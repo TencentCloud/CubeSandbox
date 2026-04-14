@@ -372,6 +372,15 @@ impl Pausable for VirtioCommon {
             })?;
         }
 
+        // Also trigger interrupts into the guest to wake up the driver to avoid a "livelock"
+        if let Some(interrupt_cb) = &self.interrupt_cb {
+            for i in 0..self.queue_evts.len() {
+                interrupt_cb
+                    .trigger(crate::VirtioInterruptType::Queue(i as u16))
+                    .ok();
+            }
+        }
+
         Ok(())
     }
 }
