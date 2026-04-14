@@ -242,20 +242,15 @@ impl VirtioCommon {
             return Err(ActivateError::BadActivate);
         }
 
-        // Do not retain virtio-net queue eventfds here. Signaling them on
-        // resume would break its `driver_awake` workaround.
-        self.queue_evts = match VirtioDeviceType::from(self.device_type) {
-            VirtioDeviceType::Net => Vec::new(),
-            _ => queues
-                .iter()
-                .map(|(_, _, queue_evt)| {
-                    queue_evt.try_clone().map_err(|e| {
-                        error!("failed cloning queue EventFd: {e}");
-                        ActivateError::BadActivate
-                    })
+        self.queue_evts = queues
+            .iter()
+            .map(|(_, _, queue_evt)| {
+                queue_evt.try_clone().map_err(|e| {
+                    error!("failed cloning queue EventFd: {e}");
+                    ActivateError::BadActivate
                 })
-                .collect::<Result<Vec<_>, _>>()?,
-        };
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let kill_evt = EventFd::new(EFD_NONBLOCK).map_err(|e| {
             error!("failed creating kill EventFd: {}", e);
