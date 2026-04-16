@@ -9,13 +9,13 @@ export GO111MODULE=on
 export GOARCH=amd64
 export GOOS=linux
 GO_BIN_DIR := $(shell if [ -n "$$(go env GOBIN)" ]; then printf "%s" "$$(go env GOBIN)"; else printf "%s/bin" "$$(go env GOPATH)"; fi)
-PROTOBUF_INCLUDE_DIR := $(shell python3 -c 'import glob, os, subprocess; candidates = ["/usr/include", "/usr/local/include"]; gopath = subprocess.check_output(["go", "env", "GOPATH"], text=True).strip(); candidates = (glob.glob(os.path.join(gopath, "pkg/mod/github.com/google/gnostic-models@*/third_party")) + glob.glob(os.path.join(gopath, "pkg/mod/github.com/gogo/protobuf@*/protobuf")) + candidates) if gopath else candidates; print(next((c for c in candidates if os.path.exists(os.path.join(c, "google/protobuf/empty.proto")) and os.path.exists(os.path.join(c, "google/protobuf/any.proto"))), ""))')
+PROTOBUF_INCLUDE_DIR := $(shell python3 -c 'import glob, os, subprocess; candidates = ["/usr/include", "/usr/local/include"]; gopath = subprocess.check_output(["go", "env", "GOPATH"], text=True).strip(); extras = glob.glob(os.path.join(gopath, "pkg/mod/github.com/google/gnostic-models@*/third_party")) if gopath else []; candidates.extend(extras); print(next((c for c in candidates if os.path.exists(os.path.join(c, "google/protobuf/empty.proto")) and os.path.exists(os.path.join(c, "google/protobuf/any.proto"))), ""))')
 PROTOC_INCLUDE_FLAGS=-I=.
 ifneq ($(strip $(PROTOBUF_INCLUDE_DIR)),)
 PROTOC_INCLUDE_FLAGS += -I=$(PROTOBUF_INCLUDE_DIR)
 endif
 PROTOC_GO_FLAGS=--go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative
-PROTO_DOC_FILES=$(shell rg --files api -g '*.proto' | sort | tr '\n' ' ')
+PROTO_DOC_FILES=$(shell python3 -c 'import glob; print(" ".join(sorted(glob.glob("api/**/*.proto", recursive=True))))')
 export PATH := $(GO_BIN_DIR):$(PATH)
 
 ifeq ($(V),1)
