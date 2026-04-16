@@ -40,6 +40,34 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 </p>
 
 
+## Demos
+
+<table align="center">
+  <tr align="center" valign="middle">
+    <td width="33%" valign="middle">
+      <video src="https://github.com/user-attachments/assets/f87c409e-29fc-4e86-9eac-dbeaff2aca18" controls="controls" muted="muted" style="max-width: 100%;"></video>
+    </td>
+    <td width="33%" valign="middle">
+      <video src="https://github.com/user-attachments/assets/50e7126e-bb73-4abc-aa85-677fdf2e8c67" controls="controls" muted="muted" style="max-width: 100%;"></video>
+    </td>
+    <td width="33%" valign="middle">
+      <video src="https://github.com/user-attachments/assets/052e0e77-e2d9-409e-90b8-d13c28b80495" controls="controls" muted="muted" style="max-width: 100%;"></video>
+    </td>
+  </tr>
+  <tr align="center" valign="top">
+    <td>
+      <em>Installation & Demo</em>
+    </td>
+    <td>
+      <em>Performance Test</em>
+    </td>
+    <td>
+      <em>RL (SWE-Bench)</em>
+    </td>
+  </tr>
+</table>
+
+
 ## Core Highlights
 
 - **Blazing-fast cold start:** Built on resource pool pre-provisioning and snapshot cloning technology, skipping time-consuming initialization entirely. Average end-to-end cold start time for a fully serviceable sandbox is < 60ms.
@@ -61,7 +89,7 @@ In the context of AI Agent code execution, CubeSandbox achieves the perfect bala
 | **Boot Speed** | ~200ms | Minutes | **Sub-millisecond (<60ms)** |
 | **Memory Overhead** | Low (Shared Kernel) | High (Full OS) | **Ultra-low (Aggressively stripped, <5MB)** |
 | **Deployment Density** | High | Low | **Extreme (Thousands per node)** |
-| **E2B SDK Compatible** | ❌ No | ❌ No | **✅ 100% Drop-in** |
+| **E2B SDK Compatible** | ❌ No | ❌ No | **✅ Drop-in** |
 
 *   *Cold start benchmarked on bare-metal. 60ms at single concurrency; under 50 concurrent creations, avg 67ms, P95 90ms, P99 137ms — consistently sub-150ms.*
 *   *Memory overhead measured with sandbox specs ≤ 32GB. Larger configurations may see a marginal increase.*
@@ -164,11 +192,13 @@ Want to explore more? Check out the 📂 [`examples/`](./examples/) directory, c
 
 ## Architecture
 
-![Cube Sandbox Architecture](docs/assets/cube-sandbox-arch.png)
+<p align="center">
+  <img src="docs/assets/cube-sandbox-arch.png" alt="Cube Sandbox Architecture" />
+</p>
 
 | Component | Responsibility |
 |---|---|
-| **CubeAPI** | High-concurrency REST API Gateway (Rust), 100% compatible with E2B. Swap the URL for seamless migration. |
+| **CubeAPI** | High-concurrency REST API Gateway (Rust), compatible with E2B. Swap the URL for seamless migration. |
 | **CubeMaster** | Cluster orchestrator. Receives API requests and dispatches them to corresponding Cubelets. Manages resource scheduling and cluster state. |
 | **CubeProxy** | Reverse proxy, compatible with the E2B protocol, routing requests to the appropriate sandbox instances. |
 | **Cubelet** | Compute node local scheduling component. Manages the complete lifecycle of all sandbox instances on the node. |
