@@ -144,7 +144,7 @@ Launch your first sandbox in 3 steps on a KVM-enabled machine:
 1. **Start the Cube Sandbox Service**
 
 ```bash
-curl -sL https://github.com/tencentcloud/CubeSandbox/cube-sandbox/deploy/one-click/online-install.sh | bash
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
 ```
 
 2. **Create a Code Interpreter Sandbox Template**

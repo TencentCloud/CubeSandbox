@@ -13,14 +13,14 @@
 以 root 身份（或使用 `sudo`）在目标机上执行：
 
 ```bash
-curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/cube-sandbox/deploy/one-click/online-install.sh | bash
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
 ```
 
 ::: tip 节点 IP 自动探测
 安装脚本会自动从 `eth0` 网卡探测节点 IP。如果你的主网卡名称不同，或者需要指定特定 IP，可通过环境变量显式传入：
 
 ```bash
-CUBE_SANDBOX_NODE_IP=<你的节点IP> bash <(curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/cube-sandbox/deploy/one-click/online-install.sh)
+CUBE_SANDBOX_NODE_IP=<你的节点IP> bash <(curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh)
 ```
 :::
 
@@ -31,13 +31,7 @@ CUBE_SANDBOX_NODE_IP=<你的节点IP> bash <(curl -sL https://github.com/tencent
 - CubeProxy 提供 TLS（mkcert）和 CoreDNS 域名路由（`cube.app`）
 :::
 
-安装完成后，将命令行工具加入 PATH：
-
-```bash
-echo 'export PATH=/usr/local/services/cubetoolbox/CubeMaster/bin:$PATH' >> ~/.bashrc
-echo 'export PATH=/usr/local/services/cubetoolbox/Cubelet/bin:$PATH' >> ~/.bashrc
-source ~/.bashrc
-```
+安装完成后，安装器会把 `cubemastercli` 和 `cubecli` 软链接到 `/usr/local/bin`。
 
 ## 第二步：制作模板
 

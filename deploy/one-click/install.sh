@@ -22,35 +22,18 @@ DEPLOY_ROLE="$(one_click_deploy_role)"
 TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
 INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
 
-detect_shell_rc_file() {
-  local shell_name
-  shell_name="$(basename "${SHELL:-}")"
-  case "${shell_name}" in
-    zsh)
-      printf '%s\n' '~/.zshrc'
-      ;;
-    bash)
-      printf '%s\n' '~/.bashrc'
-      ;;
-    *)
-      printf '%s\n' 'your shell rc file (for example ~/.bashrc or ~/.zshrc)'
-      ;;
-  esac
-}
-
 print_path_hint() {
-  local rc_file
-  rc_file="$(detect_shell_rc_file)"
-
-  cat >&2 <<EOF
-
-[one-click] Add the following directories to PATH in ${rc_file}:
-[one-click]   ${INSTALL_PREFIX}/CubeMaster/bin
-[one-click]   ${INSTALL_PREFIX}/Cubelet/bin
-[one-click] Example:
-[one-click]   export PATH=${INSTALL_PREFIX}/CubeMaster/bin:${INSTALL_PREFIX}/Cubelet/bin:\$PATH
-
-EOF
+  {
+    echo
+    echo "[one-click] Installed public commands in /usr/local/bin:"
+    echo "[one-click]   cube-runtime"
+    echo "[one-click]   containerd-shim-cube-rs"
+    echo "[one-click]   cubecli"
+    if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
+      echo "[one-click]   cubemastercli"
+    fi
+    echo
+  } >&2
 }
 
 detect_installed_role() {
@@ -356,6 +339,12 @@ fi
 
 ln -sf "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" /usr/local/bin/containerd-shim-cube-rs
 ln -sf "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime" /usr/local/bin/cube-runtime
+ln -sf "${INSTALL_PREFIX}/Cubelet/bin/cubecli" /usr/local/bin/cubecli
+if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
+  ln -sf "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli" /usr/local/bin/cubemastercli
+else
+  rm -f /usr/local/bin/cubemastercli
+fi
 
 if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   start_script="${INSTALL_PREFIX}/scripts/one-click/up-compute.sh"

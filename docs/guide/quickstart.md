@@ -13,14 +13,14 @@ Get a fully functional Cube Sandbox running in three steps — no source build r
 Run the following command on the target machine as root (or with `sudo`):
 
 ```bash
-curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/cube-sandbox/deploy/one-click/online-install.sh | bash
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
 ```
 
 ::: tip Node IP auto-detection
 The installer automatically detects the node IP from the `eth0` interface. If your primary network interface has a different name, or you want to pin a specific IP, pass it explicitly:
 
 ```bash
-CUBE_SANDBOX_NODE_IP=<your-node-ip> bash <(curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/cube-sandbox/deploy/one-click/online-install.sh)
+CUBE_SANDBOX_NODE_IP=<your-node-ip> bash <(curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh)
 ```
 :::
 
@@ -31,17 +31,11 @@ CUBE_SANDBOX_NODE_IP=<your-node-ip> bash <(curl -sL https://github.com/tencentcl
 - CubeProxy with TLS (mkcert) and CoreDNS for `cube.app` domain routing
 :::
 
-After installation completes, add the CLI tools to your PATH:
-
-```bash
-echo 'export PATH=/usr/local/services/cubetoolbox/CubeMaster/bin:$PATH' >> ~/.bashrc
-echo 'export PATH=/usr/local/services/cubetoolbox/Cubelet/bin:$PATH' >> ~/.bashrc
-source ~/.bashrc
-```
+After installation completes, the installer symlinks `cubemastercli` and `cubecli` into `/usr/local/bin`.
 
 ## Step 2: Create a Template
 
-After installation, `cubemastercli` is available on the system PATH. Create a code-interpreter template from the prebuilt image:
+Create a code-interpreter template from the prebuilt image:
 
 ```bash
 cubemastercli tpl create-from-image \

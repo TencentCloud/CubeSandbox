@@ -1,0 +1,104 @@
+name: Build vmlinux
+
+on:
+  push:
+    paths:
+      - 'configs/kernel-oc9.config'
+      - '.github/workflows/build-vmlinux.yml'
+  workflow_dispatch:
+
+env:
+  KERNEL_TAG: 6.6.119-49.6
+  KERNEL_ARCHIVE_URL: https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel/repository/archive/6.6.119-49.6.zip
+  VMLINUX_CACHE_PATH: kernel-cache/vmlinux
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute vmlinux cache metadata
+        id: vmlinux_metadata
+        run: |
+          config_hash="$(sha256sum configs/kernel-oc9.config | awk '{print $1}')"
+          echo "config_hash=${config_hash}" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=vmlinux-opencloudos-${KERNEL_TAG}-${config_hash}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            file \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            unzip
+
+      - name: Restore cached vmlinux
+        id: restore_vmlinux
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.VMLINUX_CACHE_PATH }}
+          key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
+
+      - name: Download kernel source archive
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        run: curl -fL "${KERNEL_ARCHIVE_URL}" -o opencloudos-kernel.zip
+
+      - name: Extract kernel source archive
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        run: |
+          rm -rf kernel-source
+          mkdir -p kernel-source
+          unzip -q opencloudos-kernel.zip -d kernel-source
+          shopt -s nullglob
+          dirs=(kernel-source/*/)
+          if [[ "${#dirs[@]}" -ne 1 ]]; then
+            echo "expected exactly one extracted top-level directory, got ${#dirs[@]}" >&2
+            exit 1
+          fi
+          echo "KERNEL_SRC=${dirs[0]%/}" >> "${GITHUB_ENV}"
+
+      - name: Configure kernel
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        run: |
+          cp configs/kernel-oc9.config "${KERNEL_SRC}/.config"
+          make -C "${KERNEL_SRC}" olddefconfig
+
+      - name: Build vmlinux
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        run: |
+          (
+            cd "${KERNEL_SRC}"
+            KCFLAGS="-Wa,-mx86-used-note=no" make -j "$(nproc)" vmlinux
+          )
+          install -D -m 0644 "${KERNEL_SRC}/vmlinux" "${VMLINUX_CACHE_PATH}"
+
+      - name: Verify vmlinux
+        run: |
+          test -f "${VMLINUX_CACHE_PATH}"
+          file "${VMLINUX_CACHE_PATH}"
+
+      - name: Save vmlinux cache
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VMLINUX_CACHE_PATH }}
+          key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
+
+      - name: Upload vmlinux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vmlinux_metadata.outputs.artifact_name }}
+          path: ${{ env.VMLINUX_CACHE_PATH }}
+          if-no-files-found: error
+          retention-days: 14

@@ -142,13 +142,7 @@ The install script will:
 9. Start host processes: network-agent, cubemaster, cube-api, cubelet
 10. Run a health check (if `ONE_CLICK_RUN_QUICKCHECK=1`)
 
-After installation, add the CLI tools to your PATH:
-
-```bash
-echo 'export PATH=/usr/local/services/cubetoolbox/CubeMaster/bin:$PATH' >> ~/.bashrc
-echo 'export PATH=/usr/local/services/cubetoolbox/Cubelet/bin:$PATH' >> ~/.bashrc
-source ~/.bashrc
-```
+After installation, the installer symlinks `cubemastercli` and `cubecli` into `/usr/local/bin`.
 
 #### Adding Compute Nodes (Multi-Node Cluster)
 

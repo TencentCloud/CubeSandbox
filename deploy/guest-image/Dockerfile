@@ -14,10 +14,4 @@ RUN yum install -y \
     sudo \
     lsof
 
-RUN mkdir -p /etc \
-    && if [ -L /etc/resolv.conf ]; then rm -f /etc/resolv.conf; fi \
-    && touch /etc/resolv.conf \
-    && touch /etc/hostname \
-    && touch /etc/hosts
-
 CMD ["bash"]

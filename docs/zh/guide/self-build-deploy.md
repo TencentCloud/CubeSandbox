@@ -142,13 +142,7 @@ sudo ./install.sh
 9. 启动宿主机进程：network-agent、cubemaster、cube-api、cubelet
 10. 执行健康检查（如 `ONE_CLICK_RUN_QUICKCHECK=1`）
 
-安装完成后，将命令行工具加入 PATH：
-
-```bash
-echo 'export PATH=/usr/local/services/cubetoolbox/CubeMaster/bin:$PATH' >> ~/.bashrc
-echo 'export PATH=/usr/local/services/cubetoolbox/Cubelet/bin:$PATH' >> ~/.bashrc
-source ~/.bashrc
-```
+安装完成后，安装器会把 `cubemastercli` 和 `cubecli` 软链接到 `/usr/local/bin`。
 
 #### 添加计算节点（多机集群）
 
