@@ -19,4 +19,4 @@ Cube Sandbox 是一款生产级的多组件安全沙箱系统，专为 Serverles
 * [快速开始](./quickstart) — 用最短路径从零到运行沙箱。
 * [本地构建部署](./self-build-deploy) — 单机部署参考，包含前置条件、配置说明和故障排查。
 * [多机集群部署](./multi-node-deploy) — 添加计算节点，扩展到多机集群。
-* [从 OCI 镜像制作模板](./template-from-image) — 使用 CLI 创建、监控和管理模板的分步指南。
+* [从 OCI 镜像制作模板](./tutorials/template-from-image) — 使用 CLI 创建、监控和管理模板的分步指南。

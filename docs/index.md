@@ -30,7 +30,7 @@ features:
 - [Quick Start](./guide/quickstart) — from zero to a running sandbox in minutes
 - [Self-Build Deployment](./guide/self-build-deploy) — build from source and deploy on a single machine
 - [Multi-Node Cluster](./guide/multi-node-deploy) — scale to multiple nodes
-- [Architecture Overview](../architecture/overview) — understand the system design and core components
+- [Architecture Overview](./architecture/overview) — understand the system design and core components
 
 
 ## Examples
