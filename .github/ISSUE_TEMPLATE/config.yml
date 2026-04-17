@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discord Community
+    url: https://discord.gg/kkapzDXShb
+    about: Ask questions and discuss ideas with the CubeSandbox community.
+  - name: Documentation
+    url: https://docs.cubesandbox.ai
+    about: Read the official CubeSandbox documentation.

@@ -1,9 +1,9 @@
 * @fslongjin @ls-ggg @tinklone @up2wing @chenhengqi
 
 /CubeNet/ @chenhengqi
-/CubeShim/ @ls-ggg
+/CubeShim/ @ls-ggg @fslongjin
 /Cubelet/ @fslongjin
-/agent/ @ls-ggg
+/agent/ @ls-ggg @fslongjin
 /docs/ @tinklone
 /examples/ @tinklone
 /hypervisor/ @up2wing
