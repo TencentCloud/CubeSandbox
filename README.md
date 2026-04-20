@@ -203,7 +203,7 @@ Want to explore more? Check out the 📂 [`examples/`](./examples/) directory, c
 | **CubeProxy** | Reverse proxy, compatible with the E2B protocol, routing requests to the appropriate sandbox instances. |
 | **Cubelet** | Compute node local scheduling component. Manages the complete lifecycle of all sandbox instances on the node. |
 | **CubeVS** | eBPF-based virtual switch, providing kernel-level network isolation and security policy enforcement. |
-| **CubeRuntime** | CubeHypervisor and CubeShim together form the virtualization layer — CubeHypervisor drives the KVM MicroVM, while CubeShim bridges it to containerd via the Shim v2 API. |
+| **CubeHypervisor & CubeShim** | Virtualization layer — CubeHypervisor manages KVM MicroVMs, CubeShim bridges them to containerd via the Shim v2 API. |
 
 👉 For more details, please read the [Architecture Design Document](./docs/architecture/overview.md) and [CubeVS Network Model](./docs/architecture/network.md).
 
