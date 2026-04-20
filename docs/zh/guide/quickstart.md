@@ -24,6 +24,14 @@ CUBE_SANDBOX_NODE_IP=<你的节点IP> bash <(curl -sL https://github.com/tencent
 ```
 :::
 
+::: tip 国内加速镜像
+国内网络下载慢，可加上 `MIRROR=cn` 从 CDN 拉取发布包：
+
+```bash
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+```
+:::
+
 ::: details 安装了哪些组件
 - E2B 兼容 REST API 监听在 `3000` 端口
 - CubeMaster、Cubelet、network-agent、CubeShim 作为宿主机进程运行

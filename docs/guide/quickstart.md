@@ -24,6 +24,14 @@ CUBE_SANDBOX_NODE_IP=<your-node-ip> bash <(curl -sL https://github.com/tencentcl
 ```
 :::
 
+::: tip China mainland mirror
+If GitHub downloads are slow, set `MIRROR=cn` to pull the release bundle from the CDN:
+
+```bash
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+```
+:::
+
 ::: details What gets installed
 - E2B-compatible REST API listening on port `3000`
 - CubeMaster, Cubelet, network-agent, and CubeShim running as host processes

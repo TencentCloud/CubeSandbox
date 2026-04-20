@@ -147,6 +147,14 @@ Launch your first sandbox in 3 steps on a KVM-enabled machine:
 curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
 ```
 
+> Slow GitHub downloads from mainland China? Set `MIRROR=cn` to fetch the release bundle from China CDN:
+>
+> ```bash
+> curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+> ```
+>
+> See [Quick Start — China mainland mirror](./docs/guide/quickstart.md#step-1-install) for details.
+
 2. **Create a Code Interpreter Sandbox Template**
 
 ```bash

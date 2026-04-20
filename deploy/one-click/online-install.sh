@@ -4,6 +4,9 @@ set -euo pipefail
 GITHUB_REPO="tencentcloud/CubeSandbox"
 GITHUB_API_BASE="https://api.github.com/repos/${GITHUB_REPO}"
 
+CN_MIRROR_LATEST_URL="https://download.cubesandbox.com/release/latest.json"
+MIRROR="${MIRROR:-}"
+
 DOWNLOAD_URL="${CUBE_SANDBOX_DOWNLOAD_URL:-}"
 INSTALL_ARGS=()
 
@@ -30,17 +33,50 @@ http_get() {
 }
 
 # ---------------------------------------------------------------------------
-# Auto-detect latest release asset URL from GitHub if --url was not given
+# Auto-detect download URL if --url / CUBE_SANDBOX_DOWNLOAD_URL was not given.
+#
+# Discovery order:
+#   1. MIRROR=cn   -> https://download.cubesandbox.com/release/latest.json
+#                     (JSON body: {"url": "https://.../cube-sandbox-one-click-<sha>.tar.gz"})
+#   2. default     -> GitHub API latest release asset
 # ---------------------------------------------------------------------------
 if [[ -z "${DOWNLOAD_URL}" ]]; then
-  echo "[online-install] no --url provided, fetching latest release from github.com/${GITHUB_REPO}..." >&2
+  if [[ "${MIRROR}" == "cn" ]]; then
+    echo "[online-install] MIRROR=cn, fetching latest release info from ${CN_MIRROR_LATEST_URL}..." >&2
 
-  RELEASE_JSON="$(http_get "${GITHUB_API_BASE}/releases/latest")"
+    LATEST_JSON="$(http_get "${CN_MIRROR_LATEST_URL}")" || {
+      echo "[online-install] ERROR: failed to fetch ${CN_MIRROR_LATEST_URL}." >&2
+      echo "[online-install] You can specify the URL manually:" >&2
+      echo "[online-install]   online-install.sh --url=<download-url> [install.sh options...]" >&2
+      exit 1
+    }
 
-  # Extract the first browser_download_url that matches our tarball pattern.
-  # We use Python (already required by the build scripts) for reliable JSON
-  # parsing without needing jq.
-  DOWNLOAD_URL="$(python3 - "${RELEASE_JSON}" <<'PY'
+    DOWNLOAD_URL="$(python3 - "${LATEST_JSON}" <<'PY'
+import json, sys
+
+data = json.loads(sys.argv[1])
+url = data.get("url", "")
+if not url:
+    sys.exit(1)
+print(url)
+PY
+    )" || {
+      echo "[online-install] ERROR: could not parse 'url' from ${CN_MIRROR_LATEST_URL}." >&2
+      echo "[online-install] You can specify the URL manually:" >&2
+      echo "[online-install]   online-install.sh --url=<download-url> [install.sh options...]" >&2
+      exit 1
+    }
+
+    echo "[online-install] CN mirror latest asset: ${DOWNLOAD_URL}" >&2
+  else
+    echo "[online-install] no --url provided, fetching latest release from github.com/${GITHUB_REPO}..." >&2
+
+    RELEASE_JSON="$(http_get "${GITHUB_API_BASE}/releases/latest")"
+
+    # Extract the first browser_download_url that matches our tarball pattern.
+    # We use Python (already required by the build scripts) for reliable JSON
+    # parsing without needing jq.
+    DOWNLOAD_URL="$(python3 - "${RELEASE_JSON}" <<'PY'
 import json, sys, re
 
 data = json.loads(sys.argv[1])
@@ -51,14 +87,15 @@ for asset in data.get("assets", []):
         sys.exit(0)
 sys.exit(1)
 PY
-  )" || {
-    echo "[online-install] ERROR: could not find a cube-sandbox-one-click-<sha>.tar.gz asset in the latest release." >&2
-    echo "[online-install] You can specify the URL manually:" >&2
-    echo "[online-install]   online-install.sh --url=<download-url> [install.sh options...]" >&2
-    exit 1
-  }
+    )" || {
+      echo "[online-install] ERROR: could not find a cube-sandbox-one-click-<sha>.tar.gz asset in the latest release." >&2
+      echo "[online-install] You can specify the URL manually:" >&2
+      echo "[online-install]   online-install.sh --url=<download-url> [install.sh options...]" >&2
+      exit 1
+    }
 
-  echo "[online-install] latest release asset: ${DOWNLOAD_URL}" >&2
+    echo "[online-install] latest release asset: ${DOWNLOAD_URL}" >&2
+  fi
 fi
 
 # ---------------------------------------------------------------------------
