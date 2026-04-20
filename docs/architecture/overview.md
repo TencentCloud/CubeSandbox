@@ -4,7 +4,7 @@ Cube Sandbox follows a clear layered architecture from top to bottom.
 
 ## Layered Architecture
 
-![Cube Sandbox Architecture](/assets/cube-sandbox-arch.png)
+![Cube Sandbox Architecture](../assets/cube-sandbox-arch.png)
 
 ## Key Components
 

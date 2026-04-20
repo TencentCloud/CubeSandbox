@@ -4,7 +4,7 @@ Cube Sandbox 遵循清晰的自上而下分层架构。
 
 ## 分层架构
 
-![Cube Sandbox 架构图](/assets/cube-sandbox-arch.png)
+![Cube Sandbox 架构图](../../assets/cube-sandbox-arch.png)
 
 ## 核心组件
 
