@@ -75,7 +75,7 @@ func TestDeleteTemplateMapsAttemptInProgressToParamsError(t *testing.T) {
 	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
 }
 
-func TestDeleteTemplateMapsCleanupLocatorMissingToParamsError(t *testing.T) {
+func TestDeleteTemplateMapsCleanupLocatorMissingToNotFound(t *testing.T) {
 	origDeleteTemplateFn := deleteTemplateFn
 	t.Cleanup(func() {
 		deleteTemplateFn = origDeleteTemplateFn
@@ -92,9 +92,9 @@ func TestDeleteTemplateMapsCleanupLocatorMissingToParamsError(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected response type %T", resp)
 	}
-	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Equal(t, int(errorcode.ErrorCode_NotFound), got.Ret.RetCode)
 	assert.Contains(t, got.Ret.RetMsg, "historical locator missing")
-	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
+	assert.Equal(t, int64(errorcode.ErrorCode_NotFound), rt.RetCode)
 }
 
 func TestDeleteTemplateSuccessResponse(t *testing.T) {
