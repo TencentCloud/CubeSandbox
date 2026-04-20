@@ -191,6 +191,7 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 - [文档首页](./docs/zh/index.md) — 完整指南导航
 - [模板概览](./docs/zh/guide/templates.md) — 镜像到模板的概念与工作流
 - [示例项目](./docs/zh/guide/tutorials/examples.md) — 展示各种使用场景的示例（涵盖代码执行、浏览器自动化、OpenClaw 集成与 RL 训练等）
+- [开发环境（QEMU 虚机）](./docs/zh/guide/dev-environment.md) — 没有 bare-metal？在一次性的 OpenCloudOS 9 虚机里跑 Cube Sandbox
 
 ## 架构概览
 

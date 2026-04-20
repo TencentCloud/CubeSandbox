@@ -30,7 +30,8 @@ export default withMermaid(defineConfig({
                 { text: 'Introduction', link: '/guide/introduction' },
                 { text: 'Quick Start', link: '/guide/quickstart' },
                 { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
-                { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' }
+                { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
+                { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' }
               ]
             },
             {
@@ -89,7 +90,8 @@ export default withMermaid(defineConfig({
                 { text: '简介 (Intro)', link: '/zh/guide/introduction' },
                 { text: '快速开始', link: '/zh/guide/quickstart' },
                 { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
-                { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' }
+                { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },
+                { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' }
               ]
             },
             {
