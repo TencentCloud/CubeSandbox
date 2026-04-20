@@ -77,18 +77,7 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click
 ```
 :::
 
-安装完成后按常规 [快速开始](./quickstart) 创建模板、跑第一个沙箱即可。
-
-虚机的 `:3000` 已经转发到宿主机的 `:3000`，因此**在宿主机**上直接把
-SDK 指向开发环境就行：
-
-```bash
-export E2B_API_URL="http://127.0.0.1:3000"
-export E2B_API_KEY="dummy"
-export CUBE_TEMPLATE_ID="<template-id>"
-export SSL_CERT_FILE="/etc/pki/tls/cert.pem"
-
-```
+安装完成后按常规 [快速开始](./quickstart) 在虚拟机内创建模板、跑第一个沙箱即可。
 
 ---
 

@@ -88,16 +88,7 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click
 
 When the installer finishes, follow the regular
 [Quick Start](./quickstart) to create a template and run your first
-sandbox.
-
-The guest's `:3000` is forwarded to the host's `:3000`, so you can
-point the SDK at the dev VM **from the host** directly:
-
-```bash
-export E2B_API_URL="http://127.0.0.1:3000"
-export E2B_API_KEY="dummy"
-export CUBE_TEMPLATE_ID="<template-id>"
-```
+sandbox in the VM.
 
 ---
 
