@@ -197,7 +197,7 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 | **CubeProxy** | 反向代理，兼容 E2B 协议，将请求路由到对应沙箱。 |
 | **Cubelet** | 计算节点本地调度组件，管理单节点所有沙箱实例的完整生命周期。 |
 | **CubeVS** | 基于 eBPF 内核态转发的虚拟交换机，提供网络隔离与安全策略支持。 |
-| **CubeRuntime** | Cube 沙箱底层运行时，由 Shim、Hypervisor、Agent 协同构成。 |
+| **CubeHypervisor & CubeShim** | 虚拟化层 —— CubeHypervisor 负责管理 KVM MicroVM，CubeShim 通过 Shim v2 API 将其桥接到 containerd。 |
 
 详见[架构概览](./docs/zh/architecture/overview.md)和 [CubeVS 网络模型](./docs/zh/architecture/network.md)。
 
