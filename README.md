@@ -197,6 +197,7 @@ Want to explore more? Check out the 📂 [`examples/`](./examples/) directory, c
 - 📖 [Documentation Home](./docs/index.md) - Complete guide and API reference
 - 🔧 [Template Concepts](./docs/guide/templates.md) - Image-to-Template concepts and workflows
 - 🌟 [Example Projects](./docs/guide/tutorials/examples.md) - Hands-on examples demonstrating various Cube Sandbox use cases (Browser automation, OpenClaw integration, RL training workflows, etc.)
+- 💻 [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) - No bare-metal? Spin up a disposable OpenCloudOS 9 VM and run Cube Sandbox inside it
 
 ## Architecture
 

@@ -2,6 +2,12 @@
 
 三步完成 Cube Sandbox 的完整部署，无需本地构建。
 
+::: tip 没有 bare-metal 机器？
+如果只有笔记本或云主机（已开启 KVM + nested virtualization），先按
+[开发环境（QEMU 虚机）](./dev-environment) 起一台一次性的 OpenCloudOS 9
+虚机，剩下的快速开始步骤都在虚机里执行即可。
+:::
+
 ## 前置条件
 
 - **裸金属 Linux 服务器**（x86_64），已启用 KVM（`/dev/kvm` 存在）

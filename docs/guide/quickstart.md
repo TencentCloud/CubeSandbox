@@ -2,6 +2,14 @@
 
 Get a fully functional Cube Sandbox running in three steps — no source build required.
 
+::: tip No bare-metal machine?
+If you only have a laptop or a cloud VM (with KVM + nested
+virtualization), use the
+[Development Environment (QEMU VM)](./dev-environment) guide first — it
+spins up a disposable OpenCloudOS 9 VM, and the rest of this Quick
+Start works inside that VM.
+:::
+
 ## Prerequisites
 
 - A **bare-metal Linux server** (x86_64) with KVM enabled (`/dev/kvm` exists)
