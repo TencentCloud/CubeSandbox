@@ -198,6 +198,8 @@ cleanup_vm() {
 
 need_cmd curl
 need_cmd qemu-img
+need_cmd qemu-system-x86_64
+need_cmd rg
 need_cmd python3
 need_cmd ssh
 need_cmd scp
