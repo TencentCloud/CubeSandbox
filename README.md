@@ -86,10 +86,10 @@ In the context of AI Agent code execution, CubeSandbox achieves the perfect bala
 | Metric | Docker Container | Traditional VM | CubeSandbox |
 |---|---|---|---|
 | **Isolation Level** | Low (Shared Kernel Namespaces) | High (Dedicated Kernel) | **Extreme (Dedicated Kernel + eBPF)** |
-| **Boot Speed** | ~200ms | Minutes | **Sub-millisecond (<60ms)** |
+| **Boot Speed** <br>*Full-OS boot duration | 200ms | Seconds | **Sub-millisecond (<60ms)** |
 | **Memory Overhead** | Low (Shared Kernel) | High (Full OS) | **Ultra-low (Aggressively stripped, <5MB)** |
 | **Deployment Density** | High | Low | **Extreme (Thousands per node)** |
-| **E2B SDK Compatible** | ❌ No | ❌ No | **✅ Drop-in** |
+| **E2B SDK Compatible** | / | / | **✅ Drop-in** |
 
 *   *Cold start benchmarked on bare-metal. 60ms at single concurrency; under 50 concurrent creations, avg 67ms, P95 90ms, P99 137ms — consistently sub-150ms.*
 *   *Memory overhead measured with sandbox specs ≤ 32GB. Larger configurations may see a marginal increase.*
