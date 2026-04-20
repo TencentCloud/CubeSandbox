@@ -13,4 +13,4 @@ Cube Sandbox follows a clear layered architecture from top to bottom.
 3. **CubeProxy**: Reverse proxy and request routing component that parses the `<port>-<sandbox_id>.<domain>` format in the Host header to forward SDK client requests to the target sandbox instance.
 4. **Cubelet**: Node-local scheduling component that manages the full lifecycle of all sandbox instances on a single node.
 5. **CubeVS**: eBPF-based kernel-level packet forwarding, providing comprehensive network isolation and security policy enforcement.
-6. **CubeRuntime**: The core runtime layer of Cube Sandbox, composed of three cooperating components — Shim, Hypervisor, and Agent. It accepts container scheduling instructions from Cubelet above and manages the full sandbox lifecycle below.
+6. **CubeHypervisor & CubeShim**: The virtualization layer of Cube Sandbox. CubeHypervisor manages KVM MicroVMs, CubeShim implements the containerd Shim v2 API to integrate sandboxes into the container runtime.
