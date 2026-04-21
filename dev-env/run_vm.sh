@@ -104,7 +104,7 @@ if [[ "${VM_BACKGROUND}" == "1" ]]; then
   log_info "  PID file   : ${QEMU_PIDFILE}"
   log_info "  Serial log : ${QEMU_SERIAL_LOG}"
 else
-  log_info "Detach from serial console: Ctrl+a then x"
+  log_info "Clean shutdown: in another terminal run ./login.sh, then poweroff in the guest (do not Ctrl+a x — abrupt QEMU exit)"
 fi
 
 QEMU_ARGS=(

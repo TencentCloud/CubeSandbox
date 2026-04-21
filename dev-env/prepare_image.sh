@@ -14,6 +14,7 @@ SSH_PORT="${SSH_PORT:-10022}"
 SSH_WAIT_TIMEOUT_SECS="${SSH_WAIT_TIMEOUT_SECS:-180}"
 SHUTDOWN_WAIT_TIMEOUT_SECS="${SHUTDOWN_WAIT_TIMEOUT_SECS:-120}"
 FORCE_KILL_ON_EXIT="${FORCE_KILL_ON_EXIT:-0}"
+SETUP_AUTOSTART="${SETUP_AUTOSTART:-1}"
 
 IMAGE_NAME="$(basename "${IMAGE_URL}")"
 IMAGE_PATH="${IMAGE_PATH:-${WORK_DIR}/${IMAGE_NAME}}"
@@ -23,6 +24,7 @@ GROW_SCRIPT="${INTERNAL_DIR}/grow_rootfs.sh"
 SELINUX_SCRIPT="${INTERNAL_DIR}/setup_selinux.sh"
 PATH_SCRIPT="${INTERNAL_DIR}/setup_path.sh"
 BANNER_SCRIPT="${INTERNAL_DIR}/setup_banner.sh"
+AUTOSTART_SCRIPT="${INTERNAL_DIR}/setup_autostart.sh"
 QEMU_PIDFILE="${WORK_DIR}/qemu.pid"
 QEMU_SERIAL_LOG="${WORK_DIR}/qemu-serial.log"
 ASKPASS_SCRIPT="${WORK_DIR}/.ssh-askpass.sh"
@@ -254,6 +256,10 @@ if [[ ! -f "${BANNER_SCRIPT}" ]]; then
   log_error "Guest banner script is missing: ${BANNER_SCRIPT}"
   exit 1
 fi
+if [[ "${SETUP_AUTOSTART}" == "1" && ! -f "${AUTOSTART_SCRIPT}" ]]; then
+  log_error "Guest autostart script is missing: ${AUTOSTART_SCRIPT}"
+  exit 1
+fi
 
 trap cleanup_vm EXIT
 create_askpass_script
@@ -319,6 +325,21 @@ ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
   'chmod +x ~/setup_banner.sh && ~/setup_banner.sh'
 log_success "Welcome banner installed inside the guest"
 
+if [[ "${SETUP_AUTOSTART}" == "1" ]]; then
+  log_info "Uploading setup_autostart.sh to the guest..."
+  ssh_with_password scp "${SSH_COMMON_OPTS[@]}" -P "${SSH_PORT}" \
+    "${AUTOSTART_SCRIPT}" "${VM_USER}@127.0.0.1:~/setup_autostart.sh"
+  log_success "setup_autostart.sh uploaded"
+
+  log_info "Installing cube-sandbox-oneclick.service unit (not enabled)..."
+  ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
+    "${VM_USER}@127.0.0.1" \
+    'chmod +x ~/setup_autostart.sh && ~/setup_autostart.sh'
+  log_success "Autostart unit installed inside the guest (enable it later via dev-env/cube-autostart.sh)"
+else
+  log_info "SETUP_AUTOSTART=0, skipping autostart unit installation"
+fi
+
 log_info "Requesting graceful shutdown from the guest..."
 ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
   "${VM_USER}@127.0.0.1" \
@@ -337,5 +358,10 @@ log_success "  3. VM booted and guest root filesystem expanded"
 log_success "  4. Guest SELinux set to permissive"
 log_success "  5. /usr/local/{sbin,bin} added to login PATH and sudo secure_path"
 log_success "  6. Welcome banner installed inside the guest"
-log_success "  7. VM powered off cleanly"
+if [[ "${SETUP_AUTOSTART}" == "1" ]]; then
+  log_success "  7. cube-sandbox-oneclick.service unit installed (not enabled)"
+  log_success "  8. VM powered off cleanly"
+else
+  log_success "  7. VM powered off cleanly"
+fi
 log_info "You can now run ./run_vm.sh to start the dev VM"
