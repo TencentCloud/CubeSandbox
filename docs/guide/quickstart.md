@@ -91,13 +91,15 @@ cubemastercli tpl create-from-image \
   --probe 49999
 ```
 
-Then run the following command to monitor the build and wait until the status reaches `READY`:
+Then run the following command to monitor the build progress:
 
 ```bash
 cubemastercli tpl watch --job-id <job_id>
 ```
 
-Note the **template ID** from the output — you will need it in the next step.
+Wait for the command above to finish and the template status to reach `READY`.
+
+Note the **template ID** (`template_id`) from the output — you will need it in the next step.
 
 For the full template creation workflow and more options, see [Creating Templates from OCI Images](./tutorials/template-from-image).
 

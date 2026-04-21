@@ -91,13 +91,15 @@ cubemastercli tpl create-from-image \
   --probe 49999
 ```
 
-然后，执行下面的这行命令，监控构建进度，等待状态变为 `READY`：
+然后，执行下面的这行命令，监控构建进度：
 
 ```bash
 cubemastercli tpl watch --job-id <job_id>
 ```
 
-记录输出中的**模板 ID**，下一步会用到。
+等待上述命令结束，模板状态变为 `READY`。
+
+记录输出中的**模板 ID** (`template_id`)，下一步会用到。
 
 完整的模板创建流程和更多参数说明，请参阅[从 OCI 镜像制作模板](./tutorials/template-from-image)。
 
@@ -107,6 +109,8 @@ cubemastercli tpl watch --job-id <job_id>
 
 ```bash
 yum install -y python3 python3-pip
+pip config set global.index-url https://mirrors.ustc.edu.cn/pypi/simple
+
 pip install e2b-code-interpreter
 ```
 
