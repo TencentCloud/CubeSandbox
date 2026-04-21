@@ -1,0 +1,25 @@
+name: Sync to CNB.cool
+on:
+  push:
+    branches: [master]
+
+jobs:
+  sync:
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync to CNB Repository
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:${{ github.workspace }} \
+            -w ${{ github.workspace }} \
+            -e PLUGIN_TARGET_URL="https://cnb.cool/CubeSandbox/CubeSandbox.git" \
+            -e PLUGIN_AUTH_TYPE="https" \
+            -e PLUGIN_USERNAME="cnb" \
+            -e PLUGIN_PASSWORD="${{ secrets.CNB_GIT_PASSWORD }}" \
+            -e PLUGIN_FORCE="true" \
+            tencentcom/git-sync
