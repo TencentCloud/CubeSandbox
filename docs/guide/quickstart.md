@@ -97,6 +97,9 @@ Then run the following command to monitor the build progress:
 cubemastercli tpl watch --job-id <job_id>
 ```
 
+**⚠ The image is fairly large** — downloading, extracting, and building the template may take a while; please be patient.
+
+
 Wait for the command above to finish and the template status to reach `READY`.
 
 Note the **template ID** (`template_id`) from the output — you will need it in the next step.

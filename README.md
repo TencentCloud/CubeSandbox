@@ -162,18 +162,20 @@ cd CubeSandbox/dev-env && ./login.sh   # SSH into the VM as root
 
 2. **Start the Cube Sandbox Service**
 
-Run the following command inside the dev VM you just logged into:
+Run **one** of the following commands inside the dev VM you just logged into, depending on your location:
 
-```bash
-curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
-```
+- **Global Users** (downloads from GitHub):
 
-> Slow GitHub downloads from mainland China? Set `MIRROR=cn` to fetch the release bundle from China CDN:
->
-> ```bash
-> curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
-> ```
->
+  ```bash
+  curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
+  ```
+
+- **中国用户请执行这条命令 (Mainland China)**:
+
+  ```bash
+  curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+  ```
+
 > See [Quick Start — China mainland mirror](./docs/guide/quickstart.md#step-2-install) for details.
 
 3. **Create a Code Interpreter Sandbox Template**
@@ -194,6 +196,8 @@ Then run the following command to monitor the build progress:
 ```bash
 cubemastercli tpl watch --job-id <job_id>
 ```
+
+**⚠ The image is fairly large** — downloading, extracting, and building the template may take a while; please be patient.
 
 Wait for the command above to finish and the template status to reach `READY`. Note the **template ID** (`template_id`) from the output — you will need it in the next step.
 

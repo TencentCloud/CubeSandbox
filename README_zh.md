@@ -156,11 +156,19 @@ cd CubeSandbox/dev-env && ./login.sh   # 以 root 登录虚机
 
 2. **启动Cube沙箱服务**
 
-在上述login进去的虚拟机内执行：
+在上述 login 进去的虚拟机内，根据你的网络环境执行**其中一条**命令：
 
-```bash
-curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
-```
+- **国内用户**（走 CDN 镜像，推荐）：
+
+  ```bash
+  curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+  ```
+
+- **海外用户**（从 GitHub 下载）：
+
+  ```bash
+  curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
+  ```
 
 
 3. **制作代码解释器沙箱模板**
@@ -181,6 +189,8 @@ cubemastercli tpl create-from-image \
 ```bash
 cubemastercli tpl watch --job-id <job_id>
 ```
+
+⚠ 注意：由于镜像比较大，下载、解压、模板制作过程可能比较久，请耐心等待。
 
 等待上述命令结束，模板状态变为 `READY`。记录输出中的**模板 ID** (`template_id`)，下一步会用到。
 

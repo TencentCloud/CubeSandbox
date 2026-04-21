@@ -97,6 +97,9 @@ cubemastercli tpl create-from-image \
 cubemastercli tpl watch --job-id <job_id>
 ```
 
+⚠ 注意：由于镜像比较大，下载、解压、模板制作过程可能比较久，请耐心等待。
+
+
 等待上述命令结束，模板状态变为 `READY`。
 
 记录输出中的**模板 ID** (`template_id`)，下一步会用到。
