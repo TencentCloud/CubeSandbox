@@ -2,13 +2,11 @@
 
 四步完成 Cube Sandbox 的完整部署，无需本地构建。
 
-默认路径走的是 `dev-env/` 下的**开发虚机**：在笔记本 / WSL / Linux 机
-器上拉代码、起一台一次性的 OpenCloudOS 9 虚机，然后在虚机里跑安装脚
-本。这条路径对宿主机要求最宽松。
+下面的流程会在你的开发机（ WSL / Linux 机器）上起一台**一次性的 Linux 虚机**，然后在这台虚机里安装并体验 Cube Sandbox。
+请严格按照文档操作，这样能让你在几分钟内快速体验到CubeSandbox！
 
-::: tip 已经有 bare-metal 服务器？
-如果你已经有一台 x86_64 的裸金属 Linux 服务器且已开启 KVM，可以
-**跳过第一步**，直接在那台机器上执行第二步的安装脚本。
+::: tip 已经有裸金属服务器？
+如果你已经有一台开启了 KVM 的 x86_64 Linux 物理服务器，可以**跳过第一步**，直接在那台机器上执行第二步的安装命令。
 :::
 
 ## 前置条件
@@ -16,8 +14,8 @@
 宿主机满足下列任一条件即可：
 
 - **Windows 上的 WSL 2**（Windows 11 22H2+，并在 WSL 里启用嵌套虚拟化）
-- **x86_64 Linux 物理机**
 - **已开启嵌套虚拟化的 Linux 虚拟机**（VMWare启动Ubuntu 22.04，并且在虚拟机CPU设置那里，启用 “Virtualize Intel VT-x/EPT or AMD-V/RVI”）
+- **x86_64 Linux 物理机**
 - **x86_64 裸金属 Linux 服务器** 
 
 通用要求：
@@ -68,7 +66,6 @@ root shell，Cube Sandbox 就装在这里。
 ```bash
 curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
 ```
-:::
 
 ::: details 安装了哪些组件
 - E2B 兼容 REST API 监听在 `3000` 端口

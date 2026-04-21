@@ -2,15 +2,11 @@
 
 Get a fully functional Cube Sandbox running in four steps — no source build required.
 
-The default path below uses the **development VM** under `dev-env/`: you
-clone the repo on your laptop / WSL / Linux box, boot a disposable
-OpenCloudOS 9 VM, and run the installer inside that VM. This works on
-the widest range of machines.
+The steps below boot a **disposable Linux VM** on your development machine (WSL / Linux) and install Cube Sandbox inside that VM.
+Follow this guide step by step — you can be up and running with Cube Sandbox in just a few minutes!
 
-::: tip Already have a bare-metal Linux server?
-If you have a dedicated bare-metal server (x86_64) with KVM enabled,
-you can **skip Step 1** and run the Step 2 installer directly on that
-server.
+::: tip Already have a bare-metal server?
+If you already have an x86_64 Linux bare-metal server with KVM enabled, you can **skip Step 1** and run the Step 2 installer directly on that server.
 :::
 
 ## Prerequisites
