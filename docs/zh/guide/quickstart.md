@@ -57,7 +57,7 @@ cubemastercli tpl create-from-image \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
-  --probe 49999
+  --probe 49983
 ```
 
 监控构建进度，等待状态变为 `READY`：

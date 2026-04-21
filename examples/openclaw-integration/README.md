@@ -82,7 +82,7 @@ cubemastercli tpl create-from-image \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
-  --probe 49999
+  --probe 49983
 ```
 
 Note the `template_id` printed on success.
