@@ -10,7 +10,7 @@ grown to 100G virtual disk, with SSH and the Cube API port forwarded to
 the host:
 
 ```text
-SSH      : 127.0.0.1:12222 -> guest:22
+SSH      : 127.0.0.1:10022 -> guest:22
 Cube API : 127.0.0.1:13000 -> guest:3000
 ```
 
@@ -138,7 +138,7 @@ LOGIN_AS_ROOT=0 ./login.sh
 | Symptom | Likely Cause | Fix |
 |---------|--------------|-----|
 | No `/dev/kvm` inside the guest | Nested KVM disabled on the host | Enable nested virtualization on the host and reboot the VM |
-| `./login.sh` fails to connect | VM not booted yet, or host port 12222 is busy | Check that `./run_vm.sh` is still running, or change `SSH_PORT` |
+| `./login.sh` fails to connect | VM not booted yet, or host port 10022 is busy | Check that `./run_vm.sh` is still running, or change `SSH_PORT` |
 | `df -h /` inside the guest is still small | `prepare_image.sh` never finished the auto-grow step | Inspect `.workdir/qemu-serial.log`, then `scp internal/grow_rootfs.sh` into the guest and run it manually |
 | Host port 13000 already taken | Some other service binds `13000` | Start with `CUBE_API_PORT=23000 ./run_vm.sh` |
 

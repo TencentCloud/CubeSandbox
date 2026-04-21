@@ -141,7 +141,7 @@ sudo modprobe -r kvm_intel && sudo modprobe kvm_intel
 
 | Host | Guest | Purpose |
 |------|-------|---------|
-| `127.0.0.1:12222` | `:22` | SSH into the dev VM |
+| `127.0.0.1:10022` | `:22` | SSH into the dev VM |
 | `127.0.0.1:13000` | `:3000` | Cube Sandbox E2B-compatible API |
 
 ## What prepare_image.sh does inside the guest
@@ -178,7 +178,7 @@ LOGIN_AS_ROOT=0 ./login.sh
 ```
 
 Defaults for `run_vm.sh`: 4 CPUs, 8192 MB RAM, SSH forwarded on
-`127.0.0.1:12222`, Cube API forwarded on `127.0.0.1:13000` (guest `:3000`).
+`127.0.0.1:10022`, Cube API forwarded on `127.0.0.1:13000` (guest `:3000`).
 
 ## Reset / clean up
 
@@ -192,7 +192,7 @@ Defaults for `run_vm.sh`: 4 CPUs, 8192 MB RAM, SSH forwarded on
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | No `/dev/kvm` inside the guest | Host does not have nested KVM enabled | Enable nested virtualization on the host and reboot the VM |
-| `./login.sh` cannot connect | VM not booted yet, or host port `12222` is busy | Confirm `./run_vm.sh` is still running; or change `SSH_PORT` |
+| `./login.sh` cannot connect | VM not booted yet, or host port `10022` is busy | Confirm `./run_vm.sh` is still running; or change `SSH_PORT` |
 | `cube-sandbox-mysql` keeps restarting with `Permission denied` | Guest SELinux is still enforcing | Re-run `./prepare_image.sh`, or inside the guest: `setenforce 0 && sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config && docker restart cube-sandbox-mysql` |
 | `df -h /` inside the guest is still small | The auto-grow step did not complete | Inspect `.workdir/qemu-serial.log`, then `scp internal/grow_rootfs.sh` into the guest and run it manually |
 | Host port `13000` is already taken | Another service is bound to `13000` | Use `CUBE_API_PORT=23000 ./run_vm.sh` and update `E2B_API_URL` accordingly |

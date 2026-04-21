@@ -8,7 +8,7 @@ WORK_DIR="${WORK_DIR:-${SCRIPT_DIR}/.workdir}"
 VM_USER="${VM_USER:-opencloudos}"
 VM_PASSWORD="${VM_PASSWORD:-opencloudos}"
 SSH_HOST="${SSH_HOST:-127.0.0.1}"
-SSH_PORT="${SSH_PORT:-12222}"
+SSH_PORT="${SSH_PORT:-10022}"
 LOGIN_AS_ROOT="${LOGIN_AS_ROOT:-1}"
 
 ASKPASS_SCRIPT="${WORK_DIR}/.ssh-askpass.sh"

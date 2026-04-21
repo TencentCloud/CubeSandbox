@@ -8,7 +8,7 @@
 并把 SSH 和 Cube API 端口映射到宿主机：
 
 ```text
-SSH      : 127.0.0.1:12222 -> guest:22
+SSH      : 127.0.0.1:10022 -> guest:22
 Cube API : 127.0.0.1:13000 -> guest:3000
 ```
 
@@ -128,7 +128,7 @@ LOGIN_AS_ROOT=0 ./login.sh
 | 现象 | 可能原因 | 解决方法 |
 |------|---------|---------|
 | 虚机内没有 `/dev/kvm` | 宿主机未开启 nested KVM | 在宿主机启用 nested virtualization，再重启虚机 |
-| `./login.sh` 连不上 | 虚机还没启动，或宿主机 12222 端口被占用 | 确认 `./run_vm.sh` 还在运行，或换 `SSH_PORT` |
+| `./login.sh` 连不上 | 虚机还没启动，或宿主机 10022 端口被占用 | 确认 `./run_vm.sh` 还在运行，或换 `SSH_PORT` |
 | 虚机里 `df -h /` 还是很小 | `prepare_image.sh` 没走完自动扩容 | 查看 `.workdir/qemu-serial.log`，然后把 `internal/grow_rootfs.sh` scp 进去手动跑一次 |
 | 宿主机 13000 端口被占用 | 本机有别的服务在用 | 用 `CUBE_API_PORT=23000 ./run_vm.sh` |
 
