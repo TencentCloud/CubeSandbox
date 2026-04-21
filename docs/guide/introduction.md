@@ -16,7 +16,7 @@ Cube Sandbox is a production-grade, multi-component security sandbox system desi
 
 ## Next Steps
 
-* [Quick Start](./quickstart) — the fastest path from zero to a running sandbox.
-* [Self-Build Deployment](./self-build-deploy) — single-machine deployment reference with prerequisites, configuration, and troubleshooting.
-* [Multi-Node Cluster Deployment](./multi-node-deploy) — add compute nodes to scale beyond a single machine.
-* [Creating Templates from OCI Images](./tutorials/template-from-image) — step-by-step CLI guide for template creation, monitoring, and management.
+* [Quick Start](./quickstart.md) — the fastest path from zero to a running sandbox.
+* [Self-Build Deployment](./self-build-deploy.md) — single-machine deployment reference with prerequisites, configuration, and troubleshooting.
+* [Multi-Node Cluster Deployment](./multi-node-deploy.md) — add compute nodes to scale beyond a single machine.
+* [Creating Templates from OCI Images](./tutorials/template-from-image.md) — step-by-step CLI guide for template creation, monitoring, and management.

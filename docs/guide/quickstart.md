@@ -55,7 +55,7 @@ straight into a root shell where Cube Sandbox will be installed.
 
 For host self-check (nested KVM, required packages), port mappings,
 environment overrides, and troubleshooting, see
-[Development Environment (QEMU VM)](./dev-environment).
+[Development Environment (QEMU VM)](./dev-environment.md).
 
 ## Step 2: Install
 
@@ -100,7 +100,7 @@ Wait for the command above to finish and the template status to reach `READY`.
 
 Note the **template ID** (`template_id`) from the output — you will need it in the next step.
 
-For the full template creation workflow and more options, see [Creating Templates from OCI Images](./tutorials/template-from-image).
+For the full template creation workflow and more options, see [Creating Templates from OCI Images](./tutorials/template-from-image.md).
 
 ## Step 4: Run Your First Agent
 
@@ -140,15 +140,15 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 ```
 
 
-For more end-to-end walkthroughs, see [Examples](./tutorials/examples).
+For more end-to-end walkthroughs, see [Examples](./tutorials/examples.md).
 
 ## Next Steps
 
-- [Creating Templates from OCI Images](./tutorials/template-from-image) — customize your sandbox environment
-- [Multi-Node Cluster Deployment](./multi-node-deploy) — scale to multiple machines
-- [CubeProxy TLS](./cubeproxy-tls) — TLS configuration options
-- [Authentication](./authentication) — enable API authentication
+- [Creating Templates from OCI Images](./tutorials/template-from-image.md) — customize your sandbox environment
+- [Multi-Node Cluster Deployment](./multi-node-deploy.md) — scale to multiple machines
+- [CubeProxy TLS](./cubeproxy-tls.md) — TLS configuration options
+- [Authentication](./authentication.md) — enable API authentication
 
 ## Appendix: Build from Source
 
-The steps above use a prebuilt release bundle. If you need to customize components, use a specific commit, or contribute to development, you can build the bundle yourself. See [Self-Build Deployment](./self-build-deploy) for full instructions.
+The steps above use a prebuilt release bundle. If you need to customize components, use a specific commit, or contribute to development, you can build the bundle yourself. See [Self-Build Deployment](./self-build-deploy.md) for full instructions.

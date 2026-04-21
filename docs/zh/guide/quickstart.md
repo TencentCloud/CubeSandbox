@@ -57,7 +57,7 @@ cd CubeSandbox/dev-env
 root shell，Cube Sandbox 就装在这里。
 
 关于宿主机自检（嵌套 KVM、依赖软件）、端口映射、环境变量覆盖和常见
-问题，请参阅[开发环境（QEMU 虚机）](./dev-environment)。
+问题，请参阅[开发环境（QEMU 虚机）](./dev-environment.md)。
 
 ## 第二步：安装
 
@@ -101,7 +101,7 @@ cubemastercli tpl watch --job-id <job_id>
 
 记录输出中的**模板 ID** (`template_id`)，下一步会用到。
 
-完整的模板创建流程和更多参数说明，请参阅[从 OCI 镜像制作模板](./tutorials/template-from-image)。
+完整的模板创建流程和更多参数说明，请参阅[从 OCI 镜像制作模板](./tutorials/template-from-image.md)。
 
 ## 第四步：运行第一段 Agent 代码
 
@@ -143,15 +143,15 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 ```
 
 
-更多端到端示例，请参阅[示例项目](./tutorials/examples)。
+更多端到端示例，请参阅[示例项目](./tutorials/examples.md)。
 
 ## 下一步
 
-- [从 OCI 镜像制作模板](./tutorials/template-from-image) — 自定义沙箱运行环境
-- [多机集群部署](./multi-node-deploy) — 扩展到多台机器
-- [CubeProxy TLS 配置](./cubeproxy-tls) — TLS 配置选项
-- [鉴权](./authentication) — 启用 API 鉴权
+- [从 OCI 镜像制作模板](./tutorials/template-from-image.md) — 自定义沙箱运行环境
+- [多机集群部署](./multi-node-deploy.md) — 扩展到多台机器
+- [CubeProxy TLS 配置](./cubeproxy-tls.md) — TLS 配置选项
+- [鉴权](./authentication.md) — 启用 API 鉴权
 
 ## 附录：从源码构建
 
-以上步骤使用的是预构建发布包。如果需要自定义组件、使用特定 commit 或参与开发贡献，可以自行构建发布包。完整说明请参阅[本地构建部署](./self-build-deploy)。
+以上步骤使用的是预构建发布包。如果需要自定义组件、使用特定 commit 或参与开发贡献，可以自行构建发布包。完整说明请参阅[本地构建部署](./self-build-deploy.md)。
