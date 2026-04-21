@@ -3,7 +3,8 @@
 Get a fully functional Cube Sandbox running in four steps — no source build required.
 
 The steps below boot a **disposable Linux VM** on your development machine (WSL / Linux) and install Cube Sandbox inside that VM.
-Follow this guide step by step — you can be up and running with Cube Sandbox in just a few minutes!
+
+⚠️Follow this guide step by step — you can be up and running with Cube Sandbox in just a few minutes!
 
 ::: tip Already have a bare-metal server?
 If you already have an x86_64 Linux bare-metal server with KVM enabled, you can **skip Step 1** and run the Step 2 installer directly on that server.
@@ -93,7 +94,7 @@ Then run the following command to monitor the build progress:
 cubemastercli tpl watch --job-id <job_id>
 ```
 
-**⚠ The image is fairly large** — downloading, extracting, and building the template may take a while; please be patient.
+**⚠️ The image is fairly large** — downloading, extracting, and building the template may take a while; please be patient.
 
 
 Wait for the command above to finish and the template status to reach `READY`.

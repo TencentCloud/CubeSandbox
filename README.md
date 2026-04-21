@@ -139,11 +139,17 @@ For detailed metrics on startup latency and resource overhead, please refer to:
 
 
 
-Launch your first sandbox in 4 steps on a KVM-enabled Linux environment (WSL / Linux physical machine / cloud bare-metal):
+Cube Sandbox requires a KVM-enabled x86_64 Linux environment — **WSL 2**, a **Linux physical machine**, or a **cloud bare-metal server** all work.
 
-1. **Boot the Development VM** (skip if you already have an x86_64 bare-metal Linux server)
+> Don't have one yet?
+> - **Windows users**: run `wsl --install` in an admin PowerShell to set up WSL 2 (requires Windows 11 22H2+, with nested virtualization enabled in BIOS / WSL).
+> - **Others**: grab an x86_64 Linux physical machine, or rent a bare-metal server from a cloud provider.
 
-Clone the repo and boot a disposable OpenCloudOS 9 dev VM:
+Once your environment is ready, launch your first sandbox in four steps:
+
+1. **Prepare the runtime environment** (skip this step if you already have an x86_64 bare-metal Linux server)
+
+Run the following on your WSL / Linux machine:
 
 ```bash
 git clone https://github.com/tencentcloud/CubeSandbox.git
@@ -151,18 +157,21 @@ git clone https://github.com/tencentcloud/CubeSandbox.git
 # git clone https://cnb.cool/CubeSandbox/CubeSandbox
 
 cd CubeSandbox/dev-env
-./prepare_image.sh   # one-off: download + init the OpenCloudOS 9 image
-./run_vm.sh          # boot the VM; keep this terminal open (Ctrl+a x to power off)
-
-# In a second terminal:
-cd CubeSandbox/dev-env && ./login.sh   # SSH into the VM as root
+./prepare_image.sh   # one-off: download and initialize the runtime image
+./run_vm.sh          # boot the environment; keep this terminal open (Ctrl+a x to exit)
 ```
 
-> See [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) for details.
+In a second terminal, log into the environment you just prepared:
+
+```bash
+cd CubeSandbox/dev-env && ./login.sh
+```
+
+> This drops you into a disposable Linux environment where all the subsequent installation happens, so your host stays clean. See [Development Environment](./docs/guide/dev-environment.md) for details.
 
 2. **Start the Cube Sandbox Service**
 
-Run **one** of the following commands inside the dev VM you just logged into, depending on your location:
+Inside the environment you entered via `login.sh` (or directly on your bare-metal server), run **one** of the following commands depending on your location:
 
 - **Global Users** (downloads from GitHub):
 
@@ -197,7 +206,7 @@ Then run the following command to monitor the build progress:
 cubemastercli tpl watch --job-id <job_id>
 ```
 
-**⚠ The image is fairly large** — downloading, extracting, and building the template may take a while; please be patient.
+**⚠️ The image is fairly large** — downloading, extracting, and building the template may take a while; please be patient.
 
 Wait for the command above to finish and the template status to reach `READY`. Note the **template ID** (`template_id`) from the output — you will need it in the next step.
 
