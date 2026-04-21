@@ -1,0 +1,4 @@
+openai-agents[e2b]
+e2b-code-interpreter
+python-dotenv
+pydantic

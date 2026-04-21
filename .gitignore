@@ -24,3 +24,11 @@ runtime/agent/src/version.rs
 # Python cache and compiled binaries in examples
 API/examples/__pycache__/
 API/examples/go/go
+
+# OpenAI Agents SDK examples (runtime artifacts)
+examples/openai-agents-example/__pycache__/
+examples/openai-agents-example/output/
+examples/openai-agents-example/.scratch/
+examples/openai-agents-code-interpreter/__pycache__/
+examples/openai-agents-code-interpreter/output/
+examples/openai-agents-code-interpreter/.scratch/
