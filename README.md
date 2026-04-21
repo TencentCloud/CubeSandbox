@@ -139,9 +139,24 @@ For detailed metrics on startup latency and resource overhead, please refer to:
 
 
 
-Launch your first sandbox in 3 steps on a KVM-enabled machine:
+Launch your first sandbox in 4 steps on a KVM-enabled Linux environment (WSL / Linux physical machine / cloud bare-metal):
 
-1. **Start the Cube Sandbox Service**
+1. **Boot the Development VM** (skip if you already have an x86_64 bare-metal Linux server)
+
+Clone the repo and boot a disposable OpenCloudOS 9 dev VM. All subsequent steps run inside that VM as root:
+
+```bash
+git clone https://github.com/tencentcloud/CubeSandbox.git
+cd CubeSandbox/dev-env
+./prepare_image.sh   # one-off: download + init the OpenCloudOS 9 image
+./run_vm.sh          # boot the VM; keep this terminal open (Ctrl+a x to power off)
+# In a second terminal:
+cd CubeSandbox/dev-env && ./login.sh   # SSH into the VM as root
+```
+
+> See [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) for details.
+
+2. **Start the Cube Sandbox Service**
 
 ```bash
 curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
@@ -150,12 +165,12 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click
 > Slow GitHub downloads from mainland China? Set `MIRROR=cn` to fetch the release bundle from China CDN:
 >
 > ```bash
-> curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+> curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
 > ```
 >
-> See [Quick Start — China mainland mirror](./docs/guide/quickstart.md#step-1-install) for details.
+> See [Quick Start — China mainland mirror](./docs/guide/quickstart.md#step-2-install) for details.
 
-2. **Create a Code Interpreter Sandbox Template**
+3. **Create a Code Interpreter Sandbox Template**
 
 ```bash
 cubemastercli tpl create-from-image \
@@ -166,7 +181,7 @@ cubemastercli tpl create-from-image \
   --probe 49999
 ```
 
-3. **Run Your First Agent Code**
+4. **Run Your First Agent Code**
 
 Set environment variables pointing to the local service: `CUBE_TEMPLATE_ID`, `E2B_API_URL`, and `E2B_API_KEY`, then simply use the official E2B SDK:
 
@@ -174,7 +189,7 @@ Set environment variables pointing to the local service: `CUBE_TEMPLATE_ID`, `E2
 export E2B_API_URL="http://127.0.0.1:3000"
 # Required: any non-empty value satisfies the SDK check
 export E2B_API_KEY="dummy"
-# Required: template ID obtained from Step 2 (create-from-image)
+# Required: template ID obtained from Step 3 (create-from-image)
 export CUBE_TEMPLATE_ID="<your-template-id>"
 export SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem"
 ```

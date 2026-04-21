@@ -82,7 +82,7 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click
 
 ::: tip Use the Tencent Cloud mirror from China
 ```bash
-curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
 ```
 :::
 
@@ -141,8 +141,8 @@ sudo modprobe -r kvm_intel && sudo modprobe kvm_intel
 
 | Host | Guest | Purpose |
 |------|-------|---------|
-| `127.0.0.1:2222` | `:22` | SSH into the dev VM |
-| `127.0.0.1:3000` | `:3000` | Cube Sandbox E2B-compatible API |
+| `127.0.0.1:12222` | `:22` | SSH into the dev VM |
+| `127.0.0.1:13000` | `:3000` | Cube Sandbox E2B-compatible API |
 
 ## What prepare_image.sh does inside the guest
 
@@ -168,7 +168,7 @@ All three scripts accept environment variables:
 AUTO_BOOT=0 ./prepare_image.sh
 
 # Boot with more resources, or change the forwarded Cube API port.
-VM_MEMORY_MB=16384 VM_CPUS=8 CUBE_API_PORT=13000 ./run_vm.sh
+VM_MEMORY_MB=16384 VM_CPUS=8 CUBE_API_PORT=23000 ./run_vm.sh
 
 # Boot without requiring nested KVM (OS will boot but sandboxes won't run).
 REQUIRE_NESTED_KVM=0 ./run_vm.sh
@@ -178,7 +178,7 @@ LOGIN_AS_ROOT=0 ./login.sh
 ```
 
 Defaults for `run_vm.sh`: 4 CPUs, 8192 MB RAM, SSH forwarded on
-`127.0.0.1:2222`, Cube API forwarded on `127.0.0.1:3000`.
+`127.0.0.1:12222`, Cube API forwarded on `127.0.0.1:13000` (guest `:3000`).
 
 ## Reset / clean up
 
@@ -192,10 +192,10 @@ Defaults for `run_vm.sh`: 4 CPUs, 8192 MB RAM, SSH forwarded on
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | No `/dev/kvm` inside the guest | Host does not have nested KVM enabled | Enable nested virtualization on the host and reboot the VM |
-| `./login.sh` cannot connect | VM not booted yet, or host port `2222` is busy | Confirm `./run_vm.sh` is still running; or change `SSH_PORT` |
+| `./login.sh` cannot connect | VM not booted yet, or host port `12222` is busy | Confirm `./run_vm.sh` is still running; or change `SSH_PORT` |
 | `cube-sandbox-mysql` keeps restarting with `Permission denied` | Guest SELinux is still enforcing | Re-run `./prepare_image.sh`, or inside the guest: `setenforce 0 && sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config && docker restart cube-sandbox-mysql` |
 | `df -h /` inside the guest is still small | The auto-grow step did not complete | Inspect `.workdir/qemu-serial.log`, then `scp internal/grow_rootfs.sh` into the guest and run it manually |
-| Host port `3000` is already taken | Another service is bound to `3000` | Use `CUBE_API_PORT=13000 ./run_vm.sh` and update `E2B_API_URL` accordingly |
+| Host port `13000` is already taken | Another service is bound to `13000` | Use `CUBE_API_PORT=23000 ./run_vm.sh` and update `E2B_API_URL` accordingly |
 
 ## Directory layout
 

@@ -73,7 +73,7 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click
 
 ::: tip 国内环境建议走腾讯云镜像
 ```bash
-curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
 ```
 :::
 
@@ -127,8 +127,8 @@ sudo modprobe -r kvm_intel && sudo modprobe kvm_intel
 
 | 宿主机 | 虚机 | 用途 |
 |--------|------|------|
-| `127.0.0.1:2222` | `:22` | 虚机 SSH |
-| `127.0.0.1:3000` | `:3000` | Cube Sandbox 兼容 E2B 的 API |
+| `127.0.0.1:12222` | `:22` | 虚机 SSH |
+| `127.0.0.1:13000` | `:3000` | Cube Sandbox 兼容 E2B 的 API |
 
 ## prepare_image.sh 在虚机内做了什么
 
@@ -152,7 +152,7 @@ sudo modprobe -r kvm_intel && sudo modprobe kvm_intel
 AUTO_BOOT=0 ./prepare_image.sh
 
 # 启动虚机时换更多资源 / 换 Cube API 端口。
-VM_MEMORY_MB=16384 VM_CPUS=8 CUBE_API_PORT=13000 ./run_vm.sh
+VM_MEMORY_MB=16384 VM_CPUS=8 CUBE_API_PORT=23000 ./run_vm.sh
 
 # 不强制要求 nested KVM（只想把系统起来看看，不跑沙箱）。
 REQUIRE_NESTED_KVM=0 ./run_vm.sh
@@ -162,7 +162,7 @@ LOGIN_AS_ROOT=0 ./login.sh
 ```
 
 `run_vm.sh` 的默认配置：4 CPU、8192 MB 内存，SSH 转发
-`127.0.0.1:2222`，Cube API 转发 `127.0.0.1:3000`。
+`127.0.0.1:12222`，Cube API 转发 `127.0.0.1:13000`（虚机内 `:3000`）。
 
 ## 重置 / 清理
 
@@ -175,10 +175,10 @@ LOGIN_AS_ROOT=0 ./login.sh
 | 现象 | 可能原因 | 解决方法 |
 |------|---------|---------|
 | 虚机内没有 `/dev/kvm` | 宿主机未开启 nested KVM | 在宿主机启用 nested virtualization 后重启虚机 |
-| `./login.sh` 连不上 | 虚机还没启动，或宿主机 `2222` 端口被占 | 确认 `./run_vm.sh` 还在运行，或通过 `SSH_PORT` 换端口 |
+| `./login.sh` 连不上 | 虚机还没启动，或宿主机 `12222` 端口被占 | 确认 `./run_vm.sh` 还在运行，或通过 `SSH_PORT` 换端口 |
 | `cube-sandbox-mysql` 反复重启且报 `Permission denied` | 虚机里 SELinux 还是 enforcing | 重跑 `./prepare_image.sh`；或在虚机里执行 `setenforce 0 && sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config && docker restart cube-sandbox-mysql` |
 | `df -h /` 仍然很小 | 虚机内自动扩容没走完 | 看 `.workdir/qemu-serial.log`，再把 `internal/grow_rootfs.sh` scp 进去手动跑一次 |
-| 宿主机 `3000` 端口被占 | 本机有别的服务 | 用 `CUBE_API_PORT=13000 ./run_vm.sh`，并相应调整 `E2B_API_URL` |
+| 宿主机 `13000` 端口被占 | 本机有别的服务 | 用 `CUBE_API_PORT=23000 ./run_vm.sh`，并相应调整 `E2B_API_URL` |
 
 ## 目录结构
 

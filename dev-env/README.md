@@ -10,8 +10,8 @@ grown to 100G virtual disk, with SSH and the Cube API port forwarded to
 the host:
 
 ```text
-SSH      : 127.0.0.1:2222 -> guest:22
-Cube API : 127.0.0.1:3000 -> guest:3000
+SSH      : 127.0.0.1:12222 -> guest:22
+Cube API : 127.0.0.1:13000 -> guest:3000
 ```
 
 ## Prerequisites
@@ -106,11 +106,11 @@ ls -l /dev/kvm
 egrep -c '(vmx|svm)' /proc/cpuinfo
 ```
 
-Because host `:3000` is forwarded to guest `:3000`, you can point the
+Because host `:13000` is forwarded to guest `:3000`, you can point the
 SDK at the dev environment from your host:
 
 ```bash
-export E2B_API_URL="http://127.0.0.1:3000"
+export E2B_API_URL="http://127.0.0.1:13000"
 export E2B_API_KEY="dummy"
 export CUBE_TEMPLATE_ID="<template-id>"
 ```
@@ -124,7 +124,7 @@ All three scripts accept environment variables:
 AUTO_BOOT=0 ./prepare_image.sh
 
 # Boot with more resources or a different forwarded port.
-VM_MEMORY_MB=16384 VM_CPUS=8 CUBE_API_PORT=13000 ./run_vm.sh
+VM_MEMORY_MB=16384 VM_CPUS=8 CUBE_API_PORT=23000 ./run_vm.sh
 
 # Boot without requiring nested KVM (OS boot only, sandboxes will not run).
 REQUIRE_NESTED_KVM=0 ./run_vm.sh
@@ -138,9 +138,9 @@ LOGIN_AS_ROOT=0 ./login.sh
 | Symptom | Likely Cause | Fix |
 |---------|--------------|-----|
 | No `/dev/kvm` inside the guest | Nested KVM disabled on the host | Enable nested virtualization on the host and reboot the VM |
-| `./login.sh` fails to connect | VM not booted yet, or host port 2222 is busy | Check that `./run_vm.sh` is still running, or change `SSH_PORT` |
+| `./login.sh` fails to connect | VM not booted yet, or host port 12222 is busy | Check that `./run_vm.sh` is still running, or change `SSH_PORT` |
 | `df -h /` inside the guest is still small | `prepare_image.sh` never finished the auto-grow step | Inspect `.workdir/qemu-serial.log`, then `scp internal/grow_rootfs.sh` into the guest and run it manually |
-| Host port 3000 already taken | Some other service binds `3000` | Start with `CUBE_API_PORT=13000 ./run_vm.sh` |
+| Host port 13000 already taken | Some other service binds `13000` | Start with `CUBE_API_PORT=23000 ./run_vm.sh` |
 
 ## Note
 

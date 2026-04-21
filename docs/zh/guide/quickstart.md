@@ -1,40 +1,72 @@
 # 快速开始
 
-三步完成 Cube Sandbox 的完整部署，无需本地构建。
+四步完成 Cube Sandbox 的完整部署，无需本地构建。
 
-::: tip 没有 bare-metal 机器？
-如果只有笔记本或云主机（已开启 KVM + nested virtualization），先按
-[开发环境（QEMU 虚机）](./dev-environment) 起一台一次性的 OpenCloudOS 9
-虚机，剩下的快速开始步骤都在虚机里执行即可。
+默认路径走的是 `dev-env/` 下的**开发虚机**：在笔记本 / WSL / Linux 机
+器上拉代码、起一台一次性的 OpenCloudOS 9 虚机，然后在虚机里跑安装脚
+本。这条路径对宿主机要求最宽松。
+
+::: tip 已经有 bare-metal 服务器？
+如果你已经有一台 x86_64 的裸金属 Linux 服务器且已开启 KVM，可以
+**跳过第一步**，直接在那台机器上执行第二步的安装脚本。
 :::
 
 ## 前置条件
 
-- **裸金属 Linux 服务器**（x86_64），已启用 KVM（`/dev/kvm` 存在）
-- **Docker** 已安装并正常运行
-- 可访问互联网（用于下载发布包和拉取 Docker 镜像）
+宿主机满足下列任一条件即可：
 
-## 第一步：安装
+- **Windows 上的 WSL 2**（Windows 11 22H2+，并在 WSL 里启用嵌套虚拟化）
+- **x86_64 Linux 物理机**
+- **已开启嵌套虚拟化的 Linux 虚拟机**（VMWare启动Ubuntu 22.04，并且在虚拟机CPU设置那里，启用 “Virtualize Intel VT-x/EPT or AMD-V/RVI”）
+- **x86_64 裸金属 Linux 服务器** 
 
-以 root 身份（或使用 `sudo`）在目标机上执行：
+通用要求：
+
+1. Linux环境能正常使用 KVM（`/dev/kvm` 存在且可读写）
+2. Linux环境中，**Docker、QEMU** 已安装并正常运行
+3. 可访问互联网（用于克隆仓库、下载发布包、拉取 Docker 镜像）
+
+## 第一步：启动开发虚机
+
+克隆仓库并进入 `dev-env/`：
 
 ```bash
-curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
+git clone https://github.com/tencentcloud/CubeSandbox.git
+# 如果您的环境无法访问github，请执行：
+# git clone https://cnb.cool/CubeSandbox/CubeSandbox.git
+
+
+cd CubeSandbox/dev-env
 ```
 
-::: tip 节点 IP 自动探测
-安装脚本会自动从 `eth0` 网卡探测节点 IP。如果你的主网卡名称不同，或者需要指定特定 IP，可通过环境变量显式传入：
+一共三条命令。前两条在同一个终端执行，第三条在**新终端**里执行。
+
+> 在执行命令之前，请确保您的Linux机器上已经安装qemu、qemu-img、ripgrep
 
 ```bash
-CUBE_SANDBOX_NODE_IP=<你的节点IP> bash <(curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh)
+./prepare_image.sh   # 仅首次：下载并初始化 OpenCloudOS 9 镜像
+./run_vm.sh          # 启动虚机；保持此终端不关（Ctrl+a x 关机）
 ```
-:::
 
-::: tip 国内加速镜像
-国内网络下载慢，可加上 `MIRROR=cn` 从 CDN 拉取发布包：
+在新终端里：
 
 ```bash
-curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+cd CubeSandbox/dev-env
+./login.sh           # 以 root 登录虚机
+```
+
+接下来所有步骤都在**虚机内**执行 —— `login.sh` 会直接把你送到虚机的
+root shell，Cube Sandbox 就装在这里。
+
+关于宿主机自检（嵌套 KVM、依赖软件）、端口映射、环境变量覆盖和常见
+问题，请参阅[开发环境（QEMU 虚机）](./dev-environment)。
+
+## 第二步：安装
+
+在**开发虚机内**以 root 身份执行：
+
+```bash
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
 ```
 :::
 
@@ -45,11 +77,10 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click
 - CubeProxy 提供 TLS（mkcert）和 CoreDNS 域名路由（`cube.app`）
 :::
 
-安装完成后，安装器会把 `cubemastercli` 和 `cubecli` 软链接到 `/usr/local/bin`。
 
-## 第二步：制作模板
+## 第三步：制作模板
 
-安装完成后，`cubemastercli` 已加入系统 PATH。使用预构建镜像创建代码解释器模板：
+安装完成后，使用预构建镜像创建代码解释器模板：
 
 ```bash
 cubemastercli tpl create-from-image \
@@ -60,7 +91,7 @@ cubemastercli tpl create-from-image \
   --probe 49999
 ```
 
-监控构建进度，等待状态变为 `READY`：
+然后，执行下面的这行命令，监控构建进度，等待状态变为 `READY`：
 
 ```bash
 cubemastercli tpl watch --job-id <job_id>
@@ -70,11 +101,12 @@ cubemastercli tpl watch --job-id <job_id>
 
 完整的模板创建流程和更多参数说明，请参阅[从 OCI 镜像制作模板](./tutorials/template-from-image)。
 
-## 第三步：运行第一段 Agent 代码
+## 第四步：运行第一段 Agent 代码
 
 安装 Python SDK：
 
 ```bash
+yum install -y python3 python3-pip
 pip install e2b-code-interpreter
 ```
 
@@ -91,7 +123,7 @@ export SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem"
 |------|------|
 | `E2B_API_URL` | 将 E2B SDK 请求指向本地 Cube Sandbox，而非 E2B 官方云服务 |
 | `E2B_API_KEY` | SDK 强制非空校验，本地部署填任意字符串即可 |
-| `CUBE_TEMPLATE_ID` | 第二步获取的模板 ID |
+| `CUBE_TEMPLATE_ID` | 第三步获取的模板 ID |
 | `SSL_CERT_FILE` | mkcert 签发的 CA 根证书路径，沙箱 HTTPS 连接需要 |
 
 在隔离沙箱中运行代码：
@@ -106,21 +138,6 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
     print(result)
 ```
 
-也可以执行 Shell 命令和操作文件：
-
-```python
-import os
-from e2b_code_interpreter import Sandbox
-
-with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
-    # 执行 Shell 命令
-    result = sandbox.commands.run("echo hello cube")
-    print(result.stdout)
-
-    # 读取沙箱内文件
-    content = sandbox.files.read("/etc/hosts")
-    print(content)
-```
 
 更多端到端示例，请参阅[示例项目](./tutorials/examples)。
 

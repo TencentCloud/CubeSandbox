@@ -8,8 +8,8 @@
 并把 SSH 和 Cube API 端口映射到宿主机：
 
 ```text
-SSH      : 127.0.0.1:2222 -> guest:22
-Cube API : 127.0.0.1:3000 -> guest:3000
+SSH      : 127.0.0.1:12222 -> guest:22
+Cube API : 127.0.0.1:13000 -> guest:3000
 ```
 
 ## 前置条件
@@ -97,10 +97,10 @@ ls -l /dev/kvm
 egrep -c '(vmx|svm)' /proc/cpuinfo
 ```
 
-由于宿主机 `:3000` 已经转发到 guest `:3000`，在宿主机这边可以直接把 SDK 指向开发环境：
+由于宿主机 `:13000` 已经转发到 guest `:3000`，在宿主机这边可以直接把 SDK 指向开发环境：
 
 ```bash
-export E2B_API_URL="http://127.0.0.1:3000"
+export E2B_API_URL="http://127.0.0.1:13000"
 export E2B_API_KEY="dummy"
 export CUBE_TEMPLATE_ID="<template-id>"
 ```
@@ -114,7 +114,7 @@ export CUBE_TEMPLATE_ID="<template-id>"
 AUTO_BOOT=0 ./prepare_image.sh
 
 # 启动虚机时用更多资源、换个 Cube API 端口。
-VM_MEMORY_MB=16384 VM_CPUS=8 CUBE_API_PORT=13000 ./run_vm.sh
+VM_MEMORY_MB=16384 VM_CPUS=8 CUBE_API_PORT=23000 ./run_vm.sh
 
 # 不强制要求 nested KVM（只想把系统启动起来看看，不跑沙箱）。
 REQUIRE_NESTED_KVM=0 ./run_vm.sh
@@ -128,9 +128,9 @@ LOGIN_AS_ROOT=0 ./login.sh
 | 现象 | 可能原因 | 解决方法 |
 |------|---------|---------|
 | 虚机内没有 `/dev/kvm` | 宿主机未开启 nested KVM | 在宿主机启用 nested virtualization，再重启虚机 |
-| `./login.sh` 连不上 | 虚机还没启动，或宿主机 2222 端口被占用 | 确认 `./run_vm.sh` 还在运行，或换 `SSH_PORT` |
+| `./login.sh` 连不上 | 虚机还没启动，或宿主机 12222 端口被占用 | 确认 `./run_vm.sh` 还在运行，或换 `SSH_PORT` |
 | 虚机里 `df -h /` 还是很小 | `prepare_image.sh` 没走完自动扩容 | 查看 `.workdir/qemu-serial.log`，然后把 `internal/grow_rootfs.sh` scp 进去手动跑一次 |
-| 宿主机 3000 端口被占用 | 本机有别的服务在用 | 用 `CUBE_API_PORT=13000 ./run_vm.sh` |
+| 宿主机 13000 端口被占用 | 本机有别的服务在用 | 用 `CUBE_API_PORT=23000 ./run_vm.sh` |
 
 ## 说明
 

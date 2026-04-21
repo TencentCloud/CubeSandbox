@@ -1,44 +1,73 @@
 # Quick Start
 
-Get a fully functional Cube Sandbox running in three steps — no source build required.
+Get a fully functional Cube Sandbox running in four steps — no source build required.
 
-::: tip No bare-metal machine?
-If you only have a laptop or a cloud VM (with KVM + nested
-virtualization), use the
-[Development Environment (QEMU VM)](./dev-environment) guide first — it
-spins up a disposable OpenCloudOS 9 VM, and the rest of this Quick
-Start works inside that VM.
+The default path below uses the **development VM** under `dev-env/`: you
+clone the repo on your laptop / WSL / Linux box, boot a disposable
+OpenCloudOS 9 VM, and run the installer inside that VM. This works on
+the widest range of machines.
+
+::: tip Already have a bare-metal Linux server?
+If you have a dedicated bare-metal server (x86_64) with KVM enabled,
+you can **skip Step 1** and run the Step 2 installer directly on that
+server.
 :::
 
 ## Prerequisites
 
-- A **bare-metal Linux server** (x86_64) with KVM enabled (`/dev/kvm` exists)
-- **Docker** installed and running
-- Internet access (to download the release bundle and pull Docker images)
+Any one of the following hosts works:
 
-## Step 1: Install
+- **WSL 2 on Windows** (Windows 11 22H2+, with nested virtualization enabled in WSL)
+- **An x86_64 Linux physical machine**
+- **A Linux VM with nested virtualization enabled** (e.g. Ubuntu 22.04 on VMware with "Virtualize Intel VT-x/EPT or AMD-V/RVI" enabled in the VM's CPU settings)
+- **An x86_64 bare-metal Linux server**
 
-Run the following command on the target machine as root (or with `sudo`):
+Common requirements:
+
+1. The Linux environment can use KVM (`/dev/kvm` exists and is read/writable)
+2. **Docker** and **QEMU** installed and running in the Linux environment
+3. Internet access (to clone the repo, download the release bundle, and pull Docker images)
+
+## Step 1: Boot the Development VM
+
+Clone the repository and change into `dev-env/`:
+
+```bash
+git clone https://github.com/tencentcloud/CubeSandbox.git
+cd CubeSandbox/dev-env
+```
+
+Three commands total. The first two run in one terminal, the third in
+a **second terminal**.
+
+> Before running the commands below, make sure `qemu`, `qemu-img`, and `ripgrep` are installed on your Linux machine.
+
+```bash
+./prepare_image.sh   # one-off: download + init the OpenCloudOS 9 image
+./run_vm.sh          # boot the VM; keep this terminal open (Ctrl+a x to power off)
+```
+
+In a second terminal:
+
+```bash
+cd CubeSandbox/dev-env
+./login.sh           # SSH into the VM as root
+```
+
+All the following steps run **inside this VM** — `login.sh` drops you
+straight into a root shell where Cube Sandbox will be installed.
+
+For host self-check (nested KVM, required packages), port mappings,
+environment overrides, and troubleshooting, see
+[Development Environment (QEMU VM)](./dev-environment).
+
+## Step 2: Install
+
+Run the following command **inside the dev VM** as root:
 
 ```bash
 curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
 ```
-
-::: tip Node IP auto-detection
-The installer automatically detects the node IP from the `eth0` interface. If your primary network interface has a different name, or you want to pin a specific IP, pass it explicitly:
-
-```bash
-CUBE_SANDBOX_NODE_IP=<your-node-ip> bash <(curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh)
-```
-:::
-
-::: tip China mainland mirror
-If GitHub downloads are slow, set `MIRROR=cn` to pull the release bundle from the CDN:
-
-```bash
-curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
-```
-:::
 
 ::: details What gets installed
 - E2B-compatible REST API listening on port `3000`
@@ -49,7 +78,7 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click
 
 After installation completes, the installer symlinks `cubemastercli` and `cubecli` into `/usr/local/bin`.
 
-## Step 2: Create a Template
+## Step 3: Create a Template
 
 Create a code-interpreter template from the prebuilt image:
 
@@ -62,7 +91,7 @@ cubemastercli tpl create-from-image \
   --probe 49999
 ```
 
-Monitor the build until the status reaches `READY`:
+Then run the following command to monitor the build and wait until the status reaches `READY`:
 
 ```bash
 cubemastercli tpl watch --job-id <job_id>
@@ -72,11 +101,12 @@ Note the **template ID** from the output — you will need it in the next step.
 
 For the full template creation workflow and more options, see [Creating Templates from OCI Images](./tutorials/template-from-image).
 
-## Step 3: Run Your First Agent
+## Step 4: Run Your First Agent
 
 Install the Python SDK:
 
 ```bash
+yum install -y python3 python3-pip
 pip install e2b-code-interpreter
 ```
 
@@ -93,7 +123,7 @@ export SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem"
 |----------|-------------|
 | `E2B_API_URL` | Points the E2B SDK to your local Cube Sandbox instead of the E2B cloud |
 | `E2B_API_KEY` | The SDK requires a non-empty value; any string works |
-| `CUBE_TEMPLATE_ID` | The template ID obtained in Step 2 |
+| `CUBE_TEMPLATE_ID` | The template ID obtained in Step 3 |
 | `SSL_CERT_FILE` | mkcert CA root certificate for HTTPS connections to the sandbox |
 
 Run code inside an isolated sandbox:
@@ -108,21 +138,6 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
     print(result)
 ```
 
-You can also run shell commands and work with files:
-
-```python
-import os
-from e2b_code_interpreter import Sandbox
-
-with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
-    # Run a shell command
-    result = sandbox.commands.run("echo hello cube")
-    print(result.stdout)
-
-    # Read a file inside the sandbox
-    content = sandbox.files.read("/etc/hosts")
-    print(content)
-```
 
 For more end-to-end walkthroughs, see [Examples](./tutorials/examples).
 
