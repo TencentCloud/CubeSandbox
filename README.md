@@ -143,13 +143,17 @@ Launch your first sandbox in 4 steps on a KVM-enabled Linux environment (WSL / L
 
 1. **Boot the Development VM** (skip if you already have an x86_64 bare-metal Linux server)
 
-Clone the repo and boot a disposable OpenCloudOS 9 dev VM. All subsequent steps run inside that VM as root:
+Clone the repo and boot a disposable OpenCloudOS 9 dev VM:
 
 ```bash
 git clone https://github.com/tencentcloud/CubeSandbox.git
+# For faster access from mainland China, clone from the mirror instead:
+# git clone https://cnb.cool/CubeSandbox/CubeSandbox
+
 cd CubeSandbox/dev-env
 ./prepare_image.sh   # one-off: download + init the OpenCloudOS 9 image
 ./run_vm.sh          # boot the VM; keep this terminal open (Ctrl+a x to power off)
+
 # In a second terminal:
 cd CubeSandbox/dev-env && ./login.sh   # SSH into the VM as root
 ```
@@ -157,6 +161,8 @@ cd CubeSandbox/dev-env && ./login.sh   # SSH into the VM as root
 > See [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) for details.
 
 2. **Start the Cube Sandbox Service**
+
+Run the following command inside the dev VM you just logged into:
 
 ```bash
 curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
@@ -172,6 +178,8 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click
 
 3. **Create a Code Interpreter Sandbox Template**
 
+After installation, create a code interpreter template from the prebuilt image:
+
 ```bash
 cubemastercli tpl create-from-image \
   --image ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest \
@@ -181,29 +189,45 @@ cubemastercli tpl create-from-image \
   --probe 49999
 ```
 
+Then run the following command to monitor the build progress:
+
+```bash
+cubemastercli tpl watch --job-id <job_id>
+```
+
+Wait for the command above to finish and the template status to reach `READY`. Note the **template ID** (`template_id`) from the output — you will need it in the next step.
+
 4. **Run Your First Agent Code**
 
-Set environment variables pointing to the local service: `CUBE_TEMPLATE_ID`, `E2B_API_URL`, and `E2B_API_KEY`, then simply use the official E2B SDK:
+Install the Python SDK:
+
+```bash
+yum install -y python3 python3-pip
+pip install e2b-code-interpreter
+```
+
+Set environment variables:
 
 ```bash
 export E2B_API_URL="http://127.0.0.1:3000"
-# Required: any non-empty value satisfies the SDK check
 export E2B_API_KEY="dummy"
-# Required: template ID obtained from Step 3 (create-from-image)
-export CUBE_TEMPLATE_ID="<your-template-id>"
+export CUBE_TEMPLATE_ID="<your-template-id>"  # template ID obtained from Step 3
 export SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem"
 ```
 
+Run code inside an isolated sandbox:
+
 ```python
 import os
-from e2b_code_interpreter import Sandbox # That's right, use the E2B SDK directly!
+from e2b_code_interpreter import Sandbox  # drop-in E2B SDK
 
-# CubeSandbox seamlessly intercepts all requests under the hood
+# Cube Sandbox transparently intercepts all requests
 with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
-    # Let your LLM-generated code run safely here
     result = sandbox.run_code("print('Hello from Cube Sandbox, safely isolated!')")
     print(result)
 ```
+
+> See [Quick Start — Step 4](./docs/guide/quickstart.md#step-4-run-your-first-agent) for the full variable reference and more examples.
 
 Want to explore more? Check out the 📂 [`examples/`](./examples/) directory, covering scenarios like: code execution, Shell commands, file operations, browser automation, network policies, pause/resume, OpenClaw integration, and RL training.
 
