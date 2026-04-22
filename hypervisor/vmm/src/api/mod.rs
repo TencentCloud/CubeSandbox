@@ -149,7 +149,7 @@ pub enum ApiError {
     /// The vsock device could not be added to the VM.
     VmAddVsock(VmError),
 
-    /// Error starting migration receiever
+    /// Error starting migration receiver
     VmReceiveMigration(MigratableError),
 
     /// Error starting migration sender
