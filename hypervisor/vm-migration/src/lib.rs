@@ -104,7 +104,7 @@ impl SnapshotDataSection {
     }
 }
 
-/// A Snapshottable component's snapshot is a tree of snapshots, where leafs
+/// A Snapshottable component's snapshot is a tree of snapshots, where leaves
 /// contain the snapshot data. Nodes of this tree track all their children
 /// through the snapshots field, which is basically their sub-components.
 /// Leaves will typically have an empty snapshots map, while nodes usually
