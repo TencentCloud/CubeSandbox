@@ -45,7 +45,7 @@ func TestQueue(t *testing.T) {
 	assert.Equal(t, int32(testnum), worked)
 }
 
-func TestQueueGracefullStopTimeout(t *testing.T) {
+func TestQueueGracefulStopTimeout(t *testing.T) {
 	bw := New(&Options{Limit: 5})
 	for i := 1; i <= 10; i++ {
 		bw.Push(&testReq{id: i, sleep: 3 * time.Second})
