@@ -1,0 +1,51 @@
+name: Hypervisor Tests (x86-64)
+
+on:
+  push:
+    paths:
+      - 'hypervisor/**'
+      - '.github/workflows/hypervisor-integration.yaml'
+  pull_request:
+    paths:
+      - 'hypervisor/**'
+      - '.github/workflows/hypervisor-integration.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: ['gnu']
+    name: Tests (x86-64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install Docker
+        run: |
+          set -eufo pipefail
+          sudo apt-get update
+          sudo apt-get -y install ca-certificates curl gnupg
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          sudo chmod a+r /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt install -y docker-ce docker-ce-cli
+      - name: Prepare for VDPA
+        run: hypervisor/scripts/prepare_vdpa.sh
+      - name: Run unit tests
+        run: hypervisor/scripts/dev_cli.sh tests --unit --libc ${{ matrix.libc }}
+      - name: Load openvswitch module
+        run: sudo modprobe openvswitch
+      - name: Run integration tests
+        run: hypervisor/scripts/dev_cli.sh tests --integration --quick --libc ${{ matrix.libc }}
+      - name: Skipping build for PR
+        run: echo "Skipping build for PR"

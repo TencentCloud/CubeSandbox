@@ -198,6 +198,7 @@ cmd_help() {
     echo "        --metrics                    Generate performance metrics"
     echo "        --volumes                    Hash separated volumes to be exported. Example --volumes /mnt:/mnt#/myvol:/myvol"
     echo "        --hypervisor                 Underlying hypervisor. Options kvm, mshv"
+    echo "        --quick                      Run only core smoke tests (5 priority levels)"
     echo "        --all                        Run all tests."
     echo ""
     echo "    build-container [--type]"
@@ -326,6 +327,7 @@ cmd_tests() {
     integration_live_migration=false
     integration_rate_limiter=false
     metrics=false
+    quick=false
     libc="gnu"
     arg_vols=""
     hypervisor="kvm"
@@ -358,6 +360,7 @@ cmd_tests() {
             shift
             hypervisor="$1"
             ;;
+        "--quick") { quick=true; } ;;
         "--all") {
             cargo=true
             unit=true
@@ -381,7 +384,11 @@ cmd_tests() {
         exported_device="/dev/mshv"
     fi
 
-    set -- '--hypervisor' "$hypervisor" "$@"
+    if [ "$quick" = true ]; then
+        set -- '--hypervisor' "$hypervisor" '--quick' "$@"
+    else
+        set -- '--hypervisor' "$hypervisor" "$@"
+    fi
 
     ensure_build_dir
     ensure_latest_ctr
@@ -397,6 +404,7 @@ cmd_tests() {
             --device $exported_device \
             --device /dev/net/tun \
             --cap-add net_admin \
+            --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --env BUILD_TARGET="$target" \
             "$CTR_IMAGE" \
