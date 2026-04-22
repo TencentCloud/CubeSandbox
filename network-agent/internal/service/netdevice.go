@@ -65,6 +65,36 @@ type tapDevice struct {
 	LastStage    string
 }
 
+func disableGRO(ifName string) error {
+	const (
+		SIOCETHTOOL  = 0x8946
+		ETHTOOL_SGRO = 0x0000002c
+	)
+
+	type ethtoolValue struct {
+		Cmd  uint32
+		Data uint32
+	}
+
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		return fmt.Errorf("open socket for ethtool: %w", err)
+	}
+	defer unix.Close(fd)
+
+	value := ethtoolValue{Cmd: ETHTOOL_SGRO, Data: 0}
+
+	var ifr [40]byte
+	copy(ifr[:], ifName)
+	*(*uintptr)(unsafe.Pointer(&ifr[16])) = uintptr(unsafe.Pointer(&value))
+
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), SIOCETHTOOL, uintptr(unsafe.Pointer(&ifr[0])))
+	if errno != 0 {
+		return fmt.Errorf("disable GRO on %s: %w", ifName, errno)
+	}
+	return nil
+}
+
 func getGatewayMacAddr(ifName string) (string, error) {
 	link, err := netlinkLinkByName(ifName)
 	if err != nil {

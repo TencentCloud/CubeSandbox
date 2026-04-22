@@ -79,6 +79,10 @@ func NewLocalService(cfg Config) (Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	err = disableGRO(cfg.EthName)
+	if err != nil {
+		CubeLog.WithContext(context.Background()).Warnf("network-agent failed to disable GRO on %s: %v", cfg.EthName, err)
+	}
 	cdev, err := getOrCreateCubeDev(allocator.GatewayIP(), allocator.mask, cfg.MvmMtu, cfg.MvmGwMacAddr)
 	if err != nil {
 		return nil, err
