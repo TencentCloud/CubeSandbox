@@ -171,7 +171,7 @@ func TestCubeBoxNewFromOld(t *testing.T) {
 		t.Fatalf("Unmarshal error: %v", err)
 	}
 
-	newcb.Transmition()
+	newcb.Transmission()
 
 	assert.Equal(t, oldInfo.ID, newcb.ID)
 	assert.Equal(t, 1, len(newcb.All()))
