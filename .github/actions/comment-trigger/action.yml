@@ -1,0 +1,198 @@
+name: Comment Trigger Resolver
+description: >-
+  Gate a workflow job on a chat-style comment command (e.g. "@codebuddy review")
+  and resolve the underlying PR or Issue context in a single reusable step.
+  Supports pull_request / pull_request_target / issues / issue_comment events.
+
+inputs:
+  command:
+    description: >-
+      Text to look for inside comment bodies (case-insensitive). Leave empty to
+      always consider the event triggered (useful for non-comment events such
+      as pull_request opened / issues opened).
+    required: false
+    default: ''
+  allowed-associations:
+    description: >-
+      Comma-separated GitHub author_association values allowed to trigger via
+      comment. Defaults to repo OWNER / MEMBER / COLLABORATOR. Set to empty to
+      disable association-based gating.
+    required: false
+    default: 'OWNER,MEMBER,COLLABORATOR'
+  allowed-users:
+    description: >-
+      Optional comma-separated GitHub logins. When set, the commenter must be
+      one of these (case-insensitive), regardless of association.
+    required: false
+    default: ''
+  reaction:
+    description: >-
+      Reaction emoji to apply to the triggering comment
+      (eyes, rocket, +1, -1, hooray, heart, laugh, confused). Leave empty to
+      disable.
+    required: false
+    default: 'eyes'
+  github-token:
+    description: Token used for API calls (reactions + resolving PR details).
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  triggered:
+    description: "'true' when the current event should run the downstream steps, 'false' otherwise."
+    value: ${{ steps.resolve.outputs.triggered }}
+  kind:
+    description: "'pull_request' or 'issue'."
+    value: ${{ steps.resolve.outputs.kind }}
+  number:
+    description: PR or Issue number (stringified).
+    value: ${{ steps.resolve.outputs.number }}
+  title:
+    description: PR or Issue title.
+    value: ${{ steps.resolve.outputs.title }}
+  body:
+    description: PR or Issue body.
+    value: ${{ steps.resolve.outputs.body }}
+  author:
+    description: PR or Issue author login.
+    value: ${{ steps.resolve.outputs.author }}
+  base_ref:
+    description: "(PR only) base ref name."
+    value: ${{ steps.resolve.outputs.base_ref }}
+  base_sha:
+    description: "(PR only) base commit SHA."
+    value: ${{ steps.resolve.outputs.base_sha }}
+  head_ref:
+    description: "(PR only) head ref name."
+    value: ${{ steps.resolve.outputs.head_ref }}
+  head_sha:
+    description: "(PR only) head commit SHA."
+    value: ${{ steps.resolve.outputs.head_sha }}
+  merge_ref:
+    description: "(PR only) refs/pull/<number>/merge, for actions/checkout."
+    value: ${{ steps.resolve.outputs.merge_ref }}
+  comment_id:
+    description: Triggering comment ID (empty if triggered by a non-comment event).
+    value: ${{ steps.resolve.outputs.comment_id }}
+  comment_body:
+    description: Triggering comment body.
+    value: ${{ steps.resolve.outputs.comment_body }}
+  commenter:
+    description: Triggering commenter login.
+    value: ${{ steps.resolve.outputs.commenter }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      uses: actions/github-script@v7
+      env:
+        INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_ALLOWED_ASSOCIATIONS: ${{ inputs.allowed-associations }}
+        INPUT_ALLOWED_USERS: ${{ inputs.allowed-users }}
+        INPUT_REACTION: ${{ inputs.reaction }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const command = (process.env.INPUT_COMMAND || '').trim().toLowerCase();
+          const allowedAssociations = (process.env.INPUT_ALLOWED_ASSOCIATIONS || '')
+            .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+          const allowedUsers = (process.env.INPUT_ALLOWED_USERS || '')
+            .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+          const reaction = (process.env.INPUT_REACTION || '').trim();
+
+          const setOut = (k, v) => core.setOutput(k, v == null ? '' : String(v));
+          const event = context.eventName;
+          const payload = context.payload;
+
+          const hasCommand = (body) => {
+            if (!command) return true;
+            return (body || '').toLowerCase().includes(command);
+          };
+          const authorAllowed = (assoc, login) => {
+            const a = (assoc || '').toUpperCase();
+            const u = (login || '').toLowerCase();
+            const assocOk = allowedAssociations.length === 0 || allowedAssociations.includes(a);
+            const userOk = allowedUsers.length === 0 || allowedUsers.includes(u);
+            return assocOk && userOk;
+          };
+
+          let triggered = false;
+          let kind = '';
+          let number;
+          let pr = null, issue = null;
+          let commentId = '';
+          let commentBody = '';
+          let commenter = '';
+
+          if (event === 'pull_request' || event === 'pull_request_target') {
+            pr = payload.pull_request;
+            number = pr.number;
+            kind = 'pull_request';
+            triggered = true;
+          } else if (event === 'issues') {
+            issue = payload.issue;
+            number = issue.number;
+            kind = 'issue';
+            triggered = true;
+          } else if (event === 'issue_comment') {
+            commentId = String(payload.comment.id);
+            commentBody = payload.comment.body || '';
+            commenter = (payload.comment.user && payload.comment.user.login) || '';
+            const isPR = payload.issue.pull_request != null;
+            kind = isPR ? 'pull_request' : 'issue';
+            number = payload.issue.number;
+            if (hasCommand(commentBody) &&
+                authorAllowed(payload.comment.author_association, commenter)) {
+              triggered = true;
+              if (isPR) {
+                const { data } = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: number,
+                });
+                pr = data;
+              } else {
+                issue = payload.issue;
+              }
+            }
+          } else {
+            core.warning(`comment-trigger: unsupported event "${event}"; triggered=false.`);
+          }
+
+          setOut('triggered', triggered ? 'true' : 'false');
+          setOut('kind', kind);
+          setOut('number', number != null ? String(number) : '');
+          setOut('comment_id', commentId);
+          setOut('comment_body', commentBody);
+          setOut('commenter', commenter);
+
+          if (triggered && pr) {
+            setOut('title',     pr.title);
+            setOut('body',      pr.body);
+            setOut('author',    pr.user && pr.user.login);
+            setOut('base_ref',  pr.base.ref);
+            setOut('base_sha',  pr.base.sha);
+            setOut('head_ref',  pr.head.ref);
+            setOut('head_sha',  pr.head.sha);
+            setOut('merge_ref', `refs/pull/${number}/merge`);
+          } else if (triggered && issue) {
+            setOut('title',  issue.title);
+            setOut('body',   issue.body);
+            setOut('author', issue.user && issue.user.login);
+          }
+
+          if (triggered && commentId && reaction) {
+            try {
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: Number(commentId),
+                content: reaction,
+              });
+            } catch (e) {
+              core.warning(`comment-trigger: failed to react to comment ${commentId}: ${e.message}`);
+            }
+          }
+
+          core.info(`comment-trigger: event=${event} kind=${kind} number=${number ?? ''} triggered=${triggered}`);
