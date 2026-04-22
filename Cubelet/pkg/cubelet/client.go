@@ -37,9 +37,9 @@ func WithServices(opts ...ServicesOpt) ClientOpt {
 	}
 }
 
-func WithCubeboxClient(cubeboxSerivce cubebox.CubeboxMgrServer) ServicesOpt {
+func WithCubeboxClient(cubeboxService cubebox.CubeboxMgrServer) ServicesOpt {
 	return func(s *services) {
-		s.cubeboxService = cubeboxSerivce
+		s.cubeboxService = cubeboxService
 	}
 }
 
