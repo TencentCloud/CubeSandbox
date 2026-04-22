@@ -1,4 +1,24 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# run_vm.sh — Boot the CubeSandbox dev VM via QEMU/KVM.
+#
+# Launches the prepared qcow2 image with nested KVM enabled and sets up user
+# mode networking with port forwards:
+#   - host :10022 -> guest :22  (ssh, used by login.sh / sync_to_vm.sh / copy_logs.sh)
+#   - host :13000 -> guest :3000 (cube-api HTTP endpoint)
+#
+# Run prepare_image.sh first to produce the image. This script is the normal
+# way to start the VM for day-to-day development.
+#
+# Usage:
+#   ./run_vm.sh
+#
+# Common environment variables:
+#   WORK_DIR                   Working dir (default: dev-env/.workdir)
+#   IMAGE_URL                  Base qcow2 URL (used to derive IMAGE_NAME)
+#   IMAGE_PATH                 Full path to VM disk image (defaults to WORK_DIR/IMAGE_NAME)
 
 set -euo pipefail
 

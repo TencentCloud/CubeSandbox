@@ -1,4 +1,38 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# sync_to_vm.sh — Push locally-built artifacts into the CubeSandbox dev VM.
+#
+# This is the core inner-loop tool for development: rebuild on the host, sync
+# binaries into the guest, restart services, and run quickcheck — with
+# automatic rollback from .bak if the health check fails.
+#
+# Modes (selected via MODE env, default "binaries"):
+#   binaries  Copy Go binaries from _output/bin/ to their install paths in
+#             the guest; previous file is kept as <name>.bak (only 1 backup).
+#             Restarts cube-sandbox-oneclick.service and runs quickcheck.sh.
+#             On failure, .bak files are restored and the unit restarted again.
+#   release   Run `make manual-release` then deploy the tarball via
+#             deploy-manual.sh inside the guest.
+#   files     Free-form scp of a list of files to REMOTE_DIR (default /tmp).
+#
+# Usage:
+#   ./sync_to_vm.sh                                  # binaries mode, build + restart
+#   MODE=binaries COMPONENTS="cubelet cubemaster" ./sync_to_vm.sh
+#   MODE=binaries BUILD=0 RESTART=0 ./sync_to_vm.sh  # sync only, no build/restart
+#   MODE=release ./sync_to_vm.sh
+#   MODE=files FILES="foo.yaml bar.conf" REMOTE_DIR=/tmp ./sync_to_vm.sh
+#
+# Common environment variables:
+#   MODE                       binaries | release | files (default: binaries)
+#   BUILD                      Run `make all` before syncing (default: 1)
+#   RESTART                    Restart unit + quickcheck after sync (default: 1; 0 or "systemd")
+#   COMPONENTS                 Space-separated binary names to sync (default: all in _output/bin/)
+#   FILES                      Files to send in "files" mode
+#   REMOTE_DIR                 Remote dir for "files" mode (default: /tmp)
+#   VM_USER, VM_PASSWORD       Guest credentials (default: opencloudos / opencloudos)
+#   SSH_HOST, SSH_PORT         Host-side forward target (default: 127.0.0.1:10022)
 
 set -euo pipefail
 

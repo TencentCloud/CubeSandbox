@@ -1,4 +1,32 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# cube-autostart.sh — Manage the CubeSandbox one-click autostart systemd unit.
+#
+# The unit file (cube-sandbox-oneclick.service) is installed into the guest by
+# prepare_image.sh but left disabled. This script is the user-facing entry
+# point to enable / disable / inspect it, so that cube components restart
+# automatically after a VM reboot.
+#
+# Subcommands:
+#   enable     (default) Enable and start the unit; prompts for confirmation
+#   disable    Stop and disable the unit
+#   status     Print is-enabled / is-active and full systemctl status
+#   -h|--help  Show usage
+#
+# Usage:
+#   ./cube-autostart.sh                 # interactive enable
+#   ./cube-autostart.sh disable
+#   ./cube-autostart.sh status
+#   ASSUME_YES=1 ./cube-autostart.sh    # skip confirmation
+#
+# Common environment variables:
+#   VM_USER, VM_PASSWORD       Guest credentials (default: opencloudos / opencloudos)
+#   SSH_HOST, SSH_PORT         Host-side forward target (default: 127.0.0.1:10022)
+#   UNIT_NAME                  systemd unit name (default: cube-sandbox-oneclick.service)
+#   ASSUME_YES                 Skip interactive confirmation when set to 1
+#   STOP_NOW                   On disable, also stop the unit (default: 1)
 
 set -euo pipefail
 

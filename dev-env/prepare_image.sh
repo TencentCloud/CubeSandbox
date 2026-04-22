@@ -1,4 +1,33 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# prepare_image.sh — Build the ready-to-use CubeSandbox dev VM image.
+#
+# Pipeline (high-level):
+#   1. Download the OpenCloudOS base qcow2 (if not cached) and expand it to
+#      TARGET_SIZE (default 100G) so guest / has room for nested VMs.
+#   2. Boot the VM via run_vm.sh and wait for SSH on 127.0.0.1:10022.
+#   3. Upload and run a series of in-guest provisioners under dev-env/internal/
+#      (grow rootfs, setup PATH, SELinux tweaks, install autostart unit,
+#      install login banner).
+#   4. Power the VM off cleanly, leaving a "golden" image ready for run_vm.sh.
+#
+# The autostart systemd unit is installed but NOT enabled here; enable it
+# later via dev-env/cube-autostart.sh.
+#
+# Usage:
+#   ./prepare_image.sh
+#
+# Common environment variables:
+#   WORK_DIR                   Working dir for downloads / disk (default: dev-env/.workdir)
+#   IMAGE_URL                  Base qcow2 URL (OpenCloudOS 9 cloud image by default)
+#   TARGET_SIZE                Resized disk size (default: 100G)
+#   AUTO_BOOT                  Auto-boot VM during provisioning (default: 1)
+#   AUTO_RESIZE_IN_GUEST       Run growpart/resize2fs inside guest (default: 1)
+#   SETUP_AUTOSTART            Install cube-sandbox-oneclick.service unit (default: 1)
+#   VM_USER, VM_PASSWORD       Guest credentials (default: opencloudos / opencloudos)
+#   SSH_HOST, SSH_PORT         Host-side forward target (default: 127.0.0.1:10022)
 
 set -euo pipefail
 

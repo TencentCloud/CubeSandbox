@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# login.sh — Open an interactive SSH session to the CubeSandbox dev VM.
+#
+# Connects to 127.0.0.1:10022 (the host-side port forwarded by run_vm.sh) and
+# authenticates with the default guest password via SSH_ASKPASS, so that no
+# ssh-key setup is needed.
+#
+# Usage:
+#   ./login.sh
+#
+# Common environment variables:
+#   VM_USER, VM_PASSWORD       Guest credentials (default: opencloudos / opencloudos)
+#   SSH_HOST, SSH_PORT         Host-side forward target (default: 127.0.0.1:10022)
 
 set -euo pipefail
 

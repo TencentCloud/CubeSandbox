@@ -1,4 +1,23 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# copy_logs.sh — Collect runtime logs from the CubeSandbox dev VM.
+#
+# Creates a tarball of the guest's log directory (default /data/log) and
+# downloads it to the host via SSH port-forward (127.0.0.1:10022 by default).
+# Password authentication is automated via SSH_ASKPASS; no prior key-based
+# trust is required.
+#
+# Usage:
+#   ./copy_logs.sh
+#
+# Common environment variables:
+#   VM_USER, VM_PASSWORD       Guest credentials (default: opencloudos / opencloudos)
+#   SSH_HOST, SSH_PORT         Host-side forward target (default: 127.0.0.1:10022)
+#   REMOTE_LOG_DIR             Log directory inside guest (default: /data/log)
+#   OUTPUT_DIR                 Where to drop the archive on host (default: dev-env/)
+#   ARCHIVE_NAME               Archive file name (default: data-log-<timestamp>.tar.gz)
 
 set -euo pipefail
 
