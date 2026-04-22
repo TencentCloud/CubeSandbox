@@ -325,7 +325,7 @@ pub trait Vm: Send + Sync + Any {
     /// Get dirty pages bitmap
     fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;
     #[cfg(feature = "tdx")]
-    /// Initalize TDX on this VM
+    /// Initialize TDX on this VM
     fn tdx_init(&self, _cpuid: &[CpuIdEntry], _max_vcpus: u32) -> Result<()> {
         unimplemented!()
     }
@@ -335,7 +335,7 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
     #[cfg(feature = "tdx")]
-    /// Initalize a TDX memory region for this VM
+    /// Initialize a TDX memory region for this VM
     fn tdx_init_memory_region(
         &self,
         _host_address: u64,
