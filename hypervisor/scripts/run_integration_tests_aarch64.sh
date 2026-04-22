@@ -208,7 +208,7 @@ if [[ "$hypervisor" = "mshv" ]]; then
     exit 1
 fi
 
-# For now these values are deafult for kvm
+# For now these values are default for kvm
 features=""
 
 # lock the workloads folder to avoid parallel updating by different containers
