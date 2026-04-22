@@ -77,7 +77,7 @@ func (h *handler) Create(ctx context.Context, group string) error {
 		}
 	}
 	_, err := cgroup1.New(cgroup1.StaticPath(group), linuxResource,
-		cgroup1.WithHiearchy(hierarchy),
+		cgroup1.WithHierarchy(hierarchy),
 	)
 	return err
 }
@@ -100,7 +100,7 @@ func (h *handler) CreateWithCpuSet(ctx context.Context, group string, cpuset str
 		Memory: &specs.LinuxMemory{},
 	}
 	_, err := cgroup1.New(cgroup1.StaticPath(group), linuxResource,
-		cgroup1.WithHiearchy(hierarchy),
+		cgroup1.WithHierarchy(hierarchy),
 	)
 	return err
 }
@@ -138,13 +138,13 @@ func (h *handler) Update(ctx context.Context, group string, cpu, mem resource.Qu
 			Limit: &memMax,
 		},
 	}
-	m, err := cgroup1.Load(cgroup1.StaticPath(group), cgroup1.WithHiearchy(h.hierarchy))
+	m, err := cgroup1.Load(cgroup1.StaticPath(group), cgroup1.WithHierarchy(h.hierarchy))
 	if err != nil {
 		if err != cgroup1.ErrCgroupDeleted {
 			return err
 		} else {
 			cubelog.Infof("cgroup %s not exist while update,create new cgroup ")
-			_, err = cgroup1.New(cgroup1.StaticPath(group), res, cgroup1.WithHiearchy(h.hierarchy))
+			_, err = cgroup1.New(cgroup1.StaticPath(group), res, cgroup1.WithHierarchy(h.hierarchy))
 			if err != nil {
 				return err
 			}
@@ -158,7 +158,7 @@ func (h *handler) Update(ctx context.Context, group string, cpu, mem resource.Qu
 }
 
 func (h *handler) Delete(ctx context.Context, group string) error {
-	m, err := cgroup1.Load(cgroup1.StaticPath(group), cgroup1.WithHiearchy(h.hierarchy))
+	m, err := cgroup1.Load(cgroup1.StaticPath(group), cgroup1.WithHierarchy(h.hierarchy))
 	if err != nil {
 		if err == cgroup1.ErrCgroupDeleted {
 			return nil
@@ -209,7 +209,7 @@ func (h *handler) ListSubdir(subdir string) ([]string, error) {
 }
 
 func (h *handler) AddProc(group string, pid uint64) error {
-	m, err := cgroup1.Load(cgroup1.StaticPath(group), cgroup1.WithHiearchy(h.hierarchy))
+	m, err := cgroup1.Load(cgroup1.StaticPath(group), cgroup1.WithHierarchy(h.hierarchy))
 	if err != nil {
 		return err
 	}
@@ -237,7 +237,7 @@ func (h *handler) RemoveLimit(ctx context.Context, group string) error {
 }
 
 func (h *handler) cleanProc(ctx context.Context, group string) error {
-	m, err := cgroup1.Load(cgroup1.StaticPath(group), cgroup1.WithHiearchy(h.hierarchy))
+	m, err := cgroup1.Load(cgroup1.StaticPath(group), cgroup1.WithHierarchy(h.hierarchy))
 	if err != nil {
 		return err
 	}
