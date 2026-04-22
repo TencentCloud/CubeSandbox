@@ -207,6 +207,6 @@ replace (
 	github.com/tencentcloud/CubeSandbox/cubelog => ../cubelog
 	google.golang.org/genproto => google.golang.org/genproto v0.0.0-20240123012728-ef4313101c80
 	google.golang.org/grpc => google.golang.org/grpc v1.67.1
-	// use 0.25.16 instande of latest that 0.25.16 have v1alpha2 and v1 runtime API
+	// use 0.25.16 instance of latest that 0.25.16 have v1alpha2 and v1 runtime API
 	k8s.io/cri-api => k8s.io/cri-api v0.25.16
 )
