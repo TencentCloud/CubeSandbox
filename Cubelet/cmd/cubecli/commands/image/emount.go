@@ -108,12 +108,12 @@ var erofsMountImageCommand = &cli.Command{
 		var validChildren []ocispec.Descriptor
 		images.Walk(ctx, images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) (subdescs []ocispec.Descriptor, err error) {
 			var localDescs []ocispec.Descriptor
-			childs, err := images.Children(ctx, provider, desc)
+			children, err := images.Children(ctx, provider, desc)
 			if err != nil {
 				fmt.Printf("failed to get children for %s: %v", desc.Digest.String(), err)
 				return localDescs, nil
 			}
-			for _, child := range childs {
+			for _, child := range children {
 				if !images.IsConfigType(child.MediaType) && !images.IsManifestType(child.MediaType) {
 					continue
 				}
