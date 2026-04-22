@@ -368,7 +368,7 @@ impl Sandbox {
                 ));
             }
         } else {
-            // Unprivileged part, we can driectly write to /proc/[pid]/uid_map.
+            // Unprivileged part, we can directly write to /proc/[pid]/uid_map.
             std::fs::write(
                 format!("/proc/{pid}/uid_map"),
                 format!("{} {} 1", uid_map[0].inside_uid, uid_map[0].outside_uid),
@@ -396,7 +396,7 @@ impl Sandbox {
                 ));
             }
         } else {
-            // Unprivileged part, we can driectly write to /proc/[pid]/gid_map.
+            // Unprivileged part, we can directly write to /proc/[pid]/gid_map.
             std::fs::write(format!("/proc/{pid}/setgroups"), b"deny")
                 .map_err(|e| Error::WriteGidMap(e.to_string()))?;
             std::fs::write(
