@@ -372,7 +372,7 @@ enum AddressSpaceType {
 }
 
 #[derive(Copy, Clone)]
-pub enum AddressSpaceCachable {
+pub enum AddressSpaceCacheable {
     NotCacheable,
     Cacheable,
     WriteCombining,
@@ -387,7 +387,7 @@ pub struct AddressSpace<T> {
 }
 
 impl<T> AddressSpace<T> {
-    pub fn new_memory(cacheable: AddressSpaceCachable, read_write: bool, min: T, max: T) -> Self {
+    pub fn new_memory(cacheable: AddressSpaceCacheable, read_write: bool, min: T, max: T) -> Self {
         AddressSpace {
             r#type: AddressSpaceType::Memory,
             min,
@@ -1316,13 +1316,13 @@ mod tests {
                 "_CRS".into(),
                 &ResourceTemplate::new(vec![
                     &AddressSpace::new_memory(
-                        AddressSpaceCachable::Cacheable,
+                        AddressSpaceCacheable::Cacheable,
                         true,
                         0xa_0000u32,
                         0xb_ffffu32
                     ),
                     &AddressSpace::new_memory(
-                        AddressSpaceCachable::NotCacheable,
+                        AddressSpaceCacheable::NotCacheable,
                         true,
                         0xc000_0000u32,
                         0xfebf_ffffu32
@@ -1346,7 +1346,7 @@ mod tests {
             Name::new(
                 "_CRS".into(),
                 &ResourceTemplate::new(vec![&AddressSpace::new_memory(
-                    AddressSpaceCachable::Cacheable,
+                    AddressSpaceCacheable::Cacheable,
                     true,
                     0x8_0000_0000u64,
                     0xf_ffff_ffffu64
@@ -1876,7 +1876,7 @@ mod tests {
                     &Name::new(
                         "MR64".into(),
                         &ResourceTemplate::new(vec![&AddressSpace::new_memory(
-                            AddressSpaceCachable::Cacheable,
+                            AddressSpaceCacheable::Cacheable,
                             true,
                             0x0000_0000_0000_0000u64,
                             0xFFFF_FFFF_FFFF_FFFEu64
