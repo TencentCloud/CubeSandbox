@@ -50,12 +50,12 @@ func imageIDIndex(obj interface{}) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("obj is not *templatetypes.LocalRunTemplate")
 	}
-	var imageNamesapceIDs []string
+	var imageNamespaceIDs []string
 	for _, image := range o.Images {
 
-		imageNamesapceIDs = append(imageNamesapceIDs, o.Namespace+"/"+image.Image.ID)
+		imageNamespaceIDs = append(imageNamespaceIDs, o.Namespace+"/"+image.Image.ID)
 	}
-	return imageNamesapceIDs, nil
+	return imageNamespaceIDs, nil
 }
 
 func baseBlockIDIndex(obj interface{}) ([]string, error) {
