@@ -798,7 +798,7 @@ mod tests {
                 1,
             )
             .unwrap();
-            // processes interally only have pids when manually set
+            // processes internally only have pids when manually set
             test_process.pid = test_pid;
 
             linux_container.processes.insert(test_pid, test_process);
