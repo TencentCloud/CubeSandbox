@@ -192,10 +192,10 @@ pub fn init_rootfs(
         .ok_or_else(|| anyhow!("Could not convert rootfs path to string"))?;
 
     mount(None::<&str>, "/", None::<&str>, flags, None::<&str>)
-        .map_err(|e| anyhow!("mount / faild.{:}", e))?;
+        .map_err(|e| anyhow!("mount / failed.{:}", e))?;
 
     rootfs_parent_mount_private(rootfs)
-        .map_err(|e| anyhow!("rootfs_parent_mount_private {:} faild.{:}", rootfs, e))?;
+        .map_err(|e| anyhow!("rootfs_parent_mount_private {:} failed.{:}", rootfs, e))?;
 
     mount(
         Some(rootfs),
@@ -204,7 +204,7 @@ pub fn init_rootfs(
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
     )
-    .map_err(|e| anyhow!("mount rootfs {:} faild.{:}", rootfs, e))?;
+    .map_err(|e| anyhow!("mount rootfs {:} failed.{:}", rootfs, e))?;
 
     let mut bind_mount_dev = false;
     for m in &spec.mounts {
@@ -264,7 +264,7 @@ pub fn init_rootfs(
                     pgflags,
                     None::<&str>,
                 )
-                .map_err(|e| anyhow!("bind mount to {:} faild.{:}", dest.as_str(), e))?;
+                .map_err(|e| anyhow!("bind mount to {:} failed.{:}", dest.as_str(), e))?;
             }
         }
     }
@@ -675,7 +675,7 @@ pub fn ms_move_root(rootfs: &str) -> Result<bool> {
             .ok_or_else(|| anyhow!("failed to parse {} to absolute path", info.mount_point))?;
         let abs_mount_point_string = String::from(abs_mount_point);
 
-        // Umount every syfs and proc file systems, except those under the container rootfs
+        // Umount every sysfs and proc file systems, except those under the container rootfs
         if (info.fstype != "proc" && info.fstype != "sysfs")
             || abs_mount_point_string.starts_with(abs_root)
         {
@@ -1484,7 +1484,7 @@ mod tests {
             result: &'a str,
         }
 
-        // create tempory directory to simulate container rootfs with symlink
+        // create temporary directory to simulate container rootfs with symlink
         let rootfs_dir = tempdir().expect("failed to create tmpdir");
         let rootfs_path = rootfs_dir.path().to_str().unwrap();
 
