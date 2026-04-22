@@ -25,12 +25,12 @@ func handleInfoAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 	err := utils.DecodeHttpBody(r.Body, req)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			querys := r.URL.Query()
-			req.RequestID = querys.Get("requestID")
-			req.HostID = querys.Get("host_id")
-			req.SandboxID = querys.Get("sandbox_id")
-			req.InstanceType = querys.Get("instance_type")
-			if containerPort := querys.Get("container_port"); containerPort != "" {
+			queries := r.URL.Query()
+			req.RequestID = queries.Get("requestID")
+			req.HostID = queries.Get("host_id")
+			req.SandboxID = queries.Get("sandbox_id")
+			req.InstanceType = queries.Get("instance_type")
+			if containerPort := queries.Get("container_port"); containerPort != "" {
 				port, _ := strconv.ParseInt(containerPort, 10, 32)
 				req.ContainerPort = int32(port)
 			}
