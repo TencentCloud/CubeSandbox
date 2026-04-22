@@ -1,0 +1,25 @@
+name: AI Assistant
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned, labeled]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude-response:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+            ANTHROPIC_BASE_URL: https://api.lkeap.cloud.tencent.com/plan/anthropic
+            ANTHROPIC_MODEL: glm-5.1
+            ANTHROPIC_SMALL_FAST_MODEL: glm-5.1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          bot_name: "CubeBot"
+          # Optional: add custom trigger phrase (default: @claude)
+          trigger_phrase: "/cubebot"
