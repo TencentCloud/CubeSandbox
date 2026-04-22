@@ -222,7 +222,7 @@ struct MemoryZoneConfig {
 --memory-zone <memory-zone>	User defined memory zone parameters "size=<guest_memory_region_size>,file=<backing_file>,shared=on|off,hugepages=on|off,hugepage_size=<hugepage_size>,host_numa_node=<node_id>,id=<zone_identifier>,hotplug_size=<hotpluggable_memory_size>,hotplugged_size=<hotplugged_memory_size>,prefault=on|off"
 ```
 
-This parameter expects one or more occurences, allowing for a list of memory
+This parameter expects one or more occurrences, allowing for a list of memory
 zones to be defined. It must be used with `--memory size=0`, clearly indicating
 that the memory will be described through advanced parameters.
 
