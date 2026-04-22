@@ -487,7 +487,7 @@ pub enum DeviceManagerError {
 
     /// Cannot create a PvPanic device
     PvPanicCreate(devices::pvpanic::PvPanicError),
-    /// Channle recv error.
+    /// Channel recv error.
     VirtioFsServerRecv(std::sync::mpsc::RecvError),
 
     /// Virtio-Fs server update filter failed.
@@ -535,7 +535,7 @@ pub fn create_pty() -> io::Result<(File, File, PathBuf)> {
         )
     };
 
-    // SAFETY: FFI call into libc, trivally safe
+    // SAFETY: FFI call into libc, trivially safe
     let sub_fd = unsafe {
         libc::ioctl(
             main.as_raw_fd(),
@@ -4506,7 +4506,7 @@ impl DeviceManager {
         // 1. Users will use direct kernel boot with device tree.
         // 2. Users will use ACPI+UEFI boot.
 
-        // Trigger a GPIO pin 3 event to satisify use case 1.
+        // Trigger a GPIO pin 3 event to satisfy use case 1.
         self.gpio_device
             .as_ref()
             .unwrap()
@@ -4514,7 +4514,7 @@ impl DeviceManager {
             .unwrap()
             .trigger_key(3)
             .map_err(DeviceManagerError::AArch64PowerButtonNotification)?;
-        // Trigger a GED power button event to satisify use case 2.
+        // Trigger a GED power button event to satisfy use case 2.
         return self
             .ged_notification_device
             .as_ref()
@@ -4609,7 +4609,7 @@ impl Aml for DeviceManager {
                 &aml::Name::new(
                     "_CRS".into(),
                     &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCachable::NotCacheable,
+                        aml::AddressSpaceCacheable::NotCacheable,
                         true,
                         self.acpi_address.0,
                         self.acpi_address.0 + DEVICE_MANAGER_ACPI_SIZE as u64 - 1,
