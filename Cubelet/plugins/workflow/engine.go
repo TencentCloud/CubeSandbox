@@ -148,7 +148,7 @@ func (b *CreateContext) IsCreateSnapshot() bool {
 	return ok
 }
 
-func (b *CreateContext) IsRetoreSnapshot() bool {
+func (b *CreateContext) IsRestoreSnapshot() bool {
 	_, ok := b.GetSnapshotTemplateID()
 	if !ok {
 		return false
@@ -321,7 +321,7 @@ func (e *Engine) SetFlowLimit(name string, limit int64) {
 	}
 }
 
-func (e *Engine) AddCleaupFlow(f Flow) {
+func (e *Engine) AddCleanupFlow(f Flow) {
 	e.cleanupFlow = f
 }
 func (e *Engine) AddFlow(k string, f *Workflow) {
