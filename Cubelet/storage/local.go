@@ -330,7 +330,7 @@ func (l *local) listDirtyStorage() map[string]bool {
 		}
 
 		if id != bf.SandboxID {
-			logEntry.Warnf("storage data leak: id is not equeal to sandbox id:%s,%s", id, bf.SandboxID)
+			logEntry.Warnf("storage data leak: id is not equal to sandbox id:%s,%s", id, bf.SandboxID)
 			continue
 		}
 
