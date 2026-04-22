@@ -301,7 +301,7 @@ impl FsEpollHandler {
     fn return_descriptor(queue: &mut Queue, mem: &GuestMemoryMmap, head_index: u16, len: usize) {
         let used_len: u32 = match len.try_into() {
             Ok(l) => l,
-            Err(_) => panic!("Invalid used length, can't return used descritors to the ring"),
+            Err(_) => panic!("Invalid used length, can't return used descriptors to the ring"),
         };
 
         if queue.add_used(mem, head_index, used_len).is_err() {
@@ -386,7 +386,7 @@ impl FsEpollHandler {
             Self::return_descriptor(queue, desc_chain.memory(), head_index, len);
             used_descs = true;
 
-            // Proces BucketReduction::OverConsumption.
+            // Process BucketReduction::OverConsumption.
             if let BucketReduction::OverConsumption(_) = rate_limited {
                 break;
             }
