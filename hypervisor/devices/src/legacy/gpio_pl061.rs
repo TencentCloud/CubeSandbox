@@ -27,7 +27,7 @@ const GPIOIC: u64 = 0x41c; // Interrupt Clear Register
 const GPIOAFSEL: u64 = 0x420; // Mode Control Select Register
                               // From 0x424 to 0xFDC => reserved space.
                               // From 0xFE0 to 0xFFC => Peripheral and PrimeCell Identification Registers which are Read Only registers.
-                              // Thses registers can conceptually be treated as a 32-bit register, and PartNumber[11:0] is used to identify the peripheral.
+                              // These registers can conceptually be treated as a 32-bit register, and PartNumber[11:0] is used to identify the peripheral.
                               // We are putting the expected values (look at 'Reset value' column from above mentioned document) in an array.
 const GPIO_ID: [u8; 8] = [0x61, 0x10, 0x14, 0x00, 0x0d, 0xf0, 0x05, 0xb1];
 // ID Margins
