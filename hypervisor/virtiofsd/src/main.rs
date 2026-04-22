@@ -198,7 +198,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
     ) {
         let used_len: u32 = match len.try_into() {
             Ok(l) => l,
-            Err(_) => panic!("Invalid used length, can't return used descritors to the ring"),
+            Err(_) => panic!("Invalid used length, can't return used descriptors to the ring"),
         };
 
         if vring_state.add_used(head_index, used_len).is_err() {
@@ -897,7 +897,7 @@ struct Opt {
 
     /// Controls how to respond to errors during migration.
     ///
-    /// If any inode turns out not to be migrateable (either the source cannot serialize it, or the
+    /// If any inode turns out not to be migratable (either the source cannot serialize it, or the
     /// destination cannot opened the serialized representation), the destination can react in
     /// different ways:
     ///
