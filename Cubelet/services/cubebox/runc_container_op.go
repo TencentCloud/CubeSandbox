@@ -339,7 +339,7 @@ func (rr *ociRuntime) createContainerOpts(
 		opts = append(opts, oci.WithMounts(smounts))
 	}
 
-	if propagation, ok := containerReq.Annotations[constants.AnnotationContaineRootfsPropagation]; ok {
+	if propagation, ok := containerReq.Annotations[constants.AnnotationContainRootfsPropagation]; ok {
 		opts = append(opts, WithRootfsPropagation(propagation))
 	}
 	var s specs.Spec
