@@ -398,7 +398,7 @@ impl Snapshot {
                 fs::remove_dir_all(path)
                     .map_err(|e| format!("Failed to clean path:{}, err:{}", CUBE_SYS_PATH, e))?;
             } else {
-                return Err(format!("Paht:{} exist", &self.path));
+                return Err(format!("Path:{} exist", &self.path));
             }
         }
         fs::create_dir_all(path)
