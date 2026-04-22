@@ -145,10 +145,10 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     startup_delay = "5s"
 
   [plugins."io.containerd.snapshotter.v1.overlayfs"]
-    #独立空间 存放metada
+    #独立空间 存放metadata
     #mount -t tmpfs -o size=300m none /data/cubelet/state/
     root_path = "/data/cubelet/state"
-    #独立空间 存放镜像unpack数据和snashot数据
+    #独立空间 存放镜像unpack数据和snapshot数据
     data_path = "/data/cubelet/root"
 
   [plugins."io.containerd.metadata.v1.bolt"]
