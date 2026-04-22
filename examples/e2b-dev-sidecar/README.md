@@ -61,7 +61,7 @@ Hello world Cube!
 When `demo.py` starts, it first calls `setup_dev_sidecar()`. That function does two things:
 
 1. Starts a local sidecar. By default it listens on `127.0.0.1:12580`. If the port is already in use, it automatically picks the next available port.
-2. Monkey patches `ConnectionConfig.get_host()` so that when the SDK accesses sandbox ports, it sends requests to:
+2. Monkey patches the SDK helpers that need data-plane routing. In sidecar mode, envd, file URLs, MCP URLs, and sandbox port access are routed to:
 
 ```text
 http://127.0.0.1:<local-port>/sandboxes/router/<sandbox_id>/<port>
@@ -72,6 +72,14 @@ The sidecar then forwards those requests to `CUBE_REMOTE_PROXY_BASE` and rewrite
 ```text
 <port>-<sandbox_id>.<sandbox-domain>
 ```
+
+This applies to:
+
+- envd API traffic
+- file upload/download URLs
+- MCP URLs
+- regular sandbox HTTP traffic
+- WebSocket traffic proxied through the same router path
 
 ## Configuration
 
@@ -91,6 +99,13 @@ The sidecar then forwards those requests to `CUBE_REMOTE_PROXY_BASE` and rewrite
   Optional. Preferred port of the embedded sidecar. Defaults to `12580`.
 - `CUBE_DEV_PROXY_URL`
   Optional. If you already have an external sidecar, point to it directly. In that case, the embedded sidecar will not be started.
+
+## Sidecar URL Semantics
+
+- `sandbox.get_host(port)` returns a host-plus-router-path fragment in sidecar mode, not a plain DNS hostname.
+- `download_url()`, `upload_url()`, and `get_mcp_url()` return full routed URLs and preserve the sidecar scheme.
+- The embedded sidecar always listens on `http://...`.
+- If you use `CUBE_DEV_PROXY_URL`, the generated file and MCP URLs follow that URL's scheme.
 
 ## Development Boundary
 

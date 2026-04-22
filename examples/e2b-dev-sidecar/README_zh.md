@@ -59,7 +59,7 @@ Hello world Cube！
 `demo.py` 启动时会先调用 `setup_dev_sidecar()`，它会做两件事：
 
 1. 在本地启动一个 sidecar；默认监听 `127.0.0.1:12580`，端口被占用时自动换下一个可用端口。
-2. monkey patch `ConnectionConfig.get_host()`，让 SDK 访问沙箱端口时改为请求：
+2. monkey patch 那些确实需要经过数据面的 SDK helper。sidecar 模式下，envd、文件 URL、MCP URL 和沙箱端口访问都会改为请求：
 
 ```text
 http://127.0.0.1:<local-port>/sandboxes/router/<sandbox_id>/<port>
@@ -70,6 +70,14 @@ sidecar 再把这类请求转发到 `CUBE_REMOTE_PROXY_BASE`，并把 `Host` 改
 ```text
 <port>-<sandbox_id>.<sandbox-domain>
 ```
+
+这包括：
+
+- envd API 流量
+- 文件上传/下载 URL
+- MCP URL
+- 普通沙箱 HTTP 流量
+- 通过同一路由转发的 WebSocket 流量
 
 ## 配置说明
 
@@ -89,6 +97,13 @@ sidecar 再把这类请求转发到 `CUBE_REMOTE_PROXY_BASE`，并把 `Host` 改
   可选，内嵌 sidecar 的首选端口，默认 `12580`。
 - `CUBE_DEV_PROXY_URL`
   可选。如果你已经有外部 sidecar，可以直接指向它；此时不会再启动内嵌 sidecar。
+
+## Sidecar URL 语义
+
+- sidecar 模式下，`sandbox.get_host(port)` 返回的是 host 加 router path 片段，不是纯 DNS host。
+- `download_url()`、`upload_url()`、`get_mcp_url()` 返回的是完整 routed URL，并保留 sidecar 自己的 scheme。
+- 内嵌 sidecar 默认始终监听在 `http://...`。
+- 如果使用 `CUBE_DEV_PROXY_URL`，生成出来的文件 URL 和 MCP URL 会跟随这个 URL 的 scheme。
 
 ## 开发边界
 
