@@ -16,9 +16,9 @@ use tracing::instrument;
 // Size of I/O read buffer
 const BUF_SIZE: usize = 8192;
 
-// Interruptable I/O copy using readers and writers
-// (an interruptable version of "io::copy()").
-pub async fn interruptable_io_copier<R: Sized, W: Sized>(
+// Interruptible I/O copy using readers and writers
+// (an interruptible version of "io::copy()").
+pub async fn interruptible_io_copier<R: Sized, W: Sized>(
     mut reader: R,
     mut writer: W,
     mut shutdown: Receiver<bool>,
@@ -34,7 +34,7 @@ where
     loop {
         tokio::select! {
             _ = shutdown.changed() => {
-                eprintln!("INFO: interruptable_io_copier: got shutdown request");
+                eprintln!("INFO: interruptible_io_copier: got shutdown request");
                 break;
             },
 
@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_interruptable_io_copier_reader() {
+    async fn test_interruptible_io_copier_reader() {
         #[derive(Debug)]
         struct TestData {
             reader_value: String,
@@ -219,7 +219,7 @@ mod tests {
 
             // XXX: Pass a copy of the writer to the copier to allow the
             // result of the write operation to be checked below.
-            let handle = tokio::spawn(interruptable_io_copier(reader, writer.clone(), rx));
+            let handle = tokio::spawn(interruptible_io_copier(reader, writer.clone(), rx));
 
             // Allow time for the thread to be spawned.
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -257,14 +257,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_interruptable_io_copier_eof() {
+    async fn test_interruptible_io_copier_eof() {
         // Create an async reader that always returns EOF
         let reader = tokio::io::empty();
 
         let (tx, rx) = channel(true);
         let writer = BufWriter::new();
 
-        let handle = tokio::spawn(interruptable_io_copier(reader, writer.clone(), rx));
+        let handle = tokio::spawn(interruptible_io_copier(reader, writer.clone(), rx));
 
         // Allow time for the thread to be spawned.
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_interruptable_io_copier_shutdown() {
+    async fn test_interruptible_io_copier_shutdown() {
         // Create an async reader that creates an infinite stream of bytes
         // (which allows us to interrupt it, since we know it is always busy ;)
         const REPEAT_CHAR: u8 = b'r';
@@ -302,7 +302,7 @@ mod tests {
         let (tx, rx) = channel(true);
         let writer = BufWriter::new();
 
-        let handle = tokio::spawn(interruptable_io_copier(reader, writer.clone(), rx));
+        let handle = tokio::spawn(interruptible_io_copier(reader, writer.clone(), rx));
 
         // Allow time for the thread to be spawned.
         tokio::time::sleep(Duration::from_secs(1)).await;
