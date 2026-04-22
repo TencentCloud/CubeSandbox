@@ -257,9 +257,9 @@ func TestWeightedResizeUnblockImpossible(t *testing.T) {
 
 	select {
 	case <-doneAcquire5:
-		t.Errorf("An Impossible acquire was aqcuired")
+		t.Errorf("An Impossible acquire was acquired")
 	case <-doneAcquire4:
-		t.Errorf("An Impossible acquire was aqcuired")
+		t.Errorf("An Impossible acquire was acquired")
 	default:
 
 	}
@@ -268,7 +268,7 @@ func TestWeightedResizeUnblockImpossible(t *testing.T) {
 
 	select {
 	case <-doneAcquire5:
-		t.Errorf("An Impossible acquire was aqcuired")
+		t.Errorf("An Impossible acquire was acquired")
 	case <-doneAcquire4:
 
 	}
@@ -294,7 +294,7 @@ func TestWeightedResizeUnblockImpossible(t *testing.T) {
 
 	select {
 	case <-doneAcquire5:
-		t.Errorf("An Impossible acquire was aqcuired")
+		t.Errorf("An Impossible acquire was acquired")
 	case <-doneAcquire4:
 
 	}
