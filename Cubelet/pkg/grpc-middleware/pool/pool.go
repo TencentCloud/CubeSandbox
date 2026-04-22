@@ -87,7 +87,7 @@ func New(address string, option Options) (Pool, error) {
 	}
 
 	if option.MaxConcurrentStreams <= 0 {
-		return nil, errors.New("invalid maximun settings")
+		return nil, errors.New("invalid maximum settings")
 	}
 
 	p := &pool{
