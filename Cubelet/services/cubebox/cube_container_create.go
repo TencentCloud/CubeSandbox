@@ -352,7 +352,7 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 		err                  error
 	)
 
-	if !flowOpts.IsRetoreSnapshot() {
+	if !flowOpts.IsRestoreSnapshot() {
 		additionalSandboxOpt, err = WithCubeFsAnnotation(ctx, realReq, sandBox)
 		if err != nil {
 			return nil, fmt.Errorf("failed to set cube fs annotation opt: %w", err)
@@ -502,7 +502,7 @@ func (l *local) prepareContainerFiles(ctx context.Context, sandBox *cubeboxstore
 		var ovlShare []virtiofs.ShareDirMapping
 
 		if flowOpts.NetFile != nil {
-			netfileMapping := flowOpts.NetFile.ContainerVirtiofsDirMaping(containerReq.Name)
+			netfileMapping := flowOpts.NetFile.ContainerVirtiofsDirMapping(containerReq.Name)
 			if netfileMapping != nil {
 				ovlShare = append(ovlShare, *netfileMapping)
 			}
@@ -1152,12 +1152,12 @@ func (l *local) runContainer(
 
 	ci.Container = c
 
-	var ioCreater cio.Creator
+	var ioCreator cio.Creator
 	if ci.IsDebugStdout {
-		ioCreater = taskio.New(false)
+		ioCreator = taskio.New(false)
 		debugStdout(ctx, ci.ID)
 	} else {
-		ioCreater = taskio.New(true)
+		ioCreator = taskio.New(true)
 	}
 
 	var taskOpts []containerd.NewTaskOpts
@@ -1171,7 +1171,7 @@ func (l *local) runContainer(
 	}
 
 	taskStart := time.Now()
-	task, err := c.NewTask(ctx, ioCreater, taskOpts...)
+	task, err := c.NewTask(ctx, ioCreator, taskOpts...)
 	if err != nil {
 		return transformError(err)
 	}
@@ -1323,7 +1323,7 @@ func (l *local) prepareVolume(ctx context.Context,
 
 	specOpts = append(specOpts, oci.WithMounts(mounts))
 
-	if propagation, ok := c.Annotations[constants.AnnotationContaineRootfsPropagation]; ok {
+	if propagation, ok := c.Annotations[constants.AnnotationContainRootfsPropagation]; ok {
 		specOpts = append(specOpts, WithRootfsPropagation(propagation))
 	}
 
@@ -1446,7 +1446,7 @@ func withRuntimePathOpt(cubebox *cubeboxstore.CubeBox) containerd.NewTaskOpts {
 	}
 
 	if cubebox.LocalRunTemplate != nil {
-		if shim, ok := cubebox.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeShim]; ok {
+		if shim, ok := cubebox.LocalRunTemplate.Components[templatetypes.CubeComponentCubeShim]; ok {
 			if shim.Component.Path != "" {
 				runtimePath = shim.Component.Path
 			}
