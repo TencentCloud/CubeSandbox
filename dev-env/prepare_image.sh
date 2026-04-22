@@ -1,4 +1,33 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# prepare_image.sh — Build the ready-to-use CubeSandbox dev VM image.
+#
+# Pipeline (high-level):
+#   1. Download the OpenCloudOS base qcow2 (if not cached) and expand it to
+#      TARGET_SIZE (default 100G) so guest / has room for nested VMs.
+#   2. Boot the VM via run_vm.sh and wait for SSH on 127.0.0.1:10022.
+#   3. Upload and run a series of in-guest provisioners under dev-env/internal/
+#      (grow rootfs, setup PATH, SELinux tweaks, install autostart unit,
+#      install login banner).
+#   4. Power the VM off cleanly, leaving a "golden" image ready for run_vm.sh.
+#
+# The autostart systemd unit is installed but NOT enabled here; enable it
+# later via dev-env/cube-autostart.sh.
+#
+# Usage:
+#   ./prepare_image.sh
+#
+# Common environment variables:
+#   WORK_DIR                   Working dir for downloads / disk (default: dev-env/.workdir)
+#   IMAGE_URL                  Base qcow2 URL (OpenCloudOS 9 cloud image by default)
+#   TARGET_SIZE                Resized disk size (default: 100G)
+#   AUTO_BOOT                  Auto-boot VM during provisioning (default: 1)
+#   AUTO_RESIZE_IN_GUEST       Run growpart/resize2fs inside guest (default: 1)
+#   SETUP_AUTOSTART            Install cube-sandbox-oneclick.service unit (default: 1)
+#   VM_USER, VM_PASSWORD       Guest credentials (default: opencloudos / opencloudos)
+#   SSH_HOST, SSH_PORT         Host-side forward target (default: 127.0.0.1:10022)
 
 set -euo pipefail
 
@@ -14,6 +43,7 @@ SSH_PORT="${SSH_PORT:-10022}"
 SSH_WAIT_TIMEOUT_SECS="${SSH_WAIT_TIMEOUT_SECS:-180}"
 SHUTDOWN_WAIT_TIMEOUT_SECS="${SHUTDOWN_WAIT_TIMEOUT_SECS:-120}"
 FORCE_KILL_ON_EXIT="${FORCE_KILL_ON_EXIT:-0}"
+SETUP_AUTOSTART="${SETUP_AUTOSTART:-1}"
 
 IMAGE_NAME="$(basename "${IMAGE_URL}")"
 IMAGE_PATH="${IMAGE_PATH:-${WORK_DIR}/${IMAGE_NAME}}"
@@ -23,6 +53,7 @@ GROW_SCRIPT="${INTERNAL_DIR}/grow_rootfs.sh"
 SELINUX_SCRIPT="${INTERNAL_DIR}/setup_selinux.sh"
 PATH_SCRIPT="${INTERNAL_DIR}/setup_path.sh"
 BANNER_SCRIPT="${INTERNAL_DIR}/setup_banner.sh"
+AUTOSTART_SCRIPT="${INTERNAL_DIR}/setup_autostart.sh"
 QEMU_PIDFILE="${WORK_DIR}/qemu.pid"
 QEMU_SERIAL_LOG="${WORK_DIR}/qemu-serial.log"
 ASKPASS_SCRIPT="${WORK_DIR}/.ssh-askpass.sh"
@@ -254,6 +285,10 @@ if [[ ! -f "${BANNER_SCRIPT}" ]]; then
   log_error "Guest banner script is missing: ${BANNER_SCRIPT}"
   exit 1
 fi
+if [[ "${SETUP_AUTOSTART}" == "1" && ! -f "${AUTOSTART_SCRIPT}" ]]; then
+  log_error "Guest autostart script is missing: ${AUTOSTART_SCRIPT}"
+  exit 1
+fi
 
 trap cleanup_vm EXIT
 create_askpass_script
@@ -319,6 +354,21 @@ ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
   'chmod +x ~/setup_banner.sh && ~/setup_banner.sh'
 log_success "Welcome banner installed inside the guest"
 
+if [[ "${SETUP_AUTOSTART}" == "1" ]]; then
+  log_info "Uploading setup_autostart.sh to the guest..."
+  ssh_with_password scp "${SSH_COMMON_OPTS[@]}" -P "${SSH_PORT}" \
+    "${AUTOSTART_SCRIPT}" "${VM_USER}@127.0.0.1:~/setup_autostart.sh"
+  log_success "setup_autostart.sh uploaded"
+
+  log_info "Installing cube-sandbox-oneclick.service unit (not enabled)..."
+  ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
+    "${VM_USER}@127.0.0.1" \
+    'chmod +x ~/setup_autostart.sh && ~/setup_autostart.sh'
+  log_success "Autostart unit installed inside the guest (enable it later via dev-env/cube-autostart.sh)"
+else
+  log_info "SETUP_AUTOSTART=0, skipping autostart unit installation"
+fi
+
 log_info "Requesting graceful shutdown from the guest..."
 ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
   "${VM_USER}@127.0.0.1" \
@@ -337,5 +387,10 @@ log_success "  3. VM booted and guest root filesystem expanded"
 log_success "  4. Guest SELinux set to permissive"
 log_success "  5. /usr/local/{sbin,bin} added to login PATH and sudo secure_path"
 log_success "  6. Welcome banner installed inside the guest"
-log_success "  7. VM powered off cleanly"
+if [[ "${SETUP_AUTOSTART}" == "1" ]]; then
+  log_success "  7. cube-sandbox-oneclick.service unit installed (not enabled)"
+  log_success "  8. VM powered off cleanly"
+else
+  log_success "  7. VM powered off cleanly"
+fi
 log_info "You can now run ./run_vm.sh to start the dev VM"
