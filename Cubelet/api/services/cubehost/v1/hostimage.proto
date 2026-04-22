@@ -141,7 +141,7 @@ message LayerMount {
     string usage = 6;
 
     // dev_serial_id  is the serial id of the device.
-    // this fileds is only used when the mount is a device.like erofs.
+    // this fields is only used when the mount is a device.like erofs.
     // When a layer belongs to a certain device, it is not allowed 
     // to use the `host_path` field again
     string dev_serial_id = 7;
@@ -158,9 +158,9 @@ message ImageDev {
     string host_device_path = 2;
 
     // vm_device_path is the path of the device in the VM.
-    // this fileds is only used in the VM.
+    // this fields is only used in the VM.
     string vm_device_path = 3;
-    // this fileds is only used in the VM.
+    // this fields is only used in the VM.
     string vm_root_path = 4;
     // fs_type is the filesystem type of the volume.
     string fs_type = 5;
