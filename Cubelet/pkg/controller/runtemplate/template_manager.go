@@ -193,7 +193,7 @@ func recoveredLocalTemplateFromSnapshotPath(snapshotPath string) *templatetypes.
 			},
 		},
 		Volumes:  map[string]templatetypes.LocalBaseVolume{},
-		Componts: map[string]templatetypes.LocalComponent{},
+		Components: map[string]templatetypes.LocalComponent{},
 	}
 }
 
