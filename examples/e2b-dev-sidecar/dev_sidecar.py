@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import warnings
 from typing import Iterable
 from urllib.parse import urlencode, urlsplit
 
@@ -353,7 +354,7 @@ def _run_embedded_sidecar(host: str, preferred_port: int) -> None:
     try:
         loop.run_until_complete(_bootstrap())
         loop.run_forever()
-    except BaseException as exc:  # pragma: no cover
+    except Exception as exc:  # pragma: no cover
         _SIDECAR_ERROR = exc
         _SIDECAR_READY.set()
         raise
@@ -453,6 +454,22 @@ def setup_dev_sidecar() -> None:
     base_url = _current_sidecar_url()
 
     if not _PATCHED:
+        required_attrs = [
+            (ConnectionConfig, "get_sandbox_url"),
+            (SandboxBase, "get_host"),
+            (SandboxBase, "_file_url"),
+            (SandboxBase, "get_mcp_url"),
+        ]
+        for owner, attr in required_attrs:
+            if not hasattr(owner, attr):
+                warnings.warn(
+                    f"{owner.__name__}.{attr} not found; the installed E2B SDK is incompatible "
+                    "with this dev sidecar example.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return
+
         _ORIGINAL_CONNECTION_CONFIG_GET_SANDBOX_URL = ConnectionConfig.get_sandbox_url
         _ORIGINAL_SANDBOX_BASE_GET_HOST = SandboxBase.get_host
         _ORIGINAL_SANDBOX_BASE_FILE_URL = SandboxBase._file_url

@@ -12,7 +12,9 @@ def main() -> None:
 
     from e2b_code_interpreter import Sandbox
 
-    template = os.environ["CUBE_TEMPLATE_ID"]
+    template = os.environ.get("CUBE_TEMPLATE_ID")
+    if not template:
+        raise RuntimeError("CUBE_TEMPLATE_ID is required; set it in .env or your environment")
 
     with Sandbox.create(template=template) as sandbox:
         execution = sandbox.run_code(

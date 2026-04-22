@@ -42,6 +42,8 @@ CUBE_REMOTE_PROXY_BASE="https://127.0.0.1:11443"
 CUBE_TEMPLATE_ID="<your-template-id>"
 ```
 
+如果目标集群开启了鉴权，运行前要把 `.env` 里的 `E2B_API_KEY="dummy"` 换成真实 API key。
+
 然后运行：
 
 ```bash
