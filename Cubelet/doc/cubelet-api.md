@@ -1595,8 +1595,8 @@ Basic information about a container image.
 | ----- | ---- | ----- | ----------- |
 | serial_id | [string](#string) |  |  |
 | host_device_path | [string](#string) |  |  |
-| vm_device_path | [string](#string) |  | vm_device_path is the path of the device in the VM. this fileds is only used in the VM. |
-| vm_root_path | [string](#string) |  | this fileds is only used in the VM. |
+| vm_device_path | [string](#string) |  | vm_device_path is the path of the device in the VM. this fields is only used in the VM. |
+| vm_root_path | [string](#string) |  | this fields is only used in the VM. |
 | fs_type | [string](#string) |  | fs_type is the filesystem type of the volume. |
 | mount_options | [string](#string) | repeated |  |
 | snapshots | [string](#string) | repeated | snapshots is a list of snapshots of the image. |
@@ -1655,7 +1655,7 @@ Mount specifies a host volume to mount into a container.
 | digest | [string](#string) |  |  |
 | parent | [string](#string) |  |  |
 | usage | [string](#string) |  |  |
-| dev_serial_id | [string](#string) |  | dev_serial_id is the serial id of the device. this fileds is only used when the mount is a device.like erofs. When a layer belongs to a certain device, it is not allowed to use the `host_path` field again |
+| dev_serial_id | [string](#string) |  | dev_serial_id is the serial id of the device. this fields is only used when the mount is a device.like erofs. When a layer belongs to a certain device, it is not allowed to use the `host_path` field again |
 | layer_type | [LayerType](#cubelet-services-cubebox-hostimage-v1-LayerType) |  |  |
 
 
@@ -2717,4 +2717,3 @@ Int64Value is the wrapper of int64.
 | <a name="bool" /> bool |  | bool | boolean | boolean | bool | bool | boolean | TrueClass/FalseClass |
 | <a name="string" /> string | A string must always contain UTF-8 encoded or 7-bit ASCII text. | string | String | str/unicode | string | string | string | String (UTF-8) |
 | <a name="bytes" /> bytes | May contain any arbitrary sequence of bytes. | string | ByteString | str | []byte | ByteString | string | String (ASCII-8BIT) |
-
