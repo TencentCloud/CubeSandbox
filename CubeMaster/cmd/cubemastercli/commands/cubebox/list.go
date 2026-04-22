@@ -338,12 +338,12 @@ func getStatus(s int32) string {
 	case 2:
 		return "exited"
 	case 3:
-		return "unknow"
+		return "unknown"
 	case 4:
 		return "pausing"
 	case 5:
 		return "paused"
 	default:
-		return "unknow"
+		return "unknown"
 	}
 }
