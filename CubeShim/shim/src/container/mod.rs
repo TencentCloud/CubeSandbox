@@ -467,7 +467,7 @@ impl Container {
                 if sig == (libc::SIGKILL as u32) || sig == (libc::SIGTERM as u32) {
                     //stop the container to unblock the hanging 'wait' call
                     if self.sb_conf.app_snapshot_create {
-                        state.set_container_stoped().await;
+                        state.set_container_stopped().await;
                     }
                     return Ok(());
                 }
