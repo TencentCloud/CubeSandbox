@@ -356,7 +356,7 @@ func TestWithRuntimePathOpt(t *testing.T) {
 					Path: "",
 				},
 				LocalRunTemplate: &templatetypes.LocalRunTemplate{
-					Componts: map[string]templatetypes.LocalComponent{
+					Components: map[string]templatetypes.LocalComponent{
 						templatetypes.CubeComponentCubeShim: {
 							Component: templatetypes.MachineComponent{
 								Path: "/template/shim/path",
@@ -378,7 +378,7 @@ func TestWithRuntimePathOpt(t *testing.T) {
 					Path: "/custom/runtime/path",
 				},
 				LocalRunTemplate: &templatetypes.LocalRunTemplate{
-					Componts: map[string]templatetypes.LocalComponent{
+					Components: map[string]templatetypes.LocalComponent{
 						templatetypes.CubeComponentCubeShim: {
 							Component: templatetypes.MachineComponent{
 								Path: "/template/shim/path",
