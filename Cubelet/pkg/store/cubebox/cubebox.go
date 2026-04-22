@@ -174,7 +174,7 @@ func (cb *CubeBox) GetStatus() *StatusStorage {
 	return cb.Status
 }
 
-func (cb *CubeBox) Transmition() {
+func (cb *CubeBox) Transmission() {
 	if cb.Containers == nil {
 		return
 	}
