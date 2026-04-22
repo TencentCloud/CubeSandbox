@@ -37,10 +37,10 @@ func HttpHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case actionURI(NodeAction):
 		req := &types.GetNodeReq{}
-		querys := r.URL.Query()
-		req.RequestID = querys.Get("requestID")
-		req.HostID = querys.Get("host_id")
-		ss := querys.Get("score_only")
+		queries := r.URL.Query()
+		req.RequestID = queries.Get("requestID")
+		req.HostID = queries.Get("host_id")
+		ss := queries.Get("score_only")
 		if ss != "" && ss == "true" {
 			req.ScoreOnly = true
 		}
