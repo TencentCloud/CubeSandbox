@@ -1,7 +1,7 @@
 name: Claude Auto Review with Tracking
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    types: [opened]
 
 jobs:
   review:
