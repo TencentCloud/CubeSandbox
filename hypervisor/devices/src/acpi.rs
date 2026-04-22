@@ -113,7 +113,7 @@ impl Aml for AcpiGedDevice {
                 &aml::Name::new(
                     "_CRS".into(),
                     &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCachable::NotCacheable,
+                        aml::AddressSpaceCacheable::NotCacheable,
                         true,
                         self.address.0,
                         self.address.0 + GED_DEVICE_ACPI_SIZE as u64 - 1,
