@@ -135,7 +135,7 @@ This section illustrates the Windows specific aspects of the VM network configur
 
 ### Basic Networking
 
-As the simplest option, using `--net tap=` in the Cloud Hypervisor command line will create a `vmtapX` device on the host with the default IPv4 adress `192.168.249.1`. After SAC becomes available, the guest configuration can be set with
+As the simplest option, using `--net tap=` in the Cloud Hypervisor command line will create a `vmtapX` device on the host with the default IPv4 address `192.168.249.1`. After SAC becomes available, the guest configuration can be set with
 
 <pre>
 SAC>i 10 192.168.249.2 255.255.255.0 192.168.249.1
@@ -203,13 +203,13 @@ The Windows guest debugging process relies heavily on QEMU and [socat](http://ww
 
 The connection between both guests happens over TCP, whereby on the guest side it is automatically translated to a COM port. Because the VMs are connected through TCP, the debugging infrastructure can be distributed over the network. The serial port, while slowly transferring data, is common enough to support a wide range of cases and tools.
 
-In this excercise, [WinDbg](https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/) is used. Any other debugger of choice with the ability to use serial connection can be used instead. 
+In this exercise, [WinDbg](https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/) is used. Any other debugger of choice with the ability to use serial connection can be used instead. 
 
 ### Debugger and Debuggee
 
 #### WinDbg VM
 
-For simplicity, the debugger VM is supposed to be only running under QEMU. It will require VGA and doesn't neccessarily depend on UEFI. As an OS, it can carry any supported Windows OS where the debugger of choice can be installed. The simplest way is to follow the image preparation instructions from the previous chapter, but avoid using the OVMF firmware. It is also not required to use VirtIO drivers, whereby it might be useful in some case. Though, while creating the image file for the debugger VM, be sure to choose a sufficient disk size that counts in the need to save the corresponding debug symbols and sources.
+For simplicity, the debugger VM is supposed to be only running under QEMU. It will require VGA and doesn't necessarily depend on UEFI. As an OS, it can carry any supported Windows OS where the debugger of choice can be installed. The simplest way is to follow the image preparation instructions from the previous chapter, but avoid using the OVMF firmware. It is also not required to use VirtIO drivers, whereby it might be useful in some case. Though, while creating the image file for the debugger VM, be sure to choose a sufficient disk size that counts in the need to save the corresponding debug symbols and sources.
 
 To create the debugger Windows VM, the following command can be used:
 
@@ -244,7 +244,7 @@ This will configure the debugging to be enabled and instruct to use the serial p
 bcdedit /dbgsettings serial debugport:1 baudrate:115200
 ```
 
-##### Turn On Kernel Debuging
+##### Turn On Kernel Debugging
 
 ```cmd
 bcdedit /debug on
