@@ -38,7 +38,7 @@ pub mod kvm;
 #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
 pub mod mshv;
 
-/// Hypevisor related module
+/// Hypervisor related module
 mod hypervisor;
 
 /// Vm related module
@@ -139,7 +139,7 @@ pub enum MpState {
     #[cfg(feature = "kvm")]
     Kvm(kvm_bindings::kvm_mp_state),
     #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
-    Mshv, /* MSHV does not supprt MpState yet */
+    Mshv, /* MSHV does not support MpState yet */
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -163,7 +163,7 @@ pub enum ClockData {
     #[cfg(feature = "kvm")]
     Kvm(kvm_bindings::kvm_clock_data),
     #[cfg(feature = "mshv")]
-    Mshv, /* MSHV does not supprt ClockData yet */
+    Mshv, /* MSHV does not support ClockData yet */
 }
 
 #[cfg(target_arch = "x86_64")]
