@@ -679,7 +679,7 @@ impl CpuManager {
             const XFEATURE_XTILEDATA: usize = 18;
             const XFEATURE_XTILEDATA_MASK: usize = 1 << XFEATURE_XTILEDATA;
 
-            // This is safe as the syscall is only modifing kernel internal
+            // This is safe as the syscall is only modifying kernel internal
             // data structures that the kernel is itself expected to safeguard.
             let amx_tile = unsafe {
                 libc::syscall(
@@ -1648,7 +1648,7 @@ impl CpuManager {
         #[allow(clippy::identity_op)]
         let mut descaddr: u64 = extract_bits_64!(ttbr1_el1, 0, 48);
         // In the case of FEAT_LPA and FEAT_LPA2, the initial translation table
-        // addresss bits [48:51] comes from TTBR1_EL1 bits [2:5].
+        // address bits [48:51] comes from TTBR1_EL1 bits [2:5].
         if pa_size == 52 {
             descaddr |= extract_bits_64!(ttbr1_el1, 2, 4) << 48;
         }
@@ -1971,7 +1971,7 @@ impl Aml for CpuManager {
                     &aml::Name::new(
                         "_CRS".into(),
                         &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                            aml::AddressSpaceCachable::NotCacheable,
+                            aml::AddressSpaceCacheable::NotCacheable,
                             true,
                             acpi_address.0,
                             acpi_address.0 + CPU_MANAGER_ACPI_SIZE as u64 - 1,
