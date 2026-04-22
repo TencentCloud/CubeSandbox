@@ -17,6 +17,7 @@ var Command = cli.Command{
 		MultiRun,
 		ListCommand,
 		InfoCommand,
+		DestroyCommand,
 		NodeCommand,
 		TemplateCommand,
 	},
