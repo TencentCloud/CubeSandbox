@@ -23,7 +23,7 @@ fn get_rule_conditions(args: &[LinuxSeccompArg]) -> Result<Vec<ScmpArgCompare>> 
 
     for arg in args {
         if arg.op.is_empty() {
-            return Err(anyhow!("seccomp opreator is required"));
+            return Err(anyhow!("seccomp operator is required"));
         }
 
         let cond = ScmpArgCompare::new(
