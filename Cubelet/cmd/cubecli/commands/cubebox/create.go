@@ -21,7 +21,7 @@ import (
 var Create = &cli.Command{
 	Name:      "create",
 	Aliases:   []string{"test"},
-	Usage:     "create cubebox from request file encorded in json",
+	Usage:     "create cubebox from request file encoded in json",
 	UsageText: "cubecli cubebox create [req.json]",
 	Flags: []cli.Flag{
 		&cli.DurationFlag{
