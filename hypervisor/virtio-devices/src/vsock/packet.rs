@@ -45,7 +45,7 @@ use vm_virtio::{AccessPlatform, Translatable};
 // };
 // ```
 //
-// This structed will occupy the buffer pointed to by the head descriptor. We'll be accessing it
+// This structured will occupy the buffer pointed to by the head descriptor. We'll be accessing it
 // as a byte slice. To that end, we define below the offsets for each field struct, as well as the
 // packed struct size, as a bunch of `usize` consts.
 // Note that these offsets are only used privately by the `VsockPacket` struct, the public interface
