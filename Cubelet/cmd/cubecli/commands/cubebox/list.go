@@ -24,7 +24,7 @@ import (
 var ListCommand = &cli.Command{
 	Name:    "list",
 	Aliases: []string{"ls"},
-	Usage:   "Waring: `cuebcli ls` is deprecated, please use `cubecli cubebox ls` instead",
+	Usage:   "Warning: `cuebcli ls` is deprecated, please use `cubecli cubebox ls` instead",
 	ArgsUsage: "[flags] [<filter>, ...]\n" +
 		"io.kubernetes.cri.container-type [container|sandbox]\n" +
 		"io.kubernetes.cri.sandbox-id xx",
