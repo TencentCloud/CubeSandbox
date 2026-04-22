@@ -21,7 +21,7 @@ func initContext() context.Context {
 
 	ctx = context.WithValue(ctx, cubelog.KeyAction, "Test")
 
-	ctx = context.WithValue(ctx, cubelog.KeyCaller, "TestCaler")
+	ctx = context.WithValue(ctx, cubelog.KeyCaller, "TestCaller")
 
 	ctx = context.WithValue(ctx, cubelog.KeyCallee, "Pydes")
 
