@@ -60,7 +60,7 @@ pub struct StatDefer {
     start: Instant,
     ret: StatRet,
     log: Log,
-    loged: bool,
+    logged: bool,
 }
 /*
        container_id: String,
@@ -81,7 +81,7 @@ impl StatDefer {
             start: Instant::now(),
             ret: StatRet::Err,
             log,
-            loged: false,
+            logged: false,
         }
     }
 
@@ -103,13 +103,13 @@ impl StatDefer {
             self.ret.clone(),
             duration,
         );
-        self.loged = true
+        self.logged = true
     }
 }
 
 impl Drop for StatDefer {
     fn drop(&mut self) {
-        if !self.loged {
+        if !self.logged {
             self.stat();
         }
     }
