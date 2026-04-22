@@ -42,7 +42,7 @@ func TestResolveSnapshotRuntimeArtifactsFallsBackToSnapshotConfig(t *testing.T) 
 	}
 
 	localTemplate := &templatetypes.LocalRunTemplate{
-		Componts: map[string]templatetypes.LocalComponent{
+		Components: map[string]templatetypes.LocalComponent{
 			templatetypes.CubeComponentCubeShim: {
 				Component: templatetypes.MachineComponent{
 					Path: "/opt/cube/shim/containerd-shim-cube-rs",
@@ -69,7 +69,7 @@ func TestResolveSnapshotRuntimeArtifactsPrefersTemplateComponents(t *testing.T) 
 
 	p := &cubeboxInstancePlugin{}
 	localTemplate := &templatetypes.LocalRunTemplate{
-		Componts: map[string]templatetypes.LocalComponent{
+		Components: map[string]templatetypes.LocalComponent{
 			templatetypes.CubeComponentCubeKernel: {
 				Component: templatetypes.MachineComponent{
 					Path: "/template/kernel.vm",
