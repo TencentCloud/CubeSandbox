@@ -527,7 +527,7 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     if to_new.contains(CloneFlags::CLONE_NEWNS) {
         // setup rootfs
         mount::init_rootfs(cfd_log, &spec, &cm.paths, &cm.mounts, bind_device)
-            .map_err(|e| anyhow!("init_rootfs faild.{:}", e))?;
+            .map_err(|e| anyhow!("init_rootfs failed.{:}", e))?;
     }
 
     if init {
@@ -546,10 +546,10 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     if to_new.contains(CloneFlags::CLONE_NEWNS) {
         // unistd::chroot(rootfs)?;
         if no_pivot {
-            mount::ms_move_root(rootfs).map_err(|e| anyhow!("ms_move_root faild.{:}", e))?;
+            mount::ms_move_root(rootfs).map_err(|e| anyhow!("ms_move_root failed.{:}", e))?;
         } else {
             // pivot root
-            mount::pivot_rootfs(rootfs).map_err(|e| anyhow!("pivot_rootfs faild.{:}", e))?;
+            mount::pivot_rootfs(rootfs).map_err(|e| anyhow!("pivot_rootfs failed.{:}", e))?;
         }
 
         // setup sysctl
@@ -559,7 +559,7 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     let duration_newns = start.elapsed().as_millis();
     if to_new.contains(CloneFlags::CLONE_NEWNS) {
         mount::finish_rootfs(cfd_log, &spec, &oci_process)
-            .map_err(|e| anyhow!("finish_rootfs faild.{:}", e))?;
+            .map_err(|e| anyhow!("finish_rootfs failed.{:}", e))?;
     }
 
     if !oci_process.cwd.is_empty() {
@@ -1425,7 +1425,7 @@ impl LinuxContainer {
             Some(unistd::getuid()),
             Some(unistd::getgid()),
         )
-        .context(format!("cannot change onwer of container {} root", id))?;
+        .context(format!("cannot change owner of container {} root", id))?;
 
         if config.spec.is_none() {
             return Err(anyhow!(nix::Error::EINVAL));
@@ -1828,7 +1828,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_transtition() {
+    fn test_status_transition() {
         let mut status = ContainerStatus::new();
         let status_table: [ContainerState; 4] = [
             ContainerState::Created,
