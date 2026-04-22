@@ -1,6 +1,6 @@
 # Tracing
 
-Cloud Hypervisor has a basic tracing infrastucture, particularly focussed on
+Cloud Hypervisor has a basic tracing infrastructure, particularly focussed on
 the tracing of the initial VM setup.
 
 ## Usage
