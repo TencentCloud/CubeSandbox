@@ -96,7 +96,7 @@ pub struct DiskSpec {
 }
 
 impl DiskSpec {
-    /// Parse all meatadata from the provided file and store info in DiskSpec
+    /// Parse all metadata from the provided file and store info in DiskSpec
     /// structure.
     pub fn new(f: &mut File, metadata_region: &RegionTableEntry) -> Result<DiskSpec> {
         let mut disk_spec = DiskSpec::default();
