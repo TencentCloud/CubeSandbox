@@ -109,7 +109,7 @@ func TestReleasePanic(t *testing.T) {
 	km.Unlock(t.Name())
 }
 
-func TestMultileAcquireOnKeys(t *testing.T) {
+func TestMultipleAcquireOnKeys(t *testing.T) {
 	t.Parallel()
 
 	km := newKeyMutex()
