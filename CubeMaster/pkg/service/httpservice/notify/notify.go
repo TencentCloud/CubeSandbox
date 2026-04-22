@@ -85,7 +85,7 @@ func hostChangeNotify(ctx context.Context, req *types.HostChangeEvent) (rsp *typ
 }
 
 func healthCheck(w http.ResponseWriter, r *http.Request) (rsp *types.Res) {
-	log.G(r.Context()).Debug("healthCheck comming")
+	log.G(r.Context()).Debug("healthCheck coming")
 	rsp = &types.Res{
 		Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
