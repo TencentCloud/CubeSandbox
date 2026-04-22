@@ -95,7 +95,7 @@ E - EOL
 
 ```
 
-### LTS Stablity Considerations
+### LTS Stability Considerations
 
 An LTS release is just a `MAJOR` release for which point releases are made for
 longer following the same rules for what can be backported to a `POINT` release.
