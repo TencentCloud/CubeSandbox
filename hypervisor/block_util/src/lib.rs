@@ -104,7 +104,7 @@ pub fn build_disk_image_id(disk_path: &Path) -> Vec<u8> {
 pub enum ExecuteError {
     #[error("Bad request: {0}")]
     BadRequest(Error),
-    #[error("Falied to flush: {0}")]
+    #[error("Failed to flush: {0}")]
     Flush(io::Error),
     #[error("Failed to read: {0}")]
     Read(GuestMemoryError),
