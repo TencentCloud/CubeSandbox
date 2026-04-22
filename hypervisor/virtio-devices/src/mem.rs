@@ -135,7 +135,7 @@ pub enum Error {
     #[error("Not activated by the guest")]
     NotActivatedByGuest,
     #[error("Unknown request type: {0}")]
-    UnkownRequestType(u16),
+    UnknownRequestType(u16),
     #[error("Failed adding used index: {0}")]
     QueueAddUsed(virtio_queue::Error),
 }
@@ -613,7 +613,7 @@ impl MemEpollHandler {
                 VIRTIO_MEM_REQ_UNPLUG_ALL => (self.unplug_all(), 0u16),
                 VIRTIO_MEM_REQ_STATE => self.state_request(r.req.addr, r.req.nb_blocks),
                 _ => {
-                    return Err(Error::UnkownRequestType(r.req.req_type));
+                    return Err(Error::UnknownRequestType(r.req.req_type));
                 }
             };
             let len = r.send_response(desc_chain.memory(), resp_type, resp_state)?;
