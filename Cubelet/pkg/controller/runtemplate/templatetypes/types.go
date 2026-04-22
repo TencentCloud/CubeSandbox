@@ -31,7 +31,7 @@ type LocalRunTemplate struct {
 	Images                []LocalDistributionImage   `protobuf:"bytes,3,rep,name=images" json:"images,omitempty"`
 	Volumes               map[string]LocalBaseVolume `protobuf:"bytes,4,rep,name=volumes" json:"volumes,omitempty"`
 
-	Componts map[string]LocalComponent `protobuf:"bytes,5,rep,name=componts" json:"componts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Components map[string]LocalComponent `protobuf:"bytes,5,rep,name=components" json:"components,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 
 	Snapshot LocalSnapshot `protobuf:"bytes,6,opt,name=snapshot" json:"snapshot,omitempty"`
 }
