@@ -318,7 +318,7 @@ impl PciDevice for IvshmemDevice {
                 LittleEndian::write_u32(data, v);
             }
             // bar 2
-            1 => warn!("unexpect read ivshmem memory idx: {offset}"),
+            1 => warn!("unexpected read ivshmem memory idx: {offset}"),
             _ => {
                 warn!("invalid bar_idx: {bar_idx}");
             }
@@ -327,7 +327,7 @@ impl PciDevice for IvshmemDevice {
 
     fn write_bar(&mut self, base: u64, offset: u64, _data: &[u8]) -> Option<Arc<Barrier>> {
         debug!("write base {base:x} offset {offset}");
-        warn!("unexpect write ivshmem memory idx: {offset}");
+        warn!("unexpected write ivshmem memory idx: {offset}");
         None
     }
 
