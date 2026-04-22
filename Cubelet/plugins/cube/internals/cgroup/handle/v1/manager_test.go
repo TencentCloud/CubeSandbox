@@ -22,7 +22,7 @@ import (
 
 func checkCgroupMode(t *testing.T) {
 	if cgroups.Mode() == cgroups.Unified {
-		t.Skipf("System runnning in cgroupv2 mode")
+		t.Skipf("System running in cgroupv2 mode")
 	}
 }
 
