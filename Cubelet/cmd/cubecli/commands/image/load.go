@@ -22,7 +22,7 @@ import (
 
 var Load = &cli.Command{
 	Name:  "load",
-	Usage: "Waring: load image is deprecated, `cubecli image pull` instead",
+	Usage: "Warning: load image is deprecated, `cubecli image pull` instead",
 	Flags: []cli.Flag{
 		&cli.StringFlag{
 			Name:  "snapshotter",
