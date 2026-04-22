@@ -68,7 +68,7 @@ type CommonConf struct {
 	AsyncTaskWorkerNum              int               `yaml:"async_task_worker_num"`
 	HeadlessServiceName             string            `yaml:"headless_service_name"`
 	DefaultHeadlessServiceNodesNum  int64             `yaml:"default_headless_service_nodes_num"`
-	ListFilterOutLables             map[string]string `yaml:"list_filter_out_lables"`
+	ListFilterOutLabels             map[string]string `yaml:"list_filter_out_lables"`
 	CollectMetricInterval           time.Duration     `yaml:"collect_metric_interval"`
 	ReportLocalCreateNum            bool              `yaml:"report_local_create_num"`
 	ReportStdevMetric               bool              `yaml:"report_stdev_metric"`
@@ -359,7 +359,7 @@ type CubeletConf struct {
 	LoopMaxRetries          int64                `yaml:"loop_max_retries"`
 	BufferQueueMinJob       int64                `yaml:"buffer_queue_min_job"`
 	CreateConcurrentLimit   int64                `yaml:"create_concurrent_limit"`
-	DestroyConcurentLimit   int64                `yaml:"destroy_concurent_limit"`
+	DestroyConcurrentLimit   int64                `yaml:"destroy_concurent_limit"`
 	ExposedPortList         []string             `yaml:"exposed_port_list"`
 	EnableExposedPort       bool                 `yaml:"enable_exposed_port"`
 	DisableRedisProxyPort   bool                 `yaml:"disable_redis_proxy_port"`
@@ -620,8 +620,8 @@ func preHandleCubeletConf(config *Config) error {
 		config.CubeletConf.CreateConcurrentLimit = 100
 	}
 
-	if config.CubeletConf.DestroyConcurentLimit == 0 {
-		config.CubeletConf.DestroyConcurentLimit = 50
+	if config.CubeletConf.DestroyConcurrentLimit == 0 {
+		config.CubeletConf.DestroyConcurrentLimit = 50
 	}
 
 	if config.CubeletConf.Grpc == nil {
