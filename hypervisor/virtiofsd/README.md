@@ -357,7 +357,7 @@ This parameter is ignored on the destination side of migration.
 Controls how to respond to errors during migration.
 
 During migration, some inodes that the guest has indexed or opened may turn out not to be
-migrateable: Either the source instance cannot construct instructions on how the destination
+migratable: Either the source instance cannot construct instructions on how the destination
 instance may be able to find/open some inode, or the destination instance finds itself unable to
 follow those instructions.  In all cases, the destination instance is notified of these inodes, and
 then decides what to do depending on the value of this parameter:
