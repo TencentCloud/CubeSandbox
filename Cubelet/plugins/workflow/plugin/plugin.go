@@ -71,7 +71,7 @@ func init() {
 							for key := range mPlugins {
 								keys += key + ","
 							}
-							return nil, fmt.Errorf("flow:%v step %v no such action(plugin) %v registed of %s",
+							return nil, fmt.Errorf("flow:%v step %v no such action(plugin) %v registered of %s",
 								k, i, name, keys)
 						}
 
@@ -104,9 +104,9 @@ func init() {
 			}
 			i, ok := mPlugins[constants.GCID.ID()]
 			if !ok {
-				return nil, fmt.Errorf("no such flow %v registed", constants.GCID.ID())
+				return nil, fmt.Errorf("no such flow %v registered", constants.GCID.ID())
 			}
-			engine.AddCleaupFlow(i.(workflow.Flow))
+			engine.AddCleanupFlow(i.(workflow.Flow))
 			return engine, nil
 		},
 	})
