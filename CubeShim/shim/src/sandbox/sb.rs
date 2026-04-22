@@ -492,7 +492,7 @@ impl SandBox {
             panic!("BUG: ch is None");
         }
         let (tx, mut rx) = channel::<()>(1);
-        let arc_conainers = self.containers.clone();
+        let arc_containers = self.containers.clone();
         let arc_state = self.state.clone();
         let conn = AsyncUtils::connect_agent(&self.id).await?;
         let client = health_ttrpc::HealthClient::new(conn);
@@ -534,7 +534,7 @@ impl SandBox {
                             *state = SandBoxState::Exited;
                         }
 
-                        let containers = arc_conainers.lock().await;
+                        let containers = arc_containers.lock().await;
                         for (_, container) in containers.iter() {
                             container.notify_vm_shutdown().await;
                         }
@@ -1291,13 +1291,13 @@ mod tests {
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let set_unexpect: HashSet<String> = vec!["clocksource=tsc", "tsc=reliable"]
+        let set_unexpected: HashSet<String> = vec!["clocksource=tsc", "tsc=reliable"]
             .into_iter()
             .map(|s| s.to_string())
             .collect();
 
         for cmd in vm_config.cmdlines.iter() {
-            assert!(!set_unexpect.contains(cmd), "unexpect {} in cmdlines", cmd);
+            assert!(!set_unexpected.contains(cmd), "unexpected {} in cmdlines", cmd);
             if set_expect.contains(cmd) {
                 set_expect.remove(cmd);
             }
