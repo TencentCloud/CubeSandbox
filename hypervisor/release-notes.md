@@ -433,7 +433,7 @@ binary with the detection of the hypervisor to use made at runtime.
 ### Notable Bug Fixes
 
 * The prefetchable flag is preserved on BARs for VFIO devices (#4353, #4454)
-* PCI Express capabilties for functionality we do not support are now filtered
+* PCI Express capabilities for functionality we do not support are now filtered
   out (#4456)
 * GDB breakpoint support is more reliable (#4354, #4363)
 * `SIGINT` and `SIGTERM` signals are now handled before the VM has booted
@@ -788,10 +788,10 @@ is now 5.15. (#3530)
 
 ### Notable Bug fixes
 
-* Multiple fixes were made to the OpenAPI YAML file to match the implementaion (#3555,#3562)
+* Multiple fixes were made to the OpenAPI YAML file to match the implementation (#3555,#3562)
 * Avoid live migration deadlock when triggered during the kernel boot (#3585)
 * Support live migration within firmware (#3586)
-* Validate the `virtio-net` desciptor chain (#3548)
+* Validate the `virtio-net` descriptor chain (#3548)
 * `direct=on` (`O_DIRECT`) can now be used with a guest that makes unaligned accesses (e.g. firmware) (#3587)
 
 ### Contributors
