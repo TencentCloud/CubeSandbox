@@ -1641,19 +1641,6 @@ impl FsConfig {
     }
 
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
-        if self.backendfs_config.is_some() {
-            if self.socket.to_str() != Some("") {
-                return Err(ValidationError::NativeVirtioFsSocket);
-            }
-        } else {
-            if self.socket.to_str() == Some("") {
-                return Err(ValidationError::VhostUserMissingSocket);
-            }
-            if !vm_config.backed_by_shared_memory() {
-                return Err(ValidationError::VhostUserRequiresSharedMemory);
-            }
-        }
-
         if self.num_queues > vm_config.cpus.boot_vcpus as usize {
             return Err(ValidationError::TooManyQueues);
         }
@@ -1669,6 +1656,19 @@ impl FsConfig {
                         self.pci_segment,
                     ));
                 }
+            }
+        }
+
+        if self.backendfs_config.is_some() {
+            if self.socket.to_str() != Some("") {
+                return Err(ValidationError::NativeVirtioFsSocket);
+            }
+        } else {
+            if !vm_config.backed_by_shared_memory() {
+                return Err(ValidationError::VhostUserRequiresSharedMemory);
+            }
+            if self.socket.to_str() == Some("") {
+                return Err(ValidationError::VhostUserMissingSocket);
             }
         }
 
