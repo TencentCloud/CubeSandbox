@@ -1028,7 +1028,7 @@ pub fn get_mount_fs_type(mount_point: &str) -> Result<String> {
 }
 
 // get_mount_fs_type_from_file returns the FS type corresponding to the passed mount point and
-// any error ecountered.
+// any error encountered.
 #[instrument]
 pub fn get_mount_fs_type_from_file(mount_file: &str, mount_point: &str) -> Result<String> {
     if mount_point.is_empty() {
