@@ -17,7 +17,7 @@ const DEV_MODE_FLAG: &str = "agent.devmode";
 const TRACE_MODE_OPTION: &str = "agent.trace";
 const LOG_LEVEL_OPTION: &str = "agent.log";
 const SERVER_ADDR_OPTION: &str = "agent.server_addr";
-const HOTPLUG_TIMOUT_OPTION: &str = "agent.hotplug_timeout";
+const HOTPLUG_TIMEOUT_OPTION: &str = "agent.hotplug_timeout";
 const DEBUG_CONSOLE_VPORT_OPTION: &str = "agent.debug_console_vport";
 const LOG_VPORT_OPTION: &str = "agent.log_vport";
 const CONTAINER_PIPE_SIZE_OPTION: &str = "agent.container_pipe_size";
@@ -248,7 +248,7 @@ impl AgentConfig {
             // ensure the timeout is a positive value
             parse_cmdline_param!(
                 param,
-                HOTPLUG_TIMOUT_OPTION,
+                HOTPLUG_TIMEOUT_OPTION,
                 config.hotplug_timeout,
                 get_hotplug_timeout,
                 |hotplug_timeout: time::Duration| hotplug_timeout.as_secs() > 0
@@ -328,7 +328,7 @@ fn get_vsock_port(p: &str) -> Result<i32> {
 // Map logrus (https://godoc.org/github.com/sirupsen/logrus)
 // log level to the equivalent slog log levels.
 //
-// Note: Logrus names are used for compatability with the previous
+// Note: Logrus names are used for compatibility with the previous
 // golang-based agent.
 #[instrument]
 fn logrus_to_slog_level(logrus_level: &str) -> Result<slog::Level> {
@@ -365,7 +365,7 @@ fn get_hotplug_timeout(param: &str) -> Result<time::Duration> {
     let fields: Vec<&str> = param.split('=').collect();
     ensure!(fields.len() == 2, ERR_INVALID_HOTPLUG_TIMEOUT);
     ensure!(
-        fields[0] == HOTPLUG_TIMOUT_OPTION,
+        fields[0] == HOTPLUG_TIMEOUT_OPTION,
         ERR_INVALID_HOTPLUG_TIMEOUT_KEY
     );
 
