@@ -746,7 +746,7 @@ impl VfioCommon {
             let cap_next: u16 = ((ext_cap_hdr >> 20) & 0xfff) as u16;
 
             match PciExpressCapabilityId::from(cap_id) {
-                PciExpressCapabilityId::AlternativeRoutingIdentificationIntepretation
+                PciExpressCapabilityId::AlternativeRoutingIdentificationInterpretation
                 | PciExpressCapabilityId::ResizeableBar
                 | PciExpressCapabilityId::SingleRootIoVirtualization => {
                     let reg_idx = (current_offset / 4) as usize;
