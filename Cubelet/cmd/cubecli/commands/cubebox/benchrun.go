@@ -156,7 +156,7 @@ type wrapWg struct {
 	wg              *sync.WaitGroup
 	doneCtx         context.Context
 	cancel          context.CancelFunc
-	annotaionFn     sync.Once
+	annotationFn     sync.Once
 	annotation      map[string]string
 	cnt             int64
 	concurrentTotal int
@@ -416,7 +416,7 @@ func runReq(wg *wrapWg, reqByte []byte) (string, error) {
 	if err := json.Unmarshal(reqByte, req); err != nil {
 		return "", err
 	}
-	wg.annotaionFn.Do(
+	wg.annotationFn.Do(
 		func() {
 			wg.annotation = req.Annotations
 		})
