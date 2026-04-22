@@ -70,7 +70,7 @@ var Inspect = &cli.Command{
 				ctx, cancel := gocontext.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
 
-				n, err := InspectImge(ctx, cntdClient, found.Image)
+				n, err := InspectImage(ctx, cntdClient, found.Image)
 				if err != nil {
 					return err
 				}
@@ -200,7 +200,7 @@ type nativeImage struct {
 	ImageConfig     ocispec.Image      `json:"ImageConfig"`
 }
 
-func InspectImge(ctx context.Context, client *containerd.Client, image images.Image) (*nativeImage, error) {
+func InspectImage(ctx context.Context, client *containerd.Client, image images.Image) (*nativeImage, error) {
 
 	n := &nativeImage{}
 
