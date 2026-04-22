@@ -24,6 +24,7 @@ use crate::gdb::{Debuggable, DebuggableError, GdbRequestPayload, GdbResponsePayl
 use crate::memory_manager::{
     Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData,
 };
+use crate::migration::get_vm_snapshot;
 #[cfg(feature = "guest_debug")]
 use crate::migration::url_to_file;
 use crate::migration::{url_to_path, SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE};
@@ -83,8 +84,8 @@ use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::net::UnixStream;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use std::{result, str, thread};
 use thiserror::Error;
@@ -2244,7 +2245,6 @@ impl Vm {
         &mut self,
         snapshot: &Snapshot,
     ) -> Result<Option<hypervisor::ClockData>> {
-        use crate::migration::get_vm_snapshot;
         let vm_snapshot = get_vm_snapshot(snapshot).map_err(Error::Restore)?;
         self.saved_clock = vm_snapshot.clock;
         Ok(self.saved_clock)

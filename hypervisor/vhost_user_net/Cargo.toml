@@ -12,11 +12,11 @@ libc = "0.2.137"
 log = "0.4.17"
 net_util = { path = "../net_util" }
 option_parser = { path = "../option_parser" }
-vhost = { version = "0.10.0", features = ["vhost-user-backend"] }
-vhost-user-backend = "0.13.1"
-virtio-bindings = "0.1.0"
-vm-memory = "0.14.1"
-vmm-sys-util = "0.12.1"
+vhost = { workspace = true, features = ["vhost-user-backend"] }
+vhost-user-backend = { workspace = true }
+virtio-bindings = { workspace = true }
+vm-memory = { workspace = true }
+vmm-sys-util = { workspace = true }
 
 [build-dependencies]
 clap = { version = "4.4.7", features = ["cargo"] }

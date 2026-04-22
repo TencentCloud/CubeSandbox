@@ -2267,18 +2267,6 @@ dependencies = [
 
 [[package]]
 name = "vhost"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b64e816d0d49769fbfaa1494eb77cc2a3ddc526ead05c7f922cb7d64106286f"
-dependencies = [
- "bitflags 2.6.0",
- "libc",
- "vm-memory 0.14.1",
- "vmm-sys-util 0.12.1",
-]
-
-[[package]]
-name = "vhost"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6be08d1166d41a78861ad50212ab3f9eca0729c349ac3a7a8f557c62406b87cc"
@@ -2303,21 +2291,6 @@ dependencies = [
 
 [[package]]
 name = "vhost-user-backend"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72c8c447d076ac508d78cb45664d203df7989e891656dce260a7e93d72352c9a"
-dependencies = [
- "libc",
- "log",
- "vhost 0.10.0",
- "virtio-bindings 0.2.4",
- "virtio-queue 0.11.0",
- "vm-memory 0.14.1",
- "vmm-sys-util 0.12.1",
-]
-
-[[package]]
-name = "vhost-user-backend"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f0ffb1dd8e00a708a0e2c32d5efec5812953819888591fff9ff68236b8a5096"
@@ -2328,6 +2301,20 @@ dependencies = [
  "virtio-bindings 0.2.4",
  "virtio-queue 0.12.0",
  "vm-memory 0.14.1",
+ "vmm-sys-util 0.12.1",
+]
+
+[[package]]
+name = "vhost-user-backend"
+version = "0.16.1"
+source = "git+https://github.com/rust-vmm/vhost?rev=d983ae0#d983ae07f78663b7d24059667376992460b571a2"
+dependencies = [
+ "libc",
+ "log",
+ "vhost 0.12.1",
+ "virtio-bindings 0.2.4",
+ "virtio-queue 0.14.0",
+ "vm-memory 0.16.1",
  "vmm-sys-util 0.12.1",
 ]
 
@@ -2343,11 +2330,11 @@ dependencies = [
  "log",
  "option_parser",
  "qcow",
- "vhost 0.10.0",
- "vhost-user-backend 0.13.1",
+ "vhost 0.12.1",
+ "vhost-user-backend 0.16.1",
  "virtio-bindings 0.1.0",
- "virtio-queue 0.11.0",
- "vm-memory 0.14.1",
+ "virtio-queue 0.14.0",
+ "vm-memory 0.16.1",
  "vmm-sys-util 0.12.1",
 ]
 
@@ -2362,10 +2349,10 @@ dependencies = [
  "log",
  "net_util",
  "option_parser",
- "vhost 0.10.0",
- "vhost-user-backend 0.13.1",
+ "vhost 0.12.1",
+ "vhost-user-backend 0.16.1",
  "virtio-bindings 0.1.0",
- "vm-memory 0.14.1",
+ "vm-memory 0.16.1",
  "vmm-sys-util 0.12.1",
 ]
 

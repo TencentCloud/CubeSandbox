@@ -8,6 +8,7 @@ homepage = "https://virtio-fs.gitlab.io/"
 repository = "https://gitlab.com/virtio-fs/virtiofsd"
 license = "Apache-2.0 AND BSD-3-Clause"
 readme = "README.md"
+autobins = false
 
 exclude = [".gitlab-ci.yml"]
 

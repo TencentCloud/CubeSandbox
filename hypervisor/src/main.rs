@@ -830,7 +830,7 @@ mod unit_tests {
                 max_phys_bits: 46,
                 affinity: None,
                 features: CpuFeatures::default(),
-                compatible: CompatibleMode::Ignore,
+                compatible: CompatibleMode::Vendor,
             },
             memory: MemoryConfig {
                 size: 536_870_912,
@@ -844,6 +844,7 @@ mod unit_tests {
                 prefault: false,
                 zones: None,
                 thp: true,
+                dirty_log: false,
             },
             payload: Some(PayloadConfig {
                 kernel: Some(PathBuf::from("/path/to/kernel")),

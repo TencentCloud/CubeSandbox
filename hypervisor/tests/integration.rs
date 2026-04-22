@@ -2073,7 +2073,6 @@ fn enable_guest_watchdog(guest: &Guest, watchdog_sec: u32) {
 
 mod common_parallel {
     use std::{fs::OpenOptions, io::SeekFrom};
-    use vmm::vm_config::MemoryConfig;
 
     use crate::*;
 
@@ -6268,6 +6267,7 @@ mod common_parallel {
             None,
             num_queue_pairs,
             Some(libc::O_RDWR | libc::O_NONBLOCK),
+            None,
         )
         .unwrap();
 

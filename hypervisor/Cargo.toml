@@ -113,4 +113,4 @@ virtio-queue = "0.14.0"
 virtiofsd = { path = "virtiofsd" }
 vm-fdt = { git = "https://github.com/rust-vmm/vm-fdt", branch = "main" }
 vm-memory = "0.16.1"
-
+vmm-sys-util = "0.12.1"

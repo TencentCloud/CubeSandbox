@@ -102,6 +102,9 @@ impl VhostUserNetThread {
                 rx_rate_limiter: None,
                 tx_rate_limiter: None,
                 access_platform: None,
+                rx_rate_limited: std::sync::Once::new(),
+                tx_rate_limited: std::sync::Once::new(),
+                id: "".to_string(),
             },
         })
     }
@@ -138,6 +141,7 @@ impl VhostUserNetBackend {
             &mut Some(host_mac),
             mtu,
             num_queues / 2,
+            None,
             None,
         )
         .map_err(Error::OpenTap)?;
