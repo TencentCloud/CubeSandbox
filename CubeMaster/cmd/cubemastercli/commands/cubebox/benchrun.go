@@ -160,7 +160,7 @@ type wrapWg struct {
 	wg              *sync.WaitGroup
 	doneCtx         context.Context
 	cancel          context.CancelFunc
-	annotaionFn     sync.Once
+	annotationFn     sync.Once
 	annotation      map[string]string
 	cnt             int64
 	concurrentTotal int
