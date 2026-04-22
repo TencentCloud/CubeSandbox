@@ -53,7 +53,7 @@ On-line CPU(s) list:             0-7
 
 After a reboot the added CPUs will remain.
 
-Removing CPUs works similarly by reducing the number in the "desired_vcpus" field of the reisze API. The CPUs will be automatically offlined inside the guest so there is no need to run any commands inside the guest:
+Removing CPUs works similarly by reducing the number in the "desired_vcpus" field of the resize API. The CPUs will be automatically offlined inside the guest so there is no need to run any commands inside the guest:
 
 ```shell
 ./ch-remote --api-socket=/tmp/ch-socket resize --cpus 2
