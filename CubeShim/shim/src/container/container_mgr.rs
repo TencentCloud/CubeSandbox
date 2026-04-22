@@ -217,7 +217,7 @@ impl ContainerState {
         (info.0, info.1)
     }
 
-    pub async fn set_container_stoped(&self) {
+    pub async fn set_container_stopped(&self) {
         //set exit info
         {
             let mut exit_info = self.exit_info.lock().await;
