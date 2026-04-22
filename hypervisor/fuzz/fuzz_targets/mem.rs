@@ -33,7 +33,7 @@ const VIRTIO_MEM_REGION_ADDRESS: u64 = 0;
 const QUEUE_SIZE: u16 = 64;
 // Descriptor table alignment
 const DESC_TABLE_ALIGN_SIZE: u64 = 16;
-// Avalable ring alignment
+// Available ring alignment
 const AVAIL_RING_ALIGN_SIZE: u64 = 2;
 // Used ring alignment
 const USED_RING_ALIGN_SIZE: u64 = 4;
