@@ -13,7 +13,7 @@ use std::path::Path;
 const KATA_GUEST_SANDBOX_DNS_FILE: &str = "/run/cube-containers/sandbox/resolv.conf";
 const GUEST_DNS_FILE: &str = "/etc/resolv.conf";
 
-// Network describes a sandbox network, includings its dns
+// Network describes a sandbox network, including its dns
 // related information.
 #[derive(Debug, Default)]
 pub struct Network {
