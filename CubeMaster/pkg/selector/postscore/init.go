@@ -23,5 +23,5 @@ func NewSelector() Selector {
 	if conf == nil || conf.PostScore == nil {
 		return nil
 	}
-	return &whilelistWeightedScore{}
+	return &whitelistWeightedScore{}
 }
