@@ -35,21 +35,21 @@ func handleListAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 	err := utils.DecodeHttpBody(r.Body, req)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			querys := r.URL.Query()
-			req.RequestID = querys.Get("requestID")
-			req.HostID = querys.Get("host_id")
-			req.InstanceType = querys.Get("instance_type")
-			idx, err := strconv.ParseInt(querys.Get("start_idx"), 10, 64)
+			queries := r.URL.Query()
+			req.RequestID = queries.Get("requestID")
+			req.HostID = queries.Get("host_id")
+			req.InstanceType = queries.Get("instance_type")
+			idx, err := strconv.ParseInt(queries.Get("start_idx"), 10, 64)
 			if err == nil {
 				req.StartIdx = int(idx)
 			}
-			num, err := strconv.ParseInt(querys.Get("size"), 10, 64)
+			num, err := strconv.ParseInt(queries.Get("size"), 10, 64)
 			if err == nil {
 				req.Size = int(num)
 			}
 
 			filters := make(map[string]string)
-			filterParams := querys.Get("filter.label_selector")
+			filterParams := queries.Get("filter.label_selector")
 			for _, labels := range strings.Split(filterParams, ",") {
 				if len(labels) > 0 {
 					kv := strings.Split(labels, "=")
