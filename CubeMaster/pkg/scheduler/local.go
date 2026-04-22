@@ -253,7 +253,7 @@ func reportStdevTrace() {
 
 func limitDestroyOfEveryNode() int64 {
 
-	return config.GetConfig().CubeletConf.DestroyConcurentLimit
+	return config.GetConfig().CubeletConf.DestroyConcurrentLimit
 }
 
 func (l *local) monitorLimit() {
@@ -305,8 +305,8 @@ func (l *local) monitorLimit() {
 			}
 			newMasterNodes := localcache.HealthyMasterNodes()
 
-			newLimitDesroyOfEveryNode := limitDestroyOfEveryNode()
-			limitDestroy := int64(math.Ceil(float64(newHealthyNodes * newLimitDesroyOfEveryNode * 1.0 / newMasterNodes)))
+			newLimitDestroyOfEveryNode := limitDestroyOfEveryNode()
+			limitDestroy := int64(math.Ceil(float64(newHealthyNodes * newLimitDestroyOfEveryNode * 1.0 / newMasterNodes)))
 			if l.lastDestroyconcurrentLimit != limitDestroy && limitDestroy >= 1 {
 				l.lastDestroyconcurrentLimit = limitDestroy
 				task.SetTaskWorkerConcurrent(task.DestroySandbox, limitDestroy)
