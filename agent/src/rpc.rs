@@ -107,7 +107,7 @@ const ERR_NO_SANDBOX_PIDNS: &str = "Sandbox does not have sandbox_pidns";
 
 // IPTABLES_RESTORE_WAIT_SEC is the timeout value provided to iptables-restore --wait. Since we
 // don't expect other writers to iptables, we don't expect contention for grabbing the iptables
-// filesystem lock. Based on this, 5 seconds seems a resonable timeout period in case the lock is
+// filesystem lock. Based on this, 5 seconds seems a reasonable timeout period in case the lock is
 // not available.
 const IPTABLES_RESTORE_WAIT_SEC: u64 = 5;
 
