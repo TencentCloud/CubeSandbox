@@ -750,7 +750,7 @@ fn main() {
     let (default_vcpus, default_memory, default_rng) = prepare_default_values();
     let cmd_arguments = create_app(default_vcpus, default_memory, default_rng).get_matches();
     if cmd_arguments.get_flag("snapshot-version") {
-        println!("Sanpshot Version: {}", vmm::api::SNAPSHOT_VERSION);
+        println!("Snapshot Version: {}", vmm::api::SNAPSHOT_VERSION);
         return;
     }
     let exit_code = match start_vmm(cmd_arguments, now, local) {
