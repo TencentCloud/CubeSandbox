@@ -120,7 +120,7 @@ $ popd
 
 ## Direct-kernel booting
 
-Alternativelly, you can build your own kernel for guest VM. This way, UEFI is
+Alternatively, you can build your own kernel for guest VM. This way, UEFI is
 not involved and ACPI cannot be enabled.
 
 ### Building kernel
