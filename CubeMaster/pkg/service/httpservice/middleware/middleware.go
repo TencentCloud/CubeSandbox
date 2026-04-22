@@ -74,7 +74,7 @@ func MiddlewareLogging(next http.Handler) http.Handler {
 				log.G(ctx).WithFields(map[string]interface{}{
 					"CallerIP":  r.RemoteAddr,
 					"RequestId": rt.RequestID,
-				}).Debugf("http_request_comming: %s", string(dump))
+				}).Debugf("http_request_coming: %s", string(dump))
 			}
 		}()
 
@@ -168,7 +168,7 @@ func checkAuth(ctx context.Context, r *http.Request) error {
 	}
 
 	if log.IsDebug() {
-		log.G(ctx).Debugf("http_request_comming: %v", utils.InterfaceToString(sgnp))
+		log.G(ctx).Debugf("http_request_coming: %v", utils.InterfaceToString(sgnp))
 	}
 	err := auth.CheckSign(sgnp, []byte(secretKey), config.GetConfig().AuthConf.SignatureExpireTimeInsec)
 	if err != nil {
