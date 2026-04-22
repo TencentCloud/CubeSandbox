@@ -192,14 +192,14 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 	}
 }
 
-func matchFilter(lables map[string]string) bool {
-	tmpFilter := config.GetConfig().Common.ListFilterOutLables
-	if len(tmpFilter) == 0 || len(lables) == 0 {
+func matchFilter(labels map[string]string) bool {
+	tmpFilter := config.GetConfig().Common.ListFilterOutLabels
+	if len(tmpFilter) == 0 || len(labels) == 0 {
 		return false
 	}
 
 	for k, v := range tmpFilter {
-		if m, ok := lables[k]; ok && m == v {
+		if m, ok := labels[k]; ok && m == v {
 			return true
 		}
 	}
