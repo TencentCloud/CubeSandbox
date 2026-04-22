@@ -59,7 +59,7 @@ pub struct SystemAllocator {
 }
 
 impl SystemAllocator {
-    /// Creates a new `SystemAllocator` for managing addresses and irq numvers.
+    /// Creates a new `SystemAllocator` for managing addresses and irq numbers.
     /// Can return `None` if `base` + `size` overflows a u64
     ///
     /// * `io_base` - (X86) The starting address of IO memory.
