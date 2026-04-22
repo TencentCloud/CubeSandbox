@@ -28,13 +28,13 @@ func (ts *localTransferService) prepareCfs(ctx context.Context, erf transferi.Ex
 	ctx, layerSpan := tracing.StartSpan(ctx, tracing.Name("transfer", "prepareCfs"))
 	defer layerSpan.End()
 
-	mainifestDesc, err := erf.PrepareContent(ctx, ts.content)
+	manifestDesc, err := erf.PrepareContent(ctx, ts.content)
 	if err != nil {
 		return err
 	}
 	unpackStart := time.Now()
 	var manifest ocispec.Manifest
-	if err := json.Unmarshal(mainifestDesc.Data, &manifest); err != nil {
+	if err := json.Unmarshal(manifestDesc.Data, &manifest); err != nil {
 		return fmt.Errorf("unmarshal image config: %w", err)
 	}
 
@@ -108,10 +108,10 @@ func (ts *localTransferService) prepareCfs(ctx context.Context, erf transferi.Ex
 		"duration": time.Since(unpackStart),
 	}).Debug("image unpacked")
 
-	imgs, err := is.Store(ctx, mainifestDesc, ts.images)
+	imgs, err := is.Store(ctx, manifestDesc, ts.images)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
-			log.G(ctx).Infof("No images store for %s", mainifestDesc.Digest)
+			log.G(ctx).Infof("No images store for %s", manifestDesc.Digest)
 		}
 		return err
 	}
@@ -120,7 +120,7 @@ func (ts *localTransferService) prepareCfs(ctx context.Context, erf transferi.Ex
 			tops.Progress(transfer.Progress{
 				Event: "completed prepareCfs",
 				Name:  img.Name,
-				Desc:  &mainifestDesc,
+				Desc:  &manifestDesc,
 			})
 		}
 	}
