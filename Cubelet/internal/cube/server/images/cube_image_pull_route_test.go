@@ -45,7 +45,7 @@ func TestCubeImageService_PullImage(t *testing.T) {
 	named, err := reference.ParseNormalizedNamed(name)
 	assert.NoError(t, err, "failed to parse name")
 	if taged, ok := named.(reference.NamedTagged); ok {
-		repoTag = taged.Tag()
+		repoTag = tagged.Tag()
 	}
 	if canonical, ok := named.(reference.Digested); ok {
 		repoDigest = canonical.Digest().String()
