@@ -150,24 +150,24 @@ func initRetryMap(cfg *config.Config) {
 }
 
 func initReuseMap(cfg *config.Config) {
-	resueRetryMap := new(sync.Map)
-	resueRetryMap.Store(MasterCode(cubeleterrorcode.ErrorCode_DeployLayerTimeout), struct{}{})
-	resueRetryMap.Store(MasterCode(cubeleterrorcode.ErrorCode_DeployCodeTimeout), struct{}{})
-	resueRetryMap.Store(MasterCode(cubeleterrorcode.ErrorCode_PullImageTimeOut), struct{}{})
+	reuseRetryMap := new(sync.Map)
+	reuseRetryMap.Store(MasterCode(cubeleterrorcode.ErrorCode_DeployLayerTimeout), struct{}{})
+	reuseRetryMap.Store(MasterCode(cubeleterrorcode.ErrorCode_DeployCodeTimeout), struct{}{})
+	reuseRetryMap.Store(MasterCode(cubeleterrorcode.ErrorCode_PullImageTimeOut), struct{}{})
 	reuseRetryCodes := cfg.CubeletConf.ReuseRetryCode
 	for _, code := range reuseRetryCodes {
 
 		errorCode, ok := cubeleterrorcode.ErrorCode_value[code]
 		if ok {
-			resueRetryMap.Store(ErrorCode(errorCode), struct{}{})
+			reuseRetryMap.Store(ErrorCode(errorCode), struct{}{})
 		}
 
 		errorCode, ok = errorCode_value[code]
 		if ok {
-			resueRetryMap.Store(ErrorCode(errorCode), struct{}{})
+			reuseRetryMap.Store(ErrorCode(errorCode), struct{}{})
 		}
 	}
-	cubeReuseCodeRetryMap = resueRetryMap
+	cubeReuseCodeRetryMap = reuseRetryMap
 }
 
 func initLoopRetryMap(cfg *config.Config) {
@@ -270,7 +270,7 @@ func IsReuseCode(code ErrorCode) bool {
 	return ok
 }
 
-func IsCircutBreakCode(code ErrorCode) bool {
+func IsCircuitBreakCode(code ErrorCode) bool {
 	_, ok := cubecircuitBreakerCodeMap.Load(code)
 	return ok
 }
