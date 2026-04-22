@@ -157,7 +157,7 @@ impl Handle {
         Ok(())
     }
 
-    /// Retireve available network interfaces.
+    /// Retrieve available network interfaces.
     pub async fn list_interfaces(&self) -> Result<Vec<Interface>> {
         let mut list = Vec::new();
 
