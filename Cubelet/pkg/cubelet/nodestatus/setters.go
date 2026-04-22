@@ -182,7 +182,7 @@ func LocalTemplate(localTemplateListFunc func(context.Context) (map[string]*temp
 
 		localTemplates, err := localTemplateListFunc(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to list local temlates: %v", err)
+			return fmt.Errorf("failed to list local templates: %v", err)
 		}
 		for _, lt := range localTemplates {
 			coreTemplate := cubeletnodemeta.LocalTemplate{
