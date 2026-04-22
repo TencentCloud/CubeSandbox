@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	defaulFormat = []string{"512Mi", "others"}
+	defaultFormat = []string{"512Mi", "others"}
 )
 var cleanup = &cli.Command{
 	Name:  "cleanup",
@@ -47,7 +47,7 @@ var cleanup = &cli.Command{
 
 		poolDefaultFormatSizeList := context.StringSlice("format")
 		if poolDefaultFormatSizeList == nil {
-			poolDefaultFormatSizeList = defaulFormat
+			poolDefaultFormatSizeList = defaultFormat
 		}
 
 		allformatFiles := make(map[string]map[string]struct{})
