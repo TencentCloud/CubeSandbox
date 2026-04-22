@@ -112,7 +112,7 @@ impl VhdFooter {
 pub fn is_fixed_vhd(f: &mut File) -> std::io::Result<bool> {
     let footer = VhdFooter::new(f)?;
 
-    // "conectix" => 0x636f6e6563746978
+    // "connectix" => 0x636f6e6563746978
     Ok(footer.cookie() == 0x636f6e6563746978
         && footer.file_format_version() == 0x0001_0000
         && footer.data_offset() == 0xffff_ffff_ffff_ffff
