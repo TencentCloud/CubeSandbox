@@ -129,7 +129,7 @@ pub fn apply_template(cpuids: &mut [CpuIdEntry], template: &CustomCpuTemplate) {
 
 /// T2CL template
 ///
-/// Mask CPUID to make exposed CPU features as close as possbile to Intel Cascade Lake and provide
+/// Mask CPUID to make exposed CPU features as close as possible to Intel Cascade Lake and provide
 /// instruction set feature partity with AMD Milan using T2A template.
 ///
 /// References:
