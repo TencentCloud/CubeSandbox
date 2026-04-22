@@ -133,7 +133,7 @@ async fn create_logger_task(rfd: RawFd, vsock_port: u32, shutdown: Receiver<bool
         //Box::new(tokio::io::sink())
     };
 
-    let _ = util::interruptable_io_copier(&mut reader, &mut writer, shutdown).await;
+    let _ = util::interruptible_io_copier(&mut reader, &mut writer, shutdown).await;
 
     Ok(())
 }
@@ -166,7 +166,7 @@ async fn real_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         // Init a temporary logger used by init agent as init process
         // since before do the base mount, it wouldn't access "/proc/cmdline"
-        // to get the customzied debug level.
+        // to get the customized debug level.
         let (logger, logger_async_guard) =
             logging::create_logger(NAME, "agent", slog::Level::Info, writer);
 
