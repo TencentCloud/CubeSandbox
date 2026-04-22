@@ -734,7 +734,7 @@ func applyCubeSandboxFilter(sbs []*cubebox.CubeSandbox, filter *cubebox.CubeSand
 		return sbs
 	}
 
-	var filterd []*cubebox.CubeSandbox
+	var filtered []*cubebox.CubeSandbox
 	for _, sb := range sbs {
 		var matchedContainer []*cubebox.Container
 		for _, cntr := range sb.Containers {
@@ -762,10 +762,10 @@ func applyCubeSandboxFilter(sbs []*cubebox.CubeSandbox, filter *cubebox.CubeSand
 		}
 
 		sb.Containers = matchedContainer
-		filterd = append(filterd, sb)
+		filtered = append(filtered, sb)
 	}
 
-	return filterd
+	return filtered
 }
 
 func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption) *cubebox.CubeSandbox {
