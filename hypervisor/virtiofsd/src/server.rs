@@ -167,7 +167,7 @@ impl FilterList {
         Ok(())
     }
 
-    // whether allowd_dirs is empty.
+    // whether allowed_dirs is empty.
     pub fn is_empty(&self) -> bool {
         self.allowed_dirs.is_empty()
     }
