@@ -26,7 +26,7 @@ type Result<T> = result::Result<T, Error>;
 pub const IRQ_LEGACY_BASE: usize = layout::IRQ_BASE as usize;
 pub const IRQ_LEGACY_COUNT: usize = 32;
 
-// Gic (Generic Interupt Controller) struct provides all the functionality of a
+// Gic (Generic Interrupt Controller) struct provides all the functionality of a
 // GIC device. It wraps a hypervisor-emulated GIC device (Vgic) provided by the
 // `hypervisor` crate.
 // Gic struct also implements InterruptController to provide interrupt delivery
