@@ -81,7 +81,7 @@ pub enum VhdxHeaderError {
     SeekRegionTableEntries(#[source] io::Error),
     #[error("Failed to seek in region table header {0}")]
     SeekRegionTableHeader(#[source] io::Error),
-    #[error("We do not recongize this entry")]
+    #[error("We do not recognize this entry")]
     UnrecognizedRegionEntry,
     #[error("Failed to write header {0}")]
     WriteHeader(#[source] io::Error),
@@ -302,7 +302,7 @@ impl RegionInfo {
 
             if (entry.required & REGION_ENTRY_REQUIRED) == 1 {
                 // This implementation doesn't recognize this field.
-                // Therefore, accoding to the spec, we are throwing an error.
+                // Therefore, according to the spec, we are throwing an error.
                 return Err(VhdxHeaderError::UnrecognizedRegionEntry);
             }
         }
@@ -439,7 +439,7 @@ impl VhdxHeader {
         }
     }
 
-    // Update the provided headers accoding to the spec
+    // Update the provided headers according to the spec
     fn update_headers(
         f: &mut File,
         header_1: Result<Header>,
@@ -463,7 +463,7 @@ impl VhdxHeader {
     }
 }
 
-/// Calculates the checksum of a buffer that itself containts its checksum
+/// Calculates the checksum of a buffer that itself contains its checksum
 /// Therefore, before calculating, the existing checksum is retrieved and the
 /// corresponding field is made zero. After the calculation, the existing checksum
 /// is put back to the buffer.
