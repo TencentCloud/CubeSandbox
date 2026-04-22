@@ -234,7 +234,7 @@ func (localCache *LocalCache) asyncRefresh(ctx context.Context, key string) {
 
 func (localCache *LocalCache) shrinkCache() {
 	defer localCache.waitGroup.Done()
-	defer CubeLog.Infof("Cache Shrink Proccess goroutine End")
+	defer CubeLog.Infof("Cache Shrink Process goroutine End")
 	ticker := time.NewTicker(time.Duration(15) * time.Minute)
 	for {
 		select {
