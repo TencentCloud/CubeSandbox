@@ -364,7 +364,7 @@ fn set_memory_resources(cg: &cgroups::Cgroup, memory: &LinuxMemory, update: bool
         // set against the new swap setting, if the current memory limit is large than
         // the new swap, then set limit first, otherwise the kernel would complain and
         // refused to set; on the other hand, if the current memory limit is smaller than
-        // the new swap, then we should set the swap first and then set the memor limit.
+        // the new swap, then we should set the swap first and then set the memory limit.
         if swap == -1 || memusage.limit() < swap as u64 {
             mem_controller.set_memswap_limit(swap)?;
             set_resource!(mem_controller, set_limit, memory, limit);
@@ -643,7 +643,7 @@ fn get_memory_stats(cg: &cgroups::Cgroup) -> MessageField<MemoryStats> {
     let value = memory.use_hierarchy;
     let use_hierarchy = value == 1;
 
-    // gte memory datas
+    // gte memory data
     let usage = MessageField::some(MemoryData {
         usage: memory.usage_in_bytes,
         max_usage: memory.max_usage_in_bytes,
