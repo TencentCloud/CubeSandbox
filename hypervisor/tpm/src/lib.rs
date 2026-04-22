@@ -71,7 +71,7 @@ pub trait Ptm {
     // Convert PTM Request to bytes to be sent to tpm
     fn ptm_to_request(&self) -> Vec<u8>;
 
-    // Update PTM from tpm's reponse
+    // Update PTM from tpm's response
     fn update_ptm_with_response(&mut self, buf: &[u8]) -> Result<()>;
 
     // Update tpm result
@@ -154,7 +154,7 @@ impl Ptm for PtmCap {
     }
 }
 
-/* GET_TPMESTABLISHED Reponse */
+/* GET_TPMESTABLISHED Response */
 #[derive(Debug)]
 pub struct PtmEstResp {
     pub bit: u8,
