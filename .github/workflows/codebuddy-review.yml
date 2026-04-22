@@ -1,0 +1,177 @@
+name: Perform a code review when a pull request is created or @codebuddy is mentioned.
+on:
+  pull_request:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Cheap gate: skip comments on pure Issues (this is a PR-review
+    # workflow). Command / author-association matching is delegated to
+    # the comment-trigger action below.
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request != null
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout workflow repo (for local actions)
+        uses: actions/checkout@v5
+        with:
+          # We only need the workflow / action definitions at this point,
+          # not the PR sources — those are checked out below once we know
+          # the PR ref.
+          sparse-checkout: .github
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve trigger
+        id: trigger
+        uses: ./.github/actions/comment-trigger
+        with:
+          command: '@codebuddy review'
+          # Only repo members/owners/collaborators may trigger via comment.
+          allowed-associations: 'OWNER,MEMBER,COLLABORATOR'
+
+      - name: Checkout PR merge commit
+        if: steps.trigger.outputs.triggered == 'true'
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.trigger.outputs.merge_ref }}
+
+      - name: Pre-fetch base and head refs for the PR
+        if: steps.trigger.outputs.triggered == 'true'
+        env:
+          PR_BASE_REF: ${{ steps.trigger.outputs.base_ref }}
+          PR_NUMBER: ${{ steps.trigger.outputs.number }}
+        run: |
+          # Pass GitHub expressions through env and quote shell expansions.
+          git fetch --no-tags origin \
+            "$PR_BASE_REF" \
+            "+refs/pull/$PR_NUMBER/head"
+
+      - name: Setup Node.js
+        if: steps.trigger.outputs.triggered == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install CodeBuddy Code CLI
+        if: steps.trigger.outputs.triggered == 'true'
+        run: npm install -g @tencent-ai/codebuddy-code
+
+      - name: Write GitHub MCP server config
+        if: steps.trigger.outputs.triggered == 'true'
+        run: |
+          # CodeBuddy expands ${GH_MCP_TOKEN} at load time using its
+          # built-in environment variable expansion, so we keep the
+          # placeholder literal in the file.
+          cat > mcp-servers.json <<'JSON'
+          {
+            "mcpServers": {
+              "github": {
+                "type": "http",
+                "url": "https://api.githubcopilot.com/mcp/",
+                "headers": {
+                  "Authorization": "Bearer ${GH_MCP_TOKEN}"
+                }
+              }
+            }
+          }
+          JSON
+
+      - name: Run CodeBuddy review
+        if: steps.trigger.outputs.triggered == 'true'
+        id: run_codebuddy
+        env:
+          # CodeBuddy authentication (set this as a repo/org secret).
+          CODEBUDDY_API_KEY: ${{ secrets.CODEBUDDY_API_KEY }}
+          CODEBUDDY_BASE_URL: https://tokenhub-intl.tencentmaas.com/v1/chat/completions
+          CODEBUDDY_MODEL: kimi-k2.6
+          # Token used by the remote GitHub MCP server. Prefer a dedicated
+          # PAT (`GH_MCP_PAT`) with Copilot access; fall back to the
+          # workflow token for repo-scoped read/write.
+          GH_MCP_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+          PR_NUMBER: ${{ steps.trigger.outputs.number }}
+          PR_TITLE: ${{ steps.trigger.outputs.title }}
+          PR_BODY: ${{ steps.trigger.outputs.body }}
+          PR_BASE_SHA: ${{ steps.trigger.outputs.base_sha }}
+          PR_HEAD_SHA: ${{ steps.trigger.outputs.head_sha }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+
+          PROMPT=$(cat <<EOF
+          You are reviewing Pull Request #${PR_NUMBER} in ${REPO_OWNER}/${REPO_NAME}.
+
+          Title: ${PR_TITLE}
+          Body:
+          ${PR_BODY}
+
+          Base SHA: ${PR_BASE_SHA}
+          Head SHA: ${PR_HEAD_SHA}
+
+          Goal: perform a focused code review of ONLY the changes introduced
+          by this PR, and publish the feedback back to GitHub using the
+          "github" MCP server (tools are prefixed with mcp__github__).
+
+          Step 1 — Gather context (read-only):
+            - Use mcp__github__pull_request_read with method "get" to load
+              PR metadata, "get_files" for the changed file list, and
+              "get_diff" to inspect the patch. Use mcp__github__get_file_contents
+              if you need to see surrounding context in the changed files.
+            - You may also inspect local files via Read/Grep/Glob, but the
+              authoritative diff is the one returned by the GitHub MCP tools.
+
+          Step 2 — Publish inline + overall feedback as ONE pull request review:
+            (a) Create a pending review:
+                mcp__github__pull_request_review_write
+                  method=create, owner=${REPO_OWNER}, repo=${REPO_NAME},
+                  pullNumber=${PR_NUMBER}, commitID=${PR_HEAD_SHA}
+            (b) For each concrete, line-scoped issue, add an inline comment:
+                mcp__github__add_comment_to_pending_review
+                  with correct path, line (and startLine/side/startSide for
+                  multi-line ranges), subjectType="line", side="RIGHT" for
+                  newly added/modified lines.
+                - Only comment on lines actually touched by this PR.
+                - Be concrete and actionable; propose fixes where useful.
+                - Do NOT duplicate the same point across multiple comments.
+            (c) Submit the review with the overall summary as the body:
+                mcp__github__pull_request_review_write
+                  method=submit, event=COMMENT, body=<markdown summary>
+
+          The overall summary (body of the submitted review) MUST use this
+          structure and be concise — no filler, no praise padding:
+
+            ## Summary
+            One or two sentences describing what the PR does.
+
+            ## Highlights
+            - Bullet list of things done well (omit section if none).
+
+            ## Issues / Suggestions
+            - Bullet list of problems or improvements, each referencing
+              \`path:line\` where applicable. Group related points.
+
+            ## Verdict
+            One of: approve / request changes / comment (informational;
+            always submit as COMMENT event).
+
+          Rules:
+            - Do NOT push commits, open issues, or modify repository state
+              beyond creating this one pull request review.
+            - If there are no concrete issues, still submit the review with
+              just the summary body and no inline comments.
+            - Prefer a single pull_request_review_write submission; do not
+              post the summary again as a separate issue comment.
+          EOF
+          )
+
+          codebuddy -p -y \
+            --mcp-config mcp-servers.json \
+            --settings '{"enableAllProjectMcpServers": true}' \
+            --allowedTools "Bash(*) Read(*) Edit(*) Write(*) mcp__github" \
+            --append-system-prompt "You are a senior code reviewer. Produce high-signal, actionable feedback only. Never fabricate file paths or line numbers; verify against the PR diff before commenting." \
+            "$PROMPT"
