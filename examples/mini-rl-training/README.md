@@ -197,6 +197,28 @@ bash scripts/run-swebench.sh \
   --instance django__django-13447
 ```
 
+### MiniMax Direct Connection
+
+Connect directly to the [MiniMax API](https://platform.minimax.io/docs/api-reference/text-openai-api) without going through TokenHub.
+
+```bash
+# Set MINIMAX_API_KEY in .env (or export it)
+
+# MiniMax-M2.7 (peak performance)
+bash scripts/run-swebench.sh \
+  --model openai/MiniMax-M2.7 \
+  --config configs/e2b-minimax.yaml \
+  --instance django__django-13447
+
+# MiniMax-M2.7-highspeed (faster, same performance)
+bash scripts/run-swebench.sh \
+  --model openai/MiniMax-M2.7-highspeed \
+  --config configs/e2b-minimax.yaml \
+  --instance django__django-13447
+```
+
+> `configs/e2b-minimax.yaml` points to `https://api.minimax.io/v1` and uses `MINIMAX_API_KEY`.
+
 ## Concurrent Evaluation
 
 Use `scripts/run-concurrent.py` for multi-model, multi-instance concurrent evaluation with sandbox pre-creation and TUI real-time monitoring.
@@ -308,7 +330,8 @@ cube-sandbox-rl-example/
 │   ├── e2b-tokenhub.yaml            # TokenHub model config
 │   ├── e2b-kimi.yaml                # Kimi K2.5 specific config
 │   ├── e2b-deepseek.yaml            # DeepSeek Chat config
-│   └── e2b-deepseek-reasoner.yaml   # DeepSeek Reasoner config
+│   ├── e2b-deepseek-reasoner.yaml   # DeepSeek Reasoner config
+│   └── e2b-minimax.yaml             # MiniMax direct API config
 ├── scripts/
 │   ├── setup-env.sh                 # One-click environment setup
 │   ├── inject-envd.sh               # Inject envd into SWE-bench image

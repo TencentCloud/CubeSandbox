@@ -35,7 +35,7 @@ Edit `.env`:
 | Variable | Description |
 |----------|-------------|
 | `TOKENHUB_API_KEY` | TokenHub API key (automatically mapped to `OPENAI_API_KEY`) |
-| `OPENAI_BASE_URL` | LLM endpoint (defaults to `https://tokenhub.tencentmaas.com/v1`) |
+| `OPENAI_BASE_URL` | LLM endpoint (defaults to `https://tokenhub.tencentmaas.com/v1`; set to `https://api.minimax.io/v1` for MiniMax direct) |
 | `E2B_API_URL` | CubeAPI URL, e.g. `http://<cube-host>:3000` |
 | `E2B_API_KEY` | CubeAPI auth key |
 | `CUBE_TEMPLATE_ID` | Sandbox template ID |
@@ -68,6 +68,9 @@ A minimal Shell Agent that demonstrates the core steps of integrating with CubeS
 # Basic Agent Q&A
 python simple_demo.py
 python simple_demo.py --question "What Linux distro is this?"
+
+# Use MiniMax-M2.7 directly (set OPENAI_API_KEY and OPENAI_BASE_URL first)
+python simple_demo.py --model MiniMax-M2.7
 
 # Pause / Resume demo (write file → pause → resume → verify file)
 python simple_demo.py --pause-resume
@@ -140,8 +143,11 @@ python main.py
 # Custom question
 python main.py --question "What Python version is installed? Show the Django version too."
 
-# Specify model
+# Specify model (TokenHub)
 python main.py --model openai/deepseek-v3.2
+
+# Use MiniMax-M2.7 directly (set OPENAI_API_KEY=<minimax-key> and OPENAI_BASE_URL=https://api.minimax.io/v1)
+python main.py --model MiniMax-M2.7
 
 # Only test sandbox connectivity (do not call the LLM)
 python main.py --sandbox-only
