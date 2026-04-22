@@ -108,7 +108,7 @@ func TestPassThroughAnnotationsFilter(t *testing.T) {
 				"matchmid.com/mi*d",
 				"matchhead.com/*head",
 				"matchall.com/*",
-				"end*/matchend",
+				"end*/matched",
 				"mi*d/matchmid",
 				"*head/matchhead",
 				"*/matchall",
