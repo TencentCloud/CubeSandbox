@@ -273,7 +273,7 @@ func TestSetBs_Multidb(t *testing.T) {
 	}
 }
 
-func TestSetBs_Multidb_SingelKey_BenchMark(t *testing.T) {
+func TestSetBs_Multidb_SingleKey_BenchMark(t *testing.T) {
 	SkipCI(t)
 
 	basePath := t.TempDir()
