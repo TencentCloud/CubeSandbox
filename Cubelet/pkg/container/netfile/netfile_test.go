@@ -178,7 +178,7 @@ func TestCubeboxNetfile_WriteToHost_EmptyRootPath(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestCubeboxNetfile_ContainerVirtiofsDirMaping(t *testing.T) {
+func TestCubeboxNetfile_ContainerVirtiofsDirMapping(t *testing.T) {
 	tmpDir := t.TempDir()
 	cn := &CubeboxNetfile{
 		RootPath: tmpDir,
@@ -190,16 +190,16 @@ func TestCubeboxNetfile_ContainerVirtiofsDirMaping(t *testing.T) {
 		},
 	}
 
-	mapping := cn.ContainerVirtiofsDirMaping("container1")
+	mapping := cn.ContainerVirtiofsDirMapping("container1")
 	require.NotNil(t, mapping)
 	assert.Equal(t, tmpDir, mapping.SharePath)
 	assert.Equal(t, filepath.Join(filepath.Base(tmpDir), "container1"), mapping.MountPath)
 
-	mapping = cn.ContainerVirtiofsDirMaping("nonexistent")
+	mapping = cn.ContainerVirtiofsDirMapping("nonexistent")
 	assert.Nil(t, mapping)
 
 	cn.RootPath = ""
-	mapping = cn.ContainerVirtiofsDirMaping("container1")
+	mapping = cn.ContainerVirtiofsDirMapping("container1")
 	assert.Nil(t, mapping)
 }
 
