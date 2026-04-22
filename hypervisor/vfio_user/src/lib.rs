@@ -251,9 +251,9 @@ pub enum Error {
     #[error("Error connecting: {0}")]
     Connect(#[source] std::io::Error),
     #[error("Error serializing capabilities: {0}")]
-    SerializeCapabilites(#[source] serde_json::Error),
+    SerializeCapabilities(#[source] serde_json::Error),
     #[error("Error deserializing capabilities: {0}")]
-    DeserializeCapabilites(#[source] serde_json::Error),
+    DeserializeCapabilities(#[source] serde_json::Error),
     #[error("Error writing to stream: {0}")]
     StreamWrite(#[source] std::io::Error),
     #[error("Error reading from stream: {0}")]
@@ -290,7 +290,7 @@ impl Client {
     fn negotiate_version(&mut self) -> Result<(), Error> {
         let caps = Capabilities::default();
 
-        let version_data = serde_json::to_string(&caps).map_err(Error::SerializeCapabilites)?;
+        let version_data = serde_json::to_string(&caps).map_err(Error::SerializeCapabilities)?;
 
         let version = Version {
             header: Header {
@@ -339,7 +339,7 @@ impl Client {
 
         let server_caps: Capabilities =
             serde_json::from_slice(&server_version_data[0..server_version_data.len() - 1])
-                .map_err(Error::DeserializeCapabilites)?;
+                .map_err(Error::DeserializeCapabilities)?;
 
         debug!(
             "Received server version information: major = {} minor = {} capabilities = {:?}",
@@ -576,8 +576,8 @@ impl Client {
         let cap_data_ptr = cap_data.as_ptr();
         let mut region_info_offset = region_info.cap_offset;
         while region_info_offset != 0 {
-            // calculate the offset from the begining of the cap_data based on the offset
-            // that is relative to the begining of the VFIO region info structure
+            // calculate the offset from the beginning of the cap_data based on the offset
+            // that is relative to the beginning of the VFIO region info structure
             let cap_offset = region_info_offset - size_of::<vfio_region_info>() as u32;
             if cap_offset + cap_header_size > cap_size {
                 warn!(
