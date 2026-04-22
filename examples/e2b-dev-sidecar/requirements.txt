@@ -1,0 +1,3 @@
+aiohttp>=3.9
+e2b-code-interpreter
+python-dotenv

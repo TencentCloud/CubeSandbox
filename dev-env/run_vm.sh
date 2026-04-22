@@ -8,6 +8,8 @@
 # mode networking with port forwards:
 #   - host :10022 -> guest :22  (ssh, used by login.sh / sync_to_vm.sh / copy_logs.sh)
 #   - host :13000 -> guest :3000 (cube-api HTTP endpoint)
+#   - host :11080 -> guest :80   (cube-proxy HTTP endpoint)
+#   - host :11443 -> guest :443  (cube-proxy HTTPS endpoint)
 #
 # Run prepare_image.sh first to produce the image. This script is the normal
 # way to start the VM for day-to-day development.
@@ -33,6 +35,8 @@ VM_MEMORY_MB="${VM_MEMORY_MB:-8192}"
 VM_CPUS="${VM_CPUS:-4}"
 SSH_PORT="${SSH_PORT:-10022}"
 CUBE_API_PORT="${CUBE_API_PORT:-13000}"
+CUBE_PROXY_HTTP_PORT="${CUBE_PROXY_HTTP_PORT:-11080}"
+CUBE_PROXY_HTTPS_PORT="${CUBE_PROXY_HTTPS_PORT:-11443}"
 REQUIRE_NESTED_KVM="${REQUIRE_NESTED_KVM:-1}"
 VM_BACKGROUND="${VM_BACKGROUND:-0}"
 QEMU_PIDFILE="${QEMU_PIDFILE:-${WORK_DIR}/qemu.pid}"
@@ -119,6 +123,8 @@ log_info "  Login user : opencloudos"
 log_info "  Password   : opencloudos"
 log_info "  SSH        : ssh -p ${SSH_PORT} opencloudos@127.0.0.1"
 log_info "  Cube API   : http://127.0.0.1:${CUBE_API_PORT} -> guest:3000"
+log_info "  CubeProxy  : http://127.0.0.1:${CUBE_PROXY_HTTP_PORT} -> guest:80"
+log_info "  CubeProxy  : https://127.0.0.1:${CUBE_PROXY_HTTPS_PORT} -> guest:443"
 if [[ "${VM_BACKGROUND}" == "1" ]]; then
   log_info "Background mode:"
   log_info "  PID file   : ${QEMU_PIDFILE}"
@@ -136,7 +142,7 @@ QEMU_ARGS=(
   -smp "${VM_CPUS}"
   -device virtio-rng-pci
   -drive if=virtio,format=qcow2,file="${IMAGE_PATH}"
-  -nic user,model=virtio-net-pci,hostfwd=tcp::"${SSH_PORT}"-:22,hostfwd=tcp::"${CUBE_API_PORT}"-:3000
+  -nic user,model=virtio-net-pci,hostfwd=tcp::"${SSH_PORT}"-:22,hostfwd=tcp::"${CUBE_API_PORT}"-:3000,hostfwd=tcp::"${CUBE_PROXY_HTTP_PORT}"-:80,hostfwd=tcp::"${CUBE_PROXY_HTTPS_PORT}"-:443
 )
 
 if [[ "${VM_BACKGROUND}" == "1" ]]; then

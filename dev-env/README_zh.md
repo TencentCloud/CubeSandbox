@@ -12,6 +12,8 @@
 ```text
 SSH      : 127.0.0.1:10022 -> guest:22
 Cube API : 127.0.0.1:13000 -> guest:3000
+Cube HTTP: 127.0.0.1:11080 -> guest:80
+Cube TLS : 127.0.0.1:11443 -> guest:443
 ```
 
 适用场景：
@@ -160,7 +162,7 @@ MODE=release ./sync_to_vm.sh
 | 虚机内没有 `/dev/kvm` | 宿主机未开启 nested KVM | 在宿主机启用 nested virtualization，再重启虚机 |
 | `./login.sh` 连不上 | 虚机还没启动，或宿主机 10022 端口被占用 | 确认 `./run_vm.sh` 还在运行，或换 `SSH_PORT` |
 | 虚机里 `df -h /` 还是很小 | `prepare_image.sh` 没走完自动扩容 | 查看 `.workdir/qemu-serial.log`，然后把 `internal/grow_rootfs.sh` scp 进去手动跑一次 |
-| 宿主机 13000 端口被占 | 本机有别的服务在用 | 用 `CUBE_API_PORT=23000 ./run_vm.sh` |
+| 宿主机 13000 / 11080 / 11443 端口被占 | 本机有别的服务在用这些 dev-env 转发端口 | 用 `CUBE_API_PORT=23000 CUBE_PROXY_HTTP_PORT=21080 CUBE_PROXY_HTTPS_PORT=21443 ./run_vm.sh` |
 | 虚机重启后 cube 组件没了 | 还没开启 autostart | 跑一次 `./cube-autostart.sh` |
 | `sync_to_vm.sh` 自动回滚了 | `quickcheck` 用新二进制失败 | 看 guest 里 `/data/log/`，修 bug 后重新跑 `sync_to_vm.sh` |
 
@@ -207,6 +209,8 @@ dev-env/
 | `VM_CPUS` | `4` | guest vCPU 数。 |
 | `SSH_PORT` | `10022` | 宿主机 → guest SSH。 |
 | `CUBE_API_PORT` | `13000` | 宿主机 → guest Cube API。 |
+| `CUBE_PROXY_HTTP_PORT` | `11080` | 宿主机 → guest CubeProxy HTTP（`guest:80`）。 |
+| `CUBE_PROXY_HTTPS_PORT` | `11443` | 宿主机 → guest CubeProxy HTTPS（`guest:443`）。 |
 | `REQUIRE_NESTED_KVM` | `1` | 宿主机未开 nested KVM 时拒绝启动。`0` 跳过（沙箱跑不起来）。 |
 
 #### `login.sh`

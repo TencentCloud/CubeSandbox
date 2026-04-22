@@ -12,6 +12,8 @@ Linux host, with SSH and the Cube API port-forwarded back to localhost:
 ```text
 SSH      : 127.0.0.1:10022 -> guest:22
 Cube API : 127.0.0.1:13000 -> guest:3000
+Cube HTTP: 127.0.0.1:11080 -> guest:80
+Cube TLS : 127.0.0.1:11443 -> guest:443
 ```
 
 Use this when you want to:
@@ -174,7 +176,7 @@ README as `data-log-<timestamp>.tar.gz`.
 | No `/dev/kvm` inside the guest | Nested KVM disabled on the host | Enable nested virtualization on the host, then reboot the VM |
 | `./login.sh` fails to connect | VM not booted yet, or host port 10022 is busy | Check that `./run_vm.sh` is still running, or set `SSH_PORT` |
 | `df -h /` inside the guest is still small | `prepare_image.sh` never finished the auto-grow step | Inspect `.workdir/qemu-serial.log`, then `scp internal/grow_rootfs.sh` into the guest and run it manually |
-| Host port 13000 already taken | Some other service binds `13000` | Start with `CUBE_API_PORT=23000 ./run_vm.sh` |
+| Host port 13000 / 11080 / 11443 already taken | Some other service binds the forwarded dev-env ports | Start with `CUBE_API_PORT=23000 CUBE_PROXY_HTTP_PORT=21080 CUBE_PROXY_HTTPS_PORT=21443 ./run_vm.sh` |
 | Cube components gone after VM reboot | Autostart not enabled | Run `./cube-autostart.sh` once |
 | `sync_to_vm.sh` rolled back | `quickcheck` failed with new binaries | Check `/data/log/` in the guest, fix the bug, then re-run `sync_to_vm.sh` |
 
@@ -221,6 +223,8 @@ Generated artifacts (qcow2, pid file, serial log) live in `.workdir/`.
 | `VM_CPUS` | `4` | Guest vCPUs. |
 | `SSH_PORT` | `10022` | Host -> guest SSH. |
 | `CUBE_API_PORT` | `13000` | Host -> guest Cube API. |
+| `CUBE_PROXY_HTTP_PORT` | `11080` | Host -> guest CubeProxy HTTP (`guest:80`). |
+| `CUBE_PROXY_HTTPS_PORT` | `11443` | Host -> guest CubeProxy HTTPS (`guest:443`). |
 | `REQUIRE_NESTED_KVM` | `1` | Refuse to boot if host nested KVM is off. `0` to bypass (sandboxes won't run). |
 
 #### `login.sh`
