@@ -199,7 +199,7 @@ const (
 	AffinityKeyCPUType             = "kubernetes.io/cpu-type"
 	AffinityKeyZone                = "topology.kubernetes.io/zone"
 	AffinityKeyClusterID           = "topology.kubernetes.io/cluster-id"
-	AffinityKeyDisaterRecoverGroup = "topology.kubernetes.io/disaster-recover-group-id"
+	AffinityKeyDisasterRecoverGroup = "topology.kubernetes.io/disaster-recover-group-id"
 	AffinityKeyMemorySize          = "kubernetes.io/memory-size"
 	AffinityKeyCPUCores            = "kubernetes.io/cpu-cores"
 	AffinityKeyInstanceType        = "kubernetes.io/instance-type"
