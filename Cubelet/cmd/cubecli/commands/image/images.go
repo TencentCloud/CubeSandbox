@@ -173,7 +173,7 @@ var ListImageCommand = &cli.Command{
 
 var GlobalListImageCommand = &cli.Command{
 	Name:   "images",
-	Usage:  "Waring: List images is deprecated, use 'cube image ls' instead.",
+	Usage:  "Warning: List images is deprecated, use 'cube image ls' instead.",
 	Action: ListImageCommand.Action,
 	Flags:  ListImageCommand.Flags,
 }
