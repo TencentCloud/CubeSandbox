@@ -342,7 +342,7 @@ pub struct Config {
 
     /// A hit to access share path by read only, so that we could do some optimization on migration.
     /// The correct way to implement a readonly passthroughfs should be like "5eab594b4e2a"("Add
-    /// PassthroughFsRo as read-only variant"), let's optmize this in next rebase from upstream.
+    /// PassthroughFsRo as read-only variant"), let's optimize this in next rebase from upstream.
     ///
     /// The default is 'false'.
     pub read_only: bool,
@@ -493,7 +493,7 @@ impl PassthroughFs {
         )?;
 
         let timeout = match cfg.cache_policy {
-            // We using mode 'Never' in cube product, to reudce
+            // We using mode 'Never' in cube product, to reduce
             // file pagecache inside guest kernel.
             // But we want to keep directory entry cache to speed
             // up getdents/getdents64 in guest kernel, to avoid
