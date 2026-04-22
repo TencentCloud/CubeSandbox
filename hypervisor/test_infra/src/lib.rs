@@ -151,7 +151,7 @@ impl GuestNetworkConfig {
                  expected_guest_addr=\"{}\"\n\
                  message=\"{}\"\n\
                  error=\"{:?}\"\n\
-                 \n==== End 'wait_vm_boot' outout ====\n\n",
+                 \n==== End 'wait_vm_boot' output ====\n\n",
                     duration, timeout, listen_addr, expected_guest_addr, s, e
                 );
 
@@ -605,7 +605,7 @@ fn scp_to_guest_with_auth(
                          auth=\"{:#?}\"\n\
                          ip=\"{}\"\n\
                          error=\"{:?}\"\n\
-                         \n==== End scp command outout ====\n\n",
+                         \n==== End scp command output ====\n\n",
                         path, remote_path, auth, ip, e
                     );
 
@@ -690,7 +690,7 @@ pub fn ssh_command_ip_with_auth(
                          ip=\"{}\"\n\
                          output=\"{}\"\n\
                          error=\"{:?}\"\n\
-                         \n==== End ssh command outout ====\n\n",
+                         \n==== End ssh command output ====\n\n",
                         command, auth, ip, s, e
                     );
 
