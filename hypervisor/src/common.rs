@@ -127,8 +127,8 @@ impl Logger {
         }
 
         if !self.defer_logger_thread {
-            let logger_startd = self.logger_thread_started.lock().unwrap();
-            if !logger_startd.load(Ordering::SeqCst) {
+            let logger_started = self.logger_thread_started.lock().unwrap();
+            if !logger_started.load(Ordering::SeqCst) {
                 self.build_logger_thread();
                 match target {
                     LOG_CTRL_REOPEN => {
@@ -136,7 +136,7 @@ impl Logger {
                     }
                     _ => slog_info!(slog_scope::logger(), "{}", data),
                 };
-                logger_startd.store(true, Ordering::SeqCst);
+                logger_started.store(true, Ordering::SeqCst);
             } else {
                 // logger thread has been started, slog those waiting for
                 // logger_thread_started lock
@@ -152,8 +152,8 @@ impl Logger {
         }
 
         if self.vcpu_started.load(Ordering::SeqCst) {
-            let logger_startd = self.logger_thread_started.lock().unwrap();
-            if !logger_startd.load(Ordering::SeqCst) {
+            let logger_started = self.logger_thread_started.lock().unwrap();
+            if !logger_started.load(Ordering::SeqCst) {
                 self.build_logger_thread();
                 for v in self.buffer.lock().unwrap().drain(..) {
                     slog_info!(slog_scope::logger(), "{}", v);
@@ -167,7 +167,7 @@ impl Logger {
                     }
                     _ => slog_info!(slog_scope::logger(), "{}", data),
                 };
-                logger_startd.store(true, Ordering::SeqCst);
+                logger_started.store(true, Ordering::SeqCst);
             } else {
                 // logger thread has been started, slog those waiting for
                 // logger_thread_started lock
