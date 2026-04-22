@@ -186,7 +186,7 @@ func (c *createSandboxContext) handleCubelet() {
 			c.retryTimes++
 
 			if c.cubeletRsp != nil && c.cubeletRsp.GetRet() != nil &&
-				errorcode.IsCircutBreakCode(errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode())) {
+				errorcode.IsCircuitBreakCode(errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode())) {
 				c.selctx.AddLastBadNode(c.selectHost)
 			}
 			continue
