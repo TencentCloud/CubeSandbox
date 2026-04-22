@@ -34,7 +34,7 @@
 //!    rule. It is equivalent to `:prefix:all:key:prepend`.
 //!
 //! An xattrmap is just a series of these rules separated by whitespace. Each rule
-//! can have its own delimiter. The colon (`:`) was just used here as an arbitary
+//! can have its own delimiter. The colon (`:`) was just used here as an arbitrary
 //! example. Use a delimiter that you find readable.
 //!
 //! Let's dissect the xattrmap rule syntax: `:type:scope:key:prepend:`.
