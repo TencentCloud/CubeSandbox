@@ -116,7 +116,7 @@ out=`fdisk -l  ${dest_file} --bytes | grep -i -A ${nr_partitions} 'Device' | tai
 IFS='
 '
 i=0
-declare -A liness
+declare -A lines
 for x in $out ; do
 	lines[$i]=$x
 	i=$((i+1))
