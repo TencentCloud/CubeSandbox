@@ -864,7 +864,7 @@ pub(crate) mod tests {
         assert_eq!(l.consume(100, TokenType::Bytes), BucketReduction::Failure);
 
         // after waiting out the full duration, rate limiter should be
-        // availale again
+        // available again
         thread::sleep(Duration::from_millis(200));
         assert!(l.event_handler().is_ok());
         assert!(!l.is_blocked());
