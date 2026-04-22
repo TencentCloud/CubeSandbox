@@ -115,7 +115,7 @@ func (cn *CubeboxNetfile) CreateNetfiles(req *cubebox.RunCubeSandboxRequest) err
 	return nil
 }
 
-func (cn *CubeboxNetfile) ContainerVirtiofsDirMaping(containerName string) *virtiofs.ShareDirMapping {
+func (cn *CubeboxNetfile) ContainerVirtiofsDirMapping(containerName string) *virtiofs.ShareDirMapping {
 	if cn.RootPath == "" {
 		return nil
 	}
