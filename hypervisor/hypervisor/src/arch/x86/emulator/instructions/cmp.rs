@@ -18,7 +18,7 @@ use crate::arch::x86::Exception;
 // CMP affects OF, SF, ZF, AF, PF and CF
 const FLAGS_MASK: u64 = CF | PF | AF | ZF | SF | OF;
 
-// TODO: Switch to inline asm when that's stable. Executing CMP (or any arthimetic instructions)
+// TODO: Switch to inline asm when that's stable. Executing CMP (or any arithmetic instructions)
 // natively and extracting RFLAGS will be much faster and make the code simpler.
 fn calc_rflags_cpazso(op0: u64, op1: u64, op_size: usize) -> u64 {
     let op_bits = op_size * 8;
