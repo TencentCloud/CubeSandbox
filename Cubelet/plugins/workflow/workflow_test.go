@@ -31,7 +31,7 @@ func TestLimiter(t *testing.T) {
 		}
 		defer limiter.Release(1)
 		wg.Done()
-		log.Printf("runing %d", i)
+		log.Printf("running %d", i)
 		defer log.Printf("end %d", i)
 		for {
 			select {
