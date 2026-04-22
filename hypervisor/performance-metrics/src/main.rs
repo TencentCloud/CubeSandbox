@@ -509,7 +509,7 @@ fn main() {
         .arg(
             Arg::new("list-tests")
                 .long("list-tests")
-                .help("Print the list of availale metrics tests")
+                .help("Print the list of available metrics tests")
                 .num_args(0)
                 .action(ArgAction::SetTrue)
                 .required(false),
