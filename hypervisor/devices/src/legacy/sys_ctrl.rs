@@ -89,7 +89,7 @@ impl BusDevice for SysCtrl {
         }
 
         if (code & SYS_PANIC) == SYS_PANIC {
-            warn!("Guest paniced and coredump");
+            warn!("Guest panicked and coredump");
         }
         if (code & SYS_VSOCK_SERVER) == SYS_VSOCK_SERVER {
             info!("vsock server ready");
