@@ -13,22 +13,22 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
-type whilelistWeightedScore struct {
+type whitelistWeightedScore struct {
 }
 
-func (l *whilelistWeightedScore) ID() string {
-	return constants.SelectorPostScoreID + "/" + "whilelist_weighted_score"
+func (l *whitelistWeightedScore) ID() string {
+	return constants.SelectorPostScoreID + "/" + "whitelist_weighted_score"
 }
 
-func (l *whilelistWeightedScore) String() string {
+func (l *whitelistWeightedScore) String() string {
 	return l.ID()
 }
 
-func (l *whilelistWeightedScore) Disable() bool {
+func (l *whitelistWeightedScore) Disable() bool {
 	return config.GetConfig().Scheduler.PostScore.Disable
 }
 
-func (l *whilelistWeightedScore) PostedScore(selCtx *selctx.SelectorCtx, result map[string]*node.NodeScore) (err error) {
+func (l *whitelistWeightedScore) PostedScore(selCtx *selctx.SelectorCtx, result map[string]*node.NodeScore) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = ret.Errorf(errorcode.ErrorCode_MasterInternalError, "PostedScore panic:%s", r)
