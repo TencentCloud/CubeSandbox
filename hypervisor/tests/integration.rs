@@ -1679,7 +1679,7 @@ fn test_memory_mergeable(mergeable: bool) {
         "mergeable=off"
     };
 
-    // We are assuming the rest of the system in our CI is not using mergeable memeory
+    // We are assuming the rest of the system in our CI is not using mergeable memory
     let ksm_ps_init = get_ksm_pages_shared();
     assert!(ksm_ps_init == 0);
 
@@ -6228,7 +6228,7 @@ mod common_parallel {
             guest.ssh_command("screen -dmS reboot sh -c \"sleep 5; echo s | tee /proc/sysrq-trigger; echo c | sudo tee /proc/sysrq-trigger\"").unwrap();
             // Allow some time for the watchdog to trigger (max 30s) and reboot to happen
             guest.wait_vm_boot(Some(50)).unwrap();
-            // Check a reboot is triggerred by the watchdog
+            // Check a reboot is triggered by the watchdog
             expected_reboot_count += 1;
             assert_eq!(get_reboot_count(&guest), expected_reboot_count);
 
@@ -7076,17 +7076,17 @@ mod common_sequential {
         let disk_config = DiskConfig::parse(disk_params_restored.as_str()).unwrap();
 
         // pmem config
-        let pmem_temp_file_retored = TempFile::new().unwrap();
-        pmem_temp_file_retored.as_file().set_len(128 << 20).unwrap();
+        let pmem_temp_file_restored = TempFile::new().unwrap();
+        pmem_temp_file_restored.as_file().set_len(128 << 20).unwrap();
         std::process::Command::new("mkfs.ext4")
-            .arg(pmem_temp_file_retored.as_path())
+            .arg(pmem_temp_file_restored.as_path())
             .output()
             .expect("Expect creating disk image to succeed");
         let pmem_config = PmemConfig::parse(
             format!(
                 "id={},file={}",
                 pmem_id,
-                pmem_temp_file_retored.as_path().to_str().unwrap()
+                pmem_temp_file_restored.as_path().to_str().unwrap()
             )
             .as_str(),
         )
@@ -9327,13 +9327,13 @@ mod live_migration {
             );
         });
 
-        // Check and report any errors occured during the live-migration
+        // Check and report any errors occurred during the live-migration
         if r.is_err() {
             print_and_panic(
                 src_child,
                 dest_child,
                 None,
-                "Error occured during live-migration",
+                "Error occurred during live-migration",
             );
         }
 
@@ -9348,7 +9348,7 @@ mod live_migration {
             );
         };
 
-        // Post live-migration check to make sure the destination VM is funcational
+        // Post live-migration check to make sure the destination VM is functional
         let r = std::panic::catch_unwind(|| {
             // Perform same checks to validate VM has been properly migrated
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), boot_vcpus);
@@ -9362,7 +9362,7 @@ mod live_migration {
         let dest_output = dest_child.wait_with_output().unwrap();
         handle_child_output(r, &dest_output);
 
-        // Check the destination VM has the expected 'concole_text' from its output
+        // Check the destination VM has the expected 'console_text' from its output
         let r = std::panic::catch_unwind(|| {
             assert!(String::from_utf8_lossy(&dest_output.stdout).contains(&console_text));
         });
@@ -9501,13 +9501,13 @@ mod live_migration {
             );
         });
 
-        // Check and report any errors occured during the live-migration
+        // Check and report any errors occurred during the live-migration
         if r.is_err() {
             print_and_panic(
                 src_child,
                 dest_child,
                 None,
-                "Error occured during live-migration",
+                "Error occurred during live-migration",
             );
         }
 
@@ -9522,7 +9522,7 @@ mod live_migration {
             );
         };
 
-        // Post live-migration check to make sure the destination VM is funcational
+        // Post live-migration check to make sure the destination VM is functional
         let r = std::panic::catch_unwind(|| {
             // Perform same checks to validate VM has been properly migrated
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), boot_vcpus);
@@ -9551,7 +9551,7 @@ mod live_migration {
         let dest_output = dest_child.wait_with_output().unwrap();
         handle_child_output(r, &dest_output);
 
-        // Check the destination VM has the expected 'concole_text' from its output
+        // Check the destination VM has the expected 'console_text' from its output
         let r = std::panic::catch_unwind(|| {
             assert!(String::from_utf8_lossy(&dest_output.stdout).contains(&console_text));
         });
@@ -9719,13 +9719,13 @@ mod live_migration {
             );
         });
 
-        // Check and report any errors occured during the live-migration
+        // Check and report any errors occurred during the live-migration
         if r.is_err() {
             print_and_panic(
                 src_child,
                 dest_child,
                 None,
-                "Error occured during live-migration",
+                "Error occurred during live-migration",
             );
         }
 
@@ -9740,7 +9740,7 @@ mod live_migration {
             );
         };
 
-        // Post live-migration check to make sure the destination VM is funcational
+        // Post live-migration check to make sure the destination VM is functional
         let r = std::panic::catch_unwind(|| {
             // Perform same checks to validate VM has been properly migrated
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), boot_vcpus);
@@ -9798,7 +9798,7 @@ mod live_migration {
         let dest_output = dest_child.wait_with_output().unwrap();
         handle_child_output(r, &dest_output);
 
-        // Check the destination VM has the expected 'concole_text' from its output
+        // Check the destination VM has the expected 'console_text' from its output
         let r = std::panic::catch_unwind(|| {
             assert!(String::from_utf8_lossy(&dest_output.stdout).contains(&console_text));
         });
@@ -9938,13 +9938,13 @@ mod live_migration {
             );
         });
 
-        // Check and report any errors occured during the live-migration
+        // Check and report any errors occurred during the live-migration
         if r.is_err() {
             print_and_panic(
                 src_child,
                 dest_child,
                 None,
-                "Error occured during live-migration",
+                "Error occurred during live-migration",
             );
         }
 
@@ -9959,7 +9959,7 @@ mod live_migration {
             );
         };
 
-        // Post live-migration check to make sure the destination VM is funcational
+        // Post live-migration check to make sure the destination VM is functional
         let r = std::panic::catch_unwind(|| {
             // Perform same checks to validate VM has been properly migrated
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), boot_vcpus);
@@ -9979,7 +9979,7 @@ mod live_migration {
             guest.ssh_command("screen -dmS reboot sh -c \"sleep 5; echo s | tee /proc/sysrq-trigger; echo c | sudo tee /proc/sysrq-trigger\"").unwrap();
             // Allow some time for the watchdog to trigger (max 30s) and reboot to happen
             guest.wait_vm_boot(Some(50)).unwrap();
-            // Check a reboot is triggerred by the watchdog
+            // Check a reboot is triggered by the watchdog
             expected_reboot_count += 1;
             assert_eq!(get_reboot_count(&guest), expected_reboot_count);
 
@@ -10000,7 +10000,7 @@ mod live_migration {
         let dest_output = dest_child.wait_with_output().unwrap();
         handle_child_output(r, &dest_output);
 
-        // Check the destination VM has the expected 'concole_text' from its output
+        // Check the destination VM has the expected 'console_text' from its output
         let r = std::panic::catch_unwind(|| {
             assert!(String::from_utf8_lossy(&dest_output.stdout).contains(&console_text));
         });
@@ -10048,13 +10048,13 @@ mod live_migration {
             );
         });
 
-        // Check and report any errors occured during the live-migration
+        // Check and report any errors occurred during the live-migration
         if r.is_err() {
             print_and_panic(
                 src_child,
                 dest_child,
                 Some(ovs_child),
-                "Error occured during live-migration",
+                "Error occurred during live-migration",
             );
         }
 
@@ -10069,7 +10069,7 @@ mod live_migration {
             );
         };
 
-        // Post live-migration check to make sure the destination VM is funcational
+        // Post live-migration check to make sure the destination VM is functional
         let r = std::panic::catch_unwind(|| {
             // Perform same checks to validate VM has been properly migrated
             // Spawn a new netcat listener in the OVS VM
