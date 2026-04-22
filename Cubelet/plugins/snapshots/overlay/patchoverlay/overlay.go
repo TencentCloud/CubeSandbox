@@ -570,7 +570,7 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		} else {
 			_, err := storage.GetSnapshot(ctx, refkey)
 			if err == nil {
-				return fmt.Errorf("commited cube ref snapshot already exist: %w", errdefs.ErrAlreadyExists)
+				return fmt.Errorf("committed cube ref snapshot already exist: %w", errdefs.ErrAlreadyExists)
 			}
 			shouldCommit = true
 		}
