@@ -102,8 +102,8 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	}
 	err = l.cbriManager.DestroySandbox(ctx, sb.SandboxID)
 	if err != nil {
-		log.G(ctx).Errorf("faild to destroy cbri sandbox %s", err.Error())
-		return fmt.Errorf("faild to destroy cbri sandbox")
+		log.G(ctx).Errorf("failed to destroy cbri sandbox %s", err.Error())
+		return fmt.Errorf("failed to destroy cbri sandbox")
 	}
 
 	l.collectSandboxLifeTimeMetric(ctx, sb)
