@@ -392,10 +392,10 @@ func (e *cubeboxInstancePlugin) resolveSnapshotRuntimeArtifacts(
 	var imagePath string
 
 	if localTemplate != nil {
-		if component, ok := localTemplate.Componts[templatetypes.CubeComponentCubeKernel]; ok {
+		if component, ok := localTemplate.Components[templatetypes.CubeComponentCubeKernel]; ok {
 			kernelPath = strings.TrimSpace(component.Component.Path)
 		}
-		if component, ok := localTemplate.Componts[templatetypes.CubeComponentCubeImage]; ok {
+		if component, ok := localTemplate.Components[templatetypes.CubeComponentCubeImage]; ok {
 			imagePath = strings.TrimSpace(component.Component.Path)
 		}
 	}
