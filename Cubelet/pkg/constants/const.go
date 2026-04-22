@@ -235,7 +235,7 @@ const (
 
 	DefaultSnapshotDir = "/usr/local/services/cubetoolbox/cube-snapshot"
 
-	AnnotationContaineRootfsPropagation = "cube.container.rootfs.propagation"
+	AnnotationContainRootfsPropagation = "cube.container.rootfs.propagation"
 
 	AnnotationVMKernelCmdlineAppend = "cube.vm.kernel.cmdline.append"
 	AnnotationVirtiofs              = "cube.virtiofs"
