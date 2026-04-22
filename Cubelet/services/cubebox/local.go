@@ -437,8 +437,8 @@ func (l *local) CleanUp(ctx context.Context, opts *workflow.CleanContext) error 
 
 	err = l.cbriManager.DestroySandbox(ctx, info.SandboxID)
 	if err != nil {
-		log.G(ctx).Errorf("faild to destroy cbri sandbox %s", err.Error())
-		return fmt.Errorf("faild to destroy cbri sandbox")
+		log.G(ctx).Errorf("failed to destroy cbri sandbox %s", err.Error())
+		return fmt.Errorf("failed to destroy cbri sandbox")
 	}
 
 	var ctrLists []*cubeboxstore.Container
