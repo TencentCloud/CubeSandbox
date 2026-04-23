@@ -6394,19 +6394,14 @@ mod common_parallel {
             &expected_events,
             &event_path_restored
         ));
-        let latest_events = [&MetaEvent {
-            event: "restored".to_string(),
-            device_id: None,
-        }];
-        assert!(check_latest_events_exact(
-            &latest_events,
-            &event_path_restored
-        ));
 
         let r = std::panic::catch_unwind(|| {
-            // Resume the VM
-            assert!(remote_command(&api_socket_restored, "resume", None));
+            // Automatically restart the VM after it has been restored
             let latest_events = [
+                &MetaEvent {
+                    event: "restored".to_string(),
+                    device_id: None,
+                },
                 &MetaEvent {
                     event: "resuming".to_string(),
                     device_id: None,
