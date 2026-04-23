@@ -641,7 +641,7 @@ fn test_cpu_topology(threads_per_core: u8, cores_per_package: u8, packages: u8, 
         );
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     handle_child_output(r, &output);
@@ -718,7 +718,7 @@ fn _test_guest_numa_nodes(acpi: bool) {
         }
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     handle_child_output(r, &output);
@@ -926,7 +926,7 @@ fn test_vhost_user_net(
         }
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     thread::sleep(std::time::Duration::new(5, 0));
@@ -1073,7 +1073,7 @@ fn test_vhost_user_blk(
         guest.ssh_command("rm -r mount_image").unwrap();
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     if let Some(mut daemon_child) = daemon_child {
@@ -1144,7 +1144,7 @@ fn test_boot_from_vhost_user_blk(
         assert_eq!(guest.get_cpu_count().unwrap_or_default(), num_queues as u32);
         assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
     });
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     if let Some(mut daemon_child) = daemon_child {
@@ -1505,7 +1505,7 @@ fn _test_virtio_fs(
         (r, None)
     };
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     let _ = daemon_child.kill();
@@ -1587,7 +1587,7 @@ fn test_virtio_pmem(discard_writes: bool, specify_size: bool) {
         // );
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     handle_child_output(r, &output);
@@ -1660,7 +1660,7 @@ fn _test_virtio_vsock(hotplug: bool) {
         }
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     handle_child_output(r, &output);
@@ -2043,7 +2043,7 @@ fn _test_virtio_iommu(acpi: bool) {
         );
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     handle_child_output(r, &output);
