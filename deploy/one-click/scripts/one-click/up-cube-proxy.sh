@@ -33,6 +33,8 @@ CUBE_PROXY_REDIS_IP="${CUBE_PROXY_REDIS_IP:-${CUBE_SANDBOX_NODE_IP}}"
 CUBE_PROXY_REDIS_PORT="${CUBE_PROXY_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}}"
 CUBE_PROXY_REDIS_PASSWORD="${CUBE_PROXY_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}"
 MKCERT_BUNDLED_BIN="${TOOLBOX_ROOT}/support/bin/mkcert"
+CAROOT="${CAROOT:-${TOOLBOX_ROOT}/cubeproxy/caroot}"
+export CAROOT
 ALPINE_MIRROR_URL="${ALPINE_MIRROR_URL:-https://mirrors.tuna.tsinghua.edu.cn/alpine}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 
@@ -65,6 +67,7 @@ escape_sed() {
 
 prepare_proxy_certs() {
   mkdir -p "${CERT_DIR}"
+  mkdir -p "${CAROOT}"
   if [[ -f "${CERT_DIR}/cube.app+3.pem" && -f "${CERT_DIR}/cube.app+3-key.pem" ]]; then
     return 0
   fi

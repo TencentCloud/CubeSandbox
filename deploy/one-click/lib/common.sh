@@ -243,17 +243,51 @@ detect_node_ip() {
 
   local detected_ip=""
   if command -v ip >/dev/null 2>&1; then
-    detected_ip="$(ip -4 addr show dev eth0 2>/dev/null \
+    local detected_iface
+    detected_iface="$(detect_primary_interface || true)"
+    if [[ -n "${detected_iface}" ]]; then
+      detected_ip="$(ip -4 addr show dev "${detected_iface}" 2>/dev/null \
+        | grep -oP 'inet \K[0-9.]+' | head -1 || true)"
+      if [[ -n "${detected_ip}" ]]; then
+        log "auto-detected node IP from ${detected_iface}: ${detected_ip}"
+        printf '%s\n' "${detected_ip}"
+        return 0
+      fi
+    fi
+
+    detected_ip="$(ip -4 addr show scope global 2>/dev/null \
       | grep -oP 'inet \K[0-9.]+' | head -1 || true)"
   fi
 
   if [[ -n "${detected_ip}" ]]; then
-    log "auto-detected node IP from eth0: ${detected_ip}"
+    log "auto-detected node IP from first global IPv4 address: ${detected_ip}"
     printf '%s\n' "${detected_ip}"
     return 0
   fi
 
-  die "cannot auto-detect node IP (eth0 not found or has no IPv4). Please set CUBE_SANDBOX_NODE_IP or pass --node-ip=<ip>"
+  die "cannot auto-detect node IP. Please set CUBE_SANDBOX_NODE_IP or pass --node-ip=<ip>"
+}
+
+detect_primary_interface() {
+  if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
+    printf '%s\n' "${CUBE_SANDBOX_ETH_NAME}"
+    return 0
+  fi
+
+  command -v ip >/dev/null 2>&1 || return 1
+
+  local iface
+  iface="$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}')"
+  if [[ -n "${iface}" ]]; then
+    printf '%s\n' "${iface}"
+    return 0
+  fi
+
+  iface="$(ip -o link show up 2>/dev/null \
+    | awk -F': ' '$2 != "lo" {print $2; exit}' \
+    | cut -d@ -f1)"
+  [[ -n "${iface}" ]] || return 1
+  printf '%s\n' "${iface}"
 }
 
 ensure_kernel_vmlinux() {
