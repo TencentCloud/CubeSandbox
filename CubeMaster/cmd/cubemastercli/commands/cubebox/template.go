@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -419,7 +420,7 @@ var TemplateCreateCommand = cli.Command{
 
 		serverList = getServerAddrs(c)
 		if len(serverList) == 0 {
-			myPrint("no server addr")
+			log.Printf("no server addr\n")
 			return errors.New("no server addr")
 		}
 		port = c.GlobalString("port")
@@ -431,14 +432,14 @@ var TemplateCreateCommand = cli.Command{
 		}
 		rsp := &templateResponse{}
 		if err = doHttpReq(c, url, http.MethodPost, req.RequestID, bytes.NewBuffer(body), rsp); err != nil {
-			myPrint("template create request err. %s. RequestId: %s", err.Error(), req.RequestID)
+			log.Printf("template create request err. %s. RequestId: %s\n", err.Error(), req.RequestID)
 			return err
 		}
 		if rsp.Ret == nil {
 			return errors.New("empty response")
 		}
 		if rsp.Ret.RetCode != 200 {
-			myPrint("template create failed. %s. RequestId: %s", rsp.Ret.RetMsg, req.RequestID)
+			log.Printf("template create failed. %s. RequestId: %s\n", rsp.Ret.RetMsg, req.RequestID)
 			return errors.New(rsp.Ret.RetMsg)
 		}
 		if c.Bool("json") {
@@ -475,7 +476,7 @@ var TemplateInfoCommand = cli.Command{
 
 		serverList = getServerAddrs(c)
 		if len(serverList) == 0 {
-			myPrint("no server addr")
+			log.Printf("no server addr\n")
 			return errors.New("no server addr")
 		}
 		port = c.GlobalString("port")
@@ -488,14 +489,14 @@ var TemplateInfoCommand = cli.Command{
 
 		rsp := &templateResponse{}
 		if err := doHttpReq(c, url, http.MethodGet, requestID, nil, rsp); err != nil {
-			myPrint("template info request err. %s. RequestId: %s", err.Error(), requestID)
+			log.Printf("template info request err. %s. RequestId: %s\n", err.Error(), requestID)
 			return err
 		}
 		if rsp.Ret == nil {
 			return errors.New("empty response")
 		}
 		if rsp.Ret.RetCode != 200 {
-			myPrint("template info failed. %s. RequestId: %s", rsp.Ret.RetMsg, requestID)
+			log.Printf("template info failed. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
 			return errors.New(rsp.Ret.RetMsg)
 		}
 		if c.Bool("json") {
@@ -558,7 +559,7 @@ var TemplateRenderCommand = cli.Command{
 
 		serverList = getServerAddrs(c)
 		if len(serverList) == 0 {
-			myPrint("no server addr")
+			log.Printf("no server addr\n")
 			return errors.New("no server addr")
 		}
 		port = c.GlobalString("port")
@@ -571,14 +572,14 @@ var TemplateRenderCommand = cli.Command{
 		}
 		rsp := &sandboxPreviewResponse{}
 		if err = doHttpReq(c, url, http.MethodPost, req.RequestID, bytes.NewBuffer(body), rsp); err != nil {
-			myPrint("template render request err. %s. RequestId: %s", err.Error(), req.RequestID)
+			log.Printf("template render request err. %s. RequestId: %s\n", err.Error(), req.RequestID)
 			return err
 		}
 		if rsp.Ret == nil {
 			return errors.New("empty response")
 		}
 		if rsp.Ret.RetCode != 200 {
-			myPrint("template render failed. %s. RequestId: %s", rsp.Ret.RetMsg, req.RequestID)
+			log.Printf("template render failed. %s. RequestId: %s\n", rsp.Ret.RetMsg, req.RequestID)
 			return errors.New(rsp.Ret.RetMsg)
 		}
 		if c.Bool("json") {
@@ -625,17 +626,17 @@ var TemplateDeleteCommand = cli.Command{
 
 		rsp := &templateResponse{}
 		if err := doHttpReq(c, url, http.MethodDelete, requestID, bytes.NewBuffer(body), rsp); err != nil {
-			myPrint("template delete request err. %s. RequestId: %s", err.Error(), requestID)
+			log.Printf("template delete request err. %s. RequestId: %s\n", err.Error(), requestID)
 			return err
 		}
 		if rsp.Ret == nil {
 			return errors.New("empty response")
 		}
 		if rsp.Ret.RetCode != 200 {
-			myPrint("template delete failed. %s. RequestId: %s", rsp.Ret.RetMsg, requestID)
+			log.Printf("template delete failed. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
 			return errors.New(rsp.Ret.RetMsg)
 		}
-		fmt.Printf("template deleted: %s\n", templateID)
+		log.Printf("template deleted: %s\n", templateID)
 		return nil
 	},
 }
@@ -724,22 +725,22 @@ var TemplateCommitCommand = cli.Command{
 
 		rsp := &templateCommitResponse{}
 		if err = doHttpReq(c, url, http.MethodPost, requestID, bytes.NewBuffer(body), rsp); err != nil {
-			myPrint("template commit request err. %s. RequestId: %s", err.Error(), requestID)
+			log.Printf("template commit request err. %s. RequestId: %s\n", err.Error(), requestID)
 			return err
 		}
 		if rsp.Ret == nil {
 			return errors.New("empty response")
 		}
 		if rsp.Ret.RetCode != 200 {
-			myPrint("template commit failed. %s. RequestId: %s", rsp.Ret.RetMsg, requestID)
+			log.Printf("template commit failed. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
 			return errors.New(rsp.Ret.RetMsg)
 		}
 		if c.Bool("json") {
 			commands.PrintAsJSON(rsp)
 			return nil
 		}
-		fmt.Printf("template_id: %s\n", rsp.TemplateID)
-		fmt.Printf("build_id: %s\n", rsp.BuildID)
+		log.Printf("template_id: %s\n", rsp.TemplateID)
+		log.Printf("build_id: %s\n", rsp.BuildID)
 		return nil
 	},
 }
@@ -1052,7 +1053,7 @@ var TemplateListCommand = cli.Command{
 	Action: func(c *cli.Context) error {
 		serverList = getServerAddrs(c)
 		if len(serverList) == 0 {
-			myPrint("no server addr")
+			log.Printf("no server addr\n")
 			return errors.New("no server addr")
 		}
 		port = c.GlobalString("port")
@@ -1062,14 +1063,14 @@ var TemplateListCommand = cli.Command{
 
 		rsp := &templateListResponse{}
 		if err := doHttpReq(c, url, http.MethodGet, requestID, nil, rsp); err != nil {
-			myPrint("template list request err. %s. RequestId: %s", err.Error(), requestID)
+			log.Printf("template list request err. %s. RequestId: %s\n", err.Error(), requestID)
 			return err
 		}
 		if rsp.Ret == nil {
 			return errors.New("empty response")
 		}
 		if rsp.Ret.RetCode != 200 {
-			myPrint("template list failed. %s. RequestId: %s", rsp.Ret.RetMsg, requestID)
+			log.Printf("template list failed. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
 			return errors.New(rsp.Ret.RetMsg)
 		}
 		if c.Bool("json") {
@@ -1097,15 +1098,15 @@ var TemplateListCommand = cli.Command{
 }
 
 func printTemplateSummary(rsp *templateResponse) {
-	fmt.Printf("template_id: %s\n", rsp.TemplateID)
-	fmt.Printf("instance_type: %s\n", rsp.InstanceType)
-	fmt.Printf("version: %s\n", rsp.Version)
-	fmt.Printf("status: %s\n", rsp.Status)
+	log.Printf("template_id: %s\n", rsp.TemplateID)
+	log.Printf("instance_type: %s\n", rsp.InstanceType)
+	log.Printf("version: %s\n", rsp.Version)
+	log.Printf("status: %s\n", rsp.Status)
 	if rsp.LastError != "" {
-		fmt.Printf("last_error: %s\n", rsp.LastError)
+		log.Printf("last_error: %s\n", rsp.LastError)
 	}
 	if rsp.CreateRequest != nil {
-		fmt.Printf("cubevs_context: %s\n", formatCubeVSContext(rsp.CreateRequest.CubeVSContext))
+		log.Printf("cubevs_context: %s\n", formatCubeVSContext(rsp.CreateRequest.CubeVSContext))
 	}
 	w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
 	fmt.Fprintln(w, "NODE_ID\tNODE_IP\tSTATUS\tPHASE\tSNAPSHOT_PATH\tSPEC\tERROR")
@@ -1120,23 +1121,23 @@ func printSandboxPreviewSummary(rsp *sandboxPreviewResponse) {
 	if rsp == nil {
 		return
 	}
-	fmt.Printf("request_id: %s\n", rsp.RequestID)
+	log.Printf("request_id: %s\n", rsp.RequestID)
 	if rsp.APIRequest != nil {
-		fmt.Printf("api_request: template=%s containers=%d volumes=%d network=%s\n",
+		log.Printf("api_request: template=%s containers=%d volumes=%d network=%s\n",
 			rsp.APIRequest.Annotations[constants.CubeAnnotationAppSnapshotTemplateID],
 			len(rsp.APIRequest.Containers), len(rsp.APIRequest.Volumes), rsp.APIRequest.NetworkType)
-		fmt.Printf("api_request_cubevs_context: %s\n", formatCubeVSContext(rsp.APIRequest.CubeVSContext))
+		log.Printf("api_request_cubevs_context: %s\n", formatCubeVSContext(rsp.APIRequest.CubeVSContext))
 	}
 	if rsp.MergedRequest != nil {
-		fmt.Printf("merged_request: containers=%d volumes=%d network=%s runtime=%s namespace=%s\n",
+		log.Printf("merged_request: containers=%d volumes=%d network=%s runtime=%s namespace=%s\n",
 			len(rsp.MergedRequest.Containers), len(rsp.MergedRequest.Volumes), rsp.MergedRequest.NetworkType,
 			rsp.MergedRequest.RuntimeHandler, rsp.MergedRequest.Namespace)
-		fmt.Printf("merged_request_cubevs_context: %s\n", formatCubeVSContext(rsp.MergedRequest.CubeVSContext))
+		log.Printf("merged_request_cubevs_context: %s\n", formatCubeVSContext(rsp.MergedRequest.CubeVSContext))
 	}
 	if rsp.CubeletRequest != nil {
-		fmt.Printf("cubelet_request: containers=%d volumes=%d exposed_ports=%d\n",
+		log.Printf("cubelet_request: containers=%d volumes=%d exposed_ports=%d\n",
 			len(rsp.CubeletRequest.Containers), len(rsp.CubeletRequest.Volumes), len(rsp.CubeletRequest.ExposedPorts))
-		fmt.Printf("cubelet_request_cubevs_context: %s\n", formatProtoCubeVSContext(rsp.CubeletRequest.CubevsContext))
+		log.Printf("cubelet_request_cubevs_context: %s\n", formatProtoCubeVSContext(rsp.CubeletRequest.CubevsContext))
 	}
 }
 
@@ -1167,43 +1168,43 @@ func printTemplateImageJob(job *types.TemplateImageJobInfo) {
 		fmt.Println("job: <nil>")
 		return
 	}
-	fmt.Printf("job_id: %s\n", job.JobID)
-	fmt.Printf("template_id: %s\n", job.TemplateID)
+	log.Printf("job_id: %s\n", job.JobID)
+	log.Printf("template_id: %s\n", job.TemplateID)
 	if job.AttemptNo > 0 {
-		fmt.Printf("attempt_no: %d\n", job.AttemptNo)
+		log.Printf("attempt_no: %d\n", job.AttemptNo)
 	}
 	if job.RetryOfJobID != "" {
-		fmt.Printf("retry_of_job_id: %s\n", job.RetryOfJobID)
+		log.Printf("retry_of_job_id: %s\n", job.RetryOfJobID)
 	}
 	if job.Operation != "" {
-		fmt.Printf("operation: %s\n", job.Operation)
+		log.Printf("operation: %s\n", job.Operation)
 	}
 	if job.RedoMode != "" {
-		fmt.Printf("redo_mode: %s\n", job.RedoMode)
+		log.Printf("redo_mode: %s\n", job.RedoMode)
 	}
 	if len(job.RedoScope) > 0 {
-		fmt.Printf("redo_scope: %s\n", strings.Join(job.RedoScope, ","))
+		log.Printf("redo_scope: %s\n", strings.Join(job.RedoScope, ","))
 	}
 	if job.ResumePhase != "" {
-		fmt.Printf("resume_phase: %s\n", job.ResumePhase)
+		log.Printf("resume_phase: %s\n", job.ResumePhase)
 	}
-	fmt.Printf("artifact_id: %s\n", job.ArtifactID)
-	fmt.Printf("status: %s\n", job.Status)
-	fmt.Printf("phase: %s\n", job.Phase)
-	fmt.Printf("progress: %d%%\n", job.Progress)
-	fmt.Printf("distribution: %d/%d ready, %d failed\n", job.ReadyNodeCount, job.ExpectedNodeCount, job.FailedNodeCount)
+	log.Printf("artifact_id: %s\n", job.ArtifactID)
+	log.Printf("status: %s\n", job.Status)
+	log.Printf("phase: %s\n", job.Phase)
+	log.Printf("progress: %d%%\n", job.Progress)
+	log.Printf("distribution: %d/%d ready, %d failed\n", job.ReadyNodeCount, job.ExpectedNodeCount, job.FailedNodeCount)
 	if job.TemplateSpecFingerprint != "" {
-		fmt.Printf("template_spec_fingerprint: %s\n", job.TemplateSpecFingerprint)
+		log.Printf("template_spec_fingerprint: %s\n", job.TemplateSpecFingerprint)
 	}
 	if job.Artifact != nil {
-		fmt.Printf("artifact_status: %s\n", job.Artifact.Status)
-		fmt.Printf("artifact_sha256: %s\n", job.Artifact.Ext4SHA256)
+		log.Printf("artifact_status: %s\n", job.Artifact.Status)
+		log.Printf("artifact_sha256: %s\n", job.Artifact.Ext4SHA256)
 	}
 	if job.TemplateStatus != "" {
-		fmt.Printf("template_status: %s\n", job.TemplateStatus)
+		log.Printf("template_status: %s\n", job.TemplateStatus)
 	}
 	if job.ErrorMessage != "" {
-		fmt.Printf("error: %s\n", job.ErrorMessage)
+		log.Printf("error: %s\n", job.ErrorMessage)
 	}
 }
 
@@ -1234,18 +1235,18 @@ func printTemplateBuildStatus(rsp *templateBuildStatusResponse) {
 		fmt.Println("build: <nil>")
 		return
 	}
-	fmt.Printf("build_id: %s\n", rsp.BuildID)
-	fmt.Printf("template_id: %s\n", rsp.TemplateID)
+	log.Printf("build_id: %s\n", rsp.BuildID)
+	log.Printf("template_id: %s\n", rsp.TemplateID)
 	if rsp.AttemptNo > 0 {
-		fmt.Printf("attempt_no: %d\n", rsp.AttemptNo)
+		log.Printf("attempt_no: %d\n", rsp.AttemptNo)
 	}
 	if rsp.RetryOfJobID != "" {
-		fmt.Printf("retry_of_job_id: %s\n", rsp.RetryOfJobID)
+		log.Printf("retry_of_job_id: %s\n", rsp.RetryOfJobID)
 	}
-	fmt.Printf("status: %s\n", rsp.Status)
-	fmt.Printf("progress: %d%%\n", rsp.Progress)
+	log.Printf("status: %s\n", rsp.Status)
+	log.Printf("progress: %d%%\n", rsp.Progress)
 	if rsp.Message != "" {
-		fmt.Printf("message: %s\n", rsp.Message)
+		log.Printf("message: %s\n", rsp.Message)
 	}
 }
 

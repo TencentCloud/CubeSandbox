@@ -7,6 +7,7 @@ package cubebox
 import (
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -57,7 +58,7 @@ var NodeListCommand = cli.Command{
 	Action: func(c *cli.Context) error {
 		serverList = getServerAddrs(c)
 		if len(serverList) == 0 {
-			myPrint("no server addr")
+			log.Printf("no server addr\n")
 			return errors.New("no server addr")
 		}
 		port = c.GlobalString("port")
@@ -74,14 +75,14 @@ var NodeListCommand = cli.Command{
 
 		rsp := &nodeResponse{}
 		if err := doHttpReq(c, url, http.MethodGet, requestID, nil, rsp); err != nil {
-			myPrint("node list request err. %s. RequestId: %s", err.Error(), requestID)
+			log.Printf("node list request err. %s. RequestId: %s\n", err.Error(), requestID)
 			return err
 		}
 		if rsp.Ret == nil {
 			return errors.New("empty response")
 		}
 		if rsp.Ret.RetCode != 200 {
-			myPrint("node list failed. %s. RequestId: %s", rsp.Ret.RetMsg, requestID)
+			log.Printf("node list failed. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
 			return errors.New(rsp.Ret.RetMsg)
 		}
 		sort.Slice(rsp.Data, func(i, j int) bool {

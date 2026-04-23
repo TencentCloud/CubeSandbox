@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -193,7 +194,7 @@ func (q *asyncRetryQueue) addTask(task *retryTask) {
 	defer q.mu.Unlock()
 	task.lastRetry = time.Now()
 	q.tasks = append(q.tasks, task)
-	myPrint("[AsyncRetry] Added task to queue, containerID: %s, total tasks: %d", task.containerID, len(q.tasks))
+	log.Printf("[AsyncRetry] Added task to queue, containerID: %s, total tasks: %d\n", task.containerID, len(q.tasks))
 }
 
 func (q *asyncRetryQueue) processLoop() {
@@ -203,7 +204,7 @@ func (q *asyncRetryQueue) processLoop() {
 	for {
 		select {
 		case <-q.ctx.Done():
-			myPrint("[AsyncRetry] Queue processor stopped")
+			log.Printf("[AsyncRetry] Queue processor stopped\n")
 			return
 		case <-ticker.C:
 			q.processTasks()
@@ -222,7 +223,7 @@ func (q *asyncRetryQueue) processTasks() {
 	copy(tasksToProcess, q.tasks)
 	q.mu.Unlock()
 
-	myPrint("[AsyncRetry] Processing %d tasks in queue", len(tasksToProcess))
+	log.Printf("[AsyncRetry] Processing %d tasks in queue\n", len(tasksToProcess))
 
 	remainingTasks := make([]*retryTask, 0)
 	for _, task := range tasksToProcess {
@@ -236,7 +237,7 @@ func (q *asyncRetryQueue) processTasks() {
 		err = doDestroySandbox(task.wg.cliContext, task.containerID)
 
 		if err == nil {
-			myPrint("[AsyncRetry] Successfully deleted container: %s after %d retries", task.containerID, task.retryCount)
+			log.Printf("[AsyncRetry] Successfully deleted container: %s after %d retries\n", task.containerID, task.retryCount)
 			continue
 		}
 
@@ -244,15 +245,15 @@ func (q *asyncRetryQueue) processTasks() {
 		task.lastRetry = time.Now()
 
 		if asyncRetryMax > 0 && task.retryCount > asyncRetryMax {
-			myPrint("[AsyncRetry] Giving up on container: %s after %d retries (max: %d), error: %s", task.containerID, task.retryCount, asyncRetryMax, err.Error())
+			log.Printf("[AsyncRetry] Giving up on container: %s after %d retries (max: %d), error: %s\n", task.containerID, task.retryCount, asyncRetryMax, err.Error())
 			continue
 		} else if asyncRetryMax == 0 {
 
-			myPrint("[AsyncRetry] Async retry disabled (max=0), giving up on container: %s, error: %s", task.containerID, err.Error())
+			log.Printf("[AsyncRetry] Async retry disabled (max=0), giving up on container: %s, error: %s\n", task.containerID, err.Error())
 			continue
 		}
 
-		myPrint("[AsyncRetry] Retry failed for container: %s, retry count: %d, error: %s", task.containerID, task.retryCount, err.Error())
+		log.Printf("[AsyncRetry] Retry failed for container: %s, retry count: %d, error: %s\n", task.containerID, task.retryCount, err.Error())
 		remainingTasks = append(remainingTasks, task)
 	}
 
@@ -261,7 +262,7 @@ func (q *asyncRetryQueue) processTasks() {
 	q.mu.Unlock()
 
 	if len(remainingTasks) > 0 {
-		myPrint("[AsyncRetry] Remaining tasks in queue: %d", len(remainingTasks))
+		log.Printf("[AsyncRetry] Remaining tasks in queue: %d\n", len(remainingTasks))
 	}
 }
 
@@ -283,7 +284,7 @@ func initWragWaitGroup(tmpWg *wrapWg) {
 		for _, arg := range tmpWg.cliContext.Args() {
 			_, err := getParams(arg)
 			if err != nil {
-				myPrint("Multitun getParams err. %s", err.Error())
+				log.Printf("Multitun getParams err. %s\n", err.Error())
 				continue
 			}
 			cnt += 1
@@ -318,11 +319,11 @@ func multiRunAction(c *cli.Context) error {
 		concurrentTotal:    1,
 	}
 	initWragWaitGroup(tmpWg)
-	myPrint("concurrentTotal:%d,cnt:%d", tmpWg.concurrentTotal, tmpWg.cnt)
+	log.Printf("concurrentTotal:%d,cnt:%d\n", tmpWg.concurrentTotal, tmpWg.cnt)
 
 	serverList = getServerAddrs(c)
 	if len(serverList) == 0 {
-		myPrint("no server addr")
+		log.Printf("no server addr\n")
 		return errors.New("no server addr")
 	}
 	port = c.GlobalString("port")
@@ -331,7 +332,7 @@ func multiRunAction(c *cli.Context) error {
 	if asyncRetryMax < 0 {
 		asyncRetryMax = 0
 	}
-	myPrint("Async retry max count: %d", asyncRetryMax)
+	log.Printf("Async retry max count: %d\n", asyncRetryMax)
 
 	tmpWg.doneCtx, tmpWg.cancel = context.WithCancel(context.Background())
 	defer tmpWg.cancel()
@@ -341,7 +342,7 @@ func multiRunAction(c *cli.Context) error {
 		if globalRetryQueue != nil {
 			queueSize := globalRetryQueue.getQueueSize()
 			if queueSize > 0 {
-				myPrint("[AsyncRetry] Waiting for remaining %d tasks to complete...", queueSize)
+				log.Printf("[AsyncRetry] Waiting for remaining %d tasks to complete...\n", queueSize)
 
 				time.Sleep(5 * time.Second)
 			}
@@ -358,7 +359,7 @@ func multiRunAction(c *cli.Context) error {
 	for _, arg := range c.Args() {
 		reqByte, err := getParams(arg)
 		if err != nil {
-			myPrint("Multitun getParams err. %s", err.Error())
+			log.Printf("Multitun getParams err. %s\n", err.Error())
 			continue
 		}
 		tmpWg.wg.Add(1)
@@ -366,7 +367,7 @@ func multiRunAction(c *cli.Context) error {
 			defer tmpWg.wg.Done()
 			tmpReq := reqByte
 			if err = doWork(tmpWg, tmpReq); err != nil {
-				myPrint("Multitun workerwithrm err. %s", err.Error())
+				log.Printf("Multitun workerwithrm err. %s\n", err.Error())
 				return
 			}
 		}()
@@ -416,7 +417,7 @@ func doCreateByDefault(wg *wrapWg, reqByte []byte, index int) (s string, err err
 		req = wg.lb.GetCreateCubeSandboxReq()
 	} else {
 		if err := json.Unmarshal(reqByte, &req); err != nil {
-			myPrint("doCreateSandbox_Unmarshal err. %s", err.Error())
+			log.Printf("doCreateSandbox_Unmarshal err. %s\n", err.Error())
 			return "", err
 		}
 	}
@@ -431,7 +432,7 @@ func doCreateByDefault(wg *wrapWg, reqByte []byte, index int) (s string, err err
 	startTime := time.Now()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(body))
 	if err != nil {
-		myPrint("doCreateSandbox_httpReq err. %s. RequestId: %s", err.Error(), requestID)
+		log.Printf("doCreateSandbox_httpReq err. %s. RequestId: %s\n", err.Error(), requestID)
 		return "", err
 	}
 	httpReq.Header.Set(constants.Caller, "mastercli")
@@ -444,22 +445,22 @@ func doCreateByDefault(wg *wrapWg, reqByte []byte, index int) (s string, err err
 	resp, err := client.Do(httpReq)
 	cost := time.Since(startTime).Milliseconds()
 	if err != nil {
-		myPrint("doCreateSandbox_Do err. %s. RequestId: %s", err.Error(), requestID)
+		log.Printf("doCreateSandbox_Do err. %s. RequestId: %s\n", err.Error(), requestID)
 		return "", err
 	}
 	defer resp.Body.Close()
 	if http.StatusOK != resp.StatusCode {
-		myPrint("doCreateSandbox_status err. %d. RequestId: %s", resp.StatusCode, requestID)
+		log.Printf("doCreateSandbox_status err. %d. RequestId: %s\n", resp.StatusCode, requestID)
 		return "", err
 	}
 
 	rsp := &types.CreateCubeSandboxRes{}
 	err = getBodyData(resp, rsp)
 	if err != nil {
-		myPrint("doCreateSandbox_getBodyData err. %s. RequestId: %s", err.Error(), requestID)
+		log.Printf("doCreateSandbox_getBodyData err. %s. RequestId: %s\n", err.Error(), requestID)
 		return "", err
 	}
-	myPrint("doCreateSandbox RequestId:%s,sandBoxId:%s,Ip:%s,HostID:%s,HostIP:%s,code:%d, message:%s,cost:%v",
+	log.Printf("doCreateSandbox RequestId:%s,sandBoxId:%s,Ip:%s,HostID:%s,HostIP:%s,code:%d, message:%s,cost:%v\n",
 		req.RequestID, rsp.SandboxID, rsp.SandboxIP, rsp.HostID, rsp.HostIP, rsp.Ret.RetCode, rsp.Ret.RetMsg, cost)
 	if rsp.Ret.RetCode != 200 {
 		return "", errors.New(rsp.Ret.RetMsg)
@@ -476,7 +477,7 @@ func doCreateByDefault(wg *wrapWg, reqByte []byte, index int) (s string, err err
 func doCreateSandbox(wg *wrapWg, reqByte []byte, index int) (s string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			myPrint("panic %v", string(debug.Stack()))
+			log.Printf("panic %v\n", string(debug.Stack()))
 			err = fmt.Errorf("panic %v", r)
 		}
 		if err != nil {
@@ -515,13 +516,13 @@ func doInnerDestroySandbox(clictx *cli.Context, sandboxID string, filter map[str
 	}
 	body, err := jsoniter.Marshal(reqC)
 	if err != nil {
-		myPrint("doDestroySandbox failure:%v", err)
+		log.Printf("doDestroySandbox failure:%v\n", err)
 		return err
 	}
 	url := fmt.Sprintf("http://%s/cube/sandbox", net.JoinHostPort(serverList[rand.Int()%len(serverList)], port))
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, bytes.NewBuffer(body))
 	if err != nil {
-		myPrint("doDestroySandbox failure:%v", err)
+		log.Printf("doDestroySandbox failure:%v\n", err)
 		return err
 	}
 	httpReq.Header.Set(constants.Caller, "mastercli")
@@ -533,22 +534,22 @@ func doInnerDestroySandbox(clictx *cli.Context, sandboxID string, filter map[str
 	resp, err := client.Do(httpReq)
 
 	if err != nil {
-		myPrint("doDestroySandbox failure:%v", err)
+		log.Printf("doDestroySandbox failure:%v\n", err)
 		return err
 	}
 	defer resp.Body.Close()
 	if http.StatusOK != resp.StatusCode {
-		myPrint("doDestroySandbox failure:%v", resp.Status)
+		log.Printf("doDestroySandbox failure:%v\n", resp.Status)
 		return err
 	}
 	rsp := &types.DeleteCubeSandboxRes{}
 	err = getBodyData(resp, rsp)
 	if err != nil {
-		myPrint("doDestroySandbox failure:%v", err)
+		log.Printf("doDestroySandbox failure:%v\n", err)
 		return err
 	}
 	cost := time.Since(startTime).Milliseconds()
-	myPrint("doDestroySandbox RequestId:%s,sandBoxId:%s, code:%d, message:%s,cost:%d", rsp.RequestID, sandboxID,
+	log.Printf("doDestroySandbox RequestId:%s,sandBoxId:%s, code:%d, message:%s,cost:%d\n", rsp.RequestID, sandboxID,
 		rsp.Ret.RetCode, rsp.Ret.RetMsg, cost)
 	if rsp.Ret.RetCode != 200 {
 		return errors.New(rsp.Ret.RetMsg)
@@ -597,7 +598,7 @@ func doWork(wg *wrapWg, reqByte []byte) error {
 						}
 						retry++
 						if retry >= maxSyncRetry {
-							myPrint("[SyncRetry] Failed to remove container after %d retries: %s, adding to async retry queue", maxSyncRetry, err.Error())
+							log.Printf("[SyncRetry] Failed to remove container after %d retries: %s, adding to async retry queue\n", maxSyncRetry, err.Error())
 
 							if globalRetryQueue != nil {
 								task := &retryTask{
@@ -614,7 +615,7 @@ func doWork(wg *wrapWg, reqByte []byte) error {
 					}
 				}
 				if err != nil {
-					myPrint("doWork err:%v", err)
+					log.Printf("doWork err:%v\n", err)
 					if wg.cliContext.Bool("fail_exit") {
 						wg.cancel()
 					}

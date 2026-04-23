@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -100,7 +101,7 @@ var ListCommand = cli.Command{
 
 		serverList = getServerAddrs(c)
 		if len(serverList) == 0 {
-			myPrint("no server addr")
+			log.Printf("no server addr\n")
 			return errors.New("no server addr")
 		}
 		port = c.GlobalString("port")
@@ -134,14 +135,14 @@ var ListCommand = cli.Command{
 
 		rsp, summary, err := runListQuery(c, host, req, filterList, all)
 		if err != nil {
-			myPrint("list_getBodyData err. %s. RequestId: %s", err.Error(), requestID)
+			log.Printf("list_getBodyData err. %s. RequestId: %s\n", err.Error(), requestID)
 			return err
 		}
 		if rsp.Ret == nil {
 			return errors.New("empty response")
 		}
 		if rsp.Ret.RetCode != 200 {
-			myPrint("rsp err. %s. RequestId: %s", rsp.Ret.RetMsg, requestID)
+			log.Printf("rsp err. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
 			return errors.New(rsp.Ret.RetMsg)
 		}
 
@@ -153,9 +154,9 @@ var ListCommand = cli.Command{
 					}
 					err = doInnerDestroySandbox(c, sandbox.SandboxID, sandbox.Labels, c.String("type"))
 					if err != nil {
-						myPrint("doDestroySandbox err. %s. RequestId: %s", err.Error(), requestID)
+						log.Printf("doDestroySandbox err. %s. RequestId: %s\n", err.Error(), requestID)
 					}
-					myPrint("doDestroySandbox success: %s", sandbox.SandboxID)
+					log.Printf("doDestroySandbox success: %s\n", sandbox.SandboxID)
 				} else {
 					fmt.Println(sandbox.SandboxID)
 				}
