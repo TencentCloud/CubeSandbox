@@ -33,7 +33,7 @@ export default withMermaid(defineConfig({
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' }
               ]
-            },            
+            },
             {
               text: 'Core Concepts',
               items: [
@@ -100,7 +100,6 @@ export default withMermaid(defineConfig({
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' }
               ]
             },
-            
             {
               text: '核心概念',
               items: [

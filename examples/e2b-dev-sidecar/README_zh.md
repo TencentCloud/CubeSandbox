@@ -3,6 +3,7 @@
 # E2B Dev Sidecar
 
 这个 demo 展示一件事：本地直接复用 `e2b_code_interpreter` SDK 访问 CubeSandbox，同时把沙箱数据面流量转发到 CubeProxy。
+
 ## 为什么需要dev-sidecar?
 
 由于 E2B 需要把沙箱 URL 通过泛解析解析到目标集群的 public IP，因此如果你是在生产环境中部署，通常需要在私有 DNS 中添加一条 A 记录：

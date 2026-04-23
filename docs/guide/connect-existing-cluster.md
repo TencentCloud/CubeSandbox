@@ -1,6 +1,6 @@
 # Connect to an Existing Cube Cluster
 
-If you just want the fastest path, start with the example directory:
+To get started quickly, check out the example directory:
 
 - Example: [examples/e2b-dev-sidecar](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)
 - Chinese README: [README_zh.md](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar/README_zh.md)
