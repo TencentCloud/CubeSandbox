@@ -66,13 +66,6 @@ export E2B_API_KEY="${E2B_API_KEY:-}"
 export CUBE_TEMPLATE_ID="${CUBE_TEMPLATE_ID:-}"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
-export MINIMAX_API_KEY="${MINIMAX_API_KEY:-}"
-
-# Auto-map MINIMAX_API_KEY → OPENAI_API_KEY when using the MiniMax config
-# (litellm uses OPENAI_API_KEY for openai-compatible endpoints with custom api_base)
-if [[ "$CONFIG" == *"minimax"* && -n "${MINIMAX_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
-    export OPENAI_API_KEY="$MINIMAX_API_KEY"
-fi
 
 # SSL_CERT_FILE overrides Python's default CA bundle globally, which breaks
 # HTTPS to public sites (e.g. hf-mirror.com). Instead, pass it via a custom

@@ -199,10 +199,10 @@ bash scripts/run-swebench.sh \
 
 ### MiniMax Direct Connection
 
-Connect directly to the [MiniMax API](https://platform.minimax.io/docs/api-reference/text-openai-api) without going through TokenHub.
+Connect directly to the [MiniMax API](https://platform.minimax.io/docs/api-reference/text-openai-api) without going through TokenHub. MiniMax exposes an OpenAI-compatible endpoint, so set `OPENAI_API_KEY` to your MiniMax key — `configs/e2b-minimax.yaml` already points `api_base` at `https://api.minimax.io/v1`.
 
 ```bash
-# Set MINIMAX_API_KEY in .env (or export it)
+# Set OPENAI_API_KEY=<your-minimax-key> in .env (or export it)
 
 # MiniMax-M2.7 (peak performance)
 bash scripts/run-swebench.sh \
@@ -216,8 +216,6 @@ bash scripts/run-swebench.sh \
   --config configs/e2b-minimax.yaml \
   --instance django__django-13447
 ```
-
-> `configs/e2b-minimax.yaml` points to `https://api.minimax.io/v1` and uses `MINIMAX_API_KEY`.
 
 ## Concurrent Evaluation
 
