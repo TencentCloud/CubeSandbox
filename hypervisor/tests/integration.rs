@@ -3721,6 +3721,28 @@ mod common_parallel {
     }
 
     #[test]
+    fn test_native_virtio_fs() {
+        _test_native_virtio_fs(false, None)
+    }
+
+    #[test]
+    fn test_native_virtio_fs_hotplug() {
+        _test_native_virtio_fs(true, None)
+    }
+
+    #[test]
+    #[cfg(not(feature = "mshv"))]
+    fn test_native_virtio_fs_multi_segment() {
+        _test_native_virtio_fs(false, Some(15))
+    }
+
+    #[test]
+    #[cfg(not(feature = "mshv"))]
+    fn test_native_virtio_fs_multi_segment_hotplug() {
+        _test_native_virtio_fs(true, Some(15))
+    }
+
+    #[test]
     fn test_virtio_pmem_persist_writes() {
         test_virtio_pmem(false, false)
     }
