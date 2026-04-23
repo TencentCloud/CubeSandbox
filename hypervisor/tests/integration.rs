@@ -7482,6 +7482,8 @@ mod compatibility {
 }
 
 mod vmm_instance {
+    use std::fs::File;
+    use std::io::Write;
     use std::path::PathBuf;
     #[cfg(feature = "lib_support")]
     use std::sync::mpsc::channel;
@@ -7495,7 +7497,8 @@ mod vmm_instance {
     #[cfg(feature = "lib_support")]
     use cube_hypervisor::NotifyEvent;
     use cube_hypervisor::VmmInstance;
-    use log::LevelFilter;
+    use log::{info, LevelFilter};
+    use rlimit::{setrlimit, Resource};
     use test_infra::{ssh_command_ip, DiskType, Guest, UbuntuDiskConfig};
     use vmm::api::{ApiRequest, ApiResponsePayload, VmSnapshotConfig};
     use vmm::config::RestoreConfig;
@@ -7574,7 +7577,37 @@ mod vmm_instance {
         }
     }
 
-    fn set_default_seccomp_rules() {
+    fn dummy_vmm_setup() {
+        // Ensure all created files (.e.g sockets) are only accessible by this user
+        // SAFETY: trivially safe
+        let _ = unsafe { libc::umask(0o077) };
+
+        // Create dummy socket and dup it to large fd, so that we could trigger
+        // expand_files in kernel. And this tricky work will avoid later multi
+        // thread try to invoke expand_files at same time, there will be lock
+        // contention in expand_files.
+        // SAFETY: FFI call
+        unsafe {
+            let dummy = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            if dummy > 0 {
+                libc::dup2(dummy, 512);
+            }
+        }
+
+        std::panic::set_hook(Box::new(|info| {
+            info!("{info:?}");
+            log::logger().flush();
+        }));
+
+        let coredump_limit: u64 = 2 * 1024 * 1024 * 1024;
+        let coredump_filter = "0x33".to_string();
+        let mut filter_file = File::options()
+            .write(true)
+            .open("/proc/self/coredump_filter")
+            .unwrap();
+        filter_file.write_all(coredump_filter.as_bytes()).unwrap();
+        setrlimit(Resource::CORE, coredump_limit, coredump_limit).unwrap();
+
         cube_hypervisor::set_runtime_seccomp_rules(vec![
             (libc::SYS_sysinfo, vec![]),
             (libc::SYS_getcwd, vec![]),
@@ -7588,7 +7621,7 @@ mod vmm_instance {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        set_default_seccomp_rules();
+        dummy_vmm_setup();
         let vmm_config = default_vmm_config();
         let mut vmm = DummyVmm::new(vmm_config);
 
@@ -7642,7 +7675,7 @@ mod vmm_instance {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        set_default_seccomp_rules();
+        dummy_vmm_setup();
         let vmm_config = default_vmm_config();
         let mut vmm = DummyVmm::new(vmm_config);
 
@@ -7713,7 +7746,7 @@ mod vmm_instance {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        set_default_seccomp_rules();
+        dummy_vmm_setup();
         let vmm_config = default_vmm_config();
         let mut vmm = DummyVmm::new(vmm_config);
 
@@ -7796,7 +7829,7 @@ mod vmm_instance {
         // Create the snapshot directory
         let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
 
-        set_default_seccomp_rules();
+        dummy_vmm_setup();
         let mut vmm_config = default_vmm_config();
         vmm_config.event_monitor = Some(EventMonitorConfig {
             path: Some(event_path.clone()),
@@ -7923,7 +7956,7 @@ mod vmm_instance {
         let mut vmm_config = default_vmm_config();
         let (sender, receiver) = channel();
         vmm_config.event_notifier = Some(EventNotifyConfig { notifier: sender });
-        let mut vmm = DummyVmm::new(vmm_config);
+        let vmm = DummyVmm::new(vmm_config);
 
         // Verify VMM service is running
         assert!(vmm.send_request(ApiRequest::VmmPing));
