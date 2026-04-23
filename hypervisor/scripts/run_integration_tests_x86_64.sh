@@ -178,12 +178,12 @@ cp $VMLINUX_IMAGE $VFIO_DIR || exit 1
 BUILD_TARGET="$(uname -m)-unknown-linux-${CH_LIBC}"
 
 cargo build --all  --release $features --target $BUILD_TARGET
-strip target/$BUILD_TARGET/release/cloud-hypervisor
+strip target/$BUILD_TARGET/release/cube-hypervisor
 strip target/$BUILD_TARGET/release/vhost_user_net
 strip target/$BUILD_TARGET/release/ch-remote
 
 # We always copy a fresh version of our binary for our L2 guest.
-cp target/$BUILD_TARGET/release/cloud-hypervisor $VFIO_DIR
+cp target/$BUILD_TARGET/release/cube-hypervisor $VFIO_DIR
 cp target/$BUILD_TARGET/release/ch-remote $VFIO_DIR
 
 # Enable KSM with some reasonable parameters so that it won't take too long

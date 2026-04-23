@@ -1223,7 +1223,7 @@ pub struct GuestCommand<'a> {
 
 impl<'a> GuestCommand<'a> {
     pub fn new(guest: &'a Guest) -> Self {
-        Self::new_with_binary_path(guest, &clh_command("cloud-hypervisor"))
+        Self::new_with_binary_path(guest, &clh_command("cube-hypervisor"))
     }
 
     pub fn new_with_binary_path(guest: &'a Guest, binary_path: &str) -> Self {
@@ -1265,9 +1265,9 @@ impl<'a> GuestCommand<'a> {
 
         if self.print_cmd {
             println!(
-                "\n\n==== Start cloud-hypervisor command-line ====\n\n\
+                "\n\n==== Start cube-hypervisor command-line ====\n\n\
                      {:?}\n\
-                     \n==== End cloud-hypervisor command-line ====\n\n",
+                     \n==== End cube-hypervisor command-line ====\n\n",
                 self.command
             );
         }
