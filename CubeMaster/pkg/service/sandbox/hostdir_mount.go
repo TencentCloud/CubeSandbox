@@ -16,7 +16,12 @@ import (
 )
 
 const (
-	AnnotationHostDirMount = "hostdir-mount"
+	// AnnotationHostDirMount must match the annotation key that CubeAPI
+	// writes when it lifts metadata["host-mount"] onto the sandbox
+	// CreateSandboxRequest; see CubeAPI/src/handlers/sandboxes.rs
+	// (const HOSTDIR_MOUNT_KEY). Keep these in lockstep, otherwise
+	// host-mount requests are silently dropped.
+	AnnotationHostDirMount = "host-mount"
 )
 
 type HostDirMountOption struct {
