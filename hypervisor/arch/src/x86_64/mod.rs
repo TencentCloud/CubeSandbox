@@ -839,6 +839,13 @@ pub fn configure_vcpu(
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0xb, None, CpuidReg::EDX, u32::from(id));
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1f, None, CpuidReg::EDX, u32::from(id));
 
+    // Set ApicId in cpuid for each vcpu
+    // SAFETY: get host cpuid when eax=1
+    let mut cpu_ebx = unsafe { core::arch::x86_64::__cpuid(1) }.ebx;
+    cpu_ebx &= 0xffffff;
+    cpu_ebx |= (id as u32) << 24;
+    CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1, None, CpuidReg::EBX, cpu_ebx);
+
     vcpu.set_cpuid2(&cpuid)
         .map_err(|e| Error::SetSupportedCpusFailed(e.into()))?;
 
