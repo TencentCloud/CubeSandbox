@@ -24,6 +24,7 @@
 
 <p align="center">
   <a href="./README_zh.md"><strong>中文文档</strong></a> ·
+  <a href="./README_ja.md"><strong>日本語ドキュメント</strong></a> ·
   <a href="./docs/guide/quickstart.md"><strong>Quick Start</strong></a> ·
   <a href="./docs/index.md"><strong>Documentation</strong></a> ·
   <a href="https://discord.gg/kkapzDXShb" target="_blank"><strong>Discord</strong></a>
