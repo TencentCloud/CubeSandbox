@@ -2180,7 +2180,7 @@ mod common_parallel {
             assert!(check_latest_events_exact(&latest_events, &event_path));
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2224,7 +2224,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2279,7 +2279,7 @@ mod common_parallel {
                 );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2321,7 +2321,7 @@ mod common_parallel {
             assert_eq!(String::from_utf8_lossy(&taskset_vcpu1.stdout).trim(), "1,3");
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2360,7 +2360,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 5_000_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2388,7 +2388,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 128_000_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2461,7 +2461,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() < 3_840_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2543,7 +2543,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2583,7 +2583,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2630,7 +2630,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2735,7 +2735,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2781,7 +2781,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3066,7 +3066,7 @@ mod common_parallel {
             guest.wait_vm_boot(Some(120)).unwrap();
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3185,7 +3185,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3221,7 +3221,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3257,7 +3257,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3314,7 +3314,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3406,7 +3406,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3453,7 +3453,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3490,7 +3490,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3527,7 +3527,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3575,7 +3575,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -3634,7 +3634,7 @@ mod common_parallel {
         // This sleep is needed to wait for the login prompt
         thread::sleep(std::time::Duration::new(2, 0));
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -3694,7 +3694,7 @@ mod common_parallel {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(20));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -3789,7 +3789,7 @@ mod common_parallel {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(20));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -3833,7 +3833,7 @@ mod common_parallel {
             guest.ssh_command(&cmd).unwrap();
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -3870,7 +3870,7 @@ mod common_parallel {
         guest.ssh_command("sudo shutdown -h now").unwrap();
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(20));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let r = std::panic::catch_unwind(|| {
@@ -4153,7 +4153,7 @@ mod common_parallel {
             assert!(guest.get_total_memory_l2().unwrap_or_default() > 960_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         cleanup_vfio_network_interfaces();
@@ -4189,7 +4189,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4252,7 +4252,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4330,7 +4330,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4415,7 +4415,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4495,7 +4495,7 @@ mod common_parallel {
             assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4604,7 +4604,7 @@ mod common_parallel {
             assert_ne!(init_bar_addr, new_bar_addr);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4691,7 +4691,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4778,7 +4778,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4851,7 +4851,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4914,7 +4914,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4953,7 +4953,7 @@ mod common_parallel {
             assert!(overhead <= MAXIMUM_VMM_OVERHEAD_KB);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5111,7 +5111,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5331,7 +5331,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5397,7 +5397,7 @@ mod common_parallel {
             assert!(deflated_balloon < 2147483648);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5460,7 +5460,7 @@ mod common_parallel {
             assert!(rss < 2097152);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5601,7 +5601,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5750,7 +5750,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5974,7 +5974,7 @@ mod common_parallel {
         });
 
         // Shutdown the source VM and check console output
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -6075,7 +6075,7 @@ mod common_parallel {
             guest.check_devices_common(Some(&socket), Some(&console_text), None);
         });
         // Shutdown the target VM and check console output
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -6118,7 +6118,7 @@ mod common_parallel {
             assert!(new_counters > orig_counters);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6168,7 +6168,7 @@ mod common_parallel {
             assert_eq!(String::from_utf8_lossy(&vmm_num_in_elf.stdout).trim(), "4");
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6243,7 +6243,7 @@ mod common_parallel {
             }
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6317,7 +6317,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6720,7 +6720,7 @@ mod common_parallel {
 
         cleanup_spdk_nvme();
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6842,7 +6842,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6921,7 +6921,7 @@ mod common_parallel {
             // test_vdpa_block()
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -7955,7 +7955,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8020,7 +8020,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8109,7 +8109,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8184,7 +8184,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8259,7 +8259,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8331,7 +8331,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8426,7 +8426,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8556,7 +8556,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8614,7 +8614,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8678,7 +8678,7 @@ mod sgx {
                 ));
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -8944,7 +8944,7 @@ mod vfio {
             assert!(guest.get_total_memory_l2().unwrap_or_default() > 960_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         cleanup_vfio_network_interfaces();
@@ -8989,7 +8989,7 @@ mod vfio {
             guest.check_nvidia_gpu();
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -9041,7 +9041,7 @@ mod vfio {
             guest.check_nvidia_gpu();
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -9077,7 +9077,7 @@ mod vfio {
             guest.check_nvidia_gpu();
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -10356,7 +10356,7 @@ mod rate_limiter {
             assert!(check_rate_limit(measured_bps, limit_bps, 0.1));
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
     }
@@ -10456,7 +10456,7 @@ mod rate_limiter {
             assert!(check_rate_limit(measured_rate, limit_rate, 0.1));
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
     }

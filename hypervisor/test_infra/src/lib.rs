@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use ssh2::Session;
@@ -733,6 +735,22 @@ pub fn exec_host_command_output(command: &str) -> Output {
         .args(["-c", command])
         .output()
         .unwrap_or_else(|_| panic!("Expected '{}' to run", command))
+}
+
+pub fn kill_child(child: &mut Child) {
+    let r = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    if r != 0 {
+        let e = io::Error::last_os_error();
+        if e.raw_os_error().unwrap() == libc::ESRCH {
+            return;
+        }
+        eprintln!("Failed to kill child with SIGTERM: {e:?}");
+    }
+
+    // The timeout period elapsed without the child exiting
+    if child.wait_timeout(Duration::new(5, 0)).unwrap().is_none() {
+        let _ = child.kill();
+    }
 }
 
 pub const PIPE_SIZE: i32 = 32 << 20;
