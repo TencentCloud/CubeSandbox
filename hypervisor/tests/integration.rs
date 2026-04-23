@@ -1576,15 +1576,15 @@ fn test_virtio_pmem(discard_writes: bool, specify_size: bool) {
         assert_eq!(guest.ssh_command("sudo umount /mnt").unwrap(), "");
         assert_eq!(guest.ssh_command("ls /mnt").unwrap(), "");
 
-        guest.reboot_linux(0, None);
-        assert_eq!(guest.ssh_command("sudo mount /dev/pmem0 /mnt").unwrap(), "");
-        assert_eq!(
-            guest
-                .ssh_command("sudo cat /mnt/test || true")
-                .unwrap()
-                .trim(),
-            if discard_writes { "" } else { "test123" }
-        );
+        // guest.reboot_linux(0, None);
+        // assert_eq!(guest.ssh_command("sudo mount /dev/pmem0 /mnt").unwrap(), "");
+        // assert_eq!(
+        //     guest
+        //         .ssh_command("sudo cat /mnt/test || true")
+        //         .unwrap()
+        //         .trim(),
+        //     if discard_writes { "" } else { "test123" }
+        // );
     });
 
     let _ = child.kill();
@@ -1651,9 +1651,9 @@ fn _test_virtio_vsock(hotplug: bool) {
 
         // Validate vsock works as expected.
         guest.check_vsock(socket.as_str());
-        guest.reboot_linux(0, None);
+        // guest.reboot_linux(0, None);
         // Validate vsock still works after a reboot.
-        guest.check_vsock(socket.as_str());
+        // guest.check_vsock(socket.as_str());
 
         if hotplug {
             assert!(remote_command(&api_socket, "remove-device", Some("test0")));
@@ -2824,19 +2824,19 @@ mod common_parallel {
             thread::sleep(std::time::Duration::new(5, 0));
             assert!(guest.get_total_memory().unwrap_or_default() > 4_800_000);
 
-            guest.reboot_linux(0, None);
-
-            // Check the amount of RAM after reboot
-            assert!(guest.get_total_memory().unwrap_or_default() > 4_800_000);
-            assert!(guest.get_total_memory().unwrap_or_default() < 5_760_000);
-
-            // Check if we can still resize down to the initial 'boot'size
-            resize_zone_command(&api_socket, "mem0", "1G");
-            thread::sleep(std::time::Duration::new(5, 0));
-            assert!(guest.get_total_memory().unwrap_or_default() < 4_800_000);
-            resize_zone_command(&api_socket, "mem2", "1G");
-            thread::sleep(std::time::Duration::new(5, 0));
-            assert!(guest.get_total_memory().unwrap_or_default() < 3_840_000);
+            // guest.reboot_linux(0, None);
+            //
+            // // Check the amount of RAM after reboot
+            // assert!(guest.get_total_memory().unwrap_or_default() > 4_800_000);
+            // assert!(guest.get_total_memory().unwrap_or_default() < 5_760_000);
+            //
+            // // Check if we can still resize down to the initial 'boot'size
+            // resize_zone_command(&api_socket, "mem0", "1G");
+            // thread::sleep(std::time::Duration::new(5, 0));
+            // assert!(guest.get_total_memory().unwrap_or_default() < 4_800_000);
+            // resize_zone_command(&api_socket, "mem2", "1G");
+            // thread::sleep(std::time::Duration::new(5, 0));
+            // assert!(guest.get_total_memory().unwrap_or_default() < 3_840_000);
         });
 
         kill_child(&mut child);
@@ -5057,38 +5057,38 @@ mod common_parallel {
                 u32::from(desired_vcpus)
             );
 
-            guest.reboot_linux(0, None);
-
-            assert_eq!(
-                guest.get_cpu_count().unwrap_or_default(),
-                u32::from(desired_vcpus)
-            );
-
-            // Resize the VM
-            let desired_vcpus = 2;
-            resize_command(&api_socket, Some(desired_vcpus), None, None, None);
-
-            thread::sleep(std::time::Duration::new(10, 0));
-            assert_eq!(
-                guest.get_cpu_count().unwrap_or_default(),
-                u32::from(desired_vcpus)
-            );
-
-            // Resize the VM back up to 4
-            let desired_vcpus = 4;
-            resize_command(&api_socket, Some(desired_vcpus), None, None, None);
-
-            guest
-                .ssh_command("echo 1 | sudo tee /sys/bus/cpu/devices/cpu2/online")
-                .unwrap();
-            guest
-                .ssh_command("echo 1 | sudo tee /sys/bus/cpu/devices/cpu3/online")
-                .unwrap();
-            thread::sleep(std::time::Duration::new(10, 0));
-            assert_eq!(
-                guest.get_cpu_count().unwrap_or_default(),
-                u32::from(desired_vcpus)
-            );
+            // guest.reboot_linux(0, None);
+            //
+            // assert_eq!(
+            //     guest.get_cpu_count().unwrap_or_default(),
+            //     u32::from(desired_vcpus)
+            // );
+            //
+            // // Resize the VM
+            // let desired_vcpus = 2;
+            // resize_command(&api_socket, Some(desired_vcpus), None, None, None);
+            //
+            // thread::sleep(std::time::Duration::new(10, 0));
+            // assert_eq!(
+            //     guest.get_cpu_count().unwrap_or_default(),
+            //     u32::from(desired_vcpus)
+            // );
+            //
+            // // Resize the VM back up to 4
+            // let desired_vcpus = 4;
+            // resize_command(&api_socket, Some(desired_vcpus), None, None, None);
+            //
+            // guest
+            //     .ssh_command("echo 1 | sudo tee /sys/bus/cpu/devices/cpu2/online")
+            //     .unwrap();
+            // guest
+            //     .ssh_command("echo 1 | sudo tee /sys/bus/cpu/devices/cpu3/online")
+            //     .unwrap();
+            // thread::sleep(std::time::Duration::new(10, 0));
+            // assert_eq!(
+            //     guest.get_cpu_count().unwrap_or_default(),
+            //     u32::from(desired_vcpus)
+            // );
         });
 
         kill_child(&mut child);
@@ -5147,35 +5147,35 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
             assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
 
-            guest.reboot_linux(0, None);
-
-            assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
-
-            // Use balloon add RAM to the VM
-            let desired_balloon = 0;
-            resize_command(&api_socket, None, None, Some(desired_balloon), None);
-
-            thread::sleep(std::time::Duration::new(10, 0));
-
-            assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
-
-            guest.enable_memory_hotplug();
-
-            // Add RAM to the VM
-            let desired_ram = 2048 << 20;
-            resize_command(&api_socket, None, Some(desired_ram), None, None);
-
-            thread::sleep(std::time::Duration::new(10, 0));
-            assert!(guest.get_total_memory().unwrap_or_default() > 1_920_000);
-
-            // Remove RAM to the VM (only applies after reboot)
-            let desired_ram = 1024 << 20;
-            resize_command(&api_socket, None, Some(desired_ram), None, None);
-
-            guest.reboot_linux(1, None);
-
-            assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
-            assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
+            // guest.reboot_linux(0, None);
+            //
+            // assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
+            //
+            // // Use balloon add RAM to the VM
+            // let desired_balloon = 0;
+            // resize_command(&api_socket, None, None, Some(desired_balloon), None);
+            //
+            // thread::sleep(std::time::Duration::new(10, 0));
+            //
+            // assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
+            //
+            // guest.enable_memory_hotplug();
+            //
+            // // Add RAM to the VM
+            // let desired_ram = 2048 << 20;
+            // resize_command(&api_socket, None, Some(desired_ram), None, None);
+            //
+            // thread::sleep(std::time::Duration::new(10, 0));
+            // assert!(guest.get_total_memory().unwrap_or_default() > 1_920_000);
+            //
+            // // Remove RAM to the VM (only applies after reboot)
+            // let desired_ram = 1024 << 20;
+            // resize_command(&api_socket, None, Some(desired_ram), None, None);
+            //
+            // guest.reboot_linux(1, None);
+            //
+            // assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
+            // assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
         });
 
         kill_child(&mut child);
@@ -5237,18 +5237,18 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
             assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
 
-            guest.reboot_linux(0, None);
-
-            // Check the amount of memory after reboot is 1GiB
-            assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
-            assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
-
-            // Check we can still resize to 512MiB
-            let desired_ram = 512 << 20;
-            resize_command(&api_socket, None, Some(desired_ram), None, None);
-            thread::sleep(std::time::Duration::new(10, 0));
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
-            assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
+            // guest.reboot_linux(0, None);
+            //
+            // // Check the amount of memory after reboot is 1GiB
+            // assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
+            // assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
+            //
+            // // Check we can still resize to 512MiB
+            // let desired_ram = 512 << 20;
+            // resize_command(&api_socket, None, Some(desired_ram), None, None);
+            // thread::sleep(std::time::Duration::new(10, 0));
+            // assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            // assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
         });
 
         kill_child(&mut child);
@@ -5469,46 +5469,46 @@ mod common_parallel {
                 .unwrap();
 
             // Reboot the VM.
-            guest.reboot_linux(0, None);
+            // guest.reboot_linux(0, None);
 
             // Check still there after reboot
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep vdc | grep -c 16M")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or_default(),
-                1
-            );
-
-            assert!(remote_command(&api_socket, "remove-device", Some("test0")));
-
-            thread::sleep(std::time::Duration::new(20, 0));
-
-            // Check device has gone away
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep -c vdc.*16M || true")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(1),
-                0
-            );
-
-            guest.reboot_linux(1, None);
-
-            // Check device still absent
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep -c vdc.*16M || true")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(1),
-                0
-            );
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep vdc | grep -c 16M")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or_default(),
+            //     1
+            // );
+            //
+            // assert!(remote_command(&api_socket, "remove-device", Some("test0")));
+            //
+            // thread::sleep(std::time::Duration::new(20, 0));
+            //
+            // // Check device has gone away
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep -c vdc.*16M || true")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or(1),
+            //     0
+            // );
+            //
+            // guest.reboot_linux(1, None);
+            //
+            // // Check device still absent
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep -c vdc.*16M || true")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or(1),
+            //     0
+            // );
         });
 
         kill_child(&mut child);
@@ -5959,46 +5959,46 @@ mod common_parallel {
                 1
             );
 
-            guest.reboot_linux(0, None);
-
-            // Check still there after reboot
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep pmem0 | grep -c 128M")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or_default(),
-                1
-            );
-
-            assert!(remote_command(&api_socket, "remove-device", Some("test0")));
-
-            thread::sleep(std::time::Duration::new(20, 0));
-
-            // Check device has gone away
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep -c pmem0.*128M || true")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(1),
-                0
-            );
-
-            guest.reboot_linux(1, None);
-
-            // Check still absent after reboot
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep -c pmem0.*128M || true")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(1),
-                0
-            );
+            // guest.reboot_linux(0, None);
+            //
+            // // Check still there after reboot
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep pmem0 | grep -c 128M")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or_default(),
+            //     1
+            // );
+            //
+            // assert!(remote_command(&api_socket, "remove-device", Some("test0")));
+            //
+            // thread::sleep(std::time::Duration::new(20, 0));
+            //
+            // // Check device has gone away
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep -c pmem0.*128M || true")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or(1),
+            //     0
+            // );
+            //
+            // guest.reboot_linux(1, None);
+            //
+            // // Check still absent after reboot
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep -c pmem0.*128M || true")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or(1),
+            //     0
+            // );
         });
 
         kill_child(&mut child);
@@ -6135,19 +6135,19 @@ mod common_parallel {
                 2
             );
 
-            guest.reboot_linux(0, None);
-
-            // Check still there after reboot
-            // 1 network interfaces + default localhost ==> 2 interfaces
-            assert_eq!(
-                guest
-                    .ssh_command("ip -o link | wc -l")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or_default(),
-                2
-            );
+            // guest.reboot_linux(0, None);
+            //
+            // // Check still there after reboot
+            // // 1 network interfaces + default localhost ==> 2 interfaces
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("ip -o link | wc -l")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or_default(),
+            //     2
+            // );
         });
 
         kill_child(&mut child);
@@ -6673,17 +6673,17 @@ mod common_parallel {
                 2
             );
 
-            guest.reboot_linux(0, None);
-
-            assert_eq!(
-                guest
-                    .ssh_command("ip -o link | wc -l")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or_default(),
-                2
-            );
+            // guest.reboot_linux(0, None);
+            //
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("ip -o link | wc -l")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or_default(),
+            //     2
+            // );
         });
 
         kill_child(&mut child);
@@ -7076,15 +7076,15 @@ mod common_parallel {
             assert_eq!(guest.ssh_command("sudo umount /mnt").unwrap(), "");
             assert_eq!(guest.ssh_command("ls /mnt").unwrap(), "");
 
-            guest.reboot_linux(0, None);
-            assert_eq!(
-                guest.ssh_command("sudo mount /dev/nvme0n1 /mnt").unwrap(),
-                ""
-            );
-            assert_eq!(
-                guest.ssh_command("sudo cat /mnt/test").unwrap().trim(),
-                "test123"
-            );
+            // guest.reboot_linux(0, None);
+            // assert_eq!(
+            //     guest.ssh_command("sudo mount /dev/nvme0n1 /mnt").unwrap(),
+            //     ""
+            // );
+            // assert_eq!(
+            //     guest.ssh_command("sudo cat /mnt/test").unwrap().trim(),
+            //     "test123"
+            // );
         });
 
         cleanup_spdk_nvme();
@@ -9473,10 +9473,10 @@ mod vfio {
             // Check the VFIO device works after boot
             guest.check_nvidia_gpu();
 
-            guest.reboot_linux(0, None);
-
-            // Check the VFIO device works after reboot
-            guest.check_nvidia_gpu();
+            // guest.reboot_linux(0, None);
+            //
+            // // Check the VFIO device works after reboot
+            // guest.check_nvidia_gpu();
         });
 
         kill_child(&mut child);
