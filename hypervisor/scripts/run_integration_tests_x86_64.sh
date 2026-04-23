@@ -37,11 +37,12 @@ if [ ! -f "$OVMF_FW" ]; then
 fi
 
 BIONIC_OS_IMAGE_NAME="bionic-server-cloudimg-amd64.qcow2"
-BIONIC_OS_IMAGE_URL="https://cloud-hypervisor.azureedge.net/$BIONIC_OS_IMAGE_NAME"
+BIONIC_OS_IMAGE_URL="https://github.com/lisongqian/CubeSandbox/releases/download/ci/$BIONIC_OS_IMAGE_NAME.zip"
 BIONIC_OS_IMAGE="$WORKLOADS_DIR/$BIONIC_OS_IMAGE_NAME"
 if [ ! -f "$BIONIC_OS_IMAGE" ]; then
     pushd $WORKLOADS_DIR
     time wget --quiet $BIONIC_OS_IMAGE_URL || exit 1
+    mv "$BIONIC_OS_IMAGE_NAME.zip" $BIONIC_OS_IMAGE_NAME
     popd
 fi
 
@@ -55,11 +56,12 @@ fi
 
 
 FOCAL_OS_IMAGE_NAME="focal-server-cloudimg-amd64-custom-20210609-0.qcow2"
-FOCAL_OS_IMAGE_URL="https://cloud-hypervisor.azureedge.net/$FOCAL_OS_IMAGE_NAME"
+FOCAL_OS_IMAGE_URL="https://github.com/lisongqian/CubeSandbox/releases/download/ci/$FOCAL_OS_IMAGE_NAME.zip"
 FOCAL_OS_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_IMAGE_NAME"
 if [ ! -f "$FOCAL_OS_IMAGE" ]; then
     pushd $WORKLOADS_DIR
     time wget --quiet $FOCAL_OS_IMAGE_URL || exit 1
+    mv "$FOCAL_OS_IMAGE_NAME.zip" $FOCAL_OS_IMAGE_NAME
     popd
 fi
 
@@ -72,11 +74,12 @@ if [ ! -f "$FOCAL_OS_RAW_IMAGE" ]; then
 fi
 
 JAMMY_OS_IMAGE_NAME="jammy-server-cloudimg-amd64-custom-20220329-0.qcow2"
-JAMMY_OS_IMAGE_URL="https://cloud-hypervisor.azureedge.net/$JAMMY_OS_IMAGE_NAME"
+JAMMY_OS_IMAGE_URL="https://github.com/lisongqian/CubeSandbox/releases/download/ci/$JAMMY_OS_IMAGE_NAME.zip"
 JAMMY_OS_IMAGE="$WORKLOADS_DIR/$JAMMY_OS_IMAGE_NAME"
 if [ ! -f "$JAMMY_OS_IMAGE" ]; then
     pushd $WORKLOADS_DIR
     time wget --quiet $JAMMY_OS_IMAGE_URL || exit 1
+    mv "$JAMMY_OS_IMAGE_NAME.zip" $JAMMY_OS_IMAGE_NAME
     popd
 fi
 
