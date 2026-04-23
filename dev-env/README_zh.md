@@ -114,37 +114,62 @@ coredns、network-agent、cubemaster、cube-api、cubelet 一并拉起。
 
 这才是 `dev-env/` 存在的真正价值。
 
-在宿主机上改完代码后，一行命令把改动推进虚机：
+推荐的终端分工：
 
 ```bash
-./sync_to_vm.sh
+./login.sh    # 常驻开着；默认会直接进 guest 的 root shell
 ```
 
-它会按顺序做：
-
-1. 在仓库根目录跑 `make all`
-2. 在 guest 内把旧二进制原地 `mv` 成 `*.bak`（**只保留最近一份**备份）
-3. 把新二进制 scp 到 `/usr/local/services/cubetoolbox/` 下对应路径
-4. `systemctl restart cube-sandbox-oneclick.service`
-5. 跑 `quickcheck.sh`；如果失败，**自动用 `.bak` 回滚**并重启
-
-常用快捷方式：
+然后在宿主机终端里做开发循环：
 
 ```bash
-# 跳过本地构建，直接用 _output/bin/ 里已有的产物
-BUILD=0 ./sync_to_vm.sh
+make all
+./sync_to_vm.sh bin cubelet cubemaster
+```
+
+现在的 `sync_to_vm.sh` 只有一个职责：把文件拷进虚机。它**不会**在宿主机
+构建、不会重启服务、不会跑 `quickcheck.sh`，也不会自动回滚。
+
+拷贝结束后，把脚本打印出来的重启命令粘进 `./login.sh` 那个终端里：
+
+```bash
+systemctl restart cube-sandbox-oneclick.service
+```
+
+常用示例：
+
+```bash
+# 同步 _output/bin/ 里所有已知组件
+./sync_to_vm.sh bin
 
 # 只同步指定组件
-COMPONENTS="cubemaster cubelet" ./sync_to_vm.sh
+./sync_to_vm.sh bin cubemaster cubelet
 
-# 推任意文件（不重启服务）
-MODE=files FILES="./configs/foo.toml" REMOTE_DIR=/tmp ./sync_to_vm.sh
-
-# 不走裸二进制，走官方 manual-release 流程
-MODE=release ./sync_to_vm.sh
+# 推任意文件到 guest
+./sync_to_vm.sh files --remote-dir /tmp ./configs/foo.toml
 ```
 
+旧二进制仍然会在 guest 里保留成 `*.bak`，但脚本输出不再主动教你怎么
+verify / rollback；需要的话你自己在虚机里处理。
+
 前置：第 4 步已完成；推荐先跑过 `./cube-autostart.sh`。
+
+## manual-release 流程
+
+先在宿主机终端里：
+
+```bash
+make manual-release
+./sync_to_vm.sh files \
+  _output/release/cube-manual-update-*.tar.gz \
+  deploy/one-click/deploy-manual.sh
+```
+
+然后切到 `./login.sh` 的 root 终端里：
+
+```bash
+bash /tmp/deploy-manual.sh /tmp/cube-manual-update-*.tar.gz
+```
 
 ## 从虚机收日志
 
@@ -164,7 +189,7 @@ MODE=release ./sync_to_vm.sh
 | 虚机里 `df -h /` 还是很小 | `prepare_image.sh` 没走完自动扩容 | 查看 `.workdir/qemu-serial.log`，然后把 `internal/grow_rootfs.sh` scp 进去手动跑一次 |
 | 宿主机 13000 / 11080 / 11443 端口被占 | 本机有别的服务在用这些 dev-env 转发端口 | 用 `CUBE_API_PORT=23000 CUBE_PROXY_HTTP_PORT=21080 CUBE_PROXY_HTTPS_PORT=21443 ./run_vm.sh` |
 | 虚机重启后 cube 组件没了 | 还没开启 autostart | 跑一次 `./cube-autostart.sh` |
-| `sync_to_vm.sh` 自动回滚了 | `quickcheck` 用新二进制失败 | 看 guest 里 `/data/log/`，修 bug 后重新跑 `sync_to_vm.sh` |
+| 重启后新二进制不好使 | 新构建有问题，或你手动跑 `quickcheck` 失败了 | 看 guest 里 `/data/log/`，必要时把对应的 `*.bak` 手动移回去，再重新 `systemctl restart` |
 
 ## 参考
 
@@ -177,7 +202,7 @@ dev-env/
 ├── run_vm.sh               # 第 2 步
 ├── login.sh                # 第 3 步
 ├── cube-autostart.sh       # enable / disable / status systemd autostart unit
-├── sync_to_vm.sh           # 开发循环
+├── sync_to_vm.sh           # 只负责把宿主机产物拷进虚机，不 build/不 restart
 ├── copy_logs.sh            # 拉 /data/log
 └── internal/               # 由 prepare_image.sh 传进虚机执行
     ├── grow_rootfs.sh         # 扩根文件系统到 qcow2 虚拟大小
@@ -233,12 +258,15 @@ dev-env/
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `MODE` | `binaries` | `binaries` / `release` / `files`。 |
-| `BUILD` | `1` | `0` 跳过 `make all` / `make manual-release`。 |
-| `RESTART` | `1` | `0` 不在远端 `systemctl restart`。 |
-| `COMPONENTS` | （全部） | `binaries` 模式：只推这些组件。 |
-| `FILES` | — | `files` 模式：要 scp 的路径。 |
-| `REMOTE_DIR` | `/tmp` | `files` 模式：远端落点目录。 |
+| `TOOLBOX_ROOT` | `/usr/local/services/cubetoolbox` | `bin` 子命令里已知组件的安装根目录。 |
+| `UNIT_NAME` | `cube-sandbox-oneclick.service` | 脚本末尾打印的重启提示里会用到的 unit 名。 |
+| `OUTPUT_BIN_DIR` | `_output/bin` | `bin` 子命令读取宿主机二进制的目录。 |
+
+子命令：
+
+- `bin [NAME ...]`：把预构建好的二进制推到 guest 对应安装路径；不写 `NAME` 时同步全部已知组件。
+- `files [--remote-dir DIR] PATH [PATH ...]`：把任意文件或目录推到 guest。
+- `-h`、`--help`：查看内置帮助。
 
 #### `copy_logs.sh`
 

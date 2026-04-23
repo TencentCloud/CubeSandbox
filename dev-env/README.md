@@ -123,42 +123,65 @@ Other subcommands:
 
 This is the main reason `dev-env/` exists.
 
-After editing code in this repo on your host, push your changes into the
-running VM with one command:
+Recommended terminal setup:
 
 ```bash
-./sync_to_vm.sh
+./login.sh    # keep this shell open; by default it lands in a root shell
 ```
 
-What it does, in order:
-
-1. Runs `make all` in the repo root
-2. Backs up old binaries inside the guest as `*.bak` (only the most
-   recent backup is kept)
-3. Copies the new binaries to the matching paths under
-   `/usr/local/services/cubetoolbox/`
-4. Restarts `cube-sandbox-oneclick.service`
-5. Runs `quickcheck.sh`; if it fails, **automatically restores the
-   `.bak` files** and restarts again
-
-Common shortcuts:
+Then iterate from your host shell:
 
 ```bash
-# Skip the local build, reuse what's already in _output/bin/
-BUILD=0 ./sync_to_vm.sh
+make all
+./sync_to_vm.sh bin cubelet cubemaster
+```
+
+`sync_to_vm.sh` now has a single job: copy files into the VM. It does not
+build on the host, restart services, run `quickcheck.sh`, or roll back
+automatically.
+
+After the copy finishes, paste the printed restart command into your
+`./login.sh` session:
+
+```bash
+systemctl restart cube-sandbox-oneclick.service
+```
+
+Useful examples:
+
+```bash
+# Sync all known binaries from _output/bin/
+./sync_to_vm.sh bin
 
 # Sync only specific components
-COMPONENTS="cubemaster cubelet" ./sync_to_vm.sh
+./sync_to_vm.sh bin cubemaster cubelet
 
-# Push arbitrary files (no service restart)
-MODE=files FILES="./configs/foo.toml" REMOTE_DIR=/tmp ./sync_to_vm.sh
-
-# Use the official manual-release flow instead of raw binaries
-MODE=release ./sync_to_vm.sh
+# Push arbitrary files into the guest
+./sync_to_vm.sh files --remote-dir /tmp ./configs/foo.toml
 ```
+
+The previous binary is still kept on the VM as `*.bak`, but the script no
+longer surfaces rollback or verification steps in its output.
 
 Prerequisite: Step 4 finished and (recommended) `./cube-autostart.sh`
 has been run.
+
+## Manual release flow
+
+From your host shell:
+
+```bash
+make manual-release
+./sync_to_vm.sh files \
+  _output/release/cube-manual-update-*.tar.gz \
+  deploy/one-click/deploy-manual.sh
+```
+
+Then in your `./login.sh` session:
+
+```bash
+bash /tmp/deploy-manual.sh /tmp/cube-manual-update-*.tar.gz
+```
 
 ## Collect logs from the VM
 
@@ -178,7 +201,7 @@ README as `data-log-<timestamp>.tar.gz`.
 | `df -h /` inside the guest is still small | `prepare_image.sh` never finished the auto-grow step | Inspect `.workdir/qemu-serial.log`, then `scp internal/grow_rootfs.sh` into the guest and run it manually |
 | Host port 13000 / 11080 / 11443 already taken | Some other service binds the forwarded dev-env ports | Start with `CUBE_API_PORT=23000 CUBE_PROXY_HTTP_PORT=21080 CUBE_PROXY_HTTPS_PORT=21443 ./run_vm.sh` |
 | Cube components gone after VM reboot | Autostart not enabled | Run `./cube-autostart.sh` once |
-| `sync_to_vm.sh` rolled back | `quickcheck` failed with new binaries | Check `/data/log/` in the guest, fix the bug, then re-run `sync_to_vm.sh` |
+| New binaries fail after restart | The new build is bad, or `quickcheck` fails when you run it manually | Check `/data/log/` in the guest, and if needed restore the previous `*.bak` binary manually before restarting again |
 
 ## Reference
 
@@ -191,7 +214,7 @@ dev-env/
 ├── run_vm.sh               # Step 2
 ├── login.sh                # Step 3
 ├── cube-autostart.sh       # enable / disable / status the systemd autostart unit
-├── sync_to_vm.sh           # Develop loop
+├── sync_to_vm.sh           # Copy host artifacts into the guest (no build/restart)
 ├── copy_logs.sh            # Pull /data/log from the guest
 └── internal/               # Run inside the guest by prepare_image.sh
     ├── grow_rootfs.sh         # grow rootfs to qcow2 virtual size
@@ -247,12 +270,15 @@ Subcommands: `enable` (default), `disable`, `status`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODE` | `binaries` | `binaries` / `release` / `files`. |
-| `BUILD` | `1` | `0` skips `make all` / `make manual-release`. |
-| `RESTART` | `1` | `0` skips the remote `systemctl restart`. |
-| `COMPONENTS` | (all) | `binaries` mode: subset of binaries to push. |
-| `FILES` | — | `files` mode: paths to scp. |
-| `REMOTE_DIR` | `/tmp` | `files` mode: destination dir in the guest. |
+| `TOOLBOX_ROOT` | `/usr/local/services/cubetoolbox` | Base install dir used to map known components in `bin` mode. |
+| `UNIT_NAME` | `cube-sandbox-oneclick.service` | Unit name shown in the final restart hint. |
+| `OUTPUT_BIN_DIR` | `_output/bin` | Where `bin` mode reads host-side binaries from. |
+
+Subcommands:
+
+- `bin [NAME ...]`: copy pre-built binaries into their install paths in the guest. If `NAME` is omitted, sync all known components.
+- `files [--remote-dir DIR] PATH [PATH ...]`: copy arbitrary files or directories into the guest.
+- `-h`, `--help`: show the built-in help text.
 
 #### `copy_logs.sh`
 

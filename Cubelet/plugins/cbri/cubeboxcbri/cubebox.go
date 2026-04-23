@@ -146,12 +146,17 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 		kernelPath  string
 	)
 
-	if constants.GetAppImageID(ctx) == "" {
+	appImageID := constants.GetAppImageID(ctx)
+	if appImageID == "" {
 		kernelPath = filepath.Join(e.config.BasePath, "cube-kernel-scf", "vmlinux")
 	} else {
-
-		kernelPath = e.getKernelFilePath(constants.GetAppImageID(ctx))
-		rootfs := filepath.Join(e.config.ImageBasePath, constants.GetAppImageID(ctx))
+		if flowOpts.IsCreateSnapshot() {
+			if err := e.syncLatestKernelForImage(ctx, appImageID); err != nil {
+				return nil, err
+			}
+		}
+		kernelPath = e.getKernelFilePath(appImageID)
+		rootfs := filepath.Join(e.config.ImageBasePath, appImageID)
 		specOpts = append(specOpts, oci.WithRootFSPath(rootfs))
 		logEntry = logEntry.WithField("rootfs", rootfs)
 	}
@@ -169,8 +174,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 
 	} else if templateID, ok := flowOpts.GetSnapshotTemplateID(); ok {
 
-		var snapBasePath string
-		var snapSpecPath string
+		var snapBasePath, snapSpecPath string
 
 		if flowOpts.IsCubeboxV2() {
 			if flowOpts.LocalRunTemplate == nil {
@@ -203,7 +207,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 
 		annotations[constants.AnnotationAppSnapshotRestore] = "true"
 
-		annotations[constants.AnnotationAppSnapshotContainerID] = templateID + "_" + "0"
+		annotations[constants.AnnotationAppSnapshotContainerID] = templateID + "_0"
 
 		sandbox := cubeboxstore.GetCubeBox(ctx)
 		if sandbox != nil && sandbox.FirstContainer() != nil {
@@ -377,6 +381,15 @@ func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID string) 
 func (e *cubeboxInstancePlugin) getImageFilePath(imageID string) string {
 	return filepath.Join(e.config.ImageBasePath, imageID, imageID+".ext4")
 }
+
+func (e *cubeboxInstancePlugin) syncLatestKernelForImage(ctx context.Context, imageID string) error {
+	return pmem.SyncKernelFile(
+		ctx,
+		filepath.Join(e.config.BasePath, "cube-kernel-scf", "vmlinux"),
+		e.getKernelFilePath(imageID),
+	)
+}
+
 func (e *cubeboxInstancePlugin) getKernelFilePath(imageID string) string {
 	return filepath.Join(e.config.KernelBasePath, imageID, imageID+".vm")
 }
@@ -471,11 +484,13 @@ func inferSnapshotResDirFromRequest(req *cubebox.RunCubeSandboxRequest) (string,
 		return "", fmt.Errorf("local snapshot not exist")
 	}
 
-	cpuQ, err := resource.ParseQuantity(req.Containers[0].GetResources().GetCpu())
+	resources := req.Containers[0].GetResources()
+
+	cpuQ, err := resource.ParseQuantity(resources.GetCpu())
 	if err != nil {
 		return "", fmt.Errorf("parse snapshot cpu resource failed: %w", err)
 	}
-	memQ, err := resource.ParseQuantity(req.Containers[0].GetResources().GetMem())
+	memQ, err := resource.ParseQuantity(resources.GetMem())
 	if err != nil {
 		return "", fmt.Errorf("parse snapshot memory resource failed: %w", err)
 	}

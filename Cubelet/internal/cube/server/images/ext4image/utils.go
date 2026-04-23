@@ -116,33 +116,7 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 }
 
 func ensureKernelFile(ctx context.Context, instanceType, imageRef string) error {
-	kernelPath := pmem.GetRawKernelFilePath(instanceType, imageRef)
-	exist, err := utils.FileExistAndValid(kernelPath)
-	if err != nil {
-		log.G(ctx).Warnf("kernel file %s validation failed, try copy: %v", kernelPath, err)
-	}
-	if exist {
-		return nil
-	}
-	sharedKernelPath := pmem.GetSharedKernelFilePath()
-	sharedExist, err := utils.FileExistAndValid(sharedKernelPath)
-	if err != nil {
-		return fmt.Errorf("local shared kernel validation failed: %w", err)
-	}
-	if !sharedExist {
-		return fmt.Errorf("local shared kernel not found: %s", sharedKernelPath)
-	}
-	if err := copyLocalKernelAtomically(ctx, sharedKernelPath, kernelPath); err != nil {
-		return err
-	}
-	exist, err = utils.FileExistAndValid(kernelPath)
-	if err != nil {
-		return fmt.Errorf("copied kernel file %s validation failed: %v", kernelPath, err)
-	}
-	if !exist {
-		return fmt.Errorf("copied kernel file %s not exist", kernelPath)
-	}
-	return nil
+	return pmem.SyncKernelFile(ctx, pmem.GetSharedKernelFilePath(), pmem.GetRawKernelFilePath(instanceType, imageRef))
 }
 
 func ensureImageVersionFile(ctx context.Context, instanceType, imageRef string) error {
@@ -173,10 +147,6 @@ func ensureImageVersionFile(ctx context.Context, instanceType, imageRef string) 
 		return fmt.Errorf("copied image version file %s not exist", versionPath)
 	}
 	return nil
-}
-
-func copyLocalKernelAtomically(ctx context.Context, srcPath, dstPath string) error {
-	return copyLocalFileAtomically(ctx, srcPath, dstPath, "shared kernel")
 }
 
 func copyLocalFileAtomically(ctx context.Context, srcPath, dstPath, fileType string) error {
