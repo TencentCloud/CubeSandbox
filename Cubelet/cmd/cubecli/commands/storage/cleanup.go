@@ -6,6 +6,7 @@ package storage
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -99,18 +100,18 @@ func readDbs(context *cli.Context) map[string]*storage.StorageInfo {
 	basePath := filepath.Join(context.String("state"), storageDir, "db")
 	opt := utils.MakeBoltDBOption()
 	opt.ReadOnly = true
-	myPrint("basePath: %s", basePath)
+	log.Printf("basePath: %s", basePath)
 	cs, err := utils.NewCubeStoreExt(basePath, "meta.db", 10, opt)
 	if err != nil {
 		if err == bolt.ErrTimeout {
 			err = fmt.Errorf("should stop cubelet first,err:%v", err)
 		}
-		myPrint("fail:%v", err)
+		log.Printf("fail:%v", err)
 		return map[string]*storage.StorageInfo{}
 	}
 	all, err := cs.ReadAll(context.String("bucket"))
 	if err != nil {
-		myPrint("read db fail:%v", err)
+		log.Printf("read db fail:%v", err)
 		return map[string]*storage.StorageInfo{}
 	}
 	if err != nil {
@@ -137,7 +138,7 @@ func readDbs(context *cli.Context) map[string]*storage.StorageInfo {
 }
 
 func readDir(baseFormatPath string) map[string]struct{} {
-	myPrint("basePath: %s", baseFormatPath)
+	log.Printf("basePath: %s", baseFormatPath)
 	all := map[string]struct{}{}
 	denList, err := os.ReadDir(baseFormatPath)
 	if err != nil {

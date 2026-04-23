@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"context"
@@ -61,7 +62,7 @@ func copyDb(onlineBaseDir string) (func(), error) {
 
 	exist, er := utils.DenExist(targedir)
 	if er != nil || !exist {
-		myPrint("failed to create temp dir: %v", er)
+		log.Printf("failed to create temp dir: %v", er)
 		return nil, er
 	}
 
@@ -70,19 +71,19 @@ func copyDb(onlineBaseDir string) (func(), error) {
 		{"ls", "-l", onlineBaseDir},
 		{"cp", "-r", onlineBaseDir, targedir},
 	}
-	myPrint("cmds:%v", cmds)
+	log.Printf("cmds:%v", cmds)
 	for _, cmd := range cmds {
 		if out, stderr, err := utils.ExecV(cmd, time.Minute); err == nil {
-			myPrint("metadata: %v", out)
+			log.Printf("metadata: %v", out)
 		} else {
-			myPrint("metadata: failed to exec %v: %v", cmd, err)
+			log.Printf("metadata: failed to exec %v: %v", cmd, err)
 			return clean, fmt.Errorf("metadata failed:%s", stderr)
 		}
 	}
 
 	var err error
 	if dbHandle, err = utils.NewCubeStoreExt(filepath.Join(targedir, dbDir), "meta.db", 10, nil); err != nil {
-		myPrint("metadata: failed to open db: %v", err)
+		log.Printf("metadata: failed to open db: %v", err)
 		return clean, err
 	}
 	return clean, nil
@@ -166,20 +167,20 @@ var listMetaData = cli.Command{
 
 		clean, err := copyDb(filepath.Join(clictx.String("state"), cubeboxDir, dbDir))
 		if err != nil {
-			myPrint("fail copy db:%v", err)
+			log.Printf("fail copy db:%v", err)
 			return err
 		}
 		defer clean()
 
 		all, err := dbHandle.ReadAll("sandbox/v1")
 		if err != nil {
-			myPrint("fail:%v", err)
+			log.Printf("fail:%v", err)
 			return nil
 		}
 		for id, sandboxBytes := range all {
 			var cb = new(cubeboxstore.CubeBox)
 			if err := jsoniter.Unmarshal(sandboxBytes, cb); err != nil {
-				myPrint("failed to unmarshal to cubebox %s from meta: %v", id, err)
+				log.Printf("failed to unmarshal to cubebox %s from meta: %v", id, err)
 				continue
 			}
 
@@ -191,14 +192,14 @@ var listMetaData = cli.Command{
 			podCtx := namespaces.WithNamespace(context.TODO(), cb.Namespace)
 			podCtx = context.WithValue(podCtx, constants.CubeboxID, cb.ID)
 			if err := cubes.RecoverPod(podCtx, cntdClient, cb); err != nil {
-				myPrint("failed to recover pod: %v", err)
+				log.Printf("failed to recover pod: %v", err)
 				continue
 			}
 			if cb.GetStatus().IsTerminated() {
-				myPrint("sandbox %s is terminating, skip", cb.ID)
-				myPrint("load sandbox %v", old)
+				log.Printf("sandbox %s is terminating, skip", cb.ID)
+				log.Printf("load sandbox %v", old)
 			}
-			myPrint("Loaded sandbox %v", utils.InterfaceToString(&cb))
+			log.Printf("Loaded sandbox %v", utils.InterfaceToString(&cb))
 		}
 
 		return nil

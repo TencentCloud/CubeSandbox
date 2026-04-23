@@ -6,6 +6,7 @@ package unsafe
 
 import (
 	"fmt"
+	"log"
 
 	ctrCommands "github.com/containerd/containerd/v2/cmd/ctr/commands"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -89,7 +90,7 @@ var RemoveImage = &cli.Command{
 				if !ret.IsSuccessCode(resp.GetRet().GetRetCode()) {
 					return fmt.Errorf("destroy image %q: %v", imageName, resp.GetRet().GetRetMsg())
 				}
-				myPrint("destroy image %q %v", imageName, resp.GetRet().GetRetMsg())
+				log.Printf("destroy image %q %v", imageName, resp.GetRet().GetRetMsg())
 			}
 		}
 

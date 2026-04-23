@@ -5,9 +5,7 @@
 package volume
 
 import (
-	"fmt"
 	"github.com/urfave/cli/v2"
-	"time"
 )
 
 var Command = &cli.Command{
@@ -18,9 +16,4 @@ var Command = &cli.Command{
 		resetvolumeref,
 		resetVolumeRefExec,
 	},
-}
-
-func myPrint(format string, a ...interface{}) {
-	fmt.Printf("%v,"+format+"\n",
-		append([]interface{}{fmt.Sprintf("%v", time.Now().Format(time.RFC3339Nano))}, a...)...)
 }
