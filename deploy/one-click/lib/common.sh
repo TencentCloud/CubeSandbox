@@ -269,20 +269,24 @@ detect_node_ip() {
 }
 
 detect_primary_interface() {
+  # Honor explicit override first.
   if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
     printf '%s\n' "${CUBE_SANDBOX_ETH_NAME}"
     return 0
   fi
 
+  # `ip` is required for auto-detection.
   command -v ip >/dev/null 2>&1 || return 1
 
   local iface
+  # Preferred path: resolve interface from default IPv4 route.
   iface="$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}')"
   if [[ -n "${iface}" ]]; then
     printf '%s\n' "${iface}"
     return 0
   fi
 
+  # Fallback: first non-loopback interface that is currently up.
   iface="$(ip -o link show up 2>/dev/null \
     | awk -F': ' '$2 != "lo" {print $2; exit}' \
     | cut -d@ -f1)"

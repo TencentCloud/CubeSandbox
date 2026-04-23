@@ -343,8 +343,15 @@ chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PR
 chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
 
 if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
-  sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"/" \
-    "${INSTALL_PREFIX}/Cubelet/config/config.toml"
+  cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"
+  if rg -q '^[[:space:]]*eth_name = "' "${cubelet_config}"; then
+    sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"/" "${cubelet_config}"
+    if ! grep -Fq "eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"" "${cubelet_config}"; then
+      log "WARNING: failed to patch eth_name in Cubelet config (${cubelet_config})"
+    fi
+  else
+    log "WARNING: Cubelet config missing eth_name key; skipped NIC patch (${cubelet_config})"
+  fi
 fi
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
