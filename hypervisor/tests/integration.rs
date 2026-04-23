@@ -27,6 +27,8 @@ use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 use std::thread;
 use test_infra::*;
+use vmm::config::RestoreConfig;
+use vmm::vm_config::{DiskConfig, FsConfig, NetConfig, PmemConfig, VsockConfig};
 use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
 use wait_timeout::ChildExt;
 
@@ -2069,6 +2071,382 @@ fn enable_guest_watchdog(guest: &Guest, watchdog_sec: u32) {
             watchdog_sec
         ))
         .unwrap();
+}
+
+fn snapshot_and_check_events(api_socket: &str, snapshot_dir: &str, event_path: &str) {
+    // Pause the VM
+    assert!(remote_command(api_socket, "pause", None));
+    let latest_events = [
+        &MetaEvent {
+            event: "pausing".to_string(),
+            device_id: None,
+        },
+        &MetaEvent {
+            event: "paused".to_string(),
+            device_id: None,
+        },
+    ];
+    assert!(check_latest_events_exact(&latest_events, event_path));
+
+    // Take a snapshot from the VM
+    assert!(remote_command(
+        api_socket,
+        "snapshot",
+        Some(format!("file://{}", snapshot_dir).as_str()),
+    ));
+
+    // Wait to make sure the snapshot is completed
+    thread::sleep(std::time::Duration::new(10, 0));
+
+    let latest_events = [
+        &MetaEvent {
+            event: "snapshotting".to_string(),
+            device_id: None,
+        },
+        &MetaEvent {
+            event: "snapshotted".to_string(),
+            device_id: None,
+        },
+    ];
+    assert!(check_latest_events_exact(&latest_events, event_path));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn _test_restore_from_config(
+    binary_path: &str,
+    guest: &Guest,
+    snapshot_dir: String,
+    vsock_conf: Option<VsockConfig>,
+    net_conf: Option<Vec<NetConfig>>,
+    disk_conf: Option<Vec<DiskConfig>>,
+    pmem_conf: Option<Vec<PmemConfig>>,
+    fs_conf: Option<Vec<FsConfig>>,
+) {
+    let api_socket_restored = format!("{}.2", temp_api_path(&guest.tmp_dir));
+    let event_path_restored = format!("{}.2", temp_event_monitor_path(&guest.tmp_dir));
+    let console_text = String::from("On a branch floating down river a cricket, singing.");
+
+    let restore_config = RestoreConfig {
+        source_url: PathBuf::from(format!("file://{}", snapshot_dir)),
+        vsock: vsock_conf.clone(),
+        net: net_conf.clone(),
+        disks: disk_conf.clone(),
+        pmem: pmem_conf.clone(),
+        fs: fs_conf.clone(),
+        ..Default::default()
+    };
+
+    // Start the hypervisor
+    let mut child = GuestCommand::new_with_binary_path(guest, binary_path)
+        .args(["--api-socket", &api_socket_restored])
+        .args([
+            "--event-monitor",
+            format!("path={}", event_path_restored).as_str(),
+        ])
+        .capture_output()
+        .spawn()
+        .unwrap();
+
+    thread::sleep(std::time::Duration::new(1, 0));
+
+    // Restore the VM from the snapshot
+    let body = serde_json::to_string(&restore_config).unwrap();
+    curl_command(
+        api_socket_restored.as_str(),
+        "PUT",
+        "http://localhost/api/v1/vm.restore",
+        Some(body.as_str()),
+    );
+    // Wait for the VM to be restored
+    thread::sleep(std::time::Duration::new(10, 0));
+    let r = std::panic::catch_unwind(|| {
+        // Automatically restart the VM after it has been restored
+        let latest_events = [
+            &MetaEvent {
+                event: "restored".to_string(),
+                device_id: None,
+            },
+            &MetaEvent {
+                event: "resuming".to_string(),
+                device_id: None,
+            },
+            &MetaEvent {
+                event: "resumed".to_string(),
+                device_id: None,
+            },
+        ];
+        assert!(check_latest_events_exact(
+            &latest_events,
+            &event_path_restored
+        ));
+
+        let (cmd_success, cmd_output) =
+            remote_command_w_output(api_socket_restored.as_str(), "info", None);
+        assert!(cmd_success);
+        println!(
+            "cmd_output: {}",
+            String::from_utf8_lossy(&cmd_output).trim()
+        );
+
+        guest.check_devices_common(None, Some(&console_text), None);
+        if let Some(config) = vsock_conf {
+            let socket = String::from(config.socket.to_str().unwrap());
+            assert!(String::from_utf8_lossy(&cmd_output)
+                .trim()
+                .contains(format!("\"socket\":\"{}\"", socket.as_str()).as_str()));
+            // Check vsock
+            guest.check_devices_common(Some(&socket), None, None);
+        }
+        if let Some(config_list) = net_conf {
+            for config in config_list {
+                if let Some(tap_name) = config.tap {
+                    // Check tap from RestoreConfig
+                    let tap_count = exec_host_command_output(&format!(
+                        "ip link | grep -c {}",
+                        tap_name.as_str()
+                    ));
+                    assert_eq!(String::from_utf8_lossy(&tap_count.stdout).trim(), "1");
+                    assert!(String::from_utf8_lossy(&cmd_output)
+                        .trim()
+                        .contains(format!("\"tap\":\"{}\"", tap_name.as_str()).as_str()));
+                }
+            }
+        }
+        if let Some(config_list) = disk_conf {
+            for config in config_list {
+                if let Some(path) = config.path {
+                    assert!(String::from_utf8_lossy(&cmd_output)
+                        .trim()
+                        .contains(format!("\"path\":\"{}\"", path.to_str().unwrap()).as_str()));
+                }
+            }
+        }
+        if let Some(config_list) = pmem_conf {
+            for (index, config) in config_list.iter().enumerate() {
+                let pmem_path = format!("/dev/pmem{}", index);
+
+                let pmem_file = String::from(config.file.to_str().unwrap());
+                assert!(String::from_utf8_lossy(&cmd_output)
+                    .trim()
+                    .contains(format!("\"file\":\"{}\"", pmem_file.as_str()).as_str()));
+                // Check pmem
+                guest.check_devices_common(None, None, Some(&pmem_path));
+            }
+        }
+        if let Some(config_list) = fs_conf {
+            for config in config_list {
+                if let Some(backend) = config.backendfs_config.as_ref() {
+                    assert!(String::from_utf8_lossy(&cmd_output).trim().contains(
+                        format!("\"shared_dir\":\"{}\"", backend.shared_dir.as_str()).as_str()
+                    ));
+                }
+            }
+        }
+    });
+    // Shutdown the target VM and check console output
+    kill_child(&mut child);
+    let output = child.wait_with_output().unwrap();
+    handle_child_output(r, &output);
+
+    let r = std::panic::catch_unwind(|| {
+        assert!(String::from_utf8_lossy(&output.stdout).contains(&console_text));
+    });
+
+    handle_child_output(r, &output);
+}
+
+fn _test_snapshot_restore_from_different_binary(
+    snapshot_binary_path: &str,
+    restore_binary_path: &str,
+) {
+    let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+    let guest = Guest::new(Box::new(focal));
+    let kernel_path = direct_kernel_boot_path();
+
+    let api_socket_source = format!("{}.1", temp_api_path(&guest.tmp_dir));
+    let vsock_id = "_vsock0";
+
+    let net_id = "net123";
+    let net_params = format!(
+        "id={},tap=,mac={},ip={},mask=255.255.255.0",
+        net_id, guest.network.guest_mac, guest.network.host_ip
+    );
+
+    let socket = temp_vsock_path(&guest.tmp_dir);
+    let event_path = temp_event_monitor_path(&guest.tmp_dir);
+
+    let mut workload_path = dirs::home_dir().unwrap();
+    workload_path.push("workloads");
+    // Prepare native virtiofs
+    let mut shared_dir = workload_path.clone();
+    shared_dir.push("shared_dir");
+    let fs_params = format!(
+        "id=myfs0,tag=myfs,native=true,shared_dir={},cache=always,num_queues=1,queue_size=1024",
+        shared_dir.to_str().unwrap()
+    );
+
+    // check_devices_common() needs two disks, we need to mount a empty disk here.
+    let mut blk_file_path = workload_path.clone();
+    blk_file_path.push("blk.img");
+
+    let mut child = GuestCommand::new_with_binary_path(&guest, snapshot_binary_path)
+        .args(["--api-socket", &api_socket_source])
+        .args(["--event-monitor", format!("path={}", event_path).as_str()])
+        .args(["--cpus", "boot=1"])
+        .args(["--memory", "size=1024M,hotplug_method=acpi,hotplug_size=4G"])
+        .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args([
+            "--disk",
+            format!(
+                "id=cloudinit,path={}",
+                guest.disk_config.disk(DiskType::CloudInit).unwrap()
+            )
+            .as_str(),
+            format!("id=blk-0,path={}", blk_file_path.to_str().unwrap()).as_str(),
+        ])
+        .args([
+            "--pmem",
+            format!(
+                "file={},size={}",
+                guest.disk_config.disk(DiskType::OperatingSystem).unwrap(),
+                fs::metadata(guest.disk_config.disk(DiskType::OperatingSystem).unwrap())
+                    .unwrap()
+                    .len()
+            )
+            .as_str(),
+        ])
+        .args([
+            "--cmdline",
+            DIRECT_KERNEL_BOOT_CMDLINE
+                .replace("vda1", "pmem0p1")
+                .as_str(),
+        ])
+        .args(["--fs", fs_params.as_str()])
+        .args(["--serial", "tty", "--console", "tty"])
+        .args(["--net", net_params.as_str()])
+        .args([
+            "--vsock",
+            format!("cid=3,id={},socket={}", vsock_id, socket).as_str(),
+        ])
+        .capture_output()
+        .spawn()
+        .unwrap();
+
+    let console_text = String::from("On a branch floating down river a cricket, singing.");
+    // Create the snapshot directory
+    let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
+
+    let r = std::panic::catch_unwind(|| {
+        guest.wait_vm_boot(None).unwrap();
+
+        // Check the number of vCPUs
+        assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
+
+        // Check the guest virtio-devices, e.g. block, rng, vsock, console, and net
+        guest.check_devices_common(Some(&socket), Some(&console_text), None);
+
+        snapshot_and_check_events(
+            api_socket_source.as_str(),
+            snapshot_dir.as_str(),
+            event_path.as_str(),
+        );
+    });
+
+    // Shutdown the source VM and check console output
+    kill_child(&mut child);
+    let output = child.wait_with_output().unwrap();
+    handle_child_output(r, &output);
+
+    let r = std::panic::catch_unwind(|| {
+        assert!(String::from_utf8_lossy(&output.stdout).contains(&console_text));
+    });
+
+    handle_child_output(r, &output);
+
+    // Remove the vsock socket file.
+    Command::new("rm")
+        .arg("-f")
+        .arg(socket.as_str())
+        .output()
+        .unwrap();
+
+    // Prepare restore config
+    // vsock config
+    let socket_restored = format!("{}.2", temp_vsock_path(&guest.tmp_dir));
+    let vsock_config =
+        VsockConfig::parse(format!("cid=3,id={},socket={}", vsock_id, socket_restored).as_str())
+            .unwrap();
+
+    // net config
+    let tap_name_restored = "restore-tap";
+    let net_params_restored = format!(
+        "id={},tap={},mac={},ip={},mask=255.255.255.0",
+        net_id, tap_name_restored, guest.network.guest_mac, guest.network.host_ip
+    );
+    let net_config = NetConfig::parse(net_params_restored.as_str()).unwrap();
+
+    // Pre-create restore-tap since v1.0.9 can't create a named tap
+    assert!(exec_host_command_status(
+        format!("sudo ip tuntap add {} mode tap", tap_name_restored).as_str()
+    )
+    .success());
+    assert!(exec_host_command_status(
+        format!(
+            "sudo ip link set dev {} address {}",
+            tap_name_restored, guest.network.guest_mac
+        )
+        .as_str()
+    )
+    .success());
+    assert!(exec_host_command_status(
+        format!(
+            "sudo ip addr add {}/24 dev {}",
+            guest.network.host_ip, tap_name_restored
+        )
+        .as_str()
+    )
+    .success());
+    assert!(exec_host_command_status(
+        format!("sudo ip link set {} up", tap_name_restored).as_str()
+    )
+    .success());
+
+    // disk config
+    let mut workload_path = dirs::home_dir().unwrap();
+    workload_path.push("workloads");
+    let mut blk_file_path = workload_path.clone();
+    blk_file_path.push("blk.img");
+
+    let disk_path_restored =
+        String::from(guest.tmp_dir.as_path().join("blk2.img").to_str().unwrap());
+    rate_limited_copy(blk_file_path, &disk_path_restored)
+        .expect("copying of OS source disk image failed");
+    let disk_params_restored = format!("id=blk-0,path={}", disk_path_restored);
+    let disk_config = DiskConfig::parse(disk_params_restored.as_str()).unwrap();
+
+    // fs config
+    let mut shared_dir_restored = workload_path.clone();
+    shared_dir_restored.push("restored_shared_dir");
+    let fs_params = format!(
+        "id=myfs0,tag=myfs,native=true,shared_dir={},cache=always,num_queues=1,queue_size=1024",
+        shared_dir_restored.to_str().unwrap()
+    );
+    let fs_config = FsConfig::parse(fs_params.as_str()).unwrap();
+
+    _test_restore_from_config(
+        restore_binary_path,
+        &guest,
+        snapshot_dir,
+        Some(vsock_config),
+        Some(vec![net_config]),
+        Some(vec![disk_config]),
+        None,
+        Some(vec![fs_config]),
+    );
+    assert!(
+        exec_host_command_status(format!("sudo ip link del {}", tap_name_restored).as_str())
+            .success()
+    );
 }
 
 mod common_parallel {
@@ -5935,42 +6313,11 @@ mod common_parallel {
                 ));
                 thread::sleep(std::time::Duration::new(10, 0));
             }
-
-            // Pause the VM
-            assert!(remote_command(&api_socket_source, "pause", None));
-            let latest_events = [
-                &MetaEvent {
-                    event: "pausing".to_string(),
-                    device_id: None,
-                },
-                &MetaEvent {
-                    event: "paused".to_string(),
-                    device_id: None,
-                },
-            ];
-            assert!(check_latest_events_exact(&latest_events, &event_path));
-
-            // Take a snapshot from the VM
-            assert!(remote_command(
-                &api_socket_source,
-                "snapshot",
-                Some(format!("file://{}", snapshot_dir).as_str()),
-            ));
-
-            // Wait to make sure the snapshot is completed
-            thread::sleep(std::time::Duration::new(10, 0));
-
-            let latest_events = [
-                &MetaEvent {
-                    event: "snapshotting".to_string(),
-                    device_id: None,
-                },
-                &MetaEvent {
-                    event: "snapshotted".to_string(),
-                    device_id: None,
-                },
-            ];
-            assert!(check_latest_events_exact(&latest_events, &event_path));
+            snapshot_and_check_events(
+                api_socket_source.as_str(),
+                snapshot_dir.as_str(),
+                event_path.as_str(),
+            );
         });
 
         // Shutdown the source VM and check console output

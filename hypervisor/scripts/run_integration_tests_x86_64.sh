@@ -217,4 +217,10 @@ if [ $RES -eq 0 ]; then
     RES=$?
 fi
 
+if [ $RES -eq 0 ]; then
+    export RUST_BACKTRACE=1
+    time cargo test $features "compatibility::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
+    RES=$?
+fi
+
 exit $RES
