@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -39,7 +40,7 @@ var ListInventoryCommand = cli.Command{
 	Action: func(c *cli.Context) error {
 		serverList = getServerAddrs(c)
 		if len(serverList) == 0 {
-			myPrint("no server addr")
+			log.Printf("no server addr\n")
 			return errors.New("no server addr")
 		}
 		port = c.GlobalString("port")
@@ -77,11 +78,11 @@ var ListInventoryCommand = cli.Command{
 		rsp := &types.ListInventoryRes{}
 		err := doHttpReq(c, url, http.MethodPost, requestID, bytes.NewBuffer(reqEn), rsp)
 		if err != nil {
-			myPrint("list_getBodyData err. %s. RequestId: %s", err.Error(), requestID)
+			log.Printf("list_getBodyData err. %s. RequestId: %s\n", err.Error(), requestID)
 			return err
 		}
 		if rsp.Ret.RetCode != 200 {
-			myPrint("rsp err. %s. RequestId: %s", rsp.Ret.RetMsg, requestID)
+			log.Printf("rsp err. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
 			return errors.New(rsp.Ret.RetMsg)
 		}
 
