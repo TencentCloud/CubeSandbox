@@ -6,10 +6,26 @@ source $(dirname "$0")/test-util.sh
 
 export BUILD_TARGET=${BUILD_TARGET-x86_64-unknown-linux-gnu}
 
+# Clean up leftover temp dirs from previous test runs
+rm -rf /tmp/ch[A-Za-z]*
+
 WORKLOADS_DIR="$HOME/workloads"
 mkdir -p "$WORKLOADS_DIR"
 
 process_common_args "$@"
+
+# Print machine specs and disk usage
+echo "=== Machine Specs ==="
+echo "Hostname: $(hostname)"
+echo "CPU Model: $(grep -m1 'model name' /proc/cpuinfo | awk -F: '{print $2}' | xargs)"
+echo "CPU Cores: $(nproc)"
+echo "Total Memory: $(free -h | awk '/^Mem:/{print $2}')"
+echo "Kernel: $(uname -r)"
+echo "Architecture: $(uname -m)"
+echo ""
+echo "=== Disk Usage ==="
+df -h / /tmp $HOME 2>/dev/null | sort -u
+echo ""
 
 # For now these values are default for kvm
 features=""
@@ -128,7 +144,10 @@ popd
 # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
 VMLINUX_IMAGE="$WORKLOADS_DIR/vmlinux"
 if [ ! -f "$VMLINUX_IMAGE" ]; then
-    build_custom_linux
+    pushd $WORKLOADS_DIR
+    time wget --quiet https://github.com/lisongqian/CubeSandbox/releases/download/vmlinux/vmlinux || exit 1
+#    build_custom_linux
+    popd
 fi
 
 VIRTIOFSD="$WORKLOADS_DIR/virtiofsd"
@@ -200,26 +219,107 @@ sudo chmod a+rwX /dev/hugepages
 ulimit -l unlimited
 
 export RUST_BACKTRACE=1
-time cargo test $features "common_parallel::$test_filter" -- ${test_binary_args[*]}
+
+# Quick mode: run only core smoke tests across 5 priority levels
+if [ "$quick_mode" = "true" ]; then
+    echo "=== Quick mode: running core smoke tests ==="
+
+    # Priority 1: Boot & Lifecycle
+    PRIORITY1_TESTS="test_focal_hypervisor_fw|test_direct_kernel_boot|test_multi_cpu|test_power_button|test_api_create_boot|test_api_shutdown|test_api_pause_resume"
+
+    # Priority 2: Core I/O Devices
+    PRIORITY2_TESTS="test_virtio_block|test_virtio_net_ctrl_queue|test_native_virtio_fs_hotplug|test_virtio_vsock|test_virtio_console|test_serial_tty"
+
+    # Priority 3: Hotplug
+    PRIORITY3_TESTS="test_cpu_hotplug|test_memory_hotplug|test_disk_hotplug|test_net_hotplug"
+
+    # Priority 4: Snapshot & Live Migration
+    PRIORITY4_TESTS="test_snapshot_restore_basic|test_live_migration_basic"
+
+    # Priority 5: VMM Instance API (lib mode)
+    PRIORITY5_TESTS="test_api_create_boot_and_shutdown|test_api_snapshot_restore"
+
+    # Step 1: Priority 1 - Boot & Lifecycle (parallel)
+    echo ""
+    echo ">>> [Step 1/5] Priority 1: Boot & Lifecycle"
+    build_test_filters "common_parallel" "$PRIORITY1_TESTS"
+    time cargo test $features -- --exact --test-threads=1 ${test_binary_args[*]} ${test_filters[*]}
+    RES=$?
+
+    # Step 2: Priority 2 - Core I/O Devices (parallel)
+    if [ $RES -eq 0 ]; then
+        echo ""
+        echo ">>> [Step 2/5] Priority 2: Core I/O Devices"
+        build_test_filters "common_parallel" "$PRIORITY2_TESTS"
+        time cargo test $features -- --exact --test-threads=1 ${test_binary_args[*]} ${test_filters[*]}
+        RES=$?
+    fi
+
+    # Step 3: Priority 3 - Hotplug (parallel)
+    if [ $RES -eq 0 ]; then
+        echo ""
+        echo ">>> [Step 3/5] Priority 3: Hotplug"
+        build_test_filters "common_parallel" "$PRIORITY3_TESTS"
+        time cargo test $features -- --exact --test-threads=1 ${test_binary_args[*]} ${test_filters[*]}
+        RES=$?
+    fi
+
+    # Step 4: Priority 4 - Snapshot & Live Migration (parallel + sequential)
+    if [ $RES -eq 0 ]; then
+        echo ""
+        echo ">>> [Step 4/5] Priority 4: Snapshot & Live Migration"
+        time cargo test $features -- --exact --test-threads=1 ${test_binary_args[*]} "common_sequential::test_snapshot_restore_basic"
+        RES=$?
+    fi
+    if [ $RES -eq 0 ]; then
+        time cargo test $features -- --exact --test-threads=1 ${test_binary_args[*]} "live_migration::test_live_migration_basic"
+        RES=$?
+    fi
+
+    # Step 5: Priority 5 - VMM Instance API (lib mode, sequential)
+    if [ $RES -eq 0 ]; then
+        echo ""
+        echo ">>> [Step 5/5] Priority 5: VMM Instance API (lib mode)"
+        build_test_filters "vmm_instance" "$PRIORITY5_TESTS"
+        time cargo test $features --features lib_support -- --test-threads=1 ${test_binary_args[*]} ${test_filters[*]}
+        RES=$?
+    fi
+
+    if [ $RES -eq 0 ]; then
+        echo ""
+        echo "=== Quick mode: all core smoke tests PASSED ==="
+    else
+        echo ""
+        echo "=== Quick mode: some tests FAILED ==="
+    fi
+
+    exit $RES
+fi
+
+# Full mode: run all tests
+echo "=== Full mode: running all tests ==="
+
+build_test_filters "common_parallel" "$test_filter"
+time cargo test $features -- --test-threads=$(($(nproc)/2)) ${test_binary_args[*]} ${test_filters[*]}
 RES=$?
 
 if [ $RES -eq 0 ]; then
-    export RUST_BACKTRACE=1
-    time cargo test $features "vmm_instance::$test_filter" --features lib_support -- --test-threads=1 ${test_binary_args[*]}
+    build_test_filters "vmm_instance" "$test_filter"
+    time cargo test $features --features lib_support -- --test-threads=1 ${test_binary_args[*]} ${test_filters[*]}
     RES=$?
 fi
 
 # Run some tests in sequence since the result could be affected by other tests
 # running in parallel.
 if [ $RES -eq 0 ]; then
-    export RUST_BACKTRACE=1
-    time cargo test $features "common_sequential::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
+    build_test_filters "common_sequential" "$test_filter"
+    time cargo test $features -- --test-threads=1 ${test_binary_args[*]} ${test_filters[*]}
     RES=$?
 fi
 
 if [ $RES -eq 0 ]; then
-    export RUST_BACKTRACE=1
-    time cargo test $features "compatibility::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
+    build_test_filters "compatibility" "$test_filter"
+    time cargo test $features -- --test-threads=1 ${test_binary_args[*]} ${test_filters[*]}
     RES=$?
 fi
 

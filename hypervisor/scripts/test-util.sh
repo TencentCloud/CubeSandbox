@@ -1,6 +1,7 @@
 #!/bin/bash
 hypervisor="kvm"
 test_filter=""
+quick_mode="false"
 
 # Checkout source code of a GIT repo with specified branch and commit
 # Args:
@@ -73,6 +74,7 @@ cmd_help() {
     echo ""
     echo "    --hypervisor  Underlying hypervisor. Options kvm, mshv"
     echo "    --test-filter Tests to run"
+    echo "    --quick       Run only core smoke tests (5 priority levels)"
     echo ""
     echo "    --help        Display this help message."
     echo ""
@@ -90,6 +92,9 @@ process_common_args() {
                 shift
                 test_filter="$1"
                 ;;
+            "--quick")
+                quick_mode="true"
+                ;;
             "--") {
                 shift
                 break
@@ -106,4 +111,27 @@ process_common_args() {
     fi
 
     test_binary_args=($@)
+}
+
+# Convert pipe-separated test names into an array of "module::test_name" filters.
+# Usage: build_test_filters <module_prefix> <pipe_separated_tests>
+# Result is stored in the global array: test_filters
+# Example:
+#   build_test_filters "common_parallel" "test_a|test_b"
+#   => test_filters=("common_parallel::test_a" "common_parallel::test_b")
+#
+# If pipe_separated_tests is empty, test_filters will contain just the module prefix
+# so that all tests under that module are matched.
+build_test_filters() {
+    local module="$1"
+    local tests="$2"
+    test_filters=()
+    if [ -z "$tests" ]; then
+        test_filters=("$module")
+    else
+        IFS='|' read -ra names <<< "$tests"
+        for name in "${names[@]}"; do
+            test_filters+=("${module}::${name}")
+        done
+    fi
 }

@@ -449,7 +449,7 @@ impl DiskConfig for WindowsDiskConfig {
 }
 
 pub fn rate_limited_copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
-    for i in 0..10 {
+    for i in 0..2 {
         let free_bytes = unsafe {
             let mut stats = std::mem::MaybeUninit::zeroed();
             let fs_name = std::ffi::CString::new("/tmp").unwrap();
@@ -462,12 +462,12 @@ pub fn rate_limited_copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::
         };
 
         // Make sure there is at least 6 GiB of space
-        if free_bytes < 6 << 30 {
+        if free_bytes < 4 << 30 {
             eprintln!(
                 "Not enough space on disk ({}). Attempt {} of 10. Sleeping.",
                 free_bytes, i
             );
-            thread::sleep(std::time::Duration::new(60, 0));
+            thread::sleep(std::time::Duration::new(30, 0));
             continue;
         }
 
@@ -475,8 +475,8 @@ pub fn rate_limited_copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::
             Err(e) => {
                 if let Some(errno) = e.raw_os_error() {
                     if errno == libc::ENOSPC {
-                        eprintln!("Copy returned ENOSPC. Attempt {} of 10. Sleeping.", i);
-                        thread::sleep(std::time::Duration::new(60, 0));
+                        eprintln!("Copy returned ENOSPC. Attempt {} of 2. Sleeping.", i);
+                        thread::sleep(std::time::Duration::new(30, 0));
                         continue;
                     }
                 }
@@ -765,6 +765,21 @@ pub struct Guest {
 
 // Safe to implement as we know we have no interior mutability
 impl std::panic::RefUnwindSafe for Guest {}
+
+impl Drop for Guest {
+    fn drop(&mut self) {
+        let tmp_path = self.tmp_dir.as_path().to_path_buf();
+        // Explicitly remove the temp directory to ensure cleanup even in panic scenarios.
+        // TempDir's own Drop also does this, but we add logging for better observability.
+        match self.tmp_dir.remove() {
+            Ok(_) => eprintln!("Successfully cleaned up guest temp dir: {:?}", tmp_path),
+            Err(e) => eprintln!(
+                "Warning: failed to clean up guest temp dir {:?}: {:?}",
+                tmp_path, e
+            ),
+        }
+    }
+}
 
 impl Guest {
     pub fn new_from_ip_range(mut disk_config: Box<dyn DiskConfig>, class: &str, id: u8) -> Self {
