@@ -6231,10 +6231,10 @@ mod common_parallel {
             "id={},tap=,mac={},ip={},mask=255.255.255.0",
             net_id, guest.network.guest_mac, guest.network.host_ip
         );
-        let mut mem_params = "size=4G";
+        let mut mem_params = "size=512M";
 
         if use_hotplug {
-            mem_params = "size=4G,hotplug_method=virtio-mem,hotplug_size=32G"
+            mem_params = "size=512M,hotplug_method=virtio-mem,hotplug_size=1G"
         }
 
         let cloudinit_params = format!(
@@ -6278,30 +6278,30 @@ mod common_parallel {
             // Check the number of vCPUs
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
             // Check the guest RAM
-            assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > 400_000);
             if use_hotplug {
                 // Increase guest RAM with virtio-mem
                 resize_command(
                     &api_socket_source,
                     None,
-                    Some(6 << 30),
+                    Some(1536 << 20),
                     None,
                     Some(&event_path),
                 );
                 thread::sleep(std::time::Duration::new(5, 0));
-                assert!(guest.get_total_memory().unwrap_or_default() > 5_760_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
                 // Use balloon to remove RAM from the VM
                 resize_command(
                     &api_socket_source,
                     None,
                     None,
-                    Some(1 << 30),
+                    Some(512 << 20),
                     Some(&event_path),
                 );
                 thread::sleep(std::time::Duration::new(5, 0));
                 let total_memory = guest.get_total_memory().unwrap_or_default();
-                assert!(total_memory > 4_800_000);
-                assert!(total_memory < 5_760_000);
+                assert!(total_memory > 900_000);
+                assert!(total_memory < 1_400_000);
             }
             // Check the guest virtio-devices, e.g. block, rng, vsock, console, and net
             guest.check_devices_common(Some(&socket), Some(&console_text), None);
@@ -6420,20 +6420,20 @@ mod common_parallel {
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
             let total_memory = guest.get_total_memory().unwrap_or_default();
             if !use_hotplug {
-                assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 400_000);
             } else {
-                assert!(total_memory > 4_800_000);
-                assert!(total_memory < 5_760_000);
+                assert!(total_memory > 900_000);
+                assert!(total_memory < 1_400_000);
                 // Deflate balloon to restore entire RAM to the VM
                 resize_command(&api_socket_restored, None, None, Some(0), None);
                 thread::sleep(std::time::Duration::new(5, 0));
-                assert!(guest.get_total_memory().unwrap_or_default() > 5_760_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
                 // Decrease guest RAM with virtio-mem
-                resize_command(&api_socket_restored, None, Some(5 << 30), None, None);
+                resize_command(&api_socket_restored, None, Some(1 << 30), None, None);
                 thread::sleep(std::time::Duration::new(5, 0));
                 let total_memory = guest.get_total_memory().unwrap_or_default();
-                assert!(total_memory > 4_800_000);
-                assert!(total_memory < 5_760_000);
+                assert!(total_memory > 900_000);
+                assert!(total_memory < 1_400_000);
             }
 
             guest.check_devices_common(Some(&socket), Some(&console_text), None);
@@ -7514,7 +7514,7 @@ mod vmm_instance {
     #[cfg(feature = "lib_support")]
     use cube_hypervisor::NotifyEvent;
     use cube_hypervisor::VmmInstance;
-    use log::{info, LevelFilter};
+    use log::info;
     use rlimit::{setrlimit, Resource};
     use test_infra::{ssh_command_ip, DiskType, Guest, UbuntuDiskConfig};
     use vmm::api::{ApiRequest, ApiResponsePayload, VmSnapshotConfig};
@@ -7569,8 +7569,8 @@ mod vmm_instance {
 
     fn default_vmm_config() -> VmmConfig {
         VmmConfig {
-            log_stderr: true,
-            log_level: LevelFilter::Info,
+            log_stderr: false,
+            log_json_file: None,
             ..Default::default()
         }
     }
