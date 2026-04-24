@@ -68,6 +68,15 @@ See the [Makefile](./Makefile) for the full list of build targets.
 5. **Document** — update relevant docs if your change affects user-facing behavior.
 6. **Open the PR** — describe the motivation and what the change does. Link related Issues.
 
+### Commit Organization
+
+Commits should be logically organized and self-contained:
+
+- **One component per commit** — if a change spans multiple components (e.g., `CubeAPI` and `Cubelet`), split it into separate commits for each component.
+- **Keep commits atomic** — each commit should represent a single, coherent change that can be understood and reviewed independently.
+- **Separate refactoring from behavior changes** — do not mix code cleanup or refactoring with functional changes in the same commit.
+- **Order commits logically** — when a PR contains multiple commits, arrange them so that each commit builds on the previous one (e.g., infrastructure changes first, then the feature that depends on them).
+
 ### Commit Messages
 
 Write clear commit messages that explain *why* the change was made:
@@ -77,9 +86,29 @@ component: short summary of the change
 
 Longer description explaining the motivation, trade-offs, or context.
 Closes #123
+
+Signed-off-by: Your Name <your.email@example.com>
 ```
 
 Prefix the summary with the component name (e.g., `cubeapi:`, `cubelet:`, `docs:`, `shim:`).
+
+### Developer Certificate of Origin (DCO)
+
+All commits **must** include a `Signed-off-by` line to certify the [Developer Certificate of Origin (DCO)](https://developercertificate.org/). This indicates that you have the right to submit the contribution under the project's license.
+
+Add it by using the `-s` flag when committing:
+
+```bash
+git commit -s -m "component: your commit message"
+```
+
+Or manually append the following line to your commit message:
+
+```
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+Commits without a valid `Signed-off-by` line will not be accepted.
 
 ### Code Style
 
