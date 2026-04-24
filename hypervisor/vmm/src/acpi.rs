@@ -239,7 +239,7 @@ fn create_facp_table(dsdt_offset: GuestAddress, device_manager: &Arc<Mutex<Devic
     // X_DSDT
     facp.write(140, dsdt_offset.0);
     // Hypervisor Vendor Identity
-    facp.write(268, b"CLOUDHYP");
+    facp.write_bytes(268, b"CLOUDHYP");
 
     facp.update_checksum();
 

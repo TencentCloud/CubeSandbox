@@ -1299,7 +1299,7 @@ impl CpuManager {
         let mut madt = Sdt::new(*b"APIC", 44, 5, *b"CLOUDH", *b"CHMADT  ", 1);
         #[cfg(target_arch = "x86_64")]
         {
-            madt.write(36, arch::layout::APIC_START);
+            madt.write(36, arch::layout::APIC_START.0);
 
             for cpu in 0..self.config.max_vcpus {
                 let lapic = LocalApic {
