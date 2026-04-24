@@ -85,6 +85,7 @@ use vm_migration::{
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{register_signal_handler, SIGRTMIN};
+use zerocopy::AsBytes;
 
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 /// Extract the specified bits of a 64-bit integer.
@@ -174,6 +175,7 @@ pub type Result<T> = result::Result<T, Error>;
 #[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[repr(packed)]
+#[derive(AsBytes)]
 struct LocalApic {
     pub r#type: u8,
     pub length: u8,
@@ -184,7 +186,7 @@ struct LocalApic {
 
 #[allow(dead_code)]
 #[repr(packed)]
-#[derive(Default)]
+#[derive(Default, AsBytes)]
 struct Ioapic {
     pub r#type: u8,
     pub length: u8,
@@ -197,6 +199,7 @@ struct Ioapic {
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
 #[repr(packed)]
+#[derive(AsBytes)]
 struct GicC {
     pub r#type: u8,
     pub length: u8,
@@ -221,6 +224,7 @@ struct GicC {
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
 #[repr(packed)]
+#[derive(AsBytes)]
 struct GicD {
     pub r#type: u8,
     pub length: u8,
@@ -235,6 +239,7 @@ struct GicD {
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
 #[repr(packed)]
+#[derive(AsBytes)]
 struct GicR {
     pub r#type: u8,
     pub length: u8,
@@ -246,6 +251,7 @@ struct GicR {
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
 #[repr(packed)]
+#[derive(AsBytes)]
 struct GicIts {
     pub r#type: u8,
     pub length: u8,
@@ -258,6 +264,7 @@ struct GicIts {
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
 #[repr(packed)]
+#[derive(AsBytes)]
 struct ProcessorHierarchyNode {
     pub r#type: u8,
     pub length: u8,
@@ -270,7 +277,7 @@ struct ProcessorHierarchyNode {
 
 #[allow(dead_code)]
 #[repr(packed)]
-#[derive(Default)]
+#[derive(Default, AsBytes)]
 struct InterruptSourceOverride {
     pub r#type: u8,
     pub length: u8,
