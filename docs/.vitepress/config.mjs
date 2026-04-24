@@ -52,7 +52,7 @@ export default withMermaid(defineConfig({
               text: 'Operations',
               items: [
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
-                { text: 'CubeProxy TLS', link: '/guide/cubeproxy-tls' },
+                { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
                 { text: 'Authentication', link: '/guide/authentication' }
               ]
             },
@@ -118,7 +118,7 @@ export default withMermaid(defineConfig({
               text: '安全与运维',
               items: [
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
-                { text: 'CubeProxy TLS 配置', link: '/zh/guide/cubeproxy-tls' },
+                { text: 'HTTPS 证书与域名解析', link: '/zh/guide/https-and-domain' },
                 { text: '鉴权', link: '/zh/guide/authentication' }
               ]
             },
