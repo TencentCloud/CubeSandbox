@@ -340,11 +340,21 @@ pub async fn create_sandbox(
 
     let resp = state.cubemaster.create_sandbox(&req).await.map_err(|e| {
         tracing::error!(error = %e, "create_sandbox: cubemaster error");
-        AppError::Internal(anyhow::anyhow!(e.to_string()))
+        if e.is_not_found() {
+            AppError::BadRequest(format!("template {} not found", body.template_id))
+        } else {
+            AppError::Internal(anyhow::anyhow!(e.to_string()))
+        }
     })?;
     resp.ret
         .into_result()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e.to_string())))?;
+        .map_err(|e| {
+            if e.is_not_found() {
+                AppError::BadRequest(format!("template {} not found", body.template_id))
+            } else {
+                AppError::Internal(anyhow::anyhow!(e.to_string()))
+            }
+        })?;
 
     let sandbox_id = resp.sandbox_id.clone();
 
