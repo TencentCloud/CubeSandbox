@@ -11,13 +11,13 @@ This guide explains how sandbox access domains work in Cube Sandbox and how to r
 When an E2B client accesses a sandbox, the domain name is **dynamically generated** using the following format:
 
 ```
-<sandbox-service-port>-<sandboxId>-<domain>
+<sandbox-service-port>-<sandboxId>.<domain>
 ```
 
 For example:
 
 ```
-49999-abc123def456-cube.app
+49983-1aa1fae8fb364edaa8203a7481995b4d.cube.app
 ```
 
 Where:
@@ -103,7 +103,7 @@ By default, CubeProxy listens on both HTTP and HTTPS. To disable the HTTP port e
 
 ---
 
-## Quick-Start Alternative: e2b-dev-sidecar
+## Dev-Only Alternative: e2b-dev-sidecar
 
 If you are experimenting with Cube in a local development environment and want to skip both wildcard DNS setup and self-signed certificate trust issues, the **e2b-dev-sidecar** approach is the easiest option.
 
