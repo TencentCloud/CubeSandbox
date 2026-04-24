@@ -16,7 +16,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
+)
+
+var (
+	createSandboxDealCubeboxCreateReqWithTemplateFn = dealCubeboxCreateReqWithTemplate
+	createSandboxRunFn                              = sandbox.CreateSandbox
 )
 
 func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
@@ -44,16 +50,20 @@ func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTr
 		"InstanceType": req.InstanceType,
 	}))
 
-	if err := dealCubeboxCreateReqWithTemplate(ctx, req); err != nil {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+	if err := createSandboxDealCubeboxCreateReqWithTemplateFn(ctx, req); err != nil {
+		retCode := errorcode.ErrorCode_MasterParamsError
+		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
+			retCode = errorcode.ErrorCode_NotFound
+		}
+		rsp.Ret.RetCode = int(retCode)
 		rsp.Ret.RetMsg = err.Error()
-		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		rt.RetCode = int64(retCode)
 		log.G(ctx).Error(err)
 		return rsp
 	}
 
 	ctx = runInsReq2Affinity(ctx, req)
-	ret := sandbox.CreateSandbox(ctx, req)
+	ret := createSandboxRunFn(ctx, req)
 	rt.RetCode = int64(ret.Ret.RetCode)
 	return ret
 }
