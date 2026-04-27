@@ -1,0 +1,13 @@
+from __future__ import annotations
+
+
+class CubeE2BError(Exception):
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class SandboxNotFoundError(CubeE2BError): ...
+class TemplateNotFoundError(CubeE2BError): ...
+class AuthenticationError(CubeE2BError): ...
+class ApiError(CubeE2BError): ...

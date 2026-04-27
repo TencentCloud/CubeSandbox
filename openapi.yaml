@@ -1,0 +1,255 @@
+openapi: "3.0.3"
+
+info:
+  title: cube-api
+  description: CubeSandbox REST API
+  version: "1.0.0"
+
+servers:
+  - url: "http://{host}:3000"
+    variables:
+      host:
+        default: "127.0.0.1"
+
+tags:
+  - name: sandboxes
+  - name: health
+
+paths:
+
+  /health:
+    get:
+      summary: Health check
+      operationId: getHealth
+      tags: [health]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                sandboxes: 0
+
+  /sandboxes:
+    get:
+      summary: List sandboxes (v1)
+      operationId: listSandboxes
+      tags: [sandboxes]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SandboxDetail" }
+
+    post:
+      summary: Create a sandbox
+      operationId: createSandbox
+      tags: [sandboxes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSandboxRequest" }
+            example:
+              templateID: "tpl-6265796cee124256b4dcd6a1"
+              timeout: 300
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SandboxCreated" }
+              example:
+                templateID: "tpl-6265796cee124256b4dcd6a1"
+                sandboxID: "7b93392513d84b7eb2f5b8da26717b77"
+                clientID: "bdb40b5b-4777-488e-961a-68de8083ff41"
+                envdVersion: "0.2.0"
+                domain: "cube.app"
+
+  /v2/sandboxes:
+    get:
+      summary: List sandboxes (v2)
+      operationId: listSandboxesV2
+      tags: [sandboxes]
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [running, paused, stopped]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SandboxDetail" }
+
+  /sandboxes/{sandboxID}:
+    get:
+      summary: Get sandbox details
+      operationId: getSandbox
+      tags: [sandboxes]
+      parameters: [{ $ref: "#/components/parameters/sandboxID" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SandboxDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+    delete:
+      summary: Destroy a sandbox
+      operationId: deleteSandbox
+      tags: [sandboxes]
+      parameters: [{ $ref: "#/components/parameters/sandboxID" }]
+      responses:
+        "200": { description: OK }
+        "204": { description: No Content }
+
+  /sandboxes/{sandboxID}/pause:
+    post:
+      summary: Pause a sandbox
+      operationId: pauseSandbox
+      tags: [sandboxes]
+      parameters: [{ $ref: "#/components/parameters/sandboxID" }]
+      responses:
+        "200": { description: OK }
+        "204": { description: No Content }
+
+  /sandboxes/{sandboxID}/resume:
+    post:
+      summary: Resume a sandbox
+      description: Deprecated. Use `/sandboxes/{sandboxID}/connect` instead.
+      operationId: resumeSandbox
+      deprecated: true
+      tags: [sandboxes]
+      parameters: [{ $ref: "#/components/parameters/sandboxID" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timeout: { type: integer, default: 300 }
+      responses:
+        "200": { $ref: "#/components/responses/SandboxCreatedResponse" }
+        "201": { $ref: "#/components/responses/SandboxCreatedResponse" }
+
+  /sandboxes/{sandboxID}/connect:
+    post:
+      summary: Connect to a sandbox (auto-resumes if paused)
+      operationId: connectSandbox
+      tags: [sandboxes]
+      parameters: [{ $ref: "#/components/parameters/sandboxID" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timeout: { type: integer, default: 300 }
+      responses:
+        "200": { $ref: "#/components/responses/SandboxCreatedResponse" }
+
+# Sandbox stream endpoint (via CubeProxy, not cube-api)
+# URL: http://49999-{sandboxID}.{domain}/execute
+#
+# DNS resolution:
+#   Default:                OS resolves *.cube.app via CoreDNS (deployment host only)
+#   CUBE_PROXY_NODE_IP set: TCP connects directly to that IP; Host header preserved
+#
+x-envd-stream:
+  execute:
+    method: POST
+    url: "http://49999-{sandboxID}.{domain}/execute"
+    request:
+      code: string          # required
+      context_id: string    # optional
+      language: string      # optional, default python
+      env_vars: object      # optional
+    response:
+      content-type: application/x-ndjson
+      events:
+        stdout:             { type, text, timestamp }
+        stderr:             { type, text, timestamp }
+        result:             { type, text, is_main_result, html, markdown, png, svg, ... }
+        error:              { type, name, value, traceback }
+        number_of_executions: { type, execution_count }
+
+components:
+
+  parameters:
+    sandboxID:
+      name: sandboxID
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    SandboxCreatedResponse:
+      description: Success
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SandboxCreated" }
+
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:    { type: string, enum: [ok, error] }
+        sandboxes: { type: integer }
+
+    CreateSandboxRequest:
+      type: object
+      required: [templateID]
+      properties:
+        templateID: { type: string }
+        timeout:    { type: integer, default: 300 }
+        envVars:    { type: object, additionalProperties: { type: string } }
+        metadata:   { type: object, additionalProperties: { type: string } }
+
+    SandboxCreated:
+      type: object
+      required: [templateID, sandboxID, domain]
+      properties:
+        templateID:  { type: string }
+        sandboxID:   { type: string }
+        clientID:    { type: string }
+        envdVersion: { type: string }
+        domain:      { type: string, example: cube.app }
+
+    SandboxDetail:
+      type: object
+      properties:
+        templateID:  { type: string }
+        sandboxID:   { type: string }
+        clientID:    { type: string }
+        startedAt:   { type: string, format: date-time }
+        endAt:       { type: string, format: date-time }
+        state:       { type: string, enum: [running, paused, stopped] }
+        cpuCount:    { type: integer }
+        memoryMB:    { type: integer }
+        diskSizeMB:  { type: integer }
+        envdVersion: { type: string }
+        domain:      { type: string }
+        metadata:    { type: object, additionalProperties: { type: string } }
+
+    ErrorResponse:
+      type: object
+      properties:
+        code:    { type: integer }
+        message: { type: string }

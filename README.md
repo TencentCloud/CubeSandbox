@@ -1,134 +1,139 @@
-# cube_e2b — CubeSandbox Python SDK
+# cube-e2b
 
-轻量级 Python SDK，封装 CubeSandbox 的 E2B 兼容 REST API。
+Python SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) — a self-hosted, KVM-based code execution environment.
 
-**核心特性：**
-- 支持 `CUBE_PROXY_NODE_IP` 环境变量，**完全绕过 `*.cube.app` DNS**，直连代理 IP
-- 兼容 E2B SDK 的 Sandbox 接口风格
-- 支持 HTTP / SSE 数据流 + WebSocket
-
----
-
-## 安装
+## Installation
 
 ```bash
-pip install requests websockets
-# 或
-pip install -r requirements.txt
+pip install cube-e2b
+# or from source
+pip install -e .
 ```
 
----
-
-## 环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `CUBE_API_URL` | `http://127.0.0.1:3000` | CubeAPI 地址 |
-| `E2B_API_KEY` | `dummy` | API Key（本地部署任意字符串） |
-| `CUBE_TEMPLATE_ID` | — | 默认模板 ID |
-| `CUBE_PROXY_NODE_IP` | — | **设置后绕过 DNS**，直连该 IP 访问数据流 |
-| `CUBE_PROXY_PORT_HTTP` | `80` | CubeProxy HTTP 端口 |
-| `CUBE_PROXY_PORT_HTTPS` | `443` | CubeProxy HTTPS 端口 |
-| `SSL_CERT_FILE` | — | mkcert CA 证书路径（HTTPS 时用） |
+**Dependencies:** `httpx>=0.27`, `requests>=2.28`
 
 ---
 
-## 快速开始
+## Quick Start
+
+### Create and run code
 
 ```python
-import os
-os.environ["CUBE_API_URL"]      = "http://9.135.79.34:3000"
-os.environ["CUBE_TEMPLATE_ID"]  = "tpl-6265796cee124256b4dcd6a1"
-os.environ["CUBE_PROXY_NODE_IP"] = "9.135.79.34"  # 绕过 *.cube.app DNS
-
 from cube_e2b import Sandbox
 
 with Sandbox.create() as sb:
-    print(sb.sandbox_id)               # 5405bd0b3b584ac6bafb7656ebe19f8c
-    print(sb.get_host(49999))          # 49999-xxx.cube.app
-    resp = sb.http_get(49999, "/")     # 直连 9.135.79.34:80，Host 头自动设置
-    print(resp.status_code)
+    sb.run_code("x = 1")
+    result = sb.run_code("x + 1")
+    print(result.text)          # "2"
+    print(result.logs.stdout)   # []
+    print(result.error)         # None
+```
+
+### Stream output
+
+```python
+with Sandbox.create() as sb:
+    result = sb.run_code(
+        "for i in range(5): print(i)",
+        on_stdout=lambda msg: print(">>", msg.text, end=""),
+    )
+```
+
+### Connect to an existing sandbox
+
+```python
+# Create once, reuse later
+sb = Sandbox.create(timeout=3600)
+sandbox_id = sb.sandbox_id
+
+# In another process / later
+sb = Sandbox.connect(sandbox_id)
+result = sb.run_code("1 + 1")
+sb.kill()
 ```
 
 ---
 
-## API 说明
+## Configuration
 
-### `Sandbox.create(...)`
+All options can be set via environment variables or passed as a `Config` object.
 
-```python
-sb = Sandbox.create(
-    template="tpl-xxxx",   # 模板 ID，可省略（读 CUBE_TEMPLATE_ID）
-    timeout=300,            # TTL 秒数
-    env_vars={"KEY": "val"},
-)
+| Environment Variable    | Default                   | Description                                      |
+|-------------------------|---------------------------|--------------------------------------------------|
+| `CUBE_API_URL`          | `http://127.0.0.1:3000`   | cube-api address                                 |
+| `CUBE_TEMPLATE_ID`      | —                         | Default template ID                              |
+| `CUBE_PROXY_NODE_IP`    | —                         | CubeProxy IP — bypasses DNS for remote clients   |
+| `CUBE_PROXY_PORT_HTTP`  | `80`                      | CubeProxy HTTP port                              |
+| `CUBE_SANDBOX_DOMAIN`   | `cube.app`                | Sandbox domain suffix                            |
+
+### Remote client setup
+
+When accessing CubeSandbox from a machine that cannot resolve `*.cube.app`:
+
+```bash
+export CUBE_API_URL=http://9.135.79.34:3000
+export CUBE_TEMPLATE_ID=tpl-6265796cee124256b4dcd6a1
+export CUBE_PROXY_NODE_IP=9.135.79.34
 ```
 
-### URL / Host
-
-```python
-sb.get_host(49999)          # "49999-<id>.cube.app"
-sb.get_url(49999)           # "http://49999-<id>.cube.app"
-sb.get_url(49999, "wss")    # "wss://49999-<id>.cube.app"
-```
-
-### HTTP 访问
-
-```python
-resp = sb.http_get(49999, "/api/v1/status")
-resp = sb.http_post(49999, "/run", json={"code": "print(1)"})
-```
-
-### SSE 数据流
-
-```python
-for line in sb.iter_sse(49999, "/events"):
-    print(line)
-```
-
-### WebSocket（需要 `websockets>=12`）
-
-```python
-with sb.connect_ws(49999, "/ws") as ws:
-    ws.send("hello")
-    print(ws.recv())
-```
-
-### 沙箱生命周期
-
-```python
-sb.refresh(600)   # 延长 TTL
-sb.pause()        # 快照暂停
-sb.resume(300)    # 恢复
-sb.kill()         # 销毁
-```
+The SDK will connect directly to `CUBE_PROXY_NODE_IP:80` and set the `Host` header
+to `49999-<sandboxID>.cube.app` so CubeProxy can route the request correctly.
 
 ---
 
-## DNS 绕过原理
+## API Reference
 
-当 `CUBE_PROXY_NODE_IP=9.135.79.34` 时：
+### `Sandbox.create(template, *, timeout, env_vars, metadata, config)`
 
+Create a new sandbox. Returns a `Sandbox` instance.
+
+### `Sandbox.connect(sandbox_id, *, config)`
+
+Connect to an existing sandbox. Auto-resumes if paused.
+
+### `sandbox.run_code(code, *, on_stdout, on_stderr, on_result, on_error, envs, timeout)`
+
+Execute code. Returns an `Execution` object.
+
+```python
+result = sb.run_code("1 + 1")
+result.text           # "2" — last expression value
+result.logs.stdout    # list of stdout lines
+result.logs.stderr    # list of stderr lines
+result.error          # ExecutionError or None
 ```
-客户端                          CubeProxy (9.135.79.34:80)
-  │                                   │
-  │  TCP connect → 9.135.79.34:80    │
-  │  GET / HTTP/1.1                   │
-  │  Host: 49999-xxx.cube.app  ──────▶│ 按 Host 路由到对应 sandbox
-  │                                   │
-```
 
-`requests` 使用自定义 `HTTPAdapter` 将所有连接重定向到代理 IP，同时保留 `Host` 头，使 CubeProxy 能正确路由。WebSocket 同理，通过 `socket.create_connection` 直连 IP。
+### `sandbox.pause()` / `sandbox.resume()` / `sandbox.kill()`
+
+Lifecycle management.
+
+### `sandbox.get_info()`
+
+Return current sandbox details from the API.
 
 ---
 
-## 当前部署信息
+## Generate client from OpenAPI
 
-| 字段 | 值 |
-|------|----|
-| 服务器 | `9.135.79.34` |
-| API 端口 | `3000` |
-| Proxy HTTP | `80` |
-| Proxy HTTPS | `443` |
-| 模板 ID | `tpl-6265796cee124256b4dcd6a1` |
-| 域名 | `*.cube.app` → `9.135.79.34` |
+```bash
+# Install generator
+pip install openapi-generator-cli
+# or
+npm install -g @openapitools/openapi-generator-cli
+
+# Generate Python client
+openapi-generator-cli generate \
+  -i openapi.yaml \
+  -g python \
+  -o ./cube-api-client \
+  --additional-properties=packageName=cube_api_client
+```
+
+> Note: The generated client covers the REST lifecycle API only.
+> The streaming `/execute` endpoint is handled by this SDK directly.
+
+---
+
+## License
+
+Apache-2.0
