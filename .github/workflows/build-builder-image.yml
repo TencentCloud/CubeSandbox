@@ -55,5 +55,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             GITHUB_ACTIONS=true
+            RUSTUP_DIST_SERVER=https://static.rust-lang.org
+            RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup
           cache-from: type=gha
           cache-to: type=gha,mode=max

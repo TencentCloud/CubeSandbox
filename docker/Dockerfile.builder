@@ -13,6 +13,8 @@ ARG RUST_TOOLCHAIN_HYPERVISOR=1.77.2
 ARG RUST_TOOLCHAIN_E2BAPI=1.85
 ARG RUST_TOOLCHAIN_AGENT=1.89
 ARG GITHUB_ACTIONS=false
+ARG RUSTUP_DIST_SERVER=https://rsproxy.cn
+ARG RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
 
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
@@ -110,8 +112,8 @@ RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --profile minimal --default-toolchain none
 
-ENV RUSTUP_DIST_SERVER="https://rsproxy.cn"
-ENV RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+ENV RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER}"
+ENV RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT}"
 
 RUN set -eux; \
     for toolchain in "${RUST_TOOLCHAIN_HYPERVISOR}" "${RUST_TOOLCHAIN_E2BAPI}" "${RUST_TOOLCHAIN_AGENT}"; do \

@@ -170,6 +170,8 @@ jobs:
               -t "${BUILDER_IMAGE_LOCAL}" \
               -f docker/Dockerfile.builder \
               --build-arg GITHUB_ACTIONS=true \
+              --build-arg RUSTUP_DIST_SERVER=https://static.rust-lang.org \
+              --build-arg RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup \
               .
           }
 
