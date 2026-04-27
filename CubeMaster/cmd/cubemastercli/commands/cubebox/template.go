@@ -766,8 +766,9 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringSliceFlag{Name: "arg", Usage: "override container CMD (args); repeat for multiple elements"},
 		cli.StringSliceFlag{Name: "env", Usage: "set environment variable, KEY=VALUE format; repeat for multiple envs"},
 		cli.StringSliceFlag{Name: "dns", Usage: "set container DNS nameserver; repeat for multiple servers"},
-		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets timeout_ms=30000, period_ms=500"},
+		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); see --probe-timeout, --probe-path"},
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
+		cli.DurationFlag{Name: "probe-timeout", Value: 120 * time.Second, Usage: "total probe wall-clock budget (e.g. 30s, 2m); only effective when --probe is set; default 120s suits nested-KVM hosts where the in-guest application takes longer than 30s to bind the probe port"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
@@ -1315,6 +1316,16 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 		if probePath == "" {
 			probePath = "/health"
 		}
+		probeTimeout := c.Duration("probe-timeout")
+		if probeTimeout < time.Second {
+			return nil, fmt.Errorf("--probe-timeout must be at least 1s, got %s", probeTimeout)
+		}
+		// PeriodMs is fixed at 1s; FailureThreshold derives from the requested
+		// total budget (rounded up to whole seconds). TimeoutMs == total budget
+		// so it never trips before FailureThreshold does.
+		periodMs := int32(1000)
+		timeoutMs := int32(probeTimeout.Milliseconds())
+		failureThreshold := int32((probeTimeout + time.Second - 1) / time.Second)
 		host := ""
 		overrides.Probe = &types.Probe{
 			ProbeHandler: &types.ProbeHandler{
@@ -1324,9 +1335,9 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 					Host: &host,
 				},
 			},
-			TimeoutMs:        30000,
-			PeriodMs:         500,
-			FailureThreshold: 60,
+			TimeoutMs:        timeoutMs,
+			PeriodMs:         periodMs,
+			FailureThreshold: failureThreshold,
 			SuccessThreshold: 1,
 		}
 	}
