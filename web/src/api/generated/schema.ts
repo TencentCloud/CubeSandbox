@@ -196,9 +196,9 @@ export interface components {
         ClusterOverview: {
             /**
              * Format: int64
-             * @description Currently-allocatable CPU cores.
+             * @description Currently-allocatable CPU in millicpu.
              */
-            allocatableCpuCores: number;
+            allocatableCpuMilli: number;
             /**
              * Format: int64
              * @description Currently-allocatable memory in MiB.
@@ -213,9 +213,9 @@ export interface components {
             nodeCount: number;
             /**
              * Format: int64
-             * @description Total CPU across the cluster, expressed in CPU cores.
+             * @description Total CPU across the cluster, expressed in millicpu.
              */
-            totalCpuCores: number;
+            totalCpuMilli: number;
             /**
              * Format: int64
              * @description Total memory in MiB.
@@ -261,8 +261,11 @@ export interface components {
             type: string;
         };
         NodeResourcesView: {
-            /** Format: int64 */
-            cpuCores: number;
+            /**
+             * Format: int64
+             * @description CPU capacity or availability expressed in millicpu.
+             */
+            cpuMilli: number;
             /** Format: int64 */
             memoryMB: number;
         };

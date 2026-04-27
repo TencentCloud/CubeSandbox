@@ -55,8 +55,8 @@ pub(crate) fn build_overview(nodes: &[NodeSnapshot]) -> ClusterOverview {
         if n.healthy {
             overview.healthy_nodes += 1;
         }
-        overview.total_cpu_cores += millicpu_to_cores(n.capacity.milli_cpu);
-        overview.allocatable_cpu_cores += millicpu_to_cores(n.allocatable.milli_cpu);
+        overview.total_cpu_milli += n.capacity.milli_cpu;
+        overview.allocatable_cpu_milli += n.allocatable.milli_cpu;
         overview.total_memory_mb += n.capacity.memory_mb;
         overview.allocatable_memory_mb += n.allocatable.memory_mb;
         overview.max_mvm_slots += n.max_mvm_num;
@@ -66,12 +66,12 @@ pub(crate) fn build_overview(nodes: &[NodeSnapshot]) -> ClusterOverview {
 }
 
 pub(crate) fn to_view(s: NodeSnapshot) -> NodeView {
-    let cap_cpu = millicpu_to_cores(s.capacity.milli_cpu);
-    let alloc_cpu = millicpu_to_cores(s.allocatable.milli_cpu);
+    let cap_cpu_milli = s.capacity.milli_cpu;
+    let alloc_cpu_milli = s.allocatable.milli_cpu;
     let cap_mem = s.capacity.memory_mb;
     let alloc_mem = s.allocatable.memory_mb;
 
-    let cpu_saturation = saturation_pct(cap_cpu, alloc_cpu);
+    let cpu_saturation = saturation_pct(cap_cpu_milli, alloc_cpu_milli);
     let memory_saturation = saturation_pct(cap_mem, alloc_mem);
 
     NodeView {
@@ -80,11 +80,11 @@ pub(crate) fn to_view(s: NodeSnapshot) -> NodeView {
         instance_type: s.instance_type,
         healthy: s.healthy,
         capacity: NodeResourcesView {
-            cpu_cores: cap_cpu,
+            cpu_milli: cap_cpu_milli,
             memory_mb: cap_mem,
         },
         allocatable: NodeResourcesView {
-            cpu_cores: alloc_cpu,
+            cpu_milli: alloc_cpu_milli,
             memory_mb: alloc_mem,
         },
         cpu_saturation,
@@ -110,14 +110,6 @@ pub(crate) fn to_view(s: NodeSnapshot) -> NodeView {
     }
 }
 
-pub(crate) fn millicpu_to_cores(millicpu: i64) -> i64 {
-    if millicpu <= 0 {
-        0
-    } else {
-        (millicpu + 500) / 1000
-    }
-}
-
 pub(crate) fn saturation_pct(total: i64, allocatable: i64) -> f32 {
     if total <= 0 {
         return 0.0;
@@ -129,16 +121,8 @@ pub(crate) fn saturation_pct(total: i64, allocatable: i64) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_overview, millicpu_to_cores, saturation_pct, to_view};
+    use super::{build_overview, saturation_pct, to_view};
     use crate::cubemaster::{LocalTemplate, NodeCondition, NodeResources, NodeSnapshot};
-
-    #[test]
-    fn millicpu_rounds_to_nearest_core() {
-        assert_eq!(millicpu_to_cores(0), 0);
-        assert_eq!(millicpu_to_cores(499), 0);
-        assert_eq!(millicpu_to_cores(500), 1);
-        assert_eq!(millicpu_to_cores(1500), 2);
-    }
 
     #[test]
     fn saturation_is_clamped() {
@@ -181,15 +165,15 @@ mod tests {
 
         let view = to_view(snapshot.clone());
         assert_eq!(view.node_id, "node-a");
-        assert_eq!(view.capacity.cpu_cores, 2);
-        assert_eq!(view.allocatable.cpu_cores, 1);
+        assert_eq!(view.capacity.cpu_milli, 2200);
+        assert_eq!(view.allocatable.cpu_milli, 1000);
         assert_eq!(view.local_templates, vec!["tmpl-1".to_string()]);
 
         let overview = build_overview(&[snapshot]);
         assert_eq!(overview.node_count, 1);
         assert_eq!(overview.healthy_nodes, 1);
-        assert_eq!(overview.total_cpu_cores, 2);
-        assert_eq!(overview.allocatable_cpu_cores, 1);
+        assert_eq!(overview.total_cpu_milli, 2200);
+        assert_eq!(overview.allocatable_cpu_milli, 1000);
         assert_eq!(overview.max_mvm_slots, 3);
     }
 }

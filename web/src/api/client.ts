@@ -109,8 +109,8 @@ function mapNode(dto: NodeDto): NodeView {
     role: dto.instanceType ?? undefined,
     address: dto.hostIP,
     resources: {
-      totalCpuMilli: dto.capacity.cpuCores * 1000,
-      allocatableCpuMilli: dto.allocatable.cpuCores * 1000,
+      totalCpuMilli: dto.capacity.cpuMilli,
+      allocatableCpuMilli: dto.allocatable.cpuMilli,
       totalMemoryMB: dto.capacity.memoryMB,
       allocatableMemoryMB: dto.allocatable.memoryMB,
       maxMvmSlots: dto.maxMvmSlots,

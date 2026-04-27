@@ -20,9 +20,9 @@ export default function OverviewPage() {
   const templates = useQuery({ queryKey: ['templates'], queryFn: templateApi.list, refetchInterval: 30_000 });
 
   const running = sandboxes.data?.length ?? 0;
-  const cpuUsedPct = cluster.data
-    ? Math.round(((cluster.data.totalCpuCores - cluster.data.allocatableCpuCores) / Math.max(cluster.data.totalCpuCores, 1)) * 100)
-    : 0;
+  const totalCpuMilli = cluster.data?.totalCpuMilli ?? 0;
+  const cpuUsedMilli = Math.max(totalCpuMilli - (cluster.data?.allocatableCpuMilli ?? 0), 0);
+  const cpuUsedPct = totalCpuMilli > 0 ? Math.round(Math.min((cpuUsedMilli / totalCpuMilli) * 100, 100)) : 0;
   const memUsedPct = cluster.data
     ? Math.round(((cluster.data.totalMemoryMB - cluster.data.allocatableMemoryMB) / Math.max(cluster.data.totalMemoryMB, 1)) * 100)
     : 0;
@@ -56,8 +56,8 @@ export default function OverviewPage() {
           value={cluster.isLoading ? '—' : `${cpuUsedPct}%`}
           hint={cluster.data
             ? t('kpi.coresUsed', {
-                used: cluster.data.totalCpuCores - cluster.data.allocatableCpuCores,
-                total: cluster.data.totalCpuCores,
+                used: (cpuUsedMilli / 1000).toFixed(1),
+                total: (totalCpuMilli / 1000).toFixed(1),
               })
             : ''}
           progress={cpuUsedPct}

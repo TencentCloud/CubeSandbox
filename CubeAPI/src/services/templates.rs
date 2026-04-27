@@ -194,7 +194,9 @@ impl TemplateService {
 }
 
 fn map_err(e: CubeMasterError) -> AppError {
-    if e.is_not_found() || e.is_endpoint_missing() {
+    if e.is_invalid_path_parameter() {
+        AppError::BadRequest(e.to_string())
+    } else if e.is_not_found() || e.is_endpoint_missing() {
         AppError::NotFound(e.to_string())
     } else if e.is_conflict() {
         AppError::Conflict(e.to_string())

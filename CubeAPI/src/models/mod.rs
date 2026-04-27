@@ -454,12 +454,12 @@ pub struct ClusterOverview {
     pub node_count: usize,
     #[serde(rename = "healthyNodes")]
     pub healthy_nodes: usize,
-    /// Total CPU across the cluster, expressed in CPU cores.
-    #[serde(rename = "totalCpuCores")]
-    pub total_cpu_cores: i64,
-    /// Currently-allocatable CPU cores.
-    #[serde(rename = "allocatableCpuCores")]
-    pub allocatable_cpu_cores: i64,
+    /// Total CPU across the cluster, expressed in millicpu.
+    #[serde(rename = "totalCpuMilli")]
+    pub total_cpu_milli: i64,
+    /// Currently-allocatable CPU in millicpu.
+    #[serde(rename = "allocatableCpuMilli")]
+    pub allocatable_cpu_milli: i64,
     /// Total memory in MiB.
     #[serde(rename = "totalMemoryMB")]
     pub total_memory_mb: i64,
@@ -473,8 +473,9 @@ pub struct ClusterOverview {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct NodeResourcesView {
-    #[serde(rename = "cpuCores")]
-    pub cpu_cores: i64,
+    /// CPU capacity or availability expressed in millicpu.
+    #[serde(rename = "cpuMilli")]
+    pub cpu_milli: i64,
     #[serde(rename = "memoryMB")]
     pub memory_mb: i64,
 }

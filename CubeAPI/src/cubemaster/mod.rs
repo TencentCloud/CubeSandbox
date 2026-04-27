@@ -312,6 +312,7 @@ impl CubeMasterClient {
         &self,
         build_id: &str,
     ) -> Result<TemplateBuildStatusResponse, CubeMasterError> {
+        validate_path_segment("build_id", build_id)?;
         let url = format!("{}/cube/template/build/{}/status", self.base_url, build_id);
         let resp = self
             .inner
@@ -359,6 +360,9 @@ pub enum CubeMasterError {
     #[error("CubeMaster returned error code {ret_code}: {ret_msg}")]
     Api { ret_code: i32, ret_msg: String },
 
+    #[error("invalid path parameter {name}: {value}")]
+    InvalidPathParameter { name: &'static str, value: String },
+
     #[error("failed to deserialise CubeMaster response: {0}")]
     Deserialize(String),
 }
@@ -386,6 +390,10 @@ impl CubeMasterError {
         )
     }
 
+    pub fn is_invalid_path_parameter(&self) -> bool {
+        matches!(self, Self::InvalidPathParameter { .. })
+    }
+
     /// True when CubeMaster doesn't have the endpoint yet (HTTP 404 on the path).
     pub fn is_endpoint_missing(&self) -> bool {
         match self {
@@ -395,6 +403,22 @@ impl CubeMasterError {
             Self::Http(e) => e.status().map_or(false, |s| s == 404),
             _ => false,
         }
+    }
+}
+
+fn validate_path_segment(name: &'static str, value: &str) -> Result<(), CubeMasterError> {
+    let is_valid = !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+
+    if is_valid {
+        Ok(())
+    } else {
+        Err(CubeMasterError::InvalidPathParameter {
+            name,
+            value: value.to_string(),
+        })
     }
 }
 
@@ -1413,7 +1437,28 @@ pub struct NodeResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{GetSandboxResponse, SandboxInfo};
+    use super::{validate_path_segment, CubeMasterError, GetSandboxResponse, SandboxInfo};
+
+    #[test]
+    fn build_id_path_segment_accepts_alphanumeric_and_hyphen() {
+        validate_path_segment("build_id", "abc-123").expect("build id should be valid");
+    }
+
+    #[test]
+    fn build_id_path_segment_rejects_path_control_characters() {
+        for value in ["../../x", "abc/123", "abc?x=1", ""] {
+            let err = validate_path_segment("build_id", value)
+                .expect_err("build id should reject path control characters");
+
+            assert!(matches!(
+                err,
+                CubeMasterError::InvalidPathParameter {
+                    name: "build_id",
+                    ..
+                }
+            ));
+        }
+    }
 
     #[test]
     fn sandbox_info_deserializes_resource_fields_from_list_payload() {

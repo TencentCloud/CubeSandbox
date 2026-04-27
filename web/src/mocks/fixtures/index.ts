@@ -123,8 +123,8 @@ function buildNodes(): NodeDto[] {
       hostIP: '10.0.2.11',
       instanceType: 'standard',
       healthy: true,
-      capacity: { cpuCores: 64, memoryMB: 131_072 },
-      allocatable: { cpuCores: 19, memoryMB: 42_800 },
+      capacity: { cpuMilli: 64_000, memoryMB: 131_072 },
+      allocatable: { cpuMilli: 19_000, memoryMB: 42_800 },
       cpuSaturation: 70.3,
       memorySaturation: 67.3,
       maxMvmSlots: 32,
@@ -140,8 +140,8 @@ function buildNodes(): NodeDto[] {
       hostIP: '10.0.2.12',
       instanceType: 'standard',
       healthy: true,
-      capacity: { cpuCores: 48, memoryMB: 98_304 },
-      allocatable: { cpuCores: 22, memoryMB: 55_000 },
+      capacity: { cpuMilli: 48_000, memoryMB: 98_304 },
+      allocatable: { cpuMilli: 22_000, memoryMB: 55_000 },
       cpuSaturation: 54.2,
       memorySaturation: 44.0,
       maxMvmSlots: 24,
@@ -154,8 +154,8 @@ function buildNodes(): NodeDto[] {
       hostIP: '10.0.2.13',
       instanceType: 'standard',
       healthy: false,
-      capacity: { cpuCores: 32, memoryMB: 65_536 },
-      allocatable: { cpuCores: 3, memoryMB: 4_100 },
+      capacity: { cpuMilli: 32_000, memoryMB: 65_536 },
+      allocatable: { cpuMilli: 3_000, memoryMB: 4_100 },
       cpuSaturation: 90.6,
       memorySaturation: 93.7,
       maxMvmSlots: 16,
@@ -283,16 +283,16 @@ export function getNode(nodeID: string) {
 }
 
 export function getClusterOverview(): ClusterOverviewDto {
-  const totalCpuCores = nodes.reduce((sum, node) => sum + node.capacity.cpuCores, 0);
-  const allocatableCpuCores = nodes.reduce((sum, node) => sum + node.allocatable.cpuCores, 0);
+  const totalCpuMilli = nodes.reduce((sum, node) => sum + node.capacity.cpuMilli, 0);
+  const allocatableCpuMilli = nodes.reduce((sum, node) => sum + node.allocatable.cpuMilli, 0);
   const totalMemoryMB = nodes.reduce((sum, node) => sum + node.capacity.memoryMB, 0);
   const allocatableMemoryMB = nodes.reduce((sum, node) => sum + node.allocatable.memoryMB, 0);
 
   return {
     nodeCount: nodes.length,
     healthyNodes: nodes.filter((node) => node.healthy).length,
-    totalCpuCores,
-    allocatableCpuCores,
+    totalCpuMilli,
+    allocatableCpuMilli,
     totalMemoryMB,
     allocatableMemoryMB,
     maxMvmSlots: nodes.reduce((sum, node) => sum + node.maxMvmSlots, 0),

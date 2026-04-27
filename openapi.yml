@@ -413,16 +413,16 @@ components:
       required:
       - nodeCount
       - healthyNodes
-      - totalCpuCores
-      - allocatableCpuCores
+      - totalCpuMilli
+      - allocatableCpuMilli
       - totalMemoryMB
       - allocatableMemoryMB
       - maxMvmSlots
       properties:
-        allocatableCpuCores:
+        allocatableCpuMilli:
           type: integer
           format: int64
-          description: Currently-allocatable CPU cores.
+          description: Currently-allocatable CPU in millicpu.
         allocatableMemoryMB:
           type: integer
           format: int64
@@ -437,10 +437,10 @@ components:
         nodeCount:
           type: integer
           minimum: 0
-        totalCpuCores:
+        totalCpuMilli:
           type: integer
           format: int64
-          description: Total CPU across the cluster, expressed in CPU cores.
+          description: Total CPU across the cluster, expressed in millicpu.
         totalMemoryMB:
           type: integer
           format: int64
@@ -546,12 +546,13 @@ components:
     NodeResourcesView:
       type: object
       required:
-      - cpuCores
+      - cpuMilli
       - memoryMB
       properties:
-        cpuCores:
+        cpuMilli:
           type: integer
           format: int64
+          description: CPU capacity or availability expressed in millicpu.
         memoryMB:
           type: integer
           format: int64
