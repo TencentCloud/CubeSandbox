@@ -765,6 +765,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringSliceFlag{Name: "cmd", Usage: "override container ENTRYPOINT (command); repeat for multiple elements, e.g. --cmd /bin/sh --cmd -c"},
 		cli.StringSliceFlag{Name: "arg", Usage: "override container CMD (args); repeat for multiple elements"},
 		cli.StringSliceFlag{Name: "env", Usage: "set environment variable, KEY=VALUE format; repeat for multiple envs"},
+		cli.StringSliceFlag{Name: "dns", Usage: "set container DNS nameserver; repeat for multiple servers"},
 		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets timeout_ms=30000, period_ms=500"},
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
@@ -1269,11 +1270,12 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	cmds := c.StringSlice("cmd")
 	args := c.StringSlice("arg")
 	rawEnvs := c.StringSlice("env")
+	dnsServers := c.StringSlice("dns")
 	probePort := c.Int("probe")
 	cpuMillicores := c.Int("cpu")
 	memoryMB := c.Int("memory")
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") {
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") {
 		return nil, nil
 	}
 
@@ -1293,6 +1295,14 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 			Key:   kv[:idx],
 			Value: kv[idx+1:],
 		})
+	}
+	if len(dnsServers) > 0 {
+		for _, dnsServer := range dnsServers {
+			if dnsServer == "" || net.ParseIP(dnsServer) == nil {
+				return nil, fmt.Errorf("invalid dns server %q", dnsServer)
+			}
+		}
+		overrides.DnsConfig = &types.DNSConfig{Servers: dnsServers}
 	}
 	if c.IsSet("cpu") || c.IsSet("memory") {
 		overrides.Resources = &types.Resource{

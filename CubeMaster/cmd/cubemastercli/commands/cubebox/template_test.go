@@ -229,3 +229,48 @@ func TestParseContainerOverridesCustomCpuAndMemory(t *testing.T) {
 		t.Fatalf("expected Mem=8192Mi, got %q", overrides.Resources.Mem)
 	}
 }
+
+func TestParseContainerOverridesDNS(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--dns", "8.8.8.8", "--dns", "1.1.1.1"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.DnsConfig == nil {
+		t.Fatal("expected DnsConfig to be set")
+	}
+	want := []string{"8.8.8.8", "1.1.1.1"}
+	if len(overrides.DnsConfig.Servers) != len(want) {
+		t.Fatalf("expected %d DNS servers, got %v", len(want), overrides.DnsConfig.Servers)
+	}
+	for i := range want {
+		if overrides.DnsConfig.Servers[i] != want[i] {
+			t.Fatalf("expected DNS server %d to be %q, got %q", i, want[i], overrides.DnsConfig.Servers[i])
+		}
+	}
+}
+
+func TestParseContainerOverridesRejectsInvalidDNS(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--dns", "not-an-ip"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err == nil {
+		t.Fatal("expected error for invalid DNS server")
+	}
+	if overrides != nil {
+		t.Fatalf("expected overrides to be nil on invalid DNS, got %+v", overrides)
+	}
+}
+
+func TestParseContainerOverridesNoDNS(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--env", "KEY=VALUE"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil {
+		t.Fatal("expected overrides to be non-nil due to --env flag")
+	}
+	if overrides.DnsConfig != nil {
+		t.Fatalf("expected DnsConfig to be nil when --dns is not set, got %+v", overrides.DnsConfig)
+	}
+}

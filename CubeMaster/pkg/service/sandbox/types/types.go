@@ -428,6 +428,7 @@ type ContainerOverrides struct {
 	Args            []string                  `json:"args,omitempty"`
 	WorkingDir      string                    `json:"working_dir,omitempty"`
 	Envs            []*KeyValue               `json:"envs,omitempty"`
+	DnsConfig       *DNSConfig                `json:"dns_config,omitempty"`
 	Resources       *Resource                 `json:"resources,omitempty"`
 	SecurityContext *ContainerSecurityContext `json:"security_context,omitempty"`
 	Probe           *Probe                    `json:"probe,omitempty"`

@@ -1615,6 +1615,7 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 		WorkingDir:      workingDir,
 		Envs:            envs,
 		VolumeMounts:    volumeMounts,
+		DnsConfig:       dnsConfigOrNil(req.ContainerOverrides),
 		RLimit:          defaultRLimit(req.ContainerOverrides),
 		Resources:       resources,
 		SecurityContext: securityContext,
@@ -1797,6 +1798,13 @@ func buildTemplateSpecFingerprint(req *types.CreateTemplateFromImageReq, sourceI
 	})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
+}
+
+func dnsConfigOrNil(overrides *types.ContainerOverrides) *types.DNSConfig {
+	if overrides == nil {
+		return nil
+	}
+	return overrides.DnsConfig
 }
 
 func buildArtifactID(fingerprint string) string {

@@ -199,6 +199,46 @@ func TestBuildTemplateSpecFingerprintUsesExposedPorts(t *testing.T) {
 	}
 }
 
+func TestBuildTemplateSpecFingerprintUsesDNSConfig(t *testing.T) {
+	reqA := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-1",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		ContainerOverrides: &types.ContainerOverrides{
+			DnsConfig: &types.DNSConfig{Servers: []string{"8.8.8.8"}},
+		},
+	}
+	reqB := &types.CreateTemplateFromImageReq{
+		Request:           reqA.Request,
+		SourceImageRef:    reqA.SourceImageRef,
+		TemplateID:        reqA.TemplateID,
+		WritableLayerSize: reqA.WritableLayerSize,
+		InstanceType:      reqA.InstanceType,
+		NetworkType:       reqA.NetworkType,
+		ContainerOverrides: &types.ContainerOverrides{
+			DnsConfig: &types.DNSConfig{Servers: []string{"1.1.1.1"}},
+		},
+	}
+	reqC := &types.CreateTemplateFromImageReq{
+		Request:            reqA.Request,
+		SourceImageRef:     reqA.SourceImageRef,
+		TemplateID:         reqA.TemplateID,
+		WritableLayerSize:  reqA.WritableLayerSize,
+		InstanceType:       reqA.InstanceType,
+		NetworkType:        reqA.NetworkType,
+		ContainerOverrides: &types.ContainerOverrides{},
+	}
+	if gotA, gotB := buildTemplateSpecFingerprint(reqA, "repo@sha256:aaa"), buildTemplateSpecFingerprint(reqB, "repo@sha256:aaa"); gotA == gotB {
+		t.Fatalf("fingerprint should change when DNS config changes")
+	}
+	if gotA, gotC := buildTemplateSpecFingerprint(reqA, "repo@sha256:aaa"), buildTemplateSpecFingerprint(reqC, "repo@sha256:aaa"); gotA == gotC {
+		t.Fatalf("fingerprint should change when DNS config is removed")
+	}
+}
+
 func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.T) {
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
@@ -245,6 +285,41 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	}
 	if got.Annotations[constants.AnnotationsExposedPort] != "80:8080" {
 		t.Fatalf("unexpected exposed ports annotation: %q", got.Annotations[constants.AnnotationsExposedPort])
+	}
+}
+
+func TestGenerateTemplateCreateRequestAppliesDNSConfigOverride(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-1",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		ContainerOverrides: &types.ContainerOverrides{
+			DnsConfig: &types.DNSConfig{Servers: []string{"8.8.8.8", "1.1.1.1"}},
+		},
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-1",
+		TemplateSpecFingerprint: "fingerprint-1",
+		Ext4SHA256:              "sha256-1",
+		Ext4SizeBytes:           1024,
+		DownloadToken:           "token-1",
+	}
+	got, err := generateTemplateCreateRequest(req, artifact, dockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if len(got.Containers) != 1 {
+		t.Fatalf("unexpected container count: %d", len(got.Containers))
+	}
+	if got.Containers[0].DnsConfig == nil {
+		t.Fatal("expected container DnsConfig to be set")
+	}
+	want := []string{"8.8.8.8", "1.1.1.1"}
+	if !reflect.DeepEqual(got.Containers[0].DnsConfig.Servers, want) {
+		t.Fatalf("DnsConfig.Servers=%v, want %v", got.Containers[0].DnsConfig.Servers, want)
 	}
 }
 
