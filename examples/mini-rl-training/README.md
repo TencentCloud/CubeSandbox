@@ -274,7 +274,7 @@ If cube-sandbox uses mkcert certificates, you need to install the root CA:
 
 ```bash
 # Retrieve root CA from cube-sandbox node
-ssh <cube-node> 'cat $(mkcert -CAROOT)/rootCA.pem' \
+ssh <cube-node> 'cat /root/.local/share/mkcert/rootCA.pem' \
   > /etc/pki/ca-trust/source/anchors/cube-rootCA.pem
 
 # Install to system trust chain

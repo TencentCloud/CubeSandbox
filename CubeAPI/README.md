@@ -112,13 +112,13 @@ The following four environment variables must be exported before running:
 | `CUBE_TEMPLATE_ID` | Cube sandbox template ID. All examples use this to determine which template to create sandboxes from; must be explicitly set. |
 | `E2B_API_URL` | Address of the Cube E2B API service. The SDK defaults to the official E2B cloud service, so this must be overridden with the local or deployed address — otherwise requests will go to the official service instead of Cube. |
 | `E2B_API_KEY` | The E2B SDK requires this field to be present (it performs a non-empty check). For local deployments, any non-empty string works, e.g. `dummy`. |
-| `SSL_CERT_FILE` | When accessing sandboxes using Cube's built-in test certificate (`cube.app`), set this variable to the corresponding CA root certificate path so that the E2B SDK's httpx/requests can complete TLS verification. We recommend using a locally signed certificate from mkcert: `$(mkcert -CAROOT)/rootCA.pem`.<br>If you use a custom domain with a trusted certificate, or access sandboxes over HTTP, this variable is not needed. See [CubeProxy TLS Configuration](../docs/guide/cubeproxy-tls.md). |
+| `SSL_CERT_FILE` | When accessing sandboxes using Cube's built-in test certificate (`cube.app`), set this variable to the corresponding CA root certificate path so that the E2B SDK's httpx/requests can complete TLS verification. We recommend using a locally signed certificate from mkcert: `/root/.local/share/mkcert/rootCA.pem`.<br>If you use a custom domain with a trusted certificate, or access sandboxes over HTTP, this variable is not needed. See [CubeProxy TLS Configuration](../docs/guide/cubeproxy-tls.md). |
 
 ```bash
 export CUBE_TEMPLATE_ID=<your-template-id>
 export E2B_API_URL=http://localhost:3000
 export E2B_API_KEY=dummy
-export SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 ```
 
 **3. Run**

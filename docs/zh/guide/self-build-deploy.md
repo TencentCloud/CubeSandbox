@@ -168,7 +168,7 @@ sudo ./smoke.sh
 export CUBE_TEMPLATE_ID=<你的模板ID>
 export E2B_API_URL=http://<目标机IP>:3000
 export E2B_API_KEY=dummy
-export SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 ```
 
 | 变量 | 说明 |

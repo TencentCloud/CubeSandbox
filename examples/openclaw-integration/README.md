@@ -108,7 +108,7 @@ export E2B_API_URL=http://<node-ip>:3000    # Cube API Server address
 export E2B_API_KEY=dummy                    # any non-empty string
 
 # Only needed when using Cube's built-in mkcert certificate:
-# export SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem
+# export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 ```
 
 ## 5. Usage
@@ -156,7 +156,7 @@ The skill file is at `examples/openclaw-integration/skills/cube-sandbox/SKILL.md
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
 | Skill not triggered | Skill not installed | Verify `~/.openclaw/workspace/skills/cube-sandbox/` exists |
-| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS without CA cert | Set `SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem` |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS without CA cert | Set `SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem` |
 | `Template not found` | Wrong `CUBE_TEMPLATE_ID` | Re-run `cubemastercli tpl list` |
 | DNS resolution fails | DNS not configured | See skill FAQ for `/etc/hosts` workaround |
 

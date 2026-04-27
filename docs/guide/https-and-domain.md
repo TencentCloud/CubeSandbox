@@ -74,7 +74,7 @@ mkcert <your-host-ip-or-domain>
 Set `SSL_CERT_FILE` so the E2B SDK trusts the generated CA:
 
 ```bash
-export SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 ```
 
 > mkcert certificates are only trusted on machines where `mkcert -install` has been run. Not suitable for production or shared deployments.

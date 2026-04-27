@@ -66,7 +66,7 @@ export E2B_API_URL=http://<节点IP>:3000
 export CUBE_TEMPLATE_ID=<template-id>
 
 # 使用 Cube 内置 mkcert 证书时才需要：
-# export SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem
+# export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 ```
 
 ### 第三步 — 在沙箱中运行 Python 代码
@@ -152,7 +152,7 @@ python network_denylist.py
 
 | 现象 | 可能原因 | 解决方法 |
 |------|---------|---------|
-| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS 但未配置 CA 证书 | 设置 `SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem` |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS 但未配置 CA 证书 | 设置 `SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem` |
 | `Template not found` | 模板 ID 错误 | 重新运行 `cubemastercli tpl list` |
 | `Connection refused` | CubeAPI 不可达 | 检查 `E2B_API_URL` 及端口 3000 |
 | `Sandbox timeout` | 沙箱超过 TTL | 增大 `Sandbox.create()` 中的 `timeout` |

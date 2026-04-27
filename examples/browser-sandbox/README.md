@@ -91,7 +91,7 @@ export E2B_API_URL=http://<your-node-ip>:3000
 export CUBE_TEMPLATE_ID=<template-id>
 
 # Only needed when using Cube's built-in mkcert certificate:
-# export NODE_EXTRA_CA_CERTS=$(mkcert -CAROOT)/rootCA.pem
+# export NODE_EXTRA_CA_CERTS=/root/.local/share/mkcert/rootCA.pem
 ```
 
 ### Step 3 — Run the Example
@@ -150,7 +150,7 @@ Refer to the [Playwright Python docs](https://playwright.dev/python/docs/api/cla
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
 | `Error: connect ECONNREFUSED` | CubeAPI not reachable | Check `E2B_API_URL` and that port 3000 is open |
-| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS without CA cert | Set `NODE_EXTRA_CA_CERTS=$(mkcert -CAROOT)/rootCA.pem` |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS without CA cert | Set `NODE_EXTRA_CA_CERTS=/root/.local/share/mkcert/rootCA.pem` |
 | `Timeout waiting for CDP` | Chromium not yet ready | The browser image starts Chromium at boot; retry or increase timeout |
 | `Template not found` | Wrong template ID | Re-run `cubemastercli tpl list` to verify the ID |
 

@@ -272,7 +272,7 @@ python scripts/run-concurrent.py swebench \
 
 ```bash
 # 从 cube-sandbox 节点获取 root CA
-ssh <cube-node> 'cat $(mkcert -CAROOT)/rootCA.pem' \
+ssh <cube-node> 'cat /root/.local/share/mkcert/rootCA.pem' \
   > /etc/pki/ca-trust/source/anchors/cube-rootCA.pem
 
 # 安装到系统信任链

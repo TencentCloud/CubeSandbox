@@ -168,7 +168,7 @@ Set the following environment variables on your client machine:
 export CUBE_TEMPLATE_ID=<your-template-id>
 export E2B_API_URL=http://<target-host>:3000
 export E2B_API_KEY=dummy
-export SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 ```
 
 | Variable | Description |

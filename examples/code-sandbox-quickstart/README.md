@@ -73,7 +73,7 @@ export E2B_API_URL=http://<your-node-ip>:3000
 export CUBE_TEMPLATE_ID=<template-id>
 
 # Only needed when using Cube's built-in mkcert certificate:
-# export SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem
+# export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 ```
 
 ### Step 3 — Run Python Code in a Sandbox
@@ -159,7 +159,7 @@ python network_denylist.py
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS without CA cert | Set `SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem` |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS without CA cert | Set `SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem` |
 | `Template not found` | Wrong template ID | Re-run `cubemastercli tpl list` |
 | `Connection refused` | CubeAPI not reachable | Check `E2B_API_URL` and port 3000 |
 | `Sandbox timeout` | Sandbox exceeded its TTL | Increase `timeout` in `Sandbox.create()` |

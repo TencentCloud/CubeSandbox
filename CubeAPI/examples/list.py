@@ -7,7 +7,7 @@ from e2b.sandbox.sandbox_api import SandboxQuery, SandboxState
 
 # os.environ["E2B_API_KEY"] = "dummy"
 # os.environ["E2B_API_URL"] = "http://localhost:3000"
-# os.environ["SSL_CERT_FILE"] = "$(mkcert -CAROOT)/rootCA.pem"
+# os.environ["SSL_CERT_FILE"] = "/root/.local/share/mkcert/rootCA.pem"
 
 # List all running sandboxes (paginated)
 paginator = Sandbox.list(query=SandboxQuery(state=[SandboxState.RUNNING]))

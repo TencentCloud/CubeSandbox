@@ -74,7 +74,7 @@ mkcert <your-host-ip-or-domain>
 设置 `SSL_CERT_FILE`，让 E2B SDK 信任生成的 CA：
 
 ```bash
-export SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 ```
 
 > mkcert 证书只在运行过 `mkcert -install` 的机器上受信任，不适合生产环境或多人共享部署。
