@@ -22,6 +22,7 @@ permissions:
   contents: read
 
 env:
+  GH_REPO: ${{ github.repository }}
   CNB_DOMAIN: cnb.cool
   CNB_API_ENDPOINT: https://api.cnb.cool
   CNB_WEB_ENDPOINT: https://cnb.cool
