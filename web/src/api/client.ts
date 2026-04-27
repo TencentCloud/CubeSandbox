@@ -13,7 +13,7 @@ export type SandboxLogEntry = components['schemas']['SandboxLogEntry'];
 export type SandboxResumeRequest = components['schemas']['ResumedSandbox'];
 export type TemplateSummaryDto = components['schemas']['TemplateSummary'];
 export type TemplateDetailDto = components['schemas']['TemplateDetail'];
-export type NodeDto = components['schemas']['NodeView'];
+export type ApiNodeView = components['schemas']['NodeView'];
 
 export interface RunningSandbox extends ListedSandboxDto {}
 
@@ -34,7 +34,7 @@ export interface TemplateDetail extends TemplateSummary {
   createRequest?: unknown;
 }
 
-export interface NodeResourcesView {
+export interface ClusterNodeResourcesView {
   totalCpuMilli: number;
   allocatableCpuMilli: number;
   totalMemoryMB: number;
@@ -42,7 +42,7 @@ export interface NodeResourcesView {
   maxMvmSlots: number;
 }
 
-export interface NodeConditionView {
+export interface ClusterNodeConditionView {
   type: string;
   status: string;
   lastTransitionTime?: string | null;
@@ -50,14 +50,14 @@ export interface NodeConditionView {
   message?: string;
 }
 
-export interface NodeView {
+export interface ClusterNodeView {
   nodeID: string;
   hostname?: string;
   status: string;
   role?: string;
   address?: string;
-  resources: NodeResourcesView;
-  conditions?: NodeConditionView[];
+  resources: ClusterNodeResourcesView;
+  conditions?: ClusterNodeConditionView[];
   saturationPct: number;
   memorySaturationPct: number;
   heartbeatTime?: string | null;
@@ -101,7 +101,7 @@ function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
   };
 }
 
-function mapNode(dto: NodeDto): NodeView {
+function mapNode(dto: ApiNodeView): ClusterNodeView {
   return {
     nodeID: dto.nodeID,
     hostname: undefined,
@@ -160,6 +160,6 @@ export const templateApi = {
 
 export const clusterApi = {
   overview: () => api<ClusterOverviewDto>('/cluster/overview'),
-  nodes: () => api<NodeDto[]>('/nodes').then((items) => items.map(mapNode)),
-  node: (id: string) => api<NodeDto>(`/nodes/${id}`).then(mapNode),
+  nodes: () => api<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
+  node: (id: string) => api<ApiNodeView>(`/nodes/${id}`).then(mapNode),
 };

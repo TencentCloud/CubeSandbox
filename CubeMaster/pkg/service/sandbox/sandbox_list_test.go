@@ -35,12 +35,15 @@ func TestParseMemoryMB(t *testing.T) {
 		want  int32
 	}{
 		{name: "empty", input: "", want: 0},
-		{name: "mebibytes", input: "2048Mi", want: 2048},
-		{name: "gibibytes", input: "2Gi", want: 2048},
-		{name: "gigabytes", input: "2G", want: 2048},
-		{name: "megabytes", input: "512MB", want: 512},
-		{name: "suffix m", input: "256M", want: 256},
-		{name: "plain number", input: "1024", want: 1024},
+		{name: "kibibytes", input: "1Ki", want: 1},
+		{name: "mebibytes", input: "2048Mi", want: 2148},
+		{name: "gibibytes", input: "2Gi", want: 2148},
+		{name: "tebibytes", input: "1Ti", want: 1099512},
+		{name: "gigabytes", input: "2G", want: 2000},
+		{name: "megabytes", input: "512M", want: 512},
+		{name: "milliunits", input: "256m", want: 1},
+		{name: "plain bytes", input: "1024", want: 1},
+		{name: "overflow", input: "2147483648M", want: 2147483647},
 		{name: "invalid", input: "bad", want: 0},
 	}
 

@@ -37,7 +37,7 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
   const resp = await fetch(url, {
     ...rest,
     headers: {
-      'Content-Type': 'application/json',
+      ...(rest.body != null ? { 'Content-Type': 'application/json' } : {}),
       ...(apiKey ? { 'X-API-Key': apiKey } : {}),
       ...(headers ?? {}),
     },

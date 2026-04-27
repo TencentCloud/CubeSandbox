@@ -25,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types.ListCubeSandboxRes) {
@@ -234,19 +235,15 @@ func parseMemoryMB(raw string) int32 {
 	if value == "" {
 		return 0
 	}
-	lower := strings.ToLower(value)
-	switch {
-	case strings.HasSuffix(lower, "gi"):
-		return parseInt32(strings.TrimSuffix(lower, "gi")) * 1024
-	case strings.HasSuffix(lower, "g"):
-		return parseInt32(strings.TrimSuffix(lower, "g")) * 1024
-	case strings.HasSuffix(lower, "mi"):
-		return parseInt32(strings.TrimSuffix(lower, "mi"))
-	case strings.HasSuffix(lower, "mb"):
-		return parseInt32(strings.TrimSuffix(lower, "mb"))
-	case strings.HasSuffix(lower, "m"):
-		return parseInt32(strings.TrimSuffix(lower, "m"))
-	default:
-		return parseInt32(lower)
+
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0
 	}
+	const maxInt32 = int64(1<<31 - 1)
+	memoryMB := quantity.ScaledValue(resource.Mega)
+	if memoryMB > maxInt32 {
+		return int32(maxInt32)
+	}
+	return int32(memoryMB)
 }
