@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +22,10 @@ RAW_ARTIFACTS_DIR="${SCRIPT_DIR}/assets/kernel-artifacts"
 CUBE_PROXY_TEMPLATE_DIR="${SCRIPT_DIR}/cubeproxy"
 CUBE_COREDNS_TEMPLATE_DIR="${SCRIPT_DIR}/coredns"
 CUBE_SUPPORT_TEMPLATE_DIR="${SCRIPT_DIR}/support"
+CUBE_WEBUI_TEMPLATE_DIR="${SCRIPT_DIR}/webui"
 CUBE_PROXY_SOURCE_DIR="${ONE_CLICK_CUBE_PROXY_SOURCE_DIR:-${ROOT_DIR}/CubeProxy}"
+WEB_SOURCE_DIR="${ONE_CLICK_WEB_SOURCE_DIR:-${ROOT_DIR}/web}"
+WEB_DIST_OVERRIDE="${ONE_CLICK_WEB_DIST_DIR:-}"
 MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert}"
 CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
 KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/cube-kernel-scf.zip"
@@ -91,10 +96,31 @@ with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
 PY
 }
 
+build_web_dist() {
+  local output_dir="$1"
+  rm -rf "${output_dir}"
+  mkdir -p "${output_dir}"
+
+  if [[ -n "${WEB_DIST_OVERRIDE}" ]]; then
+    log "using prebuilt web dist: ${WEB_DIST_OVERRIDE}"
+    ensure_dir "${WEB_DIST_OVERRIDE}"
+    copy_dir_contents "${WEB_DIST_OVERRIDE}" "${output_dir}"
+  else
+    log "building web dashboard"
+    require_cmd npm
+    ensure_dir "${WEB_SOURCE_DIR}"
+    (cd "${WEB_SOURCE_DIR}" && npm ci && npm run build) >&2
+    copy_dir_contents "${WEB_SOURCE_DIR}/dist" "${output_dir}"
+  fi
+
+  ensure_file "${output_dir}/index.html"
+}
+
 ensure_kernel_vmlinux "${CUBE_KERNEL_VMLINUX}" "${RAW_ARTIFACTS_DIR}"
 ensure_dir "${CUBE_PROXY_TEMPLATE_DIR}"
 ensure_dir "${CUBE_COREDNS_TEMPLATE_DIR}"
 ensure_dir "${CUBE_SUPPORT_TEMPLATE_DIR}"
+ensure_dir "${CUBE_WEBUI_TEMPLATE_DIR}"
 ensure_dir "${CUBE_PROXY_SOURCE_DIR}"
 
 log "building runtime layout"
@@ -164,6 +190,8 @@ mkdir -p \
   "${PACKAGE_ROOT}/Cubelet/dynamicconf" \
   "${PACKAGE_ROOT}/cubeproxy" \
   "${PACKAGE_ROOT}/coredns" \
+  "${PACKAGE_ROOT}/webui" \
+  "${PACKAGE_ROOT}/webui/dist" \
   "${PACKAGE_ROOT}/support" \
   "${PACKAGE_ROOT}/support/bin" \
   "${PACKAGE_ROOT}/cube-vs/network" \
@@ -195,12 +223,14 @@ copy_dir_contents "${ROOT_DIR}/Cubelet/dynamicconf" "${PACKAGE_ROOT}/Cubelet/dyn
 
 copy_dir_contents "${CUBE_PROXY_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cubeproxy"
 copy_dir_contents "${CUBE_COREDNS_TEMPLATE_DIR}" "${PACKAGE_ROOT}/coredns"
+copy_dir_contents "${CUBE_WEBUI_TEMPLATE_DIR}" "${PACKAGE_ROOT}/webui"
 copy_dir_contents "${CUBE_PROXY_SOURCE_DIR}" "${PACKAGE_ROOT}/cubeproxy/build-context"
 copy_file "${CUBE_PROXY_TEMPLATE_DIR}/Dockerfile.oneclick" "${PACKAGE_ROOT}/cubeproxy/build-context/Dockerfile.oneclick"
 rm -f \
   "${PACKAGE_ROOT}/cubeproxy/Dockerfile.oneclick" \
   "${PACKAGE_ROOT}/cubeproxy/build-context/Dockerfile" \
   "${PACKAGE_ROOT}/cubeproxy/build-context/Makefile"
+build_web_dist "${PACKAGE_ROOT}/webui/dist"
 copy_dir_contents "${CUBE_SUPPORT_TEMPLATE_DIR}" "${PACKAGE_ROOT}/support"
 copy_file "${MKCERT_BIN_ASSET}" "${PACKAGE_ROOT}/support/bin/mkcert"
 

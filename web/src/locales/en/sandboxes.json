@@ -1,0 +1,24 @@
+{
+  "title": "Sandboxes",
+  "subtitle": "Live view of all running micro-VMs. Manage lifecycle without leaving the keyboard.",
+  "newSandbox": "New sandbox",
+  "filterPlaceholder": "Filter by id, template, client…",
+  "status": "Status",
+  "col": {
+    "state": "State",
+    "sandboxId": "Sandbox ID",
+    "template": "Template",
+    "cpu": "CPU",
+    "memory": "Memory",
+    "started": "Started",
+    "actions": "Actions"
+  },
+  "noMatch": "No sandboxes match your filter.",
+  "alias": "alias: {{alias}}",
+  "vcpu": "{{count}} vCPU",
+  "actions": {
+    "resume": "Resume",
+    "pause": "Pause",
+    "kill": "Kill"
+  }
+}

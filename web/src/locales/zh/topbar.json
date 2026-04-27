@@ -1,0 +1,12 @@
+{
+  "breadcrumb": "控制台",
+  "searchPlaceholder": "搜索沙箱、模板、节点…",
+  "mockOn": "模拟开启",
+  "mockOff": "模拟",
+  "mockOnTitle": "模拟数据已开启 — 点击禁用",
+  "mockOffTitle": "模拟数据已关闭 — 点击启用",
+  "notifications": "通知",
+  "language": "语言",
+  "english": "English",
+  "chinese": "简体中文"
+}

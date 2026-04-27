@@ -1,0 +1,12 @@
+{
+  "title": "模板",
+  "subtitle": "可复用的快照，作为每个沙箱的启动基础。",
+  "noTemplates": "暂无模板。请使用 CLI 或 SDK 发布模板。",
+  "col": {
+    "instance": "实例类型",
+    "created": "创建时间",
+    "version": "版本",
+    "image": "镜像"
+  },
+  "instanceDefault": "标准"
+}

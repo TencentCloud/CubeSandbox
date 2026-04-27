@@ -12,7 +12,7 @@
 /// Implemented on CubeMaster (see pkg/service/sandbox/types):
 ///   - GET    /cube/sandbox/info       get single sandbox detail (query: sandbox_id, instance_type)
 ///   - POST   /cube/sandbox/update     update sandbox (action: "pause" | "resume")
-/// New APIs required (❌ not yet on CubeMaster — see docs/cubemaster-api-requirements.md):
+/// New APIs required (❌ not yet on CubeMaster — pending implementation):
 ///   - POST   /cube/sandbox/timeout    set absolute TTL
 ///   - POST   /cube/sandbox/refresh    extend TTL by delta
 ///   - POST   /cube/sandbox/logs       fetch sandbox logs
@@ -26,6 +26,8 @@ use chrono::{DateTime, Utc};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+const TEMPLATE_ID_LABEL_KEY: &str = "cube.master.appsnapshot.template.id";
 
 // ─── Client ────────────────────────────────────────────────────────────────
 
@@ -97,7 +99,7 @@ impl CubeMasterClient {
     }
 
     // ── Sandbox: new APIs (require CubeMaster implementation) ─────────────
-    // See docs/cubemaster-api-requirements.md §1 for full specs.
+    // These APIs are not yet available on CubeMaster; structs are pre-defined for future integration.
 
     /// GET /cube/sandbox/info — fetch a single sandbox's real-time status.
     /// Query: sandbox_id, instance_type. See CubeMaster pkg/service/sandbox/types.
@@ -201,7 +203,151 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
+    // ── Template APIs ─────────────────────────────────────────────────────
+    // Maps to CubeMaster `/cube/template` (see
+    // CubeMaster/pkg/service/httpservice/cube/template.go).
+
+    /// GET /cube/template — list templates, or fetch a single one when
+    /// `template_id` is supplied. Pass `include_request=true` to also receive
+    /// the original create payload.
+    pub async fn list_templates(
+        &self,
+        template_id: Option<&str>,
+        include_request: bool,
+    ) -> Result<TemplateListResponse, CubeMasterError> {
+        let url = format!("{}/cube/template", self.base_url);
+        let mut req = self.inner.get(&url);
+        if let Some(tid) = template_id {
+            req = req.query(&[("template_id", tid)]);
+        }
+        if include_request {
+            req = req.query(&[("include_request", "true")]);
+        }
+        let resp = req.send().await.map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
     }
+
+    /// GET /cube/template?template_id=…&include_request=true — detail.
+    pub async fn get_template(
+        &self,
+        template_id: &str,
+    ) -> Result<TemplateResponse, CubeMasterError> {
+        let url = format!("{}/cube/template", self.base_url);
+        let resp = self
+            .inner
+            .get(&url)
+            .query(&[("template_id", template_id), ("include_request", "true")])
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// DELETE /cube/template — delete by id.
+    pub async fn delete_template(
+        &self,
+        req: &TemplateDeleteRequest,
+    ) -> Result<RetEnvelope, CubeMasterError> {
+        let url = format!("{}/cube/template", self.base_url);
+        let resp = self
+            .inner
+            .delete(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// POST /cube/template/from-image — create a template from an image.
+    pub async fn create_template_from_image(
+        &self,
+        req: &CreateTemplateFromImageReq,
+    ) -> Result<TemplateJobResponse, CubeMasterError> {
+        let url = format!("{}/cube/template/from-image", self.base_url);
+        let resp = self
+            .inner
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/template/from-image?job_id=… — poll a create-from-image job.
+    pub async fn get_template_from_image_job(
+        &self,
+        job_id: &str,
+    ) -> Result<TemplateJobResponse, CubeMasterError> {
+        let url = format!("{}/cube/template/from-image", self.base_url);
+        let resp = self
+            .inner
+            .get(&url)
+            .query(&[("job_id", job_id)])
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// POST /cube/template/redo — rebuild an existing template.
+    pub async fn redo_template(
+        &self,
+        req: &RedoTemplateReq,
+    ) -> Result<TemplateJobResponse, CubeMasterError> {
+        let url = format!("{}/cube/template/redo", self.base_url);
+        let resp = self
+            .inner
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/template/build/{build_id}/status — build status.
+    pub async fn get_template_build_status(
+        &self,
+        build_id: &str,
+    ) -> Result<TemplateBuildStatusResponse, CubeMasterError> {
+        let url = format!("{}/cube/template/build/{}/status", self.base_url, build_id);
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    // ── Node / Cluster APIs ──────────────────────────────────────────────
+
+    /// GET /internal/meta/nodes — list all nodes (capacity + health).
+    pub async fn list_nodes(&self) -> Result<NodesResponse, CubeMasterError> {
+        let url = format!("{}/internal/meta/nodes", self.base_url);
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /internal/meta/nodes/{id} — single node detail.
+    pub async fn get_node(&self, node_id: &str) -> Result<NodeResponse, CubeMasterError> {
+        let url = format!("{}/internal/meta/nodes/{}", self.base_url, node_id);
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+}
 
 // ─── Error ─────────────────────────────────────────────────────────────────
 
@@ -220,18 +366,24 @@ pub enum CubeMasterError {
 impl CubeMasterError {
     /// True when CubeMaster returned 404 / 130404 (not found).
     pub fn is_not_found(&self) -> bool {
-        match self {
-            Self::Api { ret_code, .. } => *ret_code == 130404,
-            _ => false,
-        }
+        matches!(
+            self,
+            Self::Api {
+                ret_code: 130404,
+                ..
+            }
+        )
     }
 
     /// True when CubeMaster returned 130409 (conflict / wrong state).
     pub fn is_conflict(&self) -> bool {
-        match self {
-            Self::Api { ret_code, .. } => *ret_code == 130409,
-            _ => false,
-        }
+        matches!(
+            self,
+            Self::Api {
+                ret_code: 130409,
+                ..
+            }
+        )
     }
 
     /// True when CubeMaster doesn't have the endpoint yet (HTTP 404 on the path).
@@ -319,7 +471,10 @@ pub struct CreateSandboxRequest {
 #[derive(Debug, Serialize, Clone, Default)]
 pub struct CubeVSContext {
     /// Allow internet (public) access. Maps to CubeMaster allowInternetAccess.
-    #[serde(rename = "allowInternetAccess", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "allowInternetAccess",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub allow_internet_access: Option<bool>,
 
     /// Allowed outbound CIDRs whitelist.
@@ -569,9 +724,9 @@ pub struct SandboxInfo {
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub end_at: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, alias = "cpuCount")]
     pub cpu_count: i32,
-    #[serde(default)]
+    #[serde(default, alias = "memoryMB")]
     pub memory_mb: i32,
     #[serde(default)]
     pub template_id: String,
@@ -602,6 +757,8 @@ pub struct GetSandboxDataItem {
     #[serde(default)]
     pub status: i32,
     #[serde(default)]
+    pub host_id: String,
+    #[serde(default)]
     pub template_id: String,
     #[serde(default)]
     pub annotations: HashMap<String, String>,
@@ -621,11 +778,19 @@ pub struct GetSandboxContainerItem {
     #[serde(default)]
     pub container_id: String,
     #[serde(default)]
+    pub status: i32,
+    #[serde(default)]
     pub image: String,
+    #[serde(default)]
+    pub create_at: i64,
     #[serde(default)]
     pub cpu: String,
     #[serde(default)]
     pub mem: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub pause_at: i64,
 }
 
 /// Normalized sandbox detail used by handlers (built from GetSandboxDataItem).
@@ -660,11 +825,31 @@ fn parse_mem_mb(s: &str) -> i32 {
     s.parse::<i32>().unwrap_or(0)
 }
 
+fn datetime_from_unix_nanos(value: i64) -> Option<DateTime<Utc>> {
+    if value <= 0 {
+        return None;
+    }
+
+    let seconds = value.div_euclid(1_000_000_000);
+    let nanos = value.rem_euclid(1_000_000_000) as u32;
+    DateTime::<Utc>::from_timestamp(seconds, nanos)
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum SandboxStatusValue {
     Text(String),
     Number(i32),
+}
+
+fn sandbox_status_text_from_code(number: i32) -> &'static str {
+    match number {
+        1 => "running",
+        2 => "paused",
+        3 => "stopped",
+        4 => "error",
+        _ => "unknown",
+    }
 }
 
 fn deserialize_sandbox_status<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -674,28 +859,25 @@ where
     let value = Option::<SandboxStatusValue>::deserialize(deserializer)?;
     Ok(match value {
         Some(SandboxStatusValue::Text(text)) => normalize_sandbox_status_text(&text),
-        Some(SandboxStatusValue::Number(number)) => match number {
-            1 => "running".to_string(),
-            2 => "paused".to_string(),
-            3 => "stopped".to_string(),
-            4 => "error".to_string(),
-            _ => "unknown".to_string(),
-        },
+        Some(SandboxStatusValue::Number(number)) => {
+            sandbox_status_text_from_code(number).to_string()
+        }
         None => String::new(),
     })
 }
 
 fn normalize_sandbox_status_text(raw: &str) -> String {
     match raw.trim().to_lowercase().as_str() {
-        "1" | "running" => "running".to_string(),
-        "2" | "paused" => "paused".to_string(),
-        "3" | "stopped" => "stopped".to_string(),
-        "4" | "error" => "error".to_string(),
+        "1" => sandbox_status_text_from_code(1).to_string(),
+        "2" => sandbox_status_text_from_code(2).to_string(),
+        "3" => sandbox_status_text_from_code(3).to_string(),
+        "4" => sandbox_status_text_from_code(4).to_string(),
+        "running" | "paused" | "stopped" | "error" => raw.trim().to_lowercase(),
         other => other.to_string(),
     }
 }
 
-fn extract_template_id(
+pub(crate) fn extract_template_id(
     explicit_template_id: &str,
     annotations: &HashMap<String, String>,
     labels: &HashMap<String, String>,
@@ -704,9 +886,9 @@ fn extract_template_id(
         return explicit_template_id.to_string();
     }
     annotations
-        .get("cube.master.appsnapshot.template.id")
+        .get(TEMPLATE_ID_LABEL_KEY)
         .cloned()
-        .or_else(|| labels.get("cube.master.appsnapshot.template.id").cloned())
+        .or_else(|| labels.get(TEMPLATE_ID_LABEL_KEY).cloned())
         .unwrap_or_default()
 }
 
@@ -714,29 +896,32 @@ impl GetSandboxResponse {
     /// Take the first item from `data` and convert to SandboxDetail. Returns None if data is empty.
     pub fn into_first_sandbox(self, instance_type: &str) -> Option<SandboxDetail> {
         let item = self.data.into_iter().next()?;
-        let (cpu_count, memory_mb) = item
+        let primary_container = item
             .containers
-            .first()
+            .iter()
+            .find(|c| c.kind == "sandbox" || c.container_id == item.sandbox_id)
+            .or_else(|| item.containers.first());
+        let (cpu_count, memory_mb) = primary_container
             .map(|c| (parse_cpu_millicores(&c.cpu), parse_mem_mb(&c.mem)))
             .unwrap_or((0, 0));
         let status = match item.status {
-            0 => SandboxStatus::Unknown,   // CONTAINER_CREATED
-            1 => SandboxStatus::Running,   // CONTAINER_RUNNING
-            2 => SandboxStatus::Stopped,   // CONTAINER_EXITED
-            3 => SandboxStatus::Unknown,   // CONTAINER_UNKNOWN
-            4 => SandboxStatus::Pausing,   // CONTAINER_PAUSING
-            5 => SandboxStatus::Paused,    // CONTAINER_PAUSED
+            0 => SandboxStatus::Unknown, // CONTAINER_CREATED
+            1 => SandboxStatus::Running, // CONTAINER_RUNNING
+            2 => SandboxStatus::Stopped, // CONTAINER_EXITED
+            3 => SandboxStatus::Unknown, // CONTAINER_UNKNOWN
+            4 => SandboxStatus::Pausing, // CONTAINER_PAUSING
+            5 => SandboxStatus::Paused,  // CONTAINER_PAUSED
             _ => SandboxStatus::Unknown,
         };
         let template_id = extract_template_id(&item.template_id, &item.annotations, &item.labels);
         let sid = item.sandbox_id;
         Some(SandboxDetail {
             sandbox_id: sid.clone(),
-            host_id: sid,
+            host_id: item.host_id,
             instance_type: instance_type.to_string(),
             status,
             template_id,
-            started_at: None,
+            started_at: primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at)),
             end_at: None,
             cpu_count,
             memory_mb,
@@ -778,7 +963,7 @@ pub struct SandboxUpdateResponse {
 }
 
 // ─── Set sandbox timeout (absolute) ───────────────────────────────────────
-// ❌ New API — see docs/cubemaster-api-requirements.md §1.4
+// ❌ New API — not yet implemented on CubeMaster
 
 #[derive(Debug, Serialize)]
 pub struct SandboxTimeoutRequest {
@@ -804,7 +989,7 @@ pub struct SandboxTimeoutResponse {
 }
 
 // ─── Refresh sandbox TTL (relative extend) ────────────────────────────────
-// ❌ New API — see docs/cubemaster-api-requirements.md §1.5
+// ❌ New API — not yet implemented on CubeMaster
 
 #[derive(Debug, Serialize)]
 pub struct SandboxRefreshRequest {
@@ -830,7 +1015,7 @@ pub struct SandboxRefreshResponse {
 }
 
 // ─── Sandbox logs ──────────────────────────────────────────────────────────
-// ❌ New API — see docs/cubemaster-api-requirements.md §1.6
+// ❌ New API — not yet implemented on CubeMaster
 
 #[derive(Debug, Serialize)]
 pub struct SandboxLogsRequest {
@@ -871,7 +1056,7 @@ pub struct SandboxLogLine {
 }
 
 // ─── Sandbox snapshot ──────────────────────────────────────────────────────
-// ❌ New API — see docs/cubemaster-api-requirements.md §1.7
+// ❌ New API — not yet implemented on CubeMaster
 
 #[derive(Debug, Serialize)]
 pub struct SandboxSnapshotRequest {
@@ -950,4 +1135,363 @@ async fn parse_response<T: for<'de> Deserialize<'de>>(
 
     serde_json::from_str::<T>(&body)
         .map_err(|e| CubeMasterError::Deserialize(format!("{e}: body={body}")))
+}
+
+// ─── Templates ─────────────────────────────────────────────────────────────
+// Maps CubeMaster /cube/template* responses.
+
+/// Summary entry returned by GET /cube/template (list mode).
+#[derive(Debug, Deserialize, Clone)]
+pub struct TemplateSummaryItem {
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub instance_type: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub last_error: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub image_info: String,
+}
+
+/// Envelope for GET /cube/template (list mode).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct TemplateListResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    #[serde(default)]
+    pub data: Vec<TemplateSummaryItem>,
+    pub ret: RetCode,
+}
+
+/// Envelope for GET /cube/template?template_id=... (detail) and
+/// POST /cube/template (create).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct TemplateResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub instance_type: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub last_error: String,
+    /// Opaque replica list (node placement). Left as raw JSON to avoid
+    /// coupling to CubeMaster-internal types.
+    #[serde(default)]
+    pub replicas: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub create_request: Option<serde_json::Value>,
+}
+
+/// Body for DELETE /cube/template.
+#[derive(Debug, Serialize)]
+pub struct TemplateDeleteRequest {
+    #[serde(rename = "RequestID", alias = "requestID")]
+    pub request_id: String,
+    pub template_id: String,
+    pub instance_type: String,
+    #[serde(default)]
+    pub sync: bool,
+}
+
+/// Bare envelope used when CubeMaster only returns `ret`.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct RetEnvelope {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+}
+
+/// Body for POST /cube/template/from-image. Most fields are passed through
+/// transparently as JSON to keep this client decoupled from CubeMaster's
+/// internal type system.
+#[derive(Debug, Serialize)]
+pub struct CreateTemplateFromImageReq {
+    #[serde(rename = "requestID", alias = "RequestID")]
+    pub request_id: String,
+    pub instance_type: String,
+    pub template_id: String,
+    /// Container image reference (e.g. "registry.example.com/foo:tag").
+    pub image: String,
+    /// Optional additional fields forwarded as-is to CubeMaster.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Body for POST /cube/template/redo (rebuild).
+#[derive(Debug, Serialize)]
+pub struct RedoTemplateReq {
+    #[serde(rename = "requestID", alias = "RequestID")]
+    pub request_id: String,
+    pub template_id: String,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Envelope for template-build jobs (from-image / redo / poll).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct TemplateJobResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub job: Option<TemplateJob>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct TemplateJob {
+    #[serde(default)]
+    pub job_id: String,
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub progress: i32,
+    #[serde(default)]
+    pub error_message: String,
+    #[serde(default)]
+    pub attempt_no: i32,
+    #[serde(default)]
+    pub retry_of_job_id: String,
+}
+
+/// Envelope for GET /cube/template/build/{id}/status.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct TemplateBuildStatusResponse {
+    pub ret: RetCode,
+    #[serde(default)]
+    pub build_id: String,
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub attempt_no: i32,
+    #[serde(default)]
+    pub retry_of_job_id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub progress: i32,
+    #[serde(default)]
+    pub message: String,
+}
+
+// ─── Nodes ─────────────────────────────────────────────────────────────────
+// Maps CubeMaster /internal/meta/nodes responses.
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct NodeResources {
+    #[serde(default)]
+    pub milli_cpu: i64,
+    #[serde(default)]
+    pub memory_mb: i64,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct NodeCondition {
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(rename = "lastHeartbeatTime", default)]
+    pub last_heartbeat_time: Option<DateTime<Utc>>,
+    #[serde(rename = "lastTransitionTime", default)]
+    pub last_transition_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct NodeImage {
+    #[serde(default)]
+    pub names: Vec<String>,
+    #[serde(default)]
+    pub size_bytes: i64,
+    #[serde(default)]
+    pub namespace: String,
+    #[serde(default)]
+    pub media_type: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct LocalTemplate {
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub media: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub namespace: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct NodeSnapshot {
+    #[serde(default)]
+    pub node_id: String,
+    #[serde(default)]
+    pub host_ip: String,
+    #[serde(default)]
+    pub grpc_port: i32,
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub capacity: NodeResources,
+    #[serde(default)]
+    pub allocatable: NodeResources,
+    #[serde(default)]
+    pub instance_type: String,
+    #[serde(default)]
+    pub cluster_label: String,
+    #[serde(default)]
+    pub quota_cpu: i64,
+    #[serde(default)]
+    pub quota_mem_mb: i64,
+    #[serde(default)]
+    pub create_concurrent_num: i64,
+    #[serde(default)]
+    pub max_mvm_num: i64,
+    #[serde(default)]
+    pub conditions: Vec<NodeCondition>,
+    #[serde(default)]
+    pub images: Vec<NodeImage>,
+    #[serde(default)]
+    pub local_templates: Vec<LocalTemplate>,
+    #[serde(default)]
+    pub heartbeat_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub healthy: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct NodesResponse {
+    #[serde(rename = "requestID", alias = "RequestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub data: Vec<NodeSnapshot>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct NodeResponse {
+    #[serde(rename = "requestID", alias = "RequestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub data: Option<NodeSnapshot>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GetSandboxResponse, SandboxInfo};
+
+    #[test]
+    fn sandbox_info_deserializes_resource_fields_from_list_payload() {
+        let payload = serde_json::json!({
+            "sandbox_id": "sb-1",
+            "host_id": "host-1",
+            "status": 1,
+            "cpu_count": 2,
+            "memory_mb": 2048,
+            "template_id": "tpl-1",
+            "labels": { "user": "alice" }
+        });
+
+        let info: SandboxInfo =
+            serde_json::from_value(payload).expect("sandbox info should deserialize");
+        assert_eq!(info.cpu_count, 2);
+        assert_eq!(info.memory_mb, 2048);
+        assert_eq!(info.template_id, "tpl-1");
+    }
+
+    #[test]
+    fn sandbox_info_accepts_camel_case_resource_aliases() {
+        let payload = serde_json::json!({
+            "sandbox_id": "sb-2",
+            "cpuCount": 4,
+            "memoryMB": 4096
+        });
+
+        let info: SandboxInfo =
+            serde_json::from_value(payload).expect("sandbox info should deserialize aliases");
+        assert_eq!(info.cpu_count, 4);
+        assert_eq!(info.memory_mb, 4096);
+    }
+
+    #[test]
+    fn get_sandbox_prefers_sandbox_container_timestamps_and_host() {
+        let payload = serde_json::json!({
+            "requestID": "req-1",
+            "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "data": [{
+                "sandbox_id": "sb-1",
+                "host_id": "host-1",
+                "status": 1,
+                "template_id": "tpl-1",
+                "containers": [
+                    {
+                        "container_id": "workload-1",
+                        "type": "workload",
+                        "create_at": 1713953785140309977i64,
+                        "cpu": "500m",
+                        "mem": "512Mi"
+                    },
+                    {
+                        "container_id": "sb-1",
+                        "type": "sandbox",
+                        "create_at": 1713953785140309977i64,
+                        "cpu": "2000m",
+                        "mem": "2048Mi"
+                    }
+                ]
+            }]
+        });
+
+        let response: GetSandboxResponse =
+            serde_json::from_value(payload).expect("response should deserialize");
+        let detail = response
+            .into_first_sandbox("cubebox")
+            .expect("detail should exist");
+
+        assert_eq!(detail.host_id, "host-1");
+        assert_eq!(detail.cpu_count, 2);
+        assert_eq!(detail.memory_mb, 2048);
+        assert_eq!(
+            detail
+                .started_at
+                .expect("start time should exist")
+                .timestamp_nanos_opt(),
+            Some(1713953785140309977)
+        );
+    }
 }

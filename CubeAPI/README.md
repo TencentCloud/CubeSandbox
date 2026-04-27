@@ -40,8 +40,6 @@ The following Sandbox core APIs are **fully E2B-compatible** and can be used dir
 
 **Legend:** ✅ Fully implemented | ❌ Route not registered or depends on pending CubeMaster APIs
 
-> See [docs/cubemaster-api-requirements.md](docs/cubemaster-api-requirements.md) for pending CubeMaster API details.
-
 ### Cube Extensions
 
 | Feature | Description |
@@ -68,8 +66,10 @@ cargo build --release
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BIND` | `0.0.0.0:3000` | Listen address |
+| `CUBE_API_BIND` | `0.0.0.0:3000` | Listen address |
 | `LOG_LEVEL` | `info` | Log level |
+
+CubeAPI also exposes dashboard-oriented routes under `/cubeapi/v1`. The one-click WebUI is served by a separate nginx container on port `12088`; that nginx instance serves the packaged static dashboard and proxies same-origin `/cubeapi` requests back to the host CubeAPI through Docker `host-gateway`.
 
 ---
 

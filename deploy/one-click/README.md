@@ -10,6 +10,7 @@ This directory is used to build and deliver the single-machine one-click release
 - `config-cube.toml`: Default one-click runtime configuration template.
 - `support/`: `docker compose` templates for MySQL/Redis, installed to `/usr/local/services/cubetoolbox/support/` on the target machine; `support/bin/mkcert` is the bundled mkcert binary.
 - `cubeproxy/`: Compose template, `global.conf` template, CoreDNS template, and wrapper Dockerfile for `cube proxy`.
+- `webui/`: Nginx runtime files for the dashboard, installed to `/usr/local/services/cubetoolbox/webui/` on the target machine.
 - `install.sh`: Entry point for installing and starting the control node on the target machine (defaults to all-in-one mode).
 - `install-compute.sh`: Entry point for installing a compute node on the target machine.
 - `down.sh`: Stops the services and dependencies installed by one-click.
@@ -63,7 +64,7 @@ This entry point will:
 - Compile `cubemaster`, `cubemastercli`, `cubelet`, `cubecli`, `cube-api`, `network-agent`, `cube-agent`, `containerd-shim-cube-rs`, and `cube-runtime` inside a container using the root-level builder image.
 - Run `go mod download` for `CubeMaster` and `Cubelet` inside the builder. The first build will fetch Go modules online; subsequent builds reuse the module cache under the builder's HOME directory.
 - Place the pre-built artifacts in `deploy/one-click/.work/prebuilt/`.
-- Return to the host machine and call `build-release-bundle.sh` to continue with guest image generation and final packaging.
+- Return to the host machine and call `build-release-bundle.sh` to build the WebUI static assets, continue with guest image generation, and finish final packaging.
 
 If the build machine already has a complete toolchain, or you want to specify `ONE_CLICK_*_BIN` manually, you can invoke the low-level entry point directly:
 
@@ -72,6 +73,12 @@ If the build machine already has a complete toolchain, or you want to specify `O
 ```
 
 Regardless of which entry point is used, `CubeMaster` / `Cubelet` no longer depend on the `vendor/` directory in the repository; dependencies are resolved at build time via Go modules.
+
+The WebUI build runs on the build machine during final packaging and requires `npm`. The target machine does not build a WebUI image; it mounts the packaged `webui/dist` directory into a standard nginx container. To reuse an already built dashboard, set:
+
+```bash
+export ONE_CLICK_WEB_DIST_DIR=/abs/path/to/web/dist
+```
 
 ### Go Modules Dependency Download
 
@@ -94,6 +101,7 @@ The release package contains:
 - Locally built `cube-image/cube-guest-image-cpu.img`
 - `cubeproxy/` directory and its build context
 - `support/` directory and its compose templates
+- `webui/` directory, its compose template, nginx configuration, and built `web/dist` assets
 - `cube-kernel-scf.zip` packaged on the fly from `vmlinux`
 - `install.sh` / `install-compute.sh` / `down.sh` / `smoke.sh` ready to run on the target machine
 
@@ -108,8 +116,9 @@ One-click does not create an extra global `configs/` layer on the target machine
 - `CubeAPI/bin/cube-api` → `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` → `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` → `/usr/local/services/cubetoolbox/cubeproxy/`
+- `webui/` → `/usr/local/services/cubetoolbox/webui/`
 
-`Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is. At runtime, `network-agent` preferentially reads the network plugin configuration from `Cubelet/config/config.toml` via `--cubelet-config` to stay consistent with `Cubelet`'s network parameters. `cube-api` reads environment variables directly from `.one-click.env` on startup, listening on `0.0.0.0:3000` by default and forwarding to the local `cubemaster`. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and managed by the local `docker compose` on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy` and built and started locally via `docker compose build && up`.
+`Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is. At runtime, `network-agent` preferentially reads the network plugin configuration from `Cubelet/config/config.toml` via `--cubelet-config` to stay consistent with `Cubelet`'s network parameters. `cube-api` reads environment variables directly from `.one-click.env` on startup, listening on `0.0.0.0:3000` by default and forwarding to the local `cubemaster`. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and managed by the local `docker compose` on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy` and built and started locally via `docker compose build && up`. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway`.
 
 ## Target Machine Installation
 
@@ -129,6 +138,12 @@ Common commands:
 ```bash
 sudo ./smoke.sh
 sudo ./down.sh
+```
+
+After a control-node installation, open the dashboard at:
+
+```bash
+http://<target-host>:12088
 ```
 
 Before installation, you can explicitly set the current node's internal IP in `.env`. If not set, `install.sh` will attempt to auto-detect the IPv4 address of `eth0`:
@@ -205,6 +220,10 @@ Other common parameters:
 CUBE_PROXY_HOST_PORT=443
 CUBE_PROXY_CERT_DIR="${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
+WEB_UI_ENABLE=1
+WEB_UI_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+WEB_UI_HOST_PORT=12088
+WEB_UI_UPSTREAM=http://host.docker.internal:3000
 CUBE_API_BIND=0.0.0.0:3000
 CUBE_API_HEALTH_ADDR=127.0.0.1:3000
 CUBE_API_SANDBOX_DOMAIN=cube.app
@@ -220,8 +239,9 @@ During installation, the following steps are performed:
 - A `docker-compose.yaml` is generated under `/usr/local/services/cubetoolbox/cubeproxy/`. The host's `CUBE_PROXY_CERT_DIR` is mounted read-only into the container at `/usr/local/openresty/nginx/certs/`. `ALPINE_MIRROR_URL` / `PIP_INDEX_URL` are passed as build args to `Dockerfile.oneclick` for a local `cube proxy` image build.
 - A `CoreDNS` container is started. If `resolvectl` is available, one-click creates a dedicated dummy link (default `cube-dns0`) with a local address, binds CoreDNS to `169.254.254.53` on that link by default, and routes `cube.app` through the link without affecting the host's default public DNS path. If `resolvectl` is unavailable on the target machine, the installer falls back to `NetworkManager + dnsmasq`, continuing to use `127.0.0.54` by default.
 - Host processes `network-agent`, `cubemaster`, `cube-api`, and `cubelet` are started, and `cube-api /health` is verified in `quickcheck.sh`.
+- A standard WebUI nginx container is started under `/usr/local/services/cubetoolbox/webui/`. It mounts `webui/dist` as read-only static content, publishes `WEB_UI_HOST_PORT` (`12088` by default), maps `host.docker.internal` to Docker `host-gateway`, and verifies `/cubeapi/v1/health` through the nginx reverse proxy.
 
-Stopping one-click will simultaneously stop MySQL/Redis under `/usr/local/services/cubetoolbox/support`, `cube proxy` / `CoreDNS`, and the host processes `network-agent` / `cubemaster` / `cube-api` / `cubelet`, and will roll back the host DNS routing configuration for `cube.app`.
+Stopping one-click will simultaneously stop MySQL/Redis under `/usr/local/services/cubetoolbox/support`, WebUI, `cube proxy` / `CoreDNS`, and the host processes `network-agent` / `cubemaster` / `cube-api` / `cubelet`, and will roll back the host DNS routing configuration for `cube.app`.
 
 After deployment, to point the E2B official SDK to the one-click node, set the following on the client side:
 

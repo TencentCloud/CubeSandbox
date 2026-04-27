@@ -1,0 +1,8 @@
+{
+  "label": "命令面板",
+  "placeholder": "搜索或输入命令…",
+  "noResults": "无结果。",
+  "groupNavigate": "导航",
+  "groupActions": "操作",
+  "createSandbox": "创建新沙箱"
+}

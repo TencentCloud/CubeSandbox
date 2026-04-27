@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+
 BUILDER_IMAGE ?= cube-sandbox-builder:latest
 BUILDER_DOCKERFILE ?= docker/Dockerfile.builder
 BUILDER_HOME ?= $(HOME)/.cache/cube-sandbox-builder
@@ -10,13 +13,14 @@ GID := $(shell id -g)
 OUTPUT_DIR ?= $(ROOT_DIR)/_output/bin
 RELEASE_DIR ?= $(ROOT_DIR)/_output/release
 MANUAL_DEPLOY_SCRIPT ?= $(ROOT_DIR)/deploy/one-click/deploy-manual.sh
+WEB_DIR ?= $(ROOT_DIR)/web
 
 DOCKER_GIT_CRED =
 ifneq ($(wildcard $(HOME)/.git-credentials),)
 DOCKER_GIT_CRED += -v $(TMP_GIT_CREDENTIALS):$(BUILDER_CONTAINER_HOME)/.git-credentials
 endif
 
-.PHONY: help builder-image builder-shell builder-run prepare-builder-home prepare-tmp-git-credentials all cubemaster cubelet network-agent agent cubeapi shim manual-release
+.PHONY: help builder-image builder-shell builder-run prepare-builder-home prepare-tmp-git-credentials all cubemaster cubelet network-agent agent cubeapi shim manual-release web-install web-dev web-build web-preview web-lint web-api-sync web-sync-dev-env
 
 help:
 	@printf "Targets:\n"
@@ -31,6 +35,13 @@ help:
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
 	@printf "  all           Build cubemaster, cubelet and network-agent in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
+	@printf "  web-install   Install WebUI npm dependencies\n"
+	@printf "  web-dev       Start WebUI Vite dev server\n"
+	@printf "  web-build     Build WebUI static assets\n"
+	@printf "  web-preview   Preview built WebUI assets\n"
+	@printf "  web-lint      Run WebUI lint checks\n"
+	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
+	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
 	@printf "\nNotes:\n"
 	@printf "  - builder-shell forwards ~/.git-credentials when present\n"
 	@printf "  - builder-run reuses the same mounted workspace and persisted HOME\n"
@@ -122,3 +133,24 @@ manual-release: all
 		"$(RELEASE_DIR)/$${PKG_NAME}" \
 		"$(RELEASE_DIR)/$${PKG_NAME}.sha256" \
 		"$(RELEASE_DIR)/deploy-manual.sh"
+
+web-install:
+	cd "$(WEB_DIR)" && npm install
+
+web-dev:
+	cd "$(WEB_DIR)" && npm run dev
+
+web-build:
+	cd "$(WEB_DIR)" && npm run build
+
+web-preview:
+	cd "$(WEB_DIR)" && npm run preview
+
+web-lint:
+	cd "$(WEB_DIR)" && npm run lint
+
+web-api-sync:
+	cd "$(WEB_DIR)" && npm run api:sync
+
+web-sync-dev-env:
+	"$(ROOT_DIR)/dev-env/internal/sync_web_to_vm.sh"

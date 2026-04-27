@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,3 +43,4 @@ if [[ "${METRIC_LOOP}" == "1" ]]; then
 fi
 
 "${SCRIPT_DIR}/up.sh"
+"${SCRIPT_DIR}/up-webui.sh"

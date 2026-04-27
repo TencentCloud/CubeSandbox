@@ -4,6 +4,7 @@
 
 use crate::cubemaster::CubeMasterClient;
 use crate::logging::ArcLogger;
+use crate::services::AppServices;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -19,8 +20,8 @@ pub struct AppState {
     /// Shared reqwest connection pool.
     pub http_client: reqwest::Client,
 
-    /// CubeMaster thin client.
-    pub cubemaster: CubeMasterClient,
+    /// Shared business services built on top of CubeMaster.
+    pub services: AppServices,
 
     /// Structured event logger (fan-out to all configured backends).
     pub logger: ArcLogger,
@@ -45,11 +46,12 @@ impl AppState {
             .expect("failed to build HTTP client");
 
         let cubemaster = CubeMasterClient::new(config.cubemaster_url.clone(), http_client.clone());
+        let services = AppServices::new(&config, cubemaster.clone());
 
         Self {
             rate_limiter,
             http_client,
-            cubemaster,
+            services,
             logger,
             config: Arc::new(config),
         }

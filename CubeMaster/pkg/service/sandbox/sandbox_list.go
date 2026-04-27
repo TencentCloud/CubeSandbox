@@ -7,6 +7,8 @@ package sandbox
 import (
 	"context"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -179,6 +181,8 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 					Status:      int32(container.GetState()),
 					HostIP:      tmpNode.HostIP(),
 					TemplateID:  templateID,
+					CpuCount:    parseCPUCount(container.GetResources().GetCpu()),
+					MemoryMB:    parseMemoryMB(container.GetResources().GetMem()),
 					Annotations: buildTemplateAnnotations(templateID),
 					Labels:      labels,
 					NameSpace:   sandbox.GetNamespace(),
@@ -192,16 +196,57 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 	}
 }
 
-func matchFilter(lables map[string]string) bool {
+func matchFilter(labels map[string]string) bool {
 	tmpFilter := config.GetConfig().Common.ListFilterOutLables
-	if len(tmpFilter) == 0 || len(lables) == 0 {
+	if len(tmpFilter) == 0 || len(labels) == 0 {
 		return false
 	}
 
 	for k, v := range tmpFilter {
-		if m, ok := lables[k]; ok && m == v {
+		if m, ok := labels[k]; ok && m == v {
 			return true
 		}
 	}
 	return false
+}
+
+func parseInt32(raw string) int32 {
+	value, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return int32(value)
+}
+
+func parseCPUCount(raw string) int32 {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+	if strings.HasSuffix(value, "m") {
+		return parseInt32(strings.TrimSuffix(value, "m")) / 1000
+	}
+	return parseInt32(value)
+}
+
+func parseMemoryMB(raw string) int32 {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+	lower := strings.ToLower(value)
+	switch {
+	case strings.HasSuffix(lower, "gi"):
+		return parseInt32(strings.TrimSuffix(lower, "gi")) * 1024
+	case strings.HasSuffix(lower, "g"):
+		return parseInt32(strings.TrimSuffix(lower, "g")) * 1024
+	case strings.HasSuffix(lower, "mi"):
+		return parseInt32(strings.TrimSuffix(lower, "mi"))
+	case strings.HasSuffix(lower, "mb"):
+		return parseInt32(strings.TrimSuffix(lower, "mb"))
+	case strings.HasSuffix(lower, "m"):
+		return parseInt32(strings.TrimSuffix(lower, "m"))
+	default:
+		return parseInt32(lower)
+	}
 }

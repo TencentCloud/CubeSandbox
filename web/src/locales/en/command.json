@@ -1,0 +1,8 @@
+{
+  "label": "Command palette",
+  "placeholder": "Search or type a command…",
+  "noResults": "No results.",
+  "groupNavigate": "Navigate",
+  "groupActions": "Actions",
+  "createSandbox": "Create new sandbox"
+}

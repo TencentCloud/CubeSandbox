@@ -14,6 +14,7 @@ SSH      : 127.0.0.1:10022 -> guest:22
 Cube API : 127.0.0.1:13000 -> guest:3000
 Cube HTTP: 127.0.0.1:11080 -> guest:80
 Cube TLS : 127.0.0.1:11443 -> guest:443
+WebUI    : 127.0.0.1:12088 -> guest:12088
 ```
 
 适用场景：
@@ -147,6 +148,9 @@ systemctl restart cube-sandbox-oneclick.service
 
 # 推任意文件到 guest
 ./sync_to_vm.sh files --remote-dir /tmp ./configs/foo.toml
+
+# 构建并部署 WebUI 到 guest
+make -C .. web-sync-dev-env
 ```
 
 旧二进制仍然会在 guest 里保留成 `*.bak`，但脚本输出不再主动教你怎么
@@ -187,7 +191,7 @@ bash /tmp/deploy-manual.sh /tmp/cube-manual-update-*.tar.gz
 | 虚机内没有 `/dev/kvm` | 宿主机未开启 nested KVM | 在宿主机启用 nested virtualization，再重启虚机 |
 | `./login.sh` 连不上 | 虚机还没启动，或宿主机 10022 端口被占用 | 确认 `./run_vm.sh` 还在运行，或换 `SSH_PORT` |
 | 虚机里 `df -h /` 还是很小 | `prepare_image.sh` 没走完自动扩容 | 查看 `.workdir/qemu-serial.log`，然后把 `internal/grow_rootfs.sh` scp 进去手动跑一次 |
-| 宿主机 13000 / 11080 / 11443 端口被占 | 本机有别的服务在用这些 dev-env 转发端口 | 用 `CUBE_API_PORT=23000 CUBE_PROXY_HTTP_PORT=21080 CUBE_PROXY_HTTPS_PORT=21443 ./run_vm.sh` |
+| 宿主机 13000 / 11080 / 11443 / 12088 端口被占 | 本机有别的服务在用这些 dev-env 转发端口 | 用 `CUBE_API_PORT=23000 CUBE_PROXY_HTTP_PORT=21080 CUBE_PROXY_HTTPS_PORT=21443 WEB_UI_PORT=22088 ./run_vm.sh` |
 | 虚机重启后 cube 组件没了 | 还没开启 autostart | 跑一次 `./cube-autostart.sh` |
 | 重启后新二进制不好使 | 新构建有问题，或你手动跑 `quickcheck` 失败了 | 看 guest 里 `/data/log/`，必要时把对应的 `*.bak` 手动移回去，再重新 `systemctl restart` |
 
@@ -236,6 +240,7 @@ dev-env/
 | `CUBE_API_PORT` | `13000` | 宿主机 → guest Cube API。 |
 | `CUBE_PROXY_HTTP_PORT` | `11080` | 宿主机 → guest CubeProxy HTTP（`guest:80`）。 |
 | `CUBE_PROXY_HTTPS_PORT` | `11443` | 宿主机 → guest CubeProxy HTTPS（`guest:443`）。 |
+| `WEB_UI_PORT` | `12088` | 宿主机 → guest WebUI HTTP（`guest:12088`）。 |
 | `REQUIRE_NESTED_KVM` | `1` | 宿主机未开 nested KVM 时拒绝启动。`0` 跳过（沙箱跑不起来）。 |
 
 #### `login.sh`

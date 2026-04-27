@@ -1,0 +1,12 @@
+{
+  "title": "Templates",
+  "subtitle": "Reusable snapshots used as the starting point of every sandbox.",
+  "noTemplates": "No templates yet. Use the CLI or SDK to publish a template.",
+  "col": {
+    "instance": "Instance",
+    "created": "Created",
+    "version": "version",
+    "image": "image"
+  },
+  "instanceDefault": "standard"
+}

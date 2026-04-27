@@ -1,0 +1,24 @@
+{
+  "title": "沙箱",
+  "subtitle": "所有运行中微虚拟机的实时视图，无需离开键盘即可管理生命周期。",
+  "newSandbox": "新建沙箱",
+  "filterPlaceholder": "按 ID、模板、客户端筛选…",
+  "status": "状态",
+  "col": {
+    "state": "状态",
+    "sandboxId": "沙箱 ID",
+    "template": "模板",
+    "cpu": "CPU",
+    "memory": "内存",
+    "started": "启动时间",
+    "actions": "操作"
+  },
+  "noMatch": "没有沙箱匹配当前筛选条件。",
+  "alias": "别名: {{alias}}",
+  "vcpu": "{{count}} vCPU",
+  "actions": {
+    "resume": "恢复",
+    "pause": "暂停",
+    "kill": "终止"
+  }
+}

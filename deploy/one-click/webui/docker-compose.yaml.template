@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+
+services:
+  webui:
+    image: __WEB_UI_IMAGE__
+    container_name: __WEB_UI_CONTAINER_NAME__
+    restart: unless-stopped
+    ports:
+      - "__WEB_UI_HOST_PORT__:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - __WEB_UI_DIST_DIR__:/usr/share/nginx/html:ro
+      - __WEB_UI_NGINX_CONF__:/usr/local/openresty/nginx/conf/nginx.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6

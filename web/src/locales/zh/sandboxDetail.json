@@ -1,0 +1,27 @@
+{
+  "started": "启动于 {{time}}",
+  "resources": "资源",
+  "runtime": "运行时",
+  "runtimeDesc": "服务端上报的生命周期字段。",
+  "metadata": "元数据",
+  "noMetadata": "暂无元数据。",
+  "logs": "日志",
+  "logsDesc": "最新日志条目，10s 自动刷新。",
+  "logsLoading": "加载中…",
+  "fields": {
+    "vcpu": "vCPU",
+    "memory": "内存",
+    "client": "客户端",
+    "alias": "别名",
+    "ends": "到期时间",
+    "domain": "域名",
+    "started": "启动时间",
+    "state": "状态",
+    "envd": "envd"
+  },
+  "actions": {
+    "resume": "恢复",
+    "pause": "暂停",
+    "kill": "终止"
+  }
+}

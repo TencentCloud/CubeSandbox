@@ -1,0 +1,27 @@
+{
+  "started": "started {{time}}",
+  "resources": "Resources",
+  "runtime": "Runtime",
+  "runtimeDesc": "Server-reported lifecycle fields.",
+  "metadata": "Metadata",
+  "noMetadata": "No metadata.",
+  "logs": "Logs",
+  "logsDesc": "Recent entries. Auto-refresh 10s.",
+  "logsLoading": "loading…",
+  "fields": {
+    "vcpu": "vCPU",
+    "memory": "Memory",
+    "client": "Client",
+    "alias": "Alias",
+    "ends": "Ends",
+    "domain": "Domain",
+    "started": "Started",
+    "state": "State",
+    "envd": "envd"
+  },
+  "actions": {
+    "resume": "Resume",
+    "pause": "Pause",
+    "kill": "Kill"
+  }
+}

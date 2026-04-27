@@ -1,0 +1,169 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 Tencent. All rights reserved. */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Dark (default) — Cube Midnight */
+  :root,
+  .dark {
+    --background: 215 35% 5%;
+    --foreground: 210 40% 96%;
+
+    --card: 215 32% 7%;
+    --card-foreground: 210 40% 96%;
+
+    --popover: 215 32% 9%;
+    --popover-foreground: 210 40% 96%;
+
+    --muted: 215 25% 12%;
+    --muted-foreground: 215 18% 62%;
+
+    --primary: 220 85% 64%;
+    --primary-foreground: 215 40% 7%;
+
+    --secondary: 215 28% 14%;
+    --secondary-foreground: 210 40% 96%;
+
+    --accent: 220 70% 58%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 348 90% 65%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 215 22% 18%;
+    --input: 215 22% 18%;
+    --ring: 220 85% 64%;
+
+    /* Surface tints (neutral for overlays — used instead of white/black) */
+    --tint: 210 40% 96%; /* light on dark */
+    --tint-strong: 0 0% 0%; /* for modal backdrop */
+
+    --radius: 0.75rem;
+  }
+
+  /* Light — Paper-like, warm, easy on the eyes */
+  .light {
+    --background: 40 20% 97%;        /* ivory */
+    --foreground: 20 15% 15%;        /* ink */
+
+    --card: 0 0% 100%;              /* paper */
+    --card-foreground: 20 15% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 20 15% 15%;
+
+    --muted: 20 15% 94%;
+    --muted-foreground: 20 10% 40%;
+
+    --primary: 212 55% 42%;          /* deep calm blue */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 20 15% 94%;
+    --secondary-foreground: 20 15% 15%;
+
+    --accent: 212 50% 50%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 55% 45%;        /* muted vermilion */
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 20 15% 86%;
+    --input: 20 15% 92%;
+    --ring: 212 55% 42%;
+
+    /* Overlays use ink, not white */
+    --tint: 30 15% 20%;
+    --tint-strong: 30 15% 10%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+    background-attachment: fixed;
+  }
+
+  /* Dark atmospheric gradient */
+  .dark body {
+    background-image:
+      radial-gradient(1200px 600px at 15% -10%, rgba(91, 141, 239, 0.08), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(167, 139, 250, 0.06), transparent 60%);
+  }
+
+  /* Light paper gradient — warm cream glow */
+  .light body {
+    background-image:
+      radial-gradient(1200px 600px at 15% -10%, rgba(91, 141, 239, 0.05), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(167, 139, 250, 0.04), transparent 60%);
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 10px;
+    border: 2px solid hsl(var(--background));
+  }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.5); }
+}
+
+@layer components {
+  .glass {
+    @apply bg-card/60 backdrop-blur-xl border border-border/60;
+  }
+  .glow-ring {
+    box-shadow:
+      0 0 0 1px rgba(91, 141, 239, 0.25),
+      0 10px 40px -10px rgba(91, 141, 239, 0.35);
+  }
+  .light .glow-ring {
+    box-shadow:
+      0 0 0 1px rgba(66, 110, 180, 0.18),
+      0 8px 24px -8px rgba(66, 110, 180, 0.22);
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+  .chip-ok {
+    @apply chip bg-cube-emerald/10 text-cube-emerald ring-1 ring-cube-emerald/30;
+  }
+  .chip-warn {
+    @apply chip bg-cube-amber/10 text-cube-amber ring-1 ring-cube-amber/30;
+  }
+  .chip-err {
+    @apply chip bg-cube-rose/10 text-cube-rose ring-1 ring-cube-rose/30;
+  }
+  .chip-info {
+    @apply chip bg-primary/10 text-primary ring-1 ring-primary/30;
+  }
+  .chip-mute {
+    @apply chip bg-muted text-muted-foreground ring-1 ring-border;
+  }
+  .panel {
+    @apply rounded-xl border border-border/60 bg-card/70 backdrop-blur-sm;
+  }
+  .light .panel {
+    @apply bg-card/95 border-border shadow-sm;
+  }
+  .panel-hover {
+    @apply panel transition-all duration-200 ease-cube hover:border-primary/30 hover:bg-card/85;
+  }
+
+  /* Neutral overlay utilities (theme-aware) */
+  .tint-bg-5 { background-color: hsl(var(--tint) / 0.05); }
+  .tint-bg-10 { background-color: hsl(var(--tint) / 0.08); }
+  .tint-border-5 { border-color: hsl(var(--tint) / 0.08); }
+  .tint-border-10 { border-color: hsl(var(--tint) / 0.15); }
+}

@@ -1,0 +1,8 @@
+{
+  "title": "API Keys",
+  "subtitle": "Store the dashboard access key locally. Injected as <code>X-API-Key</code> on requests.",
+  "cardTitle": "Dashboard API Key",
+  "cardDesc": "Kept only in this browser (localStorage).",
+  "save": "Save",
+  "saved": "Saved"
+}

@@ -1,0 +1,20 @@
+{
+  "title": "集群概览",
+  "subtitle": "沙箱、容量与流水线的实时快照。",
+  "kpi": {
+    "runningSandboxes": "运行中沙箱",
+    "cpuUtilization": "CPU 使用率",
+    "memoryUtilization": "内存使用率",
+    "healthyNodes": "健康节点",
+    "templatesAvailable": "{{count}} 个模板可用",
+    "coresUsed": "{{used}} / {{total}} 核",
+    "memoryUsed": "{{used}} / {{total}} GiB",
+    "maxSlots": "最大 {{count}} 个 MVM 槽位"
+  },
+  "recentSandboxes": "最近沙箱",
+  "recentSandboxesDesc": "集群中最新运行的微虚拟机。",
+  "templatePipeline": "模板流水线",
+  "templatePipelineDesc": "可用于启动的模板列表。",
+  "noSandboxes": "暂无运行中的沙箱。",
+  "noTemplates": "暂无模板。"
+}

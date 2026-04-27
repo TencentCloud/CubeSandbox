@@ -1,0 +1,22 @@
+{
+  "newSandbox": {
+    "title": "New sandbox",
+    "description": "Wizard for choosing template and resources."
+  },
+  "templateDetail": {
+    "title": "Template detail",
+    "description": "Build history, replicas and redeploy."
+  },
+  "network": {
+    "title": "Network",
+    "description": "Gateways, egress and rate policies."
+  },
+  "observability": {
+    "title": "Observability",
+    "description": "Metrics, traces and audit trail."
+  },
+  "settings": {
+    "title": "Settings",
+    "description": "Theme, shortcuts and cluster targets."
+  }
+}

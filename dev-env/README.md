@@ -14,6 +14,7 @@ SSH      : 127.0.0.1:10022 -> guest:22
 Cube API : 127.0.0.1:13000 -> guest:3000
 Cube HTTP: 127.0.0.1:11080 -> guest:80
 Cube TLS : 127.0.0.1:11443 -> guest:443
+WebUI    : 127.0.0.1:12088 -> guest:12088
 ```
 
 Use this when you want to:
@@ -158,6 +159,9 @@ Useful examples:
 
 # Push arbitrary files into the guest
 ./sync_to_vm.sh files --remote-dir /tmp ./configs/foo.toml
+
+# Build and deploy the WebUI into the guest
+make -C .. web-sync-dev-env
 ```
 
 The previous binary is still kept on the VM as `*.bak`, but the script no
@@ -199,7 +203,7 @@ README as `data-log-<timestamp>.tar.gz`.
 | No `/dev/kvm` inside the guest | Nested KVM disabled on the host | Enable nested virtualization on the host, then reboot the VM |
 | `./login.sh` fails to connect | VM not booted yet, or host port 10022 is busy | Check that `./run_vm.sh` is still running, or set `SSH_PORT` |
 | `df -h /` inside the guest is still small | `prepare_image.sh` never finished the auto-grow step | Inspect `.workdir/qemu-serial.log`, then `scp internal/grow_rootfs.sh` into the guest and run it manually |
-| Host port 13000 / 11080 / 11443 already taken | Some other service binds the forwarded dev-env ports | Start with `CUBE_API_PORT=23000 CUBE_PROXY_HTTP_PORT=21080 CUBE_PROXY_HTTPS_PORT=21443 ./run_vm.sh` |
+| Host port 13000 / 11080 / 11443 / 12088 already taken | Some other service binds the forwarded dev-env ports | Start with `CUBE_API_PORT=23000 CUBE_PROXY_HTTP_PORT=21080 CUBE_PROXY_HTTPS_PORT=21443 WEB_UI_PORT=22088 ./run_vm.sh` |
 | Cube components gone after VM reboot | Autostart not enabled | Run `./cube-autostart.sh` once |
 | New binaries fail after restart | The new build is bad, or `quickcheck` fails when you run it manually | Check `/data/log/` in the guest, and if needed restore the previous `*.bak` binary manually before restarting again |
 
@@ -248,6 +252,7 @@ Generated artifacts (qcow2, pid file, serial log) live in `.workdir/`.
 | `CUBE_API_PORT` | `13000` | Host -> guest Cube API. |
 | `CUBE_PROXY_HTTP_PORT` | `11080` | Host -> guest CubeProxy HTTP (`guest:80`). |
 | `CUBE_PROXY_HTTPS_PORT` | `11443` | Host -> guest CubeProxy HTTPS (`guest:443`). |
+| `WEB_UI_PORT` | `12088` | Host -> guest WebUI HTTP (`guest:12088`). |
 | `REQUIRE_NESTED_KVM` | `1` | Refuse to boot if host nested KVM is off. `0` to bypass (sandboxes won't run). |
 
 #### `login.sh`

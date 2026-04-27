@@ -10,7 +10,9 @@ mod handlers;
 mod logging;
 mod middleware;
 mod models;
+mod openapi;
 mod routes;
+mod services;
 mod state;
 
 use clap::Parser;
@@ -112,11 +114,21 @@ struct Cli {
     /// Domain string returned in sandbox API responses (default: "cube.app").
     #[arg(long, value_name = "DOMAIN")]
     sandbox_domain: Option<String>,
+
+    /// Export the current OpenAPI spec to a YAML file and exit.
+    #[arg(long, value_name = "PATH")]
+    export_openapi: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
     // ── CLI ────────────────────────────────────────────────────────────────
     let cli = Cli::parse();
+
+    if let Some(path) = cli.export_openapi.as_deref() {
+        openapi::export_to_file(path)?;
+        println!("exported OpenAPI to {}", path);
+        return Ok(());
+    }
 
     // ── Config ─────────────────────────────────────────────────────────────
     let mut cfg = config::ServerConfig::from_env().unwrap_or_default();

@@ -1,0 +1,8 @@
+{
+  "title": "API 密钥",
+  "subtitle": "将控制台访问密钥存储在本地浏览器中，请求时自动注入 <code>X-API-Key</code> 头。",
+  "cardTitle": "控制台 API 密钥",
+  "cardDesc": "仅保存在当前浏览器（localStorage）中。",
+  "save": "保存",
+  "saved": "已保存"
+}

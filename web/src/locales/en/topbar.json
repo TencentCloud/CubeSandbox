@@ -1,0 +1,12 @@
+{
+  "breadcrumb": "Dashboard",
+  "searchPlaceholder": "Search sandboxes, templates, nodes…",
+  "mockOn": "Mock ON",
+  "mockOff": "Mock",
+  "mockOnTitle": "Mock data ON — click to disable",
+  "mockOffTitle": "Mock data OFF — click to enable",
+  "notifications": "Notifications",
+  "language": "Language",
+  "english": "English",
+  "chinese": "简体中文"
+}
