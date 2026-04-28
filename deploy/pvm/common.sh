@@ -157,6 +157,16 @@ ensure_build_tools() {
     if ! command -v lz4c >/dev/null 2>&1 && ! command -v lz4 >/dev/null 2>&1; then
         need_pkgs+=(lz4)
     fi
+    # The kernel's libbpf / tools/bpf build invokes scripts/bpf_doc.py
+    # (shebang: /usr/bin/env python3) to generate bpf_helper_defs.h. Without
+    # python3 this fails with a very misleading:
+    #   install -m 644 libbpf_legacy.h ...
+    #   make[8]: *** [Makefile:160: .../libbpf/bpf_helper_defs.h] Error 127
+    # (Error 127 = command not found, referring to the python3 interpreter
+    # that runs bpf_doc.py, not to `install`.)
+    if ! command -v python3 >/dev/null 2>&1; then
+        need_pkgs+=(python3)
+    fi
 
     if [[ ${#need_pkgs[@]} -eq 0 ]]; then
         ensure_lz4c
@@ -173,6 +183,7 @@ ensure_build_tools() {
             elfutils-libelf-devel openssl-devel
             perl-core ncurses-devel
             dwarves cpio tar xz which findutils hostname lz4
+            python3
         )
         if [[ "${PVM_BUILD_PROFILE:-}" == "host" ]]; then
             rpm_pkgs+=(rpm-build rsync)
@@ -185,6 +196,7 @@ ensure_build_tools() {
             build-essential make bc bison flex
             libelf-dev libssl-dev libncurses-dev
             dwarves cpio kmod lz4
+            python3
         )
         if [[ "${PVM_BUILD_PROFILE:-}" == "host" ]]; then
             deb_pkgs+=(fakeroot rsync dpkg-dev debhelper)
@@ -196,6 +208,7 @@ ensure_build_tools() {
             make gcc gcc-c++ bc bison flex
             libelf-devel libopenssl-devel ncurses-devel
             dwarves cpio lz4
+            python3
         )
         if [[ "${PVM_BUILD_PROFILE:-}" == "host" ]]; then
             zypper_pkgs+=(rpm-build rsync)
@@ -275,6 +288,7 @@ install_deps_rpm() {
         perl-core ncurses-devel
         dwarves cpio tar xz which findutils
         hostname wget rsync lz4
+        python3
     )
     if [[ "${PVM_BUILD_PROFILE:-}" == "host" ]]; then
         pkgs+=(rpm-build)
@@ -291,6 +305,7 @@ install_deps_deb() {
         libelf-dev libssl-dev libncurses-dev
         dwarves cpio kmod
         wget ca-certificates lz4
+        python3
     )
     if [[ "${PVM_BUILD_PROFILE:-}" == "host" ]]; then
         pkgs+=(fakeroot rsync dpkg-dev debhelper)

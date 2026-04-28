@@ -206,7 +206,8 @@ install_common_build_deps() {
                 perl-core ncurses-devel \
                 rpm-build rsync \
                 dwarves cpio tar xz which findutils \
-                hostname wget curl ca-certificates || {
+                hostname wget curl ca-certificates \
+                python3 || {
                 warn "Common dep install still failed; the sub-scripts' ensure_build_tools will try once more."
             }
             ;;
@@ -218,7 +219,8 @@ install_common_build_deps() {
                 libelf-dev libssl-dev libncurses-dev \
                 dwarves cpio kmod \
                 fakeroot rsync dpkg-dev debhelper \
-                wget curl ca-certificates || {
+                wget curl ca-certificates \
+                python3 || {
                 warn "Common dep install still failed; the sub-scripts' ensure_build_tools will try once more."
             }
             ;;
