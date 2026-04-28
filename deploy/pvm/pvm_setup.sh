@@ -20,7 +20,18 @@
 # Environment variables (all optional):
 #   PVM_SETUP_WORK_DIR       Base dir for build scripts (default: $(pwd))
 #   PVM_SETUP_ASSUME_YES=1   Skip the interactive confirmation prompt
-#   PVM_SETUP_SKIP_BUILD=1   Skip the build step (reuse existing artifacts)
+#   PVM_SETUP_SKIP_BUILD=1   Skip BOTH kernel builds (reuse existing artifacts)
+#   PVM_SETUP_SKIP_HOST_BUILD=1
+#                            Skip only the pvm-host kernel package build.
+#                            Implies PVM_SETUP_SKIP_INSTALL=1 (no artifact =>
+#                            nothing to install; GRUB default / kvm_pvm
+#                            auto-load are left untouched).
+#                            Useful when you only need to (re)build the guest
+#                            vmlinux on a host that is already running the
+#                            pvm-host kernel.
+#   PVM_SETUP_SKIP_GUEST_BUILD=1
+#                            Skip only the pvm-guest vmlinux build. Implies
+#                            PVM_SETUP_SKIP_PLACE=1 (nothing to place).
 #   PVM_SETUP_SKIP_INSTALL=1 Skip the pvm-host package installation step
 #   PVM_SETUP_SKIP_PLACE=1   Skip the guest vmlinux placement step
 #   PVM_SETUP_SKIP_GRUB=1    Do not touch GRUB default / do not regenerate
@@ -35,6 +46,17 @@
 #   SKIP_DEPS=1              Forwarded to the two build scripts
 #   JOBS, REPO_URL, BRANCH,
 #   CONFIG_URL               Forwarded to the two build scripts
+#
+# Command-line flags (override the matching env vars when given):
+#   -y, --yes                Same as PVM_SETUP_ASSUME_YES=1
+#   --guest-only             Build & place only the guest vmlinux. Equivalent
+#                            to PVM_SETUP_SKIP_HOST_BUILD=1. Does NOT touch
+#                            the currently running kernel, GRUB, or
+#                            /etc/modules-load.d/kvm_pvm.conf.
+#   --host-only              Build & install only the pvm-host package.
+#                            Equivalent to PVM_SETUP_SKIP_GUEST_BUILD=1.
+#   --skip-host-build        Same as PVM_SETUP_SKIP_HOST_BUILD=1.
+#   --skip-guest-build       Same as PVM_SETUP_SKIP_GUEST_BUILD=1.
 # ============================================================================
 
 # Re-exec under bash if the script was invoked through /bin/sh (which on
@@ -112,8 +134,22 @@ export SUDO
 for arg in "$@"; do
     case "${arg}" in
         -y|--yes) ASSUME_YES=1 ;;
+        --guest-only|--skip-host-build)
+            # Skipping the host-kernel build also means we have no host
+            # package to install, so tie SKIP_INSTALL along for free. GRUB
+            # default switching is a side-effect of install_pvm_host_package
+            # and is therefore also naturally skipped.
+            PVM_SETUP_SKIP_HOST_BUILD=1
+            PVM_SETUP_SKIP_INSTALL=1
+            ;;
+        --host-only|--skip-guest-build)
+            # Symmetric opposite: skipping the guest build means there is
+            # nothing to place into the assets / cubetoolbox paths.
+            PVM_SETUP_SKIP_GUEST_BUILD=1
+            PVM_SETUP_SKIP_PLACE=1
+            ;;
         -h|--help)
-            sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,70p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -121,6 +157,19 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Env-var path: if the user set PVM_SETUP_SKIP_HOST_BUILD / _GUEST_BUILD
+# directly (instead of via the flags above), apply the same implications
+# here so downstream code only has to look at a single, consistent set of
+# skip flags.
+if [[ "${PVM_SETUP_SKIP_HOST_BUILD:-0}" == "1" ]]; then
+    : "${PVM_SETUP_SKIP_INSTALL:=1}"
+fi
+if [[ "${PVM_SETUP_SKIP_GUEST_BUILD:-0}" == "1" ]]; then
+    : "${PVM_SETUP_SKIP_PLACE:=1}"
+fi
+export PVM_SETUP_SKIP_HOST_BUILD PVM_SETUP_SKIP_GUEST_BUILD \
+       PVM_SETUP_SKIP_INSTALL PVM_SETUP_SKIP_PLACE
 
 # ------------------------- Platform detection -------------------------
 detect_family() {
@@ -232,13 +281,22 @@ install_common_build_deps() {
 }
 
 run_builds_in_parallel() {
-    step "Step 1b/3: build pvm-host package and pvm-guest vmlinux in parallel"
+    step "Step 1b/3: build pvm-host package and/or pvm-guest vmlinux"
 
-    if [[ ! -f "${HOST_BUILD_SCRIPT}" ]]; then
+    local do_host=1 do_guest=1
+    [[ "${PVM_SETUP_SKIP_HOST_BUILD:-0}"  == "1" ]] && do_host=0
+    [[ "${PVM_SETUP_SKIP_GUEST_BUILD:-0}" == "1" ]] && do_guest=0
+
+    if [[ "${do_host}" -eq 0 && "${do_guest}" -eq 0 ]]; then
+        warn "Both PVM_SETUP_SKIP_HOST_BUILD=1 and PVM_SETUP_SKIP_GUEST_BUILD=1 are set; nothing to build."
+        return 0
+    fi
+
+    if [[ "${do_host}" -eq 1 && ! -f "${HOST_BUILD_SCRIPT}" ]]; then
         err "Build script not found: ${HOST_BUILD_SCRIPT}"
         exit 1
     fi
-    if [[ ! -f "${GUEST_BUILD_SCRIPT}" ]]; then
+    if [[ "${do_guest}" -eq 1 && ! -f "${GUEST_BUILD_SCRIPT}" ]]; then
         err "Build script not found: ${GUEST_BUILD_SCRIPT}"
         exit 1
     fi
@@ -247,23 +305,103 @@ run_builds_in_parallel() {
     local host_log="${HOST_BUILD_DIR}/pvm-setup-host-build.log"
     local guest_log="${GUEST_BUILD_DIR}/pvm-setup-guest-build.log"
 
-    log "Host build log:  ${host_log}"
-    log "Guest build log: ${guest_log}"
-    log "Launching both builds; this can take a while..."
+    # Write a separator banner to a log file so multiple pvm_setup.sh
+    # invocations can share the same log file without clobbering each
+    # other's output. We append rather than overwrite so the log for the
+    # first (possibly failing) run is preserved when the user re-runs
+    # pvm_setup.sh. The banner includes an ISO timestamp and the key env
+    # vars forwarded to the child build so grepping `===== pvm_setup.sh`
+    # in the log instantly lands on per-run boundaries.
+    _append_run_banner() {
+        local logfile="$1"
+        local label="$2"
+        {
+            printf '\n'
+            printf '========================================================================\n'
+            printf '===== pvm_setup.sh %s run @ %s\n' "${label}" "$(date -Iseconds 2>/dev/null || date)"
+            printf '=====   host pid=%s uid=%s\n' "$$" "${EUID:-$(id -u)}"
+            printf '=====   WORK_DIR=%s\n' "${3:-}"
+            printf '=====   BRANCH=%s REPO_URL=%s JOBS=%s SKIP_DEPS=%s\n' \
+                "${BRANCH:-<unset>}" "${REPO_URL:-<unset>}" \
+                "${JOBS:-<unset>}" "${SKIP_DEPS:-<unset>}"
+            printf '========================================================================\n'
+        } >>"${logfile}" 2>/dev/null || true
+    }
 
-    # SKIP_DEPS=1 for *both* child scripts: the common deps were already
-    # installed above, so neither needs to hit the package manager again.
-    # ensure_build_tools inside each script will still verify that
-    # make / gcc / bc / bison / flex are actually present.
+    # SKIP_DEPS=1 for every child script invocation: the common deps were
+    # already installed above, so no sub-script needs to hit the package
+    # manager again. ensure_build_tools inside each script still verifies
+    # that make / gcc / bc / bison / flex / python3 are actually present.
     #
     # Invoke the child scripts explicitly through `bash` rather than relying
     # on the executable bit / shebang. This keeps things working even when
     # the repo was checked out without preserving +x (e.g. unpacked from a
     # zip on Windows) or when pvm_setup.sh itself was launched via `sh`.
-    SKIP_DEPS=1 WORK_DIR="${HOST_BUILD_DIR}"  bash "${HOST_BUILD_SCRIPT}"  >"${host_log}"  2>&1 &
+
+    # Fast path: only one side requested -> run it serially so the user
+    # sees the live output / exit code clearly without interleaving two
+    # build logs they don't need.
+    if [[ "${do_host}" -eq 1 && "${do_guest}" -eq 0 ]]; then
+        # --skip-guest-build / --host-only: only the pvm-host kernel
+        # package is (re)built; the guest vmlinux is left untouched.
+        log "Only the pvm-host kernel package will be built in this run."
+        log "  build script : ${HOST_BUILD_SCRIPT}"
+        log "  build WORK_DIR: ${HOST_BUILD_DIR}"
+        log "  build log    : ${host_log} (appended)"
+        _append_run_banner "${host_log}" "host (serial)" "${HOST_BUILD_DIR}"
+        # NOTE: do NOT pipe through `tee` here. In --host-only / --guest-only
+        # mode main() already redirects pvm_setup.sh's own stdout/stderr to
+        # the same log file via `exec > >(tee -a ...)`. An extra `tee -a`
+        # at this layer would cause every line of the child build's output
+        # to be written to the log file twice. Plain `>>` keeps the file
+        # line-for-line faithful; the output is still visible on the
+        # terminal because main()'s outer tee mirrors it.
+        SKIP_DEPS=1 WORK_DIR="${HOST_BUILD_DIR}"  bash "${HOST_BUILD_SCRIPT}"  >>"${host_log}"  2>&1
+        local host_rc=$?
+        if [[ "${host_rc}" -ne 0 ]]; then
+            err "pvm-host build failed (rc=${host_rc}). Full log: ${host_log}"
+            exit 1
+        fi
+        log "pvm-host build completed successfully."
+        unset -f _append_run_banner
+        return 0
+    fi
+
+    if [[ "${do_host}" -eq 0 && "${do_guest}" -eq 1 ]]; then
+        # --skip-host-build / --guest-only: only the pvm-guest vmlinux
+        # is (re)built; the running pvm-host kernel package is untouched
+        # (nothing is installed, GRUB is left alone, no reboot required).
+        log "Only the pvm-guest vmlinux will be built in this run."
+        log "  build script : ${GUEST_BUILD_SCRIPT}"
+        log "  build WORK_DIR: ${GUEST_BUILD_DIR}"
+        log "  build log    : ${guest_log} (appended)"
+        _append_run_banner "${guest_log}" "guest (serial)" "${GUEST_BUILD_DIR}"
+        # See the symmetric comment above: main()'s outer tee already
+        # captures everything into ${guest_log}; a second `tee -a` here
+        # would duplicate every line.
+        SKIP_DEPS=1 WORK_DIR="${GUEST_BUILD_DIR}" bash "${GUEST_BUILD_SCRIPT}" >>"${guest_log}" 2>&1
+        local guest_rc=$?
+        if [[ "${guest_rc}" -ne 0 ]]; then
+            err "pvm-guest vmlinux build failed (rc=${guest_rc}). Full log: ${guest_log}"
+            exit 1
+        fi
+        log "pvm-guest vmlinux build completed successfully."
+        unset -f _append_run_banner
+        return 0
+    fi
+
+    # Default path: both sides in parallel.
+    log "Host build log:  ${host_log} (appended)"
+    log "Guest build log: ${guest_log} (appended)"
+    log "Launching both builds; this can take a while..."
+
+    _append_run_banner "${host_log}"  "host (parallel)"  "${HOST_BUILD_DIR}"
+    _append_run_banner "${guest_log}" "guest (parallel)" "${GUEST_BUILD_DIR}"
+
+    SKIP_DEPS=1 WORK_DIR="${HOST_BUILD_DIR}"  bash "${HOST_BUILD_SCRIPT}"  >>"${host_log}"  2>&1 &
     local host_pid=$!
 
-    SKIP_DEPS=1 WORK_DIR="${GUEST_BUILD_DIR}" bash "${GUEST_BUILD_SCRIPT}" >"${guest_log}" 2>&1 &
+    SKIP_DEPS=1 WORK_DIR="${GUEST_BUILD_DIR}" bash "${GUEST_BUILD_SCRIPT}" >>"${guest_log}" 2>&1 &
     local guest_pid=$!
 
     local host_rc=0
@@ -280,10 +418,12 @@ run_builds_in_parallel() {
         tail -n 40 "${guest_log}" 1>&2 || true
     fi
     if [[ "${host_rc}" -ne 0 || "${guest_rc}" -ne 0 ]]; then
+        unset -f _append_run_banner
         exit 1
     fi
 
     log "Both builds completed successfully."
+    unset -f _append_run_banner
 }
 
 # ------------------------- Step 2: install pvm-host package -------------------------
@@ -518,6 +658,10 @@ EOF
 install_pvm_host_package() {
     step "Step 2/3: install pvm-host kernel package and configure GRUB"
 
+    if [[ "${PVM_SETUP_SKIP_HOST_BUILD:-0}" == "1" ]]; then
+        warn "PVM_SETUP_SKIP_HOST_BUILD=1, no pvm-host package was built; skipping install + GRUB + kvm_pvm auto-load."
+        return 0
+    fi
     if [[ "${PVM_SETUP_SKIP_INSTALL:-0}" == "1" ]]; then
         warn "PVM_SETUP_SKIP_INSTALL=1, skipping pvm-host package installation."
         return 0
@@ -551,6 +695,10 @@ install_pvm_host_package() {
 place_guest_vmlinux() {
     step "Step 3/3: place pvm-guest vmlinux into the expected locations"
 
+    if [[ "${PVM_SETUP_SKIP_GUEST_BUILD:-0}" == "1" ]]; then
+        warn "PVM_SETUP_SKIP_GUEST_BUILD=1, no guest vmlinux was built; skipping placement."
+        return 0
+    fi
     if [[ "${PVM_SETUP_SKIP_PLACE:-0}" == "1" ]]; then
         warn "PVM_SETUP_SKIP_PLACE=1, skipping guest vmlinux placement."
         return 0
@@ -584,6 +732,65 @@ place_guest_vmlinux() {
 }
 
 # ------------------------- Main -------------------------
+# Redirect pvm_setup.sh's OWN stdout/stderr to the matching per-side log
+# file whenever the user asked for a single-sided run (--skip-host-build /
+# --guest-only, or --skip-guest-build / --host-only). This way the log
+# file is a faithful transcript of "everything the user saw on the
+# terminal" for that run, not just the output of the child build script.
+#
+# Both streams are tee'd with `-a` so:
+#   * the terminal still shows live progress (operator feedback preserved);
+#   * multiple re-runs never clobber each other's history (matches the
+#     behaviour of the child build invocations inside
+#     run_builds_in_parallel, which already use >> and tee -a).
+#
+# We do this BEFORE the first log/warn line so the redirected log captures
+# the full banner as well. Using `exec > >(tee -a ...)` keeps the redirect
+# in effect for the rest of the script (including any subshells that
+# inherit fd 1/2), without requiring every helper to know about it.
+_setup_run_log_redirect() {
+    local log_file="$1"
+    local label="$2"
+    local work_dir="$3"
+
+    # Make sure the target directory exists: --skip-host-build is the
+    # earliest point at which we need GUEST_BUILD_DIR to be writable, and
+    # conversely for --skip-guest-build / HOST_BUILD_DIR.
+    mkdir -p "$(dirname -- "${log_file}")" 2>/dev/null || true
+
+    # Append a banner identical in style to the one written by
+    # run_builds_in_parallel, so `grep '===== pvm_setup.sh' ${log_file}`
+    # shows every run boundary uniformly.
+    {
+        printf '\n'
+        printf '========================================================================\n'
+        printf '===== pvm_setup.sh %s setup @ %s\n' "${label}" "$(date -Iseconds 2>/dev/null || date)"
+        printf '=====   host pid=%s uid=%s\n' "$$" "${EUID:-$(id -u)}"
+        printf '=====   WORK_DIR=%s\n' "${work_dir}"
+        printf '=====   argv=%s\n' "$*"
+        printf '=====   PVM_SETUP_SKIP_HOST_BUILD=%s PVM_SETUP_SKIP_GUEST_BUILD=%s\n' \
+            "${PVM_SETUP_SKIP_HOST_BUILD:-0}" "${PVM_SETUP_SKIP_GUEST_BUILD:-0}"
+        printf '========================================================================\n'
+    } >>"${log_file}" 2>/dev/null || true
+
+    # Redirect stdout and stderr through tee -a so the terminal still sees
+    # them AND the log file grows. Keep stderr on fd 2 so error messages
+    # retain their semantic stream even after the split.
+    exec > >(tee -a "${log_file}") 2> >(tee -a "${log_file}" >&2)
+}
+
+if [[ "${PVM_SETUP_SKIP_HOST_BUILD:-0}" == "1" ]]; then
+    _setup_run_log_redirect \
+        "${GUEST_BUILD_DIR}/pvm-setup-guest-build.log" \
+        "guest-only" \
+        "${GUEST_BUILD_DIR}"
+elif [[ "${PVM_SETUP_SKIP_GUEST_BUILD:-0}" == "1" ]]; then
+    _setup_run_log_redirect \
+        "${HOST_BUILD_DIR}/pvm-setup-host-build.log" \
+        "host-only" \
+        "${HOST_BUILD_DIR}"
+fi
+
 main() {
     log "Script directory: ${SCRIPT_DIR}"
     log "Host build dir:   ${HOST_BUILD_DIR}"
@@ -604,6 +811,25 @@ main() {
     echo
     log "All done."
     echo
+
+    # If the host kernel wasn't built/installed in this run (e.g. user passed
+    # --guest-only), DO NOT print the reboot + GRUB cmdline reminder: the
+    # currently running kernel hasn't changed and the user shouldn't be
+    # nudged into touching GRUB or rebooting.
+    if [[ "${PVM_SETUP_SKIP_HOST_BUILD:-0}" == "1" || "${PVM_SETUP_SKIP_INSTALL:-0}" == "1" ]]; then
+        cat <<'EOF'
+Guest-only run summary:
+  - The pvm-host kernel package was NOT (re)installed in this run; the
+    currently running kernel and GRUB defaults are unchanged.
+  - The freshly built guest vmlinux has been placed into the in-repo
+    assets dir (and, if applicable, the cubetoolbox runtime path); no
+    reboot is required for that to take effect.
+  - New PVM guests launched by CubeShim / Cubelet will pick up the new
+    vmlinux automatically; existing guests continue to run their current
+    kernel until they are restarted.
+EOF
+        return 0
+    fi
 
     # Prominent, impossible-to-miss reminder: the pvm-host kernel needs
     # additional cmdline parameters (e.g. kvm.nx_huge_pages=never,
