@@ -12,7 +12,9 @@ import (
 
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/pkg/oci"
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
+
+
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
@@ -107,7 +109,7 @@ func getDiskQos(ctx context.Context, realReq *cubebox.RunCubeSandboxRequest, key
 func (l *local) genVirtFsAnnotationOpt(ctx context.Context,
 	opts *workflow.CreateContext,
 	mountsConfig *virtiofs.CubeRootfsInfo) oci.SpecOpts {
-	mc, _ := jsoniter.Marshal(mountsConfig)
+	mc, _ := json.Marshal(mountsConfig)
 	return oci.WithAnnotations(map[string]string{
 		constants.AnnotationsRootfsKey: string(mc),
 	})
@@ -155,7 +157,7 @@ func (l *local) genStorageMediumDefaultAnnotationOpt(ctx context.Context,
 	}
 
 	if len(annotationInfo) > 0 {
-		b, _ := jsoniter.Marshal(annotationInfo)
+		b, _ := json.Marshal(annotationInfo)
 		log.G(ctx).Debugf("%s genContainerTmpOpt %s: %s", opts.SandboxID, constants.AnnotationsMountListKey, string(b))
 		tmpSpecs = append(tmpSpecs, oci.WithAnnotations(map[string]string{
 			constants.AnnotationsMountListKey: string(b),
@@ -200,7 +202,7 @@ func (l *local) genCgroupAnnotationOpt(ctx context.Context, c *cubebox.Container
 		return tmpSpecs
 	}
 
-	resJson, _ := jsoniter.Marshal(cgInfo.VmSnapshotSpec)
+	resJson, _ := json.Marshal(cgInfo.VmSnapshotSpec)
 	log.G(ctx).Debugf("%v genCgroupAnnotationOpt:%+v,vmres:%v", opts.SandboxID,
 		cgInfo.CgroupID, string(resJson))
 

@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/integration"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/semaphore"
@@ -514,7 +514,7 @@ func doInnerDestroySandbox(clictx *cli.Context, sandboxID string, filter map[str
 		InstanceType: instanceType,
 		Sync:         true,
 	}
-	body, err := jsoniter.Marshal(reqC)
+	body, err := json.Marshal(reqC)
 	if err != nil {
 		log.Printf("doDestroySandbox failure:%v\n", err)
 		return err

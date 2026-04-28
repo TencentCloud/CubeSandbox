@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
@@ -60,7 +59,8 @@ var Create = &cli.Command{
 				myPrint("create failure:%v", err)
 				os.Exit(1)
 			}
-			respStr, err := jsoniter.MarshalToString(rsp)
+
+			respStr, err := json.Marshal(rsp)
 			if err != nil {
 				myPrint("failed to marshal resp: %v", err)
 				os.Exit(1)

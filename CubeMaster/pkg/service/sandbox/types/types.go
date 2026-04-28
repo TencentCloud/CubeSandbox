@@ -6,7 +6,8 @@
 package types
 
 import (
-	jsoniter "github.com/json-iterator/go"
+	"bytes"
+	"encoding/json"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
@@ -553,12 +554,19 @@ const (
 	StartTime contextKey = "startTime"
 )
 
-var FastestJsoniter = jsoniter.Config{
-	EscapeHTML:                    false,
-	UseNumber:                     true,
-	MarshalFloatWith6Digits:       true,
-	ObjectFieldMustBeSimpleString: true,
-}.Froze()
+type stdJSONTool struct{}
+
+func (stdJSONTool) Marshal(v interface{}) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+func (stdJSONTool) Unmarshal(data []byte, v interface{}) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
+
+var Fastestjson = stdJSONTool{}
 
 type UpdateRequest struct {
 	RequestID    string `json:"requestID" p:"requestID"  v:"required"`

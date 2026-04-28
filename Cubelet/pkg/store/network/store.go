@@ -8,8 +8,7 @@ import (
 	"fmt"
 	"sync"
 
-	jsoniter "github.com/json-iterator/go"
-
+	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -43,7 +42,7 @@ func RecoverFromDB(db *utils.CubeStore) (*Store, error) {
 
 	for id, netBytes := range all {
 		var net NetworkAllocation
-		if err := jsoniter.Unmarshal(netBytes, &net); err != nil {
+		if err := json.Unmarshal(netBytes, &net); err != nil {
 			return nil, err
 		}
 		var metadata provider.NetworkProvider
@@ -111,7 +110,7 @@ func (s *Store) Sync(id string) error {
 		return utils.ErrorKeyNotFound
 	}
 
-	bs, err := jsoniter.Marshal(net)
+	bs, err := json.Marshal(net)
 	if err != nil {
 		return err
 	}

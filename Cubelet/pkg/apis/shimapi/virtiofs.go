@@ -6,10 +6,11 @@ package shimapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/containerd/containerd/v2/client"
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -45,7 +46,7 @@ func (csc *cubeShimControl) AddAllowedDirs(ctx context.Context, toAppendLayer []
 
 		defaultVfs.VirtioBackendFsConfig.AllowedDirs = allowedDir.UnsortedList()
 		cubebox.VirtiofsMap[constants.CubeDefaultNamespace] = defaultVfs
-		cubeFsValue, err := jsoniter.MarshalToString(defaultVfs)
+		cubeFsValue, err := json.Marshal(defaultVfs)
 		if err != nil {
 			logEntry.WithError(err).Errorf("failed to marshal cube fs config")
 			return fmt.Errorf("failed to marshal cube fs config")

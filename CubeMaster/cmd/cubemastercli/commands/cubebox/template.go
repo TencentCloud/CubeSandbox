@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	api "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	commands "github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemastercli/commands"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -385,7 +385,7 @@ var TemplateCreateCommand = cli.Command{
 			return err
 		}
 		req := &types.CreateCubeSandboxReq{}
-		if err = jsoniter.Unmarshal(reqBytes, req); err != nil {
+		if err = json.Unmarshal(reqBytes, req); err != nil {
 			return err
 		}
 		if req.Request == nil {
@@ -426,7 +426,7 @@ var TemplateCreateCommand = cli.Command{
 		port = c.GlobalString("port")
 		host := serverList[rand.Int()%len(serverList)]
 		url := fmt.Sprintf("http://%s/cube/template", net.JoinHostPort(host, port))
-		body, err := jsoniter.Marshal(req)
+		body, err := json.Marshal(req)
 		if err != nil {
 			return err
 		}
@@ -536,7 +536,7 @@ var TemplateRenderCommand = cli.Command{
 			if err != nil {
 				return err
 			}
-			if err = jsoniter.Unmarshal(reqBytes, req); err != nil {
+			if err = json.Unmarshal(reqBytes, req); err != nil {
 				return err
 			}
 		}
@@ -566,7 +566,7 @@ var TemplateRenderCommand = cli.Command{
 		host := serverList[rand.Int()%len(serverList)]
 		url := fmt.Sprintf("http://%s/cube/sandbox/preview", net.JoinHostPort(host, port))
 
-		body, err := jsoniter.Marshal(req)
+		body, err := json.Marshal(req)
 		if err != nil {
 			return err
 		}
@@ -619,7 +619,7 @@ var TemplateDeleteCommand = cli.Command{
 			RequestID:  requestID,
 			TemplateID: templateID,
 		}
-		body, err := jsoniter.Marshal(req)
+		body, err := json.Marshal(req)
 		if err != nil {
 			return err
 		}
@@ -690,7 +690,7 @@ var TemplateCommitCommand = cli.Command{
 			return err
 		}
 		createReq := &types.CreateCubeSandboxReq{}
-		if err = jsoniter.Unmarshal(reqBytes, createReq); err != nil {
+		if err = json.Unmarshal(reqBytes, createReq); err != nil {
 			return err
 		}
 		if createReq.Request == nil {
@@ -718,7 +718,7 @@ var TemplateCommitCommand = cli.Command{
 		port = c.GlobalString("port")
 		host := serverList[rand.Int()%len(serverList)]
 		url := fmt.Sprintf("http://%s/cube/sandbox/commit", net.JoinHostPort(host, port))
-		body, err := jsoniter.Marshal(req)
+		body, err := json.Marshal(req)
 		if err != nil {
 			return err
 		}
@@ -810,7 +810,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		if err != nil {
 			return err
 		}
-		body, err := jsoniter.Marshal(req)
+		body, err := json.Marshal(req)
 		if err != nil {
 			return err
 		}
@@ -863,7 +863,7 @@ var TemplateRedoCommand = cli.Command{
 			FailedOnly:        c.Bool("failed-only"),
 			Wait:              c.Bool("wait"),
 		}
-		body, err := jsoniter.Marshal(req)
+		body, err := json.Marshal(req)
 		if err != nil {
 			return err
 		}

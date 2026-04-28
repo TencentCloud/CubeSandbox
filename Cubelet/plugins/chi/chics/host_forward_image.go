@@ -14,7 +14,9 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/containerd/typeurl/v2"
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
+	"encoding/json"
+
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -225,7 +227,7 @@ func (s *cubeHostImageReverseClient) sharedHostSnapshotToVm(ctx context.Context,
 func appendImageDescriptors(image imagestore.Image, response *cubehost.ForwardImageResponse) error {
 
 	imageSpec := image.ImageSpec
-	configBytes, err := jsoniter.Marshal(imageSpec)
+	configBytes, err := json.Marshal(imageSpec)
 	if err != nil {
 		return fmt.Errorf("failed to marshal image config: %w", err)
 	}

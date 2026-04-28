@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
@@ -67,7 +67,7 @@ func (s *service) doResetVolumeRefExec(ctx context.Context, req *images.VolumUti
 				continue
 			}
 			m := &meta{}
-			err = jsoniter.Unmarshal(v, m)
+			err = json.Unmarshal(v, m)
 			if err != nil {
 				continue
 			}
@@ -92,7 +92,7 @@ func (s *service) doResetVolumeRefExec(ctx context.Context, req *images.VolumUti
 			}
 			m.Ref = 0
 			m.Timestamp = time.Now().Unix()
-			value, err := jsoniter.Marshal(m)
+			value, err := json.Marshal(m)
 			if err != nil {
 				return err
 			}
@@ -146,7 +146,7 @@ func (s *service) doResetVolumeRef(ctx context.Context, req *images.VolumUtilsRe
 				continue
 			}
 			m := &meta{}
-			err = jsoniter.Unmarshal(v, m)
+			err = json.Unmarshal(v, m)
 			if err != nil {
 				continue
 			}
@@ -169,7 +169,7 @@ func (s *service) doResetVolumeRef(ctx context.Context, req *images.VolumUtilsRe
 			}
 			m.Ref = cnt
 			m.Timestamp = time.Now().Unix()
-			value, err := jsoniter.Marshal(m)
+			value, err := json.Marshal(m)
 			if err != nil {
 				return err
 			}

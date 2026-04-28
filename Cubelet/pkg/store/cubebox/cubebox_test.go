@@ -12,7 +12,8 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
@@ -86,13 +87,13 @@ func TestCubeBoxOldFromNew(t *testing.T) {
 	assert.Equal(t, ci.ID, ctr.ID)
 	assert.Equal(t, cubebox.ContainerState_CONTAINER_RUNNING, ctr.Status.Status.State())
 
-	bs, err := jsoniter.Marshal(&info)
+	bs, err := json.Marshal(&info)
 	if err != nil {
 		t.Fatalf("Marshal error: %v", err)
 	}
 
 	var cb CubeBox
-	if err := jsoniter.Unmarshal(bs, &cb); err != nil {
+	if err := json.Unmarshal(bs, &cb); err != nil {
 		t.Fatalf("Unmarshal error: %v", err)
 	}
 
@@ -106,7 +107,7 @@ func TestCubeBoxOldFromNew(t *testing.T) {
 	assert.Equal(t, cubebox.ContainerState_CONTAINER_RUNNING, cntr.Status.Status.State())
 
 	var oldcb OldCubeBox
-	if err := jsoniter.Unmarshal(bs, &oldcb); err != nil {
+	if err := json.Unmarshal(bs, &oldcb); err != nil {
 		t.Fatalf("Unmarshal error: %v", err)
 	}
 
@@ -151,13 +152,13 @@ func TestCubeBoxNewFromOld(t *testing.T) {
 	assert.Equal(t, ci.ID, cntr.ID)
 	assert.Equal(t, cubebox.ContainerState_CONTAINER_RUNNING, cntr.Status.Status.State())
 
-	oldbs, err := jsoniter.Marshal(&oldInfo)
+	oldbs, err := json.Marshal(&oldInfo)
 	if err != nil {
 		t.Fatalf("Marshal error: %v", err)
 	}
 
 	var oldcb OldCubeBox
-	if err := jsoniter.Unmarshal(oldbs, &oldcb); err != nil {
+	if err := json.Unmarshal(oldbs, &oldcb); err != nil {
 		t.Fatalf("Unmarshal error: %v", err)
 	}
 
@@ -167,7 +168,7 @@ func TestCubeBoxNewFromOld(t *testing.T) {
 	assert.Equal(t, cubebox.ContainerState_CONTAINER_RUNNING, cntr.Status.Status.State())
 
 	var newcb CubeBox
-	if err := jsoniter.Unmarshal(oldbs, &newcb); err != nil {
+	if err := json.Unmarshal(oldbs, &newcb); err != nil {
 		t.Fatalf("Unmarshal error: %v", err)
 	}
 
@@ -217,13 +218,13 @@ func TestCubeBoxEncodeDecode(t *testing.T) {
 	assert.Equal(t, ci.ID, ctr.ID)
 	assert.Equal(t, cubebox.ContainerState_CONTAINER_RUNNING, ctr.Status.Status.State())
 
-	bs, err := jsoniter.Marshal(&info)
+	bs, err := json.Marshal(&info)
 	if err != nil {
 		t.Fatalf("Marshal error: %v", err)
 	}
 
 	var cb CubeBox
-	if err := jsoniter.Unmarshal(bs, &cb); err != nil {
+	if err := json.Unmarshal(bs, &cb); err != nil {
 		t.Fatalf("Unmarshal error: %v", err)
 	}
 
@@ -320,7 +321,7 @@ func TestAddContainer(t *testing.T) {
 	assert.Equal(t, ctr.ID, ci.ID)
 	assert.True(t, ctr.Status.Status.State() == cubebox.ContainerState_CONTAINER_RUNNING)
 
-	bs, err := jsoniter.Marshal(info)
+	bs, err := json.Marshal(info)
 	if err != nil {
 		t.Fatalf("Marshal error: %v", err)
 	}
@@ -334,7 +335,7 @@ func TestAddContainer(t *testing.T) {
 		t.Fatalf("Get error: %v", err)
 	}
 	var cb CubeBox
-	if err := jsoniter.Unmarshal(sandboxBytes, &cb); err != nil {
+	if err := json.Unmarshal(sandboxBytes, &cb); err != nil {
 		t.Fatalf("Unmarshal error: %v", err)
 	}
 

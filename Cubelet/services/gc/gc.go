@@ -15,7 +15,9 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/plugin/registry"
-	jsoniter "github.com/json-iterator/go"
+	//"encoding/json"
+	"encoding/json"
+
 	"github.com/moby/sys/mountinfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 
@@ -209,7 +211,7 @@ type sandBoxInfo struct {
 }
 
 func (l *local) saveSandBoxInfo(info *sandBoxInfo) error {
-	b, _ := jsoniter.Marshal(info)
+	b, _ := json.Marshal(info)
 	return l.db.Set(bucketName, info.SandboxID, b)
 }
 
@@ -229,7 +231,7 @@ func (l *local) readAll() (infos []*sandBoxInfo, _ error) {
 
 	for k, v := range all {
 		bf := &sandBoxInfo{}
-		err = jsoniter.Unmarshal(v, bf)
+		err = json.Unmarshal(v, bf)
 		if err != nil {
 			CubeLog.Warnf("readAll [%s] failed:%s", k, err.Error())
 			continue

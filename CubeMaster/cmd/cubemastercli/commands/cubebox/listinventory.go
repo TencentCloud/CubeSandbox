@@ -17,7 +17,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
 )
@@ -73,7 +73,7 @@ var ListInventoryCommand = cli.Command{
 				})
 			}
 		}
-		reqEn, _ := jsoniter.Marshal(req)
+		reqEn, _ := json.Marshal(req)
 		url := fmt.Sprintf("http://%s/cube/listinventory", net.JoinHostPort(host, port))
 		rsp := &types.ListInventoryRes{}
 		err := doHttpReq(c, url, http.MethodPost, requestID, bytes.NewBuffer(reqEn), rsp)

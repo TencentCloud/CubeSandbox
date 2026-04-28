@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
+
+	"encoding/json"
+
 	"github.com/tatsushid/go-fastping"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
@@ -267,7 +269,7 @@ func doHTTPGet(req *http.Request, timeout time.Duration, instanceType string) (e
 	}
 
 	pRes := &httpProbeRet{}
-	err = jsoniter.Unmarshal(b, pRes)
+	err = json.Unmarshal(b, pRes)
 	if err != nil {
 		pRes.ErrorCode = int(errorcode.ErrorCode_PortBindingFailed)
 		pRes.ErrorMsg = string(b)

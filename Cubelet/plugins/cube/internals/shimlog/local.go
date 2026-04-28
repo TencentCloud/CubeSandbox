@@ -17,7 +17,9 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/fifo"
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
+	"encoding/json"
+
 	"github.com/moby/sys/mountinfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -236,7 +238,7 @@ func (l *local) shimStatlog(ctx context.Context, sandBoxID string, f io.ReadClos
 					lines := logBuf.Write(buf[:n])
 					for _, line := range lines {
 						trace := &CubeLog.RequestTrace{}
-						err := jsoniter.Unmarshal(line, trace)
+						err := json.Unmarshal(line, trace)
 						if err != nil {
 							logEntry.Warnf("json.Unmarshal ShimStatLog error: %+v", err)
 							continue

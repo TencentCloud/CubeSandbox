@@ -13,7 +13,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -33,7 +33,7 @@ func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx con
 	}
 	for id, sandboxBytes := range all {
 		var cb = new(cubeboxstore.CubeBox)
-		if err := jsoniter.Unmarshal(sandboxBytes, &cb); err != nil {
+		if err := json.Unmarshal(sandboxBytes, &cb); err != nil {
 			log.G(ctx).Errorf("Unmarshal to cubebox %s from meta: %v", id, err)
 			continue
 		}

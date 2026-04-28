@@ -5,6 +5,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -12,7 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/urfave/cli/v2"
@@ -73,7 +74,7 @@ var lsdb = &cli.Command{
 				continue
 			}
 			bf := &storage.StorageInfo{}
-			err = jsoniter.Unmarshal(v, bf)
+			err = json.Unmarshal(v, bf)
 			if err != nil {
 				continue
 			}

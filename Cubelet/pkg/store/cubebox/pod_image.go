@@ -9,7 +9,8 @@ import (
 	"errors"
 
 	"github.com/containerd/continuity/fs"
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
+
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubehost/v1"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -83,7 +84,7 @@ func (cb *PodConfig) appendImageLayer(layers []*cubehost.LayerMount) error {
 		if _, ok := cb.HostSharedLayers[l.Name]; !ok {
 			if l.Usage != "" {
 				usage := &fs.Usage{}
-				err := jsoniter.Unmarshal([]byte(l.Usage), usage)
+				err := json.Unmarshal([]byte(l.Usage), usage)
 				if err == nil {
 					newSize = newSize + usage.Size
 					if newSize > cb.ImageStorageQuota && cb.ImageStorageQuota > 0 {
@@ -111,7 +112,7 @@ func (cb *PodConfig) DeleteImageLayer(name string) {
 	if l, ok := cb.HostSharedLayers[name]; ok {
 		if l.Usage != "" {
 			usage := &fs.Usage{}
-			err := jsoniter.Unmarshal([]byte(l.Usage), usage)
+			err := json.Unmarshal([]byte(l.Usage), usage)
 			if err == nil {
 				cb.ImageStorageUsed -= usage.Size
 				if cb.ImageStorageUsed < 0 {

@@ -6,12 +6,12 @@ package common
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"reflect"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/bufferpool"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
@@ -20,7 +20,7 @@ import (
 func WriteResponse(w http.ResponseWriter, code int, data interface{}) {
 	w.WriteHeader(code)
 	w.Header().Set("Content-Type", "application/json")
-	d, _ := FastestJsoniter.Marshal(data)
+	d, _ := types.Fastestjson.Marshal(data)
 	w.Write(d)
 }
 
@@ -31,7 +31,7 @@ func WriteListResponse(w http.ResponseWriter, code int, data interface{}) {
 			reqRspPool.Put(buffer)
 		}
 	}()
-	err := jsoniter.NewEncoder(buffer).Encode(data)
+	err := json.NewEncoder(buffer).Encode(data)
 	if err != nil {
 		CubeLog.Fatalf("WriteListResponse fail:%v", err)
 		WriteResponse(w, http.StatusOK, &types.Res{
@@ -104,19 +104,12 @@ func GetBodyReq(r *http.Request, object interface{}) (err error) {
 	if err != nil {
 		return err
 	}
-	err = FastestJsoniter.Unmarshal(buffer.Bytes(), object)
+	err = types.Fastestjson.Unmarshal(buffer.Bytes(), object)
 	if err != nil {
 		return err
 	}
 	return nil
 }
-
-var FastestJsoniter = jsoniter.Config{
-	EscapeHTML:                    false,
-	UseNumber:                     true,
-	MarshalFloatWith6Digits:       true,
-	ObjectFieldMustBeSimpleString: true,
-}.Froze()
 
 var reqRspPool bufferpool.BufferPool
 

@@ -5,11 +5,10 @@
 package log
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
-
-	jsoniter "github.com/json-iterator/go"
 )
 
 const (
@@ -113,7 +112,7 @@ func (w *CubeWrapperLogEntry) extralFieldsToContent() string {
 	}
 
 	if len(extendsFields) > 0 {
-		jsonStr, _ := jsoniter.MarshalToString(extendsFields)
+		jsonStr, _ := json.Marshal(extendsFields)
 		return fmt.Sprintf(" with additional fields: %s", jsonStr)
 	}
 	return ""

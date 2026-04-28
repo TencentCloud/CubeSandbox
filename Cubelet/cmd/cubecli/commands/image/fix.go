@@ -5,6 +5,7 @@
 package image
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
+	//"encoding/json"
 	imagestore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/urfave/cli/v2"
@@ -79,7 +80,7 @@ var Fix = &cli.Command{
 
 		for _, data := range nfsImageMap {
 			img := &imagestore.Image{}
-			err = jsoniter.Unmarshal(data, img)
+			err = json.Unmarshal(data, img)
 			if err != nil {
 				fmt.Printf("unmarshal nfs image failed %s\n", err.Error())
 				continue

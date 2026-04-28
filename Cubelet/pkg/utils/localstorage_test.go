@@ -13,7 +13,9 @@ import (
 	"testing"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
+	"encoding/json"
+
 	"github.com/stretchr/testify/assert"
 	bolt "go.etcd.io/bbolt"
 )
@@ -306,7 +308,7 @@ func TestSetBs_Multidb_SingelKey_BenchMark(t *testing.T) {
 			FileSize:  1024 * 1024 * 50,
 			Timestamp: time.Now().Unix(),
 		}
-		value, _ := jsoniter.Marshal(vv)
+		value, _ := json.Marshal(vv)
 
 		key := strconv.FormatInt(int64(i), 10) + strconv.FormatInt(int64(i), 10)
 		err = db.Set(b1, key, value)
@@ -320,7 +322,7 @@ func TestSetBs_Multidb_SingelKey_BenchMark(t *testing.T) {
 	assert.Equal(t, len(all), num)
 	for _, v := range all {
 		m := &meta{}
-		_ = jsoniter.Unmarshal(v, m)
+		_ = json.Unmarshal(v, m)
 
 	}
 }
@@ -361,7 +363,7 @@ func TestSetBs_Multidb_MultiKeys_BenchMark(t *testing.T) {
 			FileSize:  1024 * 1024 * 50,
 			Timestamp: time.Now().Unix(),
 		}
-		value, _ := jsoniter.Marshal(vv)
+		value, _ := json.Marshal(vv)
 		key := strconv.FormatInt(int64(i), 10)
 		err = db.SetBs(key, value, b1, b2s[i])
 		if err != nil {
@@ -384,7 +386,7 @@ func TestSetBs_Multidb_MultiKeys_BenchMark(t *testing.T) {
 		}
 		for _, v := range all {
 			m := &meta{}
-			_ = jsoniter.Unmarshal(v, m)
+			_ = json.Unmarshal(v, m)
 
 		}
 	}

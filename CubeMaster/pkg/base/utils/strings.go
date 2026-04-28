@@ -6,24 +6,20 @@
 package utils
 
 import (
+	"encoding/json"
 	"io"
 	"reflect"
-	"unsafe"
-
 	"slices"
-
-	jsoniter "github.com/json-iterator/go"
+	"unsafe"
 )
 
-var JSONTool = jsoniter.ConfigFastest
-
 func InterfaceToString(obj interface{}) string {
-	body, _ := JSONTool.Marshal(obj)
+	body, _ := json.Marshal(obj)
 	return string(body)
 }
 
 func DecodeHttpBody(body io.ReadCloser, obj interface{}) error {
-	decoder := jsoniter.NewDecoder(body)
+	decoder := json.NewDecoder(body)
 	decoder.UseNumber()
 	return decoder.Decode(obj)
 }

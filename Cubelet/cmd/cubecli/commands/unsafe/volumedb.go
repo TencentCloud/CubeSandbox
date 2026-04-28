@@ -6,13 +6,13 @@ package unsafe
 
 import (
 	gocontext "context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -87,7 +87,7 @@ var volumedb = &cli.Command{
 		allSandboxVolumes := map[string]*createInfo{}
 		for k, v := range all {
 			bf := &createInfo{}
-			err = jsoniter.ConfigFastest.Unmarshal(v, bf)
+			err = json.Unmarshal(v, bf)
 			if err != nil {
 				myPrint("decode[%s]  fail:%v", k, err)
 				continue
