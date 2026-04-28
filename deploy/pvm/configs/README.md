@@ -11,7 +11,7 @@ build scripts:
 The configs are kept in-tree so the default build path is reproducible and
 works in offline or air-gapped environments. They are derived from the PVM
 kernel tree used by these scripts (`https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel.git`,
-branch `linux-6.6/cube/pvm`) and the upstream reference configs published by
+tag `6.6.69-1.cubesandbox`) and the upstream reference configs published by
 the virt-pvm project:
 
 - `https://raw.githubusercontent.com/virt-pvm/misc/refs/heads/main/pvm-host-6.12.33.config`

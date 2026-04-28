@@ -3,7 +3,7 @@
 # build-pvm-host-kernel-pkg.sh
 #
 # Build the pvm-host kernel installation package:
-#   - Clone https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel.git (branch: linux-6.6/cube/pvm)
+#   - Clone https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel.git (tag: 6.6.69-1.cubesandbox)
 #   - Apply the pvm-host kernel .config
 #   - Build an RPM or DEB package depending on the host distribution family
 #
@@ -34,7 +34,7 @@ PVM_CONFIG_NAME="pvm_host"
 PVM_TARGET_DESC="target host"
 
 REPO_URL="${REPO_URL:-https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel.git}"
-BRANCH="${BRANCH:-linux-6.6/cube/pvm}"
+BRANCH="${BRANCH:-6.6.69-1.cubesandbox}"
 CONFIG_URL="${CONFIG_URL:-https://raw.githubusercontent.com/virt-pvm/misc/refs/heads/main/pvm-host-6.12.33.config}"
 CONFIG_SHA256="${CONFIG_SHA256:-edc1965a48fbe972ee6eb3d1be96de3d0fd00c1edfe665974330dea819545e00}"
 
