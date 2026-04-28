@@ -330,13 +330,77 @@ install_deps() {
 
 clone_source() {
     mkdir -p "${WORK_DIR}"
+
+    # BRANCH can be any of: a branch name, a tag name, or a commit SHA.
+    # The previous implementation assumed a branch name and referenced
+    # `origin/${BRANCH}` after fetch, which breaks on a second run when
+    # BRANCH is actually a tag: `git fetch --depth=1 origin <tag>` only
+    # updates FETCH_HEAD and does NOT create a remote-tracking ref
+    # `refs/remotes/origin/<tag>`, so `git reset --hard origin/<tag>`
+    # fails with
+    #     fatal: ambiguous argument 'origin/<tag>': unknown revision ...
+    #
+    # Instead, fetch and then pin to the concrete SHA resolved via
+    # FETCH_HEAD. That works uniformly for branches, tags and commit
+    # SHAs, and is also correct on shallow clones.
     if [[ -d "${SRC_DIR}/.git" ]]; then
-        log "Source tree already exists at ${SRC_DIR}; updating..."
-        git -C "${SRC_DIR}" fetch --depth=1 origin "${BRANCH}"
-        git -C "${SRC_DIR}" checkout "${BRANCH}"
-        git -C "${SRC_DIR}" reset --hard "origin/${BRANCH}"
+        log "Source tree already exists at ${SRC_DIR}; updating to ${BRANCH} ..."
+
+        # Make sure we're pointing at the configured remote; if someone
+        # hand-edited .git/config or re-ran with a different REPO_URL,
+        # update it so we don't silently fetch from the wrong place.
+        local current_url=""
+        current_url="$(git -C "${SRC_DIR}" remote get-url origin 2>/dev/null || true)"
+        if [[ -z "${current_url}" ]]; then
+            git -C "${SRC_DIR}" remote add origin "${REPO_URL}"
+        elif [[ "${current_url}" != "${REPO_URL}" ]]; then
+            warn "origin URL differs (${current_url} -> ${REPO_URL}); updating."
+            git -C "${SRC_DIR}" remote set-url origin "${REPO_URL}"
+        fi
+
+        # Fetch the requested ref together with its tags. --depth=1 keeps
+        # things cheap; if a previous run left a deeper history behind,
+        # this will simply shallow-fetch on top of it (harmless).
+        if ! git -C "${SRC_DIR}" fetch --depth=1 --tags --force origin "${BRANCH}"; then
+            # Some remotes won't accept a direct SHA in refspec position
+            # on a shallow clone; fall back to fetching everything the
+            # remote advertises and resolving locally.
+            warn "Targeted fetch of '${BRANCH}' failed; retrying with a generic fetch."
+            git -C "${SRC_DIR}" fetch --depth=1 --tags --force origin
+        fi
+
+        # Resolve BRANCH to a concrete commit SHA without relying on
+        # refs/remotes/origin/<name> existing.
+        local target_sha=""
+        if target_sha="$(git -C "${SRC_DIR}" rev-parse --verify -q FETCH_HEAD)"; then
+            :
+        elif target_sha="$(git -C "${SRC_DIR}" rev-parse --verify -q "refs/tags/${BRANCH}")"; then
+            :
+        elif target_sha="$(git -C "${SRC_DIR}" rev-parse --verify -q "refs/remotes/origin/${BRANCH}")"; then
+            :
+        elif target_sha="$(git -C "${SRC_DIR}" rev-parse --verify -q "${BRANCH}^{commit}")"; then
+            :
+        else
+            err "Could not resolve '${BRANCH}' to a commit in ${SRC_DIR}."
+            err "Tried: FETCH_HEAD, refs/tags/${BRANCH}, refs/remotes/origin/${BRANCH}, ${BRANCH}."
+            exit 1
+        fi
+
+        log "Resolved '${BRANCH}' to ${target_sha}; checking out."
+        # Detach to the SHA: idempotent for branches/tags/SHAs alike, and
+        # never fails because of a pre-existing local branch with the
+        # same name pointing elsewhere.
+        git -C "${SRC_DIR}" checkout --detach --quiet "${target_sha}"
+        git -C "${SRC_DIR}" reset --hard "${target_sha}"
+        # Drop any untracked leftovers from a previous, possibly failed
+        # build so the tree really is at `${target_sha}` and nothing else.
+        git -C "${SRC_DIR}" clean -fdx
     else
-        log "Cloning ${REPO_URL} (branch ${BRANCH}) into ${SRC_DIR} ..."
+        log "Cloning ${REPO_URL} (ref ${BRANCH}) into ${SRC_DIR} ..."
+        # `git clone --branch` accepts either a branch or a tag name, so
+        # this single line handles both; it does not accept bare commit
+        # SHAs, but REPO_URL+BRANCH combos consumed by this script always
+        # resolve to a named ref.
         git clone --depth=1 --branch "${BRANCH}" "${REPO_URL}" "${SRC_DIR}"
     fi
 }
