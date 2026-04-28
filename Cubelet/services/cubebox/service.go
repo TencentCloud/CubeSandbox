@@ -863,6 +863,16 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 		if cb.FirstContainer() == nil {
 			continue
 		}
+		// Cubelet itself initiated the pause and already tracks the in-progress
+		// state via PausingAt (CONTAINER_PAUSING) or PausedAt (CONTAINER_PAUSED).
+		// Calling RecoverContainer -> shim state() while pause_vm() holds the
+		// sandbox mutex causes a ttrpc timeout; RecoverContainer then sets
+		// Unknown=true, making the sandbox appear Terminated and triggering a
+		// spurious Destroy cascade.  Skip paused/pausing sandboxes: DeadGC has
+		// nothing useful to do for them.
+		if cb.GetStatus() != nil && cb.GetStatus().IsPaused() {
+			continue
+		}
 		ctx = namespaces.WithNamespace(ctx, cb.Namespace)
 		ctr, err := cubes.RecoverContainer(ctx, client, cb, cb.FirstContainer())
 		if err != nil {
