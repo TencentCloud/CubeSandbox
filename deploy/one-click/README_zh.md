@@ -22,15 +22,19 @@
 
 ## 构建输入
 
-需要准备的固定文件只有 guest kernel 的 `vmlinux`：
+必须准备的固定 kernel 制品是普通 guest kernel `vmlinux`，也可以额外打包 PVM guest kernel `vmlinux-pvm`：
 
 - `vmlinux`
+- `vmlinux-pvm`（可选）
 
 默认放在 `assets/kernel-artifacts/`，也可以通过环境变量覆盖：
 
 ```bash
 export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
+export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
+
+运行时仍然使用 `cube-kernel-scf/vmlinux`。默认情况下该文件是普通 guest kernel；如果目标机安装时设置 `CUBE_PVM_ENABLE=1`，安装脚本会把包内的 `vmlinux-pvm` 覆盖安装为 `cube-kernel-scf/vmlinux`。
 
 guest image 不再依赖本地 zip，而是在构建 one-click 发布包时基于 `deploy/guest-image/Dockerfile` 本地生成。常用覆盖参数如下：
 
@@ -313,7 +317,7 @@ export E2B_API_KEY=dummy
 
 ## 已知限制
 
-- 如果 `assets/kernel-artifacts/` 下缺少 `vmlinux`，`build-vm-assets.sh` 和 `build-release-bundle.sh` 会立即失败；发布包里的 `cube-kernel-scf.zip` 会在打包阶段自动生成。
+- 如果 `assets/kernel-artifacts/` 下缺少 `vmlinux`，`build-vm-assets.sh` 和 `build-release-bundle.sh` 会立即失败；`vmlinux-pvm` 在构建时是可选制品，但安装时若设置 `CUBE_PVM_ENABLE=1`，发布包内必须包含它；发布包里的 `cube-kernel-scf.zip` 会在打包阶段自动生成。
 - 如果 `deploy/guest-image/Dockerfile` 构建失败，或构建机的 `mkfs.ext4` 不支持 `-d`，guest image 生成会立即失败。
 - `cube-snapshot/spec.json` 在当前 one-click 首版中不是强制产物；缺失时相关插件会退化为告警，而不是阻塞基础启动。
 - 如果目标机既没有 `systemd-resolved` / `resolvectl`，也没有可重启的 `NetworkManager`，当前 one-click 仍会报错，因为这类环境下暂未接入第三套宿主机 DNS 方案。

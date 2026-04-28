@@ -1,0 +1,107 @@
+name: Release PVM Host Kernel Packages
+
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-pvm-host-kernel-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build PVM host kernel (${{ matrix.package_type }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package_type: deb
+            build_mode: native
+          - package_type: rpm
+            build_mode: container
+            container_image: fedora:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build DEB package
+        if: matrix.build_mode == 'native'
+        run: |
+          WORK_DIR="${GITHUB_WORKSPACE}/pvm-host-build" \
+          OUTPUT_DIR="${GITHUB_WORKSPACE}/pvm-host-build/output" \
+            bash deploy/pvm/build-pvm-host-kernel-pkg.sh
+
+      - name: Build RPM package
+        if: matrix.build_mode == 'container'
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -w /workspace \
+            "${{ matrix.container_image }}" \
+            bash -lc 'WORK_DIR=/workspace/pvm-host-build OUTPUT_DIR=/workspace/pvm-host-build/output bash deploy/pvm/build-pvm-host-kernel-pkg.sh'
+
+      - name: Verify package artifacts
+        run: |
+          shopt -s nullglob
+          packages=(pvm-host-build/output/*.${{ matrix.package_type }})
+          if [[ "${#packages[@]}" -eq 0 ]]; then
+            echo "No ${{ matrix.package_type }} packages were produced" >&2
+            exit 1
+          fi
+          ls -lh "${packages[@]}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pvm-host-kernel-${{ matrix.package_type }}-${{ github.ref_name }}
+          path: pvm-host-build/output/*.${{ matrix.package_type }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Upload PVM host packages to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: pvm-host-release-assets
+          pattern: pvm-host-kernel-*-${{ github.ref_name }}
+          merge-multiple: true
+
+      - name: Verify release assets
+        run: |
+          shopt -s nullglob
+          assets=(pvm-host-release-assets/*.{deb,rpm})
+          if [[ "${#assets[@]}" -eq 0 ]]; then
+            echo "No PVM host kernel packages were downloaded" >&2
+            exit 1
+          fi
+          ls -lh "${assets[@]}"
+
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Automated PVM host kernel packages."
+          fi
+
+      - name: Upload PVM host packages to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          assets=(pvm-host-release-assets/*.{deb,rpm})
+          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber

@@ -19,10 +19,79 @@ env:
   VMLINUX_CACHE_PATH: kernel-cache/vmlinux
   VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
   KERNEL_TAG: 6.6.119-49.6
+  PVM_KERNEL_TAG: 6.6.69-1.cubesandbox
+  PVM_VMLINUX_CACHE_PATH: kernel-cache/vmlinux-pvm
+  PVM_VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux-pvm
 
 jobs:
+  build_pvm_guest_vmlinux:
+    name: Build PVM guest vmlinux for release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute PVM vmlinux cache metadata
+        id: pvm_vmlinux_metadata
+        run: |
+          source_hash="$(
+            sha256sum \
+              deploy/pvm/build-pvm-guest-vmlinux.sh \
+              deploy/pvm/common.sh \
+              deploy/pvm/configs/pvm_guest \
+              | sha256sum \
+              | awk '{print $1}'
+          )"
+          echo "source_hash=${source_hash}" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=vmlinux-pvm-${PVM_KERNEL_TAG}-${source_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=vmlinux-pvm-${PVM_KERNEL_TAG}-${source_hash}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore cached PVM vmlinux
+        id: restore_pvm_vmlinux
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.PVM_VMLINUX_CACHE_PATH }}
+          key: ${{ steps.pvm_vmlinux_metadata.outputs.cache_key }}
+
+      - name: Build PVM guest vmlinux
+        if: steps.restore_pvm_vmlinux.outputs.cache-hit != 'true'
+        run: |
+          WORK_DIR="${GITHUB_WORKSPACE}/pvm-guest-build" \
+          OUTPUT_DIR="${GITHUB_WORKSPACE}/pvm-guest-build/output" \
+            bash deploy/pvm/build-pvm-guest-vmlinux.sh
+          install -D -m 0644 \
+            "${GITHUB_WORKSPACE}/pvm-guest-build/output/vmlinux" \
+            "${PVM_VMLINUX_CACHE_PATH}"
+
+      - name: Verify PVM vmlinux
+        run: |
+          test -f "${PVM_VMLINUX_CACHE_PATH}"
+          file "${PVM_VMLINUX_CACHE_PATH}"
+
+      - name: Save PVM vmlinux cache
+        if: steps.restore_pvm_vmlinux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.PVM_VMLINUX_CACHE_PATH }}
+          key: ${{ steps.pvm_vmlinux_metadata.outputs.cache_key }}
+
+      - name: Stage PVM vmlinux artifact payload
+        run: |
+          rm -rf pvm-vmlinux-artifact
+          install -D -m 0644 "${PVM_VMLINUX_CACHE_PATH}" pvm-vmlinux-artifact/vmlinux-pvm
+
+      - name: Upload PVM vmlinux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pvm_vmlinux_metadata.outputs.artifact_name }}
+          path: pvm-vmlinux-artifact/vmlinux-pvm
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     runs-on: ubuntu-latest
+    needs: build_pvm_guest_vmlinux
 
     steps:
       - name: Checkout
@@ -133,6 +202,35 @@ jobs:
           test -f "${VMLINUX_CACHE_PATH}"
           test -f "${VMLINUX_RELEASE_PATH}"
           file "${VMLINUX_RELEASE_PATH}"
+
+      - name: Compute PVM vmlinux cache metadata
+        id: pvm_vmlinux_metadata
+        run: |
+          source_hash="$(
+            sha256sum \
+              deploy/pvm/build-pvm-guest-vmlinux.sh \
+              deploy/pvm/common.sh \
+              deploy/pvm/configs/pvm_guest \
+              | sha256sum \
+              | awk '{print $1}'
+          )"
+          echo "source_hash=${source_hash}" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=vmlinux-pvm-${PVM_KERNEL_TAG}-${source_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=vmlinux-pvm-${PVM_KERNEL_TAG}-${source_hash}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download PVM vmlinux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.pvm_vmlinux_metadata.outputs.artifact_name }}
+          path: downloaded-pvm-vmlinux
+
+      - name: Stage PVM vmlinux
+        run: |
+          install -D -m 0644 \
+            downloaded-pvm-vmlinux/vmlinux-pvm \
+            "${PVM_VMLINUX_RELEASE_PATH}"
+          test -f "${PVM_VMLINUX_RELEASE_PATH}"
+          file "${PVM_VMLINUX_RELEASE_PATH}"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
