@@ -7,6 +7,8 @@ on:
       - 'deploy/pvm/common.sh'
       - 'deploy/pvm/configs/pvm_guest'
       - '.github/workflows/build-pvm-guest-vmlinux.yml'
+    tags:
+      - '*'
   workflow_dispatch:
 
 env:
@@ -18,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      artifact_name: ${{ steps.pvm_vmlinux_metadata.outputs.artifact_name }}
 
     steps:
       - name: Checkout
@@ -79,3 +83,41 @@ jobs:
           path: pvm-vmlinux-artifact/vmlinux-pvm
           if-no-files-found: error
           retention-days: 14
+
+  publish:
+    name: Upload PVM guest vmlinux to GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download PVM vmlinux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: pvm-guest-release-assets
+
+      - name: Verify release asset
+        run: |
+          test -f pvm-guest-release-assets/vmlinux-pvm
+          ls -lh pvm-guest-release-assets/vmlinux-pvm
+
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Automated release."
+          fi
+
+      - name: Upload PVM guest vmlinux to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            pvm-guest-release-assets/vmlinux-pvm \
+            --clobber
