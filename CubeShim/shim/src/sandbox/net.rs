@@ -124,9 +124,6 @@ pub struct Interface {
     #[serde(default)]
     pub ips: Vec<MVMIp>,
     pub qos: Option<NetQos>,
-    pub disable_tso: bool,
-    pub disable_ufo: bool,
-    pub disable_check_sum: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
