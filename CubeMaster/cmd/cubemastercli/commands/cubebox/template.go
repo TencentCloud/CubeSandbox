@@ -112,177 +112,6 @@ type templateDeleteRequest struct {
 	Sync         bool   `json:"sync,omitempty"`
 }
 
-func mergeCubeVSContextFlags(c *cli.Context, existing *types.CubeVSContext) *types.CubeVSContext {
-	hasAllowInternetAccess := c.IsSet("allow-internet-access")
-	allowOut := dedupeCIDRs(c.StringSlice("allow-out-cidr"))
-	denyOut := dedupeCIDRs(c.StringSlice("deny-out-cidr"))
-	return mergeCubeVSContextValues(existing, hasAllowInternetAccess, c.Bool("allow-internet-access"), allowOut, denyOut)
-}
-
-func mergeCubeVSContextValues(existing *types.CubeVSContext, hasAllowInternetAccess bool, allowInternetAccess bool, allowOut []string, denyOut []string) *types.CubeVSContext {
-	if !hasAllowInternetAccess && len(allowOut) == 0 && len(denyOut) == 0 {
-		return existing
-	}
-
-	out := cloneCubeVSContext(existing)
-	if out == nil {
-		out = &types.CubeVSContext{}
-	}
-	if hasAllowInternetAccess {
-		out.AllowInternetAccess = &allowInternetAccess
-	}
-	if len(allowOut) > 0 {
-		out.AllowOut = appendUniqueCIDRs(out.AllowOut, allowOut)
-	}
-	if len(denyOut) > 0 {
-		out.DenyOut = appendUniqueCIDRs(out.DenyOut, denyOut)
-	}
-	return out
-}
-
-type createFromImageExtraCubeVSFlags struct {
-	hasAllowInternetAccess bool
-	allowInternetAccess    bool
-	allowOut               []string
-	denyOut                []string
-}
-
-func mergeCreateFromImageCubeVSContextFlags(c *cli.Context, existing *types.CubeVSContext) (*types.CubeVSContext, error) {
-	extra, err := parseCreateFromImageExtraCubeVSFlags(c)
-	if err != nil {
-		return nil, err
-	}
-	hasAllowInternetAccess := c.IsSet("allow-internet-access") || extra.hasAllowInternetAccess
-	allowInternetAccess := c.Bool("allow-internet-access")
-	if extra.hasAllowInternetAccess {
-		allowInternetAccess = extra.allowInternetAccess
-	}
-	allowOut := appendUniqueCIDRs(dedupeCIDRs(c.StringSlice("allow-out-cidr")), extra.allowOut)
-	denyOut := appendUniqueCIDRs(dedupeCIDRs(c.StringSlice("deny-out-cidr")), extra.denyOut)
-	return mergeCubeVSContextValues(existing, hasAllowInternetAccess, allowInternetAccess, allowOut, denyOut), nil
-}
-
-func parseCreateFromImageExtraCubeVSFlags(c *cli.Context) (*createFromImageExtraCubeVSFlags, error) {
-	extraArgs := make([]string, 0, c.NArg())
-	for i := 0; i < c.NArg(); i++ {
-		extraArgs = append(extraArgs, c.Args().Get(i))
-	}
-	if len(extraArgs) == 0 {
-		return &createFromImageExtraCubeVSFlags{}, nil
-	}
-	extra := &createFromImageExtraCubeVSFlags{}
-	idx := 0
-
-	if c.IsSet("allow-internet-access") {
-		if value, ok := parseBoolToken(extraArgs[idx]); ok {
-			extra.hasAllowInternetAccess = true
-			extra.allowInternetAccess = value
-			idx++
-		}
-	}
-
-	for idx < len(extraArgs) {
-		arg := extraArgs[idx]
-		switch {
-		case arg == "--allow-out-cidr":
-			idx++
-			if idx >= len(extraArgs) {
-				return nil, errors.New("--allow-out-cidr requires a value")
-			}
-			extra.allowOut = append(extra.allowOut, extraArgs[idx])
-			idx++
-		case strings.HasPrefix(arg, "--allow-out-cidr="):
-			extra.allowOut = append(extra.allowOut, strings.TrimPrefix(arg, "--allow-out-cidr="))
-			idx++
-		case arg == "--deny-out-cidr":
-			idx++
-			if idx >= len(extraArgs) {
-				return nil, errors.New("--deny-out-cidr requires a value")
-			}
-			extra.denyOut = append(extra.denyOut, extraArgs[idx])
-			idx++
-		case strings.HasPrefix(arg, "--deny-out-cidr="):
-			extra.denyOut = append(extra.denyOut, strings.TrimPrefix(arg, "--deny-out-cidr="))
-			idx++
-		case arg == "--allow-internet-access":
-			idx++
-			if idx >= len(extraArgs) {
-				return nil, errors.New("--allow-internet-access requires true or false when passed as a trailing argument")
-			}
-			value, ok := parseBoolToken(extraArgs[idx])
-			if !ok {
-				return nil, fmt.Errorf("invalid --allow-internet-access value %q: want true or false", extraArgs[idx])
-			}
-			extra.hasAllowInternetAccess = true
-			extra.allowInternetAccess = value
-			idx++
-		case strings.HasPrefix(arg, "--allow-internet-access="):
-			value, ok := parseBoolToken(strings.TrimPrefix(arg, "--allow-internet-access="))
-			if !ok {
-				return nil, fmt.Errorf("invalid --allow-internet-access value %q: want true or false", strings.TrimPrefix(arg, "--allow-internet-access="))
-			}
-			extra.hasAllowInternetAccess = true
-			extra.allowInternetAccess = value
-			idx++
-		default:
-			return nil, fmt.Errorf("unexpected positional or trailing argument %q; use --allow-internet-access=false or place bool values at the end only when explicitly supported", arg)
-		}
-	}
-
-	extra.allowOut = dedupeCIDRs(extra.allowOut)
-	extra.denyOut = dedupeCIDRs(extra.denyOut)
-	return extra, nil
-}
-
-func parseBoolToken(value string) (bool, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "true":
-		return true, true
-	case "false":
-		return false, true
-	default:
-		return false, false
-	}
-}
-
-func cloneCubeVSContext(in *types.CubeVSContext) *types.CubeVSContext {
-	if in == nil {
-		return nil
-	}
-	out := &types.CubeVSContext{
-		AllowOut: append([]string(nil), in.AllowOut...),
-		DenyOut:  append([]string(nil), in.DenyOut...),
-	}
-	if in.AllowInternetAccess != nil {
-		allowInternetAccess := *in.AllowInternetAccess
-		out.AllowInternetAccess = &allowInternetAccess
-	}
-	return out
-}
-
-func dedupeCIDRs(values []string) []string {
-	return appendUniqueCIDRs(nil, values)
-}
-
-func appendUniqueCIDRs(base []string, extra []string) []string {
-	seen := make(map[string]struct{}, len(base)+len(extra))
-	out := append([]string(nil), base...)
-	for _, cidr := range base {
-		seen[cidr] = struct{}{}
-	}
-	for _, cidr := range extra {
-		if cidr == "" {
-			continue
-		}
-		if _, ok := seen[cidr]; ok {
-			continue
-		}
-		seen[cidr] = struct{}{}
-		out = append(out, cidr)
-	}
-	return out
-}
-
 func formatCubeVSContext(ctx *types.CubeVSContext) string {
 	if ctx == nil {
 		return "allow_internet_access=default(true) allow_out=[] deny_out=[]"
@@ -416,7 +245,10 @@ var TemplateCreateCommand = cli.Command{
 		if scope := c.StringSlice("node"); len(scope) > 0 {
 			req.DistributionScope = scope
 		}
-		req.CubeVSContext = mergeCubeVSContextFlags(c, req.CubeVSContext)
+		req.CubeVSContext, err = mergeCubeVSParams(c, req.CubeVSContext)
+		if err != nil {
+			return err
+		}
 
 		serverList = getServerAddrs(c)
 		if len(serverList) == 0 {
@@ -702,7 +534,10 @@ var TemplateCommitCommand = cli.Command{
 			createReq.Annotations = map[string]string{}
 		}
 		createReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
-		createReq.CubeVSContext = mergeCubeVSContextFlags(c, createReq.CubeVSContext)
+		createReq.CubeVSContext, err = mergeCubeVSParams(c, createReq.CubeVSContext)
+		if err != nil {
+			return err
+		}
 
 		req := &templateCommitRequest{
 			RequestID:     requestID,
@@ -806,7 +641,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 			RegistryPassword:   c.String("registry-password"),
 			ContainerOverrides: containerOverrides,
 		}
-		req.CubeVSContext, err = mergeCreateFromImageCubeVSContextFlags(c, req.CubeVSContext)
+		req.CubeVSContext, err = parseCubeVSParams(c)
 		if err != nil {
 			return err
 		}
