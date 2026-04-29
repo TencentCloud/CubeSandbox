@@ -25,7 +25,7 @@ jobs:
             build_mode: native
           - package_type: rpm
             build_mode: container
-            container_image: fedora:latest
+            container_image: fedora:40
 
     steps:
       - name: Checkout
