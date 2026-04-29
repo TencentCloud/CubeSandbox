@@ -26,6 +26,21 @@ const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
+const HOSTDIR_MOUNT_LEGACY_KEY: &str = "hostdir-mount";
+
+fn split_metadata_labels_and_hostdir_annotation(
+    metadata: Option<HashMap<String, String>>,
+    annotations: &mut HashMap<String, String>,
+) -> Option<HashMap<String, String>> {
+    metadata.map(|mut meta| {
+        let host_mount = meta.remove(HOSTDIR_MOUNT_KEY);
+        let legacy_hostdir_mount = meta.remove(HOSTDIR_MOUNT_LEGACY_KEY);
+        if let Some(value) = host_mount.or(legacy_hostdir_mount) {
+            annotations.insert(HOSTDIR_MOUNT_KEY.to_string(), value);
+        }
+        meta
+    })
+}
 
 #[derive(Clone)]
 pub struct SandboxService {
@@ -126,12 +141,7 @@ impl SandboxService {
             ),
         ]);
 
-        let labels = body.metadata.map(|mut meta| {
-            if let Some(value) = meta.remove(HOSTDIR_MOUNT_KEY) {
-                annotations.insert(HOSTDIR_MOUNT_KEY.to_string(), value);
-            }
-            meta
-        });
+        let labels = split_metadata_labels_and_hostdir_annotation(body.metadata, &mut annotations);
 
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
@@ -681,7 +691,10 @@ pub(crate) fn build_cubevs_context(
 mod tests {
     use std::collections::HashMap;
 
-    use super::{build_cubevs_context, filter_by_metadata, from_cubemaster_info};
+    use super::{
+        build_cubevs_context, filter_by_metadata, from_cubemaster_info,
+        split_metadata_labels_and_hostdir_annotation,
+    };
     use crate::cubemaster::SandboxInfo;
     use crate::models::SandboxNetworkConfig;
 
@@ -699,6 +712,46 @@ mod tests {
         ));
         assert!(!filter_by_metadata(Some(&metadata), Some("user=bob")));
         assert!(!filter_by_metadata(None, Some("user=alice")));
+    }
+
+    #[test]
+    fn split_metadata_moves_host_mount_to_annotation() {
+        let mut annotations = HashMap::new();
+        let labels = split_metadata_labels_and_hostdir_annotation(
+            Some(HashMap::from([
+                ("host-mount".to_string(), "mount-config".to_string()),
+                ("user".to_string(), "alice".to_string()),
+            ])),
+            &mut annotations,
+        )
+        .expect("labels");
+
+        assert_eq!(
+            annotations.get("host-mount").map(String::as_str),
+            Some("mount-config")
+        );
+        assert_eq!(labels.get("user").map(String::as_str), Some("alice"));
+        assert!(!labels.contains_key("host-mount"));
+    }
+
+    #[test]
+    fn split_metadata_accepts_legacy_hostdir_mount_and_prefers_canonical() {
+        let mut annotations = HashMap::new();
+        let labels = split_metadata_labels_and_hostdir_annotation(
+            Some(HashMap::from([
+                ("host-mount".to_string(), "canonical".to_string()),
+                ("hostdir-mount".to_string(), "legacy".to_string()),
+            ])),
+            &mut annotations,
+        )
+        .expect("labels");
+
+        assert_eq!(
+            annotations.get("host-mount").map(String::as_str),
+            Some("canonical")
+        );
+        assert!(!labels.contains_key("host-mount"));
+        assert!(!labels.contains_key("hostdir-mount"));
     }
 
     #[test]
