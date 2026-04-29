@@ -25,11 +25,22 @@ jobs:
             build_mode: native
           - package_type: rpm
             build_mode: container
-            container_image: fedora:latest
+            container_image: fedora:40
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
 
       - name: Build DEB package
         if: matrix.build_mode == 'native'
