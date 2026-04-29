@@ -120,6 +120,49 @@ class Sandbox:
 
     # ── code execution ────────────────────────────────────────────────
 
+    # ── context management ──────────────────────────────────────────
+
+    def create_context(
+        self,
+        *,
+        language: str = "python",
+        cwd: str = "/home/user",
+    ) -> "Context":
+        """Create a new kernel context on the sandbox's envd.
+
+        The context keeps variable state alive between :meth:`run_code` calls.
+        envd generates the ``id``; use the returned :class:`Context` object
+        with subsequent ``run_code`` calls.
+
+        Args:
+            language: Kernel language (default ``"python"``)
+            cwd: Working directory for the context.
+
+        Returns:
+            A :class:`Context` with the server-assigned ``id``.
+        """
+        if self._client is None:
+            self._client = build_client(self._config)
+        url = f"http://{self.get_host(JUPYTER_PORT)}/contexts"
+        resp = self._client.post(
+            url,
+            json={"language": language, "cwd": cwd},
+            headers={"Content-Type": "application/json"},
+        )
+        if resp.status_code >= 400:
+            raise ApiError(f"create_context failed: HTTP {resp.status_code}", resp.status_code)
+        data = resp.json()
+        return Context(id=data["id"], language=data["language"], cwd=data["cwd"])
+
+    def delete_context(self, context: "Context") -> None:
+        """Delete a kernel context from the sandbox's envd."""
+        if self._client is None:
+            self._client = build_client(self._config)
+        url = f"http://{self.get_host(JUPYTER_PORT)}/contexts/{context.id}"
+        resp = self._client.delete(url)
+        if resp.status_code >= 400:
+            raise ApiError(f"delete_context failed: HTTP {resp.status_code}", resp.status_code)
+
     def run_code(
         self,
         code: str,

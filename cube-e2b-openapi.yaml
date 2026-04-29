@@ -29,7 +29,7 @@ info:
     | CUBE_TEMPLATE_ID | ✅ | — | 模板 ID |
     | CUBE_PROXY_NODE_IP | 远程必填 | — | CubeProxy IP，绕过 DNS |
     | E2B_API_KEY | ❌ 无需 | dummy | cube-api 不鉴权，可忽略 |
-    | CUBE_PROXY_PORT_HTTP | — | 80 | CubeProxy HTTP 端口 |
+    | CUBE_PROXY_PORT_HTTP | — | 80 | CubeProxy 对外 HTTP 端口（nginx 内部 listen 8081，对外暴露 80） |
     | CUBE_SANDBOX_DOMAIN | — | cube.app | sandbox 域名后缀 |
 
   version: "1.0.0"
