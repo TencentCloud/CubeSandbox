@@ -26,7 +26,7 @@
   <a href="./README_zh.md"><strong>中文文档</strong></a> ·
   <a href="./docs/guide/quickstart.md"><strong>Quick Start</strong></a> ·
   <a href="./docs/index.md"><strong>Documentation</strong></a> ·
-  <a href="https://discord.gg/kkapzDXShb" target="_blank"><strong>Discord</strong></a>
+  <a href="./docs/changelog.md"><strong>Changelog</strong></a>
 </p>
 
 ---
@@ -272,7 +272,7 @@ Want to explore more? Check out the 📂 [`examples/`](./examples/) directory, c
 
 We welcome contributions of all kinds—whether it’s a bug report, feature suggestion, documentation improvement, or code submission!
 
-- 🐞 **Found a Bug?** Submit an issue on <a href="https://github.com/tencentcloud/CubeSandbox/issues" target="_blank">GitHub Issues</a>.
+- 🐞 **Found a Bug or have questions?** Submit an issue on <a href="https://github.com/tencentcloud/CubeSandbox/issues" target="_blank">GitHub Issues</a>.
 - 💡 **Have an Idea?** Join the conversation in <a href="https://github.com/tencentcloud/CubeSandbox/discussions" target="_blank">GitHub Discussions</a>.
 - 🛠️ **Want to Code?** Check out our <a href="./CONTRIBUTING.md" target="_blank">CONTRIBUTING.md</a> to learn how to submit a Pull Request.
 - 💬 **Want to Chat?** Join our <a href="https://discord.gg/kkapzDXShb" target="_blank">Discord</a>.
