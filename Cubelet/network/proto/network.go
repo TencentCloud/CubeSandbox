@@ -38,9 +38,6 @@ type Interface struct {
 
 	Mask            int        `json:"mask"`
 	IPs             []MVMIp    `json:"ips"`
-	DisableTso      bool       `json:"disable_tso"`
-	DisableUfo      bool       `json:"disable_ufo"`
-	DisableCheckSum bool       `json:"disable_check_sum"`
 	Qos             *QosConfig `json:"qos"`
 }
 
