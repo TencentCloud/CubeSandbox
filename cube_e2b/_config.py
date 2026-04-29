@@ -18,7 +18,7 @@ class Config:
         default_factory=lambda: os.environ.get("CUBE_PROXY_NODE_IP")
     )
     proxy_port: int = field(
-        default_factory=lambda: int(os.environ.get("CUBE_PROXY_PORT_HTTP", "8081"))
+        default_factory=lambda: int(os.environ.get("CUBE_PROXY_PORT_HTTP", "80"))
     )
     sandbox_domain: str = field(
         default_factory=lambda: os.environ.get("CUBE_SANDBOX_DOMAIN", "cube.app")
