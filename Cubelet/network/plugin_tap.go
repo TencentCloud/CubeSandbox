@@ -7,6 +7,7 @@ package network
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +25,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 	. "github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/allocator"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -41,11 +41,7 @@ import (
 )
 
 var (
-	ErrNotRangeIP = errors.New("NotRangeIP")
-
 	ErrNotCubeTap = errors.New("NotCubeTap")
-
-	ErrIPExhausted = errors.New("IP exhausted")
 
 	ErrInvalidParams = errors.New("invalid network params")
 )
@@ -253,10 +249,9 @@ func extractIP(name string) (string, error) {
 
 var (
 	Name2MvmNet sync.Map
-	CfgAppMark  string
-
-	tapVersion uint32 = 0
 )
+
+var DefaultExposedPorts = []uint16{8080, 32000}
 
 type Config struct {
 	EthName             string   `toml:"eth_name"`
@@ -297,8 +292,6 @@ type Config struct {
 
 type local struct {
 	ID2MvmNet       sync.Map
-	allocator       *IPAllocator
-	portAllocator   allocator.Allocator[uint16]
 	Config          *Config
 	cubeDev         *CubeDev
 	Device          *MachineDevice
@@ -366,20 +359,13 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 		return nil, err
 	}
 	log.G(ic.Context).Info("network get node info done")
-	ipAllocator, err := NewAllocator(config.CIDR)
+	gwIP, mask, err := getGwIPAndMask(config.CIDR)
 	if err != nil {
 		return nil, err
 	}
-	log.G(ic.Context).Info("network ipam init done")
 
-	portAllocator, err := initPortAllocatorFromSysConfig()
-	if err != nil {
-		return nil, err
-	}
-	log.G(ic.Context).Info("network port allocator init done")
 
-	gwIP := ipAllocator.GatewayIP()
-	cubeDev, err := getOrNewCubeDev(gwIP, ipAllocator.mask, config.MvmMtu, config.MvmGwMacAddr)
+	cubeDev, err := getOrNewCubeDev(gwIP, mask, config.MvmMtu, config.MvmGwMacAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -389,8 +375,6 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 		Config:             config,
 		Device:             device,
 		cubeDev:            cubeDev,
-		allocator:          ipAllocator,
-		portAllocator:      portAllocator,
 		DestroyLocks:       utils.NewResourceLocks(),
 		networkAgentClient: networkagentclient.NewNoopClient(),
 	}
@@ -1171,4 +1155,21 @@ func (l *local) loadNet(sandboxID string) *MvmNet {
 	}
 
 	return mvmNet.(*MvmNet)
+}
+
+func getGwIPAndMask(cidr string) (net.IP, int, error) {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, 0, err
+	}
+	mask, _ := ipNet.Mask.Size()
+	netIP := ipNet.IP.To4()
+	if netIP == nil {
+		return nil, 0, fmt.Errorf("invalid IPv4 CIDR: %s", cidr)
+	}
+	// Gateway is network address + 1
+	gwInt := binary.BigEndian.Uint32(netIP) + 1
+	gwIP := make(net.IP, 4)
+	binary.BigEndian.PutUint32(gwIP, gwInt)
+	return gwIP, mask, nil
 }
