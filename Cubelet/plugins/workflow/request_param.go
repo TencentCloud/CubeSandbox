@@ -8,13 +8,11 @@ import (
 	"fmt"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/disk"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
-func GetQosFromReq(req *cubebox.RunCubeSandboxRequest) (*disk.RateLimiter, error) {
-	key := constants.MasterAnnotationsFSQos
+func GetQosFromReq(req *cubebox.RunCubeSandboxRequest, key string) (*disk.RateLimiter, error) {
 	if req == nil {
 		return nil, fmt.Errorf("reqinfo is nil")
 	}
