@@ -7,13 +7,14 @@ package app
 import (
 	"context"
 	"fmt"
+	stdlog "log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/server"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"golang.org/x/sys/unix"
 )
 
@@ -25,6 +26,7 @@ var handledSignals = []os.Signal{
 }
 
 func handleSignals(ctx context.Context, signals chan os.Signal, serverC chan *server.Server,
+	serverErr chan error,
 	cancelOutside func()) chan struct{} {
 	done := make(chan struct{}, 1)
 	go func() {
@@ -52,6 +54,13 @@ func handleSignals(ctx context.Context, signals chan os.Signal, serverC chan *se
 					close(done)
 					return
 				}
+			case err := <-serverErr:
+				stdlog.Printf("server error: %v", err)
+				CubeLog.WithContext(ctx).Errorf("server error: %v", err)
+				cancelOutside()
+				graceFullStop()
+				close(done)
+				return
 			}
 		}
 	}()
