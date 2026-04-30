@@ -78,21 +78,60 @@ build_rust_binary() {
   esac
 }
 
+build_or_copy_go_binary() {
+  local name="$1"
+  local override_path="$2"
+  local workdir="$3"
+  local mode="$4"
+  local output="$5"
+  local package="$6"
+
+  if [[ -n "${override_path}" ]]; then
+    log "using prebuilt ${name}: ${override_path}"
+    copy_file "${override_path}" "${output}"
+    return 0
+  fi
+
+  log "building ${name}"
+  build_go_binary "${workdir}" "${mode}" "${output}" "${package}"
+}
+
+build_or_copy_rust_binary() {
+  local name="$1"
+  local override_path="$2"
+  local workdir="$3"
+  local mode="$4"
+  local output="$5"
+
+  if [[ -n "${override_path}" ]]; then
+    log "using prebuilt ${name}: ${override_path}"
+    copy_file "${override_path}" "${output}"
+    return 0
+  fi
+
+  log "building ${name}"
+  build_rust_binary "${workdir}" "${mode}" "${name}" "${output}"
+}
+
 package_kernel_artifact_zip() {
   local src_vmlinux="$1"
   local output_zip="$2"
+  local src_pvm_vmlinux="${3:-}"
   require_cmd python3
-  python3 - "${src_vmlinux}" "${output_zip}" <<'PY'
+  python3 - "${src_vmlinux}" "${output_zip}" "${src_pvm_vmlinux}" <<'PY'
 import os
 import sys
 import zipfile
 
 src_path = sys.argv[1]
 zip_path = sys.argv[2]
+pvm_src_path = sys.argv[3] if len(sys.argv) > 3 else ""
 
 os.makedirs(os.path.dirname(zip_path), exist_ok=True)
 with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
     zf.write(src_path, arcname="vmlinux")
+    if pvm_src_path and os.path.isfile(pvm_src_path):
+        zf.write(pvm_src_path, arcname="vmlinux-pvm")
 PY
 }
 
@@ -127,58 +166,38 @@ log "building runtime layout"
 "${SCRIPT_DIR}/build-vm-assets.sh"
 
 log "packaging fixed kernel artifact zip"
-package_kernel_artifact_zip "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux" "${KERNEL_ARTIFACT_ZIP}"
+package_kernel_artifact_zip \
+  "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux" \
+  "${KERNEL_ARTIFACT_ZIP}" \
+  "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
 
 rm -rf "${CORE_BIN_DIR}" "${PACKAGE_ROOT}" "${PACKAGE_TAR}" "${DIST_ROOT}" "${DIST_TAR}"
 mkdir -p "${CORE_BIN_DIR}"
 
-if [[ -z "${CUBEMASTER_BIN_OVERRIDE}" ]]; then
-  log "building cubemaster"
-  build_go_binary "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" "${CORE_BIN_DIR}/cubemaster" ./cmd/cubemaster
-else
-  log "using prebuilt cubemaster: ${CUBEMASTER_BIN_OVERRIDE}"
-  copy_file "${CUBEMASTER_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cubemaster"
-fi
-
-if [[ -z "${CUBEMASTERCLI_BIN_OVERRIDE}" ]]; then
-  log "building cubemastercli"
-  build_go_binary "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" "${CORE_BIN_DIR}/cubemastercli" ./cmd/cubemastercli
-else
-  log "using prebuilt cubemastercli: ${CUBEMASTERCLI_BIN_OVERRIDE}"
-  copy_file "${CUBEMASTERCLI_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cubemastercli"
-fi
-
-if [[ -z "${CUBELET_BIN_OVERRIDE}" ]]; then
-  log "building cubelet"
-  build_go_binary "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" "${CORE_BIN_DIR}/cubelet" ./cmd/cubelet
-else
-  log "using prebuilt cubelet: ${CUBELET_BIN_OVERRIDE}"
-  copy_file "${CUBELET_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cubelet"
-fi
-
-if [[ -z "${CUBECLI_BIN_OVERRIDE}" ]]; then
-  log "building cubecli"
-  build_go_binary "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" "${CORE_BIN_DIR}/cubecli" ./cmd/cubecli
-else
-  log "using prebuilt cubecli: ${CUBECLI_BIN_OVERRIDE}"
-  copy_file "${CUBECLI_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cubecli"
-fi
-
-if [[ -z "${API_BIN_OVERRIDE}" ]]; then
-  log "building cube-api"
-  build_rust_binary "${ROOT_DIR}/CubeAPI" "${API_BUILD_MODE}" "cube-api" "${CORE_BIN_DIR}/cube-api"
-else
-  log "using prebuilt cube-api: ${API_BIN_OVERRIDE}"
-  copy_file "${API_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cube-api"
-fi
-
-if [[ -z "${NETWORK_AGENT_BIN_OVERRIDE}" ]]; then
-  log "building network-agent"
-  build_go_binary "${ROOT_DIR}/network-agent" "${NETWORK_AGENT_BUILD_MODE}" "${CORE_BIN_DIR}/network-agent" ./cmd/network-agent
-else
-  log "using prebuilt network-agent: ${NETWORK_AGENT_BIN_OVERRIDE}"
-  copy_file "${NETWORK_AGENT_BIN_OVERRIDE}" "${CORE_BIN_DIR}/network-agent"
-fi
+build_or_copy_go_binary \
+  "cubemaster" "${CUBEMASTER_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/cubemaster" ./cmd/cubemaster
+build_or_copy_go_binary \
+  "cubemastercli" "${CUBEMASTERCLI_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/cubemastercli" ./cmd/cubemastercli
+build_or_copy_go_binary \
+  "cubelet" "${CUBELET_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/cubelet" ./cmd/cubelet
+build_or_copy_go_binary \
+  "cubecli" "${CUBECLI_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/cubecli" ./cmd/cubecli
+build_or_copy_rust_binary \
+  "cube-api" "${API_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/CubeAPI" "${API_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/cube-api"
+build_or_copy_go_binary \
+  "network-agent" "${NETWORK_AGENT_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/network-agent" "${NETWORK_AGENT_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/network-agent" ./cmd/network-agent
 
 mkdir -p \
   "${PACKAGE_ROOT}/network-agent/bin" \

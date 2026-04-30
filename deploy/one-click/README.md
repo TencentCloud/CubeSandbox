@@ -22,15 +22,19 @@ This directory is used to build and deliver the single-machine one-click release
 
 ## Build Inputs
 
-The only fixed file that needs to be prepared is the guest kernel `vmlinux`:
+The required fixed kernel artifact is the ordinary guest kernel `vmlinux`. A PVM guest kernel can also be packaged as `vmlinux-pvm`:
 
 - `vmlinux`
+- `vmlinux-pvm` (optional)
 
-By default it is placed under `assets/kernel-artifacts/`, but can be overridden via an environment variable:
+By default they are placed under `assets/kernel-artifacts/`, but can be overridden via environment variables:
 
 ```bash
 export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
+export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
+
+The installed runtime still uses `cube-kernel-scf/vmlinux`. By default that file is the ordinary guest kernel. If the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer copies the packaged `vmlinux-pvm` over `cube-kernel-scf/vmlinux`.
 
 The guest image no longer depends on a local zip file. Instead, it is generated locally from `deploy/guest-image/Dockerfile` during the one-click release package build. Common override parameters:
 
@@ -313,7 +317,7 @@ Conditional commands:
 
 ## Known Limitations
 
-- If `vmlinux` is missing from `assets/kernel-artifacts/`, `build-vm-assets.sh` and `build-release-bundle.sh` will fail immediately. The `cube-kernel-scf.zip` in the release package is generated automatically during the packaging phase.
+- If `vmlinux` is missing from `assets/kernel-artifacts/`, `build-vm-assets.sh` and `build-release-bundle.sh` will fail immediately. `vmlinux-pvm` is optional at build time, but installation with `CUBE_PVM_ENABLE=1` requires it to be present in the package. The `cube-kernel-scf.zip` in the release package is generated automatically during the packaging phase.
 - If the `deploy/guest-image/Dockerfile` build fails, or the build machine's `mkfs.ext4` does not support the `-d` flag, guest image generation will fail immediately.
 - `cube-snapshot/spec.json` is not a mandatory artifact in the current first release of one-click. If absent, the related plugin degrades to a warning rather than blocking the basic startup.
 - If the target machine has neither `systemd-resolved` / `resolvectl` nor a restartable `NetworkManager`, one-click will currently report an error, as a third host DNS solution for such environments has not yet been integrated.

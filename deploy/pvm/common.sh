@@ -284,7 +284,7 @@ install_deps_rpm() {
 
     local pkgs=(
         git make gcc gcc-c++ bc bison flex
-        elfutils-libelf-devel openssl-devel
+        elfutils-libelf-devel openssl openssl-devel
         perl-core ncurses-devel
         dwarves cpio tar xz which findutils
         hostname wget rsync lz4

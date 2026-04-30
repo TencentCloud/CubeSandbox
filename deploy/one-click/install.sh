@@ -23,6 +23,11 @@ fi
 DEPLOY_ROLE="$(one_click_deploy_role)"
 TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
 INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
+CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
+case "${CUBE_PVM_ENABLE}" in
+  0|1) ;;
+  *) die "unsupported CUBE_PVM_ENABLE: ${CUBE_PVM_ENABLE} (expected 0 or 1)" ;;
+esac
 
 print_path_hint() {
   {
@@ -68,6 +73,16 @@ require_any_cmd() {
     fi
   done
   die "requires one of commands: $*"
+}
+
+install_required_dependencies() {
+  log "checking and installing dependencies..."
+  install_ripgrep
+
+  if needs_docker_for_install; then
+    install_docker
+    install_docker_compose
+  fi
 }
 
 check_dns_preflight() {
@@ -189,6 +204,20 @@ check_install_preflight() {
   fi
 }
 
+select_installed_kernel_vmlinux() {
+  local kernel_dir="${INSTALL_PREFIX}/cube-kernel-scf"
+
+  ensure_file "${kernel_dir}/vmlinux"
+  if [[ "${CUBE_PVM_ENABLE}" != "1" ]]; then
+    log "using ordinary guest kernel: ${kernel_dir}/vmlinux"
+    return 0
+  fi
+
+  ensure_file "${kernel_dir}/vmlinux-pvm"
+  cp -f "${kernel_dir}/vmlinux-pvm" "${kernel_dir}/vmlinux"
+  log "CUBE_PVM_ENABLE=1, installed PVM guest kernel as ${kernel_dir}/vmlinux"
+}
+
 configure_tencent_docker_mirror() {
   local enable_mirror="${ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR:-0}"
   local mirror_url="${ONE_CLICK_TENCENT_DOCKER_MIRROR_URL:-https://mirror.ccs.tencentyun.com}"
@@ -251,7 +280,7 @@ else
   log "primary network interface not detected; keeping packaged Cubelet eth_name"
 fi
 
-install_dependencies
+install_required_dependencies
 check_hardware_preflight
 check_cubelet_fs_preflight
 check_install_preflight
@@ -321,6 +350,8 @@ else
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
 
+select_installed_kernel_vmlinux
+
 mkdir -p \
   "${INSTALL_PREFIX}/cube-vs/network" \
   "${INSTALL_PREFIX}/cube-snapshot" \
@@ -344,6 +375,7 @@ else
   : > "${RUNTIME_ENV_FILE}"
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
 if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NODE_IP" "${CUBE_SANDBOX_NODE_IP}"
 fi
