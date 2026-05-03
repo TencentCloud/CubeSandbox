@@ -79,8 +79,6 @@ local function get_backend_address(ins_id, container_port)
     local host_ip = cache:get(cache_backend_ip_key)
     local host_port = cache:get(cache_backend_port_key)
     if host_ip and host_port then
-        cache:set(cache_backend_ip_key, host_ip, timeout)
-        cache:set(cache_backend_port_key, host_port, timeout)
         return host_ip, host_port
     end
 
@@ -148,6 +146,8 @@ end
 local host_ip, host_port = get_backend_address(ins_id, container_port)
 ngx.var.backend_ip = host_ip
 ngx.var.backend_port = host_port
+ngx.ctx.ins_id = ins_id
+ngx.ctx.container_port = container_port
 
 local faulty_backend, err = utils:is_faulty_backend(host_ip, true)
 if err then
