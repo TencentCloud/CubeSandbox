@@ -79,60 +79,71 @@ local function get_backend_address(ins_id, container_port)
     local host_ip = cache:get(cache_backend_ip_key)
     local host_port = cache:get(cache_backend_port_key)
     if host_ip and host_port then
-        cache:set(cache_backend_ip_key, host_ip, timeout)
-        cache:set(cache_backend_port_key, host_port, timeout)
         return host_ip, host_port
     end
 
-    local metadata, err = load_sandbox_proxy_metadata(ins_id)
-    if err then
-        ngx.log(ngx.ERR, "LEVEL_ERROR||", err)
-        ngx.var.cube_retcode = "310500"
-        ngx.exit(500)
+    local fn = function()
+        -- 2nd check
+        local h_ip = cache:get(cache_backend_ip_key)
+        local h_port = cache:get(cache_backend_port_key)
+        if h_ip and h_port then
+            return {ip = h_ip, port = h_port}, nil
+        end
+
+        local metadata, err = load_sandbox_proxy_metadata(ins_id)
+        if err then
+            return nil, {code = "310500", level = ngx.ERR, msg = err}
+        end
+
+        local metadata_map = {}
+        for i = 1, #metadata, 2 do
+            local k = metadata[i]
+            local v = metadata[i + 1]
+            metadata_map[k] = v
+            cache:set(ins_id .. ":" .. k, v, timeout)
+        end
+
+        local target_host_ip = metadata_map["HostIP"]
+        local target_sandbox_ip = metadata_map["SandboxIP"]
+        if utils:is_null(target_host_ip) then
+            return nil, {code = "310507", level = ngx.WARN, msg = string.format("request %s using instance %s misses HostIP", ngx.var.http_x_cube_request_id, ins_id)}
+        end
+
+        if not utils:is_null(caller_host_ip) and caller_host_ip == target_host_ip then
+            if utils:is_null(target_sandbox_ip) then
+                return nil, {code = "310507", level = ngx.ERR, msg = string.format("request %s instance %s on local host %s misses SandboxIP", ngx.var.http_x_cube_request_id, ins_id, caller_host_ip)}
+            end
+            h_ip = target_sandbox_ip
+            h_port = container_port
+        else
+            h_ip = target_host_ip
+            h_port = metadata_map[container_port]
+            if utils:is_null(h_port) then
+                return nil, {code = "310507", level = ngx.ERR, msg = string.format("request %s instance %s misses host port mapping for container_port %s", ngx.var.http_x_cube_request_id, ins_id, container_port)}
+            end
+        end
+
+        cache:set(cache_backend_ip_key, h_ip, timeout)
+        cache:set(cache_backend_port_key, h_port, timeout)
+        return {ip = h_ip, port = h_port}, nil
     end
 
-    local metadata_map = {}
-    for i = 1, #metadata, 2 do
-        local k = metadata[i]
-        local v = metadata[i + 1]
-        metadata_map[k] = v
-        cache:set(ins_id .. ":" .. k, v, timeout)
-    end
-
-    local target_host_ip = metadata_map["HostIP"]
-    local target_sandbox_ip = metadata_map["SandboxIP"]
-    if utils:is_null(target_host_ip) then
-        ngx.log(ngx.ERR, "LEVEL_WARN||",
-            string.format("request %s using instance %s misses HostIP", ngx.var.http_x_cube_request_id, ins_id))
-        ngx.var.cube_retcode = "310507"
-        ngx.exit(500)
-    end
-
-    if not utils:is_null(caller_host_ip) and caller_host_ip == target_host_ip then
-        if utils:is_null(target_sandbox_ip) then
-            ngx.log(ngx.ERR, "LEVEL_ERROR||",
-                string.format("request %s instance %s on local host %s misses SandboxIP",
-                    ngx.var.http_x_cube_request_id, ins_id, caller_host_ip))
-            ngx.var.cube_retcode = "310507"
+    local res, err, shared = utils:singleflight_do("local_cache_locks", "meta:" .. ins_id, fn)
+    
+    if not res then
+        if type(err) == "table" and err.code then
+            local level_str = (err.level == ngx.WARN) and "LEVEL_WARN||" or "LEVEL_ERROR||"
+            ngx.log(err.level or ngx.ERR, level_str, err.msg)
+            ngx.var.cube_retcode = err.code
+            ngx.exit(500)
+        else
+            ngx.log(ngx.ERR, "LEVEL_ERROR||", tostring(err))
+            ngx.var.cube_retcode = "310500"
             ngx.exit(500)
         end
-        host_ip = target_sandbox_ip
-        host_port = container_port
-    else
-        host_ip = target_host_ip
-        host_port = metadata_map[container_port]
-        if utils:is_null(host_port) then
-            ngx.log(ngx.ERR, "LEVEL_ERROR||",
-                string.format("request %s instance %s misses host port mapping for container_port %s",
-                    ngx.var.http_x_cube_request_id, ins_id, container_port))
-            ngx.var.cube_retcode = "310507"
-            ngx.exit(500)
-        end
     end
 
-    cache:set(cache_backend_ip_key, host_ip, timeout)
-    cache:set(cache_backend_port_key, host_port, timeout)
-    return host_ip, host_port
+    return res.ip, res.port
 end
 
 -- resolve sandbox id and container port from Host: <port>-<sandbox_id>.<domain>
