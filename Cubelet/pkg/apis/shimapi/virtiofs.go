@@ -10,7 +10,6 @@ import (
 	"fmt"
 
 	"github.com/containerd/containerd/v2/client"
-	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -52,7 +51,7 @@ func (csc *cubeShimControl) AddAllowedDirs(ctx context.Context, toAppendLayer []
 			return fmt.Errorf("failed to marshal cube fs config")
 		}
 		if err := csc.task.Update(ctx, client.WithAnnotations(map[string]string{
-			constants.AnnotationsFSKey: cubeFsValue,
+			constants.AnnotationsFSKey: string(cubeFsValue),
 		})); err != nil {
 			logEntry.WithError(err).Errorf("failed to update task for container %s", cubebox.FirstContainer().Container.ID())
 			return fmt.Errorf("failed to update task for container %s", cubebox.FirstContainer().Container.ID())

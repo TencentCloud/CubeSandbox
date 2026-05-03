@@ -13,13 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"encoding/json"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
-	"encoding/json"
-	"encoding/json"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"

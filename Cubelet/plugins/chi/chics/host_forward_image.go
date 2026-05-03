@@ -12,10 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"encoding/json"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/typeurl/v2"
-	"encoding/json"
-	"encoding/json"
 
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"

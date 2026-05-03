@@ -14,14 +14,13 @@ import (
 	"strings"
 	"time"
 
+	"encoding/json"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/events/exchange"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
-	"encoding/json"
-
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"

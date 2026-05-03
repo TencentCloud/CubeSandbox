@@ -18,7 +18,7 @@ func SafeCopyFile(dst, src string) (err error) {
 	}
 	defer srcFile.Close()
 
-	dstNewFile := dst + ".new" // NOCC:Path Traversal()
+	dstNewFile := dst + ".new"                                                        // NOCC:Path Traversal()
 	dstFile, err := os.OpenFile(dstNewFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644) // NOCC:Path Traversal()
 	if err != nil {
 		return err

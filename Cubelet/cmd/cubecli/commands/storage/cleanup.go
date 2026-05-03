@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"text/tabwriter"
 
-	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"

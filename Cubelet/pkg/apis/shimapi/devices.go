@@ -10,7 +10,6 @@ import (
 	"fmt"
 
 	"github.com/containerd/containerd/v2/client"
-	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/apis/shimapi/shimtypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
@@ -98,7 +97,7 @@ func (csc *cubeShimControl) DelDevices(ctx context.Context, devices []*shimtypes
 		}
 		if err := csc.task.Update(ctx, client.WithAnnotations(map[string]string{
 			API_UPDATE_ACTION_KEY:      API_ACTION_HOT_PLUGIN_DEL,
-			API_UPDATE_ACTION_DATA_KEY: b,
+			API_UPDATE_ACTION_DATA_KEY: string(b),
 		})); err != nil {
 			logEntry.WithError(err).Errorf("failed to update task for container %s", sandbox.FirstContainer().Container.ID())
 			return fmt.Errorf("failed to update task for container %s", sandbox.FirstContainer().Container.ID())

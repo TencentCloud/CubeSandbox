@@ -6,6 +6,7 @@ package localcache
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -14,7 +15,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"gorm.io/gorm"
 )
 
@@ -112,7 +112,7 @@ func (l *local) syncAllFromDB(update bool) error {
 			n.MachineHostIP = v.HostIP
 			n.InstanceFamily = v.InstanceFamily
 			if v.VirtualNodeQuota != "" {
-				err := utils.JSONTool.UnmarshalFromString(v.VirtualNodeQuota, &n.VirtualNodeQuotaArray)
+				err := json.Unmarshal([]byte(v.VirtualNodeQuota), &n.VirtualNodeQuotaArray)
 				if err != nil {
 					log.G(context.Background()).Errorf("VirtualNodeQuota error: %v", err)
 				}
@@ -187,7 +187,8 @@ func (l *local) loadFromDBByIDs(hostIDs []string) ([]*node.Node, error) {
 			n.MachineHostIP = v.HostIP
 			n.InstanceFamily = v.InstanceFamily
 			if v.VirtualNodeQuota != "" {
-				err := utils.JSONTool.UnmarshalFromString(v.VirtualNodeQuota, &n.VirtualNodeQuotaArray)
+				// MIGRATION: Using standard encoding/json
+				err := json.Unmarshal([]byte(v.VirtualNodeQuota), &n.VirtualNodeQuotaArray)
 				if err != nil {
 					log.G(context.Background()).Errorf("VirtualNodeQuota error: %v", err)
 				}

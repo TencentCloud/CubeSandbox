@@ -557,7 +557,17 @@ const (
 type stdJSONTool struct{}
 
 func (stdJSONTool) Marshal(v interface{}) ([]byte, error) {
-	return json.Marshal(v)
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	out := b.Bytes()
+	if n := len(out); n > 0 && out[n-1] == '\n' {
+		out = out[:n-1]
+	}
+	return out, nil
 }
 
 func (stdJSONTool) Unmarshal(data []byte, v interface{}) error {
@@ -566,7 +576,7 @@ func (stdJSONTool) Unmarshal(data []byte, v interface{}) error {
 	return dec.Decode(v)
 }
 
-var Fastestjson = stdJSONTool{}
+var FastestJsoniter = stdJSONTool{}
 
 type UpdateRequest struct {
 	RequestID    string `json:"requestID" p:"requestID"  v:"required"`

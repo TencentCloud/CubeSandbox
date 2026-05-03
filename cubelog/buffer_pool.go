@@ -13,7 +13,6 @@ var (
 	bufferPool BufferPool
 )
 
-
 type BufferPool interface {
 	Put(buffer *bytes.Buffer)
 	Get() *bytes.Buffer

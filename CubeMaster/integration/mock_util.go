@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"encoding/json"
 	"github.com/rcrowley/go-metrics"
 	"github.com/smallnest/weighted"
 	"github.com/stretchr/testify/assert"

@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"time"
 
-
 	"encoding/json"
 
 	"github.com/tatsushid/go-fastping"

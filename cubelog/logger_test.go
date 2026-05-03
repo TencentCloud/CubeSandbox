@@ -20,7 +20,6 @@ func makeLogContext() context.Context {
 	return ctx
 }
 
-
 func BenchmarkLogger_Infof(b *testing.B) {
 	ctx := makeLogContext()
 

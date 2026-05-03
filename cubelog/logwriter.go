@@ -13,16 +13,13 @@ import (
 	"time"
 )
 
-
 const (
 	DAY DateType = iota
 	HOUR
 )
 
-
 type ConsoleWriter struct {
 }
-
 
 type RollFileWriter struct {
 	logpath  string
@@ -33,7 +30,6 @@ type RollFileWriter struct {
 	currFile *os.File
 	openTime int64
 }
-
 
 type DateWriter struct {
 	logpath   string
@@ -46,10 +42,8 @@ type DateWriter struct {
 	hasPrefix bool
 }
 
-
 type HourWriter struct {
 }
-
 
 type DateType uint8
 
@@ -66,11 +60,9 @@ func reOpenFile(path string, currFile **os.File, openTime *int64) {
 	}
 }
 
-
 func (w *ConsoleWriter) Write(v []byte) (int, error) {
 	return os.Stdout.Write(v)
 }
-
 
 func (w *RollFileWriter) Write(v []byte) (int, error) {
 	if w.currFile == nil || w.openTime+10 < currUnixTime {
@@ -109,7 +101,6 @@ func (w *RollFileWriter) Write(v []byte) (int, error) {
 	return n, nil
 }
 
-
 func NewRollFileWriter(logpath, name string, num, sizeMB int) *RollFileWriter {
 	w := &RollFileWriter{
 		logpath: logpath,
@@ -124,7 +115,6 @@ func NewRollFileWriter(logpath, name string, num, sizeMB int) *RollFileWriter {
 	}
 	return w
 }
-
 
 func (w *DateWriter) Write(v []byte) (int, error) {
 	if w.currFile == nil || w.openTime+10 < currUnixTime {
@@ -146,7 +136,6 @@ func (w *DateWriter) Write(v []byte) (int, error) {
 	n, _ := w.currFile.Write(v)
 	return n, nil
 }
-
 
 func NewDateWriter(logpath, name string, dateType DateType, num int) *DateWriter {
 	w := &DateWriter{

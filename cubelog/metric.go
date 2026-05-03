@@ -14,12 +14,10 @@ import (
 )
 
 var (
-
 	enableLogMetric = false
 
 	traceStd *Logger
 )
-
 
 type RequestTrace struct {
 	DestID         int64
@@ -56,13 +54,11 @@ type RequestTrace struct {
 	InstanceType   string
 }
 
-
 func (rt *RequestTrace) DeepCopy() *RequestTrace {
 	o := new(RequestTrace)
 	*o = *rt
 	return o
 }
-
 
 func (rt *RequestTrace) WithCallee(callee string) *RequestTrace {
 	rt.Callee = callee
@@ -181,8 +177,6 @@ func init() {
 
 }
 
-
-
 func Trace(trace *RequestTrace) {
 	cost := float64(trace.Cost.Nanoseconds()/1000) / 1000
 
@@ -199,52 +193,9 @@ func Trace(trace *RequestTrace) {
 		version = moduleVersion
 	}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 	if enableLogMetric {
 		fields := makeLogFieldsFromTrace(trace)
 		fields["CostTime"] = cost
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 		if traceStd.writer != nil {
 			traceStd.WithFields(fields).Errorf("")
@@ -254,19 +205,13 @@ func Trace(trace *RequestTrace) {
 	}
 }
 
-
-
-
-
 func EnableLogMetric() {
 	enableLogMetric = true
 }
 
-
 func DisableLogMetric() {
 	enableLogMetric = false
 }
-
 
 func SetTraceOutput(w io.Writer) {
 	traceStd.writer = w

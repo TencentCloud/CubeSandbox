@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 
-	"encoding/json"
 	"github.com/sirupsen/logrus"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"

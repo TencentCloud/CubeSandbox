@@ -6,12 +6,31 @@
 package utils
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"reflect"
 	"slices"
 	"unsafe"
 )
+
+type stdJSONTool struct{}
+
+func (stdJSONTool) Marshal(v interface{}) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+func (stdJSONTool) Unmarshal(data []byte, v interface{}) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
+
+func (t stdJSONTool) UnmarshalFromString(s string, v interface{}) error {
+	return t.Unmarshal([]byte(s), v)
+}
+
+var JSONTool = stdJSONTool{}
 
 func InterfaceToString(obj interface{}) string {
 	body, _ := json.Marshal(obj)

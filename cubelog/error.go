@@ -4,9 +4,7 @@
 
 package CubeLog
 
-
 type ErrorCode int
-
 
 const (
 	CodeSuccess ErrorCode = iota
@@ -25,11 +23,9 @@ const (
 	CodeResourceInsufficient
 	CodeUnknownError
 
-
 	codeXingYunAlarmError
 	codeHaboWriteMetricError
 )
-
 
 func (s ErrorCode) String() string {
 	switch s {

@@ -3,6 +3,8 @@
 FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
+# Optional APT mirror for mainland-China/off-Tencent-network builds (`docker build --build-arg APT_USE_TENCENT_MIRROR=true`).
+ARG APT_USE_TENCENT_MIRROR=false
 ARG APT_PRIMARY_MIRROR=http://mirrors.tencent.com/ubuntu
 ARG APT_SECURITY_MIRROR=http://mirrors.tencent.com/ubuntu
 ARG GO_VERSION=1.24.8
@@ -31,7 +33,7 @@ ENV LANG=C.UTF-8 \
     LIBSECCOMP_LINK_TYPE=static \
     LIBSECCOMP_LIB_PATH=/usr/local/lib64/libseccomp/lib
 
-RUN if [ "${GITHUB_ACTIONS}" != "true" ]; then \
+RUN if [ "${GITHUB_ACTIONS}" != "true" ] && [ "${APT_USE_TENCENT_MIRROR}" = "true" ]; then \
         sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_PRIMARY_MIRROR}|g; \
                 s|http://security.ubuntu.com/ubuntu|${APT_SECURITY_MIRROR}|g" \
             /etc/apt/sources.list; \

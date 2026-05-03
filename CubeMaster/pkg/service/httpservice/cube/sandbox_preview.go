@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"encoding/json"
 	api "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"

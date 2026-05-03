@@ -18,8 +18,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/google/uuid"
 	"encoding/json"
+	"github.com/google/uuid"
 	api "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	commands "github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemastercli/commands"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"

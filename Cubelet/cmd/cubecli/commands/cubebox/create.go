@@ -60,11 +60,12 @@ var Create = &cli.Command{
 				os.Exit(1)
 			}
 
-			respStr, err := json.Marshal(rsp)
+			respBytes, err := json.Marshal(rsp)
 			if err != nil {
 				myPrint("failed to marshal resp: %v", err)
 				os.Exit(1)
 			}
+			respStr := string(respBytes)
 			myPrint("create sandbox rspesponse: %s", respStr)
 			if rsp.Ret.RetCode == errorcode.ErrorCode_Success {
 				myPrint("create sandbox %s success", rsp.SandboxID)

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"encoding/json"
-	"encoding/json"
 
 	"github.com/stretchr/testify/assert"
 	bolt "go.etcd.io/bbolt"

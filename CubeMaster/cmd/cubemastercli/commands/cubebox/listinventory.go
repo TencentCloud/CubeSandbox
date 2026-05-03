@@ -16,8 +16,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/google/uuid"
 	"encoding/json"
+	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
 )

@@ -26,18 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
-type stdJSONTool struct{}
-
-func (stdJSONTool) Marshal(v interface{}) ([]byte, error) {
-	return json.Marshal(v)
-}
-
-func (stdJSONTool) Unmarshal(data []byte, v interface{}) error {
-	return json.Unmarshal(data, v)
-}
-
-var JSONTool = stdJSONTool{}
-
 func String2Slice(s string) []byte {
 	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))
 	bh := reflect.SliceHeader{
