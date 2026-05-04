@@ -5,11 +5,13 @@
 package service
 
 import (
+	"encoding/binary"
+	"errors"
 	"net"
-	"strconv"
-	"strings"
 	"sync"
 )
+
+var errNotInRange = errors.New("ip not in allocator range")
 
 type ipAllocator struct {
 	sync.Mutex
@@ -23,16 +25,18 @@ type ipAllocator struct {
 }
 
 func newIPAllocator(cidr string) (*ipAllocator, error) {
-	i := strings.Index(cidr, "/")
-	if i < 0 {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, err
+	}
+	netIP := ipNet.IP.To4()
+	mask, bits := ipNet.Mask.Size()
+	if netIP == nil || bits != 32 {
 		return nil, &net.ParseError{Type: "cidr address", Text: cidr}
 	}
-	addr, m := cidr[:i], cidr[i+1:]
-	mask, err := strconv.Atoi(m)
-	if err != nil {
+	if mask > 30 {
 		return nil, &net.ParseError{Type: "cidr mask fail", Text: cidr}
 	}
-	startIP := net.ParseIP(addr).To4()
 	size := 1 << (32 - mask)
 	byteNum := size / 8
 	if size%8 != 0 {
@@ -45,7 +49,9 @@ func newIPAllocator(cidr string) (*ipAllocator, error) {
 		bitmap:    make([]byte, byteNum),
 		usedIPNum: 0,
 	}
-	allocator.startIdx = allocator.ip2Idx(startIP)
+	allocator.startIdx = allocator.ip2Idx(netIP)
+
+	// Reserve the network address (idx 0), gateway (idx 1), and broadcast (last idx).
 	allocator.setUsed(0)
 	allocator.setUsed(1)
 	allocator.setUsed(size - 1)
@@ -57,30 +63,39 @@ func (a *ipAllocator) GatewayIP() net.IP {
 	return a.gwIP
 }
 
+func (a *ipAllocator) exist(ip net.IP) (bool, error) {
+	idx := a.ip2Idx(ip) - a.startIdx
+	if idx < 0 || idx >= a.size {
+		return false, errNotInRange
+	}
+	return a.existIdx(idx), nil
+}
+
+func (a *ipAllocator) existIdx(idx int) bool {
+	return a.bitmap[idx/8]&(1<<(idx%8)) != 0
+}
+
 func (a *ipAllocator) setUsed(idx int) {
 	a.usedIPNum++
-	a.bitmap[idx/8] = a.bitmap[idx/8] | (1 << (idx % 8))
+	a.bitmap[idx/8] |= 1 << (idx % 8)
 }
 
 func (a *ipAllocator) setUnused(idx int) {
 	a.usedIPNum--
-	a.bitmap[idx/8] = a.bitmap[idx/8] &^ (1 << (idx % 8))
+	a.bitmap[idx/8] &^= 1 << (idx % 8)
 }
 
 func (a *ipAllocator) ip2Idx(ip net.IP) int {
-	ip = ip.To4()
-	bytes := []byte(ip)
-	return int(bytes[0])*256*256*256 + int(bytes[1])*256*256 + int(bytes[2])*256 + int(bytes[3])
+	ipv4 := ip.To4()
+	if ipv4 == nil {
+		return -1
+	}
+	return int(binary.BigEndian.Uint32(ipv4))
 }
 
 func (a *ipAllocator) idx2IP(idx int) net.IP {
-	targetIdx := idx + a.startIdx
-	bytes := make([]byte, 4)
-	bytes[0] = byte(targetIdx / (256 * 256 * 256))
-	bytes[1] = byte(targetIdx % (256 * 256 * 256) / (256 * 256))
-	bytes[2] = byte(targetIdx % (256 * 256) / 256)
-	bytes[3] = byte(targetIdx % 256)
-	return net.IPv4(bytes[0], bytes[1], bytes[2], bytes[3]).To4()
+	ipInt := uint32(a.startIdx + idx)
+	return net.IPv4(byte(ipInt>>24), byte(ipInt>>16), byte(ipInt>>8), byte(ipInt)).To4()
 }
 
 func (a *ipAllocator) Allocate() (net.IP, error) {
@@ -89,24 +104,28 @@ func (a *ipAllocator) Allocate() (net.IP, error) {
 	if a.usedIPNum >= a.size {
 		return nil, errIPExhausted
 	}
-	for {
+	for range a.size {
 		a.maxIdx = (a.maxIdx + 1) % a.size
 		idx := a.maxIdx
-		if a.bitmap[idx/8]&byte(1<<(idx%8)) == 0 {
+		if !a.existIdx(idx) {
 			a.setUsed(idx)
 			return a.idx2IP(idx), nil
 		}
 	}
+	return nil, errIPExhausted
 }
 
 func (a *ipAllocator) Release(ip net.IP) {
 	a.Lock()
 	defer a.Unlock()
+	if ip == nil || ip.To4() == nil {
+		return
+	}
 	idx := a.ip2Idx(ip) - a.startIdx
 	if idx < 0 || idx >= a.size {
 		return
 	}
-	if a.bitmap[idx/8]&byte(1<<(idx%8)) > 0 {
+	if a.existIdx(idx) {
 		a.setUnused(idx)
 	}
 }
@@ -114,8 +133,14 @@ func (a *ipAllocator) Release(ip net.IP) {
 func (a *ipAllocator) Assign(ip net.IP) {
 	a.Lock()
 	defer a.Unlock()
+	if ip == nil || ip.To4() == nil {
+		return
+	}
 	idx := a.ip2Idx(ip) - a.startIdx
-	if idx >= 0 && idx < a.size && a.bitmap[idx/8]&byte(1<<(idx%8)) == 0 {
+	if idx < 0 || idx >= a.size {
+		return
+	}
+	if !a.existIdx(idx) {
 		a.setUsed(idx)
 	}
 	if idx > a.maxIdx {
