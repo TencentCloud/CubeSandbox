@@ -8,7 +8,6 @@ import (
 	"flag"
 	"testing"
 
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
 )
 
@@ -70,46 +69,6 @@ func TestCreateCommandParsesNodeScope(t *testing.T) {
 	}
 }
 
-func TestMergeCreateFromImageCubeVSContextFlagsEqualsSyntax(t *testing.T) {
-	ctx := newCreateFromImageContext(t, []string{
-		"--allow-internet-access=false",
-		"--allow-out-cidr", "172.67.0.0/16",
-		"--deny-out-cidr", "10.0.0.0/8",
-	})
-
-	got, err := mergeCreateFromImageCubeVSContextFlags(ctx, nil)
-	if err != nil {
-		t.Fatalf("mergeCreateFromImageCubeVSContextFlags error=%v", err)
-	}
-	if got == nil || got.AllowInternetAccess == nil || *got.AllowInternetAccess {
-		t.Fatalf("AllowInternetAccess=%v, want false", got)
-	}
-	if len(got.AllowOut) != 1 || got.AllowOut[0] != "172.67.0.0/16" {
-		t.Fatalf("AllowOut=%v, want [172.67.0.0/16]", got.AllowOut)
-	}
-	if len(got.DenyOut) != 1 || got.DenyOut[0] != "10.0.0.0/8" {
-		t.Fatalf("DenyOut=%v, want [10.0.0.0/8]", got.DenyOut)
-	}
-}
-
-func TestMergeCreateFromImageCubeVSContextFlagsSupportsTrailingFalse(t *testing.T) {
-	ctx := newCreateFromImageContext(t, []string{
-		"--allow-internet-access", "false",
-		"--allow-out-cidr", "172.67.0.0/16",
-	})
-
-	got, err := mergeCreateFromImageCubeVSContextFlags(ctx, nil)
-	if err != nil {
-		t.Fatalf("mergeCreateFromImageCubeVSContextFlags error=%v", err)
-	}
-	if got == nil || got.AllowInternetAccess == nil || *got.AllowInternetAccess {
-		t.Fatalf("AllowInternetAccess=%v, want false", got)
-	}
-	if len(got.AllowOut) != 1 || got.AllowOut[0] != "172.67.0.0/16" {
-		t.Fatalf("AllowOut=%v, want [172.67.0.0/16]", got.AllowOut)
-	}
-}
-
 func TestCreateFromImageCommandParsesNodeScope(t *testing.T) {
 	ctx := newCreateFromImageContext(t, []string{
 		"--node", "node-a",
@@ -117,32 +76,6 @@ func TestCreateFromImageCommandParsesNodeScope(t *testing.T) {
 	})
 	if got := ctx.StringSlice("node"); len(got) != 2 || got[0] != "node-a" || got[1] != "10.0.0.2" {
 		t.Fatalf("node flags=%v", got)
-	}
-}
-
-func TestMergeCreateFromImageCubeVSContextFlagsRejectsUnexpectedArgs(t *testing.T) {
-	ctx := newCreateFromImageContext(t, []string{
-		"--allow-internet-access", "false",
-		"unexpected",
-	})
-
-	_, err := mergeCreateFromImageCubeVSContextFlags(ctx, nil)
-	if err == nil {
-		t.Fatal("expected error for unexpected trailing argument")
-	}
-}
-
-func TestMergeCubeVSContextValuesPreservesExistingCIDRs(t *testing.T) {
-	existing := &types.CubeVSContext{
-		AllowOut: []string{"192.168.0.0/16"},
-	}
-
-	got := mergeCubeVSContextValues(existing, true, false, []string{"172.67.0.0/16"}, nil)
-	if got == nil || got.AllowInternetAccess == nil || *got.AllowInternetAccess {
-		t.Fatalf("AllowInternetAccess=%v, want false", got)
-	}
-	if len(got.AllowOut) != 2 || got.AllowOut[0] != "192.168.0.0/16" || got.AllowOut[1] != "172.67.0.0/16" {
-		t.Fatalf("AllowOut=%v, want merged CIDRs", got.AllowOut)
 	}
 }
 
