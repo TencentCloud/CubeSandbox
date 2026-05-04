@@ -68,24 +68,13 @@ function _M.is_faulty_backend(self, backend_ip, check_remote)
         redis_pd = ngx.var.redis_pd,
         redis_index = ngx.var.redis_index
     })
-    local key = "faulty_backend_set"
-    local err
-    value, err = red:smembers(key)
+    
+    local res, err = red:sismember("faulty_backend_set", backend_ip)
     if err then
         return false, err
     end
 
-    if not value then
-        return false, nil
-    end
-
-    for _, v in ipairs(value) do
-        if v == backend_ip then
-            return true, nil
-        end
-    end
-
-    return false, nil
+    return res == 1, nil
 end
 
 return _M
