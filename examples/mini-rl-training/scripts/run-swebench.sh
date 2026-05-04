@@ -65,6 +65,7 @@ export E2B_API_URL="${E2B_API_URL:-}"
 export E2B_API_KEY="${E2B_API_KEY:-}"
 export CUBE_TEMPLATE_ID="${CUBE_TEMPLATE_ID:-}"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 
 # SSL_CERT_FILE overrides Python's default CA bundle globally, which breaks
 # HTTPS to public sites (e.g. hf-mirror.com). Instead, pass it via a custom
