@@ -7,15 +7,13 @@ package cubebox
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"time"
-
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
 	"github.com/urfave/cli/v2"
+	"os"
+	"time"
 )
 
 var Create = &cli.Command{
@@ -60,11 +58,12 @@ var Create = &cli.Command{
 				myPrint("create failure:%v", err)
 				os.Exit(1)
 			}
-			respStr, err := jsoniter.MarshalToString(rsp)
+			respBytes, err := json.Marshal(rsp)
 			if err != nil {
 				myPrint("failed to marshal resp: %v", err)
 				os.Exit(1)
 			}
+			respStr := string(respBytes)
 			myPrint("create sandbox rspesponse: %s", respStr)
 			if rsp.Ret.RetCode == errorcode.ErrorCode_Success {
 				myPrint("create sandbox %s success", rsp.SandboxID)

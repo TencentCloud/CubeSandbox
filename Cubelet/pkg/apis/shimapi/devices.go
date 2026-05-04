@@ -8,8 +8,8 @@ import (
 	"context"
 	"fmt"
 
+	"encoding/json"
 	"github.com/containerd/containerd/v2/client"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/apis/shimapi/shimtypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
@@ -47,15 +47,16 @@ func (csc *cubeShimControl) AddDevices(ctx context.Context, devices []*shimtypes
 			API_UPDATE_ACTION_KEY: API_ACTION_HOT_PLUGIN_ADD,
 		})
 
-		b, err := jsoniter.MarshalToString(toAppendDevices)
+		b, err := json.Marshal(toAppendDevices)
 		if err != nil {
 			logEntry.WithError(err).Errorf("failed to marshal device list")
 			return fmt.Errorf("failed to marshal device list")
 		}
-		logEntry = logEntry.WithField(API_UPDATE_ACTION_DATA_KEY, string(b))
+		payload := string(b)
+		logEntry = logEntry.WithField(API_UPDATE_ACTION_DATA_KEY, payload)
 		if err := csc.task.Update(ctx, client.WithAnnotations(map[string]string{
 			API_UPDATE_ACTION_KEY:      API_ACTION_HOT_PLUGIN_ADD,
-			API_UPDATE_ACTION_DATA_KEY: b,
+			API_UPDATE_ACTION_DATA_KEY: payload,
 		})); err != nil {
 			logEntry.WithError(err).Errorf("failed to update task for container %s", sandbox.FirstContainer().Container.ID())
 			return fmt.Errorf("failed to update task for container %s", sandbox.FirstContainer().Container.ID())
@@ -90,19 +91,20 @@ func (csc *cubeShimControl) DelDevices(ctx context.Context, devices []*shimtypes
 			"action":  "HotPlugDevice.del",
 		})
 
-		b, err := jsoniter.MarshalToString(toADeletedDevices)
+		b, err := json.Marshal(toADeletedDevices)
 		if err != nil {
 			logEntry.WithError(err).Errorf("failed to marshal device list")
 			return fmt.Errorf("failed to marshal device list")
 		}
+		payload := string(b)
 		if err := csc.task.Update(ctx, client.WithAnnotations(map[string]string{
 			API_UPDATE_ACTION_KEY:      API_ACTION_HOT_PLUGIN_DEL,
-			API_UPDATE_ACTION_DATA_KEY: b,
+			API_UPDATE_ACTION_DATA_KEY: payload,
 		})); err != nil {
 			logEntry.WithError(err).Errorf("failed to update task for container %s", sandbox.FirstContainer().Container.ID())
 			return fmt.Errorf("failed to update task for container %s", sandbox.FirstContainer().Container.ID())
 		}
-		logEntry.WithField("devices", string(b)).Infof("del device to task")
+		logEntry.WithField("devices", payload).Infof("del device to task")
 	}
 	return nil
 }

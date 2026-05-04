@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	"github.com/sirupsen/logrus"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
@@ -84,7 +84,7 @@ var removeImageCommand = &cli.Command{
 			}
 			for _, box := range resp.GetItems() {
 				cubeBox := &cubeboxstore.CubeBox{}
-				err := jsoniter.Unmarshal(box.PrivateCubeboxStorageData, cubeBox)
+				err := json.Unmarshal(box.PrivateCubeboxStorageData, cubeBox)
 				if err != nil {
 					return fmt.Errorf("failed to unmarshal cubebox for %s: %w", box.Id, err)
 				}

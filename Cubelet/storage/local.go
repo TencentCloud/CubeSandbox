@@ -24,9 +24,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
 
+	"encoding/json"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/plugin"
-	jsoniter "github.com/json-iterator/go"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
@@ -316,7 +316,7 @@ func (l *local) listDirtyStorage() map[string]bool {
 			continue
 		}
 		bf := &StorageInfo{}
-		err = jsoniter.ConfigFastest.Unmarshal(data, bf)
+		err = json.Unmarshal(data, bf)
 		if err != nil {
 			logEntry.Errorf("storage data leak: failed to unmarshal StorageInfo: %v", err)
 			continue
@@ -399,7 +399,7 @@ func (l *local) Init(ctx context.Context, opts *workflow.InitInfo) error {
 				continue
 			}
 			bf := &StorageInfo{}
-			err = jsoniter.ConfigFastest.Unmarshal(v, bf)
+			err = json.Unmarshal(v, bf)
 			if err != nil {
 				log.G(ctx).Errorf("Init:load Metadata,unmarshal fail:%v", err)
 				continue
@@ -883,7 +883,7 @@ func (l *local) readBackendFileInfo(ctx context.Context, id string) (*StorageInf
 		}
 	}
 	bf := &StorageInfo{}
-	err = jsoniter.ConfigFastest.Unmarshal(b, bf)
+	err = json.Unmarshal(b, bf)
 	if err != nil {
 		return nil, err
 	}
@@ -891,7 +891,7 @@ func (l *local) readBackendFileInfo(ctx context.Context, id string) (*StorageInf
 }
 
 func (l *local) writeBackendFileInfo(ctx context.Context, id string, info *StorageInfo) error {
-	b, _ := jsoniter.ConfigFastest.Marshal(info)
+	b, _ := json.Marshal(info)
 	err := l.db.Set(bucketName, id, b)
 	if err != nil {
 
@@ -913,7 +913,7 @@ func (l *local) updateCubeBoxBaseInfo(ctx context.Context, templateID string) er
 		return err
 	}
 	info.UpdateAt = time.Now()
-	b, _ := jsoniter.ConfigFastest.Marshal(info)
+	b, _ := json.Marshal(info)
 	err = l.db.Set(bucketName, templateID, b)
 	if err != nil {
 
@@ -957,7 +957,7 @@ func (l *local) readAllStorageInfo() (map[string]*StorageInfo, error) {
 	storageInfo := make(map[string]*StorageInfo)
 	for id, data := range all {
 		info := &StorageInfo{}
-		err := jsoniter.ConfigFastest.Unmarshal(data, info)
+		err := json.Unmarshal(data, info)
 		if err != nil {
 			continue
 		}
@@ -1138,7 +1138,7 @@ func (l *local) readStorageInfo(ctx context.Context, id string, bucketName strin
 			return utils.ErrorKeyNotFound
 		}
 	}
-	err = jsoniter.ConfigFastest.Unmarshal(b, infoType)
+	err = json.Unmarshal(b, infoType)
 	if err != nil {
 		return err
 	}
@@ -1146,7 +1146,7 @@ func (l *local) readStorageInfo(ctx context.Context, id string, bucketName strin
 }
 
 func (l *local) writeStorageInfo(ctx context.Context, id string, info interface{}, bucketName string, failoverDirFunc func() string) error {
-	b, _ := jsoniter.ConfigFastest.Marshal(info)
+	b, _ := json.Marshal(info)
 	err := l.db.Set(bucketName, id, b)
 	if err != nil {
 
