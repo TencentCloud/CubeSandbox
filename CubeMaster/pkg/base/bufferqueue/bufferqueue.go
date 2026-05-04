@@ -9,7 +9,6 @@ import (
 	"container/heap"
 	"context"
 	"errors"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,7 +26,7 @@ type WorkHandler interface {
 type BufferQueue interface {
 	PushItem(i *Item)
 
-	Push(any interface{})
+	Push(value interface{})
 
 	Pop() interface{}
 
@@ -42,7 +41,14 @@ type BufferQueue interface {
 
 type Options struct {
 	Limit int64
+
+	// testHook is invoked at the end of each consumer loop iteration that
+	// dispatched work. Tests in this package set it to observe loop progress;
+	// production callers leave it nil.
+	testHook func()
 }
+
+var errQueueLimitExceeded = errors.New("buffer queue limit exceeded")
 
 func New(opt *Options) BufferQueue {
 	if opt == nil {
@@ -53,9 +59,12 @@ func New(opt *Options) BufferQueue {
 		opt.Limit = 10
 	}
 	sh := &bufferQueue{
-		queue:   &TimeSortedQueue{},
-		limiter: semaphore.NewWeighted(opt.Limit),
-		stopped: make(chan struct{}),
+		queue:    &TimeSortedQueue{},
+		limiter:  semaphore.NewWeighted(opt.Limit),
+		stopped:  make(chan struct{}),
+		notify:   make(chan struct{}, 1),
+		done:     make(chan struct{}),
+		testHook: opt.testHook,
 	}
 	heap.Init(sh.queue)
 	sh.start()
@@ -63,123 +72,137 @@ func New(opt *Options) BufferQueue {
 }
 
 func (sh *bufferQueue) start() {
-	randInterval := func() time.Duration {
-		return time.Duration(float64(5+rand.Intn(5))*(1+0.8*rand.Float64())) * time.Millisecond
-	}
 	loopFunc := func() {
 		for {
-			select {
-			case <-sh.stopped:
-				if sh.Len() > 0 || sh.Workings() > 0 {
-					break
-				}
-				return
-			default:
-			}
-
+			// Wait for work or stop signal when queue is empty.
 			if sh.Len() <= 0 {
-				time.Sleep(time.Millisecond)
+				if sh.isStopped() {
+					return
+				}
+
+				select {
+				case <-sh.stopped:
+				case <-sh.notify:
+				}
 				continue
 			}
 
+			// Fast-path: try non-blocking acquire first to avoid blocking on the limiter.
 			if err := sh.TryAcquire(); err != nil {
-				time.Sleep(time.Millisecond)
-				continue
+				if err := sh.Acquire(); err != nil {
+					continue
+				}
 			}
 
 			value := sh.Pop()
 			if value == nil {
 				sh.Release()
-				time.Sleep(time.Millisecond)
 				continue
 			}
 
 			wh, ok := value.(WorkHandler)
 			if !ok {
 				sh.Release()
-				time.Sleep(randInterval())
+				CubeLog.WithContext(context.Background()).Warnf(
+					"BufferWorker: item does not implement WorkHandler: %v",
+					utils.InterfaceToString(value))
 				continue
 			}
 
-			recov.GoWithRecover(func() {
+			recov.GoWithWaitGroup(&sh.wg, func() {
 				defer sh.Release()
 				sh.IncrWorking()
 				defer sh.DecrWorking()
 				wh.Handle()
 			}, func(panicError interface{}) {
-				defer sh.Release()
-				defer sh.DecrWorking()
 				CubeLog.WithContext(context.Background()).Fatalf("BufferWorker panic:%v,value:%v",
 					panicError, utils.InterfaceToString(value))
 			})
 
-			select {
-			case <-sh.stopped:
-				if sh.Len() > 0 || sh.Workings() > 0 {
-
-					break
-				}
-				return
-			default:
+			if sh.testHook != nil {
+				sh.testHook()
 			}
 		}
 	}
-	recov.GoWithRecover(loopFunc, func(panicError interface{}) {
+	recov.GoWithWaitGroup(&sh.wg, loopFunc, func(panicError interface{}) {
 		CubeLog.WithContext(context.Background()).Fatalf("BufferWorker panic:%v", panicError)
 	})
 }
 
+// GraceFullStop signals the consumer loop and any in-flight workers to drain,
+// then waits for completion or until ctx is done. Safe to call multiple times.
+//
+// Note: if ctx fires before the queue drains (e.g. a hung Handle), the internal
+// wg.Wait waiter goroutine remains until all workers eventually return — which
+// matches the existing trade-off, since WorkHandler has no cancellation channel.
 func (sh *bufferQueue) GraceFullStop(ctx context.Context) {
-	close(sh.stopped)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
+	sh.stopOnce.Do(func() {
+		atomic.StoreInt32(&sh.stoppedFlg, 1)
+		close(sh.stopped)
+		go func() {
+			sh.wg.Wait()
+			close(sh.done)
+		}()
+	})
 
-		if err := sh.Acquire(); err == nil {
-			sh.Release()
-			if sh.Len() <= 0 && sh.Workings() <= 0 {
-
-				return
-			}
-		}
-		time.Sleep(time.Millisecond * 10)
+	select {
+	case <-ctx.Done():
+	case <-sh.done:
 	}
 }
 
 type bufferQueue struct {
-	queue   *TimeSortedQueue
-	limiter *semaphore.Weighted
-	lock    sync.RWMutex
-	len     int32
-	working int32
-	stopped chan struct{}
+	queue      *TimeSortedQueue
+	limiter    *semaphore.Weighted
+	lock       sync.RWMutex
+	len        int32
+	working    int32
+	stopped    chan struct{}
+	notify     chan struct{}
+	done       chan struct{}
+	stoppedFlg int32 // atomic flag for fast stopped check without channel read
+	stopOnce   sync.Once
+	testHook   func() // test only: called at the end of each loop iteration that dispatched work
+	wg         sync.WaitGroup
+}
+
+func (sh *bufferQueue) isStopped() bool {
+	return atomic.LoadInt32(&sh.stoppedFlg) == 1
+}
+
+func (sh *bufferQueue) signal() {
+	select {
+	case sh.notify <- struct{}{}:
+	default:
+	}
 }
 
 func (sh *bufferQueue) PushItem(i *Item) {
 	sh.lock.Lock()
-	defer sh.lock.Unlock()
 	heap.Push(sh.queue, i)
 	atomic.AddInt32(&sh.len, 1)
+	sh.lock.Unlock()
+	sh.signal()
 }
 
-func (sh *bufferQueue) Push(x interface{}) {
+func (sh *bufferQueue) Push(value interface{}) {
 	sh.lock.Lock()
-	defer sh.lock.Unlock()
 	item := &Item{
-		value:    x,
+		value:    value,
 		priority: time.Now().UnixNano(),
 	}
 	heap.Push(sh.queue, item)
 	atomic.AddInt32(&sh.len, 1)
+	sh.lock.Unlock()
+	sh.signal()
 }
 
 func (sh *bufferQueue) Pop() interface{} {
 	sh.lock.Lock()
 	defer sh.lock.Unlock()
 	if sh.queue.Len() == 0 {
+		// Defensive: keep counter aligned with the actual heap state.
+		atomic.StoreInt32(&sh.len, 0)
 		return nil
 	}
 	atomic.AddInt32(&sh.len, -1)
@@ -198,13 +221,13 @@ func (sh *bufferQueue) Len() int {
 	return int(atomic.LoadInt32(&sh.len))
 }
 
+// Acquire blocks until a limiter slot is available. The notify-driven loop no
+// longer needs polling, so we use Background to avoid per-call ctx allocation.
 func (sh *bufferQueue) Acquire() error {
 	if sh.limiter == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	return sh.limiter.Acquire(ctx, 1)
+	return sh.limiter.Acquire(context.Background(), 1)
 }
 
 func (sh *bufferQueue) TryAcquire() error {
@@ -214,7 +237,7 @@ func (sh *bufferQueue) TryAcquire() error {
 	if sh.limiter.TryAcquire(1) {
 		return nil
 	}
-	return errors.New("buffer queue limit exceeded")
+	return errQueueLimitExceeded
 }
 
 func (sh *bufferQueue) Release() {
@@ -275,6 +298,7 @@ func (pq *TimeSortedQueue) Pop() interface{} {
 	old := *pq
 	n := len(old)
 	item := old[n-1]
+	old[n-1] = nil // avoid memory leak
 	item.index = -1
 	*pq = old[0 : n-1]
 	return item
