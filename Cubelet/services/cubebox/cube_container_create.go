@@ -26,7 +26,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/typeurl/v2"
-	jsoniter "github.com/json-iterator/go"
+
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -371,7 +371,7 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate sandbox dns annotation failed: %v", err)
 	}
 	if len(dnsServers) > 0 {
-		data, _ := jsoniter.Marshal(dnsServers)
+		data, _ := json.Marshal(dnsServers)
 		additionalSandboxOpt = append(additionalSandboxOpt, oci.WithAnnotations(map[string]string{
 			constants.AnnotationsSandboxDNS: string(data),
 		}))
@@ -621,7 +621,7 @@ func WithCubeFsAnnotation(ctx context.Context,
 		sandBox.VirtiofsMap = make(map[string]*virtiofs.VirtiofsConfig)
 	}
 	sandBox.VirtiofsMap[constants.CubeDefaultNamespace] = virtiofsConfig
-	vc, _ := jsoniter.Marshal(virtiofsConfig)
+	vc, _ := json.Marshal(virtiofsConfig)
 	fsstr := string(vc)
 	sandBox.FirstContainer().AddAnnotations(map[string]string{constants.AnnotationsFSKey: fsstr})
 	opts = append(opts, func(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {

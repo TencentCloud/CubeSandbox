@@ -13,6 +13,7 @@
 package utils
 
 import (
+	"encoding/json"
 	"errors"
 	"hash/crc32"
 	"io"
@@ -21,12 +22,9 @@ import (
 	"strings"
 	"unsafe"
 
-	jsoniter "github.com/json-iterator/go"
 	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
-
-var JSONTool = jsoniter.ConfigCompatibleWithStandardLibrary
 
 func String2Slice(s string) []byte {
 	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))
@@ -48,7 +46,7 @@ func InStringSlice(ss []string, str string) bool {
 }
 
 func Decode(body string, req interface{}) error {
-	return JSONTool.Unmarshal([]byte(body), req)
+	return json.Unmarshal([]byte(body), req)
 }
 
 func HashCode(dimension string) uint32 {
@@ -56,7 +54,7 @@ func HashCode(dimension string) uint32 {
 }
 
 func InterfaceToString(obj interface{}) string {
-	body, _ := JSONTool.Marshal(obj)
+	body, _ := json.Marshal(obj)
 	return string(body)
 }
 

@@ -7,7 +7,6 @@ package CubeLog
 import "time"
 
 var (
-
 	currUnixTime int64
 	currDateTime string
 	currDateHour string

@@ -11,7 +11,8 @@ import (
 	"path"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
+
 	"github.com/shopspring/decimal"
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -81,7 +82,7 @@ func loadVmSnapshotSpec(path string, overhead *OverheadConfig) (VMSnapshotSpecsB
 	if err != nil {
 		return nil, err
 	}
-	err = jsoniter.Unmarshal(bb, &specs)
+	err = json.Unmarshal(bb, &specs)
 	if err != nil {
 		return nil, err
 	}

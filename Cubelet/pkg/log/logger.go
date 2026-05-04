@@ -5,9 +5,9 @@
 package log
 
 import (
+	"encoding/json"
 	"runtime/debug"
 
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -18,11 +18,11 @@ func IsDebug() bool {
 }
 
 func WithJsonValue(obj any) string {
-	bs, err := jsoniter.MarshalToString(obj)
+	bs, err := json.Marshal(obj)
 	if err != nil {
 		return ""
 	}
-	return bs
+	return string(bs)
 }
 
 func WithDebugStack() string {

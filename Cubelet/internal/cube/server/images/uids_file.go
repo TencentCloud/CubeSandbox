@@ -6,6 +6,7 @@ package images
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +17,6 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/opencontainers/image-spec/identity"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -75,12 +75,12 @@ func (c *CubeImageService) GenImageExtraAttributes(ctx context.Context, oldimg, 
 				fieldPaths = append(fieldPaths, "labels."+constants.LabelImageHostLowerDirsPrefix)
 
 				dirs = utils.RemoveStringPrefix(dirs, prefix)
-				s, _ := jsoniter.MarshalToString(dirs)
-				i.Labels[constants.LabelImageLayerDirs] = s
+				s, _ := json.Marshal(dirs)
+				i.Labels[constants.LabelImageLayerDirs] = string(s)
 				fieldPaths = append(fieldPaths, "labels."+constants.LabelImageLayerDirs)
 			} else {
-				s, _ := jsoniter.MarshalToString(dirs)
-				i.Labels[constants.LabelImageHostLowerDirs] = s
+				s, _ := json.Marshal(dirs)
+				i.Labels[constants.LabelImageHostLowerDirs] = string(s)
 				fieldPaths = append(fieldPaths, "labels."+constants.LabelImageHostLowerDirs)
 			}
 		}

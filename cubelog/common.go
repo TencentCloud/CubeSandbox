@@ -8,24 +8,22 @@ import (
 	"net"
 )
 
-
 type Region string
 
-
 const (
-	RegionGuangzhou       Region = "ap-guangzhou"
-	RegionShanghai        Region = "ap-shanghai"
-	RegionBeijing         Region = "ap-beijing"
-	RegionHongKong        Region = "ap-hongkong"
-	RegionChengdu         Region = "ap-chengdu"
-	RegionIndia           Region = "ap-mumbai"
-	RegionChongqing       Region = "ap-chongqing"
-	RegionSeoul           Region = "ap-seoul"
-	RegionSingapore       Region = "ap-singapore"
-	RegionToronto         Region = "na-toronto"
-	RegionSiliconValley   Region = "na-siliconvalley"
-	RegionFrankfurt       Region = "eu-frankfurt"
-	RegionBangkok         Region = "ap-bangkok"
+	RegionGuangzhou     Region = "ap-guangzhou"
+	RegionShanghai      Region = "ap-shanghai"
+	RegionBeijing       Region = "ap-beijing"
+	RegionHongKong      Region = "ap-hongkong"
+	RegionChengdu       Region = "ap-chengdu"
+	RegionIndia         Region = "ap-mumbai"
+	RegionChongqing     Region = "ap-chongqing"
+	RegionSeoul         Region = "ap-seoul"
+	RegionSingapore     Region = "ap-singapore"
+	RegionToronto       Region = "na-toronto"
+	RegionSiliconValley Region = "na-siliconvalley"
+	RegionFrankfurt     Region = "eu-frankfurt"
+	RegionBangkok       Region = "ap-bangkok"
 )
 
 var defaultRegion Region
@@ -33,7 +31,6 @@ var cluster string
 var moduleName string
 var moduleVersion string
 var reportLevel LogLevel
-
 
 var LocalIP string
 
@@ -72,37 +69,25 @@ func getLocalIP() string {
 	return fallbackIP
 }
 
-
 func SetRegion(r Region) {
 	defaultRegion = r
 }
-
 
 func SetCluster(c string) {
 	cluster = c
 }
 
-
 func SetModuleName(n string) {
 	moduleName = n
 }
-
 
 func GetModuleName() string {
 	return moduleName
 }
 
-
 func SetVersion(version string) {
 	moduleVersion = version
 }
-
-
-
-
-
-
-
 
 func (r Region) String() string {
 	return string(r)

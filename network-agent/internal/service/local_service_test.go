@@ -10,16 +10,16 @@ import (
 	"os"
 	"testing"
 
-	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
 	"github.com/cilium/ebpf"
+	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
 	"github.com/vishvananda/netlink"
 )
 
 func TestCubeVSTapRegistration(t *testing.T) {
 	opts := cubeVSTapRegistration(&CubeVSContext{
 		AllowInternetAccess: boolPtr(true),
-		AllowOut:        []string{"10.0.0.0/8"},
-		DenyOut:         []string{"192.168.0.0/16"},
+		AllowOut:            []string{"10.0.0.0/8"},
+		DenyOut:             []string{"192.168.0.0/16"},
 	})
 	if opts.AllowInternetAccess == nil || *opts.AllowInternetAccess != true {
 		t.Fatalf("opts.AllowInternetAccess=%v, want true", opts.AllowInternetAccess)

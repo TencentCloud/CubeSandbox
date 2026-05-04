@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"context"
+	"encoding/json"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,7 +19,6 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/platforms"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/urfave/cli/v2"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
@@ -179,8 +179,13 @@ var listMetaData = cli.Command{
 		}
 		for id, sandboxBytes := range all {
 			var cb = new(cubeboxstore.CubeBox)
+<<<<<<< HEAD
+			if err := json.Unmarshal(sandboxBytes, cb); err != nil {
+				myPrint("failed to unmarshal to cubebox %s from meta: %v", id, err)
+=======
 			if err := jsoniter.Unmarshal(sandboxBytes, cb); err != nil {
 				log.Printf("failed to unmarshal to cubebox %s from meta: %v", id, err)
+>>>>>>> upstream/master
 				continue
 			}
 

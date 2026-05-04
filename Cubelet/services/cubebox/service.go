@@ -14,13 +14,14 @@ import (
 	"strings"
 	"time"
 
+	"encoding/json"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/events/exchange"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
-	jsoniter "github.com/json-iterator/go"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"k8s.io/utils/clock"
@@ -194,8 +195,8 @@ func (s *service) Register(server *grpc.Server) error {
 
 func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 	tmpReq := &cubebox.RunCubeSandboxRequest{}
-	body, _ := jsoniter.Marshal(req)
-	jsoniter.Unmarshal(body, tmpReq)
+	body, _ := json.Marshal(req)
+	json.Unmarshal(body, tmpReq)
 	for _, c := range tmpReq.GetContainers() {
 		c.Envs = []*cubebox.KeyValue{
 			{
@@ -797,7 +798,7 @@ func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption
 		cb.Containers = append(cb.Containers, cc)
 	}
 	if opt != nil && opt.GetPrivateWithCubeboxStore() {
-		v, err := jsoniter.MarshalIndent(box, "", "    ")
+		v, err := json.MarshalIndent(box, "", "    ")
 		if err != nil {
 			log.L.Errorf("marshal cubebox to json failed: %v", err)
 		}

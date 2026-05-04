@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
 	"github.com/rcrowley/go-metrics"
 	"github.com/smallnest/weighted"
 	"github.com/stretchr/testify/assert"
@@ -282,7 +281,7 @@ func isAllMvmNumZero(product string) bool {
 
 func testGetScheduleReq() *types.CreateCubeSandboxReq {
 	reqC := &types.CreateCubeSandboxReq{}
-	jsoniter.Unmarshal([]byte(mocktest_ScheduleReq), reqC)
+	json.Unmarshal([]byte(mocktest_ScheduleReq), reqC)
 	return reqC
 }
 

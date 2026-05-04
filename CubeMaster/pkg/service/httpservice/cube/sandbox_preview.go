@@ -5,9 +5,9 @@
 package cube
 
 import (
+	"encoding/json"
 	"net/http"
 
-	jsoniter "github.com/json-iterator/go"
 	api "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -148,12 +148,12 @@ func previewSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestT
 }
 
 func cloneCreateReq(req *types.CreateCubeSandboxReq) (*types.CreateCubeSandboxReq, error) {
-	payload, err := jsoniter.Marshal(req)
+	payload, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
 	out := &types.CreateCubeSandboxReq{}
-	if err = jsoniter.Unmarshal(payload, out); err != nil {
+	if err = json.Unmarshal(payload, out); err != nil {
 		return nil, err
 	}
 	return out, nil

@@ -7,6 +7,7 @@ package utils
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -76,7 +77,7 @@ func GetBodyData(rsp *http.Response, object any) error {
 	if err != nil {
 		return err
 	}
-	err = JSONTool.Unmarshal(data, object)
+	err = json.Unmarshal(data, object)
 	if err != nil {
 		return err
 	}

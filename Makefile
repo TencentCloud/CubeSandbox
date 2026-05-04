@@ -2,6 +2,9 @@
 # Copyright (C) 2026 Tencent. All rights reserved.
 
 BUILDER_IMAGE ?= cube-sandbox-builder:latest
+BUILDER_PLATFORM ?= linux/amd64
+# Set to true to use mirrors.tencent.com in the builder image (default: official Ubuntu APT).
+BUILDER_APT_TENCENT_MIRROR ?= false
 BUILDER_DOCKERFILE ?= docker/Dockerfile.builder
 BUILDER_HOME ?= $(HOME)/.cache/cube-sandbox-builder
 BUILDER_CONTAINER_HOME ?= /home/builder
@@ -48,9 +51,13 @@ help:
 	@printf "  - binary outputs are written to %s\n" "$(OUTPUT_DIR)"
 	@printf "  - release outputs are written to %s\n" "$(RELEASE_DIR)"
 	@printf "  - Run 'make builder-image' first if image %s is missing\n" "$(BUILDER_IMAGE)"
+	@printf "  - BUILDER_PLATFORM=%s (use linux/amd64 on Apple Silicon / arm64 Docker; unset to use host arch)\n" "$(BUILDER_PLATFORM)"
+	@printf "  - BUILDER_APT_TENCENT_MIRROR=%s (set true for Tencent APT mirror; otherwise official Ubuntu)\n" "$(BUILDER_APT_TENCENT_MIRROR)"
 
 builder-image:
-	docker build -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) .
+	docker build $(if $(BUILDER_PLATFORM),--platform "$(BUILDER_PLATFORM)") \
+		--build-arg APT_USE_TENCENT_MIRROR="$(BUILDER_APT_TENCENT_MIRROR)" \
+		-t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) .
 
 prepare-builder-home:
 	@mkdir -p "$(BUILDER_HOME)" \
@@ -67,7 +74,7 @@ prepare-tmp-git-credentials:
 	fi
 
 builder-shell: prepare-builder-home prepare-tmp-git-credentials
-	docker run --rm -it \
+	docker run --rm -it $(if $(BUILDER_PLATFORM),--platform "$(BUILDER_PLATFORM)") \
 		--user "$(UID):$(GID)" \
 		-e HOME=$(BUILDER_CONTAINER_HOME) \
 		-e CARGO_HOME=$(BUILDER_CONTAINER_HOME)/.cargo \
@@ -82,7 +89,7 @@ builder-shell: prepare-builder-home prepare-tmp-git-credentials
 
 builder-run: prepare-builder-home prepare-tmp-git-credentials
 	@test -n "$(strip $(BUILDER_CMD))" || { echo "BUILDER_CMD must not be empty"; exit 1; }
-	docker run --rm -i \
+	docker run --rm -i $(if $(BUILDER_PLATFORM),--platform "$(BUILDER_PLATFORM)") \
 		--user "$(UID):$(GID)" \
 		-e HOME=$(BUILDER_CONTAINER_HOME) \
 		-e CARGO_HOME=$(BUILDER_CONTAINER_HOME)/.cargo \

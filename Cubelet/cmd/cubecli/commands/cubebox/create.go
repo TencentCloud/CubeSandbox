@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
@@ -60,12 +59,13 @@ var Create = &cli.Command{
 				log.Printf("create failure:%v", err)
 				os.Exit(1)
 			}
-			respStr, err := jsoniter.MarshalToString(rsp)
+
+			respBytes, err := json.Marshal(rsp)
 			if err != nil {
 				log.Printf("failed to marshal resp: %v", err)
 				os.Exit(1)
 			}
-			log.Printf("create sandbox rspesponse: %s", respStr)
+			myPrint("create sandbox rspesponse: %s", respStr)
 			if rsp.Ret.RetCode == errorcode.ErrorCode_Success {
 				log.Printf("create sandbox %s success", rsp.SandboxID)
 				if context.Bool("rm") {
