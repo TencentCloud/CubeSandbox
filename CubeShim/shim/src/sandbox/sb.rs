@@ -777,7 +777,7 @@ impl SandBox {
             let ch = self.ch.as_mut().unwrap().lock().await;
             let start = Instant::now();
             let ev = ch
-                .wait_notify(Duration::from_nanos(1000 * 1000 * 1000 * 10 as u64))
+                .wait_notify(Duration::from_nanos(1000 * 1000 * 1000 * 60 as u64))
                 .await?;
 
             if CH::NotifyEvent::VsockServerReady != ev {
