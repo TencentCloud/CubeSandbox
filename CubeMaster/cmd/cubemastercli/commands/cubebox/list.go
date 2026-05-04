@@ -18,8 +18,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"encoding/json"
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
@@ -261,7 +261,7 @@ func doListRequest(c *cli.Context, host string, req *types.ListCubeSandboxReq, f
 func buildListRequest(c *cli.Context, host string, req *types.ListCubeSandboxReq, filterList []string) (string, io.Reader, error) {
 	if !c.Bool("old") {
 
-		reqEn, err := jsoniter.Marshal(req)
+		reqEn, err := json.Marshal(req)
 		if err != nil {
 			return "", nil, err
 		}

@@ -7,13 +7,11 @@ package proto
 import (
 	"context"
 	"encoding/json"
-	"net"
-	"os"
-
 	"github.com/containerd/containerd/v2/pkg/oci"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"net"
+	"os"
 )
 
 type QosConfig struct {
@@ -136,7 +134,7 @@ func (r *ShimNetReq) AllocatedPorts() []PortMapping {
 }
 
 func (r *ShimNetReq) OCISpecOpts() oci.SpecOpts {
-	b, _ := jsoniter.Marshal(r)
+	b, _ := json.Marshal(r)
 
 	return oci.WithAnnotations(map[string]string{
 		constants.AnnotationsNetWork: string(b),

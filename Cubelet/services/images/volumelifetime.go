@@ -21,7 +21,7 @@ import (
 	"time"
 	"unsafe"
 
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/multimetadb/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -289,7 +289,7 @@ func (l *volumeLifetime) asyncClean(ctx context.Context,
 			continue
 		}
 		m := &meta{}
-		err = jsoniter.Unmarshal(v, m)
+		err = json.Unmarshal(v, m)
 		if err != nil {
 			CubeLog.Errorf("volumeLifetime[%s] asyncClean ReadAll[%d] Fatal:%v,err:%v,value:%v",
 				bucket, len(all), k, err, string(v))
@@ -572,7 +572,7 @@ func (l *volumeLifetime) isStillRef(m *meta) bool {
 		return false
 	}
 	dbMeta := &meta{}
-	err = jsoniter.Unmarshal(tmpV, dbMeta)
+	err = json.Unmarshal(tmpV, dbMeta)
 	if err != nil {
 		return false
 	}
@@ -685,7 +685,7 @@ func (l *volumeLifetime) syncDb(m *meta) error {
 	if err == nil {
 
 		oldM := &meta{}
-		err := jsoniter.Unmarshal(tmpV, oldM)
+		err := json.Unmarshal(tmpV, oldM)
 		if err == nil {
 			if m.Del == metaDelete || m.Ref < 0 {
 
@@ -726,7 +726,7 @@ func (l *volumeLifetime) syncDb(m *meta) error {
 			CubeLog.Warnf("syncDb Unmarshal key [%s] failed. %s", m.realKey(), err)
 		}
 	}
-	value, err := jsoniter.Marshal(m)
+	value, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}

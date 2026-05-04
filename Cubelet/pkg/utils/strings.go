@@ -21,12 +21,11 @@ import (
 	"strings"
 	"unsafe"
 
-	jsoniter "github.com/json-iterator/go"
 	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
-var JSONTool = jsoniter.ConfigCompatibleWithStandardLibrary
+var JSONTool = NewJSONCodec(false)
 
 func String2Slice(s string) []byte {
 	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))

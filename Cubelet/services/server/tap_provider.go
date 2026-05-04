@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network"
 	netproto "github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
@@ -53,7 +53,7 @@ func matchTapFd(buf []byte) (errCode errCode, retFile *os.File, du1, du2 time.Du
 	startTime := time.Now()
 
 	var req Req
-	err := jsoniter.Unmarshal(buf, &req)
+	err := json.Unmarshal(buf, &req)
 	if err != nil {
 		return ParseJsonFailed, nil, du1, du2
 	}

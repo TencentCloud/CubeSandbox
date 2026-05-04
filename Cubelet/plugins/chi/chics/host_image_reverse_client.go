@@ -13,12 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"encoding/json"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
@@ -424,7 +424,8 @@ func (s *cubeHostImageReverseClient) handleRemoveSnapshot(ctx context.Context, c
 		start = time.Now()
 	)
 	toRemove := vmReq.GetRemoveSnapshotRequest().GetLayerMounts()
-	v, _ := jsoniter.MarshalToString(toRemove)
+	b, _ := json.Marshal(toRemove)
+	v := string(b)
 	log := log.G(ctx).WithFields(CubeLog.Fields{
 		"toRemove":  v,
 		"requestID": vmReq.Id,

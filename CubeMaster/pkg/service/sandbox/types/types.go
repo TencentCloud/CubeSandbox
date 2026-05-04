@@ -6,10 +6,10 @@
 package types
 
 import (
-	jsoniter "github.com/json-iterator/go"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	baseutils "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 )
 
 type Request struct {
@@ -553,12 +553,7 @@ const (
 	StartTime contextKey = "startTime"
 )
 
-var FastestJsoniter = jsoniter.Config{
-	EscapeHTML:                    false,
-	UseNumber:                     true,
-	MarshalFloatWith6Digits:       true,
-	ObjectFieldMustBeSimpleString: true,
-}.Froze()
+var FastestJsoniter = baseutils.NewJSONCodec(true)
 
 type UpdateRequest struct {
 	RequestID    string `json:"requestID" p:"requestID"  v:"required"`
