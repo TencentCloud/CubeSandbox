@@ -18,8 +18,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"encoding/json"
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
@@ -78,7 +78,7 @@ var InfoCommand = cli.Command{
 				HostID:        hostID,
 				ContainerPort: int32(containerPort),
 			}
-			reqEn, _ := jsoniter.Marshal(req)
+			reqEn, _ := json.Marshal(req)
 			body = bytes.NewBuffer(reqEn)
 			url = fmt.Sprintf("http://%s/cube/sandbox/info", net.JoinHostPort(host, port))
 		} else {

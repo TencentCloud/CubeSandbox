@@ -9,14 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"math"
-	"net/http"
-	"sync/atomic"
-	"testing"
-	"time"
-
-	jsoniter "github.com/json-iterator/go"
 	"github.com/rcrowley/go-metrics"
 	"github.com/smallnest/weighted"
 	"github.com/stretchr/testify/assert"
@@ -29,7 +21,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/inner"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"io"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"math"
+	"net/http"
+	"sync/atomic"
+	"testing"
+	"time"
 )
 
 var (
@@ -282,7 +280,7 @@ func isAllMvmNumZero(product string) bool {
 
 func testGetScheduleReq() *types.CreateCubeSandboxReq {
 	reqC := &types.CreateCubeSandboxReq{}
-	jsoniter.Unmarshal([]byte(mocktest_ScheduleReq), reqC)
+	json.Unmarshal([]byte(mocktest_ScheduleReq), reqC)
 	return reqC
 }
 
