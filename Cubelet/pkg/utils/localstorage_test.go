@@ -5,6 +5,7 @@
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -13,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"encoding/json"
 	"github.com/stretchr/testify/assert"
 	bolt "go.etcd.io/bbolt"
 )

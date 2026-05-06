@@ -7,6 +7,7 @@ package netfile
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"sort"
 	"strings"
 
-	"encoding/json"
 	"github.com/containerd/containerd/v2/pkg/oci"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"

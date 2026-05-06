@@ -6,13 +6,13 @@ package gc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"time"
 
-	"encoding/json"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/plugin/registry"
@@ -29,7 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 type GCConfig struct {

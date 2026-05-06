@@ -6,13 +6,13 @@ package telnet
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"time"
 
-	"encoding/json"
 	"github.com/tatsushid/go-fastping"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"

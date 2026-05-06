@@ -5,9 +5,9 @@
 package cubebox
 
 import (
+	"encoding/json"
 	"errors"
 
-	"encoding/json"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 

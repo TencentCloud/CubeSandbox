@@ -9,6 +9,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	"github.com/rcrowley/go-metrics"
 	"github.com/smallnest/weighted"
 	"github.com/stretchr/testify/assert"
@@ -21,13 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/inner"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"io"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"math"
-	"net/http"
-	"sync/atomic"
-	"testing"
-	"time"
 )
 
 var (

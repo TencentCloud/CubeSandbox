@@ -5,10 +5,10 @@
 package log
 
 import (
+	"encoding/json"
 	"runtime/debug"
 
-	"encoding/json"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 var AuditLogger *CubeLog.Logger = CubeLog.GetDefaultLogger()

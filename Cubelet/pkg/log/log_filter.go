@@ -5,11 +5,10 @@
 package log
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
-
-	"encoding/json"
 )
 
 const (

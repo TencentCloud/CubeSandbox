@@ -5,10 +5,9 @@
 package network
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
-
-	"encoding/json"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"

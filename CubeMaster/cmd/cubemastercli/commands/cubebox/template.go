@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -18,7 +19,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"encoding/json"
 	"github.com/google/uuid"
 	api "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	commands "github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemastercli/commands"

@@ -7,11 +7,12 @@ package proto
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"os"
+
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
-	"net"
-	"os"
 )
 
 type QosConfig struct {
@@ -34,9 +35,9 @@ type Interface struct {
 
 	Family int `json:"family"`
 
-	Mask            int        `json:"mask"`
-	IPs             []MVMIp    `json:"ips"`
-	Qos             *QosConfig `json:"qos"`
+	Mask int        `json:"mask"`
+	IPs  []MVMIp    `json:"ips"`
+	Qos  *QosConfig `json:"qos"`
 }
 
 type MVMIp struct {
