@@ -22,7 +22,7 @@ on the Cubelet host *after* the sandbox is destroyed (overlay merged on teardown
 import json
 import subprocess
 import os
-from cube_sandbox import Sandbox
+from cubesandbox import Sandbox
 
 CUBELET_HOST = os.environ.get("CUBE_PROXY_NODE_IP", "9.135.79.34")
 HOST_DIR   = "/tmp/cube_volume_demo"

@@ -11,7 +11,7 @@ A Context is a server-side kernel namespace created via envd's POST /contexts.
 Calling sandbox.create_context() returns a Context object with a server-assigned id.
 Pass it to run_code() to keep variables alive between calls.
 """
-from cube_sandbox import Sandbox
+from cubesandbox import Sandbox
 
 with Sandbox.create() as sb:
     print(f"Created: {sb}")

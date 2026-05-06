@@ -18,7 +18,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from cube_sandbox import Sandbox
+from cubesandbox import Sandbox
 
 
 def _ids(sandboxes: list[dict]) -> set[str]:
