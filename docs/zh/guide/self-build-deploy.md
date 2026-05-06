@@ -311,8 +311,6 @@ sudo ./down.sh
 | `CUBE_PROXY_DNS_ANSWER_IP` | `${CUBE_SANDBOX_NODE_IP}` | CoreDNS 对 `cube.app` 返回的 IP |
 | `CUBE_PROXY_COREDNS_BIND_ADDR` | `127.0.0.54` | CoreDNS 绑定地址 |
 | `ONE_CLICK_MKCERT_BIN` | `assets/bin/mkcert`（内置） | 构建时自定义 mkcert 二进制路径 |
-| `ALPINE_MIRROR_URL` | 清华镜像 | CubeProxy 构建使用的 Alpine 软件源 |
-| `PIP_INDEX_URL` | 清华镜像 | CubeProxy 构建使用的 PyPI 源 |
 
 ### 进程监听地址
 

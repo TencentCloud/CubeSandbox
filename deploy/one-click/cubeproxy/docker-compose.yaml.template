@@ -4,10 +4,7 @@ services:
     container_name: __CUBE_PROXY_CONTAINER_NAME__
     build:
       context: __CUBE_PROXY_BUILD_CONTEXT__
-      dockerfile: Dockerfile.oneclick
-      args:
-        ALPINE_MIRROR_URL: "__ALPINE_MIRROR_URL__"
-        PIP_INDEX_URL: "__PIP_INDEX_URL__"
+      dockerfile: Dockerfile
     restart: unless-stopped
     ports:
       - "__CUBE_PROXY_HOST_PORT__:8080"

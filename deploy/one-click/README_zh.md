@@ -9,7 +9,7 @@
 - `build-release-bundle.sh`：底层打包入口；消费源码树或 `ONE_CLICK_*_BIN` 预编译产物，组装 `sandbox-package` 并生成最终发布包。
 - `config-cube.toml`：one-click 默认 runtime 配置模板。
 - `support/`：MySQL/Redis 的 `docker compose` 模板，安装后落到 `/usr/local/services/cubetoolbox/support/`；`support/bin/mkcert` 为内置的 mkcert 二进制。
-- `cubeproxy/`：`cube proxy` 的 compose 模板、`global.conf` 模板、CoreDNS 模板与包装 Dockerfile。
+- `cubeproxy/`：`cube proxy` 的 compose 模板、`global.conf` 模板与 CoreDNS 模板。
 - `webui/`：Dashboard 的 Nginx 运行时文件，安装后落到 `/usr/local/services/cubetoolbox/webui/`。
 - `install.sh`：目标机控制节点安装与启动入口（默认 all-in-one）。
 - `install-compute.sh`：目标机计算节点安装入口。
@@ -231,8 +231,6 @@ WEB_UI_UPSTREAM=http://host.docker.internal:3000
 CUBE_API_BIND=0.0.0.0:3000
 CUBE_API_HEALTH_ADDR=127.0.0.1:3000
 CUBE_API_SANDBOX_DOMAIN=cube.app
-ALPINE_MIRROR_URL=https://mirrors.tuna.tsinghua.edu.cn/alpine
-PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 安装过程中会做这些事：
@@ -240,7 +238,7 @@ PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 - 若系统尚未安装 `mkcert`，从安装包内置的 `support/bin/mkcert` 复制到 `/usr/local/bin/mkcert`，再在宿主机 `CUBE_PROXY_CERT_DIR`（默认 `/usr/local/services/cubetoolbox/cubeproxy/certs/`）下执行 `mkcert -install` 并生成 `cube.app+3.pem`、`cube.app+3-key.pem`
 - 在 `/usr/local/services/cubetoolbox/support/` 下生成 `docker-compose.yaml` 并启动 MySQL/Redis
 - 用 `CUBE_SANDBOX_NODE_IP` 渲染 `cubeproxy/global.conf`
-- 在 `/usr/local/services/cubetoolbox/cubeproxy/` 下生成 `docker-compose.yaml`，并把宿主机 `CUBE_PROXY_CERT_DIR` 只读挂载到容器内 `/usr/local/openresty/nginx/certs/`，同时把 `ALPINE_MIRROR_URL` / `PIP_INDEX_URL` 作为 build args 传给 `Dockerfile.oneclick` 本地构建 `cube proxy` 镜像
+- 在 `/usr/local/services/cubetoolbox/cubeproxy/` 下生成 `docker-compose.yaml`，把宿主机 `CUBE_PROXY_CERT_DIR` 只读挂载到容器内 `/usr/local/openresty/nginx/certs/`，并使用发布包 build context 中来自 `CubeProxy/Dockerfile` 的标准 Dockerfile 本地构建 `cube proxy` 镜像
 - 启动 `CoreDNS` 容器；若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS，避免污染宿主机默认公网 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`，默认继续使用 `127.0.0.54`
 - 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 `cube-api /health`
 - 在 `/usr/local/services/cubetoolbox/webui/` 下启动标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/cubeapi/v1/health`
@@ -308,7 +306,6 @@ export E2B_API_KEY=dummy
 - 目标机默认联网拉取 `mysql:8.0` 和 `redis:7-alpine`。
 - `mkcert` 二进制已内置在发布包中（`support/bin/mkcert`），安装时若系统未预装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
 - `cube proxy` 的 TLS 证书和私钥保存在宿主机 `CUBE_PROXY_CERT_DIR`，并通过 `docker compose` 以只读方式挂载进容器；更新证书后无需重建镜像，只需重启 `cube-proxy` 或在容器内 reload nginx。
-- `cube proxy` 镜像构建默认使用国内源：`ALPINE_MIRROR_URL=https://mirrors.tuna.tsinghua.edu.cn/alpine`、`PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`；若目标机网络策略不同，可以在 `.env` 中覆盖。
 - 推荐入口 `build-release-bundle-builder.sh` 需要宿主机具备 `docker` / `make` / `tar` / `python3` / `truncate` / `ldd` / `mkfs.ext4` 等工具。
 - 推荐入口只把组件编译放进 builder；guest image 与最终打包仍在宿主机执行。
 - 若直接执行底层入口 `build-release-bundle.sh`，构建机还需要根据 build mode 自行准备 `go` / `cargo` / `make` 等本地工具链。

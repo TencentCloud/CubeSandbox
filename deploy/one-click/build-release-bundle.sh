@@ -244,11 +244,7 @@ copy_dir_contents "${CUBE_PROXY_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cubeproxy"
 copy_dir_contents "${CUBE_COREDNS_TEMPLATE_DIR}" "${PACKAGE_ROOT}/coredns"
 copy_dir_contents "${CUBE_WEBUI_TEMPLATE_DIR}" "${PACKAGE_ROOT}/webui"
 copy_dir_contents "${CUBE_PROXY_SOURCE_DIR}" "${PACKAGE_ROOT}/cubeproxy/build-context"
-copy_file "${CUBE_PROXY_TEMPLATE_DIR}/Dockerfile.oneclick" "${PACKAGE_ROOT}/cubeproxy/build-context/Dockerfile.oneclick"
-rm -f \
-  "${PACKAGE_ROOT}/cubeproxy/Dockerfile.oneclick" \
-  "${PACKAGE_ROOT}/cubeproxy/build-context/Dockerfile" \
-  "${PACKAGE_ROOT}/cubeproxy/build-context/Makefile"
+rm -f "${PACKAGE_ROOT}/cubeproxy/build-context/Makefile"
 build_web_dist "${PACKAGE_ROOT}/webui/dist"
 copy_dir_contents "${CUBE_SUPPORT_TEMPLATE_DIR}" "${PACKAGE_ROOT}/support"
 copy_file "${MKCERT_BIN_ASSET}" "${PACKAGE_ROOT}/support/bin/mkcert"
