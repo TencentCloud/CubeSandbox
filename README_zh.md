@@ -26,6 +26,7 @@
   <a href="./README.md"><strong>English</strong></a> ·
   <a href="./docs/zh/guide/quickstart.md"><strong>快速开始</strong></a> ·
   <a href="./docs/zh/index.md"><strong>文档</strong></a> ·
+  <a href="./docs/zh/changelog.md"><strong>变更日志</strong></a> ·
   <a href="#wechat-group"><strong>微信交流群</strong></a>
 </p>
 

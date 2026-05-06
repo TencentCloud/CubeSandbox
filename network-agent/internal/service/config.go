@@ -33,9 +33,6 @@ type Config struct {
 	StateDir            string
 	TapFDSocketPath     string
 	HostProxyBindIP     string
-	DisableTso          bool
-	DisableUfo          bool
-	DisableCheckSum     bool
 	ConnectTimeout      time.Duration
 }
 
@@ -55,9 +52,6 @@ func DefaultConfig() Config {
 		StateDir:            defaultStateDir,
 		TapFDSocketPath:     "/tmp/cube/network-agent-tap.sock",
 		HostProxyBindIP:     "127.0.0.1",
-		DisableTso:          true,
-		DisableUfo:          true,
-		DisableCheckSum:     true,
 		ConnectTimeout:      5 * time.Second,
 	}
 }
@@ -77,9 +71,6 @@ type cubeletNetworkConfig struct {
 	MvmGwMacAddr        string   `toml:"mvm_gw_mac_addr"`
 	MvmMask             int      `toml:"mvm_mask"`
 	MvmMtu              int      `toml:"mvm_mtu"`
-	DisableTso          bool     `toml:"disable_tso"`
-	DisableUfo          bool     `toml:"disable_ufo"`
-	DisableCheckSum     bool     `toml:"disable_check_sum"`
 	DefaultExposedPorts []uint16 `toml:"default_exposed_ports"`
 }
 
@@ -135,9 +126,6 @@ func LoadConfigFromCubeletTOML(base Config, path string) (Config, error) {
 	if networkCfg.TapInitNum != 0 {
 		base.TapInitNum = networkCfg.TapInitNum
 	}
-	base.DisableTso = networkCfg.DisableTso
-	base.DisableUfo = networkCfg.DisableUfo
-	base.DisableCheckSum = networkCfg.DisableCheckSum
 	if len(networkCfg.DefaultExposedPorts) > 0 {
 		base.DefaultExposedPorts = append([]uint16(nil), networkCfg.DefaultExposedPorts...)
 	}

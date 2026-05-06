@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/google/uuid"
@@ -81,7 +82,7 @@ var Destroy = &cli.Command{
 		}
 
 		if len(ids) <= 0 {
-			myPrint("should provide sandboxid")
+			log.Printf("should provide sandboxid")
 			return fmt.Errorf("should provide sandboxid")
 		}
 		tmpAnnation := make(map[string]string)
@@ -96,11 +97,11 @@ var Destroy = &cli.Command{
 		req := &cubebox.ListCubeSandboxRequest{}
 		resp, err := client.List(ctx, req)
 		if err != nil {
-			myPrint(fmt.Sprintf("list sandbox error:%v", err))
+			log.Printf("list sandbox error:%v", err)
 			return err
 		}
 		if len(resp.Items) == 0 {
-			myPrint("no any sandbox exits")
+			log.Printf("no any sandbox exits")
 			return nil
 		}
 
@@ -108,7 +109,7 @@ var Destroy = &cli.Command{
 			for _, id := range ids {
 				id := strings.TrimSpace(id)
 				if len(item.GetContainers()) == 0 {
-					myPrint(fmt.Sprintf("Warning sandbox:%s has no container", item.GetId()))
+					log.Printf("Warning sandbox:%s has no container", item.GetId())
 					continue
 				}
 
@@ -139,7 +140,7 @@ var DestroyAll = &cli.Command{
 		},
 	},
 	Action: func(context *cli.Context) error {
-		myPrint("cubecli destroyall is deprecated, please use:  \n cubecli unsafe rm --all\n")
+		log.Printf("cubecli destroyall is deprecated, please use: cubecli unsafe rm --all")
 		if !commands.AskForConfirm("will destroy ALL of the container, continue only if you confirm", 3) {
 			return nil
 		}
@@ -162,10 +163,10 @@ var DestroyAll = &cli.Command{
 		sandboxes := resp.Items
 
 		if len(sandboxes) == 0 {
-			myPrint("no any Containers")
+			log.Printf("no any Containers")
 			return nil
 		}
-		myPrint("Sandboxes:%d", len(sandboxes))
+		log.Printf("Sandboxes:%d", len(sandboxes))
 
 		tmpAnnation := make(map[string]string)
 		if context.IsSet("annotation") {
@@ -195,14 +196,14 @@ var DestroyAll = &cli.Command{
 }
 
 func destroy(context *cli.Context, req *cubebox.DestroyCubeSandboxRequest, client cubebox.CubeboxMgrClient) error {
-	myPrint("destroy sandbox: %s", req.GetSandboxID())
+	log.Printf("destroy sandbox: %s", req.GetSandboxID())
 	ctx, cancel := commands.AppContext(context)
 	defer cancel()
 	rsp, err := client.Destroy(ctx, req)
 	if err != nil {
-		myPrint("destroy failure:%v", err)
+		log.Printf("destroy failure:%v", err)
 		return err
 	}
-	myPrint("destroy rsp:%+v", rsp)
+	log.Printf("destroy rsp:%+v", rsp)
 	return nil
 }

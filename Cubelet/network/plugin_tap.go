@@ -33,7 +33,7 @@ import (
 	networkstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/codes"
@@ -269,9 +269,6 @@ type Config struct {
 	MvmGwMacAddr        string   `toml:"mvm_gw_mac_addr"`
 	MvmMask             int      `toml:"mvm_mask"`
 	MvmMtu              int      `toml:"mvm_mtu"`
-	DisableTso          bool     `toml:"disable_tso"`
-	DisableUfo          bool     `toml:"disable_ufo"`
-	DisableCheckSum     bool     `toml:"disable_check_sum"`
 	DefaultExposedPorts []uint16 `toml:"default_exposed_ports"`
 
 	CheckIntervalTime      tomlext.Duration `toml:"check_interval_in_sec"`
@@ -678,69 +675,6 @@ func appendUniqueString(base []string, extra []string) []string {
 	return out
 }
 
-func (l *local) generateShimNetReq(req *NetRequest, tap *Tap) (*ShimNetReq, error) {
-	shimReq := &ShimNetReq{
-		Interfaces: []*Interface{
-			{
-				Name:      tap.Name,
-				IPAddr:    tap.IP,
-				GuestName: eth0,
-				Mac:       l.Config.MVMMacAddr,
-
-				IP: l.Config.MVMInnerIP,
-
-				Family: 0,
-
-				Mask: l.Config.MvmMask,
-				IPs: []MVMIp{
-					{
-						IP:     l.Config.MVMInnerIP,
-						Mask:   l.Config.MvmMask,
-						Family: 0,
-					},
-				},
-				Mtu:             l.Config.MvmMtu,
-				DisableCheckSum: l.Config.DisableCheckSum,
-				DisableTso:      l.Config.DisableTso,
-				DisableUfo:      l.Config.DisableUfo,
-			},
-		},
-		Routes: []Route{
-			{
-				Family:  0,
-				Gateway: l.Config.MvmGwDestIP,
-				Source:  l.Config.MVMInnerIP,
-				Device:  eth0,
-				Scope:   0,
-			},
-		},
-		ARPs: []ARP{
-			{
-				DestIP: l.Config.MvmGwDestIP,
-				Device: eth0,
-				LlAddr: l.Config.MvmGwMacAddr,
-				State:  0,
-				Flags:  0,
-			},
-		},
-		PortMappings: tap.GetPortMappings(),
-	}
-	if req.Qos != nil {
-		bandwidthQos := req.Qos.BandWidth
-		opsQos := req.Qos.OPS
-		shimReq.Interfaces[0].Qos = &QosConfig{
-			BwSize:          bandwidthQos.Size,
-			BwOneTimeBurst:  bandwidthQos.OneTimeBurst,
-			BwRefillTime:    bandwidthQos.RefillTime,
-			OpsSize:         opsQos.Size,
-			OpsOneTimeBurst: opsQos.OneTimeBurst,
-			OpsRefillTime:   opsQos.RefillTime,
-		}
-	}
-
-	return shimReq, nil
-}
-
 func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) error {
 	if opts == nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.DestroyContext nil")
@@ -905,18 +839,15 @@ func (l *local) buildShimNetReqFromEnsureResponse(resp *networkagentclient.Ensur
 	shimReq := &ShimNetReq{
 		Interfaces: []*Interface{
 			{
-				Name:            intf.Name,
-				IPAddr:          sandboxIP,
-				GuestName:       eth0,
-				Mac:             intf.MAC,
-				Mtu:             int(intf.MTU),
-				IP:              legacyIP,
-				Family:          0,
-				Mask:            legacyMask,
-				IPs:             mvmIPs,
-				DisableCheckSum: l.Config.DisableCheckSum,
-				DisableTso:      l.Config.DisableTso,
-				DisableUfo:      l.Config.DisableUfo,
+				Name:      intf.Name,
+				IPAddr:    sandboxIP,
+				GuestName: eth0,
+				Mac:       intf.MAC,
+				Mtu:       int(intf.MTU),
+				IP:        legacyIP,
+				Family:    0,
+				Mask:      legacyMask,
+				IPs:       mvmIPs,
 			},
 		},
 	}
