@@ -136,12 +136,39 @@ func generateRestoreVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateCo
 
 	if len(allMnts) > 0 {
 		vc, _ := jsoniter.Marshal(allMnts)
+		umounts := virtiofs.GenPropagationContainerUmounts()
+		needSkipRo := false
+		needSkipRw := false
+		for _, info := range storageInfo.HostDirBackendInfos {
+			if info.ReadOnly {
+				needSkipRo = true
+			} else {
+				needSkipRw = true
+			}
+		}
+		var umountList []virtiofs.PropagationContainerDirs
+		if err := jsoniter.Unmarshal([]byte(umounts), &umountList); err != nil {
+			return nil, err
+		}
+		filtered := make([]virtiofs.PropagationContainerDirs, 0, len(umountList))
+		for _, u := range umountList {
+			if u.ContainerDir == constants.PropagationContainerDirRw && needSkipRw {
+				log.G(ctx).Infof("[hostdir] skip umount %s because it has active rw hostdir mounts", u.ContainerDir)
+				continue
+			}
+			if u.ContainerDir == constants.PropagationContainerDirRo && needSkipRo {
+				log.G(ctx).Infof("[hostdir] skip umount %s because it has active ro hostdir mounts", u.ContainerDir)
+				continue
+			}
+			filtered = append(filtered, u)
+		}
+		filteredUmounts, _ := jsoniter.Marshal(filtered)
 		specOpts = append(specOpts, oci.WithAnnotations(map[string]string{
 			constants.AnnotationPropagationExecMounts:       string(vc),
-			constants.AnnotationPropagationContainerUmounts: virtiofs.GenPropagationContainerUmounts(),
+			constants.AnnotationPropagationContainerUmounts: string(filteredUmounts),
 		}))
 		log.G(ctx).Infof("[hostdir] %s annotation set: %s", constants.AnnotationPropagationExecMounts, string(vc))
-		log.G(ctx).Infof("[hostdir] %s annotation set: %s", constants.AnnotationPropagationContainerUmounts, virtiofs.GenPropagationContainerUmounts())
+		log.G(ctx).Infof("[hostdir] %s annotation set: %s", constants.AnnotationPropagationContainerUmounts, string(filteredUmounts))
 	}
 	return specOpts, nil
 }
