@@ -14,7 +14,7 @@ Supported values (platform-defined):
     "custom"      — apply allow-list rules in ``network-rules``
 """
 import json
-from cube_e2b import Sandbox
+from cube_sandbox import Sandbox
 
 # ── 1. Default sandbox (allow-all) ───────────────────────────────────────────
 print("=== allow-all ===")

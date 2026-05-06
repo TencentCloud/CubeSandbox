@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.backends.legacy:build"
 
 [project]
-name = "cube-e2b"
+name = "cube-sandbox"
 version = "0.1.0"
 description = "Python SDK for CubeSandbox"
 readme = "README.md"
@@ -19,7 +19,7 @@ dev = ["pytest>=7", "pytest-mock", "ruff", "mypy"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["cube_e2b*"]
+include = ["cube_sandbox*"]
 
 [tool.ruff]
 line-length = 100

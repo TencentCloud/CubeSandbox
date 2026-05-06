@@ -8,7 +8,7 @@ Usage:
     python examples/create_and_run.py
 """
 import os
-from cube_e2b import Sandbox
+from cube_sandbox import Sandbox
 
 # ── Option A: environment variables (recommended) ─────────────────────────
 with Sandbox.create() as sb:
@@ -38,7 +38,7 @@ print("Sandbox destroyed.")
 
 
 # ── Option B: explicit config ─────────────────────────────────────────────
-from cube_e2b import Config, Sandbox
+from cube_sandbox import Config, Sandbox
 
 config = Config(
     api_url="http://9.135.79.34:3000",

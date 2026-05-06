@@ -2,7 +2,7 @@
 Example: Sandbox lifecycle — pause, connect, kill.
 """
 import time
-from cube_e2b import Config, Sandbox
+from cube_sandbox import Config, Sandbox
 
 config = Config(
     api_url="http://9.135.79.34:3000",
