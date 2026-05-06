@@ -53,36 +53,8 @@ end
 function _M.is_faulty_backend(self, backend_ip, check_remote)
     local cache = ngx.shared.faulty_backend
     local value = cache:get(backend_ip)
-    if not value or value ~= "true" then
-        return false, nil
-    end
-
-    if check_remote == false then
+    if value == "true" then
         return true, nil
-    end
-
-    local redis = require "redis_iresty"
-    local red = redis:new({
-        redis_ip = ngx.var.redis_ip,
-        redis_port = ngx.var.redis_port,
-        redis_pd = ngx.var.redis_pd,
-        redis_index = ngx.var.redis_index
-    })
-    local key = "faulty_backend_set"
-    local err
-    value, err = red:smembers(key)
-    if err then
-        return false, err
-    end
-
-    if not value then
-        return false, nil
-    end
-
-    for _, v in ipairs(value) do
-        if v == backend_ip then
-            return true, nil
-        end
     end
 
     return false, nil
