@@ -52,10 +52,9 @@ sudo su root
 ```bash
 # 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接
 wget "<kernel rpm 下载链接>"
-wget "<kernel-headers rpm 下载链接>"
 
 # 若宿主机已有更高版本内核，--oldpackage 跳过版本号比较
-rpm -ivh --oldpackage kernel-*.rpm kernel-headers-*.rpm
+rpm -ivh --oldpackage kernel-*.rpm
 ```
 
 设置 PVM 内核为默认启动项：
@@ -76,14 +75,12 @@ grubby --default-kernel
 在 Release 附件列表中找到以下两个文件，右键复制各自的下载链接后替换到命令中：
 
 - `linux-image-*cube.pvm.host*_amd64.deb`（内核主包）
-- `linux-headers-*cube.pvm.host*_amd64.deb`（内核头文件）
 
 ```bash
 # 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接
 wget "<linux-image deb 下载链接>"
-wget "<linux-headers deb 下载链接>"
 
-dpkg -i linux-image-*cube.pvm.host*.deb linux-headers-*cube.pvm.host*.deb
+dpkg -i linux-image-*cube.pvm.host*.deb
 ```
 
 设置 PVM 内核为默认启动项：
@@ -121,7 +118,7 @@ lsmod | grep kvm
 # 期望输出中包含 kvm_pvm
 ```
 
-如需开机自动加载 `kvm_pvm` 模块：
+设置开机自动加载 `kvm_pvm` 模块：
 
 ```bash
 echo 'kvm_pvm' > /etc/modules-load.d/kvm-pvm.conf

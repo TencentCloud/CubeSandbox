@@ -44,18 +44,16 @@ Choose the package format that matches your Linux distribution:
 
 ### RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora)
 
-Find the following two files in the release assets, right-click each to copy its download link:
+Find the following file in the release assets, right-click it to copy its download link:
 
 - `kernel-*cube.pvm.host*.x86_64.rpm` (kernel package)
-- `kernel-headers-*cube.pvm.host*.x86_64.rpm` (kernel headers)
 
 ```bash
 # Replace the URLs below with the actual download links copied from the Releases page
 wget "<kernel rpm download URL>"
-wget "<kernel-headers rpm download URL>"
 
 # --oldpackage skips the version check if a newer kernel is already installed
-rpm -ivh --oldpackage kernel-*.rpm kernel-headers-*.rpm
+rpm -ivh --oldpackage kernel-*.rpm
 ```
 
 Set the PVM kernel as the default boot entry:
@@ -73,17 +71,15 @@ grubby --default-kernel
 
 ### DEB-based (Ubuntu, Debian)
 
-Find the following two files in the release assets, right-click each to copy its download link:
+Find the following file in the release assets, right-click it to copy its download link:
 
 - `linux-image-*cube.pvm.host*_amd64.deb` (kernel package)
-- `linux-headers-*cube.pvm.host*_amd64.deb` (kernel headers)
 
 ```bash
 # Replace the URLs below with the actual download links copied from the Releases page
 wget "<linux-image deb download URL>"
-wget "<linux-headers deb download URL>"
 
-dpkg -i linux-image-*cube.pvm.host*.deb linux-headers-*cube.pvm.host*.deb
+dpkg -i linux-image-*cube.pvm.host*.deb
 ```
 
 Set the PVM kernel as the default boot entry:
@@ -121,7 +117,7 @@ lsmod | grep kvm
 # Expected output includes kvm_pvm
 ```
 
-To load `kvm_pvm` automatically on boot:
+Configure `kvm_pvm` to load automatically on boot:
 
 ```bash
 echo 'kvm_pvm' > /etc/modules-load.d/kvm-pvm.conf
