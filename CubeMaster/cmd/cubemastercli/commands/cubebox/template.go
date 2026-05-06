@@ -892,12 +892,18 @@ var TemplateRedoCommand = cli.Command{
 			if err != nil {
 				return err
 			}
-			current := fmt.Sprintf("%s/%s/%d/%d/%d", latest.Job.Status, latest.Job.Phase, latest.Job.Progress, latest.Job.ReadyNodeCount, latest.Job.ExpectedNodeCount)
+			if latest.Job == nil {
+				printTemplateImageJobWatchLine(nil)
+				printTemplateImageJobCompletionSummary(nil)
+				return errors.New("empty job")
+			}
+			current := formatTemplateImageJobWatchLine(latest.Job)
 			if current != lastPrinted {
-				printTemplateImageJob(latest.Job)
+				printTemplateImageJobWatchLine(latest.Job)
 				lastPrinted = current
 			}
 			if latest.Job.Status == "READY" || latest.Job.Status == "FAILED" {
+				printTemplateImageJobCompletionSummary(latest.Job)
 				if c.Bool("json") {
 					commands.PrintAsJSON(latest)
 				}
@@ -955,12 +961,18 @@ var TemplateWatchCommand = cli.Command{
 			if err != nil {
 				return err
 			}
-			current := fmt.Sprintf("%s/%s/%d/%d/%d", rsp.Job.Status, rsp.Job.Phase, rsp.Job.Progress, rsp.Job.ReadyNodeCount, rsp.Job.ExpectedNodeCount)
+			if rsp.Job == nil {
+				printTemplateImageJobWatchLine(nil)
+				printTemplateImageJobCompletionSummary(nil)
+				return errors.New("empty job")
+			}
+			current := formatTemplateImageJobWatchLine(rsp.Job)
 			if current != lastPrinted {
-				printTemplateImageJob(rsp.Job)
+				printTemplateImageJobWatchLine(rsp.Job)
 				lastPrinted = current
 			}
 			if rsp.Job.Status == "READY" || rsp.Job.Status == "FAILED" {
+				printTemplateImageJobCompletionSummary(rsp.Job)
 				if c.Bool("json") {
 					commands.PrintAsJSON(rsp)
 				}
@@ -1207,6 +1219,92 @@ func printTemplateImageJob(job *types.TemplateImageJobInfo) {
 	if job.ErrorMessage != "" {
 		log.Printf("error: %s\n", job.ErrorMessage)
 	}
+}
+
+func formatTemplateImageJobWatchPhase(job *types.TemplateImageJobInfo) string {
+	phase := "UNKNOWN"
+	if job != nil {
+		if job.Status == "READY" {
+			return "[7/7] READY"
+		}
+		if job.Phase != "" {
+			phase = job.Phase
+		}
+	}
+
+	phaseOrder := map[string]int{
+		"PULLING":           1,
+		"UNPACKING":         2,
+		"BUILDING_EXT4":     3,
+		"GENERATING_JSON":   4,
+		"DISTRIBUTING":      5,
+		"CREATING_TEMPLATE": 6,
+	}
+	if step, ok := phaseOrder[phase]; ok {
+		return fmt.Sprintf("[%d/7] %s", step, phase)
+	}
+	return fmt.Sprintf("[?/7] %s", phase)
+}
+
+func formatTemplateImageJobWatchLine(job *types.TemplateImageJobInfo) string {
+	if job == nil {
+		return "[?/7] UNKNOWN"
+	}
+	parts := []string{formatTemplateImageJobWatchPhase(job)}
+	parts = append(parts, fmt.Sprintf("progress=%d%%", job.Progress))
+	if job.ExpectedNodeCount > 0 || job.ReadyNodeCount > 0 || job.FailedNodeCount > 0 {
+		parts = append(parts, fmt.Sprintf("distribution=%d/%d ready, %d failed", job.ReadyNodeCount, job.ExpectedNodeCount, job.FailedNodeCount))
+	}
+	if job.TemplateID != "" {
+		parts = append(parts, fmt.Sprintf("template_id=%s", job.TemplateID))
+	}
+	if job.JobID != "" {
+		parts = append(parts, fmt.Sprintf("job_id=%s", job.JobID))
+	}
+	if job.ArtifactID != "" {
+		parts = append(parts, fmt.Sprintf("artifact_id=%s", job.ArtifactID))
+	}
+	if job.ErrorMessage != "" {
+		parts = append(parts, fmt.Sprintf("error=%s", job.ErrorMessage))
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatTemplateImageJobCompletionSummary(job *types.TemplateImageJobInfo) string {
+	if job == nil {
+		return "template image job finished with empty response"
+	}
+	status := "finished"
+	if job.Status == "READY" {
+		status = "succeeded"
+	} else if job.Status == "FAILED" {
+		status = "failed"
+	}
+	parts := []string{fmt.Sprintf("template image job %s", status)}
+	if job.TemplateID != "" {
+		parts = append(parts, fmt.Sprintf("template_id=%s", job.TemplateID))
+	}
+	if job.JobID != "" {
+		parts = append(parts, fmt.Sprintf("job_id=%s", job.JobID))
+	}
+	if job.ArtifactID != "" {
+		parts = append(parts, fmt.Sprintf("artifact_id=%s", job.ArtifactID))
+	}
+	if job.ExpectedNodeCount > 0 || job.ReadyNodeCount > 0 || job.FailedNodeCount > 0 {
+		parts = append(parts, fmt.Sprintf("distribution=%d/%d ready, %d failed", job.ReadyNodeCount, job.ExpectedNodeCount, job.FailedNodeCount))
+	}
+	if job.ErrorMessage != "" {
+		parts = append(parts, fmt.Sprintf("error=%s", job.ErrorMessage))
+	}
+	return strings.Join(parts, " ")
+}
+
+func printTemplateImageJobWatchLine(job *types.TemplateImageJobInfo) {
+	log.Print(formatTemplateImageJobWatchLine(job) + "\n")
+}
+
+func printTemplateImageJobCompletionSummary(job *types.TemplateImageJobInfo) {
+	log.Print(formatTemplateImageJobCompletionSummary(job) + "\n")
 }
 
 func fetchTemplateBuildStatus(c *cli.Context, buildID string) (*templateBuildStatusResponse, error) {

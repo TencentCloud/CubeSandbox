@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"flag"
+	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -272,5 +273,124 @@ func TestParseContainerOverridesNoDNS(t *testing.T) {
 	}
 	if overrides.DnsConfig != nil {
 		t.Fatalf("expected DnsConfig to be nil when --dns is not set, got %+v", overrides.DnsConfig)
+	}
+}
+
+func TestTemplateImageJobWatchPhaseLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		job  *types.TemplateImageJobInfo
+		want string
+	}{
+		{name: "pulling", job: &types.TemplateImageJobInfo{Phase: "PULLING"}, want: "[1/7] PULLING"},
+		{name: "unpacking", job: &types.TemplateImageJobInfo{Phase: "UNPACKING"}, want: "[2/7] UNPACKING"},
+		{name: "building ext4", job: &types.TemplateImageJobInfo{Phase: "BUILDING_EXT4"}, want: "[3/7] BUILDING_EXT4"},
+		{name: "generating json", job: &types.TemplateImageJobInfo{Phase: "GENERATING_JSON"}, want: "[4/7] GENERATING_JSON"},
+		{name: "distributing", job: &types.TemplateImageJobInfo{Phase: "DISTRIBUTING"}, want: "[5/7] DISTRIBUTING"},
+		{name: "creating template", job: &types.TemplateImageJobInfo{Phase: "CREATING_TEMPLATE"}, want: "[6/7] CREATING_TEMPLATE"},
+		{name: "ready", job: &types.TemplateImageJobInfo{Status: "READY", Phase: "READY"}, want: "[7/7] READY"},
+		{name: "failed with ready phase", job: &types.TemplateImageJobInfo{Status: "FAILED", Phase: "READY"}, want: "[?/7] READY"},
+		{name: "unknown", job: &types.TemplateImageJobInfo{Phase: "SOMETHING_NEW"}, want: "[?/7] SOMETHING_NEW"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatTemplateImageJobWatchPhase(tt.job)
+			if got != tt.want {
+				t.Fatalf("phase label=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatTemplateImageJobWatchLineIncludesKeyFields(t *testing.T) {
+	job := &types.TemplateImageJobInfo{
+		JobID:             "job-1",
+		TemplateID:        "tpl-1",
+		ArtifactID:        "artifact-1",
+		Phase:             "DISTRIBUTING",
+		Progress:          73,
+		ExpectedNodeCount: 5,
+		ReadyNodeCount:    3,
+		FailedNodeCount:   1,
+	}
+
+	got := formatTemplateImageJobWatchLine(job)
+	for _, want := range []string{
+		"[5/7] DISTRIBUTING",
+		"progress=73%",
+		"distribution=3/5 ready, 1 failed",
+		"template_id=tpl-1",
+		"job_id=job-1",
+		"artifact_id=artifact-1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("watch line=%q, want substring %q", got, want)
+		}
+	}
+}
+
+func TestFormatTemplateImageJobWatchLineIncludesError(t *testing.T) {
+	job := &types.TemplateImageJobInfo{
+		Status:       "FAILED",
+		Phase:        "BUILDING_EXT4",
+		Progress:     55,
+		ErrorMessage: "build ext4 failed",
+	}
+
+	got := formatTemplateImageJobWatchLine(job)
+	for _, want := range []string{"[3/7] BUILDING_EXT4", "progress=55%", "error=build ext4 failed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("watch line=%q, want substring %q", got, want)
+		}
+	}
+}
+
+func TestFormatTemplateImageJobCompletionSummarySuccess(t *testing.T) {
+	job := &types.TemplateImageJobInfo{
+		Status:             "READY",
+		TemplateID:         "tpl-1",
+		JobID:              "job-1",
+		ArtifactID:         "artifact-1",
+		ExpectedNodeCount:  2,
+		ReadyNodeCount:     2,
+		FailedNodeCount:    0,
+		TemplateStatus:     "READY",
+		TemplateSpecFingerprint: "sha256:abc",
+	}
+
+	got := formatTemplateImageJobCompletionSummary(job)
+	for _, want := range []string{"template image job succeeded", "template_id=tpl-1", "job_id=job-1", "artifact_id=artifact-1", "distribution=2/2 ready, 0 failed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary=%q, want substring %q", got, want)
+		}
+	}
+}
+
+func TestFormatTemplateImageJobCompletionSummaryFailure(t *testing.T) {
+	job := &types.TemplateImageJobInfo{
+		Status:       "FAILED",
+		TemplateID:   "tpl-1",
+		JobID:        "job-1",
+		ErrorMessage: "pull failed",
+	}
+
+	got := formatTemplateImageJobCompletionSummary(job)
+	for _, want := range []string{"template image job failed", "template_id=tpl-1", "job_id=job-1", "error=pull failed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary=%q, want substring %q", got, want)
+		}
+	}
+}
+
+func TestFormatTemplateImageJobWatchHelpersHandleNil(t *testing.T) {
+	if got := formatTemplateImageJobWatchPhase(nil); got != "[?/7] UNKNOWN" {
+		t.Fatalf("nil phase label=%q, want [?/7] UNKNOWN", got)
+	}
+	if got := formatTemplateImageJobWatchLine(nil); got == "" {
+		t.Fatal("expected non-empty watch line for nil job")
+	}
+	if got := formatTemplateImageJobCompletionSummary(nil); got == "" {
+		t.Fatal("expected non-empty completion summary for nil job")
 	}
 }
