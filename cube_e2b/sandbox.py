@@ -118,6 +118,66 @@ class Sandbox:
         _check_response(resp)
         return cls(resp.json(), config=cfg)
 
+    # ── class-level API methods ───────────────────────────────────────
+
+    @classmethod
+    def list(cls, config: Config | None = None) -> list[dict]:
+        """Return all running sandboxes from the v1 API.
+
+        Calls ``GET /sandboxes`` and returns the JSON response as a list of
+        sandbox dicts (each dict contains at least ``sandboxID`` and
+        ``templateID`` keys).
+
+        Args:
+            config: SDK config. Uses default (env-based) config if omitted.
+
+        Returns:
+            A list of sandbox info dicts.
+        """
+        cfg = config or Config()
+        s = requests.Session()
+        resp = s.get(f"{cfg.api_url}/sandboxes")
+        _check_response(resp)
+        return resp.json()
+
+    @classmethod
+    def list_v2(cls, config: Config | None = None) -> list[dict]:
+        """Return all running sandboxes from the v2 API.
+
+        Calls ``GET /v2/sandboxes`` and returns the JSON response as a list of
+        sandbox dicts.
+
+        Args:
+            config: SDK config. Uses default (env-based) config if omitted.
+
+        Returns:
+            A list of sandbox info dicts.
+        """
+        cfg = config or Config()
+        s = requests.Session()
+        resp = s.get(f"{cfg.api_url}/v2/sandboxes")
+        _check_response(resp)
+        return resp.json()
+
+    @classmethod
+    def health(cls, config: Config | None = None) -> dict:
+        """Check the health of the sandbox API.
+
+        Calls ``GET /health`` and returns the response dict, e.g.
+        ``{"status": "ok", "sandboxes": 0}``.
+
+        Args:
+            config: SDK config. Uses default (env-based) config if omitted.
+
+        Returns:
+            A dict with at least a ``status`` key.
+        """
+        cfg = config or Config()
+        s = requests.Session()
+        resp = s.get(f"{cfg.api_url}/health")
+        _check_response(resp)
+        return resp.json()
+
     # ── code execution ────────────────────────────────────────────────
 
     # ── context management ──────────────────────────────────────────
