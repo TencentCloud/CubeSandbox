@@ -96,6 +96,23 @@ check_proxy_cert_preflight() {
 
 check_hardware_preflight() {
   if [[ ! -e /dev/kvm ]]; then
+    log "KVM is not supported or not enabled (/dev/kvm not found)."
+    log ""
+    log "If this host cannot expose hardware KVM (for example, it is itself a"
+    log "virtual machine without nested virtualization), you can try the"
+    log "open-source PVM stack shipped under deploy/pvm/ to turn the current"
+    log "guest into a PVM host that provides /dev/kvm to CubeSandbox:"
+    log ""
+    log "    sudo bash deploy/pvm/pvm_setup.sh"
+    log ""
+    log "That script will build and install a PVM-enabled host kernel, build a"
+    log "matching PVM guest vmlinux, and guide you through the reboot needed to"
+    log "switch into the new kernel. After reboot, re-run this installer."
+    log ""
+    log "WARNING: the open-source kvm-pvm integration is intended for"
+    log "development, evaluation and self-built experiments only. It is NOT"
+    log "suitable for production workloads -- expect reduced performance,"
+    log "limited hardware coverage and no long-term support guarantees."
     die "KVM is not supported or not enabled (/dev/kvm not found)."
   fi
 

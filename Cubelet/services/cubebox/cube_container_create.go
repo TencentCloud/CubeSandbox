@@ -607,7 +607,7 @@ func WithCubeFsAnnotation(ctx context.Context,
 	if err != nil {
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate virtiofs config failed: %v", err)
 	}
-	limit, err := workflow.GetQosFromReq(realReq)
+	limit, err := workflow.GetQosFromReq(realReq, constants.MasterAnnotationsFSQos)
 	if err != nil {
 		return nil, err
 	}

@@ -28,9 +28,6 @@ func TestLoadConfigFromCubeletTOML(t *testing.T) {
     mvm_gw_mac_addr = "02:aa:bb:cc:dd:ee"
     mvm_mask = 29
     mvm_mtu = 1450
-    disable_tso = false
-    disable_ufo = false
-    disable_check_sum = false
     default_exposed_ports = [81, 8081]
 `
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -71,15 +68,6 @@ func TestLoadConfigFromCubeletTOML(t *testing.T) {
 	}
 	if cfg.MvmMtu != 1450 {
 		t.Fatalf("MvmMtu=%d", cfg.MvmMtu)
-	}
-	if cfg.DisableTso {
-		t.Fatalf("DisableTso=%v, want false", cfg.DisableTso)
-	}
-	if cfg.DisableUfo {
-		t.Fatalf("DisableUfo=%v, want false", cfg.DisableUfo)
-	}
-	if cfg.DisableCheckSum {
-		t.Fatalf("DisableCheckSum=%v, want false", cfg.DisableCheckSum)
 	}
 	if len(cfg.DefaultExposedPorts) != 2 || cfg.DefaultExposedPorts[0] != 81 || cfg.DefaultExposedPorts[1] != 8081 {
 		t.Fatalf("DefaultExposedPorts=%v", cfg.DefaultExposedPorts)

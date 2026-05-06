@@ -32,3 +32,6 @@ examples/openai-agents-example/.scratch/
 examples/openai-agents-code-interpreter/__pycache__/
 examples/openai-agents-code-interpreter/output/
 examples/openai-agents-code-interpreter/.scratch/
+
+pvm-guest-build/
+pvm-host-build/
