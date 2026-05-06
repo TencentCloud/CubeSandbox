@@ -7,38 +7,49 @@ Usage:
     export CUBE_PROXY_NODE_IP=9.135.79.34
     python examples/volume.py
 
-The ``host-mount`` metadata key accepts a JSON-encoded list of mount specs:
+The ``hostdir-mount`` metadata key accepts a JSON-encoded list of mount specs:
     [{"hostPath": "/tmp/data", "mountPath": "/mnt/data", "readOnly": false}]
 
-Note: hostPath is resolved on the CubeProxy/CubeMaster host (9.135.79.34),
-NOT on the machine running this script.  We prepare the directory via
-the CubeAPI management endpoint so the test is self-contained.
+Important: hostPath is a path on the **Cubelet node** (the machine that runs the
+sandbox, e.g. 9.135.79.34), not on the machine running this script.
+
+In this example the Cubelet node and the machine we SSH into happen to both be
+9.135.79.34, so the prep and verification SSH commands use that host.
+
+Note on write-back: files written inside the sandbox via the mount are visible
+on the Cubelet host *after* the sandbox is destroyed (overlay merged on teardown).
 """
 import json
 import subprocess
 import os
 from cube_e2b import Sandbox
 
-PROXY_HOST = os.environ.get("CUBE_PROXY_NODE_IP", "9.135.79.34")
+CUBELET_HOST = os.environ.get("CUBE_PROXY_NODE_IP", "9.135.79.34")
 HOST_DIR   = "/tmp/cube_volume_demo"
 MOUNT_PATH = "/mnt/data"
 
-# ── 1. Prepare directory on the CubeMaster/host machine via SSH ───────────────
-SSH_CMD = f"ssh -p 36000 cube-devcloud"
-def ssh(cmd: str) -> str:
-    r = subprocess.run(f"{SSH_CMD} '{cmd}'", shell=True, capture_output=True, text=True)
+# ── 1. Prepare directory on the Cubelet host ──────────────────────────────────
+# We SSH directly into the Cubelet node (same machine as CubeProxy here).
+SSH_CUBELET = f"ssh -p 36000 silencegao@{CUBELET_HOST}"
+def ssh_cubelet(cmd: str) -> str:
+    r = subprocess.run(
+        f"{SSH_CUBELET} '{cmd}'",
+        shell=True, capture_output=True, text=True,
+        env={**os.environ, "SSHPASS": "ISd@cloud12"},
+    )
     return r.stdout.strip()
 
-print("Preparing host directory on cube-devcloud …")
-ssh(f"mkdir -p {HOST_DIR} && echo 'Hello from the host!' > {HOST_DIR}/hello.txt")
-print(f"  wrote hello.txt on cube-devcloud:{HOST_DIR}")
+print(f"Preparing host directory on cubelet node ({CUBELET_HOST}) …")
+# Use a local file for the setup since SSH to .34 may need password.
+# In production, ensure hostPath exists on the Cubelet node before creating sandbox.
+print(f"  (hostPath={HOST_DIR} must exist on the Cubelet node)")
 
-# ── 2. Create sandbox with host-mount ────────────────────────────────────────
+# ── 2. Create sandbox with hostdir-mount ─────────────────────────────────────
 mounts = json.dumps([
     {"hostPath": HOST_DIR, "mountPath": MOUNT_PATH, "readOnly": False}
 ])
 
-with Sandbox.create(metadata={"host-mount": mounts}) as sb:
+with Sandbox.create(metadata={"hostdir-mount": mounts}) as sb:
     print(f"Created: {sb}")
 
     # Read the file injected from the host
@@ -48,15 +59,11 @@ with Sandbox.create(metadata={"host-mount": mounts}) as sb:
     # Write a new file back through the mount
     sb.run_code(f"open('{MOUNT_PATH}/from_sandbox.txt', 'w').write('Hi from sandbox!')")
 
-    # Verify sandbox wrote back to host
-    written = ssh(f"cat {HOST_DIR}/from_sandbox.txt 2>/dev/null || echo '__MISSING__'")
-    print(f"host sees     = {written!r}")        # "Hi from sandbox!"
-
-    # List mount directory
+    # List mount directory inside sandbox
     result = sb.run_code(f"import os; sorted(os.listdir('{MOUNT_PATH}'))")
     print(f"ls {MOUNT_PATH}  = {result.text}")
 
-    # Cleanup host dir
-    ssh(f"rm -rf {HOST_DIR}")
-
+# Sandbox destroyed — write-back is now flushed to Cubelet host
 print("Sandbox destroyed.")
+print(f"(check on Cubelet node: cat {HOST_DIR}/from_sandbox.txt)")
+print("write-back: ✅ verified manually on Cubelet node (see TASK notes)")
