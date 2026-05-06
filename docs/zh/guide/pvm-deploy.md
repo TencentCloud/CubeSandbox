@@ -44,10 +44,9 @@ sudo su root
 
 ### RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）
 
-在 Release 附件列表中找到以下两个文件，右键复制各自的下载链接后替换到命令中：
+在 Release 附件列表中找到以下文件，右键复制下载链接：
 
 - `kernel-*cube.pvm.host*.x86_64.rpm`（内核主包）
-- `kernel-headers-*cube.pvm.host*.x86_64.rpm`（内核头文件）
 
 ```bash
 # 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接
@@ -70,9 +69,15 @@ grubby --set-default-index=<index>
 grubby --default-kernel
 ```
 
+配置内核启动参数：
+
+```bash
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/pvm/grub/host_grub_config.sh | bash
+```
+
 ### DEB 系（Ubuntu、Debian）
 
-在 Release 附件列表中找到以下两个文件，右键复制各自的下载链接后替换到命令中：
+在 Release 附件列表中找到以下文件，右键复制下载链接：
 
 - `linux-image-*cube.pvm.host*_amd64.deb`（内核主包）
 
@@ -93,8 +98,12 @@ ls /boot/vmlinuz-*
 KVER="$(ls /boot/vmlinuz-*cube.pvm.host* | sed 's|/boot/vmlinuz-||' | tail -1)"
 sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"Advanced options for Ubuntu>Ubuntu, with Linux ${KVER}\"|" \
   /etc/default/grub
+```
 
-update-grub
+配置内核启动参数（脚本内部会调用 `update-grub` 使上述设置生效）：
+
+```bash
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/pvm/grub/host_grub_config.sh | bash
 ```
 
 ### 重启并验证
@@ -139,23 +148,22 @@ echo 'kvm_pvm' > /etc/modules-load.d/kvm-pvm.conf
 在线安装脚本将发布包下载到临时目录再执行，安装目录中无 `.env` 文件，因此直接在命令前加 `CUBE_PVM_ENABLE=1` 即可生效：
 
 ```bash
-# 使用 GitHub（默认）
-CUBE_PVM_ENABLE=1 bash <(curl -fsSL \
-  https://github.com/TencentCloud/CubeSandbox/releases/latest/download/online-install.sh)
+# 国内访问（推荐，从 CNB 拉取脚本）
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh \
+  | CUBE_PVM_ENABLE=1 MIRROR=cn bash
 ```
 
 ```bash
-# 国内访问加速（使用镜像源）
-MIRROR=cn CUBE_PVM_ENABLE=1 bash <(curl -fsSL \
+# 境外访问（从 GitHub 拉取脚本）
+CUBE_PVM_ENABLE=1 bash <(curl -fsSL \
   https://github.com/TencentCloud/CubeSandbox/releases/latest/download/online-install.sh)
 ```
 
 如需手动指定节点 IP（多网卡机器建议显式指定）：
 
 ```bash
-CUBE_PVM_ENABLE=1 bash <(curl -fsSL \
-  https://github.com/TencentCloud/CubeSandbox/releases/latest/download/online-install.sh) \
-  --node-ip=<你的服务器 IP>
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh \
+  | CUBE_PVM_ENABLE=1 MIRROR=cn bash -s -- --node-ip=<你的服务器 IP>
 ```
 
 ### 方式二：手动下载发布包

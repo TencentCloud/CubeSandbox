@@ -69,6 +69,13 @@ grubby --set-default-index=<index>
 grubby --default-kernel
 ```
 
+Configure the required kernel boot parameters:
+
+```bash
+bash <(curl -fsSL \
+  https://raw.githubusercontent.com/TencentCloud/CubeSandbox/master/deploy/pvm/grub/host_grub_config.sh)
+```
+
 ### DEB-based (Ubuntu, Debian)
 
 Find the following file in the release assets, right-click it to copy its download link:
@@ -92,8 +99,13 @@ ls /boot/vmlinuz-*
 KVER="$(ls /boot/vmlinuz-*cube.pvm.host* | sed 's|/boot/vmlinuz-||' | tail -1)"
 sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"Advanced options for Ubuntu>Ubuntu, with Linux ${KVER}\"|" \
   /etc/default/grub
+```
 
-update-grub
+Configure the required kernel boot parameters (the script also calls `update-grub`, applying the default-entry change above):
+
+```bash
+bash <(curl -fsSL \
+  https://raw.githubusercontent.com/TencentCloud/CubeSandbox/master/deploy/pvm/grub/host_grub_config.sh)
 ```
 
 ### Reboot and Verify
