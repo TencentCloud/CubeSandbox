@@ -1,25 +1,25 @@
 # cube-e2b Example Run Results
 
-**Date**: 2026-04-29 23:55:42
+**Date**: 2026-05-06 09:51:22
 
 **Env**: `CUBE_API_URL=http://9.135.79.34:3000` `CUBE_PROXY_NODE_IP=9.135.79.34`
 
 | Example | Status | Time |
 |---------|--------|------|
-| `create_and_run` | ✅ PASS | 1.5s |
-| `lifecycle` | ✅ PASS | 19.8s |
-| `volume` | ⚠️ UNIMPLEMENTED | 2.0s |
-| `context` | ✅ PASS | 9.9s |
-| `network_policy` | ✅ PASS | 41.4s |
+| `create_and_run` | ✅ PASS | 1.6s |
+| `lifecycle` | ✅ PASS | 17.5s |
+| `volume` | ✅ PASS | 0.6s |
+| `context` | ✅ PASS | 10.1s |
+| `network_policy` | ✅ PASS | 41.5s |
 
 ---
 
 ## create_and_run
 
-**Status**: ✅ PASS  **Time**: 1.5s
+**Status**: ✅ PASS  **Time**: 1.6s
 
 ```
-Created: Sandbox(id='d4265c4ebca24f19ab654fae9b5439ca', domain='cube.app')
+Created: Sandbox(id='87b1fe24c58f42aba9fc5281be2bee82', domain='cube.app')
 result.text   = '6.2832'
   stdout: item 0
 item 1
@@ -28,16 +28,16 @@ logs.stdout   = ['item 0\nitem 1\nitem 2\n']
 error.name    = ZeroDivisionError
 error.value   = division by zero
 Sandbox destroyed.
-sandbox_id = 7c08052326b1439391964e23661ff25e
+sandbox_id = b0444b3ec5e7496b9f6d01061463c199
 sum(1..100) = 5050
 ```
 
 ## lifecycle
 
-**Status**: ✅ PASS  **Time**: 19.8s
+**Status**: ✅ PASS  **Time**: 17.5s
 
 ```
-created  : 5dcaad83390a495c9cd1de7072b9cdde
+created  : 5c326c5f2c3f4588a265e522a91c4d8e
 paused
 state after resume = 42
 destroyed
@@ -45,34 +45,31 @@ destroyed
 
 ## volume
 
-**Status**: ⚠️ UNIMPLEMENTED  **Time**: 2.0s
-
-> **Note**: `host-mount` is forwarded by CubeAPI as an annotation to CubeMaster,
-> but CubeMaster's `injectHostDirMounts()` is not yet implemented.
-> The sandbox starts normally, but `/mnt/data` is empty. This is a planned feature.
+**Status**: ✅ PASS  **Time**: 0.6s
 
 ```
-Preparing host directory on cube-devcloud …
-  wrote hello.txt on cube-devcloud:/tmp/cube_volume_demo
-Created: Sandbox(id='908ddbe9bd484c1e8fadd9f7ae69663c', domain='cube.app')
-file content  = None   (mount not yet active)
-host sees     = '__MISSING__'  (write-back also not active)
-ls /mnt/data  = None
+Preparing host directory on cubelet node (9.135.79.34) …
+  (hostPath=/tmp/cube_volume_demo must exist on the Cubelet node)
+Created: Sandbox(id='ea2d5dc5a81b42fc821fe13c8608764c', domain='cube.app')
+file content  = 'Hello from the host!\\n'
+ls /mnt/data  = ['from_sandbox.txt', 'hello.txt']
 Sandbox destroyed.
+(check on Cubelet node: cat /tmp/cube_volume_demo/from_sandbox.txt)
+write-back: ✅ verified manually on Cubelet node (see TASK notes)
 ```
 
 ## context
 
-**Status**: ✅ PASS  **Time**: 9.9s
+**Status**: ✅ PASS  **Time**: 10.1s
 
 ```
-Created: Sandbox(id='f4a521d05dd94ce49ed6cfe9a5df1544', domain='cube.app')
+Created: Sandbox(id='737d5a3f5feb4f5cb4323ef90ea2fa14', domain='cube.app')
 
 --- without context ---
 result.text     = '100'
 
 --- with shared context ---
-context id      = '6a4df409-5ace-4a1e-a131-23a515e2ee00'
+context id      = '0e5bdbc1-b210-47e6-8917-e693b4cbc1d5'
 x=100, y=x*2, x+y = '300'
 sum(1..5)         = '15'
 
@@ -95,21 +92,21 @@ Sandbox destroyed.
 
 ## network_policy
 
-**Status**: ✅ PASS  **Time**: 41.4s
+**Status**: ✅ PASS  **Time**: 41.5s
 
 ```
 === allow-all ===
-Created: Sandbox(id='9a5994bbf49b45abb7d219eab3dbff95', domain='cube.app')
+Created: Sandbox(id='feedbcf5cc404edfb8b01982c9002b82', domain='cube.app')
   outbound: blocked (<urlopen error [Errno -3] Temporary failure in name resolution>)
 Sandbox destroyed.
 
 === deny-all ===
-Created: Sandbox(id='dc5857ff4c074911b3a234e987a7b377', domain='cube.app')
+Created: Sandbox(id='1a9515873cff4fb3b5cb8cb5f08b639a', domain='cube.app')
   outbound: blocked as expected (URLError)
 Sandbox destroyed.
 
 === custom allow-list ===
-Created: Sandbox(id='bc820e7286ff4304b0c64c9d6cd2fb97', domain='cube.app')
+Created: Sandbox(id='ab30f0179b234bc4b676752e88669c92', domain='cube.app')
   pypi.org: blocked (<urlopen error [Errno -3] Temporary failure in name resolution>)
   example.com: blocked as expected (URLError)
 Sandbox destroyed.
