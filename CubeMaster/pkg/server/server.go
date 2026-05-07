@@ -23,7 +23,7 @@ import (
 	metahttp "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/meta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/middleware"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/notify"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 type Server struct {
@@ -124,7 +124,7 @@ func (s *Server) Run() {
 	if s.InternalHttpServer != nil {
 		go func() {
 			if err := s.InternalHttpServer.Start(); err != nil {
-				CubeLog.Errorf("ListenAndServe:%v", err)
+				panic(fmt.Errorf("ListenAndServe:%v", err))
 			}
 		}()
 	}
