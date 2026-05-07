@@ -37,7 +37,7 @@
 | test_list_v2_running | ✅ PASS |
 | test_list_v2_paused | ✅ PASS |
 
-### TestCreate (8/8)
+### TestCreate (9/9)
 
 | Test | Result |
 |------|--------|
