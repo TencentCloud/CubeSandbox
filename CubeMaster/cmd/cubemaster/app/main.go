@@ -32,7 +32,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 type App struct {
@@ -105,7 +105,7 @@ func (a *App) Run() {
 	case serverC <- serverTmp:
 	}
 
-	done := handleSignals(ctx, signals, serverC, serverTmp.ErrChan, cancel)
+	done := handleSignals(ctx, signals, serverC, cancel)
 
 	signal.Notify(signals, handledSignals...)
 

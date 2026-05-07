@@ -8,8 +8,6 @@ package server
 import (
 	"context"
 	"fmt"
-	stdlog "log"
-	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -25,19 +23,18 @@ import (
 	metahttp "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/meta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/middleware"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/notify"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 type Server struct {
 	InternalHttpServer *internalHttp
-	ErrChan            chan error
 }
 
 func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 	if cfg == nil || cfg.Common == nil {
 		return nil, errors.New("config is nil")
 	}
-	s := &Server{ErrChan: make(chan error, 1)}
+	s := &Server{}
 	var err error
 	s.InternalHttpServer, err = NewInternalHttp(ctx, cfg)
 	if err != nil {
@@ -114,26 +111,13 @@ func (s *internalHttp) registerHandlers() {
 }
 
 func (s *internalHttp) Start() error {
-	addr := s.Addr
-	if addr == "" {
-		addr = ":http"
+	if err := s.ListenAndServe(); err != nil {
+		if err == http.ErrServerClosed {
+			return nil
+		}
+		return errors.WithStack(err)
 	}
-
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
-
-	actualAddr := ln.Addr().String()
-	CubeLog.Infof("cube-master listening on %s", actualAddr)
-	stdlog.Printf("cube-master listening on %s", actualAddr)
-
-	err = s.Serve(ln)
-	if err == http.ErrServerClosed {
-		return nil
-	}
-
-	return errors.WithStack(err)
+	return nil
 }
 
 func (s *Server) Run() {
@@ -141,7 +125,6 @@ func (s *Server) Run() {
 		go func() {
 			if err := s.InternalHttpServer.Start(); err != nil {
 				CubeLog.Errorf("ListenAndServe:%v", err)
-				s.ErrChan <- err
 			}
 		}()
 	}
