@@ -1,77 +1,44 @@
 # cubesandbox
 
-Python SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) — a self-hosted, KVM-based secure sandbox service for AI agents.
+<p align="center">
+  <a href="https://github.com/TencentCloud/CubeSandbox">
+    <img alt="CubeSandbox" src="https://img.shields.io/badge/CubeSandbox-Python_SDK-blue">
+  </a>
+  <a href="https://opensource.org/licenses/Apache-2.0">
+    <img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-green">
+  </a>
+  <a href="https://www.python.org/downloads/">
+    <img alt="Python" src="https://img.shields.io/badge/Python-3.9+-blue">
+  </a>
+</p>
+
+Python SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) — an instant, concurrent, secure and lightweight sandbox service for AI agents, built on RustVMM and KVM.
+
+> Create a hardware-isolated sandbox in under **60ms**, with less than **5MB** memory overhead.
+
+---
+
+## What is CubeSandbox?
+
+CubeSandbox is a high-performance, out-of-the-box secure sandbox service. It supports single-node deployment and can scale to a multi-node cluster. Use this SDK to create sandboxes, execute code, stream output, manage file mounts, and control network policies — all from Python.
+
+---
 
 ## Installation
 
 ```bash
 pip install cubesandbox
 # or from source
-pip install -e .
+pip install git+https://github.com/TencentCloud/CubeSandbox.git#subdirectory=sdk/python
 ```
 
-**Dependencies:** `httpx>=0.27`, `requests>=2.28`
+**Requirements:** Python 3.9+, `httpx>=0.27`, `requests>=2.28`
 
 ---
 
 ## Quick Start
 
-### Create and run code
-
-```python
-from cubesandbox import Sandbox
-
-with Sandbox.create() as sb:
-    sb.run_code("x = 1")
-    result = sb.run_code("x + 1")
-    print(result.text)          # "2"
-    print(result.logs.stdout)   # []
-    print(result.error)         # None
-```
-
-### Stream output
-
-```python
-with Sandbox.create() as sb:
-    sb.run_code(
-        "for i in range(5): print(i)",
-        on_stdout=lambda msg: print(">>", msg.text, end=""),
-    )
-```
-
-### Connect to an existing sandbox
-
-```python
-# Create once, reuse later
-sb = Sandbox.create(timeout=3600)
-sandbox_id = sb.sandbox_id
-
-# In another process / later
-sb = Sandbox.connect(sandbox_id)
-result = sb.run_code("1 + 1")
-sb.kill()
-```
-
----
-
-## Configuration
-
-All options can be set via environment variables or passed as a `Config` object.
-
-| Environment Variable   | Default                 | Description                                    |
-|------------------------|-------------------------|------------------------------------------------|
-| `CUBE_API_URL`         | `http://127.0.0.1:3000` | CubeAPI management plane address               |
-| `CUBE_TEMPLATE_ID`     | —                       | Default template ID (required)                 |
-| `CUBE_PROXY_NODE_IP`   | —                       | CubeProxy node IP — bypasses DNS for `*.cube.app` |
-| `CUBE_PROXY_PORT_HTTP` | `80`                    | CubeProxy HTTP port                            |
-| `CUBE_SANDBOX_DOMAIN`  | `cube.app`              | Sandbox domain suffix                          |
-
-### Remote client setup
-
-When accessing CubeSandbox from a machine that cannot resolve `*.cube.app`,
-set `CUBE_PROXY_NODE_IP` to the node IP. The SDK routes all data-plane
-connections directly to that IP while preserving the `Host` header so
-CubeProxy can identify the target sandbox.
+### 1. Set up environment
 
 ```bash
 export CUBE_API_URL=http://<YOUR_NODE_IP>:3000
@@ -79,75 +46,202 @@ export CUBE_TEMPLATE_ID=<YOUR_TEMPLATE_ID>
 export CUBE_PROXY_NODE_IP=<YOUR_NODE_IP>
 ```
 
+### 2. Run your first sandbox
+
+```python
+from cubesandbox import Sandbox
+
+with Sandbox.create() as sb:
+    sb.run_code("x = 1")
+    result = sb.run_code("x + 1")
+    print(result.text)   # "2"
+```
+
+---
+
+## Features
+
+### Execute code
+
+```python
+from cubesandbox import Sandbox
+
+with Sandbox.create() as sb:
+    # Basic execution
+    result = sb.run_code("sum(range(101))")
+    print(result.text)          # "5050"
+    print(result.logs.stdout)   # []
+    print(result.error)         # None
+
+    # Stream stdout in real time
+    sb.run_code(
+        "for i in range(5): print(f'step {i}')",
+        on_stdout=lambda msg: print(msg.text, end=""),
+    )
+
+    # Capture errors
+    result = sb.run_code("1 / 0")
+    print(result.error.name)    # "ZeroDivisionError"
+    print(result.error.value)   # "division by zero"
+```
+
+### Share state with contexts
+
+```python
+with Sandbox.create() as sb:
+    ctx = sb.create_context()
+
+    sb.run_code("x = 100",       context=ctx)
+    sb.run_code("y = x * 2",     context=ctx)
+    result = sb.run_code("x + y", context=ctx)
+    print(result.text)   # "300"
+
+    sb.delete_context(ctx)
+```
+
+### Lifecycle management
+
+```python
+from cubesandbox import Sandbox
+
+# Create
+sb = Sandbox.create(timeout=600)
+print(sb.sandbox_id)
+
+# Pause (persists memory snapshot)
+sb.pause()
+
+# Resume later — auto-resumes if paused
+sb2 = Sandbox.connect(sb.sandbox_id)
+result = sb2.run_code("1 + 1")
+print(result.text)   # "2"
+
+# Destroy
+sb2.kill()
+```
+
+### Host-directory mount
+
+```python
+import json
+
+mounts = json.dumps([
+    {"hostPath": "/data/shared", "mountPath": "/mnt/data", "readOnly": False}
+])
+
+with Sandbox.create(metadata={"hostdir-mount": mounts}) as sb:
+    result = sb.run_code("open('/mnt/data/hello.txt').read()")
+    print(result.text)
+```
+
+### Network policy
+
+```python
+import json
+
+# Deny all outbound traffic
+with Sandbox.create(metadata={"network-policy": "deny-all"}) as sb:
+    result = sb.run_code(
+        "import urllib.request; urllib.request.urlopen('http://example.com')"
+    )
+    print(result.error.name)   # "URLError"
+
+# Custom allow-list
+rules = json.dumps({"allow": ["pypi.org", "files.pythonhosted.org"]})
+with Sandbox.create(
+    metadata={"network-policy": "custom", "network-rules": rules}
+) as sb:
+    sb.run_code("import subprocess; subprocess.run(['pip', 'install', 'requests'])")
+```
+
+### List & health check
+
+```python
+from cubesandbox import Sandbox
+
+# Health check
+health = Sandbox.health()
+print(health)   # {"status": "ok", "sandboxes": 2}
+
+# List running sandboxes
+sandboxes = Sandbox.list()
+for s in sandboxes:
+    print(s["sandboxID"], s["state"])
+```
+
+---
+
+## Configuration
+
+| Environment Variable   | Default                 | Description                                       |
+|------------------------|-------------------------|---------------------------------------------------|
+| `CUBE_API_URL`         | `http://127.0.0.1:3000` | CubeAPI management plane address                  |
+| `CUBE_TEMPLATE_ID`     | —                       | Default template ID (required)                    |
+| `CUBE_PROXY_NODE_IP`   | —                       | CubeProxy node IP — bypasses DNS for `*.cube.app` |
+| `CUBE_PROXY_PORT_HTTP` | `80`                    | CubeProxy HTTP port                               |
+| `CUBE_SANDBOX_DOMAIN`  | `cube.app`              | Sandbox domain suffix                             |
+
+Or pass a `Config` object directly:
+
+```python
+from cubesandbox import Config, Sandbox
+
+config = Config(
+    api_url="http://<YOUR_NODE_IP>:3000",
+    template_id="<YOUR_TEMPLATE_ID>",
+    proxy_node_ip="<YOUR_NODE_IP>",
+    timeout=300,
+)
+
+with Sandbox.create(config=config) as sb:
+    result = sb.run_code("2 ** 10")
+    print(result.text)   # "1024"
+```
+
 ---
 
 ## API Reference
 
-### `Sandbox.create(template=None, *, timeout, env_vars, metadata, config)`
+| Method | Description |
+|--------|-------------|
+| `Sandbox.create(template, *, timeout, env_vars, metadata, config)` | Create a new sandbox |
+| `Sandbox.connect(sandbox_id, *, config)` | Connect to existing sandbox (auto-resume) |
+| `Sandbox.list(config)` | List all running sandboxes (v1) |
+| `Sandbox.list_v2(config)` | List all running sandboxes (v2) |
+| `Sandbox.health(config)` | Check CubeAPI health |
+| `sb.run_code(code, *, context, on_stdout, on_stderr, envs, timeout)` | Execute code, return `Execution` |
+| `sb.create_context()` | Create kernel context for state sharing |
+| `sb.delete_context(ctx)` | Delete kernel context |
+| `sb.pause()` | Pause sandbox (snapshot memory) |
+| `sb.resume()` | Resume sandbox *(deprecated, use `connect`)* |
+| `sb.kill()` | Destroy sandbox |
+| `sb.get_info()` | Get sandbox details |
 
-Create a new sandbox. Returns a `Sandbox` instance.
-
-```python
-sb = Sandbox.create(template="<template-id>", timeout=300)
-```
-
-### `Sandbox.connect(sandbox_id, *, config)`
-
-Connect to an existing sandbox. Auto-resumes if paused.
-
-### `Sandbox.list(config=None)` / `Sandbox.list_v2(config=None)`
-
-List all running sandboxes (v1 / v2 API).
-
-### `Sandbox.health(config=None)`
-
-Check CubeAPI health. Returns `{"status": "ok", "sandboxes": N}`.
-
-### `sb.run_code(code, *, context, on_stdout, on_stderr, on_result, on_error, envs, timeout)`
-
-Execute Python code. Returns an `Execution` object.
+### `Execution` object
 
 ```python
 result = sb.run_code("1 + 1")
+
 result.text           # "2"  — last expression value
-result.logs.stdout    # list of stdout lines
-result.logs.stderr    # list of stderr lines
-result.error          # ExecutionError or None
+result.logs.stdout    # ["hello\n"]  — list of stdout lines
+result.logs.stderr    # []
+result.error          # None or ExecutionError(name, value, traceback)
 ```
-
-### `sb.create_context()` / `sb.delete_context(ctx)`
-
-Create or delete a kernel context for sharing state across `run_code` calls.
-
-```python
-ctx = sb.create_context()
-sb.run_code("x = 42", context=ctx)
-result = sb.run_code("x * 2", context=ctx)  # "84"
-sb.delete_context(ctx)
-```
-
-### `sb.pause()` / `sb.resume()` / `sb.kill()`
-
-Lifecycle management. `resume()` is deprecated — use `Sandbox.connect()` instead.
-
-### `sb.get_info()`
-
-Return current sandbox details (state, resources, metadata).
 
 ---
 
 ## Examples
 
-See [`examples/`](examples/) for runnable scripts:
+See [`sdk/python/examples/`](sdk/python/examples/) for runnable scripts:
 
 | Script | Description |
 |--------|-------------|
-| `create_and_run.py` | Create sandbox, run code, streaming, error handling |
+| `create_and_run.py` | Create sandbox, run code, streaming, error handling, env vars |
 | `lifecycle.py` | pause / connect (auto-resume) / kill |
-| `context.py` | Kernel contexts, variable persistence |
-| `volume.py` | Host-directory mount (rw / ro) |
-| `network_policy.py` | deny-all / allow-all / custom network policies |
-| `list_and_health.py` | health check, list v1/v2 |
+| `context.py` | Kernel contexts, cross-call variable persistence |
+| `volume.py` | Host-directory mount (read-write / read-only) |
+| `network_policy.py` | deny-all / allow-all / custom allow-list |
+| `list_and_health.py` | Health check, list v1/v2, verify after kill |
 | `run_all.py` | Run all examples, output to `output.md` |
 
 ---
