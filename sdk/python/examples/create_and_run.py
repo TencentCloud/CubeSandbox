@@ -9,9 +9,9 @@ Tests:
   - sb.kill() (implicit via context manager)
 
 Usage:
-    export CUBE_API_URL=http://9.135.79.34:3000
+    export CUBE_API_URL=http://<YOUR_NODE_IP>:3000
     export CUBE_TEMPLATE_ID=tpl-6265796cee124256b4dcd6a1
-    export CUBE_PROXY_NODE_IP=9.135.79.34
+    export CUBE_PROXY_NODE_IP=<YOUR_NODE_IP>
     python examples/create_and_run.py
 """
 import sys
@@ -80,9 +80,9 @@ print("Sandbox destroyed.\n")
 # ── 2. explicit Config ───────────────────────────────────────────────────────
 print("=== explicit Config ===")
 config = Config(
-    api_url=os.environ.get("CUBE_API_URL", "http://9.135.79.34:3000"),
+    api_url=os.environ["CUBE_API_URL"],
     template_id=os.environ.get("CUBE_TEMPLATE_ID", "tpl-6265796cee124256b4dcd6a1"),
-    proxy_node_ip=os.environ.get("CUBE_PROXY_NODE_IP", "9.135.79.34"),
+    proxy_node_ip=os.environ["CUBE_PROXY_NODE_IP"],
     timeout=120,
 )
 sb2 = Sandbox.create(config=config)

@@ -9,9 +9,9 @@ Tests:
   - metadata["network-policy"] = "custom"      → only allow-listed domains reachable
 
 Usage:
-    export CUBE_API_URL=http://9.135.79.34:3000
+    export CUBE_API_URL=http://<YOUR_NODE_IP>:3000
     export CUBE_TEMPLATE_ID=tpl-6265796cee124256b4dcd6a1
-    export CUBE_PROXY_NODE_IP=9.135.79.34
+    export CUBE_PROXY_NODE_IP=<YOUR_NODE_IP>
     python examples/network_policy.py
 
 Note: deny-all blocks outbound TCP including port 80 (HTTP) and port 443 (HTTPS).

@@ -9,12 +9,12 @@ Tests:
   - write-back: files written inside sandbox appear on Cubelet host after destroy
 
 Usage:
-    export CUBE_API_URL=http://9.135.79.34:3000
+    export CUBE_API_URL=http://<YOUR_NODE_IP>:3000
     export CUBE_TEMPLATE_ID=tpl-6265796cee124256b4dcd6a1
-    export CUBE_PROXY_NODE_IP=9.135.79.34
+    export CUBE_PROXY_NODE_IP=<YOUR_NODE_IP>
     python examples/volume.py
 
-Note: hostPath is a directory on the **Cubelet node** (9.135.79.34), NOT on this
+Note: hostPath is a directory on the **Cubelet node** (<YOUR_NODE_IP>), NOT on this
 machine. Write-back (sandbox writes → host) is flushed after the sandbox is destroyed
 (overlay merged on teardown), not in real-time.
 """
@@ -39,9 +39,13 @@ def check(tag: str, condition: bool, detail: str = "") -> None:
         failures.append(msg)
 
 
-CUBELET_HOST = os.environ.get("CUBE_PROXY_NODE_IP", "9.135.79.34")
-CUBELET_PORT = os.environ.get("CUBE_CUBELET_SSH_PORT", "36000")
-CUBELET_USER = os.environ.get("CUBE_CUBELET_SSH_USER", "silencegao")
+CUBELET_HOST = os.environ.get("CUBE_PROXY_NODE_IP")
+CUBELET_PORT = os.environ.get("CUBE_CUBELET_SSH_PORT", "22")
+CUBELET_USER = os.environ.get("CUBE_CUBELET_SSH_USER")
+
+if not CUBELET_HOST or not CUBELET_USER:
+    print("ERROR: CUBE_PROXY_NODE_IP and CUBE_CUBELET_SSH_USER must be set")
+    sys.exit(1)
 HOST_DIR_RW = "/tmp/cube_volume_rw"
 HOST_DIR_RO = "/tmp/cube_volume_ro"
 MOUNT_PATH = "/mnt/data"

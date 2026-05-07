@@ -12,9 +12,9 @@ Tests:
   - streaming (on_stdout) with context
 
 Usage:
-    export CUBE_API_URL=http://9.135.79.34:3000
+    export CUBE_API_URL=http://<YOUR_NODE_IP>:3000
     export CUBE_TEMPLATE_ID=tpl-6265796cee124256b4dcd6a1
-    export CUBE_PROXY_NODE_IP=9.135.79.34
+    export CUBE_PROXY_NODE_IP=<YOUR_NODE_IP>
     python examples/context.py
 """
 import sys
