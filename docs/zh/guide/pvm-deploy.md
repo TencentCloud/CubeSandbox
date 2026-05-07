@@ -155,8 +155,8 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-cl
 
 ```bash
 # 境外访问（从 GitHub 拉取脚本）
-CUBE_PVM_ENABLE=1 bash <(curl -fsSL \
-  https://github.com/TencentCloud/CubeSandbox/releases/latest/download/online-install.sh)
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh \
+  | CUBE_PVM_ENABLE=1 bash
 ```
 
 如需手动指定节点 IP（多网卡机器建议显式指定）：

@@ -151,22 +151,21 @@ The online install script downloads the release bundle to a temporary directory 
 
 ```bash
 # Using GitHub (default)
-CUBE_PVM_ENABLE=1 bash <(curl -fsSL \
-  https://github.com/TencentCloud/CubeSandbox/releases/latest/download/online-install.sh)
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh \
+  | CUBE_PVM_ENABLE=1 bash
 ```
 
 ```bash
 # Using the CN mirror for faster downloads in mainland China
-MIRROR=cn CUBE_PVM_ENABLE=1 bash <(curl -fsSL \
-  https://github.com/TencentCloud/CubeSandbox/releases/latest/download/online-install.sh)
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh \
+  | CUBE_PVM_ENABLE=1 MIRROR=cn bash
 ```
 
 To explicitly set the node IP (recommended on machines with multiple network interfaces):
 
 ```bash
-CUBE_PVM_ENABLE=1 bash <(curl -fsSL \
-  https://github.com/TencentCloud/CubeSandbox/releases/latest/download/online-install.sh) \
-  --node-ip=<your-server-ip>
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh \
+  | CUBE_PVM_ENABLE=1 bash -s -- --node-ip=<your-server-ip>
 ```
 
 ### Option B: Manual Download

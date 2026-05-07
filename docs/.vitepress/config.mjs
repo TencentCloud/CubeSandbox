@@ -3,7 +3,7 @@ import { withMermaid } from 'vitepress-plugin-mermaid'
 
 export default withMermaid(defineConfig({
   title: "Cube Sandbox",
-  description: "Production-grade, multi-component security sandbox system for serverless computing.",
+  description: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents",
   
   themeConfig: {
     socialLinks: [
@@ -82,7 +82,7 @@ export default withMermaid(defineConfig({
       lang: 'zh',
       link: '/zh/',
       title: 'Cube Sandbox',
-      description: '专为 Serverless 计算设计的生产级多组件安全沙箱系统。',
+      description: '一个极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务',
       themeConfig: {
         nav: [
           { text: '首页', link: '/zh/' },
