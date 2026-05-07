@@ -3,63 +3,63 @@ openapi: "3.0.3"
 info:
   title: cubesandbox SDK
   description: |
-    cubesandbox Python SDK 接口规格。
-    兼容 CubeAPI，提供客户端侧 DNS 绕过能力（CUBE_PROXY_NODE_IP），
-    使远程机器无需 CoreDNS 即可访问 sandbox 数据流。
+    cubesandbox Python SDK OpenAPI specification.
+    Compatible with CubeAPI, with client-side DNS bypass support (CUBE_PROXY_NODE_IP)
+    so remote machines can access sandbox data streams without CoreDNS.
 
-    ## 架构说明
+    ## Architecture
 
     ```
     Client
         │
-        ├─ CubeAPI:3000  ──── 沙箱生命周期（本文档 paths）
-        │     直连 IP:3000，无需 DNS
+        ├─ CubeAPI:3000  ──── Sandbox lifecycle (this document's paths)
+        │     Direct TCP to IP:3000, no DNS required
         │
-        └─ CubeProxy:80  ──── 数据流（x-envd-stream 扩展）
-              标准方式: *.cube.app ──CoreDNS──▶ 127.0.0.1（仅部署机本机）
-              本 SDK:   TCP 直连 CUBE_PROXY_NODE_IP:80
-                        Host 头保留 49999-{id}.cube.app（CubeProxy 路由依据）
+        └─ CubeProxy:80  ──── Data stream (x-envd-stream extension)
+              Standard:  *.cube.app ──CoreDNS──▶ 127.0.0.1 (local node only)
+              This SDK:  TCP direct to CUBE_PROXY_NODE_IP:80
+                         Host header preserves 49999-{id}.cube.app (CubeProxy routing key)
     ```
 
-    ## 环境变量
+    ## Environment Variables
 
-    | 变量 | 必填 | 默认 | 说明 |
-    |------|:----:|------|------|
-    | CUBE_API_URL | ✅ | http://127.0.0.1:3000 | CubeAPI 地址 |
-    | CUBE_TEMPLATE_ID | ✅ | — | 模板 ID |
-    | CUBE_PROXY_NODE_IP | 远程必填 | — | CubeProxy 节点 IP，绕过 DNS |
-    | CUBE_PROXY_PORT_HTTP | — | 80 | CubeProxy HTTP 端口 |
-    | CUBE_SANDBOX_DOMAIN | — | cube.app | sandbox 域名后缀 |
+    | Variable | Required | Default | Description |
+    |----------|:--------:|---------|-------------|
+    | CUBE_API_URL | ✅ | http://127.0.0.1:3000 | CubeAPI address |
+    | CUBE_TEMPLATE_ID | ✅ | — | Template ID |
+    | CUBE_PROXY_NODE_IP | remote | — | CubeProxy node IP, bypasses DNS |
+    | CUBE_PROXY_PORT_HTTP | — | 80 | CubeProxy HTTP port |
+    | CUBE_SANDBOX_DOMAIN | — | cube.app | Sandbox domain suffix |
 
   version: "1.0.0"
 
 servers:
   - url: "http://{cubeApiHost}:3000"
-    description: cube-api（沙箱生命周期，对应 CUBE_API_URL）
+    description: CubeAPI management plane (CUBE_API_URL)
     variables:
       cubeApiHost:
         default: "127.0.0.1"
-        description: "cube-api 所在机器 IP"
+        description: "CubeAPI host IP"
 
 tags:
   - name: health
-    description: 健康检查
+    description: Health check
   - name: sandboxes-v1
-    description: 沙箱管理 v1
+    description: Sandbox management v1
   - name: sandboxes-v2
-    description: 沙箱管理 v2（支持过滤）
+    description: Sandbox management v2 (with filtering)
 
 paths:
 
   /health:
     get:
       summary: Health check
-      description: 健康检查，无需鉴权
+      description: Check service health. No authentication required.
       operationId: getHealth
       tags: [health]
       responses:
         "200":
-          description: 服务正常
+          description: Service is healthy
           content:
             application/json:
               schema:
@@ -71,12 +71,12 @@ paths:
   /sandboxes:
     get:
       summary: List all sandboxes (v1)
-      description: 列出所有运行中的 sandbox（v1，返回全量列表）
+      description: List all running sandboxes (v1, returns full list).
       operationId: listSandboxes
       tags: [sandboxes-v1]
       responses:
         "200":
-          description: sandbox 列表
+          description: Sandbox list
           content:
             application/json:
               schema:
@@ -87,13 +87,13 @@ paths:
     post:
       summary: Create a sandbox
       description: |
-        创建新的 sandbox 实例。
-        返回 sandboxID 和 domain，SDK 据此构造数据流地址：
+        Create a new sandbox instance.
+        Returns sandboxID and domain; the SDK uses these to construct the data stream URL:
         `http://{JUPYTER_PORT}-{sandboxID}.{domain}/execute`
 
-        **数据流 DNS 绕过**（SDK 自动处理）：
-        - 未设置 `CUBE_PROXY_NODE_IP`：OS 解析 `*.cube.app`（仅限部署机本机）
-        - 已设置 `CUBE_PROXY_NODE_IP`：TCP 直连该 IP，Host 头保留虚拟域名
+        **DNS bypass (handled automatically by the SDK)**:
+        - Without `CUBE_PROXY_NODE_IP`: OS resolves `*.cube.app` (local node only)
+        - With `CUBE_PROXY_NODE_IP`: direct TCP to that IP, Host header preserved
       operationId: createSandbox
       tags: [sandboxes-v1]
       requestBody:
@@ -103,17 +103,17 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateSandboxRequest"
             example:
-              templateID: "tpl-6265796cee124256b4dcd6a1"
+              templateID: "tpl-xxxxxxxxxxxxxxxxxxxxxxxx"
               timeout: 300
       responses:
-        "200":
-          description: 创建成功
+        "201":
+          description: Sandbox created
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxCreated"
               example:
-                templateID: "tpl-6265796cee124256b4dcd6a1"
+                templateID: "tpl-xxxxxxxxxxxxxxxxxxxxxxxx"
                 sandboxID: "7b93392513d84b7eb2f5b8da26717b77"
                 clientID: "bdb40b5b-4777-488e-961a-68de8083ff41"
                 envdVersion: "0.2.0"
@@ -127,15 +127,15 @@ paths:
     get:
       summary: List sandboxes (v2)
       description: |
-        列出 sandbox（v2），支持 state / metadata 过滤和 limit 分页。
-        响应结构与 v1 相同。
+        List sandboxes (v2) with optional state / metadata filtering and limit.
+        Response structure is identical to v1.
       operationId: listSandboxesV2
       tags: [sandboxes-v2]
       parameters:
         - name: state
           in: query
           required: false
-          description: 按状态过滤
+          description: Filter by sandbox state
           schema:
             type: string
             enum: [running, paused, stopped]
@@ -143,7 +143,7 @@ paths:
         - name: limit
           in: query
           required: false
-          description: 最多返回条数
+          description: Maximum number of results to return
           schema:
             type: integer
             minimum: 1
@@ -151,13 +151,13 @@ paths:
         - name: metadata
           in: query
           required: false
-          description: 按 metadata key=value 过滤（可多次传）
+          description: Filter by metadata key=value (repeatable)
           schema:
             type: string
           example: "cube.product=cubebox"
       responses:
         "200":
-          description: sandbox 列表（过滤后）
+          description: Filtered sandbox list
           content:
             application/json:
               schema:
@@ -167,20 +167,21 @@ paths:
 
   /sandboxes/{sandboxID}:
     get:
-      summary: Get single sandbox details
+      summary: Get sandbox detail
+      description: GET /sandboxes/:sandboxID — Get sandbox detail.
       operationId: getSandbox
       tags: [sandboxes-v1]
       parameters:
         - $ref: "#/components/parameters/sandboxID"
       responses:
         "200":
-          description: sandbox 详情
+          description: Sandbox detail
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxDetail"
               example:
-                templateID: "tpl-6265796cee124256b4dcd6a1"
+                templateID: "tpl-xxxxxxxxxxxxxxxxxxxxxxxx"
                 sandboxID: "7b93392513d84b7eb2f5b8da26717b77"
                 clientID: "7b93392513d84b7eb2f5b8da26717b77"
                 startedAt: "2026-04-26T10:59:24.813Z"
@@ -196,38 +197,48 @@ paths:
 
     delete:
       summary: Destroy a sandbox
+      description: DELETE /sandboxes/:sandboxID — Destroy a sandbox.
       operationId: deleteSandbox
       tags: [sandboxes-v1]
       parameters:
         - $ref: "#/components/parameters/sandboxID"
       responses:
-        "200":
-          description: 销毁成功（空响应体）
         "204":
-          description: 销毁成功（空响应体）
+          description: Sandbox deleted
         "404":
           $ref: "#/components/responses/NotFound"
 
   /sandboxes/{sandboxID}/pause:
     post:
       summary: Pause a sandbox
-      description: 暂停 sandbox，保留内存快照，可通过 resume 或 connect 恢复
+      description: |
+        POST /sandboxes/:sandboxID/pause — Pause a sandbox (preserves memory snapshot).
+
+        The sandbox can be resumed later via POST /sandboxes/:sandboxID/connect.
       operationId: pauseSandbox
       tags: [sandboxes-v1]
       parameters:
         - $ref: "#/components/parameters/sandboxID"
       responses:
-        "200":
-          description: 暂停成功（空响应体）
+        "204":
+          description: Sandbox paused
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: Sandbox cannot be paused
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /sandboxes/{sandboxID}/resume:
     post:
       summary: Resume a sandbox (deprecated)
       description: |
-        恢复已暂停的 sandbox。
-        **已废弃**，建议使用 `/sandboxes/{sandboxID}/connect`（自动处理 resume 逻辑）。
+        POST /sandboxes/:sandboxID/resume — Resume a paused sandbox.
+
+        **Deprecated** — use POST /sandboxes/:sandboxID/connect instead,
+        which handles resume automatically.
       operationId: resumeSandbox
       deprecated: true
       tags: [sandboxes-v1]
@@ -241,32 +252,34 @@ paths:
               properties:
                 timeout:
                   type: integer
-                  description: 恢复后的 TTL（秒）
+                  description: Sandbox TTL after resume (seconds)
                   default: 300
             example:
               timeout: 300
       responses:
-        "200":
-          description: 恢复成功，返回 sandbox 信息
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SandboxCreated"
         "201":
-          description: 恢复成功（Created），返回 sandbox 信息
+          description: Sandbox resumed
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxCreated"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: Sandbox is already running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /sandboxes/{sandboxID}/connect:
     post:
       summary: Connect to a sandbox
       description: |
-        连接到 sandbox（自动 resume 已暂停的 sandbox，替代 resume 接口）。
-        返回格式与 createSandbox 相同，SDK 可直接用返回的 sandboxID/domain 构造数据流 URL。
+        POST /sandboxes/:sandboxID/connect — Connect to a sandbox.
+
+        Automatically resumes the sandbox if it is currently paused.
+        Returns the same format as POST /sandboxes (create).
       operationId: connectSandbox
       tags: [sandboxes-v1]
       parameters:
@@ -279,50 +292,44 @@ paths:
               properties:
                 timeout:
                   type: integer
-                  description: 连接后的 TTL（秒）
+                  description: Sandbox TTL after connect (seconds)
                   default: 300
             example:
               timeout: 300
       responses:
         "200":
-          description: 连接成功，返回 sandbox 信息
+          description: Connected successfully
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxCreated"
-              example:
-                templateID: "tpl-6265796cee124256b4dcd6a1"
-                sandboxID: "bf37c581decd478aae85a641afd8d14f"
-                clientID: "bf37c581decd478aae85a641afd8d14f"
-                envdVersion: "0.2.0"
-                domain: "cube.app"
         "404":
           $ref: "#/components/responses/NotFound"
 
-# ── 数据流（envd，通过 CubeProxy，不走 cube-api）─────────────────────────
-# URL 格式：http://49999-{sandboxID}.{domain}/execute
-# SDK 实现：IPOverrideTransport 将 TCP 目标替换为 CUBE_PROXY_NODE_IP:80
-#           HTTP Host 头保留原始虚拟主机名（CubeProxy 路由依据）
+# ── Data stream (envd via CubeProxy, not CubeAPI) ────────────────────────────
+# URL format:  http://49999-{sandboxID}.{domain}/execute
+# SDK impl:    IPOverrideTransport replaces TCP target with CUBE_PROXY_NODE_IP:80
+#              HTTP Host header preserves the virtual hostname (CubeProxy routing key)
 x-envd-stream:
   execute:
     method: POST
     urlTemplate: "http://{JUPYTER_PORT}-{sandboxID}.{domain}/execute"
     jupyterPort: 49999
     description: |
-      在 sandbox 内执行代码，ndjson 流式返回结果。
-      客户端 DNS 绕过逻辑（IPOverrideTransport）：
-        TCP 连接目标 → CUBE_PROXY_NODE_IP:CUBE_PROXY_PORT_HTTP
-        HTTP Host 头 → {JUPYTER_PORT}-{sandboxID}.{domain}（不变）
+      Execute code inside the sandbox; returns results as an ndjson stream.
+      Client DNS bypass (IPOverrideTransport):
+        TCP target  → CUBE_PROXY_NODE_IP:CUBE_PROXY_PORT_HTTP
+        HTTP Host   → {JUPYTER_PORT}-{sandboxID}.{domain} (unchanged)
     requestBody:
       schema: ExecuteRequest
     response:
       contentType: application/x-ndjson
       events:
-        - type: stdout        # print() 输出
-        - type: stderr        # 错误输出
-        - type: result        # 表达式返回值（is_main_result=true 为 cell 最终值）
-        - type: error         # 执行异常
-        - type: number_of_executions  # 执行计数
+        - type: stdout        # print() output
+        - type: stderr        # stderr output
+        - type: result        # expression return value (is_main_result=true for cell final value)
+        - type: error         # execution exception
+        - type: number_of_executions  # execution counter
 
 components:
 
@@ -331,14 +338,14 @@ components:
       name: sandboxID
       in: path
       required: true
-      description: sandbox 唯一 ID
+      description: Sandbox identifier
       schema:
         type: string
         example: "7b93392513d84b7eb2f5b8da26717b77"
 
   responses:
     NotFound:
-      description: 资源不存在
+      description: Resource not found
       content:
         application/json:
           schema:
@@ -347,7 +354,7 @@ components:
             code: 404
             message: "sandbox not found"
     ServerError:
-      description: 服务内部错误
+      description: Unexpected backend error
       content:
         application/json:
           schema:
@@ -364,7 +371,7 @@ components:
           example: ok
         sandboxes:
           type: integer
-          description: 当前运行中的 sandbox 数量
+          description: Number of currently running sandboxes
           example: 1
 
     CreateSandboxRequest:
@@ -373,36 +380,40 @@ components:
       properties:
         templateID:
           type: string
-          description: 模板 ID（cubemastercli tpl create 得到）
-          example: "tpl-6265796cee124256b4dcd6a1"
+          description: Template ID
+          example: "tpl-xxxxxxxxxxxxxxxxxxxxxxxx"
         timeout:
           type: integer
-          description: sandbox TTL（秒）
+          description: Sandbox TTL in seconds
           default: 300
           example: 300
         envVars:
           type: object
           additionalProperties:
             type: string
-          description: 注入到 sandbox 的环境变量
+          description: Environment variables injected into the sandbox
           nullable: true
         metadata:
           type: object
           additionalProperties:
             type: string
-          description: 自定义元数据
+          description: |
+            Arbitrary key-value metadata. Supported keys:
+            - `network-policy`: `allow-all` | `deny-all` | `custom`
+            - `network-rules`: JSON allow/deny list (used with `custom` policy)
+            - `hostdir-mount`: JSON array of host-directory mount configs
           nullable: true
 
     SandboxCreated:
       type: object
-      description: createSandbox / connectSandbox 成功响应
+      description: Response from POST /sandboxes or POST /sandboxes/:sandboxID/connect
       required: [templateID, sandboxID, domain]
       properties:
         templateID:
           type: string
         sandboxID:
           type: string
-          description: sandbox 唯一 ID，用于构造数据流 URL
+          description: Sandbox identifier, used to construct the data stream URL
         clientID:
           type: string
         envdVersion:
@@ -410,7 +421,7 @@ components:
           example: "0.2.0"
         domain:
           type: string
-          description: sandbox 域名后缀
+          description: Sandbox domain suffix
           example: "cube.app"
 
     SandboxDetail:
@@ -450,16 +461,16 @@ components:
     ExecuteRequest:
       type: object
       required: [code]
-      description: 发送到 envd /execute 端点的请求体
+      description: Request body for POST /execute (envd endpoint)
       properties:
         code:
           type: string
-          description: 要执行的 Python 代码
+          description: Python code to execute
           example: "x = 1 + 1; x"
         context_id:
           type: string
           nullable: true
-          description: kernel context ID，同一 context 内变量持久共享
+          description: Kernel context ID; variables persist within the same context
         language:
           type: string
           nullable: true
@@ -492,12 +503,12 @@ components:
       properties:
         type:           { type: string, enum: [result] }
         text:           { type: string, example: "2", nullable: true }
-        is_main_result: { type: boolean, description: "true = cell 最终返回值" }
+        is_main_result: { type: boolean, description: "true = final cell return value" }
         html:           { type: string, nullable: true }
         markdown:       { type: string, nullable: true }
         svg:            { type: string, nullable: true }
-        png:            { type: string, nullable: true, description: base64 }
-        jpeg:           { type: string, nullable: true, description: base64 }
+        png:            { type: string, nullable: true, description: base64-encoded }
+        jpeg:           { type: string, nullable: true, description: base64-encoded }
         pdf:            { type: string, nullable: true }
         latex:          { type: string, nullable: true }
         json:           { type: object, nullable: true }
