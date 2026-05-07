@@ -74,8 +74,6 @@ paths:
       description: 列出所有运行中的 sandbox（v1，返回全量列表）
       operationId: listSandboxes
       tags: [sandboxes-v1]
-      security:
-        - ApiKeyAuth: []
       responses:
         "200":
           description: sandbox 列表
@@ -98,8 +96,6 @@ paths:
         - 已设置 `CUBE_PROXY_NODE_IP`：TCP 直连该 IP，Host 头保留虚拟域名
       operationId: createSandbox
       tags: [sandboxes-v1]
-      security:
-        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -135,8 +131,6 @@ paths:
         响应结构与 v1 相同。
       operationId: listSandboxesV2
       tags: [sandboxes-v2]
-      security:
-        - ApiKeyAuth: []
       parameters:
         - name: state
           in: query
@@ -176,8 +170,6 @@ paths:
       summary: Get single sandbox details
       operationId: getSandbox
       tags: [sandboxes-v1]
-      security:
-        - ApiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/sandboxID"
       responses:
@@ -206,8 +198,6 @@ paths:
       summary: Destroy a sandbox
       operationId: deleteSandbox
       tags: [sandboxes-v1]
-      security:
-        - ApiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/sandboxID"
       responses:
@@ -224,8 +214,6 @@ paths:
       description: 暂停 sandbox，保留内存快照，可通过 resume 或 connect 恢复
       operationId: pauseSandbox
       tags: [sandboxes-v1]
-      security:
-        - ApiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/sandboxID"
       responses:
@@ -243,8 +231,6 @@ paths:
       operationId: resumeSandbox
       deprecated: true
       tags: [sandboxes-v1]
-      security:
-        - ApiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/sandboxID"
       requestBody:
@@ -283,8 +269,6 @@ paths:
         返回格式与 createSandbox 相同，SDK 可直接用返回的 sandboxID/domain 构造数据流 URL。
       operationId: connectSandbox
       tags: [sandboxes-v1]
-      security:
-        - ApiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/sandboxID"
       requestBody:
@@ -341,15 +325,6 @@ x-envd-stream:
         - type: number_of_executions  # 执行计数
 
 components:
-
-  securitySchemes:
-    ApiKeyAuth:
-      type: apiKey
-      in: header
-      name: X-API-Key
-      description: |
-        CubeAPI 本地部署默认不做鉴权，不传或传任意字符串均可正常请求。
-        仅为兼容标准 OpenAPI 鉴权字段保留。
 
   parameters:
     sandboxID:
