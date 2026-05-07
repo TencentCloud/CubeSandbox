@@ -82,12 +82,14 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-cl
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest \
+  --image cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
   --probe 49999
 ```
+
+> **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`。
 
 然后，执行下面的这行命令，监控构建进度：
 

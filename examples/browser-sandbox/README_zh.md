@@ -62,12 +62,14 @@ playwright install chromium
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image ccr.ccs.tencentyun.com/ags-image/sandbox-browser:latest \
+  --image cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest \
   --writable-layer-size 1G \
   --expose-port 9000 \
   --probe 9000 \
   --probe-path /cdp/json/version
 ```
+
+> **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`。
 
 记录输出的 `template_id`。
 
