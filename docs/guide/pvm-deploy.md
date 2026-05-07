@@ -21,7 +21,7 @@ PVM was originally proposed in the paper [*PVM: Efficient Shadow Paging for Depl
 
 ## Prerequisites
 
-- **x86_64** Linux server (cloud VM or physical machine)
+- **x86_64** Linux server (cloud server or physical machine)
 - **Root access**
 - **No `/dev/kvm` required** — PVM provides KVM capability after the kernel switch
 - All other requirements are the same as [Quick Start](./quickstart.md#prerequisites) (≥ 8 GB RAM, XFS-capable storage for `/data/cubelet`, etc.)
@@ -34,6 +34,18 @@ sudo su root
 ```
 
 Then run all subsequent commands directly in the root shell.
+:::
+
+## Step 0: Provision a Cloud Server
+
+Purchase an **x86_64** cloud server from any cloud provider — no special requirements apply.
+
+**OpenCloudOS 9 (RPM-based) is the recommended OS.** The Cube Sandbox PVM host kernel is built on the OpenCloudOS kernel, so choosing OpenCloudOS 9 gives the best compatibility with the fewest distribution-specific differences to handle. Other mainstream distributions — Ubuntu, Debian, CentOS, etc. — are equally supported; just follow the corresponding section below.
+
+::: tip Recommended specifications
+- CPU: ≥ 4 cores
+- RAM: ≥ 8 GB
+- System disk: ≥ 50 GB (attaching a dedicated data disk for `/data/cubelet` is recommended)
 :::
 
 ## Step 1: Install the PVM Host Kernel

@@ -134,11 +134,12 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 
 --- 
 
-Cube Sandbox 需要一台开启了 KVM 的 x86_64 Linux 环境，**WSL 2 / Linux 物理机 / 云上裸金属**均可。
+Cube Sandbox 需要一台支持 KVM 的 x86_64 Linux 环境，**WSL 2 / Linux 物理机 / 云上裸金属 / 普通云服务器（通过 PVM）**均可。
 
 > 还没有这样的环境？
 > - **Windows 用户**：在管理员 PowerShell 里执行 `wsl --install` 安装 WSL 2（需 Windows 11 22H2+，并在 BIOS / WSL 里开启嵌套虚拟化）。
-> - **其他用户**：准备一台 x86_64 Linux 物理机，或在云厂商购买一台裸金属服务器。
+> - **物理机 / 裸金属用户**：准备一台 x86_64 Linux 物理机，或在云厂商购买一台裸金属服务器。
+> - **普通云服务器用户**：无需裸金属 —— 安装 PVM 宿主机内核即可在普通云服务器上启用 KVM 能力，详见 [PVM 部署](./docs/zh/guide/pvm-deploy.md)。
 
 准备好环境后，四步启动你的第一个沙箱：
 
@@ -166,7 +167,7 @@ cd CubeSandbox/dev-env && ./login.sh
 
 2. **启动 Cube 沙箱服务**
 
-在上一步 `login.sh` 进入的环境里（或你自己的裸金属服务器上），根据你的网络环境执行**其中一条**命令：
+在上一步 `login.sh` 进入的环境里（或你自己的服务器上，裸金属或通过 PVM 配置好的普通云服务器均可），根据你的网络环境执行**其中一条**命令：
 
 - **国内用户**（走 CDN 镜像，推荐）：
 
@@ -245,7 +246,8 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 - [文档首页](./docs/zh/index.md) — 完整指南导航
 - [模板概览](./docs/zh/guide/templates.md) — 镜像到模板的概念与工作流
 - [示例项目](./docs/zh/guide/tutorials/examples.md) — 展示各种使用场景的示例（涵盖代码执行、浏览器自动化、OpenClaw 集成与 RL 训练等）
-- [开发环境（QEMU 虚机）](./docs/zh/guide/dev-environment.md) — 没有 bare-metal？在一次性的 OpenCloudOS 9 虚机里跑 Cube Sandbox
+- 💻 [开发环境（QEMU 虚机）](./docs/zh/guide/dev-environment.md) — 暂时没有 KVM 访问权限？在一次性的 OpenCloudOS 9 虚机里体验 Cube Sandbox
+- ☁️ [PVM 部署](./docs/zh/guide/pvm-deploy.md) — 在普通云服务器上部署，无需裸金属或嵌套虚拟化
 
 ## 架构概览
 

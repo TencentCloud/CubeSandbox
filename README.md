@@ -139,15 +139,16 @@ For detailed metrics on startup latency and resource overhead, please refer to:
 
 
 
-Cube Sandbox requires a KVM-enabled x86_64 Linux environment — **WSL 2**, a **Linux physical machine**, or a **cloud bare-metal server** all work.
+Cube Sandbox requires an x86_64 Linux environment with KVM support — **WSL 2**, a **Linux physical machine**, a **cloud bare-metal server**, or an **ordinary cloud VM** (via PVM, no bare-metal needed) all work.
 
 > Don't have one yet?
 > - **Windows users**: run `wsl --install` in an admin PowerShell to set up WSL 2 (requires Windows 11 22H2+, with nested virtualization enabled in BIOS / WSL).
-> - **Others**: grab an x86_64 Linux physical machine, or rent a bare-metal server from a cloud provider.
+> - **Bare-metal / physical machine users**: grab an x86_64 Linux physical machine, or rent a bare-metal server from a cloud provider.
+> - **Ordinary cloud VM users**: no bare-metal required — install the PVM host kernel to enable KVM on any standard cloud VM. See [PVM Deployment](./docs/guide/pvm-deploy.md).
 
 Once your environment is ready, launch your first sandbox in four steps:
 
-1. **Prepare the runtime environment** (skip this step if you already have an x86_64 bare-metal Linux server)
+1. **Prepare the runtime environment** (skip this step if you already have an x86_64 Linux server with KVM enabled — bare-metal or a cloud VM set up via [PVM](./docs/guide/pvm-deploy.md))
 
 Run the following on your WSL / Linux machine:
 
@@ -171,7 +172,7 @@ cd CubeSandbox/dev-env && ./login.sh
 
 2. **Start the Cube Sandbox Service**
 
-Inside the environment you entered via `login.sh` (or directly on your bare-metal server), run **one** of the following commands depending on your location:
+Inside the environment you entered via `login.sh` (or directly on your server — bare-metal or cloud VM), run **one** of the following commands depending on your location:
 
 - **Global Users** (downloads from GitHub):
 
@@ -249,7 +250,8 @@ Want to explore more? Check out the 📂 [`examples/`](./examples/) directory, c
 - 📖 [Documentation Home](./docs/index.md) - Complete guide and API reference
 - 🔧 [Template Concepts](./docs/guide/templates.md) - Image-to-Template concepts and workflows
 - 🌟 [Example Projects](./docs/guide/tutorials/examples.md) - Hands-on examples demonstrating various Cube Sandbox use cases (Browser automation, OpenClaw integration, RL training workflows, etc.)
-- 💻 [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) - No bare-metal? Spin up a disposable OpenCloudOS 9 VM and run Cube Sandbox inside it
+- 💻 [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) - No KVM access yet? Spin up a disposable OpenCloudOS 9 VM on your machine and run Cube Sandbox inside it
+- ☁️ [PVM Deployment](./docs/guide/pvm-deploy.md) - Deploy on ordinary cloud VMs without bare-metal or nested virtualization
 
 ## Architecture
 

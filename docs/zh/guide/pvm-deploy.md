@@ -21,7 +21,7 @@ PVM 最初由论文 [《PVM: Efficient Shadow Paging for Deploying Secure Contai
 
 ## 前置条件
 
-- **x86_64** 架构的 Linux 服务器（云 VM 或物理机均可）
+- **x86_64** 架构的 Linux 服务器（云服务器或物理机均可）
 - 有 **root 权限**
 - **无需 `/dev/kvm`**（安装 PVM 内核后由 PVM 提供 KVM 能力）
 - 其余要求与[快速开始](./quickstart.md#前置条件)相同（内存 ≥ 8 GB、XFS 或可用于 `/data/cubelet` 的分区等）
@@ -34,6 +34,18 @@ sudo su root
 ```
 
 之后的所有命令直接在 root shell 中运行。
+:::
+
+## 第零步：购买云服务器
+
+在任意云服务商购买一台 **x86_64** 架构的云服务器即可，无特殊要求。
+
+**操作系统推荐选择 OpenCloudOS 9**（RPM 系）。Cube Sandbox 的 PVM 宿主机内核基于 OpenCloudOS 内核构建，选用 OpenCloudOS 9 可获得最佳兼容性，且无需处理发行版差异。Ubuntu / Debian / CentOS 等其他主流发行版同样支持，按对应章节操作即可。
+
+::: tip 规格建议
+- CPU：≥ 4 核
+- 内存：≥ 8 GB
+- 系统盘：≥ 50 GB（推荐挂载额外数据盘用于 `/data/cubelet`）
 :::
 
 ## 第一步：安装 PVM 宿主机内核
