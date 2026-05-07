@@ -1,4 +1,4 @@
-# Copyright (c) 2024 Tencent Inc.
+# Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 """
 Example: Network policy — control outbound network access via sandbox metadata.
