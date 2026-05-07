@@ -95,7 +95,7 @@ with Sandbox.create() as sb:
     result = sb.run_code(
         "for i in items: print(f'item {i}')",
         context=ctx_d,
-        on_stdout=lambda m: captured.append(m.text),
+        on_stdout=lambda m: captured.extend([l for l in m.text.splitlines() if l]),
     )
     print(f"  stdout captured: {captured}")
     check("streaming: 4 stdout lines", len(captured) == 4, f"got {captured}")

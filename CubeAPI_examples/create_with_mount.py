@@ -1,4 +1,4 @@
-# Copyright (c) 2024 Tencent Inc.
+# Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 """
 create_with_mount.py — Create sandbox with host-directory mounts (rw + ro).

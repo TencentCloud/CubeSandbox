@@ -46,10 +46,14 @@ with Sandbox.create() as sb:
     check("math result", result.text == "6.2832", f"got {result.text!r}")
 
     # ── stdout streaming ─────────────────────────────────────────────
+    # Note: envd may deliver multiple print() lines as one callback event
+    # (e.g. 'item 0\nitem 1\nitem 2\n'). Split before counting.
     captured: list[str] = []
     sb.run_code(
         "for i in range(3): print(f'item {i}')",
-        on_stdout=lambda msg: captured.append(msg.text),
+        on_stdout=lambda msg: captured.extend(
+            [l for l in msg.text.splitlines() if l]
+        ),
     )
     check("stdout lines", len(captured) == 3, f"got {captured}")
 
