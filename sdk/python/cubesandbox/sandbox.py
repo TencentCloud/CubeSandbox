@@ -63,7 +63,10 @@ class Sandbox:
         return self._data.get("domain") or self._config.sandbox_domain
 
     def get_host(self, port: int) -> str:
-        """Return the virtual hostname for a sandbox port, e.g. ``49999-<id>.cube.app``."""
+        """Return the virtual hostname for a sandbox port.
+
+        e.g. ``49999-<sandboxID>.cube.app``
+        """
         return f"{port}-{self.sandbox_id}.{self.domain}"
 
     # ── factory methods ───────────────────────────────────────────────
@@ -79,17 +82,21 @@ class Sandbox:
         config: Config | None = None,
         **kwargs: Any,
     ) -> "Sandbox":
-        """Create a new sandbox.
+        """POST /sandboxes — Create a new sandbox.
 
         Args:
             template: Template ID. Falls back to ``CUBE_TEMPLATE_ID`` env var.
             timeout: Sandbox TTL in seconds. Defaults to ``Config.timeout`` (300).
             env_vars: Environment variables injected into the sandbox.
-            metadata: Arbitrary key-value metadata.
+            metadata: Arbitrary key-value metadata (e.g. network-policy, hostdir-mount).
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
             A running :class:`Sandbox` instance.
+
+        Raises:
+            ValueError: If no template ID is provided.
+            ApiError: On unexpected backend error (HTTP 500).
         """
         cfg = config or Config()
         tpl = template or cfg.template_id
@@ -111,7 +118,21 @@ class Sandbox:
 
     @classmethod
     def connect(cls, sandbox_id: str, *, config: Config | None = None) -> "Sandbox":
-        """Connect to an existing sandbox, resuming it if paused."""
+        """POST /sandboxes/:sandboxID/connect — Connect to an existing sandbox.
+
+        Resumes the sandbox if it is currently paused.
+
+        Args:
+            sandbox_id: Sandbox identifier.
+            config: SDK config. Uses default (env-based) config if omitted.
+
+        Returns:
+            A :class:`Sandbox` instance connected to the existing sandbox.
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: On unexpected backend error (HTTP 500).
+        """
         cfg = config or Config()
         s = requests.Session()
         resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
@@ -124,17 +145,14 @@ class Sandbox:
 
     @classmethod
     def list(cls, config: Config | None = None) -> list[dict]:
-        """Return all running sandboxes from the v1 API.
-
-        Calls ``GET /sandboxes`` and returns the JSON response as a list of
-        sandbox dicts (each dict contains at least ``sandboxID`` and
-        ``templateID`` keys).
+        """GET /sandboxes — List all running sandboxes (v1).
 
         Args:
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
-            A list of sandbox info dicts.
+            A list of sandbox info dicts, each containing at least
+            ``sandboxID``, ``templateID``, and ``state`` keys.
         """
         cfg = config or Config()
         s = requests.Session()
@@ -144,10 +162,9 @@ class Sandbox:
 
     @classmethod
     def list_v2(cls, config: Config | None = None) -> list[dict]:
-        """Return all running sandboxes from the v2 API.
+        """GET /v2/sandboxes — List all running sandboxes (v2).
 
-        Calls ``GET /v2/sandboxes`` and returns the JSON response as a list of
-        sandbox dicts.
+        Supports state / metadata filtering on the server side.
 
         Args:
             config: SDK config. Uses default (env-based) config if omitted.
@@ -163,16 +180,14 @@ class Sandbox:
 
     @classmethod
     def health(cls, config: Config | None = None) -> dict:
-        """Check the health of the sandbox API.
-
-        Calls ``GET /health`` and returns the response dict, e.g.
-        ``{"status": "ok", "sandboxes": 0}``.
+        """GET /health — Check the health of the CubeAPI service.
 
         Args:
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
-            A dict with at least a ``status`` key.
+            A dict with at least a ``status`` key, e.g.
+            ``{"status": "ok", "sandboxes": 0}``.
         """
         cfg = config or Config()
         s = requests.Session()
@@ -180,9 +195,7 @@ class Sandbox:
         _check_response(resp)
         return resp.json()
 
-    # ── code execution ────────────────────────────────────────────────
-
-    # ── context management ──────────────────────────────────────────
+    # ── context management ────────────────────────────────────────────
 
     def create_context(
         self,
@@ -190,18 +203,21 @@ class Sandbox:
         language: str = "python",
         cwd: str = "/home/user",
     ) -> "Context":
-        """Create a new kernel context on the sandbox's envd.
+        """POST /contexts — Create a new kernel context on the sandbox.
 
-        The context keeps variable state alive between :meth:`run_code` calls.
-        envd generates the ``id``; use the returned :class:`Context` object
-        with subsequent ``run_code`` calls.
+        A context keeps Python variable state alive across :meth:`run_code`
+        calls. Use the returned :class:`Context` object with subsequent
+        ``run_code(code, context=ctx)`` calls.
 
         Args:
-            language: Kernel language (default ``"python"``)
+            language: Kernel language (default ``"python"``).
             cwd: Working directory for the context.
 
         Returns:
             A :class:`Context` with the server-assigned ``id``.
+
+        Raises:
+            ApiError: If context creation fails (HTTP 4xx/5xx).
         """
         if self._client is None:
             self._client = build_client(self._config)
@@ -217,13 +233,22 @@ class Sandbox:
         return Context(id=data["id"], language=data["language"], cwd=data["cwd"])
 
     def delete_context(self, context: "Context") -> None:
-        """Delete a kernel context from the sandbox's envd."""
+        """DELETE /contexts/:id — Delete a kernel context from the sandbox.
+
+        Args:
+            context: The :class:`Context` to delete.
+
+        Raises:
+            ApiError: If deletion fails (HTTP 4xx/5xx).
+        """
         if self._client is None:
             self._client = build_client(self._config)
         url = f"http://{self.get_host(JUPYTER_PORT)}/contexts/{context.id}"
         resp = self._client.delete(url)
         if resp.status_code >= 400:
             raise ApiError(f"delete_context failed: HTTP {resp.status_code}", resp.status_code)
+
+    # ── code execution ────────────────────────────────────────────────
 
     def run_code(
         self,
@@ -238,23 +263,28 @@ class Sandbox:
         envs: Dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> Execution:
-        """Execute code in the sandbox and return the result.
+        """POST /execute — Execute code inside the sandbox.
 
-        Streams the ndjson response from the sandbox's envd process via CubeProxy.
-        When ``CUBE_PROXY_NODE_IP`` is set, the connection bypasses DNS resolution.
+        Streams the ndjson response from the sandbox's envd process via
+        CubeProxy. When ``CUBE_PROXY_NODE_IP`` is set, connections bypass
+        DNS resolution using :class:`IPOverrideTransport`.
 
         Args:
             code: Python code to execute.
+            language: Kernel language override (default: ``"python"``).
             context: Kernel context for sharing state across calls.
-            on_stdout: Callback for stdout events.
-            on_stderr: Callback for stderr events.
-            on_result: Callback for result events.
-            on_error: Callback for error events.
+            on_stdout: Callback invoked for each stdout event.
+            on_stderr: Callback invoked for each stderr event.
+            on_result: Callback invoked for each result event.
+            on_error: Callback invoked on execution error.
             envs: Per-execution environment variables.
             timeout: Read timeout in seconds (default: no timeout).
 
         Returns:
             :class:`Execution` with ``.text``, ``.logs``, and ``.error``.
+
+        Raises:
+            ApiError: If the execute endpoint returns HTTP 4xx/5xx.
         """
         if self._client is None:
             self._client = build_client(self._config)
@@ -291,12 +321,34 @@ class Sandbox:
     # ── lifecycle ─────────────────────────────────────────────────────
 
     def pause(self) -> None:
-        """Pause the sandbox (preserves memory snapshot)."""
+        """POST /sandboxes/:sandboxID/pause — Pause a sandbox.
+
+        Preserves the sandbox memory snapshot. The sandbox can be resumed
+        later via :meth:`connect`.
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: If the sandbox cannot be paused (HTTP 409) or on
+                unexpected backend error (HTTP 500).
+        """
         resp = self._session.post(f"{self._config.api_url}/sandboxes/{self.sandbox_id}/pause")
         _check_response(resp)
 
     def resume(self, timeout: int = 300) -> None:
-        """Resume a paused sandbox. Deprecated — use :meth:`connect` instead."""
+        """POST /sandboxes/:sandboxID/resume — Resume a paused sandbox.
+
+        .. deprecated::
+            Use :meth:`connect` instead, which auto-resumes paused sandboxes
+            and returns a fresh :class:`Sandbox` instance.
+
+        Args:
+            timeout: Sandbox TTL in seconds after resume (default: 300).
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: If the sandbox is already running (HTTP 409) or on
+                unexpected backend error (HTTP 500).
+        """
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/resume",
             json={"timeout": timeout},
@@ -304,12 +356,26 @@ class Sandbox:
         _check_response(resp)
 
     def kill(self) -> None:
-        """Destroy the sandbox."""
+        """DELETE /sandboxes/:sandboxID — Destroy a sandbox.
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: On unexpected backend error (HTTP 500).
+        """
         resp = self._session.delete(f"{self._config.api_url}/sandboxes/{self.sandbox_id}")
         _check_response(resp)
 
     def get_info(self) -> dict:
-        """Return sandbox details from the API."""
+        """GET /sandboxes/:sandboxID — Get sandbox detail.
+
+        Returns:
+            A dict containing ``sandboxID``, ``state``, ``cpuCount``,
+            ``memoryMB``, ``startedAt``, and other sandbox metadata.
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: On unexpected backend error (HTTP 500).
+        """
         resp = self._session.get(f"{self._config.api_url}/sandboxes/{self.sandbox_id}")
         _check_response(resp)
         return resp.json()
