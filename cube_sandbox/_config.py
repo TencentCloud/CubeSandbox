@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
 import os

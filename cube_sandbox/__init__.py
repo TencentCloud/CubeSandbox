@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
 from .sandbox import Sandbox
 from ._config import Config
 from ._models import Execution, Result, Logs, ExecutionError, OutputMessage, Context

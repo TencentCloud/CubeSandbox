@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
 """
 Example: Host-mount volumes — share a host directory into the sandbox.
 
