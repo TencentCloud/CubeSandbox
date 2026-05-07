@@ -320,19 +320,37 @@ class Sandbox:
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
-    def pause(self) -> None:
+    def pause(self, *, wait: bool = True, timeout: float = 30, interval: float = 1.0) -> None:
         """POST /sandboxes/:sandboxID/pause — Pause a sandbox.
 
         Preserves the sandbox memory snapshot. The sandbox can be resumed
         later via :meth:`connect`.
 
+        Args:
+            wait: If ``True`` (default), poll :meth:`get_info` until the sandbox
+                state becomes ``"paused"`` before returning.
+            timeout: Maximum seconds to wait when ``wait=True`` (default: 30).
+            interval: Polling interval in seconds (default: 1.0).
+
         Raises:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
             ApiError: If the sandbox cannot be paused (HTTP 409) or on
                 unexpected backend error (HTTP 500).
+            TimeoutError: If ``wait=True`` and sandbox does not reach
+                ``"paused"`` state within ``timeout`` seconds.
         """
+        import time
         resp = self._session.post(f"{self._config.api_url}/sandboxes/{self.sandbox_id}/pause")
         _check_response(resp)
+        if wait:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if self.get_info().get("state") == "paused":
+                    return
+                time.sleep(interval)
+            raise TimeoutError(
+                f"Sandbox {self.sandbox_id!r} did not reach 'paused' state within {timeout}s"
+            )
 
     def resume(self, timeout: int = 300) -> None:
         """POST /sandboxes/:sandboxID/resume — Resume a paused sandbox.

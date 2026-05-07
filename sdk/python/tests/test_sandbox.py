@@ -246,7 +246,7 @@ class TestPause:
     def test_pause_success(self):
         sb = make_sandbox()
         with patch.object(sb._session, "post", return_value=mock_resp(status=204)) as m:
-            sb.pause()
+            sb.pause(wait=False)
         m.assert_called_once_with(f"http://localhost:3000/sandboxes/{SANDBOX_ID}/pause")
 
     def test_pause_not_found(self):
@@ -254,7 +254,29 @@ class TestPause:
         with patch.object(sb._session, "post",
                           return_value=mock_resp({"message": "not found"}, status=404)):
             with pytest.raises(SandboxNotFoundError):
-                sb.pause()
+                sb.pause(wait=False)
+
+    def test_pause_wait_polls_until_paused(self):
+        """pause(wait=True) should poll get_info until state == 'paused'."""
+        sb = make_sandbox()
+        paused_info = {**SANDBOX_DATA, "state": "paused"}
+        with patch.object(sb._session, "post", return_value=mock_resp(status=204)), \
+             patch.object(sb._session, "get",
+                          side_effect=[
+                              mock_resp({**SANDBOX_DATA, "state": "running"}),
+                              mock_resp(paused_info),
+                          ]) as get_m:
+            sb.pause(wait=True, interval=0)
+        assert get_m.call_count == 2
+
+    def test_pause_wait_timeout(self):
+        """pause(wait=True) raises TimeoutError when state never becomes 'paused'."""
+        sb = make_sandbox()
+        with patch.object(sb._session, "post", return_value=mock_resp(status=204)), \
+             patch.object(sb._session, "get",
+                          return_value=mock_resp({**SANDBOX_DATA, "state": "running"})):
+            with pytest.raises(TimeoutError):
+                sb.pause(wait=True, timeout=0, interval=0)
 
 
 # ── POST /sandboxes/:id/resume ────────────────────────────────────────────────
