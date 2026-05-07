@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Tencent Inc.
+# Copyright (c) 2024 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 """
 Example: Sandbox lifecycle — create, get_info, pause, connect (auto-resume), resume (deprecated), kill.
