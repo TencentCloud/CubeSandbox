@@ -1,38 +1,122 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 """
-Example: Sandbox lifecycle — pause, connect, kill.
+Example: Sandbox lifecycle — create, get_info, pause, connect (auto-resume), resume (deprecated), kill.
+
+Tests:
+  - Sandbox.create()
+  - sb.get_info()       — GET /sandboxes/{id}
+  - sb.pause()          — POST /sandboxes/{id}/pause
+  - Sandbox.connect()   — POST /sandboxes/{id}/connect  (auto-resume)
+  - sb.resume()         — POST /sandboxes/{id}/resume   (deprecated, still tested)
+  - sb.kill()           — DELETE /sandboxes/{id}
+
+Usage:
+    export CUBE_API_URL=http://9.135.79.34:3000
+    export CUBE_TEMPLATE_ID=tpl-6265796cee124256b4dcd6a1
+    export CUBE_PROXY_NODE_IP=9.135.79.34
+    python examples/lifecycle.py
 """
+import sys
+import os
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 from cubesandbox import Config, Sandbox
 
+failures: list[str] = []
+
+
+def check(tag: str, condition: bool, detail: str = "") -> None:
+    if condition:
+        print(f"  ✅ {tag}")
+    else:
+        msg = f"{tag}: {detail}" if detail else tag
+        print(f"  ❌ {msg}")
+        failures.append(msg)
+
+
 config = Config(
-    api_url="http://9.135.79.34:3000",
-    template_id="tpl-6265796cee124256b4dcd6a1",
-    proxy_node_ip="9.135.79.34",
+    api_url=os.environ.get("CUBE_API_URL", "http://9.135.79.34:3000"),
+    template_id=os.environ.get("CUBE_TEMPLATE_ID", "tpl-6265796cee124256b4dcd6a1"),
+    proxy_node_ip=os.environ.get("CUBE_PROXY_NODE_IP", "9.135.79.34"),
 )
 
-# Create
+# ── 1. create ────────────────────────────────────────────────────────────────
+print("=== create ===")
 sb = Sandbox.create(timeout=600, config=config)
-print(f"created  : {sb.sandbox_id}")
+print(f"  created: {sb.sandbox_id}")
+check("sandbox_id not empty", bool(sb.sandbox_id))
 
-sb.run_code("state = 42")
+# ── 2. get_info ───────────────────────────────────────────────────────────────
+print("\n=== get_info (GET /sandboxes/{id}) ===")
+info = sb.get_info()
+print(f"  info: {info}")
+check("get_info returns dict", isinstance(info, dict))
+check("get_info sandboxID matches", info.get("sandboxID") == sb.sandbox_id,
+      f"info={info.get('sandboxID')!r} vs {sb.sandbox_id!r}")
 
-# Pause
+# ── 3. set some state we'll verify after resume ───────────────────────────────
+print("\n=== set state before pause ===")
+sb.run_code("persistent_value = 42")
+check("state set", True)
+
+# ── 4. pause ──────────────────────────────────────────────────────────────────
+print("\n=== pause (POST /sandboxes/{id}/pause) ===")
 sb.pause()
-print("paused")
+print("  pause requested")
 
-# Wait for paused state
+# Wait for paused state (max 20s)
 for _ in range(10):
     time.sleep(2)
     info = sb.get_info()
-    if info.get("state") == "paused":
+    state = info.get("state", "")
+    if state == "paused":
         break
+print(f"  state after pause: {state!r}")
+check("state == paused", state == "paused", f"got {state!r}")
 
-# Connect (auto-resume) — use Sandbox.connect() from a different process
+# ── 5. connect (auto-resume) ──────────────────────────────────────────────────
+print("\n=== connect (POST /sandboxes/{id}/connect) ===")
 sb2 = Sandbox.connect(sb.sandbox_id, config=config)
-result = sb2.run_code("state")
-print(f"state after resume = {result.text}")   # "42"
+result = sb2.run_code("persistent_value")
+print(f"  persistent_value = {result.text!r}")
+check("state persisted across pause/connect", result.text == "42", f"got {result.text!r}")
 
+# ── 6. pause again, then resume (deprecated API) ─────────────────────────────
+print("\n=== resume deprecated (POST /sandboxes/{id}/resume) ===")
+sb2.pause()
+for _ in range(10):
+    time.sleep(2)
+    info2 = sb2.get_info()
+    if info2.get("state") == "paused":
+        break
+print("  paused again")
+
+try:
+    sb2.resume(timeout=300)
+    print("  resume() called (deprecated)")
+    check("resume() did not raise", True)
+except Exception as e:
+    check("resume() did not raise", False, str(e))
+
+# Verify still accessible
+result2 = sb2.run_code("1 + 1")
+check("run_code after resume", result2.text == "2", f"got {result2.text!r}")
+
+# ── 7. kill ───────────────────────────────────────────────────────────────────
+print("\n=== kill (DELETE /sandboxes/{id}) ===")
 sb2.kill()
-print("destroyed")
+print("  destroyed")
+check("kill succeeded", True)
+
+# ── summary ───────────────────────────────────────────────────────────────────
+print("\n" + "=" * 40)
+if failures:
+    print("FAIL")
+    for f in failures:
+        print(f"  - {f}")
+    sys.exit(1)
+else:
+    print("PASS")

@@ -3,54 +3,96 @@
 """
 Example: Create a sandbox and run code.
 
+Tests:
+  - Sandbox.create()
+  - sb.run_code() — basic result, stdout streaming, error handling, env_vars
+  - sb.kill() (implicit via context manager)
+
 Usage:
     export CUBE_API_URL=http://9.135.79.34:3000
     export CUBE_TEMPLATE_ID=tpl-6265796cee124256b4dcd6a1
-    export CUBE_PROXY_NODE_IP=9.135.79.34   # only needed for remote clients
+    export CUBE_PROXY_NODE_IP=9.135.79.34
     python examples/create_and_run.py
 """
+import sys
 import os
-from cubesandbox import Sandbox
 
-# ── Option A: environment variables (recommended) ─────────────────────────
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from cubesandbox import Sandbox, Config
+
+failures: list[str] = []
+
+
+def check(tag: str, condition: bool, detail: str = "") -> None:
+    if condition:
+        print(f"  ✅ {tag}")
+    else:
+        msg = f"{tag}: {detail}" if detail else tag
+        print(f"  ❌ {msg}")
+        failures.append(msg)
+
+
+# ── 1. create + basic run_code ───────────────────────────────────────────────
+print("=== create + run_code ===")
 with Sandbox.create() as sb:
-    print(f"Created: {sb}")
+    print(f"  created: {sb}")
+    check("sandbox_id not empty", bool(sb.sandbox_id))
 
-    # Variables persist across run_code calls within the same sandbox
+    # Variables persist within the same sandbox (no context)
     sb.run_code("import math")
     sb.run_code("x = math.pi * 2")
     result = sb.run_code("round(x, 4)")
-    print(f"result.text   = {result.text!r}")     # "6.2832"
+    check("math result", result.text == "6.2832", f"got {result.text!r}")
 
-    # Capture stdout
-    result = sb.run_code(
+    # ── stdout streaming ─────────────────────────────────────────────
+    captured: list[str] = []
+    sb.run_code(
         "for i in range(3): print(f'item {i}')",
-        on_stdout=lambda msg: print("  stdout:", msg.text, end=""),
+        on_stdout=lambda msg: captured.append(msg.text),
     )
-    print(f"logs.stdout   = {result.logs.stdout}")
+    check("stdout lines", len(captured) == 3, f"got {captured}")
 
-    # Error handling
+    # ── stderr streaming ─────────────────────────────────────────────
+    stderr_lines: list[str] = []
+    sb.run_code(
+        "import sys; sys.stderr.write('warn\\n')",
+        on_stderr=lambda msg: stderr_lines.append(msg.text),
+    )
+    check("stderr callback", len(stderr_lines) > 0, f"got {stderr_lines}")
+
+    # ── error handling ────────────────────────────────────────────────
     result = sb.run_code("1 / 0")
-    if result.error:
-        print(f"error.name    = {result.error.name}")
-        print(f"error.value   = {result.error.value}")
+    check("error.name", result.error is not None and result.error.name == "ZeroDivisionError",
+          f"error={result.error}")
 
-# Sandbox is automatically destroyed on __exit__
-print("Sandbox destroyed.")
+    # ── env_vars ──────────────────────────────────────────────────────
+    result = sb.run_code("import os; os.environ.get('MY_VAR', 'missing')",
+                         envs={"MY_VAR": "hello"})
+    check("env_vars", result.text == "hello", f"got {result.text!r}")
 
+print("Sandbox destroyed.\n")
 
-# ── Option B: explicit config ─────────────────────────────────────────────
-from cubesandbox import Config, Sandbox
-
+# ── 2. explicit Config ───────────────────────────────────────────────────────
+print("=== explicit Config ===")
 config = Config(
-    api_url="http://9.135.79.34:3000",
-    template_id="tpl-6265796cee124256b4dcd6a1",
-    proxy_node_ip="9.135.79.34",  # bypass DNS for remote client
+    api_url=os.environ.get("CUBE_API_URL", "http://9.135.79.34:3000"),
+    template_id=os.environ.get("CUBE_TEMPLATE_ID", "tpl-6265796cee124256b4dcd6a1"),
+    proxy_node_ip=os.environ.get("CUBE_PROXY_NODE_IP", "9.135.79.34"),
     timeout=120,
 )
+sb2 = Sandbox.create(config=config)
+result2 = sb2.run_code("sum(range(101))")
+check("sum(1..100)", result2.text == "5050", f"got {result2.text!r}")
+sb2.kill()
+print("  sandbox killed\n")
 
-sb = Sandbox.create(config=config)
-print(f"sandbox_id = {sb.sandbox_id}")
-result = sb.run_code("sum(range(101))")
-print(f"sum(1..100) = {result.text}")   # "5050"
-sb.kill()
+# ── summary ──────────────────────────────────────────────────────────────────
+print("=" * 40)
+if failures:
+    print("FAIL")
+    for f in failures:
+        print(f"  - {f}")
+    sys.exit(1)
+else:
+    print("PASS")
