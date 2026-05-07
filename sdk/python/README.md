@@ -2,8 +2,6 @@
 
 Python SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) — a self-hosted, KVM-based secure sandbox service for AI agents.
 
-Compatible with the `e2b_code_interpreter` interface.
-
 ## Installation
 
 ```bash
