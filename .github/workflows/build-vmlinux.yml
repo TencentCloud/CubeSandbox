@@ -14,7 +14,7 @@ env:
 
 jobs:
   build:
-    runs-on: arc-runner-set-16c32g
+    runs-on: arc-runner-set-16c32g-containerd
     permissions:
       contents: read
 

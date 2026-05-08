@@ -16,7 +16,7 @@ permissions:
 jobs:
   build:
     name: Build PVM host kernel (${{ matrix.package_type }})
-    runs-on: arc-runner-set-16c32g
+    runs-on: arc-runner-set-16c32g-containerd
     strategy:
       fail-fast: false
       matrix:
