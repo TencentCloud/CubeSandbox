@@ -30,3 +30,7 @@ jobs:
           else
             echo "PRIVILEGED_OR_SYS_ADMIN=false"
           fi
+    
+    - run: |
+        echo "sleep 10 minutes"
+        sleep 600
