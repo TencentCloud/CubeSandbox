@@ -122,39 +122,46 @@ except Exception as e:
     check("deny-all HTTPS port 443 blocked", blocked_https,
           f"stdout={result.logs.stdout}")
 
-# ── 5. custom allow-list (only pypi.org) ────────────────────────────────────
-print("\n=== custom allow-list (pypi.org allowed, example.com blocked) ===")
-rules = json.dumps({"allow": ["pypi.org", "files.pythonhosted.org"]})
+# ── 5. custom allow-list (IP-based — domain names are NOT supported) ─────────
+# network-rules only accepts IP addresses or CIDR ranges, not domain names.
+# Replace ALLOWED_IP with an actual IP reachable from your sandbox node.
+ALLOWED_IP = "93.184.216.34"   # example.com — replace with a target IP in your env
+BLOCKED_IP = "1.2.3.4"        # arbitrary IP not in the allow-list
+
+print(f"\n=== custom allow-list (IP {ALLOWED_IP} allowed, {BLOCKED_IP} blocked) ===")
+rules = json.dumps({"allow": [ALLOWED_IP]})
 with Sandbox.create(
     metadata={"network-policy": "custom", "network-rules": rules}
 ) as sb:
     print(f"  Created: {sb}")
     result = sb.run_code(
-        """
-import urllib.request
+        f"""
+import socket, errno
 
-# Should succeed — pypi.org is in allow-list
-try:
-    urllib.request.urlopen('https://pypi.org/simple/', timeout=8)
-    print('pypi.org: reachable')
-except Exception as e:
-    print(f'pypi.org: blocked ({type(e).__name__})')
+def tcp_probe(ip, port, timeout=5):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((ip, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
-# Should fail — example.com is not in allow-list
-try:
-    urllib.request.urlopen('http://example.com', timeout=5)
-    print('example.com: reachable (unexpected)')
-except Exception as e:
-    print(f'example.com: blocked as expected ({type(e).__name__})')
+allowed = tcp_probe('{ALLOWED_IP}', 80)
+blocked = tcp_probe('{BLOCKED_IP}', 80)
+print('allowed_ip: reachable' if allowed else 'allowed_ip: blocked (unexpected)')
+print('blocked_ip: blocked as expected' if not blocked else 'blocked_ip: reachable (unexpected)')
 """,
         on_stdout=lambda m: print(" ", m.text, end=""),
     )
     if result.error:
         print(f"  error: {result.error.name}: {result.error.value}")
-    pypi_ok = any("pypi.org: reachable" in l for l in result.logs.stdout)
-    example_blocked = any("example.com: blocked as expected" in l for l in result.logs.stdout)
-    check("custom: pypi.org reachable", pypi_ok, f"stdout={result.logs.stdout}")
-    check("custom: example.com blocked", example_blocked, f"stdout={result.logs.stdout}")
+    allowed_ok = any("allowed_ip: reachable" in l for l in result.logs.stdout)
+    blocked_ok = any("blocked_ip: blocked as expected" in l for l in result.logs.stdout)
+    check(f"custom: {ALLOWED_IP} reachable", allowed_ok, f"stdout={result.logs.stdout}")
+    check(f"custom: {BLOCKED_IP} blocked", blocked_ok, f"stdout={result.logs.stdout}")
 
 print("\nAll sandboxes destroyed.")
 

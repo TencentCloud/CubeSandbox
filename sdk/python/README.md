@@ -12,7 +12,7 @@
 ---
 
 `cubesandbox` is the official Python SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox).
-It provides a simple, Pythonic interface to create sandboxes, execute code, manage kernel contexts,
+It provides a simple, Pythonic interface to create sandboxes, execute code,
 and control the full sandbox lifecycle — including pause/resume with memory snapshot.
 
 ## Installation
@@ -73,18 +73,20 @@ with Sandbox.create() as sb:
     )
 ```
 
-### Shared kernel context
+### Persistent variables within a sandbox
 
-Variables persist across `run_code` calls within the same context:
+Variables assigned in one `run_code` call persist for the lifetime of the sandbox —
+no separate context object needed:
 
 ```python
 with Sandbox.create() as sb:
-    ctx = sb.create_context()
-    sb.run_code("x = 100", context=ctx)
-    result = sb.run_code("x + 1", context=ctx)
+    sb.run_code("x = 100")
+    result = sb.run_code("x + 1")
     print(result.text)   # "101"
-    sb.delete_context(ctx)
 ```
+
+> **Note:** `create_context` / `delete_context` methods are defined in the SDK
+> but the underlying server API (`/contexts`) is not yet implemented.
 
 ### Pause & resume
 
@@ -113,8 +115,8 @@ with Sandbox.create(metadata={"network-policy": "deny-all"}) as sb:
     )
     print(result.error.name)   # "URLError"
 
-# Custom allow-list
-rules = json.dumps({"allow": ["pypi.org", "files.pythonhosted.org"]})
+# Custom allow-list — NOTE: only IP addresses are supported, not domain names
+rules = json.dumps({"allow": ["151.101.0.0/16"]})
 with Sandbox.create(
     metadata={"network-policy": "custom", "network-rules": rules}
 ) as sb:
@@ -184,8 +186,8 @@ with Sandbox.create(config=cfg) as sb:
 | Method | Description |
 |---|---|
 | `sb.run_code(code, *, context, on_stdout, on_stderr, on_result, on_error, envs, timeout)` | `POST /execute` — execute code, returns `Execution` |
-| `sb.create_context(*, language, cwd)` | `POST /contexts` — create kernel context |
-| `sb.delete_context(context)` | `DELETE /contexts/:id` — delete kernel context |
+| `sb.create_context(*, language, cwd)` | `POST /contexts` — create kernel context (**not yet implemented on server**) |
+| `sb.delete_context(context)` | `DELETE /contexts/:id` — delete kernel context (**not yet implemented on server**) |
 | `sb.get_info()` | `GET /sandboxes/:id` — get sandbox detail |
 | `sb.pause(*, wait, timeout, interval)` | `POST /sandboxes/:id/pause` — pause sandbox |
 | `sb.resume(timeout)` | `POST /sandboxes/:id/resume` — resume (deprecated, use `connect`) |
@@ -207,7 +209,7 @@ with Sandbox.create(config=cfg) as sb:
 | Script | Description |
 |---|---|
 | `examples/create_and_run.py` | Create sandbox and run code |
-| `examples/context.py` | Shared kernel context |
+| `examples/context.py` | Kernel context (server-side not yet implemented) |
 | `examples/lifecycle.py` | Pause / connect / kill |
 | `examples/list_and_health.py` | List sandboxes and health check |
 | `examples/network_policy.py` | Network policy (deny-all / custom) |
