@@ -263,7 +263,6 @@ dev-env/
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `TOOLBOX_ROOT` | `/usr/local/services/cubetoolbox` | `bin` 子命令里已知组件的安装根目录。 |
 | `UNIT_NAME` | `cube-sandbox-oneclick.service` | 脚本末尾打印的重启提示里会用到的 unit 名。 |
 | `OUTPUT_BIN_DIR` | `_output/bin` | `bin` 子命令读取宿主机二进制的目录。 |
 

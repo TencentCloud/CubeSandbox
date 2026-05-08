@@ -159,7 +159,8 @@ component_remote_dir() {
     cubelet|cubecli) printf '%s/Cubelet/bin\n' "${TOOLBOX_ROOT}" ;;
     network-agent) printf '%s/network-agent/bin\n' "${TOOLBOX_ROOT}" ;;
     cube-api) printf '%s/CubeAPI/bin\n' "${TOOLBOX_ROOT}" ;;
-    cube-runtime|containerd-shim-cube-rs) printf '/usr/local/bin\n' ;;
+    # Keep one-click's /usr/local/bin symlinks intact by updating the real install path.
+    cube-runtime|containerd-shim-cube-rs) printf '%s/cube-shim/bin\n' "${TOOLBOX_ROOT}" ;;
     *) return 1 ;;
   esac
 }
