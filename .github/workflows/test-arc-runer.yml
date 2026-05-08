@@ -34,3 +34,32 @@ jobs:
     - run: |
         echo "sleep 10 minutes"
         sleep 600
+
+  Explore-GitHub-Actions-github-hosted:
+    # You need to use the INSTALLATION_NAME from the previous step
+    runs-on: arc-runner-set
+    steps:
+    - run: |
+        echo "🎉 This job uses github hosted runners!"
+        echo
+        echo "== lscpu =="
+        lscpu
+        echo
+        echo "== uname -r =="
+        uname -r
+    - run: |
+          grep CapEff /proc/self/status
+          python3 - <<'PY'
+          import re
+          capeff = int(re.search(r"CapEff:\s*([0-9a-fA-F]+)", open("/proc/self/status").read()).group(1), 16)
+          print("CAP_SYS_ADMIN:", bool(capeff & (1 << 21)))
+          PY
+
+          mkdir -p /tmp/mnt
+          if mount -t tmpfs tmpfs /tmp/mnt; then
+            echo "PRIVILEGED_OR_SYS_ADMIN=true"
+            umount /tmp/mnt
+          else
+            echo "PRIVILEGED_OR_SYS_ADMIN=false"
+          fi
+    
