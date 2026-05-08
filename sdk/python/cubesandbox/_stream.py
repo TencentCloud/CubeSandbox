@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from typing import Callable, Optional
 
-from ._models import Execution, ExecutionError, Logs, OutputMessage, Result
+from ._models import Execution, ExecutionError, OutputMessage, Result
 
 
 def _parse_line(

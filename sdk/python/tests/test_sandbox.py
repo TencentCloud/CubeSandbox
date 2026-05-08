@@ -18,13 +18,13 @@ Covers all implemented CubeAPI endpoints:
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cubesandbox import Config, Execution, Sandbox
 from cubesandbox._exceptions import ApiError, AuthenticationError, SandboxNotFoundError
-from cubesandbox._models import ExecutionError, Logs, OutputMessage, Result
+from cubesandbox._models import ExecutionError, Result
 from cubesandbox._stream import _parse_line
 
 # ── fixtures ──────────────────────────────────────────────────────────────────

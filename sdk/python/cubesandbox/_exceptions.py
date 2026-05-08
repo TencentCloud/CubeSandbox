@@ -10,10 +10,6 @@ class CubeSandboxError(Exception):
         self.status_code = status_code
 
 
-# Backwards-compatible alias
-CubeSandboxError = CubeSandboxError
-
-
 class SandboxNotFoundError(CubeSandboxError): ...
 class TemplateNotFoundError(CubeSandboxError): ...
 class AuthenticationError(CubeSandboxError): ...
