@@ -70,7 +70,8 @@ export default withMermaid(defineConfig({
               text: 'System Design',
               items: [
                 { text: 'Architecture Overview', link: '/architecture/overview' },
-                { text: 'Networking (CubeVS)', link: '/architecture/network' }
+                { text: 'Networking (CubeVS)', link: '/architecture/network' },
+                { text: 'GPU Sandbox Design', link: '/architecture/gpu-sandbox' }
               ]
             }
           ]
@@ -138,7 +139,8 @@ export default withMermaid(defineConfig({
               text: '系统设计',
               items: [
                 { text: '架构概览 (Overview)', link: '/zh/architecture/overview' },
-                { text: 'CubeVS 网络模型', link: '/zh/architecture/network' }
+                { text: 'CubeVS 网络模型', link: '/zh/architecture/network' },
+                { text: 'GPU 沙箱设计', link: '/zh/architecture/gpu-sandbox' }
               ]
             }
           ]
