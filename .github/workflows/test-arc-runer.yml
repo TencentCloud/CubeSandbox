@@ -30,6 +30,14 @@ jobs:
           else
             echo "PRIVILEGED_OR_SYS_ADMIN=false"
           fi
+
+          mkdir -p /tmp/mnt-sudo
+          if command -v sudo >/dev/null 2>&1 && sudo -n mount -t tmpfs tmpfs /tmp/mnt-sudo; then
+            echo "SUDO_MOUNT=true"
+            sudo -n umount /tmp/mnt-sudo
+          else
+            echo "SUDO_MOUNT=false"
+          fi
     
     - run: |
         echo "sleep 10 minutes"
@@ -61,5 +69,13 @@ jobs:
             umount /tmp/mnt
           else
             echo "PRIVILEGED_OR_SYS_ADMIN=false"
+          fi
+
+          mkdir -p /tmp/mnt-sudo
+          if command -v sudo >/dev/null 2>&1 && sudo -n mount -t tmpfs tmpfs /tmp/mnt-sudo; then
+            echo "SUDO_MOUNT=true"
+            sudo -n umount /tmp/mnt-sudo
+          else
+            echo "SUDO_MOUNT=false"
           fi
     
