@@ -127,26 +127,26 @@ class TestListSandboxesV2:
 
 class TestCreate:
     def test_create_minimal(self):
-        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA)):
+        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA, status=201)):
             sb = Sandbox.create(config=make_config())
         assert sb.sandbox_id == SANDBOX_ID
         assert sb.template_id == TEMPLATE_ID
         assert sb.domain == DOMAIN
 
     def test_create_with_timeout(self):
-        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA)) as m:
+        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(timeout=600, config=make_config())
         body = m.call_args[1]["json"]
         assert body["timeout"] == 600
 
     def test_create_with_env_vars(self):
-        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA)) as m:
+        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(env_vars={"FOO": "bar"}, config=make_config())
         body = m.call_args[1]["json"]
         assert body["envVars"] == {"FOO": "bar"}
 
     def test_create_with_metadata(self):
-        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA)) as m:
+        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(metadata={"owner": "test"}, config=make_config())
         body = m.call_args[1]["json"]
         assert body["metadata"] == {"owner": "test"}
@@ -157,7 +157,7 @@ class TestCreate:
             Sandbox.create(config=cfg)
 
     def test_create_explicit_template(self):
-        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA)) as m:
+        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(template="tpl-override", config=make_config())
         body = m.call_args[1]["json"]
         assert body["templateID"] == "tpl-override"
@@ -223,7 +223,7 @@ class TestKill:
                 sb.kill()
 
     def test_context_manager_kills_on_exit(self):
-        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA)):
+        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA, status=201)):
             sb = Sandbox.create(config=make_config())
         with patch.object(sb._session, "delete", return_value=mock_resp(status=204)) as m:
             with sb:
@@ -231,7 +231,7 @@ class TestKill:
         m.assert_called_once()
 
     def test_context_manager_suppresses_kill_error(self):
-        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA)):
+        with patch("requests.Session.post", return_value=mock_resp(SANDBOX_DATA, status=201)):
             sb = Sandbox.create(config=make_config())
         with patch.object(sb._session, "delete",
                           return_value=mock_resp({"message": "gone"}, status=404)):
