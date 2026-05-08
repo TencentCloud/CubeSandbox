@@ -17,7 +17,6 @@ Examples:
 Environment variables:
     CUBE_TEMPLATE_ID   sandbox 模板 ID
     CUBE_API_URL       CubeAPI 地址，默认 http://127.0.0.1:3000
-    E2B_API_KEY        API key（本地部署填 dummy 即可）
 """
 
 from __future__ import annotations
@@ -318,8 +317,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", "-m", choices=["create-delete", "create-only"],
                         default="create-delete", help="测试模式（默认 create-delete）")
     parser.add_argument("--output", "-o", type=str, default=None, help="导出 JSON 报告路径")
-    parser.add_argument("--api-url", type=str, default=None, help="CubeAPI 地址")
-    parser.add_argument("--api-key", type=str, default=None, help="API key")
+    parser.add_argument("--api-url", type=str, default=None, help="CubeAPI 地址（覆盖 CUBE_API_URL）")
     parser.add_argument("--dry-run", action="store_true", help="模拟模式（无需真实服务）")
     parser.add_argument("--dry-latency", type=str, default="80,30", help="dry-run 延迟 mean,std（ms）")
     parser.add_argument("--dry-error-rate", type=float, default=0.02, help="dry-run 错误率")
@@ -332,18 +330,17 @@ def main() -> None:
     if args.dry_run:
         template_id = args.template or "dry-run-template"
         api_url = args.api_url or "http://127.0.0.1:3000"
-        api_key = args.api_key or "dummy"
     else:
         template_id = args.template or os.environ.get("CUBE_TEMPLATE_ID", "")
-        api_url = (args.api_url or os.environ.get("CUBE_API_URL") or
-                   os.environ.get("E2B_API_URL", "")).rstrip("/")
-        api_key = args.api_key or os.environ.get("E2B_API_KEY", "dummy")
+        api_url = (args.api_url or os.environ.get("CUBE_API_URL", "")).rstrip("/")
         if not template_id:
             print("ERROR: CUBE_TEMPLATE_ID not set. Use --template or env var.")
             sys.exit(1)
         if not api_url:
             print("ERROR: CUBE_API_URL not set. Use --api-url or env var.")
             sys.exit(1)
+
+    api_key = "dummy"
 
     args.template = template_id
     args.api_url = api_url
