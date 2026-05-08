@@ -38,13 +38,9 @@ jobs:
           else
             echo "SUDO_MOUNT=false"
           fi
-    
-    - run: |
-        echo "sleep 10 minutes"
-        sleep 600
+
 
   Explore-GitHub-Actions-github-hosted:
-    # You need to use the INSTALLATION_NAME from the previous step
     runs-on: ubuntu-latest
     steps:
     - run: |
