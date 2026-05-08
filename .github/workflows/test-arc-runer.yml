@@ -5,7 +5,7 @@ on:
 jobs:
   Explore-GitHub-Actions:
     # You need to use the INSTALLATION_NAME from the previous step
-    runs-on: arc-runner-set
+    runs-on: arc-runner-set-8c16g
     steps:
     - run: |
         echo "🎉 This job uses runner scale set runners!"
@@ -15,6 +15,12 @@ jobs:
         echo
         echo "== uname -r =="
         uname -r
+        echo "== free -h =="
+        free -h
+        echo "== df -h =="
+        df -h
+        echo "== nproc =="
+        nproc
     - run: |
           grep CapEff /proc/self/status
           python3 - <<'PY'
@@ -51,6 +57,12 @@ jobs:
         echo
         echo "== uname -r =="
         uname -r
+        echo "== free -h =="
+        free -h
+        echo "== df -h =="
+        df -h
+        echo "== nproc =="
+        nproc
     - run: |
           grep CapEff /proc/self/status
           python3 - <<'PY'
