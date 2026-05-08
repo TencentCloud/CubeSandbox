@@ -45,7 +45,7 @@ jobs:
 
   Explore-GitHub-Actions-github-hosted:
     # You need to use the INSTALLATION_NAME from the previous step
-    runs-on: arc-runner-set
+    runs-on: ubuntu-latest
     steps:
     - run: |
         echo "🎉 This job uses github hosted runners!"
