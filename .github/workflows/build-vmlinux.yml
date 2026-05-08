@@ -37,6 +37,7 @@ jobs:
             bc \
             bison \
             build-essential \
+            cpio \
             file \
             flex \
             libelf-dev \
