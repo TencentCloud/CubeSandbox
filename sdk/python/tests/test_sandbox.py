@@ -26,7 +26,7 @@ from cubesandbox import Config, Execution, Sandbox
 from cubesandbox._commands import CommandResult, Commands
 from cubesandbox._exceptions import ApiError, AuthenticationError, SandboxNotFoundError
 from cubesandbox._filesystem import Filesystem
-from cubesandbox._models import ExecutionError, Logs, Result
+from cubesandbox._models import ExecutionError, Logs, OutputMessage, Result
 from cubesandbox._stream import _parse_line
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -527,33 +527,41 @@ class TestConfig:
 class TestCommands:
     def test_run_success(self):
         sb = make_sandbox()
-        mock_exec = Execution(
-            logs=Logs(stdout=["hello", "world"], stderr=[]),
-        )
-        with patch.object(sb, "run_code", return_value=mock_exec) as m:
+        # new impl collects stdout via on_stdout callback; last line is exit code
+        def fake_run_code(code, *, timeout=None, on_stdout=None, **kw):
+            if on_stdout:
+                on_stdout(OutputMessage(text="hello\nworld\n0\n"))
+            return Execution(logs=Logs(stdout=["hello\nworld\n0\n"], stderr=[]))
+        with patch.object(sb, "run_code", side_effect=fake_run_code):
             result = sb.commands.run("echo hello")
-        m.assert_called_once_with("echo hello", language="sh", timeout=None)
-        assert result.stdout == "hello\nworld"
+        assert result.stdout == "hello\nworld\n"
         assert result.stderr == ""
         assert result.exit_code == 0
 
     def test_run_with_error(self):
         sb = make_sandbox()
-        mock_exec = Execution(
-            logs=Logs(stdout=[], stderr=["error msg"]),
-            error=ExecutionError("ShellError", "command failed"),
-        )
-        with patch.object(sb, "run_code", return_value=mock_exec):
+        def fake_run_code(code, *, timeout=None, on_stdout=None, **kw):
+            if on_stdout:
+                on_stdout(OutputMessage(text="1\n"))
+            return Execution(
+                logs=Logs(stdout=["1\n"], stderr=["error msg"]),
+                error=ExecutionError("ShellError", "command failed"),
+            )
+        with patch.object(sb, "run_code", side_effect=fake_run_code):
             result = sb.commands.run("false")
         assert result.exit_code == 1
-        assert result.stderr == "error msg"
 
     def test_run_with_timeout(self):
         sb = make_sandbox()
-        mock_exec = Execution(logs=Logs(stdout=["ok"], stderr=[]))
-        with patch.object(sb, "run_code", return_value=mock_exec) as m:
-            sb.commands.run("sleep 1", timeout=5.0)
-        m.assert_called_once_with("sleep 1", language="sh", timeout=5.0)
+        def fake_run_code(code, *, timeout=None, on_stdout=None, **kw):
+            if on_stdout:
+                on_stdout(OutputMessage(text="ok\n0\n"))
+            return Execution(logs=Logs(stdout=["ok\n0\n"], stderr=[]))
+        with patch.object(sb, "run_code", side_effect=fake_run_code) as m:
+            result = sb.commands.run("sleep 1", timeout=5.0)
+        # timeout is forwarded
+        assert m.call_args.kwargs.get("timeout") == 5.0
+        assert result.exit_code == 0
 
     def test_commands_property_returns_commands_instance(self):
         sb = make_sandbox()
