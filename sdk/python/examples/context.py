@@ -1,15 +1,18 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 """
-Example: Kernel Context — share variable state across run_code calls.
+Example: Variable persistence within a sandbox.
 
-Tests:
-  - sb.create_context()                    — POST /contexts
-  - sb.run_code(code, context=ctx)         — state persists within a context
-  - sb.run_code(code)                      — no context: no state persistence
-  - two independent contexts are isolated  — namespaces don't bleed
-  - sb.delete_context(ctx)                 — DELETE /contexts/{id}
-  - streaming (on_stdout) with context
+Variables assigned in one run_code call persist for the full lifetime of the
+sandbox — no separate context object is needed.
+
+  - sb.run_code("x = 100") then sb.run_code("x") returns 100
+  - state accumulates across calls
+  - each sandbox has its own isolated namespace
+
+NOTE: create_context / delete_context methods exist in the SDK but the
+server-side /contexts API is not yet implemented (envd returns HTTP 404).
+Do NOT call create_context / delete_context in examples or production code.
 
 Usage:
     export CUBE_API_URL=http://<YOUR_NODE_IP>:3000
@@ -39,75 +42,41 @@ def check(tag: str, condition: bool, detail: str = "") -> None:
 with Sandbox.create() as sb:
     print(f"Created: {sb}")
 
-    # ── A: without context — variables do NOT persist ─────────────────────────
-    print("\n--- A: without context (no state persistence) ---")
+    # ── A: variables persist across run_code calls within same sandbox ────────
+    print("\n--- A: variable persistence ---")
     sb.run_code("x = 100")
     result = sb.run_code("x")
-    if result.error:
-        print(f"  expected NameError: {result.error.name}: {result.error.value}")
-        check("no-context: NameError raised", result.error.name == "NameError",
-              f"got {result.error.name!r}")
-    else:
-        # Some envd versions may share state globally; accept both behaviors
-        print(f"  result.text = {result.text!r} (envd may share global state)")
-        check("no-context: result returned", result.text is not None)
+    print(f"  x = {result.text!r}")
+    check("x persists across calls", result.text == "100", f"got {result.text!r}")
 
-    # ── B: with a shared context — variables DO persist ───────────────────────
-    print("\n--- B: with shared context ---")
-    ctx = sb.create_context()
-    print(f"  context id = {ctx.id!r}")
-    check("create_context returns id", bool(ctx.id))
-
-    sb.run_code("x = 100",         context=ctx)
-    sb.run_code("y = x * 2",       context=ctx)
-    result = sb.run_code("x + y",  context=ctx)
-    print(f"  x=100, y=x*2, x+y = {result.text!r}")
-    check("context: x + y == 300", result.text == "300", f"got {result.text!r}")
-
-    # Accumulate across multiple calls
-    sb.run_code("total = 0",           context=ctx)
+    # ── B: accumulate state across multiple calls ─────────────────────────────
+    print("\n--- B: accumulate state ---")
+    sb.run_code("total = 0")
     for i in range(1, 6):
-        sb.run_code(f"total += {i}",   context=ctx)
-    result = sb.run_code("total",      context=ctx)
+        sb.run_code(f"total += {i}")
+    result = sb.run_code("total")
     print(f"  sum(1..5) = {result.text!r}")
-    check("context: sum(1..5) == 15", result.text == "15", f"got {result.text!r}")
+    check("sum(1..5) == 15", result.text == "15", f"got {result.text!r}")
 
-    # ── C: two independent contexts — namespaces are isolated ─────────────────
-    print("\n--- C: two independent contexts ---")
-    ctx_a = sb.create_context()
-    ctx_b = sb.create_context()
+    # ── C: complex state (list / dict) persists ───────────────────────────────
+    print("\n--- C: complex state persists ---")
+    sb.run_code("items = []")
+    for v in ["a", "b", "c"]:
+        sb.run_code(f"items.append('{v}')")
+    result = sb.run_code("','.join(items)")
+    print(f"  items = {result.text!r}")
+    check("list accumulation", result.text == "a,b,c", f"got {result.text!r}")
 
-    sb.run_code("value = 'Alice'", context=ctx_a)
-    sb.run_code("value = 'Bob'",   context=ctx_b)
-
-    result_a = sb.run_code("value", context=ctx_a)
-    result_b = sb.run_code("value", context=ctx_b)
-    print(f"  ctx_a.value = {result_a.text!r}")
-    print(f"  ctx_b.value = {result_b.text!r}")
-    check("ctx_a isolated", result_a.text == "Alice", f"got {result_a.text!r}")
-    check("ctx_b isolated", result_b.text == "Bob",   f"got {result_b.text!r}")
-
-    # ── D: streaming (on_stdout) with context ─────────────────────────────────
-    print("\n--- D: streaming with context ---")
-    ctx_d = sb.create_context()
-    sb.run_code("items = list(range(4))", context=ctx_d)
+    # ── D: streaming with persistent state ───────────────────────────────────
+    print("\n--- D: streaming with persistent state ---")
+    sb.run_code("seq = list(range(4))")
     captured: list[str] = []
     result = sb.run_code(
-        "for i in items: print(f'item {i}')",
-        context=ctx_d,
+        "for i in seq: print(f'item {i}')",
         on_stdout=lambda m: captured.extend([l for l in m.text.splitlines() if l]),
     )
     print(f"  stdout captured: {captured}")
     check("streaming: 4 stdout lines", len(captured) == 4, f"got {captured}")
-
-    # ── E: delete contexts ────────────────────────────────────────────────────
-    print("\n--- E: delete contexts ---")
-    sb.delete_context(ctx)
-    sb.delete_context(ctx_a)
-    sb.delete_context(ctx_b)
-    sb.delete_context(ctx_d)
-    print("  all contexts deleted")
-    check("delete_context no error", True)
 
 print("\nSandbox destroyed.")
 

@@ -83,7 +83,7 @@ class Sandbox:
         config: Config | None = None,
         **kwargs: Any,
     ) -> "Sandbox":
-        """POST /sandboxes — Create a new sandbox.
+        """POST /sandboxes - Create a new sandbox.
 
         Args:
             template: Template ID. Falls back to ``CUBE_TEMPLATE_ID`` env var.
@@ -119,7 +119,7 @@ class Sandbox:
 
     @classmethod
     def connect(cls, sandbox_id: str, *, config: Config | None = None) -> "Sandbox":
-        """POST /sandboxes/:sandboxID/connect — Connect to an existing sandbox.
+        """POST /sandboxes/:sandboxID/connect - Connect to an existing sandbox.
 
         Resumes the sandbox if it is currently paused.
 
@@ -146,7 +146,7 @@ class Sandbox:
 
     @classmethod
     def list(cls, config: Config | None = None) -> list[dict]:
-        """GET /sandboxes — List all running sandboxes (v1).
+        """GET /sandboxes - List all running sandboxes (v1).
 
         Args:
             config: SDK config. Uses default (env-based) config if omitted.
@@ -163,7 +163,7 @@ class Sandbox:
 
     @classmethod
     def list_v2(cls, config: Config | None = None) -> list[dict]:
-        """GET /v2/sandboxes — List all running sandboxes (v2).
+        """GET /v2/sandboxes - List all running sandboxes (v2).
 
         Supports state / metadata filtering on the server side.
 
@@ -181,7 +181,7 @@ class Sandbox:
 
     @classmethod
     def health(cls, config: Config | None = None) -> dict:
-        """GET /health — Check the health of the CubeAPI service.
+        """GET /health - Check the health of the CubeAPI service.
 
         Args:
             config: SDK config. Uses default (env-based) config if omitted.
@@ -206,19 +206,21 @@ class Sandbox:
     ) -> "Context":
         """POST /contexts — Create a new kernel context on the sandbox.
 
-        A context keeps Python variable state alive across :meth:`run_code`
-        calls. Use the returned :class:`Context` object with subsequent
-        ``run_code(code, context=ctx)`` calls.
+        .. warning::
+            The server-side ``/contexts`` API is **not yet implemented**.
+            Calling this method will raise :class:`ApiError` (HTTP 404).
+            Use plain :meth:`run_code` calls instead — variables persist
+            for the lifetime of the sandbox without a context object.
 
         Args:
-            language: Kernel language (default ``"python"``).
+            language: Kernel language (default ``"python"``).  
             cwd: Working directory for the context.
 
         Returns:
             A :class:`Context` with the server-assigned ``id``.
 
         Raises:
-            ApiError: If context creation fails (HTTP 4xx/5xx).
+            ApiError: Always raises until the server implements ``/contexts``.
         """
         if self._client is None:
             self._client = build_client(self._config)
@@ -236,11 +238,15 @@ class Sandbox:
     def delete_context(self, context: "Context") -> None:
         """DELETE /contexts/:id — Delete a kernel context from the sandbox.
 
+        .. warning::
+            The server-side ``/contexts`` API is **not yet implemented**.
+            This method will raise :class:`ApiError` (HTTP 404).
+
         Args:
             context: The :class:`Context` to delete.
 
         Raises:
-            ApiError: If deletion fails (HTTP 4xx/5xx).
+            ApiError: Always raises until the server implements ``/contexts``.
         """
         if self._client is None:
             self._client = build_client(self._config)
@@ -264,7 +270,7 @@ class Sandbox:
         envs: Dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> Execution:
-        """POST /execute — Execute code inside the sandbox.
+        """POST /execute - Execute code inside the sandbox.
 
         Streams the ndjson response from the sandbox's envd process via
         CubeProxy. When ``CUBE_PROXY_NODE_IP`` is set, connections bypass
@@ -273,7 +279,8 @@ class Sandbox:
         Args:
             code: Python code to execute.
             language: Kernel language override (default: ``"python"``).
-            context: Kernel context for sharing state across calls.
+            context: **Not yet implemented.** Reserved for future use;
+                pass ``None`` (or omit) to use the sandbox's global namespace.
             on_stdout: Callback invoked for each stdout event.
             on_stderr: Callback invoked for each stderr event.
             on_result: Callback invoked for each result event.
@@ -322,7 +329,7 @@ class Sandbox:
     # ── lifecycle ─────────────────────────────────────────────────────
 
     def pause(self, *, wait: bool = True, timeout: float = 30, interval: float = 1.0) -> None:
-        """POST /sandboxes/:sandboxID/pause — Pause a sandbox.
+        """POST /sandboxes/:sandboxID/pause - Pause a sandbox.
 
         Preserves the sandbox memory snapshot. The sandbox can be resumed
         later via :meth:`connect`.
@@ -354,7 +361,7 @@ class Sandbox:
             )
 
     def resume(self, timeout: int = 300) -> None:
-        """POST /sandboxes/:sandboxID/resume — Resume a paused sandbox.
+        """POST /sandboxes/:sandboxID/resume - Resume a paused sandbox.
 
         .. deprecated::
             Use :meth:`connect` instead, which auto-resumes paused sandboxes
@@ -375,7 +382,7 @@ class Sandbox:
         _check_response(resp)
 
     def kill(self) -> None:
-        """DELETE /sandboxes/:sandboxID — Destroy a sandbox.
+        """DELETE /sandboxes/:sandboxID - Destroy a sandbox.
 
         Raises:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
@@ -385,7 +392,7 @@ class Sandbox:
         _check_response(resp)
 
     def get_info(self) -> dict:
-        """GET /sandboxes/:sandboxID — Get sandbox detail.
+        """GET /sandboxes/:sandboxID - Get sandbox detail.
 
         Returns:
             A dict containing ``sandboxID``, ``state``, ``cpuCount``,

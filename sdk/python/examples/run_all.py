@@ -14,8 +14,8 @@ Covers all CubeAPI-supported features:
   - POST /sandboxes/{id}/resume (deprecated)
   - POST /sandboxes/{id}/connect
   - envd: POST /execute (run_code + streaming + env_vars)
-  - envd: POST /contexts + DELETE /contexts/{id}
-  - metadata: network-policy (allow-all / deny-all / custom)
+  - sandbox variable persistence (no /contexts API needed)
+  - metadata: network-policy (allow-all / deny-all / custom, IP/CIDR only)
   - metadata: hostdir-mount (readOnly=false / readOnly=true)
 
 Usage:

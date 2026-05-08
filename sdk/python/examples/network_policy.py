@@ -6,7 +6,7 @@ Example: Network policy — control outbound network access via sandbox metadata
 Tests:
   - metadata["network-policy"] = "allow-all"   → outbound HTTP/HTTPS reachable
   - metadata["network-policy"] = "deny-all"    → outbound blocked (http:80 + https:443)
-  - metadata["network-policy"] = "custom"      → only allow-listed domains reachable
+  - metadata["network-policy"] = "custom"      → only allow-listed IPs/CIDRs reachable (domain names NOT supported)
 
 Usage:
     export CUBE_API_URL=http://<YOUR_NODE_IP>:3000
