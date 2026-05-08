@@ -19,7 +19,6 @@ Usage:
 """
 import sys
 import os
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -43,22 +42,6 @@ config = Config(
     proxy_node_ip=os.environ["CUBE_PROXY_NODE_IP"],
 )
 
-
-def _wait_for_state(sb: Sandbox, target: str, retries: int = 15, interval: float = 2.0) -> str:
-    """Poll get_info() until state == target or retries exhausted. Returns final state."""
-    state = ""
-    for _ in range(retries):
-        time.sleep(interval)
-        try:
-            info = sb.get_info()
-            state = info.get("state", "")
-            if state == target:
-                return state
-        except Exception:
-            pass
-    return state
-
-
 # ── 1. create ────────────────────────────────────────────────────────────────
 print("=== create ===")
 sb = Sandbox.create(timeout=600, config=config)
@@ -80,10 +63,12 @@ check("state set", True)
 
 # ── 4. pause ──────────────────────────────────────────────────────────────────
 print("\n=== pause (POST /sandboxes/{id}/pause) ===")
+# pause(wait=True) already polls internally until state=="paused"
 sb.pause()
-print("  pause requested")
-state = _wait_for_state(sb, "paused")
-print(f"  state after pause: {state!r}")
+print("  paused")
+info = sb.get_info()
+state = info.get("state", "")
+print(f"  state = {state!r}")
 check("state == paused", state == "paused", f"got {state!r}")
 
 # ── 5. connect (auto-resume) ──────────────────────────────────────────────────
@@ -98,8 +83,7 @@ check("state persisted across pause/connect", result.text == "42", f"got {result
 print("\n=== resume deprecated (POST /sandboxes/{id}/resume) ===")
 try:
     sb2.pause()
-    state2 = _wait_for_state(sb2, "paused")
-    print(f"  re-paused: state={state2!r}")
+    print("  re-paused")
 
     sb2.resume(timeout=300)
     print("  resume() called (deprecated)")

@@ -64,7 +64,12 @@ class OutputMessage:
 
 @dataclass
 class Context:
-    """Kernel execution context for sharing state across run_code calls."""
+    """Kernel execution context placeholder.
+
+    .. warning::
+        The server-side ``/contexts`` API is not yet implemented.
+        Do not instantiate or use this class directly.
+    """
     id: str
     language: str = "python"
     cwd: str = "/home/user"

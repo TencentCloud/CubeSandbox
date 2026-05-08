@@ -129,7 +129,7 @@ with Sandbox.create(
 import json
 from cubesandbox import Sandbox
 
-mounts = json.dumps([{"host_path": "/data/shared", "sandbox_path": "/mnt/data"}])
+mounts = json.dumps([{"hostPath": "/data/shared", "mountPath": "/mnt/data"}])
 with Sandbox.create(metadata={"hostdir-mount": mounts}) as sb:
     result = sb.run_code("open('/mnt/data/hello.txt').read()")
     print(result.text)
@@ -185,7 +185,7 @@ with Sandbox.create(config=cfg) as sb:
 
 | Method | Description |
 |---|---|
-| `sb.run_code(code, *, context, on_stdout, on_stderr, on_result, on_error, envs, timeout)` | `POST /execute` — execute code, returns `Execution` |
+| `sb.run_code(code, *, on_stdout, on_stderr, on_result, on_error, envs, timeout)` | `POST /execute` — execute code, returns `Execution` |
 | `sb.create_context(*, language, cwd)` | `POST /contexts` — create kernel context (**not yet implemented on server**) |
 | `sb.delete_context(context)` | `DELETE /contexts/:id` — delete kernel context (**not yet implemented on server**) |
 | `sb.get_info()` | `GET /sandboxes/:id` — get sandbox detail |
