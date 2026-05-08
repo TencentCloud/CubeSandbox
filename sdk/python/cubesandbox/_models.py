@@ -60,16 +60,3 @@ class OutputMessage:
     text: str
     timestamp: str = ""
     is_stderr: bool = False
-
-
-@dataclass
-class Context:
-    """Kernel execution context placeholder.
-
-    .. warning::
-        The server-side ``/contexts`` API is not yet implemented.
-        Do not instantiate or use this class directly.
-    """
-    id: str
-    language: str = "python"
-    cwd: str = "/home/user"

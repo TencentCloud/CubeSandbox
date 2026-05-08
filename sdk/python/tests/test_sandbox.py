@@ -23,8 +23,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cubesandbox import Config, Execution, Sandbox
+from cubesandbox._commands import CommandResult, Commands
 from cubesandbox._exceptions import ApiError, AuthenticationError, SandboxNotFoundError
-from cubesandbox._models import ExecutionError, Result
+from cubesandbox._filesystem import Filesystem
+from cubesandbox._models import ExecutionError, Logs, Result
 from cubesandbox._stream import _parse_line
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -518,3 +520,162 @@ class TestConfig:
         assert cfg.proxy_node_ip == "1.2.3.4"
         assert cfg.proxy_port    == 9090
         assert cfg.sandbox_domain == "mybox.io"
+
+
+# ── Commands submodule ───────────────────────────────────────────────────────
+
+class TestCommands:
+    def test_run_success(self):
+        sb = make_sandbox()
+        mock_exec = Execution(
+            logs=Logs(stdout=["hello", "world"], stderr=[]),
+        )
+        with patch.object(sb, "run_code", return_value=mock_exec) as m:
+            result = sb.commands.run("echo hello")
+        m.assert_called_once_with("echo hello", language="sh", timeout=None)
+        assert result.stdout == "hello\nworld"
+        assert result.stderr == ""
+        assert result.exit_code == 0
+
+    def test_run_with_error(self):
+        sb = make_sandbox()
+        mock_exec = Execution(
+            logs=Logs(stdout=[], stderr=["error msg"]),
+            error=ExecutionError("ShellError", "command failed"),
+        )
+        with patch.object(sb, "run_code", return_value=mock_exec):
+            result = sb.commands.run("false")
+        assert result.exit_code == 1
+        assert result.stderr == "error msg"
+
+    def test_run_with_timeout(self):
+        sb = make_sandbox()
+        mock_exec = Execution(logs=Logs(stdout=["ok"], stderr=[]))
+        with patch.object(sb, "run_code", return_value=mock_exec) as m:
+            sb.commands.run("sleep 1", timeout=5.0)
+        m.assert_called_once_with("sleep 1", language="sh", timeout=5.0)
+
+    def test_commands_property_returns_commands_instance(self):
+        sb = make_sandbox()
+        assert isinstance(sb.commands, Commands)
+
+    def test_commands_result_is_dataclass(self):
+        result = CommandResult(stdout="out", stderr="err", exit_code=0)
+        assert result.stdout == "out"
+        assert result.stderr == "err"
+        assert result.exit_code == 0
+
+
+# ── Filesystem submodule ──────────────────────────────────────────────────────
+
+class TestFilesystem:
+    def test_read_success(self):
+        sb = make_sandbox()
+        mock_exec = Execution(results=[Result(text="file content", is_main_result=True)])
+        with patch.object(sb, "run_code", return_value=mock_exec) as m:
+            content = sb.files.read("/tmp/foo.txt")
+        m.assert_called_once_with("open('/tmp/foo.txt').read()")
+        assert content == "file content"
+
+    def test_read_returns_empty_string_when_no_text(self):
+        sb = make_sandbox()
+        mock_exec = Execution()  # no results, text is None
+        with patch.object(sb, "run_code", return_value=mock_exec):
+            content = sb.files.read("/tmp/empty.txt")
+        assert content == ""
+
+    def test_read_raises_on_error(self):
+        sb = make_sandbox()
+        mock_exec = Execution(
+            error=ExecutionError("FileNotFoundError", "No such file or directory"),
+        )
+        with patch.object(sb, "run_code", return_value=mock_exec):
+            with pytest.raises(IOError, match="Failed to read"):
+                sb.files.read("/tmp/missing.txt")
+
+    def test_files_property_returns_filesystem_instance(self):
+        sb = make_sandbox()
+        assert isinstance(sb.files, Filesystem)
+
+
+# ── TestCreate: allow_internet_access and network params ──────────────────────
+
+class TestCreateNetworkParams:
+    def test_create_allow_internet_access_false(self):
+        with patch("requests.Session.post",
+                   return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(allow_internet_access=False, config=make_config())
+        body = m.call_args[1]["json"]
+        assert body["allowInternetAccess"] is False
+
+    def test_create_allow_internet_access_true_not_in_payload(self):
+        """When allow_internet_access=True (default), key is NOT sent."""
+        with patch("requests.Session.post",
+                   return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(config=make_config())
+        body = m.call_args[1]["json"]
+        assert "allowInternetAccess" not in body
+
+    def test_create_network_allow_out(self):
+        with patch("requests.Session.post",
+                   return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                network={"allow_out": ["8.8.8.8/32"]},
+                config=make_config(),
+            )
+        body = m.call_args[1]["json"]
+        assert "network" in body
+        assert body["network"]["allowOut"] == ["8.8.8.8/32"]
+
+    def test_create_network_deny_out(self):
+        with patch("requests.Session.post",
+                   return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                network={"deny_out": ["0.0.0.0/0"]},
+                config=make_config(),
+            )
+        body = m.call_args[1]["json"]
+        assert body["network"]["denyOut"] == ["0.0.0.0/0"]
+
+    def test_create_network_both_allow_and_deny(self):
+        with patch("requests.Session.post",
+                   return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                network={"allow_out": ["1.2.3.4/32"], "deny_out": ["0.0.0.0/0"]},
+                config=make_config(),
+            )
+        body = m.call_args[1]["json"]
+        assert body["network"]["allowOut"] == ["1.2.3.4/32"]
+        assert body["network"]["denyOut"] == ["0.0.0.0/0"]
+
+    def test_create_network_empty_dict_not_in_payload(self):
+        """network={} with no recognized keys → no 'network' key sent."""
+        with patch("requests.Session.post",
+                   return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network={}, config=make_config())
+        body = m.call_args[1]["json"]
+        assert "network" not in body
+
+    def test_create_combined_no_internet_and_network(self):
+        with patch("requests.Session.post",
+                   return_value=mock_resp(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                allow_internet_access=False,
+                network={"allow_out": ["10.0.0.1/32"]},
+                config=make_config(),
+            )
+        body = m.call_args[1]["json"]
+        assert body["allowInternetAccess"] is False
+        assert body["network"]["allowOut"] == ["10.0.0.1/32"]
+
+
+# ── CommandResult in __init__ exports ─────────────────────────────────────────
+
+class TestExports:
+    def test_command_result_importable_from_package(self):
+        from cubesandbox import CommandResult  # noqa: F401
+        assert CommandResult is not None
+
+    def test_command_result_in_all(self):
+        import cubesandbox
+        assert "CommandResult" in cubesandbox.__all__

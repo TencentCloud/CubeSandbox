@@ -8,9 +8,11 @@ from typing import Any, Callable, Dict
 import httpx
 import requests
 
+from ._commands import CommandResult, Commands
 from ._config import Config
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
-from ._models import Context, Execution, ExecutionError, OutputMessage, Result
+from ._filesystem import Filesystem
+from ._models import Execution, ExecutionError, OutputMessage, Result
 from ._stream import _parse_line
 from ._transport import build_client
 
@@ -45,9 +47,11 @@ class Sandbox:
 
     def __init__(self, data: dict, config: Config) -> None:
         self._data = data
-        self._config = config
+        self._config = config or Config()
         self._session = self._build_session()
         self._client: httpx.Client | None = None
+        self._commands = Commands(self)
+        self._files = Filesystem(self)
 
     # ── properties ───────────────────────────────────────────────────
 
@@ -70,6 +74,14 @@ class Sandbox:
         """
         return f"{port}-{self.sandbox_id}.{self.domain}"
 
+    @property
+    def commands(self) -> "Commands":
+        return self._commands
+
+    @property
+    def files(self) -> "Filesystem":
+        return self._files
+
     # ── factory methods ───────────────────────────────────────────────
 
     @classmethod
@@ -80,6 +92,8 @@ class Sandbox:
         timeout: int | None = None,
         env_vars: Dict[str, str] | None = None,
         metadata: Dict[str, str] | None = None,
+        allow_internet_access: bool = True,
+        network: Dict[str, Any] | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> "Sandbox":
@@ -109,6 +123,16 @@ class Sandbox:
             payload["envVars"] = env_vars
         if metadata:
             payload["metadata"] = metadata
+        if not allow_internet_access:
+            payload["allowInternetAccess"] = False
+        if network:
+            net: dict = {}
+            if "allow_out" in network:
+                net["allowOut"] = network["allow_out"]
+            if "deny_out" in network:
+                net["denyOut"] = network["deny_out"]
+            if net:
+                payload["network"] = net
         payload.update(kwargs)
 
         s = requests.Session()
@@ -196,65 +220,6 @@ class Sandbox:
         _check_response(resp)
         return resp.json()
 
-    # ── context management ────────────────────────────────────────────
-
-    def create_context(
-        self,
-        *,
-        language: str = "python",
-        cwd: str = "/home/user",
-    ) -> "Context":
-        """POST /contexts — Create a new kernel context on the sandbox.
-
-        .. warning::
-            The server-side ``/contexts`` API is **not yet implemented**.
-            Calling this method will raise :class:`ApiError` (HTTP 404).
-            Use plain :meth:`run_code` calls instead — variables persist
-            for the lifetime of the sandbox without a context object.
-
-        Args:
-            language: Kernel language (default ``"python"``).  
-            cwd: Working directory for the context.
-
-        Returns:
-            A :class:`Context` with the server-assigned ``id``.
-
-        Raises:
-            ApiError: Always raises until the server implements ``/contexts``.
-        """
-        if self._client is None:
-            self._client = build_client(self._config)
-        url = f"http://{self.get_host(JUPYTER_PORT)}/contexts"
-        resp = self._client.post(
-            url,
-            json={"language": language, "cwd": cwd},
-            headers={"Content-Type": "application/json"},
-        )
-        if resp.status_code >= 400:
-            raise ApiError(f"create_context failed: HTTP {resp.status_code}", resp.status_code)
-        data = resp.json()
-        return Context(id=data["id"], language=data["language"], cwd=data["cwd"])
-
-    def delete_context(self, context: "Context") -> None:
-        """DELETE /contexts/:id — Delete a kernel context from the sandbox.
-
-        .. warning::
-            The server-side ``/contexts`` API is **not yet implemented**.
-            This method will raise :class:`ApiError` (HTTP 404).
-
-        Args:
-            context: The :class:`Context` to delete.
-
-        Raises:
-            ApiError: Always raises until the server implements ``/contexts``.
-        """
-        if self._client is None:
-            self._client = build_client(self._config)
-        url = f"http://{self.get_host(JUPYTER_PORT)}/contexts/{context.id}"
-        resp = self._client.delete(url)
-        if resp.status_code >= 400:
-            raise ApiError(f"delete_context failed: HTTP {resp.status_code}", resp.status_code)
-
     # ── code execution ────────────────────────────────────────────────
 
     def run_code(
@@ -262,7 +227,6 @@ class Sandbox:
         code: str,
         *,
         language: str | None = None,
-        context: Context | None = None,
         on_stdout: Callable[[OutputMessage], None] | None = None,
         on_stderr: Callable[[OutputMessage], None] | None = None,
         on_result: Callable[[Result], None] | None = None,
@@ -279,7 +243,6 @@ class Sandbox:
         Args:
             code: Python code to execute.
             language: Kernel language override (default: ``"python"``).
-            context: **Not yet implemented.** Reserved for future use;
                 pass ``None`` (or omit) to use the sandbox's global namespace.
             on_stdout: Callback invoked for each stdout event.
             on_stderr: Callback invoked for each stderr event.
@@ -300,7 +263,6 @@ class Sandbox:
         url = f"http://{self.get_host(JUPYTER_PORT)}/execute"
         payload = {
             "code": code,
-            "context_id": context.id if context else None,
             "language": language,
             "env_vars": envs,
         }
