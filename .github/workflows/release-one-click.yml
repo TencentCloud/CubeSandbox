@@ -26,7 +26,7 @@ env:
 jobs:
   build_pvm_guest_vmlinux:
     name: Build PVM guest vmlinux for release
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set-16c32g
 
     steps:
       - name: Checkout
@@ -101,7 +101,7 @@ jobs:
           retention-days: 14
 
   release:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set-16c32g
     needs: build_pvm_guest_vmlinux
 
     steps:
