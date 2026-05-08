@@ -1,0 +1,17 @@
+name: Actions Runner Controller Demo
+on:
+  workflow_dispatch:
+
+jobs:
+  Explore-GitHub-Actions:
+    # You need to use the INSTALLATION_NAME from the previous step
+    runs-on: arc-runner-set
+    steps:
+    - run: |
+        echo "🎉 This job uses runner scale set runners!"
+        echo
+        echo "== lscpu =="
+        lscpu
+        echo
+        echo "== uname -r =="
+        uname -r
