@@ -48,13 +48,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 	opts.SandboxID = utils.GenerateID()
 
 	if opts.IsCreateSnapshot() {
-
-		templateID, ok := opts.GetSnapshotTemplateID()
-		if !ok {
-			return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "cube.master.appsnapshot.template.id should provide")
-		}
-
-		opts.SandboxID = templateID + "_" + "0"
+		opts.SandboxID = utils.GenerateID() + "_snapshot"
 	}
 	return nil
 }

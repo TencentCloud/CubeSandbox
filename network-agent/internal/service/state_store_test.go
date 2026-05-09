@@ -4,7 +4,54 @@
 
 package service
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestStateStorePath(t *testing.T) {
+	store, err := newStateStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("newStateStore error=%v", err)
+	}
+
+	tests := []struct {
+		name      string
+		sandboxID string
+		wantErr   bool
+	}{
+		{name: "valid simple id", sandboxID: "sb-1", wantErr: false},
+		{name: "valid uuid", sandboxID: "a1b2c3d4e5f6", wantErr: false},
+		{name: "valid snapshot id", sandboxID: "a1b2c3d4e5f6_snapshot", wantErr: false},
+		{name: "empty string", sandboxID: "", wantErr: true},
+		{name: "contains dot", sandboxID: "sb.1", wantErr: true},
+		{name: "forward slash", sandboxID: "a/b", wantErr: true},
+		{name: "backslash", sandboxID: "a\\b", wantErr: true},
+		{name: "dot prefix", sandboxID: ".hidden", wantErr: true},
+		{name: "double dot traversal", sandboxID: "..", wantErr: true},
+		{name: "oci image name", sandboxID: "registry.example.com/path/image:tag", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := store.path(tt.sandboxID)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("path(%q) = %q, want error", tt.sandboxID, p)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("path(%q) unexpected error: %v", tt.sandboxID, err)
+				return
+			}
+			want := filepath.Join(store.dir, tt.sandboxID+".json")
+			if p != want {
+				t.Errorf("path(%q) = %q, want %q", tt.sandboxID, p, want)
+			}
+		})
+	}
+}
 
 func TestStateStoreSaveLoadDelete(t *testing.T) {
 	store, err := newStateStore(t.TempDir())
