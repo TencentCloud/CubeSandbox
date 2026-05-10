@@ -26,7 +26,8 @@
   <a href="./README_zh.md"><strong>中文文档</strong></a> ·
   <a href="./docs/guide/quickstart.md"><strong>Quick Start</strong></a> ·
   <a href="./docs/index.md"><strong>Documentation</strong></a> ·
-  <a href="./docs/changelog.md"><strong>Changelog</strong></a>
+  <a href="./docs/changelog.md"><strong>Changelog</strong></a> ·
+  <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a>
 </p>
 
 ---
