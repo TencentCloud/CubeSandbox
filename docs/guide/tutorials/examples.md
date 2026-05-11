@@ -10,6 +10,7 @@ Hands-on examples demonstrating various Cube Sandbox use cases. Each example is 
 | [SWE-bench with mini-swe-agent](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/mini-rl-training) | Automate SWE-bench coding tasks in isolated sandboxes using cube-sandbox + mini-swe-agent, with multi-model support and RL training vision. |
 | [OpenAI Agents SDK Integration](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/openai-agents-example) | Wire OpenAI Agents SDK's `E2BSandboxClient` to Cube Sandbox. Ships a minimal Shell Agent with Pause/Resume and a full SWE-bench Django debugging agent with streaming + tracing. |
 | [OpenAI Agents + Code Interpreter](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/openai-agents-code-interpreter) | Data-analysis Agent running pandas / matplotlib inside a Cube Sandbox. Provides two variants: generic E2B write+exec and Jupyter-kernel Code Interpreter with cross-turn state and auto image capture. |
+| [cube-bench](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/cube-bench) | CLI benchmark tool written in Go that measures sandbox creation/deletion latency at configurable concurrency levels. Features a real-time TUI dashboard (Bubbletea/Lipgloss), percentile report (P50/P95/P99), and JSON export. |
 
 ::: tip
 All examples share the same environment variable conventions (`E2B_API_URL`, `E2B_API_KEY`, `CUBE_TEMPLATE_ID`). See the [Quick Start](../quickstart) guide to set up your Cube Sandbox deployment first.

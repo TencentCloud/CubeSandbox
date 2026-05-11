@@ -1,4 +1,4 @@
-module github.com/tencentcloud/CubeSandbox/CubeAPI/benchmark
+module github.com/tencentcloud/CubeSandbox/examples/cube-bench
 
 go 1.25.0
 
