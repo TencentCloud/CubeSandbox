@@ -10,11 +10,12 @@ import { ThemeProvider } from '@/components/ThemeProvider';
 import OverviewPage from '@/pages/Overview';
 import SandboxesPage from '@/pages/Sandboxes';
 import SandboxDetailPage from '@/pages/SandboxDetail';
+import SandboxNewPage from '@/pages/SandboxNew';
 import TemplatesPage from '@/pages/Templates';
 import NodesPage from '@/pages/Nodes';
 import KeysPage from '@/pages/Keys';
 import { Placeholder } from '@/pages/Placeholder';
-import { Network, Activity, Settings, Package, Plus } from 'lucide-react';
+import { Network, Activity, Settings, Package } from 'lucide-react';
 
 import './styles/globals.css';
 import '@/i18n';
@@ -35,10 +36,7 @@ const App = () => (
             <Route element={<AppShell />}>
               <Route path="/" element={<OverviewPage />} />
               <Route path="/sandboxes" element={<SandboxesPage />} />
-              <Route
-                path="/sandboxes/new"
-                element={<Placeholder titleKey="newSandbox.title" descriptionKey="newSandbox.description" icon={Plus} />}
-              />
+              <Route path="/sandboxes/new" element={<SandboxNewPage />} />
               <Route path="/sandboxes/:sandboxID" element={<SandboxDetailPage />} />
               <Route path="/templates" element={<TemplatesPage />} />
               <Route
