@@ -79,48 +79,28 @@ function ProgressBar({ value }: { value: number }) {
 
 // ── build log viewer ─────────────────────────────────────────────────────────
 
-interface BuildLog {
-  timestamp: string;
-  level: string;
-  message: string;
-}
-
-const LOG_LEVEL_CLASS: Record<string, string> = {
-  debug: 'text-muted-foreground',
-  info:  'text-cube-cyan',
-  warn:  'text-cube-amber',
-  error: 'text-cube-rose',
-};
-
 function LogViewer({ templateID, buildID }: { templateID: string; buildID: string }) {
   const bottomRef = useRef<HTMLDivElement>(null);
-  const { data: logs = [], isLoading } = useQuery({
+  const { data: logsData, isLoading } = useQuery({
     queryKey: ['template-build-logs', templateID, buildID],
     queryFn: () => templateApi.getBuildLogs(templateID, buildID),
     refetchInterval: 2000,
   });
+  const lines = logsData?.lines ?? [];
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
+  }, [lines]);
 
   if (isLoading) return <Skeleton className="h-40 w-full" />;
 
   return (
     <div className="rounded-md bg-muted/50 border p-3 font-mono text-xs overflow-y-auto max-h-72 space-y-0.5">
-      {logs.length === 0 && (
+      {lines.length === 0 && (
         <span className="text-muted-foreground">No logs yet…</span>
       )}
-      {(logs as BuildLog[]).map((l, i) => (
-        <div key={i} className="flex gap-2">
-          <span className="text-muted-foreground shrink-0">
-            {new Date(l.timestamp).toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 })}
-          </span>
-          <span className={cn('shrink-0 w-10', LOG_LEVEL_CLASS[l.level?.toLowerCase()] ?? 'text-muted-foreground')}>
-            {l.level?.toUpperCase()}
-          </span>
-          <span className="break-all">{l.message}</span>
-        </div>
+      {lines.map((line, i) => (
+        <div key={i} className="break-all">{line}</div>
       ))}
       <div ref={bottomRef} />
     </div>

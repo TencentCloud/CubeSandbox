@@ -167,7 +167,7 @@ export const templateApi = {
   getBuildStatus: (id: string, buildID: string) =>
     api<unknown>(`/templates/${id}/builds/${buildID}/status`),
   getBuildLogs: (id: string, buildID: string) =>
-    api<unknown[]>(`/templates/${id}/builds/${buildID}/logs`),
+    api<{ lines?: string[]; status?: string; progress?: number }>(`/templates/${id}/builds/${buildID}/logs`),
   remove: (id: string) => api<void>(`/templates/${id}`, { method: 'DELETE' }),
 };
 
