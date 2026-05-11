@@ -20,7 +20,8 @@
     "phase": "Phase",
     "artifactID": "Artifact ID",
     "snapshotPath": "Snapshot Path",
-    "lastJob": "Last Job"
+    "lastJob": "Last Job",
+    "lastError": "Last Error"
   },
   "status": {
     "ready": "Ready",

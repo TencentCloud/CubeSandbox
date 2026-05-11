@@ -320,6 +320,12 @@ export default function TemplateDetailPage() {
           <Field label={t('fields.instanceType')} value={data.instanceType ?? '—'} />
           <Field label={t('fields.version')} value={data.version ?? '—'} />
         </div>
+        {data.lastError && (
+          <div className="mt-4 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+            <p className="text-[11px] uppercase tracking-wider text-destructive mb-1">{t('fields.lastError')}</p>
+            <p className="font-mono text-xs break-all text-destructive/80">{data.lastError}</p>
+          </div>
+        )}
       </Section>
 
       {/* replicas */}

@@ -20,7 +20,8 @@
     "phase": "阶段",
     "artifactID": "Artifact ID",
     "snapshotPath": "快照路径",
-    "lastJob": "最近任务"
+    "lastJob": "最近任务",
+    "lastError": "错误信息"
   },
   "status": {
     "ready": "就绪",
