@@ -125,48 +125,59 @@ GET  /cubeapi/v1/templates        （获取模板列表）
 POST /cubeapi/v1/sandboxes        （创建沙箱）
 ```
 
-### 注意事项
-- `timeout` 字段由 CubeAPI 透传至 CubeMaster 的 `CreateSandboxRequest.timeout`，**真实生效**，填 0 表示永不自动超时
-- Mock handler 中 `createSandbox()` 会把新建的假沙箱追加到内存列表，支持后续列表页展示
+---
+
+
 
 ---
 
-## ④ 修复模板状态大小写不匹配
+## ⑥ 修复沙箱列表启动时间显示错误
 
 **日期**：2026-05-11
 **状态**：✅ 完成
 
 ### 改动文件
-- `web/src/pages/SandboxNew.tsx`
-- `web/src/pages/Templates.tsx`
-- `web/src/pages/Overview.tsx`
+- `CubeAPI/src/cubemaster/mod.rs`
+- `CubeAPI/src/services/sandboxes.rs`
 
-### 做了什么
+### 问题描述
+沙箱列表页所有沙箱的「启动时间」均显示「1秒钟前」，实际上各沙箱应有不同的创建时间。
 
-后端（CubeMaster）返回的模板 status 为全大写（`READY` / `FAILED` / `BUILDING`），而前端三处均使用小写字符串字面量直接比较，导致：
+### 根因分析
+CubeMaster `/cube/sandbox/list` 接口返回的 `SandboxBriefData` 中，`started_at` 字段为空（`None`）。CubeAPI 在 `from_cubemaster_info` 中处理时：
 
-- `SandboxNew` 页：所有模板均为 disabled，无法选择
-- `Templates` 列表页：状态 Badge 全部显示为 err（红色）
-- `Overview` 页：同上
-
-**修复方式**：比较前统一调用 `.toLowerCase()`
-
-```diff
-- tpl.status === ready
-+ tpl.status.toLowerCase() === ready
+```rust
+started_at: s.started_at.unwrap_or(now),  // started_at 为 None，fallback 成当前时间
 ```
 
----
+导致每次调用 list 接口，所有沙箱的 `startedAt` 都被设置为「当前时间」。
 
-## ⑤ Vite 升级至 6.4.2
+### 修复方案
+CubeMaster list 接口的 `SandboxBriefData` 中实际有 `create_at` 字段（Unix 纳秒，来自 Cubelet container），但 CubeAPI 侧未读取。
 
-**日期**：2026-05-11
-**状态**：✅ 完成
+**修改 `cubemaster/mod.rs`**：
+- `SandboxInfo` 结构体新增 `create_at: i64` 字段，接收 CubeMaster 返回的 Unix 纳秒时间戳
+- 将 `datetime_from_unix_nanos` 函数改为 `pub(crate)` 供其他模块使用
 
-### 改动文件
-- `web/package.json`
-- `web/package-lock.json`
+**修改 `services/sandboxes.rs`**：
+- `from_cubemaster_info` 中改为三级 fallback：
+  1. `started_at`（显式字段，优先）
+  2. `datetime_from_unix_nanos(create_at)`（Cubelet 容器创建时间）
+  3. `now`（兜底，理论上不会走到这里）
 
-### 做了什么
-将 Vite 从 `5.4.17` 升级到 `6.4.2`（大版本升级）。升级后页面功能正常，无兼容性问题。
+```rust
+let started_at = s.started_at
+    .or_else(|| datetime_from_unix_nanos(s.create_at))
+    .unwrap_or(now);
+```
+
+### 验证
+修复后与 `cubemastercli list` 输出对比，时间完全一致（UTC 与北京时间差 8 小时）：
+
+| sandbox_id | cubemastercli create_at | API startedAt |
+|---|---|---|
+| 8143aD3d | 2026-05-08 15:25:25 | 2026-05-08T07:25:25Z ✅ |
+| dA68B3eE | 2026-05-08 15:27:27 | 2026-05-08T07:27:27Z ✅ |
+| 6D6a013A | 2026-05-08 15:30:55 | 2026-05-08T07:30:54Z ✅ |
+| 5AC42Cd3 | 2026-05-11 14:39:00 | 2026-05-11T06:39:00Z ✅ |
 
