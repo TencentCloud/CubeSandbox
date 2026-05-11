@@ -4,16 +4,11 @@
   "section": {
     "template": "Choose template",
     "templateDesc": "Only templates with status ready are selectable.",
-    "resources": "Timeout",
-    "resourcesDesc": "The sandbox will be automatically destroyed after this duration with no active connections. Set to 0 to disable auto-timeout.",
     "metadata": "Metadata",
     "metadataDesc": "Custom key-value pairs attached to the sandbox for identification and filtering."
   },
   "form": {
     "templateRequired": "Select a template to continue.",
-    "timeout": "Timeout",
-    "seconds": "seconds",
-    "timeoutHint": "0 means no automatic timeout.",
     "alias": "Alias (optional)",
     "aliasPlaceholder": "e.g. my-dev-sandbox",
     "autoPause": "Auto-pause on idle",

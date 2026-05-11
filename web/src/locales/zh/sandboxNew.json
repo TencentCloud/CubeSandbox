@@ -4,16 +4,11 @@
   "section": {
     "template": "选择模板",
     "templateDesc": "仅显示状态为 ready 的模板可供选择。",
-    "resources": "超时时间",
-    "resourcesDesc": "沙箱在无活动连接后经过此时间将自动销毁，设为 0 表示永不自动超时。",
     "metadata": "元数据",
     "metadataDesc": "附加到沙箱的自定义键值对，可用于标识和过滤。"
   },
   "form": {
     "templateRequired": "请选择一个模板以继续。",
-    "timeout": "超时时间",
-    "seconds": "秒",
-    "timeoutHint": "0 表示不自动超时。",
     "alias": "别名（可选）",
     "aliasPlaceholder": "如 my-dev-sandbox",
     "autoPause": "空闲自动暂停",

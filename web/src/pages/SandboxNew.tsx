@@ -19,13 +19,11 @@ interface MetaEntry { key: string; value: string }
 
 interface FormState {
   templateID: string;
-  timeout: string;       // seconds, string for input
   meta: MetaEntry[];
 }
 
 const DEFAULT_FORM: FormState = {
   templateID: '',
-  timeout: '300',
   meta: [],
 };
 
@@ -178,7 +176,6 @@ export default function SandboxNewPage() {
       });
       return sandboxApi.create({
         templateID: form.templateID,
-        timeout: Number(form.timeout) || 300,
         metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       });
     },
@@ -215,26 +212,7 @@ export default function SandboxNewPage() {
         )}
       </Section>
 
-      {/* Resources */}
-      <Section title={t('section.resources')} description={t('section.resourcesDesc')}>
-        <div>
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <Input
-                type="number"
-                min={0}
-                value={form.timeout}
-                onChange={(e) => set('timeout', e.target.value)}
-                className="w-36"
-              />
-              <span className="text-sm text-muted-foreground">{t('form.seconds')}</span>
-            </div>
-            <p className="text-[11px] text-muted-foreground">{t('form.timeoutHint')}</p>
-          </div>
 
-        </div>
-
-      </Section>
 
       {/* Metadata */}
       <Section title={t('section.metadata')} description={t('section.metadataDesc')}>
