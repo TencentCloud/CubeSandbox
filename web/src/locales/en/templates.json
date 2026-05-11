@@ -18,7 +18,7 @@
     "cancel": "Cancel",
     "submit": "Create",
     "creating": "Creating…",
-    "error": "Failed to create template. Please try again.",
+    "error": "Failed to create template.",
     "writableLayerSize": "writable-layer-size",
     "writableLayerSizeHint": "e.g. 1G, 2G",
     "exposedPorts": "expose-port",
