@@ -1,25 +1,130 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { templateApi } from '@/api/client';
-import { Card, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Package } from 'lucide-react';
+import { Package, Plus, X } from 'lucide-react';
 import { formatRelative } from '@/lib/utils';
+
+// ── create template modal ────────────────────────────────────────────────────
+
+interface CreateModalProps {
+  onClose: () => void;
+}
+
+function CreateTemplateModal({ onClose }: CreateModalProps) {
+  const { t } = useTranslation('templates');
+  const qc = useQueryClient();
+  const [templateID, setTemplateID] = useState('');
+  const [image, setImage] = useState('');
+  const [instanceType, setInstanceType] = useState('');
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      templateApi.create({
+        templateID,
+        image,
+        instanceType: instanceType.trim() || undefined,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['templates'] });
+      onClose();
+    },
+  });
+
+  const valid = templateID.trim().length > 0 && image.trim().length > 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <Card className="w-full max-w-md shadow-xl">
+        <CardHeader className="flex flex-row items-center justify-between pb-3">
+          <CardTitle className="text-base">{t('create.title')}</CardTitle>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+            <X className="h-4 w-4" />
+          </button>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              {t('create.templateID')} <span className="text-destructive">*</span>
+            </label>
+            <Input
+              placeholder="tpl-xxxxxxxx"
+              value={templateID}
+              onChange={(e) => setTemplateID(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              {t('create.image')} <span className="text-destructive">*</span>
+            </label>
+            <Input
+              placeholder="registry.example.com/image:tag"
+              value={image}
+              onChange={(e) => setImage(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              {t('create.instanceType')}
+            </label>
+            <Input
+              placeholder={t('instanceDefault')}
+              value={instanceType}
+              onChange={(e) => setInstanceType(e.target.value)}
+            />
+          </div>
+
+          {mutation.isError && (
+            <p className="text-xs text-destructive">
+              {(mutation.error as Error)?.message ?? t('create.error')}
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" size="sm" onClick={onClose}>
+              {t('create.cancel')}
+            </Button>
+            <Button
+              size="sm"
+              disabled={!valid || mutation.isPending}
+              onClick={() => mutation.mutate()}
+            >
+              {mutation.isPending ? t('create.creating') : t('create.submit')}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ── main page ────────────────────────────────────────────────────────────────
 
 export default function TemplatesPage() {
   const { data, isLoading } = useQuery({ queryKey: ['templates'], queryFn: templateApi.list });
   const { t } = useTranslation('templates');
+  const [showCreate, setShowCreate] = useState(false);
 
   return (
     <div className="animate-fade-in space-y-5">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">{t('title')}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{t('subtitle')}</p>
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('title')}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{t('subtitle')}</p>
+        </div>
+        <Button size="sm" onClick={() => setShowCreate(true)}>
+          <Plus className="mr-1.5 h-4 w-4" />
+          {t('create.button')}
+        </Button>
       </header>
 
       {isLoading && (
@@ -74,6 +179,8 @@ export default function TemplatesPage() {
           </Link>
         ))}
       </div>
+
+      {showCreate && <CreateTemplateModal onClose={() => setShowCreate(false)} />}
     </div>
   );
 }

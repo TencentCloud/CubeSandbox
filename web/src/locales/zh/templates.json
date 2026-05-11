@@ -8,5 +8,16 @@
     "version": "版本",
     "image": "镜像"
   },
-  "instanceDefault": "标准"
+  "instanceDefault": "标准",
+  "create": {
+    "button": "+ 新建模板",
+    "title": "新建模板",
+    "templateID": "模板 ID",
+    "image": "镜像",
+    "instanceType": "实例类型（可选）",
+    "cancel": "取消",
+    "submit": "创建",
+    "creating": "创建中…",
+    "error": "创建失败，请重试。"
+  }
 }

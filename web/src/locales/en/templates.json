@@ -8,5 +8,16 @@
     "version": "version",
     "image": "image"
   },
-  "instanceDefault": "standard"
+  "instanceDefault": "standard",
+  "create": {
+    "button": "+ New Template",
+    "title": "New Template",
+    "templateID": "Template ID",
+    "image": "Image",
+    "instanceType": "Instance Type (optional)",
+    "cancel": "Cancel",
+    "submit": "Create",
+    "creating": "Creating…",
+    "error": "Failed to create template. Please try again."
+  }
 }
