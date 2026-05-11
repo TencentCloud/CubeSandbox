@@ -145,7 +145,7 @@ impl TemplateService {
             request_id: new_request_id(),
             instance_type: body.instance_type.unwrap_or_else(|| self.instance_type.clone()),
             template_id: body.template_id,
-            source_image_ref: body.image,
+            source_image_ref: body.image.trim().to_string(),
             writable_layer_size: body.writable_layer_size,
             exposed_ports: body.exposed_ports,
             container_overrides,

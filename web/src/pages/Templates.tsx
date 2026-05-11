@@ -88,7 +88,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
             <Input
               placeholder="registry.example.com/image:tag"
               value={image}
-              onChange={(e) => setImage(e.target.value)}
+              onChange={(e) => setImage(e.target.value.trim())}
             />
           </div>
           <div className="space-y-1.5">
