@@ -118,7 +118,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               {t('create.exposedPorts')} <span className="text-destructive">*</span>
             </label>
             <Input
-              placeholder="9000"
+              placeholder="49983"
               value={exposedPorts}
               onChange={(e) => { setExposedPorts(e.target.value); const first = e.target.value.split(',')[0].trim(); if (first) setProbePort(first); }}
             />
@@ -130,7 +130,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
                 {t('create.probePort')}
               </label>
               <Input
-                placeholder="9000"
+                placeholder="49983"
                 value={probePort}
                 onChange={(e) => setProbePort(e.target.value)}
               />
