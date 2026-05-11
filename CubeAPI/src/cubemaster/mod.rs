@@ -746,6 +746,9 @@ pub struct SandboxInfo {
     pub status: String,
     #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
+    /// Unix nanoseconds from Cubelet container.created_at — used as fallback for started_at
+    #[serde(default)]
+    pub create_at: i64,
     #[serde(default)]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default, alias = "cpuCount")]
@@ -849,7 +852,7 @@ fn parse_mem_mb(s: &str) -> i32 {
     s.parse::<i32>().unwrap_or(0)
 }
 
-fn datetime_from_unix_nanos(value: i64) -> Option<DateTime<Utc>> {
+pub(crate) fn datetime_from_unix_nanos(value: i64) -> Option<DateTime<Utc>> {
     if value <= 0 {
         return None;
     }
@@ -867,11 +870,13 @@ enum SandboxStatusValue {
 }
 
 fn sandbox_status_text_from_code(number: i32) -> &'static str {
+    // CubeMaster CONTAINER_* status codes:
+    // 0=CREATED, 1=RUNNING, 2=EXITED/STOPPED, 3=UNKNOWN, 4=PAUSING, 5=PAUSED
     match number {
         1 => "running",
-        2 => "paused",
-        3 => "stopped",
-        4 => "error",
+        2 => "stopped",
+        4 => "pausing",
+        5 => "paused",
         _ => "unknown",
     }
 }
@@ -1039,44 +1044,34 @@ pub struct SandboxRefreshResponse {
 }
 
 // ─── Sandbox logs ──────────────────────────────────────────────────────────
-// ❌ New API — not yet implemented on CubeMaster
+// ✅ Implemented: POST /cube/sandbox/logs
 
 #[derive(Debug, Serialize)]
 pub struct SandboxLogsRequest {
-    #[serde(rename = "RequestID", alias = "requestID")]
-    pub request_id: String,
     #[serde(rename = "sandboxID")]
     pub sandbox_id: String,
-    #[serde(rename = "instanceType")]
-    pub instance_type: String,
-    /// Unix-millisecond cursor — only return logs after this timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub start: Option<i64>,
-    /// Max log lines to return (default 1000, max 5000).
+    pub cursor: Option<i64>,
     pub limit: i32,
-    /// "stdout" | "stderr" | "all"
-    pub source: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct SandboxLogsResponse {
-    #[serde(rename = "RequestID", alias = "requestID")]
-    pub request_id: String,
+    pub ret: RetCode,
     #[serde(default)]
     pub logs: Vec<SandboxLogLine>,
+    #[serde(rename = "nextCursor", default)]
     pub next_cursor: Option<i64>,
-    #[serde(default)]
+    #[serde(rename = "hasMore", default)]
     pub has_more: bool,
-    pub ret: RetCode,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SandboxLogLine {
     pub timestamp: DateTime<Utc>,
-    pub line: String,
+    pub message: String,
     #[serde(default)]
-    pub source: String, // "stdout" | "stderr"
+    pub level: String,
 }
 
 // ─── Sandbox snapshot ──────────────────────────────────────────────────────
