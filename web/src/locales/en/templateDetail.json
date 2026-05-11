@@ -48,5 +48,6 @@
   },
   "empty": {
     "replicas": "No replica info available."
-  }
+  },
+  "building": "Template is being built. Please refresh in a moment."
 }

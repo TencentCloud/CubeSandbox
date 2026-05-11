@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { templateApi } from '@/api/client';
+import { ApiError } from '@/lib/api';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -174,7 +175,7 @@ export default function TemplateDetailPage() {
   const [showLogs, setShowLogs] = useState(false);
 
   // ── fetch template detail ──
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['template', templateID],
     queryFn: () => templateApi.get(templateID!),
     enabled: !!templateID,
@@ -227,13 +228,25 @@ export default function TemplateDetailPage() {
     );
   }
 
+  // Check if it's a 404 (template still building / not indexed yet)
+  const is404 = isError && error instanceof ApiError && error.status === 404;
+
   if (isError || !data) {
     return (
       <div className="p-6">
         <Link to="/templates" className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-4">
           <ArrowLeft className="h-4 w-4" /> {t('backToTemplates')}
         </Link>
-        <p className="text-sm text-muted-foreground">{t('notFound')}</p>
+        {is404 ? (
+          <div className="space-y-2">
+            <p className="text-sm text-muted-foreground">{t('building')}</p>
+            <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
+              刷新
+            </Button>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">{t('notFound')}</p>
+        )}
       </div>
     );
   }
