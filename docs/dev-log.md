@@ -184,7 +184,7 @@ let started_at = s.started_at
 
 ---
 
-## ⑦ 模板详情页（/templates/:templateID）
+## ⑤ 模板详情页（/templates/:templateID）
 
 **日期**：2026-05-11
 **状态**：✅ 完成
@@ -208,11 +208,52 @@ let started_at = s.started_at
 | 重建 | 触发 `POST /templates/:id`，返回 jobID 后轮询 build status（2s），进度条 + 构建日志展开 |
 | 删除 | 二次确认后 `DELETE /templates/:id`，成功跳回模板列表 |
 
-### Bug 修复记录
-1. **重建后空白页**：`getBuildLogs` 返回结构为 `{ lines, status, progress }` 对象，而非数组，前端对其 `.map()` 导致崩溃。修复：从 `data.lines` 取字符串数组。
-2. **「危险操作」改名**：Section 标题改为「删除模板」，去掉红色样式。
-3. **「副本分布」改名**：改为「Replicas」。
 
 ### 说明
 - 重建期间模板 `status` 仍为 `READY`（CubeMaster 不切换状态），构建进度通过 jobID 单独轮询，与模板状态无关，属于正常行为。
 
+
+---
+
+## ⑥ 新建模板功能
+
+**日期**：2026-05-11
+**状态**：✅ 完成
+
+### 修改文件
+- `web/src/pages/Templates.tsx`：新增「+ 新建模板」按钮及 Modal 表单
+- `web/src/locales/zh/templates.json`：新增 `create.*` 翻译
+- `web/src/locales/en/templates.json`：新增 `create.*` 翻译
+- `CubeAPI/src/models/mod.rs`：`CreateTemplateRequest` 新增 `writable_layer_size`/`exposed_ports`/`probe_port`/`probe_path`/`cpu`/`memory`/`env`/`allow_internet_access` 字段，`templateID` 改为选填
+- `CubeAPI/src/cubemaster/mod.rs`：`CreateTemplateFromImageReq` 新增 `source_image_ref`（修复原来序列化为 `image` 的字段名不匹配）/`container_overrides`/`cubevs_context`
+- `CubeAPI/src/services/templates.rs`：`create_template` 透传全部字段；probe 默认值 `timeout_ms=30000`/`period_ms=500`/`success_threshold=1`/`failure_threshold=60`；`image` 字段加 `trim()` 防止空格导致构建失败；`templateID` 校验改为选填
+
+### 功能说明
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| image | ✅ | 镜像地址，自动 trim |
+| writable-layer-size | ✅ | 如 `1G` |
+| expose-port | ✅ | 逗号分隔，默认 placeholder `49983` |
+| Template ID | | 不填由 CubeMaster 自动生成 |
+| instance-type | | 选填 |
+| probe | | 随 expose-port 第一个端口自动同步，默认 placeholder `49983` |
+| probe-path | | 默认空，sandbox-code 填 `/health`，sandbox-browser 填 `/cdp/json/version` |
+| CPU (millicores) | | 默认空 |
+| Memory (MiB) | | 默认空 |
+| env | | `KEY=VALUE` 每行一条 |
+| allow-internet-access | | 复选框 |
+
+### Bug 修复
+| # | 问题 | 原因 | 修复 |
+|---|------|------|------|
+| 1 | 创建后立即 FAILED | image 字段含前后空格 | 前端 onChange trim + 后端 trim |
+| 2 | 创建后立即 FAILED | probe 缺少 `timeout_ms`/`period_ms`/`success_threshold`/`failure_threshold`，CubeMaster 默认值为 0 报错 | 后端补充默认值 |
+| 3 | 模板 RUNNING 时点详情显示「模板不存在」 | 构建中 CubeMaster 尚未建立记录，GET 返回 404 | 404 时结合列表缓存状态区分：RUNNING/BUILDING → 「正在构建中」，FAILED → 「构建失败」，其他 → 「不存在」 |
+| 4 | 列表状态 RUNNING Badge 显示异常 | 前端 Badge 未处理 RUNNING 值 | 加 RUNNING 为橙色 warn 分支 |
+| 5 | FAILED 模板详情无错误信息 | `lastError` 字段未展示 | 基础信息卡下方加红色错误框展示 `lastError` |
+
+### 常用镜像参数参考
+| 镜像 | expose-port | probe-path |
+|------|-------------|------------|
+| sandbox-code | 49983 | /health |
+| sandbox-browser | 9000 | /cdp/json/version |
