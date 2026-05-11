@@ -29,7 +29,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
   const [writableLayerSize, setWritableLayerSize] = useState('1G');
   const [exposedPorts, setExposedPorts] = useState('');
   const [probePort, setProbePort] = useState('');
-  const [probePath, setProbePath] = useState('/health');
+  const [probePath, setProbePath] = useState('');
   const [cpu, setCpu] = useState('');
   const [memory, setMemory] = useState('');
   const [envVars, setEnvVars] = useState('');
