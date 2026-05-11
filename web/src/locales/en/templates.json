@@ -13,17 +13,17 @@
     "button": "+ New Template",
     "title": "New Template",
     "templateID": "Template ID",
-    "image": "Image",
-    "instanceType": "Instance Type (optional)",
+    "image": "image",
+    "instanceType": "instance-type",
     "cancel": "Cancel",
     "submit": "Create",
     "creating": "Creating…",
     "error": "Failed to create template. Please try again.",
-    "writableLayerSize": "Writable Layer Size",
-    "writableLayerSizeHint": "Disk quota for the container writable layer, e.g. 1G, 2G.",
-    "exposedPorts": "Exposed Ports",
-    "exposedPortsHint": "Ports the container listens on. Multiple ports separated by commas, e.g. 9000,8080.",
-    "probePort": "Probe Port",
-    "probePath": "Probe Path"
+    "writableLayerSize": "writable-layer-size",
+    "writableLayerSizeHint": "e.g. 1G, 2G",
+    "exposedPorts": "expose-port",
+    "exposedPortsHint": "Multiple ports separated by commas, e.g. 9000,8080.",
+    "probePort": "probe",
+    "probePath": "probe-path"
   }
 }
