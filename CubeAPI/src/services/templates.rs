@@ -83,9 +83,9 @@ impl TemplateService {
         &self,
         body: CreateTemplateRequest,
     ) -> AppResult<TemplateBuildJob> {
-        if body.template_id.trim().is_empty() || body.image.trim().is_empty() {
+        if body.image.trim().is_empty() {
             return Err(AppError::BadRequest(
-                "templateID and image are required".to_string(),
+                "image is required".to_string(),
             ));
         }
 

@@ -401,8 +401,7 @@ pub struct TemplateDetail {
 /// Body for POST /templates (create from image).
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateTemplateRequest {
-    #[serde(rename = "templateID")]
-    #[validate(length(min = 1))]
+    #[serde(rename = "templateID", default)]
     pub template_id: String,
     #[serde(rename = "instanceType", default)]
     pub instance_type: Option<String>,

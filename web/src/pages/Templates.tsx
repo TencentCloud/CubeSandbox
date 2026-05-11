@@ -59,7 +59,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
     },
   });
 
-  const valid = templateID.trim().length > 0 && image.trim().length > 0 && writableLayerSize.trim().length > 0 && exposedPorts.trim().length > 0;
+  const valid = image.trim().length > 0 && writableLayerSize.trim().length > 0 && exposedPorts.trim().length > 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
@@ -73,7 +73,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
         <CardContent className="space-y-4">
           <div className="space-y-1.5">
             <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              {t('create.templateID')} <span className="text-destructive">*</span>
+              {t('create.templateID')}
             </label>
             <Input
               placeholder="tpl-xxxxxxxx"
