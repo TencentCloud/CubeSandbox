@@ -61,7 +61,8 @@ function TemplatePicker({
   return (
     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
       {(templates ?? []).map((tpl) => {
-        const isReady = tpl.status === 'ready';
+        const statusLower = tpl.status.toLowerCase();
+        const isReady = statusLower === 'ready';
         const isSelected = tpl.templateID === selected;
         return (
           <button
@@ -80,7 +81,7 @@ function TemplatePicker({
             <div className="flex items-center justify-between gap-2">
               <span className="truncate font-mono text-sm font-medium">{tpl.templateID}</span>
               <Badge
-                tone={tpl.status === 'ready' ? 'ok' : tpl.status === 'building' ? 'warn' : 'err'}
+                tone={statusLower === 'ready' ? 'ok' : statusLower === 'building' ? 'warn' : 'err'}
                 className="shrink-0 text-[10px]"
               >
                 {tpl.status}

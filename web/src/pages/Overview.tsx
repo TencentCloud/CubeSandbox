@@ -151,7 +151,7 @@ export default function OverviewPage() {
                   <div className="truncate text-sm font-medium">{tpl.templateID}</div>
                   <div className="truncate font-mono text-[11px] text-muted-foreground">{tpl.templateID}</div>
                 </div>
-                <Badge tone={tpl.status === 'ready' ? 'ok' : tpl.status === 'failed' ? 'err' : 'warn'}>
+                <Badge tone={tpl.status.toLowerCase() === 'ready' ? 'ok' : tpl.status.toLowerCase() === 'failed' ? 'err' : 'warn'}>
                   {tpl.version ?? tpl.status}
                 </Badge>
               </Link>

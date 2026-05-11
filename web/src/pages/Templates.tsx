@@ -52,7 +52,7 @@ export default function TemplatesPage() {
                     <CardDescription className="font-mono text-[11px]">{tpl.templateID}</CardDescription>
                   </div>
                 </div>
-                <Badge tone={tpl.status === 'ready' ? 'ok' : tpl.status === 'failed' ? 'err' : 'warn'}>
+                <Badge tone={tpl.status.toLowerCase() === 'ready' ? 'ok' : tpl.status.toLowerCase() === 'failed' ? 'err' : 'warn'}>
                   {tpl.status}
                 </Badge>
               </CardHeader>
