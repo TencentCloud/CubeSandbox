@@ -131,7 +131,7 @@ POST /cubeapi/v1/sandboxes        （创建沙箱）
 
 ---
 
-## ⑥ 修复沙箱列表启动时间显示错误
+## ④ 修复沙箱列表启动时间显示错误
 
 **日期**：2026-05-11
 **状态**：✅ 完成
@@ -180,4 +180,39 @@ let started_at = s.started_at
 | dA68B3eE | 2026-05-08 15:27:27 | 2026-05-08T07:27:27Z ✅ |
 | 6D6a013A | 2026-05-08 15:30:55 | 2026-05-08T07:30:54Z ✅ |
 | 5AC42Cd3 | 2026-05-11 14:39:00 | 2026-05-11T06:39:00Z ✅ |
+
+
+---
+
+## ⑦ 模板详情页（/templates/:templateID）
+
+**日期**：2026-05-11
+**状态**：✅ 完成
+
+### 新增文件
+- `web/src/pages/TemplateDetail.tsx`
+- `web/src/locales/zh/templateDetail.json`
+- `web/src/locales/en/templateDetail.json`
+
+### 修改文件
+- `web/src/api/client.ts`：新增 `templateApi.rebuild` / `getBuildStatus` / `getBuildLogs`
+- `web/src/i18n/index.ts`：注册 `templateDetail` namespace
+- `web/src/i18n/resources.ts`：注册翻译资源
+- `web/src/main.tsx`：路由替换 Placeholder → `TemplateDetailPage`
+
+### 功能说明
+| 区域 | 内容 |
+|------|------|
+| 基础信息 | 模板 ID、状态 Badge、实例类型、版本 |
+| Replicas | 各节点副本的节点 IP、phase、规格、artifact ID、最近任务 ID |
+| 重建 | 触发 `POST /templates/:id`，返回 jobID 后轮询 build status（2s），进度条 + 构建日志展开 |
+| 删除 | 二次确认后 `DELETE /templates/:id`，成功跳回模板列表 |
+
+### Bug 修复记录
+1. **重建后空白页**：`getBuildLogs` 返回结构为 `{ lines, status, progress }` 对象，而非数组，前端对其 `.map()` 导致崩溃。修复：从 `data.lines` 取字符串数组。
+2. **「危险操作」改名**：Section 标题改为「删除模板」，去掉红色样式。
+3. **「副本分布」改名**：改为「Replicas」。
+
+### 说明
+- 重建期间模板 `status` 仍为 `READY`（CubeMaster 不切换状态），构建进度通过 jobID 单独轮询，与模板状态无关，属于正常行为。
 
