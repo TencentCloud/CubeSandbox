@@ -120,7 +120,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
             <Input
               placeholder="9000"
               value={exposedPorts}
-              onChange={(e) => setExposedPorts(e.target.value)}
+              onChange={(e) => { setExposedPorts(e.target.value); const first = e.target.value.split(',')[0].trim(); if (first) setProbePort(first); }}
             />
             <p className="text-[11px] text-muted-foreground">{t('create.exposedPortsHint')}</p>
           </div>
