@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::{
     cubemaster::{
-        CreateTemplateFromImageReq, CubeMasterClient, CubeMasterError, RedoTemplateReq,
+        CreateTemplateContainerOverrides, CreateTemplateFromImageReq, CubeMasterClient,
+        CubeMasterError, Probe, ProbeHandler, HttpGetAction, RedoTemplateReq,
         TemplateDeleteRequest, TemplateJob, TemplateJobResponse,
     },
     error::{AppError, AppResult},
@@ -87,14 +88,37 @@ impl TemplateService {
             ));
         }
 
+        // Build probe from probe_port / probe_path if provided
+        let probe = body.probe_port.or_else(|| body.exposed_ports.as_ref().and_then(|p| p.first().copied())).map(|port| {
+            Probe {
+                probe_handler: ProbeHandler {
+                    http_get: Some(HttpGetAction {
+                        path: body.probe_path.clone().unwrap_or_else(|| "/".to_string()),
+                        port,
+                        host: None,
+                        scheme: None,
+                    }),
+                    exec: None,
+                },
+                timeout_ms: None,
+                period_ms: None,
+                success_threshold: None,
+                failure_threshold: None,
+            }
+        });
+
+        let container_overrides = probe.map(|p| CreateTemplateContainerOverrides { probe: Some(p) });
+
         let req = CreateTemplateFromImageReq {
             request_id: new_request_id(),
             instance_type: body
                 .instance_type
                 .unwrap_or_else(|| self.instance_type.clone()),
             template_id: body.template_id,
-            image: body.image,
-            extra: body.extra,
+            source_image_ref: body.image,
+            writable_layer_size: body.writable_layer_size,
+            exposed_ports: body.exposed_ports.map(|v| v.into_iter().map(|p| p as u16).collect()),
+            container_overrides,
         };
 
         let resp = self

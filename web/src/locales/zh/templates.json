@@ -18,6 +18,12 @@
     "cancel": "取消",
     "submit": "创建",
     "creating": "创建中…",
-    "error": "创建失败，请重试。"
+    "error": "创建失败，请重试。",
+    "writableLayerSize": "可写层大小",
+    "writableLayerSizeHint": "容器可写层的磁盘配额，如 1G、2G。",
+    "exposedPorts": "暴露端口",
+    "exposedPortsHint": "容器监听的端口，多个用逗号分隔，如 9000,8080。",
+    "probePort": "探针端口",
+    "probePath": "探针路径"
   }
 }

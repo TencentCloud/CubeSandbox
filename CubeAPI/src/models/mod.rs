@@ -409,9 +409,18 @@ pub struct CreateTemplateRequest {
     /// Container image reference, e.g. `registry.example.com/code:latest`.
     #[validate(length(min = 1))]
     pub image: String,
-    /// Extra fields forwarded verbatim to CubeMaster.
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    /// Writable layer size for the rootfs, e.g. "1G".
+    #[serde(rename = "writableLayerSize", default)]
+    pub writable_layer_size: Option<String>,
+    /// Ports the container listens on (used for health probe and traffic routing).
+    #[serde(rename = "exposedPorts", default)]
+    pub exposed_ports: Option<Vec<u16>>,
+    /// HTTP probe port (defaults to first exposed port if omitted).
+    #[serde(rename = "probePort", default)]
+    pub probe_port: Option<u16>,
+    /// HTTP probe path, e.g. "/health".
+    #[serde(rename = "probePath", default)]
+    pub probe_path: Option<String>,
 }
 
 /// Body for POST /templates/:id (rebuild).

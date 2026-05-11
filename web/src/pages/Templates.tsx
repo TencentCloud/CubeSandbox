@@ -26,21 +26,31 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
   const [templateID, setTemplateID] = useState('');
   const [image, setImage] = useState('');
   const [instanceType, setInstanceType] = useState('');
+  const [writableLayerSize, setWritableLayerSize] = useState('1G');
+  const [exposedPorts, setExposedPorts] = useState('');
+  const [probePort, setProbePort] = useState('');
+  const [probePath, setProbePath] = useState('/health');
 
   const mutation = useMutation({
-    mutationFn: () =>
-      templateApi.create({
+    mutationFn: () => {
+      const ports = exposedPorts.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
+      return templateApi.create({
         templateID,
         image,
         instanceType: instanceType.trim() || undefined,
-      }),
+        writableLayerSize: writableLayerSize.trim() || undefined,
+        exposedPorts: ports.length > 0 ? ports : undefined,
+        probePort: probePort.trim() ? parseInt(probePort.trim(), 10) : undefined,
+        probePath: probePath.trim() || undefined,
+      });
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['templates'] });
       onClose();
     },
   });
 
-  const valid = templateID.trim().length > 0 && image.trim().length > 0;
+  const valid = templateID.trim().length > 0 && image.trim().length > 0 && writableLayerSize.trim().length > 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
@@ -81,6 +91,51 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               value={instanceType}
               onChange={(e) => setInstanceType(e.target.value)}
             />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              {t('create.writableLayerSize')} <span className="text-destructive">*</span>
+            </label>
+            <Input
+              placeholder="1G"
+              value={writableLayerSize}
+              onChange={(e) => setWritableLayerSize(e.target.value)}
+            />
+            <p className="text-[11px] text-muted-foreground">{t('create.writableLayerSizeHint')}</p>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              {t('create.exposedPorts')}
+            </label>
+            <Input
+              placeholder="9000"
+              value={exposedPorts}
+              onChange={(e) => setExposedPorts(e.target.value)}
+            />
+            <p className="text-[11px] text-muted-foreground">{t('create.exposedPortsHint')}</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                {t('create.probePort')}
+              </label>
+              <Input
+                placeholder="9000"
+                value={probePort}
+                onChange={(e) => setProbePort(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                {t('create.probePath')}
+              </label>
+              <Input
+                placeholder="/health"
+                value={probePath}
+                onChange={(e) => setProbePath(e.target.value)}
+              />
+            </div>
           </div>
 
           {mutation.isError && (

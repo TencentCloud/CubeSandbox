@@ -18,6 +18,12 @@
     "cancel": "Cancel",
     "submit": "Create",
     "creating": "Creating…",
-    "error": "Failed to create template. Please try again."
+    "error": "Failed to create template. Please try again.",
+    "writableLayerSize": "Writable Layer Size",
+    "writableLayerSizeHint": "Disk quota for the container writable layer, e.g. 1G, 2G.",
+    "exposedPorts": "Exposed Ports",
+    "exposedPortsHint": "Ports the container listens on. Multiple ports separated by commas, e.g. 9000,8080.",
+    "probePort": "Probe Port",
+    "probePath": "Probe Path"
   }
 }

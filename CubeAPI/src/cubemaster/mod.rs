@@ -1235,20 +1235,31 @@ pub struct RetEnvelope {
     pub ret: RetCode,
 }
 
-/// Body for POST /cube/template/from-image. Most fields are passed through
-/// transparently as JSON to keep this client decoupled from CubeMaster's
-/// internal type system.
+/// Body for POST /cube/template/from-image.
 #[derive(Debug, Serialize)]
 pub struct CreateTemplateFromImageReq {
-    #[serde(rename = "requestID", alias = "RequestID")]
+    #[serde(rename = "requestID")]
     pub request_id: String,
     pub instance_type: String,
     pub template_id: String,
-    /// Container image reference (e.g. "registry.example.com/foo:tag").
-    pub image: String,
-    /// Optional additional fields forwarded as-is to CubeMaster.
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    /// CubeMaster field name for the source image.
+    pub source_image_ref: String,
+    /// Writable layer size, e.g. "1G".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writable_layer_size: Option<String>,
+    /// Ports exposed by the container.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exposed_ports: Option<Vec<u16>>,
+    /// Container-level overrides (probe, resources, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_overrides: Option<CreateTemplateContainerOverrides>,
+}
+
+/// Minimal container overrides for template creation.
+#[derive(Debug, Serialize)]
+pub struct CreateTemplateContainerOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe: Option<Probe>,
 }
 
 /// Body for POST /cube/template/redo (rebuild).
