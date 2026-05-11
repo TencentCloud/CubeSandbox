@@ -253,7 +253,7 @@ impl Exec {
         };
         let ctx = Context::default();
         loop {
-            let res = client.read_stdout(ctx.clone(), &req).await;
+            let res = client.read_stderr(ctx.clone(), &req).await;
 
             if let Err(e) = res {
                 debugf!(
