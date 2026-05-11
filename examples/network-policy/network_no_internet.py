@@ -15,7 +15,9 @@ How it works:
 """
 
 import os
+
 from e2b_code_interpreter import Sandbox
+
 from env_utils import load_local_dotenv
 
 load_local_dotenv()

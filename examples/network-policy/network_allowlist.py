@@ -16,7 +16,9 @@ How it works:
 """
 
 import os
+
 from e2b_code_interpreter import Sandbox
+
 from env_utils import load_local_dotenv
 
 load_local_dotenv()
@@ -25,8 +27,8 @@ template_id = os.environ["CUBE_TEMPLATE_ID"]
 
 # Allow only internal DNS (10.0.0.53) and the internal object-storage subnet (10.0.1.0/24)
 ALLOWED_CIDRS = [
-    "10.0.0.53/32",   # internal DNS server
-    "10.0.1.0/24",    # internal object-storage subnet
+    "10.0.0.53/32",  # internal DNS server
+    "10.0.1.0/24",   # internal object-storage subnet
 ]
 
 with Sandbox.create(
