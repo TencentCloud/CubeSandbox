@@ -351,50 +351,8 @@ BASE URL：/cubeapi/v1（开发环境由 Vite proxy 转发到 localhost:3000）
 
 ---
 
-## 五、Mock 系统
 
-### 开启方式（三选一）
-
-```bash
-# 1. URL 参数（持久化到 localStorage）
-http://localhost:5173?mock=1
-
-# 2. localStorage
-localStorage.setItem('cube.useMock', '1')
-
-# 3. 构建变量
-VITE_USE_MOCK=1 npm run dev
-```
-
-TopBar 右侧有 **Mock 开关按钮**，点击切换后自动刷新页面。
-
-### Mock 数据覆盖情况
-
-| 接口 | 覆盖 |
-|------|------|
-| `GET /cluster/overview` | ✅ |
-| `GET /nodes` | ✅（3 个节点：2 健康 1 异常）|
-| `GET /nodes/:id` | ✅ |
-| `GET /templates` | ✅（4 个模板：ready/building/failed）|
-| `GET /templates/:id` | ✅（含 replicas/createRequest）|
-| `GET /v2/sandboxes` | ✅（4 个沙箱：3 running 1 paused，支持 state 过滤）|
-| `GET /sandboxes/:id` | ✅ |
-| `DELETE /sandboxes/:id` | ✅ |
-| `POST /sandboxes/:id/pause` | ✅ |
-| `POST /sandboxes/:id/resume` | ✅ |
-| `GET /v2/sandboxes/:id/logs` | ✅（3 条结构化日志）|
-| `POST /sandboxes`（创建） | ❌ |
-| `POST /templates`（创建） | ❌ |
-| `POST /sandboxes/:id/timeout` | ❌ |
-| `POST /sandboxes/:id/snapshots` | ❌ |
-| `POST /sandboxes/:id/connect` | ❌ |
-| `POST /templates/:id/builds/:buildID` | ❌ |
-| `GET /templates/:id/builds/:buildID/status` | ❌ |
-| `GET /templates/:id/builds/:buildID/logs` | ❌ |
-
----
-
-## 六、国际化
+## 五、国际化
 
 支持语言：**中文（zh）**、**英文（en）**，浏览器自动检测，手动切换后持久化。
 
@@ -417,7 +375,7 @@ TopBar 右侧有 **Mock 开关按钮**，点击切换后自动刷新页面。
 
 ---
 
-## 七、已知问题与待验证项
+## 六、已知问题与待验证项
 
 | 问题 | 位置 | 说明 |
 |------|------|------|
@@ -427,13 +385,11 @@ TopBar 右侧有 **Mock 开关按钮**，点击切换后自动刷新页面。
 | 节点无法点击进详情 | Nodes 页 | 卡片无跳转链接，`clusterApi.node(id)` 已封装但无页面 |
 | 创建沙箱入口无效 | Sandboxes 页 / ⌘K | 跳转到 `/sandboxes/new` 但渲染 Placeholder |
 
----
 
-*生成时间：2026-05-09*
 
 ---
 
-## 八、未来两周 Roadmap（2026-05-12 ~ 2026-05-26）
+## 七、未来两周 Roadmap（2026-05-12 ~ 2026-05-26）
 
 > **原则**
 > - Week 1 聚焦「让现有功能真正可用」——全部基于已有后端接口
@@ -468,17 +424,17 @@ TopBar 右侧有 **Mock 开关按钮**，点击切换后自动刷新页面。
 
 **目标**：展示模板完整信息、副本分布、构建历史，支持重建和删除
 
-| # | 任务 | 文件 | 接口 | 工时 |
-|---|------|------|------|------|
-| 5 | 新建 `TemplateDetail.tsx`，替换 Placeholder | `pages/TemplateDetail.tsx` | — | — |
-| 5a | 基本信息卡片（版本/状态/instanceType/imageInfo/创建时间） | 同上 | `GET /templates/:id` | 1h |
-| 5b | 副本分布列表（replicas：节点/ready 状态/本地版本） | 同上 | `GET /templates/:id` | 1h |
-| 5c | 重建按钮（触发构建，返回 buildID） | 同上 | `POST /templates/:id` | 1h |
-| 5d | 构建进度追踪（轮询 status，展示 building→ready/failed） | 同上 | `GET /templates/:id/builds/:buildID/status` | 1.5h |
-| 5e | 构建日志展示（可折叠 pre 块） | 同上 | `GET /templates/:id/builds/:buildID/logs` | 1h |
-| 5f | 删除模板（二次确认弹窗，成功后跳回列表） | 同上 | `DELETE /templates/:id` | 1h |
-| 5g | 补充 Mock handler：rebuild / buildStatus / buildLogs / delete | `mocks/handlers/index.ts` | — | 1h |
-| 5h | 注册路由（替换 Placeholder） | `main.tsx` | — | 0.5h |
+| # | 任务 | 文件 | 接口 | 
+|---|------|------|------|
+| 5 | 新建 `TemplateDetail.tsx`，替换 Placeholder | `pages/TemplateDetail.tsx` | — |
+| 5a | 基本信息卡片（版本/状态/instanceType/imageInfo/创建时间） | 同上 | `GET /templates/:id` | 
+| 5b | 副本分布列表（replicas：节点/ready 状态/本地版本） | 同上 | `GET /templates/:id` |
+| 5c | 重建按钮（触发构建，返回 buildID） | 同上 | `POST /templates/:id` | 
+| 5d | 构建进度追踪（轮询 status，展示 building→ready/failed） | 同上 | `GET /templates/:id/builds/:buildID/status` |
+| 5e | 构建日志展示（可折叠 pre 块） | 同上 | `GET /templates/:id/builds/:buildID/logs` | 
+| 5f | 删除模板（二次确认弹窗，成功后跳回列表） | 同上 | `DELETE /templates/:id` | 
+| 5g | 补充 Mock handler：rebuild / buildStatus / buildLogs / delete | `mocks/handlers/index.ts` | — | 
+| 5h | 注册路由（替换 Placeholder） | `main.tsx` | — |
 
 
 ---
@@ -489,38 +445,38 @@ TopBar 右侧有 **Mock 开关按钮**，点击切换后自动刷新页面。
 
 **目标**：展示单节点完整资源、Conditions、本地模板，从 Nodes 列表可跳转
 
-| # | 任务 | 文件 | 接口 | 工时 |
-|---|------|------|------|------|
-| 6 | 新建 `NodeDetail.tsx` | `pages/NodeDetail.tsx` | — | — |
-| 6a | 资源详情（CPU/内存进度条 + 数值、maxMvmSlots） | 同上 | `GET /nodes/:id` | 1h |
-| 6b | Conditions 完整列表（type/status/reason/message/时间） | 同上 | `GET /nodes/:id` | 1h |
-| 6c | 本地模板列表（localTemplates，点击跳转模板详情） | 同上 | `GET /nodes/:id` | 1h |
-| 6d | 节点上运行的沙箱列表（按 nodeID 过滤） | 同上 | `GET /v2/sandboxes`（前端过滤） | 1h |
-| 6e | Nodes 列表卡片添加跳转链接 | `pages/Nodes.tsx` | — | 0.5h |
-| 6f | 注册路由 `/nodes/:nodeID` | `main.tsx` | — | 0.5h |
+| # | 任务 | 文件 | 接口 | 
+|---|------|------|------|
+| 6 | 新建 `NodeDetail.tsx` | `pages/NodeDetail.tsx` | — |
+| 6a | 资源详情（CPU/内存进度条 + 数值、maxMvmSlots） | 同上 | `GET /nodes/:id` | 
+| 6b | Conditions 完整列表（type/status/reason/message/时间） | 同上 | `GET /nodes/:id` | 
+| 6c | 本地模板列表（localTemplates，点击跳转模板详情） | 同上 | `GET /nodes/:id` | 
+| 6d | 节点上运行的沙箱列表（按 nodeID 过滤） | 同上 | `GET /v2/sandboxes`（前端过滤） |
+| 6e | Nodes 列表卡片添加跳转链接 | `pages/Nodes.tsx` | — | 
+| 6f | 注册路由 `/nodes/:nodeID` | `main.tsx` | — |
 
 #### Day 2-3：模板创建页 `/templates/new`
 
 **目标**：用户能填写配置创建新模板并追踪构建进度
 
 | # | 任务 | 文件 | 接口 | 工时 |
-|---|------|------|------|------|
-| 7 | 新建 `TemplateNew.tsx` | `pages/TemplateNew.tsx` | — | — |
-| 7a | 创建表单（templateID / instanceType / image）| 同上 | — | 1.5h |
-| 7b | 提交创建，获取 buildID | 同上 | `POST /templates` | 1h |
-| 7c | 构建进度轮询展示（复用 TemplateDetail 构建组件） | 同上 | `GET /templates/:id/builds/:buildID/status` + `logs` | 1h |
-| 7d | Templates 列表页添加「New Template」入口按钮 | `pages/Templates.tsx` | — | 0.5h |
-| 7e | ⌘K 命令面板添加「Create Template」入口 | `components/CommandPalette.tsx` | — | 0.5h |
-| 7f | 补充 Mock handler：`POST /templates` | `mocks/handlers/index.ts` | — | 0.5h |
-| 7g | 注册路由 `/templates/new` | `main.tsx` | — | 0.5h |
+|---|------|------|------|
+| 7 | 新建 `TemplateNew.tsx` | `pages/TemplateNew.tsx` | — | 
+| 7a | 创建表单（templateID / instanceType / image）| 同上 | — | 
+| 7b | 提交创建，获取 buildID | 同上 | `POST /templates` |
+| 7c | 构建进度轮询展示（复用 TemplateDetail 构建组件） | 同上 | `GET /templates/:id/builds/:buildID/status` + `logs` |
+| 7d | Templates 列表页添加「New Template」入口按钮 | `pages/Templates.tsx` | — |
+| 7e | ⌘K 命令面板添加「Create Template」入口 | `components/CommandPalette.tsx` | — | 
+| 7f | 补充 Mock handler：`POST /templates` | `mocks/handlers/index.ts` | — | 
+| 7g | 注册路由 `/templates/new` | `main.tsx` | — | 
 
 #### Day 4：沙箱快照功能
 
-| # | 任务 | 文件 | 接口 | 工时 |
-|---|------|------|------|------|
-| 8a | `sandboxApi` 补充 `snapshot(id, name?)` 方法 | `api/client.ts` | `POST /sandboxes/:id/snapshots` | 0.5h |
-| 8b | SandboxDetail 页添加「创建快照」按钮 + 输入快照名弹窗 | `pages/SandboxDetail.tsx` | 同上 | 1.5h |
-| 8c | 补充 Mock handler | `mocks/handlers/index.ts` | — | 0.5h |
+| # | 任务 | 文件 | 接口 |
+|---|------|------|------|
+| 8a | `sandboxApi` 补充 `snapshot(id, name?)` 方法 | `api/client.ts` | `POST /sandboxes/:id/snapshots` | 
+| 8b | SandboxDetail 页添加「创建快照」按钮 + 输入快照名弹窗 | `pages/SandboxDetail.tsx` | 同上 |
+| 8c | 补充 Mock handler | `mocks/handlers/index.ts` | — |
 
 #### Day 5：全局体验打磨
 
@@ -558,9 +514,9 @@ TopBar 右侧有 **Mock 开关按钮**，点击切换后自动刷新页面。
 
 ---
 
-## 九、开发时间线（2026-05-12 ~ 2026-05-26）
+## 八、开发时间线（2026-05-12 ~ 2026-05-26）
 
-> 📅 工作日排列，每格代表一个工作日。括号内为预估工时，Day 容量约 4~6h 有效编码时间。
+> 📅 
 
 ```
 日期        Mon 5/12  Tue 5/13  Wed 5/14  Thu 5/15  Fri 5/16
@@ -606,15 +562,57 @@ Bug 修复
 
 | 日期 | 里程碑 |
 |------|--------|
-| **05-14（周三）** | 沙箱创建页上线，用户能端到端创建沙箱 |
-| **05-16（周五）** | 模板详情页完整落地，Week 1 交付完成 |
+| **05-14（周三）** | 沙箱创建页完成，用户能端到端创建沙箱 |
+| **05-16（周五）** | 模板详情页完整落地 |
 | **05-20（周二）** | 节点详情页上线，集群视角补齐 |
 | **05-22（周四）** | 模板创建流程完整，核心管理功能闭环 |
-| **05-26（周一）** | 全局体验打磨完成，Week 2 交付完成 |
+| **05-26（周一）** | 全局体验打磨完成 |
 
 ### 优先级说明
 
-- **P0（必须完成）**：Bug 修复、沙箱创建、模板详情
-- **P1（应完成）**：节点详情、模板创建、Toast 错误处理
-- **P2（有时间则做）**：沙箱快照、ConfirmDialog 统一、metadata 过滤、Overview 趋势
+- **P0**：Bug 修复、沙箱创建、模板详情
+- **P1**：节点详情、模板创建、Toast 错误处理
+- **P2**：沙箱快照、ConfirmDialog 统一、metadata 过滤、Overview 趋势
+
+
+---
+
+## 十、变更记录
+
+### 2026-05-11
+
+#### feat: 沙箱创建页 `/sandboxes/new`
+
+- 新增 `web/src/pages/SandboxNew.tsx`，替换原 Placeholder
+  - 模板选择器（卡片式，仅 ready 状态可选）
+  - 资源配置表单：超时时间、别名、autoPause 开关、metadata KV 编辑器
+  - 提交调用 `POST /cubeapi/v1/sandboxes`，成功后跳转 `/sandboxes/:id`
+- `web/src/api/client.ts`：`sandboxApi` 新增 `create()` 方法
+- `web/src/mocks/handlers/index.ts`：新增 `POST /sandboxes` mock handler
+- `web/src/mocks/fixtures/index.ts`：新增 `createSandbox()` fixture
+- `web/src/locales/{en,zh}/sandboxNew.json`：新增 `sandboxNew` i18n 命名空间
+- `web/src/i18n/resources.ts` / `index.ts`：注册 `sandboxNew` namespace
+- `web/src/main.tsx`：路由 `/sandboxes/new` 指向 `SandboxNewPage`
+
+#### fix: 模板状态大小写不匹配
+
+**根因**：后端（CubeMaster）返回的模板 status 为大写（`READY` / `FAILED` / `BUILDING`），
+前端所有比较均使用小写字符串字面量，导致：
+
+- `SandboxNew` 页：所有模板 disabled，无法选择
+- `Templates` 列表页：状态 Badge 全部显示为 err 颜色
+- `Overview` 页：模板状态 Badge 颜色同样错误
+
+**修复**：在比较前统一调用 `.toLowerCase()`
+
+```diff
+- tpl.status === ready
++ tpl.status.toLowerCase() === ready
+```
+
+涉及文件：`SandboxNew.tsx`、`Templates.tsx`、`Overview.tsx`
+
+#### chore: Vite 升级至 6.4.2
+
+- `web/package.json`：`vite` 从 `^5.4.10` 升级到 `^6.4.2`
 
