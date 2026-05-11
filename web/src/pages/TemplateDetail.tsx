@@ -182,6 +182,10 @@ export default function TemplateDetailPage() {
     refetchInterval: activeBuildID ? 3000 : false,
   });
 
+  // ── get cached status from template list (for 404 error context) ──
+  const cachedStatus = qc.getQueryData<{ templateID: string; status: string }[]>(['templates'])
+    ?.find(t => t.templateID === templateID)?.status?.toUpperCase();
+
   // ── build status polling ──
   const { data: buildStatus } = useQuery({
     queryKey: ['template-build-status', templateID, activeBuildID],
@@ -230,6 +234,7 @@ export default function TemplateDetailPage() {
 
   // Check if it's a 404 (template still building / not indexed yet)
   const is404 = isError && error instanceof ApiError && error.status === 404;
+  const isBuilding404 = is404 && (cachedStatus === 'RUNNING' || cachedStatus === 'BUILDING');
 
   if (isError || !data) {
     return (
@@ -237,7 +242,7 @@ export default function TemplateDetailPage() {
         <Link to="/templates" className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-4">
           <ArrowLeft className="h-4 w-4" /> {t('backToTemplates')}
         </Link>
-        {is404 ? (
+        {isBuilding404 ? (
           <div className="space-y-2">
             <p className="text-sm text-muted-foreground">{t('building')}</p>
             <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
