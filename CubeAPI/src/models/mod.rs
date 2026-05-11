@@ -412,15 +412,27 @@ pub struct CreateTemplateRequest {
     /// Writable layer size for the rootfs, e.g. "1G".
     #[serde(rename = "writableLayerSize", default)]
     pub writable_layer_size: Option<String>,
-    /// Ports the container listens on (used for health probe and traffic routing).
+    /// Ports the container listens on.
     #[serde(rename = "exposedPorts", default)]
     pub exposed_ports: Option<Vec<u16>>,
-    /// HTTP probe port (defaults to first exposed port if omitted).
+    /// HTTP probe port.
     #[serde(rename = "probePort", default)]
     pub probe_port: Option<u16>,
     /// HTTP probe path, e.g. "/health".
     #[serde(rename = "probePath", default)]
     pub probe_path: Option<String>,
+    /// CPU in millicores, e.g. 2000 means 2000m.
+    #[serde(default)]
+    pub cpu: Option<u32>,
+    /// Memory in MiB, e.g. 2000.
+    #[serde(default)]
+    pub memory: Option<u32>,
+    /// Environment variables as "KEY=VALUE" strings.
+    #[serde(default)]
+    pub env: Option<Vec<String>>,
+    /// Allow internet (public) access.
+    #[serde(rename = "allowInternetAccess", default)]
+    pub allow_internet_access: Option<bool>,
 }
 
 /// Body for POST /templates/:id (rebuild).

@@ -1250,9 +1250,12 @@ pub struct CreateTemplateFromImageReq {
     /// Ports exposed by the container.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exposed_ports: Option<Vec<u16>>,
-    /// Container-level overrides (probe, resources, etc.)
+    /// Container-level overrides (probe, resources, envs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_overrides: Option<CreateTemplateContainerOverrides>,
+    /// Network / internet-access context.
+    #[serde(rename = "cubevs_context", skip_serializing_if = "Option::is_none")]
+    pub cubevs_context: Option<CreateTemplateCubeVSContext>,
 }
 
 /// Minimal container overrides for template creation.
@@ -1260,6 +1263,35 @@ pub struct CreateTemplateFromImageReq {
 pub struct CreateTemplateContainerOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probe: Option<Probe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<CreateTemplateResources>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envs: Option<Vec<CreateTemplateEnv>>,
+}
+
+/// CPU / memory resources for template container.
+#[derive(Debug, Serialize)]
+pub struct CreateTemplateResources {
+    /// CPU in millicores, e.g. "2000m".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<String>,
+    /// Memory, e.g. "2000Mi".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem: Option<String>,
+}
+
+/// Key-value env var.
+#[derive(Debug, Serialize)]
+pub struct CreateTemplateEnv {
+    pub key: String,
+    pub value: String,
+}
+
+/// CubeVS context for template creation.
+#[derive(Debug, Serialize)]
+pub struct CreateTemplateCubeVSContext {
+    #[serde(rename = "allowInternetAccess", skip_serializing_if = "Option::is_none")]
+    pub allow_internet_access: Option<bool>,
 }
 
 /// Body for POST /cube/template/redo (rebuild).

@@ -30,10 +30,15 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
   const [exposedPorts, setExposedPorts] = useState('');
   const [probePort, setProbePort] = useState('');
   const [probePath, setProbePath] = useState('/health');
+  const [cpu, setCpu] = useState('');
+  const [memory, setMemory] = useState('');
+  const [envVars, setEnvVars] = useState('');
+  const [allowInternet, setAllowInternet] = useState(false);
 
   const mutation = useMutation({
     mutationFn: () => {
       const ports = exposedPorts.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
+      const envList = envVars.split('\n').map(s => s.trim()).filter(Boolean);
       return templateApi.create({
         templateID,
         image,
@@ -42,6 +47,10 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
         exposedPorts: ports.length > 0 ? ports : undefined,
         probePort: probePort.trim() ? parseInt(probePort.trim(), 10) : undefined,
         probePath: probePath.trim() || undefined,
+        cpu: cpu.trim() ? parseInt(cpu.trim(), 10) : undefined,
+        memory: memory.trim() ? parseInt(memory.trim(), 10) : undefined,
+        env: envList.length > 0 ? envList : undefined,
+        allowInternetAccess: allowInternet || undefined,
       });
     },
     onSuccess: () => {
@@ -50,7 +59,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
     },
   });
 
-  const valid = templateID.trim().length > 0 && image.trim().length > 0 && writableLayerSize.trim().length > 0;
+  const valid = templateID.trim().length > 0 && image.trim().length > 0 && writableLayerSize.trim().length > 0 && exposedPorts.trim().length > 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
@@ -106,7 +115,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
           </div>
           <div className="space-y-1.5">
             <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              {t('create.exposedPorts')}
+              {t('create.exposedPorts')} <span className="text-destructive">*</span>
             </label>
             <Input
               placeholder="9000"
@@ -137,6 +146,36 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               />
             </div>
           </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">CPU (millicores)</label>
+              <Input placeholder="2000" value={cpu} onChange={(e) => setCpu(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Memory (MiB)</label>
+              <Input placeholder="2000" value={memory} onChange={(e) => setMemory(e.target.value)} />
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">env</label>
+            <textarea
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono resize-y min-h-[64px] focus:outline-none focus:ring-1 focus:ring-ring"
+              placeholder={"APP_ENV=production\nDEBUG=false"}
+              value={envVars}
+              onChange={(e) => setEnvVars(e.target.value)}
+            />
+            <p className="text-[11px] text-muted-foreground">每行一条，格式 KEY=VALUE</p>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border"
+              checked={allowInternet}
+              onChange={(e) => setAllowInternet(e.target.checked)}
+            />
+            <span className="text-sm">allow-internet-access</span>
+          </label>
 
           {mutation.isError && (
             <p className="text-xs text-destructive">
