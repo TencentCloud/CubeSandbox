@@ -102,10 +102,10 @@ impl TemplateService {
                     }),
                     exec: None,
                 },
-                timeout_ms: None,
-                period_ms: None,
-                success_threshold: None,
-                failure_threshold: None,
+                timeout_ms: Some(30000),
+                period_ms: Some(500),
+                success_threshold: Some(1),
+                failure_threshold: Some(60),
             });
 
         // resources
