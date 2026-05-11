@@ -20,16 +20,12 @@ interface MetaEntry { key: string; value: string }
 interface FormState {
   templateID: string;
   timeout: string;       // seconds, string for input
-  alias: string;
-  autoPause: boolean;
   meta: MetaEntry[];
 }
 
 const DEFAULT_FORM: FormState = {
   templateID: '',
   timeout: '300',
-  alias: '',
-  autoPause: false,
   meta: [],
 };
 
@@ -183,8 +179,6 @@ export default function SandboxNewPage() {
       return sandboxApi.create({
         templateID: form.templateID,
         timeout: Number(form.timeout) || 300,
-        alias: form.alias.trim() || undefined,
-        autoPause: form.autoPause,
         metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       });
     },
@@ -223,7 +217,7 @@ export default function SandboxNewPage() {
 
       {/* Resources */}
       <Section title={t('section.resources')} description={t('section.resourcesDesc')}>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div>
           <div className="space-y-1.5">
             <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
               {t('form.timeout')}
@@ -241,41 +235,8 @@ export default function SandboxNewPage() {
             <p className="text-[11px] text-muted-foreground">{t('form.timeoutHint')}</p>
           </div>
 
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              {t('form.alias')}
-            </label>
-            <Input
-              placeholder={t('form.aliasPlaceholder')}
-              value={form.alias}
-              onChange={(e) => set('alias', e.target.value)}
-            />
-          </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            role="switch"
-            aria-checked={form.autoPause}
-            onClick={() => set('autoPause', !form.autoPause)}
-            className={cn(
-              'relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors',
-              form.autoPause ? 'bg-primary' : 'bg-muted',
-            )}
-          >
-            <span
-              className={cn(
-                'pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform',
-                form.autoPause ? 'translate-x-4' : 'translate-x-0',
-              )}
-            />
-          </button>
-          <div>
-            <span className="text-sm font-medium">{t('form.autoPause')}</span>
-            <p className="text-[11px] text-muted-foreground">{t('form.autoPauseHint')}</p>
-          </div>
-        </div>
       </Section>
 
       {/* Metadata */}
