@@ -219,9 +219,6 @@ export default function SandboxNewPage() {
       <Section title={t('section.resources')} description={t('section.resourcesDesc')}>
         <div>
           <div className="space-y-1.5">
-            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              {t('form.timeout')}
-            </label>
             <div className="flex items-center gap-2">
               <Input
                 type="number"
