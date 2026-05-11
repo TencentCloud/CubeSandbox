@@ -1,0 +1,52 @@
+{
+  "title": "模板详情",
+  "backToTemplates": "返回模板列表",
+  "notFound": "模板不存在或已被删除。",
+  "section": {
+    "info": "基础信息",
+    "infoDesc": "模板的基本属性与当前状态。",
+    "replicas": "副本分布",
+    "replicasDesc": "该模板在各节点上的 replica 状态。",
+    "danger": "危险操作",
+    "dangerDesc": "不可逆的操作，请谨慎执行。"
+  },
+  "fields": {
+    "templateID": "模板 ID",
+    "status": "状态",
+    "instanceType": "实例类型",
+    "version": "版本",
+    "spec": "规格",
+    "node": "节点",
+    "phase": "阶段",
+    "artifactID": "Artifact ID",
+    "snapshotPath": "快照路径",
+    "lastJob": "最近任务"
+  },
+  "status": {
+    "ready": "就绪",
+    "building": "构建中",
+    "failed": "失败",
+    "unknown": "未知"
+  },
+  "rebuild": {
+    "button": "重建模板",
+    "confirm": "确认重建",
+    "confirmDesc": "这将触发模板重新构建，过程中模板不可用于创建新沙箱。确认继续？",
+    "cancel": "取消",
+    "building": "构建中…",
+    "success": "重建已触发",
+    "progress": "进度 {{progress}}%",
+    "viewLogs": "查看构建日志",
+    "hideLogs": "隐藏日志"
+  },
+  "delete": {
+    "button": "删除模板",
+    "confirm": "确认删除",
+    "confirmDesc": "删除后无法恢复，该模板下所有 replica 将一并删除。确认继续？",
+    "cancel": "取消",
+    "deleting": "删除中…"
+  },
+  "empty": {
+    "replicas": "暂无副本信息。"
+  }
+}

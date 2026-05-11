@@ -14,6 +14,7 @@ import SandboxNewPage from '@/pages/SandboxNew';
 import TemplatesPage from '@/pages/Templates';
 import NodesPage from '@/pages/Nodes';
 import KeysPage from '@/pages/Keys';
+import TemplateDetailPage from '@/pages/TemplateDetail';
 import { Placeholder } from '@/pages/Placeholder';
 import { Network, Activity, Settings, Package } from 'lucide-react';
 
@@ -41,7 +42,7 @@ const App = () => (
               <Route path="/templates" element={<TemplatesPage />} />
               <Route
                 path="/templates/:templateID"
-                element={<Placeholder titleKey="templateDetail.title" descriptionKey="templateDetail.description" icon={Package} />}
+                element={<TemplateDetailPage />}
               />
               <Route path="/nodes" element={<NodesPage />} />
               <Route

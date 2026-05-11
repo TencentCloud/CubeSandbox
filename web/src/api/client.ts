@@ -163,6 +163,11 @@ export const sandboxApi = {
 export const templateApi = {
   list: () => api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
   get: (id: string) => api<TemplateDetailDto>(`/templates/${id}`).then(mapTemplateDetail),
+  rebuild: (id: string) => api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
+  getBuildStatus: (id: string, buildID: string) =>
+    api<unknown>(`/templates/${id}/builds/${buildID}/status`),
+  getBuildLogs: (id: string, buildID: string) =>
+    api<unknown[]>(`/templates/${id}/builds/${buildID}/logs`),
   remove: (id: string) => api<void>(`/templates/${id}`, { method: 'DELETE' }),
 };
 

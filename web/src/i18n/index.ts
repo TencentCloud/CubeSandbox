@@ -14,7 +14,7 @@ i18n
     fallbackLng: 'en',
     supportedLngs: ['en', 'zh'],
     defaultNS: 'common',
-    ns: ['common', 'nav', 'topbar', 'command', 'overview', 'sandboxes', 'sandboxDetail', 'sandboxNew', 'templates', 'nodes', 'keys', 'placeholder'],
+    ns: ['common', 'nav', 'topbar', 'command', 'overview', 'sandboxes', 'sandboxDetail', 'sandboxNew', 'templates', 'templateDetail', 'nodes', 'keys', 'placeholder'],
     interpolation: {
       escapeValue: false,
     },
