@@ -4,8 +4,8 @@
   "section": {
     "template": "选择模板",
     "templateDesc": "仅显示状态为 ready 的模板可供选择。",
-    "resources": "资源配置",
-    "resourcesDesc": "设置超时时间、别名和自动暂停策略。",
+    "resources": "超时时间",
+    "resourcesDesc": "沙箱在无活动连接后经过此时间将自动销毁，设为 0 表示永不自动超时。",
     "metadata": "元数据",
     "metadataDesc": "附加到沙箱的自定义键值对，可用于标识和过滤。"
   },

@@ -4,8 +4,8 @@
   "section": {
     "template": "Choose template",
     "templateDesc": "Only templates with status ready are selectable.",
-    "resources": "Resources",
-    "resourcesDesc": "Configure timeout, alias and auto-pause policy.",
+    "resources": "Timeout",
+    "resourcesDesc": "The sandbox will be automatically destroyed after this duration with no active connections. Set to 0 to disable auto-timeout.",
     "metadata": "Metadata",
     "metadataDesc": "Custom key-value pairs attached to the sandbox for identification and filtering."
   },
