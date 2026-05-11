@@ -136,7 +136,7 @@ export default function SandboxDetailPage() {
               <Field label={t('fields.memory')} value={formatBytes(data?.memoryMB)} />
               <Field label={t('fields.client')} value={data?.clientID ?? '—'} mono />
               <Field label={t('fields.alias')} value={data?.alias ?? '—'} />
-              <Field label={t('fields.ends')} value={formatRelative(data?.endAt)} />
+              <Field label={t('fields.started')} value={formatRelative(data?.startedAt)} />
               <Field label={t('fields.domain')} value={data?.domain ?? '—'} mono />
             </dl>
           )}
@@ -153,10 +153,7 @@ export default function SandboxDetailPage() {
               <span className="text-muted-foreground">{t('fields.started')}</span>
               <span>{formatDateTime(data?.startedAt)}</span>
             </li>
-            <li className="flex justify-between">
-              <span className="text-muted-foreground">{t('fields.ends')}</span>
-              <span>{formatDateTime(data?.endAt)}</span>
-            </li>
+
             <li className="flex justify-between">
               <span className="text-muted-foreground">{t('fields.state')}</span>
               <span>{state}</span>
