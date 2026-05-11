@@ -181,6 +181,7 @@ export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 **Run code**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
@@ -193,6 +194,7 @@ with Sandbox.create(template=template_id) as sandbox:
 **Run a shell command**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
@@ -205,6 +207,7 @@ with Sandbox.create(template=template_id) as sandbox:
 **Read a file inside the sandbox**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
