@@ -36,6 +36,7 @@ pub type EnvVars = HashMap<String, String>;
 pub enum SandboxState {
     Running,
     Paused,
+    Pausing,
 }
 
 /// Network configuration for sandbox egress/ingress control.

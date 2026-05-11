@@ -628,6 +628,7 @@ fn sandbox_state_from_status(status: SandboxStatus) -> SandboxState {
 fn sandbox_state_from_str(status: &str) -> SandboxState {
     match status.to_lowercase().as_str() {
         "paused" => SandboxState::Paused,
+        "pausing" => SandboxState::Pausing,
         _ => SandboxState::Running,
     }
 }

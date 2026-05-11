@@ -354,7 +354,7 @@ export interface components {
          * @description State of the sandbox (running | paused)
          * @enum {string}
          */
-        SandboxState: "running" | "paused";
+        SandboxState: "running" | "paused" | "pausing";
         /** @description Volume mount inside the sandbox. */
         SandboxVolumeMount: {
             name: string;
