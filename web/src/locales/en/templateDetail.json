@@ -5,10 +5,10 @@
   "section": {
     "info": "Basic Info",
     "infoDesc": "Core properties and current status of the template.",
-    "replicas": "Replica Distribution",
-    "replicasDesc": "Replica status of this template across nodes.",
-    "danger": "Danger Zone",
-    "dangerDesc": "Irreversible operations — proceed with caution."
+    "replicas": "Replicas",
+    "replicasDesc": "Snapshot replicas of this template across nodes.",
+    "danger": "Delete Template",
+    "dangerDesc": "This action cannot be undone. All replicas of this template will also be deleted."
   },
   "fields": {
     "templateID": "Template ID",

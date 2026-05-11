@@ -5,10 +5,10 @@
   "section": {
     "info": "基础信息",
     "infoDesc": "模板的基本属性与当前状态。",
-    "replicas": "副本分布",
-    "replicasDesc": "该模板在各节点上的 replica 状态。",
-    "danger": "危险操作",
-    "dangerDesc": "不可逆的操作，请谨慎执行。"
+    "replicas": "Replicas",
+    "replicasDesc": "该模板在各节点上的快照副本状态。",
+    "danger": "删除模板",
+    "dangerDesc": "删除后无法恢复，该模板下所有 replica 将一并删除。"
   },
   "fields": {
     "templateID": "模板 ID",

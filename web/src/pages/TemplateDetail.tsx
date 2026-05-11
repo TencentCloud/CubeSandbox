@@ -327,7 +327,7 @@ export default function TemplateDetailPage() {
       </Section>
 
       {/* danger zone */}
-      <Section title={t('section.danger')} description={t('section.dangerDesc')} variant="danger">
+      <Section title={t('section.danger')} description={t('section.dangerDesc')} >
         {showDeleteConfirm ? (
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">{t('delete.confirmDesc')}</p>
