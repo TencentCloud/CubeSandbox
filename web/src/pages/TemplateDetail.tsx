@@ -235,6 +235,7 @@ export default function TemplateDetailPage() {
   // Check if it's a 404 (template still building / not indexed yet)
   const is404 = isError && error instanceof ApiError && error.status === 404;
   const isBuilding404 = is404 && (cachedStatus === 'RUNNING' || cachedStatus === 'BUILDING');
+  const isFailed404   = is404 && cachedStatus === 'FAILED';
 
   if (isError || !data) {
     return (
@@ -249,6 +250,8 @@ export default function TemplateDetailPage() {
               刷新
             </Button>
           </div>
+        ) : isFailed404 ? (
+          <p className="text-sm text-destructive">{t('buildFailed')}</p>
         ) : (
           <p className="text-sm text-muted-foreground">{t('notFound')}</p>
         )}
