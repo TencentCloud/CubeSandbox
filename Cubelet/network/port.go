@@ -14,7 +14,7 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-var DefaultExposedPorts = []uint16{8080, 32000}
+var DefaultExposedPorts = []uint16{49983}
 
 func initPortAllocatorFromSysConfig() (allocator.Allocator[uint16], error) {
 	_, upperPort, err := getLocalPortRange()

@@ -2272,8 +2272,7 @@ func countCustomTemplateExposedPorts(ports []int32) int {
 
 func defaultTemplateExposedPorts() map[int32]struct{} {
 	return map[int32]struct{}{
-		8080:  {},
-		32000: {},
+		49983: {},
 	}
 }
 

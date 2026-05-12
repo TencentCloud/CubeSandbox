@@ -48,7 +48,7 @@ func DefaultConfig() Config {
 		MvmMask:             30,
 		MvmMtu:              1300,
 		TapInitNum:          0,
-		DefaultExposedPorts: []uint16{8080, 32000},
+		DefaultExposedPorts: []uint16{49983},
 		StateDir:            defaultStateDir,
 		TapFDSocketPath:     "/tmp/cube/network-agent-tap.sock",
 		HostProxyBindIP:     "127.0.0.1",

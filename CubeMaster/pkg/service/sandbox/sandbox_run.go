@@ -442,7 +442,7 @@ func (c *createSandboxContext) setProxyToRedis() error {
 			HostIP:      c.selectHost.HostIP(),
 			SandboxID:   c.masterRsp.SandboxID,
 			SandboxIP:   c.masterRsp.SandboxIP,
-			SandboxPort: "8080",
+			SandboxPort: "49983",
 			CreatedAt:   strconv.FormatInt(time.Now().UnixNano(), 10),
 		}
 
