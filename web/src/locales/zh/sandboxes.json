@@ -4,6 +4,11 @@
   "newSandbox": "新建沙箱",
   "filterPlaceholder": "按 ID、模板、客户端筛选…",
   "status": "状态",
+  "filter": {
+    "all": "全部",
+    "running": "运行中",
+    "paused": "已暂停"
+  },
   "col": {
     "state": "状态",
     "sandboxId": "沙箱 ID",

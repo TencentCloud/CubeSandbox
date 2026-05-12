@@ -11,8 +11,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Package, Plus, X } from 'lucide-react';
-import { formatRelative } from '@/lib/utils';
+import { Package, Plus, Trash2, X } from 'lucide-react';
+import { formatRelative, formatDeleteError } from '@/lib/utils';
 
 // ── create template modal ────────────────────────────────────────────────────
 
@@ -72,7 +72,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-1.5">
-            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <label className="text-xs font-medium text-muted-foreground">
               {t('create.templateID')}
             </label>
             <Input
@@ -82,7 +82,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <label className="text-xs font-medium text-muted-foreground">
               {t('create.image')} <span className="text-destructive">*</span>
             </label>
             <Input
@@ -92,7 +92,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <label className="text-xs font-medium text-muted-foreground">
               {t('create.instanceType')}
             </label>
             <Input
@@ -103,7 +103,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <label className="text-xs font-medium text-muted-foreground">
               {t('create.writableLayerSize')} <span className="text-destructive">*</span>
             </label>
             <Input
@@ -114,7 +114,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
             <p className="text-[11px] text-muted-foreground">{t('create.writableLayerSizeHint')}</p>
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <label className="text-xs font-medium text-muted-foreground">
               {t('create.exposedPorts')} <span className="text-destructive">*</span>
             </label>
             <Input
@@ -126,7 +126,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              <label className="text-xs font-medium text-muted-foreground">
                 {t('create.probePort')}
               </label>
               <Input
@@ -136,7 +136,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               />
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              <label className="text-xs font-medium text-muted-foreground">
                 {t('create.probePath')}
               </label>
               <Input
@@ -149,16 +149,16 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">CPU (millicores)</label>
+              <label className="text-xs font-medium text-muted-foreground">CPU (millicores)</label>
               <Input placeholder="2000" value={cpu} onChange={(e) => setCpu(e.target.value)} />
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Memory (MiB)</label>
+              <label className="text-xs font-medium text-muted-foreground">Memory (MiB)</label>
               <Input placeholder="2000" value={memory} onChange={(e) => setMemory(e.target.value)} />
             </div>
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">env</label>
+            <label className="text-xs font-medium text-muted-foreground">env</label>
             <textarea
               className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono resize-y min-h-[64px] focus:outline-none focus:ring-1 focus:ring-ring"
               placeholder={"APP_ENV=production\nDEBUG=false"}
@@ -201,12 +201,74 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
   );
 }
 
+// ── delete confirm modal ────────────────────────────────────────────────────
+
+interface DeleteModalProps {
+  templateID: string;
+  onClose: () => void;
+}
+
+function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
+  const { t } = useTranslation('templates');
+  const qc = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => templateApi.remove(templateID),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['templates'] });
+      onClose();
+    },
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <Card className="w-full max-w-sm shadow-xl">
+        <CardHeader className="flex flex-row items-center justify-between pb-3">
+          <CardTitle className="text-base text-destructive">
+            {t('delete.title', { defaultValue: '删除模板' })}
+          </CardTitle>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+            <X className="h-4 w-4" />
+          </button>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            {t('delete.confirmDesc', { defaultValue: '确定要删除模板' })}{' '}
+            <span className="font-mono font-medium text-foreground">{templateID}</span>
+            {' '}{t('delete.confirmDescSuffix', { defaultValue: '吗？此操作不可撤销。' })}
+          </p>
+          {mutation.isError && (
+            <p className="text-xs text-destructive">
+              {formatDeleteError(mutation.error)}
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={onClose}>
+              {t('delete.cancel', { defaultValue: '取消' })}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={mutation.isPending}
+              onClick={() => mutation.mutate()}
+            >
+              {mutation.isPending
+                ? t('delete.deleting', { defaultValue: '删除中…' })
+                : t('delete.confirm', { defaultValue: '确认删除' })}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 // ── main page ────────────────────────────────────────────────────────────────
 
 export default function TemplatesPage() {
   const { data, isLoading } = useQuery({ queryKey: ['templates'], queryFn: templateApi.list });
   const { t } = useTranslation('templates');
   const [showCreate, setShowCreate] = useState(false);
+  const [deletingID, setDeletingID] = useState<string | null>(null);
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -239,42 +301,70 @@ export default function TemplatesPage() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {data?.map((tpl) => (
-          <Link key={tpl.templateID} to={`/templates/${tpl.templateID}`} className="block">
-            <Card className="panel-hover h-full">
-              <CardHeader>
-                <div className="flex items-center gap-3">
-                  <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-violet/20 text-primary ring-1 ring-primary/20">
-                    <Package size={18} />
-                  </span>
+          <div key={tpl.templateID} className="relative group">
+            <Link to={`/templates/${tpl.templateID}`} className="block">
+              <Card className="panel-hover h-full">
+                <CardHeader>
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-violet/20 text-primary ring-1 ring-primary/20">
+                      <Package size={18} />
+                    </span>
+                    <div>
+                      <CardTitle className="text-base">{tpl.templateID}</CardTitle>
+                      <CardDescription className="font-mono text-[11px]">{tpl.templateID}</CardDescription>
+                    </div>
+                  </div>
+                  <Badge tone={tpl.status.toLowerCase() === 'ready' ? 'ok' : tpl.status.toLowerCase() === 'failed' ? 'err' : 'warn'}>
+                    {tpl.status}
+                  </Badge>
+                </CardHeader>
+                <div className="grid grid-cols-2 gap-3 pt-3 text-xs text-muted-foreground">
                   <div>
-                    <CardTitle className="text-base">{tpl.templateID}</CardTitle>
-                    <CardDescription className="font-mono text-[11px]">{tpl.templateID}</CardDescription>
+                    <div className="text-[10px] uppercase tracking-wider">{t('col.instance')}</div>
+                    <div className="mt-0.5 text-foreground/80">{tpl.instanceType ?? t('instanceDefault')}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider">{t('col.created')}</div>
+                    <div className="mt-0.5 text-foreground/80">{formatRelative(tpl.createdAt)}</div>
                   </div>
                 </div>
-                <Badge tone={tpl.status.toLowerCase() === 'ready' ? 'ok' : tpl.status.toLowerCase() === 'failed' ? 'err' : 'warn'}>
-                  {tpl.status}
-                </Badge>
-              </CardHeader>
-              <div className="grid grid-cols-2 gap-3 pt-3 text-xs text-muted-foreground">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider">{t('col.instance')}</div>
-                  <div className="mt-0.5 text-foreground/80">{tpl.instanceType ?? t('instanceDefault')}</div>
+                <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+                  <div className="truncate">{t('col.version')}: <span className="text-foreground/80">{tpl.version ?? '—'}</span></div>
+                  <div className="truncate">{t('col.image')}: <span className="text-foreground/80">{tpl.imageInfo ?? '—'}</span></div>
                 </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider">{t('col.created')}</div>
-                  <div className="mt-0.5 text-foreground/80">{formatRelative(tpl.createdAt)}</div>
-                </div>
-              </div>
-              <div className="mt-3 space-y-1 text-xs text-muted-foreground">
-                <div className="truncate">{t('col.version')}: <span className="text-foreground/80">{tpl.version ?? '—'}</span></div>
-                <div className="truncate">{t('col.image')}: <span className="text-foreground/80">{tpl.imageInfo ?? '—'}</span></div>
-              </div>
-            </Card>
-          </Link>
+              </Card>
+            </Link>
+            {/* delete button — visible on hover, always shown for failed templates */}
+            <button
+              className={[
+                'absolute top-2.5 right-2.5 z-10 flex items-center justify-center',
+                'h-7 w-7 rounded-md border bg-background shadow-sm',
+                'text-muted-foreground hover:text-destructive hover:border-destructive/50',
+                'transition-opacity duration-150',
+                tpl.status.toLowerCase() === 'failed'
+                  ? 'opacity-100'
+                  : 'opacity-0 group-hover:opacity-100',
+              ].join(' ')}
+              title={t('delete.button', { defaultValue: '删除模板' })}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setDeletingID(tpl.templateID);
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
         ))}
       </div>
 
       {showCreate && <CreateTemplateModal onClose={() => setShowCreate(false)} />}
+      {deletingID && (
+        <DeleteTemplateModal
+          templateID={deletingID}
+          onClose={() => setDeletingID(null)}
+        />
+      )}
     </div>
   );
 }

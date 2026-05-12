@@ -35,3 +35,8 @@ examples/openai-agents-code-interpreter/.scratch/
 
 pvm-guest-build/
 pvm-host-build/
+# Dev notes (local only)
+docs/webui-init.md
+docs/dev-log.md
+docs/image-1.png
+docs/image.png

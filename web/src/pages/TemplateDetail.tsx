@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowLeft, RefreshCw, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, formatDeleteError } from '@/lib/utils';
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -234,7 +234,7 @@ export default function TemplateDetailPage() {
 
   // Check if it's a 404 (template still building / not indexed yet)
   const is404 = isError && error instanceof ApiError && error.status === 404;
-  const isBuilding404 = is404 && (cachedStatus === 'RUNNING' || cachedStatus === 'BUILDING');
+  const isBuilding404 = is404 && cachedStatus !== 'FAILED';
   const isFailed404   = is404 && cachedStatus === 'FAILED';
 
   if (isError || !data) {
@@ -246,12 +246,47 @@ export default function TemplateDetailPage() {
         {isBuilding404 ? (
           <div className="space-y-2">
             <p className="text-sm text-muted-foreground">{t('building')}</p>
-            <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
+            <Button variant="outline" size="sm" onClick={() => qc.invalidateQueries({ queryKey: ['template', templateID] })}>
               刷新
             </Button>
           </div>
         ) : isFailed404 ? (
-          <p className="text-sm text-destructive">{t('buildFailed')}</p>
+          <div className="space-y-3">
+            <p className="text-sm text-destructive">{t('buildFailed')}</p>
+            <p className="text-xs text-muted-foreground">{t('buildFailedDeleteHint', { defaultValue: '该模板构建失败，无法查看详情，但你可以将其删除。' })}</p>
+            {showDeleteConfirm ? (
+              <div className="space-y-3">
+                <p className="text-sm text-muted-foreground">{t('delete.confirmDesc')}</p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    disabled={deleteMutation.isPending}
+                    onClick={() => deleteMutation.mutate()}
+                  >
+                    {deleteMutation.isPending ? t('delete.deleting') : t('delete.confirm')}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setShowDeleteConfirm(false)}>
+                    {t('delete.cancel')}
+                  </Button>
+                </div>
+                {deleteMutation.isError && (
+                  <p className="text-xs text-destructive">
+                    {formatDeleteError(deleteMutation.error)}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setShowDeleteConfirm(true)}
+              >
+                <Trash2 className="h-4 w-4 mr-1.5" />
+                {t('delete.button')}
+              </Button>
+            )}
+          </div>
         ) : (
           <p className="text-sm text-muted-foreground">{t('notFound')}</p>
         )}
@@ -351,6 +386,11 @@ export default function TemplateDetailPage() {
                 {t('delete.cancel')}
               </Button>
             </div>
+            {deleteMutation.isError && (
+              <p className="text-xs text-destructive">
+                {formatDeleteError(deleteMutation.error)}
+              </p>
+            )}
           </div>
         ) : (
           <Button

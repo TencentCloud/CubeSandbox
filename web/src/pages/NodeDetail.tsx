@@ -1,0 +1,313 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Tencent. All rights reserved.
+
+import { useQuery } from '@tanstack/react-query';
+import { Link, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import { clusterApi, sandboxApi } from '@/api/client';
+import { Badge } from '@/components/ui/badge';
+import { Skeleton } from '@/components/ui/skeleton';
+import { ArrowLeft, Package, Box, Activity } from 'lucide-react';
+import { cn, formatRelative } from '@/lib/utils';
+
+// ── Resource bar ──────────────────────────────────────────────────────────────
+
+function ResourceBar({ pct }: { pct: number }) {
+  const color =
+    pct > 85 ? 'bg-cube-rose' :
+    pct > 65 ? 'bg-cube-amber' :
+    'bg-cube-cyan';
+  return (
+    <div className="h-1 w-full rounded-full bg-white/8 overflow-hidden">
+      <div
+        className={cn('h-full rounded-full transition-all duration-700', color)}
+        style={{ width: `${Math.max(1, Math.min(100, pct))}%` }}
+      />
+    </div>
+  );
+}
+
+// ── KPI card ──────────────────────────────────────────────────────────────────
+
+function KpiCard({
+  label,
+  pct,
+  used,
+  total,
+  unit,
+}: {
+  label: string;
+  pct: number;
+  used: string;
+  total: string;
+  unit: string;
+}) {
+  const color =
+    pct > 85 ? 'text-cube-rose' :
+    pct > 65 ? 'text-cube-amber' :
+    'text-foreground';
+
+  return (
+    <div className="rounded-xl border border-white/8 bg-white/[0.03] p-4 space-y-3">
+      <div className="text-xs text-muted-foreground tracking-wider uppercase">{label}</div>
+      <div className="flex items-end justify-between gap-2">
+        <span className={cn('text-3xl font-semibold tabular-nums leading-none', color)}>
+          {pct}<span className="text-base font-normal text-muted-foreground ml-0.5">%</span>
+        </span>
+        <span className="text-xs text-muted-foreground pb-0.5">
+          {used} / {total} {unit}
+        </span>
+      </div>
+      <ResourceBar pct={pct} />
+    </div>
+  );
+}
+
+// ── Section wrapper ───────────────────────────────────────────────────────────
+
+function Section({ title, children, action }: { title: string; children: React.ReactNode; action?: React.ReactNode }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">{title}</span>
+        {action}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ── Stat row ──────────────────────────────────────────────────────────────────
+
+function StatRow({ label, value, mono }: { label: string; value?: string | null; mono?: boolean }) {
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-white/5 last:border-0">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className={cn('text-xs text-foreground/90', mono && 'font-mono')}>{value ?? '—'}</span>
+    </div>
+  );
+}
+
+// ── Condition row ─────────────────────────────────────────────────────────────
+
+function ConditionRow({ type, status, reason, message, time }: {
+  type: string; status: string; reason?: string; message?: string; time?: string | null;
+}) {
+  const ok = status === 'True';
+  return (
+    <div className="flex items-start justify-between gap-4 py-2.5 border-b border-white/5 last:border-0">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className={cn('inline-block h-1.5 w-1.5 rounded-full shrink-0', ok ? 'bg-cube-cyan' : 'bg-cube-amber')} />
+          <span className="text-sm font-medium">{type}</span>
+          <span className={cn('text-[10px] font-medium px-1.5 py-0.5 rounded border',
+            ok ? 'text-cube-cyan border-cube-cyan/30 bg-cube-cyan/5' : 'text-cube-amber border-cube-amber/30 bg-cube-amber/5'
+          )}>{status}</span>
+        </div>
+        {reason && <p className="mt-0.5 text-xs text-muted-foreground pl-3.5">{reason}</p>}
+        {message && <p className="mt-0.5 text-[11px] text-muted-foreground/60 break-all pl-3.5">{message}</p>}
+      </div>
+      {time && <span className="shrink-0 text-[11px] text-muted-foreground/60 mt-0.5">{formatRelative(time)}</span>}
+    </div>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+export default function NodeDetailPage() {
+  const { nodeID } = useParams<{ nodeID: string }>();
+  const { t } = useTranslation('nodeDetail');
+
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['node', nodeID],
+    queryFn: () => clusterApi.node(nodeID!),
+    enabled: !!nodeID,
+    refetchInterval: 10_000,
+  });
+
+  const { data: allSandboxes, isLoading: sandboxesLoading } = useQuery({
+    queryKey: ['sandboxes'],
+    queryFn: () => sandboxApi.list(),
+    refetchInterval: 10_000,
+    enabled: !!data,
+  });
+
+  const nodeSandboxes = (allSandboxes ?? []).filter(
+    (sb) => sb.clientID === data?.address,
+  );
+
+  if (isLoading) {
+    return (
+      <div className="space-y-6 max-w-3xl">
+        <Skeleton className="h-5 w-32" />
+        <Skeleton className="h-24 w-full" />
+        <Skeleton className="h-40 w-full" />
+      </div>
+    );
+  }
+
+  if (isError || !data) {
+    return (
+      <div>
+        <Link to="/nodes" className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-6">
+          <ArrowLeft className="h-4 w-4" /> {t('backToNodes')}
+        </Link>
+        <p className="text-sm text-muted-foreground">{t('notFound')}</p>
+      </div>
+    );
+  }
+
+  const cpuUsed = data.resources.totalCpuMilli - data.resources.allocatableCpuMilli;
+  const memUsed = data.resources.totalMemoryMB - data.resources.allocatableMemoryMB;
+
+  const isReady = data.status.toLowerCase() === 'ready';
+
+  return (
+    <div className="animate-fade-in space-y-8 max-w-3xl">
+      {/* back */}
+      <Link to="/nodes" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
+        <ArrowLeft className="h-4 w-4" /> {t('backToNodes')}
+      </Link>
+
+      {/* header */}
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2.5">
+            {/* live indicator */}
+            <span className="relative flex h-2 w-2">
+              {isReady && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cube-cyan opacity-60" />}
+              <span className={cn('relative inline-flex rounded-full h-2 w-2', isReady ? 'bg-cube-cyan' : 'bg-cube-amber')} />
+            </span>
+            <h1 className="text-2xl font-semibold tracking-tight">{data.hostname ?? data.nodeID}</h1>
+          </div>
+          <div className="flex items-center gap-3 pl-4.5">
+            <span className="font-mono text-xs text-muted-foreground/70">{data.nodeID}</span>
+            {data.role && (
+              <>
+                <span className="text-muted-foreground/30">·</span>
+                <span className="text-xs text-muted-foreground">{data.role}</span>
+              </>
+            )}
+            {data.address && (
+              <>
+                <span className="text-muted-foreground/30">·</span>
+                <span className="font-mono text-xs text-muted-foreground">{data.address}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0 pt-1">
+          <Activity size={13} className="text-muted-foreground/50" />
+          <span className="text-xs text-muted-foreground">{formatRelative(data.heartbeatTime)}</span>
+        </div>
+      </div>
+
+      {/* resource KPIs */}
+      <Section title={t('section.resources')}>
+        <div className="grid grid-cols-2 gap-3">
+          <KpiCard
+            label={t('fields.cpu')}
+            pct={data.saturationPct}
+            used={(cpuUsed / 1000).toFixed(1)}
+            total={(data.resources.totalCpuMilli / 1000).toFixed(1)}
+            unit="cores"
+          />
+          <KpiCard
+            label={t('fields.memory')}
+            pct={data.memorySaturationPct}
+            used={(memUsed / 1024).toFixed(1)}
+            total={(data.resources.totalMemoryMB / 1024).toFixed(1)}
+            unit="GiB"
+          />
+        </div>
+
+        {/* meta stats */}
+        <div className="rounded-xl border border-white/8 bg-white/[0.03] px-4 py-1 mt-1">
+          <StatRow label={t('fields.allocCpu')} value={`${(data.resources.allocatableCpuMilli / 1000).toFixed(1)} cores`} />
+          <StatRow label={t('fields.allocMem')} value={`${(data.resources.allocatableMemoryMB / 1024).toFixed(1)} GiB`} />
+          <StatRow label={t('fields.maxMvmSlots')} value={String(data.resources.maxMvmSlots)} />
+        </div>
+      </Section>
+
+      {/* conditions */}
+      {data.conditions && data.conditions.length > 0 && (
+        <Section title={t('section.conditions')}>
+          <div className="rounded-xl border border-white/8 bg-white/[0.03] px-4 py-1">
+            {data.conditions.map((c, i) => (
+              <ConditionRow
+                key={i}
+                type={c.type}
+                status={c.status}
+                reason={c.reason}
+                message={c.message}
+                time={c.lastTransitionTime}
+              />
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {/* local templates */}
+      {data.localTemplates && data.localTemplates.length > 0 && (
+        <Section title={t('section.localTemplates')}>
+          <div className="flex flex-wrap gap-2">
+            {data.localTemplates.map((tplID) => (
+              <Link
+                key={tplID}
+                to={`/templates/${tplID}`}
+                className="flex items-center gap-1.5 rounded-lg border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs font-mono text-muted-foreground hover:border-cube-cyan/30 hover:text-foreground hover:bg-cube-cyan/5 transition-all"
+              >
+                <Package size={11} className="text-cube-cyan/60" />
+                {tplID}
+              </Link>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {/* sandboxes */}
+      <Section
+        title={t('section.sandboxes')}
+        action={
+          nodeSandboxes.length > 0
+            ? <span className="text-xs text-muted-foreground">{nodeSandboxes.length} running</span>
+            : undefined
+        }
+      >
+        {sandboxesLoading ? (
+          <Skeleton className="h-20 w-full" />
+        ) : nodeSandboxes.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t('empty.sandboxes')}</p>
+        ) : (
+          <div className="rounded-xl border border-white/8 bg-white/[0.03] divide-y divide-white/5">
+            {nodeSandboxes.map((sb) => (
+              <Link
+                key={sb.sandboxID}
+                to={`/sandboxes/${sb.sandboxID}`}
+                className="flex items-center justify-between gap-3 px-4 py-2.5 hover:bg-white/[0.03] transition-colors first:rounded-t-xl last:rounded-b-xl"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <Box size={12} className="shrink-0 text-muted-foreground/50" />
+                  <span className="font-mono text-xs text-foreground/80 truncate">{sb.sandboxID}</span>
+                  <span className="text-xs text-muted-foreground/50 truncate hidden sm:block">{sb.templateID}</span>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className={cn(
+                    'inline-flex items-center gap-1.5 text-[11px] font-medium',
+                    sb.state === 'running' ? 'text-cube-cyan' : sb.state === 'paused' ? 'text-cube-amber' : 'text-muted-foreground'
+                  )}>
+                    <span className={cn('h-1.5 w-1.5 rounded-full',
+                      sb.state === 'running' ? 'bg-cube-cyan' : sb.state === 'paused' ? 'bg-cube-amber' : 'bg-muted-foreground'
+                    )} />
+                    {sb.state}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground/60">{formatRelative(sb.startedAt)}</span>
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
+      </Section>
+    </div>
+  );
+}
