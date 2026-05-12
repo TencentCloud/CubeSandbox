@@ -109,6 +109,20 @@ check_proxy_cert_preflight() {
   :
 }
 
+generate_cubemaster_config_ports() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+
+  local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
+  local mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+
+  ensure_file "${cfg}"
+  sed -i \
+    -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
+    -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
+    "${cfg}"
+}
+
 check_hardware_preflight() {
   if [[ ! -e /dev/kvm ]]; then
     log "KVM is not supported or not enabled (/dev/kvm not found)."
@@ -347,6 +361,7 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/cube-image" "${INSTALL_PREFIX}/cube-image"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
+  generate_cubemaster_config_ports
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
 
