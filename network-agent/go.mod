@@ -9,7 +9,7 @@ require (
 	github.com/tencentcloud/CubeSandbox/cubelog v0.1.0
 	github.com/vishvananda/netlink v1.1.0
 	golang.org/x/sys v0.39.0
-	google.golang.org/grpc v1.79.2
+	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.10
 )
 
