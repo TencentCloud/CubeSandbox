@@ -379,6 +379,22 @@ pub struct Config {
     ///
     /// The default is `FindPaths`.
     pub migration_mode: MigrationMode,
+
+    /// Whether to use the legacy DFS-based `PathReconstructor` during the preserialization
+    /// phase of migration instead of the optimized "store-only" reconstructor.
+    ///
+    /// When `false` (default), preserialization only iterates the inode store (and reverse-looks
+    /// up parents via a path -> inode hash table built in a single store pass), avoiding any
+    /// directory tree traversal. Any parent inodes that are not yet in the store are
+    /// materialized on demand via `openat(O_PATH | O_NOFOLLOW)` from the nearest known anchor,
+    /// so the result is semantically identical to the legacy DFS reconstructor. This is much
+    /// faster when the shared directory is large but only a small subset has been looked up by
+    /// the guest, and especially when the shared tree is on a slow backend (e.g. NFS).
+    ///
+    /// When `true`, fall back to the original full-tree DFS-based `PathReconstructor` (e.g. as
+    /// an escape hatch if the store-only reconstructor is suspected of misbehaving in a
+    /// specific setup).
+    pub migration_dfs_preserialization: bool,
 }
 
 impl Default for Config {
@@ -410,6 +426,7 @@ impl Default for Config {
             migration_verify_handles: false,
             migration_confirm_paths: false,
             migration_mode: MigrationMode::FindPaths,
+            migration_dfs_preserialization: false,
         }
     }
 }

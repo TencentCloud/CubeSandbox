@@ -20,7 +20,7 @@ mod serialized;
 
 use crate::filesystem::SerializableFileSystem;
 use crate::passthrough::PassthroughFs;
-use preserialization::{InodeMigrationInfoConstructor, PathReconstructor};
+use preserialization::{InodeMigrationInfoConstructor, PathReconstructor, StoreOnlyReconstructor};
 use std::convert::{TryFrom, TryInto};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -38,10 +38,17 @@ impl SerializableFileSystem for PassthroughFs {
         // filesystem code makes an effort to set it (when the node is created).
         self.track_migration_info.store(true, Ordering::Relaxed);
 
-        // Create the reconstructor (which reconstructs parent+filename information for each node
-        // in our inode store), and run it
-        let reconstructor = PathReconstructor::new(self, cancel);
-        let result = reconstructor.execute();
+        // Pick a reconstructor.  The new "store-only" implementation is far cheaper for big
+        // shared directories (and especially for slow backends like NFS); the legacy
+        // `PathReconstructor` (full-tree DFS) is kept as a fallback that can be re-enabled via
+        // configuration.
+        let result = if self.cfg.migration_dfs_preserialization {
+            let reconstructor = PathReconstructor::new(self, cancel);
+            reconstructor.execute()
+        } else {
+            let reconstructor = StoreOnlyReconstructor::new(self, cancel);
+            reconstructor.execute()
+        };
         if result.is_err() {
             // Do not leave incomplete data behind (cancelling returns an error, too, landing here)
             self.inodes.clear_migration_info();
