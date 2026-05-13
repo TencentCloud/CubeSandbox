@@ -206,6 +206,7 @@ check_install_preflight() {
   require_cmd tar
   require_cmd rg
   require_cmd ss
+  require_cmd systemctl
 
   # runtime common helpers used by up/down scripts.
   require_cmd bash
@@ -294,6 +295,79 @@ PY
   fi
 }
 
+systemd_target_for_role() {
+  local role="$1"
+  case "${role}" in
+    control)
+      printf '%s\n' "cube-sandbox-control.target"
+      ;;
+    compute)
+      printf '%s\n' "cube-sandbox-compute.target"
+      ;;
+    *)
+      die "unsupported role for systemd target: ${role}"
+      ;;
+  esac
+}
+
+stop_existing_systemd_deployment() {
+  systemctl disable --now \
+    cube-sandbox-control.target \
+    cube-sandbox-compute.target \
+    cube-sandbox-seed-cubemaster-metrics.timer >/dev/null 2>&1 || true
+}
+
+stop_existing_legacy_deployment() {
+  # Legacy bridge for upgrading pre-systemd one-click installs.
+  # New installs are systemd-only; this path only stops old nohup/pidfile deployments
+  # before the install prefix is replaced.
+  local installed_role="$1"
+  local legacy_stop_script=""
+
+  if [[ "${installed_role}" == "compute" && -x "${INSTALL_PREFIX}/scripts/one-click/down-compute.sh" ]]; then
+    legacy_stop_script="${INSTALL_PREFIX}/scripts/one-click/down-compute.sh"
+  elif [[ -x "${INSTALL_PREFIX}/scripts/one-click/down-with-deps.sh" ]]; then
+    legacy_stop_script="${INSTALL_PREFIX}/scripts/one-click/down-with-deps.sh"
+  fi
+
+  if [[ -n "${legacy_stop_script}" ]]; then
+    log "stopping legacy pre-systemd deployment under ${INSTALL_PREFIX}"
+    ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
+    ONE_CLICK_RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env" \
+      "${legacy_stop_script}" || true
+  fi
+}
+
+install_systemd_units() {
+  local install_units_script="${INSTALL_PREFIX}/scripts/systemd/install-units.sh"
+  ensure_file "${install_units_script}"
+  ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
+  ONE_CLICK_RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env" \
+    "${install_units_script}"
+}
+
+configure_metrics_timer() {
+  if [[ "${DEPLOY_ROLE}" != "control" ]]; then
+    systemctl disable --now cube-sandbox-seed-cubemaster-metrics.timer >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if [[ "${CUBEMASTER_METRIC_LOOP:-0}" == "1" ]]; then
+    systemctl enable --now cube-sandbox-seed-cubemaster-metrics.timer
+  else
+    systemctl disable --now cube-sandbox-seed-cubemaster-metrics.timer >/dev/null 2>&1 || true
+  fi
+}
+
+start_systemd_target() {
+  local target
+  target="$(systemd_target_for_role "${DEPLOY_ROLE}")"
+  systemctl disable --now \
+    cube-sandbox-control.target \
+    cube-sandbox-compute.target >/dev/null 2>&1 || true
+  systemctl enable --now "${target}"
+}
+
 require_root
 
 # Run critical preflight checks that do not depend on dependency installation first
@@ -335,18 +409,9 @@ if [[ -n "${detected_installed_role}" ]]; then
   installed_role="${detected_installed_role}"
 fi
 
-if [[ "${installed_role}" == "compute" && -x "${INSTALL_PREFIX}/scripts/one-click/down-compute.sh" ]]; then
-  stop_script="${PKG_ROOT}/scripts/one-click/down-compute.sh"
-else
-  stop_script="${PKG_ROOT}/scripts/one-click/down-with-deps.sh"
-fi
-
-if [[ -x "${stop_script}" ]]; then
-  log "stopping existing deployment under ${INSTALL_PREFIX}"
-  ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
-  ONE_CLICK_RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env" \
-    "${stop_script}" || true
-fi
+log "stopping existing systemd deployment under ${INSTALL_PREFIX}"
+stop_existing_systemd_deployment
+stop_existing_legacy_deployment "${installed_role}"
 
 if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
   rm -rf \
@@ -358,6 +423,7 @@ if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
     "${INSTALL_PREFIX}/coredns" \
     "${INSTALL_PREFIX}/webui" \
     "${INSTALL_PREFIX}/support" \
+    "${INSTALL_PREFIX}/systemd" \
     "${INSTALL_PREFIX}/cube-shim" \
     "${INSTALL_PREFIX}/cube-kernel-scf" \
     "${INSTALL_PREFIX}/cube-image" \
@@ -375,6 +441,7 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/cube-shim" "${INSTALL_PREFIX}/cube-shim"
   copy_dir_contents "${PKG_ROOT}/cube-kernel-scf" "${INSTALL_PREFIX}/cube-kernel-scf"
   copy_dir_contents "${PKG_ROOT}/cube-image" "${INSTALL_PREFIX}/cube-image"
+  copy_dir_contents "${PKG_ROOT}/systemd" "${INSTALL_PREFIX}/systemd"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
   generate_cubemaster_config_ports
@@ -424,6 +491,7 @@ chmod +x "${INSTALL_PREFIX}/network-agent/bin/network-agent"
 chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*
 chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"
 chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
+chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
 
 if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
   cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"
@@ -451,15 +519,9 @@ else
   rm -f /usr/local/bin/cubemastercli
 fi
 
-if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
-  start_script="${INSTALL_PREFIX}/scripts/one-click/up-compute.sh"
-else
-  start_script="${INSTALL_PREFIX}/scripts/one-click/up-with-deps.sh"
-fi
-
-ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
-ONE_CLICK_RUNTIME_ENV_FILE="${RUNTIME_ENV_FILE}" \
-  "${start_script}"
+install_systemd_units
+start_systemd_target
+configure_metrics_timer
 
 if [[ "${ONE_CLICK_RUN_QUICKCHECK:-1}" == "1" ]]; then
   ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \

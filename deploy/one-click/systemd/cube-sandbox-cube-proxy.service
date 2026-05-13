@@ -1,0 +1,21 @@
+[Unit]
+Description=Cube Sandbox cube-proxy container
+After=docker.service network-online.target cube-sandbox-redis.service
+Requires=docker.service
+Wants=network-online.target cube-sandbox-redis.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-start.sh
+ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-postcheck.sh
+ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-stop.sh
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=cube-sandbox-control.target

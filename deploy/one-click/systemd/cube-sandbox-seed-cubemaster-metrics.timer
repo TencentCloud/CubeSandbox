@@ -1,0 +1,12 @@
+[Unit]
+Description=Cube Sandbox seed CubeMaster metrics timer
+PartOf=cube-sandbox-control.target
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Unit=cube-sandbox-seed-cubemaster-metrics.service
+Persistent=true
+
+[Install]
+WantedBy=cube-sandbox-control.target

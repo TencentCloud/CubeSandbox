@@ -1,0 +1,27 @@
+[Unit]
+Description=Cube Sandbox Cubelet
+After=network-online.target cube-sandbox-network-agent.service
+Wants=network-online.target cube-sandbox-network-agent.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+RequiresMountsFor=/data/cubelet /data/cube-shim /data/snapshot_pack
+PartOf=cube-sandbox-control.target cube-sandbox-compute.target
+
+[Service]
+Type=forking
+ExecStartPre=/usr/local/services/cubetoolbox/scripts/systemd/prepare-compute-role.sh
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+PIDFile=/run/cube-sandbox-systemd/cubelet.pid
+Delegate=yes
+KillMode=process
+ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cubelet-start.sh
+ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/cubelet-stop.sh
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=cube-sandbox-control.target
+WantedBy=cube-sandbox-compute.target

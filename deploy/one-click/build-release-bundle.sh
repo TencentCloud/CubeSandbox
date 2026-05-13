@@ -23,6 +23,7 @@ CUBE_PROXY_TEMPLATE_DIR="${SCRIPT_DIR}/cubeproxy"
 CUBE_COREDNS_TEMPLATE_DIR="${SCRIPT_DIR}/coredns"
 CUBE_SUPPORT_TEMPLATE_DIR="${SCRIPT_DIR}/support"
 CUBE_WEBUI_TEMPLATE_DIR="${SCRIPT_DIR}/webui"
+CUBE_SYSTEMD_TEMPLATE_DIR="${SCRIPT_DIR}/systemd"
 CUBE_PROXY_SOURCE_DIR="${ONE_CLICK_CUBE_PROXY_SOURCE_DIR:-${ROOT_DIR}/CubeProxy}"
 WEB_SOURCE_DIR="${ONE_CLICK_WEB_SOURCE_DIR:-${ROOT_DIR}/web}"
 WEB_DIST_OVERRIDE="${ONE_CLICK_WEB_DIST_DIR:-}"
@@ -160,6 +161,7 @@ ensure_dir "${CUBE_PROXY_TEMPLATE_DIR}"
 ensure_dir "${CUBE_COREDNS_TEMPLATE_DIR}"
 ensure_dir "${CUBE_SUPPORT_TEMPLATE_DIR}"
 ensure_dir "${CUBE_WEBUI_TEMPLATE_DIR}"
+ensure_dir "${CUBE_SYSTEMD_TEMPLATE_DIR}"
 ensure_dir "${CUBE_PROXY_SOURCE_DIR}"
 
 log "building runtime layout"
@@ -213,9 +215,11 @@ mkdir -p \
   "${PACKAGE_ROOT}/webui/dist" \
   "${PACKAGE_ROOT}/support" \
   "${PACKAGE_ROOT}/support/bin" \
+  "${PACKAGE_ROOT}/systemd" \
   "${PACKAGE_ROOT}/cube-vs/network" \
   "${PACKAGE_ROOT}/cube-snapshot" \
   "${PACKAGE_ROOT}/scripts/one-click" \
+  "${PACKAGE_ROOT}/scripts/systemd" \
   "${PACKAGE_ROOT}/sql"
 
 copy_file "${CORE_BIN_DIR}/network-agent" "${PACKAGE_ROOT}/network-agent/bin/network-agent"
@@ -243,6 +247,7 @@ copy_dir_contents "${ROOT_DIR}/Cubelet/dynamicconf" "${PACKAGE_ROOT}/Cubelet/dyn
 copy_dir_contents "${CUBE_PROXY_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cubeproxy"
 copy_dir_contents "${CUBE_COREDNS_TEMPLATE_DIR}" "${PACKAGE_ROOT}/coredns"
 copy_dir_contents "${CUBE_WEBUI_TEMPLATE_DIR}" "${PACKAGE_ROOT}/webui"
+copy_dir_contents "${CUBE_SYSTEMD_TEMPLATE_DIR}" "${PACKAGE_ROOT}/systemd"
 copy_dir_contents "${CUBE_PROXY_SOURCE_DIR}" "${PACKAGE_ROOT}/cubeproxy/build-context"
 rm -f "${PACKAGE_ROOT}/cubeproxy/build-context/Makefile"
 build_web_dist "${PACKAGE_ROOT}/webui/dist"
@@ -253,13 +258,15 @@ copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-shim" "${PACKAGE_ROOT}/cube-shim"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf" "${PACKAGE_ROOT}/cube-kernel-scf"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image" "${PACKAGE_ROOT}/cube-image"
 
-copy_dir_contents "${SCRIPT_DIR}/scripts/one-click" "${PACKAGE_ROOT}/scripts/one-click"
-copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cube-diag"
+copy_file "${SCRIPT_DIR}/scripts/one-click/common.sh" "${PACKAGE_ROOT}/scripts/one-click/common.sh"
+copy_file "${SCRIPT_DIR}/scripts/one-click/quickcheck.sh" "${PACKAGE_ROOT}/scripts/one-click/quickcheck.sh"
+copy_file "${SCRIPT_DIR}/scripts/one-click/seed-cubemaster-metrics.sh" "${PACKAGE_ROOT}/scripts/one-click/seed-cubemaster-metrics.sh"
+copy_dir_contents "${SCRIPT_DIR}/scripts/systemd" "${PACKAGE_ROOT}/scripts/systemd"
 copy_dir_contents "${SCRIPT_DIR}/sql" "${PACKAGE_ROOT}/sql"
 
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;
-find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/scripts/systemd" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
 tar -C "${WORK_ROOT}" -czf "${PACKAGE_TAR}" "sandbox-package"

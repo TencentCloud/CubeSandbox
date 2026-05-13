@@ -12,10 +12,52 @@ CUBE_API_HEALTH_ADDR="${CUBE_API_HEALTH_ADDR:-127.0.0.1:3000}"
 ROLE="$(one_click_deploy_role)"
 NODE_ID="${CUBE_SANDBOX_NODE_IP:-}"
 
+require_cmd systemctl
+
+check_unit_active() {
+  local unit="$1"
+  systemctl is-active --quiet "${unit}" || die "expected systemd unit not active: ${unit}"
+}
+
+check_container_ready() {
+  local container="$1"
+  local status
+  status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container}" 2>/dev/null || true)"
+  [[ "${status}" == "healthy" || "${status}" == "running" ]] || die "container is not ready: ${container} (status=${status:-unknown})"
+}
+
+echo "[quickcheck] role=${ROLE}"
 echo "[quickcheck] cubemaster=${MASTER_ADDR}"
 echo "[quickcheck] network-agent-health=${NA_HEALTH_ADDR}"
 if [[ "${ROLE}" != "compute" ]]; then
   echo "[quickcheck] cube-api-health=${CUBE_API_HEALTH_ADDR}"
+fi
+
+echo "[quickcheck] check systemd units"
+check_unit_active cube-sandbox-network-agent.service
+check_unit_active cube-sandbox-cubelet.service
+if [[ "${ROLE}" != "compute" ]]; then
+  check_unit_active cube-sandbox-mysql.service
+  check_unit_active cube-sandbox-redis.service
+  check_unit_active cube-sandbox-cubemaster.service
+  check_unit_active cube-sandbox-cube-api.service
+  check_unit_active cube-sandbox-cube-proxy.service
+  check_unit_active cube-sandbox-coredns.service
+  check_unit_active cube-sandbox-dns.service
+  if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then
+    check_unit_active cube-sandbox-webui.service
+  fi
+fi
+
+if command -v docker >/dev/null 2>&1 && [[ "${ROLE}" != "compute" ]]; then
+  echo "[quickcheck] check container runtime state"
+  check_container_ready "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
+  check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
+  check_container_ready "${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
+  check_container_ready "${CUBE_PROXY_COREDNS_CONTAINER:-cube-proxy-coredns}"
+  if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then
+    check_container_ready "${WEB_UI_CONTAINER_NAME:-cube-webui}"
+  fi
 fi
 
 echo "[quickcheck] 1/5 check network-agent healthz"

@@ -17,7 +17,7 @@ This directory is used to build and deliver the single-machine one-click release
 - `smoke.sh`: Runs basic health checks.
 - `env.example`: Shared environment variable template for both the build machine and the target machine.
 - `lib/common.sh`: Common shell utility functions.
-- `scripts/one-click/`: Start/stop and validation scripts executed after installation.
+- `scripts/one-click/`: Validation and maintenance helpers used by the systemd-managed deployment after installation.
 - `sql/`: MySQL initialization schema and seed data.
 
 ## Build Inputs
@@ -122,7 +122,7 @@ One-click does not create an extra global `configs/` layer on the target machine
 - `cubeproxy/` → `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` → `/usr/local/services/cubetoolbox/webui/`
 
-`Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is. At runtime, `network-agent` preferentially reads the network plugin configuration from `Cubelet/config/config.toml` via `--cubelet-config` to stay consistent with `Cubelet`'s network parameters. `cube-api` reads environment variables directly from `.one-click.env` on startup, listening on `0.0.0.0:3000` by default and forwarding to the local `cubemaster`. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and managed by the local `docker compose` on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy` and built and started locally via `docker compose build && up`. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway`.
+`Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is. At runtime, `network-agent` preferentially reads the network plugin configuration from `Cubelet/config/config.toml` via `--cubelet-config` to stay consistent with `Cubelet`'s network parameters. `cube-api` reads environment variables directly from `.one-click.env` on startup, listening on `0.0.0.0:3000` by default and forwarding to the local `cubemaster`. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and run in Docker containers managed by dedicated systemd services on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy`, built locally from the bundled build context, and managed by systemd. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway` under systemd management.
 
 ## Target Machine Installation
 
@@ -136,6 +136,13 @@ sudo ./install.sh
 ```
 
 The default installation path is `/usr/local/services/cubetoolbox`.
+
+New one-click installations are managed by systemd only:
+
+- control node: `cube-sandbox-control.target`
+- compute node: `cube-sandbox-compute.target`
+
+The installer copies the unit files into `/etc/systemd/system/` and runs `enable --now` for the selected role automatically. Legacy shell up/down scripts are kept only as a short-term upgrade bridge for older pre-systemd installs and are not part of the runtime interface for new installations.
 
 Common commands:
 
@@ -206,7 +213,7 @@ MySQL/Redis dependencies are deployed by default to:
 /usr/local/services/cubetoolbox/support
 ```
 
-During installation, a `docker-compose.yaml` is rendered in this directory to manage:
+During installation, runtime files are prepared in this directory and the following containers are managed individually by systemd:
 
 - `mysql:8.0`
 - `redis:7-alpine`
@@ -236,11 +243,12 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 During installation, the following steps are performed:
 
 - If `mkcert` is not already installed on the system, it is copied from the bundled `support/bin/mkcert` to `/usr/local/bin/mkcert`. Then `mkcert -install` is run on the host under `CUBE_PROXY_CERT_DIR` (default `/usr/local/services/cubetoolbox/cubeproxy/certs/`) to generate `cube.app+3.pem` and `cube.app+3-key.pem`.
-- A `docker-compose.yaml` is rendered under `/usr/local/services/cubetoolbox/support/` and MySQL/Redis are started.
+- Runtime configuration and rendered files are prepared under `/usr/local/services/cubetoolbox/support/`, `cubeproxy/`, `coredns/`, and `webui/`.
 - `cubeproxy/global.conf` is rendered using `CUBE_SANDBOX_NODE_IP`.
-- A `docker-compose.yaml` is generated under `/usr/local/services/cubetoolbox/cubeproxy/`. The host's `CUBE_PROXY_CERT_DIR` is mounted read-only into the container at `/usr/local/openresty/nginx/certs/`, and `CubeProxy/Dockerfile` from the bundled build context is used for the local `cube proxy` image build.
-- A `CoreDNS` container is started. If `resolvectl` is available, one-click creates a dedicated dummy link (default `cube-dns0`) with a local address, binds CoreDNS to `169.254.254.53` on that link by default, and routes `cube.app` through the link without affecting the host's default public DNS path. If `resolvectl` is unavailable on the target machine, the installer falls back to `NetworkManager + dnsmasq`, continuing to use `127.0.0.54` by default.
-- Host processes `network-agent`, `cubemaster`, `cube-api`, and `cubelet` are started, and `cube-api /health` is verified in `quickcheck.sh`.
+- `cube-sandbox-*.service|target|timer` unit files are installed under `/etc/systemd/system/`, and both host processes and Docker containers are managed uniformly by systemd.
+- MySQL, Redis, cube proxy, WebUI, and CoreDNS still run in Docker, but their lifecycle is managed directly by dedicated systemd services instead of relying on runtime `docker compose up -d`.
+- If `resolvectl` is available, one-click creates a dedicated dummy link (default `cube-dns0`) with a local address, binds CoreDNS to `169.254.254.53` on that link by default, and routes `cube.app` through the link without affecting the host's default public DNS path. If `resolvectl` is unavailable on the target machine, the installer falls back to `NetworkManager + dnsmasq`, continuing to use `127.0.0.54` by default.
+- Host processes `network-agent`, `cubemaster`, `cube-api`, and `cubelet` are started through systemd, and `quickcheck.sh` verifies both unit state and service health.
 - A standard WebUI nginx container is started under `/usr/local/services/cubetoolbox/webui/`. It mounts `webui/dist` as read-only static content, publishes `WEB_UI_HOST_PORT` (`12088` by default), maps `host.docker.internal` to Docker `host-gateway`, and verifies `/cubeapi/v1/health` through the nginx reverse proxy.
 
 Stopping one-click will simultaneously stop MySQL/Redis under `/usr/local/services/cubetoolbox/support`, WebUI, `cube proxy` / `CoreDNS`, and the host processes `network-agent` / `cubemaster` / `cube-api` / `cubelet`, and will roll back the host DNS routing configuration for `cube.app`.

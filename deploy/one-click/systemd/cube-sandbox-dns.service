@@ -1,0 +1,21 @@
+[Unit]
+Description=Cube Sandbox host DNS routing
+After=cube-sandbox-coredns.service
+Requires=cube-sandbox-coredns.service
+BindsTo=cube-sandbox-coredns.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+RemainAfterExit=yes
+ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/dns-host-route-up.sh
+ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/dns-host-route-down.sh
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=cube-sandbox-control.target

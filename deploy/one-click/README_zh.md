@@ -17,7 +17,7 @@
 - `smoke.sh`：执行基础健康检查。
 - `env.example`：构建机和目标机共用的环境变量模板。
 - `lib/common.sh`：公共 shell 函数。
-- `scripts/one-click/`：安装后实际执行的启停与校验脚本。
+- `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
 - `sql/`：MySQL 初始化 schema 和 seed 数据。
 
 ## 构建输入
@@ -122,7 +122,7 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` -> `/usr/local/services/cubetoolbox/webui/`
 
-其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`；`network-agent` 实际启动时优先通过 `--cubelet-config` 读取 `Cubelet/config/config.toml` 中的网络插件配置，以保证和 `Cubelet` 的网络参数保持一致；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，由目标机本地 `docker compose` 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，在目标机本地 `docker compose build && up`。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI。
+其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`；`network-agent` 实际启动时优先通过 `--cubelet-config` 读取 `Cubelet/config/config.toml` 中的网络插件配置，以保证和 `Cubelet` 的网络参数保持一致；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
 
 ## 目标机安装
 
@@ -136,6 +136,13 @@ sudo ./install.sh
 ```
 
 默认会安装到 `/usr/local/services/cubetoolbox`。
+
+新的 one-click 安装统一只使用 systemd 托管：
+
+- 控制节点：`cube-sandbox-control.target`
+- 计算节点：`cube-sandbox-compute.target`
+
+安装脚本会自动把单元文件安装到 `/etc/systemd/system/`，并按角色执行 `enable --now`。旧的 shell 启停脚本只作为 pre-systemd 历史版本升级时的短期过渡能力保留，不属于新安装的运行接口。
 
 常用命令：
 
@@ -206,7 +213,7 @@ MySQL/Redis 依赖默认会部署到：
 /usr/local/services/cubetoolbox/support
 ```
 
-安装时会在这个目录下渲染并使用 `docker-compose.yaml`，统一管理：
+安装时会在这个目录下准备运行期文件，并由 systemd 分别管理：
 
 - `mysql:8.0`
 - `redis:7-alpine`
@@ -236,12 +243,13 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 安装过程中会做这些事：
 
 - 若系统尚未安装 `mkcert`，从安装包内置的 `support/bin/mkcert` 复制到 `/usr/local/bin/mkcert`，再在宿主机 `CUBE_PROXY_CERT_DIR`（默认 `/usr/local/services/cubetoolbox/cubeproxy/certs/`）下执行 `mkcert -install` 并生成 `cube.app+3.pem`、`cube.app+3-key.pem`
-- 在 `/usr/local/services/cubetoolbox/support/` 下生成 `docker-compose.yaml` 并启动 MySQL/Redis
+- 在 `/usr/local/services/cubetoolbox/support/`、`cubeproxy/`、`coredns/`、`webui/` 下生成运行期配置与渲染文件
 - 用 `CUBE_SANDBOX_NODE_IP` 渲染 `cubeproxy/global.conf`
-- 在 `/usr/local/services/cubetoolbox/cubeproxy/` 下生成 `docker-compose.yaml`，把宿主机 `CUBE_PROXY_CERT_DIR` 只读挂载到容器内 `/usr/local/openresty/nginx/certs/`，并使用发布包 build context 中来自 `CubeProxy/Dockerfile` 的标准 Dockerfile 本地构建 `cube proxy` 镜像
-- 启动 `CoreDNS` 容器；若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS，避免污染宿主机默认公网 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`，默认继续使用 `127.0.0.54`
-- 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 `cube-api /health`
-- 在 `/usr/local/services/cubetoolbox/webui/` 下启动标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/cubeapi/v1/health`
+- 安装 `/etc/systemd/system/cube-sandbox-*.service|target|timer`，并把宿主机进程与容器统一交给 systemd 管理
+- MySQL、Redis、cube proxy、WebUI、CoreDNS 仍使用 Docker 运行，但生命周期改由各自的 systemd service 直接管理，而不是运行期依赖 `docker compose up -d`
+- 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`，默认继续使用 `127.0.0.54`
+- 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 systemd 状态与业务健康检查
+- 在 `/usr/local/services/cubetoolbox/webui/` 下运行标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/cubeapi/v1/health`
 
 停止 one-click 时会同时停止 `/usr/local/services/cubetoolbox/support` 下的 MySQL/Redis、WebUI、`cube proxy` / `CoreDNS`、宿主机进程 `network-agent` / `cubemaster` / `cube-api` / `cubelet`，并回滚 `cube.app` 的宿主机 DNS 路由配置。
 

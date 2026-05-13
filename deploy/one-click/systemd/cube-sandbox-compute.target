@@ -1,0 +1,9 @@
+[Unit]
+Description=Cube Sandbox compute-node stack
+After=network-online.target
+Wants=network-online.target
+Wants=cube-sandbox-network-agent.service cube-sandbox-cubelet.service
+AllowIsolate=no
+
+[Install]
+WantedBy=multi-user.target

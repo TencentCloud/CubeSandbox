@@ -1,0 +1,16 @@
+[Unit]
+Description=Cube Sandbox seed CubeMaster metrics
+After=network-online.target cube-sandbox-cubemaster.service cube-sandbox-redis.service
+Wants=network-online.target cube-sandbox-cubemaster.service cube-sandbox-redis.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/seed-cubemaster-metrics.sh
+
+[Install]
+WantedBy=cube-sandbox-control.target
