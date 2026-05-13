@@ -481,6 +481,7 @@ type RootfsArtifactInfo struct {
 type TemplateImageJobInfo struct {
 	JobID                   string              `json:"job_id,omitempty"`
 	TemplateID              string              `json:"template_id,omitempty"`
+	RequestID               string              `json:"request_id,omitempty"`
 	AttemptNo               int32               `json:"attempt_no,omitempty"`
 	RetryOfJobID            string              `json:"retry_of_job_id,omitempty"`
 	Operation               string              `json:"operation,omitempty"`

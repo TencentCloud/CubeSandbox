@@ -79,6 +79,8 @@ var deleteRootfsArtifactRecord = func(ctx context.Context, artifactID string) er
 	return store.db.WithContext(ctx).Unscoped().Table(constants.RootfsArtifactTableName).
 		Where("artifact_id = ?", artifactID).Delete(&models.RootfsArtifact{}).Error
 }
+const legacyRequestIDPrefix = "legacy-"
+
 var ErrNoFailedTemplateReplicas = errors.New("no failed template replicas matched redo request")
 
 type dockerInspectImage struct {
@@ -146,6 +148,7 @@ func initTemplateImageJobTable(client *gorm.DB) error {
 			id bigint unsigned NOT NULL AUTO_INCREMENT,
 			job_id varchar(128) NOT NULL COMMENT 'job id',
 			template_id varchar(128) NOT NULL DEFAULT '' COMMENT 'template id',
+			request_id varchar(128) NOT NULL DEFAULT '' COMMENT 'idempotent request id',
 			attempt_no int NOT NULL DEFAULT 1 COMMENT 'attempt number',
 			retry_of_job_id varchar(128) NOT NULL DEFAULT '' COMMENT 'previous job id',
 			operation varchar(32) NOT NULL DEFAULT '' COMMENT 'job operation',
@@ -179,6 +182,7 @@ func initTemplateImageJobTable(client *gorm.DB) error {
 			PRIMARY KEY (id),
 			UNIQUE KEY idx_template_image_job_id (job_id),
 			UNIQUE KEY idx_template_image_template_attempt (template_id,attempt_no),
+			KEY idx_template_image_request_id (request_id),
 			KEY idx_template_image_status (status),
 			KEY idx_template_image_template_status (template_id,status)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error; err != nil {
@@ -190,8 +194,13 @@ func initTemplateImageJobTable(client *gorm.DB) error {
 
 func migrateTemplateImageJobTable(client *gorm.DB, tableName string) error {
 	jobModel := &models.TemplateImageJob{}
+	if !client.Migrator().HasColumn(jobModel, "request_id") {
+		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN request_id varchar(128) NOT NULL DEFAULT '' AFTER template_id`).Error; err != nil {
+			return err
+		}
+	}
 	if !client.Migrator().HasColumn(jobModel, "attempt_no") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN attempt_no int NOT NULL DEFAULT 1 AFTER template_id`).Error; err != nil {
+		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN attempt_no int NOT NULL DEFAULT 1 AFTER request_id`).Error; err != nil {
 			return err
 		}
 	}
@@ -253,7 +262,135 @@ func migrateTemplateImageJobTable(client *gorm.DB, tableName string) error {
 			return err
 		}
 	}
+	if !client.Migrator().HasIndex(jobModel, "idx_template_image_request_id") {
+		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD KEY idx_template_image_request_id (request_id)`).Error; err != nil {
+			return err
+		}
+	}
+	if err := normalizeTemplateImageJobRequestIDs(client, tableName); err != nil {
+		return err
+	}
+	if !client.Migrator().HasIndex(jobModel, "idx_template_image_request_operation") {
+		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD UNIQUE KEY idx_template_image_request_operation (request_id,operation)`).Error; err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func normalizeTemplateImageJobRequestIDs(client *gorm.DB, tableName string) error {
+	type requestBinding struct {
+		JobID     string
+		RequestID string
+		Operation string
+	}
+	var bindings []requestBinding
+	if err := client.Table(tableName).
+		Select("job_id, request_id, operation").
+		Order("id asc").
+		Find(&bindings).Error; err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(bindings))
+	for _, binding := range bindings {
+		jobID := strings.TrimSpace(binding.JobID)
+		if jobID == "" {
+			continue
+		}
+		requestID := strings.TrimSpace(binding.RequestID)
+		operation := strings.TrimSpace(binding.Operation)
+		normalized := requestID
+		switch {
+		case normalized == "":
+			normalized = legacyRequestIDPrefix + jobID
+		case hasSeenRequestBinding(seen, normalized, operation):
+			normalized = normalized + "#" + jobID
+		}
+		if normalized != requestID {
+			if err := client.Exec(`UPDATE `+tableName+` SET request_id = ? WHERE job_id = ?`, normalized, jobID).Error; err != nil {
+				return err
+			}
+		}
+		seen[requestBindingKey(normalized, operation)] = struct{}{}
+	}
+	return nil
+}
+
+func hasSeenRequestBinding(seen map[string]struct{}, requestID, operation string) bool {
+	_, ok := seen[requestBindingKey(requestID, operation)]
+	return ok
+}
+
+func requestBindingKey(requestID, operation string) string {
+	return strings.TrimSpace(requestID) + "\x00" + strings.TrimSpace(operation)
+}
+
+func nextAttemptNoFromLatest(latestAttemptNo int32) int32 {
+	if latestAttemptNo <= 0 {
+		return 2
+	}
+	return latestAttemptNo + 1
+}
+
+func distributionScopeFromTargets(targets []*node.Node) []string {
+	scope := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target == nil {
+			continue
+		}
+		scope = append(scope, target.ID())
+	}
+	return scope
+}
+
+func newRedoWorkingRequest(sourceReq *types.CreateTemplateFromImageReq, targets []*node.Node) types.CreateTemplateFromImageReq {
+	workingReq := *sourceReq
+	workingReq.Request = &types.Request{RequestID: uuid.NewString()}
+	workingReq.DistributionScope = distributionScopeFromTargets(targets)
+	return workingReq
+}
+
+func newCreateTemplateImageJobRecord(jobID string, normalized *types.CreateTemplateFromImageReq, requestSnapshot string, attemptNo int32, retryOfJobID string) *models.TemplateImageJob {
+	return &models.TemplateImageJob{
+		JobID:             jobID,
+		TemplateID:        normalized.TemplateID,
+		RequestID:         normalized.RequestID,
+		AttemptNo:         attemptNo,
+		RetryOfJobID:      retryOfJobID,
+		Operation:         JobOperationCreate,
+		SourceImageRef:    normalized.SourceImageRef,
+		WritableLayerSize: normalized.WritableLayerSize,
+		InstanceType:      normalized.InstanceType,
+		NetworkType:       normalized.NetworkType,
+		Status:            JobStatusPending,
+		Phase:             JobPhasePulling,
+		Progress:          0,
+		RequestJSON:       requestSnapshot,
+	}
+}
+
+func newRedoTemplateImageJobRecord(jobID string, normalized *types.RedoTemplateFromImageReq, latestJob *models.TemplateImageJob, sourceReq *types.CreateTemplateFromImageReq, requestSnapshot string, attemptNo int32, targetScope []string, replicas []models.TemplateReplica) *models.TemplateImageJob {
+	resumePhase := determineRedoResumePhase(latestJob, replicas)
+	return &models.TemplateImageJob{
+		JobID:             jobID,
+		TemplateID:        normalized.TemplateID,
+		RequestID:         normalized.RequestID,
+		AttemptNo:         attemptNo,
+		RetryOfJobID:      latestJob.JobID,
+		Operation:         JobOperationRedo,
+		RedoMode:          determineRedoMode(normalized),
+		RedoScopeJSON:     marshalRedoScope(targetScope),
+		ResumePhase:       resumePhase,
+		ArtifactID:        latestJob.ArtifactID,
+		SourceImageRef:    sourceReq.SourceImageRef,
+		WritableLayerSize: sourceReq.WritableLayerSize,
+		InstanceType:      sourceReq.InstanceType,
+		NetworkType:       sourceReq.NetworkType,
+		Status:            JobStatusPending,
+		Phase:             resumePhase,
+		Progress:          0,
+		RequestJSON:       requestSnapshot,
+	}
 }
 
 func SubmitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
@@ -319,27 +456,10 @@ func SubmitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 		}
 
 		if latestJob != nil {
-			attemptNo = latestJob.AttemptNo + 1
-			if attemptNo <= 1 {
-				attemptNo = 2
-			}
+			attemptNo = nextAttemptNoFromLatest(latestJob.AttemptNo)
 			retryOfJobID = latestJob.JobID
 		}
-		record := &models.TemplateImageJob{
-			JobID:             jobID,
-			TemplateID:        normalized.TemplateID,
-			AttemptNo:         attemptNo,
-			RetryOfJobID:      retryOfJobID,
-			Operation:         JobOperationCreate,
-			SourceImageRef:    normalized.SourceImageRef,
-			WritableLayerSize: normalized.WritableLayerSize,
-			InstanceType:      normalized.InstanceType,
-			NetworkType:       normalized.NetworkType,
-			Status:            JobStatusPending,
-			Phase:             JobPhasePulling,
-			Progress:          0,
-			RequestJSON:       requestSnapshot,
-		}
+		record := newCreateTemplateImageJobRecord(jobID, normalized, requestSnapshot, attemptNo, retryOfJobID)
 		return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error
 	}); err != nil {
 		return nil, err
@@ -395,13 +515,7 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 		if err != nil {
 			return err
 		}
-		targetScope := make([]string, 0, len(targetNodes))
-		for _, target := range targetNodes {
-			if target == nil {
-				continue
-			}
-			targetScope = append(targetScope, target.ID())
-		}
+		targetScope := distributionScopeFromTargets(targetNodes)
 		attemptNo := latestJob.AttemptNo + 1
 		if attemptNo <= 1 {
 			attemptNo = 2
@@ -410,25 +524,7 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 		if err != nil {
 			return err
 		}
-		redoJob = &models.TemplateImageJob{
-			JobID:             jobID,
-			TemplateID:        normalized.TemplateID,
-			AttemptNo:         attemptNo,
-			RetryOfJobID:      latestJob.JobID,
-			Operation:         JobOperationRedo,
-			RedoMode:          determineRedoMode(normalized),
-			RedoScopeJSON:     marshalRedoScope(targetScope),
-			ResumePhase:       determineRedoResumePhase(latestJob, replicas),
-			ArtifactID:        latestJob.ArtifactID,
-			SourceImageRef:    sourceReq.SourceImageRef,
-			WritableLayerSize: sourceReq.WritableLayerSize,
-			InstanceType:      sourceReq.InstanceType,
-			NetworkType:       sourceReq.NetworkType,
-			Status:            JobStatusPending,
-			Phase:             determineRedoResumePhase(latestJob, replicas),
-			Progress:          0,
-			RequestJSON:       requestSnapshot,
-		}
+		redoJob = newRedoTemplateImageJobRecord(jobID, normalized, latestJob, sourceReq, requestSnapshot, attemptNo, targetScope, replicas)
 		return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(redoJob).Error
 	}); err != nil {
 		return nil, err
@@ -1019,15 +1115,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		failRedoTemplateImageJob(ctx, jobID, jobRecord.ResumePhase, err.Error())
 		return
 	}
-	workingReq := *sourceReq
-	workingReq.Request = &types.Request{RequestID: uuid.NewString()}
-	workingReq.DistributionScope = make([]string, 0, len(targets))
-	for _, target := range targets {
-		if target == nil {
-			continue
-		}
-		workingReq.DistributionScope = append(workingReq.DistributionScope, target.ID())
-	}
+	workingReq := newRedoWorkingRequest(sourceReq, targets)
 
 	var artifact *models.RootfsArtifact
 	resumePhase := jobRecord.ResumePhase
@@ -1068,15 +1156,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			})
 			return
 		}
-		workingReq = *sourceReq
-		workingReq.Request = &types.Request{RequestID: uuid.NewString()}
-		workingReq.DistributionScope = make([]string, 0, len(targets))
-		for _, target := range targets {
-			if target == nil {
-				continue
-			}
-			workingReq.DistributionScope = append(workingReq.DistributionScope, target.ID())
-		}
+		workingReq = newRedoWorkingRequest(sourceReq, targets)
 		_ = generatedReq
 		_ = builtFresh
 		jobRecord.ArtifactID = artifact.ArtifactID
@@ -1958,6 +2038,7 @@ func jobModelToInfo(ctx context.Context, record *models.TemplateImageJob) (*type
 	info := &types.TemplateImageJobInfo{
 		JobID:                   record.JobID,
 		TemplateID:              record.TemplateID,
+		RequestID:               record.RequestID,
 		AttemptNo:               record.AttemptNo,
 		RetryOfJobID:            record.RetryOfJobID,
 		Operation:               record.Operation,

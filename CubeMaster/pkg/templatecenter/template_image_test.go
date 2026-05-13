@@ -239,6 +239,81 @@ func TestBuildTemplateSpecFingerprintUsesDNSConfig(t *testing.T) {
 	}
 }
 
+func TestNewCreateTemplateImageJobRecordPersistsRequestID(t *testing.T) {
+	record := newCreateTemplateImageJobRecord(
+		"job-1",
+		&types.CreateTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-123"},
+			TemplateID:        "tpl-1",
+			SourceImageRef:    "docker.io/library/nginx:latest",
+			WritableLayerSize: "20Gi",
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		},
+		`{"template_id":"tpl-1"}`,
+		2,
+		"job-prev",
+	)
+	if record.RequestID != "req-123" {
+		t.Fatalf("RequestID=%q, want %q", record.RequestID, "req-123")
+	}
+	if record.Operation != JobOperationCreate {
+		t.Fatalf("Operation=%q, want %q", record.Operation, JobOperationCreate)
+	}
+	if record.AttemptNo != 2 {
+		t.Fatalf("AttemptNo=%d, want %d", record.AttemptNo, 2)
+	}
+	if record.RetryOfJobID != "job-prev" {
+		t.Fatalf("RetryOfJobID=%q, want %q", record.RetryOfJobID, "job-prev")
+	}
+}
+
+func TestNewRedoTemplateImageJobRecordPersistsRequestID(t *testing.T) {
+	record := newRedoTemplateImageJobRecord(
+		"job-redo-1",
+		&types.RedoTemplateFromImageReq{
+			Request:    &types.Request{RequestID: "req-redo-123"},
+			TemplateID: "tpl-1",
+			FailedOnly: true,
+		},
+		&models.TemplateImageJob{
+			JobID:      "job-prev",
+			ArtifactID: "artifact-1",
+			Phase:      JobPhaseDistributing,
+		},
+		&types.CreateTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-create-1"},
+			TemplateID:        "tpl-1",
+			SourceImageRef:    "docker.io/library/nginx:latest",
+			WritableLayerSize: "20Gi",
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		},
+		`{"template_id":"tpl-1"}`,
+		3,
+		[]string{"node-a"},
+		[]models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusFailed}},
+	)
+	if record.RequestID != "req-redo-123" {
+		t.Fatalf("RequestID=%q, want %q", record.RequestID, "req-redo-123")
+	}
+	if record.Operation != JobOperationRedo {
+		t.Fatalf("Operation=%q, want %q", record.Operation, JobOperationRedo)
+	}
+	if record.AttemptNo != 3 {
+		t.Fatalf("AttemptNo=%d, want %d", record.AttemptNo, 3)
+	}
+	if record.RetryOfJobID != "job-prev" {
+		t.Fatalf("RetryOfJobID=%q, want %q", record.RetryOfJobID, "job-prev")
+	}
+	if record.RedoMode != RedoModeFailedOnly {
+		t.Fatalf("RedoMode=%q, want %q", record.RedoMode, RedoModeFailedOnly)
+	}
+	if record.Phase == "" || record.ResumePhase == "" {
+		t.Fatalf("Phase=%q ResumePhase=%q, both should be set", record.Phase, record.ResumePhase)
+	}
+}
+
 func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.T) {
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
