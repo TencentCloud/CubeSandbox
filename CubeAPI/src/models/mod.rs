@@ -396,6 +396,12 @@ pub struct TemplateDetail {
     pub replicas: Vec<serde_json::Value>,
     #[serde(rename = "createRequest", skip_serializing_if = "Option::is_none")]
     pub create_request: Option<serde_json::Value>,
+    /// Network type used when the template was created, e.g. "tap".
+    #[serde(rename = "networkType", skip_serializing_if = "Option::is_none")]
+    pub network_type: Option<String>,
+    /// Whether public internet access is allowed for sandboxes from this template.
+    #[serde(rename = "allowInternetAccess", skip_serializing_if = "Option::is_none")]
+    pub allow_internet_access: Option<bool>,
 }
 
 /// Body for POST /templates (create from image).
@@ -533,6 +539,15 @@ pub struct NodeView {
     pub memory_saturation: f32,
     #[serde(rename = "maxMvmSlots")]
     pub max_mvm_slots: i64,
+    /// CPU quota in millicores assigned to this node.
+    #[serde(rename = "quotaCpu")]
+    pub quota_cpu: i64,
+    /// Memory quota in MiB assigned to this node.
+    #[serde(rename = "quotaMemMB")]
+    pub quota_mem_mb: i64,
+    /// Max concurrent sandbox-create operations on this node.
+    #[serde(rename = "createConcurrentNum")]
+    pub create_concurrent_num: i64,
     #[serde(rename = "heartbeatTime", skip_serializing_if = "Option::is_none")]
     pub heartbeat_time: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

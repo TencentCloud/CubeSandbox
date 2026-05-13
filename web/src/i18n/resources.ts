@@ -12,6 +12,7 @@ import enTemplates from '@/locales/en/templates.json';
 import enTemplateDetail from '@/locales/en/templateDetail.json';
 import enNodes from '@/locales/en/nodes.json';
 import enNodeDetail from '@/locales/en/nodeDetail.json';
+import enNetwork from '@/locales/en/network.json';
 import enKeys from '@/locales/en/keys.json';
 import enPlaceholder from '@/locales/en/placeholder.json';
 import enSandboxNew from '@/locales/en/sandboxNew.json';
@@ -28,6 +29,7 @@ import zhTemplates from '@/locales/zh/templates.json';
 import zhTemplateDetail from '@/locales/zh/templateDetail.json';
 import zhNodes from '@/locales/zh/nodes.json';
 import zhNodeDetail from '@/locales/zh/nodeDetail.json';
+import zhNetwork from '@/locales/zh/network.json';
 import zhKeys from '@/locales/zh/keys.json';
 import zhPlaceholder from '@/locales/zh/placeholder.json';
 import zhSandboxNew from '@/locales/zh/sandboxNew.json';
@@ -46,6 +48,7 @@ export const resources = {
     templateDetail: enTemplateDetail,
     nodes: enNodes,
     nodeDetail: enNodeDetail,
+    network: enNetwork,
     keys: enKeys,
     placeholder: enPlaceholder,
     sandboxNew: enSandboxNew,
@@ -63,6 +66,7 @@ export const resources = {
     templateDetail: zhTemplateDetail,
     nodes: zhNodes,
     nodeDetail: zhNodeDetail,
+    network: zhNetwork,
     keys: zhKeys,
     placeholder: zhPlaceholder,
     sandboxNew: zhSandboxNew,

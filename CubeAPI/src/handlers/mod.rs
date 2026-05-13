@@ -6,3 +6,4 @@ pub mod cluster;
 pub mod health;
 pub mod sandboxes;
 pub mod templates;
+pub mod config;

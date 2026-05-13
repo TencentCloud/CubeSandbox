@@ -155,6 +155,9 @@ pub(crate) fn to_view_with_used(
         cpu_saturation,
         memory_saturation,
         max_mvm_slots: s.max_mvm_num,
+        quota_cpu: s.quota_cpu,
+        quota_mem_mb: s.quota_mem_mb,
+        create_concurrent_num: s.create_concurrent_num,
         heartbeat_time: s.heartbeat_time,
         conditions: s
             .conditions

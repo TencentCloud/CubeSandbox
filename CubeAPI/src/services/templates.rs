@@ -68,6 +68,16 @@ impl TemplateService {
             )));
         }
 
+        // Extract network fields from create_request JSON (stored by CubeMaster)
+        let network_type = resp.create_request.as_ref()
+            .and_then(|v| v.get("network_type"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) });
+        let allow_internet_access = resp.create_request.as_ref()
+            .and_then(|v| v.get("cubevs_context"))
+            .and_then(|v| v.get("allowInternetAccess"))
+            .and_then(|v| v.as_bool());
+
         Ok(TemplateDetail {
             template_id: string_or(resp.template_id, template_id),
             instance_type: non_empty(resp.instance_type),
@@ -76,6 +86,8 @@ impl TemplateService {
             last_error: non_empty(resp.last_error),
             replicas: resp.replicas,
             create_request: resp.create_request,
+            network_type,
+            allow_internet_access,
         })
     }
 
