@@ -31,6 +31,9 @@ ENV LANG=C.UTF-8 \
     LIBSECCOMP_LINK_TYPE=static \
     LIBSECCOMP_LIB_PATH=/usr/local/lib64/libseccomp/lib
 
+RUN apt-get update -o Acquire::Retries=3 \
+    && apt install -y ca-certificates --no-install-recommends
+    
 RUN if [ "${GITHUB_ACTIONS}" != "true" ]; then \
         sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_PRIMARY_MIRROR}|g; \
                 s|http://security.ubuntu.com/ubuntu|${APT_SECURITY_MIRROR}|g" \
@@ -38,7 +41,6 @@ RUN if [ "${GITHUB_ACTIONS}" != "true" ]; then \
     fi
 
 RUN apt-get update -o Acquire::Retries=3 \
-    && apt install -y ca-certificates \
     && apt-get install -y --no-install-recommends \
         bash \
         bc \
