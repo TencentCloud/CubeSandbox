@@ -4,7 +4,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { clusterApi, sandboxApi } from '@/api/client';
+import { clusterApi, sandboxApi, templateApi } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowLeft, Package, Box, Activity } from 'lucide-react';
@@ -49,12 +49,12 @@ function KpiCard({
 
   return (
     <div className="rounded-xl border border-white/8 bg-white/[0.03] p-4 space-y-3">
-      <div className="text-xs text-muted-foreground tracking-wider uppercase">{label}</div>
+      <div className="text-sm text-muted-foreground tracking-wider uppercase">{label}</div>
       <div className="flex items-end justify-between gap-2">
         <span className={cn('text-3xl font-semibold tabular-nums leading-none', color)}>
           {pct}<span className="text-base font-normal text-muted-foreground ml-0.5">%</span>
         </span>
-        <span className="text-xs text-muted-foreground pb-0.5">
+        <span className="text-sm text-muted-foreground pb-0.5">
           {used} / {total} {unit}
         </span>
       </div>
@@ -69,7 +69,7 @@ function Section({ title, children, action }: { title: string; children: React.R
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">{title}</span>
+        <span className="text-sm font-medium uppercase tracking-widest text-muted-foreground">{title}</span>
         {action}
       </div>
       {children}
@@ -82,8 +82,8 @@ function Section({ title, children, action }: { title: string; children: React.R
 function StatRow({ label, value, mono }: { label: string; value?: string | null; mono?: boolean }) {
   return (
     <div className="flex items-center justify-between py-2 border-b border-white/5 last:border-0">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <span className={cn('text-xs text-foreground/90', mono && 'font-mono')}>{value ?? '—'}</span>
+      <span className="text-sm text-muted-foreground">{label}</span>
+      <span className={cn('text-sm text-foreground/90', mono && 'font-mono')}>{value ?? '—'}</span>
     </div>
   );
 }
@@ -99,15 +99,15 @@ function ConditionRow({ type, status, reason, message, time }: {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className={cn('inline-block h-1.5 w-1.5 rounded-full shrink-0', ok ? 'bg-cube-cyan' : 'bg-cube-amber')} />
-          <span className="text-sm font-medium">{type}</span>
-          <span className={cn('text-[10px] font-medium px-1.5 py-0.5 rounded border',
+          <span className="text-base font-medium">{type}</span>
+          <span className={cn('text-xs font-medium px-1.5 py-0.5 rounded border',
             ok ? 'text-cube-cyan border-cube-cyan/30 bg-cube-cyan/5' : 'text-cube-amber border-cube-amber/30 bg-cube-amber/5'
           )}>{status}</span>
         </div>
-        {reason && <p className="mt-0.5 text-xs text-muted-foreground pl-3.5">{reason}</p>}
-        {message && <p className="mt-0.5 text-[11px] text-muted-foreground/60 break-all pl-3.5">{message}</p>}
+        {reason && <p className="mt-0.5 text-sm text-muted-foreground pl-3.5">{reason}</p>}
+        {message && <p className="mt-0.5 text-xs text-muted-foreground/60 break-all pl-3.5">{message}</p>}
       </div>
-      {time && <span className="shrink-0 text-[11px] text-muted-foreground/60 mt-0.5">{formatRelative(time)}</span>}
+      {time && <span className="shrink-0 text-xs text-muted-foreground/60 mt-0.5">{formatRelative(time)}</span>}
     </div>
   );
 }
@@ -132,13 +132,26 @@ export default function NodeDetailPage() {
     enabled: !!data,
   });
 
+  const { data: allTemplates } = useQuery({
+    queryKey: ['templates'],
+    queryFn: () => templateApi.list(),
+    staleTime: 30_000,
+    enabled: !!data,
+  });
+
+  // local templates with READY or RUNNING status only
+  const localTemplateIDs = new Set(data?.localTemplates ?? []);
+  const visibleLocalTemplates = (allTemplates ?? [])
+    .filter(t => localTemplateIDs.has(t.templateID) &&
+      ['READY', 'RUNNING'].includes((t.status ?? '').toUpperCase()));
+
   const nodeSandboxes = (allSandboxes ?? []).filter(
     (sb) => sb.clientID === data?.address,
   );
 
   if (isLoading) {
     return (
-      <div className="space-y-6 max-w-3xl">
+      <div className="space-y-6">
         <Skeleton className="h-5 w-32" />
         <Skeleton className="h-24 w-full" />
         <Skeleton className="h-40 w-full" />
@@ -163,7 +176,7 @@ export default function NodeDetailPage() {
   const isReady = data.status.toLowerCase() === 'ready';
 
   return (
-    <div className="animate-fade-in space-y-8 max-w-3xl">
+    <div className="animate-fade-in space-y-8">
       {/* back */}
       <Link to="/nodes" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
         <ArrowLeft className="h-4 w-4" /> {t('backToNodes')}
@@ -181,24 +194,24 @@ export default function NodeDetailPage() {
             <h1 className="text-2xl font-semibold tracking-tight">{data.hostname ?? data.nodeID}</h1>
           </div>
           <div className="flex items-center gap-3 pl-4.5">
-            <span className="font-mono text-xs text-muted-foreground/70">{data.nodeID}</span>
+            <span className="font-mono text-sm text-muted-foreground/70">{data.nodeID}</span>
             {data.role && (
               <>
                 <span className="text-muted-foreground/30">·</span>
-                <span className="text-xs text-muted-foreground">{data.role}</span>
+                <span className="text-sm text-muted-foreground">{data.role}</span>
               </>
             )}
             {data.address && (
               <>
                 <span className="text-muted-foreground/30">·</span>
-                <span className="font-mono text-xs text-muted-foreground">{data.address}</span>
+                <span className="font-mono text-sm text-muted-foreground">{data.address}</span>
               </>
             )}
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0 pt-1">
           <Activity size={13} className="text-muted-foreground/50" />
-          <span className="text-xs text-muted-foreground">{formatRelative(data.heartbeatTime)}</span>
+          <span className="text-sm text-muted-foreground">{formatRelative(data.heartbeatTime)}</span>
         </div>
       </div>
 
@@ -222,10 +235,20 @@ export default function NodeDetailPage() {
         </div>
 
         {/* meta stats */}
-        <div className="rounded-xl border border-white/8 bg-white/[0.03] px-4 py-1 mt-1">
-          <StatRow label={t('fields.allocCpu')} value={`${(data.resources.allocatableCpuMilli / 1000).toFixed(1)} cores`} />
-          <StatRow label={t('fields.allocMem')} value={`${(data.resources.allocatableMemoryMB / 1024).toFixed(1)} GiB`} />
-          <StatRow label={t('fields.maxMvmSlots')} value={String(data.resources.maxMvmSlots)} />
+        <div className="rounded-xl border border-white/8 bg-white/[0.03] px-6 py-4 mt-1 grid grid-cols-3 divide-x divide-white/8">
+          {[
+            { label: t('fields.allocCpu'), value: `${(data.resources.allocatableCpuMilli / 1000).toFixed(1)}`, unit: 'cores' },
+            { label: t('fields.allocMem'), value: `${(data.resources.allocatableMemoryMB / 1024).toFixed(1)}`, unit: 'GiB' },
+            { label: t('fields.maxMvmSlots'), value: String(data.resources.maxMvmSlots), unit: '' },
+          ].map(({ label, value, unit }) => (
+            <div key={label} className="flex flex-col gap-1 px-5 first:pl-0 last:pr-0">
+              <span className="text-xs uppercase tracking-widest text-muted-foreground/60 font-medium">{label}</span>
+              <span className="text-xl font-semibold font-mono tabular-nums">
+                {value}
+                {unit && <span className="text-sm font-normal text-muted-foreground ml-1.5">{unit}</span>}
+              </span>
+            </div>
+          ))}
         </div>
       </Section>
 
@@ -248,17 +271,17 @@ export default function NodeDetailPage() {
       )}
 
       {/* local templates */}
-      {data.localTemplates && data.localTemplates.length > 0 && (
+      {visibleLocalTemplates.length > 0 && (
         <Section title={t('section.localTemplates')}>
           <div className="flex flex-wrap gap-2">
-            {data.localTemplates.map((tplID) => (
+            {visibleLocalTemplates.map((tpl) => (
               <Link
-                key={tplID}
-                to={`/templates/${tplID}`}
-                className="flex items-center gap-1.5 rounded-lg border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs font-mono text-muted-foreground hover:border-cube-cyan/30 hover:text-foreground hover:bg-cube-cyan/5 transition-all"
+                key={tpl.templateID}
+                to={`/templates/${tpl.templateID}`}
+                className="flex items-center gap-1.5 rounded-lg border border-white/8 bg-white/[0.03] px-3 py-1.5 text-sm font-mono text-muted-foreground hover:border-cube-cyan/30 hover:text-foreground hover:bg-cube-cyan/5 transition-all"
               >
                 <Package size={11} className="text-cube-cyan/60" />
-                {tplID}
+                {tpl.templateID}
               </Link>
             ))}
           </div>
@@ -270,7 +293,7 @@ export default function NodeDetailPage() {
         title={t('section.sandboxes')}
         action={
           nodeSandboxes.length > 0
-            ? <span className="text-xs text-muted-foreground">{nodeSandboxes.length} running</span>
+            ? <span className="text-sm text-muted-foreground">{nodeSandboxes.length} running</span>
             : undefined
         }
       >
@@ -288,12 +311,12 @@ export default function NodeDetailPage() {
               >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <Box size={12} className="shrink-0 text-muted-foreground/50" />
-                  <span className="font-mono text-xs text-foreground/80 truncate">{sb.sandboxID}</span>
-                  <span className="text-xs text-muted-foreground/50 truncate hidden sm:block">{sb.templateID}</span>
+                  <span className="font-mono text-sm text-foreground/80 truncate">{sb.sandboxID}</span>
+                  <span className="text-sm text-muted-foreground/50 truncate hidden sm:block">{sb.templateID}</span>
                 </div>
                 <div className="flex items-center gap-3 shrink-0">
                   <span className={cn(
-                    'inline-flex items-center gap-1.5 text-[11px] font-medium',
+                    'inline-flex items-center gap-1.5 text-sm font-medium',
                     sb.state === 'running' ? 'text-cube-cyan' : sb.state === 'paused' ? 'text-cube-amber' : 'text-muted-foreground'
                   )}>
                     <span className={cn('h-1.5 w-1.5 rounded-full',
@@ -301,7 +324,7 @@ export default function NodeDetailPage() {
                     )} />
                     {sb.state}
                   </span>
-                  <span className="text-[11px] text-muted-foreground/60">{formatRelative(sb.startedAt)}</span>
+                  <span className="text-sm text-muted-foreground/60">{formatRelative(sb.startedAt)}</span>
                 </div>
               </Link>
             ))}
