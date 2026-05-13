@@ -2,73 +2,149 @@
 
 四步完成 Cube Sandbox 的完整部署，无需本地构建。
 
-下面的流程会在你的开发机（ WSL / Linux 机器）上起一台**一次性的 Linux 虚机**，然后在这台虚机里安装并体验 Cube Sandbox。
+下面的流程会引导你在腾讯云购买一台普通云服务器，通过 PVM 启用 KVM，然后在这台服务器上安装并体验 Cube Sandbox。
 
 ⚠️请严格按照文档操作，这样能让你在几分钟内快速体验到CubeSandbox！
 
 ::: tip 已经有支持 KVM 的服务器？
-如果你已经有一台开启了 KVM 的 x86_64 Linux 服务器（物理机或云服务器均可），可以**跳过第一步**，直接在那台机器上执行第二步的安装命令。
-
-如果你用的是**没有 `/dev/kvm` 的普通云服务器**，也不需要裸金属 —— 通过 PVM 即可在普通云服务器上启用 KVM，详见 [PVM 部署](./pvm-deploy.md)。
+如果你已经有一台开启了 KVM 的 x86_64 Linux 服务器（物理机或裸金属服务器），可以直接参阅[裸金属 / 物理机部署](./bare-metal-deploy.md)，跳过 PVM 安装步骤。
 :::
 
 ## 前置条件
 
-宿主机满足下列任一条件即可：
+- **x86_64** 架构的云服务器（普通云服务器即可，无需 `/dev/kvm`）
+- 有 **root 权限**
+- 可访问互联网（用于下载发布包、拉取 Docker 镜像）
 
-- **Windows 上的 WSL 2**（Windows 11 22H2+，并在 WSL 里启用嵌套虚拟化）
-- **已开启嵌套虚拟化的 Linux 虚拟机**（VMWare启动Ubuntu 22.04，并且在虚拟机CPU设置那里，启用 “Virtualize Intel VT-x/EPT or AMD-V/RVI”）
-- **x86_64 Linux 物理机**
-- **x86_64 裸金属 Linux 服务器**
-- **普通云服务器**（通过 PVM 部署，无需 `/dev/kvm`，详见 [PVM 部署](./pvm-deploy.md)）
+## 第一步：购买云服务器并安装 PVM 内核
 
-通用要求：
+### 购买云服务器
 
-1. Linux环境能正常使用 KVM（`/dev/kvm` 存在且可读写）
-2. Linux环境中，**Docker、QEMU** 已安装并正常运行
-3. 可访问互联网（用于克隆仓库、下载发布包、拉取 Docker 镜像）
+在腾讯云购买一台 **x86_64** 架构的云服务器，无特殊要求。
 
-## 第一步：启动开发虚机
+**操作系统推荐选择 OpenCloudOS 9**（RPM 系）。Cube Sandbox 的 PVM 宿主机内核基于 OpenCloudOS 内核构建，选用 OpenCloudOS 9 可获得最佳兼容性，且无需处理发行版差异。Ubuntu / Debian / CentOS 等其他主流发行版同样支持。
 
-克隆仓库并进入 `dev-env/`：
+| 配置 | CPU | 内存 | 磁盘 |
+| --- | --- | --- | --- |
+| 功能体验 | ≥ 4 核 | ≥ 8 GB | ≥ 300 GB |
+| 推荐 | 32 核 | 64 GB | ≥ 300 GB |
 
-```bash
-git clone https://github.com/tencentcloud/CubeSandbox.git
-# 如果您的环境无法访问github，请执行：
-# git clone https://cnb.cool/CubeSandbox/CubeSandbox.git
-
-
-cd CubeSandbox/dev-env
-```
-
-一共三条命令。前两条在同一个终端执行，第三条在**新终端**里执行。
-
-> 在执行命令之前，请确保您的Linux机器上已经安装qemu、qemu-img、ripgrep
+::: warning 以 root 身份执行所有操作
+本文档中的所有命令均需在 **root** 用户下执行。请先切换到 root：
 
 ```bash
-./prepare_image.sh   # 仅首次：下载并初始化 OpenCloudOS 9 镜像
-./run_vm.sh          # 启动虚机；保持此终端不关（Ctrl+a x 关机）
+sudo su root
 ```
 
-在新终端里：
+:::
+
+### 安装 PVM 宿主机内核
+
+前往 [CubeSandbox GitHub Releases](https://github.com/TencentCloud/CubeSandbox/releases) 页面，打开最新包含 PVM 内核附件的 Release，**在对应附件上右键 → 复制链接地址**，然后用 `wget` 下载。
+
+根据你的 Linux 发行版选择对应格式：
+
+#### RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）
+
+在 Release 附件列表中找到 `kernel-*cube.pvm.host*.x86_64.rpm`，右键复制下载链接：
 
 ```bash
-cd CubeSandbox/dev-env
-./login.sh           # 以 root 登录虚机
+# 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接
+wget "<kernel rpm 下载链接>"
+
+# 若宿主机已有更高版本内核，--oldpackage 跳过版本号比较
+rpm -ivh --oldpackage kernel-*.rpm
 ```
 
-接下来所有步骤都在**虚机内**执行 —— `login.sh` 会直接把你送到虚机的
-root shell，Cube Sandbox 就装在这里。
+设置 PVM 内核为默认启动项：
 
-关于宿主机自检（嵌套 KVM、依赖软件）、端口映射、环境变量覆盖和常见
-问题，请参阅[开发环境（QEMU 虚机）](./dev-environment.md)。
+```bash
+# 查看已安装内核列表，找到 PVM 内核对应的序号
+grubby --info=ALL | grep -E "^kernel|^index"
+
+# 将 <index> 替换为上面输出中 PVM 内核对应的数字
+grubby --set-default-index=<index>
+
+# 确认设置生效
+grubby --default-kernel
+```
+
+配置内核启动参数：
+
+```bash
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/pvm/grub/host_grub_config.sh | bash
+```
+
+#### DEB 系（Ubuntu、Debian）
+
+在 Release 附件列表中找到 `linux-image-*cube.pvm.host*_amd64.deb`，右键复制下载链接：
+
+```bash
+# 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接
+wget "<linux-image deb 下载链接>"
+
+dpkg -i linux-image-*cube.pvm.host*.deb
+```
+
+设置 PVM 内核为默认启动项：
+
+```bash
+# 查看已安装的内核列表，确认 PVM 内核版本字符串
+ls /boot/vmlinuz-*
+
+# 将 GRUB 默认启动项指向 PVM 内核（将下面的内核版本替换为上一步看到的实际版本字符串）
+KVER="$(ls /boot/vmlinuz-*cube.pvm.host* | sed 's|/boot/vmlinuz-||' | tail -1)"
+sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"Advanced options for Ubuntu>Ubuntu, with Linux ${KVER}\"|" \
+  /etc/default/grub
+```
+
+配置内核启动参数（脚本内部会调用 `update-grub` 使上述设置生效）：
+
+```bash
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/pvm/grub/host_grub_config.sh | bash
+```
+
+### 重启并验证
+
+```bash
+reboot
+```
+
+重启后，确认已进入 PVM 内核并加载 KVM 模块：
+
+```bash
+# 确认内核版本
+uname -r
+# 期望输出包含：cube.pvm.host
+
+# 加载 PVM KVM 模块
+modprobe kvm_pvm
+
+# 确认模块已加载
+lsmod | grep kvm
+# 期望输出中包含 kvm_pvm
+```
+
+设置开机自动加载 `kvm_pvm` 模块：
+
+```bash
+echo 'kvm_pvm' > /etc/modules-load.d/kvm-pvm.conf
+```
+
+::: details 什么是 PVM？（技术原理）
+PVM（Pagetable-based Virtual Machine）是一种**基于页表的嵌套虚拟化框架**，构建于 KVM 之上。与传统嵌套虚拟化不同，PVM 不依赖宿主 hypervisor 向 guest 暴露 Intel VT-x / AMD-V 等硬件虚拟化扩展，而是在 guest 内核层通过共享内存区域和影子页表（shadow page table）来完成特权级切换与内存虚拟化，对宿主 hypervisor 完全透明。
+
+腾讯云已在生产环境大规模部署 PVM 实例，可靠性经过充分验证，并将改进成果开源至 [OpenCloudOS 内核](https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel.git)。
+
+完整的 PVM 部署说明请参阅 [PVM 部署](./pvm-deploy.md)。
+:::
 
 ## 第二步：安装
 
-在**开发虚机内**以 root 身份执行：
+以 root 身份执行：
 
 ```bash
-curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | CUBE_PVM_ENABLE=1 MIRROR=cn bash
 ```
 
 ::: details 安装了哪些组件
@@ -154,6 +230,7 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 ## 下一步
 
 - [从 OCI 镜像制作模板](./tutorials/template-from-image.md) — 自定义沙箱运行环境
+- [裸金属 / 物理机部署](./bare-metal-deploy.md) — 已有支持 KVM 的机器直接部署
 - [多机集群部署](./multi-node-deploy.md) — 扩展到多台机器
 - [HTTPS 证书与域名解析](./https-and-domain.md) — TLS 配置选项
 - [鉴权](./authentication.md) — 启用 API 鉴权

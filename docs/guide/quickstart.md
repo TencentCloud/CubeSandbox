@@ -2,85 +2,161 @@
 
 Get a fully functional Cube Sandbox running in four steps — no source build required.
 
-The steps below boot a **disposable Linux VM** on your development machine (WSL / Linux) and install Cube Sandbox inside that VM.
+The steps below guide you through provisioning a cloud server, enabling KVM via PVM, and installing Cube Sandbox on that server.
 
-⚠️Follow this guide step by step — you can be up and running with Cube Sandbox in just a few minutes!
+⚠️ Follow this guide step by step — you can be up and running with Cube Sandbox in just a few minutes!
 
 ::: tip Already have a server with KVM enabled?
-If you already have an x86_64 Linux server with KVM enabled (bare-metal or cloud VM), you can **skip Step 1** and run the Step 2 installer directly on that server.
-
-If you're on an **ordinary cloud VM without KVM**, you don't need bare-metal either — see [PVM Deployment](./pvm-deploy.md) to enable KVM on any standard cloud VM.
+If you already have an x86_64 Linux server with KVM enabled (bare-metal or physical machine), skip to [Bare-Metal Deployment](./bare-metal-deploy.md) to install directly without PVM.
 :::
 
 ## Prerequisites
 
-Any one of the following hosts works:
+- **x86_64** cloud server (any standard cloud VM works — `/dev/kvm` not required)
+- **Root access**
+- Internet access (for downloading release packages and Docker images)
 
-- **WSL 2 on Windows** (Windows 11 22H2+, with nested virtualization enabled in WSL)
-- **An x86_64 Linux physical machine**
-- **A Linux VM with nested virtualization enabled** (e.g. Ubuntu 22.04 on VMware with "Virtualize Intel VT-x/EPT or AMD-V/RVI" enabled in the VM's CPU settings)
-- **An x86_64 bare-metal Linux server**
-- **An ordinary cloud VM** (via PVM — no `/dev/kvm` or bare-metal required; see [PVM Deployment](./pvm-deploy.md))
+## Step 1: Provision a Cloud Server & Install the PVM Kernel
 
-Common requirements:
+### Provision a Cloud Server
 
-1. The Linux environment can use KVM (`/dev/kvm` exists and is read/writable)
-2. **Docker** and **QEMU** installed and running in the Linux environment
-3. Internet access (to clone the repo, download the release bundle, and pull Docker images)
+Provision an **x86_64** cloud server — no special requirements.
 
-## Step 1: Boot the Development VM
+**Recommended OS: OpenCloudOS 9** (RPM-based). Cube Sandbox's PVM host kernel is built on the OpenCloudOS kernel, so OpenCloudOS 9 offers the best compatibility without distribution-specific adjustments. Ubuntu, Debian, CentOS, and other mainstream distributions are also supported.
 
-Clone the repository and change into `dev-env/`:
+| Config | CPU | RAM | Disk |
+| --- | --- | --- | --- |
+| Functional experience | ≥ 4 cores | ≥ 8 GB | ≥ 300 GB |
+| Recommended | 32 cores | 64 GB | ≥ 300 GB |
 
-```bash
-git clone https://github.com/tencentcloud/CubeSandbox.git
-cd CubeSandbox/dev-env
-```
-
-Three commands total. The first two run in one terminal, the third in
-a **second terminal**.
-
-> Before running the commands below, make sure `qemu`, `qemu-img`, and `ripgrep` are installed on your Linux machine.
+::: warning Run all commands as root
+Every command in this guide must be executed as **root**. Switch to root first:
 
 ```bash
-./prepare_image.sh   # one-off: download + init the OpenCloudOS 9 image
-./run_vm.sh          # boot the VM; keep this terminal open (Ctrl+a x to power off)
+sudo su root
 ```
 
-In a second terminal:
+:::
+
+### Install the PVM Host Kernel
+
+Go to the [CubeSandbox GitHub Releases](https://github.com/TencentCloud/CubeSandbox/releases) page, open the latest release that includes PVM kernel attachments, **right-click the matching attachment → Copy Link Address**, then download with `wget`.
+
+Choose the format for your Linux distribution:
+
+#### RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora)
+
+In the release attachments, find `kernel-*cube.pvm.host*.x86_64.rpm`, right-click and copy the download link:
 
 ```bash
-cd CubeSandbox/dev-env
-./login.sh           # SSH into the VM as root
+# Replace the URL below with the actual download link you copied from the Releases page
+wget "<kernel rpm download link>"
+
+# Use --oldpackage if the host already has a newer kernel version
+rpm -ivh --oldpackage kernel-*.rpm
 ```
 
-All the following steps run **inside this VM** — `login.sh` drops you
-straight into a root shell where Cube Sandbox will be installed.
+Set the PVM kernel as the default boot entry:
 
-For host self-check (nested KVM, required packages), port mappings,
-environment overrides, and troubleshooting, see
-[Development Environment (QEMU VM)](./dev-environment.md).
+```bash
+# List installed kernels and find the index of the PVM kernel
+grubby --info=ALL | grep -E "^kernel|^index"
+
+# Replace <index> with the number from the output above for the PVM kernel
+grubby --set-default-index=<index>
+
+# Confirm the change
+grubby --default-kernel
+```
+
+Configure kernel boot parameters:
+
+```bash
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/pvm/grub/host_grub_config.sh | bash
+```
+
+#### DEB-based (Ubuntu, Debian)
+
+In the release attachments, find `linux-image-*cube.pvm.host*_amd64.deb`, right-click and copy the download link:
+
+```bash
+# Replace the URL below with the actual download link you copied from the Releases page
+wget "<linux-image deb download link>"
+
+dpkg -i linux-image-*cube.pvm.host*.deb
+```
+
+Set the PVM kernel as the default boot entry:
+
+```bash
+# List installed kernels to find the PVM kernel version string
+ls /boot/vmlinuz-*
+
+# Point GRUB default to the PVM kernel (replace with the actual version string from above)
+KVER="$(ls /boot/vmlinuz-*cube.pvm.host* | sed 's|/boot/vmlinuz-||' | tail -1)"
+sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"Advanced options for Ubuntu>Ubuntu, with Linux ${KVER}\"|" \
+  /etc/default/grub
+```
+
+Configure kernel boot parameters (the script internally calls `update-grub` to apply the GRUB changes above):
+
+```bash
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/pvm/grub/host_grub_config.sh | bash
+```
+
+### Reboot & Verify
+
+```bash
+reboot
+```
+
+After rebooting, confirm you're running the PVM kernel and the KVM module is loaded:
+
+```bash
+# Verify kernel version
+uname -r
+# Expected output contains: cube.pvm.host
+
+# Load the PVM KVM module
+modprobe kvm_pvm
+
+# Confirm the module is loaded
+lsmod | grep kvm
+# Expected output includes kvm_pvm
+```
+
+Enable `kvm_pvm` to load automatically at boot:
+
+```bash
+echo 'kvm_pvm' > /etc/modules-load.d/kvm-pvm.conf
+```
+
+::: details What is PVM? (Technical background)
+PVM (Pagetable-based Virtual Machine) is a **page-table-based nested virtualization framework** built on top of KVM. Unlike traditional nested virtualization, PVM does not rely on the host hypervisor exposing Intel VT-x / AMD-V hardware virtualization extensions to the guest. Instead, it performs privilege-level switching and memory virtualization within the guest kernel layer through shared memory regions and shadow page tables — completely transparent to the host hypervisor.
+
+Tencent Cloud has deployed PVM instances at scale in production, with reliability validated extensively. Improvements have been upstreamed to the [OpenCloudOS kernel](https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel.git).
+
+For complete PVM deployment details, see [PVM Deployment](./pvm-deploy.md).
+:::
 
 ## Step 2: Install
 
-Run the following command **inside the dev VM** as root:
+Run as root:
 
 ```bash
-curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | CUBE_PVM_ENABLE=1 bash
 ```
 
 ::: details What gets installed
 - E2B-compatible REST API listening on port `3000`
-- CubeMaster, Cubelet, network-agent, and CubeShim running as host processes
+- CubeMaster, Cubelet, network-agent, CubeShim running as host processes
 - MySQL and Redis managed via Docker Compose
-- CubeProxy with TLS (mkcert) and CoreDNS for `cube.app` domain routing
+- CubeProxy providing TLS (mkcert) and CoreDNS domain routing (`cube.app`)
 :::
-
-After installation completes, the installer symlinks `cubemastercli` and `cubecli` into `/usr/local/bin`.
 
 ## Step 3: Create a Template
 
-Create a code-interpreter template from the prebuilt image:
+After installation, create a code interpreter template using a pre-built image:
 
 ```bash
 cubemastercli tpl create-from-image \
@@ -91,29 +167,29 @@ cubemastercli tpl create-from-image \
   --probe 49999
 ```
 
-> **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
+> **Registry note:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
 
-Then run the following command to monitor the build progress:
+Then monitor the build progress:
 
 ```bash
 cubemastercli tpl watch --job-id <job_id>
 ```
 
-**⚠️ The image is fairly large** — downloading, extracting, and building the template may take a while; please be patient.
+⚠️ Note: the image is large; downloading, extracting, and building the template may take a while. Please be patient.
 
+Wait for the command above to finish — the template status should become `READY`.
 
-Wait for the command above to finish and the template status to reach `READY`.
-
-Note the **template ID** (`template_id`) from the output — you will need it in the next step.
+Take note of the **template ID** (`template_id`) from the output; you'll need it in the next step.
 
 For the full template creation workflow and more options, see [Creating Templates from OCI Images](./tutorials/template-from-image.md).
 
-## Step 4: Run Your First Agent
+## Step 4: Run Your First Agent Code
 
 Install the Python SDK:
 
 ```bash
 yum install -y python3 python3-pip
+
 pip install e2b-code-interpreter
 ```
 
@@ -127,33 +203,33 @@ export SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
 ```
 
 | Variable | Description |
-|----------|-------------|
-| `E2B_API_URL` | Points the E2B SDK to your local Cube Sandbox instead of the E2B cloud |
-| `E2B_API_KEY` | The SDK requires a non-empty value; any string works |
+|------|------|
+| `E2B_API_URL` | Points the E2B SDK to your local Cube Sandbox instead of the E2B cloud service |
+| `E2B_API_KEY` | Required by the SDK; use any placeholder string for local deployment |
 | `CUBE_TEMPLATE_ID` | The template ID obtained in Step 3 |
-| `SSL_CERT_FILE` | mkcert CA root certificate for HTTPS connections to the sandbox |
+| `SSL_CERT_FILE` | Path to the mkcert CA root certificate, required for sandbox HTTPS connections |
 
-Run code inside an isolated sandbox:
+Run code in an isolated sandbox:
 
 ```python
 import os
-from e2b_code_interpreter import Sandbox  # drop-in E2B SDK
+from e2b_code_interpreter import Sandbox  # Use the E2B SDK directly!
 
-# Cube Sandbox transparently intercepts all requests
+# CubeSandbox seamlessly handles all requests under the hood
 with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
     result = sandbox.run_code("print('Hello from Cube Sandbox, safely isolated!')")
     print(result)
 ```
 
-
-For more end-to-end walkthroughs, see [Examples](./tutorials/examples.md).
+For more end-to-end examples, see [Examples](./tutorials/examples.md).
 
 ## Next Steps
 
-- [Creating Templates from OCI Images](./tutorials/template-from-image.md) — customize your sandbox environment
-- [Multi-Node Cluster Deployment](./multi-node-deploy.md) — scale to multiple machines
+- [Create Templates from OCI Images](./tutorials/template-from-image.md) — Customize sandbox environments
+- [Bare-Metal Deployment](./bare-metal-deploy.md) — Already have a KVM-enabled server? Install directly
+- [Multi-Node Cluster](./multi-node-deploy.md) — Scale across multiple machines
 - [HTTPS & Domain Resolution](./https-and-domain.md) — TLS configuration options
-- [Authentication](./authentication.md) — enable API authentication
+- [Authentication](./authentication.md) — Enable API authentication
 
 ## Appendix: Build from Source
 
