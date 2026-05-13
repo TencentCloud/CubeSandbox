@@ -32,6 +32,42 @@ export function short(id: string, head = 6, tail = 4): string {
 }
 
 /**
+ * Copy text to clipboard with execCommand fallback for HTTP (non-HTTPS) environments.
+ * On success, dispatches a 'cube:toast' custom event so ToastProvider can show a notification.
+ */
+export function copyToClipboard(text: string, message = '已复制'): void {
+  const dispatch = (ok: boolean) => {
+    if (ok) {
+      window.dispatchEvent(new CustomEvent('cube:toast', { detail: { message } }));
+    }
+  };
+
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => dispatch(true)).catch(() => {
+      fallbackCopy(text, dispatch);
+    });
+  } else {
+    fallbackCopy(text, dispatch);
+  }
+}
+
+function fallbackCopy(text: string, cb: (ok: boolean) => void) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    cb(ok);
+  } catch {
+    cb(false);
+  }
+}
+
+/**
  * Translate a template-deletion API error into a human-friendly message.
  * Falls back to the raw error message if no known pattern matches.
  */

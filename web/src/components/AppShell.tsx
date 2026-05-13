@@ -5,6 +5,7 @@ import { Outlet } from 'react-router-dom';
 import { Rail } from './Rail';
 import { TopBar } from './TopBar';
 import { CommandPalette } from './CommandPalette';
+import { ToastProvider } from './ui/ToastProvider';
 
 export function AppShell() {
   return (
@@ -17,6 +18,7 @@ export function AppShell() {
         </div>
       </main>
       <CommandPalette />
+      <ToastProvider />
     </div>
   );
 }
