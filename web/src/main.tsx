@@ -14,6 +14,7 @@ import SandboxNewPage from '@/pages/SandboxNew';
 import TemplatesPage from '@/pages/Templates';
 import NodesPage from '@/pages/Nodes';
 import KeysPage from '@/pages/Keys';
+import SettingsPage from '@/pages/Settings';
 import TemplateDetailPage from '@/pages/TemplateDetail';
 import NodeDetailPage from '@/pages/NodeDetail';
 import NetworkPage from '@/pages/Network';
@@ -54,10 +55,7 @@ const App = () => (
                 element={<Placeholder titleKey="observability.title" descriptionKey="observability.description" icon={Activity} />}
               />
               <Route path="/keys" element={<KeysPage />} />
-              <Route
-                path="/settings"
-                element={<Placeholder titleKey="settings.title" descriptionKey="settings.description" icon={Settings} />}
-              />
+              <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Routes>

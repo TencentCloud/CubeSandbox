@@ -6,6 +6,12 @@ import { Rail } from './Rail';
 import { TopBar } from './TopBar';
 import { CommandPalette } from './CommandPalette';
 import { ToastProvider } from './ui/ToastProvider';
+import { useGlobalHotkeys } from '@/hooks/useGlobalHotkeys';
+
+function HotkeyMount() {
+  useGlobalHotkeys();
+  return null;
+}
 
 export function AppShell() {
   return (
@@ -19,6 +25,7 @@ export function AppShell() {
       </main>
       <CommandPalette />
       <ToastProvider />
+      <HotkeyMount />
     </div>
   );
 }

@@ -17,6 +17,7 @@ import enKeys from '@/locales/en/keys.json';
 import enPlaceholder from '@/locales/en/placeholder.json';
 import enSandboxNew from '@/locales/en/sandboxNew.json';
 import enTheme from '@/locales/en/theme.json';
+import enSettings from '@/locales/en/settings.json';
 
 import zhCommon from '@/locales/zh/common.json';
 import zhNav from '@/locales/zh/nav.json';
@@ -34,6 +35,7 @@ import zhKeys from '@/locales/zh/keys.json';
 import zhPlaceholder from '@/locales/zh/placeholder.json';
 import zhSandboxNew from '@/locales/zh/sandboxNew.json';
 import zhTheme from '@/locales/zh/theme.json';
+import zhSettings from '@/locales/zh/settings.json';
 
 export const resources = {
   en: {
@@ -53,6 +55,7 @@ export const resources = {
     placeholder: enPlaceholder,
     sandboxNew: enSandboxNew,
     theme: enTheme,
+    settings: enSettings,
   },
   zh: {
     common: zhCommon,
@@ -71,6 +74,7 @@ export const resources = {
     placeholder: zhPlaceholder,
     sandboxNew: zhSandboxNew,
     theme: zhTheme,
+    settings: zhSettings,
   },
 } as const;
 
