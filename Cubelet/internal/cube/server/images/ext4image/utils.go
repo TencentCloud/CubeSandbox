@@ -56,10 +56,7 @@ func EnsurePmemFile(ctx context.Context, instanceType, imageRef string) error {
 			return fmt.Errorf("downloaded pmem file %s not exist", imagePath)
 		}
 	}
-	if err := ensureKernelFile(ctx, instanceType, imageRef); err != nil {
-		return err
-	}
-	return ensureImageVersionFile(ctx, instanceType, imageRef)
+	return ensureArtifactRuntimeFilesPresent(ctx, instanceType, imageRef)
 }
 
 func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages.ImageSpec) error {
@@ -115,8 +112,27 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 	return nil
 }
 
-func ensureKernelFile(ctx context.Context, instanceType, imageRef string) error {
-	return pmem.SyncKernelFile(ctx, pmem.GetSharedKernelFilePath(), pmem.GetRawKernelFilePath(instanceType, imageRef))
+// RefreshArtifactRuntimeFiles rewrites runtime companion files from the current shared sources.
+func RefreshArtifactRuntimeFiles(ctx context.Context, instanceType, imageRef string) error {
+	if err := refreshKernelFile(ctx, instanceType, imageRef); err != nil {
+		return err
+	}
+	return ensureImageVersionFile(ctx, instanceType, imageRef)
+}
+
+func ensureArtifactRuntimeFilesPresent(ctx context.Context, instanceType, imageRef string) error {
+	if err := ensureKernelFilePresent(ctx, instanceType, imageRef); err != nil {
+		return err
+	}
+	return ensureImageVersionFile(ctx, instanceType, imageRef)
+}
+
+func ensureKernelFilePresent(ctx context.Context, instanceType, imageRef string) error {
+	return pmem.EnsureKernelFilePresent(ctx, pmem.GetSharedKernelFilePath(), pmem.GetRawKernelFilePath(instanceType, imageRef))
+}
+
+func refreshKernelFile(ctx context.Context, instanceType, imageRef string) error {
+	return pmem.RefreshKernelFile(ctx, pmem.GetSharedKernelFilePath(), pmem.GetRawKernelFilePath(instanceType, imageRef))
 }
 
 func ensureImageVersionFile(ctx context.Context, instanceType, imageRef string) error {

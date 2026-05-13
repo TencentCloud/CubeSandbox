@@ -116,6 +116,44 @@ func TestCreateSandboxRestoreDoesNotRefreshArtifactKernel(t *testing.T) {
 	require.Equal(t, "/template/kernel.vm", spec.Annotations[constants.AnnotationsVMKernelPath])
 }
 
+func TestCreateSandboxNormalStartDoesNotRefreshArtifactKernel(t *testing.T) {
+	t.Parallel()
+
+	plugin := newTestCubeboxPlugin(t)
+	artifactID := "artifact-3"
+	sharedKernelPath := filepath.Join(plugin.config.BasePath, "cube-kernel-scf", "vmlinux")
+	targetKernelPath := plugin.getKernelFilePath(artifactID)
+	oldKernel := bytes.Repeat([]byte("o"), 2048)
+	writeTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
+	writeTestFile(t, targetKernelPath, oldKernel)
+
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+			Containers: []*cubebox.ContainerConfig{
+				{
+					Resources: &cubebox.Resource{Cpu: "2000m", Mem: "2000Mi"},
+					Image: &cubeimages.ImageSpec{
+						Image:        artifactID,
+						StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
+					},
+				},
+			},
+		},
+	}
+	ctx := constants.WithAppImageID(context.Background(), artifactID)
+
+	specOpts, err := plugin.CreateSandbox(ctx, flowOpts)
+	require.NoError(t, err)
+
+	gotKernel, err := os.ReadFile(targetKernelPath)
+	require.NoError(t, err)
+	require.Equal(t, oldKernel, gotKernel)
+
+	spec := applySpecOpts(t, ctx, specOpts)
+	require.Equal(t, targetKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
+}
+
 func newTestCubeboxPlugin(t *testing.T) *cubeboxInstancePlugin {
 	t.Helper()
 

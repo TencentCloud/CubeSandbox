@@ -17,8 +17,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
-// SyncKernelFile keeps targetKernelPath aligned with the current shared kernel.
-func SyncKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath string) error {
+var compareKernelFiles = sameFileSHA256
+
+// EnsureKernelFilePresent copies the shared kernel only when the target is missing.
+func EnsureKernelFilePresent(ctx context.Context, sharedKernelPath, targetKernelPath string) error {
 	sharedExist, err := utils.FileExistAndValid(sharedKernelPath)
 	if err != nil {
 		return fmt.Errorf("local shared kernel validation failed: %w", err)
@@ -35,37 +37,67 @@ func SyncKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath stri
 		if err := copyKernelFileAtomically(sharedKernelPath, targetKernelPath); err != nil {
 			return err
 		}
-		targetExist, err = utils.FileExistAndValid(targetKernelPath)
-		if err != nil {
-			return fmt.Errorf("copied kernel file %s validation failed: %v", targetKernelPath, err)
-		}
-		if !targetExist {
-			return fmt.Errorf("copied kernel file %s not exist", targetKernelPath)
+		if err := validateKernelFile(targetKernelPath, "copied"); err != nil {
+			return err
 		}
 		log.G(ctx).Infof("kernel file %s missing, copied latest shared kernel from %s", targetKernelPath, sharedKernelPath)
-		return nil
 	}
+	return nil
+}
 
-	same, err := sameFileSHA256(sharedKernelPath, targetKernelPath)
+// RefreshKernelFile rewrites the target from the current shared kernel.
+func RefreshKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath string) error {
+	sharedExist, err := utils.FileExistAndValid(sharedKernelPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("local shared kernel validation failed: %w", err)
 	}
-	if same {
-		log.G(ctx).Infof("kernel file %s already matches latest shared kernel %s", targetKernelPath, sharedKernelPath)
-		return nil
+	if !sharedExist {
+		return fmt.Errorf("local shared kernel not found: %s", sharedKernelPath)
 	}
-
 	if err := copyKernelFileAtomically(sharedKernelPath, targetKernelPath); err != nil {
 		return err
 	}
-	same, err = sameFileSHA256(sharedKernelPath, targetKernelPath)
-	if err != nil {
+	if err := validateRefreshedKernelFile(sharedKernelPath, targetKernelPath); err != nil {
+		cleanupErr := cleanupKernelFile(targetKernelPath)
+		if cleanupErr != nil {
+			log.G(ctx).Errorf(
+				"kernel file %s verification failed against shared kernel %s and cleanup failed: verifyErr=%v cleanupErr=%v",
+				targetKernelPath, sharedKernelPath, err, cleanupErr,
+			)
+			return fmt.Errorf("%w: cleanup invalid kernel file failed: %v", err, cleanupErr)
+		}
+		log.G(ctx).Errorf(
+			"kernel file %s verification failed against shared kernel %s, cleaned up invalid target: %v",
+			targetKernelPath, sharedKernelPath, err,
+		)
 		return err
 	}
-	if !same {
-		return fmt.Errorf("refreshed kernel file %s still differs from shared kernel %s", targetKernelPath, sharedKernelPath)
-	}
 	log.G(ctx).Infof("kernel file %s refreshed from latest shared kernel %s", targetKernelPath, sharedKernelPath)
+	return nil
+}
+
+func validateRefreshedKernelFile(sharedKernelPath, targetKernelPath string) error {
+	if err := validateKernelFile(targetKernelPath, "refreshed"); err != nil {
+		return err
+	}
+	same, err := compareKernelFiles(sharedKernelPath, targetKernelPath)
+	if err != nil {
+		return fmt.Errorf("refreshed kernel file %s verification failed against shared kernel %s: %w", targetKernelPath, sharedKernelPath, err)
+	}
+	if !same {
+		return fmt.Errorf("refreshed kernel file %s differs from shared kernel %s", targetKernelPath, sharedKernelPath)
+	}
+	return nil
+}
+
+func validateKernelFile(path, operation string) error {
+	exist, err := utils.FileExistAndValid(path)
+	if err != nil {
+		return fmt.Errorf("%s kernel file %s validation failed: %v", operation, path, err)
+	}
+	if !exist {
+		return fmt.Errorf("%s kernel file %s not exist", operation, path)
+	}
 	return nil
 }
 
@@ -93,6 +125,14 @@ func fileSHA256(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func cleanupKernelFile(path string) error {
+	err := os.Remove(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func copyKernelFileAtomically(srcPath, dstPath string) error {
