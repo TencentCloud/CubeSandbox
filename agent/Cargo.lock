@@ -167,9 +167,9 @@ dependencies = [
 
 [[package]]
 name = "bytes"
-version = "1.11.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
+checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "capctl"
@@ -990,7 +990,7 @@ version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72452e012c2f8d612410d89eea01e2d9b56205274abb35d53f60200b2ec41d60"
 dependencies = [
- "bytes 1.11.0",
+ "bytes 1.11.1",
  "futures",
  "log",
  "netlink-packet-core",
@@ -1016,7 +1016,7 @@ version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "416060d346fbaf1f23f9512963e3e878f1a78e707cb699ba9215761754244307"
 dependencies = [
- "bytes 1.11.0",
+ "bytes 1.11.1",
  "futures",
  "libc",
  "log",
@@ -1409,7 +1409,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de5e2533f59d08fcf364fd374ebda0692a70bd6d7e66ef97f306f45c6c5d8020"
 dependencies = [
- "bytes 1.11.0",
+ "bytes 1.11.1",
  "prost-derive",
 ]
 
@@ -1419,7 +1419,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "355f634b43cdd80724ee7848f95770e7e70eefa6dcf14fea676216573b8fd603"
 dependencies = [
- "bytes 1.11.0",
+ "bytes 1.11.1",
  "heck 0.3.3",
  "itertools",
  "log",
@@ -1450,7 +1450,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "603bbd6394701d13f3f25aada59c7de9d35a6a5887cfc156181234a44002771b"
 dependencies = [
- "bytes 1.11.0",
+ "bytes 1.11.1",
  "prost",
 ]
 
@@ -2116,7 +2116,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75ef51a33ef1da925cea3e4eb122833cb377c61439ca401b770f54902b806779"
 dependencies = [
  "backtrace",
- "bytes 1.11.0",
+ "bytes 1.11.1",
  "libc",
  "mio",
  "parking_lot 0.12.5",
@@ -2168,7 +2168,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52a15c15b1bc91f90902347eff163b5b682643aff0c8e972912cca79bd9208dd"
 dependencies = [
- "bytes 1.11.0",
+ "bytes 1.11.1",
  "futures",
  "libc",
  "tokio",
@@ -2181,7 +2181,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e336ac4b36df625d5429a735dd5847732fe5f62010e3ce0c50f3705d44730f8"
 dependencies = [
- "bytes 1.11.0",
+ "bytes 1.11.1",
  "futures",
  "libc",
  "tokio",
