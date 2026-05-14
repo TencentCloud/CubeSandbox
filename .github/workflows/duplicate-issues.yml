@@ -1,10 +1,10 @@
-name: Issue Triage
+name: Duplicate Issues Check
 on:
   issues:
-    types: [opened]
+    types: [opened, edited]
 
 jobs:
-  triage-issue:
+  check-duplicate-issue:
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -14,14 +14,14 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
-      
+
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.CLAUDE_APP_ID }}
           private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
-        
+
       - uses: anthropics/claude-code-action@v1
         env:
             ANTHROPIC_BASE_URL: https://api.lkeap.cloud.tencent.com/plan/anthropic
@@ -30,6 +30,6 @@ jobs:
             CLAUDE_CODE_SCRIPT_CAPS: '{"edit-issue-labels.sh":2}'
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: "/label-issue REPO: ${{ github.repository }} ISSUE_NUMBER: ${{ github.event.issue.number }}"
-          allowed_non_write_users: "*" # Required for issue triage workflow, if users without repo write access create issues
+          prompt: "/check-issue-duplicate REPO: ${{ github.repository }} ISSUE_NUMBER: ${{ github.event.issue.number }}"
+          allowed_non_write_users: "*" # Required so issues opened by users without repo write access are still checked
           github_token: ${{ steps.app-token.outputs.token }}

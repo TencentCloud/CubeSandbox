@@ -1,11 +1,10 @@
 name: Claude Auto Review with Tracking
 on:
-  pull_request_target:
-    types: [opened]
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 jobs:
   review:
-    if: github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -14,6 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+
       - uses: anthropics/claude-code-action@v1
         env:
             ANTHROPIC_BASE_URL: https://api.lkeap.cloud.tencent.com/plan/anthropic
@@ -21,59 +27,9 @@ jobs:
             ANTHROPIC_SMALL_FAST_MODEL: glm-5.1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
           track_progress: true # ✨ Enables tracking comments
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-
-            Please review this pull request with a focus on:
-            - Code quality and best practices
-            - Potential bugs or issues
-            - Security implications
-            - Performance considerations
-            - DCO check: verify every commit in this PR contains a valid `Signed-off-by:` trailer (Developer Certificate of Origin). If any commit is missing the sign-off, flag it clearly and ask the author to amend the commits with `git commit --amend -s` or `git rebase --signoff` and force-push.
-
-            Provide detailed feedback using inline comments for specific issues.
-
-          claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
-    
-  first-time-review:
-    if: github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: anthropics/claude-code-action@v1
-        env:
-            ANTHROPIC_BASE_URL: https://api.lkeap.cloud.tencent.com/plan/anthropic
-            ANTHROPIC_MODEL: glm-5.1
-            ANTHROPIC_SMALL_FAST_MODEL: glm-5.1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          track_progress: true # ✨ Enables tracking comments
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-            CONTRIBUTOR: ${{ github.event.pull_request.user.login }}
-
-            This is a first-time contribution from @${{ github.event.pull_request.user.login }}.
-
-            Please provide a comprehensive review focusing on:
-            - Compliance with project coding standards
-            - Proper test coverage (unit and integration)
-            - Documentation for new features
-            - Potential breaking changes
-            - License header requirements
-            - DCO check: verify every commit in this PR contains a valid `Signed-off-by:` trailer (Developer Certificate of Origin). If any commit is missing the sign-off, flag it clearly and ask the author to amend the commits with `git commit --amend -s` or `git rebase --signoff` and force-push.
-
-            Be welcoming but thorough in your review. Use inline comments for code-specific feedback. As this is a first-time contribution, kindly remind @${{ github.event.pull_request.user.login }} to read and follow the project's `CONTRIBUTING.md` (contribution workflow, commit message conventions, DCO sign-off, testing requirements, etc.) before we can merge this PR.
+          prompt: "/review-pr REPO: ${{ github.repository }} PR NUMBER: ${{ github.event.pull_request.number }}"
 
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
