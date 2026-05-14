@@ -24,7 +24,7 @@ TASK OVERVIEW:
      - `./scripts/gh.sh issue view 123` — view issue details
      - `./scripts/gh.sh issue view 123 --comments` — view with comments
      - `./scripts/gh.sh search issues "query" --limit 10` — search for issues
-     - `./scripts/gh.sh issue comment 123 --body-file /tmp/comment.md` — post a single comment
+     - `./scripts/gh.sh issue comment 123 --body-file -` — post a single comment whose body is piped in via stdin (see "POSTING YOUR COMMENT" below)
 
 3. If, based on TASK 1 below, the issue is NOT compliant, apply the compliance label:
 
@@ -76,13 +76,23 @@ POSTING YOUR COMMENT:
 
 Based on your findings, post a SINGLE comment on issue #${{ github.event.issue.number }}.
 
-To create the comment file, write the body to an absolute path (e.g. `/tmp/comment.md`). Do NOT use shell variables like `$TMPDIR` in the command — the sandbox rejects commands containing variable expansion (`Contains simple_expansion`). Either:
-- Use the `Write` tool to create `/tmp/comment.md` directly, or
-- Use a heredoc with a literal absolute path: `cat > /tmp/comment.md << 'COMMENT_EOF' ... COMMENT_EOF`
+IMPORTANT — exactly one way to post a comment:
 
-Then post it with:
+The sandbox does NOT let you create files in `/tmp/`, in the working directory, or anywhere else (the `Write` tool, `cat > file`, `tee file`, `touch file`, etc. will all be rejected as "requires approval"). Variable expansion in Bash (e.g. `$TMPDIR`) is also rejected (`Contains simple_expansion`).
 
-`./scripts/gh.sh issue comment ${{ github.event.issue.number }} --body-file /tmp/comment.md`
+The ONLY working pattern is to pipe the body into the wrapper via stdin using `--body-file -`. Use a heredoc with a single-quoted delimiter so the body is treated as a literal:
+
+```
+./scripts/gh.sh issue comment ${{ github.event.issue.number }} --body-file - <<'COMMENT_EOF'
+<comment body goes here, exactly as it should appear on the issue>
+COMMENT_EOF
+```
+
+Rules:
+- Do NOT first try to write the body to a file. It will fail. Go straight to the heredoc-piped command above.
+- Do NOT post any "test" / "smoke" comment to verify the wrapper works. The wrapper is known to work; emit the real comment on the first try.
+- Do NOT use `gh issue comment` directly — only `./scripts/gh.sh issue comment`.
+- Use a single-quoted heredoc delimiter (`<<'COMMENT_EOF'`) so backticks, `$`, etc. inside the body are not expanded.
 
 Build the comment as follows:
 
