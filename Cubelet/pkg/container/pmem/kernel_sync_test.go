@@ -59,6 +59,69 @@ func TestRefreshKernelFileCleansTargetOnVerificationFailure(t *testing.T) {
 	}
 }
 
+func TestEnsureKernelFilePresentRejectsMissingTarget(t *testing.T) {
+	baseDir := t.TempDir()
+	sharedKernelPath := filepath.Join(baseDir, "shared", "vmlinux")
+	targetKernelPath := filepath.Join(baseDir, "target", "artifact.vm")
+
+	sharedKernel := bytes.Repeat([]byte("s"), 4096)
+	writeKernelTestFile(t, sharedKernelPath, sharedKernel)
+
+	err := EnsureKernelFilePresent(context.Background(), sharedKernelPath, targetKernelPath)
+	if err == nil {
+		t.Fatal("EnsureKernelFilePresent error=nil, want non-nil")
+	}
+}
+
+func TestEnsureKernelFilePresentRejectsSmallTarget(t *testing.T) {
+	baseDir := t.TempDir()
+	sharedKernelPath := filepath.Join(baseDir, "shared", "vmlinux")
+	targetKernelPath := filepath.Join(baseDir, "target", "artifact.vm")
+
+	sharedKernel := bytes.Repeat([]byte("s"), 4096)
+	writeKernelTestFile(t, sharedKernelPath, sharedKernel)
+	writeKernelTestFile(t, targetKernelPath, bytes.Repeat([]byte("o"), 128))
+
+	err := EnsureKernelFilePresent(context.Background(), sharedKernelPath, targetKernelPath)
+	if err == nil {
+		t.Fatal("EnsureKernelFilePresent error=nil, want non-nil")
+	}
+}
+
+func TestEnsureKernelFilePresentRejectsDirectoryTarget(t *testing.T) {
+	baseDir := t.TempDir()
+	sharedKernelPath := filepath.Join(baseDir, "shared", "vmlinux")
+	targetKernelPath := filepath.Join(baseDir, "target", "artifact.vm")
+
+	sharedKernel := bytes.Repeat([]byte("s"), 4096)
+	writeKernelTestFile(t, sharedKernelPath, sharedKernel)
+	if err := os.MkdirAll(targetKernelPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll target kernel dir error=%v", err)
+	}
+
+	err := EnsureKernelFilePresent(context.Background(), sharedKernelPath, targetKernelPath)
+	if err == nil {
+		t.Fatal("EnsureKernelFilePresent error=nil, want non-nil")
+	}
+}
+
+func TestEnsureKernelFilePresentRequiresValidSharedKernel(t *testing.T) {
+	baseDir := t.TempDir()
+	sharedKernelPath := filepath.Join(baseDir, "shared", "vmlinux")
+	targetKernelPath := filepath.Join(baseDir, "target", "artifact.vm")
+
+	err := EnsureKernelFilePresent(context.Background(), sharedKernelPath, targetKernelPath)
+	if err == nil {
+		t.Fatal("EnsureKernelFilePresent error=nil for missing shared kernel")
+	}
+
+	writeKernelTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 128))
+	err = EnsureKernelFilePresent(context.Background(), sharedKernelPath, targetKernelPath)
+	if err == nil {
+		t.Fatal("EnsureKernelFilePresent error=nil for invalid shared kernel")
+	}
+}
+
 func writeKernelTestFile(t *testing.T, path string, content []byte) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

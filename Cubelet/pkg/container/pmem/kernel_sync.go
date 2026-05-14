@@ -19,40 +19,32 @@ import (
 
 var compareKernelFiles = sameFileSHA256
 
-// EnsureKernelFilePresent copies the shared kernel only when the target is missing.
+// EnsureKernelFilePresent verifies that the target kernel file is already present and valid.
 func EnsureKernelFilePresent(ctx context.Context, sharedKernelPath, targetKernelPath string) error {
-	sharedExist, err := utils.FileExistAndValid(sharedKernelPath)
-	if err != nil {
-		return fmt.Errorf("local shared kernel validation failed: %w", err)
-	}
-	if !sharedExist {
-		return fmt.Errorf("local shared kernel not found: %s", sharedKernelPath)
+	if err := requireValidSharedKernel(sharedKernelPath); err != nil {
+		return err
 	}
 
-	targetExist, err := utils.FileExistAndValid(targetKernelPath)
+	targetState, err := inspectKernelFileState(targetKernelPath)
 	if err != nil {
-		log.G(ctx).Warnf("kernel file %s validation failed, refresh from shared kernel: %v", targetKernelPath, err)
+		return err
 	}
-	if !targetExist {
-		if err := copyKernelFileAtomically(sharedKernelPath, targetKernelPath); err != nil {
-			return err
-		}
-		if err := validateKernelFile(targetKernelPath, "copied"); err != nil {
-			return err
-		}
-		log.G(ctx).Infof("kernel file %s missing, copied latest shared kernel from %s", targetKernelPath, sharedKernelPath)
+	switch targetState {
+	case kernelFileStateValid:
+		return nil
+	case kernelFileStateMissing:
+		return fmt.Errorf("target kernel file %s not exist", targetKernelPath)
+	case kernelFileStateInvalid:
+		return fmt.Errorf("target kernel file %s is invalid", targetKernelPath)
+	default:
+		return fmt.Errorf("unknown kernel file state for %s", targetKernelPath)
 	}
-	return nil
 }
 
 // RefreshKernelFile rewrites the target from the current shared kernel.
 func RefreshKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath string) error {
-	sharedExist, err := utils.FileExistAndValid(sharedKernelPath)
-	if err != nil {
-		return fmt.Errorf("local shared kernel validation failed: %w", err)
-	}
-	if !sharedExist {
-		return fmt.Errorf("local shared kernel not found: %s", sharedKernelPath)
+	if err := requireValidSharedKernel(sharedKernelPath); err != nil {
+		return err
 	}
 	if err := copyKernelFileAtomically(sharedKernelPath, targetKernelPath); err != nil {
 		return err
@@ -74,6 +66,40 @@ func RefreshKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath s
 	}
 	log.G(ctx).Infof("kernel file %s refreshed from latest shared kernel %s", targetKernelPath, sharedKernelPath)
 	return nil
+}
+
+type kernelFileState string
+
+const (
+	kernelFileStateValid   kernelFileState = "valid"
+	kernelFileStateMissing kernelFileState = "missing"
+	kernelFileStateInvalid kernelFileState = "invalid"
+)
+
+func requireValidSharedKernel(sharedKernelPath string) error {
+	sharedState, err := inspectKernelFileState(sharedKernelPath)
+	if err != nil {
+		return err
+	}
+	switch sharedState {
+	case kernelFileStateValid:
+		return nil
+	case kernelFileStateMissing:
+		return fmt.Errorf("local shared kernel not found: %s", sharedKernelPath)
+	default:
+		return fmt.Errorf("local shared kernel validation failed: %w", validateKernelFile(sharedKernelPath, "local shared"))
+	}
+}
+
+func inspectKernelFileState(path string) (kernelFileState, error) {
+	exist, err := utils.FileExistAndValid(path)
+	if err != nil {
+		return kernelFileStateInvalid, nil
+	}
+	if exist {
+		return kernelFileStateValid, nil
+	}
+	return kernelFileStateMissing, nil
 }
 
 func validateRefreshedKernelFile(sharedKernelPath, targetKernelPath string) error {

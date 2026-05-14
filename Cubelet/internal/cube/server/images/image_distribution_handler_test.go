@@ -19,6 +19,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 )
 
+func writeImageTestFile(t *testing.T, path string, content []byte) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, content, 0o644))
+}
+
 func TestDefaultTemplateImageSpecSetsExt4InstanceType(t *testing.T) {
 	spec := defaultTemplateImageSpec("test-ns", &templatetypes.TemplateImage{
 		Image:        "artifact-1",
@@ -36,16 +42,13 @@ func TestMaterializeDistributedTemplateRuntimeFilesRefreshesKernel(t *testing.T)
 		StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
 	}
 	sharedKernelPath := pmem.GetSharedKernelFilePath()
-	require.NoError(t, os.MkdirAll(filepath.Dir(sharedKernelPath), 0o755))
-	require.NoError(t, os.WriteFile(sharedKernelPath, bytes.Repeat([]byte("s"), 4096), 0o644))
+	writeImageTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
 
 	sharedVersionPath := pmem.GetSharedImageVersionFilePath()
-	require.NoError(t, os.MkdirAll(filepath.Dir(sharedVersionPath), 0o755))
-	require.NoError(t, os.WriteFile(sharedVersionPath, []byte("2.2.0-20251010\n"), 0o644))
+	writeImageTestFile(t, sharedVersionPath, []byte("2.2.0-20251010\n"))
 
 	targetKernelPath := pmem.GetRawKernelFilePath(cubebox.InstanceType_cubebox.String(), template.Image)
-	require.NoError(t, os.MkdirAll(filepath.Dir(targetKernelPath), 0o755))
-	require.NoError(t, os.WriteFile(targetKernelPath, bytes.Repeat([]byte("o"), 2048), 0o644))
+	writeImageTestFile(t, targetKernelPath, bytes.Repeat([]byte("o"), 2048))
 
 	err := materializeDistributedTemplateRuntimeFiles(context.Background(), template)
 	require.NoError(t, err)
@@ -53,12 +56,31 @@ func TestMaterializeDistributedTemplateRuntimeFilesRefreshesKernel(t *testing.T)
 	gotKernel, err := os.ReadFile(targetKernelPath)
 	require.NoError(t, err)
 	require.Equal(t, bytes.Repeat([]byte("s"), 4096), gotKernel)
+
+	targetVersionPath := pmem.GetRawImageVersionFilePath(cubebox.InstanceType_cubebox.String(), template.Image)
+	gotVersion, err := os.ReadFile(targetVersionPath)
+	require.NoError(t, err)
+	require.Equal(t, []byte("2.2.0-20251010\n"), gotVersion)
 }
 
 func TestMaterializeDistributedTemplateRuntimeFilesSkipsNonExt4(t *testing.T) {
 	err := materializeDistributedTemplateRuntimeFiles(context.Background(), &templatetypes.TemplateImage{
 		Image:        "artifact-1",
 		StorageMedia: "overlayfs",
+	})
+	require.NoError(t, err)
+}
+
+func TestEnsureDistributedTemplateImageExt4DoesNotRequireKernelFile(t *testing.T) {
+	baseDir := t.TempDir()
+	pmem.Init(baseDir)
+
+	imagePath := pmem.GetRawImageFilePath(cubebox.InstanceType_cubebox.String(), "artifact-2")
+	writeImageTestFile(t, imagePath, bytes.Repeat([]byte("e"), 4096))
+
+	err := ensureDistributedTemplateImage(context.Background(), nil, &templatetypes.TemplateImage{
+		Image:        "artifact-2",
+		StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
 	})
 	require.NoError(t, err)
 }

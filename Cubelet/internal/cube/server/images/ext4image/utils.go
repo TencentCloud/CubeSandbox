@@ -26,6 +26,14 @@ import (
 )
 
 func EnsurePmemFile(ctx context.Context, instanceType, imageRef string) error {
+	if err := EnsurePmemRootfs(ctx, instanceType, imageRef); err != nil {
+		return err
+	}
+	return validateArtifactRuntimeFilesPresent(ctx, instanceType, imageRef)
+}
+
+// EnsurePmemRootfs ensures the ext4 rootfs artifact exists locally.
+func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error {
 	if instanceType == "" || imageRef == "" {
 		return fmt.Errorf("instanceType or imageRef is empty")
 	}
@@ -56,7 +64,7 @@ func EnsurePmemFile(ctx context.Context, instanceType, imageRef string) error {
 			return fmt.Errorf("downloaded pmem file %s not exist", imagePath)
 		}
 	}
-	return ensureArtifactRuntimeFilesPresent(ctx, instanceType, imageRef)
+	return nil
 }
 
 func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages.ImageSpec) error {
@@ -117,14 +125,14 @@ func RefreshArtifactRuntimeFiles(ctx context.Context, instanceType, imageRef str
 	if err := refreshKernelFile(ctx, instanceType, imageRef); err != nil {
 		return err
 	}
-	return ensureImageVersionFile(ctx, instanceType, imageRef)
+	return refreshImageVersionFile(ctx, instanceType, imageRef)
 }
 
-func ensureArtifactRuntimeFilesPresent(ctx context.Context, instanceType, imageRef string) error {
+func validateArtifactRuntimeFilesPresent(ctx context.Context, instanceType, imageRef string) error {
 	if err := ensureKernelFilePresent(ctx, instanceType, imageRef); err != nil {
 		return err
 	}
-	return ensureImageVersionFile(ctx, instanceType, imageRef)
+	return validateImageVersionFilePresent(ctx, instanceType, imageRef)
 }
 
 func ensureKernelFilePresent(ctx context.Context, instanceType, imageRef string) error {
@@ -135,15 +143,20 @@ func refreshKernelFile(ctx context.Context, instanceType, imageRef string) error
 	return pmem.RefreshKernelFile(ctx, pmem.GetSharedKernelFilePath(), pmem.GetRawKernelFilePath(instanceType, imageRef))
 }
 
-func ensureImageVersionFile(ctx context.Context, instanceType, imageRef string) error {
+func validateImageVersionFilePresent(ctx context.Context, instanceType, imageRef string) error {
 	versionPath := pmem.GetRawImageVersionFilePath(instanceType, imageRef)
 	exist, err := fileExistsAndNonEmpty(versionPath)
 	if err != nil {
-		log.G(ctx).Warnf("image version file %s validation failed, try copy: %v", versionPath, err)
+		return fmt.Errorf("image version file %s validation failed: %v", versionPath, err)
 	}
 	if exist {
 		return nil
 	}
+	return fmt.Errorf("image version file %s not exist", versionPath)
+}
+
+func refreshImageVersionFile(ctx context.Context, instanceType, imageRef string) error {
+	versionPath := pmem.GetRawImageVersionFilePath(instanceType, imageRef)
 	sharedVersionPath := pmem.GetSharedImageVersionFilePath()
 	sharedExist, err := fileExistsAndNonEmpty(sharedVersionPath)
 	if err != nil {
@@ -155,7 +168,7 @@ func ensureImageVersionFile(ctx context.Context, instanceType, imageRef string) 
 	if err := copyLocalFileAtomically(ctx, sharedVersionPath, versionPath, "image version"); err != nil {
 		return err
 	}
-	exist, err = fileExistsAndNonEmpty(versionPath)
+	exist, err := fileExistsAndNonEmpty(versionPath)
 	if err != nil {
 		return fmt.Errorf("copied image version file %s validation failed: %v", versionPath, err)
 	}

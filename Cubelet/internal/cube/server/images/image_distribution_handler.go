@@ -38,14 +38,16 @@ type imageDistributionHandler struct {
 
 func defaultTemplateImageSpec(ns string, template *templatetypes.TemplateImage) *cubeimages.ImageSpec {
 	annotations := map[string]string{}
-	if template != nil && template.StorageMedia == cubeimages.ImageStorageMediaType_ext4.String() {
-		annotations[constants.MasterAnnotationInstanceType] = cubebox.InstanceType_cubebox.String()
-	}
-	var storageMedia string
-	var imageRef string
+	var (
+		storageMedia string
+		imageRef     string
+	)
 	if template != nil {
 		storageMedia = template.StorageMedia
 		imageRef = template.Image
+		if template.StorageMedia == cubeimages.ImageStorageMediaType_ext4.String() {
+			annotations[constants.MasterAnnotationInstanceType] = cubebox.InstanceType_cubebox.String()
+		}
 	}
 	return &cubeimages.ImageSpec{
 		StorageMedia: storageMedia,
@@ -60,6 +62,17 @@ func materializeDistributedTemplateRuntimeFiles(ctx context.Context, template *t
 		return nil
 	}
 	return ext4image.RefreshArtifactRuntimeFiles(ctx, cubebox.InstanceType_cubebox.String(), template.Image)
+}
+
+func ensureDistributedTemplateImage(ctx context.Context, c *CubeImageService, template *templatetypes.TemplateImage) error {
+	if template == nil {
+		return fmt.Errorf("template image is nil")
+	}
+	if template.StorageMedia == cubeimages.ImageStorageMediaType_ext4.String() {
+		return ext4image.EnsurePmemRootfs(ctx, cubebox.InstanceType_cubebox.String(), template.Image)
+	}
+	_, err := c.EnsureImage(ctx, template.Image, "", "", &runtime.PodSandboxConfig{})
+	return err
 }
 
 func (c *imageDistributionHandler) GetTaskExternObjByKey(ctx context.Context, key string) (any, error) {
@@ -120,8 +133,7 @@ func (c *imageDistributionHandler) Handle(ctx context.Context, task *distributio
 		ctx = constants.WithImageSpec(ctx, cubeSpec)
 
 		logEntry.Infof("ensuring image: %s", template.Image)
-		_, err = c.EnsureImage(ctx, template.Image, "", "", &runtime.PodSandboxConfig{})
-		if err != nil {
+		if err = ensureDistributedTemplateImage(ctx, c.CubeImageService, template); err != nil {
 			err = fmt.Errorf("ensure image failed: %w", err)
 			return
 		}
