@@ -10,22 +10,19 @@ concurrency:
   group: release-pvm-host-kernel-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build PVM host kernel (${{ matrix.package_type }})
+  build_deb:
+    name: Build PVM host kernel (deb)
     runs-on: arc-runner-set-16c32g-containerd
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - package_type: deb
-            build_mode: native
-          - package_type: rpm
-            build_mode: container
-            container_image: fedora:40
+    container:
+      image: ubuntu:24.04
 
     steps:
       - name: Checkout
@@ -42,28 +39,24 @@ jobs:
           docker-images: false
           swap-storage: true
 
+      - name: Install verification tools
+        run: |
+          apt-get update
+          apt-get install -y file sudo build-essential git bc bison flex \
+            libelf-dev libssl-dev libncurses-dev dwarves cpio kmod \
+            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3
       - name: Build DEB package
-        if: matrix.build_mode == 'native'
         run: |
           WORK_DIR="${GITHUB_WORKSPACE}/pvm-host-build" \
           OUTPUT_DIR="${GITHUB_WORKSPACE}/pvm-host-build/output" \
             bash deploy/pvm/build-pvm-host-kernel-pkg.sh
 
-      - name: Build RPM package
-        if: matrix.build_mode == 'container'
-        run: |
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -w /workspace \
-            "${{ matrix.container_image }}" \
-            bash -lc 'WORK_DIR=/workspace/pvm-host-build OUTPUT_DIR=/workspace/pvm-host-build/output bash deploy/pvm/build-pvm-host-kernel-pkg.sh'
-
       - name: Verify package artifacts
         run: |
           shopt -s nullglob
-          packages=(pvm-host-build/output/*.${{ matrix.package_type }})
+          packages=(pvm-host-build/output/*.deb)
           if [[ "${#packages[@]}" -eq 0 ]]; then
-            echo "No ${{ matrix.package_type }} packages were produced" >&2
+            echo "No deb packages were produced" >&2
             exit 1
           fi
           ls -lh "${packages[@]}"
@@ -71,15 +64,61 @@ jobs:
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pvm-host-kernel-${{ matrix.package_type }}-${{ github.ref_name }}
-          path: pvm-host-build/output/*.${{ matrix.package_type }}
+          name: pvm-host-kernel-deb-${{ github.ref_name }}
+          path: pvm-host-build/output/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  build_rpm:
+    name: Build PVM host kernel (rpm)
+    runs-on: arc-runner-set-16c32g-containerd
+    container:
+      image: opencloudos/opencloudos9-minimal:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Switch OpenCloudOS repos to Tencent mirrors
+        run: |
+          set -euo pipefail
+          sed -i "s#https://mirrors.opencloudos.tech/opencloudos/#https://mirrors.tencent.com/opencloudos/#g" /etc/yum.repos.d/OpenCloudOS.repo
+          if [[ -f /etc/yum.repos.d/epol.repo ]]; then
+            sed -i "s#http://mirrors.tencent.com/epol/#https://mirrors.tencent.com/epol/#g" /etc/yum.repos.d/epol.repo
+          fi
+          dnf clean all
+          rm -rf /var/cache/dnf/*
+
+      - name: Build RPM package
+        run: |
+          WORK_DIR="${GITHUB_WORKSPACE}/pvm-host-build" \
+          OUTPUT_DIR="${GITHUB_WORKSPACE}/pvm-host-build/output" \
+            bash deploy/pvm/build-pvm-host-kernel-pkg.sh
+
+      - name: Verify package artifacts
+        run: |
+          shopt -s nullglob
+          packages=(pvm-host-build/output/*.rpm)
+          if [[ "${#packages[@]}" -eq 0 ]]; then
+            echo "No rpm packages were produced" >&2
+            exit 1
+          fi
+          ls -lh "${packages[@]}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pvm-host-kernel-rpm-${{ github.ref_name }}
+          path: pvm-host-build/output/*.rpm
           if-no-files-found: error
           retention-days: 14
 
   publish:
     name: Upload PVM host packages to GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs:
+      - build_deb
+      - build_rpm
     runs-on: ubuntu-latest
     permissions:
       contents: write
