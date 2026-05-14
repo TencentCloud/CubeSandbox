@@ -2005,7 +2005,8 @@ func artifactWorkRootDir() string {
 	if value := strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_DIR")); value != "" {
 		return value
 	}
-	return filepath.Join(os.TempDir(), "cubemaster-rootfs-artifacts")
+	storeRoot := artifactStoreRootDir()
+	return filepath.Join(storeRoot, "tmp", "cubemaster-rootfs-artifacts")
 }
 
 func artifactStoreRootDir() string {
