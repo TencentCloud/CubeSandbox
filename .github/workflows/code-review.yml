@@ -22,14 +22,15 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         env:
-            ANTHROPIC_BASE_URL: https://api.lkeap.cloud.tencent.com/plan/anthropic
-            ANTHROPIC_MODEL: glm-5.1
-            ANTHROPIC_SMALL_FAST_MODEL: glm-5.1
+            ANTHROPIC_BASE_URL: https://tokenhub.tencentmaas.com
+            ANTHROPIC_MODEL: deepseek-v4-flash
+            ANTHROPIC_SMALL_FAST_MODEL: deepseek-v4-flash
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
           track_progress: true # ✨ Enables tracking comments
           prompt: "/review-pr REPO: ${{ github.repository }} PR NUMBER: ${{ github.event.pull_request.number }}"
+          show_full_output: true
 
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
