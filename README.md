@@ -32,7 +32,7 @@
 
 ---
 
-Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built on RustVMM and KVM. It supports both single-node deployment and can be easily scaled to a multi-node cluster. It is compatible with the E2B SDK, capable of creating a hardware-isolated sandbox environment with full service capabilities in under 60ms, while maintaining less than 5MB memory overhead.
+Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built on RustVMM and KVM. It supports both single-node deployment and easy scaling to multi-node clusters. It is compatible with the E2B SDK and can create a hardware-isolated, fully serviceable sandbox in under 60ms with less than 5MB of memory overhead.
 
 
 <p align="center">
@@ -280,6 +280,7 @@ We welcome contributions of all kinds—whether it’s a bug report, feature sug
 - 🐞 **Found a Bug or have questions?** Submit an issue on <a href="https://github.com/tencentcloud/CubeSandbox/issues" target="_blank">GitHub Issues</a>.
 - 💡 **Have an Idea?** Join the conversation in <a href="https://github.com/tencentcloud/CubeSandbox/discussions" target="_blank">GitHub Discussions</a>.
 - 🛠️ **Want to Code?** Check out our <a href="./CONTRIBUTING.md" target="_blank">CONTRIBUTING.md</a> to learn how to submit a Pull Request.
+- 📝 **Want to contribute docs?** Submit bilingual PRs to our community doc channels: <a href="./docs/guide/troubleshooting/index.md" target="_blank">Troubleshooting</a>, <a href="./docs/guide/usecases/index.md" target="_blank">Use Cases</a>, and <a href="./docs/guide/integrations/index.md" target="_blank">Integrations</a>.
 - 💬 **Want to Chat?** Join our <a href="https://discord.gg/kkapzDXShb" target="_blank">Discord</a>.
 
 ## License

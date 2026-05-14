@@ -9,6 +9,21 @@ Thank you for your interest in contributing to Cube Sandbox! This document provi
 - **Improve documentation** — Fix typos, clarify explanations, or add examples.
 - **Submit code** — Fix bugs, implement features, or improve performance.
 
+## Community Docs Channels
+
+Besides general documentation fixes, we maintain three community doc channels under `docs/guide/`:
+
+- **Troubleshooting** — deployment and operations write-ups in [`docs/guide/troubleshooting/`](./docs/guide/troubleshooting/index.md) and [`docs/zh/guide/troubleshooting/`](./docs/zh/guide/troubleshooting/index.md)
+- **Use Cases** — real-world business or production case studies in [`docs/guide/usecases/`](./docs/guide/usecases/index.md) and [`docs/zh/guide/usecases/`](./docs/zh/guide/usecases/index.md)
+- **Integrations** — one integration guide per framework or agent in [`docs/guide/integrations/`](./docs/guide/integrations/index.md) and [`docs/zh/guide/integrations/`](./docs/zh/guide/integrations/index.md)
+
+### Requirements for Community Doc PRs
+
+- **Bilingual is mandatory** — every new or updated article must include both `docs/guide/<channel>/<slug>.md` and `docs/zh/guide/<channel>/<slug>.md`
+- **Use the same filename in both languages** — filenames must use English kebab-case, for example `langchain.md` or `e2b-api-401-timeout.md`
+- **Keep frontmatter aligned** — both language versions should use the same frontmatter keys (`title`, `author`, `date`, `tags`, `lang`)
+- **Start from the provided template** — each channel includes an `_template.md` file plus an index page with the current article list and instructions
+
 ## Getting Started
 
 ### Prerequisites

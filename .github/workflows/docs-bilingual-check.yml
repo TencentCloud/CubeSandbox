@@ -1,0 +1,92 @@
+name: Community Docs Bilingual Check
+
+on:
+  pull_request:
+    paths:
+      - 'docs/guide/troubleshooting/**'
+      - 'docs/guide/usecases/**'
+      - 'docs/guide/integrations/**'
+      - 'docs/zh/guide/troubleshooting/**'
+      - 'docs/zh/guide/usecases/**'
+      - 'docs/zh/guide/integrations/**'
+      - '.github/workflows/docs-bilingual-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-bilingual-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bilingual-check:
+    name: Community docs bilingual parity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate mirrored file changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${BASE_SHA:-}" ]]; then
+            echo "This workflow enforces bilingual parity for pull requests."
+            exit 0
+          fi
+
+          declare -a files=()
+          while IFS= read -r path; do
+            [[ -n "${path}" ]] || continue
+            case "${path}" in
+              docs/guide/troubleshooting/*.md|docs/guide/usecases/*.md|docs/guide/integrations/*.md|docs/zh/guide/troubleshooting/*.md|docs/zh/guide/usecases/*.md|docs/zh/guide/integrations/*.md)
+                files+=("${path}")
+                ;;
+            esac
+          done < <(git diff --name-only --diff-filter=ACMR "${BASE_SHA}" "${HEAD_SHA}")
+
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "No community docs markdown changes detected."
+            exit 0
+          fi
+
+          declare -A changed=()
+          for file in "${files[@]}"; do
+            changed["${file}"]=1
+          done
+
+          failed=0
+          for file in "${files[@]}"; do
+            case "${file}" in
+              docs/zh/guide/*)
+                counterpart="docs/${file#docs/zh/}"
+                ;;
+              docs/guide/*)
+                counterpart="docs/zh/${file#docs/}"
+                ;;
+              *)
+                continue
+                ;;
+            esac
+
+            if [[ -z "${changed[${counterpart}]:-}" ]]; then
+              echo "::error file=${file}::Missing mirrored change: ${counterpart}"
+              failed=1
+            fi
+          done
+
+          if [[ "${failed}" -ne 0 ]]; then
+            echo ""
+            echo "Community doc changes must be submitted in both languages."
+            echo "Update both the English and Chinese mirrored file paths in the same PR."
+            exit 1
+          fi
+
+          echo "All community doc changes have mirrored bilingual updates."

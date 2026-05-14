@@ -33,7 +33,7 @@
 
 ---
 
-Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用的安全沙箱服务。它既支持单机部署，也能够很方便的扩展到多台机器的集群服务。同时对外兼容E2B SDK， 在60ms内就可以创建一个具备服务能力的硬件隔离沙箱环境，并保持着小于5M的内存开销。
+Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用的安全沙箱服务。它既支持单机部署，也能方便地扩展到多机集群。对外兼容 E2B SDK，可在 60ms 内创建具备完整服务能力的硬件隔离沙箱，并将内存开销控制在 5MB 以内。
 
 
 <p align="center">
@@ -275,7 +275,8 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 
 - **发现 Bug** —— <a href="https://github.com/tencentcloud/CubeSandbox/issues" target="_blank">在这里报告问题或提出建议</a>
 - **有新想法** —— <a href="https://github.com/tencentcloud/CubeSandbox/discussions" target="_blank">提问交流与想法分享</a>
-- **想写代码？** —— 查看我们的 <a href="./CONTRIBUTING.md" target="_blank">CONTRIBUTING.md</a> 贡献指南，了解如何提交Pull Requst。
+- **想写代码？** —— 查看我们的 <a href="./CONTRIBUTING.md" target="_blank">CONTRIBUTING.md</a> 贡献指南，了解如何提交 Pull Request。
+- **想贡献文档 / PR？** —— 欢迎按双语方式投稿到这 3 个社区文档入口：<a href="./docs/zh/guide/troubleshooting/index.md" target="_blank">故障排障</a>、<a href="./docs/zh/guide/usecases/index.md" target="_blank">应用案例</a>、<a href="./docs/zh/guide/integrations/index.md" target="_blank">生态集成</a>。
 - **想成为最终用户？** —— 点击<a href="https://wj.qq.com/s2/26499618/a9fc/" target="_blank">这里</a>填写用户调研。
 - **想聊聊天？** —— 扫描二维码，加入我们的微信交流群。
 
