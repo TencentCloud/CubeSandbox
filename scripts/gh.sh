@@ -10,6 +10,7 @@ set -euo pipefail
 #   ./scripts/gh.sh issue list --state open --limit 20
 #   ./scripts/gh.sh search issues "search query" --limit 10
 #   ./scripts/gh.sh label list --limit 100
+#   ./scripts/gh.sh issue comment 123 --body-file /tmp/comment.md
 
 export GH_HOST=github.com
 
@@ -20,17 +21,17 @@ if [[ -z "$REPO" || "$REPO" == */*/* || "$REPO" != */* ]]; then
 fi
 export GH_REPO="$REPO"
 
-ALLOWED_FLAGS=(--comments --state --limit --label)
-FLAGS_WITH_VALUES=(--state --limit --label)
+ALLOWED_FLAGS=(--comments --state --limit --label --body-file)
+FLAGS_WITH_VALUES=(--state --limit --label --body-file)
 
 SUB1="${1:-}"
 SUB2="${2:-}"
 CMD="$SUB1 $SUB2"
 case "$CMD" in
-  "issue view"|"issue list"|"search issues"|"label list")
+  "issue view"|"issue list"|"search issues"|"label list"|"issue comment")
     ;;
   *)
-    echo "Error: only 'issue view', 'issue list', 'search issues', 'label list' are allowed (e.g., ./scripts/gh.sh issue view 123)" >&2
+    echo "Error: only 'issue view', 'issue list', 'search issues', 'label list', 'issue comment' are allowed (e.g., ./scripts/gh.sh issue view 123)" >&2
     exit 1
     ;;
 esac
@@ -55,7 +56,7 @@ for arg in "$@"; do
       fi
     done
     if [[ "$matched" == false ]]; then
-      echo "Error: only --comments, --state, --limit, --label flags are allowed (e.g., ./scripts/gh.sh issue list --state open --limit 20)" >&2
+      echo "Error: only --comments, --state, --limit, --label, --body-file flags are allowed (e.g., ./scripts/gh.sh issue list --state open --limit 20)" >&2
       exit 1
     fi
     FLAGS+=("$arg")
@@ -84,6 +85,23 @@ if [[ "$CMD" == "search issues" ]]; then
 elif [[ "$CMD" == "issue view" ]]; then
   if [[ ${#POSITIONAL[@]} -ne 1 ]] || ! [[ "${POSITIONAL[0]}" =~ ^[0-9]+$ ]]; then
     echo "Error: issue view requires exactly one numeric issue number (e.g., ./scripts/gh.sh issue view 123)" >&2
+    exit 1
+  fi
+  gh "$SUB1" "$SUB2" "${POSITIONAL[0]}" "${FLAGS[@]}"
+elif [[ "$CMD" == "issue comment" ]]; then
+  if [[ ${#POSITIONAL[@]} -ne 1 ]] || ! [[ "${POSITIONAL[0]}" =~ ^[0-9]+$ ]]; then
+    echo "Error: issue comment requires exactly one numeric issue number (e.g., ./scripts/gh.sh issue comment 123 --body-file /tmp/comment.md)" >&2
+    exit 1
+  fi
+  has_body_file=false
+  for f in "${FLAGS[@]}"; do
+    if [[ "$f" == "--body-file" || "$f" == --body-file=* ]]; then
+      has_body_file=true
+      break
+    fi
+  done
+  if [[ "$has_body_file" == false ]]; then
+    echo "Error: issue comment requires --body-file <path> (e.g., ./scripts/gh.sh issue comment 123 --body-file /tmp/comment.md)" >&2
     exit 1
   fi
   gh "$SUB1" "$SUB2" "${POSITIONAL[0]}" "${FLAGS[@]}"

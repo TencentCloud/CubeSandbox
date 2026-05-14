@@ -24,7 +24,7 @@ TASK OVERVIEW:
      - `./scripts/gh.sh issue view 123` — view issue details
      - `./scripts/gh.sh issue view 123 --comments` — view with comments
      - `./scripts/gh.sh search issues "query" --limit 10` — search for issues
-     - `./scripts/gh.sh issue comment 123 --body-file comment.md` — post a single comment
+     - `./scripts/gh.sh issue comment 123 --body-file /tmp/comment.md` — post a single comment
 
 3. If, based on TASK 1 below, the issue is NOT compliant, apply the compliance label:
 
@@ -74,7 +74,17 @@ Additionally, if the issue mentions keybinds, keyboard shortcuts, or key binding
 
 POSTING YOUR COMMENT:
 
-Based on your findings, post a SINGLE comment on issue #${{ github.event.issue.number }} using `./scripts/gh.sh issue comment ${{ github.event.issue.number }} --body-file <path-to-comment>`. Build the comment as follows:
+Based on your findings, post a SINGLE comment on issue #${{ github.event.issue.number }}.
+
+To create the comment file, write the body to an absolute path (e.g. `/tmp/comment.md`). Do NOT use shell variables like `$TMPDIR` in the command — the sandbox rejects commands containing variable expansion (`Contains simple_expansion`). Either:
+- Use the `Write` tool to create `/tmp/comment.md` directly, or
+- Use a heredoc with a literal absolute path: `cat > /tmp/comment.md << 'COMMENT_EOF' ... COMMENT_EOF`
+
+Then post it with:
+
+`./scripts/gh.sh issue comment ${{ github.event.issue.number }} --body-file /tmp/comment.md`
+
+Build the comment as follows:
 
 If the issue is NOT compliant, start the comment with:
 <!-- issue-compliance -->
