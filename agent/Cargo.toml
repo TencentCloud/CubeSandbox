@@ -56,7 +56,7 @@ prometheus = { version = "0.13.0", features = ["process"] }
 procfs = "0.12.0"
 anyhow = "1.0.99"
 cgroups = { package = "cgroups-rs", version = "0.3.0" }
-time = "0.3.41"
+time = "0.3.47"
 
 # Tracing
 tracing = "0.1.26"
