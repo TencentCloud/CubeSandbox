@@ -156,7 +156,7 @@ function ClusterSection() {
         <div className="space-y-3">
           <div className="flex items-center gap-2">
             <div className="flex-1 rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 font-mono text-sm text-foreground/60">
-              {window.location.origin}/cubeapi/v1
+              {cfg?.apiEndpoint ?? `${window.location.origin}/cubeapi/v1`}
             </div>
             <button
               onClick={handleTest}
@@ -275,7 +275,7 @@ function AboutSection() {
       <div className="rounded-xl border border-white/8 bg-white/[0.03] divide-y divide-white/5">
         {[
           [t('about.version'),     'v0.1.0'],
-          [t('about.cubeApi'),     `${window.location.origin}/cubeapi/v1`],
+          [t('about.cubeApi'),     cfg?.apiEndpoint ?? `${window.location.origin}/cubeapi/v1`],
           [t('about.instanceType'),cfg?.instanceType ?? '—'],
         ].map(([label, value]) => (
           <div key={label} className="flex items-center justify-between px-5 py-3.5">

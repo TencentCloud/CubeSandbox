@@ -188,6 +188,7 @@ export const clusterApi = {
   nodes: () => api<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
   node: (id: string) => api<ApiNodeView>(`/nodes/${id}`).then(mapNode),
   config: () => api<{
+    apiEndpoint: string;
     rateLimitPerSec: number;
     authEnabled: boolean;
     sandboxDomain: string;
