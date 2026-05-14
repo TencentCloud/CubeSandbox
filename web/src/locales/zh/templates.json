@@ -10,7 +10,7 @@
   },
   "instanceDefault": "标准",
   "create": {
-    "button": "+ 新建模板",
+    "button": "新建模板",
     "title": "新建模板",
     "templateID": "Template ID",
     "image": "image",

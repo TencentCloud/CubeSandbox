@@ -63,7 +63,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <Card className="w-full max-w-md shadow-xl">
+      <Card className="w-full max-w-2xl shadow-xl overflow-y-auto max-h-[90vh]">
         <CardHeader className="flex flex-row items-center justify-between pb-3">
           <CardTitle className="text-base">{t('create.title')}</CardTitle>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
@@ -71,51 +71,57 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
           </button>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {t('create.templateID')}
-            </label>
-            <Input
-              placeholder="tpl-xxxxxxxx"
-              value={templateID}
-              onChange={(e) => setTemplateID(e.target.value)}
-            />
+          {/* Row 1: templateID + image */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">
+                {t('create.templateID')}
+              </label>
+              <Input
+                placeholder="tpl-xxxxxxxx"
+                value={templateID}
+                onChange={(e) => setTemplateID(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">
+                {t('create.image')} <span className="text-destructive text-sm font-bold">*</span>
+              </label>
+              <Input
+                placeholder="registry.example.com/image:tag"
+                value={image}
+                onChange={(e) => setImage(e.target.value.trim())}
+              />
+            </div>
           </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {t('create.image')} <span className="text-destructive">*</span>
-            </label>
-            <Input
-              placeholder="registry.example.com/image:tag"
-              value={image}
-              onChange={(e) => setImage(e.target.value.trim())}
-            />
+          {/* Row 2: instanceType + writableLayerSize */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">
+                {t('create.instanceType')}
+              </label>
+              <Input
+                placeholder={t('instanceDefault')}
+                value={instanceType}
+                onChange={(e) => setInstanceType(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">
+                {t('create.writableLayerSize')} <span className="text-destructive text-sm font-bold">*</span>
+              </label>
+              <Input
+                placeholder="1G"
+                value={writableLayerSize}
+                onChange={(e) => setWritableLayerSize(e.target.value)}
+              />
+              <p className="text-[11px] text-muted-foreground">{t('create.writableLayerSizeHint')}</p>
+            </div>
           </div>
+          {/* Row 3: exposedPorts 占全宽 */}
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-muted-foreground">
-              {t('create.instanceType')}
-            </label>
-            <Input
-              placeholder={t('instanceDefault')}
-              value={instanceType}
-              onChange={(e) => setInstanceType(e.target.value)}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {t('create.writableLayerSize')} <span className="text-destructive">*</span>
-            </label>
-            <Input
-              placeholder="1G"
-              value={writableLayerSize}
-              onChange={(e) => setWritableLayerSize(e.target.value)}
-            />
-            <p className="text-[11px] text-muted-foreground">{t('create.writableLayerSizeHint')}</p>
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {t('create.exposedPorts')} <span className="text-destructive">*</span>
+              {t('create.exposedPorts')} <span className="text-destructive text-sm font-bold">*</span>
             </label>
             <Input
               placeholder="49983"
@@ -277,9 +283,8 @@ export default function TemplatesPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('title')}</h1>
           <p className="mt-1 text-sm text-muted-foreground">{t('subtitle')}</p>
         </div>
-        <Button size="sm" onClick={() => setShowCreate(true)}>
-          <Plus className="mr-1.5 h-4 w-4" />
-          {t('create.button')}
+        <Button onClick={() => setShowCreate(true)}>
+          <Plus size={14} /> {t('create.button')}
         </Button>
       </header>
 

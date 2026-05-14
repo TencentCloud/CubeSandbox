@@ -10,7 +10,7 @@
   },
   "instanceDefault": "standard",
   "create": {
-    "button": "+ New Template",
+    "button": "New Template",
     "title": "New Template",
     "templateID": "Template ID",
     "image": "image",
