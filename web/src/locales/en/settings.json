@@ -19,7 +19,7 @@
     "title": "Cluster Connection",
     "desc": "View information about the connected CubeAPI instance.",
     "endpoint": "API Endpoint",
-    "endpointDesc": "The CubeAPI address this Dashboard is connected to (same-origin proxy).",
+    "endpointDesc": "The public-facing CubeAPI address. Configure via CUBE_API_PUBLIC_HOST env var at startup.",
     "test": "Test",
     "connected": "Connected",
     "runtime": "Runtime Config",

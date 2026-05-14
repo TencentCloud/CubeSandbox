@@ -19,7 +19,7 @@
     "title": "集群连接",
     "desc": "查看当前连接的 CubeAPI 实例信息。",
     "endpoint": "API 端点",
-    "endpointDesc": "Dashboard 当前连接的 CubeAPI 地址（同源代理）。",
+    "endpointDesc": "CubeAPI的对外访问地址。启动时通过CUBE_API_PUBLIC_HOST环境变量配置。",
     "test": "测试连接",
     "connected": "连接正常",
     "runtime": "运行时配置",
