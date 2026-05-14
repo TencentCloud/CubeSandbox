@@ -6,4 +6,4 @@ edition = "2021"
 [dependencies]
 libc = "0.2.137"
 log = "0.4.17"
-vmm-sys-util = "0.11.1"
+vmm-sys-util = { workspace = true }
