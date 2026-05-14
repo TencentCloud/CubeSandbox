@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.4.7", features = ["wrap_help", "cargo"] }
-env_logger = "0.9.3"
+env_logger = "0.10.2"
 epoll = "4.3.1"
 libc = "0.2.137"
 log = "0.4.17"
