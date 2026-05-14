@@ -869,9 +869,9 @@ enum SandboxStatusValue {
 fn sandbox_status_text_from_code(number: i32) -> &'static str {
     match number {
         1 => "running",
-        2 => "paused",
-        3 => "stopped",
-        4 => "error",
+        2 => "stopped",
+        4 => "pausing",
+        5 => "paused",
         _ => "unknown",
     }
 }
@@ -896,7 +896,8 @@ fn normalize_sandbox_status_text(raw: &str) -> String {
         "2" => sandbox_status_text_from_code(2).to_string(),
         "3" => sandbox_status_text_from_code(3).to_string(),
         "4" => sandbox_status_text_from_code(4).to_string(),
-        "running" | "paused" | "stopped" | "error" => raw.trim().to_lowercase(),
+        "5" => sandbox_status_text_from_code(5).to_string(),
+        "running" | "paused" | "pausing" | "stopped" | "error" => raw.trim().to_lowercase(),
         other => other.to_string(),
     }
 }

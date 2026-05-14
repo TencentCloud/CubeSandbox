@@ -682,8 +682,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{build_cubevs_context, filter_by_metadata, from_cubemaster_info};
-    use crate::cubemaster::SandboxInfo;
-    use crate::models::SandboxNetworkConfig;
+    use crate::cubemaster::{ListSandboxResponse, SandboxInfo};
+    use crate::models::{SandboxNetworkConfig, SandboxState};
 
     #[test]
     fn metadata_filter_matches_all_pairs() {
@@ -736,5 +736,37 @@ mod tests {
         assert_eq!(listed.cpu_count, 2);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+    }
+
+    #[test]
+    fn listed_sandbox_maps_paused_container_state_from_cubemaster_list() {
+        let payload = serde_json::json!({
+            "requestID": "req-1",
+            "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "data": [{
+                "sandbox_id": "sb-paused",
+                "host_id": "host-1",
+                "status": 5,
+                "template_id": "tpl-1"
+            }, {
+                "sandbox_id": "sb-paused-string",
+                "host_id": "host-1",
+                "status": "5",
+                "template_id": "tpl-1"
+            }]
+        });
+
+        let response: ListSandboxResponse =
+            serde_json::from_value(payload).expect("list response should deserialize");
+        let listed: Vec<_> = response
+            .sandboxes
+            .into_iter()
+            .map(from_cubemaster_info)
+            .collect();
+
+        assert_eq!(listed.len(), 2);
+        assert!(listed
+            .iter()
+            .all(|sandbox| sandbox.state == SandboxState::Paused));
     }
 }
