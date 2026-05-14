@@ -19,6 +19,7 @@ GUEST_ROOTFS_TAR="${GUEST_IMAGE_WORK_DIR}/rootfs.tar"
 RAW_ARTIFACTS_DIR="${SCRIPT_DIR}/assets/kernel-artifacts"
 
 CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
+CUBE_KERNEL_PVM_VMLINUX="${ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux-pvm}"
 GUEST_IMAGE_DOCKERFILE="${ONE_CLICK_GUEST_IMAGE_DOCKERFILE:-${ROOT_DIR}/deploy/guest-image/Dockerfile}"
 GUEST_IMAGE_CONTEXT_DIR="${ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR:-$(dirname "${GUEST_IMAGE_DOCKERFILE}")}"
 GUEST_IMAGE_REF="${ONE_CLICK_GUEST_IMAGE_REF:-cube-sandbox-guest-image:one-click}"
@@ -397,5 +398,14 @@ build_guest_image_artifacts \
 log "copying fixed kernel vmlinux"
 copy_file "${CUBE_KERNEL_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux"
 ensure_file "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux"
+if [[ -f "${CUBE_KERNEL_PVM_VMLINUX}" ]]; then
+  log "copying PVM kernel vmlinux"
+  copy_file "${CUBE_KERNEL_PVM_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
+  ensure_file "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
+elif [[ -n "${ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX:-}" ]]; then
+  die "PVM kernel vmlinux file not found: ${CUBE_KERNEL_PVM_VMLINUX}"
+else
+  log "PVM kernel vmlinux not found; packaging ordinary kernel only"
+fi
 
 log "runtime layout ready: ${RUNTIME_LAYOUT_DIR}"

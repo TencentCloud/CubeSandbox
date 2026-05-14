@@ -26,12 +26,14 @@
   <a href="./README.md"><strong>English</strong></a> ·
   <a href="./docs/zh/guide/quickstart.md"><strong>快速开始</strong></a> ·
   <a href="./docs/zh/index.md"><strong>文档</strong></a> ·
-  <a href="#wechat-group"><strong>微信交流群</strong></a>
+  <a href="./docs/zh/changelog.md"><strong>变更日志</strong></a> ·
+  <a href="#wechat-group"><strong>微信交流群</strong></a> ·
+  <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a>
 </p>
 
 ---
 
-Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用的安全沙箱服务。它既支持单机部署，也能够很方便的扩展到多台机器的集群服务。同时对外兼容E2B SDK， 在60ms内就可以创建一个具备服务能力的硬件隔离沙箱环境，并保持着小于5M的内存开销。
+Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用的安全沙箱服务。它既支持单机部署，也能方便地扩展到多机集群。对外兼容 E2B SDK，可在 60ms 内创建具备完整服务能力的硬件隔离沙箱，并将内存开销控制在 5MB 以内。
 
 
 <p align="center">
@@ -133,11 +135,12 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 
 --- 
 
-Cube Sandbox 需要一台开启了 KVM 的 x86_64 Linux 环境，**WSL 2 / Linux 物理机 / 云上裸金属**均可。
+Cube Sandbox 需要一台支持 KVM 的 x86_64 Linux 环境，**WSL 2 / Linux 物理机 / 云上裸金属 / 普通云服务器（通过 PVM）**均可。
 
 > 还没有这样的环境？
 > - **Windows 用户**：在管理员 PowerShell 里执行 `wsl --install` 安装 WSL 2（需 Windows 11 22H2+，并在 BIOS / WSL 里开启嵌套虚拟化）。
-> - **其他用户**：准备一台 x86_64 Linux 物理机，或在云厂商购买一台裸金属服务器。
+> - **物理机 / 裸金属用户**：准备一台 x86_64 Linux 物理机，或在云厂商购买一台裸金属服务器。
+> - **普通云服务器用户**：无需裸金属 —— 安装 PVM 宿主机内核即可在普通云服务器上启用 KVM 能力，详见 [PVM 部署](./docs/zh/guide/pvm-deploy.md)。
 
 准备好环境后，四步启动你的第一个沙箱：
 
@@ -165,7 +168,7 @@ cd CubeSandbox/dev-env && ./login.sh
 
 2. **启动 Cube 沙箱服务**
 
-在上一步 `login.sh` 进入的环境里（或你自己的裸金属服务器上），根据你的网络环境执行**其中一条**命令：
+在上一步 `login.sh` 进入的环境里（或你自己的服务器上，裸金属或通过 PVM 配置好的普通云服务器均可），根据你的网络环境执行**其中一条**命令：
 
 - **国内用户**（走 CDN 镜像，推荐）：
 
@@ -186,12 +189,14 @@ cd CubeSandbox/dev-env && ./login.sh
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest \
+  --image cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
   --probe 49999
 ```
+
+> **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`。
 
 然后，执行下面的这行命令，监控构建进度：
 
@@ -244,7 +249,8 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 - [文档首页](./docs/zh/index.md) — 完整指南导航
 - [模板概览](./docs/zh/guide/templates.md) — 镜像到模板的概念与工作流
 - [示例项目](./docs/zh/guide/tutorials/examples.md) — 展示各种使用场景的示例（涵盖代码执行、浏览器自动化、OpenClaw 集成与 RL 训练等）
-- [开发环境（QEMU 虚机）](./docs/zh/guide/dev-environment.md) — 没有 bare-metal？在一次性的 OpenCloudOS 9 虚机里跑 Cube Sandbox
+- 💻 [开发环境（QEMU 虚机）](./docs/zh/guide/dev-environment.md) — 暂时没有 KVM 访问权限？在一次性的 OpenCloudOS 9 虚机里体验 Cube Sandbox
+- ☁️ [PVM 部署](./docs/zh/guide/pvm-deploy.md) — 在普通云服务器上部署，无需裸金属或嵌套虚拟化
 
 ## 架构概览
 
@@ -268,9 +274,11 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 我们欢迎各种形式的贡献——Bug 报告、功能建议、文档改进、代码提交。
 
 - **发现 Bug** —— <a href="https://github.com/tencentcloud/CubeSandbox/issues" target="_blank">在这里报告问题或提出建议</a>
-- **有新想法** — <a href="https://github.com/tencentcloud/CubeSandbox/discussions" target="_blank">提问交流与想法分享</a>
-- **想写代码？** —  查看我们的 <a href="./CONTRIBUTING.md" target="_blank">CONTRIBUTING.md</a> 贡献指南，了解如何提交Pull Requst。
-- **想聊聊天？** 扫描二维码，加入我们的微信交流群。
+- **有新想法** —— <a href="https://github.com/tencentcloud/CubeSandbox/discussions" target="_blank">提问交流与想法分享</a>
+- **想写代码？** —— 查看我们的 <a href="./CONTRIBUTING.md" target="_blank">CONTRIBUTING.md</a> 贡献指南，了解如何提交 Pull Request。
+- **想贡献文档 / PR？** —— 欢迎按双语方式投稿到这 3 个社区文档入口：<a href="./docs/zh/guide/troubleshooting/index.md" target="_blank">故障排障</a>、<a href="./docs/zh/guide/usecases/index.md" target="_blank">应用案例</a>、<a href="./docs/zh/guide/integrations/index.md" target="_blank">生态集成</a>。
+- **想成为最终用户？** —— 点击<a href="https://wj.qq.com/s2/26499618/a9fc/" target="_blank">这里</a>填写用户调研。
+- **想聊聊天？** —— 扫描二维码，加入我们的微信交流群。
 
 
 ---

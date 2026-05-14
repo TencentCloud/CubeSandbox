@@ -2,6 +2,7 @@ name: Build Check
 
 on:
   push:
+    branches: [master]
     paths:
       - 'CubeAPI/**'
       - 'CubeMaster/**'

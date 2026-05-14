@@ -20,8 +20,6 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-var errIPExhausted = errors.New("ip exhausted")
-
 var (
 	cubevsAttachFilter = cubevs.AttachFilter
 	cubevsGetTAPDevice = cubevs.GetTAPDevice
@@ -609,13 +607,6 @@ func (s *localService) cleanupOrphanTaps(states []*persistedState) error {
 
 func (s *localService) normalizePortMappings(req []PortMapping) []PortMapping {
 	byContainerPort := make(map[int32]PortMapping)
-	for _, port := range s.cfg.DefaultExposedPorts {
-		byContainerPort[int32(port)] = PortMapping{
-			Protocol:      "tcp",
-			HostIP:        s.cfg.HostProxyBindIP,
-			ContainerPort: int32(port),
-		}
-	}
 	for _, mapping := range req {
 		if mapping.ContainerPort == 0 {
 			continue

@@ -1,0 +1,38 @@
+name: Duplicate Issues Check
+on:
+  issues:
+    types: [opened, edited]
+
+jobs:
+  check-duplicate-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+
+      - uses: anthropics/claude-code-action@v1
+        env:
+            ANTHROPIC_BASE_URL: https://tokenhub.tencentmaas.com
+            ANTHROPIC_MODEL: deepseek-v4-flash
+            ANTHROPIC_SMALL_FAST_MODEL: deepseek-v4-flash
+            CLAUDE_CODE_SCRIPT_CAPS: '{"edit-issue-labels.sh":2}'
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: "/check-issue-duplicate REPO: ${{ github.repository }} ISSUE_NUMBER: ${{ github.event.issue.number }}"
+          allowed_non_write_users: "*" # Required so issues opened by users without repo write access are still checked
+          github_token: ${{ steps.app-token.outputs.token }}
+          show_full_output: true
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(./scripts/gh.sh:*),Bash(./scripts/edit-issue-labels.sh:*)"

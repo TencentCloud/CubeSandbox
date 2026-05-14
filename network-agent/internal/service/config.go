@@ -19,46 +19,38 @@ const (
 
 // Config keeps the minimal single-node network-agent settings aligned with Cubelet.
 type Config struct {
-	EthName             string
-	ObjectDir           string
-	CIDR                string
-	MVMInnerIP          string
-	MVMMacAddr          string
-	MvmGwDestIP         string
-	MvmGwMacAddr        string
-	MvmMask             int
-	MvmMtu              int
-	TapInitNum          int
-	DefaultExposedPorts []uint16
-	StateDir            string
-	TapFDSocketPath     string
-	HostProxyBindIP     string
-	DisableTso          bool
-	DisableUfo          bool
-	DisableCheckSum     bool
-	ConnectTimeout      time.Duration
+	EthName         string
+	ObjectDir       string
+	CIDR            string
+	MVMInnerIP      string
+	MVMMacAddr      string
+	MvmGwDestIP     string
+	MvmGwMacAddr    string
+	MvmMask         int
+	MvmMtu          int
+	TapInitNum      int
+	StateDir        string
+	TapFDSocketPath string
+	HostProxyBindIP string
+	ConnectTimeout  time.Duration
 }
 
 func DefaultConfig() Config {
 	return Config{
-		EthName:             "",
-		ObjectDir:           defaultObjectDir,
-		CIDR:                "192.168.0.0/18",
-		MVMInnerIP:          "169.254.68.6",
-		MVMMacAddr:          "20:90:6f:fc:fc:fc",
-		MvmGwDestIP:         "169.254.68.5",
-		MvmGwMacAddr:        "20:90:6f:cf:cf:cf",
-		MvmMask:             30,
-		MvmMtu:              1300,
-		TapInitNum:          0,
-		DefaultExposedPorts: []uint16{8080, 32000},
-		StateDir:            defaultStateDir,
-		TapFDSocketPath:     "/tmp/cube/network-agent-tap.sock",
-		HostProxyBindIP:     "127.0.0.1",
-		DisableTso:          true,
-		DisableUfo:          true,
-		DisableCheckSum:     true,
-		ConnectTimeout:      5 * time.Second,
+		EthName:         "",
+		ObjectDir:       defaultObjectDir,
+		CIDR:            "192.168.0.0/18",
+		MVMInnerIP:      "169.254.68.6",
+		MVMMacAddr:      "20:90:6f:fc:fc:fc",
+		MvmGwDestIP:     "169.254.68.5",
+		MvmGwMacAddr:    "20:90:6f:cf:cf:cf",
+		MvmMask:         30,
+		MvmMtu:          1300,
+		TapInitNum:      0,
+		StateDir:        defaultStateDir,
+		TapFDSocketPath: "/tmp/cube/network-agent-tap.sock",
+		HostProxyBindIP: "127.0.0.1",
+		ConnectTimeout:  5 * time.Second,
 	}
 }
 
@@ -67,20 +59,16 @@ type cubeletConfigFile struct {
 }
 
 type cubeletNetworkConfig struct {
-	ObjectDir           string   `toml:"object_dir"`
-	EthName             string   `toml:"eth_name"`
-	TapInitNum          int      `toml:"tap_init_num"`
-	CIDR                string   `toml:"cidr"`
-	MVMInnerIP          string   `toml:"mvm_inner_ip"`
-	MVMMacAddr          string   `toml:"mvm_mac_addr"`
-	MvmGwDestIP         string   `toml:"mvm_gw_dest_ip"`
-	MvmGwMacAddr        string   `toml:"mvm_gw_mac_addr"`
-	MvmMask             int      `toml:"mvm_mask"`
-	MvmMtu              int      `toml:"mvm_mtu"`
-	DisableTso          bool     `toml:"disable_tso"`
-	DisableUfo          bool     `toml:"disable_ufo"`
-	DisableCheckSum     bool     `toml:"disable_check_sum"`
-	DefaultExposedPorts []uint16 `toml:"default_exposed_ports"`
+	ObjectDir    string `toml:"object_dir"`
+	EthName      string `toml:"eth_name"`
+	TapInitNum   int    `toml:"tap_init_num"`
+	CIDR         string `toml:"cidr"`
+	MVMInnerIP   string `toml:"mvm_inner_ip"`
+	MVMMacAddr   string `toml:"mvm_mac_addr"`
+	MvmGwDestIP  string `toml:"mvm_gw_dest_ip"`
+	MvmGwMacAddr string `toml:"mvm_gw_mac_addr"`
+	MvmMask      int    `toml:"mvm_mask"`
+	MvmMtu       int    `toml:"mvm_mtu"`
 }
 
 const cubeletNetworkPluginKey = "io.cubelet.internal.v1.network"
@@ -135,12 +123,5 @@ func LoadConfigFromCubeletTOML(base Config, path string) (Config, error) {
 	if networkCfg.TapInitNum != 0 {
 		base.TapInitNum = networkCfg.TapInitNum
 	}
-	base.DisableTso = networkCfg.DisableTso
-	base.DisableUfo = networkCfg.DisableUfo
-	base.DisableCheckSum = networkCfg.DisableCheckSum
-	if len(networkCfg.DefaultExposedPorts) > 0 {
-		base.DefaultExposedPorts = append([]uint16(nil), networkCfg.DefaultExposedPorts...)
-	}
-
 	return base, nil
 }

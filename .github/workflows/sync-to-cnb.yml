@@ -183,7 +183,7 @@ jobs:
 
       - name: Create CNB release if missing
         env:
-          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_TOKEN: ${{ secrets.CNB_GIT_PASSWORD }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve_release_context.outputs.release_tag }}
         run: |
@@ -266,7 +266,7 @@ jobs:
       - name: Upload GitHub release assets to CNB
         if: steps.assets.outputs.asset_count != '0'
         env:
-          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_TOKEN: ${{ secrets.CNB_GIT_PASSWORD }}
           RELEASE_TAG: ${{ needs.resolve_release_context.outputs.release_tag }}
         run: |
           set -euo pipefail

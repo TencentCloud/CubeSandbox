@@ -3,7 +3,8 @@ import { withMermaid } from 'vitepress-plugin-mermaid'
 
 export default withMermaid(defineConfig({
   title: "Cube Sandbox",
-  description: "Production-grade, multi-component security sandbox system for serverless computing.",
+  description: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents",
+  srcExclude: ['**/_template.md'],
   
   themeConfig: {
     socialLinks: [
@@ -20,6 +21,8 @@ export default withMermaid(defineConfig({
           { text: 'Home', link: '/' },
           { text: 'Guide', link: '/guide/introduction' },
           { text: 'Architecture', link: '/architecture/overview' },
+          { text: 'About us', link: '/about-us' },
+          { text: 'Changelog', link: '/changelog' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
@@ -29,8 +32,10 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Introduction', link: '/guide/introduction' },
                 { text: 'Quick Start', link: '/guide/quickstart' },
-                { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
+                { text: 'PVM Deployment', link: '/guide/pvm-deploy' },
+                { text: 'Bare-Metal Deployment', link: '/guide/bare-metal-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
+                { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' }
               ]
             },
@@ -61,6 +66,14 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Connect to an Existing Cube Cluster', link: '/guide/connect-existing-cluster' }
               ]
+            },
+            {
+              text: 'Contribute',
+              items: [
+                { text: 'Troubleshooting', link: '/guide/troubleshooting/' },
+                { text: 'Use Cases', link: '/guide/usecases/' },
+                { text: 'Integrations', link: '/guide/integrations/' }
+              ]
             }
           ],
           '/architecture/': [
@@ -80,12 +93,14 @@ export default withMermaid(defineConfig({
       lang: 'zh',
       link: '/zh/',
       title: 'Cube Sandbox',
-      description: '专为 Serverless 计算设计的生产级多组件安全沙箱系统。',
+      description: '一个极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务',
       themeConfig: {
         nav: [
           { text: '首页', link: '/zh/' },
           { text: '指南', link: '/zh/guide/introduction' },
           { text: '架构', link: '/zh/architecture/overview' },
+          { text: '关于我们', link: '/zh/about-us' },
+          { text: '更新日志', link: '/zh/changelog' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
@@ -95,8 +110,10 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '简介 (Intro)', link: '/zh/guide/introduction' },
                 { text: '快速开始', link: '/zh/guide/quickstart' },
-                { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
+                { text: 'PVM部署', link: '/zh/guide/pvm-deploy' },
+                { text: '裸金属/物理机部署', link: '/zh/guide/bare-metal-deploy' },
                 { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },
+                { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' }
               ]
             },
@@ -126,6 +143,14 @@ export default withMermaid(defineConfig({
               text: '开发文档',
               items: [
                 { text: '连接到已有 Cube 集群', link: '/zh/guide/connect-existing-cluster' }
+              ]
+            },
+            {
+              text: '社区共建',
+              items: [
+                { text: '故障排障', link: '/zh/guide/troubleshooting/' },
+                { text: '应用案例', link: '/zh/guide/usecases/' },
+                { text: '生态集成', link: '/zh/guide/integrations/' }
               ]
             }
           ],

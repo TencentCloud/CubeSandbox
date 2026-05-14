@@ -181,6 +181,7 @@ export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 **执行代码**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
@@ -193,6 +194,7 @@ with Sandbox.create(template=template_id) as sandbox:
 **执行 Shell 命令**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
@@ -205,6 +207,7 @@ with Sandbox.create(template=template_id) as sandbox:
 **读取沙箱内文件**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
@@ -311,8 +314,6 @@ sudo ./down.sh
 | `CUBE_PROXY_DNS_ANSWER_IP` | `${CUBE_SANDBOX_NODE_IP}` | CoreDNS 对 `cube.app` 返回的 IP |
 | `CUBE_PROXY_COREDNS_BIND_ADDR` | `127.0.0.54` | CoreDNS 绑定地址 |
 | `ONE_CLICK_MKCERT_BIN` | `assets/bin/mkcert`（内置） | 构建时自定义 mkcert 二进制路径 |
-| `ALPINE_MIRROR_URL` | 清华镜像 | CubeProxy 构建使用的 Alpine 软件源 |
-| `PIP_INDEX_URL` | 清华镜像 | CubeProxy 构建使用的 PyPI 源 |
 
 ### 进程监听地址
 

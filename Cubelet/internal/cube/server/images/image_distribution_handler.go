@@ -9,7 +9,9 @@ import (
 	"fmt"
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/ext4image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/nodedistribution/distribution"
@@ -32,6 +34,45 @@ func afterImageRecoverForHandler(c *CubeImageService) {
 
 type imageDistributionHandler struct {
 	*CubeImageService
+}
+
+func defaultTemplateImageSpec(ns string, template *templatetypes.TemplateImage) *cubeimages.ImageSpec {
+	annotations := map[string]string{}
+	var (
+		storageMedia string
+		imageRef     string
+	)
+	if template != nil {
+		storageMedia = template.StorageMedia
+		imageRef = template.Image
+		if template.StorageMedia == cubeimages.ImageStorageMediaType_ext4.String() {
+			annotations[constants.MasterAnnotationInstanceType] = cubebox.InstanceType_cubebox.String()
+		}
+	}
+	return &cubeimages.ImageSpec{
+		StorageMedia: storageMedia,
+		Image:        imageRef,
+		Namespace:    ns,
+		Annotations:  annotations,
+	}
+}
+
+func materializeDistributedTemplateRuntimeFiles(ctx context.Context, template *templatetypes.TemplateImage) error {
+	if template == nil || template.StorageMedia != cubeimages.ImageStorageMediaType_ext4.String() {
+		return nil
+	}
+	return ext4image.RefreshArtifactRuntimeFiles(ctx, cubebox.InstanceType_cubebox.String(), template.Image)
+}
+
+func ensureDistributedTemplateImage(ctx context.Context, c *CubeImageService, template *templatetypes.TemplateImage) error {
+	if template == nil {
+		return fmt.Errorf("template image is nil")
+	}
+	if template.StorageMedia == cubeimages.ImageStorageMediaType_ext4.String() {
+		return ext4image.EnsurePmemRootfs(ctx, cubebox.InstanceType_cubebox.String(), template.Image)
+	}
+	_, err := c.EnsureImage(ctx, template.Image, "", "", &runtime.PodSandboxConfig{})
+	return err
 }
 
 func (c *imageDistributionHandler) GetTaskExternObjByKey(ctx context.Context, key string) (any, error) {
@@ -88,17 +129,16 @@ func (c *imageDistributionHandler) Handle(ctx context.Context, task *distributio
 		})
 		ctx = log.WithLogger(ctx, logEntry)
 
-		cubeSpec := &cubeimages.ImageSpec{
-			StorageMedia: template.StorageMedia,
-			Image:        template.Image,
-			Namespace:    ns,
-		}
+		cubeSpec := defaultTemplateImageSpec(ns, template)
 		ctx = constants.WithImageSpec(ctx, cubeSpec)
 
 		logEntry.Infof("ensuring image: %s", template.Image)
-		_, err = c.EnsureImage(ctx, template.Image, "", "", &runtime.PodSandboxConfig{})
-		if err != nil {
+		if err = ensureDistributedTemplateImage(ctx, c.CubeImageService, template); err != nil {
 			err = fmt.Errorf("ensure image failed: %w", err)
+			return
+		}
+		if err = materializeDistributedTemplateRuntimeFiles(ctx, template); err != nil {
+			err = fmt.Errorf("materialize template runtime files failed: %w", err)
 			return
 		}
 

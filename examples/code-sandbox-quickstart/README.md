@@ -7,24 +7,35 @@ and execute shell commands — all from your local machine using the E2B Python 
 
 ## 1. Background
 
-**Cube Sandbox** is a lightweight MicroVM platform fully compatible with the
-[E2B SDK](https://e2b.dev). Each `Sandbox.create()` call boots a new KVM
-MicroVM from a template snapshot in under 50 ms. The sandbox is fully isolated —
-dedicated kernel, filesystem, and network. When the `with` block exits, the
-sandbox is automatically deleted.
+**Cube Sandbox** is a lightweight MicroVM platform fully compatible with the [E2B SDK](https://e2b.dev). Its architecture is split into two planes:
 
-```
-Your script  (E2B SDK)
-    │  REST API
-    ▼
-CubeAPI  (port 3000)
-    │
-    ▼
-CubeMaster ──► Cubelet ──► KVM MicroVM
-                               │
-                           cube-agent (PID 1)
-                               │
-                           Python / shell process
+- **Control Plane**: Manages the sandbox lifecycle. Each `Sandbox.create()` call boots a new KVM MicroVM from a template snapshot in under 50ms. Commands flow through CubeAPI/Master to Cubelet, which uses `cube-agent` (PID 1) inside the VM to start the `envd` service.
+- **Data Plane**: Handles high-frequency code execution and file interaction. Traffic is routed via CubeProxy directly to the `envd` agent inside the sandbox, allowing for the execution of Python or Shell scripts in a secured environment. The sandbox is fully isolated with its own kernel, filesystem, and network.
+
+When the `with` block exits, the sandbox is automatically deleted.
+
+```text
+                            User Script (E2B SDK)
+                                      │
+                                      ▼
+        ┌─────────────────────────────┴─────────────────────────────┐
+        │                                                           │
+ [ 1. Control Plane ]                                     [ 2. Data Plane ]
+(e.g., Sandbox.create)                                  (e.g., run_code, commands.run)
+        │                                                           │
+        ▼  REST API (Port 3000)                                     ▼  WSS / HTTP
+     CubeAPI                                                    CubeProxy
+        │                                                           │
+        ▼                                                           │
+    CubeMaster                                                      │
+        │                                                           │
+        │                  ┌────────────────────────────────────┐   │
+        ▼                  │            KVM MicroVM             │   │
+     Cubelet ──────────────┼──► cube-agent ──► envd  ◄──────────┼───┘
+                           │     (PID 1)         │              │
+                           │                     ▼              │
+                           │                Python / Shell      │
+                           └────────────────────────────────────┘
 ```
 
 ## 2. Prerequisites
@@ -46,12 +57,14 @@ continue with the current process environment variables.
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest \
+  --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
   --probe 49999
 ```
+
+> **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
 
 Note the `template_id` printed on success.
 

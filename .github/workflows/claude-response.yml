@@ -26,9 +26,9 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         env:
-            ANTHROPIC_BASE_URL: https://api.lkeap.cloud.tencent.com/plan/anthropic
-            ANTHROPIC_MODEL: glm-5.1
-            ANTHROPIC_SMALL_FAST_MODEL: glm-5.1
+            ANTHROPIC_BASE_URL: https://tokenhub.tencentmaas.com
+            ANTHROPIC_MODEL: deepseek-v4-flash
+            ANTHROPIC_SMALL_FAST_MODEL: deepseek-v4-flash
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}

@@ -179,7 +179,7 @@ if env_config["environment_class"] in ["docker", "swerex_modal", "e2b"]:
 SWE-bench 原始镜像 ──► envd 注入 ──► 注册为 cube-sandbox 模板
 ```
 
-1. 从 `ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest` 提取 envd 二进制
+1. 从 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` 提取 envd 二进制（境外访问请使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`）
 2. 将 envd 注入 SWE-bench 镜像（Dockerfile 覆盖 ENTRYPOINT）
 3. 将注入后的镜像注册为 cube-sandbox 模板，获得 `template_id`
 

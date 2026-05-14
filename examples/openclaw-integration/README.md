@@ -78,12 +78,14 @@ CubeProxy exposes **both HTTPS (port 443) and HTTP (port 80)** simultaneously:
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest \
+  --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
   --probe 49999
 ```
+
+> **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
 
 Note the `template_id` printed on success.
 

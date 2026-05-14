@@ -115,6 +115,23 @@ func TestNormalizeTemplateImageRequestRejectsTooManyCustomExposedPorts(t *testin
 	}
 }
 
+func TestDefaultTemplateExposedPortsContainsOnly49983(t *testing.T) {
+	got := defaultTemplateExposedPorts()
+	want := map[int32]struct{}{49983: {}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("defaultTemplateExposedPorts()=%v, want %v", got, want)
+	}
+}
+
+func TestCountCustomTemplateExposedPortsTreats49983AsReserved(t *testing.T) {
+	if count := countCustomTemplateExposedPorts([]int32{49983, 9000}); count != 1 {
+		t.Fatalf("countCustomTemplateExposedPorts([49983, 9000])=%d, want 1", count)
+	}
+	if count := countCustomTemplateExposedPorts([]int32{8080, 9000}); count != 2 {
+		t.Fatalf("countCustomTemplateExposedPorts([8080, 9000])=%d, want 2", count)
+	}
+}
+
 func TestNormalizeTemplateImageRequestTreatsOnlyCubeletDefaultsAsReserved(t *testing.T) {
 	withTemplateImageConfig(t, &config.Config{CubeletConf: &config.CubeletConf{
 		EnableExposedPort: true,
@@ -320,6 +337,111 @@ func TestGenerateTemplateCreateRequestAppliesDNSConfigOverride(t *testing.T) {
 	want := []string{"8.8.8.8", "1.1.1.1"}
 	if !reflect.DeepEqual(got.Containers[0].DnsConfig.Servers, want) {
 		t.Fatalf("DnsConfig.Servers=%v, want %v", got.Containers[0].DnsConfig.Servers, want)
+	}
+}
+
+func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	inspectCalls := 0
+	inspectPayload := `[{"RepoDigests":["docker.io/library/nginx@sha256:abcd"],"Config":{"Env":["A=B"],"WorkingDir":"/workspace"}}]`
+
+	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
+		if len(args) == 3 && args[0] == "image" && args[1] == "inspect" && args[2] == "docker.io/library/nginx:latest" {
+			inspectCalls++
+			return []byte(inspectPayload), nil
+		}
+		if len(args) == 2 && args[0] == "pull" && args[1] == "docker.io/library/nginx:latest" {
+			t.Fatal("expected docker pull to be skipped when image exists locally")
+		}
+		t.Fatalf("unexpected dockerOutput args=%v", args)
+		return nil, nil
+	})
+
+	got, err := prepareSourceImage(context.Background(), &types.CreateTemplateFromImageReq{
+		SourceImageRef: "docker.io/library/nginx:latest",
+	}, "http://master.example")
+	if err != nil {
+		t.Fatalf("prepareSourceImage failed: %v", err)
+	}
+	if inspectCalls != 1 {
+		t.Fatalf("expected 1 inspect call, got %d", inspectCalls)
+	}
+	if got == nil || got.digest != "docker.io/library/nginx@sha256:abcd" {
+		t.Fatalf("unexpected resolved image: %#v", got)
+	}
+}
+
+func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	inspectCalls := 0
+	pullCalled := false
+	inspectPayload := `[{"RepoDigests":["docker.io/library/nginx@sha256:abcd"],"Config":{"Cmd":["nginx"]}}]`
+
+	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
+		if len(args) == 3 && args[0] == "image" && args[1] == "inspect" && args[2] == "docker.io/library/nginx:latest" {
+			inspectCalls++
+			if inspectCalls == 1 {
+				return nil, errors.New("No such image")
+			}
+			return []byte(inspectPayload), nil
+		}
+		if len(args) == 2 && args[0] == "pull" && args[1] == "docker.io/library/nginx:latest" {
+			pullCalled = true
+			return nil, nil
+		}
+		t.Fatalf("unexpected dockerOutput args=%v", args)
+		return nil, nil
+	})
+
+	got, err := prepareSourceImage(context.Background(), &types.CreateTemplateFromImageReq{
+		SourceImageRef: "docker.io/library/nginx:latest",
+	}, "http://master.example")
+	if err != nil {
+		t.Fatalf("prepareSourceImage failed: %v", err)
+	}
+	if !pullCalled {
+		t.Fatal("expected docker pull to run after local inspect miss")
+	}
+	if inspectCalls != 2 {
+		t.Fatalf("expected 2 inspect calls, got %d", inspectCalls)
+	}
+	if got == nil || got.digest != "docker.io/library/nginx@sha256:abcd" {
+		t.Fatalf("unexpected resolved image: %#v", got)
+	}
+}
+
+func TestPrepareSourceImageReturnsPullErrorAfterInspectMiss(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	inspectCalls := 0
+	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
+		if len(args) == 3 && args[0] == "image" && args[1] == "inspect" && args[2] == "docker.io/library/nginx:latest" {
+			inspectCalls++
+			return nil, errors.New("No such image")
+		}
+		if len(args) == 2 && args[0] == "pull" && args[1] == "docker.io/library/nginx:latest" {
+			return nil, errors.New("pull denied")
+		}
+		t.Fatalf("unexpected dockerOutput args=%v", args)
+		return nil, nil
+	})
+
+	got, err := prepareSourceImage(context.Background(), &types.CreateTemplateFromImageReq{
+		SourceImageRef: "docker.io/library/nginx:latest",
+	}, "http://master.example")
+	if err == nil || !strings.Contains(err.Error(), "docker pull docker.io/library/nginx:latest failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil resolved image on error, got %#v", got)
+	}
+	if inspectCalls != 1 {
+		t.Fatalf("expected 1 inspect call before pull failure, got %d", inspectCalls)
 	}
 }
 

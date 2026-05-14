@@ -5,7 +5,8 @@
 package volume
 
 import (
-	"fmt"
+	"errors"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,13 +38,13 @@ var resetvolumeref = &cli.Command{
 		resp, err := client.VolumeUtils(ctx, &req)
 		cost := time.Since(startTime).Milliseconds()
 		if err != nil {
-			myPrint("VolumeUtils err. %s. RequestId: %s", err.Error(), req.RequestID)
+			log.Printf("VolumeUtils err. %s. RequestId: %s", err.Error(), req.RequestID)
 			time.Sleep(5 * time.Second)
 			return err
 		}
-		myPrint("VolumeUtils RequestId:%s,code:%d, message:%s,cost:%v", resp.RequestID, resp.Ret.RetCode, resp.Ret.RetMsg, cost)
+		log.Printf("VolumeUtils RequestId:%s,code:%d, message:%s,cost:%v", resp.RequestID, resp.Ret.RetCode, resp.Ret.RetMsg, cost)
 		if resp.Ret.RetCode != errorcode.ErrorCode_Success {
-			return fmt.Errorf(resp.Ret.RetMsg)
+			return errors.New(resp.Ret.RetMsg)
 		}
 		return nil
 	},

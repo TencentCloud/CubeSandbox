@@ -181,6 +181,7 @@ export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 **Run code**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
@@ -193,6 +194,7 @@ with Sandbox.create(template=template_id) as sandbox:
 **Run a shell command**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
@@ -205,6 +207,7 @@ with Sandbox.create(template=template_id) as sandbox:
 **Read a file inside the sandbox**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
@@ -311,8 +314,6 @@ You can also point to prebuilt binaries to skip compilation:
 | `CUBE_PROXY_DNS_ANSWER_IP` | `${CUBE_SANDBOX_NODE_IP}` | IP returned by CoreDNS for `cube.app` |
 | `CUBE_PROXY_COREDNS_BIND_ADDR` | `127.0.0.54` | CoreDNS bind address |
 | `ONE_CLICK_MKCERT_BIN` | `assets/bin/mkcert` (bundled) | Override path to mkcert binary at build time |
-| `ALPINE_MIRROR_URL` | Tsinghua mirror | Alpine package mirror for CubeProxy build |
-| `PIP_INDEX_URL` | Tsinghua mirror | PyPI mirror for CubeProxy build |
 
 ### Process Addresses
 

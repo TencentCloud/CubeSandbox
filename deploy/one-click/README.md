@@ -9,7 +9,7 @@ This directory is used to build and deliver the single-machine one-click release
 - `build-release-bundle.sh`: Low-level packaging entry point. Consumes either the source tree or `ONE_CLICK_*_BIN` pre-built artifacts, assembles `sandbox-package`, and produces the final release package.
 - `config-cube.toml`: Default one-click runtime configuration template.
 - `support/`: `docker compose` templates for MySQL/Redis, installed to `/usr/local/services/cubetoolbox/support/` on the target machine; `support/bin/mkcert` is the bundled mkcert binary.
-- `cubeproxy/`: Compose template, `global.conf` template, CoreDNS template, and wrapper Dockerfile for `cube proxy`.
+- `cubeproxy/`: Compose template, `global.conf` template, and CoreDNS template for `cube proxy`.
 - `webui/`: Nginx runtime files for the dashboard, installed to `/usr/local/services/cubetoolbox/webui/` on the target machine.
 - `install.sh`: Entry point for installing and starting the control node on the target machine (defaults to all-in-one mode).
 - `install-compute.sh`: Entry point for installing a compute node on the target machine.
@@ -22,15 +22,19 @@ This directory is used to build and deliver the single-machine one-click release
 
 ## Build Inputs
 
-The only fixed file that needs to be prepared is the guest kernel `vmlinux`:
+The required fixed kernel artifact is the ordinary guest kernel `vmlinux`. A PVM guest kernel can also be packaged as `vmlinux-pvm`:
 
 - `vmlinux`
+- `vmlinux-pvm` (optional)
 
-By default it is placed under `assets/kernel-artifacts/`, but can be overridden via an environment variable:
+By default they are placed under `assets/kernel-artifacts/`, but can be overridden via environment variables:
 
 ```bash
 export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
+export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
+
+The installed runtime still uses `cube-kernel-scf/vmlinux`. By default that file is the ordinary guest kernel. If the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer copies the packaged `vmlinux-pvm` over `cube-kernel-scf/vmlinux`.
 
 The guest image no longer depends on a local zip file. Instead, it is generated locally from `deploy/guest-image/Dockerfile` during the one-click release package build. Common override parameters:
 
@@ -227,8 +231,6 @@ WEB_UI_UPSTREAM=http://host.docker.internal:3000
 CUBE_API_BIND=0.0.0.0:3000
 CUBE_API_HEALTH_ADDR=127.0.0.1:3000
 CUBE_API_SANDBOX_DOMAIN=cube.app
-ALPINE_MIRROR_URL=https://mirrors.tuna.tsinghua.edu.cn/alpine
-PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 During installation, the following steps are performed:
@@ -236,7 +238,7 @@ During installation, the following steps are performed:
 - If `mkcert` is not already installed on the system, it is copied from the bundled `support/bin/mkcert` to `/usr/local/bin/mkcert`. Then `mkcert -install` is run on the host under `CUBE_PROXY_CERT_DIR` (default `/usr/local/services/cubetoolbox/cubeproxy/certs/`) to generate `cube.app+3.pem` and `cube.app+3-key.pem`.
 - A `docker-compose.yaml` is rendered under `/usr/local/services/cubetoolbox/support/` and MySQL/Redis are started.
 - `cubeproxy/global.conf` is rendered using `CUBE_SANDBOX_NODE_IP`.
-- A `docker-compose.yaml` is generated under `/usr/local/services/cubetoolbox/cubeproxy/`. The host's `CUBE_PROXY_CERT_DIR` is mounted read-only into the container at `/usr/local/openresty/nginx/certs/`. `ALPINE_MIRROR_URL` / `PIP_INDEX_URL` are passed as build args to `Dockerfile.oneclick` for a local `cube proxy` image build.
+- A `docker-compose.yaml` is generated under `/usr/local/services/cubetoolbox/cubeproxy/`. The host's `CUBE_PROXY_CERT_DIR` is mounted read-only into the container at `/usr/local/openresty/nginx/certs/`, and `CubeProxy/Dockerfile` from the bundled build context is used for the local `cube proxy` image build.
 - A `CoreDNS` container is started. If `resolvectl` is available, one-click creates a dedicated dummy link (default `cube-dns0`) with a local address, binds CoreDNS to `169.254.254.53` on that link by default, and routes `cube.app` through the link without affecting the host's default public DNS path. If `resolvectl` is unavailable on the target machine, the installer falls back to `NetworkManager + dnsmasq`, continuing to use `127.0.0.54` by default.
 - Host processes `network-agent`, `cubemaster`, `cube-api`, and `cubelet` are started, and `cube-api /health` is verified in `quickcheck.sh`.
 - A standard WebUI nginx container is started under `/usr/local/services/cubetoolbox/webui/`. It mounts `webui/dist` as read-only static content, publishes `WEB_UI_HOST_PORT` (`12088` by default), maps `host.docker.internal` to Docker `host-gateway`, and verifies `/cubeapi/v1/health` through the nginx reverse proxy.
@@ -304,7 +306,6 @@ Conditional commands:
 - The target machine pulls `mysql:8.0` and `redis:7-alpine` from the internet by default.
 - The `mkcert` binary is bundled in the release package (`support/bin/mkcert`). If `mkcert` is not pre-installed on the system, it is automatically copied from the package to `/usr/local/bin/mkcert` — no internet download required.
 - TLS certificates and private keys for `cube proxy` are stored on the host under `CUBE_PROXY_CERT_DIR` and mounted read-only into the container via `docker compose`. After updating certificates, simply restart `cube-proxy` or reload nginx inside the container — no image rebuild required.
-- The `cube proxy` image build uses Chinese mirrors by default: `ALPINE_MIRROR_URL=https://mirrors.tuna.tsinghua.edu.cn/alpine` and `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`. Override these in `.env` if the target machine uses a different network policy.
 - The recommended entry point `build-release-bundle-builder.sh` requires the host machine to have `docker`, `make`, `tar`, `python3`, `truncate`, `ldd`, `mkfs.ext4`, and similar tools.
 - The recommended entry point only runs component compilation inside the builder; guest image generation and final packaging are still performed on the host machine.
 - If invoking the low-level entry point `build-release-bundle.sh` directly, the build machine must also have local toolchains such as `go`, `cargo`, and `make` installed, depending on the build mode.
@@ -313,7 +314,7 @@ Conditional commands:
 
 ## Known Limitations
 
-- If `vmlinux` is missing from `assets/kernel-artifacts/`, `build-vm-assets.sh` and `build-release-bundle.sh` will fail immediately. The `cube-kernel-scf.zip` in the release package is generated automatically during the packaging phase.
+- If `vmlinux` is missing from `assets/kernel-artifacts/`, `build-vm-assets.sh` and `build-release-bundle.sh` will fail immediately. `vmlinux-pvm` is optional at build time, but installation with `CUBE_PVM_ENABLE=1` requires it to be present in the package. The `cube-kernel-scf.zip` in the release package is generated automatically during the packaging phase.
 - If the `deploy/guest-image/Dockerfile` build fails, or the build machine's `mkfs.ext4` does not support the `-d` flag, guest image generation will fail immediately.
 - `cube-snapshot/spec.json` is not a mandatory artifact in the current first release of one-click. If absent, the related plugin degrades to a warning rather than blocking the basic startup.
 - If the target machine has neither `systemd-resolved` / `resolvectl` nor a restartable `NetworkManager`, one-click will currently report an error, as a third host DNS solution for such environments has not yet been integrated.

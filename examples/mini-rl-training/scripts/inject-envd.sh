@@ -5,7 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ENVD_INJECT_DIR="$PROJECT_DIR/envd-inject"
 ENVD_BIN="$ENVD_INJECT_DIR/envd"
-ENVD_SOURCE_IMAGE="ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest"
+# For mainland China (recommended) use the CN endpoint;
+# for international access use the INT endpoint.
+ENVD_SOURCE_IMAGE="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
+# ENVD_SOURCE_IMAGE="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
 
 usage() {
     echo "Usage: $0 <base-image> [output-tag]"

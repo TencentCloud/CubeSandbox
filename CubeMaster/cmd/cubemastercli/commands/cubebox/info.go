@@ -31,30 +31,30 @@ var InfoCommand = cli.Command{
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "sandboxid,s",
-			Usage: "与hostid二选一,也可同时指定,单意义不大,sandbox决定了在那个host上",
+			Usage: "Either sandboxid or hostid; both can be specified, though specifying both has little effect since sandboxid determines the host",
 		},
 		cli.StringFlag{
 			Name:  "hostid,t",
-			Usage: "与sandboxid二选一,也可同时指定,只查某个实例",
+			Usage: "Either hostid or sandboxid; both can be specified to query a specific instance",
 		},
 		cli.BoolFlag{
 			Name:  "old",
-			Usage: "/cube/sandbox/info 旧接口用法",
+			Usage: "/cube/sandbox/info legacy API usage",
 		},
 		cli.IntFlag{
 			Name:  "containerport,p",
-			Usage: "可选，查询 exposed port 时传入目标 container port",
+			Usage: "Optional, target container port when querying exposed port",
 		},
 		cli.StringFlag{
 			Name:  "callerhostip",
-			Usage: "可选，模拟 cube proxy 所在节点 HostIP，用于选择 tap ip 或 host port",
+			Usage: "Optional, simulate the HostIP of the cube proxy node to select tap ip or host port",
 		},
 	},
 	Action: func(c *cli.Context) error {
 		hostID := c.String("hostid")
 		sandboxID := c.String("sandboxid")
 		if hostID == "" && sandboxID == "" {
-			return errors.New("hostid和sandboxid不能同时为空")
+			return errors.New("hostid and sandboxid cannot both be empty")
 		}
 
 		serverList = getServerAddrs(c)

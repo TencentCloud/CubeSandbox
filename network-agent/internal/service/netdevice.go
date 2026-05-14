@@ -21,10 +21,12 @@ import (
 
 var netlinkRouteReplace = netlink.RouteReplace
 var netlinkRouteListFiltered = netlink.RouteListFiltered
+var netlinkRouteList = netlink.RouteList
 var netlinkLinkByIndex = netlink.LinkByIndex
 var netlinkLinkByName = netlink.LinkByName
 var netlinkLinkList = netlink.LinkList
 var netlinkLinkDel = netlink.LinkDel
+var netlinkNeighList = netlink.NeighList
 var unixOpen = unix.Open
 var unixClose = unix.Close
 var unixIoctlIfreq = unix.IoctlIfreq
@@ -100,16 +102,62 @@ func getGatewayMacAddr(ifName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	neighs, err := netlink.NeighList(link.Attrs().Index, 0)
+	gatewayIP, err := defaultGatewayIP(link)
+	if err != nil {
+		return "", err
+	}
+	neighs, err := netlinkNeighList(link.Attrs().Index, netlink.FAMILY_V4)
 	if err != nil {
 		return "", err
 	}
 	for _, neigh := range neighs {
-		if neigh.Family == netlink.FAMILY_V4 && neigh.State == unix.NUD_REACHABLE {
+		if isUsableGatewayNeighbor(neigh, gatewayIP) {
 			return neigh.HardwareAddr.String(), nil
 		}
 	}
-	return "", fmt.Errorf("reachable gateway mac not found on %s", ifName)
+	return "", fmt.Errorf("gateway mac for %s via %s not found", ifName, gatewayIP.String())
+}
+
+func defaultGatewayIP(link netlink.Link) (net.IP, error) {
+	routes, err := netlinkRouteList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return nil, err
+	}
+	var gatewayIP net.IP
+	var gatewayMetric int
+	for _, route := range routes {
+		if !isIPv4DefaultRoute(route.Dst) || route.Gw.To4() == nil {
+			continue
+		}
+		if gatewayIP == nil || route.Priority < gatewayMetric {
+			gatewayIP = route.Gw.To4()
+			gatewayMetric = route.Priority
+		}
+	}
+	if gatewayIP == nil {
+		return nil, fmt.Errorf("default gateway not found on %s", link.Attrs().Name)
+	}
+	return gatewayIP, nil
+}
+
+func isIPv4DefaultRoute(dst *net.IPNet) bool {
+	if dst == nil {
+		return true
+	}
+	ones, bits := dst.Mask.Size()
+	return bits == 32 && ones == 0
+}
+
+func isUsableGatewayNeighbor(neigh netlink.Neigh, gatewayIP net.IP) bool {
+	if neigh.Family != netlink.FAMILY_V4 || !neigh.IP.Equal(gatewayIP) || len(neigh.HardwareAddr) == 0 {
+		return false
+	}
+	switch neigh.State {
+	case unix.NUD_REACHABLE, unix.NUD_STALE, unix.NUD_DELAY, unix.NUD_PROBE, unix.NUD_PERMANENT:
+		return true
+	default:
+		return false
+	}
 }
 
 func getMachineDevice(ifName string) (*machineDevice, error) {

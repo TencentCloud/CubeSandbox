@@ -190,7 +190,7 @@ func (b *CreateContext) GetRegion() string {
 }
 
 func (b *CreateContext) GetQos(key string) (*disk.RateLimiter, error) {
-	return GetQosFromReq(b.ReqInfo)
+	return GetQosFromReq(b.ReqInfo, key)
 }
 
 type metricInfo struct {

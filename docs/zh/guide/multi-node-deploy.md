@@ -10,9 +10,9 @@
 
 ```
 ┌─────────────────────────────────────────┐
-│              控制节点                     │
-│  CubeMaster, cube-api, CubeProxy,      │
-│  CoreDNS, MySQL, Redis,                │
+│              控制节点                    │
+│  CubeMaster, cube-api, CubeProxy,       │
+│  CoreDNS, MySQL, Redis,                 │
 │  Cubelet, network-agent                 │
 └──────────────────┬──────────────────────┘
                    │  /internal/meta API

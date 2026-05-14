@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-network_no_internet.py — 完全禁止沙箱访问公网
+network_no_internet.py — Fully disable outbound internet access for a sandbox.
 
-使用场景：
-    代码执行、数据处理等不需要外网访问的任务，隔离沙箱防止数据外泄。
+Use case:
+    Tasks that do not require external network access (code execution, data
+    processing, etc.) where you want to prevent any data exfiltration.
 
-原理：
-    allow_internet_access=False 会在 Cubelet 的 tap 网络层设置
-    CubeVSContext.AllowInternetAccess=false，阻断所有公网出口流量。
+How it works:
+    Setting allow_internet_access=False instructs Cubelet to set
+    CubeVSContext.AllowInternetAccess=false in the tap network layer,
+    which drops all outbound traffic to public IP addresses.
 """
 
 import os
@@ -24,12 +26,12 @@ with Sandbox.create(
     template=template_id,
     allow_internet_access=False,
 ) as sandbox:
-    # 验证：公网不可达（curl 应超时或返回 connection refused）
+    # Verify: public internet is unreachable (curl should time out or be blocked)
     result = sandbox.commands.run(
         "curl -s --max-time 3 https://example.com -o /dev/null -w '%{http_code}' || echo 'blocked'"
     )
     print("internet access blocked:", result.stdout.strip() == "blocked" or result.exit_code != 0)
 
-    # 沙箱内部逻辑仍正常工作
+    # Internal sandbox logic still works normally
     result = sandbox.commands.run("echo 'isolated execution ok'")
     print(result.stdout.strip())

@@ -6,20 +6,33 @@ Cube Sandbox 最基础的使用方式：创建沙箱、在其中运行 Python �
 
 ## 1. 背景
 
-**Cube Sandbox** 是轻量级 MicroVM 平台，控制面和数据面完全兼容 [E2B SDK](https://e2b.dev)。每次 `Sandbox.create()` 调用都会在 50ms 内从模板快照启动一个新的 KVM MicroVM。沙箱完全隔离——独立内核、文件系统和网络。`with` 块退出时沙箱自动销毁。
+**Cube Sandbox** 是轻量级 MicroVM 平台，控制面和数据面完全兼容 [E2B SDK](https://e2b.dev)。其设计分为两个平面：
 
-```
-你的脚本  (E2B SDK)
-    │  REST API
-    ▼
-CubeAPI  (端口 3000)
-    │
-    ▼
-CubeMaster ──► Cubelet ──► KVM MicroVM
-                               │
-                           cube-agent (PID 1)
-                               │
-                           Python / Shell 进程
+- **控制面 (Control Plane)**：负责沙箱生命周期管理。每次 `Sandbox.create()` 调用都会在 50ms 内从模板快照启动一个新的 KVM MicroVM。指令流经 CubeAPI/Master，最终由 Cubelet 在 VM 内通过 `cube-agent` (PID 1) 拉起 `envd` 服务。
+- **数据面 (Data Plane)**：负责沙箱内的代码执行和数据交互。流量经由 CubeProxy 直接路由至沙箱内的 `envd`，支持在隔离环境内运行 Python 或 Shell 脚本。沙箱完全隔离——拥有独立内核、文件系统和网络。`with` 块退出时，沙箱自动销毁。
+
+```text
+                             用户脚本 (E2B SDK)
+                                      │
+                                      ▼
+        ┌─────────────────────────────┴─────────────────────────────┐
+        │                                                           │
+ 【1. 管理流程 Control Plane】                            【2. 调用流程 Data Plane】
+  (如 Sandbox.create / delete)                        (如 run_code, commands.run)
+        │                                                           │
+        ▼  REST API (端口 3000)                                     ▼  WSS / HTTP
+     CubeAPI                                                    CubeProxy
+        │                                                           │
+        ▼                                                           │
+    CubeMaster                                                      │
+        │                                                           │
+        │                  ┌────────────────────────────────────┐   │
+        ▼                  │            KVM MicroVM             │   │
+     Cubelet ──────────────┼──► cube-agent ──► envd  ◄──────────┼───┘
+                           │     (PID 1)         │              │
+                           │                     ▼              │
+                           │                Python / Shell      │
+                           └────────────────────────────────────┘
 ```
 
 ## 2. 前置条件
@@ -40,12 +53,14 @@ pip install -r requirements.txt
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest \
+  --image cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
   --probe 49999
 ```
+
+> **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`。
 
 记录输出的 `template_id`。
 

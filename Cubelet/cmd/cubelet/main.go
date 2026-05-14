@@ -161,9 +161,16 @@ func newCubeMnt() error {
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+		// Use Cloneflags only (not Unshareflags) so that Go does not run
+		// its automatic post-unshare mount("none", "/", MS_REC|MS_PRIVATE)
+		// (see runtime.forkAndExecInChild1 in the Go stdlib). CLONE_NEWNS
+		// in Cloneflags still gives us a fresh mount namespace, and the
+		// kernel preserves the shared-propagation peer group relationship
+		// for mounts copied from the parent. That is a prerequisite for
+		// the subsequent `mount --make-rslave /` to slave this ns's root
+		// back to the host's shared group.
 		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Cloneflags:   syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
-			Unshareflags: syscall.CLONE_NEWNS,
+			Cloneflags: syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
 		}
 		if err := cmd.Start(); err != nil {
 			newMntErr = fmt.Errorf("start newCubeMnt job error: %v", err)
@@ -189,6 +196,17 @@ func newCubeMnt() error {
 	cmds := [][]string{
 		{"mkdir", "-p", CubeShimTopdir},
 		{"mkdir", "-p", CubeShimSandboxes},
+		// Re-slave the root of cubelet's new mount namespace so that mount
+		// events happening in the host (init) namespace — e.g. operators
+		// mounting a new network storage volume after cubelet has started —
+		// propagate into this ns and become visible to prepareHostDirVolume.
+		// Without this, a freshly-added host mount is invisible here and
+		// any sandbox requesting a hostPath under it fails with ENOENT.
+		// Propagation is one-way (slave): mounts performed inside this ns
+		// (shim bind-mounts etc.) do not flow back to the host ns.
+		// Prerequisite: the host's "/" must be shared (true on systemd-based
+		// distros by default; our compute nodes confirm shared:1).
+		{"nsenter", "-t", fmt.Sprintf("%d", newMntPID), "-m", "mount", "--make-rslave", "/"},
 		{"nsenter", "-t", fmt.Sprintf("%d", newMntPID), "-m", "mount", "--bind", "--make-shared", CubeShimTopdir, CubeShimTopdir},
 		{"mkdir", "-p", CubeMntNsDirPath},
 		{"touch", CubeMntNsFilePath},

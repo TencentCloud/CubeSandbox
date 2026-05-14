@@ -76,7 +76,7 @@ var MultiRun = cli.Command{
 		&cli.BoolFlag{
 			Name: "same",
 
-			Usage: "需要严格并发运行的场景",
+			Usage: "Run with strict concurrent synchronization",
 		},
 		&cli.IntFlag{
 			Name:  "delcc",
@@ -84,11 +84,11 @@ var MultiRun = cli.Command{
 		},
 		cli.StringFlag{
 			Name:  "hostid,t",
-			Usage: "内部调试参数,需指定http头部才有效果,指定物理机ID生产容器",
+			Usage: "Internal debug param; requires HTTP header to take effect. Specify physical machine ID to create containers",
 		},
 		cli.StringFlag{
 			Name:  "hostip,s",
-			Usage: "内部调试参数,需指定http头部才有效果,指定物理IP生产容器",
+			Usage: "Internal debug param; requires HTTP header to take effect. Specify physical IP to create containers",
 		},
 		&cli.BoolFlag{
 			Name:  "testmocksch",
@@ -106,7 +106,7 @@ var MultiRun = cli.Command{
 		cli.StringFlag{
 			Name:  "multireq_user_id",
 			Value: "123456789",
-			Usage: "多函数对应的user_id参数",
+			Usage: "user_id parameter for multiple functions",
 		},
 		&cli.IntFlag{
 			Name:  "async_retry_max",
