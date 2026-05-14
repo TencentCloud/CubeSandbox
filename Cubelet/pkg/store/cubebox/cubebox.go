@@ -87,6 +87,7 @@ func (m *Metadata) AddLabels(labels map[string]string) {
 type ResourceWithOverHead struct {
 	MemReq,
 	HostCpuQ,
+	HostCpuBurstQ,
 	HostMemQ,
 	VmCpuQ,
 	VmMemQ,
@@ -94,8 +95,8 @@ type ResourceWithOverHead struct {
 }
 
 func (rq *ResourceWithOverHead) String() string {
-	return fmt.Sprintf("MemReq: %v, HostCpuQ: %v, HostMemQ: %v, VmCpuQ: %v, VmMemQ: %v, PmemPageQ: %v",
-		rq.MemReq.String(), rq.HostCpuQ.String(), rq.HostMemQ.String(), rq.VmCpuQ.String(), rq.VmMemQ.String(), rq.PmemPageQ.String())
+	return fmt.Sprintf("MemReq: %v, HostCpuQ: %v, HostCpuBurstQ: %v, HostMemQ: %v, VmCpuQ: %v, VmMemQ: %v, PmemPageQ: %v",
+		rq.MemReq.String(), rq.HostCpuQ.String(), rq.HostCpuBurstQ.String(), rq.HostMemQ.String(), rq.VmCpuQ.String(), rq.VmMemQ.String(), rq.PmemPageQ.String())
 }
 
 type CubeBox struct {

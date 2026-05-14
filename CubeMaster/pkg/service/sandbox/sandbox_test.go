@@ -11,11 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -90,6 +92,68 @@ func TestReqResource(t *testing.T) {
 
 	assert.Equal(t, cpu.String(), "5")
 }
+
+func TestCheckAndGetContainersSetsHostCPUBurstAnnotation(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{
+		Containers: []*types.Container{
+			{
+				Name:  "runtime-sidecar",
+				Image: &types.ImageSpec{Image: "busybox:latest"},
+				Resources: &types.Resource{
+					Cpu: "1",
+					Mem: "128Mi",
+					HostBurst: &types.HostResourceBurst{
+						Cpu: "2",
+					},
+				},
+			},
+			{
+				Name:  "worker",
+				Image: &types.ImageSpec{Image: "busybox:latest"},
+				Resources: &types.Resource{
+					Cpu: "1",
+					Mem: "128Mi",
+				},
+			},
+		},
+	}
+	out := &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{}}
+
+	if err := checkAndGetContainers(req, out); err != nil {
+		t.Fatalf("checkAndGetContainers returned error: %v", err)
+	}
+
+	if got := out.Annotations[constants.CubeAnnotationsHostCPUBurst]; got != "3" {
+		t.Fatalf("host cpu burst annotation = %q, want %q", got, "3")
+	}
+}
+
+func TestCheckAndGetContainersRejectsHostCPUBurstBelowCPU(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{
+		Containers: []*types.Container{
+			{
+				Name: "runtime-sidecar",
+				Resources: &types.Resource{
+					Cpu: "1",
+					Mem: "128Mi",
+					HostBurst: &types.HostResourceBurst{
+						Cpu: "500m",
+					},
+				},
+			},
+		},
+	}
+	out := &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{}}
+
+	err := checkAndGetContainers(req, out)
+	if err == nil {
+		t.Fatal("checkAndGetContainers returned nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "host cpu burst must be >= cpu") {
+		t.Fatalf("error = %q, want host cpu burst validation error", err.Error())
+	}
+}
+
 func TestBackoffRetryDelay(t *testing.T) {
 	c := &createSandboxContext{}
 	for i := 0; i < int(config.GetConfig().CubeletConf.LoopMaxRetries); i++ {

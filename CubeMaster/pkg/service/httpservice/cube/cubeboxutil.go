@@ -192,6 +192,9 @@ func applyTemplateResources(resourceIn *types.Resource, resourceOut *types.Resou
 	if resourceIn.Limit != nil {
 		resourceOut.Limit = resourceIn.Limit
 	}
+	if resourceIn.HostBurst != nil {
+		resourceOut.HostBurst = resourceIn.HostBurst
+	}
 }
 
 func applyTemplateImageSpec(imageSpecIn *types.ImageSpec, imageSpecOut *types.ImageSpec) {

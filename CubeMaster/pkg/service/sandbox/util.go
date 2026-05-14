@@ -219,6 +219,16 @@ func getExposedPorts(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandbo
 	return nil
 }
 func checkAndGetContainers(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {
+	hostCPUBurst, hasHostCPUBurst, err := aggregateHostCPUBurst(req.Containers)
+	if err != nil {
+		return err
+	}
+	if hasHostCPUBurst {
+		if out.Annotations == nil {
+			out.Annotations = make(map[string]string)
+		}
+		out.Annotations[constants.CubeAnnotationsHostCPUBurst] = hostCPUBurst.String()
+	}
 
 	for _, cnt := range req.Containers {
 		if cnt.Resources == nil {
@@ -282,6 +292,64 @@ func checkAndGetContainers(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 		out.Containers = append(out.Containers, c)
 	}
 	return nil
+}
+
+func aggregateHostCPUBurst(containers []*types.Container) (resource.Quantity, bool, error) {
+	total := resource.MustParse("0")
+	hasHostCPUBurst := false
+
+	for _, ctr := range containers {
+		if ctr.Resources == nil {
+			continue
+		}
+		if ctr.Resources.HostBurst != nil && strings.TrimSpace(ctr.Resources.HostBurst.Cpu) != "" {
+			hasHostCPUBurst = true
+			break
+		}
+	}
+	if !hasHostCPUBurst {
+		return total, false, nil
+	}
+
+	for _, ctr := range containers {
+		if ctr.Resources == nil {
+			continue
+		}
+
+		cpuQuantity, err := resource.ParseQuantity(ctr.Resources.Cpu)
+		if err != nil {
+			return total, false, fmt.Errorf("parse container %q cpu limit: %w", ctr.Name, err)
+		}
+
+		hostCPUBurst := ""
+		if ctr.Resources.HostBurst != nil {
+			hostCPUBurst = strings.TrimSpace(ctr.Resources.HostBurst.Cpu)
+		}
+		if hostCPUBurst == "" {
+			total.Add(cpuQuantity)
+			continue
+		}
+
+		cpuBurstQuantity, err := resource.ParseQuantity(hostCPUBurst)
+		if err != nil {
+			return total, false, fmt.Errorf("parse container %q host cpu burst: %w", ctr.Name, err)
+		}
+		if cpuBurstQuantity.Sign() <= 0 {
+			return total, false, fmt.Errorf("container %q host cpu burst must be > 0", ctr.Name)
+		}
+		if cpuBurstQuantity.Cmp(cpuQuantity) < 0 {
+			return total, false, fmt.Errorf("container %q host cpu burst must be >= cpu", ctr.Name)
+		}
+		maxBurstQuantity := cpuQuantity.DeepCopy()
+		maxBurstQuantity.Add(cpuQuantity)
+		if cpuBurstQuantity.Cmp(maxBurstQuantity) > 0 {
+			return total, false, fmt.Errorf("container %q host cpu burst must be <= 2 * cpu", ctr.Name)
+		}
+
+		total.Add(cpuBurstQuantity)
+	}
+
+	return total, true, nil
 }
 
 func checkAndGetImageSpec(c *cubebox.ContainerConfig, cnt *types.Container) error {

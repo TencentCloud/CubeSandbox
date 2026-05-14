@@ -53,7 +53,7 @@ func TestHandler_Base(t *testing.T) {
 
 	cpu := resource.MustParse("100m")
 	mem := resource.MustParse("128Mi")
-	err = h.Update(ctx, testGroup, cpu, mem)
+	err = h.Update(ctx, testGroup, cpu, mem, resource.Quantity{})
 	assert.NoError(t, err, "update")
 
 	checkValue(t, path.Join(h.root, testGroup, "cpu.max"), "10000 100000")

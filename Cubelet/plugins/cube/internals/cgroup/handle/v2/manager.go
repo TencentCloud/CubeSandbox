@@ -194,7 +194,7 @@ func toggleFunc(controllers []string, prefix string) []string {
 	return out
 }
 
-func (h *handler) Update(ctx context.Context, group string, cpu, mem resource.Quantity) error {
+func (h *handler) Update(ctx context.Context, group string, cpu, mem, cpuBurst resource.Quantity) error {
 	cpuQuota := cpu.MilliValue() * 100
 	memMax := mem.Value()
 	cpuMax := cgroup2.NewCPUMax(&cpuQuota, &handle.DefaultCPUPeriod)
@@ -209,11 +209,39 @@ func (h *handler) Update(ctx context.Context, group string, cpu, mem resource.Qu
 	}
 	cgroupv2Path := path.Join(h.root, group)
 	if exist, _ := utils.DenExist(cgroupv2Path); exist {
-		return m.Update(res)
+		if err := m.Update(res); err != nil {
+			return err
+		}
+		return h.updateCPUBurst(ctx, group, cpu, cpuBurst)
 	}
 
 	log.G(ctx).Infof("cgroup %s not exist while update, create one", group)
-	return h.createWithResource(ctx, group, res)
+	if err := h.createWithResource(ctx, group, res); err != nil {
+		return err
+	}
+	return h.updateCPUBurst(ctx, group, cpu, cpuBurst)
+}
+
+func (h *handler) updateCPUBurst(ctx context.Context, group string, cpu, cpuBurst resource.Quantity) error {
+	cpuBurstQuota, configured, err := handle.CPUBurstQuota(cpu, cpuBurst)
+	if err != nil {
+		return err
+	}
+
+	cpuBurstFilePath := path.Join(h.root, group, "cpu.max.burst")
+	if exist, _ := utils.DenExist(cpuBurstFilePath); !exist {
+		if configured {
+			return fmt.Errorf("cpu burst unsupported: %s not found", cpuBurstFilePath)
+		}
+		return nil
+	}
+
+	err = os.WriteFile(cpuBurstFilePath, []byte(strconv.FormatUint(cpuBurstQuota, 10)), 0644)
+	if err != nil {
+		log.G(ctx).Errorf("set cpu burst error %v", err)
+		return err
+	}
+	return nil
 }
 
 func (h *handler) Delete(ctx context.Context, group string) error {
@@ -273,11 +301,19 @@ func (h *handler) AddProc(group string, pid uint64) error {
 
 func (h *handler) RemoveLimit(ctx context.Context, group string) error {
 	cpuLimitFilePath := path.Join(h.root, group, "cpu.max")
+	cpuBurstFilePath := path.Join(h.root, group, "cpu.max.burst")
 	memLimitFilePath := path.Join(h.root, group, "memory.max")
 	if exist, _ := utils.DenExist(cpuLimitFilePath); exist {
 		err := os.WriteFile(cpuLimitFilePath, []byte("max 100000"), 0644)
 		if err != nil {
 			log.G(ctx).Errorf("remove cpu limit error %v", err)
+			return err
+		}
+	}
+	if exist, _ := utils.DenExist(cpuBurstFilePath); exist {
+		err := os.WriteFile(cpuBurstFilePath, []byte("0"), 0644)
+		if err != nil {
+			log.G(ctx).Errorf("remove cpu burst error %v", err)
 			return err
 		}
 	}

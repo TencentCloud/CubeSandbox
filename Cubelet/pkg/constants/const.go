@@ -179,6 +179,7 @@ const (
 	MasterAnnotationsInsHostUUID              = "cube.master.instance.host_uuid"
 	MasterAnnotationsInsHostCpuTotal          = "cube.master.instance.host_cpu_total"
 	MasterAnnotationsInsHostVirtualQuotaArray = "cube.master.instance.host_virtual_quota_array"
+	MasterAnnotationsHostCPUBurst             = "cube.master.instance.host_cpu_burst"
 	MasterAnnotationsDisableVmCgroup          = "cube.master.disable_vm_cgroup"
 	MasterAnnotationsDisableHostCgroup        = "cube.master.disable_host_cgroup"
 	MasterAnnotationsUpdateAction             = "cube.master.update_action"

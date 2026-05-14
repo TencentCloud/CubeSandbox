@@ -127,7 +127,7 @@ func SingleSubsystem(baseHierarchy cgroup1.Hierarchy, needSystemName []cgroup1.N
 	}
 }
 
-func (h *handler) Update(ctx context.Context, group string, cpu, mem resource.Quantity) error {
+func (h *handler) Update(ctx context.Context, group string, cpu, mem, cpuBurst resource.Quantity) error {
 	cpuQuota := cpu.MilliValue() * 100
 	memMax := mem.Value()
 	res := &specs.LinuxResources{
@@ -152,6 +152,31 @@ func (h *handler) Update(ctx context.Context, group string, cpu, mem resource.Qu
 	}
 	err = m.Update(res)
 	if err != nil {
+		return err
+	}
+	if err = h.updateCPUBurst(ctx, group, cpu, cpuBurst); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (h *handler) updateCPUBurst(ctx context.Context, group string, cpu, cpuBurst resource.Quantity) error {
+	cpuBurstQuota, configured, err := handle.CPUBurstQuota(cpu, cpuBurst)
+	if err != nil {
+		return err
+	}
+
+	cpuBurstFilePath := path.Join(h.root, "cpu", group, "cpu.cfs_burst_us")
+	if exist, _ := utils.DenExist(cpuBurstFilePath); !exist {
+		if configured {
+			return fmt.Errorf("cpu burst unsupported: %s not found", cpuBurstFilePath)
+		}
+		return nil
+	}
+
+	err = os.WriteFile(cpuBurstFilePath, []byte(strconv.FormatUint(cpuBurstQuota, 10)), 0644)
+	if err != nil {
+		log.G(ctx).Errorf("set cpu burst error %v", err)
 		return err
 	}
 	return nil
@@ -218,11 +243,19 @@ func (h *handler) AddProc(group string, pid uint64) error {
 
 func (h *handler) RemoveLimit(ctx context.Context, group string) error {
 	cpuLimitFilePath := path.Join(h.root, "cpu", group, "cpu.cfs_quota_us")
+	cpuBurstFilePath := path.Join(h.root, "cpu", group, "cpu.cfs_burst_us")
 	memLimitFilePath := path.Join(h.root, "memory", group, "memory.limit_in_bytes")
 	if exist, _ := utils.DenExist(cpuLimitFilePath); exist {
 		err := os.WriteFile(cpuLimitFilePath, []byte("-1"), 0644)
 		if err != nil {
 			log.G(ctx).Errorf("remove cpu limit error %v", err)
+			return err
+		}
+	}
+	if exist, _ := utils.DenExist(cpuBurstFilePath); exist {
+		err := os.WriteFile(cpuBurstFilePath, []byte("0"), 0644)
+		if err != nil {
+			log.G(ctx).Errorf("remove cpu burst error %v", err)
 			return err
 		}
 	}

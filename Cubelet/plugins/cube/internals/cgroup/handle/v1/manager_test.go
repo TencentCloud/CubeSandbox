@@ -101,14 +101,18 @@ func TestHandler_Base(t *testing.T) {
 			t.Fatalf("subsystem %q for %q not created", string(s.Name()), testGroup)
 		}
 	}
+	err = os.WriteFile(path.Join(mock.root, "cpu", testGroup, "cpu.cfs_burst_us"), []byte("0"), 0644)
+	assert.NoError(t, err, "create cpu burst file")
 
 	cpu := resource.MustParse("100m")
 	mem := resource.MustParse("128Mi")
-	err = h.Update(ctx, testGroup, cpu, mem)
+	cpuBurst := resource.MustParse("200m")
+	err = h.Update(ctx, testGroup, cpu, mem, cpuBurst)
 	assert.NoError(t, err, "update")
 
 	checkValue(t, mock, path.Join("cpu", testGroup, "cpu.cfs_period_us"), "100000")
 	checkValue(t, mock, path.Join("cpu", testGroup, "cpu.cfs_quota_us"), "10000")
+	checkValue(t, mock, path.Join("cpu", testGroup, "cpu.cfs_burst_us"), "10000")
 	checkValue(t, mock, path.Join("memory", testGroup, "memory.limit_in_bytes"), "134217728")
 
 	assert.Equal(t, 100, h.GetAllocatedCpuNum(testGroup), "get cpu")
@@ -118,6 +122,7 @@ func TestHandler_Base(t *testing.T) {
 	assert.NoError(t, err, "remove limit")
 	assert.Equal(t, 0, h.GetAllocatedCpuNum(testGroup), "get cpu")
 	assert.Equal(t, int64(0), h.GetAllocatedMem(testGroup), "get mem")
+	checkValue(t, mock, path.Join("cpu", testGroup, "cpu.cfs_burst_us"), "0")
 
 	err = h.Delete(ctx, testGroup)
 	assert.NoError(t, err, "delete")

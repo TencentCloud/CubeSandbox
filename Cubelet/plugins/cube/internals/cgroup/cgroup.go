@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	jsoniter "github.com/json-iterator/go"
@@ -131,8 +132,14 @@ func (overhead *OverheadConfig) GetResourceWithOverhead(ctx context.Context, rea
 		rq.VmCpuQ = cpuQuantity.DeepCopy()
 		rq.VmMemQ = memQuantity.DeepCopy()
 		rq.PmemPageQ = resource.MustParse("0")
+		if err := applyHostCPUBurst(realReq, rq, resource.MustParse("0")); err != nil {
+			return nil, err
+		}
 		return rq, nil
 	}
+
+	hostCPUOverhead := overhead.VmCpu.DeepCopy()
+	hostCPUOverhead.Add(overhead.HostCpu)
 
 	cpuQuantity.Add(overhead.VmCpu)
 	rq.VmCpuQ = cpuQuantity.DeepCopy()
@@ -153,7 +160,38 @@ func (overhead *OverheadConfig) GetResourceWithOverhead(ctx context.Context, rea
 	memOverheadVarQuantity.Add(rq.PmemPageQ)
 	rq.VmMemQ = ceilMemQuota(*memOverheadVarQuantity)
 
+	if err := applyHostCPUBurst(realReq, rq, hostCPUOverhead); err != nil {
+		return nil, err
+	}
+
 	return rq, nil
+}
+
+func applyHostCPUBurst(realReq *cubebox.RunCubeSandboxRequest, rq *cubeboxstore.ResourceWithOverHead, overhead resource.Quantity) error {
+	hostCPUBurst := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationsHostCPUBurst])
+	if hostCPUBurst == "" {
+		return nil
+	}
+
+	hostCPUBurstQuantity, err := resource.ParseQuantity(hostCPUBurst)
+	if err != nil {
+		return fmt.Errorf("parse host cpu burst: %w", err)
+	}
+	if hostCPUBurstQuantity.Sign() <= 0 {
+		return fmt.Errorf("host cpu burst must be > 0")
+	}
+	hostCPUBurstQuantity.Add(overhead)
+	if hostCPUBurstQuantity.Cmp(rq.HostCpuQ) < 0 {
+		return fmt.Errorf("host cpu burst must be >= host cpu quota")
+	}
+	hostCPUBurstExtra := hostCPUBurstQuantity.DeepCopy()
+	hostCPUBurstExtra.Sub(rq.HostCpuQ)
+	if hostCPUBurstExtra.Cmp(rq.HostCpuQ) > 0 {
+		return fmt.Errorf("host cpu burst extra must be <= host cpu quota")
+	}
+
+	rq.HostCpuBurstQ = hostCPUBurstQuantity
+	return nil
 }
 
 func (overhead *OverheadConfig) MatchVMSnapshotSpec(ctx context.Context, req cubeboxstore.ResourceWithOverHead,
@@ -216,11 +254,11 @@ func (overhead *OverheadConfig) MatchVMSnapshotSpec(ctx context.Context, req cub
 	return vmResource, &req
 }
 
-func SetCubeboxCgroupLimit(ctx context.Context, group string, cpuQ resource.Quantity, memQ resource.Quantity, usePoolV2 bool) error {
+func SetCubeboxCgroupLimit(ctx context.Context, group string, cpuQ resource.Quantity, memQ resource.Quantity, cpuBurstQ resource.Quantity, usePoolV2 bool) error {
 	if usePoolV2 {
-		return l.poolV2Handle.Update(ctx, group, cpuQ, memQ)
+		return l.poolV2Handle.Update(ctx, group, cpuQ, memQ, cpuBurstQ)
 	}
-	return l.poolV1Handle.Update(ctx, group, cpuQ, memQ)
+	return l.poolV1Handle.Update(ctx, group, cpuQ, memQ, cpuBurstQ)
 }
 
 func AddProc(path string, pid uint64) error {

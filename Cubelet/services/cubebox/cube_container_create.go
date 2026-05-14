@@ -117,7 +117,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		if !config.GetCommon().DisableHostCgroup && !constants.GetDisableHostCgroup(ctx) {
 			startTime := time.Now()
 			err := cgroupp.SetCubeboxCgroupLimit(ctx, cgInfo.CgroupID, cgInfo.ResourceQuantity.HostCpuQ,
-				cgInfo.ResourceQuantity.HostMemQ, cgInfo.UsePoolV2)
+				cgInfo.ResourceQuantity.HostMemQ, cgInfo.ResourceQuantity.HostCpuBurstQ, cgInfo.UsePoolV2)
 			if err != nil {
 				err = ret.Errorf(errorcode.ErrorCode_SetCubeboxCgroupLimitFailed,
 					"set cubebox cgroup limit error: %s", err)
@@ -125,8 +125,9 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 				return err
 			}
 			workflow.RecordCreateMetric(ctx, nil, constants.CubeRunCgroupId, time.Since(startTime))
-			log.G(ctx).Debugf("set cubebox cgroup %s limit: mem %s, cpu %s", cgInfo.CgroupID,
-				cgInfo.ResourceQuantity.HostMemQ.String(), cgInfo.ResourceQuantity.HostCpuQ.String())
+			log.G(ctx).Debugf("set cubebox cgroup %s limit: mem %s, cpu %s, cpu burst %s", cgInfo.CgroupID,
+				cgInfo.ResourceQuantity.HostMemQ.String(), cgInfo.ResourceQuantity.HostCpuQ.String(),
+				cgInfo.ResourceQuantity.HostCpuBurstQ.String())
 		}
 	}
 

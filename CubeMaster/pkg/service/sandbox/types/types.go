@@ -70,12 +70,18 @@ type Resource struct {
 	Mem string `json:"mem,omitempty"`
 
 	Limit *RequestLimit `json:"limit,omitempty"`
+
+	HostBurst *HostResourceBurst `json:"host_burst,omitempty"`
 }
 
 type RequestLimit struct {
 	Cpu string `json:"cpu,omitempty"`
 
 	Mem string `json:"mem,omitempty"`
+}
+
+type HostResourceBurst struct {
+	Cpu string `json:"cpu,omitempty"`
 }
 
 type CubeVSContext struct {

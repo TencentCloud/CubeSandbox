@@ -52,6 +52,7 @@ const (
 	CubeAnnotationsInsHostUUID              = "cube.master.instance.host_uuid"
 	CubeAnnotationsInsHostCpuTotal          = "cube.master.instance.host_cpu_total"
 	CubeAnnotationsInsHostVirtualQuotaArray = "cube.master.instance.host_virtual_quota_array"
+	CubeAnnotationsHostCPUBurst             = "cube.master.instance.host_cpu_burst"
 	CubeAnnotationsPICMode                  = "cube.master.instance.pic_mode"
 	CubeAnnotationsDisableVmCgroup          = "cube.master.disable_vm_cgroup"
 	CubeAnnotationsDisableHostCgroup        = "cube.master.disable_host_cgroup"

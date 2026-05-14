@@ -231,6 +231,57 @@ func TestParseContainerOverridesCustomCpuAndMemory(t *testing.T) {
 	}
 }
 
+func TestParseContainerOverridesHostBurstCPU(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--cpu", "2000", "--memory", "2048", "--host-burst-cpu", "4000"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.Resources == nil || overrides.Resources.HostBurst == nil {
+		t.Fatal("expected host burst resources to be set")
+	}
+	if overrides.Resources.Cpu != "2000m" {
+		t.Fatalf("expected Cpu=2000m, got %q", overrides.Resources.Cpu)
+	}
+	if overrides.Resources.Mem != "2048Mi" {
+		t.Fatalf("expected Mem=2048Mi, got %q", overrides.Resources.Mem)
+	}
+	if overrides.Resources.HostBurst.Cpu != "4000m" {
+		t.Fatalf("expected HostBurst.Cpu=4000m, got %q", overrides.Resources.HostBurst.Cpu)
+	}
+}
+
+func TestParseContainerOverridesHostBurstCPUUsesDefaultResources(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--host-burst-cpu", "4000"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.Resources == nil || overrides.Resources.HostBurst == nil {
+		t.Fatal("expected host burst resources to be set")
+	}
+	if overrides.Resources.Cpu != "2000m" {
+		t.Fatalf("expected Cpu=2000m, got %q", overrides.Resources.Cpu)
+	}
+	if overrides.Resources.Mem != "2000Mi" {
+		t.Fatalf("expected Mem=2000Mi, got %q", overrides.Resources.Mem)
+	}
+	if overrides.Resources.HostBurst.Cpu != "4000m" {
+		t.Fatalf("expected HostBurst.Cpu=4000m, got %q", overrides.Resources.HostBurst.Cpu)
+	}
+}
+
+func TestParseContainerOverridesRejectsHostBurstCPUBelowCPU(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--cpu", "2000", "--host-burst-cpu", "1000"})
+	_, err := parseContainerOverrides(ctx)
+	if err == nil {
+		t.Fatal("expected error for host-burst-cpu below cpu")
+	}
+	if !strings.Contains(err.Error(), "host-burst-cpu must be >= cpu") {
+		t.Fatalf("error = %q, want host-burst lower bound error", err.Error())
+	}
+}
+
 func TestParseContainerOverridesDNS(t *testing.T) {
 	ctx := newCreateFromImageContext(t, []string{"--dns", "8.8.8.8", "--dns", "1.1.1.1"})
 	overrides, err := parseContainerOverrides(ctx)
@@ -348,14 +399,14 @@ func TestFormatTemplateImageJobWatchLineIncludesError(t *testing.T) {
 
 func TestFormatTemplateImageJobCompletionSummarySuccess(t *testing.T) {
 	job := &types.TemplateImageJobInfo{
-		Status:             "READY",
-		TemplateID:         "tpl-1",
-		JobID:              "job-1",
-		ArtifactID:         "artifact-1",
-		ExpectedNodeCount:  2,
-		ReadyNodeCount:     2,
-		FailedNodeCount:    0,
-		TemplateStatus:     "READY",
+		Status:                  "READY",
+		TemplateID:              "tpl-1",
+		JobID:                   "job-1",
+		ArtifactID:              "artifact-1",
+		ExpectedNodeCount:       2,
+		ReadyNodeCount:          2,
+		FailedNodeCount:         0,
+		TemplateStatus:          "READY",
 		TemplateSpecFingerprint: "sha256:abc",
 	}
 

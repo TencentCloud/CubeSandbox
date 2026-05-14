@@ -769,6 +769,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets timeout_ms=30000, period_ms=500"},
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
+		cli.IntFlag{Name: "host-burst-cpu", Usage: "Host CPU burst ceiling in millicores for the template container, e.g. 4000 for 4 cores"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
 	},
@@ -1371,9 +1372,10 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	dnsServers := c.StringSlice("dns")
 	probePort := c.Int("probe")
 	cpuMillicores := c.Int("cpu")
+	hostBurstCPUMillicores := c.Int("host-burst-cpu")
 	memoryMB := c.Int("memory")
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") {
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("host-burst-cpu") && !c.IsSet("memory") {
 		return nil, nil
 	}
 
@@ -1402,10 +1404,21 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 		}
 		overrides.DnsConfig = &types.DNSConfig{Servers: dnsServers}
 	}
-	if c.IsSet("cpu") || c.IsSet("memory") {
+	if c.IsSet("cpu") || c.IsSet("host-burst-cpu") || c.IsSet("memory") {
 		overrides.Resources = &types.Resource{
 			Cpu: fmt.Sprintf("%dm", cpuMillicores),
 			Mem: fmt.Sprintf("%dMi", memoryMB),
+		}
+		if c.IsSet("host-burst-cpu") {
+			if hostBurstCPUMillicores < cpuMillicores {
+				return nil, fmt.Errorf("host-burst-cpu must be >= cpu")
+			}
+			if hostBurstCPUMillicores > cpuMillicores*2 {
+				return nil, fmt.Errorf("host-burst-cpu must be <= 2 * cpu")
+			}
+			overrides.Resources.HostBurst = &types.HostResourceBurst{
+				Cpu: fmt.Sprintf("%dm", hostBurstCPUMillicores),
+			}
 		}
 	}
 	if probePort > 0 {
