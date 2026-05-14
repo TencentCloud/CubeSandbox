@@ -114,6 +114,11 @@ export default function OverviewPage() {
                 <Badge tone="info">{sb.state ?? 'running'}</Badge>
                 <span className="font-mono text-xs text-foreground/80">{short(sb.sandboxID)}</span>
                 <span className="text-muted-foreground">{sb.templateID ?? sb.alias ?? '—'}</span>
+                {sb.clientID && (
+                  <span className="font-mono text-xs text-muted-foreground/60 bg-white/[0.03] border border-white/8 rounded px-1.5 py-0.5">
+                    {sb.clientID}
+                  </span>
+                )}
                 <span className="ml-auto text-xs text-muted-foreground">
                   {formatRelative(sb.startedAt)}
                 </span>

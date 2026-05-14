@@ -122,12 +122,13 @@ export default function SandboxesPage() {
       </Card>
 
       <Card className="!p-0 overflow-hidden">
-        <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-[11px] uppercase tracking-wider text-muted-foreground">
+        <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-[11px] uppercase tracking-wider text-muted-foreground">
           <div>{t('col.state')}</div>
           <div>{t('col.sandboxId')}</div>
           <div>{t('col.template')}</div>
           <div>{t('col.cpu')}</div>
           <div>{t('col.memory')}</div>
+          <div>{t('col.node')}</div>
           <div>{t('col.started')}</div>
           <div className="text-right">{t('col.actions')}</div>
         </div>
@@ -172,7 +173,7 @@ function Row({
   const state = sb.state ?? 'running';
   const tone = state === 'paused' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   return (
-    <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-sm transition hover:bg-muted/50">
+    <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-sm transition hover:bg-muted/50">
       <div>
         <Badge tone={tone as any}>{state}</Badge>
       </div>
@@ -192,6 +193,7 @@ function Row({
         {sb.cpuCount != null ? t('vcpu', { count: sb.cpuCount }) : '—'}
       </div>
       <div className="text-xs text-muted-foreground">{formatBytes(sb.memoryMB)}</div>
+      <div className="font-mono text-xs text-muted-foreground/70">{sb.clientID || '—'}</div>
       <div className="text-xs text-muted-foreground">{formatRelative(sb.startedAt)}</div>
       <div className="flex justify-end gap-1">
         {state === 'paused' ? (

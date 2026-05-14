@@ -16,7 +16,8 @@
     "cpu": "CPU",
     "memory": "Memory",
     "started": "Started",
-    "actions": "Actions"
+    "actions": "Actions",
+    "node": "Node"
   },
   "noMatch": "No sandboxes match your filter.",
   "alias": "alias: {{alias}}",

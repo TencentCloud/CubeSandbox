@@ -16,7 +16,8 @@
     "cpu": "CPU",
     "memory": "内存",
     "started": "启动时间",
-    "actions": "操作"
+    "actions": "操作",
+    "node": "节点"
   },
   "noMatch": "没有沙箱匹配当前筛选条件。",
   "alias": "别名: {{alias}}",
