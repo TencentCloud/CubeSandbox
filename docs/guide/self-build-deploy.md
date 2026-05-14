@@ -27,6 +27,7 @@ After deployment, you will have a fully functional Cube Sandbox instance with:
 | Linux | OpenCloudOS 9 (recommended) or Ubuntu 22.04+ |
 | Docker | Must be installed and running |
 | root access | `install.sh` requires root privileges |
+| FileSystem | XFS |
 | DNS routing | `systemd-resolved` (preferred) or `NetworkManager + dnsmasq` |
 | `tar`, `rg`, `ss` | Required by install script |
 
@@ -122,6 +123,37 @@ CUBE_SANDBOX_NODE_IP=<your-node-ip>
 See [Configuration Reference](#configuration-reference) below for a full list of configurable parameters.
 
 ### 2.3 Install
+
+#### (Optional) Create XFS, and mount it via loop device
+Cube Sandbox requires the /data/cubelet directory to reside on an XFS filesystem.
+
+Create a large file, format it as XFS, and mount it via loop device.
+This works well for testing, development, or virtualized environments.
+```bash
+# Create a 20 GB sparse file (adjust size as needed)
+sudo dd if=/dev/zero of=/xfs-loopfile bs=1G count=0 seek=20 status=progress
+# Or use fallocate for speed: sudo fallocate -l 20G /xfs-loopfile
+
+# Format as XFS
+sudo mkfs.xfs /xfs-loopfile
+
+# Mount point
+sudo mkdir -p /data/cubelet
+
+# Mount via loop
+sudo mount -o loop /xfs-loopfile /data/cubelet
+
+# Persistent mount (add to /etc/fstab)
+echo '/xfs-loopfile /data/cubelet xfs loop 0 2' | sudo tee -a /etc/fstab
+```
+> Note: The loop file must be on a filesystem that supports sparse files (ext4 does), and you’ll need enough free space inside the file for the sandbox. Adjust the count/seek parameter to your required capacity.
+
+To make sure that you are running under `xfs`, run the following command:
+```bash
+df -T /data/cubelet
+# type should be xfs
+```
+
 
 #### Control Node
 

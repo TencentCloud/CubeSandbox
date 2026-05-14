@@ -123,6 +123,32 @@ CUBE_SANDBOX_NODE_IP=<你的节点IP>
 
 ### 2.3 执行安装
 
+#### （可选）
+Cube Sandbox 要求 /data/cubelet 所在的文件系统必须是 XFS。如果当前并非XFS文件系统，可以考虑使用现有文件系统上创建一个大文件并格式化为 XFS，再通过 loop 方式挂载。这种做法适合测试或虚拟机环境。
+
+```bash
+# 1. 创建一个 20G 的空文件（大小按需调整）
+sudo dd if=/dev/zero of=/xfs-loopfile bs=1G count=0 seek=20 status=progress
+# 或者用 fallocate 更快：sudo fallocate -l 20G /xfs-loopfile
+
+# 2. 把这个文件格式化为 XFS
+sudo mkfs.xfs /xfs-loopfile
+
+# 3. 创建挂载点并挂载
+sudo mkdir -p /data/cubelet
+sudo mount -o loop /xfs-loopfile /data/cubelet
+
+# 4. 设置开机自动挂载
+echo '/xfs-loopfile /data/cubelet xfs loop 0 2' | sudo tee -a /etc/fstab
+```
+> 注意：文件实际放在 / (ext4) 上，但挂载到 /data/cubelet 后，Cube 看到的就是 XFS 了。可以自行通过 `seed` 和 `count` 的调整以适配当前的硬件条件。
+
+通过运行以下指令以确保运行在`XFS` 文件系统。
+```bash
+df -T /data/cubelet
+# 类型应为 xfs
+```
+
 #### 控制节点
 
 ```bash
