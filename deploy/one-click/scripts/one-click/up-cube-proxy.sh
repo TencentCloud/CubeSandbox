@@ -26,12 +26,12 @@ COMPOSE_FILE="${PROXY_DIR}/docker-compose.yaml"
 
 CUBE_PROXY_IMAGE_TAG="${CUBE_PROXY_IMAGE_TAG:-cube-proxy:one-click}"
 CUBE_PROXY_CONTAINER_NAME="${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
-CUBE_PROXY_HOST_PORT="${CUBE_PROXY_HOST_PORT:-443}"
-CUBE_PROXY_HTTP_HOST_PORT="${CUBE_PROXY_HTTP_HOST_PORT:-80}"
 CUBE_SANDBOX_NODE_IP="${CUBE_SANDBOX_NODE_IP:-}"
-CUBE_PROXY_REDIS_IP="${CUBE_PROXY_REDIS_IP:-${CUBE_SANDBOX_NODE_IP}}"
+CUBE_PROXY_REDIS_IP="${CUBE_PROXY_REDIS_IP:-127.0.0.1}"
 CUBE_PROXY_REDIS_PORT="${CUBE_PROXY_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}}"
 CUBE_PROXY_REDIS_PASSWORD="${CUBE_PROXY_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}"
+CUBE_PROXY_HTTPS_PORT="${CUBE_PROXY_HTTPS_PORT:-443}"
+CUBE_PROXY_HTTP_PORT="${CUBE_PROXY_HTTP_PORT:-80}"
 MKCERT_BUNDLED_BIN="${TOOLBOX_ROOT}/support/bin/mkcert"
 
 ensure_dir "${PROXY_DIR}"
@@ -84,14 +84,22 @@ sed \
   -e "s/__CUBE_PROXY_HOST_IP__/$(escape_sed "${CUBE_SANDBOX_NODE_IP}")/g" \
   "${GLOBAL_TEMPLATE}" > "${GLOBAL_CONF}"
 
+NGINX_TEMPLATE="${PROXY_DIR}/nginx.conf.template"
+NGINX_CONF="${PROXY_DIR}/nginx.conf"
+if [[ -f "${NGINX_TEMPLATE}" ]]; then
+  sed \
+    -e "s/__CUBE_PROXY_HTTPS_PORT__/$(escape_sed "${CUBE_PROXY_HTTPS_PORT}")/g" \
+    -e "s/__CUBE_PROXY_HTTP_PORT__/$(escape_sed "${CUBE_PROXY_HTTP_PORT}")/g" \
+    "${NGINX_TEMPLATE}" > "${NGINX_CONF}"
+fi
+
 sed \
   -e "s#__CUBE_PROXY_IMAGE__#$(escape_sed "${CUBE_PROXY_IMAGE_TAG}")#g" \
   -e "s#__CUBE_PROXY_CONTAINER_NAME__#$(escape_sed "${CUBE_PROXY_CONTAINER_NAME}")#g" \
   -e "s#__CUBE_PROXY_BUILD_CONTEXT__#$(escape_sed "${BUILD_CONTEXT_DIR}")#g" \
-  -e "s#__CUBE_PROXY_HOST_PORT__#$(escape_sed "${CUBE_PROXY_HOST_PORT}")#g" \
-  -e "s#__CUBE_PROXY_HTTP_HOST_PORT__#$(escape_sed "${CUBE_PROXY_HTTP_HOST_PORT}")#g" \
   -e "s#__CUBE_PROXY_CERT_DIR__#$(escape_sed "${CERT_DIR}")#g" \
   -e "s#__CUBE_PROXY_GLOBAL_CONF__#$(escape_sed "${GLOBAL_CONF}")#g" \
+  -e "s#__CUBE_PROXY_NGINX_CONF__#$(escape_sed "${NGINX_CONF}")#g" \
   "${COMPOSE_TEMPLATE}" > "${COMPOSE_FILE}"
 
 compose_run down --remove-orphans >/dev/null 2>&1 || true
@@ -108,11 +116,11 @@ done
 [[ "${state:-}" == "running" ]] || die "cube proxy container failed to start"
 
 for _ in {1..30}; do
-  if ss -lnt "( sport = :${CUBE_PROXY_HOST_PORT} )" | rg -q ":${CUBE_PROXY_HOST_PORT}"; then
-    log "cube proxy listening on ${CUBE_PROXY_HOST_PORT}"
+  if ss -lnt "( sport = :${CUBE_PROXY_HTTPS_PORT} )" | rg -q ":${CUBE_PROXY_HTTPS_PORT}"; then
+    log "cube proxy listening on ${CUBE_PROXY_HTTPS_PORT}"
     exit 0
   fi
   sleep 2
 done
 
-die "cube proxy port ${CUBE_PROXY_HOST_PORT} did not become ready"
+die "cube proxy port ${CUBE_PROXY_HTTPS_PORT} did not become ready"
