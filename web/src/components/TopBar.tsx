@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { Search, Command as CmdIcon, Bell, Sparkles, FlaskConical } from 'lucide-react';
+import { Search, Command as CmdIcon, Bell, Sparkles, FlaskConical, ExternalLink, Github, BookOpen } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Button } from './ui/button';
 import { LanguageSwitcher } from './LanguageSwitcher';
@@ -39,6 +39,24 @@ export function TopBar() {
       </button>
 
       <div className="flex items-center gap-2">
+        <a
+          href="https://github.com/tencentcloud/CubeSandbox"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground hover:text-foreground hover:bg-white/[0.06] transition-colors"
+        >
+          <Github size={14} />
+          {t('github')}
+        </a>
+        <a
+          href="https://github.com/tencentcloud/CubeSandbox/wiki"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground hover:text-foreground hover:bg-white/[0.06] transition-colors"
+        >
+          <BookOpen size={14} />
+          {t('docs')}
+        </a>
         <LanguageSwitcher />
         <ThemeToggle />
         <Button
