@@ -274,7 +274,7 @@ function AboutSection() {
 
       <div className="rounded-xl border border-white/8 bg-white/[0.03] divide-y divide-white/5">
         {[
-          [t('about.version'),     'v0.1.0'],
+          [t('about.version'),     'v0.2.0'],
           [t('about.cubeApi'),     cfg?.apiEndpoint ?? `${window.location.origin}/cubeapi/v1`],
           [t('about.instanceType'),cfg?.instanceType ?? '—'],
         ].map(([label, value]) => (
