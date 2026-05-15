@@ -147,7 +147,7 @@ Cube Sandbox requires an x86_64 Linux environment with KVM support — **WSL 2**
 > - **Bare-metal / physical machine users**: grab an x86_64 Linux physical machine, or rent a bare-metal server from a cloud provider.
 > - **Ordinary cloud VM users**: no bare-metal required — install the PVM host kernel to enable KVM on any standard cloud VM. See [PVM Deployment](./docs/guide/pvm-deploy.md).
 >
-> **NOTE on storage**: Ensure the partition hosting the CubeMaster storage directory (usually `/data`) has at least 20GB of free space for template creation.
+> **NOTE on storage**: Ensure the partition hosting the CubeMaster storage directory (usually `/data`) has at least 20GiB of free space for template creation.
 
 Once your environment is ready, launch your first sandbox in four steps:
 

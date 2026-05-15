@@ -72,6 +72,7 @@ const (
 	fallbackArtifactStoreDir   = "cubemaster-rootfs-artifacts-store"
 	rootfsWritableVolumeName   = "cube_rootfs_rw"
 	defaultDistributionWorkers = 4
+	requiredExtractionSpace    = 20 << 30
 )
 
 var getTemplateImageConfig = config.GetConfig
@@ -2000,13 +2001,29 @@ func artifactModelToInfo(record *models.RootfsArtifact) *types.RootfsArtifactInf
 		LastError:               record.LastError,
 	}
 }
+func checkPartition(tempPath string) error {
+	var stat syscall.Statfs_t
+	err := syscall.Statfs(tempPath, &stat)
+	if err != nil {
+		return fmt.Errorf("error! Failed to check disk space at %s: %w", tempPath, err)
+	}
+	available := stat.Bavail * uint64(stat.Bsize)
+	if available < requiredExtractionSpace {
+		return fmt.Errorf("error: not enough space on %s\nRequired 20GiB\n Available: %dGiB", tempPath, available>>30)
+	}
+	return nil
+}
 
 func artifactWorkRootDir() string {
+	tempDir := os.TempDir()
 	if value := strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_DIR")); value != "" {
 		return value
 	}
-	storeRoot := artifactStoreRootDir()
-	return filepath.Join(storeRoot, "tmp", "cubemaster-rootfs-artifacts")
+	if err := checkPartition(tempDir); err == nil{
+		return filepath.Join(tempDir, "cubemaster-rootfs-artifacts")
+	}
+	fallbackDir := artifactStoreRootDir()
+	return filepath.Join(fallbackDir, "tmp", "cubemaster-rootfs-artifacts")
 }
 
 func artifactStoreRootDir() string {
