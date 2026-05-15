@@ -19,6 +19,7 @@ import TemplateDetailPage from '@/pages/TemplateDetail';
 import NodeDetailPage from '@/pages/NodeDetail';
 import NetworkPage from '@/pages/Network';
 import ObservabilityPage from '@/pages/Observability';
+import TemplateStorePage from '@/pages/TemplateStore';
 import { Placeholder } from '@/pages/Placeholder';
 import { Network, Activity, Settings, Package } from 'lucide-react';
 
@@ -52,6 +53,7 @@ const App = () => (
               <Route path="/nodes/:nodeID" element={<NodeDetailPage />} />
               <Route path="/network" element={<NetworkPage />} />
               <Route path="/observability" element={<ObservabilityPage />} />
+              <Route path="/store" element={<TemplateStorePage />} />
               <Route path="/keys" element={<KeysPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />

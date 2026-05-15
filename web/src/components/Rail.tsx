@@ -12,6 +12,7 @@ import {
   Activity,
   KeyRound,
   Settings,
+  Store,
   Github,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -25,6 +26,7 @@ const NAV_ITEMS = [
   { to: '/observability', icon: Activity, key: 'observability' },
   { to: '/keys', icon: KeyRound, key: 'apiKeys' },
   { to: '/settings', icon: Settings, key: 'settings' },
+  { to: '/store', icon: Store, key: 'store' },
 ] as const;
 
 export function Rail() {

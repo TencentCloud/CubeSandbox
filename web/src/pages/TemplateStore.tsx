@@ -1,0 +1,502 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Tencent. All rights reserved.
+
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
+import { templateApi, type TemplateSummary } from '@/api/client';
+import { STORE_TEMPLATES, CATEGORIES, type StoreTemplate, type CategoryId } from '@/data/templateStore';
+import { Card, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Code2, Globe, Bot, Box, Search, X, ChevronDown, Package, Loader2, Plus } from 'lucide-react';
+import { cn } from '@/lib/utils';
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+function categoryIcon(category: StoreTemplate['category']) {
+  switch (category) {
+    case 'code':    return Code2;
+    case 'browser': return Globe;
+    case 'ai':      return Bot;
+    case 'base':    return Box;
+  }
+}
+
+/** 只计 status=READY 的模板为"已安装" */
+function getInstalledTemplates(item: StoreTemplate, templates: TemplateSummary[]): TemplateSummary[] {
+  return templates.filter((tpl) => {
+    if (!tpl.imageInfo) return false;
+    const statusOk = tpl.status?.toUpperCase() === 'READY';
+    if (!statusOk) return false;
+    if (item.digest && tpl.imageInfo.includes(item.digest)) return true;
+    const imageName = item.image.split('@')[0];
+    return tpl.imageInfo.includes(imageName);
+  });
+}
+
+// ── InstallModal ──────────────────────────────────────────────────────────────
+
+type InstallPhase =
+  | { kind: 'idle' }
+  | { kind: 'submitting' }
+  | { kind: 'polling'; templateID: string }
+  | { kind: 'ready';   templateID: string }
+  | { kind: 'failed';  message: string };
+
+interface InstallModalProps {
+  item: StoreTemplate;
+  onClose: () => void;
+}
+
+function InstallModal({ item, onClose }: InstallModalProps) {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [templateID, setTemplateID] = useState('');
+  const [writableLayerSize, setWritableLayerSize] = useState(item.writable_layer_size);
+  const [phase, setPhase] = useState<InstallPhase>({ kind: 'idle' });
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  const startPolling = useCallback(
+    (tplID: string) => {
+      let attempts = 0;
+      const MAX = 60; // 60 × 2s = 2min
+      pollRef.current = setInterval(async () => {
+        attempts++;
+        try {
+          const list = await templateApi.list();
+          qc.setQueryData(['templates'], list);
+          const found = list.find((t) => t.templateID === tplID);
+          if (found?.status?.toUpperCase() === 'READY') {
+            stopPolling();
+            setPhase({ kind: 'ready', templateID: tplID });
+          } else if (found?.status?.toUpperCase() === 'FAILED') {
+            stopPolling();
+            setPhase({ kind: 'failed', message: found.lastError ?? '制作失败' });
+          } else if (attempts >= MAX) {
+            stopPolling();
+            setPhase({ kind: 'failed', message: '等待超时，请在模板列表中查看状态。' });
+          }
+        } catch {
+          // ignore transient errors
+        }
+      }, 2000);
+    },
+    [qc, stopPolling],
+  );
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      templateApi.create({
+        templateID: templateID.trim() || '',
+        image: item.image_cn,
+        exposedPorts: item.expose_ports,
+        probePort: item.probe_port,
+        probePath: item.probe_path,
+        writableLayerSize: writableLayerSize.trim() || item.writable_layer_size,
+      }),
+    onMutate: () => setPhase({ kind: 'submitting' }),
+    onSuccess: (data) => {
+      const id =
+        (data as { templateID?: string } | null)?.templateID ??
+        templateID.trim() ??
+        '';
+      setPhase({ kind: 'polling', templateID: id });
+      startPolling(id);
+    },
+    onError: (err) => {
+      setPhase({ kind: 'failed', message: (err as Error)?.message ?? '安装失败，请重试。' });
+    },
+  });
+
+  const isBuilding = phase.kind === 'submitting' || phase.kind === 'polling';
+  const isDone     = phase.kind === 'ready';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <Card className="w-full max-w-lg shadow-xl">
+        {/* header */}
+        <div className="flex items-center justify-between border-b px-5 py-4">
+          <div>
+            <p className="text-sm font-semibold">{item.name}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">安装为 Cube 模板</p>
+          </div>
+          <button
+            onClick={() => { stopPolling(); onClose(); }}
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <CardContent className="space-y-4 pt-4">
+          {/* 镜像信息（只读） */}
+          <div className="rounded-lg border bg-muted/30 p-3 space-y-1.5 text-xs font-mono">
+            <div><span className="text-muted-foreground">image: </span>{item.image_cn}</div>
+            <div><span className="text-muted-foreground">expose-port: </span>{item.expose_ports.join(', ')}</div>
+            <div><span className="text-muted-foreground">probe: </span>{item.probe_port}</div>
+            <div><span className="text-muted-foreground">probe-path: </span>{item.probe_path}</div>
+          </div>
+
+          {/* 可编辑参数 */}
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">
+                Template ID <span className="text-muted-foreground/60">（留空则自动生成）</span>
+              </label>
+              <Input
+                placeholder="tpl-xxxxxxxx"
+                value={templateID}
+                disabled={isBuilding || isDone}
+                onChange={(e) => setTemplateID(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">writable-layer-size</label>
+              <Input
+                placeholder="1G"
+                value={writableLayerSize}
+                disabled={isBuilding || isDone}
+                onChange={(e) => setWritableLayerSize(e.target.value)}
+              />
+            </div>
+          </div>
+
+          {/* 安装进度 */}
+          {phase.kind === 'polling' && (
+            <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+              <span>
+                正在制作模板，请稍候…
+                {phase.templateID && (
+                  <span className="ml-1 font-mono text-foreground">{phase.templateID}</span>
+                )}
+              </span>
+            </div>
+          )}
+
+          {/* 成功 */}
+          {phase.kind === 'ready' && (
+            <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2 text-xs text-green-600 dark:text-green-400">
+              ✅ 安装成功！
+              <button
+                className="ml-2 underline"
+                onClick={() => { stopPolling(); onClose(); navigate(`/templates/${phase.templateID}`); }}
+              >
+                查看模板 {phase.templateID}
+              </button>
+            </div>
+          )}
+
+          {/* 失败 */}
+          {phase.kind === 'failed' && (
+            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              ❌ {phase.message}
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2 pt-1">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => { stopPolling(); onClose(); }}
+            >
+              {isDone ? '关闭' : '取消'}
+            </Button>
+            {!isDone && (
+              <Button
+                size="sm"
+                disabled={isBuilding}
+                onClick={() => mutation.mutate()}
+              >
+                {isBuilding ? (
+                  <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />安装中…</>
+                ) : phase.kind === 'failed' ? (
+                  '重试'
+                ) : (
+                  '确认安装'
+                )}
+              </Button>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ── InstalledDropdown ─────────────────────────────────────────────────────────
+
+interface InstalledDropdownProps {
+  installed: TemplateSummary[];
+  onInstallAnother: () => void;
+}
+
+function InstalledDropdown({ installed, onInstallAnother }: InstalledDropdownProps) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, right: 0 });
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
+
+  const openMenu = () => {
+    if (triggerRef.current) {
+      const rect = triggerRef.current.getBoundingClientRect();
+      setPos({
+        top: rect.bottom + window.scrollY + 4,
+        right: window.innerWidth - rect.right + window.scrollX,
+      });
+    }
+    setOpen(true);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    function handle(e: MouseEvent) {
+      if (
+        menuRef.current && !menuRef.current.contains(e.target as Node) &&
+        triggerRef.current && !triggerRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [open]);
+
+  if (installed.length === 1) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <Button
+          variant="outline"
+          size="sm"
+          className="text-green-600 border-green-500/40 hover:bg-green-500/10"
+          onClick={() => navigate(`/templates/${installed[0].templateID}`)}
+        >
+          ✓ 已安装
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="px-2 text-muted-foreground"
+          title="使用不同参数再次安装"
+          onClick={onInstallAnother}
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <Button
+        ref={triggerRef}
+        variant="outline"
+        size="sm"
+        className="text-green-600 border-green-500/40 hover:bg-green-500/10"
+        onClick={() => (open ? setOpen(false) : openMenu())}
+      >
+        ✓ 已安装 {installed.length} 个 <ChevronDown className="ml-1 h-3 w-3" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="px-2 text-muted-foreground"
+        title="使用不同参数再次安装"
+        onClick={onInstallAnother}
+      >
+        <Plus className="h-3.5 w-3.5" />
+      </Button>
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          style={{ position: 'absolute', top: pos.top, right: pos.right, zIndex: 9999 }}
+          className="w-64 max-h-60 overflow-y-auto rounded-lg border bg-popover shadow-xl"
+        >
+          {installed.map((tpl) => (
+            <button
+              key={tpl.templateID}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-muted"
+              onClick={() => { setOpen(false); navigate(`/templates/${tpl.templateID}`); }}
+            >
+              <Package className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span className="font-mono truncate flex-1 min-w-0">{tpl.templateID}</span>
+              <Badge
+                tone={tpl.status?.toUpperCase() === 'READY' ? 'ok' : 'warn'}
+                className="ml-auto text-[10px] shrink-0"
+              >
+                {tpl.status}
+              </Badge>
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+// ── StoreCard ─────────────────────────────────────────────────────────────────
+
+interface StoreCardProps {
+  item: StoreTemplate;
+  installed: TemplateSummary[];
+  onInstall: () => void;
+}
+
+function StoreCard({ item, installed, onInstall }: StoreCardProps) {
+  const Icon = categoryIcon(item.category);
+  const isInstalled = installed.length > 0;
+
+  return (
+    <Card className="flex flex-col h-full relative overflow-hidden">
+      {item.official && (
+        <span className="absolute top-2.5 right-2.5 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary ring-1 ring-primary/20">
+          官方
+        </span>
+      )}
+
+      <div className="p-4 flex-1 space-y-3">
+        {/* icon + name */}
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-violet/20 text-primary ring-1 ring-primary/20">
+            <Icon size={18} />
+          </span>
+          <div>
+            <p className="text-sm font-semibold leading-tight">{item.name}</p>
+            <p className="text-[11px] text-muted-foreground mt-0.5">{item.size_mb} MB</p>
+          </div>
+        </div>
+
+        {/* description */}
+        <p className="text-xs text-muted-foreground leading-relaxed">{item.description}</p>
+
+        {/* tags */}
+        <div className="flex flex-wrap gap-1">
+          {item.tags.map((tag) => (
+            <Badge key={tag} tone="mute" className="text-[10px]">{tag}</Badge>
+          ))}
+        </div>
+      </div>
+
+      {/* footer */}
+      <div className="border-t px-4 py-3 flex items-center justify-between gap-2">
+        <span className="text-[11px] text-muted-foreground font-mono truncate flex-1 min-w-0">
+          {item.image.split('/').pop()}
+        </span>
+        {isInstalled ? (
+          <InstalledDropdown installed={installed} onInstallAnother={onInstall} />
+        ) : (
+          <Button size="sm" onClick={onInstall}>一键安装</Button>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+// ── main page ─────────────────────────────────────────────────────────────────
+
+export default function TemplateStorePage() {
+  const [category, setCategory] = useState<CategoryId>('all');
+  const [search, setSearch] = useState('');
+  const [installing, setInstalling] = useState<StoreTemplate | null>(null);
+
+  const { data: templates, isLoading } = useQuery({
+    queryKey: ['templates'],
+    queryFn: templateApi.list,
+    refetchInterval: 5000,
+  });
+
+  const filtered = STORE_TEMPLATES.filter((item) => {
+    if (category !== 'all' && item.category !== category) return false;
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      return (
+        item.name.toLowerCase().includes(q) ||
+        item.description.toLowerCase().includes(q) ||
+        item.tags.some((t) => t.toLowerCase().includes(q))
+      );
+    }
+    return true;
+  });
+
+  return (
+    <div className="animate-fade-in space-y-5">
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">模板市场</h1>
+          <p className="mt-1 text-sm text-muted-foreground">一键安装官方预置镜像，快速制作沙箱模板。</p>
+        </div>
+        <div className="relative w-56">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            className="pl-8 h-9 text-sm"
+            placeholder="搜索镜像…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+      </header>
+
+      {/* category tabs */}
+      <div className="flex gap-1.5 flex-wrap">
+        {CATEGORIES.map((cat) => (
+          <button
+            key={cat.id}
+            onClick={() => setCategory(cat.id as CategoryId)}
+            className={cn(
+              'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+              category === cat.id
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground',
+            )}
+          >
+            {cat.label}
+          </button>
+        ))}
+      </div>
+
+      {/* grid */}
+      {isLoading ? (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-48" />
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {filtered.map((item) => (
+            <StoreCard
+              key={item.id}
+              item={item}
+              installed={getInstalledTemplates(item, templates ?? [])}
+              onInstall={() => setInstalling(item)}
+            />
+          ))}
+          {filtered.length === 0 && (
+            <div className="col-span-3 py-16 text-center text-sm text-muted-foreground">
+              没有匹配的镜像。
+            </div>
+          )}
+        </div>
+      )}
+
+      {installing && (
+        <InstallModal item={installing} onClose={() => setInstalling(null)} />
+      )}
+    </div>
+  );
+}
