@@ -23,6 +23,7 @@
 - **如果想要提供中英两种语言**：
   - **需使用相同文件名** — 文件名统一采用英文 kebab-case 格式，例如 `langchain.md` 或 `e2b-api-401-timeout.md`。
   - **保持 frontmatter 一致** — 两个语言版本应使用相同的 frontmatter 字段（`title`、`author`、`date`、`tags`、`lang`）。
+
 - **从提供的模板开始** — 每个频道均包含一个 `_template.md` 模板文件，以及列有当前文章列表和使用说明的索引页，请以此为起点进行编写。
 
 ## 快速上手
