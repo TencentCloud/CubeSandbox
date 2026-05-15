@@ -17,11 +17,12 @@
 - **应用案例** — 真实业务或生产环境的使用案例，存放于 [`docs/guide/usecases/`](./docs/guide/usecases/index.md) 和 [`docs/zh/guide/usecases/`](./docs/zh/guide/usecases/index.md)
 - **生态集成** — 各框架或 Agent 的集成指南（每个框架一篇），存放于 [`docs/guide/integrations/`](./docs/guide/integrations/index.md) 和 [`docs/zh/guide/integrations/`](./docs/zh/guide/integrations/index.md)
 
-### 社区文档 PR 要求
+### ⛺️ 社区文档 PR 要求
 
-- **中英双语为必选项** — 每篇新增或更新的文章必须同时提供 `docs/guide/<频道>/<slug>.md` 和 `docs/zh/guide/<频道>/<slug>.md` 两个版本。
-- **两种语言使用相同文件名** — 文件名统一采用英文 kebab-case 格式，例如 `langchain.md` 或 `e2b-api-401-timeout.md`。
-- **保持 frontmatter 一致** — 两个语言版本应使用相同的 frontmatter 字段（`title`、`author`、`date`、`tags`、`lang`）。
+- **选择一种语言** — 每篇新增或更新的文章须提供 `docs/guide/<频道>/<slug>.md` 或 `docs/zh/guide/<频道>/<slug>.md` 其中的一个版本。
+- **如果想要提供中英两种语言**：
+  - **需使用相同文件名** — 文件名统一采用英文 kebab-case 格式，例如 `langchain.md` 或 `e2b-api-401-timeout.md`。
+  - **保持 frontmatter 一致** — 两个语言版本应使用相同的 frontmatter 字段（`title`、`author`、`date`、`tags`、`lang`）。
 - **从提供的模板开始** — 每个频道均包含一个 `_template.md` 模板文件，以及列有当前文章列表和使用说明的索引页，请以此为起点进行编写。
 
 ## 快速上手
