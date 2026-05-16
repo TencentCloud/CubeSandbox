@@ -47,4 +47,4 @@ lang: en-US
 
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
-| _Add your article here_ | - | - | - |
+| LlamaIndex Integration Guide | Johnny-zbb | 2026-05-16 | integration, llamaindex |
