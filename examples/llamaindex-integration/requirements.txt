@@ -1,0 +1,12 @@
+# Core dependencies
+llama-index>=0.10.0
+llama-index-agent-openai>=0.2.0
+
+# Cube Sandbox SDK (E2B compatible)
+e2b-code-interpreter>=0.0.20
+
+# Optional utilities
+python-dotenv>=1.0.0
+
+# For local development
+pytest>=7.0
