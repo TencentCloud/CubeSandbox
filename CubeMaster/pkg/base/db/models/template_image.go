@@ -37,6 +37,7 @@ type TemplateImageJob struct {
 	gorm.Model
 	JobID                   string `json:"job_id" gorm:"column:job_id"`
 	TemplateID              string `json:"template_id" gorm:"column:template_id"`
+	RequestID               string `json:"request_id" gorm:"column:request_id"`
 	AttemptNo               int32  `json:"attempt_no" gorm:"column:attempt_no"`
 	RetryOfJobID            string `json:"retry_of_job_id" gorm:"column:retry_of_job_id"`
 	Operation               string `json:"operation" gorm:"column:operation"`

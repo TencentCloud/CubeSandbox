@@ -13,7 +13,14 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
-const cmdTimeout = time.Second * 3
+// cmdTimeout is the per-command timeout for utils.ExecV calls in this
+// package (cp, truncate, e2fsck, resize2fs, mkfs.ext4, ...). The
+// default of 3s is fine for the small pre-formatted images on the
+// pool fast path; the live `mkfs + reflink-copy + e2fsck + resize2fs`
+// slow path on multi-GiB images can need longer. Override via the
+// storage plugin config `cmd_timeout` (see Config.CmdTimeout); set
+// during plugin initialization.
+var cmdTimeout = 3 * time.Second
 
 const diskSizeOverheadInBytes = 1024 * 1024 * 100
 

@@ -4,6 +4,7 @@ import { withMermaid } from 'vitepress-plugin-mermaid'
 export default withMermaid(defineConfig({
   title: "Cube Sandbox",
   description: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents",
+  srcExclude: ['**/_template.md'],
   
   themeConfig: {
     socialLinks: [
@@ -64,6 +65,14 @@ export default withMermaid(defineConfig({
               text: 'Developer Docs',
               items: [
                 { text: 'Connect to an Existing Cube Cluster', link: '/guide/connect-existing-cluster' }
+              ]
+            },
+            {
+              text: 'Contribute',
+              items: [
+                { text: 'Troubleshooting', link: '/guide/troubleshooting/' },
+                { text: 'Use Cases', link: '/guide/usecases/' },
+                { text: 'Integrations', link: '/guide/integrations/' }
               ]
             }
           ],
@@ -134,6 +143,14 @@ export default withMermaid(defineConfig({
               text: '开发文档',
               items: [
                 { text: '连接到已有 Cube 集群', link: '/zh/guide/connect-existing-cluster' }
+              ]
+            },
+            {
+              text: '社区共建',
+              items: [
+                { text: '故障排障', link: '/zh/guide/troubleshooting/' },
+                { text: '应用案例', link: '/zh/guide/usecases/' },
+                { text: '生态集成', link: '/zh/guide/integrations/' }
               ]
             }
           ],

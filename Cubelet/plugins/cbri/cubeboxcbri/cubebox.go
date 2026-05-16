@@ -32,7 +32,7 @@ import (
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -383,7 +383,7 @@ func (e *cubeboxInstancePlugin) getImageFilePath(imageID string) string {
 }
 
 func (e *cubeboxInstancePlugin) syncLatestKernelForImage(ctx context.Context, imageID string) error {
-	return pmem.SyncKernelFile(
+	return pmem.RefreshKernelFile(
 		ctx,
 		filepath.Join(e.config.BasePath, "cube-kernel-scf", "vmlinux"),
 		e.getKernelFilePath(imageID),

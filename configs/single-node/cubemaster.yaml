@@ -43,7 +43,7 @@ req_template_conf:
     {"volumes":[{"name":"tmp","volume_source":{"empty_dir":{"medium":0}}}],"containers":[{"name":"cubebox-default","envs":[{"key":"TZ","value":"Asia/Shanghai"},{"key":"TERM","value":"xterm"}],"volume_mounts":[{"name":"tmp","container_path":"/"}],"security_context":{"privileged":true,"readonly_rootfs":false,"no_new_privs":false}}],"network_type":"tap","cubevs_context":{"allowInternetAccess":true,"denyOut":["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/18"]}}
 
 ossdb_config:
-  addr: "127.0.0.1:3306"
+  addr: "127.0.0.1:__CUBE_SANDBOX_MYSQL_PORT__"
   user: "cube"
   pwd: "cube_pass"
   db_name: "cube_mvp"
@@ -55,7 +55,7 @@ ossdb_config:
   max_conn_life_time_seconds: 300
 
 instance_db_config:
-  addr: "127.0.0.1:3306"
+  addr: "127.0.0.1:__CUBE_SANDBOX_MYSQL_PORT__"
   user: "cube"
   pwd: "cube_pass"
   db_name: "cube_mvp"
@@ -67,7 +67,7 @@ instance_db_config:
   max_conn_life_time_seconds: 300
 
 redis:
-  nodes: "127.0.0.1:6379"
+  nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"
   password: "ceuhvu123"
   db_no: 0
   max_idle: 8
@@ -76,7 +76,7 @@ redis:
   max_retry: 2
 
 redis_read:
-  nodes: "127.0.0.1:6379"
+  nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"
   password: "ceuhvu123"
   db_no: 0
   max_idle: 8
@@ -85,7 +85,7 @@ redis_read:
   max_retry: 2
 
 redis_write:
-  nodes: "127.0.0.1:6379"
+  nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"
   password: "ceuhvu123"
   db_no: 0
   max_idle: 8

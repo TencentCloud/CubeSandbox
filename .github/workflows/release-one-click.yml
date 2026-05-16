@@ -27,10 +27,19 @@ jobs:
   build_pvm_guest_vmlinux:
     name: Build PVM guest vmlinux for release
     runs-on: arc-runner-set-16c32g-containerd
+    container:
+      image: ubuntu:24.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install verification tools
+        run: |
+          apt-get update
+          apt-get install -y file sudo build-essential git bc bison flex \
+            libelf-dev libssl-dev libncurses-dev dwarves cpio kmod \
+            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3
 
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
@@ -101,7 +110,7 @@ jobs:
           retention-days: 14
 
   release:
-    runs-on: arc-runner-set-16c32g
+    runs-on: ubuntu-latest
     needs: build_pvm_guest_vmlinux
 
     steps:

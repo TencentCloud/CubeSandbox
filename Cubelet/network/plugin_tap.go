@@ -251,20 +251,17 @@ var (
 	Name2MvmNet sync.Map
 )
 
-var DefaultExposedPorts = []uint16{8080, 32000}
-
 type Config struct {
-	EthName             string   `toml:"eth_name"`
-	TapInitNum          int      `toml:"tap_init_num"`
-	CIDR                string   `toml:"cidr"`
-	ObjectDir           string   `toml:"object_dir"`
-	MVMInnerIP          string   `toml:"mvm_inner_ip"`
-	MVMMacAddr          string   `toml:"mvm_mac_addr"`
-	MvmGwDestIP         string   `toml:"mvm_gw_dest_ip"`
-	MvmGwMacAddr        string   `toml:"mvm_gw_mac_addr"`
-	MvmMask             int      `toml:"mvm_mask"`
-	MvmMtu              int      `toml:"mvm_mtu"`
-	DefaultExposedPorts []uint16 `toml:"default_exposed_ports"`
+	EthName      string `toml:"eth_name"`
+	TapInitNum   int    `toml:"tap_init_num"`
+	CIDR         string `toml:"cidr"`
+	ObjectDir    string `toml:"object_dir"`
+	MVMInnerIP   string `toml:"mvm_inner_ip"`
+	MVMMacAddr   string `toml:"mvm_mac_addr"`
+	MvmGwDestIP  string `toml:"mvm_gw_dest_ip"`
+	MvmGwMacAddr string `toml:"mvm_gw_mac_addr"`
+	MvmMask      int    `toml:"mvm_mask"`
+	MvmMtu       int    `toml:"mvm_mtu"`
 
 	CheckIntervalTime      tomlext.Duration `toml:"check_interval_in_sec"`
 	ReportStatIntervalTime tomlext.Duration `toml:"report_stat_interval_in_sec"`
@@ -345,10 +342,6 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 		config.EthName = eth0
 	}
 
-	if len(config.DefaultExposedPorts) > 0 {
-		log.G(ic.Context).Errorf("set default exposed ports to %v", config.DefaultExposedPorts)
-		DefaultExposedPorts = config.DefaultExposedPorts
-	}
 	log.G(ic.Context).Info("network plugin init begin")
 
 	device, err := getMachineDevice(config.EthName)
@@ -767,9 +760,6 @@ func (l *local) buildEnsureNetworkRequestFromIntent(sandboxID, requestID string,
 	portReq := make(map[uint16]struct{})
 	for _, port := range exposedPorts {
 		portReq[uint16(port)] = struct{}{}
-	}
-	for _, port := range DefaultExposedPorts {
-		portReq[port] = struct{}{}
 	}
 	for reqPort := range portReq {
 		desired.PortMappings = append(desired.PortMappings, networkagentclient.PortMapping{

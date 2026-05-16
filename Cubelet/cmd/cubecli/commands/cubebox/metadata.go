@@ -6,88 +6,13 @@ package cubebox
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
-	"context"
-	"os"
-	"path"
-	"path/filepath"
-	"time"
-
-	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
-	"github.com/containerd/platforms"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/urfave/cli/v2"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
-	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 )
-
-var (
-	cubeboxDir = "io.cubelet.internal.v1.cubebox"
-)
-
-var (
-	dbDir    = "db"
-	dbHandle *utils.CubeStore
-)
-
-type sandBoxInfo struct {
-	SandboxID  string
-	IP         string
-	PID        int
-	Namespace  string
-	Containers map[string]*containerInfo
-}
-
-type containerInfo struct {
-	ID  string
-	PID int
-}
-
-func copyDb(onlineBaseDir string) (func(), error) {
-	targedir := filepath.Join(os.TempDir(), dbDir)
-	if err := os.MkdirAll(path.Clean(targedir), os.ModeDir|0755); err != nil {
-		return nil, fmt.Errorf("init dir failed %s", err.Error())
-	}
-	clean := func() {
-		os.RemoveAll(path.Clean(targedir))
-	}
-
-	exist, er := utils.DenExist(targedir)
-	if er != nil || !exist {
-		log.Printf("failed to create temp dir: %v", er)
-		return nil, er
-	}
-
-	cmds := [][]string{
-		{"mkdir", "-p", targedir},
-		{"ls", "-l", onlineBaseDir},
-		{"cp", "-r", onlineBaseDir, targedir},
-	}
-	log.Printf("cmds:%v", cmds)
-	for _, cmd := range cmds {
-		if out, stderr, err := utils.ExecV(cmd, time.Minute); err == nil {
-			log.Printf("metadata: %v", out)
-		} else {
-			log.Printf("metadata: failed to exec %v: %v", cmd, err)
-			return clean, fmt.Errorf("metadata failed:%s", stderr)
-		}
-	}
-
-	var err error
-	if dbHandle, err = utils.NewCubeStoreExt(filepath.Join(targedir, dbDir), "meta.db", 10, nil); err != nil {
-		log.Printf("metadata: failed to open db: %v", err)
-		return clean, err
-	}
-	return clean, nil
-}
 
 var inspecMetaData = cli.Command{
 	Name:      "inspect",
@@ -149,59 +74,6 @@ var inspecMetaData = cli.Command{
 				fmt.Println(string(item.GetPrivateCubeboxStorageData()))
 			}
 		}
-		return nil
-	},
-}
-
-var listMetaData = cli.Command{
-	Name:    "listmd",
-	Aliases: []string{"lsmd"},
-	Usage:   "list metadata",
-	Action: func(clictx *cli.Context) error {
-		cntdClient, err := containerd.New(clictx.String("address"),
-			containerd.WithDefaultPlatform(platforms.Default()),
-		)
-		if err != nil {
-			return fmt.Errorf("init containerd connect failed.%s", err)
-		}
-
-		clean, err := copyDb(filepath.Join(clictx.String("state"), cubeboxDir, dbDir))
-		if err != nil {
-			log.Printf("fail copy db:%v", err)
-			return err
-		}
-		defer clean()
-
-		all, err := dbHandle.ReadAll("sandbox/v1")
-		if err != nil {
-			log.Printf("fail:%v", err)
-			return nil
-		}
-		for id, sandboxBytes := range all {
-			var cb = new(cubeboxstore.CubeBox)
-			if err := jsoniter.Unmarshal(sandboxBytes, cb); err != nil {
-				log.Printf("failed to unmarshal to cubebox %s from meta: %v", id, err)
-				continue
-			}
-
-			old := utils.InterfaceToString(cb)
-
-			if cb.Namespace == "" {
-				cb.Namespace = namespaces.Default
-			}
-			podCtx := namespaces.WithNamespace(context.TODO(), cb.Namespace)
-			podCtx = context.WithValue(podCtx, constants.CubeboxID, cb.ID)
-			if err := cubes.RecoverPod(podCtx, cntdClient, cb); err != nil {
-				log.Printf("failed to recover pod: %v", err)
-				continue
-			}
-			if cb.GetStatus().IsTerminated() {
-				log.Printf("sandbox %s is terminating, skip", cb.ID)
-				log.Printf("load sandbox %v", old)
-			}
-			log.Printf("Loaded sandbox %v", utils.InterfaceToString(&cb))
-		}
-
 		return nil
 	},
 }

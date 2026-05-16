@@ -38,11 +38,13 @@ func DenExist(path string) (bool, error) {
 func FileExistAndValid(path string) (bool, error) {
 	info, err := os.Stat(path)
 	if err == nil {
+		if info.IsDir() {
+			return false, fmt.Errorf("%s is a directory", path)
+		}
 		if info.Size() > 1024 {
 			return true, nil
-		} else {
-			return false, fmt.Errorf("invalid size:%d", info.Size())
 		}
+		return false, fmt.Errorf("invalid size:%d", info.Size())
 	}
 	if os.IsNotExist(err) {
 		return false, nil

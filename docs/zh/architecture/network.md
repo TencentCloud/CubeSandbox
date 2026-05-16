@@ -270,6 +270,16 @@ CubeVS 完全在内核态执行逐沙箱的出站网络策略，使用 LPM（最
 
 Go API 提供了 `AddPortMapping()`、`DelPortMapping()`、`ListPortMapping()` 和 `GetPortMapping()`，用于在运行时管理映射关系。
 
+### 6.4 计算节点端口分配
+
+为避免不同子系统之间的端口冲突，计算节点上的可用端口被划分为三段：
+
+| 端口范围 | 用途 | 分配者 |
+|----------|------|--------|
+| `10000`--`19999` | `ip_local_port_range`（宿主机临时端口） | 由 network-agent 启动时修改 |
+| `20000`--`29999` | CubeProxy 访问沙箱所用的端口范围 | 由 network-agent 在创建沙箱时分配 |
+| `30000`--`65535` | 沙箱出站报文经主机 NAT 时使用的端口范围 | 由 CubeVS 在 SNAT 时分配 |
+
 ---
 
 ## 7. TAP 设备生命周期
