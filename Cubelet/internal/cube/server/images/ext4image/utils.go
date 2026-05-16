@@ -29,7 +29,7 @@ func EnsurePmemFile(ctx context.Context, instanceType, imageRef string) error {
 	if err := EnsurePmemRootfs(ctx, instanceType, imageRef); err != nil {
 		return err
 	}
-	return validateArtifactRuntimeFilesPresent(ctx, instanceType, imageRef)
+	return ensureArtifactRuntimeFiles(ctx, instanceType, imageRef)
 }
 
 // EnsurePmemRootfs ensures the ext4 rootfs artifact exists locally.
@@ -133,6 +133,22 @@ func validateArtifactRuntimeFilesPresent(ctx context.Context, instanceType, imag
 		return err
 	}
 	return validateImageVersionFilePresent(ctx, instanceType, imageRef)
+}
+
+func ensureArtifactRuntimeFiles(ctx context.Context, instanceType, imageRef string) error {
+	if err := ensureKernelFilePresent(ctx, instanceType, imageRef); err != nil {
+		log.G(ctx).Warnf("artifact kernel file validation failed, refreshing from shared kernel: %v", err)
+		if refreshErr := refreshKernelFile(ctx, instanceType, imageRef); refreshErr != nil {
+			return fmt.Errorf("refresh artifact kernel file failed: %w", refreshErr)
+		}
+	}
+	if err := validateImageVersionFilePresent(ctx, instanceType, imageRef); err != nil {
+		log.G(ctx).Warnf("artifact image version validation failed, refreshing from shared version: %v", err)
+		if refreshErr := refreshImageVersionFile(ctx, instanceType, imageRef); refreshErr != nil {
+			return fmt.Errorf("refresh artifact image version file failed: %w", refreshErr)
+		}
+	}
+	return validateArtifactRuntimeFilesPresent(ctx, instanceType, imageRef)
 }
 
 func ensureKernelFilePresent(ctx context.Context, instanceType, imageRef string) error {

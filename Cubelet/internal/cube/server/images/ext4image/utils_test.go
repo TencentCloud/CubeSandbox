@@ -126,7 +126,7 @@ func TestEnsurePmemFilePreservesExistingRuntimeFiles(t *testing.T) {
 	}
 }
 
-func TestEnsurePmemFileRejectsMissingKernelFile(t *testing.T) {
+func TestEnsurePmemFileMaterializesMissingKernelFile(t *testing.T) {
 	baseDir := t.TempDir()
 	pmem.Init(baseDir)
 
@@ -135,9 +135,16 @@ func TestEnsurePmemFileRejectsMissingKernelFile(t *testing.T) {
 	writeSharedVersionFile(t, "2.2.0-20251010\n")
 	writeRawImageFile(t, "cubebox", "artifact-3", bytes.Repeat([]byte("e"), 2048))
 
-	err := EnsurePmemFile(context.Background(), "cubebox", "artifact-3")
-	if err == nil {
-		t.Fatal("EnsurePmemFile error=nil, want non-nil")
+	if err := EnsurePmemFile(context.Background(), "cubebox", "artifact-3"); err != nil {
+		t.Fatalf("EnsurePmemFile error=%v", err)
+	}
+
+	got, err := os.ReadFile(pmem.GetRawKernelFilePath("cubebox", "artifact-3"))
+	if err != nil {
+		t.Fatalf("ReadFile materialized kernel error=%v", err)
+	}
+	if !bytes.Equal(got, sharedKernel) {
+		t.Fatal("materialized kernel should match shared kernel")
 	}
 }
 
@@ -152,7 +159,7 @@ func TestEnsurePmemRootfsDoesNotRequireKernelFile(t *testing.T) {
 	}
 }
 
-func TestEnsurePmemFileRejectsMissingImageVersionFile(t *testing.T) {
+func TestEnsurePmemFileMaterializesMissingImageVersionFile(t *testing.T) {
 	baseDir := t.TempDir()
 	pmem.Init(baseDir)
 
@@ -161,9 +168,16 @@ func TestEnsurePmemFileRejectsMissingImageVersionFile(t *testing.T) {
 	writeRawImageFile(t, "cubebox", "artifact-5", bytes.Repeat([]byte("e"), 2048))
 	writeRawKernelFile(t, "cubebox", "artifact-5", bytes.Repeat([]byte("k"), 3072))
 
-	err := EnsurePmemFile(context.Background(), "cubebox", "artifact-5")
-	if err == nil {
-		t.Fatal("EnsurePmemFile error=nil, want non-nil")
+	if err := EnsurePmemFile(context.Background(), "cubebox", "artifact-5"); err != nil {
+		t.Fatalf("EnsurePmemFile error=%v", err)
+	}
+
+	got, err := os.ReadFile(pmem.GetRawImageVersionFilePath("cubebox", "artifact-5"))
+	if err != nil {
+		t.Fatalf("ReadFile materialized version error=%v", err)
+	}
+	if !bytes.Equal(got, []byte("2.2.0-20251010\n")) {
+		t.Fatal("materialized version should match shared image version")
 	}
 }
 
