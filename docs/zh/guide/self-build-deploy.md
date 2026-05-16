@@ -127,21 +127,28 @@ CUBE_SANDBOX_NODE_IP=<你的节点IP>
 Cube Sandbox 要求 /data/cubelet 所在的文件系统必须是 XFS。如果当前并非XFS文件系统，可以考虑使用现有文件系统上创建一个大文件并格式化为 XFS，再通过 loop 方式挂载。这种做法适合测试或虚拟机环境。
 
 ```bash
-# 1. 创建一个 20G 的空文件（大小按需调整）
-sudo dd if=/dev/zero of=/xfs-loopfile bs=1G count=0 seek=20 status=progress
-# 或者用 fallocate 更快：sudo fallocate -l 20G /xfs-loopfile
+# 1. 安装 xfsprogs（如果没有 mkfs.xfs）
+# Ubuntu/Debian
+sudo apt update && sudo apt install xfsprogs -y
+# RHEL/CentOS
+# sudo yum update && install xfsprogs -y
 
-# 2. 把这个文件格式化为 XFS
-sudo mkfs.xfs /xfs-loopfile
+# 2. 创建标准路径（/var/lib/cube-sandbox）并生成稀疏文件（示例 20G）
+sudo mkdir -p /var/lib/cube-sandbox
+sudo dd if=/dev/zero of=/var/lib/cube-sandbox/xfs-loopfile bs=1G count=0 seek=20 status=progress
 
-# 3. 创建挂载点并挂载
+# 3. 格式化为 XFS
+sudo mkfs.xfs /var/lib/cube-sandbox/xfs-loopfile
+
+# 4. 创建挂载点并挂载
 sudo mkdir -p /data/cubelet
-sudo mount -o loop /xfs-loopfile /data/cubelet
+sudo mount -o loop /var/lib/cube-sandbox/xfs-loopfile /data/cubelet
 
-# 4. 设置开机自动挂载
-echo '/xfs-loopfile /data/cubelet xfs loop 0 2' | sudo tee -a /etc/fstab
+# 5. 安全写入 /etc/fstab（避免重复条目）
+grep -q '/var/lib/cube-sandbox/xfs-loopfile' /etc/fstab || \
+  echo '/var/lib/cube-sandbox/xfs-loopfile /data/cubelet xfs loop 0 2' | sudo tee -a /etc/fstab
 ```
-> 注意：文件实际放在 / (ext4) 上，但挂载到 /data/cubelet 后，Cube 看到的就是 XFS 了。可以自行通过 `seed` 和 `count` 的调整以适配当前的硬件条件。
+> 注意：循环文件必须位于支持稀疏文件（ext4 支持）的文件系统上，并且文件内需要有足够的空闲空间供沙箱使用。你可以自行通过 `seed` 和 `count` 的调整以适配当前的硬件条件。
 
 通过运行以下指令以确保运行在`XFS` 文件系统。
 ```bash

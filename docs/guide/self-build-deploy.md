@@ -130,21 +130,26 @@ Cube Sandbox requires the /data/cubelet directory to reside on an XFS filesystem
 Create a large file, format it as XFS, and mount it via loop device.
 This works well for testing, development, or virtualized environments.
 ```bash
-# Create a 20 GB sparse file (adjust size as needed)
-sudo dd if=/dev/zero of=/xfs-loopfile bs=1G count=0 seek=20 status=progress
-# Or use fallocate for speed: sudo fallocate -l 20G /xfs-loopfile
+# 1. Install xfsprogs（If `mkfs.xfs` is missing）
+# Ubuntu/Debian
+sudo apt update && sudo apt install xfsprogs -y
+# RHEL/CentOS
+# sudo yum update && install xfsprogs -y
 
-# Format as XFS
-sudo mkfs.xfs /xfs-loopfile
+# 2. Create a standard directory and a sparse loopback file (adjust size as needed, e.g., 20G)
+sudo mkdir -p /var/lib/cube-sandbox
+sudo dd if=/dev/zero of=/var/lib/cube-sandbox/xfs-loopfile bs=1G count=0 seek=20 status=progress
 
-# Mount point
+# 3. Format the loopback file as XFS
+sudo mkfs.xfs /var/lib/cube-sandbox/xfs-loopfile
+
+# 4. Create the mount point and mount
 sudo mkdir -p /data/cubelet
+sudo mount -o loop /var/lib/cube-sandbox/xfs-loopfile /data/cubelet
 
-# Mount via loop
-sudo mount -o loop /xfs-loopfile /data/cubelet
-
-# Persistent mount (add to /etc/fstab)
-echo '/xfs-loopfile /data/cubelet xfs loop 0 2' | sudo tee -a /etc/fstab
+# 5. Persist the mount in /etc/fstab 
+grep -q '/var/lib/cube-sandbox/xfs-loopfile' /etc/fstab || \
+  echo '/var/lib/cube-sandbox/xfs-loopfile /data/cubelet xfs loop 0 2' | sudo tee -a /etc/fstab
 ```
 > Note: The loop file must be on a filesystem that supports sparse files (ext4 does), and you’ll need enough free space inside the file for the sandbox. Adjust the count/seek parameter to your required capacity.
 
