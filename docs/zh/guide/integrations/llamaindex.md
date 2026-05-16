@@ -28,11 +28,26 @@ lang: zh-CN
 pip install llama-index llama-index-agent-openai
 ```
 
+- 准备 Cube Sandbox 模板（如果没有）：
+  1. 基于 Cube Sandbox 基础镜像构建（包含 `envd` 支持），例如：
+
+     ```dockerfile
+     FROM cubesandbox-base:latest
+     # 或: FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16
+     ```
+
+  2. 通过 CLI 创建模板：
+     ```bash
+     cubemastercli tpl create-from-image --image <your-image-tag>
+     # 输出包含: template_id="tpl-xxxxxxxxxxxx"
+     ```
+  3. 使用返回的 `template_id`（格式：`tpl-<hex>`）。
+
 - 配置环境变量：
 
 ```bash
 export CUBE_API_URL=http://<your-cubeapi-host>:3000
-export CUBE_TEMPLATE_ID=<your-template-id>
+export CUBE_TEMPLATE_ID=<your-template-id>   # 例如 tpl-748094d2f2374b0a8a37e6ec
 export CUBE_PROXY_NODE_IP=<your-cubeproxy-node-ip>   # 远程访问时需要
 ```
 
@@ -50,7 +65,6 @@ pip install llama-index llama-index-agent-openai
 
 ```python
 # tools/cube_tool.py
-import json
 from llama_index.core.tools import FunctionTool
 from cubesandbox import Sandbox, Config
 
@@ -65,7 +79,7 @@ def create_cube_tool(
     创建一个由 Cube Sandbox 驱动的 LlamaIndex FunctionTool。
 
     Args:
-        template_id: Cube 模板 ID（如 python:3.12-slim）
+        template_id: Cube 模板 ID（如 tpl-748094d2f2374b0a8a37e6ec）
         api_url: CubeAPI 地址
         proxy_node_ip: CubeProxy 节点 IP（远程访问时填写）
         timeout: 最大执行时间（秒）
@@ -108,7 +122,7 @@ llm = OpenAI(model="gpt-4o")
 # 注册 Cube 工具作为代码执行后端
 agent = ReActAgent.from_tools(
     tools=[create_cube_tool(
-        template_id="python:3.12-slim",
+        template_id="<your-template-id>",  # 例如 tpl-748094d2f2374b0a8a37e6ec
         api_url="http://localhost:3000",
     )],
     llm=llm,
@@ -147,7 +161,7 @@ from cubesandbox import Sandbox, Config
 
 cfg = Config(
     api_url="http://localhost:3000",
-    template_id="python:3.12-slim",
+    template_id="<your-template-id>",  # 例如 tpl-748094d2f2374b0a8a37e6ec
 )
 with Sandbox.create(config=cfg) as sb:
     result = sb.run_code("""
@@ -189,20 +203,26 @@ print(Counter(p.words).most_common(10))
 
 ### 网络隔离（处理不可信数据源）
 
-LlamaIndex 常需从外部 URL 获取数据，Cube Sandbox 支持细粒度网络策略：
+LlamaIndex 常需从外部 URL 获取数据，Cube Sandbox 支持通过 SDK 原生的 `network` 参数实现细粒度网络策略：
 
 ```python
+from cubesandbox import Sandbox, Config
+
+cfg = Config(
+    api_url="http://localhost:3000",
+    template_id="<your-template-id>",
+)
+
 # 完全禁止出站流量 — 避免数据泄露风险
-with Sandbox.create(
-    metadata={"network-policy": "deny-all"}
-) as sb:
+with Sandbox.create(config=cfg, allow_internet_access=False) as sb:
     # 只能读取通过 hostdir-mount 挂载的本地文件
     result = sb.run_code("open('/mnt/data/input.txt').read()")
 
-# 仅允许特定 IP 范围
-rules = json.dumps({"allow": ["151.101.0.0/16"]})  # GitHub IP 段
+# 仅允许特定 IP 范围（CIDR 表示法）
 with Sandbox.create(
-    metadata={"network-policy": "custom", "network-rules": rules}
+    config=cfg,
+    allow_internet_access=False,
+    network={"allow_out": ["151.101.0.0/16"]},  # GitHub IP 段
 ) as sb:
     result = sb.run_code("""
 import urllib.request

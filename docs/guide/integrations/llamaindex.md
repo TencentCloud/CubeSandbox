@@ -23,11 +23,26 @@ lang: en-US
 - Cube Sandbox deployment (see [Quick Start](https://github.com/TencentCloud/CubeSandbox))
 - Python `3.9+` with `pip`
 - LlamaIndex installed: `pip install llama-index`
+- A Cube Sandbox template. If you don't have one:
+  1. Build from base image with `envd` support, e.g.:
+
+     ```dockerfile
+     FROM cubesandbox-base:latest
+     # Or: FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16
+     ```
+
+  2. Create a template via CLI:
+     ```bash
+     cubemastercli tpl create-from-image --image <your-image-tag>
+     # Output includes: template_id="tpl-xxxxxxxxxxxx"
+     ```
+  3. Use the returned `template_id` (format: `tpl-<hex>`) in your code.
+
 - Environment variables configured:
 
 ```bash
 export CUBE_API_URL=http://<your-cubeapi-host>:3000
-export CUBE_TEMPLATE_ID=<your-template-id>
+export CUBE_TEMPLATE_ID=<your-template-id>   # e.g. tpl-748094d2f2374b0a8a37e6ec
 export CUBE_PROXY_NODE_IP=<your-cubeproxy-node-ip>   # for remote access
 ```
 
@@ -45,7 +60,6 @@ The key insight: replacing `SimpleDirectoryReader` or local Python execution wit
 
 ```python
 # tools/cube_tool.py
-import json
 from llama_index.core.tools import FunctionTool
 from cubesandbox import Sandbox, Config
 
@@ -60,7 +74,7 @@ def create_cube_tool(
     Create a LlamaIndex FunctionTool backed by a Cube Sandbox.
 
     Args:
-        template_id: Cube template ID (e.g. python:3.12-slim)
+        template_id: Cube template ID (e.g. tpl-748094d2f2374b0a8a37e6ec)
         api_url: CubeAPI address
         proxy_node_ip: CubeProxy node IP for remote access
         timeout: max execution time in seconds
@@ -104,7 +118,7 @@ llm = OpenAI(model="gpt-4o")
 # Register Cube tool as a code execution backend
 agent = ReActAgent.from_tools(
     tools=[create_cube_tool(
-        template_id="python:3.12-slim",
+        template_id="<your-template-id>",  # e.g. tpl-748094d2f2374b0a8a37e6ec
         api_url="http://localhost:3000",
     )],
     llm=llm,
@@ -143,7 +157,7 @@ from cubesandbox import Sandbox, Config
 
 cfg = Config(
     api_url="http://localhost:3000",
-    template_id="python:3.12-slim",
+    template_id="<your-template-id>",  # e.g. tpl-748094d2f2374b0a8a37e6ec
 )
 with Sandbox.create(config=cfg) as sb:
     result = sb.run_code("""
@@ -185,20 +199,26 @@ print(Counter(p.words).most_common(10))
 
 ### Network isolation for untrusted data sources
 
-LlamaIndex often fetches data from external URLs. Cube Sandbox supports network policies:
+LlamaIndex often fetches data from external URLs. Cube Sandbox supports network policies via the SDK's native `network` parameter:
 
 ```python
+from cubesandbox import Sandbox, Config
+
+cfg = Config(
+    api_url="http://localhost:3000",
+    template_id="<your-template-id>",
+)
+
 # Deny all outbound — no data exfiltration risk
-with Sandbox.create(
-    metadata={"network-policy": "deny-all"}
-) as sb:
+with Sandbox.create(config=cfg, allow_internet_access=False) as sb:
     # can still read local files mounted via hostdir-mount
     result = sb.run_code("open('/mnt/data/input.txt').read()")
 
-# Allow specific IPs only
-rules = json.dumps({"allow": ["151.101.0.0/16"]})  # GitHub IPs
+# Allow specific IP ranges only (CIDR notation)
 with Sandbox.create(
-    metadata={"network-policy": "custom", "network-rules": rules}
+    config=cfg,
+    allow_internet_access=False,
+    network={"allow_out": ["151.101.0.0/16"]},  # GitHub IP range
 ) as sb:
     result = sb.run_code("""
 import urllib.request
