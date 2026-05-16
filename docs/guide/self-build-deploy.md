@@ -134,7 +134,7 @@ This works well for testing, development, or virtualized environments.
 # Ubuntu/Debian
 sudo apt update && sudo apt install xfsprogs -y
 # RHEL/CentOS
-# sudo yum update && install xfsprogs -y
+# sudo yum update && sudo yum install xfsprogs -y
 
 # 2. Create a standard directory and a sparse loopback file (adjust size as needed, e.g., 20G)
 sudo mkdir -p /var/lib/cube-sandbox

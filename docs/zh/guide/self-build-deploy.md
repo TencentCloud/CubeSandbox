@@ -27,6 +27,7 @@
 | Linux | 推荐 Ubuntu 22.04+ |
 | Docker | 已安装并正常运行 |
 | root 权限 | `install.sh` 需要 root 执行 |
+| 文件系统 | XFS |
 | DNS 路由 | `systemd-resolved`（推荐）或 `NetworkManager + dnsmasq` |
 | `tar`、`rg`、`ss` | 安装脚本依赖 |
 
@@ -131,7 +132,7 @@ Cube Sandbox 要求 /data/cubelet 所在的文件系统必须是 XFS。如果当
 # Ubuntu/Debian
 sudo apt update && sudo apt install xfsprogs -y
 # RHEL/CentOS
-# sudo yum update && install xfsprogs -y
+# sudo yum update && sudo yum install xfsprogs -y
 
 # 2. 创建标准路径（/var/lib/cube-sandbox）并生成稀疏文件（示例 20G）
 sudo mkdir -p /var/lib/cube-sandbox
@@ -148,7 +149,7 @@ sudo mount -o loop /var/lib/cube-sandbox/xfs-loopfile /data/cubelet
 grep -q '/var/lib/cube-sandbox/xfs-loopfile' /etc/fstab || \
   echo '/var/lib/cube-sandbox/xfs-loopfile /data/cubelet xfs loop 0 2' | sudo tee -a /etc/fstab
 ```
-> 注意：循环文件必须位于支持稀疏文件（ext4 支持）的文件系统上，并且文件内需要有足够的空闲空间供沙箱使用。你可以自行通过 `seed` 和 `count` 的调整以适配当前的硬件条件。
+> 注意：循环文件必须位于支持稀疏文件（ext4 支持）的文件系统上，并且文件内需要有足够的空闲空间供沙箱使用。你可以自行通过 `seek` 和 `count` 的调整以适配当前的硬件条件。
 
 通过运行以下指令以确保运行在`XFS` 文件系统。
 ```bash
