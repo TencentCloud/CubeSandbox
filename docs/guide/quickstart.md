@@ -147,6 +147,19 @@ Run as root:
 curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | CUBE_PVM_ENABLE=1 bash
 ```
 
+::: tip Skipping Pre-download Preflight Checks
+The online installer script performs lightweight pre-download checks for OS, memory, KVM, and `/data/cubelet` filesystem (requires XFS) to save your time.
+If you need to bypass these early checks (e.g. in custom test environments), set the `ONE_CLICK_SKIP_PRECHECK=1` environment variable or pass the `--skip-precheck` argument:
+```bash
+# Option A: via environment variable
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | ONE_CLICK_SKIP_PRECHECK=1 CUBE_PVM_ENABLE=1 bash
+
+# Option B: via argument
+curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | CUBE_PVM_ENABLE=1 bash -s -- --skip-precheck
+```
+⚠️ Note: Skipping the prechecks only affects the download behavior of `online-install.sh`. The authoritative system constraints in `install.sh` are still strictly enforced during actual deployment to ensure stability.
+:::
+
 ::: details What gets installed
 - E2B-compatible REST API listening on port `3000`
 - CubeMaster, Cubelet, network-agent, CubeShim running as host processes

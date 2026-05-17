@@ -147,8 +147,21 @@ check_hardware_preflight() {
 
   local mem_total_kb
   mem_total_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-  if [[ "${mem_total_kb}" -lt 7500000 ]]; then
-    die "System memory must be at least 8GB."
+  
+  local min_mem_kb=7500000
+  if [[ -n "${CUBE_MIN_MEMORY_KB:-}" ]]; then
+    if [[ "${CUBE_MIN_MEMORY_KB}" =~ ^[0-9]+$ ]] && [[ "${CUBE_MIN_MEMORY_KB}" -gt 0 ]]; then
+      # Enforce that the threshold cannot be lower than the default 8GB (7500000 KB) in the authoritative installer
+      if [[ "${CUBE_MIN_MEMORY_KB}" -ge 7500000 ]]; then
+        min_mem_kb="${CUBE_MIN_MEMORY_KB}"
+      fi
+    else
+      die "Invalid CUBE_MIN_MEMORY_KB '${CUBE_MIN_MEMORY_KB}' (must be a positive integer greater than 0)."
+    fi
+  fi
+
+  if [[ "${mem_total_kb}" -lt "${min_mem_kb}" ]]; then
+    die "System memory must be at least $((min_mem_kb / 1024 / 1024))GB (found $((mem_total_kb / 1024 / 1024)) GB)."
   fi
 }
 
@@ -283,6 +296,11 @@ PY
 
 require_root
 
+# Run critical preflight checks that do not depend on dependency installation first
+# to ensure we fail fast before installing or modifying any local system packages.
+check_hardware_preflight
+check_cubelet_fs_preflight
+
 CUBE_SANDBOX_NODE_IP="$(detect_node_ip)"
 export CUBE_SANDBOX_NODE_IP
 log "using node IP: ${CUBE_SANDBOX_NODE_IP}"
@@ -295,8 +313,6 @@ else
 fi
 
 install_required_dependencies
-check_hardware_preflight
-check_cubelet_fs_preflight
 check_install_preflight
 if needs_docker_for_install; then
   configure_tencent_docker_mirror
