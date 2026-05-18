@@ -18,6 +18,13 @@ import (
 )
 
 var compareKernelFiles = sameFileSHA256
+var writeKernelVersionFile = writeKernelVersionFileImpl
+
+const (
+	kernelVersionFileName = "version"
+	kernelVersionPrefix   = "sha256:"
+	kernelVersionFileMode = 0o644
+)
 
 // EnsureKernelFilePresent verifies that the target kernel file is already present and valid.
 func EnsureKernelFilePresent(ctx context.Context, sharedKernelPath, targetKernelPath string) error {
@@ -50,7 +57,7 @@ func RefreshKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath s
 		return err
 	}
 	if err := validateRefreshedKernelFile(sharedKernelPath, targetKernelPath); err != nil {
-		cleanupErr := cleanupKernelFile(targetKernelPath)
+		cleanupErr := cleanupKernelRuntimeFiles(targetKernelPath)
 		if cleanupErr != nil {
 			log.G(ctx).Errorf(
 				"kernel file %s verification failed against shared kernel %s and cleanup failed: verifyErr=%v cleanupErr=%v",
@@ -64,7 +71,19 @@ func RefreshKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath s
 		)
 		return err
 	}
-	log.G(ctx).Infof("kernel file %s refreshed from latest shared kernel %s", targetKernelPath, sharedKernelPath)
+	if err := writeKernelVersionFile(targetKernelPath); err != nil {
+		cleanupErr := cleanupKernelRuntimeFiles(targetKernelPath)
+		if cleanupErr != nil {
+			log.G(ctx).Errorf(
+				"kernel version file for %s refresh failed and cleanup failed: refreshErr=%v cleanupErr=%v",
+				targetKernelPath, err, cleanupErr,
+			)
+			return fmt.Errorf("refresh kernel version file failed: %w: cleanup invalid runtime files failed: %v", err, cleanupErr)
+		}
+		log.G(ctx).Errorf("kernel version file for %s refresh failed, cleaned up invalid runtime files: %v", targetKernelPath, err)
+		return fmt.Errorf("refresh kernel version file failed: %w", err)
+	}
+	log.G(ctx).Infof("kernel file %s refreshed from latest shared kernel %s with version metadata", targetKernelPath, sharedKernelPath)
 	return nil
 }
 
@@ -153,12 +172,34 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
+func writeKernelVersionFileImpl(kernelPath string) error {
+	sha, err := fileSHA256(kernelPath)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomically(kernelVersionPath(kernelPath), []byte(kernelVersionPrefix+sha+"\n"), kernelVersionFileMode)
+}
+
+func kernelVersionPath(kernelPath string) string {
+	return filepath.Join(filepath.Dir(kernelPath), kernelVersionFileName)
+}
+
 func cleanupKernelFile(path string) error {
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
+}
+
+func cleanupKernelRuntimeFiles(kernelPath string) error {
+	if err := cleanupKernelFile(kernelPath); err != nil {
+		return err
+	}
+	if err := cleanupKernelFile(kernelVersionPath(kernelPath)); err != nil {
+		return err
+	}
+	return cleanupKernelFile(kernelVersionPath(kernelPath) + ".tmp")
 }
 
 // CopyFileAtomically copies a local file to dstPath via a same-directory temp file.
@@ -191,6 +232,25 @@ func CopyFileAtomically(srcPath, dstPath string) error {
 		return err
 	}
 	if err := dstFile.Close(); err != nil {
+		_ = os.RemoveAll(tmpPath) // NOCC:Path Traversal()
+		return err
+	}
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		_ = os.RemoveAll(tmpPath) // NOCC:Path Traversal()
+		return err
+	}
+	return nil
+}
+
+func writeFileAtomically(dstPath string, content []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return err
+	}
+	tmpPath := dstPath + ".tmp"
+	if err := os.RemoveAll(tmpPath); err != nil { // NOCC:Path Traversal()
+		return err
+	}
+	if err := os.WriteFile(tmpPath, content, mode); err != nil { // NOCC:Path Traversal()
 		_ = os.RemoveAll(tmpPath) // NOCC:Path Traversal()
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,7 @@ func TestRefreshKernelFileVerifiesCopiedContent(t *testing.T) {
 	if !bytes.Equal(got, bytes.Repeat([]byte("s"), 4096)) {
 		t.Fatal("target kernel should match shared kernel after refresh")
 	}
+	assertKernelVersionMatches(t, targetKernelPath)
 }
 
 func TestRefreshKernelFileCleansTargetOnVerificationFailure(t *testing.T) {
@@ -57,6 +59,36 @@ func TestRefreshKernelFileCleansTargetOnVerificationFailure(t *testing.T) {
 	if _, statErr := os.Stat(targetKernelPath); !os.IsNotExist(statErr) {
 		t.Fatalf("target kernel should be removed after verification failure, statErr=%v", statErr)
 	}
+	if _, statErr := os.Stat(kernelVersionPath(targetKernelPath)); !os.IsNotExist(statErr) {
+		t.Fatalf("target kernel version should be removed after verification failure, statErr=%v", statErr)
+	}
+}
+
+func TestRefreshKernelFileCleansRuntimeFilesOnVersionFailure(t *testing.T) {
+	baseDir := t.TempDir()
+	sharedKernelPath := filepath.Join(baseDir, "shared", "vmlinux")
+	targetKernelPath := filepath.Join(baseDir, "target", "artifact.vm")
+
+	writeKernelTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
+
+	originalWrite := writeKernelVersionFile
+	writeKernelVersionFile = func(path string) error {
+		return os.ErrPermission
+	}
+	defer func() {
+		writeKernelVersionFile = originalWrite
+	}()
+
+	err := RefreshKernelFile(context.Background(), sharedKernelPath, targetKernelPath)
+	if err == nil {
+		t.Fatal("RefreshKernelFile error=nil, want non-nil")
+	}
+	if _, statErr := os.Stat(targetKernelPath); !os.IsNotExist(statErr) {
+		t.Fatalf("target kernel should be removed after version failure, statErr=%v", statErr)
+	}
+	if _, statErr := os.Stat(kernelVersionPath(targetKernelPath)); !os.IsNotExist(statErr) {
+		t.Fatalf("target kernel version should be removed after version failure, statErr=%v", statErr)
+	}
 }
 
 func TestEnsureKernelFilePresentRejectsMissingTarget(t *testing.T) {
@@ -70,6 +102,33 @@ func TestEnsureKernelFilePresentRejectsMissingTarget(t *testing.T) {
 	err := EnsureKernelFilePresent(context.Background(), sharedKernelPath, targetKernelPath)
 	if err == nil {
 		t.Fatal("EnsureKernelFilePresent error=nil, want non-nil")
+	}
+}
+
+func TestEnsureKernelFilePresentDoesNotRequireVersion(t *testing.T) {
+	baseDir := t.TempDir()
+	sharedKernelPath := filepath.Join(baseDir, "shared", "vmlinux")
+	targetKernelPath := filepath.Join(baseDir, "target", "artifact.vm")
+
+	writeKernelTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
+	writeKernelTestFile(t, targetKernelPath, bytes.Repeat([]byte("s"), 4096))
+
+	if err := EnsureKernelFilePresent(context.Background(), sharedKernelPath, targetKernelPath); err != nil {
+		t.Fatalf("EnsureKernelFilePresent error=%v", err)
+	}
+}
+
+func TestEnsureKernelFilePresentIgnoresInvalidVersion(t *testing.T) {
+	baseDir := t.TempDir()
+	sharedKernelPath := filepath.Join(baseDir, "shared", "vmlinux")
+	targetKernelPath := filepath.Join(baseDir, "target", "artifact.vm")
+
+	writeKernelTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
+	writeKernelTestFile(t, targetKernelPath, bytes.Repeat([]byte("s"), 4096))
+	writeKernelTestFile(t, kernelVersionPath(targetKernelPath), []byte("not-a-sha\n"))
+
+	if err := EnsureKernelFilePresent(context.Background(), sharedKernelPath, targetKernelPath); err != nil {
+		t.Fatalf("EnsureKernelFilePresent error=%v", err)
 	}
 }
 
@@ -129,5 +188,21 @@ func writeKernelTestFile(t *testing.T, path string, content []byte) {
 	}
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatalf("WriteFile error=%v", err)
+	}
+}
+
+func assertKernelVersionMatches(t *testing.T, kernelPath string) {
+	t.Helper()
+	sha, err := fileSHA256(kernelPath)
+	if err != nil {
+		t.Fatalf("fileSHA256 error=%v", err)
+	}
+	got, err := os.ReadFile(kernelVersionPath(kernelPath))
+	if err != nil {
+		t.Fatalf("ReadFile version error=%v", err)
+	}
+	want := kernelVersionPrefix + sha
+	if strings.TrimSpace(string(got)) != want {
+		t.Fatalf("kernel version=%q, want %q", strings.TrimSpace(string(got)), want)
 	}
 }
