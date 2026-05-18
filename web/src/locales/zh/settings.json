@@ -1,0 +1,61 @@
+{
+  "title": "设置",
+  "subtitle": "外观、集群连接与快捷键配置。",
+  "nav": {
+    "appearance": "外观",
+    "cluster": "集群连接",
+    "shortcuts": "快捷键",
+    "about": "关于"
+  },
+  "appearance": {
+    "title": "外观",
+    "desc": "自定义界面主题与语言。",
+    "theme": "主题",
+    "themeDesc": "选择界面配色，跟随系统会自动匹配操作系统的深浅色设置。",
+    "language": "语言",
+    "languageDesc": "切换界面显示语言。"
+  },
+  "cluster": {
+    "title": "集群连接",
+    "desc": "查看当前连接的 CubeAPI 实例信息。",
+    "endpoint": "API 端点",
+    "endpointDesc": "CubeAPI的对外访问地址。启动时通过CUBE_API_PUBLIC_HOST环境变量配置。",
+    "test": "测试连接",
+    "connected": "连接正常",
+    "runtime": "运行时配置",
+    "runtimeDesc": "来自 CubeAPI 的运行时只读信息。",
+    "sandboxDomain": "沙箱域名",
+    "instanceType": "默认实例类型",
+    "rateLimit": "限流策略",
+    "auth": "认证状态",
+    "authOn": "已启用",
+    "authOff": "未启用"
+  },
+  "shortcuts": {
+    "title": "快捷键",
+    "desc": "Dashboard 内置的键盘快捷键一览。",
+    "commandPalette": "打开命令面板",
+    "newSandbox": "新建沙箱",
+    "search": "搜索",
+    "escape": "关闭弹窗 / 取消"
+  },
+  "shortcut": {
+    "commandPalette": "打开命令面板",
+    "escape": "关闭弹窗 / 取消",
+    "refresh": "刷新当前页数据",
+    "helpShortcuts": "查看快捷键帮助",
+    "goOverview": "跳转 概览",
+    "goSandboxes": "跳转 沙箱列表",
+    "goTemplates": "跳转 模板列表",
+    "goNodes": "跳转 节点列表",
+    "goKeys": "跳转 API 密钥"
+  },
+  "about": {
+    "title": "关于",
+    "desc": "版本信息与相关链接。",
+    "version": "版本",
+    "cubeApi": "CubeAPI 地址",
+    "instanceType": "默认实例类型",
+    "docs": "文档"
+  }
+}

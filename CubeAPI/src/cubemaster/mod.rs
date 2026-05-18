@@ -746,6 +746,9 @@ pub struct SandboxInfo {
     pub status: String,
     #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
+    /// Unix nanoseconds from Cubelet container.created_at — used as fallback for started_at
+    #[serde(default)]
+    pub create_at: i64,
     #[serde(default)]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default, alias = "cpuCount")]
@@ -849,7 +852,7 @@ fn parse_mem_mb(s: &str) -> i32 {
     s.parse::<i32>().unwrap_or(0)
 }
 
-fn datetime_from_unix_nanos(value: i64) -> Option<DateTime<Utc>> {
+pub(crate) fn datetime_from_unix_nanos(value: i64) -> Option<DateTime<Utc>> {
     if value <= 0 {
         return None;
     }
@@ -867,11 +870,13 @@ enum SandboxStatusValue {
 }
 
 fn sandbox_status_text_from_code(number: i32) -> &'static str {
+    // CubeMaster CONTAINER_* status codes:
+    // 0=CREATED, 1=RUNNING, 2=EXITED/STOPPED, 3=UNKNOWN, 4=PAUSING, 5=PAUSED
     match number {
         1 => "running",
-        2 => "paused",
-        3 => "stopped",
-        4 => "error",
+        2 => "stopped",
+        4 => "pausing",
+        5 => "paused",
         _ => "unknown",
     }
 }
@@ -1039,44 +1044,34 @@ pub struct SandboxRefreshResponse {
 }
 
 // ─── Sandbox logs ──────────────────────────────────────────────────────────
-// ❌ New API — not yet implemented on CubeMaster
+// ✅ Implemented: POST /cube/sandbox/logs
 
 #[derive(Debug, Serialize)]
 pub struct SandboxLogsRequest {
-    #[serde(rename = "RequestID", alias = "requestID")]
-    pub request_id: String,
     #[serde(rename = "sandboxID")]
     pub sandbox_id: String,
-    #[serde(rename = "instanceType")]
-    pub instance_type: String,
-    /// Unix-millisecond cursor — only return logs after this timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub start: Option<i64>,
-    /// Max log lines to return (default 1000, max 5000).
+    pub cursor: Option<i64>,
     pub limit: i32,
-    /// "stdout" | "stderr" | "all"
-    pub source: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct SandboxLogsResponse {
-    #[serde(rename = "RequestID", alias = "requestID")]
-    pub request_id: String,
+    pub ret: RetCode,
     #[serde(default)]
     pub logs: Vec<SandboxLogLine>,
+    #[serde(rename = "nextCursor", default)]
     pub next_cursor: Option<i64>,
-    #[serde(default)]
+    #[serde(rename = "hasMore", default)]
     pub has_more: bool,
-    pub ret: RetCode,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SandboxLogLine {
     pub timestamp: DateTime<Utc>,
-    pub line: String,
+    pub message: String,
     #[serde(default)]
-    pub source: String, // "stdout" | "stderr"
+    pub level: String,
 }
 
 // ─── Sandbox snapshot ──────────────────────────────────────────────────────
@@ -1240,20 +1235,63 @@ pub struct RetEnvelope {
     pub ret: RetCode,
 }
 
-/// Body for POST /cube/template/from-image. Most fields are passed through
-/// transparently as JSON to keep this client decoupled from CubeMaster's
-/// internal type system.
+/// Body for POST /cube/template/from-image.
 #[derive(Debug, Serialize)]
 pub struct CreateTemplateFromImageReq {
-    #[serde(rename = "requestID", alias = "RequestID")]
+    #[serde(rename = "requestID")]
     pub request_id: String,
     pub instance_type: String,
     pub template_id: String,
-    /// Container image reference (e.g. "registry.example.com/foo:tag").
-    pub image: String,
-    /// Optional additional fields forwarded as-is to CubeMaster.
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    /// CubeMaster field name for the source image.
+    pub source_image_ref: String,
+    /// Writable layer size, e.g. "1G".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writable_layer_size: Option<String>,
+    /// Ports exposed by the container.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exposed_ports: Option<Vec<u16>>,
+    /// Container-level overrides (probe, resources, envs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_overrides: Option<CreateTemplateContainerOverrides>,
+    /// Network / internet-access context.
+    #[serde(rename = "cubevs_context", skip_serializing_if = "Option::is_none")]
+    pub cubevs_context: Option<CreateTemplateCubeVSContext>,
+}
+
+/// Minimal container overrides for template creation.
+#[derive(Debug, Serialize)]
+pub struct CreateTemplateContainerOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe: Option<Probe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<CreateTemplateResources>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envs: Option<Vec<CreateTemplateEnv>>,
+}
+
+/// CPU / memory resources for template container.
+#[derive(Debug, Serialize)]
+pub struct CreateTemplateResources {
+    /// CPU in millicores, e.g. "2000m".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<String>,
+    /// Memory, e.g. "2000Mi".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem: Option<String>,
+}
+
+/// Key-value env var.
+#[derive(Debug, Serialize)]
+pub struct CreateTemplateEnv {
+    pub key: String,
+    pub value: String,
+}
+
+/// CubeVS context for template creation.
+#[derive(Debug, Serialize)]
+pub struct CreateTemplateCubeVSContext {
+    #[serde(rename = "allowInternetAccess", skip_serializing_if = "Option::is_none")]
+    pub allow_internet_access: Option<bool>,
 }
 
 /// Body for POST /cube/template/redo (rebuild).

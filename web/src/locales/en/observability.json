@@ -1,0 +1,55 @@
+{
+  "title": "Observability",
+  "description": "Runtime status, node health, and template build overview",
+  "sandboxes": {
+    "title": "Sandbox Health",
+    "desc": "Current state distribution of sandboxes in the cluster",
+    "total": "Total",
+    "running": "Running",
+    "paused": "Paused",
+    "distribution": "Distribution",
+    "recent": "Recently Created",
+    "empty": "No sandboxes",
+    "colId": "Sandbox ID",
+    "colTemplate": "Template",
+    "colState": "State",
+    "colCreated": "Created"
+  },
+  "nodes": {
+    "title": "Node Health",
+    "desc": "Resource utilization and health status per node",
+    "healthy": "Healthy",
+    "degraded": "Degraded",
+    "healthyCount": "Healthy Nodes",
+    "totalCount": "Total Nodes",
+    "cpu": "CPU",
+    "memory": "Memory",
+    "empty": "No node data"
+  },
+  "api": {
+    "title": "API Monitor",
+    "desc": "CubeAPI gateway connectivity and rate-limit config",
+    "rateLimit": "Rate Limit",
+    "auth": "Auth",
+    "authOn": "Enabled",
+    "authOff": "Disabled",
+    "latency": "Latency",
+    "test": "Test Connectivity",
+    "testing": "Testing…",
+    "connected": "Connected",
+    "failed": "Failed"
+  },
+  "templates": {
+    "title": "Template Build Status",
+    "desc": "Current status and failures across all templates",
+    "ready": "Ready",
+    "building": "Building",
+    "failed": "Failed",
+    "failedList": "Failed Templates",
+    "noFailed": "No failed templates",
+    "colId": "Template ID",
+    "colStatus": "Status",
+    "colVersion": "Version",
+    "colError": "Error"
+  }
+}

@@ -3,12 +3,13 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import { clusterApi } from '@/api/client';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Cpu, HardDrive, Server } from 'lucide-react';
-import { formatRelative } from '@/lib/utils';
+import { cn, formatRelative } from '@/lib/utils';
 
 export default function NodesPage() {
   const { data, isLoading } = useQuery({
@@ -35,18 +36,28 @@ export default function NodesPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {data?.map((n) => (
-          <Card key={n.nodeID}>
+          <Link key={n.nodeID} to={`/nodes/${n.nodeID}`} className="block hover:opacity-90 transition-opacity">
+            <Card className="panel-hover h-full">
             <CardHeader>
               <div className="flex items-center gap-3">
                 <span className="flex h-9 w-9 items-center justify-center rounded-md bg-muted text-muted-foreground">
                   <Server size={16} />
                 </span>
-                <div>
-                  <CardTitle>{n.hostname ?? n.nodeID}</CardTitle>
-                  <CardDescription className="font-mono text-[11px]">{n.nodeID}</CardDescription>
+                <div className="min-w-0">
+                  <CardTitle className="flex items-center gap-2">
+                    <span className="relative flex h-2 w-2 shrink-0">
+                      {n.status.toLowerCase() === 'ready' && (
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-60" />
+                      )}
+                      <span className={cn('relative inline-flex rounded-full h-2 w-2', n.status.toLowerCase() === 'ready' ? 'bg-green-400' : 'bg-amber-400')} />
+                    </span>
+                    {n.hostname && n.hostname !== n.nodeID ? n.hostname : n.nodeID}
+                  </CardTitle>
+                  {n.hostname && n.hostname !== n.nodeID && (
+                    <CardDescription className="font-mono text-[11px]">{n.nodeID}</CardDescription>
+                  )}
                 </div>
               </div>
-              <Badge tone={n.status.toLowerCase() === 'ready' ? 'ok' : 'warn'}>{n.status}</Badge>
             </CardHeader>
 
             <div className="mt-2 grid grid-cols-2 gap-4 text-xs">
@@ -86,6 +97,7 @@ export default function NodesPage() {
               </div>
             )}
           </Card>
+            </Link>
         ))}
       </div>
 

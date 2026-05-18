@@ -33,6 +33,7 @@ const (
 	TemplateArtifactDownloadAction = "/template/artifact/download"
 	RootfsArtifactAction           = "/rootfs-artifact"
 	ListInventoryAction            = "/listinventory"
+	SandboxLogsAction              = "/sandbox/logs"
 )
 
 func CubeURI() string {
@@ -61,6 +62,8 @@ func HttpHandler(w http.ResponseWriter, r *http.Request) {
 		rsp = handleInfoAction(w, r, rt)
 	case r.URL.Path == actionURI(SandboxExecAction):
 		rsp = handleExecAction(w, r, rt)
+	case r.URL.Path == actionURI(SandboxLogsAction):
+		rsp = handleSandboxLogsAction(w, r, rt)
 	case r.URL.Path == actionURI(SandboxUpdateAction):
 		rsp = handleUpdateAction(w, r, rt)
 	case r.URL.Path == actionURI(SandboxCommitAction):

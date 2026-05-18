@@ -3,6 +3,7 @@
 
 import { http, HttpResponse } from 'msw';
 import {
+  createSandbox,
   deleteSandbox,
   getClusterOverview,
   getNode,
@@ -99,6 +100,22 @@ export const handlers = [
     await mockDelay();
     const logs = getSandboxLogs(String(params.sandboxID));
     return logs ? HttpResponse.json(logs) : notFound(`sandbox ${params.sandboxID} not found`);
+  }),
+
+  http.post('/cubeapi/v1/sandboxes', async ({ request }) => {
+    await mockDelay();
+    const body = await request.json() as {
+      templateID: string;
+      timeout?: number;
+      alias?: string;
+      autoPause?: boolean;
+      metadata?: Record<string, string>;
+    };
+    if (!body.templateID) {
+      return HttpResponse.json({ code: 400, message: 'templateID is required' }, { status: 400 });
+    }
+    const sandbox = createSandbox(body);
+    return HttpResponse.json(sandbox, { status: 201 });
   }),
 
   http.post('/mock/reset', async () => {

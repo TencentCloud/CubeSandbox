@@ -6,36 +6,43 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { sandboxApi, type RunningSandbox } from '@/api/client';
-import { Card, CardTitle, CardDescription, CardHeader } from '@/components/ui/card';
+import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Pause, Play, Trash2, Search, Plus, Filter } from 'lucide-react';
+import { Pause, Play, Trash2, Search, Plus } from 'lucide-react';
 import { formatBytes, formatRelative, short } from '@/lib/utils';
+import { cn } from '@/lib/utils';
+
+type StateFilter = 'all' | 'running' | 'paused';
 
 export default function SandboxesPage() {
   const [q, setQ] = useState('');
+  const [stateFilter, setStateFilter] = useState<StateFilter>('all');
   const qc = useQueryClient();
   const { t } = useTranslation('sandboxes');
 
   const { data, isLoading } = useQuery({
-    queryKey: ['sandboxes'],
-    queryFn: () => sandboxApi.list(),
+    queryKey: ['sandboxes', stateFilter],
+    queryFn: () =>
+      sandboxApi.list({ state: stateFilter === 'all' ? undefined : stateFilter }),
     refetchInterval: 5_000,
   });
 
+  const [pendingId, setPendingId] = useState<string | null>(null);
+
   const killMut = useMutation({
-    mutationFn: (id: string) => sandboxApi.kill(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['sandboxes'] }),
+    mutationFn: (id: string) => { setPendingId(id); return sandboxApi.kill(id); },
+    onSettled: () => { setPendingId(null); qc.invalidateQueries({ queryKey: ['sandboxes'] }); },
   });
   const pauseMut = useMutation({
-    mutationFn: (id: string) => sandboxApi.pause(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['sandboxes'] }),
+    mutationFn: (id: string) => { setPendingId(id); return sandboxApi.pause(id); },
+    onSettled: () => { setPendingId(null); qc.invalidateQueries({ queryKey: ['sandboxes'] }); },
   });
   const resumeMut = useMutation({
-    mutationFn: (id: string) => sandboxApi.resume(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['sandboxes'] }),
+    mutationFn: (id: string) => { setPendingId(id); return sandboxApi.resume(id); },
+    onSettled: () => { setPendingId(null); qc.invalidateQueries({ queryKey: ['sandboxes'] }); },
   });
 
   const filtered = useMemo(() => {
@@ -45,9 +52,15 @@ export default function SandboxesPage() {
     return data.filter((sb) =>
       [sb.sandboxID, sb.templateID, sb.alias, sb.clientID]
         .filter(Boolean)
-        .some((v) => String(v).toLowerCase().includes(needle))
+        .some((v) => String(v).toLowerCase().includes(needle)),
     );
   }, [data, q]);
+
+  const STATE_TABS: { key: StateFilter; label: string }[] = [
+    { key: 'all', label: t('filter.all') },
+    { key: 'running', label: t('filter.running') },
+    { key: 'paused', label: t('filter.paused') },
+  ];
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -66,7 +79,10 @@ export default function SandboxesPage() {
       <Card className="!p-3">
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" size={14} />
+            <Search
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+              size={14}
+            />
             <Input
               placeholder={t('filterPlaceholder')}
               value={q}
@@ -74,19 +90,47 @@ export default function SandboxesPage() {
               className="pl-9"
             />
           </div>
-          <Button variant="outline" size="sm">
-            <Filter size={14} /> {t('status')}
-          </Button>
+          {/* State filter tabs */}
+          <div className="flex items-center rounded-lg border border-border/60 bg-muted/40 p-1 gap-1">
+            {STATE_TABS.map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setStateFilter(key)}
+                className={cn(
+                  'rounded-md px-3 py-1 text-xs font-medium transition-all',
+                  stateFilter === key
+                    ? 'bg-background text-foreground shadow-sm ring-1 ring-border/60'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
+                {label}
+                {/* 显示对应状态的数量角标 */}
+                {key !== 'all' && data && (
+                  <span
+                    className={cn(
+                      'ml-1.5 rounded-full px-1.5 py-0.5 text-[10px]',
+                      key === 'running'
+                        ? 'bg-cube-emerald/20 text-cube-emerald'
+                        : 'bg-cube-amber/20 text-cube-amber',
+                    )}
+                  >
+                    {data.filter((sb) => (sb.state ?? 'running') === key).length}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
         </div>
       </Card>
 
       <Card className="!p-0 overflow-hidden">
-        <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-[11px] uppercase tracking-wider text-muted-foreground">
+        <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-[11px] uppercase tracking-wider text-muted-foreground">
           <div>{t('col.state')}</div>
           <div>{t('col.sandboxId')}</div>
           <div>{t('col.template')}</div>
           <div>{t('col.cpu')}</div>
           <div>{t('col.memory')}</div>
+          <div>{t('col.node')}</div>
           <div>{t('col.started')}</div>
           <div className="text-right">{t('col.actions')}</div>
         </div>
@@ -103,13 +147,11 @@ export default function SandboxesPage() {
             onKill={() => killMut.mutate(sb.sandboxID)}
             onPause={() => pauseMut.mutate(sb.sandboxID)}
             onResume={() => resumeMut.mutate(sb.sandboxID)}
-            busy={killMut.isPending || pauseMut.isPending || resumeMut.isPending}
+            busy={pendingId === sb.sandboxID}
           />
         ))}
         {filtered.length === 0 && !isLoading && (
-          <div className="py-16 text-center text-sm text-muted-foreground">
-            {t('noMatch')}
-          </div>
+          <div className="py-16 text-center text-sm text-muted-foreground">{t('noMatch')}</div>
         )}
       </Card>
     </div>
@@ -133,19 +175,27 @@ function Row({
   const state = sb.state ?? 'running';
   const tone = state === 'paused' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   return (
-    <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-sm transition hover:bg-muted/50">
+    <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-sm transition hover:bg-muted/50">
       <div>
         <Badge tone={tone as any}>{state}</Badge>
       </div>
       <div className="flex flex-col">
-        <Link to={`/sandboxes/${sb.sandboxID}`} className="font-mono text-xs text-foreground hover:text-primary">
+        <Link
+          to={`/sandboxes/${sb.sandboxID}`}
+          className="font-mono text-xs text-foreground hover:text-primary"
+        >
           {short(sb.sandboxID)}
         </Link>
-        {sb.alias && <span className="text-[11px] text-muted-foreground">{t('alias', { alias: sb.alias })}</span>}
+        {sb.alias && (
+          <span className="text-[11px] text-muted-foreground">{t('alias', { alias: sb.alias })}</span>
+        )}
       </div>
       <div className="truncate text-xs text-muted-foreground">{sb.templateID ?? '—'}</div>
-      <div className="text-xs text-muted-foreground">{sb.cpuCount != null ? t('vcpu', { count: sb.cpuCount }) : '—'}</div>
+      <div className="text-xs text-muted-foreground">
+        {sb.cpuCount != null ? t('vcpu', { count: sb.cpuCount }) : '—'}
+      </div>
       <div className="text-xs text-muted-foreground">{formatBytes(sb.memoryMB)}</div>
+      <div className="font-mono text-xs text-muted-foreground/70">{sb.clientID || '—'}</div>
       <div className="text-xs text-muted-foreground">{formatRelative(sb.startedAt)}</div>
       <div className="flex justify-end gap-1">
         {state === 'paused' ? (

@@ -1,0 +1,55 @@
+{
+  "title": "Template Detail",
+  "backToTemplates": "Back to Templates",
+  "notFound": "Template not found or has been deleted.",
+  "section": {
+    "info": "Basic Info",
+    "infoDesc": "Core properties and current status of the template.",
+    "replicas": "Replicas",
+    "replicasDesc": "Snapshot replicas of this template across nodes.",
+    "danger": "Delete Template",
+    "dangerDesc": "This action cannot be undone. All replicas of this template will also be deleted."
+  },
+  "fields": {
+    "templateID": "Template ID",
+    "status": "Status",
+    "instanceType": "Instance Type",
+    "version": "Version",
+    "spec": "Spec",
+    "node": "Node",
+    "phase": "Phase",
+    "artifactID": "Artifact ID",
+    "snapshotPath": "Snapshot Path",
+    "lastJob": "Last Job",
+    "lastError": "Last Error"
+  },
+  "status": {
+    "ready": "Ready",
+    "building": "Building",
+    "failed": "Failed",
+    "unknown": "Unknown"
+  },
+  "rebuild": {
+    "button": "Rebuild Template",
+    "confirm": "Confirm Rebuild",
+    "confirmDesc": "This will trigger a template rebuild. The template will be unavailable for creating new sandboxes during the process. Continue?",
+    "cancel": "Cancel",
+    "building": "Building…",
+    "success": "Rebuild triggered",
+    "progress": "Progress {{progress}}%",
+    "viewLogs": "View Build Logs",
+    "hideLogs": "Hide Logs"
+  },
+  "delete": {
+    "button": "Delete Template",
+    "confirm": "Confirm Delete",
+    "confirmDesc": "This action cannot be undone. All replicas of this template will also be deleted. Continue?",
+    "cancel": "Cancel",
+    "deleting": "Deleting…"
+  },
+  "empty": {
+    "replicas": "No replica info available."
+  },
+  "building": "Template is being built. Please refresh in a moment.",
+  "buildFailed": "Template build failed."
+}

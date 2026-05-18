@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::collections::HashMap;
+
 use crate::{
-    cubemaster::{CubeMasterClient, CubeMasterError, NodeSnapshot},
+    cubemaster::{CubeMasterClient, CubeMasterError, ListSandboxRequest, NodeSnapshot},
     error::{AppError, AppResult},
     models::{ClusterOverview, NodeConditionView, NodeResourcesView, NodeView},
 };
@@ -20,12 +22,14 @@ impl ClusterService {
 
     pub async fn cluster_overview(&self) -> AppResult<ClusterOverview> {
         let resp = self.cubemaster.list_nodes().await.map_err(map_err)?;
-        Ok(build_overview(&resp.data))
+        let used_map = self.fetch_used_resources().await;
+        Ok(build_overview_with_used(&resp.data, &used_map))
     }
 
     pub async fn list_nodes(&self) -> AppResult<Vec<NodeView>> {
         let resp = self.cubemaster.list_nodes().await.map_err(map_err)?;
-        Ok(resp.data.into_iter().map(to_view).collect())
+        let used_map = self.fetch_used_resources().await;
+        Ok(resp.data.into_iter().map(|s| to_view_with_used(s, &used_map)).collect())
     }
 
     pub async fn get_node(&self, node_id: &str) -> AppResult<NodeView> {
@@ -33,7 +37,37 @@ impl ClusterService {
         let snapshot = resp
             .data
             .ok_or_else(|| AppError::NotFound(format!("node {} not found", node_id)))?;
-        Ok(to_view(snapshot))
+        let used_map = self.fetch_used_resources().await;
+        Ok(to_view_with_used(snapshot, &used_map))
+    }
+
+    /// Fetch all running sandboxes and aggregate cpu_milli / memory_mb used per host IP.
+    /// Returns a map of host_ip -> (used_cpu_milli, used_memory_mb).
+    /// On any error the map is empty and saturation falls back to CubeMaster values.
+    async fn fetch_used_resources(&self) -> HashMap<String, (i64, i64)> {
+        let req = ListSandboxRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            instance_type: String::new(),
+            host_id: None,
+            start_idx: Some(1),
+            size: Some(500),
+            filter: None,
+        };
+        let Ok(resp) = self.cubemaster.list_sandboxes(&req).await else {
+            return HashMap::new();
+        };
+        let mut map: HashMap<String, (i64, i64)> = HashMap::new();
+        for sb in &resp.sandboxes {
+            // only count running sandboxes
+            if sb.status.to_lowercase() != "running" {
+                continue;
+            }
+            let entry = map.entry(sb.host_id.clone()).or_default();
+            // cpu_count is in cores; convert to millicores
+            entry.0 += sb.cpu_count as i64 * 1000;
+            entry.1 += sb.memory_mb as i64;
+        }
+        map
     }
 }
 
@@ -46,6 +80,13 @@ fn map_err(e: CubeMasterError) -> AppError {
 }
 
 pub(crate) fn build_overview(nodes: &[NodeSnapshot]) -> ClusterOverview {
+    build_overview_with_used(nodes, &HashMap::new())
+}
+
+fn build_overview_with_used(
+    nodes: &[NodeSnapshot],
+    used_map: &HashMap<String, (i64, i64)>,
+) -> ClusterOverview {
     let mut overview = ClusterOverview {
         node_count: nodes.len(),
         ..Default::default()
@@ -56,23 +97,47 @@ pub(crate) fn build_overview(nodes: &[NodeSnapshot]) -> ClusterOverview {
             overview.healthy_nodes += 1;
         }
         overview.total_cpu_milli += n.capacity.milli_cpu;
-        overview.allocatable_cpu_milli += n.allocatable.milli_cpu;
         overview.total_memory_mb += n.capacity.memory_mb;
-        overview.allocatable_memory_mb += n.allocatable.memory_mb;
         overview.max_mvm_slots += n.max_mvm_num;
+
+        // Use sandbox-aggregated used resources if available; fall back to CubeMaster allocatable.
+        if let Some(&(used_cpu, used_mem)) = used_map.get(&n.host_ip) {
+            let alloc_cpu = (n.capacity.milli_cpu - used_cpu).max(0);
+            let alloc_mem = (n.capacity.memory_mb - used_mem).max(0);
+            overview.allocatable_cpu_milli += alloc_cpu;
+            overview.allocatable_memory_mb += alloc_mem;
+        } else {
+            overview.allocatable_cpu_milli += n.allocatable.milli_cpu;
+            overview.allocatable_memory_mb += n.allocatable.memory_mb;
+        }
     }
 
     overview
 }
 
-pub(crate) fn to_view(s: NodeSnapshot) -> NodeView {
+/// Build a NodeView, overriding allocatable with sandbox-based actual usage when available.
+pub(crate) fn to_view_with_used(
+    s: NodeSnapshot,
+    used_map: &HashMap<String, (i64, i64)>,
+) -> NodeView {
     let cap_cpu_milli = s.capacity.milli_cpu;
-    let alloc_cpu_milli = s.allocatable.milli_cpu;
     let cap_mem = s.capacity.memory_mb;
-    let alloc_mem = s.allocatable.memory_mb;
+
+    // Use sandbox-aggregated usage if available; fall back to CubeMaster allocatable diff.
+    let (used_cpu_milli, used_mem_mb) = if let Some(&(cpu, mem)) = used_map.get(&s.host_ip) {
+        (cpu, mem)
+    } else {
+        (
+            (cap_cpu_milli - s.allocatable.milli_cpu).max(0),
+            (cap_mem - s.allocatable.memory_mb).max(0),
+        )
+    };
+
+    let alloc_cpu_milli = (cap_cpu_milli - used_cpu_milli).max(0);
+    let alloc_mem_mb = (cap_mem - used_mem_mb).max(0);
 
     let cpu_saturation = saturation_pct(cap_cpu_milli, alloc_cpu_milli);
-    let memory_saturation = saturation_pct(cap_mem, alloc_mem);
+    let memory_saturation = saturation_pct(cap_mem, alloc_mem_mb);
 
     NodeView {
         node_id: s.node_id,
@@ -85,11 +150,14 @@ pub(crate) fn to_view(s: NodeSnapshot) -> NodeView {
         },
         allocatable: NodeResourcesView {
             cpu_milli: alloc_cpu_milli,
-            memory_mb: alloc_mem,
+            memory_mb: alloc_mem_mb,
         },
         cpu_saturation,
         memory_saturation,
         max_mvm_slots: s.max_mvm_num,
+        quota_cpu: s.quota_cpu,
+        quota_mem_mb: s.quota_mem_mb,
+        create_concurrent_num: s.create_concurrent_num,
         heartbeat_time: s.heartbeat_time,
         conditions: s
             .conditions
@@ -108,6 +176,11 @@ pub(crate) fn to_view(s: NodeSnapshot) -> NodeView {
             .map(|t| t.template_id)
             .collect(),
     }
+}
+
+/// Keep the old signature for tests (no sandbox data, pure CubeMaster values).
+pub(crate) fn to_view(s: NodeSnapshot) -> NodeView {
+    to_view_with_used(s, &HashMap::new())
 }
 
 pub(crate) fn saturation_pct(total: i64, allocatable: i64) -> f32 {

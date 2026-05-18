@@ -6,7 +6,9 @@ use uuid::Uuid;
 
 use crate::{
     cubemaster::{
-        CreateTemplateFromImageReq, CubeMasterClient, CubeMasterError, RedoTemplateReq,
+        CreateTemplateContainerOverrides, CreateTemplateCubeVSContext, CreateTemplateEnv,
+        CreateTemplateFromImageReq, CreateTemplateResources, CubeMasterClient,
+        CubeMasterError, HttpGetAction, Probe, ProbeHandler, RedoTemplateReq,
         TemplateDeleteRequest, TemplateJob, TemplateJobResponse,
     },
     error::{AppError, AppResult},
@@ -66,6 +68,16 @@ impl TemplateService {
             )));
         }
 
+        // Extract network fields from create_request JSON (stored by CubeMaster)
+        let network_type = resp.create_request.as_ref()
+            .and_then(|v| v.get("network_type"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) });
+        let allow_internet_access = resp.create_request.as_ref()
+            .and_then(|v| v.get("cubevs_context"))
+            .and_then(|v| v.get("allowInternetAccess"))
+            .and_then(|v| v.as_bool());
+
         Ok(TemplateDetail {
             template_id: string_or(resp.template_id, template_id),
             instance_type: non_empty(resp.instance_type),
@@ -74,6 +86,8 @@ impl TemplateService {
             last_error: non_empty(resp.last_error),
             replicas: resp.replicas,
             create_request: resp.create_request,
+            network_type,
+            allow_internet_access,
         })
     }
 
@@ -81,20 +95,73 @@ impl TemplateService {
         &self,
         body: CreateTemplateRequest,
     ) -> AppResult<TemplateBuildJob> {
-        if body.template_id.trim().is_empty() || body.image.trim().is_empty() {
+        if body.image.trim().is_empty() {
             return Err(AppError::BadRequest(
-                "templateID and image are required".to_string(),
+                "image is required".to_string(),
             ));
         }
 
+        // probe
+        let probe = body.probe_port
+            .or_else(|| body.exposed_ports.as_ref().and_then(|p| p.first().copied()))
+            .map(|port| Probe {
+                probe_handler: ProbeHandler {
+                    http_get: Some(HttpGetAction {
+                        path: body.probe_path.clone().unwrap_or_else(|| "/health".to_string()),
+                        port,
+                        host: None,
+                        scheme: None,
+                    }),
+                    exec: None,
+                },
+                timeout_ms: Some(30000),
+                period_ms: Some(500),
+                success_threshold: Some(1),
+                failure_threshold: Some(60),
+            });
+
+        // resources
+        let resources = if body.cpu.is_some() || body.memory.is_some() {
+            Some(CreateTemplateResources {
+                cpu: body.cpu.map(|v| format!("{}m", v)),
+                mem: body.memory.map(|v| format!("{}Mi", v)),
+            })
+        } else {
+            None
+        };
+
+        // envs: parse "KEY=VALUE" strings
+        let envs = body.env.map(|envs| {
+            envs.into_iter()
+                .filter_map(|s| {
+                    let mut parts = s.splitn(2, '=');
+                    let key = parts.next()?.trim().to_string();
+                    let value = parts.next().unwrap_or("").to_string();
+                    if key.is_empty() { None } else { Some(CreateTemplateEnv { key, value }) }
+                })
+                .collect::<Vec<_>>()
+        }).filter(|v| !v.is_empty());
+
+        let container_overrides = if probe.is_some() || resources.is_some() || envs.is_some() {
+            Some(CreateTemplateContainerOverrides { probe, resources, envs })
+        } else {
+            None
+        };
+
+        // cubevs_context
+        let cubevs_context = body.allow_internet_access.map(|v| CreateTemplateCubeVSContext {
+            allow_internet_access: Some(v),
+        });
+
         let req = CreateTemplateFromImageReq {
             request_id: new_request_id(),
-            instance_type: body
-                .instance_type
-                .unwrap_or_else(|| self.instance_type.clone()),
+            instance_type: body.instance_type.unwrap_or_else(|| self.instance_type.clone()),
             template_id: body.template_id,
-            image: body.image,
-            extra: body.extra,
+            source_image_ref: body.image.trim().to_string(),
+            writable_layer_size: body.writable_layer_size,
+            exposed_ports: body.exposed_ports,
+            container_overrides,
+            cubevs_context,
         };
 
         let resp = self

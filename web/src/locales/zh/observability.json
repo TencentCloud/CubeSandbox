@@ -1,0 +1,55 @@
+{
+  "title": "可观测性",
+  "description": "集群运行时状态、节点健康与模板构建概览",
+  "sandboxes": {
+    "title": "沙箱健康概览",
+    "desc": "当前集群中沙箱的运行状态分布",
+    "total": "沙箱总数",
+    "running": "运行中",
+    "paused": "已暂停",
+    "distribution": "状态分布",
+    "recent": "最近创建",
+    "empty": "暂无沙箱",
+    "colId": "沙箱 ID",
+    "colTemplate": "模板",
+    "colState": "状态",
+    "colCreated": "创建时间"
+  },
+  "nodes": {
+    "title": "节点健康状态",
+    "desc": "各节点资源使用率与健康状况",
+    "healthy": "健康",
+    "degraded": "异常",
+    "healthyCount": "健康节点",
+    "totalCount": "总节点数",
+    "cpu": "CPU",
+    "memory": "内存",
+    "empty": "暂无节点数据"
+  },
+  "api": {
+    "title": "API 请求监控",
+    "desc": "CubeAPI 网关连通性与限流配置",
+    "rateLimit": "限流阈值",
+    "auth": "认证状态",
+    "authOn": "已启用",
+    "authOff": "未启用",
+    "latency": "延迟",
+    "test": "测试连通性",
+    "testing": "测试中…",
+    "connected": "连接正常",
+    "failed": "连接失败"
+  },
+  "templates": {
+    "title": "模板构建状态",
+    "desc": "各模板当前状态与异常情况",
+    "ready": "正常",
+    "building": "构建中",
+    "failed": "失败",
+    "failedList": "失败模板",
+    "noFailed": "无失败模板",
+    "colId": "模板 ID",
+    "colStatus": "状态",
+    "colVersion": "版本",
+    "colError": "错误信息"
+  }
+}

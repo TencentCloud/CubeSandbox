@@ -10,11 +10,18 @@ import { ThemeProvider } from '@/components/ThemeProvider';
 import OverviewPage from '@/pages/Overview';
 import SandboxesPage from '@/pages/Sandboxes';
 import SandboxDetailPage from '@/pages/SandboxDetail';
+import SandboxNewPage from '@/pages/SandboxNew';
 import TemplatesPage from '@/pages/Templates';
 import NodesPage from '@/pages/Nodes';
 import KeysPage from '@/pages/Keys';
+import SettingsPage from '@/pages/Settings';
+import TemplateDetailPage from '@/pages/TemplateDetail';
+import NodeDetailPage from '@/pages/NodeDetail';
+import NetworkPage from '@/pages/Network';
+import ObservabilityPage from '@/pages/Observability';
+import TemplateStorePage from '@/pages/TemplateStore';
 import { Placeholder } from '@/pages/Placeholder';
-import { Network, Activity, Settings, Package, Plus } from 'lucide-react';
+import { Network, Activity, Settings, Package } from 'lucide-react';
 
 import './styles/globals.css';
 import '@/i18n';
@@ -35,30 +42,20 @@ const App = () => (
             <Route element={<AppShell />}>
               <Route path="/" element={<OverviewPage />} />
               <Route path="/sandboxes" element={<SandboxesPage />} />
-              <Route
-                path="/sandboxes/new"
-                element={<Placeholder titleKey="newSandbox.title" descriptionKey="newSandbox.description" icon={Plus} />}
-              />
+              <Route path="/sandboxes/new" element={<SandboxNewPage />} />
               <Route path="/sandboxes/:sandboxID" element={<SandboxDetailPage />} />
               <Route path="/templates" element={<TemplatesPage />} />
               <Route
                 path="/templates/:templateID"
-                element={<Placeholder titleKey="templateDetail.title" descriptionKey="templateDetail.description" icon={Package} />}
+                element={<TemplateDetailPage />}
               />
               <Route path="/nodes" element={<NodesPage />} />
-              <Route
-                path="/network"
-                element={<Placeholder titleKey="network.title" descriptionKey="network.description" icon={Network} />}
-              />
-              <Route
-                path="/observability"
-                element={<Placeholder titleKey="observability.title" descriptionKey="observability.description" icon={Activity} />}
-              />
+              <Route path="/nodes/:nodeID" element={<NodeDetailPage />} />
+              <Route path="/network" element={<NetworkPage />} />
+              <Route path="/observability" element={<ObservabilityPage />} />
+              <Route path="/store" element={<TemplateStorePage />} />
               <Route path="/keys" element={<KeysPage />} />
-              <Route
-                path="/settings"
-                element={<Placeholder titleKey="settings.title" descriptionKey="settings.description" icon={Settings} />}
-              />
+              <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Routes>

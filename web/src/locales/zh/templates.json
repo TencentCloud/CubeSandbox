@@ -8,5 +8,22 @@
     "version": "版本",
     "image": "镜像"
   },
-  "instanceDefault": "标准"
+  "instanceDefault": "标准",
+  "create": {
+    "button": "新建模板",
+    "title": "新建模板",
+    "templateID": "Template ID",
+    "image": "image",
+    "instanceType": "instance-type",
+    "cancel": "取消",
+    "submit": "创建",
+    "creating": "创建中…",
+    "error": "创建失败，请重试。",
+    "writableLayerSize": "writable-layer-size",
+    "writableLayerSizeHint": "e.g. 1G, 2G",
+    "exposedPorts": "expose-port",
+    "exposedPortsHint": "Multiple ports separated by commas, e.g. 49983,9000.",
+    "probePort": "probe",
+    "probePath": "probe-path"
+  }
 }

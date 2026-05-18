@@ -1,0 +1,26 @@
+{
+  "backToNodes": "Back to nodes",
+  "notFound": "Node not found or offline.",
+  "section": {
+    "resources": "Resources",
+    "conditions": "Conditions",
+    "localTemplates": "Local Templates",
+    "localTemplatesDesc": "Template replicas cached on this node. Click to view template details.",
+    "sandboxes": "Running Sandboxes",
+    "sandboxesDesc": "Sandbox instances currently scheduled on this node."
+  },
+  "fields": {
+    "cpu": "CPU",
+    "memory": "Memory",
+    "totalCpu": "Total CPU",
+    "allocCpu": "Allocatable CPU",
+    "totalMem": "Total Memory",
+    "allocMem": "Allocatable Memory",
+    "maxMvmSlots": "Max MVM Slots",
+    "address": "Address",
+    "heartbeat": "Last Heartbeat"
+  },
+  "empty": {
+    "sandboxes": "No sandboxes running on this node."
+  }
+}

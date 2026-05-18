@@ -30,3 +30,57 @@ export function short(id: string, head = 6, tail = 4): string {
   if (id.length <= head + tail + 1) return id;
   return `${id.slice(0, head)}…${id.slice(-tail)}`;
 }
+
+/**
+ * Copy text to clipboard with execCommand fallback for HTTP (non-HTTPS) environments.
+ * On success, dispatches a 'cube:toast' custom event so ToastProvider can show a notification.
+ */
+export function copyToClipboard(text: string, message = '已复制'): void {
+  const dispatch = (ok: boolean) => {
+    if (ok) {
+      window.dispatchEvent(new CustomEvent('cube:toast', { detail: { message } }));
+    }
+  };
+
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => dispatch(true)).catch(() => {
+      fallbackCopy(text, dispatch);
+    });
+  } else {
+    fallbackCopy(text, dispatch);
+  }
+}
+
+function fallbackCopy(text: string, cb: (ok: boolean) => void) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    cb(ok);
+  } catch {
+    cb(false);
+  }
+}
+
+/**
+ * Translate a template-deletion API error into a human-friendly message.
+ * Falls back to the raw error message if no known pattern matches.
+ */
+export function formatDeleteError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (/template is still in use/i.test(raw)) {
+    return '该模板当前有沙箱实例正在使用，请先销毁所有关联沙箱后再删除。';
+  }
+  if (/build job is still active|attempt in progress/i.test(raw)) {
+    return '模板正在构建中，请等待构建完成后再删除。';
+  }
+  if (/cleanup locator is missing/i.test(raw)) {
+    return '模板清理信息不完整，无法自动删除，请联系管理员。';
+  }
+  return raw;
+}
