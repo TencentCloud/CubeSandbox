@@ -1,0 +1,26 @@
+{
+  "backToNodes": "返回节点列表",
+  "notFound": "节点不存在或已下线。",
+  "section": {
+    "resources": "资源概览",
+    "conditions": "状态条件",
+    "localTemplates": "本地模板",
+    "localTemplatesDesc": "已缓存到该节点的模板副本，点击可查看模板详情。",
+    "sandboxes": "运行中沙箱",
+    "sandboxesDesc": "当前调度到该节点的沙箱实例。"
+  },
+  "fields": {
+    "cpu": "CPU",
+    "memory": "内存",
+    "totalCpu": "总 CPU",
+    "allocCpu": "可分配 CPU",
+    "totalMem": "总内存",
+    "allocMem": "可分配内存",
+    "maxMvmSlots": "最大 MVM 槽位",
+    "address": "地址",
+    "heartbeat": "最近心跳"
+  },
+  "empty": {
+    "sandboxes": "该节点上暂无运行中的沙箱。"
+  }
+}
