@@ -97,6 +97,27 @@ type dockerImageConfig struct {
 	User       string   `json:"User"`
 }
 
+// applyUserToSecurityContext parses a Docker USER string (e.g. "node", "1000", "node:group", "1000:1000")
+// and sets the corresponding RunAsUser/RunAsUsername/RunAsGroup fields on the SecurityContext.
+func applyUserToSecurityContext(securityContext *types.ContainerSecurityContext, user string) {
+	userPart := user
+	groupPart := ""
+	if idx := strings.IndexByte(user, ':'); idx >= 0 {
+		userPart = user[:idx]
+		groupPart = user[idx+1:]
+	}
+	if uid, err := strconv.ParseInt(userPart, 10, 64); err == nil {
+		securityContext.RunAsUser = &types.Int64Value{Value: uid}
+	} else {
+		securityContext.RunAsUsername = userPart
+	}
+	if groupPart != "" {
+		if gid, err := strconv.ParseInt(groupPart, 10, 64); err == nil {
+			securityContext.RunAsGroup = &types.Int64Value{Value: gid}
+		}
+	}
+}
+
 type resolvedSourceImage struct {
 	localRef     string
 	digest       string
@@ -1670,8 +1691,34 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 		resources = req.ContainerOverrides.Resources
 	}
 	securityContext := &types.ContainerSecurityContext{Privileged: true, ReadonlyRootfs: false}
+	// Apply image User as default RunAsUser/RunAsUsername, can be overridden by ContainerOverrides.SecurityContext
+	// Docker USER format: "user", "uid", "user:group", "uid:gid"
+	if imageCfg.User != "" {
+		applyUserToSecurityContext(securityContext, imageCfg.User)
+	}
 	if req.ContainerOverrides != nil && req.ContainerOverrides.SecurityContext != nil {
-		securityContext = req.ContainerOverrides.SecurityContext
+		override := req.ContainerOverrides.SecurityContext
+		// Only merge user-related and pointer fields; Privileged/NoNewPrivs are bool
+		// with zero-value false, so we cannot distinguish "not set" from "explicitly false".
+		// Keep the default Privileged=true unless explicitly overridden via API.
+		if override.Privileged {
+			securityContext.Privileged = true
+		}
+		if override.RunAsUser != nil {
+			securityContext.RunAsUser = override.RunAsUser
+		}
+		if override.RunAsGroup != nil {
+			securityContext.RunAsGroup = override.RunAsGroup
+		}
+		if override.RunAsUsername != "" {
+			securityContext.RunAsUsername = override.RunAsUsername
+		}
+		if override.Capabilities != nil {
+			securityContext.Capabilities = override.Capabilities
+		}
+		if override.NoNewPrivs {
+			securityContext.NoNewPrivs = true
+		}
 		securityContext.ReadonlyRootfs = false
 	}
 	if req.ContainerOverrides != nil && req.ContainerOverrides.VolumeMounts != nil {

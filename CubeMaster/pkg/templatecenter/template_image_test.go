@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1194,5 +1195,173 @@ func TestRunRedoTemplateImageJobRequiresLocalImageForBuildRedo(t *testing.T) {
 	}
 	if got, _ := lastUpdate["error_message"].(string); !strings.Contains(got, "still exist locally") {
 		t.Fatalf("unexpected error message: %q", got)
+	}
+}
+
+func TestApplyUserToSecurityContext(t *testing.T) {
+	tests := []struct {
+		name           string
+		user           string
+		wantRunAsUser  int64
+		wantUsername   string
+		wantRunAsGroup int64
+	}{
+		{
+			name:          "numeric UID only",
+			user:          "1000",
+			wantRunAsUser: 1000,
+		},
+		{
+			name:         "username only",
+			user:         "node",
+			wantUsername: "node",
+		},
+		{
+			name:           "UID:GID format",
+			user:           "1000:1000",
+			wantRunAsUser:  1000,
+			wantRunAsGroup: 1000,
+		},
+		{
+			name:         "username:group format",
+			user:         "node:node",
+			wantUsername: "node",
+		},
+		{
+			name:          "UID:groupname format (group ignored since not numeric)",
+			user:          "1000:node",
+			wantRunAsUser: 1000,
+		},
+		{
+			name:          "root user",
+			user:          "0",
+			wantRunAsUser: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := &types.ContainerSecurityContext{}
+			applyUserToSecurityContext(sc, tt.user)
+
+			if tt.wantRunAsUser != 0 || tt.wantUsername == "" {
+				if sc.RunAsUser == nil {
+					t.Errorf("RunAsUser is nil, want %d", tt.wantRunAsUser)
+				} else if sc.RunAsUser.Value != tt.wantRunAsUser {
+					t.Errorf("RunAsUser.Value = %d, want %d", sc.RunAsUser.Value, tt.wantRunAsUser)
+				}
+			}
+			if tt.wantUsername != "" {
+				if sc.RunAsUsername != tt.wantUsername {
+					t.Errorf("RunAsUsername = %q, want %q", sc.RunAsUsername, tt.wantUsername)
+				}
+			}
+			if tt.wantRunAsGroup != 0 {
+				if sc.RunAsGroup == nil {
+					t.Errorf("RunAsGroup is nil, want %d", tt.wantRunAsGroup)
+				} else if sc.RunAsGroup.Value != tt.wantRunAsGroup {
+					t.Errorf("RunAsGroup.Value = %d, want %d", sc.RunAsGroup.Value, tt.wantRunAsGroup)
+				}
+			}
+		})
+	}
+}
+
+func TestSecurityContextMerge(t *testing.T) {
+	// Simulate the merge logic from generateTemplateCreateRequest
+	tests := []struct {
+		name            string
+		imageUser       string
+		overrideUser    string // CLI --user
+		wantRunAsUser   int64
+		wantUsername    string
+		wantPrivileged  bool
+	}{
+		{
+			name:           "image user only",
+			imageUser:      "node",
+			overrideUser:   "",
+			wantUsername:   "node",
+			wantPrivileged: true,
+		},
+		{
+			name:           "CLI --user overrides image user",
+			imageUser:      "node",
+			overrideUser:   "2000",
+			wantRunAsUser:  2000,
+			wantPrivileged: true,
+		},
+		{
+			name:           "no user set, privileged default",
+			imageUser:      "",
+			overrideUser:   "",
+			wantPrivileged: true,
+		},
+		{
+			name:           "image UID:GID",
+			imageUser:      "1000:1000",
+			overrideUser:   "",
+			wantRunAsUser:  1000,
+			wantPrivileged: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate generateTemplateCreateRequest logic
+			securityContext := &types.ContainerSecurityContext{Privileged: true, ReadonlyRootfs: false}
+			if tt.imageUser != "" {
+				applyUserToSecurityContext(securityContext, tt.imageUser)
+			}
+			// Simulate ContainerOverrides from CLI --user
+			if tt.overrideUser != "" {
+				override := &types.ContainerSecurityContext{}
+				userPart := tt.overrideUser
+				groupPart := ""
+				if idx := strings.IndexByte(tt.overrideUser, ':'); idx >= 0 {
+					userPart = tt.overrideUser[:idx]
+					groupPart = tt.overrideUser[idx+1:]
+				}
+				if uid, err := strconv.ParseInt(userPart, 10, 64); err == nil {
+					override.RunAsUser = &types.Int64Value{Value: uid}
+				} else {
+					override.RunAsUsername = userPart
+				}
+				if groupPart != "" {
+					if gid, err := strconv.ParseInt(groupPart, 10, 64); err == nil {
+						override.RunAsGroup = &types.Int64Value{Value: gid}
+					}
+				}
+				// Merge logic (same as template_image.go)
+				// Privileged is bool with zero-value false, so only set if true
+				if override.Privileged {
+					securityContext.Privileged = true
+				}
+				if override.RunAsUser != nil {
+					securityContext.RunAsUser = override.RunAsUser
+				}
+				if override.RunAsGroup != nil {
+					securityContext.RunAsGroup = override.RunAsGroup
+				}
+				if override.RunAsUsername != "" {
+					securityContext.RunAsUsername = override.RunAsUsername
+				}
+				securityContext.ReadonlyRootfs = false
+			}
+
+			if securityContext.Privileged != tt.wantPrivileged {
+				t.Errorf("Privileged = %v, want %v", securityContext.Privileged, tt.wantPrivileged)
+			}
+			if tt.wantRunAsUser != 0 {
+				if securityContext.RunAsUser == nil || securityContext.RunAsUser.Value != tt.wantRunAsUser {
+					t.Errorf("RunAsUser = %v, want %d", securityContext.RunAsUser, tt.wantRunAsUser)
+				}
+			}
+			if tt.wantUsername != "" {
+				if securityContext.RunAsUsername != tt.wantUsername {
+					t.Errorf("RunAsUsername = %q, want %q", securityContext.RunAsUsername, tt.wantUsername)
+				}
+			}
+		})
 	}
 }

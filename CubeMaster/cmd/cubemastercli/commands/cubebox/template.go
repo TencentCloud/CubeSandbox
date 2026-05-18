@@ -770,6 +770,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
+		cli.StringFlag{Name: "user", Usage: "override the user (UID or username) for the container process, e.g. --user 1000 or --user node"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
 	},
 	Action: func(c *cli.Context) error {
@@ -1372,8 +1373,9 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	probePort := c.Int("probe")
 	cpuMillicores := c.Int("cpu")
 	memoryMB := c.Int("memory")
+	userFlag := c.String("user")
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") {
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && userFlag == "" {
 		return nil, nil
 	}
 
@@ -1426,6 +1428,25 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 			PeriodMs:         500,
 			FailureThreshold: 60,
 			SuccessThreshold: 1,
+		}
+	}
+	if userFlag != "" {
+		overrides.SecurityContext = &types.ContainerSecurityContext{}
+		userPart := userFlag
+		groupPart := ""
+		if idx := strings.IndexByte(userFlag, ':'); idx >= 0 {
+			userPart = userFlag[:idx]
+			groupPart = userFlag[idx+1:]
+		}
+		if uid, err := strconv.ParseInt(userPart, 10, 64); err == nil {
+			overrides.SecurityContext.RunAsUser = &types.Int64Value{Value: uid}
+		} else {
+			overrides.SecurityContext.RunAsUsername = userPart
+		}
+		if groupPart != "" {
+			if gid, err := strconv.ParseInt(groupPart, 10, 64); err == nil {
+				overrides.SecurityContext.RunAsGroup = &types.Int64Value{Value: gid}
+			}
 		}
 	}
 	return overrides, nil
