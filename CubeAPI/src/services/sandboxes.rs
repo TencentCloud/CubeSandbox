@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     constants::ENVD_VERSION,
     cubemaster::{
-        extract_template_id, CreateSandboxRequest, CubeMasterClient, CubeMasterError,
+        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient, CubeMasterError,
         CubeVSContext, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo, SandboxLogsRequest,
         SandboxRefreshRequest, SandboxSnapshotRequest, SandboxStatus, SandboxTimeoutRequest,
         SandboxUpdateRequest,
@@ -311,7 +311,7 @@ impl SandboxService {
                         .iter()
                         .map(|l| SandboxLog {
                             timestamp: l.timestamp,
-                            line: l.line.clone(),
+                            line: l.message.clone(),
                         })
                         .collect(),
                     log_entries: resp.logs.into_iter().map(to_log_entry).collect(),
@@ -508,16 +508,13 @@ impl SandboxService {
     fn build_logs_request(
         &self,
         sandbox_id: &str,
-        start: Option<i64>,
+        cursor: Option<i64>,
         limit: i32,
     ) -> SandboxLogsRequest {
         SandboxLogsRequest {
-            request_id: new_request_id(),
             sandbox_id: sandbox_id.to_string(),
-            instance_type: self.instance_type.clone(),
-            start,
+            cursor,
             limit,
-            source: "all".to_string(),
         }
     }
 }
@@ -564,12 +561,17 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
     let now = chrono::Utc::now();
     let template_id = extract_template_id(&s.template_id, &s.annotations, &s.labels);
 
+    // Prefer explicit started_at; fall back to create_at (Unix nanos from Cubelet); last resort: now
+    let started_at = s.started_at
+        .or_else(|| datetime_from_unix_nanos(s.create_at))
+        .unwrap_or(now);
+
     ListedSandbox {
         template_id,
         alias: None,
         sandbox_id: s.sandbox_id,
         client_id: s.host_id,
-        started_at: s.started_at.unwrap_or(now),
+        started_at,
         end_at: s.end_at.unwrap_or(now),
         cpu_count: s.cpu_count,
         memory_mb: s.memory_mb,
@@ -626,6 +628,7 @@ fn sandbox_state_from_status(status: SandboxStatus) -> SandboxState {
 fn sandbox_state_from_str(status: &str) -> SandboxState {
     match status.to_lowercase().as_str() {
         "paused" => SandboxState::Paused,
+        "pausing" => SandboxState::Pausing,
         _ => SandboxState::Running,
     }
 }
@@ -639,14 +642,17 @@ fn optional_metadata(metadata: HashMap<String, String>) -> Option<HashMap<String
 }
 
 fn to_log_entry(log: crate::cubemaster::SandboxLogLine) -> SandboxLogEntry {
-    let mut fields = HashMap::new();
-    fields.insert("source".to_string(), log.source);
-
+    let level = match log.level.to_lowercase().as_str() {
+        "debug" => ModelLogLevel::Debug,
+        "warn" | "warning" => ModelLogLevel::Warn,
+        "error" => ModelLogLevel::Error,
+        _ => ModelLogLevel::Info,
+    };
     SandboxLogEntry {
         timestamp: log.timestamp,
-        message: log.line,
-        level: ModelLogLevel::Info,
-        fields,
+        message: log.message,
+        level,
+        fields: HashMap::new(),
     }
 }
 
