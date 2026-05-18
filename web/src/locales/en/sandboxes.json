@@ -4,6 +4,11 @@
   "newSandbox": "New sandbox",
   "filterPlaceholder": "Filter by id, template, client…",
   "status": "Status",
+  "filter": {
+    "all": "All",
+    "running": "Running",
+    "paused": "Paused"
+  },
   "col": {
     "state": "State",
     "sandboxId": "Sandbox ID",
@@ -11,7 +16,8 @@
     "cpu": "CPU",
     "memory": "Memory",
     "started": "Started",
-    "actions": "Actions"
+    "actions": "Actions",
+    "node": "Node"
   },
   "noMatch": "No sandboxes match your filter.",
   "alias": "alias: {{alias}}",

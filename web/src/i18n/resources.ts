@@ -9,10 +9,17 @@ import enOverview from '@/locales/en/overview.json';
 import enSandboxes from '@/locales/en/sandboxes.json';
 import enSandboxDetail from '@/locales/en/sandboxDetail.json';
 import enTemplates from '@/locales/en/templates.json';
+import enTemplateDetail from '@/locales/en/templateDetail.json';
 import enNodes from '@/locales/en/nodes.json';
+import enNodeDetail from '@/locales/en/nodeDetail.json';
+import enNetwork from '@/locales/en/network.json';
 import enKeys from '@/locales/en/keys.json';
 import enPlaceholder from '@/locales/en/placeholder.json';
+import enSandboxNew from '@/locales/en/sandboxNew.json';
 import enTheme from '@/locales/en/theme.json';
+import enSettings from '@/locales/en/settings.json';
+import enObservability from '@/locales/en/observability.json';
+import enStore from '@/locales/en/store.json';
 
 import zhCommon from '@/locales/zh/common.json';
 import zhNav from '@/locales/zh/nav.json';
@@ -22,10 +29,17 @@ import zhOverview from '@/locales/zh/overview.json';
 import zhSandboxes from '@/locales/zh/sandboxes.json';
 import zhSandboxDetail from '@/locales/zh/sandboxDetail.json';
 import zhTemplates from '@/locales/zh/templates.json';
+import zhTemplateDetail from '@/locales/zh/templateDetail.json';
 import zhNodes from '@/locales/zh/nodes.json';
+import zhNodeDetail from '@/locales/zh/nodeDetail.json';
+import zhNetwork from '@/locales/zh/network.json';
 import zhKeys from '@/locales/zh/keys.json';
 import zhPlaceholder from '@/locales/zh/placeholder.json';
+import zhSandboxNew from '@/locales/zh/sandboxNew.json';
 import zhTheme from '@/locales/zh/theme.json';
+import zhSettings from '@/locales/zh/settings.json';
+import zhObservability from '@/locales/zh/observability.json';
+import zhStore from '@/locales/zh/store.json';
 
 export const resources = {
   en: {
@@ -37,10 +51,17 @@ export const resources = {
     sandboxes: enSandboxes,
     sandboxDetail: enSandboxDetail,
     templates: enTemplates,
+    templateDetail: enTemplateDetail,
     nodes: enNodes,
+    nodeDetail: enNodeDetail,
+    network: enNetwork,
     keys: enKeys,
     placeholder: enPlaceholder,
+    sandboxNew: enSandboxNew,
     theme: enTheme,
+    settings: enSettings,
+    observability: enObservability,
+    store: enStore,
   },
   zh: {
     common: zhCommon,
@@ -51,10 +72,17 @@ export const resources = {
     sandboxes: zhSandboxes,
     sandboxDetail: zhSandboxDetail,
     templates: zhTemplates,
+    templateDetail: zhTemplateDetail,
     nodes: zhNodes,
+    nodeDetail: zhNodeDetail,
+    network: zhNetwork,
     keys: zhKeys,
     placeholder: zhPlaceholder,
+    sandboxNew: zhSandboxNew,
     theme: zhTheme,
+    settings: zhSettings,
+    observability: zhObservability,
+    store: zhStore,
   },
 } as const;
 

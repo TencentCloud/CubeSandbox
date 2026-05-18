@@ -46,6 +46,7 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
   const body = text ? safeJson(text) : undefined;
   if (!resp.ok) {
     const msg = (body && typeof body === 'object' && 'error' in body && (body as any).error)
+      || (body && typeof body === 'object' && 'message' in body && (body as any).message)
       || `${resp.status} ${resp.statusText}`;
     throw new ApiError(resp.status, String(msg), body);
   }

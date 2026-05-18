@@ -8,5 +8,7 @@
   "notifications": "通知",
   "language": "语言",
   "english": "English",
-  "chinese": "简体中文"
+  "chinese": "简体中文",
+  "github": "GitHub",
+  "docs": "文档"
 }

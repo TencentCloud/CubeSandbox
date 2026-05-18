@@ -325,3 +325,38 @@ export function getSandboxLogs(sandboxID: string): SandboxLogsDto | undefined {
     ],
   };
 }
+
+export function createSandbox(body: {
+  templateID: string;
+  timeout?: number;
+  alias?: string;
+  autoPause?: boolean;
+  metadata?: Record<string, string>;
+}): SandboxSessionDto {
+  const sandboxID = 'isb_' + Math.random().toString(36).slice(2, 18).padEnd(16, '0');
+  const newSandbox: ListedSandboxDto = {
+    templateID: body.templateID,
+    sandboxID,
+    alias: body.alias,
+    clientID: 'dashboard',
+    startedAt: new Date().toISOString(),
+    endAt: later((body.timeout ?? 300)),
+    cpuCount: 2,
+    memoryMB: 4096,
+    diskSizeMB: 8192,
+    metadata: body.metadata ?? {},
+    state: 'running',
+    envdVersion: '0.1.7',
+  };
+  sandboxes.push(newSandbox);
+  return {
+    templateID: newSandbox.templateID,
+    sandboxID: newSandbox.sandboxID,
+    alias: newSandbox.alias,
+    clientID: newSandbox.clientID,
+    envdVersion: newSandbox.envdVersion,
+    envdAccessToken: `eat_${sandboxID.slice(-8)}`,
+    trafficAccessToken: undefined,
+    domain: 'cube.local',
+  };
+}

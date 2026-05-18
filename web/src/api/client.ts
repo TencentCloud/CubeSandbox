@@ -32,6 +32,8 @@ export interface TemplateSummary {
 export interface TemplateDetail extends TemplateSummary {
   replicas: unknown[];
   createRequest?: unknown;
+  networkType?: string | null;
+  allowInternetAccess?: boolean | null;
 }
 
 export interface ClusterNodeResourcesView {
@@ -40,6 +42,9 @@ export interface ClusterNodeResourcesView {
   totalMemoryMB: number;
   allocatableMemoryMB: number;
   maxMvmSlots: number;
+  quotaCpu: number;
+  quotaMemMB: number;
+  createConcurrentNum: number;
 }
 
 export interface ClusterNodeConditionView {
@@ -98,6 +103,8 @@ function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
     imageInfo: undefined,
     replicas: dto.replicas,
     createRequest: dto.createRequest,
+    networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
+    allowInternetAccess: (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
   };
 }
 
@@ -114,6 +121,9 @@ function mapNode(dto: ApiNodeView): ClusterNodeView {
       totalMemoryMB: dto.capacity.memoryMB,
       allocatableMemoryMB: dto.allocatable.memoryMB,
       maxMvmSlots: dto.maxMvmSlots,
+      quotaCpu: (dto as unknown as { quotaCpu?: number }).quotaCpu ?? 0,
+      quotaMemMB: (dto as unknown as { quotaMemMB?: number }).quotaMemMB ?? 0,
+      createConcurrentNum: (dto as unknown as { createConcurrentNum?: number }).createConcurrentNum ?? 0,
     },
     conditions: dto.conditions?.map((condition) => ({
       type: condition.type,
@@ -150,11 +160,26 @@ export const sandboxApi = {
     api<void>(`/sandboxes/${id}/timeout`, { method: 'POST', body: JSON.stringify({ timeout: seconds }) }),
   logs: (id: string, params?: { cursor?: number; limit?: number; direction?: string }) =>
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
+  create: (body: {
+    templateID: string;
+    metadata?: Record<string, string>;
+  }) =>
+    api<SandboxSessionDto>('/sandboxes', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 };
 
 export const templateApi = {
   list: () => api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
   get: (id: string) => api<TemplateDetailDto>(`/templates/${id}`).then(mapTemplateDetail),
+  create: (body: { templateID: string; image: string; instanceType?: string; writableLayerSize?: string; exposedPorts?: number[]; probePort?: number; probePath?: string; cpu?: number; memory?: number; env?: string[]; allowInternetAccess?: boolean }) =>
+    api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) }),
+  rebuild: (id: string) => api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
+  getBuildStatus: (id: string, buildID: string) =>
+    api<unknown>(`/templates/${id}/builds/${buildID}/status`),
+  getBuildLogs: (id: string, buildID: string) =>
+    api<{ lines?: string[]; status?: string; progress?: number }>(`/templates/${id}/builds/${buildID}/logs`),
   remove: (id: string) => api<void>(`/templates/${id}`, { method: 'DELETE' }),
 };
 
@@ -162,4 +187,28 @@ export const clusterApi = {
   overview: () => api<ClusterOverviewDto>('/cluster/overview'),
   nodes: () => api<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
   node: (id: string) => api<ApiNodeView>(`/nodes/${id}`).then(mapNode),
+  config: () => api<{
+    apiEndpoint: string;
+    rateLimitPerSec: number;
+    authEnabled: boolean;
+    sandboxDomain: string;
+    instanceType: string;
+  }>('/config'),
+};
+
+export interface ImageMeta {
+  image: string;
+  size_bytes: number;
+  size_mb: number;
+  digest: string | null;
+  digest_short: string | null;
+}
+
+export interface StoreMeta {
+  images: ImageMeta[];
+}
+
+export const storeApi = {
+  meta: () => api<StoreMeta>('/store/meta'),
+  refresh: () => api<StoreMeta>('/store/refresh', { method: 'POST' }),
 };

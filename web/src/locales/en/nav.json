@@ -6,5 +6,6 @@
   "network": "Network",
   "observability": "Observability",
   "apiKeys": "API Keys",
-  "settings": "Settings"
+  "settings": "Settings",
+  "store": "Template Store"
 }
