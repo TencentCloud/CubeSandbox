@@ -5,14 +5,15 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { templateApi, type TemplateSummary } from '@/api/client';
+import { templateApi, storeApi, type TemplateSummary, type ImageMeta } from '@/api/client';
+import { showToast } from '@/components/ui/ToastProvider';
 import { STORE_TEMPLATES, CATEGORIES, type StoreTemplate, type CategoryId } from '@/data/templateStore';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Code2, Globe, Bot, Box, Search, X, ChevronDown, Package, Loader2, Plus } from 'lucide-react';
+import { Code2, Globe, Bot, Box, Search, X, ChevronDown, Package, Loader2, Plus, AlertTriangle, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -126,12 +127,12 @@ function InstallModal({ item, onClose }: InstallModalProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <Card className="w-full max-w-lg shadow-xl">
+      <Card className="w-full max-w-2xl shadow-xl">
         {/* header */}
-        <div className="flex items-center justify-between border-b px-5 py-4">
+        <div className="flex items-center justify-between border-b px-6 py-5">
           <div>
-            <p className="text-sm font-semibold">{item.name}</p>
-            <p className="mt-0.5 text-xs text-muted-foreground">安装为 Cube 模板</p>
+            <p className="text-base font-semibold font-mono">{item.image.split("/").pop()}</p>
+            <p className="mt-1 text-sm text-muted-foreground">安装为 Cube 模板</p>
           </div>
           <button
             onClick={() => { stopPolling(); onClose(); }}
@@ -141,9 +142,9 @@ function InstallModal({ item, onClose }: InstallModalProps) {
           </button>
         </div>
 
-        <CardContent className="space-y-4 pt-4">
+        <CardContent className="space-y-5 pt-5 px-6 pb-6">
           {/* 镜像信息（只读） */}
-          <div className="rounded-lg border bg-muted/30 p-3 space-y-1.5 text-xs font-mono">
+          <div className="rounded-lg border bg-muted/30 p-4 space-y-2 text-sm font-mono">
             <div><span className="text-muted-foreground">image: </span>{item.image_cn}</div>
             <div><span className="text-muted-foreground">expose-port: </span>{item.expose_ports.join(', ')}</div>
             <div><span className="text-muted-foreground">probe: </span>{item.probe_port}</div>
@@ -153,7 +154,7 @@ function InstallModal({ item, onClose }: InstallModalProps) {
           {/* 可编辑参数 */}
           <div className="space-y-3">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
+              <label className="text-sm font-medium text-muted-foreground">
                 Template ID <span className="text-muted-foreground/60">（留空则自动生成）</span>
               </label>
               <Input
@@ -164,7 +165,7 @@ function InstallModal({ item, onClose }: InstallModalProps) {
               />
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">writable-layer-size</label>
+              <label className="text-sm font-medium text-muted-foreground">writable-layer-size</label>
               <Input
                 placeholder="1G"
                 value={writableLayerSize}
@@ -355,17 +356,32 @@ interface StoreCardProps {
   item: StoreTemplate;
   installed: TemplateSummary[];
   onInstall: () => void;
+  liveMeta?: ImageMeta;
 }
 
-function StoreCard({ item, installed, onInstall }: StoreCardProps) {
+function StoreCard({ item, installed, onInstall, liveMeta }: StoreCardProps) {
+  const installedDigest = installed.length > 0
+    ? (installed[0].imageInfo ?? '').split('sha256:')[1]
+      ? 'sha256:' + (installed[0].imageInfo ?? '').split('sha256:')[1]
+      : null
+    : null;
+  const latestDigest = liveMeta?.digest_short ?? null;
+  const hasUpdate = installedDigest != null && latestDigest != null && installedDigest !== latestDigest;
+  const displaySizeMb = liveMeta?.size_mb ?? item.size_mb;
   const Icon = categoryIcon(item.category);
   const isInstalled = installed.length > 0;
 
   return (
     <Card className="flex flex-col h-full relative overflow-hidden">
-      {item.official && (
+      {item.official && !hasUpdate && (
         <span className="absolute top-2.5 right-2.5 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary ring-1 ring-primary/20">
           官方
+        </span>
+      )}
+      {hasUpdate && (
+        <span className="absolute top-2.5 right-2.5 flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-500 ring-1 ring-amber-500/30">
+          <AlertTriangle size={10} />
+          有更新
         </span>
       )}
 
@@ -376,8 +392,8 @@ function StoreCard({ item, installed, onInstall }: StoreCardProps) {
             <Icon size={18} />
           </span>
           <div>
-            <p className="text-sm font-semibold leading-tight">{item.name}</p>
-            <p className="text-[11px] text-muted-foreground mt-0.5">{item.size_mb} MB</p>
+            <p className="text-sm font-semibold leading-tight">{item.image.split("/").pop()}</p>
+            <p className="text-[11px] text-muted-foreground mt-0.5">{displaySizeMb >= 1000 ? (displaySizeMb / 1024).toFixed(1) + " GB" : displaySizeMb + " MB"}</p>
           </div>
         </div>
 
@@ -393,15 +409,17 @@ function StoreCard({ item, installed, onInstall }: StoreCardProps) {
       </div>
 
       {/* footer */}
-      <div className="border-t px-4 py-3 flex items-center justify-between gap-2">
-        <span className="text-[11px] text-muted-foreground font-mono truncate flex-1 min-w-0">
-          {item.image.split('/').pop()}
-        </span>
-        {isInstalled ? (
-          <InstalledDropdown installed={installed} onInstallAnother={onInstall} />
-        ) : (
-          <Button size="sm" onClick={onInstall}>一键安装</Button>
-        )}
+      <div className="border-t px-4 py-3 space-y-2">
+        <p className="text-[11px] text-muted-foreground font-mono break-all leading-relaxed">
+          {item.image}
+        </p>
+        <div className="flex justify-end">
+          {isInstalled ? (
+            <InstalledDropdown installed={installed} onInstallAnother={onInstall} />
+          ) : (
+            <Button size="sm" onClick={onInstall}>一键安装</Button>
+          )}
+        </div>
       </div>
     </Card>
   );
@@ -418,6 +436,42 @@ export default function TemplateStorePage() {
     queryKey: ['templates'],
     queryFn: templateApi.list,
     refetchInterval: 5000,
+  });
+
+  const { data: storeMeta, refetch: refetchMeta } = useQuery({
+    queryKey: ['store-meta'],
+    queryFn: storeApi.meta,
+    refetchInterval: 6 * 60 * 60 * 1000, // 6 hours
+    staleTime: 60 * 60 * 1000,            // 1 hour
+  });
+
+  const { mutate: checkUpdates, isPending: isChecking } = useMutation({
+    mutationFn: storeApi.refresh,
+    onSuccess: (data) => {
+      qc.setQueryData(['store-meta'], data);
+      // 统计有多少镜像 digest 与当前已安装模板不一致
+      const currentTemplates = qc.getQueryData<typeof templates>(['templates']) ?? [];
+      const updatedCount = data.images.filter((img) => {
+        const latestDigest = img.digest_short;
+        if (!latestDigest) return false;
+        return currentTemplates.some((tpl) => {
+          const info = tpl.imageInfo ?? '';
+          if (!info.includes(img.image.split(':')[0])) return false;
+          const installedDigest = info.includes('sha256:')
+            ? 'sha256:' + info.split('sha256:')[1]
+            : null;
+          return installedDigest != null && installedDigest !== latestDigest;
+        });
+      }).length;
+      if (updatedCount > 0) {
+        showToast(`发现 ${updatedCount} 个镜像有新版本`, 'warn');
+      } else {
+        showToast('所有镜像已是最新');
+      }
+    },
+    onError: () => {
+      showToast('检查更新失败，请重试', 'warn');
+    },
   });
 
   const filtered = STORE_TEMPLATES.filter((item) => {
@@ -440,7 +494,18 @@ export default function TemplateStorePage() {
           <h1 className="text-2xl font-semibold tracking-tight">模板市场</h1>
           <p className="mt-1 text-sm text-muted-foreground">一键安装官方预置镜像，快速制作沙箱模板。</p>
         </div>
-        <div className="relative w-56">
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => checkUpdates()}
+            disabled={isChecking}
+            className="gap-1.5 text-xs"
+          >
+            <RefreshCw className={isChecking ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
+            {isChecking ? '检查中…' : '检查更新'}
+          </Button>
+          <div className="relative w-56">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <Input
             className="pl-8 h-9 text-sm"
@@ -448,6 +513,7 @@ export default function TemplateStorePage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
+          </div>
         </div>
       </header>
 
@@ -484,6 +550,7 @@ export default function TemplateStorePage() {
               item={item}
               installed={getInstalledTemplates(item, templates ?? [])}
               onInstall={() => setInstalling(item)}
+              liveMeta={storeMeta?.images.find((m) => m.image === item.image)}
             />
           ))}
           {filtered.length === 0 && (

@@ -195,3 +195,20 @@ export const clusterApi = {
     instanceType: string;
   }>('/config'),
 };
+
+export interface ImageMeta {
+  image: string;
+  size_bytes: number;
+  size_mb: number;
+  digest: string | null;
+  digest_short: string | null;
+}
+
+export interface StoreMeta {
+  images: ImageMeta[];
+}
+
+export const storeApi = {
+  meta: () => api<StoreMeta>('/store/meta'),
+  refresh: () => api<StoreMeta>('/store/refresh', { method: 'POST' }),
+};

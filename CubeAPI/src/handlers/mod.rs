@@ -7,3 +7,4 @@ pub mod health;
 pub mod sandboxes;
 pub mod templates;
 pub mod config;
+pub mod store;

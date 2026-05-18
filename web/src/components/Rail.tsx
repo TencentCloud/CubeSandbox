@@ -25,8 +25,8 @@ const NAV_ITEMS = [
   { to: '/network', icon: Network, key: 'network' },
   { to: '/observability', icon: Activity, key: 'observability' },
   { to: '/keys', icon: KeyRound, key: 'apiKeys' },
-  { to: '/settings', icon: Settings, key: 'settings' },
   { to: '/store', icon: Store, key: 'store' },
+  { to: '/settings', icon: Settings, key: 'settings' },
 ] as const;
 
 export function Rail() {

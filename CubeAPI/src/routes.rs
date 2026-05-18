@@ -18,7 +18,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{cluster, config, health, sandboxes, templates},
+    handlers::{cluster, config, health, sandboxes, store, templates},
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -134,7 +134,9 @@ fn build_cluster_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/cluster/overview", get(cluster::cluster_overview))
         .route("/nodes", get(cluster::list_nodes))
         .route("/nodes/:nodeID", get(cluster::get_node))
-        .route("/config", get(config::get_config));
+        .route("/config", get(config::get_config))
+        .route("/store/meta", get(store::get_store_meta))
+        .route("/store/refresh", axum::routing::post(store::refresh_store_meta));
 
     with_auth(routes, state, auth_configured)
 }
