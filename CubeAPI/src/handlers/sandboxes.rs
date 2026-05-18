@@ -198,6 +198,7 @@ pub async fn create_sandbox(
     responses(
         (status = 204, description = "Sandbox deleted"),
         (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "Sandbox cannot be deleted in its current state (e.g. paused); resume first", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]
