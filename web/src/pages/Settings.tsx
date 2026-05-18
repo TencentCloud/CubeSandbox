@@ -90,7 +90,7 @@ function AppearanceSection() {
               )}
             >
               <Icon size={14} />
-              {tTheme(labelKey)}
+              {tTheme(labelKey as any)}
               {mode === value && <Check size={12} className="ml-0.5" />}
             </button>
           ))}
@@ -235,7 +235,7 @@ function ShortcutsSection() {
       <div className="rounded-xl border border-white/8 bg-white/[0.03] divide-y divide-white/5">
         {SHORTCUTS.map(({ action, keys }) => (
           <div key={action} className="flex items-center justify-between px-5 py-3.5">
-            <span className="text-sm text-foreground/80">{t(action)}</span>
+            <span className="text-sm text-foreground/80">{t(action as any)}</span>
             <div className="flex items-center gap-1">
               {keys.map((k, i) => (
                 <span key={i} className="flex items-center gap-1">
