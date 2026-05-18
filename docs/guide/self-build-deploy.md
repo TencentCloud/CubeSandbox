@@ -130,7 +130,7 @@ Cube Sandbox requires the /data/cubelet directory to reside on an XFS filesystem
 Create a large file, format it as XFS, and mount it via loop device.
 This works well for testing, development, or virtualized environments.
 ```bash
-# 1. Install xfsprogs（If `mkfs.xfs` is missing）
+# 1. Install xfsprogs (If `mkfs.xfs` is missing)
 # Ubuntu/Debian
 sudo apt update && sudo apt install xfsprogs -y
 # RHEL/CentOS
