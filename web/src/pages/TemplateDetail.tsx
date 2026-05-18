@@ -54,6 +54,7 @@ function StatusBadge({ status }: { status: string }) {
 // ── copy button ───────────────────────────────────────────────────────────────
 
 function CopyButton({ text, className }: { text: string; className?: string }) {
+  const { t } = useTranslation('templateDetail');
   const [copied, setCopied] = useState(false);
   return (
     <button
@@ -93,6 +94,7 @@ function Field({ label, value, mono, copyable, dim }: {
 // ── copy tooltip wrapper ─────────────────────────────────────────────────────
 
 function CopyableText({ text, display, className }: { text: string; display?: string; className?: string }) {
+  const { t } = useTranslation('templateDetail');
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {
     copyToClipboard(text);
