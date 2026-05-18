@@ -1,0 +1,61 @@
+{
+  "title": "Settings",
+  "subtitle": "Appearance, cluster connection and keyboard shortcuts.",
+  "nav": {
+    "appearance": "Appearance",
+    "cluster": "Cluster",
+    "shortcuts": "Shortcuts",
+    "about": "About"
+  },
+  "appearance": {
+    "title": "Appearance",
+    "desc": "Customize the interface theme and language.",
+    "theme": "Theme",
+    "themeDesc": "Choose a color scheme. System mode follows your OS light/dark setting.",
+    "language": "Language",
+    "languageDesc": "Switch the display language of the interface."
+  },
+  "cluster": {
+    "title": "Cluster Connection",
+    "desc": "View information about the connected CubeAPI instance.",
+    "endpoint": "API Endpoint",
+    "endpointDesc": "The public-facing CubeAPI address. Configure via CUBE_API_PUBLIC_HOST env var at startup.",
+    "test": "Test",
+    "connected": "Connected",
+    "runtime": "Runtime Config",
+    "runtimeDesc": "Read-only runtime information from CubeAPI.",
+    "sandboxDomain": "Sandbox Domain",
+    "instanceType": "Default Instance Type",
+    "rateLimit": "Rate Limit",
+    "auth": "Auth",
+    "authOn": "Enabled",
+    "authOff": "Disabled"
+  },
+  "shortcuts": {
+    "title": "Keyboard Shortcuts",
+    "desc": "Built-in keyboard shortcuts for the Dashboard.",
+    "commandPalette": "Open Command Palette",
+    "newSandbox": "New Sandbox",
+    "search": "Search",
+    "escape": "Close / Cancel"
+  },
+  "shortcut": {
+    "commandPalette": "Open Command Palette",
+    "escape": "Close / Cancel",
+    "refresh": "Refresh current page data",
+    "helpShortcuts": "View keyboard shortcuts",
+    "goOverview": "Go to Overview",
+    "goSandboxes": "Go to Sandboxes",
+    "goTemplates": "Go to Templates",
+    "goNodes": "Go to Nodes",
+    "goKeys": "Go to API Keys"
+  },
+  "about": {
+    "title": "About",
+    "desc": "Version and related links.",
+    "version": "Version",
+    "cubeApi": "CubeAPI Endpoint",
+    "instanceType": "Default Instance Type",
+    "docs": "Docs"
+  }
+}
