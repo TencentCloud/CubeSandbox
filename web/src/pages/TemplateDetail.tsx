@@ -460,7 +460,7 @@ export default function TemplateDetailPage() {
           <>
             <div className="flex items-center gap-2 mb-3">
               <div className="h-3.5 w-0.5 rounded-full bg-blue-400/70" />
-              <span className="text-sm font-semibold text-foreground/80">规格</span>
+              {/* specs */}<span className="text-sm font-semibold text-foreground/80">{t('specs')}</span>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-5 mb-6">
               {cfg.cpu && <Field label="CPU" value={cfg.cpu} mono />}
@@ -473,7 +473,7 @@ export default function TemplateDetailPage() {
         {/* 属性分组 */}
         <div className="flex items-center gap-2 mb-3">
           <div className="h-3.5 w-0.5 rounded-full bg-blue-400/70" />
-          <span className="text-sm font-semibold text-foreground/80">属性</span>
+          {/* attributes */}<span className="text-sm font-semibold text-foreground/80">{t('attributes')}</span>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-5">
           <Field label={t('fields.templateID')} value={data.templateID} mono copyable />

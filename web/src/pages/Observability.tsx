@@ -3,6 +3,7 @@
 
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useRuntimeConfig } from '@/hooks/useRuntimeConfig';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -259,11 +260,7 @@ function ApiSection() {
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; latency?: number; msg?: string } | null>(null);
 
-  const { data: cfg, isLoading } = useQuery({
-    queryKey: ['runtime-config'],
-    queryFn: () => clusterApi.config(),
-    staleTime: 60_000,
-  });
+  const { data: cfg, isLoading } = useRuntimeConfig();
 
   const handleTest = async () => {
     setTesting(true);

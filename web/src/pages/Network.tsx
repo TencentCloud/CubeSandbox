@@ -58,11 +58,7 @@ function BoolBadge({ value, trueLabel, falseLabel }: { value?: boolean | null; t
 
 function GatewaySection() {
   const { t } = useTranslation('network');
-  const { data, isLoading } = useQuery({
-    queryKey: ['runtime-config'],
-    queryFn: () => clusterApi.config(),
-    staleTime: 60_000,
-  });
+  const { data, isLoading } = useRuntimeConfig();
 
   return (
     <div>

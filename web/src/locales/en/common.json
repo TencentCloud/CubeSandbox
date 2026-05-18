@@ -7,5 +7,6 @@
   "live": "Live · auto-refresh 5s",
   "comingSoon": "Coming soon",
   "comingSoonDesc": "This surface is part of the Dashboard roadmap — check back in a later milestone.",
-  "preview": "Preview"
+  "preview": "Preview",
+  "refreshed": "Refreshed"
 }

@@ -51,5 +51,7 @@
     "replicas": "暂无副本信息。"
   },
   "building": "模板正在构建中，请稍后刷新。",
-  "buildFailed": "模板构建失败。"
+  "buildFailed": "模板构建失败。",
+  "specs": "规格",
+  "attributes": "属性"
 }

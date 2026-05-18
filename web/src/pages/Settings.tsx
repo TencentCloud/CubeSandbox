@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { useRuntimeConfig } from '@/hooks/useRuntimeConfig';
 import {
   Palette, Plug, Keyboard, Info,
   Sun, Moon, Monitor, Check, ExternalLink,
@@ -127,11 +128,7 @@ function ClusterSection() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; latency?: number; msg?: string } | null>(null);
 
-  const { data: cfg, isLoading } = useQuery({
-    queryKey: ['runtime-config'],
-    queryFn: () => clusterApi.config(),
-    staleTime: 30_000,
-  });
+  const { data: cfg, isLoading } = useRuntimeConfig();
 
   const handleTest = async () => {
     setTesting(true);
@@ -262,11 +259,7 @@ function ShortcutsSection() {
 
 function AboutSection() {
   const { t } = useTranslation('settings');
-  const { data: cfg } = useQuery({
-    queryKey: ['runtime-config'],
-    queryFn: () => clusterApi.config(),
-    staleTime: 60_000,
-  });
+  const { data: cfg } = useRuntimeConfig();
 
   return (
     <div className="space-y-8">

@@ -51,5 +51,7 @@
     "replicas": "No replica info available."
   },
   "building": "Template is being built. Please refresh in a moment.",
-  "buildFailed": "Template build failed."
+  "buildFailed": "Template build failed.",
+  "specs": "Specs",
+  "attributes": "Attributes"
 }

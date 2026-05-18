@@ -436,11 +436,12 @@ export default function TemplateStorePage() {
   const [search, setSearch] = useState('');
   const [installing, setInstalling] = useState<StoreTemplate | null>(null);
   const { t } = useTranslation('store');
+  const qc = useQueryClient();
 
   const { data: templates, isLoading } = useQuery({
     queryKey: ['templates'],
     queryFn: templateApi.list,
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
   });
 
   const { data: storeMeta, refetch: refetchMeta } = useQuery({

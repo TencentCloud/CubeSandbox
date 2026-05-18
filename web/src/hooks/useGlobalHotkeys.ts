@@ -12,12 +12,14 @@
  */
 
 import { useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCommandPaletteStore } from '@/store/ui';
 
 export function useGlobalHotkeys() {
   const nav = useNavigate();
+  const { t } = useTranslation('common');
   const qc = useQueryClient();
   const openPalette = useCommandPaletteStore((s) => s.open);
 
@@ -46,7 +48,7 @@ export function useGlobalHotkeys() {
       if (e.key.toLowerCase() === 'r') {
         e.preventDefault();
         void qc.refetchQueries({ type: 'active' });
-        window.dispatchEvent(new CustomEvent('cube:toast', { detail: { message: '已刷新' } }));
+        window.dispatchEvent(new CustomEvent('cube:toast', { detail: { message: t('refreshed') } }));
         return;
       }
 
