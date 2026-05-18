@@ -175,7 +175,7 @@ impl SandboxService {
 
         resp.ret
             .into_result()
-            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
+            .map_err(|e| sandbox_delete_state_error(e, sandbox_id))?;
 
         Ok(())
     }
@@ -534,6 +534,26 @@ fn sandbox_not_found_or_internal(e: CubeMasterError, sandbox_id: &str) -> AppErr
     }
 }
 
+/// Map a CubeMaster error from delete_sandbox onto an HTTP error.
+///
+/// In addition to the not-found / internal mapping done by
+/// [`sandbox_not_found_or_internal`], conflict codes (e.g. when CubeMaster
+/// refuses to delete a sandbox that is not in the `running` state) are
+/// surfaced as `409 Conflict` with guidance to resume first, instead of
+/// being collapsed into a generic 500.
+fn sandbox_delete_state_error(e: CubeMasterError, sandbox_id: &str) -> AppError {
+    if e.is_not_found() {
+        AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+    } else if e.is_conflict() {
+        AppError::Conflict(format!(
+            "sandbox {} cannot be deleted in its current state; resume it first via POST /sandboxes/{}/connect",
+            sandbox_id, sandbox_id
+        ))
+    } else {
+        internal_error(e)
+    }
+}
+
 fn ensure_update_result(
     ret_code: i32,
     ret_msg: String,
@@ -681,8 +701,12 @@ pub(crate) fn build_cubevs_context(
 mod tests {
     use std::collections::HashMap;
 
-    use super::{build_cubevs_context, filter_by_metadata, from_cubemaster_info};
-    use crate::cubemaster::SandboxInfo;
+    use super::{
+        build_cubevs_context, filter_by_metadata, from_cubemaster_info, sandbox_delete_state_error,
+        sandbox_not_found_or_internal, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND,
+    };
+    use crate::cubemaster::{CubeMasterError, SandboxInfo};
+    use crate::error::AppError;
     use crate::models::SandboxNetworkConfig;
 
     #[test]
@@ -736,5 +760,71 @@ mod tests {
         assert_eq!(listed.cpu_count, 2);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+    }
+
+    #[test]
+    fn delete_state_error_maps_conflict_to_409_with_guidance() {
+        let err = CubeMasterError::Api {
+            ret_code: RET_CODE_CONFLICT,
+            ret_msg: "sandbox not in normal state".to_string(),
+        };
+
+        match sandbox_delete_state_error(err, "sb-paused") {
+            AppError::Conflict(msg) => {
+                assert!(
+                    msg.contains("sb-paused"),
+                    "conflict message should mention sandbox id: {msg}"
+                );
+                assert!(
+                    msg.contains("resume"),
+                    "conflict message should suggest the resume workflow: {msg}"
+                );
+            }
+            other => panic!("expected AppError::Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_state_error_maps_not_found_to_404() {
+        let err = CubeMasterError::Api {
+            ret_code: RET_CODE_NOT_FOUND,
+            ret_msg: "sandbox not found".to_string(),
+        };
+
+        match sandbox_delete_state_error(err, "sb-missing") {
+            AppError::NotFound(msg) => {
+                assert!(msg.contains("sb-missing"), "got: {msg}");
+            }
+            other => panic!("expected AppError::NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_state_error_falls_back_to_internal_for_unknown_codes() {
+        let err = CubeMasterError::Api {
+            ret_code: 199999,
+            ret_msg: "kernel panic".to_string(),
+        };
+
+        match sandbox_delete_state_error(err, "sb-1") {
+            AppError::Internal(_) => {}
+            other => panic!("expected AppError::Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_or_internal_still_collapses_conflicts_to_500() {
+        // Regression guard: callers that opt for the legacy mapping (logs,
+        // refresh, set_timeout, ...) must keep their existing 500 behaviour
+        // for conflict codes — only the delete path treats them as 409.
+        let err = CubeMasterError::Api {
+            ret_code: RET_CODE_CONFLICT,
+            ret_msg: "wrong state".to_string(),
+        };
+
+        match sandbox_not_found_or_internal(err, "sb-1") {
+            AppError::Internal(_) => {}
+            other => panic!("expected AppError::Internal, got {other:?}"),
+        }
     }
 }
