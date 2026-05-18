@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026.05.18 Release v0.2.2
+
+### 🛡️ Security Fixes
+
+- **`hypervisor`: `vmm-sys-util` bumped to 0.12.1** (CVE-2023-50711, GHSA-875g-mfp6-g7f9): `FamStructWrapper::deserialize` failed to verify header length against the flexible-array length, allowing out-of-bounds memory access from safe Rust code. Now pinned to the workspace version shared by all other hypervisor crates.
+- **`agent` / `hypervisor`: `bytes` and `env_logger` security bumps** as part of the same dependency-refresh pass.
+- **Reverted `time` crate bump (CVE-2026-25727)**: CubeSandbox only uses `Rfc3339` for outbound timestamp formatting and never parses untrusted `Rfc2822` input — the affected attack vector is not reachable. The upgrade was rolled back pending an MSRV bump and will be tracked separately.
+
+### 🛠️ Critical Fixes
+
+- **Fixed duplicate template-image job creation (`CubeMaster`)**: A `request_id` column with a unique index on `(request_id, operation)` makes job submissions idempotent, preventing duplicate build jobs from concurrent or retried API calls.
+- **Fixed `cubecli exec` nil-deref panic on stdin EOF**: `StdinCloser.Read` triggered a nil-pointer dereference at stdin EOF, silently aborting the exec lifecycle. Fixed using `errors.Is(err, io.EOF)` for proper error-wrapping compatibility; shim logs now emit the expected paired exec lifecycle entries.
+- **Fixed ext4 artifact runtime file materialization for PVM templates**: `RefreshArtifactRuntimeFiles`, `validateArtifactRuntimeFilesPresent`, and `ensureArtifactRuntimeFiles` are simplified to handle only kernel files; `copyKernelFileAtomically` is renamed to `CopyFileAtomically` for reuse outside the package.
+
+### ✨ Enhancements
+
+- **E2B-compatible default exposed port**: Default sandbox exposed port changed to **49983** to match the E2B sandbox protocol. `CubeMaster` is now the single source of truth — hardcoded defaults removed from `Cubelet` and `network-agent`.
+- **`cubelet`: configurable `cmdTimeout` via storage plugin TOML config**: A new optional `cmd_timeout` field replaces the hardcoded 3 s default, letting operators raise the limit for multi-GiB ext4 operations without recompiling. Default behavior is unchanged when the field is absent.
+- **`cubelet`: richer diagnostics on `newExt4RawByReflinkCopy` failures**: Error messages now include elapsed time, file sizes, and free space — e.g. `[step=N/4 cmd="…" elapsed=…ms target=size=… base=size=… free=…B]`.
+- **Deploy: sync CubeMaster custom ports from `.env`**: `cubemaster.yaml` now uses `__CUBE_SANDBOX_MYSQL_PORT__` / `__CUBE_SANDBOX_REDIS_PORT__` placeholders substituted by `install.sh`, enabling non-default MySQL/Redis ports without manual YAML edits.
+
+### ⚙️ Engineering Improvements
+
+- **`cubecli`: removed dead `listmd` command**: The unreachable `listmd` subcommand and its 128-line implementation are deleted.
+
+### 🤖 CI / DevOps
+
+- **Claude-powered code review and issue triage automation**: Five AI reviewer agents (code quality, performance, security, test coverage, documentation) added under `.agents/agents/`. Automated workflows handle PR review, duplicate issue detection, and issue label triage. Helper scripts `gh.sh` and `edit-issue-labels.sh` added under `scripts/`.
+
+### 📚 Documentation
+
+- **Chinese translation of `CONTRIBUTING.md`**: `CONTRIBUTING_zh.md` added as a full Chinese translation of the contribution guide.
+- **Community doc PR requirements relaxed**: Both `CONTRIBUTING.md` and `CONTRIBUTING_zh.md` now allow single-language submissions; bilingual docs are optional.
+- **Network port allocation ranges documented**: `docs/architecture/network.md` (EN & ZH) now documents the three port-range buckets: `10000–19999` (network-agent), `20000–29999` (CubeProxy), `30000–65535` (CubeVS SNAT).
+- **Community docs sections added**: New bilingual troubleshooting, use-cases, and integrations sections added to VitePress; a CI workflow enforces bilingual parity.
+- **Domain update**: CNAME switched from `docs.cubesandbox.ai` to `cubesandbox.com`.
+- **Fixed `browser-sandbox` example**: Added missing `load_dotenv()` call and `python-dotenv` dependency.
+- **WeChat group QR code refreshed**.
+
+---
+
 ## 2026.05.14 Release v0.2.1
 
 ### 🌟 Major New Features
