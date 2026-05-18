@@ -38,7 +38,7 @@ export function ToastProvider() {
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ message: string; type?: ToastType }>).detail;
-      addToast(detail?.message ?? '已复制', detail?.type ?? 'success');
+      addToast(detail?.message ?? 'Done', detail?.type ?? 'success');
     };
     window.addEventListener('cube:toast', handler);
     return () => window.removeEventListener('cube:toast', handler);

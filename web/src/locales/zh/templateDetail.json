@@ -53,5 +53,14 @@
   "building": "模板正在构建中，请稍后刷新。",
   "buildFailed": "模板构建失败。",
   "specs": "规格",
-  "attributes": "属性"
+  "attributes": "属性",
+  "copy": "复制",
+  "copied": "已复制",
+  "clickToCopy": "点击复制: {{text}}",
+  "refresh": "刷新",
+  "templateId": "模板 ID",
+  "createdAt": "创建于",
+  "imageCopied": "镜像地址已复制",
+  "exposedPorts": "暴露端口",
+  "probePath": "探针路径和端口"
 }

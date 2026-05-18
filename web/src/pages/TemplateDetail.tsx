@@ -63,7 +63,7 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
         setTimeout(() => setCopied(false), 1500);
       }}
       className={cn('text-muted-foreground/50 hover:text-muted-foreground transition-colors', className)}
-      title="复制"
+      title={t('copy')}
     >
       {copied ? <Check className="h-3 w-3 text-cube-emerald" /> : <Copy className="h-3 w-3" />}
     </button>
@@ -103,7 +103,7 @@ function CopyableText({ text, display, className }: { text: string; display?: st
     <span
       className={cn('inline-flex items-center gap-1.5 cursor-pointer group', className)}
       onClick={handleCopy}
-      title={copied ? '已复制' : `点击复制: ${text}`}
+      title={copied ? t('copied') : t('clickToCopy', { text })}
     >
       <span>{display ?? text}</span>
       <span className="opacity-0 group-hover:opacity-100 transition-opacity">
@@ -339,7 +339,7 @@ export default function TemplateDetailPage() {
         {isBuilding404 ? (
           <div className="space-y-2">
             <p className="text-sm text-muted-foreground">{t('building')}</p>
-            <Button variant="outline" size="sm" onClick={() => window.location.reload()}>刷新</Button>
+            <Button variant="outline" size="sm" onClick={() => window.location.reload()}>{t('refresh')}</Button>
           </div>
         ) : isFailed404 ? (
           <div className="space-y-3">
@@ -390,7 +390,7 @@ export default function TemplateDetailPage() {
         {/* left: id + meta */}
         <div className="min-w-0 space-y-2 border-l-[3px] border-cube-emerald pl-3">
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px] uppercase tracking-widest text-muted-foreground/50 font-medium">模板 ID</span>
+            <span className="text-[10px] uppercase tracking-widest text-muted-foreground/50 font-medium">{t('templateId')}</span>
           </div>
           <div className="flex items-center gap-2">
             <h1 className="text-lg font-semibold font-mono tracking-tight truncate">{data.templateID}</h1>
@@ -401,7 +401,7 @@ export default function TemplateDetailPage() {
               <p
                 className="text-xs font-mono text-muted-foreground truncate max-w-lg cursor-pointer hover:text-foreground transition-colors"
                 title={imgShort}
-                onClick={() => copyToClipboard(imgShort, '镜像地址已复制')}
+                onClick={() => copyToClipboard(imgShort, t('imageCopied'))}
               >
                 {imgShort}
               </p>
@@ -410,7 +410,7 @@ export default function TemplateDetailPage() {
           )}
           {createdAt && (
             <p className="text-xs text-muted-foreground/60">
-              创建于 {new Date(createdAt).toLocaleString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+              {t('createdAt')} {new Date(createdAt).toLocaleString(undefined, { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
             </p>
           )}
         </div>
@@ -478,9 +478,9 @@ export default function TemplateDetailPage() {
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-5">
           <Field label={t('fields.templateID')} value={data.templateID} mono copyable />
           <Field label={t('fields.instanceType')} value={data.instanceType ?? '—'} />
-          {cfg?.exposedPorts && <Field label="暴露端口" value={cfg.exposedPorts} mono />}
-          {cfg?.probePath && <Field label="探针路径和端口" value={`${cfg.probePath} :${cfg.probePort}`} mono dim />}
-          {createdAt && <Field label="创建时间" value={new Date(createdAt).toLocaleString('zh-CN')} dim />}
+          {cfg?.exposedPorts && <Field label={t('exposedPorts')} value={cfg.exposedPorts} mono />}
+          {cfg?.probePath && <Field label={t('probePath')} value={`${cfg.probePath} :${cfg.probePort}`} mono dim />}
+          {createdAt && <Field label={t('createdAt')} value={new Date(createdAt).toLocaleString()} dim />}
         </div>
 
         {/* error */}

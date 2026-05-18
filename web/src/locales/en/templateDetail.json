@@ -53,5 +53,14 @@
   "building": "Template is being built. Please refresh in a moment.",
   "buildFailed": "Template build failed.",
   "specs": "Specs",
-  "attributes": "Attributes"
+  "attributes": "Attributes",
+  "copy": "Copy",
+  "copied": "Copied",
+  "clickToCopy": "Click to copy: {{text}}",
+  "refresh": "Refresh",
+  "templateId": "Template ID",
+  "createdAt": "Created at",
+  "imageCopied": "Image URL copied",
+  "exposedPorts": "Exposed Ports",
+  "probePath": "Probe Path & Port"
 }

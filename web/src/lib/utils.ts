@@ -35,7 +35,7 @@ export function short(id: string, head = 6, tail = 4): string {
  * Copy text to clipboard with execCommand fallback for HTTP (non-HTTPS) environments.
  * On success, dispatches a 'cube:toast' custom event so ToastProvider can show a notification.
  */
-export function copyToClipboard(text: string, message = '已复制'): void {
+export function copyToClipboard(text: string, message = 'Copied'): void {
   const dispatch = (ok: boolean) => {
     if (ok) {
       window.dispatchEvent(new CustomEvent('cube:toast', { detail: { message } }));

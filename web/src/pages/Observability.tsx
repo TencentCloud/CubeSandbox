@@ -47,31 +47,19 @@ function KpiCard({ label, value, color }: { label: string; value: number | strin
 function SandboxSection() {
   const { t } = useTranslation('observability');
 
-  const { data: all, isLoading: loadingAll } = useQuery({
+  const { data: all, isLoading: loading } = useQuery({
     queryKey: ['sandboxes-obs'],
     queryFn: () => sandboxApi.list(),
     staleTime: 10_000,
     refetchInterval: 10_000,
   });
 
-  const { data: running, isLoading: loadingRunning } = useQuery({
-    queryKey: ['sandboxes-running-obs'],
-    queryFn: () => sandboxApi.list({ state: 'running' }),
-    staleTime: 10_000,
-    refetchInterval: 10_000,
-  });
+  const running = all?.filter(s => s.state === 'running') ?? [];
+  const paused = all?.filter(s => s.state === 'paused') ?? [];
 
-  const { data: paused, isLoading: loadingPaused } = useQuery({
-    queryKey: ['sandboxes-paused-obs'],
-    queryFn: () => sandboxApi.list({ state: 'paused' }),
-    staleTime: 10_000,
-    refetchInterval: 10_000,
-  });
-
-  const loading = loadingAll || loadingRunning || loadingPaused;
   const totalCount = all?.length ?? 0;
-  const runningCount = running?.length ?? 0;
-  const pausedCount = paused?.length ?? 0;
+  const runningCount = running.length;
+  const pausedCount = paused.length;
   const recent = [...(all ?? [])].slice(0, 5);
 
   // distribution bar widths

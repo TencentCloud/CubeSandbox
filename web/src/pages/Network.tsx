@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { clusterApi, templateApi } from '@/api/client';
+import { useRuntimeConfig } from '@/hooks/useRuntimeConfig';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Shield, Globe, Gauge, Server, ExternalLink, CheckCircle2, XCircle, Minus } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -45,11 +46,11 @@ function BoolBadge({ value, trueLabel, falseLabel }: { value?: boolean | null; t
   if (value == null) return <span className="text-muted-foreground/50 text-xs">—</span>;
   return value ? (
     <span className="inline-flex items-center gap-1 text-cube-emerald text-xs font-medium">
-      <CheckCircle2 size={12} /> {trueLabel ?? '是'}
+      <CheckCircle2 size={12} /> {trueLabel ?? 'Yes'}
     </span>
   ) : (
     <span className="inline-flex items-center gap-1 text-cube-rose text-xs font-medium">
-      <XCircle size={12} /> {falseLabel ?? '否'}
+      <XCircle size={12} /> {falseLabel ?? 'No'}
     </span>
   );
 }
