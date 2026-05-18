@@ -166,7 +166,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-muted-foreground">env</label>
             <textarea
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono resize-y min-h-[64px] focus:outline-none focus:ring-1 focus:ring-ring"
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono resize-y min-h-[64px] focus:outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/40"
               placeholder={"APP_ENV=production\nDEBUG=false"}
               value={envVars}
               onChange={(e) => setEnvVars(e.target.value)}
