@@ -47,4 +47,5 @@ lang: zh-CN
 
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
+| [在 Cube Sandbox 上运行 GitHub Actions 自托管 Runner](./github-actions-self-hosted-runner.md) | jimyag | 2026-05-19 | integration, github-actions, self-hosted-runner |
 | _在这里补充你的文章_ | - | - | - |
