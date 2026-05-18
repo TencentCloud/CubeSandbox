@@ -46,7 +46,7 @@ func RefreshKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath s
 	if err := requireValidSharedKernel(sharedKernelPath); err != nil {
 		return err
 	}
-	if err := copyKernelFileAtomically(sharedKernelPath, targetKernelPath); err != nil {
+	if err := CopyFileAtomically(sharedKernelPath, targetKernelPath); err != nil {
 		return err
 	}
 	if err := validateRefreshedKernelFile(sharedKernelPath, targetKernelPath); err != nil {
@@ -161,7 +161,8 @@ func cleanupKernelFile(path string) error {
 	return nil
 }
 
-func copyKernelFileAtomically(srcPath, dstPath string) error {
+// CopyFileAtomically copies a local file to dstPath via a same-directory temp file.
+func CopyFileAtomically(srcPath, dstPath string) error {
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return err
 	}

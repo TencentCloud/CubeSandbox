@@ -24,20 +24,12 @@ func GetRawKernelFilePath(instanceType, imageID string) string {
 	return filepath.Join(GetPmemBasePath(instanceType), imageID, imageID+".vm")
 }
 
-func GetRawImageVersionFilePath(instanceType, imageID string) string {
-	return filepath.Join(GetPmemBasePath(instanceType), imageID, "version")
-}
-
 func GetKoFilePath(instanceType, imageID string) string {
 	return filepath.Join(GetPmemBasePath(instanceType), imageID, imageID+".ko")
 }
 
 func GetSharedKernelFilePath() string {
 	return filepath.Join(baseDirPath, "cube-kernel-scf", "vmlinux")
-}
-
-func GetSharedImageVersionFilePath() string {
-	return filepath.Join(baseDirPath, "cube-image", "version")
 }
 
 func GetPmemBasePath(instanceType string) string {

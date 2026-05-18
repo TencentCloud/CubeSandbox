@@ -122,17 +122,11 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 
 // RefreshArtifactRuntimeFiles rewrites runtime companion files from the current shared sources.
 func RefreshArtifactRuntimeFiles(ctx context.Context, instanceType, imageRef string) error {
-	if err := refreshKernelFile(ctx, instanceType, imageRef); err != nil {
-		return err
-	}
-	return refreshImageVersionFile(ctx, instanceType, imageRef)
+	return refreshKernelFile(ctx, instanceType, imageRef)
 }
 
 func validateArtifactRuntimeFilesPresent(ctx context.Context, instanceType, imageRef string) error {
-	if err := ensureKernelFilePresent(ctx, instanceType, imageRef); err != nil {
-		return err
-	}
-	return validateImageVersionFilePresent(ctx, instanceType, imageRef)
+	return ensureKernelFilePresent(ctx, instanceType, imageRef)
 }
 
 func ensureArtifactRuntimeFiles(ctx context.Context, instanceType, imageRef string) error {
@@ -142,13 +136,7 @@ func ensureArtifactRuntimeFiles(ctx context.Context, instanceType, imageRef stri
 			return fmt.Errorf("refresh artifact kernel file failed: %w", refreshErr)
 		}
 	}
-	if err := validateImageVersionFilePresent(ctx, instanceType, imageRef); err != nil {
-		log.G(ctx).Warnf("artifact image version validation failed, refreshing from shared version: %v", err)
-		if refreshErr := refreshImageVersionFile(ctx, instanceType, imageRef); refreshErr != nil {
-			return fmt.Errorf("refresh artifact image version file failed: %w", refreshErr)
-		}
-	}
-	return validateArtifactRuntimeFilesPresent(ctx, instanceType, imageRef)
+	return nil
 }
 
 func ensureKernelFilePresent(ctx context.Context, instanceType, imageRef string) error {
@@ -157,95 +145,6 @@ func ensureKernelFilePresent(ctx context.Context, instanceType, imageRef string)
 
 func refreshKernelFile(ctx context.Context, instanceType, imageRef string) error {
 	return pmem.RefreshKernelFile(ctx, pmem.GetSharedKernelFilePath(), pmem.GetRawKernelFilePath(instanceType, imageRef))
-}
-
-func validateImageVersionFilePresent(ctx context.Context, instanceType, imageRef string) error {
-	versionPath := pmem.GetRawImageVersionFilePath(instanceType, imageRef)
-	exist, err := fileExistsAndNonEmpty(versionPath)
-	if err != nil {
-		return fmt.Errorf("image version file %s validation failed: %v", versionPath, err)
-	}
-	if exist {
-		return nil
-	}
-	return fmt.Errorf("image version file %s not exist", versionPath)
-}
-
-func refreshImageVersionFile(ctx context.Context, instanceType, imageRef string) error {
-	versionPath := pmem.GetRawImageVersionFilePath(instanceType, imageRef)
-	sharedVersionPath := pmem.GetSharedImageVersionFilePath()
-	sharedExist, err := fileExistsAndNonEmpty(sharedVersionPath)
-	if err != nil {
-		return fmt.Errorf("local shared image version validation failed: %w", err)
-	}
-	if !sharedExist {
-		return fmt.Errorf("local shared image version not found: %s", sharedVersionPath)
-	}
-	if err := copyLocalFileAtomically(ctx, sharedVersionPath, versionPath, "image version"); err != nil {
-		return err
-	}
-	exist, err := fileExistsAndNonEmpty(versionPath)
-	if err != nil {
-		return fmt.Errorf("copied image version file %s validation failed: %v", versionPath, err)
-	}
-	if !exist {
-		return fmt.Errorf("copied image version file %s not exist", versionPath)
-	}
-	return nil
-}
-
-func copyLocalFileAtomically(ctx context.Context, srcPath, dstPath, fileType string) error {
-	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
-		return err
-	}
-	tmpPath := dstPath + ".tmp"
-	if err := os.RemoveAll(tmpPath); err != nil { // NOCC:Path Traversal()
-		return err
-	}
-
-	srcFile, err := os.Open(srcPath)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	srcInfo, err := srcFile.Stat()
-	if err != nil {
-		return err
-	}
-	dstFile, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, srcInfo.Mode()) // NOCC:Path Traversal()
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(dstFile, srcFile); err != nil {
-		dstFile.Close()
-		_ = os.RemoveAll(tmpPath) // NOCC:Path Traversal()
-		return err
-	}
-	if err := dstFile.Close(); err != nil {
-		_ = os.RemoveAll(tmpPath) // NOCC:Path Traversal()
-		return err
-	}
-	if err := os.Rename(tmpPath, dstPath); err != nil {
-		_ = os.RemoveAll(tmpPath) // NOCC:Path Traversal()
-		return err
-	}
-	log.G(ctx).Infof("copied local %s from %s to %s", fileType, srcPath, dstPath)
-	return nil
-}
-
-func fileExistsAndNonEmpty(path string) (bool, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if info.IsDir() {
-		return false, fmt.Errorf("%s is a directory", path)
-	}
-	return info.Size() > 0, nil
 }
 
 func rewriteDownloadHost(rawURL string) string {

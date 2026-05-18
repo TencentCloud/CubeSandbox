@@ -31,11 +31,6 @@ func writeSharedKernelFile(t *testing.T, content []byte) {
 	writeTestFile(t, pmem.GetSharedKernelFilePath(), content)
 }
 
-func writeSharedVersionFile(t *testing.T, version string) {
-	t.Helper()
-	writeTestFile(t, pmem.GetSharedImageVersionFilePath(), []byte(version))
-}
-
 func writeRawImageFile(t *testing.T, instanceType, imageRef string, content []byte) {
 	t.Helper()
 	writeTestFile(t, pmem.GetRawImageFilePath(instanceType, imageRef), content)
@@ -46,18 +41,12 @@ func writeRawKernelFile(t *testing.T, instanceType, imageRef string, content []b
 	writeTestFile(t, pmem.GetRawKernelFilePath(instanceType, imageRef), content)
 }
 
-func writeRawVersionFile(t *testing.T, instanceType, imageRef, version string) {
-	t.Helper()
-	writeTestFile(t, pmem.GetRawImageVersionFilePath(instanceType, imageRef), []byte(version))
-}
-
 func TestRefreshArtifactRuntimeFilesRefreshesKernelWhenSharedKernelChanges(t *testing.T) {
 	baseDir := t.TempDir()
 	pmem.Init(baseDir)
 
 	kernelV1 := bytes.Repeat([]byte("a"), 2048)
 	writeSharedKernelFile(t, kernelV1)
-	writeSharedVersionFile(t, "2.2.0-20251010\n")
 
 	if err := RefreshArtifactRuntimeFiles(context.Background(), "cubebox", "artifact-1"); err != nil {
 		t.Fatalf("RefreshArtifactRuntimeFiles error=%v", err)
@@ -92,7 +81,6 @@ func TestEnsurePmemFilePreservesExistingRuntimeFiles(t *testing.T) {
 	pmem.Init(baseDir)
 
 	writeSharedKernelFile(t, bytes.Repeat([]byte("s"), 3072))
-	writeSharedVersionFile(t, "2.2.0-20251010\n")
 	writeRawImageFile(t, "cubebox", "artifact-2", bytes.Repeat([]byte("e"), 2048))
 	targetKernelPath := pmem.GetRawKernelFilePath("cubebox", "artifact-2")
 	oldKernel := bytes.Repeat([]byte("o"), 3072)
@@ -103,8 +91,6 @@ func TestEnsurePmemFilePreservesExistingRuntimeFiles(t *testing.T) {
 			constants.MasterAnnotationRootfsArtifactSHA256: "deadbeef",
 		},
 	})
-	targetVersionPath := pmem.GetRawImageVersionFilePath("cubebox", "artifact-2")
-	writeRawVersionFile(t, "cubebox", "artifact-2", "2.2.0-20251010\n")
 
 	if err := EnsurePmemFile(ctx, "cubebox", "artifact-2"); err != nil {
 		t.Fatalf("EnsurePmemFile error=%v", err)
@@ -117,22 +103,14 @@ func TestEnsurePmemFilePreservesExistingRuntimeFiles(t *testing.T) {
 	if !bytes.Equal(got, oldKernel) {
 		t.Fatal("target kernel should stay unchanged when file already exists")
 	}
-	gotVersion, err := os.ReadFile(targetVersionPath)
-	if err != nil {
-		t.Fatalf("ReadFile target version error=%v", err)
-	}
-	if !bytes.Equal(gotVersion, []byte("2.2.0-20251010\n")) {
-		t.Fatal("target version should stay unchanged when file already exists")
-	}
 }
 
-func TestEnsurePmemFileMaterializesMissingKernelFile(t *testing.T) {
+func TestEnsurePmemFileMaterializesFreshArtifactKernel(t *testing.T) {
 	baseDir := t.TempDir()
 	pmem.Init(baseDir)
 
 	sharedKernel := bytes.Repeat([]byte("s"), 3072)
 	writeSharedKernelFile(t, sharedKernel)
-	writeSharedVersionFile(t, "2.2.0-20251010\n")
 	writeRawImageFile(t, "cubebox", "artifact-3", bytes.Repeat([]byte("e"), 2048))
 
 	if err := EnsurePmemFile(context.Background(), "cubebox", "artifact-3"); err != nil {
@@ -159,25 +137,24 @@ func TestEnsurePmemRootfsDoesNotRequireKernelFile(t *testing.T) {
 	}
 }
 
-func TestEnsurePmemFileMaterializesMissingImageVersionFile(t *testing.T) {
+func TestEnsurePmemFileDoesNotRequireImageVersionFile(t *testing.T) {
 	baseDir := t.TempDir()
 	pmem.Init(baseDir)
 
-	writeSharedKernelFile(t, bytes.Repeat([]byte("s"), 3072))
-	writeSharedVersionFile(t, "2.2.0-20251010\n")
+	sharedKernel := bytes.Repeat([]byte("s"), 3072)
+	writeSharedKernelFile(t, sharedKernel)
 	writeRawImageFile(t, "cubebox", "artifact-5", bytes.Repeat([]byte("e"), 2048))
-	writeRawKernelFile(t, "cubebox", "artifact-5", bytes.Repeat([]byte("k"), 3072))
 
 	if err := EnsurePmemFile(context.Background(), "cubebox", "artifact-5"); err != nil {
 		t.Fatalf("EnsurePmemFile error=%v", err)
 	}
 
-	got, err := os.ReadFile(pmem.GetRawImageVersionFilePath("cubebox", "artifact-5"))
+	got, err := os.ReadFile(pmem.GetRawKernelFilePath("cubebox", "artifact-5"))
 	if err != nil {
-		t.Fatalf("ReadFile materialized version error=%v", err)
+		t.Fatalf("ReadFile materialized kernel error=%v", err)
 	}
-	if !bytes.Equal(got, []byte("2.2.0-20251010\n")) {
-		t.Fatal("materialized version should match shared image version")
+	if !bytes.Equal(got, sharedKernel) {
+		t.Fatal("materialized kernel should match shared kernel")
 	}
 }
 
@@ -188,65 +165,5 @@ func TestEnsureKernelFilePresentRequiresSharedKernel(t *testing.T) {
 	err := ensureKernelFilePresent(context.Background(), "cubebox", "artifact-2")
 	if err == nil {
 		t.Fatal("ensureKernelFilePresent error=nil, want non-nil")
-	}
-}
-
-func TestRefreshImageVersionFileRefreshesSharedVersion(t *testing.T) {
-	baseDir := t.TempDir()
-	pmem.Init(baseDir)
-
-	versionV1 := []byte("2.2.0-20251010\n")
-	writeSharedVersionFile(t, string(versionV1))
-
-	if err := refreshImageVersionFile(context.Background(), "cubebox", "artifact-1"); err != nil {
-		t.Fatalf("refreshImageVersionFile error=%v", err)
-	}
-
-	targetVersionPath := pmem.GetRawImageVersionFilePath("cubebox", "artifact-1")
-	got, err := os.ReadFile(targetVersionPath)
-	if err != nil {
-		t.Fatalf("ReadFile target version error=%v", err)
-	}
-	if !bytes.Equal(got, versionV1) {
-		t.Fatal("target version content mismatch after first copy")
-	}
-
-	versionV2 := []byte("2.2.0-20251011\n")
-	writeSharedVersionFile(t, string(versionV2))
-	if err := refreshImageVersionFile(context.Background(), "cubebox", "artifact-1"); err != nil {
-		t.Fatalf("refreshImageVersionFile second call error=%v", err)
-	}
-
-	got, err = os.ReadFile(targetVersionPath)
-	if err != nil {
-		t.Fatalf("ReadFile target version after second call error=%v", err)
-	}
-	if !bytes.Equal(got, versionV2) {
-		t.Fatal("target version should refresh from shared version")
-	}
-}
-
-func TestRefreshImageVersionFileRequiresSharedVersion(t *testing.T) {
-	baseDir := t.TempDir()
-	pmem.Init(baseDir)
-
-	err := refreshImageVersionFile(context.Background(), "cubebox", "artifact-2")
-	if err == nil {
-		t.Fatal("refreshImageVersionFile error=nil, want non-nil")
-	}
-}
-
-func TestValidateImageVersionFilePresentRequiresArtifactVersion(t *testing.T) {
-	baseDir := t.TempDir()
-	pmem.Init(baseDir)
-
-	err := validateImageVersionFilePresent(context.Background(), "cubebox", "artifact-2")
-	if err == nil {
-		t.Fatal("validateImageVersionFilePresent error=nil, want non-nil")
-	}
-
-	writeRawVersionFile(t, "cubebox", "artifact-2", "2.2.0-20251010\n")
-	if err := validateImageVersionFilePresent(context.Background(), "cubebox", "artifact-2"); err != nil {
-		t.Fatalf("validateImageVersionFilePresent error=%v", err)
 	}
 }

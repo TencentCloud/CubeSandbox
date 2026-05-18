@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
-	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
@@ -44,9 +44,6 @@ func TestMaterializeDistributedTemplateRuntimeFilesRefreshesKernel(t *testing.T)
 	sharedKernelPath := pmem.GetSharedKernelFilePath()
 	writeImageTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
 
-	sharedVersionPath := pmem.GetSharedImageVersionFilePath()
-	writeImageTestFile(t, sharedVersionPath, []byte("2.2.0-20251010\n"))
-
 	targetKernelPath := pmem.GetRawKernelFilePath(cubebox.InstanceType_cubebox.String(), template.Image)
 	writeImageTestFile(t, targetKernelPath, bytes.Repeat([]byte("o"), 2048))
 
@@ -56,11 +53,6 @@ func TestMaterializeDistributedTemplateRuntimeFilesRefreshesKernel(t *testing.T)
 	gotKernel, err := os.ReadFile(targetKernelPath)
 	require.NoError(t, err)
 	require.Equal(t, bytes.Repeat([]byte("s"), 4096), gotKernel)
-
-	targetVersionPath := pmem.GetRawImageVersionFilePath(cubebox.InstanceType_cubebox.String(), template.Image)
-	gotVersion, err := os.ReadFile(targetVersionPath)
-	require.NoError(t, err)
-	require.Equal(t, []byte("2.2.0-20251010\n"), gotVersion)
 }
 
 func TestMaterializeDistributedTemplateRuntimeFilesSkipsNonExt4(t *testing.T) {
