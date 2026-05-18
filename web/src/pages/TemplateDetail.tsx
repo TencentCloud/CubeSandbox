@@ -59,7 +59,7 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
   return (
     <button
       onClick={() => {
-        copyToClipboard(text);
+        copyToClipboard(text, t('copied'));
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       }}
