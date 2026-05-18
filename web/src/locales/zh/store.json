@@ -1,0 +1,41 @@
+{
+  "title": "模板市场",
+  "subtitle": "一键安装官方预置镜像，快速制作沙箱模板。",
+  "searchPlaceholder": "搜索镜像…",
+  "checkUpdates": "检查更新",
+  "checking": "检查中…",
+  "noResults": "没有匹配的镜像。",
+  "official": "官方",
+  "hasUpdate": "有更新",
+  "install": "一键安装",
+  "installed": "已安装",
+  "installedCount": "已安装 {{count}} 个",
+  "installAdditionalHint": "使用不同参数再次安装",
+  "installModal": {
+    "subtitle": "安装为 Cube 模板",
+    "templateIDHint": "留空则自动生成",
+    "building": "正在制作模板，请稍候…",
+    "success": "安装成功！",
+    "viewTemplate": "查看模板",
+    "close": "关闭",
+    "cancel": "取消",
+    "confirm": "确认安装",
+    "installing": "安装中…",
+    "retry": "重试",
+    "failed": "安装失败，请重试。",
+    "buildFailed": "制作失败",
+    "timeout": "等待超时，请在模板列表中查看状态。"
+  },
+  "toast": {
+    "updatesFound": "发现 {{count}} 个镜像有新版本",
+    "upToDate": "所有镜像已是最新",
+    "checkFailed": "检查更新失败，请重试"
+  },
+  "categories": {
+    "all": "全部",
+    "code": "代码执行",
+    "browser": "浏览器",
+    "ai": "AI · LLM",
+    "base": "基础镜像"
+  }
+}

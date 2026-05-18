@@ -1,0 +1,41 @@
+{
+  "title": "Template Store",
+  "subtitle": "Install official preset images to quickly create sandbox templates.",
+  "searchPlaceholder": "Search images…",
+  "checkUpdates": "Check Updates",
+  "checking": "Checking…",
+  "noResults": "No matching images.",
+  "official": "Official",
+  "hasUpdate": "Update Available",
+  "install": "Install",
+  "installed": "Installed",
+  "installedCount": "Installed {{count}}",
+  "installAdditionalHint": "Install with different parameters",
+  "installModal": {
+    "subtitle": "Install as Cube Template",
+    "templateIDHint": "leave blank to auto-generate",
+    "building": "Building template, please wait…",
+    "success": "Installation successful!",
+    "viewTemplate": "View template",
+    "close": "Close",
+    "cancel": "Cancel",
+    "confirm": "Confirm Install",
+    "installing": "Installing…",
+    "retry": "Retry",
+    "failed": "Installation failed, please retry.",
+    "buildFailed": "Build failed",
+    "timeout": "Timeout. Check template list for status."
+  },
+  "toast": {
+    "updatesFound": "Found {{count}} image(s) with new versions",
+    "upToDate": "All images are up to date",
+    "checkFailed": "Check updates failed, please retry"
+  },
+  "categories": {
+    "all": "All",
+    "code": "Code Execution",
+    "browser": "Browser",
+    "ai": "AI · LLM",
+    "base": "Base Image"
+  }
+}
