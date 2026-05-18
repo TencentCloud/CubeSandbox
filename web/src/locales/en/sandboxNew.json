@@ -1,0 +1,25 @@
+{
+  "title": "New sandbox",
+  "subtitle": "Choose a template and configure resources to spin up a new micro-VM sandbox.",
+  "section": {
+    "template": "Choose template",
+    "templateDesc": "Only templates with status ready are selectable.",
+    "metadata": "Metadata",
+    "metadataDesc": "Custom key-value pairs attached to the sandbox for identification and filtering."
+  },
+  "form": {
+    "templateRequired": "Select a template to continue.",
+    "alias": "Alias (optional)",
+    "aliasPlaceholder": "e.g. my-dev-sandbox",
+    "autoPause": "Auto-pause on idle",
+    "autoPauseHint": "Automatically pause the sandbox when there are no active connections.",
+    "metaKey": "Key",
+    "metaValue": "Value",
+    "addMeta": "Add entry"
+  },
+  "actions": {
+    "cancel": "Cancel",
+    "create": "Create sandbox",
+    "creating": "Creating…"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "title": "新建沙箱",
+  "subtitle": "选择模板与资源规格，创建一个新的微虚拟机沙箱。",
+  "section": {
+    "template": "选择模板",
+    "templateDesc": "仅显示状态为 ready 的模板可供选择。",
+    "metadata": "元数据",
+    "metadataDesc": "附加到沙箱的自定义键值对，可用于标识和过滤。"
+  },
+  "form": {
+    "templateRequired": "请选择一个模板以继续。",
+    "alias": "别名（可选）",
+    "aliasPlaceholder": "如 my-dev-sandbox",
+    "autoPause": "空闲自动暂停",
+    "autoPauseHint": "无活动连接时自动暂停沙箱以节省资源。",
+    "metaKey": "键",
+    "metaValue": "值",
+    "addMeta": "添加键值对"
+  },
+  "actions": {
+    "cancel": "取消",
+    "create": "创建沙箱",
+    "creating": "创建中…"
+  }
+}
