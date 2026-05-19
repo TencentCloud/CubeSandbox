@@ -7,9 +7,79 @@ export default withMermaid(defineConfig({
   srcExclude: ['**/_template.md'],
   
   themeConfig: {
+    outline: { level: [1, 3] },
     socialLinks: [
       { icon: 'github', link: 'https://github.com/tencentcloud/CubeSandbox' }
-    ]
+    ],
+    search: {
+      provider: 'local',
+      options: {
+        miniSearch: {
+          options: {
+            tokenize: (text) => text
+              ? text.split(/([\u4e00-\u9fa5])|[\s\W]+/).filter(Boolean)
+              : []
+          },
+          searchOptions: {
+            fuzzy: 0.2,
+            prefix: true,
+            boost: { title: 4, text: 2, titles: 1 }
+          }
+        },
+        _render(src, env, md) {
+          const html = md.render(src, env)
+          if (env.frontmatter?.search === false) return ''
+          const fm = env.frontmatter ?? {}
+          if (!html.trim()) {
+            // No markdown body (e.g. external-link blog posts).
+            // Build a synthetic VitePress-style heading so splitPageIntoSections
+            // picks it up. The actual page will redirect to externalUrl on load.
+            if (!fm.title) return ''
+            const slug = fm.title.toLowerCase()
+              .replace(/\s+/g, '-')
+              .replace(/[^\w-]/g, '')
+              .replace(/-+/g, '-')
+            return `<h1 id="${slug}" tabindex="-1">${fm.title} <a class="header-anchor" href="#${slug}">\u200B</a></h1>${fm.description ? `<p>${fm.description}</p>` : ''}`
+          }
+          // Inject frontmatter description right after the first heading so it
+          // becomes part of that section's indexed text.
+          if (fm.description) {
+            return html.replace(/(<\/h[1-6]>)/, `$1<p>${fm.description}</p>`)
+          }
+          return html
+        },
+        locales: {
+          root: {
+            translations: {
+              button: { buttonText: 'Search', buttonAriaLabel: 'Search docs' },
+              modal: {
+                displayDetails: 'Display detailed list',
+                resetButtonTitle: 'Reset search',
+                backButtonTitle: 'Close search',
+                noResultsText: 'No results for',
+                footer: {
+                  selectText: 'to select',
+                  navigateText: 'to navigate',
+                  closeText: 'to close'
+                }
+              }
+            }
+          },
+          zh: {
+            translations: {
+              button: { buttonText: '搜索', buttonAriaLabel: '搜索文档' },
+              modal: {
+                displayDetails: '显示详细列表',
+                resetButtonTitle: '清空搜索',
+                backButtonTitle: '关闭搜索',
+                noResultsText: '没有找到相关结果',
+                footer: { selectText: '选择', navigateText: '切换', closeText: '关闭' }
+              }
+            }
+          }
+        }
+      }
+    }
   },
 
   locales: {
@@ -21,11 +91,13 @@ export default withMermaid(defineConfig({
           { text: 'Home', link: '/' },
           { text: 'Guide', link: '/guide/introduction' },
           { text: 'Architecture', link: '/architecture/overview' },
+          { text: 'Blog', link: '/blog/' },
           { text: 'About us', link: '/about-us' },
           { text: 'Changelog', link: '/changelog' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
+          '/blog/': [],
           '/guide/': [
             {
               text: 'Getting Started',
@@ -74,6 +146,12 @@ export default withMermaid(defineConfig({
                 { text: 'Use Cases', link: '/guide/usecases/' },
                 { text: 'Integrations', link: '/guide/integrations/' }
               ]
+            },
+            {
+              text: 'Maintainer Docs',
+              items: [
+                { text: 'Blog Maintenance', link: '/guide/maintainer/blog' }
+              ]
             }
           ],
           '/architecture/': [
@@ -99,11 +177,13 @@ export default withMermaid(defineConfig({
           { text: '首页', link: '/zh/' },
           { text: '指南', link: '/zh/guide/introduction' },
           { text: '架构', link: '/zh/architecture/overview' },
+          { text: '博客', link: '/zh/blog/' },
           { text: '关于我们', link: '/zh/about-us' },
           { text: '更新日志', link: '/zh/changelog' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
+          '/zh/blog/': [],
           '/zh/guide/': [
             {
               text: '入门指南',
@@ -151,6 +231,12 @@ export default withMermaid(defineConfig({
                 { text: '故障排障', link: '/zh/guide/troubleshooting/' },
                 { text: '应用案例', link: '/zh/guide/usecases/' },
                 { text: '生态集成', link: '/zh/guide/integrations/' }
+              ]
+            },
+            {
+              text: '维护者文档',
+              items: [
+                { text: '博客维护', link: '/zh/guide/maintainer/blog' }
               ]
             }
           ],
