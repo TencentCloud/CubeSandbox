@@ -80,6 +80,8 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     enable_network_agent = true
     network_agent_endpoint = "grpc+unix:///tmp/cube/network-agent-grpc.sock"
     network_agent_tap_socket = "/tmp/cube/network-agent-tap.sock"
+    network_agent_init_timeout = "120s"
+    network_agent_retry_interval = "1s"
 
   [plugins."io.cubelet.internal.v1.storage"]
     #root_path=/data/cubelet/state/io.cubelet.internal.v1.storage
