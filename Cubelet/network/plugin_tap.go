@@ -463,6 +463,26 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 		l.recordNetworkAgentFailure(naErr)
 		return ret.Errorf(errorcode.ErrorCode_CreateNetworkFailed, "network-agent EnsureNetwork failed: %s", classifyNetworkAgentError(naErr))
 	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		// Use a detached context with a 15-second timeout to ensure rollback succeeds even if the parent context is cancelled, without hanging indefinitely.
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		releaseReq := &networkagentclient.ReleaseNetworkRequest{
+			SandboxID:       opts.SandboxID,
+			NetworkHandle:   ensureResp.NetworkHandle,
+			IdempotencyKey:  ensureReq.IdempotencyKey,
+			PersistMetadata: ensureResp.PersistMetadata,
+		}
+		if rErr := l.networkAgentClient.ReleaseNetwork(rollbackCtx, releaseReq); rErr != nil {
+			log.G(rollbackCtx).Warnf("failed to release network during rollback for sandbox %s: %v", opts.SandboxID, rErr)
+		}
+		l.unregisterNetworkAgentTapForPool(rollbackCtx, opts.SandboxID)
+	}()
+
 	log.G(ctx).Infof("tap create ensure response: sandbox_id=%s network_handle=%s interfaces=%d routes=%d arps=%d port_mappings=%d persist_metadata=%s",
 		ensureResp.SandboxID, ensureResp.NetworkHandle, len(ensureResp.Interfaces), len(ensureResp.Routes),
 		len(ensureResp.ARPNeighbors), len(ensureResp.PortMappings), utils.InterfaceToString(ensureResp.PersistMetadata))
