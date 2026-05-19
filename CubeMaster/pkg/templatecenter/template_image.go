@@ -2199,7 +2199,15 @@ func directorySize(root string) (int64, error) {
 
 func firstNonEmptyDigest(info dockerInspectImage) string {
 	if len(info.RepoDigests) > 0 && info.RepoDigests[0] != "" {
-		return info.RepoDigests[0]
+		rd := info.RepoDigests[0]
+		// RepoDigests entries are canonical references of the form
+		// "name@sha256:...". We only want the digest portion so that
+		// callers can compose "ref@digest" without producing
+		// "name:tag@name@sha256:..." style duplication.
+		if at := strings.Index(rd, "@"); at >= 0 && at+1 < len(rd) {
+			return rd[at+1:]
+		}
+		return rd
 	}
 	return info.ID
 }

@@ -631,6 +631,12 @@ func TestComposeImageInfo(t *testing.T) {
 			digest: "sha256:abcd",
 			want:   "docker.io/library/nginx@sha256:abcd",
 		},
+		{
+			name:   "digest carries canonical name prefix",
+			ref:    "docker.io/library/nginx:latest",
+			digest: "docker.io/library/nginx@sha256:abcd",
+			want:   "docker.io/library/nginx:latest@sha256:abcd",
+		},
 	}
 	for _, tc := range tests {
 		if got := composeImageInfo(tc.ref, tc.digest); got != tc.want {

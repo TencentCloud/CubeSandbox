@@ -680,6 +680,12 @@ func composeImageInfo(ref, digest string) string {
 	if imageDigest == "" {
 		return imageRef
 	}
+	// Tolerate historical rows where SourceImageDigest was stored as a
+	// full canonical reference ("name@sha256:..."). Strip the "name@"
+	// prefix so we never produce "name:tag@name@sha256:...".
+	if at := strings.Index(imageDigest, "@"); at >= 0 && at+1 < len(imageDigest) {
+		imageDigest = imageDigest[at+1:]
+	}
 	if strings.Contains(imageRef, "@") {
 		return imageRef
 	}
