@@ -6,6 +6,13 @@ Every contribution in this section must include both an English file under `docs
 
 This section collects practical troubleshooting write-ups for Cube Sandbox deployments and daily operations. Preferred submissions are concrete, reproducible, and directly actionable.
 
+## Topic index
+
+Curated index tables of high-frequency issues, each row linking to a GitHub Issue:
+
+- [Deployment Troubleshooting](./deployment)
+- [Templates Troubleshooting](./templates)
+
 ## What belongs here
 
 - Deployment failures and environment-specific pitfalls

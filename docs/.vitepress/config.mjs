@@ -142,7 +142,14 @@ export default withMermaid(defineConfig({
             {
               text: 'Contribute',
               items: [
-                { text: 'Troubleshooting', link: '/guide/troubleshooting/' },
+                {
+                  text: 'Troubleshooting',
+                  link: '/guide/troubleshooting/',
+                  items: [
+                    { text: 'Deployment', link: '/guide/troubleshooting/deployment' },
+                    { text: 'Templates', link: '/guide/troubleshooting/templates' }
+                  ]
+                },
                 { text: 'Use Cases', link: '/guide/usecases/' },
                 { text: 'Integrations', link: '/guide/integrations/' }
               ]
@@ -228,7 +235,14 @@ export default withMermaid(defineConfig({
             {
               text: '社区共建',
               items: [
-                { text: '故障排障', link: '/zh/guide/troubleshooting/' },
+                {
+                  text: '故障排障',
+                  link: '/zh/guide/troubleshooting/',
+                  items: [
+                    { text: '部署相关', link: '/zh/guide/troubleshooting/deployment' },
+                    { text: '模板相关', link: '/zh/guide/troubleshooting/templates' }
+                  ]
+                },
                 { text: '应用案例', link: '/zh/guide/usecases/' },
                 { text: '生态集成', link: '/zh/guide/integrations/' }
               ]
