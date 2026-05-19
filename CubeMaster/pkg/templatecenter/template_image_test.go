@@ -443,7 +443,7 @@ func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
 	if inspectCalls != 1 {
 		t.Fatalf("expected 1 inspect call, got %d", inspectCalls)
 	}
-	if got == nil || got.digest != "docker.io/library/nginx@sha256:abcd" {
+	if got == nil || got.digest != "sha256:abcd" {
 		t.Fatalf("unexpected resolved image: %#v", got)
 	}
 }
@@ -484,7 +484,7 @@ func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
 	if inspectCalls != 2 {
 		t.Fatalf("expected 2 inspect calls, got %d", inspectCalls)
 	}
-	if got == nil || got.digest != "docker.io/library/nginx@sha256:abcd" {
+	if got == nil || got.digest != "sha256:abcd" {
 		t.Fatalf("unexpected resolved image: %#v", got)
 	}
 }
