@@ -81,6 +81,7 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     network_agent_tap_socket = "/tmp/cube/network-agent-tap.sock"
     network_agent_init_timeout = "120s"
     network_agent_retry_interval = "1s"
+    network_agent_tap_fd_timeout = "2s"
 
   [plugins."io.cubelet.internal.v1.storage"]
     #root_path=/data/cubelet/state/io.cubelet.internal.v1.storage
