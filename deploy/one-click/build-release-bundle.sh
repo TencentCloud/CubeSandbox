@@ -254,10 +254,12 @@ copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf" "${PACKAGE_ROOT}/cube-
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image" "${PACKAGE_ROOT}/cube-image"
 
 copy_dir_contents "${SCRIPT_DIR}/scripts/one-click" "${PACKAGE_ROOT}/scripts/one-click"
+copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cube-diag"
 copy_dir_contents "${SCRIPT_DIR}/sql" "${PACKAGE_ROOT}/sql"
 
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
 tar -C "${WORK_ROOT}" -czf "${PACKAGE_TAR}" "sandbox-package"
