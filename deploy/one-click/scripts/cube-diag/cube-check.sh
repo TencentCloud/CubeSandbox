@@ -211,13 +211,11 @@ main() {
     if [[ -n "${CHECK_LOG}" ]]; then
       "${SCRIPT_DIR}/collect-logs.sh" \
         --dir "${OUT_DIR}" \
-        --no-tar \
         --allow-existing \
         "${COLLECT_FLAGS[@]+"${COLLECT_FLAGS[@]}"}" 2>&1 | tee -a "${CHECK_LOG}"
     else
       "${SCRIPT_DIR}/collect-logs.sh" \
         --dir "${OUT_DIR}" \
-        --no-tar \
         --allow-existing \
         "${COLLECT_FLAGS[@]+"${COLLECT_FLAGS[@]}"}"
     fi

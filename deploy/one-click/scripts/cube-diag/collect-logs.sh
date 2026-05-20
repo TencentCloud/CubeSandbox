@@ -13,7 +13,7 @@
 #   /data/log/CubeShim/                CubeShim request/stat logs
 #   /data/log/CubeVmm/                 VMM logs
 #   /data/log/network-agent/           network-agent request logs
-#   /data/log/cube-proxy/              cube-proxy logs
+#   cube-proxy (Docker)                error.log and access.log via docker exec
 #   dmesg                              kernel ring buffer
 #   process/env snapshot               ps, ports, mounts, cgroup, cpuinfo, …
 #   config files                       with secrets redacted
@@ -28,9 +28,8 @@
 #                       Default: all modules
 #   --lines <n>         Tail N lines per log file (default: 2000)
 #   --all-lines         Collect entire log files (may be very large)
-#   --dir <dir>         Output directory (default: /tmp/cube-diag-<timestamp>)
+#   --dir <dir>         Output directory (default: cube-diag-<timestamp> under CWD)
 #                       Must not already exist or be non-empty (exits with error if non-empty)
-#   --no-tar            Keep the directory, skip .tar.gz creation
 #
 # Exit: 0 = collection complete (partial source failures are warned, not fatal)
 
@@ -41,7 +40,7 @@ usage() {
   cat <<'EOF'
 Usage: collect-logs.sh [OPTIONS]
 
-Collect Cube Sandbox logs and diagnostic information into a .tar.gz bundle.
+Collect Cube Sandbox logs and diagnostic information into a directory.
 
 Log sources:
   /var/log/cube-sandbox-one-click/   Runtime startup logs
@@ -51,7 +50,7 @@ Log sources:
   /data/log/CubeShim/                CubeShim request/stat logs
   /data/log/CubeVmm/                 VMM logs
   /data/log/network-agent/           network-agent request logs
-  /data/log/cube-proxy/              cube-proxy logs
+  cube-proxy (Docker)                error.log and access.log via docker exec
   dmesg                              Full kernel ring buffer + filtered views
   env                                Process list, ports, mounts, cgroup, cpuinfo, ...
   configs                            Config files with secrets redacted
@@ -64,10 +63,10 @@ Options:
                     Default: all modules
   --lines <n>       Tail N lines per log file (default: 2000)
   --all-lines       Copy entire log files without truncation.
-                    WARNING: some logs exceed 1 million lines; bundle may be very large.
-  --dir <dir>       Output directory (default: /tmp/cube-diag-<timestamp>)
-                    Must not already exist or be non-empty (exits with error if non-empty)
-  --no-tar          Keep output directory; skip .tar.gz creation
+                    WARNING: some logs exceed 1 million lines; output may be very large.
+  --dir <dir>       Output directory.
+                    Default: cube-diag-<timestamp> under the current working directory.
+                    Must not already exist or be non-empty (exits with error if non-empty).
   --help            Show this help message and exit
 
 Environment variables:
@@ -90,7 +89,7 @@ Examples:
   ./collect-logs.sh --module cubemaster --all-lines
 
   # Save to a specific directory without creating a tarball
-  ./collect-logs.sh --dir /tmp/my-diag --no-tar
+  ./collect-logs.sh --dir ./my-diag
 
 EOF
 }
@@ -106,8 +105,9 @@ TS="$(date +%Y%m%d_%H%M%S)"
 # ── CLI flags ──────────────────────────────────────────────────────────────────
 TAIL_LINES=2000
 ALL_LINES=0
-OUT_DIR="/tmp/cube-diag-${TS}"
-NO_TAR=0
+# Default: cube-diag-<ts> under CWD (not /tmp), no compression
+_DEFAULT_OUT_NAME="cube-diag-${TS}"
+OUT_DIR="${PWD}/${_DEFAULT_OUT_NAME}"
 ALLOW_EXISTING=0
 declare -a SELECTED_MODULES=()
 
@@ -116,9 +116,17 @@ while [[ $# -gt 0 ]]; do
     --module)    SELECTED_MODULES+=("$2"); shift 2 ;;
     --lines)     TAIL_LINES="$2"; shift 2 ;;
     --all-lines) ALL_LINES=1; shift ;;
-    --dir)       OUT_DIR="$2"; shift 2 ;;
-    --no-tar)        NO_TAR=1; shift ;;
+    --dir)
+      # Support both absolute and relative paths
+      case "$2" in
+        /*) OUT_DIR="$2" ;;
+        *)  OUT_DIR="${PWD}/$2" ;;
+      esac
+      shift 2 ;;
+    # Internal flag used by cube-check.sh to merge into an existing directory
     --allow-existing) ALLOW_EXISTING=1; shift ;;
+    # Kept for backward compatibility but now a no-op (no tarball is created)
+    --no-tar) shift ;;
     --help|-h)   usage; exit 0 ;;
     *)           echo "[collect] WARNING: unrecognized option: $1" >&2; shift ;;
   esac
@@ -249,7 +257,59 @@ collect_cube_proxy() {
   _info "── cube-proxy ──"
   local dest="${OUT_DIR}/cube-proxy"
   mkdir -p "${dest}"
-  _collect_data_log_dir "${DATA_LOG_DIR}/cube-proxy" "${dest}"
+
+  # cube-proxy runs inside a Docker container; its logs are not on the host
+  # filesystem. Find the running container by image name (cube-proxy:one-click
+  # as shipped by the one-click installer) and extract via docker exec.
+  if ! command -v docker >/dev/null 2>&1; then
+    _warn "docker not found — cannot collect cube-proxy container logs"
+    return
+  fi
+
+  # Locate the cube-proxy container by exact name 'cube-proxy'.
+  # docker --filter name= does prefix/substring matching, so we must verify
+  # the exact name from the output to avoid matching 'cube-proxy-coredns'.
+  local cid
+  cid="$(docker ps --filter 'name=cube-proxy' --filter 'status=running' \
+           --format '{{.Names}}\t{{.ID}}' 2>/dev/null \
+         | awk '$1=="cube-proxy" {print $2}' | head -1)"
+  if [[ -z "${cid}" ]]; then
+    # Fall back: match by image name pattern cube-proxy:*
+    cid="$(docker ps --filter 'status=running' \
+             --format '{{.Image}}\t{{.ID}}' 2>/dev/null \
+           | awk '$1~/^cube-proxy:/ {print $2}' | head -1)"
+  fi
+  if [[ -z "${cid}" ]]; then
+    _warn "cube-proxy container not running — cannot collect its logs"
+    return
+  fi
+  _info "cube-proxy container: ${cid}"
+
+  local -a log_paths=(
+    /data/log/cube-proxy/error.log
+    /data/log/cube-proxy/access.log
+  )
+
+  for log_path in "${log_paths[@]}"; do
+    local base; base="$(basename "${log_path}")"
+    local out_file="${dest}/${base}"
+    # Use '[ -f ... ]' via sh -c to avoid relying on the 'test' binary
+    # which may not be present in the container's PATH.
+    if docker exec "${cid}" sh -c "[ -f '${log_path}' ]" 2>/dev/null; then
+      if [[ "${ALL_LINES}" -eq 1 ]]; then
+        docker exec "${cid}" cat "${log_path}" > "${out_file}" 2>/dev/null \
+          && _info "docker exec ${cid} cat ${log_path}" \
+          || _warn "could not read ${log_path} from container ${cid}"
+      else
+        docker exec "${cid}" sh -c "tail -n ${TAIL_LINES} ${log_path}" \
+          > "${out_file}" 2>/dev/null \
+          && _info "docker exec ${cid} tail -${TAIL_LINES} ${log_path}" \
+          || _warn "could not tail ${log_path} from container ${cid}"
+      fi
+    else
+      _warn "${log_path} not found inside container ${cid}"
+    fi
+  done
 }
 
 collect_runtime() {
@@ -338,18 +398,19 @@ collect_configs() {
 }
 
 # ── Tarball ────────────────────────────────────────────────────────────────────
-create_tarball() {
-  local tarball="${OUT_DIR}.tar.gz"
-  tar -czf "${tarball}" -C "$(dirname "${OUT_DIR}")" "$(basename "${OUT_DIR}")" 2>/dev/null
+print_done() {
   echo
   echo "╔══════════════════════════════════════════════════════╗"
-  echo "║  Diagnostics bundle ready                           ║"
+  echo "║  Diagnostics collection complete                    ║"
   echo "╚══════════════════════════════════════════════════════╝"
-  printf "  File : %s\n" "${tarball}"
-  printf "  Size : %s\n" "$(du -sh "${tarball}" 2>/dev/null | cut -f1)"
+  printf "  Directory : %s\n" "${OUT_DIR}"
+  printf "  Size      : %s\n" "$(du -sh "${OUT_DIR}" 2>/dev/null | cut -f1)"
   echo
-  echo "  Share this bundle with the Cube Sandbox support team."
-  echo "  https://github.com/TencentCloud/CubeSandbox/issues"
+  echo "  To package and share:"
+  printf "    tar czf %s.tar.gz %s\n" \
+    "$(basename "${OUT_DIR}")" "$(basename "${OUT_DIR}")"
+  echo
+  echo "  Issues: https://github.com/TencentCloud/CubeSandbox/issues"
   echo "  Discord: https://discord.gg/kkapzDXShb"
 }
 
@@ -380,14 +441,7 @@ main() {
   _module_selected "configs"       && collect_configs
 
   _info "Collection complete"
-
-  if [[ "${NO_TAR}" -eq 0 ]]; then
-    create_tarball
-    rm -rf "${OUT_DIR}"
-  else
-    echo
-    echo "  Directory: ${OUT_DIR}"
-  fi
+  print_done
 }
 
 main "$@"
