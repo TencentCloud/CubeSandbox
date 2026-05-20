@@ -55,4 +55,5 @@ lang: en-US
 
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
+| [Template Creation Times Out When the Sandbox CIDR Overlaps the LAN](./local-network-cidr-conflict.md) | luzhixing12345 | 2026-05-20 | deployment, networking, one-click |
 | _Add your article here_ | - | - | - |
