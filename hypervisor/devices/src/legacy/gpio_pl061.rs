@@ -8,6 +8,7 @@
 //!
 
 use crate::{read_le_u32, write_le_u32};
+use serde::{Deserialize, Serialize};
 use std::result;
 use std::sync::{Arc, Barrier};
 use std::{fmt, io};

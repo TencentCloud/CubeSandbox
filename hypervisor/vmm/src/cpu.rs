@@ -815,12 +815,10 @@ impl CpuManager {
                 &self.vm_memory,
                 self.cpuid.clone(),
                 self.config.kvm_hyperv,
-            )
-            .expect("Failed to configure vCPU");
+            )?;
 
             #[cfg(target_arch = "aarch64")]
-            vcpu.configure(&self.vm, entry_point)
-                .expect("Failed to configure vCPU");
+            vcpu.configure(&self.vm, entry_point)?;
         }
 
         // Adding vCPU to the CpuManager's vCPU list.

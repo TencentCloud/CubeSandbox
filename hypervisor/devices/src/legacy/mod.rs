@@ -16,7 +16,6 @@ mod i8042;
 #[cfg(target_arch = "aarch64")]
 mod rtc_pl031;
 mod serial;
-#[cfg(target_arch = "x86_64")]
 mod sys_ctrl;
 #[cfg(target_arch = "aarch64")]
 mod uart_pl011;
@@ -28,7 +27,6 @@ pub use self::debug_port::DebugPort;
 pub use self::fwdebug::FwDebugDevice;
 pub use self::i8042::I8042Device;
 pub use self::serial::Serial;
-#[cfg(target_arch = "x86_64")]
 pub use self::sys_ctrl::SysCtrl;
 
 #[cfg(target_arch = "aarch64")]
