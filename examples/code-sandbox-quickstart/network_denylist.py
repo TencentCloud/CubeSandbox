@@ -2,16 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-network_denylist.py — 允许访问公网，但拦截特定 IP/CIDR
+network_denylist.py — Allow normal internet access but block specific IP/CIDR ranges.
 
-使用场景：
-    沙箱需要正常上网（安装包、拉取资源），
-    但要屏蔽云厂商 metadata 接口、内网敏感段等特定地址，
-    防止沙箱内代码探测宿主机信息或横向移动。
+Use case:
+    The sandbox needs full internet access (to install packages, fetch resources,
+    etc.) but specific addresses must be blocked — for example, cloud provider
+    metadata endpoints and internal management subnets — to prevent sandbox code
+    from probing host information or performing lateral movement.
 
-原理：
-    network.deny_out 设置黑名单 CIDR 列表，传入 CubeVSContext.DenyOut，
-    Cubelet tap 网络层丢弃所有目标地址匹配的出口流量。
+How it works:
+    network.deny_out sets a CIDR denylist passed to CubeVSContext.DenyOut.
+    The Cubelet tap network layer drops all outbound packets whose destination
+    address matches one of the listed CIDRs; all other traffic is allowed.
 """
 
 import os
@@ -22,11 +24,11 @@ load_local_dotenv()
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
 
-# 屏蔽云厂商 metadata 接口和内网管理段
+# Block cloud provider metadata endpoints and internal management subnets
 DENIED_CIDRS = [
-    "169.254.0.0/16",  # link-local（AWS/GCP/腾讯云 metadata 通用段）
-    "100.100.100.200/32",  # 阿里云 metadata
-    "10.0.0.0/8",     # 内网管理段
+    "169.254.0.0/16",       # link-local — AWS/GCP/Tencent Cloud metadata range
+    "100.100.100.200/32",   # Alibaba Cloud metadata endpoint
+    "10.0.0.0/8",           # internal management subnet
 ]
 
 with Sandbox.create(
@@ -36,13 +38,13 @@ with Sandbox.create(
         "deny_out": DENIED_CIDRS,
     },
 ) as sandbox:
-    # 公网仍可正常访问
+    # Public internet is still accessible
     result = sandbox.commands.run(
         "curl -s --max-time 5 https://example.com -o /dev/null -w '%{http_code}'"
     )
     print("public internet:", result.stdout.strip())
 
-    # metadata 接口被拦截
+    # Cloud metadata endpoint is blocked
     result = sandbox.commands.run(
         "curl -s --max-time 3 http://169.254.169.254/latest/meta-data/ || echo 'blocked'"
     )

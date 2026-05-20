@@ -15,7 +15,6 @@ var Command = &cli.Command{
 	Subcommands: []*cli.Command{
 		ListCommand,
 		ListSandboxCommand,
-		&listMetaData,
 		update,
 		Create,
 		&inspecMetaData,

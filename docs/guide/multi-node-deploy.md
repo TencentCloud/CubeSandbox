@@ -11,8 +11,8 @@ You must have a working control node deployed via the [Self-Build Deployment Gui
 ```
 ┌─────────────────────────────────────────┐
 │           Control Node                  │
-│  CubeMaster, cube-api, CubeProxy,      │
-│  CoreDNS, MySQL, Redis,                │
+│  CubeMaster, cube-api, CubeProxy,       │
+│  CoreDNS, MySQL, Redis,                 │
 │  Cubelet, network-agent                 │
 └──────────────────┬──────────────────────┘
                    │  /internal/meta API

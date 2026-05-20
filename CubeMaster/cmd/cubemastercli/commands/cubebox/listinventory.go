@@ -29,7 +29,7 @@ var ListInventoryCommand = cli.Command{
 	Flags: []cli.Flag{
 		cli.StringSliceFlag{
 			Name:  "filter",
-			Usage: "过滤条件,支持多个,格式:key=value,key=value,key=value",
+			Usage: "Filter conditions, multiple supported, format: key=value,key=value,key=value",
 		},
 		cli.StringFlag{
 			Name:  "type",

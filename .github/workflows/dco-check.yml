@@ -1,0 +1,59 @@
+name: DCO Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dco-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dco:
+    name: Developer Certificate of Origin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check DCO sign-off
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          failed=0
+          while IFS= read -r sha; do
+            # Skip merge commits
+            parents=$(git cat-file -p "$sha" | grep -c '^parent ' || true)
+            if [[ "$parents" -gt 1 ]]; then
+              continue
+            fi
+
+            message=$(git log -1 --format='%B' "$sha")
+            if ! echo "$message" | grep -qP '^Signed-off-by: .+ <.+@.+>'; then
+              echo "::error::Commit $sha is missing a valid 'Signed-off-by:' line."
+              echo "  Subject: $(git log -1 --format='%s' "$sha")"
+              echo "  Author:  $(git log -1 --format='%an <%ae>' "$sha")"
+              echo ""
+              failed=1
+            fi
+          done < <(git rev-list "$BASE_SHA".."$HEAD_SHA")
+
+          if [[ "$failed" -eq 1 ]]; then
+            echo ""
+            echo "DCO check failed. Every commit must contain:"
+            echo "  Signed-off-by: Your Name <your.email@example.com>"
+            echo ""
+            echo "Fix with: git rebase --signoff HEAD~N && git push --force-with-lease"
+            echo "See: https://developercertificate.org/"
+            exit 1
+          fi
+
+          echo "All commits have valid DCO sign-off."

@@ -14,7 +14,7 @@ markdown-it-py==4.0.0
 mdurl==0.1.2
 packaging==26.0
 protobuf==7.34.0
-Pygments==2.19.2
+Pygments==2.20.0
 python-dateutil==2.9.0.post0
 rich==14.3.3
 six==1.17.0

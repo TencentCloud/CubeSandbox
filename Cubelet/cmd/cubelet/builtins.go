@@ -64,6 +64,7 @@ import (
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/createid"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
+	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/metric"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/netfile"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/runtime"

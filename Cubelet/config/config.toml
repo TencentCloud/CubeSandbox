@@ -66,7 +66,6 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     mvm_gw_mac_addr = "20:90:6f:cf:cf:cf"
     mvm_gw_dest_ip = "169.254.68.5"
     mvm_mtu = 1300
-    default_exposed_ports = [8080, 32000]
     # metric
     check_interval_in_sec = "5s"
     report_stat_interval_in_sec = "60s"
@@ -80,6 +79,8 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     enable_network_agent = true
     network_agent_endpoint = "grpc+unix:///tmp/cube/network-agent-grpc.sock"
     network_agent_tap_socket = "/tmp/cube/network-agent-tap.sock"
+    network_agent_init_timeout = "120s"
+    network_agent_retry_interval = "1s"
 
   [plugins."io.cubelet.internal.v1.storage"]
     #root_path=/data/cubelet/state/io.cubelet.internal.v1.storage

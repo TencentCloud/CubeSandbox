@@ -32,4 +32,4 @@ default-features = false
 features = ["std", "decoder", "op_code_info", "instr_info", "fast_fmt"]
 
 [dev-dependencies]
-env_logger = "0.9.3"
+env_logger = "0.10.2"

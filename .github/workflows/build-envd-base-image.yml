@@ -2,6 +2,7 @@ name: Build envd Base Image
 
 on:
   push:
+    branches: [master]
     paths:
       - 'docker/Dockerfile.cube-base'
       - 'docker/cube-entrypoint.sh'

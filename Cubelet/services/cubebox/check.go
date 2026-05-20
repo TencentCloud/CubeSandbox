@@ -14,7 +14,6 @@ import (
 	"github.com/containerd/fifo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
@@ -48,26 +47,14 @@ func checkParam(ctx context.Context, realReq *cubebox.RunCubeSandboxRequest) err
 		}
 	}
 
-	reqPorts := 0
 	for _, p := range realReq.GetExposedPorts() {
 		if p <= 0 || p > 65535 {
 			return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid exposed port %d", p)
 		}
-		isDefault := false
-		for _, d := range network.DefaultExposedPorts {
-			if uint16(p) == d {
-				isDefault = true
-				break
-			}
-		}
-		if !isDefault {
-			reqPorts++
-		}
 	}
-
-	if reqPorts > 3 {
+	if len(realReq.GetExposedPorts()) > 4 {
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat,
-			"exposed ports should less or equal than 5(system reserves two of them)")
+			"exposed ports should be at most 4")
 	}
 
 	if err != nil {

@@ -1,5 +1,105 @@
 # Changelog
 
+## 2026.05.18 Release v0.2.2
+
+### 🛡️ Security Fixes
+
+- **`hypervisor`: `vmm-sys-util` bumped to 0.12.1** (CVE-2023-50711, GHSA-875g-mfp6-g7f9): `FamStructWrapper::deserialize` failed to verify header length against the flexible-array length, allowing out-of-bounds memory access from safe Rust code. Now pinned to the workspace version shared by all other hypervisor crates.
+- **`agent` / `hypervisor`: `bytes` and `env_logger` security bumps** as part of the same dependency-refresh pass.
+- **Reverted `time` crate bump (CVE-2026-25727)**: CubeSandbox only uses `Rfc3339` for outbound timestamp formatting and never parses untrusted `Rfc2822` input — the affected attack vector is not reachable. The upgrade was rolled back pending an MSRV bump and will be tracked separately.
+
+### 🛠️ Critical Fixes
+
+- **Fixed duplicate template-image job creation (`CubeMaster`)**: A `request_id` column with a unique index on `(request_id, operation)` makes job submissions idempotent, preventing duplicate build jobs from concurrent or retried API calls.
+- **Fixed `cubecli exec` nil-deref panic on stdin EOF**: `StdinCloser.Read` triggered a nil-pointer dereference at stdin EOF, silently aborting the exec lifecycle. Fixed using `errors.Is(err, io.EOF)` for proper error-wrapping compatibility; shim logs now emit the expected paired exec lifecycle entries.
+- **Fixed ext4 artifact runtime file materialization for PVM templates**: `RefreshArtifactRuntimeFiles`, `validateArtifactRuntimeFilesPresent`, and `ensureArtifactRuntimeFiles` are simplified to handle only kernel files; `copyKernelFileAtomically` is renamed to `CopyFileAtomically` for reuse outside the package.
+
+### ✨ Enhancements
+
+- **E2B-compatible default exposed port**: Default sandbox exposed port changed to **49983** to match the E2B sandbox protocol. `CubeMaster` is now the single source of truth — hardcoded defaults removed from `Cubelet` and `network-agent`.
+- **`cubelet`: configurable `cmdTimeout` via storage plugin TOML config**: A new optional `cmd_timeout` field replaces the hardcoded 3 s default, letting operators raise the limit for multi-GiB ext4 operations without recompiling. Default behavior is unchanged when the field is absent.
+- **`cubelet`: richer diagnostics on `newExt4RawByReflinkCopy` failures**: Error messages now include elapsed time, file sizes, and free space — e.g. `[step=N/4 cmd="…" elapsed=…ms target=size=… base=size=… free=…B]`.
+- **Deploy: sync CubeMaster custom ports from `.env`**: `cubemaster.yaml` now uses `__CUBE_SANDBOX_MYSQL_PORT__` / `__CUBE_SANDBOX_REDIS_PORT__` placeholders substituted by `install.sh`, enabling non-default MySQL/Redis ports without manual YAML edits.
+
+### ⚙️ Engineering Improvements
+
+- **`cubecli`: removed dead `listmd` command**: The unreachable `listmd` subcommand and its 128-line implementation are deleted.
+
+### 🤖 CI / DevOps
+
+- **Claude-powered code review and issue triage automation**: Five AI reviewer agents (code quality, performance, security, test coverage, documentation) added under `.agents/agents/`. Automated workflows handle PR review, duplicate issue detection, and issue label triage. Helper scripts `gh.sh` and `edit-issue-labels.sh` added under `scripts/`.
+
+### 📚 Documentation
+
+- **Chinese translation of `CONTRIBUTING.md`**: `CONTRIBUTING_zh.md` added as a full Chinese translation of the contribution guide.
+- **Community doc PR requirements relaxed**: Both `CONTRIBUTING.md` and `CONTRIBUTING_zh.md` now allow single-language submissions; bilingual docs are optional.
+- **Network port allocation ranges documented**: `docs/architecture/network.md` (EN & ZH) now documents the three port-range buckets: `10000–19999` (network-agent), `20000–29999` (CubeProxy), `30000–65535` (CubeVS SNAT).
+- **Community docs sections added**: New bilingual troubleshooting, use-cases, and integrations sections added to VitePress; a CI workflow enforces bilingual parity.
+- **Domain update**: CNAME switched from `docs.cubesandbox.ai` to `cubesandbox.com`.
+- **Fixed `browser-sandbox` example**: Added missing `load_dotenv()` call and `python-dotenv` dependency.
+- **WeChat group QR code refreshed**.
+
+---
+
+## 2026.05.14 Release v0.2.1
+
+### 🌟 Major New Features
+
+- **Official Python SDK (`cubesandbox` v0.1.0)**: A first-party Python SDK shipped under `sdk/python/`, fully aligned with the CubeAPI OpenAPI spec. Covers full sandbox lifecycle (create/connect/pause/kill/list/health), code execution with streaming stdout/stderr, filesystem access, direct-connect transport, and network policy. Includes 12 worked examples, a concurrency benchmark, and 76/76 tests passing.
+
+### 🚀 Performance
+
+- **Skip SHA256 on every Cubelet startup**: Split `SyncKernelFile` into `EnsureKernelFilePresent` (copy-if-missing, fast path) and `RefreshKernelFile` (force-refresh with verification), removing the expensive per-boot SHA256 comparison. Normal startup latency drops significantly on hosts with many templates.
+- **Skip redundant `docker pull` in CubeMaster**: Source image pulls are now bypassed when the image already exists locally, removing unnecessary registry round-trips during template builds.
+
+### 🛡️ Security Fixes
+
+- **`shim`: protobuf bumped 3.4.0 → 3.7.2** (RUSTSEC, stack overflow on crafted unknown fields). Co-upgrades `containerd-shim-protos`, `containerd-shim`, and `nix`.
+- **`cubeapi` / `agent` / `shim` / `hypervisor`: rand 0.8.5 → 0.8.6** (GHSA-cq8v-f236-94qc, soundness issue with `ThreadRng` reseeding).
+- **`CubeVS`: `golang.org/x/net` → v0.38.0, `golang.org/x/sys` → v0.38.0**.
+- **`network-agent`: `google.golang.org/grpc` → 1.79.3**.
+- **`CubeAPI/examples`: `pygments` → 2.20.0**.
+
+### 🛠️ Critical Fixes
+
+- **Fixed Seccomp swallowing all syscalls**: `Seccomp` initialization now sets `DefaultAction = ActAllow`; an empty syscall list short-circuits as a no-op instead of silently blocking everything.
+- **Fixed `shim` stderr being routed through stdout**: The `Exec` stream-forwarding path was incorrectly calling the stdout read method for stderr; stderr is now properly captured and forwarded.
+- **Fixed `CubeProxy` workers sharing the same PRNG seed**: OpenResty workers now seed the RNG per-worker in `init_worker` with `(ngx.now() * 1000 + ngx.worker.id())`, preventing synchronized cache-expiration stampedes.
+- **Fixed dev-env sync overwriting `cube-shim` symlinks**: `cube-runtime` and `containerd-shim-cube-rs` are now written to `${TOOLBOX_ROOT}/cube-shim/bin`, preserving the toolbox symlink layout.
+- **Fixed Dockerfile breakage on HTTPS-only mirrors**: `ca-certificates` is now installed before apt sources are swapped to internal mirrors.
+
+### ✨ Enhancements
+
+- **`cubemastercli tpl watch` — phase-oriented output**: Replaced the old multi-line full-status dump with concise `[N/7] PHASE` progress lines plus a terminal summary; much friendlier in CI logs.
+- **IPAM — comprehensive optimization and reliability overhaul** (Cubelet + network-agent): Validation rewritten on `net/netip`; IP ↔ index conversions via `encoding/binary.BigEndian`; bounds checks, safety limits, and `nil` guards added; reserved-address semantics documented; comprehensive table-driven and concurrency tests.
+
+### ⚙️ Engineering Improvements
+
+- **Examples reorganized into standalone top-level directories**: Moved from `CubeAPI/examples/` to top-level `examples/`, with dedicated `host-mount` and `network-policy` directories (each with its own README); comments translated to English.
+- **`cube-bench` promoted to `examples/cube-bench`**: Now a standalone Go module with its own Makefile.
+- **Go toolchain alignment**: `CubeVS` and `network-agent` upgraded to Go 1.24.8.
+- **`cubecli` internationalization**: Remaining Chinese usage strings in `benchrun.go` translated to English.
+- **Docker build context cleanup**: `Makefile` builder-image now builds from `./docker` instead of the repo root.
+- **Alpine mirror swap**: APK repositories switched from `dl-cdn.alpinelinux.org` to `mirrors.tencent.com`.
+
+### 🤖 CI / DevOps
+
+- **DCO check workflow**: A dedicated PR gate now blocks merges if any non-merge commit is missing a valid `Signed-off-by` trailer.
+- **GitHub ARC (Actions Runner Controller) support**: Self-hosted ARC runners wired up for kernel/package build workflows.
+- **No more duplicate PR checks**: `push` triggers on several workflows now scoped to `master` only; PR validation runs exclusively via `pull_request` — halving CI cost.
+- **`sync-to-cnb`**: Uses the `CNB_GIT_PASSWORD` secret.
+
+### 📚 Documentation
+
+- **Deployment guide reworked**: PVM and bare-metal are now presented as the preferred deployment paths.
+- **PVM rapid-deploy on OpenCloudOS 9**: New step-by-step section added to `pvm-deploy.md`.
+- **"About us" page**: English and Chinese versions added, with corresponding VitePress navigation.
+- **X (Twitter) link** added to project READMEs.
+- **Docs polish**: Python import paths and architecture-diagram spacing corrected.
+- **WeChat / assistant QR codes** refreshed in `README_zh.md`.
+
+---
+
 ## 2026.05.07 Release v0.2.0
 
 ### 🌟 Major New Features

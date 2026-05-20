@@ -3,7 +3,6 @@ module github.com/tencentcloud/CubeSandbox/Cubelet
 go 1.24.8
 
 require (
-	github.com/agiledragon/gomonkey/v2 v2.9.0
 	github.com/cilium/ebpf v0.17.3 // indirect
 	github.com/containerd/console v1.0.5
 	github.com/containerd/continuity v0.4.5
@@ -78,7 +77,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-openapi/jsonreference v0.21.2 // indirect

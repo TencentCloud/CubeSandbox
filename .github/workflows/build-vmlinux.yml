@@ -15,6 +15,8 @@ env:
 jobs:
   build:
     runs-on: arc-runner-set-16c32g-containerd
+    container:
+      image: ubuntu:24.04
     permissions:
       contents: read
 
@@ -32,17 +34,10 @@ jobs:
 
       - name: Install kernel build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            bc \
-            bison \
-            build-essential \
-            cpio \
-            file \
-            flex \
-            libelf-dev \
-            libssl-dev \
-            unzip
+          apt-get update
+          apt-get install -y file sudo build-essential git bc bison flex \
+            libelf-dev libssl-dev libncurses-dev dwarves cpio kmod \
+            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3
 
       - name: Restore cached vmlinux
         id: restore_vmlinux

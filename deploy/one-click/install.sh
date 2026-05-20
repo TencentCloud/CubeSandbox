@@ -109,6 +109,20 @@ check_proxy_cert_preflight() {
   :
 }
 
+generate_cubemaster_config_ports() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+
+  local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
+  local mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+
+  ensure_file "${cfg}"
+  sed -i \
+    -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
+    -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
+    "${cfg}"
+}
+
 check_hardware_preflight() {
   if [[ ! -e /dev/kvm ]]; then
     log "KVM is not supported or not enabled (/dev/kvm not found)."
@@ -133,8 +147,21 @@ check_hardware_preflight() {
 
   local mem_total_kb
   mem_total_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-  if [[ "${mem_total_kb}" -lt 7500000 ]]; then
-    die "System memory must be at least 8GB."
+  
+  local min_mem_kb=7500000
+  if [[ -n "${CUBE_MIN_MEMORY_KB:-}" ]]; then
+    if [[ "${CUBE_MIN_MEMORY_KB}" =~ ^[0-9]+$ ]] && [[ "${CUBE_MIN_MEMORY_KB}" -gt 0 ]]; then
+      # Enforce that the threshold cannot be lower than the default 8GB (7500000 KB) in the authoritative installer
+      if [[ "${CUBE_MIN_MEMORY_KB}" -ge 7500000 ]]; then
+        min_mem_kb="${CUBE_MIN_MEMORY_KB}"
+      fi
+    else
+      die "Invalid CUBE_MIN_MEMORY_KB '${CUBE_MIN_MEMORY_KB}' (must be a positive integer greater than 0)."
+    fi
+  fi
+
+  if [[ "${mem_total_kb}" -lt "${min_mem_kb}" ]]; then
+    die "System memory must be at least $((min_mem_kb / 1024 / 1024))GB (found $((mem_total_kb / 1024 / 1024)) GB)."
   fi
 }
 
@@ -269,6 +296,11 @@ PY
 
 require_root
 
+# Run critical preflight checks that do not depend on dependency installation first
+# to ensure we fail fast before installing or modifying any local system packages.
+check_hardware_preflight
+check_cubelet_fs_preflight
+
 CUBE_SANDBOX_NODE_IP="$(detect_node_ip)"
 export CUBE_SANDBOX_NODE_IP
 log "using node IP: ${CUBE_SANDBOX_NODE_IP}"
@@ -281,8 +313,6 @@ else
 fi
 
 install_required_dependencies
-check_hardware_preflight
-check_cubelet_fs_preflight
 check_install_preflight
 if needs_docker_for_install; then
   configure_tencent_docker_mirror
@@ -347,6 +377,7 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/cube-image" "${INSTALL_PREFIX}/cube-image"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
+  generate_cubemaster_config_ports
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
 

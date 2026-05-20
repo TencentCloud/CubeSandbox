@@ -275,7 +275,6 @@ Subcommands: `enable` (default), `disable`, `status`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TOOLBOX_ROOT` | `/usr/local/services/cubetoolbox` | Base install dir used to map known components in `bin` mode. |
 | `UNIT_NAME` | `cube-sandbox-oneclick.service` | Unit name shown in the final restart hint. |
 | `OUTPUT_BIN_DIR` | `_output/bin` | Where `bin` mode reads host-side binaries from. |
 

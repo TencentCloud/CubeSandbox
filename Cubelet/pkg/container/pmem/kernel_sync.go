@@ -17,55 +17,132 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
-// SyncKernelFile keeps targetKernelPath aligned with the current shared kernel.
-func SyncKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath string) error {
-	sharedExist, err := utils.FileExistAndValid(sharedKernelPath)
-	if err != nil {
-		return fmt.Errorf("local shared kernel validation failed: %w", err)
+var compareKernelFiles = sameFileSHA256
+var writeKernelVersionFile = writeKernelVersionFileImpl
+
+const (
+	kernelVersionFileName = "version"
+	kernelVersionPrefix   = "sha256:"
+	kernelVersionFileMode = 0o644
+)
+
+// EnsureKernelFilePresent verifies that the target kernel file is already present and valid.
+func EnsureKernelFilePresent(ctx context.Context, sharedKernelPath, targetKernelPath string) error {
+	if err := requireValidSharedKernel(sharedKernelPath); err != nil {
+		return err
 	}
-	if !sharedExist {
+
+	targetState, err := inspectKernelFileState(targetKernelPath)
+	if err != nil {
+		return err
+	}
+	switch targetState {
+	case kernelFileStateValid:
+		return nil
+	case kernelFileStateMissing:
+		return fmt.Errorf("target kernel file %s not exist", targetKernelPath)
+	case kernelFileStateInvalid:
+		return fmt.Errorf("target kernel file %s is invalid", targetKernelPath)
+	default:
+		return fmt.Errorf("unknown kernel file state for %s", targetKernelPath)
+	}
+}
+
+// RefreshKernelFile rewrites the target from the current shared kernel.
+func RefreshKernelFile(ctx context.Context, sharedKernelPath, targetKernelPath string) error {
+	if err := requireValidSharedKernel(sharedKernelPath); err != nil {
+		return err
+	}
+	if err := CopyFileAtomically(sharedKernelPath, targetKernelPath); err != nil {
+		return err
+	}
+	if err := validateRefreshedKernelFile(sharedKernelPath, targetKernelPath); err != nil {
+		cleanupErr := cleanupKernelRuntimeFiles(targetKernelPath)
+		if cleanupErr != nil {
+			log.G(ctx).Errorf(
+				"kernel file %s verification failed against shared kernel %s and cleanup failed: verifyErr=%v cleanupErr=%v",
+				targetKernelPath, sharedKernelPath, err, cleanupErr,
+			)
+			return fmt.Errorf("%w: cleanup invalid kernel file failed: %v", err, cleanupErr)
+		}
+		log.G(ctx).Errorf(
+			"kernel file %s verification failed against shared kernel %s, cleaned up invalid target: %v",
+			targetKernelPath, sharedKernelPath, err,
+		)
+		return err
+	}
+	if err := writeKernelVersionFile(targetKernelPath); err != nil {
+		cleanupErr := cleanupKernelRuntimeFiles(targetKernelPath)
+		if cleanupErr != nil {
+			log.G(ctx).Errorf(
+				"kernel version file for %s refresh failed and cleanup failed: refreshErr=%v cleanupErr=%v",
+				targetKernelPath, err, cleanupErr,
+			)
+			return fmt.Errorf("refresh kernel version file failed: %w: cleanup invalid runtime files failed: %v", err, cleanupErr)
+		}
+		log.G(ctx).Errorf("kernel version file for %s refresh failed, cleaned up invalid runtime files: %v", targetKernelPath, err)
+		return fmt.Errorf("refresh kernel version file failed: %w", err)
+	}
+	log.G(ctx).Infof("kernel file %s refreshed from latest shared kernel %s with version metadata", targetKernelPath, sharedKernelPath)
+	return nil
+}
+
+type kernelFileState string
+
+const (
+	kernelFileStateValid   kernelFileState = "valid"
+	kernelFileStateMissing kernelFileState = "missing"
+	kernelFileStateInvalid kernelFileState = "invalid"
+)
+
+func requireValidSharedKernel(sharedKernelPath string) error {
+	sharedState, err := inspectKernelFileState(sharedKernelPath)
+	if err != nil {
+		return err
+	}
+	switch sharedState {
+	case kernelFileStateValid:
+		return nil
+	case kernelFileStateMissing:
 		return fmt.Errorf("local shared kernel not found: %s", sharedKernelPath)
+	default:
+		return fmt.Errorf("local shared kernel validation failed: %w", validateKernelFile(sharedKernelPath, "local shared"))
 	}
+}
 
-	targetExist, err := utils.FileExistAndValid(targetKernelPath)
+func inspectKernelFileState(path string) (kernelFileState, error) {
+	exist, err := utils.FileExistAndValid(path)
 	if err != nil {
-		log.G(ctx).Warnf("kernel file %s validation failed, refresh from shared kernel: %v", targetKernelPath, err)
+		return kernelFileStateInvalid, nil
 	}
-	if !targetExist {
-		if err := copyKernelFileAtomically(sharedKernelPath, targetKernelPath); err != nil {
-			return err
-		}
-		targetExist, err = utils.FileExistAndValid(targetKernelPath)
-		if err != nil {
-			return fmt.Errorf("copied kernel file %s validation failed: %v", targetKernelPath, err)
-		}
-		if !targetExist {
-			return fmt.Errorf("copied kernel file %s not exist", targetKernelPath)
-		}
-		log.G(ctx).Infof("kernel file %s missing, copied latest shared kernel from %s", targetKernelPath, sharedKernelPath)
-		return nil
+	if exist {
+		return kernelFileStateValid, nil
 	}
+	return kernelFileStateMissing, nil
+}
 
-	same, err := sameFileSHA256(sharedKernelPath, targetKernelPath)
-	if err != nil {
+func validateRefreshedKernelFile(sharedKernelPath, targetKernelPath string) error {
+	if err := validateKernelFile(targetKernelPath, "refreshed"); err != nil {
 		return err
 	}
-	if same {
-		log.G(ctx).Infof("kernel file %s already matches latest shared kernel %s", targetKernelPath, sharedKernelPath)
-		return nil
-	}
-
-	if err := copyKernelFileAtomically(sharedKernelPath, targetKernelPath); err != nil {
-		return err
-	}
-	same, err = sameFileSHA256(sharedKernelPath, targetKernelPath)
+	same, err := compareKernelFiles(sharedKernelPath, targetKernelPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("refreshed kernel file %s verification failed against shared kernel %s: %w", targetKernelPath, sharedKernelPath, err)
 	}
 	if !same {
-		return fmt.Errorf("refreshed kernel file %s still differs from shared kernel %s", targetKernelPath, sharedKernelPath)
+		return fmt.Errorf("refreshed kernel file %s differs from shared kernel %s", targetKernelPath, sharedKernelPath)
 	}
-	log.G(ctx).Infof("kernel file %s refreshed from latest shared kernel %s", targetKernelPath, sharedKernelPath)
+	return nil
+}
+
+func validateKernelFile(path, operation string) error {
+	exist, err := utils.FileExistAndValid(path)
+	if err != nil {
+		return fmt.Errorf("%s kernel file %s validation failed: %v", operation, path, err)
+	}
+	if !exist {
+		return fmt.Errorf("%s kernel file %s not exist", operation, path)
+	}
 	return nil
 }
 
@@ -95,7 +172,38 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func copyKernelFileAtomically(srcPath, dstPath string) error {
+func writeKernelVersionFileImpl(kernelPath string) error {
+	sha, err := fileSHA256(kernelPath)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomically(kernelVersionPath(kernelPath), []byte(kernelVersionPrefix+sha+"\n"), kernelVersionFileMode)
+}
+
+func kernelVersionPath(kernelPath string) string {
+	return filepath.Join(filepath.Dir(kernelPath), kernelVersionFileName)
+}
+
+func cleanupKernelFile(path string) error {
+	err := os.Remove(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func cleanupKernelRuntimeFiles(kernelPath string) error {
+	if err := cleanupKernelFile(kernelPath); err != nil {
+		return err
+	}
+	if err := cleanupKernelFile(kernelVersionPath(kernelPath)); err != nil {
+		return err
+	}
+	return cleanupKernelFile(kernelVersionPath(kernelPath) + ".tmp")
+}
+
+// CopyFileAtomically copies a local file to dstPath via a same-directory temp file.
+func CopyFileAtomically(srcPath, dstPath string) error {
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return err
 	}
@@ -124,6 +232,25 @@ func copyKernelFileAtomically(srcPath, dstPath string) error {
 		return err
 	}
 	if err := dstFile.Close(); err != nil {
+		_ = os.RemoveAll(tmpPath) // NOCC:Path Traversal()
+		return err
+	}
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		_ = os.RemoveAll(tmpPath) // NOCC:Path Traversal()
+		return err
+	}
+	return nil
+}
+
+func writeFileAtomically(dstPath string, content []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return err
+	}
+	tmpPath := dstPath + ".tmp"
+	if err := os.RemoveAll(tmpPath); err != nil { // NOCC:Path Traversal()
+		return err
+	}
+	if err := os.WriteFile(tmpPath, content, mode); err != nil { // NOCC:Path Traversal()
 		_ = os.RemoveAll(tmpPath) // NOCC:Path Traversal()
 		return err
 	}

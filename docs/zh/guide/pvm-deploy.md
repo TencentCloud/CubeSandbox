@@ -40,7 +40,13 @@ sudo su root
 
 在任意云服务商购买一台 **x86_64** 架构的云服务器即可，无特殊要求。
 
-**操作系统推荐选择 OpenCloudOS 9**（RPM 系）。Cube Sandbox 的 PVM 宿主机内核基于 OpenCloudOS 内核构建，选用 OpenCloudOS 9 可获得最佳兼容性，且无需处理发行版差异。Ubuntu / Debian / CentOS 等其他主流发行版同样支持，按对应章节操作即可。
+**操作系统推荐选择 OpenCloudOS 9**（RPM 系）。Cube Sandbox 的 PVM 宿主机内核基于 OpenCloudOS 内核构建，选用 OpenCloudOS 9 可获得最佳兼容性，且无需处理发行版差异。
+
+> 📌 **OpenCloudOS 9 用户专属快捷路径**
+> Cube PVM 宿主机内核包已上架 OpenCloudOS 官方 yum 仓库，无需手动下载 rpm， dnf install 一行命令可实现直装，整体部署只需 5 条命令。
+> 👉 [在 OpenCloudOS 9 上一键部署 CubeSandbox 实测](https://mp.weixin.qq.com/s/oGAaUpze_uB_uzyvuYJSIg)
+
+Ubuntu / Debian / CentOS 等其他主流发行版同样支持，按对应章节操作即可。
 
 ::: tip 规格建议
 - CPU：≥ 4 核

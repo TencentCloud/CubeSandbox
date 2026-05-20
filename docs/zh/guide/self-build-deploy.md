@@ -181,6 +181,7 @@ export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 **执行代码**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
@@ -193,6 +194,7 @@ with Sandbox.create(template=template_id) as sandbox:
 **执行 Shell 命令**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
@@ -205,6 +207,7 @@ with Sandbox.create(template=template_id) as sandbox:
 **读取沙箱内文件**
 
 ```python
+import os
 from e2b_code_interpreter import Sandbox
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]

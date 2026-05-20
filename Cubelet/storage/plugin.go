@@ -50,6 +50,14 @@ type Config struct {
 
 	FreeInodesThreshold int32            `toml:"free_inodes_threshold"`
 	ReconcileInterval   tomlext.Duration `toml:"reconcile_interval"`
+
+	// CmdTimeout overrides the per-command timeout for utils.ExecV
+	// invocations in shell.go (cp / truncate / e2fsck / resize2fs /
+	// mkfs.ext4). Defaults to defaultCmdTimeout when zero. The slow
+	// ext4-create path on multi-GiB images can need noticeably more
+	// than the 3s default; this knob lets operators bump it without
+	// recompiling.
+	CmdTimeout tomlext.Duration `toml:"cmd_timeout"`
 }
 
 func init() {
@@ -76,6 +84,14 @@ func init() {
 			if localStorage.config.PoolType == "" {
 				localStorage.config.PoolType = cp_type
 			}
+			if localStorage.config.CmdTimeout == 0 {
+				localStorage.config.CmdTimeout = tomlext.FromStdTime(defaultCmdTimeout)
+			}
+			if tomlext.ToStdTime(localStorage.config.CmdTimeout) < 0 {
+				return nil, fmt.Errorf("cmd_timeout must be non-negative, got %v",
+					tomlext.ToStdTime(localStorage.config.CmdTimeout))
+			}
+			cmdTimeout = tomlext.ToStdTime(localStorage.config.CmdTimeout)
 			checkPoolType(localStorage.config)
 
 			cubeboxAPIObj, err := ic.GetByID(constants.CubeStorePlugin, constants.CubeboxID.ID())

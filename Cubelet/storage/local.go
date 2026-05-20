@@ -75,6 +75,7 @@ var (
 	defaultPoolTriggerIntervalInMs = 1000
 	defaultWarningPercent          = 100
 	defaultFormatSize              = "1Gi"
+	defaultCmdTimeout              = 3 * time.Second
 
 	unifiedStorageSize        = resource.MustParse(defaultFormatSize)
 	otherFormatSize           = "othersv2"

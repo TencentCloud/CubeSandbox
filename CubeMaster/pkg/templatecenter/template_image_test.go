@@ -115,6 +115,23 @@ func TestNormalizeTemplateImageRequestRejectsTooManyCustomExposedPorts(t *testin
 	}
 }
 
+func TestDefaultTemplateExposedPortsContainsOnly49983(t *testing.T) {
+	got := defaultTemplateExposedPorts()
+	want := map[int32]struct{}{49983: {}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("defaultTemplateExposedPorts()=%v, want %v", got, want)
+	}
+}
+
+func TestCountCustomTemplateExposedPortsTreats49983AsReserved(t *testing.T) {
+	if count := countCustomTemplateExposedPorts([]int32{49983, 9000}); count != 1 {
+		t.Fatalf("countCustomTemplateExposedPorts([49983, 9000])=%d, want 1", count)
+	}
+	if count := countCustomTemplateExposedPorts([]int32{8080, 9000}); count != 2 {
+		t.Fatalf("countCustomTemplateExposedPorts([8080, 9000])=%d, want 2", count)
+	}
+}
+
 func TestNormalizeTemplateImageRequestTreatsOnlyCubeletDefaultsAsReserved(t *testing.T) {
 	withTemplateImageConfig(t, &config.Config{CubeletConf: &config.CubeletConf{
 		EnableExposedPort: true,
@@ -239,6 +256,81 @@ func TestBuildTemplateSpecFingerprintUsesDNSConfig(t *testing.T) {
 	}
 }
 
+func TestNewCreateTemplateImageJobRecordPersistsRequestID(t *testing.T) {
+	record := newCreateTemplateImageJobRecord(
+		"job-1",
+		&types.CreateTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-123"},
+			TemplateID:        "tpl-1",
+			SourceImageRef:    "docker.io/library/nginx:latest",
+			WritableLayerSize: "20Gi",
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		},
+		`{"template_id":"tpl-1"}`,
+		2,
+		"job-prev",
+	)
+	if record.RequestID != "req-123" {
+		t.Fatalf("RequestID=%q, want %q", record.RequestID, "req-123")
+	}
+	if record.Operation != JobOperationCreate {
+		t.Fatalf("Operation=%q, want %q", record.Operation, JobOperationCreate)
+	}
+	if record.AttemptNo != 2 {
+		t.Fatalf("AttemptNo=%d, want %d", record.AttemptNo, 2)
+	}
+	if record.RetryOfJobID != "job-prev" {
+		t.Fatalf("RetryOfJobID=%q, want %q", record.RetryOfJobID, "job-prev")
+	}
+}
+
+func TestNewRedoTemplateImageJobRecordPersistsRequestID(t *testing.T) {
+	record := newRedoTemplateImageJobRecord(
+		"job-redo-1",
+		&types.RedoTemplateFromImageReq{
+			Request:    &types.Request{RequestID: "req-redo-123"},
+			TemplateID: "tpl-1",
+			FailedOnly: true,
+		},
+		&models.TemplateImageJob{
+			JobID:      "job-prev",
+			ArtifactID: "artifact-1",
+			Phase:      JobPhaseDistributing,
+		},
+		&types.CreateTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-create-1"},
+			TemplateID:        "tpl-1",
+			SourceImageRef:    "docker.io/library/nginx:latest",
+			WritableLayerSize: "20Gi",
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		},
+		`{"template_id":"tpl-1"}`,
+		3,
+		[]string{"node-a"},
+		[]models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusFailed}},
+	)
+	if record.RequestID != "req-redo-123" {
+		t.Fatalf("RequestID=%q, want %q", record.RequestID, "req-redo-123")
+	}
+	if record.Operation != JobOperationRedo {
+		t.Fatalf("Operation=%q, want %q", record.Operation, JobOperationRedo)
+	}
+	if record.AttemptNo != 3 {
+		t.Fatalf("AttemptNo=%d, want %d", record.AttemptNo, 3)
+	}
+	if record.RetryOfJobID != "job-prev" {
+		t.Fatalf("RetryOfJobID=%q, want %q", record.RetryOfJobID, "job-prev")
+	}
+	if record.RedoMode != RedoModeFailedOnly {
+		t.Fatalf("RedoMode=%q, want %q", record.RedoMode, RedoModeFailedOnly)
+	}
+	if record.Phase == "" || record.ResumePhase == "" {
+		t.Fatalf("Phase=%q ResumePhase=%q, both should be set", record.Phase, record.ResumePhase)
+	}
+}
+
 func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.T) {
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
@@ -351,7 +443,7 @@ func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
 	if inspectCalls != 1 {
 		t.Fatalf("expected 1 inspect call, got %d", inspectCalls)
 	}
-	if got == nil || got.digest != "docker.io/library/nginx@sha256:abcd" {
+	if got == nil || got.digest != "sha256:abcd" {
 		t.Fatalf("unexpected resolved image: %#v", got)
 	}
 }
@@ -392,7 +484,7 @@ func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
 	if inspectCalls != 2 {
 		t.Fatalf("expected 2 inspect calls, got %d", inspectCalls)
 	}
-	if got == nil || got.digest != "docker.io/library/nginx@sha256:abcd" {
+	if got == nil || got.digest != "sha256:abcd" {
 		t.Fatalf("unexpected resolved image: %#v", got)
 	}
 }
@@ -538,6 +630,12 @@ func TestComposeImageInfo(t *testing.T) {
 			ref:    "docker.io/library/nginx@sha256:abcd",
 			digest: "sha256:abcd",
 			want:   "docker.io/library/nginx@sha256:abcd",
+		},
+		{
+			name:   "digest carries canonical name prefix",
+			ref:    "docker.io/library/nginx:latest",
+			digest: "docker.io/library/nginx@sha256:abcd",
+			want:   "docker.io/library/nginx:latest@sha256:abcd",
 		},
 	}
 	for _, tc := range tests {

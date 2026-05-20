@@ -212,7 +212,7 @@ func validateService(svc service.Service) error {
 
 func summarizeConfig(cfg service.Config) string {
 	return fmt.Sprintf(
-		"eth_name=%q object_dir=%q cidr=%q mvm_inner_ip=%q mvm_mac_addr=%q mvm_gw_dest_ip=%q mvm_gw_mac_addr=%q mvm_mask=%d mvm_mtu=%d tap_init_num=%d default_exposed_ports=%v state_dir=%q tap_fd_socket_path=%q host_proxy_bind_ip=%q connect_timeout=%s",
+		"eth_name=%q object_dir=%q cidr=%q mvm_inner_ip=%q mvm_mac_addr=%q mvm_gw_dest_ip=%q mvm_gw_mac_addr=%q mvm_mask=%d mvm_mtu=%d tap_init_num=%d state_dir=%q tap_fd_socket_path=%q host_proxy_bind_ip=%q connect_timeout=%s",
 		cfg.EthName,
 		cfg.ObjectDir,
 		cfg.CIDR,
@@ -223,7 +223,6 @@ func summarizeConfig(cfg service.Config) string {
 		cfg.MvmMask,
 		cfg.MvmMtu,
 		cfg.TapInitNum,
-		cfg.DefaultExposedPorts,
 		cfg.StateDir,
 		cfg.TapFDSocketPath,
 		cfg.HostProxyBindIP,

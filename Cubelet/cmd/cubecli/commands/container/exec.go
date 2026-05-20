@@ -269,10 +269,8 @@ type StdinCloser struct {
 
 func (s *StdinCloser) Read(p []byte) (int, error) {
 	n, err := s.Stdin.Read(p)
-	if err == io.EOF {
-		if s.Stdin != nil {
-			s.Closer()
-		}
+	if errors.Is(err, io.EOF) && s.Closer != nil {
+		s.Closer()
 	}
 	return n, err
 }

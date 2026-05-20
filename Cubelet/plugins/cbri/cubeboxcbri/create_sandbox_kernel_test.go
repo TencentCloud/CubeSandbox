@@ -7,8 +7,11 @@ package cubeboxcbri
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/containers"
@@ -59,6 +62,7 @@ func TestCreateSandboxCreateSnapshotRefreshesArtifactKernel(t *testing.T) {
 	gotKernel, err := os.ReadFile(targetKernelPath)
 	require.NoError(t, err)
 	require.Equal(t, bytes.Repeat([]byte("s"), 4096), gotKernel)
+	require.Equal(t, kernelVersionForContent(gotKernel), readKernelVersion(t, targetKernelPath))
 
 	spec := applySpecOpts(t, ctx, specOpts)
 	require.Equal(t, targetKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
@@ -74,6 +78,7 @@ func TestCreateSandboxRestoreDoesNotRefreshArtifactKernel(t *testing.T) {
 	oldKernel := bytes.Repeat([]byte("o"), 2048)
 	writeTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
 	writeTestFile(t, targetKernelPath, oldKernel)
+	writeKernelVersion(t, targetKernelPath, oldKernel)
 
 	flowOpts := &workflow.CreateContext{
 		ReqInfo: &cubebox.RunCubeSandboxRequest{
@@ -111,9 +116,50 @@ func TestCreateSandboxRestoreDoesNotRefreshArtifactKernel(t *testing.T) {
 	gotKernel, err := os.ReadFile(targetKernelPath)
 	require.NoError(t, err)
 	require.Equal(t, oldKernel, gotKernel)
+	require.Equal(t, kernelVersionForContent(oldKernel), readKernelVersion(t, targetKernelPath))
 
 	spec := applySpecOpts(t, ctx, specOpts)
 	require.Equal(t, "/template/kernel.vm", spec.Annotations[constants.AnnotationsVMKernelPath])
+}
+
+func TestCreateSandboxNormalStartDoesNotRefreshArtifactKernel(t *testing.T) {
+	t.Parallel()
+
+	plugin := newTestCubeboxPlugin(t)
+	artifactID := "artifact-3"
+	sharedKernelPath := filepath.Join(plugin.config.BasePath, "cube-kernel-scf", "vmlinux")
+	targetKernelPath := plugin.getKernelFilePath(artifactID)
+	oldKernel := bytes.Repeat([]byte("o"), 2048)
+	writeTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
+	writeTestFile(t, targetKernelPath, oldKernel)
+	writeKernelVersion(t, targetKernelPath, oldKernel)
+
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+			Containers: []*cubebox.ContainerConfig{
+				{
+					Resources: &cubebox.Resource{Cpu: "2000m", Mem: "2000Mi"},
+					Image: &cubeimages.ImageSpec{
+						Image:        artifactID,
+						StorageMedia: cubeimages.ImageStorageMediaType_ext4.String(),
+					},
+				},
+			},
+		},
+	}
+	ctx := constants.WithAppImageID(context.Background(), artifactID)
+
+	specOpts, err := plugin.CreateSandbox(ctx, flowOpts)
+	require.NoError(t, err)
+
+	gotKernel, err := os.ReadFile(targetKernelPath)
+	require.NoError(t, err)
+	require.Equal(t, oldKernel, gotKernel)
+	require.Equal(t, kernelVersionForContent(oldKernel), readKernelVersion(t, targetKernelPath))
+
+	spec := applySpecOpts(t, ctx, specOpts)
+	require.Equal(t, targetKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
 }
 
 func newTestCubeboxPlugin(t *testing.T) *cubeboxInstancePlugin {
@@ -135,6 +181,23 @@ func writeTestFile(t *testing.T, path string, content []byte) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, content, 0o644))
+}
+
+func writeKernelVersion(t *testing.T, kernelPath string, kernel []byte) {
+	t.Helper()
+	writeTestFile(t, filepath.Join(filepath.Dir(kernelPath), "version"), []byte(kernelVersionForContent(kernel)+"\n"))
+}
+
+func readKernelVersion(t *testing.T, kernelPath string) string {
+	t.Helper()
+	got, err := os.ReadFile(filepath.Join(filepath.Dir(kernelPath), "version"))
+	require.NoError(t, err)
+	return strings.TrimSpace(string(got))
+}
+
+func kernelVersionForContent(content []byte) string {
+	sum := sha256.Sum256(content)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func applySpecOpts(t *testing.T, ctx context.Context, specOpts []oci.SpecOpts) *specs.Spec {

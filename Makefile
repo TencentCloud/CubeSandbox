@@ -50,7 +50,7 @@ help:
 	@printf "  - Run 'make builder-image' first if image %s is missing\n" "$(BUILDER_IMAGE)"
 
 builder-image:
-	docker build -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) .
+	docker build -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker
 
 prepare-builder-home:
 	@mkdir -p "$(BUILDER_HOME)" \

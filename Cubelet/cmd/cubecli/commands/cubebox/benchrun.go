@@ -82,7 +82,7 @@ var MultiRun = &cli.Command{
 		},
 		&cli.BoolFlag{
 			Name:  "same",
-			Usage: "需要严格并发运行的场景",
+			Usage: "Run with strict concurrent synchronization",
 		},
 		&cli.IntFlag{
 			Name:  "delcc",

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -24,7 +25,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 	. "github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/allocator"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -41,11 +41,7 @@ import (
 )
 
 var (
-	ErrNotRangeIP = errors.New("NotRangeIP")
-
 	ErrNotCubeTap = errors.New("NotCubeTap")
-
-	ErrIPExhausted = errors.New("IP exhausted")
 
 	ErrInvalidParams = errors.New("invalid network params")
 )
@@ -253,23 +249,19 @@ func extractIP(name string) (string, error) {
 
 var (
 	Name2MvmNet sync.Map
-	CfgAppMark  string
-
-	tapVersion uint32 = 0
 )
 
 type Config struct {
-	EthName             string   `toml:"eth_name"`
-	TapInitNum          int      `toml:"tap_init_num"`
-	CIDR                string   `toml:"cidr"`
-	ObjectDir           string   `toml:"object_dir"`
-	MVMInnerIP          string   `toml:"mvm_inner_ip"`
-	MVMMacAddr          string   `toml:"mvm_mac_addr"`
-	MvmGwDestIP         string   `toml:"mvm_gw_dest_ip"`
-	MvmGwMacAddr        string   `toml:"mvm_gw_mac_addr"`
-	MvmMask             int      `toml:"mvm_mask"`
-	MvmMtu              int      `toml:"mvm_mtu"`
-	DefaultExposedPorts []uint16 `toml:"default_exposed_ports"`
+	EthName      string `toml:"eth_name"`
+	TapInitNum   int    `toml:"tap_init_num"`
+	CIDR         string `toml:"cidr"`
+	ObjectDir    string `toml:"object_dir"`
+	MVMInnerIP   string `toml:"mvm_inner_ip"`
+	MVMMacAddr   string `toml:"mvm_mac_addr"`
+	MvmGwDestIP  string `toml:"mvm_gw_dest_ip"`
+	MvmGwMacAddr string `toml:"mvm_gw_mac_addr"`
+	MvmMask      int    `toml:"mvm_mask"`
+	MvmMtu       int    `toml:"mvm_mtu"`
 
 	CheckIntervalTime      tomlext.Duration `toml:"check_interval_in_sec"`
 	ReportStatIntervalTime tomlext.Duration `toml:"report_stat_interval_in_sec"`
@@ -294,8 +286,6 @@ type Config struct {
 
 type local struct {
 	ID2MvmNet       sync.Map
-	allocator       *IPAllocator
-	portAllocator   allocator.Allocator[uint16]
 	Config          *Config
 	cubeDev         *CubeDev
 	Device          *MachineDevice
@@ -352,10 +342,6 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 		config.EthName = eth0
 	}
 
-	if len(config.DefaultExposedPorts) > 0 {
-		log.G(ic.Context).Errorf("set default exposed ports to %v", config.DefaultExposedPorts)
-		DefaultExposedPorts = config.DefaultExposedPorts
-	}
 	log.G(ic.Context).Info("network plugin init begin")
 
 	device, err := getMachineDevice(config.EthName)
@@ -363,20 +349,11 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 		return nil, err
 	}
 	log.G(ic.Context).Info("network get node info done")
-	ipAllocator, err := NewAllocator(config.CIDR)
+	gwIP, mask, err := getGwIPAndMask(config.CIDR)
 	if err != nil {
 		return nil, err
 	}
-	log.G(ic.Context).Info("network ipam init done")
-
-	portAllocator, err := initPortAllocatorFromSysConfig()
-	if err != nil {
-		return nil, err
-	}
-	log.G(ic.Context).Info("network port allocator init done")
-
-	gwIP := ipAllocator.GatewayIP()
-	cubeDev, err := getOrNewCubeDev(gwIP, ipAllocator.mask, config.MvmMtu, config.MvmGwMacAddr)
+	cubeDev, err := getOrNewCubeDev(gwIP, mask, config.MvmMtu, config.MvmGwMacAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -386,8 +363,6 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 		Config:             config,
 		Device:             device,
 		cubeDev:            cubeDev,
-		allocator:          ipAllocator,
-		portAllocator:      portAllocator,
 		DestroyLocks:       utils.NewResourceLocks(),
 		networkAgentClient: networkagentclient.NewNoopClient(),
 	}
@@ -786,9 +761,6 @@ func (l *local) buildEnsureNetworkRequestFromIntent(sandboxID, requestID string,
 	for _, port := range exposedPorts {
 		portReq[uint16(port)] = struct{}{}
 	}
-	for _, port := range DefaultExposedPorts {
-		portReq[port] = struct{}{}
-	}
 	for reqPort := range portReq {
 		desired.PortMappings = append(desired.PortMappings, networkagentclient.PortMapping{
 			Protocol:      "tcp",
@@ -1102,4 +1074,24 @@ func (l *local) loadNet(sandboxID string) *MvmNet {
 	}
 
 	return mvmNet.(*MvmNet)
+}
+
+func getGwIPAndMask(cidr string) (net.IP, int, error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !prefix.Addr().Is4() {
+		return nil, 0, fmt.Errorf("invalid IPv4 CIDR: %s", cidr)
+	}
+	mask := prefix.Bits()
+	if mask < 8 || mask > 30 {
+		return nil, 0, &net.ParseError{Type: "cidr mask fail", Text: cidr}
+	}
+	// Gateway is network address + 1
+	gwAddr := prefix.Masked().Addr().Next()
+	if !gwAddr.IsValid() {
+		return nil, 0, fmt.Errorf("gateway IP address out of bounds for CIDR: %s", cidr)
+	}
+	return gwAddr.AsSlice(), mask, nil
 }

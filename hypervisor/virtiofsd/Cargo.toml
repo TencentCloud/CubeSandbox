@@ -20,7 +20,7 @@ xen = ["vhost-user-backend/xen", "vhost/xen", "vm-memory/xen"]
 anyhow = "1.0.66"
 bitflags = "1.2"
 capng = "0.2.2"
-env_logger = "0.8.4"
+env_logger = "0.10.2"
 futures = { version = "0.3", features = ["thread-pool"] }
 libc = "0.2.155"
 log = "0.4"

@@ -7,28 +7,52 @@ package ext4image
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 )
 
-func TestEnsureKernelFileRefreshesWhenSharedKernelChanges(t *testing.T) {
+func writeTestFile(t *testing.T, path string, content []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll %s error=%v", path, err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("WriteFile %s error=%v", path, err)
+	}
+}
+
+func writeSharedKernelFile(t *testing.T, content []byte) {
+	t.Helper()
+	writeTestFile(t, pmem.GetSharedKernelFilePath(), content)
+}
+
+func writeRawImageFile(t *testing.T, instanceType, imageRef string, content []byte) {
+	t.Helper()
+	writeTestFile(t, pmem.GetRawImageFilePath(instanceType, imageRef), content)
+}
+
+func writeRawKernelFile(t *testing.T, instanceType, imageRef string, content []byte) {
+	t.Helper()
+	writeTestFile(t, pmem.GetRawKernelFilePath(instanceType, imageRef), content)
+}
+
+func TestRefreshArtifactRuntimeFilesRefreshesKernelWhenSharedKernelChanges(t *testing.T) {
 	baseDir := t.TempDir()
 	pmem.Init(baseDir)
 
-	sharedKernelPath := pmem.GetSharedKernelFilePath()
-	if err := os.MkdirAll(filepath.Dir(sharedKernelPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll error=%v", err)
-	}
 	kernelV1 := bytes.Repeat([]byte("a"), 2048)
-	if err := os.WriteFile(sharedKernelPath, kernelV1, 0o644); err != nil {
-		t.Fatalf("WriteFile shared kernel error=%v", err)
-	}
+	writeSharedKernelFile(t, kernelV1)
 
-	if err := ensureKernelFile(context.Background(), "cubebox", "artifact-1"); err != nil {
-		t.Fatalf("ensureKernelFile error=%v", err)
+	if err := RefreshArtifactRuntimeFiles(context.Background(), "cubebox", "artifact-1"); err != nil {
+		t.Fatalf("RefreshArtifactRuntimeFiles error=%v", err)
 	}
 
 	targetKernelPath := pmem.GetRawKernelFilePath("cubebox", "artifact-1")
@@ -39,13 +63,12 @@ func TestEnsureKernelFileRefreshesWhenSharedKernelChanges(t *testing.T) {
 	if !bytes.Equal(got, kernelV1) {
 		t.Fatal("target kernel content mismatch after first copy")
 	}
+	assertRawKernelVersionMatches(t, "cubebox", "artifact-1", kernelV1)
 
 	kernelV2 := bytes.Repeat([]byte("b"), 4096)
-	if err := os.WriteFile(sharedKernelPath, kernelV2, 0o644); err != nil {
-		t.Fatalf("WriteFile updated shared kernel error=%v", err)
-	}
-	if err := ensureKernelFile(context.Background(), "cubebox", "artifact-1"); err != nil {
-		t.Fatalf("ensureKernelFile second call error=%v", err)
+	writeSharedKernelFile(t, kernelV2)
+	if err := RefreshArtifactRuntimeFiles(context.Background(), "cubebox", "artifact-1"); err != nil {
+		t.Fatalf("RefreshArtifactRuntimeFiles second call error=%v", err)
 	}
 
 	got, err = os.ReadFile(targetKernelPath)
@@ -55,102 +78,122 @@ func TestEnsureKernelFileRefreshesWhenSharedKernelChanges(t *testing.T) {
 	if !bytes.Equal(got, kernelV2) {
 		t.Fatal("target kernel should refresh to latest shared content")
 	}
+	assertRawKernelVersionMatches(t, "cubebox", "artifact-1", kernelV2)
 }
 
-func TestEnsureKernelFileRefreshesExistingTargetKernel(t *testing.T) {
+func TestEnsurePmemFilePreservesExistingRuntimeFiles(t *testing.T) {
 	baseDir := t.TempDir()
 	pmem.Init(baseDir)
 
-	sharedKernelPath := pmem.GetSharedKernelFilePath()
-	if err := os.MkdirAll(filepath.Dir(sharedKernelPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll error=%v", err)
-	}
-	sharedKernel := bytes.Repeat([]byte("s"), 3072)
-	if err := os.WriteFile(sharedKernelPath, sharedKernel, 0o644); err != nil {
-		t.Fatalf("WriteFile shared kernel error=%v", err)
-	}
-
+	writeSharedKernelFile(t, bytes.Repeat([]byte("s"), 3072))
+	writeRawImageFile(t, "cubebox", "artifact-2", bytes.Repeat([]byte("e"), 2048))
 	targetKernelPath := pmem.GetRawKernelFilePath("cubebox", "artifact-2")
-	if err := os.MkdirAll(filepath.Dir(targetKernelPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll target dir error=%v", err)
-	}
 	oldKernel := bytes.Repeat([]byte("o"), 3072)
-	if err := os.WriteFile(targetKernelPath, oldKernel, 0o644); err != nil {
-		t.Fatalf("WriteFile target kernel error=%v", err)
-	}
+	writeRawKernelFile(t, "cubebox", "artifact-2", oldKernel)
+	ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{
+		Annotations: map[string]string{
+			constants.MasterAnnotationRootfsArtifactURL:    "http://unused.example/artifact.ext4",
+			constants.MasterAnnotationRootfsArtifactSHA256: "deadbeef",
+		},
+	})
 
-	if err := ensureKernelFile(context.Background(), "cubebox", "artifact-2"); err != nil {
-		t.Fatalf("ensureKernelFile error=%v", err)
+	if err := EnsurePmemFile(ctx, "cubebox", "artifact-2"); err != nil {
+		t.Fatalf("EnsurePmemFile error=%v", err)
 	}
 
 	got, err := os.ReadFile(targetKernelPath)
 	if err != nil {
 		t.Fatalf("ReadFile target kernel error=%v", err)
 	}
+	if !bytes.Equal(got, oldKernel) {
+		t.Fatal("target kernel should stay unchanged when file already exists")
+	}
+	if _, statErr := os.Stat(rawKernelVersionPath("cubebox", "artifact-2")); !os.IsNotExist(statErr) {
+		t.Fatalf("existing runtime version should not be required or generated by EnsurePmemFile, statErr=%v", statErr)
+	}
+}
+
+func TestEnsurePmemFileMaterializesFreshArtifactKernel(t *testing.T) {
+	baseDir := t.TempDir()
+	pmem.Init(baseDir)
+
+	sharedKernel := bytes.Repeat([]byte("s"), 3072)
+	writeSharedKernelFile(t, sharedKernel)
+	writeRawImageFile(t, "cubebox", "artifact-3", bytes.Repeat([]byte("e"), 2048))
+
+	if err := EnsurePmemFile(context.Background(), "cubebox", "artifact-3"); err != nil {
+		t.Fatalf("EnsurePmemFile error=%v", err)
+	}
+
+	got, err := os.ReadFile(pmem.GetRawKernelFilePath("cubebox", "artifact-3"))
+	if err != nil {
+		t.Fatalf("ReadFile materialized kernel error=%v", err)
+	}
 	if !bytes.Equal(got, sharedKernel) {
-		t.Fatal("target kernel should refresh from shared kernel")
+		t.Fatal("materialized kernel should match shared kernel")
 	}
+	assertRawKernelVersionMatches(t, "cubebox", "artifact-3", sharedKernel)
 }
 
-func TestEnsureKernelFileRequiresSharedKernel(t *testing.T) {
+func TestEnsurePmemRootfsDoesNotRequireKernelFile(t *testing.T) {
 	baseDir := t.TempDir()
 	pmem.Init(baseDir)
 
-	err := ensureKernelFile(context.Background(), "cubebox", "artifact-2")
-	if err == nil {
-		t.Fatal("ensureKernelFile error=nil, want non-nil")
+	writeRawImageFile(t, "cubebox", "artifact-4", bytes.Repeat([]byte("e"), 2048))
+
+	if err := EnsurePmemRootfs(context.Background(), "cubebox", "artifact-4"); err != nil {
+		t.Fatalf("EnsurePmemRootfs error=%v", err)
 	}
 }
 
-func TestEnsureImageVersionFileCopiesSharedVersionOnce(t *testing.T) {
+func TestEnsurePmemFileDoesNotRequireCubeImageVersionFile(t *testing.T) {
 	baseDir := t.TempDir()
 	pmem.Init(baseDir)
 
-	sharedVersionPath := pmem.GetSharedImageVersionFilePath()
-	if err := os.MkdirAll(filepath.Dir(sharedVersionPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll error=%v", err)
-	}
-	versionV1 := []byte("2.2.0-20251010\n")
-	if err := os.WriteFile(sharedVersionPath, versionV1, 0o644); err != nil {
-		t.Fatalf("WriteFile shared version error=%v", err)
+	sharedKernel := bytes.Repeat([]byte("s"), 3072)
+	writeSharedKernelFile(t, sharedKernel)
+	writeRawImageFile(t, "cubebox", "artifact-5", bytes.Repeat([]byte("e"), 2048))
+
+	if err := EnsurePmemFile(context.Background(), "cubebox", "artifact-5"); err != nil {
+		t.Fatalf("EnsurePmemFile error=%v", err)
 	}
 
-	if err := ensureImageVersionFile(context.Background(), "cubebox", "artifact-1"); err != nil {
-		t.Fatalf("ensureImageVersionFile error=%v", err)
-	}
-
-	targetVersionPath := pmem.GetRawImageVersionFilePath("cubebox", "artifact-1")
-	got, err := os.ReadFile(targetVersionPath)
+	got, err := os.ReadFile(pmem.GetRawKernelFilePath("cubebox", "artifact-5"))
 	if err != nil {
-		t.Fatalf("ReadFile target version error=%v", err)
+		t.Fatalf("ReadFile materialized kernel error=%v", err)
 	}
-	if !bytes.Equal(got, versionV1) {
-		t.Fatal("target version content mismatch after first copy")
+	if !bytes.Equal(got, sharedKernel) {
+		t.Fatal("materialized kernel should match shared kernel")
 	}
-
-	versionV2 := []byte("2.2.0-20251011\n")
-	if err := os.WriteFile(sharedVersionPath, versionV2, 0o644); err != nil {
-		t.Fatalf("WriteFile updated shared version error=%v", err)
-	}
-	if err := ensureImageVersionFile(context.Background(), "cubebox", "artifact-1"); err != nil {
-		t.Fatalf("ensureImageVersionFile second call error=%v", err)
-	}
-
-	got, err = os.ReadFile(targetVersionPath)
-	if err != nil {
-		t.Fatalf("ReadFile target version after second call error=%v", err)
-	}
-	if !bytes.Equal(got, versionV1) {
-		t.Fatal("target version should keep first copied content")
-	}
+	assertRawKernelVersionMatches(t, "cubebox", "artifact-5", sharedKernel)
 }
 
-func TestEnsureImageVersionFileRequiresSharedVersion(t *testing.T) {
+func TestEnsureKernelFilePresentRequiresSharedKernel(t *testing.T) {
 	baseDir := t.TempDir()
 	pmem.Init(baseDir)
 
-	err := ensureImageVersionFile(context.Background(), "cubebox", "artifact-2")
+	err := ensureKernelFilePresent(context.Background(), "cubebox", "artifact-2")
 	if err == nil {
-		t.Fatal("ensureImageVersionFile error=nil, want non-nil")
+		t.Fatal("ensureKernelFilePresent error=nil, want non-nil")
+	}
+}
+
+func rawKernelVersionPath(instanceType, imageRef string) string {
+	return filepath.Join(filepath.Dir(pmem.GetRawKernelFilePath(instanceType, imageRef)), "version")
+}
+
+func kernelVersionForContent(content []byte) string {
+	sum := sha256.Sum256(content)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func assertRawKernelVersionMatches(t *testing.T, instanceType, imageRef string, kernel []byte) {
+	t.Helper()
+	got, err := os.ReadFile(rawKernelVersionPath(instanceType, imageRef))
+	if err != nil {
+		t.Fatalf("ReadFile kernel version error=%v", err)
+	}
+	if strings.TrimSpace(string(got)) != kernelVersionForContent(kernel) {
+		t.Fatalf("kernel version=%q, want %q", strings.TrimSpace(string(got)), kernelVersionForContent(kernel))
 	}
 }

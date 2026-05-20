@@ -270,6 +270,16 @@ This path does not create entries in the session tables, which keeps the maps le
 
 The Go API provides `AddPortMapping()`, `DelPortMapping()`, `ListPortMapping()`, and `GetPortMapping()` for managing mappings at runtime.
 
+### 6.4 Compute-Node Port Allocation
+
+To prevent collisions between subsystems, the host's usable port space is partitioned into three ranges:
+
+| Port range | Purpose | Allocator |
+|------------|---------|-----------|
+| `10000`--`19999` | `ip_local_port_range` (host ephemeral ports) | Set by network-agent at startup |
+| `20000`--`29999` | Ports CubeProxy uses to reach sandboxes | Allocated by network-agent when a sandbox is created |
+| `30000`--`65535` | Source ports used by host SNAT for sandbox-originated traffic | Allocated by CubeVS during SNAT |
+
 ---
 
 ## 7. TAP Device Lifecycle
