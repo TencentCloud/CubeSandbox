@@ -230,7 +230,10 @@ impl Snapshot {
     fn launch_vmm(&mut self) -> CResult<()> {
         //launch
         cube_hypervisor::set_runtime_seccomp_rules(vec![
+            #[cfg(target_arch = "x86_64")]
             (libc::SYS_mkdir, vec![]),
+            #[cfg(target_arch = "aarch64")]
+            (libc::SYS_mkdirat, vec![]),
             (libc::SYS_getsockopt, vec![]),
             (libc::SYS_setsockopt, vec![]),
         ]);
