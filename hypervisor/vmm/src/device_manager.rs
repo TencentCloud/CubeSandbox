@@ -122,7 +122,6 @@ const BALLOON_DEVICE_NAME: &str = "__balloon";
 const CONSOLE_DEVICE_NAME: &str = "__console";
 const PVPANIC_DEVICE_NAME: &str = "__pvpanic";
 const IVSHMEM_DEVICE_NAME: &str = "__ivshmem";
-#[cfg(target_arch = "x86_64")]
 const SYS_CTRL_DEVICE_NAME: &str = "__sys_ctrl";
 
 // Devices that the user may name and for which we generate
@@ -984,7 +983,6 @@ pub struct DeviceManager {
 
     sandbox_id: String,
 
-    #[cfg(target_arch = "x86_64")]
     sys_ctrl: Option<Arc<Mutex<devices::legacy::SysCtrl>>>,
 
     // ivshmem device
@@ -1129,6 +1127,7 @@ impl DeviceManager {
             virtio_mem_devices: Vec::new(),
             #[cfg(target_arch = "aarch64")]
             gpio_device: None,
+            sys_ctrl: None,
             pvpanic_device: None,
             force_iommu,
             restoring,
@@ -1139,8 +1138,6 @@ impl DeviceManager {
             acpi_platform_addresses: AcpiPlatformAddresses::default(),
             snapshot,
             sandbox_id,
-            #[cfg(target_arch = "x86_64")]
-            sys_ctrl: None,
             ivshmem_device: None,
         };
 
@@ -1782,6 +1779,34 @@ impl DeviceManager {
             .lock()
             .unwrap()
             .insert(id.clone(), device_node!(id, gpio_device));
+
+        // Add a system control device for guest-to-shim notifications.
+        // AArch64 has no PIO port space, so expose the same SysCtrl device via MMIO.
+        if self.config.lock().unwrap().sys_ctrl {
+            let id = String::from(SYS_CTRL_DEVICE_NAME);
+            let sys_ctrl = Arc::new(Mutex::new(devices::legacy::SysCtrl::new(
+                id.clone(),
+                state_from_id(self.snapshot.as_ref(), id.as_str())
+                    .map_err(DeviceManagerError::RestoreGetState)?,
+            )));
+            self.sys_ctrl = Some(Arc::clone(&sys_ctrl));
+            self.bus_devices
+                .push(Arc::clone(&sys_ctrl) as Arc<Mutex<dyn BusDevice>>);
+
+            let addr = arch::layout::LEGACY_SYS_CTRL_MAPPED_IO_START;
+            self.address_manager
+                .mmio_bus
+                .insert(
+                    Arc::clone(&sys_ctrl) as Arc<Mutex<dyn BusDevice>>,
+                    addr.0,
+                    MMIO_LEN,
+                )
+                .map_err(DeviceManagerError::BusError)?;
+            self.device_tree
+                .lock()
+                .unwrap()
+                .insert(id.clone(), device_node!(id, sys_ctrl));
+        }
 
         Ok(())
     }
@@ -4393,7 +4418,6 @@ impl DeviceManager {
     }
 
     pub fn sys_started(&self) -> bool {
-        #[cfg(target_arch = "x86_64")]
         if let Some(sys_ctrl) = &self.sys_ctrl {
             return sys_ctrl.clone().lock().unwrap().sys_started();
         }

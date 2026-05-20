@@ -24,6 +24,7 @@ use crate::gdb::{Debuggable, DebuggableError, GdbRequestPayload, GdbResponsePayl
 use crate::memory_manager::{
     Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData,
 };
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 use crate::migration::get_vm_snapshot;
 #[cfg(feature = "guest_debug")]
 use crate::migration::url_to_file;

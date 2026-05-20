@@ -947,6 +947,7 @@ impl KvmHypervisor {
             return Err(hypervisor::HypervisorError::IncompatibleApiVersion);
         }
 
+        #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
         let mut hypervisor_type = HypervisorType::Kvm;
 
         #[cfg(target_arch = "x86_64")]
@@ -1195,7 +1196,7 @@ impl cpu::Vcpu for KvmVcpu {
 
         // We are now entering the "Other register" section of the ARMv8-a architecture.
         // First one, stack pointer.
-        let off = offset_of!(user_pt_regs, sp);
+        let off = offset__of!(user_pt_regs, sp);
         let mut bytes = [0_u8; 8];
         self.fd
             .lock()
@@ -1205,7 +1206,7 @@ impl cpu::Vcpu for KvmVcpu {
         state.regs.sp = u64::from_le_bytes(bytes);
 
         // Second one, the program counter.
-        let off = offset_of!(user_pt_regs, pc);
+        let off = offset__of!(user_pt_regs, pc);
         let mut bytes = [0_u8; 8];
         self.fd
             .lock()
@@ -1215,18 +1216,17 @@ impl cpu::Vcpu for KvmVcpu {
         state.regs.pc = u64::from_le_bytes(bytes);
 
         // Next is the processor state.
-        let off = offset_of!(user_pt_regs, pstate);
-        state.regs.pstate = self
-            .fd
+        let off = offset__of!(user_pt_regs, pstate);
+        let mut bytes = [0_u8; 8];
+        self.fd
             .lock()
             .unwrap()
-            .get_one_reg(arm64_core_reg_id!(KVM_REG_SIZE_U64, off))
-            .map_err(|e| cpu::HypervisorCpuError::GetCoreRegister(e.into()))?
-            .try_into()
-            .unwrap();
+            .get_one_reg(arm64_core_reg_id!(KVM_REG_SIZE_U64, off), &mut bytes)
+            .map_err(|e| cpu::HypervisorCpuError::GetCoreRegister(e.into()))?;
+        state.regs.pstate = u64::from_le_bytes(bytes);
 
         // The stack pointer associated with EL1
-        let off = offset_of!(kvm_regs, sp_el1);
+        let off = offset__of!(kvm_regs, sp_el1);
         let mut bytes = [0_u8; 8];
         self.fd
             .lock()
@@ -1237,7 +1237,7 @@ impl cpu::Vcpu for KvmVcpu {
 
         // Exception Link Register for EL1, when taking an exception to EL1, this register
         // holds the address to which to return afterwards.
-        let off = offset_of!(kvm_regs, elr_el1);
+        let off = offset__of!(kvm_regs, elr_el1);
         let mut bytes = [0_u8; 8];
         self.fd
             .lock()
@@ -1247,7 +1247,7 @@ impl cpu::Vcpu for KvmVcpu {
         state.elr_el1 = u64::from_le_bytes(bytes);
 
         // Saved Program Status Registers, there are 5 of them used in the kernel.
-        let mut off = offset_of!(kvm_regs, spsr);
+        let mut off = offset__of!(kvm_regs, spsr);
         for i in 0..KVM_NR_SPSR as usize {
             let mut bytes = [0_u8; 8];
             self.fd
@@ -1261,7 +1261,7 @@ impl cpu::Vcpu for KvmVcpu {
 
         // Now moving on to floating point registers which are stored in the user_fpsimd_state in the kernel:
         // https://elixir.free-electrons.com/linux/v4.9.62/source/arch/arm64/include/uapi/asm/kvm.h#L53
-        let mut off = offset_of!(kvm_regs, fp_regs) + offset_of!(user_fpsimd_state, vregs);
+        let mut off = offset__of!(kvm_regs, fp_regs) + offset__of!(user_fpsimd_state, vregs);
         for i in 0..32 {
             let mut bytes = [0_u8; 16];
             self.fd
@@ -1274,7 +1274,7 @@ impl cpu::Vcpu for KvmVcpu {
         }
 
         // Floating-point Status Register
-        let off = offset_of!(kvm_regs, fp_regs) + offset_of!(user_fpsimd_state, fpsr);
+        let off = offset__of!(kvm_regs, fp_regs) + offset__of!(user_fpsimd_state, fpsr);
         let mut bytes = [0_u8; 4];
         self.fd
             .lock()
@@ -1284,7 +1284,7 @@ impl cpu::Vcpu for KvmVcpu {
         state.fp_regs.fpsr = u32::from_le_bytes(bytes);
 
         // Floating-point Control Register
-        let off = offset_of!(kvm_regs, fp_regs) + offset_of!(user_fpsimd_state, fpcr);
+        let off = offset__of!(kvm_regs, fp_regs) + offset__of!(user_fpsimd_state, fpcr);
         let mut bytes = [0_u8; 4];
         self.fd
             .lock()
@@ -1316,7 +1316,7 @@ impl cpu::Vcpu for KvmVcpu {
     fn set_regs(&self, state: &StandardRegisters) -> cpu::Result<()> {
         // The function follows the exact identical order from `state`. Look there
         // for some additional info on registers.
-        let mut off = offset_of!(user_pt_regs, regs);
+        let mut off = offset__of!(user_pt_regs, regs);
         for i in 0..31 {
             self.fd
                 .lock()
@@ -1329,7 +1329,7 @@ impl cpu::Vcpu for KvmVcpu {
             off += std::mem::size_of::<u64>();
         }
 
-        let off = offset_of!(user_pt_regs, sp);
+        let off = offset__of!(user_pt_regs, sp);
         self.fd
             .lock()
             .unwrap()
@@ -1339,7 +1339,7 @@ impl cpu::Vcpu for KvmVcpu {
             )
             .map_err(|e| cpu::HypervisorCpuError::SetCoreRegister(e.into()))?;
 
-        let off = offset_of!(user_pt_regs, pc);
+        let off = offset__of!(user_pt_regs, pc);
         self.fd
             .lock()
             .unwrap()
@@ -1349,7 +1349,7 @@ impl cpu::Vcpu for KvmVcpu {
             )
             .map_err(|e| cpu::HypervisorCpuError::SetCoreRegister(e.into()))?;
 
-        let off = offset_of!(user_pt_regs, pstate);
+        let off = offset__of!(user_pt_regs, pstate);
         self.fd
             .lock()
             .unwrap()
@@ -1359,7 +1359,7 @@ impl cpu::Vcpu for KvmVcpu {
             )
             .map_err(|e| cpu::HypervisorCpuError::SetCoreRegister(e.into()))?;
 
-        let off = offset_of!(kvm_regs, sp_el1);
+        let off = offset__of!(kvm_regs, sp_el1);
         self.fd
             .lock()
             .unwrap()
@@ -1369,7 +1369,7 @@ impl cpu::Vcpu for KvmVcpu {
             )
             .map_err(|e| cpu::HypervisorCpuError::SetCoreRegister(e.into()))?;
 
-        let off = offset_of!(kvm_regs, elr_el1);
+        let off = offset__of!(kvm_regs, elr_el1);
         self.fd
             .lock()
             .unwrap()
@@ -1379,7 +1379,7 @@ impl cpu::Vcpu for KvmVcpu {
             )
             .map_err(|e| cpu::HypervisorCpuError::SetCoreRegister(e.into()))?;
 
-        let mut off = offset_of!(kvm_regs, spsr);
+        let mut off = offset__of!(kvm_regs, spsr);
         for i in 0..KVM_NR_SPSR as usize {
             self.fd
                 .lock()
@@ -1392,7 +1392,7 @@ impl cpu::Vcpu for KvmVcpu {
             off += std::mem::size_of::<u64>();
         }
 
-        let mut off = offset_of!(kvm_regs, fp_regs) + offset_of!(user_fpsimd_state, vregs);
+        let mut off = offset__of!(kvm_regs, fp_regs) + offset__of!(user_fpsimd_state, vregs);
         for i in 0..32 {
             self.fd
                 .lock()
@@ -1405,7 +1405,7 @@ impl cpu::Vcpu for KvmVcpu {
             off += mem::size_of::<u128>();
         }
 
-        let off = offset_of!(kvm_regs, fp_regs) + offset_of!(user_fpsimd_state, fpsr);
+        let off = offset__of!(kvm_regs, fp_regs) + offset__of!(user_fpsimd_state, fpsr);
         self.fd
             .lock()
             .unwrap()
@@ -1415,7 +1415,7 @@ impl cpu::Vcpu for KvmVcpu {
             )
             .map_err(|e| cpu::HypervisorCpuError::SetCoreRegister(e.into()))?;
 
-        let off = offset_of!(kvm_regs, fp_regs) + offset_of!(user_fpsimd_state, fpcr);
+        let off = offset__of!(kvm_regs, fp_regs) + offset__of!(user_fpsimd_state, fpcr);
         self.fd
             .lock()
             .unwrap()
@@ -1866,10 +1866,10 @@ impl cpu::Vcpu for KvmVcpu {
         const PSTATE_FAULT_BITS_64: u64 =
             PSR_MODE_EL1h | PSR_A_BIT | PSR_F_BIT | PSR_I_BIT | PSR_D_BIT;
 
-        let kreg_off = offset_of!(kvm_regs, regs);
+        let kreg_off = offset__of!(kvm_regs, regs);
 
         // Get the register index of the PSTATE (Processor State) register.
-        let pstate = offset_of!(user_pt_regs, pstate) + kreg_off;
+        let pstate = offset__of!(user_pt_regs, pstate) + kreg_off;
         self.fd
             .lock()
             .unwrap()
@@ -1882,7 +1882,7 @@ impl cpu::Vcpu for KvmVcpu {
         // Other vCPUs are powered off initially awaiting PSCI wakeup.
         if cpu_id == 0 {
             // Setting the PC (Processor Counter) to the current program address (kernel address).
-            let pc = offset_of!(user_pt_regs, pc) + kreg_off;
+            let pc = offset__of!(user_pt_regs, pc) + kreg_off;
             self.fd
                 .lock()
                 .unwrap()
@@ -1896,7 +1896,7 @@ impl cpu::Vcpu for KvmVcpu {
             // "The device tree blob (dtb) must be placed on an 8-byte boundary and must
             // not exceed 2 megabytes in size." -> https://www.kernel.org/doc/Documentation/arm64/booting.txt.
             // We are choosing to place it the end of DRAM. See `get_fdt_addr`.
-            let regs0 = offset_of!(user_pt_regs, regs) + kreg_off;
+            let regs0 = offset__of!(user_pt_regs, regs) + kreg_off;
             self.fd
                 .lock()
                 .unwrap()
