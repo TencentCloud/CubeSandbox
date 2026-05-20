@@ -59,7 +59,7 @@ echo "[one-click] building network-agent in builder" >&2
 
 echo "[one-click] building cube-agent in builder" >&2
 (cd /workspace/agent && make -j1)
-install -m 0755 /workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent "${PREBUILT_DIR}/cube-agent"
+install -m 0755 "/workspace/agent/$(make -s -C /workspace/agent print-target-path)" "${PREBUILT_DIR}/cube-agent"
 
 echo "[one-click] building shim workspace in builder" >&2
 (cd /workspace/CubeShim && cargo build --release --locked)

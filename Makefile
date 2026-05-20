@@ -116,7 +116,7 @@ network-agent: builder-image
 
 agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 && install -m 0755 /workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent /workspace/_output/bin/cube-agent'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 && install -m 0755 "/workspace/agent/$$(make -s print-target-path)" /workspace/_output/bin/cube-agent'
 
 cubeapi: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
