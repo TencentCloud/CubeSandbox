@@ -26,7 +26,9 @@ CUBE_WEBUI_TEMPLATE_DIR="${SCRIPT_DIR}/webui"
 CUBE_PROXY_SOURCE_DIR="${ONE_CLICK_CUBE_PROXY_SOURCE_DIR:-${ROOT_DIR}/CubeProxy}"
 WEB_SOURCE_DIR="${ONE_CLICK_WEB_SOURCE_DIR:-${ROOT_DIR}/web}"
 WEB_DIST_OVERRIDE="${ONE_CLICK_WEB_DIST_DIR:-}"
-MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert}"
+DEFAULT_MKCERT_BIN_ASSET="${SCRIPT_DIR}/assets/bin/mkcert"
+MKCERT_VERSION="${ONE_CLICK_MKCERT_VERSION:-v1.4.4}"
+MKCERT_BIN_ASSET=""
 CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
 KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/cube-kernel-scf.zip"
 DIST_VERSION="${ONE_CLICK_DIST_VERSION:-$(latest_git_revision "${ROOT_DIR}")}"
@@ -154,6 +156,49 @@ build_web_dist() {
 
   ensure_file "${output_dir}/index.html"
 }
+
+resolve_mkcert_bin_asset() {
+  if [[ -n "${ONE_CLICK_MKCERT_BIN:-}" ]]; then
+    printf '%s\n' "${ONE_CLICK_MKCERT_BIN}"
+    return 0
+  fi
+
+  case "$(uname -m)" in
+    aarch64|arm64)
+      local filename="mkcert-${MKCERT_VERSION}-linux-arm64"
+      local output="${WORK_ROOT}/mkcert/${filename}"
+      local url="https://github.com/FiloSottile/mkcert/releases/download/${MKCERT_VERSION}/${filename}"
+      local host_mkcert=""
+      mkdir -p "$(dirname "${output}")"
+      if [[ ! -x "${output}" ]]; then
+        if command -v curl >/dev/null 2>&1; then
+          log "downloading arm64 mkcert: ${url}"
+          if curl -fL "${url}" -o "${output}"; then
+            chmod 0755 "${output}"
+          else
+            rm -f "${output}"
+            log "failed to download arm64 mkcert; trying host mkcert from PATH"
+          fi
+        else
+          log "curl not found; trying host mkcert from PATH"
+        fi
+      fi
+      if [[ -x "${output}" ]]; then
+        printf '%s\n' "${output}"
+        return 0
+      fi
+      host_mkcert="$(which mkcert 2>/dev/null || true)"
+      [[ -n "${host_mkcert}" && -x "${host_mkcert}" ]] || die "failed to download arm64 mkcert and no executable mkcert found in PATH"
+      log "using host mkcert: ${host_mkcert}"
+      printf '%s\n' "${host_mkcert}"
+      ;;
+    *)
+      printf '%s\n' "${DEFAULT_MKCERT_BIN_ASSET}"
+      ;;
+  esac
+}
+
+MKCERT_BIN_ASSET="$(resolve_mkcert_bin_asset)"
 
 ensure_kernel_vmlinux "${CUBE_KERNEL_VMLINUX}" "${RAW_ARTIFACTS_DIR}"
 ensure_dir "${CUBE_PROXY_TEMPLATE_DIR}"
