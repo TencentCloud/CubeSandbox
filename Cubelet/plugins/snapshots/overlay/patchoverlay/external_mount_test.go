@@ -169,6 +169,15 @@ func TestTryCommitWithRefPath(t *testing.T) {
 		t.Fatalf("invalid name should skip")
 	}
 
+	infoNilLabels := snapshots.Info{}
+	oldSnapshotPathNilLabels := filepath.Dir(enabled.upperPath(id + "-nil-labels"))
+	if err := os.MkdirAll(oldSnapshotPathNilLabels, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enabled.tryCommitWithRefPath(ctx, infoNilLabels, "ns/meta/"+constants.PrefixSha256+"nil-labels", id+"-nil-labels"); err != nil {
+		t.Fatalf("nil labels should not fail: %v", err)
+	}
+
 	info := snapshots.Info{Labels: map[string]string{}}
 	oldSnapshotPath := filepath.Dir(enabled.upperPath(id))
 	if err := os.MkdirAll(oldSnapshotPath, 0o700); err != nil {

@@ -59,7 +59,7 @@ func (c *CubeImageService) EnsureImage(ctx context.Context, ref, username, passw
 		if instanceType == "" {
 			return nil, fmt.Errorf("create req is nil")
 		}
-		err := ext4image.EnsurePmemFile(ctx, instanceType, ref)
+		err := ensureExt4ArtifactImage(ctx, instanceType, ref)
 		if err != nil {
 			return nil, fmt.Errorf("ensure pmem file failed: %v", err)
 		}
@@ -124,6 +124,13 @@ func (c *CubeImageService) EnsureImage(ctx context.Context, ref, username, passw
 
 var ErrSkip = errors.New("skip error")
 
+func ensureExt4ArtifactImage(ctx context.Context, instanceType, imageRef string) error {
+	if err := ext4image.EnsurePmemRootfs(ctx, instanceType, imageRef); err != nil {
+		return err
+	}
+	return ext4image.RefreshArtifactRuntimeFiles(ctx, instanceType, imageRef)
+}
+
 func (c *CubeImageService) PullImage(ctx context.Context, name string, credentials func(string) (string, string, error), sandboxConfig *runtime.PodSandboxConfig) (_ string, err error) {
 
 	c.imageRemoveLock.RLock()
@@ -157,7 +164,7 @@ func (c *CubeImageService) PullImage(ctx context.Context, name string, credentia
 				if err != nil {
 					return "", fmt.Errorf("unmarshal cube image spec failed: %v", err)
 				}
-				constants.WithImageSpec(ctx, cubeSpec)
+				ctx = constants.WithImageSpec(ctx, cubeSpec)
 			}
 		}
 	}
@@ -169,7 +176,7 @@ func (c *CubeImageService) PullImage(ctx context.Context, name string, credentia
 			if instanceType == "" {
 				return "", fmt.Errorf("create req is nil")
 			}
-			err := ext4image.EnsurePmemFile(ctx, instanceType, ref)
+			err := ensureExt4ArtifactImage(ctx, instanceType, ref)
 			if err != nil {
 				return "", fmt.Errorf("ensure pmem file failed: %v", err)
 			}

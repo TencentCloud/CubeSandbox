@@ -161,6 +161,9 @@ func (o *snapshotter) tryCommitWithRefPath(ctx context.Context, info snapshots.I
 			sname, err := parseSnapshotName(name)
 			if err == nil {
 				if sname.isDigest {
+					if info.Labels == nil {
+						info.Labels = make(map[string]string)
+					}
 					info.Labels[constants.AnnotationSnapshotRef] = sname.name
 					oldSnapshotPath := filepath.Dir(o.upperPath(id))
 					newRefPath, err := o.makeCubeRefPathDir(ctx, info)
