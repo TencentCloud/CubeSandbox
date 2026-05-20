@@ -43,7 +43,7 @@ use tokio::time::{sleep, Duration};
 
 use super::device;
 use super::disk::Disk;
-use super::pmem::{self, Pmem};
+use super::pmem::Pmem;
 //use tokio_uring::fs::UnixStream;
 
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
