@@ -22,7 +22,7 @@ export AUTH_CALLBACK_URL=https://your-auth-service/verify
 请求到达时，Cube API Server 按以下流程处理：
 
 1. 从请求 header 中提取凭证（`Authorization: Bearer` 优先于 `X-API-Key`）。
-2. 向回调地址发送 `POST` 请求，透传凭证 header 和原始请求路径。
+2. 向回调地址发送 `POST` 请求，透传凭证 header、原始请求路径**以及 HTTP 方法**。
 3. 回调返回 **HTTP 200** → 放行请求。
 4. 其他状态码 → 返回客户端 **HTTP 401 Unauthorized**。
 
@@ -30,6 +30,7 @@ export AUTH_CALLBACK_URL=https://your-auth-service/verify
 客户端 ──→ Cube API Server
                 │
                 ├─ 提取凭证（Bearer / API Key）
+                ├─ 记录方法（GET / POST / DELETE / PATCH …）
                 │
                 └─ POST → 你的鉴权服务
                                 │
@@ -58,12 +59,19 @@ X-API-Key: your-actual-api-key
 Cube API Server 向回调地址发送的 `POST` 请求包含以下 header：
 
 | Header | 值 |
-|--------|----|
+|--------|---|
 | `Authorization` | `Bearer <token>` — 客户端使用 Bearer 鉴权时透传 |
 | `X-API-Key` | `<key>` — 客户端使用 API Key 鉴权时透传 |
-| `X-Request-Path` | 原始请求路径，如 `/v1/sandboxes` |
+| `X-Request-Path` | 原始请求路径，如 `/templates/my-tmpl` |
+| `X-Request-Method` | 原始请求的 HTTP 方法，如 `GET`、`DELETE` |
 
 两个凭证 header 互斥，回调方收到哪个取决于客户端发送的是哪种格式。
+
+::: warning 必须同时校验路径**和**方法
+同一路径上挂载了多个 HTTP 方法——例如 `/templates/:id` 同时处理 `GET`（读取）、`POST`（重建）、`DELETE`（删除）和 `PATCH`（更新）。如果回调仅按路径白名单授权，则读权限可能被放大为删除或覆写操作：持有只读凭证的调用方发送 `DELETE` 请求时，路径匹配不会拦截它。
+
+请在回调中**同时校验** `X-Request-Path` 和 `X-Request-Method`。
+:::
 
 ### 回调示例（Python/FastAPI）
 
@@ -73,22 +81,38 @@ from fastapi.responses import Response
 
 app = FastAPI()
 
-VALID_KEYS = {"secret-key-1", "secret-key-2"}
+# 读操作方法集合
+READ_METHODS = {"GET", "HEAD"}
+
+# 只读凭证与完全访问凭证分开管理。
+# 必须同时校验路径和方法——同一路径（如 /templates/:id）
+# 既有 GET（读取），也有 DELETE、POST（重建）、PATCH（更新）。
+READONLY_KEYS = {"readonly-key-1"}
+FULL_ACCESS_KEYS = {"secret-key-1", "secret-key-2"}
 
 @app.post("/verify")
 async def verify(request: Request):
-    # Bearer token
+    path = request.headers.get("X-Request-Path", "")
+    method = request.headers.get("X-Request-Method", "").upper()
+
+    # 提取凭证（Bearer 优先）
+    key = None
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        token = auth.removeprefix("Bearer ").strip()
-        if token in VALID_KEYS:
-            return {}               # 200 → 放行
-        return Response(status_code=403)
+        key = auth.removeprefix("Bearer ").strip()
+    else:
+        key = request.headers.get("X-API-Key", "")
 
-    # API Key
-    key = request.headers.get("X-API-Key", "")
-    if key in VALID_KEYS:
-        return {}                   # 200 → 放行
+    if not key:
+        return Response(status_code=401)
+
+    if key in FULL_ACCESS_KEYS:
+        return {}                           # 200 → 放行所有操作
+
+    if key in READONLY_KEYS:
+        if method in READ_METHODS:
+            return {}                       # 200 → 允许读操作
+        return Response(status_code=403)   # 拒绝写/删操作
 
     return Response(status_code=401)
 ```

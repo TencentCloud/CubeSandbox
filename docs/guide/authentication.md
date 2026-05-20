@@ -22,7 +22,7 @@ When `AUTH_CALLBACK_URL` is not set (the default), all requests are allowed with
 When a request arrives, Cube API Server:
 
 1. Extracts the credential from the request header (`Authorization: Bearer` takes priority over `X-API-Key`).
-2. Forwards a `POST` request to the callback URL with the credential header and the original request path.
+2. Forwards a `POST` request to the callback URL with the credential header, the original request path, **and the HTTP method**.
 3. If the callback returns **HTTP 200**, the request is allowed through.
 4. Any other status code causes the request to be rejected with **HTTP 401 Unauthorized**.
 
@@ -30,6 +30,7 @@ When a request arrives, Cube API Server:
 Client ──→ Cube API Server
                 │
                 ├─ extract credential (Bearer / API Key)
+                ├─ capture method (GET / POST / DELETE / PATCH …)
                 │
                 └─ POST → your auth service
                                 │
@@ -61,33 +62,59 @@ Cube API Server sends a `POST` to your callback URL with the following headers:
 |--------|-------|
 | `Authorization` | `Bearer <token>` — present when the client used Bearer auth |
 | `X-API-Key` | `<key>` — present when the client used API Key auth |
-| `X-Request-Path` | The original request path (e.g. `/v1/sandboxes`) |
+| `X-Request-Path` | The original request path (e.g. `/templates/my-tmpl`) |
+| `X-Request-Method` | The HTTP method of the original request (e.g. `GET`, `DELETE`) |
 
 The two credential headers are mutually exclusive. Your callback receives whichever one the client sent.
+
+::: warning Validate both path **and** method
+Multiple HTTP methods are mounted on the same path — for example, `/templates/:id` handles `GET` (read), `POST` (rebuild), `DELETE` (delete), and `PATCH` (update). A callback that only whitelists by path cannot distinguish a read from a destructive operation: a caller with read-only access could escalate to delete or overwrite a template.
+
+Always check **both** `X-Request-Path` and `X-Request-Method` in your callback.
+:::
 
 ### Example callback (Python/FastAPI)
 
 ```python
 from fastapi import FastAPI, Request
+from fastapi.responses import Response
 
 app = FastAPI()
 
 VALID_KEYS = {"secret-key-1", "secret-key-2"}
 
+# Define which methods each key is allowed to use per path prefix.
+# Always check BOTH path and method — the same path (e.g. /templates/:id)
+# serves GET (read), DELETE, POST (rebuild), and PATCH (update).
+READ_METHODS = {"GET", "HEAD"}
+WRITE_METHODS = {"POST", "DELETE", "PATCH", "PUT"}
+
+READONLY_KEYS = {"readonly-key-1"}
+FULL_ACCESS_KEYS = {"secret-key-1", "secret-key-2"}
+
 @app.post("/verify")
 async def verify(request: Request):
-    # Bearer token
+    path = request.headers.get("X-Request-Path", "")
+    method = request.headers.get("X-Request-Method", "").upper()
+
+    # Extract credential (Bearer takes priority)
+    key = None
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        token = auth.removeprefix("Bearer ").strip()
-        if token in VALID_KEYS:
-            return {}           # 200 → allow
-        return Response(status_code=403)
+        key = auth.removeprefix("Bearer ").strip()
+    else:
+        key = request.headers.get("X-API-Key", "")
 
-    # API Key
-    key = request.headers.get("X-API-Key", "")
-    if key in VALID_KEYS:
-        return {}               # 200 → allow
+    if not key:
+        return Response(status_code=401)
+
+    if key in FULL_ACCESS_KEYS:
+        return {}                           # 200 → allow all
+
+    if key in READONLY_KEYS:
+        if method in READ_METHODS:
+            return {}                       # 200 → allow reads
+        return Response(status_code=403)   # deny writes/deletes
 
     return Response(status_code=401)
 ```

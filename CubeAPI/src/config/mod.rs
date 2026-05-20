@@ -48,9 +48,16 @@ pub struct ServerConfig {
     ///   - `Authorization: Bearer <token>`, or
     ///   - `X-API-Key: <key>`
     ///
-    /// The middleware will POST to this URL with the credential headers plus
-    /// `X-Request-Path: <original request path>`. An HTTP 200 response grants
-    /// access; any other status code returns 401 to the client.
+    /// The middleware will POST to this URL with the credential headers plus:
+    ///   - `X-Request-Path: <original request path>`
+    ///   - `X-Request-Method: <HTTP method>` (e.g. GET, POST, DELETE, PATCH)
+    ///
+    /// An HTTP 200 response grants access; any other status code returns 401 to the client.
+    ///
+    /// **Security note**: Multiple HTTP methods (e.g. GET/POST/DELETE/PATCH) are mounted
+    /// on the same path (e.g. `/templates/:id`). Callbacks that only whitelist by path
+    /// cannot distinguish read from write/delete operations. Always validate both
+    /// `X-Request-Path` **and** `X-Request-Method` in your callback implementation.
     ///
     /// When unset (default), all requests are allowed through without authentication.
     ///
