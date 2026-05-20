@@ -3,12 +3,15 @@
 
 export interface StoreTemplate {
   id: string;
-  name: string;
-  description: string;
+  /** i18n key under store.items.<id>.name */
+  nameKey: string;
+  /** i18n key under store.items.<id>.description */
+  descriptionKey: string;
   image: string;
   image_cn: string;
   image_intl: string;
   digest?: string;
+  /** stable tag keys, resolved via store.tagLabels.<key> */
   tags: string[];
   category: 'code' | 'browser' | 'ai' | 'base';
   size_mb: number;
@@ -22,13 +25,13 @@ export interface StoreTemplate {
 export const STORE_TEMPLATES: StoreTemplate[] = [
   {
     id: 'sandbox-code',
-    name: '代码执行沙箱',
-    description: '官方代码执行环境，预装 Python3 + Jupyter Kernel，兼容 E2B SDK',
+    nameKey: 'items.sandbox-code.name',
+    descriptionKey: 'items.sandbox-code.description',
     image_cn: 'cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest',
     image_intl: 'cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest',
     image: 'cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest',
     digest: 'sha256:a7b8654aac5b90e241b98e195ae1d8c85d59fe1fb8c282bcccf1071f877db20f',
-    tags: ['Python', 'Jupyter', '官方'],
+    tags: ['python', 'jupyter', 'official'],
     category: 'code',
     size_mb: 207,
     expose_ports: [49983, 49999],
@@ -39,13 +42,13 @@ export const STORE_TEMPLATES: StoreTemplate[] = [
   },
   {
     id: 'sandbox-browser',
-    name: '浏览器沙箱',
-    description: '预装 Chromium，支持网页自动化',
+    nameKey: 'items.sandbox-browser.name',
+    descriptionKey: 'items.sandbox-browser.description',
     image_cn: 'cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest',
     image_intl: 'cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest',
     image: 'cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest',
     digest: 'sha256:1786786af8510c34eda64ebec5b0a61a98583cb311c3045c0222910ec0680d60',
-    tags: ['浏览器', 'Chromium', '官方'],
+    tags: ['browser', 'chromium', 'official'],
     category: 'browser',
     size_mb: 1530,
     expose_ports: [49983],
@@ -56,12 +59,12 @@ export const STORE_TEMPLATES: StoreTemplate[] = [
   },
   {
     id: 'cubesandbox-base',
-    name: '基础镜像',
-    description: '最小化基础镜像，仅含 envd，适合自定义构建',
+    nameKey: 'items.cubesandbox-base.name',
+    descriptionKey: 'items.cubesandbox-base.description',
     image_cn: 'ghcr.io/tencentcloud/cubesandbox-base:latest',
     image_intl: 'ghcr.io/tencentcloud/cubesandbox-base:latest',
     image: 'ghcr.io/tencentcloud/cubesandbox-base:latest',
-    tags: ['基础', 'envd', '官方'],
+    tags: ['base', 'envd', 'official'],
     category: 'base',
     size_mb: 98,
     expose_ports: [49983],

@@ -33,7 +33,7 @@ export function TopBar() {
           <Search size={14} />
           {t('searchPlaceholder')}
         </span>
-        <kbd className="flex items-center gap-1 rounded border border-border/60 bg-background/60 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+        <kbd className="flex items-center gap-1 rounded border border-border/60 bg-background/60 px-1.5 py-0.5 text-xs font-medium text-muted-foreground">
           <CmdIcon size={10} />K
         </kbd>
       </button>

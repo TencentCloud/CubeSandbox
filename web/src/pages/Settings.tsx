@@ -39,7 +39,7 @@ function SettingsSidebar({ active, onChange }: {
             'flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors',
             active === key
               ? 'bg-primary/10 text-primary font-medium'
-              : 'text-muted-foreground hover:bg-white/[0.04] hover:text-foreground'
+              : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
           )}
         >
           <Icon size={15} />
@@ -86,7 +86,7 @@ function AppearanceSection() {
                 'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-all',
                 mode === value
                   ? 'border-primary/40 bg-primary/10 text-primary'
-                  : 'border-white/8 bg-white/[0.03] text-muted-foreground hover:border-white/15 hover:text-foreground'
+                  : 'border-border/60 bg-card/40 text-muted-foreground hover:border-border hover:text-foreground'
               )}
             >
               <Icon size={14} />
@@ -108,7 +108,7 @@ function AppearanceSection() {
                 'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-all',
                 currentLang === code
                   ? 'border-primary/40 bg-primary/10 text-primary'
-                  : 'border-white/8 bg-white/[0.03] text-muted-foreground hover:border-white/15 hover:text-foreground'
+                  : 'border-border/60 bg-card/40 text-muted-foreground hover:border-border hover:text-foreground'
               )}
             >
               {label}
@@ -152,13 +152,13 @@ function ClusterSection() {
       <SettingRow label={t('cluster.endpoint')} desc={t('cluster.endpointDesc')}>
         <div className="space-y-3">
           <div className="flex items-center gap-2">
-            <div className="flex-1 rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 font-mono text-sm text-foreground/60">
+            <div className="flex-1 rounded-lg border border-border/60 bg-card/40 px-3 py-2 font-mono text-sm text-foreground/70">
               {cfg?.apiEndpoint ?? `${window.location.origin}/cubeapi/v1`}
             </div>
             <button
               onClick={handleTest}
               disabled={testing}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-sm text-muted-foreground hover:border-primary/30 hover:text-foreground transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/40 px-3 py-2 text-sm text-muted-foreground hover:border-primary/30 hover:text-foreground transition-colors disabled:opacity-50"
             >
               {testing ? <Loader2 size={13} className="animate-spin" /> : <Wifi size={13} />}
               {t('cluster.test')}
@@ -185,19 +185,19 @@ function ClusterSection() {
       <SettingRow label={t('cluster.runtime')} desc={t('cluster.runtimeDesc')}>
         {isLoading ? (
           <div className="space-y-2">
-            {[1,2,3,4].map(i => <div key={i} className="h-4 w-48 animate-pulse rounded bg-white/[0.05]" />)}
+            {[1,2,3,4].map(i => <div key={i} className="h-4 w-48 animate-pulse rounded bg-muted/60" />)}
           </div>
         ) : (
           <dl className="space-y-2 text-sm">
-            {[
-              [t('cluster.sandboxDomain'), cfg?.sandboxDomain],
-              [t('cluster.instanceType'),  cfg?.instanceType],
-              [t('cluster.rateLimit'),     `${cfg?.rateLimitPerSec} req/s`],
-              [t('cluster.auth'),          cfg?.authEnabled ? t('cluster.authOn') : t('cluster.authOff')],
-            ].map(([label, value]) => (
+            {([
+              { label: t('cluster.sandboxDomain'), value: cfg?.sandboxDomain ?? '—',  numeric: false },
+              { label: t('cluster.instanceType'),  value: cfg?.instanceType ?? '—',   numeric: false },
+              { label: t('cluster.rateLimit'),     value: `${cfg?.rateLimitPerSec ?? '—'} req/s`, numeric: true },
+              { label: t('cluster.auth'),          value: cfg?.authEnabled ? t('cluster.authOn') : t('cluster.authOff'), numeric: false },
+            ] as Array<{ label: string; value: string; numeric: boolean }>).map(({ label, value, numeric }) => (
               <div key={label} className="flex items-center gap-3">
                 <span className="w-36 text-muted-foreground">{label}</span>
-                <span className="font-mono text-foreground/80">{value}</span>
+                <span className={cn('text-foreground/90', numeric && 'text-num')}>{value}</span>
               </div>
             ))}
           </dl>
@@ -221,7 +221,7 @@ const SHORTCUTS: { action: string; keys: string[] }[] = [
 
 function Kbd({ children }: { children: string }) {
   return (
-    <kbd className="inline-flex items-center justify-center rounded border border-white/15 bg-white/[0.06] px-1.5 py-0.5 font-mono text-[11px] text-foreground/70 min-w-[22px]">
+    <kbd className="inline-flex items-center justify-center rounded border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-xs text-foreground/80 min-w-[22px]">
       {children}
     </kbd>
   );
@@ -232,7 +232,7 @@ function ShortcutsSection() {
   return (
     <div className="space-y-8">
       <SectionHeader icon={Keyboard} title={t('shortcuts.title')} desc={t('shortcuts.desc')} />
-      <div className="rounded-xl border border-white/8 bg-white/[0.03] divide-y divide-white/5">
+      <div className="rounded-xl border border-border/60 bg-card/40 divide-y divide-border/40">
         {SHORTCUTS.map(({ action, keys }) => (
           <div key={action} className="flex items-center justify-between px-5 py-3.5">
             <span className="text-sm text-foreground/80">{t(action as any)}</span>
@@ -265,15 +265,15 @@ function AboutSection() {
     <div className="space-y-8">
       <SectionHeader icon={Info} title={t('about.title')} desc={t('about.desc')} />
 
-      <div className="rounded-xl border border-white/8 bg-white/[0.03] divide-y divide-white/5">
-        {[
-          [t('about.version'),     'v0.2.0'],
-          [t('about.cubeApi'),     cfg?.apiEndpoint ?? `${window.location.origin}/cubeapi/v1`],
-          [t('about.instanceType'),cfg?.instanceType ?? '—'],
-        ].map(([label, value]) => (
+      <div className="rounded-xl border border-border/60 bg-card/40 divide-y divide-border/40">
+        {([
+          { label: t('about.version'),     value: 'v0.2.0',                                                  mono: true  },
+          { label: t('about.cubeApi'),     value: cfg?.apiEndpoint ?? `${window.location.origin}/cubeapi/v1`, mono: true  },
+          { label: t('about.instanceType'),value: cfg?.instanceType ?? '—',                                   mono: false },
+        ] as Array<{ label: string; value: string; mono: boolean }>).map(({ label, value, mono }) => (
           <div key={label} className="flex items-center justify-between px-5 py-3.5">
             <span className="text-sm text-muted-foreground">{label}</span>
-            <span className="font-mono text-sm text-foreground/80">{value}</span>
+            <span className={cn('text-sm text-foreground/90', mono && 'font-mono')}>{value}</span>
           </div>
         ))}
       </div>
@@ -289,7 +289,7 @@ function AboutSection() {
             href={href}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-sm text-muted-foreground hover:border-primary/30 hover:text-foreground transition-colors"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/40 px-3 py-2 text-sm text-muted-foreground hover:border-primary/30 hover:text-foreground transition-colors"
           >
             {label}
             <ExternalLink size={12} />
@@ -304,9 +304,9 @@ function AboutSection() {
 
 function SectionHeader({ icon: Icon, title, desc }: { icon: React.ElementType; title: string; desc: string }) {
   return (
-    <div className="flex items-start gap-3 pb-2 border-b border-white/6">
-      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white/[0.04] border border-white/8">
-        <Icon size={15} className="text-muted-foreground/70" />
+    <div className="flex items-start gap-3 pb-2 border-b border-border/40">
+      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/40 border border-border/60">
+        <Icon size={15} className="text-muted-foreground/80" />
       </span>
       <div>
         <h2 className="text-base font-semibold">{title}</h2>

@@ -37,5 +37,28 @@
     "browser": "浏览器",
     "ai": "AI · LLM",
     "base": "基础镜像"
+  },
+  "items": {
+    "sandbox-code": {
+      "name": "代码执行沙箱",
+      "description": "官方代码执行环境，预装 Python3 + Jupyter Kernel，兼容 E2B SDK。"
+    },
+    "sandbox-browser": {
+      "name": "浏览器沙箱",
+      "description": "预装 Chromium，支持网页自动化。"
+    },
+    "cubesandbox-base": {
+      "name": "基础镜像",
+      "description": "最小化基础镜像，仅含 envd，适合自定义构建。"
+    }
+  },
+  "tagLabels": {
+    "python": "Python",
+    "jupyter": "Jupyter",
+    "official": "官方",
+    "browser": "浏览器",
+    "chromium": "Chromium",
+    "base": "基础",
+    "envd": "envd"
   }
 }

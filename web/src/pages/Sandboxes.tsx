@@ -108,7 +108,7 @@ export default function SandboxesPage() {
                 {key !== 'all' && data && (
                   <span
                     className={cn(
-                      'ml-1.5 rounded-full px-1.5 py-0.5 text-[10px]',
+                      'ml-1.5 rounded-full px-1.5 py-0.5 text-xs text-num',
                       key === 'running'
                         ? 'bg-cube-emerald/20 text-cube-emerald'
                         : 'bg-cube-amber/20 text-cube-amber',
@@ -124,7 +124,7 @@ export default function SandboxesPage() {
       </Card>
 
       <Card className="!p-0 overflow-hidden">
-        <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-[11px] uppercase tracking-wider text-muted-foreground">
+        <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-xs uppercase tracking-wider font-medium text-muted-foreground/85">
           <div>{t('col.state')}</div>
           <div>{t('col.sandboxId')}</div>
           <div>{t('col.template')}</div>
@@ -187,15 +187,15 @@ function Row({
           {short(sb.sandboxID)}
         </Link>
         {sb.alias && (
-          <span className="text-[11px] text-muted-foreground">{t('alias', { alias: sb.alias })}</span>
+          <span className="text-xs text-muted-foreground">{t('alias', { alias: sb.alias })}</span>
         )}
       </div>
       <div className="truncate text-xs text-muted-foreground">{sb.templateID ?? '—'}</div>
-      <div className="text-xs text-muted-foreground">
+      <div className="text-xs text-muted-foreground text-num">
         {sb.cpuCount != null ? t('vcpu', { count: sb.cpuCount }) : '—'}
       </div>
-      <div className="text-xs text-muted-foreground">{formatBytes(sb.memoryMB)}</div>
-      <div className="font-mono text-xs text-muted-foreground/70">{sb.clientID || '—'}</div>
+      <div className="text-xs text-muted-foreground text-num">{formatBytes(sb.memoryMB)}</div>
+      <div className="text-xs text-muted-foreground/80 text-num">{sb.clientID || '—'}</div>
       <div className="text-xs text-muted-foreground">{formatRelative(sb.startedAt)}</div>
       <div className="flex justify-end gap-1">
         {state === 'paused' ? (

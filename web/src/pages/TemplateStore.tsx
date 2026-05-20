@@ -340,7 +340,7 @@ function InstalledDropdown({ installed, onInstallAnother }: InstalledDropdownPro
               <span className="font-mono truncate flex-1 min-w-0">{tpl.templateID}</span>
               <Badge
                 tone={tpl.status?.toUpperCase() === 'READY' ? 'ok' : 'warn'}
-                className="ml-auto text-[10px] shrink-0"
+                className="ml-auto text-xs shrink-0"
               >
                 {tpl.status}
               </Badge>
@@ -378,12 +378,12 @@ function StoreCard({ item, installed, onInstall, liveMeta }: StoreCardProps) {
   return (
     <Card className="flex flex-col h-full relative overflow-hidden">
       {item.official && !hasUpdate && (
-        <span className="absolute top-2.5 right-2.5 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary ring-1 ring-primary/20">
+        <span className="absolute top-2.5 right-2.5 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary ring-1 ring-primary/20">
           {t('official')}
         </span>
       )}
       {hasUpdate && (
-        <span className="absolute top-2.5 right-2.5 flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-500 ring-1 ring-amber-500/30">
+        <span className="absolute top-2.5 right-2.5 flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-500 ring-1 ring-amber-500/30">
           <AlertTriangle size={10} />
           {t('hasUpdate')}
         </span>
@@ -397,24 +397,28 @@ function StoreCard({ item, installed, onInstall, liveMeta }: StoreCardProps) {
           </span>
           <div>
             <p className="text-sm font-semibold leading-tight">{item.image.split("/").pop()}</p>
-            <p className="text-[11px] text-muted-foreground mt-0.5">{displaySizeMb >= 1000 ? (displaySizeMb / 1024).toFixed(1) + " GB" : displaySizeMb + " MB"}</p>
+            <p className="text-xs text-muted-foreground mt-0.5 text-num">{displaySizeMb >= 1000 ? (displaySizeMb / 1024).toFixed(1) + " GB" : displaySizeMb + " MB"}</p>
           </div>
         </div>
 
         {/* description */}
-        <p className="text-xs text-muted-foreground leading-relaxed">{item.description}</p>
+        <p className="text-xs text-muted-foreground leading-relaxed">
+          {t(item.descriptionKey as 'official', { defaultValue: '' })}
+        </p>
 
         {/* tags */}
         <div className="flex flex-wrap gap-1">
           {item.tags.map((tag) => (
-            <Badge key={tag} tone="mute" className="text-[10px]">{tag}</Badge>
+            <Badge key={tag} tone="mute" className="text-xs">
+              {t(`tagLabels.${tag}` as 'official', { defaultValue: tag })}
+            </Badge>
           ))}
         </div>
       </div>
 
       {/* footer */}
       <div className="border-t px-4 py-3 space-y-2">
-        <p className="text-[11px] text-muted-foreground font-mono break-all leading-relaxed">
+        <p className="text-xs text-muted-foreground font-mono break-all leading-relaxed">
           {item.image}
         </p>
         <div className="flex justify-end">
@@ -484,10 +488,15 @@ export default function TemplateStorePage() {
     if (category !== 'all' && item.category !== category) return false;
     if (search.trim()) {
       const q = search.toLowerCase();
+      const name = t(item.nameKey as 'official', { defaultValue: '' }).toLowerCase();
+      const description = t(item.descriptionKey as 'official', { defaultValue: '' }).toLowerCase();
       return (
-        item.name.toLowerCase().includes(q) ||
-        item.description.toLowerCase().includes(q) ||
-        item.tags.some((t) => t.toLowerCase().includes(q))
+        name.includes(q) ||
+        description.includes(q) ||
+        item.tags.some((tag) => {
+          const label = t(`tagLabels.${tag}` as 'official', { defaultValue: tag }).toLowerCase();
+          return tag.toLowerCase().includes(q) || label.includes(q);
+        })
       );
     }
     return true;

@@ -50,7 +50,7 @@ export function CommandPalette() {
               {t('noResults')}
             </Command.Empty>
 
-            <Command.Group heading={t('groupNavigate')} className="px-2 pb-2 pt-1 text-[11px] uppercase tracking-widest text-muted-foreground">
+            <Command.Group heading={t('groupNavigate')} className="px-2 pb-2 pt-1 text-xs uppercase tracking-wider font-medium text-muted-foreground">
               <Item icon={<LayoutDashboard size={14} />} label={tNav('overview')} onSelect={() => go('/')} />
               <Item icon={<Boxes size={14} />} label={tNav('sandboxes')} onSelect={() => go('/sandboxes')} />
               <Item icon={<Package size={14} />} label={tNav('templates')} onSelect={() => go('/templates')} />
@@ -60,7 +60,7 @@ export function CommandPalette() {
               <Item icon={<Settings size={14} />} label={tNav('settings')} onSelect={() => go('/settings')} />
             </Command.Group>
 
-            <Command.Group heading={t('groupActions')} className="px-2 pb-2 pt-1 text-[11px] uppercase tracking-widest text-muted-foreground">
+            <Command.Group heading={t('groupActions')} className="px-2 pb-2 pt-1 text-xs uppercase tracking-wider font-medium text-muted-foreground">
               <Item icon={<Plus size={14} />} label={t('createSandbox')} onSelect={() => go('/sandboxes/new')} />
             </Command.Group>
           </Command.List>

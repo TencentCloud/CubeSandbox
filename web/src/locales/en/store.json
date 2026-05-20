@@ -37,5 +37,28 @@
     "browser": "Browser",
     "ai": "AI · LLM",
     "base": "Base Image"
+  },
+  "items": {
+    "sandbox-code": {
+      "name": "Code Execution Sandbox",
+      "description": "Official code execution environment, preinstalled with Python3 + Jupyter Kernel, compatible with the E2B SDK."
+    },
+    "sandbox-browser": {
+      "name": "Browser Sandbox",
+      "description": "Preinstalled Chromium, ready for web automation."
+    },
+    "cubesandbox-base": {
+      "name": "Base Image",
+      "description": "Minimal base image with envd only, ideal for custom builds."
+    }
+  },
+  "tagLabels": {
+    "python": "Python",
+    "jupyter": "Jupyter",
+    "official": "Official",
+    "browser": "Browser",
+    "chromium": "Chromium",
+    "base": "Base",
+    "envd": "envd"
   }
 }

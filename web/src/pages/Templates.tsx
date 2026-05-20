@@ -115,7 +115,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
                 value={writableLayerSize}
                 onChange={(e) => setWritableLayerSize(e.target.value)}
               />
-              <p className="text-[11px] text-muted-foreground">{t('create.writableLayerSizeHint')}</p>
+              <p className="text-xs text-muted-foreground">{t('create.writableLayerSizeHint')}</p>
             </div>
           </div>
           {/* Row 3: exposedPorts 占全宽 */}
@@ -128,7 +128,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               value={exposedPorts}
               onChange={(e) => { setExposedPorts(e.target.value); const first = e.target.value.split(',')[0].trim(); if (first) setProbePort(first); }}
             />
-            <p className="text-[11px] text-muted-foreground">{t('create.exposedPortsHint')}</p>
+            <p className="text-xs text-muted-foreground">{t('create.exposedPortsHint')}</p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
@@ -171,7 +171,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               value={envVars}
               onChange={(e) => setEnvVars(e.target.value)}
             />
-            <p className="text-[11px] text-muted-foreground">每行一条，格式 KEY=VALUE</p>
+            <p className="text-xs text-muted-foreground">每行一条，格式 KEY=VALUE</p>
           </div>
           <label className="flex items-center gap-2 cursor-pointer select-none">
             <input
@@ -316,7 +316,7 @@ export default function TemplatesPage() {
                     </span>
                     <div>
                       <CardTitle className="text-base">{tpl.templateID}</CardTitle>
-                      <CardDescription className="font-mono text-[11px]">{tpl.templateID}</CardDescription>
+                      <CardDescription className="font-mono text-xs">{tpl.templateID}</CardDescription>
                     </div>
                   </div>
                   <Badge tone={tpl.status.toLowerCase() === 'ready' ? 'ok' : tpl.status.toLowerCase() === 'failed' ? 'err' : 'warn'}>
@@ -325,11 +325,11 @@ export default function TemplatesPage() {
                 </CardHeader>
                 <div className="grid grid-cols-2 gap-3 pt-3 text-xs text-muted-foreground">
                   <div>
-                    <div className="text-[10px] uppercase tracking-wider">{t('col.instance')}</div>
+                    <div className="text-xs uppercase tracking-wider">{t('col.instance')}</div>
                     <div className="mt-0.5 text-foreground/80">{tpl.instanceType ?? t('instanceDefault')}</div>
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase tracking-wider">{t('col.created')}</div>
+                    <div className="text-xs uppercase tracking-wider">{t('col.created')}</div>
                     <div className="mt-0.5 text-foreground/80">{formatRelative(tpl.createdAt)}</div>
                   </div>
                 </div>

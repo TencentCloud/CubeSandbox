@@ -54,7 +54,7 @@ export default function NodesPage() {
                     {n.hostname && n.hostname !== n.nodeID ? n.hostname : n.nodeID}
                   </CardTitle>
                   {n.hostname && n.hostname !== n.nodeID && (
-                    <CardDescription className="font-mono text-[11px]">{n.nodeID}</CardDescription>
+                    <CardDescription className="font-mono text-xs">{n.nodeID}</CardDescription>
                   )}
                 </div>
               </div>
@@ -86,7 +86,7 @@ export default function NodesPage() {
             {n.conditions && n.conditions.length > 0 && (
               <div className="mt-4 space-y-1 border-t border-border/60 pt-3">
                 {n.conditions.slice(0, 3).map((c, i) => (
-                  <div key={i} className="flex items-center justify-between text-[11px]">
+                  <div key={i} className="flex items-center justify-between text-xs">
                     <span className="text-muted-foreground">{c.type}</span>
                     <span className="flex items-center gap-2">
                       <Badge tone={c.status === 'True' ? 'ok' : 'warn'}>{c.status}</Badge>
@@ -126,7 +126,7 @@ function Meter({
     <div>
       <div className="flex items-center justify-between text-muted-foreground">
         <span className="flex items-center gap-1.5">{icon}{label}</span>
-        <span className="text-foreground">{pct}%</span>
+        <span className="text-foreground text-num">{pct}%</span>
       </div>
       <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
         <div
@@ -134,7 +134,7 @@ function Meter({
           style={{ width: `${Math.max(2, Math.min(100, pct))}%` }}
         />
       </div>
-      <div className="mt-1 text-[10px] text-muted-foreground">{detail}</div>
+      <div className="mt-1 text-xs text-muted-foreground text-num">{detail}</div>
     </div>
   );
 }

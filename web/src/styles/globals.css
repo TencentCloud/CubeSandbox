@@ -91,8 +91,22 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-feature-settings: 'cv11', 'ss01';
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     background-attachment: fixed;
+  }
+
+  /* Monospace family: disable contextual ligatures, force tabular & slashed zero
+     so IDs / IPs / numbers stay aligned and unambiguous (0/O, l/1). */
+  code,
+  kbd,
+  samp,
+  pre,
+  .font-mono {
+    font-feature-settings: 'calt' 0;
+    font-variant-numeric: tabular-nums slashed-zero;
   }
 
   /* Dark atmospheric gradient */
@@ -166,4 +180,25 @@
   .tint-bg-10 { background-color: hsl(var(--tint) / 0.08); }
   .tint-border-5 { border-color: hsl(var(--tint) / 0.08); }
   .tint-border-10 { border-color: hsl(var(--tint) / 0.15); }
+
+  /* Unified table primitives. Replaces three different <th> classNames
+     scattered across Network/Observability/TemplateDetail. */
+  .tbl-th {
+    @apply px-5 py-3 text-left text-xs uppercase tracking-wider font-medium whitespace-nowrap;
+    color: hsl(var(--muted-foreground) / 0.85);
+  }
+  .tbl-td-num {
+    font-variant-numeric: tabular-nums slashed-zero;
+  }
+
+  /* Neutral chip for short machine-ish labels (networkType, clientID).
+     Uses sans + medium weight; resists looking like code. */
+  .chip-net {
+    @apply inline-flex items-center rounded-md border border-border/70 bg-muted/40 px-1.5 py-0.5 text-xs font-medium text-foreground/80;
+  }
+
+  /* Inline numeric utility for sans-serif numbers that need column alignment. */
+  .text-num {
+    font-variant-numeric: tabular-nums slashed-zero;
+  }
 }

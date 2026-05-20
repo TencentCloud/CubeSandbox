@@ -73,7 +73,7 @@ export function Rail() {
             GitHub
           </span>
         </a>
-        <div className="text-[10px] tracking-widest text-muted-foreground/60">v0.1</div>
+        <div className="text-xs tracking-wider text-muted-foreground/70 text-num">v0.1</div>
       </div>
     </aside>
   );

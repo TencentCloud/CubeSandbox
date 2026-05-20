@@ -78,7 +78,7 @@ function Field({ label, value, mono, copyable, dim }: {
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <span className="text-xs uppercase tracking-widest text-muted-foreground/70 font-medium">{label}</span>
+      <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{label}</span>
       <span className={cn(
         'text-sm break-all flex items-center gap-1.5',
         mono && 'font-mono text-sm',
@@ -183,14 +183,14 @@ function ReplicaTable({ replicas }: { replicas: Replica[] }) {
         <thead>
           <tr className="border-b border-border/50">
             {[t('fields.node'), t('fields.phase'), t('fields.spec'), t('fields.artifactID'), t('fields.lastJob')].map(h => (
-              <th key={h} className="pb-2 pr-8 text-left text-xs uppercase tracking-widest text-muted-foreground/70 font-medium whitespace-nowrap">{h}</th>
+              <th key={h} className="tbl-th pl-0 pr-8 py-2">{h}</th>
             ))}
           </tr>
         </thead>
         <tbody className="divide-y divide-border/30">
           {replicas.map((r, i) => (
             <tr key={i} className="hover:bg-cube-emerald/5 transition-colors">
-              <td className="py-3 pr-8 font-mono text-sm font-medium whitespace-nowrap">{r.node_ip ?? r.node_id ?? '—'}</td>
+              <td className="py-3 pr-8 text-sm font-medium text-num whitespace-nowrap">{r.node_ip ?? r.node_id ?? '—'}</td>
               <td className="py-3 pr-8 whitespace-nowrap">
                 <span className="inline-flex items-center gap-1.5">
                   <span className={cn('h-1.5 w-1.5 rounded-full', statusDotClass(r.phase ?? r.status ?? ''))} />
@@ -392,7 +392,7 @@ export default function TemplateDetailPage() {
         {/* left: id + meta */}
         <div className="min-w-0 space-y-2 border-l-[3px] border-cube-emerald pl-3">
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px] uppercase tracking-widest text-muted-foreground/50 font-medium">{t('templateId')}</span>
+            <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{t('templateId')}</span>
           </div>
           <div className="flex items-center gap-2">
             <h1 className="text-lg font-semibold font-mono tracking-tight truncate">{data.templateID}</h1>
@@ -426,11 +426,11 @@ export default function TemplateDetailPage() {
                 <span className={cn('text-sm font-semibold', statusTextClass(status))}>{t(`status.${status.toLowerCase()}` as 'status.ready', { defaultValue: status })}</span>
               </span>
             )},
-            { label: '版本', content: <span className="text-base font-semibold font-mono">{data.version ?? '—'}</span> },
-            { label: 'Replicas', content: <span className="text-base font-semibold">{replicas.length}</span> },
+            { label: '版本', content: <span className="text-base font-semibold text-num">{data.version ?? '—'}</span> },
+            { label: 'Replicas', content: <span className="text-base font-semibold text-num">{replicas.length}</span> },
           ].map(({ label, content }) => (
             <div key={label} className="px-5 flex flex-col gap-1 first:pl-0 last:pr-0">
-              <span className="text-[10px] uppercase tracking-widest text-muted-foreground/50 font-medium">{label}</span>
+              <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{label}</span>
               {content}
             </div>
           ))}
@@ -488,7 +488,7 @@ export default function TemplateDetailPage() {
         {/* error */}
         {data.lastError && (
           <div className="mt-5 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-            <p className="text-[10px] uppercase tracking-widest text-destructive/70 mb-1.5">{t('fields.lastError')}</p>
+            <p className="text-xs uppercase tracking-wider font-medium text-destructive/70 mb-1.5">{t('fields.lastError')}</p>
             <p className="font-mono text-xs break-all text-destructive/80 leading-relaxed">{data.lastError}</p>
           </div>
         )}

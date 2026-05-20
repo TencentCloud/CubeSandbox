@@ -48,13 +48,13 @@ function KpiCard({
     'text-foreground';
 
   return (
-    <div className="rounded-xl border border-white/8 bg-white/[0.03] p-4 space-y-3">
-      <div className="text-sm text-muted-foreground tracking-wider uppercase">{label}</div>
+    <div className="rounded-xl border border-border/60 bg-card/40 p-4 space-y-3">
+      <div className="text-xs text-muted-foreground tracking-wider uppercase font-medium">{label}</div>
       <div className="flex items-end justify-between gap-2">
         <span className={cn('text-3xl font-semibold tabular-nums leading-none', color)}>
           {pct}<span className="text-base font-normal text-muted-foreground ml-0.5">%</span>
         </span>
-        <span className="text-sm text-muted-foreground pb-0.5">
+        <span className="text-sm text-muted-foreground pb-0.5 text-num">
           {used} / {total} {unit}
         </span>
       </div>
@@ -69,7 +69,7 @@ function Section({ title, children, action }: { title: string; children: React.R
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-medium uppercase tracking-widest text-muted-foreground">{title}</span>
+        <span className="text-sm font-medium uppercase tracking-wider text-muted-foreground">{title}</span>
         {action}
       </div>
       {children}
@@ -204,7 +204,7 @@ export default function NodeDetailPage() {
             {data.address && (
               <>
                 <span className="text-muted-foreground/30">·</span>
-                <span className="font-mono text-sm text-muted-foreground">{data.address}</span>
+                <span className="text-sm text-muted-foreground text-num">{data.address}</span>
               </>
             )}
           </div>
@@ -235,15 +235,15 @@ export default function NodeDetailPage() {
         </div>
 
         {/* meta stats */}
-        <div className="rounded-xl border border-white/8 bg-white/[0.03] px-6 py-4 mt-1 grid grid-cols-3 divide-x divide-white/8">
+        <div className="rounded-xl border border-border/60 bg-card/40 px-6 py-4 mt-1 grid grid-cols-3 divide-x divide-border/40">
           {[
             { label: t('fields.allocCpu'), value: `${(data.resources.allocatableCpuMilli / 1000).toFixed(1)}`, unit: 'cores' },
             { label: t('fields.allocMem'), value: `${(data.resources.allocatableMemoryMB / 1024).toFixed(1)}`, unit: 'GiB' },
             { label: t('fields.maxMvmSlots'), value: String(data.resources.maxMvmSlots), unit: '' },
           ].map(({ label, value, unit }) => (
             <div key={label} className="flex flex-col gap-1 px-5 first:pl-0 last:pr-0">
-              <span className="text-xs uppercase tracking-widest text-muted-foreground/60 font-medium">{label}</span>
-              <span className="text-xl font-semibold font-mono tabular-nums">
+              <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{label}</span>
+              <span className="text-xl font-semibold tabular-nums">
                 {value}
                 {unit && <span className="text-sm font-normal text-muted-foreground ml-1.5">{unit}</span>}
               </span>
@@ -255,7 +255,7 @@ export default function NodeDetailPage() {
       {/* conditions */}
       {data.conditions && data.conditions.length > 0 && (
         <Section title={t('section.conditions')}>
-          <div className="rounded-xl border border-white/8 bg-white/[0.03] px-4 py-1">
+          <div className="rounded-xl border border-border/60 bg-card/40 px-4 py-1">
             {data.conditions.map((c, i) => (
               <ConditionRow
                 key={i}
@@ -278,7 +278,7 @@ export default function NodeDetailPage() {
               <Link
                 key={tpl.templateID}
                 to={`/templates/${tpl.templateID}`}
-                className="flex items-center gap-1.5 rounded-lg border border-white/8 bg-white/[0.03] px-3 py-1.5 text-sm font-mono text-muted-foreground hover:border-cube-cyan/30 hover:text-foreground hover:bg-cube-cyan/5 transition-all"
+                className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/40 px-3 py-1.5 text-sm font-mono text-muted-foreground hover:border-cube-cyan/40 hover:text-foreground hover:bg-cube-cyan/5 transition-all"
               >
                 <Package size={11} className="text-cube-cyan/60" />
                 {tpl.templateID}
@@ -302,12 +302,12 @@ export default function NodeDetailPage() {
         ) : nodeSandboxes.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t('empty.sandboxes')}</p>
         ) : (
-          <div className="rounded-xl border border-white/8 bg-white/[0.03] divide-y divide-white/5">
+          <div className="rounded-xl border border-border/60 bg-card/40 divide-y divide-border/40">
             {nodeSandboxes.map((sb) => (
               <Link
                 key={sb.sandboxID}
                 to={`/sandboxes/${sb.sandboxID}`}
-                className="flex items-center justify-between gap-3 px-4 py-2.5 hover:bg-white/[0.03] transition-colors first:rounded-t-xl last:rounded-b-xl"
+                className="flex items-center justify-between gap-3 px-4 py-2.5 hover:bg-muted/40 transition-colors first:rounded-t-xl last:rounded-b-xl"
               >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <Box size={12} className="shrink-0 text-muted-foreground/50" />

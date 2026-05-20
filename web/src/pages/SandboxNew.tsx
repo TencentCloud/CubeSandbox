@@ -76,7 +76,7 @@ function TemplatePicker({
               <span className="truncate font-mono text-sm font-medium">{tpl.templateID}</span>
               <Badge
                 tone={statusLower === 'ready' ? 'ok' : statusLower === 'building' ? 'warn' : 'err'}
-                className="shrink-0 text-[10px]"
+                className="shrink-0 text-xs"
               >
                 {tpl.status}
               </Badge>

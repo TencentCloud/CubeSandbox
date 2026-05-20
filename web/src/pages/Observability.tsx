@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { clusterApi, sandboxApi, templateApi } from '@/api/client';
 import { Skeleton } from '@/components/ui/skeleton';
+import { MetricValue } from '@/components/ui/typography';
 import { cn, formatRelative } from '@/lib/utils';
 
 // ── Shared primitives ─────────────────────────────────────────────────────────
@@ -22,8 +23,8 @@ function SectionHeader({ icon: Icon, title, desc }: {
 }) {
   return (
     <div className="flex items-start gap-3 mb-5">
-      <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white/[0.04] border border-white/8">
-        <Icon size={15} className="text-cube-cyan/70" />
+      <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/40 border border-border/60">
+        <Icon size={15} className="text-cube-cyan/80" />
       </div>
       <div>
         <h2 className="text-base font-semibold tracking-tight">{title}</h2>
@@ -35,8 +36,8 @@ function SectionHeader({ icon: Icon, title, desc }: {
 
 function KpiCard({ label, value, color }: { label: string; value: number | string; color?: string }) {
   return (
-    <div className="rounded-xl border border-white/8 bg-white/[0.03] px-5 py-4 flex flex-col gap-1">
-      <span className="text-xs text-muted-foreground uppercase tracking-widest">{label}</span>
+    <div className="rounded-xl border border-border/60 bg-card/40 px-5 py-4 flex flex-col gap-1">
+      <span className="text-xs text-muted-foreground uppercase tracking-wider font-medium">{label}</span>
       <span className={cn('text-3xl font-semibold tabular-nums', color ?? 'text-foreground')}>{value}</span>
     </div>
   );
@@ -74,7 +75,7 @@ function SandboxSection() {
       <div className="grid grid-cols-3 gap-3 mb-5">
         {loading ? (
           Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="rounded-xl border border-white/8 bg-white/[0.03] px-5 py-4">
+            <div key={i} className="rounded-xl border border-border/60 bg-card/40 px-5 py-4">
               <Skeleton className="h-3 w-16 mb-2" />
               <Skeleton className="h-8 w-10" />
             </div>
@@ -90,33 +91,33 @@ function SandboxSection() {
 
       {/* Distribution bar */}
       {!loading && totalCount > 0 && (
-        <div className="mb-5 rounded-xl border border-white/8 bg-white/[0.03] px-5 py-4">
-          <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3">{t('sandboxes.distribution')}</p>
-          <div className="flex h-2 w-full overflow-hidden rounded-full bg-white/[0.06]">
+        <div className="mb-5 rounded-xl border border-border/60 bg-card/40 px-5 py-4">
+          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium mb-3">{t('sandboxes.distribution')}</p>
+          <div className="flex h-2 w-full overflow-hidden rounded-full bg-muted">
             <div className="bg-cube-emerald transition-all" style={{ width: `${runningPct}%` }} />
             <div className="bg-cube-amber transition-all" style={{ width: `${pausedPct}%` }} />
           </div>
           <div className="mt-2 flex items-center gap-4 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cube-emerald" />{t('sandboxes.running')} {runningPct}%</span>
-            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cube-amber" />{t('sandboxes.paused')} {pausedPct}%</span>
+            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cube-emerald" />{t('sandboxes.running')} <span className="text-num">{runningPct}%</span></span>
+            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cube-amber" />{t('sandboxes.paused')} <span className="text-num">{pausedPct}%</span></span>
           </div>
         </div>
       )}
 
       {/* Recent list */}
-      <div className="rounded-xl border border-white/8 bg-white/[0.03] overflow-x-auto">
-        <div className="px-5 py-3 border-b border-white/6">
-          <p className="text-xs text-muted-foreground uppercase tracking-widest">{t('sandboxes.recent')}</p>
+      <div className="rounded-xl border border-border/60 bg-card/40 overflow-x-auto">
+        <div className="px-5 py-3 border-b border-border/40">
+          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium">{t('sandboxes.recent')}</p>
         </div>
         <table className="w-full text-sm" style={{ minWidth: '560px' }}>
           <thead>
-            <tr className="border-b border-white/6">
+            <tr className="border-b border-border/40">
               {[t('sandboxes.colId'), t('sandboxes.colTemplate'), t('sandboxes.colState'), t('sandboxes.colCreated')].map(h => (
-                <th key={h} className="px-5 py-2.5 text-left text-xs uppercase tracking-widest text-muted-foreground/60 font-medium">{h}</th>
+                <th key={h} className="tbl-th py-2.5">{h}</th>
               ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-white/5">
+          <tbody className="divide-y divide-border/30">
             {loading ? (
               Array.from({ length: 3 }).map((_, i) => (
                 <tr key={i}>{[1,2,3,4].map(j => <td key={j} className="px-5 py-3"><Skeleton className="h-4 w-20" /></td>)}</tr>
@@ -125,9 +126,9 @@ function SandboxSection() {
               <tr><td colSpan={4} className="px-5 py-6 text-sm text-muted-foreground text-center">{t('sandboxes.empty')}</td></tr>
             ) : (
               recent.map(s => (
-                <tr key={s.sandboxID} className="hover:bg-white/[0.02] transition-colors">
+                <tr key={s.sandboxID} className="hover:bg-muted/30 transition-colors">
                   <td className="px-5 py-3">
-                    <Link to={`/sandboxes/${s.sandboxID}`} className="inline-flex items-center gap-1.5 font-mono text-xs text-foreground/80 hover:text-cube-cyan transition-colors">
+                    <Link to={`/sandboxes/${s.sandboxID}`} className="inline-flex items-center gap-1.5 font-mono text-xs text-foreground/80 hover:text-primary transition-colors">
                       {s.sandboxID.slice(0, 8)}…<ExternalLink size={10} className="opacity-50" />
                     </Link>
                   </td>
@@ -168,7 +169,7 @@ function NodeSection() {
       <div className="grid grid-cols-2 gap-3 mb-5">
         {isLoading ? (
           Array.from({ length: 2 }).map((_, i) => (
-            <div key={i} className="rounded-xl border border-white/8 bg-white/[0.03] px-5 py-4">
+            <div key={i} className="rounded-xl border border-border/60 bg-card/40 px-5 py-4">
               <Skeleton className="h-3 w-16 mb-2" /><Skeleton className="h-8 w-10" />
             </div>
           ))
@@ -184,21 +185,21 @@ function NodeSection() {
       <div className="space-y-3">
         {isLoading ? (
           Array.from({ length: 2 }).map((_, i) => (
-            <div key={i} className="rounded-xl border border-white/8 bg-white/[0.03] px-5 py-4">
+            <div key={i} className="rounded-xl border border-border/60 bg-card/40 px-5 py-4">
               <Skeleton className="h-4 w-32 mb-3" />
               <Skeleton className="h-2 w-full mb-2" />
               <Skeleton className="h-2 w-full" />
             </div>
           ))
         ) : !nodes || nodes.length === 0 ? (
-          <div className="rounded-xl border border-white/8 bg-white/[0.03] px-5 py-6 text-sm text-muted-foreground text-center">{t('nodes.empty')}</div>
+          <div className="rounded-xl border border-border/60 bg-card/40 px-5 py-6 text-sm text-muted-foreground text-center">{t('nodes.empty')}</div>
         ) : (
           nodes.map(node => (
-            <div key={node.nodeID} className={cn('rounded-xl border bg-white/[0.03] px-5 py-4', node.healthy ? 'border-white/8' : 'border-cube-rose/30 bg-cube-rose/[0.03]')}>
+            <div key={node.nodeID} className={cn('rounded-xl border bg-card/40 px-5 py-4', node.healthy ? 'border-border/60' : 'border-cube-rose/30 bg-cube-rose/[0.04]')}>
               <div className="flex items-center justify-between mb-4">
-                <Link to={`/nodes/${node.nodeID}`} className="inline-flex items-center gap-2 hover:text-cube-cyan transition-colors">
+                <Link to={`/nodes/${node.nodeID}`} className="inline-flex items-center gap-2 hover:text-primary transition-colors">
                   <span className={cn('h-2 w-2 rounded-full', node.healthy ? 'bg-cube-emerald animate-pulse' : 'bg-cube-rose')} />
-                  <span className="font-mono text-sm text-foreground/80">{node.address ?? node.nodeID}</span>
+                  <span className="text-sm text-foreground/90 text-num">{node.address ?? node.nodeID}</span>
                   <ExternalLink size={11} className="opacity-40" />
                 </Link>
                 <span className={cn('text-xs font-medium', node.healthy ? 'text-cube-emerald' : 'text-cube-rose')}>
@@ -210,9 +211,9 @@ function NodeSection() {
                 <div>
                   <div className="flex justify-between text-xs text-muted-foreground mb-1">
                     <span>{t('nodes.cpu')}</span>
-                    <span>{node.saturationPct}%</span>
+                    <span className="text-num">{node.saturationPct}%</span>
                   </div>
-                  <div className="h-1.5 w-full rounded-full bg-white/[0.06] overflow-hidden">
+                  <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
                     <div
                       className={cn('h-full rounded-full transition-all', node.saturationPct > 80 ? 'bg-cube-rose' : node.saturationPct > 60 ? 'bg-cube-amber' : 'bg-cube-cyan')}
                       style={{ width: `${node.saturationPct}%` }}
@@ -223,9 +224,9 @@ function NodeSection() {
                 <div>
                   <div className="flex justify-between text-xs text-muted-foreground mb-1">
                     <span>{t('nodes.memory')}</span>
-                    <span>{node.memorySaturationPct}%</span>
+                    <span className="text-num">{node.memorySaturationPct}%</span>
                   </div>
-                  <div className="h-1.5 w-full rounded-full bg-white/[0.06] overflow-hidden">
+                  <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
                     <div
                       className={cn('h-full rounded-full transition-all', node.memorySaturationPct > 80 ? 'bg-cube-rose' : node.memorySaturationPct > 60 ? 'bg-cube-amber' : 'bg-cube-violet')}
                       style={{ width: `${node.memorySaturationPct}%` }}
@@ -267,14 +268,14 @@ function ApiSection() {
   return (
     <div>
       <SectionHeader icon={Gauge} title={t('api.title')} desc={t('api.desc')} />
-      <div className="rounded-xl border border-white/8 bg-white/[0.03] px-5 py-1 mb-3">
+      <div className="rounded-xl border border-border/60 bg-card/40 px-5 py-1 mb-3">
         {isLoading ? (
           <div className="space-y-3 py-3">{[1,2].map(i => <Skeleton key={i} className="h-4 w-full" />)}</div>
         ) : (
           <>
-            <div className="flex items-center justify-between py-2.5 border-b border-white/5">
+            <div className="flex items-center justify-between py-2.5 border-b border-border/40">
               <span className="text-sm text-muted-foreground">{t('api.rateLimit')}</span>
-              <span className="font-mono text-sm">{cfg?.rateLimitPerSec ?? '—'} req/s</span>
+              <MetricValue value={cfg?.rateLimitPerSec ?? '—'} unit="req/s" />
             </div>
             <div className="flex items-center justify-between py-2.5">
               <span className="text-sm text-muted-foreground">{t('api.auth')}</span>
@@ -293,7 +294,7 @@ function ApiSection() {
         <button
           onClick={handleTest}
           disabled={testing}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-sm text-muted-foreground hover:border-primary/30 hover:text-foreground transition-colors disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/40 px-3 py-2 text-sm text-muted-foreground hover:border-primary/30 hover:text-foreground transition-colors disabled:opacity-50"
         >
           {testing ? <Loader2 size={13} className="animate-spin" /> : <Wifi size={13} />}
           {testing ? t('api.testing') : t('api.test')}
@@ -304,7 +305,7 @@ function ApiSection() {
             result.ok ? 'border-cube-emerald/20 bg-cube-emerald/[0.06] text-cube-emerald' : 'border-cube-rose/20 bg-cube-rose/[0.06] text-cube-rose'
           )}>
             {result.ok
-              ? <><Wifi size={13} />{t('api.connected')} · {result.latency}ms</>
+              ? <><Wifi size={13} />{t('api.connected')} · <span className="text-num">{result.latency}ms</span></>
               : <><WifiOff size={13} />{result.msg}</>}
           </div>
         )}
@@ -339,16 +340,16 @@ function TemplateSection() {
         ) : (
           <>
             <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-emerald/20 bg-cube-emerald/[0.08] px-3 py-1 text-xs font-medium text-cube-emerald">
-              <CheckCircle2 size={11} />{t('templates.ready')} · {ready}
+              <CheckCircle2 size={11} />{t('templates.ready')} · <span className="text-num">{ready}</span>
             </span>
             {building > 0 && (
               <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-amber/20 bg-cube-amber/[0.08] px-3 py-1 text-xs font-medium text-cube-amber">
-                <Loader2 size={11} className="animate-spin" />{t('templates.building')} · {building}
+                <Loader2 size={11} className="animate-spin" />{t('templates.building')} · <span className="text-num">{building}</span>
               </span>
             )}
             {failed.length > 0 && (
               <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-rose/20 bg-cube-rose/[0.08] px-3 py-1 text-xs font-medium text-cube-rose">
-                <AlertTriangle size={11} />{t('templates.failed')} · {failed.length}
+                <AlertTriangle size={11} />{t('templates.failed')} · <span className="text-num">{failed.length}</span>
               </span>
             )}
           </>
@@ -356,9 +357,9 @@ function TemplateSection() {
       </div>
 
       {/* Failed templates */}
-      <div className="rounded-xl border border-white/8 bg-white/[0.03] overflow-x-auto">
-        <div className="px-5 py-3 border-b border-white/6">
-          <p className="text-xs text-muted-foreground uppercase tracking-widest">{t('templates.failedList')}</p>
+      <div className="rounded-xl border border-border/60 bg-card/40 overflow-x-auto">
+        <div className="px-5 py-3 border-b border-border/40">
+          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium">{t('templates.failedList')}</p>
         </div>
         {isLoading ? (
           <div className="px-5 py-4 space-y-2">{[1,2].map(i => <Skeleton key={i} className="h-4 w-full" />)}</div>
@@ -369,24 +370,24 @@ function TemplateSection() {
         ) : (
           <table className="w-full text-sm" style={{ minWidth: '560px' }}>
             <thead>
-              <tr className="border-b border-white/6">
+              <tr className="border-b border-border/40">
                 {[t('templates.colId'), t('templates.colStatus'), t('templates.colVersion'), t('templates.colError')].map(h => (
-                  <th key={h} className="px-5 py-2.5 text-left text-xs uppercase tracking-widest text-muted-foreground/60 font-medium">{h}</th>
+                  <th key={h} className="tbl-th py-2.5">{h}</th>
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-white/5">
+            <tbody className="divide-y divide-border/30">
               {failed.map(tpl => (
-                <tr key={tpl.templateID} className="hover:bg-white/[0.02] transition-colors">
+                <tr key={tpl.templateID} className="hover:bg-muted/30 transition-colors">
                   <td className="px-5 py-3">
-                    <Link to={`/templates/${tpl.templateID}`} className="inline-flex items-center gap-1.5 font-mono text-xs text-foreground/80 hover:text-cube-cyan transition-colors">
+                    <Link to={`/templates/${tpl.templateID}`} className="inline-flex items-center gap-1.5 font-mono text-xs text-foreground/80 hover:text-primary transition-colors">
                       {tpl.templateID}<ExternalLink size={10} className="opacity-50" />
                     </Link>
                   </td>
                   <td className="px-5 py-3">
                     <span className="text-xs font-medium text-cube-rose">{tpl.status}</span>
                   </td>
-                  <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{tpl.version ?? '—'}</td>
+                  <td className="px-5 py-3 text-xs text-muted-foreground text-num">{tpl.version ?? '—'}</td>
                   <td className="px-5 py-3 text-xs text-cube-rose/80 max-w-xs truncate">{tpl.lastError ?? '—'}</td>
                 </tr>
               ))}

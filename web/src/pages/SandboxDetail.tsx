@@ -134,10 +134,10 @@ export default function SandboxDetailPage() {
             <dl className="grid grid-cols-2 gap-3 text-sm">
               <Field label={t('fields.vcpu')} value={`${data?.cpuCount ?? '—'}`} />
               <Field label={t('fields.memory')} value={formatBytes(data?.memoryMB)} />
-              <Field label={t('fields.client')} value={data?.clientID ?? '—'} mono />
+              <Field label={t('fields.client')} value={data?.clientID ?? '—'} />
               <Field label={t('fields.alias')} value={data?.alias ?? '—'} />
               <Field label={t('fields.started')} value={formatRelative(data?.startedAt)} />
-              <Field label={t('fields.domain')} value={data?.domain ?? '—'} mono />
+              <Field label={t('fields.domain')} value={data?.domain ?? '—'} />
             </dl>
           )}
         </Card>
@@ -210,7 +210,7 @@ export default function SandboxDetailPage() {
         </CardHeader>
         <pre
           ref={logRef}
-          className="max-h-[400px] overflow-auto rounded-md bg-muted/60 p-3 font-mono text-[11px] leading-relaxed ring-1 ring-border/60"
+          className="max-h-[400px] overflow-auto rounded-md bg-muted/60 p-3 font-mono text-xs leading-relaxed ring-1 ring-border/60"
         >
           {logs.isLoading ? (
             <span className="text-muted-foreground">{t('logsLoading')}</span>
@@ -254,7 +254,7 @@ function formatDateTime(value?: string | null): string {
 function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
     <div>
-      <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</dt>
+      <dt className="text-xs uppercase tracking-wider text-muted-foreground">{label}</dt>
       <dd className={mono ? 'mt-0.5 truncate font-mono text-xs' : 'mt-0.5 truncate'}>{value}</dd>
     </div>
   );
