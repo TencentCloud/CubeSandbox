@@ -49,14 +49,15 @@ endif
 ##VAR BUILD_TYPE=release|debug type of rust build
 BUILD_TYPE = release
 
-##VAR MUSL=yes|no build a fully static x86_64-unknown-linux-musl binary
+##VAR MUSL=yes|no build a fully static native musl binary
 MUSL := yes
+HOST_ARCH := $(shell uname -m | sed 's/^arm64$$/aarch64/')
 
 EXTRA_RUSTFLAGS :=
 CARGO_TARGET_FLAG :=
 
 ifeq ($(MUSL),yes)
-    TRIPLE = x86_64-unknown-linux-musl
+    TRIPLE ?= $(HOST_ARCH)-unknown-linux-musl
     CARGO_TARGET_FLAG := --target $(TRIPLE)
     # +crt-static: statically link libc/crt
     # -lpthread: required by libunwind in musl builds (pthread_rwlock_*)
