@@ -1,0 +1,37 @@
+name: Docs Build Check
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs-build-check.yml'
+
+concurrency:
+  group: docs-build-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-check:
+    name: Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: docs
+
+      - name: Build with VitePress
+        run: npm run docs:build
+        working-directory: docs
