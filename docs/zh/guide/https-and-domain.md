@@ -56,6 +56,39 @@ export CUBE_API_SANDBOX_DOMAIN=your.domain.com
 
 ---
 
+## 路径式快速访问（免 DNS / 免证书）
+
+除 Host 模式外，CubeProxy 还支持通过 URL **路径**路由到沙箱，适用于本地 Demo、内网临时分享，以及不便配置泛解析 DNS 和 TLS 证书的场景。
+
+```
+http://<cube-proxy-host>:<http-port>/sandbox/<sandbox-id>/<container-port>/<剩余路径>?<query>
+```
+
+例如，沙箱 `abc123` 暴露了 `49999` 端口，CubeProxy 部署在 `10.0.0.5:80`：
+
+```
+http://10.0.0.5/sandbox/abc123/49999/
+http://10.0.0.5/sandbox/abc123/49999/health
+http://10.0.0.5/sandbox/abc123/49999/api/v1/items?limit=10
+```
+
+CubeProxy 会在转发时剥离 `/sandbox/<id>/<port>` 前缀，沙箱内的应用看到的 URI 与从根路径直接访问相同。同一 location 内复用了原有的 `Upgrade` / `Connection` 头处理，因此 WebSocket 升级也照常工作。
+
+为方便应用与前缀协作，CubeProxy 额外会：
+
+- 在转发到上游的请求里附加 `X-Forwarded-Prefix: /sandbox/<id>/<port>`。
+- 改写响应中以根开头的 `Location` 头，把它重新放回 `/sandbox/<id>/<port>/...` 前缀下（比如上游返回 `Location: /login` 时仍能正确跳转）。
+- 把上游 Set-Cookie 中的 `Path=/` 限定到 `Path=/sandbox/<id>/<port>/`，避免与同一 CubeProxy 上其他沙箱的 cookie 相互影响。
+
+两种模式如何选择：
+
+- **Host 模式**（`<port>-<id>.<domain>`）：更适合 SPA 以及任何用根绝对路径加载静态资源（如 `/static/app.js`）的前端，CubeProxy 不会改写 HTML body，使用 Host 模式可以避免这类引用被前缀拦腰打断。
+- **路径模式**（`/sandbox/<id>/<port>/...`）：更适合 HTTP API、简单页面、快速预览和一次性分享，省去 DNS 和证书配置的成本。
+
+两种模式在每个 CubeProxy 实例上同时启用，共享同一份 Redis 路由元数据，无需额外配置即可使用路径形式。
+
+---
+
 ## HTTPS 证书配置
 
 CubeProxy 开箱提供 **HTTPS（443 端口）和 HTTP（80 端口）** 两种访问方式。E2B SDK 默认使用 HTTPS。Cube 一键安装已预装 `cube.app` 测试证书，可直接体验 HTTPS。
