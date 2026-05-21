@@ -22,6 +22,8 @@ MYSQL_DB="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
 MYSQL_USER="${CUBE_SANDBOX_MYSQL_USER:-cube}"
 MYSQL_PASSWORD="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
 MYSQL_ROOT_PASSWORD="${CUBE_SANDBOX_MYSQL_ROOT_PASSWORD:-cube_root}"
+MYSQL_IMAGE="${CUBE_SANDBOX_MYSQL_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/mysql:8.0}"
+REDIS_IMAGE="${CUBE_SANDBOX_REDIS_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/redis:7-alpine}"
 SQL_DIR="${TOOLBOX_ROOT}/sql"
 SUPPORT_DIR="${TOOLBOX_ROOT}/support"
 SUPPORT_TEMPLATE="${SUPPORT_DIR}/docker-compose.yaml.template"
@@ -47,6 +49,8 @@ sed \
   -e "s/__MYSQL_USER__/$(escape_sed "${MYSQL_USER}")/g" \
   -e "s/__MYSQL_PASSWORD__/$(escape_sed "${MYSQL_PASSWORD}")/g" \
   -e "s/__MYSQL_ROOT_PASSWORD__/$(escape_sed "${MYSQL_ROOT_PASSWORD}")/g" \
+  -e "s#__MYSQL_IMAGE__#$(escape_sed "${MYSQL_IMAGE}")#g" \
+  -e "s#__REDIS_IMAGE__#$(escape_sed "${REDIS_IMAGE}")#g" \
   -e "s#__SQL_DIR__#$(escape_sed "${SQL_DIR}")#g" \
   "${SUPPORT_TEMPLATE}" > "${SUPPORT_COMPOSE_FILE}"
 

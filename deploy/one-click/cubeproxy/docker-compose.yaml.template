@@ -5,6 +5,8 @@ services:
     build:
       context: __CUBE_PROXY_BUILD_CONTEXT__
       dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: __CUBE_PROXY_BASE_IMAGE__
     restart: unless-stopped
     ports:
       - "__CUBE_PROXY_HOST_PORT__:8080"

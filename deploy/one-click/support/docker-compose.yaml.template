@@ -1,6 +1,6 @@
 services:
   mysql:
-    image: cube-sandbox-image.tencentcloudcr.com/opensource/mysql:8.0
+    image: __MYSQL_IMAGE__
     container_name: __MYSQL_CONTAINER__
     restart: unless-stopped
     environment:
@@ -27,7 +27,7 @@ services:
       - __SQL_DIR__:/docker-entrypoint-initdb.d:ro
 
   redis:
-    image: cube-sandbox-image.tencentcloudcr.com/opensource/redis:7-alpine
+    image: __REDIS_IMAGE__
     container_name: __REDIS_CONTAINER__
     restart: unless-stopped
     command:
