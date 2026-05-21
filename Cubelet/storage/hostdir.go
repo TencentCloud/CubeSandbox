@@ -6,12 +6,14 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"golang.org/x/sys/unix"
 )
@@ -94,21 +96,46 @@ func (l *local) prepareHostDirVolume(ctx context.Context, opts *workflow.CreateC
 	return nil
 }
 
-func (l *local) cleanupHostDirVolumes(ctx context.Context, sandboxID string) {
-	sandboxDir := filepath.Join(hostDirBasePath, sandboxID)
-	if _, err := os.Stat(sandboxDir); os.IsNotExist(err) {
-		return
+func (l *local) cleanupHostDirVolumes(ctx context.Context, info *StorageInfo) error {
+	if info == nil || info.SandboxID == "" || len(info.HostDirBackendInfos) == 0 {
+		return nil
 	}
-	_ = filepath.WalkDir(sandboxDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || !d.IsDir() || path == sandboxDir {
+
+	sandboxDir := filepath.Join(hostDirBasePath, info.SandboxID)
+	if _, err := os.Stat(sandboxDir); os.IsNotExist(err) {
+		return nil
+	}
+
+	if err := filepath.WalkDir(sandboxDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() || path == sandboxDir {
 			return nil
 		}
-		if umErr := unix.Unmount(path, unix.MNT_DETACH); umErr != nil {
-			log.G(ctx).Warnf("cleanupHostDirVolumes: unmount %s: %v", path, umErr)
+		mounted, err := utils.IsMountPoint(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("check mount point %s: %w", path, err)
+		}
+		if mounted {
+			if err := unix.Unmount(path, unix.MNT_DETACH); err != nil &&
+				!errors.Is(err, unix.EINVAL) && !os.IsNotExist(err) {
+				return fmt.Errorf("unmount %s: %w", path, err)
+			}
+			return filepath.SkipDir
 		}
 		return nil
-	})
+	}); err != nil {
+		log.G(ctx).Warnf("cleanupHostDirVolumes: skip removeAll %s: %v", sandboxDir, err)
+		return err
+	}
+
 	if err := os.RemoveAll(sandboxDir); err != nil {
 		log.G(ctx).Warnf("cleanupHostDirVolumes: removeAll %s: %v", sandboxDir, err)
+		return err
 	}
+	return nil
 }
