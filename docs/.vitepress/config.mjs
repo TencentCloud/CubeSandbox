@@ -6,8 +6,13 @@ export default withMermaid(defineConfig({
   description: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents",
   srcExclude: ['**/_template.md'],
   
+  head: [
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }]
+  ],
+  
   themeConfig: {
     outline: { level: [1, 3] },
+    logo: '/logo.svg',
     socialLinks: [
       { icon: 'github', link: 'https://github.com/tencentcloud/CubeSandbox' }
     ],
