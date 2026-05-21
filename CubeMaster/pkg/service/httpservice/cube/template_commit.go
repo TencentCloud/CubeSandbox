@@ -60,6 +60,15 @@ func handleSandboxCommitAction(w http.ResponseWriter, r *http.Request, rt *CubeL
 			}},
 		}
 	}
+	if strings.TrimSpace(req.RequestID) == "" {
+		return &commitTemplateResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  "requestID is required for commit; retry should generate a new request id",
+			}},
+			TemplateID: req.TemplateID,
+		}
+	}
 	if req.CreateRequest.Request == nil {
 		req.CreateRequest.Request = &types.Request{RequestID: req.RequestID}
 	}

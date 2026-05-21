@@ -51,6 +51,8 @@ const (
 
 	JobOperationCreate = "CREATE"
 	JobOperationRedo   = "REDO"
+	JobOperationCommit = "COMMIT"
+	JobOperationLegacy = "LEGACY"
 
 	RedoModeAll         = "ALL"
 	RedoModeNodes       = "NODES"
@@ -280,13 +282,16 @@ func migrateTemplateImageJobTable(client *gorm.DB, tableName string) error {
 
 func normalizeTemplateImageJobRequestIDs(client *gorm.DB, tableName string) error {
 	type requestBinding struct {
-		JobID     string
-		RequestID string
-		Operation string
+		JobID          string
+		RequestID      string
+		Operation      string
+		NodeID         string
+		SourceImageRef string
+		RetryOfJobID   string
 	}
 	var bindings []requestBinding
 	if err := client.Table(tableName).
-		Select("job_id, request_id, operation").
+		Select("job_id, request_id, operation, node_id, source_image_ref, retry_of_job_id").
 		Order("id asc").
 		Find(&bindings).Error; err != nil {
 		return err
@@ -299,21 +304,50 @@ func normalizeTemplateImageJobRequestIDs(client *gorm.DB, tableName string) erro
 		}
 		requestID := strings.TrimSpace(binding.RequestID)
 		operation := strings.TrimSpace(binding.Operation)
-		normalized := requestID
+		normalizedRequest := requestID
+		normalizedOperation := operation
 		switch {
-		case normalized == "":
-			normalized = legacyRequestIDPrefix + jobID
-		case hasSeenRequestBinding(seen, normalized, operation):
-			normalized = normalized + "#" + jobID
+		case normalizedRequest == "":
+			normalizedRequest = legacyRequestIDPrefix + jobID
+		case hasSeenRequestBinding(seen, normalizedRequest, normalizedOperation):
+			normalizedRequest = normalizedRequest + "#" + jobID
 		}
-		if normalized != requestID {
-			if err := client.Exec(`UPDATE `+tableName+` SET request_id = ? WHERE job_id = ?`, normalized, jobID).Error; err != nil {
+		if normalizedOperation == "" {
+			normalizedOperation = inferLegacyJobOperation(binding.NodeID, binding.SourceImageRef, binding.RetryOfJobID)
+		}
+		if normalizedRequest != requestID || normalizedOperation != operation {
+			if err := client.Exec(
+				`UPDATE `+tableName+` SET request_id = ?, operation = ? WHERE job_id = ?`,
+				normalizedRequest, normalizedOperation, jobID,
+			).Error; err != nil {
 				return err
 			}
 		}
-		seen[requestBindingKey(normalized, operation)] = struct{}{}
+		seen[requestBindingKey(normalizedRequest, normalizedOperation)] = struct{}{}
 	}
 	return nil
+}
+
+// inferLegacyJobOperation guesses the operation column for legacy rows that
+// pre-date the explicit Operation field. It mirrors the producer-side semantics:
+// commit jobs always carry a node assignment but no source image ref;
+// create-from-image jobs carry a source image ref without a retry_of_job_id.
+// Anything else is treated as a generic LEGACY entry so the unique
+// (request_id, operation) index can be created without conflicts.
+func inferLegacyJobOperation(nodeID, sourceImageRef, retryOfJobID string) string {
+	nodeID = strings.TrimSpace(nodeID)
+	sourceImageRef = strings.TrimSpace(sourceImageRef)
+	retryOfJobID = strings.TrimSpace(retryOfJobID)
+	switch {
+	case nodeID != "" && sourceImageRef == "":
+		return JobOperationCommit
+	case sourceImageRef != "" && retryOfJobID == "":
+		return JobOperationCreate
+	case sourceImageRef != "" && retryOfJobID != "":
+		return JobOperationRedo
+	default:
+		return JobOperationLegacy
+	}
 }
 
 func hasSeenRequestBinding(seen map[string]struct{}, requestID, operation string) bool {

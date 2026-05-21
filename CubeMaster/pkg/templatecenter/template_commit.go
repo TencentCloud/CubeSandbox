@@ -30,6 +30,10 @@ func SubmitTemplateCommit(ctx context.Context, sandboxID, nodeID, nodeIP string,
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
+	if req == nil || req.Request == nil || strings.TrimSpace(req.RequestID) == "" {
+		return nil, errors.New("requestID is required for commit; retry should generate a new request id")
+	}
+	requestID := strings.TrimSpace(req.RequestID)
 	createReq, templateID, err := NormalizeRequest(req)
 	if err != nil {
 		return nil, err
@@ -47,6 +51,19 @@ func SubmitTemplateCommit(ctx context.Context, sandboxID, nodeID, nodeIP string,
 	retryOfJobID := ""
 	reusedExistingJob := false
 	if err := withTemplateWriteLock(templateID, func() error {
+		// Idempotency: the same (request_id, COMMIT) tuple uniquely identifies a
+		// commit attempt. Reuse a prior job when payload matches; reject on drift.
+		if job, err := getTemplateImageJobByRequestOperation(ctx, requestID, JobOperationCommit); err == nil {
+			if job.RequestJSON == requestSnapshot {
+				jobID = job.JobID
+				reusedExistingJob = true
+				return nil
+			}
+			return fmt.Errorf("%w: request_id=%s already used with a different commit payload (job_id=%s)", ErrTemplateAttemptInProgress, requestID, job.JobID)
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
 		definitionFailed := false
 		if def, err := GetDefinition(ctx, templateID); err == nil {
 			if strings.EqualFold(def.Status, StatusFailed) {
@@ -86,28 +103,26 @@ func SubmitTemplateCommit(ctx context.Context, sandboxID, nodeID, nodeIP string,
 		}
 
 		if latestJob != nil {
-			attemptNo = latestJob.AttemptNo + 1
-			if attemptNo <= 1 {
-				attemptNo = 2
-			}
+			attemptNo = nextAttemptNoFromLatest(latestJob.AttemptNo)
 			retryOfJobID = latestJob.JobID
 		}
-		record := &models.TemplateImageJob{
-			JobID:                   jobID,
-			TemplateID:              templateID,
-			AttemptNo:               attemptNo,
-			RetryOfJobID:            retryOfJobID,
-			NodeID:                  nodeID,
-			NodeIP:                  nodeIP,
-			TemplateSpecFingerprint: buildCommitTemplateSpecFingerprint(storedReq),
-			InstanceType:            createReq.InstanceType,
-			NetworkType:             createReq.NetworkType,
-			Status:                  JobStatusPending,
-			Phase:                   JobPhaseSnapshotting,
-			Progress:                0,
-			RequestJSON:             requestSnapshot,
+		record := newCommitTemplateImageJobRecord(jobID, requestID, templateID, nodeID, nodeIP, storedReq, createReq, requestSnapshot, attemptNo, retryOfJobID)
+		if createErr := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error; createErr != nil {
+			// Concurrent writer may have inserted the same (request_id, COMMIT)
+			// tuple between our lookup and create. Fall back to idempotent reuse.
+			if isDuplicateKeyError(createErr) {
+				if job, lookupErr := getTemplateImageJobByRequestOperation(ctx, requestID, JobOperationCommit); lookupErr == nil {
+					if job.RequestJSON == requestSnapshot {
+						jobID = job.JobID
+						reusedExistingJob = true
+						return nil
+					}
+					return fmt.Errorf("%w: request_id=%s already used with a different commit payload (job_id=%s)", ErrTemplateAttemptInProgress, requestID, job.JobID)
+				}
+			}
+			return createErr
 		}
-		return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error
+		return nil
 	}); err != nil {
 		return nil, err
 	}
@@ -259,4 +274,52 @@ func max(a, b int32) int32 {
 		return a
 	}
 	return b
+}
+
+func newCommitTemplateImageJobRecord(
+	jobID, requestID, templateID, nodeID, nodeIP string,
+	storedReq, createReq *sandboxtypes.CreateCubeSandboxReq,
+	requestSnapshot string,
+	attemptNo int32,
+	retryOfJobID string,
+) *models.TemplateImageJob {
+	return &models.TemplateImageJob{
+		JobID:                   jobID,
+		TemplateID:              templateID,
+		RequestID:               requestID,
+		AttemptNo:               attemptNo,
+		RetryOfJobID:            retryOfJobID,
+		Operation:               JobOperationCommit,
+		NodeID:                  nodeID,
+		NodeIP:                  nodeIP,
+		TemplateSpecFingerprint: buildCommitTemplateSpecFingerprint(storedReq),
+		InstanceType:            createReq.InstanceType,
+		NetworkType:             createReq.NetworkType,
+		Status:                  JobStatusPending,
+		Phase:                   JobPhaseSnapshotting,
+		Progress:                0,
+		RequestJSON:             requestSnapshot,
+	}
+}
+
+func getTemplateImageJobByRequestOperation(ctx context.Context, requestID, operation string) (*models.TemplateImageJob, error) {
+	record := &models.TemplateImageJob{}
+	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("request_id = ? AND operation = ?", requestID, operation).
+		Order("id desc").First(record).Error
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+func isDuplicateKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Duplicate entry") || strings.Contains(msg, "1062")
 }
