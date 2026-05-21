@@ -1,17 +1,34 @@
 name: Claude Auto Review with Tracking
+
 on:
-  pull_request:
+  # IMPORTANT: pull_request_target makes secrets available to fork PRs.
+  # SECURITY RULE: never add steps that EXECUTE code from the PR
+  # (no npm install / make / cargo build / pre-commit / etc.).
+  # Claude only READS files (safe) and runs `gh pr *` via allowedTools.
+  pull_request_target:
     types: [opened, synchronize, reopened]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   review:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout PR head for review context
+        uses: actions/checkout@v6
+        with:
+          # Check out the PR's HEAD so Claude can read the post-change source
+          # for richer context. SAFE only because no step below executes it.
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Strip the GITHUB_TOKEN from .git/config so even an accidental
+          # git push from a future step cannot use base-repo write creds.
+          persist-credentials: false
 
       - name: Generate GitHub App token
         id: app-token
