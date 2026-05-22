@@ -10,7 +10,6 @@ import (
 	"expvar"
 	"fmt"
 	stdlog "log"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -51,7 +50,6 @@ func (a *App) Run() {
 	)
 	defer cancel()
 
-	rand.Seed(time.Now().UnixNano())
 
 	cfg := config.GetConfig()
 
