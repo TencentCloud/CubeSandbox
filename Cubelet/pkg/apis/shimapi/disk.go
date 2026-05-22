@@ -84,7 +84,7 @@ func (csc *cubeShimControl) DelDisk(ctx context.Context, serial string) error {
 		return fmt.Errorf("error marshaling request body: %v", err)
 	}
 	ipath := "vm.remove-device"
-	_, err = csc.chRequest(ctx, ipath, requestBody)
+	_, err = csc.chRequest(ctx, "remove-device", requestBody)
 	if err != nil {
 		return fmt.Errorf("error sending request to %s: %v", ipath, err)
 	}
@@ -93,9 +93,9 @@ func (csc *cubeShimControl) DelDisk(ctx context.Context, serial string) error {
 }
 
 func (csc *cubeShimControl) chRequest(ctx context.Context, path string, reqBody []byte) ([]byte, error) {
-	url := chAPIPrefix + "add-disk"
+	url := chAPIPrefix + path
 
-	hreq, err := http.NewRequest("PUT", url, bytes.NewBuffer(reqBody))
+	hreq, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("error creating request: %v", err)
 	}
@@ -104,7 +104,7 @@ func (csc *cubeShimControl) chRequest(ctx context.Context, path string, reqBody 
 	hreq.Header.Set("Content-Type", "application/json")
 
 	stepLog := log.G(ctx).WithFields(CubeLog.Fields{
-		"func":    "AddDisk",
+		"func":    path,
 		"reqBody": string(reqBody),
 		"chsock":  csc.getChSockPath(),
 		"url":     url,
