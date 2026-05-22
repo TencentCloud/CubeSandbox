@@ -34,15 +34,18 @@ func newCommitFixtureRequests() (*types.CreateCubeSandboxReq, *types.CreateCubeS
 
 func TestNewCommitTemplateImageJobRecordPersistsIdentityFields(t *testing.T) {
 	createReq, storedReq := newCommitFixtureRequests()
+	requestSnapshot, err := marshalTemplateCommitJobRequest(storedReq)
+	if err != nil {
+		t.Fatalf("marshalTemplateCommitJobRequest failed: %v", err)
+	}
 	record := newCommitTemplateImageJobRecord(
 		"job-commit-1",
 		"req-123",
 		"tpl-commit-1",
 		"node-a",
 		"10.0.0.1",
-		storedReq,
 		createReq,
-		`{"template_id":"tpl-commit-1"}`,
+		requestSnapshot,
 		2,
 		"job-prev",
 	)
@@ -60,6 +63,9 @@ func TestNewCommitTemplateImageJobRecordPersistsIdentityFields(t *testing.T) {
 	}
 	if record.TemplateSpecFingerprint == "" {
 		t.Fatal("TemplateSpecFingerprint should be populated for commit jobs")
+	}
+	if record.TemplateSpecFingerprint != buildCommitTemplateSpecFingerprintFromSnapshot(requestSnapshot) {
+		t.Fatalf("TemplateSpecFingerprint=%q, want fingerprint from request snapshot", record.TemplateSpecFingerprint)
 	}
 	if record.Status != JobStatusPending || record.Phase != JobPhaseSnapshotting {
 		t.Fatalf("unexpected initial state: status=%q phase=%q", record.Status, record.Phase)
@@ -149,15 +155,17 @@ func TestBuildCommitFailureMessageNeverEmpty(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		got := buildCommitFailureMessage(tc.rsp)
-		if got == "" {
-			t.Fatalf("%s: error_message must never be empty", tc.name)
-		}
-		for _, part := range tc.wantParts {
-			if !strings.Contains(got, part) {
-				t.Fatalf("%s: missing %q in %q", tc.name, part, got)
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildCommitFailureMessage(tc.rsp)
+			if got == "" {
+				t.Fatal("error_message must never be empty")
 			}
-		}
+			for _, part := range tc.wantParts {
+				if !strings.Contains(got, part) {
+					t.Fatalf("missing %q in %q", part, got)
+				}
+			}
+		})
 	}
 }
 

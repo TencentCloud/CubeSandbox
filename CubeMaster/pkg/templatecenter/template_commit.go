@@ -121,7 +121,7 @@ func SubmitTemplateCommit(ctx context.Context, sandboxID, nodeID, nodeIP string,
 			attemptNo = nextAttemptNoFromLatest(latestJob.AttemptNo)
 			retryOfJobID = latestJob.JobID
 		}
-		record := newCommitTemplateImageJobRecord(jobID, requestID, templateID, nodeID, nodeIP, storedReq, createReq, requestSnapshot, attemptNo, retryOfJobID)
+		record := newCommitTemplateImageJobRecord(jobID, requestID, templateID, nodeID, nodeIP, createReq, requestSnapshot, attemptNo, retryOfJobID)
 		if createErr := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error; createErr != nil {
 			// Concurrent writer may have inserted the same (request_id, COMMIT)
 			// tuple between our lookup and create. Fall back to idempotent reuse.
@@ -346,7 +346,7 @@ func buildCommitFailureMessage(commitRsp *cubeboxv1.CommitSandboxResponse) strin
 
 func newCommitTemplateImageJobRecord(
 	jobID, requestID, templateID, nodeID, nodeIP string,
-	storedReq, createReq *sandboxtypes.CreateCubeSandboxReq,
+	createReq *sandboxtypes.CreateCubeSandboxReq,
 	requestSnapshot string,
 	attemptNo int32,
 	retryOfJobID string,
@@ -360,7 +360,7 @@ func newCommitTemplateImageJobRecord(
 		Operation:               JobOperationCommit,
 		NodeID:                  nodeID,
 		NodeIP:                  nodeIP,
-		TemplateSpecFingerprint: buildCommitTemplateSpecFingerprint(storedReq),
+		TemplateSpecFingerprint: buildCommitTemplateSpecFingerprintFromSnapshot(requestSnapshot),
 		InstanceType:            createReq.InstanceType,
 		NetworkType:             createReq.NetworkType,
 		Status:                  JobStatusPending,

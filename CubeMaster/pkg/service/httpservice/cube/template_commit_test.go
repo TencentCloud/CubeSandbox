@@ -5,12 +5,14 @@
 package cube
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -55,4 +57,43 @@ func TestHandleSandboxCommitActionRejectsMissingFields(t *testing.T) {
 	}
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Res.Ret.RetCode)
 	assert.Contains(t, got.Res.Ret.RetMsg, "sandbox_id, template_id and create_request are required")
+}
+
+func TestCommitTemplateErrorCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{
+			name: "template id required is params error",
+			err:  templatecenter.ErrTemplateIDRequired,
+			want: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			name: "duplicate template is params error",
+			err:  templatecenter.ErrDuplicateTemplate,
+			want: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			name: "attempt in progress is params error",
+			err:  fmt.Errorf("commit conflict: %w", templatecenter.ErrTemplateAttemptInProgress),
+			want: int(errorcode.ErrorCode_MasterParamsError),
+		},
+		{
+			name: "store not initialized is db error",
+			err:  templatecenter.ErrTemplateStoreNotInitialized,
+			want: int(errorcode.ErrorCode_DBError),
+		},
+		{
+			name: "unknown error is internal error",
+			err:  fmt.Errorf("unexpected"),
+			want: int(errorcode.ErrorCode_MasterInternalError),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, commitTemplateErrorCode(tc.err))
+		})
+	}
 }

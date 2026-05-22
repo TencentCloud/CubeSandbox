@@ -127,13 +127,8 @@ func handleSandboxCommitAction(w http.ResponseWriter, r *http.Request, rt *CubeL
 	}))
 	job, err := templatecenter.SubmitTemplateCommit(ctx, req.SandboxID, hostID, hostIP, req.CreateRequest)
 	if err != nil {
-		code := int(errorcode.ErrorCode_MasterInternalError)
-		switch {
-		case errors.Is(err, templatecenter.ErrTemplateIDRequired), errors.Is(err, templatecenter.ErrDuplicateTemplate):
-			code = int(errorcode.ErrorCode_MasterParamsError)
-		case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):
-			code = int(errorcode.ErrorCode_DBError)
-		}
+		code := commitTemplateErrorCode(err)
+		rt.RetCode = int64(code)
 		return &commitTemplateResponse{
 			Res: &types.Res{
 				RequestID: req.RequestID,
@@ -151,6 +146,19 @@ func handleSandboxCommitAction(w http.ResponseWriter, r *http.Request, rt *CubeL
 		},
 		TemplateID: req.TemplateID,
 		BuildID:    job.JobID,
+	}
+}
+
+func commitTemplateErrorCode(err error) int {
+	switch {
+	case errors.Is(err, templatecenter.ErrTemplateIDRequired),
+		errors.Is(err, templatecenter.ErrDuplicateTemplate),
+		errors.Is(err, templatecenter.ErrTemplateAttemptInProgress):
+		return int(errorcode.ErrorCode_MasterParamsError)
+	case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):
+		return int(errorcode.ErrorCode_DBError)
+	default:
+		return int(errorcode.ErrorCode_MasterInternalError)
 	}
 }
 

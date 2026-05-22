@@ -81,6 +81,7 @@ var deleteRootfsArtifactRecord = func(ctx context.Context, artifactID string) er
 	return store.db.WithContext(ctx).Unscoped().Table(constants.RootfsArtifactTableName).
 		Where("artifact_id = ?", artifactID).Delete(&models.RootfsArtifact{}).Error
 }
+
 const legacyRequestIDPrefix = "legacy-"
 
 var ErrNoFailedTemplateReplicas = errors.New("no failed template replicas matched redo request")
@@ -1962,9 +1963,8 @@ func marshalTemplateCommitJobRequest(req *types.CreateCubeSandboxReq) (string, e
 	return string(payload), nil
 }
 
-func buildCommitTemplateSpecFingerprint(req *types.CreateCubeSandboxReq) string {
-	payload, _ := marshalTemplateCommitJobRequest(req)
-	sum := sha256.Sum256([]byte(payload))
+func buildCommitTemplateSpecFingerprintFromSnapshot(requestSnapshot string) string {
+	sum := sha256.Sum256([]byte(requestSnapshot))
 	return hex.EncodeToString(sum[:])
 }
 
