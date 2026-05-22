@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	errorcodev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"gorm.io/gorm"
@@ -101,6 +102,61 @@ func TestInferLegacyJobOperationCoversAllShapes(t *testing.T) {
 	for _, tc := range tests {
 		if got := inferLegacyJobOperation(tc.nodeID, tc.sourceImageRef, tc.retryOfJobID); got != tc.want {
 			t.Fatalf("%s: inferLegacyJobOperation()=%q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestBuildCommitFailureMessageNeverEmpty pins the regression that produced
+// FAILED jobs with empty error_message: when cubelet returned a non-success Ret
+// without filling RetMsg (or returned nil Ret entirely), the previous code path
+// stored "" in t_cube_template_image_job, defeating post-mortem.
+func TestBuildCommitFailureMessageNeverEmpty(t *testing.T) {
+	tests := []struct {
+		name      string
+		rsp       *cubeboxv1.CommitSandboxResponse
+		wantParts []string
+	}{
+		{
+			name:      "nil response",
+			rsp:       nil,
+			wantParts: []string{"commit sandbox failed", "nil response"},
+		},
+		{
+			name:      "nil Ret",
+			rsp:       &cubeboxv1.CommitSandboxResponse{},
+			wantParts: []string{"commit sandbox failed", "empty Ret"},
+		},
+		{
+			name: "non-success code with empty retMsg",
+			rsp: &cubeboxv1.CommitSandboxResponse{
+				Ret: &errorcodev1.Ret{RetCode: 500, RetMsg: ""},
+			},
+			wantParts: []string{"commit sandbox failed", "retCode=500", "empty retMsg"},
+		},
+		{
+			name: "non-success code with retMsg",
+			rsp: &cubeboxv1.CommitSandboxResponse{
+				Ret: &errorcodev1.Ret{RetCode: 500, RetMsg: "snapshot timed out"},
+			},
+			wantParts: []string{"commit sandbox failed", "retCode=500", "snapshot timed out"},
+		},
+		{
+			name: "non-success code with whitespace-only retMsg is treated as empty",
+			rsp: &cubeboxv1.CommitSandboxResponse{
+				Ret: &errorcodev1.Ret{RetCode: 130599, RetMsg: "   \t\n"},
+			},
+			wantParts: []string{"commit sandbox failed", "retCode=130599", "empty retMsg"},
+		},
+	}
+	for _, tc := range tests {
+		got := buildCommitFailureMessage(tc.rsp)
+		if got == "" {
+			t.Fatalf("%s: error_message must never be empty", tc.name)
+		}
+		for _, part := range tc.wantParts {
+			if !strings.Contains(got, part) {
+				t.Fatalf("%s: missing %q in %q", tc.name, part, got)
+			}
 		}
 	}
 }

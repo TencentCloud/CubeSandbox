@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
@@ -16,10 +18,23 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"gorm.io/gorm"
 )
+
+// commitSandboxRPCTimeout caps how long runTemplateCommitJob waits on the
+// cubelet CommitSandbox RPC. The detached background context has no deadline
+// of its own, so a hung cubelet would otherwise leave the job stuck in
+// SNAPSHOTTING forever. Typical successful snapshots complete in 5-15s; the
+// generous 5 minute ceiling accommodates large memory footprints while still
+// guaranteeing eventual failure resolution.
+const commitSandboxRPCTimeout = 5 * time.Minute
+
+// cleanupTemplateRPCTimeout bounds the best-effort cleanup RPC used when the
+// commit job rolls back after a partial success.
+const cleanupTemplateRPCTimeout = 1 * time.Minute
 
 const (
 	JobPhaseSnapshotting = "SNAPSHOTTING"
@@ -130,7 +145,14 @@ func SubmitTemplateCommit(ctx context.Context, sandboxID, nodeID, nodeIP string,
 		return GetTemplateImageJobInfo(ctx, jobID)
 	}
 
-	runTemplateCommitJob(detachTemplateImageJobContext(ctx, map[string]any{
+	// runTemplateCommitJob historically ran synchronously on the HTTP handler
+	// goroutine, which (a) blocked the caller for the full snapshot duration
+	// (≈10–30s for a 2C2000M sandbox) defeating the asynchronous build_id +
+	// poll contract introduced by PR #227, and (b) made any panic inside the
+	// job invisible to the response. Match the sibling SubmitTemplateImage()
+	// path: detach the context (so HTTP client disconnects do not cancel the
+	// background work) and dispatch onto a fresh goroutine.
+	go runTemplateCommitJob(detachTemplateImageJobContext(ctx, map[string]any{
 		"job_id":          jobID,
 		"template_id":     templateID,
 		"attempt_no":      attemptNo,
@@ -152,37 +174,55 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"node_id":     nodeID,
 		"node_ip":     nodeIP,
 	})
+	defer func() {
+		if r := recover(); r != nil {
+			stack := string(debug.Stack())
+			logger.Errorf("template commit job panic: %v\n%s", r, stack)
+			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+				"status":        JobStatusFailed,
+				"phase":         JobPhaseSnapshotting,
+				"progress":      100,
+				"error_message": fmt.Sprintf("template commit job panic: %v", r),
+			})
+		}
+	}()
 	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 		"status":   JobStatusRunning,
 		"phase":    JobPhaseSnapshotting,
 		"progress": 10,
 	})
 
-	commitRsp, err := cubelet.CommitSandbox(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CommitSandboxRequest{
+	commitCtx, commitCancel := context.WithTimeout(ctx, commitSandboxRPCTimeout)
+	commitRsp, err := cubelet.CommitSandbox(commitCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CommitSandboxRequest{
 		RequestID:   uuid.NewString(),
 		SandboxID:   sandboxID,
 		TemplateID:  templateID,
 		SnapshotDir: createReq.SnapshotDir,
 	})
+	commitCancel()
 	if err != nil {
+		errMsg := fmt.Sprintf("cubelet CommitSandbox transport error: %v", err)
+		logger.Errorf("%s", errMsg)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":        JobStatusFailed,
 			"phase":         JobPhaseSnapshotting,
 			"progress":      100,
-			"error_message": err.Error(),
+			"error_message": errMsg,
 		})
 		return
 	}
-	if commitRsp.GetRet() == nil || commitRsp.GetRet().GetRetCode() != 0 {
-		msg := "commit sandbox failed"
-		if commitRsp.GetRet() != nil {
-			msg = commitRsp.GetRet().GetRetMsg()
-		}
+	// Cubelet returns errorcode.ErrorCode_Success (=200) on success, not 0.
+	// All other call sites in CubeMaster compare against int(ErrorCode_Success);
+	// this site is the only one that historically wrote `!= 0`, which silently
+	// flipped every successful commit into a FAILED job with empty error_message.
+	if ret := commitRsp.GetRet(); ret == nil || int(ret.GetRetCode()) != int(errorcode.ErrorCode_Success) {
+		errMsg := buildCommitFailureMessage(commitRsp)
+		logger.Errorf("cubelet CommitSandbox returned non-success: %s snapshot_path=%q", errMsg, commitRsp.GetSnapshotPath())
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":        JobStatusFailed,
 			"phase":         JobPhaseSnapshotting,
 			"progress":      100,
-			"error_message": msg,
+			"error_message": errMsg,
 		})
 		return
 	}
@@ -198,12 +238,18 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 
 	definitionCreated := false
 	cleanupOnFailure := func(cause error) {
+		if cause == nil {
+			cause = errors.New("template commit job failed: unknown cause")
+		}
 		if snapshotPath != "" {
-			if _, cleanupErr := cubelet.CleanupTemplate(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
+			cleanupCtx, cleanupCancel := context.WithTimeout(ctx, cleanupTemplateRPCTimeout)
+			_, cleanupErr := cubelet.CleanupTemplate(cleanupCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
 				RequestID:    uuid.NewString(),
 				TemplateID:   templateID,
 				SnapshotPath: snapshotPath,
-			}); cleanupErr != nil {
+			})
+			cleanupCancel()
+			if cleanupErr != nil {
 				cause = errors.Join(cause, cleanupErr)
 			}
 		}
@@ -212,6 +258,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 				cause = errors.Join(cause, cleanupErr)
 			}
 		}
+		logger.Errorf("template commit job rolling back to FAILED: %v", cause)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseRegistering,
@@ -274,6 +321,27 @@ func max(a, b int32) int32 {
 		return a
 	}
 	return b
+}
+
+// buildCommitFailureMessage produces a never-empty error message for the failure
+// branch of runTemplateCommitJob. Cubelet's CommitSandbox sometimes returns a
+// non-success Ret with empty RetMsg; the previous implementation silently
+// overwrote the fallback message with that empty string and stored an empty
+// error_message in t_cube_template_image_job, making post-mortem impossible.
+func buildCommitFailureMessage(commitRsp *cubeboxv1.CommitSandboxResponse) string {
+	if commitRsp == nil {
+		return "commit sandbox failed: cubelet returned nil response"
+	}
+	ret := commitRsp.GetRet()
+	if ret == nil {
+		return "commit sandbox failed: cubelet returned empty Ret"
+	}
+	retCode := int(ret.GetRetCode())
+	retMsg := strings.TrimSpace(ret.GetRetMsg())
+	if retMsg == "" {
+		return fmt.Sprintf("commit sandbox failed: retCode=%d (empty retMsg)", retCode)
+	}
+	return fmt.Sprintf("commit sandbox failed: retCode=%d retMsg=%s", retCode, retMsg)
 }
 
 func newCommitTemplateImageJobRecord(
