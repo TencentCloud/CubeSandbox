@@ -7,12 +7,16 @@ The steps below guide you through provisioning a cloud server, enabling KVM via 
 ⚠️ Follow this guide step by step — you can be up and running with Cube Sandbox in just a few minutes!
 
 ::: tip Already have a server with KVM enabled?
-If you already have an x86_64 Linux server with KVM enabled (bare-metal or physical machine), skip to [Bare-Metal Deployment](./bare-metal-deploy.md) to install directly without PVM.
+If you already have a Linux server with KVM enabled (bare-metal, physical machine, or an aarch64 host with `/dev/kvm` exposed), skip to [Bare-Metal Deployment](./bare-metal-deploy.md) to install directly without PVM.
+:::
+
+::: tip aarch64 (arm64) users
+This Quick Start uses PVM, which is currently **x86_64 only**. If you are on an arm64 machine (e.g., HUAWEI Kunpeng 920), please follow [Bare-Metal Deployment](./bare-metal-deploy.md) — aarch64 has preliminary support and only requires `/dev/kvm`. Validated platforms so far: HUAWEI Kunpeng 920 only.
 :::
 
 ## Prerequisites
 
-- **x86_64** cloud server (any standard cloud VM works — `/dev/kvm` not required)
+- **x86_64** cloud server (any standard cloud VM works — `/dev/kvm` not required). aarch64 is currently **not** supported through this PVM-based path; use [Bare-Metal Deployment](./bare-metal-deploy.md) on aarch64 hosts instead.
 - **Root access**
 - Internet access (for downloading release packages and Docker images)
 

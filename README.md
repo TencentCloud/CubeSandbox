@@ -140,16 +140,17 @@ For detailed metrics on startup latency and resource overhead, please refer to:
 
 
 
-Cube Sandbox requires an x86_64 Linux environment with KVM support — **WSL 2**, a **Linux physical machine**, a **cloud bare-metal server**, or an **ordinary cloud VM** (via PVM, no bare-metal needed) all work.
+Cube Sandbox runs on Linux with KVM support — **WSL 2**, a **Linux physical machine**, a **cloud bare-metal server**, or an **ordinary cloud VM** (via PVM, no bare-metal needed) all work. **x86_64** is the primary, fully-supported architecture, and **aarch64 (arm64)** has preliminary support (also requires `/dev/kvm`).
 
 > Don't have one yet?
 > - **Windows users**: run `wsl --install` in an admin PowerShell to set up WSL 2 (requires Windows 11 22H2+, with nested virtualization enabled in BIOS / WSL).
-> - **Bare-metal / physical machine users**: grab an x86_64 Linux physical machine, or rent a bare-metal server from a cloud provider.
-> - **Ordinary cloud VM users**: no bare-metal required — install the PVM host kernel to enable KVM on any standard cloud VM. See [PVM Deployment](./docs/guide/pvm-deploy.md).
+> - **Bare-metal / physical machine users**: grab an x86_64 or aarch64 Linux physical machine, or rent a bare-metal server from a cloud provider.
+> - **Ordinary cloud VM users**: no bare-metal required — install the PVM host kernel to enable KVM on any standard cloud VM. See [PVM Deployment](./docs/guide/pvm-deploy.md). (PVM is x86_64-only for now.)
+> - **aarch64 users**: pick arm64-flavored container images and pull the matching arm64 sandbox images. See [Bare-Metal Deployment — aarch64 notes](./docs/guide/bare-metal-deploy.md#aarch64-arm64-notes) for the recommended `.env` overrides.
 
 Once your environment is ready, launch your first sandbox in four steps:
 
-1. **Prepare the runtime environment** (skip this step if you already have an x86_64 Linux server with KVM enabled — bare-metal or a cloud VM set up via [PVM](./docs/guide/pvm-deploy.md))
+1. **Prepare the runtime environment** (skip this step if you already have a Linux server with KVM enabled — bare-metal, an aarch64 host, or a cloud VM set up via [PVM](./docs/guide/pvm-deploy.md))
 
 Run the following on your WSL / Linux machine:
 

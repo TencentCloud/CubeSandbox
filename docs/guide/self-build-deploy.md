@@ -16,9 +16,13 @@ After deployment, you will have a fully functional Cube Sandbox instance with:
 ### Hardware
 
 - **Physical machine or bare-metal server** (nested virtualization is not supported)
-- **x86_64** architecture
+- CPU architecture: **x86_64** (primary), or **aarch64** (initial support, see note below)
 - **KVM enabled** — verify with `ls /dev/kvm`
 - Recommended: 8+ CPU cores, 16+ GB RAM
+
+::: tip aarch64 / arm64 support (initial)
+In addition to x86_64, Cube Sandbox now has initial support for the aarch64 architecture (still requires `/dev/kvm`). When running on an arm64 host, make sure to override the support-service container images in `.env` to arm64-compatible tags. See [Bare-Metal Deployment — Initial aarch64 Support](./bare-metal-deploy.md#initial-aarch64--arm64-support) for the full image override snippet, the list of validated machines, and the current capability gaps (e.g. **PVM is not supported on aarch64 and there are no plans for it**).
+:::
 
 ### Software (Target Machine)
 

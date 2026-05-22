@@ -135,12 +135,13 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 
 --- 
 
-Cube Sandbox 需要一台支持 KVM 的 x86_64 Linux 环境，**WSL 2 / Linux 物理机 / 云上裸金属 / 普通云服务器（通过 PVM）**均可。
+Cube Sandbox 运行在支持 KVM 的 Linux 环境上，**WSL 2 / Linux 物理机 / 云上裸金属 / 普通云服务器（通过 PVM）**均可。**x86_64** 为主推、完整支持的架构，**aarch64（arm64）** 已具备初步支持（同样需要 `/dev/kvm`）。
 
 > 还没有这样的环境？
 > - **Windows 用户**：在管理员 PowerShell 里执行 `wsl --install` 安装 WSL 2（需 Windows 11 22H2+，并在 BIOS / WSL 里开启嵌套虚拟化）。
-> - **物理机 / 裸金属用户**：准备一台 x86_64 Linux 物理机，或在云厂商购买一台裸金属服务器。
-> - **普通云服务器用户**：无需裸金属 —— 安装 PVM 宿主机内核即可在普通云服务器上启用 KVM 能力，详见 [PVM 部署](./docs/zh/guide/pvm-deploy.md)。
+> - **物理机 / 裸金属用户**：准备一台 x86_64 或 aarch64 Linux 物理机，或在云厂商购买一台裸金属服务器。
+> - **普通云服务器用户**：无需裸金属 —— 安装 PVM 宿主机内核即可在普通云服务器上启用 KVM 能力，详见 [PVM 部署](./docs/zh/guide/pvm-deploy.md)。（PVM 目前仅支持 x86_64。）
+> - **aarch64 用户**：请使用 arm64 架构的容器镜像，并拉取匹配的 arm64 沙箱镜像。可参考[裸金属部署 — aarch64 注意事项](./docs/zh/guide/bare-metal-deploy.md#aarch64arm64-注意事项)中的 `.env` 覆盖示例。
 
 准备好环境后，四步启动你的第一个沙箱：
 

@@ -1,17 +1,44 @@
 # 裸金属 / 物理机部署
 
-> **适用场景：** 已有支持 KVM 的 x86_64 Linux 机器（`/dev/kvm` 可用），例如物理机、裸金属服务器、或已开启嵌套虚拟化的云服务器。
+> **适用场景：** 已有支持 KVM 的 x86_64 或 aarch64 Linux 机器（`/dev/kvm` 可用），例如物理机、裸金属服务器、或已开启嵌套虚拟化的云服务器。
 >
-> 如果你用的是**普通云服务器**（`/dev/kvm` 不可用），无需裸金属 —— 通过 PVM 即可在普通云服务器上启用 KVM，请参阅[快速开始](./quickstart.md)。
+> 如果你用的是**普通云服务器**（`/dev/kvm` 不可用），无需裸金属 —— 通过 PVM 即可在普通云服务器上启用 KVM，请参阅[快速开始](./quickstart.md)。注意：PVM 仅在 x86_64 上可用；aarch64 必须使用原生暴露 `/dev/kvm` 的宿主机。
 
 ## 前置条件
 
-- **x86_64** 架构的 Linux 机器
+- **x86_64** 或 **aarch64** 架构的 Linux 机器（参见下方 [aarch64 注意事项](#aarch64-注意事项)）
 - `/dev/kvm` 存在且可读写（`ls -la /dev/kvm`）
 - 有 **root 权限**
 - **Docker** 已安装并正常运行
 - 可访问互联网（用于下载发布包、拉取 Docker 镜像）
 - 内存 ≥ 8 GB，磁盘空余 ≥ 50 GB
+
+### aarch64 注意事项
+
+Cube Sandbox 已提供 **aarch64 初步支持**。运行时仍然要求宿主机上有 `/dev/kvm`（不能通过 PVM 替代），并且需要将支撑组件的容器镜像替换为多架构标签，以便自动拉取 arm64 镜像。
+
+在使用 cube-sandbox-one-click 的 `install.sh` 之前，先把下述变量追加到 `.env`：
+
+```bash
+cat <<EOF >> .env
+CUBE_SANDBOX_MYSQL_IMAGE="mysql:8.0"
+CUBE_SANDBOX_REDIS_IMAGE="redis:7-alpine"
+CUBE_PROXY_COREDNS_IMAGE="coredns/coredns:1.14.2"
+WEB_UI_IMAGE="openresty/openresty:1.21.4.1-6-alpine-fat"
+EOF
+```
+
+`env.example` 中的默认标签指向 `cube-sandbox-image.tencentcloudcr.com/opensource/...` 镜像源，目前仅提供 x86_64 manifest。上面这些 Docker Hub 上游标签是多架构 manifest，会自动解析为正确的 arm64 镜像。
+
+**已覆盖的 aarch64 测试机器：**
+
+- HUAWEI 鲲鹏 920（裸金属 Linux）
+
+> 目前 aarch64 测试只覆盖 HUAWEI 鲲鹏 920。其他 arm64 平台（包括其他云厂商的 Arm 裸金属、Apple Silicon 通过 [lima-vm](https://lima-vm.io/) 等嵌套虚拟化方案）原则上同样可用，但尚未经过官方测试，欢迎反馈。
+
+**aarch64 上已知的能力差异：**
+
+- **不支持 PVM。** PVM（基于页表的虚拟机）是 x86_64 专属能力，目前**没有移植到 aarch64 的计划**。aarch64 必须运行在原生暴露 `/dev/kvm` 的宿主机上（裸金属 Arm 服务器、Arm 云裸金属，或任何已将 ARM 虚拟化扩展透出到内核的嵌套虚拟化环境）。
 
 ::: warning 以 root 身份执行所有操作
 本文档中的所有命令均需在 **root** 用户下执行。请先切换到 root：

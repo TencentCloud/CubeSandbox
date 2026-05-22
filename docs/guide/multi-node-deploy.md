@@ -33,9 +33,13 @@ You must have a working control node deployed via the [Self-Build Deployment Gui
 Each compute node must meet the same hardware and software requirements as the control node:
 
 - **Physical machine or bare-metal server** (nested virtualization is not supported)
-- **x86_64** architecture with **KVM enabled** (`ls /dev/kvm`)
+- **x86_64** or **aarch64** architecture with **KVM enabled** (`ls /dev/kvm`)
 - **Docker** installed and running
 - **Network connectivity** to the control node (specifically to `CubeMaster` on port `8089` by default)
+
+::: tip All nodes must share the same CPU architecture
+A single Cube Sandbox cluster cannot mix x86_64 and aarch64 nodes — the guest kernel and `vmlinux` shipped in the release bundle are arch-specific. Build and roll out a separate release bundle per architecture if you need clusters on both. On aarch64 control + compute nodes, also override the support service container images via `.env` to use arm64-compatible tags (see [Bare-Metal / Physical Machine Deployment — aarch64](./bare-metal-deploy.md#aarch64-additional-configuration)).
+:::
 
 For the full requirements list, see [Self-Build Deployment — Prerequisites](./self-build-deploy#prerequisites).
 

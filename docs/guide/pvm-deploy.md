@@ -2,6 +2,10 @@
 
 > **When to use this guide:** Your cloud server does not expose `/dev/kvm` (nested virtualization is blocked by the cloud provider). If your machine already has KVM support, refer to [Quick Start](./quickstart.md) or [Self-Build Deployment](./self-build-deploy.md) instead.
 
+::: warning x86_64 only
+PVM is **only available on x86_64**. There is currently **no plan** to port PVM to aarch64 — on arm64 machines you must use a host that exposes `/dev/kvm` natively (bare-metal, a physical machine, or a cloud VM with nested virtualization enabled, e.g. an Apple Silicon host running [lima-vm](https://github.com/lima-vm/lima)). See [Bare-Metal / Physical Machine Deployment](./bare-metal-deploy.md) for the aarch64 install path.
+:::
+
 PVM enables you to deploy Cube Sandbox on an **ordinary cloud server**, with all sandbox instances running inside PVM-backed Micro-VMs.
 
 Compared to a standard deployment, PVM adds only two extra steps:
@@ -21,7 +25,7 @@ PVM was originally proposed in the paper [*PVM: Efficient Shadow Paging for Depl
 
 ## Prerequisites
 
-- **x86_64** Linux server (cloud server or physical machine)
+- **x86_64** Linux server (cloud server or physical machine) — **aarch64 is not supported by PVM**
 - **Root access**
 - **No `/dev/kvm` required** — PVM provides KVM capability after the kernel switch
 - All other requirements are the same as [Quick Start](./quickstart.md#prerequisites) (≥ 8 GB RAM, XFS-capable storage for `/data/cubelet`, etc.)

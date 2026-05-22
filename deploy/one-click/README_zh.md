@@ -137,6 +137,32 @@ sudo ./install.sh
 
 默认会安装到 `/usr/local/services/cubetoolbox`。
 
+### 架构支持
+
+one-click 在 `x86_64` 与 `aarch64`（初步支持）目标机上均可使用，两种架构都要求目标机存在 `/dev/kvm`。
+
+`env.example` 中 `CUBE_SANDBOX_MYSQL_IMAGE`、`CUBE_SANDBOX_REDIS_IMAGE`、`CUBE_PROXY_COREDNS_IMAGE`、`WEB_UI_IMAGE` 默认指向 `cube-sandbox-image.tencentcloudcr.com` 上的镜像，目前仅提供 `x86_64` 版本。**在 `aarch64` 目标机上**，请在执行 `install.sh` **之前**，往 `.env` 追加以下内容，将这些镜像替换为官方的多架构上游镜像：
+
+```bash
+cat <<EOF >> .env
+CUBE_SANDBOX_MYSQL_IMAGE="mysql:8.0"
+CUBE_SANDBOX_REDIS_IMAGE="redis:7-alpine"
+CUBE_PROXY_COREDNS_IMAGE="coredns/coredns:1.14.2"
+WEB_UI_IMAGE="openresty/openresty:1.21.4.1-6-alpine-fat"
+EOF
+```
+
+目前已覆盖的 `aarch64` 测试机型：
+
+- HUAWEI Kunpeng 920
+
+> 当前测试覆盖范围仅限上述机型，其它 `aarch64` 硬件理论上只要本身暴露了 `/dev/kvm` 即可工作，但尚未经过验证。
+
+`aarch64` 暂不具备的能力：
+
+- **不支持 PVM**（暂无支持计划）。`aarch64` 部署仅适用于本身已暴露 `/dev/kvm` 的硬件（裸金属 Arm 服务器、云上 Arm 裸金属，或其它任何向内核暴露 ARM 虚拟化扩展的环境）。
+- 完整能力差异请参阅[裸金属 / 物理机部署 — `aarch64` 备注](../../docs/zh/guide/bare-metal-deploy.md#aarch64-备注初步支持)和[本地构建部署 — `aarch64` 备注](../../docs/zh/guide/self-build-deploy.md#aarch64-备注初步支持)。
+
 常用命令：
 
 ```bash

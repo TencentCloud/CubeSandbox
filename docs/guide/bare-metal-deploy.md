@@ -1,17 +1,44 @@
 # Bare-Metal / Physical Machine Deployment
 
-> **Use case:** You already have an x86_64 Linux machine with KVM support (`/dev/kvm` available), such as a physical machine, bare-metal server, or a cloud VM with nested virtualization enabled.
+> **Use case:** You already have an x86_64 or aarch64 Linux machine with KVM support (`/dev/kvm` available), such as a physical machine, bare-metal server, or a cloud VM with nested virtualization enabled.
 >
-> If you're on an **ordinary cloud VM** without `/dev/kvm`, you don't need bare-metal — use PVM to enable KVM on standard cloud VMs, see [Quick Start](./quickstart.md).
+> If you're on an **ordinary cloud VM** without `/dev/kvm`, you don't need bare-metal — use PVM to enable KVM on standard cloud VMs, see [Quick Start](./quickstart.md). Note that PVM is only available on x86_64; on aarch64 you must use a host with native `/dev/kvm`.
 
 ## Prerequisites
 
-- **x86_64** Linux machine
+- **x86_64** or **aarch64** Linux machine (see [aarch64 notes](#aarch64-notes) below)
 - `/dev/kvm` present and read/writable (`ls -la /dev/kvm`)
 - **Root access**
 - **Docker** installed and running
 - Internet access (for downloading release packages and Docker images)
 - RAM ≥ 8 GB, free disk ≥ 50 GB
+
+### aarch64 notes
+
+Cube Sandbox provides **preliminary aarch64 support**. The runtime still requires `/dev/kvm` on the host (no PVM fallback), and you must override the support container images to multi-arch tags so that they pull the arm64 variants.
+
+Before running `install.sh` from the cube-sandbox-one-click bundle, append the following overrides to your `.env`:
+
+```bash
+cat <<EOF >> .env
+CUBE_SANDBOX_MYSQL_IMAGE="mysql:8.0"
+CUBE_SANDBOX_REDIS_IMAGE="redis:7-alpine"
+CUBE_PROXY_COREDNS_IMAGE="coredns/coredns:1.14.2"
+WEB_UI_IMAGE="openresty/openresty:1.21.4.1-6-alpine-fat"
+EOF
+```
+
+The default tags in `env.example` point at the `cube-sandbox-image.tencentcloudcr.com/opensource/...` mirror, which currently only ships x86_64 manifests. The upstream Docker Hub tags above provide multi-arch manifests and resolve to the correct arm64 image automatically.
+
+**Validated aarch64 hosts:**
+
+- HUAWEI Kunpeng 920 (bare-metal Linux)
+
+This is currently the only aarch64 platform under active testing. Other arm64 hosts that natively expose `/dev/kvm` are expected to work, but have not been validated by the project yet — please file an issue if you try one and hit problems.
+
+**Known limitations on aarch64:**
+
+- **No PVM support.** PVM (Pagetable-based Virtual Machine) is x86_64-only and there is no plan to port it to aarch64. On aarch64 you must run on a host that natively exposes `/dev/kvm` (bare-metal Arm server, Arm cloud bare-metal, or any environment that surfaces ARM virtualization extensions to the kernel).
 
 ::: warning Run all commands as root
 Every command in this guide must be executed as **root**. Switch to root first:

@@ -137,6 +137,32 @@ sudo ./install.sh
 
 The default installation path is `/usr/local/services/cubetoolbox`.
 
+### Architecture Support
+
+One-click works on both `x86_64` and `aarch64` (initial support) hosts. In both cases, `/dev/kvm` must be available on the target machine.
+
+The default values for `CUBE_SANDBOX_MYSQL_IMAGE`, `CUBE_SANDBOX_REDIS_IMAGE`, `CUBE_PROXY_COREDNS_IMAGE`, and `WEB_UI_IMAGE` in `env.example` point to images mirrored on `cube-sandbox-image.tencentcloudcr.com`, which currently only ship `x86_64` variants. **On `aarch64` hosts**, override them with their official multi-arch upstream images by appending the following block to `.env` **before running `install.sh`**:
+
+```bash
+cat <<EOF >> .env
+CUBE_SANDBOX_MYSQL_IMAGE="mysql:8.0"
+CUBE_SANDBOX_REDIS_IMAGE="redis:7-alpine"
+CUBE_PROXY_COREDNS_IMAGE="coredns/coredns:1.14.2"
+WEB_UI_IMAGE="openresty/openresty:1.21.4.1-6-alpine-fat"
+EOF
+```
+
+`aarch64` deployments verified so far:
+
+- HUAWEI Kunpeng 920
+
+Other arm64 hardware (e.g. Apple Silicon under `lima-vm`, AWS Graviton, Ampere Altra) is expected to work as long as the host exposes `/dev/kvm`, but has not been validated yet.
+
+Capabilities not yet available on `aarch64`:
+
+- **PVM is not supported** (no plan to port). Run `aarch64` deployments only on hardware that already exposes `/dev/kvm` (bare-metal Arm servers, Arm cloud bare-metal, or `lima-vm`-style nested virtualization environments).
+- See [Bare-Metal Deployment — `aarch64` Notes](../../docs/guide/bare-metal-deploy.md#aarch64-notes-initial-support) and [Self-Build Deployment — `aarch64` Notes](../../docs/guide/self-build-deploy.md#aarch64-notes-initial-support) for the full feature-loss list.
+
 Common commands:
 
 ```bash
