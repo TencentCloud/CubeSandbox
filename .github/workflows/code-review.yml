@@ -45,6 +45,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
+          allowed_non_write_users: "*"
           track_progress: true # ✨ Enables tracking comments
           prompt: "/review-pr REPO: ${{ github.repository }} PR NUMBER: ${{ github.event.pull_request.number }}"
           show_full_output: true
