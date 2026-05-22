@@ -262,11 +262,16 @@ copy_file "${SCRIPT_DIR}/scripts/one-click/common.sh" "${PACKAGE_ROOT}/scripts/o
 copy_file "${SCRIPT_DIR}/scripts/one-click/quickcheck.sh" "${PACKAGE_ROOT}/scripts/one-click/quickcheck.sh"
 copy_file "${SCRIPT_DIR}/scripts/one-click/seed-cubemaster-metrics.sh" "${PACKAGE_ROOT}/scripts/one-click/seed-cubemaster-metrics.sh"
 copy_dir_contents "${SCRIPT_DIR}/scripts/systemd" "${PACKAGE_ROOT}/scripts/systemd"
+# cube-diag is the documented diagnostic entry point (see docs/guide/service-management.md);
+# it must ship in the release bundle so the install layout exposes
+# ${INSTALL_PREFIX}/scripts/cube-diag/collect-logs.sh.
+copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cube-diag"
 copy_dir_contents "${SCRIPT_DIR}/sql" "${PACKAGE_ROOT}/sql"
 
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/systemd" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
 tar -C "${WORK_ROOT}" -czf "${PACKAGE_TAR}" "sandbox-package"

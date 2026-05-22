@@ -247,7 +247,7 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 - 用 `CUBE_SANDBOX_NODE_IP` 渲染 `cubeproxy/global.conf`
 - 安装 `/etc/systemd/system/cube-sandbox-*.service|target|timer`，并把宿主机进程与容器统一交给 systemd 管理
 - MySQL、Redis、cube proxy、WebUI、CoreDNS 仍使用 Docker 运行，但生命周期改由各自的 systemd service 直接管理，而不是运行期依赖 `docker compose up -d`
-- 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`，默认继续使用 `127.0.0.54`
+- 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`：同样会创建该 dummy link，并让 `dnsmasq` 在 `169.254.254.53` 上额外监听，安装器同时把 `/etc/resolv.conf` 从 NetworkManager 手里接管（`rc-manager=unmanaged`）并改写为指向该非 loopback IP。这样宿主与 `systemd-resolved` 路径保持对称，避免 Docker 在 `/etc/resolv.conf` 只剩 loopback nameserver 时默默回退到内置公网 DNS（`8.8.8.8`）——一旦回退，宿主上所有依赖域名解析的容器（典型如 `docker build` 跑 `apk update`）都会因为公网 DNS 在内网不可达而失败。
 - 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 systemd 状态与业务健康检查
 - 在 `/usr/local/services/cubetoolbox/webui/` 下运行标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/cubeapi/v1/health`
 
@@ -310,7 +310,7 @@ export E2B_API_KEY=dummy
 ## 前置条件
 
 - 目标机需要 `root` 权限。
-- 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会尝试回退到 `NetworkManager + dnsmasq`，默认使用 `127.0.0.54`。
+- 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会回退到 `NetworkManager + dnsmasq`：同样创建该 dummy link，并通过 `listen-address` / `bind-interfaces` 让 `dnsmasq` 同时绑定 `127.0.0.1` 和 `169.254.254.53`；随后安装器自己写 `/etc/resolv.conf`（NetworkManager 切到 `rc-manager=unmanaged`），把 nameserver 指向 `169.254.254.53`，让宿主应用和 Docker 容器看到同一个非 loopback 解析器。
 - 目标机默认联网拉取 `mysql:8.0` 和 `redis:7-alpine`。
 - `mkcert` 二进制已内置在发布包中（`support/bin/mkcert`），安装时若系统未预装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
 - `cube proxy` 的 TLS 证书和私钥保存在宿主机 `CUBE_PROXY_CERT_DIR`，并通过 `docker compose` 以只读方式挂载进容器；更新证书后无需重建镜像，只需重启 `cube-proxy` 或在容器内 reload nginx。
@@ -331,5 +331,7 @@ export E2B_API_KEY=dummy
 
 - 查看当前 split DNS 状态：`resolvectl status`
 - 验证宿主机 stub 是否正常：`dig +tcp +timeout=3 docker.cnb.cool @127.0.0.53`
-- 验证本地 CoreDNS 是否正常：若使用 `systemd-resolved` 路径，默认执行 `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`；若使用 `NetworkManager` 回退路径，则执行 `dig +tcp +timeout=3 foo.cube.app @127.0.0.54`
+- 验证本地 DNS 入口是否正常：两条路径下客户端入口都是同一个 dummy link IP，统一执行 `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`。CoreDNS 内部仍然绑在 `127.0.0.54`，但只有 `systemd-resolved` 路径直连 CoreDNS，`NetworkManager` 回退路径先到 `dnsmasq` 再转发到 CoreDNS。
+- 验证宿主 `/etc/resolv.conf` 是否走该入口：`cat /etc/resolv.conf` 应能看到 `nameserver 169.254.254.53`（两条路径均如此）。
+- 验证容器视角：`docker run --rm alpine cat /etc/resolv.conf` 也应是 `nameserver 169.254.254.53`。如果看到 `nameserver 8.8.8.8`，说明宿主 `/etc/resolv.conf` 退化到了 loopback nameserver，导致 Docker 回退到内置公网 DNS。
 - 若使用 `systemd-resolved` 路径，正常情况下默认网卡不应承载本地 CoreDNS 地址；该地址应只出现在专用 dummy link 上。

@@ -120,7 +120,15 @@ case "${mode}" in
     if networkmanager_available; then
       systemctl restart NetworkManager >/dev/null 2>&1 || true
     fi
+    # Restore /etc/resolv.conf in case NM is not yet ready to repopulate it.
+    # With rc-manager back to its default after the conf removal+restart,
+    # NM will normally rewrite resolv.conf itself, but this is the safety net.
     restore_non_stub_resolv_conf
+    # The NM path now uses the same dummy link as the systemd-resolved
+    # path to host dnsmasq, so tear it down here as well.
+    if [[ -n "${iface}" ]] && link_exists "${iface}" && link_is_dummy "${iface}"; then
+      ip link delete "${iface}" >/dev/null 2>&1 || true
+    fi
     ;;
 esac
 
