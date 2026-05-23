@@ -52,11 +52,14 @@ impl SerializableFileSystem for PassthroughFs {
     fn serialize_data(&self) -> io::Result<Vec<u8>> {
         self.track_migration_info.store(false, Ordering::Relaxed);
 
-        let state = serialized::PassthroughFs::V1(self.try_into()?);
-        self.inodes.clear_migration_info();
-        let serialized: Vec<u8> = state.try_into()?;
+        let result = (|| {
+            let state = serialized::PassthroughFs::V1(self.try_into()?);
+            let serialized: Vec<u8> = state.try_into()?;
+            Ok(serialized)
+        })();
 
-        Ok(serialized)
+        self.inodes.clear_migration_info();
+        result
     }
 
     fn serialize(&self, mut state_pipe: File) -> io::Result<()> {
@@ -76,5 +79,107 @@ impl SerializableFileSystem for PassthroughFs {
         let mut serialized: Vec<u8> = Vec::new();
         state_pipe.read_to_end(&mut serialized)?;
         self.deserialize_and_apply_data(&serialized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preserialization::{InodeLocation, InodeMigrationInfo};
+    use super::serialized;
+    use crate::filesystem::SerializableFileSystem;
+    use crate::fuse;
+    use crate::passthrough::file_handle::FileOrHandle;
+    use crate::passthrough::inode_store::{InodeData, InodeIds};
+    use crate::passthrough::{Config, PassthroughFs};
+    use std::convert::TryFrom;
+    use std::fs::{self, File};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "virtiofsd-device-state-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn new_passthrough_fs(root: &Path) -> PassthroughFs {
+        PassthroughFs::new(Config {
+            root_dir: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn set_root_migration_info(fs: &PassthroughFs) {
+        let root = fs.inodes.get(fuse::ROOT_ID).unwrap();
+        *root.migration_info.lock().unwrap() = Some(InodeMigrationInfo {
+            location: InodeLocation::RootNode,
+            file_handle: None,
+        });
+    }
+
+    #[test]
+    fn serialize_data_marks_non_root_inode_invalid_when_location_is_missing() {
+        let test_dir = TestDir::new("missing-child-info");
+        let child_path = test_dir.path().join("child");
+        fs::write(&child_path, b"child").unwrap();
+
+        let fs = new_passthrough_fs(test_dir.path());
+        fs.open_root_node().unwrap();
+        set_root_migration_info(&fs);
+        fs.inodes
+            .new_inode(InodeData {
+                inode: 2,
+                file_or_handle: FileOrHandle::File(File::open(&child_path).unwrap()),
+                refcount: AtomicU64::new(1),
+                ids: InodeIds {
+                    ino: 2,
+                    dev: 3,
+                    mnt_id: 4,
+                },
+                mode: libc::S_IFREG as u32,
+                migration_info: Mutex::new(None),
+            })
+            .unwrap();
+
+        let data = fs.serialize_data().unwrap();
+        let serialized = serialized::PassthroughFs::try_from(&data).unwrap();
+        let serialized::PassthroughFs::V1(state) = serialized;
+
+        let child = state.inodes.iter().find(|inode| inode.id == 2).unwrap();
+        assert!(matches!(child.location, serialized::InodeLocation::Invalid));
+        let root = state
+            .inodes
+            .iter()
+            .find(|inode| inode.id == fuse::ROOT_ID)
+            .unwrap();
+        assert!(matches!(root.location, serialized::InodeLocation::RootNode));
+        let root = fs.inodes.get(fuse::ROOT_ID).unwrap();
+        assert!(root.migration_info.lock().unwrap().is_none());
     }
 }

@@ -321,7 +321,6 @@ impl FsEpollHandler {
         let mut limit_by_bytes = Wrapping(0);
 
         while let Some(desc_chain) = queue.pop_descriptor_chain(self.mem.memory()) {
-
             let head_index = desc_chain.head_index();
 
             let reader = Reader::new(desc_chain.memory(), desc_chain.clone())
@@ -559,6 +558,23 @@ unsafe impl ByteValued for VirtioFsConfig {}
 enum ServerType {
     PassthroughFs(Server<PassthroughFs>),
     PassthroughFsRo(Server<PassthroughFsRo>),
+}
+
+#[must_use]
+struct BackendSerializationGuard<'a> {
+    pre_serialization: &'a AtomicBool,
+}
+
+impl<'a> BackendSerializationGuard<'a> {
+    fn new(pre_serialization: &'a AtomicBool) -> Self {
+        Self { pre_serialization }
+    }
+}
+
+impl Drop for BackendSerializationGuard<'_> {
+    fn drop(&mut self) {
+        self.pre_serialization.store(false, Ordering::Release);
+    }
 }
 
 // Macro to forward method calls to the underlying server variant
@@ -835,6 +851,36 @@ impl Fs {
             )))
         }
     }
+
+    fn prepare_backend_serialization(
+        &self,
+        server: &ServerType,
+    ) -> std::result::Result<(), MigratableError> {
+        let start = Instant::now();
+        let cancel = Arc::new(AtomicBool::new(false));
+        debug!("serialize prepare");
+        server.prepare_serialization(cancel).map_err(|e| {
+            warn!("{} preserialization failed ({:?})", self.id, e);
+            MigratableError::Snapshot(anyhow!("serialize prepare failed: {:?}", e))
+        })?;
+        self.pre_serialization.store(true, Ordering::Release);
+        info!(
+            "{} preserialization success after {}(us)",
+            self.id,
+            start.elapsed().as_micros()
+        );
+        Ok(())
+    }
+
+    fn prepare_backend_serialization_if_needed(
+        &self,
+        server: &ServerType,
+    ) -> std::result::Result<(), MigratableError> {
+        if self.pre_serialization.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.prepare_backend_serialization(server)
+    }
 }
 
 impl Drop for Fs {
@@ -1053,8 +1099,10 @@ impl Snapshottable for Fs {
     fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let mut state = self.state();
         if let Some(server) = &self.server {
+            self.prepare_backend_serialization_if_needed(server)?;
+            let _serialization_cleanup = BackendSerializationGuard::new(&self.pre_serialization);
             let start = Instant::now();
-            server
+            let result = server
                 .serialize_data()
                 .map_err(|e| {
                     warn!("{} serialization failed ({:?})", self.id, e);
@@ -1062,7 +1110,8 @@ impl Snapshottable for Fs {
                 })
                 .map(|data| {
                     state.back_state = data;
-                })?;
+                });
+            result?;
             info!(
                 "{} serialization success after {}(us)",
                 self.id,
@@ -1078,20 +1127,121 @@ impl Transportable for Fs {}
 impl Migratable for Fs {
     fn start_migration(&mut self) -> std::result::Result<(), MigratableError> {
         if let Some(server) = &self.server {
-            let start = Instant::now();
-            let cancel = Arc::new(AtomicBool::new(false));
-            debug!("serialize prepare");
-            server.prepare_serialization(cancel).map_err(|e| {
-                warn!("{} preserialization failed ({:?})", self.id, e);
-                MigratableError::Snapshot(anyhow!("serialize prepare failed: {:?}", e))
-            })?;
-            info!(
-                "{} preserialization success after {}(us)",
-                self.id,
-                start.elapsed().as_micros()
-            );
+            self.prepare_backend_serialization(server)?;
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "virtio-devices-fs-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn backend_serialization_guard_clears_marker_on_drop() {
+        let pre_serialization = AtomicBool::new(true);
+
+        {
+            let _guard = BackendSerializationGuard::new(&pre_serialization);
+            assert!(pre_serialization.load(Ordering::Acquire));
+        }
+
+        assert!(!pre_serialization.load(Ordering::Acquire));
+    }
+
+    fn new_test_fs(root: &Path) -> Fs {
+        let backendfs_config = BackendFsConfig {
+            shared_dir: root.to_string_lossy().into_owned(),
+            read_only: false,
+            cache: BACKEND_FS_CACHE_NONE,
+            ..Default::default()
+        };
+        let mut fs = Fs::new(
+            "testfs".to_string(),
+            "testfs",
+            1,
+            128,
+            SeccompAction::Allow,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            false,
+            None,
+            &backendfs_config,
+            None,
+            None,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+        .unwrap();
+
+        let passthrough = PassthroughFs::new(passthrough::Config {
+            root_dir: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        passthrough.open_root_node().unwrap();
+        fs.server = Some(Arc::new(ServerType::PassthroughFs(
+            Server::new(passthrough, &Option::<Vec<String>>::None).unwrap(),
+        )));
+        fs
+    }
+
+    #[test]
+    fn snapshot_prepares_backend_serialization_when_needed() {
+        let root = TestDir::new("snapshot-prepare");
+        let mut fs = new_test_fs(root.path());
+
+        let snapshot = fs.snapshot().unwrap();
+        let state: State = snapshot.to_state("testfs").unwrap();
+
+        assert!(!state.back_state.is_empty());
+        assert!(!fs.pre_serialization.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn snapshot_reuses_started_migration_and_clears_marker() {
+        let root = TestDir::new("snapshot-reuse");
+        let mut fs = new_test_fs(root.path());
+
+        fs.start_migration().unwrap();
+        assert!(fs.pre_serialization.load(Ordering::Acquire));
+
+        let snapshot = fs.snapshot().unwrap();
+        let state: State = snapshot.to_state("testfs").unwrap();
+
+        assert!(!state.back_state.is_empty());
+        assert!(!fs.pre_serialization.load(Ordering::Acquire));
     }
 }
