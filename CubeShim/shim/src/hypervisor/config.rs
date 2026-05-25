@@ -88,9 +88,16 @@ impl Default for VmConfig {
             "audit=0".to_string(),
             "LANG=C".to_string(),
             "raid=noautodetect".to_string(),
-            "earlyprintk=ttyS0".to_string(),
             "agent.debug_console".to_string(),
             "agent.debug_console_vport=1026".to_string(),
+        ]);
+        // x86-only kernel cmdline parameters. The ARM kernel does not recognize
+        // these and forwards unknown tokens as argv to /sbin/init (= cube-agent),
+        // making clap's argument parser fail and the agent exit immediately
+        // (kernel panic on init / "unrecognized argument" from agent).
+        #[cfg(target_arch = "x86_64")]
+        params.extend([
+            "earlyprintk=ttyS0".to_string(),
             "mitigations=off".to_string(),
         ]);
 
@@ -475,9 +482,12 @@ mod tests {
             "audit=0".to_string(),
             "LANG=C".to_string(),
             "raid=noautodetect".to_string(),
-            "earlyprintk=ttyS0".to_string(),
             "agent.debug_console".to_string(),
             "agent.debug_console_vport=1026".to_string(),
+        ]);
+        #[cfg(target_arch = "x86_64")]
+        params.extend([
+            "earlyprintk=ttyS0".to_string(),
             "mitigations=off".to_string(),
         ]);
         assert_eq!(config.cmdlines, params);
