@@ -241,6 +241,49 @@ run_mkfs_ext4_with_optional_sudo() {
   sudo mkfs.ext4 "$@"
 }
 
+run_as_root() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    "$@"
+    return $?
+  fi
+  require_cmd sudo
+  sudo "$@"
+}
+
+SHRINK_RESERVED_BYTES="${ONE_CLICK_GUEST_IMAGE_RESERVED_BYTES:-$((32 * 1024 * 1024))}"
+
+# Shrink the ext4 image to its minimum size, then grow it by RESERVED bytes of
+# free headroom so the guest still has room for runtime writes.
+shrink_ext4_image() {
+  local img="$1"
+  local reserved_bytes="${2:-${SHRINK_RESERVED_BYTES}}"
+  local dumpe2fs_out block_size min_blocks reserved_blocks target_blocks final_bytes
+
+  run_as_root e2fsck -fy "${img}" >&2 || true
+  run_as_root resize2fs -M "${img}" >&2
+
+  dumpe2fs_out="$(run_as_root dumpe2fs -h "${img}" 2>/dev/null)"
+  block_size="$(printf '%s\n' "${dumpe2fs_out}" | awk -F': *' '/^Block size/ {print $2; exit}')"
+  min_blocks="$(printf '%s\n' "${dumpe2fs_out}" | awk -F': *' '/^Block count/ {print $2; exit}')"
+
+  if [[ -z "${block_size}" || -z "${min_blocks}" ]]; then
+    die "failed to parse ext4 metadata from ${img}"
+  fi
+
+  reserved_blocks="$(( (reserved_bytes + block_size - 1) / block_size ))"
+  target_blocks="$(( min_blocks + reserved_blocks ))"
+  final_bytes="$(( target_blocks * block_size ))"
+
+  run_as_root truncate -s "${final_bytes}" "${img}"
+  run_as_root resize2fs "${img}" "${target_blocks}" >&2
+  run_as_root e2fsck -fy "${img}" >&2 || true
+
+  local human_final human_reserved
+  human_final="$(numfmt --to=iec --suffix=B "${final_bytes}" 2>/dev/null || echo "${final_bytes}")"
+  human_reserved="$(numfmt --to=iec --suffix=B "${reserved_bytes}" 2>/dev/null || echo "${reserved_bytes}")"
+  log "guest image shrunk to ${human_final} (reserved ${human_reserved} headroom)"
+}
+
 remove_path_with_optional_sudo() {
   if [[ "$#" -eq 0 ]]; then
     return 0
@@ -356,6 +399,8 @@ build_guest_image_artifacts() {
   truncate -s "${image_size_bytes}" "${output_img}"
   run_mkfs_ext4_with_optional_sudo -F -d "${GUEST_ROOTFS_DIR}" "${output_img}" >&2
 
+  shrink_ext4_image "${output_img}"
+
   printf '%s\n' "${GUEST_IMAGE_VERSION}" > "${output_version}"
 
   docker rm -f "${guest_container_id}" >/dev/null 2>&1 || true
@@ -368,6 +413,9 @@ require_cmd python3
 require_cmd truncate
 require_cmd ldd
 require_cmd mkfs.ext4
+require_cmd e2fsck
+require_cmd resize2fs
+require_cmd dumpe2fs
 require_cmd docker
 require_cmd tar
 
