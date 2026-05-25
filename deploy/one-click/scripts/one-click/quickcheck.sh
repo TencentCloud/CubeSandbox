@@ -21,9 +21,28 @@ check_unit_active() {
 
 check_container_ready() {
   local container="$1"
+  local timeout="${CUBE_QUICKCHECK_CONTAINER_TIMEOUT:-60}"
+  local interval=2
+  local elapsed=0
   local status
-  status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container}" 2>/dev/null || true)"
-  [[ "${status}" == "healthy" || "${status}" == "running" ]] || die "container is not ready: ${container} (status=${status:-unknown})"
+  while :; do
+    status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container}" 2>/dev/null || true)"
+    case "${status}" in
+      healthy|running)
+        return 0
+        ;;
+      starting)
+        ;;
+      *)
+        die "container is not ready: ${container} (status=${status:-unknown})"
+        ;;
+    esac
+    if (( elapsed >= timeout )); then
+      die "container is not ready within ${timeout}s: ${container} (status=${status:-unknown})"
+    fi
+    sleep "${interval}"
+    elapsed=$(( elapsed + interval ))
+  done
 }
 
 echo "[quickcheck] role=${ROLE}"
