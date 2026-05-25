@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
@@ -109,6 +110,11 @@ func (s *snhostProvider) handleGetBDFByIfName(w http.ResponseWriter, r *http.Req
 		s.writeJSONResponse(w, http.StatusBadRequest, resp)
 		return
 	}
+	if err := pathutil.ValidateIfName(ifName); err != nil {
+		resp := newResponse(CodeBadRequest, fmt.Sprintf("Invalid ifname parameter: %v", err))
+		s.writeJSONResponse(w, http.StatusBadRequest, resp)
+		return
+	}
 
 	pciID, err := s.getPCIIDByIfName(ifName)
 	if err != nil {
@@ -151,6 +157,11 @@ func (s *snhostProvider) handleGetBDFByUUID(w http.ResponseWriter, r *http.Reque
 	uuid := r.URL.Query().Get("uuid")
 	if uuid == "" {
 		resp := newResponse(CodeBadRequest, "Missing required parameter: uuid")
+		s.writeJSONResponse(w, http.StatusBadRequest, resp)
+		return
+	}
+	if err := pathutil.ValidateUUID(uuid); err != nil {
+		resp := newResponse(CodeBadRequest, fmt.Sprintf("Invalid uuid parameter: %v", err))
 		s.writeJSONResponse(w, http.StatusBadRequest, resp)
 		return
 	}
