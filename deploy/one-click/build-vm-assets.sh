@@ -246,8 +246,36 @@ run_as_root() {
     "$@"
     return $?
   fi
+
+  # Try without sudo first so the caller can still capture stdout via $(...).
+  # Only stderr is silenced so a permission error doesn't pollute the log
+  # before the sudo fallback retries.
+  local rc=0
+  "$@" 2>/dev/null
+  rc=$?
+  if [[ ${rc} -eq 0 ]]; then
+    return 0
+  fi
+
   require_cmd sudo
   sudo "$@"
+}
+
+# Locale-stable dumpe2fs wrapper: dumpe2fs translates field names under
+# non-C locales, which would break the awk parsing in shrink_ext4_image.
+dump_ext4_header() {
+  local img="$1"
+  if [[ "${EUID}" -eq 0 ]]; then
+    LC_ALL=C dumpe2fs -h "${img}" 2>/dev/null
+    return $?
+  fi
+
+  if LC_ALL=C dumpe2fs -h "${img}" 2>/dev/null; then
+    return 0
+  fi
+
+  require_cmd sudo
+  sudo LC_ALL=C dumpe2fs -h "${img}" 2>/dev/null
 }
 
 SHRINK_RESERVED_BYTES="${ONE_CLICK_GUEST_IMAGE_RESERVED_BYTES:-$((32 * 1024 * 1024))}"
@@ -257,12 +285,12 @@ SHRINK_RESERVED_BYTES="${ONE_CLICK_GUEST_IMAGE_RESERVED_BYTES:-$((32 * 1024 * 10
 shrink_ext4_image() {
   local img="$1"
   local reserved_bytes="${2:-${SHRINK_RESERVED_BYTES}}"
-  local dumpe2fs_out block_size min_blocks reserved_blocks target_blocks final_bytes
+  local dumpe2fs_out block_size min_blocks reserved_blocks target_blocks final_bytes min_bytes
 
   run_as_root e2fsck -fy "${img}" >&2 || true
   run_as_root resize2fs -M "${img}" >&2
 
-  dumpe2fs_out="$(run_as_root dumpe2fs -h "${img}" 2>/dev/null)"
+  dumpe2fs_out="$(dump_ext4_header "${img}")"
   block_size="$(printf '%s\n' "${dumpe2fs_out}" | awk -F': *' '/^Block size/ {print $2; exit}')"
   min_blocks="$(printf '%s\n' "${dumpe2fs_out}" | awk -F': *' '/^Block count/ {print $2; exit}')"
 
@@ -273,7 +301,20 @@ shrink_ext4_image() {
   reserved_blocks="$(( (reserved_bytes + block_size - 1) / block_size ))"
   target_blocks="$(( min_blocks + reserved_blocks ))"
   final_bytes="$(( target_blocks * block_size ))"
+  min_bytes="$(( min_blocks * block_size ))"
 
+  # Defensive sanity check: truncating below the shrunk filesystem size would
+  # chop live FS data. With reserved_blocks >= 0 this should never trigger,
+  # but we want a clear failure if future refactors break the invariant.
+  if (( final_bytes < min_bytes )); then
+    die "shrink target ${final_bytes} smaller than ext4 minimum ${min_bytes}"
+  fi
+
+  # The resulting ext4 file is sparse: ext4 free space inside the image
+  # corresponds to filesystem holes on the host. Packagers that don't
+  # preserve sparseness (e.g. plain tar without --sparse) will inflate
+  # the file back to its apparent size, but gzip still compresses the
+  # zeroed extents efficiently.
   run_as_root truncate -s "${final_bytes}" "${img}"
   run_as_root resize2fs "${img}" "${target_blocks}" >&2
   run_as_root e2fsck -fy "${img}" >&2 || true

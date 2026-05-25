@@ -4,7 +4,10 @@ WORKDIR /work
 
 # Keep only the runtime essentials:
 # - util-linux: mount/umount/blkid (referenced indirectly by agent)
-# - busybox:    /bin/sh plus awk/sed/grep applets replacing gawk/which/etc.
+# - busybox:    provides /bin/sh and core applets (awk/sed/grep, etc.).
+#               Note: busybox applets are lighter-weight reimplementations
+#               and do not cover every GNU extension; current guest startup
+#               (cube-agent + empty rc.local) does not rely on those.
 RUN yum install -y --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
         util-linux \
         busybox \
