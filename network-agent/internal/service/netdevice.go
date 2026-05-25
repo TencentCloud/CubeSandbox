@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
@@ -106,6 +107,13 @@ func getGatewayMacAddr(ifName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Refresh the kernel ARP cache by sending one probe to the gateway. On a
+	// freshly booted node — or after a long idle period — there is no neighbor
+	// entry for the gateway at all, and NeighList returns it as NUD_NONE /
+	// missing, so the loop below would fail. The probe forces the kernel to
+	// resolve the MAC.
+	probeGateway(gatewayIP)
+
 	neighs, err := netlinkNeighList(link.Attrs().Index, netlink.FAMILY_V4)
 	if err != nil {
 		return "", err
@@ -116,6 +124,28 @@ func getGatewayMacAddr(ifName string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("gateway mac for %s via %s not found", ifName, gatewayIP.String())
+}
+
+// probeGateway sends a one-shot UDP packet to the gateway to force kernel
+// neighbor resolution. The packet itself is irrelevant — it is enough that the
+// kernel emits an ARP request and populates the neighbor table. Errors are
+// intentionally ignored: a missing route or filtered traffic must not block
+// the caller, which can still succeed if a stale-but-valid neighbor entry
+// already exists.
+func probeGateway(gatewayIP net.IP) {
+	if gatewayIP == nil {
+		return
+	}
+	conn, err := net.DialTimeout("udp4", net.JoinHostPort(gatewayIP.String(), "9"), 200*time.Millisecond)
+	if err != nil {
+		return
+	}
+	_, _ = conn.Write([]byte{0})
+	_ = conn.Close()
+	// Give the kernel a brief moment to install the resolved neighbor entry
+	// before the caller reads NeighList. 100ms is conservatively above the
+	// observed ARP resolution latency on common LANs.
+	time.Sleep(100 * time.Millisecond)
 }
 
 func defaultGatewayIP(link netlink.Link) (net.IP, error) {

@@ -105,6 +105,7 @@ func main() {
 	svc, err := initService(cfg)
 	if err != nil {
 		CubeLog.Fatalf("network-agent init failed: %v", err)
+		os.Exit(1)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -112,6 +113,7 @@ func main() {
 	CubeLog.Infof("network-agent bootstrap health check with service: %s", describeService(svc))
 	if err := svc.Health(ctx); err != nil {
 		CubeLog.Fatalf("network-agent bootstrap health check failed: %v", err)
+		os.Exit(1)
 	}
 
 	apiServer, err := httpserver.NewEndpoint(*listenEndpoint, svc)
