@@ -47,8 +47,35 @@ impl Utils {
     pub fn load_spec(bundle: &str) -> CResult<Spec> {
         let mut conf_path = PathBuf::from(bundle);
         conf_path.push("config.json");
-        let spec = Spec::load(conf_path)
-            .map_err(|e| format!("load config failed:{} bundle:{}", e, bundle))?;
+
+        // Read the config.json as a raw JSON value first, so we can sanitize
+        // fields that the oci-spec 0.6.x deserializer rejects. Recent
+        // containerd releases emit `linux.seccomp = {"defaultAction": ""}`
+        // when the runtime spec has no seccomp profile, and the empty string
+        // fails to deserialize into the LinuxSeccompAction enum, which makes
+        // sandbox creation fall over with an opaque serde error.
+        //
+        // Strip the empty-action seccomp object up-front; an absent seccomp
+        // section is the correct representation of "no profile applied".
+        let data = fs::read_to_string(&conf_path).map_err(|e| {
+            format!(
+                "load config failed:read file {:?}: {} bundle:{}",
+                conf_path, e, bundle
+            )
+        })?;
+        let mut value: serde_json::Value = serde_json::from_str(&data)
+            .map_err(|e| format!("load config failed:parse json: {} bundle:{}", e, bundle))?;
+        if let Some(linux) = value.get_mut("linux") {
+            if let Some(seccomp) = linux.get("seccomp") {
+                if seccomp.get("defaultAction").and_then(|v| v.as_str()) == Some("") {
+                    if let Some(obj) = linux.as_object_mut() {
+                        obj.remove("seccomp");
+                    }
+                }
+            }
+        }
+        let spec: Spec = serde_json::from_value(value)
+            .map_err(|e| format!("load config failed:serde failed:{} bundle:{}", e, bundle))?;
         Ok(spec)
     }
 
