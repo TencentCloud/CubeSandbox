@@ -185,6 +185,8 @@ const (
 	MasterAnnotationsFallbackToSlowPath       = "cube.master.fallback_to_slow_path"
 	MasterAnnotationsAppSnapshotCreate        = "cube.master.appsnapshot.create"
 	MasterAnnotationAppSnapshotTemplateID     = "cube.master.appsnapshot.template.id"
+	MasterAnnotationRuntimeSnapshotID         = "cube.master.runtime.snapshot.id"
+	MasterAnnotationRuntimeSnapshotAttachedAt = "cube.master.runtime.snapshot.attached_at"
 
 	MasterAnnotationAppSnapshotVersion               = "cube.master.appsnapshot.version"
 	MasterAnnotationRootfsArtifactID                 = "cube.master.rootfs.artifact.id"
@@ -224,6 +226,7 @@ const (
 	AnnotationsProduct            = "cube.product"
 
 	AnnotationVMSnapshotPath           = "cube.vm.snapshot.base.path"
+	AnnotationVMSnapshotMemoryVolURL   = "cube.vm.snapshot.memory_vol_url"
 	AnnotationPmemContainerPrefix      = "pmem-cntr"
 	AnnotationPmemLangPrefix           = "pmem-lang"
 	AnnotationPmemCubeBoxImageIDPrefix = "pmem-cubebox-image"

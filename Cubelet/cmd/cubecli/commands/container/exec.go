@@ -129,10 +129,8 @@ var ExecCommand = &cli.Command{
 		}
 		var (
 			ioCreator cio.Creator
-			stdinC    = &StdinCloser{
-				Stdin: os.Stdin,
-			}
-			con console.Console
+			stdinC    = newStdinCloser(os.Stdin)
+			con       console.Console
 		)
 
 		cioOpts := []cio.Opt{cio.WithFIFODir("/data/cubelet/fifo")}
@@ -153,9 +151,9 @@ var ExecCommand = &cli.Command{
 		if err != nil {
 			return fmt.Errorf("failed to exec: %w", err)
 		}
-		stdinC.Closer = func() {
+		stdinC.SetCloser(func() {
 			process.CloseIO(cntCtx, containerd.WithStdinCloser)
-		}
+		})
 
 		if !flagD {
 			defer process.Delete(cntCtx)
@@ -262,15 +260,47 @@ func generateExecProcessSpec(ctx gocontext.Context, context *cli.Context, args [
 
 type StdinCloser struct {
 	mu     sync.Mutex
-	Stdin  *os.File
-	Closer func()
+	stdin  *os.File
+	closer func()
 	closed bool
 }
 
+func newStdinCloser(stdin *os.File) *StdinCloser {
+	return &StdinCloser{stdin: stdin}
+}
+
+func (s *StdinCloser) SetCloser(closer func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closer = closer
+}
+
 func (s *StdinCloser) Read(p []byte) (int, error) {
-	n, err := s.Stdin.Read(p)
-	if errors.Is(err, io.EOF) && s.Closer != nil {
-		s.Closer()
+	s.mu.Lock()
+	stdin := s.stdin
+	s.mu.Unlock()
+	if stdin == nil {
+		return 0, io.EOF
+	}
+	n, err := stdin.Read(p)
+	if err == io.EOF {
+		s.closeOnce()
 	}
 	return n, err
+}
+
+func (s *StdinCloser) closeOnce() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	s.stdin = nil
+	closer := s.closer
+	s.mu.Unlock()
+
+	if closer != nil {
+		closer()
+	}
 }

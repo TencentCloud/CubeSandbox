@@ -28,6 +28,7 @@ var (
 
 	ErrorCode_MasterParamsError ErrorCode = 130400
 	ErrorCode_AuthFailed        ErrorCode = 130401
+	ErrorCode_Conflict          ErrorCode = 130409
 	ErrorCode_NotFound          ErrorCode = 130404
 	ErrorCode_NotFoundAtCubelet ErrorCode = 130406
 	ErrorCode_CubeletUnHealthy  ErrorCode = 130408
@@ -45,6 +46,7 @@ var (
 		"MasterInternalError":    130593,
 		"MasterRateLimitedError": 130592,
 		"MasterParamsError":      130400,
+		"Conflict":               130409,
 		"NotFound":               130404,
 		"NotFoundAtCubelet":      130406,
 		"TooManyRequests":        130429,
@@ -62,6 +64,7 @@ var (
 		130593: "MasterInternalError",
 		130592: "MasterRateLimitedError",
 		130400: "MasterParamsError",
+		130409: "Conflict",
 		130401: "AuthFailed",
 		130404: "NotFound",
 		130406: "NotFoundAtCubelet",

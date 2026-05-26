@@ -280,6 +280,25 @@ Required commands:
 Conditional commands:
 
 - If `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` is enabled and `/etc/docker/daemon.json` already exists, `python3` is required.
+- If the packaged `Cubelet/config/config.toml` enables `storage_backend = "cubecow"`, one-click also checks:
+  `mkfs.ext4`, `mount`, `umount`, `losetup`
+
+Recommended packages to satisfy the cubecow command set:
+
+- Debian / Ubuntu: `e2fsprogs`, `util-linux`
+- OpenCloudOS / RHEL / CentOS: `e2fsprogs`, `util-linux`
+
+Example install commands:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y e2fsprogs util-linux
+
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y e2fsprogs util-linux || \
+sudo yum install -y e2fsprogs util-linux
+```
 
 ### Control Role (`install.sh`, default)
 
@@ -306,6 +325,25 @@ One-of-two commands:
 Conditional commands:
 
 - If `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` is enabled and `/etc/docker/daemon.json` already exists, `python3` is required.
+- If the packaged `Cubelet/config/config.toml` enables `storage_backend = "cubecow"`, one-click also checks:
+  `mkfs.ext4`, `mount`, `umount`, `losetup`
+
+Recommended packages to satisfy the cubecow command set:
+
+- Debian / Ubuntu: `e2fsprogs`, `util-linux`
+- OpenCloudOS / RHEL / CentOS: `e2fsprogs`, `util-linux`
+
+Example install commands:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y e2fsprogs util-linux
+
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y e2fsprogs util-linux || \
+sudo yum install -y e2fsprogs util-linux
+```
 
 ## Prerequisites
 

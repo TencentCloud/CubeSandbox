@@ -84,21 +84,32 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     network_agent_tap_fd_timeout = "2s"
 
   [plugins."io.cubelet.internal.v1.storage"]
-    #root_path=/data/cubelet/state/io.cubelet.internal.v1.storage
-    #独立磁盘
+    # Default storage backend: cubecow (reflink-only copy-on-write).
+    storage_backend = "cubecow"
+
+    # Working directory for the cubelet storage plugin. cubecow reflink volumes land at
+    # <data_path>/cubecow-reflink, so the filesystem backing data_path must support
+    # FICLONE (e.g. xfs with `-m reflink=1` or btrfs).
     data_path = "/data/cubelet/storage"
-    #默认普通cp模式 copy
-    pool_type = "copy_reflink"
-    disksize = "400Gi"
-    warningPercent = 200
-    pool_default_format_size_list = ["1Gi"]
-    base_disk_uuid = "ef5c2893-ddbd-4d6e-bef6-3853c31d5b94"
-    pool_size = 3000
-    pool_worker_num = 8
-    pool_trigger_interval_in_ms = 800
-    snapshot_base_path="/data/cube-shim/disks"
-    snapshot_format_size_list = ["512Mi"]
-    snapshot_format_num = 1
+
+
+    [plugins."io.cubelet.internal.v1.storage".cow.log]
+    level = "info,h2=warn,hyper=warn,tower=warn"
+    format = "compact"
+    file = "/data/log/cubecow/cubecow.log"
+    rotation = "daily"
+
+    # Only needed when switching back to the legacy ext4 / raw / reflink-pool
+    # backend: change storage_backend to the corresponding value (e.g. "ext4")
+    # and uncomment the fields below as needed. Under cubecow these fields are ignored.
+    # pool_type = "copy_reflink"
+    # disksize = "400Gi"
+    # warningPercent = 200
+    # pool_default_format_size_list = ["1Gi"]
+    # base_disk_uuid = "ef5c2893-ddbd-4d6e-bef6-3853c31d5b94"
+    # pool_size = 3000
+    # pool_worker_num = 8
+    # pool_trigger_interval_in_ms = 800
   [plugins."io.cubelet.internal.v1.images"]
     runtime_type = "io.containerd.cube.v2"
   [plugins."io.cubelet.internal.v1.cubebox"]

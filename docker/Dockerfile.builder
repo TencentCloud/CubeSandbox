@@ -63,6 +63,7 @@ RUN apt-get update -o Acquire::Retries=3 \
         jq \
         libcap-dev \
         libcap-ng-dev \
+        libdevmapper-dev \
         libelf-dev \
         libglib2.0-dev \
         libiberty-dev \

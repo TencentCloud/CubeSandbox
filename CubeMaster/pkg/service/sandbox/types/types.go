@@ -54,6 +54,31 @@ type CreateCubeSandboxReq struct {
 	Namespace      string `json:"namespace,omitempty"`
 }
 
+func (r *CreateCubeSandboxReq) UnmarshalJSON(data []byte) error {
+	type rawCreateCubeSandboxReq CreateCubeSandboxReq
+	type requestIDEnvelope struct {
+		RequestID      string `json:"requestID"`
+		SnakeRequestID string `json:"request_id"`
+	}
+	var aux rawCreateCubeSandboxReq
+	if err := FastestJsoniter.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	var envelope requestIDEnvelope
+	if err := FastestJsoniter.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+	*r = CreateCubeSandboxReq(aux)
+	if r.Request == nil {
+		r.Request = &Request{}
+	}
+	r.RequestID = envelope.RequestID
+	if envelope.SnakeRequestID != "" {
+		r.RequestID = envelope.SnakeRequestID
+	}
+	return nil
+}
+
 type CreateCubeSandboxRes struct {
 	RequestID string
 	Ret       *Ret              `json:"ret,omitempty"`
@@ -482,6 +507,9 @@ type TemplateImageJobInfo struct {
 	JobID                   string              `json:"job_id,omitempty"`
 	TemplateID              string              `json:"template_id,omitempty"`
 	RequestID               string              `json:"request_id,omitempty"`
+	SandboxID               string              `json:"sandbox_id,omitempty"`
+	ResourceType            string              `json:"resource_type,omitempty"`
+	ResourceID              string              `json:"resource_id,omitempty"`
 	AttemptNo               int32               `json:"attempt_no,omitempty"`
 	RetryOfJobID            string              `json:"retry_of_job_id,omitempty"`
 	Operation               string              `json:"operation,omitempty"`

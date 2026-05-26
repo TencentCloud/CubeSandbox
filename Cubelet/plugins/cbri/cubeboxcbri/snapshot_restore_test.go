@@ -11,6 +11,8 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
 func TestResolveSnapshotRuntimeArtifactsFallsBackToSnapshotConfig(t *testing.T) {
@@ -147,5 +149,76 @@ func TestResolveSnapshotPathsEmptyRawPathUsesTemplateBase(t *testing.T) {
 	}
 	if paths.Spec != "/snapshots/cubebox/tpl-1/2C2000M" {
 		t.Fatalf("Spec=%q, want %q", paths.Spec, "/snapshots/cubebox/tpl-1/2C2000M")
+	}
+}
+
+func TestResolveSnapshotPathsNormalizesTemporarySpecPath(t *testing.T) {
+	t.Parallel()
+
+	p := &cubeboxInstancePlugin{
+		config: &cubeboxInstancePluginConfig{
+			SnapShotBasePath: "/snapshots",
+			instanceType:     cubebox.InstanceType_cubebox.String(),
+		},
+	}
+	req := &cubebox.RunCubeSandboxRequest{
+		Containers: []*cubebox.ContainerConfig{
+			{
+				Resources: &cubebox.Resource{
+					Cpu: "2000m",
+					Mem: "2000Mi",
+				},
+			},
+		},
+	}
+
+	paths, err := p.resolveSnapshotPaths("tpl-1", "/snapshots/cubebox/tpl-1/2C2000M.tmp", req)
+	if err != nil {
+		t.Fatalf("resolveSnapshotPaths error=%v", err)
+	}
+	if paths.Base != "/snapshots/cubebox/tpl-1" {
+		t.Fatalf("Base=%q, want %q", paths.Base, "/snapshots/cubebox/tpl-1")
+	}
+	if paths.Spec != "/snapshots/cubebox/tpl-1/2C2000M" {
+		t.Fatalf("Spec=%q, want %q", paths.Spec, "/snapshots/cubebox/tpl-1/2C2000M")
+	}
+}
+
+func TestSnapshotRestoreMemoryVolURLFromStorageInfo(t *testing.T) {
+	t.Parallel()
+
+	flowOpts := &workflow.CreateContext{
+		StorageInfo: &storage.StorageInfo{
+			RestoreMemoryVolURL: "file:///dev/mapper/prefetched-memory",
+		},
+	}
+
+	got := snapshotRestoreMemoryVolURLFromStorageInfo(flowOpts)
+	if got != "file:///dev/mapper/prefetched-memory" {
+		t.Fatalf("snapshotRestoreMemoryVolURLFromStorageInfo=%q", got)
+	}
+}
+
+func TestSnapshotRestoreContainerIDUsesMetadataWhenPresent(t *testing.T) {
+	t.Parallel()
+
+	snapshotPath := t.TempDir()
+	metadataJSON := `{"app_snapshot_container_id":"tpl-1e0d677b60a0499c80f49e55_0"}`
+	if err := os.WriteFile(filepath.Join(snapshotPath, "metadata.json"), []byte(metadataJSON), 0o644); err != nil {
+		t.Fatalf("WriteFile error=%v", err)
+	}
+
+	got := snapshotRestoreContainerID("snap-123", snapshotPath)
+	if got != "tpl-1e0d677b60a0499c80f49e55_0" {
+		t.Fatalf("snapshotRestoreContainerID=%q, want %q", got, "tpl-1e0d677b60a0499c80f49e55_0")
+	}
+}
+
+func TestSnapshotRestoreContainerIDFallsBackToSnapshotID(t *testing.T) {
+	t.Parallel()
+
+	got := snapshotRestoreContainerID("snap-123", t.TempDir())
+	if got != "snap-123_0" {
+		t.Fatalf("snapshotRestoreContainerID=%q, want %q", got, "snap-123_0")
 	}
 }

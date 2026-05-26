@@ -12,10 +12,53 @@ import (
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"gorm.io/gorm"
 )
+
+// TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations verifies the
+// v4+ contract for stored template requests: per-invocation runtime-snapshot
+// binding annotations are scrubbed so they cannot leak into later
+// create-from-template flows. The logical template id remains. (v5 removed
+// the physical memory_vol/memory_kind annotations entirely.)
+func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(NormalizeRequest, func(in *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, string, error) {
+		return in, "tpl-after-norm", nil
+	})
+
+	req := &sandboxtypes.CreateCubeSandboxReq{
+		InstanceType: "cubebox",
+		SnapshotDir:  "/snapshots/should-be-cleared",
+		Timeout:      1,
+		Annotations: map[string]string{
+			constants.CubeAnnotationsAppSnapshotCreate:        "true",
+			constants.CubeAnnotationRuntimeSnapshotID:         "snap-stale",
+			constants.CubeAnnotationRuntimeSnapshotAttachedAt: "2026-05-01T00:00:00Z",
+			"unrelated":                                       "keep-me",
+		},
+	}
+
+	out, err := normalizeStoredTemplateRequest(req)
+	require.NoError(t, err)
+
+	for _, k := range []string{
+		constants.CubeAnnotationsAppSnapshotCreate,
+		constants.CubeAnnotationRuntimeSnapshotID,
+		constants.CubeAnnotationRuntimeSnapshotAttachedAt,
+	} {
+		_, present := out.Annotations[k]
+		assert.Falsef(t, present, "annotation %q must be stripped from stored template request", k)
+	}
+	assert.Equal(t, "tpl-after-norm", out.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	assert.Equal(t, "keep-me", out.Annotations["unrelated"])
+	assert.Empty(t, out.SnapshotDir)
+}
 
 func TestResolveTemplateNodesFiltersRequestedHealthyNodes(t *testing.T) {
 	patches := gomonkey.NewPatches()

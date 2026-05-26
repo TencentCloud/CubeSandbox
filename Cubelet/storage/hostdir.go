@@ -16,7 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const hostDirBasePath = "/data/cubelet/hostdir"
+var hostDirBasePath = "/data/cubelet/hostdir"
 
 type HostDirBackendInfo struct {
 	VolumeName string `json:"volume_name"`
@@ -95,6 +95,9 @@ func (l *local) prepareHostDirVolume(ctx context.Context, opts *workflow.CreateC
 }
 
 func (l *local) cleanupHostDirVolumes(ctx context.Context, sandboxID string) {
+	if sandboxID == "" {
+		return
+	}
 	sandboxDir := filepath.Join(hostDirBasePath, sandboxID)
 	if _, err := os.Stat(sandboxDir); os.IsNotExist(err) {
 		return

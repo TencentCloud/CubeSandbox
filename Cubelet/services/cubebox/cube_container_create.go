@@ -185,6 +185,9 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}
 
 	l.storeNumaQueues(ctx, sandBox, flowOpts)
+	if snapshotID, ok := flowOpts.GetSnapshotTemplateID(); ok && flowOpts.IsRetoreSnapshot() {
+		setRuntimeSnapshotBindingLabels(sandBox, snapshotID, time.Now().UTC())
+	}
 
 	cgInfo, cgSet := flowOpts.CgroupInfo.(*cgroupp.Info)
 	if cgSet {
@@ -399,6 +402,7 @@ func (l *local) genImageReferenceForCubebox(ctx context.Context, flowOpts *workf
 }
 
 func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.CreateContext, realReq *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) error {
+	sandBox.Volumes = cloneVolumesToSave(realReq.GetVolumes())
 	for i, cntrReq := range realReq.Containers {
 		isPod := i == 0
 		_, cid := l.generateContainerID(ctx, flowOpts, i)

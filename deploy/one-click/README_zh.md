@@ -280,6 +280,26 @@ export E2B_API_KEY=dummy
 条件命令：
 
 - 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
+- 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
+  `mkfs.ext4`、`mount`、`umount`、`losetup`
+
+推荐安装包（覆盖上述 `cubecow` 依赖）：
+
+- Debian / Ubuntu：`e2fsprogs`、`util-linux`
+- OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`
+- 若目标机是极简镜像，安装完上面三类包后仍缺 `dmsetup`，再补装同名包 `dmsetup`
+
+可直接执行的安装示例：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y lvm2 thin-provisioning-tools util-linux
+
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y lvm2 device-mapper-persistent-data util-linux || \
+sudo yum install -y lvm2 device-mapper-persistent-data util-linux
+```
 
 ### control 角色（`install.sh`，默认）
 
@@ -306,6 +326,26 @@ export E2B_API_KEY=dummy
 条件命令：
 
 - 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
+- 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
+  `mkfs.ext4`、`mount`、`umount`、`losetup`
+
+推荐安装包（覆盖上述 `cubecow` 依赖）：
+
+- Debian / Ubuntu：`e2fsprogs`、`util-linux`
+- OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`
+- 若目标机是极简镜像，安装完上面三类包后仍缺 `dmsetup`，再补装同名包 `dmsetup`
+
+可直接执行的安装示例：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y lvm2 thin-provisioning-tools util-linux
+
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y lvm2 device-mapper-persistent-data util-linux || \
+sudo yum install -y lvm2 device-mapper-persistent-data util-linux
+```
 
 ## 前置条件
 

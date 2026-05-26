@@ -402,6 +402,7 @@ log "extracting package ${PACKAGE_TAR}"
 tar -xzf "${PACKAGE_TAR}" -C "${WORK_DIR}"
 PKG_ROOT="${WORK_DIR}/sandbox-package"
 ensure_dir "${PKG_ROOT}"
+validate_cubelet_cow_startup_deps "${PKG_ROOT}/Cubelet/config/config.toml"
 
 installed_role="${DEPLOY_ROLE}"
 detected_installed_role="$(detect_installed_role)"

@@ -36,10 +36,9 @@ const commitSandboxRPCTimeout = 5 * time.Minute
 // commit job rolls back after a partial success.
 const cleanupTemplateRPCTimeout = 1 * time.Minute
 
-const (
-	JobPhaseSnapshotting = "SNAPSHOTTING"
-	JobPhaseRegistering  = "REGISTERING"
-)
+// JobPhaseSnapshotting / JobPhaseRegistering are declared with the rest of
+// the JobPhase* set in template_image.go; they are referenced here without
+// re-declaration to avoid duplicate constants.
 
 func SubmitTemplateCommit(ctx context.Context, sandboxID, nodeID, nodeIP string, req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if !isReady() {
@@ -241,17 +240,21 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		if cause == nil {
 			cause = errors.New("template commit job failed: unknown cause")
 		}
-		if snapshotPath != "" {
-			cleanupCtx, cleanupCancel := context.WithTimeout(ctx, cleanupTemplateRPCTimeout)
-			_, cleanupErr := cubelet.CleanupTemplate(cleanupCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
-				RequestID:    uuid.NewString(),
-				TemplateID:   templateID,
-				SnapshotPath: snapshotPath,
-			})
-			cleanupCancel()
-			if cleanupErr != nil {
-				cause = errors.Join(cause, cleanupErr)
-			}
+		// v4+: master no longer passes physical SnapshotPath/Objects to
+		// cubelet on cleanup. Cubelet resolves them from its local snapshot
+		// catalog written during CommitSandbox (with deterministic fallback).
+		// We always attempt cleanup (even before cubelet reports a snapshot
+		// path) because partial-failure rollback may need to remove a half-
+		// written entry. The bounded RPC timeout protects the goroutine from
+		// a hung cubelet.
+		cleanupCtx, cleanupCancel := context.WithTimeout(ctx, cleanupTemplateRPCTimeout)
+		_, cleanupErr := cubelet.CleanupTemplate(cleanupCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
+			RequestID:  uuid.NewString(),
+			TemplateID: templateID,
+		})
+		cleanupCancel()
+		if cleanupErr != nil {
+			cause = errors.Join(cause, cleanupErr)
 		}
 		if definitionCreated {
 			if cleanupErr := cleanupTemplateMetadata(ctx, templateID); cleanupErr != nil {
@@ -283,7 +286,6 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		NodeIP:       nodeIP,
 		InstanceType: createReq.InstanceType,
 		Spec:         calculateRequestSpec(createReq),
-		SnapshotPath: snapshotPath,
 		Status:       ReplicaStatusReady,
 	}
 	if err := UpsertReplica(ctx, templateID, createReq.InstanceType, replica); err != nil {

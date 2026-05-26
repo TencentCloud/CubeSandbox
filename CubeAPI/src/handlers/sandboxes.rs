@@ -13,8 +13,8 @@ use crate::{
     error::AppResult,
     logging::{LogEvent, LogLevel},
     models::{
-        ApiError, ConnectSandbox, CreateSnapshotRequest, ListSandboxesQuery, ListSandboxesV2Query,
-        NewSandbox, RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
+        ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
+        RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
         SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest,
     },
     state::AppState,
@@ -331,41 +331,6 @@ pub async fn connect_sandbox(
         .connect_sandbox(&sandbox_id, body.timeout)
         .await?;
     Ok((StatusCode::OK, Json(sandbox)))
-}
-
-// ─── POST /sandboxes/:sandboxID/snapshots ─────────────────────────────────────
-
-pub async fn create_snapshot(
-    State(state): State<AppState>,
-    Path(sandbox_id): Path<String>,
-    Json(body): Json<CreateSnapshotRequest>,
-) -> AppResult<impl IntoResponse> {
-    state
-        .logger
-        .log(
-            LogEvent::new(LogLevel::Debug, "api.request")
-                .field("handler", "create_snapshot")
-                .field("sandbox_id", &sandbox_id)
-                .field("name", body.name.as_deref().unwrap_or("")),
-        )
-        .await;
-
-    let snapshot = state
-        .services
-        .sandboxes
-        .create_snapshot(&sandbox_id, body.name.clone())
-        .await?;
-    let snapshot_id = snapshot.snapshot_id.clone();
-    tracing::info!(sandbox_id = %sandbox_id, snapshot_id = %snapshot_id, "create_snapshot: success");
-    state
-        .logger
-        .log(
-            LogEvent::new(LogLevel::Info, "sandbox.snapshot.created")
-                .field("sandbox_id", &sandbox_id)
-                .field("snapshot_id", &snapshot_id),
-        )
-        .await;
-    Ok((StatusCode::CREATED, Json(snapshot)))
 }
 
 // ─── GET /sandboxes/:sandboxID/logs ───────────────────────────────────────────

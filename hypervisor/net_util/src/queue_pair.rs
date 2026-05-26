@@ -130,16 +130,12 @@ impl TxVirtio {
                 rate_limit_reached = rate_limiter.consume(1, TokenType::Ops);
                 if rate_limit_reached != BucketReduction::Success {
                     self.limit_frames += Wrapping(1);
-                    rate_limited.call_once(||{
-                        info!("net tx ops ratelimit fired")
-                    });
+                    rate_limited.call_once(|| info!("net tx ops ratelimit fired"));
                 } else {
                     rate_limit_reached = rate_limiter.consume(len as u64, TokenType::Bytes);
                     if rate_limit_reached != BucketReduction::Success {
                         self.limit_bytes += Wrapping(1);
-                        rate_limited.call_once(||{
-                            info!("net tx bw ratelimit fired")
-                        });
+                        rate_limited.call_once(|| info!("net tx bw ratelimit fired"));
                     }
                 }
             }
@@ -296,16 +292,12 @@ impl RxVirtio {
                 rate_limit_reached = rate_limiter.consume(1, TokenType::Ops);
                 if rate_limit_reached != BucketReduction::Success {
                     self.limit_frames += Wrapping(1);
-                    rate_limited.call_once(||{
-                        info!("net rx ops ratelimit fired")
-                    });
+                    rate_limited.call_once(|| info!("net rx ops ratelimit fired"));
                 } else {
                     rate_limit_reached = rate_limiter.consume(len as u64, TokenType::Bytes);
                     if rate_limit_reached != BucketReduction::Success {
                         self.limit_bytes += Wrapping(1);
-                        rate_limited.call_once(||{
-                            info!("net rx bw ratelimit fired")
-                        });
+                        rate_limited.call_once(|| info!("net rx bw ratelimit fired"));
                     }
                 }
             }

@@ -59,6 +59,7 @@ use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::{ReadVolatile, WriteVolatile};
 use vm_migration::{protocol::*, Migratable};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+pub use vm_migration::{SnapshotConfig, SnapshotType};
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
@@ -78,6 +79,7 @@ mod gdb;
 pub mod interrupt;
 pub mod memory_manager;
 pub mod migration;
+pub mod pagemap_anon;
 mod pci_segment;
 pub mod seccomp_filters;
 mod serial_manager;
@@ -610,9 +612,12 @@ impl Vmm {
         }
     }
 
-    fn vm_pause_to_snapshot(&mut self, destination_url: &str) -> result::Result<(), VmError> {
+    fn vm_pause_to_snapshot(
+        &mut self,
+        snapshot_config: &SnapshotConfig,
+    ) -> result::Result<(), VmError> {
         self.vm_pause()?;
-        self.vm_snapshot(destination_url)?;
+        self.vm_snapshot(snapshot_config)?;
         self.vm_delete()
     }
 
@@ -631,12 +636,12 @@ impl Vmm {
         self.vm_restore(restore_cfg)
     }
 
-    fn vm_snapshot(&mut self, destination_url: &str) -> result::Result<(), VmError> {
+    fn vm_snapshot(&mut self, snapshot_config: &SnapshotConfig) -> result::Result<(), VmError> {
         if let Some(ref mut vm) = self.vm {
             vm.snapshot()
                 .map_err(VmError::Snapshot)
                 .and_then(|snapshot| {
-                    vm.send(&snapshot, destination_url)
+                    vm.send(&snapshot, snapshot_config)
                         .map_err(VmError::SnapshotSend)
                 })
         } else {
@@ -713,6 +718,7 @@ impl Vmm {
             activate_evt,
             self.sandbox_id.clone(),
             self.vcpu_started.clone(),
+            restore_cfg.memory_vol_url.as_deref(),
         )?;
 
         // Now we can restore the rest of the VM.
@@ -1958,7 +1964,7 @@ impl Vmm {
                                 }
                                 ApiRequest::VmPauseToSnapshot(snapshot_data) => {
                                     let response = self
-                                        .vm_pause_to_snapshot(&snapshot_data.destination_url)
+                                        .vm_pause_to_snapshot(&snapshot_data)
                                         .map_err(ApiError::VmPauseToSnapshot)
                                         .map(|_| ApiResponsePayload::Empty);
                                     res_sender.send(response).map_err(Error::ApiResponseSend)?;
@@ -1980,7 +1986,7 @@ impl Vmm {
                                 }
                                 ApiRequest::VmSnapshot(snapshot_data) => {
                                     let response = self
-                                        .vm_snapshot(&snapshot_data.destination_url)
+                                        .vm_snapshot(&snapshot_data)
                                         .map_err(ApiError::VmSnapshot)
                                         .map(|_| ApiResponsePayload::Empty);
 

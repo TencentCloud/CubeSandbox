@@ -38,6 +38,9 @@ type TemplateImageJob struct {
 	JobID                   string `json:"job_id" gorm:"column:job_id"`
 	TemplateID              string `json:"template_id" gorm:"column:template_id"`
 	RequestID               string `json:"request_id" gorm:"column:request_id"`
+	SandboxID               string `json:"sandbox_id" gorm:"column:sandbox_id"`
+	ResourceType            string `json:"resource_type" gorm:"column:resource_type"`
+	ResourceID              string `json:"resource_id" gorm:"column:resource_id"`
 	AttemptNo               int32  `json:"attempt_no" gorm:"column:attempt_no"`
 	RetryOfJobID            string `json:"retry_of_job_id" gorm:"column:retry_of_job_id"`
 	Operation               string `json:"operation" gorm:"column:operation"`

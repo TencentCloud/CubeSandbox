@@ -18,8 +18,7 @@ use vm_memory::{
 };
 
 use crate::file_traits::FileReadWriteAtVolatile;
-use crate::oslib;
-use crate::GuestMemoryMmap;
+use crate::{oslib, GuestMemoryMmap};
 use vm_memory::bitmap::{AtomicBitmap, RefSlice};
 
 #[derive(Debug)]

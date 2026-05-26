@@ -44,7 +44,9 @@ type RequestResource struct {
 
 	ErofsImages []*ImageSpec
 
-	TemplateID string
+	TemplateID             string
+	TemplateNodeScope      []string
+	EnforceSnapshotStorage bool
 }
 
 type ImageSpec struct {

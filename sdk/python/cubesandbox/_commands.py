@@ -22,14 +22,14 @@ class Commands:
 
     def run(self, cmd: str, *, timeout: float | None = None, **kwargs) -> CommandResult:
         """Run a shell command inside the sandbox via Python subprocess."""
-        code = (
-            "import subprocess as _sp\n"
-            f"_r = _sp.run({cmd!r}, shell=True, capture_output=True, text=True)\n"
-            "import sys as _sys\n"
-            "_sys.stdout.write(_r.stdout)\n"
-            "_sys.stderr.write(_r.stderr)\n"
-            "print(_r.returncode)\n"
-        )
+        code = f"""
+import subprocess as _sp
+_r = _sp.run({cmd!r}, shell=True, capture_output=True, text=True)
+import sys as _sys
+_sys.stdout.write(_r.stdout)
+_sys.stderr.write(_r.stderr)
+print(_r.returncode)
+"""
         stdout_lines: list[str] = []
         execution = self._sandbox.run_code(
             code,

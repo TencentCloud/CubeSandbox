@@ -266,6 +266,9 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 			return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "DeleteSandboxProxyMap failed: %s", err.Error())
 		}
 		localcache.DeleteSandboxCache(req.GetSandboxID())
+		if err := runAfterDestroyTaskSuccessHook(ctx, req.GetSandboxID()); err != nil {
+			log.G(ctx).Warnf("release snapshot runtime refs after destroy failed: %v", err)
+		}
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -23,6 +24,9 @@ import (
 var (
 	createSandboxDealCubeboxCreateReqWithTemplateFn = dealCubeboxCreateReqWithTemplate
 	createSandboxRunFn                              = sandbox.CreateSandbox
+	createSandboxGetTemplateKindFn                  = templatecenter.GetTemplateKind
+	createSandboxRegisterRuntimeRefFn               = templatecenter.RegisterSnapshotRuntimeRefForCreatedSandbox
+	createSandboxRegisterRuntimeRefWithReplicaFn    = templatecenter.RegisterSnapshotRuntimeRefForCreatedSandboxWithReplica
 )
 
 func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
@@ -49,6 +53,8 @@ func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTr
 		"RequestId":    req.RequestID,
 		"InstanceType": req.InstanceType,
 	}))
+	resolveResult := &templateResolveResult{}
+	ctx = withTemplateResolveResult(ctx, resolveResult)
 
 	if err := createSandboxDealCubeboxCreateReqWithTemplateFn(ctx, req); err != nil {
 		retCode := errorcode.ErrorCode_MasterParamsError
@@ -64,8 +70,49 @@ func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTr
 
 	ctx = runInsReq2Affinity(ctx, req)
 	ret := createSandboxRunFn(ctx, req)
+	if ret != nil && ret.Ret != nil && ret.Ret.RetCode == int(errorcode.ErrorCode_Success) {
+		if err := registerCreatedSandboxRuntimeRef(ctx, req, ret); err != nil {
+			log.G(ctx).Warnf("register snapshot runtime ref after create failed: %v", err)
+		}
+	}
 	rt.RetCode = int64(ret.Ret.RetCode)
 	return ret
+}
+
+func registerCreatedSandboxRuntimeRef(ctx context.Context, req *types.CreateCubeSandboxReq, ret *types.CreateCubeSandboxRes) error {
+	if req == nil || ret == nil {
+		return nil
+	}
+	templateID := strings.TrimSpace(req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	if templateID == "" {
+		return nil
+	}
+	// Reuse the kind / chosen replica that the synchronous template-resolve
+	// phase already discovered (see dealCubeboxCreateReqWithTemplateCenter
+	// + bindSnapshotCreateReplica) so the post-create path doesn't re-issue
+	// a GetDefinition + ListReplicas round-trip per create.
+	resolved := templateResolveResultFromContext(ctx)
+	kind := ""
+	if resolved != nil && strings.EqualFold(strings.TrimSpace(resolved.TemplateID), templateID) {
+		kind = resolved.Kind
+	}
+	if kind == "" {
+		var err error
+		kind, err = createSandboxGetTemplateKindFn(ctx, templateID)
+		if err != nil {
+			return err
+		}
+	}
+	if !strings.EqualFold(strings.TrimSpace(kind), templatecenter.TemplateKindSnapshot) {
+		return nil
+	}
+	if resolved != nil && resolved.HasChosenReplica &&
+		strings.EqualFold(strings.TrimSpace(resolved.TemplateID), templateID) {
+		return createSandboxRegisterRuntimeRefWithReplicaFn(
+			ctx, templateID, ret.SandboxID, ret.HostID, ret.HostIP, resolved.ChosenReplica,
+		)
+	}
+	return createSandboxRegisterRuntimeRefFn(ctx, templateID, ret.SandboxID, ret.HostID, ret.HostIP)
 }
 
 func constructCreateReq(r *http.Request) (*types.CreateCubeSandboxReq, error) {

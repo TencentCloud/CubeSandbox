@@ -3,27 +3,24 @@
 
 from __future__ import annotations
 
-import logging
-import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict
 
 import httpx
+import requests
 
 from ._commands import CommandResult, Commands
 from ._config import Config
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
 from ._filesystem import Filesystem
-from ._models import Execution, ExecutionError, OutputMessage, Result
+from ._models import Execution, ExecutionError, OutputMessage, Result, SnapshotInfo
 from ._stream import _parse_line
 from ._transport import build_client
-
-logger = logging.getLogger(__name__)
 
 JUPYTER_PORT = 49999
 
 
-def _check_response(resp: httpx.Response) -> None:
-    if resp.is_success:
+def _check_response(resp: requests.Response) -> None:
+    if resp.ok:
         return
     try:
         msg = resp.json().get("message") or resp.json().get("detail") or resp.text
@@ -48,7 +45,7 @@ class Sandbox:
             print(result.text)   # "2"
     """
 
-    def __init__(self, data: dict, config: Optional[Config] = None) -> None:
+    def __init__(self, data: dict, config: Config) -> None:
         self._data = data
         self._config = config or Config()
         self._session = self._build_session()
@@ -56,7 +53,6 @@ class Sandbox:
         self._commands = Commands(self)
         self._files = Filesystem(self)
 
-    # ── properties ───────────────────────────────────────────────────
 
     @property
     def sandbox_id(self) -> str:
@@ -85,7 +81,6 @@ class Sandbox:
     def files(self) -> "Filesystem":
         return self._files
 
-    # ── factory methods ───────────────────────────────────────────────
 
     @classmethod
     def create(
@@ -138,8 +133,9 @@ class Sandbox:
                 payload["network"] = net
         payload.update(kwargs)
 
-        with httpx.Client(headers={"Content-Type": "application/json"}) as s:
-            resp = s.post(f"{cfg.api_url}/sandboxes", json=payload)
+        s = requests.Session()
+        resp = s.post(f"{cfg.api_url}/sandboxes", json=payload,
+                      headers={"Content-Type": "application/json"})
         _check_response(resp)
         return cls(resp.json(), config=cfg)
 
@@ -161,15 +157,13 @@ class Sandbox:
             ApiError: On unexpected backend error (HTTP 500).
         """
         cfg = config or Config()
-        with httpx.Client(headers={"Content-Type": "application/json"}) as s:
-            resp = s.post(
-                f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
-                json={"timeout": cfg.timeout},
-            )
+        s = requests.Session()
+        resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
+                      json={"timeout": cfg.timeout},
+                      headers={"Content-Type": "application/json"})
         _check_response(resp)
         return cls(resp.json(), config=cfg)
 
-    # ── class-level API methods ───────────────────────────────────────
 
     @classmethod
     def list(cls, config: Config | None = None) -> list[dict]:
@@ -183,8 +177,8 @@ class Sandbox:
             ``sandboxID``, ``templateID``, and ``state`` keys.
         """
         cfg = config or Config()
-        with httpx.Client() as s:
-            resp = s.get(f"{cfg.api_url}/sandboxes")
+        s = requests.Session()
+        resp = s.get(f"{cfg.api_url}/sandboxes")
         _check_response(resp)
         return resp.json()
 
@@ -201,8 +195,8 @@ class Sandbox:
             A list of sandbox info dicts.
         """
         cfg = config or Config()
-        with httpx.Client() as s:
-            resp = s.get(f"{cfg.api_url}/v2/sandboxes")
+        s = requests.Session()
+        resp = s.get(f"{cfg.api_url}/v2/sandboxes")
         _check_response(resp)
         return resp.json()
 
@@ -218,12 +212,11 @@ class Sandbox:
             ``{"status": "ok", "sandboxes": 0}``.
         """
         cfg = config or Config()
-        with httpx.Client() as s:
-            resp = s.get(f"{cfg.api_url}/health")
+        s = requests.Session()
+        resp = s.get(f"{cfg.api_url}/health")
         _check_response(resp)
         return resp.json()
 
-    # ── code execution ────────────────────────────────────────────────
 
     def run_code(
         self,
@@ -291,7 +284,6 @@ class Sandbox:
 
         return execution
 
-    # ── lifecycle ─────────────────────────────────────────────────────
 
     def pause(self, *, wait: bool = True, timeout: float = 30, interval: float = 1.0) -> None:
         """POST /sandboxes/:sandboxID/pause - Pause a sandbox.
@@ -312,6 +304,7 @@ class Sandbox:
             TimeoutError: If ``wait=True`` and sandbox does not reach
                 ``"paused"`` state within ``timeout`` seconds.
         """
+        import time
         resp = self._session.post(f"{self._config.api_url}/sandboxes/{self.sandbox_id}/pause")
         _check_response(resp)
         if wait:
@@ -370,18 +363,6 @@ class Sandbox:
         _check_response(resp)
         return resp.json()
 
-    def close(self) -> None:
-        """Close the underlying httpx streaming client.
-
-        Called automatically by :meth:`__exit__` and :meth:`__del__`.
-        Safe to call multiple times.
-        """
-        if self._client is not None:
-            self._client.close()
-            self._client = None
-        self._session.close()
-
-    # ── context manager ───────────────────────────────────────────────
 
     def __enter__(self) -> "Sandbox":
         return self
@@ -391,18 +372,266 @@ class Sandbox:
             self.kill()
         except CubeSandboxError:
             pass
-        self.close()
-
-    def __del__(self) -> None:
-        self.close()
+        if self._client:
+            self._client.close()
 
     def __repr__(self) -> str:
         return f"Sandbox(id={self.sandbox_id!r}, domain={self.domain!r})"
 
-    # ── internal ──────────────────────────────────────────────────────
 
-    def _build_session(self) -> httpx.Client:
-        return httpx.Client(
-            headers={"Content-Type": "application/json"},
-            base_url=self._config.api_url,
+    def create_snapshot(self, name: str | None = None) -> SnapshotInfo:
+        """POST /sandboxes/:sandboxID/snapshots — Create a snapshot (1.1).
+
+        The sandbox is temporarily paused during snapshot creation.
+        The snapshot persists independently of the sandbox lifecycle;
+        it remains valid even after the sandbox is killed.
+
+        Args:
+            name: Optional template name for the snapshot.  When a template
+                with this name already exists the new build is attached to it
+                rather than creating a new template.
+
+        Returns:
+            :class:`SnapshotInfo` with ``snapshot_id`` and ``names``.
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: On unexpected backend error.
+        """
+        payload: dict = {}
+        if name is not None:
+            payload["name"] = name
+        resp = self._session.post(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/snapshots",
+            json=payload,
         )
+        _check_response(resp)
+        return SnapshotInfo.from_dict(resp.json())
+
+    @classmethod
+    def list_snapshots(
+        cls,
+        *,
+        sandbox_id: str | None = None,
+        limit: int | None = None,
+        next_token: str | None = None,
+        config: Config | None = None,
+    ) -> tuple[list[SnapshotInfo], str | None]:
+        """GET /snapshots — List snapshots (1.2).
+
+        Args:
+            sandbox_id: Filter by source sandbox ID.
+            limit: Page size (default: 100).
+            next_token: Pagination cursor from a previous call.
+            config: SDK config.  Uses default (env-based) config if omitted.
+
+        Returns:
+            A 2-tuple of ``(snapshots, next_token)`` where *next_token* is
+            ``None`` when there are no more pages.
+        """
+        cfg = config or Config()
+        params: dict = {}
+        if sandbox_id is not None:
+            params["sandboxID"] = sandbox_id
+        if limit is not None:
+            params["limit"] = limit
+        if next_token is not None:
+            params["nextToken"] = next_token
+        s = requests.Session()
+        resp = s.get(f"{cfg.api_url}/snapshots", params=params)
+        _check_response(resp)
+        items = [SnapshotInfo.from_dict(d) for d in (resp.json() or [])]
+        nt = resp.headers.get("x-next-token") or None
+        return items, nt
+
+    @classmethod
+    def delete_snapshot(cls, snapshot_id: str, *, config: Config | None = None) -> None:
+        """DELETE /templates/:templateID — Delete a snapshot (1.3).
+
+        Snapshots are stored as templates; this call removes the underlying
+        template permanently.  Deleting the originating sandbox does **not**
+        cascade-delete its snapshots.
+
+        Args:
+            snapshot_id: The ``snapshotID`` (= templateID) to delete.
+            config: SDK config.  Uses default (env-based) config if omitted.
+
+        Raises:
+            TemplateNotFoundError: If the snapshot does not exist (HTTP 404).
+            ApiError: On unexpected backend error.
+        """
+        cfg = config or Config()
+        s = requests.Session()
+        resp = s.delete(f"{cfg.api_url}/templates/{snapshot_id}")
+        _check_response(resp)
+
+    # 1.4 — create_from_snapshot is covered by Sandbox.create(template=snapshot_id).
+    # See docstring of :meth:`create` for details.
+
+    def rollback(self, snapshot_id: str) -> dict:
+        """POST /sandboxes/:sandboxID/rollback — Roll back a sandbox to a snapshot (1.5).
+
+        Reverts the sandbox's filesystem and memory to the state captured in
+        *snapshot_id*.  The snapshot must belong to (or be compatible with)
+        this sandbox.
+
+        After a successful rollback the sandbox process is restarted from the
+        snapshot image, which invalidates any TCP connections previously held
+        open against it (jupyter-server inside the sandbox + the cube-api
+        keep-alive pool). To prevent the next call (e.g. :meth:`run_code`)
+        from racing against a half-closed socket, this method proactively
+        closes the underlying HTTP clients so they are rebuilt lazily on
+        demand. Callers don't need to do anything — ``sb.run_code(...)`` after
+        ``sb.rollback(...)`` Just Works.
+
+        Args:
+            snapshot_id: Target snapshot ID.
+
+        Returns:
+            Response dict, e.g. ``{"sandboxID": ..., "snapshotID": ...,
+            "status": "success"}``.
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: On unexpected backend error.
+        """
+        resp = self._session.post(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/rollback",
+            json={"snapshotID": snapshot_id},
+        )
+        _check_response(resp)
+        result = resp.json()
+        # Rollback restarts the sandbox VM/process — old keep-alive sockets
+        # are now pointing at a torn-down kernel. Drop both client pools so
+        # the next request opens a fresh connection.
+        self._reset_connections()
+        return result
+
+    def _reset_connections(self) -> None:
+        """Close pooled HTTP connections so they are rebuilt on next use.
+
+        Idempotent and best-effort. Used after operations that invalidate
+        the sandbox's network identity (currently :meth:`rollback`; future
+        callers may include ``resume``).
+        """
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+            self._client = None
+        # ``_session`` is a requests.Session reused for the cube-api control
+        # plane. rollback responses come from cube-api (not the sandbox VM)
+        # so its sockets are usually fine, but resetting is cheap insurance
+        # against any intermediate proxy that drops idle conns on rollback.
+        try:
+            self._session.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._session = self._build_session()
+
+    def clone(self, n: int = 1, *, concurrency: int = 1) -> list["Sandbox"]:
+        """Clone this sandbox *n* times (1.6).
+
+        Internally this executes three steps:
+
+        1. :meth:`create_snapshot` — capture the current state.
+        2. :func:`Sandbox.create` × n — spin up *n* sandboxes from the snapshot.
+        3. :meth:`delete_snapshot` — clean up the ephemeral snapshot.
+
+        If any sandbox creation fails, **all sibling sandboxes that did
+        succeed are killed** before the exception propagates. This prevents
+        leaked sandboxes when a partial failure happens halfway through a
+        concurrent fan-out — the alternative (returning a partial list and
+        raising) loses one or the other in any caller that doesn't carefully
+        wrap the call in try/except. ``delete_snapshot`` for the ephemeral
+        snapshot is still best-effort and runs unconditionally.
+
+        Args:
+            n: Number of clones to create (default: 1).
+            concurrency: Maximum number of parallel ``Sandbox.create`` calls
+                (default: 1, i.e. sequential). When > 1 the calls are dispatched
+                via :class:`concurrent.futures.ThreadPoolExecutor`. The effective
+                worker count is ``min(n, concurrency)`` so passing a value larger
+                than ``n`` is harmless. Useful for fan-out scenarios where a
+                single ``create`` round-trip dominates wall time. When set to 1
+                no threads are spawned and behaviour is byte-identical to the
+                sequential code path.
+
+        Returns:
+            List of *n* new :class:`Sandbox` instances. Order is unspecified
+            when ``concurrency > 1`` (instances appear in the order their
+            backend create call returned). When ``concurrency == 1`` the
+            list preserves submission order.
+
+        Raises:
+            CubeSandboxError: If snapshot creation fails, or if any
+                sandbox creation fails (the first error is re-raised after
+                killing every sibling that did succeed).
+            ApiError: On unexpected backend error.
+        """
+        snapshot = self.create_snapshot()
+        snap_id = snapshot.snapshot_id
+        cfg = self._config
+
+        def _create_one() -> Sandbox:
+            return Sandbox.create(template=snap_id, config=cfg)
+
+        sandboxes: list[Sandbox] = []
+        first_error: BaseException | None = None
+        try:
+            if concurrency <= 1 or n <= 1:
+                # Sequential: short-circuit on first failure to preserve the
+                # historical fail-fast behaviour. Anything created before the
+                # failure stays in ``sandboxes`` and is returned via finally.
+                for _ in range(n):
+                    try:
+                        sandboxes.append(_create_one())
+                    except BaseException as exc:  # noqa: BLE001
+                        first_error = exc
+                        break
+            else:
+                # Local import: keeps the default (sequential) path free of
+                # threading machinery for callers that never opt-in.
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                workers = min(n, concurrency)
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(_create_one) for _ in range(n)]
+                    # Drain every future — never leak a Sandbox just because
+                    # an earlier sibling raised. We collect successes and the
+                    # first exception, then decide what to do once all futures
+                    # have settled.
+                    for fut in as_completed(futures):
+                        try:
+                            sandboxes.append(fut.result())
+                        except BaseException as exc:  # noqa: BLE001
+                            if first_error is None:
+                                first_error = exc
+                            # Keep draining: another in-flight create may
+                            # still succeed and we must not drop its result.
+        finally:
+            try:
+                Sandbox.delete_snapshot(snap_id, config=cfg)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
+        if first_error is not None:
+            # We hit at least one failure. The caller asked for *n* clones
+            # and got fewer — there is no clean way to return both partial
+            # successes and an exception, so kill the orphans and propagate.
+            # This is "all-or-nothing" semantics for the failure case;
+            # without it, a partial result is silently lost when we raise.
+            for sb in sandboxes:
+                try:
+                    sb.kill()
+                except Exception:  # noqa: BLE001 — best-effort cleanup
+                    pass
+            raise first_error
+        return sandboxes
+
+
+    def _build_session(self) -> requests.Session:
+        s = requests.Session()
+        s.headers.update({"Content-Type": "application/json"})
+        return s

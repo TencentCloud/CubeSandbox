@@ -9,7 +9,6 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
-
 use crate::device_tree::{DeviceNode, DeviceTree};
 use crate::interrupt::LegacyUserspaceInterruptManager;
 use crate::interrupt::MsiInterruptManager;
@@ -3810,7 +3809,6 @@ impl DeviceManager {
 
         Ok(Some(ivshmem_device))
     }
-
 
     fn pci_resources(
         &self,

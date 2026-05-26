@@ -922,10 +922,7 @@ impl PassthroughFs {
 
             debug!(
                 "lookup inode {:?} name {:?} fullname {:?} is_filter {:?}",
-                inode_data.inode,
-                name,
-                fullname,
-                is_filter,
+                inode_data.inode, name, fullname, is_filter,
             );
 
             if is_filter {

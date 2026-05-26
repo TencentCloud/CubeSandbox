@@ -870,7 +870,14 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 		// Unknown=true, making the sandbox appear Terminated and triggering a
 		// spurious Destroy cascade.  Skip paused/pausing sandboxes: DeadGC has
 		// nothing useful to do for them.
-		if cb.GetStatus() != nil && cb.GetStatus().IsPaused() {
+		//
+		// The same race exists for snapshot rollback: while updateShimForRollback
+		// runs, the shim holds its sandbox mutex doing delete_vm +
+		// resume_vm_with_config and ttrpc state() either times out or returns
+		// task status=Unknown. RollbackSandbox sets RollingBack on every
+		// container's Status before invoking the shim and clears it via defer,
+		// so DeadGC must respect the flag for the same reason.
+		if cb.GetStatus() != nil && (cb.GetStatus().IsPaused() || cb.GetStatus().Get().RollingBack) {
 			continue
 		}
 		ctx = namespaces.WithNamespace(ctx, cb.Namespace)

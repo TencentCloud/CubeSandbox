@@ -25,8 +25,28 @@ service CubeboxMgr {
   rpc AppSnapshot(AppSnapshotRequest) returns (AppSnapshotResponse);
   // CommitSandbox snapshots an existing running sandbox into a template snapshot.
   rpc CommitSandbox(CommitSandboxRequest) returns (CommitSandboxResponse);
+  // RollbackSandbox restores a running sandbox to a committed snapshot.
+  rpc RollbackSandbox(RollbackSandboxRequest) returns (RollbackSandboxResponse);
   // CleanupTemplate removes local template snapshot/base data from this node.
   rpc CleanupTemplate(CleanupTemplateRequest) returns (CleanupTemplateResponse);
+  // ListSandboxSnapshots inspects the requested snapshot objects on this node.
+  rpc ListSandboxSnapshots(ListSandboxSnapshotsRequest) returns (ListSandboxSnapshotsResponse);
+  // ListLocalSnapshots returns the full catalog of snapshots known to this node.
+  // It is intended for master discovery / inspection so master does not need to
+  // persist physical references (vol/dev/path/meta_dir) in its tables.
+  rpc ListLocalSnapshots(ListLocalSnapshotsRequest) returns (ListLocalSnapshotsResponse);
+  // GetLocalSnapshot returns the physical catalog entry for a single snapshot
+  // by snapshot id. Returns PreConditionFailed when no local record exists.
+  rpc GetLocalSnapshot(GetLocalSnapshotRequest) returns (GetLocalSnapshotResponse);
+  // GetStorageMetrics returns node-local cubecow storage metrics.
+  rpc GetStorageMetrics(GetStorageMetricsRequest) returns (GetStorageMetricsResponse);
+  // InspectStorageVolumes lists every sandbox storage record cubelet owns and
+  // re-resolves cubecow device paths so cubecli can render an authoritative
+  // view without touching boltdb or the cubecow SDK directly.
+  rpc InspectStorageVolumes(InspectStorageVolumesRequest) returns (InspectStorageVolumesResponse);
+  // CleanupOrphanStorageFiles scans configured emptydir format roots, drops
+  // files that have no live sandbox owner, and reports the action taken.
+  rpc CleanupOrphanStorageFiles(CleanupOrphanStorageFilesRequest) returns (CleanupOrphanStorageFilesResponse);
 }
 
 // SELinuxOption are the labels to be applied to the container.
@@ -766,6 +786,16 @@ message AppSnapshotResponse {
   string templateID = 4;
   // The snapshot path where the snapshot was created.
   string snapshotPath = 5;
+  // Authoritative cubecow rootfs object name.
+  string rootfs_vol = 6;
+  // Authoritative cubecow memory object name.
+  string memory_vol = 7;
+  // Authoritative cubecow rootfs object kind.
+  string rootfs_kind = 8;
+  // Authoritative cubecow memory object kind.
+  string memory_kind = 9;
+  // Rootfs size at snapshot time, used by repair and validation.
+  uint64 rootfs_size_bytes = 10;
 }
 
 message CommitSandboxRequest {
@@ -790,6 +820,79 @@ message CommitSandboxResponse {
   string templateID = 4;
   // The snapshot path where the snapshot was created.
   string snapshotPath = 5;
+  // Authoritative cubecow rootfs object name.
+  string rootfs_vol = 6;
+  // Authoritative cubecow memory object name.
+  string memory_vol = 7;
+  // Authoritative cubecow rootfs object kind.
+  string rootfs_kind = 8;
+  // Authoritative cubecow memory object kind.
+  string memory_kind = 9;
+  // Diagnostic-only rootfs device path; re-resolve from rootfs_vol on use.
+  string rootfs_dev = 10;
+  // Diagnostic-only memory device path; re-resolve from memory_vol on use.
+  string memory_dev = 11;
+  // Rootfs size at snapshot time, used by rollback resize planning.
+  uint64 rootfs_size_bytes = 12;
+}
+
+message RollbackSandboxRequest {
+  // requestID reqID
+  string requestID = 1;
+  // ID of the running sandbox to rollback.
+  string sandboxID = 2;
+  // Logical snapshot ID. When rootfs_vol/memory_vol/meta_dir are empty, cubelet
+  // resolves them from its local snapshot catalog keyed by this id.
+  string snapshotID = 3;
+  // Optional cubecow rootfs object name for the snapshot. Empty means "resolve
+  // from local catalog using snapshotID".
+  string rootfs_vol = 4;
+  // Optional cubecow memory object name for the snapshot. Empty means "resolve
+  // from local catalog using snapshotID".
+  string memory_vol = 5;
+  // Optional snapshot metadata directory. Empty means "resolve from local
+  // catalog using snapshotID".
+  string meta_dir = 6;
+  // New sandbox rootfs generation to derive.
+  uint32 new_gen = 7;
+  // Minimum rootfs size after deriving the new generation.
+  uint64 desired_size = 8;
+}
+
+message RollbackSandboxResponse {
+  // requestID reqID
+  string requestID = 1;
+  // Ret.
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  // ID of the sandbox that was rolled back.
+  string sandboxID = 3;
+  // Logical snapshot ID.
+  string snapshotID = 4;
+  // New sandbox rootfs volume name.
+  string rootfs_vol = 5;
+  // New sandbox rootfs kind.
+  string rootfs_kind = 6;
+  // Diagnostic-only rootfs device path; re-resolve from rootfs_vol on use.
+  string rootfs_dev = 7;
+  // New sandbox rootfs generation.
+  uint32 new_gen = 8;
+  // Old sandbox rootfs volume name, if known.
+  string old_rootfs_vol = 9;
+  // Whether deleting old_rootfs_vol succeeded.
+  bool old_rootfs_deleted = 10;
+  // Snapshot memory volume cubelet resolved during rollback. Master records it
+  // on the runtime ref so cleanup paths can detach the memory binding without
+  // re-fetching the local catalog.
+  string memory_vol = 11;
+}
+
+message CowObjectRef {
+  // Authoritative cubecow object name.
+  string name = 1;
+  // cubecow object kind: "snapshot" or "volume".
+  string kind = 2;
+  // Logical role: "rootfs", "memory", "build_rootfs", etc.
+  string role = 3;
 }
 
 message CleanupTemplateRequest {
@@ -797,8 +900,14 @@ message CleanupTemplateRequest {
   string requestID = 1;
   // Logical template ID.
   string templateID = 2;
-  // Snapshot path recorded on this node, if any.
+  // Snapshot path recorded on this node, if any. DEPRECATED in v4: cubelet
+  // resolves this from local catalog; legacy masters may still send it for
+  // backward compatibility but new masters MUST send empty.
   string snapshotPath = 3;
+  // cubecow objects that should be removed on this node. DEPRECATED in v4:
+  // cubelet derives objects from local catalog; legacy masters may still
+  // populate this for backward compatibility but new masters MUST send empty.
+  repeated CowObjectRef objects = 4;
 }
 
 message CleanupTemplateResponse {
@@ -808,4 +917,208 @@ message CleanupTemplateResponse {
   cubelet.services.errorcode.v1.Ret ret = 2;
   // Logical template ID.
   string templateID = 3;
+}
+
+message ListSandboxSnapshotsRequest {
+  // requestID reqID
+  string requestID = 1;
+  // Logical sandbox ID for logging / correlation.
+  string sandboxID = 2;
+  // cubecow objects that should be inspected on this node.
+  repeated CowObjectRef objects = 3;
+  // Snapshot metadata directory that must remain restorable.
+  string meta_dir = 4;
+}
+
+message CowObjectStatus {
+  // Authoritative cubecow object name.
+  string name = 1;
+  // cubecow object kind: "snapshot" or "volume".
+  string kind = 2;
+  // Logical role.
+  string role = 3;
+  // Whether the object currently exists on this node.
+  bool exists = 4;
+  // Current device path if resolvable.
+  string device_path = 5;
+  // Current size in bytes if resolvable.
+  uint64 size_bytes = 6;
+  // Object-specific inspection error if any.
+  string error_message = 7;
+}
+
+message ListSandboxSnapshotsResponse {
+  // requestID reqID
+  string requestID = 1;
+  // Ret.
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  // Logical sandbox ID.
+  string sandboxID = 3;
+  // Inspection results for requested cubecow objects.
+  repeated CowObjectStatus objects = 4;
+  // Whether the snapshot metadata directory exists.
+  bool meta_dir_exists = 5;
+  // Canonical snapshot state directory used for restore.
+  string snapshot_state_path = 6;
+  // Whether the snapshot state directory exists.
+  bool snapshot_state_exists = 7;
+  // Path inspection error if any.
+  string path_error_message = 8;
+}
+
+message ListLocalSnapshotsRequest {
+  // requestID reqID
+  string requestID = 1;
+}
+
+message LocalSnapshotInfo {
+  // Logical snapshot ID.
+  string snapshotID = 1;
+  // Instance type (e.g. "cubebox").
+  string instance_type = 2;
+  // Spec directory used to scope the snapshot (e.g. "2C2000M").
+  string spec_dir = 3;
+  // Absolute on-disk snapshot path.
+  string snapshot_path = 4;
+  // Snapshot metadata directory used for restore.
+  string meta_dir = 5;
+  // Authoritative cubecow rootfs object name.
+  string rootfs_vol = 6;
+  // Authoritative cubecow rootfs object kind.
+  string rootfs_kind = 7;
+  // Authoritative cubecow memory object name.
+  string memory_vol = 8;
+  // Authoritative cubecow memory object kind.
+  string memory_kind = 9;
+  // Rootfs size in bytes at snapshot time.
+  uint64 rootfs_size_bytes = 10;
+  // RFC3339 timestamp captured at commit time.
+  string created_at = 11;
+  // Build rootfs object name (template-build path only). Used to clean up
+  // the temporary writable layer during CleanupTemplate.
+  string build_rootfs_vol = 12;
+  // Build rootfs object kind.
+  string build_rootfs_kind = 13;
+  // Catalog entry kind: "template" (AppSnapshot) or "runtime_snapshot"
+  // (CommitSandbox). Empty for pre-v4 legacy entries.
+  string kind = 14;
+}
+
+message ListLocalSnapshotsResponse {
+  // requestID reqID
+  string requestID = 1;
+  // Ret.
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  // Snapshots known locally to this cubelet.
+  repeated LocalSnapshotInfo snapshots = 3;
+}
+
+message GetLocalSnapshotRequest {
+  // requestID reqID
+  string requestID = 1;
+  // Logical snapshot ID to look up.
+  string snapshotID = 2;
+}
+
+message GetLocalSnapshotResponse {
+  // requestID reqID
+  string requestID = 1;
+  // Ret.
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  // Catalog entry. Nil/empty when not found.
+  LocalSnapshotInfo snapshot = 3;
+}
+
+message GetStorageMetricsRequest {
+  // requestID reqID
+  string requestID = 1;
+}
+
+message GetStorageMetricsResponse {
+  // requestID reqID
+  string requestID = 1;
+  // Ret.
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  // Node identifier that produced this metric snapshot.
+  string node_id = 3;
+  // Timestamp when metrics were collected.
+  int64 timestamp_unix_nano = 4;
+  // Storage metrics reported by cubecow.
+  map<string, uint64> metrics = 5;
+}
+
+// StorageVolumeInfo describes a single backend file/volume entry attached to a
+// sandbox, as understood by cubelet at the time of inspection.
+message StorageVolumeInfo {
+  // Logical mount name within the sandbox spec.
+  string name = 1;
+  // Filesystem path to mount inside the sandbox. For cubecow volumes this is
+  // re-resolved through the engine on every call.
+  string file_path = 2;
+  // Size limit in bytes (0 if not pre-allocated).
+  uint64 size_limit = 3;
+  // cubecow object name backing this volume. Empty for legacy file-only
+  // entries that bypass cubecow.
+  string volume_name = 4;
+  // cubecow object kind ("volume"/"snapshot"). Empty for non-cubecow entries.
+  string kind = 5;
+  // Generation number, used by rollback to derive successor objects.
+  uint32 gen = 6;
+}
+
+// SandboxStorageInfo aggregates every backend volume cubelet has registered
+// for a single sandbox.
+message SandboxStorageInfo {
+  string namespace = 1;
+  string sandboxID = 2;
+  repeated StorageVolumeInfo volumes = 3;
+}
+
+message InspectStorageVolumesRequest {
+  // requestID reqID
+  string requestID = 1;
+  // Optional bucket name; defaults to "emptydir/v1" when empty.
+  string bucket = 2;
+}
+
+message InspectStorageVolumesResponse {
+  // requestID reqID
+  string requestID = 1;
+  // Ret.
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  // Sandbox storage records, after device-path refresh.
+  repeated SandboxStorageInfo sandboxes = 3;
+}
+
+message CleanupOrphanStorageFilesRequest {
+  // requestID reqID
+  string requestID = 1;
+  // Optional bucket name; defaults to "emptydir/v1" when empty.
+  string bucket = 2;
+  // Format roots cubelet should scan, e.g. "512Mi" / "1Gi" / "others". When
+  // empty cubelet falls back to a built-in default list.
+  repeated string formats = 3;
+  // When true cubelet only reports orphans without removing them.
+  bool dry_run = 4;
+}
+
+message StorageOrphanEntry {
+  // Format root the file lives under (e.g. "512Mi").
+  string format = 1;
+  // Absolute path to the orphan file.
+  string file_path = 2;
+  // True when the file was successfully removed by this RPC. Always false for
+  // dry-run responses.
+  bool removed = 3;
+  // Removal error if any (only set when removed=false and dry_run=false).
+  string error_message = 4;
+}
+
+message CleanupOrphanStorageFilesResponse {
+  // requestID reqID
+  string requestID = 1;
+  // Ret.
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  // Orphan files cubelet found (and possibly removed).
+  repeated StorageOrphanEntry orphans = 3;
 }

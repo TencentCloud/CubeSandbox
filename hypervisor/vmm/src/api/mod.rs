@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use service::Error as VmmServiceError;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use vm_migration::MigratableError;
+use vm_migration::{MigratableError, SnapshotConfig};
 
 pub const SNAPSHOT_VERSION: &str = "1.0.3";
 
@@ -241,12 +241,6 @@ pub struct VmRemoveDeviceData {
 }
 
 #[derive(Clone, Deserialize, Serialize, Default, Debug)]
-pub struct VmSnapshotConfig {
-    /// The snapshot destination URL
-    pub destination_url: String,
-}
-
-#[derive(Clone, Deserialize, Serialize, Default, Debug)]
 pub struct VmCoredumpData {
     /// The coredump destination file
     pub destination_url: String,
@@ -317,7 +311,7 @@ pub enum ApiRequest {
     VmPause,
 
     /// Pause a VM to snapshot
-    VmPauseToSnapshot(Arc<VmSnapshotConfig>),
+    VmPauseToSnapshot(Arc<SnapshotConfig>),
 
     /// Resume a VM from snapshot
     VmResumeFromSnapshot(Arc<RestoreConfig>),
@@ -383,7 +377,7 @@ pub enum ApiRequest {
     VmAddVsock(Arc<VsockConfig>),
 
     /// Take a VM snapshot
-    VmSnapshot(Arc<VmSnapshotConfig>),
+    VmSnapshot(Arc<SnapshotConfig>),
 
     /// Restore from a VM snapshot
     VmRestore(Arc<RestoreConfig>),
@@ -436,7 +430,7 @@ pub enum VmAction {
     Resume,
 
     /// Snapshot VM
-    PauseToSnapshot(Arc<VmSnapshotConfig>),
+    PauseToSnapshot(Arc<SnapshotConfig>),
 
     /// Restore VM
     ResumeFromSnapshot(Arc<RestoreConfig>),
@@ -484,7 +478,7 @@ pub enum VmAction {
     Restore(Arc<RestoreConfig>),
 
     /// Snapshot VM
-    Snapshot(Arc<VmSnapshotConfig>),
+    Snapshot(Arc<SnapshotConfig>),
 
     /// Coredump VM
     #[cfg(feature = "guest_debug")]
@@ -571,7 +565,7 @@ pub fn vm_resume() -> ApiResult<Option<Body>> {
     vm_action(VmAction::Resume)
 }
 
-pub fn vm_pause2snapshot(data: Arc<VmSnapshotConfig>) -> ApiResult<Option<Body>> {
+pub fn vm_pause2snapshot(data: Arc<SnapshotConfig>) -> ApiResult<Option<Body>> {
     vm_action(VmAction::PauseToSnapshot(data))
 }
 
@@ -595,7 +589,7 @@ pub fn vm_send_migration(data: Arc<VmSendMigrationData>) -> ApiResult<Option<Bod
     vm_action(VmAction::SendMigration(data))
 }
 
-pub fn vm_snapshot(data: Arc<VmSnapshotConfig>) -> ApiResult<Option<Body>> {
+pub fn vm_snapshot(data: Arc<SnapshotConfig>) -> ApiResult<Option<Body>> {
     vm_action(VmAction::Snapshot(data))
 }
 

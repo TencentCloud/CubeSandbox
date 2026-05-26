@@ -5,27 +5,22 @@
 package storage
 
 import (
+	"context"
 	"fmt"
-	"log"
 	"os"
-	"path"
-	"path/filepath"
 	"text/tabwriter"
 
-	jsoniter "github.com/json-iterator/go"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/urfave/cli/v2"
-	bolt "go.etcd.io/bbolt"
+	"google.golang.org/grpc/status"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	cubecommands "github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
 )
 
-var (
-	defaulFormat = []string{"512Mi", "others"}
-)
 var cleanup = &cli.Command{
 	Name:  "cleanup",
-	Usage: "cleanup blk files",
+	Usage: "cleanup orphan emptydir files via cubelet gRPC",
 	Flags: []cli.Flag{
 		&cli.StringFlag{
 			Name:    "bucket",
@@ -35,132 +30,87 @@ var cleanup = &cli.Command{
 		},
 		&cli.StringSliceFlag{
 			Name:  "format",
-			Usage: "format such as \"512Mi\", \"1Gi\",\"others\"",
+			Usage: "format roots to scan, e.g. \"512Mi\", \"1Gi\", \"others\". When omitted cubelet uses its default list.",
 		},
 		&cli.BoolFlag{
-			Name:  "printall",
-			Usage: "print all result",
+			Name:  "dry-run",
+			Usage: "list orphans but do not delete",
 		},
 	},
-	Action: func(context *cli.Context) error {
-
-		dbFiles := readDbs(context)
-
-		poolDefaultFormatSizeList := context.StringSlice("format")
-		if poolDefaultFormatSizeList == nil {
-			poolDefaultFormatSizeList = defaulFormat
+	Action: func(cliCtx *cli.Context) error {
+		conn, grpcCtx, cancel, err := cubecommands.NewGrpcConn(cliCtx)
+		if err != nil {
+			return fmt.Errorf("cubelet must be running to cleanup storage; start cubelet first: %w", err)
 		}
+		defer conn.Close()
+		defer cancel()
 
-		allformatFiles := make(map[string]map[string]struct{})
-		for _, s := range poolDefaultFormatSizeList {
-			baseFormatPath := filepath.Join("/data/cubelet/storage", storageDir, "emptydir", s)
-			allFiles := readDir(baseFormatPath)
-			allformatFiles[s] = allFiles
+		client := cubebox.NewCubeboxMgrClient(conn)
+		grpcCtx, grpcCancel := context.WithTimeout(grpcCtx, cliCtx.Duration("timeout"))
+		defer grpcCancel()
+
+		dryRun := cliCtx.Bool("dry-run")
+		previewReq := &cubebox.CleanupOrphanStorageFilesRequest{
+			Bucket:  cliCtx.String("bucket"),
+			Formats: cliCtx.StringSlice("format"),
+			DryRun:  true,
 		}
-		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
-		fmt.Fprintln(w, "Format\tFile\tInDB\tID")
-
-		needClean := []string{}
-		for ft, v := range allformatFiles {
-			for file, _ := range v {
-				inDB := false
-				sandboxID := ""
-				if info, ok := dbFiles[file]; ok {
-					inDB = true
-					sandboxID = info.SandboxID
-				}
-				if context.Bool("printall") {
-					if _, err := fmt.Fprintf(w, "%s\t%s\t%v\t%s\n", ft, file, inDB, sandboxID); err != nil {
-						return err
-					}
-				} else if inDB {
-					if _, err := fmt.Fprintf(w, "%s\t%s\t%v\t%s\n", ft, file, inDB, sandboxID); err != nil {
-						return err
-					}
-				}
-				if !inDB {
-					needClean = append(needClean, file)
-				}
+		previewResp, err := client.CleanupOrphanStorageFiles(grpcCtx, previewReq)
+		if err != nil {
+			if st, ok := status.FromError(err); ok && st.Code().String() == "Unavailable" {
+				return fmt.Errorf("cubelet must be running to cleanup storage; start cubelet first")
 			}
+			return fmt.Errorf("CleanupOrphanStorageFiles preview failed: %w", err)
+		}
+		if ret := previewResp.GetRet(); ret == nil || ret.GetRetCode() != errorcode.ErrorCode_Success {
+			msg := "<empty>"
+			if ret != nil {
+				msg = ret.GetRetMsg()
+			}
+			return fmt.Errorf("CleanupOrphanStorageFiles returned error: %s", msg)
+		}
+
+		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
+		fmt.Fprintln(w, "Format\tFile\tStatus")
+		orphans := previewResp.GetOrphans()
+		for _, e := range orphans {
+			fmt.Fprintf(w, "%s\t%s\torphan\n", e.GetFormat(), e.GetFilePath())
 		}
 		w.Flush()
-		if !commands.AskForConfirm("init will destroy ALL of the resource above, continue only if you confirm", 3) {
+
+		if dryRun {
 			return nil
 		}
-		for _, file := range needClean {
-			if err := os.RemoveAll(file); err != nil {
-				return err
-			}
+		if len(orphans) == 0 {
+			return nil
 		}
+		if !cubecommands.AskForConfirm("cleanup will destroy ALL of the resources above, continue only if you confirm", 3) {
+			return nil
+		}
+
+		actionReq := &cubebox.CleanupOrphanStorageFilesRequest{
+			Bucket:  cliCtx.String("bucket"),
+			Formats: cliCtx.StringSlice("format"),
+			DryRun:  false,
+		}
+		actionResp, err := client.CleanupOrphanStorageFiles(grpcCtx, actionReq)
+		if err != nil {
+			return fmt.Errorf("CleanupOrphanStorageFiles failed: %w", err)
+		}
+		if ret := actionResp.GetRet(); ret == nil || ret.GetRetCode() != errorcode.ErrorCode_Success {
+			msg := "<empty>"
+			if ret != nil {
+				msg = ret.GetRetMsg()
+			}
+			return fmt.Errorf("CleanupOrphanStorageFiles returned error: %s", msg)
+		}
+
+		w2 := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
+		fmt.Fprintln(w2, "Format\tFile\tRemoved\tError")
+		for _, e := range actionResp.GetOrphans() {
+			fmt.Fprintf(w2, "%s\t%s\t%v\t%s\n", e.GetFormat(), e.GetFilePath(), e.GetRemoved(), e.GetErrorMessage())
+		}
+		w2.Flush()
 		return nil
 	},
-}
-
-func readDbs(context *cli.Context) map[string]*storage.StorageInfo {
-	basePath := filepath.Join(context.String("state"), storageDir, "db")
-	opt := utils.MakeBoltDBOption()
-	opt.ReadOnly = true
-	log.Printf("basePath: %s", basePath)
-	cs, err := utils.NewCubeStoreExt(basePath, "meta.db", 10, opt)
-	if err != nil {
-		if err == bolt.ErrTimeout {
-			err = fmt.Errorf("should stop cubelet first,err:%v", err)
-		}
-		log.Printf("fail:%v", err)
-		return map[string]*storage.StorageInfo{}
-	}
-	all, err := cs.ReadAll(context.String("bucket"))
-	if err != nil {
-		log.Printf("read db fail:%v", err)
-		return map[string]*storage.StorageInfo{}
-	}
-	if err != nil {
-		return map[string]*storage.StorageInfo{}
-	}
-
-	dirtyList := make(map[string]*storage.StorageInfo)
-	for sandBoxID, v := range all {
-		if sandBoxID == "cube_stub" {
-			continue
-		}
-		bf := &storage.StorageInfo{}
-		err = jsoniter.Unmarshal(v, bf)
-		if err != nil {
-			continue
-		}
-		for _, v := range bf.Volumes {
-			if fileExist, _ := utils.DenExist(v.FilePath); fileExist {
-				dirtyList[v.FilePath] = bf
-			}
-		}
-	}
-	return dirtyList
-}
-
-func readDir(baseFormatPath string) map[string]struct{} {
-	log.Printf("basePath: %s", baseFormatPath)
-	all := map[string]struct{}{}
-	denList, err := os.ReadDir(baseFormatPath)
-	if err != nil {
-		return all
-	}
-	for _, den := range denList {
-		if den.IsDir() {
-			baseDirList, err := os.ReadDir(path.Clean(filepath.Join(baseFormatPath, den.Name())))
-			if err != nil {
-				continue
-			}
-			for _, bdir := range baseDirList {
-				if !bdir.IsDir() {
-					filePath := path.Join(path.Clean(filepath.Join(baseFormatPath, den.Name())), bdir.Name())
-					all[filePath] = struct{}{}
-				}
-			}
-			continue
-		}
-		filePath := path.Join(baseFormatPath, den.Name())
-
-		all[filePath] = struct{}{}
-	}
-	return all
 }

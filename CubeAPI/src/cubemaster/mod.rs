@@ -12,11 +12,17 @@
 /// Implemented on CubeMaster (see pkg/service/sandbox/types):
 ///   - GET    /cube/sandbox/info       get single sandbox detail (query: sandbox_id, instance_type)
 ///   - POST   /cube/sandbox/update     update sandbox (action: "pause" | "resume")
+/// Implemented on CubeMaster (snapshot APIs):
+///   - POST   /cube/snapshot                          create runtime snapshot (synchronous terminal result)
+///   - GET    /cube/snapshot                          list snapshots (paginated)
+///   - DELETE /cube/snapshot/{snapshot_id}            delete snapshot (synchronous terminal result)
+///   - POST   /cube/sandbox/{sandbox_id}/rollback     rollback sandbox to snapshot (synchronous terminal result)
+///   - GET    /cube/operation/{operation_id}          query operation/audit record (not required for snapshot completion)
+///
 /// New APIs required (❌ not yet on CubeMaster — pending implementation):
 ///   - POST   /cube/sandbox/timeout    set absolute TTL
 ///   - POST   /cube/sandbox/refresh    extend TTL by delta
 ///   - POST   /cube/sandbox/logs       fetch sandbox logs
-///   - POST   /cube/sandbox/snapshot   create sandbox snapshot
 ///   - POST   /cube/sandbox/commit     commit sandbox → template image
 ///   - GET    /cube/template/build/{id}/status  build status poll
 ///   - DELETE /cube/template           delete template
@@ -186,13 +192,14 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
-    /// POST /cube/sandbox/snapshot — create a named runtime snapshot.
-    /// ❌ New API required on CubeMaster.
-    pub async fn create_sandbox_snapshot(
+    // ── Snapshot APIs ───────────────────────────────────────────────────────
+
+    /// POST /cube/snapshot — create a runtime snapshot.
+    pub async fn create_snapshot(
         &self,
-        req: &SandboxSnapshotRequest,
-    ) -> Result<SandboxSnapshotResponse, CubeMasterError> {
-        let url = format!("{}/cube/sandbox/snapshot", self.base_url);
+        req: &CreateSnapshotRequest,
+    ) -> Result<CreateSnapshotResponse, CubeMasterError> {
+        let url = format!("{}/cube/snapshot", self.base_url);
         let resp = self
             .inner
             .post(&url)
@@ -202,6 +209,103 @@ impl CubeMasterClient {
             .map_err(CubeMasterError::Http)?;
         parse_response(resp).await
     }
+
+    /// GET /cube/snapshot — list snapshots (paginated).
+    pub async fn list_snapshots(
+        &self,
+        req: &ListSnapshotsRequest,
+    ) -> Result<ListSnapshotsResponse, CubeMasterError> {
+        let url = format!("{}/cube/snapshot", self.base_url);
+        let mut builder = self
+            .inner
+            .get(&url)
+            .query(&[("request_id", &req.request_id)])
+            .query(&[("instance_type", &req.instance_type)]);
+        if let Some(sid) = &req.sandbox_id {
+            builder = builder.query(&[("sandbox_id", sid)]);
+        }
+        if let Some(name) = &req.name {
+            builder = builder.query(&[("name", name)]);
+        }
+        if let Some(status) = &req.status {
+            builder = builder.query(&[("status", status)]);
+        }
+        if let Some(limit) = req.limit {
+            builder = builder.query(&[("limit", limit.to_string())]);
+        }
+        // Only forward `next_token` when it carries a real cursor.  An empty
+        // string is treated by some CubeMaster builds as "start over from
+        // page 0" instead of "omit the parameter", which silently breaks
+        // pagination (Bug 3).  Defensively normalise it here.
+        if let Some(token) = req.next_token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            builder = builder.query(&[("next_token", token)]);
+        }
+        let resp = builder.send().await.map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/snapshot/{snapshot_id} — fetch a single snapshot.
+    pub async fn get_snapshot(
+        &self,
+        snapshot_id: &str,
+        include_request: bool,
+    ) -> Result<SnapshotDetailResponse, CubeMasterError> {
+        validate_path_segment("snapshot_id", snapshot_id)?;
+        let url = format!("{}/cube/snapshot/{}", self.base_url, snapshot_id);
+        let mut builder = self.inner.get(&url);
+        if include_request {
+            builder = builder.query(&[("include_request", "true")]);
+        }
+        let resp = builder.send().await.map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// DELETE /cube/snapshot/{snapshot_id} — delete a snapshot.
+    pub async fn delete_snapshot(
+        &self,
+        snapshot_id: &str,
+        req: &DeleteSnapshotRequest,
+    ) -> Result<DeleteSnapshotResponse, CubeMasterError> {
+        validate_path_segment("snapshot_id", snapshot_id)?;
+        let url = format!("{}/cube/snapshot/{}", self.base_url, snapshot_id);
+        let resp = self
+            .inner
+            .delete(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// POST /cube/sandbox/{sandbox_id}/rollback — rollback sandbox to a snapshot.
+    pub async fn rollback_sandbox(
+        &self,
+        sandbox_id: &str,
+        req: &RollbackRequest,
+    ) -> Result<RollbackResponse, CubeMasterError> {
+        validate_path_segment("sandbox_id", sandbox_id)?;
+        let url = format!("{}/cube/sandbox/{}/rollback", self.base_url, sandbox_id);
+        let resp = self
+            .inner
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    // NOTE: there used to be a `CubeMasterClient::get_operation()` wrapper
+    // around `GET /cube/operation/{id}`.  It was removed in the synchronous
+    // delete contract cleanup: snapshot create/rollback/delete now return
+    // the terminal operation in their primary response, so CubeAPI no longer
+    // needs to poll.  CubeMaster still serves `/cube/operation/{id}` for
+    // human audit / out-of-band diagnostics — the snapshot API is
+    // synchronous (CubeAPI waits for a terminal state and does not
+    // expose a polling interface to callers).  Add a new wrapper
+    // back here only if a programmatic CubeAPI consumer of audit data
+    // emerges.
 
     // ── Template APIs ─────────────────────────────────────────────────────
     // Maps to CubeMaster `/cube/template` (see
@@ -397,20 +501,29 @@ impl CubeMasterError {
     /// True when CubeMaster doesn't have the endpoint yet (HTTP 404 on the path).
     pub fn is_endpoint_missing(&self) -> bool {
         match self {
-            Self::Api { ret_code, ret_msg } => {
-                *ret_code == 404 || ret_msg.to_lowercase().contains("not found")
-            }
+            Self::Api { ret_code, .. } => *ret_code == 404,
             Self::Http(e) => e.status().map_or(false, |s| s == 404),
             _ => false,
         }
     }
 }
 
+/// Restrict path segments to characters that CubeMaster's resource identifiers
+/// are guaranteed to use (`tpl-…`, `snap-…`, `sb-…`, `op-…`, `node-…`,
+/// `job-…`, `req-…`).  We deliberately reject `_`, `.`, and `:` even though
+/// they are syntactically legal in URI path segments, because:
+///
+/// * none of CubeMaster's generated IDs ever produce them, so any value that
+///   contains one is almost certainly malformed or attacker-supplied;
+/// * `:` carries scheme / port semantics in some URL parsers and was reported
+///   as a potential source of routing ambiguity;
+/// * `.` and `..` are reserved for relative path resolution and easily slip
+///   through naive equality checks.
 fn validate_path_segment(name: &'static str, value: &str) -> Result<(), CubeMasterError> {
     let is_valid = !value.is_empty()
         && value
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+            .all(|b| b == b'-' || b.is_ascii_alphanumeric());
 
     if is_valid {
         Ok(())
@@ -431,15 +544,19 @@ pub struct RetCode {
 }
 
 impl RetCode {
-    pub fn into_result(self) -> Result<(), CubeMasterError> {
+    pub fn as_result(&self) -> Result<(), CubeMasterError> {
         if self.ret_code == 0 || self.ret_code == 200 {
             Ok(())
         } else {
             Err(CubeMasterError::Api {
                 ret_code: self.ret_code,
-                ret_msg: self.ret_msg,
+                ret_msg: self.ret_msg.clone(),
             })
         }
+    }
+
+    pub fn into_result(self) -> Result<(), CubeMasterError> {
+        self.as_result()
     }
 }
 
@@ -1075,37 +1192,228 @@ pub struct SandboxLogLine {
     pub level: String,
 }
 
-// ─── Sandbox snapshot ──────────────────────────────────────────────────────
-// ❌ New API — not yet implemented on CubeMaster
+// ─── Snapshot APIs ─────────────────────────────────────────────────────
 
+/// POST /cube/snapshot — request body.
 #[derive(Debug, Serialize)]
-pub struct SandboxSnapshotRequest {
-    #[serde(rename = "RequestID", alias = "requestID")]
+pub struct CreateSnapshotRequest {
     pub request_id: String,
-    #[serde(rename = "sandboxID")]
     pub sandbox_id: String,
-    #[serde(rename = "instanceType")]
-    pub instance_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub names: Vec<String>,
-    pub sync: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<i32>,
+    pub display_name: Option<String>,
+    pub create_request: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+/// Snapshot resource as returned by CubeMaster.
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
-pub struct SandboxSnapshotResponse {
-    #[serde(rename = "RequestID", alias = "requestID")]
-    pub request_id: String,
-    #[serde(rename = "sandboxID", default)]
-    pub sandbox_id: String,
+pub struct SnapshotResource {
     pub snapshot_id: String,
     #[serde(default)]
     pub names: Vec<String>,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub origin_sandbox_id: String,
+    #[serde(default)]
+    pub origin_node_id: String,
+    #[serde(default)]
+    pub instance_type: String,
+    #[serde(default)]
+    pub storage_backend: String,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// Slimmed mirror of CubeMaster's nested `operation` block returned alongside
+/// snapshot create / rollback / delete responses.  Master populates the full
+/// `templatecenter.SnapshotOperationInfo` (operation, phase, progress, error
+/// message, audit timestamps, …) but CubeAPI only ever reads `operation_id`
+/// (for the `x-operation-id` audit header) and `status` (used by
+/// `ensure_operation_ready` to enforce CubeMaster's synchronous contract).
+/// Anything else is recoverable via `GET /cube/operation/{id}` on master, so
+/// we keep this type intentionally minimal — extra fields here only invite
+/// dead-code drift the next time master adds a new column.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct SnapshotOperationResource {
+    #[serde(default)]
+    pub operation_id: String,
+    #[serde(default)]
+    pub status: String,
+}
+
+/// POST /cube/snapshot — response.
+///
+/// The snapshot create flow is synchronous: by the time CubeMaster responds
+/// `ret_code == 0`, the snapshot is already `READY` (or master returns an
+/// error).  Callers therefore only need the `snapshot` payload to extract
+/// the new `snapshot_id` and the populated names — the inner `operation`
+/// block that older async clients consulted is intentionally not surfaced
+/// on this struct.  If you need it for audit purposes, hit
+/// `GET /cube/operation/{operation_id}` on master directly.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct CreateSnapshotResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
     pub ret: RetCode,
+    pub snapshot: SnapshotResource,
+}
+
+/// GET /cube/snapshot — query params (built manually as query string).
+#[derive(Debug)]
+pub struct ListSnapshotsRequest {
+    pub request_id: String,
+    pub instance_type: String,
+    pub sandbox_id: Option<String>,
+    pub name: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<i32>,
+    pub next_token: Option<String>,
+}
+
+/// GET /cube/snapshot — response.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct ListSnapshotsResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default, alias = "data")]
+    pub items: Vec<SnapshotResource>,
+    #[serde(default)]
+    pub next_token: String,
+}
+
+/// GET /cube/snapshot/{snapshot_id} — response.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct SnapshotDetailResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    pub snapshot: SnapshotResource,
+}
+
+/// DELETE /cube/snapshot/{snapshot_id} — request body.
+#[derive(Debug, Serialize)]
+pub struct DeleteSnapshotRequest {
+    pub request_id: String,
+    pub instance_type: String,
+}
+
+/// DELETE /cube/snapshot/{snapshot_id} — response.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct DeleteSnapshotResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub snapshot_id: String,
+    #[serde(default)]
+    pub operation_id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub operation: Option<SnapshotOperationResource>,
+}
+
+impl DeleteSnapshotResponse {
+    pub fn operation_id(&self) -> Option<&str> {
+        if let Some(value) = non_empty_str(self.operation_id.as_str()) {
+            return Some(value);
+        }
+        self.operation
+            .as_ref()
+            .map(|operation| operation.operation_id.as_str())
+            .and_then(non_empty_str)
+    }
+
+    pub fn status(&self) -> Option<&str> {
+        if let Some(value) = non_empty_str(self.status.as_str()) {
+            return Some(value);
+        }
+        self.operation
+            .as_ref()
+            .map(|operation| operation.status.as_str())
+            .and_then(non_empty_str)
+    }
+}
+
+/// POST /cube/sandbox/{sandbox_id}/rollback — request body.
+#[derive(Debug, Serialize)]
+pub struct RollbackRequest {
+    pub request_id: String,
+    pub snapshot_id: String,
+    pub instance_type: String,
+}
+
+/// POST /cube/sandbox/{sandbox_id}/rollback — response.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct RollbackResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub sandbox_id: String,
+    #[serde(default)]
+    pub snapshot_id: String,
+    #[serde(default)]
+    pub operation_id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub operation: Option<SnapshotOperationResource>,
+}
+
+impl RollbackResponse {
+    pub fn operation_id(&self) -> Option<&str> {
+        if let Some(value) = non_empty_str(self.operation_id.as_str()) {
+            return Some(value);
+        }
+        self.operation
+            .as_ref()
+            .map(|operation| operation.operation_id.as_str())
+            .and_then(non_empty_str)
+    }
+
+    pub fn status(&self) -> Option<&str> {
+        if let Some(value) = non_empty_str(self.status.as_str()) {
+            return Some(value);
+        }
+        self.operation
+            .as_ref()
+            .map(|operation| operation.status.as_str())
+            .and_then(non_empty_str)
+    }
+}
+
+// `OperationResponse` (the wrapper for `GET /cube/operation/{id}`) used to
+// live here.  It was removed alongside `CubeMasterClient::get_operation` once
+// the snapshot create/rollback/delete contracts became synchronous, so the
+// only consumer of `/cube/operation/{id}` left in the system is human audit.
+// If a programmatic consumer comes back, restore the wrapper next to the
+// commented-out method on `CubeMasterClient`.
+
+// Returns the trimmed slice of `value` if it contains any non-whitespace
+// characters, otherwise `None`.
+//
+// We intentionally return the trimmed slice (not the original) because the
+// only callers feed the result into places that reject surrounding whitespace
+// downstream — most importantly the `x-operation-id` HTTP response header, where
+// `HeaderValue::from_str` would accept the spaces as valid `field-value`
+// octets but RFC 9110 then requires recipients to strip them, producing a
+// header value that drifts between hops. Trimming here keeps the
+// "non-empty" promise and the actual returned bytes consistent.
+fn non_empty_str(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 // ─── Helper: parse HTTP response ───────────────────────────────────────────
@@ -1476,11 +1784,38 @@ pub struct NodeResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_path_segment, CubeMasterError, GetSandboxResponse, SandboxInfo};
+    use super::{
+        non_empty_str, validate_path_segment, CubeMasterError, GetSandboxResponse, SandboxInfo,
+    };
+
+    #[test]
+    fn non_empty_str_trims_surrounding_whitespace() {
+        assert_eq!(non_empty_str(" op-1 "), Some("op-1"));
+        assert_eq!(non_empty_str("\top-1\n"), Some("op-1"));
+        assert_eq!(non_empty_str("op-1"), Some("op-1"));
+    }
+
+    #[test]
+    fn non_empty_str_treats_blank_input_as_none() {
+        assert_eq!(non_empty_str(""), None);
+        assert_eq!(non_empty_str("   "), None);
+        assert_eq!(non_empty_str("\t\n"), None);
+    }
 
     #[test]
     fn build_id_path_segment_accepts_alphanumeric_and_hyphen() {
-        validate_path_segment("build_id", "abc-123").expect("build id should be valid");
+        for value in [
+            "abc-123",
+            "snap-5e40d162cda74b58a527037b",
+            "tpl-abcdef0123456789",
+            "sb-1",
+            "op-9",
+            "ABC123",
+        ] {
+            if let Err(err) = validate_path_segment("build_id", value) {
+                panic!("expected {value:?} to be accepted, got {err:?}");
+            }
+        }
     }
 
     #[test]
@@ -1496,6 +1831,33 @@ mod tests {
                     ..
                 }
             ));
+        }
+    }
+
+    /// CubeMaster only emits IDs with `[A-Za-z0-9-]`; the wrapper rejects every
+    /// other byte so that a stray `_`, `.`, or `:` in user input fails fast at
+    /// the API boundary instead of corrupting downstream URLs (Bug 4).
+    #[test]
+    fn build_id_path_segment_rejects_non_canonical_characters() {
+        for value in [
+            "abc_123",
+            "abc.123",
+            "abc:123",
+            "abc 123",
+            "abc#123",
+            "abc@123",
+            "abc%2F123",
+            "héllo",
+            "..",
+            ".",
+        ] {
+            match validate_path_segment("snapshot_id", value) {
+                Err(CubeMasterError::InvalidPathParameter { name, .. }) => {
+                    assert_eq!(name, "snapshot_id");
+                }
+                Err(other) => panic!("unexpected error variant for {value:?}: {other:?}"),
+                Ok(()) => panic!("validator unexpectedly accepted {value:?}"),
+            }
         }
     }
 

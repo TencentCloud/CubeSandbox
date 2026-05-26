@@ -23,14 +23,21 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	CubeboxMgr_Create_FullMethodName          = "/cubelet.services.cubebox.v1.CubeboxMgr/Create"
-	CubeboxMgr_Destroy_FullMethodName         = "/cubelet.services.cubebox.v1.CubeboxMgr/Destroy"
-	CubeboxMgr_List_FullMethodName            = "/cubelet.services.cubebox.v1.CubeboxMgr/List"
-	CubeboxMgr_Update_FullMethodName          = "/cubelet.services.cubebox.v1.CubeboxMgr/Update"
-	CubeboxMgr_Exec_FullMethodName            = "/cubelet.services.cubebox.v1.CubeboxMgr/Exec"
-	CubeboxMgr_AppSnapshot_FullMethodName     = "/cubelet.services.cubebox.v1.CubeboxMgr/AppSnapshot"
-	CubeboxMgr_CommitSandbox_FullMethodName   = "/cubelet.services.cubebox.v1.CubeboxMgr/CommitSandbox"
-	CubeboxMgr_CleanupTemplate_FullMethodName = "/cubelet.services.cubebox.v1.CubeboxMgr/CleanupTemplate"
+	CubeboxMgr_Create_FullMethodName                    = "/cubelet.services.cubebox.v1.CubeboxMgr/Create"
+	CubeboxMgr_Destroy_FullMethodName                   = "/cubelet.services.cubebox.v1.CubeboxMgr/Destroy"
+	CubeboxMgr_List_FullMethodName                      = "/cubelet.services.cubebox.v1.CubeboxMgr/List"
+	CubeboxMgr_Update_FullMethodName                    = "/cubelet.services.cubebox.v1.CubeboxMgr/Update"
+	CubeboxMgr_Exec_FullMethodName                      = "/cubelet.services.cubebox.v1.CubeboxMgr/Exec"
+	CubeboxMgr_AppSnapshot_FullMethodName               = "/cubelet.services.cubebox.v1.CubeboxMgr/AppSnapshot"
+	CubeboxMgr_CommitSandbox_FullMethodName             = "/cubelet.services.cubebox.v1.CubeboxMgr/CommitSandbox"
+	CubeboxMgr_RollbackSandbox_FullMethodName           = "/cubelet.services.cubebox.v1.CubeboxMgr/RollbackSandbox"
+	CubeboxMgr_CleanupTemplate_FullMethodName           = "/cubelet.services.cubebox.v1.CubeboxMgr/CleanupTemplate"
+	CubeboxMgr_ListSandboxSnapshots_FullMethodName      = "/cubelet.services.cubebox.v1.CubeboxMgr/ListSandboxSnapshots"
+	CubeboxMgr_ListLocalSnapshots_FullMethodName        = "/cubelet.services.cubebox.v1.CubeboxMgr/ListLocalSnapshots"
+	CubeboxMgr_GetLocalSnapshot_FullMethodName          = "/cubelet.services.cubebox.v1.CubeboxMgr/GetLocalSnapshot"
+	CubeboxMgr_GetStorageMetrics_FullMethodName         = "/cubelet.services.cubebox.v1.CubeboxMgr/GetStorageMetrics"
+	CubeboxMgr_InspectStorageVolumes_FullMethodName     = "/cubelet.services.cubebox.v1.CubeboxMgr/InspectStorageVolumes"
+	CubeboxMgr_CleanupOrphanStorageFiles_FullMethodName = "/cubelet.services.cubebox.v1.CubeboxMgr/CleanupOrphanStorageFiles"
 )
 
 // CubeboxMgrClient is the client API for CubeboxMgr service.
@@ -51,8 +58,28 @@ type CubeboxMgrClient interface {
 	AppSnapshot(ctx context.Context, in *AppSnapshotRequest, opts ...grpc.CallOption) (*AppSnapshotResponse, error)
 	// CommitSandbox snapshots an existing running sandbox into a template snapshot.
 	CommitSandbox(ctx context.Context, in *CommitSandboxRequest, opts ...grpc.CallOption) (*CommitSandboxResponse, error)
+	// RollbackSandbox restores a running sandbox to a committed snapshot.
+	RollbackSandbox(ctx context.Context, in *RollbackSandboxRequest, opts ...grpc.CallOption) (*RollbackSandboxResponse, error)
 	// CleanupTemplate removes local template snapshot/base data from this node.
 	CleanupTemplate(ctx context.Context, in *CleanupTemplateRequest, opts ...grpc.CallOption) (*CleanupTemplateResponse, error)
+	// ListSandboxSnapshots inspects the requested snapshot objects on this node.
+	ListSandboxSnapshots(ctx context.Context, in *ListSandboxSnapshotsRequest, opts ...grpc.CallOption) (*ListSandboxSnapshotsResponse, error)
+	// ListLocalSnapshots returns the full catalog of snapshots known to this node.
+	// It is intended for master discovery / inspection so master does not need to
+	// persist physical references (vol/dev/path/meta_dir) in its tables.
+	ListLocalSnapshots(ctx context.Context, in *ListLocalSnapshotsRequest, opts ...grpc.CallOption) (*ListLocalSnapshotsResponse, error)
+	// GetLocalSnapshot returns the physical catalog entry for a single snapshot
+	// by snapshot id. Returns PreConditionFailed when no local record exists.
+	GetLocalSnapshot(ctx context.Context, in *GetLocalSnapshotRequest, opts ...grpc.CallOption) (*GetLocalSnapshotResponse, error)
+	// GetStorageMetrics returns node-local cubecow storage metrics.
+	GetStorageMetrics(ctx context.Context, in *GetStorageMetricsRequest, opts ...grpc.CallOption) (*GetStorageMetricsResponse, error)
+	// InspectStorageVolumes lists every sandbox storage record cubelet owns and
+	// re-resolves cubecow device paths so cubecli can render an authoritative
+	// view without touching boltdb or the cubecow SDK directly.
+	InspectStorageVolumes(ctx context.Context, in *InspectStorageVolumesRequest, opts ...grpc.CallOption) (*InspectStorageVolumesResponse, error)
+	// CleanupOrphanStorageFiles scans configured emptydir format roots, drops
+	// files that have no live sandbox owner, and reports the action taken.
+	CleanupOrphanStorageFiles(ctx context.Context, in *CleanupOrphanStorageFilesRequest, opts ...grpc.CallOption) (*CleanupOrphanStorageFilesResponse, error)
 }
 
 type cubeboxMgrClient struct {
@@ -133,10 +160,80 @@ func (c *cubeboxMgrClient) CommitSandbox(ctx context.Context, in *CommitSandboxR
 	return out, nil
 }
 
+func (c *cubeboxMgrClient) RollbackSandbox(ctx context.Context, in *RollbackSandboxRequest, opts ...grpc.CallOption) (*RollbackSandboxResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RollbackSandboxResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_RollbackSandbox_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *cubeboxMgrClient) CleanupTemplate(ctx context.Context, in *CleanupTemplateRequest, opts ...grpc.CallOption) (*CleanupTemplateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CleanupTemplateResponse)
 	err := c.cc.Invoke(ctx, CubeboxMgr_CleanupTemplate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cubeboxMgrClient) ListSandboxSnapshots(ctx context.Context, in *ListSandboxSnapshotsRequest, opts ...grpc.CallOption) (*ListSandboxSnapshotsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSandboxSnapshotsResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_ListSandboxSnapshots_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cubeboxMgrClient) ListLocalSnapshots(ctx context.Context, in *ListLocalSnapshotsRequest, opts ...grpc.CallOption) (*ListLocalSnapshotsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListLocalSnapshotsResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_ListLocalSnapshots_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cubeboxMgrClient) GetLocalSnapshot(ctx context.Context, in *GetLocalSnapshotRequest, opts ...grpc.CallOption) (*GetLocalSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetLocalSnapshotResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_GetLocalSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cubeboxMgrClient) GetStorageMetrics(ctx context.Context, in *GetStorageMetricsRequest, opts ...grpc.CallOption) (*GetStorageMetricsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetStorageMetricsResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_GetStorageMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cubeboxMgrClient) InspectStorageVolumes(ctx context.Context, in *InspectStorageVolumesRequest, opts ...grpc.CallOption) (*InspectStorageVolumesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InspectStorageVolumesResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_InspectStorageVolumes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cubeboxMgrClient) CleanupOrphanStorageFiles(ctx context.Context, in *CleanupOrphanStorageFilesRequest, opts ...grpc.CallOption) (*CleanupOrphanStorageFilesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CleanupOrphanStorageFilesResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_CleanupOrphanStorageFiles_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -161,8 +258,28 @@ type CubeboxMgrServer interface {
 	AppSnapshot(context.Context, *AppSnapshotRequest) (*AppSnapshotResponse, error)
 	// CommitSandbox snapshots an existing running sandbox into a template snapshot.
 	CommitSandbox(context.Context, *CommitSandboxRequest) (*CommitSandboxResponse, error)
+	// RollbackSandbox restores a running sandbox to a committed snapshot.
+	RollbackSandbox(context.Context, *RollbackSandboxRequest) (*RollbackSandboxResponse, error)
 	// CleanupTemplate removes local template snapshot/base data from this node.
 	CleanupTemplate(context.Context, *CleanupTemplateRequest) (*CleanupTemplateResponse, error)
+	// ListSandboxSnapshots inspects the requested snapshot objects on this node.
+	ListSandboxSnapshots(context.Context, *ListSandboxSnapshotsRequest) (*ListSandboxSnapshotsResponse, error)
+	// ListLocalSnapshots returns the full catalog of snapshots known to this node.
+	// It is intended for master discovery / inspection so master does not need to
+	// persist physical references (vol/dev/path/meta_dir) in its tables.
+	ListLocalSnapshots(context.Context, *ListLocalSnapshotsRequest) (*ListLocalSnapshotsResponse, error)
+	// GetLocalSnapshot returns the physical catalog entry for a single snapshot
+	// by snapshot id. Returns PreConditionFailed when no local record exists.
+	GetLocalSnapshot(context.Context, *GetLocalSnapshotRequest) (*GetLocalSnapshotResponse, error)
+	// GetStorageMetrics returns node-local cubecow storage metrics.
+	GetStorageMetrics(context.Context, *GetStorageMetricsRequest) (*GetStorageMetricsResponse, error)
+	// InspectStorageVolumes lists every sandbox storage record cubelet owns and
+	// re-resolves cubecow device paths so cubecli can render an authoritative
+	// view without touching boltdb or the cubecow SDK directly.
+	InspectStorageVolumes(context.Context, *InspectStorageVolumesRequest) (*InspectStorageVolumesResponse, error)
+	// CleanupOrphanStorageFiles scans configured emptydir format roots, drops
+	// files that have no live sandbox owner, and reports the action taken.
+	CleanupOrphanStorageFiles(context.Context, *CleanupOrphanStorageFilesRequest) (*CleanupOrphanStorageFilesResponse, error)
 	mustEmbedUnimplementedCubeboxMgrServer()
 }
 
@@ -194,8 +311,29 @@ func (UnimplementedCubeboxMgrServer) AppSnapshot(context.Context, *AppSnapshotRe
 func (UnimplementedCubeboxMgrServer) CommitSandbox(context.Context, *CommitSandboxRequest) (*CommitSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitSandbox not implemented")
 }
+func (UnimplementedCubeboxMgrServer) RollbackSandbox(context.Context, *RollbackSandboxRequest) (*RollbackSandboxResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RollbackSandbox not implemented")
+}
 func (UnimplementedCubeboxMgrServer) CleanupTemplate(context.Context, *CleanupTemplateRequest) (*CleanupTemplateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CleanupTemplate not implemented")
+}
+func (UnimplementedCubeboxMgrServer) ListSandboxSnapshots(context.Context, *ListSandboxSnapshotsRequest) (*ListSandboxSnapshotsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSandboxSnapshots not implemented")
+}
+func (UnimplementedCubeboxMgrServer) ListLocalSnapshots(context.Context, *ListLocalSnapshotsRequest) (*ListLocalSnapshotsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListLocalSnapshots not implemented")
+}
+func (UnimplementedCubeboxMgrServer) GetLocalSnapshot(context.Context, *GetLocalSnapshotRequest) (*GetLocalSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetLocalSnapshot not implemented")
+}
+func (UnimplementedCubeboxMgrServer) GetStorageMetrics(context.Context, *GetStorageMetricsRequest) (*GetStorageMetricsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetStorageMetrics not implemented")
+}
+func (UnimplementedCubeboxMgrServer) InspectStorageVolumes(context.Context, *InspectStorageVolumesRequest) (*InspectStorageVolumesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InspectStorageVolumes not implemented")
+}
+func (UnimplementedCubeboxMgrServer) CleanupOrphanStorageFiles(context.Context, *CleanupOrphanStorageFilesRequest) (*CleanupOrphanStorageFilesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CleanupOrphanStorageFiles not implemented")
 }
 func (UnimplementedCubeboxMgrServer) mustEmbedUnimplementedCubeboxMgrServer() {}
 func (UnimplementedCubeboxMgrServer) testEmbeddedByValue()                    {}
@@ -344,6 +482,24 @@ func _CubeboxMgr_CommitSandbox_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CubeboxMgr_RollbackSandbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RollbackSandboxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).RollbackSandbox(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_RollbackSandbox_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).RollbackSandbox(ctx, req.(*RollbackSandboxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _CubeboxMgr_CleanupTemplate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CleanupTemplateRequest)
 	if err := dec(in); err != nil {
@@ -358,6 +514,114 @@ func _CubeboxMgr_CleanupTemplate_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(CubeboxMgrServer).CleanupTemplate(ctx, req.(*CleanupTemplateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CubeboxMgr_ListSandboxSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSandboxSnapshotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).ListSandboxSnapshots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_ListSandboxSnapshots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).ListSandboxSnapshots(ctx, req.(*ListSandboxSnapshotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CubeboxMgr_ListLocalSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListLocalSnapshotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).ListLocalSnapshots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_ListLocalSnapshots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).ListLocalSnapshots(ctx, req.(*ListLocalSnapshotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CubeboxMgr_GetLocalSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetLocalSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).GetLocalSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_GetLocalSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).GetLocalSnapshot(ctx, req.(*GetLocalSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CubeboxMgr_GetStorageMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetStorageMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).GetStorageMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_GetStorageMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).GetStorageMetrics(ctx, req.(*GetStorageMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CubeboxMgr_InspectStorageVolumes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InspectStorageVolumesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).InspectStorageVolumes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_InspectStorageVolumes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).InspectStorageVolumes(ctx, req.(*InspectStorageVolumesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CubeboxMgr_CleanupOrphanStorageFiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CleanupOrphanStorageFilesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).CleanupOrphanStorageFiles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_CleanupOrphanStorageFiles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).CleanupOrphanStorageFiles(ctx, req.(*CleanupOrphanStorageFilesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -398,8 +662,36 @@ var CubeboxMgr_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _CubeboxMgr_CommitSandbox_Handler,
 		},
 		{
+			MethodName: "RollbackSandbox",
+			Handler:    _CubeboxMgr_RollbackSandbox_Handler,
+		},
+		{
 			MethodName: "CleanupTemplate",
 			Handler:    _CubeboxMgr_CleanupTemplate_Handler,
+		},
+		{
+			MethodName: "ListSandboxSnapshots",
+			Handler:    _CubeboxMgr_ListSandboxSnapshots_Handler,
+		},
+		{
+			MethodName: "ListLocalSnapshots",
+			Handler:    _CubeboxMgr_ListLocalSnapshots_Handler,
+		},
+		{
+			MethodName: "GetLocalSnapshot",
+			Handler:    _CubeboxMgr_GetLocalSnapshot_Handler,
+		},
+		{
+			MethodName: "GetStorageMetrics",
+			Handler:    _CubeboxMgr_GetStorageMetrics_Handler,
+		},
+		{
+			MethodName: "InspectStorageVolumes",
+			Handler:    _CubeboxMgr_InspectStorageVolumes_Handler,
+		},
+		{
+			MethodName: "CleanupOrphanStorageFiles",
+			Handler:    _CubeboxMgr_CleanupOrphanStorageFiles_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

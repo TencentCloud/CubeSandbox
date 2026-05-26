@@ -8,6 +8,8 @@
     - [AppSnapshotResponse](#cubelet-services-cubebox-v1-AppSnapshotResponse)
     - [CDIDevice](#cubelet-services-cubebox-v1-CDIDevice)
     - [Capability](#cubelet-services-cubebox-v1-Capability)
+    - [CleanupOrphanStorageFilesRequest](#cubelet-services-cubebox-v1-CleanupOrphanStorageFilesRequest)
+    - [CleanupOrphanStorageFilesResponse](#cubelet-services-cubebox-v1-CleanupOrphanStorageFilesResponse)
     - [CleanupTemplateRequest](#cubelet-services-cubebox-v1-CleanupTemplateRequest)
     - [CleanupTemplateResponse](#cubelet-services-cubebox-v1-CleanupTemplateResponse)
     - [CommitSandboxRequest](#cubelet-services-cubebox-v1-CommitSandboxRequest)
@@ -19,6 +21,8 @@
     - [ContainerConfig.SysctlsEntry](#cubelet-services-cubebox-v1-ContainerConfig-SysctlsEntry)
     - [ContainerSecurityContext](#cubelet-services-cubebox-v1-ContainerSecurityContext)
     - [ContainerStateValue](#cubelet-services-cubebox-v1-ContainerStateValue)
+    - [CowObjectRef](#cubelet-services-cubebox-v1-CowObjectRef)
+    - [CowObjectStatus](#cubelet-services-cubebox-v1-CowObjectStatus)
     - [CubeSandbox](#cubelet-services-cubebox-v1-CubeSandbox)
     - [CubeSandbox.LabelsEntry](#cubelet-services-cubebox-v1-CubeSandbox-LabelsEntry)
     - [CubeSandboxFilter](#cubelet-services-cubebox-v1-CubeSandboxFilter)
@@ -33,6 +37,11 @@
     - [EmptyDirVolumeSource](#cubelet-services-cubebox-v1-EmptyDirVolumeSource)
     - [ExecCubeSandboxRequest](#cubelet-services-cubebox-v1-ExecCubeSandboxRequest)
     - [ExecCubeSandboxResponse](#cubelet-services-cubebox-v1-ExecCubeSandboxResponse)
+    - [GetLocalSnapshotRequest](#cubelet-services-cubebox-v1-GetLocalSnapshotRequest)
+    - [GetLocalSnapshotResponse](#cubelet-services-cubebox-v1-GetLocalSnapshotResponse)
+    - [GetStorageMetricsRequest](#cubelet-services-cubebox-v1-GetStorageMetricsRequest)
+    - [GetStorageMetricsResponse](#cubelet-services-cubebox-v1-GetStorageMetricsResponse)
+    - [GetStorageMetricsResponse.MetricsEntry](#cubelet-services-cubebox-v1-GetStorageMetricsResponse-MetricsEntry)
     - [HTTPGetAction](#cubelet-services-cubebox-v1-HTTPGetAction)
     - [HTTPHeader](#cubelet-services-cubebox-v1-HTTPHeader)
     - [Hook](#cubelet-services-cubebox-v1-Hook)
@@ -41,6 +50,8 @@
     - [HostDirSource](#cubelet-services-cubebox-v1-HostDirSource)
     - [HostDirVolumeSources](#cubelet-services-cubebox-v1-HostDirVolumeSources)
     - [IDMapping](#cubelet-services-cubebox-v1-IDMapping)
+    - [InspectStorageVolumesRequest](#cubelet-services-cubebox-v1-InspectStorageVolumesRequest)
+    - [InspectStorageVolumesResponse](#cubelet-services-cubebox-v1-InspectStorageVolumesResponse)
     - [Int64Value](#cubelet-services-cubebox-v1-Int64Value)
     - [KeyValue](#cubelet-services-cubebox-v1-KeyValue)
     - [LifecycleHandler](#cubelet-services-cubebox-v1-LifecycleHandler)
@@ -48,6 +59,11 @@
     - [ListCubeSandboxOption](#cubelet-services-cubebox-v1-ListCubeSandboxOption)
     - [ListCubeSandboxRequest](#cubelet-services-cubebox-v1-ListCubeSandboxRequest)
     - [ListCubeSandboxResponse](#cubelet-services-cubebox-v1-ListCubeSandboxResponse)
+    - [ListLocalSnapshotsRequest](#cubelet-services-cubebox-v1-ListLocalSnapshotsRequest)
+    - [ListLocalSnapshotsResponse](#cubelet-services-cubebox-v1-ListLocalSnapshotsResponse)
+    - [ListSandboxSnapshotsRequest](#cubelet-services-cubebox-v1-ListSandboxSnapshotsRequest)
+    - [ListSandboxSnapshotsResponse](#cubelet-services-cubebox-v1-ListSandboxSnapshotsResponse)
+    - [LocalSnapshotInfo](#cubelet-services-cubebox-v1-LocalSnapshotInfo)
     - [OCIConfig](#cubelet-services-cubebox-v1-OCIConfig)
     - [PingAction](#cubelet-services-cubebox-v1-PingAction)
     - [PortMapping](#cubelet-services-cubebox-v1-PortMapping)
@@ -57,6 +73,8 @@
     - [ProbeHandler](#cubelet-services-cubebox-v1-ProbeHandler)
     - [RLimit](#cubelet-services-cubebox-v1-RLimit)
     - [Resource](#cubelet-services-cubebox-v1-Resource)
+    - [RollbackSandboxRequest](#cubelet-services-cubebox-v1-RollbackSandboxRequest)
+    - [RollbackSandboxResponse](#cubelet-services-cubebox-v1-RollbackSandboxResponse)
     - [RunCubeSandboxRequest](#cubelet-services-cubebox-v1-RunCubeSandboxRequest)
     - [RunCubeSandboxRequest.AnnotationsEntry](#cubelet-services-cubebox-v1-RunCubeSandboxRequest-AnnotationsEntry)
     - [RunCubeSandboxRequest.LabelsEntry](#cubelet-services-cubebox-v1-RunCubeSandboxRequest-LabelsEntry)
@@ -64,6 +82,9 @@
     - [RunCubeSandboxResponse.ExtInfoEntry](#cubelet-services-cubebox-v1-RunCubeSandboxResponse-ExtInfoEntry)
     - [SELinuxOption](#cubelet-services-cubebox-v1-SELinuxOption)
     - [SandboxPathVolumeSource](#cubelet-services-cubebox-v1-SandboxPathVolumeSource)
+    - [SandboxStorageInfo](#cubelet-services-cubebox-v1-SandboxStorageInfo)
+    - [StorageOrphanEntry](#cubelet-services-cubebox-v1-StorageOrphanEntry)
+    - [StorageVolumeInfo](#cubelet-services-cubebox-v1-StorageVolumeInfo)
     - [SysCall](#cubelet-services-cubebox-v1-SysCall)
     - [TCPSocketAction](#cubelet-services-cubebox-v1-TCPSocketAction)
     - [UpdateCubeSandboxRequest](#cubelet-services-cubebox-v1-UpdateCubeSandboxRequest)
@@ -210,6 +231,11 @@ AppSnapshotResponse is the response for app snapshot creation.
 | sandboxID | [string](#string) |  | The sandbox ID that was created and destroyed. |
 | templateID | [string](#string) |  | The template ID from the request annotations. |
 | snapshotPath | [string](#string) |  | The snapshot path where the snapshot was created. |
+| rootfs_vol | [string](#string) |  | Authoritative cubecow rootfs object name. |
+| memory_vol | [string](#string) |  | Authoritative cubecow memory object name. |
+| rootfs_kind | [string](#string) |  | Authoritative cubecow rootfs object kind. |
+| memory_kind | [string](#string) |  | Authoritative cubecow memory object kind. |
+| rootfs_size_bytes | [uint64](#uint64) |  | Rootfs size at snapshot time, used by repair and validation. |
 
 
 
@@ -248,6 +274,41 @@ Capability contains the container capabilities to add or drop
 
 
 
+<a name="cubelet-services-cubebox-v1-CleanupOrphanStorageFilesRequest"></a>
+
+### CleanupOrphanStorageFilesRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| bucket | [string](#string) |  | Optional bucket name; defaults to &#34;emptydir/v1&#34; when empty. |
+| formats | [string](#string) | repeated | Format roots cubelet should scan, e.g. &#34;512Mi&#34; / &#34;1Gi&#34; / &#34;others&#34;. When empty cubelet falls back to a built-in default list. |
+| dry_run | [bool](#bool) |  | When true cubelet only reports orphans without removing them. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-CleanupOrphanStorageFilesResponse"></a>
+
+### CleanupOrphanStorageFilesResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| orphans | [StorageOrphanEntry](#cubelet-services-cubebox-v1-StorageOrphanEntry) | repeated | Orphan files cubelet found (and possibly removed). |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-CleanupTemplateRequest"></a>
 
 ### CleanupTemplateRequest
@@ -258,7 +319,8 @@ Capability contains the container capabilities to add or drop
 | ----- | ---- | ----- | ----------- |
 | requestID | [string](#string) |  | requestID reqID |
 | templateID | [string](#string) |  | Logical template ID. |
-| snapshotPath | [string](#string) |  | Snapshot path recorded on this node, if any. |
+| snapshotPath | [string](#string) |  | Snapshot path recorded on this node, if any. DEPRECATED in v4: cubelet resolves this from local catalog; legacy masters may still send it for backward compatibility but new masters MUST send empty. |
+| objects | [CowObjectRef](#cubelet-services-cubebox-v1-CowObjectRef) | repeated | cubecow objects that should be removed on this node. DEPRECATED in v4: cubelet derives objects from local catalog; legacy masters may still populate this for backward compatibility but new masters MUST send empty. |
 
 
 
@@ -313,6 +375,13 @@ Capability contains the container capabilities to add or drop
 | sandboxID | [string](#string) |  | ID of the sandbox that was snapshotted. |
 | templateID | [string](#string) |  | The logical template ID. |
 | snapshotPath | [string](#string) |  | The snapshot path where the snapshot was created. |
+| rootfs_vol | [string](#string) |  | Authoritative cubecow rootfs object name. |
+| memory_vol | [string](#string) |  | Authoritative cubecow memory object name. |
+| rootfs_kind | [string](#string) |  | Authoritative cubecow rootfs object kind. |
+| memory_kind | [string](#string) |  | Authoritative cubecow memory object kind. |
+| rootfs_dev | [string](#string) |  | Diagnostic-only rootfs device path; re-resolve from rootfs_vol on use. |
+| memory_dev | [string](#string) |  | Diagnostic-only memory device path; re-resolve from memory_vol on use. |
+| rootfs_size_bytes | [uint64](#uint64) |  | Rootfs size at snapshot time, used by rollback resize planning. |
 
 
 
@@ -457,6 +526,44 @@ ContainerStateValue is the wrapper of ContainerState.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | state | [ContainerState](#cubelet-services-cubebox-v1-ContainerState) |  | State of the container. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-CowObjectRef"></a>
+
+### CowObjectRef
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  | Authoritative cubecow object name. |
+| kind | [string](#string) |  | cubecow object kind: &#34;snapshot&#34; or &#34;volume&#34;. |
+| role | [string](#string) |  | Logical role: &#34;rootfs&#34;, &#34;memory&#34;, &#34;build_rootfs&#34;, etc. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-CowObjectStatus"></a>
+
+### CowObjectStatus
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  | Authoritative cubecow object name. |
+| kind | [string](#string) |  | cubecow object kind: &#34;snapshot&#34; or &#34;volume&#34;. |
+| role | [string](#string) |  | Logical role. |
+| exists | [bool](#bool) |  | Whether the object currently exists on this node. |
+| device_path | [string](#string) |  | Current device path if resolvable. |
+| size_bytes | [uint64](#uint64) |  | Current size in bytes if resolvable. |
+| error_message | [string](#string) |  | Object-specific inspection error if any. |
 
 
 
@@ -708,6 +815,89 @@ EmptyDirVolumeSource represents an empty directory for a sandbox.
 
 
 
+<a name="cubelet-services-cubebox-v1-GetLocalSnapshotRequest"></a>
+
+### GetLocalSnapshotRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| snapshotID | [string](#string) |  | Logical snapshot ID to look up. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-GetLocalSnapshotResponse"></a>
+
+### GetLocalSnapshotResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| snapshot | [LocalSnapshotInfo](#cubelet-services-cubebox-v1-LocalSnapshotInfo) |  | Catalog entry. Nil/empty when not found. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-GetStorageMetricsRequest"></a>
+
+### GetStorageMetricsRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-GetStorageMetricsResponse"></a>
+
+### GetStorageMetricsResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| node_id | [string](#string) |  | Node identifier that produced this metric snapshot. |
+| timestamp_unix_nano | [int64](#int64) |  | Timestamp when metrics were collected. |
+| metrics | [GetStorageMetricsResponse.MetricsEntry](#cubelet-services-cubebox-v1-GetStorageMetricsResponse-MetricsEntry) | repeated | Storage metrics reported by cubecow. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-GetStorageMetricsResponse-MetricsEntry"></a>
+
+### GetStorageMetricsResponse.MetricsEntry
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| key | [string](#string) |  |  |
+| value | [uint64](#uint64) |  |  |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-HTTPGetAction"></a>
 
 ### HTTPGetAction
@@ -842,6 +1032,39 @@ IDMapping describes host to container ID mappings for a pod sandbox.
 
 
 
+<a name="cubelet-services-cubebox-v1-InspectStorageVolumesRequest"></a>
+
+### InspectStorageVolumesRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| bucket | [string](#string) |  | Optional bucket name; defaults to &#34;emptydir/v1&#34; when empty. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-InspectStorageVolumesResponse"></a>
+
+### InspectStorageVolumesResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| sandboxes | [SandboxStorageInfo](#cubelet-services-cubebox-v1-SandboxStorageInfo) | repeated | Sandbox storage records, after device-path refresh. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-Int64Value"></a>
 
 ### Int64Value
@@ -947,6 +1170,106 @@ LifecycleHandler defines a specific action that should be taken in a lifecycle h
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | items | [CubeSandbox](#cubelet-services-cubebox-v1-CubeSandbox) | repeated | List of CubeSandboxes. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-ListLocalSnapshotsRequest"></a>
+
+### ListLocalSnapshotsRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-ListLocalSnapshotsResponse"></a>
+
+### ListLocalSnapshotsResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| snapshots | [LocalSnapshotInfo](#cubelet-services-cubebox-v1-LocalSnapshotInfo) | repeated | Snapshots known locally to this cubelet. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-ListSandboxSnapshotsRequest"></a>
+
+### ListSandboxSnapshotsRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| sandboxID | [string](#string) |  | Logical sandbox ID for logging / correlation. |
+| objects | [CowObjectRef](#cubelet-services-cubebox-v1-CowObjectRef) | repeated | cubecow objects that should be inspected on this node. |
+| meta_dir | [string](#string) |  | Snapshot metadata directory that must remain restorable. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-ListSandboxSnapshotsResponse"></a>
+
+### ListSandboxSnapshotsResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| sandboxID | [string](#string) |  | Logical sandbox ID. |
+| objects | [CowObjectStatus](#cubelet-services-cubebox-v1-CowObjectStatus) | repeated | Inspection results for requested cubecow objects. |
+| meta_dir_exists | [bool](#bool) |  | Whether the snapshot metadata directory exists. |
+| snapshot_state_path | [string](#string) |  | Canonical snapshot state directory used for restore. |
+| snapshot_state_exists | [bool](#bool) |  | Whether the snapshot state directory exists. |
+| path_error_message | [string](#string) |  | Path inspection error if any. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-LocalSnapshotInfo"></a>
+
+### LocalSnapshotInfo
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| snapshotID | [string](#string) |  | Logical snapshot ID. |
+| instance_type | [string](#string) |  | Instance type (e.g. &#34;cubebox&#34;). |
+| spec_dir | [string](#string) |  | Spec directory used to scope the snapshot (e.g. &#34;2C2000M&#34;). |
+| snapshot_path | [string](#string) |  | Absolute on-disk snapshot path. |
+| meta_dir | [string](#string) |  | Snapshot metadata directory used for restore. |
+| rootfs_vol | [string](#string) |  | Authoritative cubecow rootfs object name. |
+| rootfs_kind | [string](#string) |  | Authoritative cubecow rootfs object kind. |
+| memory_vol | [string](#string) |  | Authoritative cubecow memory object name. |
+| memory_kind | [string](#string) |  | Authoritative cubecow memory object kind. |
+| rootfs_size_bytes | [uint64](#uint64) |  | Rootfs size in bytes at snapshot time. |
+| created_at | [string](#string) |  | RFC3339 timestamp captured at commit time. |
+| build_rootfs_vol | [string](#string) |  | Build rootfs object name (template-build path only). Used to clean up the temporary writable layer during CleanupTemplate. |
+| build_rootfs_kind | [string](#string) |  | Build rootfs object kind. |
+| kind | [string](#string) |  | Catalog entry kind: &#34;template&#34; (AppSnapshot) or &#34;runtime_snapshot&#34; (CommitSandbox). Empty for pre-v4 legacy entries. |
 
 
 
@@ -1107,6 +1430,53 @@ ref by https://kubernetes.io/zh-cn/docs/reference/kubernetes-api/common-definiti
 
 
 
+<a name="cubelet-services-cubebox-v1-RollbackSandboxRequest"></a>
+
+### RollbackSandboxRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| sandboxID | [string](#string) |  | ID of the running sandbox to rollback. |
+| snapshotID | [string](#string) |  | Logical snapshot ID. When rootfs_vol/memory_vol/meta_dir are empty, cubelet resolves them from its local snapshot catalog keyed by this id. |
+| rootfs_vol | [string](#string) |  | Optional cubecow rootfs object name for the snapshot. Empty means &#34;resolve from local catalog using snapshotID&#34;. |
+| memory_vol | [string](#string) |  | Optional cubecow memory object name for the snapshot. Empty means &#34;resolve from local catalog using snapshotID&#34;. |
+| meta_dir | [string](#string) |  | Optional snapshot metadata directory. Empty means &#34;resolve from local catalog using snapshotID&#34;. |
+| new_gen | [uint32](#uint32) |  | New sandbox rootfs generation to derive. |
+| desired_size | [uint64](#uint64) |  | Minimum rootfs size after deriving the new generation. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-RollbackSandboxResponse"></a>
+
+### RollbackSandboxResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| sandboxID | [string](#string) |  | ID of the sandbox that was rolled back. |
+| snapshotID | [string](#string) |  | Logical snapshot ID. |
+| rootfs_vol | [string](#string) |  | New sandbox rootfs volume name. |
+| rootfs_kind | [string](#string) |  | New sandbox rootfs kind. |
+| rootfs_dev | [string](#string) |  | Diagnostic-only rootfs device path; re-resolve from rootfs_vol on use. |
+| new_gen | [uint32](#uint32) |  | New sandbox rootfs generation. |
+| old_rootfs_vol | [string](#string) |  | Old sandbox rootfs volume name, if known. |
+| old_rootfs_deleted | [bool](#bool) |  | Whether deleting old_rootfs_vol succeeded. |
+| memory_vol | [string](#string) |  | Snapshot memory volume cubelet resolved during rollback. Master records it on the runtime ref so cleanup paths can detach the memory binding without re-fetching the local catalog. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-RunCubeSandboxRequest"></a>
 
 ### RunCubeSandboxRequest
@@ -1229,6 +1599,63 @@ Represents a sandbox path mapped into a container.
 | ----- | ---- | ----- | ----------- |
 | path | [string](#string) |  | path of the directory on the sandbox vm. |
 | type | [string](#string) |  | type for SandboxPath Volume |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-SandboxStorageInfo"></a>
+
+### SandboxStorageInfo
+SandboxStorageInfo aggregates every backend volume cubelet has registered
+for a single sandbox.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| namespace | [string](#string) |  |  |
+| sandboxID | [string](#string) |  |  |
+| volumes | [StorageVolumeInfo](#cubelet-services-cubebox-v1-StorageVolumeInfo) | repeated |  |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-StorageOrphanEntry"></a>
+
+### StorageOrphanEntry
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| format | [string](#string) |  | Format root the file lives under (e.g. &#34;512Mi&#34;). |
+| file_path | [string](#string) |  | Absolute path to the orphan file. |
+| removed | [bool](#bool) |  | True when the file was successfully removed by this RPC. Always false for dry-run responses. |
+| error_message | [string](#string) |  | Removal error if any (only set when removed=false and dry_run=false). |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-StorageVolumeInfo"></a>
+
+### StorageVolumeInfo
+StorageVolumeInfo describes a single backend file/volume entry attached to a
+sandbox, as understood by cubelet at the time of inspection.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  | Logical mount name within the sandbox spec. |
+| file_path | [string](#string) |  | Filesystem path to mount inside the sandbox. For cubecow volumes this is re-resolved through the engine on every call. |
+| size_limit | [uint64](#uint64) |  | Size limit in bytes (0 if not pre-allocated). |
+| volume_name | [string](#string) |  | cubecow object name backing this volume. Empty for legacy file-only entries that bypass cubecow. |
+| kind | [string](#string) |  | cubecow object kind (&#34;volume&#34;/&#34;snapshot&#34;). Empty for non-cubecow entries. |
+| gen | [uint32](#uint32) |  | Generation number, used by rollback to derive successor objects. |
 
 
 
@@ -1479,7 +1906,14 @@ Service for handling cubesandbox
 | Exec | [ExecCubeSandboxRequest](#cubelet-services-cubebox-v1-ExecCubeSandboxRequest) | [ExecCubeSandboxResponse](#cubelet-services-cubebox-v1-ExecCubeSandboxResponse) |  |
 | AppSnapshot | [AppSnapshotRequest](#cubelet-services-cubebox-v1-AppSnapshotRequest) | [AppSnapshotResponse](#cubelet-services-cubebox-v1-AppSnapshotResponse) | AppSnapshot creates a cubebox, makes an app snapshot, and destroys the cubebox. Required annotations: - cube.master.appsnapshot.create: &#34;true&#34; - cube.master.appsnapshot.template.id: &#34;&lt;template_id&gt;&#34; |
 | CommitSandbox | [CommitSandboxRequest](#cubelet-services-cubebox-v1-CommitSandboxRequest) | [CommitSandboxResponse](#cubelet-services-cubebox-v1-CommitSandboxResponse) | CommitSandbox snapshots an existing running sandbox into a template snapshot. |
+| RollbackSandbox | [RollbackSandboxRequest](#cubelet-services-cubebox-v1-RollbackSandboxRequest) | [RollbackSandboxResponse](#cubelet-services-cubebox-v1-RollbackSandboxResponse) | RollbackSandbox restores a running sandbox to a committed snapshot. |
 | CleanupTemplate | [CleanupTemplateRequest](#cubelet-services-cubebox-v1-CleanupTemplateRequest) | [CleanupTemplateResponse](#cubelet-services-cubebox-v1-CleanupTemplateResponse) | CleanupTemplate removes local template snapshot/base data from this node. |
+| ListSandboxSnapshots | [ListSandboxSnapshotsRequest](#cubelet-services-cubebox-v1-ListSandboxSnapshotsRequest) | [ListSandboxSnapshotsResponse](#cubelet-services-cubebox-v1-ListSandboxSnapshotsResponse) | ListSandboxSnapshots inspects the requested snapshot objects on this node. |
+| ListLocalSnapshots | [ListLocalSnapshotsRequest](#cubelet-services-cubebox-v1-ListLocalSnapshotsRequest) | [ListLocalSnapshotsResponse](#cubelet-services-cubebox-v1-ListLocalSnapshotsResponse) | ListLocalSnapshots returns the full catalog of snapshots known to this node. It is intended for master discovery / inspection so master does not need to persist physical references (vol/dev/path/meta_dir) in its tables. |
+| GetLocalSnapshot | [GetLocalSnapshotRequest](#cubelet-services-cubebox-v1-GetLocalSnapshotRequest) | [GetLocalSnapshotResponse](#cubelet-services-cubebox-v1-GetLocalSnapshotResponse) | GetLocalSnapshot returns the physical catalog entry for a single snapshot by snapshot id. Returns PreConditionFailed when no local record exists. |
+| GetStorageMetrics | [GetStorageMetricsRequest](#cubelet-services-cubebox-v1-GetStorageMetricsRequest) | [GetStorageMetricsResponse](#cubelet-services-cubebox-v1-GetStorageMetricsResponse) | GetStorageMetrics returns node-local cubecow storage metrics. |
+| InspectStorageVolumes | [InspectStorageVolumesRequest](#cubelet-services-cubebox-v1-InspectStorageVolumesRequest) | [InspectStorageVolumesResponse](#cubelet-services-cubebox-v1-InspectStorageVolumesResponse) | InspectStorageVolumes lists every sandbox storage record cubelet owns and re-resolves cubecow device paths so cubecli can render an authoritative view without touching boltdb or the cubecow SDK directly. |
+| CleanupOrphanStorageFiles | [CleanupOrphanStorageFilesRequest](#cubelet-services-cubebox-v1-CleanupOrphanStorageFilesRequest) | [CleanupOrphanStorageFilesResponse](#cubelet-services-cubebox-v1-CleanupOrphanStorageFilesResponse) | CleanupOrphanStorageFiles scans configured emptydir format roots, drops files that have no live sandbox owner, and reports the action taken. |
 
  
 
@@ -1967,6 +2401,7 @@ CubeVMImageService is used by cube image converter service in vm.
 | OK | 0 |  |
 | Unknown | -1 |  |
 | Success | 200 |  |
+| Conflict | 130409 |  |
 | GrpcError | 130500 |  |
 | ListContainerFailed | 130504 |  |
 | ContainerNotFound | 130505 |  |

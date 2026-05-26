@@ -19,8 +19,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::mem::{size_of, MaybeUninit};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use vm_memory::ByteValued;
 

@@ -1,0 +1,74 @@
+[package]
+name = "cubecow"
+version = "0.1.0"
+edition = "2021"
+description = "An xfs-reflink based Copy-On-Write storage engine providing thin-provisioned volume management and O(1) snapshots/clones via FICLONE"
+license = "MIT"
+
+[lib]
+name = "cubecow"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+# Serialization & config
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Concurrent data structures
+dashmap = "6"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+# Logging & tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# JSON parsing (for FFI output)
+serde_json = "1"
+
+# Low-level system calls (FICLONE ioctl, fsync_dir, etc.)
+libc = "0.2"
+
+# Timestamp
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+# `panic = "abort"` is intentionally omitted here. Cargo ignores
+# `panic` in the `bench`/`test` profiles, so if release is set to
+# abort, every bench build ends up with a unwind↔abort mismatch
+# ("crate X requires panic strategy `abort` which is incompatible
+# with this crate's strategy of `unwind`"). Leaving release at the
+# default unwind strategy keeps `cargo bench` / `cargo test` happy
+# while only costing a few kilobytes in the release binary — if the
+# size difference ever matters, reintroduce abort through a custom
+# profile (e.g. `[profile.release-min] inherits = "release" panic = "abort"`)
+# rather than touching `[profile.release]`.
+
+# -----------------------------------------------------------------------------
+# Benchmarks
+# -----------------------------------------------------------------------------
+# We intentionally avoid `criterion` to keep the dependency tree slim; the
+# bench is a hand-rolled quantile calculator over a fixed iteration count.
+
+# `reflink_ops` exercises the public `Engine` trait against a real
+# `ReflinkEngine` standing on its own XFS(reflink=1) loop mount (no lvm2 /
+# DM dependencies). Covers four scenarios — single-source serial fanout,
+# chained snapshots, multi-worker concurrent fanout, and dirty-IO
+# interleaved snapshots (jitter detector).
+# Requires root + xfsprogs (>= 5.0 for `mkfs.xfs -m reflink=1`) + losetup;
+# exits with a skip message on unsuitable hosts.
+# Run with `sudo cargo bench --bench reflink_ops`.
+[[bench]]
+name = "reflink_ops"
+harness = false

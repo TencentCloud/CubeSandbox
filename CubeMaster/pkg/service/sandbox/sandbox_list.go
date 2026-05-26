@@ -166,12 +166,13 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 	}
 
 	for _, sandbox := range cubeRsp.GetItems() {
+		sandboxLabels := cloneStringMap(sandbox.GetLabels())
 		for _, container := range sandbox.GetContainers() {
 			if container.GetType() == "sandbox" {
 				if matchFilter(container.GetLabels()) {
 					continue
 				}
-				labels := cloneStringMap(container.GetLabels())
+				labels := sandboxViewLabels(sandboxLabels, container.GetLabels())
 				templateID := templateIDFromLabels(labels)
 				select {
 				case <-ctx.Done():
@@ -184,7 +185,7 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 					TemplateID:  templateID,
 					CpuCount:    parseCPUCount(container.GetResources().GetCpu()),
 					MemoryMB:    parseMemoryMB(container.GetResources().GetMem()),
-					Annotations: buildTemplateAnnotations(templateID),
+					Annotations: buildAnnotationsFromLabels(labels),
 					Labels:      labels,
 					NameSpace:   sandbox.GetNamespace(),
 					CreateAt:    sandbox.GetCreatedAt(),

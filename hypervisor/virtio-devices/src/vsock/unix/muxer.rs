@@ -897,13 +897,13 @@ impl VsockMuxer {
     /// RST packet will be scheduled for delivery to the guest.
     ///
     fn handle_peer_request_pkt(&mut self, pkt: &VsockPacket) {
-		let mut port_path = format!("{}_{}", self.host_sock_path, pkt.dst_port());
+        let mut port_path = format!("{}_{}", self.host_sock_path, pkt.dst_port());
 
         if let Some(path) = self.is_cube_vsock_dbg_port(pkt.dst_port()) {
-			port_path = path;
+            port_path = path;
         }
 
-		debug!("vsock: port_path {}", port_path);
+        debug!("vsock: port_path {}", port_path);
 
         UnixStream::connect(port_path)
             .and_then(|stream| stream.set_nonblocking(true).map(|_| stream))

@@ -394,7 +394,7 @@ func (x *imagePrinter) printImageSinglePlatform(ctx context.Context, img images.
 		if err := x.tmpl.Execute(&b, p); err != nil {
 			return err
 		}
-		if _, err = fmt.Fprintf(x.w, b.String()+"\n"); err != nil {
+		if _, err = fmt.Fprint(x.w, b.String()+"\n"); err != nil {
 			return err
 		}
 	} else if x.quiet {

@@ -389,6 +389,7 @@ dependencies = [
  "thiserror",
  "tpm",
  "tracer",
+ "vm-migration",
  "vmm",
  "vmm-sys-util",
  "wait-timeout",

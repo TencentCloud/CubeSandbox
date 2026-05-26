@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -328,6 +329,7 @@ func doHttpReq(c *cli.Context, url, method, requestID string, body io.Reader, rs
 		ctx, cancel = context.WithCancel(ctx)
 	}
 	defer cancel()
+	body = normalizeReader(body)
 
 	httpReq, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
@@ -351,4 +353,18 @@ func doHttpReq(c *cli.Context, url, method, requestID string, body io.Reader, rs
 		return err
 	}
 	return nil
+}
+
+func normalizeReader(body io.Reader) io.Reader {
+	if body == nil {
+		return nil
+	}
+	value := reflect.ValueOf(body)
+	switch value.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Interface, reflect.Func, reflect.Chan:
+		if value.IsNil() {
+			return nil
+		}
+	}
+	return body
 }

@@ -354,12 +354,7 @@ pub fn start_http_path_thread(
     // SAFETY: Valid FD just opened
     let server = unsafe { HttpServer::new_from_fd(socket_fd.into_raw_fd()) }
         .map_err(VmmError::CreateApiServer)?;
-    start_http_thread(
-        server,
-        seccomp_action,
-        exit_evt,
-        hypervisor_type,
-    )
+    start_http_thread(server, seccomp_action, exit_evt, hypervisor_type)
 }
 
 pub fn start_http_fd_thread(
@@ -370,10 +365,5 @@ pub fn start_http_fd_thread(
 ) -> Result<thread::JoinHandle<Result<()>>> {
     // SAFETY: Valid FD
     let server = unsafe { HttpServer::new_from_fd(fd) }.map_err(VmmError::CreateApiServer)?;
-    start_http_thread(
-        server,
-        seccomp_action,
-        exit_evt,
-        hypervisor_type,
-    )
+    start_http_thread(server, seccomp_action, exit_evt, hypervisor_type)
 }

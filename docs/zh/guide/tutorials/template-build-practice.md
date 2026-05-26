@@ -514,19 +514,17 @@ docker rm -f "$cid"
 
 
 
-### 💡 九、cubesandbox SDK 安装失败（setuptools 版本不兼容）
+### 💡 九、cubesandbox SDK 安装失败（历史问题，已修复）
 
-**现象：** `pip install` 报错 `BackendUnavailable: Cannot import 'setuptools.backends.legacy'`
+**现象：** 在旧版仓库上 `pip install` 报错 `BackendUnavailable: Cannot import 'setuptools.backends.legacy'`。
 
-**原因：** `cubesandbox` 的 `pyproject.toml` 使用了 `setuptools.backends.legacy:build`，这是 setuptools **71+** 才有的 API。系统通过 rpm 安装的 setuptools 版本较低（如 68.x），pip 无法直接覆盖 rpm 包。
+**原因：** 早期 `sdk/python/pyproject.toml` 误填了不存在的 build-backend `setuptools.backends.legacy:build`（PEP 517 setuptools 官方 backend 只有 `setuptools.build_meta` 和 `setuptools.build_meta:__legacy__` 两个，`setuptools.backends.legacy` 从未存在过 —— 不是版本问题，是笔误）。
 
-**解决：** clone 源码后修改 build-backend 再安装：
+**解决：** 已在源仓库改为 `setuptools.build_meta`。如果你的本地副本仍是旧版，请 `git pull` 拿到最新 `dev-snapshot`，或手动改一下：
 
 ```bash
-git clone https://github.com/wbzdssm/CubeSandbox.git --depth=1
 cd CubeSandbox/sdk/python
 sed -i 's|setuptools.backends.legacy:build|setuptools.build_meta|g' pyproject.toml
-sed -i 's|requires = \["setuptools>=61"\]|requires = ["setuptools>=40"]|g' pyproject.toml
 pip install .
 ```
 

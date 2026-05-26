@@ -25,6 +25,12 @@ When containerd needs to create a sandbox, it spawns `containerd-shim-cube-rs` a
 4. **Handles I/O and signaling** — proxies stdio streams and forwards signals between the host and the container process inside the VM.
 5. **Reports sandbox state** — tracks sandbox status and surfaces it back to containerd through the Shim v2 event model.
 
+## Documentation
+
+| Topic | Path |
+|-------|------|
+| Extended shim API (shimapi) | [`docs/shimapi/`](./docs/shimapi/README.md) |
+
 ## Sub-components
 
 | Directory | Binary | Description |

@@ -75,6 +75,7 @@ func TestTemplateLocalityCacheReturnsCopy(t *testing.T) {
 func TestInvalidateTemplateCachesClearsTemplateCaches(t *testing.T) {
 	templateDefinitionCache.Flush()
 	templateLocalityReadyCache.Flush()
+	templateKindCache.Flush()
 
 	templateID := "tpl-invalidate-test"
 	req := &types.CreateCubeSandboxReq{
@@ -89,6 +90,7 @@ func TestInvalidateTemplateCachesClearsTemplateCaches(t *testing.T) {
 	setTemplateLocalityCache(templateID, []ReplicaStatus{
 		{NodeID: "node-a", Status: ReplicaStatusReady},
 	})
+	setTemplateKindCache(templateID, TemplateKindSnapshot)
 
 	if _, hit, err := getCachedTemplateRequest(templateID); err != nil {
 		t.Fatalf("getCachedTemplateRequest failed before invalidation: %v", err)
@@ -97,6 +99,9 @@ func TestInvalidateTemplateCachesClearsTemplateCaches(t *testing.T) {
 	}
 	if _, hit := getCachedTemplateLocality(templateID); !hit {
 		t.Fatal("expected locality cache hit before invalidation")
+	}
+	if _, hit := getCachedTemplateKind(templateID); !hit {
+		t.Fatal("expected kind cache hit before invalidation")
 	}
 
 	invalidateTemplateCaches(templateID)
@@ -108,6 +113,32 @@ func TestInvalidateTemplateCachesClearsTemplateCaches(t *testing.T) {
 	}
 	if _, hit := getCachedTemplateLocality(templateID); hit {
 		t.Fatal("expected locality cache miss after invalidation")
+	}
+	if _, hit := getCachedTemplateKind(templateID); hit {
+		t.Fatal("expected kind cache miss after invalidation")
+	}
+}
+
+func TestTemplateKindCacheRoundTrip(t *testing.T) {
+	templateKindCache.Flush()
+	templateID := "tpl-kind-cache-test"
+
+	if _, hit := getCachedTemplateKind(templateID); hit {
+		t.Fatal("expected kind cache miss before set")
+	}
+
+	setTemplateKindCache(templateID, TemplateKindSnapshot)
+	kind, hit := getCachedTemplateKind(templateID)
+	if !hit {
+		t.Fatal("expected kind cache hit after set")
+	}
+	if kind != TemplateKindSnapshot {
+		t.Fatalf("expected kind %q, got %q", TemplateKindSnapshot, kind)
+	}
+
+	setTemplateKindCache("", "ignored")
+	if _, hit := getCachedTemplateKind(""); hit {
+		t.Fatal("expected miss for empty key")
 	}
 }
 

@@ -17,14 +17,12 @@ and control the full sandbox lifecycle — including pause/resume with memory sn
 
 ## Installation
 
-```bash
-pip install cubesandbox
-```
-
-Or install from source:
+> **Note:** `cubesandbox` is not yet published to PyPI.
+> Install from source until the first release is available:
 
 ```bash
-cd sdk/python
+git clone https://github.com/TencentCloud/CubeSandbox.git
+cd CubeSandbox/sdk/python
 pip install -e .
 ```
 
@@ -185,7 +183,6 @@ with Sandbox.create(config=cfg) as sb:
 |---|---|
 | `sb.run_code(code, *, on_stdout, on_stderr, on_result, on_error, envs, timeout)` | `POST /execute` — execute code, returns `Execution` |
 | `sb.get_info()` | `GET /sandboxes/:id` — get sandbox state and metadata |
-| `sb.get_info()` | `GET /sandboxes/:id` — get sandbox detail |
 | `sb.pause(*, wait, timeout, interval)` | `POST /sandboxes/:id/pause` — pause sandbox |
 | `sb.resume(timeout)` | `POST /sandboxes/:id/resume` — resume (deprecated, use `connect`) |
 | `sb.kill()` | `DELETE /sandboxes/:id` — destroy sandbox |

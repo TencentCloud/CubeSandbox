@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	stdlog "log"
 	"maps"
 	"os"
 	"path"
@@ -47,6 +46,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/taskio"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -96,11 +96,6 @@ func init() {
 		},
 		Config: defaultConfig(),
 		InitFn: func(ic *plugin.InitContext) (_ interface{}, err error) {
-			defer func() {
-				if err != nil {
-					stdlog.Fatalf("plugin %s init fail:%v", constants.CubeboxID, err.Error())
-				}
-			}()
 			config := ic.Config.(*CubeConfig)
 			if config.RootPath == "" {
 				config.RootPath = ic.Properties[plugins.PropertyRootDir]
@@ -190,6 +185,14 @@ func init() {
 			if err != nil {
 				return nil, fmt.Errorf("get cubebox api client fail:%v", err)
 			}
+			storagePluginObj, err := ic.GetByID(constants.InternalPlugin, constants.StorageID.ID())
+			if err != nil {
+				return nil, fmt.Errorf("get storage plugin fail:%v", err)
+			}
+			storageRecoverer, ok := storagePluginObj.(storage.StateRecoverer)
+			if !ok {
+				return nil, errors.New("storage plugin does not support state recovery")
+			}
 			if setter, ok := cubeboxAPIObj.(cubes.ContainerdClientSetter); ok {
 				setter.SetContainerdClient(client)
 			}
@@ -213,7 +216,7 @@ func init() {
 
 			cbriManager.SetCubeRuntimeImplementation(l)
 			afterRecover := func(tmpCtx context.Context, cb *cubeboxstore.CubeBox) error {
-				return nil
+				return storageRecoverer.RecoverSandboxStorage(tmpCtx, cb.ID)
 			}
 
 			if rev, ok := l.cubeboxManger.(cubes.RocoverCubebox); ok {
@@ -621,6 +624,24 @@ func makeContainerConfigToSave(cfg *cubebox.ContainerConfig) *cubebox.ContainerC
 		ret.Annotations = make(map[string]string)
 	}
 	return ret
+}
+
+func cloneVolumesToSave(volumes []*cubebox.Volume) []*cubebox.Volume {
+	if len(volumes) == 0 {
+		return nil
+	}
+	cloned := make([]*cubebox.Volume, 0, len(volumes))
+	for _, volume := range volumes {
+		if volume == nil {
+			continue
+		}
+		copied, ok := protobuf.Clone(volume).(*cubebox.Volume)
+		if !ok {
+			continue
+		}
+		cloned = append(cloned, copied)
+	}
+	return cloned
 }
 
 func (l *local) CubeboxStore() cubes.CubeboxAPI {

@@ -37,6 +37,7 @@ test -f "${NETWORK_AGENT_CFG}" || die "network-agent config missing: ${NETWORK_A
 test -f "${CUBEMASTER_CFG}" || die "cubemaster config missing: ${CUBEMASTER_CFG}"
 test -f "${CUBELET_CONFIG}" || die "cubelet config missing: ${CUBELET_CONFIG}"
 test -f "${CUBELET_DYNAMICCONF}" || die "cubelet dynamic config missing: ${CUBELET_DYNAMICCONF}"
+validate_cubelet_cow_startup_deps "${CUBELET_CONFIG}"
 
 mkdir -p "${NETWORK_AGENT_STATE_DIR}" "${CUBE_API_LOG_DIR}" /tmp/cube
 

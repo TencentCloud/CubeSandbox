@@ -149,15 +149,11 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 			NameSpace: sandbox.GetNamespace(),
 		}
 		sandboxLabels := cloneStringMap(sandbox.GetLabels())
-		templateID := templateIDFromLabels(sandboxLabels)
 
 		for _, container := range sandbox.GetContainers() {
 			if container.GetId() == sandbox.GetId() {
 				one.Status = int32(container.GetState())
-				if len(sandboxLabels) == 0 {
-					sandboxLabels = cloneStringMap(container.GetLabels())
-					templateID = templateIDFromLabels(sandboxLabels)
-				}
+				sandboxLabels = sandboxViewLabels(sandboxLabels, container.GetLabels())
 			}
 			containerInfo := &types.ContainerInfo{
 				Name:        getContainerName(container.GetLabels()),
@@ -172,8 +168,9 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 			}
 			one.Containers = append(one.Containers, containerInfo)
 		}
+		templateID := templateIDFromLabels(sandboxLabels)
 		one.TemplateID = templateID
-		one.Annotations = buildTemplateAnnotations(templateID)
+		one.Annotations = buildAnnotationsFromLabels(sandboxLabels)
 		one.Labels = sandboxLabels
 		rsp.Data = append(rsp.Data, one)
 	}

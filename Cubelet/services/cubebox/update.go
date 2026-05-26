@@ -124,7 +124,12 @@ func (s *service) UpdateWithPause(ctx context.Context, req *cubebox.UpdateCubeSa
 		return rsp, nil
 	}
 	if sb.GetStatus().IsTerminated() {
-		rsp.Ret.RetMsg = "sandbox is terminating"
+		// IsTerminated() covers both EXITED (FinishedAt!=0) and UNKNOWN
+		// (Unknown=true). The legacy "sandbox is terminating" wording wrongly
+		// implied a user-driven delete is in flight; use the same wording as
+		// rollback.go's precheck so operators can tell the two states apart
+		// from the message alone.
+		rsp.Ret.RetMsg = "sandbox is not running"
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 		return rsp, nil
 	}

@@ -49,10 +49,16 @@ const (
 	JobStatusReady   = "READY"
 	JobStatusFailed  = "FAILED"
 
-	JobOperationCreate = "CREATE"
-	JobOperationRedo   = "REDO"
-	JobOperationCommit = "COMMIT"
-	JobOperationLegacy = "LEGACY"
+	JobOperationCreate           = "CREATE"
+	JobOperationRedo             = "REDO"
+	JobOperationCommit           = "COMMIT"
+	JobOperationLegacy           = "LEGACY"
+	JobOperationSnapshotCreate   = "SNAPSHOT_CREATE"
+	JobOperationSnapshotRollback = "SNAPSHOT_ROLLBACK"
+	JobOperationSnapshotDelete   = "SNAPSHOT_DELETE"
+
+	JobResourceTypeSnapshot = "snapshot"
+	JobResourceTypeTemplate = "template"
 
 	RedoModeAll         = "ALL"
 	RedoModeNodes       = "NODES"
@@ -65,6 +71,12 @@ const (
 	JobPhaseGeneratingJSON   = "GENERATING_JSON"
 	JobPhaseDistributing     = "DISTRIBUTING"
 	JobPhaseCreatingTemplate = "CREATING_TEMPLATE"
+	JobPhaseSnapshotting     = "SNAPSHOTTING"
+	JobPhaseRegistering      = "REGISTERING"
+	JobPhaseRollbackPreparing = "ROLLBACK_PREPARING"
+	JobPhaseRollbackDriving   = "ROLLBACK_DRIVING"
+	JobPhaseRollbackRecovering = "ROLLBACK_RECOVERING"
+	JobPhaseDeleting         = "DELETING"
 	JobPhaseReady            = "READY"
 
 	defaultTemplateCPU         = "2000m"
@@ -74,6 +86,7 @@ const (
 	fallbackArtifactStoreDir   = "cubemaster-rootfs-artifacts-store"
 	rootfsWritableVolumeName   = "cube_rootfs_rw"
 	defaultDistributionWorkers = 4
+	legacyRequestIDPrefix      = "legacy-"
 )
 
 var getTemplateImageConfig = config.GetConfig
@@ -81,8 +94,6 @@ var deleteRootfsArtifactRecord = func(ctx context.Context, artifactID string) er
 	return store.db.WithContext(ctx).Unscoped().Table(constants.RootfsArtifactTableName).
 		Where("artifact_id = ?", artifactID).Delete(&models.RootfsArtifact{}).Error
 }
-
-const legacyRequestIDPrefix = "legacy-"
 
 var ErrNoFailedTemplateReplicas = errors.New("no failed template replicas matched redo request")
 
@@ -152,6 +163,9 @@ func initTemplateImageJobTable(client *gorm.DB) error {
 			job_id varchar(128) NOT NULL COMMENT 'job id',
 			template_id varchar(128) NOT NULL DEFAULT '' COMMENT 'template id',
 			request_id varchar(128) NOT NULL DEFAULT '' COMMENT 'idempotent request id',
+			sandbox_id varchar(128) NOT NULL DEFAULT '' COMMENT 'sandbox id for snapshot operations',
+			resource_type varchar(32) NOT NULL DEFAULT '' COMMENT 'operation resource type',
+			resource_id varchar(128) NOT NULL DEFAULT '' COMMENT 'operation resource id',
 			attempt_no int NOT NULL DEFAULT 1 COMMENT 'attempt number',
 			retry_of_job_id varchar(128) NOT NULL DEFAULT '' COMMENT 'previous job id',
 			operation varchar(32) NOT NULL DEFAULT '' COMMENT 'job operation',
@@ -186,6 +200,8 @@ func initTemplateImageJobTable(client *gorm.DB) error {
 			UNIQUE KEY idx_template_image_job_id (job_id),
 			UNIQUE KEY idx_template_image_template_attempt (template_id,attempt_no),
 			KEY idx_template_image_request_id (request_id),
+			KEY idx_template_image_sandbox_status (sandbox_id,status),
+			KEY idx_template_image_resource_status (resource_id,status),
 			KEY idx_template_image_status (status),
 			KEY idx_template_image_template_status (template_id,status)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error; err != nil {
@@ -197,38 +213,23 @@ func initTemplateImageJobTable(client *gorm.DB) error {
 
 func migrateTemplateImageJobTable(client *gorm.DB, tableName string) error {
 	jobModel := &models.TemplateImageJob{}
-	if !client.Migrator().HasColumn(jobModel, "request_id") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN request_id varchar(128) NOT NULL DEFAULT '' AFTER template_id`).Error; err != nil {
-			return err
-		}
+	columns := []struct {
+		name string
+		sql  string
+	}{
+		{name: "attempt_no", sql: `ALTER TABLE ` + tableName + ` ADD COLUMN attempt_no int NOT NULL DEFAULT 1 AFTER template_id`},
+		{name: "retry_of_job_id", sql: `ALTER TABLE ` + tableName + ` ADD COLUMN retry_of_job_id varchar(128) NOT NULL DEFAULT '' AFTER attempt_no`},
+		{name: "request_id", sql: `ALTER TABLE ` + tableName + ` ADD COLUMN request_id varchar(128) NOT NULL DEFAULT '' AFTER template_id`},
+		{name: "operation", sql: `ALTER TABLE ` + tableName + ` ADD COLUMN operation varchar(32) NOT NULL DEFAULT '' AFTER retry_of_job_id`},
+		{name: "redo_mode", sql: `ALTER TABLE ` + tableName + ` ADD COLUMN redo_mode varchar(32) NOT NULL DEFAULT '' AFTER operation`},
+		{name: "redo_scope_json", sql: `ALTER TABLE ` + tableName + ` ADD COLUMN redo_scope_json mediumtext COMMENT 'redo scope json' AFTER redo_mode`},
+		{name: "resume_phase", sql: `ALTER TABLE ` + tableName + ` ADD COLUMN resume_phase varchar(64) NOT NULL DEFAULT '' AFTER redo_scope_json`},
+		{name: "node_id", sql: `ALTER TABLE ` + tableName + ` ADD COLUMN node_id varchar(128) NOT NULL DEFAULT '' AFTER retry_of_job_id`},
+		{name: "node_ip", sql: `ALTER TABLE ` + tableName + ` ADD COLUMN node_ip varchar(256) NOT NULL DEFAULT '' AFTER node_id`},
+		{name: "snapshot_path", sql: `ALTER TABLE ` + tableName + ` ADD COLUMN snapshot_path varchar(1024) NOT NULL DEFAULT '' AFTER node_ip`},
 	}
-	if !client.Migrator().HasColumn(jobModel, "attempt_no") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN attempt_no int NOT NULL DEFAULT 1 AFTER request_id`).Error; err != nil {
-			return err
-		}
-	}
-	if !client.Migrator().HasColumn(jobModel, "retry_of_job_id") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN retry_of_job_id varchar(128) NOT NULL DEFAULT '' AFTER attempt_no`).Error; err != nil {
-			return err
-		}
-	}
-	if !client.Migrator().HasColumn(jobModel, "operation") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN operation varchar(32) NOT NULL DEFAULT '' AFTER retry_of_job_id`).Error; err != nil {
-			return err
-		}
-	}
-	if !client.Migrator().HasColumn(jobModel, "redo_mode") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN redo_mode varchar(32) NOT NULL DEFAULT '' AFTER operation`).Error; err != nil {
-			return err
-		}
-	}
-	if !client.Migrator().HasColumn(jobModel, "redo_scope_json") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN redo_scope_json mediumtext COMMENT 'redo scope json' AFTER redo_mode`).Error; err != nil {
-			return err
-		}
-	}
-	if !client.Migrator().HasColumn(jobModel, "resume_phase") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN resume_phase varchar(64) NOT NULL DEFAULT '' AFTER redo_scope_json`).Error; err != nil {
+	for _, column := range columns {
+		if err := ensureTableColumn(client, jobModel, column.name, column.sql); err != nil {
 			return err
 		}
 	}
@@ -247,21 +248,6 @@ func migrateTemplateImageJobTable(client *gorm.DB, tableName string) error {
 	}
 	if !client.Migrator().HasIndex(jobModel, "idx_template_image_template_status") {
 		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD KEY idx_template_image_template_status (template_id,status)`).Error; err != nil {
-			return err
-		}
-	}
-	if !client.Migrator().HasColumn(jobModel, "node_id") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN node_id varchar(128) NOT NULL DEFAULT '' AFTER retry_of_job_id`).Error; err != nil {
-			return err
-		}
-	}
-	if !client.Migrator().HasColumn(jobModel, "node_ip") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN node_ip varchar(256) NOT NULL DEFAULT '' AFTER node_id`).Error; err != nil {
-			return err
-		}
-	}
-	if !client.Migrator().HasColumn(jobModel, "snapshot_path") {
-		if err := client.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN snapshot_path varchar(1024) NOT NULL DEFAULT '' AFTER node_ip`).Error; err != nil {
 			return err
 		}
 	}
@@ -358,6 +344,13 @@ func hasSeenRequestBinding(seen map[string]struct{}, requestID, operation string
 
 func requestBindingKey(requestID, operation string) string {
 	return strings.TrimSpace(requestID) + "\x00" + strings.TrimSpace(operation)
+}
+
+func ensureTableColumn(client *gorm.DB, model interface{}, columnName, sql string) error {
+	if client.Migrator().HasColumn(model, columnName) {
+		return nil
+	}
+	return client.Exec(sql).Error
 }
 
 func nextAttemptNoFromLatest(latestAttemptNo int32) int32 {
@@ -551,10 +544,7 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 			return err
 		}
 		targetScope := distributionScopeFromTargets(targetNodes)
-		attemptNo := latestJob.AttemptNo + 1
-		if attemptNo <= 1 {
-			attemptNo = 2
-		}
+		attemptNo := nextAttemptNoFromLatest(latestJob.AttemptNo)
 		requestSnapshot, err := marshalTemplateImageJobRequest(sourceReq)
 		if err != nil {
 			return err
@@ -916,9 +906,8 @@ func cleanupTemplateReplicasOnNodes(ctx context.Context, templateID string, repl
 			}
 		}
 		locators = append(locators, templateCleanupLocator{
-			NodeID:       replica.NodeID,
-			NodeIP:       replica.NodeIP,
-			SnapshotPath: replica.SnapshotPath,
+			NodeID: replica.NodeID,
+			NodeIP: replica.NodeIP,
 		})
 	}
 	if len(locators) == 0 {
@@ -1968,6 +1957,17 @@ func buildCommitTemplateSpecFingerprintFromSnapshot(requestSnapshot string) stri
 	return hex.EncodeToString(sum[:])
 }
 
+// buildCommitTemplateSpecFingerprint preserves the pre-merge call signature
+// used by snapshot_ops.go (it takes the unmarshaled request, hashes the
+// canonical JSON form, and returns the same value as the *FromSnapshot
+// helper would for the corresponding payload). Keeping a thin wrapper here
+// avoids touching every snapshot call site while still routing fingerprint
+// generation through a single canonical encoder.
+func buildCommitTemplateSpecFingerprint(req *types.CreateCubeSandboxReq) string {
+	payload, _ := marshalTemplateCommitJobRequest(req)
+	return buildCommitTemplateSpecFingerprintFromSnapshot(payload)
+}
+
 func getLatestTemplateImageJobByTemplateID(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
 	record := &models.TemplateImageJob{}
 	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
@@ -1988,6 +1988,43 @@ func getActiveTemplateImageJobByTemplateID(ctx context.Context, templateID strin
 	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
 		Where("template_id = ? AND status IN ?", templateID, []string{JobStatusPending, JobStatusRunning}).
 		Order("attempt_no desc, id desc").First(record).Error
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+func getTemplateImageJobByRequestID(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
+	record := &models.TemplateImageJob{}
+	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("request_id = ?", requestID).
+		Order("id desc").First(record).Error
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+func getActiveSnapshotJobBySandboxID(ctx context.Context, sandboxID string) (*models.TemplateImageJob, error) {
+	record := &models.TemplateImageJob{}
+	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("sandbox_id = ? AND operation IN ? AND status IN ?", sandboxID,
+			[]string{JobOperationSnapshotCreate, JobOperationSnapshotRollback},
+			[]string{JobStatusPending, JobStatusRunning}).
+		Order("id desc").First(record).Error
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+func getActiveSnapshotJobByResourceID(ctx context.Context, resourceID string) (*models.TemplateImageJob, error) {
+	record := &models.TemplateImageJob{}
+	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("resource_id = ? AND operation IN ? AND status IN ?", resourceID,
+			[]string{JobOperationSnapshotCreate, JobOperationSnapshotRollback, JobOperationSnapshotDelete},
+			[]string{JobStatusPending, JobStatusRunning}).
+		Order("id desc").First(record).Error
 	if err != nil {
 		return nil, err
 	}
@@ -2073,6 +2110,9 @@ func jobModelToInfo(ctx context.Context, record *models.TemplateImageJob) (*type
 		JobID:                   record.JobID,
 		TemplateID:              record.TemplateID,
 		RequestID:               record.RequestID,
+		SandboxID:               record.SandboxID,
+		ResourceType:            record.ResourceType,
+		ResourceID:              record.ResourceID,
 		AttemptNo:               record.AttemptNo,
 		RetryOfJobID:            record.RetryOfJobID,
 		Operation:               record.Operation,

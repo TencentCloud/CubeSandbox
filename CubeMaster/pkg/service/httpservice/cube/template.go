@@ -103,9 +103,9 @@ func deleteTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestT
 		case errors.Is(err, templatecenter.ErrTemplateNotFound):
 			code = int(errorcode.ErrorCode_NotFound)
 		case errors.Is(err, templatecenter.ErrTemplateInUse):
-			code = int(errorcode.ErrorCode_MasterParamsError)
+			code = int(errorcode.ErrorCode_Conflict)
 		case errors.Is(err, templatecenter.ErrTemplateAttemptInProgress):
-			code = int(errorcode.ErrorCode_MasterParamsError)
+			code = int(errorcode.ErrorCode_Conflict)
 		case errors.Is(err, templatecenter.ErrTemplateCleanupLocatorMissing):
 			code = int(errorcode.ErrorCode_NotFound)
 		case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):

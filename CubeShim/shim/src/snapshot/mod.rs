@@ -20,8 +20,8 @@ use cube_hypervisor::config::BackendFsConfig;
 
 use cube_hypervisor::vmm_config;
 use cube_hypervisor::ApiRequest;
-use cube_hypervisor::VmSnapshotConfig;
-use cube_hypervisor::{NotifyEvent, VmmInstance};
+use cube_hypervisor::SnapshotConfig;
+use cube_hypervisor::{NotifyEvent, SnapshotType, VmmInstance};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::client;
@@ -88,6 +88,9 @@ pub struct Snapshot {
     sharefs_ptr: Option<FilePtr>,
     vsock_ptr: Option<FilePtr>,
     app_snapshot: bool,
+    snapshot_type: SnapshotType,
+    memory_vol_url: Option<String>,
+    container_id: Option<String>,
 }
 
 impl Snapshot {
@@ -115,9 +118,23 @@ impl Snapshot {
 
     async fn do_app_snapshot(&mut self) -> CResult<()> {
         self.api_pause_vm().await?;
-        self.api_snapshot_vm().await?;
-        self.api_resume_vm().await?;
-        self.store_metadata()
+        let snapshot_result = async {
+            self.api_snapshot_vm().await?;
+            self.store_metadata()
+        }
+        .await;
+        let resume_result = self.api_resume_vm().await;
+
+        match (snapshot_result, resume_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(snapshot_err), Ok(())) => Err(snapshot_err),
+            (Ok(()), Err(resume_err)) => Err(resume_err),
+            (Err(snapshot_err), Err(resume_err)) => Err(format!(
+                "{}; additionally resume vm failed:{}",
+                snapshot_err, resume_err
+            )
+            .into()),
+        }
     }
 
     async fn api_pause_vm(&self) -> CResult<()> {
@@ -130,7 +147,7 @@ impl Snapshot {
     async fn api_resume_vm(&self) -> CResult<()> {
         self.request_ch("/api/v1/vm.resume", "".to_string())
             .await
-            .map_err(|e| format!("pause vm failed:{}", e))?;
+            .map_err(|e| format!("resume vm failed:{}", e))?;
         Ok(())
     }
 
@@ -146,15 +163,18 @@ impl Snapshot {
             )
         })?;
 
-        let config = VmSnapshotConfig {
+        let config = SnapshotConfig {
             destination_url: format!("file://{}", snapshot_path.to_str().unwrap()),
+            snapshot_type: self.snapshot_type,
+            memory_vol_url: self.memory_vol_url.clone(),
+            ..Default::default()
         };
         let data =
             serde_json::to_string(&config).map_err(|e| format!("serialize config failed:{}", e))?;
 
         self.request_ch("/api/v1/vm.snapshot", data)
             .await
-            .map_err(|e| format!("pause vm failed:{}", e))?;
+            .map_err(|e| format!("snapshot vm failed:{}", e))?;
         Ok(())
     }
 
@@ -190,15 +210,20 @@ impl Snapshot {
             .await
             .map_err(|e| format!("send request failed:{}", e.to_string()))?;
         let status = response.status();
-        if !status.is_success() {
-            return Err(format!("HTTP request failed with status: {}", status).into());
-        }
         let body_bytes = response
             .into_body()
             .collect()
             .await
             .map_err(|e| format!("collect body failed:{}", e.to_string()))?
             .to_bytes();
+        if !status.is_success() {
+            let body = String::from_utf8_lossy(&body_bytes);
+            return Err(format!(
+                "HTTP request failed with status: {}, body: {}",
+                status, body
+            )
+            .into());
+        }
         Ok(body_bytes)
     }
 
@@ -346,8 +371,11 @@ impl Snapshot {
             )
         })?;
 
-        let config = VmSnapshotConfig {
+        let config = SnapshotConfig {
             destination_url: format!("file://{}", snapshot_path.to_str().unwrap()),
+            snapshot_type: self.snapshot_type,
+            memory_vol_url: self.memory_vol_url.clone(),
+            ..Default::default()
         };
         let _ = self
             .ch
@@ -363,6 +391,7 @@ impl Snapshot {
         let mut snap_info = SnapshotInfo::new(self.res.cpu, self.res.memory);
         snap_info.image_version = Utils::get_image_version()?;
         snap_info.kernel_version = Utils::get_kernel_version(self.kernel.as_str())?;
+        snap_info.app_snapshot_container_id = self.container_id.clone();
         for d in &self.disk {
             let disk = snapshot::Disk {
                 fs_type: d.fs_type.clone(),

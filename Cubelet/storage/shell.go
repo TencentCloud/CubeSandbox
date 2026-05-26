@@ -65,6 +65,35 @@ func newExt4BaseRaw(filePath, uuid string, size int64) error {
 	return nil
 }
 
+func initExt4BlockDevice(devicePath string) (err error) {
+	mountDir, err := os.MkdirTemp("", "cube-cubecow-mount-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = os.RemoveAll(mountDir)
+	}()
+
+	cmds := [][]string{
+		{"mkfs.ext4", "-F", "-O", "^has_journal", devicePath},
+		{"mount", devicePath, mountDir},
+		{"mkdir", "-p", path.Join(mountDir, emptyDirInnerSourcePath)},
+		{"mkdir", "-p", path.Join(mountDir, "containerd")},
+		{"umount", mountDir},
+	}
+
+	for _, cmd := range cmds {
+		if _, stderr, execErr := utils.ExecV(cmd, cmdTimeout); execErr != nil {
+			err = fmt.Errorf("initExt4BlockDevice failed:%s", stderr)
+			if cmd[0] != "umount" {
+				_, _, _ = utils.ExecV([]string{"umount", mountDir}, cmdTimeout)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 func newExt4RawByCopy(baseFormatFile, targetFile string, size int64) (err error) {
 	cmds := [][]string{
 		{"cp", baseFormatFile, targetFile},

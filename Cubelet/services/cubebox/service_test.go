@@ -6,11 +6,17 @@ package cubebox
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 )
 
@@ -220,4 +226,188 @@ func TestCubeboxSorting(t *testing.T) {
 	for _, box := range truncated {
 		assert.False(t, box.Status.IsTerminated(), "Truncated list should not contain terminated boxes")
 	}
+}
+
+func TestValidateCommitSandboxTarget(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{ID: "sandbox"},
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "root",
+					ContainerPath: "/",
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+
+	rootVolume, err := validateCommitSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", rootVolume)
+}
+
+func TestValidateCommitSandboxTargetRejectsHostPath(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{ID: "sandbox"},
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "root",
+					ContainerPath: "/",
+				}, {
+					Name:     "host",
+					HostPath: "/var/lib/data",
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hostPath")
+}
+
+func TestValidateCommitSandboxTargetRejectsHostDirVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "host",
+		VolumeSource: &cubeboxv1.VolumeSource{
+			HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+				VolumeSources: []*cubeboxv1.HostDirSource{{
+					Name:     "host",
+					HostPath: "/var/lib/data",
+				}},
+			},
+		},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "host",
+		ContainerPath: "/data",
+	}})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "host_dir")
+}
+
+func TestValidateCommitSandboxTargetRejectsSandboxPathHostBind(t *testing.T) {
+	for _, sandboxPathType := range []string{
+		cubeboxv1.SandboxPathType_Directory.String(),
+		cubeboxv1.SandboxPathType_SharedBindMount.String(),
+	} {
+		t.Run(sandboxPathType, func(t *testing.T) {
+			cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+				Name: "host",
+				VolumeSource: &cubeboxv1.VolumeSource{
+					SandboxPath: &cubeboxv1.SandboxPathVolumeSource{
+						Type: sandboxPathType,
+						Path: "/var/lib/data",
+					},
+				},
+			}}, []*cubeboxv1.VolumeMounts{{
+				Name:          "root",
+				ContainerPath: "/",
+			}, {
+				Name:          "host",
+				ContainerPath: "/data",
+			}})
+
+			_, err := validateCommitSandboxTarget(cb)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "sandbox_path")
+		})
+	}
+}
+
+func TestValidateCommitSandboxTargetRejectsUnknownLegacyVolumeSources(t *testing.T) {
+	cb := newRunningCommitSandboxForTest(nil, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data",
+	}})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "without persisted volume sources")
+}
+
+func TestValidateCommitSandboxTargetRequiresRunningSandbox(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{ID: "sandbox"},
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: []*cubeboxv1.VolumeMounts{{
+					Name:          "root",
+					ContainerPath: "/",
+				}},
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{CreatedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not running")
+}
+
+func newRunningCommitSandboxForTest(volumes []*cubeboxv1.Volume, mounts []*cubeboxv1.VolumeMounts) *cubeboxstore.CubeBox {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{ID: "sandbox"},
+		Volumes:  volumes,
+	}
+	cb.AddContainer(&cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sandbox",
+			Config: &cubeboxv1.ContainerConfig{
+				VolumeMounts: mounts,
+			},
+		},
+		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: time.Now().UnixNano()}),
+		IsPod:  true,
+	})
+	return cb
+}
+
+func TestWriteMemoryDevFile(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, writeMemoryDevFile(dir, "/dev/mapper/tpl-snapshot-memory"))
+
+	got, err := os.ReadFile(filepath.Join(dir, "memory.dev"))
+	require.NoError(t, err)
+	assert.Equal(t, "/dev/mapper/tpl-snapshot-memory\n", string(got))
+}
+
+func TestAppSnapshotRequiresCowBeforeCreate(t *testing.T) {
+	rsp, err := (&service{}).AppSnapshot(context.Background(), &cubeboxv1.AppSnapshotRequest{
+		CreateRequest: &cubeboxv1.RunCubeSandboxRequest{
+			RequestID: "req",
+			Annotations: map[string]string{
+				constants.MasterAnnotationsAppSnapshotCreate:    "true",
+				constants.MasterAnnotationAppSnapshotTemplateID: "template",
+			},
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, rsp)
+	assert.Equal(t, errorcode.ErrorCode_PreConditionFailed, rsp.GetRet().GetRetCode())
+	assert.Contains(t, rsp.GetRet().GetRetMsg(), "storage_backend=cubecow")
 }

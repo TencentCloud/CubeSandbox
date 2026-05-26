@@ -10,6 +10,8 @@ so no real network is needed.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -590,6 +592,419 @@ class TestClose:
         sb._client = mock_client
         sb.__del__()
         mock_client.close.assert_called_once()
+
+
+# ── Sandbox.rollback ──────────────────────────────────────────────────────────
+
+
+class TestRollback:
+    """Tests for ``Sandbox.rollback`` and its connection-reset side effect.
+
+    Background: rolling back restarts the sandbox process, so any
+    keep-alive sockets the SDK was holding against jupyter-server (or the
+    cube-api control plane) become half-closed. The next ``run_code`` would
+    block on a zombie socket. ``rollback`` must drop those pools so the
+    next request opens a fresh connection.
+    """
+
+    @staticmethod
+    def _requests_response(body=None, status: int = 200):
+        """Build a duck-typed requests.Response. ``_check_response`` reads
+        ``.ok``, ``.status_code``, ``.text`` and ``.json()`` — give it those
+        directly via MagicMock instead of the project's httpx-based
+        ``mock_response`` helper (which is what makes the other test classes
+        in this file fail; orthogonal to rollback)."""
+        m = MagicMock()
+        m.ok = 200 <= status < 400
+        m.status_code = status
+        m.text = json.dumps(body) if body is not None else ""
+        m.json.return_value = body if body is not None else {}
+        return m
+
+    def test_rollback_returns_response_body(self):
+        sb = make_sandbox()
+        body = {"sandboxID": sb.sandbox_id, "snapshotID": "snap-1", "status": "success"}
+        with patch.object(sb._session, "post", return_value=self._requests_response(body)):
+            assert sb.rollback("snap-1") == body
+
+    def test_rollback_posts_snapshot_id_to_correct_url(self):
+        sb = make_sandbox()
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response({"status": "success"})) as post_m:
+            sb.rollback("snap-xyz")
+        url = post_m.call_args.args[0]
+        assert url.endswith(f"/sandboxes/{sb.sandbox_id}/rollback")
+        assert post_m.call_args.kwargs["json"] == {"snapshotID": "snap-xyz"}
+
+    def test_rollback_not_found_raises(self):
+        sb = make_sandbox()
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response({"message": "not found"}, status=404)):
+            with pytest.raises(SandboxNotFoundError):
+                sb.rollback("snap-1")
+
+    def test_rollback_closes_httpx_client_so_run_code_rebuilds(self):
+        """After rollback, the cached httpx.Client must be dropped so the next
+        run_code() lazily opens a fresh connection (the old one points at a
+        torn-down jupyter kernel)."""
+        sb = make_sandbox()
+        mock_client = MagicMock()
+        sb._client = mock_client
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response({"status": "success"})):
+            sb.rollback("snap-1")
+        mock_client.close.assert_called_once()
+        assert sb._client is None
+
+    def test_rollback_swallows_client_close_errors(self):
+        """_client.close() failing should not fail rollback — the goal is just
+        to drop the reference so the next call opens a new client."""
+        sb = make_sandbox()
+        mock_client = MagicMock()
+        mock_client.close.side_effect = RuntimeError("already closed")
+        sb._client = mock_client
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response({"status": "ok"})):
+            sb.rollback("snap-1")  # should not raise
+        assert sb._client is None
+
+    def test_rollback_when_client_never_built_is_safe(self):
+        """If run_code was never called, _client is None — rollback should
+        still reset cleanly without trying to close None."""
+        sb = make_sandbox()
+        assert sb._client is None
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response({"status": "ok"})):
+            sb.rollback("snap-1")  # must not raise AttributeError on None.close()
+
+    def test_rollback_rebuilds_session_pool(self):
+        """The requests.Session is also pooled and recreated post-rollback so
+        intermediate proxies that drop idle conns on rollback don't bite us."""
+        sb = make_sandbox()
+        old_session = sb._session
+        with patch.object(old_session, "post",
+                          return_value=self._requests_response({"status": "ok"})):
+            sb.rollback("snap-1")
+        # New session object, not the same instance.
+        assert sb._session is not old_session
+
+    def test_rollback_does_not_reset_until_after_response_check(self):
+        """If the rollback request itself fails (e.g. 404), we shouldn't have
+        reset connections — the sandbox state didn't change, so the old
+        client is still valid."""
+        sb = make_sandbox()
+        mock_client = MagicMock()
+        sb._client = mock_client
+        with patch.object(sb._session, "post",
+                          return_value=self._requests_response({"message": "not found"}, status=404)):
+            with pytest.raises(SandboxNotFoundError):
+                sb.rollback("snap-1")
+        # _client untouched because rollback didn't actually happen
+        mock_client.close.assert_not_called()
+        assert sb._client is mock_client
+
+
+# ── Sandbox.clone ─────────────────────────────────────────────────────────────
+
+
+class TestClone:
+    """Tests for ``Sandbox.clone(n, *, concurrency)`` (1.6)."""
+
+    @staticmethod
+    def _patch_clone_internals(snapshot_id: str = "snap-test"):
+        """Return a context-manager-yielding tuple of (snapshot_mock, create_mock,
+        delete_mock). Each ``Sandbox.create`` call returns a freshly minted
+        Sandbox instance with a unique ``sandboxID``.
+        """
+        from contextlib import ExitStack
+        from itertools import count
+
+        snap_obj = MagicMock()
+        snap_obj.snapshot_id = snapshot_id
+        counter = count()
+
+        def _make(*_args, **_kwargs):
+            n = next(counter)
+            return Sandbox({**SANDBOX_DATA, "sandboxID": f"sb-clone-{n:03d}"},
+                           config=make_config())
+
+        stack = ExitStack()
+        snap_p = stack.enter_context(
+            patch.object(Sandbox, "create_snapshot", return_value=snap_obj)
+        )
+        create_p = stack.enter_context(
+            patch.object(Sandbox, "create", side_effect=_make)
+        )
+        delete_p = stack.enter_context(
+            patch.object(Sandbox, "delete_snapshot")
+        )
+        return stack, snap_p, create_p, delete_p
+
+    # ─── basic / sequential ──────────────────────────────────────────────────
+
+    def test_clone_default_returns_one(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, delete_p = self._patch_clone_internals()
+        with stack:
+            result = sb.clone()
+        assert len(result) == 1
+        assert create_p.call_count == 1
+        delete_p.assert_called_once()
+
+    def test_clone_n_sequential(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_clone_internals()
+        with stack:
+            result = sb.clone(n=5)
+        assert len(result) == 5
+        assert create_p.call_count == 5
+
+    def test_clone_zero(self):
+        """n=0 short-circuits — no create calls, snapshot still cleaned up."""
+        sb = make_sandbox()
+        stack, _snap, create_p, delete_p = self._patch_clone_internals()
+        with stack:
+            result = sb.clone(n=0)
+        assert result == []
+        assert create_p.call_count == 0
+        delete_p.assert_called_once()
+
+    def test_clone_uses_snapshot_id_as_template(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_clone_internals(
+            snapshot_id="snap-xyz"
+        )
+        with stack:
+            sb.clone(n=2)
+        for call in create_p.call_args_list:
+            assert call.kwargs["template"] == "snap-xyz"
+
+    def test_clone_deletes_snapshot_on_success(self):
+        sb = make_sandbox()
+        stack, _snap, _create, delete_p = self._patch_clone_internals(
+            snapshot_id="snap-to-clean"
+        )
+        with stack:
+            sb.clone(n=3)
+        delete_p.assert_called_once_with("snap-to-clean", config=sb._config)
+
+    def test_clone_deletes_snapshot_even_on_error(self):
+        """If a Sandbox.create call raises, the ephemeral snapshot is still
+        deleted via the ``finally`` branch."""
+        sb = make_sandbox()
+        snap_obj = MagicMock()
+        snap_obj.snapshot_id = "snap-err"
+        with (
+            patch.object(Sandbox, "create_snapshot", return_value=snap_obj),
+            patch.object(Sandbox, "create", side_effect=ApiError("boom")),
+            patch.object(Sandbox, "delete_snapshot") as delete_p,
+        ):
+            with pytest.raises(ApiError):
+                sb.clone(n=2)
+        delete_p.assert_called_once_with("snap-err", config=sb._config)
+
+    def test_clone_swallows_delete_snapshot_failure(self):
+        """A failing ``delete_snapshot`` is best-effort and must not propagate."""
+        sb = make_sandbox()
+        stack, _snap, _create, delete_p = self._patch_clone_internals()
+        delete_p.side_effect = ApiError("snapshot delete failed")
+        with stack:
+            result = sb.clone(n=2)  # should not raise
+        assert len(result) == 2
+
+    # ─── concurrent ──────────────────────────────────────────────────────────
+
+    def test_clone_concurrent_returns_n(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_clone_internals()
+        with stack:
+            result = sb.clone(n=8, concurrency=4)
+        assert len(result) == 8
+        assert create_p.call_count == 8
+
+    def test_clone_concurrency_caps_at_n(self):
+        """``concurrency=10`` with ``n=3`` should not blow up — workers ==
+        ``min(n, concurrency) == 3``."""
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_clone_internals()
+        with stack:
+            result = sb.clone(n=3, concurrency=10)
+        assert len(result) == 3
+        assert create_p.call_count == 3
+
+    def test_clone_concurrent_partial_failure_propagates(self):
+        """If any clone fails the exception bubbles up, the snapshot is still
+        cleaned up via ``finally``, AND every sibling sandbox that succeeded
+        is killed before the exception leaves ``clone()``.
+
+        This is the canonical "no resource leak on partial failure" test.
+        Previously ``clone()`` returned a partial list silently (or, after
+        as_completed broke early, dropped some results entirely). The new
+        contract is all-or-nothing: caller either gets *n* sandboxes or
+        gets an exception with no orphans left running on the backend.
+        """
+        sb = make_sandbox()
+        snap_obj = MagicMock()
+        snap_obj.snapshot_id = "snap-partial"
+        # Counter is mutated from worker threads — guard with a lock so the
+        # "fail on the 3rd call" trigger is deterministic regardless of how
+        # the GIL slices the LOAD/ADD/STORE around ``+= 1``.
+        lock = threading.Lock()
+        call_count = {"n": 0}
+        created: list[Sandbox] = []  # track every Sandbox we hand back
+
+        def _flaky(*_args, **_kwargs):
+            with lock:
+                call_count["n"] += 1
+                idx = call_count["n"]
+            if idx == 3:
+                raise ApiError("create failed")
+            inst = Sandbox(
+                {**SANDBOX_DATA, "sandboxID": f"sb-{idx:03d}"},
+                config=make_config(),
+            )
+            with lock:
+                created.append(inst)
+            return inst
+
+        with (
+            patch.object(Sandbox, "create_snapshot", return_value=snap_obj),
+            patch.object(Sandbox, "create", side_effect=_flaky),
+            patch.object(Sandbox, "delete_snapshot") as delete_p,
+            patch.object(Sandbox, "kill") as kill_p,
+        ):
+            with pytest.raises(ApiError, match="create failed"):
+                sb.clone(n=5, concurrency=3)
+
+        # Snapshot got cleaned up exactly once.
+        delete_p.assert_called_once()
+        # Every sandbox that ``Sandbox.create`` actually returned must have
+        # been killed by clone() before it raised. We assert the count
+        # matches what _flaky produced — n=5 with the 3rd raising means 4
+        # successes (calls 1, 2, 4, 5).
+        assert len(created) == 4, f"sanity: _flaky should have produced 4 sandboxes, got {len(created)}"
+        assert kill_p.call_count == 4, (
+            f"clone() leaked {4 - kill_p.call_count} sandbox(es) on partial failure"
+        )
+
+    def test_clone_concurrent_drains_all_futures_on_failure(self):
+        """Even if an *early* future fails, clone() must wait for every other
+        in-flight future and either kill or return its result. The bug being
+        defended against: ``as_completed`` + ``raise`` short-circuits the
+        loop, leaving in-flight futures to complete in the background and
+        silently leak their sandboxes once the executor's __exit__ joins.
+        """
+        sb = make_sandbox()
+        snap_obj = MagicMock()
+        snap_obj.snapshot_id = "snap-drain"
+
+        # Force a deterministic failure ordering: first call fails fast,
+        # the rest sleep a bit and succeed. as_completed will yield the
+        # failure first; a buggy implementation drops the slow ones.
+        lock = threading.Lock()
+        call_idx = {"n": 0}
+        observed: list[str] = []
+
+        def _mixed(*_args, **_kwargs):
+            with lock:
+                call_idx["n"] += 1
+                idx = call_idx["n"]
+            if idx == 1:
+                observed.append(f"fail-{idx}")
+                raise ApiError("first one fails")
+            time.sleep(0.05)  # let the failure win the as_completed race
+            inst = Sandbox(
+                {**SANDBOX_DATA, "sandboxID": f"sb-{idx:03d}"},
+                config=make_config(),
+            )
+            observed.append(f"ok-{idx}")
+            return inst
+
+        with (
+            patch.object(Sandbox, "create_snapshot", return_value=snap_obj),
+            patch.object(Sandbox, "create", side_effect=_mixed),
+            patch.object(Sandbox, "delete_snapshot"),
+            patch.object(Sandbox, "kill") as kill_p,
+        ):
+            with pytest.raises(ApiError, match="first one fails"):
+                sb.clone(n=4, concurrency=4)
+
+        # All 4 backend calls must have completed (1 fail + 3 ok); the SDK
+        # must not have abandoned any in-flight future.
+        ok_count = sum(1 for x in observed if x.startswith("ok"))
+        assert ok_count == 3, (
+            f"expected all 3 successful futures to be drained, got {ok_count}: {observed}"
+        )
+        # And every successful sandbox must have been killed.
+        assert kill_p.call_count == 3, (
+            f"expected 3 cleanup kills for the drained successes, got {kill_p.call_count}"
+        )
+
+    def test_clone_concurrent_kill_failure_does_not_mask_original(self):
+        """If cleanup kill() itself raises, clone() must still propagate the
+        original create failure — best-effort cleanup, never mask the cause."""
+        sb = make_sandbox()
+        snap_obj = MagicMock()
+        snap_obj.snapshot_id = "snap-kill-fail"
+        lock = threading.Lock()
+        idx = {"n": 0}
+
+        def _one_fails(*_args, **_kwargs):
+            with lock:
+                idx["n"] += 1
+                i = idx["n"]
+            if i == 2:
+                raise ApiError("creation boom")
+            return Sandbox(
+                {**SANDBOX_DATA, "sandboxID": f"sb-{i:03d}"},
+                config=make_config(),
+            )
+
+        with (
+            patch.object(Sandbox, "create_snapshot", return_value=snap_obj),
+            patch.object(Sandbox, "create", side_effect=_one_fails),
+            patch.object(Sandbox, "delete_snapshot"),
+            patch.object(Sandbox, "kill", side_effect=RuntimeError("kill boom")),
+        ):
+            # Original ApiError must propagate, not the RuntimeError from kill().
+            with pytest.raises(ApiError, match="creation boom"):
+                sb.clone(n=3, concurrency=3)
+
+    def test_clone_concurrency_one_no_threads(self):
+        """``concurrency=1`` must not spawn a ThreadPoolExecutor.
+
+        We patch ``ThreadPoolExecutor`` at the import site so any accidental
+        instantiation raises immediately.
+        """
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_clone_internals()
+        with stack:
+            with patch("concurrent.futures.ThreadPoolExecutor",
+                       side_effect=AssertionError("must not be used")):
+                result = sb.clone(n=4, concurrency=1)
+        assert len(result) == 4
+        assert create_p.call_count == 4
+
+    def test_clone_n_one_no_threads_even_with_concurrency(self):
+        """Single-clone fast path skips the executor."""
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_clone_internals()
+        with stack:
+            with patch("concurrent.futures.ThreadPoolExecutor",
+                       side_effect=AssertionError("must not be used")):
+                result = sb.clone(n=1, concurrency=8)
+        assert len(result) == 1
+        assert create_p.call_count == 1
+
+    def test_clone_no_longer_accepts_snapshot_name(self):
+        """``snapshot_name`` was removed in this revision (it leaked
+        implementation detail and forced ephemeral snapshots to share names
+        under concurrency)."""
+        sb = make_sandbox()
+        stack, _snap, _create, _delete = self._patch_clone_internals()
+        with stack:
+            with pytest.raises(TypeError, match="snapshot_name"):
+                sb.clone(n=1, snapshot_name="leaky")  # type: ignore[call-arg]
 
 
 # ── Exports ───────────────────────────────────────────────────────────────────

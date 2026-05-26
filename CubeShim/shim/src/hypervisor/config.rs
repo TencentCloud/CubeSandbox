@@ -173,7 +173,6 @@ impl VmConfig {
     }
 
     pub fn check_cmdline_conflicts(&self, extra_params: &[String]) -> Vec<String> {
-
         let mut existing_keys = HashSet::new();
         let mut existing_params = HashSet::new();
 

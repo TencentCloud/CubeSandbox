@@ -25,6 +25,7 @@ import (
 
 var ErrTemplateInUse = errors.New("template is still in use")
 var ErrTemplateCleanupLocatorMissing = errors.New("template cleanup locator is missing")
+var ErrSnapshotReplicaMetadataIncomplete = errors.New("snapshot replica metadata is incomplete")
 
 var (
 	cleanupTemplateOnCubelet = cubelet.CleanupTemplate
@@ -37,10 +38,19 @@ var (
 	runTemplateJobCleanup    = cleanupTemplateJobs
 )
 
+// templateCleanupLocator identifies a single cubelet that may hold artifacts
+// for a template. v4: cubelet is the authority for the actual physical
+// objects, so master no longer carries SnapshotPath / Objects here. The
+// fields are retained as deprecated for one release to keep DB rows from
+// failing JSON decode on legacy upgrade paths.
+// templateCleanupLocator identifies the cubelet node that hosts artifacts to
+// be cleaned up for a template/snapshot. v5: the deprecated SnapshotPath and
+// Objects fields were removed; cubelet is the sole authority on physical
+// layout and resolves both from its local catalog (with deterministic
+// fallback) keyed by templateID.
 type templateCleanupLocator struct {
-	NodeID       string
-	NodeIP       string
-	SnapshotPath string
+	NodeID string
+	NodeIP string
 }
 
 type templateCleanupTargets struct {
@@ -50,6 +60,16 @@ type templateCleanupTargets struct {
 	Locators     []templateCleanupLocator
 	ArtifactIDs  map[string]struct{}
 	InstanceType string
+}
+
+// cleanupLocatorKey produces a stable dedup key for a locator. v4: identity
+// is purely the (node id, node ip) pair; SnapshotPath is no longer included
+// because master does not track it.
+func cleanupLocatorKey(locator templateCleanupLocator) string {
+	return strings.Join([]string{
+		strings.TrimSpace(locator.NodeID),
+		strings.TrimSpace(locator.NodeIP),
+	}, "|")
 }
 
 func DeleteTemplate(ctx context.Context, templateID, instanceType string) error {
@@ -131,9 +151,8 @@ func discoverTemplateCleanupTargets(ctx context.Context, templateID, instanceTyp
 			targets.ArtifactIDs[replica.ArtifactID] = struct{}{}
 		}
 		targets.addLocator(templateCleanupLocator{
-			NodeID:       replica.NodeID,
-			NodeIP:       replica.NodeIP,
-			SnapshotPath: replica.SnapshotPath,
+			NodeID: replica.NodeID,
+			NodeIP: replica.NodeIP,
 		})
 	}
 
@@ -150,9 +169,8 @@ func discoverTemplateCleanupTargets(ctx context.Context, templateID, instanceTyp
 			targets.ArtifactIDs[job.ArtifactID] = struct{}{}
 		}
 		targets.addLocator(templateCleanupLocator{
-			NodeID:       job.NodeID,
-			NodeIP:       job.NodeIP,
-			SnapshotPath: job.SnapshotPath,
+			NodeID: job.NodeID,
+			NodeIP: job.NodeIP,
 		})
 	}
 
@@ -164,21 +182,12 @@ func discoverTemplateCleanupTargets(ctx context.Context, templateID, instanceTyp
 }
 
 func (t *templateCleanupTargets) addLocator(locator templateCleanupLocator) {
-	if strings.TrimSpace(locator.NodeID) == "" && strings.TrimSpace(locator.NodeIP) == "" && strings.TrimSpace(locator.SnapshotPath) == "" {
+	if strings.TrimSpace(locator.NodeID) == "" && strings.TrimSpace(locator.NodeIP) == "" {
 		return
 	}
-	key := strings.Join([]string{
-		strings.TrimSpace(locator.NodeID),
-		strings.TrimSpace(locator.NodeIP),
-		strings.TrimSpace(locator.SnapshotPath),
-	}, "|")
+	key := cleanupLocatorKey(locator)
 	for _, existing := range t.Locators {
-		existingKey := strings.Join([]string{
-			strings.TrimSpace(existing.NodeID),
-			strings.TrimSpace(existing.NodeIP),
-			strings.TrimSpace(existing.SnapshotPath),
-		}, "|")
-		if existingKey == key {
+		if cleanupLocatorKey(existing) == key {
 			return
 		}
 	}
@@ -205,7 +214,7 @@ func (t *templateCleanupTargets) hasActiveDefinitionBuild() bool {
 	if t == nil || t.Definition == nil {
 		return false
 	}
-	return strings.EqualFold(t.Definition.Status, StatusPending)
+	return strings.EqualFold(t.Definition.Status, StatusPending) || strings.EqualFold(t.Definition.Status, StatusCreating)
 }
 
 func (t *templateCleanupTargets) requiresCleanupLocator() bool {
@@ -215,12 +224,13 @@ func (t *templateCleanupTargets) requiresCleanupLocator() bool {
 	if len(t.Locators) > 0 || t.Definition != nil || len(t.Replicas) > 0 || len(t.ArtifactIDs) > 0 {
 		return false
 	}
-	// Only block deletion if there is a job that carries a snapshot path but
-	// has no resolvable node locator. Jobs with empty NodeID/NodeIP/SnapshotPath
-	// are orphaned records with nothing to clean up on any cubelet, so they
-	// can be safely removed without a locator.
+	// v4: a job is considered to need cleanup on a cubelet if it identifies
+	// a host (node id or ip). The legacy snapshot_path signal is no longer
+	// authoritative on master (cubelet owns it via local catalog), but jobs
+	// with no node binding at all are orphaned records with nothing to clean
+	// up anywhere and can be safely removed without a locator.
 	for _, job := range t.Jobs {
-		if strings.TrimSpace(job.SnapshotPath) != "" {
+		if strings.TrimSpace(job.NodeID) != "" || strings.TrimSpace(job.NodeIP) != "" {
 			return true
 		}
 	}
@@ -353,13 +363,15 @@ func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string,
 			}
 		}
 		if hostIP == "" {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup template %s: missing node address for locator node=%s snapshot=%s", templateID, locator.NodeID, locator.SnapshotPath))
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup template %s: missing node address for locator node=%s", templateID, locator.NodeID))
 			continue
 		}
+		// v4: master sends only templateID + node identity. Cubelet derives
+		// SnapshotPath + Objects from its local catalog (with deterministic
+		// fallback) so master no longer needs to know any physical detail.
 		rsp, err := cleanupTemplateOnCubelet(ctx, getCubeletAddrForDelete(hostIP), &cubeboxv1.CleanupTemplateRequest{
-			RequestID:    uuid.NewString(),
-			TemplateID:   templateID,
-			SnapshotPath: locator.SnapshotPath,
+			RequestID:  uuid.NewString(),
+			TemplateID: templateID,
 		})
 		if err != nil {
 			if isIgnorableTemplateCleanupError(err) {

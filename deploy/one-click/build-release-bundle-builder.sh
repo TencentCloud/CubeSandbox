@@ -44,11 +44,12 @@ echo "[one-click] building cubemaster in builder" >&2
 echo "[one-click] building cubemastercli in builder" >&2
 (cd /workspace/CubeMaster && go build -o "${PREBUILT_DIR}/cubemastercli" ./cmd/cubemastercli)
 
-echo "[one-click] building cubelet in builder" >&2
-(cd /workspace/Cubelet && go mod download && go build -o "${PREBUILT_DIR}/cubelet" ./cmd/cubelet)
-
-echo "[one-click] building cubecli in builder" >&2
-(cd /workspace/Cubelet && go build -o "${PREBUILT_DIR}/cubecli" ./cmd/cubecli)
+echo "[one-click] building cubelet and cubecli in builder" >&2
+mkdir -p /workspace/_output/bin
+(cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk)
+(cd /workspace/Cubelet && go mod download && make proto && go build -a -o /workspace/_output/bin/cubelet ./cmd/cubelet && go build -a -o /workspace/_output/bin/cubecli ./cmd/cubecli)
+install -m 0755 /workspace/_output/bin/cubelet "${PREBUILT_DIR}/cubelet"
+install -m 0755 /workspace/_output/bin/cubecli "${PREBUILT_DIR}/cubecli"
 
 echo "[one-click] building cube-api in builder" >&2
 (cd /workspace/CubeAPI && cargo build --release --locked)

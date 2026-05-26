@@ -52,7 +52,9 @@ cd CubeSandbox/dev-env
 ./run_vm.sh
 ```
 
-QEMU 串口会挂在当前终端。想关机按 `Ctrl+a` 然后 `x`。
+QEMU 串口会挂在当前终端。不要用 `Ctrl+a` 然后 `x` 直接关机，这相当于
+硬断电，可能损坏虚机状态。请在另一个终端执行 `./login.sh` 登录后，在
+guest 内运行 `poweroff` 正常关机。
 
 ### 第三步：登录虚机（新开一个终端）
 
@@ -78,6 +80,14 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-cl
 :::
 
 安装完成后按常规 [快速开始](./quickstart) 在虚拟机内创建模板、跑第一个沙箱即可。
+
+## dev-env 里的 cubecow 存储
+
+Cubelet 默认使用 reflink-only 的 `cubecow` 存储后端。dev 虚机只需要
+`data_path` 所在文件系统支持 reflink（例如 `xfs -m reflink=1` 或 Btrfs），
+不再需要额外裸盘或 LVM / dm-thin 工具链。
+`[plugins."io.cubelet.internal.v1.storage".cow.*]` 的默认配置会把 reflink
+卷落在 `<data_path>/../cubecow-reflink` 目录下。
 
 ---
 

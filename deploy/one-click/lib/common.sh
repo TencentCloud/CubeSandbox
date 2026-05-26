@@ -18,6 +18,50 @@ require_cmd() {
   command -v "${cmd}" >/dev/null 2>&1 || die "required command not found: ${cmd}"
 }
 
+one_click_cow_required_commands() {
+  printf '%s\n' \
+    mkfs.ext4 \
+    mount \
+    umount \
+    losetup
+}
+
+cubelet_storage_backend_from_config() {
+  local config_path="$1"
+  ensure_file "${config_path}"
+  sed -nE 's/^[[:space:]]*storage_backend[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "${config_path}" | head -n 1
+}
+
+validate_cubelet_cow_startup_deps() {
+  local config_path="$1"
+  ensure_file "${config_path}"
+  require_cmd rg
+  require_cmd sed
+
+  local storage_backend
+  storage_backend="$(cubelet_storage_backend_from_config "${config_path}")"
+  [[ "${storage_backend}" == "cubecow" ]] || return 0
+
+  local cmds=()
+  while IFS= read -r cmd; do
+    [[ -n "${cmd}" ]] && cmds+=("${cmd}")
+  done < <(one_click_cow_required_commands)
+
+  local missing=()
+  local cmd
+  for cmd in "${cmds[@]}"; do
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+      missing+=("${cmd}")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    die "cubelet cubecow startup dependency check failed for ${config_path}; missing commands in PATH: ${missing[*]} (required commands: ${cmds[*]})"
+  fi
+
+  log "cubelet cubecow startup dependencies OK: ${cmds[*]}"
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     die "this script must run as root"
