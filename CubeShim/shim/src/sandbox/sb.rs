@@ -1134,11 +1134,37 @@ impl SandBox {
     }
 
     pub async fn create_snapshot(&self, snapshot_path: &str) -> CResult<()> {
-        let ch = self.ch.as_ref().unwrap().lock().await;
-        ch.pause_vm().await?;
-        ch.snapshot_vm(format!("file://{}", snapshot_path).as_str())
-            .await?;
-        ch.resume_vm().await
+        self.ensure_pause_vm_allowed().await?;
+
+        {
+            let ch = self.ch.as_ref().unwrap().lock().await;
+            ch.pause_vm().await?;
+        }
+        self.mark_pause_vm_committed().await;
+
+        let snapshot_result = {
+            let ch = self.ch.as_ref().unwrap().lock().await;
+            ch.snapshot_vm(format!("file://{}", snapshot_path).as_str())
+                .await
+        };
+
+        let resume_result = {
+            let ch = self.ch.as_ref().unwrap().lock().await;
+            ch.resume_vm().await
+        };
+
+        if let Err(resume_err) = resume_result {
+            if let Err(snapshot_err) = snapshot_result {
+                return Err(format!(
+                    "snapshot vm failed:{}; resume vm after snapshot failed:{}",
+                    snapshot_err, resume_err
+                ));
+            }
+            return Err(resume_err);
+        }
+
+        self.mark_resume_vm_committed().await;
+        snapshot_result
     }
     pub async fn paused(&self) -> bool {
         let state = self.state.lock().await;
@@ -1150,49 +1176,161 @@ impl SandBox {
         *state == SandBoxState::Normal
     }
 
-    pub async fn pause_vm(&mut self) -> CResult<()> {
+    async fn ensure_pause_vm_allowed(&self) -> CResult<()> {
         {
-            let mut state = self.state.lock().await;
+            let state = self.state.lock().await;
             if *state != SandBoxState::Normal {
                 return Err(format!("sandbox not running").into());
             };
-
-            if self.pause_vm_forbidding().await {
-                return Err(format!("sandbox pause forbidding, terminate exec tasks first").into());
-            }
-            *state = SandBoxState::Paused;
         }
+
+        if self.pause_vm_forbidding().await {
+            return Err(format!("sandbox pause forbidding, terminate exec tasks first").into());
+        }
+        Ok(())
+    }
+
+    async fn mark_pause_vm_committed(&self) {
+        let mut state = self.state.lock().await;
+        *state = SandBoxState::Paused;
+    }
+
+    async fn wait_pause_vm_shutdown_notify(&self) -> CResult<()> {
+        let timeout = Duration::from_nanos(self.ctx.timeout_nano as u64);
+        let start = Instant::now();
+        loop {
+            if start.elapsed() >= timeout {
+                return Err(format!(
+                    "wait vm shutdown notify after pause timeout after {}ms",
+                    timeout.as_millis()
+                ));
+            }
+
+            let remaining = timeout
+                .checked_sub(start.elapsed())
+                .unwrap_or_else(|| Duration::from_nanos(0));
+            let ev = {
+                let ch = self.ch.as_ref().unwrap().lock().await;
+                ch.wait_notify(remaining).await?
+            };
+            if CH::NotifyEvent::VmShutdown == ev {
+                return Ok(());
+            }
+            warnf!(
+                self.log,
+                "Not an expected event after pause, expected:{:?}, actual:{:?}",
+                CH::NotifyEvent::VmShutdown,
+                ev
+            );
+        }
+    }
+
+    async fn ensure_resume_vm_allowed(&self) -> CResult<()> {
+        let state = self.state.lock().await;
+        if *state != SandBoxState::Paused {
+            return Err(format!("sandbox not paused").into());
+        };
+        Ok(())
+    }
+
+    async fn mark_resume_vm_committed(&self) {
+        let mut state = self.state.lock().await;
+        *state = SandBoxState::Normal;
+    }
+
+    async fn restore_runtime_after_failed_pause(&mut self, reason: &str) {
+        if let Err(err) = self.connect_agent().await {
+            warnf!(
+                self.log,
+                "reconnect agent after pause {} failed:{}",
+                reason,
+                err
+            );
+        }
+
+        if let Some(client) = self.client.as_ref().cloned() {
+            let mut containers = self.containers.lock().await;
+            for (_, c) in containers.iter_mut() {
+                c.set_client(client.clone()).await;
+            }
+        } else {
+            warnf!(
+                self.log,
+                "agent client is None after pause {} reconnect",
+                reason
+            );
+        }
+
+        match self.watch_oom().await {
+            Ok((sender, handle)) => {
+                self.tx_oom_exited = Some(sender);
+                self.oom_handle = Some(Arc::new(handle));
+            }
+            Err(err) => warnf!(
+                self.log,
+                "restart oom watcher after pause {} failed:{}",
+                reason,
+                err
+            ),
+        }
+
+        match self.monitor_vm(false).await {
+            Ok((sender, handle)) => {
+                self.tx_monitor_exited = Some(sender);
+                self.monitor_handle = Some(Arc::new(handle));
+            }
+            Err(err) => warnf!(
+                self.log,
+                "restart vm monitor after pause {} failed:{}",
+                reason,
+                err
+            ),
+        }
+    }
+
+    pub async fn pause_vm(&mut self) -> CResult<()> {
+        self.ensure_pause_vm_allowed().await?;
 
         self.disconnect_agent().await?;
 
-        let ch = self.ch.as_mut().unwrap().lock().await;
-
         let snapshot_path = format!("{}/{}", PAUSE_VM_SNAPSHOT_BASE, self.id);
-        let _ = std::fs::remove_dir_all(snapshot_path.clone());
-        if let Err(e) = std::fs::create_dir_all(snapshot_path.clone()) {
+        let _ = stdfs::remove_dir_all(&snapshot_path);
+        if let Err(e) = stdfs::create_dir_all(&snapshot_path) {
+            self.restore_runtime_after_failed_pause("mkdir failure")
+                .await;
             return Err(format!("mkdir snapshot dir failed:{}", e).into());
         }
 
-        ch.pause_vm_cube(format!("file://{}", snapshot_path).as_str())
-            .await?;
+        let pause_result = {
+            let ch = self.ch.as_mut().unwrap().lock().await;
+            ch.pause_vm_cube(format!("file://{}", snapshot_path).as_str())
+                .await
+        };
 
-        //vmshutdown event
-        let _ = ch
-            .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
-            .await?;
+        if let Err(e) = pause_result {
+            warnf!(
+                self.log,
+                "pause vm failed, preserve snapshot dir for possible recovery:{}",
+                snapshot_path
+            );
+            self.restore_runtime_after_failed_pause("vm failure").await;
+            return Err(e);
+        }
+
+        self.mark_pause_vm_committed().await;
+        // pause_vm_cube success is the pause commit point. After committing
+        // Paused, a missing shutdown notification must not make the caller
+        // observe a failed pause while the shim only allows resume.
+        if let Err(e) = self.wait_pause_vm_shutdown_notify().await {
+            warnf!(self.log, "wait vm shutdown notify after pause failed:{}", e);
+        }
 
         Ok(())
     }
 
     pub async fn resume_vm(&mut self) -> CResult<()> {
-        //modify state
-        {
-            let mut state = self.state.lock().await;
-            if *state != SandBoxState::Paused {
-                return Err(format!("sandbox not paused").into());
-            };
-            *state = SandBoxState::Normal;
-        }
+        self.ensure_resume_vm_allowed().await?;
+
         //resume vm
         {
             let ch = self.ch.as_mut().unwrap().lock().await;
@@ -1200,6 +1338,8 @@ impl SandBox {
             ch.resume_vm_cube(format!("file://{}", resume_path).as_str())
                 .await?;
         }
+
+        self.mark_resume_vm_committed().await;
 
         self.connect_agent().await?;
 
@@ -1260,6 +1400,7 @@ mod tests {
     use super::normalize_dns_for_agent;
     use super::Log;
     use super::SandBox;
+    use super::SandBoxState;
 
     #[tokio::test]
     async fn test_sandbox_prepare_resource() {
@@ -1307,6 +1448,40 @@ mod tests {
             "missing expected cmdlines: {:?}",
             set_expect
         );
+    }
+
+    #[tokio::test]
+    async fn test_pause_resume_state_commit_helpers() {
+        let log = Log::default();
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let sb = SandBox::new("ut-state".to_string(), log, false, tx);
+
+        assert!(sb.normal().await);
+        assert!(sb.ensure_pause_vm_allowed().await.is_ok());
+        assert!(sb.ensure_resume_vm_allowed().await.is_err());
+
+        sb.mark_pause_vm_committed().await;
+        assert!(sb.paused().await);
+        assert!(sb.ensure_pause_vm_allowed().await.is_err());
+        assert!(sb.ensure_resume_vm_allowed().await.is_ok());
+
+        sb.mark_resume_vm_committed().await;
+        assert!(sb.normal().await);
+    }
+
+    #[tokio::test]
+    async fn test_pause_resume_state_helpers_reject_exited() {
+        let log = Log::default();
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let sb = SandBox::new("ut-exited-state".to_string(), log, false, tx);
+
+        {
+            let mut state = sb.state.lock().await;
+            *state = SandBoxState::Exited;
+        }
+
+        assert!(sb.ensure_pause_vm_allowed().await.is_err());
+        assert!(sb.ensure_resume_vm_allowed().await.is_err());
     }
 
     #[test]
