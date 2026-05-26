@@ -385,19 +385,38 @@ impl Vcpu {
     /// Initializes an aarch64 specific vcpu for booting Linux.
     #[cfg(target_arch = "aarch64")]
     pub fn init(&self, vm: &Arc<dyn hypervisor::Vm>) -> Result<()> {
-        let mut kvi: kvm_bindings::kvm_vcpu_init = kvm_bindings::kvm_vcpu_init::default();
+        let build_kvi = |use_pmu: bool| -> Result<kvm_bindings::kvm_vcpu_init> {
+            let mut kvi: kvm_bindings::kvm_vcpu_init =
+                kvm_bindings::kvm_vcpu_init::default();
+            // This reads back the kernel's preferred target type.
+            vm.get_preferred_target(&mut kvi)
+                .map_err(Error::VcpuArmPreferredTarget)?;
+            kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PSCI_0_2;
+            if use_pmu {
+                kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PMU_V3;
+            }
+            // Non-boot cpus are powered off initially.
+            if self.id > 0 {
+                kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_POWER_OFF;
+            }
+            Ok(kvi)
+        };
 
-        // This reads back the kernel's preferred target type.
-        vm.get_preferred_target(&mut kvi)
-            .map_err(Error::VcpuArmPreferredTarget)?;
-        // We already checked that the capability is supported.
-        kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PSCI_0_2;
-        kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PMU_V3;
-        // Non-boot cpus are powered off initially.
-        if self.id > 0 {
-            kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_POWER_OFF;
+        let kvi_with_pmu = build_kvi(true)?;
+        match self.vcpu.vcpu_init(&kvi_with_pmu) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                warn!(
+                    "vcpu_init with KVM_ARM_VCPU_PMU_V3 failed for vcpu {}: {:?}, \
+                     falling back to init without PMU support",
+                    self.id, e
+                );
+                let kvi_no_pmu = build_kvi(false)?;
+                self.vcpu
+                    .vcpu_init(&kvi_no_pmu)
+                    .map_err(Error::VcpuArmInit)
+            }
         }
-        self.vcpu.vcpu_init(&kvi).map_err(Error::VcpuArmInit)
     }
 
     /// Runs the VCPU until it exits, returning the reason.
