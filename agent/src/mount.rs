@@ -29,8 +29,10 @@ use std::iter;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::instrument;
 
@@ -1150,22 +1152,107 @@ pub fn get_cgroup_mounts(
     Ok(cg_mounts)
 }
 
+fn baremount_with_timeout(
+    source: &Path,
+    destination: &Path,
+    fs_type: &str,
+    flags: MsFlags,
+    options: &str,
+    logger: &Logger,
+    timeout: Duration,
+) -> Result<()> {
+    let src = source.to_path_buf();
+    let dst = destination.to_path_buf();
+    let fs = fs_type.to_string();
+    let opt = options.to_string();
+    let log = logger.clone();
+    let (tx, rx) = mpsc::channel::<Result<()>>();
+
+    thread::Builder::new()
+        .name(format!("cg-mount-{}", dst.display()))
+        .spawn(move || {
+            let _ = tx.send(baremount(&src, &dst, &fs, flags, &opt, &log));
+        })
+        .map_err(|e| anyhow!("spawn cg-mount thread failed: {}", e))?;
+
+    match rx.recv_timeout(timeout) {
+        Ok(res) => res,
+        Err(_) => Err(anyhow!(
+            "mount {:?} -> {:?} timed out or thread disconnected after {:?}",
+            source,
+            destination,
+            timeout
+        )),
+    }
+}
+
 #[instrument]
 pub fn cgroups_mount(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result<()> {
     let logger = logger.new(o!("subsystem" => "mount"));
 
     let cgroups = get_cgroup_mounts(&logger, PROC_CGROUPS, unified_cgroup_hierarchy)?;
 
+    const PER_MOUNT_TIMEOUT: Duration = Duration::from_secs(2);
     for cg in cgroups.iter() {
-        mount_to_rootfs(&logger, cg)?;
+        // root tmpfs / cgroup2 must succeed; other controllers can be skipped
+        // on timeout/error to avoid hanging guest init.
+        let is_root = cg.fstype == "tmpfs" || cg.fstype == "cgroup2";
+        let res = if is_root {
+            mount_to_rootfs(&logger, cg)
+        } else {
+            mount_to_rootfs_with_timeout(&logger, cg, PER_MOUNT_TIMEOUT)
+        };
+
+        if let Err(e) = res {
+            if is_root {
+                return Err(e);
+            }
+            warn!(
+                logger,
+                "skip cgroup controller mount";
+                "dest" => cg.dest,
+                "options" => format!("{:?}", cg.options),
+                "error" => format!("{}", e),
+            );
+        }
     }
 
     if !unified_cgroup_hierarchy {
         // Enable memory hierarchical account.
         // For more information see https://www.kernel.org/doc/Documentation/cgroup-v1/memory.txt
-        online_device("/sys/fs/cgroup/memory/memory.use_hierarchy")?;
+        if let Err(e) = online_device("/sys/fs/cgroup/memory/memory.use_hierarchy") {
+            warn!(
+                logger,
+                "online memory.use_hierarchy failed, continuing";
+                "error" => format!("{}", e),
+            );
+        }
     }
     Ok(())
+}
+
+#[instrument]
+fn mount_to_rootfs_with_timeout(
+    logger: &Logger,
+    m: &InitMount,
+    timeout: Duration,
+) -> Result<()> {
+    let options_vec: Vec<&str> = m.options.clone();
+    let (flags, options) = parse_mount_flags_and_options(options_vec);
+
+    fs::create_dir_all(Path::new(m.dest)).context("could not create directory")?;
+
+    let source = Path::new(m.src);
+    let dest = Path::new(m.dest);
+
+    baremount_with_timeout(source, dest, m.fstype, flags, &options, logger, timeout).or_else(
+        |e| {
+            if m.src != "dev" {
+                return Err(e);
+            }
+            Ok(())
+        },
+    )
 }
 
 #[instrument]

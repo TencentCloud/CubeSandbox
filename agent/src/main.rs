@@ -82,6 +82,7 @@ mod tracer;
 
 const NAME: &str = "cube-agent";
 const ENV_WRAPPER_MODE_K: &str = "wrapper_mode";
+
 lazy_static! {
     static ref AGENT_CONFIG: Arc<RwLock<AgentConfig>> = Arc::new(RwLock::new(
         // Note: We can't do AgentOpts.parse() here to send through the processed arguments to AgentConfig
@@ -392,7 +393,22 @@ async fn start_sandbox(
     );
     // vsock:///dev/vsock, port
     let mut server = rpc::start(sandbox.clone(), config.server_addr.as_str())?;
-    server.start().await?;
+    server
+        .start()
+        .await
+        .map_err(|e| anyhow!("ttrpc server.start failed: {:#}", e))?;
+
+    if let Err(e) = rpc::notify_vsock_server_ready() {
+        warn!(
+            logger,
+            "notify VsockServerReady failed, shim will fallback to vsock probe: {:#}", e
+        );
+    } else {
+        println!(
+            "vsock server ready notified at:{}",
+            moniclock::Clock::new().elapsed().as_millis()
+        );
+    }
 
     rx.await?;
 
@@ -417,9 +433,7 @@ fn init_agent_as_init(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result
         e
     })?;
 
-    fs::remove_file(Path::new("/dev/ptmx"))?;
-    unixfs::symlink(Path::new("/dev/pts/ptmx"), Path::new("/dev/ptmx"))?;
-
+    ensure_dev_ptmx_symlink(logger)?;
     unistd::setsid()?;
 
     unsafe {
@@ -438,6 +452,49 @@ fn init_agent_as_init(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result
     }
 
     Ok(())
+}
+
+// Make /dev/ptmx a symlink to /dev/pts/ptmx in an idempotent way.
+//
+// On a freshly booted guest /dev is usually a devtmpfs that already
+// contains a /dev/ptmx character device, and on warm reboots an old
+// symlink may also be present. Calling symlink(2) directly in either
+// case fails with EEXIST and, because this runs as PID 1, crashes the
+// guest with "Attempted to kill init". We therefore probe the path
+// first, accept an already-correct symlink, and best-effort remove any
+// other entry before re-creating the link.
+fn ensure_dev_ptmx_symlink(logger: &Logger) -> Result<()> {
+    let target = Path::new("/dev/pts/ptmx");
+    let link = Path::new("/dev/ptmx");
+
+    if let Ok(meta) = fs::symlink_metadata(link) {
+        if meta.file_type().is_symlink() {
+            if let Ok(existing) = fs::read_link(link) {
+                if existing == target {
+                    return Ok(());
+                }
+            }
+        }
+        if let Err(e) = fs::remove_file(link) {
+            warn!(
+                logger,
+                "remove existing /dev/ptmx failed, will retry symlink anyway: {}", e
+            );
+        }
+    }
+
+    match unixfs::symlink(target, link) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Race or stubborn entry: accept it only if it now points
+            // where we want, otherwise surface the error.
+            match fs::read_link(link) {
+                Ok(existing) if existing == target => Ok(()),
+                _ => Err(anyhow!("symlink /dev/ptmx -> /dev/pts/ptmx failed: {}", e)),
+            }
+        }
+        Err(e) => Err(anyhow!("symlink /dev/ptmx -> /dev/pts/ptmx failed: {}", e)),
+    }
 }
 
 // The Rust standard library had suppressed the default SIGPIPE behavior,
