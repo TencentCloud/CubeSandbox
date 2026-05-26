@@ -776,21 +776,129 @@ impl SandBox {
         {
             let ch = self.ch.as_mut().unwrap().lock().await;
             let start = Instant::now();
-            let ev = ch
-                .wait_notify(Duration::from_nanos(1000 * 1000 * 1000 * 10 as u64))
-                .await?;
+            let total_wait = Duration::from_secs(30);
+            let wait_res = ch.wait_notify(total_wait).await;
+            drop(ch);
 
-            if CH::NotifyEvent::VsockServerReady != ev {
-                return Err(format!(
-                    "Not an expected event, expected:{:?}, actual:{:?}",
-                    CH::NotifyEvent::VsockServerReady,
+            match &wait_res {
+                Ok(ev) if *ev == CH::NotifyEvent::VsockServerReady => {
+                    infof!(
+                        self.log,
+                        "vm ready, vsock is listening (notify path), cost:{}",
+                        start.elapsed().as_millis()
+                    );
+                    return Ok(snapshot);
+                }
+                Ok(ev) if *ev == CH::NotifyEvent::VmShutdown => {
+                    return Err(format!(
+                        "Not an expected event, expected:{:?}, actual:{:?}",
+                        CH::NotifyEvent::VsockServerReady,
+                        ev
+                    ));
+                }
+                Ok(ev) => warnf!(
+                    self.log,
+                    "wait_notify got unexpected non-fatal event {:?}, fallback to vsock probe",
                     ev
-                ));
+                ),
+                Err(e) => warnf!(
+                    self.log,
+                    "wait_notify VsockServerReady failed: {}, fallback to vsock probe",
+                    e
+                ),
             }
-            let duration = start.elapsed().as_millis();
-            infof!(self.log, "vm ready, vsock is listening, cost:{}", duration);
+
+            let probe_budget = Duration::from_secs(15);
+            Self::probe_vsock_ready(&self.id, probe_budget, &self.log)
+                .await
+                .map_err(|e| {
+                    let orig = match &wait_res {
+                        Ok(ev) => format!("{:?}", ev),
+                        Err(orig) => orig.clone(),
+                    };
+                    format!(
+                        "vsock not ready: notify={}, probe={}",
+                        orig, e
+                    )
+                })?;
+            infof!(
+                self.log,
+                "vm ready, vsock is listening (probe path), cost:{}",
+                start.elapsed().as_millis()
+            );
         }
         Ok(snapshot)
+    }
+
+    async fn probe_vsock_ready(
+        sandbox_id: &str,
+        budget: Duration,
+        log: &Log,
+    ) -> std::result::Result<(), String> {
+        let vsock_path = Utils::vsock_path(sandbox_id);
+        const AGENT_VSOCK_PORT: u32 = 1024;
+        const PROBE_INTERVAL: Duration = Duration::from_millis(200);
+        let per_try_timeout = std::cmp::min(budget, Duration::from_millis(2000));
+
+        let deadline = std::time::Instant::now() + budget;
+        let mut last_err = String::from("not attempted");
+        while std::time::Instant::now() < deadline {
+            if !vsock_path.exists() {
+                last_err = format!("vsock socket {:?} not bound yet", vsock_path);
+            } else {
+                match tokio::time::timeout(
+                    per_try_timeout,
+                    Self::try_hybrid_vsock_handshake(&vsock_path, AGENT_VSOCK_PORT),
+                )
+                .await
+                {
+                    Ok(Ok(())) => return Ok(()),
+                    Ok(Err(e)) => last_err = format!("handshake: {}", e),
+                    Err(_) => {
+                        last_err = format!(
+                            "handshake timeout {}ms",
+                            per_try_timeout.as_millis()
+                        )
+                    }
+                }
+            }
+            debugf!(log, "vsock probe: {}", last_err);
+            sleep(PROBE_INTERVAL).await;
+        }
+        Err(format!(
+            "vsock probe gave up in {}ms, last: {}",
+            budget.as_millis(),
+            last_err
+        ))
+    }
+
+    async fn try_hybrid_vsock_handshake(
+        vsock_path: &PathBuf,
+        port: u32,
+    ) -> std::result::Result<(), String> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+
+        let mut conn = UnixStream::connect(vsock_path)
+            .await
+            .map_err(|e| format!("connect {:?} failed: {}", vsock_path, e))?;
+        conn.write_all(format!("CONNECT {}\n", port).as_bytes())
+            .await
+            .map_err(|e| format!("write CONNECT failed: {}", e))?;
+        let mut reader = tokio::io::BufReader::new(conn);
+        let mut response = String::new();
+        let n = reader
+            .read_line(&mut response)
+            .await
+            .map_err(|e| format!("read response failed: {}", e))?;
+        if n == 0 {
+            return Err("EOF before response (muxer/guest closed; likely no listener on guest:1024 -> agent ttRPC server not started)".to_string());
+        }
+        if response.contains("OK") {
+            Ok(())
+        } else {
+            Err(format!("handshake response: {:?}", response.trim()))
+        }
     }
 
     async fn boot_vm(&mut self) -> CResult<()> {
