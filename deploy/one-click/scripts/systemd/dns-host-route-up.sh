@@ -47,8 +47,11 @@ link_is_dummy() {
 ensure_resolved_link() {
   if link_exists "${RESOLVED_LINK_NAME}"; then
     link_is_dummy "${RESOLVED_LINK_NAME}" || die "existing link ${RESOLVED_LINK_NAME} is not a dummy link"
-  else
-    ip link add "${RESOLVED_LINK_NAME}" type dummy
+  elif ! ip link add "${RESOLVED_LINK_NAME}" type dummy; then
+    # CoreDNS and host DNS routing may start concurrently under systemd.
+    # If another helper created the link first, accept it after validation.
+    link_exists "${RESOLVED_LINK_NAME}" || die "failed to create dummy link ${RESOLVED_LINK_NAME}"
+    link_is_dummy "${RESOLVED_LINK_NAME}" || die "existing link ${RESOLVED_LINK_NAME} is not a dummy link"
   fi
 
   ip link set "${RESOLVED_LINK_NAME}" up
