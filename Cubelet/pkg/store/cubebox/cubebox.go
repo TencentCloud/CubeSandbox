@@ -91,11 +91,19 @@ type ResourceWithOverHead struct {
 	VmCpuQ,
 	VmMemQ,
 	PmemPageQ resource.Quantity
+
+	// HostDataDiskMB and HostStorageDiskMB capture the per-sandbox disk
+	// quota committed at create time. They are aggregated by node-resource
+	// reporting to give the scheduler an allocation view. Both default to
+	// zero when the create path has not yet recorded a value.
+	HostDataDiskMB    int64
+	HostStorageDiskMB int64
 }
 
 func (rq *ResourceWithOverHead) String() string {
-	return fmt.Sprintf("MemReq: %v, HostCpuQ: %v, HostMemQ: %v, VmCpuQ: %v, VmMemQ: %v, PmemPageQ: %v",
-		rq.MemReq.String(), rq.HostCpuQ.String(), rq.HostMemQ.String(), rq.VmCpuQ.String(), rq.VmMemQ.String(), rq.PmemPageQ.String())
+	return fmt.Sprintf("MemReq: %v, HostCpuQ: %v, HostMemQ: %v, VmCpuQ: %v, VmMemQ: %v, PmemPageQ: %v, HostDataDiskMB: %d, HostStorageDiskMB: %d",
+		rq.MemReq.String(), rq.HostCpuQ.String(), rq.HostMemQ.String(), rq.VmCpuQ.String(), rq.VmMemQ.String(), rq.PmemPageQ.String(),
+		rq.HostDataDiskMB, rq.HostStorageDiskMB)
 }
 
 type CubeBox struct {

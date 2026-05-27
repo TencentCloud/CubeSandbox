@@ -7,7 +7,6 @@ Wants=cube-sandbox-cubemaster.service cube-sandbox-cube-api.service
 Wants=cube-sandbox-network-agent.service cube-sandbox-cubelet.service
 Wants=cube-sandbox-cube-proxy.service cube-sandbox-coredns.service
 Wants=cube-sandbox-dns.service cube-sandbox-webui.service
-Wants=cube-sandbox-seed-cubemaster-metrics.service
 AllowIsolate=no
 
 [Install]

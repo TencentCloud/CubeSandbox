@@ -28,10 +28,8 @@ var networkAgentOverride struct {
 }
 
 type MetaServerConfig struct {
-	MetaServerEndpoint    string        `yaml:"meta_server_endpoint,omitempty"`
-	StatusUpdateFrequency time.Duration `yaml:"status_update_frequency,omitempty"`
-
-	NodeStatusMaxImages int32 `yaml:"node_status_max_images,omitempty"`
+	MetaServerEndpoint  string `yaml:"meta_server_endpoint,omitempty"`
+	NodeStatusMaxImages int32  `yaml:"node_status_max_images,omitempty"`
 }
 
 type Config struct {
@@ -275,9 +273,6 @@ func preHandle(config *Config) (*Config, error) {
 	}
 	if config.MetaServerConfig.NodeStatusMaxImages == 0 {
 		config.MetaServerConfig.NodeStatusMaxImages = 40000
-	}
-	if config.MetaServerConfig.StatusUpdateFrequency == time.Duration(0) {
-		config.MetaServerConfig.StatusUpdateFrequency = 10 * time.Second
 	}
 
 	if config.Common.ReconcileInterval == 0 {

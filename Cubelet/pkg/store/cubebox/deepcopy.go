@@ -155,12 +155,14 @@ func (r *ResourceWithOverHead) DeepCopy() *ResourceWithOverHead {
 		return nil
 	}
 	return &ResourceWithOverHead{
-		MemReq:    r.MemReq.DeepCopy(),
-		HostCpuQ:  r.HostCpuQ.DeepCopy(),
-		HostMemQ:  r.HostMemQ.DeepCopy(),
-		VmCpuQ:    r.VmCpuQ.DeepCopy(),
-		VmMemQ:    r.VmMemQ.DeepCopy(),
-		PmemPageQ: r.PmemPageQ.DeepCopy(),
+		MemReq:            r.MemReq.DeepCopy(),
+		HostCpuQ:          r.HostCpuQ.DeepCopy(),
+		HostMemQ:          r.HostMemQ.DeepCopy(),
+		VmCpuQ:            r.VmCpuQ.DeepCopy(),
+		VmMemQ:            r.VmMemQ.DeepCopy(),
+		PmemPageQ:         r.PmemPageQ.DeepCopy(),
+		HostDataDiskMB:    r.HostDataDiskMB,
+		HostStorageDiskMB: r.HostStorageDiskMB,
 	}
 }
 

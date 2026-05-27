@@ -335,6 +335,7 @@ func (l *local) updateNodeMetric(n *node.Node) error {
 		old.SysDiskUsagePer = n.SysDiskUsagePer
 		old.MvmNum = n.MvmNum
 		old.RealTimeCreateNum = n.RealTimeCreateNum
+		old.NicQueues = n.NicQueues
 		old.MetricLocalUpdateAt = time.Now().Local()
 		return nil
 	} else {

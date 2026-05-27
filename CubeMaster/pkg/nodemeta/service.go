@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"gorm.io/gorm"
@@ -65,6 +66,32 @@ type UpdateNodeStatusRequest struct {
 	Images         []ContainerImage       `json:"images,omitempty"`
 	LocalTemplates []LocalTemplate        `json:"local_templates,omitempty"`
 	HeartbeatTime  time.Time              `json:"heartbeat_time,omitempty"`
+
+	Allocated  *AllocatedResources `json:"allocated,omitempty"`
+	DiskUsage  *DiskUsage          `json:"disk_usage,omitempty"`
+	MetricTime time.Time           `json:"metric_time,omitempty"`
+}
+
+// AllocatedResources is cubelet-side aggregation of sandbox-quota CPU /
+// memory / disk and counts for sandboxes currently held on the node. Field
+// naming aligns with the scheduler-facing Redis schema (RedisNodeInfo).
+type AllocatedResources struct {
+	MilliCPU      int64 `json:"milli_cpu,omitempty"`
+	MemoryMB      int64 `json:"memory_mb,omitempty"`
+	MvmNum        int64 `json:"mvm_num,omitempty"`
+	MvmRunningNum int64 `json:"mvm_running_num,omitempty"`
+	NicQueues     int64 `json:"nic_queues,omitempty"`
+
+	DataDiskMB    int64 `json:"data_disk_mb,omitempty"`
+	StorageDiskMB int64 `json:"storage_disk_mb,omitempty"`
+}
+
+// DiskUsage carries actual filesystem fill ratios observed by cubelet
+// (0~100). Each dimension is optional.
+type DiskUsage struct {
+	DataDiskUsagePer    float64 `json:"data_disk_usage_per,omitempty"`
+	StorageDiskUsagePer float64 `json:"storage_disk_usage_per,omitempty"`
+	SysDiskUsagePer     float64 `json:"sys_disk_usage_per,omitempty"`
 }
 
 type NodeSnapshot struct {
@@ -170,7 +197,6 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 }
 
 func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusRequest) (*NodeSnapshot, error) {
-	_ = ctx
 	if nodeID == "" {
 		return nil, fmt.Errorf("node_id is required")
 	}
@@ -208,7 +234,54 @@ func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusR
 	snap.Healthy = status.Healthy
 	global.mu.Unlock()
 	syncLocalcache(snap)
+
+	// Resource metrics flow via Redis (shared across cubemaster replicas)
+	// and in-process cache (immediate visibility for this replica). They
+	// are intentionally not persisted to MySQL: every 10s heartbeat from
+	// hundreds of nodes would otherwise dominate write traffic, and Redis
+	// already provides the cross-replica fan-out used by the scheduler.
+	fanOutResourceMetric(ctx, nodeID, req)
 	return cloneSnapshot(snap), nil
+}
+
+// fanOutResourceMetric is best-effort: write failures to Redis fall back
+// to in-process update so the receiving replica still schedules correctly,
+// and the next heartbeat (≤NodeStatusUpdateFrequency) reattempts the write.
+func fanOutResourceMetric(ctx context.Context, nodeID string, req *UpdateNodeStatusRequest) {
+	if req == nil || (req.Allocated == nil && req.DiskUsage == nil) {
+		return
+	}
+	metricTime := req.MetricTime
+	if metricTime.IsZero() {
+		metricTime = time.Now()
+	}
+	m := &localcache.NodeMetric{NodeID: nodeID, MetricTime: metricTime}
+	// HasAllocated / HasDisk track which sub-structures the cubelet
+	// actually populated, so the downstream writers can skip the other
+	// group entirely instead of overwriting it with zero values.
+	if a := req.Allocated; a != nil {
+		m.HasAllocated = true
+		m.MilliCPUUsage = a.MilliCPU
+		m.MemoryMBUsage = a.MemoryMB
+		m.MvmNum = a.MvmNum
+		m.NicQueues = a.NicQueues
+	}
+	if d := req.DiskUsage; d != nil {
+		m.HasDisk = true
+		m.DataDiskUsagePer = d.DataDiskUsagePer
+		m.StorageDiskUsagePer = d.StorageDiskUsagePer
+		m.SysDiskUsagePer = d.SysDiskUsagePer
+	}
+	if err := localcache.WriteNodeMetric(ctx, m); err != nil {
+		log.G(ctx).Warnf("write node metric to redis failed for %s: %v", nodeID, err)
+	}
+	if err := localcache.UpdateNodeMetricInProcess(m); err != nil {
+		// Missing in-process entry is normal during cold start (this
+		// replica has not yet reloaded the registration). Other replicas
+		// pick up the metric via Redis tick, and this one will converge
+		// on the next reload cycle.
+		log.G(ctx).Debugf("in-process metric update skipped for %s: %v", nodeID, err)
+	}
 }
 
 func GetNode(ctx context.Context, nodeID string) (*NodeSnapshot, error) {
@@ -350,8 +423,13 @@ func toSchedulerNode(snap *NodeSnapshot) *node.Node {
 		CreateConcurrentNum: snap.CreateConcurrentNum,
 		MaxMvmLimit:         snap.MaxMvmNum,
 		MetaDataUpdateAt:    snap.HeartbeatTime,
-		MetricLocalUpdateAt: snap.HeartbeatTime,
-		MetricUpdate:        snap.HeartbeatTime,
+		// MetricUpdate / MetricLocalUpdateAt are intentionally left
+		// zero-valued here. They are owned by the resource-metric path
+		// (Redis tick or UpdateNodeMetricInProcess) so prefilter's
+		// MetricUpdateTimeout reflects metric freshness, not heartbeat
+		// freshness. A node with a fresh heartbeat but no metric will
+		// correctly be excluded by the timeout filter until cubelet
+		// reports usage.
 	}
 }
 

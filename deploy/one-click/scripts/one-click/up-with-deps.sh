@@ -15,8 +15,6 @@ MYSQL_DB="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
 MYSQL_ROOT_PASSWORD="${CUBE_SANDBOX_MYSQL_ROOT_PASSWORD:-cube_root}"
 CUBE_SANDBOX_NODE_IP="${CUBE_SANDBOX_NODE_IP:-}"
 SQL_DIR="${TOOLBOX_ROOT}/sql"
-METRIC_LOOP="${CUBEMASTER_METRIC_LOOP:-0}"
-METRIC_PID_FILE="${RUNTIME_DIR}/seed-cubemaster-metrics.pid"
 
 # CubeMaster owns its own schema via the embedded goose migrations; we
 # only seed deployment-specific rows here (the single-node host_info /
@@ -33,18 +31,6 @@ test -d "${SQL_DIR}" || die "sql dir missing: ${SQL_DIR}"
 
 "${SCRIPT_DIR}/up-cube-proxy.sh"
 "${SCRIPT_DIR}/up-dns.sh"
-
-"${SCRIPT_DIR}/seed-cubemaster-metrics.sh"
-if [[ "${METRIC_LOOP}" == "1" ]]; then
-  if [[ -f "${METRIC_PID_FILE}" ]]; then
-    old_pid="$(<"${METRIC_PID_FILE}")"
-    if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" >/dev/null 2>&1; then
-      kill "${old_pid}" >/dev/null 2>&1 || true
-    fi
-  fi
-  "${SCRIPT_DIR}/seed-cubemaster-metrics.sh" --loop >"${LOG_DIR}/seed-cubemaster-metrics.log" 2>&1 &
-  echo "$!" > "${METRIC_PID_FILE}"
-fi
 
 "${SCRIPT_DIR}/up.sh"
 

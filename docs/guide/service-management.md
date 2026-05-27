@@ -71,8 +71,6 @@ The target lists its child services via `Wants=`; each service declares membersh
 | `cube-sandbox-cube-proxy.service` | Docker container | `443` (TLS) / `80` | control | docker, redis |
 | `cube-sandbox-dns.service` | oneshot (no daemon) | — | control | coredns (`BindsTo`) |
 | `cube-sandbox-webui.service` | Docker container | `12088` | control | docker, cube-api |
-| `cube-sandbox-seed-cubemaster-metrics.service` | oneshot | — | control | cubemaster, redis |
-| `cube-sandbox-seed-cubemaster-metrics.timer` | timer (optional) | — | control | — |
 
 ### Startup dependency map (control node)
 

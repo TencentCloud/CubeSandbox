@@ -71,8 +71,6 @@ Target 通过 `Wants=` 列出自己要拉起的 service；service 通过 `PartOf
 | `cube-sandbox-cube-proxy.service` | Docker 容器 | `443`（TLS）/ `80` | control | docker, redis |
 | `cube-sandbox-dns.service` | oneshot（无常驻进程） | — | control | coredns（`BindsTo`）|
 | `cube-sandbox-webui.service` | Docker 容器 | `12088` | control | docker, cube-api |
-| `cube-sandbox-seed-cubemaster-metrics.service` | oneshot | — | control | cubemaster, redis |
-| `cube-sandbox-seed-cubemaster-metrics.timer` | timer（可选） | — | control | — |
 
 ### 启动依赖关系（控制节点）
 

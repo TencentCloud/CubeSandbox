@@ -7,6 +7,7 @@ package localcache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gomodule/redigo/redis"
@@ -47,6 +48,136 @@ type RedisNodeInfo struct {
 	RealTimeCreateNum int64 `json:"RealTimeCreateNum,omitempty" redis:"realtime_create_num"`
 
 	NICQueues int64 `json:"nic_queues,omitempty" redis:"nic_queues"`
+}
+
+// NodeMetric is the in-API-process view of a cubelet's resource report.
+// It is shared by the heartbeat handler and Redis fan-out so all paths
+// agree on field semantics. All numeric fields use the same units as
+// RedisNodeInfo (milli-cpu, MB, 0~100 percent) so cross-replica scheduling
+// stays stable regardless of whether a master saw the cubelet directly or
+// learned about it through Redis.
+//
+// HasAllocated and HasDisk distinguish "cubelet reported zero" from
+// "cubelet did not report this group". Without these flags an empty
+// section in a heartbeat would clobber the previous valid values in
+// Redis, because HSET cannot tell apart "set to zero" from "leave
+// untouched". The two flags map 1:1 to the Allocated / DiskUsage sub
+// structures on UpdateNodeStatusRequest, so a partial heartbeat
+// (allocated-only, disk-only, or anything in between) round-trips
+// without corrupting the other group's prior state.
+type NodeMetric struct {
+	NodeID     string
+	MetricTime time.Time
+
+	HasAllocated  bool
+	MilliCPUUsage int64
+	MemoryMBUsage int64
+	MvmNum        int64
+	NicQueues     int64
+
+	HasDisk             bool
+	DataDiskUsagePer    float64
+	StorageDiskUsagePer float64
+	SysDiskUsagePer     float64
+}
+
+// WriteNodeMetric persists a cubelet-reported metric snapshot to Redis so
+// all cubemaster replicas converge on the same view through their existing
+// loopUpdateMetric tick. We deliberately overwrite update_at with the
+// server-side timestamp passed in (which the heartbeat handler clamps to
+// time.Now()) so clock skew on individual cubelets cannot push entries
+// past or stall the MetricUpdateTimeout filter.
+func WriteNodeMetric(ctx context.Context, m *NodeMetric) error {
+	if m == nil || m.NodeID == "" {
+		return errors.New("WriteNodeMetric: node id required")
+	}
+	if !m.HasAllocated && !m.HasDisk {
+		// Nothing to do: cubelet reported neither group, and writing
+		// just an update_at would falsely refresh MetricUpdate while
+		// the underlying values are stale.
+		return nil
+	}
+	updateAt, err := m.MetricTime.MarshalText()
+	if err != nil {
+		return fmt.Errorf("marshal metric time: %w", err)
+	}
+	// Enumerate only the groups the cubelet actually reported. AddFlat
+	// of RedisNodeInfo would emit zero values for every untagged field
+	// and would also clobber RealTimeCreateNum / CpuUtil that this
+	// heartbeat never measured, so we hand-build the HSET args list.
+	args := redis.Args{m.NodeID,
+		"ins_id", m.NodeID,
+		"update_at", string(updateAt),
+	}
+	if m.HasAllocated {
+		args = args.Add(
+			"quota_cpu_usage", m.MilliCPUUsage,
+			"quota_mem_mb_usage", m.MemoryMBUsage,
+			"mvm_num", m.MvmNum,
+			"nic_queues", m.NicQueues,
+		)
+	}
+	if m.HasDisk {
+		args = args.Add(
+			"data_disk_usage_per", m.DataDiskUsagePer,
+			"storage_disk_usage_per", m.StorageDiskUsagePer,
+			"sys_disk_usage_per", m.SysDiskUsagePer,
+		)
+	}
+	if _, err := wrapredis.GetRedis(wrapredis.RedisWrite).Do("HSET", args...); err != nil {
+		log.G(ctx).Errorf("WriteNodeMetric HSET %s failed: %v", m.NodeID, err)
+		return err
+	}
+	if log.IsDebug() {
+		log.G(ctx).Debugf("WriteNodeMetric: %+v", m)
+	}
+	return nil
+}
+
+// UpdateNodeMetricInProcess pushes a metric directly into the receiving
+// cubemaster's local cache so scheduling on this replica does not have to
+// wait for the next Redis tick. Only the groups marked present on the
+// NodeMetric (HasAllocated / HasDisk) are written; other fields keep
+// whatever value the previous Redis tick or heartbeat installed, which
+// preserves the partial-update semantics the Redis writer relies on.
+//
+// Returns an error if the node is unknown to this replica (which is
+// normal during cold start and will self-heal when reload syncs the
+// registration table).
+func UpdateNodeMetricInProcess(m *NodeMetric) error {
+	if m == nil {
+		return errors.New("UpdateNodeMetricInProcess: nil metric")
+	}
+	if m.NodeID == "" {
+		return errors.New("UpdateNodeMetricInProcess: node id required")
+	}
+	if !m.HasAllocated && !m.HasDisk {
+		return nil
+	}
+	v, exist := l.cache.Get(m.NodeID)
+	if !exist {
+		return fmt.Errorf("item %s doesn't exist", m.NodeID)
+	}
+	old, ok := v.(*node.Node)
+	if !ok || old == nil {
+		return fmt.Errorf("cache entry for %s is not a *node.Node", m.NodeID)
+	}
+	l.lockMetaData.Lock()
+	defer l.lockMetaData.Unlock()
+	old.MetricUpdate = m.MetricTime
+	old.MetricLocalUpdateAt = time.Now().Local()
+	if m.HasAllocated {
+		old.QuotaCpuUsage = m.MilliCPUUsage
+		old.QuotaMemUsage = m.MemoryMBUsage
+		old.MvmNum = m.MvmNum
+		old.NicQueues = m.NicQueues
+	}
+	if m.HasDisk {
+		old.DataDiskUsagePer = m.DataDiskUsagePer
+		old.StorageDiskUsagePer = m.StorageDiskUsagePer
+		old.SysDiskUsagePer = m.SysDiskUsagePer
+	}
+	return nil
 }
 
 func (l *local) loadMetricFromRedis() error {
@@ -129,6 +260,7 @@ func (l *local) getNodeMetricFromRedis(ctx context.Context, key string) (*node.N
 	n.MvmNum = redisNode.MvmNum
 	n.MetricUpdate.UnmarshalText([]byte(redisNode.MetricUpdate))
 	n.RealTimeCreateNum = redisNode.RealTimeCreateNum
+	n.NicQueues = redisNode.NICQueues
 	if log.IsDebug() {
 		CubeLog.WithContext(ctx).Debugf("getNodeMetricFromRedis:%+v", utils.InterfaceToString(redisNode))
 	}

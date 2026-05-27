@@ -11,15 +11,6 @@ require_cmd docker
 require_cmd rg
 
 REMOVE_VOLUMES="${CUBE_SANDBOX_REMOVE_VOLUMES:-0}"
-METRIC_PID_FILE="${RUNTIME_DIR}/seed-cubemaster-metrics.pid"
-
-if [[ -f "${METRIC_PID_FILE}" ]]; then
-  metric_pid="$(<"${METRIC_PID_FILE}")"
-  if [[ -n "${metric_pid}" ]] && kill -0 "${metric_pid}" >/dev/null 2>&1; then
-    kill "${metric_pid}" >/dev/null 2>&1 || true
-  fi
-  rm -f "${METRIC_PID_FILE}"
-fi
 
 "${SCRIPT_DIR}/down-webui.sh"
 "${SCRIPT_DIR}/down-cube-proxy.sh"

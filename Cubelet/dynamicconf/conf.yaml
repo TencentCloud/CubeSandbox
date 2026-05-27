@@ -27,5 +27,4 @@ host:
 
 meta_server_config:
   meta_server_endpoint: "127.0.0.1:8089"
-  status_update_frequency: 10s
   node_status_max_images: 40000

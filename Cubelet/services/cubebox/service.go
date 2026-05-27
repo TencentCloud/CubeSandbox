@@ -29,6 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
@@ -145,6 +146,11 @@ func init() {
 					cubeboxMgr: cb,
 				},
 			}
+
+			// Publish the cubebox manager as the authoritative source of
+			// allocated-resource metrics so the cubelet heartbeat loop can
+			// pick it up without taking a hard dependency on this package.
+			resourcesource.Set(cb)
 
 			go func() {
 				CubeLog.Info("Start subscribing containerd event")

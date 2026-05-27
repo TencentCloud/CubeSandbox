@@ -356,8 +356,7 @@ systemd_target_for_role() {
 stop_existing_systemd_deployment() {
   systemctl disable --now \
     cube-sandbox-control.target \
-    cube-sandbox-compute.target \
-    cube-sandbox-seed-cubemaster-metrics.timer >/dev/null 2>&1 || true
+    cube-sandbox-compute.target >/dev/null 2>&1 || true
 }
 
 stop_existing_legacy_deployment() {
@@ -387,19 +386,6 @@ install_systemd_units() {
   ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
   ONE_CLICK_RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env" \
     "${install_units_script}"
-}
-
-configure_metrics_timer() {
-  if [[ "${DEPLOY_ROLE}" != "control" ]]; then
-    systemctl disable --now cube-sandbox-seed-cubemaster-metrics.timer >/dev/null 2>&1 || true
-    return 0
-  fi
-
-  if [[ "${CUBEMASTER_METRIC_LOOP:-0}" == "1" ]]; then
-    systemctl enable --now cube-sandbox-seed-cubemaster-metrics.timer
-  else
-    systemctl disable --now cube-sandbox-seed-cubemaster-metrics.timer >/dev/null 2>&1 || true
-  fi
 }
 
 start_systemd_target() {
@@ -566,7 +552,6 @@ fi
 
 install_systemd_units
 start_systemd_target
-configure_metrics_timer
 
 if [[ "${ONE_CLICK_RUN_QUICKCHECK:-1}" == "1" ]]; then
   ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \

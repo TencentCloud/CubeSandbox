@@ -27,6 +27,5 @@ log "stopping systemd deployment (role=${ROLE})"
 if [[ "${ROLE}" == "compute" ]]; then
   systemctl stop cube-sandbox-compute.target
 else
-  systemctl stop cube-sandbox-seed-cubemaster-metrics.timer >/dev/null 2>&1 || true
   systemctl stop cube-sandbox-control.target
 fi

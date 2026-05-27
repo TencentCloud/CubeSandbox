@@ -35,6 +35,11 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
 [debug]
   address = ":9966"
 [plugins]
+  [plugins."io.cubelet.controller.config.v1.cubelet"]
+    # Static-only cadence for node status and resource reporting.
+    # Do not configure this in dynamicconf/conf.yaml.
+    node_status_update_frequency = "10s"
+
   [plugins."io.cubelet.internal.v1.volume"]
   [plugins."io.cubelet.internal.v1.shimlog"]
     #独立空间

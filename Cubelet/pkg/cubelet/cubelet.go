@@ -51,7 +51,7 @@ func DefaultCubeletConfig() *KubeletConfig {
 		Insecurity:                true,
 		ResyncInterval:            10 * time.Hour,
 		DisableCreateNode:         false,
-		NodeStatusUpdateFrequency: 1 * time.Minute,
+		NodeStatusUpdateFrequency: 10 * time.Second,
 	}
 }
 

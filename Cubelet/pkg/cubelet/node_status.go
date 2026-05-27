@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	cubeletnodemeta "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodestatus"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/networkagentclient"
 	corev1 "k8s.io/api/core/v1"
@@ -291,16 +292,27 @@ func (kl *Cubelet) tryUpdateNodeStatus(ctx context.Context, tryNumber int) error
 		return fmt.Errorf("error getting node %q: %v", kl.nodeName, err)
 	}
 	node, changed := kl.updateNode(ctx, originalNode)
+	now := kl.clock.Now()
 	if changed || kl.lastStatusReportTime.IsZero() {
 		kl.delayAfterNodeStatusChange = kl.calculateDelay()
 	} else {
 		kl.delayAfterNodeStatusChange = 0
 	}
-	if !changed && !kl.lastStatusReportTime.IsZero() && tryNumber == 0 {
+	if !kl.shouldPatchNodeStatus(changed, tryNumber, now) {
 		return nil
 	}
 	_, err = kl.patchNodeStatus(originalNode, node)
 	return err
+}
+
+func (kl *Cubelet) shouldPatchNodeStatus(changed bool, tryNumber int, now time.Time) bool {
+	if changed || kl.lastStatusReportTime.IsZero() || tryNumber > 0 {
+		return true
+	}
+	if kl.nodeStatusReportFrequency <= 0 {
+		return true
+	}
+	return !now.Before(kl.lastStatusReportTime.Add(kl.nodeStatusReportFrequency))
 }
 
 func (kl *Cubelet) updateDefaultLabels(initialNode, existingNode *cubeletnodemeta.Node) bool {
@@ -515,11 +527,48 @@ func (kl *Cubelet) buildRegisterRequest(node *cubeletnodemeta.Node) *masterclien
 }
 
 func (kl *Cubelet) buildStatusRequest(node *cubeletnodemeta.Node) *masterclient.UpdateNodeStatusRequest {
-	return &masterclient.UpdateNodeStatusRequest{
+	req := &masterclient.UpdateNodeStatusRequest{
 		Conditions:     append([]corev1.NodeCondition(nil), node.Status.Conditions...),
 		Images:         append([]cubeletnodemeta.ContainerImage(nil), node.Status.CubeImages...),
 		LocalTemplates: append([]cubeletnodemeta.LocalTemplate(nil), node.Status.CubeTemplates...),
 		HeartbeatTime:  kl.clock.Now(),
+	}
+	attachResourceReport(req, kl.clock.Now())
+	return req
+}
+
+// attachResourceReport folds the allocated-resource and disk-usage views
+// onto an outgoing status request. The lookup is lazy so the cubelet does
+// not need to know whether the cubebox service plugin has finished
+// initialising; missing data just skips the field. MetricTime stays
+// zero-valued when nothing was attached, which cubemaster treats as
+// "no metric in this heartbeat".
+func attachResourceReport(req *masterclient.UpdateNodeStatusRequest, now time.Time) {
+	collector := resourcesource.Get()
+	if collector == nil {
+		return
+	}
+	if alloc := collector.CollectAllocated(); alloc != nil {
+		req.Allocated = &masterclient.AllocatedResources{
+			MilliCPU:      alloc.MilliCPU,
+			MemoryMB:      alloc.MemoryMB,
+			MvmNum:        alloc.MvmNum,
+			MvmRunningNum: alloc.MvmRunningNum,
+			NicQueues:     alloc.NicQueues,
+			DataDiskMB:    alloc.DataDiskMB,
+			StorageDiskMB: alloc.StorageDiskMB,
+		}
+		req.MetricTime = now
+	}
+	if du := collector.CollectDiskUsage(); du != nil {
+		req.DiskUsage = &masterclient.DiskUsage{
+			DataDiskUsagePer:    du.DataDiskUsagePer,
+			StorageDiskUsagePer: du.StorageDiskUsagePer,
+			SysDiskUsagePer:     du.SysDiskUsagePer,
+		}
+		if req.MetricTime.IsZero() {
+			req.MetricTime = now
+		}
 	}
 }
 
