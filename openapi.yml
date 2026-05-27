@@ -4,43 +4,23 @@
 openapi: 3.1.0
 info:
   title: CubeAPI
-  description: OpenAPI contract for the CubeSandbox dashboard surface.
+  description: >
+    OpenAPI contract for CubeSandbox. The API is exposed on two surfaces:
+    - **E2B-compatible surface** (root `/`): sandbox + template endpoints
+    - **CubeAPI dashboard surface** (`/cubeapi/v1`): all E2B endpoints plus cluster/config/store
   license:
-    name: ''
-  version: 0.1.0
+    name: Apache-2.0
+  version: 0.2.0
 servers:
 - url: /cubeapi/v1
-  description: CubeAPI dashboard surface
+  description: CubeAPI dashboard surface (includes cluster/config/store)
+- url: /
+  description: E2B-compatible surface (sandbox + template only)
 paths:
-  /cluster/overview:
-    get:
-      tags:
-      - handlers::cluster
-      operationId: cluster_overview
-      responses:
-        '200':
-          description: Cluster capacity overview
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ClusterOverview'
-        '404':
-          description: Cluster endpoint unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-        '500':
-          description: Unexpected backend error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
+  # ─── Health ──────────────────────────────────────────────────────────────
   /health:
     get:
-      tags:
-      - handlers::health
-      summary: GET /health
+      tags: [health]
       operationId: health
       responses:
         '200':
@@ -49,75 +29,109 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
-  /nodes:
+
+  # ─── Sandbox lifecycle ──────────────────────────────────────────────────
+  /sandboxes:
     get:
-      tags:
-      - handlers::cluster
-      operationId: list_nodes
+      tags: [sandboxes]
+      operationId: list_sandboxes
+      summary: List sandboxes (v1)
+      parameters:
+      - name: metadata
+        in: query
+        required: false
+        schema:
+          type: string
       responses:
         '200':
-          description: Node list
+          description: Sandbox list
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/NodeView'
-        '404':
-          description: Node inventory unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
+                  $ref: '#/components/schemas/ListedSandbox'
         '500':
           description: Unexpected backend error
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-  /nodes/{nodeID}:
-    get:
-      tags:
-      - handlers::cluster
-      operationId: get_node
-      parameters:
-      - name: nodeID
-        in: path
-        description: Node identifier
+    post:
+      tags: [sandboxes]
+      operationId: create_sandbox
+      summary: Create a new sandbox
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewSandbox'
         required: true
+      responses:
+        '201':
+          description: Sandbox created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sandbox'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /v2/sandboxes:
+    get:
+      tags: [sandboxes]
+      operationId: list_sandboxes_v2
+      summary: List sandboxes (v2 with pagination)
+      parameters:
+      - name: metadata
+        in: query
+        required: false
         schema:
           type: string
+      - name: state
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: nextToken
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 100
       responses:
         '200':
-          description: Node detail
+          description: Sandbox list
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/NodeView'
-        '404':
-          description: Node not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
+                type: array
+                items:
+                  $ref: '#/components/schemas/ListedSandbox'
         '500':
           description: Unexpected backend error
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+
   /sandboxes/{sandboxID}:
     get:
-      tags:
-      - handlers::sandboxes
+      tags: [sandboxes]
       operationId: get_sandbox
+      summary: Get sandbox detail
       parameters:
-      - name: sandboxID
-        in: path
-        description: Sandbox identifier
-        required: true
-        schema:
-          type: string
+      - $ref: '#/components/parameters/SandboxID'
       responses:
         '200':
           description: Sandbox detail
@@ -138,16 +152,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
     delete:
-      tags:
-      - handlers::sandboxes
+      tags: [sandboxes]
       operationId: kill_sandbox
+      summary: Delete (kill) a sandbox
       parameters:
-      - name: sandboxID
-        in: path
-        description: Sandbox identifier
-        required: true
-        schema:
-          type: string
+      - $ref: '#/components/parameters/SandboxID'
       responses:
         '204':
           description: Sandbox deleted
@@ -163,18 +172,156 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-  /sandboxes/{sandboxID}/pause:
-    post:
-      tags:
-      - handlers::sandboxes
-      operationId: pause_sandbox
+
+  /sandboxes/{sandboxID}/logs:
+    get:
+      tags: [sandboxes]
+      operationId: get_sandbox_logs
+      summary: Get sandbox logs (v1 legacy)
       parameters:
-      - name: sandboxID
-        in: path
-        description: Sandbox identifier
-        required: true
+      - $ref: '#/components/parameters/SandboxID'
+      - name: start
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 1000
+      responses:
+        '200':
+          description: Legacy log response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxLogs'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /v2/sandboxes/{sandboxID}/logs:
+    get:
+      tags: [sandboxes]
+      operationId: get_sandbox_logs_v2
+      summary: Get sandbox logs (v2 structured)
+      parameters:
+      - $ref: '#/components/parameters/SandboxID'
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 1000
+      - name: direction
+        in: query
+        required: false
         schema:
           type: string
+      responses:
+        '200':
+          description: Structured sandbox logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxLogsV2Response'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /sandboxes/{sandboxID}/timeout:
+    post:
+      tags: [sandboxes]
+      operationId: set_sandbox_timeout
+      summary: Set sandbox timeout
+      parameters:
+      - $ref: '#/components/parameters/SandboxID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetTimeoutRequest'
+        required: true
+      responses:
+        '204':
+          description: Timeout updated
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /sandboxes/{sandboxID}/refreshes:
+    post:
+      tags: [sandboxes]
+      operationId: refresh_sandbox
+      summary: Refresh (extend) a sandbox
+      parameters:
+      - $ref: '#/components/parameters/SandboxID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '204':
+          description: Sandbox refreshed
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /sandboxes/{sandboxID}/pause:
+    post:
+      tags: [sandboxes]
+      operationId: pause_sandbox
+      summary: Pause a sandbox
+      parameters:
+      - $ref: '#/components/parameters/SandboxID'
       responses:
         '204':
           description: Sandbox paused
@@ -196,18 +343,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+
   /sandboxes/{sandboxID}/resume:
     post:
-      tags:
-      - handlers::sandboxes
+      tags: [sandboxes]
       operationId: resume_sandbox
+      summary: Resume a paused sandbox
       parameters:
-      - name: sandboxID
-        in: path
-        description: Sandbox identifier
-        required: true
-        schema:
-          type: string
+      - $ref: '#/components/parameters/SandboxID'
       requestBody:
         content:
           application/json:
@@ -239,17 +382,82 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+
+  /sandboxes/{sandboxID}/connect:
+    post:
+      tags: [sandboxes]
+      operationId: connect_sandbox
+      summary: Connect to a sandbox
+      parameters:
+      - $ref: '#/components/parameters/SandboxID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectSandbox'
+        required: true
+      responses:
+        '200':
+          description: Sandbox connection info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sandbox'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /sandboxes/{sandboxID}/snapshots:
+    post:
+      tags: [sandboxes]
+      operationId: create_snapshot
+      summary: Create a sandbox snapshot
+      parameters:
+      - $ref: '#/components/parameters/SandboxID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSnapshotRequest'
+      responses:
+        '201':
+          description: Snapshot created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotInfo'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  # ─── Templates ──────────────────────────────────────────────────────────
   /templates:
     get:
-      tags:
-      - handlers::templates
+      tags: [templates]
       operationId: list_templates
+      summary: List templates
       parameters:
       - name: instance_type
         in: query
-        description: |-
-          Optional CubeMaster instance_type filter (currently no server-side filter;
-          reserved for future use).
+        description: Optional CubeMaster instance_type filter.
         required: false
         schema:
           type: string
@@ -274,18 +482,37 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+    post:
+      tags: [templates]
+      operationId: create_template
+      summary: Create a template from an image
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTemplateRequest'
+        required: true
+      responses:
+        '202':
+          description: Template build job started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateBuildJob'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
   /templates/{templateID}:
     get:
-      tags:
-      - handlers::templates
+      tags: [templates]
       operationId: get_template
+      summary: Get template detail
       parameters:
-      - name: templateID
-        in: path
-        description: Template identifier
-        required: true
-        schema:
-          type: string
+      - $ref: '#/components/parameters/TemplateID'
       responses:
         '200':
           description: Template detail
@@ -305,86 +532,286 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-  /v2/sandboxes:
-    get:
-      tags:
-      - handlers::sandboxes
-      operationId: list_sandboxes_v2
+    post:
+      tags: [templates]
+      operationId: rebuild_template
+      summary: Rebuild a template
       parameters:
-      - name: metadata
+      - $ref: '#/components/parameters/TemplateID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RebuildTemplateRequest'
+      responses:
+        '202':
+          description: Rebuild job started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateBuildJob'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    patch:
+      tags: [templates]
+      operationId: update_template
+      summary: Update a template (not implemented)
+      parameters:
+      - $ref: '#/components/parameters/TemplateID'
+      responses:
+        '501':
+          description: Not implemented
+    delete:
+      tags: [templates]
+      operationId: delete_template
+      summary: Delete a template
+      parameters:
+      - $ref: '#/components/parameters/TemplateID'
+      - name: instance_type
         in: query
         required: false
         schema:
           type: string
-      - name: state
+      - name: sync
+        in: query
+        required: false
+        schema:
+          type: boolean
+      responses:
+        '204':
+          description: Template deleted
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /templates/{templateID}/builds/{buildID}:
+    post:
+      tags: [templates]
+      operationId: start_template_build
+      summary: Start a template build job
+      parameters:
+      - $ref: '#/components/parameters/TemplateID'
+      - $ref: '#/components/parameters/BuildID'
+      responses:
+        '202':
+          description: Build started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateBuildJob'
+
+  /templates/{templateID}/builds/{buildID}/status:
+    get:
+      tags: [templates]
+      operationId: get_template_build_status
+      summary: Get template build status
+      parameters:
+      - $ref: '#/components/parameters/TemplateID'
+      - $ref: '#/components/parameters/BuildID'
+      - name: logs_offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      responses:
+        '200':
+          description: Build status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateBuildStatus'
+
+  /templates/{templateID}/builds/{buildID}/logs:
+    get:
+      tags: [templates]
+      operationId: get_template_build_logs
+      summary: Get template build logs
+      parameters:
+      - $ref: '#/components/parameters/TemplateID'
+      - $ref: '#/components/parameters/BuildID'
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 100
+      responses:
+        '200':
+          description: Build logs (opaque JSON from CubeMaster)
+
+  # ─── Snapshots ──────────────────────────────────────────────────────────
+  /snapshots:
+    get:
+      tags: [snapshots]
+      operationId: list_snapshots
+      summary: List snapshots
+      parameters:
+      - name: sandboxID
         in: query
         required: false
         schema:
           type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
       - name: nextToken
         in: query
         required: false
         schema:
           type: string
-      - name: limit
-        in: query
-        required: false
-        schema:
-          type: integer
-          format: int32
       responses:
         '200':
-          description: Sandbox list
+          description: List of snapshots
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/ListedSandbox'
+                  $ref: '#/components/schemas/SnapshotListItem'
         '500':
           description: Unexpected backend error
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-  /v2/sandboxes/{sandboxID}/logs:
-    get:
-      tags:
-      - handlers::sandboxes
-      operationId: get_sandbox_logs_v2
+
+  /sandboxes/{sandboxID}/rollback:
+    post:
+      tags: [snapshots]
+      operationId: rollback_sandbox
+      summary: Rollback a sandbox to a snapshot
       parameters:
-      - name: sandboxID
-        in: path
-        description: Sandbox identifier
+      - $ref: '#/components/parameters/SandboxID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RollbackRequest'
         required: true
-        schema:
-          type: string
-      - name: cursor
-        in: query
-        required: false
-        schema:
-          type: integer
-          format: int64
-      - name: limit
-        in: query
-        required: false
-        schema:
-          type: integer
-          format: int32
-      - name: direction
-        in: query
-        required: false
+      responses:
+        '200':
+          description: Rollback started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollbackResponse'
+        '404':
+          description: Sandbox or snapshot not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  # ─── Cluster & Config (CubeAPI surface only) ───────────────────────────
+  /cluster/overview:
+    get:
+      tags: [cluster]
+      operationId: cluster_overview
+      summary: Get cluster capacity overview
+      responses:
+        '200':
+          description: Cluster capacity overview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClusterOverview'
+        '404':
+          description: Cluster endpoint unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /nodes:
+    get:
+      tags: [cluster]
+      operationId: list_nodes
+      summary: List cluster nodes
+      responses:
+        '200':
+          description: Node list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NodeView'
+        '404':
+          description: Node inventory unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /nodes/{nodeID}:
+    get:
+      tags: [cluster]
+      operationId: get_node
+      summary: Get node detail
+      parameters:
+      - name: nodeID
+        in: path
+        description: Node identifier
+        required: true
         schema:
           type: string
       responses:
         '200':
-          description: Structured sandbox logs
+          description: Node detail
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SandboxLogsV2Response'
+                $ref: '#/components/schemas/NodeView'
         '404':
-          description: Sandbox not found
+          description: Node not found
           content:
             application/json:
               schema:
@@ -395,406 +822,448 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+
+  /config:
+    get:
+      tags: [config]
+      operationId: get_config
+      summary: Get runtime configuration
+      responses:
+        '200':
+          description: Runtime configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeConfig'
+
+  /store/meta:
+    get:
+      tags: [store]
+      operationId: get_store_meta
+      summary: Get template store image metadata
+      responses:
+        '200':
+          description: Store image metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoreMeta'
+
+  /store/refresh:
+    post:
+      tags: [store]
+      operationId: refresh_store_meta
+      summary: Pull and refresh store image metadata
+      responses:
+        '200':
+          description: Updated store image metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoreMeta'
+
 components:
+  parameters:
+    SandboxID:
+      name: sandboxID
+      in: path
+      description: Sandbox identifier
+      required: true
+      schema:
+        type: string
+    TemplateID:
+      name: templateID
+      in: path
+      description: Template identifier
+      required: true
+      schema:
+        type: string
+    BuildID:
+      name: buildID
+      in: path
+      description: Build job identifier
+      required: true
+      schema:
+        type: string
+
   schemas:
+    # ─── Common ────────────────────────────────────────────────────────────
     ApiError:
       type: object
-      required:
-      - code
-      - message
+      required: [code, message]
       properties:
         code:
           type: integer
           format: int32
         message:
           type: string
-    ClusterOverview:
-      type: object
-      required:
-      - nodeCount
-      - healthyNodes
-      - totalCpuMilli
-      - allocatableCpuMilli
-      - totalMemoryMB
-      - allocatableMemoryMB
-      - maxMvmSlots
-      properties:
-        allocatableCpuMilli:
-          type: integer
-          format: int64
-          description: Currently-allocatable CPU in millicpu.
-        allocatableMemoryMB:
-          type: integer
-          format: int64
-          description: Currently-allocatable memory in MiB.
-        healthyNodes:
-          type: integer
-          minimum: 0
-        maxMvmSlots:
-          type: integer
-          format: int64
-          description: Sum of every node's maximum MVM slots.
-        nodeCount:
-          type: integer
-          minimum: 0
-        totalCpuMilli:
-          type: integer
-          format: int64
-          description: Total CPU across the cluster, expressed in millicpu.
-        totalMemoryMB:
-          type: integer
-          format: int64
-          description: Total memory in MiB.
+
     HashMap:
       type: object
       additionalProperties:
         type: string
-      propertyNames:
-        type: string
+
+    # ─── Health ────────────────────────────────────────────────────────────
     HealthResponse:
       type: object
-      required:
-      - status
-      - sandboxes
+      required: [status, sandboxes]
       properties:
+        status:
+          type: string
         sandboxes:
           type: integer
           minimum: 0
-        status:
-          type: string
-    ListedSandbox:
-      type: object
-      description: One entry in GET /sandboxes (RunningSandbox in OpenAPI spec).
-      required:
-      - templateID
-      - sandboxID
-      - clientID
-      - startedAt
-      - endAt
-      - cpuCount
-      - memoryMB
-      - state
-      - envdVersion
-      properties:
-        alias:
-          type:
-          - string
-          - 'null'
-        clientID:
-          type: string
-        cpuCount:
-          type: integer
-          format: int32
-        diskSizeMB:
-          type:
-          - integer
-          - 'null'
-          format: int32
-        endAt:
-          type: string
-          format: date-time
-        envdVersion:
-          type: string
-        memoryMB:
-          type: integer
-          format: int32
-        metadata:
-          oneOf:
-          - type: 'null'
-          - $ref: '#/components/schemas/HashMap'
-        sandboxID:
-          type: string
-        startedAt:
-          type: string
-          format: date-time
-        state:
-          $ref: '#/components/schemas/SandboxState'
-        templateID:
-          type: string
-        volumeMounts:
-          type:
-          - array
-          - 'null'
-          items:
-            $ref: '#/components/schemas/SandboxVolumeMount'
-    LogLevel:
-      type: string
-      enum:
-      - debug
-      - info
-      - warn
-      - error
-    NodeConditionView:
-      type: object
-      required:
-      - type
-      - status
-      properties:
-        lastHeartbeatTime:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        message:
-          type: string
-        reason:
-          type: string
-        status:
-          type: string
-        type:
-          type: string
-    NodeResourcesView:
-      type: object
-      required:
-      - cpuMilli
-      - memoryMB
-      properties:
-        cpuMilli:
-          type: integer
-          format: int64
-          description: CPU capacity or availability expressed in millicpu.
-        memoryMB:
-          type: integer
-          format: int64
-    NodeView:
-      type: object
-      required:
-      - nodeID
-      - hostIP
-      - healthy
-      - capacity
-      - allocatable
-      - cpuSaturation
-      - memorySaturation
-      - maxMvmSlots
-      properties:
-        allocatable:
-          $ref: '#/components/schemas/NodeResourcesView'
-        capacity:
-          $ref: '#/components/schemas/NodeResourcesView'
-        conditions:
-          type: array
-          items:
-            $ref: '#/components/schemas/NodeConditionView'
-        cpuSaturation:
-          type: number
-          format: float
-          description: Percentage (0-100) of CPU currently in use.
-        healthy:
-          type: boolean
-        heartbeatTime:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        hostIP:
-          type: string
-        instanceType:
-          type: string
-        localTemplates:
-          type: array
-          items:
-            type: string
-        maxMvmSlots:
-          type: integer
-          format: int64
-        memorySaturation:
-          type: number
-          format: float
-          description: Percentage (0-100) of memory currently in use.
-        nodeID:
-          type: string
-    ResumedSandbox:
-      type: object
-      description: Request body for POST /sandboxes/{id}/resume (deprecated).
-      properties:
-        autoPause:
-          type: boolean
-        timeout:
-          type: integer
-          format: int32
-    Sandbox:
-      type: object
-      description: |-
-        Response for POST /sandboxes and POST /sandboxes/{id}/connect.
-        All ID abbreviations uppercase per E2B OpenAPI spec.
-      required:
-      - templateID
-      - sandboxID
-      - clientID
-      - envdVersion
-      properties:
-        alias:
-          type:
-          - string
-          - 'null'
-        clientID:
-          type: string
-        domain:
-          type:
-          - string
-          - 'null'
-        envdAccessToken:
-          type:
-          - string
-          - 'null'
-        envdVersion:
-          type: string
-        sandboxID:
-          type: string
-        templateID:
-          type: string
-        trafficAccessToken:
-          type:
-          - string
-          - 'null'
-    SandboxDetail:
-      type: object
-      description: Detailed sandbox info returned by GET /sandboxes/{sandboxID}.
-      required:
-      - templateID
-      - sandboxID
-      - clientID
-      - startedAt
-      - endAt
-      - envdVersion
-      - cpuCount
-      - memoryMB
-      - state
-      properties:
-        alias:
-          type:
-          - string
-          - 'null'
-        clientID:
-          type: string
-        cpuCount:
-          type: integer
-          format: int32
-        diskSizeMB:
-          type:
-          - integer
-          - 'null'
-          format: int32
-        domain:
-          type:
-          - string
-          - 'null'
-        endAt:
-          type: string
-          format: date-time
-        envdAccessToken:
-          type:
-          - string
-          - 'null'
-        envdVersion:
-          type: string
-        memoryMB:
-          type: integer
-          format: int32
-        metadata:
-          oneOf:
-          - type: 'null'
-          - $ref: '#/components/schemas/HashMap'
-        sandboxID:
-          type: string
-        startedAt:
-          type: string
-          format: date-time
-        state:
-          $ref: '#/components/schemas/SandboxState'
-        templateID:
-          type: string
-        volumeMounts:
-          type:
-          - array
-          - 'null'
-          items:
-            $ref: '#/components/schemas/SandboxVolumeMount'
-    SandboxLogEntry:
-      type: object
-      description: Structured log entry (v2 logs).
-      required:
-      - timestamp
-      - message
-      - level
-      - fields
-      properties:
-        fields:
-          type: object
-          additionalProperties:
-            type: string
-          propertyNames:
-            type: string
-        level:
-          $ref: '#/components/schemas/LogLevel'
-        message:
-          type: string
-        timestamp:
-          type: string
-          format: date-time
-    SandboxLogsV2Response:
-      type: object
-      description: v2 log response.
-      required:
-      - logs
-      properties:
-        logs:
-          type: array
-          items:
-            $ref: '#/components/schemas/SandboxLogEntry'
+
+    # ─── Sandbox ──────────────────────────────────────────────────────────
     SandboxState:
       type: string
-      description: State of the sandbox (running | paused)
-      enum:
-      - running
-      - paused
+      description: State of the sandbox
+      enum: [running, paused, pausing]
+
+    SandboxNetworkConfig:
+      type: object
+      description: Network configuration for sandbox egress/ingress control.
+      properties:
+        allowPublicTraffic:
+          type: boolean
+        allowOut:
+          type: array
+          items:
+            type: string
+        denyOut:
+          type: array
+          items:
+            type: string
+        maskRequestHost:
+          type: string
+
+    SandboxAutoResumeConfig:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+
     SandboxVolumeMount:
       type: object
       description: Volume mount inside the sandbox.
-      required:
-      - name
-      - path
+      required: [name, path]
       properties:
         name:
           type: string
         path:
           type: string
-    TemplateDetail:
+
+    NewSandbox:
       type: object
-      description: Detailed template response (GET /templates/:id).
-      required:
-      - templateID
-      - status
-      - replicas
+      description: Request body for POST /sandboxes
+      required: [templateID]
       properties:
-        createRequest: {}
+        templateID:
+          type: string
+        timeout:
+          type: integer
+          format: int32
+          default: 15
+          minimum: 0
+        autoPause:
+          type: boolean
+          default: false
+        autoResume:
+          $ref: '#/components/schemas/SandboxAutoResumeConfig'
+        secure:
+          type: boolean
+        allow_internet_access:
+          type: boolean
+          description: SDK sends this as snake_case (known quirk).
+        network:
+          $ref: '#/components/schemas/SandboxNetworkConfig'
+        metadata:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/HashMap'
+        envVars:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/HashMap'
+        mcp:
+          description: MCP configuration (opaque JSON).
+        volumeMounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/SandboxVolumeMount'
+
+    Sandbox:
+      type: object
+      description: Response for POST /sandboxes and POST /sandboxes/{id}/connect.
+      required: [templateID, sandboxID, clientID, envdVersion]
+      properties:
+        templateID:
+          type: string
+        sandboxID:
+          type: string
+        alias:
+          type:
+          - string
+          - 'null'
+        clientID:
+          type: string
+        envdVersion:
+          type: string
+        envdAccessToken:
+          type:
+          - string
+          - 'null'
+        trafficAccessToken:
+          type:
+          - string
+          - 'null'
+        domain:
+          type:
+          - string
+          - 'null'
+
+    SandboxDetail:
+      type: object
+      description: Detailed sandbox info returned by GET /sandboxes/{sandboxID}.
+      required: [templateID, sandboxID, clientID, startedAt, endAt, envdVersion, cpuCount, memoryMB, state]
+      properties:
+        templateID:
+          type: string
+        alias:
+          type:
+          - string
+          - 'null'
+        sandboxID:
+          type: string
+        clientID:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        envdVersion:
+          type: string
+        envdAccessToken:
+          type:
+          - string
+          - 'null'
+        domain:
+          type:
+          - string
+          - 'null'
+        cpuCount:
+          type: integer
+          format: int32
+        memoryMB:
+          type: integer
+          format: int32
+        diskSizeMB:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        metadata:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/HashMap'
+        state:
+          $ref: '#/components/schemas/SandboxState'
+        volumeMounts:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/SandboxVolumeMount'
+
+    ListedSandbox:
+      type: object
+      description: One entry in GET /sandboxes.
+      required: [templateID, sandboxID, clientID, startedAt, endAt, cpuCount, memoryMB, state, envdVersion]
+      properties:
+        templateID:
+          type: string
+        alias:
+          type:
+          - string
+          - 'null'
+        sandboxID:
+          type: string
+        clientID:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        cpuCount:
+          type: integer
+          format: int32
+        memoryMB:
+          type: integer
+          format: int32
+        diskSizeMB:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        metadata:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/HashMap'
+        state:
+          $ref: '#/components/schemas/SandboxState'
+        envdVersion:
+          type: string
+        volumeMounts:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/SandboxVolumeMount'
+
+    ResumedSandbox:
+      type: object
+      description: Request body for POST /sandboxes/{id}/resume.
+      properties:
+        timeout:
+          type: integer
+          format: int32
+          default: 15
+        autoPause:
+          type: boolean
+          default: false
+
+    ConnectSandbox:
+      type: object
+      description: Request body for POST /sandboxes/{id}/connect.
+      required: [timeout]
+      properties:
+        timeout:
+          type: integer
+          format: int32
+          minimum: 0
+
+    SetTimeoutRequest:
+      type: object
+      description: Request body for POST /sandboxes/{id}/timeout.
+      required: [timeout]
+      properties:
+        timeout:
+          type: integer
+          format: int32
+          minimum: 0
+
+    RefreshRequest:
+      type: object
+      description: Request body for POST /sandboxes/{id}/refreshes.
+      properties:
+        duration:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 3600
+
+    CreateSnapshotRequest:
+      type: object
+      description: Request body for POST /sandboxes/{id}/snapshots.
+      properties:
+        name:
+          type: string
+
+    SnapshotInfo:
+      type: object
+      description: Response for POST /sandboxes/{id}/snapshots.
+      required: [snapshotID, names]
+      properties:
+        snapshotID:
+          type: string
+        names:
+          type: array
+          items:
+            type: string
+
+    # ─── Logs ─────────────────────────────────────────────────────────────
+    LogLevel:
+      type: string
+      enum: [debug, info, warn, error]
+
+    SandboxLog:
+      type: object
+      description: Single raw log line (v1).
+      required: [timestamp, line]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        line:
+          type: string
+
+    SandboxLogEntry:
+      type: object
+      description: Structured log entry (v2 logs).
+      required: [timestamp, message, level, fields]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        message:
+          type: string
+        level:
+          $ref: '#/components/schemas/LogLevel'
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+
+    SandboxLogs:
+      type: object
+      description: Legacy v1 log response.
+      required: [logs, logEntries]
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/SandboxLog'
+        logEntries:
+          type: array
+          items:
+            $ref: '#/components/schemas/SandboxLogEntry'
+
+    SandboxLogsV2Response:
+      type: object
+      description: v2 log response.
+      required: [logs]
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/SandboxLogEntry'
+
+    # ─── Templates ────────────────────────────────────────────────────────
+    TemplateSummary:
+      type: object
+      description: Summary row returned by GET /templates.
+      required: [templateID, status]
+      properties:
+        templateID:
+          type: string
         instanceType:
           type:
           - string
           - 'null'
-        lastError:
-          type:
-          - string
-          - 'null'
-        replicas:
-          type: array
-          items: {}
-        status:
-          type: string
-        templateID:
-          type: string
         version:
           type:
           - string
           - 'null'
-    TemplateSummary:
-      type: object
-      description: Summary row returned by GET /templates.
-      required:
-      - templateID
-      - status
-      properties:
+        status:
+          type: string
+        lastError:
+          type:
+          - string
+          - 'null'
         createdAt:
           type:
           - string
@@ -803,22 +1272,368 @@ components:
           type:
           - string
           - 'null'
+
+    TemplateDetail:
+      type: object
+      description: Detailed template response (GET /templates/:id).
+      required: [templateID, status, replicas]
+      properties:
+        templateID:
+          type: string
         instanceType:
           type:
           - string
           - 'null'
-        lastError:
+        version:
           type:
           - string
           - 'null'
         status:
           type: string
-        templateID:
-          type: string
-        version:
+        lastError:
           type:
           - string
           - 'null'
+        replicas:
+          type: array
+          items: {}
+        createRequest: {}
+        networkType:
+          type:
+          - string
+          - 'null'
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+
+    CreateTemplateRequest:
+      type: object
+      description: Body for POST /templates (create from image).
+      required: [image]
+      properties:
+        templateID:
+          type: string
+          default: ''
+        instanceType:
+          type: string
+        image:
+          type: string
+          minLength: 1
+          description: Container image reference.
+        writableLayerSize:
+          type: string
+          description: Rootfs writable layer size, e.g. "1G".
+        exposedPorts:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 65535
+          description: Ports the container listens on.
+        probePort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        probePath:
+          type: string
+          description: HTTP probe path, e.g. "/health".
+        cpu:
+          type: integer
+          format: int32
+          description: CPU in millicores.
+        memory:
+          type: integer
+          format: int32
+          description: Memory in MiB.
+        env:
+          type: array
+          items:
+            type: string
+          description: Environment variables as "KEY=VALUE" strings.
+        allowInternetAccess:
+          type: boolean
+
+    RebuildTemplateRequest:
+      type: object
+      description: Body for POST /templates/:id (rebuild).
+      additionalProperties: {}
+
+    TemplateBuildJob:
+      type: object
+      description: Job envelope returned by create / rebuild.
+      required: [jobID, templateID, status, phase, progress]
+      properties:
+        jobID:
+          type: string
+        templateID:
+          type: string
+        status:
+          type: string
+        phase:
+          type: string
+        progress:
+          type: integer
+          format: int32
+        errorMessage:
+          type: string
+
+    TemplateBuildStatus:
+      type: object
+      description: Response for GET /templates/:id/builds/:bid/status.
+      required: [buildID, templateID, status, progress, message]
+      properties:
+        buildID:
+          type: string
+        templateID:
+          type: string
+        status:
+          type: string
+        progress:
+          type: integer
+          format: int32
+        message:
+          type: string
+
+    # ─── Snapshots ────────────────────────────────────────────────────────
+    SnapshotListItem:
+      type: object
+      description: One entry in GET /snapshots.
+      required: [snapshotID, names, status]
+      properties:
+        snapshotID:
+          type: string
+        names:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+        originSandboxID:
+          type:
+          - string
+          - 'null'
+        createdAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        updatedAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+
+    RollbackRequest:
+      type: object
+      description: Request body for POST /sandboxes/{id}/rollback.
+      required: [snapshotID]
+      properties:
+        snapshotID:
+          type: string
+
+    RollbackResponse:
+      type: object
+      description: Response for POST /sandboxes/{id}/rollback.
+      required: [sandboxID, snapshotID, operationID, status]
+      properties:
+        sandboxID:
+          type: string
+        snapshotID:
+          type: string
+        operationID:
+          type: string
+        status:
+          type: string
+
+    DeleteSnapshotResponse:
+      type: object
+      description: Response for DELETE /templates/{id} when target is a snapshot.
+      required: [templateID, operationID, status]
+      properties:
+        templateID:
+          type: string
+        operationID:
+          type: string
+        status:
+          type: string
+
+    # ─── Cluster & Nodes ──────────────────────────────────────────────────
+    ClusterOverview:
+      type: object
+      required: [nodeCount, healthyNodes, totalCpuMilli, allocatableCpuMilli, totalMemoryMB, allocatableMemoryMB, maxMvmSlots]
+      properties:
+        nodeCount:
+          type: integer
+          minimum: 0
+        healthyNodes:
+          type: integer
+          minimum: 0
+        totalCpuMilli:
+          type: integer
+          format: int64
+          description: Total CPU across the cluster in millicpu.
+        allocatableCpuMilli:
+          type: integer
+          format: int64
+          description: Currently-allocatable CPU in millicpu.
+        totalMemoryMB:
+          type: integer
+          format: int64
+          description: Total memory in MiB.
+        allocatableMemoryMB:
+          type: integer
+          format: int64
+          description: Currently-allocatable memory in MiB.
+        maxMvmSlots:
+          type: integer
+          format: int64
+          description: Sum of every node's maximum MVM slots.
+
+    NodeResourcesView:
+      type: object
+      required: [cpuMilli, memoryMB]
+      properties:
+        cpuMilli:
+          type: integer
+          format: int64
+          description: CPU capacity or availability in millicpu.
+        memoryMB:
+          type: integer
+          format: int64
+
+    NodeConditionView:
+      type: object
+      required: [type, status]
+      properties:
+        type:
+          type: string
+        status:
+          type: string
+        lastHeartbeatTime:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        reason:
+          type: string
+        message:
+          type: string
+
+    NodeView:
+      type: object
+      required: [nodeID, hostIP, healthy, capacity, allocatable, cpuSaturation, memorySaturation, maxMvmSlots]
+      properties:
+        nodeID:
+          type: string
+        hostIP:
+          type: string
+        instanceType:
+          type: string
+        healthy:
+          type: boolean
+        capacity:
+          $ref: '#/components/schemas/NodeResourcesView'
+        allocatable:
+          $ref: '#/components/schemas/NodeResourcesView'
+        cpuSaturation:
+          type: number
+          format: float
+          description: CPU usage percentage (0-100).
+        memorySaturation:
+          type: number
+          format: float
+          description: Memory usage percentage (0-100).
+        maxMvmSlots:
+          type: integer
+          format: int64
+        quotaCpu:
+          type: integer
+          format: int64
+          description: CPU quota in millicores.
+        quotaMemMB:
+          type: integer
+          format: int64
+          description: Memory quota in MiB.
+        createConcurrentNum:
+          type: integer
+          format: int64
+          description: Max concurrent sandbox-create operations.
+        heartbeatTime:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        conditions:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeConditionView'
+        localTemplates:
+          type: array
+          items:
+            type: string
+
+    # ─── Config ───────────────────────────────────────────────────────────
+    RuntimeConfig:
+      type: object
+      description: Runtime configuration snapshot (GET /config).
+      required: [apiEndpoint, rateLimitPerSec, authEnabled, sandboxDomain, instanceType]
+      properties:
+        apiEndpoint:
+          type: string
+          description: Public-facing API endpoint URL.
+        rateLimitPerSec:
+          type: integer
+          format: int32
+          description: Max requests per second per API key.
+        authEnabled:
+          type: boolean
+          description: Whether auth callback is configured.
+        sandboxDomain:
+          type: string
+          description: Default sandbox domain.
+        instanceType:
+          type: string
+          description: Default instance type.
+
+    # ─── Store ────────────────────────────────────────────────────────────
+    ImageMeta:
+      type: object
+      description: Per-image metadata entry.
+      required: [image, size_bytes, size_mb]
+      properties:
+        image:
+          type: string
+          description: Full image reference.
+        size_bytes:
+          type: integer
+          format: int64
+          description: Uncompressed on-disk size in bytes.
+        size_mb:
+          type: number
+          format: double
+          description: Uncompressed size in MiB.
+        digest:
+          type:
+          - string
+          - 'null'
+          description: Full repo digest (e.g. registry/repo@sha256:abc).
+        digest_short:
+          type:
+          - string
+          - 'null'
+          description: Bare sha256:... portion.
+
+    StoreMeta:
+      type: object
+      description: Store template image metadata.
+      required: [images]
+      properties:
+        images:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImageMeta'
+
   securitySchemes:
     apiKeyAuth:
       type: apiKey
@@ -828,12 +1643,19 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+
 tags:
 - name: health
   description: Health and liveness
+- name: sandboxes
+  description: Sandbox lifecycle, logs, and operations
+- name: templates
+  description: Template catalog and build management
 - name: cluster
   description: Cluster and node inventory
-- name: templates
-  description: Template catalog
-- name: sandboxes
-  description: Sandbox lifecycle and logs
+- name: config
+  description: Runtime configuration
+- name: snapshots
+  description: Sandbox snapshots and rollback
+- name: store
+  description: Template store image metadata
