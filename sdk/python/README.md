@@ -17,8 +17,11 @@ and control the full sandbox lifecycle — including pause/resume with memory sn
 
 ## Installation
 
-> **Note:** `cubesandbox` is not yet published to PyPI.
-> Install from source until the first release is available:
+```bash
+pip install cubesandbox
+```
+
+Or install the latest development version from source:
 
 ```bash
 git clone https://github.com/TencentCloud/CubeSandbox.git

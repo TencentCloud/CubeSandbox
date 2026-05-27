@@ -163,7 +163,8 @@ export default withMermaid(defineConfig({
             {
               text: 'Maintainer Docs',
               items: [
-                { text: 'Blog Maintenance', link: '/guide/maintainer/blog' }
+                { text: 'Blog Maintenance', link: '/guide/maintainer/blog' },
+                { text: 'Releasing the Python SDK', link: '/guide/maintainer/release-python-sdk' }
               ]
             }
           ],
@@ -257,7 +258,8 @@ export default withMermaid(defineConfig({
             {
               text: '维护者文档',
               items: [
-                { text: '博客维护', link: '/zh/guide/maintainer/blog' }
+                { text: '博客维护', link: '/zh/guide/maintainer/blog' },
+                { text: '发布 Python SDK', link: '/zh/guide/maintainer/release-python-sdk' }
               ]
             }
           ],

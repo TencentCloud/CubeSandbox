@@ -1,0 +1,108 @@
+name: Release Python SDK
+
+on:
+  push:
+    tags:
+      - 'python-sdk-v*'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Publish target'
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
+
+concurrency:
+  group: release-python-sdk-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: sdk/python
+
+jobs:
+  build-and-publish:
+    name: Build and publish cubesandbox
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+
+      - name: Verify version consistency
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          tag_ref="${GITHUB_REF_NAME#python-sdk-v}"
+          init_ver="$(python -c 'import re,pathlib;print(re.search(r"__version__\s*=\s*\"([^\"]+)\"", pathlib.Path("cubesandbox/__init__.py").read_text()).group(1))')"
+          echo "tag=${tag_ref}"
+          echo "__version__=${init_ver}"
+          if [[ "${tag_ref}" != "${init_ver}" ]]; then
+            echo "::error::Tag (python-sdk-v${tag_ref}) does not match cubesandbox.__version__ (${init_ver})" >&2
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: |
+          rm -rf dist
+          python -m build
+
+      - name: Verify built version matches __version__
+        run: |
+          set -euo pipefail
+          init_ver="$(python -c 'import re,pathlib;print(re.search(r"__version__\s*=\s*\"([^\"]+)\"", pathlib.Path("cubesandbox/__init__.py").read_text()).group(1))')"
+          ls dist/
+          test -f "dist/cubesandbox-${init_ver}.tar.gz"
+          test -f "dist/cubesandbox-${init_ver}-py3-none-any.whl"
+
+      - name: Twine check
+        run: python -m twine check --strict dist/*
+
+      - name: Publish to TestPyPI
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.CUBE_PYPI_TOKEN }}
+          skip-existing: true
+
+      - name: Publish to PyPI
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist
+          password: ${{ secrets.CUBE_PYPI_TOKEN }}
+
+      - name: Ensure GitHub Release exists
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Python SDK release. Install with: pip install cubesandbox==${GITHUB_REF_NAME#python-sdk-v}"
+          fi
+
+      - name: Attach distributions to GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
