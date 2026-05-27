@@ -145,3 +145,13 @@ func (a *ipAllocator) Assign(ip net.IP) {
 		a.maxIdx = idx
 	}
 }
+
+// Contains reports whether ip falls within the allocator's CIDR range.
+func (a *ipAllocator) Contains(ip net.IP) bool {
+	ipv4 := ip.To4()
+	if ipv4 == nil {
+		return false
+	}
+	idx := a.ip2Idx(ipv4) - a.startIdx
+	return idx >= 0 && idx < a.size
+}

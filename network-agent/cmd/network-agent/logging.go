@@ -67,9 +67,14 @@ func initLoggerWithDir(logDir, logLevel string, rollNum, rollSizeMB int) error {
 	// Keep stdlib log flags empty so the message body isn't double-prefixed with timestamps.
 	stdlog.SetOutput(&cubeLogStdWriter{})
 	stdlog.SetFlags(0)
+	// Get LocalIP safely
+	localIP := "unknown"
+	if CubeLog.LocalIP != "" {
+		localIP = CubeLog.LocalIP
+	}
 	CubeLog.WithContext(context.Background()).Infof(
 		"network-agent logger initialized: module=%s version=%s localip=%s level=%s logpath=%s",
-		defaultModuleName, resolveVersion(), CubeLog.LocalIP, strings.ToUpper(logLevel), logDir,
+		defaultModuleName, resolveVersion(), localIP, strings.ToUpper(logLevel), logDir,
 	)
 	return nil
 }

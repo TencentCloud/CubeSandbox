@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"slices"
 	"sync"
@@ -69,6 +70,20 @@ func NewLocalService(cfg Config) (Service, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Validate tap_init_num against available IPs in CIDR
+	prefix, err := netip.ParsePrefix(cfg.CIDR)
+	if err != nil {
+		return nil, fmt.Errorf("parse CIDR %q: %w", cfg.CIDR, err)
+	}
+	totalIPs := 1 << (32 - prefix.Bits())
+	availableIPs := totalIPs - 2 // Exclude network and broadcast addresses
+	if cfg.TapInitNum > availableIPs {
+		return nil, fmt.Errorf("tap_init_num(%d) exceeds available IPs in CIDR %s (total: %d, available: %d). "+
+			"Please either: 1) reduce tap_init_num to %d or less, or 2) expand CIDR (recommended: /22 for 1022 IPs, /21 for 2046 IPs)",
+			cfg.TapInitNum, cfg.CIDR, totalIPs, availableIPs, availableIPs)
+	}
+
 	ports, err := newPortAllocator()
 	if err != nil {
 		return nil, err
@@ -351,12 +366,16 @@ func (s *localService) reconcileState(ctx context.Context, state *managedState) 
 	if err := s.ensureHostRoute(); err != nil {
 		return err
 	}
+	sandboxIP := net.ParseIP(state.SandboxIP).To4()
+	if sandboxIP == nil || !s.allocator.Contains(sandboxIP) {
+		return fmt.Errorf("network-agent reconcile skipping sandbox %s: ip %s is outside current CIDR %s", state.SandboxID, state.SandboxIP, s.cfg.CIDR)
+	}
 	if state.tap == nil || state.tap.File == nil {
 		baseTap := state.tap
 		if baseTap == nil {
 			baseTap = &tapDevice{
 				Name:         state.TapName,
-				IP:           net.ParseIP(state.SandboxIP).To4(),
+				IP:           sandboxIP,
 				PortMappings: append([]PortMapping(nil), state.PortMappings...),
 			}
 		} else {
@@ -368,7 +387,7 @@ func (s *localService) reconcileState(ctx context.Context, state *managedState) 
 		}
 		state.tap = tap
 	}
-	s.allocator.Assign(net.ParseIP(state.SandboxIP).To4())
+	s.allocator.Assign(sandboxIP)
 	for _, mapping := range state.PortMappings {
 		s.ports.Assign(uint16(mapping.HostPort))
 	}
@@ -466,6 +485,20 @@ func (s *localService) recover() error {
 	}
 	recovered := make(map[string]struct{}, len(states))
 	for _, tap := range taps {
+		// If the tap's IP is outside the current CIDR range, the tap was
+		// created under a previous CIDR configuration. Destroy it rather
+		// than recovering it into the pool so that new sandboxes never get
+		// an IP from an outdated network segment.
+		if !s.allocator.Contains(tap.IP) {
+			CubeLog.WithContext(context.Background()).Warnf(
+				"network-agent destroying tap with out-of-range IP during recover: name=%s ifindex=%d ip=%s (not in CIDR %s)",
+				tap.Name, tap.Index, tap.IP, s.cfg.CIDR,
+			)
+			s.clearPortMappings(tap)
+			_ = cubevsDelTAPDevice(uint32(tap.Index), tap.IP.To4())
+			_ = destroyTapFunc(tap.Index)
+			continue
+		}
 		s.allocator.Assign(tap.IP)
 		tap.PortMappings = append([]PortMapping(nil), mappingsByIfindex[tap.Index]...)
 		restoredTap, err := restoreTapFunc(tap, s.cfg.MvmMtu, s.cfg.MVMMacAddr, s.cubeDev.Index)
@@ -485,19 +518,30 @@ func (s *localService) recover() error {
 			if managed.PersistMetadata == nil {
 				managed.PersistMetadata = s.persistMetadata(nil, restoredTap.Name, restoredTap.IP.String())
 			}
-			if err := s.reconcileState(context.Background(), managed); err != nil {
-				return err
-			}
-			s.states[managed.SandboxID] = managed
-			recovered[managed.SandboxID] = struct{}{}
+		if err := s.reconcileState(context.Background(), managed); err != nil {
+			CubeLog.WithContext(context.Background()).Warnf("network-agent recover skipping sandbox %s: reconcile failed: %v", managed.SandboxID, err)
+			s.clearPortMappings(restoredTap)
+			_ = cubevsDelTAPDevice(uint32(restoredTap.Index), restoredTap.IP.To4())
+			_ = destroyTapFunc(restoredTap.Index)
+			_ = s.store.Delete(managed.SandboxID)
+			s.allocator.Release(restoredTap.IP)
 			continue
 		}
+		s.states[managed.SandboxID] = managed
+		recovered[managed.SandboxID] = struct{}{}
+		continue
+	}
 		device, inCubeVS := liveCubeVSTapsByIP[restoredTap.IP.String()]
-		if inCubeVS && restoredTap.InUse {
-			managed := buildRecoveredState(restoredTap, &device, restoredTap.PortMappings, s.cfg)
-			if err := s.reconcileState(context.Background(), managed); err != nil {
-				return err
-			}
+	if inCubeVS && restoredTap.InUse {
+		managed := buildRecoveredState(restoredTap, &device, restoredTap.PortMappings, s.cfg)
+		if err := s.reconcileState(context.Background(), managed); err != nil {
+			CubeLog.WithContext(context.Background()).Warnf("network-agent recover skipping sandbox %s: reconcile failed: %v", managed.SandboxID, err)
+			s.clearPortMappings(restoredTap)
+			_ = cubevsDelTAPDevice(uint32(restoredTap.Index), restoredTap.IP.To4())
+			_ = destroyTapFunc(restoredTap.Index)
+			s.allocator.Release(restoredTap.IP)
+			continue
+		}
 			if err := s.store.Save(&managed.persistedState); err != nil {
 				return err
 			}

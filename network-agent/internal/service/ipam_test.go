@@ -258,6 +258,35 @@ func TestIPAllocatorRelease(t *testing.T) {
 	}
 }
 
+func TestIPAllocatorContains(t *testing.T) {
+	a, err := newIPAllocator("10.0.0.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		ip   net.IP
+		want bool
+	}{
+		{"in-range-low", net.ParseIP("10.0.0.0").To4(), true},
+		{"in-range-gateway", net.ParseIP("10.0.0.1").To4(), true},
+		{"in-range-mid", net.ParseIP("10.0.0.128").To4(), true},
+		{"in-range-broadcast", net.ParseIP("10.0.0.255").To4(), true},
+		{"out-of-range-next", net.ParseIP("10.0.1.0").To4(), false},
+		{"out-of-range-prev", net.ParseIP("9.255.255.255").To4(), false},
+		{"out-of-range-different-class", net.ParseIP("192.168.1.146").To4(), false},
+		{"nil-ip", nil, false},
+		{"ipv6", net.ParseIP("::1"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := a.Contains(tt.ip); got != tt.want {
+				t.Errorf("Contains(%v) = %v, want %v", tt.ip, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIPAllocatorConcurrency(t *testing.T) {
 	a, err := newIPAllocator("10.0.0.0/16")
 	if err != nil {
