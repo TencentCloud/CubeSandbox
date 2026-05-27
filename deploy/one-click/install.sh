@@ -123,6 +123,32 @@ generate_cubemaster_config_ports() {
     "${cfg}"
 }
 
+generate_cubemaster_config_cidr() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+
+  local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
+  local sandbox_cidr="${CUBE_SANDBOX_DENY_OUT_SANDBOX_CIDR:-192.168.0.0/18}"
+  local private_a="${CUBE_SANDBOX_DENY_OUT_PRIVATE_A:-10.0.0.0/8}"
+  local cgn="${CUBE_SANDBOX_DENY_OUT_CGN:-100.64.0.0/10}"
+  local private_b="${CUBE_SANDBOX_DENY_OUT_PRIVATE_B:-172.16.0.0/12}"
+
+  ensure_file "${cfg}"
+  sed -i \
+    -e "s|__CUBE_SANDBOX_DENY_OUT_SANDBOX_CIDR__|${sandbox_cidr}|g" \
+    -e "s|__CUBE_SANDBOX_DENY_OUT_PRIVATE_A__|${private_a}|g" \
+    -e "s|__CUBE_SANDBOX_DENY_OUT_CGN__|${cgn}|g" \
+    -e "s|__CUBE_SANDBOX_DENY_OUT_PRIVATE_B__|${private_b}|g" \
+    "${cfg}"
+}
+
+generate_cubelet_config_cidr() {
+  local cfg="${PKG_ROOT}/Cubelet/config/config.toml"
+  local cidr="${CUBE_SANDBOX_CIDR:-192.168.0.0/18}"
+
+  ensure_file "${cfg}"
+  sed -i "s|__CUBE_SANDBOX_CIDR__|${cidr}|g" "${cfg}"
+}
+
 check_hardware_preflight() {
   if [[ ! -e /dev/kvm ]]; then
     log "KVM is not supported or not enabled (/dev/kvm not found)."
@@ -490,8 +516,11 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
   generate_cubemaster_config_ports
+  generate_cubemaster_config_cidr
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
+
+generate_cubelet_config_cidr
 
 select_installed_kernel_vmlinux
 

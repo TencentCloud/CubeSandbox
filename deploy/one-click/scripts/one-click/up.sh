@@ -63,6 +63,9 @@ fi
 
 "${SCRIPT_DIR}/down-local.sh" >/dev/null 2>&1 || true
 
+# Render config file placeholders before starting services
+render_config_placeholders
+
 start_with_pidfile \
   "network-agent" \
   "mkdir -p /tmp/cube \"${NETWORK_AGENT_STATE_DIR}\" && \"${NETWORK_AGENT_BIN}\" --cubelet-config \"${CUBELET_CONFIG}\" --state-dir \"${NETWORK_AGENT_STATE_DIR}\""
