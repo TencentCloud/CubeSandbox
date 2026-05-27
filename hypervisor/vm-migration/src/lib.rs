@@ -113,6 +113,13 @@ pub enum SnapshotType {
     Full,
     /// Incremental snapshot - only saves CoW anonymous pages via pagemap + kpageflags
     Incremental,
+    /// Soft-dirty snapshot - only saves pages written since the previous
+    /// soft-dirty snapshot (true delta), via /proc/self/clear_refs +
+    /// /proc/self/pagemap bit 55. Requires CONFIG_MEM_SOFT_DIRTY=y; on
+    /// kernels without this support the runtime silently falls back to the
+    /// `Incremental` (pagemap_anon) path.
+    #[serde(rename = "soft-dirty")]
+    SoftDirty,
 }
 
 impl std::fmt::Display for SnapshotType {
@@ -120,6 +127,7 @@ impl std::fmt::Display for SnapshotType {
         match self {
             SnapshotType::Full => write!(f, "full"),
             SnapshotType::Incremental => write!(f, "incremental"),
+            SnapshotType::SoftDirty => write!(f, "soft-dirty"),
         }
     }
 }
@@ -131,8 +139,9 @@ impl std::str::FromStr for SnapshotType {
         match s.to_lowercase().as_str() {
             "full" => Ok(SnapshotType::Full),
             "incremental" => Ok(SnapshotType::Incremental),
+            "soft-dirty" => Ok(SnapshotType::SoftDirty),
             _ => Err(format!(
-                "Invalid snapshot type: '{}'. Valid values are 'full' or 'incremental'",
+                "Invalid snapshot type: '{}'. Valid values are 'full', 'incremental' or 'soft-dirty'",
                 s
             )),
         }

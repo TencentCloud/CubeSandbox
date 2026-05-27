@@ -96,3 +96,29 @@ snapshot earlier.
 ## Limitations
 
 VFIO devices and Intel SGX are out of scope.
+
+## Snapshot types
+
+The `--snapshot-type` flag of the `snapshot` and `pause2snapshot` ch-remote
+subcommands selects how guest RAM is captured. The other snapshot artifacts
+(`config.json`, `state.json`) are unaffected.
+
+| Type | What gets saved to `memory-ranges` | When to use |
+|------|------------------------------------|-------------|
+| `full` | Every byte of guest RAM. | First snapshot after VM start, or any time you need a self-contained image. |
+| `incremental` | Only **CoW anonymous** pages (pages the guest has written to since the original `MAP_PRIVATE` mmap was set up). Detected via `/proc/self/pagemap` + `/proc/kpageflags`. | Cheap "second" snapshot when a base file already exists. The set of saved pages monotonically grows over the VM's lifetime — every page ever touched is in the delta. |
+| `soft-dirty` | Only the pages written **since the previous `soft-dirty` snapshot** (a true delta). Detected via `/proc/self/clear_refs` + pagemap bit 55. | Repeated incremental snapshots on a long-running VM, where most pages are not touched between cycles. |
+
+### Soft-dirty details
+
+- The first `soft-dirty` snapshot taken after VM start writes a full base
+  image and arms the kernel tracker.
+- Each subsequent `soft-dirty` snapshot writes only the pages whose PTE has
+  been marked soft-dirty since the previous call, then re-arms the tracker.
+- Requires the host kernel to be built with `CONFIG_MEM_SOFT_DIRTY=y`. On
+  kernels without this support, `soft-dirty` requests are silently downgraded
+  to the `incremental` (pagemap_anon) path and a debug log is emitted.
+- A runtime failure of the `clear_refs` write (e.g. seccomp blocking it)
+  also degrades subsequent snapshots to `incremental` for the rest of the
+  VM's lifetime, with a warning log.
+
