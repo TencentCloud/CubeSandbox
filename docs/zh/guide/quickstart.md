@@ -40,7 +40,7 @@ sudo su root
 
 ### 安装 PVM 宿主机内核
 
-前往 [CubeSandbox GitHub Releases](https://github.com/TencentCloud/CubeSandbox/releases) 页面，打开最新包含 PVM 内核附件的 Release，**在对应附件上右键 → 复制链接地址**，然后用 `wget` 下载。
+前往 [CubeSandbox Releases](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases) 页面，打开最新包含 PVM 内核附件的 Release，**在对应附件上右键 → 复制链接地址**，然后用 `wget` 下载。
 
 根据你的 Linux 发行版选择对应格式：
 
