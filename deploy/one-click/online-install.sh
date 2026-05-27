@@ -140,7 +140,41 @@ check_early_preflight() {
     exit 3
   fi
 
-  # 8. Check deployment role early and check Docker/DNS installability (for control role)
+  # 8. cgroup v2 'cpu' controller check (mirrors check_cgroup_cpu_preflight in install.sh)
+  local cgroot="/sys/fs/cgroup"
+  local cg_fstype
+  cg_fstype="$(stat -fc %T "${cgroot}" 2>/dev/null || echo unknown)"
+  if [[ "${cg_fstype}" == "cgroup2fs" ]]; then
+    local cg_controllers=""
+    if [[ -r "${cgroot}/cgroup.controllers" ]]; then
+      cg_controllers="$(cat "${cgroot}/cgroup.controllers" 2>/dev/null || true)"
+    fi
+    if ! grep -qw cpu <<<"${cg_controllers}"; then
+      echo "[online-install] ERROR: Kernel cgroup v2 does not expose the 'cpu' controller (cgroup.controllers='${cg_controllers:-<empty>}')." >&2
+      echo "[online-install] cubelet cannot set CPU quotas without it." >&2
+      echo "[online-install] See: https://github.com/TencentCloud/CubeSandbox/issues/366" >&2
+      exit 3
+    fi
+    local cg_subtree=""
+    if [[ -r "${cgroot}/cgroup.subtree_control" ]]; then
+      cg_subtree="$(cat "${cgroot}/cgroup.subtree_control" 2>/dev/null || true)"
+    fi
+    if ! grep -qw cpu <<<"${cg_subtree}"; then
+      echo "[online-install] cgroup v2 'cpu' controller not enabled on ${cgroot}/cgroup.subtree_control; trying to enable it" >&2
+      if ! printf '+cpu\n' >"${cgroot}/cgroup.subtree_control" 2>/dev/null; then
+        echo "[online-install] ERROR: Failed to enable the cgroup v2 'cpu' controller on ${cgroot}/cgroup.subtree_control." >&2
+        echo "[online-install] On Ubuntu / Debian this is usually caused by 'multipathd' (or another service) running real-time threads under the root cgroup, which blocks '+cpu' with 'Invalid argument'." >&2
+        echo "[online-install] Quick fix:" >&2
+        echo "[online-install]     systemctl disable --now multipathd.service multipathd.socket" >&2
+        echo "[online-install]     echo +cpu > ${cgroot}/cgroup.subtree_control" >&2
+        echo "[online-install] Full repro and fix: https://github.com/TencentCloud/CubeSandbox/issues/366" >&2
+        exit 3
+      fi
+      echo "[online-install] enabled '+cpu' on ${cgroot}/cgroup.subtree_control" >&2
+    fi
+  fi
+
+  # 9. Check deployment role early and check Docker/DNS installability (for control role)
   local deploy_role="${ONE_CLICK_DEPLOY_ROLE:-control}"
   case "${deploy_role}" in
     control|compute) ;;

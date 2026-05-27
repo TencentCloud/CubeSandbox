@@ -201,6 +201,49 @@ check_cubelet_fs_preflight() {
   fi
 }
 
+check_cgroup_cpu_preflight() {
+  local cgroot="/sys/fs/cgroup"
+  local fstype
+  fstype="$(stat -fc %T "${cgroot}" 2>/dev/null || echo unknown)"
+
+  # cgroup v1 systems still work via the v1 handle in cubelet; only validate
+  # cgroup v2 hosts here (which is what every recent distro defaults to).
+  if [[ "${fstype}" != "cgroup2fs" ]]; then
+    return 0
+  fi
+
+  local controllers=""
+  if [[ -r "${cgroot}/cgroup.controllers" ]]; then
+    controllers="$(cat "${cgroot}/cgroup.controllers" 2>/dev/null || true)"
+  fi
+  if ! grep -qw cpu <<<"${controllers}"; then
+    die "Kernel cgroup v2 does not expose the 'cpu' controller (cgroup.controllers='${controllers:-<empty>}').
+  cubelet cannot set CPU quotas without it.
+  See: https://github.com/TencentCloud/CubeSandbox/issues/366"
+  fi
+
+  local subtree=""
+  if [[ -r "${cgroot}/cgroup.subtree_control" ]]; then
+    subtree="$(cat "${cgroot}/cgroup.subtree_control" 2>/dev/null || true)"
+  fi
+  if grep -qw cpu <<<"${subtree}"; then
+    return 0
+  fi
+
+  log "cgroup v2 'cpu' controller not enabled on ${cgroot}/cgroup.subtree_control; trying to enable it"
+  if printf '+cpu\n' >"${cgroot}/cgroup.subtree_control" 2>/dev/null; then
+    log "enabled '+cpu' on ${cgroot}/cgroup.subtree_control"
+    return 0
+  fi
+
+  die "Failed to enable the cgroup v2 'cpu' controller on ${cgroot}/cgroup.subtree_control.
+  On Ubuntu / Debian this is usually caused by 'multipathd' (or another service) running real-time threads under the root cgroup, which blocks '+cpu' with 'Invalid argument'.
+  Quick fix:
+    systemctl disable --now multipathd.service multipathd.socket
+    echo +cpu > ${cgroot}/cgroup.subtree_control
+  Full repro and fix: https://github.com/TencentCloud/CubeSandbox/issues/366"
+}
+
 check_install_preflight() {
   # install.sh itself.
   require_cmd tar
@@ -374,6 +417,7 @@ require_root
 # to ensure we fail fast before installing or modifying any local system packages.
 check_hardware_preflight
 check_cubelet_fs_preflight
+check_cgroup_cpu_preflight
 
 CUBE_SANDBOX_NODE_IP="$(detect_node_ip)"
 export CUBE_SANDBOX_NODE_IP
