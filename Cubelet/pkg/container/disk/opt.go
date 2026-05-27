@@ -16,6 +16,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
@@ -89,6 +90,9 @@ func getPCIIDByDiskID(diskId string) (string, error) {
 }
 
 func GetPCIIDByDiskUUID(diskUuid string) (string, error) {
+	if err := pathutil.ValidateUUID(diskUuid); err != nil {
+		return "", fmt.Errorf("invalid disk uuid: %w", err)
+	}
 	if stdout, stderr, err := utils.ExecBin(config.GetCommon().GetBDFByUuidCmd,
 		[]string{diskUuid}, config.GetCommon().CommandTimeout); err != nil {
 		return "", fmt.Errorf("%v, %v, %v", err, string(stdout), string(stderr))

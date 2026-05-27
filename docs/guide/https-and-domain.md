@@ -56,6 +56,39 @@ With this in place, the `domain` field in API responses will return `your.domain
 
 ---
 
+## Path-Based Quick Access (No DNS / Cert)
+
+CubeProxy also accepts a **path-based** form that routes by URL path instead of `Host` header. It is intended for local demos, internal ad-hoc sharing, or any environment where wildcard DNS and TLS are inconvenient to set up.
+
+```
+http://<cube-proxy-host>:<http-port>/sandbox/<sandbox-id>/<container-port>/<rest>?<query>
+```
+
+For example, a sandbox `abc123` exposing port `49999` reachable through CubeProxy at `10.0.0.5:80`:
+
+```
+http://10.0.0.5/sandbox/abc123/49999/
+http://10.0.0.5/sandbox/abc123/49999/health
+http://10.0.0.5/sandbox/abc123/49999/api/v1/items?limit=10
+```
+
+CubeProxy strips the `/sandbox/<id>/<port>` prefix before forwarding the request, so the upstream sandbox application sees the URI it would normally see at the root. WebSocket upgrade is supported (the proxy preserves the `Upgrade` / `Connection` headers in this location).
+
+To help apps cooperate with the prefix, CubeProxy also:
+
+- Sets `X-Forwarded-Prefix: /sandbox/<id>/<port>` on the upstream request.
+- Rewrites root-relative `Location` headers in responses back under `/sandbox/<id>/<port>/...` (so server-side redirects to e.g. `/login` keep working).
+- Scopes upstream cookies sent with `Path=/` to `Path=/sandbox/<id>/<port>/` to avoid leaking across sandboxes that share the same CubeProxy host.
+
+When to use which:
+
+- **Host-based mode** (`<port>-<id>.<domain>`): preferred for SPAs and any frontend that loads assets via root-absolute paths (e.g. `/static/app.js`). CubeProxy does not rewrite HTML bodies, so those absolute paths would otherwise miss the prefix.
+- **Path-based mode** (`/sandbox/<id>/<port>/...`): preferred for HTTP APIs, simple HTML, quick previews, and one-off sharing where you do not want to manage DNS or certificates.
+
+Both modes coexist on every CubeProxy instance and share the same Redis-backed routing metadata; no additional configuration is required to enable the path form.
+
+---
+
 ## HTTPS Certificate Configuration
 
 CubeProxy serves both **HTTPS (port 443) and HTTP (port 80)** out of the box. The E2B SDK uses HTTPS by default. The one-click install pre-installs a `cube.app` test certificate so you can try HTTPS immediately.

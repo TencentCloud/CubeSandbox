@@ -18,7 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const hostDirBasePath = "/data/cubelet/hostdir"
+var hostDirBasePath = "/data/cubelet/hostdir"
 
 type HostDirBackendInfo struct {
 	VolumeName string `json:"volume_name"`

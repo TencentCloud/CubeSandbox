@@ -24,7 +24,7 @@ use containerd_shim::protos::protobuf::MessageDyn;
 use containerd_shim::{Error, Result};
 use cube_hypervisor::config::RestoreConfig;
 use cube_hypervisor::vm_config::{DeviceConfig, FsConfig};
-use cube_hypervisor::VmRemoveDeviceData;
+use cube_hypervisor::{SnapshotType, VmRemoveDeviceData};
 use oci_spec::runtime::{LinuxResources, Process, Spec};
 use protoc::{agent, agent_ttrpc, health, health_ttrpc};
 use std::collections::{HashMap, HashSet};
@@ -43,7 +43,7 @@ use tokio::time::{sleep, Duration};
 
 use super::device;
 use super::disk::Disk;
-use super::pmem::{self, Pmem};
+use super::pmem::Pmem;
 //use tokio_uring::fs::UnixStream;
 
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
@@ -136,7 +136,38 @@ impl SandBox {
 
     pub fn init(&mut self, spec: Spec) -> CResult<()> {
         self.spec = spec;
-        self.conf = config::Config::new(self.spec.annotations())?;
+        let annotations = self.spec.annotations();
+        self.conf = config::Config::new(annotations)?;
+        if self.conf.app_snapshot_restore {
+            let snapshot_base = annotations
+                .as_ref()
+                .and_then(|anno| anno.get(config::ANNO_SNAPSHOT_BASE))
+                .map(|value| value.trim())
+                .unwrap_or("");
+            let snapshot_memory_vol_url = annotations
+                .as_ref()
+                .and_then(|anno| anno.get(config::ANNO_SNAPSHOT_MEMORY_VOL_URL))
+                .map(|value| value.trim())
+                .unwrap_or("");
+            if snapshot_memory_vol_url.is_empty() {
+                let mut annotation_keys = annotations
+                    .as_ref()
+                    .map(|anno| anno.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                annotation_keys.sort();
+                return Err(format!(
+                    "app snapshot restore requires fresh memory_vol_url annotation (cube.vm.snapshot.memory_vol_url); upstream must resolve the template memory volume for this start, snapshot_base:{}, annotation_keys:{:?}",
+                    snapshot_base, annotation_keys
+                ));
+            } else {
+                infof!(
+                    self.log,
+                    "snapshot restore init using snapshot_base:{}, memory_vol_url:{}",
+                    snapshot_base,
+                    snapshot_memory_vol_url
+                );
+            }
+        }
         let mut vm_dir = PathBuf::from(utils::VM_PATH);
         vm_dir.push(self.id.clone());
         stdfs::create_dir_all(vm_dir).map_err(|e| format!("Mkdir vm run dir failed:{}", e))?;
@@ -178,7 +209,7 @@ impl SandBox {
         }
         false
     }
-    async fn disconnect_agent(&mut self) -> CResult<()> {
+    async fn disconnect_agent(&mut self, from_rollback: bool) -> CResult<()> {
         //stop monitor
 
         if let Some(tx) = self.tx_monitor_exited.as_ref() {
@@ -202,7 +233,12 @@ impl SandBox {
         for (_, c) in containers.iter_mut() {
             c.unset_client().await;
         }
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if !from_rollback {
+            // Yield briefly so aborted monitor / oom tasks can be scheduled and
+            // drop their cloned `Arc<Client>` before we check ref counts below.
+            // Empirically 50ms is enough for the tokio runtime to make progress.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         if let Some(client) = self.client.take() {
             if Arc::strong_count(&client) != 1 {
                 errf!(
@@ -219,8 +255,8 @@ impl SandBox {
             if Arc::strong_count(&conn) != 1 {
                 errf!(self.log, "conn ref count is {}", Arc::strong_count(&conn));
                 //return Err(format!("disconnect_agent: conn ref count is not 1").into());
-                drop(conn)
             }
+            drop(conn)
         }
         Ok(())
     }
@@ -313,8 +349,6 @@ impl SandBox {
 
             infof!(self.log, "found pmem:{p:?}");
             storages.push(ps.clone());
-
-           
         }
 
         //disk
@@ -827,6 +861,7 @@ impl SandBox {
             self.conf.vm_res.snap_memory,
         );
         infof!(self.log, "snapshot dir:{}", snapshot.clone());
+        let restore_memory_vol_url = self.conf.snapshot_memory_vol_url.clone();
         let mut fss = vec![];
         if let Some(fs) = self.conf.fs.as_ref() {
             let f = Utils::restore_fs_configs(fs);
@@ -846,6 +881,7 @@ impl SandBox {
             disks: Some(disks),
             pmem: Some(pmems),
             vsock: Some(vsock),
+            memory_vol_url: restore_memory_vol_url,
             ..Default::default()
         };
 
@@ -1133,10 +1169,14 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn create_snapshot(&self, snapshot_path: &str) -> CResult<()> {
+    pub async fn create_snapshot(
+        &self,
+        snapshot_path: &str,
+        snapshot_type: SnapshotType,
+    ) -> CResult<()> {
         let ch = self.ch.as_ref().unwrap().lock().await;
         ch.pause_vm().await?;
-        ch.snapshot_vm(format!("file://{}", snapshot_path).as_str())
+        ch.snapshot_vm(format!("file://{}", snapshot_path).as_str(), snapshot_type)
             .await?;
         ch.resume_vm().await
     }
@@ -1163,15 +1203,12 @@ impl SandBox {
             *state = SandBoxState::Paused;
         }
 
-        self.disconnect_agent().await?;
+        self.disconnect_agent(false).await?;
 
         let ch = self.ch.as_mut().unwrap().lock().await;
 
         let snapshot_path = format!("{}/{}", PAUSE_VM_SNAPSHOT_BASE, self.id);
-        let _ = std::fs::remove_dir_all(snapshot_path.clone());
-        if let Err(e) = std::fs::create_dir_all(snapshot_path.clone()) {
-            return Err(format!("mkdir snapshot dir failed:{}", e).into());
-        }
+        recreate_dir(&snapshot_path, "mkdir snapshot dir failed")?;
 
         ch.pause_vm_cube(format!("file://{}", snapshot_path).as_str())
             .await?;
@@ -1185,20 +1222,90 @@ impl SandBox {
     }
 
     pub async fn resume_vm(&mut self) -> CResult<()> {
-        //modify state
+        self.resume_vm_with_config(None).await
+    }
+
+    /// Rollback: delete the current VM, then resume from a caller-supplied
+    /// snapshot. Uses `VmDelete` instead of a temporary checkpoint snapshot,
+    /// which avoids the I/O cost of writing VM memory to disk.
+    ///
+    /// If the target restore fails the VM is left deleted and the error is
+    /// returned to the caller (no fallback is possible without a checkpoint).
+    ///
+    /// * `target_config` – `RestoreConfig` pointing to the desired snapshot.
+    ///   `source_url` is mandatory; `disks`, `memory_vol_url`, etc. carry the
+    ///   new backend-file descriptors.
+    pub async fn rollback_vm(&mut self, target_config: RestoreConfig) -> CResult<()> {
+        if target_config.source_url.as_os_str().is_empty() {
+            return Err(format!("rollback restore_config.source_url is empty").into());
+        }
+
         {
             let mut state = self.state.lock().await;
+            if *state != SandBoxState::Normal {
+                return Err(format!("sandbox not running, cannot rollback").into());
+            }
+            if self.pause_vm_forbidding().await {
+                return Err(format!("sandbox pause forbidding, terminate exec tasks first").into());
+            }
+            *state = SandBoxState::Paused;
+        }
+
+        // disconnect_agent aborts the OLD monitor_vm / watch_oom tasks
+        // before we delete the VM out from under them.
+        self.disconnect_agent(true).await?;
+
+        // Delete the current VM in place of a checkpoint snapshot.
+        // VmDelete shuts the VM down and destroys its object; the VMM process
+        // stays alive and can immediately host the restored VM.
+        if let Err(e) = self.delete_vm().await {
+            let mut state = self.state.lock().await;
+            *state = SandBoxState::Normal;
+            return Err(e);
+        }
+
+        // VmDelete pushes a VmShutdown event into the hypervisor's event
+        // queue. The fresh monitor_vm spawned by resume_vm_with_config
+        // would otherwise consume that stale event on its first iteration
+        // and treat the freshly-restored VM as crashed: aborted=true →
+        // SandBoxState::Exited → notify_vm_shutdown to all containers,
+        // poisoning the next pause/resume request with "sandbox not in
+        // normal state". Drain everything left in the queue here.
+        if let Some(ch_arc) = self.ch.as_ref() {
+            let ch = ch_arc.lock().await;
+            while let Ok(ev) = ch.try_wait_notify() {
+                infof!(self.log, "rollback: drained stale hypervisor event {:?}", ev);
+            }
+        }
+
+        self.resume_vm_with_config(Some(target_config)).await
+    }
+
+    async fn delete_vm(&mut self) -> CResult<()> {
+        let ch = self.ch.as_mut().unwrap().lock().await;
+        ch.delete_vm().await
+    }
+
+    async fn resume_vm_with_config(&mut self, config: Option<RestoreConfig>) -> CResult<()> {
+        {
+            let state = self.state.lock().await;
             if *state != SandBoxState::Paused {
                 return Err(format!("sandbox not paused").into());
             };
-            *state = SandBoxState::Normal;
         }
         //resume vm
         {
             let ch = self.ch.as_mut().unwrap().lock().await;
-            let resume_path = format!("{}/{}", PAUSE_VM_SNAPSHOT_BASE, self.id);
-            ch.resume_vm_cube(format!("file://{}", resume_path).as_str())
-                .await?;
+            match config {
+                Some(restore_config) => {
+                    ch.resume_vm_cube_with_config(restore_config).await?;
+                }
+                None => {
+                    let resume_path = format!("{}/{}", PAUSE_VM_SNAPSHOT_BASE, self.id);
+                    ch.resume_vm_cube(format!("file://{}", resume_path).as_str())
+                        .await?;
+                }
+            }
         }
 
         self.connect_agent().await?;
@@ -1226,8 +1333,21 @@ impl SandBox {
         self.tx_monitor_exited = Some(sender);
         self.monitor_handle = Some(Arc::new(handle));
 
+        {
+            let mut state = self.state.lock().await;
+            *state = SandBoxState::Normal;
+        }
+
         Ok(())
     }
+}
+
+fn recreate_dir(path: &str, context: &str) -> CResult<()> {
+    let _ = std::fs::remove_dir_all(path);
+    if let Err(e) = std::fs::create_dir_all(path) {
+        return Err(format!("{}:{}", context, e).into());
+    }
+    Ok(())
 }
 
 fn normalize_dns_for_agent(entry: &str) -> CResult<String> {

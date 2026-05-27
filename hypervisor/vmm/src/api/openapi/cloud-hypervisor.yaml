@@ -1138,6 +1138,9 @@ components:
       properties:
         destination_url:
           type: string
+        memory_vol_url:
+          type: string
+          description: Optional existing memory blob path for storing memory range data on a separate volume. Accepts /dev/... and file:///dev/... forms.
 
     VmCoredumpData:
       type: object
@@ -1171,6 +1174,9 @@ components:
         dirty_log:
           type: boolean
           default: false
+        memory_vol_url:
+          type: string
+          description: Optional existing memory blob path for reading memory range data from a separate volume. Accepts /dev/... and file:///dev/... forms.
 
     ReceiveMigrationData:
       required:

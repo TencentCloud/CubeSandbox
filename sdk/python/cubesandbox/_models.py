@@ -4,47 +4,46 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 
 @dataclass
 class Logs:
-    stdout: List[str] = field(default_factory=list)
-    stderr: List[str] = field(default_factory=list)
+    stdout: list[str] = field(default_factory=list)
+    stderr: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ExecutionError:
     name: str
     value: str
-    traceback: List[str] = field(default_factory=list)
+    traceback: list[str] = field(default_factory=list)
 
 
 @dataclass
 class Result:
-    text: Optional[str] = None
-    html: Optional[str] = None
-    markdown: Optional[str] = None
-    svg: Optional[str] = None
-    png: Optional[str] = None
-    jpeg: Optional[str] = None
-    pdf: Optional[str] = None
-    latex: Optional[str] = None
-    json_data: Optional[dict] = None
-    javascript: Optional[str] = None
+    text: str | None = None
+    html: str | None = None
+    markdown: str | None = None
+    svg: str | None = None
+    png: str | None = None
+    jpeg: str | None = None
+    pdf: str | None = None
+    latex: str | None = None
+    json: dict | None = None
+    javascript: str | None = None
     is_main_result: bool = False
-    extra: Optional[dict] = None
+    extra: dict | None = None
 
 
 @dataclass
 class Execution:
-    results: List[Result] = field(default_factory=list)
+    results: list[Result] = field(default_factory=list)
     logs: Logs = field(default_factory=Logs)
-    error: Optional[ExecutionError] = None
-    execution_count: Optional[int] = None
+    error: ExecutionError | None = None
+    execution_count: int | None = None
 
     @property
-    def text(self) -> Optional[str]:
+    def text(self) -> str | None:
         """Text of the main result (last expression value)."""
         for r in self.results:
             if r.is_main_result:
@@ -53,6 +52,20 @@ class Execution:
 
     def __repr__(self) -> str:
         return f"Execution(text={self.text!r}, error={self.error})"
+
+
+@dataclass
+class SnapshotInfo:
+    """Metadata returned by snapshot-related APIs."""
+    snapshot_id: str
+    names: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SnapshotInfo":
+        return cls(
+            snapshot_id=data.get("snapshotID", ""),
+            names=data.get("names") or [],
+        )
 
 
 @dataclass

@@ -6,6 +6,7 @@ pub use vmm::api::*;
 pub use vmm::config;
 pub use vmm::seccomp_filters::*;
 pub use vmm::vm_config;
+pub use vmm::{SnapshotConfig, SnapshotType};
 
 use chrono::Local;
 use libc::{EFD_NONBLOCK, SIGSYS, SIGTERM};

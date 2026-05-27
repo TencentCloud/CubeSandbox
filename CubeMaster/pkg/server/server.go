@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
@@ -75,6 +76,7 @@ func (s *internalHttp) registerHandlers() {
 	r := s.router
 
 	r.Use(middleware.MiddlewareLogging)
+	r.Handle("/metrics", promhttp.Handler()).Methods(http.MethodGet)
 
 	notifyGroup := r.PathPrefix(notify.NotifyURI()).Subrouter()
 	notifyGroup.HandleFunc(notify.HostChangeNotifyAction, notify.HttpHandler).Methods(http.MethodPost)
@@ -88,6 +90,11 @@ func (s *internalHttp) registerHandlers() {
 	cubeGroup.HandleFunc(cube.SandboxExecAction, cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.SandboxUpdateAction, cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.SandboxCommitAction, cube.HttpHandler).Methods(http.MethodPost)
+	cubeGroup.HandleFunc(cube.SandboxRollbackAction, cube.HttpHandler).Methods(http.MethodPost)
+	cubeGroup.HandleFunc(cube.SandboxAction+"/{sandbox_id}/rollback", cube.HttpHandler).Methods(http.MethodPost)
+	cubeGroup.HandleFunc(cube.SnapshotAction, cube.HttpHandler).Methods(http.MethodGet, http.MethodPost)
+	cubeGroup.HandleFunc(cube.SnapshotAction+"/{snapshot_id}", cube.HttpHandler).Methods(http.MethodGet, http.MethodDelete)
+	cubeGroup.HandleFunc(cube.OperationAction+"/{operation_id}", cube.HttpHandler).Methods(http.MethodGet)
 	cubeGroup.HandleFunc(cube.TemplateAction, cube.HttpHandler).Methods(http.MethodGet, http.MethodPost, http.MethodDelete)
 	cubeGroup.HandleFunc(cube.TemplateRedoAction, cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.TemplateBuildStatusAction+"/{build_id}/status", cube.HttpHandler).Methods(http.MethodGet)

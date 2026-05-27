@@ -94,6 +94,8 @@ func init() {
 			}
 			l.HostId = identity.InstanceID
 
+			initPrometheusMetrics(l.register, l.workflowEngine)
+
 			rt := &CubeLog.RequestTrace{
 				Action:    "Metric",
 				Timestamp: time.Time{},

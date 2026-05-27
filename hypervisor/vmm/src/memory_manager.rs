@@ -6,7 +6,8 @@
 use crate::coredump::{
     CoredumpMemoryRegion, CoredumpMemoryRegions, DumpState, GuestDebuggableError,
 };
-use crate::migration::url_to_path;
+use crate::migration::{memory_blob_to_path, url_to_path};
+use crate::pagemap_anon::filter_memory_ranges_by_pagemap_anon;
 #[cfg(target_arch = "x86_64")]
 use crate::vm_config::SgxEpcConfig;
 use crate::vm_config::{HotplugMethod, MemoryConfig, MemoryZoneConfig};
@@ -34,7 +35,7 @@ use std::io::{self, Seek, SeekFrom};
 use std::ops::Deref;
 use std::os::fd::AsFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::{Arc, Barrier, Mutex};
 use tracer::trace_scoped;
@@ -52,7 +53,7 @@ use vm_memory::{
 };
 use vm_migration::{
     protocol::MemoryRange, protocol::MemoryRangeTable, Migratable, MigratableError, Pausable,
-    Snapshot, SnapshotDataSection, Snapshottable, Transportable,
+    Snapshot, SnapshotConfig, SnapshotDataSection, SnapshotType, Snapshottable, Transportable,
 };
 
 pub const MEMORY_MANAGER_ACPI_SIZE: usize = 0x18;
@@ -60,6 +61,115 @@ pub const MEMORY_MANAGER_ACPI_SIZE: usize = 0x18;
 const DEFAULT_MEMORY_ZONE: &str = "mem0";
 
 const SNAPSHOT_FILENAME: &str = "memory-ranges";
+
+struct MemorySnapshotFile {
+    path: PathBuf,
+    external: bool,
+}
+
+impl MemorySnapshotFile {
+    fn from_snapshot_url(
+        snapshot_url: &str,
+        memory_vol_url: Option<&str>,
+    ) -> result::Result<Self, MigratableError> {
+        if let Some(memory_vol_url) = memory_vol_url {
+            Ok(Self {
+                path: memory_blob_to_path(memory_vol_url)?,
+                external: true,
+            })
+        } else {
+            let mut path = url_to_path(snapshot_url)?;
+            path.push(SNAPSHOT_FILENAME);
+            Ok(Self {
+                path,
+                external: false,
+            })
+        }
+    }
+
+    fn open_read(&self) -> io::Result<File> {
+        OpenOptions::new().read(true).open(&self.path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn is_external(&self) -> bool {
+        self.external
+    }
+
+    fn open_read_write(&self) -> result::Result<File, MigratableError> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.path)
+            .map_err(|e| MigratableError::MigrateSend(e.into()))
+    }
+
+    fn open_for_fresh_write(&self) -> result::Result<File, MigratableError> {
+        if self.external {
+            return self.open_read_write();
+        }
+
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .truncate(true)
+            .open(&self.path)
+            .map_err(|e| MigratableError::MigrateSend(e.into()))
+    }
+}
+
+#[cfg(test)]
+mod memory_snapshot_file_tests {
+    use super::{MemorySnapshotFile, SNAPSHOT_FILENAME};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("ch-memory-snapshot-{}-{}", name, nanos))
+    }
+
+    #[test]
+    fn default_snapshot_target_uses_memory_ranges_file() {
+        let dir_path = unique_temp_path("dir");
+        fs::create_dir_all(&dir_path).unwrap();
+        let snapshot_url = format!("file://{}", dir_path.display());
+
+        let target = MemorySnapshotFile::from_snapshot_url(&snapshot_url, None).unwrap();
+        assert!(!target.external);
+        assert_eq!(target.path, dir_path.join(SNAPSHOT_FILENAME));
+        target.open_for_fresh_write().unwrap();
+        assert!(target.path.exists());
+
+        fs::remove_dir_all(dir_path).unwrap();
+    }
+
+    #[test]
+    fn external_snapshot_target_keeps_existing_file_intact() {
+        let file_path = unique_temp_path("external");
+        fs::write(&file_path, b"existing-memory").unwrap();
+        let original_len = fs::metadata(&file_path).unwrap().len();
+
+        let target = MemorySnapshotFile::from_snapshot_url(
+            "file:///unused",
+            Some(file_path.to_str().unwrap()),
+        )
+        .unwrap();
+        assert!(target.external);
+        target.open_for_fresh_write().unwrap();
+
+        assert_eq!(fs::metadata(&file_path).unwrap().len(), original_len);
+        fs::remove_file(file_path).unwrap();
+    }
+}
 
 #[cfg(target_arch = "x86_64")]
 const X86_64_IRQ_BASE: u32 = 5;
@@ -1189,18 +1299,19 @@ impl MemoryManager {
         source_url: Option<&str>,
         prefault: bool,
         phys_bits: u8,
+        memory_vol_url: Option<&str>,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         if let Some(source_url) = source_url {
-            let mut memory_file_path = url_to_path(source_url).map_err(Error::Restore)?;
-            memory_file_path.push(String::from(SNAPSHOT_FILENAME));
+            let memory_file_target =
+                MemorySnapshotFile::from_snapshot_url(source_url, memory_vol_url)
+                    .map_err(Error::Restore)?;
 
             let fast_restore = Self::support_fast_restore_check(config);
             let memory_file = if fast_restore {
                 info!("restore non-shared map, speed up restore by share map memory file");
                 Some(
-                    OpenOptions::new()
-                        .read(true)
-                        .open(memory_file_path.clone())
+                    memory_file_target
+                        .open_read()
                         .map_err(Error::SnapshotOpen)?,
                 )
             } else {
@@ -1229,7 +1340,7 @@ impl MemoryManager {
                 info!("restore shared map, fall back to slow restore");
                 mm.lock()
                     .unwrap()
-                    .fill_saved_regions(memory_file_path, mem_snapshot.memory_ranges)?;
+                    .fill_saved_regions(memory_file_target.path, mem_snapshot.memory_ranges)?;
             }
 
             Ok(mm)
@@ -2157,6 +2268,121 @@ impl MemoryManager {
 
         Ok(())
     }
+
+    /// Save a pagemap_anon incremental snapshot.
+    ///
+    /// This method creates a full snapshot by merging the base snapshot with
+    /// pagemap_anon-filtered anonymous pages (CoW pages) from current VM memory.
+    /// Only pages that Guest actually wrote to (triggering Copy-on-Write from
+    /// the MAP_PRIVATE mmap) are saved from guest memory; non-anonymous pages
+    /// When a base snapshot exists at the destination, the file is opened in
+    /// read-write mode and only the anonymous (CoW) pages are overwritten;
+    /// non-anonymous regions keep their original content from the base.
+    ///
+    /// When no base snapshot exists (cold start), a new file is created and
+    /// only anonymous pages are written; non-anonymous regions are left as
+    /// holes (zeros) in the pre-allocated file.
+    ///
+    /// The resulting snapshot file is in the same format as a regular full
+    /// snapshot and can be restored without any special handling.
+    fn send_pagemap_anon_memory(
+        &self,
+        destination_url: &str,
+        memory_vol_url: &Option<String>,
+    ) -> result::Result<(), MigratableError> {
+        if self.snapshot_memory_ranges.is_empty() {
+            return Ok(());
+        }
+
+        let guest_memory = self.guest_memory.memory();
+
+        // Use pagemap + kpageflags to filter memory ranges, keeping only anonymous pages (CoW)
+        let (filtered_ranges, stats) =
+            filter_memory_ranges_by_pagemap_anon(&guest_memory, &self.snapshot_memory_ranges)
+                .map_err(|e| {
+                    MigratableError::MigrateSend(anyhow!(
+                        "Failed to filter memory with pagemap_anon: {}",
+                        e
+                    ))
+                })?;
+
+        info!(
+            "PagemapAnon snapshot: total={} bytes ({} pages), anon={} bytes ({} pages), savings={:.1}%",
+            stats.total_bytes,
+            stats.total_pages,
+            stats.saved_bytes,
+            stats.anon_pages,
+            stats.savings_percentage()
+        );
+
+        let memory_file_target =
+            MemorySnapshotFile::from_snapshot_url(destination_url, memory_vol_url.as_deref())?;
+        if !memory_file_target.path().exists() {
+            return Err(MigratableError::MigrateSend(anyhow!(
+                "Base snapshot file not found at {:?}, incremental (pagemap_anon) snapshot requires an existing base file",
+                memory_file_target.path()
+            )));
+        }
+
+        info!(
+            "Base snapshot found at {:?}, overwriting anonymous pages in-place",
+            memory_file_target.path()
+        );
+        let memory_file = memory_file_target.open_read_write()?;
+
+        // Build a GPA-to-file-offset mapping for calculating offsets.
+        let mut gpa_to_file_offset: Vec<(u64, u64, u64)> = Vec::new();
+        let mut offset = 0_u64;
+        for range in self.snapshot_memory_ranges.regions() {
+            gpa_to_file_offset.push((range.gpa, range.length, offset));
+            offset += range.length;
+        }
+
+        // Write only anonymous pages to the snapshot file.
+        // With a base, non-anon regions already have the correct content.
+        // Without a base, non-anon regions are zeros (sparse holes).
+        for range in filtered_ranges.regions() {
+            let file_off =
+                Self::calculate_file_offset_for_gpa(range.gpa, range.length, &gpa_to_file_offset)?;
+            self.save_range_to_file(&memory_file, range, file_off)?;
+        }
+
+        info!(
+            "PagemapAnon snapshot saved: {} anon bytes written to {:?}",
+            stats.saved_bytes,
+            memory_file_target.path()
+        );
+
+        // Ensure all memory data is flushed to disk for cross-machine
+        // pause-snapshot scenarios.
+        memory_file
+            .sync_all()
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+
+        Ok(())
+    }
+
+    /// Calculate the file offset for a given GPA within the snapshot file.
+    ///
+    /// The snapshot file stores memory regions sequentially. This method finds
+    /// which region contains the given GPA and computes the corresponding
+    /// file offset.
+    fn calculate_file_offset_for_gpa(
+        gpa: u64,
+        length: u64,
+        gpa_to_file_offset: &[(u64, u64, u64)],
+    ) -> result::Result<u64, MigratableError> {
+        for &(region_gpa, region_length, file_offset) in gpa_to_file_offset {
+            if gpa >= region_gpa && gpa + length <= region_gpa + region_length {
+                return Ok(file_offset + (gpa - region_gpa));
+            }
+        }
+        Err(MigratableError::MigrateSend(anyhow!(
+            "Could not find file offset for GPA 0x{:x} (length {})",
+            gpa,
+            length
+        )))
+    }
 }
 
 struct MemoryNotify {
@@ -2548,32 +2774,28 @@ impl Transportable for MemoryManager {
     fn send(
         &self,
         _snapshot: &Snapshot,
-        destination_url: &str,
+        config: &SnapshotConfig,
     ) -> result::Result<(), MigratableError> {
         if self.snapshot_memory_ranges.is_empty() {
             return Ok(());
         }
 
-        let mut memory_file_path = url_to_path(destination_url)?;
-        memory_file_path.push(String::from(SNAPSHOT_FILENAME));
-
-        // Create the snapshot file for the entire memory
-        let memory_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .truncate(true)
-            .open(memory_file_path)
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-
-        let guest_memory = self.guest_memory.memory();
+        let destination_url = &config.destination_url;
+        let memory_file_target = MemorySnapshotFile::from_snapshot_url(
+            destination_url,
+            config.memory_vol_url.as_deref(),
+        )?;
 
         if self.dirty_log {
+            let guest_memory = self.guest_memory.memory();
+            let memory_file = memory_file_target.open_for_fresh_write()?;
             info!("Saving dirty guest memory to snapshot image file.");
             let total_size = guest_memory.iter().map(|region| region.len()).sum::<u64>();
-            memory_file
-                .set_len(total_size)
-                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            if !memory_file_target.is_external() {
+                memory_file
+                    .set_len(total_size)
+                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            }
 
             let mut offset = 0_u64;
             for range in self.snapshot_memory_ranges.regions() {
@@ -2643,17 +2865,27 @@ impl Transportable for MemoryManager {
             return Ok(());
         }
 
-        info!("Saving full guest memory to snapshot image file.");
-        for range in self.snapshot_memory_ranges.regions() {
-            self.save_range_to_file(&memory_file, range, 0)?;
+        match config.snapshot_type {
+            SnapshotType::Incremental => {
+                self.send_pagemap_anon_memory(destination_url, &config.memory_vol_url)?;
+            }
+            SnapshotType::Full => {
+                let memory_file = memory_file_target.open_for_fresh_write()?;
+
+                info!("Saving full guest memory to snapshot image file.");
+                let mut file_offset = 0u64;
+                for range in self.snapshot_memory_ranges.regions() {
+                    self.save_range_to_file(&memory_file, range, file_offset)?;
+                    file_offset += range.length;
+                }
+
+                // Ensure all memory data is flushed to disk for cross-machine
+                // pause-snapshot scenarios.
+                memory_file
+                    .sync_all()
+                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            }
         }
-
-        // Ensure all memory data is flushed to disk for cross-machine
-        // pause-snapshot scenarios.
-        memory_file
-            .sync_all()
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-
         Ok(())
     }
 }

@@ -11,13 +11,12 @@ use crate::{
     cubemaster::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient, CubeMasterError,
         CubeVSContext, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo, SandboxLogsRequest,
-        SandboxRefreshRequest, SandboxSnapshotRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest,
+        SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest, SandboxUpdateRequest,
     },
     error::{AppError, AppResult},
     models::{
         LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog, SandboxLogEntry,
-        SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState, SnapshotInfo,
+        SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
     },
 };
 
@@ -234,59 +233,6 @@ impl SandboxService {
         }
 
         Ok(self.sandbox_response(d.template_id, sandbox_id.to_string(), d.host_id))
-    }
-
-    pub async fn create_snapshot(
-        &self,
-        sandbox_id: &str,
-        name: Option<String>,
-    ) -> AppResult<SnapshotInfo> {
-        let snapshot_name = name.unwrap_or_else(new_request_id);
-        let names = vec![snapshot_name.clone()];
-        let req = SandboxSnapshotRequest {
-            request_id: new_request_id(),
-            sandbox_id: sandbox_id.to_string(),
-            instance_type: self.instance_type.clone(),
-            name: Some(snapshot_name),
-            names: names.clone(),
-            sync: false,
-            timeout: Some(60),
-        };
-
-        match self.cubemaster.create_sandbox_snapshot(&req).await {
-            Ok(resp) => {
-                resp.ret.into_result().map_err(|e| {
-                    if e.is_not_found() {
-                        AppError::NotFound(format!("sandbox {} not found", sandbox_id))
-                    } else if e.is_conflict() {
-                        AppError::Conflict(format!(
-                            "sandbox {} has a snapshot operation in progress",
-                            sandbox_id
-                        ))
-                    } else {
-                        internal_error(e)
-                    }
-                })?;
-
-                Ok(SnapshotInfo {
-                    snapshot_id: resp.snapshot_id,
-                    names: if resp.names.is_empty() {
-                        names
-                    } else {
-                        resp.names
-                    },
-                })
-            }
-            Err(e) if e.is_endpoint_missing() => Ok(SnapshotInfo {
-                snapshot_id: new_request_id(),
-                names,
-            }),
-            Err(e) if e.is_not_found() => Err(AppError::NotFound(format!(
-                "sandbox {} not found",
-                sandbox_id
-            ))),
-            Err(e) => Err(internal_error(e)),
-        }
     }
 
     pub async fn get_logs(

@@ -66,6 +66,8 @@ const (
 	CubeAnnotationAppSnapshotTemplateID      = "cube.master.appsnapshot.template.id"
 	CubeAnnotationAppSnapshotVersion         = "cube.master.appsnapshot.version"
 	CubeAnnotationAppSnapshotTemplateVersion = "cube.master.appsnapshot.template.version"
+	CubeAnnotationRuntimeSnapshotID          = "cube.master.runtime.snapshot.id"
+	CubeAnnotationRuntimeSnapshotAttachedAt  = "cube.master.runtime.snapshot.attached_at"
 	CubeAnnotationRootfsArtifactID           = "cube.master.rootfs.artifact.id"
 	CubeAnnotationRootfsArtifactJobID        = "cube.master.rootfs.artifact.job_id"
 	CubeAnnotationRootfsArtifactURL          = "cube.master.rootfs.artifact.url"
@@ -101,6 +103,13 @@ const (
 	ExtInfoCubeE2E          string = "cube-e2e"
 	CubeMasterInnerRetryID  string = "cubemaster-inner-retry"
 	CubeMasterInnerHandleID string = "cubemaster-inner-handle"
+	// CubeMasterPostRedisID / CubeMasterPostSpecID split the
+	// post-create write phase that runs after cubelet returns into
+	// the bypass-proxy Redis HSET and the sandbox_spec MySQL upsert,
+	// so observers can tell which leg of the post-create work is
+	// expensive on a per-request basis.
+	CubeMasterPostRedisID string = "cubemaster-post-redis"
+	CubeMasterPostSpecID  string = "cubemaster-post-spec"
 )
 
 const (
@@ -129,6 +138,18 @@ const (
 	ActionTemplateLocalityHit     = "templatelocalityhit"
 	ActionTemplateLocalityMiss    = "templatelocalitymiss"
 	ActionTemplateReplicaFallback = "templatereplicadbfallback"
+	// ActionTemplateResolve* split the integral templateresolve trace
+	// (already emitted as a single ActionTemplateResolve span) into the
+	// four sub-stages of dealCubeboxCreateReqWithTemplateCenter so that
+	// hot-path latency can be attributed precisely:
+	//   - tpl-resolve-request  : GetTemplateRequest (cache hit ≈ 0ms)
+	//   - tpl-resolve-locality : EnsureTemplateLocalityReady
+	//   - tpl-resolve-kind     : GetTemplateKind (now cached)
+	//   - tpl-resolve-bind     : bind*Replica + snapshot view lookups
+	ActionTemplateResolveRequest  = "tpl-resolve-request"
+	ActionTemplateResolveLocality = "tpl-resolve-locality"
+	ActionTemplateResolveKind     = "tpl-resolve-kind"
+	ActionTemplateResolveBind     = "tpl-resolve-bind"
 )
 
 const (
@@ -145,6 +166,8 @@ const (
 	TemplateReplicaTableName    = "t_cube_template_replica"
 	RootfsArtifactTableName     = "t_cube_rootfs_artifact"
 	TemplateImageJobTableName   = "t_cube_template_image_job"
+	SnapshotRuntimeRefTableName = "t_cube_snapshot_runtime_ref"
+	SandboxSpecTableName        = "t_cube_sandbox_spec"
 )
 
 const (

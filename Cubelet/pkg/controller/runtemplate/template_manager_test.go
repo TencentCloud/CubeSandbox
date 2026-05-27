@@ -35,3 +35,19 @@ func TestRecoveredLocalTemplateFromSnapshotPath(t *testing.T) {
 		t.Fatalf("expected snapshot id 2C2000M, got %q", template.Snapshot.Snapshot.ID)
 	}
 }
+
+func TestRecoveredLocalTemplateFromSnapshotPathRejectsTemporaryDir(t *testing.T) {
+	baseDir := t.TempDir()
+	snapshotPath := filepath.Join(baseDir, "cubebox", "tpl-test", "2C2000M.tmp")
+	configPath := filepath.Join(snapshotPath, "snapshot", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir snapshot config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write snapshot config: %v", err)
+	}
+
+	if template := recoveredLocalTemplateFromSnapshotPath(snapshotPath); template != nil {
+		t.Fatalf("expected nil for temporary snapshot path, got %+v", template)
+	}
+}

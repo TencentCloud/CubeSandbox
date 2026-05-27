@@ -56,6 +56,10 @@ func checkAndGetReqResource(req *types.CreateCubeSandboxReq) (*selctx.RequestRes
 		if hasTemplateID && hasTemplateVersion {
 
 			res.TemplateID = req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
+			if len(req.DistributionScope) > 0 {
+				res.TemplateNodeScope = append([]string(nil), req.DistributionScope...)
+				res.EnforceSnapshotStorage = true
+			}
 		}
 	}
 

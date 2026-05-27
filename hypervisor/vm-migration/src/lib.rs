@@ -104,6 +104,65 @@ impl SnapshotDataSection {
     }
 }
 
+/// The type of snapshot to create
+#[derive(Clone, Copy, Deserialize, Serialize, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotType {
+    /// Full snapshot - saves complete VM memory
+    #[default]
+    Full,
+    /// Incremental snapshot - only saves CoW anonymous pages via pagemap + kpageflags
+    Incremental,
+}
+
+impl std::fmt::Display for SnapshotType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SnapshotType::Full => write!(f, "full"),
+            SnapshotType::Incremental => write!(f, "incremental"),
+        }
+    }
+}
+
+impl std::str::FromStr for SnapshotType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "full" => Ok(SnapshotType::Full),
+            "incremental" => Ok(SnapshotType::Incremental),
+            _ => Err(format!(
+                "Invalid snapshot type: '{}'. Valid values are 'full' or 'incremental'",
+                s
+            )),
+        }
+    }
+}
+
+/// Metadata associated with a snapshot
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct SnapshotMetadata {
+    /// The type of snapshot
+    #[serde(default)]
+    pub snapshot_type: SnapshotType,
+}
+
+/// Configuration for creating a snapshot
+#[derive(Clone, Default, serde::Deserialize, serde::Serialize, Debug)]
+pub struct SnapshotConfig {
+    /// The snapshot destination URL
+    pub destination_url: String,
+    /// The type of snapshot to create (full or incremental)
+    #[serde(default)]
+    pub snapshot_type: SnapshotType,
+    /// Optional existing memory blob path for storing memory range data on a
+    /// separate volume.
+    /// Accepts either an absolute path like `/dev/vdb` or a `file:///dev/vdb`
+    /// URL. Other JSON data (config, state) is still saved to destination_url.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_vol_url: Option<String>,
+}
+
 /// A Snapshottable component's snapshot is a tree of snapshots, where leafs
 /// contain the snapshot data. Nodes of this tree track all their children
 /// through the snapshots field, which is basically their sub-components.
@@ -126,6 +185,10 @@ pub struct Snapshot {
     /// The Snapshottable component's snapshot data.
     /// A map of snapshot sections, indexed by the section ids.
     pub snapshot_data: std::collections::HashMap<String, SnapshotDataSection>,
+
+    /// Optional metadata about the snapshot (e.g. snapshot type).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<SnapshotMetadata>,
 }
 
 impl Snapshot {
@@ -214,12 +277,11 @@ pub trait Transportable: Pausable + Snapshottable {
     /// # Arguments
     ///
     /// * `snapshot` - The migratable component snapshot to send.
-    /// * `destination_url` - The destination URL to send the snapshot to. This
-    ///                       could be an HTTP endpoint, a TCP address or a local file.
+    /// * `config` - The snapshot configuration containing destination URL and snapshot type.
     fn send(
         &self,
         _snapshot: &Snapshot,
-        _destination_url: &str,
+        _config: &SnapshotConfig,
     ) -> std::result::Result<(), MigratableError> {
         Ok(())
     }

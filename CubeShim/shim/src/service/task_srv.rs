@@ -402,7 +402,7 @@ impl Task for TaskService {
             Error::Other(format!("update sandbox failed:{}", e))
         })?;
 
-        update_ext::update_route(&sb, &req.annotations, &self.log)
+        update_ext::update_route(&mut sb, &req.annotations, &self.log)
             .await
             .map_err(|e| {
                 errf!(self.log, "update sandbox failed:{}", e.clone());

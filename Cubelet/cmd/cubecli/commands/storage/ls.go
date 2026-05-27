@@ -5,29 +5,24 @@
 package storage
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"io"
 	"os"
-	"path"
-	"path/filepath"
 	"text/tabwriter"
-	"time"
 
 	jsoniter "github.com/json-iterator/go"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/urfave/cli/v2"
-)
+	"google.golang.org/grpc/status"
 
-var (
-	storageDir = "io.cubelet.internal.v1.storage"
-	dbHandle   *utils.CubeStore
-	dbDir      = "db"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
 )
 
 var lsdb = &cli.Command{
 	Name:  "ls",
-	Usage: "ls storage info",
+	Usage: "list sandbox storage volumes via cubelet gRPC",
 	Flags: []cli.Flag{
 		&cli.StringFlag{
 			Name:    "bucket",
@@ -37,95 +32,88 @@ var lsdb = &cli.Command{
 		},
 		&cli.BoolFlag{
 			Name:  "raw",
-			Usage: "raw json",
+			Usage: "raw json (per sandbox)",
 		},
 		&cli.BoolFlag{
 			Name:  "each-raw",
-			Usage: "each element raw json",
+			Usage: "append raw volume struct per row",
 		},
 	},
-	Action: func(context *cli.Context) error {
-		basePath := filepath.Join(context.String("state"), storageDir, "db")
-		clean, err := copyDb(basePath)
+	Action: func(cliCtx *cli.Context) error {
+		conn, grpcCtx, cancel, err := commands.NewGrpcConn(cliCtx)
 		if err != nil {
-			log.Printf("fail copy db:%v", err)
-			return err
+			return fmt.Errorf("cubelet must be running to inspect storage; start cubelet first: %w", err)
 		}
-		defer clean()
-		all, err := dbHandle.ReadAll(context.String("bucket"))
+		defer conn.Close()
+		defer cancel()
+
+		client := cubebox.NewCubeboxMgrClient(conn)
+		grpcCtx, grpcCancel := context.WithTimeout(grpcCtx, cliCtx.Duration("timeout"))
+		defer grpcCancel()
+
+		resp, err := client.InspectStorageVolumes(grpcCtx, &cubebox.InspectStorageVolumesRequest{
+			Bucket: cliCtx.String("bucket"),
+		})
 		if err != nil {
-			log.Printf("read db fail:%v", err)
+			if st, ok := status.FromError(err); ok && st.Code().String() == "Unavailable" {
+				return fmt.Errorf("cubelet must be running to inspect storage; start cubelet first")
+			}
+			return fmt.Errorf("InspectStorageVolumes failed: %w", err)
+		}
+		if ret := resp.GetRet(); ret == nil || ret.GetRetCode() != errorcode.ErrorCode_Success {
+			msg := "<empty>"
+			if ret != nil {
+				msg = ret.GetRetMsg()
+			}
+			return fmt.Errorf("InspectStorageVolumes returned error: %s", msg)
+		}
+
+		if cliCtx.Bool("raw") {
+			for _, sb := range resp.GetSandboxes() {
+				out, _ := jsoniter.MarshalToString(sb)
+				fmt.Printf("%s\t%s\n", sb.GetSandboxID(), out)
+			}
 			return nil
 		}
-		if context.Bool("raw") {
-			for id, v := range all {
-				fmt.Printf("%s\t%s\n", id, string(v))
-			}
-			return nil
-		}
-		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
-		tabHeader := "NS\tID\tFile\tSize"
-		if context.Bool("each-raw") {
-			tabHeader += "\tRAW"
-		}
-		fmt.Fprintln(w, tabHeader)
-		for id, v := range all {
-			if id == "cube_stub" {
-				continue
-			}
-			bf := &storage.StorageInfo{}
-			err = jsoniter.Unmarshal(v, bf)
-			if err != nil {
-				continue
-			}
-			for _, v := range bf.Volumes {
-				row := fmt.Sprintf("%s\t%s\t%s\t%d", bf.Namespace, bf.SandboxID, v.FilePath, v.SizeLimit)
-				if context.Bool("each-raw") {
-					row += fmt.Sprintf("\t%v", v)
-				}
-				if _, err := fmt.Fprintf(w, "%s\n", row); err != nil {
-					return err
-				}
-			}
-		}
-		return w.Flush()
+		return printStorageRows(os.Stdout, resp.GetSandboxes(), cliCtx.Bool("each-raw"))
 	},
 }
 
-func copyDb(onlineBaseDir string) (func(), error) {
-	targedir := filepath.Join(os.TempDir(), dbDir)
-	if err := os.MkdirAll(path.Clean(targedir), os.ModeDir|0755); err != nil {
-		return nil, fmt.Errorf("init dir failed %s", err.Error())
+func printStorageRows(w io.Writer, sandboxes []*cubebox.SandboxStorageInfo, eachRaw bool) error {
+	tw := tabwriter.NewWriter(w, 4, 8, 4, ' ', 0)
+	tabHeader := "NS\tID\tName\tFile\tSize\tCowVol\tKind\tGen"
+	if eachRaw {
+		tabHeader += "\tRAW"
 	}
-	clean := func() {
-		os.RemoveAll(path.Clean(targedir))
+	if _, err := fmt.Fprintln(tw, tabHeader); err != nil {
+		return err
 	}
-
-	exist, er := utils.DenExist(targedir)
-	if er != nil || !exist {
-		log.Printf("failed to create temp dir: %v", er)
-		return nil, er
-	}
-
-	cmds := [][]string{
-		{"mkdir", "-p", targedir},
-		{"ls", "-l", onlineBaseDir},
-		{"cp", "-r", onlineBaseDir, targedir},
-	}
-	log.Printf("cmds:%v", cmds)
-	for _, cmd := range cmds {
-		if out, stderr, err := utils.ExecV(cmd, time.Minute); err == nil {
-			log.Printf("storage copy: %v", out)
-		} else {
-			log.Printf("storage copy: failed to exec %v: %v", cmd, err)
-			return clean, fmt.Errorf("storage failed:%s", stderr)
+	for _, sb := range sandboxes {
+		if sb == nil {
+			continue
+		}
+		for _, volume := range sb.GetVolumes() {
+			if volume == nil {
+				continue
+			}
+			row := fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%s\t%s\t%d",
+				sb.GetNamespace(),
+				sb.GetSandboxID(),
+				volume.GetName(),
+				volume.GetFilePath(),
+				volume.GetSizeLimit(),
+				volume.GetVolumeName(),
+				volume.GetKind(),
+				volume.GetGen(),
+			)
+			if eachRaw {
+				raw, _ := jsoniter.MarshalToString(volume)
+				row += fmt.Sprintf("\t%s", raw)
+			}
+			if _, err := fmt.Fprintln(tw, row); err != nil {
+				return err
+			}
 		}
 	}
-
-	var err error
-	if dbHandle, err = utils.NewCubeStoreExt(filepath.Join(targedir, dbDir), "meta.db", 10, nil); err != nil {
-		log.Printf("storage: failed to open db: %v", err)
-		return clean, err
-	}
-	return clean, nil
+	return tw.Flush()
 }

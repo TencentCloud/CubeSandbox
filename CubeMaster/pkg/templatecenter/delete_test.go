@@ -32,9 +32,14 @@ func TestDeleteTemplateWithTargetsAllowsJobOnlyCleanup(t *testing.T) {
 	var replicaCalled, artifactCalled, metadataCalled, jobCalled bool
 	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
 		replicaCalled = true
-		if len(locators) != 1 || locators[0].NodeIP != "10.0.0.8" || locators[0].SnapshotPath != "/tmp/snap" {
+		// v4: locators are deduplicated by (NodeID|NodeIP); SnapshotPath is
+		// no longer part of the identity or the cleanup payload.
+		if len(locators) != 1 || locators[0].NodeIP != "10.0.0.8" {
 			t.Fatalf("unexpected locators: %+v", locators)
 		}
+		// v5: SnapshotPath / Objects no longer exist on templateCleanupLocator —
+		// cubelet is the sole authority and resolves both from its local
+		// catalog. The locator now contains only (NodeID, NodeIP).
 		return nil
 	}
 	runArtifactCleanup = func(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
@@ -70,7 +75,7 @@ func TestDeleteTemplateWithTargetsAllowsJobOnlyCleanup(t *testing.T) {
 			},
 		},
 		Locators: []templateCleanupLocator{
-			{NodeIP: "10.0.0.8", SnapshotPath: "/tmp/snap"},
+			{NodeIP: "10.0.0.8"},
 		},
 		ArtifactIDs: map[string]struct{}{"artifact-1": {}},
 	})
@@ -105,10 +110,12 @@ func TestDeleteTemplateWithTargetsRejectsPendingDefinitionBuild(t *testing.T) {
 }
 
 func TestDeleteTemplateWithTargetsRejectsMissingCleanupLocator(t *testing.T) {
-	// A job with a SnapshotPath but no node locator must be rejected.
+	// v4: a job that points at a host (node id / ip) but has no resolvable
+	// locator entry must be rejected so we never silently drop cubelet-side
+	// artifacts. SnapshotPath is no longer authoritative; node identity is.
 	err := deleteTemplateWithTargets(context.Background(), "tpl-missing-locator", &templateCleanupTargets{
 		Jobs: []models.TemplateImageJob{
-			{TemplateID: "tpl-missing-locator", Status: JobStatusFailed, SnapshotPath: "/data/snapshot/tpl-missing-locator"},
+			{TemplateID: "tpl-missing-locator", Status: JobStatusFailed, NodeID: "node-a"},
 		},
 		InstanceType: cubeboxv1.InstanceType_cubebox.String(),
 	})
@@ -118,8 +125,8 @@ func TestDeleteTemplateWithTargetsRejectsMissingCleanupLocator(t *testing.T) {
 }
 
 func TestDeleteTemplateWithTargetsAllowsOrphanedJobCleanup(t *testing.T) {
-	// A job with no SnapshotPath, NodeID, or NodeIP is an orphaned record with
-	// nothing to clean up on any cubelet. Deletion should succeed without a locator.
+	// v4: a job with no NodeID/NodeIP is an orphaned record with nothing to
+	// clean up on any cubelet. Deletion should succeed without a locator.
 	origReplicaCleanup := runReplicaCleanup
 	origArtifactCleanup := runArtifactCleanup
 	origMetadataCleanup := runMetadataCleanup
@@ -391,6 +398,14 @@ func TestCleanupTemplateReplicasWithLocatorsIgnoresNotFound(t *testing.T) {
 
 	getCubeletAddrForDelete = func(hostIP string) string { return hostIP + ":9000" }
 	cleanupTemplateOnCubelet = func(ctx context.Context, calleeEp string, req *cubeboxv1.CleanupTemplateRequest) (*cubeboxv1.CleanupTemplateResponse, error) {
+		// v4: master must not send Objects or SnapshotPath. Cubelet derives
+		// both from its local catalog (with deterministic fallback).
+		if got := req.GetObjects(); len(got) != 0 {
+			t.Fatalf("v4: cleanup request must not carry Objects; got %d", len(got))
+		}
+		if got := req.GetSnapshotPath(); got != "" {
+			t.Fatalf("v4: cleanup request must not carry SnapshotPath; got %q", got)
+		}
 		return &cubeboxv1.CleanupTemplateResponse{
 			Ret: &errorcodev1.Ret{
 				RetCode: errorcodev1.ErrorCode_Unknown,
@@ -399,7 +414,7 @@ func TestCleanupTemplateReplicasWithLocatorsIgnoresNotFound(t *testing.T) {
 		}, nil
 	}
 
-	if err := cleanupTemplateReplicasWithLocators(context.Background(), "tpl-1", []templateCleanupLocator{{NodeIP: "10.0.0.8", SnapshotPath: "/tmp/missing"}}); err != nil {
+	if err := cleanupTemplateReplicasWithLocators(context.Background(), "tpl-1", []templateCleanupLocator{{NodeIP: "10.0.0.8"}}); err != nil {
 		t.Fatalf("expected not-found cleanup to be ignored, got %v", err)
 	}
 }

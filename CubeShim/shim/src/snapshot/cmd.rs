@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use clap::{ArgAction, Args};
+use cube_hypervisor::SnapshotType;
 use uuid::Uuid;
 
 use crate::{
@@ -80,6 +81,35 @@ pub struct SnapshotArgs {
         required_if_eq("app_snapshot", "true")
     )]
     pub vm_id: Option<String>,
+
+    /// Snapshot type: 'full' or 'incremental' (saves only CoW anonymous pages)
+    #[arg(
+        long = "snapshot-type",
+        value_name = "snapshot type",
+        help = "snapshot type: 'full' or 'incremental'",
+        default_value = "full"
+    )]
+    pub snapshot_type: String,
+
+    /// Optional existing path or file URL for storing memory range data on a
+    /// separate volume.
+    /// When set, memory snapshot data is written to this location instead of
+    /// the default <path>/snapshot/memory-ranges.
+    #[arg(
+        long = "memory-vol",
+        value_name = "memory vol path",
+        help = "optional existing path or file URL for storing memory data on a separate volume (e.g. /dev/vdb or file:///dev/vdb)",
+        required = false
+    )]
+    pub memory_vol: Option<String>,
+
+    #[arg(
+        long = "container-id",
+        value_name = "container id",
+        help = "logical container id persisted in app snapshot metadata",
+        required = false
+    )]
+    pub container_id: Option<String>,
 }
 
 pub async fn execute(args: SnapshotArgs) -> Result<()> {
@@ -109,6 +139,15 @@ impl TryFrom<SnapshotArgs> for Snapshot {
         snapshot.tap = !args.notap;
         snapshot.force = args.force;
         snapshot.app_snapshot = args.app_snapshot;
+        snapshot.snapshot_type = args
+            .snapshot_type
+            .parse::<SnapshotType>()
+            .map_err(|e| format!("invalid snapshot type: {}", e))?;
+        snapshot.memory_vol_url = args.memory_vol;
+        snapshot.container_id = args
+            .container_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         if args.app_snapshot {
             if args.vm_id.is_none() {
                 return Err("not specify the vmid in app snapshot mode".to_string());

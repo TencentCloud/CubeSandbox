@@ -20,10 +20,9 @@ Environment overrides:
   ONE_CLICK_SKIP_QUICKCHECK  Set to 1 to skip quickcheck after restart
 
 Behavior:
-  - backup current cubemaster/cubemastercli/cubelet/cubecli/network-agent
+  - backup current systemd-managed core binaries for the installed role
   - extract package and replace binaries
-  - restart local one-click core services
-  - refresh cubelet pidfile
+  - restart local systemd-managed core services
   - run quickcheck and print key status
 EOF
 }
@@ -52,23 +51,29 @@ resolve_package_path() {
   return 1
 }
 
-fix_cubelet_pidfile() {
-  local install_prefix="$1"
-  local runtime_dir="$2"
-  local cubelet_pid
-  cubelet_pid="$(pgrep -f "^${install_prefix}/Cubelet/bin/cubelet --config" | head -n 1 || true)"
-  if [[ -z "${cubelet_pid}" ]]; then
-    log "cubelet pid not found, skip pidfile refresh"
-    return 0
+restart_core_services() {
+  local role="$1"
+  local units=()
+  local unit
+
+  if [[ "${role}" == "compute" ]]; then
+    units=(
+      cube-sandbox-network-agent.service
+      cube-sandbox-cubelet.service
+    )
+  else
+    units=(
+      cube-sandbox-cubemaster.service
+      cube-sandbox-cube-api.service
+      cube-sandbox-network-agent.service
+      cube-sandbox-cubelet.service
+    )
   fi
-  mkdir -p "${runtime_dir}"
-  printf '%s\n' "${cubelet_pid}" > "${runtime_dir}/cubelet.pid"
-  if [[ "${runtime_dir}" != "/run/cube-sandbox-one-click" ]] && [[ -d /run/cube-sandbox-one-click ]]; then
-    printf '%s\n' "${cubelet_pid}" > /run/cube-sandbox-one-click/cubelet.pid
-  fi
-  if [[ "${runtime_dir}" != "/var/run/cube-sandbox-one-click" ]] && [[ -d /var/run/cube-sandbox-one-click ]]; then
-    printf '%s\n' "${cubelet_pid}" > /var/run/cube-sandbox-one-click/cubelet.pid
-  fi
+
+  for unit in "${units[@]}"; do
+    log "restart ${unit}"
+    systemctl restart "${unit}"
+  done
 }
 
 main() {
@@ -80,8 +85,8 @@ main() {
   require_root
   require_cmd tar
   require_cmd install
-  require_cmd pgrep
   require_cmd curl
+  require_cmd systemctl
 
   local package_tar
   package_tar="$(resolve_package_path "${1:-}")" || die "manual update package not specified"
@@ -92,19 +97,24 @@ main() {
   local runtime_dir="${ONE_CLICK_RUNTIME_DIR:-/var/run/cube-sandbox-one-click}"
   local log_dir="${ONE_CLICK_LOG_DIR:-/var/log/cube-sandbox-one-click}"
   local backup_dir="${install_prefix}/.backup/manual-update-$(date +%Y%m%d-%H%M%S)"
+  local runtime_env_file="${install_prefix}/.one-click.env"
+  local role
   local work_dir
   work_dir="$(mktemp -d)"
   trap "rm -rf '${work_dir}'" EXIT
 
   ensure_dir "${install_prefix}"
-  ensure_file "${install_prefix}/scripts/one-click/down-local.sh"
-  ensure_file "${install_prefix}/scripts/one-click/up.sh"
+  ensure_file "${runtime_env_file}"
   ensure_file "${install_prefix}/scripts/one-click/quickcheck.sh"
+  load_env_file "${runtime_env_file}"
+  role="$(one_click_deploy_role)"
 
   mkdir -p "${backup_dir}"
   log "backup current binaries to ${backup_dir}"
-  cp -a "${install_prefix}/CubeMaster/bin/cubemaster" "${backup_dir}/"
-  cp -a "${install_prefix}/CubeMaster/bin/cubemastercli" "${backup_dir}/"
+  if [[ "${role}" != "compute" ]]; then
+    cp -a "${install_prefix}/CubeMaster/bin/cubemaster" "${backup_dir}/"
+    cp -a "${install_prefix}/CubeMaster/bin/cubemastercli" "${backup_dir}/"
+  fi
   cp -a "${install_prefix}/Cubelet/bin/cubelet" "${backup_dir}/"
   cp -a "${install_prefix}/Cubelet/bin/cubecli" "${backup_dir}/"
   cp -a "${install_prefix}/network-agent/bin/network-agent" "${backup_dir}/"
@@ -112,42 +122,39 @@ main() {
   log "extract package ${package_tar}"
   tar -xzf "${package_tar}" -C "${work_dir}"
 
-  ensure_file "${work_dir}/cubemaster"
-  ensure_file "${work_dir}/cubemastercli"
+  if [[ "${role}" != "compute" ]]; then
+    ensure_file "${work_dir}/cubemaster"
+    ensure_file "${work_dir}/cubemastercli"
+  fi
   ensure_file "${work_dir}/cubelet"
   ensure_file "${work_dir}/cubecli"
   ensure_file "${work_dir}/network-agent"
 
   log "replace binaries under ${install_prefix}"
-  install -m 0755 "${work_dir}/cubemaster" "${install_prefix}/CubeMaster/bin/cubemaster"
-  install -m 0755 "${work_dir}/cubemastercli" "${install_prefix}/CubeMaster/bin/cubemastercli"
+  if [[ "${role}" != "compute" ]]; then
+    install -m 0755 "${work_dir}/cubemaster" "${install_prefix}/CubeMaster/bin/cubemaster"
+    install -m 0755 "${work_dir}/cubemastercli" "${install_prefix}/CubeMaster/bin/cubemastercli"
+  fi
   install -m 0755 "${work_dir}/cubelet" "${install_prefix}/Cubelet/bin/cubelet"
   install -m 0755 "${work_dir}/cubecli" "${install_prefix}/Cubelet/bin/cubecli"
   install -m 0755 "${work_dir}/network-agent" "${install_prefix}/network-agent/bin/network-agent"
 
-  log "restart local services"
-  ONE_CLICK_TOOLBOX_ROOT="${install_prefix}" \
-  ONE_CLICK_RUNTIME_DIR="${runtime_dir}" \
-  ONE_CLICK_LOG_DIR="${log_dir}" \
-    "${install_prefix}/scripts/one-click/down-local.sh" || true
-
-  ONE_CLICK_TOOLBOX_ROOT="${install_prefix}" \
-  ONE_CLICK_RUNTIME_DIR="${runtime_dir}" \
-  ONE_CLICK_LOG_DIR="${log_dir}" \
-    "${install_prefix}/scripts/one-click/up.sh"
-
-  fix_cubelet_pidfile "${install_prefix}" "${runtime_dir}"
+  log "restart local systemd services"
+  restart_core_services "${role}"
 
   if [[ "${ONE_CLICK_SKIP_QUICKCHECK:-0}" != "1" ]]; then
     ONE_CLICK_TOOLBOX_ROOT="${install_prefix}" \
+    ONE_CLICK_RUNTIME_ENV_FILE="${runtime_env_file}" \
     ONE_CLICK_RUNTIME_DIR="${runtime_dir}" \
     ONE_CLICK_LOG_DIR="${log_dir}" \
       "${install_prefix}/scripts/one-click/quickcheck.sh"
   fi
 
-  log "node metadata after restart"
-  curl -fsS http://127.0.0.1:8089/internal/meta/nodes || true
-  printf '\n'
+  if [[ "${role}" != "compute" ]]; then
+    log "node metadata after restart"
+    curl -fsS http://127.0.0.1:8089/internal/meta/nodes || true
+    printf '\n'
+  fi
 
   log "manual update complete"
   log "backup dir: ${backup_dir}"

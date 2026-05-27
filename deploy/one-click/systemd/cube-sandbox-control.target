@@ -1,0 +1,14 @@
+[Unit]
+Description=Cube Sandbox control-plane stack
+After=network-online.target docker.service
+Wants=network-online.target
+Wants=cube-sandbox-mysql.service cube-sandbox-redis.service
+Wants=cube-sandbox-cubemaster.service cube-sandbox-cube-api.service
+Wants=cube-sandbox-network-agent.service cube-sandbox-cubelet.service
+Wants=cube-sandbox-cube-proxy.service cube-sandbox-coredns.service
+Wants=cube-sandbox-dns.service cube-sandbox-webui.service
+Wants=cube-sandbox-seed-cubemaster-metrics.service
+AllowIsolate=no
+
+[Install]
+WantedBy=multi-user.target

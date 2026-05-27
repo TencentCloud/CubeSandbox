@@ -140,3 +140,85 @@ func TestExecBinCtx(t *testing.T) {
 	assert.Error(t, execErr)
 	assert.NotEmpty(t, stderr)
 }
+
+func TestValidateExecArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		cmd     string
+		args    []string
+		wantErr bool
+		errSub  string
+	}{
+		{name: "ok-simple", cmd: "ls", args: []string{"-l", "/tmp"}, wantErr: false},
+		{name: "ok-pathlike", cmd: "/usr/bin/ls", args: nil, wantErr: false},
+		{name: "empty-cmd", cmd: "", args: nil, wantErr: true, errSub: "empty"},
+		{name: "cmd-leading-dash", cmd: "-rf", args: nil, wantErr: true, errSub: "'-'"},
+		{name: "cmd-with-semicolon", cmd: "ls;rm", args: nil, wantErr: true, errSub: "forbidden"},
+		{name: "cmd-with-pipe", cmd: "ls|cat", args: nil, wantErr: true, errSub: "forbidden"},
+		{name: "cmd-with-backtick", cmd: "l`s", args: nil, wantErr: true, errSub: "forbidden"},
+		{name: "cmd-with-dollar", cmd: "ls$IFS", args: nil, wantErr: true, errSub: "forbidden"},
+		{name: "arg-with-nul", cmd: "ls", args: []string{"a\x00b"}, wantErr: true, errSub: "NUL"},
+		{name: "arg-with-bell", cmd: "ls", args: []string{"a\x07b"}, wantErr: true, errSub: "control"},
+		{name: "arg-with-newline-ok", cmd: "ls", args: []string{"a\nb"}, wantErr: false},
+		{name: "arg-with-tab-ok", cmd: "ls", args: []string{"a\tb"}, wantErr: false},
+		{name: "arg-with-pipe-ok", cmd: "ls", args: []string{"a|b"}, wantErr: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateExecArgs(tc.cmd, tc.args)
+			if tc.wantErr {
+				assert.Error(t, err)
+				if tc.errSub != "" {
+					assert.Contains(t, err.Error(), tc.errSub)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestExecBinRejectsInjection(t *testing.T) {
+	stdout, stderr, err := ExecBin("ls;rm -rf /", nil, time.Second)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "forbidden")
+	assert.Empty(t, stdout)
+	assert.Empty(t, stderr, "stderr must be empty when no command was executed")
+
+	stdout, stderr, err = ExecBin("ls", []string{"a\x00b"}, time.Second)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "NUL")
+	assert.Empty(t, stdout)
+	assert.Empty(t, stderr)
+
+	stdout, stderr, err = ExecBin("-rf", nil, time.Second)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "'-'")
+	assert.Empty(t, stdout)
+	assert.Empty(t, stderr)
+}
+
+func TestExecRejectsNul(t *testing.T) {
+	stdout, stderr, err := Exec("echo a\x00b", time.Second)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "NUL")
+	assert.Empty(t, stdout)
+	assert.Empty(t, stderr, "stderr must be empty when no command was executed")
+}
+
+func TestExecVCtxRejectsInjection(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	stdout, stderr, err := ExecVCtx(ctx, []string{"ls;rm", "-rf"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "forbidden")
+	assert.Empty(t, stdout)
+	assert.Empty(t, stderr, "stderr must be empty when no command was executed")
+
+	stdout, stderr, err = ExecVCtx(ctx, []string{"ls", "arg\x00bad"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "NUL")
+	assert.Empty(t, stdout)
+	assert.Empty(t, stderr)
+}

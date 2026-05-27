@@ -60,8 +60,10 @@ deleting the generated `.workdir/` directory.
 ./run_vm.sh
 ```
 
-The QEMU serial console is attached to the current terminal. Press
-`Ctrl+a` then `x` to power the VM off.
+The QEMU serial console is attached to the current terminal. Do not power
+the VM off with `Ctrl+a` then `x`; that is abrupt and can corrupt the
+guest. Instead, log in from another terminal with `./login.sh` and run
+`poweroff` inside the guest.
 
 ### Step 3: Log in (in a new terminal)
 
@@ -89,6 +91,15 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-cl
 When the installer finishes, follow the regular
 [Quick Start](./quickstart) to create a template and run your first
 sandbox in the VM.
+
+## cubecow storage in dev-env
+
+Cubelet uses the reflink-only `cubecow` storage backend by default. The dev
+VM only needs a reflink-capable filesystem (e.g. XFS with `-m reflink=1`,
+or Btrfs) at the path used by `data_path`; no LVM / dm-thin tooling or extra
+raw disk is required. The default settings under
+`[plugins."io.cubelet.internal.v1.storage".cow.*]` create reflink volumes
+under `<data_path>/../cubecow-reflink`.
 
 ---
 

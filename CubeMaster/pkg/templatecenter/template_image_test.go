@@ -576,7 +576,15 @@ func TestBuildCommitTemplateSpecFingerprintIgnoresRequestID(t *testing.T) {
 			constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
 		},
 	}
-	if gotA, gotB := buildCommitTemplateSpecFingerprint(reqA), buildCommitTemplateSpecFingerprint(reqB); gotA != gotB {
+	payloadA, err := marshalTemplateCommitJobRequest(reqA)
+	if err != nil {
+		t.Fatalf("marshalTemplateCommitJobRequest(reqA) failed: %v", err)
+	}
+	payloadB, err := marshalTemplateCommitJobRequest(reqB)
+	if err != nil {
+		t.Fatalf("marshalTemplateCommitJobRequest(reqB) failed: %v", err)
+	}
+	if gotA, gotB := buildCommitTemplateSpecFingerprintFromSnapshot(payloadA), buildCommitTemplateSpecFingerprintFromSnapshot(payloadB); gotA != gotB {
 		t.Fatalf("expected identical fingerprint, got %q vs %q", gotA, gotB)
 	}
 }

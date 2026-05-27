@@ -244,6 +244,64 @@ pub struct SnapshotInfo {
     pub names: Vec<String>,
 }
 
+/// Query parameters for GET /snapshots.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListSnapshotsQuery {
+    /// Filter by originating sandbox ID.
+    #[serde(rename = "sandboxID")]
+    pub sandbox_id: Option<String>,
+    /// Max items per page (default 100, max 100).
+    pub limit: Option<i32>,
+    /// Pagination cursor from previous response header x-next-token.
+    #[serde(rename = "nextToken")]
+    pub next_token: Option<String>,
+}
+
+/// One entry in the GET /snapshots list.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SnapshotListItem {
+    #[serde(rename = "snapshotID")]
+    pub snapshot_id: String,
+    pub names: Vec<String>,
+    pub status: String,
+    #[serde(rename = "originSandboxID", skip_serializing_if = "Option::is_none")]
+    pub origin_sandbox_id: Option<String>,
+    #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// Request body for POST /sandboxes/{id}/rollback.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RollbackRequest {
+    #[serde(rename = "snapshotID")]
+    pub snapshot_id: String,
+}
+
+/// Response for POST /sandboxes/{id}/rollback after synchronous completion.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RollbackResponse {
+    #[serde(rename = "sandboxID")]
+    pub sandbox_id: String,
+    #[serde(rename = "snapshotID")]
+    pub snapshot_id: String,
+    #[serde(rename = "operationID")]
+    pub operation_id: String,
+    pub status: String,
+}
+
+/// Response for DELETE /templates/{templateID} when the target is a snapshot.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeleteSnapshotResponse {
+    #[serde(rename = "templateID")]
+    pub template_id: String,
+    #[serde(rename = "operationID")]
+    pub operation_id: String,
+    pub status: String,
+}
+
 // ─── Sandbox — logs ────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]

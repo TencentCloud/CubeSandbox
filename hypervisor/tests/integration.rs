@@ -7517,7 +7517,8 @@ mod vmm_instance {
     use log::info;
     use rlimit::{setrlimit, Resource};
     use test_infra::{ssh_command_ip, DiskType, Guest, UbuntuDiskConfig};
-    use vmm::api::{ApiRequest, ApiResponsePayload, VmSnapshotConfig};
+    use vm_migration::SnapshotConfig;
+    use vmm::api::{ApiRequest, ApiResponsePayload};
     use vmm::config::RestoreConfig;
     use vmm::vm_config::{
         ConsoleConfig, ConsoleOutputMode, CpusConfig, DiskConfig, NetConfig, PayloadConfig,
@@ -7908,8 +7909,9 @@ mod vmm_instance {
         ];
         assert!(check_latest_events_exact(&latest_events, &event_path));
 
-        let snapshot_config = VmSnapshotConfig {
+        let snapshot_config = SnapshotConfig {
             destination_url: format!("file://{snapshot_dir}"),
+            ..Default::default()
         };
         assert!(vmm.send_request(ApiRequest::VmSnapshot(Arc::new(snapshot_config))));
         let latest_events = [

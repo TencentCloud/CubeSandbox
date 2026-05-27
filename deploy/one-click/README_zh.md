@@ -17,7 +17,7 @@
 - `smoke.sh`：执行基础健康检查。
 - `env.example`：构建机和目标机共用的环境变量模板。
 - `lib/common.sh`：公共 shell 函数。
-- `scripts/one-click/`：安装后实际执行的启停与校验脚本。
+- `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
 - `sql/`：MySQL 初始化 schema 和 seed 数据。
 
 ## 构建输入
@@ -122,7 +122,7 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` -> `/usr/local/services/cubetoolbox/webui/`
 
-其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`；`network-agent` 实际启动时优先通过 `--cubelet-config` 读取 `Cubelet/config/config.toml` 中的网络插件配置，以保证和 `Cubelet` 的网络参数保持一致；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，由目标机本地 `docker compose` 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，在目标机本地 `docker compose build && up`。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI。
+其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`；`network-agent` 实际启动时优先通过 `--cubelet-config` 读取 `Cubelet/config/config.toml` 中的网络插件配置，以保证和 `Cubelet` 的网络参数保持一致；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
 
 ## 目标机安装
 
@@ -136,6 +136,13 @@ sudo ./install.sh
 ```
 
 默认会安装到 `/usr/local/services/cubetoolbox`。
+
+新的 one-click 安装统一只使用 systemd 托管：
+
+- 控制节点：`cube-sandbox-control.target`
+- 计算节点：`cube-sandbox-compute.target`
+
+安装脚本会自动把单元文件安装到 `/etc/systemd/system/`，并按角色执行 `enable --now`。旧的 shell 启停脚本只作为 pre-systemd 历史版本升级时的短期过渡能力保留，不属于新安装的运行接口。
 
 常用命令：
 
@@ -206,7 +213,7 @@ MySQL/Redis 依赖默认会部署到：
 /usr/local/services/cubetoolbox/support
 ```
 
-安装时会在这个目录下渲染并使用 `docker-compose.yaml`，统一管理：
+安装时会在这个目录下准备运行期文件，并由 systemd 分别管理：
 
 - `mysql:8.0`
 - `redis:7-alpine`
@@ -236,12 +243,13 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 安装过程中会做这些事：
 
 - 若系统尚未安装 `mkcert`，从安装包内置的 `support/bin/mkcert` 复制到 `/usr/local/bin/mkcert`，再在宿主机 `CUBE_PROXY_CERT_DIR`（默认 `/usr/local/services/cubetoolbox/cubeproxy/certs/`）下执行 `mkcert -install` 并生成 `cube.app+3.pem`、`cube.app+3-key.pem`
-- 在 `/usr/local/services/cubetoolbox/support/` 下生成 `docker-compose.yaml` 并启动 MySQL/Redis
+- 在 `/usr/local/services/cubetoolbox/support/`、`cubeproxy/`、`coredns/`、`webui/` 下生成运行期配置与渲染文件
 - 用 `CUBE_SANDBOX_NODE_IP` 渲染 `cubeproxy/global.conf`
-- 在 `/usr/local/services/cubetoolbox/cubeproxy/` 下生成 `docker-compose.yaml`，把宿主机 `CUBE_PROXY_CERT_DIR` 只读挂载到容器内 `/usr/local/openresty/nginx/certs/`，并使用发布包 build context 中来自 `CubeProxy/Dockerfile` 的标准 Dockerfile 本地构建 `cube proxy` 镜像
-- 启动 `CoreDNS` 容器；若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS，避免污染宿主机默认公网 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`，默认继续使用 `127.0.0.54`
-- 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 `cube-api /health`
-- 在 `/usr/local/services/cubetoolbox/webui/` 下启动标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/cubeapi/v1/health`
+- 安装 `/etc/systemd/system/cube-sandbox-*.service|target|timer`，并把宿主机进程与容器统一交给 systemd 管理
+- MySQL、Redis、cube proxy、WebUI、CoreDNS 仍使用 Docker 运行，但生命周期改由各自的 systemd service 直接管理，而不是运行期依赖 `docker compose up -d`
+- 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`：同样会创建该 dummy link，并让 `dnsmasq` 在 `169.254.254.53` 上额外监听，安装器同时把 `/etc/resolv.conf` 从 NetworkManager 手里接管（`rc-manager=unmanaged`）并改写为指向该非 loopback IP。这样宿主与 `systemd-resolved` 路径保持对称，避免 Docker 在 `/etc/resolv.conf` 只剩 loopback nameserver 时默默回退到内置公网 DNS（`8.8.8.8`）——一旦回退，宿主上所有依赖域名解析的容器（典型如 `docker build` 跑 `apk update`）都会因为公网 DNS 在内网不可达而失败。
+- 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 systemd 状态与业务健康检查
+- 在 `/usr/local/services/cubetoolbox/webui/` 下运行标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/cubeapi/v1/health`
 
 停止 one-click 时会同时停止 `/usr/local/services/cubetoolbox/support` 下的 MySQL/Redis、WebUI、`cube proxy` / `CoreDNS`、宿主机进程 `network-agent` / `cubemaster` / `cube-api` / `cubelet`，并回滚 `cube.app` 的宿主机 DNS 路由配置。
 
@@ -272,6 +280,26 @@ export E2B_API_KEY=dummy
 条件命令：
 
 - 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
+- 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
+  `mkfs.ext4`、`mount`、`umount`、`losetup`
+
+推荐安装包（覆盖上述 `cubecow` 依赖）：
+
+- Debian / Ubuntu：`e2fsprogs`、`util-linux`
+- OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`
+- 若目标机是极简镜像，安装完上面三类包后仍缺 `dmsetup`，再补装同名包 `dmsetup`
+
+可直接执行的安装示例：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y lvm2 thin-provisioning-tools util-linux
+
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y lvm2 device-mapper-persistent-data util-linux || \
+sudo yum install -y lvm2 device-mapper-persistent-data util-linux
+```
 
 ### control 角色（`install.sh`，默认）
 
@@ -298,11 +326,31 @@ export E2B_API_KEY=dummy
 条件命令：
 
 - 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
+- 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
+  `mkfs.ext4`、`mount`、`umount`、`losetup`
+
+推荐安装包（覆盖上述 `cubecow` 依赖）：
+
+- Debian / Ubuntu：`e2fsprogs`、`util-linux`
+- OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`
+- 若目标机是极简镜像，安装完上面三类包后仍缺 `dmsetup`，再补装同名包 `dmsetup`
+
+可直接执行的安装示例：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y lvm2 thin-provisioning-tools util-linux
+
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y lvm2 device-mapper-persistent-data util-linux || \
+sudo yum install -y lvm2 device-mapper-persistent-data util-linux
+```
 
 ## 前置条件
 
 - 目标机需要 `root` 权限。
-- 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会尝试回退到 `NetworkManager + dnsmasq`，默认使用 `127.0.0.54`。
+- 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会回退到 `NetworkManager + dnsmasq`：同样创建该 dummy link，并通过 `listen-address` / `bind-interfaces` 让 `dnsmasq` 同时绑定 `127.0.0.1` 和 `169.254.254.53`；随后安装器自己写 `/etc/resolv.conf`（NetworkManager 切到 `rc-manager=unmanaged`），把 nameserver 指向 `169.254.254.53`，让宿主应用和 Docker 容器看到同一个非 loopback 解析器。
 - 目标机默认联网拉取 `mysql:8.0` 和 `redis:7-alpine`。
 - `mkcert` 二进制已内置在发布包中（`support/bin/mkcert`），安装时若系统未预装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
 - `cube proxy` 的 TLS 证书和私钥保存在宿主机 `CUBE_PROXY_CERT_DIR`，并通过 `docker compose` 以只读方式挂载进容器；更新证书后无需重建镜像，只需重启 `cube-proxy` 或在容器内 reload nginx。
@@ -323,5 +371,7 @@ export E2B_API_KEY=dummy
 
 - 查看当前 split DNS 状态：`resolvectl status`
 - 验证宿主机 stub 是否正常：`dig +tcp +timeout=3 docker.cnb.cool @127.0.0.53`
-- 验证本地 CoreDNS 是否正常：若使用 `systemd-resolved` 路径，默认执行 `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`；若使用 `NetworkManager` 回退路径，则执行 `dig +tcp +timeout=3 foo.cube.app @127.0.0.54`
+- 验证本地 DNS 入口是否正常：两条路径下客户端入口都是同一个 dummy link IP，统一执行 `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`。CoreDNS 内部仍然绑在 `127.0.0.54`，但只有 `systemd-resolved` 路径直连 CoreDNS，`NetworkManager` 回退路径先到 `dnsmasq` 再转发到 CoreDNS。
+- 验证宿主 `/etc/resolv.conf` 是否走该入口：`cat /etc/resolv.conf` 应能看到 `nameserver 169.254.254.53`（两条路径均如此）。
+- 验证容器视角：`docker run --rm alpine cat /etc/resolv.conf` 也应是 `nameserver 169.254.254.53`。如果看到 `nameserver 8.8.8.8`，说明宿主 `/etc/resolv.conf` 退化到了 loopback nameserver，导致 Docker 回退到内置公网 DNS。
 - 若使用 `systemd-resolved` 路径，正常情况下默认网卡不应承载本地 CoreDNS 地址；该地址应只出现在专用 dummy link 上。

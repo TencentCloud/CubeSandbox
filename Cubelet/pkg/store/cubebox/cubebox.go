@@ -123,6 +123,8 @@ type CubeBox struct {
 
 	VirtiofsMap map[string]*virtiofs.VirtiofsConfig `json:"virtiofs_config_map,omitempty"`
 
+	Volumes []*cubebox.Volume `json:"volumes,omitempty"`
+
 	HotPlugDevices map[string]*shimtypes.CubeShimDevice `json:"hot_plug_devices,omitempty"`
 
 	HotPlugDisk map[string]*shimtypes.ChDiskDevice `json:"hot_plug_disk,omitempty"`

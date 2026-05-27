@@ -275,11 +275,12 @@ type Config struct {
 
 	RootPath string `toml:"root_path"`
 
-	EnableNetworkAgent        bool             `toml:"enable_network_agent"`
-	NetworkAgentEndpoint      string           `toml:"network_agent_endpoint"`
-	NetworkAgentTapSocket     string           `toml:"network_agent_tap_socket"`
-	NetworkAgentInitTimeout   tomlext.Duration `toml:"network_agent_init_timeout"`
-	NetworkAgentRetryInterval tomlext.Duration `toml:"network_agent_retry_interval"`
+	EnableNetworkAgent          bool             `toml:"enable_network_agent"`
+	NetworkAgentEndpoint        string           `toml:"network_agent_endpoint"`
+	NetworkAgentTapSocket       string           `toml:"network_agent_tap_socket"`
+	NetworkAgentInitTimeout     tomlext.Duration `toml:"network_agent_init_timeout"`
+	NetworkAgentRetryInterval   tomlext.Duration `toml:"network_agent_retry_interval"`
+	NetworkAgentTapFDTimeout    tomlext.Duration `toml:"network_agent_tap_fd_timeout"`
 
 	ReconcileInterval tomlext.Duration `toml:"reconcile_interval"`
 }
@@ -327,6 +328,9 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 	}
 	if config.NetworkAgentRetryInterval == 0 {
 		config.NetworkAgentRetryInterval = tomlext.FromStdTime(time.Second)
+	}
+	if config.NetworkAgentTapFDTimeout == 0 {
+		config.NetworkAgentTapFDTimeout = tomlext.FromStdTime(2 * time.Second)
 	}
 
 	if config.MvmMask == 0 {
@@ -463,6 +467,26 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 		l.recordNetworkAgentFailure(naErr)
 		return ret.Errorf(errorcode.ErrorCode_CreateNetworkFailed, "network-agent EnsureNetwork failed: %s", classifyNetworkAgentError(naErr))
 	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		// Use a detached context with a 15-second timeout to ensure rollback succeeds even if the parent context is cancelled, without hanging indefinitely.
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		releaseReq := &networkagentclient.ReleaseNetworkRequest{
+			SandboxID:       opts.SandboxID,
+			NetworkHandle:   ensureResp.NetworkHandle,
+			IdempotencyKey:  ensureReq.IdempotencyKey,
+			PersistMetadata: ensureResp.PersistMetadata,
+		}
+		if rErr := l.networkAgentClient.ReleaseNetwork(rollbackCtx, releaseReq); rErr != nil {
+			log.G(rollbackCtx).Warnf("failed to release network during rollback for sandbox %s: %v", opts.SandboxID, rErr)
+		}
+		l.unregisterNetworkAgentTapForPool(rollbackCtx, opts.SandboxID)
+	}()
+
 	log.G(ctx).Infof("tap create ensure response: sandbox_id=%s network_handle=%s interfaces=%d routes=%d arps=%d port_mappings=%d persist_metadata=%s",
 		ensureResp.SandboxID, ensureResp.NetworkHandle, len(ensureResp.Interfaces), len(ensureResp.Routes),
 		len(ensureResp.ARPNeighbors), len(ensureResp.PortMappings), utils.InterfaceToString(ensureResp.PersistMetadata))
@@ -956,7 +980,8 @@ func (l *local) registerNetworkAgentTapForPool(ctx context.Context, sandboxID st
 	if intf.IPAddr == nil {
 		return fmt.Errorf("shim network sandbox ip is empty")
 	}
-	file, err := requestNetworkAgentTapFile(l.Config.NetworkAgentTapSocket, sandboxID, intf.Name)
+	tapFDTimeout := time.Duration(l.Config.NetworkAgentTapFDTimeout)
+	file, err := requestNetworkAgentTapFile(l.Config.NetworkAgentTapSocket, sandboxID, intf.Name, tapFDTimeout)
 	if err != nil {
 		return fmt.Errorf("request original tap fd for %s: %w", intf.Name, err)
 	}
@@ -1014,7 +1039,7 @@ type networkAgentTapFDResponse struct {
 	ErrMsg  string `json:"errMsg"`
 }
 
-func requestNetworkAgentTapFile(socketPath, sandboxID, tapName string) (*os.File, error) {
+func requestNetworkAgentTapFile(socketPath, sandboxID, tapName string, timeout time.Duration) (*os.File, error) {
 	if socketPath == "" {
 		return nil, fmt.Errorf("network-agent tap socket is empty")
 	}
@@ -1024,7 +1049,7 @@ func requestNetworkAgentTapFile(socketPath, sandboxID, tapName string) (*os.File
 		return nil, err
 	}
 	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err
 	}
 	reqBody, err := json.Marshal(&networkAgentTapFDRequest{

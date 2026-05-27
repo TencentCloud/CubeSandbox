@@ -10,7 +10,8 @@ use crate::log::{stat_defer, Log};
 use cube_hypervisor::config::RestoreConfig;
 use cube_hypervisor::vm_config::{DeviceConfig, FsConfig};
 use cube_hypervisor::{
-    self, config, vmm_config, ApiRequest, ApiResponsePayload, VmRemoveDeviceData, VmSnapshotConfig,
+    self, config, vmm_config, ApiRequest, ApiResponsePayload, SnapshotConfig, SnapshotType,
+    VmRemoveDeviceData,
 };
 use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
@@ -131,10 +132,12 @@ impl CubeHypervisor {
         Ok(())
     }
 
-    pub async fn snapshot_vm(&self, path: &str) -> CResult<()> {
+    pub async fn snapshot_vm(&self, path: &str, snapshot_type: SnapshotType) -> CResult<()> {
         let ch = self.ch.as_ref().unwrap().lock().await;
-        let snap_config = Arc::new(VmSnapshotConfig {
+        let snap_config = Arc::new(SnapshotConfig {
             destination_url: path.to_string(),
+            snapshot_type,
+            ..Default::default()
         });
         let _ = ch
             .send_request(ApiRequest::VmSnapshot(snap_config))
@@ -231,6 +234,19 @@ impl CubeHypervisor {
         Ok(())
     }
 
+    /// Delete the current VM (cube-hypervisor `VmDelete`).
+    /// The VMM shuts down the VM if still running, then destroys the VM object.
+    /// After this call the hypervisor process is still alive and can host a new VM
+    /// (e.g. restored from a snapshot via `resume_vm_cube_with_config`).
+    pub async fn delete_vm(&self) -> CResult<()> {
+        let ch = self.ch.as_ref().unwrap().lock().await;
+        let _ = ch
+            .send_request(ApiRequest::VmDelete)
+            .map_err(|e| self.status_err(format!("Delete vm failed:{}", e)))?
+            .map_err(|e| self.status_err(format!("Delete vm failed:{}", e)))?;
+        Ok(())
+    }
+
     pub async fn wait_notify(&self, timeout: Duration) -> CResult<NotifyEvent> {
         if let Some(recv) = &self.ev_receiver {
             let rx = recv.lock().await;
@@ -268,8 +284,9 @@ impl CubeHypervisor {
     }
 
     pub async fn pause_vm_cube(&self, path: &str) -> CResult<()> {
-        let snap_config = Arc::new(VmSnapshotConfig {
+        let snap_config = Arc::new(SnapshotConfig {
             destination_url: path.to_string(),
+            ..Default::default()
         });
         let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
@@ -285,6 +302,17 @@ impl CubeHypervisor {
             source_url: path.into(),
             ..Default::default()
         });
+        let ch = self.ch.as_ref().unwrap().lock().await;
+        let _ = ch
+            .send_request(ApiRequest::VmResumeFromSnapshot(restore_config))
+            .map_err(|e| self.status_err(format!("resume vm from snapshot failed:{}", e)))?
+            .map_err(|e| self.status_err(format!("resume vm from snapshot failed:{}", e)))?;
+
+        Ok(())
+    }
+
+    pub async fn resume_vm_cube_with_config(&self, config: RestoreConfig) -> CResult<()> {
+        let restore_config = Arc::new(config);
         let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
             .send_request(ApiRequest::VmResumeFromSnapshot(restore_config))

@@ -156,9 +156,8 @@ impl BlockEpollHandler {
                     // avail ring, for later processing.
                     queue.go_to_previous_position();
                     limit_by_ops = Wrapping(1);
-                    self.rate_limited.call_once(||{
-                        info!("{} block ops ratelimit fired", self.id)
-                    });
+                    self.rate_limited
+                        .call_once(|| info!("{} block ops ratelimit fired", self.id));
                     break;
                 }
                 // Exercise the rate limiter only if this request is of data transfer type.
@@ -181,16 +180,14 @@ impl BlockEpollHandler {
                             // avail ring, for later processing.
                             queue.go_to_previous_position();
                             limit_by_bytes = Wrapping(1);
-                            self.rate_limited.call_once(||{
-                                info!("{} block bw ratelimit fired", self.id)
-                            });
+                            self.rate_limited
+                                .call_once(|| info!("{} block bw ratelimit fired", self.id));
                             break;
                         }
                         BucketReduction::OverConsumption(_r) => {
                             limit_by_bytes = Wrapping(1);
-                            self.rate_limited.call_once(||{
-                                info!("{} block bw ratelimit fired", self.id)
-                            });
+                            self.rate_limited
+                                .call_once(|| info!("{} block bw ratelimit fired", self.id));
                             break;
                         }
                         BucketReduction::Success => {}

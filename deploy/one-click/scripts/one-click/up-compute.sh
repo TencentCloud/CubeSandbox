@@ -25,6 +25,7 @@ test -x "${CUBELET_BIN}" || die "cubelet binary missing: ${CUBELET_BIN}"
 test -f "${NETWORK_AGENT_CFG}" || die "network-agent config missing: ${NETWORK_AGENT_CFG}"
 test -f "${CUBELET_CONFIG}" || die "cubelet config missing: ${CUBELET_CONFIG}"
 test -f "${CUBELET_DYNAMICCONF}" || die "cubelet dynamic config missing: ${CUBELET_DYNAMICCONF}"
+validate_cubelet_cow_startup_deps "${CUBELET_CONFIG}"
 
 ROLE="$(one_click_deploy_role)"
 [[ "${ROLE}" == "compute" ]] || die "up-compute.sh requires ONE_CLICK_DEPLOY_ROLE=compute"

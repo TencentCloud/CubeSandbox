@@ -26,13 +26,11 @@ CubeVS attaches one BPF program to each of the three network boundaries a packet
 | `from_world` | `nodenic.bpf.c` | TC ingress on host NIC (eth0) | External --> Host | Reverse NAT, port-mapping proxy |
 | `from_envoy` | `localgw.bpf.c` | TC egress on cube-dev | Overlay --> Sandbox | DNAT overlay traffic to sandbox IP, redirect to TAP |
 
-A fourth, lightweight program -- `filter_from_cube` -- is attached via XDP on cube-dev. It serves as an early-reject filter, dropping unsolicited inbound TCP and UDP packets before they enter the TC layer, while still allowing ICMP and packets that belong to existing sessions.
-
 ### 1.3 The Go Control Plane
 
 The `cubevs/` Go package wraps the BPF lifecycle:
 
-- **`Init()`** loads and pins all three BPF object files, rewrites compile-time constants (IPs, MACs, interface indices), and attaches TC / XDP filters.
+- **`Init()`** loads and pins all three BPF object files, rewrites compile-time constants (IPs, MACs, interface indices), and attaches TC filters.
 - **`AddTAPDevice()` / `DelTAPDevice()`** register and deregister sandbox TAP devices, including their metadata and network policies.
 - **`AttachFilter()`** creates the clsact qdisc on a TAP device and attaches the `from_cube` TC filter.
 - **`SetSNATIPs()`** populates the SNAT IP pool.
@@ -333,8 +331,6 @@ When a sandbox is destroyed, `DelTAPDevice(ifindex, ip)`:
    - `from_world` is attached to the host NIC's TC ingress hook (handling external-to-sandbox reply traffic).
    - `from_world` is also attached to the loopback interface for completeness.
 
-4. **Attach XDP** -- `filter_from_cube` is attached to cube-dev's XDP hook. This provides an early, high-performance rejection of unsolicited inbound TCP/UDP traffic before it reaches the TC layer.
-
 ### 8.2 Constant Rewriting
 
 BPF programs cannot read configuration files at runtime. Instead, CubeVS uses a pattern common in the eBPF ecosystem: global variables in the BPF C source are compiled as constants, and the Go loader rewrites their values in the ELF object before loading it into the kernel. This approach gives the programs the performance of compile-time constants (the verifier can optimize branches) with the flexibility of runtime configuration.
@@ -370,7 +366,7 @@ graph TB
     end
     
     subgraph "Host Kernel"
-        CD["cube-dev<br/>(from_envoy + XDP filter)"]
+        CD["cube-dev<br/>(from_envoy)"]
         NIC["Host NIC - eth0<br/>(from_world)"]
     end
     

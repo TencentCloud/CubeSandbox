@@ -67,6 +67,17 @@ func CommitSandbox(ctx context.Context, calleeEp string,
 	return c.CommitSandbox(ctx, req)
 }
 
+func RollbackSandbox(ctx context.Context, calleeEp string,
+	req *cubebox.RollbackSandboxRequest) (*cubebox.RollbackSandboxResponse, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	defer conn.Close()
+	c := cubebox.NewCubeboxMgrClient(conn.Value())
+	return c.RollbackSandbox(ctx, req)
+}
+
 func CleanupTemplate(ctx context.Context, calleeEp string,
 	req *cubebox.CleanupTemplateRequest) (*cubebox.CleanupTemplateResponse, error) {
 	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
@@ -76,6 +87,50 @@ func CleanupTemplate(ctx context.Context, calleeEp string,
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
 	return c.CleanupTemplate(ctx, req)
+}
+
+func ListSandboxSnapshots(ctx context.Context, calleeEp string,
+	req *cubebox.ListSandboxSnapshotsRequest) (*cubebox.ListSandboxSnapshotsResponse, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	defer conn.Close()
+	c := cubebox.NewCubeboxMgrClient(conn.Value())
+	return c.ListSandboxSnapshots(ctx, req)
+}
+
+func ListLocalSnapshots(ctx context.Context, calleeEp string,
+	req *cubebox.ListLocalSnapshotsRequest) (*cubebox.ListLocalSnapshotsResponse, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	defer conn.Close()
+	c := cubebox.NewCubeboxMgrClient(conn.Value())
+	return c.ListLocalSnapshots(ctx, req)
+}
+
+func GetLocalSnapshot(ctx context.Context, calleeEp string,
+	req *cubebox.GetLocalSnapshotRequest) (*cubebox.GetLocalSnapshotResponse, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	defer conn.Close()
+	c := cubebox.NewCubeboxMgrClient(conn.Value())
+	return c.GetLocalSnapshot(ctx, req)
+}
+
+func GetStorageMetrics(ctx context.Context, calleeEp string,
+	req *cubebox.GetStorageMetricsRequest) (*cubebox.GetStorageMetricsResponse, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	defer conn.Close()
+	c := cubebox.NewCubeboxMgrClient(conn.Value())
+	return c.GetStorageMetrics(ctx, req)
 }
 
 func List(ctx context.Context, calleeEp string,

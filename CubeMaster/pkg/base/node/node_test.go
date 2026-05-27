@@ -11,7 +11,6 @@ import (
 	"math/big"
 	pseudorand "math/rand"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -210,7 +209,6 @@ func TestNodes_IndexByPageFallbackRejectsOutOfRangeStart(t *testing.T) {
 }
 
 func TestRandNode(t *testing.T) {
-	pseudorand.Seed(time.Now().UnixNano())
 	nodes := NodeList{}
 	testNum := 10
 	for i := 1; i <= testNum; i++ {

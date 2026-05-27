@@ -25,18 +25,28 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	"gorm.io/gorm"
 )
 
 const (
-	DefaultTemplateVersion = "v2"
+	DefaultTemplateVersion              = "v2"
+	snapshotRuntimeRefReleasedByDestroy = "sandbox destroyed"
 
 	StatusPending        = "PENDING"
 	StatusReady          = "READY"
 	StatusPartiallyReady = "PARTIALLY_READY"
 	StatusFailed         = "FAILED"
+	StatusCreating       = "CREATING"
+	StatusDeleting       = "DELETING"
+
+	TemplateKindTemplate = "template"
+	TemplateKindSnapshot = "snapshot"
+
+	StorageBackendCow = "cubecow"
 
 	ReplicaStatusReady  = "READY"
 	ReplicaStatusFailed = "FAILED"
@@ -70,12 +80,17 @@ var (
 	storeOnce sync.Once
 )
 
+// ReplicaStatus is the master-side, control-plane view of a template replica
+// on a given node. v5: physical fields (rootfs_vol, memory_vol, snapshot_path,
+// meta_dir, build_rootfs_vol, rootfs_kind, memory_kind, rootfs_dev,
+// memory_dev) were removed because Cubelet's local snapshot catalog is the
+// single source of truth, queried by templateID/snapshotID at restore/cleanup
+// time.
 type ReplicaStatus struct {
 	NodeID          string `json:"node_id"`
 	NodeIP          string `json:"node_ip"`
 	InstanceType    string `json:"instance_type,omitempty"`
 	Spec            string `json:"spec,omitempty"`
-	SnapshotPath    string `json:"snapshot_path,omitempty"`
 	Status          string `json:"status"`
 	Phase           string `json:"phase,omitempty"`
 	ArtifactID      string `json:"artifact_id,omitempty"`
@@ -86,19 +101,53 @@ type ReplicaStatus struct {
 }
 
 type TemplateInfo struct {
-	TemplateID   string          `json:"template_id"`
-	InstanceType string          `json:"instance_type,omitempty"`
-	Version      string          `json:"version,omitempty"`
-	Status       string          `json:"status"`
-	LastError    string          `json:"last_error,omitempty"`
-	CreatedAt    string          `json:"created_at,omitempty"`
-	ImageInfo    string          `json:"image_info,omitempty"`
-	Replicas     []ReplicaStatus `json:"replicas,omitempty"`
+	TemplateID                string          `json:"template_id"`
+	InstanceType              string          `json:"instance_type,omitempty"`
+	Version                   string          `json:"version,omitempty"`
+	Status                    string          `json:"status"`
+	Kind                      string          `json:"kind,omitempty"`
+	OriginSandboxID           string          `json:"origin_sandbox_id,omitempty"`
+	OriginNodeID              string          `json:"origin_node_id,omitempty"`
+	DisplayName               string          `json:"display_name,omitempty"`
+	StorageBackend            string          `json:"storage_backend,omitempty"`
+	Retain                    bool            `json:"retain,omitempty"`
+	RootfsSizeBytesAtSnapshot uint64          `json:"rootfs_size_bytes_at_snapshot,omitempty"`
+	LastError                 string          `json:"last_error,omitempty"`
+	CreatedAt                 string          `json:"created_at,omitempty"`
+	ImageInfo                 string          `json:"image_info,omitempty"`
+	Replicas                  []ReplicaStatus `json:"replicas,omitempty"`
+}
+
+func templateInfoFromDefinition(def models.TemplateDefinition) TemplateInfo {
+	return TemplateInfo{
+		TemplateID:                def.TemplateID,
+		InstanceType:              def.InstanceType,
+		Version:                   def.Version,
+		Status:                    def.Status,
+		Kind:                      def.Kind,
+		OriginSandboxID:           def.OriginSandboxID,
+		OriginNodeID:              def.OriginNodeID,
+		DisplayName:               def.DisplayName,
+		StorageBackend:            def.StorageBackend,
+		Retain:                    def.Retain,
+		RootfsSizeBytesAtSnapshot: def.RootfsSizeBytesAtSnapshot,
+		LastError:                 def.LastError,
+	}
 }
 
 type replicaRunOptions struct {
 	ArtifactID string
 	JobID      string
+}
+
+type definitionCreateOptions struct {
+	Kind                      string
+	OriginSandboxID           string
+	OriginNodeID              string
+	DisplayName               string
+	StorageBackend            string
+	Retain                    bool
+	RootfsSizeBytesAtSnapshot uint64
 }
 
 func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
@@ -130,15 +179,10 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 		if latestJob := latestJobByTemplateID[def.TemplateID]; latestJob != nil {
 			imageInfo = composeImageInfo(latestJob.SourceImageRef, latestJob.SourceImageDigest)
 		}
-		out = append(out, TemplateInfo{
-			TemplateID:   def.TemplateID,
-			InstanceType: def.InstanceType,
-			Version:      def.Version,
-			Status:       def.Status,
-			LastError:    def.LastError,
-			CreatedAt:    formatUTCRFC3339(def.CreatedAt),
-			ImageInfo:    imageInfo,
-		})
+		info := templateInfoFromDefinition(def)
+		info.CreatedAt = formatUTCRFC3339(def.CreatedAt)
+		info.ImageInfo = imageInfo
+		out = append(out, info)
 	}
 	seen := make(map[string]struct{}, len(out))
 	for _, item := range out {
@@ -179,9 +223,19 @@ func Init(ctx context.Context) error {
 		if initErr != nil {
 			return
 		}
+		initErr = initSnapshotRuntimeRefTable(store.db)
+		if initErr != nil {
+			return
+		}
+		if initErr = sandboxspec.Init(store.db); initErr != nil {
+			return
+		}
+		configureSnapshotRuntimeRefHooks()
+		configureSandboxSpecHooks()
 		if warmErr := warmReadyTemplateLocality(ctx); warmErr != nil {
 			log.G(ctx).Warnf("warm ready template locality fail:%v", warmErr)
 		}
+		startSnapshotReconciler(ctx)
 	})
 	return initErr
 }
@@ -198,6 +252,13 @@ func initTemplateDefinitionTable(client *gorm.DB) error {
 		instance_type varchar(64) NOT NULL DEFAULT '' COMMENT 'instance type',
 		version varchar(32) NOT NULL DEFAULT '' COMMENT 'template version',
 		status varchar(32) NOT NULL DEFAULT '' COMMENT 'template status',
+		kind varchar(32) NOT NULL DEFAULT 'template' COMMENT 'template kind',
+		origin_sandbox_id varchar(128) NOT NULL DEFAULT '' COMMENT 'origin sandbox id for snapshots',
+		origin_node_id varchar(128) NOT NULL DEFAULT '' COMMENT 'origin node id for snapshots',
+		display_name varchar(256) NOT NULL DEFAULT '' COMMENT 'display name for snapshots',
+		storage_backend varchar(32) NOT NULL DEFAULT '' COMMENT 'storage backend',
+		retain tinyint(1) NOT NULL DEFAULT 0 COMMENT 'retain snapshot from gc',
+		rootfs_size_bytes_at_snapshot bigint unsigned NOT NULL DEFAULT 0 COMMENT 'rootfs size at snapshot time',
 		request_json mediumtext NOT NULL COMMENT 'normalized template request json',
 		last_error text COMMENT 'last error message',
 		created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -205,7 +266,11 @@ func initTemplateDefinitionTable(client *gorm.DB) error {
 		deleted_at datetime DEFAULT NULL,
 		PRIMARY KEY (id),
 		UNIQUE KEY idx_template_id (template_id),
-		KEY idx_status (status)
+		KEY idx_status (status),
+		KEY idx_template_kind_status (kind,status),
+		KEY idx_snapshot_origin_sandbox (origin_sandbox_id),
+		KEY idx_snapshot_origin_node (origin_node_id),
+		KEY idx_template_storage_backend (storage_backend)
 	  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error
 }
 
@@ -221,6 +286,14 @@ func initTemplateReplicaTable(client *gorm.DB) error {
 			instance_type varchar(64) NOT NULL DEFAULT '' COMMENT 'instance type',
 			spec varchar(128) NOT NULL DEFAULT '' COMMENT 'resource spec',
 			snapshot_path varchar(1024) NOT NULL DEFAULT '' COMMENT 'snapshot path',
+			rootfs_vol varchar(256) NOT NULL DEFAULT '' COMMENT 'rootfs cubecow object name',
+			memory_vol varchar(256) NOT NULL DEFAULT '' COMMENT 'memory cubecow object name',
+			rootfs_kind varchar(16) NOT NULL DEFAULT '' COMMENT 'rootfs cubecow object kind',
+			memory_kind varchar(16) NOT NULL DEFAULT '' COMMENT 'memory cubecow object kind',
+			rootfs_dev varchar(256) NOT NULL DEFAULT '' COMMENT 'rootfs device path',
+			memory_dev varchar(256) NOT NULL DEFAULT '' COMMENT 'memory device path',
+			meta_dir varchar(1024) NOT NULL DEFAULT '' COMMENT 'snapshot metadata directory',
+			build_rootfs_vol varchar(256) NOT NULL DEFAULT '' COMMENT 'build rootfs cubecow object name',
 			status varchar(32) NOT NULL DEFAULT '' COMMENT 'replica status',
 			phase varchar(32) NOT NULL DEFAULT '' COMMENT 'replica phase',
 			artifact_id varchar(128) NOT NULL DEFAULT '' COMMENT 'replica artifact id',
@@ -279,6 +352,69 @@ func migrateTemplateReplicaTable(client *gorm.DB, tableName string) error {
 	return nil
 }
 
+func initSnapshotRuntimeRefTable(client *gorm.DB) error {
+	if client.Migrator().HasTable(&models.SnapshotRuntimeRef{}) {
+		return nil
+	}
+	stmt := &gorm.Statement{DB: client}
+	stmt.Parse(&models.SnapshotRuntimeRef{})
+	return client.Exec(`CREATE TABLE IF NOT EXISTS ` + stmt.Schema.Table + ` (
+		id bigint unsigned NOT NULL AUTO_INCREMENT,
+		snapshot_id varchar(128) NOT NULL COMMENT 'snapshot id',
+		sandbox_id varchar(128) NOT NULL COMMENT 'sandbox id',
+		node_id varchar(128) NOT NULL DEFAULT '' COMMENT 'node id',
+		node_ip varchar(64) NOT NULL DEFAULT '' COMMENT 'node ip',
+		binding_type varchar(64) NOT NULL DEFAULT '' COMMENT 'runtime binding type',
+		memory_vol varchar(256) NOT NULL DEFAULT '' COMMENT 'snapshot memory volume name',
+		memory_dev varchar(256) NOT NULL DEFAULT '' COMMENT 'snapshot memory device path',
+		rootfs_vol varchar(256) NOT NULL DEFAULT '' COMMENT 'runtime rootfs volume after restore',
+		sandbox_gen int unsigned NOT NULL DEFAULT 0 COMMENT 'runtime rootfs generation',
+		status varchar(32) NOT NULL DEFAULT '' COMMENT 'runtime ref status',
+		attached_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'when runtime ref becomes active',
+		released_at datetime DEFAULT NULL COMMENT 'when runtime ref is released',
+		last_seen_at datetime DEFAULT NULL COMMENT 'last observed timestamp',
+		last_error text COMMENT 'last reconcile or release error',
+		created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		deleted_at datetime DEFAULT NULL,
+		PRIMARY KEY (id),
+		KEY idx_snapshot_runtime_ref_snapshot_status (snapshot_id,status),
+		KEY idx_snapshot_runtime_ref_sandbox_status (sandbox_id,status),
+		KEY idx_snapshot_runtime_ref_node_status (node_id,status)
+	  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error
+}
+
+func configureSnapshotRuntimeRefHooks() {
+	releaseBySandboxID := func(ctx context.Context, sandboxID string) error {
+		errReleasingRefs := ReleaseSnapshotRuntimeRefsBySandbox(ctx, sandboxID, snapshotRuntimeRefReleasedByDestroy)
+		errDeletingSpec := sandboxspec.Delete(ctx, sandboxID)
+		if errReleasingRefs != nil && errDeletingSpec != nil {
+			return errors.Join(errReleasingRefs, errDeletingSpec)
+		}
+		if errReleasingRefs != nil {
+			return errReleasingRefs
+		}
+		if errDeletingSpec != nil && !errors.Is(errDeletingSpec, sandboxspec.ErrSandboxSpecNotFound) {
+			return errDeletingSpec
+		}
+		return nil
+	}
+	sandbox.SetAfterDestroySandboxSuccessHook(releaseBySandboxID)
+	task.SetAfterDestroyTaskSuccessHook(releaseBySandboxID)
+}
+
+// configureSandboxSpecHooks wires sandbox create success to the canonical
+// spec store. Failures are swallowed by the sandbox layer (logged only); we
+// still surface them here so future callers of the hook can react.
+func configureSandboxSpecHooks() {
+	sandbox.SetAfterCreateSandboxSuccessHook(func(ctx context.Context, sandboxID, hostID, hostIP string, req *sandboxtypes.CreateCubeSandboxReq) error {
+		return sandboxspec.Put(ctx, sandboxID, req, sandboxspec.PutOptions{
+			HostID: hostID,
+			HostIP: hostIP,
+		})
+	})
+}
+
 func isReady() bool {
 	return store.db != nil
 }
@@ -329,6 +465,14 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sa
 	cloned.InsId = ""
 	cloned.InsIp = ""
 	cloned.Request = nil
+	// v4+: runtime-binding annotations are per-invocation and owned by
+	// cubelet's local catalog. Strip them from the stored template request
+	// so future restores/snapshots cannot drag a stale logical id or
+	// attachment timestamp into the new sandbox's request envelope. Physical
+	// memory-vol annotations were removed entirely in v5 (the constants no
+	// longer exist).
+	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotID)
+	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
 	cloned.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
 	return cloned, nil
 }
@@ -476,7 +620,10 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	}
 	replica.Status = ReplicaStatusReady
 	replica.Phase = ReplicaPhaseReady
-	replica.SnapshotPath = rsp.GetSnapshotPath()
+	// v4: AppSnapshot replica is "thin" -- physical refs are owned by cubelet's
+	// local catalog. Master only persists control-plane state (status / phase /
+	// last job / error) so we deliberately ignore SnapshotPath/RootfsVol/
+	// MemoryVol/RootfsKind/MemoryKind in the RPC response here.
 	replica.LastErrorPhase = ""
 	replica.CleanupRequired = false
 	replica.ErrorMessage = ""
@@ -547,6 +694,7 @@ func createDefinition(ctx context.Context, templateID string, storedReq *sandbox
 		InstanceType: instanceType,
 		Version:      version,
 		Status:       StatusPending,
+		Kind:         TemplateKindTemplate,
 		RequestJSON:  string(payload),
 	}
 	if err = store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).Create(model).Error; err != nil {
@@ -556,6 +704,10 @@ func createDefinition(ctx context.Context, templateID string, storedReq *sandbox
 		return err
 	}
 	return nil
+}
+
+func createDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
+	return createDefinitionTx(ctx, store.db.WithContext(ctx), templateID, storedReq, instanceType, version, opts)
 }
 
 func ensureTemplateDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
@@ -628,14 +780,9 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 	if err != nil {
 		return nil, err
 	}
-	out := &TemplateInfo{
-		TemplateID:   def.TemplateID,
-		InstanceType: def.InstanceType,
-		Version:      def.Version,
-		Status:       def.Status,
-		LastError:    def.LastError,
-		Replicas:     make([]ReplicaStatus, 0, len(replicas)),
-	}
+	info := templateInfoFromDefinition(*def)
+	out := &info
+	out.Replicas = make([]ReplicaStatus, 0, len(replicas))
 	for _, replica := range replicas {
 		out.Replicas = append(out.Replicas, replicaModelToStatus(replica))
 	}
@@ -803,7 +950,6 @@ func replicaModelToStatus(replica models.TemplateReplica) ReplicaStatus {
 		NodeIP:          replica.NodeIP,
 		InstanceType:    replica.InstanceType,
 		Spec:            replica.Spec,
-		SnapshotPath:    replica.SnapshotPath,
 		Status:          replica.Status,
 		Phase:           replica.Phase,
 		ArtifactID:      replica.ArtifactID,
@@ -811,6 +957,39 @@ func replicaModelToStatus(replica models.TemplateReplica) ReplicaStatus {
 		LastErrorPhase:  replica.LastErrorPhase,
 		CleanupRequired: replica.CleanupRequired,
 		ErrorMessage:    replica.ErrorMessage,
+	}
+}
+
+func replicaStatusToModel(templateID, instanceType string, replica ReplicaStatus) *models.TemplateReplica {
+	return &models.TemplateReplica{
+		TemplateID:      templateID,
+		NodeID:          replica.NodeID,
+		NodeIP:          replica.NodeIP,
+		InstanceType:    instanceType,
+		Spec:            replica.Spec,
+		Status:          replica.Status,
+		Phase:           replica.Phase,
+		ArtifactID:      replica.ArtifactID,
+		LastJobID:       replica.LastJobID,
+		LastErrorPhase:  replica.LastErrorPhase,
+		CleanupRequired: replica.CleanupRequired,
+		ErrorMessage:    replica.ErrorMessage,
+	}
+}
+
+func replicaStatusUpdateFields(instanceType string, replica ReplicaStatus) map[string]any {
+	return map[string]any{
+		"node_ip":          replica.NodeIP,
+		"instance_type":    instanceType,
+		"spec":             replica.Spec,
+		"status":           replica.Status,
+		"phase":            replica.Phase,
+		"artifact_id":      replica.ArtifactID,
+		"last_job_id":      replica.LastJobID,
+		"last_error_phase": replica.LastErrorPhase,
+		"cleanup_required": replica.CleanupRequired,
+		"error_message":    replica.ErrorMessage,
+		"updated_at":       time.Now(),
 	}
 }
 
@@ -826,35 +1005,10 @@ func UpsertReplica(ctx context.Context, templateID, instanceType string, replica
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		record.TemplateID = templateID
-		record.NodeID = replica.NodeID
-		record.NodeIP = replica.NodeIP
-		record.InstanceType = instanceType
-		record.Spec = replica.Spec
-		record.SnapshotPath = replica.SnapshotPath
-		record.Status = replica.Status
-		record.Phase = replica.Phase
-		record.ArtifactID = replica.ArtifactID
-		record.LastJobID = replica.LastJobID
-		record.LastErrorPhase = replica.LastErrorPhase
-		record.CleanupRequired = replica.CleanupRequired
-		record.ErrorMessage = replica.ErrorMessage
-		return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).Create(record).Error
+		return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+			Create(replicaStatusToModel(templateID, instanceType, replica)).Error
 	}
-	return dbq.Updates(map[string]any{
-		"node_ip":          replica.NodeIP,
-		"instance_type":    instanceType,
-		"spec":             replica.Spec,
-		"snapshot_path":    replica.SnapshotPath,
-		"status":           replica.Status,
-		"phase":            replica.Phase,
-		"artifact_id":      replica.ArtifactID,
-		"last_job_id":      replica.LastJobID,
-		"last_error_phase": replica.LastErrorPhase,
-		"cleanup_required": replica.CleanupRequired,
-		"error_message":    replica.ErrorMessage,
-		"updated_at":       time.Now(),
-	}).Error
+	return dbq.Updates(replicaStatusUpdateFields(instanceType, replica)).Error
 }
 
 func EnsureReadyReplica(ctx context.Context, templateID string) error {
@@ -871,6 +1025,24 @@ func EnsureReadyReplica(ctx context.Context, templateID string) error {
 		}
 	}
 	return ErrTemplateHasNoReadyReplica
+}
+
+func ResolveTemplateReadyReplica(ctx context.Context, templateID, preferredNodeID string) (ReplicaStatus, error) {
+	replicas, err := ListReplicas(ctx, templateID)
+	if err != nil {
+		return ReplicaStatus{}, err
+	}
+	preferredNodeID = strings.TrimSpace(preferredNodeID)
+	for _, item := range replicas {
+		replica := replicaModelToStatus(item)
+		if replica.Status != ReplicaStatusReady {
+			continue
+		}
+		if preferredNodeID == "" || strings.TrimSpace(replica.NodeID) == preferredNodeID {
+			return replica, nil
+		}
+	}
+	return ReplicaStatus{}, ErrTemplateHasNoReadyReplica
 }
 
 func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType string) error {

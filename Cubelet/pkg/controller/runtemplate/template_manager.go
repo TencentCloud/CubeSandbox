@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -166,6 +167,10 @@ func recoveredLocalTemplateFromSnapshotPath(snapshotPath string) *templatetypes.
 	if snapshotPath == "" {
 		return nil
 	}
+	snapshotPath = filepath.Clean(snapshotPath)
+	if isTemporarySnapshotPath(snapshotPath) {
+		return nil
+	}
 	configPath := filepath.Join(snapshotPath, "snapshot", "config.json")
 	if _, err := os.Stat(configPath); err != nil {
 		return nil
@@ -195,6 +200,11 @@ func recoveredLocalTemplateFromSnapshotPath(snapshotPath string) *templatetypes.
 		Volumes:  map[string]templatetypes.LocalBaseVolume{},
 		Componts: map[string]templatetypes.LocalComponent{},
 	}
+}
+
+func isTemporarySnapshotPath(snapshotPath string) bool {
+	base := filepath.Base(filepath.Clean(snapshotPath))
+	return strings.HasSuffix(base, ".tmp")
 }
 
 type unusedTemplate struct {

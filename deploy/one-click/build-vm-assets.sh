@@ -241,6 +241,117 @@ run_mkfs_ext4_with_optional_sudo() {
   sudo mkfs.ext4 "$@"
 }
 
+run_as_root() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    "$@"
+    return $?
+  fi
+
+  # Try without sudo first so the caller can still capture stdout via $(...).
+  # Only stderr is silenced so a permission error doesn't pollute the log
+  # before the sudo fallback retries.
+  local rc=0
+  "$@" 2>/dev/null
+  rc=$?
+  if [[ ${rc} -eq 0 ]]; then
+    return 0
+  fi
+
+  require_cmd sudo
+  sudo "$@"
+}
+
+# Locale-stable dumpe2fs wrapper: dumpe2fs translates field names under
+# non-C locales, which would break the awk parsing in shrink_ext4_image.
+dump_ext4_header() {
+  local img="$1"
+  if [[ "${EUID}" -eq 0 ]]; then
+    LC_ALL=C dumpe2fs -h "${img}" 2>/dev/null
+    return $?
+  fi
+
+  if LC_ALL=C dumpe2fs -h "${img}" 2>/dev/null; then
+    return 0
+  fi
+
+  require_cmd sudo
+  sudo LC_ALL=C dumpe2fs -h "${img}" 2>/dev/null
+}
+
+SHRINK_RESERVED_BYTES="${ONE_CLICK_GUEST_IMAGE_RESERVED_BYTES:-$((32 * 1024 * 1024))}"
+
+# The cube hypervisor exposes the guest image as a pmem device, and the device
+# manager rejects pmem regions whose size is not a multiple of 2 MiB (matches
+# the guest hugepage granularity, see hypervisor/vmm/src/device_manager.rs:
+# `if size % 0x20_0000 != 0 { Err(PmemSizeNotAligned) }`). The shrink path
+# below must therefore round the final image size *up* to a 2 MiB boundary
+# instead of stopping at ext4's natural block alignment (4 KiB), otherwise
+# template launch fails with PmemSizeNotAligned.
+PMEM_ALIGN_BYTES=$((2 * 1024 * 1024))
+
+# Shrink the ext4 image to its minimum size, then grow it by RESERVED bytes of
+# free headroom so the guest still has room for runtime writes.
+shrink_ext4_image() {
+  local img="$1"
+  local reserved_bytes="${2:-${SHRINK_RESERVED_BYTES}}"
+  local dumpe2fs_out block_size min_blocks reserved_blocks target_blocks final_bytes min_bytes
+  local pmem_align_blocks
+
+  run_as_root e2fsck -fy "${img}" >&2 || true
+  run_as_root resize2fs -M "${img}" >&2
+
+  dumpe2fs_out="$(dump_ext4_header "${img}")"
+  block_size="$(printf '%s\n' "${dumpe2fs_out}" | awk -F': *' '/^Block size/ {print $2; exit}')"
+  min_blocks="$(printf '%s\n' "${dumpe2fs_out}" | awk -F': *' '/^Block count/ {print $2; exit}')"
+
+  if [[ -z "${block_size}" || -z "${min_blocks}" ]]; then
+    die "failed to parse ext4 metadata from ${img}"
+  fi
+
+  # ext4 block sizes are always a power of two (1/2/4 KiB), so 2 MiB is an
+  # exact multiple of every legal block size. Verify defensively so a future
+  # exotic block size produces a clear error instead of a subtly misaligned
+  # image that only fails inside the VMM.
+  if (( PMEM_ALIGN_BYTES % block_size != 0 )); then
+    die "pmem alignment ${PMEM_ALIGN_BYTES} not a multiple of ext4 block size ${block_size}"
+  fi
+  pmem_align_blocks="$(( PMEM_ALIGN_BYTES / block_size ))"
+
+  reserved_blocks="$(( (reserved_bytes + block_size - 1) / block_size ))"
+  target_blocks="$(( min_blocks + reserved_blocks ))"
+  # Round target_blocks UP to the pmem alignment so the resulting image size
+  # (target_blocks * block_size) is a multiple of 2 MiB. Rounding up only ever
+  # grows the headroom (worst case <2 MiB extra), so it cannot truncate live
+  # filesystem data.
+  target_blocks="$(( ((target_blocks + pmem_align_blocks - 1) / pmem_align_blocks) * pmem_align_blocks ))"
+  final_bytes="$(( target_blocks * block_size ))"
+  min_bytes="$(( min_blocks * block_size ))"
+
+  # Defensive sanity check: truncating below the shrunk filesystem size would
+  # chop live FS data. With reserved_blocks >= 0 this should never trigger,
+  # but we want a clear failure if future refactors break the invariant.
+  if (( final_bytes < min_bytes )); then
+    die "shrink target ${final_bytes} smaller than ext4 minimum ${min_bytes}"
+  fi
+  if (( final_bytes % PMEM_ALIGN_BYTES != 0 )); then
+    die "shrink target ${final_bytes} not aligned to pmem boundary ${PMEM_ALIGN_BYTES}"
+  fi
+
+  # The resulting ext4 file is sparse: ext4 free space inside the image
+  # corresponds to filesystem holes on the host. Packagers that don't
+  # preserve sparseness (e.g. plain tar without --sparse) will inflate
+  # the file back to its apparent size, but gzip still compresses the
+  # zeroed extents efficiently.
+  run_as_root truncate -s "${final_bytes}" "${img}"
+  run_as_root resize2fs "${img}" "${target_blocks}" >&2
+  run_as_root e2fsck -fy "${img}" >&2 || true
+
+  local human_final human_reserved
+  human_final="$(numfmt --to=iec --suffix=B "${final_bytes}" 2>/dev/null || echo "${final_bytes}")"
+  human_reserved="$(numfmt --to=iec --suffix=B "${reserved_bytes}" 2>/dev/null || echo "${reserved_bytes}")"
+  log "guest image shrunk to ${human_final} (reserved ${human_reserved} headroom, 2MiB pmem aligned)"
+}
+
 remove_path_with_optional_sudo() {
   if [[ "$#" -eq 0 ]]; then
     return 0
@@ -356,6 +467,8 @@ build_guest_image_artifacts() {
   truncate -s "${image_size_bytes}" "${output_img}"
   run_mkfs_ext4_with_optional_sudo -F -d "${GUEST_ROOTFS_DIR}" "${output_img}" >&2
 
+  shrink_ext4_image "${output_img}"
+
   printf '%s\n' "${GUEST_IMAGE_VERSION}" > "${output_version}"
 
   docker rm -f "${guest_container_id}" >/dev/null 2>&1 || true
@@ -368,6 +481,9 @@ require_cmd python3
 require_cmd truncate
 require_cmd ldd
 require_cmd mkfs.ext4
+require_cmd e2fsck
+require_cmd resize2fs
+require_cmd dumpe2fs
 require_cmd docker
 require_cmd tar
 

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
@@ -19,6 +20,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+)
+
+var (
+	resolveSnapshotReadyNodeScopeFn = templatecenter.ResolveSnapshotReadyNodeScope
+	resolveSnapshotReadyReplicaFn   = templatecenter.ResolveSnapshotReadyReplica
+	resolveTemplateReadyReplicaFn   = templatecenter.ResolveTemplateReadyReplica
 )
 
 func getCubeboxReqTemplate() (*types.CreateCubeSandboxReq, error) {
@@ -366,13 +373,37 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	if templateID == "" {
 		return errors.New("templateID is empty")
 	}
+	stageStart := time.Now()
 	templateReq, err := templatecenter.GetTemplateRequest(ctx, templateID)
+	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveRequest, time.Since(stageStart))
 	if err != nil {
 		return fmt.Errorf("failed to get template param from store: %w", err)
 	}
 	constants.NormalizeAppSnapshotAnnotations(templateReq.Annotations)
-	if err = templatecenter.EnsureTemplateLocalityReady(ctx, templateID, reqInOut.InstanceType); err != nil {
+	stageStart = time.Now()
+	err = templatecenter.EnsureTemplateLocalityReady(ctx, templateID, reqInOut.InstanceType)
+	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
+	if err != nil {
 		return fmt.Errorf("template %s is not ready on any healthy node: %w", templateID, err)
+	}
+	stageStart = time.Now()
+	templateKind, err := templatecenter.GetTemplateKind(ctx, templateID)
+	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveKind, time.Since(stageStart))
+	if err != nil {
+		return fmt.Errorf("failed to resolve template kind: %w", err)
+	}
+	if resolved := templateResolveResultFromContext(ctx); resolved != nil {
+		resolved.TemplateID = templateID
+		resolved.Kind = templateKind
+	}
+	bindStart := time.Now()
+	defer func() {
+		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveBind, time.Since(bindStart))
+	}()
+	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
+		if err := bindSnapshotCreateReplica(ctx, templateID, reqInOut); err != nil {
+			return err
+		}
 	}
 	if log.IsDebug() {
 		log.G(ctx).Debugf("getTemplateParam success:%s", utils.InterfaceToString(templateReq))
@@ -381,6 +412,11 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	}
 
 	applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	if !strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
+		if err := bindAppSnapshotTemplateReplica(ctx, templateID, reqInOut); err != nil {
+			return err
+		}
+	}
 	reqInOut.CubeVSContext = mergeCubeVSContexts(templateReq.CubeVSContext, reqInOut.CubeVSContext)
 
 	reqInOut.Volumes = append(reqInOut.Volumes, templateReq.Volumes...)
@@ -419,6 +455,97 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	return nil
 }
 
+func constrainSnapshotCreateScope(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq) error {
+	readyScope, err := resolveSnapshotReadyNodeScopeFn(ctx, snapshotID)
+	if err != nil {
+		return fmt.Errorf("snapshot %s has no ready local replica scope: %w", snapshotID, err)
+	}
+	scopeSet := make(map[string]struct{}, len(readyScope))
+	for _, item := range readyScope {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		scopeSet[item] = struct{}{}
+	}
+	if len(reqInOut.DistributionScope) == 0 {
+		reqInOut.DistributionScope = readyScope
+		return nil
+	}
+	filtered := make([]string, 0, len(reqInOut.DistributionScope))
+	for _, item := range reqInOut.DistributionScope {
+		item = strings.TrimSpace(item)
+		if _, ok := scopeSet[item]; ok {
+			filtered = append(filtered, item)
+		}
+	}
+	if len(filtered) == 0 {
+		return fmt.Errorf("snapshot %s is only ready on nodes %v, requested distribution_scope=%v", snapshotID, readyScope, reqInOut.DistributionScope)
+	}
+	reqInOut.DistributionScope = filtered
+	return nil
+}
+
+// bindSnapshotCreateReplica selects a node to host a new sandbox restored
+// from snapshot and stamps only the logical id annotations onto the request.
+//
+// v4 contract: master MUST NOT carry physical volume references for
+// snapshots. cubelet resolves memory_vol/rootfs_vol from its local catalog
+// keyed by RuntimeSnapshotID. The legacy memory_vol/memory_dev annotation
+// keys are explicitly deleted so any stale value supplied by the caller
+// cannot reach the cubelet.
+func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq) error {
+	if err := constrainSnapshotCreateScope(ctx, snapshotID, reqInOut); err != nil {
+		return err
+	}
+	preferredNodeID := preferredDistributionNodeID(reqInOut)
+	replica, err := resolveSnapshotReadyReplicaFn(ctx, snapshotID, preferredNodeID)
+	if err != nil {
+		return fmt.Errorf("snapshot %s has no bindable ready replica: %w", snapshotID, err)
+	}
+	if resolved := templateResolveResultFromContext(ctx); resolved != nil {
+		resolved.ChosenReplica = replica
+		resolved.HasChosenReplica = true
+	}
+	selectedNodeID := strings.TrimSpace(replica.NodeID)
+	if selectedNodeID == "" {
+		selectedNodeID = preferredNodeID
+	}
+	if selectedNodeID != "" {
+		reqInOut.DistributionScope = []string{selectedNodeID}
+	}
+	if reqInOut.Annotations == nil {
+		reqInOut.Annotations = map[string]string{}
+	}
+	reqInOut.Annotations[constants.CubeAnnotationRuntimeSnapshotID] = strings.TrimSpace(snapshotID)
+	reqInOut.Annotations[constants.CubeAnnotationRuntimeSnapshotAttachedAt] = time.Now().UTC().Format(time.RFC3339Nano)
+	return nil
+}
+
+// bindAppSnapshotTemplateReplica selects a node to host a new sandbox
+// restored from an AppSnapshot template. Only the logical id annotation is
+// carried on the request (set upstream by applyTemplateAnnotationsAndLabels);
+// cubelet resolves memory_vol/memory_kind/rootfs_vol from its local catalog
+// keyed by CubeAnnotationAppSnapshotTemplateID. v5: the legacy physical
+// memory_vol/memory_kind annotation keys no longer exist as constants.
+func bindAppSnapshotTemplateReplica(ctx context.Context, templateID string, reqInOut *types.CreateCubeSandboxReq) error {
+	preferredNodeID := preferredDistributionNodeID(reqInOut)
+	if _, err := resolveTemplateReadyReplicaFn(ctx, templateID, preferredNodeID); err != nil {
+		return fmt.Errorf("template %s has no bindable ready replica: %w", templateID, err)
+	}
+	if reqInOut.Annotations == nil {
+		reqInOut.Annotations = map[string]string{}
+	}
+	return nil
+}
+
+func preferredDistributionNodeID(req *types.CreateCubeSandboxReq) string {
+	if req == nil || len(req.DistributionScope) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(req.DistributionScope[0])
+}
+
 func summarizeTemplateRequest(req *types.CreateCubeSandboxReq) string {
 	if req == nil {
 		return "request=nil"
@@ -449,31 +576,27 @@ func formatCubeVSContextSummary(ctx *types.CubeVSContext) string {
 
 func dealVolumeTemplate(volumes []*types.Volume, templateVolumes []*types.Volume) {
 	for _, v := range volumes {
-
-		if v.VolumeSource != nil && v.VolumeSource.EmptyDir != nil {
-
-			if v.Name == "" && v.VolumeSource.EmptyDir.Medium == 0 {
-				templateV := getTemplateVolumes(v.VolumeSource.EmptyDir, templateVolumes)
-				if templateV != nil && templateV.VolumeSource != nil && templateV.VolumeSource.EmptyDir != nil {
-					v.Name = templateV.Name
-					if v.VolumeSource.EmptyDir != nil {
-						v.VolumeSource.EmptyDir.Medium = templateV.VolumeSource.EmptyDir.Medium
-					}
-				}
-			}
+		if v == nil || v.VolumeSource == nil || v.VolumeSource.EmptyDir == nil {
+			continue
 		}
+		if v.Name != "" || v.VolumeSource.EmptyDir.Medium != 0 {
+			continue
+		}
+		templateV := getTemplateVolumes(v.VolumeSource.EmptyDir, templateVolumes)
+		if templateV == nil || templateV.VolumeSource == nil || templateV.VolumeSource.EmptyDir == nil {
+			continue
+		}
+		v.Name = templateV.Name
+		v.VolumeSource.EmptyDir.Medium = templateV.VolumeSource.EmptyDir.Medium
 	}
 }
 
 func getTemplateVolumes(sourceVolume interface{}, templateVolumes []*types.Volume) *types.Volume {
-
 	for _, templateVolume := range templateVolumes {
 		if templateVolume == nil || templateVolume.VolumeSource == nil {
 			continue
 		}
-
 		templateSource := templateVolume.VolumeSource
-
 		switch v := sourceVolume.(type) {
 		case *types.EmptyDirVolumeSource:
 			if v != nil && templateSource.EmptyDir != nil {
@@ -489,6 +612,5 @@ func getTemplateVolumes(sourceVolume interface{}, templateVolumes []*types.Volum
 			}
 		}
 	}
-
 	return nil
 }

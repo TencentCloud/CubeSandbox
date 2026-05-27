@@ -33,6 +33,16 @@ type Status struct {
 	Removing               bool `json:"-"`
 	PostStop               bool `json:"-"`
 	LifeTimeMetricReported bool `json:"-"`
+
+	// RollingBack signals that a snapshot rollback is in flight against this
+	// sandbox. While set, the shim holds its sandbox mutex doing
+	// delete_vm + resume_vm_with_config and ttrpc state() may transiently
+	// time out or report Unknown. Background scanners (DeadGC) MUST skip
+	// the cubebox to avoid stamping Unknown=true / FinishedAt=now into the
+	// in-memory Status, which would otherwise make IsTerminated() return
+	// true and break a follow-up pause/resume request. Mirrors the
+	// IsPaused() skip already in scanDeadContainer. Non-persistent.
+	RollingBack bool `json:"-"`
 }
 
 func (s Status) State() cubebox.ContainerState {

@@ -11,9 +11,6 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
-#[cfg(target_arch = "x86_64")]
-use crate::vm_config::CompatibleMode;
-use crate::vm_config::CpusConfig;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::{
     CpuElf64Writable, CpuSegment, CpuState as DumpCpusState, DumpState, Elf64Writable,
@@ -27,6 +24,9 @@ use crate::memory_manager::MemoryManager;
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 #[cfg(target_arch = "x86_64")]
 use crate::vm::physical_bits;
+#[cfg(target_arch = "x86_64")]
+use crate::vm_config::CompatibleMode;
+use crate::vm_config::CpusConfig;
 use crate::GuestMemoryMmap;
 use crate::CPU_MANAGER_SNAPSHOT_ID;
 use acpi_tables::{aml, aml::Aml, sdt::Sdt};

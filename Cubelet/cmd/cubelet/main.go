@@ -37,6 +37,7 @@ import (
 	"github.com/moby/sys/mountinfo"
 	"github.com/sirupsen/logrus"
 	dynamConf "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/nsenter"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
@@ -330,6 +331,7 @@ func App() *cli.App {
 		if err := applyFlags(context, config); err != nil {
 			return err
 		}
+		ensureRequiredPlugins(config)
 
 		if networkCfg, ok, err := loadNetworkPluginBootstrapConfig(config); err != nil {
 			return err
@@ -520,6 +522,32 @@ func App() *cli.App {
 		return nil
 	}
 	return app
+}
+
+func ensureRequiredPlugins(config *srvconfig.Config) {
+	if config == nil || config.Config == nil {
+		return
+	}
+	required := map[string]struct{}{}
+	for _, id := range config.RequiredPlugins {
+		required[id] = struct{}{}
+	}
+	for _, id := range criticalCubeletPluginURIs() {
+		if _, ok := required[id]; ok {
+			continue
+		}
+		config.RequiredPlugins = append(config.RequiredPlugins, id)
+		required[id] = struct{}{}
+	}
+}
+
+func criticalCubeletPluginURIs() []string {
+	return []string{
+		string(constants.InternalPlugin) + "." + constants.StorageID.ID(),
+		string(constants.InternalPlugin) + "." + constants.CubeboxID.ID(),
+		string(constants.WorkflowPlugin) + "." + constants.WorkflowID.ID(),
+		string(constants.CubeboxServicePlugin) + "." + constants.CubeboxServiceID.ID(),
+	}
 }
 
 func loadNetworkPluginBootstrapConfig(cfg *srvconfig.Config) (*networkPluginBootstrapConfig, bool, error) {

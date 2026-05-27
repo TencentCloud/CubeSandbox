@@ -1122,10 +1122,10 @@ func printTemplateSummary(rsp *templateResponse) {
 		log.Printf("cubevs_context: %s\n", formatCubeVSContext(rsp.CreateRequest.CubeVSContext))
 	}
 	w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
-	fmt.Fprintln(w, "NODE_ID\tNODE_IP\tSTATUS\tPHASE\tSNAPSHOT_PATH\tSPEC\tERROR")
+	fmt.Fprintln(w, "NODE_ID\tNODE_IP\tSTATUS\tPHASE\tSPEC\tERROR")
 	for _, replica := range rsp.Replicas {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			replica.NodeID, replica.NodeIP, replica.Status, replica.Phase, replica.SnapshotPath, replica.Spec, replica.ErrorMessage)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			replica.NodeID, replica.NodeIP, replica.Status, replica.Phase, replica.Spec, replica.ErrorMessage)
 	}
 	_ = w.Flush()
 }

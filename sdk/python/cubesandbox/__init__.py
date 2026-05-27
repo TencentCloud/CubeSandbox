@@ -3,9 +3,10 @@
 
 from .sandbox import Sandbox
 from ._config import Config
-from ._models import Execution, Result, Logs, ExecutionError, OutputMessage
-from ._exceptions import CubeSandboxError, SandboxNotFoundError, ApiError
+from ._models import Execution, Result, Logs, ExecutionError, OutputMessage, SnapshotInfo
+from ._exceptions import CubeSandboxError, SandboxNotFoundError, ApiError, TemplateNotFoundError
 from ._commands import CommandResult
+from ._template import Template, TemplateInfo, TemplateBuild
 
 __all__ = [
     "Sandbox",
@@ -15,10 +16,15 @@ __all__ = [
     "Logs",
     "ExecutionError",
     "OutputMessage",
+    "SnapshotInfo",
     "CubeSandboxError",
     "SandboxNotFoundError",
+    "TemplateNotFoundError",
     "ApiError",
     "CommandResult",
+    "Template",
+    "TemplateInfo",
+    "TemplateBuild",
 ]
 
 __version__ = "0.1.0"

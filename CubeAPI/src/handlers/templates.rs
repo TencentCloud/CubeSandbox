@@ -6,7 +6,7 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -118,13 +118,28 @@ pub async fn delete_template(
     Path(template_id): Path<String>,
     Query(params): Query<DeleteTemplateQuery>,
 ) -> AppResult<impl IntoResponse> {
+    // Both branches return `204 No Content` so callers see a single, REST-
+    // conventional response shape regardless of whether `templateID`
+    // resolves to a snapshot or a regular template (Bug 2).  The snapshot
+    // branch additionally exposes the operation id via a response header so
+    // audit trails / debugging can still correlate the deletion with its
+    // CubeMaster job, but no body is returned.
+    if state.services.snapshots.has_snapshot(&template_id).await? {
+        let resp = state.services.snapshots.delete(&template_id).await?;
+        let mut headers = HeaderMap::new();
+        if let Ok(value) = HeaderValue::from_str(&resp.operation_id) {
+            headers.insert("x-operation-id", value);
+        }
+        return Ok((StatusCode::NO_CONTENT, headers).into_response());
+    }
+
     state
         .services
         .templates
         .delete_template(template_id, params.instance_type, params.sync)
         .await?;
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ─── POST /templates/:templateID/builds/:buildID ──────────────────────────────

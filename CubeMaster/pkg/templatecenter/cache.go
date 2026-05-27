@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,8 +44,13 @@ type templateLockGroup struct {
 var (
 	templateDefinitionCache    = cache.New(templateDefinitionCacheTTL, templateDefinitionCacheTTL)
 	templateLocalityReadyCache = cache.New(templateLocalityCacheTTL, templateLocalityCacheTTL)
-	templateRequestFetchGroup  = &templateFetchGroup{calls: make(map[string]*templateFetchCall)}
-	templateRequestLockGroup   = &templateLockGroup{}
+	// templateKindCache caches the template kind ("snapshot"|"app_snapshot"|...)
+	// keyed by templateID. The kind is derived from a single column in
+	// t_cube_template_definition, so its only mutation source is the same
+	// definition write paths that already call invalidateTemplateCaches.
+	templateKindCache         = cache.New(templateDefinitionCacheTTL, templateDefinitionCacheTTL)
+	templateRequestFetchGroup = &templateFetchGroup{calls: make(map[string]*templateFetchCall)}
+	templateRequestLockGroup  = &templateLockGroup{}
 )
 
 func (g *templateLockGroup) get(templateID string) *sync.RWMutex {
@@ -168,7 +174,35 @@ func invalidateTemplateCaches(templateID string) {
 	}
 	templateDefinitionCache.Delete(templateID)
 	templateLocalityReadyCache.Delete(templateID)
+	templateKindCache.Delete(templateID)
 	localcache.InvalidateImageState(templateID)
+}
+
+// getCachedTemplateKind returns the cached kind for a templateID.
+// The second return value reports whether the entry was present.
+func getCachedTemplateKind(templateID string) (string, bool) {
+	templateID = strings.TrimSpace(templateID)
+	if templateID == "" {
+		return "", false
+	}
+	v, ok := templateKindCache.Get(templateID)
+	if !ok {
+		return "", false
+	}
+	kind, ok := v.(string)
+	if !ok {
+		templateKindCache.Delete(templateID)
+		return "", false
+	}
+	return kind, true
+}
+
+func setTemplateKindCache(templateID, kind string) {
+	templateID = strings.TrimSpace(templateID)
+	if templateID == "" {
+		return
+	}
+	templateKindCache.Set(templateID, strings.TrimSpace(kind), templateDefinitionCacheTTL)
 }
 
 func registerReadyTemplateReplicas(templateID string, replicas []ReplicaStatus) {
@@ -190,4 +224,12 @@ func reportTemplateCacheMetric(ctx context.Context, calleeAction string, cost ti
 
 func ReportResolveMetric(ctx context.Context, cost time.Duration) {
 	reportTemplateMetric(ctx, constants.CubeMasterTemplateID, constants.CubeMasterTemplateID, constants.ActionTemplateResolve, cost, 0)
+}
+
+// ReportResolveStageMetric emits a per-stage trace for the four sub-phases of
+// dealCubeboxCreateReqWithTemplateCenter (request / locality / kind / bind).
+// It re-uses the same Callee/Action shape as ReportResolveMetric so the
+// existing log.ReportExt sink handles it without additional config.
+func ReportResolveStageMetric(ctx context.Context, action string, cost time.Duration) {
+	reportTemplateMetric(ctx, constants.CubeMasterTemplateID, constants.CubeMasterTemplateID, action, cost, 0)
 }

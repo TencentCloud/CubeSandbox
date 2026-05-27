@@ -272,6 +272,20 @@ func (em *eventMonitor) handleContainerExit(ctx context.Context, e *eventtypes.T
 	if cntr.Status != nil && cntr.Status.Get().Removing {
 		return nil
 	}
+	if cntr.Status != nil && cntr.Status.Get().RollingBack {
+		// Snapshot rollback intentionally tears down the OLD VM via shim
+		// delete_vm before bringing up the restored VM via
+		// resume_vm_with_config. The OLD VM's TaskExit event is delivered
+		// to us during/right after that sequence; if we let the default
+		// handler run we (a) call task.Delete(WithProcessKill) which can
+		// race with the freshly-resumed task slot, and (b) stamp
+		// FinishedAt + ExitCode onto the cubebox status, making
+		// IsTerminated() return true and breaking a follow-up pause/
+		// resume. RollbackSandbox is responsible for resyncing the
+		// status; defer to it. See Cubelet/services/cubebox/rollback.go.
+		log.G(ctx).Infof("ignoring TaskExit for container %s: rollback in flight", e.ID)
+		return nil
+	}
 	if cntr.Container == nil {
 		return nil
 	}

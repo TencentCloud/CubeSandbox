@@ -25,6 +25,7 @@ pub const ANNO_VM_KERNEL: &str = "cube.vm.kernel.path";
 /// Annotation key used to append extra kernel cmdline parameters.
 pub const ANNO_VM_KERNEL_CMDLINE_APPEND: &str = "cube.vm.kernel.cmdline.append";
 pub const ANNO_SNAPSHOT_BASE: &str = "cube.vm.snapshot.base.path";
+pub const ANNO_SNAPSHOT_MEMORY_VOL_URL: &str = "cube.vm.snapshot.memory_vol_url";
 pub const ANNO_APP_SNAPSHOT_CREATE: &str = "cube.appsnapshot.create";
 pub const ANNO_APP_SNAPSHOT_RESTORE: &str = "cube.appsnapshot.restore";
 
@@ -45,6 +46,7 @@ pub struct Config {
     pub vm_res: VmResource,
     pub kernel: String,
     pub snapshot_base: String,
+    pub snapshot_memory_vol_url: Option<String>,
     pub fs: Option<Fs>,
     pub virtiofs: Vec<VirtioFs>,
     pub vips: String,
@@ -113,6 +115,10 @@ impl Config {
             anno.get(ANNO_SNAPSHOT_BASE).map(|x| x.as_str()),
             prod.as_str(),
         );
+        let snapshot_memory_vol_url = anno
+            .get(ANNO_SNAPSHOT_MEMORY_VOL_URL)
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty());
 
         let fs = {
             if let Some(opt_fs) = anno.get(ANNO_VMM_FS) {
@@ -193,6 +199,7 @@ impl Config {
             vm_res,
             kernel,
             snapshot_base,
+            snapshot_memory_vol_url,
             fs,
             virtiofs,
             vips: cube_vips,
@@ -245,6 +252,7 @@ mod tests {
     use crate::common::PRODUCT_CUBEBOX;
     use crate::sandbox::config::Config;
     use crate::sandbox::config::ANNO_SNAPSHOT_BASE;
+    use crate::sandbox::config::ANNO_SNAPSHOT_MEMORY_VOL_URL;
     use crate::sandbox::config::ANNO_VM_KERNEL;
     use crate::sandbox::config::ANNO_VM_KERNEL_CMDLINE_APPEND;
     use crate::sandbox::config::ANNO_VM_RES;
@@ -276,6 +284,7 @@ mod tests {
             config.snapshot_base,
             Utils::get_snapshot_base_dir(None, PRODUCT_CUBEBOX)
         );
+        assert_eq!(config.snapshot_memory_vol_url, None);
 
         annotations.insert(ANNO_SNAPSHOT_BASE.to_string(), "/1/2/3".to_string());
         let ret = Config::new(&Some(annotations.clone()));
@@ -285,6 +294,18 @@ mod tests {
         assert_eq!(
             config.snapshot_base,
             Utils::get_snapshot_base_dir(Some("/1/2/3"), PRODUCT_CUBEBOX)
+        );
+
+        annotations.insert(
+            ANNO_SNAPSHOT_MEMORY_VOL_URL.to_string(),
+            "file:///dev/dm-29".to_string(),
+        );
+        let ret = Config::new(&Some(annotations.clone()));
+        assert!(ret.is_ok());
+        let config = ret.unwrap();
+        assert_eq!(
+            config.snapshot_memory_vol_url,
+            Some("file:///dev/dm-29".to_string())
         );
 
         //vm kernel path

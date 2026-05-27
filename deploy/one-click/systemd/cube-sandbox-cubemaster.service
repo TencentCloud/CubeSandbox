@@ -1,0 +1,21 @@
+[Unit]
+Description=Cube Sandbox CubeMaster
+After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service
+Wants=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+RequiresMountsFor=/data/CubeMaster/storage
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+Environment=CUBE_MASTER_CONFIG_PATH=/usr/local/services/cubetoolbox/CubeMaster/conf.yaml
+ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cubemaster-start.sh
+ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/cubemaster-postcheck.sh
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=cube-sandbox-control.target

@@ -19,10 +19,12 @@ import (
 )
 
 type fakeNetworkAgentClient struct {
-	ensureCalled      bool
-	lastEnsureRequest *networkagentclient.EnsureNetworkRequest
-	healthErrs        []error
-	healthCalls       int
+	ensureCalled       bool
+	lastEnsureRequest  *networkagentclient.EnsureNetworkRequest
+	releaseCalled      bool
+	lastReleaseRequest *networkagentclient.ReleaseNetworkRequest
+	healthErrs         []error
+	healthCalls        int
 }
 
 func (c *fakeNetworkAgentClient) EnsureNetwork(_ context.Context, req *networkagentclient.EnsureNetworkRequest) (*networkagentclient.EnsureNetworkResponse, error) {
@@ -61,7 +63,9 @@ func (c *fakeNetworkAgentClient) EnsureNetwork(_ context.Context, req *networkag
 	}, nil
 }
 
-func (c *fakeNetworkAgentClient) ReleaseNetwork(context.Context, *networkagentclient.ReleaseNetworkRequest) error {
+func (c *fakeNetworkAgentClient) ReleaseNetwork(_ context.Context, req *networkagentclient.ReleaseNetworkRequest) error {
+	c.releaseCalled = true
+	c.lastReleaseRequest = req
 	return nil
 }
 
@@ -123,6 +127,15 @@ func TestTapCreateInNetworkAgentModeCallsEnsureNetwork(t *testing.T) {
 	}
 	if !fakeClient.ensureCalled {
 		t.Fatal("network-agent EnsureNetwork was not called")
+	}
+	if !fakeClient.releaseCalled {
+		t.Fatal("network-agent ReleaseNetwork was not called after downstream register failure")
+	}
+	if fakeClient.lastReleaseRequest == nil || fakeClient.lastReleaseRequest.NetworkHandle != "sandbox-1" {
+		t.Fatalf("ReleaseNetwork request invalid: %+v", fakeClient.lastReleaseRequest)
+	}
+	if fakeClient.lastReleaseRequest.IdempotencyKey != "req-1" {
+		t.Fatalf("ReleaseNetwork idempotency key=%q, want req-1", fakeClient.lastReleaseRequest.IdempotencyKey)
 	}
 }
 

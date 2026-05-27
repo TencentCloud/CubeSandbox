@@ -9,7 +9,7 @@ services:
       MYSQL_USER: "__MYSQL_USER__"
       MYSQL_PASSWORD: "__MYSQL_PASSWORD__"
     ports:
-      - "__MYSQL_PORT__:3306"
+      - "127.0.0.1:__MYSQL_PORT__:3306"
     command:
       - --default-authentication-plugin=mysql_native_password
       - --skip-name-resolve
@@ -35,7 +35,7 @@ services:
       - --requirepass
       - "__REDIS_PASSWORD__"
     ports:
-      - "__REDIS_PORT__:6379"
+      - "127.0.0.1:__REDIS_PORT__:6379"
     healthcheck:
       test:
         [

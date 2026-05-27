@@ -30,6 +30,10 @@ pub struct SnapshotInfo {
     pub image_version: String,
     pub ch_version: String,
     pub vm_res: VmRes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_vol_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_snapshot_container_id: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

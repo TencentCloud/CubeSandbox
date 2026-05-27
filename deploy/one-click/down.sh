@@ -17,22 +17,16 @@ INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
 ensure_dir "${INSTALL_PREFIX}"
 
 ROLE_FILE="${INSTALL_PREFIX}/.one-click.env"
-ROLE="control"
 if [[ -f "${ROLE_FILE}" ]]; then
-  role_line="$(rg '^ONE_CLICK_DEPLOY_ROLE=' "${ROLE_FILE}" || true)"
-  if [[ -n "${role_line}" ]]; then
-    ROLE="${role_line#ONE_CLICK_DEPLOY_ROLE=}"
-  fi
+  load_env_file "${ROLE_FILE}"
 fi
+ROLE="$(one_click_deploy_role)"
 
+require_cmd systemctl
+log "stopping systemd deployment (role=${ROLE})"
 if [[ "${ROLE}" == "compute" ]]; then
-  ensure_file "${INSTALL_PREFIX}/scripts/one-click/down-compute.sh"
-  stop_script="${INSTALL_PREFIX}/scripts/one-click/down-compute.sh"
+  systemctl stop cube-sandbox-compute.target
 else
-  ensure_file "${INSTALL_PREFIX}/scripts/one-click/down-with-deps.sh"
-  stop_script="${INSTALL_PREFIX}/scripts/one-click/down-with-deps.sh"
+  systemctl stop cube-sandbox-seed-cubemaster-metrics.timer >/dev/null 2>&1 || true
+  systemctl stop cube-sandbox-control.target
 fi
-
-ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
-ONE_CLICK_RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env" \
-  "${stop_script}"

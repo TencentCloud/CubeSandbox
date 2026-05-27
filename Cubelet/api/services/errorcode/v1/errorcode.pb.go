@@ -31,6 +31,7 @@ const (
 	ErrorCode_OK                                ErrorCode = 0
 	ErrorCode_Unknown                           ErrorCode = -1
 	ErrorCode_Success                           ErrorCode = 200
+	ErrorCode_Conflict                          ErrorCode = 130409
 	ErrorCode_GrpcError                         ErrorCode = 130500
 	ErrorCode_ListContainerFailed               ErrorCode = 130504
 	ErrorCode_ContainerNotFound                 ErrorCode = 130505
@@ -99,6 +100,7 @@ var (
 		0:      "OK",
 		-1:     "Unknown",
 		200:    "Success",
+		130409: "Conflict",
 		130500: "GrpcError",
 		130504: "ListContainerFailed",
 		130505: "ContainerNotFound",
@@ -162,6 +164,7 @@ var (
 		"OK":                                0,
 		"Unknown":                           -1,
 		"Success":                           200,
+		"Conflict":                          130409,
 		"GrpcError":                         130500,
 		"ListContainerFailed":               130504,
 		"ContainerNotFound":                 130505,
@@ -309,11 +312,12 @@ const file_api_services_errorcode_v1_errorcode_proto_rawDesc = "" +
 	")api/services/errorcode/v1/errorcode.proto\x12\x1dcubelet.services.errorcode.v1\"c\n" +
 	"\x03Ret\x12C\n" +
 	"\bret_code\x18\x01 \x01(\x0e2(.cubelet.services.errorcode.v1.ErrorCodeR\aretCode\x12\x17\n" +
-	"\aret_msg\x18\x02 \x01(\tR\x06retMsg*\xd4\f\n" +
+	"\aret_msg\x18\x02 \x01(\tR\x06retMsg*\xe4\f\n" +
 	"\tErrorCode\x12\x06\n" +
 	"\x02OK\x10\x00\x12\x14\n" +
 	"\aUnknown\x10\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01\x12\f\n" +
-	"\aSuccess\x10\xc8\x01\x12\x0f\n" +
+	"\aSuccess\x10\xc8\x01\x12\x0e\n" +
+	"\bConflict\x10\xe9\xfa\a\x12\x0f\n" +
 	"\tGrpcError\x10\xc4\xfb\a\x12\x19\n" +
 	"\x13ListContainerFailed\x10\xc8\xfb\a\x12\x17\n" +
 	"\x11ContainerNotFound\x10\xc9\xfb\a\x12\x1b\n" +

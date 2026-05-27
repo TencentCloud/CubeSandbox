@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -64,9 +66,37 @@ type createSandboxContext struct {
 	delay     time.Duration
 
 	reschedule bool
+
+	// Per-step costs of the post-create write phase, measured
+	// independently so dealMetric can emit cubemaster-post-redis /
+	// cubemaster-post-spec traces. They stay zero on retry / failure
+	// paths and we only emit a trace when the corresponding op ran.
+	redisCost time.Duration
+	specCost  time.Duration
+}
+
+type createOriginRequestKey struct{}
+
+// withCreateOriginRequest stashes the original CreateCubeSandboxReq onto the
+// context so dealSuccResult can hand it to the post-create hook without
+// threading a new field through the createSandboxContext struct.
+func withCreateOriginRequest(ctx context.Context, req *types.CreateCubeSandboxReq) context.Context {
+	if ctx == nil || req == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, createOriginRequestKey{}, req)
+}
+
+func createOriginRequestFromContext(ctx context.Context) *types.CreateCubeSandboxReq {
+	if ctx == nil {
+		return nil
+	}
+	v, _ := ctx.Value(createOriginRequestKey{}).(*types.CreateCubeSandboxReq)
+	return v
 }
 
 func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *types.CreateCubeSandboxRes) {
+	ctx = withCreateOriginRequest(ctx, req)
 	rsp = &types.CreateCubeSandboxRes{
 		RequestID: req.RequestID,
 		ExtInfo:   map[string]string{},
@@ -244,11 +274,53 @@ func (c *createSandboxContext) dealSuccResult() {
 				log.G(c.ctx).Warnf("no port mapping in response")
 			}
 		}
-		if err := c.setProxyToRedis(); err != nil {
-			c.setMasterRsp(int(errorcode.ErrorCode_DBError), fmt.Sprintf("setProxyToRedis fail:%s", err))
+		// Run the post-create writes (proxy redis HSET + sandbox_spec
+		// MySQL UPSERT) in parallel since they have no data dependency.
+		// The wall-clock cost collapses to max(redis, spec) instead of
+		// sum, while preserving the original fail-fast semantics:
+		//   - Redis failure still flips the master response to DBError
+		//     so the caller observes a failed create.
+		//   - Spec failure is still warn-only (persistSandboxSpec logs
+		//     the error internally and returns nothing); it never
+		//     short-circuits the create reply.
+		g := new(errgroup.Group)
+		var redisErr error
+		g.Go(func() error {
+			redisStart := time.Now()
+			redisErr = c.setProxyToRedis()
+			c.redisCost = time.Since(redisStart)
+			return redisErr
+		})
+		g.Go(func() error {
+			specStart := time.Now()
+			c.persistSandboxSpec()
+			c.specCost = time.Since(specStart)
+			return nil
+		})
+		_ = g.Wait()
+		if redisErr != nil {
+			c.setMasterRsp(int(errorcode.ErrorCode_DBError), fmt.Sprintf("setProxyToRedis fail:%s", redisErr))
 		}
 
 		c.setMasterRsp(int(c.cubeletRsp.GetRet().GetRetCode()), c.cubeletRsp.GetRet().GetRetMsg())
+	}
+}
+
+// persistSandboxSpec hands the original create request to the registered
+// post-create hook (wired by templatecenter to sandboxspec.Put). Hook
+// failures are logged but never bubble up: spec persistence is best-effort
+// and any later flow that needs the spec falls back to base template lookup.
+func (c *createSandboxContext) persistSandboxSpec() {
+	originReq := createOriginRequestFromContext(c.ctx)
+	if originReq == nil || c.masterRsp == nil {
+		return
+	}
+	sandboxID := c.masterRsp.SandboxID
+	if sandboxID == "" || c.selectHost == nil {
+		return
+	}
+	if err := runAfterCreateSandboxSuccessHook(c.ctx, sandboxID, c.selectHost.ID(), c.selectHost.HostIP(), originReq); err != nil {
+		log.G(c.ctx).Warnf("persist sandbox spec failed sandbox=%s: %v", sandboxID, err)
 	}
 }
 
@@ -415,6 +487,17 @@ func (c *createSandboxContext) dealMetric() {
 	baseRt.CalleeAction = constants.CubeMasterInnerHandleID
 	baseRt.Cost = c.endTime.Sub(c.cubeletEndTime)
 	CubeLog.Trace(baseRt)
+
+	if c.redisCost > 0 {
+		baseRt.CalleeAction = constants.CubeMasterPostRedisID
+		baseRt.Cost = c.redisCost
+		CubeLog.Trace(baseRt)
+	}
+	if c.specCost > 0 {
+		baseRt.CalleeAction = constants.CubeMasterPostSpecID
+		baseRt.Cost = c.specCost
+		CubeLog.Trace(baseRt)
+	}
 
 	baseRt.Callee = constants.CubeMasterScheduleId
 	baseRt.CalleeAction = constants.ActionBufferHandle

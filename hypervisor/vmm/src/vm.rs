@@ -101,7 +101,7 @@ use vm_memory::{
 use vm_migration::protocol::{Request, Response, Status};
 use vm_migration::{
     protocol::MemoryRangeTable, snapshot_from_id, Migratable, MigratableError, Pausable, Snapshot,
-    Snapshottable, Transportable,
+    SnapshotConfig, Snapshottable, Transportable,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
@@ -831,6 +831,7 @@ impl Vm {
         activate_evt: EventFd,
         sandbox_id: String,
         vcpu_started: Arc<AtomicBool>,
+        memory_vol_url: Option<&str>,
     ) -> Result<Self> {
         let timestamp = Instant::now();
 
@@ -854,6 +855,7 @@ impl Vm {
                 source_url,
                 prefault,
                 phys_bits,
+                memory_vol_url,
             )
             .map_err(Error::MemoryManager)?
         } else {
@@ -2812,8 +2814,9 @@ impl Transportable for Vm {
     fn send(
         &self,
         snapshot: &Snapshot,
-        destination_url: &str,
+        config: &SnapshotConfig,
     ) -> std::result::Result<(), MigratableError> {
+        let destination_url = &config.destination_url;
         let mut snapshot_config_path = url_to_path(destination_url)?;
         snapshot_config_path.push(SNAPSHOT_CONFIG_FILE);
 
@@ -2849,25 +2852,35 @@ impl Transportable for Vm {
             .open(snapshot_state_path)
             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
-        // Serialize and write the snapshot state
-        let vm_state =
-            serde_json::to_vec(snapshot).map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        // Clone the snapshot and add metadata.
+        let mut snapshot_with_meta = snapshot.clone();
+        snapshot_with_meta.metadata = Some(vm_migration::SnapshotMetadata {
+            snapshot_type: config.snapshot_type,
+        });
+
+        let vm_state = serde_json::to_vec(&snapshot_with_meta)
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
         snapshot_state_file
             .write(&vm_state)
             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-
         // Ensure state data is flushed to disk for cross-machine pause-snapshot.
+
         snapshot_state_file
             .sync_all()
             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
         // Tell the memory manager to also send/write its own snapshot.
         if let Some(memory_manager_snapshot) = snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID) {
+            let mm_config = SnapshotConfig {
+                destination_url: destination_url.clone(),
+                snapshot_type: config.snapshot_type,
+                memory_vol_url: config.memory_vol_url.clone(),
+            };
             self.memory_manager
                 .lock()
                 .unwrap()
-                .send(&memory_manager_snapshot.clone(), destination_url)?;
+                .send(&memory_manager_snapshot.clone(), &mm_config)?;
         } else {
             return Err(MigratableError::Restore(anyhow!(
                 "Missing memory manager snapshot"

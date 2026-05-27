@@ -6,5 +6,6 @@
 /agent/ @ls-ggg @fslongjin
 /docs/ @tinklone
 /examples/ @tinklone
-/hypervisor/ @up2wing
+/hypervisor/ @up2wing @lisongqian
 /network-agent/ @fslongjin
+/cubecow @lisongqian

@@ -169,6 +169,9 @@ func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSan
 		return ret.Errorf(errorcode.ErrorCode_MasterInternalError, "DeleteSandboxProxyMap failed: %s", err.Error())
 	}
 	localcache.DeleteSandboxCache(req.GetSandboxID())
+	if err := runAfterDestroySandboxSuccessHook(ctx, req.GetSandboxID()); err != nil {
+		log.G(ctx).Warnf("afterDestroySandboxSuccess hook failed: %v", err)
+	}
 
 	return nil
 }

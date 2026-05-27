@@ -208,3 +208,58 @@ func TestValidatePathUnderBase(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateIfName(t *testing.T) {
+	tests := []struct {
+		name    string
+		ifName  string
+		wantErr bool
+	}{
+		{name: "ok-eth0", ifName: "eth0", wantErr: false},
+		{name: "ok-vlan", ifName: "eth0.100", wantErr: false},
+		{name: "ok-colon", ifName: "eth0:1", wantErr: false},
+		{name: "ok-underscore", ifName: "tap_abc-1", wantErr: false},
+		{name: "empty", ifName: "", wantErr: true},
+		{name: "with-space", ifName: "eth 0", wantErr: true},
+		{name: "with-slash", ifName: "eth0/0", wantErr: true},
+		{name: "with-semicolon", ifName: "eth0;rm", wantErr: true},
+		{name: "with-pipe", ifName: "eth0|cat", wantErr: true},
+		{name: "with-dollar", ifName: "eth0$IFS", wantErr: true},
+		{name: "with-nul", ifName: "eth0\x00", wantErr: true},
+		{name: "too-long", ifName: "abcdefghijklmnopqrstuvwxyz01234567", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateIfName(tt.ifName)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateIfName(%q) error = %v, wantErr %v", tt.ifName, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateUUID(t *testing.T) {
+	tests := []struct {
+		name    string
+		uuid    string
+		wantErr bool
+	}{
+		{name: "ok-standard", uuid: "550e8400-e29b-41d4-a716-446655440000", wantErr: false},
+		{name: "ok-hex-only", uuid: "deadbeefcafebabe", wantErr: false},
+		{name: "ok-upper", uuid: "ABCDEF0123456789", wantErr: false},
+		{name: "empty", uuid: "", wantErr: true},
+		{name: "with-non-hex", uuid: "g50e8400-e29b-41d4-a716-446655440000", wantErr: true},
+		{name: "with-space", uuid: "550e 8400-e29b-41d4-a716-446655440000", wantErr: true},
+		{name: "with-semicolon", uuid: "550e8400;rm-rf-/", wantErr: true},
+		{name: "with-nul", uuid: "550e8400\x00", wantErr: true},
+		{name: "too-long", uuid: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateUUID(tt.uuid)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateUUID(%q) error = %v, wantErr %v", tt.uuid, err, tt.wantErr)
+			}
+		})
+	}
+}

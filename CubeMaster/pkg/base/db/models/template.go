@@ -11,18 +11,32 @@ import (
 
 type TemplateDefinition struct {
 	gorm.Model
-	TemplateID   string `json:"template_id" gorm:"column:template_id"`
-	InstanceType string `json:"instance_type" gorm:"column:instance_type"`
-	Version      string `json:"version" gorm:"column:version"`
-	Status       string `json:"status" gorm:"column:status"`
-	RequestJSON  string `json:"request_json" gorm:"column:request_json"`
-	LastError    string `json:"last_error" gorm:"column:last_error"`
+	TemplateID                string `json:"template_id" gorm:"column:template_id"`
+	InstanceType              string `json:"instance_type" gorm:"column:instance_type"`
+	Version                   string `json:"version" gorm:"column:version"`
+	Status                    string `json:"status" gorm:"column:status"`
+	Kind                      string `json:"kind" gorm:"column:kind"`
+	OriginSandboxID           string `json:"origin_sandbox_id" gorm:"column:origin_sandbox_id"`
+	OriginNodeID              string `json:"origin_node_id" gorm:"column:origin_node_id"`
+	DisplayName               string `json:"display_name" gorm:"column:display_name"`
+	StorageBackend            string `json:"storage_backend" gorm:"column:storage_backend"`
+	Retain                    bool   `json:"retain" gorm:"column:retain"`
+	RootfsSizeBytesAtSnapshot uint64 `json:"rootfs_size_bytes_at_snapshot" gorm:"column:rootfs_size_bytes_at_snapshot"`
+	RequestJSON               string `json:"request_json" gorm:"column:request_json"`
+	LastError                 string `json:"last_error" gorm:"column:last_error"`
 }
 
 func (TemplateDefinition) TableName() string {
 	return constants.TemplateDefinitionTableName
 }
 
+// TemplateReplica is the master-side row that tracks where a template
+// definition has been materialized. v5: physical columns
+// (snapshot_path, rootfs_vol, memory_vol, rootfs_kind, memory_kind,
+// rootfs_dev, memory_dev, meta_dir, build_rootfs_vol) were removed from
+// both the struct and the DB schema (see migrations). Cubelet's local
+// snapshot catalog is the single source of truth for physical layout,
+// keyed by templateID/snapshotID.
 type TemplateReplica struct {
 	gorm.Model
 	TemplateID      string `json:"template_id" gorm:"column:template_id"`
@@ -30,7 +44,6 @@ type TemplateReplica struct {
 	NodeIP          string `json:"node_ip" gorm:"column:node_ip"`
 	InstanceType    string `json:"instance_type" gorm:"column:instance_type"`
 	Spec            string `json:"spec" gorm:"column:spec"`
-	SnapshotPath    string `json:"snapshot_path" gorm:"column:snapshot_path"`
 	Status          string `json:"status" gorm:"column:status"`
 	Phase           string `json:"phase" gorm:"column:phase"`
 	ArtifactID      string `json:"artifact_id" gorm:"column:artifact_id"`
