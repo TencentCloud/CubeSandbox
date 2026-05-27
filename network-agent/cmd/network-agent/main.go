@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -25,6 +26,11 @@ import (
 var newLocalService = service.NewLocalService
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "\n\n=== PANIC ===\n%v\n\n%s\n", r, debug.Stack())
+		}
+	}()
 	defaultCfg := service.DefaultConfig()
 	var (
 		listenEndpoint = flag.String("listen", "unix:///tmp/cube/network-agent.sock", "network-agent listen endpoint")
@@ -104,7 +110,8 @@ func main() {
 
 	svc, err := initService(cfg)
 	if err != nil {
-		CubeLog.Fatalf("network-agent init failed: %v", err)
+		fmt.Fprintf(os.Stderr, "\n\n=== ERROR: network-agent init failed ===\n%v\n\n", err)
+		os.Exit(1)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

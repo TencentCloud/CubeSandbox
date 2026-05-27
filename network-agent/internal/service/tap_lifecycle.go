@@ -55,13 +55,28 @@ func (s *localService) dequeueTapLocked() *tapDevice {
 	for len(s.tapPool) > 0 {
 		tap := s.tapPool[0]
 		s.tapPool = s.tapPool[1:]
-		if tap != nil {
-			CubeLog.WithContext(context.Background()).Infof(
-				"network-agent tap dequeued from pool: name=%s ifindex=%d pool=%d abnormal=%d quarantined=%d",
-				tap.Name, tap.Index, len(s.tapPool), len(s.abnormalTapPool), len(s.quarantinedTaps),
-			)
-			return tap
+		if tap == nil {
+			continue
 		}
+		// Defensive: skip taps whose IP is outside the current CIDR range.
+		// These should have been destroyed during recover, but guard here
+		// in case one slips through (e.g. added to the pool before a CIDR
+		// change or via a race in the maintenance loop).
+		if !s.allocator.Contains(tap.IP) {
+			CubeLog.WithContext(context.Background()).Warnf(
+				"network-agent destroying out-of-range tap from pool: name=%s ifindex=%d ip=%s",
+				tap.Name, tap.Index, tap.IP,
+			)
+			s.clearPortMappings(tap)
+			_ = cubevsDelTAPDevice(uint32(tap.Index), tap.IP.To4())
+			_ = destroyTapFunc(tap.Index)
+			continue
+		}
+		CubeLog.WithContext(context.Background()).Infof(
+			"network-agent tap dequeued from pool: name=%s ifindex=%d pool=%d abnormal=%d quarantined=%d",
+			tap.Name, tap.Index, len(s.tapPool), len(s.abnormalTapPool), len(s.quarantinedTaps),
+		)
+		return tap
 	}
 	return nil
 }
