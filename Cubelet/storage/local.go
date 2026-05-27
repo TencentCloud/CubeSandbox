@@ -851,7 +851,7 @@ func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo) er
 	if err := l.destroy(ctx, result, cleanupOpts); err != nil {
 		errs = errors.Join(errs, err)
 	}
-	l.cleanupHostDirVolumes(ctx, result.SandboxID)
+	l.cleanupHostDirVolumes(ctx, result)
 	if _, err := l.readBackendFileInfoRaw(ctx, result.SandboxID); err == nil {
 		if err := l.deleteBackendFileInfo(ctx, result.SandboxID); err != nil {
 			errs = errors.Join(errs, fmt.Errorf("delete storage metadata after create rollback: %w", err))
