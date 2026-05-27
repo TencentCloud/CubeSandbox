@@ -173,7 +173,3 @@ cargo build --release
 cd examples/go-test
 make run
 ```
-
-## License
-
-MIT
