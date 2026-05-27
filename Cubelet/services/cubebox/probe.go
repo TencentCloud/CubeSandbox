@@ -114,14 +114,21 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 		} else {
 			log.G(ctx).Errorf("probe [%s] failed[context canceled], costtime:%+v",
 				ci.IP, time.Since(startTime))
-			return ret.Errorf(errorcode.ErrorCode_PortBindingFailed, "The initialization timeout or"+
-				" detecting %s failed.", ci.IP)
+			return ret.Errorf(errorcode.ErrorCode_PortBindingFailed,
+				"Sandbox probe canceled after %v on %s. "+
+					"The parent context was canceled, possibly due to a timeout. "+
+					"Check sandbox networking (cube-dev, CIDR, routes) if this persists.",
+				time.Since(startTime).Round(time.Second), ci.IP)
 		}
 	case <-ctx.Done():
-		log.G(ctx).Errorf("probe [%s] timeout, costtime:%+v, err:%v",
-			ci.IP, time.Since(startTime), ctx.Err())
-		return ret.Errorf(errorcode.ErrorCode_PortBindingFailed, "The initialization timeout or"+
-			" detecting %s port failed.", ci.IP)
+		probeDesc := describeProbe(c.GetProbe())
+		log.G(ctx).Errorf("probe [%s] timeout, costtime:%+v, err:%v, probe_config=%s",
+			ci.IP, time.Since(startTime), ctx.Err(), probeDesc)
+		return ret.Errorf(errorcode.ErrorCode_PortBindingFailed,
+			"Sandbox probe timed out after %v on %s. %s "+
+				"This may indicate a network connectivity issue between the host and sandbox. "+
+				"Check that the cube-dev interface and CIDR configuration are consistent.",
+			time.Since(startTime).Round(time.Second), ci.IP, probeDesc)
 	}
 
 	select {
@@ -134,8 +141,10 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 		} else {
 			log.G(ctx).Errorf("probe [%s] failed[context canceled], costtime:%+v",
 				ci.IP, time.Since(startTime))
-			return ret.Errorf(errorcode.ErrorCode_PortBindingFailed, "The initialization timeout or"+
-				" detecting %s failed.", ci.IP)
+			return ret.Errorf(errorcode.ErrorCode_PortBindingFailed,
+				"Sandbox probe canceled after %v on %s. "+
+					"Check sandbox networking (cube-dev, CIDR, routes) if this persists.",
+				time.Since(startTime).Round(time.Second), ci.IP)
 		}
 	default:
 	}
@@ -305,4 +314,25 @@ func formatURL(scheme string, host string, port int, path string) *url.URL {
 	u.Scheme = scheme
 	u.Host = net.JoinHostPort(host, strconv.Itoa(port))
 	return u
+}
+
+// describeProbe returns a human-readable summary of the probe configuration
+// for diagnostic logging.
+func describeProbe(p *cubebox.Probe) string {
+	if p == nil {
+		return "no probe configured"
+	}
+	handler := p.GetProbeHandler()
+	if handler == nil {
+		return "no probe handler"
+	}
+	switch {
+	case handler.GetTcpSocket() != nil:
+		return fmt.Sprintf("tcp_socket:%d", handler.GetTcpSocket().GetPort())
+	case handler.GetHttpGet() != nil:
+		hg := handler.GetHttpGet()
+		return fmt.Sprintf("http_get:%s:%d%s", hg.GetHost(), hg.GetPort(), hg.GetPath())
+	default:
+		return "unknown probe handler"
+	}
 }
