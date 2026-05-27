@@ -31,7 +31,7 @@ def _parse_line(
     event_type = data.pop("type", None)
 
     if event_type == "result":
-        result = Result(**{k: v for k, v in data.items() if k in Result.__dataclass_fields__})
+        result = Result(**data)
         execution.results.append(result)
         if on_result:
             on_result(result)
@@ -46,7 +46,7 @@ def _parse_line(
         text = data.get("text", "")
         execution.logs.stderr.append(text)
         if on_stderr:
-            on_stderr(OutputMessage(text, data.get("timestamp", ""), is_stderr=True))
+            on_stderr(OutputMessage(text, data.get("timestamp", ""), True))
 
     elif event_type == "error":
         execution.error = ExecutionError(

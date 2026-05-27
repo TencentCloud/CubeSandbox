@@ -3,7 +3,7 @@
 """
 cubesandbox SDK unit tests.
 
-All HTTP calls are intercepted via httpx.MockTransport / unittest.mock.patch
+All HTTP calls are intercepted via requests/httpx mocks
 so no real network is needed.
 """
 
@@ -14,10 +14,9 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 
-from cubesandbox import CommandResult
+from cubesandbox import CommandResult, Template
 from cubesandbox._commands import Commands
 from cubesandbox._config import Config
 from cubesandbox._exceptions import (
@@ -52,15 +51,14 @@ def make_config(**kwargs) -> Config:
     return Config(**defaults)
 
 
-def mock_response(body=None, status: int = 200) -> httpx.Response:
-    """Build a fake httpx.Response."""
-    if body is None:
-        content = b""
-    elif isinstance(body, (dict, list)):
-        content = json.dumps(body).encode()
-    else:
-        content = str(body).encode()
-    return httpx.Response(status_code=status, content=content)
+def mock_response(body=None, status: int = 200):
+    """Build a duck-typed requests.Response for control-plane SDK calls."""
+    response = MagicMock()
+    response.ok = 200 <= status < 400
+    response.status_code = status
+    response.text = json.dumps(body) if body is not None else ""
+    response.json.return_value = body if body is not None else {}
+    return response
 
 
 def make_sandbox(**data_overrides) -> Sandbox:
@@ -72,7 +70,7 @@ def make_sandbox(**data_overrides) -> Sandbox:
 
 class TestCreate:
     def test_create_success(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)):
             sb = Sandbox.create(config=make_config())
         assert sb.sandbox_id == SANDBOX_ID
 
@@ -82,63 +80,63 @@ class TestCreate:
             Sandbox.create(config=cfg)
 
     def test_create_sends_template_and_timeout(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(template="tpl-foo", timeout=600, config=make_config())
         body = m.call_args.kwargs["json"]
         assert body["templateID"] == "tpl-foo"
         assert body["timeout"] == 600
 
     def test_create_sends_env_vars(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(env_vars={"FOO": "bar"}, config=make_config())
         body = m.call_args.kwargs["json"]
         assert body["envVars"] == {"FOO": "bar"}
 
     def test_create_sends_metadata(self):
         meta = {"network-policy": "deny-all"}
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(metadata=meta, config=make_config())
         body = m.call_args.kwargs["json"]
         assert body["metadata"] == meta
 
     def test_create_template_not_found(self):
-        with patch("httpx.Client.post",
+        with patch("requests.Session.post",
                    return_value=mock_response({"message": "template not found"}, status=404)):
             with pytest.raises(TemplateNotFoundError):
                 Sandbox.create(config=make_config())
 
     def test_create_server_error(self):
-        with patch("httpx.Client.post",
+        with patch("requests.Session.post",
                    return_value=mock_response({"message": "internal error"}, status=500)):
             with pytest.raises(ApiError):
                 Sandbox.create(config=make_config())
 
     def test_create_allow_internet_access_false(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(allow_internet_access=False, config=make_config())
         body = m.call_args.kwargs["json"]
         assert body["allowInternetAccess"] is False
 
     def test_create_allow_internet_access_true_not_in_payload(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(config=make_config())
         body = m.call_args.kwargs["json"]
         assert "allowInternetAccess" not in body
 
     def test_create_network_allow_out(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(network={"allow_out": ["8.8.8.8/32"]}, config=make_config())
         body = m.call_args.kwargs["json"]
         assert body["network"]["allowOut"] == ["8.8.8.8/32"]
 
     def test_create_network_deny_out(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(network={"deny_out": ["0.0.0.0/0"]}, config=make_config())
         body = m.call_args.kwargs["json"]
         assert body["network"]["denyOut"] == ["0.0.0.0/0"]
 
     def test_create_network_empty_not_in_payload(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(network={}, config=make_config())
         body = m.call_args.kwargs["json"]
         assert "network" not in body
@@ -148,12 +146,12 @@ class TestCreate:
 
 class TestConnect:
     def test_connect_success(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA)):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA)):
             sb = Sandbox.connect(SANDBOX_ID, config=make_config())
         assert sb.sandbox_id == SANDBOX_ID
 
     def test_connect_not_found(self):
-        with patch("httpx.Client.post",
+        with patch("requests.Session.post",
                    return_value=mock_response({"message": "not found"}, status=404)):
             with pytest.raises(SandboxNotFoundError):
                 Sandbox.connect(SANDBOX_ID, config=make_config())
@@ -161,7 +159,7 @@ class TestConnect:
     def test_connect_sends_timeout(self):
         cfg = make_config()
         cfg.timeout = 600
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA)) as m:
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA)) as m:
             Sandbox.connect(SANDBOX_ID, config=cfg)
         body = m.call_args.kwargs["json"]
         assert body["timeout"] == 600
@@ -172,22 +170,22 @@ class TestConnect:
 class TestListSandboxesV1:
     def test_list_returns_list(self):
         data = [SANDBOX_DATA]
-        with patch("httpx.Client.get", return_value=mock_response(data)):
+        with patch("requests.Session.get", return_value=mock_response(data)):
             result = Sandbox.list(config=make_config())
         assert result == data
 
     def test_list_empty(self):
-        with patch("httpx.Client.get", return_value=mock_response([])):
+        with patch("requests.Session.get", return_value=mock_response([])):
             result = Sandbox.list(config=make_config())
         assert result == []
 
     def test_list_calls_correct_endpoint(self):
-        with patch("httpx.Client.get", return_value=mock_response([])) as m:
+        with patch("requests.Session.get", return_value=mock_response([])) as m:
             Sandbox.list(config=make_config())
         assert "/sandboxes" in str(m.call_args)
 
     def test_list_server_error(self):
-        with patch("httpx.Client.get",
+        with patch("requests.Session.get",
                    return_value=mock_response({"message": "error"}, status=500)):
             with pytest.raises(ApiError):
                 Sandbox.list(config=make_config())
@@ -198,12 +196,12 @@ class TestListSandboxesV1:
 class TestListSandboxesV2:
     def test_list_v2_returns_list(self):
         data = [SANDBOX_DATA]
-        with patch("httpx.Client.get", return_value=mock_response(data)):
+        with patch("requests.Session.get", return_value=mock_response(data)):
             result = Sandbox.list_v2(config=make_config())
         assert result == data
 
     def test_list_v2_calls_correct_endpoint(self):
-        with patch("httpx.Client.get", return_value=mock_response([])) as m:
+        with patch("requests.Session.get", return_value=mock_response([])) as m:
             Sandbox.list_v2(config=make_config())
         assert "/v2/sandboxes" in str(m.call_args)
 
@@ -212,14 +210,14 @@ class TestListSandboxesV2:
 
 class TestHealth:
     def test_health_ok(self):
-        with patch("httpx.Client.get",
+        with patch("requests.Session.get",
                    return_value=mock_response({"status": "ok", "sandboxes": 2})):
             result = Sandbox.health(config=make_config())
         assert result["status"] == "ok"
         assert result["sandboxes"] == 2
 
     def test_health_server_error(self):
-        with patch("httpx.Client.get",
+        with patch("requests.Session.get",
                    return_value=mock_response({"message": "error"}, status=500)):
             with pytest.raises(ApiError):
                 Sandbox.health(config=make_config())
@@ -260,7 +258,7 @@ class TestKill:
                 sb.kill()
 
     def test_context_manager_kills_on_exit(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)):
             sb = Sandbox.create(config=make_config())
         with patch.object(sb._session, "delete", return_value=mock_response(status=204)) as m:
             with sb:
@@ -268,7 +266,7 @@ class TestKill:
         m.assert_called_once()
 
     def test_context_manager_suppresses_kill_error(self):
-        with patch("httpx.Client.post", return_value=mock_response(SANDBOX_DATA, status=201)):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)):
             sb = Sandbox.create(config=make_config())
         with patch.object(sb._session, "delete",
                           return_value=mock_response({"message": "gone"}, status=404)):
@@ -384,6 +382,10 @@ class TestExecutionModel:
         assert ex.error.name == "ZeroDivisionError"
         assert ex.text is None
 
+    def test_error_traceback_list_is_e2b_string(self):
+        err = ExecutionError("ValueError", "bad", ["line1", "line2"])
+        assert err.traceback == "line1\nline2"
+
     def test_logs_defaults_empty(self):
         ex = Execution()
         assert ex.logs.stdout == []
@@ -397,6 +399,34 @@ class TestExecutionModel:
         ex = Execution(error=ExecutionError("ValueError", "bad"))
         assert "ValueError" in repr(ex)
 
+    def test_result_e2b_fields_and_legacy_json_alias(self):
+        result = Result(json={"a": 1}, data={"b": 2}, chart={"type": "bar"})
+        assert result.json == {"a": 1}
+        assert result.json_data == {"a": 1}
+        assert set(result.formats()) == {"json", "data", "chart"}
+
+    def test_result_legacy_json_data_constructor(self):
+        result = Result(json_data={"a": 1})
+        assert result.json == {"a": 1}
+
+    def test_execution_to_json(self):
+        ex = Execution(results=[Result(text="2", is_main_result=True)])
+        assert '"results"' in ex.to_json()
+        assert '"text": "2"' in ex.to_json()
+
+    def test_output_message_e2b_and_legacy_aliases(self):
+        msg = OutputMessage("hello\n", 123, True)
+        assert msg.line == "hello\n"
+        assert msg.text == "hello\n"
+        assert msg.error is True
+        assert msg.is_stderr is True
+        assert str(msg) == "hello\n"
+
+    def test_output_message_legacy_constructor(self):
+        msg = OutputMessage(text="warn\n", is_stderr=True)
+        assert msg.line == "warn\n"
+        assert msg.error is True
+
 
 # ── _parse_line (ndjson stream) ───────────────────────────────────────────────
 
@@ -405,6 +435,18 @@ class TestParseStream:
         ex = Execution()
         _parse_line(ex, '{"type":"result","text":"2","is_main_result":true}')
         assert ex.text == "2"
+
+    def test_parses_e2b_result_fields(self):
+        ex = Execution()
+        _parse_line(
+            ex,
+            '{"type":"result","json":{"a":1},"data":{"b":2},"chart":{"type":"bar"},"is_main_result":true}',
+        )
+        result = ex.results[0]
+        assert result.json == {"a": 1}
+        assert result.json_data == {"a": 1}
+        assert result.data == {"b": 2}
+        assert result.chart == {"type": "bar"}
 
     def test_parses_stdout(self):
         ex = Execution()
@@ -444,8 +486,14 @@ class TestParseStream:
     def test_stdout_callback(self):
         ex, calls = Execution(), []
         _parse_line(ex, '{"type":"stdout","text":"hi\\n"}',
-                    on_stdout=lambda m: calls.append(m.text))
-        assert calls == ["hi\n"]
+                    on_stdout=lambda m: calls.append((m.line, m.text, m.error)))
+        assert calls == [("hi\n", "hi\n", False)]
+
+    def test_stderr_callback(self):
+        ex, calls = Execution(), []
+        _parse_line(ex, '{"type":"stderr","text":"warn\\n"}',
+                    on_stderr=lambda m: calls.append((m.line, m.text, m.error, m.is_stderr)))
+        assert calls == [("warn\n", "warn\n", True, True)]
 
     def test_result_callback(self):
         ex, calls = Execution(), []
@@ -1005,6 +1053,84 @@ class TestClone:
         with stack:
             with pytest.raises(TypeError, match="snapshot_name"):
                 sb.clone(n=1, snapshot_name="leaky")  # type: ignore[call-arg]
+
+
+# ── Templates ─────────────────────────────────────────────────────────────────
+
+class TestTemplateAPI:
+    def test_build_uses_current_templates_endpoint(self):
+        body = {
+            "jobID": "job-001",
+            "templateID": "tpl-python",
+            "status": "running",
+            "phase": "Pulling",
+            "progress": 10,
+        }
+        config = make_config()
+
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            job = Template.build(
+                template_id="tpl-python",
+                image="python:3.11-slim",
+                instance_type="default",
+                writable_layer_size="1G",
+                exposed_ports=[80],
+                probe_port=80,
+                probe_path="/health",
+                cpu_count=2000,
+                memory_mb=2048,
+                envs={"A": "1"},
+                allow_internet_access=True,
+                config=config,
+            )
+
+        post.assert_called_once_with(
+            "http://localhost:3000/templates",
+            json={
+                "image": "python:3.11-slim",
+                "templateID": "tpl-python",
+                "instanceType": "default",
+                "writableLayerSize": "1G",
+                "exposedPorts": [80],
+                "probePort": 80,
+                "probePath": "/health",
+                "cpu": 2000,
+                "memory": 2048,
+                "env": ["A=1"],
+                "allowInternetAccess": True,
+            },
+            headers={"Content-Type": "application/json"},
+        )
+        assert job.job_id == "job-001"
+        assert job.template_id == "tpl-python"
+
+    def test_build_rejects_unsupported_models(self):
+        with pytest.raises(ValueError, match="image is required"):
+            Template.build(config=make_config())
+        with pytest.raises(ValueError, match="dockerfile"):
+            Template.build(image="python:3.11-slim", dockerfile="FROM python", config=make_config())
+        with pytest.raises(ValueError, match="start_cmd"):
+            Template.build(image="python:3.11-slim", start_cmd="python app.py", config=make_config())
+
+    def test_rebuild_uses_post_templates_template_id(self):
+        body = {"jobID": "job-002", "templateID": "tpl-python", "status": "queued"}
+
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            job = Template.rebuild("tpl-python", force=True, config=make_config())
+
+        post.assert_called_once_with(
+            "http://localhost:3000/templates/tpl-python",
+            json={"force": True},
+            headers={"Content-Type": "application/json"},
+        )
+        assert job.job_id == "job-002"
+
+    def test_update_is_not_supported_locally(self):
+        with patch("requests.Session.patch") as patch_call:
+            with pytest.raises(NotImplementedError, match="does not support"):
+                Template.update("tpl-python", name="new-name", config=make_config())
+
+        patch_call.assert_not_called()
 
 
 # ── Exports ───────────────────────────────────────────────────────────────────

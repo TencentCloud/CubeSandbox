@@ -29,10 +29,15 @@ def _check_response(resp: requests.Response) -> None:
 
 @dataclass
 class TemplateBuild:
-    """A single build record for a template."""
+    """A template create/rebuild job or build status record."""
 
     build_id: str
     status: str
+    template_id: str = ""
+    phase: str = ""
+    progress: int = 0
+    error_message: str = ""
+    message: str = ""
     created_at: str = ""
     finished_at: str = ""
     logs: list[str] = field(default_factory=list)
@@ -40,12 +45,22 @@ class TemplateBuild:
     @classmethod
     def from_dict(cls, data: dict) -> "TemplateBuild":
         return cls(
-            build_id=data.get("buildID") or data.get("build_id", ""),
+            build_id=data.get("buildID") or data.get("jobID") or data.get("build_id", ""),
+            template_id=data.get("templateID") or data.get("template_id", ""),
             status=data.get("status", ""),
+            phase=data.get("phase", ""),
+            progress=data.get("progress", 0),
+            error_message=data.get("errorMessage") or data.get("error_message", ""),
+            message=data.get("message", ""),
             created_at=data.get("createdAt") or data.get("created_at", ""),
             finished_at=data.get("finishedAt") or data.get("finished_at", ""),
             logs=data.get("logs") or [],
         )
+
+    @property
+    def job_id(self) -> str:
+        """Alias for create/rebuild responses that use ``jobID``."""
+        return self.build_id
 
 
 @dataclass
@@ -54,9 +69,19 @@ class TemplateInfo:
 
     template_id: str
     name: str = ""
+    instance_type: str = ""
+    version: str = ""
+    status: str = ""
+    last_error: str = ""
+    created_at: str = ""
+    image_info: str = ""
     public: bool = False
     cpu_count: int = 0
     memory_mb: int = 0
+    replicas: list[dict] = field(default_factory=list)
+    create_request: dict | None = None
+    network_type: str | None = None
+    allow_internet_access: bool | None = None
     builds: list[TemplateBuild] = field(default_factory=list)
 
     @classmethod
@@ -65,9 +90,23 @@ class TemplateInfo:
         return cls(
             template_id=data.get("templateID") or data.get("template_id", ""),
             name=data.get("name") or data.get("aliases", [None])[0] or "",
+            instance_type=data.get("instanceType") or data.get("instance_type", ""),
+            version=data.get("version") or "",
+            status=data.get("status") or "",
+            last_error=data.get("lastError") or data.get("last_error", ""),
+            created_at=data.get("createdAt") or data.get("created_at", ""),
+            image_info=data.get("imageInfo") or data.get("image_info", ""),
             public=bool(data.get("public", False)),
             cpu_count=data.get("cpuCount") or data.get("cpu_count", 0),
             memory_mb=data.get("memoryMB") or data.get("memory_mb", 0),
+            replicas=data.get("replicas") or [],
+            create_request=data.get("createRequest") or data.get("create_request"),
+            network_type=data.get("networkType") or data.get("network_type"),
+            allow_internet_access=(
+                data.get("allowInternetAccess")
+                if "allowInternetAccess" in data
+                else data.get("allow_internet_access")
+            ),
             builds=[TemplateBuild.from_dict(b) for b in builds_raw],
         )
 
@@ -84,19 +123,19 @@ class Template:
         for t in templates:
             print(t.template_id, t.name)
 
-        # Build a new template from a docker image
-        info = Template.build(
+        # Build a new template from a container image
+        job = Template.build(
+            template_id="my-python-env",
             image="python:3.11-slim",
-            name="my-python-env",
         )
-        print(info.template_id)
+        print(job.job_id, job.status)
 
         # Query a specific template
         detail = Template.get("tpl-xxxxxxxxxxxxxxxxxxxxxxxx")
-        print(detail.builds)
+        print(detail.status, detail.image_info)
 
-        # Update template metadata
-        Template.update("tpl-xxx", name="new-name")
+        # Rebuild an existing template
+        Template.rebuild("tpl-xxx")
 
         # Delete a template
         Template.delete("tpl-xxx")
@@ -167,66 +206,146 @@ class Template:
     def build(
         cls,
         *,
+        template_id: str | None = None,
         name: str | None = None,
         image: str | None = None,
         dockerfile: str | None = None,
         start_cmd: str | None = None,
+        instance_type: str | None = None,
+        writable_layer_size: str | None = None,
+        exposed_ports: list[int] | None = None,
+        probe_port: int | None = None,
+        probe_path: str | None = None,
         cpu_count: int | None = None,
         memory_mb: int | None = None,
         envs: Dict[str, str] | None = None,
+        allow_internet_access: bool | None = None,
         config: Config | None = None,
         **kwargs: Any,
-    ) -> TemplateInfo:
-        """POST /v2/templates — Build (create) a new template.
+    ) -> TemplateBuild:
+        """POST /templates - Build (create) a new template from an image.
 
-        Submits a template build request and returns immediately with the
-        template info (status will be ``"building"``).  Poll
-        :meth:`get` to wait for the build to finish.
+        Submits CubeAPI's create-from-image request and returns the async job
+        accepted by CubeMaster. Poll :meth:`get_build_status` or :meth:`get`
+        to watch the build finish.
 
         Args:
-            name: Human-readable template name / alias.
+            template_id: Template ID. If omitted, CubeAPI/CubeMaster may assign one.
+            name: Deprecated alias for ``template_id``.
             image: Base container image URI (e.g. ``"python:3.11-slim"``).
-            dockerfile: Inline Dockerfile content.  Mutually exclusive with
-                *image*.
-            start_cmd: Command to run when the sandbox starts.
-            cpu_count: Number of vCPUs for the sandbox.
+            dockerfile: Not supported by CubeAPI's current template endpoint.
+            start_cmd: Not supported by CubeAPI's current template endpoint.
+            instance_type: CubeMaster instance type (defaults server-side).
+            writable_layer_size: Writable layer size, e.g. ``"1G"``.
+            exposed_ports: Container ports to expose.
+            probe_port: HTTP probe port.
+            probe_path: HTTP probe path.
+            cpu_count: CPU in millicores. Sent as CubeAPI ``cpu``.
             memory_mb: Memory limit in MiB for the sandbox.
             envs: Environment variables baked into the template.
+            allow_internet_access: Whether sandboxes from this template may access internet.
             config: SDK config.  Uses default (env-based) config if omitted.
             **kwargs: Extra fields forwarded verbatim to the request body.
 
         Returns:
-            :class:`TemplateInfo` with the new ``template_id``.
+            :class:`TemplateBuild` with ``job_id``, ``template_id`` and status fields.
 
         Raises:
+            ValueError: If ``image`` is missing or unsupported fields are used.
             ApiError: On unexpected backend error.
         """
-        cfg = config or Config()
-        payload: dict = {}
-        if name is not None:
-            payload["name"] = name
-        if image is not None:
-            payload["image"] = image
         if dockerfile is not None:
-            payload["dockerfile"] = dockerfile
+            raise ValueError("dockerfile builds are not supported by CubeAPI /templates")
         if start_cmd is not None:
-            payload["startCmd"] = start_cmd
+            raise ValueError("start_cmd is not supported by CubeAPI /templates")
+        if not image or not image.strip():
+            raise ValueError("image is required")
+
+        cfg = config or Config()
+        payload: dict = {"image": image.strip()}
+        tpl_id = template_id if template_id is not None else name
+        if tpl_id is not None:
+            payload["templateID"] = tpl_id
+        if instance_type is not None:
+            payload["instanceType"] = instance_type
+        if writable_layer_size is not None:
+            payload["writableLayerSize"] = writable_layer_size
+        if exposed_ports is not None:
+            payload["exposedPorts"] = exposed_ports
+        if probe_port is not None:
+            payload["probePort"] = probe_port
+        if probe_path is not None:
+            payload["probePath"] = probe_path
         if cpu_count is not None:
-            payload["cpuCount"] = cpu_count
+            payload["cpu"] = cpu_count
         if memory_mb is not None:
-            payload["memoryMB"] = memory_mb
+            payload["memory"] = memory_mb
         if envs is not None:
-            payload["envs"] = envs
+            payload["env"] = [f"{key}={value}" for key, value in envs.items()]
+        if allow_internet_access is not None:
+            payload["allowInternetAccess"] = allow_internet_access
         payload.update(kwargs)
 
         s = requests.Session()
         resp = s.post(
-            f"{cfg.api_url}/v2/templates",
+            f"{cfg.api_url}/templates",
             json=payload,
             headers={"Content-Type": "application/json"},
         )
         _check_response(resp)
-        return TemplateInfo.from_dict(resp.json())
+        return TemplateBuild.from_dict(resp.json())
+
+
+    @classmethod
+    def rebuild(
+        cls,
+        template_id: str,
+        *,
+        config: Config | None = None,
+        **extra: Any,
+    ) -> TemplateBuild:
+        """POST /templates/:templateID - Rebuild an existing template."""
+        cfg = config or Config()
+        s = requests.Session()
+        resp = s.post(
+            f"{cfg.api_url}/templates/{template_id}",
+            json=extra,
+            headers={"Content-Type": "application/json"},
+        )
+        _check_response(resp)
+        return TemplateBuild.from_dict(resp.json())
+
+
+    @classmethod
+    def get_build_status(
+        cls,
+        template_id: str,
+        build_id: str,
+        *,
+        config: Config | None = None,
+    ) -> TemplateBuild:
+        """GET /templates/:templateID/builds/:buildID/status."""
+        cfg = config or Config()
+        s = requests.Session()
+        resp = s.get(f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/status")
+        _check_response(resp)
+        return TemplateBuild.from_dict(resp.json())
+
+
+    @classmethod
+    def get_build_logs(
+        cls,
+        template_id: str,
+        build_id: str,
+        *,
+        config: Config | None = None,
+    ) -> dict:
+        """GET /templates/:templateID/builds/:buildID/logs."""
+        cfg = config or Config()
+        s = requests.Session()
+        resp = s.get(f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/logs")
+        _check_response(resp)
+        return resp.json()
 
 
     @classmethod
@@ -242,50 +361,16 @@ class Template:
         config: Config | None = None,
         **kwargs: Any,
     ) -> TemplateInfo:
-        """PATCH /v2/templates/:templateID — Update template metadata.
+        """Template metadata updates are not supported by current CubeAPI.
 
-        Only the fields you pass will be updated (PATCH semantics).
-
-        Args:
-            template_id: Template identifier.
-            name: New template name.
-            public: Whether the template is publicly accessible.
-            cpu_count: New vCPU count.
-            memory_mb: New memory limit in MiB.
-            start_cmd: New sandbox start command.
-            config: SDK config.  Uses default (env-based) config if omitted.
-            **kwargs: Extra fields forwarded verbatim to the request body.
-
-        Returns:
-            Updated :class:`TemplateInfo`.
-
-        Raises:
-            TemplateNotFoundError: If the template does not exist (HTTP 404).
-            ApiError: On unexpected backend error.
+        CubeAPI exposes ``PATCH /templates/:templateID`` but the handler
+        returns NotImplemented. Use :meth:`rebuild` to rebuild a template or
+        delete and recreate it.
         """
-        cfg = config or Config()
-        payload: dict = {}
-        if name is not None:
-            payload["name"] = name
-        if public is not None:
-            payload["public"] = public
-        if cpu_count is not None:
-            payload["cpuCount"] = cpu_count
-        if memory_mb is not None:
-            payload["memoryMB"] = memory_mb
-        if start_cmd is not None:
-            payload["startCmd"] = start_cmd
-        payload.update(kwargs)
-
-        s = requests.Session()
-        resp = s.patch(
-            f"{cfg.api_url}/v2/templates/{template_id}",
-            json=payload,
-            headers={"Content-Type": "application/json"},
+        raise NotImplementedError(
+            "CubeAPI does not support template metadata updates; use Template.rebuild() "
+            "or delete and recreate the template"
         )
-        _check_response(resp)
-        body = resp.json() if resp.content else {}
-        return TemplateInfo.from_dict(body) if body else TemplateInfo(template_id=template_id)
 
 
     @classmethod

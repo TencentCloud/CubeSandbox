@@ -372,8 +372,17 @@ class Sandbox:
             self.kill()
         except CubeSandboxError:
             pass
-        if self._client:
-            self._client.close()
+        self.close()
+
+    def close(self) -> None:
+        """Close cached HTTP clients without destroying the sandbox."""
+        self._reset_connections()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __repr__(self) -> str:
         return f"Sandbox(id={self.sandbox_id!r}, domain={self.domain!r})"
