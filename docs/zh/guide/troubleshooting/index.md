@@ -10,8 +10,8 @@
 
 按主题归类的高频问题索引表，每行链接到对应的 GitHub Issue：
 
-- [部署相关排障](./deployment)
-- [模板相关排障](./templates)
+- [部署相关排障](./deployment.md)
+- [模板相关排障](./templates.md)
 
 ## 适合收录的内容
 

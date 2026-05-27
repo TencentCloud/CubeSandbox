@@ -20,7 +20,7 @@
 
 这是 `dev-sidecar` 最自然、也最推荐的开发路径。
 
-如果你是按 [开发环境（QEMU 虚机）](./dev-environment) 启动的本地开发环境，那么 `examples/e2b-dev-sidecar/env.example` 里的默认值本来就是为这个场景准备的。
+如果你是按 [开发环境（QEMU 虚机）](./dev-environment.md) 启动的本地开发环境，那么 `examples/e2b-dev-sidecar/env.example` 里的默认值本来就是为这个场景准备的。
 
 直接这样做：
 

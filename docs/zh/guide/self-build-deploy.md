@@ -1,6 +1,6 @@
 # 本地构建部署
 
-> 如果你希望跳过本地构建，直接开始体验，请参阅[快速开始](./quickstart)。
+> 如果你希望跳过本地构建，直接开始体验，请参阅[快速开始](./quickstart.md)。
 
 本指南介绍如何从源码构建 Cube Sandbox 发布包并在单台裸金属服务器上完成部署。本地构建部署适用于**评估体验、开发测试**场景，也是需要自定义组件或扩展计算节点时的起点。
 
@@ -146,7 +146,7 @@ sudo ./install.sh
 
 #### 添加计算节点（多机集群）
 
-如果需要扩展到多台机器，可以添加计算节点并注册到本控制节点。完整操作请参阅[多机集群部署](./multi-node-deploy)指南。
+如果需要扩展到多台机器，可以添加计算节点并注册到本控制节点。完整操作请参阅[多机集群部署](./multi-node-deploy.md)指南。
 
 ## 验证部署
 
@@ -158,7 +158,7 @@ sudo ./smoke.sh
 
 该命令运行 `quickcheck.sh`，验证 `cube-api /health` 端点是否正常响应。
 
-计算节点的健康检查请参阅[多机集群部署 — 验证部署](./multi-node-deploy#验证部署)。
+计算节点的健康检查请参阅[多机集群部署 — 验证部署](./multi-node-deploy.md#验证部署)。
 
 ### 使用 E2B SDK 测试
 
@@ -281,9 +281,9 @@ sudo ./down.sh
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `ONE_CLICK_DEPLOY_ROLE` | `control` | 部署角色：`control` 为单机部署（默认）。计算节点请参阅[多机集群部署](./multi-node-deploy) |
-| `ONE_CLICK_CONTROL_PLANE_IP` | 空 | 仅计算节点模式使用。详见[多机集群部署 — 配置环境变量](./multi-node-deploy#第二步配置环境变量) |
-| `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | 空 | 仅计算节点模式使用。详见[多机集群部署 — 配置环境变量](./multi-node-deploy#第二步配置环境变量) |
+| `ONE_CLICK_DEPLOY_ROLE` | `control` | 部署角色：`control` 为单机部署（默认）。计算节点请参阅[多机集群部署](./multi-node-deploy.md) |
+| `ONE_CLICK_CONTROL_PLANE_IP` | 空 | 仅计算节点模式使用。详见[多机集群部署 — 配置环境变量](./multi-node-deploy.md#第二步配置环境变量) |
+| `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | 空 | 仅计算节点模式使用。详见[多机集群部署 — 配置环境变量](./multi-node-deploy.md#第二步配置环境变量) |
 | `CUBE_SANDBOX_NODE_IP` | 自动从 `eth0` 探测 | 节点主网卡 IP 地址。未设置时自动探测；若网卡名称不同请显式指定。 |
 | `ONE_CLICK_INSTALL_PREFIX` | `/usr/local/services/cubetoolbox` | 安装目录 |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |

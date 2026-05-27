@@ -89,7 +89,7 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-cl
 :::
 
 When the installer finishes, follow the regular
-[Quick Start](./quickstart) to create a template and run your first
+[Quick Start](./quickstart.md) to create a template and run your first
 sandbox in the VM.
 
 ## cubecow storage in dev-env
@@ -115,8 +115,8 @@ can skip it if the happy path above worked.
 
 ::: warning Not a production deployment method
 This is explicitly a **development / evaluation** environment. For
-production, use [Quick Start](./quickstart) or
-[Multi-Node Cluster](./multi-node-deploy) on bare metal.
+production, use [Quick Start](./quickstart.md) or
+[Multi-Node Cluster](./multi-node-deploy.md) on bare metal.
 :::
 
 ## Host self-check

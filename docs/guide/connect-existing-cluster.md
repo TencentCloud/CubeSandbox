@@ -24,7 +24,7 @@ This page only does one thing: help you quickly decide how to fill the `dev-side
 
 This is the most natural and recommended development path for `dev-sidecar`.
 
-If you followed [Development Environment (QEMU VM)](./dev-environment), the defaults in `examples/e2b-dev-sidecar/env.example` were already chosen for this exact case.
+If you followed [Development Environment (QEMU VM)](./dev-environment.md), the defaults in `examples/e2b-dev-sidecar/env.example` were already chosen for this exact case.
 
 Do this:
 

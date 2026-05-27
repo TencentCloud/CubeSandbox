@@ -1,6 +1,6 @@
 # Self-Build Deployment
 
-> If you prefer to get started without building from source, see [Quick Start](./quickstart).
+> If you prefer to get started without building from source, see [Quick Start](./quickstart.md).
 
 This guide walks you through building a Cube Sandbox release bundle from source and deploying it on a single bare-metal server. Self-build deployment is intended for **evaluation, development, and testing** purposes, and is also the starting point if you need to customize components or add compute nodes.
 
@@ -146,7 +146,7 @@ After installation, the installer symlinks `cubemastercli` and `cubecli` into `/
 
 #### Adding Compute Nodes (Multi-Node Cluster)
 
-To scale beyond a single machine, you can add compute-only nodes that register to this control node. See the [Multi-Node Cluster Deployment](./multi-node-deploy) guide for full instructions.
+To scale beyond a single machine, you can add compute-only nodes that register to this control node. See the [Multi-Node Cluster Deployment](./multi-node-deploy.md) guide for full instructions.
 
 ## Verifying the Deployment
 
@@ -158,7 +158,7 @@ sudo ./smoke.sh
 
 This runs `quickcheck.sh` and verifies that the `cube-api /health` endpoint is responding.
 
-For compute-node health checks, see [Multi-Node Cluster Deployment — Verifying the Deployment](./multi-node-deploy#verifying-the-deployment).
+For compute-node health checks, see [Multi-Node Cluster Deployment — Verifying the Deployment](./multi-node-deploy.md#verifying-the-deployment).
 
 ### Test with E2B SDK
 
@@ -281,9 +281,9 @@ You can also point to prebuilt binaries to skip compilation:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ONE_CLICK_DEPLOY_ROLE` | `control` | Deployment role: `control` for single-node (default). For compute-only nodes, see [Multi-Node Cluster Deployment](./multi-node-deploy) |
-| `ONE_CLICK_CONTROL_PLANE_IP` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy#step-2-configure-environment-variables) |
-| `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy#step-2-configure-environment-variables) |
+| `ONE_CLICK_DEPLOY_ROLE` | `control` | Deployment role: `control` for single-node (default). For compute-only nodes, see [Multi-Node Cluster Deployment](./multi-node-deploy.md) |
+| `ONE_CLICK_CONTROL_PLANE_IP` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
+| `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
 | `CUBE_SANDBOX_NODE_IP` | auto-detected from `eth0` | Node's primary network interface IP. Auto-detected if unset; set explicitly if your interface differs. |
 | `ONE_CLICK_INSTALL_PREFIX` | `/usr/local/services/cubetoolbox` | Installation directory |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | Run health check after installation |

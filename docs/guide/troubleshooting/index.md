@@ -10,8 +10,8 @@ This section collects practical troubleshooting write-ups for Cube Sandbox deplo
 
 Curated index tables of high-frequency issues, each row linking to a GitHub Issue:
 
-- [Deployment Troubleshooting](./deployment)
-- [Templates Troubleshooting](./templates)
+- [Deployment Troubleshooting](./deployment.md)
+- [Templates Troubleshooting](./templates.md)
 
 ## What belongs here
 

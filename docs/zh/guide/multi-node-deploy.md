@@ -37,7 +37,7 @@
 - **Docker** 已安装并运行
 - 到控制节点的**网络连通性**（默认需访问 `CubeMaster` 的 `8089` 端口）
 
-完整要求列表请参阅[本地构建部署 — 前置条件](./self-build-deploy#前置条件)。
+完整要求列表请参阅[本地构建部署 — 前置条件](./self-build-deploy.md#前置条件)。
 
 ## 第一步：准备发布包
 
@@ -137,7 +137,7 @@ sudo ./down.sh
 | 运行时 PID 文件 | `/var/run/cube-sandbox-one-click/` |
 | 进程标准输出/错误 | `/var/log/cube-sandbox-one-click/` |
 
-控制节点的日志路径请参阅[本地构建部署 — 查看日志](./self-build-deploy#查看日志)。
+控制节点的日志路径请参阅[本地构建部署 — 查看日志](./self-build-deploy.md#查看日志)。
 
 ## 配置参考
 
@@ -152,7 +152,7 @@ sudo ./down.sh
 | `ONE_CLICK_INSTALL_PREFIX` | `/usr/local/services/cubetoolbox` | 安装目录 |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |
 
-完整配置参考（构建选项、数据库、代理等）请参阅[本地构建部署 — 配置参考](./self-build-deploy#配置参考)。
+完整配置参考（构建选项、数据库、代理等）请参阅[本地构建部署 — 配置参考](./self-build-deploy.md#配置参考)。
 
 ## 故障排查
 
@@ -176,4 +176,4 @@ curl http://<控制节点IP>:8089/internal/meta/nodes
 2. 确认 Cubelet 配置中的 `meta_server_endpoint` 指向正确的 CubeMaster 地址
 3. 确保 `CUBE_SANDBOX_NODE_IP` 设为可路由的 IP（不是 `127.0.0.1`）
 
-通用故障排查（Docker、KVM、DNS 等）请参阅[本地构建部署 — 故障排查](./self-build-deploy#故障排查)。
+通用故障排查（Docker、KVM、DNS 等）请参阅[本地构建部署 — 故障排查](./self-build-deploy.md#故障排查)。

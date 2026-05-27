@@ -37,7 +37,7 @@ Each compute node must meet the same hardware and software requirements as the c
 - **Docker** installed and running
 - **Network connectivity** to the control node (specifically to `CubeMaster` on port `8089` by default)
 
-For the full requirements list, see [Self-Build Deployment — Prerequisites](./self-build-deploy#prerequisites).
+For the full requirements list, see [Self-Build Deployment — Prerequisites](./self-build-deploy.md#prerequisites).
 
 ## Step 1: Prepare the Release Bundle
 
@@ -137,7 +137,7 @@ To reinstall a compute node, simply run `install-compute.sh` again. The script a
 | Runtime PID files | `/var/run/cube-sandbox-one-click/` |
 | Process stdout/stderr | `/var/log/cube-sandbox-one-click/` |
 
-For control-node log paths, see [Self-Build Deployment — View Logs](./self-build-deploy#view-logs).
+For control-node log paths, see [Self-Build Deployment — View Logs](./self-build-deploy.md#view-logs).
 
 ## Configuration Reference
 
@@ -152,7 +152,7 @@ Compute nodes use the same `.env` file format. The following variables are speci
 | `ONE_CLICK_INSTALL_PREFIX` | `/usr/local/services/cubetoolbox` | Installation directory |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | Run health check after installation |
 
-For the full configuration reference (build-time options, database, proxy, etc.), see [Self-Build Deployment — Configuration Reference](./self-build-deploy#configuration-reference).
+For the full configuration reference (build-time options, database, proxy, etc.), see [Self-Build Deployment — Configuration Reference](./self-build-deploy.md#configuration-reference).
 
 ## Troubleshooting
 
@@ -176,4 +176,4 @@ If `smoke.sh` passes locally but the node does not appear on the control plane:
 2. Verify `meta_server_endpoint` in the Cubelet config points to the correct CubeMaster address
 3. Ensure `CUBE_SANDBOX_NODE_IP` is correctly set to a routable IP (not `127.0.0.1`)
 
-For general troubleshooting (Docker, KVM, DNS, etc.), see [Self-Build Deployment — Troubleshooting](./self-build-deploy#troubleshooting).
+For general troubleshooting (Docker, KVM, DNS, etc.), see [Self-Build Deployment — Troubleshooting](./self-build-deploy.md#troubleshooting).

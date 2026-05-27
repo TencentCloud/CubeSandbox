@@ -2,8 +2,8 @@
 
 A Template is the base image and configuration snapshot used to create Cube-Sandbox instances. This page covers the **concept and lifecycle** of templates.
 
-- To create, monitor, query, or delete templates using the CLI, see [Creating Templates from OCI Images](./tutorials/template-from-image).
-- To inspect template build status and preview the effective request, see [Template Inspection and Request Preview](./template-inspection-and-preview).
+- To create, monitor, query, or delete templates using the CLI, see [Creating Templates from OCI Images](./tutorials/template-from-image.md).
+- To inspect template build status and preview the effective request, see [Template Inspection and Request Preview](./template-inspection-and-preview.md).
 
 ## Template Lifecycle (Three-Step Process)
 
@@ -18,5 +18,5 @@ A Template is the base image and configuration snapshot used to create Cube-Sand
 
 ## Next Steps
 
-- [Creating Templates from OCI Images](./tutorials/template-from-image) — step-by-step CLI guide with probe configuration, progress monitoring, and troubleshooting.
-- [Template Inspection and Request Preview](./template-inspection-and-preview) — how to inspect template status and preview the effective request.
+- [Creating Templates from OCI Images](./tutorials/template-from-image.md) — step-by-step CLI guide with probe configuration, progress monitoring, and troubleshooting.
+- [Template Inspection and Request Preview](./template-inspection-and-preview.md) — how to inspect template status and preview the effective request.

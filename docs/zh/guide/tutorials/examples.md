@@ -13,5 +13,5 @@
 | [cube-bench](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/cube-bench) | Go 编写的 CLI 压测工具，可在可配置并发数下测量沙箱创建/删除延迟。具备实时 TUI 看板（Bubbletea/Lipgloss）、分位数报告（P50/P95/P99）和 JSON 导出功能。 |
 
 ::: tip
-所有示例共享相同的环境变量约定（`E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID`）。请先参考[快速开始](../quickstart)指南搭建 Cube Sandbox 环境。
+所有示例共享相同的环境变量约定（`E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID`）。请先参考[快速开始](../quickstart.md)指南搭建 Cube Sandbox 环境。
 :::

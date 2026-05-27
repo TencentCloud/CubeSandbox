@@ -13,5 +13,5 @@ Hands-on examples demonstrating various Cube Sandbox use cases. Each example is 
 | [cube-bench](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/cube-bench) | CLI benchmark tool written in Go that measures sandbox creation/deletion latency at configurable concurrency levels. Features a real-time TUI dashboard (Bubbletea/Lipgloss), percentile report (P50/P95/P99), and JSON export. |
 
 ::: tip
-All examples share the same environment variable conventions (`E2B_API_URL`, `E2B_API_KEY`, `CUBE_TEMPLATE_ID`). See the [Quick Start](../quickstart) guide to set up your Cube Sandbox deployment first.
+All examples share the same environment variable conventions (`E2B_API_URL`, `E2B_API_KEY`, `CUBE_TEMPLATE_ID`). See the [Quick Start](../quickstart.md) guide to set up your Cube Sandbox deployment first.
 :::
