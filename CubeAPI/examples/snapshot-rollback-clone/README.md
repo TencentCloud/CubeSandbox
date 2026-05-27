@@ -12,7 +12,7 @@ and clone APIs. Each script is standalone and runnable.
 | 01 | `01_create_snapshot.py` | `sb.create_snapshot()` basics |
 | 02 | `02_list_snapshots.py` | `Sandbox.list_snapshots()` — global / per-sandbox / paginated |
 | 03 | `03_clone_from_snapshot.py` | Spawn a sandbox from a snapshot via `template=` |
-| 04 | `04_state_preserved.py` | Filesystem state survives snapshot + clone |
+| 04 | `04_state_preserved.py` | Filesystem and memory state survive snapshot + clone |
 | 05 | `05_snapshot_outlives_sandbox.py` | Snapshot lifecycle is independent of the sandbox |
 | 06 | `06_clone_n.py` | One-line `sb.clone(n=N)` to fan out N sandboxes |
 | 07 | `07_clone_concurrent.py` | Parallel clone via `sb.clone(n=N, concurrency=C)` |

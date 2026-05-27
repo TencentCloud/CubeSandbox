@@ -76,7 +76,7 @@ items, _ = Sandbox.list_snapshots(sandbox_id=sb.sandbox_id)
 
 ## 克隆（Clone）
 
-对一个正在运行的沙箱调用 `sb.clone(n=N)`，可以立即派生出 N 个独立副本。每个副本都继承源沙箱当前的文件系统状态，但之后的写入互不影响，源沙箱也继续正常运行。
+对一个正在运行的沙箱调用 `sb.clone(n=N)`，可以立即派生出 N 个独立副本。每个副本都完整继承源沙箱在 clone 时刻的运行状态（内存 + 文件系统），但之后的写入互不影响，源沙箱也继续正常运行。
 
 ```python
 src = Sandbox.create(template=TEMPLATE_ID)

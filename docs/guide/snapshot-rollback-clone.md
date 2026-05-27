@@ -76,7 +76,7 @@ items, _ = Sandbox.list_snapshots(sandbox_id=sb.sandbox_id)
 
 ## Clone
 
-Calling `sb.clone(n=N)` on a running sandbox immediately derives N independent copies. Each copy inherits the source sandbox's current filesystem state, but subsequent writes are fully isolated. The source sandbox keeps running unaffected.
+Calling `sb.clone(n=N)` on a running sandbox immediately derives N independent copies. Each copy fully inherits the source sandbox's runtime state at the moment of the clone call — memory and filesystem alike — but subsequent writes are fully isolated. The source sandbox keeps running unaffected.
 
 ```python
 src = Sandbox.create(template=TEMPLATE_ID)

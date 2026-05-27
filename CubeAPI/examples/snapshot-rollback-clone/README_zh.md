@@ -12,7 +12,7 @@
 | 01 | `01_create_snapshot.py` | `sb.create_snapshot()` 基础用法 |
 | 02 | `02_list_snapshots.py` | `Sandbox.list_snapshots()`：全量 / 按 sandbox_id 过滤 / 分页 |
 | 03 | `03_clone_from_snapshot.py` | 用 `template=` 参数从快照启动新沙箱 |
-| 04 | `04_state_preserved.py` | 文件系统状态在 snapshot + clone 后保留 |
+| 04 | `04_state_preserved.py` | 文件系统与内存状态在 snapshot + clone 后均得以保留 |
 | 05 | `05_snapshot_outlives_sandbox.py` | 快照生命周期独立于源沙箱 |
 | 06 | `06_clone_n.py` | 一行 `sb.clone(n=N)` 派生 N 个沙箱 |
 | 07 | `07_clone_concurrent.py` | `sb.clone(n=N, concurrency=C)` 并发派生 |
