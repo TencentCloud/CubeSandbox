@@ -405,10 +405,8 @@ pub fn filter_memory_ranges_by_anon_and_soft_dirty<B: vm_memory::bitmap::Bitmap 
         let mut current_range_start: Option<u64> = None;
         let mut current_range_length: u64 = 0;
 
-        for (page_idx, (&is_anon, &is_dirty)) in anon_pages
-            .iter()
-            .zip(dirty_pages.iter())
-            .enumerate()
+        for (page_idx, (&is_anon, &is_dirty)) in
+            anon_pages.iter().zip(dirty_pages.iter()).enumerate()
         {
             let page_gpa = gpa + (page_idx as u64 * PAGE_SIZE);
             let must_save = is_anon && is_dirty;
@@ -650,8 +648,8 @@ mod tests {
         dirty_page(3, 0xa2);
         dirty_page(4, 0xa3);
 
-        let (filtered, stats) = filter_memory_ranges_by_soft_dirty(&guest_memory, &ranges)
-            .expect("filter round 2");
+        let (filtered, stats) =
+            filter_memory_ranges_by_soft_dirty(&guest_memory, &ranges).expect("filter round 2");
 
         // The three writes must be coalesced into exactly one contiguous run
         // [page 2 .. page 5).
@@ -677,8 +675,8 @@ mod tests {
         // pages 2/3/4 would still show up here.
         dirty_page(7, 0xb1);
 
-        let (filtered, stats) = filter_memory_ranges_by_soft_dirty(&guest_memory, &ranges)
-            .expect("filter round 3");
+        let (filtered, stats) =
+            filter_memory_ranges_by_soft_dirty(&guest_memory, &ranges).expect("filter round 3");
 
         assert_eq!(
             collect(&filtered),
@@ -694,8 +692,8 @@ mod tests {
         clear_soft_dirty().expect("clear_soft_dirty: round 3 -> 4");
 
         // ---------------- Round 4: write nothing -> empty delta ----------------
-        let (filtered, stats) = filter_memory_ranges_by_soft_dirty(&guest_memory, &ranges)
-            .expect("filter round 4");
+        let (filtered, stats) =
+            filter_memory_ranges_by_soft_dirty(&guest_memory, &ranges).expect("filter round 4");
 
         assert!(
             filtered.regions().is_empty(),
@@ -724,7 +722,9 @@ mod tests {
     /// helper must produce exactly the same per-window delta as
     /// `filter_memory_ranges_by_soft_dirty` does.
     ///
-    /// Skipped silently when the host kernel lacks `CONFIG_MEM_SOFT_DIRTY=y`.
+    /// Skipped silently when the host kernel lacks `CONFIG_MEM_SOFT_DIRTY=y`,
+    /// or when the test process lacks CAP_SYS_ADMIN to read PFNs from
+    /// /proc/self/pagemap and classify anonymous pages through /proc/kpageflags.
     #[test]
     fn test_filter_memory_ranges_by_anon_and_soft_dirty_end_to_end() {
         let _guard = CLEAR_REFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -780,8 +780,17 @@ mod tests {
         dirty_page(6, 0xc2);
 
         let (filtered, stats) =
-            filter_memory_ranges_by_anon_and_soft_dirty(&guest_memory, &ranges)
-                .expect("anon ∩ soft-dirty filter failed");
+            match filter_memory_ranges_by_anon_and_soft_dirty(&guest_memory, &ranges) {
+                Ok(result) => result,
+                Err(SoftDirtyError::AnonProbe(pagemap_anon::PagemapAnonError::NoCapSysAdmin)) => {
+                    eprintln!(
+                        "no CAP_SYS_ADMIN to read pagemap PFNs; skipping {}",
+                        "test_filter_memory_ranges_by_anon_and_soft_dirty_end_to_end"
+                    );
+                    return;
+                }
+                Err(e) => panic!("anon ∩ soft-dirty filter failed: {e}"),
+            };
 
         // Every page in this anon MAP_PRIVATE mapping is anon, so
         // anon ∩ soft-dirty == soft-dirty exactly: only pages 5 and 6.

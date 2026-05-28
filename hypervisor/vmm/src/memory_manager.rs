@@ -1353,7 +1353,6 @@ impl MemoryManager {
                     .fill_saved_regions(memory_file_target.path, mem_snapshot.memory_ranges)?;
             }
 
-
             Ok(mm)
         } else {
             Err(Error::RestoreMissingSourceUrl)
@@ -2461,14 +2460,16 @@ impl MemoryManager {
             MemorySnapshotFile::from_snapshot_url(destination_url, memory_vol_url.as_deref())?;
 
         let guest_memory = self.guest_memory.memory();
-        let (filtered_ranges, stats) =
-            filter_memory_ranges_by_anon_and_soft_dirty(&guest_memory, &self.snapshot_memory_ranges)
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!(
-                        "Failed to filter memory with anon ∩ soft-dirty: {}",
-                        e
-                    ))
-                })?;
+        let (filtered_ranges, stats) = filter_memory_ranges_by_anon_and_soft_dirty(
+            &guest_memory,
+            &self.snapshot_memory_ranges,
+        )
+        .map_err(|e| {
+            MigratableError::MigrateSend(anyhow!(
+                "Failed to filter memory with anon ∩ soft-dirty: {}",
+                e
+            ))
+        })?;
 
         info!(
             "Soft-dirty snapshot (anon ∩ soft-dirty): total={} bytes ({} pages), \

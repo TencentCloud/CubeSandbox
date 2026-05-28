@@ -82,9 +82,9 @@ pub mod migration;
 pub mod pagemap_anon;
 mod pci_segment;
 pub mod seccomp_filters;
-pub mod soft_dirty;
 mod serial_manager;
 mod sigwinch_listener;
+pub mod soft_dirty;
 pub mod vm;
 pub mod vm_config;
 
