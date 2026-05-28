@@ -8,9 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 require_root
-require_cmd docker
 
-CUBE_PROXY_CONTAINER_NAME="${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
-if container_exists "${CUBE_PROXY_CONTAINER_NAME}"; then
-  docker stop -t 10 "${CUBE_PROXY_CONTAINER_NAME}" >/dev/null 2>&1 || true
-fi
+exec env \
+  ONE_CLICK_RUNTIME_ENV_FILE="${ENV_FILE}" \
+  "${TOOLBOX_ROOT}/scripts/one-click/down-cube-proxy.sh"

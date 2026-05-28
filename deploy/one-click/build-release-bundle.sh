@@ -304,9 +304,11 @@ copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-shim" "${PACKAGE_ROOT}/cube-shim"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf" "${PACKAGE_ROOT}/cube-kernel-scf"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image" "${PACKAGE_ROOT}/cube-image"
 
-copy_file "${SCRIPT_DIR}/scripts/one-click/common.sh" "${PACKAGE_ROOT}/scripts/one-click/common.sh"
-copy_file "${SCRIPT_DIR}/scripts/one-click/quickcheck.sh" "${PACKAGE_ROOT}/scripts/one-click/quickcheck.sh"
-copy_file "${SCRIPT_DIR}/scripts/one-click/seed-cubemaster-metrics.sh" "${PACKAGE_ROOT}/scripts/one-click/seed-cubemaster-metrics.sh"
+# Ship the entire scripts/one-click directory: the systemd unit scripts
+# delegate container lifecycle to the compose-based up-/down- helpers
+# (e.g. up-cube-proxy.sh, up-support.sh, up-webui.sh and their compose-lib
+# siblings), so the runtime needs every script in this directory.
+copy_dir_contents "${SCRIPT_DIR}/scripts/one-click" "${PACKAGE_ROOT}/scripts/one-click"
 copy_dir_contents "${SCRIPT_DIR}/scripts/systemd" "${PACKAGE_ROOT}/scripts/systemd"
 # cube-diag is the documented diagnostic entry point (see docs/guide/service-management.md);
 # it must ship in the release bundle so the install layout exposes

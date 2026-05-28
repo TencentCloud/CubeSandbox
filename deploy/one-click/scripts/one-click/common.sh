@@ -260,6 +260,20 @@ container_exists() {
   docker ps -a --format '{{.Names}}' | rg -x "${name}" >/dev/null 2>&1
 }
 
+docker_rm_if_exists() {
+  local name="$1"
+  local stop_timeout="${2:-10}"
+  if ! container_exists "${name}"; then
+    return 0
+  fi
+  # Graceful path: ask the container to stop, then remove it. We deliberately
+  # avoid `docker rm -f` (SIGKILL) so workloads like MySQL/Redis get to flush
+  # state. The systemd units that own these containers set TimeoutStopSec to
+  # cover this graceful stop.
+  docker stop -t "${stop_timeout}" "${name}" >/dev/null 2>&1 || true
+  docker rm "${name}" >/dev/null 2>&1 || true
+}
+
 wait_for_http() {
   local url="$1"
   local retries="${2:-30}"

@@ -154,9 +154,7 @@ if [[ -f "${COREDNS_DIR}/docker-compose.yaml" ]]; then
   coredns_compose_run down --remove-orphans >/dev/null 2>&1 || true
 fi
 
-if container_exists "${COREDNS_CONTAINER}"; then
-  docker rm -f "${COREDNS_CONTAINER}" >/dev/null
-fi
+docker_rm_if_exists "${COREDNS_CONTAINER}"
 
 rollback_host_dns
 

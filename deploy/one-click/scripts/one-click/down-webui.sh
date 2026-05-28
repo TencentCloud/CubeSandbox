@@ -18,8 +18,7 @@ if [[ -f "${WEBUI_DIR}/docker-compose.yaml" ]]; then
   webui_compose_run down --remove-orphans >/dev/null 2>&1 || true
 fi
 
-if container_exists "${WEB_UI_CONTAINER_NAME}"; then
-  docker rm -f "${WEB_UI_CONTAINER_NAME}" >/dev/null
-fi
+# Fallback for legacy non-compose containers; graceful stop, no -f.
+docker_rm_if_exists "${WEB_UI_CONTAINER_NAME}"
 
 log "webui stopped"

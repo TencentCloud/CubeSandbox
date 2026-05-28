@@ -16,6 +16,9 @@ ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/webui-postcheck.sh
 ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/webui-stop.sh
 Restart=on-failure
 RestartSec=2s
+# Override short distro defaults explicitly.
+TimeoutStartSec=60s
+TimeoutStopSec=30s
 
 [Install]
 WantedBy=cube-sandbox-control.target

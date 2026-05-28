@@ -16,6 +16,13 @@ ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-postche
 ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-stop.sh
 Restart=on-failure
 RestartSec=2s
+# Override distro defaults explicitly: some distros (e.g. OpenCloudOS) ship
+# DefaultTimeoutStopUSec=5s, which is too tight for the graceful shutdown
+# path (compose down stops the container with the usual 10s grace) and would
+# leave orphan Exited containers behind. Keep start timeout high because the
+# first-run path also builds the cube-proxy image via compose.
+TimeoutStartSec=180s
+TimeoutStopSec=30s
 
 [Install]
 WantedBy=cube-sandbox-control.target

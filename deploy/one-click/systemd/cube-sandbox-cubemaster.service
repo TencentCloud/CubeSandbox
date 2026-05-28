@@ -16,6 +16,10 @@ ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cubemaster-start.sh
 ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/cubemaster-postcheck.sh
 Restart=on-failure
 RestartSec=2s
+# Override short distro defaults explicitly so SIGTERM has room to drain DB
+# connections / flush state before SIGKILL.
+TimeoutStartSec=60s
+TimeoutStopSec=30s
 
 [Install]
 WantedBy=cube-sandbox-control.target

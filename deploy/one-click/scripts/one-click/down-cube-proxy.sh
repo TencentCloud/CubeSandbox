@@ -14,11 +14,12 @@ PROXY_DIR="${TOOLBOX_ROOT}/cubeproxy"
 CUBE_PROXY_CONTAINER_NAME="${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
 
 if [[ -f "${PROXY_DIR}/docker-compose.yaml" ]]; then
+  # compose down does graceful SIGTERM + grace period internally; no -f needed.
   compose_run down --remove-orphans >/dev/null 2>&1 || true
 fi
 
-if container_exists "${CUBE_PROXY_CONTAINER_NAME}"; then
-  docker rm -f "${CUBE_PROXY_CONTAINER_NAME}" >/dev/null
-fi
+# Fallback for the rare case where the container was not created by compose
+# (e.g. upgrade from a legacy bundle). Stop gracefully, then remove.
+docker_rm_if_exists "${CUBE_PROXY_CONTAINER_NAME}"
 
 log "cube proxy stopped"

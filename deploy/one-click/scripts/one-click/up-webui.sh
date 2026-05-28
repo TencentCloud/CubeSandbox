@@ -25,6 +25,7 @@ WEB_UI_IMAGE="${WEB_UI_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/o
 WEB_UI_CONTAINER_NAME="${WEB_UI_CONTAINER_NAME:-cube-webui}"
 WEB_UI_HOST_PORT="${WEB_UI_HOST_PORT:-12088}"
 WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3000}"
+COMPOSE_DETACH="${ONE_CLICK_COMPOSE_DETACH:-1}"
 
 WEB_UI_DIST_DIR="${WEBUI_DIR}/dist"
 NGINX_TEMPLATE="${WEBUI_DIR}/nginx.conf"
@@ -34,6 +35,10 @@ COMPOSE_FILE="${WEBUI_DIR}/docker-compose.yaml"
 
 ensure_dir "${WEBUI_DIR}"
 ensure_dir "${WEB_UI_DIST_DIR}"
+case "${COMPOSE_DETACH}" in
+  0|1) ;;
+  *) die "unsupported ONE_CLICK_COMPOSE_DETACH: ${COMPOSE_DETACH} (expected 0 or 1)" ;;
+esac
 for required_file in \
   "${WEB_UI_DIST_DIR}/index.html" \
   "${NGINX_TEMPLATE}" \
@@ -83,6 +88,13 @@ sed \
   "${COMPOSE_TEMPLATE}" > "${COMPOSE_FILE}"
 
 webui_compose_run down --remove-orphans >/dev/null 2>&1 || true
+docker_rm_if_exists "${WEB_UI_CONTAINER_NAME}"
+
+if [[ "${COMPOSE_DETACH}" == "0" ]]; then
+  webui_compose_run up webui
+  exit $?
+fi
+
 webui_compose_run up -d webui
 
 wait_for_tcp_port "${WEB_UI_HOST_PORT}" 30 2 \

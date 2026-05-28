@@ -8,9 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 require_root
-require_cmd docker
 
-WEB_UI_CONTAINER_NAME="${WEB_UI_CONTAINER_NAME:-cube-webui}"
-if container_exists "${WEB_UI_CONTAINER_NAME}"; then
-  docker stop -t 10 "${WEB_UI_CONTAINER_NAME}" >/dev/null 2>&1 || true
-fi
+exec env \
+  ONE_CLICK_RUNTIME_ENV_FILE="${ENV_FILE}" \
+  "${TOOLBOX_ROOT}/scripts/one-click/down-webui.sh"

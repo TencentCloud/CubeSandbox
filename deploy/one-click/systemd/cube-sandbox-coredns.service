@@ -15,6 +15,11 @@ ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/coredns-start.sh
 ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/coredns-stop.sh
 Restart=on-failure
 RestartSec=2s
+# Pin explicit timeouts so the unit does not inherit short distro defaults
+# (e.g. OpenCloudOS DefaultTimeoutStopUSec=5s) that would SIGKILL the stop
+# script mid-shutdown.
+TimeoutStartSec=60s
+TimeoutStopSec=30s
 
 [Install]
 WantedBy=cube-sandbox-control.target

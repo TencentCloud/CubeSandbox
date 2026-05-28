@@ -34,6 +34,7 @@ CUBE_PROXY_HTTPS_PORT="${CUBE_PROXY_HTTPS_PORT:-443}"
 CUBE_PROXY_HTTP_PORT="${CUBE_PROXY_HTTP_PORT:-80}"
 CUBE_PROXY_SSL_CERT="${CUBE_PROXY_SSL_CERT:-cube.app+3.pem}"
 CUBE_PROXY_SSL_KEY="${CUBE_PROXY_SSL_KEY:-cube.app+3-key.pem}"
+COMPOSE_DETACH="${ONE_CLICK_COMPOSE_DETACH:-1}"
 MKCERT_BUNDLED_BIN="${TOOLBOX_ROOT}/support/bin/mkcert"
 
 ensure_dir "${PROXY_DIR}"
@@ -43,6 +44,10 @@ ensure_file "${BUILD_CONTEXT_DIR}/Dockerfile"
 ensure_file "${GLOBAL_TEMPLATE}"
 ensure_file "${COMPOSE_TEMPLATE}"
 [[ -n "${CUBE_SANDBOX_NODE_IP}" ]] || die "CUBE_SANDBOX_NODE_IP is required for cube proxy"
+case "${COMPOSE_DETACH}" in
+  0|1) ;;
+  *) die "unsupported ONE_CLICK_COMPOSE_DETACH: ${COMPOSE_DETACH} (expected 0 or 1)" ;;
+esac
 
 install_mkcert() {
   if command -v mkcert >/dev/null 2>&1; then
@@ -113,6 +118,7 @@ sed \
   "${COMPOSE_TEMPLATE}" > "${COMPOSE_FILE}"
 
 compose_run down --remove-orphans >/dev/null 2>&1 || true
+docker_rm_if_exists "${CUBE_PROXY_CONTAINER_NAME}"
 
 # cube-proxy uses network_mode: host, so HTTP/HTTPS ports must be free on the
 # host before we attempt to start the container; otherwise the failure mode is
@@ -124,6 +130,11 @@ for port in "${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}"; do
 done
 
 compose_run build cube-proxy
+if [[ "${COMPOSE_DETACH}" == "0" ]]; then
+  compose_run up cube-proxy
+  exit $?
+fi
+
 compose_run up -d cube-proxy
 
 for _ in {1..40}; do

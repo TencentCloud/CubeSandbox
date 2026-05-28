@@ -145,9 +145,16 @@ container_exists() {
 
 docker_rm_if_exists() {
   local name="$1"
-  if container_exists "${name}"; then
-    docker rm -f "${name}" >/dev/null 2>&1 || true
+  local stop_timeout="${2:-10}"
+  if ! container_exists "${name}"; then
+    return 0
   fi
+  # Graceful path: stop with bounded timeout, then remove. We avoid
+  # `docker rm -f` so stateful workloads can flush. Callers that invoke this
+  # in a stop hook should pair it with an appropriate TimeoutStopSec on the
+  # owning systemd unit.
+  docker stop -t "${stop_timeout}" "${name}" >/dev/null 2>&1 || true
+  docker rm "${name}" >/dev/null 2>&1 || true
 }
 
 docker_image_exists() {

@@ -8,9 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 require_root
-require_cmd docker
 
-MYSQL_CONTAINER="${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
-if container_exists "${MYSQL_CONTAINER}"; then
-  docker stop -t 10 "${MYSQL_CONTAINER}" >/dev/null 2>&1 || true
-fi
+exec env \
+  ONE_CLICK_RUNTIME_ENV_FILE="${ENV_FILE}" \
+  ONE_CLICK_SUPPORT_SERVICES=mysql \
+  "${TOOLBOX_ROOT}/scripts/one-click/down-support.sh"
