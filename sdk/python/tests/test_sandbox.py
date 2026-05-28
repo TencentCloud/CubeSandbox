@@ -20,7 +20,7 @@ import httpx
 import pytest
 
 from cubesandbox import CommandResult, Template
-from cubesandbox._commands import Commands
+from cubesandbox._commands import Commands, _collect_process_events
 from cubesandbox._config import Config
 from cubesandbox._exceptions import (
     ApiError,
@@ -657,6 +657,55 @@ class TestCommands:
             result = sb.commands.run("false")
         assert result.exit_code == 7
 
+    def test_run_exit_code_from_signal_status(self):
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = b"".join(
+                [
+                    connect_envelope(0, '{"event":{"start":{"pid":123}}}'),
+                    connect_envelope(
+                        0,
+                        '{"event":{"end":{"exited":false,"status":"signal 9 (SIGKILL)"}}}',
+                    ),
+                    connect_envelope(0x02, "{}"),
+                ]
+            )
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with (
+            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
+            patch.object(sb, "_build_data_client", return_value=client),
+        ):
+            result = sb.commands.run("kill")
+        assert result.exit_code == 137
+
+    def test_collect_process_events_prefers_status_when_exit_code_unset(self):
+        class End:
+            exit_code = 0
+            status = "exit status 7"
+            exited = True
+            error = ""
+
+            def HasField(self, name):
+                return False
+
+        class Event:
+            end = End()
+
+            def HasField(self, name):
+                return name == "end"
+
+        class Response:
+            event = Event()
+
+            def HasField(self, name):
+                return name == "event"
+
+        result = _collect_process_events([Response()])
+        assert result.exit_code == 7
+
     def test_run_timeout_forwarded(self):
         sb = make_sandbox()
         seen = {}
@@ -679,6 +728,20 @@ class TestCommands:
         ):
             sb.commands.run("sleep 1", timeout=5.0)
         assert seen["headers"]["connect-timeout-ms"] == "5000"
+
+    def test_run_http_error_includes_response_body(self):
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"message": "sandbox is not ready"})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with (
+            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
+            patch.object(sb, "_build_data_client", return_value=client),
+        ):
+            with pytest.raises(RuntimeError, match="HTTP 400: sandbox is not ready"):
+                sb.commands.run("echo hello")
 
     def test_commands_property(self):
         assert isinstance(make_sandbox().commands, Commands)

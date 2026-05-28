@@ -152,7 +152,9 @@ class Commands:
             timeout=timeout,
         ) as resp:
             if resp.status_code >= 400:
-                raise RuntimeError(f"command failed: HTTP {resp.status_code}")
+                detail = _http_error_detail(resp)
+                suffix = f": {detail}" if detail else ""
+                raise RuntimeError(f"command failed: HTTP {resp.status_code}{suffix}")
             return _parse_process_start_stream(resp.iter_raw())
 
 
@@ -184,11 +186,7 @@ def _collect_process_events(events) -> CommandResult:
             if event.data.stderr:
                 stderr.append(event.data.stderr.decode("utf-8", "replace"))
         if event.HasField("end"):
-            if event.end.exit_code != 0:
-                exit_code = int(event.end.exit_code)
-            else:
-                parsed = _exit_code_from_status(event.end.status)
-                exit_code = 0 if parsed is None and event.end.exited else parsed
+            exit_code = _exit_code_from_end_event(event.end)
             if exit_code is None:
                 if event.end.error:
                     raise RuntimeError(f"process failed: {event.end.error}")
@@ -271,6 +269,27 @@ def _raise_connect_end_stream(raw: bytes) -> None:
     raise RuntimeError(message)
 
 
+def _http_error_detail(resp) -> str:
+    raw = resp.read()
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", "replace").strip()
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return text
+    if isinstance(payload, dict):
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+    return text
+
+
 def _decode_process_bytes(value: str) -> str:
     return base64.b64decode(value).decode("utf-8", "replace")
 
@@ -281,9 +300,37 @@ def _exit_code_from_status(status: object) -> int | None:
     match = re.search(r"(?:exit status|exited with code)\s+(-?\d+)", status)
     if match:
         return int(match.group(1))
+    signal_match = re.search(r"(?:signal|terminated by signal)\s+(\d+)", status)
+    if signal_match:
+        return 128 + int(signal_match.group(1))
     if status == "exited":
         return 0
     return None
+
+
+def _exit_code_from_end_event(end) -> int | None:
+    if _has_proto_field(end, "exit_code"):
+        return int(end.exit_code)
+
+    parsed = _exit_code_from_status(end.status)
+    if parsed is not None:
+        return parsed
+
+    # Some generated proto3 bindings do not expose scalar field presence.
+    # Preserve the legacy non-zero path while still allowing status strings to
+    # override an unset default value of 0.
+    if getattr(end, "exit_code", 0) != 0:
+        return int(end.exit_code)
+    if end.exited:
+        return 0
+    return None
+
+
+def _has_proto_field(message, field_name: str) -> bool:
+    try:
+        return bool(message.HasField(field_name))
+    except (AttributeError, ValueError):
+        return False
 
 
 def _basic_auth_user(user: str) -> str:
