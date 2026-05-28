@@ -81,6 +81,13 @@ UPDATE `t_cube_template_image_job`
 -- by appending the job_id to request_id of the older rows. This preserves
 -- the latest row's request_id intact (matching the Go-side "seen" logic that
 -- iterates ASC by id and only mutates the first-seen-then-duplicate).
+--
+-- Expected runtime: O(seconds) on tables up to ~1M rows. t_cube_template_image_job
+-- is operational metadata and typical production deployments stay well below
+-- that scale, so a single self-join is acceptable here. Batched execution is
+-- intentionally not implemented; if a deployment ever exceeds ~1M rows, run
+-- this UPDATE manually in chunks (e.g. WHERE id BETWEEN ...) before applying
+-- migration 0002, then re-run goose to record completion.
 UPDATE `t_cube_template_image_job` t
   JOIN (
     SELECT MIN(id) AS keep_id, `request_id`, `operation`

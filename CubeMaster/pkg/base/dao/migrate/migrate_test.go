@@ -70,7 +70,15 @@ func newMySQL(t *testing.T) *testEnv {
 		t.Skipf("could not start mysql container (%v); set %s to skip docker", err, dsnEnv)
 	}
 	port := resource.GetPort("3306/tcp")
-	dsn := fmt.Sprintf("root:root@tcp(127.0.0.1:%s)/cube_test?parseTime=true&multiStatements=true", port)
+	// DSN parameters intentionally mirror pkg/base/dao/driver/mysql.buildDSN so
+	// the test path exercises the same connection-level options as production
+	// (notably: multiStatements is NOT enabled). If a future migration relies
+	// on multi-statement Exec, fix the migration rather than papering over it
+	// here.
+	dsn := fmt.Sprintf(
+		"root:root@tcp(127.0.0.1:%s)/cube_test?charset=utf8&parseTime=true&loc=Local&timeout=5s&readTimeout=5s&writeTimeout=5s",
+		port,
+	)
 
 	pool.MaxWait = probeTimeout
 	if err := pool.Retry(func() error {
@@ -216,15 +224,22 @@ func TestRun_UpgradeFromV022(t *testing.T) {
 	// Seed legacy rows: same empty request_id, different job_id. The Go-
 	// side normalizer used to set request_id = 'legacy-' + job_id, which
 	// is exactly what migration 0001 step (C) replicates in SQL.
-	// Three legacy rows with empty request_id and operation. Distinct
-	// (template_id, attempt_no) so the existing v0.2.2 UNIQUE index does
-	// not reject the seed inserts.
+	// Five legacy rows with empty request_id and operation, one per
+	// branch of the CASE in 0002 step (C.2):
+	//   - job-a / job-c : CREATE (source ref, no retry, no node)
+	//   - job-b         : COMMIT (node, no source ref)
+	//   - job-d         : REDO   (source ref AND retry_of_job_id set)
+	//   - job-e         : LEGACY (everything empty -> fallback ELSE branch)
+	// Distinct (template_id, attempt_no) so the existing v0.2.2 UNIQUE
+	// index does not reject the seed inserts.
 	if _, err := db.ExecContext(ctx, `INSERT INTO t_cube_template_image_job
-		(job_id, template_id, attempt_no, source_image_ref, node_id)
+		(job_id, template_id, attempt_no, source_image_ref, node_id, retry_of_job_id)
 		VALUES
-		  ('job-a', 'tpl-1', 1, 'registry.io/img@sha256:aaa', ''),
-		  ('job-b', 'tpl-1', 2, '',                          'node-1'),
-		  ('job-c', 'tpl-2', 1, 'registry.io/img@sha256:aaa', '')`); err != nil {
+		  ('job-a', 'tpl-1', 1, 'registry.io/img@sha256:aaa', '',       ''),
+		  ('job-b', 'tpl-1', 2, '',                          'node-1', ''),
+		  ('job-c', 'tpl-2', 1, 'registry.io/img@sha256:aaa', '',       ''),
+		  ('job-d', 'tpl-2', 2, 'registry.io/img@sha256:bbb', '',       'job-a'),
+		  ('job-e', 'tpl-3', 1, '',                          '',       '')`); err != nil {
 		t.Fatalf("seed legacy rows: %v", err)
 	}
 
@@ -255,6 +270,8 @@ func TestRun_UpgradeFromV022(t *testing.T) {
 		"job-a": {"legacy-job-a", "CREATE"}, // source ref present, no retry
 		"job-b": {"legacy-job-b", "COMMIT"}, // node id present, no source ref
 		"job-c": {"legacy-job-c", "CREATE"},
+		"job-d": {"legacy-job-d", "REDO"},   // source ref + retry_of_job_id
+		"job-e": {"legacy-job-e", "LEGACY"}, // ELSE branch fallback
 	}
 	for jobID, expected := range want {
 		actual, ok := got[jobID]
