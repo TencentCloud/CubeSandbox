@@ -187,6 +187,15 @@ const (
 	MasterAnnotationAppSnapshotTemplateID     = "cube.master.appsnapshot.template.id"
 	MasterAnnotationRuntimeSnapshotID         = "cube.master.runtime.snapshot.id"
 	MasterAnnotationRuntimeSnapshotAttachedAt = "cube.master.runtime.snapshot.attached_at"
+	// MasterAnnotationRuntimeRestoreSnapshotID tracks the snapshot id whose
+	// memory image the running VM was last *restored* from (set by Create
+	// for restore-from-snapshot path, and by Rollback). Unlike
+	// MasterAnnotationRuntimeSnapshotID, Commit does NOT bump this — Commit
+	// does not restart the VM, so the in-process pagemap_anon bitmap is
+	// still tracking "anon pages dirtied since the last restore", which
+	// matches the memory file recorded here.
+	MasterAnnotationRuntimeRestoreSnapshotID         = "cube.master.runtime.restore.snapshot.id"
+	MasterAnnotationRuntimeRestoreSnapshotAttachedAt = "cube.master.runtime.restore.snapshot.attached_at"
 
 	MasterAnnotationAppSnapshotVersion               = "cube.master.appsnapshot.version"
 	MasterAnnotationRootfsArtifactID                 = "cube.master.rootfs.artifact.id"

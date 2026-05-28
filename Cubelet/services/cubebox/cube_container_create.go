@@ -186,7 +186,15 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 
 	l.storeNumaQueues(ctx, sandBox, flowOpts)
 	if snapshotID, ok := flowOpts.GetSnapshotTemplateID(); ok && flowOpts.IsRetoreSnapshot() {
-		setRuntimeSnapshotBindingLabels(sandBox, snapshotID, time.Now().UTC())
+		now := time.Now().UTC()
+		setRuntimeSnapshotBindingLabels(sandBox, snapshotID, now)
+		// Also stamp the restore-base label. Commit will advance the
+		// runtime-snapshot binding above; this label stays pinned at the
+		// memory image the VM was actually restored from, so the
+		// pagemap_anon fallback in CommitSandbox can still locate a
+		// reflinkable base after the most recent commit's snapshot is
+		// deleted.
+		setRuntimeRestoreBaseLabels(sandBox, snapshotID, now)
 	}
 
 	cgInfo, cgSet := flowOpts.CgroupInfo.(*cgroupp.Info)

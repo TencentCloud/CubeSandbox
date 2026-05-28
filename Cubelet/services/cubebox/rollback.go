@@ -182,7 +182,12 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	rsp.RootfsDev = newRootfs.DevPath
 	rsp.NewGen = newRootfs.Gen
 	rsp.MemoryVol = refs.Memory.Name
-	setRuntimeSnapshotBindingLabels(cb, req.GetSnapshotID(), time.Now().UTC())
+	rollbackTime := time.Now().UTC()
+	setRuntimeSnapshotBindingLabels(cb, req.GetSnapshotID(), rollbackTime)
+	// Rollback restarts the VM from req.SnapshotID, so this is also the
+	// new last-restore base. Update both labels here; the existing
+	// SyncByID call below covers the persistence for both.
+	setRuntimeRestoreBaseLabels(cb, req.GetSnapshotID(), rollbackTime)
 
 	if err := storage.DeleteCowObject(ctx, currentRootfs.Name, currentRootfs.Kind); err != nil {
 		rsp.OldRootfsDeleted = false

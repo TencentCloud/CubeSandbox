@@ -222,6 +222,13 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
 		return rsp, nil
 	}
+	// CubeShim resumes paused VMs from an internal full snapshot under
+	// /data/cubelet/root/pausevm/<sandbox> and does not expose that memory file
+	// as a cubecow catalog entry. Any runtime/restore-base labels that still
+	// point to older template/snapshot memory files are now stale for
+	// pagemap_anon/soft-dirty purposes, so force the next commit to re-anchor
+	// with a full snapshot.
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(sb, time.Now().UTC())
 	for _, c := range sb.AllContainers() {
 		if c.Status != nil {
 			c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
