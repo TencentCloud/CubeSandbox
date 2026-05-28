@@ -362,6 +362,8 @@ pub struct Vsock<B: VsockBackend> {
 pub struct VsockState {
     pub avail_features: u64,
     pub acked_features: u64,
+    #[serde(default)]
+    pub connections: Vec<(u32, u32)>,
 }
 
 impl<B> Vsock<B>
@@ -375,7 +377,7 @@ where
         id: String,
         cid: u64,
         path: PathBuf,
-        backend: B,
+        mut backend: B,
         iommu: bool,
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
@@ -383,6 +385,9 @@ where
     ) -> io::Result<Vsock<B>> {
         let (avail_features, acked_features) = if let Some(state) = state {
             debug!("Restoring virtio-vsock {}", id);
+            // Instead of letting the guest connection hang/timeout, proactively let
+            // the guest know the connection is gone.
+            backend.queue_rst_for_connections(state.connections.clone());
             (state.avail_features, state.acked_features)
         } else {
             let mut avail_features = 1u64 << VIRTIO_F_VERSION_1 | 1u64 << VIRTIO_F_IN_ORDER;
@@ -416,6 +421,7 @@ where
         VsockState {
             avail_features: self.common.avail_features,
             acked_features: self.common.acked_features,
+            connections: self.backend.read().unwrap().connections(),
         }
     }
 }

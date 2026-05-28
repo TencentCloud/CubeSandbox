@@ -377,7 +377,23 @@ impl Snapshottable for VsockMuxer {
     }
 }
 
-impl VsockBackend for VsockMuxer {}
+impl VsockBackend for VsockMuxer {
+    fn connections(&self) -> Vec<(u32, u32)> {
+        self.conn_map
+            .keys()
+            .map(|k| (k.local_port, k.peer_port))
+            .collect()
+    }
+
+    fn queue_rst_for_connections(&mut self, conns: Vec<(u32, u32)>) {
+        for (local_port, peer_port) in conns {
+            self.rxq.push(MuxerRx::RstPkt {
+                local_port,
+                peer_port,
+            });
+        }
+    }
+}
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct CubeVsockDbgConf {
