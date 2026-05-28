@@ -23,6 +23,7 @@
 //! Requires `CONFIG_MEM_SOFT_DIRTY=y`. On kernels without this config the
 //! caller is expected to silently fall back to the pagemap_anon path.
 
+use crate::pagemap_anon::{self, get_anon_pages};
 use log::{debug, info, trace};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -87,6 +88,9 @@ pub enum SoftDirtyError {
 
     #[error("Memory region not aligned to page boundary")]
     NotPageAligned,
+
+    #[error("Failed to probe anonymous pages via pagemap_anon: {0}")]
+    AnonProbe(#[from] pagemap_anon::PagemapAnonError),
 }
 
 /// Result type for soft-dirty operations
@@ -333,6 +337,120 @@ pub fn filter_memory_ranges_by_soft_dirty<B: vm_memory::bitmap::Bitmap + 'static
         let dirty_pct = (stats.dirty_pages as f64 / stats.total_pages as f64) * 100.0;
         debug!(
             "Soft-dirty stats: {:.1}% dirty pages, {:.1}% savings vs full snapshot",
+            dirty_pct,
+            stats.savings_percentage()
+        );
+    }
+
+    Ok((filtered_ranges, stats))
+}
+
+/// Filter memory ranges by the **intersection** of anonymous (CoW) pages
+/// and soft-dirty pages.
+///
+/// The set of pages we want to write into an incremental snapshot is exactly:
+///   * pages that have actually been Copy-on-Written by the guest (anonymous
+///     after the `MAP_PRIVATE` restore — only these can ever differ from the
+///     base snapshot file), AND
+///   * pages whose contents have changed **since the previous
+///     `clear_soft_dirty()`** (the delta this cycle must record).
+///
+/// Either signal alone over- or under-approximates:
+///   * "anonymous only" is correct but cumulative — every page CoW'd since
+///     restore shows up forever, even if it has not been modified in the
+///     current snapshot window.
+///   * "soft-dirty only" can include host-side writes that landed on
+///     file-backed page-cache pages (e.g. shared-mmap restore); those pages
+///     are the same content as the base file on disk and re-saving them
+///     would be wasteful — and on the very first soft-dirty cycle of a
+///     freshly-armed tracker every guest write since arm shows up,
+///     including writes that fault in non-anon pages.
+///
+/// Taking the intersection gives us exactly the anon pages whose contents
+/// changed in the current window, which is both minimal and safe.
+pub fn filter_memory_ranges_by_anon_and_soft_dirty<B: vm_memory::bitmap::Bitmap + 'static>(
+    guest_memory: &GuestMemoryMmap<B>,
+    ranges: &MemoryRangeTable,
+) -> Result<(MemoryRangeTable, SoftDirtyStats)> {
+    let mut filtered_ranges = MemoryRangeTable::default();
+    let mut stats = SoftDirtyStats::default();
+
+    debug!(
+        "Starting anon ∩ soft-dirty filtering for {} memory regions",
+        ranges.regions().len()
+    );
+
+    for range in ranges.regions() {
+        let gpa = range.gpa;
+        let length = range.length;
+
+        stats.total_bytes += length;
+        stats.total_pages += length.div_ceil(PAGE_SIZE);
+
+        trace!(
+            "Processing memory region: GPA=0x{:x}, length={}",
+            gpa,
+            length
+        );
+
+        let host_addr = guest_memory
+            .get_host_address(GuestAddress(gpa))
+            .map_err(|_| SoftDirtyError::GetHostAddressFailed)?;
+
+        let anon_pages = get_anon_pages(host_addr as u64, length)?;
+        let dirty_pages = get_soft_dirty_pages(host_addr as u64, length)?;
+
+        debug_assert_eq!(anon_pages.len(), dirty_pages.len());
+
+        let mut current_range_start: Option<u64> = None;
+        let mut current_range_length: u64 = 0;
+
+        for (page_idx, (&is_anon, &is_dirty)) in anon_pages
+            .iter()
+            .zip(dirty_pages.iter())
+            .enumerate()
+        {
+            let page_gpa = gpa + (page_idx as u64 * PAGE_SIZE);
+            let must_save = is_anon && is_dirty;
+
+            if must_save {
+                stats.dirty_pages += 1;
+                stats.saved_bytes += PAGE_SIZE;
+
+                if current_range_start.is_none() {
+                    current_range_start = Some(page_gpa);
+                    current_range_length = PAGE_SIZE;
+                } else {
+                    current_range_length += PAGE_SIZE;
+                }
+            } else if let Some(start) = current_range_start.take() {
+                filtered_ranges.push(MemoryRange {
+                    gpa: start,
+                    length: current_range_length,
+                });
+                current_range_length = 0;
+            }
+        }
+
+        if let Some(start) = current_range_start {
+            filtered_ranges.push(MemoryRange {
+                gpa: start,
+                length: current_range_length,
+            });
+        }
+    }
+
+    debug!(
+        "anon ∩ soft-dirty filtering complete: {} ranges, {} total pages, {} pages to save",
+        filtered_ranges.regions().len(),
+        stats.total_pages,
+        stats.dirty_pages
+    );
+
+    if stats.total_pages > 0 {
+        let dirty_pct = (stats.dirty_pages as f64 / stats.total_pages as f64) * 100.0;
+        debug!(
+            "anon ∩ soft-dirty stats: {:.1}% pages to save, {:.1}% savings vs full snapshot",
             dirty_pct,
             stats.savings_percentage()
         );
@@ -594,5 +712,87 @@ mod tests {
             "round 4: with zero dirty pages, savings should be 100%, got {}",
             stats.savings_percentage()
         );
+    }
+
+    /// End-to-end test for `filter_memory_ranges_by_anon_and_soft_dirty`:
+    /// the result must be the intersection of "anonymous (CoW)" and
+    /// "soft-dirty since the last clear".
+    ///
+    /// We build an anonymous private mapping (every present page in it
+    /// is anon by construction), so on this fixture anon == always true
+    /// and the intersection collapses to "soft-dirty only" — i.e. the
+    /// helper must produce exactly the same per-window delta as
+    /// `filter_memory_ranges_by_soft_dirty` does.
+    ///
+    /// Skipped silently when the host kernel lacks `CONFIG_MEM_SOFT_DIRTY=y`.
+    #[test]
+    fn test_filter_memory_ranges_by_anon_and_soft_dirty_end_to_end() {
+        let _guard = CLEAR_REFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        if !probe_soft_dirty_support() {
+            eprintln!(
+                "kernel has no soft-dirty support (CONFIG_MEM_SOFT_DIRTY=n); skipping {}",
+                "test_filter_memory_ranges_by_anon_and_soft_dirty_end_to_end"
+            );
+            return;
+        }
+
+        const NUM_PAGES: u64 = 16;
+        let region_len = (NUM_PAGES * PAGE_SIZE) as usize;
+        let guest_memory =
+            GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), region_len)]).unwrap();
+
+        let host_base = guest_memory
+            .get_host_address(GuestAddress(0))
+            .expect("get_host_address") as *mut u8;
+        for p in 0..NUM_PAGES {
+            // SAFETY: host_base..host_base+region_len is owned by guest_memory.
+            unsafe { host_base.add((p * PAGE_SIZE) as usize).write_volatile(0) };
+        }
+
+        let ranges = {
+            let mut t = MemoryRangeTable::default();
+            t.push(MemoryRange {
+                gpa: 0,
+                length: NUM_PAGES * PAGE_SIZE,
+            });
+            t
+        };
+
+        let dirty_page = |page_idx: u64, val: u8| {
+            // SAFETY: 0 <= page_idx < NUM_PAGES.
+            unsafe {
+                host_base
+                    .add((page_idx * PAGE_SIZE) as usize)
+                    .write_volatile(val)
+            };
+        };
+
+        let collect = |table: &MemoryRangeTable| -> Vec<(u64, u64)> {
+            table.regions().iter().map(|r| (r.gpa, r.length)).collect()
+        };
+
+        // Arm the tracker.
+        clear_soft_dirty().expect("clear_soft_dirty: round 1");
+
+        // Dirty pages 5 and 6 (will be one coalesced run after AND).
+        dirty_page(5, 0xc1);
+        dirty_page(6, 0xc2);
+
+        let (filtered, stats) =
+            filter_memory_ranges_by_anon_and_soft_dirty(&guest_memory, &ranges)
+                .expect("anon ∩ soft-dirty filter failed");
+
+        // Every page in this anon MAP_PRIVATE mapping is anon, so
+        // anon ∩ soft-dirty == soft-dirty exactly: only pages 5 and 6.
+        assert_eq!(
+            collect(&filtered),
+            vec![(5 * PAGE_SIZE, 2 * PAGE_SIZE)],
+            "anon ∩ soft-dirty must yield exactly the two pages \
+             written in this window, coalesced"
+        );
+        assert_eq!(stats.total_pages, NUM_PAGES);
+        assert_eq!(stats.dirty_pages, 2);
+        assert_eq!(stats.saved_bytes, 2 * PAGE_SIZE);
     }
 }
