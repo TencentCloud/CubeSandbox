@@ -44,9 +44,8 @@ func Init(client *gorm.DB) error {
 	if client == nil {
 		return errors.New("sandboxspec.Init: nil db")
 	}
-	if err := initTable(client); err != nil {
-		return err
-	}
+	// Schema for t_cube_sandbox_spec is owned by pkg/base/dao/migrate and
+	// applied at startup before Init runs; here we only cache the handle.
 	dbMu.Lock()
 	db = client
 	dbMu.Unlock()
@@ -62,35 +61,6 @@ func getDB() *gorm.DB {
 // IsReady reports whether the store has a usable db handle.
 func IsReady() bool {
 	return getDB() != nil
-}
-
-func initTable(client *gorm.DB) error {
-	stmt := &gorm.Statement{DB: client}
-	if err := stmt.Parse(&models.SandboxSpec{}); err != nil {
-		return err
-	}
-	if !client.Migrator().HasTable(&models.SandboxSpec{}) {
-		if err := client.Exec(`CREATE TABLE IF NOT EXISTS ` + stmt.Schema.Table + ` (
-			id bigint unsigned NOT NULL AUTO_INCREMENT,
-			sandbox_id varchar(128) NOT NULL COMMENT 'sandbox id',
-			template_id varchar(128) NOT NULL DEFAULT '' COMMENT 'base template id at create time',
-			instance_type varchar(64) NOT NULL DEFAULT '' COMMENT 'instance type',
-			network_type varchar(64) NOT NULL DEFAULT '' COMMENT 'network type',
-			host_id varchar(128) NOT NULL DEFAULT '' COMMENT 'host id where sandbox runs',
-			host_ip varchar(64) NOT NULL DEFAULT '' COMMENT 'host ip where sandbox runs',
-			request_json mediumtext NOT NULL COMMENT 'canonical create request json',
-			backfilled tinyint(1) NOT NULL DEFAULT 0 COMMENT 'whether spec was reconstructed from base template (override-lossy)',
-			created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			deleted_at datetime DEFAULT NULL,
-			PRIMARY KEY (id),
-			UNIQUE KEY idx_sandbox_spec_sandbox_id (sandbox_id),
-			KEY idx_sandbox_spec_template_id (template_id)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error; err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // PutOptions controls per-record metadata flags. Most callers should

@@ -205,28 +205,11 @@ func Init(ctx context.Context) error {
 	}
 	var initErr error
 	storeOnce.Do(func() {
+		// Schema is owned by pkg/base/dao/migrate and applied in main.go
+		// before any business package Init runs; here we only attach to
+		// the existing *gorm.DB.
 		store.db = db.Init(config.GetInstanceConfig())
 		store.dbAddr = config.GetInstanceConfig().Addr
-		initErr = initTemplateDefinitionTable(store.db)
-		if initErr != nil {
-			return
-		}
-		initErr = initTemplateReplicaTable(store.db)
-		if initErr != nil {
-			return
-		}
-		initErr = initRootfsArtifactTable(store.db)
-		if initErr != nil {
-			return
-		}
-		initErr = initTemplateImageJobTable(store.db)
-		if initErr != nil {
-			return
-		}
-		initErr = initSnapshotRuntimeRefTable(store.db)
-		if initErr != nil {
-			return
-		}
 		if initErr = sandboxspec.Init(store.db); initErr != nil {
 			return
 		}
@@ -238,150 +221,6 @@ func Init(ctx context.Context) error {
 		startSnapshotReconciler(ctx)
 	})
 	return initErr
-}
-
-func initTemplateDefinitionTable(client *gorm.DB) error {
-	if client.Migrator().HasTable(&models.TemplateDefinition{}) {
-		return nil
-	}
-	stmt := &gorm.Statement{DB: client}
-	stmt.Parse(&models.TemplateDefinition{})
-	return client.Exec(`CREATE TABLE IF NOT EXISTS ` + stmt.Schema.Table + ` (
-		id bigint unsigned NOT NULL AUTO_INCREMENT,
-		template_id varchar(128) NOT NULL COMMENT 'template id',
-		instance_type varchar(64) NOT NULL DEFAULT '' COMMENT 'instance type',
-		version varchar(32) NOT NULL DEFAULT '' COMMENT 'template version',
-		status varchar(32) NOT NULL DEFAULT '' COMMENT 'template status',
-		kind varchar(32) NOT NULL DEFAULT 'template' COMMENT 'template kind',
-		origin_sandbox_id varchar(128) NOT NULL DEFAULT '' COMMENT 'origin sandbox id for snapshots',
-		origin_node_id varchar(128) NOT NULL DEFAULT '' COMMENT 'origin node id for snapshots',
-		display_name varchar(256) NOT NULL DEFAULT '' COMMENT 'display name for snapshots',
-		storage_backend varchar(32) NOT NULL DEFAULT '' COMMENT 'storage backend',
-		retain tinyint(1) NOT NULL DEFAULT 0 COMMENT 'retain snapshot from gc',
-		rootfs_size_bytes_at_snapshot bigint unsigned NOT NULL DEFAULT 0 COMMENT 'rootfs size at snapshot time',
-		request_json mediumtext NOT NULL COMMENT 'normalized template request json',
-		last_error text COMMENT 'last error message',
-		created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		deleted_at datetime DEFAULT NULL,
-		PRIMARY KEY (id),
-		UNIQUE KEY idx_template_id (template_id),
-		KEY idx_status (status),
-		KEY idx_template_kind_status (kind,status),
-		KEY idx_snapshot_origin_sandbox (origin_sandbox_id),
-		KEY idx_snapshot_origin_node (origin_node_id),
-		KEY idx_template_storage_backend (storage_backend)
-	  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error
-}
-
-func initTemplateReplicaTable(client *gorm.DB) error {
-	stmt := &gorm.Statement{DB: client}
-	stmt.Parse(&models.TemplateReplica{})
-	if !client.Migrator().HasTable(&models.TemplateReplica{}) {
-		if err := client.Exec(`CREATE TABLE IF NOT EXISTS ` + stmt.Schema.Table + ` (
-			id bigint unsigned NOT NULL AUTO_INCREMENT,
-			template_id varchar(128) NOT NULL COMMENT 'template id',
-			node_id varchar(128) NOT NULL COMMENT 'node id',
-			node_ip varchar(64) NOT NULL DEFAULT '' COMMENT 'node ip',
-			instance_type varchar(64) NOT NULL DEFAULT '' COMMENT 'instance type',
-			spec varchar(128) NOT NULL DEFAULT '' COMMENT 'resource spec',
-			snapshot_path varchar(1024) NOT NULL DEFAULT '' COMMENT 'snapshot path',
-			rootfs_vol varchar(256) NOT NULL DEFAULT '' COMMENT 'rootfs cubecow object name',
-			memory_vol varchar(256) NOT NULL DEFAULT '' COMMENT 'memory cubecow object name',
-			rootfs_kind varchar(16) NOT NULL DEFAULT '' COMMENT 'rootfs cubecow object kind',
-			memory_kind varchar(16) NOT NULL DEFAULT '' COMMENT 'memory cubecow object kind',
-			rootfs_dev varchar(256) NOT NULL DEFAULT '' COMMENT 'rootfs device path',
-			memory_dev varchar(256) NOT NULL DEFAULT '' COMMENT 'memory device path',
-			meta_dir varchar(1024) NOT NULL DEFAULT '' COMMENT 'snapshot metadata directory',
-			build_rootfs_vol varchar(256) NOT NULL DEFAULT '' COMMENT 'build rootfs cubecow object name',
-			status varchar(32) NOT NULL DEFAULT '' COMMENT 'replica status',
-			phase varchar(32) NOT NULL DEFAULT '' COMMENT 'replica phase',
-			artifact_id varchar(128) NOT NULL DEFAULT '' COMMENT 'replica artifact id',
-			last_job_id varchar(128) NOT NULL DEFAULT '' COMMENT 'last redo/create job id',
-			last_error_phase varchar(64) NOT NULL DEFAULT '' COMMENT 'phase where last error happened',
-			cleanup_required tinyint(1) NOT NULL DEFAULT 0 COMMENT 'needs cleanup before redo',
-			error_message text COMMENT 'error message',
-			created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			deleted_at datetime DEFAULT NULL,
-			PRIMARY KEY (id),
-			UNIQUE KEY idx_template_node (template_id,node_id),
-			KEY idx_template_status (template_id,status)
-		  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error; err != nil {
-			return err
-		}
-	}
-	return migrateTemplateReplicaTable(client, stmt.Schema.Table)
-}
-
-func migrateTemplateReplicaTable(client *gorm.DB, tableName string) error {
-	replicaModel := &models.TemplateReplica{}
-	columns := []struct {
-		name string
-		sql  string
-	}{
-		{
-			name: "phase",
-			sql:  `ALTER TABLE ` + tableName + ` ADD COLUMN phase varchar(32) NOT NULL DEFAULT '' AFTER status`,
-		},
-		{
-			name: "artifact_id",
-			sql:  `ALTER TABLE ` + tableName + ` ADD COLUMN artifact_id varchar(128) NOT NULL DEFAULT '' AFTER phase`,
-		},
-		{
-			name: "last_job_id",
-			sql:  `ALTER TABLE ` + tableName + ` ADD COLUMN last_job_id varchar(128) NOT NULL DEFAULT '' AFTER artifact_id`,
-		},
-		{
-			name: "last_error_phase",
-			sql:  `ALTER TABLE ` + tableName + ` ADD COLUMN last_error_phase varchar(64) NOT NULL DEFAULT '' AFTER last_job_id`,
-		},
-		{
-			name: "cleanup_required",
-			sql:  `ALTER TABLE ` + tableName + ` ADD COLUMN cleanup_required tinyint(1) NOT NULL DEFAULT 0 AFTER last_error_phase`,
-		},
-	}
-	for _, column := range columns {
-		if client.Migrator().HasColumn(replicaModel, column.name) {
-			continue
-		}
-		if err := client.Exec(column.sql).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func initSnapshotRuntimeRefTable(client *gorm.DB) error {
-	if client.Migrator().HasTable(&models.SnapshotRuntimeRef{}) {
-		return nil
-	}
-	stmt := &gorm.Statement{DB: client}
-	stmt.Parse(&models.SnapshotRuntimeRef{})
-	return client.Exec(`CREATE TABLE IF NOT EXISTS ` + stmt.Schema.Table + ` (
-		id bigint unsigned NOT NULL AUTO_INCREMENT,
-		snapshot_id varchar(128) NOT NULL COMMENT 'snapshot id',
-		sandbox_id varchar(128) NOT NULL COMMENT 'sandbox id',
-		node_id varchar(128) NOT NULL DEFAULT '' COMMENT 'node id',
-		node_ip varchar(64) NOT NULL DEFAULT '' COMMENT 'node ip',
-		binding_type varchar(64) NOT NULL DEFAULT '' COMMENT 'runtime binding type',
-		memory_vol varchar(256) NOT NULL DEFAULT '' COMMENT 'snapshot memory volume name',
-		memory_dev varchar(256) NOT NULL DEFAULT '' COMMENT 'snapshot memory device path',
-		rootfs_vol varchar(256) NOT NULL DEFAULT '' COMMENT 'runtime rootfs volume after restore',
-		sandbox_gen int unsigned NOT NULL DEFAULT 0 COMMENT 'runtime rootfs generation',
-		status varchar(32) NOT NULL DEFAULT '' COMMENT 'runtime ref status',
-		attached_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'when runtime ref becomes active',
-		released_at datetime DEFAULT NULL COMMENT 'when runtime ref is released',
-		last_seen_at datetime DEFAULT NULL COMMENT 'last observed timestamp',
-		last_error text COMMENT 'last reconcile or release error',
-		created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		deleted_at datetime DEFAULT NULL,
-		PRIMARY KEY (id),
-		KEY idx_snapshot_runtime_ref_snapshot_status (snapshot_id,status),
-		KEY idx_snapshot_runtime_ref_sandbox_status (sandbox_id,status),
-		KEY idx_snapshot_runtime_ref_node_status (node_id,status)
-	  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error
 }
 
 func configureSnapshotRuntimeRefHooks() {

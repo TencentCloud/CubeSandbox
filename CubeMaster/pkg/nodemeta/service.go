@@ -100,13 +100,9 @@ var global = &service{
 
 func Init(ctx context.Context) error {
 	_ = ctx
+	// Schema is owned by pkg/base/dao/migrate and applied at startup
+	// before any package Init runs.
 	global.db = db.Init(config.GetDbConfig())
-	if err := initRegistrationTable(global.db); err != nil {
-		return err
-	}
-	if err := initStatusTable(global.db); err != nil {
-		return err
-	}
 	if err := global.reload(); err != nil {
 		return err
 	}
@@ -307,59 +303,6 @@ func (s *service) reload() error {
 	s.nodes = next
 	s.mu.Unlock()
 	return nil
-}
-
-func initRegistrationTable(client *gorm.DB) error {
-	if client.Migrator().HasTable(&models.NodeRegistration{}) {
-		return nil
-	}
-	stmt := &gorm.Statement{DB: client}
-	_ = stmt.Parse(&models.NodeRegistration{})
-	return client.Exec(`CREATE TABLE IF NOT EXISTS ` + stmt.Schema.Table + ` (
-		id bigint unsigned NOT NULL AUTO_INCREMENT,
-		node_id varchar(128) NOT NULL,
-		host_ip varchar(64) NOT NULL DEFAULT '',
-		grpc_port int NOT NULL DEFAULT '0',
-		labels_json longtext,
-		capacity_json text,
-		allocatable_json text,
-		instance_type varchar(64) NOT NULL DEFAULT '',
-		cluster_label varchar(128) NOT NULL DEFAULT '',
-		quota_cpu bigint NOT NULL DEFAULT '0',
-		quota_mem_mb bigint NOT NULL DEFAULT '0',
-		create_concurrent_num bigint NOT NULL DEFAULT '0',
-		max_mvm_num bigint NOT NULL DEFAULT '0',
-		created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		deleted_at datetime DEFAULT NULL,
-		PRIMARY KEY (id),
-		UNIQUE KEY idx_node_id (node_id),
-		KEY idx_host_ip (host_ip)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error
-}
-
-func initStatusTable(client *gorm.DB) error {
-	if client.Migrator().HasTable(&models.NodeStatus{}) {
-		return nil
-	}
-	stmt := &gorm.Statement{DB: client}
-	_ = stmt.Parse(&models.NodeStatus{})
-	return client.Exec(`CREATE TABLE IF NOT EXISTS ` + stmt.Schema.Table + ` (
-		id bigint unsigned NOT NULL AUTO_INCREMENT,
-		node_id varchar(128) NOT NULL,
-		conditions_json longtext,
-		images_json longtext,
-		local_templates_json longtext,
-		heartbeat_unix bigint NOT NULL DEFAULT '0',
-		healthy tinyint(1) NOT NULL DEFAULT '0',
-		created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		deleted_at datetime DEFAULT NULL,
-		PRIMARY KEY (id),
-		UNIQUE KEY idx_node_id (node_id),
-		KEY idx_heartbeat (heartbeat_unix),
-		KEY idx_healthy (healthy)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error
 }
 
 func isHealthy(conditions []corev1.NodeCondition) bool {

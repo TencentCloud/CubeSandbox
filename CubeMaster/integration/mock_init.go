@@ -658,31 +658,8 @@ func metricNow() []byte {
 
 func mock_db() {
 	mocktest_OssDb = db.Init(config.GetDbConfig())
-	mock_initHostTypeInfoTable(mocktest_OssDb)
-
-}
-
-func mock_initHostTypeInfoTable(db *gorm.DB) error {
-	if !db.Migrator().HasTable(&models.HostTypeInfo{}) {
-		stmt := &gorm.Statement{DB: db}
-		stmt.Parse(&models.HostTypeInfo{})
-
-		err := db.Exec(`CREATE TABLE IF NOT EXISTS ` + stmt.Schema.Table + ` (
-			id bigint unsigned NOT NULL AUTO_INCREMENT,
-			instance_type varchar(64) NOT NULL COMMENT 'VM机型类型',
-			cpu_type varchar(64) DEFAULT '',
-			gpu_info json DEFAULT NULL,
-			created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'VM创建时间',
-			updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'VM属性更新时间',
-			deleted_at datetime DEFAULT NULL,
-			PRIMARY KEY (id),
-			UNIQUE KEY idx_instance_type (instance_type)
-		  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	// Schema (including t_cube_host_type) is owned by the dao.Migrate
+	// path that the integration test bootstrap runs before tests.
 }
 func mock_getstr() string {
 	return fmt.Sprintf("%d.%d.%d.%d", rand.Int31n(254), rand.Int31n(254), rand.Int31n(254), rand.Int31n(254))

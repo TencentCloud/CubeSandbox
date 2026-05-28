@@ -52,85 +52,11 @@ type DescribeInstancesQuery struct {
 }
 
 func Init(ctx context.Context) error {
+	_ = ctx
+	// Schema is owned by pkg/base/dao/migrate and applied at startup
+	// before this package's Init runs.
 	l.db = db.Init(config.GetInstanceConfig())
 	l.dbAddr = config.GetInstanceConfig().Addr
-	if err := initInstanceInfoTable(l.DB()); err != nil {
-		return err
-	}
-	if err := initInstanceUserDataTable(l.DB()); err != nil {
-		return err
-	}
-	return nil
-}
-
-func initInstanceInfoTable(db *gorm.DB) error {
-	if !db.Migrator().HasTable(&models.InstanceInfo{}) {
-		stmt := &gorm.Statement{DB: db}
-		stmt.Parse(&models.InstanceInfo{})
-
-		err := db.Exec(`CREATE TABLE IF NOT EXISTS ` + stmt.Schema.Table + ` (
-			id bigint unsigned NOT NULL AUTO_INCREMENT,
-			ins_id varchar(64) NOT NULL COMMENT 'ins_id',
-			uuid varchar(64) DEFAULT NULL COMMENT 'uuid',
-			host_ip varchar(16) DEFAULT NULL COMMENT 'host_ip',
-			host_id varchar(16) DEFAULT NULL COMMENT 'host_id',
-			ins_state varchar(16) DEFAULT NULL COMMENT 'ins_state',
-			cpu int DEFAULT '0' COMMENT 'cpu',
-			mem int DEFAULT '0' COMMENT 'mem',
-			cpu_type varchar(16) DEFAULT 'INTEL',
-			zone varchar(32) DEFAULT NULL COMMENT 'zone',
-			region varchar(64) DEFAULT NULL COMMENT 'region',
-			image_id varchar(128) DEFAULT NULL COMMENT 'image_id',
-			system_disk varchar(64) DEFAULT NULL COMMENT 'system_disk',
-			private_ip_addresses varchar(128) NOT NULL DEFAULT '' COMMENT 'private_ip_addresses',
-			private_ip_cnt tinyint DEFAULT '0',
-			private_ip varchar(16) DEFAULT NULL COMMENT 'private_ip',
-			mac_address varchar(16) DEFAULT NULL COMMENT 'mac_address',
-			data_disks varchar(1800) DEFAULT NULL COMMENT 'data_disks',
-			security_ids varchar(64) DEFAULT NULL COMMENT 'security_ids',
-			vpc_id varchar(64) NOT NULL DEFAULT '' COMMENT 'vpc_id',
-			subnet_id varchar(64) NOT NULL DEFAULT '' COMMENT 'subnet_id',
-			disk_state varchar(64) DEFAULT NULL COMMENT 'disk_state',
-			fail_msg text COMMENT 'fail_msg',
-			created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'created_at',
-			updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'updated_at',
-			deleted_at datetime DEFAULT NULL,
-			PRIMARY KEY (id),
-			UNIQUE KEY ins_id (ins_id),
-			KEY ` + "`vpc-id`" + ` (vpc_id),
-			KEY private_ip_addresses (private_ip_addresses),
-			KEY idx_private_ip (private_ip),
-			KEY idx_uuid (uuid),
-			KEY idx_private_ip_cnt (private_ip_cnt),
-			KEY idx_describe (private_ip,private_ip_cnt),
-			KEY idx_ins_state (ins_state)
-		  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func initInstanceUserDataTable(db *gorm.DB) error {
-	if !db.Migrator().HasTable(&models.InstanceUserData{}) {
-		stmt := &gorm.Statement{DB: db}
-		stmt.Parse(&models.InstanceUserData{})
-
-		err := db.Exec(`CREATE TABLE IF NOT EXISTS ` + stmt.Schema.Table + ` (
-			id bigint unsigned NOT NULL AUTO_INCREMENT,
-			ins_id varchar(64) NOT NULL COMMENT 'ins_id',
-			user_data text DEFAULT NULL COMMENT 'user_data',
-			created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'created_at',
-			updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'updated_at',
-			deleted_at datetime DEFAULT NULL,
-			PRIMARY KEY (id),
-			UNIQUE KEY ins_id (ins_id)
-		  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`).Error
-		if err != nil {
-			return err
-		}
-	}
 	return nil
 }
 

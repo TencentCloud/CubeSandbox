@@ -103,6 +103,11 @@ type Debug struct {
 }
 
 type DBConfig struct {
+	// Driver selects the dao engine ("mysql", future: "postgres", ...).
+	// Empty defaults to "mysql" for backwards compatibility with v0.2.2
+	// configurations that pre-date the multi-driver dao layer.
+	Driver string `yaml:"driver"`
+
 	Addr                   string `yaml:"addr"`
 	User                   string `yaml:"user"`
 	Pwd                    string `yaml:"pwd"`
@@ -113,6 +118,10 @@ type DBConfig struct {
 	MaxIdleConns           int    `yaml:"max_idle_conns"`
 	MaxOpenConns           int    `yaml:"max_open_conns"`
 	MaxConnLifeTimeSeconds int    `yaml:"max_conn_life_time_seconds"`
+
+	// MigrationLockTimeoutSeconds bounds the cluster-wide GET_LOCK wait
+	// at startup. Defaults to 60 seconds when zero.
+	MigrationLockTimeoutSeconds int `yaml:"migration_lock_timeout_seconds"`
 }
 
 type ExtraConf struct {

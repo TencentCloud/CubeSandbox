@@ -24,6 +24,15 @@ func generateURL(user, password, addr, dbname string, connTimeout, readTimeout, 
 		user, password, addr, dbname, connTimeout, readTimeout, writeTimeout)
 }
 
+// Init opens a *gorm.DB against the given DBConfig.
+//
+// Deprecated: prefer pkg/base/dao.Open / dao.Default. This shim is kept
+// so the v0.2.2 call-sites in templatecenter / nodemeta / instancecache /
+// localcache keep compiling while they are migrated module-by-module.
+//
+// Unlike dao.Open, Init does NOT run schema migrations; the cmd/cubemaster
+// main loop is responsible for invoking dao.Migrate exactly once at
+// startup before any Init() in business packages.
 func Init(cfg *config.DBConfig) *gorm.DB {
 	db, err := initDB(cfg.User, cfg.Pwd, cfg.Addr, cfg.DBName,
 		cfg.ConnTimeout, cfg.ReadTimeout, cfg.WriteTimeout,

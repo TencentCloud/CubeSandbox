@@ -92,26 +92,6 @@ func TestIsDuplicateKeyErrorClassifiesMySQLAndGormErrors(t *testing.T) {
 	}
 }
 
-func TestInferLegacyJobOperationCoversAllShapes(t *testing.T) {
-	tests := []struct {
-		name           string
-		nodeID         string
-		sourceImageRef string
-		retryOfJobID   string
-		want           string
-	}{
-		{"commit row has node but no source image", "node-a", "", "", JobOperationCommit},
-		{"create row has source image without retry parent", "", "docker.io/nginx", "", JobOperationCreate},
-		{"redo row has source image and retry parent", "", "docker.io/nginx", "job-prev", JobOperationRedo},
-		{"fallback when nothing matches", "", "", "", JobOperationLegacy},
-	}
-	for _, tc := range tests {
-		if got := inferLegacyJobOperation(tc.nodeID, tc.sourceImageRef, tc.retryOfJobID); got != tc.want {
-			t.Fatalf("%s: inferLegacyJobOperation()=%q, want %q", tc.name, got, tc.want)
-		}
-	}
-}
-
 // TestBuildCommitFailureMessageNeverEmpty pins the regression that produced
 // FAILED jobs with empty error_message: when cubelet returned a non-success Ret
 // without filling RetMsg (or returned nil Ret entirely), the previous code path
