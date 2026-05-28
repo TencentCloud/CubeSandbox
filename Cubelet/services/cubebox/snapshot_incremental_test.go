@@ -26,6 +26,10 @@ func TestNormalizeSnapshotTypeAcceptsKnownValues(t *testing.T) {
 		{" Full ", snapshotTypeFull},
 		{"incremental", snapshotTypeIncremental},
 		{"INCREMENTAL", snapshotTypeIncremental},
+		{"soft-dirty", snapshotTypeSoftDirty},
+		{"Soft-Dirty", snapshotTypeSoftDirty},
+		{"SOFT-DIRTY", snapshotTypeSoftDirty},
+		{" soft-dirty ", snapshotTypeSoftDirty},
 		{"weird-value", snapshotTypeFull}, // unknown values must not silently break the CLI
 	}
 	for _, tc := range cases {
@@ -49,6 +53,22 @@ func TestBuildCubeRuntimeSnapshotArgsAlwaysIncludesSnapshotType(t *testing.T) {
 		idx := indexOf(args, "--snapshot-type")
 		require.GreaterOrEqual(t, idx, 0)
 		assert.Equal(t, snapshotTypeIncremental, args[idx+1])
+		assert.Contains(t, args, "--memory-vol")
+	})
+
+	t.Run("soft-dirty for CommitSandbox", func(t *testing.T) {
+		args := buildCubeRuntimeSnapshotArgs("sb-1", spec, "/tmp/s.tmp", "/dev/mapper/mem", snapshotTypeSoftDirty)
+		// Verbatim flag value -- the hypervisor's
+		// SnapshotType::FromStr must see exactly "soft-dirty",
+		// otherwise it falls back to incremental and the per-cycle
+		// delta optimization is lost.
+		assert.Contains(t, args, "--snapshot-type")
+		idx := indexOf(args, "--snapshot-type")
+		require.GreaterOrEqual(t, idx, 0)
+		assert.Equal(t, snapshotTypeSoftDirty, args[idx+1])
+		// memory-vol must still be present: the soft-dirty path
+		// requires a destination file holding the previous cycle's
+		// memory bytes (Cubelet reflink-clones it on the fast path).
 		assert.Contains(t, args, "--memory-vol")
 	})
 

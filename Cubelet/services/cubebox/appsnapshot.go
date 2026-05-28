@@ -552,6 +552,21 @@ const snapshotTypeFull = "full"
 // the destination file already contains (i.e. the reflink-cloned base).
 const snapshotTypeIncremental = "incremental"
 
+// snapshotTypeSoftDirty asks cube-runtime to write only the pages dirtied
+// since the previous soft-dirty snapshot (a true per-cycle delta) on top of
+// the destination memory file. The destination MUST already contain a valid
+// base image (the reflink-cloned previous snapshot's memory), otherwise pages
+// untouched-since-last-clear would read back as zero on restore. Cubelet
+// guarantees this precondition by reflink-cloning the binding base before
+// invoking cube-runtime; if the base cannot be resolved, the caller falls
+// back to snapshotTypeFull instead.
+//
+// The host kernel needs CONFIG_MEM_SOFT_DIRTY=y for soft-dirty to do
+// anything useful; on kernels without it the hypervisor silently downgrades
+// to the pagemap_anon (incremental) path, so this value is safe to send
+// unconditionally.
+const snapshotTypeSoftDirty = "soft-dirty"
+
 // normalizeSnapshotType defaults to snapshotTypeFull when an empty value is
 // supplied so callers that don't care (legacy code paths) keep producing full
 // snapshots.
@@ -559,6 +574,8 @@ func normalizeSnapshotType(snapshotType string) string {
 	switch strings.TrimSpace(strings.ToLower(snapshotType)) {
 	case snapshotTypeIncremental:
 		return snapshotTypeIncremental
+	case snapshotTypeSoftDirty:
+		return snapshotTypeSoftDirty
 	case "", snapshotTypeFull:
 		return snapshotTypeFull
 	default:

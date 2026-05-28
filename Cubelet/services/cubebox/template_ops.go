@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
@@ -130,17 +131,6 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 
-	// Resolve the base memory object FIRST: this is the source we will
-	// reflink-clone for the incremental memory snapshot. We do it before
-	// committing the rootfs so that a missing/broken catalog state fails
-	// fast without producing partial cubecow garbage.
-	baseMemoryObject, err := resolveBaseMemoryObject(ctx, cb)
-	if err != nil {
-		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve base memory for incremental snapshot: %v", err)
-		return rsp, nil
-	}
-
 	sourceRootfs, err := storage.GetSandboxRootfsForSnapshot(ctx, rsp.SandboxID, rootVolumeName)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
@@ -158,14 +148,17 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to create rootfs snapshot: %v", err)
 		return rsp, nil
 	}
-	// Reflink-clone the base memory blob into the new template memory name.
-	// The resulting cubecow snapshot starts out byte-for-byte identical to
-	// the base, satisfying the hypervisor's incremental snapshot precondition
-	// of "destination memory file already exists with a valid base image".
-	memoryObject, err := storage.CommitTemplateMemoryFromBase(ctx, baseMemoryObject, rsp.TemplateID, memorySizeBytes)
+	// Resolve / build the memory artifact:
+	//   - if the sandbox is bound to a previous snapshot whose memory blob
+	//     can be resolved, reflink-clone that blob and ask cube-runtime for
+	//     a soft-dirty per-cycle delta;
+	//   - otherwise (lineage broken: missing/purged catalog or upstream
+	//     volume gone) create a fresh empty volume and fall back to a full
+	//     snapshot.
+	memoryObject, snapshotTypeForCmd, err := prepareCommitMemoryArtifact(ctx, stepLog, cb, rsp.TemplateID, memorySizeBytes)
 	if err != nil {
 		if cleanupErr := storage.DeleteCowObject(ctx, rootfsObject.Name, rootfsObject.Kind); cleanupErr != nil {
-			stepLog.Warnf("failed to cleanup rootfs snapshot after memory clone failure: %v", cleanupErr)
+			stepLog.Warnf("failed to cleanup rootfs snapshot after memory artifact failure: %v", cleanupErr)
 		}
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
@@ -173,7 +166,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 			return rsp, nil
 		}
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to clone base memory for incremental snapshot: %v", err)
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to prepare memory artifact for snapshot: %v", err)
 		return rsp, nil
 	}
 	if err := validateSnapshotMemoryObject(memoryObject, memorySizeBytes); err != nil {
@@ -188,17 +181,31 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 
 	_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-	// CommitSandbox snapshots a running sandbox whose memory blob has just
-	// been reflink-cloned above; with a valid base present, cube-runtime can
-	// overlay only the CoW anon pages and skip writing the (much larger)
-	// non-anonymous regions. AppSnapshot keeps using the default full type.
-	if err := s.executeCubeRuntimeSnapshot(ctx, rsp.SandboxID, spec, tmpSnapshotPath, memoryObject.DevPath, snapshotTypeIncremental); err != nil {
+	// CommitSandbox snapshots a running sandbox whose memory artifact has
+	// just been prepared above. snapshotTypeForCmd carries the right type
+	// for the path we took: soft-dirty when reflink-cloning a base, or full
+	// when degrading because no base could be resolved. AppSnapshot keeps
+	// using the default full type via its own call site.
+	stepLog = stepLog.WithFields(CubeLog.Fields{"snapshotType": snapshotTypeForCmd})
+	if err := s.executeCubeRuntimeSnapshot(ctx, rsp.SandboxID, spec, tmpSnapshotPath, memoryObject.DevPath, snapshotTypeForCmd); err != nil {
 		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to execute cube-runtime snapshot: %v", err)
 		return rsp, nil
 	}
+	// cube-runtime returned success, which means the hypervisor has
+	// committed the delta to the memory file *and*, on the soft-dirty path,
+	// already issued clear_soft_dirty() to start the next tracking window.
+	// From this point on, the next CommitSandbox on the same VM must use
+	// rsp.TemplateID as its base (anything older would lose the bytes the
+	// guest just wrote into this snapshot). We stamp the in-memory binding
+	// immediately so a follow-up commit picks it up; SyncByID at the end of
+	// the success path persists it (mirroring the rollback flow). If a
+	// later step fails and cleanupArtifacts deletes memoryObject, the stale
+	// binding routes the next commit through the fallback-to-full branch
+	// in prepareCommitMemoryArtifact, which is self-contained and safe.
+	setRuntimeSnapshotBindingLabels(cb, rsp.TemplateID, time.Now().UTC())
 	if err := writeMemoryDevFile(tmpSnapshotPath, memoryObject.DevPath); err != nil {
 		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupArtifacts()
@@ -253,6 +260,12 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		// drift between master and cubelet local view.
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", rsp.TemplateID, err)
 	}
+	// Persist the runtime-snapshot binding update we did in-memory after
+	// cube-runtime returned. Mirrors the rollback flow's SyncByID call so
+	// that a process restart recovers the new commit lineage and so any
+	// downstream component reading the cubebox metadata sees the same
+	// ancestor as resolveBaseSnapshotID will return on the next commit.
+	s.cubeboxMgr.cubeboxManger.SyncByID(ctx, cb.ID)
 	stepLog.Infof("CommitSandbox completed successfully: snapshotPath=%s", snapshotPath)
 	return rsp, nil
 }

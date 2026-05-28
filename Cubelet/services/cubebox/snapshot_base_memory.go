@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
@@ -55,17 +56,19 @@ func resolveBaseSnapshotID(cb *cubeboxstore.CubeBox) string {
 
 // resolveBaseMemoryObject looks up the cubecow memory object that backs the
 // snapshot the sandbox is currently bound to. This is the source that
-// CommitSandbox will reflink-clone for an incremental memory snapshot.
+// CommitSandbox will reflink-clone for a soft-dirty / pagemap_anon
+// incremental memory snapshot.
 //
-// Hard-fails (rather than degrading to a full snapshot) on any of:
+// Returns ErrNoBaseMemoryForIncremental wrapped with context on any of:
 //   - the sandbox is not bound to any snapshot/template,
 //   - the local catalog entry is missing or has no memory_vol recorded,
 //   - the cubecow object can no longer be resolved on the host.
 //
-// Hard-failing keeps the user-observable contract crisp: when CommitSandbox
-// claims an incremental snapshot, the workload truly produced an incremental
-// snapshot. Silent fallback would lead to surprising "why is my snapshot
-// twice the size?" reports.
+// Callers (notably prepareCommitMemoryArtifact) are expected to recognize
+// the sentinel via errors.Is and gracefully fall back to a full snapshot;
+// previous incarnations of CommitSandbox hard-failed instead, but with the
+// soft-dirty path live we prefer "produce a slightly larger but correct
+// snapshot" over "fail the user-facing commit when the lineage breaks".
 func resolveBaseMemoryObject(ctx context.Context, cb *cubeboxstore.CubeBox) (*storage.CowSnapshotObject, error) {
 	baseSnapshotID := resolveBaseSnapshotID(cb)
 	if baseSnapshotID == "" {
@@ -92,4 +95,62 @@ func resolveBaseMemoryObject(ctx context.Context, cb *cubeboxstore.CubeBox) (*st
 		Kind:    memoryKind,
 		DevPath: devPath,
 	}, nil
+}
+
+// prepareCommitMemoryArtifact returns the cubecow memory object that
+// cube-runtime will write its memory snapshot into, plus the snapshot type
+// flag to pass to cube-runtime for this commit.
+//
+// Fast path (sandbox lineage intact): reflink-clone the binding base memory
+// into a new cubecow snapshot keyed by templateID and ask cube-runtime for a
+// soft-dirty per-cycle delta. The cloned file already contains the previous
+// snapshot's memory bytes, satisfying soft-dirty's "destination must hold
+// every still-clean page" precondition; the kernel-side soft-dirty bitmap
+// only writes the pages the guest actually dirtied since the previous
+// snapshot operation, giving a true delta and minimum disk write amplification.
+//
+// Fallback path (errors.Is(err, ErrNoBaseMemoryForIncremental)): no usable
+// base could be resolved (sandbox not bound to a snapshot, catalog entry
+// purged, upstream cubecow volume gone, etc.). Soft-dirty would be unsafe
+// here — for a *restored* VM, untouched-since-restore pages are not in the
+// soft-dirty bitmap and there is no base file to read them from on restore.
+// Instead we create a fresh empty memory volume and ask cube-runtime for a
+// full snapshot, which is self-contained regardless of soft-dirty bit state.
+//
+// Non-sentinel errors from resolveBaseMemoryObject (currently unreachable —
+// resolveBaseMemoryObject always wraps with the sentinel — kept as
+// defense-in-depth) propagate unchanged so genuine infrastructure failures
+// surface to the caller.
+//
+// The caller owns the returned cubecow object: any subsequent failure in the
+// CommitSandbox flow must call DeleteCowObject to avoid orphaned cubecow
+// state.
+func prepareCommitMemoryArtifact(
+	ctx context.Context,
+	stepLog *log.CubeWrapperLogEntry,
+	cb *cubeboxstore.CubeBox,
+	templateID string,
+	memorySizeBytes uint64,
+) (*storage.CowSnapshotObject, string, error) {
+	baseMemoryObject, baseErr := resolveBaseMemoryObject(ctx, cb)
+	if baseErr == nil {
+		memoryObject, err := storage.CommitTemplateMemoryFromBase(ctx, baseMemoryObject, templateID, memorySizeBytes)
+		if err != nil {
+			return nil, "", err
+		}
+		stepLog.Infof("CommitSandbox: reflink-cloned base memory %s/%s -> %s, snapshot type=%s",
+			baseMemoryObject.Name, baseMemoryObject.Kind, memoryObject.Name, snapshotTypeSoftDirty)
+		return memoryObject, snapshotTypeSoftDirty, nil
+	}
+	if !errors.Is(baseErr, ErrNoBaseMemoryForIncremental) {
+		return nil, "", baseErr
+	}
+	stepLog.Warnf("CommitSandbox: base memory unavailable (%v), falling back to full snapshot", baseErr)
+	memoryObject, err := storage.CreateTemplateMemoryVolume(ctx, templateID, memorySizeBytes)
+	if err != nil {
+		return nil, "", err
+	}
+	stepLog.Infof("CommitSandbox: created empty memory volume %s/%s, snapshot type=%s",
+		memoryObject.Name, memoryObject.Kind, snapshotTypeFull)
+	return memoryObject, snapshotTypeFull, nil
 }
