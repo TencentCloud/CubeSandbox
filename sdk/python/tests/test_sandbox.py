@@ -9,11 +9,14 @@ so no real network is needed.
 
 from __future__ import annotations
 
+import base64
 import json
+import struct
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from cubesandbox import CommandResult, Template
@@ -64,6 +67,20 @@ def mock_response(body=None, status: int = 200):
 def make_sandbox(**data_overrides) -> Sandbox:
     d = {**SANDBOX_DATA, **data_overrides}
     return Sandbox(d, config=make_config())
+
+
+def connect_envelope(flags: int, payload: str) -> bytes:
+    raw = payload.encode("utf-8")
+    return bytes([flags]) + struct.pack(">I", len(raw)) + raw
+
+
+def decode_connect_payload(raw: bytes) -> dict:
+    assert len(raw) >= 5
+    flags = raw[0]
+    size = struct.unpack(">I", raw[1:5])[0]
+    assert flags == 0
+    assert len(raw) == 5 + size
+    return json.loads(raw[5:].decode("utf-8"))
 
 
 # ── POST /sandboxes ───────────────────────────────────────────────────────────
@@ -558,34 +575,110 @@ class TestConfig:
 class TestCommands:
     def test_run_success(self):
         sb = make_sandbox()
-        def fake_run(code, *, timeout=None, on_stdout=None, **kw):
-            if on_stdout:
-                on_stdout(OutputMessage(text="hello\nworld\n0\n"))
-            return Execution(logs=Logs(stdout=["hello\nworld\n0\n"], stderr=[]))
-        with patch.object(sb, "run_code", side_effect=fake_run):
-            result = sb.commands.run("echo hello")
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["method"] = request.method
+            seen["host"] = request.url.host
+            seen["path"] = request.url.path
+            seen["headers"] = request.headers
+            seen["payload"] = decode_connect_payload(request.content)
+            stdout = base64.b64encode(b"hello\nworld\n").decode()
+            body = b"".join(
+                [
+                    connect_envelope(0, '{"event":{"start":{"pid":123}}}'),
+                    connect_envelope(0, json.dumps({"event": {"data": {"stdout": stdout}}})),
+                    connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+                    connect_envelope(0x02, "{}"),
+                ]
+            )
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with (
+            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
+            patch.object(sb, "_build_data_client", return_value=client),
+        ):
+            result = sb.commands.run("echo hello", cwd="/work", env={"A": "B"}, user="root")
+
         assert result.stdout == "hello\nworld\n"
         assert result.exit_code == 0
+        assert seen["method"] == "POST"
+        assert seen["host"] == f"49983-{SANDBOX_ID}.{DOMAIN}"
+        assert seen["path"] == "/process.Process/Start"
+        assert seen["headers"]["content-type"] == "application/connect+json"
+        assert seen["headers"]["connect-protocol-version"] == "1"
+        assert seen["headers"]["connect-content-encoding"] == "identity"
+        assert seen["headers"]["authorization"] == "Basic cm9vdDo="
+        assert seen["payload"]["process"]["cmd"] == "/bin/bash"
+        assert seen["payload"]["process"]["cwd"] == "/work"
+        assert seen["payload"]["process"]["envs"] == {"A": "B"}
+        assert seen["payload"]["process"]["args"] == ["-l", "-c", "echo hello"]
 
     def test_run_exit_code_nonzero(self):
         sb = make_sandbox()
-        def fake_run(code, *, timeout=None, on_stdout=None, **kw):
-            if on_stdout:
-                on_stdout(OutputMessage(text="1\n"))
-            return Execution(logs=Logs(stdout=["1\n"], stderr=[]))
-        with patch.object(sb, "run_code", side_effect=fake_run):
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = b"".join(
+                [
+                    connect_envelope(0, '{"event":{"start":{"pid":123}}}'),
+                    connect_envelope(0, '{"event":{"end":{"exitCode":1,"exited":true}}}'),
+                    connect_envelope(0x02, "{}"),
+                ]
+            )
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with (
+            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
+            patch.object(sb, "_build_data_client", return_value=client),
+        ):
             result = sb.commands.run("false")
         assert result.exit_code == 1
 
+    def test_run_exit_code_from_status_string(self):
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = b"".join(
+                [
+                    connect_envelope(0, '{"event":{"start":{"pid":123}}}'),
+                    connect_envelope(0, '{"event":{"end":{"exited":true,"status":"exit status 7"}}}'),
+                    connect_envelope(0x02, "{}"),
+                ]
+            )
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with (
+            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
+            patch.object(sb, "_build_data_client", return_value=client),
+        ):
+            result = sb.commands.run("false")
+        assert result.exit_code == 7
+
     def test_run_timeout_forwarded(self):
         sb = make_sandbox()
-        def fake_run(code, *, timeout=None, on_stdout=None, **kw):
-            if on_stdout:
-                on_stdout(OutputMessage(text="ok\n0\n"))
-            return Execution(logs=Logs(stdout=["ok\n0\n"], stderr=[]))
-        with patch.object(sb, "run_code", side_effect=fake_run) as m:
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["headers"] = request.headers
+            body = b"".join(
+                [
+                    connect_envelope(0, '{"event":{"start":{"pid":123}}}'),
+                    connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+                    connect_envelope(0x02, "{}"),
+                ]
+            )
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with (
+            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
+            patch.object(sb, "_build_data_client", return_value=client),
+        ):
             sb.commands.run("sleep 1", timeout=5.0)
-        assert m.call_args.kwargs.get("timeout") == 5.0
+        assert seen["headers"]["connect-timeout-ms"] == "5000"
 
     def test_commands_property(self):
         assert isinstance(make_sandbox().commands, Commands)
@@ -602,25 +695,96 @@ class TestCommands:
 class TestFilesystem:
     def test_read_success(self):
         sb = make_sandbox()
-        mock_exec = Execution(results=[Result(text="file content", is_main_result=True)])
-        with patch.object(sb, "run_code", return_value=mock_exec):
-            content = sb.files.read("/tmp/foo.txt")
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["method"] = request.method
+            seen["host"] = request.url.host
+            seen["path"] = request.url.path
+            seen["query_path"] = request.url.params.get("path")
+            seen["query_user"] = request.url.params.get("username")
+            return httpx.Response(200, text="file content")
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            content = sb.files.read("/tmp/foo.txt", user="root")
         assert content == "file content"
+        assert seen["method"] == "GET"
+        assert seen["host"] == f"49983-{SANDBOX_ID}.{DOMAIN}"
+        assert seen["path"] == "/files"
+        assert seen["query_path"] == "/tmp/foo.txt"
+        assert seen["query_user"] == "root"
 
     def test_read_empty_when_no_text(self):
         sb = make_sandbox()
-        with patch.object(sb, "run_code", return_value=Execution()):
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="")
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
             content = sb.files.read("/tmp/empty.txt")
         assert content == ""
 
     def test_read_raises_on_error(self):
         sb = make_sandbox()
-        mock_exec = Execution(
-            error=ExecutionError("FileNotFoundError", "No such file or directory"),
-        )
-        with patch.object(sb, "run_code", return_value=mock_exec):
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"message": "No such file or directory"})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
             with pytest.raises(IOError, match="Failed to read"):
                 sb.files.read("/tmp/missing.txt")
+
+    def test_write_uses_envd_file_api(self):
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["method"] = request.method
+            seen["host"] = request.url.host
+            seen["path"] = request.url.path
+            seen["query_path"] = request.url.params.get("path")
+            seen["query_user"] = request.url.params.get("username")
+            seen["content_type"] = request.headers.get("content-type")
+            seen["body"] = request.content
+            return httpx.Response(200, json=[{"path": "/tmp/foo.txt"}])
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            sb.files.write("/tmp/foo.txt", "file content", user="root")
+
+        assert seen["method"] == "POST"
+        assert seen["host"] == f"49983-{SANDBOX_ID}.{DOMAIN}"
+        assert seen["path"] == "/files"
+        assert seen["query_path"] == "/tmp/foo.txt"
+        assert seen["query_user"] == "root"
+        assert seen["content_type"] == "application/octet-stream"
+        assert seen["body"] == b"file content"
+
+    def test_write_falls_back_to_multipart_for_old_envd(self):
+        sb = make_sandbox()
+        seen = {"calls": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["calls"] += 1
+            if seen["calls"] == 1:
+                return httpx.Response(
+                    400,
+                    text="error parsing multipart form: request Content-Type isn't multipart/form-data",
+                )
+            seen["content_type"] = request.headers.get("content-type")
+            seen["body"] = request.content
+            return httpx.Response(200, json=[{"path": "/tmp/foo.txt"}])
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            sb.files.write("/tmp/foo.txt", "file content", user="root")
+
+        assert seen["calls"] == 2
+        assert "multipart/form-data" in seen["content_type"]
+        assert b"file content" in seen["body"]
 
     def test_files_property(self):
         assert isinstance(make_sandbox().files, Filesystem)

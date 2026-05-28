@@ -254,7 +254,7 @@ class Sandbox:
             ApiError: If the execute endpoint returns HTTP 4xx/5xx.
         """
         if self._client is None:
-            self._client = build_client(self._config)
+            self._client = self._build_data_client()
 
         url = f"http://{self.get_host(JUPYTER_PORT)}/execute"
         payload = {
@@ -644,3 +644,7 @@ class Sandbox:
         s = requests.Session()
         s.headers.update({"Content-Type": "application/json"})
         return s
+
+    def _build_data_client(self) -> httpx.Client:
+        """Build an HTTP client for CubeProxy-routed sandbox data-plane APIs."""
+        return build_client(self._config)
