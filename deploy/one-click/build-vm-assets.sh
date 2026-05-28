@@ -465,7 +465,9 @@ build_guest_image_artifacts() {
   image_size_bytes="$(calculate_guest_image_size_bytes "${rootfs_size_bytes}")"
 
   truncate -s "${image_size_bytes}" "${output_img}"
-  run_mkfs_ext4_with_optional_sudo -F -d "${GUEST_ROOTFS_DIR}" "${output_img}" >&2
+  # Force 4K block size: CubeShim boots the kernel with rootflags=dax, which
+  # does not support 1K block sizes and would panic at boot time.
+  run_mkfs_ext4_with_optional_sudo -F -b 4096 -d "${GUEST_ROOTFS_DIR}" "${output_img}" >&2
 
   shrink_ext4_image "${output_img}"
 
