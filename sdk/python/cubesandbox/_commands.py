@@ -49,6 +49,9 @@ class Commands:
         This mirrors E2B's SDK path by using the generated envd ProcessClient
         when the E2B protocol package is available. The hand-written Connect
         fallback is kept for source-tree usage without the optional dependency.
+
+        Args:
+            env: Alias for envs, matching the E2B SDK command API.
         """
         process_envs = envs if envs is not None else (env or {})
         try:
@@ -270,6 +273,8 @@ def _raise_connect_end_stream(raw: bytes) -> None:
 
 
 def _http_error_detail(resp) -> str:
+    # Only called on HTTP error responses. Reading the body here is safe because
+    # successful command streams are parsed incrementally by iter_raw().
     raw = resp.read()
     if not raw:
         return ""

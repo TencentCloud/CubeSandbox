@@ -615,6 +615,32 @@ class TestCommands:
         assert seen["payload"]["process"]["envs"] == {"A": "B"}
         assert seen["payload"]["process"]["args"] == ["-l", "-c", "echo hello"]
 
+    def test_run_stderr_event(self):
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            stderr = base64.b64encode(b"warn\nerror\n").decode()
+            body = b"".join(
+                [
+                    connect_envelope(0, '{"event":{"start":{"pid":123}}}'),
+                    connect_envelope(0, json.dumps({"event": {"data": {"stderr": stderr}}})),
+                    connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+                    connect_envelope(0x02, "{}"),
+                ]
+            )
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with (
+            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
+            patch.object(sb, "_build_data_client", return_value=client),
+        ):
+            result = sb.commands.run("echo warn >&2")
+
+        assert result.stdout == ""
+        assert result.stderr == "warn\nerror\n"
+        assert result.exit_code == 0
+
     def test_run_exit_code_nonzero(self):
         sb = make_sandbox()
 
@@ -834,8 +860,8 @@ class TestFilesystem:
             seen["calls"] += 1
             if seen["calls"] == 1:
                 return httpx.Response(
-                    400,
-                    text="error parsing multipart form: request Content-Type isn't multipart/form-data",
+                    415,
+                    text="unsupported media type",
                 )
             seen["content_type"] = request.headers.get("content-type")
             seen["body"] = request.content

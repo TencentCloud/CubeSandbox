@@ -58,7 +58,7 @@ class Filesystem:
             headers=headers,
             content=body,
         )
-        if resp.status_code >= 400 and "multipart/form-data" in resp.text:
+        if resp.status_code >= 400:
             multipart_headers = {}
             if access_token:
                 multipart_headers["X-Access-Token"] = access_token
