@@ -9,7 +9,7 @@ on:
 
 env:
   KERNEL_TAG: 6.6.119-49.6
-  KERNEL_ARCHIVE_URL: https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel/repository/archive/6.6.119-49.6.zip
+  KERNEL_ARCHIVE_URL: https://cnb.cool/CubeSandbox/OpenCloudOS-Kernel/-/git/archive/6.6.119-49.6.zip
   VMLINUX_CACHE_PATH: kernel-cache/vmlinux
 
 defaults:
@@ -61,12 +61,20 @@ jobs:
           mkdir -p kernel-source
           unzip -q opencloudos-kernel.zip -d kernel-source
           shopt -s nullglob
-          dirs=(kernel-source/*/)
-          if [[ "${#dirs[@]}" -ne 1 ]]; then
-            echo "expected exactly one extracted top-level directory, got ${#dirs[@]}" >&2
-            exit 1
+          # The CNB archive lays the kernel tree out directly at the root
+          # (arch/, Makefile, ...), while some forges wrap it in a single
+          # top-level directory. Support both: descend into the wrapper dir
+          # only when the tree is not already at the extraction root.
+          if [[ ! -f kernel-source/Makefile ]]; then
+            dirs=(kernel-source/*/)
+            if [[ "${#dirs[@]}" -ne 1 ]]; then
+              echo "unexpected archive layout: no Makefile at root and ${#dirs[@]} top-level dirs" >&2
+              exit 1
+            fi
+            echo "KERNEL_SRC=${dirs[0]%/}" >> "${GITHUB_ENV}"
+          else
+            echo "KERNEL_SRC=kernel-source" >> "${GITHUB_ENV}"
           fi
-          echo "KERNEL_SRC=${dirs[0]%/}" >> "${GITHUB_ENV}"
 
       - name: Configure kernel
         if: steps.restore_vmlinux.outputs.cache-hit != 'true'

@@ -2,7 +2,7 @@
 # ============================================================================
 # build-pvm-guest-vmlinux.sh
 #
-# Clone https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel.git (tag: 6.6.69-1.cubesandbox),
+# Clone https://cnb.cool/CubeSandbox/OpenCloudOS-Kernel.git (tag: 6.6.69-1.cubesandbox),
 # apply the pvm-guest kernel .config, and build only the vmlinux target
 # (no RPM/DEB packaging, no kernel modules).
 #
@@ -33,7 +33,7 @@ PVM_CONFIG_NAME="pvm_guest"
 PVM_DEPS_LABEL="vmlinux only"
 PVM_TARGET_DESC="target system"
 
-REPO_URL="${REPO_URL:-https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel.git}"
+REPO_URL="${REPO_URL:-https://cnb.cool/CubeSandbox/OpenCloudOS-Kernel.git}"
 BRANCH="${BRANCH:-6.6.69-1.cubesandbox}"
 CONFIG_URL="${CONFIG_URL:-https://raw.githubusercontent.com/virt-pvm/misc/refs/heads/main/pvm-guest-6.12.33.config}"
 CONFIG_SHA256="${CONFIG_SHA256:-8e579bea756b6dadeff1203a5e4f3bba851a7426e4e50abd436575eddfa019f4}"
