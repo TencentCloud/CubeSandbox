@@ -11,6 +11,7 @@ import (
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller"
@@ -67,7 +68,7 @@ func registerCubelet() {
 			metaCfg := config.GetConfig().MetaServerConfig
 			var client *masterclient.Client
 			if metaCfg != nil && metaCfg.MetaServerEndpoint != "" {
-				client = masterclient.New("http://"+metaCfg.MetaServerEndpoint, cfg.NodeStatusUpdateFrequency)
+				client = masterclient.New("http://"+metaCfg.MetaServerEndpoint, tomlext.ToStdTime(cfg.NodeStatusUpdateFrequency))
 			}
 
 			var networkAgentClient networkagentclient.Client = networkagentclient.NewNoopClient()

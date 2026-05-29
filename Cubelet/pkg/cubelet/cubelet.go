@@ -29,6 +29,7 @@ import (
 	"k8s.io/utils/clock"
 
 	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 )
 
 const (
@@ -43,7 +44,7 @@ type KubeletConfig struct {
 
 	DisableCreateNode bool `toml:"disable_create_node,omitempty"`
 
-	NodeStatusUpdateFrequency time.Duration `toml:"node_status_update_frequency,omitempty"`
+	NodeStatusUpdateFrequency tomlext.Duration `toml:"node_status_update_frequency,omitempty"`
 }
 
 func DefaultCubeletConfig() *KubeletConfig {
@@ -51,7 +52,7 @@ func DefaultCubeletConfig() *KubeletConfig {
 		Insecurity:                true,
 		ResyncInterval:            10 * time.Hour,
 		DisableCreateNode:         false,
-		NodeStatusUpdateFrequency: 10 * time.Second,
+		NodeStatusUpdateFrequency: tomlext.FromStdTime(10 * time.Second),
 	}
 }
 
@@ -149,8 +150,8 @@ func NewCubelet(
 		masterClient:              client,
 		config:                    mconfig,
 		registerNode:              !mconfig.DisableCreateNode,
-		nodeStatusUpdateFrequency: mconfig.NodeStatusUpdateFrequency,
-		nodeStatusReportFrequency: mconfig.NodeStatusUpdateFrequency,
+		nodeStatusUpdateFrequency: tomlext.ToStdTime(mconfig.NodeStatusUpdateFrequency),
+		nodeStatusReportFrequency: tomlext.ToStdTime(mconfig.NodeStatusUpdateFrequency),
 
 		criImage:           criImage,
 		rtManager:          rtManager,
