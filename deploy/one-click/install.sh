@@ -153,18 +153,10 @@ generate_cubemaster_config_cidr() {
   [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
 
   local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
-  local sandbox_cidr="${CUBE_SANDBOX_DENY_OUT_SANDBOX_CIDR:-192.168.0.0/18}"
-  local private_a="${CUBE_SANDBOX_DENY_OUT_PRIVATE_A:-10.0.0.0/8}"
-  local cgn="${CUBE_SANDBOX_DENY_OUT_CGN:-100.64.0.0/10}"
-  local private_b="${CUBE_SANDBOX_DENY_OUT_PRIVATE_B:-172.16.0.0/12}"
+  local deny_out="${CUBE_SANDBOX_DENY_OUT:-["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/18"]}"
 
   ensure_file "${cfg}"
-  sed -i \
-    -e "s|__CUBE_SANDBOX_DENY_OUT_SANDBOX_CIDR__|${sandbox_cidr}|g" \
-    -e "s|__CUBE_SANDBOX_DENY_OUT_PRIVATE_A__|${private_a}|g" \
-    -e "s|__CUBE_SANDBOX_DENY_OUT_CGN__|${cgn}|g" \
-    -e "s|__CUBE_SANDBOX_DENY_OUT_PRIVATE_B__|${private_b}|g" \
-    "${cfg}"
+  sed -i "s|__CUBE_SANDBOX_DENY_OUT__|${deny_out}|g" "${cfg}"
 }
 
 generate_cubelet_config_cidr() {
@@ -518,6 +510,12 @@ else
 fi
 
 mkdir -p "${INSTALL_PREFIX}"
+
+# Apply CIDR placeholder substitution in PKG_ROOT before copying to install target.
+# Must run before copy_dir_contents / cp -a so that both compute and control
+# roles pick up the substituted files.
+generate_cubelet_config_cidr
+
 if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/network-agent" "${INSTALL_PREFIX}/network-agent"
   copy_dir_contents "${PKG_ROOT}/Cubelet" "${INSTALL_PREFIX}/Cubelet"
@@ -531,8 +529,6 @@ else
   generate_cubemaster_config_cidr
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
-
-generate_cubelet_config_cidr
 
 select_installed_kernel_vmlinux
 

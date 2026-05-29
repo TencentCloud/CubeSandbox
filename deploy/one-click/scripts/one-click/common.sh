@@ -354,10 +354,7 @@ wait_for_health() {
 render_config_placeholders() {
   local sandbox_cidr="${CUBE_SANDBOX_CIDR:-192.168.0.0/18}"
   local tap_init_num="${CUBE_SANDBOX_TAP_INIT_NUM:-500}"
-  local deny_out_sandbox_cidr="${CUBE_SANDBOX_DENY_OUT_SANDBOX_CIDR:-192.168.0.0/18}"
-  local deny_out_private_a="${CUBE_SANDBOX_DENY_OUT_PRIVATE_A:-10.0.0.0/8}"
-  local deny_out_cgn="${CUBE_SANDBOX_DENY_OUT_CGN:-100.64.0.0/10}"
-  local deny_out_private_b="${CUBE_SANDBOX_DENY_OUT_PRIVATE_B:-172.16.0.0/12}"
+  local deny_out="${CUBE_SANDBOX_DENY_OUT:-["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/18"]}"
   local mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
   local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
 
@@ -366,23 +363,16 @@ render_config_placeholders() {
 
   # Render Cubelet config.toml CIDR and tap_init_num
   if [[ -f "${cubelet_config}" ]]; then
-    # Replace CIDR placeholder if exists
-    if grep -q "__CUBE_SANDBOX_CIDR__" "${cubelet_config}"; then
-      sed -i "s|__CUBE_SANDBOX_CIDR__|${sandbox_cidr}|g" "${cubelet_config}"
-    fi
-    # Always update tap_init_num if CUBE_SANDBOX_TAP_INIT_NUM is set
+    sed -i "s|__CUBE_SANDBOX_CIDR__|${sandbox_cidr}|g" "${cubelet_config}"
     if [[ -n "${CUBE_SANDBOX_TAP_INIT_NUM:-}" ]]; then
-      sed -i "s/tap_init_num = [0-9]*/tap_init_num = ${tap_init_num}/" "${cubelet_config}"
+      sed -i "s/tap_init_num = [0-9]\+/tap_init_num = ${tap_init_num}/" "${cubelet_config}"
     fi
   fi
 
   # Render CubeMaster conf.yaml placeholders
-  if [[ -f "${cubemaster_config}" ]] && grep -q "__CUBE_SANDBOX_" "${cubemaster_config}"; then
+  if [[ -f "${cubemaster_config}" ]]; then
     sed -i \
-      -e "s|__CUBE_SANDBOX_DENY_OUT_SANDBOX_CIDR__|${deny_out_sandbox_cidr}|g" \
-      -e "s|__CUBE_SANDBOX_DENY_OUT_PRIVATE_A__|${deny_out_private_a}|g" \
-      -e "s|__CUBE_SANDBOX_DENY_OUT_CGN__|${deny_out_cgn}|g" \
-      -e "s|__CUBE_SANDBOX_DENY_OUT_PRIVATE_B__|${deny_out_private_b}|g" \
+      -e "s|__CUBE_SANDBOX_DENY_OUT__|${deny_out}|g" \
       -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
       -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
       "${cubemaster_config}"
