@@ -6,7 +6,7 @@
   <a href="https://github.com/TencentCloud/CubeSandbox"><img src="https://img.shields.io/badge/CubeSandbox-GitHub-blue" alt="CubeSandbox" /></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue" alt="Python 3.9+" />
-  <img src="https://img.shields.io/badge/version-0.1.0-orange" alt="v0.1.0" />
+  <img src="https://img.shields.io/badge/version-0.2.1-orange" alt="v0.2.1" />
 </p>
 
 ---
@@ -17,13 +17,8 @@ and control the full sandbox lifecycle — including pause/resume with memory sn
 
 ## Installation
 
-> **Note:** `cubesandbox` is not yet published to PyPI.
-> Install from source until the first release is available:
-
 ```bash
-git clone https://github.com/TencentCloud/CubeSandbox.git
-cd CubeSandbox/sdk/python
-pip install -e .
+pip install cubesandbox
 ```
 
 ## Quick Start
