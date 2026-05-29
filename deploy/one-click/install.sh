@@ -149,16 +149,6 @@ generate_cubemaster_config_ports() {
     "${cfg}"
 }
 
-generate_cubemaster_config_cidr() {
-  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
-
-  local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
-  local deny_out="${CUBE_SANDBOX_DENY_OUT:-["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/18"]}"
-
-  ensure_file "${cfg}"
-  sed -i "s|__CUBE_SANDBOX_DENY_OUT__|${deny_out}|g" "${cfg}"
-}
-
 generate_cubelet_config_cidr() {
   local cfg="${PKG_ROOT}/Cubelet/config/config.toml"
   local cidr="${CUBE_SANDBOX_CIDR:-192.168.0.0/18}"
@@ -526,7 +516,6 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
   generate_cubemaster_config_ports
-  generate_cubemaster_config_cidr
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
 
