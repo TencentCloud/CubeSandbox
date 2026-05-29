@@ -12,6 +12,10 @@ env:
   KERNEL_ARCHIVE_URL: https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel/repository/archive/6.6.119-49.6.zip
   VMLINUX_CACHE_PATH: kernel-cache/vmlinux
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     runs-on: arc-runner-set-16c32g-containerd
@@ -37,7 +41,7 @@ jobs:
           apt-get update
           apt-get install -y file sudo build-essential git bc bison flex \
             libelf-dev libssl-dev libncurses-dev dwarves cpio kmod \
-            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3
+            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3 unzip
 
       - name: Restore cached vmlinux
         id: restore_vmlinux

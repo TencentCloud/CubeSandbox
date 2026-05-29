@@ -162,9 +162,8 @@ jobs:
           VMLINUX_ARTIFACT_NAME: ${{ steps.vmlinux_metadata.outputs.artifact_name }}
         run: |
           get_latest_artifact_url() {
-            local json
-            json="$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100")"
-            python3 -c 'import json, sys; artifact_name = sys.argv[1]; data = json.load(sys.stdin); artifacts = [artifact for artifact in data.get("artifacts", []) if artifact.get("name") == artifact_name and not artifact.get("expired", False)]; artifacts.sort(key=lambda artifact: artifact.get("created_at", ""), reverse=True); print(artifacts[0].get("archive_download_url", "") if artifacts else "")' "${VMLINUX_ARTIFACT_NAME}" <<<"${json}"
+            gh api --paginate --slurp "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" | \
+              python3 -c 'import json, sys; artifact_name = sys.argv[1]; artifacts = [artifact for page in json.load(sys.stdin) for artifact in page.get("artifacts", []) if artifact.get("name") == artifact_name and not artifact.get("expired", False)]; artifacts.sort(key=lambda artifact: artifact.get("created_at", ""), reverse=True); print(artifacts[0].get("archive_download_url", "") if artifacts else "")' "${VMLINUX_ARTIFACT_NAME}"
           }
 
           artifact_url="$(get_latest_artifact_url)"
