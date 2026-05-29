@@ -146,8 +146,16 @@ impl Log {
 
         let (reader, writer) = UnixDatagram::pair().unwrap();
 
-        dup2(writer.as_raw_fd(), std::io::stdout().as_raw_fd()).expect("dup stdout failed");
-        dup2(writer.as_raw_fd(), std::io::stderr().as_raw_fd()).expect("dup stdout failed");
+        // Only take over stderr here. Do NOT dup2 over stdout (fd 1): in the shim
+        // daemon, fd 1 is the readiness pipe that containerd-shim's parent `start`
+        // process copies until EOF. Closing it before the ttrpc server has bound and
+        // started listening makes the parent return the socket address too early, so
+        // containerd dials a not-yet-bound socket and fails with
+        // "failed to create TTRPC connection: ... connect: no such file or directory".
+        // The crate's signal_server_started() runs dup2(STDERR->STDOUT) only after
+        // server.start(), which then redirects stdout onto this datagram for us while
+        // preserving the readiness handshake.
+        dup2(writer.as_raw_fd(), std::io::stderr().as_raw_fd()).expect("dup stderr failed");
         mem::forget(writer);
 
         tokio::spawn(Self::consumer(sender.clone(), receiver));
