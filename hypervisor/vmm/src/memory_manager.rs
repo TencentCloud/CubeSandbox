@@ -2362,13 +2362,6 @@ impl MemoryManager {
             stats.saved_bytes,
             memory_file_target.path()
         );
-
-        // Ensure all memory data is flushed to disk for cross-machine
-        // pause-snapshot scenarios.
-        memory_file
-            .sync_all()
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-
         Ok(())
     }
 
@@ -2510,11 +2503,6 @@ impl MemoryManager {
                 Self::calculate_file_offset_for_gpa(range.gpa, range.length, &gpa_to_file_offset)?;
             self.save_range_to_file(&memory_file, range, file_off)?;
         }
-
-        memory_file
-            .sync_all()
-            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-
         info!(
             "Soft-dirty snapshot saved: {} dirty bytes written to {:?}",
             stats.saved_bytes,
@@ -3028,13 +3016,6 @@ impl Transportable for MemoryManager {
                 // Move to next range.
                 offset += range.length;
             }
-
-            // Ensure all dirty memory data is flushed to disk for cross-machine
-            // pause-snapshot scenarios.
-            memory_file
-                .sync_all()
-                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-
             return Ok(());
         }
 
@@ -3054,12 +3035,6 @@ impl Transportable for MemoryManager {
                     self.save_range_to_file(&memory_file, range, file_offset)?;
                     file_offset += range.length;
                 }
-
-                // Ensure all memory data is flushed to disk for cross-machine
-                // pause-snapshot scenarios.
-                memory_file
-                    .sync_all()
-                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
             }
         }
         Ok(())
