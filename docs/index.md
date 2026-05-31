@@ -22,7 +22,7 @@ features:
   - title: "🛡️ Network Security"
     details: eBPF-based CubeVS enforces strict inter-sandbox isolation and fine-grained egress filtering at the kernel level.
   - title: "📸 State Management"
-    details: "Checkpoint, restore, and fork sandbox states for parallel development and multi-version testing. (Coming soon)"
+    details: "Create checkpoints on running sandboxes, roll back to any saved state, or fork into parallel exploration environments at millisecond granularity."
 ---
 
 ## Get Started

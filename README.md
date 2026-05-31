@@ -78,7 +78,7 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 - **Zero-cost migration (E2B drop-in replacement):** Natively compatible with the E2B SDK interface. Just swap one URL environment variable — no business logic changes needed — to migrate from expensive closed-source sandboxes to free Cube Sandbox with better performance.
 - **Network security:** CubeVS, powered by eBPF, enforces strict inter-sandbox network isolation at the kernel level with fine-grained egress traffic filtering policies.
 - **Ready to use out of the box:** One-click deployment with support for both single-node and cluster setups.
-- **Event-level snapshot rollback (coming soon):** High-frequency snapshot rollback at millisecond granularity, enabling rapid fork-based exploration environments from any saved state.
+- **Event-level snapshot rollback:** High-frequency snapshot rollback at millisecond granularity. Create checkpoints on running sandboxes, roll back to any saved state, or fork into parallel exploration environments from any saved state.
 - **Production-ready:** Cube Sandbox has been validated at scale in Tencent Cloud production environments, proven stable and reliable.
 
 ## Benchmarks
