@@ -67,7 +67,7 @@ All env vars can be overridden by the corresponding flag.
 ```bash
 # Real server — 20 concurrent workers, 200 create+delete cycles
 export E2B_API_URL=http://localhost:3000
-export E2B_API_KEY=dummy
+export E2B_API_KEY=e2b_000000
 export CUBE_TEMPLATE_ID=<your-template-id>
 ./bin/cube-bench -c 20 -n 200
 

@@ -35,7 +35,7 @@ cp env.example .env
 ```bash
 E2B_API_URL="http://127.0.0.1:13000"
 CUBE_REMOTE_PROXY_BASE="https://127.0.0.1:11443"
-E2B_API_KEY="dummy"
+E2B_API_KEY="e2b_000000"
 CUBE_TEMPLATE_ID="<your-template-id>"
 ```
 
@@ -59,7 +59,7 @@ python demo.py
 ```bash
 E2B_API_URL="http://<node-ip>:3000"
 CUBE_REMOTE_PROXY_BASE="https://<node-ip>:443"
-E2B_API_KEY="dummy"
+E2B_API_KEY="e2b_000000"
 CUBE_TEMPLATE_ID="<your-template-id>"
 ```
 
@@ -76,7 +76,7 @@ python demo.py
 - `CUBE_REMOTE_PROXY_BASE`
   数据面地址。`dev-env` 默认就是 `https://127.0.0.1:11443`。
 - `E2B_API_KEY`
-  SDK 要求非空；如果你的集群开启鉴权，就填真实值，否则写`dummy`。
+  SDK 要求非空；如果你的集群开启鉴权，就填真实值，否则写`e2b_000000`。
 - `CUBE_TEMPLATE_ID`
   你要创建沙箱时使用的模板 ID。
 
@@ -87,7 +87,7 @@ python demo.py
 - 本机明明跑的是 `dev-env`，却把地址写成了虚机内地址，而不是宿主机暴露出来的 `13000/11443`
 - 把 `CUBE_REMOTE_PROXY_BASE` 错写成 sidecar 自己的监听地址
 - 忘了填 `CUBE_TEMPLATE_ID`
-- 集群开启了鉴权，但 `E2B_API_KEY` 还在用 dummy
+- 集群开启了鉴权，但 `E2B_API_KEY` 还在用 e2b_000000
 
 ## 进一步阅读
 

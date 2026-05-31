@@ -257,7 +257,7 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 
 ```bash
 export E2B_API_URL=http://<target-host>:3000
-export E2B_API_KEY=dummy
+export E2B_API_KEY=e2b_000000
 ```
 
 ## 安装脚本启动前预检清单

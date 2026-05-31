@@ -44,7 +44,7 @@ CUBE_REMOTE_PROXY_BASE="https://127.0.0.1:11443"
 CUBE_TEMPLATE_ID="<your-template-id>"
 ```
 
-If your cluster has auth enabled, replace `E2B_API_KEY="dummy"` in `.env` with a real key before running the demo.
+If your cluster has auth enabled, replace `E2B_API_KEY="e2b_000000"` in `.env` with a real key before running the demo.
 
 Then run:
 

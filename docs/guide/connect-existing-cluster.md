@@ -39,7 +39,7 @@ Then usually you only need to fill in the template ID:
 ```bash
 E2B_API_URL="http://127.0.0.1:13000"
 CUBE_REMOTE_PROXY_BASE="https://127.0.0.1:11443"
-E2B_API_KEY="dummy"
+E2B_API_KEY="e2b_000000"
 CUBE_TEMPLATE_ID="<your-template-id>"
 ```
 
@@ -63,7 +63,7 @@ You still use the same `dev-sidecar` example. You only replace the default addre
 ```bash
 E2B_API_URL="http://<node-ip>:3000"
 CUBE_REMOTE_PROXY_BASE="https://<node-ip>:443"
-E2B_API_KEY="dummy"
+E2B_API_KEY="e2b_000000"
 CUBE_TEMPLATE_ID="<your-template-id>"
 ```
 
@@ -91,7 +91,7 @@ You usually do not need to think about the other variables first. For most devel
 - You are using local `dev-env`, but configured the in-VM addresses instead of the host-exposed `13000/11443` ports
 - You pointed `CUBE_REMOTE_PROXY_BASE` at the sidecar's own listening address instead of CubeProxy
 - You forgot to set `CUBE_TEMPLATE_ID`
-- Auth is enabled on the cluster, but `E2B_API_KEY` is still `dummy`
+- Auth is enabled on the cluster, but `E2B_API_KEY` is still `e2b_000000`
 
 ## Further Reading
 

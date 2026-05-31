@@ -81,7 +81,7 @@ the variables first.
 Or export directly:
 
 ```bash
-export E2B_API_KEY=dummy
+export E2B_API_KEY=e2b_000000
 export E2B_API_URL=http://<your-node-ip>:3000
 export CUBE_TEMPLATE_ID=<template-id>
 

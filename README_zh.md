@@ -223,7 +223,7 @@ pip install e2b-code-interpreter
 
 ```bash
 export E2B_API_URL="http://127.0.0.1:3000"
-export E2B_API_KEY="dummy"
+export E2B_API_KEY="e2b_000000"
 export CUBE_TEMPLATE_ID="<你的模板ID>"  # 第三步获取的模板 ID
 export SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
 ```

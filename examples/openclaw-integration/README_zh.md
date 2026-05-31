@@ -98,7 +98,7 @@ openclaw gateway restart
 ```bash
 export CUBE_TEMPLATE_ID=<template-id>       # 第三步获取的模板 ID
 export E2B_API_URL=http://<节点IP>:3000     # Cube API Server 地址
-export E2B_API_KEY=dummy                    # 任意非空字符串
+export E2B_API_KEY=e2b_000000                    # 任意非空字符串
 
 # 使用 Cube 内置 mkcert 证书时才需要：
 # export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem

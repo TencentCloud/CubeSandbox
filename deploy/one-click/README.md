@@ -257,7 +257,7 @@ After deployment, to point the E2B official SDK to the one-click node, set the f
 
 ```bash
 export E2B_API_URL=http://<target-host>:3000
-export E2B_API_KEY=dummy
+export E2B_API_KEY=e2b_000000
 ```
 
 ## Pre-Installation Preflight Checklist

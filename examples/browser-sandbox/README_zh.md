@@ -83,7 +83,7 @@ cp .env.example .env
 或直接导出：
 
 ```bash
-export E2B_API_KEY=dummy
+export E2B_API_KEY=e2b_000000
 export E2B_API_URL=http://<节点IP>:3000
 export CUBE_TEMPLATE_ID=<template-id>
 

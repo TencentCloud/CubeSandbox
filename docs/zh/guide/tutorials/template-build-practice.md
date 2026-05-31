@@ -111,7 +111,7 @@ distribution: 1/1 ready, 0 failed
 ```bash
 export CUBE_TEMPLATE_ID=<template_id>
 export E2B_API_URL=http://127.0.0.1:3000
-export E2B_API_KEY=dummy
+export E2B_API_KEY=e2b_000000
 export SSL_CERT_FILE=~/.local/share/mkcert/rootCA.pem
 
 python3 - << 'EOF'
@@ -617,6 +617,6 @@ cubemastercli tpl delete --template-id <template_id>
 # 必要环境变量（使用 SDK 时）
 export CUBE_TEMPLATE_ID=<template_id>
 export E2B_API_URL=http://127.0.0.1:3000
-export E2B_API_KEY=dummy
+export E2B_API_KEY=e2b_000000
 export SSL_CERT_FILE=~/.local/share/mkcert/rootCA.pem
 ```

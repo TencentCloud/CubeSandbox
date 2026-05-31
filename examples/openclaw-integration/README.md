@@ -107,7 +107,7 @@ Set the following in your shell or OpenClaw environment:
 ```bash
 export CUBE_TEMPLATE_ID=<template-id>       # from Step 3
 export E2B_API_URL=http://<node-ip>:3000    # Cube API Server address
-export E2B_API_KEY=dummy                    # any non-empty string
+export E2B_API_KEY=e2b_000000                    # any non-empty string
 
 # Only needed when using Cube's built-in mkcert certificate:
 # export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem

@@ -229,7 +229,7 @@ Set environment variables:
 
 ```bash
 export E2B_API_URL="http://127.0.0.1:3000"
-export E2B_API_KEY="dummy"
+export E2B_API_KEY="e2b_000000"
 export CUBE_TEMPLATE_ID="<your-template-id>"  # template ID obtained from Step 3
 export SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
 ```
