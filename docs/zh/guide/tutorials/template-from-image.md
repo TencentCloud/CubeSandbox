@@ -71,7 +71,7 @@ cubemastercli tpl create-from-image \
   --expose-port 49999 \
   --expose-port 49983 \
   --probe      49999 \
-  --probe-path /healthz \
+  --probe-path /health \
   --env        MY_ENV=production
 ```
 
