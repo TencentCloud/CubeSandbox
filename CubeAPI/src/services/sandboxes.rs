@@ -9,9 +9,10 @@ use uuid::Uuid;
 use crate::{
     constants::ENVD_VERSION,
     cubemaster::{
-        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient, CubeMasterError,
-        CubeVSContext, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo, SandboxLogsRequest,
-        SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest, SandboxUpdateRequest,
+        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient,
+        CubeMasterError, CubeVSContext, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
+        SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
+        SandboxUpdateRequest,
     },
     error::{AppError, AppResult},
     models::{
@@ -508,7 +509,8 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
     let template_id = extract_template_id(&s.template_id, &s.annotations, &s.labels);
 
     // Prefer explicit started_at; fall back to create_at (Unix nanos from Cubelet); last resort: now
-    let started_at = s.started_at
+    let started_at = s
+        .started_at
         .or_else(|| datetime_from_unix_nanos(s.create_at))
         .unwrap_or(now);
 

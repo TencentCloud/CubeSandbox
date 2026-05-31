@@ -1,9 +1,12 @@
 
 SOURCE:=$(shell ./test.sh)
-.PHONY: test
+.PHONY: test fmt
 
 version:
 	go version
+
+fmt:
+	go fmt ./...
 
 unittest: version
 	#@export GO111MODULE=off

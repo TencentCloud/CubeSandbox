@@ -237,7 +237,12 @@ impl CubeMasterClient {
         // string is treated by some CubeMaster builds as "start over from
         // page 0" instead of "omit the parameter", which silently breaks
         // pagination (Bug 3).  Defensively normalise it here.
-        if let Some(token) = req.next_token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if let Some(token) = req
+            .next_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
             builder = builder.query(&[("next_token", token)]);
         }
         let resp = builder.send().await.map_err(CubeMasterError::Http)?;
@@ -1599,7 +1604,10 @@ pub struct CreateTemplateEnv {
 /// CubeVS context for template creation.
 #[derive(Debug, Serialize)]
 pub struct CreateTemplateCubeVSContext {
-    #[serde(rename = "allowInternetAccess", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "allowInternetAccess",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub allow_internet_access: Option<bool>,
 }
 

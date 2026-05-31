@@ -33,7 +33,7 @@ func TestStateStoreSaveLoadDelete(t *testing.T) {
 		}},
 		CubeVSContext: &CubeVSContext{
 			AllowInternetAccess: boolPtr(true),
-			AllowOut:        []string{"10.0.0.0/8"},
+			AllowOut:            []string{"10.0.0.0/8"},
 		},
 		PersistMetadata: map[string]string{
 			"sandbox_ip":    "192.168.0.10",

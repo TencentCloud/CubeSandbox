@@ -33,7 +33,11 @@ fn get_rule_conditions(args: &[LinuxSeccompArg]) -> Result<Vec<ScmpArgCompare>> 
         let cond = match op {
             ScmpCompareOp::MaskedEqual(mask) => {
                 let _ = mask; // mask already embedded in the op
-                ScmpArgCompare::new(arg.index, ScmpCompareOp::MaskedEqual(arg.value_two), arg.value)
+                ScmpArgCompare::new(
+                    arg.index,
+                    ScmpCompareOp::MaskedEqual(arg.value_two),
+                    arg.value,
+                )
             }
             _ => ScmpArgCompare::new(arg.index, op, arg.value),
         };

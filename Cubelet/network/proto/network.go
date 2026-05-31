@@ -36,9 +36,9 @@ type Interface struct {
 
 	Family int `json:"family"`
 
-	Mask            int        `json:"mask"`
-	IPs             []MVMIp    `json:"ips"`
-	Qos             *QosConfig `json:"qos"`
+	Mask int        `json:"mask"`
+	IPs  []MVMIp    `json:"ips"`
+	Qos  *QosConfig `json:"qos"`
 }
 
 type MVMIp struct {

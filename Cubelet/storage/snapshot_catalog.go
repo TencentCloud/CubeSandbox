@@ -28,15 +28,15 @@ import (
 // tolerated and missing fields decode as zero values so old catalog files keep
 // working after schema extensions.
 type SnapshotCatalogEntry struct {
-	SnapshotID      string `json:"snapshot_id"`
-	InstanceType    string `json:"instance_type,omitempty"`
-	SpecDir         string `json:"spec_dir,omitempty"`
-	SnapshotPath    string `json:"snapshot_path"`
-	MetaDir         string `json:"meta_dir"`
-	RootfsVol       string `json:"rootfs_vol"`
-	RootfsKind      string `json:"rootfs_kind"`
-	MemoryVol       string `json:"memory_vol"`
-	MemoryKind      string `json:"memory_kind"`
+	SnapshotID   string `json:"snapshot_id"`
+	InstanceType string `json:"instance_type,omitempty"`
+	SpecDir      string `json:"spec_dir,omitempty"`
+	SnapshotPath string `json:"snapshot_path"`
+	MetaDir      string `json:"meta_dir"`
+	RootfsVol    string `json:"rootfs_vol"`
+	RootfsKind   string `json:"rootfs_kind"`
+	MemoryVol    string `json:"memory_vol"`
+	MemoryKind   string `json:"memory_kind"`
 	// BuildRootfsVol/Kind track the temporary writable working layer created
 	// during template build (AppSnapshot path). They must be cleaned up at
 	// template delete time. Empty for runtime snapshots (CommitSandbox), which

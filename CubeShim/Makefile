@@ -9,9 +9,12 @@ UID = $(shell id -u)
 GID = $(shell id -g)
 PWD = $(shell pwd)
 
-.PHONY: all
+.PHONY: all fmt
 all:
 	cargo build --release
+
+fmt:
+	cargo fmt
 
 .PHONY: all-docker
 all-docker:

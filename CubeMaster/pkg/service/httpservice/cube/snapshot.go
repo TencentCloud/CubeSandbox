@@ -437,7 +437,7 @@ func getSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 // running, please poll" outcome.  `GET /cube/operation/{operation_id}` is
 // kept around purely for human audit; programmatic clients have no reason
 // to poll.  The snapshot API is synchronous — CubeAPI waits for a
-	// terminal state and does not expose a polling interface to callers.
+// terminal state and does not expose a polling interface to callers.
 func deleteSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	snapshotID := resourceIDFromPath(r.URL.Path, actionURI(SnapshotAction))
 	if snapshotID == "" {

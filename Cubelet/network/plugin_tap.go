@@ -275,12 +275,12 @@ type Config struct {
 
 	RootPath string `toml:"root_path"`
 
-	EnableNetworkAgent          bool             `toml:"enable_network_agent"`
-	NetworkAgentEndpoint        string           `toml:"network_agent_endpoint"`
-	NetworkAgentTapSocket       string           `toml:"network_agent_tap_socket"`
-	NetworkAgentInitTimeout     tomlext.Duration `toml:"network_agent_init_timeout"`
-	NetworkAgentRetryInterval   tomlext.Duration `toml:"network_agent_retry_interval"`
-	NetworkAgentTapFDTimeout    tomlext.Duration `toml:"network_agent_tap_fd_timeout"`
+	EnableNetworkAgent        bool             `toml:"enable_network_agent"`
+	NetworkAgentEndpoint      string           `toml:"network_agent_endpoint"`
+	NetworkAgentTapSocket     string           `toml:"network_agent_tap_socket"`
+	NetworkAgentInitTimeout   tomlext.Duration `toml:"network_agent_init_timeout"`
+	NetworkAgentRetryInterval tomlext.Duration `toml:"network_agent_retry_interval"`
+	NetworkAgentTapFDTimeout  tomlext.Duration `toml:"network_agent_tap_fd_timeout"`
 
 	ReconcileInterval tomlext.Duration `toml:"reconcile_interval"`
 }

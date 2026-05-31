@@ -348,14 +348,14 @@ func TestFormatTemplateImageJobWatchLineIncludesError(t *testing.T) {
 
 func TestFormatTemplateImageJobCompletionSummarySuccess(t *testing.T) {
 	job := &types.TemplateImageJobInfo{
-		Status:             "READY",
-		TemplateID:         "tpl-1",
-		JobID:              "job-1",
-		ArtifactID:         "artifact-1",
-		ExpectedNodeCount:  2,
-		ReadyNodeCount:     2,
-		FailedNodeCount:    0,
-		TemplateStatus:     "READY",
+		Status:                  "READY",
+		TemplateID:              "tpl-1",
+		JobID:                   "job-1",
+		ArtifactID:              "artifact-1",
+		ExpectedNodeCount:       2,
+		ReadyNodeCount:          2,
+		FailedNodeCount:         0,
+		TemplateStatus:          "READY",
 		TemplateSpecFingerprint: "sha256:abc",
 	}
 

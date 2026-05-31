@@ -63,8 +63,8 @@ use crate::config::AppConfig;
 use crate::engine::Engine;
 use crate::pkg::errors::{CubecowError, CubecowResult};
 use crate::pkg::metrics::{
-    MetricsCollector, METRIC_SNAPSHOT_COUNT, METRIC_TOTAL_BYTES,
-    METRIC_USED_BYTES, METRIC_VOLUME_COUNT,
+    MetricsCollector, METRIC_SNAPSHOT_COUNT, METRIC_TOTAL_BYTES, METRIC_USED_BYTES,
+    METRIC_VOLUME_COUNT,
 };
 use crate::{Snapshot, Volume, VolumeBlockInfo};
 
@@ -226,9 +226,7 @@ impl ReflinkEngine {
 
     /// Path to a snapshot file: `<volumes_dir>/<origin>/<snap>`.
     fn snap_file(&self, origin_volume: &str, snapshot_name: &str) -> PathBuf {
-        self.volumes_dir
-            .join(origin_volume)
-            .join(snapshot_name)
+        self.volumes_dir.join(origin_volume).join(snapshot_name)
     }
 
     // -----------------------------------------------------------------------
@@ -527,7 +525,8 @@ impl Engine for ReflinkEngine {
             .write(true)
             .open(&main)
             .map_err(CubecowError::IoError)?;
-        file.set_len(new_size_bytes).map_err(CubecowError::IoError)?;
+        file.set_len(new_size_bytes)
+            .map_err(CubecowError::IoError)?;
         file.sync_all().map_err(CubecowError::IoError)?;
         info!(
             volume = name,
@@ -656,10 +655,9 @@ impl Engine for ReflinkEngine {
                 .read()
                 .expect("reflink name_index lock poisoned");
             match idx.get(source_name) {
-                Some(NameKind::Volume) => (
-                    self.vol_main_file(source_name),
-                    source_name.to_string(),
-                ),
+                Some(NameKind::Volume) => {
+                    (self.vol_main_file(source_name), source_name.to_string())
+                }
                 Some(NameKind::Snapshot { origin_volume }) => (
                     self.snap_file(origin_volume, source_name),
                     origin_volume.clone(),
@@ -1124,9 +1122,7 @@ fn statvfs_total_used(path: &Path) -> std::io::Result<(u64, u64)> {
 //     origin's main file is non-zero           → orphan from a crashed FICLONE;
 //                                                 unlink.
 // ---------------------------------------------------------------------------
-fn scan_and_rebuild_index(
-    volumes_dir: &Path,
-) -> std::io::Result<HashMap<String, NameKind>> {
+fn scan_and_rebuild_index(volumes_dir: &Path) -> std::io::Result<HashMap<String, NameKind>> {
     let mut index: HashMap<String, NameKind> = HashMap::new();
 
     let read = match std::fs::read_dir(volumes_dir) {
@@ -1418,7 +1414,10 @@ mod tests {
         assert_eq!(new, 4 * 1024 * 1024);
 
         // Volume reflects new size; snapshot stays at original size.
-        assert_eq!(engine.get_volume_info("v").unwrap().size_bytes, 4 * 1024 * 1024);
+        assert_eq!(
+            engine.get_volume_info("v").unwrap().size_bytes,
+            4 * 1024 * 1024
+        );
         let (snaps, _) = engine.list_snapshots("v", 0, None);
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].size_bytes, 1024 * 1024);
@@ -1458,7 +1457,10 @@ mod tests {
             Some(NameKind::Snapshot { origin_volume }) => assert_eq!(origin_volume, "vol1"),
             other => panic!("expected snapA snapshot of vol1, got {other:?}"),
         }
-        assert!(idx.get("orphan").is_none(), "zero-byte orphan must be skipped");
+        assert!(
+            idx.get("orphan").is_none(),
+            "zero-byte orphan must be skipped"
+        );
         assert!(!orphan.exists(), "scan must remove the orphan file");
 
         let _ = std::fs::remove_dir_all(&root);

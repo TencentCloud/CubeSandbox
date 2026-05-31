@@ -37,8 +37,8 @@ func TestCreateSandboxMapsMissingTemplateToNotFound(t *testing.T) {
 	req := httptest.NewRequest("POST", "/cube/sandbox", strings.NewReader(`{
 		"requestID":"req-1",
 		"annotations":{
-			"` + constants.CubeAnnotationAppSnapshotTemplateID + `":"tpl-missing",
-			"` + constants.CubeAnnotationAppSnapshotTemplateVersion + `":"v2"
+			"`+constants.CubeAnnotationAppSnapshotTemplateID+`":"tpl-missing",
+			"`+constants.CubeAnnotationAppSnapshotTemplateVersion+`":"v2"
 		}
 	}`))
 	rt := &CubeLog.RequestTrace{}
@@ -72,8 +72,8 @@ func TestCreateSandboxKeepsOtherTemplateErrorsAsParamsError(t *testing.T) {
 	req := httptest.NewRequest("POST", "/cube/sandbox", strings.NewReader(`{
 		"requestID":"req-2",
 		"annotations":{
-			"` + constants.CubeAnnotationAppSnapshotTemplateID + `":"tpl-other-error",
-			"` + constants.CubeAnnotationAppSnapshotTemplateVersion + `":"v2"
+			"`+constants.CubeAnnotationAppSnapshotTemplateID+`":"tpl-other-error",
+			"`+constants.CubeAnnotationAppSnapshotTemplateVersion+`":"v2"
 		}
 	}`))
 	rt := &CubeLog.RequestTrace{}

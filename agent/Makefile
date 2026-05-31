@@ -132,6 +132,10 @@ clean:
 test:
 	@cargo test --all $(EXTRA_RUSTFEATURES) -- --nocapture
 
+##TARGET fmt: format code
+fmt:
+	cargo fmt
+
 ##TARGET check: run lint/fmt check
 check: $(GENERATED_FILES)
 	cargo fmt -- --check
@@ -175,6 +179,7 @@ generate-protocols:
 	clean \
 	default \
 	docker \
+	fmt \
 	generate-protocols \
 	help \
 	install \

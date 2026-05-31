@@ -78,6 +78,9 @@ $(APPS): deps
 
 
 
+fmt:
+	$(Q)go fmt ./...
+
 lint:
 	$(Q)go fmt ./...
 	$(Q)golangci-lint run

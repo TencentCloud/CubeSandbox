@@ -89,10 +89,7 @@ fn build_cubeapi_router(state: &AppState, auth_configured: bool) -> Router<AppSt
 }
 
 /// Same long-budget routes mounted under the `/cubeapi/v1` prefix.
-fn build_cubeapi_snapshot_long_router(
-    state: &AppState,
-    auth_configured: bool,
-) -> Router<AppState> {
+fn build_cubeapi_snapshot_long_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
     Router::new()
         .merge(build_long_sandbox_routes(state, auth_configured))
         .merge(build_long_template_routes(state, auth_configured))
@@ -195,10 +192,7 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
 /// `/cube/template`), both of which can wait for cubelet to physically tear
 /// down LVM volumes and replica metadata before responding.
 fn build_long_template_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
-    let routes = Router::new().route(
-        "/templates/:templateID",
-        delete(templates::delete_template),
-    );
+    let routes = Router::new().route("/templates/:templateID", delete(templates::delete_template));
 
     with_auth(routes, state, auth_configured)
 }
@@ -210,7 +204,10 @@ fn build_cluster_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/nodes/:nodeID", get(cluster::get_node))
         .route("/config", get(config::get_config))
         .route("/store/meta", get(store::get_store_meta))
-        .route("/store/refresh", axum::routing::post(store::refresh_store_meta));
+        .route(
+            "/store/refresh",
+            axum::routing::post(store::refresh_store_meta),
+        );
 
     with_auth(routes, state, auth_configured)
 }
