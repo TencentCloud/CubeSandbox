@@ -316,17 +316,10 @@ func (em *eventMonitor) handleEvent(ctx context.Context, any interface{}) error 
 		if cntr != nil && cntr.Status != nil && cntr.Status.IsTerminated() {
 			return nil
 		}
-		// Idempotent: converge PausedAt/PausingAt of all containers to RUNNING.
-		for _, c := range cb.AllContainers() {
-			if c.Status == nil {
-				continue
-			}
-			c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
-				status.PausedAt = 0
-				status.PausingAt = 0
-				return status, nil
-			})
-		}
+		// Resume is an opaque restore from CubeShim's internal pause snapshot, so
+		// use the shared converger that also invalidates stale runtime snapshot
+		// bindings before the next CommitSandbox.
+		convergeResumeStateAfterOpaqueRestore(cb, time.Now().UTC())
 		return em.c.cubeboxManger.SyncByID(ctx, cb.ID)
 	case *eventtypes.ImageCreate:
 		log.G(ctx).Infof("image create event: %+v", e)

@@ -239,22 +239,7 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
 		return rsp, nil
 	}
-	// CubeShim resumes paused VMs from an internal full snapshot under
-	// /data/cubelet/root/pausevm/<sandbox> and does not expose that memory file
-	// as a cubecow catalog entry. Any runtime/restore-base labels that still
-	// point to older template/snapshot memory files are now stale for
-	// pagemap_anon/soft-dirty purposes, so force the next commit to re-anchor
-	// with a full snapshot.
-	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(sb, time.Now().UTC())
-	for _, c := range sb.AllContainers() {
-		if c.Status != nil {
-			c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
-				status.PausedAt = 0
-				status.PausingAt = 0
-				return status, nil
-			})
-		}
-	}
+	convergeResumeStateAfterOpaqueRestore(sb, time.Now().UTC())
 	return rsp, nil
 }
 
@@ -376,6 +361,31 @@ func convergePauseStateFromShim(
 	}
 }
 
+// convergeResumeStateAfterOpaqueRestore is the single source of truth for the
+// RESUME-direction convergence rules. CubeShim resumes paused VMs from an
+// internal full snapshot under /data/cubelet/root/pausevm/<sandbox> and does
+// not expose that memory file as a cubecow catalog entry, so every successful
+// resume convergence MUST both clear the paused markers and invalidate the
+// runtime/restore-base bindings. Shared by the normal UpdateWithResume success
+// path, the resume-RPC error reconcile path, and the /tasks/resumed event path
+// so these flows cannot drift again.
+func convergeResumeStateAfterOpaqueRestore(sb *cubeboxstore.CubeBox, attachedAt time.Time) {
+	if sb == nil {
+		return
+	}
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(sb, attachedAt)
+	for _, c := range sb.AllContainers() {
+		if c.Status == nil {
+			continue
+		}
+		c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+			status.PausedAt = 0
+			status.PausingAt = 0
+			return status, nil
+		})
+	}
+}
+
 // reconcileStatusAfterResumeError is the dual of the pause case.
 func reconcileStatusAfterResumeError(
 	parentCtx context.Context,
@@ -405,17 +415,7 @@ func reconcileStatusAfterResumeError(
 		log.G(parentCtx).Warnf(
 			"reconcileStatusAfterResumeError: shim reports RUNNING despite resumeErr=%v, converging sandbox=%s",
 			resumeErr, sb.ID)
-		invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(sb, time.Now().UTC())
-		for _, c := range sb.AllContainers() {
-			if c.Status == nil {
-				continue
-			}
-			c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
-				status.PausedAt = 0
-				status.PausingAt = 0
-				return status, nil
-			})
-		}
+		convergeResumeStateAfterOpaqueRestore(sb, time.Now().UTC())
 	case containerd.Paused:
 		// Really not resumed, the state stays PAUSED and needs no rewrite (the
 		// success path has not run yet).
