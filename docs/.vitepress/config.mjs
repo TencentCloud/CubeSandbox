@@ -98,7 +98,7 @@ export default withMermaid(defineConfig({
           { text: 'Architecture', link: '/architecture/overview' },
           { text: 'Blog', link: '/blog/' },
           { text: 'About us', link: '/about-us' },
-          { text: 'Changelog', link: '/changelog' },
+          { text: 'Changelog', link: '/changelog/' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
@@ -192,7 +192,7 @@ export default withMermaid(defineConfig({
           { text: '架构', link: '/zh/architecture/overview' },
           { text: '博客', link: '/zh/blog/' },
           { text: '关于我们', link: '/zh/about-us' },
-          { text: '更新日志', link: '/zh/changelog' },
+          { text: '更新日志', link: '/zh/changelog/' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
