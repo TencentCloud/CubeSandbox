@@ -165,6 +165,27 @@ http://<target-host>:12088
 
 如果显式设置了 `CUBE_SANDBOX_NODE_IP`，安装脚本会优先使用该值；否则会把自动探测到的节点 IP 写入 MySQL 的 `t_cube_host_info.ip` 和 `t_cube_sub_host_info.host_ip`，并用于 `cube proxy` / DNS 的地址渲染。
 
+### 数字助手环境变量
+
+数字助手（AgentHub）需要 CubeAPI 连接 MySQL 保存助手实例、存档、模板和操作流水。one-click 默认会根据 `CUBE_SANDBOX_MYSQL_HOST`、`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_MYSQL_USER`、`CUBE_SANDBOX_MYSQL_PASSWORD`、`CUBE_SANDBOX_MYSQL_DB` 拼出 `DATABASE_URL`，指向随 one-click 启动的 MySQL：
+
+```bash
+# 可选；未设置时由 one-click 自动拼接。
+DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
+# CubeAPI 也支持备用变量名。
+CUBE_API_DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
+```
+
+创建或重新配置 OpenClaw 数字助手时，还需要在 `.env` 中配置 DeepSeek API Key。CubeAPI 会优先读取 `AGENTHUB_DEEPSEEK_API_KEY`，未设置时读取 `OPENCLAW_DEEPSEEK_API_KEY`，再通过 envd 注入到 sandbox 内的 OpenClaw 配置：
+
+```bash
+AGENTHUB_DEEPSEEK_API_KEY=sk-...
+# 或：
+OPENCLAW_DEEPSEEK_API_KEY=sk-...
+```
+
+该 key 会作为 `OPENCLAW_DEEPSEEK_API_KEY` 传入 sandbox，并写入 `/root/.openclaw/agents/main/agent/auth-profiles.json`。不要把真实 key 提交到仓库；只在目标机 `.env` 或安全的部署系统中配置。
+
 ### 计算节点安装
 
 如果第一台机器已经按默认方式部署为控制+计算节点，第二台机器可复用同一个发布包作为计算节点：

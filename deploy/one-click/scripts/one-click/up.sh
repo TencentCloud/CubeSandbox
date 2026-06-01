@@ -57,6 +57,16 @@ fi
 if [[ -n "${AUTH_CALLBACK_URL:-}" ]]; then
   CUBE_API_OPTIONAL_EXPORTS+="export AUTH_CALLBACK_URL=\"${AUTH_CALLBACK_URL}\"; "
 fi
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  CUBE_API_OPTIONAL_EXPORTS+="export DATABASE_URL=\"${DATABASE_URL}\"; "
+else
+  mysql_host="${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}"
+  mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+  mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+  mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
+  CUBE_API_OPTIONAL_EXPORTS+="export DATABASE_URL=\"mysql://${mysql_user}:${mysql_password}@${mysql_host}:${mysql_port}/${mysql_db}\"; "
+fi
 if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
   CUBELET_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_NODE_IP=\"${CUBE_SANDBOX_NODE_IP}\"; "
 fi

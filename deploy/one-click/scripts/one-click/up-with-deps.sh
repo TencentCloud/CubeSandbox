@@ -44,5 +44,6 @@ wait_for_http "http://${CUBEMASTER_HEALTH_ADDR}/notify/health" "${CUBEMASTER_REA
 
 sed "s/__CUBE_SANDBOX_NODE_IP__/${CUBE_SANDBOX_NODE_IP//\//\\/}/g" "${SQL_DIR}/002_seed_single_node.sql" \
   | docker exec -i "${CUBE_SANDBOX_MYSQL_CONTAINER}" mysql -uroot "-p${MYSQL_ROOT_PASSWORD}" "${MYSQL_DB}"
+docker exec -i "${CUBE_SANDBOX_MYSQL_CONTAINER}" mysql -uroot "-p${MYSQL_ROOT_PASSWORD}" "${MYSQL_DB}" < "${SQL_DIR}/003_agenthub_instances.sql"
 
 "${SCRIPT_DIR}/up-webui.sh"

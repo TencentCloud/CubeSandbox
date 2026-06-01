@@ -119,7 +119,8 @@ export default withMermaid(defineConfig({
             {
               text: 'Core Concepts',
               items: [
-                { text: 'Templates Overview', link: '/guide/templates' }
+                { text: 'Templates Overview', link: '/guide/templates' },
+                { text: 'Digital Assistant', link: '/guide/digital-assistant' }
               ]
             },
             {
@@ -213,7 +214,8 @@ export default withMermaid(defineConfig({
             {
               text: '核心概念',
               items: [
-                { text: '模板概览', link: '/zh/guide/templates' }
+                { text: '模板概览', link: '/zh/guide/templates' },
+                { text: '数字助手', link: '/zh/guide/digital-assistant' }
               ]
             },
             {
