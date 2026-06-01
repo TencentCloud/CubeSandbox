@@ -132,13 +132,19 @@ class TestCreate:
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(allow_internet_access=False, config=make_config())
         body = m.call_args.kwargs["json"]
-        assert body["allowInternetAccess"] is False
+        assert body["allow_internet_access"] is False
 
     def test_create_allow_internet_access_true_not_in_payload(self):
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(config=make_config())
         body = m.call_args.kwargs["json"]
-        assert "allowInternetAccess" not in body
+        assert "allow_internet_access" not in body
+
+    def test_create_network_allow_public_traffic(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network={"allow_public_traffic": False}, config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert body["network"]["allowPublicTraffic"] is False
 
     def test_create_network_allow_out(self):
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
@@ -599,7 +605,7 @@ class TestCommands:
             patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
-            result = sb.commands.run("echo hello", cwd="/work", env={"A": "B"}, user="root")
+            result = sb.commands.run("echo hello", cwd="/work", env={"A": "B"})
 
         assert result.stdout == "hello\nworld\n"
         assert result.exit_code == 0
@@ -796,7 +802,7 @@ class TestFilesystem:
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch.object(sb, "_build_data_client", return_value=client):
-            content = sb.files.read("/tmp/foo.txt", user="root")
+            content = sb.files.read("/tmp/foo.txt")
         assert content == "file content"
         assert seen["method"] == "GET"
         assert seen["host"] == f"49983-{SANDBOX_ID}.{DOMAIN}"
@@ -842,7 +848,7 @@ class TestFilesystem:
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch.object(sb, "_build_data_client", return_value=client):
-            sb.files.write("/tmp/foo.txt", "file content", user="root")
+            sb.files.write("/tmp/foo.txt", "file content")
 
         assert seen["method"] == "POST"
         assert seen["host"] == f"49983-{SANDBOX_ID}.{DOMAIN}"

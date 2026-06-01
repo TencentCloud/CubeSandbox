@@ -66,6 +66,19 @@ with Sandbox.create() as sb:
     )
 ```
 
+### Run shell commands
+
+```python
+from cubesandbox import Sandbox
+
+with Sandbox.create() as sb:
+    result = sb.commands.run("echo hello cube")
+    print(result.stdout)  # "hello cube\n"
+```
+
+When `user` is omitted, the SDK sends requests as `root` for compatibility
+with envd versions that reject process/file requests without an explicit user.
+
 ### Persistent variables within a sandbox
 
 Variables assigned in one `run_code` call persist for the lifetime of the sandbox —
@@ -96,20 +109,25 @@ sb2 = Sandbox.connect(sb.sandbox_id)
 ### Network policy
 
 ```python
-import json
 from cubesandbox import Sandbox
 
 # Deny all outbound traffic
-with Sandbox.create(metadata={"network-policy": "deny-all"}) as sb:
+with Sandbox.create(allow_internet_access=False) as sb:
     result = sb.run_code(
         "import urllib.request; urllib.request.urlopen('http://example.com')"
     )
     print(result.error.name)   # "URLError"
 
 # Custom allow-list — NOTE: only IP addresses are supported, not domain names
-rules = json.dumps({"allow": ["151.101.0.0/16"]})
 with Sandbox.create(
-    metadata={"network-policy": "custom", "network-rules": rules}
+    allow_internet_access=False,
+    network={"allow_out": ["151.101.0.0/16"]},
+) as sb:
+    sb.run_code("import subprocess; subprocess.run(['pip', 'install', 'requests'])")
+
+# Custom deny-list
+with Sandbox.create(
+    network={"deny_out": ["169.254.0.0/16"]},
 ) as sb:
     sb.run_code("import subprocess; subprocess.run(['pip', 'install', 'requests'])")
 ```
@@ -121,7 +139,7 @@ import json
 from cubesandbox import Sandbox
 
 mounts = json.dumps([{"hostPath": "/data/shared", "mountPath": "/mnt/data"}])
-with Sandbox.create(metadata={"hostdir-mount": mounts}) as sb:
+with Sandbox.create(metadata={"host-mount": mounts}) as sb:
     result = sb.run_code("open('/mnt/data/hello.txt').read()")
     print(result.text)
 ```

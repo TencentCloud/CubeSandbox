@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ._commands import ENVD_PORT
+from ._commands import DEFAULT_ENVD_USER, ENVD_PORT
 
 if TYPE_CHECKING:
     from .sandbox import Sandbox
@@ -19,6 +19,7 @@ class Filesystem:
         """Read a file through envd's HTTP file API."""
         if self._sandbox._client is None:
             self._sandbox._client = self._sandbox._build_data_client()
+        effective_user = user or DEFAULT_ENVD_USER
 
         headers = {}
         access_token = self._sandbox._data.get("envdAccessToken")
@@ -27,7 +28,7 @@ class Filesystem:
 
         resp = self._sandbox._client.get(
             f"http://{self._sandbox.get_host(ENVD_PORT)}/files",
-            params={"path": path, **({"username": user} if user else {})},
+            params={"path": path, "username": effective_user},
             headers=headers,
         )
         if resp.status_code != 200:
@@ -44,6 +45,7 @@ class Filesystem:
         """Write a file through envd's HTTP file API."""
         if self._sandbox._client is None:
             self._sandbox._client = self._sandbox._build_data_client()
+        effective_user = user or DEFAULT_ENVD_USER
 
         headers = {"Content-Type": "application/octet-stream"}
         access_token = self._sandbox._data.get("envdAccessToken")
@@ -51,7 +53,7 @@ class Filesystem:
             headers["X-Access-Token"] = access_token
 
         body = data.encode("utf-8") if isinstance(data, str) else data
-        params = {"path": path, **({"username": user} if user else {})}
+        params = {"path": path, "username": effective_user}
         resp = self._sandbox._client.post(
             f"http://{self._sandbox.get_host(ENVD_PORT)}/files",
             params=params,

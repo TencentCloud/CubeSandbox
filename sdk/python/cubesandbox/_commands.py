@@ -20,6 +20,7 @@ CONNECT_CONTENT_TYPE = "application/connect+json"
 CONNECT_END_STREAM_FLAG = 0x02
 CONNECT_COMPRESSED_FLAG = 0x01
 MAX_CONNECT_ENVELOPE_SIZE = 64 * 1024 * 1024
+DEFAULT_ENVD_USER = "root"
 
 
 @dataclass
@@ -52,15 +53,19 @@ class Commands:
 
         Args:
             env: Alias for envs, matching the E2B SDK command API.
+            user: Sandbox user for envd process auth. Defaults to ``"root"``
+                to keep old envd versions from rejecting requests with
+                ``"no user specified"``.
         """
         process_envs = envs if envs is not None else (env or {})
+        effective_user = user or DEFAULT_ENVD_USER
         try:
             return self._run_with_e2b_connect(
                 cmd,
                 timeout=timeout,
                 cwd=cwd,
                 envs=process_envs,
-                user=user,
+                user=effective_user,
             )
         except ImportError:
             return self._run_with_connect_fallback(
@@ -68,7 +73,7 @@ class Commands:
                 timeout=timeout,
                 cwd=cwd,
                 envs=process_envs,
-                user=user,
+                user=effective_user,
             )
 
     def _run_with_e2b_connect(

@@ -101,7 +101,7 @@ class Sandbox:
             template: Template ID. Falls back to ``CUBE_TEMPLATE_ID`` env var.
             timeout: Sandbox TTL in seconds. Defaults to ``Config.timeout`` (300).
             env_vars: Environment variables injected into the sandbox.
-            metadata: Arbitrary key-value metadata (e.g. network-policy, hostdir-mount).
+            metadata: Arbitrary key-value metadata (e.g. network-policy, host-mount).
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
@@ -122,9 +122,11 @@ class Sandbox:
         if metadata:
             payload["metadata"] = metadata
         if not allow_internet_access:
-            payload["allowInternetAccess"] = False
+            payload["allow_internet_access"] = False
         if network:
             net: dict = {}
+            if "allow_public_traffic" in network:
+                net["allowPublicTraffic"] = network["allow_public_traffic"]
             if "allow_out" in network:
                 net["allowOut"] = network["allow_out"]
             if "deny_out" in network:
