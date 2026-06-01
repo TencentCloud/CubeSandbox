@@ -98,9 +98,9 @@ fn inspect_image(image: &str) -> Option<ImageMeta> {
         .or_else(|| info.repo_digests.first())
         .cloned();
 
-    let digest_short = digest.as_deref().and_then(|d| {
-        d.split('@').nth(1).map(|s| s.to_string())
-    });
+    let digest_short = digest
+        .as_deref()
+        .and_then(|d| d.split('@').nth(1).map(|s| s.to_string()));
 
     Some(ImageMeta {
         image: image.to_string(),

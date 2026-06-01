@@ -57,6 +57,13 @@ pub struct ServerConfig {
     /// CLI flag: --auth-callback-url  |  Env var: AUTH_CALLBACK_URL
     #[serde(default)]
     pub auth_callback_url: Option<String>,
+
+    /// Optional MySQL database URL used by AgentHub persistence.
+    ///
+    /// Env vars checked by default: DATABASE_URL, then CUBE_API_DATABASE_URL.
+    /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
+    #[serde(default = "default_database_url")]
+    pub database_url: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -90,6 +97,11 @@ fn default_log_dir() -> String {
 fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
+fn default_database_url() -> Option<String> {
+    std::env::var("DATABASE_URL")
+        .ok()
+        .or_else(|| std::env::var("CUBE_API_DATABASE_URL").ok())
+}
 
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
@@ -115,6 +127,7 @@ impl Default for ServerConfig {
             log_dir: default_log_dir(),
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
+            database_url: default_database_url(),
         }
     }
 }

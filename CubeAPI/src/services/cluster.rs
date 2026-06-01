@@ -29,7 +29,11 @@ impl ClusterService {
     pub async fn list_nodes(&self) -> AppResult<Vec<NodeView>> {
         let resp = self.cubemaster.list_nodes().await.map_err(map_err)?;
         let used_map = self.fetch_used_resources().await;
-        Ok(resp.data.into_iter().map(|s| to_view_with_used(s, &used_map)).collect())
+        Ok(resp
+            .data
+            .into_iter()
+            .map(|s| to_view_with_used(s, &used_map))
+            .collect())
     }
 
     pub async fn get_node(&self, node_id: &str) -> AppResult<NodeView> {

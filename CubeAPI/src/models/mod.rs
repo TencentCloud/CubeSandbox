@@ -458,7 +458,10 @@ pub struct TemplateDetail {
     #[serde(rename = "networkType", skip_serializing_if = "Option::is_none")]
     pub network_type: Option<String>,
     /// Whether public internet access is allowed for sandboxes from this template.
-    #[serde(rename = "allowInternetAccess", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "allowInternetAccess",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub allow_internet_access: Option<bool>,
 }
 

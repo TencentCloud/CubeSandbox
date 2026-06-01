@@ -61,7 +61,10 @@ pub async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
         Json(RuntimeConfig {
             api_endpoint: public_api_endpoint(&cfg.bind),
             rate_limit_per_sec: cfg.rate_limit_per_sec,
-            auth_enabled: cfg.auth_callback_url.as_deref().is_some_and(|u| !u.is_empty()),
+            auth_enabled: cfg
+                .auth_callback_url
+                .as_deref()
+                .is_some_and(|u| !u.is_empty()),
             sandbox_domain: cfg.sandbox_domain.clone(),
             instance_type: cfg.instance_type.clone(),
         }),

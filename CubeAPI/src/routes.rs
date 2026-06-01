@@ -4,7 +4,7 @@
 
 use axum::{
     middleware,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use std::time::Duration;
@@ -18,7 +18,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{cluster, config, health, sandboxes, snapshots, store, templates},
+    handlers::{agenthub, cluster, config, health, sandboxes, snapshots, store, templates},
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -86,16 +86,15 @@ fn build_cubeapi_router(state: &AppState, auth_configured: bool) -> Router<AppSt
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
         .merge(build_cluster_routes(state, auth_configured))
+        .merge(build_agenthub_routes(state, auth_configured))
 }
 
 /// Same long-budget routes mounted under the `/cubeapi/v1` prefix.
-fn build_cubeapi_snapshot_long_router(
-    state: &AppState,
-    auth_configured: bool,
-) -> Router<AppState> {
+fn build_cubeapi_snapshot_long_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
     Router::new()
         .merge(build_long_sandbox_routes(state, auth_configured))
         .merge(build_long_template_routes(state, auth_configured))
+        .merge(build_long_agenthub_routes(state, auth_configured))
 }
 
 fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
@@ -195,10 +194,37 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
 /// `/cube/template`), both of which can wait for cubelet to physically tear
 /// down LVM volumes and replica metadata before responding.
 fn build_long_template_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
-    let routes = Router::new().route(
-        "/templates/:templateID",
-        delete(templates::delete_template),
-    );
+    let routes = Router::new().route("/templates/:templateID", delete(templates::delete_template));
+
+    with_auth(routes, state, auth_configured)
+}
+
+fn build_long_agenthub_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new()
+        .route(
+            "/agenthub/instances/:agentID/snapshots",
+            get(agenthub::list_agent_snapshots).post(agenthub::create_agent_snapshot),
+        )
+        .route(
+            "/agenthub/instances/:agentID/snapshots/:snapshotID",
+            delete(agenthub::delete_agent_snapshot).patch(agenthub::update_agent_snapshot),
+        )
+        .route(
+            "/agenthub/instances/:agentID/rollback",
+            post(agenthub::rollback_agent_to_snapshot),
+        )
+        .route(
+            "/agenthub/instances/:agentID/recover",
+            post(agenthub::recover_agent_openclaw),
+        )
+        .route(
+            "/agenthub/instances/:agentID/clone",
+            post(agenthub::clone_agent_instance),
+        )
+        .route(
+            "/agenthub/instances/:agentID/publish-template",
+            post(agenthub::publish_agent_template),
+        );
 
     with_auth(routes, state, auth_configured)
 }
@@ -210,7 +236,57 @@ fn build_cluster_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/nodes/:nodeID", get(cluster::get_node))
         .route("/config", get(config::get_config))
         .route("/store/meta", get(store::get_store_meta))
-        .route("/store/refresh", axum::routing::post(store::refresh_store_meta));
+        .route(
+            "/store/refresh",
+            axum::routing::post(store::refresh_store_meta),
+        );
+
+    with_auth(routes, state, auth_configured)
+}
+
+fn build_agenthub_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new()
+        .route(
+            "/agenthub/instances",
+            get(agenthub::list_agent_instances).post(agenthub::create_agent_instance),
+        )
+        .route("/agenthub/templates", get(agenthub::list_agent_templates))
+        .route(
+            "/agenthub/templates/:templateID",
+            patch(agenthub::update_agent_template).delete(agenthub::delete_agent_template),
+        )
+        .route(
+            "/agenthub/instances/:agentID",
+            delete(agenthub::delete_agent_instance),
+        )
+        .route(
+            "/agenthub/instances/:agentID/restart",
+            post(agenthub::restart_agent_openclaw),
+        )
+        .route(
+            "/agenthub/instances/:agentID/operations",
+            get(agenthub::list_agent_operations),
+        )
+        .route(
+            "/agenthub/instances/:agentID/pause",
+            post(agenthub::pause_agent_openclaw),
+        )
+        .route(
+            "/agenthub/instances/:agentID/resume",
+            post(agenthub::resume_agent_openclaw),
+        )
+        .route(
+            "/agenthub/instances/:agentID/upgrade",
+            post(agenthub::upgrade_agent_openclaw),
+        )
+        .route(
+            "/agenthub/instances/:agentID/model",
+            put(agenthub::update_agent_model),
+        )
+        .route(
+            "/agenthub/instances/:agentID/wecom",
+            get(agenthub::get_agent_wecom_config).put(agenthub::update_agent_wecom_config),
+        );
 
     with_auth(routes, state, auth_configured)
 }
@@ -263,17 +339,17 @@ mod tests {
     use axum::http::StatusCode;
     use axum_test::TestServer;
 
-    fn test_server() -> TestServer {
+    async fn test_server() -> TestServer {
         let mut config = ServerConfig::default();
         config.cubemaster_url = "http://127.0.0.1:9".to_string();
 
-        let state = AppState::new(config, arc(NoopLogger));
+        let state = AppState::new(config, arc(NoopLogger)).await;
         TestServer::new(build_router(state)).expect("router should build")
     }
 
     #[tokio::test]
     async fn preserves_root_e2b_routes() {
-        let server = test_server();
+        let server = test_server().await;
 
         server.get("/health").await.assert_status_ok();
         assert_ne!(
@@ -288,7 +364,7 @@ mod tests {
 
     #[tokio::test]
     async fn serves_web_routes_under_cubeapi_prefix() {
-        let server = test_server();
+        let server = test_server().await;
 
         server.get("/cubeapi/v1/health").await.assert_status_ok();
         assert_ne!(
@@ -310,7 +386,7 @@ mod tests {
 
     #[tokio::test]
     async fn removes_cluster_routes_from_root_surface() {
-        let server = test_server();
+        let server = test_server().await;
         server
             .get("/cluster/overview")
             .await

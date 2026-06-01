@@ -79,6 +79,8 @@ async-trait = "0.1"
 # ── CLI argument parsing ──────────────────────────────────────────────────
 clap = { version = "4", features = ["derive"] }
 utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
+base64 = "0.22.1"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "mysql", "chrono", "json"] }
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────
 # (tokio::signal + axum::serve().with_graceful_shutdown is sufficient)

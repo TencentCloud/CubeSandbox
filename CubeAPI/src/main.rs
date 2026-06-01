@@ -5,6 +5,7 @@
 mod config;
 mod constants;
 mod cubemaster;
+mod db;
 mod error;
 mod handlers;
 mod logging;
@@ -226,7 +227,7 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     );
 
     // ── App state ─────────────────────────────────────────────────────────
-    let state = state::AppState::new(cfg.clone(), logger.clone());
+    let state = state::AppState::new(cfg.clone(), logger.clone()).await;
 
     // ── Router ────────────────────────────────────────────────────────────
     let app = routes::build_router(state);
