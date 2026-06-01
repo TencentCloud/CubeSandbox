@@ -95,6 +95,50 @@ ensure_dir() {
   [[ -d "${path}" ]] || die "required directory not found: ${path}"
 }
 
+ensure_not_directory_for_file() {
+  local path="$1"
+  if [[ ! -d "${path}" ]]; then
+    return 0
+  fi
+
+  if rmdir "${path}" 2>/dev/null; then
+    log "removed empty directory at file path: ${path}"
+    return 0
+  fi
+
+  die "expected file path is a non-empty directory: ${path}; move it away and retry"
+}
+
+prepare_file_output() {
+  local path="$1"
+  ensure_not_directory_for_file "${path}"
+  mkdir -p "$(dirname "${path}")"
+}
+
+ensure_bind_mount_file() {
+  local path="$1"
+  ensure_not_directory_for_file "${path}"
+  [[ -f "${path}" ]] || die "required bind mount source file not found: ${path}"
+}
+
+render_template_atomic() {
+  local template="$1"
+  local output="$2"
+  shift 2
+
+  ensure_file "${template}"
+  prepare_file_output "${output}"
+
+  local tmp="${output}.tmp.$$"
+  rm -f "${tmp}"
+  if ! sed "$@" "${template}" > "${tmp}"; then
+    rm -f "${tmp}"
+    die "failed to render template ${template} to ${output}"
+  fi
+  mv -f "${tmp}" "${output}"
+  ensure_bind_mount_file "${output}"
+}
+
 mkdir -p "${RUNTIME_DIR}" "${LOG_DIR}"
 
 one_click_deploy_role() {

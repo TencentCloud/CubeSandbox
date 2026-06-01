@@ -27,6 +27,7 @@ COREDNS_BIND_ADDR="${DEFAULT_COREDNS_BIND_ADDR}"
 RESOLVED_LINK_NAME="${CUBE_PROXY_RESOLVED_LINK_NAME:-cube-dns0}"
 RESOLVED_LINK_ADDR="${CUBE_PROXY_RESOLVED_LINK_ADDR:-${RESOLVED_COREDNS_BIND_ADDR}/32}"
 HOST_DNS_BACKEND="networkmanager-dnsmasq"
+PREPARE_ONLY="${ONE_CLICK_PREPARE_ONLY:-0}"
 
 if command -v resolvectl >/dev/null 2>&1; then
   HOST_DNS_BACKEND="systemd-resolved"
@@ -46,11 +47,12 @@ is_stub_nameserver() {
 write_upstream_resolv_conf() {
   local src_path="$1"
   local dst_path="$2"
-  local tmp_path="${dst_path}.tmp"
+  local tmp_path="${dst_path}.tmp.$$"
   local found_nameserver=1
 
   [[ -f "${src_path}" ]] || return 1
 
+  prepare_file_output "${dst_path}"
   : > "${tmp_path}"
   while IFS= read -r line || [[ -n "${line}" ]]; do
     case "${line}" in
@@ -130,11 +132,18 @@ if [[ "${HOST_DNS_BACKEND}" == "systemd-resolved" ]]; then
   ensure_resolved_link
 fi
 prepare_upstream_resolv_conf
-render_template \
+render_template_atomic \
   "${COREFILE_TEMPLATE}" \
   "${COREFILE_PATH}" \
   -e "s/__CUBE_PROXY_DNS_ANSWER_IP__/$(escape_sed "${DNS_ANSWER_IP}")/g" \
   -e "s/__COREDNS_BIND_ADDR__/$(escape_sed "${COREDNS_BIND_ADDR}")/g"
+
+ensure_bind_mount_file "${RESOLV_UPSTREAM_PATH}"
+
+if [[ "${PREPARE_ONLY}" == "1" ]]; then
+  log "coredns runtime files prepared under ${COREDNS_DIR}"
+  exit 0
+fi
 
 docker_rm_if_exists "${COREDNS_CONTAINER}"
 docker create \

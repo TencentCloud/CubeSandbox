@@ -11,7 +11,7 @@ COREDNS_COMPOSE_DOCKER_IMAGE="${COREDNS_COMPOSE_DOCKER_IMAGE:-docker/compose:1.2
 
 coredns_compose_run() {
   ensure_dir "${COREDNS_DIR}"
-  ensure_file "${COREDNS_COMPOSE_FILE}"
+  ensure_bind_mount_file "${COREDNS_COMPOSE_FILE}"
 
   if docker compose version >/dev/null 2>&1; then
     docker compose -f "${COREDNS_COMPOSE_FILE}" "$@"

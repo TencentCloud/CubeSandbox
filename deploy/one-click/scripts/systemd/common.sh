@@ -41,6 +41,32 @@ ensure_dir() {
   [[ -d "${path}" ]] || die "required directory not found: ${path}"
 }
 
+ensure_not_directory_for_file() {
+  local path="$1"
+  if [[ ! -d "${path}" ]]; then
+    return 0
+  fi
+
+  if rmdir "${path}" 2>/dev/null; then
+    log "removed empty directory at file path: ${path}"
+    return 0
+  fi
+
+  die "expected file path is a non-empty directory: ${path}; move it away and retry"
+}
+
+prepare_file_output() {
+  local path="$1"
+  ensure_not_directory_for_file "${path}"
+  mkdir -p "$(dirname "${path}")"
+}
+
+ensure_bind_mount_file() {
+  local path="$1"
+  ensure_not_directory_for_file "${path}"
+  [[ -f "${path}" ]] || die "required bind mount source file not found: ${path}"
+}
+
 ensure_executable() {
   local path="$1"
   [[ -x "${path}" ]] || die "required executable not found: ${path}"
@@ -252,8 +278,27 @@ wait_for_tcp_port() {
   local i
 
   require_cmd ss
+  require_cmd rg
   for ((i = 1; i <= retries; i++)); do
     if ss -lnt "( sport = :${port} )" | rg -q -- ":${port}"; then
+      return 0
+    fi
+    sleep "${delay}"
+  done
+  return 1
+}
+
+wait_for_udp_port() {
+  local address="$1"
+  local port="$2"
+  local retries="${3:-30}"
+  local delay="${4:-2}"
+  local i
+
+  require_cmd ss
+  require_cmd rg
+  for ((i = 1; i <= retries; i++)); do
+    if ss -lnu "( sport = :${port} )" | rg -q -- "${address}:${port}"; then
       return 0
     fi
     sleep "${delay}"
@@ -284,8 +329,27 @@ render_template() {
   local output="$2"
   shift 2
   ensure_file "${template}"
-  mkdir -p "$(dirname "${output}")"
+  prepare_file_output "${output}"
   sed "$@" "${template}" > "${output}"
+  ensure_bind_mount_file "${output}"
+}
+
+render_template_atomic() {
+  local template="$1"
+  local output="$2"
+  shift 2
+
+  ensure_file "${template}"
+  prepare_file_output "${output}"
+
+  local tmp="${output}.tmp.$$"
+  rm -f "${tmp}"
+  if ! sed "$@" "${template}" > "${tmp}"; then
+    rm -f "${tmp}"
+    die "failed to render template ${template} to ${output}"
+  fi
+  mv -f "${tmp}" "${output}"
+  ensure_bind_mount_file "${output}"
 }
 
 systemd_target_for_role() {

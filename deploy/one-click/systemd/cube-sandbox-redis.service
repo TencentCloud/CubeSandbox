@@ -11,6 +11,7 @@ Type=simple
 User=root
 WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStartPre=/usr/local/services/cubetoolbox/scripts/systemd/redis-prepare.sh
 ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/redis-start.sh
 ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/redis-postcheck.sh
 ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/redis-stop.sh

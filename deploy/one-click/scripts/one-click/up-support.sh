@@ -9,6 +9,7 @@ source "${SCRIPT_DIR}/support-compose-lib.sh"
 
 require_root
 require_cmd docker
+require_cmd flock
 require_cmd sed
 
 MYSQL_CONTAINER="${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
@@ -30,6 +31,8 @@ SUPPORT_TEMPLATE="${SUPPORT_DIR}/docker-compose.yaml.template"
 SUPPORT_COMPOSE_FILE="${SUPPORT_DIR}/docker-compose.yaml"
 SUPPORT_SERVICES="${ONE_CLICK_SUPPORT_SERVICES:-}"
 COMPOSE_DETACH="${ONE_CLICK_COMPOSE_DETACH:-1}"
+PREPARE_ONLY="${ONE_CLICK_PREPARE_ONLY:-0}"
+SUPPORT_COMPOSE_LOCK="${RUNTIME_DIR}/support-compose.lock"
 
 ensure_dir "${SUPPORT_DIR}"
 ensure_dir "${SQL_DIR}"
@@ -39,22 +42,36 @@ escape_sed() {
   printf '%s' "$1" | sed 's/[\/&]/\\&/g'
 }
 
-sed \
-  -e "s/__MYSQL_CONTAINER__/$(escape_sed "${MYSQL_CONTAINER}")/g" \
-  -e "s/__REDIS_CONTAINER__/$(escape_sed "${REDIS_CONTAINER}")/g" \
-  -e "s#__MYSQL_IMAGE__#$(escape_sed "${MYSQL_IMAGE}")#g" \
-  -e "s#__REDIS_IMAGE__#$(escape_sed "${REDIS_IMAGE}")#g" \
-  -e "s/__MYSQL_VOLUME__/$(escape_sed "${MYSQL_VOLUME}")/g" \
-  -e "s/__REDIS_VOLUME__/$(escape_sed "${REDIS_VOLUME}")/g" \
-  -e "s/__MYSQL_PORT__/$(escape_sed "${MYSQL_PORT}")/g" \
-  -e "s/__REDIS_PORT__/$(escape_sed "${REDIS_PORT}")/g" \
-  -e "s/__REDIS_PASSWORD__/$(escape_sed "${REDIS_PASSWORD}")/g" \
-  -e "s/__MYSQL_DB__/$(escape_sed "${MYSQL_DB}")/g" \
-  -e "s/__MYSQL_USER__/$(escape_sed "${MYSQL_USER}")/g" \
-  -e "s/__MYSQL_PASSWORD__/$(escape_sed "${MYSQL_PASSWORD}")/g" \
-  -e "s/__MYSQL_ROOT_PASSWORD__/$(escape_sed "${MYSQL_ROOT_PASSWORD}")/g" \
-  -e "s#__SQL_DIR__#$(escape_sed "${SQL_DIR}")#g" \
-  "${SUPPORT_TEMPLATE}" > "${SUPPORT_COMPOSE_FILE}"
+render_support_compose() {
+  mkdir -p "$(dirname "${SUPPORT_COMPOSE_LOCK}")"
+  (
+    flock -x 9
+    render_template_atomic \
+      "${SUPPORT_TEMPLATE}" \
+      "${SUPPORT_COMPOSE_FILE}" \
+      -e "s/__MYSQL_CONTAINER__/$(escape_sed "${MYSQL_CONTAINER}")/g" \
+      -e "s/__REDIS_CONTAINER__/$(escape_sed "${REDIS_CONTAINER}")/g" \
+      -e "s#__MYSQL_IMAGE__#$(escape_sed "${MYSQL_IMAGE}")#g" \
+      -e "s#__REDIS_IMAGE__#$(escape_sed "${REDIS_IMAGE}")#g" \
+      -e "s/__MYSQL_VOLUME__/$(escape_sed "${MYSQL_VOLUME}")/g" \
+      -e "s/__REDIS_VOLUME__/$(escape_sed "${REDIS_VOLUME}")/g" \
+      -e "s/__MYSQL_PORT__/$(escape_sed "${MYSQL_PORT}")/g" \
+      -e "s/__REDIS_PORT__/$(escape_sed "${REDIS_PORT}")/g" \
+      -e "s/__REDIS_PASSWORD__/$(escape_sed "${REDIS_PASSWORD}")/g" \
+      -e "s/__MYSQL_DB__/$(escape_sed "${MYSQL_DB}")/g" \
+      -e "s/__MYSQL_USER__/$(escape_sed "${MYSQL_USER}")/g" \
+      -e "s/__MYSQL_PASSWORD__/$(escape_sed "${MYSQL_PASSWORD}")/g" \
+      -e "s/__MYSQL_ROOT_PASSWORD__/$(escape_sed "${MYSQL_ROOT_PASSWORD}")/g" \
+      -e "s#__SQL_DIR__#$(escape_sed "${SQL_DIR}")#g"
+  ) 9>"${SUPPORT_COMPOSE_LOCK}"
+}
+
+render_support_compose
+
+if [[ "${PREPARE_ONLY}" == "1" ]]; then
+  log "support compose prepared at ${SUPPORT_COMPOSE_FILE}"
+  exit 0
+fi
 
 case "${COMPOSE_DETACH}" in
   0|1) ;;

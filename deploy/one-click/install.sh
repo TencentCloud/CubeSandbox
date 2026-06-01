@@ -109,6 +109,32 @@ check_proxy_cert_preflight() {
   :
 }
 
+one_click_runtime_file_paths() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+
+  printf '%s\n' \
+    "${INSTALL_PREFIX}/cubeproxy/global.conf" \
+    "${INSTALL_PREFIX}/cubeproxy/nginx.conf" \
+    "${INSTALL_PREFIX}/webui/nginx.generated.conf" \
+    "${INSTALL_PREFIX}/coredns/Corefile" \
+    "${INSTALL_PREFIX}/coredns/resolv.conf.upstream"
+}
+
+check_runtime_file_paths_not_directories() {
+  local path
+  while IFS= read -r path; do
+    [[ -n "${path}" ]] || continue
+    if [[ ! -d "${path}" ]]; then
+      continue
+    fi
+    if rmdir "${path}" 2>/dev/null; then
+      log "removed empty directory at runtime file path: ${path}"
+      continue
+    fi
+    die "runtime file path is a non-empty directory: ${path}; move it away and retry"
+  done < <(one_click_runtime_file_paths)
+}
+
 generate_cubemaster_config_ports() {
   [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
 
@@ -551,6 +577,7 @@ else
 fi
 
 install_systemd_units
+check_runtime_file_paths_not_directories
 start_systemd_target
 
 if [[ "${ONE_CLICK_RUN_QUICKCHECK:-1}" == "1" ]]; then

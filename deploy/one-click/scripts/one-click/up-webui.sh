@@ -26,6 +26,7 @@ WEB_UI_CONTAINER_NAME="${WEB_UI_CONTAINER_NAME:-cube-webui}"
 WEB_UI_HOST_PORT="${WEB_UI_HOST_PORT:-12088}"
 WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3000}"
 COMPOSE_DETACH="${ONE_CLICK_COMPOSE_DETACH:-1}"
+PREPARE_ONLY="${ONE_CLICK_PREPARE_ONLY:-0}"
 
 WEB_UI_DIST_DIR="${WEBUI_DIR}/dist"
 NGINX_TEMPLATE="${WEBUI_DIR}/nginx.conf"
@@ -74,18 +75,25 @@ WEB_UI_CONTAINER_NAME_ESCAPED="$(escape_sed "${WEB_UI_CONTAINER_NAME}")"
 WEB_UI_DIST_DIR_ESCAPED="$(escape_sed "${WEB_UI_DIST_DIR}")"
 NGINX_CONF_ESCAPED="$(escape_sed "${NGINX_CONF}")"
 
-sed \
+render_template_atomic \
+  "${NGINX_TEMPLATE}" \
+  "${NGINX_CONF}" \
   -e "s#__WEB_UI_HOST_PORT__#${WEB_UI_HOST_PORT_ESCAPED}#g" \
-  -e "s#__WEB_UI_UPSTREAM__#${WEB_UI_UPSTREAM_ESCAPED}#g" \
-  "${NGINX_TEMPLATE}" > "${NGINX_CONF}"
+  -e "s#__WEB_UI_UPSTREAM__#${WEB_UI_UPSTREAM_ESCAPED}#g"
 
-sed \
+render_template_atomic \
+  "${COMPOSE_TEMPLATE}" \
+  "${COMPOSE_FILE}" \
   -e "s#__WEB_UI_IMAGE__#${WEB_UI_IMAGE_ESCAPED}#g" \
   -e "s#__WEB_UI_CONTAINER_NAME__#${WEB_UI_CONTAINER_NAME_ESCAPED}#g" \
   -e "s#__WEB_UI_DIST_DIR__#${WEB_UI_DIST_DIR_ESCAPED}#g" \
   -e "s#__WEB_UI_NGINX_CONF__#${NGINX_CONF_ESCAPED}#g" \
-  -e "s#__WEB_UI_HOST_PORT__#${WEB_UI_HOST_PORT_ESCAPED}#g" \
-  "${COMPOSE_TEMPLATE}" > "${COMPOSE_FILE}"
+  -e "s#__WEB_UI_HOST_PORT__#${WEB_UI_HOST_PORT_ESCAPED}#g"
+
+if [[ "${PREPARE_ONLY}" == "1" ]]; then
+  log "webui runtime files prepared under ${WEBUI_DIR}"
+  exit 0
+fi
 
 webui_compose_run down --remove-orphans >/dev/null 2>&1 || true
 docker_rm_if_exists "${WEB_UI_CONTAINER_NAME}"

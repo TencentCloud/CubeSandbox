@@ -11,7 +11,7 @@ SUPPORT_COMPOSE_DOCKER_IMAGE="${SUPPORT_COMPOSE_DOCKER_IMAGE:-docker/compose:1.2
 
 support_compose_run() {
   ensure_dir "${SUPPORT_DIR}"
-  ensure_file "${SUPPORT_COMPOSE_FILE}"
+  ensure_bind_mount_file "${SUPPORT_COMPOSE_FILE}"
 
   if docker compose version >/dev/null 2>&1; then
     docker compose -f "${SUPPORT_COMPOSE_FILE}" "$@"

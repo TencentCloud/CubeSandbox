@@ -11,7 +11,7 @@ COMPOSE_DOCKER_IMAGE="${CUBE_PROXY_COMPOSE_DOCKER_IMAGE:-docker/compose:1.29.2}"
 
 compose_run() {
   ensure_dir "${PROXY_DIR}"
-  ensure_file "${COMPOSE_FILE}"
+  ensure_bind_mount_file "${COMPOSE_FILE}"
 
   if docker compose version >/dev/null 2>&1; then
     docker compose -f "${COMPOSE_FILE}" "$@"

@@ -45,6 +45,11 @@ check_container_ready() {
   done
 }
 
+check_bind_mount_source_file() {
+  local path="$1"
+  [[ -f "${path}" ]] || die "expected bind mount source file not ready: ${path}"
+}
+
 echo "[quickcheck] role=${ROLE}"
 echo "[quickcheck] cubemaster=${MASTER_ADDR}"
 echo "[quickcheck] network-agent-health=${NA_HEALTH_ADDR}"
@@ -113,6 +118,13 @@ else
   test -f "${TOOLBOX_ROOT}/Cubelet/config/config.toml"
   test -f "${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
   test -f "${TOOLBOX_ROOT}/cube-shim/conf/config-cube.toml"
+  check_bind_mount_source_file "${TOOLBOX_ROOT}/cubeproxy/global.conf"
+  check_bind_mount_source_file "${TOOLBOX_ROOT}/cubeproxy/nginx.conf"
+  check_bind_mount_source_file "${TOOLBOX_ROOT}/coredns/Corefile"
+  check_bind_mount_source_file "${TOOLBOX_ROOT}/coredns/resolv.conf.upstream"
+  if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then
+    check_bind_mount_source_file "${TOOLBOX_ROOT}/webui/nginx.generated.conf"
+  fi
 fi
 
 echo "[quickcheck] OK"

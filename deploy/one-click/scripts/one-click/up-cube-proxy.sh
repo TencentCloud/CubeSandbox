@@ -36,6 +36,7 @@ CUBE_PROXY_SSL_CERT="${CUBE_PROXY_SSL_CERT:-cube.app+3.pem}"
 CUBE_PROXY_SSL_KEY="${CUBE_PROXY_SSL_KEY:-cube.app+3-key.pem}"
 COMPOSE_DETACH="${ONE_CLICK_COMPOSE_DETACH:-1}"
 MKCERT_BUNDLED_BIN="${TOOLBOX_ROOT}/support/bin/mkcert"
+PREPARE_ONLY="${ONE_CLICK_PREPARE_ONLY:-0}"
 
 ensure_dir "${PROXY_DIR}"
 ensure_dir "${BUILD_CONTEXT_DIR}"
@@ -91,31 +92,39 @@ prepare_proxy_certs() {
 
 prepare_proxy_certs
 
-sed \
+render_template_atomic \
+  "${GLOBAL_TEMPLATE}" \
+  "${GLOBAL_CONF}" \
   -e "s/__CUBE_PROXY_REDIS_IP__/$(escape_sed "${CUBE_PROXY_REDIS_IP}")/g" \
   -e "s/__CUBE_PROXY_REDIS_PORT__/$(escape_sed "${CUBE_PROXY_REDIS_PORT}")/g" \
   -e "s/__CUBE_PROXY_REDIS_PASSWORD__/$(escape_sed "${CUBE_PROXY_REDIS_PASSWORD}")/g" \
-  -e "s/__CUBE_PROXY_HOST_IP__/$(escape_sed "${CUBE_SANDBOX_NODE_IP}")/g" \
-  "${GLOBAL_TEMPLATE}" > "${GLOBAL_CONF}"
+  -e "s/__CUBE_PROXY_HOST_IP__/$(escape_sed "${CUBE_SANDBOX_NODE_IP}")/g"
 
 NGINX_TEMPLATE="${PROXY_DIR}/nginx.conf.template"
 NGINX_CONF="${PROXY_DIR}/nginx.conf"
 ensure_file "${NGINX_TEMPLATE}"
-sed \
+render_template_atomic \
+  "${NGINX_TEMPLATE}" \
+  "${NGINX_CONF}" \
   -e "s/__CUBE_PROXY_HTTPS_PORT__/$(escape_sed "${CUBE_PROXY_HTTPS_PORT}")/g" \
   -e "s/__CUBE_PROXY_HTTP_PORT__/$(escape_sed "${CUBE_PROXY_HTTP_PORT}")/g" \
   -e "s/__CUBE_PROXY_SSL_CERT__/$(escape_sed "${CUBE_PROXY_SSL_CERT}")/g" \
-  -e "s/__CUBE_PROXY_SSL_KEY__/$(escape_sed "${CUBE_PROXY_SSL_KEY}")/g" \
-  "${NGINX_TEMPLATE}" > "${NGINX_CONF}"
+  -e "s/__CUBE_PROXY_SSL_KEY__/$(escape_sed "${CUBE_PROXY_SSL_KEY}")/g"
 
-sed \
+render_template_atomic \
+  "${COMPOSE_TEMPLATE}" \
+  "${COMPOSE_FILE}" \
   -e "s#__CUBE_PROXY_IMAGE__#$(escape_sed "${CUBE_PROXY_IMAGE_TAG}")#g" \
   -e "s#__CUBE_PROXY_CONTAINER_NAME__#$(escape_sed "${CUBE_PROXY_CONTAINER_NAME}")#g" \
   -e "s#__CUBE_PROXY_BUILD_CONTEXT__#$(escape_sed "${BUILD_CONTEXT_DIR}")#g" \
   -e "s#__CUBE_PROXY_CERT_DIR__#$(escape_sed "${CERT_DIR}")#g" \
   -e "s#__CUBE_PROXY_GLOBAL_CONF__#$(escape_sed "${GLOBAL_CONF}")#g" \
-  -e "s#__CUBE_PROXY_NGINX_CONF__#$(escape_sed "${NGINX_CONF}")#g" \
-  "${COMPOSE_TEMPLATE}" > "${COMPOSE_FILE}"
+  -e "s#__CUBE_PROXY_NGINX_CONF__#$(escape_sed "${NGINX_CONF}")#g"
+
+if [[ "${PREPARE_ONLY}" == "1" ]]; then
+  log "cube proxy runtime files prepared under ${PROXY_DIR}"
+  exit 0
+fi
 
 compose_run down --remove-orphans >/dev/null 2>&1 || true
 docker_rm_if_exists "${CUBE_PROXY_CONTAINER_NAME}"

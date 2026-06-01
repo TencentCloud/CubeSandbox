@@ -13,7 +13,7 @@ WEBUI_COMPOSE_DOCKER_IMAGE="${WEB_UI_COMPOSE_DOCKER_IMAGE:-docker/compose:1.29.2
 
 webui_compose_run() {
   ensure_dir "${WEBUI_DIR}"
-  ensure_file "${WEBUI_COMPOSE_FILE}"
+  ensure_bind_mount_file "${WEBUI_COMPOSE_FILE}"
 
   if docker compose version >/dev/null 2>&1; then
     docker compose -f "${WEBUI_COMPOSE_FILE}" "$@"
