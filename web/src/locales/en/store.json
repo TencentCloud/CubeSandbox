@@ -47,6 +47,10 @@
       "name": "Browser Sandbox",
       "description": "Preinstalled Chromium, ready for web automation."
     },
+    "openclaw": {
+      "name": "OpenClaw · AI Agent",
+      "description": "OpenClaw AI Agent platform with browser automation, code execution, and multi-model access."
+    },
     "cubesandbox-base": {
       "name": "Base Image",
       "description": "Minimal base image with envd only, ideal for custom builds."
@@ -58,6 +62,9 @@
     "official": "Official",
     "browser": "Browser",
     "chromium": "Chromium",
+    "agent": "AI Agent",
+    "openclaw": "OpenClaw",
+    "deepseek": "DeepSeek",
     "base": "Base",
     "envd": "envd"
   }

@@ -1,0 +1,310 @@
+{
+  "title": "Digital Assistant",
+  "subtitle": "Recruit and manage AI agent instances running on CubeSandbox",
+  "tabs": {
+    "personal": "Personal",
+    "team": "Team Shared",
+    "comingSoonBadge": "Coming soon"
+  },
+  "teamPlaceholder": {
+    "title": "Team Shared · Coming soon",
+    "description": "Sharing, hand-off and collaboration between team members is on the roadmap."
+  },
+  "templates": {
+    "title": "Assistant Templates",
+    "description": "View published assistant templates. They can be selected when creating a new assistant.",
+    "emptyTitle": "No published templates yet",
+    "emptyDescription": "Publish an assistant template from the assistant state details to see it here.",
+    "actions": {
+      "open": "Assistant Templates",
+      "refresh": "Refresh",
+      "loading": "Loading...",
+      "close": "Close",
+      "copyId": "Copy ID",
+      "useTemplate": "Create from template",
+      "rename": "Rename",
+      "recommend": "Recommend",
+      "unrecommend": "Unrecommend",
+      "delete": "Unpublish",
+      "saving": "Saving..."
+    },
+    "badges": {
+      "recommended": "Recommended"
+    },
+    "prompts": {
+      "rename": "Enter a new assistant template name",
+      "delete": "Unpublish this assistant template?"
+    },
+    "dialogs": {
+      "renameTitle": "Rename assistant template",
+      "deleteTitle": "Unpublish assistant template"
+    },
+    "fields": {
+      "sourceAgent": "Source agent",
+      "sourceSnapshot": "Source snapshot",
+      "sourceSandbox": "Source Sandbox",
+      "createdAt": "Published at"
+    }
+  },
+  "card": {
+    "status": {
+      "running": "Running",
+      "starting": "Starting",
+      "stopped": "Stopped",
+      "error": "Error"
+    },
+    "actions": {
+      "restart": "Restart",
+      "restartEnv": "Restart env",
+      "restarting": "Restarting...",
+      "pause": "Pause",
+      "pausing": "Pausing…",
+      "resume": "Resume",
+      "resuming": "Resuming...",
+      "upgrading": "Upgrading...",
+      "gatewayManage": "Gateway",
+      "loginEnv": "Open env",
+      "more": "More",
+      "delete": "Delete",
+      "deleting": "Deleting...",
+      "deleteConfirm": "Delete this digital assistant?"
+    },
+    "dialogs": {
+      "pauseTitle": "Confirm pause"
+    },
+    "prompts": {
+      "pause": "Once paused the assistant stops responding. You can Resume anytime. Pause now?"
+    },
+    "pending": {
+      "incubating": "Incubating…",
+      "incubatingHint": "Spinning up a new assistant from template, a few seconds",
+      "cloning": "Cloning…",
+      "cloningHint": "Creating an independent copy from a snapshot, a few seconds"
+    },
+    "fields": {
+      "model": "Model",
+      "version": "Version",
+      "sandboxId": "sandbox",
+      "robot": "Bot",
+      "modifyModel": "Change",
+      "upgrade": "Upgrade",
+      "robotHint": "Chat entry points to bind"
+    }
+  },
+  "state": {
+    "title": "State Management",
+    "description": "Manage assistant state with Sandbox snapshots, restore, and create copy",
+    "detailTitle": "{{name}} · State Management",
+    "cardSummary": "{{count}} snapshots ({{healthy}} healthy). Open details for the timeline, restore, copies, and templates.",
+    "confirmRollback": "Restore this digital assistant to the selected snapshot? Unsaved current state may be overwritten.",
+    "publishResult": "Published assistant template: {{templateId}}",
+    "recover": {
+      "action": "Self-heal",
+      "recovering": "Healing...",
+      "hint": "Restart the assistant; if still unhealthy, auto-roll back to the latest healthy snapshot",
+      "panelHint": "{{count}} healthy snapshot(s) available for recovery",
+      "resultRestart": "Recovered by restart.",
+      "resultRollback": "Rolled back to the latest healthy snapshot and recovered."
+    },
+    "placeholders": {
+      "snapshotName": "Snapshot name (optional)",
+      "selectSnapshot": "Select a snapshot",
+      "cloneName": "Copy name (optional)",
+      "cloneCount": "Number of copies (1-10)",
+      "templateName": "Template name (optional)"
+    },
+    "defaults": {
+      "cloneName": "{{name}} · Clone"
+    },
+    "actions": {
+      "refresh": "Refresh",
+      "loading": "Loading...",
+      "createSnapshot": "Create snapshot",
+      "snapshotting": "Creating...",
+      "rollback": "Restore",
+      "rollbacking": "Restoring…",
+      "clone": "Create copy",
+      "cloneN": "Create {{count}} copies",
+      "cloning": "Creating copy...",
+      "publish": "Publish",
+      "publishAssistantTemplate": "Publish assistant template",
+      "publishing": "Publishing...",
+      "manage": "Manage",
+      "deleteSnapshot": "Delete snapshot",
+      "deleting": "Deleting...",
+      "renameSnapshot": "Rename",
+      "markHealthy": "Mark healthy",
+      "unmarkHealthy": "Unmark healthy",
+      "processing": "Processing..."
+    },
+    "dialogs": {
+      "rollbackTitle": "Confirm restore",
+      "deleteSnapshotTitle": "Delete snapshot",
+      "renameSnapshotTitle": "Rename snapshot",
+      "renameSnapshotDescription": "Give this snapshot a recognizable name shown on the version timeline.",
+      "markHealthyTitle": "Mark snapshot healthy",
+      "unmarkHealthyTitle": "Unmark healthy",
+      "recoverTitle": "Confirm self-heal",
+      "cloneTitle": "Confirm create copy",
+      "publishTitle": "Confirm publish template"
+    },
+    "prompts": {
+      "markHealthy": "Mark this snapshot as healthy? Self-heal will prefer rolling back to healthy snapshots.",
+      "unmarkHealthy": "Remove the healthy mark from this snapshot? It will no longer be a self-heal anchor.",
+      "recover": "This will restart the assistant; if still unhealthy it auto-rolls back to the latest healthy snapshot, with a brief interruption. Continue?",
+      "clone": "This creates {{count}} independent copies from the selected snapshot (a few seconds). Each copy is fully independent. Continue?",
+      "publish": "Publish the selected snapshot as an assistant template for the team to reuse. Continue?"
+    },
+    "archives": {
+      "title": "Snapshot timeline",
+      "description": "Shows the assistant's version history as a timeline; select a snapshot to restore, copy, or publish.",
+      "empty": "No snapshots yet. Create one first.",
+      "createdAt": "Created",
+      "updatedAt": "Updated",
+      "originSandbox": "Source Sandbox",
+      "publishStatus": "Publish status",
+      "referenceStatus": "Template reference",
+      "notPublished": "Not published",
+      "referenced": "Referenced",
+      "notReferenced": "Not referenced",
+      "healthyBadge": "Healthy",
+      "publishedBadge": "Published",
+      "referencedBadge": "Referenced",
+      "basedOn": "Based on: {{name}}",
+      "creatingBadge": "Creating…",
+      "creatingDefault": "Creating…",
+      "confirmDelete": "Delete this snapshot? Snapshots referenced by assistant templates cannot be deleted."
+    },
+    "actionsPanel": {
+      "title": "Snapshot Actions"
+    },
+    "operations": {
+      "title": "Recent operations",
+      "empty": "No operation records yet",
+      "types": {
+        "snapshot": "Create snapshot",
+        "rollback": "Restore",
+        "clone": "Create copy",
+        "publish_template": "Publish template",
+        "recover": "Self-heal"
+      },
+      "status": {
+        "running": "Running",
+        "succeeded": "Succeeded",
+        "failed": "Failed"
+      }
+    },
+    "errors": {
+      "snapshotFailed": "Snapshot failed"
+    }
+  },
+  "newCard": {
+    "title": "Create Personal Assistant",
+    "subtitle": "Multiple agent engines supported",
+    "engines": {
+      "openclaw": "OpenClaw OSS",
+      "hermes": "Hermes OSS"
+    }
+  },
+  "dialog": {
+    "title": "Create Personal Assistant",
+    "sections": {
+      "info": "Assistant info",
+      "engine": "Work engine",
+      "template": "Assistant template",
+      "model": "Model",
+      "botConfig": "Bot config"
+    },
+    "namePlaceholder": "Give your new assistant a name",
+    "engineOptions": {
+      "openclaw": {
+        "title": "OpenClaw OSS",
+        "description": "Open-source OpenClaw, supports multi-task scheduling & tool integration"
+      },
+      "hermes": {
+        "title": "Hermes OSS",
+        "description": "Open-source Hermes, autonomous planning & continuous evolution",
+        "comingSoon": "Coming soon"
+      }
+    },
+    "templateHint": "Choose a published digital assistant template, or keep the system default.",
+    "templateLoading": "Loading templates...",
+    "templateSelected": "Assistant template selected: {{templateId}}",
+    "templateFields": {
+      "model": "Model",
+      "version": "Version",
+      "sourceAgent": "Source assistant",
+      "createdAt": "Published at"
+    },
+    "templateOptions": {
+      "default": "System default template"
+    },
+    "modelHint": "DeepSeek V4 Flash · Internal model",
+    "botConfigHint": "Paste Bot ID & Secret from the smart bot 'API config - long-connection' panel; when provided, AgentHub installs the WeCom plugin and binds the bot automatically",
+    "fields": {
+      "botId": "Bot ID",
+      "botIdPlaceholder": "Enter Bot ID",
+      "secret": "Secret",
+      "secretPlaceholder": "Enter Secret"
+    },
+    "actions": {
+      "cancel": "Cancel",
+      "submit": "Create",
+      "submitting": "Incubating…"
+    },
+    "errors": {
+      "nameRequired": "Please name your assistant"
+    }
+  },
+  "wecomDialog": {
+    "title": "WeCom Config",
+    "description": "View or update the WeCom Bot ID and Secret bound to this digital assistant.",
+    "fields": {
+      "botId": "Bot ID",
+      "botSecret": "Secret"
+    },
+    "placeholders": {
+      "botId": "Enter Bot ID",
+      "botSecret": "Enter Secret"
+    },
+    "actions": {
+      "cancel": "Cancel",
+      "save": "Save",
+      "saving": "Provisioning…",
+      "showSecret": "Show",
+      "hideSecret": "Hide"
+    },
+    "errors": {
+      "required": "Please provide both Bot ID and Secret"
+    }
+  },
+  "modelDialog": {
+    "title": "Change Model",
+    "label": "Model",
+    "help": "How to use your own model",
+    "warning": "Changing the default model restarts the Agent service automatically without data loss.",
+    "actions": {
+      "cancel": "Cancel",
+      "save": "Save and restart",
+      "saving": "Saving..."
+    },
+    "options": {
+      "deepseekV4Flash": "DeepSeek V4 Flash",
+      "deepseekV4Pro": "DeepSeek V4 Pro"
+    }
+  },
+  "errorDialog": {
+    "title": "Operation failed",
+    "description": "Review the error message below.",
+    "actions": {
+      "close": "Close"
+    }
+  },
+  "deleteDialog": {
+    "title": "Delete Digital Assistant",
+    "actions": {
+      "cancel": "Cancel",
+      "confirm": "Delete"
+    }
+  }
+}

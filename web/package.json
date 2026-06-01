@@ -13,6 +13,8 @@
     "api:sync": "npm run api:export && npm run api:generate"
   },
   "dependencies": {
+    "@dicebear/collection": "^9.4.2",
+    "@dicebear/core": "^9.4.2",
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@radix-ui/react-dialog": "^1.1.2",

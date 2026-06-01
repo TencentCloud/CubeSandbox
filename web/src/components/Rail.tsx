@@ -10,6 +10,7 @@ import {
   Server,
   Network,
   Activity,
+  Bot,
   KeyRound,
   Settings,
   Store,
@@ -26,6 +27,7 @@ const NAV_ITEMS = [
   { to: '/observability', icon: Activity, key: 'observability' },
   { to: '/keys', icon: KeyRound, key: 'apiKeys' },
   { to: '/store', icon: Store, key: 'store' },
+  { to: '/agenthub', icon: Bot, key: 'agentHub' },
   { to: '/settings', icon: Settings, key: 'settings' },
 ] as const;
 

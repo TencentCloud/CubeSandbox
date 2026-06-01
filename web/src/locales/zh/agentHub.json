@@ -1,0 +1,310 @@
+{
+  "title": "数字助手",
+  "subtitle": "招募并管理基于 CubeSandbox 运行的 AI Agent 实例",
+  "tabs": {
+    "personal": "个人助手",
+    "team": "团队共享",
+    "comingSoonBadge": "敬请期待"
+  },
+  "teamPlaceholder": {
+    "title": "团队共享 · 敬请期待",
+    "description": "团队成员之间共享、移交与协作的数字助手，正在路上。"
+  },
+  "templates": {
+    "title": "助手模板列表",
+    "description": "查看已发布的助手模板，可在创建新助手时选择使用。",
+    "emptyTitle": "暂无已发布模板",
+    "emptyDescription": "在助手的状态管理详情中发布助手模板后，会显示在这里。",
+    "actions": {
+      "open": "助手模板",
+      "refresh": "刷新",
+      "loading": "加载中...",
+      "close": "关闭",
+      "copyId": "复制 ID",
+      "useTemplate": "用此模板创建",
+      "rename": "重命名",
+      "recommend": "标记推荐",
+      "unrecommend": "取消推荐",
+      "delete": "下架",
+      "saving": "保存中..."
+    },
+    "badges": {
+      "recommended": "推荐"
+    },
+    "prompts": {
+      "rename": "请输入新的助手模板名称",
+      "delete": "确定要下架这个助手模板吗？"
+    },
+    "dialogs": {
+      "renameTitle": "重命名助手模板",
+      "deleteTitle": "下架助手模板"
+    },
+    "fields": {
+      "sourceAgent": "来源助手",
+      "sourceSnapshot": "来源存档",
+      "sourceSandbox": "来源 Sandbox",
+      "createdAt": "发布时间"
+    }
+  },
+  "card": {
+    "status": {
+      "running": "运行中",
+      "starting": "启动中",
+      "stopped": "已停止",
+      "error": "异常"
+    },
+    "actions": {
+      "restart": "重启",
+      "restartEnv": "重启环境",
+      "restarting": "重启中...",
+      "pause": "Pause",
+      "pausing": "暂停中…",
+      "resume": "Resume",
+      "resuming": "Resume 中...",
+      "upgrading": "升级中...",
+      "gatewayManage": "Gateway 管理",
+      "loginEnv": "登录环境",
+      "more": "更多",
+      "delete": "删除",
+      "deleting": "删除中...",
+      "deleteConfirm": "确定要删除这个数字助手吗？"
+    },
+    "dialogs": {
+      "pauseTitle": "确认暂停助手"
+    },
+    "prompts": {
+      "pause": "暂停后助手将停止响应，可随时 Resume 恢复。确定暂停？"
+    },
+    "pending": {
+      "incubating": "孵化中…",
+      "incubatingHint": "正在从模板孵化新助手，预计数秒",
+      "cloning": "分身中…",
+      "cloningHint": "正在从存档创建独立分身，预计数秒"
+    },
+    "fields": {
+      "model": "模型",
+      "version": "版本",
+      "sandboxId": "sandbox",
+      "robot": "机器人",
+      "modifyModel": "修改",
+      "upgrade": "更新升级",
+      "robotHint": "可绑定的对话入口"
+    }
+  },
+  "state": {
+    "title": "状态管理",
+    "description": "基于 Sandbox 存档、回档、创建分身能力管理助手状态",
+    "detailTitle": "{{name}} · 状态管理",
+    "cardSummary": "已有 {{count}} 个存档（{{healthy}} 个健康），进入详情查看时间线、回档、创建分身和助手模板",
+    "confirmRollback": "确定要将该数字助手回档到选中的存档吗？当前未保存的状态可能会被覆盖。",
+    "publishResult": "已发布助手模板：{{templateId}}",
+    "recover": {
+      "action": "一键自愈",
+      "recovering": "自愈中...",
+      "hint": "重启助手；若仍异常则自动回档到最近的健康存档",
+      "panelHint": "当前有 {{count}} 个健康存档可用于自愈",
+      "resultRestart": "已通过重启恢复正常。",
+      "resultRollback": "已回档到最近的健康存档并恢复正常。"
+    },
+    "placeholders": {
+      "snapshotName": "存档名称（可选）",
+      "selectSnapshot": "请选择存档",
+      "cloneName": "分身名称（可选）",
+      "cloneCount": "分身个数（1-10）",
+      "templateName": "模板名称（可选）"
+    },
+    "defaults": {
+      "cloneName": "{{name}} · 分身"
+    },
+    "actions": {
+      "refresh": "刷新",
+      "loading": "加载中...",
+      "createSnapshot": "创建存档",
+      "snapshotting": "存档中...",
+      "rollback": "回档",
+      "rollbacking": "回档中…",
+      "clone": "创建分身",
+      "cloneN": "创建 {{count}} 个分身",
+      "cloning": "创建分身中...",
+      "publish": "发布",
+      "publishAssistantTemplate": "发布助手模板",
+      "publishing": "发布中...",
+      "manage": "管理",
+      "deleteSnapshot": "删除存档",
+      "deleting": "删除中...",
+      "renameSnapshot": "重命名",
+      "markHealthy": "标记健康",
+      "unmarkHealthy": "取消健康",
+      "processing": "处理中..."
+    },
+    "dialogs": {
+      "rollbackTitle": "确认回档",
+      "deleteSnapshotTitle": "删除存档",
+      "renameSnapshotTitle": "重命名存档",
+      "renameSnapshotDescription": "为这个存档起一个便于识别的名称，用于版本时间线展示。",
+      "markHealthyTitle": "标记为健康存档",
+      "unmarkHealthyTitle": "取消健康标记",
+      "recoverTitle": "确认一键自愈",
+      "cloneTitle": "确认创建分身",
+      "publishTitle": "确认发布助手模板"
+    },
+    "prompts": {
+      "markHealthy": "将该存档标记为「健康」？崩溃自愈时会优先回滚到健康存档。",
+      "unmarkHealthy": "取消该存档的健康标记？取消后它将不再作为自愈回滚锚点。",
+      "recover": "将先尝试重启助手；若仍异常会自动回档到最近的健康存档，期间助手会短暂中断。确定继续？",
+      "clone": "将基于选中存档创建 {{count}} 个独立分身助手（约数秒）。分身与原助手相互独立。确定继续？",
+      "publish": "将当前选中存档发布为助手模板，供团队复用、批量孵化。确定继续？"
+    },
+    "archives": {
+      "title": "存档时间线",
+      "description": "按时间线展示助手的版本演化；选中存档后可回档、创建分身或发布为助手模板。",
+      "empty": "暂无存档，请先创建存档。",
+      "createdAt": "创建时间",
+      "updatedAt": "更新时间",
+      "originSandbox": "来源 Sandbox",
+      "publishStatus": "发布状态",
+      "referenceStatus": "模板引用",
+      "notPublished": "未发布",
+      "referenced": "已被引用",
+      "notReferenced": "未被引用",
+      "healthyBadge": "健康",
+      "publishedBadge": "已发布模板",
+      "referencedBadge": "模板引用中",
+      "basedOn": "基于：{{name}}",
+      "creatingBadge": "存档中…",
+      "creatingDefault": "存档中…",
+      "confirmDelete": "确定要删除这个存档吗？已被助手模板引用的存档不能删除。"
+    },
+    "actionsPanel": {
+      "title": "存档操作"
+    },
+    "operations": {
+      "title": "最近操作",
+      "empty": "暂无操作记录",
+      "types": {
+        "snapshot": "创建存档",
+        "rollback": "回档",
+        "clone": "创建分身",
+        "publish_template": "发布模板",
+        "recover": "自愈"
+      },
+      "status": {
+        "running": "进行中",
+        "succeeded": "成功",
+        "failed": "失败"
+      }
+    },
+    "errors": {
+      "snapshotFailed": "存档失败"
+    }
+  },
+  "newCard": {
+    "title": "创建个人助手",
+    "subtitle": "支持多种 Agent 引擎",
+    "engines": {
+      "openclaw": "OpenClaw 开源版",
+      "hermes": "Hermes 开源版"
+    }
+  },
+  "dialog": {
+    "title": "创建个人助手",
+    "sections": {
+      "info": "助手信息",
+      "engine": "工作引擎",
+      "template": "助手模板",
+      "model": "模型",
+      "botConfig": "填入配置"
+    },
+    "namePlaceholder": "给新助手起个名字",
+    "engineOptions": {
+      "openclaw": {
+        "title": "OpenClaw 开源版",
+        "description": "开源版 OpenClaw，支持多任务调度与工具集成"
+      },
+      "hermes": {
+        "title": "Hermes 开源版",
+        "description": "开源版 Hermes，支持自主规划与持续进化",
+        "comingSoon": "建设中"
+      }
+    },
+    "templateHint": "可选择已发布的数字助手模板；不选择时使用系统默认模板",
+    "templateLoading": "模板加载中...",
+    "templateSelected": "将使用助手模板：{{templateId}}",
+    "templateFields": {
+      "model": "模型",
+      "version": "版本",
+      "sourceAgent": "来源助手",
+      "createdAt": "发布时间"
+    },
+    "templateOptions": {
+      "default": "系统默认模板"
+    },
+    "modelHint": "DeepSeek V4 Flash · 内部模型",
+    "botConfigHint": "粘贴智能机器人「API配置-长连接」中的 Bot ID 与 Secret 信息；填写后会自动安装企业微信插件并绑定机器人",
+    "fields": {
+      "botId": "Bot ID",
+      "botIdPlaceholder": "请输入 Bot ID",
+      "secret": "Secret",
+      "secretPlaceholder": "请输入 Secret"
+    },
+    "actions": {
+      "cancel": "取消",
+      "submit": "创建",
+      "submitting": "孵化中…"
+    },
+    "errors": {
+      "nameRequired": "请填写助手名称"
+    }
+  },
+  "wecomDialog": {
+    "title": "企业微信配置",
+    "description": "查看或修改当前数字助手绑定的企业微信 Bot ID 与 Secret。",
+    "fields": {
+      "botId": "Bot ID",
+      "botSecret": "Secret"
+    },
+    "placeholders": {
+      "botId": "请输入 Bot ID",
+      "botSecret": "请输入 Secret"
+    },
+    "actions": {
+      "cancel": "取消",
+      "save": "保存",
+      "saving": "装配中…",
+      "showSecret": "显示",
+      "hideSecret": "隐藏"
+    },
+    "errors": {
+      "required": "请同时填写 Bot ID 和 Secret"
+    }
+  },
+  "modelDialog": {
+    "title": "修改模型",
+    "label": "模型",
+    "help": "如何使用自己的模型",
+    "warning": "修改默认模型将自动重启 Agent 服务（数据不会丢失），以使配置生效",
+    "actions": {
+      "cancel": "取消",
+      "save": "保存并重启",
+      "saving": "保存中..."
+    },
+    "options": {
+      "deepseekV4Flash": "DeepSeek V4 Flash",
+      "deepseekV4Pro": "DeepSeek V4 Pro"
+    }
+  },
+  "errorDialog": {
+    "title": "操作失败",
+    "description": "请查看具体错误信息。",
+    "actions": {
+      "close": "关闭"
+    }
+  },
+  "deleteDialog": {
+    "title": "删除数字助手",
+    "actions": {
+      "cancel": "取消",
+      "confirm": "删除"
+    }
+  }
+}

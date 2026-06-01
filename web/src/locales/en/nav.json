@@ -7,5 +7,6 @@
   "observability": "Observability",
   "apiKeys": "API Keys",
   "settings": "Settings",
-  "store": "Template Store"
+  "store": "Template Store",
+  "agentHub": "AgentHub"
 }

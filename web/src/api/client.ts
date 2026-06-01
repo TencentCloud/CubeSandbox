@@ -212,3 +212,197 @@ export const storeApi = {
   meta: () => api<StoreMeta>('/store/meta'),
   refresh: () => api<StoreMeta>('/store/refresh', { method: 'POST' }),
 };
+
+export interface AgentInstanceDto {
+  id: string;
+  name: string;
+  status: 'running' | 'starting' | 'stopped' | 'error';
+  engine: 'openclaw' | 'hermes';
+  env: 'linux' | 'mac';
+  model: string;
+  version: string;
+  bots: Array<'wecom'>;
+  botsAvailable: Array<'wecom'>;
+  avatar: string;
+  avatarTone: 'sky' | 'amber' | 'emerald' | 'rose' | 'violet';
+  sandboxId: string;
+  templateId: string;
+  gatewayUrl: string;
+  envUrl: string;
+  wecomConfig?: {
+    botId: string;
+    botSecret: string;
+  };
+  setup?: {
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+  };
+}
+
+export interface AgentWeComConfigDto {
+  botId: string;
+  botSecret: string;
+}
+
+export interface AgentSetupResultDto {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export interface AgentSnapshotDto {
+  snapshotID: string;
+  names: string[];
+  status?: string;
+  originSandboxID?: string;
+  publishedTemplateId?: string;
+  templateReferenced: boolean;
+  isHealthy: boolean;
+  parentSnapshotID?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AgentRollbackResponseDto {
+  sandboxID: string;
+  snapshotID: string;
+  operationID: string;
+  status: string;
+}
+
+export interface AgentRecoverResponseDto {
+  recovered: boolean;
+  method: 'restart' | 'rollback';
+  snapshotID?: string;
+}
+
+export interface AgentPublishTemplateResponseDto {
+  templateId: string;
+  snapshotId: string;
+  name?: string;
+}
+
+export interface AgentTemplateDto {
+  templateId: string;
+  name: string;
+  sourceAgentId: string;
+  sourceSnapshotId: string;
+  sourceSandboxId: string;
+  model: string;
+  version: string;
+  recommended: boolean;
+  createdAt?: string;
+}
+
+export interface AgentOperationDto {
+  operationId: string;
+  agentId: string;
+  operationType: string;
+  status: 'running' | 'succeeded' | 'failed';
+  targetId?: string;
+  errorMessage?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+// 存档改为异步：接口立即返回操作 ID，前端轮询操作流水获知完成状态。
+export interface AgentSnapshotJobDto {
+  operationId: string | null;
+  status: string;
+}
+
+export const agentHubApi = {
+  list: () => api<AgentInstanceDto[]>('/agenthub/instances'),
+  listTemplates: () => api<AgentTemplateDto[]>('/agenthub/templates'),
+  create: (body: {
+    name: string;
+    engine: 'openclaw';
+    model: string;
+    templateId?: string;
+    botId?: string;
+    botSecret?: string;
+  }) =>
+    api<AgentInstanceDto>('/agenthub/instances', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  delete: (id: string) =>
+    api<void>(`/agenthub/instances/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  restart: (id: string) =>
+    api<AgentSetupResultDto>(`/agenthub/instances/${encodeURIComponent(id)}/restart`, {
+      method: 'POST',
+    }),
+  pause: (id: string) =>
+    api<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/pause`, {
+      method: 'POST',
+    }),
+  resume: (id: string) =>
+    api<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/resume`, {
+      method: 'POST',
+    }),
+  upgrade: (id: string) =>
+    api<AgentSetupResultDto>(`/agenthub/instances/${encodeURIComponent(id)}/upgrade`, {
+      method: 'POST',
+    }),
+  updateModel: (id: string, body: { model: string }) =>
+    api<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/model`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  updateWecomConfig: (id: string, body: { botId: string; botSecret: string }) =>
+    api<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/wecom`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  getWecomConfig: (id: string) =>
+    api<AgentWeComConfigDto | null>(`/agenthub/instances/${encodeURIComponent(id)}/wecom`),
+  listOperations: (id: string) =>
+    api<AgentOperationDto[]>(`/agenthub/instances/${encodeURIComponent(id)}/operations`),
+  listSnapshots: (id: string) =>
+    api<AgentSnapshotDto[]>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots`),
+  createSnapshot: (id: string, body: { name?: string }) =>
+    api<AgentSnapshotJobDto>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  deleteSnapshot: (id: string, snapshotId: string) =>
+    api<void>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`, {
+      method: 'DELETE',
+    }),
+  updateSnapshot: (id: string, snapshotId: string, body: { name?: string; isHealthy?: boolean }) =>
+    api<void>(`/agenthub/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  recover: (id: string) =>
+    api<AgentRecoverResponseDto>(`/agenthub/instances/${encodeURIComponent(id)}/recover`, {
+      method: 'POST',
+    }),
+  rollback: (id: string, body: { snapshotId: string }) =>
+    api<AgentRollbackResponseDto>(`/agenthub/instances/${encodeURIComponent(id)}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  clone: (id: string, body: { name?: string; snapshotId?: string }) =>
+    api<AgentInstanceDto>(`/agenthub/instances/${encodeURIComponent(id)}/clone`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  publishTemplate: (id: string, body: { name?: string; snapshotId?: string }) =>
+    api<AgentPublishTemplateResponseDto>(`/agenthub/instances/${encodeURIComponent(id)}/publish-template`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateTemplate: (templateId: string, body: { name?: string; recommended?: boolean }) =>
+    api<void>(`/agenthub/templates/${encodeURIComponent(templateId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteTemplate: (templateId: string) =>
+    api<void>(`/agenthub/templates/${encodeURIComponent(templateId)}`, {
+      method: 'DELETE',
+    }),
+};
