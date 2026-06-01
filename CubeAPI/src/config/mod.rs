@@ -101,6 +101,20 @@ fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .or_else(|| std::env::var("CUBE_API_DATABASE_URL").ok())
+        .or_else(default_cube_sandbox_mysql_url)
+}
+
+fn default_cube_sandbox_mysql_url() -> Option<String> {
+    let host = std::env::var("CUBE_SANDBOX_MYSQL_HOST").ok()?;
+    let port = std::env::var("CUBE_SANDBOX_MYSQL_PORT").unwrap_or_else(|_| "3306".to_string());
+    let user = std::env::var("CUBE_SANDBOX_MYSQL_USER").ok()?;
+    let password = std::env::var("CUBE_SANDBOX_MYSQL_PASSWORD").ok()?;
+    let database = std::env::var("CUBE_SANDBOX_MYSQL_DB").ok()?;
+
+    Some(format!(
+        "mysql://{}:{}@{}:{}/{}",
+        user, password, host, port, database
+    ))
 }
 
 impl ServerConfig {
