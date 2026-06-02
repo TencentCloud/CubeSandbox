@@ -41,6 +41,46 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
   <img src="./docs/assets/readme_overhead_en_1.png" width="400" />
 </p>
 
+## 📰 News
+
+<table>
+  <tr>
+    <td align="right" valign="top" width="100">
+      <a href="./docs/changelog/v0.3.0.md">
+        <img src="https://img.shields.io/badge/v0.3.0-New!-6f42c1?style=flat-square" alt="v0.3.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>Snapshot, Clone &amp; Rollback at hundred-millisecond granularity</strong><br/>
+      CubeSandbox 0.3.0 introduces the <b>CubeCoW</b> Copy-on-Write snapshot engine, enabling event-level snapshots, instant cloning, and rollback to any saved state.
+      <a href="./docs/changelog/v0.3.0.md">Changelog →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
+      <a href="./docs/changelog/v0.2.2.md">
+        <img src="https://img.shields.io/badge/v0.2.2-2026.05.18-007bff?style=flat-square" alt="v0.2.2" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>Security hardening &amp; E2B compatibility improvements</strong><br/>
+      Patched CVE-2023-50711 and other vulnerabilities, aligned default ports with the E2B protocol, and shipped critical stability fixes.
+      <a href="./docs/changelog/v0.2.2.md">Changelog →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
+      <a href="./docs/changelog/v0.1.0.md">
+        <img src="https://img.shields.io/badge/v0.1.0-2026.04.20-28a745?style=flat-square" alt="v0.1.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>🎉 Initial open-source release</strong><br/>
+      Cube Sandbox is now open source! Millisecond boot, hardware-level isolation, E2B-compatible sandbox for AI Agents.
+      <a href="./docs/changelog/v0.1.0.md">Changelog →</a>
+    </td>
+  </tr>
+</table>
 
 ## Demos
 
@@ -138,124 +178,94 @@ For detailed metrics on startup latency and resource overhead, please refer to:
   <em>⚡ Millisecond-level startup — watch the fast-start flow, then jump into the <a href="./docs/guide/quickstart.md" target="_blank">Quick Start guide</a>.</em>
 </p>
 
+Cube Sandbox requires an **x86_64 Linux** environment with **KVM** support.
 
+<p align="center">
+  <a href="./docs/guide/quickstart.md" style="
+    display: inline-block;
+    background: #6f42c1;
+    color: white;
+    padding: 14px 36px;
+    border-radius: 8px;
+    font-size: 18px;
+    font-weight: bold;
+    text-decoration: none;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  ">
+    🚀 Quick Start Guide →
+  </a>
+</p>
 
+The guide walks you through everything in **four steps** — provisioning a server, installing Cube Sandbox, creating a sandbox template, and running your first agent code. No source build needed, up and running in minutes.
 
-Cube Sandbox requires an x86_64 Linux environment with KVM support — **WSL 2**, a **Linux physical machine**, a **cloud bare-metal server**, or an **ordinary cloud VM** (via PVM, no bare-metal needed) all work.
+<p align="center">
+  <b>Choose your deployment path:</b>
+</p>
 
-> Don't have one yet?
-> - **Windows users**: run `wsl --install` in an admin PowerShell to set up WSL 2 (requires Windows 11 22H2+, with nested virtualization enabled in BIOS / WSL).
-> - **Bare-metal / physical machine users**: grab an x86_64 Linux physical machine, or rent a bare-metal server from a cloud provider.
-> - **Ordinary cloud VM users**: no bare-metal required — install the PVM host kernel to enable KVM on any standard cloud VM. See [PVM Deployment](./docs/guide/pvm-deploy.md).
-
-Once your environment is ready, launch your first sandbox in four steps:
-
-1. **Prepare the runtime environment** (skip this step if you already have an x86_64 Linux server with KVM enabled — bare-metal or a cloud VM set up via [PVM](./docs/guide/pvm-deploy.md))
-
-Run the following on your WSL / Linux machine:
-
-```bash
-git clone https://github.com/tencentcloud/CubeSandbox.git
-# For faster access from mainland China, clone from the mirror instead:
-# git clone https://cnb.cool/CubeSandbox/CubeSandbox
-
-cd CubeSandbox/dev-env
-./prepare_image.sh   # one-off: download and initialize the runtime image
-./run_vm.sh          # boot the environment; keep this terminal open (Ctrl+a x to exit)
-```
-
-In a second terminal, log into the environment you just prepared:
-
-```bash
-cd CubeSandbox/dev-env && ./login.sh
-```
-
-> This drops you into a disposable Linux environment where all the subsequent installation happens, so your host stays clean. See [Development Environment](./docs/guide/dev-environment.md) for details.
-
-2. **Start the Cube Sandbox Service**
-
-Inside the environment you entered via `login.sh` (or directly on your server — bare-metal or cloud VM), run **one** of the following commands depending on your location:
-
-- **Global Users** (downloads from GitHub):
-
-  ```bash
-  curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh | bash
-  ```
-
-- **中国用户请执行这条命令 (Mainland China)**:
-
-  ```bash
-  curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
-  ```
-
-> See [Quick Start — China mainland mirror](./docs/guide/quickstart.md#step-2-install) for details.
-
-3. **Create a Code Interpreter Sandbox Template**
-
-After installation, create a code interpreter template from the prebuilt image:
-
-```bash
-cubemastercli tpl create-from-image \
-  --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-  --writable-layer-size 1G \
-  --expose-port 49999 \
-  --expose-port 49983 \
-  --probe 49999
-```
-
-> **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
-
-Then run the following command to monitor the build progress:
-
-```bash
-cubemastercli tpl watch --job-id <job_id>
-```
-
-**⚠️ The image is fairly large** — downloading, extracting, and building the template may take a while; please be patient.
-
-Wait for the command above to finish and the template status to reach `READY`. Note the **template ID** (`template_id`) from the output — you will need it in the next step.
-
-4. **Run Your First Agent Code**
-
-Install the Python SDK:
-
-```bash
-yum install -y python3 python3-pip
-pip install cubesandbox
-pip install e2b-code-interpreter
-```
-
-Set environment variables:
-
-```bash
-export E2B_API_URL="http://127.0.0.1:3000"
-export E2B_API_KEY="e2b_000000"
-export CUBE_TEMPLATE_ID="<your-template-id>"  # template ID obtained from Step 3
-export SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
-```
-
-Run code inside an isolated sandbox:
-
-```python
-import os
-from e2b_code_interpreter import Sandbox  # drop-in E2B SDK
-
-# Cube Sandbox transparently intercepts all requests
-with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
-    result = sandbox.run_code("print('Hello from Cube Sandbox, safely isolated!')")
-    print(result)
-```
-
-> See [Quick Start — Step 4](./docs/guide/quickstart.md#step-4-run-your-first-agent) for the full variable reference and more examples.
-
-Want to explore more? Check out the 📂 [`examples/`](./examples/) directory, covering scenarios like: code execution, Shell commands, file operations, browser automation, network policies, pause/resume, OpenClaw integration, and RL training.
+<table align="center">
+  <tr align="center">
+    <td align="center">
+      <a href="./docs/guide/pvm-deploy.md" style="
+        display: inline-block;
+        background: #28a745;
+        color: white;
+        padding: 12px 28px;
+        border-radius: 8px;
+        font-size: 15px;
+        font-weight: bold;
+        text-decoration: none;
+        white-space: nowrap;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      ">
+        🖥 PVM · Cloud VM →
+      </a>
+      <br/>
+      <sup><b>🏆 Recommended</b></sup>
+    </td>
+    <td align="center">
+      <a href="./docs/guide/bare-metal-deploy.md" style="
+        display: inline-block;
+        background: #007bff;
+        color: white;
+        padding: 12px 28px;
+        border-radius: 8px;
+        font-size: 15px;
+        font-weight: bold;
+        text-decoration: none;
+        white-space: nowrap;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      ">
+        🏗 Bare Metal →
+      </a>
+    </td>
+    <td align="center">
+      <a href="./docs/guide/dev-environment.md" style="
+        display: inline-block;
+        background: #6c757d;
+        color: white;
+        padding: 12px 28px;
+        border-radius: 8px;
+        font-size: 15px;
+        font-weight: bold;
+        text-decoration: none;
+        white-space: nowrap;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      ">
+        💻 Dev-Env →
+      </a>
+      <br/>
+      <sup>⚠️ <b>Not recommended — poor performance</b></sup>
+    </td>
+  </tr>
+</table>
 
 ### Deep Dive
 
 - 📖 [Documentation Home](./docs/index.md) - Complete guide and API reference
 - 🔧 [Template Concepts](./docs/guide/templates.md) - Image-to-Template concepts and workflows
-- 🌟 [Example Projects](./docs/guide/tutorials/examples.md) - Hands-on examples demonstrating various Cube Sandbox use cases (Browser automation, OpenClaw integration, RL training workflows, etc.)
-- 💻 [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) - No KVM access yet? Spin up a disposable OpenCloudOS 9 VM on your machine and run Cube Sandbox inside it
+- 🌟 [Example Projects](./docs/guide/tutorials/examples.md) - Hands-on examples (code execution, browser automation, OpenClaw integration, RL training, etc.)
+- 📂 [`examples/`](./examples/) - Runnable example code covering Shell commands, file operations, network policies, pause/resume, and more
+- 💻 [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) - No KVM? Spin up a disposable VM and run Cube Sandbox inside it
 - ☁️ [PVM Deployment](./docs/guide/pvm-deploy.md) - Deploy on ordinary cloud VMs without bare-metal or nested virtualization
 
 ## Architecture
