@@ -31,7 +31,7 @@ CubeSandbox binaries are built on **Ubuntu 22.04 (glibc 2.35)** — your system 
 > ℹ️ **Why XFS?** CubeSandbox relies on XFS reflink for Copy-on-Write snapshots. Ubuntu / Debian / WSL default to ext4 — you must mount an XFS filesystem at `/data/cubelet`. See [FAQ #311](https://github.com/TencentCloud/CubeSandbox/issues/311) for step-by-step instructions.
 
 ::: warning 💾 Disk Space
-**`/data/cubelet` must have at least 300 GB** of available disk space for sandbox images, templates, and writable layers. Insufficient disk space will cause template creation and sandbox startup failures.
+**`/data/cubelet` must have at least 50 GB** of available disk space for the sandbox image and writable layers. If you plan to build multiple templates or custom images, **200 GB or more is recommended**.
 :::
 
 ## Step 1: Provision a Cloud Server & Install the PVM Kernel
@@ -44,8 +44,8 @@ Provision an **x86_64** cloud server — no special requirements.
 
 | Config | CPU | RAM | Disk |
 | --- | --- | --- | --- |
-| Functional experience | ≥ 4 cores | ≥ 8 GB | ≥ 300 GB |
-| Recommended | 32 cores | 64 GB | ≥ 300 GB |
+| Functional experience | ≥ 4 cores | ≥ 8 GB | ≥ 50 GB |
+| Recommended | 32 cores | 64 GB | ≥ 200 GB |
 
 ::: warning Run all commands as root
 Every command in this guide must be executed as **root**. Switch to root first:
