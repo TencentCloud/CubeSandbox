@@ -46,7 +46,17 @@ const MODEL_OPTIONS = [
   { value: 'DeepSeek V4 Pro', labelKey: 'modelDialog.options.deepseekV4Pro' },
 ] as const;
 
-function buildCubeProxyUrl(agent: Agent, port: number, sourceUrl?: string): string | undefined {
+function gatewayTokenFromUrl(sourceUrl?: string): string | undefined {
+  if (!sourceUrl || typeof window === 'undefined') return undefined;
+  try {
+    const source = new URL(sourceUrl, window.location.href);
+    return new URLSearchParams(source.hash.replace(/^#/, '')).get('token') ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildCubeProxyUrl(agent: Agent, port: number, sourceUrl?: string, options?: { gateway?: boolean }): string | undefined {
   if (!agent.sandboxId || typeof window === 'undefined') return sourceUrl;
 
   let source: URL | undefined;
@@ -66,9 +76,12 @@ function buildCubeProxyUrl(agent: Agent, port: number, sourceUrl?: string): stri
   );
 
   source?.searchParams.forEach((value, key) => target.searchParams.set(key, value));
-  const hashParams = new URLSearchParams(source?.hash.replace(/^#/, '') ?? '');
-  const token = hashParams.get('token');
-  if (token) target.searchParams.set('token', token);
+  if (options?.gateway) {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.hostname}/sandbox/${encodeURIComponent(agent.sandboxId)}/${port}/`;
+    const token = gatewayTokenFromUrl(sourceUrl);
+    target.hash = `ws=${wsUrl}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+  }
 
   return target.toString();
 }
@@ -83,6 +96,7 @@ export default function AgentHubPage() {
   const [wecomAgent, setWecomAgent] = useState<Agent | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [previewNoticeDismissed, setPreviewNoticeDismissed] = useState(false);
 
   const userAgents = useAgentStore((s) => s.userAgents);
   const setAgents = useAgentStore((s) => s.setAgents);
@@ -125,6 +139,30 @@ export default function AgentHubPage() {
           {t('templates.actions.open')}
         </Button>
       </header>
+
+      {!previewNoticeDismissed && (
+        <div className="rounded-2xl border border-amber-200/70 bg-amber-50 px-4 py-3 text-sm text-amber-900 shadow-sm dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-amber-200/80 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-900 dark:bg-amber-400/20 dark:text-amber-100">
+                  {t('preview.badge')}
+                </span>
+                <span className="font-medium">{t('preview.title')}</span>
+              </div>
+              <p className="mt-1 leading-5">{t('preview.description')}</p>
+            </div>
+            <button
+              type="button"
+              className="rounded-full p-1 text-amber-800/70 transition hover:bg-amber-200/60 hover:text-amber-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-100/80 dark:hover:bg-amber-400/20 dark:hover:text-amber-50"
+              aria-label={t('preview.close')}
+              onClick={() => setPreviewNoticeDismissed(true)}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center gap-2 rounded-full bg-muted/40 p-1 ring-1 ring-border/60 w-fit">
         <TabButton
@@ -581,6 +619,7 @@ function AgentCard({
   const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
   const [healthyTarget, setHealthyTarget] = useState<AgentSnapshotDto | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [gatewayReady, setGatewayReady] = useState(false);
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const addAgent = useAgentStore((s) => s.addAgent);
   const removeAgent = useAgentStore((s) => s.removeAgent);
@@ -604,6 +643,38 @@ function AgentCard({
     snapshots.map((s) => [s.snapshotID, s.names[0] || s.snapshotID] as const)
   );
   const healthySnapshotCount = snapshots.filter((s) => s.isHealthy).length;
+
+  useEffect(() => {
+    if (!isRunning || !agent.sandboxId) {
+      setGatewayReady(false);
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | undefined;
+    const check = async () => {
+      try {
+        const health = await agentHubApi.getGatewayHealth(agent.id);
+        if (cancelled) return;
+        setGatewayReady(health.ready);
+        if (!health.ready) {
+          timer = window.setTimeout(check, 3000);
+        }
+      } catch {
+        if (!cancelled) {
+          setGatewayReady(false);
+          timer = window.setTimeout(check, 3000);
+        }
+      }
+    };
+
+    setGatewayReady(false);
+    void check();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [agent.id, agent.sandboxId, isRunning]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1490,9 +1561,9 @@ function AgentCard({
         <Button
           size="sm"
           className="gap-1.5"
-          disabled={!isRunning || !agent.sandboxId}
+          disabled={!isRunning || !agent.sandboxId || !gatewayReady}
           onClick={() => {
-            const url = buildCubeProxyUrl(agent, OPENCLAW_GATEWAY_PORT, agent.gatewayUrl);
+            const url = buildCubeProxyUrl(agent, OPENCLAW_GATEWAY_PORT, agent.gatewayUrl, { gateway: true });
             if (url) window.open(url, '_blank', 'noopener,noreferrer');
           }}
           title={!isRunning ? t('card.status.stopped') : undefined}

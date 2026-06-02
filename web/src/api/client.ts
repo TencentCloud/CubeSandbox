@@ -245,6 +245,10 @@ export interface AgentWeComConfigDto {
   botSecret: string;
 }
 
+export interface AgentGatewayHealthDto {
+  ready: boolean;
+}
+
 export interface AgentSetupResultDto {
   exitCode: number;
   stdout: string;
@@ -359,6 +363,8 @@ export const agentHubApi = {
     }),
   getWecomConfig: (id: string) =>
     api<AgentWeComConfigDto | null>(`/agenthub/instances/${encodeURIComponent(id)}/wecom`),
+  getGatewayHealth: (id: string) =>
+    api<AgentGatewayHealthDto>(`/agenthub/instances/${encodeURIComponent(id)}/gateway/health`),
   listOperations: (id: string) =>
     api<AgentOperationDto[]>(`/agenthub/instances/${encodeURIComponent(id)}/operations`),
   listSnapshots: (id: string) =>

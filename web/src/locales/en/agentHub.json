@@ -1,6 +1,12 @@
 {
   "title": "Digital Assistant",
   "subtitle": "Recruit and manage AI agent instances running on CubeSandbox",
+  "preview": {
+    "badge": "Preview",
+    "title": "Digital Assistant Preview",
+    "description": "This feature is intended for demos and early validation. APIs, deployment options, and UX may change. The default template is built from a large all-in-one OpenClaw image; initial template creation takes about 15 minutes. If you keep only 1 template, 2 snapshots, and a few running instances, reserve about 12~15 GB of free disk space.",
+    "close": "Close preview notice"
+  },
   "tabs": {
     "personal": "Personal",
     "team": "Team Shared",

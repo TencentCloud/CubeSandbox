@@ -2,6 +2,10 @@
 
 The Digital Assistant (AgentHub) uses Cube Sandbox to create and manage OpenClaw assistants. It supports assistant instances, snapshots, rollback, clone creation, assistant template publishing, and operation history.
 
+::: warning Preview
+The Digital Assistant is a preview feature intended for demos and early validation. APIs, database schema, deployment options, and UX details may still change in later releases. Validate it in a non-production environment before production use.
+:::
+
 ## Digital Assistant Template
 
 AgentHub creates assistants from a CubeSandbox template. By default, CubeAPI uses the prebuilt Digital Assistant template:
@@ -20,6 +24,17 @@ A custom template must be built from the **same Digital Assistant / OpenClaw ima
 
 - OpenClaw Gateway UI: `18789`
 - assistant environment UI: `8080`
+
+The default template is built from an all-in-one OpenClaw image, which is relatively large. Initial template creation or rebuilds need enough space for image download, extraction, snapshotting, and distribution. In typical demo environments, creating the template takes about 15 minutes; actual time depends on image cache state, disk performance, and node count. Before building the template, make sure the host and Cubelet data disk have enough free space to avoid failures caused by running out of disk.
+
+Use the following rough estimate for disk space planning:
+
+- One template is about `3 GB` (rootfs `1G` + memory `2G`).
+- One snapshot is about `2~3 GB` (memory is always `2G` plus the rootfs delta).
+- One running instance mainly uses reflink deltas, usually only tens of MB.
+- Docker infrastructure is about `3.2 GB` as fixed overhead.
+
+If you keep only `1` template, `2` snapshots, and a few running instances, reserve about `12~15 GB` of free disk space.
 
 Build or re-create the template with `cubemastercli tpl create-from-image` using the same image:
 

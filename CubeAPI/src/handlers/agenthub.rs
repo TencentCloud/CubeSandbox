@@ -141,6 +141,12 @@ pub struct AgentRecoverResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentGatewayHealthResponse {
+    pub ready: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublishAgentTemplateResponse {
     pub template_id: String,
     pub snapshot_id: String,
@@ -447,6 +453,33 @@ pub async fn list_agent_instances(State(state): State<AppState>) -> AppResult<im
         .map(|record| record.into_response())
         .collect::<Vec<_>>();
     Ok((StatusCode::OK, Json(instances)))
+}
+
+pub async fn get_agent_gateway_health(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    let record = read_agenthub_instance(&state, &agent_id).await?;
+    let proxy_base = std::env::var("AGENTHUB_SANDBOX_PROXY_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1".to_string());
+    let url = format!(
+        "{}/sandbox/{}/{}/",
+        proxy_base.trim_end_matches('/'),
+        record.sandbox_id,
+        OPENCLAW_UI_PORT
+    );
+    let ready = match state
+        .http_client
+        .get(url)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    };
+
+    Ok((StatusCode::OK, Json(AgentGatewayHealthResponse { ready })))
 }
 
 pub async fn list_agent_templates(State(state): State<AppState>) -> AppResult<impl IntoResponse> {
@@ -912,6 +945,11 @@ pub async fn clone_agent_instance(
         gateway_token.clone(),
     );
     let env_url = sandbox_url(LOGIN_ENV_PORT, &sandbox_id, &domain);
+    let bots_available = ["wecom"]
+        .into_iter()
+        .filter(|b| !record.bots.iter().any(|v| v == b))
+        .map(ToString::to_string)
+        .collect();
     let response = AgentInstanceResponse {
         id: format!("agent-{}", sandbox_id),
         name: clone_name,
@@ -921,7 +959,7 @@ pub async fn clone_agent_instance(
         model: record.model.clone(),
         version: record.version.clone(),
         bots: record.bots.clone(),
-        bots_available: Vec::new(),
+        bots_available,
         avatar: record.avatar.clone(),
         avatar_tone: record.avatar_tone.clone(),
         sandbox_id: sandbox_id.clone(),

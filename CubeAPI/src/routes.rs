@@ -268,6 +268,10 @@ fn build_agenthub_routes(state: &AppState, auth_configured: bool) -> Router<AppS
             get(agenthub::list_agent_operations),
         )
         .route(
+            "/agenthub/instances/:agentID/gateway/health",
+            get(agenthub::get_agent_gateway_health),
+        )
+        .route(
             "/agenthub/instances/:agentID/pause",
             post(agenthub::pause_agent_openclaw),
         )

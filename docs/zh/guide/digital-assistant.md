@@ -2,6 +2,10 @@
 
 数字助手（AgentHub）基于 Cube Sandbox 创建和管理 OpenClaw 助手，支持助手实例、存档、回档、创建分身、发布助手模板和操作流水。
 
+::: warning 预览版
+当前数字助手能力是 Preview 版本，主要用于演示和早期试用。API、数据库 schema、部署参数和交互细节仍可能在后续版本中调整，生产环境使用前建议先在测试环境验证。
+:::
+
 ## 数字助手模板
 
 AgentHub 会基于 CubeSandbox 模板创建数字助手。默认情况下，CubeAPI 使用预置的数字助手模板：
@@ -20,6 +24,17 @@ AGENTHUB_DS_OPENCLAW_TEMPLATE=<your-digital-assistant-template-id>
 
 - OpenClaw Gateway UI：`18789`
 - 助手环境 UI：`8080`
+
+默认模板基于 all-in-one OpenClaw 镜像制作，镜像体积较大。首次制作或重建模板时，需要预留充足的下载、解压、快照和分发空间；在常见演示环境中，模板制作时间约为 15 分钟，具体耗时取决于镜像缓存、磁盘性能和节点数量。部署前建议确认宿主机和 Cubelet 数据盘有足够可用空间，避免模板构建中途因为磁盘不足失败。
+
+磁盘空间可以按以下方式粗略估算：
+
+- 单模板约 `3 GB`（rootfs `1G` + memory `2G`）。
+- 单 snapshot 约 `2~3 GB`（memory 必定 `2G` + rootfs 增量）。
+- 单运行实例主要是 reflink 增量，通常约几十 MB。
+- Docker 基础设施约 `3.2 GB`，属于固定开销。
+
+因此，如果只保留 `1` 个模板、`2` 个 snapshot 和几个运行实例，建议至少预留约 `12~15 GB` 可用磁盘空间。
 
 可以使用 `cubemastercli tpl create-from-image` 基于相同镜像构建或重建模板：
 

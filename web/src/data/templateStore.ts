@@ -68,7 +68,7 @@ export const STORE_TEMPLATES: StoreTemplate[] = [
     tags: ['agent', 'openclaw', 'browser', 'deepseek'],
     category: 'ai',
     size_mb: 6350,
-    expose_ports: [49983, 18789],
+    expose_ports: [49983, 18789, 8080],
     probe_port: 49983,
     probe_path: '/health',
     writable_layer_size: '4G',

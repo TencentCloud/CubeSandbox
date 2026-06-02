@@ -1,6 +1,12 @@
 {
   "title": "数字助手",
   "subtitle": "招募并管理基于 CubeSandbox 运行的 AI Agent 实例",
+  "preview": {
+    "badge": "Preview",
+    "title": "数字助手预览版",
+    "description": "当前功能主要用于演示和早期试用，API、部署配置和交互细节后续可能调整。默认模板基于 all-in-one OpenClaw 镜像制作，镜像较大，首次制作模板约需 15 分钟；如果只保留 1 个模板、2 个 snapshot 和几个运行实例，建议预留约 12~15 GB 可用磁盘空间。",
+    "close": "关闭预览版提示"
+  },
   "tabs": {
     "personal": "个人助手",
     "team": "团队共享",
