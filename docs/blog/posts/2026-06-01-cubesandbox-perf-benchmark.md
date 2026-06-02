@@ -23,6 +23,7 @@ CubeSandbox is designed for AI Agent code execution, where fast cold-start and h
 
 | Item | Detail |
 |------|--------|
+| Machine | Tencent Cloud BMI5 Bare Metal Server |
 | OS | OpenCloudOS (TencentOS Server 4) kernel 6.6.119 x86_64 |
 | CPU | Intel(R) Xeon(R) Platinum 8255C @ 2.50GHz |
 | CPU config | 2 Socket × 24 Core × 2 Thread = **96 logical cores** |
@@ -154,14 +155,14 @@ Questions or results to share? Join the conversation on [GitHub Discussions](htt
 
 ## Appendix: Benchmark Scripts
 
-All tests in this post were run with the following open-source scripts, available under [`CubeAPI/examples/snapshot-rollback-clone/`](https://github.com/TencentCloud/CubeSandbox/tree/master/CubeAPI/examples/snapshot-rollback-clone):
+All tests in this post were run with the following open-source scripts, available under [`examples/snapshot-rollback-clone/`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/snapshot-rollback-clone):
 
 | Script | Section |
 |--------|---------|
-| [`bench_snapshot_dirty.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeAPI/examples/snapshot-rollback-clone/bench_snapshot_dirty.py) | 4.2 Snapshot creation vs dirty-page size |
-| [`bench_snapshot_concurrency.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeAPI/examples/snapshot-rollback-clone/bench_snapshot_concurrency.py) | 4.1 Snapshot creation vs concurrency |
-| [`bench_create_concurrency.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeAPI/examples/snapshot-rollback-clone/bench_create_concurrency.py) | 4.3 Create sandbox from snapshot |
-| [`bench_rollback_concurrency.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeAPI/examples/snapshot-rollback-clone/bench_rollback_concurrency.py) | 4.4 Rollback |
-| [`bench_clone_concurrency.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeAPI/examples/snapshot-rollback-clone/bench_clone_concurrency.py) | 4.5 Clone |
-| [`rollback_demo.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeAPI/examples/snapshot-rollback-clone/rollback_demo.py) | Functional verification |
-| [`clone_demo.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeAPI/examples/snapshot-rollback-clone/clone_demo.py) | Functional verification |
+| [`bench_snapshot_dirty.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/bench_snapshot_dirty.py) | 4.2 Snapshot creation vs dirty-page size |
+| [`bench_snapshot_concurrency.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/bench_snapshot_concurrency.py) | 4.1 Snapshot creation vs concurrency |
+| [`bench_create_concurrency.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/bench_create_concurrency.py) | 4.3 Create sandbox from snapshot |
+| [`bench_rollback_concurrency.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/bench_rollback_concurrency.py) | 4.4 Rollback |
+| [`bench_clone_concurrency.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/bench_clone_concurrency.py) | 4.5 Clone |
+| [`rollback_demo.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/rollback_demo.py) | Functional verification |
+| [`clone_demo.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/clone_demo.py) | Functional verification |

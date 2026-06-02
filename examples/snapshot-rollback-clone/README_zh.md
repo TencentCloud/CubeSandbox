@@ -70,6 +70,6 @@ fresh = Sandbox.create(template=snap.snapshot_id)
 
 ## 相关文档
 
-- [教程：快照、回滚与克隆](../../../docs/zh/guide/snapshot-rollback-clone.md)
-- SDK 源码：[`sdk/python/cubesandbox`](../../../sdk/python/cubesandbox)
-- 其他示例：[`examples/code-sandbox-quickstart`](../../../examples/code-sandbox-quickstart) 演示 E2B 兼容的基础用法
+- [教程：快照、回滚与克隆](../../docs/zh/guide/snapshot-rollback-clone.md)
+- SDK 源码：[`sdk/python/cubesandbox`](../../sdk/python/cubesandbox)
+- 其他示例：[`examples/code-sandbox-quickstart`](../code-sandbox-quickstart) 演示 E2B 兼容的基础用法

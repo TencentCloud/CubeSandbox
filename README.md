@@ -169,32 +169,14 @@ For detailed metrics on startup latency and resource overhead, please refer to:
 ## Quick Start
 
 <p align="center">
-  <a href="./docs/guide/quickstart.md">
-    <img src="docs/assets/fast-start.gif" alt="Cube Sandbox fast start walkthrough" width="720" />
-  </a>
+  <img src="docs/assets/fast-start.gif" alt="Cube Sandbox fast start walkthrough" width="720" />
 </p>
 
 <p align="center">
-  <em>⚡ Millisecond-level startup — watch the fast-start flow, then jump into the <a href="./docs/guide/quickstart.md" target="_blank">Quick Start guide</a>.</em>
+  <em>⚡ Millisecond-level startup — watch the fast-start flow above.</em>
 </p>
 
 Cube Sandbox requires an **x86_64 Linux** environment with **KVM** support.
-
-<p align="center">
-  <a href="./docs/guide/quickstart.md" style="
-    display: inline-block;
-    background: #6f42c1;
-    color: white;
-    padding: 14px 36px;
-    border-radius: 8px;
-    font-size: 18px;
-    font-weight: bold;
-    text-decoration: none;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-  ">
-    🚀 Quick Start Guide →
-  </a>
-</p>
 
 The guide walks you through everything in **four steps** — provisioning a server, installing Cube Sandbox, creating a sandbox template, and running your first agent code. No source build needed, up and running in minutes.
 

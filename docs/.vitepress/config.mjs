@@ -120,7 +120,8 @@ export default withMermaid(defineConfig({
               text: 'Core Concepts',
               items: [
                 { text: 'Templates Overview', link: '/guide/templates' },
-                { text: 'Digital Assistant', link: '/guide/digital-assistant' }
+                { text: 'Digital Assistant', link: '/guide/digital-assistant' },
+                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' }
               ]
             },
             {
@@ -215,7 +216,8 @@ export default withMermaid(defineConfig({
               text: '核心概念',
               items: [
                 { text: '模板概览', link: '/zh/guide/templates' },
-                { text: '数字助手', link: '/zh/guide/digital-assistant' }
+                { text: '数字助手', link: '/zh/guide/digital-assistant' },
+                { text: '性能测试', link: '/zh/guide/performance-benchmark' }
               ]
             },
             {

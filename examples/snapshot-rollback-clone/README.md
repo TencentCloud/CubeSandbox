@@ -70,6 +70,6 @@ fresh = Sandbox.create(template=snap.snapshot_id)
 
 ## See also
 
-- [Guide: Snapshot, Rollback & Clone](../../../docs/guide/snapshot-rollback-clone.md)
-- SDK source: [`sdk/python/cubesandbox`](../../../sdk/python/cubesandbox)
-- Other examples: [`examples/code-sandbox-quickstart`](../../../examples/code-sandbox-quickstart) for the basic E2B-compatible flow
+- [Guide: Snapshot, Rollback & Clone](../../docs/guide/snapshot-rollback-clone.md)
+- SDK source: [`sdk/python/cubesandbox`](../../sdk/python/cubesandbox)
+- Other examples: [`examples/code-sandbox-quickstart`](../code-sandbox-quickstart) for the basic E2B-compatible flow

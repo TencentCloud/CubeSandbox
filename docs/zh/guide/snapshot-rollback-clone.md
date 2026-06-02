@@ -146,5 +146,5 @@ with Sandbox.create(template=new_snap.snapshot_id) as forked:
 
 ## 参考
 
-- 示例代码：[`CubeAPI/examples/snapshot-rollback-clone/`](https://github.com/TencentCloud/CubeSandbox/tree/master/CubeAPI/examples/snapshot-rollback-clone)
+- 示例代码：[`examples/snapshot-rollback-clone/`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/snapshot-rollback-clone)
 - SDK 源码：[`sdk/python/`](https://github.com/TencentCloud/CubeSandbox/tree/master/sdk/python)
