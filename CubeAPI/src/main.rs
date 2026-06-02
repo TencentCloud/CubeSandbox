@@ -116,6 +116,39 @@ struct Cli {
     #[arg(long, value_name = "DOMAIN")]
     sandbox_domain: Option<String>,
 
+    /// Upstream OCI registry URL used for `e2b template build` image push
+    /// (default: unset). When unset, /v2/* returns 503 and dockerfile-based
+    /// requests fail with 501.
+    ///
+    /// Overrides the CUBE_API_REGISTRY_UPSTREAM environment variable.
+    #[arg(long, value_name = "URL")]
+    registry_upstream: Option<String>,
+
+    /// Public host advertised to E2B clients for docker push (no scheme).
+    /// Default: the request Host header at template-create time.
+    #[arg(long, value_name = "HOST")]
+    registry_public_host: Option<String>,
+
+    /// Repo prefix applied to pushed build images (default: "e2b").
+    #[arg(long, value_name = "PREFIX")]
+    registry_repo_prefix: Option<String>,
+
+    /// Internal registry host CubeMaster nodes pull from (e.g.
+    /// "10.0.0.1:5000"). Defaults to upstream registry host:port.
+    #[arg(long, value_name = "HOST")]
+    registry_pull_host: Option<String>,
+
+    /// Shared password returned to E2B clients as registry.password.
+    #[arg(long, value_name = "TOKEN")]
+    registry_token: Option<String>,
+
+    /// Default `writable_layer_size` to send to CubeMaster when the client
+    /// (e.g. E2B V3 SDK) does not provide one. Default: "1G".
+    ///
+    /// Overrides CUBE_API_DEFAULT_WRITABLE_LAYER_SIZE.
+    #[arg(long, value_name = "SIZE")]
+    default_writable_layer_size: Option<String>,
+
     /// Export the current OpenAPI spec to a YAML file and exit.
     #[arg(long, value_name = "PATH")]
     export_openapi: Option<String>,
@@ -167,6 +200,24 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(v) = cli.sandbox_domain {
         cfg.sandbox_domain = v;
+    }
+    if let Some(v) = cli.registry_upstream {
+        cfg.registry_upstream = Some(v);
+    }
+    if let Some(v) = cli.registry_public_host {
+        cfg.registry_public_host = Some(v);
+    }
+    if let Some(v) = cli.registry_repo_prefix {
+        cfg.registry_repo_prefix = v;
+    }
+    if let Some(v) = cli.registry_pull_host {
+        cfg.registry_pull_host = Some(v);
+    }
+    if let Some(v) = cli.registry_token {
+        cfg.registry_token = Some(v);
+    }
+    if let Some(v) = cli.default_writable_layer_size {
+        cfg.default_writable_layer_size = v;
     }
 
     // ── Tracing (stdout) ───────────────────────────────────────────────────

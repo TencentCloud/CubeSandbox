@@ -224,3 +224,9 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 | `status: FAILED`（BUILDING 阶段） | 构建错误（磁盘满、Dockerfile 问题等） | 执行 `tpl status --job-id <id> --json` 查看 `last_error` 字段 |
 | `distribution: 0/N ready`（状态已 READY） | artifact 分发仍在进行（短暂正常） | 等待后重新执行 `tpl info`；若长时间未恢复检查目标节点的 Cubelet 日志 |
 | 沙箱启动后就绪探针一直失败 | 容器内服务未在预期端口/路径监听，或服务尚未完全就绪时 HTTP server 已提前启动 | 确认 HTTP server 在应用完全就绪后再启动；检查 `--probe-path` 是否正确 |
+
+---
+
+## 延伸阅读
+
+上述所有 `--probe` / `--probe-path` 参数面向的是 `cubemastercli` 路径。如果你使用 [e2b](https://e2b.dev/) Python / JS SDK 制作模板（`Template().set_start_cmd(..., wait_for_url(...))`），**不需要手写探针参数** —— CubeAPI 会从 `wait_for_url(...)` 中自动解析出 `(port, path)` 并生成同样的 HttpGet 探针。详见主线教程：[使用 e2b SDK 创建模板](./template-from-e2b-sdk.md)。

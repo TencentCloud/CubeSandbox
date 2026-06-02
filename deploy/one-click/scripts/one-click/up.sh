@@ -85,7 +85,7 @@ start_with_pidfile \
 
 start_with_pidfile \
   "cube-api" \
-  "export LOG_DIR=\"${CUBE_API_LOG_DIR}\" CUBE_API_BIND=\"${CUBE_API_BIND:-0.0.0.0:3000}\" CUBE_API_SANDBOX_DOMAIN=\"${CUBE_API_SANDBOX_DOMAIN:-cube.app}\"; ${CUBE_API_OPTIONAL_EXPORTS}\"${CUBE_API_BIN}\""
+  "export LOG_DIR=\"${CUBE_API_LOG_DIR}\" CUBE_API_BIND=\"${CUBE_API_BIND:-0.0.0.0:3000}\" CUBE_API_SANDBOX_DOMAIN=\"${CUBE_API_SANDBOX_DOMAIN:-cube.app}\"; ${CUBE_API_OPTIONAL_EXPORTS}\"${CUBE_API_BIN}\" --registry-upstream http://127.0.0.1:5000 --registry-public-host cube.app --registry-pull-host  127.0.0.1:5000 --registry-repo-prefix e2b"
 
 start_with_pidfile \
   "cubelet" \

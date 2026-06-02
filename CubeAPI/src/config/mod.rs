@@ -64,6 +64,59 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+
+    /// E2B-compatible OCI registry upstream URL. When set, /v2/* requests are
+    /// reverse-proxied to this address so that `e2b template build` (which uses
+    /// `docker push`) can upload images that CubeMaster will later consume.
+    ///
+    /// Recommended deployment: run `distribution/distribution` (CNCF Registry)
+    /// as a sidecar listening on 127.0.0.1:5000 and set
+    /// CUBE_API_REGISTRY_UPSTREAM=http://127.0.0.1:5000.
+    ///
+    /// When unset, /v2/* returns 503 and `dockerfile`-based template requests
+    /// are rejected with 501.
+    #[serde(default)]
+    pub registry_upstream: Option<String>,
+
+    /// Public host (no scheme) advertised to E2B clients as the docker-push
+    /// target, e.g. "cube.example.com". Defaults to the Host header of the
+    /// originating /templates request when unset.
+    #[serde(default)]
+    pub registry_public_host: Option<String>,
+
+    /// Repository namespace prefix for uploaded build images. The full image
+    /// reference returned to CubeMaster will be:
+    ///   <registry_pull_host>/<repo_prefix>/<templateID>:<buildID>
+    /// Default: "e2b".
+    #[serde(default = "default_registry_repo_prefix")]
+    pub registry_repo_prefix: String,
+
+    /// Internal registry host CubeMaster nodes should pull from (e.g.
+    /// "10.0.0.1:5000"). Defaults to `registry_upstream` host:port when unset.
+    #[serde(default)]
+    pub registry_pull_host: Option<String>,
+
+    /// Optional shared secret printed back as `registry.password` in
+    /// POST /templates responses. Empty → "_anon".
+    #[serde(default)]
+    pub registry_token: Option<String>,
+
+    /// Default `writable_layer_size` to send to CubeMaster when the client
+    /// (e.g. the E2B Python SDK) does not specify one. CubeMaster validates
+    /// this field as required, so a non-empty default is needed for the V3
+    /// flow to work out of the box.
+    ///
+    /// Env var: CUBE_API_DEFAULT_WRITABLE_LAYER_SIZE  |  Default: "1G".
+    #[serde(default = "default_writable_layer_size")]
+    pub default_writable_layer_size: String,
+}
+
+fn default_registry_repo_prefix() -> String {
+    "e2b".to_string()
+}
+
+fn default_writable_layer_size() -> String {
+    std::env::var("CUBE_API_DEFAULT_WRITABLE_LAYER_SIZE").unwrap_or_else(|_| "1G".to_string())
 }
 
 fn default_bind() -> String {
@@ -142,6 +195,12 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
+            registry_upstream: None,
+            registry_public_host: None,
+            registry_repo_prefix: default_registry_repo_prefix(),
+            registry_pull_host: None,
+            registry_token: None,
+            default_writable_layer_size: default_writable_layer_size(),
         }
     }
 }

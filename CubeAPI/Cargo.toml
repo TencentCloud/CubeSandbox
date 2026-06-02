@@ -54,7 +54,7 @@ config = "0.13"
 dotenvy = "0.15"
 
 # ── UUID ──────────────────────────────────────────────────────────────────
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # ── High-concurrency in-memory state ──────────────────────────────────────
 # Lock-free concurrent HashMap: O(1) reads without global lock

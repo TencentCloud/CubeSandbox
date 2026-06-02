@@ -466,8 +466,28 @@ pub struct TemplateDetail {
 }
 
 /// Body for POST /templates (create from image).
-#[derive(Debug, Deserialize, Validate, ToSchema)]
+///
+/// Two mutually exclusive modes are supported on the same endpoint, matching
+/// both the **CubeSandbox-native** and **E2B-standard** template build flows:
+///
+/// 1. CubeSandbox-native (`image` is provided): CubeMaster will pull
+///    `image` from an external OCI registry and build the rootfs directly.
+///    All extra fields (`exposed_ports`, `cpu`, `memory`, ...) override the
+///    image defaults.
+///
+/// 2. E2B-standard (`dockerfile` is provided): the server allocates a
+///    `templateID` + `buildID`, returns a short-lived push credential, and the
+///    client (`e2b template build`) pushes the locally-built image to the
+///    bundled OCI registry. The actual rootfs build is then triggered by
+///    `POST /templates/{tid}/builds/{bid}`.
+///
+/// Field naming follows the E2B SDK conventions where they collide with
+/// CubeSandbox legacy fields (camelCase for IDs, snake_case for
+/// `start_cmd`/`ready_cmd`).
+#[derive(Debug, Deserialize, Validate, Clone, ToSchema)]
+#[allow(dead_code)]
 pub struct CreateTemplateRequest {
+    // ── Common fields (both modes) ─────────────────────────────────────────
     /// Deprecated and ignored. Template IDs are always generated server-side
     /// with the `tpl-` prefix; clients must use the returned `templateID`.
     #[serde(rename = "templateID", default)]
@@ -475,9 +495,27 @@ pub struct CreateTemplateRequest {
     pub template_id: String,
     #[serde(rename = "instanceType", default)]
     pub instance_type: Option<String>,
-    /// Container image reference, e.g. `registry.example.com/code:latest`.
-    #[validate(length(min = 1))]
-    pub image: String,
+
+    /// Optional human-readable alias (E2B field: `alias`).
+    #[serde(default)]
+    pub alias: Option<String>,
+
+    /// E2B `teamID`. Currently only logged; reserved for multi-tenant rollout.
+    #[serde(rename = "teamID", default)]
+    pub team_id: Option<String>,
+
+    /// Container image reference (CubeSandbox-native mode), e.g.
+    /// `registry.example.com/code:latest`. Mutually exclusive with `dockerfile`.
+    #[serde(default)]
+    pub image: Option<String>,
+
+    /// Inline Dockerfile content (E2B-standard mode). Currently NOT built
+    /// server-side — the client is expected to build & push the image locally
+    /// using the credentials returned by this endpoint. Stored verbatim for
+    /// future in-cluster builds.
+    #[serde(default)]
+    pub dockerfile: Option<String>,
+
     /// Writable layer size for the rootfs, e.g. "1G".
     #[serde(rename = "writableLayerSize", default)]
     pub writable_layer_size: Option<String>,
@@ -490,15 +528,32 @@ pub struct CreateTemplateRequest {
     /// HTTP probe path, e.g. "/health". Defaults to "/health" when `probePort` is set.
     #[serde(rename = "probePath", default)]
     pub probe_path: Option<String>,
-    /// CPU in millicores, e.g. 2000 means 2000m.
+
+    /// CPU in millicores (legacy CubeSandbox field).
     #[serde(default)]
     pub cpu: Option<u32>,
-    /// Memory in MiB, e.g. 2000.
+    /// Memory in MiB (legacy CubeSandbox field).
     #[serde(default)]
     pub memory: Option<u32>,
-    /// Environment variables as "KEY=VALUE" strings.
+
+    /// E2B-style integer CPU count (cores). Mapped to `cpu * 1000` millicores
+    /// when `cpu` is not supplied.
+    #[serde(rename = "cpuCount", default)]
+    pub cpu_count: Option<u32>,
+
+    /// E2B-style memory in MiB. Mapped to `memory` when the legacy field is
+    /// not supplied.
+    #[serde(rename = "memoryMB", default)]
+    pub memory_mb: Option<u32>,
+
+    /// Environment variables as "KEY=VALUE" strings (legacy CubeSandbox).
     #[serde(default)]
     pub env: Option<Vec<String>>,
+
+    /// E2B-style env-vars map. Merged into `env` when present.
+    #[serde(rename = "envVars", default)]
+    pub env_vars: Option<HashMap<String, String>>,
+
     /// Allow internet (public) access.
     #[serde(rename = "allowInternetAccess", default)]
     pub allow_internet_access: Option<bool>,
@@ -529,6 +584,16 @@ pub struct CreateTemplateRequest {
     /// Denied outbound CIDRs for CubeVS egress policy.
     #[serde(rename = "denyOut", default)]
     pub deny_out: Option<Vec<String>>,
+
+    /// E2B-style `startCmd`: shell command to execute inside the container
+    /// once the rootfs is mounted. Mapped to CubeMaster `args`.
+    #[serde(rename = "startCmd", alias = "start_cmd", default)]
+    pub start_cmd: Option<String>,
+
+    /// E2B-style `readyCmd`: shell command used as readiness probe.
+    /// Translated into a CubeMaster `Probe.Exec` when `probe_port` is empty.
+    #[serde(rename = "readyCmd", alias = "ready_cmd", default)]
+    pub ready_cmd: Option<String>,
 }
 
 /// Body for POST /templates/:id (rebuild).
@@ -539,21 +604,60 @@ pub struct RebuildTemplateRequest {
 }
 
 /// Job envelope returned by create / rebuild.
-#[derive(Debug, Serialize, ToSchema)]
+///
+/// E2B's CLI expects (besides the bare job state):
+///   - `buildID`     — opaque token that subsequent `/builds/{buildID}/...`
+///                     calls use to refer to *this* attempt.
+///   - `uploadUrl`   — URL the CLI should `docker push` to.
+///   - `registry`    — credentials matched against `Authorization` on /v2/*.
+///
+/// All of these are emitted as *Optional* so existing CubeSandbox clients,
+/// which only look at `templateID`/`status`, continue to deserialize.
+#[derive(Debug, Serialize, ToSchema, Default)]
 pub struct TemplateBuildJob {
     #[serde(rename = "jobID")]
     pub job_id: String,
     #[serde(rename = "templateID")]
     pub template_id: String,
+    /// E2B-required identifier of this build attempt. Equals `jobID` when
+    /// CubeMaster returns one; otherwise a server-side uuid.
+    #[serde(rename = "buildID")]
+    pub build_id: String,
     pub status: String,
     pub phase: String,
     pub progress: i32,
     #[serde(rename = "errorMessage", skip_serializing_if = "String::is_empty")]
     pub error_message: String,
+
+    /// E2B-style `uploadUrl`: where the CLI should push the locally-built
+    /// dockerfile image. Same as `registry.url` for convenience.
+    #[serde(rename = "uploadUrl", skip_serializing_if = "Option::is_none")]
+    pub upload_url: Option<String>,
+
+    /// Registry credentials advertised to E2B clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<RegistryCredential>,
+}
+
+/// Short-lived push credential returned alongside a new template build.
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct RegistryCredential {
+    /// Full base URL of the registry endpoint, e.g. `https://cube.example.com`.
+    pub url: String,
+    /// Repository the client should push to, e.g. `e2b/tpl-abc:bld-001`.
+    pub repository: String,
+    /// Username for `docker login` / Basic auth.
+    pub username: String,
+    /// Password for `docker login` / Basic auth.
+    pub password: String,
 }
 
 /// Response for GET /templates/:id/builds/:bid/status
-#[derive(Debug, Serialize, ToSchema)]
+///
+/// E2B's CLI polls this endpoint with `?logsOffset=N` and expects:
+///   - `status`        : "building" | "ready" | "error" | "uploading" | ...
+///   - `logs: string[]`: the new lines added since the previous offset.
+#[derive(Debug, Serialize, ToSchema, Default)]
 pub struct TemplateBuildStatus {
     #[serde(rename = "buildID")]
     pub build_id: String,
@@ -562,6 +666,12 @@ pub struct TemplateBuildStatus {
     pub status: String,
     pub progress: i32,
     pub message: String,
+    /// Incremental log lines starting from the offset given in the query.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<String>,
+    /// Offset to send back next round to receive only newer lines.
+    #[serde(rename = "logsOffset", skip_serializing_if = "Option::is_none")]
+    pub logs_offset: Option<i32>,
 }
 
 // ─── Cluster & Nodes ───────────────────────────────────────────────────────
@@ -717,3 +827,148 @@ pub struct VersionMatrixView {
     pub components: Vec<ComponentMatrixRowView>,
     pub nodes: Vec<NodeVersionRowView>,
 }
+
+// ─── E2B V3 protocol (real e2b SDK contract) ──────────────────────────────
+//
+// The e2b Python/JS SDK calls this trio of endpoints (camelCase JSON):
+//
+//   1. POST /v3/templates                      → register, returns
+//                                                {templateID, buildID, ...}
+//   2. GET  /templates/{tid}/files/{hash}      → resolve cache, returns
+//                                                {present, url?}
+//   3. POST /v2/templates/{tid}/builds/{bid}   → trigger build, body has
+//                                                fromImage / startCmd /
+//                                                readyCmd / steps / ...
+//   4. GET  /templates/{tid}/builds/{bid}/status?logsOffset=N&limit=M
+//                                              → poll, returns
+//                                                {buildID, templateID,
+//                                                 status, logs[], logEntries[]}
+#[derive(Debug, Deserialize, Default, ToSchema)]
+#[allow(dead_code)]
+pub struct V3TemplateBuildRequest {
+    /// New-style "name" or "name:tag". The SDK *prefers* this over `alias`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Deprecated. Some older SDKs still send this.
+    #[serde(default)]
+    pub alias: Option<String>,
+    /// Tag list to attach to the resulting build.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// CPU cores (whole number).
+    #[serde(rename = "cpuCount", default)]
+    pub cpu_count: Option<u32>,
+    /// Memory in MiB.
+    #[serde(rename = "memoryMB", default)]
+    pub memory_mb: Option<u32>,
+    /// Team identifier — currently only logged.
+    #[serde(rename = "teamID", default)]
+    pub team_id: Option<String>,
+}
+
+/// Response for `POST /v3/templates` — must match `TemplateRequestResponseV3`
+/// exactly: the SDK calls `from_dict` and **fails fast on missing keys**.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct V3TemplateBuildResponse {
+    #[serde(rename = "templateID")]
+    pub template_id: String,
+    #[serde(rename = "buildID")]
+    pub build_id: String,
+    pub names: Vec<String>,
+    pub aliases: Vec<String>,
+    pub tags: Vec<String>,
+    pub public: bool,
+}
+
+/// Response for `GET /templates/{tid}/files/{hash}` — the SDK only checks
+/// `present`/`url` and (when `present=false`) PUTs the tarball to `url`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct V3TemplateFileUpload {
+    pub present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Body for `POST /v2/templates/{tid}/builds/{bid}` — the moment the build is
+/// actually dispatched to CubeMaster.
+#[derive(Debug, Deserialize, Default, ToSchema)]
+#[allow(dead_code)]
+pub struct V2TemplateBuildStart {
+    /// Skip-cache flag.
+    #[serde(default)]
+    pub force: Option<bool>,
+    /// External base image (CubeMaster `SourceImageRef`).
+    #[serde(rename = "fromImage", default)]
+    pub from_image: Option<String>,
+    /// Optional registry credential block (AWS/GCP/General). Stored verbatim
+    /// for now; CubeMaster doesn't yet consume it.
+    #[serde(rename = "fromImageRegistry", default)]
+    pub from_image_registry: Option<serde_json::Value>,
+    /// Reuse another already-built CubeSandbox template as the base.
+    #[serde(rename = "fromTemplate", default)]
+    pub from_template: Option<String>,
+    /// E2B `readyCmd` — translated into CubeMaster `Probe.Exec`.
+    #[serde(rename = "readyCmd", default)]
+    pub ready_cmd: Option<String>,
+    /// E2B `startCmd` — translated into container `args`.
+    #[serde(rename = "startCmd", default)]
+    pub start_cmd: Option<String>,
+    /// Multi-step build instructions (RUN/COPY/ENV/...). Currently only used
+    /// for hashing & log breadcrumbs; full Dockerfile-equivalent semantics
+    /// require the in-cluster builder (Phase 4).
+    #[serde(default)]
+    pub steps: Option<Vec<serde_json::Value>>,
+}
+
+/// Response for `GET /templates/{tid}/builds/{bid}/status` — must round-trip
+/// to E2B's `TemplateBuildInfo` to satisfy the SDK's strict `from_dict`.
+#[derive(Debug, Serialize, ToSchema, Default)]
+pub struct V3TemplateBuildInfo {
+    #[serde(rename = "buildID")]
+    pub build_id: String,
+    #[serde(rename = "templateID")]
+    pub template_id: String,
+    /// One of: "waiting" | "building" | "ready" | "error".
+    pub status: String,
+    /// Plain log lines (already filtered by `logsOffset`).
+    pub logs: Vec<String>,
+    /// Structured log entries — same content with timestamps + level.
+    #[serde(rename = "logEntries")]
+    pub log_entries: Vec<V3BuildLogEntry>,
+    /// Failure reason payload (only when `status == "error"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<V3BuildStatusReason>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct V3BuildLogEntry {
+    pub timestamp: DateTime<Utc>,
+    pub message: String,
+    /// "debug" | "info" | "warn" | "error"
+    pub level: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct V3BuildStatusReason {
+    #[serde(rename = "stepIndex", skip_serializing_if = "Option::is_none")]
+    pub step_index: Option<i32>,
+    pub message: String,
+}
+
+/// Query string for `GET /v3` status endpoint.
+#[derive(Debug, Deserialize, Default, IntoParams)]
+#[into_params(parameter_in = Query)]
+#[allow(dead_code)]
+pub struct V3BuildStatusQuery {
+    #[serde(rename = "logsOffset", alias = "logs_offset", default)]
+    pub logs_offset: i32,
+    #[serde(default = "default_v3_log_limit")]
+    pub limit: i32,
+    #[serde(default)]
+    pub level: Option<String>,
+}
+
+fn default_v3_log_limit() -> i32 {
+    100
+}
+

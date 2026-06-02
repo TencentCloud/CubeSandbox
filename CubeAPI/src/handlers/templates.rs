@@ -146,44 +146,44 @@ pub async fn delete_template(
 
 pub async fn start_template_build(
     State(state): State<AppState>,
-    Path((template_id, _build_id)): Path<(String, String)>,
+    Path((template_id, build_id)): Path<(String, String)>,
 ) -> AppResult<impl IntoResponse> {
     let job = state
         .services
         .templates
-        .start_template_build(template_id)
+        .start_template_build(template_id, Some(build_id))
         .await?;
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
 // ─── GET /templates/:templateID/builds/:buildID/status ────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct BuildStatusQuery {
-    #[serde(default)]
-    #[allow(dead_code)]
+    /// E2B SDK polls with `?logsOffset=N` to receive only the new lines
+    /// added since the last response. Snake-case alias is accepted too.
+    #[serde(rename = "logsOffset", alias = "logs_offset", default)]
     pub logs_offset: i32,
 }
 
 pub async fn get_template_build_status(
     State(state): State<AppState>,
     Path((template_id, build_id)): Path<(String, String)>,
-    Query(_params): Query<BuildStatusQuery>,
+    Query(params): Query<BuildStatusQuery>,
 ) -> AppResult<impl IntoResponse> {
     let out = state
         .services
         .templates
-        .get_template_build_status(&template_id, &build_id)
+        .get_template_build_status(&template_id, &build_id, params.logs_offset)
         .await?;
     Ok((StatusCode::OK, Json(out)))
 }
 
 // ─── GET /templates/:templateID/builds/:buildID/logs ─────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct BuildLogsQuery {
-    #[serde(default)]
-    #[allow(dead_code)]
+    #[serde(rename = "logsOffset", alias = "offset", alias = "logs_offset", default)]
     pub offset: i32,
     #[serde(default = "default_log_limit")]
     #[allow(dead_code)]
@@ -195,13 +195,13 @@ fn default_log_limit() -> i32 {
 
 pub async fn get_template_build_logs(
     State(state): State<AppState>,
-    Path((_template_id, build_id)): Path<(String, String)>,
-    Query(_params): Query<BuildLogsQuery>,
+    Path((template_id, build_id)): Path<(String, String)>,
+    Query(params): Query<BuildLogsQuery>,
 ) -> AppResult<impl IntoResponse> {
     let logs = state
         .services
         .templates
-        .get_template_build_logs(&build_id)
+        .get_template_build_logs(&template_id, &build_id, params.offset)
         .await?;
     Ok((StatusCode::OK, Json(logs)))
 }

@@ -244,3 +244,9 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 | `status: FAILED` after BUILDING | Build error (disk full, Dockerfile issue, etc.) | Re-run `tpl status --job-id <id> --json` and inspect `last_error` |
 | `distribution: 0/N ready` after READY | Artifact distribution still in progress (normal briefly) | Wait and re-run `tpl info`; if stuck check Cubelet logs on target nodes |
 | Sandbox fails readiness probe | Service not listening on the expected port/path at startup | Verify your container starts the HTTP server before signalling ready; adjust `--probe-path` if needed |
+
+---
+
+## Further reading
+
+The `--probe` / `--probe-path` flags above target the `cubemastercli` workflow. If you build templates through the [e2b](https://e2b.dev/) Python / JS SDK (`Template().set_start_cmd(..., wait_for_url(...))`), **you don't have to specify probe parameters by hand** — CubeAPI parses `(port, path)` straight out of `wait_for_url(...)` and synthesises an equivalent HttpGet probe. See [Create Templates with the e2b SDK](./template-from-e2b-sdk.md).

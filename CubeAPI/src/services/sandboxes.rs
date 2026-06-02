@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
-    constants::ENVD_VERSION,
+    constants::{ENVD_PORT_STR, ENVD_VERSION},
     cubemaster::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient,
         CubeMasterError, CubeVSContext, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
@@ -26,6 +26,17 @@ const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
+
+/// CubeMaster annotation key for the list of TCP ports we want cubelet to
+/// expose on the host (colon-separated, e.g. `"49983:8080"`). The port list
+/// is consumed in `CubeMaster/pkg/service/sandbox/util.go::getExposedPorts`
+/// and ends up in the per-sandbox redis metadata read by cube-proxy.
+const ANNO_EXPOSED_PORTS: &str = "com.exposed_ports";
+
+/// Optional `metadata` key that lets callers override the exposed port list
+/// for a specific sandbox (colon-separated). When absent we just publish the
+/// default envd port so the e2b SDK can connect.
+const META_EXPOSED_PORTS: &str = "exposed-ports";
 
 #[derive(Clone)]
 pub struct SandboxService {
@@ -126,12 +137,28 @@ impl SandboxService {
             ),
         ]);
 
+        // The e2b SDK always talks to envd on port 49983 via the
+        // `<port>-<sandbox_id>.<domain>` host scheme. cube-proxy looks up the
+        // host-port mapping for that container port in redis, which is only
+        // populated when the sandbox creation request advertises it through
+        // the `com.exposed_ports` annotation. Keep this annotation in sync,
+        // but allow callers to override the list via `metadata.exposed-ports`
+        // (colon-separated) when they need to expose more ports.
         let labels = body.metadata.map(|mut meta| {
             if let Some(value) = meta.remove(HOSTDIR_MOUNT_KEY) {
                 annotations.insert(HOSTDIR_MOUNT_KEY.to_string(), value);
             }
+            if let Some(raw) = meta.remove(META_EXPOSED_PORTS) {
+                annotations.insert(
+                    ANNO_EXPOSED_PORTS.to_string(),
+                    merge_exposed_ports(&raw),
+                );
+            }
             meta
         });
+        annotations
+            .entry(ANNO_EXPOSED_PORTS.to_string())
+            .or_insert_with(|| ENVD_PORT_STR.to_string());
 
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
@@ -146,15 +173,57 @@ impl SandboxService {
             cubevs_context: build_cubevs_context(body.allow_internet_access, body.network.as_ref()),
         };
 
+        tracing::info!(
+            template_id = %template_id,
+            request_id = %req.request_id,
+            instance_type = %req.instance_type,
+            exposed_ports = %req.annotations
+                .get(ANNO_EXPOSED_PORTS)
+                .cloned()
+                .unwrap_or_else(|| "<unset>".to_string()),
+            annotations = ?req.annotations,
+            "creating sandbox from template"
+        );
+
         let resp = self
             .cubemaster
             .create_sandbox(&req)
             .await
-            .map_err(internal_error)?;
+            .map_err(|e| {
+                tracing::error!(
+                    template_id = %template_id,
+                    request_id = %req.request_id,
+                    error = %e,
+                    "cubemaster create_sandbox transport failed"
+                );
+                internal_error(format!(
+                    "cubemaster transport failed (templateID={}, requestID={}): {}",
+                    template_id, req.request_id, e
+                ))
+            })?;
 
-        resp.ret.into_result().map_err(internal_error)?;
+        let sandbox_id = resp.sandbox_id.clone();
+        let resp_request_id = resp.request_id.clone();
+        if let Err(e) = resp.ret.into_result() {
+            tracing::error!(
+                template_id = %template_id,
+                request_id = %req.request_id,
+                cubemaster_error = %e,
+                "cubemaster rejected sandbox creation \
+                 — likely a microVM-level failure (rootfs mount / agent restore). \
+                 Inspect cube-agent and cubelet logs for stderr from \
+                 'do_exec_mount' / 'start_exec_process'."
+            );
+            return Err(internal_error(format!(
+                "sandbox creation failed for templateID={} (requestID={}): {} \
+                 — this happens at the microVM layer (cube-agent restore/mount); \
+                 check cube-agent / cubelet logs on the host for the underlying \
+                 mount error",
+                template_id, req.request_id, e
+            )));
+        }
 
-        Ok(self.sandbox_response(template_id, resp.sandbox_id, resp.request_id))
+        Ok(self.sandbox_response(template_id, sandbox_id, resp_request_id))
     }
 
     pub async fn kill_sandbox(&self, sandbox_id: &str) -> AppResult<()> {
@@ -470,6 +539,33 @@ fn internal_error(error: impl std::fmt::Display) -> AppError {
     AppError::Internal(anyhow::anyhow!(error.to_string()))
 }
 
+/// Merge a caller-supplied colon-separated port list with the mandatory envd
+/// port (49983), preserving order, removing duplicates and silently dropping
+/// non-numeric entries. The result is the value to set on the
+/// `com.exposed_ports` annotation that CubeMaster understands.
+fn merge_exposed_ports(raw: &str) -> String {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ordered: Vec<String> = Vec::new();
+    for part in raw.split(':') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.parse::<u32>().is_err() {
+            // Skip silently — CubeMaster's getExposedPorts would otherwise
+            // reject the whole sandbox creation with an InvalidParam error.
+            continue;
+        }
+        if seen.insert(trimmed.to_string()) {
+            ordered.push(trimmed.to_string());
+        }
+    }
+    if seen.insert(ENVD_PORT_STR.to_string()) {
+        ordered.push(ENVD_PORT_STR.to_string());
+    }
+    ordered.join(":")
+}
+
 fn sandbox_not_found_or_internal(e: CubeMasterError, sandbox_id: &str) -> AppError {
     if e.is_not_found() {
         AppError::NotFound(format!("sandbox {} not found", sandbox_id))
@@ -635,9 +731,39 @@ pub(crate) fn build_cubevs_context(
 mod tests {
     use std::collections::HashMap;
 
-    use super::{build_cubevs_context, filter_by_metadata, from_cubemaster_info};
+    use super::{build_cubevs_context, filter_by_metadata, from_cubemaster_info, merge_exposed_ports};
     use crate::cubemaster::{ListSandboxResponse, SandboxInfo};
     use crate::models::{SandboxNetworkConfig, SandboxState};
+
+    #[test]
+    fn merge_exposed_ports_appends_envd_port_when_missing() {
+        // Caller supplied two ports but no envd port → 49983 must be appended.
+        assert_eq!(merge_exposed_ports("80:8080"), "80:8080:49983");
+    }
+
+    #[test]
+    fn merge_exposed_ports_keeps_envd_port_position_when_already_listed() {
+        // 49983 already listed first → no duplicate, original order preserved.
+        assert_eq!(merge_exposed_ports("49983:8080"), "49983:8080");
+    }
+
+    #[test]
+    fn merge_exposed_ports_skips_non_numeric_and_dedupes() {
+        // Empty segments, dupes and garbage tokens get filtered without
+        // poisoning the request (CubeMaster would otherwise reject the whole
+        // sandbox create).
+        assert_eq!(
+            merge_exposed_ports("80::80:abc:8080:49983"),
+            "80:8080:49983"
+        );
+    }
+
+    #[test]
+    fn merge_exposed_ports_handles_empty_input() {
+        // Empty caller input still publishes the envd port so cube-proxy can
+        // route the e2b SDK's `49983-<sandbox>.<domain>` host.
+        assert_eq!(merge_exposed_ports(""), "49983");
+    }
 
     #[test]
     fn metadata_filter_matches_all_pairs() {

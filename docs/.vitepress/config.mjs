@@ -127,6 +127,7 @@ export default withMermaid(defineConfig({
             {
               text: 'Tutorials',
               items: [
+                { text: 'Create Templates with the e2b SDK', link: '/guide/tutorials/template-from-e2b-sdk' },
                 { text: 'Create Templates from OCI Image', link: '/guide/tutorials/template-from-image' },
                 { text: 'Examples', link: '/guide/tutorials/examples' },
                 { text: 'Custom Image', link: '/guide/tutorials/bring-your-own-image' }
@@ -229,6 +230,7 @@ export default withMermaid(defineConfig({
             {
               text: '场景教程',
               items: [
+                { text: '使用 e2b SDK 创建模板', link: '/zh/guide/tutorials/template-from-e2b-sdk' },
                 { text: '从 OCI 镜像制作模板', link: '/zh/guide/tutorials/template-from-image' },
                 { text: '示例项目', link: '/zh/guide/tutorials/examples' },
                 { text: '自定义镜像', link: '/zh/guide/tutorials/bring-your-own-image' }

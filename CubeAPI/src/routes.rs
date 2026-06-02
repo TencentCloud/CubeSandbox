@@ -18,7 +18,10 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{agenthub, cluster, config, health, sandboxes, snapshots, store, templates},
+    handlers::{
+        agenthub, cluster, config, health, registry, sandboxes, snapshots, store, templates,
+        templates_v3,
+    },
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -58,10 +61,15 @@ pub fn build_router(state: AppState) -> Router {
             ),
         SNAPSHOT_LONG_ROUTE_TIMEOUT,
     );
+    let registry_router = apply_http_layers(
+        build_registry_router(&state),
+        SNAPSHOT_LONG_ROUTE_TIMEOUT,
+    );
 
     Router::new()
         .merge(standard_router)
         .merge(snapshot_long_router)
+        .merge(registry_router)
         .with_state(state)
 }
 
@@ -170,6 +178,20 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
     let routes = Router::new()
         .route("/templates", get(templates::list_templates))
         .route("/templates", post(templates::create_template))
+        // ── E2B V3 protocol (real SDK contract) ───────────────
+        // SDK calls these in order: POST /v3/templates → GET files/{hash}
+        // → POST /v2/.../builds/{bid} → GET .../status. Routes are mounted
+        // at the same level as /templates so both `/v3/...` and `/v2/...`
+        // segments are reachable.
+        .route("/v3/templates", post(templates_v3::v3_create_template))
+        .route(
+            "/templates/:templateID/files/:hash",
+            get(templates_v3::v3_get_files_hash),
+        )
+        .route(
+            "/v2/templates/:templateID/builds/:buildID",
+            post(templates_v3::v2_trigger_build),
+        )
         .route("/templates/:templateID", get(templates::get_template))
         .route("/templates/:templateID", post(templates::rebuild_template))
         .route("/templates/:templateID", patch(templates::update_template))
@@ -179,7 +201,7 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
         )
         .route(
             "/templates/:templateID/builds/:buildID/status",
-            get(templates::get_template_build_status),
+            get(templates_v3::v3_get_build_status),
         )
         .route(
             "/templates/:templateID/builds/:buildID/logs",
@@ -294,6 +316,14 @@ fn build_agenthub_routes(state: &AppState, auth_configured: bool) -> Router<AppS
         );
 
     with_auth(routes, state, auth_configured)
+}
+
+fn build_registry_router(_state: &AppState) -> Router<AppState> {
+    use axum::routing::{any, get};
+    Router::new()
+        .route("/v2/", get(registry::ping))
+        .route("/v2", get(registry::ping))
+        .route("/v2/*path", any(registry::proxy))
 }
 
 fn with_auth(
@@ -525,5 +555,43 @@ mod tests {
             resp.status_code(),
             resp.text(),
         );
+    }
+
+    /// Regression: e2b Python SDK `Template.build()` calls `POST /v3/templates`
+    /// first; prior to the V3 routes we returned 404 with an empty body, which
+    /// surfaced to users as `BuildException: 404: b''`. After the fix, the
+    /// route exists and returns the V3 envelope.
+    #[tokio::test]
+    async fn v3_template_build_routes_are_reachable() {
+        let server = test_server().await;
+
+        // POST /v3/templates → 202 with templateID/buildID/names/aliases/tags/public
+        let resp = server
+            .post("/v3/templates")
+            .json(&serde_json::json!({
+                "name": "my-tpl:dev",
+                "cpuCount": 1,
+                "memoryMB": 1024,
+            }))
+            .await;
+        resp.assert_status(StatusCode::ACCEPTED);
+        let body: serde_json::Value = resp.json();
+        assert!(body["templateID"].as_str().is_some());
+        assert!(body["buildID"].as_str().is_some());
+        assert!(body["names"].as_array().is_some());
+        assert!(body["aliases"].as_array().is_some());
+        assert_eq!(body["public"].as_bool(), Some(false));
+        // The trailing `:dev` should have been folded into tags.
+        let tags = body["tags"].as_array().expect("tags array");
+        assert!(tags.iter().any(|t| t == "dev"));
+
+        // GET /templates/{tid}/files/{hash} → 201 with present=true (cache hit)
+        let tid = body["templateID"].as_str().unwrap();
+        let r = server
+            .get(&format!("/templates/{}/files/abc123", tid))
+            .await;
+        r.assert_status(StatusCode::CREATED);
+        let fb: serde_json::Value = r.json();
+        assert_eq!(fb["present"].as_bool(), Some(true));
     }
 }
