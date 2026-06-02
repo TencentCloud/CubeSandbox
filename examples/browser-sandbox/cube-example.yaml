@@ -1,0 +1,14 @@
+# Manifest for the CubeSandbox examples runner.
+name: browser-sandbox
+description: Drive a headless browser inside a sandbox (requires a browser template).
+lang: python
+tags: [sdk, browser]
+timeout: 240
+requires_template: browser
+setup:
+  - pip install -q -r requirements.txt
+steps:
+  - name: browser
+    run: python browser.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]

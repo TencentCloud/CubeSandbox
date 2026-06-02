@@ -1,0 +1,17 @@
+# Manifest for the CubeSandbox examples runner.
+# Skipped by default: requires a separately running dev-sidecar proxy.
+name: e2b-dev-sidecar
+description: Route E2B dev traffic through a sidecar proxy (needs CUBE_DEV_PROXY_URL).
+lang: python
+tags: [sdk, sidecar, external]
+timeout: 240
+requires_template: code
+skip: true
+skip_reason: "Requires a running dev-sidecar (CUBE_DEV_PROXY_URL); enable manually."
+setup:
+  - pip install -q -r requirements.txt
+steps:
+  - name: test_dev_sidecar
+    run: python test_dev_sidecar.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]

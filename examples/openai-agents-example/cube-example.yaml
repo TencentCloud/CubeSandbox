@@ -1,0 +1,17 @@
+# Manifest for the CubeSandbox examples runner.
+# Skipped by default: requires an external OpenAI-compatible endpoint + API key.
+name: openai-agents-example
+description: OpenAI Agents SDK driving a CubeSandbox (needs OPENAI_API_KEY / TOKENHUB_API_KEY).
+lang: python
+tags: [sdk, agents, external]
+timeout: 300
+requires_template: code
+skip: true
+skip_reason: "Requires external OPENAI_API_KEY / TOKENHUB_API_KEY; enable manually."
+setup:
+  - pip install -q -r requirements.txt
+steps:
+  - name: simple_demo
+    run: python simple_demo.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]

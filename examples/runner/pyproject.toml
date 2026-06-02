@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cube-examples-runner"
+version = "0.1.0"
+description = "Declarative runner to verify CubeSandbox example scripts."
+requires-python = ">=3.8"
+dependencies = ["PyYAML>=6.0"]
+
+[project.scripts]
+cube-examples = "cube_examples.cli:main"
+
+[tool.setuptools]
+packages = ["cube_examples"]

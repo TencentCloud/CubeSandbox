@@ -1,0 +1,14 @@
+# Manifest for the CubeSandbox examples runner.
+name: cubesandbox-base-nginx
+description: Verify file read/write operations inside a sandbox using the E2B SDK.
+lang: python
+tags: [smoke, sdk]
+timeout: 180
+requires_template: nginx
+setup:
+  - pip install -q -r requirements.txt
+steps:
+  - name: test_files
+    run: python test_files.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback", "Error"]

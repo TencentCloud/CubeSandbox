@@ -1,0 +1,22 @@
+# Manifest for the CubeSandbox examples runner.
+name: network-policy
+description: Demonstrate network allowlist, denylist, and no-internet sandbox policies.
+lang: python
+tags: [sdk, network]
+timeout: 240
+requires_template: code
+setup:
+  - pip install -q -r requirements.txt
+steps:
+  - name: allowlist
+    run: python network_allowlist.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]
+  - name: denylist
+    run: python network_denylist.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]
+  - name: no_internet
+    run: python network_no_internet.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]

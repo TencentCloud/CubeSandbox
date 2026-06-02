@@ -1,0 +1,14 @@
+# Manifest for the CubeSandbox examples runner.
+name: host-mount
+description: Create a sandbox with a host directory bind-mounted into the guest.
+lang: python
+tags: [sdk, host-mount]
+timeout: 180
+requires_template: code
+setup:
+  - pip install -q -r requirements.txt
+steps:
+  - name: create_with_mount
+    run: python create_with_mount.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]

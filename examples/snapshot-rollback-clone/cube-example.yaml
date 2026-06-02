@@ -1,0 +1,36 @@
+# Manifest for the CubeSandbox examples runner.
+# Uses the native cubesandbox Python SDK (not the E2B SDK).
+name: snapshot-rollback-clone
+description: Snapshot, list, clone, rollback, and lifecycle demos via the cubesandbox SDK.
+lang: python
+tags: [sdk, snapshot]
+timeout: 300
+requires_template: code
+setup:
+  - pip install -q -r requirements.txt
+steps:
+  - name: 01_create_snapshot
+    run: python 01_create_snapshot.py
+    expect_exit: 0
+    expect_stdout_contains: ["snapshot created"]
+    expect_stdout_not_contains: ["Traceback"]
+  - name: 02_list_snapshots
+    run: python 02_list_snapshots.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]
+  - name: 03_clone_from_snapshot
+    run: python 03_clone_from_snapshot.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]
+  - name: 04_state_preserved
+    run: python 04_state_preserved.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]
+  - name: 09_rollback
+    run: python 09_rollback.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]
+  - name: 11_delete_snapshot
+    run: python 11_delete_snapshot.py
+    expect_exit: 0
+    expect_stdout_not_contains: ["Traceback"]

@@ -1,0 +1,27 @@
+# Manifest for the CubeSandbox examples runner.
+# Run with: python -m cube_examples run --only code-sandbox-quickstart \
+#   --api-url http://<node-ip>:3000 --template code=<template-id>
+name: code-sandbox-quickstart
+description: Create a sandbox, run Python code, and execute shell commands via the E2B SDK.
+lang: python
+tags: [smoke, sdk]
+timeout: 180
+requires_template: code
+setup:
+  - pip install -q -r requirements.txt
+steps:
+  - name: create
+    run: python create.py
+    expect_exit: 0
+    expect_stdout_contains: ["sandbox info"]
+    expect_stdout_not_contains: ["Traceback"]
+  - name: exec_code
+    run: python exec_code.py
+    expect_exit: 0
+    expect_stdout_contains: ["hello cube"]
+    expect_stdout_not_contains: ["Traceback"]
+  - name: cmd
+    run: python cmd.py
+    expect_exit: 0
+    expect_stdout_contains: ["hello cube"]
+    expect_stdout_not_contains: ["Traceback"]
