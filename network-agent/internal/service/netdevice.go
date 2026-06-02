@@ -68,6 +68,101 @@ type tapDevice struct {
 }
 
 func disableGRO(ifName string) error {
+	link, err := netlinkLinkByName(ifName)
+	if err != nil {
+		return fmt.Errorf("lookup link %s: %w", ifName, err)
+	}
+	targets, err := resolveGROTargets(link)
+	if err != nil {
+		return err
+	}
+	logger := CubeLog.WithContext(context.Background())
+	var firstErr error
+	for _, name := range targets {
+		if err := disableGROOnDev(name); err != nil {
+			logger.Warnf("network-agent failed to disable GRO on underlying dev %s (root=%s): %v", name, ifName, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if name != ifName {
+			logger.Infof("network-agent disabled GRO on underlying dev %s (root=%s)", name, ifName)
+		}
+	}
+	return firstErr
+}
+
+// resolveGROTargets returns the list of netdev names that should actually have
+// GRO turned off. For bond/vlan upper devices, GRO must be disabled on the
+// underlying physical netdev because ethtool SGRO on the upper device does not
+// propagate down — GRO aggregation happens in the NAPI poll of the underlying
+// driver. For any other link type, we default to operating on the device
+// itself.
+func resolveGROTargets(link netlink.Link) ([]string, error) {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+
+	var walk func(netlink.Link) error
+	walk = func(l netlink.Link) error {
+		// Always include the device itself so its feature flag stays consistent.
+		add(l.Attrs().Name)
+		switch typed := l.(type) {
+		case *netlink.Bond:
+			slaves, err := bondSlaves(typed.Attrs().Index)
+			if err != nil {
+				return err
+			}
+			for _, s := range slaves {
+				if err := walk(s); err != nil {
+					return err
+				}
+			}
+		case *netlink.Vlan:
+			parent, err := netlinkLinkByIndex(typed.ParentIndex)
+			if err != nil {
+				return fmt.Errorf("lookup vlan parent of %s: %w", typed.Name, err)
+			}
+			if err := walk(parent); err != nil {
+				return err
+			}
+		default:
+			// Physical NIC, virtio-net, or anything else we don't recursively
+			// unwrap: operate on the device itself (already added above).
+		}
+		return nil
+	}
+	if err := walk(link); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func bondSlaves(masterIndex int) ([]netlink.Link, error) {
+	all, err := netlinkLinkList()
+	if err != nil {
+		return nil, fmt.Errorf("list links for bond slaves: %w", err)
+	}
+	var slaves []netlink.Link
+	for _, l := range all {
+		if l.Attrs().MasterIndex == masterIndex {
+			slaves = append(slaves, l)
+		}
+	}
+	return slaves, nil
+}
+
+func disableGROOnDev(ifName string) error {
 	const (
 		SIOCETHTOOL  = 0x8946
 		ETHTOOL_SGRO = 0x0000002c
