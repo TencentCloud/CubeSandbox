@@ -16,6 +16,24 @@
 - 有 **root 权限**
 - 可访问互联网（用于下载发布包、拉取 Docker 镜像）
 
+### 🖥 受支持的系统
+
+CubeSandbox 二进制文件基于 **Ubuntu 22.04（glibc 2.35）** 构建，**系统 glibc 必须 ≥ 2.35**，否则二进制无法运行。
+
+| 系统 | 状态 | 说明 |
+|---|---|---|
+| 🏆 **OpenCloudOS 9 / TencentOS 4** | ✅ 推荐 | 最佳兼容性，默认 XFS 文件系统，生产就绪 |
+| Ubuntu 24.04 | ✅ 已测试 | glibc 2.39 — 可用。需手动[配置 XFS →](https://github.com/TencentCloud/CubeSandbox/issues/311) |
+| Ubuntu 22.04 | ✅ 已测试 | glibc 2.35 — 可用。需手动[配置 XFS →](https://github.com/TencentCloud/CubeSandbox/issues/311) |
+| 其他 RPM 系（CentOS、RHEL 等） | ⚠️ 检查 glibc | glibc 必须 ≥ 2.35，且 `/data/cubelet` 需为 XFS |
+| Debian / WSL | ⚠️ 检查 glibc | 同上要求；详见 [XFS FAQ →](https://github.com/TencentCloud/CubeSandbox/issues/311) |
+
+> ℹ️ **为什么需要 XFS？** CubeSandbox 依赖 XFS reflink 实现 Copy-on-Write 快照。Ubuntu / Debian / WSL 默认使用 ext4，你需要将 XFS 文件系统挂载到 `/data/cubelet`。逐步操作指南见 [FAQ #311](https://github.com/TencentCloud/CubeSandbox/issues/311)。
+
+::: warning 💾 磁盘空间
+**`/data/cubelet` 至少需要 300 GB** 可用磁盘空间，用于存放沙箱镜像、模板和可写层。磁盘空间不足将导致模板创建和沙箱启动失败。
+:::
+
 ## 第一步：购买云服务器并安装 PVM 内核
 
 ### 购买云服务器

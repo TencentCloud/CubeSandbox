@@ -16,6 +16,24 @@ If you already have an x86_64 Linux server with KVM enabled (bare-metal or physi
 - **Root access**
 - Internet access (for downloading release packages and Docker images)
 
+### 🖥 Supported Systems
+
+CubeSandbox binaries are built on **Ubuntu 22.04 (glibc 2.35)** — your system **must have glibc ≥ 2.35**, or the binaries won't run.
+
+| OS | Status | Notes |
+|---|---|---|
+| 🏆 **OpenCloudOS 9 / TencentOS 4** | ✅ Recommended | Best compatibility, XFS by default, production-ready |
+| Ubuntu 24.04 | ✅ Tested | glibc 2.39 — works. Requires manual [XFS setup →](https://github.com/TencentCloud/CubeSandbox/issues/311) |
+| Ubuntu 22.04 | ✅ Tested | glibc 2.35 — works. Requires manual [XFS setup →](https://github.com/TencentCloud/CubeSandbox/issues/311) |
+| Other RPM-based (CentOS, RHEL, etc.) | ⚠️ Check glibc | Must have glibc ≥ 2.35 and XFS for `/data/cubelet` |
+| Debian / WSL | ⚠️ Check glibc | Same requirements; see [XFS FAQ →](https://github.com/TencentCloud/CubeSandbox/issues/311) |
+
+> ℹ️ **Why XFS?** CubeSandbox relies on XFS reflink for Copy-on-Write snapshots. Ubuntu / Debian / WSL default to ext4 — you must mount an XFS filesystem at `/data/cubelet`. See [FAQ #311](https://github.com/TencentCloud/CubeSandbox/issues/311) for step-by-step instructions.
+
+::: warning 💾 Disk Space
+**`/data/cubelet` must have at least 300 GB** of available disk space for sandbox images, templates, and writable layers. Insufficient disk space will cause template creation and sandbox startup failures.
+:::
+
 ## Step 1: Provision a Cloud Server & Install the PVM Kernel
 
 ### Provision a Cloud Server
