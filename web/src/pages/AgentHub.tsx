@@ -38,11 +38,40 @@ import { agentHubApi, type AgentOperationDto, type AgentSnapshotDto, type AgentT
 type Tab = 'personal' | 'team';
 
 const HIDE_AGENT_RECOVER = import.meta.env.VITE_HIDE_AGENT_RECOVER === '1';
+const OPENCLAW_GATEWAY_PORT = 18789;
+const LOGIN_ENV_PORT = 8080;
 
 const MODEL_OPTIONS = [
   { value: 'DeepSeek V4 Flash', labelKey: 'modelDialog.options.deepseekV4Flash' },
   { value: 'DeepSeek V4 Pro', labelKey: 'modelDialog.options.deepseekV4Pro' },
 ] as const;
+
+function buildCubeProxyUrl(agent: Agent, port: number, sourceUrl?: string): string | undefined {
+  if (!agent.sandboxId || typeof window === 'undefined') return sourceUrl;
+
+  let source: URL | undefined;
+  if (sourceUrl) {
+    try {
+      source = new URL(sourceUrl, window.location.href);
+    } catch {
+      source = undefined;
+    }
+  }
+
+  const sourcePath = source?.pathname.replace(/^\/+/, '') ?? '';
+  const cubeProxyBase = `${window.location.protocol}//${window.location.hostname}`;
+  const target = new URL(
+    `/sandbox/${encodeURIComponent(agent.sandboxId)}/${port}/${sourcePath}`,
+    cubeProxyBase,
+  );
+
+  source?.searchParams.forEach((value, key) => target.searchParams.set(key, value));
+  const hashParams = new URLSearchParams(source?.hash.replace(/^#/, '') ?? '');
+  const token = hashParams.get('token');
+  if (token) target.searchParams.set('token', token);
+
+  return target.toString();
+}
 
 export default function AgentHubPage() {
   const { t } = useTranslation('agentHub');
@@ -1461,8 +1490,11 @@ function AgentCard({
         <Button
           size="sm"
           className="gap-1.5"
-          disabled={!isRunning}
-          onClick={() => agent.gatewayUrl && window.open(agent.gatewayUrl, '_blank', 'noopener,noreferrer')}
+          disabled={!isRunning || !agent.sandboxId}
+          onClick={() => {
+            const url = buildCubeProxyUrl(agent, OPENCLAW_GATEWAY_PORT, agent.gatewayUrl);
+            if (url) window.open(url, '_blank', 'noopener,noreferrer');
+          }}
           title={!isRunning ? t('card.status.stopped') : undefined}
         >
           <ExternalLink size={13} />
@@ -1472,8 +1504,11 @@ function AgentCard({
           size="sm"
           variant="outline"
           className="gap-1.5"
-          disabled={!isRunning || !agent.envUrl}
-          onClick={() => agent.envUrl && window.open(agent.envUrl, '_blank', 'noopener,noreferrer')}
+          disabled={!isRunning || !agent.sandboxId}
+          onClick={() => {
+            const url = buildCubeProxyUrl(agent, LOGIN_ENV_PORT, agent.envUrl);
+            if (url) window.open(url, '_blank', 'noopener,noreferrer');
+          }}
           title={!isRunning ? t('card.status.stopped') : undefined}
         >
           <Terminal size={13} />
