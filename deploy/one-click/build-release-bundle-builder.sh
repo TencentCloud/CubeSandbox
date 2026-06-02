@@ -83,10 +83,10 @@ echo "[one-click] building cube-api in builder" >&2
 install -m 0755 /workspace/CubeAPI/target/release/cube-api "${PREBUILT_DIR}/cube-api"
 
 echo "[one-click] building network-agent in builder" >&2
-(cd /workspace/network-agent && go build -ldflags "${NETAGENT_LDFLAGS}" -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
+(cd /workspace/CubeNet && make -C cubevs gen && cd /workspace/network-agent && go build -ldflags "${NETAGENT_LDFLAGS}" -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
 
 echo "[one-click] building cubevsmapdump in builder" >&2
-(cd /workspace/CubeNet/cubevs && go build -o "${PREBUILT_DIR}/cubevsmapdump" ./cmd/cubevsmapdump)
+(cd /workspace/CubeNet/cubevs && make gen && go build -o "${PREBUILT_DIR}/cubevsmapdump" ./cmd/cubevsmapdump)
 
 echo "[one-click] building cube-agent in builder" >&2
 # Agent Makefile reads CUBE_VERSION/CUBE_COMMIT/CUBE_BUILD_TIME directly.
