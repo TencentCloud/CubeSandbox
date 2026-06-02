@@ -1,5 +1,15 @@
--- AgentHub schema is normally applied by CubeMaster's embedded goose
--- migrations. Keep this file lock-protected for operator/manual repair use.
+-- Copyright (c) 2026 Tencent Inc.
+-- SPDX-License-Identifier: Apache-2.0
+--
+-- AgentHub digital assistant schema.
+--
+-- CubeMaster owns shared-database schema migration through embedded goose
+-- migrations. Keep this schema here so fresh installs and upgrades are
+-- recorded in goose_db_version instead of relying on one-click shell scripts.
+
+-- +goose NO TRANSACTION
+-- +goose Up
+
 CALL cubemaster_acquire_migration_lock('cubemaster_migration_0003_agenthub_instances', 60);
 
 CREATE TABLE IF NOT EXISTS `t_agenthub_instance` (
@@ -89,5 +99,16 @@ CREATE TABLE IF NOT EXISTS `t_agenthub_operation` (
   KEY `idx_agenthub_operation_agent` (`agent_id`, `created_at`),
   KEY `idx_agenthub_operation_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+SELECT RELEASE_LOCK('cubemaster_migration_0003_agenthub_instances');
+
+-- +goose Down
+
+CALL cubemaster_acquire_migration_lock('cubemaster_migration_0003_agenthub_instances', 60);
+
+DROP TABLE IF EXISTS `t_agenthub_operation`;
+DROP TABLE IF EXISTS `t_agenthub_template`;
+DROP TABLE IF EXISTS `t_agenthub_snapshot`;
+DROP TABLE IF EXISTS `t_agenthub_instance`;
 
 SELECT RELEASE_LOCK('cubemaster_migration_0003_agenthub_instances');
