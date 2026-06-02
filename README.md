@@ -5,7 +5,7 @@
 <h1 align="center">CubeSandbox</h1>
 
 <p align="center">
-  <strong>Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents</strong>
+  <strong>Instant, concurrent, secure, and lightweight sandbox service for AI Agents</strong>
 </p>
 
 <p align="center">
