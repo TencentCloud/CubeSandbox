@@ -58,6 +58,8 @@
 #define UDP_CSUM_OFF(LEN)		(sizeof(struct ethhdr) + LEN + offsetof(struct udphdr, check))
 #define UDP_SRC_OFF(LEN)		(sizeof(struct ethhdr) + LEN + offsetof(struct udphdr, source))
 #define UDP_DST_OFF(LEN)		(sizeof(struct ethhdr) + LEN + offsetof(struct udphdr, dest))
+#define ICMP_CSUM_OFF(LEN)		(sizeof(struct ethhdr) + LEN + offsetof(struct icmphdr, checksum))
+#define ICMP_ECHO_ID_OFF(LEN)		(sizeof(struct ethhdr) + LEN + offsetof(struct icmphdr, un.echo.id))
 
 /* IP and MAC address inside MVMs */
 const volatile __u32 mvm_inner_ip       = 0x0644fea9;	/* 169.254.68.6, network byte order */
