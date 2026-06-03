@@ -40,25 +40,28 @@ CubeSandbox is designed for AI Agent code execution, where fast cold-start and h
 | Storage | CoW reflink (XFS, `/data/cubelet/storage/`) |
 | Memory tracking | soft-dirty (`/proc/PID/clear_refs`) |
 
+The template used in tests was built with the following command (same as the default in [Quick Start](../../guide/quickstart.md)):
+
+```bash
+cubemastercli tpl create-from-image \
+  --image cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  --writable-layer-size 1G \
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --probe 49999
+```
+
 ---
 
 ## 3. Methodology
 
-### 3.1 General Conventions
-
-- **All times in milliseconds (ms)**
-- `wall`: end-to-end elapsed time for the entire batch (first request sent → last one done)
-- `per`: amortized per-operation time (wall ÷ number of successful operations in the round)
-- A **warm-up** round is run before each scenario and discarded, eliminating first-access page-cache spikes
-- Different rounds run serially — no cross-round concurrency — to avoid mutual interference
-
-### 3.2 Snapshot Creation
+### 3.1 Snapshot Creation
 
 Calls `POST /sandboxes/{id}/snapshots` on a running sandbox and records wall time from request dispatch to snapshot write completion.
 
 Concurrency test: N concurrent snapshot requests are issued against the **same sandbox**; `wall` = time until all complete, `per-snapshot` = amortized time per successful snapshot. CubeSandbox serializes snapshot requests on a single sandbox internally, so the number of successful snapshots may be less than the requested concurrency.
 
-**Dirty Page note:** CubeSandbox uses the soft-dirty mechanism to only save memory pages modified since the last snapshot. The "write size" in tests refers to data written to `/dev/shm` (tmpfs) to precisely control dirty-page count; the "Dirty Page" column is the actual bytes written as read from `vmm.log`.
+**Dirty Page note:** CubeSandbox uses the soft-dirty mechanism to only save memory pages modified since the last snapshot. The "write size" in tests refers to data written to `/dev/shm` (tmpfs) to precisely control dirty-page count; the "Dirty Page" column is the actual bytes written as read from `/data/log/CubeVmm/vmm.log`.
 
 ### 3.3 Create Sandbox from Snapshot
 
@@ -79,6 +82,14 @@ Calls `POST /sandboxes/{id}/clone` to fork a new sandbox from a running one, pre
 ---
 
 ## 4. Results
+
+### 4.0 General Conventions
+
+- **All times in milliseconds (ms)**
+- `wall`: end-to-end elapsed time for the entire batch (first request sent → last one done)
+- `per`: amortized per-operation time (wall ÷ number of successful operations in the round)
+- A **warm-up** round is run before each scenario and discarded, eliminating first-access page-cache spikes
+- Different rounds run serially — no cross-round concurrency — to avoid mutual interference
 
 ### 4.1 Snapshot Creation vs Concurrency
 
