@@ -15,27 +15,53 @@
 #include "tcp.h"
 #include "udp.h"
 
-static int tcp_nat_proxy(struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4, struct mvm_port *mvm_port)
+static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4,
+			 struct mvm_port *mvm_port)
 {
-	__u32 old_csum, new_csum;
-	struct csum_buff old_buff = {}, new_buff = {};
+	__u32 old_daddr, new_daddr, tcp_csum_off;
+	__u16 old_dport, new_dport;
+	__u16 ip_hlen;
+	__u64 flags;
+	long err;
 
-	/* update target port and L4 csum */
-	old_buff.addr = l3->daddr;
-	old_buff.port = l4->dest;
-	new_buff.addr = mvm_inner_ip;
-	new_buff.port = mvm_port->listen_port;
-	old_csum = l4->check;
-	new_csum = bpf_csum_diff((void *)&old_buff, sizeof(old_buff), (void *)&new_buff, sizeof(new_buff), ~old_csum);
-	l4->check = csum_fold(new_csum);
-	l4->dest = mvm_port->listen_port;
+	old_daddr = l3->daddr;
+	new_daddr = mvm_inner_ip;
+	old_dport = l4->dest;
+	new_dport = mvm_port->listen_port;
 
-	/* update target addr and L3 csum */
-	rewrite_l3_addr(l3, &l3->daddr, mvm_inner_ip);
+	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
+	ip_hlen <<= 2;
+	tcp_csum_off = TCP_CSUM_OFF(ip_hlen);
 
-	/* update L2 addrs */
+	/* update L2 first: csum/store helpers may invalidate packet pointers */
 	set_mac_pair(l2, cubegw0_macaddr_p1, cubegw0_macaddr_p2,
 		     mvm_macaddr_p1, mvm_macaddr_p2);
+
+	/* update TCP csum: IP daddr is part of pseudo-header, so BPF_F_PSEUDO_HDR */
+	flags = BPF_F_PSEUDO_HDR | sizeof(old_daddr);
+	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_daddr, new_daddr, flags);
+	if (err)
+		return TC_ACT_OK;
+
+	/* update TCP csum for port change (not part of pseudo-header) */
+	flags = sizeof(old_dport);
+	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_dport, new_dport, flags);
+	if (err)
+		return TC_ACT_OK;
+
+	/* write new TCP destination port */
+	err = bpf_skb_store_bytes(skb, TCP_DST_OFF(ip_hlen), &new_dport, sizeof(new_dport), 0);
+	if (err)
+		return TC_ACT_OK;
+
+	/* update IP csum and write new daddr */
+	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
+	if (err)
+		return TC_ACT_OK;
+
+	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
+	if (err)
+		return TC_ACT_OK;
 
 	return bpf_redirect(mvm_port->ifindex, 0);
 }
@@ -60,12 +86,15 @@ static __always_inline struct nat_session *lookup_session(const struct session_k
 
 static int tcp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4)
 {
-	struct csum_buff old_buff = {}, new_buff = {};
-	__u32 old_csum, new_csum;
+	__u32 old_daddr, new_daddr, tcp_csum_off;
+	__u16 old_dport, new_dport;
 	struct session_key key = {};
 	struct nat_session *sess;
 	bool syn, ack, fin, rst;
+	__u16 ip_hlen;
+	__u64 flags;
 	__u64 now;
+	long err;
 
 	key.src_ip = l3->saddr;
 	key.dst_ip = l3->daddr;
@@ -85,33 +114,58 @@ static int tcp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	rst = l4->rst;
 	update_session(IP_CT_DIR_REPLY, sess, now, syn, ack, fin, rst);
 
-	/* update L4 */
-	old_buff.addr = l3->daddr;
-	old_buff.port = l4->dest;
-	new_buff.addr = mvm_inner_ip;
-	new_buff.port = sess->vm_port;
-	old_csum = l4->check;
-	new_csum = bpf_csum_diff((void *)&old_buff, sizeof(old_buff), (void *)&new_buff, sizeof(new_buff), ~old_csum);
-	l4->check = csum_fold(new_csum);
-	l4->dest = sess->vm_port;
+	old_daddr = l3->daddr;
+	new_daddr = mvm_inner_ip;
+	old_dport = l4->dest;
+	new_dport = sess->vm_port;
 
-	/* update L3 */
-	rewrite_l3_addr(l3, &l3->daddr, mvm_inner_ip);
+	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
+	ip_hlen <<= 2;
+	tcp_csum_off = TCP_CSUM_OFF(ip_hlen);
 
-	/* update L2 */
+	/* update L2 first: csum/store helpers may invalidate packet pointers */
 	set_mac_pair(l2, cubegw0_macaddr_p1, cubegw0_macaddr_p2,
 		     mvm_macaddr_p1, mvm_macaddr_p2);
+
+	/* update TCP csum: IP daddr is part of pseudo-header, so BPF_F_PSEUDO_HDR */
+	flags = BPF_F_PSEUDO_HDR | sizeof(old_daddr);
+	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_daddr, new_daddr, flags);
+	if (err)
+		return TC_ACT_OK;
+
+	/* update TCP csum for port change (not part of pseudo-header) */
+	flags = sizeof(old_dport);
+	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_dport, new_dport, flags);
+	if (err)
+		return TC_ACT_OK;
+
+	/* write new TCP destination port */
+	err = bpf_skb_store_bytes(skb, TCP_DST_OFF(ip_hlen), &new_dport, sizeof(new_dport), 0);
+	if (err)
+		return TC_ACT_OK;
+
+	/* update IP csum and write new daddr */
+	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
+	if (err)
+		return TC_ACT_OK;
+
+	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
+	if (err)
+		return TC_ACT_OK;
 
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 
 static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct udphdr *l4)
 {
-	struct csum_buff old_buff = {}, new_buff = {};
-	__u32 old_csum, new_csum;
+	__u32 old_daddr, new_daddr, udp_csum_off;
+	__u16 old_dport, new_dport, old_csum;
 	struct session_key key = {};
 	struct nat_session *sess;
+	__u16 ip_hlen;
+	__u64 flags;
 	__u64 now;
+	long err;
 
 	key.src_ip = l3->saddr;
 	key.dst_ip = l3->daddr;
@@ -127,36 +181,65 @@ static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	now = bpf_ktime_get_ns();
 	update_udp_session(IP_CT_DIR_REPLY, sess, now);
 
-	/* update L4 */
-	old_buff.addr = l3->daddr;
-	old_buff.port = l4->dest;
-	new_buff.addr = mvm_inner_ip;
-	new_buff.port = sess->vm_port;
+	old_daddr = l3->daddr;
+	new_daddr = mvm_inner_ip;
+	old_dport = l4->dest;
+	new_dport = sess->vm_port;
 	old_csum = l4->check;
-	if (old_csum) {
-		new_csum = bpf_csum_diff((void *)&old_buff, sizeof(old_buff), (void *)&new_buff, sizeof(new_buff),
-					 ~old_csum);
-		l4->check = csum_fold(new_csum) ?: 0xffff;
-	}
-	l4->dest = sess->vm_port;
 
-	/* update L3 */
-	rewrite_l3_addr(l3, &l3->daddr, mvm_inner_ip);
+	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
+	ip_hlen <<= 2;
+	udp_csum_off = UDP_CSUM_OFF(ip_hlen);
 
-	/* update L2 */
+	/* update L2 first: csum/store helpers may invalidate packet pointers */
 	set_mac_pair(l2, cubegw0_macaddr_p1, cubegw0_macaddr_p2,
 		     mvm_macaddr_p1, mvm_macaddr_p2);
+
+	/* update UDP csum only if it was non-zero (UDP csum is optional over IPv4).
+	 * BPF_F_MARK_MANGLED_0 keeps a 0 csum (= disabled) intact in case the
+	 * incremental update would yield 0; the helper rewrites it to 0xffff.
+	 * IP daddr is part of UDP pseudo-header, so BPF_F_PSEUDO_HDR is required.
+	 */
+	if (old_csum) {
+		flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(old_daddr);
+		err = bpf_l4_csum_replace(skb, udp_csum_off, old_daddr, new_daddr, flags);
+		if (err)
+			return TC_ACT_OK;
+
+		/* port is not part of pseudo-header */
+		flags = BPF_F_MARK_MANGLED_0 | sizeof(old_dport);
+		err = bpf_l4_csum_replace(skb, udp_csum_off, old_dport, new_dport, flags);
+		if (err)
+			return TC_ACT_OK;
+	}
+
+	/* write new UDP destination port */
+	err = bpf_skb_store_bytes(skb, UDP_DST_OFF(ip_hlen), &new_dport, sizeof(new_dport), 0);
+	if (err)
+		return TC_ACT_OK;
+
+	/* update IP csum and write new daddr */
+	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
+	if (err)
+		return TC_ACT_OK;
+
+	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
+	if (err)
+		return TC_ACT_OK;
 
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 
 static int icmp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct icmphdr *l4)
 {
-	struct icmp_id_buff old_id = {}, new_id = {};
-	__u32 old_csum, new_csum;
+	__u32 old_daddr, new_daddr, icmp_csum_off;
+	__u16 old_id, new_id;
 	struct session_key key = {};
 	struct nat_session *sess;
+	__u16 ip_hlen;
+	__u64 flags;
 	__u64 now;
+	long err;
 
 	/* Only handle Echo Reply inbound */
 	if (l4->type != ICMP_ECHOREPLY)
@@ -177,22 +260,41 @@ static int icmp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iph
 	now = bpf_ktime_get_ns();
 	update_icmp_session(IP_CT_DIR_REPLY, sess, now);
 
-	/* restore original ICMP identifier (no pseudo-header).
-	 * bpf_csum_diff requires 4-byte aligned sizes, use icmp_id_buff.
-	 */
-	old_id.id = l4->un.echo.id;
-	new_id.id = sess->vm_port;
-	old_csum = l4->checksum;
-	new_csum = bpf_csum_diff((void *)&old_id, sizeof(old_id), (void *)&new_id, sizeof(new_id), ~old_csum);
-	l4->checksum = csum_fold(new_csum) ?: 0xffff;
-	l4->un.echo.id = sess->vm_port;
+	old_daddr = l3->daddr;
+	new_daddr = mvm_inner_ip;
+	old_id = l4->un.echo.id;
+	new_id = sess->vm_port;
 
-	/* update L3 destination address */
-	rewrite_l3_addr(l3, &l3->daddr, mvm_inner_ip);
+	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
+	ip_hlen <<= 2;
+	icmp_csum_off = ICMP_CSUM_OFF(ip_hlen);
 
-	/* update L2 */
+	/* update L2 first: csum/store helpers may invalidate packet pointers */
 	set_mac_pair(l2, cubegw0_macaddr_p1, cubegw0_macaddr_p2,
 		     mvm_macaddr_p1, mvm_macaddr_p2);
+
+	/* update ICMP csum: ICMP has no pseudo-header, so no BPF_F_PSEUDO_HDR.
+	 * Only the echo identifier change affects the csum (IP daddr is not
+	 * covered by ICMP checksum).
+	 */
+	flags = sizeof(old_id);
+	err = bpf_l4_csum_replace(skb, icmp_csum_off, old_id, new_id, flags);
+	if (err)
+		return TC_ACT_OK;
+
+	/* write the restored ICMP echo identifier */
+	err = bpf_skb_store_bytes(skb, ICMP_ECHO_ID_OFF(ip_hlen), &new_id, sizeof(new_id), 0);
+	if (err)
+		return TC_ACT_OK;
+
+	/* update IP csum and write new daddr */
+	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
+	if (err)
+		return TC_ACT_OK;
+
+	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
+	if (err)
+		return TC_ACT_OK;
 
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
@@ -235,7 +337,7 @@ static int do_tcp_nat(struct __sk_buff *skb)
 	dport = l4->dest;
 	mvm_port = bpf_map_lookup_elem(&remote_port_mapping, &dport);
 	if (mvm_port)
-		return tcp_nat_proxy(l2, l3, l4, mvm_port);
+		return tcp_nat_proxy(skb, l2, l3, l4, mvm_port);
 
 	return tcp_nat_session(skb, l2, l3, l4);
 }
