@@ -1,5 +1,5 @@
 ---
-title: trpc-agent-go: A Secure Code Execution Backend Powered by Cube Sandbox
+title: "trpc-agent-go: A Secure Code Execution Backend Powered by Cube Sandbox"
 author: joeyczheng
 date: 2026-06-03
 tags:

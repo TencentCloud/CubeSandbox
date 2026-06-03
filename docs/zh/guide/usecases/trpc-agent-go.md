@@ -1,5 +1,5 @@
 ---
-title: trpc-agent-go：基于 Cube Sandbox 的安全代码执行后端
+title: "trpc-agent-go：基于 Cube Sandbox 的安全代码执行后端"
 author: joeyczheng
 date: 2026-06-03
 tags:

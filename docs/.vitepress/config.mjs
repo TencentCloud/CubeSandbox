@@ -158,7 +158,13 @@ export default withMermaid(defineConfig({
                     { text: 'Templates', link: '/guide/troubleshooting/templates' }
                   ]
                 },
-                { text: 'Use Cases', link: '/guide/usecases/' },
+                {
+                  text: 'Use Cases',
+                  link: '/guide/usecases/',
+                  items: [
+                    { text: 'trpc-agent-go', link: '/guide/usecases/trpc-agent-go' }
+                  ]
+                },
                 { text: 'Integrations', link: '/guide/integrations/' }
               ]
             },
@@ -254,7 +260,13 @@ export default withMermaid(defineConfig({
                     { text: '模板相关', link: '/zh/guide/troubleshooting/templates' }
                   ]
                 },
-                { text: '应用案例', link: '/zh/guide/usecases/' },
+                {
+                  text: '应用案例',
+                  link: '/zh/guide/usecases/',
+                  items: [
+                    { text: 'trpc-agent-go', link: '/zh/guide/usecases/trpc-agent-go' }
+                  ]
+                },
                 { text: '生态集成', link: '/zh/guide/integrations/' }
               ]
             },
