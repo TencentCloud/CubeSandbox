@@ -27,7 +27,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${WORK_DIR:-${SCRIPT_DIR}/.workdir}"
-IMAGE_URL="${IMAGE_URL:-https://mirrors.tencent.com/opencloudos/9/images/qcow2/x86_64/OpenCloudOS-GenericCloud-9.4-20251120.0.x86_64.qcow2}"
+IMAGE_URL="${IMAGE_URL:-https://mirrors.tencent.com/opencloudos/9.6/images/qcow2/x86_64/20260514.2/OpenCloudOS-GenericCloud-9.6-20260514.2.x86_64.qcow2}"
 IMAGE_NAME="$(basename "${IMAGE_URL}")"
 IMAGE_PATH="${IMAGE_PATH:-${WORK_DIR}/${IMAGE_NAME}}"
 
