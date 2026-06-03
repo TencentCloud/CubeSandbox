@@ -12,8 +12,8 @@ User=root
 WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 Environment=CUBE_MASTER_CONFIG_PATH=/usr/local/services/cubetoolbox/CubeMaster/conf.yaml
-ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cubemaster-start.sh
-ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/cubemaster-postcheck.sh
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cubemaster-start.sh
+ExecStartPost=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cubemaster-postcheck.sh
 Restart=on-failure
 RestartSec=2s
 # Override short distro defaults explicitly so SIGTERM has room to drain DB

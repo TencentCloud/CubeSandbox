@@ -10,8 +10,8 @@ Type=simple
 User=root
 WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
-ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/network-agent-start.sh
-ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/network-agent-postcheck.sh
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/network-agent-start.sh
+ExecStartPost=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/network-agent-postcheck.sh
 Restart=on-failure
 RestartSec=2s
 # Override short distro defaults explicitly.

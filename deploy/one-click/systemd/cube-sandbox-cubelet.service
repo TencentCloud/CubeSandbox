@@ -8,14 +8,14 @@ PartOf=cube-sandbox-control.target cube-sandbox-compute.target
 
 [Service]
 Type=forking
-ExecStartPre=/usr/local/services/cubetoolbox/scripts/systemd/prepare-compute-role.sh
+ExecStartPre=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/prepare-compute-role.sh
 User=root
 WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 PIDFile=/run/cube-sandbox-systemd/cubelet.pid
 Delegate=yes
 KillMode=process
-ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cubelet-start.sh
+ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cubelet-start.sh
 ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/cubelet-stop.sh
 Restart=on-failure
 RestartSec=2s

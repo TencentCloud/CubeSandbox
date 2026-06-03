@@ -442,6 +442,13 @@ else
   log "primary network interface not detected; keeping packaged Cubelet eth_name"
 fi
 
+# Validate cubevs CIDR from env var (if set)
+CUBE_SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-}"
+if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR}" ]]; then
+  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}"
+  export CUBE_SANDBOX_NETWORK_CIDR
+fi
+
 install_required_dependencies
 check_install_preflight
 if needs_docker_for_install; then
@@ -560,6 +567,49 @@ if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
   else
     log "WARNING: Cubelet config missing eth_name key; skipped NIC patch (${cubelet_config})"
   fi
+fi
+
+# Patch cubevs CIDR if env var is set
+if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
+  cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"
+
+  # SECURITY: Refuse to patch a symlink -- sed -i follows symlinks, which
+  # could allow an attacker with write access to ONE_CLICK_INSTALL_PREFIX
+  # to overwrite arbitrary files via symlink.
+  if [[ -L "${cubelet_config}" ]]; then
+    die "refusing to patch a symlink target: ${cubelet_config} -> $(readlink "${cubelet_config}")"
+  fi
+
+  if rg -q '^[[:space:]]*cidr = "' "${cubelet_config}"; then
+    # NOTE: Use '|' as sed delimiter -- CIDR values always contain '/', so
+    # the default '/' delimiter would break the sed command.
+    sed -i "s|cidr = \"[^\"]*\"|cidr = \"${CUBE_SANDBOX_NETWORK_CIDR}\"|" "${cubelet_config}"
+    if ! grep -Fq "cidr = \"${CUBE_SANDBOX_NETWORK_CIDR}\"" "${cubelet_config}"; then
+      log "WARNING: failed to patch cidr in Cubelet config (${cubelet_config})"
+    fi
+    log "patched cubevs CIDR: ${CUBE_SANDBOX_NETWORK_CIDR}"
+  else
+    log "WARNING: Cubelet config missing cidr key; skipped CIDR patch (${cubelet_config})"
+  fi
+
+  # Persist CIDR to env file AFTER successful config patch (defense-in-depth:
+  # env file and config.toml should always be in sync; if the script crashes
+  # between patching and persistence, the env file stays clean).
+  if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
+    upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR" "${CUBE_SANDBOX_NETWORK_CIDR}"
+  fi
+  if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-}" ]]; then
+    case "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}" in
+      0|1) ;;
+      *) die "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK must be 0 or 1 (got: '${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}')" ;;
+    esac
+    upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK" "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}"
+  fi
+else
+  # Log current CIDR for debugging
+  current_cidr=$(rg '^[[:space:]]*cidr = "' "${INSTALL_PREFIX}/Cubelet/config/config.toml" 2>/dev/null \
+    | sed -nE 's/.*"([^"]+)".*/\1/p' || echo "unknown")
+  log "using cubevs CIDR from config.toml: ${current_cidr} (CUBE_SANDBOX_NETWORK_CIDR not set)"
 fi
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
