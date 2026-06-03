@@ -9,10 +9,13 @@ source "${SCRIPT_DIR}/common.sh"
 
 require_root
 require_cmd ip
+require_cmd awk
 
 COREDNS_DIR="${TOOLBOX_ROOT}/coredns"
 DNS_MODE_FILE="${COREDNS_DIR}/host-dns-mode"
 DNS_IFACE_FILE="${COREDNS_DIR}/host-dns-interface"
+DEFAULT_COREDNS_BIND_ADDR="${CUBE_PROXY_COREDNS_BIND_ADDR:-127.0.0.54}"
+RESOLVED_COREDNS_BIND_ADDR="${CUBE_PROXY_RESOLVED_DNS_ADDR:-169.254.254.53}"
 NM_MAIN_CONF="/etc/NetworkManager/conf.d/90-cubeproxy-dns.conf"
 NM_DOMAIN_CONF="/etc/NetworkManager/dnsmasq.d/90-cubeproxy-cube-app.conf"
 
@@ -32,12 +35,10 @@ link_is_dummy() {
 }
 
 is_stub_nameserver() {
-  local nameserver="$1"
-  [[ -n "${nameserver}" ]] || return 0
-  [[ "${nameserver}" == 127.* ]] && return 0
-  [[ "${nameserver}" == ::1 ]] && return 0
-  [[ "${nameserver}" == 0:0:0:0:0:0:0:1 ]] && return 0
-  return 1
+  is_reserved_nameserver \
+    "${1:-}" \
+    "${DEFAULT_COREDNS_BIND_ADDR}" \
+    "${RESOLVED_COREDNS_BIND_ADDR}"
 }
 
 copy_non_stub_resolv_conf_if_needed() {

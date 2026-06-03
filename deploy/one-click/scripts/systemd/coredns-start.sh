@@ -35,13 +35,10 @@ if command -v resolvectl >/dev/null 2>&1; then
 fi
 
 is_stub_nameserver() {
-  local nameserver="$1"
-  [[ -n "${nameserver}" ]] || return 0
-  [[ "${nameserver}" == 127.* ]] && return 0
-  [[ "${nameserver}" == ::1 ]] && return 0
-  [[ "${nameserver}" == 0:0:0:0:0:0:0:1 ]] && return 0
-  [[ "${nameserver}" == "${COREDNS_BIND_ADDR}" ]] && return 0
-  return 1
+  is_reserved_nameserver \
+    "${1:-}" \
+    "${COREDNS_BIND_ADDR}" \
+    "${RESOLVED_COREDNS_BIND_ADDR}"
 }
 
 write_upstream_resolv_conf() {

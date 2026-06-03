@@ -9,6 +9,7 @@ source "${SCRIPT_DIR}/common.sh"
 
 require_root
 require_cmd ip
+require_cmd awk
 
 COREDNS_DIR="${TOOLBOX_ROOT}/coredns"
 DNS_MODE_FILE="${COREDNS_DIR}/host-dns-mode"
@@ -75,10 +76,10 @@ wait_for_udp_listen() {
   return 1
 }
 
-# Render /etc/resolv.conf so its only nameserver is the dummy-link IP
-# we just bound dnsmasq to, while preserving search/options pulled from
-# NetworkManager's non-stub snapshot. Docker daemon will then propagate
-# this non-loopback nameserver into every container it spawns.
+# Render /etc/resolv.conf so the dummy-link IP is the primary nameserver,
+# while preserving search/options and keeping one upstream fallback for
+# recovery. Docker daemon will then propagate this non-loopback resolver
+# into every container it spawns without making host DNS single-homed.
 write_host_resolv_conf() {
   local primary="$1"
   local tmp="/etc/resolv.conf.cube-proxy.tmp"
@@ -88,14 +89,52 @@ write_host_resolv_conf() {
     "/run/systemd/resolve/resolv.conf"
     "/etc/resolv.conf"
   )
+  local src
+  local line
+  local nameserver
+  local fallback=""
+  local metadata=""
+
   : > "${tmp}"
   printf 'nameserver %s\n' "${primary}" >> "${tmp}"
-  local src
+
   for src in "${candidates[@]}"; do
     [[ -f "${src}" ]] || continue
-    awk '/^(search|domain|options|sortlist) /' "${src}" >> "${tmp}"
-    break
+
+    if [[ -z "${metadata}" ]]; then
+      metadata="$(awk '/^(search|domain|options|sortlist) / { print }' "${src}" 2>/dev/null || true)"
+    fi
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      case "${line}" in
+        nameserver\ *)
+          nameserver="${line#nameserver }"
+          nameserver="${nameserver%%#*}"
+          nameserver="${nameserver%%;*}"
+          nameserver="$(printf '%s' "${nameserver}" | awk '{print $1}')"
+          if ! is_reserved_nameserver \
+            "${nameserver}" \
+            "${primary}" \
+            "${DEFAULT_COREDNS_BIND_ADDR}" \
+            "${RESOLVED_COREDNS_BIND_ADDR}"; then
+            fallback="${nameserver}"
+            break
+          fi
+          ;;
+      esac
+    done < "${src}"
+
+    [[ -n "${fallback}" ]] && break
   done
+
+  if [[ -n "${fallback}" ]]; then
+    printf 'nameserver %s\n' "${fallback}" >> "${tmp}"
+  fi
+
+  if [[ -n "${metadata}" ]]; then
+    printf '%s\n' "${metadata}" >> "${tmp}"
+  fi
+
   install -m 0644 "${tmp}" /etc/resolv.conf
   rm -f "${tmp}"
 }
@@ -162,6 +201,10 @@ EOF
 
   wait_for_udp_listen "${RESOLVED_COREDNS_BIND_ADDR}" 53 30 || \
     die "dnsmasq did not bind ${RESOLVED_COREDNS_BIND_ADDR}:53 after NetworkManager restart"
+  # Keep the host on its original upstream DNS until CoreDNS is actually
+  # listening. Otherwise a failed/slow CoreDNS start can strand docker pulls.
+  wait_for_udp_port "${COREDNS_BIND_ADDR}" 53 20 1 || \
+    die "coredns did not become ready on ${COREDNS_BIND_ADDR}:53; refusing to switch host resolv.conf"
   write_host_resolv_conf "${RESOLVED_COREDNS_BIND_ADDR}"
 
   printf 'networkmanager-dnsmasq\n' > "${DNS_MODE_FILE}"

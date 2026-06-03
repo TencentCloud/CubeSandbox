@@ -72,6 +72,22 @@ ensure_executable() {
   [[ -x "${path}" ]] || die "required executable not found: ${path}"
 }
 
+is_reserved_nameserver() {
+  local nameserver="${1:-}"
+  shift || true
+
+  [[ -n "${nameserver}" ]] || return 0
+  [[ "${nameserver}" == 127.* ]] && return 0
+  [[ "${nameserver}" == "::1" ]] && return 0
+  [[ "${nameserver}" == "0:0:0:0:0:0:0:1" ]] && return 0
+
+  local reserved
+  for reserved in "$@"; do
+    [[ -n "${reserved}" && "${nameserver}" == "${reserved}" ]] && return 0
+  done
+  return 1
+}
+
 load_runtime_env() {
   local had_nounset=0
   if [[ ! -f "${ENV_FILE}" ]]; then
