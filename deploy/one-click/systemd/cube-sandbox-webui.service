@@ -14,7 +14,7 @@ EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 ExecStartPre=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/webui-prepare.sh
 ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/webui-start.sh
 ExecStartPost=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/webui-postcheck.sh
-ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/webui-stop.sh
+ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/webui-stop.sh
 Restart=on-failure
 RestartSec=2s
 # Override short distro defaults explicitly.

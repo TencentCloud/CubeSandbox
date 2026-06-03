@@ -14,7 +14,7 @@ EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 ExecStartPre=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/redis-prepare.sh
 ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/redis-start.sh
 ExecStartPost=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/redis-postcheck.sh
-ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/redis-stop.sh
+ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/redis-stop.sh
 Restart=on-failure
 RestartSec=2s
 # Override short distro defaults explicitly.

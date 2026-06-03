@@ -14,7 +14,7 @@ EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 ExecStartPre=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-prepare.sh
 ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-start.sh
 ExecStartPost=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-postcheck.sh
-ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-stop.sh
+ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-stop.sh
 Restart=on-failure
 RestartSec=2s
 # Override distro defaults explicitly: some distros (e.g. OpenCloudOS) ship

@@ -13,7 +13,7 @@ WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 RemainAfterExit=yes
 ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/dns-host-route-up.sh
-ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/dns-host-route-down.sh
+ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/dns-host-route-down.sh
 TimeoutStartSec=60s
 TimeoutStopSec=30s
 
