@@ -450,7 +450,13 @@ func restoreTap(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*ta
 		PortMappings: append([]PortMapping(nil), tap.PortMappings...),
 	}
 
-	if restored.File == nil {
+	// If the tap is currently in use (IFF_LOWER_UP set), another process
+	// (typically sandbox spawned by cubelet) holds the original fd. Issuing
+	// TUNSETIFF here would fail with EBUSY for IFF_ONE_QUEUE taps, so we skip
+	// fd acquisition. Callers that actually need the fd later (e.g. fresh
+	// allocation from the pool, or GetTapFile) will retry once the tap is
+	// idle again.
+	if restored.File == nil && !restored.InUse {
 		restored.File, err = getTapFd(name)
 		if err != nil {
 			return nil, err

@@ -43,5 +43,11 @@ func (s *localService) GetTapFile(sandboxID, tapName string) (*os.File, error) {
 		}
 		state.tap = tap
 	}
+	// restoreTap intentionally skips fd acquisition when the tap is held by
+	// another process. If we still have no fd at this point, surface a clear
+	// error rather than handing back a nil file.
+	if state.tap.File == nil {
+		return nil, fmt.Errorf("tap fd unavailable for sandbox %q: tap %s is currently held by another process", sandboxID, state.TapName)
+	}
 	return state.tap.File, nil
 }
