@@ -46,6 +46,6 @@ lang: zh-CN
 
 ## 已发布文章
 
-| 标题 | 作者 | 日期 | 标签 |
-| --- | --- | --- | --- |
-| _在这里补充你的文章_ | - | - | - |
+| 标题 | 作者         | 日期 | 标签 |
+| --- |------------| --- | --- |
+| [trpc-agent-go：基于 Cube Sandbox 的安全代码执行后端](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |

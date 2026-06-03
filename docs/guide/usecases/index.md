@@ -46,6 +46,6 @@ lang: en-US
 
 ## Published articles
 
-| Title | Author | Date | Tags |
-| --- | --- | --- | --- |
-| _Add your article here_ | - | - | - |
+| Title | Author     | Date | Tags |
+| --- |------------| --- | --- |
+| [trpc-agent-go: A Secure Code Execution Backend Powered by Cube Sandbox](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |
