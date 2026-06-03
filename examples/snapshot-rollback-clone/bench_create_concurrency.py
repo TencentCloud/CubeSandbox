@@ -1,12 +1,21 @@
 # Copyright (c) 2024 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 """
-bench_create_concurrency.py — Create-sandbox-from-snapshot latency vs concurrency benchmark.
+bench_create_concurrency.py — Create-sandbox-from-snapshot latency benchmark (single tier).
 
-For each concurrency level, creates N sandboxes in parallel from the same snapshot
-and measures wall time + per-sandbox amortized time.
+Creates `concurrency` sandboxes in parallel from one snapshot and reports
+wall time + per-sandbox amortized time over N rounds.
+
+This script provides the mechanism for ONE concurrency tier per invocation,
+mirroring cube-bench. Sweep multiple tiers by invoking it repeatedly, e.g.:
+
+    python bench_create_concurrency.py -c 1
+    python bench_create_concurrency.py -c 10
+    python bench_create_concurrency.py -c 20
+    python bench_create_concurrency.py -c 50
 """
 
+import argparse
 import math
 import statistics
 import sys
@@ -16,9 +25,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from cubesandbox import Sandbox
 from env import TEMPLATE_ID
 
-CONCURRENCY_LEVELS = [1, 10, 20]
-ROUNDS = 3
-SETTLE_SECS = 1.0
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("-c", "--concurrency", type=int, default=1,
+                   help="number of concurrent create requests (default: 1)")
+    p.add_argument("-n", "--rounds", type=int, default=3,
+                   help="measured rounds after warm-up (default: 3)")
+    p.add_argument("-s", "--settle-secs", type=float, default=1.0,
+                   help="sleep seconds between rounds (default: 1.0)")
+    p.add_argument("--no-header", action="store_true",
+                   help="suppress the table header (useful when sweeping)")
+    return p.parse_args()
 
 
 def prepare_snapshot() -> str:
@@ -45,35 +64,44 @@ def run_round(snap_id: str, concurrency: int) -> dict:
     return {"wall_ms": wall_ms, "per_ms": wall_ms / concurrency}
 
 
-print(f"{'concurrency':>11}  {'n_total':>7}  {'rounds':>6}  {'wall_avg':>10}  {'wall_min':>10}  "
-      f"{'wall_p50':>10}  {'wall_p80':>10}  {'wall_max':>10}  {'per_avg':>10}")
-print("-" * 105)
+def percentile(data: list, p: float) -> float:
+    s = sorted(data)
+    k = int(math.ceil(len(s) * p / 100.0)) - 1
+    return s[max(0, min(k, len(s) - 1))]
 
-for c in CONCURRENCY_LEVELS:
+
+def main():
+    args = parse_args()
+
+    if not args.no_header:
+        print(f"{'concurrency':>11}  {'n_total':>7}  {'rounds':>6}  {'wall_avg':>10}  {'wall_min':>10}  "
+              f"{'wall_p95':>10}  {'wall_max':>10}  {'per_avg':>10}")
+        print("-" * 95)
+
     snap_id = prepare_snapshot()
 
     # warm-up: first restore eliminates page-cache cold-miss (~150 ms spike)
     wb = Sandbox.create(template=snap_id)
     wb.kill()
-    time.sleep(SETTLE_SECS)
+    time.sleep(args.settle_secs)
 
     walls, pers = [], []
-    for _ in range(ROUNDS):
-        r = run_round(snap_id, c)
+    for _ in range(args.rounds):
+        r = run_round(snap_id, args.concurrency)
         walls.append(r["wall_ms"])
         pers.append(r["per_ms"])
-        time.sleep(SETTLE_SECS)
+        time.sleep(args.settle_secs)
 
     Sandbox.delete_snapshot(snap_id)
 
-    walls_sorted = sorted(walls)
-    p50 = walls_sorted[len(walls_sorted) // 2]
-    p80 = walls_sorted[min(int(math.ceil(len(walls_sorted) * 0.8)) - 1, len(walls_sorted) - 1)]
-
     print(
-        f"{c:>11}  {c:>7}  {ROUNDS:>6}  "
+        f"{args.concurrency:>11}  {args.concurrency:>7}  {args.rounds:>6}  "
         f"{statistics.mean(walls):>10.1f}  {min(walls):>10.1f}  "
-        f"{p50:>10.1f}  {p80:>10.1f}  {max(walls):>10.1f}  "
+        f"{percentile(walls, 95):>10.1f}  {max(walls):>10.1f}  "
         f"{statistics.mean(pers):>10.1f}"
     )
     sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()
