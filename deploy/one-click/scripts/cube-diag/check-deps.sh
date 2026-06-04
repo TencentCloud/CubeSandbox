@@ -282,7 +282,8 @@ check_filesystem() {
       pass "xfs_cubesandbox" "${CUBE_DATA_PATH} is XFS"
     else
       fail "xfs_cubesandbox" \
-        "${CUBE_DATA_PATH} is ${fstype}; Cube requires XFS for CoW/reflink (pool_type=copy_reflink)"
+        "${CUBE_DATA_PATH} is ${fstype}; Cube requires XFS for CoW/reflink (pool_type=copy_reflink)
+  Troubleshooting: https://github.com/TencentCloud/CubeSandbox/issues/311"
     fi
 
     local free_gb

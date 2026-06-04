@@ -64,7 +64,7 @@ Choose the format for your Linux distribution:
 
 #### RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora)
 
-In the release attachments, find `kernel-*cube.pvm.host*.x86_64.rpm`, right-click and copy the download link:
+Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `kernel-*cube.pvm.host*.x86_64.rpm`, right-click and copy the download link:
 
 ```bash
 # Replace the URL below with the actual download link you copied from the Releases page
@@ -95,7 +95,7 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/pvm/grub/
 
 #### DEB-based (Ubuntu, Debian)
 
-In the release attachments, find `linux-image-*cube.pvm.host*_amd64.deb`, right-click and copy the download link:
+Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `linux-image-*cube.pvm.host*_amd64.deb`, right-click and copy the download link:
 
 ```bash
 # Replace the URL below with the actual download link you copied from the Releases page

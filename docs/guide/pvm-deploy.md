@@ -56,9 +56,7 @@ Choose the package format that matches your Linux distribution:
 
 ### RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora)
 
-Find the following file in the release assets, right-click it to copy its download link:
-
-- `kernel-*cube.pvm.host*.x86_64.rpm` (kernel package)
+Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `kernel-*cube.pvm.host*.x86_64.rpm`, right-click and copy the download link:
 
 ```bash
 # Replace the URLs below with the actual download links copied from the Releases page
@@ -90,9 +88,7 @@ bash <(curl -fsSL \
 
 ### DEB-based (Ubuntu, Debian)
 
-Find the following file in the release assets, right-click it to copy its download link:
-
-- `linux-image-*cube.pvm.host*_amd64.deb` (kernel package)
+Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `linux-image-*cube.pvm.host*_amd64.deb`, right-click and copy the download link:
 
 ```bash
 # Replace the URLs below with the actual download links copied from the Releases page
