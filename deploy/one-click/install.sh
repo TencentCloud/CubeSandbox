@@ -191,6 +191,94 @@ check_hardware_preflight() {
   fi
 }
 
+# Check PVM host consistency: if the kvm_pvm kernel module is loaded,
+# CUBE_PVM_ENABLE must be set to 1. Otherwise the installer will use the
+# ordinary guest kernel (vmlinux) instead of the PVM-optimized one
+# (vmlinux-pvm), which causes VM template creation to fail later with
+# minimal error messages.
+#
+# This check runs after check_hardware_preflight (which validates /dev/kvm)
+# and before any filesystem or cgroup checks, so the user gets a clear
+# fail-fast message before the installer touches the system.
+check_pvm_consistency_preflight() {
+  local has_kvm_pvm=0
+  if lsmod 2>/dev/null | grep -qE '^kvm_pvm[[:space:]]'; then
+    has_kvm_pvm=1
+  fi
+
+  # Not a PVM host — nothing to check.
+  if [[ "${has_kvm_pvm}" -eq 0 ]]; then
+    return 0
+  fi
+
+  # PVM host detected, CUBE_PVM_ENABLE is already set correctly.
+  if [[ "${CUBE_PVM_ENABLE}" == "1" ]]; then
+    log "PVM host detected (kvm_pvm loaded) and CUBE_PVM_ENABLE=1 — proceeding with PVM guest kernel."
+    return 0
+  fi
+
+  # PVM host detected but CUBE_PVM_ENABLE is NOT set to 1.
+  # This is the dangerous case: the installer will use the ordinary guest
+  # kernel, and VM template creation will fail later.
+
+  cat >&2 <<'EOF'
+
+╔══════════════════════════════════════════════════════════════════╗
+║  [!!] PVM HOST DETECTED -- CUBE_PVM_ENABLE NOT SET             ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  The kvm_pvm kernel module is loaded on this host -- this        ║
+║  machine is running as a PVM host.                               ║
+║                                                                  ║
+║  However, CUBE_PVM_ENABLE is not set to 1. The installer will    ║
+║  use the ordinary guest kernel (vmlinux) instead of the PVM-     ║
+║  optimized guest kernel (vmlinux-pvm).                           ║
+║                                                                  ║
+║  [!!] VM template creation will fail with minimal error          ║
+║       messages if the wrong guest kernel is used.                ║
+║                                                                  ║
+║  Solution: re-run with CUBE_PVM_ENABLE=1:                        ║
+║                                                                  ║
+║    CUBE_PVM_ENABLE=1 ./install.sh                                ║
+║                                                                  ║
+║  To bypass this check (not recommended):                         ║
+║                                                                  ║
+║    ONE_CLICK_SKIP_PVM_CHECK=1 ./install.sh                       ║
+║                                                                  ║
+║  Docs: https://cubesandbox.com/guide/pvm-deploy.html             ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+EOF
+
+  # Check if the user has explicitly opted to skip this check.
+  if [[ "${ONE_CLICK_SKIP_PVM_CHECK:-0}" == "1" ]]; then
+    log "ONE_CLICK_SKIP_PVM_CHECK=1 — bypassing PVM consistency check (not recommended)."
+    return 0
+  fi
+
+  # Non-interactive environment: fail fast with a clear error.
+  if [[ ! -t 0 ]]; then
+    die "PVM host detected but CUBE_PVM_ENABLE is not 1, and stdin is not a terminal.
+Re-run with CUBE_PVM_ENABLE=1 to use the PVM guest kernel, or set
+ONE_CLICK_SKIP_PVM_CHECK=1 to bypass this check (not recommended).
+See: https://cubesandbox.com/guide/pvm-deploy.html"
+  fi
+
+  # Interactive: ask the user to confirm.
+  printf '\n%s' "Proceed WITHOUT PVM guest kernel support? This may cause VM template failures. [y/N]: "
+  read -r reply
+  case "${reply}" in
+    [Yy]|[Yy][Ee][Ss])
+      log "User acknowledged the risk — proceeding with ordinary guest kernel on PVM host."
+      ;;
+    *)
+      die "Installation aborted. Re-run with CUBE_PVM_ENABLE=1 to use the PVM guest kernel.
+See: https://cubesandbox.com/guide/pvm-deploy.html"
+      ;;
+  esac
+}
+
 check_cubelet_fs_preflight() {
   local cubelet_dir="/data/cubelet"
 
@@ -428,6 +516,7 @@ require_root
 # Run critical preflight checks that do not depend on dependency installation first
 # to ensure we fail fast before installing or modifying any local system packages.
 check_hardware_preflight
+check_pvm_consistency_preflight
 check_cubelet_fs_preflight
 check_cgroup_cpu_preflight
 
