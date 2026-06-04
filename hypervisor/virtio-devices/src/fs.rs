@@ -300,20 +300,21 @@ impl FsEpollHandler {
 
     fn return_descriptor(queue: &mut Queue, mem: &GuestMemoryMmap, head_index: u16, len: usize) {
         // In FUSE, a single response should never reach 4 GiB; if it ever does
-        // (most likely a bug or a malformed request) we saturate to u32::MAX
-        // and log a warning instead of panicking, so the worker thread keeps
-        // serving the rest of the queue.
-        let used_len: u32 = match u32::try_from(len) {
-            Ok(l) => l,
-            Err(_) => {
-                warn!(
-                    "virtio-fs: response length {} exceeds u32::MAX, saturating; \
-                     Guest may receive a truncated reply",
-                    len
-                );
-                u32::MAX
-            }
-        };
+        // (most likely a bug or a malformed request) we report 0 bytes used
+        // and log a warning instead of panicking. Reporting 0 is safer than
+        // saturating to u32::MAX because the Guest virtio-ring layer rejects
+        // any used_len that exceeds the descriptor chain's writable capacity;
+        // a 0-length reply makes the Guest FUSE driver fall back to its
+        // short-reply / unmatched-reply path and complete the request with
+        // -EIO, while the worker thread keeps serving the rest of the queue.
+        let used_len: u32 = u32::try_from(len).unwrap_or_else(|_| {
+            warn!(
+                "virtio-fs: response length {} exceeds u32::MAX, reporting 0 used bytes; \
+                 Guest will see a short reply and fail the request with -EIO",
+                len
+            );
+            0
+        });
 
         if queue.add_used(mem, head_index, used_len).is_err() {
             warn!("Couldn't return used descriptors to the ring");
@@ -353,15 +354,20 @@ impl FsEpollHandler {
             Ok(w) => w,
             Err(_) => return 0,
         };
+        // Bail out early when the descriptor chain has no room for a full
+        // OutHeader, otherwise write_obj would partially succeed and report
+        // a misleading bytes_written back to the Guest.
+        if writer.available_bytes() < std::mem::size_of::<OutHeader>() {
+            return 0;
+        }
         let header = OutHeader {
             len: std::mem::size_of::<OutHeader>() as u32,
             error: -libc::EIO,
             unique,
         };
-        match std::io::Write::write_all(&mut writer, header.as_slice()) {
-            Ok(()) => writer.bytes_written(),
-            Err(_) => 0,
-        }
+        writer
+            .write_obj(header)
+            .map_or(0, |_| writer.bytes_written())
     }
 
     fn process_queue_serial(&mut self) -> Result<bool> {

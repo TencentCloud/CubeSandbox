@@ -14,7 +14,7 @@ use super::{
 };
 use crate::seccomp_filters::Thread;
 use crate::thread_helper::spawn_virtio_thread;
-use crate::{GuestMemoryMmap, MmapRegion};
+use crate::{GuestMemoryMmap, GuestRegionMmap};
 use crate::{VirtioInterrupt, VirtioInterruptType};
 use anyhow::anyhow;
 use seccompiler::SeccompAction;
@@ -30,7 +30,7 @@ use thiserror::Error;
 use virtio_queue::{DescriptorChain, Queue, QueueT};
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic,
-    GuestMemoryError, GuestMemoryLoadGuard,
+    GuestMemoryError, GuestMemoryLoadGuard, GuestMemoryRegion,
 };
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vm_virtio::{AccessPlatform, Translatable};
@@ -273,8 +273,11 @@ pub struct Pmem {
     exit_evt: EventFd,
 
     // Hold ownership of the memory that is allocated for the device
-    // which will be automatically dropped when the device is dropped
-    _region: MmapRegion,
+    // which will be automatically dropped when the device is dropped.
+    // The same Arc is also held by MemoryManager::device_memory so that
+    // virtio backends can dereference GPAs that fall inside this PMEM
+    // region.
+    _region: Arc<GuestRegionMmap>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -291,7 +294,7 @@ impl Pmem {
         disk: File,
         addr: GuestAddress,
         mapping: UserspaceMapping,
-        _region: MmapRegion,
+        _region: Arc<GuestRegionMmap>,
         iommu: bool,
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
@@ -303,7 +306,7 @@ impl Pmem {
         } else {
             let config = VirtioPmemConfig {
                 start: addr.raw_value().to_le(),
-                size: (_region.size() as u64).to_le(),
+                size: _region.len().to_le(),
             };
 
             let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
