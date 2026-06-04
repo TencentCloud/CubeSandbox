@@ -597,3 +597,47 @@ check_cidr_preflight() {
 
   log "CUBE_SANDBOX_NETWORK_CIDR preflight OK: ${cidr}"
 }
+
+# check_glibc_preflight: Verify the system glibc version meets the minimum
+# requirement (2.34, matching the highest GLIBC_X.Y symbol version required
+# by cubelet / cubecli binaries).  Fails fast to prevent installation on
+# unsupported older distributions (Ubuntu 20.04, CentOS 7/8, Debian 11).
+check_glibc_preflight() {
+  local min_major=2
+  local min_minor=34
+
+  local glibc_ver
+  glibc_ver="$(ldd --version 2>&1 | head -1 | awk '{print $NF}')"
+
+  if [[ -z "${glibc_ver}" ]]; then
+    die "unable to detect glibc version (ldd --version failed)"
+  fi
+
+  # glibc version format is MAJOR.MINOR (e.g., 2.34, 2.39).
+  # Strip any patch level or distro suffix beyond the second component.
+  local major="${glibc_ver%%.*}"
+  local minor="${glibc_ver#*.}"
+  minor="${minor%%.*}"
+  [[ "${minor}" =~ ^[0-9]+$ ]] || minor=0
+  [[ "${major}" =~ ^[0-9]+$ ]] || major=0
+
+  if (( major < min_major )) || { (( major == min_major )) && (( minor < min_minor )); }; then
+    cat >&2 <<EOF
+[one-click] ERROR: glibc version ${glibc_ver} is too old (minimum required: ${min_major}.${min_minor}).
+[one-click]
+[one-click]   This system has glibc ${glibc_ver}, but Cube Sandbox requires
+[one-click]   glibc >= ${min_major}.${min_minor} (Ubuntu 22.04 LTS baseline).
+[one-click]
+[one-click]   Supported distributions include:
+[one-click]     - Ubuntu 22.04+
+[one-click]     - Debian 12+
+[one-click]     - RHEL / CentOS 9+
+[one-click]     - OpenCloudOS 9+
+[one-click]
+[one-click]   Please upgrade to a newer distribution and retry.
+EOF
+    exit 3
+  fi
+
+  log "glibc version ${glibc_ver} OK (>= ${min_major}.${min_minor})"
+}

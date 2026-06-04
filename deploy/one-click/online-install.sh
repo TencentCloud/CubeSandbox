@@ -36,6 +36,29 @@ check_early_preflight() {
     exit 3
   fi
 
+  # Glibc version check (fail fast before download)
+  local glibc_ver
+  glibc_ver="$(ldd --version 2>&1 | head -1 | awk '{print $NF}')"
+  if [[ -z "${glibc_ver}" ]]; then
+    echo "[online-install] ERROR: unable to detect glibc version (ldd --version failed)." >&2
+    exit 3
+  fi
+  local gc_major="${glibc_ver%%.*}"
+  local gc_minor="${glibc_ver#*.}"
+  gc_minor="${gc_minor%%.*}"
+  [[ "${gc_minor}" =~ ^[0-9]+$ ]] || gc_minor=0
+  [[ "${gc_major}" =~ ^[0-9]+$ ]] || gc_major=0
+  if (( gc_major < 2 )) || { (( gc_major == 2 )) && (( gc_minor < 34 )); }; then
+    cat >&2 <<EOF
+[online-install] ERROR: glibc version ${glibc_ver} is too old (minimum required: 2.34).
+[online-install]   The system must have glibc >= 2.34 (Ubuntu 22.04 LTS baseline).
+[online-install]   Detected: glibc ${glibc_ver}.
+[online-install]   Supported: Ubuntu 22.04+, Debian 12+, RHEL/CentOS 9+, OpenCloudOS 9+.
+EOF
+    exit 3
+  fi
+  echo "[online-install] glibc version ${glibc_ver} OK (>= 2.34)" >&2
+
   # 2. Root check (install.sh and services require root anyway)
   if [[ "${EUID}" -ne 0 ]]; then
     echo "[online-install] ERROR: This script must run as root." >&2
