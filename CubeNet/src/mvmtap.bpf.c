@@ -213,16 +213,19 @@ static __always_inline void del_session(struct session_key *ekey, struct nat_ses
 
 static bool do_icmp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *dst_ifindex)
 {
-	struct icmp_id_buff old_id = {}, new_id = {};
-	__u32 old_csum, new_csum;
+	__u32 old_saddr, new_saddr, icmp_csum_off;
+	__u16 old_id, new_id;
 	struct session_key key = {};
 	struct nat_session *sess;
 	struct snat_ip *snat_ip;
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct icmphdr *l4;
+	__u16 ip_hlen;
 	__u16 snat_id;
+	__u64 flags;
 	__u64 now;
+	long err;
 	bool ok;
 
 	if (!__pull_headers_icmp(skb, &l2, &l3, &l4))
@@ -259,22 +262,41 @@ static bool do_icmp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 
 		return false;
 
 do_nat:
-	/* update ICMP identifier (no pseudo-header checksum for ICMP).
-	 * bpf_csum_diff requires 4-byte aligned sizes, use icmp_id_buff.
-	 */
-	old_id.id = l4->un.echo.id;
-	new_id.id = sess->node_port;
-	old_csum = l4->checksum;
-	new_csum = bpf_csum_diff((void *)&old_id, sizeof(old_id), (void *)&new_id, sizeof(new_id), ~old_csum);
-	l4->checksum = csum_fold(new_csum) ?: 0xffff;
-	l4->un.echo.id = sess->node_port;
+	old_saddr = l3->saddr;
+	new_saddr = sess->node_ip;
+	old_id = l4->un.echo.id;
+	new_id = sess->node_port;
 
-	/* update L3 source address */
-	rewrite_l3_addr(l3, &l3->saddr, sess->node_ip);
+	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
+	ip_hlen <<= 2;
+	icmp_csum_off = ICMP_CSUM_OFF(ip_hlen);
 
-	/* update L2 */
+	/* update L2 first: csum/store helpers may invalidate packet pointers */
 	set_mac_pair(l2, nodenic_macaddr_p1, nodenic_macaddr_p2,
 		     nodegw_macaddr_p1, nodegw_macaddr_p2);
+
+	/* update ICMP csum: ICMP has no pseudo-header, so no BPF_F_PSEUDO_HDR.
+	 * Only the echo identifier change affects the csum (IP saddr is not
+	 * covered by ICMP checksum).
+	 */
+	flags = sizeof(old_id);
+	err = bpf_l4_csum_replace(skb, icmp_csum_off, old_id, new_id, flags);
+	if (err)
+		return false;
+
+	/* write the new ICMP echo identifier */
+	err = bpf_skb_store_bytes(skb, ICMP_ECHO_ID_OFF(ip_hlen), &new_id, sizeof(new_id), 0);
+	if (err)
+		return false;
+
+	/* update IP csum and write new saddr */
+	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_saddr, new_saddr, sizeof(old_saddr));
+	if (err)
+		return false;
+
+	err = bpf_skb_store_bytes(skb, IP_SADDR_OFF, &new_saddr, sizeof(new_saddr), 0);
+	if (err)
+		return false;
 
 	*dst_ifindex = sess->node_ifindex;
 	return true;
@@ -282,16 +304,19 @@ do_nat:
 
 static bool do_udp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *dst_ifindex)
 {
-	__u32 old_csum, new_csum;
-	struct csum_buff old_buff = {}, new_buff = {};
+	__u32 old_saddr, new_saddr, udp_csum_off;
+	__u16 old_sport, new_sport, old_csum;
 	struct session_key key = {};
 	struct nat_session *sess;
 	struct snat_ip *snat_ip;
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct udphdr *l4;
+	__u16 ip_hlen;
 	__u16 snat_port;
+	__u64 flags;
 	__u64 now;
+	long err;
 	bool ok;
 
 	if (!__pull_headers_udp(skb, &l2, &l3, &l4))
@@ -323,25 +348,51 @@ static bool do_udp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *
 		return false;
 
 do_nat:
-	/* update L4 */
-	old_buff.addr = l3->saddr;
-	old_buff.port = l4->source;
-	new_buff.addr = sess->node_ip;
-	new_buff.port = sess->node_port;
+	old_saddr = l3->saddr;
+	new_saddr = sess->node_ip;
+	old_sport = l4->source;
+	new_sport = sess->node_port;
 	old_csum = l4->check;
-	if (old_csum) {
-		new_csum = bpf_csum_diff((void *)&old_buff, sizeof(old_buff), (void *)&new_buff, sizeof(new_buff),
-					 ~old_csum);
-		l4->check = csum_fold(new_csum) ?: 0xffff;
-	}
-	l4->source = sess->node_port;
 
-	/* update L3 */
-	rewrite_l3_addr(l3, &l3->saddr, sess->node_ip);
+	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
+	ip_hlen <<= 2;
+	udp_csum_off = UDP_CSUM_OFF(ip_hlen);
 
-	/* update L2 */
+	/* update L2 first: csum/store helpers may invalidate packet pointers */
 	set_mac_pair(l2, nodenic_macaddr_p1, nodenic_macaddr_p2,
 		     nodegw_macaddr_p1, nodegw_macaddr_p2);
+
+	/* update UDP csum only if it was non-zero (UDP csum is optional over IPv4).
+	 * BPF_F_MARK_MANGLED_0 keeps a 0 csum (= disabled) intact in case the
+	 * incremental update would yield 0; the helper rewrites it to 0xffff.
+	 * IP saddr is part of UDP pseudo-header, so BPF_F_PSEUDO_HDR is required.
+	 */
+	if (old_csum) {
+		flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(old_saddr);
+		err = bpf_l4_csum_replace(skb, udp_csum_off, old_saddr, new_saddr, flags);
+		if (err)
+			return false;
+
+		/* port is not part of pseudo-header */
+		flags = BPF_F_MARK_MANGLED_0 | sizeof(old_sport);
+		err = bpf_l4_csum_replace(skb, udp_csum_off, old_sport, new_sport, flags);
+		if (err)
+			return false;
+	}
+
+	/* write new UDP source port */
+	err = bpf_skb_store_bytes(skb, UDP_SRC_OFF(ip_hlen), &new_sport, sizeof(new_sport), 0);
+	if (err)
+		return false;
+
+	/* update IP csum and write new saddr */
+	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_saddr, new_saddr, sizeof(old_saddr));
+	if (err)
+		return false;
+
+	err = bpf_skb_store_bytes(skb, IP_SADDR_OFF, &new_saddr, sizeof(new_saddr), 0);
+	if (err)
+		return false;
 
 	*dst_ifindex = sess->node_ifindex;
 	return true;
@@ -349,8 +400,8 @@ do_nat:
 
 static bool do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *dst_ifindex)
 {
-	__u32 old_csum, new_csum;
-	struct csum_buff old_buff = {}, new_buff = {};
+	__u32 old_saddr, new_saddr, tcp_csum_off;
+	__u16 old_sport, new_sport;
 	struct session_key key = {};
 	struct nat_session *sess;
 	struct snat_ip *snat_ip;
@@ -358,8 +409,11 @@ static bool do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct tcphdr *l4;
+	__u16 ip_hlen;
 	__u16 snat_port;
+	__u64 flags;
 	__u64 now;
+	long err;
 	bool ok;
 
 	if (!__pull_headers(skb, &l2, &l3, &l4))
@@ -412,22 +466,44 @@ do_update:
 	update_session(IP_CT_DIR_ORIGINAL, sess, now, syn, ack, fin, rst);
 
 do_nat:
-	/* update L4 */
-	old_buff.addr = l3->saddr;
-	old_buff.port = l4->source;
-	new_buff.addr = sess->node_ip;
-	new_buff.port = sess->node_port;
-	old_csum = l4->check;
-	new_csum = bpf_csum_diff((void *)&old_buff, sizeof(old_buff), (void *)&new_buff, sizeof(new_buff), ~old_csum);
-	l4->check = csum_fold(new_csum);
-	l4->source = sess->node_port;
+	old_saddr = l3->saddr;
+	new_saddr = sess->node_ip;
+	old_sport = l4->source;
+	new_sport = sess->node_port;
 
-	/* update L3 */
-	rewrite_l3_addr(l3, &l3->saddr, sess->node_ip);
+	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
+	ip_hlen <<= 2;
+	tcp_csum_off = TCP_CSUM_OFF(ip_hlen);
 
-	/* update L2 */
+	/* update L2 first: csum/store helpers may invalidate packet pointers */
 	set_mac_pair(l2, nodenic_macaddr_p1, nodenic_macaddr_p2,
 		     nodegw_macaddr_p1, nodegw_macaddr_p2);
+
+	/* update TCP csum: IP saddr is part of pseudo-header, so BPF_F_PSEUDO_HDR */
+	flags = BPF_F_PSEUDO_HDR | sizeof(old_saddr);
+	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_saddr, new_saddr, flags);
+	if (err)
+		return false;
+
+	/* update TCP csum for port change (not part of pseudo-header) */
+	flags = sizeof(old_sport);
+	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_sport, new_sport, flags);
+	if (err)
+		return false;
+
+	/* write new TCP source port */
+	err = bpf_skb_store_bytes(skb, TCP_SRC_OFF(ip_hlen), &new_sport, sizeof(new_sport), 0);
+	if (err)
+		return false;
+
+	/* update IP csum and write new saddr */
+	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_saddr, new_saddr, sizeof(old_saddr));
+	if (err)
+		return false;
+
+	err = bpf_skb_store_bytes(skb, IP_SADDR_OFF, &new_saddr, sizeof(new_saddr), 0);
+	if (err)
+		return false;
 
 	*dst_ifindex = sess->node_ifindex;
 	return true;
