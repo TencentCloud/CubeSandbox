@@ -97,6 +97,10 @@ func (require NodeSelectorRequirement) Match(ls labels.Set) bool {
 		}
 		_, ok := require.Values[ls.Get(require.Key)]
 		return !ok
+	case NodeSelectorOpExists:
+		return ls.Has(require.Key)
+	case NodeSelectorOpDoesNotExist:
+		return !ls.Has(require.Key)
 	case NodeSelectorOpGt, NodeSelectorOpLt:
 		if !ls.Has(require.Key) {
 			return false
