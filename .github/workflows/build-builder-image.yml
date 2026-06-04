@@ -44,6 +44,7 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
+            type=raw,value=ubuntu2004,enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
             type=sha,prefix=sha-,format=short
 
       - name: Build and push

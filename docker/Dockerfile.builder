@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM ubuntu:22.04
+FROM ubuntu:20.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APT_PRIMARY_MIRROR=http://mirrors.tencent.com/ubuntu

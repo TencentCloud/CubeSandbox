@@ -13,7 +13,7 @@ fi
 
 PREBUILT_DIR="${SCRIPT_DIR}/.work/prebuilt"
 HELPER_SCRIPT="${SCRIPT_DIR}/.work/build-prebuilt-in-builder.sh"
-BUILDER_IMAGE_REF="${BUILDER_IMAGE:-cube-sandbox-builder:latest}"
+BUILDER_IMAGE_REF="${BUILDER_IMAGE:-cube-sandbox-builder:ubuntu2004}"
 
 require_cmd docker
 require_cmd make
