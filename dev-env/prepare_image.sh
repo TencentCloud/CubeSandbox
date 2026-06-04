@@ -31,9 +31,10 @@
 
 set -euo pipefail
 
+TARGET_ARCH="${TARGET_ARCH:-$(uname -m | sed 's/^arm64/aarch64/')}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${WORK_DIR:-${SCRIPT_DIR}/.workdir}"
-IMAGE_URL="${IMAGE_URL:-https://mirrors.tencent.com/opencloudos/9.6/images/qcow2/x86_64/20260514.2/OpenCloudOS-GenericCloud-9.6-20260514.2.x86_64.qcow2}"
+IMAGE_URL="${IMAGE_URL:-https://mirrors.tencent.com/opencloudos/9.6/images/qcow2/${TARGET_ARCH}/20260514.2/OpenCloudOS-GenericCloud-9.6-20260514.2.${TARGET_ARCH}.qcow2}"
 TARGET_SIZE="${TARGET_SIZE:-100G}"
 AUTO_BOOT="${AUTO_BOOT:-1}"
 AUTO_RESIZE_IN_GUEST="${AUTO_RESIZE_IN_GUEST:-1}"
@@ -229,7 +230,7 @@ cleanup_vm() {
 
 need_cmd curl
 need_cmd qemu-img
-need_cmd qemu-system-x86_64
+need_cmd qemu-system-${TARGET_ARCH}
 need_cmd rg
 need_cmd python3
 need_cmd ssh

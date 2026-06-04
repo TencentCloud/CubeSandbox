@@ -25,9 +25,10 @@
 
 set -euo pipefail
 
+TARGET_ARCH="${TARGET_ARCH:-$(uname -m | sed 's/^arm64/aarch64/')}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${WORK_DIR:-${SCRIPT_DIR}/.workdir}"
-IMAGE_URL="${IMAGE_URL:-https://mirrors.tencent.com/opencloudos/9.6/images/qcow2/x86_64/20260514.2/OpenCloudOS-GenericCloud-9.6-20260514.2.x86_64.qcow2}"
+IMAGE_URL="${IMAGE_URL:-https://mirrors.tencent.com/opencloudos/9.6/images/qcow2/${TARGET_ARCH}/20260514.2/OpenCloudOS-GenericCloud-9.6-20260514.2.${TARGET_ARCH}.qcow2}"
 IMAGE_NAME="$(basename "${IMAGE_URL}")"
 IMAGE_PATH="${IMAGE_PATH:-${WORK_DIR}/${IMAGE_NAME}}"
 
@@ -102,7 +103,45 @@ require_nested_kvm() {
   fi
 }
 
-need_cmd qemu-system-x86_64
+# Resolve UEFI firmware path for aarch64 across different distros.
+# Returns the first valid path found, or exits with an error if none exist.
+find_aarch64_uefi_firmware() {
+  # Common firmware paths across distros:
+  # - Debian/Ubuntu:     /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+  # - Fedora/RHEL/OC9:   /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw or QEMU_EFI.fd
+  # - Arch:              /usr/share/edk2-armvirt/aarch64/QEMU_EFI.fd
+  # - openSUSE:          /usr/share/qemu/qemu-uefi-aarch64.bin
+  local candidates=(
+    "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd"
+    "/usr/share/edk2/aarch64/QEMU_EFI-pflash.raw"
+    "/usr/share/edk2/aarch64/QEMU_EFI.fd"
+    "/usr/share/AAVMF/AAVMF_CODE.fd"
+    "/usr/share/edk2-armvirt/aarch64/QEMU_EFI.fd"
+    "/usr/share/qemu/qemu-uefi-aarch64.bin"
+  )
+
+  for path in "${candidates[@]}"; do
+    if [[ -f "${path}" ]]; then
+      printf '%s' "${path}"
+      return 0
+    fi
+  done
+
+  log_error "UEFI firmware for aarch64 not found."
+  log_error "Searched paths:"
+  for path in "${candidates[@]}"; do
+    log_error "  - ${path}"
+  done
+  log_error ""
+  log_error "Please install the appropriate UEFI firmware package:"
+  log_error "  Debian/Ubuntu:  apt-get install qemu-efi-aarch64"
+  log_error "  Fedora/RHEL/OC: dnf install edk2-aarch64"
+  log_error "  Arch:           pacman -S edk2-armvirt"
+  log_error "  openSUSE:       zypper install qemu-uefi-aarch64"
+  exit 1
+}
+
+need_cmd qemu-system-${TARGET_ARCH}
 
 if [[ ! -e /dev/kvm ]]; then
   log_error "Host has no /dev/kvm; KVM acceleration is unavailable."
@@ -136,9 +175,27 @@ else
   log_info "Clean shutdown: in another terminal run ./login.sh, then poweroff in the guest (do not Ctrl+a x — abrupt QEMU exit)"
 fi
 
+case "${TARGET_ARCH}" in
+  "x86_64")
+    VM_MACHINE='q35'
+    BIOS_PARAM=''
+    ;;
+  "aarch64")
+    VM_MACHINE=virt;
+    UEFI_FIRMWARE="$(find_aarch64_uefi_firmware)"
+    log_info "  UEFI       : ${UEFI_FIRMWARE}"
+    BIOS_PARAM=(-bios "${UEFI_FIRMWARE}")
+    ;;
+  *)
+    log_error "Unsupported architecture: ${TARGET_ARCH}"
+    exit 1
+    ;;
+esac
+
 QEMU_ARGS=(
   -enable-kvm
-  -machine q35,accel=kvm
+  -machine ${VM_MACHINE},accel=kvm
+  "${BIOS_PARAM[@]}"
   -cpu host
   -name "${VM_NAME}"
   -m "${VM_MEMORY_MB}"
@@ -150,7 +207,7 @@ QEMU_ARGS=(
 
 if [[ "${VM_BACKGROUND}" == "1" ]]; then
   mkdir -p "${WORK_DIR}"
-  exec qemu-system-x86_64 \
+  exec qemu-system-${TARGET_ARCH} \
     "${QEMU_ARGS[@]}" \
     -daemonize \
     -pidfile "${QEMU_PIDFILE}" \
@@ -158,7 +215,7 @@ if [[ "${VM_BACKGROUND}" == "1" ]]; then
     -serial "file:${QEMU_SERIAL_LOG}"
 fi
 
-exec qemu-system-x86_64 \
+exec qemu-system-${TARGET_ARCH} \
   "${QEMU_ARGS[@]}" \
   -nographic \
   -serial mon:stdio
