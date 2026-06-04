@@ -196,7 +196,7 @@ func generateEmptyVirtiofsDevices(ctx context.Context) (map[string]string, error
 	}
 	allVirtios = append(allVirtios, roVirtioCfg)
 
-	rwVirtioCfg, err := virtiofs.GenEmptyVirtiofsConfig(false, constants.VirtiofsCacheNone)
+	rwVirtioCfg, err := virtiofs.GenEmptyVirtiofsConfig(false, constants.VirtiofsCacheAlways)
 	if err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
 	}
