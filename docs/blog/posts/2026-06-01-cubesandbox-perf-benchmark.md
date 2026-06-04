@@ -460,6 +460,50 @@ Clone (full memory + filesystem state): single clone ~**220 ms**; for 100 sandbo
 
 > **Counter-intuitive concurrency behavior:** 10-concurrent batch wall (870 ms) is actually **slower than** 20 / 50-concurrent (639 / 541 ms). This is because with a fixed n=100, 10-concurrent requires serializing 10 batches with accumulated scheduling overhead; at higher concurrency, fewer batches are needed and the source sandbox's memory pages are more effectively reused from Page Cache, making the overall operation faster. This shows that at this scale, Clone is not bottlenecked by concurrency — increasing concurrency is beneficial.
 
+### 4.6 Pause / Resume
+
+**How it works:** Creates `concurrency` sandboxes, pauses all of them concurrently via `POST /sandboxes/{id}/pause`, then resumes all concurrently via `POST /sandboxes/{id}/resume`. Records wall time and per-sandbox amortized latency for both operations.
+
+> ⚠️ **Current implementation note:** Pause currently uses **full-memory-copy mode** — on pause, all anonymous memory pages of the sandbox are written to persistent storage. Latency scales linearly with sandbox memory size (~558 ms per sandbox at 2 GiB). A future release will upgrade to **soft-dirty incremental mode**, which only saves pages dirtied since the last checkpoint. For an idle sandbox this is expected to reduce pause latency by **80–90%** — down to ~**60 ms**, on par with Snapshot creation.
+
+**Run:** (script: [`bench_pause_resume_concurrency.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/snapshot-rollback-clone/bench_pause_resume_concurrency.py))
+
+```bash
+cd examples/snapshot-rollback-clone
+# If this is a new terminal, set environment variables (same as the dependency installation section):
+export E2B_API_URL=http://<your-server-ip>:3000
+export E2B_API_KEY=e2b_000000
+export CUBE_TEMPLATE_ID=<your-template-id>
+
+# The script provides single-tier mechanism; control concurrency from the command line:
+python bench_pause_resume_concurrency.py -c 1  -n 5
+python bench_pause_resume_concurrency.py -c 5  -n 5 --no-header
+python bench_pause_resume_concurrency.py -c 10 -n 5 --no-header
+```
+
+**Pause results:**
+
+| Concurrency | Rounds | wall avg | wall min | wall p95 | wall max | per-pause avg |
+|:----:|:----:|--------:|--------:|--------:|--------:|-------------:|
+| 1    | 5    | 558.4 ms | 530.8 ms | 590.3 ms | 590.3 ms | 558.4 ms |
+| 5    | 5    | 656.9 ms | 621.9 ms | 683.2 ms | 683.2 ms | **131.4 ms** |
+| 10   | 5    | 682.1 ms | 674.1 ms | 699.3 ms | 699.3 ms | **68.2 ms** |
+
+**Resume results:**
+
+| Concurrency | Rounds | wall avg | wall min | wall p95 | wall max | per-resume avg |
+|:----:|:----:|--------:|--------:|--------:|--------:|---------------:|
+| 1    | 5    | 41.8 ms  | 18.7 ms  | 65.1 ms  | 65.1 ms  | 41.8 ms |
+| 5    | 5    | 28.2 ms  | 17.6 ms  | 34.2 ms  | 34.2 ms  | **5.6 ms** |
+| 10   | 5    | 35.7 ms  | 30.6 ms  | 41.7 ms  | 41.7 ms  | **3.6 ms** |
+
+**Key findings:**
+- **Resume is extremely fast with excellent concurrency scaling:** single resume ~42 ms; at 10-concurrent, per-resume amortized just **3.6 ms/sandbox**
+- **Pause scales well concurrently:** in full-copy mode, wall time grows only moderately as concurrency increases (1-concurrent 558 ms → 10-concurrent 682 ms), per-pause amortized drops from 558 ms to **68 ms/sandbox** — reflecting good IO parallelism on bare-metal NVMe
+- **After soft-dirty mode lands:** pause latency is expected to drop to ~60 ms (on par with Snapshot creation), pushing per-pause at 10-concurrent into single-digit milliseconds
+
+> **full-copy → soft-dirty optimization:** The current full-copy mode writes up to 2 GiB of VM anonymous memory to disk on every pause, creating high IO pressure. The soft-dirty incremental mode tracks dirty pages via `/proc/PID/clear_refs` since the last checkpoint; pause only writes actually modified pages (typically a few MB for an idle sandbox), reducing pause latency by **80–90%** and significantly increasing high-concurrency throughput.
+
 ---
 
 ## Appendix: Benchmark Script Index
@@ -467,4 +511,4 @@ Clone (full memory + filesystem state): single clone ~**220 ms**; for 100 sandbo
 All benchmark scripts used in this post are located in the repository directories:
 
 - **[`examples/cube-bench/`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cube-bench)** — Template-based concurrent creation benchmark tool (Go)
-- **[`examples/snapshot-rollback-clone/`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/snapshot-rollback-clone)** — Snapshot / Rollback / Clone Python scripts
+- **[`examples/snapshot-rollback-clone/`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/snapshot-rollback-clone)** — Snapshot / Rollback / Clone / Pause-Resume Python scripts
