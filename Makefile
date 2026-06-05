@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Tencent. All rights reserved.
 
-BUILDER_IMAGE ?= cube-sandbox-builder:latest
+BUILDER_IMAGE ?= cube-sandbox-builder:ubuntu2004
 BUILDER_DOCKERFILE ?= docker/Dockerfile.builder
 BUILDER_HOME ?= $(HOME)/.cache/cube-sandbox-builder
 BUILDER_CONTAINER_HOME ?= /home/builder

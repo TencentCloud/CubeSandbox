@@ -15,7 +15,7 @@ permissions:
   packages: read
 
 env:
-  BUILDER_IMAGE: ghcr.io/tencentcloud/cubesandbox-builder:latest
+  BUILDER_IMAGE: ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
   VMLINUX_CACHE_PATH: kernel-cache/vmlinux
   VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
   KERNEL_TAG: 6.6.119-49.6

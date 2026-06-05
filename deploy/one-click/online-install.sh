@@ -48,16 +48,16 @@ check_early_preflight() {
   gc_minor="${gc_minor%%.*}"
   [[ "${gc_minor}" =~ ^[0-9]+$ ]] || gc_minor=0
   [[ "${gc_major}" =~ ^[0-9]+$ ]] || gc_major=0
-  if (( gc_major < 2 )) || { (( gc_major == 2 )) && (( gc_minor < 34 )); }; then
+  if (( gc_major < 2 )) || { (( gc_major == 2 )) && (( gc_minor < 31 )); }; then
     cat >&2 <<EOF
-[online-install] ERROR: glibc version ${glibc_ver} is too old (minimum required: 2.34).
-[online-install]   The system must have glibc >= 2.34 (Ubuntu 22.04 LTS baseline).
+[online-install] ERROR: glibc version ${glibc_ver} is too old (minimum required: 2.31).
+[online-install]   The system must have glibc >= 2.31 (Ubuntu 20.04 LTS baseline).
 [online-install]   Detected: glibc ${glibc_ver}.
-[online-install]   Supported: Ubuntu 22.04+, Debian 12+, RHEL/CentOS 9+, OpenCloudOS 9+.
+[online-install]   Supported: Ubuntu 20.04+, Debian 11+, RHEL/CentOS 8+, OpenCloudOS 8+.
 EOF
     exit 3
   fi
-  echo "[online-install] glibc version ${glibc_ver} OK (>= 2.34)" >&2
+  echo "[online-install] glibc version ${glibc_ver} OK (>= 2.31)" >&2
 
   # 2. Root check (install.sh and services require root anyway)
   if [[ "${EUID}" -ne 0 ]]; then
