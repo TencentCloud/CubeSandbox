@@ -113,6 +113,25 @@ test_unit_dependency_order() {
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-webui.service" "After=docker.service network-online.target cube-sandbox-cube-api.service"
 }
 
+test_detect_glibc_version_consumes_full_ldd_output() {
+  ldd() {
+    printf 'ldd (GNU libc) 2.39\n'
+    seq 1 100000
+  }
+
+  local version
+  version="$(detect_glibc_version)" || fail "expected detect_glibc_version to succeed with long ldd output"
+  [[ "${version}" == "2.39" ]] || fail "expected glibc version 2.39, got ${version}"
+}
+
+test_online_install_glibc_detection_avoids_head_pipe() {
+  local path="${ONE_CLICK_DIR}/online-install.sh"
+
+  assert_contains "${path}" "detect_glibc_version()"
+  assert_contains "${path}" "ldd_output=\"\$(ldd --version 2>&1)\""
+  assert_not_contains "${path}" "ldd --version 2>&1 | head -1 | awk '{print \$NF}'"
+}
+
 test_render_template_replaces_empty_directory
 test_render_template_rejects_non_empty_directory
 test_unit_prepare_hooks_are_wired
@@ -120,5 +139,7 @@ test_support_compose_render_is_locked_and_atomic
 test_compose_wrappers_reject_directories
 test_coredns_direct_outputs_prepare_file_path
 test_unit_dependency_order
+test_detect_glibc_version_consumes_full_ldd_output
+test_online_install_glibc_detection_avoids_head_pipe
 
 echo "runtime file safety tests OK"

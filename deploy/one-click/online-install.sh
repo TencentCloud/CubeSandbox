@@ -19,6 +19,18 @@ for arg in "$@"; do
   esac
 done
 
+# Avoid `ldd --version | head -1` here: under `set -euo pipefail`, `head`
+# can exit early and SIGPIPE `ldd`, causing a silent false failure.
+detect_glibc_version() {
+  local ldd_output glibc_ver
+  if ! ldd_output="$(ldd --version 2>&1)"; then
+    return 1
+  fi
+  glibc_ver="$(awk 'NR == 1 { print $NF; exit }' <<<"${ldd_output}")"
+  [[ -n "${glibc_ver}" ]] || return 1
+  printf '%s\n' "${glibc_ver}"
+}
+
 # ---------------------------------------------------------------------------
 # Pre-download preflight checks (lightweight, self-contained)
 # ---------------------------------------------------------------------------
@@ -38,8 +50,7 @@ check_early_preflight() {
 
   # Glibc version check (fail fast before download)
   local glibc_ver
-  glibc_ver="$(ldd --version 2>&1 | head -1 | awk '{print $NF}')"
-  if [[ -z "${glibc_ver}" ]]; then
+  if ! glibc_ver="$(detect_glibc_version)"; then
     echo "[online-install] ERROR: unable to detect glibc version (ldd --version failed)." >&2
     exit 3
   fi
