@@ -303,7 +303,8 @@ check_cubelet_fs_preflight() {
     die "/data/cubelet is a mount point but its filesystem type is '${fs_type}' (requires xfs).
   Please format the underlying partition as XFS and remount it at /data/cubelet:
     mkfs.xfs /dev/<your-partition>
-    mount /dev/<your-partition> /data/cubelet"
+    mount /dev/<your-partition> /data/cubelet
+  Troubleshooting: https://github.com/TencentCloud/CubeSandbox/issues/311"
   else
     die "The filesystem that will host /data/cubelet is on '${check_path}' (type: ${fs_type:-unknown}), which is not XFS.
   Cube Sandbox requires the /data/cubelet directory to reside on an XFS filesystem.
@@ -311,7 +312,8 @@ check_cubelet_fs_preflight() {
     1. Mount a dedicated XFS-formatted partition at /data/cubelet:
          mkfs.xfs /dev/<your-partition>
          mount /dev/<your-partition> /data/cubelet
-    2. Ensure the parent path (${check_path}) itself is on XFS."
+    2. Ensure the parent path (${check_path}) itself is on XFS.
+  Troubleshooting: https://github.com/TencentCloud/CubeSandbox/issues/311"
   fi
 }
 

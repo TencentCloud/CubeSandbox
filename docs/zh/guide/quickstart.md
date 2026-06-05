@@ -64,7 +64,7 @@ sudo su root
 
 #### RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）
 
-在 Release 附件列表中找到 `kernel-*cube.pvm.host*.x86_64.rpm`，右键复制下载链接：
+在 [Release 附件列表](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/) 中找到 `kernel-*cube.pvm.host*.x86_64.rpm`，右键复制下载链接：
 
 ```bash
 # 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接
@@ -95,7 +95,7 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/pvm/gr
 
 #### DEB 系（Ubuntu、Debian）
 
-在 Release 附件列表中找到 `linux-image-*cube.pvm.host*_amd64.deb`，右键复制下载链接：
+在 [Release 附件列表](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/) 中找到 `linux-image-*cube.pvm.host*_amd64.deb`，右键复制下载链接：
 
 ```bash
 # 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接

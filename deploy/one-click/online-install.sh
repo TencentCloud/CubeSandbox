@@ -188,6 +188,8 @@ EOF
     echo "[online-install]        mkfs.xfs /dev/<your-partition>" >&2
     echo "[online-install]        mount /dev/<your-partition> /data/cubelet" >&2
     echo "[online-install]   2. Ensure the parent path (${check_path}) itself is on XFS." >&2
+    echo "[online-install]" >&2
+    echo "[online-install] Troubleshooting: https://github.com/TencentCloud/CubeSandbox/issues/311" >&2
     exit 3
   fi
 
