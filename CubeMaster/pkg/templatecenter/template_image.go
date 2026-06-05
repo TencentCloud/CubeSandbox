@@ -67,19 +67,19 @@ const (
 	RedoModeFailedOnly  = "FAILED_ONLY"
 	RedoModeFailedNodes = "FAILED_NODES"
 
-	JobPhasePulling          = "PULLING"
-	JobPhaseUnpacking        = "UNPACKING"
-	JobPhaseBuildingExt4     = "BUILDING_EXT4"
-	JobPhaseGeneratingJSON   = "GENERATING_JSON"
-	JobPhaseDistributing     = "DISTRIBUTING"
-	JobPhaseCreatingTemplate = "CREATING_TEMPLATE"
-	JobPhaseSnapshotting     = "SNAPSHOTTING"
-	JobPhaseRegistering      = "REGISTERING"
-	JobPhaseRollbackPreparing = "ROLLBACK_PREPARING"
-	JobPhaseRollbackDriving   = "ROLLBACK_DRIVING"
+	JobPhasePulling            = "PULLING"
+	JobPhaseUnpacking          = "UNPACKING"
+	JobPhaseBuildingExt4       = "BUILDING_EXT4"
+	JobPhaseGeneratingJSON     = "GENERATING_JSON"
+	JobPhaseDistributing       = "DISTRIBUTING"
+	JobPhaseCreatingTemplate   = "CREATING_TEMPLATE"
+	JobPhaseSnapshotting       = "SNAPSHOTTING"
+	JobPhaseRegistering        = "REGISTERING"
+	JobPhaseRollbackPreparing  = "ROLLBACK_PREPARING"
+	JobPhaseRollbackDriving    = "ROLLBACK_DRIVING"
 	JobPhaseRollbackRecovering = "ROLLBACK_RECOVERING"
-	JobPhaseDeleting         = "DELETING"
-	JobPhaseReady            = "READY"
+	JobPhaseDeleting           = "DELETING"
+	JobPhaseReady              = "READY"
 
 	defaultTemplateCPU         = "2000m"
 	defaultTemplateMemory      = "2000Mi"
@@ -103,12 +103,6 @@ type dockerInspectImage struct {
 	ID          string            `json:"Id"`
 	RepoDigests []string          `json:"RepoDigests"`
 	Config      dockerImageConfig `json:"Config"`
-	RootFS      dockerRootFS      `json:"RootFS"`
-}
-
-type dockerRootFS struct {
-	Type   string   `json:"Type"`
-	Layers []string `json:"Layers"`
 }
 
 type dockerImageConfig struct {
@@ -1435,7 +1429,7 @@ func prepareSourceImage(ctx context.Context, req *types.CreateTemplateFromImageR
 				_ = os.RemoveAll(dockerConfigDir)
 			}
 			if !imageExistsLocally {
-					_ = dockerRun(cleanupCtx, "", "image", "rm", "-f", "--", req.SourceImageRef)
+				_ = dockerRun(cleanupCtx, "", "image", "rm", "-f", "--", req.SourceImageRef)
 			}
 		},
 	}, nil
@@ -1465,48 +1459,7 @@ func exportImageRootfs(ctx context.Context, source *resolvedSourceImage, destRoo
 		return err
 	}
 
-	// Core optimisation: pipe docker export stdout directly into tar -xf - stdin,
-	// eliminating the intermediate rootfs.tar file.
-	exportCmd := exec.CommandContext(ctx, "docker", "export", containerID)
-	tarCmd := exec.CommandContext(ctx, "tar", "-xf", "-", "-C", destRootfsDir)
-
-	pipe, err := exportCmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("create pipe from docker export to tar: %w", err)
-	}
-	tarCmd.Stdin = pipe
-
-	// Best-effort: increase pipe buffer to 1 MiB to reduce context switches.
-	if f, ok := pipe.(*os.File); ok {
-		_, _ = unix.FcntlInt(f.Fd(), unix.F_SETPIPE_SZ, 1<<20)
-	}
-
-	var exportErrBuf, tarErrBuf bytes.Buffer
-	exportCmd.Stderr = &exportErrBuf
-	tarCmd.Stderr = &tarErrBuf
-
-	// Start tar (consumer) first, then export (producer).
-	if err := tarCmd.Start(); err != nil {
-		return fmt.Errorf("start tar extract: %w", err)
-	}
-	if err := exportCmd.Start(); err != nil {
-		// export failed to start – must kill tar and reap it to avoid zombies.
-		tarCmd.Process.Kill()
-		_ = tarCmd.Wait()
-		return fmt.Errorf("start docker export: %w", err)
-	}
-
-	// Wait export first (closes the write end of the pipe), then tar (reads EOF).
-	exportWaitErr := exportCmd.Wait()
-	tarWaitErr := tarCmd.Wait()
-
-	if exportWaitErr != nil {
-		return fmt.Errorf("docker export %s failed: %w (stderr: %s)", containerID, exportWaitErr, exportErrBuf.String())
-	}
-	if tarWaitErr != nil {
-		return fmt.Errorf("extract rootfs tar failed: %w (stderr: %s)", tarWaitErr, tarErrBuf.String())
-	}
-	return nil
+	return pipeExportToDir(ctx, containerID, destRootfsDir)
 }
 
 func createExt4Image(ctx context.Context, rootfsDir, ext4Path string) error {
@@ -2112,7 +2065,8 @@ func diskSpaceSafetyMargin() float64 {
 
 func loopMountExt4Enabled() bool {
 	if v := strings.TrimSpace(os.Getenv("CUBEMASTER_LOOP_MOUNT_EXT4_ENABLED")); v != "" {
-		return v == "true" || v == "1"
+		enabled, err := strconv.ParseBool(v)
+		return err == nil && enabled
 	}
 	return false
 }
@@ -2256,22 +2210,32 @@ func checkDiskSpace(ctx context.Context, storeDir string, estimatedSizeBytes int
 	return nil
 }
 
-// isLocalFastFS returns true when the filesystem of the given path is a local
-// high-performance filesystem (ext4, xfs, btrfs, etc.) rather than a network
-// filesystem like NFS or CIFS.  Used to decide whether we can export the rootfs
-// directly to the storeDir without a separate relocate step.
+// isLocalFastFS returns true when the filesystem of the given path appears safe
+// for direct rootfs export rather than requiring workDir + relocate.  It is
+// conservative for known network or FUSE filesystems and falls back to the
+// parent directory when the artifact directory has not been created yet.
 func isLocalFastFS(path string) bool {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
-		return false // cannot determine – be conservative
+		if !errors.Is(err, os.ErrNotExist) {
+			return false // cannot determine – be conservative
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return false
+		}
+		if err := syscall.Statfs(parent, &stat); err != nil {
+			return false
+		}
 	}
-	// Common network filesystem magic numbers.
+	// Known network or FUSE filesystem magic numbers.
 	const (
 		NFS_SUPER_MAGIC  = 0x6969
 		CIFS_SUPER_MAGIC = 0xFF534D42
+		FUSE_SUPER_MAGIC = 0x65735546
 	)
 	switch stat.Type {
-	case NFS_SUPER_MAGIC, CIFS_SUPER_MAGIC:
+	case NFS_SUPER_MAGIC, CIFS_SUPER_MAGIC, FUSE_SUPER_MAGIC:
 		return false
 	default:
 		return true
@@ -2338,12 +2302,10 @@ func getFileBlockSize(path string) int64 {
 	return stat.Blocks * 512
 }
 
-// estimateImageSizeFromInspect extracts an approximate image size from docker
-// inspect output.  It first tries the per-image cumulative Size field (which
-// reports the uncompressed on-disk size of all layers).  If that is unavailable,
-// it falls back to summing the compressed layer sizes from the manifest.
-// A 4x multiplier accounts for the expansion from compressed layers to an
-// on-disk rootfs + ext4 overhead + temporary workspace.
+// estimateImageSizeFromInspect extracts an approximate image size from the
+// per-image cumulative Size field in docker inspect output.  A 4x multiplier
+// accounts for the expansion from the on-disk layer size to rootfs data, ext4
+// overhead, and temporary workspace.
 func estimateImageSizeFromInspect(ctx context.Context, source *resolvedSourceImage) (int64, error) {
 	// Try the per-image cumulative Size field first (fast, single call).
 	out, err := dockerOutput(ctx, "", "image", "inspect", "--format", "{{.Size}}", "--", source.localRef)
@@ -2366,8 +2328,6 @@ func estimateImageSizeFromInspect(ctx context.Context, source *resolvedSourceIma
 // createExt4ImageStreaming uses loop-mount to stream docker export directly into
 // an ext4 image, avoiding any intermediate rootfs directory on disk (Phase 2).
 // Falls back to Phase 1 when prerequisites are not met.
-// createExt4ImageStreaming uses loop-mount to stream docker export directly into
-// an ext4 image, avoiding any intermediate rootfs directory on disk (Phase 2).
 // estimatedSizeBytes should be obtained from estimateImageSizeFromInspect.
 func createExt4ImageStreaming(ctx context.Context, source *resolvedSourceImage, workDir, ext4Path string, estimatedSizeBytes int64) error {
 	if !canUseLoopMount() {
@@ -2454,7 +2414,7 @@ func createExt4ImageStreaming(ctx context.Context, source *resolvedSourceImage, 
 }
 
 // pipeExportToDir streams the docker export of a container directly into a target
-// directory via tar -xf -, using the same pipe pattern as exportImageRootfs.
+// directory via tar -xf -.
 func pipeExportToDir(ctx context.Context, containerID, destDir string) error {
 	exportCmd := exec.CommandContext(ctx, "docker", "export", containerID)
 	tarCmd := exec.CommandContext(ctx, "tar", "-xf", "-", "-C", destDir)
@@ -2490,7 +2450,7 @@ func pipeExportToDir(ctx context.Context, containerID, destDir string) error {
 		return fmt.Errorf("docker export %s failed: %w (stderr: %s)", containerID, exportWaitErr, exportErrBuf.String())
 	}
 	if tarWaitErr != nil {
-		return fmt.Errorf("extract tar to mount point failed: %w (stderr: %s)", tarWaitErr, tarErrBuf.String())
+		return fmt.Errorf("extract tar to %s failed: %w (stderr: %s)", destDir, tarWaitErr, tarErrBuf.String())
 	}
 	return nil
 }
@@ -2705,21 +2665,6 @@ func ensureArtifactBuildPreflight(ctx context.Context) error {
 		return fmt.Errorf("mkfs.ext4 on cubemaster node does not appear to support the -d option required for rootfs image creation")
 	}
 	return nil
-}
-
-func cleanupIntermediateArtifacts(workDir, storeRootfsDir, storeDir string, keepStoreDir bool) {
-	if workDir != "" {
-		_ = os.RemoveAll(workDir) // NOCC:Path Traversal()
-	}
-	if !keepStoreDir {
-		if storeDir != "" {
-			_ = os.RemoveAll(storeDir) // NOCC:Path Traversal()
-		}
-		return
-	}
-	if storeRootfsDir != "" {
-		_ = os.RemoveAll(storeRootfsDir) // NOCC:Path Traversal()
-	}
 }
 
 func relocateRootfsToArtifactStore(ctx context.Context, srcRootfsDir, dstRootfsDir string) error {
