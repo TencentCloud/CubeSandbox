@@ -14,6 +14,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0 License" /></a>
   <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs Welcome" /></a>
   <a href="https://pypi.org/project/cubesandbox/"><img src="https://img.shields.io/badge/PyPI-0.2.1-blue" alt="PyPI Version" /></a>
+  <a href="https://landscape.cncf.io/?landscape=observability-and-analysis&group=ai-native&item=ai-native-infra--workload-runtime--cubesandbox"><img src="https://img.shields.io/badge/CNCF-Landscape-0C66E4" alt="CNCF Landscape" /></a>
 </p>
 
 <p align="center">
@@ -282,3 +283,14 @@ We welcome contributions of all kinds—whether it’s a bug report, feature sug
 CubeSandbox is released under the [Apache License 2.0](./LICENSE).
 
 The birth of CubeSandbox stands on the shoulders of open-source giants. Special thanks to [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor), [Kata Containers](https://github.com/kata-containers/kata-containers), virtiofsd, containerd-shim-rs, ttrpc-rust, and others. We have made tailored modifications to some components to fit the CubeSandbox execution model, and the original in-file copyright notices are preserved.
+
+---
+
+<p align="center">
+  <a href="https://landscape.cncf.io/?landscape=observability-and-analysis&group=ai-native&item=ai-native-infra--workload-runtime--cubesandbox">
+    <img src="https://raw.githubusercontent.com/cncf/artwork/refs/heads/main/other/cncf-landscape/horizontal/color/cncf-landscape-horizontal-color.svg" width="300" alt="CNCF Landscape" />
+  </a>
+</p>
+<p align="center">
+  Cube Sandbox is listed in the <a href="https://landscape.cncf.io/?landscape=observability-and-analysis&group=ai-native&item=ai-native-infra--workload-runtime--cubesandbox">CNCF Landscape</a>.
+</p>
