@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
@@ -52,14 +53,18 @@ func handleSandboxCommitAction(w http.ResponseWriter, r *http.Request, rt *CubeL
 			Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: err.Error()}},
 		}
 	}
-	if strings.TrimSpace(req.SandboxID) == "" || strings.TrimSpace(req.TemplateID) == "" || req.CreateRequest == nil {
+	if strings.TrimSpace(req.SandboxID) == "" || req.CreateRequest == nil {
 		return &commitTemplateResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  "sandbox_id, template_id and create_request are required",
+				RetMsg:  "sandbox_id and create_request are required",
 			}},
 		}
 	}
+	// Auto-generate the template ID before any later response can reference it.
+	// Users are not allowed to set custom template IDs because the snapshot
+	// system depends on the tpl- / snap- prefix convention.
+	req.TemplateID = templatecenter.GenerateTemplateID()
 	if strings.TrimSpace(req.RequestID) == "" {
 		return &commitTemplateResponse{
 			Res: &types.Res{Ret: &types.Ret{
@@ -78,7 +83,7 @@ func handleSandboxCommitAction(w http.ResponseWriter, r *http.Request, rt *CubeL
 	if req.CreateRequest.Annotations == nil {
 		req.CreateRequest.Annotations = map[string]string{}
 	}
-	req.CreateRequest.Annotations["cube.master.appsnapshot.template.id"] = req.TemplateID
+	req.CreateRequest.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = req.TemplateID
 
 	hostIP := ""
 	if cache := localcache.GetSandboxCache(req.SandboxID); cache != nil {

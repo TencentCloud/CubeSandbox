@@ -13,7 +13,6 @@
   "installAdditionalHint": "Install with different parameters",
   "installModal": {
     "subtitle": "Install as Cube Template",
-    "templateIDHint": "leave blank to auto-generate",
     "building": "Building template, please wait…",
     "success": "Installation successful!",
     "viewTemplate": "View template",

@@ -123,9 +123,8 @@ class Template:
         for t in templates:
             print(t.template_id, t.name)
 
-        # Build a new template from a container image
+        # Build a new template from a container image (template ID is auto-generated)
         job = Template.build(
-            template_id="my-python-env",
             image="python:3.11-slim",
         )
         print(job.job_id, job.status)
@@ -206,8 +205,8 @@ class Template:
     def build(
         cls,
         *,
-        template_id: str | None = None,
-        name: str | None = None,
+        template_id: str | None = None,  # Deprecated: server always auto-generates template IDs with "tpl-" prefix.
+        name: str | None = None,  # Deprecated alias for template_id.
         image: str | None = None,
         dockerfile: str | None = None,
         start_cmd: str | None = None,
@@ -230,7 +229,9 @@ class Template:
         to watch the build finish.
 
         Args:
-            template_id: Template ID. If omitted, CubeAPI/CubeMaster may assign one.
+            template_id: Template ID. Deprecated: the server always auto-generates template IDs
+                with the "tpl-" prefix. This parameter is accepted for backward compatibility
+                but its value is ignored.
             name: Deprecated alias for ``template_id``.
             image: Base container image URI (e.g. ``"python:3.11-slim"``).
             dockerfile: Not supported by CubeAPI's current template endpoint.
@@ -263,9 +264,6 @@ class Template:
 
         cfg = config or Config()
         payload: dict = {"image": image.strip()}
-        tpl_id = template_id if template_id is not None else name
-        if tpl_id is not None:
-            payload["templateID"] = tpl_id
         if instance_type is not None:
             payload["instanceType"] = instance_type
         if writable_layer_size is not None:

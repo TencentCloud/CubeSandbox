@@ -13,7 +13,6 @@
   "installAdditionalHint": "使用不同参数再次安装",
   "installModal": {
     "subtitle": "安装为 Cube 模板",
-    "templateIDHint": "留空则自动生成",
     "building": "正在制作模板，请稍候…",
     "success": "安装成功！",
     "viewTemplate": "查看模板",

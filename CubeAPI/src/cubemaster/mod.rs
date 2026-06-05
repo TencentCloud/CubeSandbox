@@ -1555,6 +1555,7 @@ pub struct CreateTemplateFromImageReq {
     #[serde(rename = "requestID")]
     pub request_id: String,
     pub instance_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub template_id: String,
     /// CubeMaster field name for the source image.
     pub source_image_ref: String,

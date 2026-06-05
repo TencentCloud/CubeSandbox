@@ -23,7 +23,6 @@ interface CreateModalProps {
 function CreateTemplateModal({ onClose }: CreateModalProps) {
   const { t } = useTranslation('templates');
   const qc = useQueryClient();
-  const [templateID, setTemplateID] = useState('');
   const [image, setImage] = useState('');
   const [instanceType, setInstanceType] = useState('');
   const [writableLayerSize, setWritableLayerSize] = useState('1G');
@@ -40,7 +39,6 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
       const ports = exposedPorts.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
       const envList = envVars.split('\n').map(s => s.trim()).filter(Boolean);
       return templateApi.create({
-        templateID,
         image,
         instanceType: instanceType.trim() || undefined,
         writableLayerSize: writableLayerSize.trim() || undefined,
@@ -71,18 +69,8 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
           </button>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Row 1: templateID + image */}
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
-                {t('create.templateID')}
-              </label>
-              <Input
-                placeholder="tpl-xxxxxxxx"
-                value={templateID}
-                onChange={(e) => setTemplateID(e.target.value)}
-              />
-            </div>
+          {/* Row 1: image */}
+          <div className="grid grid-cols-1 gap-3">
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">
                 {t('create.image')} <span className="text-destructive text-sm font-bold">*</span>
