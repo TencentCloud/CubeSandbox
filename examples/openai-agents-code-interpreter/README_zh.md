@@ -58,7 +58,6 @@ cp .env.example .env
 cubemastercli template create-from-image \
   --image cube-sandbox-image.tencentcloudcr.com/demo/e2b-code-interpreter:v1.1-data \
   --writable-layer-size 1Gi \
-  --template-id e2b-code-interpreter \
   --expose-port 49983 \
   --expose-port 49999 \
   --probe 49983

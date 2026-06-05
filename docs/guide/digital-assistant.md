@@ -8,13 +8,7 @@ The Digital Assistant is a preview feature intended for demos and early validati
 
 ## Digital Assistant Template
 
-AgentHub creates assistants from a CubeSandbox template. By default, CubeAPI uses the prebuilt Digital Assistant template:
-
-```env
-AGENTHUB_DS_OPENCLAW_TEMPLATE=wecom-ds-openclaw
-```
-
-You can override it in `.env` when a deployment uses a different published template ID:
+AgentHub creates assistants from a CubeSandbox template. Before deployment, build the Digital Assistant template (see the command below), then copy the auto-generated `tpl-` prefixed template ID into `.env`:
 
 ```env
 AGENTHUB_DS_OPENCLAW_TEMPLATE=<your-digital-assistant-template-id>
@@ -43,7 +37,6 @@ OPENCLAW_IMAGE=cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openc
 
 cubemastercli tpl create-from-image \
   --image "${OPENCLAW_IMAGE}" \
-  --template-id wecom-ds-openclaw \
   --writable-layer-size 20Gi \
   --expose-port 18789 \
   --expose-port 8080 \

@@ -8,13 +8,7 @@
 
 ## 数字助手模板
 
-AgentHub 会基于 CubeSandbox 模板创建数字助手。默认情况下，CubeAPI 使用预置的数字助手模板：
-
-```env
-AGENTHUB_DS_OPENCLAW_TEMPLATE=wecom-ds-openclaw
-```
-
-如果部署环境使用其他已发布模板，可以在 `.env` 中覆盖：
+AgentHub 会基于 CubeSandbox 模板创建数字助手。部署前需要先制作数字助手模板（见下方命令），然后将自动生成的 `tpl-` 前缀模板 ID 写入 `.env`：
 
 ```env
 AGENTHUB_DS_OPENCLAW_TEMPLATE=<your-digital-assistant-template-id>
@@ -43,7 +37,6 @@ OPENCLAW_IMAGE=cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openc
 
 cubemastercli tpl create-from-image \
   --image "${OPENCLAW_IMAGE}" \
-  --template-id wecom-ds-openclaw \
   --writable-layer-size 20Gi \
   --expose-port 18789 \
   --expose-port 8080 \
