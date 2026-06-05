@@ -468,7 +468,10 @@ pub struct TemplateDetail {
 /// Body for POST /templates (create from image).
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateTemplateRequest {
+    /// Deprecated and ignored. Template IDs are always generated server-side
+    /// with the `tpl-` prefix; clients must use the returned `templateID`.
     #[serde(rename = "templateID", default)]
+    #[allow(dead_code)]
     pub template_id: String,
     #[serde(rename = "instanceType", default)]
     pub instance_type: Option<String>,

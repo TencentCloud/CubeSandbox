@@ -275,6 +275,14 @@ func NormalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.Cre
 	templateID := strings.TrimSpace(cloned.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	if templateID == "" {
 		templateID = generateTemplateID()
+	} else if !hasValidTemplateIDPrefix(templateID) {
+		// Defensive guard: template IDs must start with "tpl-" (templates
+		// created from images or imports) or "snap-" (snapshot-kind templates).
+		// Reaching this branch means an external caller injected a non-standard
+		// template ID via the annotation. Reject it explicitly rather than
+		// silently accepting it, so the caller can be fixed.
+		return nil, "", fmt.Errorf("invalid template ID %q from annotation %s: must start with 'tpl-' or 'snap-' and include a non-empty suffix",
+			templateID, constants.CubeAnnotationAppSnapshotTemplateID)
 	}
 	cloned.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
 	cloned.Annotations[constants.CubeAnnotationsAppSnapshotCreate] = "true"
@@ -291,6 +299,22 @@ func NormalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.Cre
 
 func generateTemplateID() string {
 	return "tpl-" + strings.ReplaceAll(uuid.New().String(), "-", "")[:24]
+}
+
+func hasValidTemplateIDPrefix(templateID string) bool {
+	for _, prefix := range []string{"tpl-", "snap-"} {
+		if strings.HasPrefix(templateID, prefix) {
+			return len(templateID) > len(prefix)
+		}
+	}
+	return false
+}
+
+// GenerateTemplateID returns a new unique template ID with "tpl-" prefix.
+// Exported for use by HTTP handlers (e.g. template commit) that need to
+// generate a template ID before calling NormalizeRequest.
+func GenerateTemplateID() string {
+	return generateTemplateID()
 }
 
 func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, error) {

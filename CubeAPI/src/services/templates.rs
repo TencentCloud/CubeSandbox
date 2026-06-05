@@ -183,7 +183,10 @@ impl TemplateService {
             instance_type: body
                 .instance_type
                 .unwrap_or_else(|| self.instance_type.clone()),
-            template_id: body.template_id,
+            // template_id is intentionally left empty — CubeMaster always
+            // auto-generates it with the "tpl-" prefix via
+            // normalizeTemplateImageRequest.
+            template_id: String::new(),
             source_image_ref: body.image.trim().to_string(),
             writable_layer_size: body.writable_layer_size,
             exposed_ports: body.exposed_ports,

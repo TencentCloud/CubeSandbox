@@ -1744,9 +1744,10 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 		return nil, err
 	}
 	cloned.ExposedPorts = exposedPorts
-	if strings.TrimSpace(cloned.TemplateID) == "" {
-		cloned.TemplateID = generateTemplateID()
-	}
+	// Always auto-generate the template ID. Users are not allowed to set
+	// custom template IDs because the snapshot system depends on the
+	// tpl- / snap- prefix convention for storage naming and identification.
+	cloned.TemplateID = generateTemplateID()
 	if cloned.InstanceType == "" {
 		cloned.InstanceType = cubeboxv1.InstanceType_cubebox.String()
 	}

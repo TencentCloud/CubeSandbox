@@ -58,7 +58,6 @@ function InstallModal({ item, onClose }: InstallModalProps) {
   const { t } = useTranslation('store');
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const [templateID, setTemplateID] = useState('');
   const [writableLayerSize, setWritableLayerSize] = useState(item.writable_layer_size);
   const [phase, setPhase] = useState<InstallPhase>({ kind: 'idle' });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -103,7 +102,6 @@ function InstallModal({ item, onClose }: InstallModalProps) {
   const mutation = useMutation({
     mutationFn: () =>
       templateApi.create({
-        templateID: templateID.trim() || '',
         image: item.image_cn,
         exposedPorts: item.expose_ports,
         probePort: item.probe_port,
@@ -114,7 +112,6 @@ function InstallModal({ item, onClose }: InstallModalProps) {
     onSuccess: (data) => {
       const id =
         (data as { templateID?: string } | null)?.templateID ??
-        templateID.trim() ??
         '';
       setPhase({ kind: 'polling', templateID: id });
       startPolling(id);
@@ -155,17 +152,6 @@ function InstallModal({ item, onClose }: InstallModalProps) {
 
           {/* 可编辑参数 */}
           <div className="space-y-3">
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium text-muted-foreground">
-                Template ID <span className="text-muted-foreground/60">{t('installModal.templateIDHint')}</span>
-              </label>
-              <Input
-                placeholder="tpl-xxxxxxxx"
-                value={templateID}
-                disabled={isBuilding || isDone}
-                onChange={(e) => setTemplateID(e.target.value)}
-              />
-            </div>
             <div className="space-y-1.5">
               <label className="text-sm font-medium text-muted-foreground">writable-layer-size</label>
               <Input

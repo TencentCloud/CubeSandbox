@@ -1347,7 +1347,6 @@ class TestTemplateAPI:
             "http://localhost:3000/templates",
             json={
                 "image": "python:3.11-slim",
-                "templateID": "tpl-python",
                 "instanceType": "default",
                 "writableLayerSize": "1G",
                 "exposedPorts": [80],

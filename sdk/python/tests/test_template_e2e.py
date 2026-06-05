@@ -79,11 +79,12 @@ def test_template_create_from_image_and_cleanup(pytestconfig: pytest.Config) -> 
         pytest.skip("use --cube-template-image or set CUBE_TEMPLATE_E2E_IMAGE to create a template")
 
     config = _config(pytestconfig)
-    template_id = os.environ.get("CUBE_TEMPLATE_E2E_ID") or f"e2e-python-{uuid.uuid4().hex[:8]}"
+    requested_template_id = os.environ.get("CUBE_TEMPLATE_E2E_ID") or f"e2e-python-{uuid.uuid4().hex[:8]}"
+    created_template_id: str | None = None
 
     try:
         job = Template.build(
-            template_id=template_id,
+            template_id=requested_template_id,
             image=image,
             instance_type=os.environ.get("CUBE_TEMPLATE_E2E_INSTANCE_TYPE"),
             writable_layer_size=os.environ.get("CUBE_TEMPLATE_E2E_WRITABLE_LAYER_SIZE"),
@@ -97,20 +98,32 @@ def test_template_create_from_image_and_cleanup(pytestconfig: pytest.Config) -> 
         )
 
         assert job.job_id
-        assert job.template_id == template_id
+        assert job.template_id.startswith("tpl-")
+        assert job.template_id != requested_template_id
         assert job.status
+        created_template_id = job.template_id
 
-        detail = Template.get(template_id, config=config)
-        assert detail.template_id == template_id
+        # Template creation is async — poll until the definition is persisted.
+        deadline = time.time() + 120
+        detail = None
+        while time.time() < deadline:
+            try:
+                detail = Template.get(created_template_id, config=config)
+                break
+            except TemplateNotFoundError:
+                time.sleep(2)
+        assert detail is not None, f"template {created_template_id} not persisted within 120s"
+        assert detail.template_id == created_template_id
 
         if job.job_id:
-            status = Template.get_build_status(template_id, job.job_id, config=config)
+            status = Template.get_build_status(created_template_id, job.job_id, config=config)
             assert status.build_id == job.job_id
-            assert status.template_id == template_id
+            assert status.template_id == created_template_id
     finally:
         # Give CubeAPI a short moment to persist the new template before cleanup.
         time.sleep(1)
-        try:
-            Template.delete(template_id, config=config)
-        except (ApiError, TemplateNotFoundError):
-            pass
+        if created_template_id is not None:
+            try:
+                Template.delete(created_template_id, config=config)
+            except (ApiError, TemplateNotFoundError):
+                pass

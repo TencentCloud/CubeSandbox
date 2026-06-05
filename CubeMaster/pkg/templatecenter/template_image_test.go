@@ -61,6 +61,26 @@ func TestNormalizeTemplateImageRequestDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeTemplateImageRequestIgnoresProvidedTemplateID(t *testing.T) {
+	withTemplateImageConfig(t, &config.Config{CubeletConf: &config.CubeletConf{}})
+
+	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "custom-template",
+		WritableLayerSize: "20Gi",
+	})
+	if err != nil {
+		t.Fatalf("normalizeTemplateImageRequest failed: %v", err)
+	}
+	if req.TemplateID == "custom-template" {
+		t.Fatal("provided TemplateID should be ignored")
+	}
+	if !strings.HasPrefix(req.TemplateID, "tpl-") {
+		t.Fatalf("unexpected generated TemplateID: %q", req.TemplateID)
+	}
+}
+
 func TestNormalizeTemplateImageRequestNormalizesExposedPorts(t *testing.T) {
 	withTemplateImageConfig(t, &config.Config{CubeletConf: &config.CubeletConf{
 		EnableExposedPort: true,
@@ -167,6 +187,60 @@ func TestNormalizeRequestGeneratesTemplateIDWhenMissing(t *testing.T) {
 	}
 	if got := req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]; got != templateID {
 		t.Fatalf("template annotation mismatch: %q", got)
+	}
+}
+
+func TestNormalizeRequestRejectsInvalidTemplateIDPrefix(t *testing.T) {
+	tests := []string{
+		"template-1",
+		"custom-template",
+		"sb-123",
+		"op-123",
+		"tpl-",
+		"snap-",
+		"tpl-   ",
+		"snap-   ",
+	}
+	for _, templateID := range tests {
+		t.Run(templateID, func(t *testing.T) {
+			_, _, err := NormalizeRequest(&types.CreateCubeSandboxReq{
+				Request: &types.Request{RequestID: "req-1"},
+				Annotations: map[string]string{
+					constants.CubeAnnotationAppSnapshotTemplateID:      templateID,
+					constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
+				},
+			})
+			if err == nil {
+				t.Fatalf("expected invalid template ID error for %q", templateID)
+			}
+			if !strings.Contains(err.Error(), constants.CubeAnnotationAppSnapshotTemplateID) {
+				t.Fatalf("error should include annotation key, got %v", err)
+			}
+		})
+	}
+}
+
+func TestNormalizeRequestAcceptsTemplateAndSnapshotPrefixes(t *testing.T) {
+	tests := []string{"tpl-existing", "snap-existing"}
+	for _, templateID := range tests {
+		t.Run(templateID, func(t *testing.T) {
+			req, got, err := NormalizeRequest(&types.CreateCubeSandboxReq{
+				Request: &types.Request{RequestID: "req-1"},
+				Annotations: map[string]string{
+					constants.CubeAnnotationAppSnapshotTemplateID:      templateID,
+					constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
+				},
+			})
+			if err != nil {
+				t.Fatalf("NormalizeRequest failed: %v", err)
+			}
+			if got != templateID {
+				t.Fatalf("templateID=%q, want %q", got, templateID)
+			}
+			if req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] != templateID {
+				t.Fatalf("template annotation mismatch: %q", req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+			}
+		})
 	}
 }
 
