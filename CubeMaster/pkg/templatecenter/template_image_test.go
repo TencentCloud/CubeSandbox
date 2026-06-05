@@ -423,11 +423,11 @@ func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
 	inspectPayload := `[{"RepoDigests":["docker.io/library/nginx@sha256:abcd"],"Config":{"Env":["A=B"],"WorkingDir":"/workspace"}}]`
 
 	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
-		if len(args) == 3 && args[0] == "image" && args[1] == "inspect" && args[2] == "docker.io/library/nginx:latest" {
+		if len(args) == 4 && args[0] == "image" && args[1] == "inspect" && args[2] == "--" && args[3] == "docker.io/library/nginx:latest" {
 			inspectCalls++
 			return []byte(inspectPayload), nil
 		}
-		if len(args) == 2 && args[0] == "pull" && args[1] == "docker.io/library/nginx:latest" {
+		if len(args) == 3 && args[0] == "pull" && args[1] == "--" && args[2] == "docker.io/library/nginx:latest" {
 			t.Fatal("expected docker pull to be skipped when image exists locally")
 		}
 		t.Fatalf("unexpected dockerOutput args=%v", args)
@@ -457,14 +457,14 @@ func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
 	inspectPayload := `[{"RepoDigests":["docker.io/library/nginx@sha256:abcd"],"Config":{"Cmd":["nginx"]}}]`
 
 	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
-		if len(args) == 3 && args[0] == "image" && args[1] == "inspect" && args[2] == "docker.io/library/nginx:latest" {
+		if len(args) == 4 && args[0] == "image" && args[1] == "inspect" && args[2] == "--" && args[3] == "docker.io/library/nginx:latest" {
 			inspectCalls++
 			if inspectCalls == 1 {
 				return nil, errors.New("No such image")
 			}
 			return []byte(inspectPayload), nil
 		}
-		if len(args) == 2 && args[0] == "pull" && args[1] == "docker.io/library/nginx:latest" {
+		if len(args) == 3 && args[0] == "pull" && args[1] == "--" && args[2] == "docker.io/library/nginx:latest" {
 			pullCalled = true
 			return nil, nil
 		}
@@ -495,11 +495,11 @@ func TestPrepareSourceImageReturnsPullErrorAfterInspectMiss(t *testing.T) {
 
 	inspectCalls := 0
 	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
-		if len(args) == 3 && args[0] == "image" && args[1] == "inspect" && args[2] == "docker.io/library/nginx:latest" {
+		if len(args) == 4 && args[0] == "image" && args[1] == "inspect" && args[2] == "--" && args[3] == "docker.io/library/nginx:latest" {
 			inspectCalls++
 			return nil, errors.New("No such image")
 		}
-		if len(args) == 2 && args[0] == "pull" && args[1] == "docker.io/library/nginx:latest" {
+		if len(args) == 3 && args[0] == "pull" && args[1] == "--" && args[2] == "docker.io/library/nginx:latest" {
 			return nil, errors.New("pull denied")
 		}
 		t.Fatalf("unexpected dockerOutput args=%v", args)
@@ -768,59 +768,37 @@ func TestRootfsArtifactSoftDeleted(t *testing.T) {
 	}
 }
 
-func TestCleanupIntermediateArtifactsRemovesIntermediateFiles(t *testing.T) {
-	workDir := t.TempDir()
-	storeDir := filepath.Join(t.TempDir(), "artifact-1")
-	storeRootfsDir := filepath.Join(storeDir, "rootfs")
-	ext4Path := filepath.Join(storeDir, "artifact-1.ext4")
-	if err := os.MkdirAll(filepath.Join(workDir, "rootfs", "etc"), 0o755); err != nil {
-		t.Fatalf("MkdirAll work rootfsDir failed: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(storeRootfsDir, "etc"), 0o755); err != nil {
-		t.Fatalf("MkdirAll store rootfsDir failed: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(storeRootfsDir, "etc", "hosts"), []byte("127.0.0.1 localhost\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile store rootfs content failed: %v", err)
-	}
-	if err := os.WriteFile(ext4Path, []byte("ext4"), 0o644); err != nil {
-		t.Fatalf("WriteFile ext4Path failed: %v", err)
-	}
+func TestIsLocalFastFSFallsBackToParentForMissingArtifactDir(t *testing.T) {
+	storeRoot := t.TempDir()
+	existingResult := isLocalFastFS(storeRoot)
+	missingArtifactDir := filepath.Join(storeRoot, "artifact-1")
 
-	cleanupIntermediateArtifacts(workDir, storeRootfsDir, storeDir, false)
-
-	if _, err := os.Stat(workDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("workDir should be removed on failure, err=%v", err)
-	}
-	if _, err := os.Stat(storeDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("storeDir should be removed on failure, err=%v", err)
+	if got := isLocalFastFS(missingArtifactDir); got != existingResult {
+		t.Fatalf("isLocalFastFS missing artifact dir=%v, want parent result %v", got, existingResult)
 	}
 }
 
-func TestCleanupIntermediateArtifactsKeepsStoreDirOnSuccess(t *testing.T) {
-	workDir := t.TempDir()
-	storeDir := filepath.Join(t.TempDir(), "artifact-1")
-	storeRootfsDir := filepath.Join(storeDir, "rootfs")
-	ext4Path := filepath.Join(storeDir, "artifact-1.ext4")
-	if err := os.MkdirAll(filepath.Join(workDir, "rootfs"), 0o755); err != nil {
-		t.Fatalf("MkdirAll work rootfsDir failed: %v", err)
-	}
-	if err := os.MkdirAll(storeRootfsDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll store rootfsDir failed: %v", err)
-	}
-	if err := os.WriteFile(ext4Path, []byte("ext4"), 0o644); err != nil {
-		t.Fatalf("WriteFile ext4Path failed: %v", err)
+func TestLoopMountExt4EnabledParsesBoolValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "unset", value: "", want: false},
+		{name: "true lowercase", value: "true", want: true},
+		{name: "true uppercase", value: "TRUE", want: true},
+		{name: "one", value: "1", want: true},
+		{name: "false", value: "false", want: false},
+		{name: "invalid", value: "yes", want: false},
 	}
 
-	cleanupIntermediateArtifacts(workDir, storeRootfsDir, storeDir, true)
-
-	if _, err := os.Stat(workDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("workDir should be removed on success, err=%v", err)
-	}
-	if _, err := os.Stat(storeRootfsDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("storeRootfsDir should be removed, err=%v", err)
-	}
-	if _, err := os.Stat(ext4Path); err != nil {
-		t.Fatalf("ext4Path should be kept on success, err=%v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CUBEMASTER_LOOP_MOUNT_EXT4_ENABLED", tt.value)
+			if got := loopMountExt4Enabled(); got != tt.want {
+				t.Fatalf("loopMountExt4Enabled()=%v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

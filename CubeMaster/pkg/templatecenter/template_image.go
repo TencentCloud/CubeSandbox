@@ -5,6 +5,7 @@
 package templatecenter
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -35,6 +36,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	"golang.org/x/sys/unix"
 	"gorm.io/gorm"
 )
 
@@ -65,19 +67,19 @@ const (
 	RedoModeFailedOnly  = "FAILED_ONLY"
 	RedoModeFailedNodes = "FAILED_NODES"
 
-	JobPhasePulling          = "PULLING"
-	JobPhaseUnpacking        = "UNPACKING"
-	JobPhaseBuildingExt4     = "BUILDING_EXT4"
-	JobPhaseGeneratingJSON   = "GENERATING_JSON"
-	JobPhaseDistributing     = "DISTRIBUTING"
-	JobPhaseCreatingTemplate = "CREATING_TEMPLATE"
-	JobPhaseSnapshotting     = "SNAPSHOTTING"
-	JobPhaseRegistering      = "REGISTERING"
-	JobPhaseRollbackPreparing = "ROLLBACK_PREPARING"
-	JobPhaseRollbackDriving   = "ROLLBACK_DRIVING"
+	JobPhasePulling            = "PULLING"
+	JobPhaseUnpacking          = "UNPACKING"
+	JobPhaseBuildingExt4       = "BUILDING_EXT4"
+	JobPhaseGeneratingJSON     = "GENERATING_JSON"
+	JobPhaseDistributing       = "DISTRIBUTING"
+	JobPhaseCreatingTemplate   = "CREATING_TEMPLATE"
+	JobPhaseSnapshotting       = "SNAPSHOTTING"
+	JobPhaseRegistering        = "REGISTERING"
+	JobPhaseRollbackPreparing  = "ROLLBACK_PREPARING"
+	JobPhaseRollbackDriving    = "ROLLBACK_DRIVING"
 	JobPhaseRollbackRecovering = "ROLLBACK_RECOVERING"
-	JobPhaseDeleting         = "DELETING"
-	JobPhaseReady            = "READY"
+	JobPhaseDeleting           = "DELETING"
+	JobPhaseReady              = "READY"
 
 	defaultTemplateCPU         = "2000m"
 	defaultTemplateMemory      = "2000Mi"
@@ -576,7 +578,7 @@ func prepareLocalSourceImage(ctx context.Context, req *types.CreateTemplateFromI
 	if req == nil {
 		return nil, errors.New("request is nil")
 	}
-	inspectOutput, err := dockerOutput(ctx, "", "image", "inspect", req.SourceImageRef)
+	inspectOutput, err := dockerOutput(ctx, "", "image", "inspect", "--", req.SourceImageRef)
 	if err != nil {
 		return nil, fmt.Errorf("redo requires source image %s to still exist locally: %w", req.SourceImageRef, err)
 	}
@@ -1225,7 +1227,6 @@ func restoreRootfsArtifact(ctx context.Context, artifactID string) error {
 
 func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req *types.CreateTemplateFromImageReq, source *resolvedSourceImage, downloadBaseURL string) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
 	workDir := filepath.Join(artifactWorkRootDir(), record.ArtifactID)
-	rootfsDir := filepath.Join(workDir, "rootfs")
 	storeDir, err := resolveArtifactStoreDir(ctx, record.ArtifactID)
 	if err != nil {
 		return nil, nil, err
@@ -1233,18 +1234,94 @@ func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req
 	storeRootfsDir := filepath.Join(storeDir, "rootfs")
 	ext4Path := filepath.Join(storeDir, record.ArtifactID+".ext4")
 	keepStoreDir := false
+
+	// Phase 2: loop-mount streaming build (optional, auto-detects capability).
+	if loopMountExt4Enabled() && canUseLoopMount() {
+		estimatedPhase2, err := estimateImageSizeFromInspect(ctx, source)
+		if err != nil {
+			log.G(ctx).Warnf("cannot estimate image size for Phase 2, falling back to Phase 1: %v", err)
+		} else {
+			if err := checkDiskSpace(ctx, storeDir, estimatedPhase2); err != nil {
+				return nil, nil, err
+			}
+			if err := createExt4ImageStreaming(ctx, source, workDir, ext4Path, estimatedPhase2); err != nil {
+				log.G(ctx).Warnf("loop-mount streaming ext4 build failed, falling back to phase-1: %v", err)
+				// Clean up partial work and fall through to phase-1 path.
+				_ = os.RemoveAll(workDir)
+				_ = os.Remove(ext4Path)
+			} else {
+				// Streaming build succeeded – compute SHA256, record metadata, and return.
+				shaValue, sizeBytes, err := computeFileSHA256(ext4Path)
+				if err != nil {
+					return nil, nil, err
+				}
+				_ = os.RemoveAll(workDir) // clean up temp work directory on success
+				keepStoreDir = true
+				return finalizeArtifact(ctx, record, source, ext4Path, shaValue, sizeBytes, downloadBaseURL, req)
+			}
+		}
+	}
+
+	// Phase 1: disk space pre-check.
+	// Use docker image inspect to get an approximate size for the check.
+	estimatedSizeBytes, err := estimateImageSizeFromInspect(ctx, source)
+	if err != nil {
+		log.G(ctx).Warnf("cannot estimate image size for disk-space check, skipping: %v", err)
+	} else if estimatedSizeBytes > 0 {
+		if err := checkDiskSpace(ctx, storeDir, estimatedSizeBytes); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Defer cleanup of workDir.  storeDir cleanup is handled explicitly below.
 	defer func() {
-		cleanupIntermediateArtifacts(workDir, storeRootfsDir, storeDir, keepStoreDir)
+		if workDir != "" {
+			if err := os.RemoveAll(workDir); err != nil { // NOCC:Path Traversal()
+				log.G(ctx).Warnf("cleanup workDir %s failed: %v", workDir, err)
+			}
+		}
+		if !keepStoreDir {
+			if storeDir != "" {
+				if err := os.RemoveAll(storeDir); err != nil { // NOCC:Path Traversal()
+					log.G(ctx).Warnf("cleanup storeDir %s failed: %v", storeDir, err)
+				}
+			}
+		} else {
+			if storeRootfsDir != "" {
+				if err := os.RemoveAll(storeRootfsDir); err != nil { // NOCC:Path Traversal()
+					log.G(ctx).Warnf("cleanup storeRootfsDir %s failed: %v", storeRootfsDir, err)
+				}
+			}
+		}
 	}()
-	if err := os.MkdirAll(rootfsDir, 0o755); err != nil {
-		return nil, nil, err
+
+	// Optimisation 4: export directly to storeDir when on a local fast filesystem.
+	// When storeDir is on NFS/CIFS, fall back to workDir + relocate.
+	if isLocalFastFS(storeDir) {
+		if err := exportImageRootfs(ctx, source, storeRootfsDir); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		rootfsDir := filepath.Join(workDir, "rootfs")
+		if err := os.MkdirAll(rootfsDir, 0o755); err != nil {
+			return nil, nil, err
+		}
+		if err := exportImageRootfs(ctx, source, rootfsDir); err != nil {
+			return nil, nil, err
+		}
+		if err := relocateRootfsToArtifactStore(ctx, rootfsDir, storeRootfsDir); err != nil {
+			return nil, nil, err
+		}
 	}
-	if _, err = exportImageRootfs(ctx, source, workDir, rootfsDir); err != nil {
-		return nil, nil, err
+
+	// Optimisation 2: clean up workDir early – at this point rootfs has been
+	// exported to storeRootfsDir and workDir is no longer needed for ext4 creation.
+	if workDir != "" {
+		if err := os.RemoveAll(workDir); err != nil { // NOCC:Path Traversal()
+			log.G(ctx).Warnf("cleanup workDir %s failed: %v", workDir, err)
+		}
 	}
-	if err := relocateRootfsToArtifactStore(ctx, rootfsDir, storeRootfsDir); err != nil {
-		return nil, nil, err
-	}
+
 	if err := createExt4Image(ctx, storeRootfsDir, ext4Path); err != nil {
 		return nil, nil, err
 	}
@@ -1252,6 +1329,13 @@ func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req
 	if err != nil {
 		return nil, nil, err
 	}
+	keepStoreDir = true
+	return finalizeArtifact(ctx, record, source, ext4Path, shaValue, sizeBytes, downloadBaseURL, req)
+}
+
+// finalizeArtifact populates the artifact record with computed values, persists it,
+// and returns the latest version.
+func finalizeArtifact(ctx context.Context, record *models.RootfsArtifact, source *resolvedSourceImage, ext4Path, shaValue string, sizeBytes int64, downloadBaseURL string, req *types.CreateTemplateFromImageReq) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
 	downloadToken := uuid.New().String()
 	record.SourceImageDigest = source.digest
 	record.MasterNodeIP = source.masterNodeIP
@@ -1291,7 +1375,6 @@ func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req
 	if err != nil {
 		return nil, nil, err
 	}
-	keepStoreDir = true
 	return latest, generatedReq, nil
 }
 
@@ -1302,7 +1385,7 @@ func prepareSourceImage(ctx context.Context, req *types.CreateTemplateFromImageR
 		inspectOutput      []byte
 		err                error
 	)
-	inspectOutput, err = dockerOutput(ctx, "", "image", "inspect", req.SourceImageRef)
+	inspectOutput, err = dockerOutput(ctx, "", "image", "inspect", "--", req.SourceImageRef)
 	if err == nil {
 		imageExistsLocally = true
 	}
@@ -1318,10 +1401,10 @@ func prepareSourceImage(ctx context.Context, req *types.CreateTemplateFromImageR
 				return nil, err
 			}
 		}
-		if err := dockerRun(ctx, dockerConfigDir, "pull", req.SourceImageRef); err != nil {
+		if err := dockerRun(ctx, dockerConfigDir, "pull", "--", req.SourceImageRef); err != nil {
 			return nil, fmt.Errorf("docker pull %s failed: %w", req.SourceImageRef, err)
 		}
-		inspectOutput, err = dockerOutput(ctx, dockerConfigDir, "image", "inspect", req.SourceImageRef)
+		inspectOutput, err = dockerOutput(ctx, dockerConfigDir, "image", "inspect", "--", req.SourceImageRef)
 		if err != nil {
 			return nil, fmt.Errorf("docker image inspect %s failed: %w", req.SourceImageRef, err)
 		}
@@ -1346,55 +1429,68 @@ func prepareSourceImage(ctx context.Context, req *types.CreateTemplateFromImageR
 				_ = os.RemoveAll(dockerConfigDir)
 			}
 			if !imageExistsLocally {
-				_ = dockerRun(cleanupCtx, "", "image", "rm", "-f", req.SourceImageRef)
+				_ = dockerRun(cleanupCtx, "", "image", "rm", "-f", "--", req.SourceImageRef)
 			}
 		},
 	}, nil
 }
 
-func exportImageRootfs(ctx context.Context, source *resolvedSourceImage, workDir, rootfsDir string) (string, error) {
-	containerIDBytes, err := dockerOutput(ctx, "", "create", source.localRef)
+func exportImageRootfs(ctx context.Context, source *resolvedSourceImage, destRootfsDir string) error {
+	// Validate source.localRef to prevent argument injection.
+	if strings.HasPrefix(source.localRef, "-") {
+		return fmt.Errorf("invalid image reference: %s", source.localRef)
+	}
+
+	containerIDBytes, err := dockerOutput(ctx, "", "create", "--", source.localRef)
 	if err != nil {
-		return "", fmt.Errorf("docker create %s failed: %w", source.localRef, err)
+		return fmt.Errorf("docker create %s failed: %w", source.localRef, err)
 	}
 	containerID := strings.TrimSpace(string(containerIDBytes))
+	// Use context.Background() so that cleanup runs even after request ctx is cancelled.
+	cleanupCtx := context.Background()
 	defer func() {
-		_ = dockerRun(ctx, "", "rm", "-f", containerID)
+		_ = dockerRun(cleanupCtx, "", "rm", "-f", containerID)
 	}()
-	tarPath := filepath.Join(workDir, "rootfs.tar")
-	if err := dockerRun(ctx, "", "export", "-o", tarPath, containerID); err != nil {
-		return "", fmt.Errorf("docker export %s failed: %w", containerID, err)
+
+	if err := os.RemoveAll(destRootfsDir); err != nil { // NOCC:Path Traversal()
+		return err
 	}
-	if err := os.RemoveAll(rootfsDir); err != nil { // NOCC:Path Traversal()
-		return "", err
+	if err := os.MkdirAll(destRootfsDir, 0o755); err != nil {
+		return err
 	}
-	if err := os.MkdirAll(rootfsDir, 0o755); err != nil {
-		return "", err
-	}
-	if err := runCommand(ctx, "", "tar", "-xf", tarPath, "-C", rootfsDir); err != nil {
-		return "", fmt.Errorf("extract rootfs tar failed: %w", err)
-	}
-	return tarPath, nil
+
+	return pipeExportToDir(ctx, containerID, destRootfsDir)
 }
 
 func createExt4Image(ctx context.Context, rootfsDir, ext4Path string) error {
-	sizeBytes, err := directorySize(rootfsDir)
+	sizeBytes, fileCount, err := directorySizeAndFileCount(rootfsDir)
 	if err != nil {
 		return err
 	}
 
-	raw := sizeBytes + 256*1024*1024
-	const gib int64 = 1024 * 1024 * 1024
+	const mib = int64(1024 * 1024)
+	const gib = int64(1024 * 1024 * 1024)
+
+	// Fixed overhead (default 256 MiB, configurable).
+	fixedOverhead := ext4FixedOverheadMiB() * mib
+
+	// Percentage overhead: configurable percentage of the data size (default 10%).
+	percentageOverhead := sizeBytes * ext4OverheadPercent() / 100
+
+	// Per-file overhead: ~1 KiB per file for inode (256 B) + directory entry + indirect block alignment.
+	perFileOverhead := fileCount * 1024
+
+	raw := sizeBytes + fixedOverhead + percentageOverhead + perFileOverhead
+
+	// Minimum 1 GiB.
 	if raw < gib {
 		raw = gib
 	}
 
-	gibs := (raw + gib - 1) / gib
-	pow := int64(1)
-	for pow < gibs {
-		pow <<= 1
-	}
-	imageSize := pow * gib
+	// Align up to 256 MiB boundary instead of next power-of-2.
+	alignment := int64(256) * mib
+	imageSize := ((raw + alignment - 1) / alignment) * alignment
+
 	if err := runCommand(ctx, "", "truncate", "-s", strconv.FormatInt(imageSize, 10), ext4Path); err != nil {
 		return fmt.Errorf("truncate ext4 image failed: %w", err)
 	}
@@ -1635,6 +1731,9 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	}
 	if strings.TrimSpace(req.SourceImageRef) == "" {
 		return nil, errors.New("source_image_ref is required")
+	}
+	if strings.HasPrefix(strings.TrimSpace(req.SourceImageRef), "-") {
+		return nil, errors.New("source_image_ref must not start with '-'")
 	}
 	if strings.TrimSpace(req.WritableLayerSize) == "" {
 		return nil, errors.New("writable_layer_size is required")
@@ -1937,6 +2036,41 @@ func artifactStoreRootDir() string {
 	return defaultArtifactStoreDir
 }
 
+func ext4FixedOverheadMiB() int64 {
+	if v := strings.TrimSpace(os.Getenv("CUBEMASTER_EXT4_FIXED_OVERHEAD_MIB")); v != "" {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 256
+}
+
+func ext4OverheadPercent() int64 {
+	if v := strings.TrimSpace(os.Getenv("CUBEMASTER_EXT4_OVERHEAD_PERCENT")); v != "" {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed >= 1 && parsed <= 20 {
+			return parsed
+		}
+	}
+	return 10
+}
+
+func diskSpaceSafetyMargin() float64 {
+	if v := strings.TrimSpace(os.Getenv("CUBEMASTER_DISK_SPACE_SAFETY_MARGIN")); v != "" {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil && parsed >= 1.0 {
+			return parsed
+		}
+	}
+	return 1.5
+}
+
+func loopMountExt4Enabled() bool {
+	if v := strings.TrimSpace(os.Getenv("CUBEMASTER_LOOP_MOUNT_EXT4_ENABLED")); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		return err == nil && enabled
+	}
+	return false
+}
+
 func artifactFallbackStoreRootDir() string {
 	return filepath.Join(os.TempDir(), fallbackArtifactStoreDir)
 }
@@ -2016,15 +2150,20 @@ func computeFileSHA256(path string) (string, int64, error) {
 	}
 	defer f.Close()
 	hasher := sha256.New()
-	size, err := io.Copy(hasher, f)
+	// Use a 4 MiB buffer to reduce read syscall count for large files.
+	buf := make([]byte, 4*1024*1024)
+	size, err := io.CopyBuffer(hasher, f, buf)
 	if err != nil {
 		return "", 0, err
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
 
-func directorySize(root string) (int64, error) {
-	var total int64
+// directorySizeAndFileCount returns the total size of regular files and the count of
+// regular files in the directory tree rooted at root.  A single filepath.Walk avoids
+// a second I/O pass.
+func directorySizeAndFileCount(root string) (int64, int64, error) {
+	var totalSize, fileCount int64
 	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -2032,10 +2171,288 @@ func directorySize(root string) (int64, error) {
 		if info == nil || info.IsDir() {
 			return nil
 		}
-		total += info.Size()
+		totalSize += info.Size()
+		fileCount++
 		return nil
 	})
-	return total, err
+	return totalSize, fileCount, err
+}
+
+// checkDiskSpace verifies that the filesystem hosting storeDir has enough free space
+// for the estimated build requirements multiplied by a configurable safety margin.
+// If storeDir does not exist yet, the function falls back to statfs-ing its parent.
+func checkDiskSpace(ctx context.Context, storeDir string, estimatedSizeBytes int64) error {
+	var stat syscall.Statfs_t
+	dir := storeDir
+	if err := syscall.Statfs(dir, &stat); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			dir = filepath.Dir(storeDir)
+			if err2 := syscall.Statfs(dir, &stat); err2 != nil {
+				return fmt.Errorf("statfs failed for %s (and parent %s): %w", storeDir, dir, err2)
+			}
+		} else {
+			return fmt.Errorf("statfs failed for %s: %w", storeDir, err)
+		}
+	}
+	availableBytes := int64(stat.Bavail) * int64(stat.Bsize)
+	margin := diskSpaceSafetyMargin()
+	requiredBytes := int64(float64(estimatedSizeBytes) * margin)
+	if availableBytes < requiredBytes {
+		return fmt.Errorf(
+			"insufficient disk space: available=%d GiB, estimated_required=%d GiB (image_size_estimate * %.1fx safety_margin)",
+			availableBytes/(1024*1024*1024),
+			requiredBytes/(1024*1024*1024),
+			margin,
+		)
+	}
+	log.G(ctx).Infof("disk space check passed: available=%d GiB, required=%d GiB",
+		availableBytes/(1024*1024*1024), requiredBytes/(1024*1024*1024))
+	return nil
+}
+
+// isLocalFastFS returns true when the filesystem of the given path appears safe
+// for direct rootfs export rather than requiring workDir + relocate.  It is
+// conservative for known network or FUSE filesystems and falls back to the
+// parent directory when the artifact directory has not been created yet.
+func isLocalFastFS(path string) bool {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return false // cannot determine – be conservative
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return false
+		}
+		if err := syscall.Statfs(parent, &stat); err != nil {
+			return false
+		}
+	}
+	// Known network or FUSE filesystem magic numbers.
+	const (
+		NFS_SUPER_MAGIC  = 0x6969
+		CIFS_SUPER_MAGIC = 0xFF534D42
+		FUSE_SUPER_MAGIC = 0x65735546
+	)
+	switch stat.Type {
+	case NFS_SUPER_MAGIC, CIFS_SUPER_MAGIC, FUSE_SUPER_MAGIC:
+		return false
+	default:
+		return true
+	}
+}
+
+// canUseLoopMount checks whether the host environment supports loop-device
+// mount-based ext4 creation (Phase 2).  Returns false when CubeMaster runs
+// inside a container without CAP_SYS_ADMIN or /dev/loop-control.
+func canUseLoopMount() bool {
+	// Check CAP_SYS_ADMIN – mount(2) requires it.
+	if !hasCapability(unix.CAP_SYS_ADMIN) {
+		return false
+	}
+	// Check that /dev/loop-control exists.
+	if _, err := os.Stat("/dev/loop-control"); err != nil {
+		return false
+	}
+	// Check required commands.
+	for _, cmd := range []string{"mount", "umount", "resize2fs"} {
+		if _, err := exec.LookPath(cmd); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// hasCapability returns true when the current process has the given capability
+// in its effective set.  On Linux this reads /proc/self/status.
+func hasCapability(cap uintptr) bool {
+	// Attempt to read CapEff from /proc/self/status.
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "CapEff:") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				return false
+			}
+			caps, err := strconv.ParseUint(fields[1], 16, 64)
+			if err != nil {
+				return false
+			}
+			return caps&(1<<uint(cap)) != 0
+		}
+	}
+	return false
+}
+
+// getFileBlockSize returns the actual on-disk size of a file (as reported by
+// stat(2) st_blocks * 512), which for sparse files is smaller than the apparent
+// length.
+func getFileBlockSize(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	stat, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || stat == nil {
+		return fi.Size() // fallback to apparent size
+	}
+	return stat.Blocks * 512
+}
+
+// estimateImageSizeFromInspect extracts an approximate image size from the
+// per-image cumulative Size field in docker inspect output.  A 4x multiplier
+// accounts for the expansion from the on-disk layer size to rootfs data, ext4
+// overhead, and temporary workspace.
+func estimateImageSizeFromInspect(ctx context.Context, source *resolvedSourceImage) (int64, error) {
+	// Try the per-image cumulative Size field first (fast, single call).
+	out, err := dockerOutput(ctx, "", "image", "inspect", "--format", "{{.Size}}", "--", source.localRef)
+	if err != nil {
+		return 0, fmt.Errorf("docker inspect for size estimation failed: %w", err)
+	}
+	sizeBytes, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse docker inspect size output %q: %w", strings.TrimSpace(string(out)), err)
+	}
+	if sizeBytes <= 0 {
+		return 0, fmt.Errorf("docker image inspect reported zero or negative size (%d bytes)", sizeBytes)
+	}
+	// RootFS data plus writable layer overhead typically expands 3-4x from the
+	// on-disk layer size. Use a conservative 4x multiplier for the disk-space
+	// pre-check.
+	return sizeBytes * 4, nil
+}
+
+// createExt4ImageStreaming uses loop-mount to stream docker export directly into
+// an ext4 image, avoiding any intermediate rootfs directory on disk (Phase 2).
+// Falls back to Phase 1 when prerequisites are not met.
+// estimatedSizeBytes should be obtained from estimateImageSizeFromInspect.
+func createExt4ImageStreaming(ctx context.Context, source *resolvedSourceImage, workDir, ext4Path string, estimatedSizeBytes int64) error {
+	if !canUseLoopMount() {
+		return fmt.Errorf("loop mount not available")
+	}
+
+	// 2. Create empty ext4 image using the caller-provided size estimate.
+	if err := runCommand(ctx, "", "truncate", "-s", strconv.FormatInt(estimatedSizeBytes, 10), ext4Path); err != nil {
+		return fmt.Errorf("truncate ext4 image for streaming: %w", err)
+	}
+	if err := runCommand(ctx, "", "mkfs.ext4", "-F", ext4Path); err != nil {
+		return fmt.Errorf("mkfs.ext4 for streaming: %w", err)
+	}
+
+	// 3. Mount the ext4 image via loop device.
+	mountPoint := filepath.Join(workDir, "ext4-mnt")
+	if err := os.MkdirAll(mountPoint, 0o700); err != nil {
+		return fmt.Errorf("create mount point: %w", err)
+	}
+
+	// Use context.Background() for cleanup so it runs even after request cancellation.
+	cleanupCtx := context.Background()
+	var unmountOnce sync.Once
+	var detachOnce sync.Once
+	cleanup := func() {
+		unmountOnce.Do(func() {
+			_ = runCommand(cleanupCtx, "", "umount", "--", mountPoint)
+		})
+		if err := os.RemoveAll(mountPoint); err != nil {
+			log.G(ctx).Warnf("cleanup mount point %s failed: %v", mountPoint, err)
+		}
+	}
+	defer cleanup()
+
+	// Allocate a free loop device and mount.
+	loopOut, err := exec.CommandContext(ctx, "losetup", "--find", "--show", ext4Path).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("losetup --find --show %s failed: %w: %s", ext4Path, err, string(loopOut))
+	}
+	loopDevice := strings.TrimSpace(string(loopOut))
+	detachLoop := func() {
+		detachOnce.Do(func() {
+			_ = runCommand(cleanupCtx, "", "losetup", "--detach", "--", loopDevice)
+		})
+	}
+	defer detachLoop()
+
+	if err := runCommand(ctx, "", "mount", "-o", "nosuid,noexec,nodev,noatime", "--", loopDevice, mountPoint); err != nil {
+		detachLoop() // explicit detach on mount failure (defer will be a no-op via sync.Once)
+		return fmt.Errorf("mount loop device %s: %w", loopDevice, err)
+	}
+
+	// 4. Create container and stream export directly into the mounted ext4.
+	containerIDBytes, err := dockerOutput(ctx, "", "create", "--", source.localRef)
+	if err != nil {
+		return fmt.Errorf("docker create for streaming: %w", err)
+	}
+	containerID := strings.TrimSpace(string(containerIDBytes))
+	defer func() {
+		_ = dockerRun(cleanupCtx, "", "rm", "-f", containerID)
+	}()
+
+	if err := pipeExportToDir(ctx, containerID, mountPoint); err != nil {
+		return fmt.Errorf("pipe export to mount point: %w", err)
+	}
+
+	// 5. Unmount (via cleanup).
+	cleanup()
+
+	// 6. Shrink the ext4 filesystem to minimum size (best-effort).
+	if err := runCommand(cleanupCtx, "", "resize2fs", "-M", ext4Path); err != nil {
+		log.G(ctx).Warnf("resize2fs -M failed (best-effort, using original size): %v", err)
+	}
+
+	// 7. Truncate to actual block size.
+	finalSize := getFileBlockSize(ext4Path)
+	if finalSize > 0 && finalSize < estimatedSizeBytes {
+		if err := runCommand(cleanupCtx, "", "truncate", "-s", strconv.FormatInt(finalSize, 10), ext4Path); err != nil {
+			log.G(ctx).Warnf("truncate to final size %d failed: %v", finalSize, err)
+		}
+	}
+
+	return nil
+}
+
+// pipeExportToDir streams the docker export of a container directly into a target
+// directory via tar -xf -.
+func pipeExportToDir(ctx context.Context, containerID, destDir string) error {
+	exportCmd := exec.CommandContext(ctx, "docker", "export", containerID)
+	tarCmd := exec.CommandContext(ctx, "tar", "-xf", "-", "-C", destDir)
+
+	pipe, err := exportCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("create pipe from docker export to tar: %w", err)
+	}
+	tarCmd.Stdin = pipe
+
+	// Best-effort: increase pipe buffer to 1 MiB.
+	if f, ok := pipe.(*os.File); ok {
+		_, _ = unix.FcntlInt(f.Fd(), unix.F_SETPIPE_SZ, 1<<20)
+	}
+
+	var exportErrBuf, tarErrBuf bytes.Buffer
+	exportCmd.Stderr = &exportErrBuf
+	tarCmd.Stderr = &tarErrBuf
+
+	if err := tarCmd.Start(); err != nil {
+		return fmt.Errorf("start tar extract: %w", err)
+	}
+	if err := exportCmd.Start(); err != nil {
+		tarCmd.Process.Kill()
+		_ = tarCmd.Wait()
+		return fmt.Errorf("start docker export: %w", err)
+	}
+
+	exportWaitErr := exportCmd.Wait()
+	tarWaitErr := tarCmd.Wait()
+
+	if exportWaitErr != nil {
+		return fmt.Errorf("docker export %s failed: %w (stderr: %s)", containerID, exportWaitErr, exportErrBuf.String())
+	}
+	if tarWaitErr != nil {
+		return fmt.Errorf("extract tar to %s failed: %w (stderr: %s)", destDir, tarWaitErr, tarErrBuf.String())
+	}
+	return nil
 }
 
 func firstNonEmptyDigest(info dockerInspectImage) string {
@@ -2248,21 +2665,6 @@ func ensureArtifactBuildPreflight(ctx context.Context) error {
 		return fmt.Errorf("mkfs.ext4 on cubemaster node does not appear to support the -d option required for rootfs image creation")
 	}
 	return nil
-}
-
-func cleanupIntermediateArtifacts(workDir, storeRootfsDir, storeDir string, keepStoreDir bool) {
-	if workDir != "" {
-		_ = os.RemoveAll(workDir) // NOCC:Path Traversal()
-	}
-	if !keepStoreDir {
-		if storeDir != "" {
-			_ = os.RemoveAll(storeDir) // NOCC:Path Traversal()
-		}
-		return
-	}
-	if storeRootfsDir != "" {
-		_ = os.RemoveAll(storeRootfsDir) // NOCC:Path Traversal()
-	}
 }
 
 func relocateRootfsToArtifactStore(ctx context.Context, srcRootfsDir, dstRootfsDir string) error {
