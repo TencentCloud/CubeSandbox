@@ -196,6 +196,10 @@ func TestNormalizeRequestRejectsInvalidTemplateIDPrefix(t *testing.T) {
 		"custom-template",
 		"sb-123",
 		"op-123",
+		"tpl-",
+		"snap-",
+		"tpl-   ",
+		"snap-   ",
 	}
 	for _, templateID := range tests {
 		t.Run(templateID, func(t *testing.T) {
