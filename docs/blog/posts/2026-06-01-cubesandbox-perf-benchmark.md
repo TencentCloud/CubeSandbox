@@ -38,6 +38,8 @@ Every section includes the exact commands needed to reproduce the results on you
 
 > **BMI5** (Memory-optimized Bare Metal Instance 5) is a Tencent Cloud bare-metal instance series designed for large-memory, high-density deployment scenarios. It provides physical-machine-level isolation and performance with zero virtualization overhead, supports nested virtualization, and is particularly well-suited for running large numbers of lightweight VMs like CubeSandbox. To reproduce the tests in this post, visit the [Tencent Cloud Bare Metal purchase page](https://buy.cloud.tencent.com/bm) to select the same model.
 
+> To install CubeSandbox, refer to the [Bare Metal Deployment Guide](../../guide/bare-metal-deploy.md).
+
 ### 2.2 Sandbox Spec and Template Creation
 
 All tests use sandboxes with the following spec:
