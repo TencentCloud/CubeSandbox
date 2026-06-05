@@ -13,6 +13,18 @@ die() {
   exit 1
 }
 
+# Avoid `ldd --version | head -1` under strict mode: `head` may exit early and
+# SIGPIPE `ldd`, which turns a valid glibc probe into a false failure.
+detect_glibc_version() {
+  local ldd_output glibc_ver
+  if ! ldd_output="$(ldd --version 2>&1)"; then
+    return 1
+  fi
+  glibc_ver="$(awk 'NR == 1 { print $NF; exit }' <<<"${ldd_output}")"
+  [[ -n "${glibc_ver}" ]] || return 1
+  printf '%s\n' "${glibc_ver}"
+}
+
 require_cmd() {
   local cmd="$1"
   command -v "${cmd}" >/dev/null 2>&1 || die "required command not found: ${cmd}"
@@ -608,9 +620,7 @@ check_glibc_preflight() {
   local min_minor=31
 
   local glibc_ver
-  glibc_ver="$(ldd --version 2>&1 | head -1 | awk '{print $NF}')"
-
-  if [[ -z "${glibc_ver}" ]]; then
+  if ! glibc_ver="$(detect_glibc_version)"; then
     die "unable to detect glibc version (ldd --version failed)"
   fi
 
