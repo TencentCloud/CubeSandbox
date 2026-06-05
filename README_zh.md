@@ -13,6 +13,7 @@
   <a href="https://github.com/tencentcloud/CubeSandbox/issues"><img src="https://img.shields.io/github/issues/tencentcloud/cubesandbox" alt="GitHub Issues" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0 License" /></a>
   <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs Welcome" /></a>
+  <a href="https://landscape.cncf.io/?landscape=observability-and-analysis&group=ai-native&item=ai-native-infra--workload-runtime--cubesandbox"><img src="https://img.shields.io/badge/CNCF-Landscape-0C66E4" alt="CNCF Landscape" /></a>
 </p>
 
 <p align="center">
@@ -290,3 +291,14 @@ Cube Sandbox 需要一台支持 **KVM** 的 **x86_64 Linux** 环境。
 Cube Sandbox 使用 [Apache License 2.0](./LICENSE) 开源许可证。
 
 Cube Sandbox 的诞生离不开开源社区的基石，特别鸣谢 [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor)、[Kata Containers](https://github.com/kata-containers/kata-containers)、virtiofsd、containerd-shim-rs、ttrpc-rust 等。部分组件为适配 Cube Sandbox 运行模型进行了定制修改，原始上游归属声明均已保留。
+
+---
+
+<p align="center">
+  <a href="https://landscape.cncf.io/?landscape=observability-and-analysis&group=ai-native&item=ai-native-infra--workload-runtime--cubesandbox">
+    <img src="https://raw.githubusercontent.com/cncf/artwork/refs/heads/main/other/cncf-landscape/horizontal/color/cncf-landscape-horizontal-color.svg" width="300" alt="CNCF Landscape" />
+  </a>
+</p>
+<p align="center">
+  Cube Sandbox 已被收录至 <a href="https://landscape.cncf.io/?landscape=observability-and-analysis&group=ai-native&item=ai-native-infra--workload-runtime--cubesandbox">CNCF Landscape</a>。
+</p>
