@@ -91,7 +91,7 @@ echo "[one-click] building cubevsmapdump in builder" >&2
 echo "[one-click] building cube-agent in builder" >&2
 # Agent Makefile reads CUBE_VERSION/CUBE_COMMIT/CUBE_BUILD_TIME directly.
 (cd /workspace/agent && make -j1)
-make BINDIR=${PREBUILT_DIR} install"
+make -C /workspace/agent BINDIR=${PREBUILT_DIR} install
 
 echo "[one-click] building shim workspace in builder" >&2
 # CUBE_VERSION/COMMIT/BUILD_TIME picked up by shim/build.rs and cube-runtime/build.rs

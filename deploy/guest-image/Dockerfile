@@ -1,4 +1,4 @@
-FROM cube-sandbox-image.tencentcloudcr.com/opensource/tencentos4-minimal:4.4-v20250331
+FROM tencentos/tencentos4-minimal:latest
 
 WORKDIR /work
 
