@@ -423,11 +423,11 @@ func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
 	inspectPayload := `[{"RepoDigests":["docker.io/library/nginx@sha256:abcd"],"Config":{"Env":["A=B"],"WorkingDir":"/workspace"}}]`
 
 	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
-		if len(args) == 3 && args[0] == "image" && args[1] == "inspect" && args[2] == "docker.io/library/nginx:latest" {
+		if len(args) == 4 && args[0] == "image" && args[1] == "inspect" && args[2] == "--" && args[3] == "docker.io/library/nginx:latest" {
 			inspectCalls++
 			return []byte(inspectPayload), nil
 		}
-		if len(args) == 2 && args[0] == "pull" && args[1] == "docker.io/library/nginx:latest" {
+		if len(args) == 3 && args[0] == "pull" && args[1] == "--" && args[2] == "docker.io/library/nginx:latest" {
 			t.Fatal("expected docker pull to be skipped when image exists locally")
 		}
 		t.Fatalf("unexpected dockerOutput args=%v", args)
@@ -457,14 +457,14 @@ func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
 	inspectPayload := `[{"RepoDigests":["docker.io/library/nginx@sha256:abcd"],"Config":{"Cmd":["nginx"]}}]`
 
 	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
-		if len(args) == 3 && args[0] == "image" && args[1] == "inspect" && args[2] == "docker.io/library/nginx:latest" {
+		if len(args) == 4 && args[0] == "image" && args[1] == "inspect" && args[2] == "--" && args[3] == "docker.io/library/nginx:latest" {
 			inspectCalls++
 			if inspectCalls == 1 {
 				return nil, errors.New("No such image")
 			}
 			return []byte(inspectPayload), nil
 		}
-		if len(args) == 2 && args[0] == "pull" && args[1] == "docker.io/library/nginx:latest" {
+		if len(args) == 3 && args[0] == "pull" && args[1] == "--" && args[2] == "docker.io/library/nginx:latest" {
 			pullCalled = true
 			return nil, nil
 		}
@@ -495,11 +495,11 @@ func TestPrepareSourceImageReturnsPullErrorAfterInspectMiss(t *testing.T) {
 
 	inspectCalls := 0
 	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
-		if len(args) == 3 && args[0] == "image" && args[1] == "inspect" && args[2] == "docker.io/library/nginx:latest" {
+		if len(args) == 4 && args[0] == "image" && args[1] == "inspect" && args[2] == "--" && args[3] == "docker.io/library/nginx:latest" {
 			inspectCalls++
 			return nil, errors.New("No such image")
 		}
-		if len(args) == 2 && args[0] == "pull" && args[1] == "docker.io/library/nginx:latest" {
+		if len(args) == 3 && args[0] == "pull" && args[1] == "--" && args[2] == "docker.io/library/nginx:latest" {
 			return nil, errors.New("pull denied")
 		}
 		t.Fatalf("unexpected dockerOutput args=%v", args)
