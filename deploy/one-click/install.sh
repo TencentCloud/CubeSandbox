@@ -109,6 +109,18 @@ check_proxy_cert_preflight() {
   :
 }
 
+restore_selinux_contexts() {
+  command -v restorecon >/dev/null 2>&1 || return 0
+  if command -v selinuxenabled >/dev/null 2>&1; then
+    selinuxenabled || return 0
+  elif [[ ! -d /sys/fs/selinux ]]; then
+    return 0
+  fi
+
+  log "restoring SELinux contexts under ${INSTALL_PREFIX}"
+  restorecon -R "${INSTALL_PREFIX}"
+}
+
 one_click_runtime_file_paths() {
   [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
 
@@ -718,6 +730,7 @@ else
   rm -f /usr/local/bin/cubemastercli
 fi
 
+restore_selinux_contexts
 install_systemd_units
 check_runtime_file_paths_not_directories
 start_systemd_target
