@@ -42,6 +42,8 @@ Compared to the [bare-metal benchmark report](./2026-06-01-cubesandbox-perf-benc
 
 > **SA9.4XLARGE32** is a Tencent Cloud ninth-generation standard instance powered by AMD EPYC 9K65 processors, suited for general-purpose computing. This post runs a PVM (Parallel Virtual Machine) kernel that supports nested virtualization, enabling CubeSandbox to run on an ordinary cloud server. To reproduce the tests in this post, visit the [Tencent Cloud CVM purchase page](https://buy.cloud.tencent.com/cvm) to select the same model.
 
+> To install CubeSandbox, refer to the [Quick Start Guide](../../guide/quickstart.md).
+
 ### 2.2 Sandbox Spec and Template Creation
 
 All tests use sandboxes with the following spec:
