@@ -75,7 +75,7 @@ export function Rail() {
             GitHub
           </span>
         </a>
-        <div className="text-xs tracking-wider text-muted-foreground/70 text-num">v0.1</div>
+        <div className="text-xs tracking-wider text-muted-foreground/70 text-num">v{__APP_VERSION__}</div>
       </div>
     </aside>
   );

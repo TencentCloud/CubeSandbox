@@ -273,6 +273,10 @@ jobs:
         run: docker pull "${BUILDER_IMAGE}"
 
       - name: Build one-click release bundle
+        env:
+          # Align the dashboard's displayed version with the release tag; the
+          # value propagates to the web build (vite reads CUBE_RELEASE_VERSION).
+          CUBE_RELEASE_VERSION: ${{ github.ref_name }}
         run: ./deploy/one-click/build-release-bundle-builder.sh
 
       - name: Resolve bundle path
