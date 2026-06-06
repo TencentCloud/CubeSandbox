@@ -106,7 +106,7 @@ function EgressSection() {
     staleTime: 30_000,
   });
 
-  // fetch details for all templates to get networkType / allowInternetAccess
+  // fetch details for all templates to get networkType, allowInternetAccess, and egress policy
   const { data: details, isLoading: detailsLoading } = useQuery({
     queryKey: ['templates-details-network'],
     queryFn: async () => {

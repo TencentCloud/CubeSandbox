@@ -291,9 +291,71 @@ export function listTemplates() {
   return clone(templates);
 }
 
+function buildMockCreateRequest(base: TemplateSummaryDto) {
+  const containerBase = {
+    image: { writable_layer_size: '1G' },
+    resources: { cpu: '2000m', mem: '2048Mi' },
+    probe: { probe_handler: { http_get: { path: '/health', port: 8080 } } },
+  };
+
+  const common = {
+    templateID: base.templateID,
+    instanceType: base.instanceType ?? 'standard',
+    image: base.imageInfo,
+    annotations: { 'com.exposed_ports': '8080' },
+    containers: [containerBase],
+  };
+
+  switch (base.templateID) {
+    case 'python-3.11-ai':
+      return {
+        ...common,
+        network_type: 'tap',
+        cubevs_context: {
+          allowInternetAccess: true,
+          allowOut: ['172.67.0.0/16'],
+          denyOut: ['10.0.0.0/8'],
+        },
+        containers: [{
+          ...containerBase,
+          envs: [
+            { key: 'APP_ENV', value: 'production' },
+            { key: 'DEBUG', value: 'false' },
+          ],
+          dns_config: { servers: ['8.8.8.8', '1.1.1.1'] },
+        }],
+      };
+    case 'nodejs-20-web':
+      return {
+        ...common,
+        network_type: 'tap',
+        cubevs_context: { allowInternetAccess: false },
+        containers: [{
+          ...containerBase,
+          envs: [{ key: 'NODE_ENV', value: 'production' }],
+          dns_config: { servers: ['114.114.114.114'] },
+        }],
+      };
+    default:
+      return common;
+  }
+}
+
+function mockTemplateNetworkFields(templateID: string) {
+  switch (templateID) {
+    case 'python-3.11-ai':
+      return { networkType: 'tap', allowInternetAccess: true };
+    case 'nodejs-20-web':
+      return { networkType: 'tap', allowInternetAccess: false };
+    default:
+      return { networkType: null, allowInternetAccess: null };
+  }
+}
+
 export function getTemplate(templateID: string): TemplateDetailDto | undefined {
   const base = templates.find((item) => item.templateID === templateID);
   if (!base) return undefined;
+  const network = mockTemplateNetworkFields(base.templateID);
   return {
     templateID: base.templateID,
     instanceType: base.instanceType,
@@ -304,12 +366,9 @@ export function getTemplate(templateID: string): TemplateDetailDto | undefined {
       { node: 'cube-edge-01', ready: true, localVersion: base.version },
       { node: 'cube-edge-02', ready: base.status !== 'failed', localVersion: base.version },
     ],
-    createRequest: {
-      templateID: base.templateID,
-      instanceType: base.instanceType ?? 'standard',
-      image: base.imageInfo,
-    },
-  };
+    createRequest: buildMockCreateRequest(base),
+    ...network,
+  } as TemplateDetailDto;
 }
 
 export function getTemplateCompat(): TemplateCompatMatrix {

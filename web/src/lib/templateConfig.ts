@@ -41,15 +41,17 @@ function formatEnvList(envs?: KeyValue[]): string | null {
   if (!envs?.length) return null;
   const lines = envs
     .map(({ key, value }) => (key ? `${key}=${value ?? ''}` : null))
-    .filter(Boolean) as string[];
+    .filter((line): line is string => line !== null);
   return lines.length > 0 ? lines.join('\n') : null;
 }
 
 function formatStringList(items?: string[]): string | null {
+  // 去掉 API 返回值首尾空白, 避免展示时出现多余空格; 合法 DNS/CIDR 不应含空格
   const values = items?.map((item) => item.trim()).filter(Boolean) ?? [];
   return values.length > 0 ? values.join(', ') : null;
 }
 
+// 无效输入时返回 null, 便于详情页用 cfg?.env 等条件渲染
 export function extractTemplateRuntimeConfig(cr: unknown): TemplateRuntimeConfig | null {
   if (!cr || typeof cr !== 'object') return null;
   const req = cr as CreateRequestShape;
@@ -67,6 +69,7 @@ export function extractTemplateRuntimeConfig(cr: unknown): TemplateRuntimeConfig
   };
 }
 
+// 无效输入时返回空策略对象, 便于表格列始终渲染占位符
 export function extractTemplateNetworkPolicy(cr: unknown): TemplateNetworkPolicy {
   if (!cr || typeof cr !== 'object') {
     return { dns: null, allowOut: null, denyOut: null };
