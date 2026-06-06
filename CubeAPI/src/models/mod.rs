@@ -487,7 +487,7 @@ pub struct CreateTemplateRequest {
     /// HTTP probe port.
     #[serde(rename = "probePort", default)]
     pub probe_port: Option<u16>,
-    /// HTTP probe path, e.g. "/health".
+    /// HTTP probe path, e.g. "/health". Defaults to "/health" when `probePort` is set.
     #[serde(rename = "probePath", default)]
     pub probe_path: Option<String>,
     /// CPU in millicores, e.g. 2000 means 2000m.
@@ -502,6 +502,33 @@ pub struct CreateTemplateRequest {
     /// Allow internet (public) access.
     #[serde(rename = "allowInternetAccess", default)]
     pub allow_internet_access: Option<bool>,
+    /// Network mode, e.g. "tap".
+    #[serde(rename = "networkType", default)]
+    pub network_type: Option<String>,
+    /// Limit template distribution to these node IDs or host IPs.
+    #[serde(default)]
+    pub nodes: Option<Vec<String>>,
+    /// Registry username for private source images.
+    #[serde(rename = "registryUsername", default)]
+    pub registry_username: Option<String>,
+    /// Registry password for private source images.
+    #[serde(rename = "registryPassword", default)]
+    pub registry_password: Option<String>,
+    /// Override container ENTRYPOINT.
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    /// Override container CMD args.
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// Container DNS nameservers.
+    #[serde(default)]
+    pub dns: Option<Vec<String>>,
+    /// Allowed outbound CIDRs for CubeVS egress policy.
+    #[serde(rename = "allowOut", default)]
+    pub allow_out: Option<Vec<String>>,
+    /// Denied outbound CIDRs for CubeVS egress policy.
+    #[serde(rename = "denyOut", default)]
+    pub deny_out: Option<Vec<String>>,
 }
 
 /// Body for POST /templates/:id (rebuild).

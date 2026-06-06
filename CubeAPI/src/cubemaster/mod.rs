@@ -1565,6 +1565,14 @@ pub struct CreateTemplateFromImageReq {
     /// Ports exposed by the container.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exposed_ports: Option<Vec<u16>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distribution_scope: Option<Vec<String>>,
     /// Container-level overrides (probe, resources, envs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_overrides: Option<CreateTemplateContainerOverrides>,
@@ -1577,11 +1585,17 @@ pub struct CreateTemplateFromImageReq {
 #[derive(Debug, Serialize)]
 pub struct CreateTemplateContainerOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub probe: Option<Probe>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<CreateTemplateResources>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub envs: Option<Vec<CreateTemplateEnv>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_config: Option<DnsConfig>,
 }
 
 /// CPU / memory resources for template container.
@@ -1610,6 +1624,10 @@ pub struct CreateTemplateCubeVSContext {
         skip_serializing_if = "Option::is_none"
     )]
     pub allow_internet_access: Option<bool>,
+    #[serde(rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
+    pub allow_out: Vec<String>,
+    #[serde(rename = "denyOut", skip_serializing_if = "Vec::is_empty")]
+    pub deny_out: Vec<String>,
 }
 
 /// Body for POST /cube/template/redo (rebuild).

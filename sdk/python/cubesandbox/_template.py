@@ -87,9 +87,10 @@ class TemplateInfo:
     @classmethod
     def from_dict(cls, data: dict) -> "TemplateInfo":
         builds_raw = data.get("builds") or []
+        aliases = data.get("aliases") or []
         return cls(
             template_id=data.get("templateID") or data.get("template_id", ""),
-            name=data.get("name") or data.get("aliases", [None])[0] or "",
+            name=data.get("name") or (aliases[0] if aliases else "") or "",
             instance_type=data.get("instanceType") or data.get("instance_type", ""),
             version=data.get("version") or "",
             status=data.get("status") or "",
@@ -219,6 +220,15 @@ class Template:
         memory_mb: int | None = None,
         envs: Dict[str, str] | None = None,
         allow_internet_access: bool | None = None,
+        network_type: str | None = None,
+        nodes: list[str] | None = None,
+        registry_username: str | None = None,
+        registry_password: str | None = None,
+        command: list[str] | None = None,
+        args: list[str] | None = None,
+        dns: list[str] | None = None,
+        allow_out: list[str] | None = None,
+        deny_out: list[str] | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> TemplateBuild:
@@ -245,6 +255,15 @@ class Template:
             memory_mb: Memory limit in MiB for the sandbox.
             envs: Environment variables baked into the template.
             allow_internet_access: Whether sandboxes from this template may access internet.
+            network_type: Network mode for the generated template, e.g. ``"tap"``.
+            nodes: Limit template distribution to these node IDs or host IPs.
+            registry_username: Registry username for private source images.
+            registry_password: Registry password for private source images.
+            command: Override container ENTRYPOINT.
+            args: Override container CMD args.
+            dns: Container DNS nameservers.
+            allow_out: Allowed outbound CIDRs for CubeVS egress policy.
+            deny_out: Denied outbound CIDRs for CubeVS egress policy.
             config: SDK config.  Uses default (env-based) config if omitted.
             **kwargs: Extra fields forwarded verbatim to the request body.
 
@@ -282,6 +301,24 @@ class Template:
             payload["env"] = [f"{key}={value}" for key, value in envs.items()]
         if allow_internet_access is not None:
             payload["allowInternetAccess"] = allow_internet_access
+        if network_type is not None:
+            payload["networkType"] = network_type
+        if nodes is not None:
+            payload["nodes"] = nodes
+        if registry_username is not None:
+            payload["registryUsername"] = registry_username
+        if registry_password is not None:
+            payload["registryPassword"] = registry_password
+        if command is not None:
+            payload["command"] = command
+        if args is not None:
+            payload["args"] = args
+        if dns is not None:
+            payload["dns"] = dns
+        if allow_out is not None:
+            payload["allowOut"] = allow_out
+        if deny_out is not None:
+            payload["denyOut"] = deny_out
         payload.update(kwargs)
 
         s = requests.Session()

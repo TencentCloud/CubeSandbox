@@ -679,6 +679,7 @@ mod tests {
             host_id: "host-1".to_string(),
             status: "running".to_string(),
             started_at: None,
+            create_at: 0,
             end_at: None,
             cpu_count: 2,
             memory_mb: 2048,

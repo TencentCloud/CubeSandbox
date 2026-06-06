@@ -20,6 +20,7 @@ import httpx
 import pytest
 
 from cubesandbox import CommandResult, Template
+from cubesandbox._template import TemplateInfo
 from cubesandbox._commands import Commands, _collect_process_events
 from cubesandbox._config import Config
 from cubesandbox._exceptions import (
@@ -1361,6 +1362,91 @@ class TestTemplateAPI:
         )
         assert job.job_id == "job-001"
         assert job.template_id == "tpl-python"
+
+    def test_build_forwards_create_from_image_options(self):
+        body = {
+            "jobID": "job-002",
+            "templateID": "tpl-network",
+            "status": "accepted",
+            "phase": "",
+            "progress": 0,
+        }
+        config = make_config()
+
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(
+                image="registry.example.com/app:latest",
+                writable_layer_size="20Gi",
+                network_type="tap",
+                nodes=["node-a", "10.0.0.12"],
+                registry_username="pull-user",
+                registry_password="pull-pass",
+                command=["/bin/sh", "-c"],
+                args=["sleep infinity"],
+                dns=["8.8.8.8", "1.1.1.1"],
+                allow_out=["172.67.0.0/16"],
+                deny_out=["10.0.0.0/8"],
+                config=config,
+            )
+
+        post.assert_called_once_with(
+            "http://localhost:3000/templates",
+            json={
+                "image": "registry.example.com/app:latest",
+                "writableLayerSize": "20Gi",
+                "networkType": "tap",
+                "nodes": ["node-a", "10.0.0.12"],
+                "registryUsername": "pull-user",
+                "registryPassword": "pull-pass",
+                "command": ["/bin/sh", "-c"],
+                "args": ["sleep infinity"],
+                "dns": ["8.8.8.8", "1.1.1.1"],
+                "allowOut": ["172.67.0.0/16"],
+                "denyOut": ["10.0.0.0/8"],
+            },
+            headers={"Content-Type": "application/json"},
+        )
+
+    def test_template_info_from_dict_handles_empty_aliases(self):
+        info = TemplateInfo.from_dict({
+            "templateID": "tpl-test",
+            "aliases": [],
+            "networkType": "tap",
+            "allowInternetAccess": True,
+        })
+        assert info.template_id == "tpl-test"
+        assert info.name == ""
+        assert info.network_type == "tap"
+        assert info.allow_internet_access is True
+
+    def test_template_get_parses_network_fields(self):
+        body = {
+            "templateID": "tpl-network",
+            "status": "READY",
+            "networkType": "tap",
+            "allowInternetAccess": False,
+            "createRequest": {
+                "network_type": "tap",
+                "cubevs_context": {
+                    "allowInternetAccess": False,
+                    "allowOut": ["172.67.0.0/16"],
+                    "denyOut": ["10.0.0.0/8"],
+                },
+            },
+        }
+        config = make_config()
+
+        with patch("requests.Session.get", return_value=mock_response(body)) as get:
+            info = Template.get("tpl-network", config=config)
+
+        get.assert_called_once_with(
+            "http://localhost:3000/templates/tpl-network",
+            params={},
+        )
+        assert info.template_id == "tpl-network"
+        assert info.network_type == "tap"
+        assert info.allow_internet_access is False
+        assert info.create_request["cubevs_context"]["allowOut"] == ["172.67.0.0/16"]
 
     def test_build_rejects_unsupported_models(self):
         with pytest.raises(ValueError, match="image is required"):

@@ -851,3 +851,110 @@ func assertStringSlice(t *testing.T, value any, want []string) {
 		t.Fatalf("slice=%#v, want %#v", got, want)
 	}
 }
+
+func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/templates" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, `{"jobID":"job-1","templateID":"tpl-1","status":"accepted","phase":"","progress":0}`)
+	}))
+	defer server.Close()
+
+	probePort := uint16(8080)
+	cpu := uint32(2000)
+	memory := uint32(2048)
+	allowInternet := true
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	_, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{
+		Image:               "registry.example.com/app:latest",
+		WritableLayerSize:   "20Gi",
+		ExposedPorts:        []uint16{8080},
+		ProbePort:           &probePort,
+		ProbePath:           "/health",
+		CPU:                 &cpu,
+		Memory:              &memory,
+		Env:                 map[string]string{"A": "1"},
+		AllowInternetAccess: &allowInternet,
+		NetworkType:         "tap",
+		Nodes:               []string{"node-a", "10.0.0.12"},
+		RegistryUsername:    "pull-user",
+		RegistryPassword:    "pull-pass",
+		Command:             []string{"/bin/sh", "-c"},
+		Args:                []string{"sleep infinity"},
+		DNS:                 []string{"8.8.8.8", "1.1.1.1"},
+		AllowOut:            []string{"172.67.0.0/16"},
+		DenyOut:             []string{"10.0.0.0/8"},
+	})
+	if err != nil {
+		t.Fatalf("BuildTemplate returned error: %v", err)
+	}
+
+	assertString(t, got, "image", "registry.example.com/app:latest")
+	assertString(t, got, "writableLayerSize", "20Gi")
+	assertString(t, got, "networkType", "tap")
+	assertString(t, got, "registryUsername", "pull-user")
+	assertString(t, got, "registryPassword", "pull-pass")
+	assertString(t, got, "probePath", "/health")
+	assertNumber(t, got, "probePort", 8080)
+	assertNumber(t, got, "cpu", 2000)
+	assertNumber(t, got, "memory", 2048)
+	assertStringSlice(t, got["nodes"], []string{"node-a", "10.0.0.12"})
+	assertStringSlice(t, got["command"], []string{"/bin/sh", "-c"})
+	assertStringSlice(t, got["args"], []string{"sleep infinity"})
+	assertStringSlice(t, got["dns"], []string{"8.8.8.8", "1.1.1.1"})
+	assertStringSlice(t, got["allowOut"], []string{"172.67.0.0/16"})
+	assertStringSlice(t, got["denyOut"], []string{"10.0.0.0/8"})
+	assertStringSlice(t, got["env"], []string{"A=1"})
+	if got["allowInternetAccess"] != true {
+		t.Fatalf("allowInternetAccess=%#v, want true", got["allowInternetAccess"])
+	}
+}
+
+func TestBuildTemplateRequiresImage(t *testing.T) {
+	client := NewClient(Config{APIURL: "http://example.com", Timeout: 300 * time.Second})
+	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{}); err == nil {
+		t.Fatal("BuildTemplate without image returned nil error")
+	}
+}
+
+func TestGetTemplateParsesNetworkFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/templates/tpl-network" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"templateID":"tpl-network",
+			"status":"READY",
+			"networkType":"tap",
+			"allowInternetAccess":false,
+			"createRequest":{
+				"network_type":"tap",
+				"cubevs_context":{"allowOut":["172.67.0.0/16"],"denyOut":["10.0.0.0/8"]}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	info, err := client.GetTemplate(context.Background(), "tpl-network")
+	if err != nil {
+		t.Fatalf("GetTemplate returned error: %v", err)
+	}
+	if info.TemplateID != "tpl-network" {
+		t.Fatalf("TemplateID=%q, want tpl-network", info.TemplateID)
+	}
+	if info.NetworkType != "tap" {
+		t.Fatalf("NetworkType=%q, want tap", info.NetworkType)
+	}
+	if info.AllowInternetAccess == nil || *info.AllowInternetAccess {
+		t.Fatalf("AllowInternetAccess=%#v, want false", info.AllowInternetAccess)
+	}
+}
