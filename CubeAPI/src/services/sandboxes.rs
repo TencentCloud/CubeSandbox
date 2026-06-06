@@ -9,10 +9,10 @@ use uuid::Uuid;
 use crate::{
     constants::ENVD_VERSION,
     cubemaster::{
-        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient,
-        CubeMasterError, CubeVSContext, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
-        SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest,
+        datetime_from_unix_nanos, extract_template_id, ContainerSpec, CreateSandboxRequest,
+        CubeMasterClient, CubeMasterError, CubeVSContext, DeleteSandboxRequest, EnvVar, ImageSpec,
+        ListSandboxRequest, SandboxInfo, SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus,
+        SandboxTimeoutRequest, SandboxUpdateRequest,
     },
     error::{AppError, AppResult},
     models::{
@@ -140,7 +140,7 @@ impl SandboxService {
             annotations,
             labels,
             volumes: None,
-            containers: vec![],
+            containers: build_containers_from_env_vars(body.env_vars.as_ref()),
             exposed_ports: vec![],
             network_type: Some("tap".to_string()),
             cubevs_context: build_cubevs_context(body.allow_internet_access, body.network.as_ref()),
@@ -608,6 +608,41 @@ fn new_request_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// Map SDK `envVars` into a placeholder container so CubeMaster merges them
+/// with the template container via `applyTemplateToContainer`.
+fn build_containers_from_env_vars(env_vars: Option<&HashMap<String, String>>) -> Vec<ContainerSpec> {
+    let Some(env_vars) = env_vars.filter(|vars| !vars.is_empty()) else {
+        return Vec::new();
+    };
+
+    let envs = env_vars
+        .iter()
+        .map(|(key, value)| EnvVar {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .collect();
+
+    vec![ContainerSpec {
+        name: None,
+        image: ImageSpec {
+            image: String::new(),
+            storage_media: None,
+        },
+        command: None,
+        args: None,
+        working_dir: None,
+        resources: None,
+        envs: Some(envs),
+        volume_mounts: None,
+        dns_config: None,
+        r_limit: None,
+        security_context: None,
+        probe: None,
+        annotations: None,
+    }]
+}
+
 pub(crate) fn build_cubevs_context(
     allow_internet_access: Option<bool>,
     network: Option<&SandboxNetworkConfig>,
@@ -635,7 +670,7 @@ pub(crate) fn build_cubevs_context(
 mod tests {
     use std::collections::HashMap;
 
-    use super::{build_cubevs_context, filter_by_metadata, from_cubemaster_info};
+    use super::{build_containers_from_env_vars, build_cubevs_context, filter_by_metadata, from_cubemaster_info};
     use crate::cubemaster::{ListSandboxResponse, SandboxInfo};
     use crate::models::{SandboxNetworkConfig, SandboxState};
 
@@ -680,6 +715,7 @@ mod tests {
             status: "running".to_string(),
             started_at: None,
             end_at: None,
+            create_at: 0,
             cpu_count: 2,
             memory_mb: 2048,
             template_id: "tpl-1".to_string(),
@@ -690,6 +726,28 @@ mod tests {
         assert_eq!(listed.cpu_count, 2);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+    }
+
+    #[test]
+    fn build_containers_from_env_vars_maps_sdk_payload() {
+        let mut env_vars = HashMap::from([
+            ("CUBE_CREATE_ENV_TEST".to_string(), "injected-at-create".to_string()),
+            ("MY_APP_TOKEN".to_string(), "token-abc-123".to_string()),
+        ]);
+
+        let containers = build_containers_from_env_vars(Some(&env_vars));
+        assert_eq!(containers.len(), 1);
+        let envs = containers[0]
+            .envs
+            .as_ref()
+            .expect("create env vars should produce container envs");
+        assert_eq!(envs.len(), 2);
+        assert!(envs.iter().any(|e| e.key == "CUBE_CREATE_ENV_TEST" && e.value == "injected-at-create"));
+        assert!(envs.iter().any(|e| e.key == "MY_APP_TOKEN" && e.value == "token-abc-123"));
+
+        env_vars.clear();
+        assert!(build_containers_from_env_vars(Some(&env_vars)).is_empty());
+        assert!(build_containers_from_env_vars(None).is_empty());
     }
 
     #[test]

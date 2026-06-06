@@ -174,7 +174,7 @@ func (l *local) genNetworkAnnotationOpt(ctx context.Context,
 		specOpts = append(specOpts, opts.NetworkInfo.OCISpecOpts())
 	}
 	if opts.NetFile != nil {
-		if spec := opts.NetFile.OciContainerNetfileSpec(ctx, containerReq.Name); spec != nil {
+		if spec := opts.NetFile.OciContainerNetfileSpec(ctx, containerReq.Name, containerReq.GetEnvs()); spec != nil {
 			specOpts = append(specOpts, spec)
 		}
 

@@ -18,7 +18,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var hostDirBasePath = "/data/cubelet/hostdir"
+var (
+	hostDirBasePath   = "/data/cubelet/hostdir"
+	HostDirBasePath   = hostDirBasePath
+	createEnvHostBase = "/data/cubelet/create-env"
+)
 
 type HostDirBackendInfo struct {
 	VolumeName string `json:"volume_name"`
@@ -136,6 +140,10 @@ func (l *local) cleanupHostDirVolumes(ctx context.Context, info *StorageInfo) er
 	if err := os.RemoveAll(sandboxDir); err != nil {
 		log.G(ctx).Warnf("cleanupHostDirVolumes: removeAll %s: %v", sandboxDir, err)
 		return err
+	}
+	createEnvDir := filepath.Join(createEnvHostBase, info.SandboxID)
+	if err := os.RemoveAll(createEnvDir); err != nil {
+		log.G(ctx).Warnf("cleanupHostDirVolumes: removeAll %s: %v", createEnvDir, err)
 	}
 	return nil
 }

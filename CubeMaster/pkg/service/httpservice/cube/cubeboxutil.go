@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -123,8 +124,16 @@ func applyTemplateToContainer(ctr *types.Container, templateCtr *types.Container
 	ctr.Sysctls = templateCtr.Sysctls
 	ctr.SecurityContext = templateCtr.SecurityContext
 
-	ctr.Envs = append(ctr.Envs, templateCtr.Envs...)
+	ctr.Envs = append(slices.Clone(templateCtr.Envs), ctr.Envs...)
 	applyTemplateVolumeMounts(templateCtr, ctr)
+
+	// Create-time overrides may send env-only placeholder containers from CubeAPI.
+	if len(ctr.Command) == 0 {
+		ctr.Command = templateCtr.Command
+	}
+	if len(ctr.Args) == 0 {
+		ctr.Args = templateCtr.Args
+	}
 
 	if !isContainerReqWhiteTag("WorkingDir") {
 		ctr.WorkingDir = templateCtr.WorkingDir

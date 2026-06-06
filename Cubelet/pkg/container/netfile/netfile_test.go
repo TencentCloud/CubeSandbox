@@ -257,16 +257,16 @@ func TestCubeboxNetfile_OciContainerNetfileSpec(t *testing.T) {
 		},
 	}
 
-	specOpts := cn.OciContainerNetfileSpec(ctx, "container1")
+	specOpts := cn.OciContainerNetfileSpec(ctx, "container1", nil)
 	assert.NotNil(t, specOpts)
 
-	specOpts = cn.OciContainerNetfileSpec(ctx, "nonexistent")
+	specOpts = cn.OciContainerNetfileSpec(ctx, "nonexistent", nil)
 	assert.Nil(t, specOpts)
 
 	cn.ContainerNetfiles["empty-container"] = ContainerNetfile{
 		Files: map[string]FileContent{},
 	}
-	specOpts = cn.OciContainerNetfileSpec(ctx, "empty-container")
+	specOpts = cn.OciContainerNetfileSpec(ctx, "empty-container", nil)
 	assert.Nil(t, specOpts)
 }
 
@@ -377,6 +377,69 @@ func TestResolveEffectiveDNSServers(t *testing.T) {
 	}
 }
 
+func TestGenCreateEnvProfileExportsCreateTimeVars(t *testing.T) {
+	content := string(GenCreateEnvProfile([]*cubebox.KeyValue{
+		{Key: "MY_APP_TOKEN", Value: "token-abc-123"},
+		{Key: "CUBE_CONTAINER_MAIN", Value: "ignored-internal"},
+		{Key: "__BRIEF_SUMMARY__", Value: "ignored-summary"},
+		{Key: "EMPTY_OK", Value: ""},
+		{Key: "SHELL_LITERAL", Value: "hello $USER `cmd` 'quote'"},
+	}))
+	assert.Contains(t, content, "export MY_APP_TOKEN='token-abc-123'")
+	assert.Contains(t, content, "export EMPTY_OK=''")
+	assert.Contains(t, content, "export SHELL_LITERAL='hello $USER `cmd` '\\''quote'\\'''")
+	assert.NotContains(t, content, "CUBE_CONTAINER_MAIN")
+	assert.NotContains(t, content, "__BRIEF_SUMMARY__")
+}
+
+func TestCreateEnvVolumeName(t *testing.T) {
+	assert.Equal(t, CreateEnvInternalVolumeName, CreateEnvVolumeName(""))
+	assert.Equal(t, CreateEnvInternalVolumeName+"-sidecar", CreateEnvVolumeName("sidecar"))
+}
+
+func TestCreateNetfilesAddsCreateEnvProfile(t *testing.T) {
+	cn := &CubeboxNetfile{Hostname: "test-hostname"}
+	req := &cubebox.RunCubeSandboxRequest{
+		Containers: []*cubebox.ContainerConfig{
+			{
+				Name: "main",
+				Envs: []*cubebox.KeyValue{
+					{Key: "CUBE_CREATE_ENV_TEST", Value: "injected-at-create"},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, cn.CreateNetfiles(req))
+
+	files := cn.ContainerNetfiles["main"].Files
+	require.Contains(t, files, CreateEnvProfilePath)
+	assert.Contains(t, string(files[CreateEnvProfilePath].Content), "export CUBE_CREATE_ENV_TEST='injected-at-create'")
+}
+
+func TestEnsureCreateEnvProfileRefreshesFromLatestEnvs(t *testing.T) {
+	cn := &CubeboxNetfile{
+		ContainerNetfiles: map[string]ContainerNetfile{
+			"main": {
+				Files: map[string]FileContent{
+					CreateEnvProfilePath: {
+						Path:    CreateEnvProfilePath,
+						Content: []byte("stale"),
+					},
+				},
+			},
+		},
+	}
+
+	cn.EnsureCreateEnvProfile("main", []*cubebox.KeyValue{
+		{Key: "REFRESHED", Value: "new-value"},
+	})
+
+	content := string(cn.ContainerNetfiles["main"].Files[CreateEnvProfilePath].Content)
+	assert.Contains(t, content, "export REFRESHED='new-value'")
+	assert.NotContains(t, content, "stale")
+}
+
 func TestFileContent_EmptyContent(t *testing.T) {
 	cn := &CubeboxNetfile{
 		ContainerNetfiles: map[string]ContainerNetfile{
@@ -392,6 +455,6 @@ func TestFileContent_EmptyContent(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	specOpts := cn.OciContainerNetfileSpec(ctx, "container1")
+	specOpts := cn.OciContainerNetfileSpec(ctx, "container1", nil)
 	assert.NotNil(t, specOpts)
 }

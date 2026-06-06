@@ -31,6 +31,7 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"k8s.io/apimachinery/pkg/api/resource"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"golang.org/x/sys/unix"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
@@ -459,11 +460,155 @@ func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.C
 		}
 	}
 
+	if err := injectCreateEnvProfileToRootfs(ctx, flowOpts, realReq); err != nil {
+		return fmt.Errorf("inject create env profile to rootfs failed: %w", err)
+	}
+	syncSavedContainerConfigs(realReq, sandBox)
+
 	if err := l.cubeboxManger.Save(ctx, sandBox, cubes.WithNoEvent); err != nil {
 		log.G(ctx).Warnf("saveSandBoxInfo failed.%s", err.Error())
 		return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed, err.Error())
 	}
 	return nil
+}
+
+func injectCreateEnvProfileToRootfs(ctx context.Context, flowOpts *workflow.CreateContext, realReq *cubebox.RunCubeSandboxRequest) error {
+	if flowOpts == nil || realReq == nil {
+		return nil
+	}
+	if flowOpts.IsRetoreSnapshot() {
+		return injectCreateEnvProfileForRestore(ctx, flowOpts, realReq)
+	}
+	if flowOpts.StorageInfo == nil {
+		return nil
+	}
+	storageInfo, ok := flowOpts.StorageInfo.(*storage.StorageInfo)
+	if !ok || len(storageInfo.Volumes) == 0 {
+		return nil
+	}
+	for _, containerReq := range realReq.GetContainers() {
+		var blkPath string
+		for _, vm := range containerReq.GetVolumeMounts() {
+			if vm.GetContainerPath() != "/" {
+				continue
+			}
+			if vol, ok := storageInfo.Volumes[vm.GetName()]; ok && vol.FilePath != "" {
+				blkPath = vol.FilePath
+				break
+			}
+		}
+		if blkPath == "" {
+			continue
+		}
+		return localnetfile.WriteCreateEnvProfileToBlockDevice(ctx, blkPath, containerReq.GetEnvs())
+	}
+	return nil
+}
+
+func syncSavedContainerConfigs(realReq *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) {
+	for _, cntrReq := range realReq.GetContainers() {
+		ci, err := sandBox.Get(cntrReq.Id)
+		if err != nil {
+			continue
+		}
+		ci.Config = makeContainerConfigToSave(cntrReq)
+		if sandBox.FirstContainerName == ci.ID {
+			sandBox.Config = ci.Config
+		}
+	}
+}
+
+func injectCreateEnvProfileForRestore(ctx context.Context, flowOpts *workflow.CreateContext, realReq *cubebox.RunCubeSandboxRequest) error {
+	if flowOpts.StorageInfo == nil {
+		return nil
+	}
+	storageInfo, ok := flowOpts.StorageInfo.(*storage.StorageInfo)
+	if !ok {
+		return nil
+	}
+	sandboxID := flowOpts.SandboxID
+	if sandboxID == "" {
+		return nil
+	}
+
+	shareDir := filepath.Join(storage.HostDirBasePath, sandboxID, "ro")
+	sharePrepared := false
+	if storageInfo.HostDirBackendInfos == nil {
+		storageInfo.HostDirBackendInfos = make(map[string]*storage.HostDirBackendInfo)
+	}
+
+	for _, containerReq := range realReq.GetContainers() {
+		content := localnetfile.GenCreateEnvProfile(containerReq.GetEnvs())
+		if len(content) == 0 {
+			continue
+		}
+
+		containerKey := containerReq.GetName()
+		if containerKey == "" {
+			containerKey = containerReq.GetId()
+		}
+		if containerKey == "" {
+			continue
+		}
+		volumeName := localnetfile.CreateEnvVolumeName(containerKey)
+
+		hostDir := filepath.Join(localnetfile.CreateEnvHostBase, sandboxID, containerKey)
+		if err := os.MkdirAll(hostDir, 0o755); err != nil {
+			return fmt.Errorf("mkdir create env host dir %s: %w", hostDir, err)
+		}
+		hostFile := filepath.Join(hostDir, filepath.Base(localnetfile.CreateEnvProfilePath))
+		if err := os.WriteFile(hostFile, content, 0o644); err != nil {
+			return fmt.Errorf("write create env profile %s: %w", hostFile, err)
+		}
+
+		if !sharePrepared {
+			if err := os.MkdirAll(shareDir, 0o755); err != nil {
+				return fmt.Errorf("mkdir create env share dir %s: %w", shareDir, err)
+			}
+			sharePrepared = true
+		}
+
+		bindDest := filepath.Join(shareDir, volumeName)
+		if err := os.WriteFile(bindDest, content, 0o644); err != nil {
+			return fmt.Errorf("seed create env bind dest %s: %w", bindDest, err)
+		}
+		if err := unix.Mount(hostFile, bindDest, "", unix.MS_BIND, ""); err != nil {
+			return fmt.Errorf("bind mount create env profile %s -> %s: %w", hostFile, bindDest, err)
+		}
+		roFlags := uintptr(unix.MS_BIND | unix.MS_REMOUNT | unix.MS_RDONLY)
+		if err := unix.Mount("", bindDest, "", roFlags, ""); err != nil {
+			return fmt.Errorf("remount create env profile ro %s: %w", bindDest, err)
+		}
+
+		backendKey := volumeName + "/profile"
+		storageInfo.HostDirBackendInfos[backendKey] = &storage.HostDirBackendInfo{
+			VolumeName: volumeName,
+			ShareDir:   shareDir,
+			BindPath:   bindDest,
+			ReadOnly:   true,
+		}
+		log.G(ctx).Infof("prepared create env profile exec mount: container=%s host=%s share=%s dest=%s",
+			containerKey, hostFile, shareDir, localnetfile.CreateEnvProfilePath)
+
+		appendCreateEnvVolumeMount(containerReq, volumeName)
+	}
+	return nil
+}
+
+func appendCreateEnvVolumeMount(containerReq *cubebox.ContainerConfig, volumeName string) {
+	if volumeName == "" {
+		volumeName = localnetfile.CreateEnvInternalVolumeName
+	}
+	for _, vm := range containerReq.GetVolumeMounts() {
+		if vm.GetName() == volumeName {
+			return
+		}
+	}
+	containerReq.VolumeMounts = append(containerReq.VolumeMounts, &cubebox.VolumeMounts{
+		Name:          volumeName,
+		ContainerPath: localnetfile.CreateEnvProfilePath,
+		Readonly:      true,
+	})
 }
 
 func (l *local) generateContainerID(ctx context.Context, flowOpts *workflow.CreateContext, index int) (context.Context, string) {
