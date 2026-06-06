@@ -237,8 +237,12 @@ export interface components {
             cpuCount: number;
             /** Format: int32 */
             diskSizeMB?: number | null;
-            /** Format: date-time */
-            endAt: string;
+            /**
+             * Format: date-time
+             * @description Absolute deadline when the TTL reaper will destroy this sandbox.
+             *     `null` / omitted means the sandbox has no automatic-destroy schedule.
+             */
+            endAt?: string | null;
             envdVersion: string;
             /** Format: int32 */
             memoryMB: number;
@@ -322,8 +326,12 @@ export interface components {
             /** Format: int32 */
             diskSizeMB?: number | null;
             domain?: string | null;
-            /** Format: date-time */
-            endAt: string;
+            /**
+             * Format: date-time
+             * @description Absolute deadline when the TTL reaper will destroy this sandbox.
+             *     `null` / omitted means the sandbox has no automatic-destroy schedule.
+             */
+            endAt?: string | null;
             envdAccessToken?: string | null;
             envdVersion: string;
             /** Format: int32 */

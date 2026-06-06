@@ -871,7 +871,7 @@ pub struct SandboxInfo {
     /// Unix nanoseconds from Cubelet container.created_at — used as fallback for started_at
     #[serde(default)]
     pub create_at: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_end_at_nanos")]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default, alias = "cpuCount")]
     pub cpu_count: i32,
@@ -1027,6 +1027,41 @@ fn normalize_sandbox_status_text(raw: &str) -> String {
         "running" | "paused" | "pausing" | "stopped" | "error" => raw.trim().to_lowercase(),
         other => other.to_string(),
     }
+}
+
+fn deserialize_end_at_nanos<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum EndAtRepr {
+        Number(i64),
+        Text(String),
+        Datetime(DateTime<Utc>),
+    }
+
+    let value = Option::<EndAtRepr>::deserialize(deserializer)?;
+    Ok(match value {
+        None => None,
+        Some(EndAtRepr::Number(n)) if n <= 0 => None,
+        Some(EndAtRepr::Number(n)) => datetime_from_unix_nanos(n),
+        Some(EndAtRepr::Text(s)) if s.trim().is_empty() => None,
+        Some(EndAtRepr::Text(s)) => {
+            if let Ok(n) = s.trim().parse::<i64>() {
+                if n <= 0 {
+                    None
+                } else {
+                    datetime_from_unix_nanos(n)
+                }
+            } else {
+                DateTime::parse_from_rfc3339(s.trim())
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            }
+        }
+        Some(EndAtRepr::Datetime(dt)) => Some(dt),
+    })
 }
 
 pub(crate) fn extract_template_id(
@@ -1901,6 +1936,42 @@ mod tests {
             serde_json::from_value(payload).expect("sandbox info should deserialize aliases");
         assert_eq!(info.cpu_count, 4);
         assert_eq!(info.memory_mb, 4096);
+    }
+
+    #[test]
+    fn sandbox_info_decodes_end_at_in_every_supported_form() {
+        let payload = serde_json::json!({
+            "sandbox_id": "sb-1",
+            "end_at": 1_780_650_812_190_807_839_i64
+        });
+        let info: SandboxInfo = serde_json::from_value(payload).unwrap();
+        assert!(info.end_at.is_some());
+
+        let payload = serde_json::json!({
+            "sandbox_id": "sb-2",
+            "end_at": "1780650812190807839"
+        });
+        let info: SandboxInfo = serde_json::from_value(payload).unwrap();
+        assert!(info.end_at.is_some());
+
+        let payload = serde_json::json!({
+            "sandbox_id": "sb-3",
+            "end_at": "2026-06-05T08:14:03.198556093Z"
+        });
+        let info: SandboxInfo = serde_json::from_value(payload).unwrap();
+        assert!(info.end_at.is_some());
+
+        for raw in [
+            serde_json::json!({ "sandbox_id": "sb" }),
+            serde_json::json!({ "sandbox_id": "sb", "end_at": null }),
+            serde_json::json!({ "sandbox_id": "sb", "end_at": 0 }),
+            serde_json::json!({ "sandbox_id": "sb", "end_at": -1 }),
+            serde_json::json!({ "sandbox_id": "sb", "end_at": "" }),
+            serde_json::json!({ "sandbox_id": "sb", "end_at": "0" }),
+        ] {
+            let info: SandboxInfo = serde_json::from_value(raw).unwrap();
+            assert!(info.end_at.is_none(), "expected no TTL");
+        }
     }
 
     #[test]

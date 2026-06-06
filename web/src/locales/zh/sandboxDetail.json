@@ -17,6 +17,7 @@
     "client": "客户端",
     "alias": "别名",
     "ends": "到期时间",
+    "endsNever": "— 永不过期",
     "domain": "域名",
     "started": "启动时间",
     "state": "状态",

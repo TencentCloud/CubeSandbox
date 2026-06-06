@@ -137,6 +137,7 @@ export default function SandboxDetailPage() {
               <Field label={t('fields.client')} value={data?.clientID ?? '—'} />
               <Field label={t('fields.alias')} value={data?.alias ?? '—'} />
               <Field label={t('fields.started')} value={formatRelative(data?.startedAt)} />
+              <Field label={t('fields.ends')} value={formatEndAtRelative(data?.endAt, t('fields.endsNever'))} />
               <Field label={t('fields.domain')} value={data?.domain ?? '—'} />
             </dl>
           )}
@@ -152,6 +153,10 @@ export default function SandboxDetailPage() {
             <li className="flex justify-between">
               <span className="text-muted-foreground">{t('fields.started')}</span>
               <span>{formatDateTime(data?.startedAt)}</span>
+            </li>
+            <li className="flex justify-between">
+              <span className="text-muted-foreground">{t('fields.ends')}</span>
+              <span>{formatEndAtAbsolute(data?.endAt, t('fields.endsNever'))}</span>
             </li>
 
             <li className="flex justify-between">
@@ -249,6 +254,26 @@ function formatDateTime(value?: string | null): string {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: false,
   }).format(date);
+}
+
+// `endAt` is `string | null | undefined`: a real ISO timestamp when the
+// sandbox has an active TTL, missing/null when the user opted into
+// "no automatic destroy". The two helpers below render the same value
+// in two different idioms — relative ("in 99 minutes") for the resources
+// summary, absolute wall-clock for the runtime audit row — collapsing
+// the missing case into the i18n-supplied "never" label.
+function formatEndAtRelative(value: string | null | undefined, neverLabel: string): string {
+  if (!value) return neverLabel;
+  const ts = Date.parse(value);
+  if (!Number.isFinite(ts) || ts <= 0) return neverLabel;
+  return formatRelative(value);
+}
+
+function formatEndAtAbsolute(value: string | null | undefined, neverLabel: string): string {
+  if (!value) return neverLabel;
+  const ts = Date.parse(value);
+  if (!Number.isFinite(ts) || ts <= 0) return neverLabel;
+  return formatDateTime(value);
 }
 
 function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {

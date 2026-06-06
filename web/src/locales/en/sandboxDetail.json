@@ -17,6 +17,7 @@
     "client": "Client",
     "alias": "Alias",
     "ends": "Ends",
+    "endsNever": "— No expiry",
     "domain": "Domain",
     "started": "Started",
     "state": "State",

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -209,6 +210,10 @@ func NotifyEvent(e *Event) error {
 }
 
 func SetSandboxProxyMap(ctx context.Context, proxyInfo *types.SandboxProxyMap) error {
+	if proxyInfo == nil || proxyInfo.SandboxID == "" {
+		log.G(ctx).Errorf("SetSandboxProxyMap rejected: empty SandboxID, proxy=%+v", proxyInfo)
+		return errors.New("SetSandboxProxyMap: empty SandboxID")
+	}
 	keyByPass := "bypass_host_proxy" + ":" + proxyInfo.SandboxID
 	err := l.setByPassProsyToRedis(ctx, keyByPass, proxyInfo)
 	if err != nil {
@@ -226,6 +231,7 @@ func GetSandboxProxyMap(ctx context.Context, sandboxID string) (*types.SandboxPr
 	}
 
 	if proxyMap != nil {
+		proxyMap.SandboxID = sandboxID
 		return proxyMap, true
 	} else {
 		return nil, false
@@ -287,6 +293,40 @@ func DeleteSandboxProxyMap(ctx context.Context, sandboxID string) error {
 		return err
 	}
 	return nil
+}
+
+// ListExpiredSandboxIDs scans Redis for SandboxProxyMap entries whose
+// EndAt has elapsed and returns their sandbox IDs. Entries with empty
+// or unparseable EndAt are treated as having no TTL and skipped.
+func ListExpiredSandboxIDs(ctx context.Context, now time.Time) ([]string, error) {
+	keys, err := l.scanByPassProxyKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	const prefix = "bypass_host_proxy:"
+	expired := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if len(key) <= len(prefix) {
+			continue
+		}
+		sandboxID := key[len(prefix):]
+		proxy, err := l.getByPassProsyFromRedis(ctx, key)
+		if err != nil || proxy == nil || proxy.EndAt == "" {
+			continue
+		}
+		endNanos, err := strconv.ParseInt(proxy.EndAt, 10, 64)
+		if err != nil || endNanos <= 0 {
+			continue
+		}
+		if now.UnixNano() > endNanos {
+			log.G(ctx).Infof("reaper: sandbox=%s EndAt=%s (%s ago) -> mark expired",
+				sandboxID,
+				time.Unix(0, endNanos).UTC().Format(time.RFC3339Nano),
+				now.Sub(time.Unix(0, endNanos)))
+			expired = append(expired, sandboxID)
+		}
+	}
+	return expired, nil
 }
 
 func SetDescribeTask(ctx context.Context, taskInfo *types.DescribeTaskMap) error {

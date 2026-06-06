@@ -77,9 +77,13 @@ pub struct NewSandbox {
     #[serde(rename = "templateID")]
     pub template_id: String,
 
+    /// Sandbox lifetime in seconds. `None` (field omitted) means "no
+    /// automatic destroy" — the sandbox lives until killed explicitly
+    /// via DELETE /sandboxes/{id} or until SetTimeout/Refresh installs
+    /// a deadline. `Some(0)` is treated the same as `None`.
     #[validate(range(min = 0))]
-    #[serde(default = "default_timeout")]
-    pub timeout: i32,
+    #[serde(default)]
+    pub timeout: Option<i32>,
 
     #[serde(rename = "autoPause", default)]
     pub auto_pause: bool,
@@ -160,8 +164,10 @@ pub struct ListedSandbox {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    #[serde(rename = "endAt")]
-    pub end_at: DateTime<Utc>,
+    /// Absolute deadline when the TTL reaper will destroy this sandbox.
+    /// `None` means the sandbox has no automatic-destroy schedule.
+    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
     #[serde(rename = "memoryMB")]
@@ -190,8 +196,10 @@ pub struct SandboxDetail {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    #[serde(rename = "endAt")]
-    pub end_at: DateTime<Utc>,
+    /// Absolute deadline when the TTL reaper will destroy this sandbox.
+    /// `None` means the sandbox has no automatic-destroy schedule.
+    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "envdVersion")]
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]
@@ -373,13 +381,15 @@ fn default_log_limit() -> i32 {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct SetTimeoutRequest {
     #[validate(range(min = 0))]
+    #[serde(alias = "duration")]
     pub timeout: i32,
 }
 
 /// Request body for POST /sandboxes/{id}/refreshes
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct RefreshRequest {
-    #[validate(range(min = 0, max = 3600))]
+    #[validate(range(min = 0, max = 86400))]
+    #[serde(default, alias = "timeout")]
     pub duration: Option<i32>,
 }
 

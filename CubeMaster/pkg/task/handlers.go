@@ -148,7 +148,12 @@ func (l *localTask) workHandler(data interface{}) (err error) {
 func reportMetric(t *Task, err error) {
 
 	status, _ := ret.FromError(err)
-	rt := CubeLog.GetTraceInfo(t.Ctx).DeepCopy()
+	var rt *CubeLog.RequestTrace
+	if existing := CubeLog.GetTraceInfo(t.Ctx); existing != nil {
+		rt = existing.DeepCopy()
+	} else {
+		rt = &CubeLog.RequestTrace{}
+	}
 	rt.Callee = constants.CubeLet
 	rt.Cost = time.Since(t.start)
 	rt.RetCode = int64(status.Code())

@@ -395,6 +395,7 @@ type SandboxBriefData struct {
 	NameSpace   string            `json:"namespace,omitempty"`
 	CreateAt    int64             `json:"create_at,omitempty"`
 	PauseAt     int64             `json:"pause_at,omitempty"`
+	EndAt       int64             `json:"end_at,omitempty"`
 }
 
 type GetCubeSandboxReq struct {
@@ -594,6 +595,45 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id" p:"sandbox_id"  v:"required"`
 	InstanceType string `json:"instance_type" p:"instance_type"  v:"required"`
 	Action       string `json:"action" p:"action"  v:"required"`
+	// Timeout is only meaningful for action="resume": new TTL in seconds
+	// from now. 0 keeps the previously-recorded EndAt unchanged.
+	Timeout int `json:"timeout,omitempty"`
+}
+
+// SandboxTimeoutRequest is the body of POST /cube/sandbox/timeout.
+type SandboxTimeoutRequest struct {
+	RequestID    string `json:"RequestID" p:"RequestID" v:"required"`
+	SandboxID    string `json:"sandboxID" p:"sandboxID" v:"required"`
+	InstanceType string `json:"instanceType,omitempty"`
+	// Timeout is the new absolute TTL in seconds from now. 0 cancels the TTL.
+	Timeout int `json:"timeout"`
+}
+
+type SandboxTimeoutResponse struct {
+	RequestID string `json:"RequestID,omitempty"`
+	SandboxID string `json:"sandboxID,omitempty"`
+	// EndAt is the new absolute deadline in RFC3339 (UTC). Empty when
+	// timeout==0 (TTL cancelled).
+	EndAt string `json:"end_at,omitempty"`
+	Ret   *Ret   `json:"ret,omitempty"`
+}
+
+// SandboxRefreshRequest is the body of POST /cube/sandbox/refresh.
+type SandboxRefreshRequest struct {
+	RequestID    string `json:"RequestID" p:"RequestID" v:"required"`
+	SandboxID    string `json:"sandboxID" p:"sandboxID" v:"required"`
+	InstanceType string `json:"instanceType,omitempty"`
+	// Duration is the new absolute TTL in seconds from now. 0 cancels the TTL.
+	// Despite the historical "refresh" name, the semantics match SetTimeout
+	// because that is what the e2b-style SDKs actually expect.
+	Duration int `json:"duration"`
+}
+
+type SandboxRefreshResponse struct {
+	RequestID string `json:"RequestID,omitempty"`
+	SandboxID string `json:"sandboxID,omitempty"`
+	EndAt     string `json:"end_at,omitempty"`
+	Ret       *Ret   `json:"ret,omitempty"`
 }
 
 type ListInventoryReq struct {

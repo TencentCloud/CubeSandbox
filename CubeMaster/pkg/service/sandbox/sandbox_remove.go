@@ -124,14 +124,15 @@ func dealScfSandbox(ctx context.Context, req *types.DeleteCubeSandboxReq, t *tas
 		if proxyMap.CreatedAt != "" {
 			created, err := strconv.ParseInt(proxyMap.CreatedAt, 10, 64)
 			if err == nil && created > 0 {
-				rt := CubeLog.GetTraceInfo(ctx)
-				rt.InstanceID = req.SandboxID
+				if rt := CubeLog.GetTraceInfo(ctx); rt != nil {
+					rt.InstanceID = req.SandboxID
 
-				tmpRt := rt.DeepCopy()
-				tmpRt.RetCode = int64(errorcode.ErrorCode_Success)
-				tmpRt.CalleeAction = "lifetime"
-				tmpRt.Cost = time.Duration(time.Now().UnixNano()-created) * time.Nanosecond
-				go CubeLog.Trace(tmpRt)
+					tmpRt := rt.DeepCopy()
+					tmpRt.RetCode = int64(errorcode.ErrorCode_Success)
+					tmpRt.CalleeAction = "lifetime"
+					tmpRt.Cost = time.Duration(time.Now().UnixNano()-created) * time.Nanosecond
+					go CubeLog.Trace(tmpRt)
+				}
 			}
 		}
 	}

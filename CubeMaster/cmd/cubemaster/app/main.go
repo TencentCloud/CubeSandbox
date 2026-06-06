@@ -52,7 +52,6 @@ func (a *App) Run() {
 	)
 	defer cancel()
 
-
 	cfg := config.GetConfig()
 
 	if err := coreInit(ctx, cfg); err != nil {
@@ -169,6 +168,11 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 		stdlog.Fatalf("cube init fail:%v", err)
 		return err
 	}
+
+	// Background TTL reaper: periodically destroys sandboxes whose
+	// EndAt deadline has elapsed. Cancelled with the same root context
+	// as the rest of the master loops so graceful shutdown ends it.
+	sandbox.StartTimeoutReaper(ctx)
 
 	return nil
 }

@@ -16,6 +16,8 @@
     "cpu": "CPU",
     "memory": "Memory",
     "started": "Started",
+    "endAt": "Ends",
+    "endAtNever": "— No expiry",
     "actions": "Actions",
     "node": "Node"
   },

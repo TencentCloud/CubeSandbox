@@ -91,8 +91,7 @@ impl SandboxService {
         let end_at = summary
             .as_ref()
             .and_then(|s| s.end_at.as_ref().cloned())
-            .or(d.end_at)
-            .unwrap_or(started_at);
+            .or(d.end_at);
 
         Ok(SandboxDetail {
             template_id: d.template_id,
@@ -136,7 +135,7 @@ impl SandboxService {
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
             instance_type: self.instance_type.clone(),
-            timeout: Some(body.timeout),
+            timeout: body.timeout.filter(|t| *t > 0),
             annotations,
             labels,
             volumes: None,
@@ -520,7 +519,7 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         sandbox_id: s.sandbox_id,
         client_id: s.host_id,
         started_at,
-        end_at: s.end_at.unwrap_or(now),
+        end_at: s.end_at,
         cpu_count: s.cpu_count,
         memory_mb: s.memory_mb,
         disk_size_mb: Some(0),
@@ -679,6 +678,7 @@ mod tests {
             host_id: "host-1".to_string(),
             status: "running".to_string(),
             started_at: None,
+            create_at: 0,
             end_at: None,
             cpu_count: 2,
             memory_mb: 2048,
@@ -690,6 +690,7 @@ mod tests {
         assert_eq!(listed.cpu_count, 2);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+        assert!(listed.end_at.is_none());
     }
 
     #[test]

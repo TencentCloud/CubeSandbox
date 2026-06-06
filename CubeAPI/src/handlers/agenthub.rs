@@ -267,7 +267,7 @@ pub async fn create_agent_instance(
         .sandboxes
         .create_sandbox(NewSandbox {
             template_id: template_id.clone(),
-            timeout,
+            timeout: Some(timeout),
             auto_pause: false,
             auto_resume: None,
             secure: None,
@@ -903,7 +903,7 @@ pub async fn clone_agent_instance(
         .sandboxes
         .create_sandbox(NewSandbox {
             template_id: snapshot_id.clone(),
-            timeout,
+            timeout: Some(timeout),
             auto_pause: false,
             auto_resume: None,
             secure: None,

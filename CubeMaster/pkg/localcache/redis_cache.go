@@ -295,6 +295,10 @@ func (l *local) getByPassProsyFromRedis(ctx context.Context, key string) (*types
 		nodeIdIp.CreatedAt = createAt
 		delete(mapvalues, "CreatedAt")
 	}
+	if endAt, ok := mapvalues["EndAt"]; ok {
+		nodeIdIp.EndAt = endAt
+		delete(mapvalues, "EndAt")
+	}
 	if sandboxIP, ok := mapvalues["SandboxIP"]; ok {
 		nodeIdIp.SandboxIP = sandboxIP
 		delete(mapvalues, "SandboxIP")
@@ -359,6 +363,7 @@ func (l *local) setByPassProsyToRedis(ctx context.Context, key string, byPassPro
 	if byPassProsy.SandboxIP != "" {
 		fieldValues = append(fieldValues, "SandboxIP", byPassProsy.SandboxIP)
 	}
+	fieldValues = append(fieldValues, "EndAt", byPassProsy.EndAt)
 	for k, v := range byPassProsy.ContainerToHostPorts {
 		fieldValues = append(fieldValues, k, v)
 	}
@@ -433,7 +438,12 @@ func (l *local) deleteKeyFromRedis(ctx context.Context, key string) (err error) 
 
 func traceRedis(ctx context.Context, action, redisOp, key string, start time.Time, err error) {
 	cost := time.Since(start)
-	baseRt := CubeLog.GetTraceInfo(ctx).DeepCopy()
+	var baseRt *CubeLog.RequestTrace
+	if rt := CubeLog.GetTraceInfo(ctx); rt != nil {
+		baseRt = rt.DeepCopy()
+	} else {
+		baseRt = &CubeLog.RequestTrace{}
+	}
 	baseRt.Callee = constants.Redis
 	baseRt.Action = action
 	baseRt.CalleeAction = redisOp
@@ -444,4 +454,37 @@ func traceRedis(ctx context.Context, action, redisOp, key string, start time.Tim
 		baseRt.RetCode = int64(errorcode.ErrorCode_DBError)
 	}
 	CubeLog.Trace(baseRt)
+}
+
+func (l *local) scanByPassProxyKeys(ctx context.Context) ([]string, error) {
+	const pattern = "bypass_host_proxy:*"
+	const batch = 200
+	var (
+		cursor int64
+		keys   []string
+	)
+	conn := wrapredis.GetRedis(wrapredis.RedisRead)
+	for {
+		values, err := redis.Values(conn.Do("SCAN", cursor, "MATCH", pattern, "COUNT", batch))
+		if err != nil {
+			log.G(ctx).Warnf("scanByPassProxyKeys err:%s", err)
+			return nil, err
+		}
+		if len(values) != 2 {
+			return nil, errors.New("scanByPassProxyKeys: malformed reply")
+		}
+		next, err := redis.Int64(values[0], nil)
+		if err != nil {
+			return nil, err
+		}
+		batchKeys, err := redis.Strings(values[1], nil)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, batchKeys...)
+		cursor = next
+		if cursor == 0 {
+			return keys, nil
+		}
+	}
 }

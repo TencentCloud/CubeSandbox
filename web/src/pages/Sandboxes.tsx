@@ -15,6 +15,18 @@ import { Pause, Play, Trash2, Search, Plus } from 'lucide-react';
 import { formatBytes, formatRelative, short } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 
+// `endAt` is `string | null | undefined` on the wire: a real ISO timestamp
+// when the sandbox has an active deadline, `null`/missing when it lives
+// forever (no SetTimeout / no Refresh, or explicitly set to 0). The
+// caller passes the already-translated "no expiry" label so this helper
+// stays decoupled from react-i18next's strongly-typed TFunction.
+function formatEndAt(endAt: string | null | undefined, neverLabel: string): string {
+  if (!endAt) return neverLabel;
+  const ts = Date.parse(endAt);
+  if (!Number.isFinite(ts) || ts <= 0) return neverLabel;
+  return formatRelative(endAt);
+}
+
 type StateFilter = 'all' | 'running' | 'paused';
 
 export default function SandboxesPage() {
@@ -124,7 +136,7 @@ export default function SandboxesPage() {
       </Card>
 
       <Card className="!p-0 overflow-hidden">
-        <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-xs uppercase tracking-wider font-medium text-muted-foreground/85">
+        <div className="grid grid-cols-[110px_minmax(180px,1.1fr)_minmax(140px,1fr)_90px_100px_120px_110px_140px_110px] gap-2 border-b border-border/60 px-4 py-3 text-xs uppercase tracking-wider font-medium text-muted-foreground/85">
           <div>{t('col.state')}</div>
           <div>{t('col.sandboxId')}</div>
           <div>{t('col.template')}</div>
@@ -132,6 +144,7 @@ export default function SandboxesPage() {
           <div>{t('col.memory')}</div>
           <div>{t('col.node')}</div>
           <div>{t('col.started')}</div>
+          <div>{t('col.endAt')}</div>
           <div className="text-right">{t('col.actions')}</div>
         </div>
         {isLoading &&
@@ -175,7 +188,7 @@ function Row({
   const state = sb.state ?? 'running';
   const tone = state === 'paused' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   return (
-    <div className="grid grid-cols-[120px_minmax(200px,1.2fr)_minmax(160px,1fr)_110px_120px_130px_120px_120px] gap-2 border-b border-border/60 px-4 py-3 text-sm transition hover:bg-muted/50">
+    <div className="grid grid-cols-[110px_minmax(180px,1.1fr)_minmax(140px,1fr)_90px_100px_120px_110px_140px_110px] gap-2 border-b border-border/60 px-4 py-3 text-sm transition hover:bg-muted/50">
       <div>
         <Badge tone={tone as any}>{state}</Badge>
       </div>
@@ -197,6 +210,7 @@ function Row({
       <div className="text-xs text-muted-foreground text-num">{formatBytes(sb.memoryMB)}</div>
       <div className="text-xs text-muted-foreground/80 text-num">{sb.clientID || '—'}</div>
       <div className="text-xs text-muted-foreground">{formatRelative(sb.startedAt)}</div>
+      <div className="text-xs text-muted-foreground">{formatEndAt(sb.endAt, t('col.endAtNever'))}</div>
       <div className="flex justify-end gap-1">
         {state === 'paused' ? (
           <Button size="icon" variant="ghost" title={t('actions.resume')} onClick={onResume} disabled={busy}>

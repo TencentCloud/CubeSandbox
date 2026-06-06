@@ -16,6 +16,8 @@
     "cpu": "CPU",
     "memory": "内存",
     "started": "启动时间",
+    "endAt": "结束时间",
+    "endAtNever": "— 永不过期",
     "actions": "操作",
     "node": "节点"
   },

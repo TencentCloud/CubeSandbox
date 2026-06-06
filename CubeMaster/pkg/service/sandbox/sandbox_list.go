@@ -174,6 +174,12 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 				}
 				labels := sandboxViewLabels(sandboxLabels, container.GetLabels())
 				templateID := templateIDFromLabels(labels)
+				var endAt int64
+				if proxy, ok := localcache.GetSandboxProxyMap(ctx, sandbox.GetId()); ok && proxy != nil && proxy.EndAt != "" {
+					if v, err := strconv.ParseInt(proxy.EndAt, 10, 64); err == nil && v > 0 {
+						endAt = v
+					}
+				}
 				select {
 				case <-ctx.Done():
 					return
@@ -190,6 +196,7 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 					NameSpace:   sandbox.GetNamespace(),
 					CreateAt:    sandbox.GetCreatedAt(),
 					PauseAt:     container.GetPausedAt(),
+					EndAt:       endAt,
 				}:
 				}
 				break

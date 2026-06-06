@@ -38,6 +38,8 @@ const (
 	RootfsArtifactAction           = "/rootfs-artifact"
 	ListInventoryAction            = "/listinventory"
 	SandboxLogsAction              = "/sandbox/logs"
+	SandboxTimeoutAction           = "/sandbox/timeout"
+	SandboxRefreshAction           = "/sandbox/refresh"
 )
 
 func CubeURI() string {
@@ -78,6 +80,10 @@ func HttpHandler(w http.ResponseWriter, r *http.Request) {
 		rsp = handleSandboxLogsAction(w, r, rt)
 	case r.URL.Path == actionURI(SandboxUpdateAction):
 		rsp = handleUpdateAction(w, r, rt)
+	case r.URL.Path == actionURI(SandboxTimeoutAction):
+		rsp = handleSandboxTimeoutAction(w, r, rt)
+	case r.URL.Path == actionURI(SandboxRefreshAction):
+		rsp = handleSandboxRefreshAction(w, r, rt)
 	case r.URL.Path == actionURI(SandboxCommitAction):
 		rsp = handleSandboxCommitAction(w, r, rt)
 	case r.URL.Path == actionURI(SandboxRollbackAction):

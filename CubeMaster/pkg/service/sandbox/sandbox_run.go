@@ -37,6 +37,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
+// defaultCreateDeadline bounds the synchronous create flow when callers
+// do not specify a Timeout (or pass 0 to mean "no automatic destroy").
+// It only governs the create handshake with cubelet; it does NOT become
+// the sandbox's EndAt — see setProxyToRedis for that decision.
+const defaultCreateDeadline = 60 * time.Second
+
 type createSandboxContext struct {
 	selctx           *selctx.SelectorCtx
 	directHost       bool
@@ -521,12 +527,21 @@ func (c *createSandboxContext) setProxyToRedis() error {
 	}
 	switch c.cubeletReq.GetInstanceType() {
 	case cubebox.InstanceType_cubebox.String():
+		now := time.Now()
 		proxy := &proxytypes.SandboxProxyMap{
 			HostIP:      c.selectHost.HostIP(),
 			SandboxID:   c.masterRsp.SandboxID,
 			SandboxIP:   c.masterRsp.SandboxIP,
 			SandboxPort: "8080",
-			CreatedAt:   strconv.FormatInt(time.Now().UnixNano(), 10),
+			CreatedAt:   strconv.FormatInt(now.UnixNano(), 10),
+		}
+		// Stamp the absolute deadline used by the TTL reaper. The
+		// CreateCubeSandboxReq.Timeout is interpreted as "seconds from
+		// now"; <=0 means "no TTL" so the reaper will skip this sandbox.
+		if originReq := createOriginRequestFromContext(c.ctx); originReq != nil && originReq.Timeout > 0 {
+			proxy.EndAt = strconv.FormatInt(
+				now.Add(time.Duration(originReq.Timeout)*time.Second).UnixNano(), 10,
+			)
 		}
 
 		if config.GetConfig().CubeletConf.EnableExposedPort {

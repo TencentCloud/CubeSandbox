@@ -17,12 +17,24 @@ export function formatBytes(mib: number | undefined | null): string {
 export function formatRelative(ts?: string | number | null, locale?: string): string {
   if (!ts) return '—';
   const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '—';
+  // diffSec > 0 ⇒ ts is in the past (e.g. startedAt)
+  // diffSec < 0 ⇒ ts is in the future (e.g. endAt with active TTL)
+  // The original implementation only handled the past branch and clamped
+  // every future timestamp into "1 second ago" via `-Math.max(1, …)`.
   const diffSec = (Date.now() - d.getTime()) / 1000;
   const rtf = new Intl.RelativeTimeFormat(locale ?? navigator.language, { numeric: 'auto' });
-  if (diffSec < 60) return rtf.format(-Math.max(1, Math.floor(diffSec)), 'second');
-  if (diffSec < 3600) return rtf.format(-Math.floor(diffSec / 60), 'minute');
-  if (diffSec < 86400) return rtf.format(-Math.floor(diffSec / 3600), 'hour');
-  return rtf.format(-Math.floor(diffSec / 86400), 'day');
+  const abs = Math.abs(diffSec);
+  // Intl.RelativeTimeFormat takes a SIGNED value: negative ⇒ past, positive ⇒ future.
+  // We invert `diffSec` because diffSec was computed as past-positive above.
+  const sign = diffSec >= 0 ? -1 : 1;
+  if (abs < 60) {
+    // Avoid the "0 seconds ago" / "in 0 seconds" edge by flooring to at least 1.
+    return rtf.format(sign * Math.max(1, Math.floor(abs)), 'second');
+  }
+  if (abs < 3600) return rtf.format(sign * Math.floor(abs / 60), 'minute');
+  if (abs < 86400) return rtf.format(sign * Math.floor(abs / 3600), 'hour');
+  return rtf.format(sign * Math.floor(abs / 86400), 'day');
 }
 
 export function short(id: string, head = 6, tail = 4): string {

@@ -6,6 +6,8 @@ package sandbox
 
 import (
 	"context"
+	"strconv"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -89,5 +91,28 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 	}
 	rsp.Ret.RetCode = int(cubeRsp.GetRet().GetRetCode())
 	rsp.Ret.RetMsg = cubeRsp.GetRet().GetRetMsg()
+
+	// On a successful resume, refresh the absolute deadline so the
+	// TTL reaper aligns with the new lifetime requested by the caller.
+	// Pause does not touch EndAt; a later resume will rewrite it.
+	if req.Action == "resume" && req.Timeout > 0 &&
+		rsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {
+		refreshSandboxEndAt(ctx, req.SandboxID, time.Duration(req.Timeout)*time.Second)
+	}
 	return
+}
+
+func refreshSandboxEndAt(ctx context.Context, sandboxID string, ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	proxy, ok := localcache.GetSandboxProxyMap(ctx, sandboxID)
+	if !ok || proxy == nil {
+		log.G(ctx).Warnf("refreshSandboxEndAt: proxy map missing for %s", sandboxID)
+		return
+	}
+	proxy.EndAt = strconv.FormatInt(time.Now().Add(ttl).UnixNano(), 10)
+	if err := localcache.SetSandboxProxyMap(ctx, proxy); err != nil {
+		log.G(ctx).Warnf("refreshSandboxEndAt: rewrite proxy for %s failed: %v", sandboxID, err)
+	}
 }
