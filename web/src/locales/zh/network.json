@@ -18,6 +18,9 @@
     "colStatus": "状态",
     "colNetwork": "网络类型",
     "colInternet": "公网访问",
+    "colDns": "DNS",
+    "colAllowOut": "Allow Out",
+    "colDenyOut": "Deny Out",
     "allowed": "允许",
     "blocked": "禁止",
     "empty": "暂无模板数据。"

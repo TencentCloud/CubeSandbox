@@ -18,6 +18,9 @@
     "colStatus": "Status",
     "colNetwork": "Network Type",
     "colInternet": "Internet Access",
+    "colDns": "DNS",
+    "colAllowOut": "Allow Out",
+    "colDenyOut": "Deny Out",
     "allowed": "Allowed",
     "blocked": "Blocked",
     "empty": "No templates found."

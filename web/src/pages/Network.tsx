@@ -4,11 +4,12 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { clusterApi, templateApi } from '@/api/client';
+import { clusterApi, templateApi, type TemplateDetail } from '@/api/client';
 import { useRuntimeConfig } from '@/hooks/useRuntimeConfig';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Shield, Globe, Gauge, Server, ExternalLink, CheckCircle2, XCircle, Minus } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { extractTemplateNetworkPolicy } from '@/lib/templateConfig';
 import { MetricValue } from '@/components/ui/typography';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -40,6 +41,15 @@ function InfoRow({ label, value, mono, badge }: {
         {value}
       </span>
     </div>
+  );
+}
+
+function PolicyCell({ value }: { value?: string | null }) {
+  if (!value) return <Minus size={12} className="text-muted-foreground/40" />;
+  return (
+    <span className="font-mono text-xs text-foreground/80 truncate max-w-[220px] block" title={value}>
+      {value}
+    </span>
   );
 }
 
@@ -105,7 +115,16 @@ function EgressSection() {
         templates.map(t => templateApi.get(t.templateID))
       );
       return results
-        .map((r, i) => r.status === 'fulfilled' ? r.value : { ...templates[i], networkType: null, allowInternetAccess: null })
+        .map((r, i): TemplateDetail => {
+          if (r.status === 'fulfilled') return r.value;
+          return {
+            ...templates[i],
+            replicas: [],
+            createRequest: undefined,
+            networkType: null,
+            allowInternetAccess: null,
+          };
+        })
         .filter(Boolean);
     },
     enabled: !!templates && templates.length > 0,
@@ -118,10 +137,18 @@ function EgressSection() {
     <div>
       <SectionHeader icon={Globe} title={t('egress.title')} description={t('egress.desc')} />
       <div className="rounded-xl border border-border/60 bg-card/40 overflow-x-auto">
-        <table className="w-full text-sm" style={{ minWidth: '640px' }}>
+        <table className="w-full text-sm" style={{ minWidth: '1120px' }}>
           <thead>
             <tr className="border-b border-border/50">
-              {[t('egress.colTemplate'), t('egress.colStatus'), t('egress.colNetwork'), t('egress.colInternet')].map(h => (
+              {[
+                t('egress.colTemplate'),
+                t('egress.colStatus'),
+                t('egress.colNetwork'),
+                t('egress.colInternet'),
+                t('egress.colDns'),
+                t('egress.colAllowOut'),
+                t('egress.colDenyOut'),
+              ].map(h => (
                 <th key={h} className="tbl-th">{h}</th>
               ))}
             </tr>
@@ -130,17 +157,18 @@ function EgressSection() {
             {loading ? (
               Array.from({ length: 3 }).map((_, i) => (
                 <tr key={i}>
-                  {[1, 2, 3, 4].map(j => (
+                  {[1, 2, 3, 4, 5, 6, 7].map(j => (
                     <td key={j} className="px-5 py-3"><Skeleton className="h-4 w-24" /></td>
                   ))}
                 </tr>
               ))
             ) : !details || details.length === 0 ? (
               <tr>
-                <td colSpan={4} className="px-5 py-6 text-sm text-muted-foreground text-center">{t('egress.empty')}</td>
+                <td colSpan={7} className="px-5 py-6 text-sm text-muted-foreground text-center">{t('egress.empty')}</td>
               </tr>
             ) : (
               details.map((tpl) => {
+                const policy = extractTemplateNetworkPolicy(tpl.createRequest);
                 const statusColor = tpl.status?.toUpperCase() === 'READY'
                   ? 'text-cube-ok'
                   : tpl.status?.toUpperCase() === 'BUILDING'
@@ -173,6 +201,15 @@ function EgressSection() {
                         trueLabel={t('egress.allowed')}
                         falseLabel={t('egress.blocked')}
                       />
+                    </td>
+                    <td className="px-5 py-3">
+                      <PolicyCell value={policy.dns} />
+                    </td>
+                    <td className="px-5 py-3">
+                      <PolicyCell value={policy.allowOut} />
+                    </td>
+                    <td className="px-5 py-3">
+                      <PolicyCell value={policy.denyOut} />
                     </td>
                   </tr>
                 );

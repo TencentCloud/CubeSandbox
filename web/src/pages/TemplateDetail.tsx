@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowLeft, RefreshCw, Trash2, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 import { cn, formatDeleteError, copyToClipboard } from '@/lib/utils';
+import { extractTemplateRuntimeConfig } from '@/lib/templateConfig';
 
 // ── status helpers ────────────────────────────────────────────────────────────
 
@@ -224,33 +225,6 @@ function ReplicaTable({ replicas }: { replicas: Replica[] }) {
   );
 }
 
-// ── extract createRequest ─────────────────────────────────────────────────────
-
-interface CreateRequest {
-  annotations?: Record<string, string>;
-  containers?: Array<{
-    image?: { writable_layer_size?: string };
-    resources?: { cpu?: string; mem?: string };
-    probe?: { probe_handler?: { http_get?: { path?: string; port?: number } } };
-  }>;
-}
-
-function extractConfig(cr: unknown) {
-  if (!cr || typeof cr !== 'object') return null;
-  const req = cr as CreateRequest;
-  const ann = req.annotations ?? {};
-  const c = (req.containers ?? [])[0] ?? {};
-  const probe = c.probe?.probe_handler?.http_get;
-  return {
-    exposedPorts: ann['com.exposed_ports'] ?? null,
-    writableLayerSize: c.image?.writable_layer_size ?? null,
-    cpu: c.resources?.cpu ?? null,
-    mem: c.resources?.mem ?? null,
-    probePath: probe?.path ?? null,
-    probePort: probe?.port != null ? String(probe.port) : null,
-  };
-}
-
 function shortImage(imageInfo?: string | null) {
   if (!imageInfo) return null;
   const i = imageInfo.indexOf('@');
@@ -374,7 +348,7 @@ export default function TemplateDetailPage() {
   const replicas = (data.replicas ?? []) as Replica[];
   const isBuilding = !!activeBuildID || data.status?.toUpperCase() === 'BUILDING';
   const buildProgress = (buildStatus as { progress?: number } | undefined)?.progress ?? 0;
-  const cfg = extractConfig(data.createRequest);
+  const cfg = extractTemplateRuntimeConfig(data.createRequest);
   const imgShort = shortImage(cachedSummary?.imageInfo ?? (data as { imageInfo?: string }).imageInfo);
   const createdAt = cachedSummary?.createdAt ?? (data as { createdAt?: string }).createdAt;
   const status = data.status ?? 'UNKNOWN';
@@ -484,6 +458,15 @@ export default function TemplateDetailPage() {
           {cfg?.probePath && <Field label={t('probePath')} value={`${cfg.probePath} :${cfg.probePort}`} mono dim />}
           {createdAt && <Field label={t('createdAt')} value={new Date(createdAt).toLocaleString()} dim />}
         </div>
+
+        {cfg?.env && (
+          <div className="mt-5 flex flex-col gap-1.5">
+            <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{t('fields.env')}</span>
+            <pre className="rounded-md border border-border/50 bg-muted/30 px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all leading-relaxed text-foreground/90">
+              {cfg.env}
+            </pre>
+          </div>
+        )}
 
         {/* error */}
         {data.lastError && (

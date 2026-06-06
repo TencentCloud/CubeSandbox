@@ -21,7 +21,8 @@
     "artifactID": "Artifact ID",
     "snapshotPath": "Snapshot Path",
     "lastJob": "Last Job",
-    "lastError": "Last Error"
+    "lastError": "Last Error",
+    "env": "Environment Variables"
   },
   "status": {
     "ready": "Ready",

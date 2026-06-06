@@ -21,7 +21,8 @@
     "artifactID": "Artifact ID",
     "snapshotPath": "快照路径",
     "lastJob": "最近任务",
-    "lastError": "错误信息"
+    "lastError": "错误信息",
+    "env": "环境变量"
   },
   "status": {
     "ready": "就绪",
