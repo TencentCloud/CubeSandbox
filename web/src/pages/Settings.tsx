@@ -267,7 +267,7 @@ function AboutSection() {
 
       <div className="rounded-xl border border-border/60 bg-card/40 divide-y divide-border/40">
         {([
-          { label: t('about.version'),     value: 'v0.2.0',                                                  mono: true  },
+          { label: t('about.version'),     value: `v${__APP_VERSION__}`,                                     mono: true  },
           { label: t('about.cubeApi'),     value: cfg?.apiEndpoint ?? `${window.location.origin}/cubeapi/v1`, mono: true  },
           { label: t('about.instanceType'),value: cfg?.instanceType ?? '—',                                   mono: false },
         ] as Array<{ label: string; value: string; mono: boolean }>).map(({ label, value, mono }) => (
