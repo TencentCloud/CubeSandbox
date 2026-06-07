@@ -199,8 +199,12 @@ impl CgroupManager for Manager {
     }
 
     fn get_pids(&self) -> Result<Vec<pid_t>> {
-        let mem_controller: &MemController = self.cgroup.controller_of().unwrap();
-        let pids = mem_controller.tasks();
+        let pids = if self.cgroup.v2() {
+            self.cgroup.procs()
+        } else {
+            let mem_controller: &MemController = self.cgroup.controller_of().unwrap();
+            mem_controller.tasks()
+        };
         let result = pids.iter().map(|x| x.pid as i32).collect::<Vec<i32>>();
 
         Ok(result)
