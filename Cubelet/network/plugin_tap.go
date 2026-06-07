@@ -981,17 +981,24 @@ func (l *local) registerNetworkAgentTapForPool(ctx context.Context, sandboxID st
 		return fmt.Errorf("shim network sandbox ip is empty")
 	}
 	tapFDTimeout := time.Duration(l.Config.NetworkAgentTapFDTimeout)
-	file, err := requestNetworkAgentTapFile(l.Config.NetworkAgentTapSocket, sandboxID, intf.Name, tapFDTimeout)
+	file, ifindex, err := requestNetworkAgentTapFile(l.Config.NetworkAgentTapSocket, sandboxID, intf.Name, tapFDTimeout)
 	if err != nil {
 		return fmt.Errorf("request original tap fd for %s: %w", intf.Name, err)
 	}
-	link, err := netlink.LinkByName(intf.Name)
-	if err != nil {
-		_ = file.Close()
-		return fmt.Errorf("lookup tap link %s: %w", intf.Name, err)
+	// network-agent returns the tap's kernel ifindex alongside the fd, so we can
+	// skip a netlink LinkByName here (an rtnl read that serialises with every
+	// other concurrent sandbox create). Fall back to a lookup only if the agent
+	// did not provide it (older agent).
+	if ifindex <= 0 {
+		link, lerr := netlink.LinkByName(intf.Name)
+		if lerr != nil {
+			_ = file.Close()
+			return fmt.Errorf("lookup tap link %s: %w", intf.Name, lerr)
+		}
+		ifindex = link.Attrs().Index
 	}
 	tap := &Tap{
-		Index: link.Attrs().Index,
+		Index: ifindex,
 		Name:  intf.Name,
 		IP:    append(net.IP(nil), intf.IPAddr...),
 		File:  file,
@@ -1037,59 +1044,62 @@ type networkAgentTapFDRequest struct {
 type networkAgentTapFDResponse struct {
 	ErrCode string `json:"errCode"`
 	ErrMsg  string `json:"errMsg"`
+	// IfIndex is the tap's kernel ifindex, returned by network-agent so the
+	// caller can avoid a separate netlink LinkByName on the create hot path.
+	IfIndex int `json:"ifindex"`
 }
 
-func requestNetworkAgentTapFile(socketPath, sandboxID, tapName string, timeout time.Duration) (*os.File, error) {
+func requestNetworkAgentTapFile(socketPath, sandboxID, tapName string, timeout time.Duration) (*os.File, int, error) {
 	if socketPath == "" {
-		return nil, fmt.Errorf("network-agent tap socket is empty")
+		return nil, 0, fmt.Errorf("network-agent tap socket is empty")
 	}
 	addr := &net.UnixAddr{Name: socketPath, Net: "unix"}
 	conn, err := net.DialUnix("unix", nil, addr)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer conn.Close()
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	reqBody, err := json.Marshal(&networkAgentTapFDRequest{
 		Name:      tapName,
 		SandboxID: sandboxID,
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if _, err := conn.Write(reqBody); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	buf := make([]byte, 1024)
 	oob := make([]byte, 1024)
 	n, oobn, _, _, err := conn.ReadMsgUnix(buf, oob)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	resp := &networkAgentTapFDResponse{}
 	if err := json.Unmarshal(buf[:n], resp); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if resp.ErrCode != "" && resp.ErrCode != "0" {
-		return nil, errors.New(resp.ErrMsg)
+		return nil, 0, errors.New(resp.ErrMsg)
 	}
 	msgs, err := syscall.ParseSocketControlMessage(oob[:oobn])
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for _, msg := range msgs {
 		fds, err := syscall.ParseUnixRights(&msg)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if len(fds) == 0 {
 			continue
 		}
-		return os.NewFile(uintptr(fds[0]), "/dev/net/tun"), nil
+		return os.NewFile(uintptr(fds[0]), "/dev/net/tun"), resp.IfIndex, nil
 	}
-	return nil, fmt.Errorf("network-agent tap fd response missing fd")
+	return nil, 0, fmt.Errorf("network-agent tap fd response missing fd")
 }
 
 func (l *local) loadNet(sandboxID string) *MvmNet {

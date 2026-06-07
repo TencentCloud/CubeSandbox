@@ -67,8 +67,8 @@ func TestCreatePoolTapLockedStagesNewTapWithoutRestore(t *testing.T) {
 	}
 
 	svc := newLifecycleTestService(t)
-	if err := svc.createPoolTapLocked(); err != nil {
-		t.Fatalf("createPoolTapLocked error=%v", err)
+	if err := svc.createPoolTap(); err != nil {
+		t.Fatalf("createPoolTap error=%v", err)
 	}
 
 	if restoreCalls != 0 {

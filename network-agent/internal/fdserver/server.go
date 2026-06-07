@@ -94,11 +94,11 @@ func handleConn(conn *net.UnixConn, provider service.TapFDProvider) error {
 	if err := json.Unmarshal(buf[:n], req); err != nil {
 		return writeResponse(conn, []byte(`{"errCode":"1001","errMsg":"Parse json failed"}`), nil)
 	}
-	file, err := provider.GetTapFile(req.SandboxID, req.Name)
+	file, ifindex, err := provider.GetTapFile(req.SandboxID, req.Name)
 	if err != nil {
 		return writeResponse(conn, []byte(fmt.Sprintf(`{"errCode":"1002","errMsg":%q}`, err.Error())), nil)
 	}
-	return writeResponse(conn, []byte(`{"errCode":"0","errMsg":"Success"}`), file)
+	return writeResponse(conn, []byte(fmt.Sprintf(`{"errCode":"0","errMsg":"Success","ifindex":%d}`, ifindex)), file)
 }
 
 func writeResponse(conn *net.UnixConn, payload []byte, file *os.File) error {

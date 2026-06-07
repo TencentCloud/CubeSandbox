@@ -536,6 +536,7 @@ func TestEnsureReleaseEnsureReusesTapFromPool(t *testing.T) {
 func TestGetTapFileRestoresMissingFD(t *testing.T) {
 	oldList := listCubeTapsFunc
 	oldRestore := restoreTapFunc
+	oldOpen := openTapFdByNameFunc
 	oldListCubeVSTaps := cubevsListTAPDevices
 	oldListPortMappings := cubevsListPortMappings
 	oldAttach := cubevsAttachFilter
@@ -547,6 +548,7 @@ func TestGetTapFileRestoresMissingFD(t *testing.T) {
 	t.Cleanup(func() {
 		listCubeTapsFunc = oldList
 		restoreTapFunc = oldRestore
+		openTapFdByNameFunc = oldOpen
 		cubevsListTAPDevices = oldListCubeVSTaps
 		cubevsListPortMappings = oldListPortMappings
 		cubevsAttachFilter = oldAttach
@@ -587,6 +589,11 @@ func TestGetTapFileRestoresMissingFD(t *testing.T) {
 		tap.File = newTestTapFile(t)
 		return tap, nil
 	}
+	openCalls := 0
+	openTapFdByNameFunc = func(string) (*os.File, error) {
+		openCalls++
+		return newTestTapFile(t), nil
+	}
 	cubevsListTAPDevices = func() ([]cubevs.TAPDevice, error) { return nil, nil }
 	cubevsListPortMappings = func() (map[uint16]cubevs.MVMPort, error) { return map[uint16]cubevs.MVMPort{}, nil }
 	cubevsAttachFilter = func(uint32) error { return nil }
@@ -613,15 +620,24 @@ func TestGetTapFileRestoresMissingFD(t *testing.T) {
 		t.Fatalf("recover error=%v", err)
 	}
 	svc.states["sandbox-1"].tap.File = nil
-	file, err := svc.GetTapFile("sandbox-1", "z192.168.0.3")
+	file, ifindex, err := svc.GetTapFile("sandbox-1", "z192.168.0.3")
 	if err != nil {
 		t.Fatalf("GetTapFile error=%v", err)
 	}
 	if file == nil {
 		t.Fatal("GetTapFile returned nil file")
 	}
-	if restoreCalls < 2 {
-		t.Fatalf("restoreCalls=%d, want at least 2 (recover + on-demand reopen)", restoreCalls)
+	if ifindex != 13 {
+		t.Fatalf("ifindex=%d, want 13", ifindex)
+	}
+	// recover() does the full restore once; the on-demand reopen of an idle,
+	// already-configured managed tap takes the cheap openTapFdByName path and
+	// must NOT trigger another full restoreTap.
+	if restoreCalls != 1 {
+		t.Fatalf("restoreCalls=%d, want 1 (recover only)", restoreCalls)
+	}
+	if openCalls != 1 {
+		t.Fatalf("openCalls=%d, want 1 (on-demand reopen)", openCalls)
 	}
 }
 

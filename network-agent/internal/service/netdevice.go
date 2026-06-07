@@ -390,6 +390,37 @@ func getTapFd(name string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), tunDevicePath), nil
 }
 
+// openTapFdByName opens a fresh fd for an already-existing, already-configured
+// tap device identified by name, WITHOUT any netlink/rtnl lookup. It is the hot
+// path used when the caller already knows the device exists and is fully set up
+// (e.g. a pooled tap whose fd was closed while idle). Compared to restoreTap it
+// avoids netlinkLinkByName (an rtnl read), LinkSetUp/SetMTU, the TC AttachFilter
+// and the ARP entry, all of which were already applied when the tap was created.
+// For recovering taps of unknown state (e.g. after a restart) use restoreTap.
+func openTapFdByName(name string) (*os.File, error) {
+	fd, err := unixOpen(tunDevicePath, os.O_RDWR|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	var req ifReq
+	copy(req.Name[:15], name)
+	req.Flags = unix.IFF_TAP | unix.IFF_NO_PI | unix.IFF_VNET_HDR | unix.IFF_ONE_QUEUE
+
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TUNSETIFF), uintptr(unsafe.Pointer(&req))); errno != 0 {
+		unixClose(fd)
+		return nil, fmt.Errorf("set tap(%s) TUNSETIFF failed, errno: %+v", name, errno)
+	}
+
+	size := virtioNetHdrSize
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TUNSETVNETHDRSZ), uintptr(unsafe.Pointer(&size))); errno != 0 {
+		unixClose(fd)
+		return nil, fmt.Errorf("set tap(%s) vnet hdr failed, errno: %+v", name, errno)
+	}
+
+	return os.NewFile(uintptr(fd), tunDevicePath), nil
+}
+
 func restoreTap(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*tapDevice, error) {
 	if tap == nil {
 		return nil, fmt.Errorf("tap is nil")

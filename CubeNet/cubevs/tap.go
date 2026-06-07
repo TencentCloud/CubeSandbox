@@ -15,11 +15,10 @@ type MVMOptions struct {
 
 // ListTAPDevices lists all TAP devices that managed by CubeVS.
 func ListTAPDevices() ([]TAPDevice, error) {
-	m, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
+	m, err := cachedPinnedMap(MapNameIfindexToMVMMetadata)
 	if err != nil {
 		return nil, err
 	}
-	defer m.Close()
 
 	var taps []TAPDevice
 	var key uint32
@@ -54,11 +53,10 @@ func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVM
 	}
 
 	// ifindex <-> MVM metadata (IP, ID and tunnels)
-	m, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
+	m, err := cachedPinnedMap(MapNameIfindexToMVMMetadata)
 	if err != nil {
 		return err
 	}
-	defer m.Close()
 
 	err = m.Update(&ifindex, &mvmID, ebpf.UpdateAny)
 	if err != nil {
@@ -66,11 +64,10 @@ func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVM
 	}
 
 	// MVM IP <-> ifindex
-	m, err = loadPinnedMap(MapNameMVMIPToIfindex)
+	m, err = cachedPinnedMap(MapNameMVMIPToIfindex)
 	if err != nil {
 		return err
 	}
-	defer m.Close()
 
 	err = m.Update(&mvmIP, &ifindex, ebpf.UpdateAny)
 	if err != nil {
@@ -91,11 +88,10 @@ func DelTAPDevice(ifindex uint32, ip net.IP) error {
 	mvmIP := ipToUint32(ip)
 
 	// ifindex <-> MVM metadata
-	m, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
+	m, err := cachedPinnedMap(MapNameIfindexToMVMMetadata)
 	if err != nil {
 		return err
 	}
-	defer m.Close()
 
 	err = m.Delete(&ifindex)
 	if err != nil {
@@ -103,11 +99,10 @@ func DelTAPDevice(ifindex uint32, ip net.IP) error {
 	}
 
 	// MVM IP <-> ifindex
-	m, err = loadPinnedMap(MapNameMVMIPToIfindex)
+	m, err = cachedPinnedMap(MapNameMVMIPToIfindex)
 	if err != nil {
 		return err
 	}
-	defer m.Close()
 
 	err = m.Delete(&mvmIP)
 	if err != nil {
@@ -119,11 +114,10 @@ func DelTAPDevice(ifindex uint32, ip net.IP) error {
 
 // GetTAPDevice returns a TAP device associated with the specific ifindex.
 func GetTAPDevice(ifindex uint32) (*TAPDevice, error) {
-	m, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
+	m, err := cachedPinnedMap(MapNameIfindexToMVMMetadata)
 	if err != nil {
 		return nil, err
 	}
-	defer m.Close()
 
 	var mvmMeta mvmMetadata
 	err = m.Lookup(&ifindex, &mvmMeta)

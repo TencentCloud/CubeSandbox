@@ -9,9 +9,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"reflect"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -50,6 +53,7 @@ func main() {
 		logLevel       = flag.String("log-level", defaultLogLevel, "set the logging level [debug, info, warn, error, fatal]")
 		logRollNum     = flag.Int("log-roll-num", defaultRollNum, "network-agent log files roll number")
 		logRollSize    = flag.Int("log-roll-size", defaultRollSizeMB, "network-agent log files roll size(MB)")
+		pprofListen    = flag.String("pprof-listen", "", "optional pprof/debug http listen address (e.g. 127.0.0.1:6060); empty disables profiling")
 	)
 	flag.Parse()
 	if showVersion {
@@ -58,6 +62,10 @@ func main() {
 	}
 	if err := initLogger(*logPath, *logLevel, *logRollNum, *logRollSize); err != nil {
 		CubeLog.Fatalf("network-agent init logger failed: %v", err)
+	}
+
+	if *pprofListen != "" {
+		startProfilingServer(*pprofListen)
 	}
 
 	cfg := defaultCfg
@@ -190,6 +198,24 @@ func main() {
 	if err := healthServer.Stop(stopCtx); err != nil {
 		CubeLog.Warnf("network-agent health server shutdown error: %v", err)
 	}
+}
+
+// startProfilingServer enables the Go pprof endpoints (CPU, heap, goroutine,
+// and crucially mutex/block contention) on the given address so the create hot
+// path can be profiled under load. Disabled by default; only started when
+// --pprof-listen is provided. Mutex/block profiling lets us confirm whether any
+// Go-level lock (e.g. localService.mu) is actually contended versus the cost
+// living in kernel-serialized netlink/eBPF syscalls.
+func startProfilingServer(addr string) {
+	runtime.SetMutexProfileFraction(1)
+	runtime.SetBlockProfileRate(1)
+	go func() {
+		server := &http.Server{Addr: addr, ReadHeaderTimeout: 5 * time.Second}
+		CubeLog.Infof("network-agent pprof server listening on %s", addr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			CubeLog.Warnf("network-agent pprof server failed: %v", err)
+		}
+	}()
 }
 
 func initService(cfg service.Config) (service.Service, error) {

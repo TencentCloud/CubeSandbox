@@ -16,6 +16,7 @@ import (
 
 var (
 	restoreTapFunc         = restoreTap
+	openTapFdByNameFunc    = openTapFdByName
 	newTapFunc             = newTap
 	cubevsListTAPDevices   = cubevs.ListTAPDevices
 	cubevsListPortMappings = cubevs.ListPortMapping
@@ -140,7 +141,11 @@ func (s *localService) recycleTapLocked(tap *tapDevice) {
 	s.stageTapForPoolLocked(tap, "recycle")
 }
 
-func (s *localService) createPoolTapLocked() error {
+// createPoolTap provisions a fresh tap and stages it into the free pool. Only
+// the IP allocation (self-locked allocator) and the final staging take a lock;
+// the heavy newTap syscalls run lock-free so background inventory refills never
+// hold s.mu while creating taps.
+func (s *localService) createPoolTap() error {
 	ip, err := s.allocator.Allocate()
 	if err != nil {
 		return err
@@ -150,7 +155,9 @@ func (s *localService) createPoolTapLocked() error {
 		s.allocator.Release(ip)
 		return err
 	}
+	s.mu.Lock()
 	s.stageTapForPoolLocked(tap, "create_pool")
+	s.mu.Unlock()
 	return nil
 }
 
@@ -164,10 +171,7 @@ func (s *localService) ensureTapInventory() error {
 	}
 	need := s.cfg.TapInitNum - len(taps)
 	for i := 0; i < need; i++ {
-		s.mu.Lock()
-		err := s.createPoolTapLocked()
-		s.mu.Unlock()
-		if err != nil {
+		if err := s.createPoolTap(); err != nil {
 			return err
 		}
 	}

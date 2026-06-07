@@ -68,22 +68,20 @@ func ensureInnerMap(outerMap *ebpf.Map, ifindex uint32, mapName string) error {
 // in both allow_out and deny_out hash-of-maps, if not already present.
 // This should be called during AttachFilter.
 func initNetPolicy(ifindex uint32) error {
-	allowOut, err := loadPinnedMap(MapNameAllowOut)
+	allowOut, err := cachedPinnedMap(MapNameAllowOut)
 	if err != nil {
 		return err
 	}
-	defer allowOut.Close()
 
 	err = ensureInnerMap(allowOut, ifindex, MapNameAllowOut)
 	if err != nil {
 		return err
 	}
 
-	denyOut, err := loadPinnedMap(MapNameDenyOut)
+	denyOut, err := cachedPinnedMap(MapNameDenyOut)
 	if err != nil {
 		return err
 	}
-	defer denyOut.Close()
 
 	return ensureInnerMap(denyOut, ifindex, MapNameDenyOut)
 }
@@ -118,22 +116,20 @@ func flushInnerMap(outerMap *ebpf.Map, ifindex uint32) error {
 // for the given ifindex in both allow_out and deny_out.
 // This should be called during DelTAPDevice.
 func cleanupNetPolicy(ifindex uint32) error {
-	allowOut, err := loadPinnedMap(MapNameAllowOut)
+	allowOut, err := cachedPinnedMap(MapNameAllowOut)
 	if err != nil {
 		return err
 	}
-	defer allowOut.Close()
 
 	err = flushInnerMap(allowOut, ifindex)
 	if err != nil {
 		return fmt.Errorf("flush %s failed: %w", MapNameAllowOut, err)
 	}
 
-	denyOut, err := loadPinnedMap(MapNameDenyOut)
+	denyOut, err := cachedPinnedMap(MapNameDenyOut)
 	if err != nil {
 		return err
 	}
-	defer denyOut.Close()
 
 	return flushInnerMap(denyOut, ifindex)
 }
@@ -197,11 +193,10 @@ func applyNetPolicy(ifindex uint32, opts MVMOptions) error {
 		allowOut = *opts.AllowOut
 	}
 	if len(allowOut) > 0 {
-		allowOutMap, err := loadPinnedMap(MapNameAllowOut)
+		allowOutMap, err := cachedPinnedMap(MapNameAllowOut)
 		if err != nil {
 			return err
 		}
-		defer allowOutMap.Close()
 
 		err = populateInnerMap(allowOutMap, ifindex, allowOut)
 		if err != nil {
@@ -223,11 +218,10 @@ func applyNetPolicy(ifindex uint32, opts MVMOptions) error {
 	}
 
 	if len(denyOut) > 0 {
-		denyOutMap, err := loadPinnedMap(MapNameDenyOut)
+		denyOutMap, err := cachedPinnedMap(MapNameDenyOut)
 		if err != nil {
 			return err
 		}
-		defer denyOutMap.Close()
 
 		err = populateInnerMap(denyOutMap, ifindex, denyOut)
 		if err != nil {
