@@ -6,10 +6,12 @@ package localcache
 
 import (
 	"testing"
+	"time"
 
 	"github.com/patrickmn/go-cache"
 	fwk "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/framework"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
 )
 
 func TestGetHealthyNodesByInstanceType(t *testing.T) {
@@ -24,7 +26,11 @@ func TestGetHealthyNodesByInstanceType(t *testing.T) {
 	createNodes := func(count int, healthy bool) node.NodeList {
 		nodes := make(node.NodeList, count)
 		for i := 0; i < count; i++ {
-			nodes[i] = &node.Node{Healthy: healthy}
+			nodes[i] = &node.Node{
+				ReportedReady:    healthy,
+				Healthy:          healthy,
+				MetaDataUpdateAt: time.Now(),
+			}
 		}
 		return nodes
 	}
@@ -258,5 +264,145 @@ func TestInvalidateImageStateAllowsHeartbeatToRebuildLocality(t *testing.T) {
 		t.Fatal("expected reverse index after heartbeat replay")
 	} else if _, exists := templates["tpl-replay"]; !exists {
 		t.Fatal("reverse index should be rebuilt after heartbeat replay")
+	}
+}
+
+func TestGetNodeRefreshesCurrentHealthFromCachedFacts(t *testing.T) {
+	origCache := l.cache
+	defer func() {
+		l.cache = origCache
+	}()
+
+	l.cache = cache.New(0, 0)
+	staleHeartbeat := time.Now().Add(-(metadataHealthTimeout() + time.Second))
+	l.cache.SetDefault("node-stale", &node.Node{
+		InsID:            "node-stale",
+		IP:               "10.0.0.1",
+		ReportedReady:    true,
+		Healthy:          true,
+		MetaDataUpdateAt: staleHeartbeat,
+	})
+
+	got, ok := GetNode("node-stale")
+	if !ok || got == nil {
+		t.Fatal("expected node to exist")
+	}
+	if got.Healthy {
+		t.Fatal("stale heartbeat should be reflected as unhealthy")
+	}
+	if got.UnhealthyReason != nodehealth.ReasonHeartbeatExpired {
+		t.Fatalf("UnhealthyReason=%s want %s", got.UnhealthyReason, nodehealth.ReasonHeartbeatExpired)
+	}
+	raw, ok := l.cache.Get("node-stale")
+	if !ok {
+		t.Fatal("expected cached node to remain in cache")
+	}
+	cached, ok := raw.(*node.Node)
+	if !ok {
+		t.Fatal("expected cached node type")
+	}
+	if !cached.Healthy {
+		t.Fatal("read path should not mutate cached health state")
+	}
+}
+
+func TestGetHealthyNodesByInstanceTypeFiltersExpiredHeartbeat(t *testing.T) {
+	origNodesByClusters := l.sortedNodesByClusters
+	defer func() {
+		l.sortedNodesByClusters = origNodesByClusters
+	}()
+
+	fresh := &node.Node{
+		InsID:            "node-fresh",
+		ReportedReady:    true,
+		Healthy:          true,
+		MetaDataUpdateAt: time.Now(),
+	}
+	stale := &node.Node{
+		InsID:            "node-stale",
+		ReportedReady:    true,
+		Healthy:          true,
+		MetaDataUpdateAt: time.Now().Add(-(metadataHealthTimeout() + time.Second)),
+	}
+	l.sortedNodesByClusters = map[string]node.NodeList{
+		"valid": {fresh, stale},
+	}
+
+	got := GetHealthyNodesByInstanceType(-1, "valid")
+	if got.Len() != 1 {
+		t.Fatalf("healthy node count=%d want 1", got.Len())
+	}
+	if got[0].ID() != fresh.ID() {
+		t.Fatalf("healthy node=%s want %s", got[0].ID(), fresh.ID())
+	}
+	if !stale.Healthy {
+		t.Fatal("read path should not mutate source node health state")
+	}
+}
+
+func TestGetNodesByIpRefreshesCurrentHealthFromCachedFacts(t *testing.T) {
+	origCache := l.cache
+	defer func() {
+		l.cache = origCache
+	}()
+
+	l.cache = cache.New(0, 0)
+	staleHeartbeat := time.Now().Add(-(metadataHealthTimeout() + time.Second))
+	l.cache.SetDefault("node-stale", &node.Node{
+		InsID:            "node-stale",
+		IP:               "10.0.0.9",
+		ReportedReady:    true,
+		Healthy:          true,
+		MetaDataUpdateAt: staleHeartbeat,
+	})
+
+	got, ok := GetNodesByIp("10.0.0.9")
+	if !ok || got == nil {
+		t.Fatal("expected node to exist")
+	}
+	if got.Healthy {
+		t.Fatal("stale heartbeat should be reflected as unhealthy")
+	}
+	if got.UnhealthyReason != nodehealth.ReasonHeartbeatExpired {
+		t.Fatalf("UnhealthyReason=%s want %s", got.UnhealthyReason, nodehealth.ReasonHeartbeatExpired)
+	}
+}
+
+func TestNodeConcurrentCountersUpdateCachedNodeFromReadClone(t *testing.T) {
+	origCache := l.cache
+	defer func() {
+		l.cache = origCache
+	}()
+
+	l.cache = cache.New(0, 0)
+	l.cache.SetDefault("node-a", &node.Node{
+		InsID:            "node-a",
+		IP:               "10.0.0.10",
+		ReportedReady:    true,
+		Healthy:          true,
+		MetaDataUpdateAt: time.Now(),
+	})
+
+	got, ok := GetNode("node-a")
+	if !ok || got == nil {
+		t.Fatal("expected node to exist")
+	}
+	if err := IncrNodeConcurrent(got); err != nil {
+		t.Fatalf("IncrNodeConcurrent error: %v", err)
+	}
+	if err := DecrNodeConcurrent(got); err != nil {
+		t.Fatalf("DecrNodeConcurrent error: %v", err)
+	}
+
+	raw, ok := l.cache.Get("node-a")
+	if !ok {
+		t.Fatal("expected cached node to remain in cache")
+	}
+	cached, ok := raw.(*node.Node)
+	if !ok {
+		t.Fatal("expected cached node type")
+	}
+	if cached.LocalCreateNum != 0 {
+		t.Fatalf("LocalCreateNum=%d want 0", cached.LocalCreateNum)
 	}
 }

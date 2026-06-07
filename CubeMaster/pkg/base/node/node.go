@@ -54,7 +54,11 @@ type Node struct {
 
 	MetaDataUpdateAt time.Time `json:"MetaDataUpdateAt,omitempty"`
 
-	Healthy bool `json:"Healthy,omitempty"`
+	ReportedReady bool `json:"-"`
+
+	Healthy bool `json:"Healthy"`
+
+	UnhealthyReason string `json:"UnhealthyReason,omitempty"`
 
 	Score float64 `json:"Score,omitempty"`
 
@@ -84,6 +88,22 @@ type Node struct {
 	NicQueues      int64 `json:"nic_queues,omitempty"`
 
 	NodeLabels map[string]string `json:"NodeLabels,omitempty"`
+}
+
+func (n *Node) Clone() *Node {
+	if n == nil {
+		return nil
+	}
+	// Clone provides a best-effort read-side snapshot. Mutable counters such
+	// as LocalCreateNum are refreshed via atomic loads after the structural
+	// copy so cloned read models stay aligned with the write path.
+	localCreateNum := atomic.LoadInt64(&n.LocalCreateNum)
+	cloned := *n
+	cloned.LocalCreateNum = localCreateNum
+	if n.VirtualNodeQuotaArray != nil {
+		cloned.VirtualNodeQuotaArray = append([]int64(nil), n.VirtualNodeQuotaArray...)
+	}
+	return &cloned
 }
 
 func (n *Node) ID() string {

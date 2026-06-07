@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
@@ -204,7 +205,9 @@ func (l *local) downNodeCache(n *node.Node) {
 	if v, exist := l.cache.Get(n.ID()); exist {
 		l.lockMetaData.Lock()
 		old := v.(*node.Node)
+		old.ReportedReady = false
 		old.Healthy = false
+		old.UnhealthyReason = nodehealth.ReasonReportedNotReady
 		old.MetaDataUpdateAt = time.Now()
 		l.lockMetaData.Unlock()
 		l.delSortedNodes(n)
@@ -292,7 +295,9 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.Region = n.Region
 		old.QuotaCpu = n.QuotaCpu
 		old.QuotaMem = n.QuotaMem
+		old.ReportedReady = n.ReportedReady
 		old.Healthy = n.Healthy
+		old.UnhealthyReason = n.UnhealthyReason
 		old.HostStatus = n.HostStatus
 		old.CreateConcurrentNum = n.CreateConcurrentNum
 		old.MaxMvmLimit = n.MaxMvmLimit

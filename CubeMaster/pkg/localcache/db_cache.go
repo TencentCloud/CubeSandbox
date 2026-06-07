@@ -215,6 +215,7 @@ func constructNode(elem *models.HostInfo) *node.Node {
 		InstanceType:        elem.InstanceType,
 		HostStatus:          elem.HostStatus,
 		MetaDataUpdateAt:    time.Now(),
+		ReportedReady:       constants.HeartbeatHealth == elem.LiveStatus,
 		Healthy:             constants.HeartbeatHealth == elem.LiveStatus,
 		QuotaMem:            elem.QuotaMem,
 		QuotaCpu:            elem.QuotaCpu,

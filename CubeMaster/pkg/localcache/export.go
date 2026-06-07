@@ -21,6 +21,7 @@ import (
 	fwk "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/framework"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/wrapredis"
@@ -89,10 +90,11 @@ func GetCacheItems() map[string]cache.Item {
 func GetNodes(n int) node.NodeList {
 	nodes := node.NodeList{}
 	elems := l.cache.Items()
+	now := time.Now()
 	for _, v := range elems {
 		h, ok := v.Object.(*node.Node)
 		if ok {
-			nodes.Append(h)
+			nodes.Append(cloneNodeWithCurrentHealth(h, now))
 		}
 		if n > 0 && nodes.Len() >= n {
 			break
@@ -104,13 +106,17 @@ func GetNodes(n int) node.NodeList {
 func GetHealthyNodes(n int) node.NodeList {
 	nodes := node.NodeList{}
 	elems := l.cache.Items()
+	now := time.Now()
 	for _, v := range elems {
 		if n >= 0 && nodes.Len() >= n {
 			break
 		}
 		h, ok := v.Object.(*node.Node)
-		if ok && h.Healthy {
-			nodes.Append(h)
+		if ok {
+			current := cloneNodeWithCurrentHealth(h, now)
+			if current.Healthy {
+				nodes.Append(current)
+			}
 		}
 
 	}
@@ -127,11 +133,8 @@ func GetHealthyNodesByInstanceType(n int, product string) node.NodeList {
 		return GetHealthyNodes(n)
 	}
 
-	if n == -1 {
-		return clusterNodes
-	}
-
 	nodes := node.NodeList{}
+	now := time.Now()
 
 	for _, v := range clusterNodes {
 
@@ -139,8 +142,9 @@ func GetHealthyNodesByInstanceType(n int, product string) node.NodeList {
 			break
 		}
 
-		if v.Healthy {
-			nodes.Append(v)
+		current := cloneNodeWithCurrentHealth(v, now)
+		if current.Healthy {
+			nodes.Append(current)
 		}
 	}
 
@@ -153,15 +157,34 @@ func GetNode(id string) (*node.Node, bool) {
 		return nil, exist
 	}
 	h, ok := elem.(*node.Node)
-	return h, ok
+	if ok {
+		return cloneNodeWithCurrentHealth(h, time.Now()), true
+	}
+	return nil, false
+}
+
+func metadataHealthTimeout() time.Duration {
+	return nodehealth.MetadataTimeout(config.GetConfig().Common.SyncMetaDataInterval)
+}
+
+func cloneNodeWithCurrentHealth(n *node.Node, now time.Time) *node.Node {
+	if n == nil {
+		return nil
+	}
+	current := n.Clone()
+	status := nodehealth.EvaluateFromFacts(n.ReportedReady, n.MetaDataUpdateAt, now, metadataHealthTimeout())
+	current.Healthy = status.Healthy
+	current.UnhealthyReason = status.UnhealthyReason
+	return current
 }
 
 func GetNodesByIp(ip string) (*node.Node, bool) {
 	elems := l.cache.Items()
+	now := time.Now()
 	for _, v := range elems {
 		h, ok := v.Object.(*node.Node)
 		if ok && h.IP == ip {
-			return h, true
+			return cloneNodeWithCurrentHealth(h, now), true
 		}
 	}
 	return nil, false
@@ -370,6 +393,10 @@ func IncrNodeConcurrent(n *node.Node) error {
 	if n == nil {
 		return nil
 	}
+	if cached, ok := getMutableNode(n); ok {
+		cached.LocalCreateNumIncrBy(1)
+		return nil
+	}
 	n.LocalCreateNumIncrBy(1)
 	return nil
 }
@@ -378,8 +405,27 @@ func DecrNodeConcurrent(n *node.Node) error {
 	if n == nil {
 		return nil
 	}
+	if cached, ok := getMutableNode(n); ok {
+		cached.LocalCreateNumIncrBy(-1)
+		return nil
+	}
 	n.LocalCreateNumIncrBy(-1)
 	return nil
+}
+
+func getMutableNode(n *node.Node) (*node.Node, bool) {
+	if n == nil {
+		return nil, false
+	}
+	elem, ok := l.cache.Get(n.ID())
+	if !ok {
+		return nil, false
+	}
+	cached, ok := elem.(*node.Node)
+	if !ok || cached == nil {
+		return nil, false
+	}
+	return cached, true
 }
 
 func HealthyMasterNodes() (num int64) {

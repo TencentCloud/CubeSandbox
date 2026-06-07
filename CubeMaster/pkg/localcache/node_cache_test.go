@@ -25,9 +25,11 @@ func init() {
 	}
 	fmt.Printf("mydir=%s\n", mydir)
 	if os.Getenv("CUBE_MASTER_CONFIG_PATH") == "" {
-		os.Setenv("CUBE_MASTER_CONFIG_PATH", filepath.Clean(filepath.Join(mydir, "../../test/conf.yaml")))
+		os.Setenv("CUBE_MASTER_CONFIG_PATH", filepath.Clean(filepath.Join(mydir, "../../conf.yaml")))
 	}
-	config.Init()
+	if _, err := config.Init(); err != nil {
+		panic(err)
+	}
 }
 
 func Test_local_appendNodeByCluster(t *testing.T) {
