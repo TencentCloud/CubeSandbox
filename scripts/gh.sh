@@ -11,7 +11,7 @@ set -euo pipefail
 #   ./scripts/gh.sh search issues "search query" --limit 10
 #   ./scripts/gh.sh label list --limit 100
 #   ./scripts/gh.sh issue comment 123 --body-file /tmp/comment.md
-#   ./scripts/gh.sh pr review-comment 123 --body-file /tmp/comment.md
+#   ./scripts/gh.sh pr review-comment 123 --body-file -
 
 export GH_HOST=github.com
 
@@ -112,31 +112,33 @@ elif [[ "$CMD" == "issue comment" ]]; then
   gh "$SUB1" "$SUB2" "${POSITIONAL[0]}" "${FLAGS[@]}"
 elif [[ "$CMD" == "pr review-comment" ]]; then
   if [[ ${#POSITIONAL[@]} -ne 1 ]] || ! [[ "${POSITIONAL[0]}" =~ ^[0-9]+$ ]]; then
-    echo "Error: pr review-comment requires exactly one numeric PR number (e.g., ./scripts/gh.sh pr review-comment 123 --body-file /tmp/comment.md)" >&2
+    echo "Error: pr review-comment requires exactly one numeric PR number (e.g., ./scripts/gh.sh pr review-comment 123 --body-file -)" >&2
     exit 1
   fi
 
   pr_number="${POSITIONAL[0]}"
-  body_file=""
+  body_source=""
   i=0
   while [[ $i -lt ${#FLAGS[@]} ]]; do
     f="${FLAGS[$i]}"
     if [[ "$f" == "--body-file" ]]; then
       i=$((i + 1))
-      body_file="${FLAGS[$i]:-}"
+      body_source="${FLAGS[$i]:-}"
     elif [[ "$f" == --body-file=* ]]; then
-      body_file="${f#--body-file=}"
+      body_source="${f#--body-file=}"
     else
-      echo "Error: pr review-comment only accepts --body-file" >&2
+      echo "Error: pr review-comment only accepts --body-file -" >&2
       exit 1
     fi
     i=$((i + 1))
   done
 
-  if [[ -z "$body_file" || ! -f "$body_file" ]]; then
-    echo "Error: pr review-comment requires an existing --body-file <path>" >&2
+  if [[ "$body_source" != "-" ]]; then
+    echo "Error: pr review-comment only accepts review body from stdin via --body-file -" >&2
     exit 1
   fi
+
+  body="$(cat)"
 
   if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
     current_pr="$(
@@ -161,7 +163,6 @@ PY
     fi
   fi
 
-  body="$(<"$body_file")"
   if [[ "$body" != *"$AUTO_REVIEW_START_MARKER"* || "$body" != *"$AUTO_REVIEW_END_MARKER"* ]]; then
     echo "Error: review comment body must contain the auto-review start and end markers" >&2
     exit 1
@@ -202,17 +203,7 @@ if matches:
 PY
   )"
 
-  python3 - "$body_file" "$payload_file" <<'PY'
-import json
-import sys
-
-body_path, payload_path = sys.argv[1], sys.argv[2]
-with open(body_path, encoding="utf-8") as f:
-    body = f.read()
-
-with open(payload_path, "w", encoding="utf-8") as f:
-    json.dump({"body": body}, f)
-PY
+  printf '%s' "$body" | python3 -c 'import json, sys; body = sys.stdin.read(); open(sys.argv[1], "w", encoding="utf-8").write(json.dumps({"body": body}))' "$payload_file"
 
   if [[ -n "$comment_id" ]]; then
     gh api --method PATCH "repos/$REPO/issues/comments/$comment_id" --input "$payload_file" >/dev/null

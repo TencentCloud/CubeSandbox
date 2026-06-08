@@ -52,9 +52,13 @@ jobs:
 
             Comment management requirements:
             - Use a single top-level PR review comment for this workflow.
-            - To publish top-level PR feedback, write the full review body to a
-              temporary file and run:
-              ./scripts/gh.sh pr review-comment ${{ github.event.pull_request.number }} --body-file <file>
+            - To publish top-level PR feedback, pass the full review body to the
+              wrapper through stdin; do not write review files into the checkout:
+            ./scripts/gh.sh pr review-comment ${{ github.event.pull_request.number }} --body-file - <<'EOF'
+            <!-- cubesandbox-auto-review:start -->
+            ...review body...
+            <!-- cubesandbox-auto-review:end -->
+            EOF
             - Wrap the review body with these exact hidden markers so future
               runs can reliably recognize and update the same review comment:
               <!-- cubesandbox-auto-review:start -->

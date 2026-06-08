@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)
+allowed-tools: Bash(./scripts/gh.sh pr review-comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)
 description: Review a pull request
 ---
 
@@ -14,7 +14,7 @@ Perform a comprehensive code review using subagents for key areas:
 Instruct each to only provide noteworthy feedback. Once they finish, review the feedback and post only the feedback that you also deem noteworthy.
 
 Provide feedback using inline comments for specific issues.
-Use top-level comments for general observations or praise.
+Use `./scripts/gh.sh pr review-comment <pr-number> --body-file -` with stdin for top-level comments.
 Keep feedback concise.
 
 ---
