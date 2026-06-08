@@ -135,7 +135,7 @@ impl SandboxService {
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
             instance_type: self.instance_type.clone(),
-            timeout: body.timeout.filter(|t| *t > 0),
+            timeout: Some(body.timeout).filter(|t| *t > 0),
             annotations,
             labels,
             volumes: None,

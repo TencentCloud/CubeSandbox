@@ -77,13 +77,14 @@ pub struct NewSandbox {
     #[serde(rename = "templateID")]
     pub template_id: String,
 
-    /// Sandbox lifetime in seconds. `None` (field omitted) means "no
-    /// automatic destroy" — the sandbox lives until killed explicitly
-    /// via DELETE /sandboxes/{id} or until SetTimeout/Refresh installs
-    /// a deadline. `Some(0)` is treated the same as `None`.
+    /// Sandbox lifetime in seconds. Defaults to 15 if the field is
+    /// omitted, matching the historical behavior every official SDK
+    /// relies on. `0` means "no automatic destroy" — the sandbox lives
+    /// until killed explicitly via DELETE /sandboxes/{id} or until
+    /// SetTimeout / Refresh installs a new deadline.
     #[validate(range(min = 0))]
-    #[serde(default)]
-    pub timeout: Option<i32>,
+    #[serde(default = "default_timeout")]
+    pub timeout: i32,
 
     #[serde(rename = "autoPause", default)]
     pub auto_pause: bool,
@@ -377,11 +378,17 @@ fn default_log_limit() -> i32 {
 
 // ─── Sandbox — timeout / refresh ──────────────────────────────────────────
 
-/// Request body for POST /sandboxes/{id}/timeout
+/// Request body for POST /sandboxes/{id}/timeout.
+///
+/// Field name is `timeout` (seconds, absolute). Earlier drafts also
+/// accepted a `duration` alias for cross-SDK compatibility, but this
+/// invited callers to confuse SetTimeout (absolute reset) with the
+/// /refreshes endpoint (which still uses `duration`). The two
+/// endpoints now keep their natural field names so the on-wire shape
+/// communicates the semantics.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct SetTimeoutRequest {
     #[validate(range(min = 0))]
-    #[serde(alias = "duration")]
     pub timeout: i32,
 }
 

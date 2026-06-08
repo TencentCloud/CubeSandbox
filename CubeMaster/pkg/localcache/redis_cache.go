@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/gomodule/redigo/redis"
@@ -363,14 +364,37 @@ func (l *local) setByPassProsyToRedis(ctx context.Context, key string, byPassPro
 	if byPassProsy.SandboxIP != "" {
 		fieldValues = append(fieldValues, "SandboxIP", byPassProsy.SandboxIP)
 	}
-	fieldValues = append(fieldValues, "EndAt", byPassProsy.EndAt)
+	writeEndAt := byPassProsy.EndAt != "" && byPassProsy.EndAt != "0"
+	if writeEndAt {
+		fieldValues = append(fieldValues, "EndAt", byPassProsy.EndAt)
+	}
 	for k, v := range byPassProsy.ContainerToHostPorts {
 		fieldValues = append(fieldValues, k, v)
 	}
-	_, err = wrapredis.GetRedis(wrapredis.RedisWrite).Do("HSET", redis.Args{key}.AddFlat(fieldValues)...)
+	conn := wrapredis.GetRedis(wrapredis.RedisWrite)
+	_, err = conn.Do("HSET", redis.Args{key}.AddFlat(fieldValues)...)
 	if err != nil {
 		log.G(ctx).Errorf("redis set error, key: %s, err: %s", key, err)
 		return err
+	}
+	// Maintain the TTL secondary index in lock-step with the hash:
+	//   - HDEL EndAt + ZREM when the caller wants "no TTL", so we never
+	//     leave a stale empty string that would later be wrongly parsed
+	//     and never leak a ghost member into the index.
+	//   - ZADD score=EndAt-nanos when the caller asks for a deadline, so
+	//     the reaper can do O(logN+K) lookups via ZRANGEBYSCORE instead
+	//     of a full HGETALL scan over every sandbox.
+	if !writeEndAt {
+		if _, derr := conn.Do("HDEL", key, "EndAt"); derr != nil {
+			log.G(ctx).Warnf("setByPassProsyToRedis HDEL EndAt key=%s err:%s", key, derr)
+		}
+		if _, zerr := conn.Do("ZREM", sandboxTTLIndexKey, byPassProsy.SandboxID); zerr != nil {
+			log.G(ctx).Warnf("setByPassProsyToRedis ZREM ttl-index sandbox=%s err:%s", byPassProsy.SandboxID, zerr)
+		}
+	} else if score, perr := strconv.ParseInt(byPassProsy.EndAt, 10, 64); perr == nil && score > 0 {
+		if _, zerr := conn.Do("ZADD", sandboxTTLIndexKey, score, byPassProsy.SandboxID); zerr != nil {
+			log.G(ctx).Warnf("setByPassProsyToRedis ZADD ttl-index sandbox=%s err:%s", byPassProsy.SandboxID, zerr)
+		}
 	}
 	if log.IsDebug() {
 		log.G(ctx).Debugf("setByPassProsyToRedis:%s,%s", key, fieldValues)
@@ -456,35 +480,84 @@ func traceRedis(ctx context.Context, action, redisOp, key string, start time.Tim
 	CubeLog.Trace(baseRt)
 }
 
-func (l *local) scanByPassProxyKeys(ctx context.Context) ([]string, error) {
-	const pattern = "bypass_host_proxy:*"
-	const batch = 200
-	var (
-		cursor int64
-		keys   []string
-	)
+// sandboxTTLIndexKey is a redis sorted set whose member is the sandbox
+// id and whose score is its absolute deadline in unix-nanoseconds. The
+// reaper queries it with ZRANGEBYSCORE -inf <now>, which is O(logN+K)
+// in the number of *expired* sandboxes and avoids a full SCAN+HGETALL
+// over every running sandbox on every tick.
+const sandboxTTLIndexKey = "sandbox_ttl_index"
+
+// listExpiredSandboxIDsByZSet returns at most `limit` sandbox ids whose
+// EndAt has elapsed. The slice is bounded so a single reaper tick never
+// blocks on tens of thousands of entries; the next tick picks up the
+// rest.
+func (l *local) listExpiredSandboxIDsByZSet(ctx context.Context, now time.Time, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 256
+	}
 	conn := wrapredis.GetRedis(wrapredis.RedisRead)
-	for {
-		values, err := redis.Values(conn.Do("SCAN", cursor, "MATCH", pattern, "COUNT", batch))
-		if err != nil {
-			log.G(ctx).Warnf("scanByPassProxyKeys err:%s", err)
-			return nil, err
+	ids, err := redis.Strings(conn.Do(
+		"ZRANGEBYSCORE", sandboxTTLIndexKey,
+		"-inf", now.UnixNano(),
+		"LIMIT", 0, limit,
+	))
+	if err != nil {
+		if errors.Is(err, redis.ErrNil) {
+			return nil, nil
 		}
-		if len(values) != 2 {
-			return nil, errors.New("scanByPassProxyKeys: malformed reply")
-		}
-		next, err := redis.Int64(values[0], nil)
-		if err != nil {
-			return nil, err
-		}
-		batchKeys, err := redis.Strings(values[1], nil)
-		if err != nil {
-			return nil, err
-		}
-		keys = append(keys, batchKeys...)
-		cursor = next
-		if cursor == 0 {
-			return keys, nil
-		}
+		log.G(ctx).Warnf("listExpiredSandboxIDsByZSet err:%s", err)
+		return nil, err
+	}
+	return ids, nil
+}
+
+// removeFromTTLIndex drops a sandbox from the TTL secondary index. It
+// is best-effort: a leftover member will simply be observed as "no
+// proxy / no EndAt" by the reaper on the next tick and pruned then.
+func (l *local) removeFromTTLIndex(ctx context.Context, sandboxID string) {
+	if sandboxID == "" {
+		return
+	}
+	if _, err := wrapredis.GetRedis(wrapredis.RedisWrite).Do("ZREM", sandboxTTLIndexKey, sandboxID); err != nil {
+		log.G(ctx).Warnf("removeFromTTLIndex sandbox=%s err:%s", sandboxID, err)
 	}
 }
+
+// acquireReaperLock attempts to acquire the cluster-wide reaper lease so
+// that, in a multi-master deployment, only one CubeMaster runs the
+// destroy fan-out at any given moment. The lease auto-expires after
+// ttl, so a crashed leader does not stall the reaper for long.
+func acquireReaperLock(ctx context.Context, holder string, ttl time.Duration) (bool, error) {
+	if holder == "" {
+		return false, errors.New("acquireReaperLock: empty holder")
+	}
+	reply, err := wrapredis.GetRedis(wrapredis.RedisWrite).Do(
+		"SET", reaperLockKey, holder, "NX", "EX", int(ttl.Seconds()),
+	)
+	if err != nil {
+		if errors.Is(err, redis.ErrNil) {
+			return false, nil
+		}
+		return false, err
+	}
+	if reply == nil {
+		return false, nil
+	}
+	s, ok := reply.(string)
+	return ok && s == "OK", nil
+}
+
+// releaseReaperLock releases the lease iff the caller still owns it.
+// The compare-and-delete script avoids the classic "deleted someone
+// else's lock after a long GC" race.
+func releaseReaperLock(ctx context.Context, holder string) {
+	if holder == "" {
+		return
+	}
+	const script = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
+	if _, err := wrapredis.GetRedis(wrapredis.RedisWrite).Do("EVAL", script, 1, reaperLockKey, holder); err != nil {
+		log.G(ctx).Warnf("releaseReaperLock holder=%s err:%s", holder, err)
+	}
+}
+
+const reaperLockKey = "sandbox_reaper_lock"

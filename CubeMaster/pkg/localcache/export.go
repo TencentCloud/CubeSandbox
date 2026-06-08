@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -209,6 +208,14 @@ func NotifyEvent(e *Event) error {
 	}
 }
 
+// SetSandboxProxyMap upserts a sandbox's proxy hash. Callers MUST treat
+// this as a full overwrite: the EndAt / SandboxIP / port-mapping fields
+// of the supplied SandboxProxyMap are authoritative, and an empty EndAt
+// will explicitly drop the absolute deadline (HDEL + ZREM on the TTL
+// secondary index) — exactly what SetTimeout(0) / Refresh(0) wants.
+// New code paths that only mutate one field should always start from
+// GetSandboxProxyMap so they don't accidentally clobber another field
+// (most importantly EndAt) that they had no intention of touching.
 func SetSandboxProxyMap(ctx context.Context, proxyInfo *types.SandboxProxyMap) error {
 	if proxyInfo == nil || proxyInfo.SandboxID == "" {
 		log.G(ctx).Errorf("SetSandboxProxyMap rejected: empty SandboxID, proxy=%+v", proxyInfo)
@@ -288,45 +295,40 @@ func DeleteInstanceInfoMap(ctx context.Context, insID string) error {
 
 func DeleteSandboxProxyMap(ctx context.Context, sandboxID string) error {
 	keyByPass := "bypass_host_proxy" + ":" + sandboxID
-	err := l.deleteKeyFromRedis(ctx, keyByPass)
-	if err != nil {
+	if err := l.deleteKeyFromRedis(ctx, keyByPass); err != nil {
 		return err
 	}
+	// Best-effort: drop the TTL secondary-index entry so the reaper does
+	// not keep observing a phantom sandbox that no longer has a hash.
+	l.removeFromTTLIndex(ctx, sandboxID)
 	return nil
 }
 
-// ListExpiredSandboxIDs scans Redis for SandboxProxyMap entries whose
-// EndAt has elapsed and returns their sandbox IDs. Entries with empty
-// or unparseable EndAt are treated as having no TTL and skipped.
-func ListExpiredSandboxIDs(ctx context.Context, now time.Time) ([]string, error) {
-	keys, err := l.scanByPassProxyKeys(ctx)
-	if err != nil {
-		return nil, err
-	}
-	const prefix = "bypass_host_proxy:"
-	expired := make([]string, 0, len(keys))
-	for _, key := range keys {
-		if len(key) <= len(prefix) {
-			continue
-		}
-		sandboxID := key[len(prefix):]
-		proxy, err := l.getByPassProsyFromRedis(ctx, key)
-		if err != nil || proxy == nil || proxy.EndAt == "" {
-			continue
-		}
-		endNanos, err := strconv.ParseInt(proxy.EndAt, 10, 64)
-		if err != nil || endNanos <= 0 {
-			continue
-		}
-		if now.UnixNano() > endNanos {
-			log.G(ctx).Infof("reaper: sandbox=%s EndAt=%s (%s ago) -> mark expired",
-				sandboxID,
-				time.Unix(0, endNanos).UTC().Format(time.RFC3339Nano),
-				now.Sub(time.Unix(0, endNanos)))
-			expired = append(expired, sandboxID)
-		}
-	}
-	return expired, nil
+// ListExpiredSandboxIDs returns up to `limit` sandbox ids whose absolute
+// deadline has elapsed, by querying the TTL secondary index sorted set.
+// Compared to the previous SCAN+HGETALL strategy this is O(logN+K) in
+// the number of *expired* entries, so a reaper tick stays cheap even
+// with tens of thousands of running sandboxes. The bounded `limit`
+// guarantees a single tick never blocks for arbitrarily long; any
+// remaining expired ids are picked up on the next tick.
+func ListExpiredSandboxIDs(ctx context.Context, now time.Time, limit int) ([]string, error) {
+	return l.listExpiredSandboxIDsByZSet(ctx, now, limit)
+}
+
+// AcquireReaperLock tries to install a cluster-wide reaper lease in
+// Redis so that, in a multi-master deployment, only one CubeMaster
+// performs the destroy fan-out at any given moment. The lease auto-
+// expires after `ttl`, ensuring a crashed leader never permanently
+// stalls TTL-based destroys.
+func AcquireReaperLock(ctx context.Context, holder string, ttl time.Duration) (bool, error) {
+	return acquireReaperLock(ctx, holder, ttl)
+}
+
+// ReleaseReaperLock releases the reaper lease iff the caller still owns
+// it, using a CAS Lua script so a slow leader cannot accidentally drop
+// the lock the next leader has just acquired.
+func ReleaseReaperLock(ctx context.Context, holder string) {
+	releaseReaperLock(ctx, holder)
 }
 
 func SetDescribeTask(ctx context.Context, taskInfo *types.DescribeTaskMap) error {
