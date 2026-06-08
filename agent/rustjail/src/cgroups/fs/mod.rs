@@ -90,7 +90,12 @@ macro_rules! set_resource {
 
 impl CgroupManager for Manager {
     fn apply(&self, pid: pid_t) -> Result<()> {
-        self.cgroup.add_task(CgroupPid::from(pid as u64))?;
+        let cgroup_pid = CgroupPid::from(pid as u64);
+        if self.cgroup.v2() {
+            self.cgroup.add_task_by_tgid(cgroup_pid)?;
+        } else {
+            self.cgroup.add_task(cgroup_pid)?;
+        }
         Ok(())
     }
 
@@ -194,8 +199,12 @@ impl CgroupManager for Manager {
     }
 
     fn get_pids(&self) -> Result<Vec<pid_t>> {
-        let mem_controller: &MemController = self.cgroup.controller_of().unwrap();
-        let pids = mem_controller.tasks();
+        let pids = if self.cgroup.v2() {
+            self.cgroup.procs()
+        } else {
+            let mem_controller: &MemController = self.cgroup.controller_of().unwrap();
+            mem_controller.tasks()
+        };
         let result = pids.iter().map(|x| x.pid as i32).collect::<Vec<i32>>();
 
         Ok(result)
@@ -933,14 +942,20 @@ pub fn get_mounts() -> Result<HashMap<String, String>> {
     Ok(m)
 }
 
-fn new_cgroup(h: Box<dyn cgroups::Hierarchy>, path: &str) -> Cgroup {
+fn new_cgroup(h: Box<dyn cgroups::Hierarchy>, path: &str) -> Result<Cgroup> {
     let valid_path = path.trim_start_matches('/').to_string();
+
+    if h.v2() {
+        // Let cgroups-rs map cgroup v2 kernel controller names to its own subsystem model.
+        return cgroups::Cgroup::new(h, valid_path.as_str()).context("create cgroup v2");
+    }
+
     cgroups::Cgroup::new_with_specified_controllers(
         h,
         valid_path.as_str(),
         Some(CUBE_CONTROLLER.to_vec()),
     )
-    .unwrap()
+    .context("create cgroup v1")
 }
 
 impl Manager {
@@ -965,7 +980,7 @@ impl Manager {
             mounts,
             // rels: paths,
             cpath: cpath.to_string(),
-            cgroup: new_cgroup(cgroups::hierarchies::auto(), cpath),
+            cgroup: new_cgroup(cgroups::hierarchies::auto(), cpath)?,
         })
     }
 
