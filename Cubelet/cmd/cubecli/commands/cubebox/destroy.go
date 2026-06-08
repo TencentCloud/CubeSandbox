@@ -131,7 +131,7 @@ var Destroy = &cli.Command{
 
 var DestroyAll = &cli.Command{
 	Name:  "destroyall",
-	Usage: "destroy all cubebox",
+	Usage: "destroy all cubeboxes",
 	Flags: []cli.Flag{
 		&cli.BoolFlag{
 			Name:    "force",

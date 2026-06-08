@@ -65,7 +65,7 @@ var ListDbCommand = cli.Command{
 	Flags: []cli.Flag{
 		&cli.StringFlag{
 			Name:  "db",
-			Usage: "db name, this is required to access standlan db",
+			Usage: "DB name; required to access a standalone DB",
 		},
 		&cli.StringFlag{
 			Name:  "key",
