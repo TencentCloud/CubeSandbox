@@ -387,6 +387,15 @@ func getTapFd(name string) (*os.File, error) {
 		return nil, fmt.Errorf("set tap(%s) vnet hdr failed, errno: %+v", tap.Name, errno)
 	}
 
+	offload := uintptr(unix.TUN_F_CSUM | unix.TUN_F_TSO4 | unix.TUN_F_TSO6)
+	_, _, errno = unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TUNSETOFFLOAD), offload)
+	if errno != 0 {
+		unixClose(fd)
+		return nil, fmt.Errorf("set tap(%s) TUNSETOFFLOAD failed, errno: %+v", tap.Name, errno)
+	}
+	// tx-tcp-mangleid-segmentation is optional, no need to bail out
+	enableTXTCPMangleIDSegmentation(tap.Name)
+
 	return os.NewFile(uintptr(fd), tunDevicePath), nil
 }
 
