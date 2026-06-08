@@ -20,12 +20,16 @@ import (
 	"github.com/tencentcloud/CubeSandbox/network-agent/internal/grpcserver"
 	"github.com/tencentcloud/CubeSandbox/network-agent/internal/httpserver"
 	"github.com/tencentcloud/CubeSandbox/network-agent/internal/service"
+	"github.com/tencentcloud/CubeSandbox/network-agent/pkg/version"
 )
 
 var newLocalService = service.NewLocalService
 
 func main() {
 	defaultCfg := service.DefaultConfig()
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "show version information")
+	flag.BoolVar(&showVersion, "v", false, "show version information")
 	var (
 		listenEndpoint = flag.String("listen", "unix:///tmp/cube/network-agent.sock", "network-agent listen endpoint")
 		healthListen   = flag.String("health-listen", "127.0.0.1:19090", "network-agent health server listen address")
@@ -48,6 +52,10 @@ func main() {
 		logRollSize    = flag.Int("log-roll-size", defaultRollSizeMB, "network-agent log files roll size(MB)")
 	)
 	flag.Parse()
+	if showVersion {
+		fmt.Println(version.String())
+		os.Exit(0)
+	}
 	if err := initLogger(*logPath, *logLevel, *logRollNum, *logRollSize); err != nil {
 		CubeLog.Fatalf("network-agent init logger failed: %v", err)
 	}

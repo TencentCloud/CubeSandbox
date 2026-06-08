@@ -33,7 +33,7 @@ var extraCmds = []*cli.Command{
 
 func init() {
 	cli.VersionPrinter = func(c *cli.Context) {
-		fmt.Println(c.App.Name, pkgv.Package, c.App.Version)
+		fmt.Println(pkgv.VersionString("cubecli"))
 	}
 }
 

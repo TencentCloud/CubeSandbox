@@ -17,7 +17,9 @@ pub const MOUNT_TYPE_RBIND: &str = "rbind";
 pub const ANNO_ROOTFS_WLAYER_PATH: &str = "cube.rootfs.wlayer.path";
 pub const ANNO_ROOTFS_WLAYER_PATH_SUBDIR: &str = "cube.rootfs.wlayer.subdir";
 
-pub const SHIM_VERSION: &str = env!("GIT_COMMIT_INFO");
+pub const SHIM_VERSION: &str = env!("CUBE_VERSION");
+pub const SHIM_COMMIT: &str = env!("CUBE_COMMIT");
+pub const SHIM_BUILD_TIME: &str = env!("CUBE_BUILD_TIME");
 
 pub const ANNO_UPDATE_EXT_ACT: &str = "cube.shimapi.update.action";
 pub const ANNO_UPDATE_EXT_PARAM: &str = "cube.shimapi.update.param";

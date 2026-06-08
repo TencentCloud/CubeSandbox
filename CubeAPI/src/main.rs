@@ -30,7 +30,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 /// Most settings are controlled via environment variables; only the most
 /// commonly overridden ones are exposed as CLI flags.
 #[derive(Parser, Debug)]
-#[command(name = "cube-api", version, about, long_about = None)]
+#[command(name = "cube-api", version = env!("CUBE_VERSION_FULL"), about, long_about = None)]
 struct Cli {
     /// Enable debug log level (overrides LOG_LEVEL env var and config).
     ///

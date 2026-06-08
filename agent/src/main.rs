@@ -285,9 +285,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     if args.version {
         println!(
-            "version:{} ,commit: {})",
+            "{} {} ({}) built at {}",
+            version::AGENT_NAME,
             version::AGENT_VERSION,
             version::VERSION_COMMIT,
+            version::BUILD_TIME,
         );
         exit(0);
     }

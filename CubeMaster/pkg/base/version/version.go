@@ -12,7 +12,15 @@ import (
 )
 
 var (
-	Version = "release"
+	// Version is the semantic release version, injected at build time via ldflags.
+	// Falls back to "0.0.0-dev" when not set (e.g. local development builds).
+	Version = "0.0.0-dev"
+
+	// Commit is the full git commit SHA, injected at build time via ldflags.
+	Commit = "unknown"
+
+	// BuildTime is the UTC ISO 8601 build timestamp, injected at build time via ldflags.
+	BuildTime = "unknown"
 
 	Package = "github.com/tencentcloud/CubeSandbox/CubeMaster"
 
@@ -21,9 +29,14 @@ var (
 	GoVersion = runtime.Version()
 )
 
+// VersionString returns the unified version string for the given binary name.
+func VersionString(binaryName string) string {
+	return fmt.Sprintf("%s %s (%s) built at %s", binaryName, Version, Commit, BuildTime)
+}
+
 func ShowAndExit(show bool) {
 	if show {
-		fmt.Println("Version: " + Version)
+		fmt.Println(VersionString("cubemaster"))
 		os.Exit(0)
 	}
 }

@@ -6,7 +6,7 @@
 package version
 
 import (
-	"strings"
+	"fmt"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
 	"github.com/urfave/cli"
@@ -26,13 +26,13 @@ var Command = cli.Command{
 		},
 	},
 	Action: func(context *cli.Context) error {
-		var buf strings.Builder
+		if context.Bool("versiononly") {
+			fmt.Println(version.Version)
+			return nil
+		}
 		if context.Bool("withclient") {
-			buf.WriteString(version.ShowVersion() + "\n")
-			buf.WriteString("Client:" + "\n")
-			buf.WriteString("  Version: " + version.Version + "\n")
-			buf.WriteString("  Revision :" + version.Revision + "\n")
-			buf.WriteString("  Go version: " + version.GoVersion + "\n")
+			fmt.Println(version.VersionString("cubemastercli"))
+			fmt.Println("  Go version: " + version.GoVersion)
 		}
 		return nil
 	},

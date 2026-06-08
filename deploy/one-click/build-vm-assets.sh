@@ -13,6 +13,15 @@ fi
 
 WORK_ROOT="${ONE_CLICK_WORK_ROOT:-${SCRIPT_DIR}/.work}"
 RUNTIME_LAYOUT_DIR="${ONE_CLICK_RUNTIME_LAYOUT_DIR:-${WORK_ROOT}/runtime-layout}"
+
+LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+
+# Version injection for Rust build.rs (shim, cube-runtime) when built on host.
+# In CI these are prebuilt via the builder container; for local dev, provide
+# consistent fallbacks so all components share the same version information.
+export CUBE_VERSION="${CUBE_RELEASE_VERSION:-${LATEST_RELEASE_TAG:-0.0.0-dev}}"
+export CUBE_COMMIT="${CUBE_RELEASE_COMMIT:-$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')}"
+export CUBE_BUILD_TIME="${CUBE_RELEASE_BUILD_TIME:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
 GUEST_IMAGE_WORK_DIR="${WORK_ROOT}/guest-image-build"
 GUEST_ROOTFS_DIR="${GUEST_IMAGE_WORK_DIR}/rootfs"
 GUEST_ROOTFS_TAR="${GUEST_IMAGE_WORK_DIR}/rootfs.tar"
@@ -23,7 +32,7 @@ CUBE_KERNEL_PVM_VMLINUX="${ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX:-${RAW_ARTIFACTS_DI
 GUEST_IMAGE_DOCKERFILE="${ONE_CLICK_GUEST_IMAGE_DOCKERFILE:-${ROOT_DIR}/deploy/guest-image/Dockerfile}"
 GUEST_IMAGE_CONTEXT_DIR="${ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR:-$(dirname "${GUEST_IMAGE_DOCKERFILE}")}"
 GUEST_IMAGE_REF="${ONE_CLICK_GUEST_IMAGE_REF:-cube-sandbox-guest-image:one-click}"
-GUEST_IMAGE_VERSION="${ONE_CLICK_GUEST_IMAGE_VERSION:-$(latest_git_revision "${ROOT_DIR}")}"
+GUEST_IMAGE_VERSION="${ONE_CLICK_GUEST_IMAGE_VERSION:-${CUBE_RELEASE_VERSION:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
 
 CUBE_AGENT_BUILD_MODE="${ONE_CLICK_CUBE_AGENT_BUILD_MODE:-local}"
 CUBE_SHIM_BUILD_MODE="${ONE_CLICK_CUBE_SHIM_BUILD_MODE:-local}"
@@ -247,13 +256,8 @@ run_as_root() {
     return $?
   fi
 
-  # Try without sudo first so the caller can still capture stdout via $(...).
-  # Only stderr is silenced so a permission error doesn't pollute the log
-  # before the sudo fallback retries.
-  local rc=0
-  "$@" 2>/dev/null
-  rc=$?
-  if [[ ${rc} -eq 0 ]]; then
+  # Try without sudo first so command substitution still captures stdout.
+  if "$@" 2>/dev/null; then
     return 0
   fi
 
@@ -438,6 +442,7 @@ EOF
 build_guest_image_artifacts() {
   local output_img="$1"
   local output_version="$2"
+  local output_agent_version="$3"
   local rootfs_size_bytes
   local image_size_bytes
   local guest_container_id=""
@@ -445,7 +450,7 @@ build_guest_image_artifacts() {
   ensure_dir "${GUEST_IMAGE_CONTEXT_DIR}"
   ensure_file "${GUEST_IMAGE_DOCKERFILE}"
 
-  mkdir -p "${GUEST_IMAGE_WORK_DIR}" "$(dirname "${output_img}")" "$(dirname "${output_version}")"
+  mkdir -p "${GUEST_IMAGE_WORK_DIR}" "$(dirname "${output_img}")" "$(dirname "${output_version}")" "$(dirname "${output_agent_version}")"
   remove_path_with_optional_sudo "${GUEST_ROOTFS_DIR}" "${GUEST_ROOTFS_TAR}"
 
   log "building guest image from ${GUEST_IMAGE_DOCKERFILE}"
@@ -472,6 +477,7 @@ build_guest_image_artifacts() {
   shrink_ext4_image "${output_img}"
 
   printf '%s\n' "${GUEST_IMAGE_VERSION}" > "${output_version}"
+  printf '%s\n' "${CUBE_VERSION}" > "${output_agent_version}"
 
   docker rm -f "${guest_container_id}" >/dev/null 2>&1 || true
   guest_container_id=""
@@ -512,7 +518,8 @@ prepare_runtime_config "${RUNTIME_LAYOUT_DIR}/cube-shim/conf/config-cube.toml"
 log "building guest image artifacts"
 build_guest_image_artifacts \
   "${RUNTIME_LAYOUT_DIR}/cube-image/cube-guest-image-cpu.img" \
-  "${RUNTIME_LAYOUT_DIR}/cube-image/version"
+  "${RUNTIME_LAYOUT_DIR}/cube-image/version" \
+  "${RUNTIME_LAYOUT_DIR}/cube-image/agent-version"
 log "copying fixed kernel vmlinux"
 copy_file "${CUBE_KERNEL_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux"
 ensure_file "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux"

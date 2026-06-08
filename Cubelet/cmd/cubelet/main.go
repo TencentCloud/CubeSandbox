@@ -231,7 +231,7 @@ func init() {
 	grpclog.SetLoggerV2(grpclog.NewLoggerV2(io.Discard, io.Discard, io.Discard))
 
 	cli.VersionPrinter = func(c *cli.Context) {
-		fmt.Println(c.App.Name, c.App.Version)
+		fmt.Println(version.VersionString("cubelet"))
 	}
 }
 

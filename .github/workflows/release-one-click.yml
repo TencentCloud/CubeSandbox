@@ -274,15 +274,15 @@ jobs:
 
       - name: Build one-click release bundle
         env:
-          # Align the dashboard's displayed version with the release tag; the
-          # value propagates to the web build (vite reads CUBE_RELEASE_VERSION).
+          # Propagates to Go ldflags, Rust build.rs, web build, and guest-image version.
           CUBE_RELEASE_VERSION: ${{ github.ref_name }}
+          ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}
         run: ./deploy/one-click/build-release-bundle-builder.sh
 
       - name: Resolve bundle path
         id: bundle
         run: |
-          bundle_path="deploy/one-click/dist/cube-sandbox-one-click-$(git rev-parse --short HEAD).tar.gz"
+          bundle_path="deploy/one-click/dist/cube-sandbox-one-click-${{ github.ref_name }}.tar.gz"
           test -f "${bundle_path}"
           echo "path=${bundle_path}" >> "${GITHUB_OUTPUT}"
 

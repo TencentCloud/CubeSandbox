@@ -15,15 +15,44 @@ PREBUILT_DIR="${SCRIPT_DIR}/.work/prebuilt"
 HELPER_SCRIPT="${SCRIPT_DIR}/.work/build-prebuilt-in-builder.sh"
 BUILDER_IMAGE_REF="${BUILDER_IMAGE:-cube-sandbox-builder:ubuntu2004}"
 
+CUBE_RELEASE_VERSION_FROM_ENV="${CUBE_RELEASE_VERSION:-}"
+LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+: "${CUBE_RELEASE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"
+: "${CUBE_RELEASE_COMMIT:=$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')}"
+: "${CUBE_RELEASE_BUILD_TIME:=$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
+: "${ONE_CLICK_DIST_VERSION:=${CUBE_RELEASE_VERSION_FROM_ENV:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
+export CUBE_RELEASE_VERSION CUBE_RELEASE_COMMIT CUBE_RELEASE_BUILD_TIME ONE_CLICK_DIST_VERSION
+
 require_cmd docker
 require_cmd make
 
 rm -rf "${PREBUILT_DIR}"
 mkdir -p "${PREBUILT_DIR}" "$(dirname "${HELPER_SCRIPT}")"
 
-cat > "${HELPER_SCRIPT}" <<'EOF'
+cat > "${HELPER_SCRIPT}" <<'SCRIPT_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Version values are resolved by the host script and passed into this helper.
+export CUBE_VERSION="${CUBE_RELEASE_VERSION}"
+export CUBE_COMMIT="${CUBE_RELEASE_COMMIT}"
+export CUBE_BUILD_TIME="${CUBE_RELEASE_BUILD_TIME}"
+
+go_version_ldflags() {
+  local version_pkg="$1"
+  printf -- "-s -w -X '%s.Version=%s' -X '%s.Commit=%s' -X '%s.BuildTime=%s'" \
+    "${version_pkg}" "${CUBE_VERSION}" \
+    "${version_pkg}" "${CUBE_COMMIT}" \
+    "${version_pkg}" "${CUBE_BUILD_TIME}"
+}
+
+CUBEMASTER_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
+CUBELET_VERSION_PKG="github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
+NETAGENT_VERSION_PKG="github.com/tencentcloud/CubeSandbox/network-agent/pkg/version"
+
+CUBEMASTER_LDFLAGS="$(go_version_ldflags "${CUBEMASTER_VERSION_PKG}")"
+CUBELET_LDFLAGS="$(go_version_ldflags "${CUBELET_VERSION_PKG}")"
+NETAGENT_LDFLAGS="$(go_version_ldflags "${NETAGENT_VERSION_PKG}")"
 
 PREBUILT_DIR="/workspace/deploy/one-click/.work/prebuilt"
 mkdir -p "${PREBUILT_DIR}"
@@ -39,15 +68,15 @@ rm -f \
   "${PREBUILT_DIR}/cube-runtime"
 
 echo "[one-click] building cubemaster in builder" >&2
-(cd /workspace/CubeMaster && go mod download && go build -o "${PREBUILT_DIR}/cubemaster" ./cmd/cubemaster)
+(cd /workspace/CubeMaster && go mod download && go build -ldflags "${CUBEMASTER_LDFLAGS}" -o "${PREBUILT_DIR}/cubemaster" ./cmd/cubemaster)
 
 echo "[one-click] building cubemastercli in builder" >&2
-(cd /workspace/CubeMaster && go build -o "${PREBUILT_DIR}/cubemastercli" ./cmd/cubemastercli)
+(cd /workspace/CubeMaster && go build -ldflags "${CUBEMASTER_LDFLAGS}" -o "${PREBUILT_DIR}/cubemastercli" ./cmd/cubemastercli)
 
 echo "[one-click] building cubelet and cubecli in builder" >&2
 mkdir -p /workspace/_output/bin
 (cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk)
-(cd /workspace/Cubelet && go mod download && make proto && go build -a -o /workspace/_output/bin/cubelet ./cmd/cubelet && go build -a -o /workspace/_output/bin/cubecli ./cmd/cubecli)
+(cd /workspace/Cubelet && go mod download && make proto && go build -ldflags "${CUBELET_LDFLAGS}" -o /workspace/_output/bin/cubelet ./cmd/cubelet && go build -ldflags "${CUBELET_LDFLAGS}" -o /workspace/_output/bin/cubecli ./cmd/cubecli)
 install -m 0755 /workspace/_output/bin/cubelet "${PREBUILT_DIR}/cubelet"
 install -m 0755 /workspace/_output/bin/cubecli "${PREBUILT_DIR}/cubecli"
 
@@ -56,17 +85,19 @@ echo "[one-click] building cube-api in builder" >&2
 install -m 0755 /workspace/CubeAPI/target/release/cube-api "${PREBUILT_DIR}/cube-api"
 
 echo "[one-click] building network-agent in builder" >&2
-(cd /workspace/network-agent && go build -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
+(cd /workspace/network-agent && go build -ldflags "${NETAGENT_LDFLAGS}" -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
 
 echo "[one-click] building cube-agent in builder" >&2
+# Agent Makefile reads CUBE_RELEASE_VERSION; CUBE_VERSION/COMMIT/BUILD_TIME already exported
 (cd /workspace/agent && make -j1)
 install -m 0755 /workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent "${PREBUILT_DIR}/cube-agent"
 
 echo "[one-click] building shim workspace in builder" >&2
+# CUBE_VERSION/COMMIT/BUILD_TIME picked up by shim/build.rs and cube-runtime/build.rs
 (cd /workspace/CubeShim && cargo build --release --locked)
 install -m 0755 /workspace/CubeShim/target/release/containerd-shim-cube-rs "${PREBUILT_DIR}/containerd-shim-cube-rs"
 install -m 0755 /workspace/CubeShim/target/release/cube-runtime "${PREBUILT_DIR}/cube-runtime"
-EOF
+SCRIPT_EOF
 
 chmod 0755 "${HELPER_SCRIPT}"
 
