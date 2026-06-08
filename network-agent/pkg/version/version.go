@@ -18,7 +18,12 @@ var (
 	BuildTime = "unknown"
 )
 
-// String returns the unified version string.
+// VersionString returns the unified version string for the given binary name.
+func VersionString(binaryName string) string {
+	return fmt.Sprintf("%s %s (%s) built at %s", binaryName, Version, Commit, BuildTime)
+}
+
+// String returns the version string for the network-agent binary.
 func String() string {
-	return fmt.Sprintf("network-agent %s (%s) built at %s", Version, Commit, BuildTime)
+	return VersionString("network-agent")
 }

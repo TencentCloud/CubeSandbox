@@ -308,7 +308,7 @@ http_get() {
 #
 # Discovery order:
 #   1. MIRROR=cn   -> https://download.cubesandbox.com/release/latest.json
-#                     (JSON body: {"url": "https://.../cube-sandbox-one-click-<sha>.tar.gz"})
+#                     (JSON body: {"url": "https://.../cube-sandbox-one-click-<version-or-sha>.tar.gz"})
 #   2. default     -> GitHub API latest release asset
 # ---------------------------------------------------------------------------
 if [[ -z "${DOWNLOAD_URL}" ]]; then
@@ -351,7 +351,7 @@ PY
 import json, sys, re
 
 data = json.loads(sys.argv[1])
-pattern = re.compile(r'^cube-sandbox-one-click-[0-9a-f]+\.tar\.gz$')
+pattern = re.compile(r'^cube-sandbox-one-click-(?:[0-9a-f]+|v[0-9A-Za-z][0-9A-Za-z._-]*)\.tar\.gz$')
 for asset in data.get("assets", []):
     if pattern.match(asset.get("name", "")):
         print(asset["browser_download_url"])
@@ -359,7 +359,7 @@ for asset in data.get("assets", []):
 sys.exit(1)
 PY
     )" || {
-      echo "[online-install] ERROR: could not find a cube-sandbox-one-click-<sha>.tar.gz asset in the latest release." >&2
+      echo "[online-install] ERROR: could not find a cube-sandbox-one-click-<version-or-sha>.tar.gz asset in the latest release." >&2
       echo "[online-install] You can specify the URL manually:" >&2
       echo "[online-install]   online-install.sh --url=<download-url> [install.sh options...]" >&2
       exit 1
@@ -372,7 +372,7 @@ fi
 # ---------------------------------------------------------------------------
 # Derive the expected directory name from the tarball filename.
 # The tarball produced by build-release-bundle.sh is always named
-#   cube-sandbox-one-click-<git-short-sha>.tar.gz
+#   cube-sandbox-one-click-<version-or-sha>.tar.gz
 # and extracts to a single top-level directory with the same stem.
 # ---------------------------------------------------------------------------
 TARBALL_FILENAME="${DOWNLOAD_URL##*/}"   # basename of URL
@@ -380,7 +380,7 @@ BUNDLE_DIRNAME="${TARBALL_FILENAME%.tar.gz}"
 
 if [[ "${BUNDLE_DIRNAME}" != cube-sandbox-one-click-* ]]; then
   echo "[online-install] ERROR: unexpected tarball filename '${TARBALL_FILENAME}'." >&2
-  echo "[online-install] Expected: cube-sandbox-one-click-<sha>.tar.gz" >&2
+  echo "[online-install] Expected: cube-sandbox-one-click-<version-or-sha>.tar.gz" >&2
   exit 1
 fi
 

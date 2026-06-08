@@ -232,9 +232,7 @@ kernel_vmlinux    = sys.argv[14]
 kernel_pvm_vmlinux = sys.argv[15] if len(sys.argv) > 15 else ""
 
 def sha256_hex(path):
-    """Return sha256:hexdigest, or None if the file is missing."""
-    if not path or not os.path.isfile(path):
-        return None
+    """Return sha256:hexdigest for an existing file."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while True:
@@ -243,6 +241,16 @@ def sha256_hex(path):
                 break
             h.update(chunk)
     return "sha256:" + h.hexdigest()
+
+def required_sha256(path):
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"required release artifact is missing: {path}")
+    return sha256_hex(path)
+
+def optional_sha256(path):
+    if not path or not os.path.isfile(path):
+        return None
+    return sha256_hex(path)
 
 components = {}
 
@@ -253,7 +261,7 @@ for name in ["cubemaster", "cubemastercli", "cubelet", "cubecli", "network-agent
         "version": cube_version,
         "commit": cube_commit,
         "build_time": cube_build_time,
-        "digest_sha256": sha256_hex(path),
+        "digest_sha256": required_sha256(path),
     }
 
 # ── cube-api from CORE_BIN_DIR ──
@@ -261,7 +269,7 @@ components["cube-api"] = {
     "version": cube_version,
     "commit": cube_commit,
     "build_time": cube_build_time,
-    "digest_sha256": sha256_hex(os.path.join(core_bin_dir, "cube-api")),
+    "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cube-api")),
 }
 
 # ── Rust binaries from build-vm-assets.sh ──
@@ -269,25 +277,25 @@ components["cube-agent"] = {
     "version": cube_version,
     "commit": cube_commit,
     "build_time": cube_build_time,
-    "digest_sha256": sha256_hex(agent_bin),
+    "digest_sha256": required_sha256(agent_bin),
 }
 components["containerd-shim-cube-rs"] = {
     "version": cube_version,
     "commit": cube_commit,
     "build_time": cube_build_time,
-    "digest_sha256": sha256_hex(shim_bin),
+    "digest_sha256": required_sha256(shim_bin),
 }
 components["cube-runtime"] = {
     "version": cube_version,
     "commit": cube_commit,
     "build_time": cube_build_time,
-    "digest_sha256": sha256_hex(runtime_bin),
+    "digest_sha256": required_sha256(runtime_bin),
 }
 
 # ── Guest image ──
 guest_image = {
     "version": guest_image_ver,
-    "digest_sha256": sha256_hex(guest_image_path),
+    "digest_sha256": required_sha256(guest_image_path),
     "base_image": os.environ.get("ONE_CLICK_GUEST_IMAGE_REF", "cube-sandbox-guest-image:one-click"),
     "agent_version": guest_agent_ver,
 }
@@ -295,9 +303,10 @@ guest_image = {
 # ── Kernel ──
 kernel = {"version": kernel_version}
 if kernel_vmlinux:
-    kernel["vmlinux_digest_sha256"] = sha256_hex(kernel_vmlinux)
-if kernel_pvm_vmlinux:
-    kernel["vmlinux_pvm_digest_sha256"] = sha256_hex(kernel_pvm_vmlinux)
+    kernel["vmlinux_digest_sha256"] = required_sha256(kernel_vmlinux)
+pvm_digest = optional_sha256(kernel_pvm_vmlinux)
+if pvm_digest:
+    kernel["vmlinux_pvm_digest_sha256"] = pvm_digest
 
 manifest = {
     "release_version": release_version,
@@ -308,6 +317,9 @@ manifest = {
     "guest_image": guest_image,
     "kernel": kernel,
 }
+
+if not kernel.get("vmlinux_digest_sha256"):
+    raise ValueError("missing kernel vmlinux digest")
 
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
 with open(output_path, "w") as f:

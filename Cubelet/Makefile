@@ -41,8 +41,6 @@ COVERAGE_PACKAGES=$(shell go list ./... \
 
 # Version — injected at build time via ldflags.
 # Priority: env var CUBE_RELEASE_VERSION > git tag > hardcoded fallback.
-# Ensure workspace is a git safe.directory inside Docker containers.
-GIT_INIT=$(shell git config --global --add safe.directory $(PWD) 2>/dev/null || true)
 CUBE_VERSION ?= $(or $(CUBE_RELEASE_VERSION),$(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null),0.0.0-dev)
 CUBE_COMMIT ?= $(or $(CUBE_RELEASE_COMMIT),$(shell git rev-parse HEAD 2>/dev/null),unknown)
 CUBE_BUILD_TIME ?= $(or $(CUBE_RELEASE_BUILD_TIME),$(shell date -u +'%Y-%m-%dT%H:%M:%SZ'))

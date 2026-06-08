@@ -39,9 +39,7 @@ fn main() {
     let flags = parse(&os_args[1..]).expect("Invalid params");
     if flags.version {
         print_version();
-        unsafe {
-            libc::exit(0);
-        }
+        return;
     }
     if flags.action.is_empty() {
         thread_num = 2;
