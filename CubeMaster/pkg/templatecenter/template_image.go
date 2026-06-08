@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -96,6 +98,7 @@ var deleteRootfsArtifactRecord = func(ctx context.Context, artifactID string) er
 	return store.db.WithContext(ctx).Unscoped().Table(constants.RootfsArtifactTableName).
 		Where("artifact_id = ?", artifactID).Delete(&models.RootfsArtifact{}).Error
 }
+var executableLookPath = exec.LookPath
 
 var ErrNoFailedTemplateReplicas = errors.New("no failed template replicas matched redo request")
 
@@ -103,6 +106,23 @@ type dockerInspectImage struct {
 	ID          string            `json:"Id"`
 	RepoDigests []string          `json:"RepoDigests"`
 	Config      dockerImageConfig `json:"Config"`
+}
+
+type skopeoInspectImage struct {
+	Name       string               `json:"Name"`
+	Digest     string               `json:"Digest"`
+	LayersData []skopeoInspectLayer `json:"LayersData"`
+}
+
+// skopeoInspectLayer mirrors a single entry of the LayersData array returned by
+// `skopeo inspect`. Size is the compressed (on-registry) size of the layer blob
+// in bytes.
+type skopeoInspectLayer struct {
+	Size int64 `json:"Size"`
+}
+
+type skopeoInspectConfig struct {
+	Config dockerImageConfig `json:"config"`
 }
 
 type dockerImageConfig struct {
@@ -114,12 +134,19 @@ type dockerImageConfig struct {
 }
 
 type resolvedSourceImage struct {
-	localRef     string
-	digest       string
-	config       dockerImageConfig
-	configJSON   string
-	masterNodeIP string
-	cleanup      func(context.Context)
+	localRef       string
+	digest         string
+	config         dockerImageConfig
+	configJSON     string
+	masterNodeIP   string
+	useDockerless  bool
+	skopeoAuthFile string
+	// compressedSizeBytes is the sum of the compressed layer blob sizes reported
+	// by `skopeo inspect` (LayersData[].Size). It is only populated on the
+	// dockerless path and lets the disk-space pre-check estimate the image size
+	// without invoking the docker daemon. Zero means "unknown".
+	compressedSizeBytes int64
+	cleanup             func(context.Context)
 }
 
 func nextAttemptNoFromLatest(latestAttemptNo int32) int32 {
@@ -578,6 +605,12 @@ func prepareLocalSourceImage(ctx context.Context, req *types.CreateTemplateFromI
 	if req == nil {
 		return nil, errors.New("request is nil")
 	}
+	// In dockerless mode there is no local docker daemon to hold the image, so a
+	// redo re-resolves the source from the registry via skopeo. This intentionally
+	// relaxes the docker-path requirement that the image still exist locally.
+	if hasDockerlessRootfsExportTools() {
+		return prepareDockerlessSourceImage(ctx, req, downloadBaseURL)
+	}
 	inspectOutput, err := dockerOutput(ctx, "", "image", "inspect", "--", req.SourceImageRef)
 	if err != nil {
 		return nil, fmt.Errorf("redo requires source image %s to still exist locally: %w", req.SourceImageRef, err)
@@ -590,7 +623,10 @@ func prepareLocalSourceImage(ctx context.Context, req *types.CreateTemplateFromI
 		return nil, fmt.Errorf("docker image inspect returned empty result for %s", req.SourceImageRef)
 	}
 	inspectInfo := inspectList[0]
-	configJSON, _ := json.Marshal(inspectInfo.Config)
+	configJSON, err := json.Marshal(inspectInfo.Config)
+	if err != nil {
+		return nil, fmt.Errorf("marshal image config: %w", err)
+	}
 	return &resolvedSourceImage{
 		localRef:     req.SourceImageRef,
 		digest:       firstNonEmptyDigest(inspectInfo),
@@ -936,6 +972,9 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4, prepErr.Error())
 			return
 		}
+		if source.cleanup != nil {
+			defer source.cleanup(ctx)
+		}
 		var generatedReq *types.CreateCubeSandboxReq
 		var builtFresh bool
 		artifact, generatedReq, builtFresh, err = ensureRootfsArtifact(ctx, &workingReq, source, downloadBaseURL)
@@ -1236,7 +1275,15 @@ func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req
 	keepStoreDir := false
 
 	// Phase 2: loop-mount streaming build (optional, auto-detects capability).
-	if loopMountExt4Enabled() && canUseLoopMount() {
+	//
+	// The streaming build relies on `docker create` + `docker export`, so it is
+	// only available on the docker path. For dockerless sources (skopeo+umoci)
+	// we deliberately skip Phase 2 and fall through to the daemonless Phase 1 to
+	// keep the dockerless path free of any docker binary dependency. umoci
+	// unpacks to an on-disk bundle rather than streaming to stdout, so a
+	// loop-mount "streaming" variant would not avoid the intermediate rootfs
+	// anyway.
+	if loopMountExt4Enabled() && canUseLoopMount() && !source.useDockerless {
 		estimatedPhase2, err := estimateImageSizeFromInspect(ctx, source)
 		if err != nil {
 			log.G(ctx).Warnf("cannot estimate image size for Phase 2, falling back to Phase 1: %v", err)
@@ -1263,7 +1310,8 @@ func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req
 	}
 
 	// Phase 1: disk space pre-check.
-	// Use docker image inspect to get an approximate size for the check.
+	// Size estimate comes from skopeo inspect (dockerless) or docker image
+	// inspect (docker), selected by estimateImageSizeFromInspect.
 	estimatedSizeBytes, err := estimateImageSizeFromInspect(ctx, source)
 	if err != nil {
 		log.G(ctx).Warnf("cannot estimate image size for disk-space check, skipping: %v", err)
@@ -1379,28 +1427,100 @@ func finalizeArtifact(ctx context.Context, record *models.RootfsArtifact, source
 }
 
 func prepareSourceImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*resolvedSourceImage, error) {
+	if req == nil {
+		return nil, errors.New("request is nil")
+	}
+	if hasDockerlessRootfsExportTools() {
+		return prepareDockerlessSourceImage(ctx, req, downloadBaseURL)
+	}
+	return prepareDockerSourceImage(ctx, req, downloadBaseURL)
+}
+
+func prepareDockerlessSourceImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*resolvedSourceImage, error) {
+	if req == nil {
+		return nil, errors.New("request is nil")
+	}
+	if err := validateImageRef(req.SourceImageRef); err != nil {
+		return nil, err
+	}
+	authFile, cleanup, err := createSkopeoAuthFile(req.SourceImageRef, req.RegistryUsername, req.RegistryPassword)
+	if err != nil {
+		return nil, err
+	}
+	sourceRef := skopeoDockerImageRef(req.SourceImageRef)
+	inspectOutput, err := skopeoOutput(ctx, authFile, "inspect", sourceRef)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("skopeo inspect %s failed: %w", req.SourceImageRef, err)
+	}
+	configOutput, err := skopeoOutput(ctx, authFile, "inspect", "--config", sourceRef)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("skopeo inspect --config %s failed: %w", req.SourceImageRef, err)
+	}
+
+	var inspectInfo skopeoInspectImage
+	if err := json.Unmarshal(inspectOutput, &inspectInfo); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("unmarshal skopeo inspect output: %w", err)
+	}
+	var configInfo skopeoInspectConfig
+	if err := json.Unmarshal(configOutput, &configInfo); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("unmarshal skopeo inspect config output: %w", err)
+	}
+	configJSON, err := json.Marshal(configInfo.Config)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("marshal image config: %w", err)
+	}
+	return &resolvedSourceImage{
+		localRef:            req.SourceImageRef,
+		digest:              skopeoImageDigest(inspectInfo, req.SourceImageRef),
+		config:              configInfo.Config,
+		configJSON:          string(configJSON),
+		masterNodeIP:        normalizeBaseURL(downloadBaseURL),
+		useDockerless:       true,
+		skopeoAuthFile:      authFile,
+		compressedSizeBytes: skopeoLayersTotalSize(inspectInfo),
+		cleanup: func(context.Context) {
+			cleanup()
+		},
+	}, nil
+}
+
+func prepareDockerSourceImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*resolvedSourceImage, error) {
+	if req == nil {
+		return nil, errors.New("request is nil")
+	}
 	var (
-		dockerConfigDir    string
-		imageExistsLocally bool
-		inspectOutput      []byte
-		err                error
+		dockerConfigDir       string
+		removeDockerConfigDir bool
+		imageExistsLocally    bool
+		inspectOutput         []byte
+		err                   error
 	)
+	defer func() {
+		if removeDockerConfigDir && dockerConfigDir != "" {
+			_ = os.RemoveAll(dockerConfigDir)
+		}
+	}()
 	inspectOutput, err = dockerOutput(ctx, "", "image", "inspect", "--", req.SourceImageRef)
 	if err == nil {
 		imageExistsLocally = true
 	}
-	if !imageExistsLocally {
-		if req.RegistryUsername != "" || req.RegistryPassword != "" {
-			tmpDir, err := os.MkdirTemp("", "cubemaster-docker-config-*")
-			if err != nil {
-				return nil, err
-			}
-			dockerConfigDir = tmpDir
-			defer os.RemoveAll(tmpDir)
-			if err := dockerLogin(ctx, dockerConfigDir, req.SourceImageRef, req.RegistryUsername, req.RegistryPassword); err != nil {
-				return nil, err
-			}
+	if req.RegistryUsername != "" || req.RegistryPassword != "" {
+		tmpDir, err := os.MkdirTemp("", "cubemaster-docker-config-*")
+		if err != nil {
+			return nil, err
 		}
+		dockerConfigDir = tmpDir
+		removeDockerConfigDir = true
+		if err := dockerLogin(ctx, dockerConfigDir, req.SourceImageRef, req.RegistryUsername, req.RegistryPassword); err != nil {
+			return nil, err
+		}
+	}
+	if !imageExistsLocally {
 		if err := dockerRun(ctx, dockerConfigDir, "pull", "--", req.SourceImageRef); err != nil {
 			return nil, fmt.Errorf("docker pull %s failed: %w", req.SourceImageRef, err)
 		}
@@ -1417,8 +1537,11 @@ func prepareSourceImage(ctx context.Context, req *types.CreateTemplateFromImageR
 		return nil, fmt.Errorf("docker image inspect returned empty result for %s", req.SourceImageRef)
 	}
 	inspectInfo := inspectList[0]
-	configJSON, _ := json.Marshal(inspectInfo.Config)
-	return &resolvedSourceImage{
+	configJSON, err := json.Marshal(inspectInfo.Config)
+	if err != nil {
+		return nil, fmt.Errorf("marshal image config: %w", err)
+	}
+	source := &resolvedSourceImage{
 		localRef:     req.SourceImageRef,
 		digest:       firstNonEmptyDigest(inspectInfo),
 		config:       inspectInfo.Config,
@@ -1432,15 +1555,213 @@ func prepareSourceImage(ctx context.Context, req *types.CreateTemplateFromImageR
 				_ = dockerRun(cleanupCtx, "", "image", "rm", "-f", "--", req.SourceImageRef)
 			}
 		},
-	}, nil
+	}
+	removeDockerConfigDir = false
+	return source, nil
+}
+
+// imageRefAllowedPattern is the strict character whitelist for image
+// references. It permits exactly the characters that appear in legitimate
+// registry/repository[:tag][@algo:hexdigest] references: alphanumerics and
+// `.`, `-`, `_`, `/`, `:`, `@`. Any other character (notably whitespace) is
+// rejected so the reference cannot be split into additional argv entries.
+var imageRefAllowedPattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+$`)
+
+// validateImageRef guards against argument injection (CWE-88) when the image
+// reference is later passed as a positional argument to external CLIs
+// (skopeo/umoci/docker). Those tools accept flags interspersed with positional
+// arguments, so a ref such as `registry.example.com/image --authfile /etc/shadow`
+// would otherwise smuggle extra flags into the subprocess. To prevent this we
+// enforce a strict character whitelist (which excludes whitespace and other
+// argument delimiters) and reject any ref that begins with a dash.
+func validateImageRef(imageRef string) error {
+	trimmed := strings.TrimPrefix(imageRef, "docker://")
+	if trimmed == "" {
+		return errors.New("empty image reference")
+	}
+	if strings.HasPrefix(trimmed, "-") {
+		return fmt.Errorf("invalid image reference: %s", imageRef)
+	}
+	if !imageRefAllowedPattern.MatchString(trimmed) {
+		return fmt.Errorf("invalid image reference: %s", imageRef)
+	}
+	return nil
 }
 
 func exportImageRootfs(ctx context.Context, source *resolvedSourceImage, destRootfsDir string) error {
-	// Validate source.localRef to prevent argument injection.
-	if strings.HasPrefix(source.localRef, "-") {
-		return fmt.Errorf("invalid image reference: %s", source.localRef)
+	if source == nil {
+		return errors.New("resolved source image is nil")
+	}
+	if err := validateImageRef(source.localRef); err != nil {
+		return err
+	}
+	// Use the strategy chosen at prepare time rather than re-detecting, so the
+	// prepare and export phases never diverge (see resolvedSourceImage.useDockerless).
+	if source.useDockerless {
+		return dockerlessExportImageRootfs(ctx, source, destRootfsDir)
+	}
+	return dockerExportImageRootfs(ctx, source, destRootfsDir)
+}
+
+// dockerlessExportImageRootfs exports the source image's root filesystem
+// without a docker daemon. The flow is:
+//
+//  1. `skopeo copy docker://<ref> oci:<workDir>/image` pulls the image into a
+//     local OCI layout (honoring the optional skopeo auth file).
+//  2. `umoci unpack --rootless` materializes that layout into an OCI bundle
+//     under <workDir>/bundle, whose `rootfs` subdir holds the extracted files.
+//  3. The bundle's rootfs is moved into place at destRootfsDir via os.Rename.
+//
+// The scratch workDir is created under destRootfsDir's parent (rather than
+// $TMPDIR) so the final os.Rename stays on the same filesystem and cannot fail
+// with EXDEV, which would otherwise force a slow full copy across devices.
+func dockerlessExportImageRootfs(ctx context.Context, source *resolvedSourceImage, destRootfsDir string) error {
+	if err := os.MkdirAll(filepath.Dir(destRootfsDir), 0o755); err != nil {
+		return err
+	}
+	workDir, err := os.MkdirTemp(filepath.Dir(destRootfsDir), ".dockerless-rootfs-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(workDir)
+
+	ociDir := filepath.Join(workDir, "image")
+	bundleDir := filepath.Join(workDir, "bundle")
+
+	sourceRef := skopeoDockerImageRef(source.localRef)
+	ociImageRef := "oci:" + ociLayoutImageRef(ociDir, source.localRef)
+	skopeoArgs := []string{"copy"}
+	if source.skopeoAuthFile != "" {
+		skopeoArgs = append(skopeoArgs, "--authfile", source.skopeoAuthFile)
+	}
+	skopeoArgs = append(skopeoArgs, sourceRef, ociImageRef)
+	if err := runCommand(ctx, "", "skopeo", skopeoArgs...); err != nil {
+		return fmt.Errorf("skopeo copy %s failed: %w", source.localRef, err)
 	}
 
+	umociImageRef := ociLayoutImageRef(ociDir, source.localRef)
+	if err := runCommand(ctx, "", "umoci", "unpack", "--rootless", "--image", umociImageRef, bundleDir); err != nil {
+		return fmt.Errorf("umoci unpack %s failed: %w", source.localRef, err)
+	}
+	// The OCI layout is no longer needed once unpacked; drop it early to reduce
+	// peak disk usage on the artifact filesystem.
+	_ = os.RemoveAll(ociDir) // NOCC:Path Traversal()
+
+	unpackedRootfsDir := filepath.Join(bundleDir, "rootfs")
+	if err := os.RemoveAll(destRootfsDir); err != nil { // NOCC:Path Traversal()
+		return err
+	}
+	if err := os.Rename(unpackedRootfsDir, destRootfsDir); err != nil { // NOCC:Path Traversal()
+		return fmt.Errorf("move unpacked rootfs failed: %w", err)
+	}
+	return nil
+}
+
+// hasDockerlessRootfsExportTools reports whether both skopeo and umoci are
+// available on PATH. When they are, the build prefers the daemonless export
+// path (skopeo+umoci) over docker. This auto-detection means installing both
+// tools on a cubemaster node silently switches the source-image handling away
+// from the docker daemon; ensureArtifactBuildPreflight reflects the resulting
+// command requirements.
+func hasDockerlessRootfsExportTools() bool {
+	if _, err := executableLookPath("skopeo"); err != nil {
+		return false
+	}
+	if _, err := executableLookPath("umoci"); err != nil {
+		return false
+	}
+	return true
+}
+
+func skopeoDockerImageRef(imageRef string) string {
+	if strings.HasPrefix(imageRef, "docker://") {
+		return imageRef
+	}
+	return "docker://" + imageRef
+}
+
+func createSkopeoAuthFile(imageRef, username, password string) (string, func(), error) {
+	if username == "" && password == "" {
+		return "", func() {}, nil
+	}
+	tmpDir, err := os.MkdirTemp("", "cubemaster-skopeo-auth-*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() {
+		_ = os.RemoveAll(tmpDir)
+	}
+	authPayload := map[string]any{
+		"auths": map[string]any{
+			registryHostFromImageRef(imageRef): map[string]string{
+				"auth": base64.StdEncoding.EncodeToString([]byte(username + ":" + password)),
+			},
+		},
+	}
+	payload, err := json.Marshal(authPayload)
+	if err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	authFile := filepath.Join(tmpDir, "auth.json")
+	if err := os.WriteFile(authFile, payload, 0o600); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return authFile, cleanup, nil
+}
+
+func skopeoImageDigest(info skopeoInspectImage, imageRef string) string {
+	if info.Digest == "" {
+		return ""
+	}
+	name := info.Name
+	if name == "" {
+		name = imageNameWithoutTagDigest(imageRef)
+	}
+	if name == "" {
+		return info.Digest
+	}
+	return name + "@" + info.Digest
+}
+
+func ociLayoutImageRef(ociDir, imageRef string) string {
+	tag := imageTagFromRef(imageRef)
+	if tag == "" {
+		return ociDir
+	}
+	return ociDir + ":" + tag
+}
+
+// splitImageRef strips the docker:// transport prefix and any @digest suffix,
+// then splits the remainder into the repository name and the tag. The final
+// ":" is only treated as a tag separator when it appears after the last "/", so
+// a registry port (e.g. registry:5000/image) is not mistaken for a tag. When
+// the reference carries no tag, name is the whole remainder and tag is empty.
+func splitImageRef(imageRef string) (name, tag string) {
+	imageRef = strings.TrimPrefix(imageRef, "docker://")
+	if digestIndex := strings.LastIndex(imageRef, "@"); digestIndex >= 0 {
+		imageRef = imageRef[:digestIndex]
+	}
+	lastSlash := strings.LastIndex(imageRef, "/")
+	lastColon := strings.LastIndex(imageRef, ":")
+	if lastColon > lastSlash {
+		return imageRef[:lastColon], imageRef[lastColon+1:]
+	}
+	return imageRef, ""
+}
+
+func imageTagFromRef(imageRef string) string {
+	_, tag := splitImageRef(imageRef)
+	return tag
+}
+
+func imageNameWithoutTagDigest(imageRef string) string {
+	name, _ := splitImageRef(imageRef)
+	return name
+}
+
+func dockerExportImageRootfs(ctx context.Context, source *resolvedSourceImage, destRootfsDir string) error {
 	containerIDBytes, err := dockerOutput(ctx, "", "create", "--", source.localRef)
 	if err != nil {
 		return fmt.Errorf("docker create %s failed: %w", source.localRef, err)
@@ -2132,6 +2453,24 @@ func dockerOutput(ctx context.Context, configDir string, args ...string) ([]byte
 	return output, nil
 }
 
+func skopeoOutput(ctx context.Context, authFile string, args ...string) ([]byte, error) {
+	// skopeo expects global-ish flags such as --authfile to follow the
+	// subcommand (e.g. `skopeo inspect --authfile X docker://...`).
+	cmdArgs := make([]string, 0, len(args)+2)
+	if authFile != "" && len(args) > 0 {
+		cmdArgs = append(cmdArgs, args[0], "--authfile", authFile)
+		cmdArgs = append(cmdArgs, args[1:]...)
+	} else {
+		cmdArgs = append(cmdArgs, args...)
+	}
+	cmd := exec.CommandContext(ctx, "skopeo", cmdArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return output, nil
+}
+
 func runCommand(ctx context.Context, dir, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if dir != "" {
@@ -2303,11 +2642,56 @@ func getFileBlockSize(path string) int64 {
 	return stat.Blocks * 512
 }
 
-// estimateImageSizeFromInspect extracts an approximate image size from the
-// per-image cumulative Size field in docker inspect output.  A 4x multiplier
-// accounts for the expansion from the on-disk layer size to rootfs data, ext4
-// overhead, and temporary workspace.
+const (
+	// dockerInspectSizeMultiplier expands the uncompressed on-disk image size
+	// reported by `docker image inspect` to account for rootfs data, ext4
+	// overhead, and temporary workspace.
+	dockerInspectSizeMultiplier = 4
+	// skopeoInspectSizeMultiplier expands the *compressed* layer size reported
+	// by `skopeo inspect` (LayersData[].Size). Compressed layers typically
+	// decompress ~2-3x; the extra headroom covers ext4 overhead and temporary
+	// workspace, mirroring dockerInspectSizeMultiplier on top of decompression.
+	skopeoInspectSizeMultiplier = 8
+)
+
+// skopeoLayersTotalSize sums the compressed layer blob sizes from a
+// `skopeo inspect` result. Returns 0 when no LayersData is present.
+func skopeoLayersTotalSize(info skopeoInspectImage) int64 {
+	var total int64
+	for _, layer := range info.LayersData {
+		if layer.Size > 0 {
+			total += layer.Size
+		}
+	}
+	return total
+}
+
+// estimateImageSizeFromInspect returns an approximate on-disk size for the
+// source image, used for the disk-space pre-check and Phase 2 ext4 sizing.
+//
+// The dockerless path (skopeo+umoci) must not depend on the docker binary, so
+// it derives the estimate from the compressed layer sizes captured at prepare
+// time via `skopeo inspect`. The docker path keeps using the per-image
+// cumulative Size field from `docker image inspect`.
 func estimateImageSizeFromInspect(ctx context.Context, source *resolvedSourceImage) (int64, error) {
+	if source != nil && source.useDockerless {
+		return estimateImageSizeFromSkopeo(source)
+	}
+	return estimateImageSizeFromDocker(ctx, source)
+}
+
+// estimateImageSizeFromSkopeo derives the estimate from the compressed layer
+// sizes captured by `skopeo inspect`, avoiding any docker invocation.
+func estimateImageSizeFromSkopeo(source *resolvedSourceImage) (int64, error) {
+	if source == nil || source.compressedSizeBytes <= 0 {
+		return 0, fmt.Errorf("skopeo inspect did not report any layer sizes for %s", sourceRefForLog(source))
+	}
+	return source.compressedSizeBytes * skopeoInspectSizeMultiplier, nil
+}
+
+// estimateImageSizeFromDocker extracts an approximate image size from the
+// per-image cumulative Size field in docker inspect output.
+func estimateImageSizeFromDocker(ctx context.Context, source *resolvedSourceImage) (int64, error) {
 	// Try the per-image cumulative Size field first (fast, single call).
 	out, err := dockerOutput(ctx, "", "image", "inspect", "--format", "{{.Size}}", "--", source.localRef)
 	if err != nil {
@@ -2321,9 +2705,16 @@ func estimateImageSizeFromInspect(ctx context.Context, source *resolvedSourceIma
 		return 0, fmt.Errorf("docker image inspect reported zero or negative size (%d bytes)", sizeBytes)
 	}
 	// RootFS data plus writable layer overhead typically expands 3-4x from the
-	// on-disk layer size. Use a conservative 4x multiplier for the disk-space
+	// on-disk layer size. Use a conservative multiplier for the disk-space
 	// pre-check.
-	return sizeBytes * 4, nil
+	return sizeBytes * dockerInspectSizeMultiplier, nil
+}
+
+func sourceRefForLog(source *resolvedSourceImage) string {
+	if source == nil {
+		return "<nil>"
+	}
+	return source.localRef
 }
 
 // createExt4ImageStreaming uses loop-mount to stream docker export directly into
@@ -2540,6 +2931,7 @@ func artifactRootHostHint() string {
 }
 
 func registryHostFromImageRef(imageRef string) string {
+	imageRef = strings.TrimPrefix(imageRef, "docker://")
 	parts := strings.Split(imageRef, "/")
 	if len(parts) == 0 {
 		return "docker.io"
@@ -2651,9 +3043,14 @@ func detachTemplateImageJobContext(ctx context.Context, fields map[string]any) c
 }
 
 func ensureArtifactBuildPreflight(ctx context.Context) error {
-	requiredCommands := []string{"docker", "mkfs.ext4", "tar", "truncate", "cp"}
+	requiredCommands := []string{"mkfs.ext4", "truncate", "cp"}
+	if hasDockerlessRootfsExportTools() {
+		requiredCommands = append(requiredCommands, "skopeo", "umoci")
+	} else {
+		requiredCommands = append(requiredCommands, "docker", "tar")
+	}
 	for _, cmd := range requiredCommands {
-		if _, err := exec.LookPath(cmd); err != nil {
+		if _, err := executableLookPath(cmd); err != nil {
 			return fmt.Errorf("required command %q is not available on cubemaster node", cmd)
 		}
 	}

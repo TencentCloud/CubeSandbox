@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -34,6 +35,23 @@ func withTemplateImageConfig(t *testing.T, cfg *config.Config) {
 	t.Cleanup(func() {
 		getTemplateImageConfig = original
 	})
+}
+
+func withExecutableLookPath(t *testing.T, fn func(string) (string, error)) {
+	t.Helper()
+	original := executableLookPath
+	executableLookPath = fn
+	t.Cleanup(func() {
+		executableLookPath = original
+	})
+}
+
+func installFakeCommand(t *testing.T, dir, name, body string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatalf("install fake command %s failed: %v", name, err)
+	}
 }
 
 func TestNormalizeTemplateImageRequestDefaults(t *testing.T) {
@@ -492,6 +510,9 @@ func TestGenerateTemplateCreateRequestAppliesDNSConfigOverride(t *testing.T) {
 func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
+	withExecutableLookPath(t, func(file string) (string, error) {
+		return "", errors.New("not found")
+	})
 
 	inspectCalls := 0
 	inspectPayload := `[{"RepoDigests":["docker.io/library/nginx@sha256:abcd"],"Config":{"Env":["A=B"],"WorkingDir":"/workspace"}}]`
@@ -525,6 +546,9 @@ func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
 func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
+	withExecutableLookPath(t, func(file string) (string, error) {
+		return "", errors.New("not found")
+	})
 
 	inspectCalls := 0
 	pullCalled := false
@@ -566,6 +590,9 @@ func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
 func TestPrepareSourceImageReturnsPullErrorAfterInspectMiss(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
+	withExecutableLookPath(t, func(file string) (string, error) {
+		return "", errors.New("not found")
+	})
 
 	inspectCalls := 0
 	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
@@ -591,6 +618,593 @@ func TestPrepareSourceImageReturnsPullErrorAfterInspectMiss(t *testing.T) {
 	}
 	if inspectCalls != 1 {
 		t.Fatalf("expected 1 inspect call before pull failure, got %d", inspectCalls)
+	}
+}
+
+func TestPrepareSourceImageUsesSkopeoWhenDockerlessToolsAvailable(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	withExecutableLookPath(t, func(file string) (string, error) {
+		if file == "skopeo" || file == "umoci" {
+			return "/usr/bin/" + file, nil
+		}
+		return "", errors.New("not found")
+	})
+
+	var calls [][]string
+	patches.ApplyFunc(skopeoOutput, func(ctx context.Context, authFile string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) == 2 && args[0] == "inspect" {
+			return []byte(`{"Name":"docker.io/library/nginx","Digest":"sha256:abcd"}`), nil
+		}
+		if len(args) == 3 && args[0] == "inspect" && args[1] == "--config" {
+			return []byte(`{"config":{"Env":["A=B"],"WorkingDir":"/workspace","Cmd":["nginx"]}}`), nil
+		}
+		t.Fatalf("unexpected skopeoOutput args=%v", args)
+		return nil, nil
+	})
+	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
+		t.Fatal("dockerOutput should not be called when dockerless tools are available")
+		return nil, nil
+	})
+
+	got, err := prepareSourceImage(context.Background(), &types.CreateTemplateFromImageReq{
+		SourceImageRef: "docker.io/library/nginx:1.27",
+	}, "http://master.example")
+	if err != nil {
+		t.Fatalf("prepareSourceImage failed: %v", err)
+	}
+	wantCalls := [][]string{
+		{"inspect", "docker://docker.io/library/nginx:1.27"},
+		{"inspect", "--config", "docker://docker.io/library/nginx:1.27"},
+	}
+	if !reflect.DeepEqual(calls, wantCalls) {
+		t.Fatalf("unexpected skopeo calls: got %#v want %#v", calls, wantCalls)
+	}
+	if got.digest != "docker.io/library/nginx@sha256:abcd" {
+		t.Fatalf("unexpected digest: %q", got.digest)
+	}
+	if got.config.WorkingDir != "/workspace" || !reflect.DeepEqual(got.config.Cmd, []string{"nginx"}) {
+		t.Fatalf("unexpected image config: %#v", got.config)
+	}
+}
+
+func TestExportImageRootfsUsesDockerlessSkopeoUmociWhenAvailable(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	workDir := t.TempDir()
+	rootfsDir := filepath.Join(workDir, "rootfs")
+	if err := os.MkdirAll(rootfsDir, 0o755); err != nil {
+		t.Fatalf("prepare rootfs dir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootfsDir, "old"), []byte("old"), 0o644); err != nil {
+		t.Fatalf("prepare stale rootfs file failed: %v", err)
+	}
+
+	type commandCall struct {
+		dir  string
+		name string
+		args []string
+	}
+	var calls []commandCall
+	patches.ApplyFunc(runCommand, func(ctx context.Context, dir, name string, args ...string) error {
+		calls = append(calls, commandCall{
+			dir:  dir,
+			name: name,
+			args: append([]string(nil), args...),
+		})
+		if name == "umoci" {
+			bundleDir := args[len(args)-1]
+			unpackedRootfsDir := filepath.Join(bundleDir, "rootfs")
+			if err := os.MkdirAll(unpackedRootfsDir, 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(unpackedRootfsDir, "etc-release"), []byte("ok"), 0o644)
+		}
+		return nil
+	})
+	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
+		t.Fatal("dockerOutput should not be called by default rootfs export")
+		return nil, nil
+	})
+
+	source := &resolvedSourceImage{
+		localRef:      "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:v1.2.3",
+		useDockerless: true,
+	}
+	if err := exportImageRootfs(context.Background(), source, rootfsDir); err != nil {
+		t.Fatalf("exportImageRootfs failed: %v", err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("unexpected command calls: %#v", calls)
+	}
+	if calls[0].name != "skopeo" {
+		t.Fatalf("first command=%q, want skopeo", calls[0].name)
+	}
+	if len(calls[0].args) != 3 || calls[0].args[0] != "copy" || calls[0].args[1] != "docker://cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:v1.2.3" {
+		t.Fatalf("unexpected skopeo args: %#v", calls[0].args)
+	}
+	ociImageRef := strings.TrimPrefix(calls[0].args[2], "oci:")
+	ociDir := strings.TrimSuffix(ociImageRef, ":v1.2.3")
+	if ociImageRef == calls[0].args[2] || ociDir == ociImageRef || filepath.Base(ociDir) != "image" || filepath.Dir(filepath.Dir(ociDir)) != workDir {
+		t.Fatalf("unexpected OCI image ref: %q", calls[0].args[2])
+	}
+	wantUmociArgs := []string{
+		"unpack",
+		"--rootless",
+		"--image",
+		ociDir + ":v1.2.3",
+		filepath.Join(filepath.Dir(ociDir), "bundle"),
+	}
+	if calls[1].name != "umoci" || !reflect.DeepEqual(calls[1].args, wantUmociArgs) {
+		t.Fatalf("unexpected umoci call: %#v", calls[1])
+	}
+	if _, err := os.Stat(filepath.Join(rootfsDir, "etc-release")); err != nil {
+		t.Fatalf("expected unpacked rootfs file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rootfsDir, "old")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale rootfs file to be removed, stat err=%v", err)
+	}
+}
+
+func TestExportImageRootfsUsesDockerPathWhenSourceNotDockerless(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	dockerExportCalled := false
+	patches.ApplyFunc(dockerlessExportImageRootfs, func(ctx context.Context, source *resolvedSourceImage, destRootfsDir string) error {
+		t.Fatal("dockerlessExportImageRootfs should not be called when source was not prepared dockerless")
+		return nil
+	})
+	patches.ApplyFunc(dockerExportImageRootfs, func(ctx context.Context, source *resolvedSourceImage, destRootfsDir string) error {
+		dockerExportCalled = true
+		return nil
+	})
+
+	// useDockerless is false, so the export must honor the docker path chosen at
+	// prepare time even if skopeo/umoci happen to be installed.
+	if err := exportImageRootfs(context.Background(), &resolvedSourceImage{localRef: "example.com/app:latest"}, t.TempDir()); err != nil {
+		t.Fatalf("exportImageRootfs failed: %v", err)
+	}
+	if !dockerExportCalled {
+		t.Fatal("expected docker export path to be used")
+	}
+}
+
+func TestExportImageRootfsRejectsInjectableImageRef(t *testing.T) {
+	err := exportImageRootfs(context.Background(), &resolvedSourceImage{localRef: "-rm -rf"}, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "invalid image reference") {
+		t.Fatalf("expected invalid image reference error, got %v", err)
+	}
+}
+
+func TestExportImageRootfsPassesAuthFileToSkopeoCopy(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	workDir := t.TempDir()
+	rootfsDir := filepath.Join(workDir, "rootfs")
+
+	var skopeoArgs []string
+	patches.ApplyFunc(runCommand, func(ctx context.Context, dir, name string, args ...string) error {
+		if name == "skopeo" {
+			skopeoArgs = append([]string(nil), args...)
+		}
+		if name == "umoci" {
+			bundleDir := args[len(args)-1]
+			return os.MkdirAll(filepath.Join(bundleDir, "rootfs"), 0o755)
+		}
+		return nil
+	})
+
+	source := &resolvedSourceImage{
+		localRef:       "example.com/app:latest",
+		useDockerless:  true,
+		skopeoAuthFile: "/tmp/auth-xyz/auth.json",
+	}
+	if err := exportImageRootfs(context.Background(), source, rootfsDir); err != nil {
+		t.Fatalf("exportImageRootfs failed: %v", err)
+	}
+	want := []string{"copy", "--authfile", "/tmp/auth-xyz/auth.json", "docker://example.com/app:latest"}
+	if len(skopeoArgs) != 5 || !reflect.DeepEqual(skopeoArgs[:4], want) {
+		t.Fatalf("expected skopeo copy to receive --authfile, got %#v", skopeoArgs)
+	}
+}
+
+func TestCreateSkopeoAuthFileWritesScopedCredentials(t *testing.T) {
+	authFile, cleanup, err := createSkopeoAuthFile("docker://example.com:5000/ns/app:tag", "alice", "s3cret")
+	if err != nil {
+		t.Fatalf("createSkopeoAuthFile failed: %v", err)
+	}
+	defer cleanup()
+
+	info, err := os.Stat(authFile)
+	if err != nil {
+		t.Fatalf("stat auth file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("auth file mode = %o, want 0600", perm)
+	}
+
+	raw, err := os.ReadFile(authFile) // NOCC:Path Traversal()
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	var payload struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal auth file: %v", err)
+	}
+	entry, ok := payload.Auths["example.com:5000"]
+	if !ok {
+		t.Fatalf("auth file missing registry host key, got %#v", payload.Auths)
+	}
+	if entry.Auth != base64.StdEncoding.EncodeToString([]byte("alice:s3cret")) {
+		t.Fatalf("unexpected auth value: %q", entry.Auth)
+	}
+
+	cleanup()
+	if _, err := os.Stat(authFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected auth file removed after cleanup, stat err=%v", err)
+	}
+}
+
+func TestCreateSkopeoAuthFileNoCredentials(t *testing.T) {
+	authFile, cleanup, err := createSkopeoAuthFile("example.com/app:tag", "", "")
+	if err != nil {
+		t.Fatalf("createSkopeoAuthFile failed: %v", err)
+	}
+	if authFile != "" {
+		t.Fatalf("expected empty auth file path, got %q", authFile)
+	}
+	if cleanup == nil {
+		t.Fatal("expected non-nil cleanup func")
+	}
+	cleanup() // must be a safe no-op
+}
+
+func TestPrepareDockerlessSourceImageCleansAuthFileOnInspectFailure(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	withExecutableLookPath(t, func(file string) (string, error) {
+		if file == "skopeo" || file == "umoci" {
+			return "/usr/bin/" + file, nil
+		}
+		return "", errors.New("not found")
+	})
+
+	cleanupCalled := false
+	patches.ApplyFunc(createSkopeoAuthFile, func(imageRef, username, password string) (string, func(), error) {
+		return "/tmp/fake-auth/auth.json", func() { cleanupCalled = true }, nil
+	})
+	patches.ApplyFunc(skopeoOutput, func(ctx context.Context, authFile string, args ...string) ([]byte, error) {
+		return nil, errors.New("inspect boom")
+	})
+
+	_, err := prepareSourceImage(context.Background(), &types.CreateTemplateFromImageReq{
+		SourceImageRef:   "example.com/app:tag",
+		RegistryUsername: "alice",
+		RegistryPassword: "s3cret",
+	}, "http://master.example")
+	if err == nil || !strings.Contains(err.Error(), "skopeo inspect") {
+		t.Fatalf("expected skopeo inspect error, got %v", err)
+	}
+	if !cleanupCalled {
+		t.Fatal("expected auth file cleanup on inspect failure")
+	}
+}
+
+func TestSkopeoOutputInsertsAuthFileAfterSubcommand(t *testing.T) {
+	binDir := t.TempDir()
+	t.Setenv("PATH", binDir)
+	installFakeCommand(t, binDir, "skopeo", `printf '%s\n' "$*"`)
+
+	out, err := skopeoOutput(context.Background(), "/tmp/auth.json", "inspect", "docker://example.com/app:latest")
+	if err != nil {
+		t.Fatalf("skopeoOutput failed: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "inspect --authfile /tmp/auth.json docker://example.com/app:latest" {
+		t.Fatalf("unexpected skopeo arg ordering: %q", got)
+	}
+}
+
+func TestSkopeoOutputOmitsAuthFileWhenEmpty(t *testing.T) {
+	binDir := t.TempDir()
+	t.Setenv("PATH", binDir)
+	installFakeCommand(t, binDir, "skopeo", `printf '%s\n' "$*"`)
+
+	out, err := skopeoOutput(context.Background(), "", "inspect", "docker://example.com/app:latest")
+	if err != nil {
+		t.Fatalf("skopeoOutput failed: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "inspect docker://example.com/app:latest" {
+		t.Fatalf("unexpected skopeo args: %q", got)
+	}
+}
+
+func TestSkopeoImageDigest(t *testing.T) {
+	tests := []struct {
+		name     string
+		info     skopeoInspectImage
+		imageRef string
+		want     string
+	}{
+		{
+			name:     "empty digest yields empty",
+			info:     skopeoInspectImage{Name: "example.com/app"},
+			imageRef: "example.com/app:tag",
+			want:     "",
+		},
+		{
+			name:     "prefers name from inspect output",
+			info:     skopeoInspectImage{Name: "example.com/app", Digest: "sha256:abcd"},
+			imageRef: "ignored:tag",
+			want:     "example.com/app@sha256:abcd",
+		},
+		{
+			name:     "falls back to ref name without tag",
+			info:     skopeoInspectImage{Digest: "sha256:abcd"},
+			imageRef: "example.com:5000/ns/app:tag",
+			want:     "example.com:5000/ns/app@sha256:abcd",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := skopeoImageDigest(tt.info, tt.imageRef); got != tt.want {
+				t.Fatalf("skopeoImageDigest()=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSkopeoLayersTotalSize(t *testing.T) {
+	info := skopeoInspectImage{
+		LayersData: []skopeoInspectLayer{
+			{Size: 100},
+			{Size: 250},
+			{Size: -5}, // ignored
+			{Size: 0},  // ignored
+		},
+	}
+	if got := skopeoLayersTotalSize(info); got != 350 {
+		t.Fatalf("skopeoLayersTotalSize()=%d, want 350", got)
+	}
+	if got := skopeoLayersTotalSize(skopeoInspectImage{}); got != 0 {
+		t.Fatalf("skopeoLayersTotalSize(empty)=%d, want 0", got)
+	}
+}
+
+func TestEstimateImageSizeFromInspectDockerlessUsesSkopeoSize(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
+		t.Fatal("dockerOutput must not be called for dockerless size estimation")
+		return nil, nil
+	})
+
+	source := &resolvedSourceImage{
+		localRef:            "example.com/app:latest",
+		useDockerless:       true,
+		compressedSizeBytes: 1000,
+	}
+	got, err := estimateImageSizeFromInspect(context.Background(), source)
+	if err != nil {
+		t.Fatalf("estimateImageSizeFromInspect failed: %v", err)
+	}
+	if want := int64(1000 * skopeoInspectSizeMultiplier); got != want {
+		t.Fatalf("estimateImageSizeFromInspect()=%d, want %d", got, want)
+	}
+}
+
+func TestEstimateImageSizeFromInspectDockerlessMissingSize(t *testing.T) {
+	source := &resolvedSourceImage{
+		localRef:      "example.com/app:latest",
+		useDockerless: true,
+	}
+	if _, err := estimateImageSizeFromInspect(context.Background(), source); err == nil {
+		t.Fatal("expected error when skopeo reports no layer sizes")
+	}
+}
+
+func TestEstimateImageSizeFromInspectDockerPath(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(dockerOutput, func(ctx context.Context, configDir string, args ...string) ([]byte, error) {
+		return []byte("500\n"), nil
+	})
+
+	source := &resolvedSourceImage{localRef: "example.com/app:latest"}
+	got, err := estimateImageSizeFromInspect(context.Background(), source)
+	if err != nil {
+		t.Fatalf("estimateImageSizeFromInspect failed: %v", err)
+	}
+	if want := int64(500 * dockerInspectSizeMultiplier); got != want {
+		t.Fatalf("estimateImageSizeFromInspect()=%d, want %d", got, want)
+	}
+}
+
+func TestRegistryHostFromImageRefStripsDockerTransport(t *testing.T) {
+	if got := registryHostFromImageRef("docker://example.com:5000/ns/app:tag"); got != "example.com:5000" {
+		t.Fatalf("registryHostFromImageRef()=%q, want example.com:5000", got)
+	}
+	if got := registryHostFromImageRef("library/nginx:latest"); got != "docker.io" {
+		t.Fatalf("registryHostFromImageRef()=%q, want docker.io", got)
+	}
+}
+
+func TestSkopeoDockerImageRefKeepsExistingTransport(t *testing.T) {
+	got := skopeoDockerImageRef("docker://example.com/app:latest")
+	if got != "docker://example.com/app:latest" {
+		t.Fatalf("skopeoDockerImageRef()=%q", got)
+	}
+}
+
+func TestValidateImageRef(t *testing.T) {
+	valid := []string{
+		"docker://registry.example.com/image:latest",
+		"registry.example.com:5000/ns/app:1.2.3",
+		"library/nginx",
+		"library/nginx@sha256:" + strings.Repeat("a", 64),
+		"reg.io/my_app.name/sub-component:tag_1.0",
+	}
+	for _, ref := range valid {
+		if err := validateImageRef(ref); err != nil {
+			t.Errorf("validateImageRef(%q) returned error, want nil: %v", ref, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"docker://",
+		"-rm -rf",
+		"--authfile=/etc/shadow",
+		"registry.example.com/image --authfile /etc/shadow",
+		"registry.example.com/image\t--flag",
+		"registry.example.com/image\n--flag",
+		"image;rm -rf /",
+		"image$(whoami)",
+		"image`whoami`",
+	}
+	for _, ref := range invalid {
+		if err := validateImageRef(ref); err == nil {
+			t.Errorf("validateImageRef(%q) returned nil, want error", ref)
+		}
+	}
+}
+
+func TestSplitImageRef(t *testing.T) {
+	tests := []struct {
+		name     string
+		imageRef string
+		wantName string
+		wantTag  string
+	}{
+		{
+			name:     "no colon",
+			imageRef: "library/nginx",
+			wantName: "library/nginx",
+			wantTag:  "",
+		},
+		{
+			name:     "port but no tag",
+			imageRef: "registry:5000/image",
+			wantName: "registry:5000/image",
+			wantTag:  "",
+		},
+		{
+			name:     "port with tag",
+			imageRef: "registry:5000/image:v1",
+			wantName: "registry:5000/image",
+			wantTag:  "v1",
+		},
+		{
+			name:     "tag and digest after docker prefix",
+			imageRef: "docker://example.com/ns/app:stable@sha256:abcd",
+			wantName: "example.com/ns/app",
+			wantTag:  "stable",
+		},
+		{
+			name:     "digest without tag",
+			imageRef: "example.com/ns/app@sha256:abcd",
+			wantName: "example.com/ns/app",
+			wantTag:  "",
+		},
+		{
+			name:     "bare name with tag",
+			imageRef: "nginx:latest",
+			wantName: "nginx",
+			wantTag:  "latest",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotName, gotTag := splitImageRef(tt.imageRef)
+			if gotName != tt.wantName || gotTag != tt.wantTag {
+				t.Fatalf("splitImageRef(%q)=(%q,%q), want (%q,%q)",
+					tt.imageRef, gotName, gotTag, tt.wantName, tt.wantTag)
+			}
+			if got := imageTagFromRef(tt.imageRef); got != tt.wantTag {
+				t.Fatalf("imageTagFromRef(%q)=%q, want %q", tt.imageRef, got, tt.wantTag)
+			}
+			if got := imageNameWithoutTagDigest(tt.imageRef); got != tt.wantName {
+				t.Fatalf("imageNameWithoutTagDigest(%q)=%q, want %q", tt.imageRef, got, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestOciLayoutImageRefUsesExplicitSourceTag(t *testing.T) {
+	tests := []struct {
+		name     string
+		imageRef string
+		want     string
+	}{
+		{
+			name:     "tagged image",
+			imageRef: "example.com/app:v1.2.3",
+			want:     "/tmp/image:v1.2.3",
+		},
+		{
+			name:     "registry port with tag",
+			imageRef: "example.com:5000/ns/app:release",
+			want:     "/tmp/image:release",
+		},
+		{
+			name:     "digest with tag",
+			imageRef: "docker://example.com/ns/app:stable@sha256:abcd",
+			want:     "/tmp/image:stable",
+		},
+		{
+			name:     "untagged image",
+			imageRef: "example.com/ns/app",
+			want:     "/tmp/image",
+		},
+		{
+			name:     "digest without tag",
+			imageRef: "example.com/ns/app@sha256:abcd",
+			want:     "/tmp/image",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ociLayoutImageRef("/tmp/image", tt.imageRef)
+			if got != tt.want {
+				t.Fatalf("ociLayoutImageRef()=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnsureArtifactBuildPreflightAllowsDockerlessWithoutDockerOrTar(t *testing.T) {
+	binDir := t.TempDir()
+	t.Setenv("PATH", binDir)
+	for _, cmd := range []string{"truncate", "cp", "skopeo", "umoci"} {
+		installFakeCommand(t, binDir, cmd, "exit 0")
+	}
+	installFakeCommand(t, binDir, "mkfs.ext4", "echo 'mkfs.ext4 help supports -d'")
+
+	if err := ensureArtifactBuildPreflight(context.Background()); err != nil {
+		t.Fatalf("ensureArtifactBuildPreflight failed: %v", err)
+	}
+}
+
+func TestEnsureArtifactBuildPreflightRequiresTarForDockerFallback(t *testing.T) {
+	binDir := t.TempDir()
+	t.Setenv("PATH", binDir)
+	for _, cmd := range []string{"docker", "mkfs.ext4", "truncate", "cp", "skopeo"} {
+		installFakeCommand(t, binDir, cmd, "exit 0")
+	}
+
+	err := ensureArtifactBuildPreflight(context.Background())
+	if err == nil || !strings.Contains(err.Error(), `required command "tar"`) {
+		t.Fatalf("unexpected preflight error: %v", err)
 	}
 }
 
