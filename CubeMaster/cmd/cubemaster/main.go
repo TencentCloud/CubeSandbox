@@ -14,14 +14,16 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
-	_ "go.uber.org/automaxprocs"
 )
 
-var versionFlag = flag.Bool("v", false, "show version")
+var (
+	versionFlag     = flag.Bool("v", false, "show version")
+	longVersionFlag = flag.Bool("version", false, "show version")
+)
 
 func main() {
 	flag.Parse()
-	if *versionFlag {
+	if *versionFlag || *longVersionFlag {
 		version.ShowAndExit(true)
 	}
 

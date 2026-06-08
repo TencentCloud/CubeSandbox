@@ -20,10 +20,11 @@ UID = $(shell id -u)
 GID = $(shell id -g)
 PWD = $(shell pwd)
 
-VERSION := $(shell git describe --abbrev=0 --tags 2>/dev/null || echo "0.0.0")
+VERSION := $(if $(CUBE_RELEASE_VERSION),$(CUBE_RELEASE_VERSION),$(shell git describe --abbrev=0 --tags --match 'v*' 2>/dev/null || echo "0.0.0"))
 COMMIT_NO := $(shell git rev-parse HEAD 2>/dev/null || true)
 COMMIT := $(if $(shell git status --porcelain --untracked-files=no 2>/dev/null || true),${COMMIT_NO}-dirty,${COMMIT_NO})
 COMMIT_MSG = $(if $(COMMIT),$(COMMIT),unknown)
+BUILD_TIME := $(if $(CUBE_RELEASE_BUILD_TIME),$(CUBE_RELEASE_BUILD_TIME),$(shell date -u +'%Y-%m-%dT%H:%M:%SZ'))
 
 export VERSION_COMMIT := $(if $(COMMIT),$(COMMIT),$(VERSION))
 
@@ -88,7 +89,7 @@ AGENT_NAME = $(TARGET)
 API_VERSION = 0.0.1
 AGENT_VERSION = $(VERSION)
 
-GENERATED_REPLACEMENTS = AGENT_NAME AGENT_VERSION API_VERSION BINDIR COMMIT VERSION_COMMIT
+GENERATED_REPLACEMENTS = AGENT_NAME AGENT_VERSION API_VERSION BINDIR COMMIT VERSION_COMMIT BUILD_TIME
 GENERATED_FILES = $(GENERATED_CODE)
 
 define get_command_version

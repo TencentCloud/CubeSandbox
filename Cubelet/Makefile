@@ -39,20 +39,23 @@ COVERAGE_PACKAGES=$(shell go list ./... \
 	| grep -v github.com/tencentcloud/CubeSandbox/Cubelet/runtime \
 	| grep -v /integration)
 
-# Version
-APP_VERSION=0.4.24
-GIT_INIT=$(shell git config --global --add safe.directory $(PWD))
-GO_VERSION=$(shell go version | awk '{print $$3}')
-GIT_COMMIT=$(shell git rev-parse --short HEAD)
-BUILD_DATE=$(shell date +'%Y%m%d-%H:%M:%S')
-PROTOC = $(shell protoc --version|awk '{print "protoc.v"$$2}')
-VERSION=$(APP_VERSION)-$(GIT_COMMIT)-$(BUILD_DATE)-$(GO_VERSION)-$(PROTOC)
+# Version — injected at build time via ldflags.
+# Priority: env var CUBE_RELEASE_VERSION > git tag > hardcoded fallback.
+CUBE_VERSION ?= $(or $(CUBE_RELEASE_VERSION),$(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null),0.0.0-dev)
+CUBE_COMMIT ?= $(or $(CUBE_RELEASE_COMMIT),$(shell git rev-parse HEAD 2>/dev/null),unknown)
+CUBE_BUILD_TIME ?= $(or $(CUBE_RELEASE_BUILD_TIME),$(shell date -u +'%Y-%m-%dT%H:%M:%SZ'))
+
 VERSION_PKG=$(PKG)/version
-BUILD_FLAGS=-ldflags "-X '$(VERSION_PKG).Version=$(VERSION)'"
+BUILD_FLAGS=-ldflags "-s -w \
+  -X '$(VERSION_PKG).Version=$(CUBE_VERSION)' \
+  -X '$(VERSION_PKG).Commit=$(CUBE_COMMIT)' \
+  -X '$(VERSION_PKG).BuildTime=$(CUBE_BUILD_TIME)'"
+APP_VERSION ?= $(CUBE_VERSION)
+GIT_COMMIT_SHORT ?= $(shell echo $(CUBE_COMMIT) | cut -c1-7)
 PUBLISH_NAME=cubelet-$(APP_VERSION).zip
 
 # use for mark docker image tags
-APP_BUILD_VERSION=$(APP_VERSION)-$(GIT_COMMIT)
+APP_BUILD_VERSION=$(APP_VERSION)-$(GIT_COMMIT_SHORT)
 
 #
 CONF_VERSION=1.1.7
@@ -74,7 +77,7 @@ check-proto-tools:
 
 $(APPS): deps
 	@echo "${GOOS}"
-	@echo "${VERSION}"
+	@echo "${CUBE_VERSION}"
 	$(call msg,Build app,$@)
 	mkdir -p $(BUILD_DIR)
 	$(Q)go build -o $(BUILD_DIR)/$@ \
@@ -103,7 +106,7 @@ pack:build
 packconf:
 	$(Q)mkdir -p $(DYNAMIC_CONF_DIR)
 	$(Q)cp -rf dynamicconf/* $(DYNAMIC_CONF_DIR)/
-	$(Q)echo $(CONF_VERSION)-$(GIT_COMMIT)-$(BUILD_DATE) > $(DYNAMIC_CONF_DIR)/version
+	$(Q)echo $(CONF_VERSION)-$(GIT_COMMIT_SHORT)-$(CUBE_BUILD_TIME) > $(DYNAMIC_CONF_DIR)/version
 	$(Q)cd ./build && zip -q -r  $(BUILD_DIR)/$(DYNAMIC_PUBLISH_NAME) ./cube-cubelet-conf
 	$(Q)rm -rf $(PACK_DIR)
 

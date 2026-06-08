@@ -23,6 +23,10 @@ fn main() {
 
     let mut thread_num = 1;
     let os_args: Vec<_> = std::env::args_os().collect();
+    if is_version_request(&os_args[1..]) {
+        print_version();
+        return;
+    }
     if is_runtime_info_request(&os_args[1..]) {
         if let Err(err) = handle_runtime_info_request() {
             eprintln!("handle runtime info request failed: {err}");
@@ -34,11 +38,8 @@ fn main() {
     }
     let flags = parse(&os_args[1..]).expect("Invalid params");
     if flags.version {
-        //println!("Version:{} ChVersion:{}", SHIM_VERSION, CH_VERSION);
-        println!("version:{}", common::SHIM_VERSION);
-        unsafe {
-            libc::exit(0);
-        }
+        print_version();
+        return;
     }
     if flags.action.is_empty() {
         thread_num = 2;
@@ -53,10 +54,27 @@ fn main() {
     runtime.block_on(shim_run::<Service>("io.containerd.cube.rs", Some(c)));
 }
 
+fn is_version_request(args: &[OsString]) -> bool {
+    args.iter().any(|arg| {
+        arg.to_str()
+            .map(|value| matches!(value, "-v" | "-version" | "--version"))
+            .unwrap_or(false)
+    })
+}
+
+fn print_version() {
+    println!(
+        "containerd-shim-cube-rs {} ({}) built at {}",
+        common::SHIM_VERSION,
+        common::SHIM_COMMIT,
+        common::SHIM_BUILD_TIME
+    );
+}
+
 fn is_runtime_info_request(args: &[OsString]) -> bool {
     args.iter().any(|arg| {
         arg.to_str()
-            .map(|value| value == "-info" || value == "--info")
+            .map(|value| matches!(value, "-info" | "--info"))
             .unwrap_or(false)
     })
 }

@@ -100,6 +100,9 @@ builder-run: prepare-builder-home prepare-tmp-git-credentials
 		-e RUSTUP_HOME=/usr/local/rustup \
 		-e GOPATH=$(BUILDER_CONTAINER_HOME)/go \
 		-e BUILDER_CMD="$(BUILDER_CMD)" \
+		-e CUBE_RELEASE_VERSION \
+		-e CUBE_RELEASE_COMMIT \
+		-e CUBE_RELEASE_BUILD_TIME \
 		-v "$(ROOT_DIR)":/workspace \
 		-v "$(BUILDER_HOME)":$(BUILDER_CONTAINER_HOME) \
 		$(DOCKER_GIT_CRED) \
@@ -141,7 +144,7 @@ cubelet: builder-image
 
 network-agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/network-agent && make proto && go build -o /workspace/_output/bin/network-agent ./cmd/network-agent'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/network-agent && make proto && make build && cp bin/network-agent /workspace/_output/bin/network-agent'
 
 agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"

@@ -640,6 +640,16 @@ if [[ -f "${ENV_FILE}" ]]; then
 else
   : > "${RUNTIME_ENV_FILE}"
 fi
+
+# Install version files so the installed system can report its version.
+if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then
+  cp -f "${SCRIPT_DIR}/VERSION.txt" "${INSTALL_PREFIX}/VERSION.txt"
+  log "installed VERSION.txt to ${INSTALL_PREFIX}/VERSION.txt"
+fi
+if [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
+  cp -f "${SCRIPT_DIR}/release-manifest.json" "${INSTALL_PREFIX}/release-manifest.json"
+  log "installed release-manifest.json to ${INSTALL_PREFIX}/release-manifest.json"
+fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
 if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then

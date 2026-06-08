@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use containerd_shim_cube_rs::snapshot::cmd::SnapshotArgs;
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version = env!("CUBE_VERSION_FULL"), about, long_about = None)]
 pub struct CliArgs {
     #[command(subcommand)]
     pub command: SubCommands,
