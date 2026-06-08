@@ -48,11 +48,7 @@ detect_installed_role() {
     return 0
   fi
 
-  local installed_role_line
-  installed_role_line="$(rg '^ONE_CLICK_DEPLOY_ROLE=' "${INSTALL_PREFIX}/.one-click.env" || true)"
-  if [[ -n "${installed_role_line}" ]]; then
-    printf '%s\n' "${installed_role_line#ONE_CLICK_DEPLOY_ROLE=}"
-  fi
+  sed -n '/^ONE_CLICK_DEPLOY_ROLE=/{s/^ONE_CLICK_DEPLOY_ROLE=//;p;q;}' "${INSTALL_PREFIX}/.one-click.env" 2>/dev/null || true
 }
 
 needs_docker_for_install() {
@@ -77,7 +73,6 @@ require_any_cmd() {
 
 install_required_dependencies() {
   log "checking and installing dependencies..."
-  install_ripgrep
 
   if needs_docker_for_install; then
     install_docker
@@ -375,7 +370,6 @@ check_cgroup_cpu_preflight() {
 check_install_preflight() {
   # install.sh itself.
   require_cmd tar
-  require_cmd rg
   require_cmd ss
   require_cmd systemctl
 
@@ -383,6 +377,7 @@ check_install_preflight() {
   require_cmd bash
   require_cmd curl
   require_cmd sed
+  require_cmd grep
   require_cmd pgrep
   require_cmd date
 
@@ -673,7 +668,7 @@ chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
 
 if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
   cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"
-  if rg -q '^[[:space:]]*eth_name = "' "${cubelet_config}"; then
+  if grep -Eq '^[[:space:]]*eth_name = "' "${cubelet_config}"; then
     sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"/" "${cubelet_config}"
     if ! grep -Fq "eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"" "${cubelet_config}"; then
       log "WARNING: failed to patch eth_name in Cubelet config (${cubelet_config})"
@@ -694,7 +689,7 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
     die "refusing to patch a symlink target: ${cubelet_config} -> $(readlink "${cubelet_config}")"
   fi
 
-  if rg -q '^[[:space:]]*cidr = "' "${cubelet_config}"; then
+  if grep -Eq '^[[:space:]]*cidr = "' "${cubelet_config}"; then
     # NOTE: Use '|' as sed delimiter -- CIDR values always contain '/', so
     # the default '/' delimiter would break the sed command.
     sed -i "s|cidr = \"[^\"]*\"|cidr = \"${CUBE_SANDBOX_NETWORK_CIDR}\"|" "${cubelet_config}"
@@ -721,8 +716,7 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   fi
 else
   # Log current CIDR for debugging
-  current_cidr=$(rg '^[[:space:]]*cidr = "' "${INSTALL_PREFIX}/Cubelet/config/config.toml" 2>/dev/null \
-    | sed -nE 's/.*"([^"]+)".*/\1/p' || echo "unknown")
+  current_cidr="$(sed -nE '/^[[:space:]]*cidr[[:space:]]*=[[:space:]]*"/{s/.*"([^"]+)".*/\1/p;q;}' "${INSTALL_PREFIX}/Cubelet/config/config.toml" 2>/dev/null || echo "unknown")"
   log "using cubevs CIDR from config.toml: ${current_cidr} (CUBE_SANDBOX_NETWORK_CIDR not set)"
 fi
 

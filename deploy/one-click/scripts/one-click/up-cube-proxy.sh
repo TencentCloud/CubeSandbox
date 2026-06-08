@@ -133,7 +133,7 @@ docker_rm_if_exists "${CUBE_PROXY_CONTAINER_NAME}"
 # host before we attempt to start the container; otherwise the failure mode is
 # a cryptic "address already in use" from nginx inside the container.
 for port in "${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}"; do
-  if ss -lnt "( sport = :${port} )" | rg -q "LISTEN"; then
+  if command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${port} )"; then
     die "port ${port} is already in use; cube-proxy uses host networking and requires it to be free"
   fi
 done
@@ -159,11 +159,11 @@ http_ready=0
 https_ready=0
 for _ in {1..30}; do
   if [[ "${http_ready}" == "0" ]] && \
-     ss -lnt "( sport = :${CUBE_PROXY_HTTP_PORT} )" | rg -q "LISTEN"; then
+     command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${CUBE_PROXY_HTTP_PORT} )"; then
     http_ready=1
   fi
   if [[ "${https_ready}" == "0" ]] && \
-     ss -lnt "( sport = :${CUBE_PROXY_HTTPS_PORT} )" | rg -q "LISTEN"; then
+     command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${CUBE_PROXY_HTTPS_PORT} )"; then
     https_ready=1
   fi
   if [[ "${http_ready}" == "1" && "${https_ready}" == "1" ]]; then

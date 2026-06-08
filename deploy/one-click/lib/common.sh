@@ -47,7 +47,6 @@ cubelet_storage_backend_from_config() {
 validate_cubelet_cow_startup_deps() {
   local config_path="$1"
   ensure_file "${config_path}"
-  require_cmd rg
   require_cmd sed
 
   local storage_backend
@@ -133,9 +132,21 @@ latest_git_revision() {
   date +%Y%m%d-%H%M%S
 }
 
+command_output_has_exact_line() {
+  local needle="$1"
+  shift
+
+  require_cmd grep
+
+  local output
+  output="$("$@" 2>/dev/null || true)"
+  [[ -n "${output}" ]] || return 1
+  grep -Fxq -- "${needle}" <<<"${output}"
+}
+
 container_exists() {
   local name="$1"
-  docker ps -a --format '{{.Names}}' | rg -x "${name}" >/dev/null 2>&1
+  command_output_has_exact_line "${name}" docker ps -a --format '{{.Names}}'
 }
 
 wait_for_http() {
@@ -225,25 +236,6 @@ detect_pkg_manager() {
   fi
 }
 
-install_ripgrep() {
-  if command -v rg >/dev/null 2>&1; then
-    return 0
-  fi
-  local pm
-  pm="$(detect_pkg_manager)"
-  log "installing ripgrep via ${pm}..."
-  case "${pm}" in
-    apt)
-      apt-get update -qq && apt-get install -y -qq ripgrep
-      ;;
-    yum)
-      yum install -y epel-release 2>/dev/null || true
-      yum install -y ripgrep
-      ;;
-  esac
-  command -v rg >/dev/null 2>&1 || die "failed to install ripgrep"
-}
-
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
     return 0
@@ -289,7 +281,6 @@ install_docker_compose() {
 
 install_dependencies() {
   log "checking and installing dependencies..."
-  install_ripgrep
   install_docker
   install_docker_compose
 }

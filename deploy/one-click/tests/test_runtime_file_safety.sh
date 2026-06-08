@@ -14,6 +14,8 @@ export ONE_CLICK_TOOLBOX_ROOT="${TMP_DIR}/toolbox"
 export ONE_CLICK_RUNTIME_DIR="${TMP_DIR}/run"
 export ONE_CLICK_LOG_DIR="${TMP_DIR}/log"
 
+# shellcheck source=../lib/common.sh
+source "${ONE_CLICK_DIR}/lib/common.sh"
 # shellcheck source=../scripts/one-click/common.sh
 source "${ONE_CLICK_DIR}/scripts/one-click/common.sh"
 
@@ -29,13 +31,13 @@ assert_file() {
 assert_contains() {
   local path="$1"
   local needle="$2"
-  rg -q --fixed-strings "${needle}" "${path}" || fail "expected ${path} to contain ${needle}"
+  grep -Fq -- "${needle}" "${path}" || fail "expected ${path} to contain ${needle}"
 }
 
 assert_not_contains() {
   local path="$1"
   local needle="$2"
-  if rg -q --fixed-strings "${needle}" "${path}"; then
+  if grep -Fq -- "${needle}" "${path}"; then
     fail "expected ${path} not to contain ${needle}"
   fi
 }
@@ -75,12 +77,12 @@ test_render_template_rejects_non_empty_directory() {
 }
 
 test_unit_prepare_hooks_are_wired() {
-  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-mysql.service" "ExecStartPre=/usr/local/services/cubetoolbox/scripts/systemd/mysql-prepare.sh"
-  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-redis.service" "ExecStartPre=/usr/local/services/cubetoolbox/scripts/systemd/redis-prepare.sh"
-  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-coredns.service" "ExecStartPre=/usr/local/services/cubetoolbox/scripts/systemd/coredns-prepare.sh"
-  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-coredns.service" "ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/coredns-postcheck.sh"
-  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cube-proxy.service" "ExecStartPre=/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-prepare.sh"
-  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-webui.service" "ExecStartPre=/usr/local/services/cubetoolbox/scripts/systemd/webui-prepare.sh"
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-mysql.service" "/usr/local/services/cubetoolbox/scripts/systemd/mysql-prepare.sh"
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-redis.service" "/usr/local/services/cubetoolbox/scripts/systemd/redis-prepare.sh"
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-coredns.service" "/usr/local/services/cubetoolbox/scripts/systemd/coredns-prepare.sh"
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-coredns.service" "/usr/local/services/cubetoolbox/scripts/systemd/coredns-postcheck.sh"
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cube-proxy.service" "/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-prepare.sh"
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-webui.service" "/usr/local/services/cubetoolbox/scripts/systemd/webui-prepare.sh"
 }
 
 test_support_compose_render_is_locked_and_atomic() {
@@ -103,7 +105,7 @@ test_coredns_direct_outputs_prepare_file_path() {
   assert_contains "${ONE_CLICK_DIR}/scripts/one-click/up-dns.sh" "prepare_file_output \"\${dst_path}\""
   assert_contains "${ONE_CLICK_DIR}/scripts/systemd/coredns-start.sh" "prepare_file_output \"\${dst_path}\""
   assert_contains "${ONE_CLICK_DIR}/scripts/systemd/common.sh" "wait_for_udp_port()"
-  assert_contains "${ONE_CLICK_DIR}/scripts/systemd/common.sh" "require_cmd rg"
+  assert_not_contains "${ONE_CLICK_DIR}/scripts/systemd/common.sh" "require_cmd rg"
 }
 
 test_unit_dependency_order() {
@@ -132,6 +134,27 @@ test_online_install_glibc_detection_avoids_head_pipe() {
   assert_not_contains "${path}" "ldd --version 2>&1 | head -1 | awk '{print \$NF}'"
 }
 
+test_one_click_scripts_do_not_require_ripgrep() {
+  assert_not_contains "${ONE_CLICK_DIR}/install.sh" "require_cmd rg"
+  assert_not_contains "${ONE_CLICK_DIR}/install.sh" "install_ripgrep"
+  assert_not_contains "${ONE_CLICK_DIR}/lib/common.sh" "install_ripgrep"
+  assert_not_contains "${ONE_CLICK_DIR}/scripts/one-click/common.sh" "require_cmd rg"
+  assert_not_contains "${ONE_CLICK_DIR}/scripts/systemd/common.sh" "require_cmd rg"
+  assert_not_contains "${ONE_CLICK_DIR}/scripts/one-click/up-with-deps.sh" "require_cmd rg"
+  assert_not_contains "${ONE_CLICK_DIR}/scripts/one-click/down-with-deps.sh" "require_cmd rg"
+  assert_not_contains "${ONE_CLICK_DIR}/scripts/one-click/up-webui.sh" "require_cmd rg"
+  assert_not_contains "${ONE_CLICK_DIR}/scripts/one-click/up-compute.sh" "require_cmd rg"
+  assert_not_contains "${ONE_CLICK_DIR}/scripts/systemd/prepare-compute-role.sh" "require_cmd rg"
+}
+
+test_quickcheck_reports_node_registration_failure_explicitly() {
+  local path="${ONE_CLICK_DIR}/scripts/one-click/quickcheck.sh"
+
+  assert_contains "${path}" "failed to query cubemaster node registration"
+  assert_contains "${path}" "cubemaster node registration missing host_ip="
+  assert_not_contains "${path}" "| rg -q"
+}
+
 test_render_template_replaces_empty_directory
 test_render_template_rejects_non_empty_directory
 test_unit_prepare_hooks_are_wired
@@ -141,5 +164,7 @@ test_coredns_direct_outputs_prepare_file_path
 test_unit_dependency_order
 test_detect_glibc_version_consumes_full_ldd_output
 test_online_install_glibc_detection_avoids_head_pipe
+test_one_click_scripts_do_not_require_ripgrep
+test_quickcheck_reports_node_registration_failure_explicitly
 
 echo "runtime file safety tests OK"

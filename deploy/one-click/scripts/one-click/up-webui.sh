@@ -11,7 +11,6 @@ source "${SCRIPT_DIR}/webui-compose-lib.sh"
 
 require_root
 require_cmd docker
-require_cmd rg
 require_cmd sed
 require_cmd ss
 
@@ -59,7 +58,7 @@ wait_for_tcp_port() {
   local i
 
   for ((i = 1; i <= retries; i++)); do
-    if ss -lnt "( sport = :${port} )" | rg -q ":${port}"; then
+    if command_output_contains_fixed_string ":${port}" ss -lnt "( sport = :${port} )"; then
       return 0
     fi
     sleep "${delay}"

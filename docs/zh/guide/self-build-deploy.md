@@ -28,7 +28,7 @@
 | Docker | 已安装并正常运行 |
 | root 权限 | `install.sh` 需要 root 执行 |
 | DNS 路由 | `systemd-resolved`（推荐）或 `NetworkManager + dnsmasq` |
-| `tar`、`rg`、`ss` | 安装脚本依赖 |
+| `tar`、`ss`、`grep`、`sed`、`awk` | 安装脚本依赖 |
 
 ### 软件要求（构建机）
 
@@ -419,22 +419,6 @@ docker logs cube-sandbox-redis
 - 端口冲突（3306 或 6379 已被占用）
 - 磁盘空间不足
 - Docker 守护进程异常
-
-### ripgrep (`rg`) 未安装
-
-```
-Error: required command not found: rg
-```
-
-安装 ripgrep：
-
-```bash
-# Ubuntu/Debian
-sudo apt-get install ripgrep
-
-# CentOS/RHEL
-sudo yum install ripgrep
-```
 
 ## 已知限制
 

@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-require_cmd rg
 require_cmd sed
 
 NETWORK_AGENT_BIN="${TOOLBOX_ROOT}/network-agent/bin/network-agent"
@@ -33,7 +32,7 @@ ROLE="$(one_click_deploy_role)"
 CONTROL_PLANE_ADDR="$(resolve_control_plane_cubemaster_addr)"
 [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute role"
 
-rg -q "meta_server_endpoint:" "${CUBELET_DYNAMICCONF}" || die "meta_server_endpoint missing in ${CUBELET_DYNAMICCONF}"
+grep -Eq "meta_server_endpoint:" "${CUBELET_DYNAMICCONF}" || die "meta_server_endpoint missing in ${CUBELET_DYNAMICCONF}"
 sed -i \
   -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${CONTROL_PLANE_ADDR}\"#" \
   "${CUBELET_DYNAMICCONF}"

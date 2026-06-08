@@ -180,9 +180,33 @@ escape_sed() {
   printf '%s' "$1" | sed 's/[\/&]/\\&/g'
 }
 
+command_output_has_exact_line() {
+  local needle="$1"
+  shift
+
+  require_cmd grep
+
+  local output
+  output="$("$@" 2>/dev/null || true)"
+  [[ -n "${output}" ]] || return 1
+  grep -Fxq -- "${needle}" <<<"${output}"
+}
+
+command_output_contains_fixed_string() {
+  local needle="$1"
+  shift
+
+  require_cmd grep
+
+  local output
+  output="$("$@" 2>/dev/null || true)"
+  [[ -n "${output}" ]] || return 1
+  grep -Fq -- "${needle}" <<<"${output}"
+}
+
 container_exists() {
   local name="$1"
-  docker ps -a --format '{{.Names}}' | rg -x -- "${name}" >/dev/null 2>&1
+  command_output_has_exact_line "${name}" docker ps -a --format '{{.Names}}'
 }
 
 docker_rm_if_exists() {
@@ -224,7 +248,7 @@ pid_matches_pattern() {
     return 0
   fi
 
-  pgrep -f -- "${pattern}" | rg -x -- "${pid}" >/dev/null 2>&1
+  command_output_has_exact_line "${pid}" pgrep -f -- "${pattern}"
 }
 
 refresh_pidfile_from_pattern() {
@@ -294,9 +318,8 @@ wait_for_tcp_port() {
   local i
 
   require_cmd ss
-  require_cmd rg
   for ((i = 1; i <= retries; i++)); do
-    if ss -lnt "( sport = :${port} )" | rg -q -- ":${port}"; then
+    if command_output_contains_fixed_string ":${port}" ss -lnt "( sport = :${port} )"; then
       return 0
     fi
     sleep "${delay}"
@@ -312,9 +335,8 @@ wait_for_udp_port() {
   local i
 
   require_cmd ss
-  require_cmd rg
   for ((i = 1; i <= retries; i++)); do
-    if ss -lnu "( sport = :${port} )" | rg -q -- "${address}:${port}"; then
+    if command_output_contains_fixed_string "${address}:${port}" ss -lnu "( sport = :${port} )"; then
       return 0
     fi
     sleep "${delay}"
