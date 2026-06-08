@@ -120,6 +120,24 @@ ensure_bind_mount_file() {
   [[ -f "${path}" ]] || die "required bind mount source file not found: ${path}"
 }
 
+# Escape VALUE so it can be safely interpolated into the replacement text of a
+# sed `s<delim>...<delim>...<delim>` expression. Escapes backslashes, '&' (the
+# whole-match reference) and the substitution delimiter (default '/'); pass the
+# delimiter actually used at the call site (e.g. '#') so values containing it do
+# not terminate the command. Backslash is written as '\\' in the bracket
+# expression so it is unambiguously a member across POSIX and GNU sed (GNU sed
+# treats a bare '\<delim>' as the plain delimiter, dropping backslash from the
+# set). Embedded newlines / carriage returns are stripped as defense-in-depth:
+# an unescaped newline would terminate the sed command and allow a crafted value
+# (e.g. a password read from .env) to inject arbitrary sed script. This is the
+# single shared helper for every one-click runtime script; do not re-define it
+# per-script (that historically caused inconsistent escaping semantics).
+escape_sed() {
+  local value="$1"
+  local delim="${2:-/}"
+  printf '%s' "${value}" | tr -d '\n\r' | sed "s/[\\\\${delim}&]/\\\\&/g"
+}
+
 render_template_atomic() {
   local template="$1"
   local output="$2"

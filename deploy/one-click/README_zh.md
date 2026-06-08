@@ -239,6 +239,34 @@ MySQL/Redis 依赖默认会部署到：
 - `mysql:8.0`
 - `redis:7-alpine`
 
+### 使用外部 MySQL / Redis
+
+如果希望使用已有的 MySQL/Redis 服务器，而不是内置的本地容器，可在执行
+`install.sh` 之前在 `.env` 中设置以下变量（参见 `env.example`）：
+
+```bash
+# 外部 MySQL（凭据字段可按需覆盖）
+CUBE_EXTERNAL_MYSQL_HOST=10.0.0.20
+CUBE_EXTERNAL_MYSQL_PORT=3306
+CUBE_EXTERNAL_MYSQL_USER=cube
+CUBE_EXTERNAL_MYSQL_PASSWORD=cube_pass
+CUBE_EXTERNAL_MYSQL_DB=cube_mvp
+
+# 外部 Redis
+CUBE_EXTERNAL_REDIS_HOST=10.0.0.21
+CUBE_EXTERNAL_REDIS_PORT=6379
+CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
+```
+
+当设置了 `CUBE_EXTERNAL_MYSQL_HOST`（和/或 `CUBE_EXTERNAL_REDIS_HOST`）时，`install.sh` 会：
+
+- 用外部 MySQL/Redis 地址改写 `CubeMaster/conf.yaml`；
+- 将 `DATABASE_URL`（CubeAPI）和 `CUBE_PROXY_REDIS_*`（cube proxy）写入 `.one-click.env`，让各服务都连接外部地址；
+- mask 对应的 `cube-sandbox-mysql.service` / `cube-sandbox-redis.service`，本地容器不会再被启动；
+- 让 `quickcheck.sh` 和 `up-support.sh` 跳过对已外置依赖的本地生命周期管理（`down-support.sh` 未感知外部依赖，仍会执行 `docker compose down`，但由于本地容器从未被启动，这是无害的空操作）。
+
+外部 MySQL 需要预先授予所配置用户对目标库的访问权限；CubeMaster 首次启动会自行执行 schema 迁移，单机种子数据通过宿主机上的 `mysql` 客户端写入（在控制节点上需安装 MySQL 客户端用于对外部库做 seed）。
+
 `cube proxy` 和它的 DNS 解析在 one-click 里是必选能力，`.env` 中这两个值必须保持为 `1`：
 
 ```bash

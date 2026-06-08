@@ -250,6 +250,38 @@ During installation, runtime files are prepared in this directory and the follow
 - `mysql:8.0`
 - `redis:7-alpine`
 
+### Using an external MySQL / Redis
+
+To point CubeSandbox at an existing MySQL/Redis server instead of the bundled
+local containers, set the following in `.env` before running `install.sh`
+(see `env.example`):
+
+```bash
+# External MySQL (any subset of the credential fields may be overridden)
+CUBE_EXTERNAL_MYSQL_HOST=10.0.0.20
+CUBE_EXTERNAL_MYSQL_PORT=3306
+CUBE_EXTERNAL_MYSQL_USER=cube
+CUBE_EXTERNAL_MYSQL_PASSWORD=cube_pass
+CUBE_EXTERNAL_MYSQL_DB=cube_mvp
+
+# External Redis
+CUBE_EXTERNAL_REDIS_HOST=10.0.0.21
+CUBE_EXTERNAL_REDIS_PORT=6379
+CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
+```
+
+When `CUBE_EXTERNAL_MYSQL_HOST` (and/or `CUBE_EXTERNAL_REDIS_HOST`) is set, `install.sh`:
+
+- patches `CubeMaster/conf.yaml` with the external MySQL/Redis endpoint;
+- writes `DATABASE_URL` (CubeAPI) and `CUBE_PROXY_REDIS_*` (cube proxy) to `.one-click.env` so every service consumes the external endpoint;
+- masks the corresponding `cube-sandbox-mysql.service` / `cube-sandbox-redis.service` so the local container is never started; and
+- makes `quickcheck.sh` and `up-support.sh` skip lifecycle management of the now-external dependency. (`down-support.sh` has no external-dep awareness and still issues a `docker compose down`, but this is a harmless no-op because the local containers were never started for the external dependency.)
+
+The external MySQL must already grant the configured user access to the target
+database; CubeMaster runs its own schema migrations on first start, and the
+single-node seed rows are applied through a host-side `mysql` client (install
+the MySQL client package on the control node when seeding an external DB).
+
 `cube proxy` and its DNS resolution are mandatory capabilities in one-click. The following two values in `.env` must remain `1`:
 
 ```bash

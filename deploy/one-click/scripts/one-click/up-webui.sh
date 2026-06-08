@@ -49,10 +49,6 @@ do
   ensure_file "${required_file}"
 done
 
-escape_sed() {
-  printf '%s' "$1" | sed 's/[\/&]/\\&/g'
-}
-
 wait_for_tcp_port() {
   local port="$1"
   local retries="${2:-30}"
@@ -69,13 +65,15 @@ wait_for_tcp_port() {
   return 1
 }
 
-WEB_UI_HOST_PORT_ESCAPED="$(escape_sed "${WEB_UI_HOST_PORT}")"
-WEB_UI_UPSTREAM_ESCAPED="$(escape_sed "${WEB_UI_UPSTREAM}")"
-SANDBOX_PROXY_UPSTREAM_ESCAPED="$(escape_sed "${SANDBOX_PROXY_UPSTREAM}")"
-WEB_UI_IMAGE_ESCAPED="$(escape_sed "${WEB_UI_IMAGE}")"
-WEB_UI_CONTAINER_NAME_ESCAPED="$(escape_sed "${WEB_UI_CONTAINER_NAME}")"
-WEB_UI_DIST_DIR_ESCAPED="$(escape_sed "${WEB_UI_DIST_DIR}")"
-NGINX_CONF_ESCAPED="$(escape_sed "${NGINX_CONF}")"
+# All render_template_atomic call sites below use '#' as the sed delimiter, so
+# escape against '#' (not the default '/').
+WEB_UI_HOST_PORT_ESCAPED="$(escape_sed "${WEB_UI_HOST_PORT}" '#')"
+WEB_UI_UPSTREAM_ESCAPED="$(escape_sed "${WEB_UI_UPSTREAM}" '#')"
+SANDBOX_PROXY_UPSTREAM_ESCAPED="$(escape_sed "${SANDBOX_PROXY_UPSTREAM}" '#')"
+WEB_UI_IMAGE_ESCAPED="$(escape_sed "${WEB_UI_IMAGE}" '#')"
+WEB_UI_CONTAINER_NAME_ESCAPED="$(escape_sed "${WEB_UI_CONTAINER_NAME}" '#')"
+WEB_UI_DIST_DIR_ESCAPED="$(escape_sed "${WEB_UI_DIST_DIR}" '#')"
+NGINX_CONF_ESCAPED="$(escape_sed "${NGINX_CONF}" '#')"
 
 render_template_atomic \
   "${NGINX_TEMPLATE}" \

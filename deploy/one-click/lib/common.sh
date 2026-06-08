@@ -101,6 +101,49 @@ ensure_file() {
   [[ -f "${path}" ]] || die "required file not found: ${path}"
 }
 
+# Escape a string so it can be used safely as the replacement text in a sed
+# `s|...|...|` expression. Escapes the delimiter '|', backslashes, '&' (the
+# whole-match reference) and '"'. Mirrors the escape_sed helper in
+# up-support.sh, which escapes for the '/' delimiter instead.
+#
+# The '"' is escaped because the only caller (patch_cubemaster_external_deps in
+# install.sh) embeds the result inside double-quoted sed replacement strings
+# such as `pwd: "${value}"`; escaping it keeps a value that itself contains a
+# '"' from corrupting the rendered YAML.
+#
+# SECURITY: embedded newlines / carriage returns are stripped first as
+# defense-in-depth. An unescaped newline in the replacement text would
+# terminate the sed `s` command and let a crafted value (e.g. a password read
+# from .env) inject arbitrary sed commands into the rendered config.
+escape_sed() {
+  printf '%s' "$1" | tr -d '\n\r' | sed 's/[|\\&"]/\\&/g'
+}
+
+# Percent-encode a string for safe use as a URL component (e.g. the userinfo
+# section of a connection string). Encodes every byte that is not an RFC 3986
+# unreserved character, so values containing '@', ':', '/', '%', etc. do not
+# corrupt the resulting URL. Operates byte-wise under the C locale so multibyte
+# input is encoded correctly.
+urlencode() {
+  local LC_ALL=C
+  local string="$1"
+  local len="${#string}"
+  local i char hex out=""
+  for (( i = 0; i < len; i++ )); do
+    char="${string:i:1}"
+    case "${char}" in
+      [a-zA-Z0-9._~-])
+        out+="${char}"
+        ;;
+      *)
+        printf -v hex '%02X' "'${char}"
+        out+="%${hex}"
+        ;;
+    esac
+  done
+  printf '%s' "${out}"
+}
+
 declared_release_manifest_relpath() {
   local version_file="$1"
   [[ -f "${version_file}" ]] || return 0
@@ -239,10 +282,24 @@ upsert_env_kv() {
   local key="$2"
   local value="$3"
   local tmp_file
+  # SECURITY: tighten umask before mktemp so the temp file is created 0600 from
+  # the start, closing the race window between creation and the chmod below.
+  # The atomic `mv` later replaces the target's inode with this temp file, so a
+  # permissive umask (e.g. 0022 -> 0644, or 0000 -> 0666) would otherwise leak
+  # every persisted secret (DATABASE_URL, CUBE_EXTERNAL_*_PASSWORD, ...) to other
+  # local users -- briefly here and permanently in env_file. Mirrors the pattern
+  # in install.sh's check_external_deps_preflight and up-with-deps.sh.
+  local old_umask
+  old_umask="$(umask)"
+  umask 077
   # Create temp file in the same directory as target to guarantee
   # atomic rename across filesystem boundaries (e.g., /tmp on tmpfs
   # and /usr/local on ext4/xfs).
   tmp_file="$(mktemp "${env_file}.XXXXXX")"
+  umask "${old_umask}"
+  # Defense-in-depth: enforce 0600 explicitly in case the temp file pre-existed
+  # with looser permissions or mktemp honored a non-default mode.
+  chmod 600 "${tmp_file}"
   local replaced=false
 
   if [[ -f "${env_file}" ]]; then

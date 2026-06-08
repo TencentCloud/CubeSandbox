@@ -21,6 +21,46 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 DEPLOY_ROLE="$(one_click_deploy_role)"
+
+# ---- External MySQL / Redis support ----
+# Set CUBE_EXTERNAL_MYSQL_HOST to point CubeSandbox at an existing MySQL server
+# instead of the bundled local Docker container. When set, install.sh will:
+#   1. Patch CubeMaster conf.yaml with the external connection details
+#   2. Persist the external endpoint to .one-click.env so every systemd unit
+#      and helper script (CubeAPI DATABASE_URL, cube-proxy redis, quickcheck...)
+#      consumes it instead of the local container
+#   3. Mask the cube-sandbox-mysql systemd service so it never starts
+CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
+CUBE_EXTERNAL_MYSQL_PORT="${CUBE_EXTERNAL_MYSQL_PORT:-3306}"
+CUBE_EXTERNAL_MYSQL_USER="${CUBE_EXTERNAL_MYSQL_USER:-cube}"
+CUBE_EXTERNAL_MYSQL_PASSWORD="${CUBE_EXTERNAL_MYSQL_PASSWORD:-cube_pass}"
+# Default the external DB name from CUBE_SANDBOX_MYSQL_DB so it resolves to the
+# same value up-with-deps.sh derives independently. Otherwise a custom
+# CUBE_SANDBOX_MYSQL_DB (without an explicit CUBE_EXTERNAL_MYSQL_DB) would make
+# the persisted .one-click.env and the seed step disagree on the database name.
+CUBE_EXTERNAL_MYSQL_DB="${CUBE_EXTERNAL_MYSQL_DB:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}"
+
+# Set CUBE_EXTERNAL_REDIS_HOST to use an external Redis instance. Mirrors the
+# MySQL behaviour above (patch conf.yaml, persist env, mask local redis unit).
+CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
+CUBE_EXTERNAL_REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-6379}"
+CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-ceuhvu123}"
+
+# Guard against shipping the example/default credentials to a real external
+# server. The defaults (cube_pass / ceuhvu123) are published in env.example and
+# are trivially guessable, so warn loudly when an external endpoint is wired up
+# without overriding them.
+warn_default_external_credentials() {
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" && "${CUBE_EXTERNAL_MYSQL_PASSWORD}" == "cube_pass" ]]; then
+    log "WARNING: external MySQL (${CUBE_EXTERNAL_MYSQL_HOST}) configured with the default password 'cube_pass'."
+    log "WARNING: set CUBE_EXTERNAL_MYSQL_PASSWORD to a strong value in your .env before exposing this deployment."
+  fi
+  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" && "${CUBE_EXTERNAL_REDIS_PASSWORD}" == "ceuhvu123" ]]; then
+    log "WARNING: external Redis (${CUBE_EXTERNAL_REDIS_HOST}) configured with the default password 'ceuhvu123'."
+    log "WARNING: set CUBE_EXTERNAL_REDIS_PASSWORD to a strong value in your .env before exposing this deployment."
+  fi
+}
+
 TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
 INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
@@ -155,6 +195,155 @@ generate_cubemaster_config_ports() {
     -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
     -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
     "${cfg}"
+}
+
+# When external MySQL/Redis is configured, patch CubeMaster conf.yaml to replace
+# the default 127.0.0.1 endpoints with the external connection details. Must run
+# after generate_cubemaster_config_ports so the port placeholders are resolved.
+patch_cubemaster_external_deps() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+
+  local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
+
+  # Validate once up front; both branches patch the same file.
+  if [[ -z "${CUBE_EXTERNAL_MYSQL_HOST}" && -z "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+    return 0
+  fi
+  ensure_file "${cfg}"
+
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+    log "patching conf.yaml for external MySQL: ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}/${CUBE_EXTERNAL_MYSQL_DB}"
+    # SECURITY: escape user-supplied values for the sed '|' delimiter so that a
+    # '|', '\', '&' or '"' in a host/user/password does not corrupt conf.yaml
+    # or break the double-quoted sed replacement strings below.
+    local mysql_addr_esc mysql_user_esc mysql_pwd_esc mysql_db_esc
+    mysql_addr_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}")"
+    mysql_user_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_USER}")"
+    mysql_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_PASSWORD}")"
+    mysql_db_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_DB}")"
+    # Match only on the YAML key prefix ('addr:'/'user:'/'pwd:'/'db_name:') and
+    # accept any current value, so these patterns keep working even if the
+    # conf.yaml template is regenerated with different defaults. These keys only
+    # appear in the MySQL sections (ossdb_config/instance_db_config), so without
+    # a trailing 'g' flag each line is patched exactly once and Redis fields
+    # (nodes:/password:) are never touched.
+    sed -i \
+      -e "s|addr: \".*\"|addr: \"${mysql_addr_esc}\"|" \
+      -e "s|user: \".*\"|user: \"${mysql_user_esc}\"|" \
+      -e "s|pwd: \".*\"|pwd: \"${mysql_pwd_esc}\"|" \
+      -e "s|db_name: \".*\"|db_name: \"${mysql_db_esc}\"|" \
+      "${cfg}"
+  fi
+
+  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+    log "patching conf.yaml for external Redis: ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
+    local redis_nodes_esc redis_pwd_esc
+    redis_nodes_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}")"
+    redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD}")"
+    # Match only on the YAML key prefix so these patterns survive template
+    # default changes. 'nodes:'/'password:' only appear in the redis* sections,
+    # so every Redis endpoint is repointed while MySQL fields stay untouched.
+    sed -i \
+      -e "s|nodes: \".*\"|nodes: \"${redis_nodes_esc}\"|" \
+      -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|" \
+      "${cfg}"
+  fi
+}
+
+# Fail fast when an external MySQL/Redis endpoint is unreachable or rejects the
+# configured credentials. Without this, a misconfigured host/port/password only
+# surfaces much later during up-with-deps.sh seeding. The check is best-effort:
+# if the corresponding client binary is missing we skip rather than block, since
+# the seed step (which requires the client) runs later anyway.
+check_external_deps_preflight() {
+  local connect_timeout="${ONE_CLICK_EXTERNAL_DEP_TIMEOUT:-5}"
+
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+    if command -v mysqladmin >/dev/null 2>&1; then
+      log "checking connectivity to external MySQL ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}"
+      local mysql_cnf
+      # SECURITY: tighten umask before mktemp so the credential file is created
+      # 0600 from the start -- this closes the brief race window between mktemp's
+      # default (umask-derived) permissions and the chmod 600 below.
+      local old_umask
+      old_umask="$(umask)"
+      umask 077
+      mysql_cnf="$(mktemp)"
+      umask "${old_umask}"
+      # SECURITY: trap on EXIT so the plaintext password is removed even if the
+      # script is killed abruptly between here and the explicit rm-f below.
+      # Mirrors the trap pattern in up-with-deps.sh.
+      trap 'rm -f "${mysql_cnf}"' EXIT
+      chmod 600 "${mysql_cnf}"
+      cat > "${mysql_cnf}" <<EOF
+[client]
+password="${CUBE_EXTERNAL_MYSQL_PASSWORD}"
+EOF
+      if ! mysqladmin --defaults-extra-file="${mysql_cnf}" \
+          -h "${CUBE_EXTERNAL_MYSQL_HOST}" \
+          -P "${CUBE_EXTERNAL_MYSQL_PORT}" \
+          -u "${CUBE_EXTERNAL_MYSQL_USER}" \
+          --connect-timeout="${connect_timeout}" ping >/dev/null 2>&1; then
+        rm -f "${mysql_cnf}"
+        trap - EXIT
+        die "cannot reach external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT} as user '${CUBE_EXTERNAL_MYSQL_USER}'.
+  Verify CUBE_EXTERNAL_MYSQL_HOST / _PORT / _USER / _PASSWORD and that the server is reachable from this host."
+      fi
+      rm -f "${mysql_cnf}"
+      trap - EXIT
+      log "external MySQL connectivity OK"
+    else
+      log "mysqladmin not found; skipping external MySQL connectivity preflight"
+    fi
+  fi
+
+  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+    if command -v redis-cli >/dev/null 2>&1; then
+      log "checking connectivity to external Redis ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
+      local redis_reply
+      if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
+        # SECURITY: PING is NOT an authenticated command. A reachable server that
+        # has no 'requirepass' set answers PONG even when a (wrong/extraneous)
+        # password is configured, so a misconfigured credential would slip
+        # through this preflight and only surface much later when CubeMaster /
+        # cube-proxy actually try to use Redis. Validate the credential directly
+        # by issuing AUTH and requiring an "OK" reply.
+        #
+        # The password is fed via stdin (`-x AUTH`) rather than as a command-line
+        # argument so it is not exposed in /proc/<pid>/cmdline to other local
+        # users; --no-auth-warning keeps redis-cli from echoing it on stderr.
+        # --connect-timeout bounds the TCP handshake; --timeout bounds Redis
+        # protocol I/O so a middlebox that accepts the socket but stalls the
+        # response (broken proxy / overloaded server) cannot hang this preflight
+        # indefinitely.
+        redis_reply="$(printf '%s' "${CUBE_EXTERNAL_REDIS_PASSWORD}" | redis-cli \
+          -h "${CUBE_EXTERNAL_REDIS_HOST}" \
+          -p "${CUBE_EXTERNAL_REDIS_PORT}" \
+          --connect-timeout "${connect_timeout}" \
+          --timeout "${connect_timeout}" \
+          --no-auth-warning \
+          -x AUTH 2>&1 || true)"
+        if [[ "${redis_reply}" != "OK" ]]; then
+          die "external Redis at ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT} is unreachable or rejected the configured password (AUTH replied: ${redis_reply:-<no response>}).
+  Verify CUBE_EXTERNAL_REDIS_HOST / _PORT / _PASSWORD and that the server is reachable from this host."
+        fi
+      else
+        local redis_pong
+        redis_pong="$(redis-cli \
+          -h "${CUBE_EXTERNAL_REDIS_HOST}" \
+          -p "${CUBE_EXTERNAL_REDIS_PORT}" \
+          --connect-timeout "${connect_timeout}" \
+          --timeout "${connect_timeout}" ping 2>/dev/null || true)"
+        if [[ "${redis_pong}" != "PONG" ]]; then
+          die "cannot reach external Redis at ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT} (PING did not return PONG).
+  Verify CUBE_EXTERNAL_REDIS_HOST / _PORT and that the server is reachable from this host."
+        fi
+      fi
+      log "external Redis connectivity OK"
+    else
+      log "redis-cli not found; skipping external Redis connectivity preflight"
+    fi
+  fi
 }
 
 check_hardware_preflight() {
@@ -537,6 +726,30 @@ start_systemd_target() {
   systemctl enable --now "${target}"
 }
 
+# When external MySQL/Redis is configured, mask the local container systemd
+# services so the control target never starts (or restarts) them. The target
+# only `Wants` these units, so masking is non-fatal for the rest of the stack.
+# Must run after install_systemd_units (units installed + daemon-reload) and
+# before start_systemd_target.
+mask_external_dep_services() {
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+    log "masking local MySQL service (external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST} in use)"
+    systemctl stop cube-sandbox-mysql.service >/dev/null 2>&1 || true
+    systemctl mask cube-sandbox-mysql.service >/dev/null 2>&1 || true
+  else
+    # Re-enable in case a previous install masked it and the user switched back.
+    systemctl unmask cube-sandbox-mysql.service >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+    log "masking local Redis service (external Redis at ${CUBE_EXTERNAL_REDIS_HOST} in use)"
+    systemctl stop cube-sandbox-redis.service >/dev/null 2>&1 || true
+    systemctl mask cube-sandbox-redis.service >/dev/null 2>&1 || true
+  else
+    systemctl unmask cube-sandbox-redis.service >/dev/null 2>&1 || true
+  fi
+}
+
 require_root
 
 # Run critical preflight checks that do not depend on dependency installation first
@@ -567,6 +780,8 @@ fi
 
 install_required_dependencies
 check_install_preflight
+warn_default_external_credentials
+check_external_deps_preflight
 if needs_docker_for_install; then
   configure_tencent_docker_mirror
 fi
@@ -627,6 +842,7 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
   generate_cubemaster_config_ports
+  patch_cubemaster_external_deps
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
 
@@ -654,6 +870,12 @@ if [[ -f "${ENV_FILE}" ]]; then
 else
   : > "${RUNTIME_ENV_FILE}"
 fi
+# SECURITY: this file holds DATABASE_URL and CUBE_EXTERNAL_*_PASSWORD secrets.
+# Restrict it to root before any secrets are written so they are never readable
+# by other local users. Note that upsert_env_kv rewrites the file via an atomic
+# mktemp+mv, which replaces the inode; it sets 0600 on its temp file so this
+# mode is preserved across every later upsert rather than reverting to 0644.
+chmod 600 "${RUNTIME_ENV_FILE}"
 
 # Install version files so the installed system can report its version.
 if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then
@@ -682,6 +904,39 @@ if [[ -n "${ONE_CLICK_CONTROL_PLANE_IP:-}" ]]; then
 fi
 if [[ -n "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR" "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR}"
+fi
+
+# Persist external MySQL config so every systemd unit / helper picks it up
+# instead of the local container. The CUBE_EXTERNAL_* markers let quickcheck
+# and the up/down helpers skip the local service entirely; DATABASE_URL points
+# CubeAPI at the external server (CubeMaster reads the patched conf.yaml).
+if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_HOST" "${CUBE_EXTERNAL_MYSQL_HOST}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_PORT" "${CUBE_EXTERNAL_MYSQL_PORT}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_USER" "${CUBE_EXTERNAL_MYSQL_USER}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_PASSWORD" "${CUBE_EXTERNAL_MYSQL_PASSWORD}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_DB" "${CUBE_EXTERNAL_MYSQL_DB}"
+  # Percent-encode every URI component so values containing URL metacharacters
+  # (@, :, /, #, %, ...) cannot corrupt the connection string. This covers the
+  # userinfo (user/password) as well as the host, port, and database name (e.g.
+  # a '/' in the db name would otherwise be parsed as a path separator).
+  database_url_user="$(urlencode "${CUBE_EXTERNAL_MYSQL_USER}")"
+  database_url_pass="$(urlencode "${CUBE_EXTERNAL_MYSQL_PASSWORD}")"
+  database_url_host="$(urlencode "${CUBE_EXTERNAL_MYSQL_HOST}")"
+  database_url_port="$(urlencode "${CUBE_EXTERNAL_MYSQL_PORT}")"
+  database_url_db="$(urlencode "${CUBE_EXTERNAL_MYSQL_DB}")"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
+fi
+
+# Persist external Redis config. cube-proxy reads CUBE_PROXY_REDIS_* from the
+# env file when rendering global.conf (CubeMaster reads the patched conf.yaml).
+if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_HOST" "${CUBE_EXTERNAL_REDIS_HOST}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PORT" "${CUBE_EXTERNAL_REDIS_PORT}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_IP" "${CUBE_EXTERNAL_REDIS_HOST}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PORT" "${CUBE_EXTERNAL_REDIS_PORT}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
 fi
 
 chmod +x "${INSTALL_PREFIX}/network-agent/bin/"*
@@ -762,6 +1017,7 @@ fi
 
 restore_selinux_contexts
 install_systemd_units
+mask_external_dep_services
 check_runtime_file_paths_not_directories
 start_systemd_target
 
