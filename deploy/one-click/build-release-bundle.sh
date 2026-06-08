@@ -48,6 +48,7 @@ CUBELET_BUILD_MODE="${ONE_CLICK_CUBELET_BUILD_MODE:-local}"
 API_BUILD_MODE="${ONE_CLICK_CUBE_API_BUILD_MODE:-local}"
 NETWORK_AGENT_BUILD_MODE="${ONE_CLICK_NETWORK_AGENT_BUILD_MODE:-local}"
 CUBEVSMAPDUMP_BUILD_MODE="${ONE_CLICK_CUBEVSMAPDUMP_BUILD_MODE:-local}"
+CUBE_PROXY_SIDECAR_BUILD_MODE="${ONE_CLICK_CUBE_PROXY_SIDECAR_BUILD_MODE:-local}"
 
 CUBEMASTER_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTER_BIN:-}"
 CUBEMASTERCLI_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTERCLI_BIN:-}"
@@ -56,6 +57,7 @@ CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
 NETWORK_AGENT_BIN_OVERRIDE="${ONE_CLICK_NETWORK_AGENT_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
+CUBE_PROXY_SIDECAR_BIN_OVERRIDE="${ONE_CLICK_CUBE_PROXY_SIDECAR_BIN:-}"
 
 go_version_ldflags() {
   local version_pkg="$1"
@@ -484,6 +486,33 @@ build_or_copy_go_binary \
   "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeNet/cubevs" "${CUBEVSMAPDUMP_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubevsmapdump" ./cmd/cubevsmapdump
+# Auto-pause sidecar ships embedded inside the cube-proxy container image
+# (CubeProxy/Dockerfile COPY bin/cube-proxy-sidecar). The cube-proxy image
+# is openresty:alpine-fat (musl libc), so the binary MUST be statically
+# linked — a default `go build` produces a glibc-linked binary that fails
+# at exec with rc=127 / "required file not found" on musl. Force
+# CGO_ENABLED=0 + -tags netgo,osusergo to get a pure-Go static binary.
+# Skip the generic build_or_copy_go_binary helper (which doesn't expose
+# these knobs) and call build directly here.
+if [[ -n "${CUBE_PROXY_SIDECAR_BIN_OVERRIDE}" ]]; then
+  log "using prebuilt cube-proxy-sidecar: ${CUBE_PROXY_SIDECAR_BIN_OVERRIDE}"
+  copy_file "${CUBE_PROXY_SIDECAR_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cube-proxy-sidecar"
+else
+  log "building cube-proxy-sidecar (static, CGO_ENABLED=0)"
+  case "${CUBE_PROXY_SIDECAR_BUILD_MODE}" in
+    local)
+      require_cmd go
+      (cd "${ROOT_DIR}/CubeProxy/sidecar" && \
+        go mod download && \
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+          go build -trimpath -tags 'netgo osusergo' -ldflags '-s -w' \
+            -o "${CORE_BIN_DIR}/cube-proxy-sidecar" ./cmd/sidecar) >&2
+      ;;
+    *)
+      die "unsupported cube-proxy-sidecar build mode: ${CUBE_PROXY_SIDECAR_BUILD_MODE}"
+      ;;
+  esac
+fi
 
 mkdir -p \
   "${PACKAGE_ROOT}/network-agent/bin" \
@@ -537,6 +566,20 @@ copy_dir_contents "${CUBE_WEBUI_TEMPLATE_DIR}" "${PACKAGE_ROOT}/webui"
 copy_dir_contents "${CUBE_SYSTEMD_TEMPLATE_DIR}" "${PACKAGE_ROOT}/systemd"
 copy_dir_contents "${CUBE_PROXY_SOURCE_DIR}" "${PACKAGE_ROOT}/cubeproxy/build-context"
 rm -f "${PACKAGE_ROOT}/cubeproxy/build-context/Makefile"
+# The build-context only needs the prebuilt sidecar binary, not the Go
+# source: the runtime image uses `COPY bin/cube-proxy-sidecar` (no Go
+# toolchain in the runtime stage). Strip the source tree to keep the
+# release bundle lean.
+rm -rf "${PACKAGE_ROOT}/cubeproxy/build-context/sidecar"
+# Drop the prebuilt sidecar binary into the build context so the Dockerfile's
+# COPY bin/cube-proxy-sidecar step has something to grab. Path matches the
+# in-tree CubeProxy/Makefile prebuild-sidecar layout (CubeProxy/bin/) so the
+# Dockerfile is identical for both build flows.
+mkdir -p "${PACKAGE_ROOT}/cubeproxy/build-context/bin"
+copy_file \
+  "${CORE_BIN_DIR}/cube-proxy-sidecar" \
+  "${PACKAGE_ROOT}/cubeproxy/build-context/bin/cube-proxy-sidecar"
+chmod +x "${PACKAGE_ROOT}/cubeproxy/build-context/bin/cube-proxy-sidecar"
 generate_cube_proxy_nginx_template \
   "${CUBE_PROXY_SOURCE_DIR}/nginx.conf" \
   "${PACKAGE_ROOT}/cubeproxy/nginx.conf.template"

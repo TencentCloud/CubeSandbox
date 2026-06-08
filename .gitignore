@@ -47,4 +47,5 @@ docs/image.png
 
 __pycache__
 /design
+/plan
 /tests

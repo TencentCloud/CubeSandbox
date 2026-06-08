@@ -119,6 +119,7 @@ hello cube
 | `create.py` | `sandbox.get_info()` — 获取沙箱元数据 |
 | `read.py` | `sandbox.files.read()` — 读取沙箱文件系统中的文件 |
 | `pause.py` | `sandbox.pause()` / `sandbox.connect()` — 快照与恢复 |
+| `auto_resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — 平台在空闲超时后自动暂停沙箱，下一次请求自动恢复 |
 | `network_no_internet.py` | `allow_internet_access=False` — 完全断网沙箱 |
 | `network_allowlist.py` | `allow_out` — 白名单 CIDR，拦截其余所有出口 |
 | `network_denylist.py` | `deny_out` — 黑名单 CIDR，其余放行 |
@@ -148,6 +149,25 @@ with Sandbox.create(template=template_id) as sandbox:
     time.sleep(3)
     sandbox.connect()     # 恢复快照，继续执行
     print(sandbox.get_info())
+```
+
+### auto_resume.py — 自动暂停与自动恢复
+
+与 `pause.py` 类似，但暂停/恢复完全交给平台自动管理。`lifecycle` 参数与 e2b SDK 对齐
+（参考 [e2b 文档](https://e2b.dev/docs/sandbox/auto-resume)）：`on_timeout="pause"`
+表示空闲超时后由 sidecar 触发暂停；`auto_resume=True` 让下一次请求命中
+暂停沙箱时自动恢复：
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    timeout=30,             # auto-pause sidecar 用作空闲阈值
+    lifecycle={"on_timeout": "pause", "auto_resume": True},
+)
+sandbox.run_code("print('first call')")
+time.sleep(45)              # 超过空闲阈值，sidecar 暂停沙箱
+sandbox.run_code("print('back from a transparent resume')")
+sandbox.kill()
 ```
 
 ### 网络策略
@@ -183,6 +203,7 @@ code-sandbox-quickstart/
 ├── create.py                  # 创建沙箱并查看元数据
 ├── read.py                    # 读取沙箱文件系统中的文件
 ├── pause.py                   # 暂停与恢复沙箱
+├── auto_resume.py             # 自动暂停 / 自动恢复（基于空闲超时）
 ├── network_no_internet.py     # 完全断网沙箱
 ├── network_allowlist.py       # 出口 CIDR 白名单
 ├── network_denylist.py        # 出口 CIDR 黑名单

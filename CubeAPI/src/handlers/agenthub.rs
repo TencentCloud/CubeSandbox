@@ -458,8 +458,7 @@ pub async fn create_agent_instance(
         .create_sandbox(NewSandbox {
             template_id: template_id.clone(),
             timeout,
-            auto_pause: false,
-            auto_resume: None,
+            lifecycle: None,
             secure: None,
             allow_internet_access: Some(true),
             network: network_config,
@@ -1995,8 +1994,7 @@ pub async fn clone_agent_instance(
         .create_sandbox(NewSandbox {
             template_id: snapshot_id.clone(),
             timeout,
-            auto_pause: false,
-            auto_resume: None,
+            lifecycle: None,
             secure: None,
             allow_internet_access: Some(true),
             network: network_config,

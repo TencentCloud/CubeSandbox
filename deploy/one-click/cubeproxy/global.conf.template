@@ -5,3 +5,11 @@ set $redis_index 0;
 set $timeout_min 500;
 set $timeout_max 700;
 set $cube_proxy_host_ip "__CUBE_PROXY_HOST_IP__";
+
+# Auto-pause / auto-resume wiring. $cube_sidecar_addr points at the
+# co-resident cube-proxy-sidecar (loopback by default). $cube_admin_token
+# is an optional shared secret enforced by the sidecar admin server; leave
+# empty to disable auth (safe because the admin server listens on 127.0.0.1
+# only).
+set $cube_sidecar_addr "__CUBE_SIDECAR_NGX_ADDR__";
+set $cube_admin_token "__CUBE_ADMIN_TOKEN__";

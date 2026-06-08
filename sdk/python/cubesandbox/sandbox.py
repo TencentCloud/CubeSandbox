@@ -40,6 +40,31 @@ def _check_response(resp: requests.Response) -> None:
     raise ApiError(msg, code)
 
 
+_VALID_ON_TIMEOUT = ("kill", "pause")
+
+
+def _serialize_lifecycle(lifecycle: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate a snake_case ``lifecycle`` dict to the camelCase wire shape
+    used by CubeAPI (and by the e2b SDK).
+
+    Validates ``on_timeout`` early so misspellings ("paused", "Pause") raise
+    a clean ``ValueError`` at the call site instead of producing an opaque
+    HTTP 4xx from the server.
+    """
+    out: Dict[str, Any] = {}
+    on_timeout = lifecycle.get("on_timeout")
+    if on_timeout is not None:
+        if on_timeout not in _VALID_ON_TIMEOUT:
+            raise ValueError(
+                f"lifecycle.on_timeout must be one of {_VALID_ON_TIMEOUT!r}, "
+                f"got {on_timeout!r}"
+            )
+        out["onTimeout"] = on_timeout
+    if "auto_resume" in lifecycle:
+        out["autoResume"] = bool(lifecycle["auto_resume"])
+    return out
+
+
 class Sandbox:
     """A CubeSandbox code execution environment.
 
@@ -98,6 +123,7 @@ class Sandbox:
         metadata: Dict[str, str] | None = None,
         allow_internet_access: bool = True,
         network: Dict[str, Any] | None = None,
+        lifecycle: Dict[str, Any] | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> "Sandbox":
@@ -108,8 +134,9 @@ class Sandbox:
             timeout: Sandbox TTL in seconds. Defaults to ``Config.timeout`` (300).
             env_vars: Environment variables injected into the sandbox.
             metadata: Arbitrary key-value metadata (e.g. network-policy, host-mount).
+            allow_internet_access: When ``False``, the sandbox is blocked from
+                making outbound traffic to the public internet.
             network: Egress network policy. Accepts keys:
-
                 - ``allow_out`` / ``deny_out``: lists of CIDRs or hostnames (L3/L4).
                 - ``rules``: list of :class:`~cubesandbox.Rule` dataclasses (or
                   equivalent dicts with snake_case keys) for L7 host/path/SNI
@@ -118,13 +145,29 @@ class Sandbox:
                   ``{"api.example.com": [{"transform": {"headers": {...}}}]}``)
                   is also accepted and converted into equivalent CubeEgress
                   inject rules.
+            lifecycle: Optional dict mirroring the e2b SDK's ``lifecycle``
+                object (https://e2b.dev/docs/sandbox/auto-resume). Accepts
+                two keys:
+
+                - ``on_timeout``: ``"kill"`` (default) or ``"pause"``. When
+                  ``"pause"``, an idle sandbox is suspended instead of
+                  deleted; its memory snapshot survives across the pause.
+                - ``auto_resume``: ``bool``, default ``False``. Only
+                  meaningful when ``on_timeout="pause"``. When ``True``, the
+                  next request hitting the paused sandbox transparently
+                  wakes it back up. When ``False`` you must call
+                  :meth:`connect` to resume manually.
+
+                Absent ``lifecycle`` keeps today's behaviour (idle sandboxes
+                are killed).
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
             A running :class:`Sandbox` instance.
 
         Raises:
-            ValueError: If no template ID is provided.
+            ValueError: If no template ID is provided, or if ``lifecycle``
+                contains an unsupported ``on_timeout`` value.
             ApiError: On unexpected backend error (HTTP 500).
         """
         cfg = config or Config()
@@ -162,6 +205,11 @@ class Sandbox:
                     net["rules"] = [_serialize_rule(r) for r in normalized_rules]
             if net:
                 payload["network"] = net
+        # Lifecycle: opt-in. Wire shape mirrors e2b
+        # (https://e2b.dev/docs/sandbox/auto-resume) — a nested object with
+        # camelCase keys. Absent => server-side default ("kill" on timeout).
+        if lifecycle:
+            payload["lifecycle"] = _serialize_lifecycle(lifecycle)
         payload.update(kwargs)
 
         s = requests.Session()

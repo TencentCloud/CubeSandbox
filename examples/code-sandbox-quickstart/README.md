@@ -124,6 +124,7 @@ hello cube
 | `create.py` | `sandbox.get_info()` — retrieve sandbox metadata |
 | `read.py` | `sandbox.files.read()` — read a file from the sandbox filesystem |
 | `pause.py` | `sandbox.pause()` / `sandbox.connect()` — snapshot and restore |
+| `auto_resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — let the platform pause idle sandboxes and resume them on the next request |
 | `network_no_internet.py` | `allow_internet_access=False` — fully air-gapped sandbox |
 | `network_allowlist.py` | `allow_out` — whitelist specific CIDRs, block everything else |
 | `network_denylist.py` | `deny_out` — block specific CIDRs, allow the rest |
@@ -153,6 +154,26 @@ with Sandbox.create(template=template_id) as sandbox:
     time.sleep(3)
     sandbox.connect()     # restore snapshot, resume execution
     print(sandbox.get_info())
+```
+
+### auto_resume.py — Auto Pause & Auto Resume
+
+Like `pause.py`, but the platform handles the pause/resume cycle on its own.
+The `lifecycle` argument mirrors the e2b SDK
+([reference](https://e2b.dev/docs/sandbox/auto-resume)) — set
+`on_timeout="pause"` to opt into idle-timeout pausing and `auto_resume=True`
+so the next request automatically wakes the sandbox up:
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    timeout=30,             # idle threshold the auto-pause sidecar uses
+    lifecycle={"on_timeout": "pause", "auto_resume": True},
+)
+sandbox.run_code("print('first call')")
+time.sleep(45)              # exceeds the timeout — sidecar pauses the sandbox
+sandbox.run_code("print('back from a transparent resume')")
+sandbox.kill()
 ```
 
 ### Network Policies
@@ -188,6 +209,7 @@ code-sandbox-quickstart/
 ├── create.py                  # Create sandbox and inspect metadata
 ├── read.py                    # Read files from the sandbox filesystem
 ├── pause.py                   # Pause and resume a sandbox
+├── auto_resume.py             # Auto-pause / auto-resume on idle timeout
 ├── network_no_internet.py     # Fully air-gapped sandbox
 ├── network_allowlist.py       # Outbound CIDR allowlist
 ├── network_denylist.py        # Outbound CIDR denylist

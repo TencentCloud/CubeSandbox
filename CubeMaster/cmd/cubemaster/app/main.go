@@ -26,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/instancecache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler"
@@ -160,6 +161,14 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 	if err := templatecenter.Init(ctx); err != nil {
 		stdlog.Fatalf("templatecenter init fail:%v", err)
 		return err
+	}
+
+	// lifecycle wires the auto-pause / auto-resume metadata channel into the
+	// sandbox create/destroy hooks. It is non-fatal: a Redis hiccup must not
+	// block CubeMaster from serving sandboxes, only the sidecar's view goes
+	// stale until the next reconcile.
+	if err := lifecycle.Init(ctx); err != nil {
+		log.G(ctx).Warnf("lifecycle init fail (non-fatal): %v", err)
 	}
 
 	scheduler.InitScheduler(ctx)

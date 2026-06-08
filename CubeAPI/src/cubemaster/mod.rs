@@ -657,6 +657,19 @@ pub struct CreateSandboxRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub cube_network_config: Option<CubeNetworkConfig>,
+
+    /// Auto-pause: when true, CubeMaster publishes this sandbox to the
+    /// auto-pause registry consumed by CubeProxy-sidecar; once the proxy
+    /// reports it idle for `timeout` seconds the sidecar pauses it.
+    /// Field name matches CubeMaster's `auto_pause` JSON tag.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub auto_pause: bool,
+
+    /// Auto-resume: when true, an incoming request hitting a paused sandbox
+    /// is transparently resumed instead of erroring. Field name matches
+    /// CubeMaster's `auto_resume` JSON tag.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub auto_resume: bool,
 }
 
 /// Network egress control sent to CubeMaster.

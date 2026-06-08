@@ -138,6 +138,21 @@ impl SandboxService {
         let cube_network_config =
             build_cube_network_config(body.allow_internet_access, body.network.as_ref())?;
 
+        // Derive the two CubeMaster-side bools from the e2b-shaped lifecycle
+        // object. Absent lifecycle keeps today's behaviour: idle sandboxes
+        // are killed (auto_pause = false), and auto_resume defaults off.
+        let (auto_pause, auto_resume) = body
+            .lifecycle
+            .as_ref()
+            .map(|lc| {
+                use crate::models::SandboxOnTimeout;
+                (
+                    matches!(lc.on_timeout, SandboxOnTimeout::Pause),
+                    lc.auto_resume,
+                )
+            })
+            .unwrap_or((false, false));
+
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
             instance_type: self.instance_type.clone(),
@@ -150,6 +165,8 @@ impl SandboxService {
             exposed_ports: vec![],
             network_type: Some("tap".to_string()),
             cube_network_config,
+            auto_pause,
+            auto_resume,
         };
 
         let resp = self
@@ -718,7 +735,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{build_cube_network_config, filter_by_metadata, from_cubemaster_info};
-    use crate::cubemaster::{ListSandboxResponse, SandboxInfo};
+    use crate::cubemaster::{CreateSandboxRequest, ListSandboxResponse, SandboxInfo};
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, SandboxNetworkConfig,
         SandboxState,
@@ -952,5 +969,113 @@ mod tests {
         assert!(listed
             .iter()
             .all(|sandbox| sandbox.state == SandboxState::Paused));
+    }
+
+    /// CubeMaster keys lifecycle metadata off these exact JSON field names —
+    /// `auto_pause` / `auto_resume`. If they ever rename or get dropped during
+    /// serialization the auto-pause sidecar silently treats every new sandbox
+    /// as opted-out. Lock the wire shape down with a serialization snapshot.
+    #[test]
+    fn create_sandbox_request_serializes_lifecycle_flags() {
+        let mut req = CreateSandboxRequest {
+            request_id: "req-1".to_string(),
+            instance_type: "cubebox".to_string(),
+            timeout: Some(60),
+            annotations: HashMap::new(),
+            labels: None,
+            volumes: None,
+            containers: vec![],
+            exposed_ports: vec![],
+            network_type: None,
+            cube_network_config: None,
+            auto_pause: false,
+            auto_resume: false,
+        };
+
+        // Both false → both fields are omitted (skip_serializing_if = Not::not).
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            json.get("auto_pause").is_none(),
+            "auto_pause=false should be omitted, got: {json}"
+        );
+        assert!(
+            json.get("auto_resume").is_none(),
+            "auto_resume=false should be omitted, got: {json}"
+        );
+
+        // Flip on → fields appear with snake_case key matching CubeMaster's
+        // `json:"auto_pause,omitempty"` and `json:"auto_resume,omitempty"`.
+        req.auto_pause = true;
+        req.auto_resume = true;
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json.get("auto_pause"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            json.get("auto_resume"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    /// The inbound API mirrors the e2b `lifecycle` object (camelCase nested
+    /// struct). CubeAPI then translates it to the two CubeMaster-side bools
+    /// when constructing the create-sandbox RPC. Verify the translation
+    /// covers each meaningful combination.
+    #[test]
+    fn lifecycle_object_translates_to_cubemaster_bools() {
+        use crate::models::{NewSandbox, SandboxLifecycleConfig, SandboxOnTimeout};
+
+        // Helper that mimics services::create_sandbox's lifecycle decoding.
+        fn translate(body: &NewSandbox) -> (bool, bool) {
+            body.lifecycle
+                .as_ref()
+                .map(|lc| {
+                    (
+                        matches!(lc.on_timeout, SandboxOnTimeout::Pause),
+                        lc.auto_resume,
+                    )
+                })
+                .unwrap_or((false, false))
+        }
+
+        // Absent lifecycle => preserve historical behaviour.
+        let absent: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+        }))
+        .unwrap();
+        assert_eq!(translate(&absent), (false, false));
+
+        // Explicit kill (with auto_resume=true) is still kill — auto_resume
+        // doesn't auto-imply pause. Server-side enforcement of the e2b
+        // semantic ("auto_resume only meaningful when on_timeout=pause") is
+        // delegated to CubeMaster.
+        let kill: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+            "lifecycle": {"onTimeout": "kill", "autoResume": true},
+        }))
+        .unwrap();
+        assert_eq!(translate(&kill), (false, true));
+
+        // Pause + auto_resume — the canonical e2b auto-resume case.
+        let pause_with_resume: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+            "lifecycle": {"onTimeout": "pause", "autoResume": true},
+        }))
+        .unwrap();
+        assert_eq!(translate(&pause_with_resume), (true, true));
+
+        // Pause without auto_resume — caller must call connect() manually.
+        let pause_only: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+            "lifecycle": {"onTimeout": "pause"},
+        }))
+        .unwrap();
+        assert_eq!(translate(&pause_only), (true, false));
+
+        // Empty lifecycle object — defaults: kill on timeout, no auto-resume.
+        let empty: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+            "lifecycle": {},
+        }))
+        .unwrap();
+        assert_eq!(translate(&empty), (false, false));
     }
 }

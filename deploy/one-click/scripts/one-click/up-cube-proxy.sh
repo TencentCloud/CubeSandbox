@@ -34,6 +34,25 @@ CUBE_PROXY_HTTPS_PORT="${CUBE_PROXY_HTTPS_PORT:-443}"
 CUBE_PROXY_HTTP_PORT="${CUBE_PROXY_HTTP_PORT:-80}"
 CUBE_PROXY_SSL_CERT="${CUBE_PROXY_SSL_CERT:-cube.app+3.pem}"
 CUBE_PROXY_SSL_KEY="${CUBE_PROXY_SSL_KEY:-cube.app+3-key.pem}"
+# Auto-pause sidecar runs in the same container as nginx; it is always
+# brought up alongside it and consumes the same Redis CubeMaster writes
+# lifecycle events to.
+CUBE_SIDECAR_REDIS_ADDR="${CUBE_SIDECAR_REDIS_ADDR:-${CUBE_PROXY_REDIS_IP}:${CUBE_PROXY_REDIS_PORT}}"
+CUBE_SIDECAR_REDIS_PASSWORD="${CUBE_SIDECAR_REDIS_PASSWORD:-${CUBE_PROXY_REDIS_PASSWORD}}"
+CUBE_SIDECAR_REDIS_DB="${CUBE_SIDECAR_REDIS_DB:-0}"
+CUBE_SIDECAR_PROXY_ADMIN_URLS="${CUBE_SIDECAR_PROXY_ADMIN_URLS:-http://127.0.0.1:8082}"
+# CubeMaster's HTTP listener defaults to :8089 (see configs/single-node/
+# cubemaster.yaml `common.http_port`). Override CUBE_SIDECAR_CUBEMASTER_URL
+# at deploy time if your CubeMaster is on a different host:port.
+CUBE_SIDECAR_CUBEMASTER_URL="${CUBE_SIDECAR_CUBEMASTER_URL:-http://${CUBE_SANDBOX_NODE_IP}:8089}"
+CUBE_SIDECAR_LISTEN_ADDR="${CUBE_SIDECAR_LISTEN_ADDR:-127.0.0.1:8083}"
+CUBE_SIDECAR_DEFAULT_IDLE_TIMEOUT="${CUBE_SIDECAR_DEFAULT_IDLE_TIMEOUT:-5m}"
+# Lua $cube_sidecar_addr is consumed by the /_sidecar_resume internal proxy.
+# Default to the same loopback address the sidecar binds to.
+CUBE_SIDECAR_NGX_ADDR="${CUBE_SIDECAR_NGX_ADDR:-${CUBE_SIDECAR_LISTEN_ADDR}}"
+# Optional shared secret accepted by CubeProxy's /admin/* endpoints. Empty
+# means "no auth"; safe because the admin server listens on 127.0.0.1 only.
+CUBE_ADMIN_TOKEN="${CUBE_ADMIN_TOKEN:-}"
 COMPOSE_DETACH="${ONE_CLICK_COMPOSE_DETACH:-1}"
 MKCERT_BUNDLED_BIN="${TOOLBOX_ROOT}/support/bin/mkcert"
 PREPARE_ONLY="${ONE_CLICK_PREPARE_ONLY:-0}"
@@ -94,7 +113,9 @@ render_template_atomic \
   -e "s/__CUBE_PROXY_REDIS_IP__/$(escape_sed "${CUBE_PROXY_REDIS_IP}")/g" \
   -e "s/__CUBE_PROXY_REDIS_PORT__/$(escape_sed "${CUBE_PROXY_REDIS_PORT}")/g" \
   -e "s/__CUBE_PROXY_REDIS_PASSWORD__/$(escape_sed "${CUBE_PROXY_REDIS_PASSWORD}")/g" \
-  -e "s/__CUBE_PROXY_HOST_IP__/$(escape_sed "${CUBE_SANDBOX_NODE_IP}")/g"
+  -e "s/__CUBE_PROXY_HOST_IP__/$(escape_sed "${CUBE_SANDBOX_NODE_IP}")/g" \
+  -e "s#__CUBE_SIDECAR_NGX_ADDR__#$(escape_sed "${CUBE_SIDECAR_NGX_ADDR}" '#')#g" \
+  -e "s#__CUBE_ADMIN_TOKEN__#$(escape_sed "${CUBE_ADMIN_TOKEN}" '#')#g"
 
 NGINX_TEMPLATE="${PROXY_DIR}/nginx.conf.template"
 NGINX_CONF="${PROXY_DIR}/nginx.conf"
@@ -115,7 +136,15 @@ render_template_atomic \
   -e "s#__CUBE_PROXY_BUILD_CONTEXT__#$(escape_sed "${BUILD_CONTEXT_DIR}" '#')#g" \
   -e "s#__CUBE_PROXY_CERT_DIR__#$(escape_sed "${CERT_DIR}" '#')#g" \
   -e "s#__CUBE_PROXY_GLOBAL_CONF__#$(escape_sed "${GLOBAL_CONF}" '#')#g" \
-  -e "s#__CUBE_PROXY_NGINX_CONF__#$(escape_sed "${NGINX_CONF}" '#')#g"
+  -e "s#__CUBE_PROXY_NGINX_CONF__#$(escape_sed "${NGINX_CONF}" '#')#g" \
+  -e "s#__CUBE_SIDECAR_REDIS_ADDR__#$(escape_sed "${CUBE_SIDECAR_REDIS_ADDR}" '#')#g" \
+  -e "s#__CUBE_SIDECAR_REDIS_PASSWORD__#$(escape_sed "${CUBE_SIDECAR_REDIS_PASSWORD}" '#')#g" \
+  -e "s#__CUBE_SIDECAR_REDIS_DB__#$(escape_sed "${CUBE_SIDECAR_REDIS_DB}" '#')#g" \
+  -e "s#__CUBE_SIDECAR_PROXY_ADMIN_URLS__#$(escape_sed "${CUBE_SIDECAR_PROXY_ADMIN_URLS}" '#')#g" \
+  -e "s#__CUBE_SIDECAR_CUBEMASTER_URL__#$(escape_sed "${CUBE_SIDECAR_CUBEMASTER_URL}" '#')#g" \
+  -e "s#__CUBE_SIDECAR_LISTEN_ADDR__#$(escape_sed "${CUBE_SIDECAR_LISTEN_ADDR}" '#')#g" \
+  -e "s#__CUBE_SIDECAR_DEFAULT_IDLE_TIMEOUT__#$(escape_sed "${CUBE_SIDECAR_DEFAULT_IDLE_TIMEOUT}" '#')#g" \
+  -e "s#__CUBE_ADMIN_TOKEN__#$(escape_sed "${CUBE_ADMIN_TOKEN}" '#')#g"
 
 if [[ "${PREPARE_ONLY}" == "1" ]]; then
   log "cube proxy runtime files prepared under ${PROXY_DIR}"

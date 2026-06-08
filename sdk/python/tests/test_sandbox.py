@@ -159,6 +159,73 @@ class TestCreate:
         body = m.call_args.kwargs["json"]
         assert "network" not in body
 
+    def test_create_default_lifecycle_omitted(self):
+        # Default behavior must remain wire-compatible with pre-feature
+        # callers: when ``lifecycle`` isn't set, the SDK must emit a
+        # payload that's byte-identical to the historical one — no
+        # ``lifecycle``, ``autoPause``, or ``autoResume`` keys.
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert "lifecycle" not in body
+        assert "autoPause" not in body
+        assert "autoResume" not in body
+
+    def test_create_lifecycle_pause_on_timeout(self):
+        # `on_timeout="pause"` alone (no auto_resume) should ship a
+        # camelCase nested object and nothing else lifecycle-related.
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                lifecycle={"on_timeout": "pause"},
+                config=make_config(),
+            )
+        body = m.call_args.kwargs["json"]
+        assert body["lifecycle"] == {"onTimeout": "pause"}
+
+    def test_create_lifecycle_pause_with_auto_resume(self):
+        # The full e2b-shaped lifecycle: pause on timeout AND auto-resume on
+        # next request. Wire shape mirrors
+        # https://e2b.dev/docs/sandbox/auto-resume verbatim.
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                lifecycle={"on_timeout": "pause", "auto_resume": True},
+                config=make_config(),
+            )
+        body = m.call_args.kwargs["json"]
+        assert body["lifecycle"] == {"onTimeout": "pause", "autoResume": True}
+
+    def test_create_lifecycle_kill_explicit(self):
+        # Explicit "kill" is identical to the default but the user might
+        # set it for clarity. Make sure it round-trips.
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                lifecycle={"on_timeout": "kill"},
+                config=make_config(),
+            )
+        body = m.call_args.kwargs["json"]
+        assert body["lifecycle"] == {"onTimeout": "kill"}
+
+    def test_create_lifecycle_invalid_on_timeout_raises(self):
+        # Mistyped values must fail client-side, before we hit the network,
+        # so the user gets a stack trace pointing at their source.
+        with pytest.raises(ValueError, match="on_timeout"):
+            Sandbox.create(
+                lifecycle={"on_timeout": "Pause"},  # capital P
+                config=make_config(),
+            )
+
+    def test_create_lifecycle_auto_resume_only(self):
+        # Asymmetric input — auto_resume without on_timeout — is allowed
+        # and just translates literally; it's the server's job to enforce
+        # that auto_resume only matters when on_timeout="pause".
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                lifecycle={"auto_resume": True},
+                config=make_config(),
+            )
+        body = m.call_args.kwargs["json"]
+        assert body["lifecycle"] == {"autoResume": True}
+
 
 # ── domain filtering (DNS allow-list) ────────────────────────────────────────
 

@@ -8,6 +8,22 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     network_mode: host
+    environment:
+      # cube-proxy-sidecar runs alongside nginx inside this container (started
+      # by /usr/local/openresty/nginx/sbin/start.sh). It needs to reach the
+      # same Redis CubeMaster writes lifecycle events to, plus the loopback
+      # admin server on the co-resident nginx.
+      CUBE_SIDECAR_REDIS_ADDR: "__CUBE_SIDECAR_REDIS_ADDR__"
+      CUBE_SIDECAR_REDIS_PASSWORD: "__CUBE_SIDECAR_REDIS_PASSWORD__"
+      CUBE_SIDECAR_REDIS_DB: "__CUBE_SIDECAR_REDIS_DB__"
+      CUBE_SIDECAR_PROXY_ADMIN_URLS: "__CUBE_SIDECAR_PROXY_ADMIN_URLS__"
+      CUBE_SIDECAR_CUBEMASTER_URL: "__CUBE_SIDECAR_CUBEMASTER_URL__"
+      CUBE_SIDECAR_LISTEN_ADDR: "__CUBE_SIDECAR_LISTEN_ADDR__"
+      CUBE_SIDECAR_DEFAULT_IDLE_TIMEOUT: "__CUBE_SIDECAR_DEFAULT_IDLE_TIMEOUT__"
+      # Shared secret sent as X-Cube-Admin-Token on every /admin/* push the
+      # sidecar makes to its co-resident nginx. Must match the value Lua
+      # global.conf substitutes into $cube_admin_token.
+      CUBE_SIDECAR_ADMIN_TOKEN: "__CUBE_ADMIN_TOKEN__"
     volumes:
       - __CUBE_PROXY_CERT_DIR__:/usr/local/openresty/nginx/certs:ro
       - __CUBE_PROXY_GLOBAL_CONF__:/usr/local/openresty/nginx/conf/global/global.conf:ro

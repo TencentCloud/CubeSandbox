@@ -116,10 +116,37 @@ pub struct EgressRuleInject {
     pub format: Option<String>,
 }
 
-/// Auto-resume configuration for paused sandboxes.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SandboxAutoResumeConfig {
-    pub enabled: bool,
+/// Sandbox lifecycle configuration. Mirrors the e2b SDK's `lifecycle` object —
+/// see https://e2b.dev/docs/sandbox/auto-resume for the canonical reference.
+///
+/// `on_timeout` decides what happens when the sandbox idle timer fires; the
+/// historical default is "kill" (delete the sandbox) which matches today's
+/// behaviour. `auto_resume` only takes effect when `on_timeout = "pause"` —
+/// it tells the proxy/sidecar to wake a paused sandbox up automatically when
+/// activity arrives, instead of returning an error.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct SandboxLifecycleConfig {
+    /// "kill" (default) | "pause".
+    #[serde(rename = "onTimeout", default)]
+    pub on_timeout: SandboxOnTimeout,
+
+    /// Auto-resume on activity. Defaults to false. Only meaningful when
+    /// `on_timeout` is set to "pause".
+    #[serde(rename = "autoResume", default)]
+    pub auto_resume: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxOnTimeout {
+    Kill,
+    Pause,
+}
+
+impl Default for SandboxOnTimeout {
+    fn default() -> Self {
+        Self::Kill
+    }
 }
 
 /// Volume mount inside the sandbox.
@@ -133,8 +160,9 @@ pub struct SandboxVolumeMount {
 
 /// Request body for POST /sandboxes
 /// Field names match exactly what the E2B SDK sends.
-/// Rule: ID abbreviations → uppercase (templateID, sandboxID, envVars, autoPause);
-///       allow_internet_access is a known SDK snake_case quirk.
+/// Rule: ID abbreviations → uppercase (templateID, sandboxID, envVars);
+///       allow_internet_access is a known SDK snake_case quirk;
+///       lifecycle is a nested object — see SandboxLifecycleConfig.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[allow(dead_code)]
 pub struct NewSandbox {
@@ -145,11 +173,11 @@ pub struct NewSandbox {
     #[serde(default = "default_timeout")]
     pub timeout: i32,
 
-    #[serde(rename = "autoPause", default)]
-    pub auto_pause: bool,
-
-    #[serde(rename = "autoResume", skip_serializing_if = "Option::is_none")]
-    pub auto_resume: Option<SandboxAutoResumeConfig>,
+    /// Sandbox lifecycle configuration. Maps to e2b's `lifecycle` object so
+    /// callers that already speak e2b can pass through unchanged. Absent
+    /// (None) means today's behaviour: idle sandboxes are killed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<SandboxLifecycleConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secure: Option<bool>,

@@ -70,6 +70,7 @@ help:
 	@printf "  cubecow-smoke Build cubecow smoke test CLI in Docker\n"
 	@printf "  cubecow-test-native Build SDK artifacts and run native tests in Docker\n"
 	@printf "  network-agent Build network-agent in Docker\n"
+	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cubeapi       Build CubeAPI (cube-api) in Docker\n"
 	@printf "  cube-api      Alias of cubeapi\n"
@@ -205,6 +206,11 @@ cubevsmapdump: builder-image
 network-agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/network-agent && make proto && make build && cp bin/network-agent /workspace/_output/bin/network-agent'
+
+.PHONY: cube-proxy-sidecar
+cube-proxy-sidecar: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeProxy/sidecar && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -tags "netgo osusergo" -ldflags "-s -w" -o /workspace/_output/bin/cube-proxy-sidecar ./cmd/sidecar'
 
 .PHONY: agent
 agent: builder-image

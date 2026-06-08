@@ -7,6 +7,7 @@
 -- routing in rewrite_phase.lua.
 
 local sb = require "sandbox_backend"
+local state = require "sandbox_state"
 
 local uri = ngx.var.uri or ""
 local ins_id, container_port, rest = uri:match("^/sandbox/([%w_%-]+)/(%d+)(/?.*)$")
@@ -33,6 +34,11 @@ ngx.var.container_port = container_port
 -- the remaining phases (balancer / header_filter / log) of this location
 -- continue to run as configured.
 ngx.req.set_uri(rest, false)
+
+-- Auto-pause gate: if the sandbox is currently paused, ask the sidecar to
+-- resume it before we attempt backend resolution. No-op when the lifecycle
+-- feature is disabled or the sandbox isn't tracked.
+state.gate(ins_id)
 
 local host_ip, host_port = sb.resolve_backend(ins_id, container_port)
 ngx.var.backend_ip = host_ip

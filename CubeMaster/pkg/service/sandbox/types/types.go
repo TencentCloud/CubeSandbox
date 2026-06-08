@@ -52,6 +52,17 @@ type CreateCubeSandboxReq struct {
 
 	RuntimeHandler string `json:"runtime_handler,omitempty"`
 	Namespace      string `json:"namespace,omitempty"`
+
+	// AutoPause asks CubeMaster (via the lifecycle subsystem) to publish this
+	// sandbox to the auto-pause registry: once the proxy reports it has been
+	// idle for `Timeout` seconds the sidecar will pause it. Default false
+	// preserves the historical "never pause" behavior.
+	AutoPause bool `json:"auto_pause,omitempty"`
+
+	// AutoResume signals that an incoming request hitting a paused sandbox
+	// should transparently resume it. Default false means a request hitting a
+	// paused sandbox returns an error instead.
+	AutoResume bool `json:"auto_resume,omitempty"`
 }
 
 func (r *CreateCubeSandboxReq) UnmarshalJSON(data []byte) error {
