@@ -8,8 +8,8 @@ use crate::{
     cubemaster::{
         CreateTemplateContainerOverrides, CreateTemplateCubeVSContext, CreateTemplateEnv,
         CreateTemplateFromImageReq, CreateTemplateResources, CubeMasterClient, CubeMasterError,
-        HttpGetAction, Probe, ProbeHandler, RedoTemplateReq, TemplateDeleteRequest, TemplateJob,
-        TemplateJobResponse,
+        DnsConfig, HttpGetAction, Probe, ProbeHandler, RedoTemplateReq, TemplateDeleteRequest,
+        TemplateJob, TemplateJobResponse,
     },
     error::{AppError, AppResult},
     models::{
@@ -109,74 +109,9 @@ impl TemplateService {
             return Err(AppError::BadRequest("image is required".to_string()));
         }
 
-        // probe
-        let probe = body
-            .probe_port
-            .or_else(|| body.exposed_ports.as_ref().and_then(|p| p.first().copied()))
-            .map(|port| Probe {
-                probe_handler: ProbeHandler {
-                    http_get: Some(HttpGetAction {
-                        path: body
-                            .probe_path
-                            .clone()
-                            .unwrap_or_else(|| "/health".to_string()),
-                        port,
-                        host: None,
-                        scheme: None,
-                    }),
-                    exec: None,
-                },
-                timeout_ms: Some(30000),
-                period_ms: Some(500),
-                success_threshold: Some(1),
-                failure_threshold: Some(60),
-            });
-
-        // resources
-        let resources = if body.cpu.is_some() || body.memory.is_some() {
-            Some(CreateTemplateResources {
-                cpu: body.cpu.map(|v| format!("{}m", v)),
-                mem: body.memory.map(|v| format!("{}Mi", v)),
-            })
-        } else {
-            None
-        };
-
-        // envs: parse "KEY=VALUE" strings
-        let envs = body
-            .env
-            .map(|envs| {
-                envs.into_iter()
-                    .filter_map(|s| {
-                        let mut parts = s.splitn(2, '=');
-                        let key = parts.next()?.trim().to_string();
-                        let value = parts.next().unwrap_or("").to_string();
-                        if key.is_empty() {
-                            None
-                        } else {
-                            Some(CreateTemplateEnv { key, value })
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .filter(|v| !v.is_empty());
-
-        let container_overrides = if probe.is_some() || resources.is_some() || envs.is_some() {
-            Some(CreateTemplateContainerOverrides {
-                probe,
-                resources,
-                envs,
-            })
-        } else {
-            None
-        };
-
-        // cubevs_context
-        let cubevs_context = body
-            .allow_internet_access
-            .map(|v| CreateTemplateCubeVSContext {
-                allow_internet_access: Some(v),
-            });
+        let dns_servers = validate_dns_servers(body.dns.as_deref())?;
+        let container_overrides = build_template_container_overrides(&body, dns_servers.as_deref());
+        let cubevs_context = build_template_cubevs_context(&body);
 
         let req = CreateTemplateFromImageReq {
             request_id: new_request_id(),
@@ -190,6 +125,10 @@ impl TemplateService {
             source_image_ref: body.image.trim().to_string(),
             writable_layer_size: body.writable_layer_size,
             exposed_ports: body.exposed_ports,
+            network_type: non_empty_option(body.network_type),
+            registry_username: non_empty_option(body.registry_username),
+            registry_password: non_empty_option(body.registry_password),
+            distribution_scope: non_empty_vec(body.nodes),
             container_overrides,
             cubevs_context,
         };
@@ -352,5 +291,212 @@ fn default_template_job() -> TemplateJob {
         error_message: String::new(),
         attempt_no: 0,
         retry_of_job_id: String::new(),
+    }
+}
+
+fn non_empty_option(value: Option<String>) -> Option<String> {
+    value.and_then(|s| non_empty(s))
+}
+
+fn non_empty_vec(values: Option<Vec<String>>) -> Option<Vec<String>> {
+    values.and_then(|items| {
+        let cleaned: Vec<String> = items
+            .into_iter()
+            .filter_map(|item| non_empty(item))
+            .collect();
+        if cleaned.is_empty() {
+            None
+        } else {
+            Some(cleaned)
+        }
+    })
+}
+
+fn validate_dns_servers(servers: Option<&[String]>) -> AppResult<Option<Vec<String>>> {
+    let Some(servers) = servers else {
+        return Ok(None);
+    };
+    let mut cleaned = Vec::new();
+    for server in servers {
+        let server = server.trim();
+        if server.is_empty() {
+            continue;
+        }
+        if server.parse::<std::net::IpAddr>().is_err() {
+            return Err(AppError::BadRequest(format!(
+                "invalid dns server {server:?}"
+            )));
+        }
+        cleaned.push(server.to_string());
+    }
+    if cleaned.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(cleaned))
+    }
+}
+
+fn build_template_probe(body: &CreateTemplateRequest) -> Option<Probe> {
+    body.probe_port
+        .or_else(|| body.exposed_ports.as_ref().and_then(|p| p.first().copied()))
+        .map(|port| Probe {
+            probe_handler: ProbeHandler {
+                http_get: Some(HttpGetAction {
+                    path: body
+                        .probe_path
+                        .clone()
+                        .unwrap_or_else(|| "/health".to_string()),
+                    port,
+                    host: None,
+                    scheme: None,
+                }),
+                exec: None,
+            },
+            timeout_ms: Some(30000),
+            period_ms: Some(500),
+            success_threshold: Some(1),
+            failure_threshold: Some(60),
+        })
+}
+
+fn build_template_resources(body: &CreateTemplateRequest) -> Option<CreateTemplateResources> {
+    if body.cpu.is_none() && body.memory.is_none() {
+        return None;
+    }
+    Some(CreateTemplateResources {
+        cpu: body.cpu.map(|v| format!("{v}m")),
+        mem: body.memory.map(|v| format!("{v}Mi")),
+    })
+}
+
+fn build_template_envs(body: &CreateTemplateRequest) -> Option<Vec<CreateTemplateEnv>> {
+    body.env
+        .as_ref()
+        .map(|envs| {
+            envs.iter()
+                .filter_map(|s| {
+                    let mut parts = s.splitn(2, '=');
+                    let key = parts.next()?.trim().to_string();
+                    let value = parts.next().unwrap_or("").to_string();
+                    if key.is_empty() {
+                        None
+                    } else {
+                        Some(CreateTemplateEnv { key, value })
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|envs| !envs.is_empty())
+}
+
+fn build_template_container_overrides(
+    body: &CreateTemplateRequest,
+    dns_servers: Option<&[String]>,
+) -> Option<CreateTemplateContainerOverrides> {
+    let command = non_empty_vec(body.command.clone());
+    let args = non_empty_vec(body.args.clone());
+    let probe = build_template_probe(body);
+    let resources = build_template_resources(body);
+    let envs = build_template_envs(body);
+    let dns_config = dns_servers.map(|servers| DnsConfig {
+        servers: servers.to_vec(),
+        searches: Vec::new(),
+    });
+
+    if command.is_none()
+        && args.is_none()
+        && probe.is_none()
+        && resources.is_none()
+        && envs.is_none()
+        && dns_config.is_none()
+    {
+        return None;
+    }
+
+    Some(CreateTemplateContainerOverrides {
+        command,
+        args,
+        probe,
+        resources,
+        envs,
+        dns_config,
+    })
+}
+
+fn build_template_cubevs_context(body: &CreateTemplateRequest) -> Option<CreateTemplateCubeVSContext> {
+    let allow_out = body.allow_out.clone().unwrap_or_default();
+    let deny_out = body.deny_out.clone().unwrap_or_default();
+    if body.allow_internet_access.is_none() && allow_out.is_empty() && deny_out.is_empty() {
+        return None;
+    }
+    Some(CreateTemplateCubeVSContext {
+        allow_internet_access: body.allow_internet_access,
+        allow_out,
+        deny_out,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_request() -> CreateTemplateRequest {
+        CreateTemplateRequest {
+            template_id: String::new(),
+            instance_type: Some("cubebox".to_string()),
+            image: "python:3.11-slim".to_string(),
+            writable_layer_size: Some("1G".to_string()),
+            exposed_ports: Some(vec![8080]),
+            probe_port: Some(8080),
+            probe_path: Some("/health".to_string()),
+            cpu: Some(2000),
+            memory: Some(2048),
+            env: Some(vec!["A=1".to_string()]),
+            allow_internet_access: Some(true),
+            network_type: Some("tap".to_string()),
+            nodes: Some(vec!["node-1".to_string()]),
+            registry_username: Some("user".to_string()),
+            registry_password: Some("pass".to_string()),
+            command: Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
+            args: Some(vec!["sleep infinity".to_string()]),
+            dns: Some(vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()]),
+            allow_out: Some(vec!["172.67.0.0/16".to_string()]),
+            deny_out: Some(vec!["10.0.0.0/8".to_string()]),
+        }
+    }
+
+    #[test]
+    fn build_template_container_overrides_maps_cli_fields() {
+        let body = sample_request();
+        let overrides = build_template_container_overrides(&body, Some(&["8.8.8.8".to_string()]))
+            .expect("overrides");
+
+        assert_eq!(
+            overrides.command,
+            Some(vec!["/bin/sh".to_string(), "-c".to_string()])
+        );
+        assert_eq!(overrides.args, Some(vec!["sleep infinity".to_string()]));
+        assert_eq!(
+            overrides.dns_config.as_ref().map(|d| d.servers.clone()),
+            Some(vec!["8.8.8.8".to_string()])
+        );
+        assert!(overrides.probe.is_some());
+        assert!(overrides.resources.is_some());
+        assert_eq!(overrides.envs.as_ref().map(|envs| envs.len()), Some(1));
+    }
+
+    #[test]
+    fn build_template_cubevs_context_includes_egress_rules() {
+        let body = sample_request();
+        let ctx = build_template_cubevs_context(&body).expect("cubevs");
+        assert_eq!(ctx.allow_internet_access, Some(true));
+        assert_eq!(ctx.allow_out, vec!["172.67.0.0/16".to_string()]);
+        assert_eq!(ctx.deny_out, vec!["10.0.0.0/8".to_string()]);
+    }
+
+    #[test]
+    fn validate_dns_servers_rejects_invalid_ip() {
+        let err = validate_dns_servers(Some(&["not-an-ip".to_string()])).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
     }
 }
