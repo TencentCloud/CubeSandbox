@@ -52,7 +52,6 @@ cubelet_storage_backend_from_config() {
 validate_cubelet_cow_startup_deps() {
   local config_path="$1"
   ensure_file "${config_path}"
-  require_cmd rg
   require_cmd sed
 
   local storage_backend
@@ -183,6 +182,30 @@ resolve_control_plane_cubemaster_addr() {
   die "ONE_CLICK_CONTROL_PLANE_IP or ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR is required for compute role"
 }
 
+command_output_has_exact_line() {
+  local needle="$1"
+  shift
+
+  require_cmd grep
+
+  local output
+  output="$("$@" 2>/dev/null || true)"
+  [[ -n "${output}" ]] || return 1
+  grep -Fxq -- "${needle}" <<<"${output}"
+}
+
+command_output_contains_fixed_string() {
+  local needle="$1"
+  shift
+
+  require_cmd grep
+
+  local output
+  output="$("$@" 2>/dev/null || true)"
+  [[ -n "${output}" ]] || return 1
+  grep -Fq -- "${needle}" <<<"${output}"
+}
+
 start_with_pidfile() {
   local name="$1"
   local cmd="$2"
@@ -233,7 +256,7 @@ pid_matches_pattern() {
     return 0
   fi
 
-  pgrep -f -- "${pattern}" | rg -x -- "${pid}" >/dev/null 2>&1
+  command_output_has_exact_line "${pid}" pgrep -f -- "${pattern}"
 }
 
 refresh_pidfile_from_pattern() {
@@ -301,7 +324,7 @@ stop_by_pidfile() {
 
 container_exists() {
   local name="$1"
-  docker ps -a --format '{{.Names}}' | rg -x "${name}" >/dev/null 2>&1
+  command_output_has_exact_line "${name}" docker ps -a --format '{{.Names}}'
 }
 
 docker_rm_if_exists() {

@@ -290,10 +290,10 @@ export E2B_API_KEY=e2b_000000
 必需命令：
 
 - `tar`
-- `rg`
 - `ss`
 - `bash`
 - `curl`
+- `grep`
 - `sed`
 - `pgrep`
 - `date`
@@ -328,10 +328,10 @@ sudo yum install -y lvm2 device-mapper-persistent-data util-linux
 
 - `docker`
 - `tar`
-- `rg`
 - `ss`
 - `bash`
 - `curl`
+- `grep`
 - `sed`
 - `pgrep`
 - `date`

@@ -28,7 +28,7 @@ After deployment, you will have a fully functional Cube Sandbox instance with:
 | Docker | Must be installed and running |
 | root access | `install.sh` requires root privileges |
 | DNS routing | `systemd-resolved` (preferred) or `NetworkManager + dnsmasq` |
-| `tar`, `rg`, `ss` | Required by install script |
+| `tar`, `ss`, `grep`, `sed`, `awk` | Required by install script |
 
 ### Software (Build Machine)
 
@@ -416,22 +416,6 @@ Common causes:
 - Port conflicts (3306 or 6379 already in use)
 - Insufficient disk space for Docker volumes
 - Docker daemon issues
-
-### ripgrep (`rg`) Not Installed
-
-```
-Error: required command not found: rg
-```
-
-Install ripgrep:
-
-```bash
-# Ubuntu/Debian
-sudo apt-get install ripgrep
-
-# CentOS/RHEL
-sudo yum install ripgrep
-```
 
 ## Known Limitations
 
