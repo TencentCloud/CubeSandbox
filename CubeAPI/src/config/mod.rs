@@ -71,6 +71,26 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+
+    /// Default template ID used by the Examples runner.
+    /// Env var: CUBE_TEMPLATE_ID
+    #[serde(default = "default_template_id")]
+    pub default_template_id: Option<String>,
+
+    /// CubeAPI URL used by the Examples runner (passed as CUBE_API_URL to scripts).
+    /// Env var: CUBE_API_URL (default "http://127.0.0.1:3000")
+    #[serde(default = "default_cube_api_url")]
+    pub cube_api_url: Option<String>,
+
+    /// CubeProxy node IP for bypassing DNS resolution (passed as CUBE_PROXY_NODE_IP).
+    /// Env var: CUBE_PROXY_NODE_IP
+    #[serde(default)]
+    pub cube_proxy_node_ip: Option<String>,
+
+    /// CubeProxy HTTP port (passed as CUBE_PROXY_PORT_HTTP).
+    /// Env var: CUBE_PROXY_PORT_HTTP (default "80")
+    #[serde(default = "default_cube_proxy_port_http")]
+    pub cube_proxy_port_http: Option<u16>,
 }
 
 fn default_bind() -> String {
@@ -108,6 +128,21 @@ fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .or_else(default_cube_sandbox_mysql_url)
+}
+fn default_template_id() -> Option<String> {
+    std::env::var("CUBE_TEMPLATE_ID").ok().filter(|s| !s.is_empty())
+}
+fn default_cube_api_url() -> Option<String> {
+    std::env::var("CUBE_API_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| Some("http://127.0.0.1:3000".to_string()))
+}
+
+fn default_cube_proxy_port_http() -> Option<u16> {
+    std::env::var("CUBE_PROXY_PORT_HTTP")
+        .ok()
+        .and_then(|s| s.parse().ok())
 }
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
@@ -148,6 +183,10 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
+            default_template_id: default_template_id(),
+            cube_api_url: default_cube_api_url(),
+            cube_proxy_node_ip: None,
+            cube_proxy_port_http: default_cube_proxy_port_http(),
         }
     }
 }

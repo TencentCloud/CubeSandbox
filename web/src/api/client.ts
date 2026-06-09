@@ -264,6 +264,7 @@ export const clusterApi = {
     authEnabled: boolean;
     sandboxDomain: string;
     instanceType: string;
+    defaultTemplateId?: string;
   }>('/config'),
 };
 
@@ -282,6 +283,37 @@ export interface StoreMeta {
 export const storeApi = {
   meta: () => api<StoreMeta>('/store/meta'),
   refresh: () => api<StoreMeta>('/store/refresh', { method: 'POST' }),
+};
+
+export interface ExampleMeta {
+  id: string;
+  filename: string;
+  title: string;
+  description: string;
+  category: string;
+}
+
+export interface ExampleSource {
+  id: string;
+  filename: string;
+  source: string;
+}
+
+export interface ExampleRunResult {
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  success: boolean;
+}
+
+export const examplesApi = {
+  list: () => api<ExampleMeta[]>('/examples'),
+  source: (id: string) => api<ExampleSource>(`/examples/${encodeURIComponent(id)}`),
+  run: (id: string, templateId?: string) =>
+    api<ExampleRunResult>('/examples/run', {
+      method: 'POST',
+      body: JSON.stringify({ id, template_id: templateId || undefined }),
+    }),
 };
 
 export interface AgentInstanceDto {
