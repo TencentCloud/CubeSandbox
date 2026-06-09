@@ -1,0 +1,32 @@
+{
+  "title": "Examples",
+  "subtitle": "Browse and run code-sandbox-quickstart examples directly from the dashboard — experience sandbox capabilities in one click.",
+  "badge": "code-sandbox-quickstart",
+  "run": "Run",
+  "running": "Running…",
+  "output": "Output",
+  "outputHint": "Click Run to execute this example. Output will appear here.",
+  "selectHint": "Pick an example from the left to view its code and output here.",
+  "selectHintTitle": "Choose an example to start",
+  "defaultTemplate": "Default: {{id}}",
+  "noTemplate": "No templates available",
+  "allCategories": "All",
+  "searchPlaceholder": "Search examples…",
+  "noResults": "No matching examples",
+  "copy": "Copy code",
+  "copied": "Copied to clipboard",
+  "copyFailed": "Copy failed",
+  "completed": "Completed",
+  "failed": "Failed",
+  "templateSelector": {
+    "title": "Select template",
+    "searchPlaceholder": "Search by ID / type…",
+    "empty": "No matching templates",
+    "hint": "Click outside to close",
+    "group": {
+      "ready": "Available",
+      "building": "Building",
+      "other": "Other"
+    }
+  }
+}
