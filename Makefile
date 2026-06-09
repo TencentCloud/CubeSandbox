@@ -19,12 +19,22 @@ CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
 
+# All versioned binaries should consume the canonical CUBE_VERSION /
+# CUBE_COMMIT / CUBE_BUILD_TIME triplet. Keep the root Makefile's ad-hoc
+# builder path aligned with the one-click release path so `_output/bin/* --version`
+# is never "0.0.0-dev (unknown) built at unknown" unless the repo metadata is
+# genuinely unavailable.
+CUBE_VERSION ?= $(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo 0.0.0-dev)
+CUBE_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+CUBE_BUILD_TIME ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
+
 DOCKER_GIT_CRED =
 ifneq ($(wildcard $(HOME)/.git-credentials),)
 DOCKER_GIT_CRED += -v $(TMP_GIT_CREDENTIALS):$(BUILDER_CONTAINER_HOME)/.git-credentials
 endif
 
-.PHONY: help builder-image builder-shell builder-run prepare-builder-home prepare-tmp-git-credentials all cubemaster cubelet cubecow-sdk cubecow-clean cubecow-smoke cubecow-test-native network-agent agent cubeapi shim manual-release web-install web-dev web-build web-preview web-lint web-api-sync web-sync-dev-env
+.PHONY: help builder-image builder-shell builder-run prepare-builder-home prepare-tmp-git-credentials all cubemaster cubelet cubecow-sdk cubecow-clean cubecow-smoke cubecow-test-native network-agent agent cubeapi cube-api shim manual-release web-install web-dev web-build web-preview web-lint web-api-sync web-sync-dev-env
 
 help:
 	@printf "Targets:\n"
@@ -39,6 +49,7 @@ help:
 	@printf "  network-agent Build network-agent in Docker\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cubeapi       Build CubeAPI (cube-api) in Docker\n"
+	@printf "  cube-api      Alias of cubeapi\n"
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
 	@printf "  all           Build cubemaster, cubelet and network-agent in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
@@ -100,9 +111,9 @@ builder-run: prepare-builder-home prepare-tmp-git-credentials
 		-e RUSTUP_HOME=/usr/local/rustup \
 		-e GOPATH=$(BUILDER_CONTAINER_HOME)/go \
 		-e BUILDER_CMD="$(BUILDER_CMD)" \
-		-e CUBE_RELEASE_VERSION \
-		-e CUBE_RELEASE_COMMIT \
-		-e CUBE_RELEASE_BUILD_TIME \
+		-e CUBE_VERSION \
+		-e CUBE_COMMIT \
+		-e CUBE_BUILD_TIME \
 		-v "$(ROOT_DIR)":/workspace \
 		-v "$(BUILDER_HOME)":$(BUILDER_CONTAINER_HOME) \
 		$(DOCKER_GIT_CRED) \
@@ -153,6 +164,8 @@ agent: builder-image
 cubeapi: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeAPI && cargo build --release --locked && install -m 0755 /workspace/CubeAPI/target/release/cube-api /workspace/_output/bin/cube-api'
+
+cube-api: cubeapi
 
 shim: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"

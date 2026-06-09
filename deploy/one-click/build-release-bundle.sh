@@ -31,14 +31,14 @@ MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert}"
 CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
 KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/cube-kernel-scf.zip"
 
-CUBE_RELEASE_VERSION_FROM_ENV="${CUBE_RELEASE_VERSION:-}"
+CUBE_VERSION_FROM_ENV="${CUBE_VERSION:-}"
 LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
-: "${CUBE_RELEASE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"
-: "${CUBE_RELEASE_COMMIT:=$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')}"
-: "${CUBE_RELEASE_BUILD_TIME:=$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
-export CUBE_RELEASE_VERSION CUBE_RELEASE_COMMIT CUBE_RELEASE_BUILD_TIME
+: "${CUBE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"
+: "${CUBE_COMMIT:=$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')}"
+: "${CUBE_BUILD_TIME:=$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
+export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
 
-DIST_VERSION="${ONE_CLICK_DIST_VERSION:-${CUBE_RELEASE_VERSION_FROM_ENV:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
+DIST_VERSION="${ONE_CLICK_DIST_VERSION:-${CUBE_VERSION_FROM_ENV:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
 DIST_ROOT="${SCRIPT_DIR}/dist/cube-sandbox-one-click-${DIST_VERSION}"
 DIST_TAR="${SCRIPT_DIR}/dist/cube-sandbox-one-click-${DIST_VERSION}.tar.gz"
 
@@ -57,9 +57,9 @@ NETWORK_AGENT_BIN_OVERRIDE="${ONE_CLICK_NETWORK_AGENT_BIN:-}"
 go_version_ldflags() {
   local version_pkg="$1"
   printf -- "-s -w -X '%s.Version=%s' -X '%s.Commit=%s' -X '%s.BuildTime=%s'" \
-    "${version_pkg}" "${CUBE_RELEASE_VERSION}" \
-    "${version_pkg}" "${CUBE_RELEASE_COMMIT}" \
-    "${version_pkg}" "${CUBE_RELEASE_BUILD_TIME}"
+    "${version_pkg}" "${CUBE_VERSION}" \
+    "${version_pkg}" "${CUBE_COMMIT}" \
+    "${version_pkg}" "${CUBE_BUILD_TIME}"
 }
 
 build_go_binary() {
@@ -90,10 +90,6 @@ build_rust_binary() {
   local mode="$2"
   local binary_name="$3"
   local output="$4"
-
-  export CUBE_VERSION="${CUBE_RELEASE_VERSION}"
-  export CUBE_COMMIT="${CUBE_RELEASE_COMMIT}"
-  export CUBE_BUILD_TIME="${CUBE_RELEASE_BUILD_TIME}"
 
   case "${mode}" in
     local)
@@ -164,9 +160,9 @@ generate_release_manifest() {
 
   log "generating release manifest: ${output}"
 
-  local cube_version="${CUBE_RELEASE_VERSION}"
-  local cube_commit="${CUBE_RELEASE_COMMIT}"
-  local cube_build_time="${CUBE_RELEASE_BUILD_TIME}"
+  local cube_version="${CUBE_VERSION}"
+  local cube_commit="${CUBE_COMMIT}"
+  local cube_build_time="${CUBE_BUILD_TIME}"
 
   # Guest-image version file (single line, read by CubeShim::get_image_version()).
   local guest_image_version="unknown"
@@ -565,8 +561,8 @@ chmod +x \
 
 cat > "${DIST_ROOT}/VERSION.txt" <<EOF
 release_version=${DIST_VERSION}
-git_commit=${CUBE_RELEASE_COMMIT}
-built_at=${CUBE_RELEASE_BUILD_TIME}
+git_commit=${CUBE_COMMIT}
+built_at=${CUBE_BUILD_TIME}
 manifest=release-manifest.json
 EOF
 

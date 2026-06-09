@@ -15,13 +15,13 @@ PREBUILT_DIR="${SCRIPT_DIR}/.work/prebuilt"
 HELPER_SCRIPT="${SCRIPT_DIR}/.work/build-prebuilt-in-builder.sh"
 BUILDER_IMAGE_REF="${BUILDER_IMAGE:-cube-sandbox-builder:ubuntu2004}"
 
-CUBE_RELEASE_VERSION_FROM_ENV="${CUBE_RELEASE_VERSION:-}"
+CUBE_VERSION_FROM_ENV="${CUBE_VERSION:-}"
 LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
-: "${CUBE_RELEASE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"
-: "${CUBE_RELEASE_COMMIT:=$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')}"
-: "${CUBE_RELEASE_BUILD_TIME:=$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
-: "${ONE_CLICK_DIST_VERSION:=${CUBE_RELEASE_VERSION_FROM_ENV:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
-export CUBE_RELEASE_VERSION CUBE_RELEASE_COMMIT CUBE_RELEASE_BUILD_TIME ONE_CLICK_DIST_VERSION
+: "${CUBE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"
+: "${CUBE_COMMIT:=$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')}"
+: "${CUBE_BUILD_TIME:=$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
+: "${ONE_CLICK_DIST_VERSION:=${CUBE_VERSION_FROM_ENV:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
+export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME ONE_CLICK_DIST_VERSION
 
 require_cmd docker
 require_cmd make
@@ -34,9 +34,6 @@ cat > "${HELPER_SCRIPT}" <<'SCRIPT_EOF'
 set -euo pipefail
 
 # Version values are resolved by the host script and passed into this helper.
-export CUBE_VERSION="${CUBE_RELEASE_VERSION}"
-export CUBE_COMMIT="${CUBE_RELEASE_COMMIT}"
-export CUBE_BUILD_TIME="${CUBE_RELEASE_BUILD_TIME}"
 
 go_version_ldflags() {
   local version_pkg="$1"
@@ -88,7 +85,7 @@ echo "[one-click] building network-agent in builder" >&2
 (cd /workspace/network-agent && go build -ldflags "${NETAGENT_LDFLAGS}" -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
 
 echo "[one-click] building cube-agent in builder" >&2
-# Agent Makefile reads CUBE_RELEASE_VERSION; CUBE_VERSION/COMMIT/BUILD_TIME already exported
+# Agent Makefile reads CUBE_VERSION/CUBE_COMMIT/CUBE_BUILD_TIME directly.
 (cd /workspace/agent && make -j1)
 install -m 0755 /workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent "${PREBUILT_DIR}/cube-agent"
 

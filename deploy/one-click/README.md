@@ -100,6 +100,7 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 The release package contains:
 
 - `sandbox-package.tar.gz`
+- `release-manifest.json`
 - `CubeAPI/bin/cube-api`
 - `containerd-shim-cube-rs`, `cube-runtime`
 - Locally built `cube-image/cube-guest-image-cpu.img`
@@ -108,6 +109,16 @@ The release package contains:
 - `webui/` directory, its compose template, nginx configuration, and built `web/dist` assets
 - `cube-kernel-scf.zip` packaged on the fly from `vmlinux`
 - `install.sh` / `install-compute.sh` / `down.sh` / `smoke.sh` ready to run on the target machine
+
+During installation, the top-level `release-manifest.json` is copied to:
+
+```bash
+/usr/local/services/cubetoolbox/release-manifest.json
+```
+
+When `VERSION.txt` declares `manifest=release-manifest.json`, `install.sh`
+validates that the manifest is present and parseable before it starts replacing
+the existing installation.
 
 ## Configuration Mapping
 

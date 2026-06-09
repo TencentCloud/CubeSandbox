@@ -16,9 +16,10 @@ APP := network-agent
 GO_BIN_DIR := $(shell if [ -n "$$(go env GOBIN)" ]; then printf "%s" "$$(go env GOBIN)"; else printf "%s/bin" "$$(go env GOPATH)"; fi)
 
 # Version — injected at build time via ldflags.
-CUBE_VERSION ?= $(or $(CUBE_RELEASE_VERSION),$(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null),0.0.0-dev)
-CUBE_COMMIT ?= $(or $(CUBE_RELEASE_COMMIT),$(shell git rev-parse HEAD 2>/dev/null),unknown)
-CUBE_BUILD_TIME ?= $(or $(CUBE_RELEASE_BUILD_TIME),$(shell date -u +'%Y-%m-%dT%H:%M:%SZ'))
+# Priority: env var CUBE_VERSION/CUBE_COMMIT/CUBE_BUILD_TIME > local git/date fallback.
+CUBE_VERSION ?= $(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo 0.0.0-dev)
+CUBE_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+CUBE_BUILD_TIME ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 
 VERSION_PKG := github.com/tencentcloud/CubeSandbox/network-agent/pkg/version
 LDFLAGS := -ldflags "-s -w \

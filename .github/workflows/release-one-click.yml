@@ -275,9 +275,10 @@ jobs:
       - name: Build one-click release bundle
         env:
           # Propagates to Go ldflags, Rust build.rs, web build, and guest-image version.
-          CUBE_RELEASE_VERSION: ${{ github.ref_name }}
+          CUBE_VERSION: ${{ github.ref_name }}
+          CUBE_COMMIT: ${{ github.sha }}
           ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}
-        run: ./deploy/one-click/build-release-bundle-builder.sh
+        run: CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" ./deploy/one-click/build-release-bundle-builder.sh
 
       - name: Resolve bundle path
         id: bundle

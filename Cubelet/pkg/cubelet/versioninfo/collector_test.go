@@ -27,8 +27,11 @@ func writeManifest(t *testing.T, dir string) {
   "release_version": "v0.5.0",
   "components": {
     "cubemaster": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
+    "cubemastercli": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cube-api": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cubelet": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
+    "cubecli": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
+    "network-agent": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "containerd-shim-cube-rs": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cube-runtime": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cube-agent": {"version": "v0.5.0", "commit": "abc", "build_time": "t"}
@@ -45,6 +48,17 @@ func mkComponentDir(t *testing.T, base, name string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(base, name, "v0.5.0"), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", name, err)
+	}
+}
+
+func mkComponentFile(t *testing.T, base string, rel ...string) {
+	t.Helper()
+	path := filepath.Join(append([]string{base}, rel...)...)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir parent for %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
 
@@ -70,6 +84,36 @@ func TestCollectFiltersUninstalledComponents(t *testing.T) {
 	}
 	if _, ok := versionOf(t, got, "cube-runtime"); !ok {
 		t.Errorf("installed cube-runtime should be reported")
+	}
+}
+
+func TestCollectRecognizesOneClickInstallLayout(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir)
+
+	mkComponentFile(t, dir, "CubeMaster", "bin", "cubemaster")
+	mkComponentFile(t, dir, "CubeMaster", "bin", "cubemastercli")
+	mkComponentFile(t, dir, "CubeAPI", "bin", "cube-api")
+	mkComponentFile(t, dir, "Cubelet", "bin", "cubecli")
+	mkComponentFile(t, dir, "network-agent", "bin", "network-agent")
+	mkComponentFile(t, dir, "cube-shim", "bin", "containerd-shim-cube-rs")
+	mkComponentFile(t, dir, "cube-shim", "bin", "cube-runtime")
+
+	c := NewCollector(dir)
+	got := c.Collect()
+
+	for _, name := range []string{
+		"cubemaster",
+		"cubemastercli",
+		"cube-api",
+		"cubecli",
+		"network-agent",
+		"containerd-shim-cube-rs",
+		"cube-runtime",
+	} {
+		if _, ok := versionOf(t, got, name); !ok {
+			t.Errorf("%s should be reported when the one-click install path exists", name)
+		}
 	}
 }
 

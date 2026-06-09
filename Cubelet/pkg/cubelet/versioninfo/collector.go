@@ -54,6 +54,21 @@ const (
 	guestImageVerPath = "cube-image/version"
 )
 
+// oneClickInstallLayout maps manifest component keys to the concrete one-click
+// install paths that prove the component is actually present on this node. The
+// collector still supports the original "${baseDir}/<component>/" directory
+// shape first; these aliases cover the packaged control-plane layout
+// (CubeMaster/CubeAPI/Cubelet/cube-shim, etc.).
+var oneClickInstallLayout = map[string][][]string{
+	"cubemaster":              {{"CubeMaster", "bin", "cubemaster"}},
+	"cubemastercli":           {{"CubeMaster", "bin", "cubemastercli"}},
+	"cube-api":                {{"CubeAPI", "bin", "cube-api"}},
+	"cubecli":                 {{"Cubelet", "bin", "cubecli"}},
+	"network-agent":           {{"network-agent", "bin", "network-agent"}},
+	"containerd-shim-cube-rs": {{"cube-shim", "bin", "containerd-shim-cube-rs"}},
+	"cube-runtime":            {{"cube-shim", "bin", "cube-runtime"}},
+}
+
 // ComponentVersion is a pure-data version record. It mirrors
 // masterclient.ComponentVersion (kept independent to avoid a layering
 // dependency from this low-level package onto the HTTP client).
@@ -193,10 +208,20 @@ func (c *Collector) loadManifestLocked() *releaseManifest {
 }
 
 // componentInstalledLocked reports whether a versioned directory exists for
-// the component (${baseDir}/<component>), i.e. it is actually deployed here.
+// the component (${baseDir}/<component>), or whether the one-click packaged
+// install layout carries the matching binary/config path, i.e. it is actually
+// deployed here.
 func (c *Collector) componentInstalledLocked(name string) bool {
-	info, err := os.Stat(filepath.Join(c.baseDir, name))
-	return err == nil && info.IsDir()
+	if exists(filepath.Join(c.baseDir, name)) {
+		return true
+	}
+	for _, rel := range oneClickInstallLayout[name] {
+		parts := append([]string{c.baseDir}, rel...)
+		if exists(filepath.Join(parts...)) {
+			return true
+		}
+	}
+	return false
 }
 
 // guestImageVersionLocked returns the single-line guest image version, using
@@ -248,4 +273,9 @@ func firstLine(data []byte) string {
 
 func isSpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\v' || b == '\f'
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

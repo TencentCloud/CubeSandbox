@@ -19,9 +19,10 @@ LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v
 # Version injection for Rust build.rs (shim, cube-runtime) when built on host.
 # In CI these are prebuilt via the builder container; for local dev, provide
 # consistent fallbacks so all components share the same version information.
-export CUBE_VERSION="${CUBE_RELEASE_VERSION:-${LATEST_RELEASE_TAG:-0.0.0-dev}}"
-export CUBE_COMMIT="${CUBE_RELEASE_COMMIT:-$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')}"
-export CUBE_BUILD_TIME="${CUBE_RELEASE_BUILD_TIME:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
+: "${CUBE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"
+: "${CUBE_COMMIT:=$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')}"
+: "${CUBE_BUILD_TIME:=$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
+export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
 GUEST_IMAGE_WORK_DIR="${WORK_ROOT}/guest-image-build"
 GUEST_ROOTFS_DIR="${GUEST_IMAGE_WORK_DIR}/rootfs"
 GUEST_ROOTFS_TAR="${GUEST_IMAGE_WORK_DIR}/rootfs.tar"
@@ -32,7 +33,7 @@ CUBE_KERNEL_PVM_VMLINUX="${ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX:-${RAW_ARTIFACTS_DI
 GUEST_IMAGE_DOCKERFILE="${ONE_CLICK_GUEST_IMAGE_DOCKERFILE:-${ROOT_DIR}/deploy/guest-image/Dockerfile}"
 GUEST_IMAGE_CONTEXT_DIR="${ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR:-$(dirname "${GUEST_IMAGE_DOCKERFILE}")}"
 GUEST_IMAGE_REF="${ONE_CLICK_GUEST_IMAGE_REF:-cube-sandbox-guest-image:one-click}"
-GUEST_IMAGE_VERSION="${ONE_CLICK_GUEST_IMAGE_VERSION:-${CUBE_RELEASE_VERSION:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
+GUEST_IMAGE_VERSION="${ONE_CLICK_GUEST_IMAGE_VERSION:-${CUBE_VERSION:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
 
 CUBE_AGENT_BUILD_MODE="${ONE_CLICK_CUBE_AGENT_BUILD_MODE:-local}"
 CUBE_SHIM_BUILD_MODE="${ONE_CLICK_CUBE_SHIM_BUILD_MODE:-local}"

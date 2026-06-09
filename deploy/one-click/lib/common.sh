@@ -102,6 +102,43 @@ ensure_file() {
   [[ -f "${path}" ]] || die "required file not found: ${path}"
 }
 
+declared_release_manifest_relpath() {
+  local version_file="$1"
+  [[ -f "${version_file}" ]] || return 0
+  sed -nE 's/^manifest=(.+)$/\1/p' "${version_file}" | head -n 1
+}
+
+validate_declared_release_manifest() {
+  local bundle_dir="$1"
+  local version_file="${bundle_dir}/VERSION.txt"
+  local manifest_rel manifest_path
+
+  manifest_rel="$(declared_release_manifest_relpath "${version_file}")"
+  [[ -n "${manifest_rel}" ]] || return 0
+
+  case "${manifest_rel}" in
+    /* | *..* | */* )
+      die "unsupported manifest path declared in ${version_file}: ${manifest_rel}"
+      ;;
+  esac
+
+  manifest_path="${bundle_dir}/${manifest_rel}"
+  ensure_file "${manifest_path}"
+  require_cmd python3
+  python3 - "${manifest_path}" <<'PY' || die "invalid release manifest: ${manifest_path}"
+import json, sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+if not isinstance(data, dict):
+    raise ValueError("release manifest root must be a JSON object")
+for key in ("components", "guest_image", "kernel"):
+    if key not in data:
+        raise ValueError(f"release manifest missing required key: {key}")
+PY
+  log "release manifest contract OK: ${manifest_path}"
+}
+
 ensure_dir() {
   local path="$1"
   [[ -d "${path}" ]] || die "required directory not found: ${path}"

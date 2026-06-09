@@ -564,6 +564,7 @@ WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 ensure_file "${PACKAGE_TAR}"
+validate_declared_release_manifest "${SCRIPT_DIR}"
 
 log "extracting package ${PACKAGE_TAR}"
 tar -xzf "${PACKAGE_TAR}" -C "${WORK_DIR}"
@@ -646,7 +647,12 @@ if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then
   cp -f "${SCRIPT_DIR}/VERSION.txt" "${INSTALL_PREFIX}/VERSION.txt"
   log "installed VERSION.txt to ${INSTALL_PREFIX}/VERSION.txt"
 fi
-if [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
+manifest_rel="$(declared_release_manifest_relpath "${SCRIPT_DIR}/VERSION.txt")"
+if [[ -n "${manifest_rel}" ]]; then
+  cp -f "${SCRIPT_DIR}/${manifest_rel}" "${INSTALL_PREFIX}/release-manifest.json"
+  ensure_file "${INSTALL_PREFIX}/release-manifest.json"
+  log "installed ${manifest_rel} to ${INSTALL_PREFIX}/release-manifest.json"
+elif [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
   cp -f "${SCRIPT_DIR}/release-manifest.json" "${INSTALL_PREFIX}/release-manifest.json"
   log "installed release-manifest.json to ${INSTALL_PREFIX}/release-manifest.json"
 fi
