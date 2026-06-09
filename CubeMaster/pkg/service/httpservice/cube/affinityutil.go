@@ -181,6 +181,17 @@ func parseNodeAffinitySelector(selectorJSON string) ([]affinity.NodeSelectorRequ
 			if len(r.Values) != 0 {
 				return nil, fmt.Errorf("operator %q requires empty values for key %q", r.Operator, r.Key)
 			}
+		switch r.Operator {
+		case affinity.NodeSelectorOpIn, affinity.NodeSelectorOpNotIn:
+			if len(r.Values) == 0 {
+				return nil, fmt.Errorf("operator %q requires non-empty values for key %q", r.Operator, r.Key)
+			}
+		case affinity.NodeSelectorOpExists, affinity.NodeSelectorOpDoesNotExist:
+			if len(r.Values) != 0 {
+				return nil, fmt.Errorf("operator %q requires empty values for key %q", r.Operator, r.Key)
+			}
+		default:
+			return nil, fmt.Errorf("unsupported operator %q for key %q", r.Operator, r.Key)
 		}
 		req := affinity.NodeSelectorRequirement{
 			Key:      r.Key,
