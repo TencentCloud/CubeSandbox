@@ -321,6 +321,9 @@ pub enum DeviceManagerError {
     /// Failed to create a new MmapRegion instance.
     NewMmapRegion(vm_memory::mmap::MmapRegionError),
 
+    /// Failed to create a new GuestRegionMmap.
+    NewGuestRegion(vm_memory::Error),
+
     /// Failed to clone a File.
     CloneFile(io::Error),
 
@@ -2811,6 +2814,21 @@ impl DeviceManager {
             .create_userspace_mapping(region_base, region_size, host_addr, false, false, false)
             .map_err(DeviceManagerError::MemoryManager)?;
 
+        // Wrap the MmapRegion into a GuestRegionMmap so it can be inserted
+        // into MemoryManager::device_memory. Ownership is shared via Arc:
+        // the same Arc is also handed to virtio_devices::Pmem so that
+        // munmap happens automatically when the device (and the device_memory
+        // entry) are dropped.
+        let pmem_guest_region = Arc::new(
+            GuestRegionMmap::new(mmap_region, GuestAddress(region_base))
+                .map_err(DeviceManagerError::NewGuestRegion)?,
+        );
+        self.memory_manager
+            .lock()
+            .unwrap()
+            .add_device_region(pmem_guest_region.clone())
+            .map_err(DeviceManagerError::MemoryManager)?;
+
         let mapping = virtio_devices::UserspaceMapping {
             host_addr,
             mem_slot,
@@ -2825,7 +2843,7 @@ impl DeviceManager {
                 file,
                 GuestAddress(region_base),
                 mapping,
-                mmap_region,
+                pmem_guest_region,
                 self.force_iommu | pmem_cfg.iommu,
                 self.seccomp_action.clone(),
                 self.exit_evt
@@ -3113,7 +3131,7 @@ impl DeviceManager {
             virtio_devices::Vdpa::new(
                 id.clone(),
                 device_path,
-                self.memory_manager.lock().unwrap().guest_memory(),
+                self.memory_manager.lock().unwrap().device_memory(),
                 vdpa_cfg.num_queues as u16,
                 state_from_id(self.snapshot.as_ref(), id.as_str())
                     .map_err(DeviceManagerError::RestoreGetState)?,
@@ -3124,7 +3142,7 @@ impl DeviceManager {
         // Create the DMA handler that is required by the vDPA device
         let vdpa_mapping = Arc::new(VdpaDmaMapping::new(
             Arc::clone(&vdpa_device),
-            Arc::new(self.memory_manager.lock().unwrap().guest_memory()),
+            Arc::new(self.memory_manager.lock().unwrap().device_memory()),
         ));
 
         self.device_tree
@@ -3241,7 +3259,7 @@ impl DeviceManager {
 
             let vfio_mapping = Arc::new(VfioDmaMapping::new(
                 Arc::clone(&vfio_container),
-                Arc::new(self.memory_manager.lock().unwrap().guest_memory()),
+                Arc::new(self.memory_manager.lock().unwrap().device_memory()),
             ));
 
             if let Some(iommu) = &self.iommu_device {
@@ -3285,7 +3303,7 @@ impl DeviceManager {
 
             let vfio_mapping = Arc::new(VfioDmaMapping::new(
                 Arc::clone(&vfio_container),
-                Arc::new(self.memory_manager.lock().unwrap().guest_memory()),
+                Arc::new(self.memory_manager.lock().unwrap().device_memory()),
             ));
 
             for virtio_mem_device in self.virtio_mem_devices.iter() {
@@ -3490,7 +3508,7 @@ impl DeviceManager {
         )
         .map_err(DeviceManagerError::VfioUserCreate)?;
 
-        let memory = self.memory_manager.lock().unwrap().guest_memory();
+        let memory = self.memory_manager.lock().unwrap().device_memory();
         let vfio_user_mapping = Arc::new(VfioUserDmaMapping::new(client, Arc::new(memory)));
         for virtio_mem_device in self.virtio_mem_devices.iter() {
             virtio_mem_device
@@ -3605,7 +3623,11 @@ impl DeviceManager {
             None
         };
 
-        let memory = self.memory_manager.lock().unwrap().guest_memory();
+        // NOTE: use device_memory so that virtio backends and DMA handlers can
+        // resolve GPAs that fall inside device-mapped host memory (e.g. PMEM).
+        // The guest_memory() RAM-only view is reserved for snapshot, migration,
+        // coredump and firmware-loading paths.
+        let memory = self.memory_manager.lock().unwrap().device_memory();
 
         // Map DMA ranges if a DMA handler is available and if the device is
         // not attached to a virtual IOMMU.
@@ -3791,6 +3813,14 @@ impl DeviceManager {
                 false,
                 false,
             )
+            .map_err(DeviceManagerError::MemoryManager)?;
+        // Make ivshmem/zshm BAR2 visible through device_memory so that virtio
+        // backends and DMA-mapping helpers can dereference GPAs that fall
+        // inside this BAR.
+        self.memory_manager
+            .lock()
+            .unwrap()
+            .add_device_region(Arc::clone(&region))
             .map_err(DeviceManagerError::MemoryManager)?;
         let _mapping = virtio_devices::UserspaceMapping {
             host_addr: region.as_ptr() as u64,

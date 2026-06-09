@@ -29,12 +29,12 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::time::Instant;
 use std::{collections::HashMap, convert::TryInto};
 use thiserror::Error;
-use virtio_queue::{Queue, QueueOwnedT, QueueT};
+use virtio_queue::{DescriptorChain, Queue, QueueOwnedT, QueueT};
 use virtiofsd::{
     descriptor_utils::{Error as VufDescriptorError, Reader, Writer},
     filesystem::SerializableFileSystem,
     fs_cache_req_handler::FsCacheReqHandler,
-    fuse::RemovemappingOne,
+    fuse::{InHeader, OutHeader, RemovemappingOne},
     limits,
     passthrough::{
         self, read_only::PassthroughFsRo, xattrmap::XattrMap, CachePolicy, PassthroughFs,
@@ -42,7 +42,7 @@ use virtiofsd::{
     server::Server,
     Error as VhostUserFsError,
 };
-use vm_memory::{ByteValued, GuestAddressSpace, GuestMemoryAtomic};
+use vm_memory::{ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard};
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -299,14 +299,75 @@ impl FsEpollHandler {
     }
 
     fn return_descriptor(queue: &mut Queue, mem: &GuestMemoryMmap, head_index: u16, len: usize) {
-        let used_len: u32 = match len.try_into() {
-            Ok(l) => l,
-            Err(_) => panic!("Invalid used length, can't return used descritors to the ring"),
-        };
+        // In FUSE, a single response should never reach 4 GiB; if it ever does
+        // (most likely a bug or a malformed request) we report 0 bytes used
+        // and log a warning instead of panicking. Reporting 0 is safer than
+        // saturating to u32::MAX because the Guest virtio-ring layer rejects
+        // any used_len that exceeds the descriptor chain's writable capacity;
+        // a 0-length reply makes the Guest FUSE driver fall back to its
+        // short-reply / unmatched-reply path and complete the request with
+        // -EIO, while the worker thread keeps serving the rest of the queue.
+        let used_len: u32 = u32::try_from(len).unwrap_or_else(|_| {
+            warn!(
+                "virtio-fs: response length {} exceeds u32::MAX, reporting 0 used bytes; \
+                 Guest will see a short reply and fail the request with -EIO",
+                len
+            );
+            0
+        });
 
         if queue.add_used(mem, head_index, used_len).is_err() {
             warn!("Couldn't return used descriptors to the ring");
         }
+    }
+
+    /// Try to peek the FUSE InHeader from a fresh Reader built on a clone of
+    /// `desc_chain`, returning the request's `unique` id. The original reader
+    /// used by the FUSE server is unaffected (Reader keeps its own cursor).
+    ///
+    /// On any failure (descriptor chain too short, guest memory error, etc.)
+    /// returns `None`.
+    fn peek_in_header_unique(
+        mem: &GuestMemoryMmap,
+        desc_chain: DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
+    ) -> Option<u64> {
+        let mut peek_reader = Reader::new(mem, desc_chain).ok()?;
+        let in_header: InHeader = peek_reader.read_obj().ok()?;
+        Some(in_header.unique)
+    }
+
+    /// Try to write a minimal FUSE error reply (`OutHeader { len: 16,
+    /// error: -EIO, unique }`) into a freshly built Writer over `desc_chain`,
+    /// returning the number of bytes actually written (always 16 on success,
+    /// 0 on failure).
+    ///
+    /// This is used as a best-effort recovery path when reader/writer
+    /// construction or `Server::handle_message` fails: instead of letting the
+    /// worker thread die, we try to surface a clean `-EIO` to the Guest so
+    /// the in-flight FUSE request is woken up immediately.
+    fn try_write_fuse_eio(
+        mem: &GuestMemoryMmap,
+        desc_chain: DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
+        unique: u64,
+    ) -> usize {
+        let mut writer = match Writer::new(mem, desc_chain) {
+            Ok(w) => w,
+            Err(_) => return 0,
+        };
+        // Bail out early when the descriptor chain has no room for a full
+        // OutHeader, otherwise write_obj would partially succeed and report
+        // a misleading bytes_written back to the Guest.
+        if writer.available_bytes() < std::mem::size_of::<OutHeader>() {
+            return 0;
+        }
+        let header = OutHeader {
+            len: std::mem::size_of::<OutHeader>() as u32,
+            error: -libc::EIO,
+            unique,
+        };
+        writer
+            .write_obj(header)
+            .map_or(0, |_| writer.bytes_written())
     }
 
     fn process_queue_serial(&mut self) -> Result<bool> {
@@ -322,28 +383,80 @@ impl FsEpollHandler {
 
         while let Some(desc_chain) = queue.pop_descriptor_chain(self.mem.memory()) {
             let head_index = desc_chain.head_index();
+            let mem_ref = desc_chain.memory();
 
-            let reader = Reader::new(desc_chain.memory(), desc_chain.clone())
-                .map_err(Error::QueueReader)
-                .unwrap();
-            let writer = Writer::new(desc_chain.memory(), desc_chain.clone())
-                .map_err(Error::QueueWriter)
-                .unwrap();
+            // Best-effort: peek the FUSE in_header.unique from a separate
+            // Reader built on a clone of desc_chain, so we can produce a
+            // matching FUSE error reply if anything below fails. If even the
+            // peek fails (bad descriptor chain), fall back to unique=0; the
+            // Guest driver will then fall back to its short-reply / unmatched
+            // reply path and complete the request with -EIO.
+            let peek_unique = Self::peek_in_header_unique(mem_ref, desc_chain.clone()).unwrap_or(0);
+
+            let reader = match Reader::new(mem_ref, desc_chain.clone()) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(
+                        "virtio-fs: failed to build Reader for request (unique={}): {:?}; \
+                         replying -EIO and continuing",
+                        peek_unique, e
+                    );
+                    let written =
+                        Self::try_write_fuse_eio(mem_ref, desc_chain.clone(), peek_unique);
+                    Self::return_descriptor(queue, mem_ref, head_index, written);
+                    used_descs = true;
+                    continue;
+                }
+            };
+            let writer = match Writer::new(mem_ref, desc_chain.clone()) {
+                Ok(w) => w,
+                Err(e) => {
+                    // Without a working Writer there is no way to deliver any
+                    // reply at all; just hand the descriptor back with len=0
+                    // and let the Guest's FUSE layer recover (modern kernels
+                    // turn a short reply into -EIO).
+                    warn!(
+                        "virtio-fs: failed to build Writer for request (unique={}): {:?}; \
+                         returning descriptor with len=0",
+                        peek_unique, e
+                    );
+                    Self::return_descriptor(queue, mem_ref, head_index, 0);
+                    used_descs = true;
+                    continue;
+                }
+            };
 
             let mut rate_limited = BucketReduction::Success;
             let mut rate_limited_type = TokenType::Ops;
             let req_start = Instant::now();
-            let len = self
-                .server
-                .handle_message(
-                    reader,
-                    writer,
-                    cache_handler.as_mut(),
-                    &mut self.rate_limiter,
-                    &mut rate_limited,
-                    &mut rate_limited_type,
-                )
-                .map_err(Error::ProcessQueue)?;
+            let len = match self.server.handle_message(
+                reader,
+                writer,
+                cache_handler.as_mut(),
+                &mut self.rate_limiter,
+                &mut rate_limited,
+                &mut rate_limited_type,
+            ) {
+                Ok(n) => n,
+                Err(e) => {
+                    // The FUSE server failed mid-way; the original writer may
+                    // contain a partially-written reply with a stale `len`
+                    // field. Build a fresh Writer from a clone of desc_chain
+                    // (which always starts at the writable region's offset 0)
+                    // and write a minimal -EIO header there. This overwrites
+                    // whatever the server may have left behind, so the Guest
+                    // sees a single, well-formed FUSE error reply.
+                    warn!(
+                        "virtio-fs: handle_message failed (unique={}): {:?}; replying -EIO",
+                        peek_unique, e
+                    );
+                    let written =
+                        Self::try_write_fuse_eio(mem_ref, desc_chain.clone(), peek_unique);
+                    Self::return_descriptor(queue, mem_ref, head_index, written);
+                    used_descs = true;
+                    continue;
+                }
+            };
 
             if rate_limited != BucketReduction::Success {
                 match rate_limited_type {
