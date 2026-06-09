@@ -1867,7 +1867,9 @@ pub struct ComponentMatrixRow {
     #[serde(default)]
     pub component: String,
     #[serde(default)]
-    pub expected_version: String,
+    pub declared_version: String,
+    #[serde(default)]
+    pub declared_versions: Vec<String>,
     #[serde(default)]
     pub consistent: bool,
     #[serde(default)]
@@ -1882,7 +1884,7 @@ pub struct NodeComponentEntry {
     #[serde(default)]
     pub version: String,
     #[serde(default)]
-    pub outdated: bool,
+    pub declared: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

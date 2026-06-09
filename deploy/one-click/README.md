@@ -34,7 +34,7 @@ export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
 export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
 
-The installed runtime still uses `cube-kernel-scf/vmlinux`. By default that file is the ordinary guest kernel. If the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer copies the packaged `vmlinux-pvm` over `cube-kernel-scf/vmlinux`.
+The installed runtime still uses `cube-kernel-scf/vmlinux` as the active guest kernel path. The package stores the ordinary guest kernel as `vmlinux-bm` and keeps `vmlinux` as a symlink: by default it points to `vmlinux-bm`; if the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer points it to `vmlinux-pvm`.
 
 The guest image no longer depends on a local zip file. Instead, it is generated locally from `deploy/guest-image/Dockerfile` during the one-click release package build. Common override parameters:
 
@@ -107,7 +107,7 @@ The release package contains:
 - `cubeproxy/` directory and its build context
 - `support/` directory and its compose templates
 - `webui/` directory, its compose template, nginx configuration, and built `web/dist` assets
-- `cube-kernel-scf.zip` packaged on the fly from `vmlinux`
+- `cube-kernel-scf.zip` packaged on the fly from the ordinary/PVM guest kernel artifacts
 - `install.sh` / `install-compute.sh` / `down.sh` / `smoke.sh` ready to run on the target machine
 
 During installation, the top-level `release-manifest.json` is copied to:
@@ -392,7 +392,7 @@ sudo yum install -y e2fsprogs util-linux
 
 ## Known Limitations
 
-- If `vmlinux` is missing from `assets/kernel-artifacts/`, `build-vm-assets.sh` and `build-release-bundle.sh` will fail immediately. `vmlinux-pvm` is optional at build time, but installation with `CUBE_PVM_ENABLE=1` requires it to be present in the package. The `cube-kernel-scf.zip` in the release package is generated automatically during the packaging phase.
+- If `vmlinux` is missing from `assets/kernel-artifacts/`, `build-vm-assets.sh` and `build-release-bundle.sh` will fail immediately. `vmlinux-pvm` is optional at build time, but installation with `CUBE_PVM_ENABLE=1` requires it to be present in the package. The installed `cube-kernel-scf/vmlinux` path is an active symlink to `vmlinux-bm` or `vmlinux-pvm`. The `cube-kernel-scf.zip` in the release package is generated automatically during the packaging phase.
 - If the `deploy/guest-image/Dockerfile` build fails, or the build machine's `mkfs.ext4` does not support the `-d` flag, guest image generation will fail immediately.
 - `cube-snapshot/spec.json` is not a mandatory artifact in the current first release of one-click. If absent, the related plugin degrades to a warning rather than blocking the basic startup.
 - If the target machine has neither `systemd-resolved` / `resolvectl` nor a restartable `NetworkManager`, one-click will currently report an error, as a third host DNS solution for such environments has not yet been integrated.

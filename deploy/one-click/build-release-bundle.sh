@@ -181,11 +181,18 @@ generate_release_manifest() {
   local guest_image_path="${RUNTIME_LAYOUT_DIR}/cube-image/cube-guest-image-cpu.img"
 
   # Kernel paths
-  local kernel_vmlinux="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux"
+  local kernel_vmlinux="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"
   local kernel_pvm_vmlinux="${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
 
-  # Kernel version (use CI env or hardcoded tag from release-one-click.yml)
+  # Kernel versions (use CI env or hardcoded tags from release-one-click.yml).
   local kernel_version="${KERNEL_TAG:-unknown}"
+  local kernel_pvm_version="${PVM_KERNEL_TAG:-unknown}"
+  if [[ "${kernel_version}" == "unknown" ]]; then
+    log "WARNING: KERNEL_TAG is not set; release manifest will record kernel.version=unknown"
+  fi
+  if [[ -f "${kernel_pvm_vmlinux}" && "${kernel_pvm_version}" == "unknown" ]]; then
+    log "WARNING: PVM_KERNEL_TAG is not set; release manifest will record kernel.pvm_version=unknown"
+  fi
 
   # Agent binary: prefer CI override, then search known build output paths.
   local agent_bin="${ONE_CLICK_CUBE_AGENT_BIN:-}"
@@ -205,7 +212,7 @@ generate_release_manifest() {
   local runtime_bin="${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-runtime"
 
   python3 - "${output}" "${release_version}" "${cube_version}" "${cube_commit}" "${cube_build_time}" \
-      "${guest_image_version}" "${guest_agent_version}" "${kernel_version}" \
+      "${guest_image_version}" "${guest_agent_version}" "${kernel_version}" "${kernel_pvm_version}" \
       "${CORE_BIN_DIR}" \
       "${agent_bin}" "${shim_bin}" "${runtime_bin}" \
       "${guest_image_path}" "${kernel_vmlinux}" "${kernel_pvm_vmlinux}" <<'PY'
@@ -219,13 +226,14 @@ cube_build_time   = sys.argv[5]
 guest_image_ver   = sys.argv[6]
 guest_agent_ver   = sys.argv[7]
 kernel_version    = sys.argv[8]
-core_bin_dir      = sys.argv[9]
-agent_bin         = sys.argv[10]
-shim_bin          = sys.argv[11]
-runtime_bin       = sys.argv[12]
-guest_image_path  = sys.argv[13]
-kernel_vmlinux    = sys.argv[14]
-kernel_pvm_vmlinux = sys.argv[15] if len(sys.argv) > 15 else ""
+kernel_pvm_version = sys.argv[9]
+core_bin_dir      = sys.argv[10]
+agent_bin         = sys.argv[11]
+shim_bin          = sys.argv[12]
+runtime_bin       = sys.argv[13]
+guest_image_path  = sys.argv[14]
+kernel_vmlinux    = sys.argv[15]
+kernel_pvm_vmlinux = sys.argv[16] if len(sys.argv) > 16 else ""
 
 def sha256_hex(path):
     """Return sha256:hexdigest for an existing file."""
@@ -302,6 +310,7 @@ if kernel_vmlinux:
     kernel["vmlinux_digest_sha256"] = required_sha256(kernel_vmlinux)
 pvm_digest = optional_sha256(kernel_pvm_vmlinux)
 if pvm_digest:
+    kernel["pvm_version"] = kernel_pvm_version
     kernel["vmlinux_pvm_digest_sha256"] = pvm_digest
 
 manifest = {
@@ -344,6 +353,7 @@ pvm_src_path = sys.argv[3] if len(sys.argv) > 3 else ""
 os.makedirs(os.path.dirname(zip_path), exist_ok=True)
 with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
     zf.write(src_path, arcname="vmlinux")
+    zf.write(src_path, arcname="vmlinux-bm")
     if pvm_src_path and os.path.isfile(pvm_src_path):
         zf.write(pvm_src_path, arcname="vmlinux-pvm")
 PY
@@ -425,7 +435,7 @@ log "building runtime layout"
 
 log "packaging fixed kernel artifact zip"
 package_kernel_artifact_zip \
-  "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux" \
+  "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm" \
   "${KERNEL_ARTIFACT_ZIP}" \
   "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
 

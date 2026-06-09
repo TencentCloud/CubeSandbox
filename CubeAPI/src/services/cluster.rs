@@ -225,7 +225,8 @@ fn to_version_matrix_view(m: crate::cubemaster::VersionMatrix) -> VersionMatrixV
             .into_iter()
             .map(|c| ComponentMatrixRowView {
                 component: c.component,
-                expected_version: c.expected_version,
+                declared_version: c.declared_version,
+                declared_versions: c.declared_versions,
                 consistent: c.consistent,
                 versions: c
                     .versions
@@ -249,7 +250,7 @@ fn to_version_matrix_view(m: crate::cubemaster::VersionMatrix) -> VersionMatrixV
                     .map(|e| NodeComponentEntryView {
                         component: e.component,
                         version: e.version,
-                        outdated: e.outdated,
+                        declared: e.declared,
                     })
                     .collect(),
             })

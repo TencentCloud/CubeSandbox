@@ -684,18 +684,20 @@ pub struct ComponentVersionGroupView {
 #[derive(Debug, Serialize, ToSchema, Clone, Default)]
 pub struct ComponentMatrixRowView {
     pub component: String,
-    #[serde(rename = "expectedVersion", skip_serializing_if = "String::is_empty")]
-    pub expected_version: String,
+    #[serde(rename = "declaredVersion", skip_serializing_if = "String::is_empty")]
+    pub declared_version: String,
+    #[serde(rename = "declaredVersions", skip_serializing_if = "Vec::is_empty")]
+    pub declared_versions: Vec<String>,
     pub consistent: bool,
     pub versions: Vec<ComponentVersionGroupView>,
 }
 
-/// A single component version on a single node, with outdated pre-computed.
+/// A single component version on a single node, with release declaration membership.
 #[derive(Debug, Serialize, ToSchema, Clone, Default)]
 pub struct NodeComponentEntryView {
     pub component: String,
     pub version: String,
-    pub outdated: bool,
+    pub declared: bool,
 }
 
 /// Per-node view of the version matrix.

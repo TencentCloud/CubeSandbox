@@ -1,5 +1,7 @@
+---
+# Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (C) 2026 Tencent. All rights reserved.
+#
 
 openapi: 3.1.0
 info:
@@ -475,8 +477,12 @@ components:
           type: string
         consistent:
           type: boolean
-        expectedVersion:
+        declaredVersion:
           type: string
+        declaredVersions:
+          type: array
+          items:
+            type: string
         versions:
           type: array
           items:
@@ -603,15 +609,15 @@ components:
       - error
     NodeComponentEntryView:
       type: object
-      description: A single component version on a single node, with outdated pre-computed.
+      description: A single component version on a single node, with release declaration membership.
       required:
       - component
       - version
-      - outdated
+      - declared
       properties:
         component:
           type: string
-        outdated:
+        declared:
           type: boolean
         version:
           type: string

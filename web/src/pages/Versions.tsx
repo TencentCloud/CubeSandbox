@@ -27,8 +27,45 @@ import { cn, formatRelative } from '@/lib/utils';
 type ComponentRow = VersionMatrixDto['components'][number];
 type NodeRow = VersionMatrixDto['nodes'][number];
 
-type CompFilter = 'all' | 'consistent' | 'drift' | 'outdated';
+type CompFilter = 'all' | 'consistent' | 'multiVersion' | 'undeclared';
 type NodeFilter = 'all' | 'healthy' | 'notReady';
+
+function declaredVersionsFor(row: ComponentRow): string[] {
+  const versions =
+    row.declaredVersions && row.declaredVersions.length > 0
+      ? row.declaredVersions
+      : row.declaredVersion
+      ? [row.declaredVersion]
+      : [];
+  return versions.filter((v) => v && v !== 'unknown');
+}
+
+function isVersionUndeclared(row: ComponentRow, version: string): boolean {
+  const declared = declaredVersionsFor(row);
+  return declared.length > 0 && version !== '' && version !== 'unknown' && !declared.includes(version);
+}
+
+function rowHasUndeclaredVersion(row: ComponentRow): boolean {
+  return row.versions.some((g) => isVersionUndeclared(row, g.version));
+}
+
+function hasReleaseDeclaration(rows: ComponentRow[]): boolean {
+	return rows.some((row) => declaredVersionsFor(row).length > 0);
+}
+
+function displayVersionIdentity(version: string): string {
+  const marker = '@sha256:';
+  const markerIndex = version.indexOf(marker);
+  if (markerIndex > 0) {
+    const tag = version.slice(0, markerIndex);
+    const hash = version.slice(markerIndex + marker.length);
+    return `${tag} @ ${hash.slice(0, 12)}`;
+  }
+  if (version.startsWith('sha256:')) {
+    return `sha256:${version.slice('sha256:'.length, 'sha256:'.length + 12)}`;
+  }
+  return version;
+}
 
 // ── Page ────────────────────────────────────────────────────────────────────
 
@@ -44,13 +81,11 @@ export default function VersionsPage() {
   const components = data?.components ?? [];
   const nodes = data?.nodes ?? [];
 
-  const { driftCount, outdatedCount, reportingCount } = useMemo(() => {
+  const { multiVersionCount, undeclaredCount, reportingCount } = useMemo(() => {
     const reporting = nodes.filter((n) => n.healthy).length;
-    const drift = components.filter((c) => !c.consistent).length;
-    const outdated = components.filter((c) =>
-      !!c.expectedVersion && c.versions.some((g) => g.version !== c.expectedVersion),
-    ).length;
-    return { driftCount: drift, outdatedCount: outdated, reportingCount: reporting };
+    const multiVersion = components.filter((c) => !c.consistent).length;
+    const undeclared = components.filter(rowHasUndeclaredVersion).length;
+    return { multiVersionCount: multiVersion, undeclaredCount: undeclared, reportingCount: reporting };
   }, [components, nodes]);
 
   return (
@@ -127,16 +162,16 @@ export default function VersionsPage() {
               hint={t('kpi.reportingHint')}
             />
             <KpiCard
-              label={t('kpi.drift')}
-              value={driftCount}
-              tone={driftCount === 0 ? 'ok' : 'warn'}
-              hint={t('kpi.driftHint')}
+              label={t('kpi.multiVersion')}
+              value={multiVersionCount}
+              tone={multiVersionCount === 0 ? 'ok' : 'info'}
+              hint={t('kpi.multiVersionHint')}
             />
             <KpiCard
-              label={t('kpi.outdated')}
-              value={outdatedCount}
-              tone={outdatedCount === 0 ? 'ok' : 'err'}
-              hint={t('kpi.outdatedHint')}
+              label={t('kpi.undeclared')}
+              value={undeclaredCount}
+              tone={undeclaredCount === 0 ? 'ok' : 'warn'}
+              hint={t('kpi.undeclaredHint')}
             />
           </div>
 
@@ -171,7 +206,7 @@ export default function VersionsPage() {
 
           {/* Components section */}
           {components.length > 0 ? (
-            <ComponentsSection components={components} />
+          <ComponentsSection components={components} hasReleaseDeclaration={hasReleaseDeclaration(components)} />
           ) : (
             <EmptyState
               icon={PackageOpen}
@@ -182,7 +217,7 @@ export default function VersionsPage() {
 
           {/* Node × Component matrix */}
           {nodes.length > 0 && components.length > 0 && (
-            <MatrixSection nodes={nodes} componentNames={components.map((c) => c.component)} />
+            <MatrixSection nodes={nodes} components={components} />
           )}
         </>
       )}
@@ -226,7 +261,13 @@ function KpiCard({
 
 // ── Components section ──────────────────────────────────────────────────────
 
-function ComponentsSection({ components }: { components: ComponentRow[] }) {
+function ComponentsSection({
+	components,
+	hasReleaseDeclaration,
+}: {
+	components: ComponentRow[];
+	hasReleaseDeclaration: boolean;
+}) {
   const { t } = useTranslation('versions');
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<CompFilter>('all');
@@ -236,10 +277,8 @@ function ComponentsSection({ components }: { components: ComponentRow[] }) {
     return {
       all: components.length,
       consistent: components.filter((c) => c.consistent).length,
-      drift: components.filter((c) => !c.consistent).length,
-      outdated: components.filter(
-        (c) => !!c.expectedVersion && c.versions.some((g) => g.version !== c.expectedVersion),
-      ).length,
+      multiVersion: components.filter((c) => !c.consistent).length,
+      undeclared: components.filter(rowHasUndeclaredVersion).length,
     };
   }, [components]);
 
@@ -247,11 +286,10 @@ function ComponentsSection({ components }: { components: ComponentRow[] }) {
     const q = query.trim().toLowerCase();
     return components.filter((c) => {
       if (q && !c.component.toLowerCase().includes(q)) return false;
-      const isOutdated =
-        !!c.expectedVersion && c.versions.some((g) => g.version !== c.expectedVersion);
+      const hasUndeclared = rowHasUndeclaredVersion(c);
       if (filter === 'consistent' && !c.consistent) return false;
-      if (filter === 'drift' && c.consistent) return false;
-      if (filter === 'outdated' && !isOutdated) return false;
+      if (filter === 'multiVersion' && c.consistent) return false;
+      if (filter === 'undeclared' && !hasUndeclared) return false;
       return true;
     });
   }, [components, query, filter]);
@@ -270,8 +308,8 @@ function ComponentsSection({ components }: { components: ComponentRow[] }) {
             options={[
               { value: 'all', label: t('filter.all'), count: counts.all },
               { value: 'consistent', label: t('filter.consistent'), count: counts.consistent },
-              { value: 'drift', label: t('filter.drift'), count: counts.drift },
-              { value: 'outdated', label: t('filter.outdated'), count: counts.outdated },
+              { value: 'multiVersion', label: t('filter.multiVersion'), count: counts.multiVersion },
+              { value: 'undeclared', label: t('filter.undeclared'), count: counts.undeclared },
             ]}
           />
         }
@@ -281,6 +319,7 @@ function ComponentsSection({ components }: { components: ComponentRow[] }) {
           <ComponentRowItem
             key={c.component}
             row={c}
+            hasReleaseDeclaration={hasReleaseDeclaration}
             expanded={expanded === c.component}
             onToggle={() =>
               setExpanded((prev) => (prev === c.component ? null : c.component))
@@ -297,30 +336,31 @@ function ComponentsSection({ components }: { components: ComponentRow[] }) {
 
 function ComponentRowItem({
   row,
+	hasReleaseDeclaration,
   expanded,
   onToggle,
 }: {
   row: ComponentRow;
+	hasReleaseDeclaration: boolean;
   expanded: boolean;
   onToggle: () => void;
 }) {
   const { t } = useTranslation('versions');
-  const isOutdated =
-    !!row.expectedVersion && row.versions.some((g) => g.version !== row.expectedVersion);
+  const declared = declaredVersionsFor(row);
+  const declaredLabel = declared.map(displayVersionIdentity).join(' / ');
+  const hasUndeclared = rowHasUndeclaredVersion(row);
 
   let badge: React.ReactNode;
-  if (row.consistent && row.expectedVersion) {
-    badge = (
-      <span className="chip-ok">
-        <CheckCircle2 size={11} /> {t('consistent')}
-      </span>
-    );
-  } else if (row.consistent && !row.expectedVersion) {
-    badge = <span className="chip-mute">{t('consistent')}</span>;
-  } else if (!row.consistent && row.expectedVersion) {
+  if (hasUndeclared) {
     badge = (
       <span className="chip-warn">
-        <AlertTriangle size={11} /> {t('driftWithCount', { count: row.versions.length })}
+        <AlertTriangle size={11} /> {t('undeclared')}
+      </span>
+    );
+  } else if (row.consistent) {
+    badge = (
+      <span className="chip-ok">
+        <CheckCircle2 size={11} /> {t('singleVersion')}
       </span>
     );
   } else {
@@ -342,18 +382,20 @@ function ComponentRowItem({
             <MonoId>{row.component}</MonoId>
             {badge}
           </div>
-          {/* Inline expected + actual versions for left-to-right scan. Versions are rendered as-is from the backend (no v-prefix). */}
+          {/* Inline release declarations + actual versions for left-to-right scan. */}
           <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
-            <span className="text-muted-foreground/70">{t('expected')}:</span>
-            {row.expectedVersion ? (
-              <span className="font-mono text-foreground/80">{row.expectedVersion}</span>
+            <span className="text-muted-foreground/70">{t('declared')}:</span>
+            {declaredLabel ? (
+              <span className="font-mono text-foreground/80">{declaredLabel}</span>
+            ) : !hasReleaseDeclaration ? (
+              <span className="text-muted-foreground/60 italic">{t('noDeclarationReference')}</span>
             ) : (
-              <span className="text-muted-foreground/60 italic">{t('noExpected')}</span>
+              <span className="text-muted-foreground/60 italic">{t('noDeclared')}</span>
             )}
             {row.versions.map((g) => {
-              const outdated = !!row.expectedVersion && g.version !== row.expectedVersion;
-              const noRef = !row.expectedVersion;
-              const chipClass = outdated
+              const undeclared = isVersionUndeclared(row, g.version);
+              const noRef = !declaredLabel;
+              const chipClass = undeclared
                 ? 'border-cube-warn/40 bg-cube-warn/[0.08] text-cube-warn'
                 : noRef
                 ? 'border-cube-mute/30 bg-cube-mute/[0.06] text-foreground/80'
@@ -361,14 +403,14 @@ function ComponentRowItem({
               return (
                 <span
                   key={g.version}
-                  title={g.nodes.join(', ')}
+                  title={`${g.version}\n${g.nodes.join(', ')}`}
                   className={cn(
                     'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-xs ml-1',
                     chipClass,
                   )}
                 >
-                  {outdated && <AlertTriangle size={10} />}
-                  {g.version}
+                  {undeclared && <AlertTriangle size={10} />}
+                  {displayVersionIdentity(g.version)}
                   <span className="text-muted-foreground/60">×{g.nodes.length}</span>
                 </span>
               );
@@ -396,13 +438,15 @@ function ComponentRowItem({
                   to={`/nodes/${nodeID}`}
                   className={cn(
                     'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs transition-colors hover:bg-muted',
-                    !!row.expectedVersion && g.version !== row.expectedVersion
+                    isVersionUndeclared(row, g.version)
                       ? 'border-cube-warn/30 text-cube-warn hover:border-cube-warn/60'
                       : 'border-border/60 text-foreground/80 hover:border-primary/30',
                   )}
                 >
                   {nodeID}
-                  <span className="text-muted-foreground/60">{g.version}</span>
+                  <span className="text-muted-foreground/60">
+                    {displayVersionIdentity(g.version)}
+                  </span>
                 </Link>
               )),
             )}
@@ -415,7 +459,7 @@ function ComponentRowItem({
 
 // ── Node × Component matrix ─────────────────────────────────────────────────
 
-function MatrixSection({ nodes, componentNames }: { nodes: NodeRow[]; componentNames: string[] }) {
+function MatrixSection({ nodes, components }: { nodes: NodeRow[]; components: ComponentRow[] }) {
   const { t } = useTranslation('versions');
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<NodeFilter>('all');
@@ -431,6 +475,11 @@ function MatrixSection({ nodes, componentNames }: { nodes: NodeRow[]; componentN
       notReady: nodes.filter((n) => !n.healthy).length,
     }),
     [nodes],
+  );
+  const componentNames = useMemo(() => components.map((c) => c.component), [components]);
+  const componentsWithDeclaration = useMemo(
+    () => new Set(components.filter((c) => declaredVersionsFor(c).length > 0).map((c) => c.component)),
+    [components],
   );
 
   const filtered = useMemo(() => {
@@ -542,6 +591,7 @@ function MatrixSection({ nodes, componentNames }: { nodes: NodeRow[]; componentN
                   </td>
                   {componentNames.map((name) => {
                     const entry = byComponent.get(name);
+                    const undeclared = !!entry && componentsWithDeclaration.has(name) && !entry.declared;
                     if (!entry) {
                       return (
                         <td
@@ -557,17 +607,17 @@ function MatrixSection({ nodes, componentNames }: { nodes: NodeRow[]; componentN
                         key={name}
                         className={cn(
                           'px-4 py-3',
-                          entry.outdated && 'border-l-2 border-cube-warn/50',
+                          undeclared && 'border-l-2 border-cube-warn/50',
                         )}
                       >
                         <span
                           className={cn(
                             'inline-flex items-center gap-1 font-mono text-xs',
-                            entry.outdated ? 'text-cube-warn' : 'text-foreground/80',
+                            undeclared ? 'text-cube-warn' : 'text-foreground/80',
                           )}
                         >
-                          {entry.outdated && <AlertTriangle size={10} />}
-                          {entry.version}
+                          {undeclared && <AlertTriangle size={10} />}
+                          <span title={entry.version}>{displayVersionIdentity(entry.version)}</span>
                         </span>
                       </td>
                     );

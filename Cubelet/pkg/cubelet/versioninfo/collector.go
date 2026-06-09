@@ -7,7 +7,7 @@
 // cubemaster on register / heartbeat.
 //
 // Primary data source is the release-manifest.json installed alongside the
-// node binaries (machine-readable, complete, release-consistent). Three
+// node binaries (machine-readable, complete, release-consistent). Four
 // adjustments are layered on top:
 //
 //  1. the cubelet entry is overridden with the running binary's own
@@ -17,7 +17,10 @@
 //     version actually in effect, which may drift from the manifest), with a
 //     lazy mtime-based re-read so an out-of-band guest upgrade is picked up
 //     without restarting cubelet;
-//  3. components are filtered to those actually installed on this node, so a
+//  3. kernel is selected from the active cube-kernel-scf/vmlinux symlink so
+//     PVM nodes report the PVM guest kernel version instead of the ordinary
+//     packaged kernel;
+//  4. components are filtered to those actually installed on this node, so a
 //     compute node does not report control-plane binaries it never runs.
 //
 // Collection never blocks register/heartbeat: a missing or malformed manifest
@@ -52,6 +55,7 @@ const (
 const (
 	manifestFileName  = "release-manifest.json"
 	guestImageVerPath = "cube-image/version"
+	kernelVmlinuxPath = "cube-kernel-scf/vmlinux"
 )
 
 // oneClickInstallLayout maps manifest component keys to the concrete one-click
@@ -93,7 +97,10 @@ type releaseManifest struct {
 		AgentVersion string `json:"agent_version"`
 	} `json:"guest_image"`
 	Kernel struct {
-		Version string `json:"version"`
+		Version          string `json:"version"`
+		PVMVersion       string `json:"pvm_version"`
+		VMLinuxDigest    string `json:"vmlinux_digest_sha256"`
+		VMLinuxPVMDigest string `json:"vmlinux_pvm_digest_sha256"`
 	} `json:"kernel"`
 }
 
@@ -109,6 +116,10 @@ type Collector struct {
 	guestImageMTime int64
 	guestImageVer   string
 	guestImageRead  bool
+	// active kernel symlink target, re-read lazily on lstat mtime change.
+	kernelLinkMTime  int64
+	kernelLinkTarget string
+	kernelLinkRead   bool
 }
 
 // NewCollector builds a collector rooted at baseDir. An empty baseDir falls
@@ -167,13 +178,10 @@ func (c *Collector) Collect() []ComponentVersion {
 				Source:    SourceManifest,
 			})
 		}
-		// (4) kernel.
-		if man.Kernel.Version != "" {
-			out = append(out, ComponentVersion{
-				Component: ComponentKernel,
-				Version:   man.Kernel.Version,
-				Source:    SourceManifest,
-			})
+		// (4) kernel: report the active guest kernel variant, not the host
+		// kernel and not just the static ordinary manifest value.
+		if kernel := c.kernelVersionLocked(man); kernel.Version != "" {
+			out = append(out, kernel)
 		}
 	}
 
@@ -187,6 +195,68 @@ func (c *Collector) Collect() []ComponentVersion {
 	}
 
 	return out
+}
+
+// kernelVersionLocked returns the active guest kernel version. The active
+// variant is represented by cube-kernel-scf/vmlinux: a symlink to vmlinux-bm
+// for ordinary nodes, or vmlinux-pvm for PVM nodes. If the symlink is missing
+// or from an older install layout, fall back to the ordinary manifest identity.
+func (c *Collector) kernelVersionLocked(man *releaseManifest) ComponentVersion {
+	target, ok := c.kernelLinkTargetLocked()
+	if ok {
+		switch filepath.Base(target) {
+		case "vmlinux-pvm":
+			return ComponentVersion{
+				Component: ComponentKernel,
+				Version:   kernelArtifactIdentity(man.Kernel.PVMVersion, man.Kernel.VMLinuxPVMDigest),
+				Source:    SourceFile,
+			}
+		case "vmlinux-bm":
+			return ComponentVersion{
+				Component: ComponentKernel,
+				Version:   kernelArtifactIdentity(man.Kernel.Version, man.Kernel.VMLinuxDigest),
+				Source:    SourceFile,
+			}
+		}
+	}
+	identity := kernelArtifactIdentity(man.Kernel.Version, man.Kernel.VMLinuxDigest)
+	if identity == "" {
+		return ComponentVersion{}
+	}
+	return ComponentVersion{
+		Component: ComponentKernel,
+		Version:   identity,
+		Source:    SourceManifest,
+	}
+}
+
+func (c *Collector) kernelLinkTargetLocked() (string, bool) {
+	path := filepath.Join(c.baseDir, kernelVmlinuxPath)
+	info, err := os.Lstat(path)
+	if err != nil {
+		c.kernelLinkRead = true
+		c.kernelLinkTarget = ""
+		return "", false
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		c.kernelLinkRead = true
+		c.kernelLinkMTime = info.ModTime().UnixNano()
+		c.kernelLinkTarget = ""
+		return "", false
+	}
+	mtime := info.ModTime().UnixNano()
+	if c.kernelLinkRead && mtime == c.kernelLinkMTime {
+		return c.kernelLinkTarget, c.kernelLinkTarget != ""
+	}
+	c.kernelLinkRead = true
+	c.kernelLinkMTime = mtime
+	c.kernelLinkTarget = ""
+	target, err := os.Readlink(path)
+	if err != nil {
+		return "", false
+	}
+	c.kernelLinkTarget = target
+	return target, true
 }
 
 // loadManifestLocked parses the manifest once and caches the result.
@@ -269,6 +339,26 @@ func firstLine(data []byte) string {
 		j--
 	}
 	return string(line[:j])
+}
+
+func kernelArtifactIdentity(tag, digest string) string {
+	tag = trimKernelIdentityPart(tag)
+	digest = trimKernelIdentityPart(digest)
+	if digest != "" {
+		if tag != "" {
+			return tag + "@" + digest
+		}
+		return digest
+	}
+	return tag
+}
+
+func trimKernelIdentityPart(value string) string {
+	value = firstLine([]byte(value))
+	if value == "unknown" {
+		return ""
+	}
+	return value
 }
 
 func isSpace(b byte) bool {

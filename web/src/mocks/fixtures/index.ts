@@ -163,9 +163,8 @@ function buildNodes(): NodeDto[] {
       heartbeatTime: ago(9),
       conditions: [{ type: 'Ready', status: 'True', lastHeartbeatTime: ago(9) }],
       localTemplates: ['nodejs-20-web', 'go-1.22', 'ubuntu-24.04'],
-      // edge-02 is on an older cubelet — produces a "drift" row in the
-      // components view AND an outdated cell in the matrix. Used to demo
-      // the new KPI / badge / search-filter behavior.
+      // edge-02 is on a different cubelet version, which demonstrates normal
+      // multi-version distribution plus an undeclared version marker.
       versions: [
         { component: 'cubelet', version: 'v0.4.9', commit: 'f6e5d4c3b2a1', source: 'binary' },
         { component: 'containerd-shim-cube-rs', version: 'v0.5.0', source: 'manifest' },
@@ -200,8 +199,8 @@ function buildNodes(): NodeDto[] {
         { type: 'MemoryPressure', status: 'True', lastHeartbeatTime: ago(60) },
       ],
       localTemplates: ['ubuntu-24.04'],
-      // edge-03 is unhealthy AND running an older guest-image — covers the
-      // "not ready" + outdated combination in the matrix table.
+      // edge-03 is unhealthy AND running a guest-image outside the release
+      // declaration, covering "not ready" + undeclared in the matrix table.
       versions: [
         { component: 'cubelet', version: 'v0.5.0', commit: 'a1b2c3d4e5f6', source: 'binary' },
         { component: 'containerd-shim-cube-rs', version: 'v0.5.0', source: 'manifest' },
@@ -322,7 +321,7 @@ export function getNode(nodeID: string) {
 }
 
 export function getVersionMatrix(): VersionMatrixDto {
-  const expected: Record<string, string> = {
+  const declared: Record<string, string> = {
     cubelet: 'v0.5.0',
     'containerd-shim-cube-rs': 'v0.5.0',
     'cube-runtime': 'v0.5.0',
@@ -351,7 +350,8 @@ export function getVersionMatrix(): VersionMatrixDto {
         .map(([version, nodeIds]) => ({ version, nodes: nodeIds }));
       return {
         component,
-        expectedVersion: expected[component] ?? '',
+        declaredVersion: declared[component] ?? '',
+        declaredVersions: declared[component] ? [declared[component]] : [],
         consistent: versions.length <= 1,
         versions,
       };
@@ -366,7 +366,7 @@ export function getVersionMatrix(): VersionMatrixDto {
       .map((v) => ({
         component: v.component,
         version: v.version ?? '',
-        outdated: !!expected[v.component] && v.version !== expected[v.component],
+        declared: !!declared[v.component] && v.version === declared[v.component],
       })),
   }));
 

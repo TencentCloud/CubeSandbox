@@ -29,11 +29,43 @@ EOF
 {
   "components": {},
   "guest_image": {},
-  "kernel": {}
+  "kernel": {
+    "version": "6.6.119-49.6",
+    "pvm_version": "6.6.69-1.cubesandbox",
+    "vmlinux_digest_sha256": "sha256:ordinary",
+    "vmlinux_pvm_digest_sha256": "sha256:pvm"
+  }
 }
 EOF
 
   validate_declared_release_manifest "${bundle}"
+
+  python3 - "${bundle}/release-manifest.json" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    kernel = json.load(f)["kernel"]
+for key in ("version", "pvm_version", "vmlinux_digest_sha256", "vmlinux_pvm_digest_sha256"):
+    if key not in kernel:
+        raise SystemExit(f"missing kernel key: {key}")
+
+def kernel_identity(tag, digest):
+    tag = (tag or "").strip()
+    digest = (digest or "").strip()
+    if tag == "unknown":
+        tag = ""
+    if digest:
+        return f"{tag}@{digest}" if tag else digest
+    return tag
+
+ordinary_identity = kernel_identity(kernel["version"], kernel["vmlinux_digest_sha256"])
+pvm_identity = kernel_identity(kernel["pvm_version"], kernel["vmlinux_pvm_digest_sha256"])
+if ordinary_identity != "6.6.119-49.6@sha256:ordinary":
+    raise SystemExit(f"unexpected ordinary kernel identity: {ordinary_identity}")
+if pvm_identity != "6.6.69-1.cubesandbox@sha256:pvm":
+    raise SystemExit(f"unexpected PVM kernel identity: {pvm_identity}")
+if kernel_identity("unknown", "sha256:fallback") != "sha256:fallback":
+    raise SystemExit("kernel identity must use digest when tag is unknown")
+PY
 }
 
 test_rejects_missing_declared_manifest() {

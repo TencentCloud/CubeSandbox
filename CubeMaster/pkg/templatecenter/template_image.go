@@ -1758,6 +1758,10 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 }
 
 func buildTemplateSpecFingerprint(req *types.CreateTemplateFromImageReq, sourceImageDigest string) string {
+	// This fingerprint scopes only the reusable rootfs artifact. Runtime inputs
+	// such as the active guest kernel identity must stay out of this payload:
+	// changing the kernel should invalidate/rebuild snapshots or template
+	// replicas, not the ext4 rootfs artifact derived from the source image.
 	type fingerprintPayload struct {
 		SourceImageDigest  string                    `json:"source_image_digest"`
 		WritableLayerSize  string                    `json:"writable_layer_size"`

@@ -27,16 +27,22 @@ import (
 // demand because they can change across activations. Unknown JSON fields are
 // tolerated and missing fields decode as zero values so old catalog files keep
 // working after schema extensions.
+//
+// Runtime artifact identity belongs here, not in the rootfs artifact cache. In
+// particular, future "redo snapshot" checks should compare the node's active
+// kernel artifact identity with the identity recorded in this catalog entry;
+// a kernel mismatch requires rebuilding the snapshot/template replica, but does
+// not by itself require rebuilding the rootfs ext4 artifact.
 type SnapshotCatalogEntry struct {
-	SnapshotID      string `json:"snapshot_id"`
-	InstanceType    string `json:"instance_type,omitempty"`
-	SpecDir         string `json:"spec_dir,omitempty"`
-	SnapshotPath    string `json:"snapshot_path"`
-	MetaDir         string `json:"meta_dir"`
-	RootfsVol       string `json:"rootfs_vol"`
-	RootfsKind      string `json:"rootfs_kind"`
-	MemoryVol       string `json:"memory_vol"`
-	MemoryKind      string `json:"memory_kind"`
+	SnapshotID   string `json:"snapshot_id"`
+	InstanceType string `json:"instance_type,omitempty"`
+	SpecDir      string `json:"spec_dir,omitempty"`
+	SnapshotPath string `json:"snapshot_path"`
+	MetaDir      string `json:"meta_dir"`
+	RootfsVol    string `json:"rootfs_vol"`
+	RootfsKind   string `json:"rootfs_kind"`
+	MemoryVol    string `json:"memory_vol"`
+	MemoryKind   string `json:"memory_kind"`
 	// BuildRootfsVol/Kind track the temporary writable working layer created
 	// during template build (AppSnapshot path). They must be cleaned up at
 	// template delete time. Empty for runtime snapshots (CommitSandbox), which

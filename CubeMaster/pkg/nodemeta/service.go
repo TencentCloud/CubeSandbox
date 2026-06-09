@@ -143,6 +143,12 @@ type service struct {
 	ready bool
 	nodes map[string]*NodeSnapshot
 
+	// declaredVersions is loaded once from the local release manifest during
+	// service startup. The manifest is deployed as an immutable release asset,
+	// so version-matrix reads should not parse it on every request.
+	declaredVersions    map[string]string
+	declaredVersionSets map[string]map[string]struct{}
+
 	// versionWriteLocks serialises the hash-check/write/update sequence per
 	// node so concurrent heartbeats cannot race each other and issue redundant
 	// version writes or overwrite a newer in-memory hash with an older one.
@@ -150,7 +156,9 @@ type service struct {
 }
 
 var global = &service{
-	nodes: make(map[string]*NodeSnapshot),
+	nodes:               make(map[string]*NodeSnapshot),
+	declaredVersions:    map[string]string{},
+	declaredVersionSets: map[string]map[string]struct{}{},
 }
 
 func Init(ctx context.Context) error {
@@ -158,6 +166,9 @@ func Init(ctx context.Context) error {
 	// Schema is owned by pkg/base/dao/migrate and applied at startup
 	// before any package Init runs.
 	global.db = db.Init(config.GetDbConfig())
+	declaredInfo := loadDeclaredVersionInfo()
+	global.declaredVersions = declaredInfo.Primary
+	global.declaredVersionSets = declaredInfo.Sets
 	if err := global.reload(); err != nil {
 		return err
 	}

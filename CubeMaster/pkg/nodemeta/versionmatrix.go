@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
@@ -45,18 +46,20 @@ type ComponentVersionGroup struct {
 
 // ComponentMatrixRow is the per-component aggregation across all nodes.
 type ComponentMatrixRow struct {
-	Component       string                  `json:"component"`
-	ExpectedVersion string                  `json:"expected_version,omitempty"`
-	Consistent      bool                    `json:"consistent"`
-	Versions        []ComponentVersionGroup `json:"versions"`
+	Component        string                  `json:"component"`
+	DeclaredVersion  string                  `json:"declared_version,omitempty"`
+	DeclaredVersions []string                `json:"declared_versions,omitempty"`
+	Consistent       bool                    `json:"consistent"`
+	Versions         []ComponentVersionGroup `json:"versions"`
 }
 
-// NodeComponentEntry is a single component version on a single node, with the
-// outdated flag pre-computed against the expected version.
+// NodeComponentEntry is a single component version on a single node. Declared
+// tells whether the actual version belongs to the release-manifest declaration
+// set when such a set exists; it is informational, not a failure verdict.
 type NodeComponentEntry struct {
 	Component string `json:"component"`
 	Version   string `json:"version"`
-	Outdated  bool   `json:"outdated"`
+	Declared  bool   `json:"declared"`
 }
 
 // NodeVersionRow is the per-node view of the matrix.
@@ -78,24 +81,38 @@ type VersionMatrix struct {
 //
 // It reads versions directly from t_cube_node_component_version (rather than
 // the per-replica in-memory snapshot) so the matrix is consistent across
-// cubemaster replicas. Expected versions come from the control-plane's own
-// release manifest, classified per component: release-bound binaries compare
-// against the manifest's (== semver) version, while independent-versioning
-// components (guest-image / kernel / cube-agent) compare against their own
-// manifest entry — never against the semver — so they are not falsely flagged
-// as outdated.
+// cubemaster replicas. Release manifest data is exposed only as declared
+// artifacts; the matrix itself is an inventory/distribution view, not a
+// policy engine that decides whether mixed versions are wrong.
 func GetVersionMatrix(ctx context.Context) (*VersionMatrix, error) {
 	return global.getVersionMatrix(ctx)
 }
 
-func (s *service) getVersionMatrix(_ context.Context) (*VersionMatrix, error) {
+func (s *service) getVersionMatrix(ctx context.Context) (*VersionMatrix, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	rows := make([]*models.NodeComponentVersion, 0)
-	if err := s.db.Model(&models.NodeComponentVersion{}).Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).Model(&models.NodeComponentVersion{}).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 
-	healthy := s.healthyByNode()
-	expected := loadExpectedVersions()
+	healthy := s.healthyByNode(ctx)
+	return buildVersionMatrix(rows, healthy, s.declaredVersions, s.declaredVersionSets), nil
+}
+
+func buildVersionMatrix(
+	rows []*models.NodeComponentVersion,
+	healthy map[string]bool,
+	declared map[string]string,
+	declaredSets map[string]map[string]struct{},
+) *VersionMatrix {
+	if declared == nil {
+		declared = map[string]string{}
+	}
+	if declaredSets == nil {
+		declaredSets = map[string]map[string]struct{}{}
+	}
 
 	// component -> version -> nodes
 	byComponent := make(map[string]map[string][]string)
@@ -113,12 +130,10 @@ func (s *service) getVersionMatrix(_ context.Context) (*VersionMatrix, error) {
 		}
 		byComponent[r.Component][r.Version] = append(byComponent[r.Component][r.Version], r.NodeID)
 
-		exp, hasExpected := expected[r.Component]
-		outdated := hasExpected && exp != "" && r.Version != exp
 		byNode[r.NodeID] = append(byNode[r.NodeID], NodeComponentEntry{
 			Component: r.Component,
 			Version:   r.Version,
-			Outdated:  outdated,
+			Declared:  versionIsDeclared(r.Component, r.Version, declared, declaredSets),
 		})
 	}
 
@@ -146,10 +161,11 @@ func (s *service) getVersionMatrix(_ context.Context) (*VersionMatrix, error) {
 		}
 		sort.Slice(groups, func(i, j int) bool { return groups[i].Version < groups[j].Version })
 		matrix.Components = append(matrix.Components, ComponentMatrixRow{
-			Component:       c,
-			ExpectedVersion: expected[c],
-			Consistent:      len(groups) <= 1,
-			Versions:        groups,
+			Component:        c,
+			DeclaredVersion:  declared[c],
+			DeclaredVersions: sortedDeclaredVersions(c, declared, declaredSets),
+			Consistent:       len(groups) <= 1,
+			Versions:         groups,
 		})
 	}
 
@@ -167,16 +183,16 @@ func (s *service) getVersionMatrix(_ context.Context) (*VersionMatrix, error) {
 			Components: entries,
 		})
 	}
-	return matrix, nil
+	return matrix
 }
 
 // healthyByNode reads node health straight from the status table so the
 // matrix reflects the cluster-wide persisted state rather than this replica's
 // in-memory snapshot.
-func (s *service) healthyByNode() map[string]bool {
+func (s *service) healthyByNode(ctx context.Context) map[string]bool {
 	out := make(map[string]bool)
 	statuses := make([]*models.NodeStatus, 0)
-	if err := s.db.Model(&models.NodeStatus{}).Find(&statuses).Error; err != nil {
+	if err := s.db.WithContext(ctx).Model(&models.NodeStatus{}).Find(&statuses).Error; err != nil {
 		return out
 	}
 	for _, st := range statuses {
@@ -185,8 +201,8 @@ func (s *service) healthyByNode() map[string]bool {
 	return out
 }
 
-// releaseManifest is the subset of release-manifest.json needed to derive
-// expected component versions.
+// releaseManifest is the subset of release-manifest.json needed to expose
+// declared component artifacts.
 type releaseManifest struct {
 	Components map[string]struct {
 		Version string `json:"version"`
@@ -196,41 +212,141 @@ type releaseManifest struct {
 		AgentVersion string `json:"agent_version"`
 	} `json:"guest_image"`
 	Kernel struct {
-		Version string `json:"version"`
+		Version          string `json:"version"`
+		PVMVersion       string `json:"pvm_version"`
+		VMLinuxDigest    string `json:"vmlinux_digest_sha256"`
+		VMLinuxPVMDigest string `json:"vmlinux_pvm_digest_sha256"`
 	} `json:"kernel"`
 }
 
-// loadExpectedVersions returns the expected version per component, derived
-// from the control-plane's own release manifest. Returns an empty map (no
-// outdated checks, consistency-only) when the manifest is missing/unreadable.
-func loadExpectedVersions() map[string]string {
+type declaredVersionInfo struct {
+	Primary map[string]string
+	Sets    map[string]map[string]struct{}
+}
+
+// loadDeclaredVersions returns the release-declared version per component.
+// Returns an empty map when the manifest is missing/unreadable.
+func loadDeclaredVersions() map[string]string {
 	path := os.Getenv("CUBE_RELEASE_MANIFEST")
 	if path == "" {
 		path = defaultReleaseManifestPath
 	}
+	return loadDeclaredVersionsFromPath(path)
+}
+
+func loadDeclaredVersionsFromPath(path string) map[string]string {
+	return loadDeclaredVersionInfoFromPath(path).Primary
+}
+
+func loadDeclaredVersionInfo() declaredVersionInfo {
+	path := os.Getenv("CUBE_RELEASE_MANIFEST")
+	if path == "" {
+		path = defaultReleaseManifestPath
+	}
+	return loadDeclaredVersionInfoFromPath(path)
+}
+
+func loadDeclaredVersionInfoFromPath(path string) declaredVersionInfo {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return map[string]string{}
+		return declaredVersionInfo{Primary: map[string]string{}, Sets: map[string]map[string]struct{}{}}
 	}
 	var m releaseManifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return map[string]string{}
+		return declaredVersionInfo{Primary: map[string]string{}, Sets: map[string]map[string]struct{}{}}
 	}
-	expected := make(map[string]string, len(m.Components)+3)
+	declared := make(map[string]string, len(m.Components)+3)
+	declaredSets := make(map[string]map[string]struct{}, len(m.Components)+3)
 	for name, c := range m.Components {
-		expected[name] = c.Version
+		addDeclaredVersion(declared, declaredSets, name, c.Version, false)
 	}
 	// guest-image / cube-agent / kernel follow their own version systems; take
 	// them from the dedicated manifest sections (cube-agent overrides any
 	// components["cube-agent"] entry to match the agent baked into the guest).
 	if m.GuestImage.Version != "" {
-		expected[componentGuestImage] = m.GuestImage.Version
+		setDeclaredVersion(declared, declaredSets, componentGuestImage, m.GuestImage.Version)
 	}
 	if m.GuestImage.AgentVersion != "" {
-		expected[componentCubeAgent] = m.GuestImage.AgentVersion
+		setDeclaredVersion(declared, declaredSets, componentCubeAgent, m.GuestImage.AgentVersion)
 	}
-	if m.Kernel.Version != "" {
-		expected[componentKernel] = m.Kernel.Version
+	if identity := kernelArtifactIdentity(m.Kernel.Version, m.Kernel.VMLinuxDigest); identity != "" {
+		setDeclaredVersion(declared, declaredSets, componentKernel, identity)
 	}
-	return expected
+	if identity := kernelArtifactIdentity(m.Kernel.PVMVersion, m.Kernel.VMLinuxPVMDigest); identity != "" {
+		addDeclaredVersion(declared, declaredSets, componentKernel, identity, false)
+	}
+	return declaredVersionInfo{Primary: declared, Sets: declaredSets}
+}
+
+func addDeclaredVersion(primary map[string]string, sets map[string]map[string]struct{}, component, version string, forcePrimary bool) {
+	if version == "" || version == "unknown" {
+		return
+	}
+	if forcePrimary || primary[component] == "" {
+		primary[component] = version
+	}
+	if sets[component] == nil {
+		sets[component] = map[string]struct{}{}
+	}
+	sets[component][version] = struct{}{}
+}
+
+func setDeclaredVersion(primary map[string]string, sets map[string]map[string]struct{}, component, version string) {
+	if version == "" || version == "unknown" {
+		return
+	}
+	primary[component] = version
+	sets[component] = map[string]struct{}{version: {}}
+}
+
+func versionIsDeclared(component, actual string, primary map[string]string, sets map[string]map[string]struct{}) bool {
+	if actual == "" || actual == "unknown" {
+		return false
+	}
+	if set := sets[component]; len(set) > 0 {
+		if _, ok := set[actual]; ok {
+			return true
+		}
+		return false
+	}
+	exp := primary[component]
+	return exp != "" && exp != "unknown" && actual == exp
+}
+
+func sortedDeclaredVersions(component string, primary map[string]string, sets map[string]map[string]struct{}) []string {
+	set := sets[component]
+	if len(set) == 0 {
+		if primary[component] == "" {
+			return nil
+		}
+		return []string{primary[component]}
+	}
+	out := make([]string, 0, len(set))
+	for v := range set {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func kernelArtifactIdentity(tag, digest string) string {
+	tag = trimKernelIdentityPart(tag)
+	digest = trimKernelIdentityPart(digest)
+	if digest != "" {
+		if tag != "" {
+			return tag + "@" + digest
+		}
+		return digest
+	}
+	return tag
+}
+
+func trimKernelIdentityPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "unknown" {
+		return ""
+	}
+	return value
 }

@@ -239,7 +239,8 @@ export interface components {
         ComponentMatrixRowView: {
             component: string;
             consistent: boolean;
-            expectedVersion?: string;
+            declaredVersion?: string;
+            declaredVersions?: string[];
             versions: components["schemas"]["ComponentVersionGroupView"][];
         };
         /** @description A group of nodes that report the same version of a component. */
@@ -291,10 +292,10 @@ export interface components {
         };
         /** @enum {string} */
         LogLevel: "debug" | "info" | "warn" | "error";
-        /** @description A single component version on a single node, with outdated pre-computed. */
+        /** @description A single component version on a single node, with release declaration membership. */
         NodeComponentEntryView: {
             component: string;
-            outdated: boolean;
+            declared: boolean;
             version: string;
         };
         NodeConditionView: {

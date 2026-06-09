@@ -521,9 +521,10 @@ build_guest_image_artifacts \
   "${RUNTIME_LAYOUT_DIR}/cube-image/cube-guest-image-cpu.img" \
   "${RUNTIME_LAYOUT_DIR}/cube-image/version" \
   "${RUNTIME_LAYOUT_DIR}/cube-image/agent-version"
-log "copying fixed kernel vmlinux"
-copy_file "${CUBE_KERNEL_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux"
-ensure_file "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux"
+log "copying ordinary guest kernel vmlinux"
+copy_file "${CUBE_KERNEL_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"
+ensure_file "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-bm"
+ln -sfn "vmlinux-bm" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux"
 if [[ -f "${CUBE_KERNEL_PVM_VMLINUX}" ]]; then
   log "copying PVM kernel vmlinux"
   copy_file "${CUBE_KERNEL_PVM_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"

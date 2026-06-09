@@ -405,16 +405,19 @@ check_install_preflight() {
 
 select_installed_kernel_vmlinux() {
   local kernel_dir="${INSTALL_PREFIX}/cube-kernel-scf"
+  local target="vmlinux-bm"
 
-  ensure_file "${kernel_dir}/vmlinux"
-  if [[ "${CUBE_PVM_ENABLE}" != "1" ]]; then
-    log "using ordinary guest kernel: ${kernel_dir}/vmlinux"
-    return 0
+  if [[ "${CUBE_PVM_ENABLE}" == "1" ]]; then
+    target="vmlinux-pvm"
   fi
 
-  ensure_file "${kernel_dir}/vmlinux-pvm"
-  cp -f "${kernel_dir}/vmlinux-pvm" "${kernel_dir}/vmlinux"
-  log "CUBE_PVM_ENABLE=1, installed PVM guest kernel as ${kernel_dir}/vmlinux"
+  ensure_file "${kernel_dir}/${target}"
+  ln -sfn "${target}" "${kernel_dir}/vmlinux"
+  if [[ "${target}" == "vmlinux-pvm" ]]; then
+    log "CUBE_PVM_ENABLE=1, selected PVM guest kernel: ${kernel_dir}/vmlinux -> ${target}"
+  else
+    log "selected ordinary guest kernel: ${kernel_dir}/vmlinux -> ${target}"
+  fi
 }
 
 configure_tencent_docker_mirror() {
