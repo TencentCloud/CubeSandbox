@@ -9,5 +9,6 @@
   "apiKeys": "API Keys",
   "settings": "Settings",
   "store": "Template Store",
-  "agentHub": "AgentHub"
+  "agentHub": "AgentHub",
+  "examples": "Examples"
 }
