@@ -26,6 +26,12 @@ const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
+/// Sandbox-metadata key promoted to a CubeMaster annotation so callers can
+/// append guest kernel cmdline parameters (e.g. a per-sandbox identity nonce the
+/// guest reads from `/proc/cmdline`) without a shared host mount. Mirrors the
+/// `host-mount` promotion below. The annotation is consumed by Cubelet
+/// (`cube.vm.kernel.cmdline.append`) and appended to the guest boot args.
+const KERNEL_CMDLINE_APPEND_KEY: &str = "cube.vm.kernel.cmdline.append";
 
 #[derive(Clone)]
 pub struct SandboxService {
@@ -129,6 +135,9 @@ impl SandboxService {
         let labels = body.metadata.map(|mut meta| {
             if let Some(value) = meta.remove(HOSTDIR_MOUNT_KEY) {
                 annotations.insert(HOSTDIR_MOUNT_KEY.to_string(), value);
+            }
+            if let Some(value) = meta.remove(KERNEL_CMDLINE_APPEND_KEY) {
+                annotations.insert(KERNEL_CMDLINE_APPEND_KEY.to_string(), value);
             }
             meta
         });
