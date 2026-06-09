@@ -37,7 +37,8 @@ use virtiofsd::{
     fuse::{InHeader, OutHeader, RemovemappingOne},
     limits,
     passthrough::{
-        self, read_only::PassthroughFsRo, xattrmap::XattrMap, CachePolicy, PassthroughFs,
+        self, read_only::PassthroughFsRo, xattrmap::XattrMap, CachePolicy, MigrationOnError,
+        PassthroughFs,
     },
     server::Server,
     Error as VhostUserFsError,
@@ -939,6 +940,10 @@ impl Fs {
             killpriv_v2: backendfs_config.killpriv_v2,
             security_label: backendfs_config.security_label,
             posix_acl: backendfs_config.posix_acl,
+            // Hardcoded override (not driven by BackendFsConfig): surface
+            // per-inode restore failures to the guest instead of aborting
+            // the whole live migration. Upstream default is `Abort`.
+            migration_on_error: MigrationOnError::GuestError,
             ..Default::default()
         };
 

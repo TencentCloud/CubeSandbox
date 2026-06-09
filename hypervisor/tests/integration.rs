@@ -7476,6 +7476,209 @@ mod common_sequential {
             Some(vec![fs_config]),
         );
     }
+
+    /// Snapshot a VM that has a native virtiofs share, delete one of the
+    /// backing files referenced by that snapshot, then restore the VM.
+    ///
+    /// This exercises the `migration_on_error: GuestError` policy in the
+    /// native virtiofs server (see `virtio-devices/src/fs.rs`
+    /// `init_backend_fs_server`):
+    ///
+    /// * with `MigrationOnError::Abort` (the upstream default) the missing
+    ///   inode would tear down the whole live restore;
+    /// * with `MigrationOnError::GuestError` (our setting) the restore must
+    ///   succeed end-to-end, the surviving files must still be readable,
+    ///   the FS must still accept new operations, and only access to the
+    ///   deleted file must surface an error to the guest.
+    #[test]
+    fn test_snapshot_restore_native_virtiofs_with_deleted_backing_file() {
+        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(Box::new(focal));
+        let kernel_path = direct_kernel_boot_path();
+
+        let api_socket_source = format!("{}.1", temp_api_path(&guest.tmp_dir));
+        let event_path = temp_event_monitor_path(&guest.tmp_dir);
+
+        // Carve a private shared_dir under tmp_dir so we can mutate it
+        // without disturbing other tests that point at ~/workloads/shared_dir.
+        let shared_dir = guest.tmp_dir.as_path().join("virtiofs_shared");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+        let survivor_path = shared_dir.join("survivor.txt");
+        let victim_path = shared_dir.join("victim.txt");
+        std::fs::write(&survivor_path, b"survivor-before-snapshot\n").unwrap();
+        std::fs::write(&victim_path, b"victim-before-snapshot\n").unwrap();
+
+        let fs_params = format!(
+            "id=myfs0,tag=myfs,native=true,shared_dir={},cache=always,read_only=false,num_queues=1,queue_size=1024",
+            shared_dir.to_str().unwrap()
+        );
+
+        let mut child = GuestCommand::new(&guest)
+            .args(["--api-socket", &api_socket_source])
+            .args(["--event-monitor", format!("path={}", event_path).as_str()])
+            .args(["--cpus", "boot=1"])
+            .args(["--memory", "size=512M,shared=on"])
+            .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .default_disks()
+            .default_net()
+            .args(["--fs", fs_params.as_str()])
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
+
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
+            // Mount virtiofs and prime the inode cache for both files.
+            // `stat` forces virtiofsd to record an entry for each one in
+            // its inode store before we take the snapshot.
+            guest
+                .ssh_command("mkdir -p mount_dir && sudo mount -t virtiofs myfs mount_dir/")
+                .unwrap();
+            assert_eq!(
+                guest
+                    .ssh_command("cat mount_dir/survivor.txt")
+                    .unwrap()
+                    .trim(),
+                "survivor-before-snapshot",
+            );
+            assert_eq!(
+                guest
+                    .ssh_command("cat mount_dir/victim.txt")
+                    .unwrap()
+                    .trim(),
+                "victim-before-snapshot",
+            );
+            guest
+                .ssh_command("stat mount_dir/survivor.txt mount_dir/victim.txt >/dev/null")
+                .unwrap();
+
+            snapshot_and_check_events(
+                api_socket_source.as_str(),
+                snapshot_dir.as_str(),
+                event_path.as_str(),
+            );
+        });
+
+        // Tear down the source VM so its O_PATH fds against the shared dir
+        // are released. This is what makes the next restore's lookup of the
+        // deleted file actually fail (rather than succeed via a still-open
+        // unlinked inode).
+        kill_child(&mut child);
+        let output = child.wait_with_output().unwrap();
+        handle_child_output(r, &output);
+
+        // Delete the file the snapshot indexed. The directory itself
+        // survives so `<root_dir>` still passes virtiofsd's startup checks.
+        std::fs::remove_file(&victim_path).unwrap();
+        assert!(survivor_path.exists());
+        assert!(!victim_path.exists());
+
+        // Restore against the same (now-mutated) shared_dir.
+        let api_socket_restored = format!("{}.2", temp_api_path(&guest.tmp_dir));
+        let event_path_restored = format!("{}.2", temp_event_monitor_path(&guest.tmp_dir));
+
+        let mut restored_child = GuestCommand::new(&guest)
+            .args(["--api-socket", &api_socket_restored])
+            .args([
+                "--event-monitor",
+                format!("path={}", event_path_restored).as_str(),
+            ])
+            .args([
+                "--restore",
+                format!("source_url=file://{}", snapshot_dir).as_str(),
+            ])
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        // Give the restore time to complete and the guest to come back.
+        // Poll the event monitor instead of a fixed sleep — restore time
+        // varies with host load, and SSH retries below cover the rest.
+        let restored_events = [
+            &MetaEvent {
+                event: "restored".to_string(),
+                device_id: None,
+            },
+            &MetaEvent {
+                event: "resuming".to_string(),
+                device_id: None,
+            },
+            &MetaEvent {
+                event: "resumed".to_string(),
+                device_id: None,
+            },
+        ];
+        let mut restored = false;
+        for _ in 0..30 {
+            if check_latest_events_exact(&restored_events, &event_path_restored) {
+                restored = true;
+                break;
+            }
+            thread::sleep(std::time::Duration::new(1, 0));
+        }
+
+        let r = std::panic::catch_unwind(|| {
+            // (a) Restore is reported successful even though one indexed
+            // backing file vanished. This is the migration_on_error =
+            // GuestError contract — without it we would have aborted.
+            assert!(
+                restored,
+                "VM did not reach `resumed` within the 30s budget — restore likely aborted",
+            );
+
+            // (b) The restored guest is alive and the surviving file still
+            // reads through. virtiofs as a whole has to be functional.
+            assert_eq!(
+                guest
+                    .ssh_command("cat mount_dir/survivor.txt")
+                    .unwrap()
+                    .trim(),
+                "survivor-before-snapshot",
+            );
+
+            // (c) Access to the deleted file errors out on the guest side
+            // (ENOENT). The error is *guest-visible*, not VM-fatal.
+            let probe = guest
+                .ssh_command(
+                    "cat mount_dir/victim.txt >/dev/null 2>&1; \
+                     echo rc=$?; \
+                     test -e mount_dir/victim.txt && echo present || echo missing",
+                )
+                .unwrap();
+            assert!(
+                probe.contains("rc=") && !probe.contains("rc=0"),
+                "expected non-zero exit reading deleted file, got: {probe:?}",
+            );
+            assert!(
+                probe.contains("missing"),
+                "expected victim.txt to be missing on guest, got: {probe:?}",
+            );
+
+            // (d) The FS must still accept new operations after the
+            // guest-visible error — i.e. the error did NOT poison the
+            // mount or panic the guest VFS layer.
+            guest
+                .ssh_command("echo post-restore | sudo tee mount_dir/post_restore.txt >/dev/null")
+                .unwrap();
+            assert_eq!(
+                guest
+                    .ssh_command("cat mount_dir/post_restore.txt")
+                    .unwrap()
+                    .trim(),
+                "post-restore",
+            );
+            // And the host sees the new file via the same shared_dir.
+            assert!(shared_dir.join("post_restore.txt").exists());
+        });
+
+        kill_child(&mut restored_child);
+        let restored_output = restored_child.wait_with_output().unwrap();
+        handle_child_output(r, &restored_output);
+    }
 }
 
 mod compatibility {
