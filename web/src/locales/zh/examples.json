@@ -1,0 +1,32 @@
+{
+  "title": "示例中心",
+  "subtitle": "浏览并直接在控制台运行 code-sandbox-quickstart 示例代码，一键体验沙箱的常用能力。",
+  "badge": "code-sandbox-quickstart",
+  "run": "运行",
+  "running": "运行中…",
+  "output": "运行结果",
+  "outputHint": "点击「运行」执行此示例，输出将在这里显示。",
+  "selectHint": "从左侧选择一个示例，代码和运行结果将在这里显示。",
+  "selectHintTitle": "选择一个示例开始",
+  "defaultTemplate": "默认：{{id}}",
+  "noTemplate": "暂无可用模板，请新建模版",
+  "allCategories": "全部",
+  "searchPlaceholder": "搜索示例…",
+  "noResults": "没有匹配的示例",
+  "copy": "复制代码",
+  "copied": "已复制到剪贴板",
+  "copyFailed": "复制失败",
+  "completed": "已完成",
+  "failed": "失败",
+  "templateSelector": {
+    "title": "选择模板",
+    "searchPlaceholder": "按 ID / 类型搜索…",
+    "empty": "没有匹配的模板",
+    "hint": "点击外部区域关闭",
+    "group": {
+      "ready": "可用",
+      "building": "构建中",
+      "other": "其他"
+    }
+  }
+}
