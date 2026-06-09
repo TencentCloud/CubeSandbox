@@ -311,6 +311,14 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.CPUType = n.CPUType
 		old.InstanceType = n.InstanceType
 		old.OssClusterLabel = n.OssClusterLabel
+		var labels map[string]string
+		if n.NodeLabels != nil {
+			labels = make(map[string]string, len(n.NodeLabels))
+			for k, v := range n.NodeLabels {
+				labels[k] = v
+			}
+		}
+		old.NodeLabels = labels
 		l.lockMetaData.Unlock()
 
 		l.updateSortedNodes(old)

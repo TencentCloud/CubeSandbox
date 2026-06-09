@@ -86,6 +86,8 @@ type Node struct {
 
 	LocalCreateNum int64 `json:"LocalCreateNum,omitempty"`
 	NicQueues      int64 `json:"nic_queues,omitempty"`
+
+	NodeLabels map[string]string `json:"NodeLabels,omitempty"`
 }
 
 func (n *Node) Clone() *Node {
@@ -100,6 +102,12 @@ func (n *Node) Clone() *Node {
 	cloned.LocalCreateNum = localCreateNum
 	if n.VirtualNodeQuotaArray != nil {
 		cloned.VirtualNodeQuotaArray = append([]int64(nil), n.VirtualNodeQuotaArray...)
+	}
+	if n.NodeLabels != nil {
+		cloned.NodeLabels = make(map[string]string, len(n.NodeLabels))
+		for k, v := range n.NodeLabels {
+			cloned.NodeLabels[k] = v
+		}
 	}
 	return &cloned
 }
@@ -118,7 +126,12 @@ func (n *Node) LocalCreateNumIncrBy(i int64) int64 {
 }
 
 func (n *Node) Labels() map[string]string {
+	// Canonical affinity keys derived from Node struct fields always take
+	// priority over node-reported labels, so they are written last.
 	labels := make(map[string]string)
+	for k, v := range n.NodeLabels {
+		labels[k] = v
+	}
 	labels[constants.AffinityKeyZone] = n.Zone
 	labels[constants.AffinityKeyClusterID] = n.ClusterLabel
 	labels[constants.AffinityKeyCPUType] = n.CPUType

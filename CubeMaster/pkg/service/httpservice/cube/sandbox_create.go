@@ -68,7 +68,14 @@ func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTr
 		return rsp
 	}
 
-	ctx = runInsReq2Affinity(ctx, req)
+	ctx, err = runInsReq2Affinity(ctx, req)
+	if err != nil {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = err.Error()
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		log.G(ctx).Error(err)
+		return rsp
+	}
 	ret := createSandboxRunFn(ctx, req)
 	if ret != nil && ret.Ret != nil && ret.Ret.RetCode == int(errorcode.ErrorCode_Success) {
 		if err := registerCreatedSandboxRuntimeRef(ctx, req, ret); err != nil {
