@@ -7,6 +7,7 @@ package cube
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -18,8 +19,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func runInsReq2Affinity(ctx context.Context, req *types.CreateCubeSandboxReq) context.Context {
-	matchExpressionsWithANDed := constructNodeAffinity(ctx, req)
+func runInsReq2Affinity(ctx context.Context, req *types.CreateCubeSandboxReq) (context.Context, error) {
+	matchExpressionsWithANDed, err := constructNodeAffinity(ctx, req)
+	if err != nil {
+		return ctx, err
+	}
 
 	var nodeSelectorTerms []affinity.NodeSelectorTerm
 	if len(matchExpressionsWithANDed) > 0 {
@@ -29,8 +33,7 @@ func runInsReq2Affinity(ctx context.Context, req *types.CreateCubeSandboxReq) co
 	if len(nodeSelectorTerms) > 0 {
 		ns, err := affinity.NewNodeSelector(nodeSelectorTerms)
 		if err != nil {
-			log.G(ctx).Fatalf("runInsReq2Affinity NewNodeSelector fail:%s", err)
-			return ctx
+			return ctx, fmt.Errorf("runInsReq2Affinity NewNodeSelector fail: %w", err)
 		}
 		ctx = constants.WithNodeSelector(ctx, ns)
 
@@ -38,10 +41,10 @@ func runInsReq2Affinity(ctx context.Context, req *types.CreateCubeSandboxReq) co
 			ctx = constants.WithBackoffNodeSelector(ctx, ns)
 		}
 	}
-	return ctx
+	return ctx, nil
 }
 
-func constructNodeAffinity(ctx context.Context, req *types.CreateCubeSandboxReq) []affinity.NodeSelectorRequirement {
+func constructNodeAffinity(ctx context.Context, req *types.CreateCubeSandboxReq) ([]affinity.NodeSelectorRequirement, error) {
 	var matchExpressions []affinity.NodeSelectorRequirement
 
 	nodeClusterLabel := map[string]any{}
@@ -103,21 +106,18 @@ func constructNodeAffinity(ctx context.Context, req *types.CreateCubeSandboxReq)
 			}
 			matchExpressions = append(matchExpressions, requiredV)
 		}
-	}
 
-	if req.Annotations != nil {
 		if selectorJSON, ok := req.Annotations[constants.AnnotationsNodeAffinitySelector]; ok && selectorJSON != "" {
 			parsed, err := parseNodeAffinitySelector(selectorJSON)
 			if err != nil {
-				log.G(ctx).Errorf("parseNodeAffinitySelector fail: %s", err)
-			} else {
-				matchExpressions = append(matchExpressions, parsed...)
+				return nil, fmt.Errorf("parseNodeAffinitySelector: %w", err)
 			}
+			matchExpressions = append(matchExpressions, parsed...)
 		}
 	}
 
 	log.G(ctx).Debugf("constructNodeAffinity:%s", utils.InterfaceToString(matchExpressions))
-	return matchExpressions
+	return matchExpressions, nil
 }
 
 func isLargeMemSize(ctx context.Context, req *types.CreateCubeSandboxReq, largeMemSize string) bool {
@@ -169,6 +169,19 @@ func parseNodeAffinitySelector(selectorJSON string) ([]affinity.NodeSelectorRequ
 
 	result := make([]affinity.NodeSelectorRequirement, 0, len(raw))
 	for _, r := range raw {
+		if r.Key == "" {
+			return nil, fmt.Errorf("node selector key must not be empty")
+		}
+		switch r.Operator {
+		case affinity.NodeSelectorOpIn, affinity.NodeSelectorOpNotIn:
+			if len(r.Values) == 0 {
+				return nil, fmt.Errorf("operator %q requires non-empty values for key %q", r.Operator, r.Key)
+			}
+		case affinity.NodeSelectorOpExists, affinity.NodeSelectorOpDoesNotExist:
+			if len(r.Values) != 0 {
+				return nil, fmt.Errorf("operator %q requires empty values for key %q", r.Operator, r.Key)
+			}
+		}
 		req := affinity.NodeSelectorRequirement{
 			Key:      r.Key,
 			Operator: r.Operator,

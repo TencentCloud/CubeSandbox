@@ -103,6 +103,12 @@ func (n *Node) Clone() *Node {
 	if n.VirtualNodeQuotaArray != nil {
 		cloned.VirtualNodeQuotaArray = append([]int64(nil), n.VirtualNodeQuotaArray...)
 	}
+	if n.NodeLabels != nil {
+		cloned.NodeLabels = make(map[string]string, len(n.NodeLabels))
+		for k, v := range n.NodeLabels {
+			cloned.NodeLabels[k] = v
+		}
+	}
 	return &cloned
 }
 
