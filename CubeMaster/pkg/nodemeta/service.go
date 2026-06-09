@@ -423,6 +423,7 @@ func toSchedulerNode(snap *NodeSnapshot) *node.Node {
 		CreateConcurrentNum: snap.CreateConcurrentNum,
 		MaxMvmLimit:         snap.MaxMvmNum,
 		MetaDataUpdateAt:    snap.HeartbeatTime,
+		NodeLabels:          snap.Labels,
 		// MetricUpdate / MetricLocalUpdateAt are intentionally left
 		// zero-valued here. They are owned by the resource-metric path
 		// (Redis tick or UpdateNodeMetricInProcess) so prefilter's

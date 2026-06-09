@@ -82,6 +82,8 @@ type Node struct {
 
 	LocalCreateNum int64 `json:"LocalCreateNum,omitempty"`
 	NicQueues      int64 `json:"nic_queues,omitempty"`
+
+	NodeLabels map[string]string `json:"NodeLabels,omitempty"`
 }
 
 func (n *Node) ID() string {
@@ -105,6 +107,9 @@ func (n *Node) Labels() map[string]string {
 	labels[constants.AffinityKeyMemorySize] = fmt.Sprintf("%dMi", n.QuotaMem)
 	labels[constants.AffinityKeyCPUCores] = fmt.Sprintf("%dm", n.QuotaCpu)
 	labels[constants.AffinityKeyInstanceType] = n.InstanceType
+	for k, v := range n.NodeLabels {
+		labels[k] = v
+	}
 	return labels
 }
 

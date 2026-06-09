@@ -6,6 +6,7 @@ package cube
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -104,6 +105,17 @@ func constructNodeAffinity(ctx context.Context, req *types.CreateCubeSandboxReq)
 		}
 	}
 
+	if req.Annotations != nil {
+		if selectorJSON, ok := req.Annotations[constants.AnnotationsNodeAffinitySelector]; ok && selectorJSON != "" {
+			parsed, err := parseNodeAffinitySelector(selectorJSON)
+			if err != nil {
+				log.G(ctx).Errorf("parseNodeAffinitySelector fail: %s", err)
+			} else {
+				matchExpressions = append(matchExpressions, parsed...)
+			}
+		}
+	}
+
 	log.G(ctx).Debugf("constructNodeAffinity:%s", utils.InterfaceToString(matchExpressions))
 	return matchExpressions
 }
@@ -138,4 +150,45 @@ func isLargeCpucores(ctx context.Context, req *types.CreateCubeSandboxReq, large
 		reqCpu.Add(ctncpuQuantity)
 	}
 	return reqCpu.Cmp(resource.MustParse(largeCpucores)) >= 0
+}
+
+// nodeSelectorRequirementJSON is an intermediate struct for JSON unmarshaling
+// where Values is a slice (matching the user-facing JSON format), which is then
+// converted to map[string]any to fit affinity.NodeSelectorRequirement.
+type nodeSelectorRequirementJSON struct {
+	Key      string                      `json:"key"`
+	Operator affinity.NodeSelectorOperator `json:"operator"`
+	Values   []string                    `json:"values,omitempty"`
+}
+
+func parseNodeAffinitySelector(selectorJSON string) ([]affinity.NodeSelectorRequirement, error) {
+	var raw []nodeSelectorRequirementJSON
+	if err := json.Unmarshal([]byte(selectorJSON), &raw); err != nil {
+		return nil, err
+	}
+
+	result := make([]affinity.NodeSelectorRequirement, 0, len(raw))
+	for _, r := range raw {
+		req := affinity.NodeSelectorRequirement{
+			Key:      r.Key,
+			Operator: r.Operator,
+			Values:   valuesSliceToMap(r.Values),
+		}
+		result = append(result, req)
+	}
+	return result, nil
+}
+
+// valuesSliceToMap converts a []string to map[string]any.
+// This bridges the gap between the JSON input format (values as array) and the
+// NodeSelectorRequirement.Values type (map[string]any).
+func valuesSliceToMap(vals []string) map[string]any {
+	if len(vals) == 0 {
+		return nil
+	}
+	m := make(map[string]any, len(vals))
+	for _, v := range vals {
+		m[v] = struct{}{}
+	}
+	return m
 }

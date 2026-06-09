@@ -31,6 +31,8 @@ const (
 	AnnotationsNodeAffinityClusterLabel = "com.nodeaffinity.cluster.label"
 
 	AnnotationsNodeAffinityInstanceType = "com.nodeaffinity.instancetype"
+
+	AnnotationsNodeAffinitySelector = "com.nodeaffinity.selector"
 )
 
 const (
