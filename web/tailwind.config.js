@@ -45,12 +45,17 @@ export default {
           DEFAULT: 'hsl(var(--popover))',
           foreground: 'hsl(var(--popover-foreground))',
         },
+        // Semantic status palette. Values resolve through CSS variables
+        // defined in styles/globals.css so light/dark themes get readable
+        // contrast automatically. Pick the role name (ok/warn/err/info),
+        // never the underlying color.
         cube: {
-          cyan: '#6FE3FF',
-          violet: '#A78BFA',
-          amber: '#F5B450',
-          rose: '#FF6B8A',
-          emerald: '#38D39F',
+          ok:     'hsl(var(--cube-ok) / <alpha-value>)',
+          warn:   'hsl(var(--cube-warn) / <alpha-value>)',
+          err:    'hsl(var(--cube-err) / <alpha-value>)',
+          info:   'hsl(var(--cube-info) / <alpha-value>)',
+          accent: 'hsl(var(--cube-accent) / <alpha-value>)',
+          mute:   'hsl(var(--cube-mute) / <alpha-value>)',
         },
       },
       borderRadius: {

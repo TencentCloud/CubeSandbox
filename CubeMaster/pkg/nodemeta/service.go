@@ -8,7 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -30,6 +32,17 @@ type ResourceSnapshot struct {
 	MemoryMB int64 `json:"memory_mb,omitempty"`
 }
 
+// ComponentVersion mirrors the cubelet-side masterclient.ComponentVersion.
+// It carries the real version of one component installed on a node. Source is
+// one of "manifest" | "binary" | "file".
+type ComponentVersion struct {
+	Component string `json:"component"`
+	Version   string `json:"version,omitempty"`
+	Commit    string `json:"commit,omitempty"`
+	BuildTime string `json:"build_time,omitempty"`
+	Source    string `json:"source,omitempty"`
+}
+
 type ContainerImage struct {
 	Names     []string `json:"names,omitempty"`
 	SizeBytes int64    `json:"size_bytes,omitempty"`
@@ -46,19 +59,20 @@ type LocalTemplate struct {
 }
 
 type RegisterNodeRequest struct {
-	RequestID           string            `json:"requestID,omitempty"`
-	NodeID              string            `json:"node_id,omitempty"`
-	HostIP              string            `json:"host_ip,omitempty"`
-	GRPCPort            int               `json:"grpc_port,omitempty"`
-	Labels              map[string]string `json:"labels,omitempty"`
-	Capacity            ResourceSnapshot  `json:"capacity,omitempty"`
-	Allocatable         ResourceSnapshot  `json:"allocatable,omitempty"`
-	InstanceType        string            `json:"instance_type,omitempty"`
-	ClusterLabel        string            `json:"cluster_label,omitempty"`
-	QuotaCPU            int64             `json:"quota_cpu,omitempty"`
-	QuotaMemMB          int64             `json:"quota_mem_mb,omitempty"`
-	CreateConcurrentNum int64             `json:"create_concurrent_num,omitempty"`
-	MaxMvmNum           int64             `json:"max_mvm_num,omitempty"`
+	RequestID           string             `json:"requestID,omitempty"`
+	NodeID              string             `json:"node_id,omitempty"`
+	HostIP              string             `json:"host_ip,omitempty"`
+	GRPCPort            int                `json:"grpc_port,omitempty"`
+	Labels              map[string]string  `json:"labels,omitempty"`
+	Capacity            ResourceSnapshot   `json:"capacity,omitempty"`
+	Allocatable         ResourceSnapshot   `json:"allocatable,omitempty"`
+	InstanceType        string             `json:"instance_type,omitempty"`
+	ClusterLabel        string             `json:"cluster_label,omitempty"`
+	QuotaCPU            int64              `json:"quota_cpu,omitempty"`
+	QuotaMemMB          int64              `json:"quota_mem_mb,omitempty"`
+	CreateConcurrentNum int64              `json:"create_concurrent_num,omitempty"`
+	MaxMvmNum           int64              `json:"max_mvm_num,omitempty"`
+	Versions            []ComponentVersion `json:"versions,omitempty"`
 }
 
 type UpdateNodeStatusRequest struct {
@@ -71,6 +85,8 @@ type UpdateNodeStatusRequest struct {
 	Allocated  *AllocatedResources `json:"allocated,omitempty"`
 	DiskUsage  *DiskUsage          `json:"disk_usage,omitempty"`
 	MetricTime time.Time           `json:"metric_time,omitempty"`
+
+	Versions []ComponentVersion `json:"versions,omitempty"`
 }
 
 // AllocatedResources is cubelet-side aggregation of sandbox-quota CPU /
@@ -111,10 +127,14 @@ type NodeSnapshot struct {
 	Conditions          []corev1.NodeCondition `json:"conditions,omitempty"`
 	Images              []ContainerImage       `json:"images,omitempty"`
 	LocalTemplates      []LocalTemplate        `json:"local_templates,omitempty"`
+	Versions            []ComponentVersion     `json:"versions,omitempty"`
 	HeartbeatTime       time.Time              `json:"heartbeat_time,omitempty"`
 	ReportedReady       bool                   `json:"-"`
 	Healthy             bool                   `json:"healthy"`
 	UnhealthyReason     string                 `json:"unhealthy_reason,omitempty"`
+	// versionsHash is the content hash of Versions, used to skip redundant DB
+	// writes on every heartbeat. Not serialised to JSON.
+	versionsHash string
 }
 
 type service struct {
@@ -122,6 +142,11 @@ type service struct {
 	mu    sync.RWMutex
 	ready bool
 	nodes map[string]*NodeSnapshot
+
+	// versionWriteLocks serialises the hash-check/write/update sequence per
+	// node so concurrent heartbeats cannot race each other and issue redundant
+	// version writes or overwrite a newer in-memory hash with an older one.
+	versionWriteLocks sync.Map
 }
 
 var global = &service{
@@ -148,7 +173,6 @@ func Ready() bool {
 }
 
 func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot, error) {
-	_ = ctx
 	if req == nil || req.NodeID == "" {
 		return nil, fmt.Errorf("node_id is required")
 	}
@@ -197,6 +221,7 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 	applyCurrentHealth(snap, time.Now())
 	global.mu.Unlock()
 	syncLocalcache(snap)
+	global.persistVersions(ctx, req.NodeID, req.Versions)
 	return cloneSnapshot(snap), nil
 }
 
@@ -247,7 +272,111 @@ func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusR
 	// hundreds of nodes would otherwise dominate write traffic, and Redis
 	// already provides the cross-replica fan-out used by the scheduler.
 	fanOutResourceMetric(ctx, nodeID, req)
+	global.persistVersions(ctx, nodeID, req.Versions)
 	return cloneSnapshot(snap), nil
+}
+
+// persistVersions records the node's component versions, skipping the DB
+// write entirely when the reported set is unchanged (content-hash compare
+// against the in-memory snapshot). This keeps the 10s heartbeat from turning
+// slow-changing version data into a MySQL write storm.
+func (s *service) persistVersions(ctx context.Context, nodeID string, versions []ComponentVersion) {
+	s.persistVersionsWithWriter(ctx, nodeID, versions, s.writeVersions)
+}
+
+func (s *service) persistVersionsWithWriter(
+	ctx context.Context,
+	nodeID string,
+	versions []ComponentVersion,
+	writer func(string, []ComponentVersion) error,
+) {
+	if len(versions) == 0 {
+		return
+	}
+	unlock := s.lockVersionWrite(nodeID)
+	defer unlock()
+	h := versionsHash(versions)
+	snap := s.ensureNode(nodeID)
+	s.mu.RLock()
+	unchanged := snap.versionsHash == h
+	s.mu.RUnlock()
+	if unchanged {
+		log.G(ctx).Debugf("version_write_skipped node=%s", nodeID)
+		return
+	}
+	if err := writer(nodeID, versions); err != nil {
+		log.G(ctx).Warnf("write node component versions failed for %s: %v", nodeID, err)
+		return
+	}
+	s.mu.Lock()
+	snap.Versions = append([]ComponentVersion(nil), versions...)
+	snap.versionsHash = h
+	s.mu.Unlock()
+	log.G(ctx).Debugf("version_write_applied node=%s components=%d", nodeID, len(versions))
+}
+
+func (s *service) lockVersionWrite(nodeID string) func() {
+	lockAny, _ := s.versionWriteLocks.LoadOrStore(nodeID, &sync.Mutex{})
+	lock := lockAny.(*sync.Mutex)
+	lock.Lock()
+	return lock.Unlock
+}
+
+// writeVersions upserts the reported component rows and physically removes
+// any component previously recorded for the node but absent from this report.
+// The table carries no soft-delete column, so Delete is a hard delete by
+// design (see models.NodeComponentVersion).
+func (s *service) writeVersions(nodeID string, versions []ComponentVersion) error {
+	now := time.Now().Unix()
+	rows := make([]*models.NodeComponentVersion, 0, len(versions))
+	keep := make([]string, 0, len(versions))
+	for _, v := range versions {
+		if v.Component == "" {
+			continue
+		}
+		rows = append(rows, &models.NodeComponentVersion{
+			NodeID:       nodeID,
+			Component:    v.Component,
+			Version:      v.Version,
+			Commit:       v.Commit,
+			BuildTime:    v.BuildTime,
+			Source:       v.Source,
+			ReportedUnix: now,
+		})
+		keep = append(keep, v.Component)
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if len(rows) > 0 {
+			if err := tx.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "node_id"}, {Name: "component"}},
+				DoUpdates: clause.AssignmentColumns([]string{
+					"version", "commit", "build_time", "source", "reported_unix", "updated_at",
+				}),
+			}).Create(&rows).Error; err != nil {
+				return err
+			}
+		}
+		del := tx.Where("node_id = ?", nodeID)
+		if len(keep) > 0 {
+			del = del.Where("component NOT IN ?", keep)
+		}
+		return del.Delete(&models.NodeComponentVersion{}).Error
+	})
+}
+
+// versionsHash returns a stable content hash of the version set, order
+// independent (components are sorted first).
+func versionsHash(versions []ComponentVersion) string {
+	if len(versions) == 0 {
+		return ""
+	}
+	sorted := append([]ComponentVersion(nil), versions...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Component < sorted[j].Component })
+	h := fnv.New64a()
+	for _, v := range sorted {
+		fmt.Fprintf(h, "%s|%s|%s|%s|%s\n", v.Component, v.Version, v.Commit, v.BuildTime, v.Source)
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // fanOutResourceMetric is best-effort: write failures to Redis fall back
@@ -380,6 +509,27 @@ func (s *service) reload() error {
 		snap.ReportedReady = st.Healthy
 		applyCurrentHealth(snap, time.Now())
 	}
+	versions := make([]*models.NodeComponentVersion, 0)
+	if err := s.db.Model(&models.NodeComponentVersion{}).Find(&versions).Error; err != nil {
+		return err
+	}
+	for _, v := range versions {
+		snap, ok := next[v.NodeID]
+		if !ok {
+			snap = &NodeSnapshot{NodeID: v.NodeID}
+			next[v.NodeID] = snap
+		}
+		snap.Versions = append(snap.Versions, ComponentVersion{
+			Component: v.Component,
+			Version:   v.Version,
+			Commit:    v.Commit,
+			BuildTime: v.BuildTime,
+			Source:    v.Source,
+		})
+	}
+	for _, snap := range next {
+		snap.versionsHash = versionsHash(snap.Versions)
+	}
 	s.mu.Lock()
 	s.nodes = next
 	s.mu.Unlock()
@@ -482,6 +632,7 @@ func cloneSnapshot(in *NodeSnapshot) *NodeSnapshot {
 	out.Conditions = append([]corev1.NodeCondition(nil), in.Conditions...)
 	out.Images = append([]ContainerImage(nil), in.Images...)
 	out.LocalTemplates = append([]LocalTemplate(nil), in.LocalTemplates...)
+	out.Versions = append([]ComponentVersion(nil), in.Versions...)
 	return &out
 }
 

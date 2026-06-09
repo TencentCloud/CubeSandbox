@@ -3,6 +3,7 @@
   "sandboxes": "Sandboxes",
   "templates": "Templates",
   "nodes": "Nodes",
+  "versions": "Versions",
   "network": "Network",
   "observability": "Observability",
   "apiKeys": "API Keys",

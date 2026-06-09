@@ -232,6 +232,7 @@ fn build_long_agenthub_routes(state: &AppState, auth_configured: bool) -> Router
 fn build_cluster_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
     let routes = Router::new()
         .route("/cluster/overview", get(cluster::cluster_overview))
+        .route("/cluster/versions", get(cluster::cluster_versions))
         .route("/nodes", get(cluster::list_nodes))
         .route("/nodes/:nodeID", get(cluster::get_node))
         .route("/config", get(config::get_config))

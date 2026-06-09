@@ -221,7 +221,7 @@ export default function SandboxNewPage() {
 
       {/* Error */}
       {error && (
-        <div className="rounded-md border border-cube-rose/40 bg-cube-rose/10 px-4 py-3 text-sm text-cube-rose">
+        <div className="rounded-md border border-cube-err/40 bg-cube-err/10 px-4 py-3 text-sm text-cube-err">
           {error}
         </div>
       )}

@@ -121,7 +121,7 @@ function Meter({
   pct: number;
   detail: string;
 }) {
-  const tone = pct > 85 ? 'from-cube-rose/80 to-cube-rose' : pct > 65 ? 'from-cube-amber/80 to-cube-amber' : 'from-primary/70 to-cube-violet';
+  const tone = pct > 85 ? 'from-cube-err/80 to-cube-err' : pct > 65 ? 'from-cube-warn/80 to-cube-warn' : 'from-primary/70 to-cube-accent';
   return (
     <div>
       <div className="flex items-center justify-between text-muted-foreground">

@@ -3,6 +3,7 @@
   "sandboxes": "沙箱",
   "templates": "模板",
   "nodes": "节点",
+  "versions": "版本",
   "network": "网络",
   "observability": "可观测性",
   "apiKeys": "API 密钥",

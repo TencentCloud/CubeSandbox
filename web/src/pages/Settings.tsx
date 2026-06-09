@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useThemeStore, type ThemeMode } from '@/store/theme';
 import { clusterApi } from '@/api/client';
+import { useControlPlaneVersion } from '@/hooks/useControlPlaneVersion';
 import { cn } from '@/lib/utils';
 
 // ── Sidebar nav ───────────────────────────────────────────────────────────────
@@ -169,8 +170,8 @@ function ClusterSection() {
             <div className={cn(
               'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm animate-fade-in',
               testResult.ok
-                ? 'border-cube-emerald/20 bg-cube-emerald/[0.06] text-cube-emerald'
-                : 'border-cube-rose/20 bg-cube-rose/[0.06] text-cube-rose'
+                ? 'border-cube-ok/20 bg-cube-ok/[0.06] text-cube-ok'
+                : 'border-cube-err/20 bg-cube-err/[0.06] text-cube-err'
             )}>
               {testResult.ok
                 ? <><Wifi size={13} /> {t('cluster.connected')} · {testResult.latency}ms</>
@@ -260,6 +261,7 @@ function ShortcutsSection() {
 function AboutSection() {
   const { t } = useTranslation('settings');
   const { data: cfg } = useRuntimeConfig();
+  const version = useControlPlaneVersion();
 
   return (
     <div className="space-y-8">
@@ -267,7 +269,7 @@ function AboutSection() {
 
       <div className="rounded-xl border border-border/60 bg-card/40 divide-y divide-border/40">
         {([
-          { label: t('about.version'),     value: `v${__APP_VERSION__}`,                                     mono: true  },
+          { label: t('about.version'),     value: `v${version}`,                                             mono: true  },
           { label: t('about.cubeApi'),     value: cfg?.apiEndpoint ?? `${window.location.origin}/cubeapi/v1`, mono: true  },
           { label: t('about.instanceType'),value: cfg?.instanceType ?? '—',                                   mono: false },
         ] as Array<{ label: string; value: string; mono: boolean }>).map(({ label, value, mono }) => (

@@ -19,7 +19,7 @@ function SectionHeader({ icon: Icon, title, description }: {
   return (
     <div className="flex items-start gap-3 mb-5">
       <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/40 border border-border/60">
-        <Icon size={15} className="text-cube-cyan/80" />
+        <Icon size={15} className="text-cube-info/80" />
       </div>
       <div>
         <h2 className="text-base font-semibold tracking-tight">{title}</h2>
@@ -46,11 +46,11 @@ function InfoRow({ label, value, mono, badge }: {
 function BoolBadge({ value, trueLabel, falseLabel }: { value?: boolean | null; trueLabel?: string; falseLabel?: string }) {
   if (value == null) return <span className="text-muted-foreground/50 text-xs">—</span>;
   return value ? (
-    <span className="inline-flex items-center gap-1 text-cube-emerald text-xs font-medium">
+    <span className="inline-flex items-center gap-1 text-cube-ok text-xs font-medium">
       <CheckCircle2 size={12} /> {trueLabel ?? 'Yes'}
     </span>
   ) : (
-    <span className="inline-flex items-center gap-1 text-cube-rose text-xs font-medium">
+    <span className="inline-flex items-center gap-1 text-cube-err text-xs font-medium">
       <XCircle size={12} /> {falseLabel ?? 'No'}
     </span>
   );
@@ -142,10 +142,10 @@ function EgressSection() {
             ) : (
               details.map((tpl) => {
                 const statusColor = tpl.status?.toUpperCase() === 'READY'
-                  ? 'text-cube-emerald'
+                  ? 'text-cube-ok'
                   : tpl.status?.toUpperCase() === 'BUILDING'
-                  ? 'text-cube-amber'
-                  : 'text-cube-rose';
+                  ? 'text-cube-warn'
+                  : 'text-cube-err';
                 return (
                   <tr key={tpl.templateID} className="hover:bg-muted/30 transition-colors">
                     <td className="px-5 py-3">
@@ -235,8 +235,8 @@ function NodeQuotaSection() {
                   </td>
                   <td className="px-5 py-3">
                     <span className="inline-flex items-center gap-1.5">
-                      <span className={cn('h-1.5 w-1.5 rounded-full', node.healthy ? 'bg-cube-emerald' : 'bg-cube-rose')} />
-                      <span className={cn('text-xs font-medium', node.healthy ? 'text-cube-emerald' : 'text-cube-rose')}>
+                      <span className={cn('h-1.5 w-1.5 rounded-full', node.healthy ? 'bg-cube-ok' : 'bg-cube-err')} />
+                      <span className={cn('text-xs font-medium', node.healthy ? 'text-cube-ok' : 'text-cube-err')}>
                         {node.healthy ? t('quota.ready') : t('quota.degraded')}
                       </span>
                     </span>
@@ -273,7 +273,7 @@ export default function NetworkPage() {
     <div className="animate-fade-in space-y-10 py-8">
       {/* page header */}
       <div className="flex items-center gap-3 border-b border-border/50 pb-6">
-        <Shield size={20} className="text-cube-cyan/70" />
+        <Shield size={20} className="text-cube-info/70" />
         <div>
           <h1 className="text-xl font-semibold tracking-tight">{t('title')}</h1>
           <p className="text-sm text-muted-foreground mt-0.5">{t('description')}</p>

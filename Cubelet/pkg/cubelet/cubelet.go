@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate"
 	cubeletnodemeta "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/versioninfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/networkagentclient"
@@ -112,6 +113,8 @@ type Cubelet struct {
 	networkAgentClient networkagentclient.Client
 	lastNodeSnapshot   *cubeletnodemeta.Node
 
+	versionCollector *versioninfo.Collector
+
 	closeCh chan struct{}
 }
 
@@ -160,8 +163,9 @@ func NewCubelet(
 
 		NodeLabels: nodeLabels,
 
-		clock:   clock.RealClock{},
-		closeCh: make(chan struct{}),
+		clock:            clock.RealClock{},
+		versionCollector: versioninfo.NewCollector(""),
+		closeCh:          make(chan struct{}),
 	}
 
 	clet.NodeHasSynced = func() bool { return true }

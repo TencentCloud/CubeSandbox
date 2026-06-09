@@ -35,7 +35,7 @@ export default function OverviewPage() {
           <p className="mt-1 text-sm text-muted-foreground">{t('subtitle')}</p>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="inline-flex h-2 w-2 animate-pulse-soft rounded-full bg-cube-emerald" />
+          <span className="inline-flex h-2 w-2 animate-pulse-soft rounded-full bg-cube-ok" />
           {tCommon('live')}
         </div>
       </header>
@@ -187,12 +187,12 @@ function Kpi({
   const { t: tCommon } = useTranslation('common');
   const barClass =
     tone === 'ok'
-      ? 'from-cube-emerald/70 to-cube-emerald'
+      ? 'from-cube-ok/70 to-cube-ok'
       : tone === 'warn'
-      ? 'from-cube-amber/70 to-cube-amber'
+      ? 'from-cube-warn/70 to-cube-warn'
       : tone === 'err'
-      ? 'from-cube-rose/70 to-cube-rose'
-      : 'from-primary/70 to-cube-violet';
+      ? 'from-cube-err/70 to-cube-err'
+      : 'from-primary/70 to-cube-accent';
   return (
     <Card>
       <div className="flex items-start justify-between">

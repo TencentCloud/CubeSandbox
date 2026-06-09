@@ -7,7 +7,11 @@ use std::collections::HashMap;
 use crate::{
     cubemaster::{CubeMasterClient, CubeMasterError, ListSandboxRequest, NodeSnapshot},
     error::{AppError, AppResult},
-    models::{ClusterOverview, NodeConditionView, NodeResourcesView, NodeView},
+    models::{
+        ClusterOverview, ComponentMatrixRowView, ComponentVersionGroupView, ComponentVersionView,
+        ControlPlaneVersionView, NodeComponentEntryView, NodeConditionView, NodeResourcesView,
+        NodeVersionRowView, NodeView, VersionMatrixView,
+    },
 };
 
 #[derive(Clone)]
@@ -43,6 +47,17 @@ impl ClusterService {
             .ok_or_else(|| AppError::NotFound(format!("node {} not found", node_id)))?;
         let used_map = self.fetch_used_resources().await;
         Ok(to_view_with_used(snapshot, &used_map))
+    }
+
+    /// Fetch the cluster-wide component version matrix. When the underlying
+    /// CubeMaster predates the endpoint (404), an empty matrix is returned so
+    /// the UI degrades gracefully rather than surfacing an error.
+    pub async fn version_matrix(&self) -> AppResult<VersionMatrixView> {
+        match self.cubemaster.get_version_matrix().await {
+            Ok(resp) => Ok(to_version_matrix_view(resp.data.unwrap_or_default())),
+            Err(e) if e.is_endpoint_missing() => Ok(VersionMatrixView::default()),
+            Err(e) => Err(map_err(e)),
+        }
     }
 
     /// Fetch all running sandboxes and aggregate cpu_milli / memory_mb used per host IP.
@@ -179,12 +194,67 @@ pub(crate) fn to_view_with_used(
             .into_iter()
             .map(|t| t.template_id)
             .collect(),
+        versions: s
+            .versions
+            .into_iter()
+            .map(|v| ComponentVersionView {
+                component: v.component,
+                version: v.version,
+                commit: v.commit,
+                build_time: v.build_time,
+                source: v.source,
+            })
+            .collect(),
     }
 }
 
 /// Keep the old signature for tests (no sandbox data, pure CubeMaster values).
 pub(crate) fn to_view(s: NodeSnapshot) -> NodeView {
     to_view_with_used(s, &HashMap::new())
+}
+
+fn to_version_matrix_view(m: crate::cubemaster::VersionMatrix) -> VersionMatrixView {
+    VersionMatrixView {
+        control_plane: ControlPlaneVersionView {
+            version: m.control_plane.version,
+            commit: m.control_plane.commit,
+            build_time: m.control_plane.build_time,
+        },
+        components: m
+            .components
+            .into_iter()
+            .map(|c| ComponentMatrixRowView {
+                component: c.component,
+                expected_version: c.expected_version,
+                consistent: c.consistent,
+                versions: c
+                    .versions
+                    .into_iter()
+                    .map(|g| ComponentVersionGroupView {
+                        version: g.version,
+                        nodes: g.nodes,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        nodes: m
+            .nodes
+            .into_iter()
+            .map(|n| NodeVersionRowView {
+                node_id: n.node_id,
+                healthy: n.healthy,
+                components: n
+                    .components
+                    .into_iter()
+                    .map(|e| NodeComponentEntryView {
+                        component: e.component,
+                        version: e.version,
+                        outdated: e.outdated,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
 }
 
 pub(crate) fn saturation_pct(total: i64, allocatable: i64) -> f32 {

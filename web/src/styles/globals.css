@@ -42,6 +42,16 @@
     --tint-strong: 0 0% 0%; /* for modal backdrop */
 
     --radius: 0.75rem;
+
+    /* Semantic status palette (dark). Light variants override these in
+       the .light block below. Saturation/lightness tuned to clear WCAG AA
+       on the page's actual surface in both themes. */
+    --cube-ok:     158 64% 50%;   /* emerald */
+    --cube-warn:   32 95% 60%;    /* amber */
+    --cube-err:    0 72% 62%;     /* rose */
+    --cube-info:   245 70% 68%;   /* indigo */
+    --cube-accent: 280 70% 68%;   /* violet (decorative only) */
+    --cube-mute:   215 18% 65%;   /* slate */
   }
 
   /* Light — Paper-like, warm, easy on the eyes */
@@ -77,6 +87,16 @@
     /* Overlays use ink, not white */
     --tint: 30 15% 20%;
     --tint-strong: 30 15% 10%;
+
+    /* Light theme overrides — darker / more saturated so the tokens stay
+       legible against a near-white page. Each value is WCAG-AA-safe
+       against #FFFFFF at 14px regular text. */
+    --cube-ok:     158 70% 32%;
+    --cube-warn:   32 95% 36%;
+    --cube-err:    0 72% 42%;
+    --cube-info:   245 58% 48%;
+    --cube-accent: 270 50% 45%;
+    --cube-mute:   215 18% 35%;
   }
 
   * {
@@ -112,15 +132,15 @@
   /* Dark atmospheric gradient */
   .dark body {
     background-image:
-      radial-gradient(1200px 600px at 15% -10%, rgba(91, 141, 239, 0.08), transparent 60%),
-      radial-gradient(900px 500px at 100% 0%, rgba(167, 139, 250, 0.06), transparent 60%);
+      radial-gradient(1200px 600px at 15% -10%, hsl(var(--cube-info) / 0.10), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, hsl(var(--cube-accent) / 0.07), transparent 60%);
   }
 
   /* Light paper gradient — warm cream glow */
   .light body {
     background-image:
-      radial-gradient(1200px 600px at 15% -10%, rgba(91, 141, 239, 0.05), transparent 60%),
-      radial-gradient(900px 500px at 100% 0%, rgba(167, 139, 250, 0.04), transparent 60%);
+      radial-gradient(1200px 600px at 15% -10%, hsl(var(--cube-info) / 0.06), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, hsl(var(--cube-accent) / 0.05), transparent 60%);
   }
 
   /* Scrollbar */
@@ -139,31 +159,31 @@
   }
   .glow-ring {
     box-shadow:
-      0 0 0 1px rgba(91, 141, 239, 0.25),
-      0 10px 40px -10px rgba(91, 141, 239, 0.35);
+      0 0 0 1px hsl(var(--cube-info) / 0.25),
+      0 10px 40px -10px hsl(var(--cube-info) / 0.35);
   }
   .light .glow-ring {
     box-shadow:
-      0 0 0 1px rgba(66, 110, 180, 0.18),
-      0 8px 24px -8px rgba(66, 110, 180, 0.22);
+      0 0 0 1px hsl(var(--cube-info) / 0.20),
+      0 8px 24px -8px hsl(var(--cube-info) / 0.25);
   }
   .chip {
     @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium;
   }
   .chip-ok {
-    @apply chip bg-cube-emerald/10 text-cube-emerald ring-1 ring-cube-emerald/30;
+    @apply chip bg-cube-ok/10 text-cube-ok ring-1 ring-cube-ok/30;
   }
   .chip-warn {
-    @apply chip bg-cube-amber/10 text-cube-amber ring-1 ring-cube-amber/30;
+    @apply chip bg-cube-warn/10 text-cube-warn ring-1 ring-cube-warn/30;
   }
   .chip-err {
-    @apply chip bg-cube-rose/10 text-cube-rose ring-1 ring-cube-rose/30;
+    @apply chip bg-cube-err/10 text-cube-err ring-1 ring-cube-err/30;
   }
   .chip-info {
-    @apply chip bg-primary/10 text-primary ring-1 ring-primary/30;
+    @apply chip bg-cube-info/10 text-cube-info ring-1 ring-cube-info/30;
   }
   .chip-mute {
-    @apply chip bg-muted text-muted-foreground ring-1 ring-border;
+    @apply chip bg-cube-mute/10 text-cube-mute ring-1 ring-cube-mute/30;
   }
   .panel {
     @apply rounded-xl border border-border/60 bg-card/70 backdrop-blur-sm;

@@ -36,6 +36,9 @@ examples/openai-agents-code-interpreter/.scratch/
 
 pvm-guest-build/
 pvm-host-build/
+
+# Local workdir for one-off deploy / screenshot scripts
+.workdir/
 # Dev notes (local only)
 docs/webui-init.md
 docs/dev-log.md

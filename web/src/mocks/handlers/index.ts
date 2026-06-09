@@ -7,6 +7,7 @@ import {
   deleteSandbox,
   getClusterOverview,
   getNode,
+  getVersionMatrix,
   getSandboxDetail,
   getSandboxLogs,
   getSandboxSession,
@@ -33,6 +34,11 @@ export const handlers = [
   http.get('/cubeapi/v1/cluster/overview', async () => {
     await mockDelay();
     return HttpResponse.json(getClusterOverview());
+  }),
+
+  http.get('/cubeapi/v1/cluster/versions', async () => {
+    await mockDelay();
+    return HttpResponse.json(getVersionMatrix());
   }),
 
   http.get('/cubeapi/v1/nodes', async () => {

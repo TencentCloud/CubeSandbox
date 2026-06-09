@@ -162,6 +162,7 @@ const (
 	InstanceUserDataTableName   = "t_cube_instance_userdata"
 	NodeMetaRegistrationTable   = "t_cube_node_registration"
 	NodeMetaStatusTable         = "t_cube_node_status"
+	NodeComponentVersionTable   = "t_cube_node_component_version"
 	TemplateDefinitionTableName = "t_cube_template_definition"
 	TemplateReplicaTableName    = "t_cube_template_replica"
 	RootfsArtifactTableName     = "t_cube_rootfs_artifact"

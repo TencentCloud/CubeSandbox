@@ -36,6 +36,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /cluster/versions:
+    get:
+      tags:
+      - handlers::cluster
+      operationId: cluster_versions
+      responses:
+        '200':
+          description: Cluster component version matrix
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionMatrixView'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /health:
     get:
       tags:
@@ -445,6 +463,65 @@ components:
           type: integer
           format: int64
           description: Total memory in MiB.
+    ComponentMatrixRowView:
+      type: object
+      description: Per-component aggregation across all nodes.
+      required:
+      - component
+      - consistent
+      - versions
+      properties:
+        component:
+          type: string
+        consistent:
+          type: boolean
+        expectedVersion:
+          type: string
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComponentVersionGroupView'
+    ComponentVersionGroupView:
+      type: object
+      description: A group of nodes that report the same version of a component.
+      required:
+      - version
+      - nodes
+      properties:
+        nodes:
+          type: array
+          items:
+            type: string
+        version:
+          type: string
+    ComponentVersionView:
+      type: object
+      description: One component's version on a node.
+      required:
+      - component
+      properties:
+        buildTime:
+          type: string
+        commit:
+          type: string
+        component:
+          type: string
+        source:
+          type: string
+        version:
+          type: string
+    ControlPlaneVersionView:
+      type: object
+      description: Control-plane reference version (the cluster's target version).
+      required:
+      - version
+      properties:
+        buildTime:
+          type: string
+        commit:
+          type: string
+        version:
+          type: string
     HashMap:
       type: object
       additionalProperties:
@@ -524,6 +601,20 @@ components:
       - info
       - warn
       - error
+    NodeComponentEntryView:
+      type: object
+      description: A single component version on a single node, with outdated pre-computed.
+      required:
+      - component
+      - version
+      - outdated
+      properties:
+        component:
+          type: string
+        outdated:
+          type: boolean
+        version:
+          type: string
     NodeConditionView:
       type: object
       required:
@@ -556,6 +647,22 @@ components:
         memoryMB:
           type: integer
           format: int64
+    NodeVersionRowView:
+      type: object
+      description: Per-node view of the version matrix.
+      required:
+      - nodeID
+      - healthy
+      - components
+      properties:
+        components:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeComponentEntryView'
+        healthy:
+          type: boolean
+        nodeID:
+          type: string
     NodeView:
       type: object
       required:
@@ -567,6 +674,9 @@ components:
       - cpuSaturation
       - memorySaturation
       - maxMvmSlots
+      - quotaCpu
+      - quotaMemMB
+      - createConcurrentNum
       properties:
         allocatable:
           $ref: '#/components/schemas/NodeResourcesView'
@@ -580,6 +690,10 @@ components:
           type: number
           format: float
           description: Percentage (0-100) of CPU currently in use.
+        createConcurrentNum:
+          type: integer
+          format: int64
+          description: Max concurrent sandbox-create operations on this node.
         healthy:
           type: boolean
         heartbeatTime:
@@ -604,6 +718,18 @@ components:
           description: Percentage (0-100) of memory currently in use.
         nodeID:
           type: string
+        quotaCpu:
+          type: integer
+          format: int64
+          description: CPU quota in millicores assigned to this node.
+        quotaMemMB:
+          type: integer
+          format: int64
+          description: Memory quota in MiB assigned to this node.
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComponentVersionView'
     ResumedSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/resume (deprecated).
@@ -749,6 +875,7 @@ components:
       enum:
       - running
       - paused
+      - pausing
     SandboxVolumeMount:
       type: object
       description: Volume mount inside the sandbox.
@@ -768,6 +895,11 @@ components:
       - status
       - replicas
       properties:
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Whether public internet access is allowed for sandboxes from this template.
         createRequest: {}
         instanceType:
           type:
@@ -777,6 +909,11 @@ components:
           type:
           - string
           - 'null'
+        networkType:
+          type:
+          - string
+          - 'null'
+          description: Network type used when the template was created, e.g. "tap".
         replicas:
           type: array
           items: {}
@@ -819,6 +956,24 @@ components:
           type:
           - string
           - 'null'
+    VersionMatrixView:
+      type: object
+      description: Full node x component version matrix.
+      required:
+      - controlPlane
+      - components
+      - nodes
+      properties:
+        components:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComponentMatrixRowView'
+        controlPlane:
+          $ref: '#/components/schemas/ControlPlaneVersionView'
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeVersionRowView'
   securitySchemes:
     apiKeyAuth:
       type: apiKey

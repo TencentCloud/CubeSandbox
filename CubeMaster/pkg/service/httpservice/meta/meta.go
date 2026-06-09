@@ -16,12 +16,13 @@ import (
 )
 
 const (
-	metaURI            = "/internal/meta"
-	readyzAction       = "/readyz"
-	registerNodeAction = "/nodes/register"
-	nodesAction        = "/nodes"
-	nodeAction         = "/nodes/{node_id}"
-	nodeStatusAction   = "/nodes/{node_id}/status"
+	metaURI             = "/internal/meta"
+	readyzAction        = "/readyz"
+	registerNodeAction  = "/nodes/register"
+	nodesAction         = "/nodes"
+	nodeAction          = "/nodes/{node_id}"
+	nodeStatusAction    = "/nodes/{node_id}/status"
+	versionMatrixAction = "/version-matrix"
 )
 
 type nodesResponse struct {
@@ -34,6 +35,12 @@ type nodeResponse struct {
 	RequestID string                 `json:"requestID,omitempty"`
 	Ret       *sandboxtypes.Ret      `json:"ret,omitempty"`
 	Data      *nodemeta.NodeSnapshot `json:"data,omitempty"`
+}
+
+type versionMatrixResponse struct {
+	RequestID string                  `json:"requestID,omitempty"`
+	Ret       *sandboxtypes.Ret       `json:"ret,omitempty"`
+	Data      *nodemeta.VersionMatrix `json:"data,omitempty"`
 }
 
 func MetaURI() string {
@@ -58,6 +65,10 @@ func NodeAction() string {
 
 func NodeStatusAction() string {
 	return nodeStatusAction
+}
+
+func VersionMatrixAction() string {
+	return versionMatrixAction
 }
 
 func ReadyzHandler(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +143,18 @@ func ListNodesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	common.WriteResponse(w, http.StatusOK, &nodesResponse{
+		Ret:  successRet(),
+		Data: data,
+	})
+}
+
+func VersionMatrixHandler(w http.ResponseWriter, r *http.Request) {
+	data, err := nodemeta.GetVersionMatrix(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusOK, err)
+		return
+	}
+	common.WriteResponse(w, http.StatusOK, &versionMatrixResponse{
 		Ret:  successRet(),
 		Data: data,
 	})

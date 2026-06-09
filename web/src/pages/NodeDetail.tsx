@@ -14,9 +14,9 @@ import { cn, formatRelative } from '@/lib/utils';
 
 function ResourceBar({ pct }: { pct: number }) {
   const color =
-    pct > 85 ? 'bg-cube-rose' :
-    pct > 65 ? 'bg-cube-amber' :
-    'bg-cube-cyan';
+    pct > 85 ? 'bg-cube-err' :
+    pct > 65 ? 'bg-cube-warn' :
+    'bg-cube-ok';
   return (
     <div className="h-1 w-full rounded-full bg-white/8 overflow-hidden">
       <div
@@ -43,8 +43,8 @@ function KpiCard({
   unit: string;
 }) {
   const color =
-    pct > 85 ? 'text-cube-rose' :
-    pct > 65 ? 'text-cube-amber' :
+    pct > 85 ? 'text-cube-err' :
+    pct > 65 ? 'text-cube-warn' :
     'text-foreground';
 
   return (
@@ -98,10 +98,10 @@ function ConditionRow({ type, status, reason, message, time }: {
     <div className="flex items-start justify-between gap-4 py-2.5 border-b border-white/5 last:border-0">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className={cn('inline-block h-1.5 w-1.5 rounded-full shrink-0', ok ? 'bg-cube-cyan' : 'bg-cube-amber')} />
+          <span className={cn('inline-block h-1.5 w-1.5 rounded-full shrink-0', ok ? 'bg-cube-ok' : 'bg-cube-warn')} />
           <span className="text-base font-medium">{type}</span>
           <span className={cn('text-xs font-medium px-1.5 py-0.5 rounded border',
-            ok ? 'text-cube-cyan border-cube-cyan/30 bg-cube-cyan/5' : 'text-cube-amber border-cube-amber/30 bg-cube-amber/5'
+            ok ? 'text-cube-ok border-cube-ok/30 bg-cube-ok/5' : 'text-cube-warn border-cube-warn/30 bg-cube-warn/5'
           )}>{status}</span>
         </div>
         {reason && <p className="mt-0.5 text-sm text-muted-foreground pl-3.5">{reason}</p>}
@@ -188,8 +188,8 @@ export default function NodeDetailPage() {
           <div className="flex items-center gap-2.5">
             {/* live indicator */}
             <span className="relative flex h-2 w-2">
-              {isReady && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cube-cyan opacity-60" />}
-              <span className={cn('relative inline-flex rounded-full h-2 w-2', isReady ? 'bg-cube-cyan' : 'bg-cube-amber')} />
+              {isReady && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cube-ok opacity-60" />}
+              <span className={cn('relative inline-flex rounded-full h-2 w-2', isReady ? 'bg-cube-ok' : 'bg-cube-warn')} />
             </span>
             <h1 className="text-2xl font-semibold tracking-tight">{data.hostname ?? data.nodeID}</h1>
           </div>
@@ -270,6 +270,28 @@ export default function NodeDetailPage() {
         </Section>
       )}
 
+      {/* component versions */}
+      {data.versions && data.versions.length > 0 && (
+        <Section title={t('section.versions')}>
+          <div className="rounded-xl border border-border/60 bg-card/40 px-4 py-1">
+            {data.versions.map((v) => (
+              <div
+                key={v.component}
+                className="flex items-center justify-between gap-4 py-2.5 border-b border-white/5 last:border-0"
+              >
+                <span className="font-mono text-sm text-foreground/90">{v.component}</span>
+                <div className="flex items-center gap-3 text-right">
+                  <span className="font-mono text-sm text-foreground/80">{v.version || '—'}</span>
+                  {v.commit && (
+                    <span className="font-mono text-xs text-muted-foreground/60">{v.commit.slice(0, 12)}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
       {/* local templates */}
       {visibleLocalTemplates.length > 0 && (
         <Section title={t('section.localTemplates')}>
@@ -278,9 +300,9 @@ export default function NodeDetailPage() {
               <Link
                 key={tpl.templateID}
                 to={`/templates/${tpl.templateID}`}
-                className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/40 px-3 py-1.5 text-sm font-mono text-muted-foreground hover:border-cube-cyan/40 hover:text-foreground hover:bg-cube-cyan/5 transition-all"
+                className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/40 px-3 py-1.5 text-sm font-mono text-muted-foreground hover:border-cube-ok/40 hover:text-foreground hover:bg-cube-ok/5 transition-all"
               >
-                <Package size={11} className="text-cube-cyan/60" />
+                <Package size={11} className="text-cube-ok/60" />
                 {tpl.templateID}
               </Link>
             ))}
@@ -317,10 +339,10 @@ export default function NodeDetailPage() {
                 <div className="flex items-center gap-3 shrink-0">
                   <span className={cn(
                     'inline-flex items-center gap-1.5 text-sm font-medium',
-                    sb.state === 'running' ? 'text-cube-cyan' : sb.state === 'paused' ? 'text-cube-amber' : 'text-muted-foreground'
+                    sb.state === 'running' ? 'text-cube-ok' : sb.state === 'paused' ? 'text-cube-warn' : 'text-muted-foreground'
                   )}>
                     <span className={cn('h-1.5 w-1.5 rounded-full',
-                      sb.state === 'running' ? 'bg-cube-cyan' : sb.state === 'paused' ? 'bg-cube-amber' : 'bg-muted-foreground'
+                      sb.state === 'running' ? 'bg-cube-ok' : sb.state === 'paused' ? 'bg-cube-warn' : 'bg-muted-foreground'
                     )} />
                     {sb.state}
                   </span>

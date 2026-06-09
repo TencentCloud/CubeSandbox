@@ -114,6 +114,7 @@ func (s *internalHttp) registerHandlers() {
 	metaGroup.HandleFunc(metahttp.ReadyzAction(), metahttp.ReadyzHandler).Methods(http.MethodGet)
 	metaGroup.HandleFunc(metahttp.RegisterNodeAction(), metahttp.RegisterNodeHandler).Methods(http.MethodPost)
 	metaGroup.HandleFunc(metahttp.NodesAction(), metahttp.ListNodesHandler).Methods(http.MethodGet)
+	metaGroup.HandleFunc(metahttp.VersionMatrixAction(), metahttp.VersionMatrixHandler).Methods(http.MethodGet)
 	metaGroup.HandleFunc(metahttp.NodeAction(), metahttp.GetNodeHandler).Methods(http.MethodGet)
 	metaGroup.HandleFunc(metahttp.NodeStatusAction(), metahttp.UpdateNodeStatusHandler).Methods(http.MethodPost)
 }

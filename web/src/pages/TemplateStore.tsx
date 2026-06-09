@@ -378,7 +378,7 @@ function StoreCard({ item, installed, onInstall, liveMeta }: StoreCardProps) {
       <div className="p-4 flex-1 space-y-3">
         {/* icon + name */}
         <div className="flex items-center gap-3">
-          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-violet/20 text-primary ring-1 ring-primary/20">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-accent/20 text-primary ring-1 ring-primary/20">
             <Icon size={18} />
           </span>
           <div>

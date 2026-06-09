@@ -18,7 +18,7 @@ use axum::{
 
 use crate::{
     error::AppResult,
-    models::{ApiError, ClusterOverview, NodeView},
+    models::{ApiError, ClusterOverview, NodeView, VersionMatrixView},
     state::AppState,
 };
 
@@ -74,4 +74,19 @@ pub async fn get_node(
 ) -> AppResult<impl IntoResponse> {
     let node = state.services.cluster.get_node(&node_id).await?;
     Ok((StatusCode::OK, Json(node)))
+}
+
+// ─── GET /cluster/versions ────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/cluster/versions",
+    responses(
+        (status = 200, description = "Cluster component version matrix", body = VersionMatrixView),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn cluster_versions(State(state): State<AppState>) -> AppResult<impl IntoResponse> {
+    let matrix = state.services.cluster.version_matrix().await?;
+    Ok((StatusCode::OK, Json(matrix)))
 }

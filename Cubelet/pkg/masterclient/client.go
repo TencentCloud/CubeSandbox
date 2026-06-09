@@ -24,20 +24,32 @@ type ResourceSnapshot struct {
 	MemoryMB int64 `json:"memory_mb,omitempty"`
 }
 
+// ComponentVersion describes the version of a single component installed on
+// this node. Reported to CubeMaster on register and heartbeat. Source is one
+// of "manifest" | "binary" | "file".
+type ComponentVersion struct {
+	Component string `json:"component"`
+	Version   string `json:"version,omitempty"`
+	Commit    string `json:"commit,omitempty"`
+	BuildTime string `json:"build_time,omitempty"`
+	Source    string `json:"source,omitempty"`
+}
+
 type RegisterNodeRequest struct {
-	RequestID           string            `json:"requestID,omitempty"`
-	NodeID              string            `json:"node_id,omitempty"`
-	HostIP              string            `json:"host_ip,omitempty"`
-	GRPCPort            int               `json:"grpc_port,omitempty"`
-	Labels              map[string]string `json:"labels,omitempty"`
-	Capacity            ResourceSnapshot  `json:"capacity,omitempty"`
-	Allocatable         ResourceSnapshot  `json:"allocatable,omitempty"`
-	InstanceType        string            `json:"instance_type,omitempty"`
-	ClusterLabel        string            `json:"cluster_label,omitempty"`
-	QuotaCPU            int64             `json:"quota_cpu,omitempty"`
-	QuotaMemMB          int64             `json:"quota_mem_mb,omitempty"`
-	CreateConcurrentNum int64             `json:"create_concurrent_num,omitempty"`
-	MaxMvmNum           int64             `json:"max_mvm_num,omitempty"`
+	RequestID           string             `json:"requestID,omitempty"`
+	NodeID              string             `json:"node_id,omitempty"`
+	HostIP              string             `json:"host_ip,omitempty"`
+	GRPCPort            int                `json:"grpc_port,omitempty"`
+	Labels              map[string]string  `json:"labels,omitempty"`
+	Capacity            ResourceSnapshot   `json:"capacity,omitempty"`
+	Allocatable         ResourceSnapshot   `json:"allocatable,omitempty"`
+	InstanceType        string             `json:"instance_type,omitempty"`
+	ClusterLabel        string             `json:"cluster_label,omitempty"`
+	QuotaCPU            int64              `json:"quota_cpu,omitempty"`
+	QuotaMemMB          int64              `json:"quota_mem_mb,omitempty"`
+	CreateConcurrentNum int64              `json:"create_concurrent_num,omitempty"`
+	MaxMvmNum           int64              `json:"max_mvm_num,omitempty"`
+	Versions            []ComponentVersion `json:"versions,omitempty"`
 }
 
 type UpdateNodeStatusRequest struct {
@@ -50,6 +62,8 @@ type UpdateNodeStatusRequest struct {
 	Allocated  *AllocatedResources `json:"allocated,omitempty"`
 	DiskUsage  *DiskUsage          `json:"disk_usage,omitempty"`
 	MetricTime time.Time           `json:"metric_time,omitempty"`
+
+	Versions []ComponentVersion `json:"versions,omitempty"`
 }
 
 // AllocatedResources represents sandbox-quota resources already committed by

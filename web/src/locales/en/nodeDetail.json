@@ -4,6 +4,7 @@
   "section": {
     "resources": "Resources",
     "conditions": "Conditions",
+    "versions": "Component Versions",
     "localTemplates": "Local Templates",
     "localTemplatesDesc": "Template replicas cached on this node. Click to view template details.",
     "sandboxes": "Running Sandboxes",

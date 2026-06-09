@@ -11,6 +11,7 @@ type SandboxSessionDto = components['schemas']['Sandbox'];
 type TemplateDetailDto = components['schemas']['TemplateDetail'];
 type TemplateSummaryDto = components['schemas']['TemplateSummary'];
 type NodeDto = components['schemas']['NodeView'];
+type VersionMatrixDto = components['schemas']['VersionMatrixView'];
 
 const ago = (secs: number) => new Date(Date.now() - secs * 1000).toISOString();
 const later = (secs: number) => new Date(Date.now() + secs * 1000).toISOString();
@@ -128,12 +129,23 @@ function buildNodes(): NodeDto[] {
       cpuSaturation: 70.3,
       memorySaturation: 67.3,
       maxMvmSlots: 32,
+      quotaCpu: 64_000,
+      quotaMemMB: 131_072,
+      createConcurrentNum: 8,
       heartbeatTime: ago(12),
       conditions: [
         { type: 'Ready', status: 'True', lastHeartbeatTime: ago(12) },
         { type: 'KernelDeadlock', status: 'False', lastHeartbeatTime: ago(60) },
       ],
       localTemplates: ['python-3.11-ai', 'nodejs-20-web', 'ubuntu-24.04'],
+      versions: [
+        { component: 'cubelet', version: 'v0.5.0', commit: 'a1b2c3d4e5f6', source: 'binary' },
+        { component: 'containerd-shim-cube-rs', version: 'v0.5.0', source: 'manifest' },
+        { component: 'cube-runtime', version: 'v0.5.0', source: 'manifest' },
+        { component: 'cube-agent', version: 'agent-1.2.3', source: 'manifest' },
+        { component: 'guest-image', version: 'cube-image/2026.01', source: 'file' },
+        { component: 'kernel', version: '5.10.0-100', source: 'manifest' },
+      ],
     },
     {
       nodeID: 'cube-edge-02',
@@ -145,9 +157,23 @@ function buildNodes(): NodeDto[] {
       cpuSaturation: 54.2,
       memorySaturation: 44.0,
       maxMvmSlots: 24,
+      quotaCpu: 48_000,
+      quotaMemMB: 98_304,
+      createConcurrentNum: 6,
       heartbeatTime: ago(9),
       conditions: [{ type: 'Ready', status: 'True', lastHeartbeatTime: ago(9) }],
       localTemplates: ['nodejs-20-web', 'go-1.22', 'ubuntu-24.04'],
+      // edge-02 is on an older cubelet — produces a "drift" row in the
+      // components view AND an outdated cell in the matrix. Used to demo
+      // the new KPI / badge / search-filter behavior.
+      versions: [
+        { component: 'cubelet', version: 'v0.4.9', commit: 'f6e5d4c3b2a1', source: 'binary' },
+        { component: 'containerd-shim-cube-rs', version: 'v0.5.0', source: 'manifest' },
+        { component: 'cube-runtime', version: 'v0.5.0', source: 'manifest' },
+        { component: 'cube-agent', version: 'agent-1.2.2', source: 'manifest' },
+        { component: 'guest-image', version: 'cube-image/2026.01', source: 'file' },
+        { component: 'kernel', version: '5.10.0-100', source: 'manifest' },
+      ],
     },
     {
       nodeID: 'cube-edge-03',
@@ -159,6 +185,9 @@ function buildNodes(): NodeDto[] {
       cpuSaturation: 90.6,
       memorySaturation: 93.7,
       maxMvmSlots: 16,
+      quotaCpu: 32_000,
+      quotaMemMB: 65_536,
+      createConcurrentNum: 4,
       heartbeatTime: ago(48),
       conditions: [
         {
@@ -171,6 +200,16 @@ function buildNodes(): NodeDto[] {
         { type: 'MemoryPressure', status: 'True', lastHeartbeatTime: ago(60) },
       ],
       localTemplates: ['ubuntu-24.04'],
+      // edge-03 is unhealthy AND running an older guest-image — covers the
+      // "not ready" + outdated combination in the matrix table.
+      versions: [
+        { component: 'cubelet', version: 'v0.5.0', commit: 'a1b2c3d4e5f6', source: 'binary' },
+        { component: 'containerd-shim-cube-rs', version: 'v0.5.0', source: 'manifest' },
+        { component: 'cube-runtime', version: 'v0.5.0', source: 'manifest' },
+        { component: 'cube-agent', version: 'agent-1.2.3', source: 'manifest' },
+        { component: 'guest-image', version: 'cube-image/2025.12', source: 'file' },
+        { component: 'kernel', version: '5.10.0-100', source: 'manifest' },
+      ],
     },
   ];
 }
@@ -280,6 +319,62 @@ export function listNodes() {
 export function getNode(nodeID: string) {
   const node = nodes.find((item) => item.nodeID === nodeID);
   return node ? clone(node) : undefined;
+}
+
+export function getVersionMatrix(): VersionMatrixDto {
+  const expected: Record<string, string> = {
+    cubelet: 'v0.5.0',
+    'containerd-shim-cube-rs': 'v0.5.0',
+    'cube-runtime': 'v0.5.0',
+    'cube-agent': 'agent-1.2.3',
+    'guest-image': 'cube-image/2026.01',
+    kernel: '5.10.0-100',
+  };
+
+  const componentNodes = new Map<string, Map<string, string[]>>();
+  for (const node of nodes) {
+    for (const v of node.versions ?? []) {
+      const version = v.version ?? '';
+      if (!componentNodes.has(v.component)) componentNodes.set(v.component, new Map());
+      const byVersion = componentNodes.get(v.component)!;
+      const list = byVersion.get(version) ?? [];
+      list.push(node.nodeID);
+      byVersion.set(version, list);
+    }
+  }
+
+  const components = Array.from(componentNodes.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([component, byVersion]) => {
+      const versions = Array.from(byVersion.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([version, nodeIds]) => ({ version, nodes: nodeIds }));
+      return {
+        component,
+        expectedVersion: expected[component] ?? '',
+        consistent: versions.length <= 1,
+        versions,
+      };
+    });
+
+  const matrixNodes = nodes.map((node) => ({
+    nodeID: node.nodeID,
+    healthy: node.healthy,
+    components: (node.versions ?? [])
+      .slice()
+      .sort((a, b) => a.component.localeCompare(b.component))
+      .map((v) => ({
+        component: v.component,
+        version: v.version ?? '',
+        outdated: !!expected[v.component] && v.version !== expected[v.component],
+      })),
+  }));
+
+  return {
+    controlPlane: { version: 'v0.5.0', commit: 'a1b2c3d4e5f6a1b2', buildTime: '2026-01-15T08:00:00Z' },
+    components,
+    nodes: matrixNodes,
+  };
 }
 
 export function getClusterOverview(): ClusterOverviewDto {

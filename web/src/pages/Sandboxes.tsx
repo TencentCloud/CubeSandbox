@@ -110,8 +110,8 @@ export default function SandboxesPage() {
                     className={cn(
                       'ml-1.5 rounded-full px-1.5 py-0.5 text-xs text-num',
                       key === 'running'
-                        ? 'bg-cube-emerald/20 text-cube-emerald'
-                        : 'bg-cube-amber/20 text-cube-amber',
+                        ? 'bg-cube-ok/20 text-cube-ok'
+                        : 'bg-cube-warn/20 text-cube-warn',
                     )}
                   >
                     {data.filter((sb) => (sb.state ?? 'running') === key).length}
@@ -208,7 +208,7 @@ function Row({
           </Button>
         )}
         <Button size="icon" variant="ghost" title={t('actions.kill')} onClick={onKill} disabled={busy}>
-          <Trash2 size={14} className="text-cube-rose" />
+          <Trash2 size={14} className="text-cube-err" />
         </Button>
       </div>
     </div>

@@ -457,6 +457,18 @@ impl CubeMasterClient {
             .map_err(CubeMasterError::Http)?;
         parse_response(resp).await
     }
+
+    /// GET /internal/meta/version-matrix — cluster-wide component version matrix.
+    pub async fn get_version_matrix(&self) -> Result<VersionMatrixResponse, CubeMasterError> {
+        let url = format!("{}/internal/meta/version-matrix", self.base_url);
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
 }
 
 // ─── Error ─────────────────────────────────────────────────────────────────
@@ -1784,9 +1796,27 @@ pub struct NodeSnapshot {
     #[serde(default)]
     pub local_templates: Vec<LocalTemplate>,
     #[serde(default)]
+    pub versions: Vec<ComponentVersion>,
+    #[serde(default)]
     pub heartbeat_time: Option<DateTime<Utc>>,
     #[serde(default)]
     pub healthy: bool,
+}
+
+/// One component's version on a node, as reported by cubelet.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct ComponentVersion {
+    #[serde(default)]
+    pub component: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub commit: String,
+    #[serde(default)]
+    pub build_time: String,
+    #[serde(default)]
+    pub source: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1807,6 +1837,84 @@ pub struct NodeResponse {
     pub ret: RetCode,
     #[serde(default)]
     pub data: Option<NodeSnapshot>,
+}
+
+// ─── Version matrix ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct ControlPlaneVersion {
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub commit: String,
+    #[serde(default)]
+    pub build_time: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct ComponentVersionGroup {
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub nodes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct ComponentMatrixRow {
+    #[serde(default)]
+    pub component: String,
+    #[serde(default)]
+    pub expected_version: String,
+    #[serde(default)]
+    pub consistent: bool,
+    #[serde(default)]
+    pub versions: Vec<ComponentVersionGroup>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct NodeComponentEntry {
+    #[serde(default)]
+    pub component: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub outdated: bool,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct NodeVersionRow {
+    #[serde(default)]
+    pub node_id: String,
+    #[serde(default)]
+    pub healthy: bool,
+    #[serde(default)]
+    pub components: Vec<NodeComponentEntry>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct VersionMatrix {
+    #[serde(default)]
+    pub control_plane: ControlPlaneVersion,
+    #[serde(default)]
+    pub components: Vec<ComponentMatrixRow>,
+    #[serde(default)]
+    pub nodes: Vec<NodeVersionRow>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct VersionMatrixResponse {
+    #[serde(rename = "requestID", alias = "RequestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub data: Option<VersionMatrix>,
 }
 
 #[cfg(test)]

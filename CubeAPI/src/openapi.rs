@@ -12,9 +12,11 @@ use utoipa::{
 use crate::{
     handlers,
     models::{
-        ApiError, ClusterOverview, NodeConditionView, NodeResourcesView, NodeView, ResumedSandbox,
-        Sandbox, SandboxDetail, SandboxLogEntry, SandboxLogsV2Response, SandboxState,
-        SandboxVolumeMount, TemplateDetail, TemplateSummary,
+        ApiError, ClusterOverview, ComponentMatrixRowView, ComponentVersionGroupView,
+        ComponentVersionView, ControlPlaneVersionView, NodeComponentEntryView, NodeConditionView,
+        NodeResourcesView, NodeVersionRowView, NodeView, ResumedSandbox, Sandbox, SandboxDetail,
+        SandboxLogEntry, SandboxLogsV2Response, SandboxState, SandboxVolumeMount, TemplateDetail,
+        TemplateSummary, VersionMatrixView,
     },
 };
 
@@ -49,6 +51,7 @@ impl Modify for SecurityAddon {
     paths(
         handlers::health::health,
         handlers::cluster::cluster_overview,
+        handlers::cluster::cluster_versions,
         handlers::cluster::list_nodes,
         handlers::cluster::get_node,
         handlers::templates::list_templates,
@@ -67,6 +70,13 @@ impl Modify for SecurityAddon {
         NodeResourcesView,
         NodeConditionView,
         NodeView,
+        ComponentVersionView,
+        ControlPlaneVersionView,
+        ComponentVersionGroupView,
+        ComponentMatrixRowView,
+        NodeComponentEntryView,
+        NodeVersionRowView,
+        VersionMatrixView,
         TemplateSummary,
         TemplateDetail,
         SandboxState,

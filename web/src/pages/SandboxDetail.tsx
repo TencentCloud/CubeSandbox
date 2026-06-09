@@ -18,8 +18,8 @@ import { cn, formatBytes, formatRelative } from '@/lib/utils';
 const LEVEL_CLASS: Record<string, string> = {
   debug: 'text-muted-foreground/50',
   info: 'text-foreground/60',
-  warn: 'text-cube-amber/70',
-  error: 'text-cube-rose/70',
+  warn: 'text-cube-warn/70',
+  error: 'text-cube-err/70',
 };
 
 function formatLogTime(ts: string): string {

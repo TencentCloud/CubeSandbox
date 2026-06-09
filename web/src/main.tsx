@@ -16,6 +16,7 @@ import SandboxDetailPage from '@/pages/SandboxDetail';
 import SandboxNewPage from '@/pages/SandboxNew';
 import TemplatesPage from '@/pages/Templates';
 import NodesPage from '@/pages/Nodes';
+import VersionsPage from '@/pages/Versions';
 import KeysPage from '@/pages/Keys';
 import SettingsPage from '@/pages/Settings';
 import TemplateDetailPage from '@/pages/TemplateDetail';
@@ -55,6 +56,7 @@ const App = () => (
               />
               <Route path="/nodes" element={<NodesPage />} />
               <Route path="/nodes/:nodeID" element={<NodeDetailPage />} />
+              <Route path="/versions" element={<VersionsPage />} />
               <Route path="/network" element={<NetworkPage />} />
               <Route path="/observability" element={<ObservabilityPage />} />
               <Route path="/store" element={<TemplateStorePage />} />

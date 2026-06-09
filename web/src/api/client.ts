@@ -14,6 +14,8 @@ export type SandboxResumeRequest = components['schemas']['ResumedSandbox'];
 export type TemplateSummaryDto = components['schemas']['TemplateSummary'];
 export type TemplateDetailDto = components['schemas']['TemplateDetail'];
 export type ApiNodeView = components['schemas']['NodeView'];
+export type VersionMatrixDto = components['schemas']['VersionMatrixView'];
+export type ComponentVersionDto = components['schemas']['ComponentVersionView'];
 
 export interface RunningSandbox extends ListedSandboxDto {}
 
@@ -68,6 +70,7 @@ export interface ClusterNodeView {
   heartbeatTime?: string | null;
   healthy: boolean;
   localTemplates: string[];
+  versions: ComponentVersionDto[];
 }
 
 export interface ClusterOverview extends ClusterOverviewDto {}
@@ -137,6 +140,7 @@ function mapNode(dto: ApiNodeView): ClusterNodeView {
     heartbeatTime: dto.heartbeatTime,
     healthy: dto.healthy,
     localTemplates: dto.localTemplates ?? [],
+    versions: dto.versions ?? [],
   };
 }
 
@@ -181,6 +185,10 @@ export const templateApi = {
   getBuildLogs: (id: string, buildID: string) =>
     api<{ lines?: string[]; status?: string; progress?: number }>(`/templates/${id}/builds/${buildID}/logs`),
   remove: (id: string) => api<void>(`/templates/${id}`, { method: 'DELETE' }),
+};
+
+export const versionApi = {
+  matrix: () => api<VersionMatrixDto>('/cluster/versions'),
 };
 
 export const clusterApi = {

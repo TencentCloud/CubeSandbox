@@ -4,6 +4,7 @@
   "section": {
     "resources": "资源概览",
     "conditions": "状态条件",
+    "versions": "组件版本",
     "localTemplates": "本地模板",
     "localTemplatesDesc": "已缓存到该节点的模板副本，点击可查看模板详情。",
     "sandboxes": "运行中沙箱",

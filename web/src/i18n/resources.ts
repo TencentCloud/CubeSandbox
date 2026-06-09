@@ -12,6 +12,7 @@ import enTemplates from '@/locales/en/templates.json';
 import enTemplateDetail from '@/locales/en/templateDetail.json';
 import enNodes from '@/locales/en/nodes.json';
 import enNodeDetail from '@/locales/en/nodeDetail.json';
+import enVersions from '@/locales/en/versions.json';
 import enNetwork from '@/locales/en/network.json';
 import enKeys from '@/locales/en/keys.json';
 import enPlaceholder from '@/locales/en/placeholder.json';
@@ -33,6 +34,7 @@ import zhTemplates from '@/locales/zh/templates.json';
 import zhTemplateDetail from '@/locales/zh/templateDetail.json';
 import zhNodes from '@/locales/zh/nodes.json';
 import zhNodeDetail from '@/locales/zh/nodeDetail.json';
+import zhVersions from '@/locales/zh/versions.json';
 import zhNetwork from '@/locales/zh/network.json';
 import zhKeys from '@/locales/zh/keys.json';
 import zhPlaceholder from '@/locales/zh/placeholder.json';
@@ -56,6 +58,7 @@ export const resources = {
     templateDetail: enTemplateDetail,
     nodes: enNodes,
     nodeDetail: enNodeDetail,
+    versions: enVersions,
     network: enNetwork,
     keys: enKeys,
     placeholder: enPlaceholder,
@@ -78,6 +81,7 @@ export const resources = {
     templateDetail: zhTemplateDetail,
     nodes: zhNodes,
     nodeDetail: zhNodeDetail,
+    versions: zhVersions,
     network: zhNetwork,
     keys: zhKeys,
     placeholder: zhPlaceholder,

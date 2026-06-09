@@ -24,7 +24,7 @@ function SectionHeader({ icon: Icon, title, desc }: {
   return (
     <div className="flex items-start gap-3 mb-5">
       <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/40 border border-border/60">
-        <Icon size={15} className="text-cube-cyan/80" />
+        <Icon size={15} className="text-cube-info/80" />
       </div>
       <div>
         <h2 className="text-base font-semibold tracking-tight">{title}</h2>
@@ -83,8 +83,8 @@ function SandboxSection() {
         ) : (
           <>
             <KpiCard label={t('sandboxes.total')} value={totalCount} />
-            <KpiCard label={t('sandboxes.running')} value={runningCount} color="text-cube-emerald" />
-            <KpiCard label={t('sandboxes.paused')} value={pausedCount} color="text-cube-amber" />
+            <KpiCard label={t('sandboxes.running')} value={runningCount} color="text-cube-ok" />
+            <KpiCard label={t('sandboxes.paused')} value={pausedCount} color="text-cube-warn" />
           </>
         )}
       </div>
@@ -94,12 +94,12 @@ function SandboxSection() {
         <div className="mb-5 rounded-xl border border-border/60 bg-card/40 px-5 py-4">
           <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium mb-3">{t('sandboxes.distribution')}</p>
           <div className="flex h-2 w-full overflow-hidden rounded-full bg-muted">
-            <div className="bg-cube-emerald transition-all" style={{ width: `${runningPct}%` }} />
-            <div className="bg-cube-amber transition-all" style={{ width: `${pausedPct}%` }} />
+            <div className="bg-cube-ok transition-all" style={{ width: `${runningPct}%` }} />
+            <div className="bg-cube-warn transition-all" style={{ width: `${pausedPct}%` }} />
           </div>
           <div className="mt-2 flex items-center gap-4 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cube-emerald" />{t('sandboxes.running')} <span className="text-num">{runningPct}%</span></span>
-            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cube-amber" />{t('sandboxes.paused')} <span className="text-num">{pausedPct}%</span></span>
+            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cube-ok" />{t('sandboxes.running')} <span className="text-num">{runningPct}%</span></span>
+            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cube-warn" />{t('sandboxes.paused')} <span className="text-num">{pausedPct}%</span></span>
           </div>
         </div>
       )}
@@ -134,7 +134,7 @@ function SandboxSection() {
                   </td>
                   <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{s.templateID ?? '—'}</td>
                   <td className="px-5 py-3">
-                    <span className={cn('text-xs font-medium', s.state === 'running' ? 'text-cube-emerald' : 'text-cube-amber')}>{s.state}</span>
+                    <span className={cn('text-xs font-medium', s.state === 'running' ? 'text-cube-ok' : 'text-cube-warn')}>{s.state}</span>
                   </td>
                   <td className="px-5 py-3 text-xs text-muted-foreground">{formatRelative(s.startedAt)}</td>
                 </tr>
@@ -175,7 +175,7 @@ function NodeSection() {
           ))
         ) : (
           <>
-            <KpiCard label={t('nodes.healthyCount')} value={healthyCount} color={healthyCount === totalCount ? 'text-cube-emerald' : 'text-cube-rose'} />
+            <KpiCard label={t('nodes.healthyCount')} value={healthyCount} color={healthyCount === totalCount ? 'text-cube-ok' : 'text-cube-err'} />
             <KpiCard label={t('nodes.totalCount')} value={totalCount} />
           </>
         )}
@@ -195,14 +195,14 @@ function NodeSection() {
           <div className="rounded-xl border border-border/60 bg-card/40 px-5 py-6 text-sm text-muted-foreground text-center">{t('nodes.empty')}</div>
         ) : (
           nodes.map(node => (
-            <div key={node.nodeID} className={cn('rounded-xl border bg-card/40 px-5 py-4', node.healthy ? 'border-border/60' : 'border-cube-rose/30 bg-cube-rose/[0.04]')}>
+            <div key={node.nodeID} className={cn('rounded-xl border bg-card/40 px-5 py-4', node.healthy ? 'border-border/60' : 'border-cube-err/30 bg-cube-err/[0.04]')}>
               <div className="flex items-center justify-between mb-4">
                 <Link to={`/nodes/${node.nodeID}`} className="inline-flex items-center gap-2 hover:text-primary transition-colors">
-                  <span className={cn('h-2 w-2 rounded-full', node.healthy ? 'bg-cube-emerald animate-pulse' : 'bg-cube-rose')} />
+                  <span className={cn('h-2 w-2 rounded-full', node.healthy ? 'bg-cube-ok animate-pulse' : 'bg-cube-err')} />
                   <span className="text-sm text-foreground/90 text-num">{node.address ?? node.nodeID}</span>
                   <ExternalLink size={11} className="opacity-40" />
                 </Link>
-                <span className={cn('text-xs font-medium', node.healthy ? 'text-cube-emerald' : 'text-cube-rose')}>
+                <span className={cn('text-xs font-medium', node.healthy ? 'text-cube-ok' : 'text-cube-err')}>
                   {node.healthy ? t('nodes.healthy') : t('nodes.degraded')}
                 </span>
               </div>
@@ -215,7 +215,7 @@ function NodeSection() {
                   </div>
                   <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
                     <div
-                      className={cn('h-full rounded-full transition-all', node.saturationPct > 80 ? 'bg-cube-rose' : node.saturationPct > 60 ? 'bg-cube-amber' : 'bg-cube-cyan')}
+                      className={cn('h-full rounded-full transition-all', node.saturationPct > 80 ? 'bg-cube-err' : node.saturationPct > 60 ? 'bg-cube-warn' : 'bg-cube-info')}
                       style={{ width: `${node.saturationPct}%` }}
                     />
                   </div>
@@ -228,7 +228,7 @@ function NodeSection() {
                   </div>
                   <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
                     <div
-                      className={cn('h-full rounded-full transition-all', node.memorySaturationPct > 80 ? 'bg-cube-rose' : node.memorySaturationPct > 60 ? 'bg-cube-amber' : 'bg-cube-violet')}
+                      className={cn('h-full rounded-full transition-all', node.memorySaturationPct > 80 ? 'bg-cube-err' : node.memorySaturationPct > 60 ? 'bg-cube-warn' : 'bg-cube-accent')}
                       style={{ width: `${node.memorySaturationPct}%` }}
                     />
                   </div>
@@ -280,7 +280,7 @@ function ApiSection() {
             <div className="flex items-center justify-between py-2.5">
               <span className="text-sm text-muted-foreground">{t('api.auth')}</span>
               {cfg?.authEnabled ? (
-                <span className="inline-flex items-center gap-1 text-cube-emerald text-xs font-medium"><CheckCircle2 size={12} />{t('api.authOn')}</span>
+                <span className="inline-flex items-center gap-1 text-cube-ok text-xs font-medium"><CheckCircle2 size={12} />{t('api.authOn')}</span>
               ) : (
                 <span className="inline-flex items-center gap-1 text-muted-foreground text-xs"><XCircle size={12} />{t('api.authOff')}</span>
               )}
@@ -302,7 +302,7 @@ function ApiSection() {
         {result && (
           <div className={cn(
             'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm animate-fade-in',
-            result.ok ? 'border-cube-emerald/20 bg-cube-emerald/[0.06] text-cube-emerald' : 'border-cube-rose/20 bg-cube-rose/[0.06] text-cube-rose'
+            result.ok ? 'border-cube-ok/20 bg-cube-ok/[0.06] text-cube-ok' : 'border-cube-err/20 bg-cube-err/[0.06] text-cube-err'
           )}>
             {result.ok
               ? <><Wifi size={13} />{t('api.connected')} · <span className="text-num">{result.latency}ms</span></>
@@ -339,16 +339,16 @@ function TemplateSection() {
           Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-7 w-20 rounded-full" />)
         ) : (
           <>
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-emerald/20 bg-cube-emerald/[0.08] px-3 py-1 text-xs font-medium text-cube-emerald">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-ok/20 bg-cube-ok/[0.08] px-3 py-1 text-xs font-medium text-cube-ok">
               <CheckCircle2 size={11} />{t('templates.ready')} · <span className="text-num">{ready}</span>
             </span>
             {building > 0 && (
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-amber/20 bg-cube-amber/[0.08] px-3 py-1 text-xs font-medium text-cube-amber">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-warn/20 bg-cube-warn/[0.08] px-3 py-1 text-xs font-medium text-cube-warn">
                 <Loader2 size={11} className="animate-spin" />{t('templates.building')} · <span className="text-num">{building}</span>
               </span>
             )}
             {failed.length > 0 && (
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-rose/20 bg-cube-rose/[0.08] px-3 py-1 text-xs font-medium text-cube-rose">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-cube-err/20 bg-cube-err/[0.08] px-3 py-1 text-xs font-medium text-cube-err">
                 <AlertTriangle size={11} />{t('templates.failed')} · <span className="text-num">{failed.length}</span>
               </span>
             )}
@@ -365,7 +365,7 @@ function TemplateSection() {
           <div className="px-5 py-4 space-y-2">{[1,2].map(i => <Skeleton key={i} className="h-4 w-full" />)}</div>
         ) : failed.length === 0 ? (
           <div className="px-5 py-6 text-sm text-muted-foreground text-center flex items-center justify-center gap-2">
-            <CheckCircle2 size={14} className="text-cube-emerald" />{t('templates.noFailed')}
+            <CheckCircle2 size={14} className="text-cube-ok" />{t('templates.noFailed')}
           </div>
         ) : (
           <table className="w-full text-sm" style={{ minWidth: '560px' }}>
@@ -385,10 +385,10 @@ function TemplateSection() {
                     </Link>
                   </td>
                   <td className="px-5 py-3">
-                    <span className="text-xs font-medium text-cube-rose">{tpl.status}</span>
+                    <span className="text-xs font-medium text-cube-err">{tpl.status}</span>
                   </td>
                   <td className="px-5 py-3 text-xs text-muted-foreground text-num">{tpl.version ?? '—'}</td>
-                  <td className="px-5 py-3 text-xs text-cube-rose/80 max-w-xs truncate">{tpl.lastError ?? '—'}</td>
+                  <td className="px-5 py-3 text-xs text-cube-err/80 max-w-xs truncate">{tpl.lastError ?? '—'}</td>
                 </tr>
               ))}
             </tbody>
@@ -406,7 +406,7 @@ export default function ObservabilityPage() {
   return (
     <div className="animate-fade-in space-y-10 py-8">
       <div className="flex items-center gap-3 border-b border-border/50 pb-6">
-        <Activity size={20} className="text-cube-cyan/70" />
+        <Activity size={20} className="text-cube-info/70" />
         <div>
           <h1 className="text-xl font-semibold tracking-tight">{t('title')}</h1>
           <p className="text-sm text-muted-foreground mt-0.5">{t('description')}</p>

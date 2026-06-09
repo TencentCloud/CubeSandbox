@@ -17,19 +17,19 @@ import { cn, formatDeleteError, copyToClipboard } from '@/lib/utils';
 
 function statusDotClass(status: string) {
   switch (status.toUpperCase()) {
-    case 'READY':    return 'bg-cube-emerald';
+    case 'READY':    return 'bg-cube-ok';
     case 'BUILDING':
-    case 'RUNNING':  return 'bg-cube-amber animate-pulse';
-    case 'FAILED':   return 'bg-cube-rose';
+    case 'RUNNING':  return 'bg-cube-warn animate-pulse';
+    case 'FAILED':   return 'bg-cube-err';
     default:         return 'bg-muted-foreground';
   }
 }
 function statusTextClass(status: string) {
   switch (status.toUpperCase()) {
-    case 'READY':    return 'text-cube-emerald';
+    case 'READY':    return 'text-cube-ok';
     case 'BUILDING':
-    case 'RUNNING':  return 'text-cube-amber';
-    case 'FAILED':   return 'text-cube-rose';
+    case 'RUNNING':  return 'text-cube-warn';
+    case 'FAILED':   return 'text-cube-err';
     default:         return 'text-muted-foreground';
   }
 }
@@ -37,10 +37,10 @@ function StatusBadge({ status }: { status: string }) {
   const { t } = useTranslation('templateDetail');
   const tone = (() => {
     switch (status.toUpperCase()) {
-      case 'READY':    return 'bg-cube-emerald/15 text-cube-emerald border-cube-emerald/30';
+      case 'READY':    return 'bg-cube-ok/15 text-cube-ok border-cube-ok/30';
       case 'BUILDING':
-      case 'RUNNING':  return 'bg-cube-amber/15 text-cube-amber border-cube-amber/30';
-      case 'FAILED':   return 'bg-cube-rose/15 text-cube-rose border-cube-rose/30';
+      case 'RUNNING':  return 'bg-cube-warn/15 text-cube-warn border-cube-warn/30';
+      case 'FAILED':   return 'bg-cube-err/15 text-cube-err border-cube-err/30';
       default:         return 'bg-muted text-muted-foreground border-border';
     }
   })();
@@ -66,7 +66,7 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
       className={cn('text-muted-foreground/50 hover:text-muted-foreground transition-colors', className)}
       title={t('copy')}
     >
-      {copied ? <Check className="h-3 w-3 text-cube-emerald" /> : <Copy className="h-3 w-3" />}
+      {copied ? <Check className="h-3 w-3 text-cube-ok" /> : <Copy className="h-3 w-3" />}
     </button>
   );
 }
@@ -109,7 +109,7 @@ function CopyableText({ text, display, className }: { text: string; display?: st
     >
       <span>{display ?? text}</span>
       <span className="opacity-0 group-hover:opacity-100 transition-opacity">
-        {copied ? <Check className="h-3 w-3 text-cube-emerald" /> : <Copy className="h-3 w-3 text-muted-foreground/50" />}
+        {copied ? <Check className="h-3 w-3 text-cube-ok" /> : <Copy className="h-3 w-3 text-muted-foreground/50" />}
       </span>
     </span>
   );
@@ -137,7 +137,7 @@ function ProgressBar({ value }: { value: number }) {
   return (
     <div className="h-0.5 w-full rounded-full bg-border overflow-hidden">
       <div
-        className="h-full rounded-full bg-cube-amber transition-all duration-500"
+        className="h-full rounded-full bg-cube-warn transition-all duration-500"
         style={{ width: `${Math.min(100, Math.max(0, value))}%` }}
       />
     </div>
@@ -189,7 +189,7 @@ function ReplicaTable({ replicas }: { replicas: Replica[] }) {
         </thead>
         <tbody className="divide-y divide-border/30">
           {replicas.map((r, i) => (
-            <tr key={i} className="hover:bg-cube-emerald/5 transition-colors">
+            <tr key={i} className="hover:bg-cube-ok/5 transition-colors">
               <td className="py-3 pr-8 text-sm font-medium text-num whitespace-nowrap">{r.node_ip ?? r.node_id ?? '—'}</td>
               <td className="py-3 pr-8 whitespace-nowrap">
                 <span className="inline-flex items-center gap-1.5">
@@ -390,7 +390,7 @@ export default function TemplateDetailPage() {
       {/* ── hero header ── */}
       <div className="flex items-start justify-between gap-6 pb-6 border-b border-border/50">
         {/* left: id + meta */}
-        <div className="min-w-0 space-y-2 border-l-[3px] border-cube-emerald pl-3">
+        <div className="min-w-0 space-y-2 border-l-[3px] border-cube-ok pl-3">
           <div className="flex items-center gap-1.5">
             <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{t('templateId')}</span>
           </div>
@@ -418,7 +418,7 @@ export default function TemplateDetailPage() {
         </div>
 
         {/* right: status kpi strip — 竖线分隔，无边框格子 */}
-        <div className="flex items-stretch shrink-0 divide-x divide-cube-emerald/20">
+        <div className="flex items-stretch shrink-0 divide-x divide-cube-ok/20">
           {[
             { label: '状态', content: (
               <span className="inline-flex items-center gap-1.5">
@@ -442,7 +442,7 @@ export default function TemplateDetailPage() {
         <div className="py-4 border-b border-border/50 space-y-2">
           <div className="flex justify-between text-xs text-muted-foreground">
             <span className="flex items-center gap-1.5">
-              <span className="h-1.5 w-1.5 rounded-full bg-cube-amber animate-pulse" />
+              <span className="h-1.5 w-1.5 rounded-full bg-cube-warn animate-pulse" />
               {t('rebuild.progress', { progress: buildProgress })}
             </span>
             <button className="flex items-center gap-1 hover:text-foreground transition-colors" onClick={() => setShowLogs(v => !v)}>
