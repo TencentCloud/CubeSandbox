@@ -452,6 +452,10 @@ func RegisterTemplateReplica(templateID, nodeID string, sizeBytes int64) {
 	registerTemplateReplica(templateID, nodeID, sizeBytes, true)
 }
 
+func DeregisterTemplateReplica(templateID, nodeID string) {
+	deregisterTemplateReplica(templateID, nodeID, true)
+}
+
 func registerTemplateReplica(templateID, nodeID string, sizeBytes int64, syncNodeTemplates bool) {
 	if templateID == "" || nodeID == "" {
 		return

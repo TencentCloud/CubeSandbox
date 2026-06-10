@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Tencent. All rights reserved.
 
 import type { components } from '@/api/generated/schema';
+import type { TemplateCompatMatrix } from '@/api/client';
 
 type ClusterOverviewDto = components['schemas']['ClusterOverview'];
 type ListedSandboxDto = components['schemas']['ListedSandbox'];
@@ -308,6 +309,58 @@ export function getTemplate(templateID: string): TemplateDetailDto | undefined {
       instanceType: base.instanceType ?? 'standard',
       image: base.imageInfo,
     },
+  };
+}
+
+export function getTemplateCompat(): TemplateCompatMatrix {
+  return {
+    summary: {
+      staleTemplates: 1,
+      staleReplicas: 1,
+      affectedNodes: 1,
+      missingReplicas: 1,
+      unknownReplicas: 1,
+    },
+    templates: [
+      {
+        templateID: 'python-3.11-ai',
+        instanceType: 'standard',
+        overall: 'STALE',
+        nodes: [
+          {
+            nodeID: 'cube-edge-01',
+            nodeIP: '10.0.2.11',
+            compatStatus: 'STALE',
+            boundGuestImageVersion: 'guest-image@2024.11.02',
+            currentGuestImageVersion: 'guest-image@2024.12.01',
+            boundAgentVersion: 'cube-agent@0.1.7',
+            currentAgentVersion: 'cube-agent@0.1.8',
+            boundKernelVersion: 'kernel@6.6.32-cube',
+            currentKernelVersion: 'kernel@6.6.32-cube',
+          },
+          {
+            nodeID: 'cube-edge-02',
+            nodeIP: '10.0.2.12',
+            compatStatus: 'OK',
+            boundGuestImageVersion: 'guest-image@2024.11.02',
+            currentGuestImageVersion: 'guest-image@2024.11.02',
+            boundAgentVersion: 'cube-agent@0.1.7',
+            currentAgentVersion: 'cube-agent@0.1.7',
+            boundKernelVersion: 'kernel@6.6.32-cube',
+            currentKernelVersion: 'kernel@6.6.32-cube',
+          },
+        ],
+      },
+      {
+        templateID: 'nodejs-20-web',
+        instanceType: 'standard',
+        overall: 'UNKNOWN',
+        nodes: [
+          { nodeID: 'cube-edge-01', nodeIP: '10.0.2.11', compatStatus: 'UNKNOWN' },
+          { nodeID: 'cube-edge-02', nodeIP: '10.0.2.12', compatStatus: 'MISSING' },
+        ],
+      },
+    ],
   };
 }
 

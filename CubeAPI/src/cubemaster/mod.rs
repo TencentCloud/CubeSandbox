@@ -432,6 +432,34 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
+    /// GET /cube/template/compat — template compatibility matrix.
+    pub async fn get_template_compat(&self) -> Result<TemplateCompatResponse, CubeMasterError> {
+        let url = format!("{}/cube/template/compat", self.base_url);
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// POST /cube/template/compat action=adopt_baseline.
+    pub async fn adopt_template_compat_baseline(
+        &self,
+        req: &TemplateCompatAdoptRequest,
+    ) -> Result<TemplateCompatAdoptResponse, CubeMasterError> {
+        let url = format!("{}/cube/template/compat", self.base_url);
+        let resp = self
+            .inner
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
     // ── Node / Cluster APIs ──────────────────────────────────────────────
 
     /// GET /internal/meta/nodes — list all nodes (capacity + health).
@@ -1605,6 +1633,88 @@ pub struct RetEnvelope {
     #[serde(rename = "RequestID", alias = "requestID", default)]
     pub request_id: String,
     pub ret: RetCode,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct TemplateCompatSummary {
+    #[serde(default)]
+    pub stale_templates: i32,
+    #[serde(default)]
+    pub stale_replicas: i32,
+    #[serde(default)]
+    pub affected_nodes: i32,
+    #[serde(default)]
+    pub missing_replicas: i32,
+    #[serde(default)]
+    pub unknown_replicas: i32,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct TemplateNodeCompat {
+    #[serde(default)]
+    pub node_id: String,
+    #[serde(default)]
+    pub node_ip: String,
+    #[serde(default)]
+    pub compat_status: String,
+    #[serde(default)]
+    pub bound_guest_image_version: String,
+    #[serde(default)]
+    pub current_guest_image_version: String,
+    #[serde(default)]
+    pub bound_agent_version: String,
+    #[serde(default)]
+    pub current_agent_version: String,
+    #[serde(default)]
+    pub bound_kernel_version: String,
+    #[serde(default)]
+    pub current_kernel_version: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct TemplateCompatRow {
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub instance_type: String,
+    #[serde(default)]
+    pub overall: String,
+    #[serde(default)]
+    pub nodes: Vec<TemplateNodeCompat>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct TemplateCompatMatrix {
+    #[serde(default)]
+    pub summary: TemplateCompatSummary,
+    #[serde(default)]
+    pub templates: Vec<TemplateCompatRow>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct TemplateCompatResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub data: Option<TemplateCompatMatrix>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TemplateCompatAdoptRequest {
+    pub action: String,
+    pub template_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct TemplateCompatAdoptResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub updated: i32,
 }
 
 /// Body for POST /cube/template/from-image.

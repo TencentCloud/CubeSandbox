@@ -170,7 +170,7 @@ func ResolveSnapshotReadyNodeScope(ctx context.Context, snapshotID string) ([]st
 	}
 	scope := make([]string, 0, len(info.Replicas))
 	for _, replica := range info.Replicas {
-		if replica.Status != ReplicaStatusReady {
+		if !isReplicaSchedulable(replica) {
 			continue
 		}
 		if replica.NodeID != "" {

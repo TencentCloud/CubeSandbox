@@ -38,6 +38,38 @@ export interface TemplateDetail extends TemplateSummary {
   allowInternetAccess?: boolean | null;
 }
 
+export interface TemplateCompatSummary {
+  staleTemplates: number;
+  staleReplicas: number;
+  affectedNodes: number;
+  missingReplicas: number;
+  unknownReplicas: number;
+}
+
+export interface TemplateNodeCompat {
+  nodeID: string;
+  nodeIP?: string | null;
+  compatStatus: 'OK' | 'STALE' | 'UNKNOWN' | 'MISSING' | string;
+  boundGuestImageVersion?: string | null;
+  currentGuestImageVersion?: string | null;
+  boundAgentVersion?: string | null;
+  currentAgentVersion?: string | null;
+  boundKernelVersion?: string | null;
+  currentKernelVersion?: string | null;
+}
+
+export interface TemplateCompatRow {
+  templateID: string;
+  instanceType?: string | null;
+  overall: 'OK' | 'STALE' | 'UNKNOWN' | 'MISSING' | string;
+  nodes: TemplateNodeCompat[];
+}
+
+export interface TemplateCompatMatrix {
+  summary: TemplateCompatSummary;
+  templates: TemplateCompatRow[];
+}
+
 export interface ClusterNodeResourcesView {
   totalCpuMilli: number;
   allocatableCpuMilli: number;
@@ -185,6 +217,9 @@ export const templateApi = {
   getBuildLogs: (id: string, buildID: string) =>
     api<{ lines?: string[]; status?: string; progress?: number }>(`/templates/${id}/builds/${buildID}/logs`),
   remove: (id: string) => api<void>(`/templates/${id}`, { method: 'DELETE' }),
+  compat: () => api<TemplateCompatMatrix>('/templates/compat'),
+  adoptCompatBaseline: (id: string) =>
+    api<{ updated: number }>(`/templates/compat/${id}/adopt-baseline`, { method: 'POST' }),
 };
 
 export const versionApi = {

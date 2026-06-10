@@ -31,6 +31,7 @@ const (
 	SnapshotStorageAction          = "/snapshot/storage"
 	OperationAction                = "/operation"
 	TemplateAction                 = "/template"
+	TemplateCompatAction           = "/template/compat"
 	TemplateRedoAction             = "/template/redo"
 	TemplateBuildStatusAction      = "/template/build"
 	TemplateFromImageAction        = "/template/from-image"
@@ -87,6 +88,8 @@ func HttpHandler(w http.ResponseWriter, r *http.Request) {
 		rsp = handleSnapshotAction(w, r, rt)
 	case r.URL.Path == actionURI(TemplateAction):
 		rsp = handleTemplateAction(w, r, rt)
+	case r.URL.Path == actionURI(TemplateCompatAction):
+		rsp = handleTemplateCompatAction(w, r, rt)
 	case r.URL.Path == actionURI(TemplateRedoAction):
 		rsp = handleRedoTemplateAction(w, r, rt)
 	case r.URL.Path == actionURI(TemplateFromImageAction):

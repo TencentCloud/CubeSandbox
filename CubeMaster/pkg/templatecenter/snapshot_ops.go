@@ -300,6 +300,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		Phase:        ReplicaPhaseReady,
 		LastJobID:    jobID,
 	}
+	bindGuestVersionToReplica(&replica, commitRsp.GetGuestImageVersion(), commitRsp.GetAgentVersion(), commitRsp.GetKernelVersion())
 	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 		"phase":    JobPhaseRegistering,
 		"progress": 85,
@@ -850,7 +851,7 @@ func getSnapshotReadyReplica(ctx context.Context, snapshotID, preferredNodeID st
 	var firstErr error
 	for _, item := range replicas {
 		replica := replicaModelToStatus(item)
-		if replica.Status != ReplicaStatusReady {
+		if !isReplicaSchedulable(replica) {
 			continue
 		}
 		if preferredNodeID != "" && replica.NodeID != preferredNodeID {

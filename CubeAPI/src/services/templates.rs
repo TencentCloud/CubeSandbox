@@ -8,13 +8,14 @@ use crate::{
     cubemaster::{
         CreateTemplateContainerOverrides, CreateTemplateCubeNetworkConfig, CreateTemplateEnv,
         CreateTemplateFromImageReq, CreateTemplateResources, CubeMasterClient, CubeMasterError,
-        DnsConfig, HttpGetAction, Probe, ProbeHandler, RedoTemplateReq, TemplateDeleteRequest,
-        TemplateJob, TemplateJobResponse,
+        DnsConfig, HttpGetAction, Probe, ProbeHandler, RedoTemplateReq, TemplateCompatAdoptRequest,
+        TemplateDeleteRequest, TemplateJob, TemplateJobResponse,
     },
     error::{AppError, AppResult},
     models::{
         CreateTemplateRequest, RebuildTemplateRequest, TemplateBuildJob, TemplateBuildStatus,
-        TemplateDetail, TemplateSummary,
+        TemplateCompatMatrixView, TemplateCompatRowView, TemplateCompatSummaryView, TemplateDetail,
+        TemplateNodeCompatView, TemplateSummary,
     },
 };
 
@@ -227,6 +228,28 @@ impl TemplateService {
             "lines": [line],
         }))
     }
+
+    pub async fn compat_matrix(&self) -> AppResult<TemplateCompatMatrixView> {
+        let resp = self
+            .cubemaster
+            .get_template_compat()
+            .await
+            .map_err(map_err)?;
+        Ok(to_compat_matrix_view(resp.data.unwrap_or_default()))
+    }
+
+    pub async fn adopt_compat_baseline(&self, template_id: String) -> AppResult<i32> {
+        let req = TemplateCompatAdoptRequest {
+            action: "adopt_baseline".to_string(),
+            template_id,
+        };
+        let resp = self
+            .cubemaster
+            .adopt_template_compat_baseline(&req)
+            .await
+            .map_err(map_err)?;
+        Ok(resp.updated)
+    }
 }
 
 fn map_err(e: CubeMasterError) -> AppError {
@@ -266,6 +289,42 @@ fn build_log_line(status: &str, progress: i32, message: &str) -> String {
         format!("[{}] progress={}%", status, progress)
     } else {
         format!("[{}] {}", status, message)
+    }
+}
+
+fn to_compat_matrix_view(src: crate::cubemaster::TemplateCompatMatrix) -> TemplateCompatMatrixView {
+    TemplateCompatMatrixView {
+        summary: TemplateCompatSummaryView {
+            stale_templates: src.summary.stale_templates,
+            stale_replicas: src.summary.stale_replicas,
+            affected_nodes: src.summary.affected_nodes,
+            missing_replicas: src.summary.missing_replicas,
+            unknown_replicas: src.summary.unknown_replicas,
+        },
+        templates: src
+            .templates
+            .into_iter()
+            .map(|row| TemplateCompatRowView {
+                template_id: row.template_id,
+                instance_type: non_empty(row.instance_type),
+                overall: row.overall,
+                nodes: row
+                    .nodes
+                    .into_iter()
+                    .map(|node| TemplateNodeCompatView {
+                        node_id: node.node_id,
+                        node_ip: non_empty(node.node_ip),
+                        compat_status: node.compat_status,
+                        bound_guest_image_version: non_empty(node.bound_guest_image_version),
+                        current_guest_image_version: non_empty(node.current_guest_image_version),
+                        bound_agent_version: non_empty(node.bound_agent_version),
+                        current_agent_version: non_empty(node.current_agent_version),
+                        bound_kernel_version: non_empty(node.bound_kernel_version),
+                        current_kernel_version: non_empty(node.current_kernel_version),
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 

@@ -160,12 +160,34 @@ func setTemplateLocalityCache(templateID string, replicas []ReplicaStatus) {
 	}
 	ready := make([]ReplicaStatus, 0, len(replicas))
 	for _, replica := range replicas {
-		if replica.Status != ReplicaStatusReady {
+		if !isReplicaSchedulable(replica) {
 			continue
 		}
 		ready = append(ready, replica)
 	}
 	templateLocalityReadyCache.Set(templateID, &templateLocalitySnapshot{ReadyReplicas: ready}, templateLocalityCacheTTL)
+}
+
+func evictReplicaFromLocalityCache(templateID, nodeID string) {
+	if templateID == "" || nodeID == "" {
+		return
+	}
+	replicas, ok := getCachedTemplateLocality(templateID)
+	if !ok {
+		return
+	}
+	next := make([]ReplicaStatus, 0, len(replicas))
+	for _, replica := range replicas {
+		if replica.NodeID == nodeID {
+			continue
+		}
+		next = append(next, replica)
+	}
+	if len(next) == 0 {
+		templateLocalityReadyCache.Delete(templateID)
+		return
+	}
+	templateLocalityReadyCache.Set(templateID, &templateLocalitySnapshot{ReadyReplicas: next}, templateLocalityCacheTTL)
 }
 
 func invalidateTemplateCaches(templateID string) {
@@ -207,7 +229,7 @@ func setTemplateKindCache(templateID, kind string) {
 
 func registerReadyTemplateReplicas(templateID string, replicas []ReplicaStatus) {
 	for _, replica := range replicas {
-		if replica.Status != ReplicaStatusReady || replica.NodeID == "" {
+		if !isReplicaSchedulable(replica) || replica.NodeID == "" {
 			continue
 		}
 		localcache.RegisterTemplateReplica(templateID, replica.NodeID, 1)

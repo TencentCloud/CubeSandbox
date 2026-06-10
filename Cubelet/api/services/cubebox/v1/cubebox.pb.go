@@ -4345,8 +4345,14 @@ type AppSnapshotResponse struct {
 	MemoryKind string `protobuf:"bytes,9,opt,name=memory_kind,json=memoryKind,proto3" json:"memory_kind,omitempty"`
 	// Rootfs size at snapshot time, used by repair and validation.
 	RootfsSizeBytes uint64 `protobuf:"varint,10,opt,name=rootfs_size_bytes,json=rootfsSizeBytes,proto3" json:"rootfs_size_bytes,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// guest-image version bound when this snapshot was created.
+	GuestImageVersion string `protobuf:"bytes,11,opt,name=guest_image_version,json=guestImageVersion,proto3" json:"guest_image_version,omitempty"`
+	// cube-agent version bound when this snapshot was created.
+	AgentVersion string `protobuf:"bytes,12,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	// Guest kernel artifact identity bound when this snapshot was created.
+	KernelVersion string `protobuf:"bytes,13,opt,name=kernel_version,json=kernelVersion,proto3" json:"kernel_version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AppSnapshotResponse) Reset() {
@@ -4449,6 +4455,27 @@ func (x *AppSnapshotResponse) GetRootfsSizeBytes() uint64 {
 	return 0
 }
 
+func (x *AppSnapshotResponse) GetGuestImageVersion() string {
+	if x != nil {
+		return x.GuestImageVersion
+	}
+	return ""
+}
+
+func (x *AppSnapshotResponse) GetAgentVersion() string {
+	if x != nil {
+		return x.AgentVersion
+	}
+	return ""
+}
+
+func (x *AppSnapshotResponse) GetKernelVersion() string {
+	if x != nil {
+		return x.KernelVersion
+	}
+	return ""
+}
+
 type CommitSandboxRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
@@ -4547,8 +4574,14 @@ type CommitSandboxResponse struct {
 	MemoryDev string `protobuf:"bytes,11,opt,name=memory_dev,json=memoryDev,proto3" json:"memory_dev,omitempty"`
 	// Rootfs size at snapshot time, used by rollback resize planning.
 	RootfsSizeBytes uint64 `protobuf:"varint,12,opt,name=rootfs_size_bytes,json=rootfsSizeBytes,proto3" json:"rootfs_size_bytes,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// guest-image version bound when this snapshot was created.
+	GuestImageVersion string `protobuf:"bytes,13,opt,name=guest_image_version,json=guestImageVersion,proto3" json:"guest_image_version,omitempty"`
+	// cube-agent version bound when this snapshot was created.
+	AgentVersion string `protobuf:"bytes,14,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	// Guest kernel artifact identity bound when this snapshot was created.
+	KernelVersion string `protobuf:"bytes,15,opt,name=kernel_version,json=kernelVersion,proto3" json:"kernel_version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CommitSandboxResponse) Reset() {
@@ -4663,6 +4696,27 @@ func (x *CommitSandboxResponse) GetRootfsSizeBytes() uint64 {
 		return x.RootfsSizeBytes
 	}
 	return 0
+}
+
+func (x *CommitSandboxResponse) GetGuestImageVersion() string {
+	if x != nil {
+		return x.GuestImageVersion
+	}
+	return ""
+}
+
+func (x *CommitSandboxResponse) GetAgentVersion() string {
+	if x != nil {
+		return x.AgentVersion
+	}
+	return ""
+}
+
+func (x *CommitSandboxResponse) GetKernelVersion() string {
+	if x != nil {
+		return x.KernelVersion
+	}
+	return ""
 }
 
 type RollbackSandboxRequest struct {
@@ -6743,7 +6797,7 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\"\x92\x01\n" +
 	"\x12AppSnapshotRequest\x12Y\n" +
 	"\x0ecreate_request\x18\x01 \x01(\v22.cubelet.services.cubebox.v1.RunCubeSandboxRequestR\rcreateRequest\x12!\n" +
-	"\fsnapshot_dir\x18\x02 \x01(\tR\vsnapshotDir\"\xf7\x02\n" +
+	"\fsnapshot_dir\x18\x02 \x01(\tR\vsnapshotDir\"\xf3\x03\n" +
 	"\x13AppSnapshotResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1c\n" +
@@ -6761,14 +6815,17 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\vmemory_kind\x18\t \x01(\tR\n" +
 	"memoryKind\x12*\n" +
 	"\x11rootfs_size_bytes\x18\n" +
-	" \x01(\x04R\x0frootfsSizeBytes\"\x95\x01\n" +
+	" \x01(\x04R\x0frootfsSizeBytes\x12.\n" +
+	"\x13guest_image_version\x18\v \x01(\tR\x11guestImageVersion\x12#\n" +
+	"\ragent_version\x18\f \x01(\tR\fagentVersion\x12%\n" +
+	"\x0ekernel_version\x18\r \x01(\tR\rkernelVersion\"\x95\x01\n" +
 	"\x14CommitSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12\x1e\n" +
 	"\n" +
 	"templateID\x18\x03 \x01(\tR\n" +
 	"templateID\x12!\n" +
-	"\fsnapshot_dir\x18\x04 \x01(\tR\vsnapshotDir\"\xb7\x03\n" +
+	"\fsnapshot_dir\x18\x04 \x01(\tR\vsnapshotDir\"\xb3\x04\n" +
 	"\x15CommitSandboxResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1c\n" +
@@ -6790,7 +6847,10 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	" \x01(\tR\trootfsDev\x12\x1d\n" +
 	"\n" +
 	"memory_dev\x18\v \x01(\tR\tmemoryDev\x12*\n" +
-	"\x11rootfs_size_bytes\x18\f \x01(\x04R\x0frootfsSizeBytes\"\x89\x02\n" +
+	"\x11rootfs_size_bytes\x18\f \x01(\x04R\x0frootfsSizeBytes\x12.\n" +
+	"\x13guest_image_version\x18\r \x01(\tR\x11guestImageVersion\x12#\n" +
+	"\ragent_version\x18\x0e \x01(\tR\fagentVersion\x12%\n" +
+	"\x0ekernel_version\x18\x0f \x01(\tR\rkernelVersion\"\x89\x02\n" +
 	"\x16RollbackSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12\x1e\n" +

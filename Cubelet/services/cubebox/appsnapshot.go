@@ -385,6 +385,10 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	rsp.RootfsKind = rootfsObject.Kind
 	rsp.MemoryKind = memoryObject.Kind
 	rsp.RootfsSizeBytes = rootfsObject.SizeBytes
+	versions := collectGuestEnvironmentVersions()
+	rsp.GuestImageVersion = versions.GuestImage
+	rsp.AgentVersion = versions.Agent
+	rsp.KernelVersion = versions.Kernel
 
 	// Persist the catalog entry so subsequent create-from-template and
 	// CleanupTemplate calls can resolve physical refs locally. The build

@@ -12,6 +12,7 @@ import {
   getSandboxLogs,
   getSandboxSession,
   getTemplate,
+  getTemplateCompat,
   listNodes,
   listSandboxes,
   listTemplates,
@@ -55,6 +56,16 @@ export const handlers = [
   http.get('/cubeapi/v1/templates', async () => {
     await mockDelay();
     return HttpResponse.json(listTemplates());
+  }),
+
+  http.get('/cubeapi/v1/templates/compat', async () => {
+    await mockDelay();
+    return HttpResponse.json(getTemplateCompat());
+  }),
+
+  http.post('/cubeapi/v1/templates/compat/:templateID/adopt-baseline', async () => {
+    await mockDelay();
+    return HttpResponse.json({ updated: 1 });
   }),
 
   http.get('/cubeapi/v1/templates/:templateID', async ({ params }) => {

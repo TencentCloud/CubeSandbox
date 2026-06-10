@@ -17,6 +17,10 @@
     "metaValue": "值",
     "addMeta": "添加键值对"
   },
+  "compat": {
+    "stale": "需重建",
+    "staleHelp": "该模板在当前节点环境下已失效，需要先重建模板或采用当前基线后才能创建沙箱。"
+  },
   "actions": {
     "cancel": "取消",
     "create": "创建沙箱",

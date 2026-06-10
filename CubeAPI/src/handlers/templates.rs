@@ -16,7 +16,7 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         ApiError, CreateTemplateRequest, ListTemplatesQuery, RebuildTemplateRequest,
-        TemplateDetail, TemplateSummary,
+        TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateDetail, TemplateSummary,
     },
     state::AppState,
 };
@@ -61,6 +61,50 @@ pub async fn get_template(
 ) -> AppResult<impl IntoResponse> {
     let detail = state.services.templates.get_template(&template_id).await?;
     Ok((StatusCode::OK, Json(detail)))
+}
+
+// ─── GET /templates/compat ────────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/templates/compat",
+    responses(
+        (status = 200, description = "Template compatibility matrix", body = TemplateCompatMatrixView),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn template_compat(State(state): State<AppState>) -> AppResult<impl IntoResponse> {
+    let matrix = state.services.templates.compat_matrix().await?;
+    Ok((StatusCode::OK, Json(matrix)))
+}
+
+// ─── POST /templates/compat/:templateID/adopt-baseline ────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/templates/compat/{templateID}/adopt-baseline",
+    params(
+        ("templateID" = String, Path, description = "Template identifier")
+    ),
+    responses(
+        (status = 200, description = "Adopted UNKNOWN replicas to current baseline", body = TemplateCompatAdoptResponseView),
+        (status = 404, description = "Template not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn adopt_template_compat_baseline(
+    State(state): State<AppState>,
+    Path(template_id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    let updated = state
+        .services
+        .templates
+        .adopt_compat_baseline(template_id)
+        .await?;
+    Ok((
+        StatusCode::OK,
+        Json(TemplateCompatAdoptResponseView { updated }),
+    ))
 }
 
 // ─── POST /templates ──────────────────────────────────────────────────────────

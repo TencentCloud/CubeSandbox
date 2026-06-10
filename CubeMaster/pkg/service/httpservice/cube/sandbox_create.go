@@ -60,6 +60,8 @@ func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTr
 		retCode := errorcode.ErrorCode_MasterParamsError
 		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
 			retCode = errorcode.ErrorCode_NotFound
+		} else if errors.Is(err, templatecenter.ErrTemplateStaleNeedsRedo) {
+			retCode = errorcode.ErrorCode_Conflict
 		}
 		rsp.Ret.RetCode = int(retCode)
 		rsp.Ret.RetMsg = err.Error()

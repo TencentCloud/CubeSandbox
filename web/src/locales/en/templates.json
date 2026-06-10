@@ -2,6 +2,29 @@
   "title": "Templates",
   "subtitle": "Reusable snapshots used as the starting point of every sandbox.",
   "noTemplates": "No templates yet. Use the CLI or SDK to publish a template.",
+  "tabs": {
+    "list": "Templates",
+    "compat": "Compatibility"
+  },
+  "compat": {
+    "banner": "{{templates}} templates have {{replicas}} stale replicas after node environment changes and need rebuild.",
+    "view": "View compatibility",
+    "adoptBaseline": "Adopt current baseline",
+    "adoptConfirm": "Use the current node versions as the new baseline for UNKNOWN replicas of this template? Only continue if you have verified the template works in the current environment.",
+    "status": {
+      "OK": "OK",
+      "STALE": "Needs rebuild",
+      "UNKNOWN": "Unknown",
+      "MISSING": "Missing"
+    },
+    "kpi": {
+      "staleTemplates": "Stale templates",
+      "staleReplicas": "Stale replicas",
+      "affectedNodes": "Affected nodes",
+      "missingReplicas": "Missing replicas",
+      "unknownReplicas": "Unknown replicas"
+    }
+  },
   "col": {
     "instance": "Instance",
     "created": "Created",

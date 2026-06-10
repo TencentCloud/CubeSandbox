@@ -17,6 +17,10 @@
     "metaValue": "Value",
     "addMeta": "Add entry"
   },
+  "compat": {
+    "stale": "Needs rebuild",
+    "staleHelp": "This template is stale in the current node environment. Rebuild it or adopt the current baseline before creating a sandbox."
+  },
   "actions": {
     "cancel": "Cancel",
     "create": "Create sandbox",

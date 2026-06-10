@@ -41,6 +41,16 @@ function TemplatePicker({
     queryFn: templateApi.list,
     staleTime: 30_000,
   });
+  const { data: compat } = useQuery({
+    queryKey: ['templates', 'compat'],
+    queryFn: templateApi.compat,
+    staleTime: 15_000,
+  });
+  const staleTemplates = new Set(
+    (compat?.templates ?? [])
+      .filter((row) => row.overall === 'STALE')
+      .map((row) => row.templateID),
+  );
 
   if (isLoading) {
     return (
@@ -57,28 +67,29 @@ function TemplatePicker({
       {(templates ?? []).map((tpl) => {
         const statusLower = tpl.status.toLowerCase();
         const isReady = statusLower === 'ready';
+        const isStale = staleTemplates.has(tpl.templateID);
         const isSelected = tpl.templateID === selected;
         return (
           <button
             key={tpl.templateID}
             type="button"
-            disabled={!isReady}
+            disabled={!isReady || isStale}
             onClick={() => onSelect(tpl.templateID)}
             className={cn(
               'flex flex-col gap-1 rounded-lg border px-4 py-3 text-left transition-colors',
               isSelected
                 ? 'border-primary bg-primary/10 ring-1 ring-primary'
                 : 'border-border bg-card hover:border-primary/50 hover:bg-muted/40',
-              !isReady && 'cursor-not-allowed opacity-50',
+              (!isReady || isStale) && 'cursor-not-allowed opacity-50',
             )}
           >
             <div className="flex items-center justify-between gap-2">
               <span className="truncate font-mono text-sm font-medium">{tpl.templateID}</span>
               <Badge
-                tone={statusLower === 'ready' ? 'ok' : statusLower === 'building' ? 'warn' : 'err'}
+                tone={isStale ? 'err' : statusLower === 'ready' ? 'ok' : statusLower === 'building' ? 'warn' : 'err'}
                 className="shrink-0 text-xs"
               >
-                {tpl.status}
+                {isStale ? t('compat.stale') : tpl.status}
               </Badge>
             </div>
             <span className="truncate text-xs text-muted-foreground">
@@ -164,6 +175,11 @@ export default function SandboxNewPage() {
   const { t } = useTranslation('sandboxNew');
   const [form, setForm] = useState<FormState>(DEFAULT_FORM);
   const [error, setError] = useState<string | null>(null);
+  const { data: compat } = useQuery({
+    queryKey: ['templates', 'compat'],
+    queryFn: templateApi.compat,
+    staleTime: 15_000,
+  });
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -187,7 +203,9 @@ export default function SandboxNewPage() {
     },
   });
 
-  const canSubmit = !!form.templateID && !create.isPending;
+  const selectedCompat = compat?.templates.find((row) => row.templateID === form.templateID);
+  const selectedTemplateStale = selectedCompat?.overall === 'STALE';
+  const canSubmit = !!form.templateID && !selectedTemplateStale && !create.isPending;
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -209,6 +227,9 @@ export default function SandboxNewPage() {
         <TemplatePicker selected={form.templateID} onSelect={(id) => set('templateID', id)} />
         {!form.templateID && (
           <p className="text-xs text-muted-foreground">{t('form.templateRequired')}</p>
+        )}
+        {selectedTemplateStale && (
+          <p className="text-xs text-destructive">{t('compat.staleHelp')}</p>
         )}
       </Section>
 

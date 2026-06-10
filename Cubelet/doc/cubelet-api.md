@@ -240,6 +240,9 @@ AppSnapshotResponse is the response for app snapshot creation.
 | rootfs_kind | [string](#string) |  | Authoritative cubecow rootfs object kind. |
 | memory_kind | [string](#string) |  | Authoritative cubecow memory object kind. |
 | rootfs_size_bytes | [uint64](#uint64) |  | Rootfs size at snapshot time, used by repair and validation. |
+| guest_image_version | [string](#string) |  | guest-image version bound when this snapshot was created. |
+| agent_version | [string](#string) |  | cube-agent version bound when this snapshot was created. |
+| kernel_version | [string](#string) |  | Guest kernel artifact identity bound when this snapshot was created. |
 
 
 
@@ -386,6 +389,9 @@ Capability contains the container capabilities to add or drop
 | rootfs_dev | [string](#string) |  | Diagnostic-only rootfs device path; re-resolve from rootfs_vol on use. |
 | memory_dev | [string](#string) |  | Diagnostic-only memory device path; re-resolve from memory_vol on use. |
 | rootfs_size_bytes | [uint64](#uint64) |  | Rootfs size at snapshot time, used by rollback resize planning. |
+| guest_image_version | [string](#string) |  | guest-image version bound when this snapshot was created. |
+| agent_version | [string](#string) |  | cube-agent version bound when this snapshot was created. |
+| kernel_version | [string](#string) |  | Guest kernel artifact identity bound when this snapshot was created. |
 
 
 

@@ -241,6 +241,10 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	rsp.RootfsDev = rootfsObject.DevPath
 	rsp.MemoryDev = memoryObject.DevPath
 	rsp.RootfsSizeBytes = rootfsObject.SizeBytes
+	versions := collectGuestEnvironmentVersions()
+	rsp.GuestImageVersion = versions.GuestImage
+	rsp.AgentVersion = versions.Agent
+	rsp.KernelVersion = versions.Kernel
 	if err := storage.WriteSnapshotCatalog(&storage.SnapshotCatalogEntry{
 		SnapshotID:      rsp.TemplateID,
 		InstanceType:    "cubebox",

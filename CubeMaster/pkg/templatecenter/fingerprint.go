@@ -26,8 +26,8 @@ func unmarshalTemplateImageJobRequest(payload string) (*types.CreateTemplateFrom
 func buildTemplateSpecFingerprint(req *types.CreateTemplateFromImageReq, sourceImageDigest string) string {
 	// This fingerprint scopes only the reusable rootfs artifact. Runtime inputs
 	// such as the active guest kernel identity must stay out of this payload:
-	// changing the kernel should invalidate/rebuild snapshots or template
-	// replicas, not the ext4 rootfs artifact derived from the source image.
+	// template compatibility is governed at the replica layer, and the guest
+	// kernel file captured for a template is not part of rootfs artifact reuse.
 	return buildTemplateSpecFingerprintWithCA(req, sourceImageDigest, "")
 }
 

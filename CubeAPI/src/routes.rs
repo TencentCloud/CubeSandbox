@@ -170,6 +170,11 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
     let routes = Router::new()
         .route("/templates", get(templates::list_templates))
         .route("/templates", post(templates::create_template))
+        .route("/templates/compat", get(templates::template_compat))
+        .route(
+            "/templates/compat/:templateID/adopt-baseline",
+            post(templates::adopt_template_compat_baseline),
+        )
         .route("/templates/:templateID", get(templates::get_template))
         .route("/templates/:templateID", post(templates::rebuild_template))
         .route("/templates/:templateID", patch(templates::update_template))

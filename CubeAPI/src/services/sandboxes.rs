@@ -69,7 +69,7 @@ impl SandboxService {
             .await
             .map_err(internal_error)?;
 
-        resp.ret.into_result().map_err(internal_error)?;
+        ensure_create_result(resp.ret.ret_code, resp.ret.ret_msg)?;
 
         let state_filter = parse_state_filter(state_filter);
         Ok(resp
@@ -472,6 +472,19 @@ impl SandboxService {
 
 fn internal_error(error: impl std::fmt::Display) -> AppError {
     AppError::Internal(anyhow::anyhow!(error.to_string()))
+}
+
+fn ensure_create_result(ret_code: i32, ret_msg: String) -> AppResult<()> {
+    if is_success_ret_code(ret_code) {
+        return Ok(());
+    }
+    if ret_code == RET_CODE_NOT_FOUND {
+        return Err(AppError::NotFound(ret_msg));
+    }
+    if ret_code == RET_CODE_CONFLICT {
+        return Err(AppError::Conflict(ret_msg));
+    }
+    Err(AppError::Internal(anyhow::anyhow!(ret_msg)))
 }
 
 fn sandbox_not_found_or_internal(e: CubeMasterError, sandbox_id: &str) -> AppError {

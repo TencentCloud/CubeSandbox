@@ -294,6 +294,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /templates/compat:
+    get:
+      tags:
+      - handlers::templates
+      operationId: template_compat
+      responses:
+        '200':
+          description: Template compatibility matrix
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateCompatMatrixView'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /templates/compat/{templateID}/adopt-baseline:
+    post:
+      tags:
+      - handlers::templates
+      operationId: adopt_template_compat_baseline
+      parameters:
+      - name: templateID
+        in: path
+        description: Template identifier
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Adopted UNKNOWN replicas to current baseline
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateCompatAdoptResponseView'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /templates/{templateID}:
     get:
       tags:
@@ -893,6 +942,69 @@ components:
           type: string
         path:
           type: string
+    TemplateCompatAdoptResponseView:
+      type: object
+      required:
+      - updated
+      properties:
+        updated:
+          type: integer
+          format: int32
+    TemplateCompatMatrixView:
+      type: object
+      required:
+      - summary
+      - templates
+      properties:
+        summary:
+          $ref: '#/components/schemas/TemplateCompatSummaryView'
+        templates:
+          type: array
+          items:
+            $ref: '#/components/schemas/TemplateCompatRowView'
+    TemplateCompatRowView:
+      type: object
+      required:
+      - templateID
+      - overall
+      - nodes
+      properties:
+        instanceType:
+          type:
+          - string
+          - 'null'
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/TemplateNodeCompatView'
+        overall:
+          type: string
+        templateID:
+          type: string
+    TemplateCompatSummaryView:
+      type: object
+      required:
+      - staleTemplates
+      - staleReplicas
+      - affectedNodes
+      - missingReplicas
+      - unknownReplicas
+      properties:
+        affectedNodes:
+          type: integer
+          format: int32
+        missingReplicas:
+          type: integer
+          format: int32
+        staleReplicas:
+          type: integer
+          format: int32
+        staleTemplates:
+          type: integer
+          format: int32
+        unknownReplicas:
+          type: integer
+          format: int32
     TemplateDetail:
       type: object
       description: Detailed template response (GET /templates/:id).
@@ -928,6 +1040,44 @@ components:
         templateID:
           type: string
         version:
+          type:
+          - string
+          - 'null'
+    TemplateNodeCompatView:
+      type: object
+      required:
+      - nodeID
+      - compatStatus
+      properties:
+        boundAgentVersion:
+          type:
+          - string
+          - 'null'
+        boundGuestImageVersion:
+          type:
+          - string
+          - 'null'
+        boundKernelVersion:
+          type:
+          - string
+          - 'null'
+        compatStatus:
+          type: string
+        currentAgentVersion:
+          type:
+          - string
+          - 'null'
+        currentGuestImageVersion:
+          type:
+          - string
+          - 'null'
+        currentKernelVersion:
+          type:
+          - string
+          - 'null'
+        nodeID:
+          type: string
+        nodeIP:
           type:
           - string
           - 'null'

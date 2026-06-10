@@ -11,6 +11,7 @@ import (
 	"hash/fnv"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -161,6 +162,11 @@ var global = &service{
 	declaredVersionSets: map[string]map[string]struct{}{},
 }
 
+// OnGuestAgentVersionChanged is registered by template compatibility
+// management. It must stay in nodemeta to avoid a package import cycle:
+// nodemeta never imports templatecenter.
+var OnGuestAgentVersionChanged func(nodeID string)
+
 func Init(ctx context.Context) error {
 	_ = ctx
 	// Schema is owned by pkg/base/dao/migrate and applied at startup
@@ -310,6 +316,7 @@ func (s *service) persistVersionsWithWriter(
 	snap := s.ensureNode(nodeID)
 	s.mu.RLock()
 	unchanged := snap.versionsHash == h
+	prevCompat := compatRelevantVersions(snap.Versions)
 	s.mu.RUnlock()
 	if unchanged {
 		log.G(ctx).Debugf("version_write_skipped node=%s", nodeID)
@@ -324,6 +331,9 @@ func (s *service) persistVersionsWithWriter(
 	snap.versionsHash = h
 	s.mu.Unlock()
 	log.G(ctx).Debugf("version_write_applied node=%s components=%d", nodeID, len(versions))
+	if OnGuestAgentVersionChanged != nil && compatVersionsChanged(prevCompat, compatRelevantVersions(versions)) {
+		go OnGuestAgentVersionChanged(nodeID)
+	}
 }
 
 func (s *service) lockVersionWrite(nodeID string) func() {
@@ -388,6 +398,53 @@ func versionsHash(versions []ComponentVersion) string {
 		fmt.Fprintf(h, "%s|%s|%s|%s|%s\n", v.Component, v.Version, v.Commit, v.BuildTime, v.Source)
 	}
 	return strconv.FormatUint(h.Sum64(), 16)
+}
+
+func compatRelevantVersions(versions []ComponentVersion) map[string]string {
+	out := map[string]string{
+		"guest-image": "",
+		"cube-agent":  "",
+	}
+	for _, v := range versions {
+		switch v.Component {
+		case "guest-image", "cube-agent":
+			out[v.Component] = strings.TrimSpace(v.Version)
+		}
+	}
+	return out
+}
+
+func compatVersionsChanged(prev, next map[string]string) bool {
+	for _, component := range []string{"guest-image", "cube-agent"} {
+		if strings.TrimSpace(prev[component]) != strings.TrimSpace(next[component]) {
+			return true
+		}
+	}
+	return false
+}
+
+// GetNodeComponentVersions returns the current trusted guest-environment
+// versions for a healthy node. The boolean is false when the node is unknown,
+// unhealthy, or its heartbeat has expired; callers should treat that as
+// UNKNOWN rather than reusing stale DB values.
+func GetNodeComponentVersions(ctx context.Context, nodeID string) (map[string]string, bool) {
+	_ = ctx
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil, false
+	}
+	global.mu.RLock()
+	snap, ok := global.nodes[nodeID]
+	if !ok || snap == nil {
+		global.mu.RUnlock()
+		return nil, false
+	}
+	cloned := cloneSnapshotWithCurrentHealth(snap, time.Now())
+	global.mu.RUnlock()
+	if !cloned.Healthy {
+		return nil, false
+	}
+	return compatRelevantVersions(cloned.Versions), true
 }
 
 // fanOutResourceMetric is best-effort: write failures to Redis fall back

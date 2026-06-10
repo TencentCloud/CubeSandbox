@@ -648,6 +648,75 @@ pub struct TemplateBuildStatus {
     pub message: String,
 }
 
+#[derive(Debug, Serialize, Default, ToSchema)]
+pub struct TemplateCompatSummaryView {
+    #[serde(rename = "staleTemplates")]
+    pub stale_templates: i32,
+    #[serde(rename = "staleReplicas")]
+    pub stale_replicas: i32,
+    #[serde(rename = "affectedNodes")]
+    pub affected_nodes: i32,
+    #[serde(rename = "missingReplicas")]
+    pub missing_replicas: i32,
+    #[serde(rename = "unknownReplicas")]
+    pub unknown_replicas: i32,
+}
+
+#[derive(Debug, Serialize, Default, ToSchema)]
+pub struct TemplateNodeCompatView {
+    #[serde(rename = "nodeID")]
+    pub node_id: String,
+    #[serde(rename = "nodeIP", skip_serializing_if = "Option::is_none")]
+    pub node_ip: Option<String>,
+    #[serde(rename = "compatStatus")]
+    pub compat_status: String,
+    #[serde(
+        rename = "boundGuestImageVersion",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub bound_guest_image_version: Option<String>,
+    #[serde(
+        rename = "currentGuestImageVersion",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_guest_image_version: Option<String>,
+    #[serde(rename = "boundAgentVersion", skip_serializing_if = "Option::is_none")]
+    pub bound_agent_version: Option<String>,
+    #[serde(
+        rename = "currentAgentVersion",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_agent_version: Option<String>,
+    #[serde(rename = "boundKernelVersion", skip_serializing_if = "Option::is_none")]
+    pub bound_kernel_version: Option<String>,
+    #[serde(
+        rename = "currentKernelVersion",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_kernel_version: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default, ToSchema)]
+pub struct TemplateCompatRowView {
+    #[serde(rename = "templateID")]
+    pub template_id: String,
+    #[serde(rename = "instanceType", skip_serializing_if = "Option::is_none")]
+    pub instance_type: Option<String>,
+    pub overall: String,
+    pub nodes: Vec<TemplateNodeCompatView>,
+}
+
+#[derive(Debug, Serialize, Default, ToSchema)]
+pub struct TemplateCompatMatrixView {
+    pub summary: TemplateCompatSummaryView,
+    pub templates: Vec<TemplateCompatRowView>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TemplateCompatAdoptResponseView {
+    pub updated: i32,
+}
+
 // ─── Cluster & Nodes ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Default, ToSchema)]

@@ -5,13 +5,13 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { templateApi } from '@/api/client';
+import { templateApi, type TemplateCompatMatrix, type TemplateCompatRow } from '@/api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Package, Plus, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Package, Plus, Trash2, X } from 'lucide-react';
 import { formatRelative, formatDeleteError } from '@/lib/utils';
 
 // ── create template modal ────────────────────────────────────────────────────
@@ -260,9 +260,16 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
 
 export default function TemplatesPage() {
   const { data, isLoading } = useQuery({ queryKey: ['templates'], queryFn: templateApi.list });
+  const { data: compat } = useQuery({
+    queryKey: ['templates', 'compat'],
+    queryFn: templateApi.compat,
+    refetchInterval: 30_000,
+  });
   const { t } = useTranslation('templates');
   const [showCreate, setShowCreate] = useState(false);
   const [deletingID, setDeletingID] = useState<string | null>(null);
+  const [tab, setTab] = useState<'list' | 'compat'>('list');
+  const compatByTemplate = new Map((compat?.templates ?? []).map((row) => [row.templateID, row]));
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -276,7 +283,40 @@ export default function TemplatesPage() {
         </Button>
       </header>
 
-      {isLoading && (
+      {(compat?.summary.staleTemplates ?? 0) > 0 && (
+        <Card className="border-destructive/30 bg-destructive/5">
+          <div className="flex items-center justify-between gap-3 p-4 text-sm">
+            <div className="flex items-center gap-2 text-destructive">
+              <AlertTriangle size={16} />
+              <span>
+                {t('compat.banner', {
+                  templates: compat?.summary.staleTemplates,
+                  replicas: compat?.summary.staleReplicas,
+                })}
+              </span>
+            </div>
+            <Button variant="secondary" size="sm" onClick={() => setTab('compat')}>
+              {t('compat.view')}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      <div className="flex gap-2">
+        <Button variant={tab === 'list' ? 'default' : 'secondary'} size="sm" onClick={() => setTab('list')}>
+          {t('tabs.list')}
+        </Button>
+        <Button variant={tab === 'compat' ? 'default' : 'secondary'} size="sm" onClick={() => setTab('compat')}>
+          {t('tabs.compat')}
+          {(compat?.summary.staleTemplates ?? 0) > 0 && (
+            <Badge tone="err" className="ml-2">{compat?.summary.staleTemplates}</Badge>
+          )}
+        </Button>
+      </div>
+
+      {tab === 'compat' && <TemplateCompatPanel matrix={compat} />}
+
+      {tab === 'list' && isLoading && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
             <Skeleton key={i} className="h-28" />
@@ -284,7 +324,7 @@ export default function TemplatesPage() {
         </div>
       )}
 
-      {data && data.length === 0 && (
+      {tab === 'list' && data && data.length === 0 && (
         <Card>
           <div className="py-16 text-center text-sm text-muted-foreground">
             {t('noTemplates')}
@@ -292,7 +332,7 @@ export default function TemplatesPage() {
         </Card>
       )}
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      {tab === 'list' && <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {data?.map((tpl) => (
           <div key={tpl.templateID} className="relative group">
             <Link to={`/templates/${tpl.templateID}`} className="block">
@@ -307,9 +347,13 @@ export default function TemplatesPage() {
                       <CardDescription className="font-mono text-xs">{tpl.templateID}</CardDescription>
                     </div>
                   </div>
-                  <Badge tone={tpl.status.toLowerCase() === 'ready' ? 'ok' : tpl.status.toLowerCase() === 'failed' ? 'err' : 'warn'}>
-                    {tpl.status}
-                  </Badge>
+                  {compatByTemplate.get(tpl.templateID)?.overall === 'STALE' ? (
+                    <Badge tone="err">{t('compat.status.STALE')}</Badge>
+                  ) : (
+                    <Badge tone={tpl.status.toLowerCase() === 'ready' ? 'ok' : tpl.status.toLowerCase() === 'failed' ? 'err' : 'warn'}>
+                      {tpl.status}
+                    </Badge>
+                  )}
                 </CardHeader>
                 <div className="grid grid-cols-2 gap-3 pt-3 text-xs text-muted-foreground">
                   <div>
@@ -349,7 +393,7 @@ export default function TemplatesPage() {
             </button>
           </div>
         ))}
-      </div>
+      </div>}
 
       {showCreate && <CreateTemplateModal onClose={() => setShowCreate(false)} />}
       {deletingID && (
@@ -360,4 +404,126 @@ export default function TemplatesPage() {
       )}
     </div>
   );
+}
+
+function TemplateCompatPanel({ matrix }: { matrix?: TemplateCompatMatrix }) {
+  const { t } = useTranslation('templates');
+  if (!matrix) {
+    return (
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-24" />)}
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+        <CompatKpi label={t('compat.kpi.staleTemplates')} value={matrix.summary.staleTemplates} tone="err" />
+        <CompatKpi label={t('compat.kpi.staleReplicas')} value={matrix.summary.staleReplicas} tone="err" />
+        <CompatKpi label={t('compat.kpi.affectedNodes')} value={matrix.summary.affectedNodes} tone="warn" />
+        <CompatKpi label={t('compat.kpi.missingReplicas')} value={matrix.summary.missingReplicas} tone="warn" />
+        <CompatKpi label={t('compat.kpi.unknownReplicas')} value={matrix.summary.unknownReplicas} tone="mute" />
+      </div>
+      {matrix.templates.length === 0 ? (
+        <Card><div className="p-8 text-center text-sm text-muted-foreground">{t('noTemplates')}</div></Card>
+      ) : (
+        <div className="space-y-3">
+          {matrix.templates.map((row) => <CompatTemplateRow key={row.templateID} row={row} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompatKpi({ label, value, tone }: { label: string; value: number; tone: 'err' | 'warn' | 'mute' }) {
+  return (
+    <Card>
+      <div className="p-4">
+        <div className="text-xs text-muted-foreground">{label}</div>
+        <div className={['mt-2 text-2xl font-semibold', compatKpiToneClass(tone)].join(' ')}>
+          {value}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function compatKpiToneClass(tone: 'err' | 'warn' | 'mute') {
+  switch (tone) {
+    case 'err':
+      return 'text-destructive';
+    case 'warn':
+      return 'text-warning';
+    default:
+      return 'text-muted-foreground';
+  }
+}
+
+function CompatTemplateRow({ row }: { row: TemplateCompatRow }) {
+  const { t } = useTranslation('templates');
+  const queryClient = useQueryClient();
+  const adoptMutation = useMutation({
+    mutationFn: () => templateApi.adoptCompatBaseline(row.templateID),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['templates', 'compat'] }),
+  });
+  const hasUnknown = row.nodes.some((node) => node.compatStatus === 'UNKNOWN');
+  return (
+    <Card>
+      <div className="space-y-3 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <Link to={`/templates/${row.templateID}`} className="font-mono text-sm hover:text-primary">{row.templateID}</Link>
+          <div className="flex items-center gap-2">
+            {hasUnknown && (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={adoptMutation.isPending}
+                onClick={() => {
+                  if (window.confirm(t('compat.adoptConfirm'))) {
+                    adoptMutation.mutate();
+                  }
+                }}
+              >
+                {t('compat.adoptBaseline')}
+              </Button>
+            )}
+            <Badge tone={compatTone(row.overall)}>{t(`compat.status.${row.overall}`, { defaultValue: row.overall })}</Badge>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+          {row.nodes.map((node) => (
+            <div key={node.nodeID} className="rounded-lg border border-border/60 bg-card/40 p-3 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono">{node.nodeID}</span>
+                <Badge tone={compatTone(node.compatStatus)}>
+                  {t(`compat.status.${node.compatStatus}`, { defaultValue: node.compatStatus })}
+                </Badge>
+              </div>
+              <div className="mt-2 space-y-1 text-muted-foreground">
+                <CompatVersionLine label="guest" bound={node.boundGuestImageVersion} current={node.currentGuestImageVersion} />
+                <CompatVersionLine label="agent" bound={node.boundAgentVersion} current={node.currentAgentVersion} />
+                <CompatVersionLine label="kernel" bound={node.boundKernelVersion} current={node.currentKernelVersion} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function CompatVersionLine({ label, bound, current }: { label: string; bound?: string | null; current?: string | null }) {
+  return (
+    <div className="flex justify-between gap-3">
+      <span>{label}</span>
+      <span className="truncate font-mono text-foreground/80">{bound ?? '—'} → {current ?? '—'}</span>
+    </div>
+  );
+}
+
+function compatTone(status: string): 'ok' | 'err' | 'warn' | 'mute' {
+  if (status === 'OK') return 'ok';
+  if (status === 'STALE') return 'err';
+  if (status === 'MISSING') return 'warn';
+  return 'mute';
 }

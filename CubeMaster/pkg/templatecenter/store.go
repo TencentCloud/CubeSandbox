@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -58,6 +60,14 @@ const (
 	ReplicaPhaseReady        = "READY"
 	ReplicaPhaseFailed       = "FAILED"
 	ReplicaPhaseCleaning     = "CLEANING"
+
+	CompatStatusOK      = "OK"
+	CompatStatusStale   = "STALE"
+	CompatStatusUnknown = "UNKNOWN"
+	CompatStatusMissing = "MISSING"
+
+	CompatPolicyStrict    = "STRICT"
+	CompatPolicyGuestOnly = "GUEST_ONLY"
 )
 
 var (
@@ -68,7 +78,27 @@ var (
 	ErrNoTemplateNodes             = errors.New("no healthy nodes available for template creation")
 	ErrDuplicateTemplate           = errors.New("template already exists")
 	ErrTemplateAttemptInProgress   = errors.New("template attempt is already in progress")
+	ErrTemplateStaleNeedsRedo      = errors.New("template stale needs redo")
 )
+
+type TemplateStaleNeedsRedoError struct {
+	TemplateID string
+	Nodes      []string
+}
+
+func (e *TemplateStaleNeedsRedoError) Error() string {
+	if e == nil {
+		return ErrTemplateStaleNeedsRedo.Error()
+	}
+	if len(e.Nodes) == 0 {
+		return fmt.Sprintf("template %s is stale and needs redo", e.TemplateID)
+	}
+	return fmt.Sprintf("template %s is stale on nodes [%s] and needs redo", e.TemplateID, strings.Join(e.Nodes, ", "))
+}
+
+func (e *TemplateStaleNeedsRedoError) Unwrap() error {
+	return ErrTemplateStaleNeedsRedo
+}
 
 type localStore struct {
 	db     *gorm.DB
@@ -87,17 +117,23 @@ var (
 // single source of truth, queried by templateID/snapshotID at restore/cleanup
 // time.
 type ReplicaStatus struct {
-	NodeID          string `json:"node_id"`
-	NodeIP          string `json:"node_ip"`
-	InstanceType    string `json:"instance_type,omitempty"`
-	Spec            string `json:"spec,omitempty"`
-	Status          string `json:"status"`
-	Phase           string `json:"phase,omitempty"`
-	ArtifactID      string `json:"artifact_id,omitempty"`
-	LastJobID       string `json:"last_job_id,omitempty"`
-	LastErrorPhase  string `json:"last_error_phase,omitempty"`
-	CleanupRequired bool   `json:"cleanup_required,omitempty"`
-	ErrorMessage    string `json:"error_message,omitempty"`
+	NodeID            string `json:"node_id"`
+	NodeIP            string `json:"node_ip"`
+	InstanceType      string `json:"instance_type,omitempty"`
+	Spec              string `json:"spec,omitempty"`
+	Status            string `json:"status"`
+	Phase             string `json:"phase,omitempty"`
+	ArtifactID        string `json:"artifact_id,omitempty"`
+	LastJobID         string `json:"last_job_id,omitempty"`
+	LastErrorPhase    string `json:"last_error_phase,omitempty"`
+	CleanupRequired   bool   `json:"cleanup_required,omitempty"`
+	ErrorMessage      string `json:"error_message,omitempty"`
+	GuestImageVersion string `json:"guest_image_version,omitempty"`
+	AgentVersion      string `json:"agent_version,omitempty"`
+	KernelVersion     string `json:"kernel_version,omitempty"`
+	CompatStatus      string `json:"compat_status,omitempty"`
+	CompatPolicy      string `json:"compat_policy,omitempty"`
+	CompatCheckedUnix int64  `json:"compat_checked_unix,omitempty"`
 }
 
 type TemplateInfo struct {
@@ -224,10 +260,12 @@ func Init(ctx context.Context) error {
 		}
 		configureSnapshotRuntimeRefHooks()
 		configureSandboxSpecHooks()
+		configureCompatHooks()
 		if warmErr := warmReadyTemplateLocality(ctx); warmErr != nil {
 			log.G(ctx).Warnf("warm ready template locality fail:%v", warmErr)
 		}
 		startSnapshotReconciler(ctx)
+		scheduleInitialCompatScan(ctx)
 	})
 	return initErr
 }
@@ -492,6 +530,7 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	}
 	replica.Status = ReplicaStatusReady
 	replica.Phase = ReplicaPhaseReady
+	bindGuestVersionToReplica(&replica, rsp.GetGuestImageVersion(), rsp.GetAgentVersion(), rsp.GetKernelVersion())
 	// v4: AppSnapshot replica is "thin" -- physical refs are owned by cubelet's
 	// local catalog. Master only persists control-plane state (status / phase /
 	// last job / error) so we deliberately ignore SnapshotPath/RootfsVol/
@@ -833,41 +872,139 @@ func ListReplicas(ctx context.Context, templateID string) ([]models.TemplateRepl
 	return replicas, err
 }
 
+func normalizeComponentVersion(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.EqualFold(value, "unknown") {
+		return ""
+	}
+	return value
+}
+
+func normalizeCompatStatus(status string) string {
+	status = strings.ToUpper(strings.TrimSpace(status))
+	switch status {
+	case CompatStatusOK, CompatStatusStale, CompatStatusUnknown:
+		return status
+	case "":
+		return CompatStatusUnknown
+	default:
+		return status
+	}
+}
+
+func normalizeCompatPolicy(policy string) string {
+	policy = strings.ToUpper(strings.TrimSpace(policy))
+	switch policy {
+	case CompatPolicyStrict, CompatPolicyGuestOnly:
+		return policy
+	case "":
+		return CompatPolicyStrict
+	default:
+		return policy
+	}
+}
+
+func compareCompatDimension(bound, current string) (stale bool, unknown bool) {
+	bound = normalizeComponentVersion(bound)
+	current = normalizeComponentVersion(current)
+	if bound == "" || current == "" {
+		return false, true
+	}
+	return bound != current, false
+}
+
+func evaluateCompat(replica ReplicaStatus, currentGuestImage, currentAgent, _ string) string {
+	policy := normalizeCompatPolicy(replica.CompatPolicy)
+	dimensions := []struct {
+		bound   string
+		current string
+		active  bool
+	}{
+		{replica.GuestImageVersion, currentGuestImage, true},
+		{replica.AgentVersion, currentAgent, policy != CompatPolicyGuestOnly},
+	}
+	seenUnknown := false
+	for _, dim := range dimensions {
+		if !dim.active {
+			continue
+		}
+		stale, unknown := compareCompatDimension(dim.bound, dim.current)
+		if stale {
+			return CompatStatusStale
+		}
+		if unknown {
+			seenUnknown = true
+		}
+	}
+	if seenUnknown {
+		return CompatStatusUnknown
+	}
+	return CompatStatusOK
+}
+
+func isReplicaSchedulable(replica ReplicaStatus) bool {
+	return replica.Status == ReplicaStatusReady && normalizeCompatStatus(replica.CompatStatus) != CompatStatusStale
+}
+
+func bindGuestVersionToReplica(replica *ReplicaStatus, guestImageVersion, agentVersion, kernelVersion string) {
+	if replica == nil {
+		return
+	}
+	replica.GuestImageVersion = normalizeComponentVersion(guestImageVersion)
+	replica.AgentVersion = normalizeComponentVersion(agentVersion)
+	replica.KernelVersion = normalizeComponentVersion(kernelVersion)
+	replica.CompatPolicy = CompatPolicyStrict
+	replica.CompatStatus = evaluateCompat(*replica, replica.GuestImageVersion, replica.AgentVersion, replica.KernelVersion)
+	replica.CompatCheckedUnix = time.Now().Unix()
+}
+
 func replicaModelToStatus(replica models.TemplateReplica) ReplicaStatus {
 	return ReplicaStatus{
-		NodeID:          replica.NodeID,
-		NodeIP:          replica.NodeIP,
-		InstanceType:    replica.InstanceType,
-		Spec:            replica.Spec,
-		Status:          replica.Status,
-		Phase:           replica.Phase,
-		ArtifactID:      replica.ArtifactID,
-		LastJobID:       replica.LastJobID,
-		LastErrorPhase:  replica.LastErrorPhase,
-		CleanupRequired: replica.CleanupRequired,
-		ErrorMessage:    replica.ErrorMessage,
+		NodeID:            replica.NodeID,
+		NodeIP:            replica.NodeIP,
+		InstanceType:      replica.InstanceType,
+		Spec:              replica.Spec,
+		Status:            replica.Status,
+		Phase:             replica.Phase,
+		ArtifactID:        replica.ArtifactID,
+		LastJobID:         replica.LastJobID,
+		LastErrorPhase:    replica.LastErrorPhase,
+		CleanupRequired:   replica.CleanupRequired,
+		ErrorMessage:      replica.ErrorMessage,
+		GuestImageVersion: replica.GuestImageVersion,
+		AgentVersion:      replica.AgentVersion,
+		KernelVersion:     replica.KernelVersion,
+		CompatStatus:      normalizeCompatStatus(replica.CompatStatus),
+		CompatPolicy:      normalizeCompatPolicy(replica.CompatPolicy),
+		CompatCheckedUnix: replica.CompatCheckedUnix,
 	}
 }
 
 func replicaStatusToModel(templateID, instanceType string, replica ReplicaStatus) *models.TemplateReplica {
 	return &models.TemplateReplica{
-		TemplateID:      templateID,
-		NodeID:          replica.NodeID,
-		NodeIP:          replica.NodeIP,
-		InstanceType:    instanceType,
-		Spec:            replica.Spec,
-		Status:          replica.Status,
-		Phase:           replica.Phase,
-		ArtifactID:      replica.ArtifactID,
-		LastJobID:       replica.LastJobID,
-		LastErrorPhase:  replica.LastErrorPhase,
-		CleanupRequired: replica.CleanupRequired,
-		ErrorMessage:    replica.ErrorMessage,
+		TemplateID:        templateID,
+		NodeID:            replica.NodeID,
+		NodeIP:            replica.NodeIP,
+		InstanceType:      instanceType,
+		Spec:              replica.Spec,
+		Status:            replica.Status,
+		Phase:             replica.Phase,
+		ArtifactID:        replica.ArtifactID,
+		LastJobID:         replica.LastJobID,
+		LastErrorPhase:    replica.LastErrorPhase,
+		CleanupRequired:   replica.CleanupRequired,
+		ErrorMessage:      replica.ErrorMessage,
+		GuestImageVersion: replica.GuestImageVersion,
+		AgentVersion:      replica.AgentVersion,
+		KernelVersion:     replica.KernelVersion,
+		CompatStatus:      normalizeCompatStatus(replica.CompatStatus),
+		CompatPolicy:      normalizeCompatPolicy(replica.CompatPolicy),
+		CompatCheckedUnix: replica.CompatCheckedUnix,
 	}
 }
 
 func replicaStatusUpdateFields(instanceType string, replica ReplicaStatus) map[string]any {
-	return map[string]any{
+	fields := map[string]any{
 		"node_ip":          replica.NodeIP,
 		"instance_type":    instanceType,
 		"spec":             replica.Spec,
@@ -880,6 +1017,18 @@ func replicaStatusUpdateFields(instanceType string, replica ReplicaStatus) map[s
 		"error_message":    replica.ErrorMessage,
 		"updated_at":       time.Now(),
 	}
+	if normalizeCompatStatus(replica.CompatStatus) != CompatStatusUnknown ||
+		normalizeComponentVersion(replica.GuestImageVersion) != "" ||
+		normalizeComponentVersion(replica.AgentVersion) != "" ||
+		normalizeComponentVersion(replica.KernelVersion) != "" {
+		fields["guest_image_version"] = normalizeComponentVersion(replica.GuestImageVersion)
+		fields["agent_version"] = normalizeComponentVersion(replica.AgentVersion)
+		fields["kernel_version"] = normalizeComponentVersion(replica.KernelVersion)
+		fields["compat_status"] = normalizeCompatStatus(replica.CompatStatus)
+		fields["compat_policy"] = normalizeCompatPolicy(replica.CompatPolicy)
+		fields["compat_checked_unix"] = replica.CompatCheckedUnix
+	}
+	return fields
 }
 
 func UpsertReplica(ctx context.Context, templateID, instanceType string, replica ReplicaStatus) error {
@@ -909,7 +1058,7 @@ func EnsureReadyReplica(ctx context.Context, templateID string) error {
 		return err
 	}
 	for _, replica := range replicas {
-		if replica.Status == ReplicaStatusReady {
+		if isReplicaSchedulableNow(ctx, replicaModelToStatus(replica)) {
 			return nil
 		}
 	}
@@ -924,7 +1073,7 @@ func ResolveTemplateReadyReplica(ctx context.Context, templateID, preferredNodeI
 	preferredNodeID = strings.TrimSpace(preferredNodeID)
 	for _, item := range replicas {
 		replica := replicaModelToStatus(item)
-		if replica.Status != ReplicaStatusReady {
+		if !isReplicaSchedulableNow(ctx, replica) {
 			continue
 		}
 		if preferredNodeID == "" || strings.TrimSpace(replica.NodeID) == preferredNodeID {
@@ -932,6 +1081,32 @@ func ResolveTemplateReadyReplica(ctx context.Context, templateID, preferredNodeI
 		}
 	}
 	return ReplicaStatus{}, ErrTemplateHasNoReadyReplica
+}
+
+func isTemplateReplicaSchedulable(ctx context.Context, templateID, nodeID string) bool {
+	if !isReady() || strings.TrimSpace(templateID) == "" || strings.TrimSpace(nodeID) == "" {
+		return false
+	}
+	replica := models.TemplateReplica{}
+	err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND node_id = ?", templateID, nodeID).
+		First(&replica).Error
+	if err != nil {
+		return false
+	}
+	return isReplicaSchedulableNow(ctx, replicaModelToStatus(replica))
+}
+
+func effectiveCompatStatus(ctx context.Context, replica ReplicaStatus) string {
+	current, ok := nodemeta.GetNodeComponentVersions(ctx, replica.NodeID)
+	if !ok {
+		return normalizeCompatStatus(replica.CompatStatus)
+	}
+	return evaluateCompat(replica, current[compatComponentGuestImage], current[compatComponentAgent], current[compatComponentKernel])
+}
+
+func isReplicaSchedulableNow(ctx context.Context, replica ReplicaStatus) bool {
+	return strings.TrimSpace(replica.Status) == ReplicaStatusReady && effectiveCompatStatus(ctx, replica) != CompatStatusStale
 }
 
 func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType string) error {
@@ -944,8 +1119,11 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 	healthyNodeIPs := make(map[string]struct{}, len(nodes))
 	for i := range nodes {
 		if localcache.GetImageStateByNode(templateID, nodes[i].ID()) != nil {
-			reportTemplateCacheMetric(ctx, constants.ActionTemplateLocalityHit, 0)
-			return nil
+			if isTemplateReplicaSchedulable(ctx, templateID, nodes[i].ID()) {
+				reportTemplateCacheMetric(ctx, constants.ActionTemplateLocalityHit, 0)
+				return nil
+			}
+			evictReplicaFromSchedulingCaches(templateID, nodes[i].ID())
 		}
 		healthyNodeIDs[nodes[i].ID()] = struct{}{}
 		if hostIP := strings.TrimSpace(nodes[i].HostIP()); hostIP != "" {
@@ -954,6 +1132,9 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 	}
 	if replicas, ok := getCachedTemplateLocality(templateID); ok {
 		for _, replica := range replicas {
+			if !isReplicaSchedulableNow(ctx, replica) {
+				continue
+			}
 			if _, matchNodeID := healthyNodeIDs[replica.NodeID]; matchNodeID {
 				registerReadyTemplateReplicas(templateID, replicas)
 				reportTemplateCacheMetric(ctx, constants.ActionTemplateLocalityHit, 0)
@@ -969,6 +1150,7 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 	reportTemplateCacheMetric(ctx, constants.ActionTemplateLocalityMiss, 0)
 	if isReady() {
 		matched := false
+		staleNodes := make([]string, 0)
 		err := withTemplateReadLock(templateID, func() error {
 			dbStart := time.Now()
 			replicas, err := ListReplicas(ctx, templateID)
@@ -978,10 +1160,18 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 			}
 			readyReplicas := make([]ReplicaStatus, 0, len(replicas))
 			for _, replica := range replicas {
-				if replica.Status != ReplicaStatusReady {
+				status := replicaModelToStatus(replica)
+				if !isReplicaSchedulableNow(ctx, status) {
+					if status.Status == ReplicaStatusReady && effectiveCompatStatus(ctx, status) == CompatStatusStale {
+						if _, ok := healthyNodeIDs[replica.NodeID]; ok {
+							staleNodes = append(staleNodes, replica.NodeID)
+						} else if _, ok := healthyNodeIPs[replica.NodeIP]; ok {
+							staleNodes = append(staleNodes, replica.NodeIP)
+						}
+					}
 					continue
 				}
-				readyReplicas = append(readyReplicas, replicaModelToStatus(replica))
+				readyReplicas = append(readyReplicas, status)
 				if _, ok := healthyNodeIDs[replica.NodeID]; ok {
 					matched = true
 				}
@@ -998,6 +1188,10 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
 		}
 		if matched {
 			return nil
+		}
+		if len(staleNodes) > 0 {
+			sort.Strings(staleNodes)
+			return &TemplateStaleNeedsRedoError{TemplateID: templateID, Nodes: staleNodes}
 		}
 	}
 	return ErrTemplateHasNoReadyReplica

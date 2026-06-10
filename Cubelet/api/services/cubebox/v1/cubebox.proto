@@ -824,6 +824,12 @@ message AppSnapshotResponse {
   string memory_kind = 9;
   // Rootfs size at snapshot time, used by repair and validation.
   uint64 rootfs_size_bytes = 10;
+  // guest-image version bound when this snapshot was created.
+  string guest_image_version = 11;
+  // cube-agent version bound when this snapshot was created.
+  string agent_version = 12;
+  // Guest kernel artifact identity bound when this snapshot was created.
+  string kernel_version = 13;
 }
 
 message CommitSandboxRequest {
@@ -862,6 +868,12 @@ message CommitSandboxResponse {
   string memory_dev = 11;
   // Rootfs size at snapshot time, used by rollback resize planning.
   uint64 rootfs_size_bytes = 12;
+  // guest-image version bound when this snapshot was created.
+  string guest_image_version = 13;
+  // cube-agent version bound when this snapshot was created.
+  string agent_version = 14;
+  // Guest kernel artifact identity bound when this snapshot was created.
+  string kernel_version = 15;
 }
 
 message RollbackSandboxRequest {

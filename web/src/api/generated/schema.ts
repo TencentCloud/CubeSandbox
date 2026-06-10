@@ -149,6 +149,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/templates/compat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["template_compat"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/templates/compat/{templateID}/adopt-baseline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["adopt_template_compat_baseline"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/templates/{templateID}": {
         parameters: {
             query?: never;
@@ -428,6 +460,32 @@ export interface components {
             name: string;
             path: string;
         };
+        TemplateCompatAdoptResponseView: {
+            /** Format: int32 */
+            updated: number;
+        };
+        TemplateCompatMatrixView: {
+            summary: components["schemas"]["TemplateCompatSummaryView"];
+            templates: components["schemas"]["TemplateCompatRowView"][];
+        };
+        TemplateCompatRowView: {
+            instanceType?: string | null;
+            nodes: components["schemas"]["TemplateNodeCompatView"][];
+            overall: string;
+            templateID: string;
+        };
+        TemplateCompatSummaryView: {
+            /** Format: int32 */
+            affectedNodes: number;
+            /** Format: int32 */
+            missingReplicas: number;
+            /** Format: int32 */
+            staleReplicas: number;
+            /** Format: int32 */
+            staleTemplates: number;
+            /** Format: int32 */
+            unknownReplicas: number;
+        };
         /** @description Detailed template response (GET /templates/:id). */
         TemplateDetail: {
             /** @description Whether public internet access is allowed for sandboxes from this template. */
@@ -441,6 +499,17 @@ export interface components {
             status: string;
             templateID: string;
             version?: string | null;
+        };
+        TemplateNodeCompatView: {
+            boundAgentVersion?: string | null;
+            boundGuestImageVersion?: string | null;
+            boundKernelVersion?: string | null;
+            compatStatus: string;
+            currentAgentVersion?: string | null;
+            currentGuestImageVersion?: string | null;
+            currentKernelVersion?: string | null;
+            nodeID: string;
+            nodeIP?: string | null;
         };
         /** @description Summary row returned by GET /templates. */
         TemplateSummary: {
@@ -840,6 +909,76 @@ export interface operations {
                 };
             };
             /** @description Template endpoint unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    template_compat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Template compatibility matrix */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateCompatMatrixView"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    adopt_template_compat_baseline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Adopted UNKNOWN replicas to current baseline */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateCompatAdoptResponseView"];
+                };
+            };
+            /** @description Template not found */
             404: {
                 headers: {
                     [name: string]: unknown;
