@@ -66,13 +66,71 @@ impl AppState {
             None => None,
         };
 
-        Self {
+        let s = Self {
             rate_limiter,
             http_client,
             services,
             logger,
             config: Arc::new(config),
             agenthub_store,
+        };
+        s.log_registry_security_posture();
+        s
+    }
+
+    /// Emit a single startup line summarising whether the bundled OCI
+    /// registry reverse-proxy is on, and — if so — whether the operator
+    /// has obviously misconfigured the deployment such that the per-build
+    /// credentials are exposed in the clear.
+    ///
+    /// We don't refuse to start: this is a one-click developer-experience
+    /// product, and a hard failure on `bind=0.0.0.0` would surprise users
+    /// running on a single VM with a firewall in front of them. But we do
+    /// log loudly so that production operators see the warning during the
+    /// first deploy.
+    fn log_registry_security_posture(&self) {
+        let upstream = self
+            .config
+            .registry_upstream
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(upstream) = upstream else {
+            tracing::info!("registry reverse-proxy disabled (CUBE_API_REGISTRY_UPSTREAM unset)");
+            return;
+        };
+
+        let upstream_is_loopback = upstream.contains("127.0.0.1")
+            || upstream.contains("localhost")
+            || upstream.contains("[::1]");
+        let bind = self.config.bind.as_str();
+        let bind_is_loopback = bind.starts_with("127.0.0.1") || bind.starts_with("[::1]");
+        let bind_is_public = bind.starts_with("0.0.0.0") || bind.starts_with("[::]");
+
+        if bind_is_public && upstream_is_loopback {
+            tracing::warn!(
+                bind = %bind,
+                upstream = %upstream,
+                "registry reverse-proxy is enabled with an unauthenticated loopback \
+                 upstream while CubeAPI binds on a public interface. CubeAPI's own \
+                 per-build credential gate is in force, but build push tokens will \
+                 cross the network in clear text unless this listener is fronted \
+                 by TLS. Either: (a) terminate TLS in a reverse proxy in front of \
+                 CubeAPI, or (b) run distribution/distribution with htpasswd auth \
+                 and rely on the upstream's own TLS+auth. See ServerConfig::registry_upstream."
+            );
+        } else if bind_is_loopback {
+            tracing::info!(
+                bind = %bind,
+                upstream = %upstream,
+                "registry reverse-proxy enabled on a loopback bind; safe for development"
+            );
+        } else {
+            tracing::info!(
+                bind = %bind,
+                upstream = %upstream,
+                "registry reverse-proxy enabled; per-build credential gate is in force"
+            );
         }
     }
 }

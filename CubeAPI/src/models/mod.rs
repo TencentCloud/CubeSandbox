@@ -591,7 +591,17 @@ pub struct CreateTemplateRequest {
     pub start_cmd: Option<String>,
 
     /// E2B-style `readyCmd`: shell command used as readiness probe.
-    /// Translated into a CubeMaster `Probe.Exec` when `probe_port` is empty.
+    ///
+    /// **Not** forwarded to the container as a shell command — neither
+    /// CubeMaster nor Cubelet support `Probe.Exec`, so we cannot run an
+    /// arbitrary shell snippet as a readiness check end-to-end. Instead
+    /// `services/templates.rs::v3_trigger_build` performs a best-effort
+    /// parse of an `http(s)://<host>:<port>[/<path>]` URL embedded in the
+    /// snippet (the shape produced by the e2b SDK's `wait_for_url(...)`)
+    /// and synthesises a CubeMaster `Probe.HttpGet` from it. If no URL
+    /// can be extracted (or no `probe_port` is supplied alongside), the
+    /// `readyCmd` is recorded in the build log only and **no probe is
+    /// emitted** — Cubelet treats that as "no readiness check".
     #[serde(rename = "readyCmd", alias = "ready_cmd", default)]
     pub ready_cmd: Option<String>,
 }
@@ -905,9 +915,24 @@ pub struct V2TemplateBuildStart {
     #[serde(rename = "fromImageRegistry", default)]
     pub from_image_registry: Option<serde_json::Value>,
     /// Reuse another already-built CubeSandbox template as the base.
+    ///
+    /// **Currently rejected with `501 Not Implemented`** by
+    /// `services/templates.rs::v3_trigger_build`: the downstream stack
+    /// (CubeMaster `template_image.go` → `docker pull`) has no resolver
+    /// for the `cube://<templateID>` source scheme, so honouring this
+    /// field at the API layer would only push the failure into the build
+    /// worker as an opaque `invalid reference format`. Resolve the parent
+    /// template to a concrete OCI reference and pass it via `fromImage`
+    /// instead, until the resolver lands end-to-end.
     #[serde(rename = "fromTemplate", default)]
     pub from_template: Option<String>,
-    /// E2B `readyCmd` — translated into CubeMaster `Probe.Exec`.
+    /// E2B `readyCmd` — best-effort translated into a CubeMaster
+    /// `Probe.HttpGet` by extracting the `http(s)://host:port[/path]`
+    /// URL embedded in the snippet (CubeMaster/Cubelet don't support
+    /// `Probe.Exec`, so the shell snippet itself is *not* run). When no
+    /// URL can be parsed and the V3 body doesn't carry `probePort` /
+    /// `exposedPorts`, no probe is emitted — see
+    /// `services/templates.rs::parse_ready_url` and `build_probe`.
     #[serde(rename = "readyCmd", default)]
     pub ready_cmd: Option<String>,
     /// E2B `startCmd` — translated into container `args`.

@@ -30,6 +30,26 @@ pub async fn v3_create_template(
 /// SDK before uploading build context tarballs. We always answer
 /// `present=true` because the current CubeMaster pipeline only consumes
 /// `from_image` references (no Dockerfile-from-context build yet).
+///
+/// ### Why `201 Created` on a successful GET?
+///
+/// ref: https://github.com/e2b-dev/infra/blob/db88eee0fd5df4a5c90e544faa5c7b44c6719b51/packages/api/internal/handlers/template_layer_files_upload.go#L71
+/// This is intentional and matches the upstream E2B Infra contract: the same
+/// endpoint is overloaded as both a *cache probe* and an *upload-slot
+/// allocator*. On cache miss the server returns `201 Created` together with
+/// a freshly minted presigned upload URL; on cache hit it returns the same
+/// `201` without a URL so the SDK can branch purely on the `present` flag
+/// without also having to discriminate by status code. Several E2B SDK
+/// versions hard-code this: anything other than `2xx` is treated as a
+/// fatal error, and at least the JS SDK additionally asserts on `201` for
+/// the upload-allocator branch.
+///
+/// Switching to `200 OK` here would be more REST-correct, but it would
+/// silently break SDK clients in the wild that still do
+/// `if (status !== 201) throw ...`. Until we either own all client paths
+/// or upstream relaxes the contract, we stick with `201` and pin it via
+/// the `v3_template_build_routes_are_reachable` route test in
+/// `routes.rs` so it can't drift unnoticed.
 pub async fn v3_get_files_hash(
     State(state): State<AppState>,
     Path((template_id, hash)): Path<(String, String)>,

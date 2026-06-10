@@ -22,7 +22,9 @@ pub struct AppServices {
 
 impl AppServices {
     pub fn new(config: &ServerConfig, cubemaster: CubeMasterClient) -> Self {
-        let builds = builds::BuildRegistry::new();
+        let policy = builds::EvictionPolicy::from_config(config);
+        let builds = builds::BuildRegistry::with_policy(policy);
+        let _gc = builds.spawn_gc();
         Self {
             cluster: cluster::ClusterService::new(cubemaster.clone()),
             sandboxes: sandboxes::SandboxService::new(

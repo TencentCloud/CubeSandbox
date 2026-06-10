@@ -75,6 +75,32 @@ pub struct ServerConfig {
     ///
     /// When unset, /v2/* returns 503 and `dockerfile`-based template requests
     /// are rejected with 501.
+    ///
+    /// ## Security contract — read this before exposing CubeAPI publicly
+    ///
+    /// CubeAPI itself enforces **per-build, short-lived push credentials**
+    /// on every `/v2/*` path other than the unauthenticated `GET /v2/` ping
+    /// (which is required by the docker / oci-distribution handshake). The
+    /// credential is minted at build-creation time, returned to the SDK in
+    /// the `registry` field of the build response, indexed inside the
+    /// in-memory `BuildRegistry`, and is repo-scoped: it can only push /
+    /// pull blobs and manifests under `<repo_prefix>/<templateID>`. It is
+    /// dropped when the build reaches its terminal stage (TTL- or
+    /// size-cap-evicted by `BuildRegistry`).
+    ///
+    /// **Strongly recommended** in addition: run an authenticated upstream
+    /// (e.g. `distribution/distribution` with htpasswd) and bind CubeAPI
+    /// itself behind TLS + an HTTP authenticator. Both layers together
+    /// match the depth of access control most operators expect from a
+    /// public OCI registry.
+    ///
+    /// **Not safe**: setting `registry_upstream` to an unauthenticated
+    /// upstream *and* binding CubeAPI on a public interface without TLS.
+    /// CubeAPI's own credential gate covers the bulk of the attack
+    /// surface, but it cannot stop a network attacker from observing the
+    /// per-build password in transit. CubeAPI logs a `WARN` at startup
+    /// when this combination is detected (see
+    /// `AppState::log_registry_security_posture`).
     #[serde(default)]
     pub registry_upstream: Option<String>,
 
@@ -109,10 +135,48 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_DEFAULT_WRITABLE_LAYER_SIZE  |  Default: "1G".
     #[serde(default = "default_writable_layer_size")]
     pub default_writable_layer_size: String,
+
+    /// How long (seconds) a *terminal* build (Ready / Error) is kept in the
+    /// in-memory `BuildRegistry` after reaching its terminal stage. Past this
+    /// TTL the build context (create request, credentials, logs, …) is
+    /// evicted by the background GC.
+    ///
+    /// 0 disables TTL-based eviction (only the size cap will fire).
+    /// Default: 3600 (1 hour) — comfortably covers slow log pollers without
+    /// retaining old builds for the lifetime of the process.
+    #[serde(default = "default_build_registry_terminal_ttl_secs")]
+    pub build_registry_terminal_ttl_secs: u64,
+
+    /// Hard upper bound on the number of *logical* builds tracked in the
+    /// `BuildRegistry`. When exceeded, the oldest terminal builds are
+    /// evicted FIFO regardless of TTL. In-flight builds are never evicted by
+    /// this cap (a warning is logged if the cap can't be honoured because
+    /// every entry is still in-flight).
+    ///
+    /// 0 disables the cap (only TTL applies). Default: 5000.
+    #[serde(default = "default_build_registry_max_entries")]
+    pub build_registry_max_entries: usize,
+
+    /// Interval (seconds) at which the background GC task scans the
+    /// `BuildRegistry` for TTL-expired terminal builds. Default: 300 (5 min).
+    /// 0 disables the background task entirely (size-cap eviction at
+    /// `create()` time still applies).
+    #[serde(default = "default_build_registry_gc_interval_secs")]
+    pub build_registry_gc_interval_secs: u64,
 }
 
 fn default_registry_repo_prefix() -> String {
     "e2b".to_string()
+}
+
+fn default_build_registry_terminal_ttl_secs() -> u64 {
+    3600
+}
+fn default_build_registry_max_entries() -> usize {
+    5000
+}
+fn default_build_registry_gc_interval_secs() -> u64 {
+    300
 }
 
 fn default_writable_layer_size() -> String {
@@ -201,6 +265,9 @@ impl Default for ServerConfig {
             registry_pull_host: None,
             registry_token: None,
             default_writable_layer_size: default_writable_layer_size(),
+            build_registry_terminal_ttl_secs: default_build_registry_terminal_ttl_secs(),
+            build_registry_max_entries: default_build_registry_max_entries(),
+            build_registry_gc_interval_secs: default_build_registry_gc_interval_secs(),
         }
     }
 }

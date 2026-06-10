@@ -22,7 +22,10 @@ use crate::{
         agenthub, cluster, config, health, registry, sandboxes, snapshots, store, templates,
         templates_v3,
     },
-    middleware::{auth::unified_auth, rate_limit::rate_limit},
+    middleware::{
+        auth::unified_auth,
+        rate_limit::{rate_limit, registry_rate_limit},
+    },
     state::AppState,
 };
 
@@ -175,9 +178,23 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
     // `snapshot_long_router` (240 s).  Keeping it here would re-introduce the
     // 30 s "the API gave up but the master is still deleting" race we just
     // closed off when we promoted the master path to a synchronous contract.
-    let routes = Router::new()
-        .route("/templates", get(templates::list_templates))
-        .route("/templates", post(templates::create_template))
+    //
+    // We split this into two sub-routers because the *build pipeline*
+    // routes (V3 create + cache probe + trigger + status, plus the legacy
+    // V2 build trigger) each allocate non-trivial backend state — an
+    // in-memory `BuildContext` (request snapshot, registry credentials,
+    // log buffer, terminal-eviction bookkeeping), and on the trigger
+    // path an actual CubeMaster build pipeline. Auth alone does not
+    // bound that cost: a single authenticated client can fan out
+    // arbitrarily many build allocations per second. We therefore put
+    // these specific routes behind `with_auth_and_rate_limit`, sharing
+    // the same per-API-key 100 req/s governor that already protects
+    // the sandbox surface. Plain template management (list / get /
+    // create / rebuild / update / read-only logs) stays on `with_auth`
+    // because it forwards directly to CubeMaster's CRUD layer, which
+    // CubeMaster itself rate-limits, and these endpoints do not
+    // allocate registry state.
+    let build_pipeline_routes = Router::new()
         // ── E2B V3 protocol (real SDK contract) ───────────────
         // SDK calls these in order: POST /v3/templates → GET files/{hash}
         // → POST /v2/.../builds/{bid} → GET .../status. Routes are mounted
@@ -192,23 +209,39 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
             "/v2/templates/:templateID/builds/:buildID",
             post(templates_v3::v2_trigger_build),
         )
-        .route("/templates/:templateID", get(templates::get_template))
-        .route("/templates/:templateID", post(templates::rebuild_template))
-        .route("/templates/:templateID", patch(templates::update_template))
+        // Legacy v2 build trigger — same backend cost as the v3 trigger
+        // (CubeMaster `create_template_from_image` pipeline), so it
+        // belongs on the rate-limited lane too.
         .route(
             "/templates/:templateID/builds/:buildID",
             post(templates::start_template_build),
         )
+        // Status polling: the SDK polls this in a tight loop; on every
+        // call the service synchronously hits CubeMaster
+        // (`get_template_build_status`) and writes into the build
+        // registry's log buffer, so it is not free.
         .route(
             "/templates/:templateID/builds/:buildID/status",
             get(templates_v3::v3_get_build_status),
-        )
+        );
+    let build_pipeline_routes =
+        with_auth_and_rate_limit(build_pipeline_routes, state, auth_configured);
+
+    let management_routes = Router::new()
+        .route("/templates", get(templates::list_templates))
+        .route("/templates", post(templates::create_template))
+        .route("/templates/:templateID", get(templates::get_template))
+        .route("/templates/:templateID", post(templates::rebuild_template))
+        .route("/templates/:templateID", patch(templates::update_template))
         .route(
             "/templates/:templateID/builds/:buildID/logs",
             get(templates::get_template_build_logs),
         );
+    let management_routes = with_auth(management_routes, state, auth_configured);
 
-    with_auth(routes, state, auth_configured)
+    Router::new()
+        .merge(build_pipeline_routes)
+        .merge(management_routes)
 }
 
 /// Template/snapshot deletion lives on the long (240 s) router because it is
@@ -318,12 +351,26 @@ fn build_agenthub_routes(state: &AppState, auth_configured: bool) -> Router<AppS
     with_auth(routes, state, auth_configured)
 }
 
-fn build_registry_router(_state: &AppState) -> Router<AppState> {
+fn build_registry_router(state: &AppState) -> Router<AppState> {
     use axum::routing::{any, get};
+    // Registry routes deliberately do NOT go through `unified_auth`. The OCI
+    // distribution v2 protocol uses a dedicated credential domain (Basic auth
+    // against the per-build push token we minted in `mint_registry_credential`),
+    // and that validation lives inside `registry::proxy` itself — it must run
+    // *after* the docker client's two-step `GET /v2/` → `WWW-Authenticate` →
+    // retry-with-Basic handshake, which `unified_auth` would short-circuit.
+    //
+    // The reverse-proxy is, however, attached to a per-build /
+    // per-source-IP rate-limit bucket so a single misbehaving CLI cannot
+    // saturate the upstream. See `registry_rate_limit` for the keying rules.
     Router::new()
         .route("/v2/", get(registry::ping))
         .route("/v2", get(registry::ping))
         .route("/v2/*path", any(registry::proxy))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            registry_rate_limit,
+        ))
 }
 
 fn with_auth(
@@ -593,5 +640,123 @@ mod tests {
         r.assert_status(StatusCode::CREATED);
         let fb: serde_json::Value = r.json();
         assert_eq!(fb["present"].as_bool(), Some(true));
+    }
+
+    /// Spin up a minimal in-process auth callback that always returns 200,
+    /// returning the absolute URL (`http://127.0.0.1:<port>/`) plus a
+    /// JoinHandle for the tokio task running it. Used by the rate-limit
+    /// regression tests below: `with_auth_and_rate_limit` only attaches
+    /// the rate-limiter when `auth_callback_url` is configured, so we
+    /// need a real, reachable callback to exercise the production layer
+    /// stack.
+    async fn spawn_always_200_auth_server() -> (String, tokio::task::JoinHandle<()>) {
+        use axum::routing::post;
+        let app = axum::Router::new().route("/", post(|| async { axum::http::StatusCode::OK }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock auth server");
+        let addr = listener.local_addr().expect("addr");
+        let url = format!("http://{}/", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn v3_build_pipeline_routes_are_rate_limited() {
+        let (auth_url, _auth_handle) = spawn_always_200_auth_server().await;
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = "http://127.0.0.1:9".to_string();
+        config.auth_callback_url = Some(auth_url);
+        config.rate_limit_per_sec = 1;
+
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        let mut rate_limited = 0usize;
+        let mut passed = 0usize;
+        for _ in 0..20 {
+            let resp = server
+                .post("/v3/templates")
+                .add_header(
+                    axum::http::HeaderName::from_static("x-api-key"),
+                    axum::http::HeaderValue::from_static("abuser"),
+                )
+                .json(&serde_json::json!({
+                    "name": "my-tpl:dev",
+                    "cpuCount": 1,
+                    "memoryMB": 1024,
+                }))
+                .await;
+            match resp.status_code() {
+                StatusCode::TOO_MANY_REQUESTS => rate_limited += 1,
+                code if code.is_success() => passed += 1,
+                _ => passed += 1,
+            }
+        }
+
+        assert!(
+            rate_limited > 0,
+            "expected at least one POST /v3/templates to be 429-throttled \
+             with rate_limit_per_sec=1; got {} successes and 0 throttled \
+             responses across 20 requests — the rate-limit middleware is \
+             not attached to V3 build pipeline routes",
+            passed,
+        );
+        assert!(
+            passed > 0,
+            "expected at least one POST /v3/templates to pass the gate \
+             (the very first burst token); got {} 429s and 0 passes — \
+             auth or rate-limit is mis-configured in the test harness",
+            rate_limited,
+        );
+    }
+
+    /// Companion: plain template *management* endpoints (list / get /
+    /// CRUD) explicitly stay on `with_auth` rather than
+    /// `with_auth_and_rate_limit`, because they forward directly to
+    /// CubeMaster's CRUD layer and don't allocate in-process build
+    /// state. Pinning that boundary here so a future "let's just rate
+    /// limit everything" change can't silently regress operator
+    /// workflows that legitimately list templates faster than the
+    /// shared governor allows.
+    #[tokio::test]
+    async fn template_management_routes_are_not_rate_limited() {
+        let (auth_url, _auth_handle) = spawn_always_200_auth_server().await;
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = "http://127.0.0.1:9".to_string();
+        config.auth_callback_url = Some(auth_url);
+        config.rate_limit_per_sec = 1;
+
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        // Burst the same 20 requests against the management surface.
+        // Even with quota=1 we should never see 429 here, because the
+        // rate-limit layer is not attached to this lane.
+        let mut saw_throttle = false;
+        for _ in 0..20 {
+            let resp = server
+                .get("/templates")
+                .add_header(
+                    axum::http::HeaderName::from_static("x-api-key"),
+                    axum::http::HeaderValue::from_static("abuser"),
+                )
+                .await;
+            if resp.status_code() == StatusCode::TOO_MANY_REQUESTS {
+                saw_throttle = true;
+                break;
+            }
+        }
+
+        assert!(
+            !saw_throttle,
+            "GET /templates is on the auth-only lane and must NOT be \
+             rate-limited; observing 429 here would mean the management \
+             sub-router was accidentally folded into with_auth_and_rate_limit"
+        );
     }
 }

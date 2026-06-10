@@ -199,16 +199,10 @@ impl TemplateService {
             format!("https://{}", public_host)
         };
 
-        let credential = RegistryCredential {
-            url: credential_url,
-            repository: format!("{}/{}", repo_prefix, template_id),
-            username: "_token".to_string(),
-            password: self
-                .config
-                .registry_token
-                .clone()
-                .unwrap_or_else(|| "_anon".to_string()),
-        };
+        let credential = mint_registry_credential(
+            credential_url,
+            format!("{}/{}", repo_prefix, template_id),
+        );
 
         // Image ref CubeMaster will pull from once push is complete.
         let pull_host = self
@@ -446,9 +440,47 @@ impl TemplateService {
 
     /// Mark a build as image-pushed (called by the registry handler once the
     /// manifest PUT for `repo:tag` succeeds). Idempotent.
-    pub fn mark_image_pushed(&self, build_id: &str) {
+    /// Advance a build from `WaitingPush` → `Building` after the registry
+    /// reverse-proxy observed a successful manifest PUT.
+    ///
+    /// **Defence in depth**: while build IDs are 128-bit UUIDs and therefore
+    /// hard to guess, we still cross-check that the manifest's repository
+    /// path matches the one we minted at create time. This stops a leaked
+    /// (or copy-pasted) build_id from being advanced by a manifest pushed
+    /// against an unrelated repo, and surfaces config drift in the registry
+    /// path-prefix as a warning rather than a silent state transition.
+    ///
+    /// `repo` is the path between `/v2/` and `/manifests/<tag>`, e.g.
+    /// `e2b/tpl-abc123` for `PUT /v2/e2b/tpl-abc123/manifests/bld-...`.
+    pub fn mark_image_pushed(&self, build_id: &str, repo: &str) {
+        let Some(ctx) = self.builds.get(build_id) else {
+            tracing::debug!(
+                build_id = %build_id,
+                repo = %repo,
+                "manifest PUT received for unknown build_id; ignoring"
+            );
+            return;
+        };
+
+        if !manifest_repo_matches(&ctx.image_ref, repo) {
+            tracing::warn!(
+                build_id = %build_id,
+                got_repo = %repo,
+                expected_image_ref = %ctx.image_ref,
+                "manifest PUT repo does not match the image_ref \
+                 minted for this build; refusing to advance build state"
+            );
+            return;
+        }
+
         self.builds.update(build_id, |ctx| {
             ctx.append_log_inline("[push] image upload complete");
+            // `image_pushed` is the single, authoritative signal that a
+            // manifest landed under our predicted `image_ref`. It survives
+            // any subsequent stage mutation (e.g. by status pollers) and
+            // is what `v3_trigger_build`'s OCI-distribution fallback
+            // gates on — *not* `stage`, which is an indirect proxy.
+            ctx.image_pushed = true;
             if matches!(ctx.stage, BuildStage::WaitingPush) {
                 ctx.stage = BuildStage::Building;
                 ctx.message = "image uploaded, waiting for build dispatch".to_string();
@@ -677,11 +709,65 @@ impl TemplateService {
 
     /// `GET /templates/{tid}/files/{hash}` — file-cache probe.
     ///
-    /// Until the in-cluster builder lands we don't actually consume uploaded
-    /// tarballs. We answer `present=true` so the SDK skips uploading; this is
-    /// safe because `from_image`-based builds (the only flow CubeMaster
-    /// currently supports) don't need the build context.
-    pub fn v3_get_file_upload(&self, _template_id: &str, _files_hash: &str) -> AppResult<crate::models::V3TemplateFileUpload> {
+    /// ## Contract (paired with `v3_trigger_build`)
+    ///
+    /// The E2B SDK calls this endpoint to ask "do you already have the
+    /// build-context tarball identified by `<hash>`?". A `present=true`
+    /// answer makes the SDK *skip* uploading the tarball, on the assumption
+    /// that the server-side builder will read it from cache. CubeAPI does
+    /// **not** currently run an in-cluster Dockerfile/steps builder, so
+    /// strictly speaking we don't have any tarball cache at all.
+    ///
+    /// We still answer `present=true` here for two reasons:
+    ///
+    ///   1. The SDK calls this endpoint *unconditionally* before every
+    ///      build, including pure `fromImage` flows that don't need a
+    ///      tarball at all. Returning `present=false` would force the SDK
+    ///      to PUT a (typically empty) tarball to a URL we don't have
+    ///      anywhere to put.
+    ///   2. We compensate by enforcing a strict fail-fast in
+    ///      `v3_trigger_build`: if the dispatch body doesn't carry a
+    ///      `fromImage` / `fromTemplate` / pre-pushed registry image, we
+    ///      reject with `501 Not Implemented` and a message that points the
+    ///      caller back to the supported flows. That means a `dockerfile`
+    ///      / `steps`-driven build can never silently succeed against a
+    ///      non-existent tarball — it just fails one round-trip later than
+    ///      it would in upstream e2b-infra.
+    ///
+    /// **A `present=true` reply from this endpoint is therefore not a
+    /// promise that we accepted a tarball.** It is exactly the
+    /// "no-op, please proceed" hint the SDK needs to advance to the
+    /// `POST /v2/.../builds/{bid}` step where the real validation lives.
+    ///
+    /// Until the in-cluster builder lands (Phase 4) the warning emitted
+    /// here gives operators an observability hook for "someone is trying
+    /// to use a context-based build against a CubeAPI that can't honour
+    /// it" without having to read trigger-time logs.
+    ///
+    /// The handler returns `201 Created` (not `200 OK`) on purpose — see the
+    /// doc comment on `handlers::templates_v3::v3_get_files_hash` for the
+    /// E2B SDK compatibility rationale.
+    pub fn v3_get_file_upload(
+        &self,
+        template_id: &str,
+        files_hash: &str,
+    ) -> AppResult<crate::models::V3TemplateFileUpload> {
+        // Cheap heuristic: an SDK invoking the empty-context flow (pure
+        // `fromImage`) typically still hashes *something*, so we can't tell
+        // dockerfile vs. fromImage apart purely from `files_hash`. Emit a
+        // single warn so operators can grep for it; trigger-time fail-fast
+        // is the authoritative gate.
+        tracing::warn!(
+            template_id = %template_id,
+            files_hash = %files_hash,
+            "files-hash cache probe answered present=true unconditionally; \
+             CubeAPI does not run an in-cluster context builder. \
+             Dockerfile-/steps-based builds will be rejected at \
+             POST /v2/templates/{{tid}}/builds/{{bid}} with 501. \
+             Use `fromImage` (or `docker push` via the bundled OCI registry) \
+             to drive the build."
+        );
+
         Ok(crate::models::V3TemplateFileUpload {
             present: true,
             url: None,
@@ -696,12 +782,34 @@ impl TemplateService {
     ///   1. `body.from_image`  — the standard E2B flow, e.g.
     ///                            `python:3.11-slim`.
     ///   2. The image already pushed to the bundled registry under
-    ///      `<repo>/<templateID>:<buildID>` (when the OCI Distribution path
-    ///      was used).
-    ///   3. `body.from_template` — copy from another known CubeSandbox
-    ///      template (resolved via CubeMaster `get_template`).
+    ///      `<repo>/<templateID>:<buildID>` — only used when
+    ///      `BuildContext::image_pushed` is `true`, i.e. the registry
+    ///      reverse proxy has observed a successful manifest PUT and
+    ///      `mark_image_pushed` cross-checked the repo. We deliberately
+    ///      do **not** key off `stage` or "image_ref is non-empty"
+    ///      here: `image_ref` is *predicted* at create time and would
+    ///      otherwise let us dispatch CubeMaster against a registry
+    ///      slot that holds nothing, with the failure surfacing later
+    ///      as `manifest unknown` during pull. When `image_ref` is
+    ///      non-empty but `image_pushed` is still `false`, we surface
+    ///      that mismatch as **`409 Conflict`** so the SDK can retry
+    ///      after `docker push` completes.
+    ///   3. `body.from_template` — **rejected with 501** until a
+    ///      downstream resolver for `cube://<templateID>` exists in
+    ///      CubeMaster/Cubelet. Today CubeMaster feeds `SourceImageRef`
+    ///      straight into `docker pull`, so a synthesised `cube://...`
+    ///      ref would silently break image resolution; we fail fast at
+    ///      the API layer instead. Callers who want this flow should
+    ///      resolve the parent template themselves and pass the resulting
+    ///      OCI reference through `from_image`.
     ///
-    /// `start_cmd` becomes container `args`; `ready_cmd` becomes a Probe.Exec.
+    /// `start_cmd` becomes container `args`; `ready_cmd` is *not* forwarded
+    /// as an exec probe — CubeMaster/Cubelet only accept TcpSocket / Ping /
+    /// HttpGet handlers, so we instead best-effort parse an embedded
+    /// `http(s)://host:port[/path]` URL out of the readyCmd and synthesise
+    /// a `Probe.HttpGet`. If no URL can be parsed and no `probePort` /
+    /// `exposedPorts` are supplied, no probe is emitted at all — see
+    /// `parse_ready_url` and `build_probe` for the precise rules.
     pub async fn v3_trigger_build(
         &self,
         template_id: String,
@@ -732,18 +840,154 @@ impl TemplateService {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
         {
-            // Re-use an already-built CubeSandbox template as the base. We
-            // synthesise a CubeMaster reference of the form `cube://<tid>`,
-            // letting downstream callers resolve it. Adjust to your local
-            // convention if needed.
-            format!("cube://{}", parent)
-        } else if !ctx.image_ref.is_empty() {
+            // `fromTemplate` is **not yet wired end-to-end**: CubeMaster's
+            // template_image.go feeds `SourceImageRef` straight into
+            // `docker pull` / `docker image inspect`, and there is no
+            // resolver for a `cube://<tid>` scheme anywhere downstream
+            // (Cubelet, CubeMaster, builder). If we synthesised a
+            // `cube://<parent>` ref here, the build would *look* accepted
+            // at the API layer and only fail several seconds later inside
+            // the build worker with an opaque `docker pull cube://...:
+            // invalid reference format` error — exactly the kind of
+            // "looks supported but isn't" footgun reviewers flagged.
+            //
+            // Until the downstream resolver lands (tracked separately),
+            // surface the gap explicitly. Operators who actually want this
+            // flow today can resolve `parent` themselves and pass the
+            // resulting OCI ref via `fromImage`.
+            self.builds.append_log(
+                &build_id,
+                format!(
+                    "[dispatch-v3] rejecting build: fromTemplate={} is not \
+                     supported by this deployment — no downstream resolver \
+                     for `cube://<templateID>` exists in CubeMaster/Cubelet \
+                     yet. Resolve the parent template to an OCI image \
+                     reference and pass it via `fromImage` instead.",
+                    parent,
+                ),
+            );
+            return Err(AppError::NotImplemented(format!(
+                "build {} of template {} requested `fromTemplate={}`, but \
+                 CubeAPI cannot honour it: the downstream stack \
+                 (CubeMaster/Cubelet) does not yet understand the \
+                 `cube://<templateID>` source scheme and would attempt to \
+                 `docker pull` it verbatim. Pass `fromImage` with the \
+                 already-resolved OCI reference of the parent template, \
+                 or wait for the cube:// resolver to ship.",
+                build_id, template_id, parent,
+            )));
+        } else if ctx.image_pushed {
+            // OCI Distribution path: the caller has actually completed an
+            // OCI manifest PUT against `image_ref` — `mark_image_pushed`
+            // verified the repo and flipped `image_pushed` to true. We
+            // can safely dispatch CubeMaster against the predicted ref
+            // because we *know* a manifest now lives under it.
+            //
+            // Note we deliberately do NOT key off `stage != WaitingPush`
+            // here. `stage` is mutated by status pollers and the v2
+            // dispatch path for unrelated reasons; using it as a proxy
+            // for "client pushed" would re-open the very gap the
+            // reviewer flagged: dispatching against `ctx.image_ref` even
+            // though it's just the *predicted* path minted at create
+            // time, with no manifest behind it. The CubeMaster pull
+            // would then fail several seconds later with `manifest
+            // unknown` — exactly the kind of late-stage error this guard
+            // is meant to prevent.
+            debug_assert!(
+                !ctx.image_ref.is_empty(),
+                "image_pushed=true must imply non-empty image_ref"
+            );
             ctx.image_ref.clone()
         } else {
-            return Err(AppError::BadRequest(
-                "either fromImage, fromTemplate, or a previously-pushed image is required"
-                    .to_string(),
-            ));
+            // Distinguish three remaining failure modes so the error
+            // message tells the operator *exactly* what to do.
+            let has_steps = body
+                .steps
+                .as_ref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if has_steps {
+                // (1) `steps[]` build with no fromImage — needs an
+                //     in-cluster context builder we don't run.
+                self.builds.append_log(
+                    &build_id,
+                    "[dispatch-v3] rejecting build: steps[] supplied but \
+                     CubeAPI has no in-cluster context builder; supply \
+                     fromImage or push a pre-built image to the bundled \
+                     OCI registry instead",
+                );
+                return Err(AppError::NotImplemented(format!(
+                    "dockerfile-/steps-based builds are not supported by \
+                     this CubeAPI deployment (build {} of template {} \
+                     supplied {} step(s) without a fromImage). Either set \
+                     `fromImage` to a base OCI reference, or `docker push` \
+                     a pre-built image to the bundled registry under \
+                     `<repo_prefix>/<templateID>:<buildID>` before calling \
+                     this endpoint.",
+                    build_id,
+                    template_id,
+                    body.steps.as_ref().map(|s| s.len()).unwrap_or(0),
+                )));
+            }
+            if !ctx.image_ref.is_empty() {
+                // (2) `image_ref` is non-empty (it was predicted at
+                //     create time) but the manifest never landed — the
+                //     SDK skipped (or hasn't yet completed) `docker
+                //     push`. Reviewer-driven guard: do NOT silently
+                //     dispatch CubeMaster against an empty registry
+                //     slot. Surface the mismatch *before* CubeMaster
+                //     starts pulling, with an actionable hint.
+                self.builds.append_log(
+                    &build_id,
+                    format!(
+                        "[dispatch-v3] rejecting build: predicted image_ref \
+                         {} exists but no successful manifest PUT has been \
+                         observed by the registry reverse proxy yet \
+                         (image_pushed=false). Dispatching now would only \
+                         move the failure into CubeMaster's pull stage as \
+                         `manifest unknown`.",
+                        ctx.image_ref,
+                    ),
+                );
+                return Err(AppError::Conflict(format!(
+                    "build {} of template {} has not received the \
+                     OCI manifest PUT yet: the registry reverse proxy \
+                     has not observed a successful `PUT \
+                     /v2/<repo>/manifests/{}` against `image_ref={}`. \
+                     Note: the SDK's `GET /templates/{{tid}}/files/{{hash}}` \
+                     cache probe always returns `present=true` and is \
+                     *not* a commitment that any image was accepted — \
+                     see `v3_get_file_upload` for the contract. Either \
+                     wait for `docker push` to complete and retry, or \
+                     supply `fromImage` to bypass the bundled registry \
+                     path.",
+                    build_id, template_id, build_id, ctx.image_ref,
+                )));
+            }
+            // (3) Neither steps nor fromImage nor any push — the SDK
+            //     probably believed the build context was already cached
+            //     server-side (because `/files/{hash}` answered
+            //     present=true); see `v3_get_file_upload` for the
+            //     contract. We surface a 501 here so the failure mode
+            //     is unambiguous.
+            self.builds.append_log(
+                &build_id,
+                "[dispatch-v3] rejecting build: no fromImage / fromTemplate \
+                 and no image was pushed to the bundled registry before \
+                 dispatch; CubeAPI cannot synthesise a source image from a \
+                 build-context tarball alone",
+            );
+            return Err(AppError::NotImplemented(format!(
+                "build {} of template {} cannot be dispatched: this \
+                 CubeAPI deployment does not run an in-cluster build-context \
+                 builder, so a `fromImage` (or pre-pushed registry image, \
+                 or `fromTemplate`) is required. The SDK's \
+                 `GET /templates/{{tid}}/files/{{hash}}` cache probe \
+                 returns `present=true` unconditionally and is *not* a \
+                 commitment that any tarball was accepted — see the \
+                 server-side docs on `v3_get_file_upload` for the contract.",
+                build_id, template_id,
+            )));
         };
 
         // Patch the cached create_request with the V2-time fields and dispatch.
@@ -870,14 +1114,73 @@ impl TemplateService {
             .take(limit)
             .cloned()
             .collect();
-        let log_entries: Vec<V3BuildLogEntry> = logs
-            .iter()
-            .map(|line| V3BuildLogEntry {
-                timestamp: chrono::Utc::now(),
-                message: line.clone(),
-                level: "info".to_string(),
-            })
-            .collect();
+
+        // Reviewer-flagged bug: previously `log_entries` stamped each line
+        // with `Utc::now()` at poll time, so the *same* historical line
+        // would receive a fresh timestamp on every status poll — making
+        // `logEntries[i].timestamp` jitter forwards in time even though
+        // the line itself never changed.
+        //
+        // The structured timestamps already exist on
+        // `BuildContext.logs[i].timestamp` (`BuildLogLine`) and were
+        // stamped at log-write time by `BuildRegistry::append_log`. We
+        // reach into the registry to pull those write-time timestamps
+        // back out, taking care to:
+        //
+        //   - apply the *same* `(logs_offset, limit)` window that
+        //     `get_template_build_status` used to produce
+        //     `internal.logs`, so the i-th entry of `logs` lines up
+        //     with the i-th entry of `log_entries`;
+        //   - clamp the entry count to `logs.len()` so we never emit
+        //     more `log_entries` than `logs` even if a concurrent
+        //     poll appended new lines between the two reads.
+        //
+        // The narrow corner case where the build context has been
+        // evicted between the `get_template_build_status` call above
+        // and this read (e.g. terminal-state eviction firing during
+        // an in-flight poll on the same build) falls through to a
+        // best-effort `created_at`-style fallback — the historical
+        // bug used `Utc::now()` there too, so behaviour is no worse
+        // than before, and we still preserve the
+        // `logs.len() == log_entries.len()` invariant the SDK relies
+        // on.
+        let log_entries: Vec<V3BuildLogEntry> = match self.builds.get(build_id) {
+            Some(ctx) => {
+                let total = ctx.logs.len();
+                let start = (logs_offset.max(0) as usize).min(total);
+                ctx.logs
+                    .iter()
+                    .skip(start)
+                    .take(logs.len())
+                    .map(|entry| V3BuildLogEntry {
+                        timestamp: entry.timestamp,
+                        message: entry.line.clone(),
+                        level: "info".to_string(),
+                    })
+                    .collect()
+            }
+            None => {
+                tracing::debug!(
+                    template_id = %template_id,
+                    build_id = %build_id,
+                    "build context vanished between status poll and \
+                     log-entry materialisation; falling back to \
+                     poll-time timestamps for V3 logEntries"
+                );
+                logs.iter()
+                    .map(|line| V3BuildLogEntry {
+                        timestamp: chrono::Utc::now(),
+                        message: line.clone(),
+                        level: "info".to_string(),
+                    })
+                    .collect()
+            }
+        };
+        debug_assert_eq!(
+            logs.len(),
+            log_entries.len(),
+            "V3 logs and logEntries must be aligned 1:1"
+        );
 
         let status = match internal.status.as_str() {
             "ready" => "ready",
@@ -924,16 +1227,11 @@ impl TemplateService {
         } else {
             self.config.registry_repo_prefix.trim()
         };
-        RegistryCredential {
-            url,
-            repository: format!("{}/{}", repo_prefix, template_id),
-            username: "_token".to_string(),
-            password: self
-                .config
-                .registry_token
-                .clone()
-                .unwrap_or_else(|| "_anon".to_string()),
-        }
+        // Per-build short-lived credential — see `mint_registry_credential`
+        // and the matching comment in `create_template_e2b_mode` for the
+        // rationale (username is the routing key into `username_index`,
+        // password is verified by the registry reverse-proxy).
+        mint_registry_credential(url, format!("{}/{}", repo_prefix, template_id))
     }
 }
 
@@ -1282,6 +1580,44 @@ fn base_url(url: &str) -> String {
     }
 }
 
+fn mint_registry_credential(url: String, repository: String) -> RegistryCredential {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let mut buf = [0u8; 32];
+    buf[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    buf[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    let token = URL_SAFE_NO_PAD.encode(buf);
+    RegistryCredential {
+        url,
+        repository,
+        username: format!("bld_{}", &token[..22]),
+        password: token,
+    }
+}
+
+fn manifest_repo_matches(image_ref: &str, repo: &str) -> bool {
+    let Some(expected) = image_ref_repo(image_ref) else {
+        return false;
+    };
+    expected == repo
+}
+
+/// Extract the `repo` segment from an `image_ref` of the form
+/// `<host>[:port]/<repo>:<tag>`. Returns `None` when the host or tag is
+/// missing, or when the repo would be empty.
+fn image_ref_repo(image_ref: &str) -> Option<String> {
+    let without_tag = match (image_ref.rfind(':'), image_ref.rfind('/')) {
+        (Some(colon), Some(slash)) if colon > slash => &image_ref[..colon],
+        _ => image_ref,
+    };
+    let slash = without_tag.find('/')?;
+    let repo = &without_tag[slash + 1..];
+    if repo.is_empty() {
+        None
+    } else {
+        Some(repo.to_string())
+    }
+}
+
 // Adapter helper used inside dashmap update closures.
 impl crate::services::builds::BuildContext {
     pub(crate) fn append_log_inline(&mut self, line: impl Into<String>) {
@@ -1522,6 +1858,127 @@ mod tests {
     }
 
     #[test]
+    fn image_ref_repo_extracts_repo_with_host_port_and_tag() {
+        assert_eq!(
+            image_ref_repo("127.0.0.1:5000/e2b/tpl-abc:bld-123").as_deref(),
+            Some("e2b/tpl-abc")
+        );
+        assert_eq!(
+            image_ref_repo("registry.example.com/team/tpl-xyz").as_deref(),
+            Some("team/tpl-xyz")
+        );
+        assert_eq!(
+            image_ref_repo("reg.local:443/x/y/z:latest").as_deref(),
+            Some("x/y/z")
+        );
+    }
+
+    #[test]
+    fn image_ref_repo_returns_none_for_malformed_input() {
+        assert_eq!(image_ref_repo("only-host").as_deref(), None);
+        assert_eq!(image_ref_repo("host.example.com/").as_deref(), None);
+        assert_eq!(image_ref_repo("host:5000/:tag").as_deref(), None);
+    }
+
+    #[test]
+    fn manifest_repo_matches_accepts_canonical_image_ref() {
+        assert!(manifest_repo_matches(
+            "127.0.0.1:5000/e2b/tpl-abc:bld-123",
+            "e2b/tpl-abc"
+        ));
+    }
+
+    #[test]
+    fn manifest_repo_matches_rejects_mismatched_repo() {
+        assert!(!manifest_repo_matches(
+            "127.0.0.1:5000/e2b/tpl-abc:bld-123",
+            "attacker/tpl-abc"
+        ));
+        assert!(!manifest_repo_matches(
+            "127.0.0.1:5000/e2b/tpl-abc:bld-123",
+            "e2b/tpl-other"
+        ));
+    }
+
+    #[test]
+    fn manifest_repo_matches_rejects_malformed_image_ref() {
+        assert!(!manifest_repo_matches("e2b/tpl-abc:bld-123", "e2b/tpl-abc"));
+    }
+
+    #[test]
+    fn mark_image_pushed_advances_stage_when_repo_matches() {
+        let svc = make_service(Some("http://127.0.0.1:5000".to_string()));
+        let cred = RegistryCredential {
+            url: "http://127.0.0.1:5000".to_string(),
+            repository: "e2b/tpl-abc".to_string(),
+            username: "_token".to_string(),
+            password: "secret".to_string(),
+        };
+        let ctx = svc.builds.create(
+            "tpl-abc".to_string(),
+            empty_request(),
+            cred,
+            "127.0.0.1:5000/e2b/tpl-abc:bld-deadbeef".to_string(),
+        );
+        svc.builds.update(&ctx.build_id, |c| {
+            c.image_ref = format!("127.0.0.1:5000/e2b/tpl-abc:{}", c.build_id);
+        });
+
+        svc.mark_image_pushed(&ctx.build_id, "e2b/tpl-abc");
+
+        let after = svc.builds.get(&ctx.build_id).expect("ctx");
+        assert_eq!(after.stage, BuildStage::Building);
+        assert!(
+            after.image_pushed,
+            "mark_image_pushed must flip image_pushed=true on success — \
+             this is the authoritative signal v3_trigger_build's \
+             OCI fallback gates on"
+        );
+    }
+
+    #[test]
+    fn mark_image_pushed_refuses_when_repo_does_not_match() {
+        let svc = make_service(Some("http://127.0.0.1:5000".to_string()));
+        let cred = RegistryCredential {
+            url: "http://127.0.0.1:5000".to_string(),
+            repository: "e2b/tpl-abc".to_string(),
+            username: "_token".to_string(),
+            password: "secret".to_string(),
+        };
+        let ctx = svc.builds.create(
+            "tpl-abc".to_string(),
+            empty_request(),
+            cred,
+            "127.0.0.1:5000/e2b/tpl-abc:bld-deadbeef".to_string(),
+        );
+        svc.builds.update(&ctx.build_id, |c| {
+            c.image_ref = format!("127.0.0.1:5000/e2b/tpl-abc:{}", c.build_id);
+        });
+
+        svc.mark_image_pushed(&ctx.build_id, "attacker/tpl-abc");
+
+        let after = svc.builds.get(&ctx.build_id).expect("ctx");
+        assert_eq!(
+            after.stage,
+            BuildStage::WaitingPush,
+            "stage must not advance when repo mismatches"
+        );
+        assert!(
+            !after.image_pushed,
+            "image_pushed must stay false when the repo cross-check \
+             fails — otherwise v3_trigger_build would later dispatch \
+             against an unverified slot"
+        );
+    }
+
+    #[test]
+    fn mark_image_pushed_is_noop_for_unknown_build_id() {
+        let svc = make_service(Some("http://127.0.0.1:5000".to_string()));
+        svc.mark_image_pushed("bld-does-not-exist", "e2b/tpl-abc");
+        assert!(svc.builds.get("bld-does-not-exist").is_none());
+    }
+
+    #[test]
     fn remap_cubemaster_status_normalizes_phases_to_e2b_tokens() {
         assert_eq!(remap_cubemaster_status(""), "pending");
         assert_eq!(remap_cubemaster_status("Ready"), "ready");
@@ -1572,7 +2029,38 @@ mod tests {
         let cred = job.registry.expect("registry credential");
         assert_eq!(cred.url, "http://127.0.0.1:5000");
         assert!(cred.repository.starts_with("e2b/tpl-"));
-        assert_eq!(cred.username, "_token");
+        // Per-build short-lived credential: username is `bld_<…>` (i.e. NOT
+        // the legacy global `_token`), and password is a high-entropy
+        // random string that the registry reverse-proxy validates against
+        // the in-memory BuildRegistry on every push request. See
+        // `mint_registry_credential` for the rationale.
+        assert!(
+            cred.username.starts_with("bld_"),
+            "expected per-build username (bld_<…>), got {:?}",
+            cred.username
+        );
+        assert!(
+            cred.password.len() >= 32,
+            "expected high-entropy random password, got {} chars",
+            cred.password.len()
+        );
+        assert_ne!(
+            cred.username, "_token",
+            "the legacy shared `_token` username must not regress — \
+             it would defeat per-build credential validation"
+        );
+        // Issuing a second build must produce a different credential pair
+        // (i.e. RNG is wired up properly and we're not handing every build
+        // the same secret).
+        let mut req2 = empty_request();
+        req2.dockerfile = Some("FROM ubuntu".to_string());
+        let job2 = svc
+            .create_template(req2)
+            .await
+            .expect("second e2b create should succeed");
+        let cred2 = job2.registry.expect("second registry credential");
+        assert_ne!(cred.username, cred2.username);
+        assert_ne!(cred.password, cred2.password);
 
         // Internal BuildRegistry now knows about this build and stores the
         // image_ref CubeMaster will later pull from.
@@ -1582,6 +2070,329 @@ mod tests {
             .expect("build context should be registered");
         assert!(ctx.image_ref.starts_with("127.0.0.1:5000/e2b/"));
         assert!(ctx.image_ref.ends_with(&format!(":{}", job.build_id)));
+    }
+
+    #[tokio::test]
+    async fn v3_trigger_build_rejects_steps_without_from_image_with_501() {
+        let svc = make_service(Some("http://127.0.0.1:5000".to_string()));
+        let mut req = empty_request();
+        req.dockerfile = Some("FROM ubuntu".to_string());
+        let job = svc
+            .create_template(req)
+            .await
+            .expect("e2b create should succeed");
+
+        let body = V2TemplateBuildStart {
+            steps: Some(vec![serde_json::json!({"type": "RUN", "args": ["echo hi"]})]),
+            ..Default::default()
+        };
+        let err = svc
+            .v3_trigger_build(job.template_id.clone(), job.build_id.clone(), body)
+            .await
+            .expect_err("steps-only build must be rejected, not dispatched");
+
+        match err {
+            AppError::NotImplemented(msg) => {
+                assert!(
+                    msg.contains("dockerfile-/steps-based builds are not supported"),
+                    "unexpected NotImplemented message: {msg}"
+                );
+                assert!(msg.contains(&job.build_id));
+            }
+            other => panic!("expected NotImplemented, got {other:?}"),
+        }
+
+        let ctx = svc
+            .builds
+            .get(&job.build_id)
+            .expect("build context preserved on failure");
+        assert_eq!(ctx.stage, BuildStage::WaitingPush);
+    }
+
+    #[tokio::test]
+    async fn v3_trigger_build_does_not_use_unpushed_image_ref() {
+        let svc = make_service(Some("http://127.0.0.1:5000".to_string()));
+        let mut req = empty_request();
+        req.dockerfile = Some("FROM ubuntu".to_string());
+        let job = svc
+            .create_template(req)
+            .await
+            .expect("e2b create should succeed");
+
+        let ctx = svc
+            .builds
+            .get(&job.build_id)
+            .expect("build context exists");
+        assert!(!ctx.image_pushed, "fresh build must not be marked pushed");
+        assert!(
+            !ctx.image_ref.is_empty(),
+            "image_ref is predicted at create time and should already \
+             be populated — exactly the trap this guard prevents"
+        );
+
+        let body = V2TemplateBuildStart::default();
+        let err = svc
+            .v3_trigger_build(job.template_id.clone(), job.build_id.clone(), body)
+            .await
+            .expect_err("unpushed builds must not be dispatched against the predicted ref");
+
+        match err {
+            AppError::Conflict(msg) => {
+                assert!(
+                    msg.contains("manifest PUT"),
+                    "error must name the missing operation: {msg}"
+                );
+                assert!(
+                    msg.contains(&job.build_id),
+                    "error must include the build_id: {msg}"
+                );
+                assert!(
+                    msg.contains("fromImage"),
+                    "error must point operators at the fromImage \
+                     workaround: {msg}"
+                );
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+
+        let ctx = svc
+            .builds
+            .get(&job.build_id)
+            .expect("build context preserved on failure");
+        assert!(!ctx.image_pushed);
+    }
+
+    #[tokio::test]
+    async fn v3_trigger_build_uses_image_ref_after_mark_image_pushed_flips_flag() {
+        let svc = make_service(Some("http://127.0.0.1:5000".to_string()));
+        let mut req = empty_request();
+        req.dockerfile = Some("FROM ubuntu".to_string());
+        let job = svc
+            .create_template(req)
+            .await
+            .expect("e2b create should succeed");
+
+        svc.builds.update(&job.build_id, |c| {
+            c.image_ref = format!("127.0.0.1:5000/e2b/tpl-abc:{}", c.build_id);
+        });
+        svc.mark_image_pushed(&job.build_id, "e2b/tpl-abc");
+        let ctx = svc.builds.get(&job.build_id).expect("ctx exists");
+        assert!(
+            ctx.image_pushed,
+            "mark_image_pushed must flip image_pushed=true"
+        );
+
+        let body = V2TemplateBuildStart::default();
+        let err = svc
+            .v3_trigger_build(job.template_id.clone(), job.build_id.clone(), body)
+            .await
+            .expect_err(
+                "cubemaster is unreachable in unit tests, so dispatch \
+                 will fail at transport — but the source-resolution \
+                 branch must already have been satisfied",
+            );
+
+        assert!(
+            !matches!(err, AppError::Conflict(_)),
+            "image_pushed=true must defuse the 409 guard: {err:?}"
+        );
+        assert!(
+            !matches!(err, AppError::NotImplemented(_)),
+            "image_pushed=true must defuse the 501 source-resolution \
+             guard: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_get_build_status_preserves_log_write_timestamps_across_polls() {
+        let svc = make_service(Some("http://127.0.0.1:5000".to_string()));
+        let mut req = empty_request();
+        req.dockerfile = Some("FROM ubuntu".to_string());
+        let job = svc
+            .create_template(req)
+            .await
+            .expect("e2b create should succeed");
+
+        let baseline_len = svc
+            .builds
+            .get(&job.build_id)
+            .expect("ctx exists")
+            .logs
+            .len();
+
+        svc.builds.append_log(&job.build_id, "first line");
+        svc.builds.append_log(&job.build_id, "second line");
+        svc.builds.append_log(&job.build_id, "third line");
+
+        let expected_ts: Vec<_> = svc
+            .builds
+            .get(&job.build_id)
+            .expect("ctx exists")
+            .logs
+            .iter()
+            .map(|l| l.timestamp)
+            .collect();
+        let expected_total = baseline_len + 3;
+        assert_eq!(
+            expected_ts.len(),
+            expected_total,
+            "test setup must seed exactly three additional log lines"
+        );
+
+        let first = svc
+            .v3_get_build_status(&job.template_id, &job.build_id, 0, 1000)
+            .await
+            .expect("first status poll should succeed");
+        assert_eq!(first.log_entries.len(), expected_total);
+        assert_eq!(first.logs.len(), first.log_entries.len());
+        for (i, entry) in first.log_entries.iter().enumerate() {
+            assert_eq!(
+                entry.timestamp, expected_ts[i],
+                "logEntries[{i}].timestamp must match the write-time \
+                 BuildLogLine.timestamp, not Utc::now() at poll time"
+            );
+        }
+        assert_eq!(first.log_entries[baseline_len].message, "first line");
+        assert_eq!(first.log_entries[baseline_len + 1].message, "second line");
+        assert_eq!(first.log_entries[baseline_len + 2].message, "third line");
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let second = svc
+            .v3_get_build_status(&job.template_id, &job.build_id, 0, 1000)
+            .await
+            .expect("second status poll should succeed");
+        assert_eq!(second.log_entries.len(), expected_total);
+        for (i, entry) in second.log_entries.iter().enumerate() {
+            assert_eq!(
+                entry.timestamp, first.log_entries[i].timestamp,
+                "logEntries[{i}].timestamp must be stable across \
+                 polls — reviewer-flagged regression: previously \
+                 each poll re-stamped lines with Utc::now() so the \
+                 same historical line drifted forwards in time"
+            );
+            assert_eq!(
+                entry.message, first.log_entries[i].message,
+                "log message must match across polls"
+            );
+        }
+
+        svc.builds.append_log(&job.build_id, "fourth line");
+        let third = svc
+            .v3_get_build_status(&job.template_id, &job.build_id, 0, 1000)
+            .await
+            .expect("third status poll should succeed");
+        assert_eq!(third.log_entries.len(), expected_total + 1);
+        for i in 0..expected_total {
+            assert_eq!(
+                third.log_entries[i].timestamp, first.log_entries[i].timestamp,
+                "appending a new line must not perturb existing \
+                 logEntries[{i}].timestamp"
+            );
+        }
+        assert_eq!(third.log_entries[expected_total].message, "fourth line");
+        assert!(
+            third.log_entries[expected_total].timestamp
+                >= first.log_entries[expected_total - 1].timestamp,
+            "newly appended line must carry a write-time timestamp \
+             at or after the previous tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_get_build_status_log_entries_respect_logs_offset() {
+        let svc = make_service(Some("http://127.0.0.1:5000".to_string()));
+        let mut req = empty_request();
+        req.dockerfile = Some("FROM ubuntu".to_string());
+        let job = svc
+            .create_template(req)
+            .await
+            .expect("e2b create should succeed");
+
+        let baseline_len = svc
+            .builds
+            .get(&job.build_id)
+            .expect("ctx")
+            .logs
+            .len();
+
+        svc.builds.append_log(&job.build_id, "alpha");
+        svc.builds.append_log(&job.build_id, "beta");
+        svc.builds.append_log(&job.build_id, "gamma");
+        svc.builds.append_log(&job.build_id, "delta");
+
+        let expected_ts: Vec<_> = svc
+            .builds
+            .get(&job.build_id)
+            .expect("ctx")
+            .logs
+            .iter()
+            .map(|l| l.timestamp)
+            .collect();
+
+        let skip = (baseline_len + 2) as i32;
+        let resp = svc
+            .v3_get_build_status(&job.template_id, &job.build_id, skip, 1000)
+            .await
+            .expect("paged status poll should succeed");
+
+        assert_eq!(resp.log_entries.len(), 2);
+        assert_eq!(resp.logs.len(), resp.log_entries.len());
+        assert_eq!(resp.log_entries[0].message, "gamma");
+        assert_eq!(resp.log_entries[1].message, "delta");
+        assert_eq!(
+            resp.log_entries[0].timestamp,
+            expected_ts[baseline_len + 2]
+        );
+        assert_eq!(
+            resp.log_entries[1].timestamp,
+            expected_ts[baseline_len + 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_trigger_build_rejects_from_template_with_501_until_resolver_lands() {
+        let svc = make_service(Some("http://127.0.0.1:5000".to_string()));
+        let mut req = empty_request();
+        req.dockerfile = Some("FROM ubuntu".to_string());
+        let job = svc
+            .create_template(req)
+            .await
+            .expect("e2b create should succeed");
+
+        let body = V2TemplateBuildStart {
+            from_template: Some("tpl-parent-xyz".to_string()),
+            ..Default::default()
+        };
+        let err = svc
+            .v3_trigger_build(job.template_id.clone(), job.build_id.clone(), body)
+            .await
+            .expect_err("fromTemplate must be rejected, not silently dispatched as cube://...");
+
+        match err {
+            AppError::NotImplemented(msg) => {
+                assert!(
+                    msg.contains("tpl-parent-xyz"),
+                    "error must echo the rejected parent: {msg}"
+                );
+                assert!(
+                    msg.contains("fromImage"),
+                    "error must point operators at the fromImage workaround: {msg}"
+                );
+                assert!(
+                    msg.contains("cube://"),
+                    "error should name the unimplemented scheme so \
+                     operators can grep release notes for it: {msg}"
+                );
+            }
+            other => panic!("expected NotImplemented, got {other:?}"),
+        }
+
+        let ctx = svc
+            .builds
+            .get(&job.build_id)
+            .expect("build context preserved on failure");
+        assert_eq!(ctx.stage, BuildStage::WaitingPush);
     }
 
     /// Regression: CubeMaster validates `writable_layer_size` as required and
