@@ -423,12 +423,12 @@ function ScenarioGroup({ scenario, selectedFileId, onSelect }: ScenarioGroupProp
       <button
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          'group flex w-full items-center gap-2 rounded-md px-1 py-1 text-left transition-colors',
+          'group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors',
           'hover:bg-muted/40',
         )}
       >
         <ChevronRight
-          size={11}
+          size={13}
           className={cn(
             'shrink-0 text-muted-foreground transition-transform duration-150',
             open && 'rotate-90 text-primary',
@@ -436,15 +436,17 @@ function ScenarioGroup({ scenario, selectedFileId, onSelect }: ScenarioGroupProp
         />
         <span
           className={cn(
-            'flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-gradient-to-br ring-1',
+            'flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-gradient-to-br ring-1',
             scenario.accent,
             'ring-border/60',
           )}
         >
-          <Icon size={11} className="text-foreground/80" />
+          <Icon size={13} className="text-foreground/80" />
         </span>
-        <span className="flex-1 truncate text-[11.5px] font-semibold text-foreground/85">{title}</span>
-        <span className="text-[10px] tabular-nums text-muted-foreground/60">{scenario.files.length}</span>
+        <span className="flex-1 truncate text-[13.5px] font-semibold tracking-tight text-foreground">{title}</span>
+        <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[10.5px] font-medium tabular-nums text-muted-foreground/70">
+          {scenario.files.length}
+        </span>
       </button>
       {open && (
         <div className="space-y-1.5 pl-1">
