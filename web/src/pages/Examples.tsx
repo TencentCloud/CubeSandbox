@@ -11,7 +11,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { CodeBlock } from '@/components/CodeBlock';
-import { showToast } from '@/components/ui/ToastProvider';
 import {
   Play,
   Terminal,
@@ -34,7 +33,7 @@ import {
   FileCode2,
   Timer,
 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, copyToClipboard } from '@/lib/utils';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -572,14 +571,11 @@ export default function ExamplesPage() {
     return new Set(examples.map((e) => e.category)).size;
   }, [examples]);
 
-  const handleCopySource = async () => {
+  const handleCopySource = () => {
     if (!sourceCode) return;
-    try {
-      await navigator.clipboard.writeText(sourceCode);
-      showToast(t('copied'), 'success');
-    } catch {
-      showToast(t('copyFailed'), 'warn');
-    }
+    // copyToClipboard 内置 fallback：HTTPS 下用 navigator.clipboard，
+    // HTTP（无 Secure Context）下回退到 execCommand('copy')，不再抛异常。
+    copyToClipboard(sourceCode, t('copied'));
   };
 
   const runSelected = () => {
