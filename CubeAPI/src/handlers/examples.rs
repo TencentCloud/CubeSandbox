@@ -897,6 +897,73 @@ pub async fn get_example_source(
 
 // ─── POST /cubeapi/v1/examples/run ───────────────────────────────────────────
 
+/// Install per-scenario Python dependencies from `requirements.txt` if present.
+///
+/// Uses a lightweight fingerprint file (`.requirements_installed`) to skip
+/// redundant installs when the requirements have not changed since the last
+/// successful install.
+async fn ensure_requirements(base_dir: &PathBuf) -> bool {
+    let req_file = base_dir.join("requirements.txt");
+    if !req_file.exists() {
+        return true; // no requirements file — nothing to install
+    }
+
+    // Fingerprint: hash of requirements.txt content. If unchanged since last
+    // install, skip pip install to avoid ~10s overhead per run.
+    let req_content = match std::fs::read_to_string(&req_file) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("cannot read {}: {}", req_file.display(), e);
+            return false;
+        }
+    };
+    let fingerprint = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        req_content.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    };
+
+    let stamp_file = base_dir.join(".requirements_installed");
+    if let Ok(stamp) = std::fs::read_to_string(&stamp_file) {
+        if stamp == fingerprint {
+            tracing::debug!(
+                "requirements unchanged (fingerprint={}), skipping pip install",
+                fingerprint
+            );
+            return true;
+        }
+    }
+
+    tracing::info!("installing scenario requirements from {}", req_file.display());
+    let install_result = Command::new("pip3")
+        .args(["install", "--quiet", "-r"])
+        .arg(&req_file)
+        .output()
+        .await;
+
+    match install_result {
+        Ok(output) => {
+            if output.status.success() {
+                let _ = std::fs::write(&stamp_file, &fingerprint);
+                true
+            } else {
+                tracing::warn!(
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "pip install failed, continuing anyway"
+                );
+                // Still return true — the script might work with already-installed packages
+                true
+            }
+        }
+        Err(e) => {
+            tracing::warn!("failed to spawn pip3: {}", e);
+            true // don't block execution; let the script fail with its own ImportError
+        }
+    }
+}
+
 /// Run an example script in a subprocess and return stdout / stderr plus a
 /// synthetic step log and the topology graph for the scenario.
 pub async fn run_example(
@@ -1055,6 +1122,11 @@ pub async fn run_example(
         }
     };
 
+    // ── Auto-install per-scenario Python dependencies ────────────
+    if program == "python3" {
+        ensure_requirements(&base_dir).await;
+    }
+
     // ── When the user edited the code, materialise a temp file next to
     // the original so relative imports / shared modules keep working.
     let mut tmp_path: Option<PathBuf> = None;
@@ -1110,6 +1182,44 @@ pub async fn run_example(
         cmd.env("CUBE_PROXY_PORT_HTTP", proxy_port.to_string());
     }
     cmd.env("CUBE_SANDBOX_DOMAIN", &state.config.sandbox_domain);
+
+    // ── Scenario-specific environment variables ──────────────────
+    if meta.scenario == "e2b-dev-sidecar" {
+        // The e2b SDK reads E2B_API_URL (not CUBE_API_URL) for the
+        // control-plane endpoint. Map it to the same CubeAPI URL.
+        cmd.env("E2B_API_URL", &cube_api_url);
+        // The SDK requires a non-empty API key; for local dev any
+        // placeholder satisfies the check.
+        if std::env::var("E2B_API_KEY").is_err() {
+            cmd.env("E2B_API_KEY", "e2b_0000000000000000000000000000000000000000");
+        }
+        // Data-plane: the sidecar proxies to CubeProxy. Derive the
+        // base URL from the proxy config.
+        let proxy_base = if let Some(ref ip) = state.config.cube_proxy_node_ip {
+            let port_suffix = state
+                .config
+                .cube_proxy_port_http
+                .filter(|&p| p != 443)
+                .map(|p| format!(":{}", p))
+                .unwrap_or_default();
+            format!("https://{}{}", ip, port_suffix)
+        } else {
+            // No explicit proxy IP configured; assume CubeProxy (nginx)
+            // is on localhost at the standard HTTPS port.
+            let port_suffix = state
+                .config
+                .cube_proxy_port_http
+                .filter(|&p| p != 443)
+                .map(|p| format!(":{}", p))
+                .unwrap_or_default();
+            format!("https://127.0.0.1{}", port_suffix)
+        };
+        cmd.env("CUBE_REMOTE_PROXY_BASE", &proxy_base);
+        cmd.env("CUBE_REMOTE_PROXY_VERIFY_SSL", "false");
+        // The sidecar reads CUBE_REMOTE_SANDBOX_DOMAIN for the Host
+        // header sent to CubeProxy. Map it from the same domain config.
+        cmd.env("CUBE_REMOTE_SANDBOX_DOMAIN", &state.config.sandbox_domain);
+    }
 
     let start = Instant::now();
     let max_secs = sc.timeout_secs.unwrap_or(120);
