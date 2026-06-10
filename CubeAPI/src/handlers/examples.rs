@@ -1130,40 +1130,112 @@ pub async fn run_example(
     // ── When the user edited the code, materialise a temp file next to
     // the original so relative imports / shared modules keep working.
     let mut tmp_path: Option<PathBuf> = None;
+    let mut tmp_dir: Option<PathBuf> = None; // for Go: isolated subdirectory
     let run_path: PathBuf = if let Some(user_code) = req.code.as_ref() {
-        let tmp_name = format!(".tmp_run_{}.{}", Uuid::new_v4(), ext);
-        let tmp = base_dir.join(&tmp_name);
-        if let Err(io_err) = std::fs::write(&tmp, user_code) {
-            return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(RunExampleResponse {
-                    stdout: String::new(),
-                    stderr: format!(
-                        "Failed to write edited code to {}: {}",
-                        tmp.display(),
-                        io_err
-                    ),
-                    exit_code: 1,
-                    success: false,
-                    elapsed_ms: 0,
-                    steps: Vec::new(),
-                    topology: topology_with_status(sc.topology.clone(), false),
-                    ran_edited: true,
-                }),
-            )
-                .into_response());
+        if program == "go" {
+            // For Go, place the edited file in an isolated subdirectory so
+            // that `go run .` compiles only the user's code without
+            // conflicting with the other `.go` files in the package.
+            let dir_name = format!(".tmp_run_{}", Uuid::new_v4());
+            let dir = base_dir.join(&dir_name);
+            if let Err(io_err) = std::fs::create_dir_all(&dir) {
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(RunExampleResponse {
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Failed to create temp dir {}: {}",
+                            dir.display(),
+                            io_err
+                        ),
+                        exit_code: 1,
+                        success: false,
+                        elapsed_ms: 0,
+                        steps: Vec::new(),
+                        topology: topology_with_status(sc.topology.clone(), false),
+                        ran_edited: true,
+                    }),
+                )
+                    .into_response());
+            }
+            let tmp = dir.join(&meta.filename);
+            if let Err(io_err) = std::fs::write(&tmp, user_code) {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(RunExampleResponse {
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Failed to write edited code to {}: {}",
+                            tmp.display(),
+                            io_err
+                        ),
+                        exit_code: 1,
+                        success: false,
+                        elapsed_ms: 0,
+                        steps: Vec::new(),
+                        topology: topology_with_status(sc.topology.clone(), false),
+                        ran_edited: true,
+                    }),
+                )
+                    .into_response());
+            }
+            // Copy go.mod / go.sum so the isolated dir compiles as a
+            // standalone module.
+            for go_file in &["go.mod", "go.sum"] {
+                let src = base_dir.join(go_file);
+                if src.exists() {
+                    let _ = std::fs::copy(&src, dir.join(go_file));
+                }
+            }
+            tmp_path = Some(tmp);
+            tmp_dir = Some(dir.clone());
+            dir.join(&meta.filename)
+        } else {
+            let tmp_name = format!(".tmp_run_{}.{}", Uuid::new_v4(), ext);
+            let tmp = base_dir.join(&tmp_name);
+            if let Err(io_err) = std::fs::write(&tmp, user_code) {
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(RunExampleResponse {
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Failed to write edited code to {}: {}",
+                            tmp.display(),
+                            io_err
+                        ),
+                        exit_code: 1,
+                        success: false,
+                        elapsed_ms: 0,
+                        steps: Vec::new(),
+                        topology: topology_with_status(sc.topology.clone(), false),
+                        ran_edited: true,
+                    }),
+                )
+                    .into_response());
+            }
+            tmp_path = Some(tmp.clone());
+            tmp
         }
-        tmp_path = Some(tmp.clone());
-        tmp
     } else {
         script_path.clone()
     };
 
-    // Build argv from the resolved run_path. `go run file.go` needs an
-    // explicit "run" subcommand; everything else takes the path directly.
+    // Build argv from the resolved run_path.
+    // - For Go: use `go run .` to compile the whole package directory
+    //   (multi-file packages like cube-bench need this).
+    // - For everything else: pass the file path directly.
     let argv: Vec<String> = match program {
-        "go" => vec!["run".to_string(), run_path.to_string_lossy().to_string()],
+        "go" => vec!["run".to_string(), ".".to_string()],
         _ => vec![run_path.to_string_lossy().to_string()],
+    };
+
+    // For Go, the working directory must be the directory containing the
+    // entry file so that `go run .` finds all sibling `.go` files.
+    let work_dir = if program == "go" {
+        run_path.parent().unwrap_or(&base_dir).to_path_buf()
+    } else {
+        base_dir.clone()
     };
 
     let mut cmd = Command::new(program);
@@ -1173,7 +1245,15 @@ pub async fn run_example(
     cmd.env("CUBE_API_URL", &cube_api_url)
         .env("CUBE_TEMPLATE_ID", &template_id)
         .env("SSL_CERT_FILE", ssl_cert)
-        .current_dir(&base_dir);
+        .current_dir(&work_dir);
+
+    // ── Common: API key for all scenarios ─────────────────────────
+    // Many SDKs and examples (cube-bench, e2b SDK, etc.) require a
+    // non-empty API key. For local dev any placeholder satisfies the
+    // check. Prefer an explicitly set key if one exists.
+    if std::env::var("CUBE_API_KEY").is_err() {
+        cmd.env("CUBE_API_KEY", "cube_0000000000000000000000000000000000000000");
+    }
 
     if let Some(ref proxy_ip) = state.config.cube_proxy_node_ip {
         cmd.env("CUBE_PROXY_NODE_IP", proxy_ip);
@@ -1188,8 +1268,8 @@ pub async fn run_example(
         // The e2b SDK reads E2B_API_URL (not CUBE_API_URL) for the
         // control-plane endpoint. Map it to the same CubeAPI URL.
         cmd.env("E2B_API_URL", &cube_api_url);
-        // The SDK requires a non-empty API key; for local dev any
-        // placeholder satisfies the check.
+        // The e2b SDK also reads E2B_API_KEY. Map it from CUBE_API_KEY
+        // or use the same placeholder.
         if std::env::var("E2B_API_KEY").is_err() {
             cmd.env("E2B_API_KEY", "e2b_0000000000000000000000000000000000000000");
         }
@@ -1226,8 +1306,10 @@ pub async fn run_example(
     let run_result = timeout(Duration::from_secs(max_secs), cmd.output()).await;
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
-    // Always remove the temp file, even on error paths.
-    if let Some(p) = tmp_path.take() {
+    // Always remove the temp file/dir, even on error paths.
+    if let Some(d) = tmp_dir.take() {
+        let _ = std::fs::remove_dir_all(&d);
+    } else if let Some(p) = tmp_path.take() {
         let _ = std::fs::remove_file(&p);
     }
 
