@@ -54,6 +54,33 @@ export CUBE_API_SANDBOX_DOMAIN=your.domain.com
 
 With this in place, the `domain` field in API responses will return `your.domain.com`, allowing the E2B SDK to correctly construct sandbox access URLs.
 
+### Non-Default CubeProxy HTTPS Ports
+
+If CubeProxy is not exposed on the default HTTPS port `443`, include the external HTTPS port in `CUBE_API_SANDBOX_DOMAIN`:
+
+```bash
+export CUBE_PROXY_HTTPS_PORT=10443
+export CUBE_API_SANDBOX_DOMAIN=cube.app:10443
+```
+
+E2B-compatible clients construct data-plane URLs from the domain returned by CubeAPI. With `CUBE_API_SANDBOX_DOMAIN=cube.app`, a client will access:
+
+```text
+https://49983-<sandboxId>.cube.app/files
+```
+
+and the HTTPS client will use port `443`. If CubeProxy actually listens on `10443`, file upload, command execution, and other sandbox data-plane requests can fail with:
+
+```text
+dial tcp <cube-proxy-ip>:443: connect: connection refused
+```
+
+Publishing `cube.app:10443` makes clients use:
+
+```text
+https://49983-<sandboxId>.cube.app:10443/files
+```
+
 ---
 
 ## Path-Based Quick Access (No DNS / Cert)

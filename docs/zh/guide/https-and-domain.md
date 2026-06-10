@@ -54,6 +54,33 @@ export CUBE_API_SANDBOX_DOMAIN=your.domain.com
 
 这样 API 响应中的 `domain` 字段会返回 `your.domain.com`，E2B SDK 才能正确构建沙箱访问地址。
 
+### 非默认 CubeProxy HTTPS 端口
+
+如果 CubeProxy 没有暴露在默认 HTTPS 端口 `443`，需要在 `CUBE_API_SANDBOX_DOMAIN` 中带上外部 HTTPS 端口：
+
+```bash
+export CUBE_PROXY_HTTPS_PORT=10443
+export CUBE_API_SANDBOX_DOMAIN=cube.app:10443
+```
+
+E2B 兼容客户端会根据 CubeAPI 返回的 domain 构造数据面 URL。若配置为 `CUBE_API_SANDBOX_DOMAIN=cube.app`，客户端会访问：
+
+```text
+https://49983-<sandboxId>.cube.app/files
+```
+
+此时 HTTPS 客户端会使用默认端口 `443`。如果 CubeProxy 实际监听在 `10443`，上传文件、执行命令等沙箱数据面请求可能失败：
+
+```text
+dial tcp <cube-proxy-ip>:443: connect: connection refused
+```
+
+发布 `cube.app:10443` 后，客户端会改为访问：
+
+```text
+https://49983-<sandboxId>.cube.app:10443/files
+```
+
 ---
 
 ## 路径式快速访问（免 DNS / 免证书）

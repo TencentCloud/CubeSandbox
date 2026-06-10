@@ -272,6 +272,17 @@ CUBE_API_HEALTH_ADDR=127.0.0.1:3000
 CUBE_API_SANDBOX_DOMAIN=cube.app
 ```
 
+If the host ports `80` or `443` are already occupied, CubeProxy can use alternative ports. Keep the CubeProxy listener port and the domain published by CubeAPI consistent:
+
+```bash
+CUBE_PROXY_HTTP_PORT=10080
+CUBE_PROXY_HTTPS_PORT=10443
+CUBE_PROXY_HOST_PORT=10443
+CUBE_API_SANDBOX_DOMAIN=cube.app:10443
+```
+
+`CUBE_PROXY_HTTPS_PORT` controls where CubeProxy listens. `CUBE_API_SANDBOX_DOMAIN` controls the domain returned to E2B-compatible clients. When HTTPS is not exposed on `443`, the domain must include the port; otherwise clients will default to `443` for sandbox file upload and command execution requests.
+
 During installation, the following steps are performed:
 
 - If `mkcert` is not already installed on the system, it is copied from the bundled `support/bin/mkcert` to `/usr/local/bin/mkcert`. Then `mkcert -install` is run on the host under `CUBE_PROXY_CERT_DIR` (default `/usr/local/services/cubetoolbox/cubeproxy/certs/`) to generate `cube.app+3.pem` and `cube.app+3-key.pem`.

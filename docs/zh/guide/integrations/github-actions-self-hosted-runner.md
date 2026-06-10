@@ -38,6 +38,28 @@ flowchart LR
 - 一个 GitHub 可访问的公网 HTTPS webhook 地址。
 - 一个具备创建 self-hosted runner registration token 权限的 GitHub token。
 
+在配置 GitHub App 或 webhook 前，建议先分别验证 Cube 控制面和数据面：
+
+```bash
+# CubeAPI 控制面
+curl -fsS http://<cube-host>:3000/health
+
+# 在运行 e2b-github-runner 的机器上检查 CubeProxy HTTPS 数据面端口
+nc -vz <cube-proxy-host> 443
+
+# 沙箱 wildcard DNS 必须解析到 CubeProxy 所在机器
+getent hosts 49983-test.cube.app
+```
+
+如果 CubeProxy 暴露在非默认 HTTPS 端口，例如 `10443`，需要把该端口发布到 CubeAPI 返回的沙箱域名中：
+
+```bash
+export CUBE_API_SANDBOX_DOMAIN=cube.app:10443
+sudo systemctl restart cube-sandbox-cube-api.service
+```
+
+原因是 E2B 兼容客户端会根据 CubeAPI 返回的 domain 组装沙箱数据面 URL。如果 domain 只有 `cube.app`，客户端会默认访问 HTTPS `443`，即使 CubeProxy 实际监听在 `10443`。
+
 ## GitHub Token 权限
 
 仓库级 runner 推荐使用 fine-grained personal access token：
@@ -97,7 +119,7 @@ export MAX_CONCURRENT_RUNNERS="1"
 
 - `E2B_API_URL` 指向 CubeAPI，不是 CubeProxy。
 - 本地未启用鉴权的 Cube 部署中，`E2B_API_KEY` 可以填任意非空字符串。若 Cube 已启用鉴权，请填入认证回调服务认可的真实 key。
-- `E2B_DOMAIN` 必须与 CubeAPI 对外返回的沙箱域名一致。快速体验通常是 `cube.app`；生产环境建议使用已配置 wildcard DNS 的自有域名。
+- `E2B_DOMAIN` 必须与 CubeAPI 对外返回的沙箱域名一致。快速体验通常是 `cube.app`；生产环境建议使用已配置 wildcard DNS 的自有域名。如果 CubeProxy 使用非默认 HTTPS 端口，需要带上端口，例如 `cube.app:10443`。
 - `RUNNER_LABELS` 必须与 GitHub Actions workflow 中的 `runs-on` 标签一致。
 
 ## 启动 Runner 服务
@@ -180,6 +202,29 @@ jobs:
 5. GitHub 将 job 分配给沙箱内的 runner 执行。
 6. runner 退出后，服务清理对应沙箱。
 
+成功时，GitHub Actions 日志中应能看到 self-hosted runner 身份，以及 runner hook 导出的沙箱元信息：
+
+```text
+Runner name: 'e2b-80599715321'
+Machine name: 'tpl-5095'
+RUNNERD_JOB_STARTED
+Notice: sandbox_id=a1c386f2ca3144f1868b1be93f0a9251 runner_request_id=80599715321 runner_name=e2b-80599715321
+Run uname -a
+Linux tpl-5095 6.6.1199-0009-03_2.0.1 ... x86_64 GNU/Linux
+RUNNERD_JOB_COMPLETED
+```
+
+在 runner 服务侧，健康请求会经过同样的关键阶段：
+
+```text
+workflow_job webhook parsed action=queued job_name=smoke labels=["self-hosted","e2b"]
+matched runner profile profile=ubuntu-24-04
+starting sandbox runner id=80599715321 runner_name=e2b-80599715321
+sandbox runner started sandbox_id=a1c386f2ca3144f1868b1be93f0a9251 pid=9
+runner is listening for jobs id=80599715321
+workflow_job completed handled job_id=80599715321 status=completed
+```
+
 ## 排查
 
 查看活跃 runner 请求：
@@ -205,11 +250,37 @@ cat var/runners/<request_id>/stderr.log
 | job 一直 queued | workflow 标签和 `RUNNER_LABELS` 不匹配 | 使用 `runs-on: [self-hosted, e2b]` 或修改 `RUNNER_LABELS` |
 | runner 注册失败 | GitHub token 缺少 runner 权限 | 检查仓库 `Administration: Read and write` 或组织 runner 管理权限 |
 | 沙箱创建失败 | CubeAPI 地址、API key 或模板 ID 错误 | 检查 `E2B_API_URL`、`E2B_API_KEY` 和 `SANDBOX_TEMPLATE_ID` |
+| 上传文件失败并出现 `dial tcp <proxy-ip>:443: connect: connection refused` | CubeProxy 监听在非默认 HTTPS 端口，但 CubeAPI 发布的沙箱域名没有带端口 | 设置 `CUBE_API_SANDBOX_DOMAIN=<domain>:<https-port>` 并重启 `cube-api` |
 | runner 无法访问 GitHub | 沙箱镜像或网络策略阻止出站访问 | 放通到 GitHub 的 HTTPS 出站访问，并在模板中安装必要工具 |
 | 数据面连接失败 | wildcard DNS 或 TLS 未配置 | 按[HTTPS 证书与域名解析](../https-and-domain.md)配置 |
 | `runner concurrency limit reached` | 活跃 runner 数达到 `MAX_CONCURRENT_RUNNERS` | 提高并发限制或等待已有 job 完成 |
 
 runner 注册成功且 job 开始执行后，workflow step 日志会正常显示在 GitHub Actions 页面中。沙箱创建、webhook 校验、runner 注册和清理错误属于服务控制面日志，应优先检查 `STATE_DIR` 和 `runnerd` 进程日志。
+
+向上游反馈问题时，建议提供能覆盖各层链路的最小日志集合：
+
+- GitHub delivery ID 和 `workflow_job` action，例如 `workflow_job.queued`。
+- runner 服务从收到 webhook 到启动沙箱或失败的日志。
+- runner request 的 control log 或 state 文件。
+- Cube 主机上的 CubeAPI 和 CubeProxy 日志。
+- 相关 Cube 运行时环境变量，尤其是 `CUBE_API_SANDBOX_DOMAIN`、`CUBE_PROXY_HTTP_PORT` 和 `CUBE_PROXY_HTTPS_PORT`。
+
+one-click 部署可以使用诊断收集脚本采集 Cube 侧日志和已脱敏配置：
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh \
+  --module cube-api \
+  --module cube-proxy \
+  --module cubelet \
+  --module runtime \
+  --module env \
+  --module configs \
+  --lines 1000 \
+  --dir /tmp/cube-diag-github-runner
+
+cd /tmp
+sudo tar czf cube-diag-github-runner.tar.gz cube-diag-github-runner
+```
 
 ## 参考资料
 

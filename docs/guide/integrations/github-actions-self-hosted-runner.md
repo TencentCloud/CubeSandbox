@@ -38,6 +38,28 @@ flowchart LR
 - A public HTTPS endpoint that GitHub can call for webhook delivery.
 - A GitHub token with permission to create self-hosted runner registration tokens.
 
+Before wiring the GitHub App or webhook, verify the Cube control plane and data plane separately:
+
+```bash
+# CubeAPI control plane
+curl -fsS http://<cube-host>:3000/health
+
+# CubeProxy HTTPS data plane port on the client host that runs e2b-github-runner
+nc -vz <cube-proxy-host> 443
+
+# Wildcard sandbox DNS must resolve to the CubeProxy host.
+getent hosts 49983-test.cube.app
+```
+
+If CubeProxy is exposed on a non-default HTTPS port, such as `10443`, publish that port in the sandbox domain returned by CubeAPI:
+
+```bash
+export CUBE_API_SANDBOX_DOMAIN=cube.app:10443
+sudo systemctl restart cube-sandbox-cube-api.service
+```
+
+This is required because E2B-compatible clients build sandbox data-plane URLs from the domain returned by CubeAPI. If the domain is only `cube.app`, clients will use the default HTTPS port `443` even when CubeProxy is actually listening on `10443`.
+
 ## GitHub Token Permissions
 
 For repository runners, use a fine-grained personal access token when possible:
@@ -97,7 +119,7 @@ Notes:
 
 - `E2B_API_URL` points to CubeAPI, not CubeProxy.
 - `E2B_API_KEY` can be any non-empty value for a local unauthenticated Cube deployment. If Cube authentication is enabled, use a real key accepted by your auth callback.
-- `E2B_DOMAIN` must match the sandbox domain published by CubeAPI. The default quick-start domain is usually `cube.app`; production deployments should use a domain with wildcard DNS.
+- `E2B_DOMAIN` must match the sandbox domain published by CubeAPI. The default quick-start domain is usually `cube.app`; production deployments should use a domain with wildcard DNS. If CubeProxy uses a non-default HTTPS port, include the port, for example `cube.app:10443`.
 - `RUNNER_LABELS` must match the labels used by your GitHub Actions workflow.
 
 ## Start the Runner Service
@@ -180,6 +202,29 @@ Expected flow:
 5. GitHub assigns the job to the sandbox runner.
 6. When the runner exits, the service cleans up the sandbox.
 
+Successful GitHub Actions logs should show both the self-hosted runner identity and the sandbox metadata exported by the runner hooks:
+
+```text
+Runner name: 'e2b-80599715321'
+Machine name: 'tpl-5095'
+RUNNERD_JOB_STARTED
+Notice: sandbox_id=a1c386f2ca3144f1868b1be93f0a9251 runner_request_id=80599715321 runner_name=e2b-80599715321
+Run uname -a
+Linux tpl-5095 6.6.1199-0009-03_2.0.1 ... x86_64 GNU/Linux
+RUNNERD_JOB_COMPLETED
+```
+
+On the runner service side, a healthy request reaches the same milestones:
+
+```text
+workflow_job webhook parsed action=queued job_name=smoke labels=["self-hosted","e2b"]
+matched runner profile profile=ubuntu-24-04
+starting sandbox runner id=80599715321 runner_name=e2b-80599715321
+sandbox runner started sandbox_id=a1c386f2ca3144f1868b1be93f0a9251 pid=9
+runner is listening for jobs id=80599715321
+workflow_job completed handled job_id=80599715321 status=completed
+```
+
 ## Troubleshooting
 
 Check active runner requests:
@@ -205,11 +250,37 @@ Common issues:
 | Job stays queued | Workflow labels do not match `RUNNER_LABELS` | Use `runs-on: [self-hosted, e2b]` or update `RUNNER_LABELS` |
 | Runner registration fails | GitHub token lacks runner permissions | Check repository `Administration: Read and write` or organization runner permissions |
 | Sandbox creation fails | CubeAPI URL, API key, or template ID is wrong | Verify `E2B_API_URL`, `E2B_API_KEY`, and `SANDBOX_TEMPLATE_ID` |
+| File upload fails with `dial tcp <proxy-ip>:443: connect: connection refused` | CubeProxy is listening on a non-default HTTPS port, but CubeAPI publishes a sandbox domain without that port | Set `CUBE_API_SANDBOX_DOMAIN=<domain>:<https-port>` and restart `cube-api` |
 | Runner cannot reach GitHub | Sandbox image or network policy blocks outbound access | Allow outbound HTTPS to GitHub and include required tools in the template |
 | Data-plane connection fails | Wildcard DNS or TLS is not configured | Follow [HTTPS & Domain Resolution](../https-and-domain.md) |
 | `runner concurrency limit reached` | Active runner count reached `MAX_CONCURRENT_RUNNERS` | Increase the limit or wait for existing jobs to finish |
 
 GitHub Actions job logs are visible in the normal Actions UI after the runner is registered and the job starts. Sandbox creation, webhook validation, runner registration, and cleanup errors are service-side control-plane logs, so check `STATE_DIR` and the `runnerd` process logs first.
+
+When reporting issues upstream, include the smallest log set that shows each layer:
+
+- GitHub delivery ID and `workflow_job` action, for example `workflow_job.queued`.
+- Runner service logs from webhook receipt through sandbox startup or failure.
+- The runner request control log or state file.
+- CubeAPI and CubeProxy logs collected from the Cube host.
+- The relevant Cube runtime environment, especially `CUBE_API_SANDBOX_DOMAIN`, `CUBE_PROXY_HTTP_PORT`, and `CUBE_PROXY_HTTPS_PORT`.
+
+For one-click deployments, the diagnostic collector can gather the Cube-side logs and redacted configuration:
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/cube-diag/collect-logs.sh \
+  --module cube-api \
+  --module cube-proxy \
+  --module cubelet \
+  --module runtime \
+  --module env \
+  --module configs \
+  --lines 1000 \
+  --dir /tmp/cube-diag-github-runner
+
+cd /tmp
+sudo tar czf cube-diag-github-runner.tar.gz cube-diag-github-runner
+```
 
 ## References
 
