@@ -261,17 +261,6 @@ CUBE_API_HEALTH_ADDR=127.0.0.1:3000
 CUBE_API_SANDBOX_DOMAIN=cube.app
 ```
 
-如果宿主机的 `80` 或 `443` 已被占用，CubeProxy 可以改用其他端口。此时需要保持 CubeProxy 监听端口和 CubeAPI 对客户端发布的域名一致：
-
-```bash
-CUBE_PROXY_HTTP_PORT=10080
-CUBE_PROXY_HTTPS_PORT=10443
-CUBE_PROXY_HOST_PORT=10443
-CUBE_API_SANDBOX_DOMAIN=cube.app:10443
-```
-
-`CUBE_PROXY_HTTPS_PORT` 控制 CubeProxy 实际监听端口；`CUBE_API_SANDBOX_DOMAIN` 控制 CubeAPI 返回给 E2B 兼容客户端的沙箱域名。当 HTTPS 不暴露在 `443` 时，domain 必须包含端口，否则客户端会默认访问 `443` 来上传文件或执行命令。
-
 安装过程中会做这些事：
 
 - 若系统尚未安装 `mkcert`，从安装包内置的 `support/bin/mkcert` 复制到 `/usr/local/bin/mkcert`，再在宿主机 `CUBE_PROXY_CERT_DIR`（默认 `/usr/local/services/cubetoolbox/cubeproxy/certs/`）下执行 `mkcert -install` 并生成 `cube.app+3.pem`、`cube.app+3-key.pem`
