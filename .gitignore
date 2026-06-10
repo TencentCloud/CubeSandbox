@@ -39,6 +39,9 @@ examples/host-mount/__pycache__/
 examples/network-policy/__pycache__/
 examples/snapshot-rollback-clone/__pycache__/
 
+# Auto-generated pip install fingerprints (local cache, do not commit)
+examples/*/.requirements_installed
+
 pvm-guest-build/
 pvm-host-build/
 
