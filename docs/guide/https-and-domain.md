@@ -58,6 +58,8 @@ With this in place, the `domain` field in API responses will return `your.domain
 
 If CubeProxy is not exposed on the default HTTPS port `443`, include the external HTTPS port in `CUBE_API_SANDBOX_DOMAIN`:
 
+`CUBE_PROXY_HTTPS_PORT` controls the external HTTPS port where CubeProxy listens. It must match the port mapping in the CubeProxy deployment configuration. If unset, CubeProxy defaults to `443`.
+
 ```bash
 export CUBE_PROXY_HTTPS_PORT=10443
 export CUBE_API_SANDBOX_DOMAIN=cube.app:10443

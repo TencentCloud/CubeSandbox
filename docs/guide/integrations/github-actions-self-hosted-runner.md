@@ -36,7 +36,7 @@ flowchart LR
 - A Cube template that can run the GitHub Actions runner process. The template image should include basic build tools needed by your workflows, such as `bash`, `curl`, `tar`, `git`, and any language runtimes used by your jobs.
 - Network access from `e2b-github-runner` to CubeAPI, and data-plane access to CubeProxy. For production, configure wildcard DNS and TLS as described in [HTTPS & Domain Resolution](../https-and-domain.md).
 - A public HTTPS endpoint that GitHub can call for webhook delivery.
-- A GitHub token with permission to create self-hosted runner registration tokens.
+- A GitHub App or token with permission to receive `workflow_job` webhook events and create self-hosted runner registration tokens.
 
 Before wiring the GitHub App or webhook, verify the Cube control plane and data plane separately:
 
@@ -48,7 +48,8 @@ curl -fsS http://<cube-host>:3000/health
 nc -vz <cube-proxy-host> 443
 
 # Wildcard sandbox DNS must resolve to the CubeProxy host.
-getent hosts 49983-test.cube.app
+# Replace <sandbox-id> with an actual sandbox ID from your deployment.
+getent hosts 49983-<sandbox-id>.cube.app
 ```
 
 If CubeProxy is exposed on a non-default HTTPS port, such as `10443`, publish that port in the sandbox domain returned by CubeAPI:
@@ -60,14 +61,17 @@ sudo systemctl restart cube-sandbox-cube-api.service
 
 This is required because E2B-compatible clients build sandbox data-plane URLs from the domain returned by CubeAPI. If the domain is only `cube.app`, clients will use the default HTTPS port `443` even when CubeProxy is actually listening on `10443`.
 
-## GitHub Token Permissions
+## GitHub App and Token Permissions
 
-For repository runners, use a fine-grained personal access token when possible:
+Prefer a GitHub App installation token over a long-lived personal access token. Install the app only on the repositories that should be allowed to launch Cube-backed runners.
 
-- Repository access: select only the target repository.
-- Repository permissions: set `Administration` to `Read and write`.
+Minimum permissions are split by function:
 
-For organization runners, the token must be allowed to manage organization self-hosted runners. The service uses GitHub's runner registration token APIs for the configured scope.
+- Webhook delivery: subscribe to the `Workflow jobs` event. For GitHub Apps, GitHub requires at least read-level access to the `Actions` repository permission to receive `workflow_job` events.
+- Repository-level runners: the REST API that creates repository runner registration and remove tokens currently requires `Administration` repository permission with `Read and write` access. This is broader than the webhook permission, so restrict the GitHub App installation or fine-grained token to the target repositories only.
+- Organization-level runners: prefer `Self-hosted runners` organization permission with `Read and write` access instead of broad organization administration scopes.
+
+The service uses GitHub's runner registration token APIs for the configured scope.
 
 ## Configure the Runner Service
 
@@ -81,13 +85,21 @@ cd e2b-github-runner
 Required environment variables:
 
 ```bash
-export E2B_API_URL="http://<cube-host>:3000"
+export E2B_API_URL="https://<cube-host>:3000"
 export E2B_API_KEY="<cube-api-key-or-dummy>"
 export E2B_DOMAIN="<cube-sandbox-domain>"
 export SANDBOX_TEMPLATE_ID="<cube-template-id>"
 
 export GITHUB_TOKEN="<github-token>"
 export GITHUB_WEBHOOK_SECRET="<random-webhook-secret>"
+```
+
+For local unauthenticated deployments, `E2B_API_URL` can use `http://<cube-host>:3000`. For production, use HTTPS to protect the API key and sandbox management commands from network eavesdropping.
+
+Generate a strong webhook secret instead of choosing a short human-readable string:
+
+```bash
+export GITHUB_WEBHOOK_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 Use repository scope:
@@ -233,13 +245,13 @@ Check active runner requests:
 curl -fsS http://127.0.0.1:8080/runners | jq
 ```
 
-Inspect per-request state and logs:
+Inspect per-request state and logs. The following paths assume the default `STATE_DIR=./var/runners`; if you set an absolute `STATE_DIR`, replace `./var/runners` with that directory:
 
 ```bash
-cat var/runners/<request_id>/state.json
-cat var/runners/<request_id>/control.log
-cat var/runners/<request_id>/stdout.log
-cat var/runners/<request_id>/stderr.log
+cat ./var/runners/<request_id>/state.json
+cat ./var/runners/<request_id>/control.log
+cat ./var/runners/<request_id>/stdout.log
+cat ./var/runners/<request_id>/stderr.log
 ```
 
 Common issues:

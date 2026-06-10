@@ -36,7 +36,7 @@ flowchart LR
 - 一个可运行 GitHub Actions runner 进程的 Cube 模板。模板镜像中应包含工作流需要的基础工具，例如 `bash`、`curl`、`tar`、`git`，以及 job 需要的语言运行时。
 - `e2b-github-runner` 能访问 CubeAPI，并能通过 CubeProxy 访问沙箱数据面。生产环境请按[HTTPS 证书与域名解析](../https-and-domain.md)配置泛域名解析和 TLS。
 - 一个 GitHub 可访问的公网 HTTPS webhook 地址。
-- 一个具备创建 self-hosted runner registration token 权限的 GitHub token。
+- 一个具备接收 `workflow_job` webhook 事件并创建 self-hosted runner registration token 权限的 GitHub App 或 token。
 
 在配置 GitHub App 或 webhook 前，建议先分别验证 Cube 控制面和数据面：
 
@@ -48,7 +48,8 @@ curl -fsS http://<cube-host>:3000/health
 nc -vz <cube-proxy-host> 443
 
 # 沙箱 wildcard DNS 必须解析到 CubeProxy 所在机器
-getent hosts 49983-test.cube.app
+# 将 <sandbox-id> 替换为当前部署中的真实 sandbox ID
+getent hosts 49983-<sandbox-id>.cube.app
 ```
 
 如果 CubeProxy 暴露在非默认 HTTPS 端口，例如 `10443`，需要把该端口发布到 CubeAPI 返回的沙箱域名中：
@@ -60,14 +61,17 @@ sudo systemctl restart cube-sandbox-cube-api.service
 
 原因是 E2B 兼容客户端会根据 CubeAPI 返回的 domain 组装沙箱数据面 URL。如果 domain 只有 `cube.app`，客户端会默认访问 HTTPS `443`，即使 CubeProxy 实际监听在 `10443`。
 
-## GitHub Token 权限
+## GitHub App 和 Token 权限
 
-仓库级 runner 推荐使用 fine-grained personal access token：
+优先使用 GitHub App installation token，而不是长期有效的 personal access token。安装 GitHub App 时只选择允许启动 Cube-backed runner 的目标仓库。
 
-- Repository access：只选择目标仓库。
-- Repository permissions：将 `Administration` 设为 `Read and write`。
+最小权限需要按用途拆开看：
 
-组织级 runner 需要 token 具备管理组织 self-hosted runner 的权限。服务会根据配置的 scope 调用 GitHub runner registration token API。
+- Webhook 投递：订阅 `Workflow jobs` 事件。对 GitHub App 来说，GitHub 要求至少具备 `Actions` 仓库权限的 read-level 访问，才能接收 `workflow_job` 事件。
+- 仓库级 runner：创建 repository runner registration token 和 remove token 的 REST API 当前要求 `Administration` 仓库权限为 `Read and write`。这比 webhook 权限更宽，因此应把 GitHub App installation 或 fine-grained token 限制到目标仓库。
+- 组织级 runner：优先使用 `Self-hosted runners` 组织权限的 `Read and write`，避免使用过宽的组织管理权限。
+
+服务会根据配置的 scope 调用 GitHub runner registration token API。
 
 ## 配置 Runner 服务
 
@@ -81,13 +85,21 @@ cd e2b-github-runner
 必需环境变量：
 
 ```bash
-export E2B_API_URL="http://<cube-host>:3000"
+export E2B_API_URL="https://<cube-host>:3000"
 export E2B_API_KEY="<cube-api-key-or-dummy>"
 export E2B_DOMAIN="<cube-sandbox-domain>"
 export SANDBOX_TEMPLATE_ID="<cube-template-id>"
 
 export GITHUB_TOKEN="<github-token>"
 export GITHUB_WEBHOOK_SECRET="<random-webhook-secret>"
+```
+
+本地未启用鉴权的部署可以使用 `http://<cube-host>:3000`。生产环境建议使用 HTTPS，避免 `E2B_API_KEY` 和沙箱管理请求在网络中明文传输。
+
+不要手写较短的 webhook secret，建议生成强随机值：
+
+```bash
+export GITHUB_WEBHOOK_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 使用仓库级 runner：
@@ -233,13 +245,13 @@ workflow_job completed handled job_id=80599715321 status=completed
 curl -fsS http://127.0.0.1:8080/runners | jq
 ```
 
-查看单个请求的状态和日志：
+查看单个请求的状态和日志。下面的路径假设使用默认 `STATE_DIR=./var/runners`；如果配置了绝对路径形式的 `STATE_DIR`，请把 `./var/runners` 替换成对应目录：
 
 ```bash
-cat var/runners/<request_id>/state.json
-cat var/runners/<request_id>/control.log
-cat var/runners/<request_id>/stdout.log
-cat var/runners/<request_id>/stderr.log
+cat ./var/runners/<request_id>/state.json
+cat ./var/runners/<request_id>/control.log
+cat ./var/runners/<request_id>/stdout.log
+cat ./var/runners/<request_id>/stderr.log
 ```
 
 常见问题：

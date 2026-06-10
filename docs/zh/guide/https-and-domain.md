@@ -58,6 +58,8 @@ export CUBE_API_SANDBOX_DOMAIN=your.domain.com
 
 如果 CubeProxy 没有暴露在默认 HTTPS 端口 `443`，需要在 `CUBE_API_SANDBOX_DOMAIN` 中带上外部 HTTPS 端口：
 
+`CUBE_PROXY_HTTPS_PORT` 控制 CubeProxy 对外监听的 HTTPS 端口，必须与 CubeProxy 部署配置中的端口映射一致。未设置时，CubeProxy 默认使用 `443`。
+
 ```bash
 export CUBE_PROXY_HTTPS_PORT=10443
 export CUBE_API_SANDBOX_DOMAIN=cube.app:10443
