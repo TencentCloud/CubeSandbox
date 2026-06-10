@@ -33,7 +33,7 @@ Compared to the [bare-metal benchmark report](./2026-06-01-cubesandbox-perf-benc
 | Machine | Tencent Cloud [Standard CVM SA9.4XLARGE32](https://cloud.tencent.com/document/product/213/11518) (available for purchase from the Tencent Cloud console) |
 | Availability Zone | — |
 | OS | OpenCloudOS 9.4 |
-| Kernel | `6.6.69-cube.pvm.host.005.x` |
+| Kernel | `6.6.69-opencloudos.oc9.cubesandbox.pvm.host` |
 | CPU Model | AMD EPYC 9K65 |
 | CPU Config | 1 Socket × 16 Core × 1 Thread = **16 logical cores** |
 | NUMA Nodes | 1 (node0: 0-15) |

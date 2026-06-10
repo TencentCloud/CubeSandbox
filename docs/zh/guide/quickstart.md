@@ -64,7 +64,7 @@ sudo su root
 
 #### RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）
 
-在 [Release 附件列表](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/) 中找到 `kernel-*cube.pvm.host*.x86_64.rpm`，右键复制下载链接：
+在 [Release 附件列表](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/) 中找到 `kernel-*opencloudos.oc9.cubesandbox.pvm.host*.x86_64.rpm`，右键复制下载链接：
 
 ```bash
 # 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接
@@ -95,13 +95,13 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/pvm/gr
 
 #### DEB 系（Ubuntu、Debian）
 
-在 [Release 附件列表](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/) 中找到 `linux-image-*cube.pvm.host*_amd64.deb`，右键复制下载链接：
+在 [Release 附件列表](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/) 中找到 `linux-image-*opencloudos.oc9.cubesandbox.pvm.host*_amd64.deb`，右键复制下载链接：
 
 ```bash
 # 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接
 wget "<linux-image deb 下载链接>"
 
-dpkg -i linux-image-*cube.pvm.host*.deb
+dpkg -i linux-image-*opencloudos.oc9.cubesandbox.pvm.host*.deb
 ```
 
 设置 PVM 内核为默认启动项：
@@ -111,7 +111,7 @@ dpkg -i linux-image-*cube.pvm.host*.deb
 ls /boot/vmlinuz-*
 
 # 将 GRUB 默认启动项指向 PVM 内核（将下面的内核版本替换为上一步看到的实际版本字符串）
-KVER="$(ls /boot/vmlinuz-*cube.pvm.host* | sed 's|/boot/vmlinuz-||' | tail -1)"
+KVER="$(ls /boot/vmlinuz-*opencloudos.oc9.cubesandbox.pvm.host* | sed 's|/boot/vmlinuz-||' | tail -1)"
 sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"Advanced options for Ubuntu>Ubuntu, with Linux ${KVER}\"|" \
   /etc/default/grub
 ```
@@ -133,7 +133,7 @@ reboot
 ```bash
 # 确认内核版本
 uname -r
-# 期望输出包含：cube.pvm.host
+# 期望输出包含：opencloudos.oc9.cubesandbox.pvm.host
 
 # 加载 PVM KVM 模块
 modprobe kvm_pvm
