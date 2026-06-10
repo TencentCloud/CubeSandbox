@@ -27,7 +27,7 @@ import TemplateStorePage from '@/pages/TemplateStore';
 import AgentHubPage from '@/pages/AgentHub';
 import LoginPage from '@/pages/Login';
 import { AuthGuard } from '@/components/AuthGuard';
-import ExamplesPage from '@/pages/Examples';
+import ExamplesPage from '@/pages/SandboxCases';
 import { Placeholder } from '@/pages/Placeholder';
 import { Network, Activity, Settings, Package } from 'lucide-react';
 

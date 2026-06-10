@@ -1,0 +1,678 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Tencent. All rights reserved.
+//
+// Scenario registry used by the SandboxCases page. The page groups case
+// cards by scenario (sub-directory under examples/), shows a topology
+// preview per scenario, and filters by category / search keyword.
+//
+// AI / LLM scenarios are intentionally NOT exported — they live behind the
+// `hidden` flag on the Rust side and never appear in the API.
+
+import {
+  Boxes,
+  Camera,
+  CircuitBoard,
+  Cpu,
+  FlaskConical,
+  FolderOpen,
+  GitBranch,
+  Globe2,
+  Layers,
+  type LucideIcon,
+  Network,
+  Rocket,
+  Server,
+  ShieldCheck,
+  TimerReset,
+} from 'lucide-react';
+
+export type ExampleCategoryId =
+  | 'basics'
+  | 'filesystem'
+  | 'lifecycle'
+  | 'network'
+  | 'browser'
+  | 'image'
+  | 'perf'
+  | 'advanced';
+
+export interface ExampleCategory {
+  id: ExampleCategoryId;
+  /** Translation key without namespace prefix. */
+  i18nKey: string;
+  icon: LucideIcon;
+  /** Tailwind gradient classes for the card banner. */
+  accent: string;
+  /** Description used as the category heading hint. */
+  hintZh: string;
+  hintEn: string;
+}
+
+export const EXAMPLE_CATEGORIES: ExampleCategory[] = [
+  {
+    id: 'basics',
+    i18nKey: 'categories.basics',
+    icon: Rocket,
+    accent: 'from-primary/20 via-primary/5 to-transparent',
+    hintZh: '沙箱最常用 API：创建、运行、读文件、暂停。',
+    hintEn: 'The most-used APIs: create, run, read files, pause.',
+  },
+  {
+    id: 'filesystem',
+    i18nKey: 'categories.filesystem',
+    icon: FolderOpen,
+    accent: 'from-cube-emerald/20 via-cube-emerald/5 to-transparent',
+    hintZh: '把主机目录挂载进沙箱、或在沙箱内读写文件。',
+    hintEn: 'Mount host directories and read / write inside the guest.',
+  },
+  {
+    id: 'lifecycle',
+    i18nKey: 'categories.lifecycle',
+    icon: TimerReset,
+    accent: 'from-cube-amber/20 via-cube-amber/5 to-transparent',
+    hintZh: '快照、回滚、克隆：让沙箱像 Git 一样可分叉。',
+    hintEn: 'Snapshot, rollback, clone: branch sandboxes like Git.',
+  },
+  {
+    id: 'network',
+    i18nKey: 'categories.network',
+    icon: Network,
+    accent: 'from-cube-violet/20 via-cube-violet/5 to-transparent',
+    hintZh: '用 eBPF 数据面强制执行 allow / deny / 隔离策略。',
+    hintEn: 'Enforce allow / deny / isolation through the eBPF datapath.',
+  },
+  {
+    id: 'browser',
+    i18nKey: 'categories.browser',
+    icon: Globe2,
+    accent: 'from-cube-cyan/20 via-cube-cyan/5 to-transparent',
+    hintZh: '在沙箱里跑 Playwright + Chromium,直接 CDP 控制。',
+    hintEn: 'Run Playwright + Chromium inside the guest, driven over CDP.',
+  },
+  {
+    id: 'image',
+    i18nKey: 'categories.image',
+    icon: Layers,
+    accent: 'from-cube-rose/20 via-cube-rose/5 to-transparent',
+    hintZh: '基于自定义镜像(nginx 等)启动沙箱并验证。',
+    hintEn: 'Boot a sandbox from a custom image (nginx, …) and verify.',
+  },
+  {
+    id: 'perf',
+    i18nKey: 'categories.perf',
+    icon: Cpu,
+    accent: 'from-cube-amber/15 via-cube-amber/5 to-transparent',
+    hintZh: '并发建沙箱、跑压测，拿到真实吞吐数字。',
+    hintEn: 'Concurrent sandbox creation, throughput numbers.',
+  },
+  {
+    id: 'advanced',
+    i18nKey: 'categories.advanced',
+    icon: CircuitBoard,
+    accent: 'from-cube-violet/15 via-cube-violet/5 to-transparent',
+    hintZh: '本地 Sidecar、Host 改写、e2b 兼容等高级玩法。',
+    hintEn: 'Local sidecar, Host rewriting, e2b-compatible mode.',
+  },
+];
+
+export type Plane = 'control' | 'data';
+export type NodeKind = 'user' | 'control' | 'data' | 'vm' | 'store';
+
+export interface ScenarioNode {
+  id: string;
+  labelZh: string;
+  labelEn: string;
+  plane: Plane;
+  kind: NodeKind;
+  descriptionZh: string;
+  descriptionEn: string;
+}
+
+export interface ScenarioEdge {
+  from: string;
+  to: string;
+  labelZh: string;
+  labelEn: string;
+  plane: Plane;
+}
+
+export interface ScenarioTopology {
+  nodes: ScenarioNode[];
+  edges: ScenarioEdge[];
+}
+
+export interface ScenarioFile {
+  /** File id matching the Rust registry (without scenario prefix). */
+  id: string;
+  filename: string;
+  titleZh: string;
+  titleEn: string;
+  descriptionZh: string;
+  descriptionEn: string;
+  language: 'python' | 'go' | 'bash' | 'javascript';
+}
+
+export interface ExampleScenario {
+  id: string;
+  titleZh: string;
+  titleEn: string;
+  descriptionZh: string;
+  descriptionEn: string;
+  category: ExampleCategoryId;
+  icon: LucideIcon;
+  /** Tailwind accent gradient for the left-rail group header. */
+  accent: string;
+  /** GitHub docs anchor; falls back to the repo root when unset. */
+  docsAnchor?: string;
+  topology: ScenarioTopology;
+  files: ScenarioFile[];
+}
+
+// ─── Shared topology helpers ────────────────────────────────────────────────
+//
+// Architecture overview:
+//
+//   Control plane (orchestration):
+//     User Script → CubeAPI → CubeMaster → Cubelet
+//
+//   Data plane (runtime, inside MicroVM):
+//     CubeAPI → CubeProxy → envd → Runner
+//
+//   The MicroVM is the sandbox isolation boundary. Cubelet creates/destroys
+//   it (control-plane action), but the actual workload runs inside it
+//   (data-plane). envd and the runner are processes INSIDE the MicroVM,
+//   reachable from CubeProxy over a WSS tunnel.
+
+const SHARED_NODES: ScenarioNode[] = [
+  // ── Control plane ──────────────────────────────────────────────
+  { id: 'user', labelZh: '用户脚本', labelEn: 'User Script', plane: 'control', kind: 'user',
+    descriptionZh: '你在页面上点击「运行」后发起的示例脚本调用。',
+    descriptionEn: 'The example invocation triggered when you click Run.' },
+  { id: 'cubeapi', labelZh: 'CubeAPI :3000', labelEn: 'CubeAPI :3000', plane: 'control', kind: 'control',
+    descriptionZh: 'HTTP 网关：校验请求 → 调度 CubeMaster 创建沙箱 → 代理数据到 CubeProxy。',
+    descriptionEn: 'HTTP gateway: validates requests, schedules sandbox creation via CubeMaster, proxies data via CubeProxy.' },
+  { id: 'cubemaster', labelZh: 'CubeMaster', labelEn: 'CubeMaster', plane: 'control', kind: 'control',
+    descriptionZh: '调度器：根据模板和负载挑选 Cubelet 节点，下发创建 MicroVM。',
+    descriptionEn: 'Scheduler: picks a Cubelet node based on template & load, then creates a MicroVM.' },
+  { id: 'cubelet', labelZh: 'Cubelet', labelEn: 'Cubelet', plane: 'control', kind: 'control',
+    descriptionZh: '节点代理：管理本机 MicroVM 完整生命周期（创建/销毁/暂停/恢复/快照）。',
+    descriptionEn: 'Per-node agent: manages the full MicroVM lifecycle (create/destroy/pause/resume/snapshot).' },
+
+  // ── Data plane ─────────────────────────────────────────────────
+  { id: 'cubeproxy', labelZh: 'CubeProxy', labelEn: 'CubeProxy', plane: 'data', kind: 'control',
+    descriptionZh: 'TLS 终结的反向代理：将外部请求通过 WSS 隧道转发到沙箱内的 envd。',
+    descriptionEn: 'TLS-terminating reverse proxy: forwards requests via WSS tunnel to in-sandbox envd.' },
+  { id: 'microvm', labelZh: 'KVM MicroVM', labelEn: 'KVM MicroVM', plane: 'data', kind: 'vm',
+    descriptionZh: 'QEMU/KVM 微虚拟机：沙箱的运行时隔离边界，内部运行 envd 和用户工作负载。',
+    descriptionEn: 'QEMU/KVM MicroVM: the sandbox isolation boundary, running envd and the user workload.' },
+  { id: 'envd', labelZh: 'envd :49983', labelEn: 'envd :49983', plane: 'data', kind: 'data',
+    descriptionZh: '沙箱内守护进程：暴露 Jupyter 内核、文件系统访问和 Shell 执行接口。',
+    descriptionEn: 'In-sandbox daemon: exposes Jupyter kernel, filesystem access, and shell execution.' },
+  { id: 'runner', labelZh: 'Python / Shell', labelEn: 'Python / Shell', plane: 'data', kind: 'data',
+    descriptionZh: '真正执行示例代码的解释器进程，由 envd fork+exec 启动。',
+    descriptionEn: 'The interpreter process that actually runs the example code, forked by envd.' },
+];
+
+const SHARED_EDGES: ScenarioEdge[] = [
+  // ── Control plane: request orchestration ───────────────────────
+  { from: 'user', to: 'cubeapi', labelZh: 'HTTPS', labelEn: 'HTTPS', plane: 'control' },
+  { from: 'cubeapi', to: 'cubemaster', labelZh: 'gRPC', labelEn: 'gRPC', plane: 'control' },
+  { from: 'cubemaster', to: 'cubelet', labelZh: 'gRPC', labelEn: 'gRPC', plane: 'control' },
+  { from: 'cubelet', to: 'microvm', labelZh: 'QMP / boot', labelEn: 'QMP / boot', plane: 'control' },
+
+  // ── Data plane: runtime data flow ──────────────────────────────
+  { from: 'cubeapi', to: 'cubeproxy', labelZh: 'HTTPS', labelEn: 'HTTPS', plane: 'data' },
+  { from: 'cubeproxy', to: 'envd', labelZh: 'WSS 隧道', labelEn: 'WSS tunnel', plane: 'data' },
+  { from: 'envd', to: 'runner', labelZh: 'fork+exec', labelEn: 'fork+exec', plane: 'data' },
+];
+
+function clone<T>(arr: T[]): T[] {
+  return arr.map((x) => ({ ...x }));
+}
+
+function cloneSharedTopology(): ScenarioTopology {
+  return { nodes: clone(SHARED_NODES), edges: clone(SHARED_EDGES) };
+}
+
+// ─── Scenario topologies ────────────────────────────────────────────────────
+//
+// Each scenario builds on the shared base and adds/removes nodes & edges
+// to reflect its unique architecture. The shared base already covers the
+// standard control-plane + data-plane flow; scenarios only need to declare
+// their differences.
+
+function topologyQuickstart(): ScenarioTopology {
+  // The standard topology is exactly the shared base — no additions needed.
+  return cloneSharedTopology();
+}
+
+function topologyNetworkPolicy(): ScenarioTopology {
+  const t = cloneSharedTopology();
+  // Replace the direct cubelet→microvm edge with an eBPF data-path hop.
+  // CubeVS sits on the veth between the host and the guest, enforcing
+  // allow/deny rules before packets reach the MicroVM.
+  t.edges = t.edges.filter((e) => !(e.from === 'cubelet' && e.to === 'microvm'));
+  t.nodes.push({
+    id: 'cubevs',
+    labelZh: 'CubeVS (eBPF)',
+    labelEn: 'CubeVS (eBPF)',
+    plane: 'data',
+    kind: 'control',
+    descriptionZh: 'eBPF 数据面：在 guest veth 上按 CIDR 规则强制执行 allow / deny。',
+    descriptionEn: 'eBPF datapath: enforces allow/deny by CIDR on the guest veth.',
+  });
+  t.edges.push(
+    { from: 'cubelet', to: 'cubevs', labelZh: 'tc / eBPF', labelEn: 'tc / eBPF', plane: 'data' },
+    { from: 'cubevs', to: 'microvm', labelZh: 'veth', labelEn: 'veth', plane: 'data' },
+  );
+  return t;
+}
+
+function topologyHostMount(): ScenarioTopology {
+  const t = cloneSharedTopology();
+  // Add a host directory that is bind-mounted into the MicroVM.
+  t.nodes.push({
+    id: 'hostdir',
+    labelZh: '主机目录',
+    labelEn: 'Host Directory',
+    plane: 'data',
+    kind: 'store',
+    descriptionZh: '主机本地目录，通过 9p / virtiofs 挂载到沙箱内 /mnt。',
+    descriptionEn: 'Host directory bind-mounted into the sandbox at /mnt via 9p / virtiofs.',
+  });
+  t.edges.push({
+    from: 'hostdir',
+    to: 'microvm',
+    labelZh: '9p / virtiofs',
+    labelEn: '9p / virtiofs',
+    plane: 'data',
+  });
+  return t;
+}
+
+function topologyBrowser(): ScenarioTopology {
+  const t = cloneSharedTopology();
+  // Replace the generic runner with Chromium + Playwright.
+  t.nodes = t.nodes.filter((n) => n.id !== 'runner');
+  t.edges = t.edges.filter((e) => !(e.from === 'envd' && e.to === 'runner'));
+  t.nodes.push(
+    {
+      id: 'playwright',
+      labelZh: 'Playwright (CDP)',
+      labelEn: 'Playwright (CDP)',
+      plane: 'data',
+      kind: 'data',
+      descriptionZh: 'Python 客户端，通过 Chrome DevTools Protocol 控制 Chromium。',
+      descriptionEn: 'Python client driving Chromium over Chrome DevTools Protocol.',
+    },
+    {
+      id: 'chromium',
+      labelZh: 'Chromium :9000',
+      labelEn: 'Chromium :9000',
+      plane: 'data',
+      kind: 'data',
+      descriptionZh: '沙箱内启用 CDP 的无头 Chromium 浏览器。',
+      descriptionEn: 'Headless Chromium inside the sandbox with CDP enabled.',
+    },
+  );
+  t.edges.push(
+    { from: 'envd', to: 'playwright', labelZh: 'exec', labelEn: 'exec', plane: 'data' },
+    { from: 'playwright', to: 'chromium', labelZh: 'CDP WS', labelEn: 'CDP WS', plane: 'data' },
+  );
+  return t;
+}
+
+function topologySnapshot(): ScenarioTopology {
+  const t = cloneSharedTopology();
+  // Add the LVM snapshot store between Cubelet and MicroVM.
+  // Snapshots outlive the sandbox and can be used for clone / rollback.
+  t.nodes.push({
+    id: 'snapshot',
+    labelZh: '快照 (LVM)',
+    labelEn: 'Snapshot (LVM)',
+    plane: 'control',
+    kind: 'store',
+    descriptionZh: '根 LV 的写时复制快照，生命周期独立于沙箱，用于克隆和回滚。',
+    descriptionEn: 'CoW snapshot of the root LV. Outlives the sandbox; used for clone & rollback.',
+  });
+  t.edges.push(
+    { from: 'cubelet', to: 'snapshot', labelZh: 'lvcreate', labelEn: 'lvcreate', plane: 'control' },
+    { from: 'snapshot', to: 'microvm', labelZh: 'rollback / clone', labelEn: 'rollback / clone', plane: 'control' },
+  );
+  return t;
+}
+
+function topologySidecar(): ScenarioTopology {
+  const t = cloneSharedTopology();
+  // Insert a dev-sidecar between CubeAPI and CubeProxy that rewrites
+  // the Host header to mimic the e2b client.
+  t.nodes.push({
+    id: 'sidecar',
+    labelZh: 'Dev Sidecar',
+    labelEn: 'Dev Sidecar',
+    plane: 'data',
+    kind: 'control',
+    descriptionZh: '本地反向代理：重写 Host 头以模拟 e2b 兼容客户端。',
+    descriptionEn: 'Local reverse-proxy that rewrites Host headers for e2b compatibility.',
+  });
+  t.edges = t.edges.filter((e) => !(e.from === 'cubeapi' && e.to === 'cubeproxy'));
+  t.edges.push(
+    { from: 'cubeapi', to: 'sidecar', labelZh: 'HTTPS', labelEn: 'HTTPS', plane: 'data' },
+    { from: 'sidecar', to: 'cubeproxy', labelZh: 'Host 改写', labelEn: 'Host rewrite', plane: 'data' },
+  );
+  return t;
+}
+
+function topologyNginx(): ScenarioTopology {
+  const t = cloneSharedTopology();
+  // Replace the generic runner with nginx serving static files.
+  t.nodes = t.nodes.filter((n) => n.id !== 'runner');
+  t.edges = t.edges.filter((e) => !(e.from === 'envd' && e.to === 'runner'));
+  t.nodes.push({
+    id: 'nginx',
+    labelZh: 'nginx :80',
+    labelEn: 'nginx :80',
+    plane: 'data',
+    kind: 'data',
+    descriptionZh: '沙箱内的 nginx，托管自定义镜像里的静态文件。',
+    descriptionEn: 'nginx serving static files from the custom image inside the sandbox.',
+  });
+  t.edges.push({
+    from: 'envd',
+    to: 'nginx',
+    labelZh: 'exec',
+    labelEn: 'exec',
+    plane: 'data',
+  });
+  return t;
+}
+
+function topologyBench(): ScenarioTopology {
+  const t = cloneSharedTopology();
+  // Fan out: replace single MicroVM with N parallel clones.
+  t.nodes = t.nodes.filter((n) => n.id !== 'microvm');
+  t.edges = t.edges.filter((e) => e.to !== 'microvm');
+  for (let i = 0; i < 4; i++) {
+    t.nodes.push({
+      id: `microvm-${i}`,
+      labelZh: `MicroVM #${i}`,
+      labelEn: `MicroVM #${i}`,
+      plane: 'data',
+      kind: 'vm',
+      descriptionZh: '并发压测的目标沙箱。',
+      descriptionEn: 'Concurrent benchmark target sandbox.',
+    });
+    t.edges.push({
+      from: 'cubelet',
+      to: `microvm-${i}`,
+      labelZh: 'QMP',
+      labelEn: 'QMP',
+      plane: 'control',
+    });
+  }
+  return t;
+}
+
+// ─── Scenario registry ──────────────────────────────────────────────────────
+//
+// 8 scenarios — none of them AI / LLM. The Rust handler enforces the same
+// `hidden: true` filter so even an attacker who knows the IDs cannot reach
+// these scenarios through the HTTP API.
+
+export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
+  {
+    id: 'code-sandbox-quickstart',
+    titleZh: '沙箱快速上手',
+    titleEn: 'Sandbox Quickstart',
+    descriptionZh: '创建一个沙箱并把最常用的 API 都跑一遍：create / exec_code / cmd / read / pause。',
+    descriptionEn: 'Create a sandbox and walk through the most-used APIs: create, exec_code, cmd, read, and pause.',
+    category: 'basics',
+    icon: Rocket,
+    accent: 'from-primary/20 via-primary/5 to-transparent',
+    topology: topologyQuickstart(),
+    files: [
+      { id: 'create', filename: 'create.py', language: 'python',
+        titleZh: '创建沙箱', titleEn: 'Create Sandbox',
+        descriptionZh: '从一个模板创建沙箱，并读取它的元数据。',
+        descriptionEn: 'Create a sandbox from a template and read its metadata.' },
+      { id: 'exec_code', filename: 'exec_code.py', language: 'python',
+        titleZh: '执行代码', titleEn: 'Execute Code',
+        descriptionZh: '通过 Jupyter 内核在沙箱里运行 Python 代码。',
+        descriptionEn: 'Run Python code inside the sandbox through the Jupyter kernel.' },
+      { id: 'cmd', filename: 'cmd.py', language: 'python',
+        titleZh: '执行 Shell', titleEn: 'Run Shell Command',
+        descriptionZh: '在沙箱里执行 Shell 命令并捕获 stdout。',
+        descriptionEn: 'Execute a shell command inside the sandbox and capture stdout.' },
+      { id: 'read', filename: 'read.py', language: 'python',
+        titleZh: '读 / 写文件', titleEn: 'Read / Write File',
+        descriptionZh: '读写沙箱内的文件。',
+        descriptionEn: 'Read and write files inside the sandbox.' },
+      { id: 'pause', filename: 'pause.py', language: 'python',
+        titleZh: '暂停与恢复', titleEn: 'Pause & Resume',
+        descriptionZh: '冻结沙箱状态并在之后恢复。',
+        descriptionEn: 'Freeze the sandbox memory and resume it later.' },
+    ],
+  },
+  {
+    id: 'network-policy',
+    titleZh: '网络策略',
+    titleEn: 'Network Policy',
+    descriptionZh: '应用网络策略并验证连通性。eBPF 数据面会拦截非法流量。',
+    descriptionEn: 'Apply network policies and verify connectivity. The eBPF datapath drops traffic that violates the policy.',
+    category: 'network',
+    icon: ShieldCheck,
+    accent: 'from-cube-violet/20 via-cube-violet/5 to-transparent',
+    topology: topologyNetworkPolicy(),
+    files: [
+      { id: 'network_no_internet', filename: 'network_no_internet.py', language: 'python',
+        titleZh: '无互联网', titleEn: 'No Internet',
+        descriptionZh: '出站完全阻断的沙箱。',
+        descriptionEn: 'Sandbox without outbound network access.' },
+      { id: 'network_allowlist', filename: 'network_allowlist.py', language: 'python',
+        titleZh: '白名单', titleEn: 'Allowlist',
+        descriptionZh: '限制出网到显式 IP 列表。',
+        descriptionEn: 'Restrict egress to an explicit list of IPs.' },
+      { id: 'network_denylist', filename: 'network_denylist.py', language: 'python',
+        titleZh: '黑名单', titleEn: 'Denylist',
+        descriptionZh: '默认放行，仅 deny 命中项。',
+        descriptionEn: 'Default-allow with explicit deny entries.' },
+    ],
+  },
+  {
+    id: 'host-mount',
+    titleZh: '主机目录挂载',
+    titleEn: 'Host Mount',
+    descriptionZh: '把主机目录 bind-mount 进沙箱文件系统。',
+    descriptionEn: 'Bind-mount a host directory into the sandbox filesystem.',
+    category: 'filesystem',
+    icon: FolderOpen,
+    accent: 'from-cube-emerald/20 via-cube-emerald/5 to-transparent',
+    topology: topologyHostMount(),
+    files: [
+      { id: 'create_with_mount', filename: 'create_with_mount.py', language: 'python',
+        titleZh: '挂载并创建', titleEn: 'Create With Mount',
+        descriptionZh: '创建带主机目录挂载的沙箱。',
+        descriptionEn: 'Create a sandbox with a host directory mounted at /mnt.' },
+    ],
+  },
+  {
+    id: 'browser-sandbox',
+    titleZh: '浏览器沙箱',
+    titleEn: 'Browser Sandbox',
+    descriptionZh: '在沙箱里启动 Playwright + Chromium，用 CDP 控制。',
+    descriptionEn: 'Drive a headless Chromium with Playwright over CDP.',
+    category: 'browser',
+    icon: Globe2,
+    accent: 'from-cube-cyan/20 via-cube-cyan/5 to-transparent',
+    topology: topologyBrowser(),
+    files: [
+      { id: 'browser', filename: 'browser.py', language: 'python',
+        titleZh: 'Playwright + Chromium', titleEn: 'Playwright + Chromium',
+        descriptionZh: '启动 Chromium 并跑一段 Playwright 脚本。',
+        descriptionEn: 'Boot a sandbox with Chromium and run a Playwright script.' },
+    ],
+  },
+  {
+    id: 'snapshot-rollback-clone',
+    titleZh: '快照 / 回滚 / 克隆',
+    titleEn: 'Snapshot · Rollback · Clone',
+    descriptionZh: '把沙箱像 Git 一样分叉：从快照克隆出 N 个，回滚到任意时间点。',
+    descriptionEn: 'Branch sandboxes like Git: clone from a snapshot, roll back to any point.',
+    category: 'lifecycle',
+    icon: GitBranch,
+    accent: 'from-cube-amber/20 via-cube-amber/5 to-transparent',
+    topology: topologySnapshot(),
+    files: [
+      { id: '01_create_snapshot', filename: '01_create_snapshot.py', language: 'python',
+        titleZh: '01 创建快照', titleEn: '01 Create Snapshot',
+        descriptionZh: '在运行中的沙箱上打快照。',
+        descriptionEn: 'Capture a snapshot from a running sandbox.' },
+      { id: '02_list_snapshots', filename: '02_list_snapshots.py', language: 'python',
+        titleZh: '02 列出快照', titleEn: '02 List Snapshots',
+        descriptionZh: '查看集群下的快照列表。',
+        descriptionEn: 'List snapshots attached to the cluster.' },
+      { id: '03_clone_from_snapshot', filename: '03_clone_from_snapshot.py', language: 'python',
+        titleZh: '03 从快照克隆', titleEn: '03 Clone From Snapshot',
+        descriptionZh: '用快照派生新沙箱。',
+        descriptionEn: 'Create a new sandbox from a snapshot.' },
+      { id: '04_state_preserved', filename: '04_state_preserved.py', language: 'python',
+        titleZh: '04 状态保留', titleEn: '04 State Preserved',
+        descriptionZh: '验证状态在克隆后仍然保留。',
+        descriptionEn: 'Verify state survives the clone.' },
+      { id: '05_snapshot_outlives_sandbox', filename: '05_snapshot_outlives_sandbox.py', language: 'python',
+        titleZh: '05 快照独立', titleEn: '05 Snapshot Outlives',
+        descriptionZh: '快照生命周期独立于源沙箱。',
+        descriptionEn: 'Snapshot outlives its source sandbox.' },
+      { id: '06_clone_n', filename: '06_clone_n.py', language: 'python',
+        titleZh: '06 串行克隆 N 次', titleEn: '06 Clone N Times',
+        descriptionZh: '依次克隆出 N 个沙箱。',
+        descriptionEn: 'Spin up N clones in sequence.' },
+      { id: '07_clone_concurrent', filename: '07_clone_concurrent.py', language: 'python',
+        titleZh: '07 并发克隆', titleEn: '07 Clone Concurrently',
+        descriptionZh: '并发克隆 N 个沙箱。',
+        descriptionEn: 'Spin up N clones in parallel.' },
+      { id: '08_fork_three_axis', filename: '08_fork_three_axis.py', language: 'python',
+        titleZh: '08 三轴分叉', titleEn: '08 Fork Three-axis',
+        descriptionZh: '从三个正交维度克隆 / 回滚。',
+        descriptionEn: 'Three orthogonal dimensions of clone / rollback.' },
+      { id: '09_rollback', filename: '09_rollback.py', language: 'python',
+        titleZh: '09 回滚', titleEn: '09 Rollback',
+        descriptionZh: '把沙箱回滚到之前的快照。',
+        descriptionEn: 'Roll the sandbox back to a previous snapshot.' },
+      { id: '10_rollback_then_continue', filename: '10_rollback_then_continue.py', language: 'python',
+        titleZh: '10 回滚后继续', titleEn: '10 Rollback Then Continue',
+        descriptionZh: '回滚后继续正常执行。',
+        descriptionEn: 'Rollback, then resume normal execution.' },
+      { id: '11_delete_snapshot', filename: '11_delete_snapshot.py', language: 'python',
+        titleZh: '11 删除快照', titleEn: '11 Delete Snapshot',
+        descriptionZh: '从集群里清理一个快照。',
+        descriptionEn: 'Clean up a snapshot from the cluster.' },
+      { id: 'clone_demo', filename: 'clone_demo.py', language: 'python',
+        titleZh: '克隆 Demo', titleEn: 'Clone Demo',
+        descriptionZh: '端到端克隆示例。',
+        descriptionEn: 'End-to-end clone walkthrough.' },
+      { id: 'rollback_demo', filename: 'rollback_demo.py', language: 'python',
+        titleZh: '回滚 Demo', titleEn: 'Rollback Demo',
+        descriptionZh: '端到端回滚示例。',
+        descriptionEn: 'End-to-end rollback walkthrough.' },
+    ],
+  },
+  {
+    id: 'e2b-dev-sidecar',
+    titleZh: 'e2b Dev Sidecar',
+    titleEn: 'e2b Dev Sidecar',
+    descriptionZh: '本地 Sidecar 反代到 CubeProxy，并改写 Host 头模拟 e2b 客户端。',
+    descriptionEn: 'A local dev-sidecar proxies to CubeProxy and rewrites the Host header to mimic the e2b client.',
+    category: 'advanced',
+    icon: Server,
+    accent: 'from-cube-violet/15 via-cube-violet/5 to-transparent',
+    topology: topologySidecar(),
+    files: [
+      { id: 'demo', filename: 'demo.py', language: 'python',
+        titleZh: 'Sidecar Demo', titleEn: 'Sidecar Demo',
+        descriptionZh: '在 CubeAPI 前面起一个 Sidecar 反向代理。',
+        descriptionEn: 'Start a sidecar proxy in front of CubeAPI.' },
+    ],
+  },
+  {
+    id: 'cubesandbox-base-nginx',
+    titleZh: '自定义镜像 (nginx)',
+    titleEn: 'Custom Image (nginx)',
+    descriptionZh: '基于带 nginx 的自定义镜像启动沙箱并访问静态资源。',
+    descriptionEn: 'Boot a sandbox from a custom image that runs nginx and reach its static files.',
+    category: 'image',
+    icon: Layers,
+    accent: 'from-cube-rose/20 via-cube-rose/5 to-transparent',
+    topology: topologyNginx(),
+    files: [
+      { id: 'test_files', filename: 'test_files.py', language: 'python',
+        titleZh: 'Test Files', titleEn: 'Test Files',
+        descriptionZh: '通过代理访问 nginx 服务的文件。',
+        descriptionEn: 'Reach the nginx-served files via the proxy.' },
+    ],
+  },
+  {
+    id: 'cube-bench',
+    titleZh: 'cube-bench',
+    titleEn: 'cube-bench',
+    descriptionZh: '用 Go 写的并发建沙箱基准测试，输出真实吞吐。',
+    descriptionEn: 'Concurrent sandbox creation benchmark written in Go, with throughput numbers.',
+    category: 'perf',
+    icon: Cpu,
+    accent: 'from-cube-amber/15 via-cube-amber/5 to-transparent',
+    topology: topologyBench(),
+    files: [
+      { id: 'main', filename: 'main.go', language: 'go',
+        titleZh: '运行压测', titleEn: 'Run Benchmark',
+        descriptionZh: '并发启动 N 个沙箱并报告吞吐。',
+        descriptionEn: 'Spawn N sandboxes in parallel and report throughput.' },
+    ],
+  },
+];
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+export function findScenario(id: string): ExampleScenario | undefined {
+  return EXAMPLE_SCENARIOS.find((s) => s.id === id);
+}
+
+export function findFile(scenarioId: string, fileId: string): ScenarioFile | undefined {
+  return findScenario(scenarioId)?.files.find((f) => f.id === fileId);
+}
+
+export function categoryMeta(id: ExampleCategoryId): ExampleCategory | undefined {
+  return EXAMPLE_CATEGORIES.find((c) => c.id === id);
+}
+
+// Kept for CommandPalette / legacy callers that previously imported the
+// `examples` data array from a different file.
+export interface LegacyExampleEntry {
+  id: string;
+  scenario: string;
+  filename: string;
+  title: string;
+  description: string;
+  category: string;
+  language: string;
+}
+
+export function buildLegacyExamples(): LegacyExampleEntry[] {
+  const out: LegacyExampleEntry[] = [];
+  for (const sc of EXAMPLE_SCENARIOS) {
+    for (const f of sc.files) {
+      out.push({
+        id: `${sc.id}:${f.id}`,
+        scenario: sc.id,
+        filename: f.filename,
+        title: f.titleEn,
+        description: f.descriptionEn,
+        category: sc.category,
+        language: f.language,
+      });
+    }
+  }
+  return out;
+}
+
+// Lightweight type alias to keep imports consistent across the project.
+export type { Boxes, Camera };

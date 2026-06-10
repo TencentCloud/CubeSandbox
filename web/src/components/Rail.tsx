@@ -15,7 +15,7 @@ import {
   Settings,
   Store,
   Layers,
-  BookOpen,
+  FlaskConical,
   Github,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -31,7 +31,7 @@ const NAV_ITEMS = [
   { to: '/observability', icon: Activity, key: 'observability' },
   { to: '/keys', icon: KeyRound, key: 'apiKeys' },
   { to: '/store', icon: Store, key: 'store' },
-  { to: '/examples', icon: BookOpen, key: 'examples' },
+  { to: '/examples', icon: FlaskConical, key: 'examples' },
   { to: '/agenthub', icon: Bot, key: 'agentHub' },
   { to: '/settings', icon: Settings, key: 'settings' },
 ] as const;
