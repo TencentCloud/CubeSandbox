@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -21,22 +22,36 @@ import (
 )
 
 var (
-	cubevsAttachFilter = cubevs.AttachFilter
-	cubevsGetTAPDevice = cubevs.GetTAPDevice
-	cubevsAddTAPDevice = cubevs.AddTAPDevice
-	cubevsDelTAPDevice = cubevs.DelTAPDevice
-	cubevsAddPortMap   = cubevs.AddPortMapping
-	cubevsDelPortMap   = cubevs.DelPortMapping
-	listCubeTapsFunc   = listCubeTaps
-	getTapByNameFunc   = getTapByName
-	destroyTapFunc     = destroyTap
-	addARPEntryFunc    = addARPEntry
+	cubevsAttachFilter        = cubevs.AttachFilter
+	cubevsGetTAPDevice        = cubevs.GetTAPDevice
+	cubevsAddTAPDevice        = cubevs.AddTAPDevice
+	cubevsUpsertTAPDevice     = cubevs.UpsertTAPDevice
+	cubevsUpsertTAPDeviceMeta = cubevs.UpsertTAPDeviceMeta
+	cubevsDelTAPDevice        = cubevs.DelTAPDevice
+	cubevsAddPortMap          = cubevs.AddPortMapping
+	cubevsDelPortMap          = cubevs.DelPortMapping
+	listCubeTapsFunc          = listCubeTaps
+	getTapByNameFunc          = getTapByName
+	destroyTapFunc            = destroyTap
+	addARPEntryFunc           = addARPEntry
 )
 
 type managedState struct {
 	persistedState
 	tap     *tapDevice
 	proxies []*hostProxy
+
+	// policyKnown is an in-memory guard that says CubeNetworkConfig is a
+	// complete desired policy. Recovered live TAPs may only have runtime
+	// metadata, so recovery must not replay an unknown policy back to eBPF maps.
+	policyKnown bool
+
+	// pendingEgressPush is set when a per-sandbox PUT to CubeEgress's
+	// admin API has failed transiently (5xx, transport error). The
+	// maintenance loop retries until the push lands or until the
+	// sandbox is released. Permanent failures (4xx) clear the flag —
+	// retrying a malformed body won't fix it.
+	pendingEgressPush bool
 }
 
 type localService struct {
@@ -55,6 +70,12 @@ type localService struct {
 	destroyFailedTaps map[string]*tapDevice
 
 	version uint32
+
+	// egress is the loopback admin client toward CubeEgress. nil when
+	// CubeEgressAdminURL is empty (dev / test setups). The push and
+	// delete sites tolerate nil; the dump endpoint exposes the current
+	// state regardless of whether a client is configured.
+	egress egressClient
 }
 
 func NewLocalService(cfg Config) (Service, error) {
@@ -135,27 +156,31 @@ func NewLocalService(cfg Config) (Service, error) {
 		abnormalTapPool:   make([]*tapDevice, 0),
 		quarantinedTaps:   make(map[string]*tapDevice),
 		destroyFailedTaps: make(map[string]*tapDevice),
+		egress:            newEgressClientFromConfig(cfg),
 	}
 	if err := s.recover(); err != nil {
 		return nil, err
 	}
-	if err := s.ensureTapInventory(); err != nil {
-		return nil, err
-	}
+	// Pool warmup runs in the background so first-deploy startup
+	// (~63ms × TapInitNum) does not block NewLocalService and trip
+	// systemd's ExecStartPost timeout. EnsureNetwork transparently
+	// handles an under-filled pool by creating taps on demand. See
+	// code-analysis/network/11-network-agent-async-init-plan.md.
+	go s.warmupTapPoolBackground()
 	s.startMaintenanceLoop()
 	return s, nil
 }
 
 func (s *localService) EnsureNetwork(ctx context.Context, req *EnsureNetworkRequest) (*EnsureNetworkResponse, error) {
 	CubeLog.WithContext(ctx).Infof(
-		"network-agent EnsureNetwork request: sandbox_id=%s idempotency_key=%s interfaces=%d routes=%d arps=%d port_mappings=%d cubevs_context=%s persist_metadata=%v",
+		"network-agent EnsureNetwork request: sandbox_id=%s idempotency_key=%s interfaces=%d routes=%d arps=%d port_mappings=%d cube_network_config=%s persist_metadata=%v",
 		req.SandboxID,
 		req.IdempotencyKey,
 		len(req.Interfaces),
 		len(req.Routes),
 		len(req.ARPNeighbors),
 		len(req.PortMappings),
-		formatCubeVSContext(req.CubeVSContext),
+		formatCubeNetworkConfig(req.CubeNetworkConfig),
 		req.PersistMetadata,
 	)
 	s.mu.Lock()
@@ -301,7 +326,7 @@ func (s *localService) createStateLocked(ctx context.Context, req *EnsureNetwork
 		}
 		return nil, err
 	}
-	if err := s.registerCubeVSTap(tap.Index, tap.IP, req.SandboxID, req.CubeVSContext); err != nil {
+	if err := s.registerCubeVSTap(tap.Index, tap.IP, req.SandboxID, req.CubeNetworkConfig); err != nil {
 		s.clearPortMappings(tap)
 		if fromPool {
 			s.recycleTapLocked(tap)
@@ -314,19 +339,20 @@ func (s *localService) createStateLocked(ctx context.Context, req *EnsureNetwork
 	}
 	state := &managedState{
 		persistedState: persistedState{
-			SandboxID:       req.SandboxID,
-			NetworkHandle:   req.SandboxID,
-			TapName:         tap.Name,
-			TapIfIndex:      tap.Index,
-			SandboxIP:       tap.IP.String(),
-			Interfaces:      s.actualInterfaces(tap.Name, req.Interfaces),
-			Routes:          slices.Clone(req.Routes),
-			ARPNeighbors:    slices.Clone(req.ARPNeighbors),
-			PortMappings:    actualMappings,
-			CubeVSContext:   cloneCubeVSContext(req.CubeVSContext),
-			PersistMetadata: s.persistMetadata(req.PersistMetadata, tap.Name, tap.IP.String()),
+			SandboxID:         req.SandboxID,
+			NetworkHandle:     req.SandboxID,
+			TapName:           tap.Name,
+			TapIfIndex:        tap.Index,
+			SandboxIP:         tap.IP.String(),
+			Interfaces:        s.actualInterfaces(tap.Name, req.Interfaces),
+			Routes:            slices.Clone(req.Routes),
+			ARPNeighbors:      slices.Clone(req.ARPNeighbors),
+			PortMappings:      actualMappings,
+			CubeNetworkConfig: cloneCubeNetworkConfig(req.CubeNetworkConfig),
+			PersistMetadata:   s.persistMetadata(req.PersistMetadata, tap.Name, tap.IP.String()),
 		},
-		tap: tap,
+		tap:         tap,
+		policyKnown: true,
 	}
 	if err := s.store.Save(&state.persistedState); err != nil {
 		_ = cubevsDelTAPDevice(uint32(tap.Index), tap.IP.To4())
@@ -340,10 +366,41 @@ func (s *localService) createStateLocked(ctx context.Context, req *EnsureNetwork
 		}
 		return nil, err
 	}
+	// Push the L7 egress policy to CubeEgress's admin API. Best-effort:
+	// the call records pendingEgressPush on transient failure so the
+	// maintenance loop retries. We DO NOT unwind the tap / cubevs setup
+	// if this fails — the sandbox is functional with L3/L4 enforcement
+	// from cubevs, and the L7 layer is downstream of the data plane
+	// init. Failing here would convert a CubeEgress hiccup into a
+	// sandbox-creation failure, which is the wrong trade-off.
+	s.pushEgressForState(ctx, state)
 	return state, nil
 }
 
 func (s *localService) reconcileState(ctx context.Context, state *managedState) error {
+	if !state.policyKnown {
+		CubeLog.WithContext(ctx).Warnf("network-agent reconcile leaves cubevs policy untouched because desired policy is unknown: sandbox_id=%s tap=%s ifindex=%d", state.SandboxID, state.TapName, state.TapIfIndex)
+		return s.reconcileRecoveredState(ctx, state)
+	}
+	return s.reconcileStateWithCubeVSPolicy(ctx, state)
+}
+
+func (s *localService) reconcileStateWithCubeVSPolicy(ctx context.Context, state *managedState) error {
+	if err := s.reconcileRuntimeState(ctx, state); err != nil {
+		return err
+	}
+	return s.refreshCubeVSTapWithPolicy(state)
+}
+
+func (s *localService) reconcileRecoveredState(ctx context.Context, state *managedState) error {
+	if err := s.reconcileRuntimeState(ctx, state); err != nil {
+		return err
+	}
+	return s.refreshCubeVSTapForRecover(state)
+}
+
+func (s *localService) reconcileRuntimeState(ctx context.Context, state *managedState) error {
+	_ = ctx
 	if err := s.ensureHostRoute(); err != nil {
 		return err
 	}
@@ -368,9 +425,6 @@ func (s *localService) reconcileState(ctx context.Context, state *managedState) 
 	for _, mapping := range state.PortMappings {
 		s.ports.Assign(uint16(mapping.HostPort))
 	}
-	if err := s.refreshCubeVSTap(state); err != nil {
-		return err
-	}
 	if err := addARPEntryFunc(net.ParseIP(state.SandboxIP).To4(), s.cfg.MVMMacAddr, s.cubeDev.Index); err != nil && !errors.Is(err, syscall.EEXIST) {
 		return err
 	}
@@ -382,25 +436,34 @@ func (s *localService) reconcileState(ctx context.Context, state *managedState) 
 	return nil
 }
 
-func (s *localService) refreshCubeVSTap(state *managedState) error {
+func (s *localService) refreshCubeVSTapForRecover(state *managedState) error {
 	// Re-attach the ingress filter for recovered TAPs so the running kernel
-	// always uses the currently deployed from_cube program.
+	// always uses the currently deployed from_cube program. AttachFilter only
+	// ensures per-ifindex inner maps exist; it must not replay desired policy.
 	if err := cubevsAttachFilter(uint32(state.TapIfIndex)); err != nil {
 		return fmt.Errorf("attach cubevs filter for tap %s(%d): %w", state.TapName, state.TapIfIndex, err)
 	}
 	if _, err := cubevsGetTAPDevice(uint32(state.TapIfIndex)); err != nil {
-		if !errors.Is(err, ebpf.ErrKeyNotExist) {
-			// The tap map can be gone after restart; recreate it for both not-exist and generic lookup failures.
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			CubeLog.WithContext(context.Background()).Warnf("network-agent recover cubevs tap metadata missing, restoring metadata only: sandbox_id=%s tap=%s ifindex=%d", state.SandboxID, state.TapName, state.TapIfIndex)
+			return s.upsertCubeVSTapMeta(state.TapIfIndex, net.ParseIP(state.SandboxIP).To4(), state.SandboxID)
 		}
-		if err := s.registerCubeVSTap(state.TapIfIndex, net.ParseIP(state.SandboxIP).To4(), state.SandboxID, state.CubeVSContext); err != nil {
-			return err
-		}
+		CubeLog.WithContext(context.Background()).Warnf("network-agent recover cubevs tap lookup failed, leaving policy untouched: tap=%s ifindex=%d err=%v", state.TapName, state.TapIfIndex, err)
 	}
 	return nil
 }
 
+func (s *localService) refreshCubeVSTapWithPolicy(state *managedState) error {
+	if err := cubevsAttachFilter(uint32(state.TapIfIndex)); err != nil {
+		return fmt.Errorf("attach cubevs filter for tap %s(%d): %w", state.TapName, state.TapIfIndex, err)
+	}
+	if _, err := cubevsGetTAPDevice(uint32(state.TapIfIndex)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		CubeLog.WithContext(context.Background()).Warnf("network-agent cubevs tap lookup failed before policy refresh, will upsert state: tap=%s ifindex=%d err=%v", state.TapName, state.TapIfIndex, err)
+	}
+	return s.upsertCubeVSTap(state.TapIfIndex, net.ParseIP(state.SandboxIP).To4(), state.SandboxID, state.CubeNetworkConfig)
+}
+
 func (s *localService) releaseState(ctx context.Context, state *managedState) error {
-	_ = ctx
 	for _, proxy := range state.proxies {
 		_ = proxy.Close()
 	}
@@ -422,7 +485,14 @@ func (s *localService) releaseState(ctx context.Context, state *managedState) er
 	s.mu.Lock()
 	s.recycleTapLocked(state.tap)
 	s.mu.Unlock()
-	return s.store.Delete(state.SandboxID)
+	if err := s.store.Delete(state.SandboxID); err != nil {
+		return err
+	}
+	// Best-effort: drop the L7 policy from CubeEgress so a future
+	// sandbox that lands on the same IP sees a clean slate. Failures
+	// here are logged at WARN, never propagated — see deleteEgressForState.
+	s.deleteEgressForState(ctx, state.SandboxID, state.SandboxIP)
+	return nil
 }
 
 func (s *localService) recover() error {
@@ -471,7 +541,7 @@ func (s *localService) recover() error {
 		}
 		restoredTap.PortMappings = append([]PortMapping(nil), mappingsByIfindex[restoredTap.Index]...)
 		if state, ok := statesByTapName[restoredTap.Name]; ok {
-			managed := &managedState{persistedState: *state, tap: restoredTap}
+			managed := &managedState{persistedState: *state, tap: restoredTap, policyKnown: state.CubeNetworkConfig != nil}
 			managed.TapIfIndex = restoredTap.Index
 			managed.TapName = restoredTap.Name
 			managed.SandboxIP = restoredTap.IP.String()
@@ -481,7 +551,7 @@ func (s *localService) recover() error {
 			if managed.PersistMetadata == nil {
 				managed.PersistMetadata = s.persistMetadata(nil, restoredTap.Name, restoredTap.IP.String())
 			}
-			if err := s.reconcileState(context.Background(), managed); err != nil {
+			if err := s.reconcileRecoveredState(context.Background(), managed); err != nil {
 				return err
 			}
 			s.states[managed.SandboxID] = managed
@@ -491,7 +561,7 @@ func (s *localService) recover() error {
 		device, inCubeVS := liveCubeVSTapsByIP[restoredTap.IP.String()]
 		if inCubeVS && restoredTap.InUse {
 			managed := buildRecoveredState(restoredTap, &device, restoredTap.PortMappings, s.cfg)
-			if err := s.reconcileState(context.Background(), managed); err != nil {
+			if err := s.reconcileRecoveredState(context.Background(), managed); err != nil {
 				return err
 			}
 			if err := s.store.Save(&managed.persistedState); err != nil {
@@ -667,13 +737,14 @@ func (s *localService) ensureHostRoute() error {
 	return ensureRouteToCubeDev(s.cfg.CIDR, s.cubeDev)
 }
 
-func cloneCubeVSContext(in *CubeVSContext) *CubeVSContext {
+func cloneCubeNetworkConfig(in *CubeNetworkConfig) *CubeNetworkConfig {
 	if in == nil {
 		return nil
 	}
-	out := &CubeVSContext{
+	out := &CubeNetworkConfig{
 		AllowOut: append([]string(nil), in.AllowOut...),
 		DenyOut:  append([]string(nil), in.DenyOut...),
+		Rules:    cloneEgressRules(in.Rules),
 	}
 	if in.AllowInternetAccess != nil {
 		v := *in.AllowInternetAccess
@@ -682,54 +753,241 @@ func cloneCubeVSContext(in *CubeVSContext) *CubeVSContext {
 	return out
 }
 
-func formatCubeVSContext(in *CubeVSContext) string {
+func cloneEgressRules(in []*EgressRule) []*EgressRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*EgressRule, 0, len(in))
+	for _, r := range in {
+		if r == nil {
+			continue
+		}
+		cp := &EgressRule{Name: r.Name}
+		if r.Match != nil {
+			match := *r.Match
+			match.Method = append([]string(nil), r.Match.Method...)
+			cp.Match = &match
+		}
+		if r.Action != nil {
+			action := &EgressRuleAction{Allow: r.Action.Allow}
+			if r.Action.Audit != nil {
+				audit := *r.Action.Audit
+				action.Audit = &audit
+			}
+			if len(r.Action.Inject) > 0 {
+				action.Inject = make([]*EgressRuleInject, 0, len(r.Action.Inject))
+				for _, inj := range r.Action.Inject {
+					if inj == nil {
+						continue
+					}
+					injCopy := *inj
+					if inj.Format != nil {
+						format := *inj.Format
+						injCopy.Format = &format
+					}
+					action.Inject = append(action.Inject, &injCopy)
+				}
+			}
+			cp.Action = action
+		}
+		out = append(out, cp)
+	}
+	return out
+}
+
+func formatCubeNetworkConfig(in *CubeNetworkConfig) string {
 	if in == nil {
-		return "allow_internet_access=default(true) allow_out=[] deny_out=[]"
+		return "allow_internet_access=default(true) allow_out=[] deny_out=[] rules=0"
 	}
 	allowInternetAccess := "default(true)"
 	if in.AllowInternetAccess != nil {
 		allowInternetAccess = fmt.Sprintf("%t", *in.AllowInternetAccess)
 	}
-	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v", allowInternetAccess, in.AllowOut, in.DenyOut)
+	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v rules=%d", allowInternetAccess, in.AllowOut, in.DenyOut, len(in.Rules))
 }
 
-func (s *localService) registerCubeVSTap(ifindex int, ip net.IP, sandboxID string, ctx *CubeVSContext) error {
-	opts := cubeVSTapRegistration(ctx)
+func (s *localService) registerCubeVSTap(ifindex int, ip net.IP, sandboxID string, cfg *CubeNetworkConfig) error {
+	opts := cubeVSTapRegistration(cfg)
 	CubeLog.WithContext(context.Background()).Infof(
-		"network-agent register cubevs tap: sandbox_id=%s ifindex=%d sandbox_ip=%s cubevs_context=%s allow_internet_access=%v allow_out=%v deny_out=%v",
+		"network-agent register cubevs tap: sandbox_id=%s ifindex=%d sandbox_ip=%s cube_network_config=%s allow_internet_access=%v allow_out=%v l7_allow_out=%v deny_out=%v",
 		sandboxID,
 		ifindex,
 		ip.String(),
-		formatCubeVSContext(ctx),
+		formatCubeNetworkConfig(cfg),
 		opts.AllowInternetAccess,
 		opts.AllowOut,
+		opts.L7AllowOut,
 		opts.DenyOut,
 	)
 	return cubevsAddTAPDevice(uint32(ifindex), ip, sandboxID, atomic.AddUint32(&s.version, 1), opts)
 }
 
-func cubeVSTapRegistration(ctx *CubeVSContext) cubevs.MVMOptions {
-	if ctx == nil {
+func (s *localService) upsertCubeVSTapMeta(ifindex int, ip net.IP, sandboxID string) error {
+	CubeLog.WithContext(context.Background()).Infof(
+		"network-agent upsert cubevs tap metadata only: sandbox_id=%s ifindex=%d sandbox_ip=%s",
+		sandboxID,
+		ifindex,
+		ip.String(),
+	)
+	return cubevsUpsertTAPDeviceMeta(uint32(ifindex), ip, sandboxID, atomic.AddUint32(&s.version, 1))
+}
+
+func (s *localService) upsertCubeVSTap(ifindex int, ip net.IP, sandboxID string, cfg *CubeNetworkConfig) error {
+	opts := cubeVSTapRegistration(cfg)
+	CubeLog.WithContext(context.Background()).Infof(
+		"network-agent upsert cubevs tap: sandbox_id=%s ifindex=%d sandbox_ip=%s cube_network_config=%s allow_internet_access=%v allow_out=%v l7_allow_out=%v deny_out=%v",
+		sandboxID,
+		ifindex,
+		ip.String(),
+		formatCubeNetworkConfig(cfg),
+		opts.AllowInternetAccess,
+		opts.AllowOut,
+		opts.L7AllowOut,
+		opts.DenyOut,
+	)
+	return cubevsUpsertTAPDevice(uint32(ifindex), ip, sandboxID, atomic.AddUint32(&s.version, 1), opts)
+}
+
+// cubeVSTapRegistration translates a CubeNetworkConfig into the cubevs MVM
+// options consumed by the eBPF datapath. cubevs enforces L3/L4
+// allow_internet_access / allow_out / deny_out, and it also receives network
+// targets extracted from L7 rules as L7 allow targets. The complete L7 rules
+// are still pushed to CubeEgress separately.
+func cubeVSTapRegistration(cfg *CubeNetworkConfig) cubevs.MVMOptions {
+	if cfg == nil {
 		allowInternetAccess := true
 		return cubevs.MVMOptions{AllowInternetAccess: &allowInternetAccess}
 	}
 	opts := cubevs.MVMOptions{}
-	if ctx.AllowInternetAccess != nil {
-		v := *ctx.AllowInternetAccess
+	if cfg.AllowInternetAccess != nil {
+		v := *cfg.AllowInternetAccess
 		opts.AllowInternetAccess = &v
 	} else {
 		allowInternetAccess := true
 		opts.AllowInternetAccess = &allowInternetAccess
 	}
-	if len(ctx.AllowOut) > 0 {
-		allowOut := append([]string(nil), ctx.AllowOut...)
+	if len(cfg.AllowOut) > 0 {
+		allowOut := append([]string(nil), cfg.AllowOut...)
 		opts.AllowOut = &allowOut
 	}
-	if len(ctx.DenyOut) > 0 {
-		denyOut := append([]string(nil), ctx.DenyOut...)
+	if l7AllowOut := extractL7AllowOutTargetsFromRules(cfg.Rules); len(l7AllowOut) > 0 {
+		opts.L7AllowOut = &l7AllowOut
+	}
+	if len(cfg.DenyOut) > 0 {
+		denyOut := append([]string(nil), cfg.DenyOut...)
 		opts.DenyOut = &denyOut
 	}
 	return opts
+}
+
+func extractL7AllowOutTargetsFromRules(rules []*EgressRule) []string {
+	seen := make(map[string]struct{})
+	targets := make([]string, 0, len(rules))
+	add := func(target string, ok bool) {
+		if !ok {
+			return
+		}
+		if _, exists := seen[target]; exists {
+			return
+		}
+		seen[target] = struct{}{}
+		targets = append(targets, target)
+	}
+
+	for _, rule := range rules {
+		if rule == nil || rule.Match == nil {
+			continue
+		}
+		if rule.Match.SNI != nil {
+			add(normalizeL7DomainTarget(*rule.Match.SNI))
+		}
+		if rule.Match.Host != nil {
+			add(normalizeL7HostTarget(*rule.Match.Host))
+		}
+	}
+	return targets
+}
+
+func normalizeL7DomainTarget(raw string) (string, bool) {
+	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	if isDottedDecimalLikeL7Target(domain) || !isValidL7DomainName(domain) {
+		return "", false
+	}
+	return domain, true
+}
+
+func normalizeL7HostTarget(raw string) (string, bool) {
+	target := strings.TrimSpace(raw)
+	if target == "" {
+		return "", false
+	}
+	if host, _, err := net.SplitHostPort(target); err == nil {
+		target = host
+	}
+
+	if ip := net.ParseIP(target); ip != nil {
+		if ip.To4() == nil {
+			return "", false
+		}
+		return ip.To4().String(), true
+	}
+	if strings.Contains(target, "/") {
+		ip, ipNet, err := net.ParseCIDR(target)
+		if err != nil || ip.To4() == nil {
+			return "", false
+		}
+		return ipNet.String(), true
+	}
+	if isDottedDecimalLikeL7Target(target) {
+		return "", false
+	}
+	return normalizeL7DomainTarget(target)
+}
+
+func isDottedDecimalLikeL7Target(target string) bool {
+	parts := strings.Split(strings.TrimSuffix(target, "."), ".")
+	if len(parts) != net.IPv4len {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isValidL7DomainName(domain string) bool {
+	if domain == "" || len(domain) >= 254 {
+		return false
+	}
+	if strings.Contains(domain, "*") {
+		if strings.Count(domain, "*") != 1 || !strings.HasPrefix(domain, "*.") || len(domain) <= len("*.") {
+			return false
+		}
+		domain = domain[2:]
+	}
+	labels := strings.Split(domain, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		for i, ch := range label {
+			isAlphaNum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+			if !isAlphaNum && ch != '-' {
+				return false
+			}
+			if ch == '-' && (i == 0 || i == len(label)-1) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *localService) startProxies(state *managedState) error {

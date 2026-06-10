@@ -194,7 +194,7 @@ func TestGRPCUnixClientHealth(t *testing.T) {
 	}
 	ensureResp, err := c.EnsureNetwork(context.Background(), &EnsureNetworkRequest{
 		SandboxID: "sb-grpc",
-		CubeVSContext: &CubeVSContext{
+		CubeNetworkConfig: &CubeNetworkConfig{
 			AllowInternetAccess: boolPtr(true),
 			AllowOut:            []string{"1.1.1.1/32"},
 			DenyOut:             []string{"10.0.0.0/8"},
@@ -230,12 +230,12 @@ func TestGRPCUnixClientHealth(t *testing.T) {
 		t.Fatalf("ListNetworks[0]=%+v, want tap metadata", listResp.Networks[0])
 	}
 	if srv.lastEnsureReq == nil ||
-		!srv.lastEnsureReq.GetCubevsContext().GetAllowInternetAccess() ||
-		len(srv.lastEnsureReq.GetCubevsContext().GetAllowOut()) != 1 ||
-		srv.lastEnsureReq.GetCubevsContext().GetAllowOut()[0] != "1.1.1.1/32" ||
-		len(srv.lastEnsureReq.GetCubevsContext().GetDenyOut()) != 1 ||
-		srv.lastEnsureReq.GetCubevsContext().GetDenyOut()[0] != "10.0.0.0/8" {
-		t.Fatalf("server lastEnsureReq=%+v, want cubevs context", srv.lastEnsureReq)
+		!srv.lastEnsureReq.GetCubeNetworkConfig().GetAllowInternetAccess() ||
+		len(srv.lastEnsureReq.GetCubeNetworkConfig().GetAllowOut()) != 1 ||
+		srv.lastEnsureReq.GetCubeNetworkConfig().GetAllowOut()[0] != "1.1.1.1/32" ||
+		len(srv.lastEnsureReq.GetCubeNetworkConfig().GetDenyOut()) != 1 ||
+		srv.lastEnsureReq.GetCubeNetworkConfig().GetDenyOut()[0] != "10.0.0.0/8" {
+		t.Fatalf("server lastEnsureReq=%+v, want cube network config", srv.lastEnsureReq)
 	}
 }
 
@@ -320,7 +320,7 @@ func (s *testNetworkAgentServer) EnsureNetwork(ctx context.Context, req *network
 			MacAddress: "20:90:6f:fc:fc:fc",
 			IpCidrs:    []string{"169.254.68.6/30"},
 			Gateway:    "169.254.68.5",
-			Mtu:        1300,
+			Mtu:        1500,
 		}},
 		PortMappings: []*networkagentv1.PortMapping{{
 			Protocol:      "tcp",

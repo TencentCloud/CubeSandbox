@@ -1,0 +1,19 @@
+[Unit]
+Description=Cube Sandbox cube-egress host network rules (TPROXY + ip rule + sysctls)
+After=network-online.target cube-sandbox-network-agent.service
+Wants=network-online.target
+Requires=cube-sandbox-network-agent.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+PartOf=cube-sandbox-control.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-net-start.sh
+ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-net-stop.sh
+
+[Install]
+WantedBy=cube-sandbox-control.target cube-sandbox-compute.target

@@ -296,6 +296,7 @@ wait_for_http() {
   local curl_args="${4:-}"
   local i
   local -a extra_args=()
+  local last_err=""
 
   if [[ -n "${curl_args}" ]]; then
     # shellcheck disable=SC2206
@@ -303,11 +304,12 @@ wait_for_http() {
   fi
 
   for ((i = 1; i <= retries; i++)); do
-    if curl -fsS "${extra_args[@]}" "${url}" >/dev/null 2>&1; then
+    if last_err="$(curl -fsS "${extra_args[@]}" "${url}" 2>&1 >/dev/null)"; then
       return 0
     fi
     sleep "${delay}"
   done
+  log "ERROR wait_for_http timeout: url=${url} waited=$((retries * delay))s last_curl_error=${last_err:-<empty>}"
   return 1
 }
 
@@ -324,6 +326,7 @@ wait_for_tcp_port() {
     fi
     sleep "${delay}"
   done
+  log "ERROR wait_for_tcp_port timeout: port=${port} waited=$((retries * delay))s no_listener_observed"
   return 1
 }
 
@@ -341,6 +344,7 @@ wait_for_udp_port() {
     fi
     sleep "${delay}"
   done
+  log "ERROR wait_for_udp_port timeout: address=${address} port=${port} waited=$((retries * delay))s no_listener_observed"
   return 1
 }
 
@@ -348,7 +352,7 @@ wait_for_container_health() {
   local container="$1"
   local retries="${2:-40}"
   local delay="${3:-2}"
-  local status
+  local status=""
   local i
 
   require_cmd docker
@@ -359,6 +363,7 @@ wait_for_container_health() {
     fi
     sleep "${delay}"
   done
+  log "ERROR wait_for_container_health timeout: container=${container} waited=$((retries * delay))s last_status=${status:-<unknown>}"
   return 1
 }
 

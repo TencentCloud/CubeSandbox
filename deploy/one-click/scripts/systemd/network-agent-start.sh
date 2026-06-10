@@ -12,7 +12,7 @@ ensure_systemd_runtime_dirs
 
 NETWORK_AGENT_BIN="${TOOLBOX_ROOT}/network-agent/bin/network-agent"
 NETWORK_AGENT_CFG="${TOOLBOX_ROOT}/network-agent/network-agent.yaml"
-NETWORK_AGENT_STATE_DIR="${TOOLBOX_ROOT}/network-agent/state"
+NETWORK_AGENT_STATE_DIR="/data/cubelet/network-agent/state"
 CUBELET_CONFIG="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
 
 ensure_executable "${NETWORK_AGENT_BIN}"

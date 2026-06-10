@@ -9,15 +9,16 @@ use uuid::Uuid;
 use crate::{
     constants::ENVD_VERSION,
     cubemaster::{
-        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient,
-        CubeMasterError, CubeVSContext, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
-        SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest,
+        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient, CubeMasterError,
+        DeleteSandboxRequest, ListSandboxRequest, SandboxInfo, SandboxLogsRequest,
+        SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest, SandboxUpdateRequest,
+        CubeEgressRule, CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch,
+        CubeNetworkConfig,
     },
     error::{AppError, AppResult},
     models::{
-        LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog, SandboxLogEntry,
-        SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
+        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
     },
 };
 
@@ -143,7 +144,7 @@ impl SandboxService {
             containers: vec![],
             exposed_ports: vec![],
             network_type: Some("tap".to_string()),
-            cubevs_context: build_cubevs_context(body.allow_internet_access, body.network.as_ref()),
+            cube_network_config: build_cube_network_config(body.allow_internet_access, body.network.as_ref()),
         };
 
         let resp = self
@@ -608,10 +609,10 @@ fn new_request_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-pub(crate) fn build_cubevs_context(
+pub(crate) fn build_cube_network_config(
     allow_internet_access: Option<bool>,
     network: Option<&SandboxNetworkConfig>,
-) -> Option<CubeVSContext> {
+) -> Option<CubeNetworkConfig> {
     let effective_allow = network
         .and_then(|n| n.allow_public_traffic)
         .or(allow_internet_access);
@@ -619,25 +620,60 @@ pub(crate) fn build_cubevs_context(
         .and_then(|n| n.allow_out.clone())
         .unwrap_or_default();
     let deny_out = network.and_then(|n| n.deny_out.clone()).unwrap_or_default();
+    let rules: Vec<CubeEgressRule> = network
+        .and_then(|n| n.rules.as_ref())
+        .map(|rs| rs.iter().map(map_egress_rule).collect())
+        .unwrap_or_default();
 
-    if effective_allow.is_none() && allow_out.is_empty() && deny_out.is_empty() {
+    if effective_allow.is_none() && allow_out.is_empty() && deny_out.is_empty() && rules.is_empty()
+    {
         return None;
     }
 
-    Some(CubeVSContext {
+    Some(CubeNetworkConfig {
         allow_internet_access: effective_allow,
         allow_out,
         deny_out,
+        rules,
     })
+}
+
+fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
+    CubeEgressRule {
+        name: rule.name.clone(),
+        r#match: CubeEgressRuleMatch {
+            sni: rule.r#match.sni.clone(),
+            host: rule.r#match.host.clone(),
+            method: rule.r#match.method.clone(),
+            path: rule.r#match.path.clone(),
+            scheme: rule.r#match.scheme.clone(),
+        },
+        action: CubeEgressRuleAction {
+            allow: rule.action.allow,
+            audit: rule.action.audit.clone(),
+            inject: rule.action.inject.as_ref().map(|injs| {
+                injs.iter()
+                    .map(|i| CubeEgressRuleInject {
+                        header: i.header.clone(),
+                        secret: i.secret.clone(),
+                        format: i.format.clone(),
+                    })
+                    .collect()
+            }),
+        },
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
-    use super::{build_cubevs_context, filter_by_metadata, from_cubemaster_info};
+    use super::{build_cube_network_config, filter_by_metadata, from_cubemaster_info};
     use crate::cubemaster::{ListSandboxResponse, SandboxInfo};
-    use crate::models::{SandboxNetworkConfig, SandboxState};
+    use crate::models::{
+        EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, SandboxNetworkConfig,
+        SandboxState,
+    };
 
     #[test]
     fn metadata_filter_matches_all_pairs() {
@@ -657,19 +693,103 @@ mod tests {
 
     #[test]
     fn network_context_prefers_explicit_network_config() {
-        let context = build_cubevs_context(
+        let context = build_cube_network_config(
             Some(false),
             Some(&SandboxNetworkConfig {
                 allow_public_traffic: Some(true),
                 allow_out: Some(vec!["github.com".to_string()]),
                 deny_out: None,
                 mask_request_host: None,
+                rules: None,
             }),
         )
         .expect("context should exist");
 
         assert_eq!(context.allow_internet_access, Some(true));
         assert_eq!(context.allow_out, vec!["github.com".to_string()]);
+    }
+
+    #[test]
+    fn network_context_forwards_egress_rules() {
+        let context = build_cube_network_config(
+            None,
+            Some(&SandboxNetworkConfig {
+                allow_public_traffic: None,
+                allow_out: None,
+                deny_out: None,
+                mask_request_host: None,
+                rules: Some(vec![EgressRule {
+                    name: "deepseek_api".to_string(),
+                    r#match: EgressRuleMatch {
+                        scheme: Some("https".to_string()),
+                        host: Some("api.deepseek.com".to_string()),
+                        method: Some(vec!["POST".to_string()]),
+                        path: Some("/v1/chat".to_string()),
+                        sni: Some("api.deepseek.com".to_string()),
+                    },
+                    action: EgressRuleAction {
+                        allow: true,
+                        audit: Some("metadata".to_string()),
+                        inject: Some(vec![EgressRuleInject {
+                            header: "Authorization".to_string(),
+                            secret: "sk_xxx".to_string(),
+                            format: Some("Bearer ${SECRET}".to_string()),
+                        }]),
+                    },
+                }]),
+            }),
+        )
+        .expect("context should exist for rules-only config");
+
+        assert_eq!(context.rules.len(), 1);
+        let rule = &context.rules[0];
+        assert_eq!(rule.name, "deepseek_api");
+        assert_eq!(rule.r#match.path.as_deref(), Some("/v1/chat"));
+        assert!(rule.action.allow);
+        let inject = rule
+            .action
+            .inject
+            .as_ref()
+            .expect("inject preserved")
+            .clone();
+        assert_eq!(inject.len(), 1);
+        assert_eq!(inject[0].format.as_deref(), Some("Bearer ${SECRET}"));
+    }
+
+    #[test]
+    fn network_rules_serialize_to_camel_case_wire() {
+        let context = build_cube_network_config(
+            None,
+            Some(&SandboxNetworkConfig {
+                allow_public_traffic: None,
+                allow_out: None,
+                deny_out: None,
+                mask_request_host: None,
+                rules: Some(vec![EgressRule {
+                    name: "r1".to_string(),
+                    r#match: EgressRuleMatch {
+                        path: Some("/v1/chat".to_string()),
+                        sni: Some("api.deepseek.com".to_string()),
+                        ..Default::default()
+                    },
+                    action: EgressRuleAction {
+                        allow: true,
+                        audit: None,
+                        inject: None,
+                    },
+                }]),
+            }),
+        )
+        .expect("context should exist");
+
+        let json = serde_json::to_value(&context).expect("serialize");
+        let rule = &json["rules"][0];
+        assert_eq!(rule["name"], "r1");
+        assert_eq!(rule["match"]["path"], "/v1/chat");
+        assert_eq!(rule["match"]["sni"], "api.deepseek.com");
+        // None fields are skipped on the wire.
+        assert!(rule["action"].get("audit").is_none());
+        assert!(rule["action"].get("inject").is_none());
     }
 
     #[test]

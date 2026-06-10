@@ -36,7 +36,7 @@ message EnsureNetworkRequest {
   repeated ARPNeighbor arp_neighbors = 5;
   repeated PortMapping port_mappings = 6;
   map<string, string> persist_metadata = 7;
-  optional CubeVSContext cubevs_context = 8;
+  optional CubeNetworkConfig cube_network_config = 8;
 }
 
 message EnsureNetworkResponse {
@@ -70,7 +70,7 @@ message ReconcileNetworkRequest {
   repeated ARPNeighbor arp_neighbors = 6;
   repeated PortMapping port_mappings = 7;
   map<string, string> persist_metadata = 8;
-  optional CubeVSContext cubevs_context = 9;
+  optional CubeNetworkConfig cube_network_config = 9;
 }
 
 message ReconcileNetworkResponse {
@@ -150,8 +150,36 @@ message ARPNeighbor {
   string device = 3;
 }
 
-message CubeVSContext {
+message CubeNetworkConfig {
   optional bool allow_internet_access = 1;
   repeated string allow_out = 2;
   repeated string deny_out = 3;
+  // L7 egress rules, evaluated first-match-wins in list order.
+  repeated EgressRule rules = 4;
+}
+
+message EgressRule {
+  string name = 1;
+  optional EgressRuleMatch match = 2;
+  optional EgressRuleAction action = 3;
+}
+
+message EgressRuleMatch {
+  optional string sni = 1;
+  optional string host = 3;
+  repeated string method = 4;
+  optional string path = 5;
+  optional string scheme = 7;
+}
+
+message EgressRuleAction {
+  bool allow = 1;
+  optional string audit = 2;
+  repeated EgressRuleInject inject = 3;
+}
+
+message EgressRuleInject {
+  string header = 1;
+  string secret = 2;
+  optional string format = 3;
 }

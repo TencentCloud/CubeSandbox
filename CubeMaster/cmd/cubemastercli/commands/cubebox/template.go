@@ -39,15 +39,18 @@ type templateReplicaStatus struct {
 }
 
 type templateResponse struct {
-	RequestID     string                      `json:"requestID,omitempty"`
-	Ret           *types.Ret                  `json:"ret,omitempty"`
-	TemplateID    string                      `json:"template_id,omitempty"`
-	InstanceType  string                      `json:"instance_type,omitempty"`
-	Version       string                      `json:"version,omitempty"`
-	Status        string                      `json:"status,omitempty"`
-	LastError     string                      `json:"last_error,omitempty"`
-	Replicas      []templateReplicaStatus     `json:"replicas,omitempty"`
-	CreateRequest *types.CreateCubeSandboxReq `json:"create_request,omitempty"`
+	RequestID                  string                      `json:"requestID,omitempty"`
+	Ret                        *types.Ret                  `json:"ret,omitempty"`
+	TemplateID                 string                      `json:"template_id,omitempty"`
+	InstanceType               string                      `json:"instance_type,omitempty"`
+	Version                    string                      `json:"version,omitempty"`
+	Status                     string                      `json:"status,omitempty"`
+	LastError                  string                      `json:"last_error,omitempty"`
+	Replicas                   []templateReplicaStatus     `json:"replicas,omitempty"`
+	CreateRequest              *types.CreateCubeSandboxReq `json:"create_request,omitempty"`
+	CubeEgressCABaked          bool                        `json:"cube_egress_ca_baked,omitempty"`
+	CubeEgressCAFingerprint    string                      `json:"cube_egress_ca_fingerprint,omitempty"`
+	CubeEgressCATargetsWritten int                         `json:"cube_egress_ca_targets_written,omitempty"`
 }
 
 type templateListResponse struct {
@@ -112,21 +115,21 @@ type templateDeleteRequest struct {
 	Sync         bool   `json:"sync,omitempty"`
 }
 
-func mergeCubeVSContextFlags(c *cli.Context, existing *types.CubeVSContext) *types.CubeVSContext {
+func mergeCubeNetworkConfigFlags(c *cli.Context, existing *types.CubeNetworkConfig) *types.CubeNetworkConfig {
 	hasAllowInternetAccess := c.IsSet("allow-internet-access")
 	allowOut := dedupeCIDRs(c.StringSlice("allow-out-cidr"))
 	denyOut := dedupeCIDRs(c.StringSlice("deny-out-cidr"))
-	return mergeCubeVSContextValues(existing, hasAllowInternetAccess, c.Bool("allow-internet-access"), allowOut, denyOut)
+	return mergeCubeNetworkConfigValues(existing, hasAllowInternetAccess, c.Bool("allow-internet-access"), allowOut, denyOut)
 }
 
-func mergeCubeVSContextValues(existing *types.CubeVSContext, hasAllowInternetAccess bool, allowInternetAccess bool, allowOut []string, denyOut []string) *types.CubeVSContext {
+func mergeCubeNetworkConfigValues(existing *types.CubeNetworkConfig, hasAllowInternetAccess bool, allowInternetAccess bool, allowOut []string, denyOut []string) *types.CubeNetworkConfig {
 	if !hasAllowInternetAccess && len(allowOut) == 0 && len(denyOut) == 0 {
 		return existing
 	}
 
-	out := cloneCubeVSContext(existing)
+	out := cloneCubeNetworkConfig(existing)
 	if out == nil {
-		out = &types.CubeVSContext{}
+		out = &types.CubeNetworkConfig{}
 	}
 	if hasAllowInternetAccess {
 		out.AllowInternetAccess = &allowInternetAccess
@@ -140,15 +143,15 @@ func mergeCubeVSContextValues(existing *types.CubeVSContext, hasAllowInternetAcc
 	return out
 }
 
-type createFromImageExtraCubeVSFlags struct {
+type createFromImageExtraNetworkFlags struct {
 	hasAllowInternetAccess bool
 	allowInternetAccess    bool
 	allowOut               []string
 	denyOut                []string
 }
 
-func mergeCreateFromImageCubeVSContextFlags(c *cli.Context, existing *types.CubeVSContext) (*types.CubeVSContext, error) {
-	extra, err := parseCreateFromImageExtraCubeVSFlags(c)
+func mergeCreateFromImageCubeNetworkConfigFlags(c *cli.Context, existing *types.CubeNetworkConfig) (*types.CubeNetworkConfig, error) {
+	extra, err := parseCreateFromImageExtraNetworkFlags(c)
 	if err != nil {
 		return nil, err
 	}
@@ -159,18 +162,18 @@ func mergeCreateFromImageCubeVSContextFlags(c *cli.Context, existing *types.Cube
 	}
 	allowOut := appendUniqueCIDRs(dedupeCIDRs(c.StringSlice("allow-out-cidr")), extra.allowOut)
 	denyOut := appendUniqueCIDRs(dedupeCIDRs(c.StringSlice("deny-out-cidr")), extra.denyOut)
-	return mergeCubeVSContextValues(existing, hasAllowInternetAccess, allowInternetAccess, allowOut, denyOut), nil
+	return mergeCubeNetworkConfigValues(existing, hasAllowInternetAccess, allowInternetAccess, allowOut, denyOut), nil
 }
 
-func parseCreateFromImageExtraCubeVSFlags(c *cli.Context) (*createFromImageExtraCubeVSFlags, error) {
+func parseCreateFromImageExtraNetworkFlags(c *cli.Context) (*createFromImageExtraNetworkFlags, error) {
 	extraArgs := make([]string, 0, c.NArg())
 	for i := 0; i < c.NArg(); i++ {
 		extraArgs = append(extraArgs, c.Args().Get(i))
 	}
 	if len(extraArgs) == 0 {
-		return &createFromImageExtraCubeVSFlags{}, nil
+		return &createFromImageExtraNetworkFlags{}, nil
 	}
-	extra := &createFromImageExtraCubeVSFlags{}
+	extra := &createFromImageExtraNetworkFlags{}
 	idx := 0
 
 	if c.IsSet("allow-internet-access") {
@@ -245,11 +248,11 @@ func parseBoolToken(value string) (bool, bool) {
 	}
 }
 
-func cloneCubeVSContext(in *types.CubeVSContext) *types.CubeVSContext {
+func cloneCubeNetworkConfig(in *types.CubeNetworkConfig) *types.CubeNetworkConfig {
 	if in == nil {
 		return nil
 	}
-	out := &types.CubeVSContext{
+	out := &types.CubeNetworkConfig{
 		AllowOut: append([]string(nil), in.AllowOut...),
 		DenyOut:  append([]string(nil), in.DenyOut...),
 	}
@@ -283,26 +286,26 @@ func appendUniqueCIDRs(base []string, extra []string) []string {
 	return out
 }
 
-func formatCubeVSContext(ctx *types.CubeVSContext) string {
-	if ctx == nil {
-		return "allow_internet_access=default(true) allow_out=[] deny_out=[]"
+func formatCubeNetworkConfig(cfg *types.CubeNetworkConfig) string {
+	if cfg == nil {
+		return "allow_internet_access=default(true) allow_out=[] deny_out=[] rules=0"
 	}
 	allow := "default(true)"
-	if ctx.AllowInternetAccess != nil {
-		allow = fmt.Sprintf("%t", *ctx.AllowInternetAccess)
+	if cfg.AllowInternetAccess != nil {
+		allow = fmt.Sprintf("%t", *cfg.AllowInternetAccess)
 	}
-	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v", allow, ctx.AllowOut, ctx.DenyOut)
+	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v rules=%d", allow, cfg.AllowOut, cfg.DenyOut, len(cfg.Rules))
 }
 
-func formatProtoCubeVSContext(ctx *api.CubeVSContext) string {
-	if ctx == nil {
-		return "allow_internet_access=default(true) allow_out=[] deny_out=[]"
+func formatProtoCubeNetworkConfig(cfg *api.CubeNetworkConfig) string {
+	if cfg == nil {
+		return "allow_internet_access=default(true) allow_out=[] deny_out=[] rules=0"
 	}
 	allow := "default(true)"
-	if ctx.AllowInternetAccess != nil {
-		allow = fmt.Sprintf("%t", ctx.GetAllowInternetAccess())
+	if cfg.AllowInternetAccess != nil {
+		allow = fmt.Sprintf("%t", cfg.GetAllowInternetAccess())
 	}
-	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v", allow, ctx.GetAllowOut(), ctx.GetDenyOut())
+	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v rules=%d", allow, cfg.GetAllowOut(), cfg.GetDenyOut(), len(cfg.GetRules()))
 }
 
 var TemplateCommand = cli.Command{
@@ -352,15 +355,15 @@ var TemplateCreateCommand = cli.Command{
 		},
 		cli.BoolFlag{
 			Name:  "allow-internet-access",
-			Usage: "set CubeVS allowInternetAccess for the template request",
+			Usage: "set allowInternetAccess on the network config for the template request",
 		},
 		cli.StringSliceFlag{
 			Name:  "allow-out-cidr",
-			Usage: "append an allowed egress CIDR to cubevs_context; repeat the flag to specify multiple CIDRs",
+			Usage: "append an allowed egress CIDR to cube_network_config; repeat the flag to specify multiple CIDRs",
 		},
 		cli.StringSliceFlag{
 			Name:  "deny-out-cidr",
-			Usage: "append a denied egress CIDR to cubevs_context; repeat the flag to specify multiple CIDRs",
+			Usage: "append a denied egress CIDR to cube_network_config; repeat the flag to specify multiple CIDRs",
 		},
 		cli.BoolFlag{
 			Name:  "json",
@@ -406,7 +409,7 @@ var TemplateCreateCommand = cli.Command{
 		if scope := c.StringSlice("node"); len(scope) > 0 {
 			req.DistributionScope = scope
 		}
-		req.CubeVSContext = mergeCubeVSContextFlags(c, req.CubeVSContext)
+		req.CubeNetworkConfig = mergeCubeNetworkConfigFlags(c, req.CubeNetworkConfig)
 
 		serverList = getServerAddrs(c)
 		if len(serverList) == 0 {
@@ -645,15 +648,15 @@ var TemplateCommitCommand = cli.Command{
 		},
 		cli.BoolFlag{
 			Name:  "allow-internet-access",
-			Usage: "set CubeVS allowInternetAccess for the create_request",
+			Usage: "set allowInternetAccess on the network config for the create_request",
 		},
 		cli.StringSliceFlag{
 			Name:  "allow-out-cidr",
-			Usage: "append an allowed egress CIDR to create_request.cubevs_context; repeat the flag to specify multiple CIDRs",
+			Usage: "append an allowed egress CIDR to create_request.cube_network_config; repeat the flag to specify multiple CIDRs",
 		},
 		cli.StringSliceFlag{
 			Name:  "deny-out-cidr",
-			Usage: "append a denied egress CIDR to create_request.cubevs_context; repeat the flag to specify multiple CIDRs",
+			Usage: "append a denied egress CIDR to create_request.cube_network_config; repeat the flag to specify multiple CIDRs",
 		},
 		cli.BoolFlag{
 			Name:  "json",
@@ -686,7 +689,7 @@ var TemplateCommitCommand = cli.Command{
 		if createReq.Annotations == nil {
 			createReq.Annotations = map[string]string{}
 		}
-		createReq.CubeVSContext = mergeCubeVSContextFlags(c, createReq.CubeVSContext)
+		createReq.CubeNetworkConfig = mergeCubeNetworkConfigFlags(c, createReq.CubeNetworkConfig)
 
 		req := &templateCommitRequest{
 			RequestID:     requestID,
@@ -738,9 +741,9 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringFlag{Name: "instance-type", Value: "cubebox", Usage: "instance type"},
 		cli.StringFlag{Name: "network-type", Value: "tap", Usage: "network type"},
 		cli.StringSliceFlag{Name: "node", Usage: "create template only on the specified node id or host ip; repeat to specify multiple nodes"},
-		cli.BoolFlag{Name: "allow-internet-access", Usage: "set CubeVS allowInternetAccess for the generated template request"},
-		cli.StringSliceFlag{Name: "allow-out-cidr", Usage: "append an allowed egress CIDR to cubevs_context; repeat the flag to specify multiple CIDRs"},
-		cli.StringSliceFlag{Name: "deny-out-cidr", Usage: "append a denied egress CIDR to cubevs_context; repeat the flag to specify multiple CIDRs"},
+		cli.BoolFlag{Name: "allow-internet-access", Usage: "set allowInternetAccess on the network config for the generated template request"},
+		cli.StringSliceFlag{Name: "allow-out-cidr", Usage: "append an allowed egress CIDR to cube_network_config; repeat the flag to specify multiple CIDRs"},
+		cli.StringSliceFlag{Name: "deny-out-cidr", Usage: "append a denied egress CIDR to cube_network_config; repeat the flag to specify multiple CIDRs"},
 		cli.StringFlag{Name: "registry-username", Usage: "registry username"},
 		cli.StringFlag{Name: "registry-password", Usage: "registry password"},
 
@@ -752,6 +755,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
+		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
 	},
 	Action: func(c *cli.Context) error {
@@ -776,8 +780,8 @@ var TemplateCreateFromImageCommand = cli.Command{
 			return err
 		}
 		req := &types.CreateTemplateFromImageReq{
-			Request:            &types.Request{RequestID: uuid.New().String()},
-			SourceImageRef:     c.String("image"),
+			Request:        &types.Request{RequestID: uuid.New().String()},
+			SourceImageRef: c.String("image"),
 			// TemplateID is auto-generated by normalizeTemplateImageRequest.
 			WritableLayerSize:  c.String("writable-layer-size"),
 			DistributionScope:  c.StringSlice("node"),
@@ -788,7 +792,12 @@ var TemplateCreateFromImageCommand = cli.Command{
 			RegistryPassword:   c.String("registry-password"),
 			ContainerOverrides: containerOverrides,
 		}
-		req.CubeVSContext, err = mergeCreateFromImageCubeVSContextFlags(c, req.CubeVSContext)
+		// --with-cube-ca defaults true (BoolTFlag). We always materialise
+		// the *bool on the wire so non-CLI callers (HTTP clients, future
+		// SDKs) can still rely on `nil = server-side default`.
+		withCubeCA := c.BoolT("with-cube-ca")
+		req.WithCubeCA = &withCubeCA
+		req.CubeNetworkConfig, err = mergeCreateFromImageCubeNetworkConfigFlags(c, req.CubeNetworkConfig)
 		if err != nil {
 			return err
 		}
@@ -1100,8 +1109,15 @@ func printTemplateSummary(rsp *templateResponse) {
 	if rsp.LastError != "" {
 		log.Printf("last_error: %s\n", rsp.LastError)
 	}
+	// CubeEgress CA bake status. Always print so an operator can tell
+	// at a glance whether sandboxes from this template will trust
+	// CubeEgress's MITM certs. baked=false on a deployment that ships
+	// CubeEgress is a yellow flag worth investigating (most likely a
+	// distroless image that didn't have a ca-bundle to update).
+	log.Printf("cube_egress_ca: baked=%t fingerprint=%s targets_written=%d\n",
+		rsp.CubeEgressCABaked, fingerprintShortOrEmpty(rsp.CubeEgressCAFingerprint), rsp.CubeEgressCATargetsWritten)
 	if rsp.CreateRequest != nil {
-		log.Printf("cubevs_context: %s\n", formatCubeVSContext(rsp.CreateRequest.CubeVSContext))
+		log.Printf("cube_network_config: %s\n", formatCubeNetworkConfig(rsp.CreateRequest.CubeNetworkConfig))
 	}
 	w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
 	fmt.Fprintln(w, "NODE_ID\tNODE_IP\tSTATUS\tPHASE\tSPEC\tERROR")
@@ -1110,6 +1126,20 @@ func printTemplateSummary(rsp *templateResponse) {
 			replica.NodeID, replica.NodeIP, replica.Status, replica.Phase, replica.Spec, replica.ErrorMessage)
 	}
 	_ = w.Flush()
+}
+
+// fingerprintShortOrEmpty trims a sha256 hex fingerprint to the first
+// 16 chars for printing. Full 64-char string is usable for grep but
+// noisy in info output; the short form is enough for human eyeballing
+// and the field gets shipped raw in the JSON --json mode.
+func fingerprintShortOrEmpty(fp string) string {
+	if fp == "" {
+		return "(none)"
+	}
+	if len(fp) > 16 {
+		return fp[:16]
+	}
+	return fp
 }
 
 func printSandboxPreviewSummary(rsp *sandboxPreviewResponse) {
@@ -1121,18 +1151,18 @@ func printSandboxPreviewSummary(rsp *sandboxPreviewResponse) {
 		log.Printf("api_request: template=%s containers=%d volumes=%d network=%s\n",
 			rsp.APIRequest.Annotations[constants.CubeAnnotationAppSnapshotTemplateID],
 			len(rsp.APIRequest.Containers), len(rsp.APIRequest.Volumes), rsp.APIRequest.NetworkType)
-		log.Printf("api_request_cubevs_context: %s\n", formatCubeVSContext(rsp.APIRequest.CubeVSContext))
+		log.Printf("api_request_cube_network_config: %s\n", formatCubeNetworkConfig(rsp.APIRequest.CubeNetworkConfig))
 	}
 	if rsp.MergedRequest != nil {
 		log.Printf("merged_request: containers=%d volumes=%d network=%s runtime=%s namespace=%s\n",
 			len(rsp.MergedRequest.Containers), len(rsp.MergedRequest.Volumes), rsp.MergedRequest.NetworkType,
 			rsp.MergedRequest.RuntimeHandler, rsp.MergedRequest.Namespace)
-		log.Printf("merged_request_cubevs_context: %s\n", formatCubeVSContext(rsp.MergedRequest.CubeVSContext))
+		log.Printf("merged_request_cube_network_config: %s\n", formatCubeNetworkConfig(rsp.MergedRequest.CubeNetworkConfig))
 	}
 	if rsp.CubeletRequest != nil {
 		log.Printf("cubelet_request: containers=%d volumes=%d exposed_ports=%d\n",
 			len(rsp.CubeletRequest.Containers), len(rsp.CubeletRequest.Volumes), len(rsp.CubeletRequest.ExposedPorts))
-		log.Printf("cubelet_request_cubevs_context: %s\n", formatProtoCubeVSContext(rsp.CubeletRequest.CubevsContext))
+		log.Printf("cubelet_request_cube_network_config: %s\n", formatProtoCubeNetworkConfig(rsp.CubeletRequest.CubeNetworkConfig))
 	}
 }
 

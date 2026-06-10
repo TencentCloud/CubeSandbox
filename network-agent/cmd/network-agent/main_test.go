@@ -38,6 +38,10 @@ func (s *typedNilService) Health(ctx context.Context) error {
 	return nil
 }
 
+func (s *typedNilService) DumpEgressPolicies(ctx context.Context) (map[string]map[string]any, error) {
+	return nil, nil
+}
+
 func TestInitServiceRejectsNilFactoryResult(t *testing.T) {
 	orig := newLocalService
 	t.Cleanup(func() {

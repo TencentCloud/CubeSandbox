@@ -96,11 +96,11 @@ func SubmitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 		return nil, err
 	}
 	log.G(ctx).Infof(
-		"SubmitTemplateFromImage: template_id=%s image=%s network_type=%s cubevs_context=%s",
+		"SubmitTemplateFromImage: template_id=%s image=%s network_type=%s cube_network_config=%s",
 		normalized.TemplateID,
 		normalized.SourceImageRef,
 		normalized.NetworkType,
-		formatTemplateImageCubeVSContext(normalized.CubeVSContext),
+		formatTemplateImageCubeNetworkConfig(normalized.CubeNetworkConfig),
 	)
 	requestSnapshot, err := marshalTemplateImageJobRequest(normalized)
 	if err != nil {

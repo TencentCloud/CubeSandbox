@@ -230,7 +230,7 @@ func ingressSession(key *sessionKey, value *ingressSessionValue) string {
 }
 
 // StartSessionReaper starts a goroutine that will periodically
-// check for sessions that have expired and remove them.
+// check for sessions and DNS-learned policies that have expired and remove them.
 func StartSessionReaper() <-chan Event {
 	once.Do(func() {
 		go doReap()
@@ -241,8 +241,10 @@ func StartSessionReaper() <-chan Event {
 func doReap() {
 	ticker := time.NewTicker(reapSessionsInterval)
 	defer ticker.Stop()
+
 	for range ticker.C {
 		reapSessions()
+		reapDNSState()
 	}
 }
 

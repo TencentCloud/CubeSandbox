@@ -36,6 +36,7 @@ const (
 	TemplateFromImageAction        = "/template/from-image"
 	TemplateArtifactDownloadAction = "/template/artifact/download"
 	RootfsArtifactAction           = "/rootfs-artifact"
+	CADownloadActionPrefix         = "/ca/"
 	ListInventoryAction            = "/listinventory"
 	SandboxLogsAction              = "/sandbox/logs"
 )
@@ -92,6 +93,8 @@ func HttpHandler(w http.ResponseWriter, r *http.Request) {
 		rsp = handleTemplateFromImageAction(w, r, rt)
 	case r.URL.Path == actionURI(TemplateArtifactDownloadAction):
 		rsp = handleTemplateArtifactDownloadAction(w, r, rt)
+	case strings.HasPrefix(r.URL.Path, actionURI(CADownloadActionPrefix)):
+		rsp = handleCADownloadAction(w, r, rt)
 	case r.URL.Path == actionURI(RootfsArtifactAction):
 		rsp = handleRootfsArtifactAction(w, r, rt)
 	case r.URL.Path == actionURI(ListInventoryAction):
@@ -108,6 +111,11 @@ func HttpHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == actionURI(SandboxListAction) {
 		common.WriteListResponse(w, http.StatusOK, rsp)
 	} else if r.URL.Path == actionURI(TemplateArtifactDownloadAction) {
+		return
+	} else if strings.HasPrefix(r.URL.Path, actionURI(CADownloadActionPrefix)) && rsp == nil {
+		// handleCADownloadAction streamed the file via http.ServeContent;
+		// nothing left to write. On error paths it returned a *types.Res
+		// and we fall through to WriteResponse below.
 		return
 	} else {
 		common.WriteResponse(w, http.StatusOK, rsp)

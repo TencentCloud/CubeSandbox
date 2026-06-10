@@ -60,6 +60,7 @@ rm -f \
   "${PREBUILT_DIR}/cubecli" \
   "${PREBUILT_DIR}/cube-api" \
   "${PREBUILT_DIR}/network-agent" \
+  "${PREBUILT_DIR}/cubevsmapdump" \
   "${PREBUILT_DIR}/cube-agent" \
   "${PREBUILT_DIR}/containerd-shim-cube-rs" \
   "${PREBUILT_DIR}/cube-runtime"
@@ -83,6 +84,9 @@ install -m 0755 /workspace/CubeAPI/target/release/cube-api "${PREBUILT_DIR}/cube
 
 echo "[one-click] building network-agent in builder" >&2
 (cd /workspace/network-agent && go build -ldflags "${NETAGENT_LDFLAGS}" -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
+
+echo "[one-click] building cubevsmapdump in builder" >&2
+(cd /workspace/CubeNet/cubevs && go build -o "${PREBUILT_DIR}/cubevsmapdump" ./cmd/cubevsmapdump)
 
 echo "[one-click] building cube-agent in builder" >&2
 # Agent Makefile reads CUBE_VERSION/CUBE_COMMIT/CUBE_BUILD_TIME directly.
@@ -115,6 +119,7 @@ for artifact in \
   cubecli \
   cube-api \
   network-agent \
+  cubevsmapdump \
   cube-agent \
   containerd-shim-cube-rs \
   cube-runtime
@@ -129,6 +134,7 @@ ONE_CLICK_CUBELET_BIN="${PREBUILT_DIR}/cubelet" \
 ONE_CLICK_CUBECLI_BIN="${PREBUILT_DIR}/cubecli" \
 ONE_CLICK_CUBE_API_BIN="${PREBUILT_DIR}/cube-api" \
 ONE_CLICK_NETWORK_AGENT_BIN="${PREBUILT_DIR}/network-agent" \
+ONE_CLICK_CUBEVSMAPDUMP_BIN="${PREBUILT_DIR}/cubevsmapdump" \
 ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \
 ONE_CLICK_CUBESHIM_BIN="${PREBUILT_DIR}/containerd-shim-cube-rs" \
 ONE_CLICK_CUBE_RUNTIME_BIN="${PREBUILT_DIR}/cube-runtime" \

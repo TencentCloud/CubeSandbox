@@ -117,6 +117,9 @@ proto: check-proto-tools
 		protoc $(PROTOC_INCLUDE_FLAGS) $(PROTOC_GO_FLAGS) \
 		api/$$pkg/v1/*.proto ;\
 	done)
+	@echo pkg/networkagentclient/pb
+	$(Q)protoc $(PROTOC_INCLUDE_FLAGS) $(PROTOC_GO_FLAGS) \
+		pkg/networkagentclient/pb/network_agent.proto
 	@if command -v protoc-gen-doc >/dev/null 2>&1; then \
 		printf '  %-8s %s\n' "Generate" "proto doc"; \
 		protoc $(PROTOC_INCLUDE_FLAGS) --doc_out=./doc/ --doc_opt=markdown,cubelet-api.md $(PROTO_DOC_FILES); \

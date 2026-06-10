@@ -108,29 +108,48 @@ sb2 = Sandbox.connect(sb.sandbox_id)
 
 ### Network policy
 
+Two layers can be combined inside `network=`:
+
+- **L3/L4** — `allow_out` / `deny_out` lists of CIDRs or hostnames.
+- **L7** — `rules` for host / path / SNI matching, audit, and credential
+  injection. Use the typed `Rule` / `Match` / `Action` / `Inject` dataclasses.
+
 ```python
-from cubesandbox import Sandbox
+from cubesandbox import Sandbox, Rule, Match, Action, Inject
 
-# Deny all outbound traffic
-with Sandbox.create(allow_internet_access=False) as sb:
-    result = sb.run_code(
-        "import urllib.request; urllib.request.urlopen('http://example.com')"
-    )
-    print(result.error.name)   # "URLError"
+rules = [
+    Rule(
+        name="deepseek_api",
+        match=Match(
+            scheme="https",
+            host="api.deepseek.com",
+            method=["POST"],
+            path="/v1/chat",
+            sni="api.deepseek.com",
+        ),
+        action=Action(
+            allow=True,
+            audit="metadata",
+            inject=[Inject(
+                header="Authorization",
+                format="Bearer ${SECRET}",
+                secret="sk_xxxxxxxx",
+            )],
+        ),
+    ),
+]
 
-# Custom allow-list — NOTE: only IP addresses are supported, not domain names
 with Sandbox.create(
-    allow_internet_access=False,
-    network={"allow_out": ["151.101.0.0/16"]},
+    network={"allow_out": ["172.67.0.0/16"], "rules": rules},
 ) as sb:
-    sb.run_code("import subprocess; subprocess.run(['pip', 'install', 'requests'])")
-
-# Custom deny-list
-with Sandbox.create(
-    network={"deny_out": ["169.254.0.0/16"]},
-) as sb:
-    sb.run_code("import subprocess; subprocess.run(['pip', 'install', 'requests'])")
+    sb.run_code("import requests; requests.post('https://api.deepseek.com/v1/chat')")
 ```
+
+Rules are evaluated **first-match-wins** in list order. Credential injection
+only runs on HTTPS requests where SNI and Host match (server-enforced).
+
+The legacy `metadata={"network-policy": ...}` interface is still accepted
+for IP-only deny-all / custom allow-list scenarios.
 
 ### Host-directory mount
 

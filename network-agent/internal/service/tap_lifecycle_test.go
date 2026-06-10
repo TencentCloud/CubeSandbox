@@ -168,7 +168,7 @@ func newLifecycleTestService(t *testing.T) *localService {
 	return &localService{
 		allocator:         allocator,
 		ports:             &portAllocator{assigned: make(map[uint16]struct{})},
-		cfg:               Config{CIDR: "192.168.0.0/18", MVMMacAddr: "20:90:6f:fc:fc:fc", MvmMtu: 1300},
+		cfg:               Config{CIDR: "192.168.0.0/18", MVMMacAddr: "20:90:6f:fc:fc:fc", MvmMtu: 1500},
 		cubeDev:           &cubeDev{Index: 16},
 		states:            make(map[string]*managedState),
 		quarantinedTaps:   make(map[string]*tapDevice),

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     cubemaster::{
-        CreateTemplateContainerOverrides, CreateTemplateCubeVSContext, CreateTemplateEnv,
+        CreateTemplateContainerOverrides, CreateTemplateCubeNetworkConfig, CreateTemplateEnv,
         CreateTemplateFromImageReq, CreateTemplateResources, CubeMasterClient, CubeMasterError,
         DnsConfig, HttpGetAction, Probe, ProbeHandler, RedoTemplateReq, TemplateDeleteRequest,
         TemplateJob, TemplateJobResponse,
@@ -74,17 +74,9 @@ impl TemplateService {
             .as_ref()
             .and_then(|v| v.get("network_type"))
             .and_then(|v| v.as_str())
-            .and_then(|s| {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.to_string())
-                }
-            });
-        let allow_internet_access = resp
-            .create_request
-            .as_ref()
-            .and_then(|v| v.get("cubevs_context"))
+            .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) });
+        let allow_internet_access = resp.create_request.as_ref()
+            .and_then(|v| v.get("cube_network_config"))
             .and_then(|v| v.get("allowInternetAccess"))
             .and_then(|v| v.as_bool());
 
@@ -111,7 +103,7 @@ impl TemplateService {
 
         let dns_servers = validate_dns_servers(body.dns.as_deref())?;
         let container_overrides = build_template_container_overrides(&body, dns_servers.as_deref());
-        let cubevs_context = build_template_cubevs_context(&body);
+        let cube_network_config = build_template_cube_network_config(&body);
 
         let req = CreateTemplateFromImageReq {
             request_id: new_request_id(),
@@ -130,7 +122,7 @@ impl TemplateService {
             registry_password: non_empty_option(body.registry_password),
             distribution_scope: non_empty_vec(body.nodes),
             container_overrides,
-            cubevs_context,
+            cube_network_config,
         };
 
         let resp = self
@@ -423,13 +415,15 @@ fn build_template_container_overrides(
     })
 }
 
-fn build_template_cubevs_context(body: &CreateTemplateRequest) -> Option<CreateTemplateCubeVSContext> {
+fn build_template_cube_network_config(
+    body: &CreateTemplateRequest,
+) -> Option<CreateTemplateCubeNetworkConfig> {
     let allow_out = body.allow_out.clone().unwrap_or_default();
     let deny_out = body.deny_out.clone().unwrap_or_default();
     if body.allow_internet_access.is_none() && allow_out.is_empty() && deny_out.is_empty() {
         return None;
     }
-    Some(CreateTemplateCubeVSContext {
+    Some(CreateTemplateCubeNetworkConfig {
         allow_internet_access: body.allow_internet_access,
         allow_out,
         deny_out,
@@ -486,12 +480,12 @@ mod tests {
     }
 
     #[test]
-    fn build_template_cubevs_context_includes_egress_rules() {
+    fn build_template_cube_network_config_includes_egress_rules() {
         let body = sample_request();
-        let ctx = build_template_cubevs_context(&body).expect("cubevs");
-        assert_eq!(ctx.allow_internet_access, Some(true));
-        assert_eq!(ctx.allow_out, vec!["172.67.0.0/16".to_string()]);
-        assert_eq!(ctx.deny_out, vec!["10.0.0.0/8".to_string()]);
+        let cfg = build_template_cube_network_config(&body).expect("cube_network_config");
+        assert_eq!(cfg.allow_internet_access, Some(true));
+        assert_eq!(cfg.allow_out, vec!["172.67.0.0/16".to_string()]);
+        assert_eq!(cfg.deny_out, vec!["10.0.0.0/8".to_string()]);
     }
 
     #[test]

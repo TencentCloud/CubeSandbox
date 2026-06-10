@@ -166,6 +166,195 @@ class TestCreate:
         assert "network" not in body
 
 
+# ── domain filtering (DNS allow-list) ────────────────────────────────────────
+
+class TestDomainFiltering:
+    def _payload_for_network(self, network, **kwargs):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network=network, config=make_config(), **kwargs)
+        return m.call_args.kwargs["json"]
+
+    @pytest.mark.parametrize("domain", [
+        "api.github.com",
+        "api.deepseek.com",
+        "example.com",
+    ])
+    def test_create_network_allow_out_accepts_domain_target(self, domain):
+        body = self._payload_for_network({"allow_out": [domain]})
+        assert body["network"]["allowOut"] == [domain]
+        assert "rules" not in body["network"]
+
+    @pytest.mark.parametrize("domain", [
+        "*.example.com",
+        "*.githubusercontent.com",
+        "*.internal.example.org",
+    ])
+    def test_create_network_allow_out_accepts_wildcard_domain_target(self, domain):
+        body = self._payload_for_network({"allow_out": [domain]})
+        assert body["network"]["allowOut"] == [domain]
+
+    def test_create_network_allow_out_preserves_mixed_domain_and_cidr_targets(self):
+        allow_out = ["api.deepseek.com", "172.67.0.0/16", "*.githubusercontent.com"]
+        body = self._payload_for_network({"allow_out": allow_out})
+        assert body["network"]["allowOut"] == allow_out
+
+    def test_create_network_allow_out_preserves_order_and_duplicates(self):
+        allow_out = ["api.example.com", "*.example.com", "api.example.com"]
+        body = self._payload_for_network({"allow_out": allow_out})
+        assert body["network"]["allowOut"] == allow_out
+
+    def test_create_network_domain_filtering_preserves_literal_domain_values(self):
+        allow_out = ["API.Example.COM", "service.example.com."]
+        body = self._payload_for_network({"allow_out": allow_out})
+        assert body["network"]["allowOut"] == allow_out
+
+    def test_create_network_domain_filtering_with_deny_all_mode(self):
+        allow_out = ["api.example.com", "*.example.org"]
+        body = self._payload_for_network(
+            {"allow_out": allow_out},
+            allow_internet_access=False,
+        )
+        assert body["allow_internet_access"] is False
+        assert body["network"]["allowOut"] == allow_out
+
+    def test_create_network_domain_filtering_with_allow_public_traffic_false(self):
+        allow_out = ["api.example.com"]
+        body = self._payload_for_network({
+            "allow_public_traffic": False,
+            "allow_out": allow_out,
+        })
+        assert body["network"]["allowPublicTraffic"] is False
+        assert body["network"]["allowOut"] == allow_out
+
+    def test_create_network_domain_filtering_alongside_deny_out_cidr(self):
+        allow_out = ["api.example.com", "*.example.org"]
+        deny_out = ["203.0.113.0/24"]
+        body = self._payload_for_network({
+            "allow_out": allow_out,
+            "deny_out": deny_out,
+        })
+        assert body["network"]["allowOut"] == allow_out
+        assert body["network"]["denyOut"] == deny_out
+
+    def test_create_network_domain_filtering_alongside_l7_rules(self):
+        from cubesandbox import Action, Match, Rule
+        allow_out = ["api.github.com", "*.githubusercontent.com"]
+        rules = [Rule(
+            name="github_api",
+            match=Match(host="api.github.com", path="/repos/*"),
+            action=Action(allow=True, audit="metadata"),
+        )]
+        body = self._payload_for_network({"allow_out": allow_out, "rules": rules})
+        assert body["network"]["allowOut"] == allow_out
+        assert body["network"]["rules"] == [{
+            "name": "github_api",
+            "match": {"host": "api.github.com", "path": "/repos/*"},
+            "action": {"allow": True, "audit": "metadata"},
+        }]
+
+    def test_create_network_empty_allow_out_is_still_sent(self):
+        body = self._payload_for_network({"allow_out": []})
+        assert body["network"]["allowOut"] == []
+
+
+# ── network rules (L7 policy) ────────────────────────────────────────────────
+
+class TestNetworkRules:
+    def test_create_network_rules_dataclass(self):
+        from cubesandbox import Action, Match, Rule
+        rules = [Rule(
+            name="deepseek_api",
+            match=Match(scheme="https", host="api.deepseek.com",
+                        method=["POST"], path="/v1/chat",
+                        sni="api.deepseek.com"),
+            action=Action(allow=True, audit="metadata"),
+        )]
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network={"rules": rules}, config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert body["network"]["rules"] == [{
+            "name": "deepseek_api",
+            "match": {
+                "scheme": "https",
+                "host": "api.deepseek.com",
+                "method": ["POST"],
+                "path": "/v1/chat",
+                "sni": "api.deepseek.com",
+            },
+            "action": {"allow": True, "audit": "metadata"},
+        }]
+
+    def test_create_network_rules_dict_passthrough(self):
+        # Plain-dict rules pass through verbatim to the wire — no
+        # snake_case → camelCase rename happens for match keys today.
+        rules = [{
+            "name": "deepseek_api",
+            "match": {"path": "/v1/chat", "sni": "api.deepseek.com"},
+            "action": {"allow": True},
+        }]
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network={"rules": rules}, config=make_config())
+        body = m.call_args.kwargs["json"]
+        wire = body["network"]["rules"][0]
+        assert wire["name"] == "deepseek_api"
+        assert wire["match"]["path"] == "/v1/chat"
+        assert wire["match"]["sni"] == "api.deepseek.com"
+
+    def test_create_network_rules_with_inject(self):
+        from cubesandbox import Action, Inject, Match, Rule
+        rules = [Rule(
+            name="r1",
+            match=Match(host="api.example.com"),
+            action=Action(allow=True, inject=[
+                Inject(header="Authorization", format="Bearer ${SECRET}", secret="sk_xxx"),
+            ]),
+        )]
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network={"rules": rules}, config=make_config())
+        body = m.call_args.kwargs["json"]
+        inject_wire = body["network"]["rules"][0]["action"]["inject"]
+        assert inject_wire == [{
+            "header": "Authorization",
+            "secret": "sk_xxx",
+            "format": "Bearer ${SECRET}",
+        }]
+
+    def test_create_network_rules_alongside_allow_out(self):
+        from cubesandbox import Action, Match, Rule
+        rules = [Rule(name="r1", match=Match(host="x.com"), action=Action(allow=True))]
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(
+                network={"allow_out": ["1.2.3.0/24"], "rules": rules},
+                config=make_config(),
+            )
+        body = m.call_args.kwargs["json"]
+        assert body["network"]["allowOut"] == ["1.2.3.0/24"]
+        assert len(body["network"]["rules"]) == 1
+
+    def test_create_network_rules_empty_list_omitted(self):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network={"rules": []}, config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert "network" not in body
+
+    def test_inject_render(self):
+        from cubesandbox import Inject
+        assert Inject(header="Authorization", format="Bearer ${SECRET}",
+                      secret="sk_xxx").render() == "Bearer sk_xxx"
+        # no format → defaults to "${SECRET}"
+        assert Inject(header="X-Token", secret="abc").render() == "abc"
+
+    def test_match_to_wire_omits_none_fields(self):
+        from cubesandbox import Match
+        wire = Match(host="example.com").to_wire()
+        assert wire == {"host": "example.com"}
+        assert "scheme" not in wire
+
+    def test_action_to_wire_omits_none_inject_and_audit(self):
+        from cubesandbox import Action
+        assert Action(allow=False).to_wire() == {"allow": False}
+
+
 # ── POST /sandboxes/:id/connect ───────────────────────────────────────────────
 
 class TestConnect:

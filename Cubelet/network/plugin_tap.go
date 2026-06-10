@@ -447,21 +447,21 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "validate network params failed: %v", err)
 	}
 
-	cubeVSContextBeforeDNS := buildNetworkAgentCubeVSContext(request)
+	cubeNetworkConfigBeforeDNS := buildNetworkAgentCubeNetworkConfig(request)
 	resolvedDNSServers, err := localnetfile.ResolveEffectiveDNSServers(request)
 	if err != nil {
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "resolve effective dns servers failed: %v", err)
 	}
-	cubeVSContext, dnsAllowOutCIDRs := mergeDNSAllowOutCIDRs(cubeVSContextBeforeDNS, resolvedDNSServers)
+	cubeNetworkConfig, dnsAllowOutCIDRs := mergeDNSAllowOutCIDRs(cubeNetworkConfigBeforeDNS, resolvedDNSServers)
 
-	log.G(ctx).Infof("tap create using network-agent: sandbox_id=%s request_id=%s exposed_ports=%v req_version=%d allow_internet_access=%s allow_out=%d deny_out=%d resolved_dns_servers=%v dns_allow_out_cidrs=%v cubevs_context_before_dns_merge=%s cubevs_context=%s",
+	log.G(ctx).Infof("tap create using network-agent: sandbox_id=%s request_id=%s exposed_ports=%v req_version=%d allow_internet_access=%s allow_out=%d deny_out=%d resolved_dns_servers=%v dns_allow_out_cidrs=%v cube_network_config_before_dns_merge=%s cube_network_config=%s",
 		opts.SandboxID, request.GetRequestID(), request.ExposedPorts, req.Version,
-		formatCubeVSAllowInternetAccess(cubeVSContext), lenCubeVSList(cubeVSContext, true), lenCubeVSList(cubeVSContext, false),
-		resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkAgentCubeVSContext(cubeVSContextBeforeDNS), formatNetworkAgentCubeVSContext(cubeVSContext))
-	ensureReq := l.buildEnsureNetworkRequestFromIntent(opts.SandboxID, request.GetRequestID(), request.ExposedPorts, req, cubeVSContext)
-	log.G(ctx).Infof("tap create ensure request: sandbox_id=%s interfaces=%d routes=%d arps=%d port_mappings=%d resolved_dns_servers=%v dns_allow_out_cidrs=%v cubevs_context=%s persist_metadata=%s",
+		formatCubeNetworkAllowInternetAccess(cubeNetworkConfig), lenCubeNetworkList(cubeNetworkConfig, true), lenCubeNetworkList(cubeNetworkConfig, false),
+		resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkAgentCubeNetworkConfig(cubeNetworkConfigBeforeDNS), formatNetworkAgentCubeNetworkConfig(cubeNetworkConfig))
+	ensureReq := l.buildEnsureNetworkRequestFromIntent(opts.SandboxID, request.GetRequestID(), request.ExposedPorts, req, cubeNetworkConfig)
+	log.G(ctx).Infof("tap create ensure request: sandbox_id=%s interfaces=%d routes=%d arps=%d port_mappings=%d resolved_dns_servers=%v dns_allow_out_cidrs=%v cube_network_config=%s persist_metadata=%s",
 		ensureReq.SandboxID, len(ensureReq.Interfaces), len(ensureReq.Routes), len(ensureReq.ARPNeighbors),
-		len(ensureReq.PortMappings), resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkAgentCubeVSContext(ensureReq.CubeVSContext), utils.InterfaceToString(ensureReq.PersistMetadata))
+		len(ensureReq.PortMappings), resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkAgentCubeNetworkConfig(ensureReq.CubeNetworkConfig), utils.InterfaceToString(ensureReq.PersistMetadata))
 	ensureResp, naErr := l.networkAgentClient.EnsureNetwork(ctx, ensureReq)
 	if naErr != nil {
 		l.recordNetworkAgentFailure(naErr)
@@ -520,23 +520,24 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 	return nil
 }
 
-func buildNetworkAgentCubeVSContext(request *cubebox.RunCubeSandboxRequest) *networkagentclient.CubeVSContext {
+func buildNetworkAgentCubeNetworkConfig(request *cubebox.RunCubeSandboxRequest) *networkagentclient.CubeNetworkConfig {
 	if request == nil {
 		return nil
 	}
-	if request.GetCubevsContext() != nil {
-		return mapRunRequestCubeVSContext(request.GetCubevsContext())
+	if request.GetCubeNetworkConfig() != nil {
+		return mapRunRequestCubeNetworkConfig(request.GetCubeNetworkConfig())
 	}
-	return buildLegacyNetworkAgentCubeVSContext(request.GetAnnotations())
+	return buildLegacyNetworkAgentCubeNetworkConfig(request.GetAnnotations())
 }
 
-func mapRunRequestCubeVSContext(in *cubebox.CubeVSContext) *networkagentclient.CubeVSContext {
+func mapRunRequestCubeNetworkConfig(in *cubebox.CubeNetworkConfig) *networkagentclient.CubeNetworkConfig {
 	if in == nil {
 		return nil
 	}
-	out := &networkagentclient.CubeVSContext{
+	out := &networkagentclient.CubeNetworkConfig{
 		AllowOut: append([]string(nil), in.GetAllowOut()...),
 		DenyOut:  append([]string(nil), in.GetDenyOut()...),
+		Rules:    mapRunRequestEgressRules(in.GetRules()),
 	}
 	if in.AllowInternetAccess != nil {
 		allowInternetAccess := in.GetAllowInternetAccess()
@@ -545,64 +546,120 @@ func mapRunRequestCubeVSContext(in *cubebox.CubeVSContext) *networkagentclient.C
 	return out
 }
 
-func buildLegacyNetworkAgentCubeVSContext(annotations map[string]string) *networkagentclient.CubeVSContext {
+func mapRunRequestEgressRules(in []*cubebox.EgressRule) []*networkagentclient.EgressRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*networkagentclient.EgressRule, 0, len(in))
+	for _, r := range in {
+		if r == nil {
+			continue
+		}
+		out = append(out, &networkagentclient.EgressRule{
+			Name:   r.GetName(),
+			Match:  mapRunRequestEgressRuleMatch(r.GetMatch()),
+			Action: mapRunRequestEgressRuleAction(r.GetAction()),
+		})
+	}
+	return out
+}
+
+func mapRunRequestEgressRuleMatch(in *cubebox.EgressRuleMatch) *networkagentclient.EgressRuleMatch {
+	if in == nil {
+		return nil
+	}
+	return &networkagentclient.EgressRuleMatch{
+		SNI:    in.Sni,
+		Host:   in.Host,
+		Method: append([]string(nil), in.GetMethod()...),
+		Path:   in.Path,
+		Scheme: in.Scheme,
+	}
+}
+
+func mapRunRequestEgressRuleAction(in *cubebox.EgressRuleAction) *networkagentclient.EgressRuleAction {
+	if in == nil {
+		return nil
+	}
+	out := &networkagentclient.EgressRuleAction{
+		Allow: in.GetAllow(),
+		Audit: in.Audit,
+	}
+	if len(in.GetInject()) > 0 {
+		out.Inject = make([]*networkagentclient.EgressRuleInject, 0, len(in.GetInject()))
+		for _, inj := range in.GetInject() {
+			if inj == nil {
+				continue
+			}
+			out.Inject = append(out.Inject, &networkagentclient.EgressRuleInject{
+				Header: inj.GetHeader(),
+				Secret: inj.GetSecret(),
+				Format: inj.Format,
+			})
+		}
+	}
+	return out
+}
+
+func buildLegacyNetworkAgentCubeNetworkConfig(annotations map[string]string) *networkagentclient.CubeNetworkConfig {
 	if len(annotations) == 0 {
 		return nil
 	}
 	if v, ok := annotations[constants.MasterAnnotationNetworkPolicyBlockAll]; ok && v == "true" {
 		allowInternetAccess := false
-		return &networkagentclient.CubeVSContext{AllowInternetAccess: &allowInternetAccess}
+		return &networkagentclient.CubeNetworkConfig{AllowInternetAccess: &allowInternetAccess}
 	}
 	if v, ok := annotations[constants.MasterAnnotationNetworkPolicyAllowPublicServices]; ok && v == "true" {
 		allowInternetAccess := true
-		return &networkagentclient.CubeVSContext{AllowInternetAccess: &allowInternetAccess}
+		return &networkagentclient.CubeNetworkConfig{AllowInternetAccess: &allowInternetAccess}
 	}
 	if v, ok := annotations[constants.MasterAnnotationNetworkPolicyDefault]; ok && v == "true" {
 		allowInternetAccess := true
-		return &networkagentclient.CubeVSContext{AllowInternetAccess: &allowInternetAccess}
+		return &networkagentclient.CubeNetworkConfig{AllowInternetAccess: &allowInternetAccess}
 	}
 	return nil
 }
 
-func formatCubeVSAllowInternetAccess(ctx *networkagentclient.CubeVSContext) string {
-	if ctx == nil || ctx.AllowInternetAccess == nil {
+func formatCubeNetworkAllowInternetAccess(cfg *networkagentclient.CubeNetworkConfig) string {
+	if cfg == nil || cfg.AllowInternetAccess == nil {
 		return "default(true)"
 	}
-	if *ctx.AllowInternetAccess {
+	if *cfg.AllowInternetAccess {
 		return "true"
 	}
 	return "false"
 }
 
-func lenCubeVSList(ctx *networkagentclient.CubeVSContext, allow bool) int {
-	if ctx == nil {
+func lenCubeNetworkList(cfg *networkagentclient.CubeNetworkConfig, allow bool) int {
+	if cfg == nil {
 		return 0
 	}
 	if allow {
-		return len(ctx.AllowOut)
+		return len(cfg.AllowOut)
 	}
-	return len(ctx.DenyOut)
+	return len(cfg.DenyOut)
 }
 
-func formatNetworkAgentCubeVSContext(ctx *networkagentclient.CubeVSContext) string {
-	if ctx == nil {
-		return "allow_internet_access=default(true) allow_out=[] deny_out=[]"
+func formatNetworkAgentCubeNetworkConfig(cfg *networkagentclient.CubeNetworkConfig) string {
+	if cfg == nil {
+		return "allow_internet_access=default(true) allow_out=[] deny_out=[] rules=0"
 	}
 	return fmt.Sprintf(
-		"allow_internet_access=%s allow_out=%v deny_out=%v",
-		formatCubeVSAllowInternetAccess(ctx),
-		ctx.AllowOut,
-		ctx.DenyOut,
+		"allow_internet_access=%s allow_out=%v deny_out=%v rules=%d",
+		formatCubeNetworkAllowInternetAccess(cfg),
+		cfg.AllowOut,
+		cfg.DenyOut,
+		len(cfg.Rules),
 	)
 }
 
-func mergeDNSAllowOutCIDRs(ctx *networkagentclient.CubeVSContext, dnsServers []string) (*networkagentclient.CubeVSContext, []string) {
-	if !shouldAppendDNSAllowOut(ctx) || len(dnsServers) == 0 {
-		return ctx, nil
+func mergeDNSAllowOutCIDRs(cfg *networkagentclient.CubeNetworkConfig, dnsServers []string) (*networkagentclient.CubeNetworkConfig, []string) {
+	if !shouldAppendDNSAllowOut(cfg) || len(dnsServers) == 0 {
+		return cfg, nil
 	}
-	out := cloneNetworkAgentCubeVSContext(ctx)
+	out := cloneNetworkAgentCubeNetworkConfig(cfg)
 	if out == nil {
-		out = &networkagentclient.CubeVSContext{}
+		out = &networkagentclient.CubeNetworkConfig{}
 	}
 	dnsAllowOutCIDRs := make([]string, 0, len(dnsServers))
 	for _, dnsServer := range dnsServers {
@@ -616,26 +673,151 @@ func mergeDNSAllowOutCIDRs(ctx *networkagentclient.CubeVSContext, dnsServers []s
 	return out, dnsAllowOutCIDRs
 }
 
-func shouldAppendDNSAllowOut(ctx *networkagentclient.CubeVSContext) bool {
-	if ctx == nil {
+func shouldAppendDNSAllowOut(cfg *networkagentclient.CubeNetworkConfig) bool {
+	if cfg == nil {
 		return false
 	}
-	if ctx.AllowInternetAccess != nil && !*ctx.AllowInternetAccess {
+	if cfg.AllowInternetAccess != nil && !*cfg.AllowInternetAccess {
 		return false
 	}
-	return len(ctx.AllowOut) > 0 || len(ctx.DenyOut) > 0
+	for _, target := range cfg.AllowOut {
+		if isAllowOutDomainTarget(target) {
+			return true
+		}
+	}
+	return hasL7DomainRuleTarget(cfg.Rules)
 }
 
-func cloneNetworkAgentCubeVSContext(ctx *networkagentclient.CubeVSContext) *networkagentclient.CubeVSContext {
-	if ctx == nil {
+func isAllowOutDomainTarget(raw string) bool {
+	target := strings.TrimSpace(raw)
+	if target == "" {
+		return false
+	}
+	if isIPv4NetworkTarget(target) {
+		return false
+	}
+	if strings.Contains(target, "/") {
+		return false
+	}
+	if net.ParseIP(target) != nil || isDottedDecimalLikeTarget(target) {
+		return false
+	}
+	return isDNSAllowDomainTarget(target)
+}
+
+func hasL7DomainRuleTarget(rules []*networkagentclient.EgressRule) bool {
+	for _, rule := range rules {
+		if rule == nil || rule.Match == nil {
+			continue
+		}
+		if rule.Match.SNI != nil && isL7DomainTarget(*rule.Match.SNI) {
+			return true
+		}
+		if rule.Match.Host != nil && isL7HostDomainTarget(*rule.Match.Host) {
+			return true
+		}
+	}
+	return false
+}
+
+func isL7HostDomainTarget(raw string) bool {
+	target := strings.TrimSpace(raw)
+	if target == "" {
+		return false
+	}
+	if host, _, err := net.SplitHostPort(target); err == nil {
+		target = host
+	}
+	if net.ParseIP(target) != nil {
+		return false
+	}
+	if strings.Contains(target, "/") {
+		return false
+	}
+	if isDottedDecimalLikeTarget(target) {
+		return false
+	}
+	return isL7DomainTarget(target)
+}
+
+func isL7DomainTarget(raw string) bool {
+	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	if isDottedDecimalLikeTarget(domain) {
+		return false
+	}
+	return isValidDNSDomainTarget(domain)
+}
+
+func isIPv4NetworkTarget(target string) bool {
+	if strings.Contains(target, "/") {
+		ip, _, err := net.ParseCIDR(target)
+		return err == nil && ip.To4() != nil
+	}
+	ip := net.ParseIP(target)
+	return ip != nil && ip.To4() != nil
+}
+
+func isDottedDecimalLikeTarget(target string) bool {
+	parts := strings.Split(strings.TrimSuffix(target, "."), ".")
+	if len(parts) != net.IPv4len {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isDNSAllowDomainTarget(target string) bool {
+	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(target), "."))
+	return isValidDNSDomainTarget(domain)
+}
+
+func isValidDNSDomainTarget(domain string) bool {
+	if domain == "" || len(domain) >= 254 {
+		return false
+	}
+	if strings.HasPrefix(domain, "*.") {
+		domain = domain[2:]
+	} else if strings.Contains(domain, "*") {
+		return false
+	}
+	labels := strings.Split(domain, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		for i, ch := range label {
+			isAlphaNum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+			if !isAlphaNum && ch != '-' {
+				return false
+			}
+			if ch == '-' && (i == 0 || i == len(label)-1) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func cloneNetworkAgentCubeNetworkConfig(cfg *networkagentclient.CubeNetworkConfig) *networkagentclient.CubeNetworkConfig {
+	if cfg == nil {
 		return nil
 	}
-	out := &networkagentclient.CubeVSContext{
-		AllowOut: append([]string(nil), ctx.AllowOut...),
-		DenyOut:  append([]string(nil), ctx.DenyOut...),
+	out := &networkagentclient.CubeNetworkConfig{
+		AllowOut: append([]string(nil), cfg.AllowOut...),
+		DenyOut:  append([]string(nil), cfg.DenyOut...),
+		Rules:    cfg.Rules,
 	}
-	if ctx.AllowInternetAccess != nil {
-		v := *ctx.AllowInternetAccess
+	if cfg.AllowInternetAccess != nil {
+		v := *cfg.AllowInternetAccess
 		out.AllowInternetAccess = &v
 	}
 	return out
@@ -649,7 +831,7 @@ func dnsServerToCIDR(ip string) (string, bool) {
 	if ipv4 := parsedIP.To4(); ipv4 != nil {
 		return ipv4.String() + "/32", true
 	}
-	return parsedIP.String() + "/128", true
+	return "", false
 }
 
 func appendUniqueString(base []string, extra []string) []string {
@@ -754,7 +936,7 @@ func (l *local) CleanUp(ctx context.Context, opts *workflow.CleanContext) error 
 	return nil
 }
 
-func (l *local) buildEnsureNetworkRequestFromIntent(sandboxID, requestID string, exposedPorts []int64, shimReq *NetRequest, cubeVSContext *networkagentclient.CubeVSContext) *networkagentclient.EnsureNetworkRequest {
+func (l *local) buildEnsureNetworkRequestFromIntent(sandboxID, requestID string, exposedPorts []int64, shimReq *NetRequest, cubeNetworkConfig *networkagentclient.CubeNetworkConfig) *networkagentclient.EnsureNetworkRequest {
 	desired := &networkagentclient.EnsureNetworkRequest{
 		SandboxID:      sandboxID,
 		IdempotencyKey: requestID,
@@ -780,7 +962,7 @@ func (l *local) buildEnsureNetworkRequestFromIntent(sandboxID, requestID string,
 			},
 		},
 	}
-	desired.CubeVSContext = cubeVSContext
+	desired.CubeNetworkConfig = cubeNetworkConfig
 	portReq := make(map[uint16]struct{})
 	for _, port := range exposedPorts {
 		portReq[uint16(port)] = struct{}{}

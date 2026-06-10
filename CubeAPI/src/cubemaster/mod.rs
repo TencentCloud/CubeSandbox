@@ -620,14 +620,14 @@ pub struct CreateSandboxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_type: Option<String>,
 
-    /// CubeVS network policy (egress control).
-    #[serde(rename = "cubevs_context", skip_serializing_if = "Option::is_none")]
-    pub cubevs_context: Option<CubeVSContext>,
+    /// Network egress policy.
+    #[serde(rename = "cube_network_config", skip_serializing_if = "Option::is_none")]
+    pub cube_network_config: Option<CubeNetworkConfig>,
 }
 
-/// CubeVS network egress control, maps to CubeMaster's CubeVSContext.
+/// Network egress control sent to CubeMaster.
 #[derive(Debug, Serialize, Clone, Default)]
-pub struct CubeVSContext {
+pub struct CubeNetworkConfig {
     /// Allow internet (public) access. Maps to CubeMaster allowInternetAccess.
     #[serde(
         rename = "allowInternetAccess",
@@ -642,6 +642,49 @@ pub struct CubeVSContext {
     /// Denied outbound CIDRs blacklist.
     #[serde(rename = "denyOut", skip_serializing_if = "Vec::is_empty")]
     pub deny_out: Vec<String>,
+
+    /// L7 egress rules, evaluated first-match-wins in list order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<CubeEgressRule>,
+}
+
+/// L7 egress rule forwarded to CubeMaster (camelCase wire keys).
+#[derive(Debug, Serialize, Clone)]
+pub struct CubeEgressRule {
+    pub name: String,
+    pub r#match: CubeEgressRuleMatch,
+    pub action: CubeEgressRuleAction,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct CubeEgressRuleMatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CubeEgressRuleAction {
+    pub allow: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject: Option<Vec<CubeEgressRuleInject>>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CubeEgressRuleInject {
+    pub header: String,
+    pub secret: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1589,8 +1632,8 @@ pub struct CreateTemplateFromImageReq {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_overrides: Option<CreateTemplateContainerOverrides>,
     /// Network / internet-access context.
-    #[serde(rename = "cubevs_context", skip_serializing_if = "Option::is_none")]
-    pub cubevs_context: Option<CreateTemplateCubeVSContext>,
+    #[serde(rename = "cube_network_config", skip_serializing_if = "Option::is_none")]
+    pub cube_network_config: Option<CreateTemplateCubeNetworkConfig>,
 }
 
 /// Minimal container overrides for template creation.
@@ -1628,13 +1671,10 @@ pub struct CreateTemplateEnv {
     pub value: String,
 }
 
-/// CubeVS context for template creation.
+/// Network config for template creation.
 #[derive(Debug, Serialize)]
-pub struct CreateTemplateCubeVSContext {
-    #[serde(
-        rename = "allowInternetAccess",
-        skip_serializing_if = "Option::is_none"
-    )]
+pub struct CreateTemplateCubeNetworkConfig {
+    #[serde(rename = "allowInternetAccess", skip_serializing_if = "Option::is_none")]
     pub allow_internet_access: Option<bool>,
     #[serde(rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
     pub allow_out: Vec<String>,

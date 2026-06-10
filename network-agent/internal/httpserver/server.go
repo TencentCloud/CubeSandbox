@@ -87,6 +87,34 @@ func New(listen string, svc service.Service) *Server {
 		})
 	})
 
+	// CubeEgress bootstrap pull. CUBE_EGRESS_BOOTSTRAP_URL points here,
+	// and lua/bootstrap.lua does a plain GET (no body, JSON response).
+	// The endpoint is unconditionally exposed: even when no sandboxes
+	// have rules, returning an empty `policies` map is the right answer
+	// — bootstrap.lua treats that as "nothing to load" and proceeds.
+	mux.HandleFunc("/v1/policies/dump", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		policies, err := svc.DumpEgressPolicies(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Match bootstrap.lua's expected shape: {"policies": {...}}.
+		// We don't redact secrets here (unlike CubeEgress's own
+		// /admin/v1/dump which does): the consumer is the colocated
+		// CubeEgress that needs the inline secrets to function. The
+		// loopback isolation that protects /admin/v1/dump from
+		// untrusted callers protects this endpoint too — both bind
+		// only to 127.0.0.1.
+		resp := map[string]any{"policies": policies}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
 	return &Server{
 		httpServer: &http.Server{
 			Addr:         listen,

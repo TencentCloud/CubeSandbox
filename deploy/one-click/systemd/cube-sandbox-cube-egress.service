@@ -1,0 +1,32 @@
+[Unit]
+Description=Cube Sandbox cube-egress (transparent MITM proxy)
+After=docker.service network-online.target cube-sandbox-cube-egress-net.service cube-sandbox-network-agent.service
+Requires=docker.service cube-sandbox-network-agent.service
+Wants=network-online.target cube-sandbox-cube-egress-net.service
+ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+PartOf=cube-sandbox-control.target
+
+# Why net.service is Wants= and not Requires=:
+# net.service installs the host TPROXY iptables rules and waits for
+# cube-dev to exist. cube-dev is created lazily by network-agent at
+# first-sandbox time, so on a fresh boot it isn't there yet and
+# net.service goes into failed/activating state. We still want the
+# cube-egress container itself running (so the loopback admin API at
+# :9090 accepts policy pushes from network-agent); without TPROXY
+# rules, no sandbox traffic reaches us anyway, which is the correct
+# state until the first sandbox lands.
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/services/cubetoolbox
+EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
+ExecStartPre=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-prepare.sh
+ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-start.sh
+ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-postcheck.sh
+ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/cube-egress-stop.sh
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=cube-sandbox-control.target cube-sandbox-compute.target

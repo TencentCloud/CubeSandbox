@@ -116,6 +116,15 @@ type TemplateInfo struct {
 	CreatedAt                 string          `json:"created_at,omitempty"`
 	ImageInfo                 string          `json:"image_info,omitempty"`
 	Replicas                  []ReplicaStatus `json:"replicas,omitempty"`
+
+	// CubeEgress CA bake metadata, surfaced for ops triage. Populated
+	// from the RootfsArtifact row pointed to by the first replica.
+	// All replicas of one template share the same artifact, so a
+	// single lookup covers them. Empty/zero on legacy templates that
+	// were built before the CA feature existed.
+	CubeEgressCABaked          bool   `json:"cube_egress_ca_baked,omitempty"`
+	CubeEgressCAFingerprint    string `json:"cube_egress_ca_fingerprint,omitempty"`
+	CubeEgressCATargetsWritten int    `json:"cube_egress_ca_targets_written,omitempty"`
 }
 
 func templateInfoFromDefinition(def models.TemplateDefinition) TemplateInfo {
@@ -648,6 +657,23 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 	out.Replicas = make([]ReplicaStatus, 0, len(replicas))
 	for _, replica := range replicas {
 		out.Replicas = append(out.Replicas, replicaModelToStatus(replica))
+	}
+	// Populate CA bake metadata from the artifact referenced by the
+	// first replica with a non-empty ArtifactID. Errors here are
+	// non-fatal — the CA fields stay zero, the rest of the template
+	// info is still useful. Worst case the operator can re-query.
+	for _, r := range out.Replicas {
+		if r.ArtifactID == "" {
+			continue
+		}
+		artifact, err := getRootfsArtifactByID(ctx, r.ArtifactID)
+		if err != nil {
+			break
+		}
+		out.CubeEgressCABaked = artifact.CubeEgressCABaked
+		out.CubeEgressCAFingerprint = artifact.CubeEgressCAFingerprint
+		out.CubeEgressCATargetsWritten = artifact.CubeEgressCATargetsWritten
+		break
 	}
 	return out, nil
 }

@@ -44,12 +44,76 @@ pub enum SandboxState {
 pub struct SandboxNetworkConfig {
     #[serde(rename = "allowPublicTraffic", skip_serializing_if = "Option::is_none")]
     pub allow_public_traffic: Option<bool>,
-    #[serde(rename = "allowOut", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "allowOut",
+        alias = "allow_out",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub allow_out: Option<Vec<String>>,
-    #[serde(rename = "denyOut", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "denyOut",
+        alias = "deny_out",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub deny_out: Option<Vec<String>>,
     #[serde(rename = "maskRequestHost", skip_serializing_if = "Option::is_none")]
     pub mask_request_host: Option<String>,
+    /// L7 egress rules, evaluated first-match-wins in list order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<EgressRule>>,
+}
+
+/// L7 egress rule: match conditions + action (allow/deny, audit, credential injection).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EgressRule {
+    /// Human-readable label used for audit logging.
+    pub name: String,
+    pub r#match: EgressRuleMatch,
+    pub action: EgressRuleAction,
+}
+
+/// Rule match conditions. All fields optional; empty match matches any request.
+///
+/// Multi-field semantics: AND across fields, OR within `method`.
+/// Comparisons on sni/host/scheme are case-insensitive.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
+pub struct EgressRuleMatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+}
+
+/// Rule action.
+///
+/// - `allow=true`: pass the request through; optional credential injection.
+/// - `allow=false`: reject (HTTP 403); `inject` is ignored if set.
+/// - `audit` defaults to `"metadata"` server-side when omitted.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EgressRuleAction {
+    pub allow: bool,
+    /// One of `"full"`, `"metadata"`, `"none"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject: Option<Vec<EgressRuleInject>>,
+}
+
+/// Credential injection. Only honored when `Action.allow=true` and the
+/// request is HTTPS with matching SNI/Host (downstream enforces).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EgressRuleInject {
+    pub header: String,
+    pub secret: String,
+    /// Template containing `${SECRET}`; defaults to `"${SECRET}"` when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
 }
 
 /// Auto-resume configuration for paused sandboxes.
@@ -407,6 +471,26 @@ pub struct ListSandboxesV2Query {
 
 fn default_page_limit() -> i32 {
     100
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SandboxNetworkConfig;
+
+    #[test]
+    fn sandbox_network_config_accepts_snake_case_policy_fields() {
+        let cfg: SandboxNetworkConfig = serde_json::from_value(serde_json::json!({
+            "allow_out": ["api.example.com", "8.8.8.8"],
+            "deny_out": ["0.0.0.0/0"]
+        }))
+        .expect("network config should deserialize");
+
+        assert_eq!(
+            cfg.allow_out,
+            Some(vec!["api.example.com".to_string(), "8.8.8.8".to_string()])
+        );
+        assert_eq!(cfg.deny_out, Some(vec!["0.0.0.0/0".to_string()]));
+    }
 }
 
 // ─── Templates ─────────────────────────────────────────────────────────────

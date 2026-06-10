@@ -71,16 +71,16 @@ func TestCreateCommandParsesNodeScope(t *testing.T) {
 	}
 }
 
-func TestMergeCreateFromImageCubeVSContextFlagsEqualsSyntax(t *testing.T) {
+func TestMergeCreateFromImageCubeNetworkConfigFlagsEqualsSyntax(t *testing.T) {
 	ctx := newCreateFromImageContext(t, []string{
 		"--allow-internet-access=false",
 		"--allow-out-cidr", "172.67.0.0/16",
 		"--deny-out-cidr", "10.0.0.0/8",
 	})
 
-	got, err := mergeCreateFromImageCubeVSContextFlags(ctx, nil)
+	got, err := mergeCreateFromImageCubeNetworkConfigFlags(ctx, nil)
 	if err != nil {
-		t.Fatalf("mergeCreateFromImageCubeVSContextFlags error=%v", err)
+		t.Fatalf("mergeCreateFromImageCubeNetworkConfigFlags error=%v", err)
 	}
 	if got == nil || got.AllowInternetAccess == nil || *got.AllowInternetAccess {
 		t.Fatalf("AllowInternetAccess=%v, want false", got)
@@ -93,15 +93,15 @@ func TestMergeCreateFromImageCubeVSContextFlagsEqualsSyntax(t *testing.T) {
 	}
 }
 
-func TestMergeCreateFromImageCubeVSContextFlagsSupportsTrailingFalse(t *testing.T) {
+func TestMergeCreateFromImageCubeNetworkConfigFlagsSupportsTrailingFalse(t *testing.T) {
 	ctx := newCreateFromImageContext(t, []string{
 		"--allow-internet-access", "false",
 		"--allow-out-cidr", "172.67.0.0/16",
 	})
 
-	got, err := mergeCreateFromImageCubeVSContextFlags(ctx, nil)
+	got, err := mergeCreateFromImageCubeNetworkConfigFlags(ctx, nil)
 	if err != nil {
-		t.Fatalf("mergeCreateFromImageCubeVSContextFlags error=%v", err)
+		t.Fatalf("mergeCreateFromImageCubeNetworkConfigFlags error=%v", err)
 	}
 	if got == nil || got.AllowInternetAccess == nil || *got.AllowInternetAccess {
 		t.Fatalf("AllowInternetAccess=%v, want false", got)
@@ -121,24 +121,24 @@ func TestCreateFromImageCommandParsesNodeScope(t *testing.T) {
 	}
 }
 
-func TestMergeCreateFromImageCubeVSContextFlagsRejectsUnexpectedArgs(t *testing.T) {
+func TestMergeCreateFromImageCubeNetworkConfigFlagsRejectsUnexpectedArgs(t *testing.T) {
 	ctx := newCreateFromImageContext(t, []string{
 		"--allow-internet-access", "false",
 		"unexpected",
 	})
 
-	_, err := mergeCreateFromImageCubeVSContextFlags(ctx, nil)
+	_, err := mergeCreateFromImageCubeNetworkConfigFlags(ctx, nil)
 	if err == nil {
 		t.Fatal("expected error for unexpected trailing argument")
 	}
 }
 
-func TestMergeCubeVSContextValuesPreservesExistingCIDRs(t *testing.T) {
-	existing := &types.CubeVSContext{
+func TestMergeCubeNetworkConfigValuesPreservesExistingCIDRs(t *testing.T) {
+	existing := &types.CubeNetworkConfig{
 		AllowOut: []string{"192.168.0.0/16"},
 	}
 
-	got := mergeCubeVSContextValues(existing, true, false, []string{"172.67.0.0/16"}, nil)
+	got := mergeCubeNetworkConfigValues(existing, true, false, []string{"172.67.0.0/16"}, nil)
 	if got == nil || got.AllowInternetAccess == nil || *got.AllowInternetAccess {
 		t.Fatalf("AllowInternetAccess=%v, want false", got)
 	}

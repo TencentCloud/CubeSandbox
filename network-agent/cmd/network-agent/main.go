@@ -42,7 +42,7 @@ func main() {
 		mvmGwDestIP    = flag.String("mvm-gw-dest-ip", "169.254.68.5", "guest gateway destination IP")
 		mvmGwMacAddr   = flag.String("mvm-gw-mac-addr", "20:90:6f:cf:cf:cf", "guest gateway MAC address")
 		mvmMask        = flag.Int("mvm-mask", 30, "guest mask bits")
-		mvmMTU         = flag.Int("mvm-mtu", 1300, "guest mtu")
+		mvmMTU         = flag.Int("mvm-mtu", defaultCfg.MvmMtu, "guest mtu")
 		stateDir       = flag.String("state-dir", defaultCfg.StateDir, "network-agent state directory")
 		tapFDListen    = flag.String("tap-fd-listen", "unix:///tmp/cube/network-agent-tap.sock", "unix socket for passing original tap fds to cubelet")
 		hostProxyBind  = flag.String("host-proxy-bind-ip", "127.0.0.1", "host proxy bind ip")

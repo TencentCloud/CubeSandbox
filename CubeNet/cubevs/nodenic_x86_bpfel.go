@@ -12,6 +12,47 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type nodenicDnsAllowKey struct {
+	Prefixlen uint32
+	Name      [256]int8
+}
+
+type nodenicDnsAllowValue struct {
+	NameLen  uint32
+	Flags    uint8
+	Reserved [3]uint8
+}
+
+type nodenicDnsQueryState struct {
+	DnsOff         uint32
+	Ifindex        uint32
+	Flags          uint16
+	_              [2]byte
+	Cursor         uint32
+	LabelRemaining uint32
+	DottedLen      uint32
+	ReversePos     uint32
+	Failed         bool
+	Done           bool
+	Name           [256]int8
+	_              [2]byte
+}
+
+type nodenicDnsQueryTrackKey struct {
+	Ifindex    uint32
+	ServerIp   uint32
+	SourcePort uint16
+	DnsId      uint16
+	Reserved   uint32
+	QnameHash  uint64
+}
+
+type nodenicDnsQueryTrackValue struct {
+	ExpiresAtNs uint64
+	Flags       uint8
+	Reserved    [7]uint8
+}
+
 type nodenicIngressSession struct {
 	Version  uint32
 	VmIp     uint32
@@ -25,10 +66,11 @@ type nodenicLpmKey struct {
 }
 
 type nodenicMvmMeta struct {
-	Version  uint32
-	Ip       uint32
-	Uuid     [64]uint8
-	Reserved [56]uint8
+	Version        uint32
+	Ip             uint32
+	Uuid           [64]uint8
+	DnsPolicyFlags uint8
+	Reserved       [55]uint8
 }
 
 type nodenicMvmPort struct {
@@ -48,6 +90,12 @@ type nodenicNatSession struct {
 	State       uint8
 	ActiveClose uint8
 	Reserved    [34]uint8
+}
+
+type nodenicNetPolicyValueV2 struct {
+	ExpiresAtNs uint64
+	Flags       uint8
+	Reserved    [7]uint8
 }
 
 type nodenicSessionKey struct {
@@ -117,8 +165,14 @@ type nodenicProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type nodenicMapSpecs struct {
-	AllowOut          *ebpf.MapSpec `ebpf:"allow_out"`
+	AllowOutV2        *ebpf.MapSpec `ebpf:"allow_out_v2"`
 	DenyOut           *ebpf.MapSpec `ebpf:"deny_out"`
+	DnsAllow          *ebpf.MapSpec `ebpf:"dns_allow"`
+	DnsAllowInner     *ebpf.MapSpec `ebpf:"dns_allow_inner"`
+	DnsQueryScratch   *ebpf.MapSpec `ebpf:"dns_query_scratch"`
+	DnsQueryState     *ebpf.MapSpec `ebpf:"dns_query_state"`
+	DnsQueryTrack     *ebpf.MapSpec `ebpf:"dns_query_track"`
+	DnsTailCalls      *ebpf.MapSpec `ebpf:"dns_tail_calls"`
 	EgressSessions    *ebpf.MapSpec `ebpf:"egress_sessions"`
 	IfindexToMvmmeta  *ebpf.MapSpec `ebpf:"ifindex_to_mvmmeta"`
 	IngressSessions   *ebpf.MapSpec `ebpf:"ingress_sessions"`
@@ -169,8 +223,14 @@ func (o *nodenicObjects) Close() error {
 //
 // It can be passed to loadNodenicObjects or ebpf.CollectionSpec.LoadAndAssign.
 type nodenicMaps struct {
-	AllowOut          *ebpf.Map `ebpf:"allow_out"`
+	AllowOutV2        *ebpf.Map `ebpf:"allow_out_v2"`
 	DenyOut           *ebpf.Map `ebpf:"deny_out"`
+	DnsAllow          *ebpf.Map `ebpf:"dns_allow"`
+	DnsAllowInner     *ebpf.Map `ebpf:"dns_allow_inner"`
+	DnsQueryScratch   *ebpf.Map `ebpf:"dns_query_scratch"`
+	DnsQueryState     *ebpf.Map `ebpf:"dns_query_state"`
+	DnsQueryTrack     *ebpf.Map `ebpf:"dns_query_track"`
+	DnsTailCalls      *ebpf.Map `ebpf:"dns_tail_calls"`
 	EgressSessions    *ebpf.Map `ebpf:"egress_sessions"`
 	IfindexToMvmmeta  *ebpf.Map `ebpf:"ifindex_to_mvmmeta"`
 	IngressSessions   *ebpf.Map `ebpf:"ingress_sessions"`
@@ -183,8 +243,14 @@ type nodenicMaps struct {
 
 func (m *nodenicMaps) Close() error {
 	return _NodenicClose(
-		m.AllowOut,
+		m.AllowOutV2,
 		m.DenyOut,
+		m.DnsAllow,
+		m.DnsAllowInner,
+		m.DnsQueryScratch,
+		m.DnsQueryState,
+		m.DnsQueryTrack,
+		m.DnsTailCalls,
 		m.EgressSessions,
 		m.IfindexToMvmmeta,
 		m.IngressSessions,
