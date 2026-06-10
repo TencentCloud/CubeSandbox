@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	cubesandbox "github.com/tencentcloud/CubeSandbox/sdk/go"
 	"golang.org/x/term"
 )
 
@@ -57,8 +58,8 @@ func parseConfig() *Config {
 	flag.StringVar(&cfg.Mode, "mode", "create-delete", "Benchmark mode: create-delete | create-only")
 	flag.StringVar(&cfg.Output, "o", "", "Export JSON report to file")
 	flag.StringVar(&cfg.Output, "output", "", "Export JSON report to file")
-	flag.StringVar(&cfg.APIURL, "api-url", "", "CubeAPI base URL (overrides E2B_API_URL)")
-	flag.StringVar(&cfg.APIKey, "api-key", "", "API key (overrides E2B_API_KEY)")
+	flag.StringVar(&cfg.APIURL, "api-url", "", "CubeAPI base URL (overrides CUBE_API_URL)")
+	flag.StringVar(&cfg.APIKey, "api-key", "", "API key (overrides CUBE_API_KEY)")
 	flag.StringVar(&cfg.ThemeName, "theme", "auto", "Color theme: dark | light | auto")
 	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Simulate API calls with random latencies")
 
@@ -94,14 +95,15 @@ func parseConfig() *Config {
 			cfg.APIKey = "dry-run"
 		}
 	} else {
+		sdkCfg := cubesandbox.NewConfigFromEnv()
 		if cfg.Template == "" {
-			cfg.Template = os.Getenv("CUBE_TEMPLATE_ID")
+			cfg.Template = sdkCfg.TemplateID
 		}
 		if cfg.APIURL == "" {
-			cfg.APIURL = strings.TrimRight(os.Getenv("E2B_API_URL"), "/")
+			cfg.APIURL = sdkCfg.APIURL
 		}
 		if cfg.APIKey == "" {
-			cfg.APIKey = os.Getenv("E2B_API_KEY")
+			cfg.APIKey = sdkCfg.APIKey
 		}
 	}
 
@@ -301,11 +303,11 @@ func main() {
 			os.Exit(1)
 		}
 		if cfg.APIURL == "" {
-			fmt.Fprintln(os.Stderr, T.Error.Render("ERROR:")+" API URL not set. Use --api-url or set E2B_API_URL.")
+			fmt.Fprintln(os.Stderr, T.Error.Render("ERROR:")+" API URL not set. Use --api-url or set CUBE_API_URL.")
 			os.Exit(1)
 		}
 		if cfg.APIKey == "" {
-			fmt.Fprintln(os.Stderr, T.Error.Render("ERROR:")+" API key not set. Use --api-key or set E2B_API_KEY.")
+			fmt.Fprintln(os.Stderr, T.Error.Render("ERROR:")+" API key not set. Use --api-key or set CUBE_API_KEY.")
 			os.Exit(1)
 		}
 	}
