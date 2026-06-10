@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	cubesandbox "github.com/tencentcloud/CubeSandbox/sdk/go"
 	"golang.org/x/term"
 )
 
@@ -34,10 +34,6 @@ type Config struct {
 	APIURL         string
 	APIKey         string
 	ThemeName      string
-	HostMount      string // raw JSON array for config display and report export
-	hostMountValue string // compacted once for request-time reuse
-	requestBody    []byte
-	requestHeaders map[string]string
 	DryRun         bool
 	DryLatencyMean float64
 	DryLatencyStd  float64
@@ -45,39 +41,6 @@ type Config struct {
 	NoTUI          bool
 
 	elapsed float64
-}
-
-type createRequest struct {
-	TemplateID string            `json:"templateID"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
-}
-
-func prepareHostMount(rawJSON string) (string, error) {
-	if rawJSON == "" {
-		return "", nil
-	}
-
-	var mounts []json.RawMessage
-	if err := json.Unmarshal([]byte(rawJSON), &mounts); err != nil {
-		return "", fmt.Errorf("--host-mount must be a JSON array: %w", err)
-	}
-	if len(mounts) == 0 {
-		return "", fmt.Errorf("--host-mount must be a non-empty JSON array")
-	}
-
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, []byte(rawJSON)); err != nil {
-		return "", fmt.Errorf("--host-mount must be valid JSON: %w", err)
-	}
-	return compact.String(), nil
-}
-
-func buildCreateRequestBody(template string, hostMount string) ([]byte, error) {
-	reqBody := createRequest{TemplateID: template}
-	if hostMount != "" {
-		reqBody.Metadata = map[string]string{"host-mount": hostMount}
-	}
-	return json.Marshal(reqBody)
 }
 
 func parseConfig() *Config {
@@ -95,9 +58,8 @@ func parseConfig() *Config {
 	flag.StringVar(&cfg.Mode, "mode", "create-delete", "Benchmark mode: create-delete | create-only")
 	flag.StringVar(&cfg.Output, "o", "", "Export JSON report to file")
 	flag.StringVar(&cfg.Output, "output", "", "Export JSON report to file")
-	flag.StringVar(&cfg.HostMount, "host-mount", "", "Host mount list as a JSON array")
-	flag.StringVar(&cfg.APIURL, "api-url", "", "CubeAPI base URL (overrides E2B_API_URL)")
-	flag.StringVar(&cfg.APIKey, "api-key", "", "API key (overrides E2B_API_KEY)")
+	flag.StringVar(&cfg.APIURL, "api-url", "", "CubeAPI base URL (overrides CUBE_API_URL)")
+	flag.StringVar(&cfg.APIKey, "api-key", "", "API key (overrides CUBE_API_KEY)")
 	flag.StringVar(&cfg.ThemeName, "theme", "auto", "Color theme: dark | light | auto")
 	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Simulate API calls with random latencies")
 
@@ -133,14 +95,15 @@ func parseConfig() *Config {
 			cfg.APIKey = "dry-run"
 		}
 	} else {
+		sdkCfg := cubesandbox.NewConfigFromEnv()
 		if cfg.Template == "" {
-			cfg.Template = os.Getenv("CUBE_TEMPLATE_ID")
+			cfg.Template = sdkCfg.TemplateID
 		}
 		if cfg.APIURL == "" {
-			cfg.APIURL = strings.TrimRight(os.Getenv("E2B_API_URL"), "/")
+			cfg.APIURL = sdkCfg.APIURL
 		}
 		if cfg.APIKey == "" {
-			cfg.APIKey = os.Getenv("E2B_API_KEY")
+			cfg.APIKey = sdkCfg.APIKey
 		}
 	}
 
@@ -150,25 +113,6 @@ func parseConfig() *Config {
 	if cfg.Total < 1 {
 		cfg.Total = 1
 	}
-
-	// Validate host-mount early so the CLI fails fast on bad input while still
-	// preserving the original JSON for config display and exported reports.
-	// Cache the compacted JSON string once so benchmark throughput is not
-	// polluted by repeating client-side conversion on every request.
-	hostMountValue, err := prepareHostMount(cfg.HostMount)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
-	}
-	cfg.hostMountValue = hostMountValue
-	cfg.requestHeaders = map[string]string{"Authorization": "Bearer " + cfg.APIKey}
-
-	requestBody, err := buildCreateRequestBody(cfg.Template, cfg.hostMountValue)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: create request body build failed: %v\n", err)
-		os.Exit(1)
-	}
-	cfg.requestBody = requestBody
 
 	return cfg
 }
@@ -189,21 +133,10 @@ func renderConfig(cfg *Config) {
 		{"Total Requests", fmt.Sprintf("%d", cfg.Total)},
 		{"Warmup Rounds", fmt.Sprintf("%d", cfg.Warmup)},
 		{"Mode", cfg.Mode},
+		{"Host", hostname},
+		{"Go", runtime.Version()},
+		{"Time", time.Now().UTC().Format("2006-01-02 15:04:05 UTC")},
 	}
-	if cfg.HostMount != "" {
-		// Pretty-print the original host-mount JSON for readability.
-		var pretty bytes.Buffer
-		if err := json.Indent(&pretty, []byte(cfg.HostMount), "    ", "  "); err == nil {
-			kvs = append(kvs, kvPair{"Host Mount", pretty.String()})
-		} else {
-			kvs = append(kvs, kvPair{"Host Mount", cfg.HostMount})
-		}
-	}
-	kvs = append(kvs,
-		kvPair{"Host", hostname},
-		kvPair{"Go", runtime.Version()},
-		kvPair{"Time", time.Now().UTC().Format("2006-01-02 15:04:05 UTC")},
-	)
 
 	var content strings.Builder
 	for _, kv := range kvs {
@@ -300,7 +233,6 @@ func exportJSON(results []IterResult, cfg *Config) {
 			"total":       cfg.Total,
 			"warmup":      cfg.Warmup,
 			"mode":        cfg.Mode,
-			"host_mount":  cfg.HostMount,
 		},
 		"summary": map[string]interface{}{
 			"total_time_s":   cfg.elapsed,
@@ -371,11 +303,11 @@ func main() {
 			os.Exit(1)
 		}
 		if cfg.APIURL == "" {
-			fmt.Fprintln(os.Stderr, T.Error.Render("ERROR:")+" API URL not set. Use --api-url or set E2B_API_URL.")
+			fmt.Fprintln(os.Stderr, T.Error.Render("ERROR:")+" API URL not set. Use --api-url or set CUBE_API_URL.")
 			os.Exit(1)
 		}
 		if cfg.APIKey == "" {
-			fmt.Fprintln(os.Stderr, T.Error.Render("ERROR:")+" API key not set. Use --api-key or set E2B_API_KEY.")
+			fmt.Fprintln(os.Stderr, T.Error.Render("ERROR:")+" API key not set. Use --api-key or set CUBE_API_KEY.")
 			os.Exit(1)
 		}
 	}
