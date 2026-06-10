@@ -92,9 +92,7 @@ var (
 func startSnapshotReconciler(ctx context.Context) {
 	snapshotReconcilerOnce.Do(func() {
 		go func() {
-			runSnapshotReconcilerPass(detachTemplateImageJobContext(ctx, map[string]any{
-				"component": "snapshot_reconciler",
-			}))
+			runSnapshotReconcilerPass(detachTemplateImageJobContext(ctx, "snapshot_reconciler", nil))
 			ticker := time.NewTicker(snapshotReconcilerInterval)
 			defer ticker.Stop()
 			for {
@@ -102,9 +100,7 @@ func startSnapshotReconciler(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					runSnapshotReconcilerPass(detachTemplateImageJobContext(ctx, map[string]any{
-						"component": "snapshot_reconciler",
-					}))
+					runSnapshotReconcilerPass(detachTemplateImageJobContext(ctx, "snapshot_reconciler", nil))
 				}
 			}
 		}()

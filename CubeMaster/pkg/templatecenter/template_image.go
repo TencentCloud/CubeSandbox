@@ -161,7 +161,7 @@ func SubmitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 	if reusedExistingJob {
 		return GetTemplateImageJobInfo(ctx, jobID)
 	}
-	go runTemplateImageJob(detachTemplateImageJobContext(ctx, map[string]any{
+	go runTemplateImageJob(detachTemplateImageJobContext(ctx, "template_image_create", map[string]any{
 		"job_id":          jobID,
 		"template_id":     normalized.TemplateID,
 		"attempt_no":      attemptNo,
@@ -220,7 +220,7 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 	}); err != nil {
 		return nil, err
 	}
-	go runRedoTemplateImageJob(detachTemplateImageJobContext(ctx, map[string]any{
+	go runRedoTemplateImageJob(detachTemplateImageJobContext(ctx, "template_image_redo", map[string]any{
 		"job_id":      jobID,
 		"template_id": normalized.TemplateID,
 	}), jobID, normalized, downloadBaseURL)

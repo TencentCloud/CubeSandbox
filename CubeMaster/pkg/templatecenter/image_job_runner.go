@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -205,10 +207,31 @@ func errorString(err error) string {
 	return err.Error()
 }
 
-func detachTemplateImageJobContext(ctx context.Context, fields map[string]any) context.Context {
+func detachTemplateImageJobContext(ctx context.Context, name string, fields map[string]any) context.Context {
 	detached := context.Background()
-	if rt := CubeLog.GetTraceInfo(ctx); rt != nil {
-		detached = CubeLog.WithRequestTrace(detached, rt.DeepCopy())
+	rt := CubeLog.GetTraceInfo(ctx)
+	if rt == nil {
+		// Background workers (e.g. the snapshot reconciler) run without an
+		// incoming request and therefore carry no trace. Synthesize one so the
+		// detached context always has a usable trace and emits meaningful
+		// metric labels. The caller names the operation explicitly so each
+		// distinct job type gets its own trace label instead of sharing a
+		// generic fallback.
+		if strings.TrimSpace(name) == "" {
+			name = "template_job"
+		}
+		rt = &CubeLog.RequestTrace{
+			Action:         name,
+			Caller:         name,
+			Callee:         constants.CubeMasterServiceID,
+			CalleeEndpoint: "localhost",
+			Timestamp:      time.Now(),
+		}
+	} else {
+		// Copy the inherited trace so mutations on the detached context do not
+		// leak back into the originating request's trace.
+		rt = rt.DeepCopy()
 	}
+	detached = CubeLog.WithRequestTrace(detached, rt)
 	return log.WithLogger(detached, log.G(ctx).WithFields(fields))
 }

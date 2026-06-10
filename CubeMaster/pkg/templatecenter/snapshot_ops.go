@@ -1143,7 +1143,7 @@ func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateIm
 	if !claimed {
 		return resolveExistingSnapshotJobByID(ctx, info.JobID)
 	}
-	jobCtx, cancel := synchronousSnapshotJobContext(ctx, map[string]any{
+	jobCtx, cancel := synchronousSnapshotJobContext(ctx, "snapshot_create", map[string]any{
 		"job_id":      info.JobID,
 		"snapshot_id": info.TemplateID,
 		"sandbox_id":  sandboxID,
@@ -1185,7 +1185,7 @@ func executeSnapshotRollbackJob(ctx context.Context, info *sandboxtypes.Template
 	if !claimed {
 		return resolveExistingSnapshotJobByID(ctx, info.JobID)
 	}
-	jobCtx, cancel := synchronousSnapshotJobContext(ctx, map[string]any{
+	jobCtx, cancel := synchronousSnapshotJobContext(ctx, "snapshot_rollback", map[string]any{
 		"job_id":      info.JobID,
 		"snapshot_id": snapshotID,
 		"sandbox_id":  sandboxID,
@@ -1223,7 +1223,7 @@ func executeSnapshotDeleteJob(ctx context.Context, info *sandboxtypes.TemplateIm
 	if !claimed {
 		return resolveExistingSnapshotJobByID(ctx, info.JobID)
 	}
-	jobCtx, cancel := synchronousSnapshotJobContext(ctx, map[string]any{
+	jobCtx, cancel := synchronousSnapshotJobContext(ctx, "snapshot_delete", map[string]any{
 		"job_id":      info.JobID,
 		"snapshot_id": snapshotID,
 	})
@@ -1242,8 +1242,8 @@ func resolveExistingSnapshotJobByID(ctx context.Context, jobID string) (*sandbox
 	return resolveExistingSnapshotJob(info)
 }
 
-func synchronousSnapshotJobContext(ctx context.Context, fields map[string]any) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(detachTemplateImageJobContext(ctx, fields), snapshotOperationTimeout)
+func synchronousSnapshotJobContext(ctx context.Context, name string, fields map[string]any) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(detachTemplateImageJobContext(ctx, name, fields), snapshotOperationTimeout)
 }
 
 func finalizeSnapshotJobByID(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {

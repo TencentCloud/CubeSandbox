@@ -282,7 +282,7 @@ func TestSynchronousSnapshotJobContextDetachesFromParentCancellation(t *testing.
 	parent, cancelParent := context.WithCancel(context.Background())
 	cancelParent()
 
-	ctx, cancel := synchronousSnapshotJobContext(parent, map[string]any{"job_id": "job-1"})
+	ctx, cancel := synchronousSnapshotJobContext(parent, "snapshot_create", map[string]any{"job_id": "job-1"})
 	defer cancel()
 
 	select {

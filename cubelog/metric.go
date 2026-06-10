@@ -54,7 +54,16 @@ type RequestTrace struct {
 	InstanceType   string
 }
 
+// DeepCopy returns an independent copy of the trace. A nil receiver is
+// intentionally tolerated: non-request paths (background workers, tests) have
+// no trace in context, and callers in those paths may invoke DeepCopy on the
+// nil result of GetTraceInfo. In that case we return a fresh, empty trace
+// rather than panicking, so this nil guard is deliberate and must not be
+// removed as dead code.
 func (rt *RequestTrace) DeepCopy() *RequestTrace {
+	if rt == nil {
+		return new(RequestTrace)
+	}
 	o := new(RequestTrace)
 	*o = *rt
 	return o

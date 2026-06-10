@@ -151,7 +151,7 @@ func SubmitTemplateCommit(ctx context.Context, sandboxID, nodeID, nodeIP string,
 	// job invisible to the response. Match the sibling SubmitTemplateImage()
 	// path: detach the context (so HTTP client disconnects do not cancel the
 	// background work) and dispatch onto a fresh goroutine.
-	go runTemplateCommitJob(detachTemplateImageJobContext(ctx, map[string]any{
+	go runTemplateCommitJob(detachTemplateImageJobContext(ctx, "template_commit", map[string]any{
 		"job_id":          jobID,
 		"template_id":     templateID,
 		"attempt_no":      attemptNo,
