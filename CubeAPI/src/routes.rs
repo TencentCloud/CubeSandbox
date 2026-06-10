@@ -37,6 +37,14 @@ const DEFAULT_ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 /// for a terminal state and does not expose a polling interface.
 const SNAPSHOT_LONG_ROUTE_TIMEOUT: Duration = Duration::from_secs(240);
 
+/// Timeout budget for `POST /examples/run`.  This handler spawns an external
+/// process (the example script) and waits for it to finish; browser-sandbox
+/// scenarios can legitimately run for several minutes (sandbox creation +
+/// Chromium startup + CDP connection + user-facing wait time).  The per-
+/// scenario `timeout_secs` field controls the *inner* process timeout; this
+/// outer HTTP timeout must be at least as large as the longest inner timeout.
+const EXAMPLES_RUN_ROUTE_TIMEOUT: Duration = Duration::from_secs(600);
+
 pub fn build_router(state: AppState) -> Router {
     let auth_configured = state
         .config
@@ -58,10 +66,18 @@ pub fn build_router(state: AppState) -> Router {
             ),
         SNAPSHOT_LONG_ROUTE_TIMEOUT,
     );
+    let examples_run_router = apply_http_layers(
+        Router::new().nest(
+            "/cubeapi/v1",
+            build_examples_run_routes(&state, auth_configured),
+        ),
+        EXAMPLES_RUN_ROUTE_TIMEOUT,
+    );
 
     Router::new()
         .merge(standard_router)
         .merge(snapshot_long_router)
+        .merge(examples_run_router)
         .with_state(state)
 }
 
@@ -364,10 +380,24 @@ fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppS
 }
 
 fn build_examples_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    // NOTE: `POST /examples/run` is intentionally NOT routed here.
+    // It lives in `build_examples_run_routes` on the long-timeout router
+    // because it spawns an external process that can run for several minutes
+    // (e.g. browser-sandbox scenarios).
     let routes = Router::new()
         .route("/examples", get(examples::list_examples))
-        .route("/examples/:id", get(examples::get_example_source))
-        .route("/examples/run", post(examples::run_example));
+        .route("/examples/:scenario/:file", get(examples::get_example_source));
+    if auth_configured {
+        routes.layer(middleware::from_fn_with_state(state.clone(), unified_auth))
+    } else {
+        routes
+    }
+}
+
+/// Long-budget route for `POST /examples/run`.  Mounted on its own router so
+/// the 30 s default HTTP timeout does not kill long-running example scripts.
+fn build_examples_run_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new().route("/examples/run", post(examples::run_example));
     if auth_configured {
         routes.layer(middleware::from_fn_with_state(state.clone(), unified_auth))
     } else {

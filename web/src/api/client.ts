@@ -263,16 +263,48 @@ export const storeApi = {
 
 export interface ExampleMeta {
   id: string;
+  scenario: string;
   filename: string;
   title: string;
   description: string;
   category: string;
+  language: string;
 }
 
 export interface ExampleSource {
   id: string;
   filename: string;
+  scenario: string;
+  language: string;
   source: string;
+}
+
+export interface StepLogDto {
+  name: string;
+  plane: 'control' | 'data' | string;
+  status: 'ok' | 'warn' | 'err' | 'skipped' | string;
+  duration_ms: number;
+  message: string;
+}
+
+export interface TopologyNodeDto {
+  id: string;
+  label: string;
+  plane: 'control' | 'data' | string;
+  kind: 'user' | 'control' | 'data' | 'vm' | 'store' | string;
+  description: string;
+}
+
+export interface TopologyEdgeDto {
+  from: string;
+  to: string;
+  label: string;
+  plane: 'control' | 'data' | string;
+}
+
+export interface TopologyGraphDto {
+  nodes: TopologyNodeDto[];
+  edges: TopologyEdgeDto[];
 }
 
 export interface ExampleRunResult {
@@ -280,15 +312,42 @@ export interface ExampleRunResult {
   stderr: string;
   exit_code: number;
   success: boolean;
+  elapsed_ms: number;
+  steps: StepLogDto[];
+  topology: TopologyGraphDto;
+  ran_edited: boolean;
+}
+
+export interface RunExampleBody {
+  id: string;
+  template_id?: string;
+  language?: string;
+  code?: string;
 }
 
 export const examplesApi = {
   list: () => api<ExampleMeta[]>('/examples'),
-  source: (id: string) => api<ExampleSource>(`/examples/${encodeURIComponent(id)}`),
-  run: (id: string, templateId?: string) =>
+  /**
+   * Fetch source code for a single example.
+   * The id format is "scenario:file" (e.g. "code-sandbox-quickstart:create").
+   * We split it into two path segments to avoid URL-encoding issues with colons.
+   */
+  source: (id: string) => {
+    const [scenario, file, ...rest] = id.split(':');
+    if (!scenario || !file || rest.length > 0) {
+      throw new Error(`Invalid example id: "${id}". Expected "scenario:file".`);
+    }
+    return api<ExampleSource>(`/examples/${encodeURIComponent(scenario)}/${encodeURIComponent(file)}`);
+  },
+  run: (body: RunExampleBody) =>
     api<ExampleRunResult>('/examples/run', {
       method: 'POST',
-      body: JSON.stringify({ id, template_id: templateId || undefined }),
+      body: JSON.stringify({
+        id: body.id,
+        template_id: body.template_id,
+        language: body.language,
+        code: body.code,
+      }),
     }),
 };
 
