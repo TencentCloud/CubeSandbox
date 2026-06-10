@@ -1,25 +1,41 @@
 {
-  "title": "示例中心",
-  "subtitle": "浏览并直接在控制台运行 code-sandbox-quickstart 示例代码，一键体验沙箱的常用能力。",
-  "badge": "code-sandbox-quickstart",
+  "title": "沙箱案例",
+  "subtitle": "沙箱案例通过展示多种场景，帮助开发者快速了解沙箱的不同业务场景用法。",
+  "badge": "examples/",
   "run": "运行",
   "running": "运行中…",
-  "output": "运行结果",
+  "runningHint": "正在执行示例…可能需要几秒钟。",
+  "output": {
+    "title": "运行结果",
+    "completed": "已完成",
+    "failed": "失败",
+    "elapsed": "耗时 {{ms}}ms",
+    "runOnDisk": "已运行磁盘原文件",
+    "runEdited": "已运行你的修改"
+  },
   "outputHint": "点击「运行」执行此示例，输出将在这里显示。",
-  "selectHint": "从左侧选择一个示例，代码和运行结果将在这里显示。",
-  "selectHintTitle": "选择一个示例开始",
-  "defaultTemplate": "默认：{{id}}",
-  "noTemplate": "暂无可用模板，请新建模版",
+  "selectHint": "从左侧选择一个案例，编辑代码、运行并查看拓扑与步骤日志。",
+  "selectHintTitle": "选择一个案例开始",
   "allCategories": "全部",
-  "searchPlaceholder": "搜索示例…",
-  "noResults": "没有匹配的示例",
+  "searchPlaceholder": "搜索案例 / 场景 / 文件名…",
+  "noResults": "没有匹配的案例",
   "copy": "复制代码",
   "copied": "已复制到剪贴板",
   "copyFailed": "复制失败",
-  "completed": "已完成",
-  "failed": "失败",
+  "defaultTemplate": "默认：{{id}}",
+  "noTemplate": "暂无可用模板，请新建模板",
+  "editor": {
+    "restore": "恢复",
+    "restoreHint": "把你的修改还原到磁盘上的原始代码",
+    "dirty": "已修改",
+    "dirtyHint": "当前显示的是你的修改。点击「恢复」回到磁盘上的原始代码。"
+  },
+  "sidebar": {
+    "scenarios": "场景列表"
+  },
   "templateSelector": {
     "title": "选择模板",
+    "placeholder": "选择模板",
     "searchPlaceholder": "按 ID / 类型搜索…",
     "empty": "没有匹配的模板",
     "hint": "点击外部区域关闭",
@@ -28,5 +44,33 @@
       "building": "构建中",
       "other": "其他"
     }
+  },
+  "categories": {
+    "basics": "基础",
+    "filesystem": "文件系统",
+    "lifecycle": "生命周期",
+    "network": "网络",
+    "browser": "浏览器",
+    "image": "自定义镜像",
+    "perf": "性能",
+    "advanced": "高级"
+  },
+  "languages": {
+    "python": "Python",
+    "go": "Go",
+    "bash": "Bash",
+    "javascript": "JavaScript"
+  },
+  "topology": {
+    "title": "执行拓扑",
+    "controlPlane": "管理流",
+    "dataPlane": "调用流",
+    "hint": "拖动节点可重新排列 · 滚轮缩放"
+  },
+  "timeline": {
+    "title": "步骤时间线",
+    "empty": "运行一次案例后,这里会显示分步日志。",
+    "controlPlane": "管理流",
+    "dataPlane": "调用流"
   }
 }
