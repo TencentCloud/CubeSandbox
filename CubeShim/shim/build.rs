@@ -9,8 +9,7 @@ const ENV_BUILD_ENV_V: &str = "zhiyan";
 
 fn main() {
     // ── Version (priority: env var > git tag > fallback) ──
-    let version = std::env::var("CUBE_VERSION")
-        .unwrap_or_else(|_| "0.0.0-dev".to_string());
+    let version = std::env::var("CUBE_VERSION").unwrap_or_else(|_| "0.0.0-dev".to_string());
 
     // ── Commit (priority: env var > git rev-parse > fallback) ──
     let commit = std::env::var("CUBE_COMMIT").unwrap_or_else(|_| {
@@ -24,8 +23,7 @@ fn main() {
     });
 
     // ── Build time (priority: env var > fallback) ──
-    let build_time = std::env::var("CUBE_BUILD_TIME")
-        .unwrap_or_else(|_| "unknown".to_string());
+    let build_time = std::env::var("CUBE_BUILD_TIME").unwrap_or_else(|_| "unknown".to_string());
 
     // ── Short commit + dirty check (backward compatible GIT_COMMIT_INFO) ──
     let short_commit: String = commit.chars().take(8).collect();

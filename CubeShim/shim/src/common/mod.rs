@@ -30,6 +30,12 @@ pub const GUEST_PROPAGATION_DIR: &str = "/run/propagation";
 pub const ANNO_PROPAGATION_MNTS: &str = "cube.propagation.mounts";
 pub const ANNO_PROPAGATION_CONTAINER_MNTS: &str = "cube.propagation.container.mounts";
 
+/// Container-level annotation injected by the shim into OCI spec annotations.
+/// When present and equal to "true", the agent will create stdout/stderr pipes
+/// in open_io() so that log forwarding can work.  Absent when the old shim is
+/// used, allowing the agent to stay backward-compatible.
+pub const ANNO_CONTAINER_LOG_FORWARDING: &str = "cube.container.log_forwarding";
+
 pub const CUBE_BIND_SHARE_TYPE: &str = "bind-share";
 pub const CUBE_BIND_SHARE_GUEST_BASE_DIR: &str = "/run/cube-bind-share/";
 pub const GUEST_VIRTIOFS_MNT_PATH: &str = "/run/virtiofs";

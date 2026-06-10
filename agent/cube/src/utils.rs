@@ -6,6 +6,12 @@ use std::path::PathBuf;
 
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
 
+/// Annotation injected by the shim into OCI spec annotations to opt-in to
+/// container log forwarding.  When the value is "true" the agent creates
+/// stdout/stderr pipes in open_io(); when absent (old shim) the pipes are
+/// not created and the original behaviour is preserved.
+pub const ANNO_CONTAINER_LOG_FORWARDING: &str = "cube.container.log_forwarding";
+
 #[derive(Debug)]
 pub struct CPath {
     pub path: PathBuf,

@@ -9,7 +9,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use tokio::sync::mpsc::Sender;
 
 use nix::errno::Errno;
-use nix::fcntl::{self, FcntlArg, FdFlag};
+use nix::fcntl::{self, FcntlArg, FdFlag, OFlag};
 use nix::pty;
 use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, Pid};
@@ -64,6 +64,11 @@ pub struct Process {
     pub term_master: Option<RawFd>,
     pub term_slave: Option<RawFd>,
     pub tty: bool,
+    /// Set by rpc.do_create_container after reading the
+    /// `cube.container.log_forwarding` annotation from the OCI spec.
+    /// When true, open_io() creates stdout/stderr pipes; when false (default)
+    /// the original behaviour is preserved (streams stay None → /dev/null).
+    pub log_forwarding: bool,
     pub parent_stdin: Option<RawFd>,
     pub parent_stdout: Option<RawFd>,
     pub parent_stderr: Option<RawFd>,
@@ -140,6 +145,7 @@ impl Process {
             exit_rx: Some(exit_rx),
             extra_files: Vec::new(),
             tty: ocip.terminal,
+            log_forwarding: false,
             term_master: None,
             term_slave: None,
             cubemsg_dev: None,
@@ -184,6 +190,68 @@ impl Process {
             }
             return Ok(());
         }
+
+        // Non-tty path: create pipes so the shim can poll container
+        // stdout/stderr via do_read_stream over vsock.
+        //
+        // Only create pipes when log_forwarding is enabled.  log_forwarding is
+        // set by rpc.do_create_container after reading the
+        // "cube.container.log_forwarding" annotation injected by the shim.
+        // When the annotation is absent (old shim) we preserve the original
+        // behaviour: stdout/stderr stay None so the container writes to /dev/null.
+        if !self.log_forwarding {
+            return Ok(());
+        }
+
+        // Log-forwarding path: create pipes so the shim can poll container
+        // stdout/stderr via do_read_stream over vsock.
+        //
+        // Pipe layout:
+        //   container process  --> [child_w]  pipe  [parent_r] --> agent do_read_stream
+        //
+        // The write end (child_w) is NOT O_CLOEXEC so the child process
+        // inherits it; the read end (parent_r) IS O_CLOEXEC so it stays
+        // only in the agent.
+        //
+        // We intentionally set O_NONBLOCK on the write end: during snapshot
+        // restore there is a window between the container resuming and the shim
+        // calling start_log_forward.  If the pipe fills up in that window,
+        // O_NONBLOCK makes the container's write() return EAGAIN (log line
+        // dropped) rather than blocking the container process indefinitely.
+        //
+        // Request a 1 MiB pipe buffer to reduce drops during the restore window.
+        // This matches the kernel's /proc/sys/fs/pipe-max-size limit (1 MiB),
+        // so no clamping occurs.
+        const LOG_PIPE_SIZE: i32 = 1024 * 1024; // 1 MiB
+
+        let (parent_stdout_r, child_stdout_w) = unistd::pipe2(OFlag::O_CLOEXEC)
+            .map_err(|e| format!("create stdout pipe failed: {:?}", e))?;
+        let _ = fcntl::fcntl(child_stdout_w, FcntlArg::F_SETPIPE_SZ(LOG_PIPE_SIZE));
+        // Clear O_CLOEXEC on the write end so the container inherits it.
+        let _ = fcntl::fcntl(child_stdout_w, FcntlArg::F_SETFD(FdFlag::empty()));
+        let _ = fcntl::fcntl(child_stdout_w, FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
+
+        let (parent_stderr_r, child_stderr_w) = unistd::pipe2(OFlag::O_CLOEXEC)
+            .map_err(|e| format!("create stderr pipe failed: {:?}", e))?;
+        let _ = fcntl::fcntl(child_stderr_w, FcntlArg::F_SETPIPE_SZ(LOG_PIPE_SIZE));
+        let _ = fcntl::fcntl(child_stderr_w, FcntlArg::F_SETFD(FdFlag::empty()));
+        let _ = fcntl::fcntl(child_stderr_w, FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
+
+        debug!(
+            logger,
+            "container log pipes created: \
+             stdout child_w={} parent_r={}, stderr child_w={} parent_r={}",
+            child_stdout_w,
+            parent_stdout_r,
+            child_stderr_w,
+            parent_stderr_r,
+        );
+
+        self.stdout = Some(child_stdout_w);
+        self.stderr = Some(child_stderr_w);
+        self.parent_stdout = Some(parent_stdout_r);
+        self.parent_stderr = Some(parent_stderr_r);
+
         Ok(())
     }
 
