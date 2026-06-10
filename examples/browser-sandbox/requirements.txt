@@ -1,3 +1,3 @@
-e2b>=2.15.2
+cubesandbox>=0.2.1
 playwright>=1.40.0
 python-dotenv
