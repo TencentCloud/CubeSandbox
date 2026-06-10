@@ -3,7 +3,8 @@ name: Build vmlinux
 on:
   push:
     paths:
-      - 'configs/kernel-oc9.config'
+      - 'configs/kernel-oc9.aarch64.config'
+      - 'configs/kernel-oc9.x86_64.config'
       - '.github/workflows/build-vmlinux.yml'
   workflow_dispatch:
 
@@ -31,7 +32,7 @@ jobs:
       - name: Compute vmlinux cache metadata
         id: vmlinux_metadata
         run: |
-          config_hash="$(sha256sum configs/kernel-oc9.config | awk '{print $1}')"
+          config_hash="$(sha256sum configs/kernel-oc9.$(uname -m).config | awk '{print $1}')"
           echo "config_hash=${config_hash}" >> "${GITHUB_OUTPUT}"
           echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
           echo "artifact_name=vmlinux-opencloudos-${KERNEL_TAG}-${config_hash}" >> "${GITHUB_OUTPUT}"
@@ -79,7 +80,7 @@ jobs:
       - name: Configure kernel
         if: steps.restore_vmlinux.outputs.cache-hit != 'true'
         run: |
-          cp configs/kernel-oc9.config "${KERNEL_SRC}/.config"
+          cp configs/kernel-oc9.$(uname -m).config "${KERNEL_SRC}/.config"
           make -C "${KERNEL_SRC}" olddefconfig
 
       - name: Build vmlinux
