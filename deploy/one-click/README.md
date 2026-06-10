@@ -301,10 +301,10 @@ export E2B_API_KEY=e2b_000000
 Required commands:
 
 - `tar`
-- `rg`
 - `ss`
 - `bash`
 - `curl`
+- `grep`
 - `sed`
 - `pgrep`
 - `date`
@@ -338,10 +338,10 @@ Required commands:
 
 - `docker`
 - `tar`
-- `rg`
 - `ss`
 - `bash`
 - `curl`
+- `grep`
 - `sed`
 - `pgrep`
 - `date`

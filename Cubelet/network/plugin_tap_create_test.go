@@ -139,7 +139,7 @@ func TestTapCreateInNetworkAgentModeCallsEnsureNetwork(t *testing.T) {
 	}
 }
 
-func TestTapCreateInNetworkAgentModeAddsDNSAllowOutCIDRs(t *testing.T) {
+func TestTapCreateInNetworkAgentModeSkipsDNSAllowOutWhenInternetDisabled(t *testing.T) {
 	fakeClient := &fakeNetworkAgentClient{}
 	block := false
 	l := &local{
@@ -183,7 +183,7 @@ func TestTapCreateInNetworkAgentModeAddsDNSAllowOutCIDRs(t *testing.T) {
 	if fakeClient.lastEnsureRequest == nil || fakeClient.lastEnsureRequest.CubeVSContext == nil {
 		t.Fatal("EnsureNetwork request missing CubeVSContext")
 	}
-	wantAllowOut := []string{"172.67.0.0/16", "1.1.1.1/32", "8.8.8.8/32"}
+	wantAllowOut := []string{"172.67.0.0/16"}
 	if strings.Join(fakeClient.lastEnsureRequest.CubeVSContext.AllowOut, ",") != strings.Join(wantAllowOut, ",") {
 		t.Fatalf("AllowOut=%v, want %v", fakeClient.lastEnsureRequest.CubeVSContext.AllowOut, wantAllowOut)
 	}
@@ -214,10 +214,8 @@ func TestWaitForNetworkAgentReadyRetriesUntilSuccess(t *testing.T) {
 }
 
 func TestMergeDNSAllowOutCIDRs(t *testing.T) {
-	block := false
 	ctx := &networkagentclient.CubeVSContext{
-		AllowInternetAccess: &block,
-		AllowOut:            []string{"172.67.0.0/16"},
+		AllowOut: []string{"172.67.0.0/16"},
 	}
 
 	got, dnsCIDRs := mergeDNSAllowOutCIDRs(ctx, []string{"1.1.1.1", "2001:4860:4860::8888", "1.1.1.1"})
@@ -230,6 +228,25 @@ func TestMergeDNSAllowOutCIDRs(t *testing.T) {
 	wantAllowOut := []string{"172.67.0.0/16", "1.1.1.1/32", "2001:4860:4860::8888/128"}
 	if strings.Join(got.AllowOut, ",") != strings.Join(wantAllowOut, ",") {
 		t.Fatalf("AllowOut=%v, want %v", got.AllowOut, wantAllowOut)
+	}
+}
+
+func TestMergeDNSAllowOutCIDRsSkipsDisabledInternetAccess(t *testing.T) {
+	block := false
+	ctx := &networkagentclient.CubeVSContext{
+		AllowInternetAccess: &block,
+		DenyOut:             []string{"0.0.0.0/0"},
+	}
+
+	got, dnsCIDRs := mergeDNSAllowOutCIDRs(ctx, []string{"1.1.1.1"})
+	if got != ctx {
+		t.Fatal("expected original context to be reused when internet access is disabled")
+	}
+	if len(dnsCIDRs) != 0 {
+		t.Fatalf("dnsCIDRs=%v, want empty", dnsCIDRs)
+	}
+	if len(got.AllowOut) != 0 {
+		t.Fatalf("AllowOut=%v, want empty", got.AllowOut)
 	}
 }
 

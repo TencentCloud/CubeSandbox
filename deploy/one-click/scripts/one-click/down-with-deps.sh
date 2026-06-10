@@ -8,7 +8,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 require_cmd docker
-require_cmd rg
 
 REMOVE_VOLUMES="${CUBE_SANDBOX_REMOVE_VOLUMES:-0}"
 

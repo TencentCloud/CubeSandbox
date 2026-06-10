@@ -96,7 +96,11 @@ curl -fsS "http://${MASTER_ADDR}/notify/health" >/dev/null
 if [[ "${ROLE}" == "compute" ]]; then
   [[ -n "${NODE_ID}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute quickcheck"
   echo "[quickcheck] 4/5 check cubemaster node registration"
-  curl -fsS "http://${MASTER_ADDR}/internal/meta/nodes/${NODE_ID}" | rg -q "\"host_ip\":\"${NODE_ID}\""
+  node_registration="$(curl -fsS "http://${MASTER_ADDR}/internal/meta/nodes/${NODE_ID}")" \
+    || die "failed to query cubemaster node registration for ${NODE_ID}"
+  if ! grep -Fq "\"host_ip\":\"${NODE_ID}\"" <<<"${node_registration}"; then
+    die "cubemaster node registration missing host_ip=${NODE_ID}"
+  fi
 
   echo "[quickcheck] 5/5 check essential sockets and runtime assets"
   test -S "/data/cubelet/cubelet.sock"

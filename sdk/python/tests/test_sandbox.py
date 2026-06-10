@@ -886,6 +886,50 @@ class TestFilesystem:
         assert isinstance(make_sandbox().files, Filesystem)
 
 
+# ── IPOverrideTransport ───────────────────────────────────────────────────────
+
+class TestIPOverrideTransport:
+    """IPOverrideTransport must copy request content for all body types."""
+
+    def _handle(self, request: httpx.Request) -> None:
+        """Run handle_request and assert the request body was copied successfully
+        before the connection attempt fails."""
+        from cubesandbox._transport import IPOverrideTransport
+
+        transport = IPOverrideTransport("127.0.0.1", 1)
+        with pytest.raises(httpx.ConnectError):
+            transport.handle_request(request)
+
+    def test_content_bytes(self):
+        """content=bytes (files.write first attempt) must not raise."""
+        req = httpx.Request(
+            "POST",
+            "http://49983-sb-test.cube.app/files",
+            params={"path": "/tmp/t.txt", "username": "root"},
+            content=b"hello",
+        )
+        self._handle(req)
+
+    def test_files_multipart(self):
+        """files= multipart (files.write fallback) must reach ConnectError."""
+        req = httpx.Request(
+            "POST",
+            "http://49983-sb-test.cube.app/files",
+            params={"path": "/tmp/t.txt", "username": "root"},
+            files={"file": ("t.txt", b"hello")},
+        )
+        self._handle(req)
+
+    def test_get_no_body(self):
+        """GET (files.read) with no body must reach ConnectError."""
+        req = httpx.Request(
+            "GET",
+            "http://49983-sb-test.cube.app/files",
+            params={"path": "/tmp/t.txt", "username": "root"},
+        )
+        self._handle(req)
+
+
 # ── close / __del__ ───────────────────────────────────────────────────────────
 
 class TestClose:

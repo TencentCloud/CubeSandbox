@@ -22,7 +22,9 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y \
 	telnet \
 	tzdata \
 	vim \
-	wget
+	wget \
+	skopeo \
+	umoci
 
 RUN cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 RUN update-ca-certificates

@@ -36,6 +36,7 @@ import (
 	"github.com/containerd/log"
 	"github.com/moby/sys/mountinfo"
 	"github.com/sirupsen/logrus"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/network"
 	dynamConf "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/nsenter"
@@ -60,11 +61,6 @@ const (
 	CubeMainProcMutexLock = "/run/cubelock.db"
 	networkPluginKey      = "io.cubelet.internal.v1.network"
 )
-
-type networkPluginBootstrapConfig struct {
-	EnableNetworkAgent   bool   `toml:"enable_network_agent"`
-	NetworkAgentEndpoint string `toml:"network_agent_endpoint"`
-}
 
 func main() {
 	if len(os.Args) > 1 {
@@ -550,19 +546,18 @@ func criticalCubeletPluginURIs() []string {
 	}
 }
 
-func loadNetworkPluginBootstrapConfig(cfg *srvconfig.Config) (*networkPluginBootstrapConfig, bool, error) {
+func loadNetworkPluginBootstrapConfig(cfg *srvconfig.Config) (*network.Config, bool, error) {
 	if cfg == nil || cfg.Plugins == nil {
 		return nil, false, nil
 	}
-	_, ok := cfg.Plugins[networkPluginKey]
-	if !ok {
+	if _, ok := cfg.Plugins[networkPluginKey]; !ok {
 		return nil, false, nil
 	}
-	var networkCfg networkPluginBootstrapConfig
-	if _, err := cfg.Decode(gocontext.Background(), networkPluginKey, &networkCfg); err != nil {
+	networkCfg := &network.Config{}
+	if _, err := cfg.Decode(gocontext.Background(), networkPluginKey, networkCfg); err != nil {
 		return nil, false, fmt.Errorf("decode %s plugin config: %w", networkPluginKey, err)
 	}
-	return &networkCfg, true, nil
+	return networkCfg, true, nil
 }
 
 func serve(ctx gocontext.Context, l net.Listener, serveFunc func(net.Listener) error) {

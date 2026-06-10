@@ -99,7 +99,7 @@ This chapter measures the end-to-end time to start a ready-to-use sandbox — ca
 ```bash
 pip install e2b-code-interpreter
 
-export CUBE_API_URL=http://<your-server-ip>:3000
+export E2B_API_URL=http://<your-server-ip>:3000
 export E2B_API_KEY=e2b_000000           # any non-empty string for local deploys
 export CUBE_TEMPLATE_ID=<your-template-id>  # from cubemastercli tpl list
 export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem  # mkcert certificate path
@@ -261,10 +261,10 @@ pip install -r requirements.txt   # installs the cubesandbox SDK
 
 # The following environment variables are prerequisites for all 4.x benchmark scripts;
 # export in each new shell (or write to env.sh and source it)
-export E2B_API_URL=http://<your-server-ip>:3000
-export CUBE_API_URL=http://<your-server-ip>:3000   # same as E2B_API_URL
-export E2B_API_KEY=e2b_000000                       # any non-empty string for local deploys
+export CUBE_API_URL=http://<your-server-ip>:3000
 export CUBE_TEMPLATE_ID=<your-template-id>          # from cubemastercli tpl list
+export CUBE_PROXY_NODE_IP=<your-cubeproxy-ip>       # use 127.0.0.1 when running on the CubeProxy host
+export CUBE_PROXY_PORT_HTTP=80                      # CubeProxy listen port (default 80)
 ```
 
 > Sections 4.1–4.5 below assume you have completed the above `export` in your current shell (scripts read these variables via `env.py`). Re-export if you open a new terminal.
@@ -279,9 +279,10 @@ export CUBE_TEMPLATE_ID=<your-template-id>          # from cubemastercli tpl lis
 
 ```bash
 cd examples/snapshot-rollback-clone
-export E2B_API_URL=http://<your-server-ip>:3000
-export E2B_API_KEY=e2b_000000
+export CUBE_API_URL=http://<your-server-ip>:3000
 export CUBE_TEMPLATE_ID=<your-template-id>
+export CUBE_PROXY_NODE_IP=<your-cubeproxy-ip>
+export CUBE_PROXY_PORT_HTTP=80
 
 python bench_snapshot_concurrency.py -c 1  -n 5
 python bench_snapshot_concurrency.py -c 5  -n 5 --no-header
@@ -308,9 +309,10 @@ The test precisely controls dirty page size by pre-writing data to `/dev/shm` (t
 
 ```bash
 cd examples/snapshot-rollback-clone
-export E2B_API_URL=http://<your-server-ip>:3000
-export E2B_API_KEY=e2b_000000
+export CUBE_API_URL=http://<your-server-ip>:3000
 export CUBE_TEMPLATE_ID=<your-template-id>
+export CUBE_PROXY_NODE_IP=<your-cubeproxy-ip>
+export CUBE_PROXY_PORT_HTTP=80
 
 python bench_snapshot_dirty.py -d 0    -n 3
 python bench_snapshot_dirty.py -d 10   -n 3 --no-header
@@ -349,9 +351,10 @@ python bench_snapshot_dirty.py -d 1024 -n 3 --no-header
 
 ```bash
 cd examples/snapshot-rollback-clone
-export E2B_API_URL=http://<your-server-ip>:3000
-export E2B_API_KEY=e2b_000000
+export CUBE_API_URL=http://<your-server-ip>:3000
 export CUBE_TEMPLATE_ID=<your-template-id>
+export CUBE_PROXY_NODE_IP=<your-cubeproxy-ip>
+export CUBE_PROXY_PORT_HTTP=80
 
 python bench_create_concurrency.py -c 1  -n 3
 python bench_create_concurrency.py -c 10 -n 3 --no-header
@@ -378,9 +381,10 @@ Single sandbox startup ~**67 ms**; at 10-concurrent, wall ~**388 ms**, amortized
 
 ```bash
 cd examples/snapshot-rollback-clone
-export E2B_API_URL=http://<your-server-ip>:3000
-export E2B_API_KEY=e2b_000000
+export CUBE_API_URL=http://<your-server-ip>:3000
 export CUBE_TEMPLATE_ID=<your-template-id>
+export CUBE_PROXY_NODE_IP=<your-cubeproxy-ip>
+export CUBE_PROXY_PORT_HTTP=80
 
 python bench_rollback_concurrency.py -c 1  -n 5
 python bench_rollback_concurrency.py -c 5  -n 5 --no-header
@@ -409,9 +413,10 @@ python bench_rollback_concurrency.py -c 10 -n 5 --no-header
 
 ```bash
 cd examples/snapshot-rollback-clone
-export E2B_API_URL=http://<your-server-ip>:3000
-export E2B_API_KEY=e2b_000000
+export CUBE_API_URL=http://<your-server-ip>:3000
 export CUBE_TEMPLATE_ID=<your-template-id>
+export CUBE_PROXY_NODE_IP=<your-cubeproxy-ip>
+export CUBE_PROXY_PORT_HTTP=80
 
 python bench_clone_concurrency.py -n 1  -c 1  --rounds 5
 python bench_clone_concurrency.py -n 10 -c 5  --rounds 3 --no-header
@@ -438,9 +443,10 @@ Single sandbox clone ~**271 ms**; 10 sandboxes at 5-concurrent, batch wall ~**54
 
 ```bash
 cd examples/snapshot-rollback-clone
-export E2B_API_URL=http://<your-server-ip>:3000
-export E2B_API_KEY=e2b_000000
+export CUBE_API_URL=http://<your-server-ip>:3000
 export CUBE_TEMPLATE_ID=<your-template-id>
+export CUBE_PROXY_NODE_IP=<your-cubeproxy-ip>
+export CUBE_PROXY_PORT_HTTP=80
 
 python bench_pause_resume_concurrency.py -c 1  -n 5
 python bench_pause_resume_concurrency.py -c 10 -n 5 --no-header

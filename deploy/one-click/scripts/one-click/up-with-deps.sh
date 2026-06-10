@@ -8,7 +8,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 require_cmd docker
-require_cmd rg
 
 CUBE_SANDBOX_MYSQL_CONTAINER="${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
 MYSQL_DB="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"

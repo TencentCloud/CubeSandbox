@@ -25,6 +25,9 @@ class IPOverrideTransport(httpx.HTTPTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         original_host = request.url.host
         url = request.url.copy_with(host=self._ip, port=self._port)
+        # Buffer streaming request bodies before copying, otherwise
+        # request.content may raise RequestNotRead for multipart uploads.
+        request.read()
         proxied = httpx.Request(
             method=request.method,
             url=url,
