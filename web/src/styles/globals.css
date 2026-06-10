@@ -171,19 +171,34 @@
     @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium;
   }
   .chip-ok {
-    @apply chip bg-cube-ok/10 text-cube-ok ring-1 ring-cube-ok/30;
+    @apply chip;
+    color: hsl(var(--cube-ok));
+    background-color: hsl(var(--cube-ok) / 0.1);
+    border: 1px solid hsl(var(--cube-ok) / 0.3);
   }
   .chip-warn {
-    @apply chip bg-cube-warn/10 text-cube-warn ring-1 ring-cube-warn/30;
+    @apply chip;
+    color: hsl(var(--cube-warn));
+    background-color: hsl(var(--cube-warn) / 0.1);
+    border: 1px solid hsl(var(--cube-warn) / 0.3);
   }
   .chip-err {
-    @apply chip bg-cube-err/10 text-cube-err ring-1 ring-cube-err/30;
+    @apply chip;
+    color: hsl(var(--cube-err));
+    background-color: hsl(var(--cube-err) / 0.1);
+    border: 1px solid hsl(var(--cube-err) / 0.3);
   }
   .chip-info {
-    @apply chip bg-cube-info/10 text-cube-info ring-1 ring-cube-info/30;
+    @apply chip;
+    color: hsl(var(--cube-info));
+    background-color: hsl(var(--cube-info) / 0.1);
+    border: 1px solid hsl(var(--cube-info) / 0.3);
   }
   .chip-mute {
-    @apply chip bg-cube-mute/10 text-cube-mute ring-1 ring-cube-mute/30;
+    @apply chip;
+    color: hsl(var(--cube-mute));
+    background-color: hsl(var(--cube-mute) / 0.1);
+    border: 1px solid hsl(var(--cube-mute) / 0.3);
   }
   .panel {
     @apply rounded-xl border border-border/60 bg-card/70 backdrop-blur-sm;
