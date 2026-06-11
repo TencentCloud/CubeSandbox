@@ -1263,6 +1263,107 @@ func TestCleanupCreateResultRemovesHostDirSandboxPath(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(hostDirBasePath, "hostdir-sb"))
 }
 
+func TestCleanupHostDirVolumesResolvesSymlinkedBasePath(t *testing.T) {
+	// Simulate a deployment where an ancestor of hostDirBasePath is a symlink
+	// (e.g. /data -> /mnt/ssd/data). The kernel records fully resolved
+	// mountpoints in /proc/self/mountinfo, so cleanup must canonicalize the
+	// path before walking, otherwise mounts would leak and os.RemoveAll could
+	// wipe the real backing directory.
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	s := &local{config: cfg, cowManager: &fakeCowVolumeManager{}}
+	require.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	tmp := t.TempDir()
+	realBase := filepath.Join(tmp, "real", "hostdir")
+	require.NoError(t, os.MkdirAll(realBase, 0755))
+
+	symlinkBase := filepath.Join(tmp, "link")
+	require.NoError(t, os.Symlink(filepath.Join(tmp, "real"), symlinkBase))
+
+	oldHostDirBasePath := hostDirBasePath
+	hostDirBasePath = filepath.Join(symlinkBase, "hostdir")
+	t.Cleanup(func() { hostDirBasePath = oldHostDirBasePath })
+
+	sandboxID := "symlink-sb"
+	bindPath := filepath.Join(hostDirBasePath, sandboxID, "rw", "vol")
+	require.NoError(t, os.MkdirAll(bindPath, 0755))
+
+	err := s.cleanupHostDirVolumes(context.Background(), &StorageInfo{
+		SandboxID: sandboxID,
+		HostDirBackendInfos: map[string]*HostDirBackendInfo{
+			"test/vol": {
+				VolumeName: "test",
+				ShareDir:   filepath.Join(hostDirBasePath, sandboxID, "rw"),
+				BindPath:   bindPath,
+			},
+		},
+	})
+	require.NoError(t, err)
+	// The sandbox dir must be gone whether referenced via the symlink path or
+	// the resolved real path.
+	require.NoDirExists(t, filepath.Join(hostDirBasePath, sandboxID))
+	require.NoDirExists(t, filepath.Join(realBase, sandboxID))
+}
+
+func TestCleanupHostDirVolumesMissingSandboxDirIsNoop(t *testing.T) {
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	s := &local{config: cfg, cowManager: &fakeCowVolumeManager{}}
+	require.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	oldHostDirBasePath := hostDirBasePath
+	hostDirBasePath = t.TempDir()
+	t.Cleanup(func() { hostDirBasePath = oldHostDirBasePath })
+
+	err := s.cleanupHostDirVolumes(context.Background(), &StorageInfo{
+		SandboxID: "missing-sb",
+		HostDirBackendInfos: map[string]*HostDirBackendInfo{
+			"test/vol": {VolumeName: "test"},
+		},
+	})
+	require.NoError(t, err)
+}
+
+func TestCleanupHostDirVolumesDoesNotFollowSymlinkedLeaf(t *testing.T) {
+	// Safety: if the per-sandbox leaf directory is ever replaced by a symlink,
+	// cleanup must only unlink the symlink itself and must NOT follow it into
+	// the target, otherwise os.RemoveAll would delete unrelated data.
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	s := &local{config: cfg, cowManager: &fakeCowVolumeManager{}}
+	require.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	tmp := t.TempDir()
+	oldHostDirBasePath := hostDirBasePath
+	hostDirBasePath = filepath.Join(tmp, "hostdir")
+	require.NoError(t, os.MkdirAll(hostDirBasePath, 0755))
+	t.Cleanup(func() { hostDirBasePath = oldHostDirBasePath })
+
+	// A directory that must survive cleanup.
+	secretDir := filepath.Join(tmp, "secret")
+	require.NoError(t, os.MkdirAll(secretDir, 0755))
+	secretFile := filepath.Join(secretDir, "keep.txt")
+	require.NoError(t, os.WriteFile(secretFile, []byte("keep"), 0644))
+
+	sandboxID := "leaf-symlink-sb"
+	leaf := filepath.Join(hostDirBasePath, sandboxID)
+	require.NoError(t, os.Symlink(secretDir, leaf))
+
+	err := s.cleanupHostDirVolumes(context.Background(), &StorageInfo{
+		SandboxID: sandboxID,
+		HostDirBackendInfos: map[string]*HostDirBackendInfo{
+			"test/vol": {VolumeName: "test"},
+		},
+	})
+	require.NoError(t, err)
+	// The symlink is gone, but the target directory and its contents survive.
+	_, statErr := os.Lstat(leaf)
+	require.True(t, os.IsNotExist(statErr))
+	require.DirExists(t, secretDir)
+	require.FileExists(t, secretFile)
+}
+
 func TestDestroyAfterRestoreCleansSandboxResourcesOnly(t *testing.T) {
 	cfg := makeTestConfig(t)
 	cfg.StorageBackend = "cubecow"

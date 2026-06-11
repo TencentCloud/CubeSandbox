@@ -101,9 +101,32 @@ func (l *local) cleanupHostDirVolumes(ctx context.Context, info *StorageInfo) er
 		return nil
 	}
 
-	sandboxDir := filepath.Join(hostDirBasePath, info.SandboxID)
-	if _, err := os.Stat(sandboxDir); os.IsNotExist(err) {
-		return nil
+	// Resolve symlinks on the parent (hostDirBasePath and its ancestors) only,
+	// not on the per-sandbox leaf component. The kernel records fully resolved
+	// mountpoints in /proc/self/mountinfo, so when any ancestor of
+	// hostDirBasePath is a symlink (e.g. /data -> /mnt/ssd/data),
+	// IsMountPoint's string comparison would otherwise miss the mounts, leaking
+	// them and letting os.RemoveAll wipe the real backing directory.
+	//
+	// We deliberately do NOT EvalSymlinks the leaf <sandboxID>: if that
+	// component were ever replaced by a symlink, resolving it would make
+	// os.RemoveAll follow the link and delete the target's contents (a
+	// link-following deletion hazard). Keeping the leaf unresolved means
+	// RemoveAll only unlinks the symlink itself.
+	resolvedBase, err := filepath.EvalSymlinks(hostDirBasePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("cleanupHostDirVolumes: resolve %s: %w", hostDirBasePath, err)
+	}
+	sandboxDir := filepath.Join(resolvedBase, info.SandboxID)
+
+	if _, err := os.Lstat(sandboxDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("cleanupHostDirVolumes: stat %s: %w", sandboxDir, err)
 	}
 
 	if err := filepath.WalkDir(sandboxDir, func(path string, d os.DirEntry, err error) error {
