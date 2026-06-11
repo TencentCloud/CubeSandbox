@@ -452,7 +452,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 	if err != nil {
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "resolve effective dns servers failed: %v", err)
 	}
-	cubeNetworkConfig, dnsAllowOutCIDRs := mergeDNSAllowOutCIDRs(cubeNetworkConfigBeforeDNS, resolvedDNSServers)
+	cubeNetworkConfig, dnsAllowOutCIDRs := mergeDNSAllowOutCIDRs(ctx, cubeNetworkConfigBeforeDNS, resolvedDNSServers)
 
 	log.G(ctx).Infof("tap create using network-agent: sandbox_id=%s request_id=%s exposed_ports=%v req_version=%d allow_internet_access=%s allow_out=%d deny_out=%d resolved_dns_servers=%v dns_allow_out_cidrs=%v cube_network_config_before_dns_merge=%s cube_network_config=%s",
 		opts.SandboxID, request.GetRequestID(), request.ExposedPorts, req.Version,
@@ -653,9 +653,12 @@ func formatNetworkAgentCubeNetworkConfig(cfg *networkagentclient.CubeNetworkConf
 	)
 }
 
-func mergeDNSAllowOutCIDRs(cfg *networkagentclient.CubeNetworkConfig, dnsServers []string) (*networkagentclient.CubeNetworkConfig, []string) {
+func mergeDNSAllowOutCIDRs(ctx context.Context, cfg *networkagentclient.CubeNetworkConfig, dnsServers []string) (*networkagentclient.CubeNetworkConfig, []string) {
 	if !shouldAppendDNSAllowOut(cfg) || len(dnsServers) == 0 {
 		return cfg, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	out := cloneNetworkAgentCubeNetworkConfig(cfg)
 	if out == nil {
@@ -665,10 +668,17 @@ func mergeDNSAllowOutCIDRs(cfg *networkagentclient.CubeNetworkConfig, dnsServers
 	for _, dnsServer := range dnsServers {
 		cidr, ok := dnsServerToCIDR(dnsServer)
 		if !ok {
+			if isIPv6DNSServer(dnsServer) {
+				log.G(ctx).Warnf("skip IPv6 DNS server when appending DNS allow-out CIDR: dns_server=%s", strings.TrimSpace(dnsServer))
+			}
 			continue
 		}
 		dnsAllowOutCIDRs = append(dnsAllowOutCIDRs, cidr)
 	}
+	// CubeVS AllowOut entries are CIDR-only today and cannot express UDP/TCP port 53.
+	// These resolver CIDRs intentionally keep domain-based allow rules functional
+	// even when AllowInternetAccess=false; restricting them to DNS ports requires a
+	// network-agent/CubeVS policy-model extension.
 	out.AllowOut = appendUniqueString(out.AllowOut, dnsAllowOutCIDRs)
 	return out, dnsAllowOutCIDRs
 }
@@ -830,6 +840,11 @@ func dnsServerToCIDR(ip string) (string, bool) {
 		return ipv4.String() + "/32", true
 	}
 	return "", false
+}
+
+func isIPv6DNSServer(ip string) bool {
+	parsedIP := net.ParseIP(strings.TrimSpace(ip))
+	return parsedIP != nil && parsedIP.To4() == nil
 }
 
 func appendUniqueString(base []string, extra []string) []string {
