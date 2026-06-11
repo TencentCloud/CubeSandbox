@@ -166,6 +166,9 @@ export interface ExampleScenario {
   docsAnchor?: string;
   topology: ScenarioTopology;
   files: ScenarioFile[];
+  /** Associated store catalog item ID. When set, the frontend uses it
+   *  to auto-select a matching template or prompt the user to install one. */
+  storeItemId?: string;
 }
 
 // ─── Shared topology helpers ────────────────────────────────────────────────
@@ -419,6 +422,7 @@ export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
     icon: Rocket,
     accent: 'from-primary/20 via-primary/5 to-transparent',
     topology: topologyQuickstart(),
+    storeItemId: 'sandbox-code',
     files: [
       { id: 'create', filename: 'create.py', language: 'python',
         titleZh: '创建沙箱', titleEn: 'Create Sandbox',
@@ -452,6 +456,7 @@ export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
     icon: ShieldCheck,
     accent: 'from-cube-violet/20 via-cube-violet/5 to-transparent',
     topology: topologyNetworkPolicy(),
+    storeItemId: 'sandbox-code',
     files: [
       { id: 'network_no_internet', filename: 'network_no_internet.py', language: 'python',
         titleZh: '无互联网', titleEn: 'No Internet',
@@ -477,6 +482,7 @@ export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
     icon: FolderOpen,
     accent: 'from-cube-emerald/20 via-cube-emerald/5 to-transparent',
     topology: topologyHostMount(),
+    storeItemId: 'sandbox-code',
     files: [
       { id: 'create_with_mount', filename: 'create_with_mount.py', language: 'python',
         titleZh: '挂载并创建', titleEn: 'Create With Mount',
@@ -494,6 +500,7 @@ export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
     icon: Globe2,
     accent: 'from-cube-cyan/20 via-cube-cyan/5 to-transparent',
     topology: topologyBrowser(),
+    storeItemId: 'sandbox-browser',
     files: [
       { id: 'browser', filename: 'browser.py', language: 'python',
         titleZh: 'Playwright + Chromium', titleEn: 'Playwright + Chromium',
@@ -511,6 +518,7 @@ export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
     icon: GitBranch,
     accent: 'from-cube-amber/20 via-cube-amber/5 to-transparent',
     topology: topologySnapshot(),
+    storeItemId: 'sandbox-code',
     files: [
       { id: '01_create_snapshot', filename: '01_create_snapshot.py', language: 'python',
         titleZh: '01 创建快照', titleEn: '01 Create Snapshot',
@@ -576,6 +584,7 @@ export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
     icon: Server,
     accent: 'from-cube-violet/15 via-cube-violet/5 to-transparent',
     topology: topologySidecar(),
+    storeItemId: 'sandbox-code',
     files: [
       { id: 'demo', filename: 'demo.py', language: 'python',
         titleZh: 'Sidecar Demo', titleEn: 'Sidecar Demo',
@@ -593,6 +602,7 @@ export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
     icon: Layers,
     accent: 'from-cube-rose/20 via-cube-rose/5 to-transparent',
     topology: topologyNginx(),
+    storeItemId: 'sandbox-nginx',
     files: [
       { id: 'test_files', filename: 'test_files.py', language: 'python',
         titleZh: 'Test Files', titleEn: 'Test Files',
@@ -610,6 +620,7 @@ export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
     icon: Cpu,
     accent: 'from-cube-amber/15 via-cube-amber/5 to-transparent',
     topology: topologyBench(),
+    storeItemId: 'sandbox-code',
     files: [
       { id: 'main', filename: 'main.go', language: 'go',
         titleZh: '运行压测', titleEn: 'Run Benchmark',
