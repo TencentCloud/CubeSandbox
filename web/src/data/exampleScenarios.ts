@@ -173,44 +173,50 @@ export interface ExampleScenario {
 // Architecture overview:
 //
 //   Control plane (orchestration):
-//     User Script → CubeAPI → CubeMaster → Cubelet
+//     User Script → CubeAPI → CubeMaster → Cubelet → CubeShim → CubeHypervisor → MicroVM
+//                                CubeMaster ──端点映射──→ CubeProxy
+//
+//   Network plane:
+//     Cubelet ──EnsureNetwork──→ Network Agent ──eBPF Policy──→ MicroVM
 //
 //   Data plane (runtime, inside MicroVM):
-//     CubeAPI → CubeProxy → envd → Runner
-//
-//   The MicroVM is the sandbox isolation boundary. Cubelet creates/destroys
-//   it (control-plane action), but the actual workload runs inside it
-//   (data-plane). envd and the runner are processes INSIDE the MicroVM,
-//   reachable from CubeProxy over a WSS tunnel.
+//     CubeAPI → CubeProxy → CubeRuntime
+//     MicroVM ──Start Runtime──→ CubeRuntime
 
 const SHARED_NODES: ScenarioNode[] = [
   // ── Control plane ──────────────────────────────────────────────
   { id: 'user', labelZh: '用户脚本', labelEn: 'User Script', plane: 'control', kind: 'user',
-    descriptionZh: '你在页面上点击「运行」后发起的示例脚本调用。',
+    descriptionZh: '用户页面上点击「运行」后发起的示例脚本调用。',
     descriptionEn: 'The example invocation triggered when you click Run.' },
-  { id: 'cubeapi', labelZh: 'CubeAPI :3000', labelEn: 'CubeAPI :3000', plane: 'control', kind: 'control',
+  { id: 'cubeapi', labelZh: 'CubeAPI', labelEn: 'CubeAPI ', plane: 'control', kind: 'control',
     descriptionZh: 'HTTP 网关：校验请求 → 调度 CubeMaster 创建沙箱 → 代理数据到 CubeProxy。',
     descriptionEn: 'HTTP gateway: validates requests, schedules sandbox creation via CubeMaster, proxies data via CubeProxy.' },
   { id: 'cubemaster', labelZh: 'CubeMaster', labelEn: 'CubeMaster', plane: 'control', kind: 'control',
     descriptionZh: '调度器：根据模板和负载挑选 Cubelet 节点，下发创建 MicroVM。',
     descriptionEn: 'Scheduler: picks a Cubelet node based on template & load, then creates a MicroVM.' },
   { id: 'cubelet', labelZh: 'Cubelet', labelEn: 'Cubelet', plane: 'control', kind: 'control',
-    descriptionZh: '节点代理：管理本机 MicroVM 完整生命周期（创建/销毁/暂停/恢复/快照）。',
+    descriptionZh: '节点代理：管理本机MicroVM完整生命周期（创建/销毁/暂停/恢复/快照）。',
     descriptionEn: 'Per-node agent: manages the full MicroVM lifecycle (create/destroy/pause/resume/snapshot).' },
+  { id: 'network-agent', labelZh: 'Network Agent', labelEn: 'Network Agent', plane: 'data', kind: 'control',
+    descriptionZh: '网络策略代理：为沙箱分配 IP/Port，注入 eBPF 网络策略（EnsureNetwork）。',
+    descriptionEn: 'Network policy agent: allocates IP/Port, injects eBPF policies (EnsureNetwork).' },
+  { id: 'cubeshim', labelZh: 'CubeShim', labelEn: 'CubeShim', plane: 'control', kind: 'control',
+    descriptionZh: '容器运行时 shim：接收 Cubelet 指令，调用 Hypervisor 管理 MicroVM 生命周期。',
+    descriptionEn: 'Container runtime shim: receives Cubelet commands, calls Hypervisor to manage MicroVM lifecycle.' },
+  { id: 'cube-hypervisor', labelZh: 'CubeHypervisor', labelEn: 'CubeHypervisor', plane: 'control', kind: 'control',
+    descriptionZh: '虚拟化管理层：通过 QEMU/KVM 创建和销毁 MicroVM 实例。',
+    descriptionEn: 'Virtualization layer: creates and destroys MicroVM instances via QEMU/KVM.' },
 
   // ── Data plane ─────────────────────────────────────────────────
   { id: 'cubeproxy', labelZh: 'CubeProxy', labelEn: 'CubeProxy', plane: 'data', kind: 'control',
-    descriptionZh: 'TLS 终结的反向代理：将外部请求通过 WSS 隧道转发到沙箱内的 envd。',
-    descriptionEn: 'TLS-terminating reverse proxy: forwards requests via WSS tunnel to in-sandbox envd.' },
+    descriptionZh: 'TLS 终结的反向代理：将外部请求通过 WSS 隧道转发到沙箱内的 CubeRuntime。',
+    descriptionEn: 'TLS-terminating reverse proxy: forwards requests via WSS tunnel to in-sandbox CubeRuntime.' },
   { id: 'microvm', labelZh: 'KVM MicroVM', labelEn: 'KVM MicroVM', plane: 'data', kind: 'vm',
     descriptionZh: 'QEMU/KVM 微虚拟机：沙箱的运行时隔离边界，内部运行 envd 和用户工作负载。',
     descriptionEn: 'QEMU/KVM MicroVM: the sandbox isolation boundary, running envd and the user workload.' },
-  { id: 'envd', labelZh: 'envd :49983', labelEn: 'envd :49983', plane: 'data', kind: 'data',
-    descriptionZh: '沙箱内守护进程：暴露 Jupyter 内核、文件系统访问和 Shell 执行接口。',
-    descriptionEn: 'In-sandbox daemon: exposes Jupyter kernel, filesystem access, and shell execution.' },
-  { id: 'runner', labelZh: 'Python / Shell', labelEn: 'Python / Shell', plane: 'data', kind: 'data',
-    descriptionZh: '真正执行示例代码的解释器进程，由 envd fork+exec 启动。',
-    descriptionEn: 'The interpreter process that actually runs the example code, forked by envd.' },
+  { id: 'cube-runtime', labelZh: 'CubeRuntime', labelEn: 'CubeRuntime', plane: 'data', kind: 'data',
+    descriptionZh: '沙箱运行时：在 MicroVM 内启动守护进程，提供进程管理、文件系统和代码执行接口。',
+    descriptionEn: 'Sandbox runtime: starts the in-VM daemon, providing process management, filesystem and code execution.' },
 ];
 
 const SHARED_EDGES: ScenarioEdge[] = [
@@ -218,12 +224,19 @@ const SHARED_EDGES: ScenarioEdge[] = [
   { from: 'user', to: 'cubeapi', labelZh: 'HTTPS', labelEn: 'HTTPS', plane: 'control' },
   { from: 'cubeapi', to: 'cubemaster', labelZh: 'gRPC', labelEn: 'gRPC', plane: 'control' },
   { from: 'cubemaster', to: 'cubelet', labelZh: 'gRPC', labelEn: 'gRPC', plane: 'control' },
-  { from: 'cubelet', to: 'microvm', labelZh: 'QMP / boot', labelEn: 'QMP / boot', plane: 'control' },
+  { from: 'cubemaster', to: 'cubeproxy', labelZh: '端点映射', labelEn: 'Endpoint Mapping', plane: 'control' },
+
+  // ── Node plane: network + runtime shim ─────────────────────────
+  { from: 'cubelet', to: 'network-agent', labelZh: 'EnsureNetwork', labelEn: 'EnsureNetwork', plane: 'data' },
+  { from: 'cubelet', to: 'cubeshim', labelZh: 'Create VM', labelEn: 'Create VM', plane: 'control' },
+  { from: 'cubeshim', to: 'cube-hypervisor', labelZh: '虚拟化管理', labelEn: 'Hypervisor Mgmt', plane: 'control' },
+  { from: 'network-agent', to: 'microvm', labelZh: 'eBPF 策略', labelEn: 'eBPF Policy', plane: 'data' },
+  { from: 'cube-hypervisor', to: 'microvm', labelZh: 'QMP / boot', labelEn: 'QMP / boot', plane: 'control' },
+  { from: 'microvm', to: 'cube-runtime', labelZh: '启动运行时', labelEn: 'Start Runtime', plane: 'data' },
 
   // ── Data plane: runtime data flow ──────────────────────────────
   { from: 'cubeapi', to: 'cubeproxy', labelZh: 'HTTPS', labelEn: 'HTTPS', plane: 'data' },
-  { from: 'cubeproxy', to: 'envd', labelZh: 'WSS 隧道', labelEn: 'WSS tunnel', plane: 'data' },
-  { from: 'envd', to: 'runner', labelZh: 'fork+exec', labelEn: 'fork+exec', plane: 'data' },
+  { from: 'cubeproxy', to: 'cube-runtime', labelZh: 'WSS 隧道', labelEn: 'WSS tunnel', plane: 'data' },
 ];
 
 function clone<T>(arr: T[]): T[] {
@@ -247,25 +260,8 @@ function topologyQuickstart(): ScenarioTopology {
 }
 
 function topologyNetworkPolicy(): ScenarioTopology {
-  const t = cloneSharedTopology();
-  // Replace the direct cubelet→microvm edge with an eBPF data-path hop.
-  // CubeVS sits on the veth between the host and the guest, enforcing
-  // allow/deny rules before packets reach the MicroVM.
-  t.edges = t.edges.filter((e) => !(e.from === 'cubelet' && e.to === 'microvm'));
-  t.nodes.push({
-    id: 'cubevs',
-    labelZh: 'CubeVS (eBPF)',
-    labelEn: 'CubeVS (eBPF)',
-    plane: 'data',
-    kind: 'control',
-    descriptionZh: 'eBPF 数据面：在 guest veth 上按 CIDR 规则强制执行 allow / deny。',
-    descriptionEn: 'eBPF datapath: enforces allow/deny by CIDR on the guest veth.',
-  });
-  t.edges.push(
-    { from: 'cubelet', to: 'cubevs', labelZh: 'tc / eBPF', labelEn: 'tc / eBPF', plane: 'data' },
-    { from: 'cubevs', to: 'microvm', labelZh: 'veth', labelEn: 'veth', plane: 'data' },
-  );
-  return t;
+  // Network policy is enforced by Network Agent via eBPF — no extra hop needed.
+  return cloneSharedTopology();
 }
 
 function topologyHostMount(): ScenarioTopology {
@@ -292,9 +288,7 @@ function topologyHostMount(): ScenarioTopology {
 
 function topologyBrowser(): ScenarioTopology {
   const t = cloneSharedTopology();
-  // Replace the generic runner with Chromium + Playwright.
-  t.nodes = t.nodes.filter((n) => n.id !== 'runner');
-  t.edges = t.edges.filter((e) => !(e.from === 'envd' && e.to === 'runner'));
+  // Add Chromium + Playwright as workload under CubeRuntime.
   t.nodes.push(
     {
       id: 'playwright',
@@ -316,7 +310,7 @@ function topologyBrowser(): ScenarioTopology {
     },
   );
   t.edges.push(
-    { from: 'envd', to: 'playwright', labelZh: 'exec', labelEn: 'exec', plane: 'data' },
+    { from: 'cube-runtime', to: 'playwright', labelZh: 'exec', labelEn: 'exec', plane: 'data' },
     { from: 'playwright', to: 'chromium', labelZh: 'CDP WS', labelEn: 'CDP WS', plane: 'data' },
   );
   return t;
@@ -365,9 +359,7 @@ function topologySidecar(): ScenarioTopology {
 
 function topologyNginx(): ScenarioTopology {
   const t = cloneSharedTopology();
-  // Replace the generic runner with nginx serving static files.
-  t.nodes = t.nodes.filter((n) => n.id !== 'runner');
-  t.edges = t.edges.filter((e) => !(e.from === 'envd' && e.to === 'runner'));
+  // Add nginx as workload under CubeRuntime.
   t.nodes.push({
     id: 'nginx',
     labelZh: 'nginx :80',
@@ -378,7 +370,7 @@ function topologyNginx(): ScenarioTopology {
     descriptionEn: 'nginx serving static files from the custom image inside the sandbox.',
   });
   t.edges.push({
-    from: 'envd',
+    from: 'cube-runtime',
     to: 'nginx',
     labelZh: 'exec',
     labelEn: 'exec',
@@ -389,9 +381,9 @@ function topologyNginx(): ScenarioTopology {
 
 function topologyBench(): ScenarioTopology {
   const t = cloneSharedTopology();
-  // Fan out: replace single MicroVM with N parallel clones.
-  t.nodes = t.nodes.filter((n) => n.id !== 'microvm');
-  t.edges = t.edges.filter((e) => e.to !== 'microvm');
+  // Fan out: replace single MicroVM + CubeRuntime with N parallel clones.
+  t.nodes = t.nodes.filter((n) => n.id !== 'microvm' && n.id !== 'cube-runtime');
+  t.edges = t.edges.filter((e) => e.to !== 'microvm' && e.from !== 'microvm');
   for (let i = 0; i < 4; i++) {
     t.nodes.push({
       id: `microvm-${i}`,
@@ -402,13 +394,10 @@ function topologyBench(): ScenarioTopology {
       descriptionZh: '并发压测的目标沙箱。',
       descriptionEn: 'Concurrent benchmark target sandbox.',
     });
-    t.edges.push({
-      from: 'cubelet',
-      to: `microvm-${i}`,
-      labelZh: 'QMP',
-      labelEn: 'QMP',
-      plane: 'control',
-    });
+    t.edges.push(
+      { from: 'network-agent', to: `microvm-${i}`, labelZh: 'eBPF 策略', labelEn: 'eBPF Policy', plane: 'data' },
+      { from: 'cube-hypervisor', to: `microvm-${i}`, labelZh: 'QMP', labelEn: 'QMP', plane: 'control' },
+    );
   }
   return t;
 }
