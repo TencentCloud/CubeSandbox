@@ -6,6 +6,7 @@ package cube
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -538,7 +539,7 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 				assert.Len(t, result, 1)
 				assert.Equal(t, "gpu", result[0].Key)
 				assert.Equal(t, affinity.NodeSelectorOpExists, result[0].Operator)
-				assert.Nil(t, result[0].Values)
+				assert.Empty(t, result[0].Values)
 			},
 		},
 		{
@@ -548,7 +549,7 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 				assert.Len(t, result, 1)
 				assert.Equal(t, "tainted", result[0].Key)
 				assert.Equal(t, affinity.NodeSelectorOpDoesNotExist, result[0].Operator)
-				assert.Nil(t, result[0].Values)
+				assert.Empty(t, result[0].Values)
 			},
 		},
 		{
@@ -725,6 +726,38 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 			errMsg:  "unsupported operator",
 		},
 
+		// ---- size / complexity limits (DoS hardening) ----
+		{
+			name:    "JSON exceeds 4KB limit",
+			json:    `[{"key":"` + strings.Repeat("k", 4*1024) + `","operator":"Exists"}]`,
+			wantErr: true,
+			errMsg:  "exceeds maximum size",
+		},
+		{
+			name: "more than 10 selector requirements",
+			json: `[
+				{"key":"k0","operator":"Exists"},
+				{"key":"k1","operator":"Exists"},
+				{"key":"k2","operator":"Exists"},
+				{"key":"k3","operator":"Exists"},
+				{"key":"k4","operator":"Exists"},
+				{"key":"k5","operator":"Exists"},
+				{"key":"k6","operator":"Exists"},
+				{"key":"k7","operator":"Exists"},
+				{"key":"k8","operator":"Exists"},
+				{"key":"k9","operator":"Exists"},
+				{"key":"k10","operator":"Exists"}
+			]`,
+			wantErr: true,
+			errMsg: "allows at most",
+		},
+		{
+			name:    "In with more than 50 values",
+			json:    `[{"key":"label","operator":"In","values":[` + strings.Repeat(`"v",`, 50) + `"v"]}]`,
+			wantErr: true,
+			errMsg:  "allows at most",
+		},
+
 		// ---- second element fails validation ----
 		{
 			name: "first valid, second invalid",
@@ -752,51 +785,6 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 					tt.check(t, result)
 				}
 			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// valuesSliceToMap tests
-// ---------------------------------------------------------------------------
-
-func Test_valuesSliceToMap(t *testing.T) {
-	tests := []struct {
-		name string
-		vals []string
-		want map[string]any
-	}{
-		{
-			name: "nil slice",
-			vals: nil,
-			want: nil,
-		},
-		{
-			name: "empty slice",
-			vals: []string{},
-			want: nil,
-		},
-		{
-			name: "single value",
-			vals: []string{"a"},
-			want: map[string]any{"a": struct{}{}},
-		},
-		{
-			name: "multiple values",
-			vals: []string{"a", "b", "c"},
-			want: map[string]any{"a": struct{}{}, "b": struct{}{}, "c": struct{}{}},
-		},
-		{
-			name: "duplicate values collapse",
-			vals: []string{"a", "a", "b"},
-			want: map[string]any{"a": struct{}{}, "b": struct{}{}},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := valuesSliceToMap(tt.vals)
-			assert.Equal(t, tt.want, got)
 		})
 	}
 }

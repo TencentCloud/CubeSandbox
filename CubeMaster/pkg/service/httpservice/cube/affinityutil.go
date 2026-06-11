@@ -161,10 +161,34 @@ type nodeSelectorRequirementJSON struct {
 	Values   []string                      `json:"values,omitempty"`
 }
 
+const (
+	// maxSelectorJSONSize limits the raw annotation value to prevent memory
+	// exhaustion from multi-megabyte JSON payloads (DoS hardening).
+	maxSelectorJSONSize = 4 * 1024
+
+	// maxSelectorRequirements caps the number of individual node selector
+	// requirements per sandbox create request.
+	maxSelectorRequirements = 10
+
+	// maxValuesPerRequirement caps the number of values for In / NotIn
+	// operators to prevent map inflation.
+	maxValuesPerRequirement = 50
+)
+
 func parseNodeAffinitySelector(selectorJSON string) ([]affinity.NodeSelectorRequirement, error) {
+	if len(selectorJSON) > maxSelectorJSONSize {
+		return nil, fmt.Errorf("annotation %s exceeds maximum size of %d bytes",
+			constants.AnnotationsNodeAffinitySelector, maxSelectorJSONSize)
+	}
+
 	var raw []nodeSelectorRequirementJSON
 	if err := json.Unmarshal([]byte(selectorJSON), &raw); err != nil {
-		return nil, fmt.Errorf("invalid com.nodeaffinity.selector JSON: %w", err)
+		return nil, fmt.Errorf("invalid %s JSON: %w", constants.AnnotationsNodeAffinitySelector, err)
+	}
+
+	if len(raw) > maxSelectorRequirements {
+		return nil, fmt.Errorf("annotation %s allows at most %d selector requirements, got %d",
+			constants.AnnotationsNodeAffinitySelector, maxSelectorRequirements, len(raw))
 	}
 
 	result := make([]affinity.NodeSelectorRequirement, 0, len(raw))
@@ -176,6 +200,10 @@ func parseNodeAffinitySelector(selectorJSON string) ([]affinity.NodeSelectorRequ
 		case affinity.NodeSelectorOpIn, affinity.NodeSelectorOpNotIn:
 			if len(r.Values) == 0 {
 				return nil, fmt.Errorf("operator %q requires non-empty values for key %q", r.Operator, r.Key)
+			}
+			if len(r.Values) > maxValuesPerRequirement {
+				return nil, fmt.Errorf("operator %q allows at most %d values, got %d",
+					r.Operator, maxValuesPerRequirement, len(r.Values))
 			}
 		case affinity.NodeSelectorOpExists, affinity.NodeSelectorOpDoesNotExist:
 			if len(r.Values) != 0 {
@@ -194,23 +222,9 @@ func parseNodeAffinitySelector(selectorJSON string) ([]affinity.NodeSelectorRequ
 		req := affinity.NodeSelectorRequirement{
 			Key:      r.Key,
 			Operator: r.Operator,
-			Values:   valuesSliceToMap(r.Values),
+			Values:   utils.SliceToMap(r.Values),
 		}
 		result = append(result, req)
 	}
 	return result, nil
-}
-
-// valuesSliceToMap converts a []string to map[string]any.
-// This bridges the gap between the JSON input format (values as array) and the
-// NodeSelectorRequirement.Values type (map[string]any).
-func valuesSliceToMap(vals []string) map[string]any {
-	if len(vals) == 0 {
-		return nil
-	}
-	m := make(map[string]any, len(vals))
-	for _, v := range vals {
-		m[v] = struct{}{}
-	}
-	return m
 }
