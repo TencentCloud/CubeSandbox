@@ -8,7 +8,6 @@ require (
 	github.com/tencentcloud/CubeSandbox/CubeNet/cubevs v0.0.0
 	github.com/tencentcloud/CubeSandbox/cubelog v0.1.0
 	github.com/vishvananda/netlink v1.1.0
-	golang.org/x/sync v0.19.0
 	golang.org/x/sys v0.39.0
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.10
@@ -25,6 +24,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/vishvananda/netns v0.0.0-20191106174202-0a2b9b5464df // indirect
 	golang.org/x/net v0.48.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 )

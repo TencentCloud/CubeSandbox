@@ -31,6 +31,7 @@ var unixOpen = unix.Open
 var unixClose = unix.Close
 var unixIoctlIfreq = unix.IoctlIfreq
 var unixIoctlSetInt = unix.IoctlSetInt
+var unixIoctlSetPointerInt = unix.IoctlSetPointerInt
 
 const (
 	tapNamePrefix    = "z"
@@ -398,24 +399,35 @@ func getTapFd(name string) (*os.File, error) {
 // and the ARP entry, all of which were already applied when the tap was created.
 // For recovering taps of unknown state (e.g. after a restart) use restoreTap.
 func openTapFdByName(name string) (*os.File, error) {
+	// Use unix.Ifreq (a properly-sized struct ifreq) rather than the local
+	// 18-byte ifReq + raw unsafe.Pointer syscall: TUNSETIFF copies the full
+	// sizeof(struct ifreq) (~40 bytes) from userspace, so a short struct makes
+	// the kernel read past it. unix.NewIfreq also validates the name length.
+	// This mirrors deletePersistentTapByName below.
+	req, err := unix.NewIfreq(name)
+	if err != nil {
+		return nil, err
+	}
+	req.SetUint16(uint16(unix.IFF_TAP | unix.IFF_NO_PI | unix.IFF_VNET_HDR | unix.IFF_ONE_QUEUE))
+
 	fd, err := unixOpen(tunDevicePath, os.O_RDWR|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	var req ifReq
-	copy(req.Name[:15], name)
-	req.Flags = unix.IFF_TAP | unix.IFF_NO_PI | unix.IFF_VNET_HDR | unix.IFF_ONE_QUEUE
-
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TUNSETIFF), uintptr(unsafe.Pointer(&req))); errno != 0 {
+	if err := unixIoctlIfreq(fd, unix.TUNSETIFF, req); err != nil {
 		unixClose(fd)
-		return nil, fmt.Errorf("set tap(%s) TUNSETIFF failed, errno: %+v", name, errno)
+		return nil, fmt.Errorf("set tap(%s) TUNSETIFF failed: %w", name, err)
 	}
 
-	size := virtioNetHdrSize
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TUNSETVNETHDRSZ), uintptr(unsafe.Pointer(&size))); errno != 0 {
+	// TUNSETVNETHDRSZ takes a POINTER to an int (kernel does get_user on argp),
+	// so it must use IoctlSetPointerInt, NOT IoctlSetInt (which passes the value
+	// as argp directly and makes the kernel fault on a bogus address). This
+	// matches newTap/restoreTap, which pass &size. Getting this wrong makes the
+	// fast reopen fail and silently fall back to the slow restoreTap path.
+	if err := unixIoctlSetPointerInt(fd, unix.TUNSETVNETHDRSZ, virtioNetHdrSize); err != nil {
 		unixClose(fd)
-		return nil, fmt.Errorf("set tap(%s) vnet hdr failed, errno: %+v", name, errno)
+		return nil, fmt.Errorf("set tap(%s) vnet hdr failed: %w", name, err)
 	}
 
 	return os.NewFile(uintptr(fd), tunDevicePath), nil

@@ -5,9 +5,12 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
+
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 // TapFDProvider exposes the original TAP fd owned by network-agent. It also
@@ -44,14 +47,28 @@ func (s *localService) GetTapFile(sandboxID, tapName string) (*os.File, int, err
 	//
 	// We keep this under s.mu on purpose: parallelising these syscalls across
 	// concurrent sandbox boots regressed tail latency (they contend on kernel
-	// locks anyway), so an orderly short critical section is preferable.
+	// locks anyway), so an orderly short critical section is preferable. For the
+	// same reason we do NOT add a per-request SIOCGIFINDEX pre-check here: every
+	// extra syscall under this lock is paid by all concurrent sandbox boots and
+	// measurably regresses c50 tail latency. Out-of-band deletion of a managed
+	// tap is verified off the hot path by the maintenance loop instead.
 	if state.tap != nil && !state.tap.InUse {
 		file, err := openTapFdByNameFunc(state.TapName)
-		if err != nil {
-			return nil, 0, fmt.Errorf("tap fd unavailable for sandbox %q: %w", sandboxID, err)
+		if err == nil {
+			state.tap.File = file
+			return state.tap.File, indexFallback(ifindex, state.tap), nil
 		}
-		state.tap.File = file
-		return state.tap.File, indexFallback(ifindex, state.tap), nil
+		// On a transient open failure (e.g. the kernel is momentarily busy) we
+		// deliberately do NOT fail the request: fall through to the recovery
+		// path below so restoreTap can re-validate and retry the fd acquisition,
+		// letting the request self-heal instead of propagating a sandbox-create
+		// failure to the caller. We log at WARN so a SYSTEMATIC fast-path failure
+		// (e.g. a regression in openTapFdByName) is loud here instead of silently
+		// degrading every request to the slow restoreTap path.
+		CubeLog.WithContext(context.Background()).Warnf(
+			"network-agent GetTapFile fast reopen failed, falling back to restoreTap: sandbox_id=%s tap=%s err=%v",
+			sandboxID, state.TapName, err,
+		)
 	}
 
 	// Recovery path: no in-memory tap (e.g. after a restart) or the tap is held

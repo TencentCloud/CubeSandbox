@@ -19,7 +19,6 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
-	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -73,10 +72,6 @@ type localService struct {
 	// committed into states. ReleaseNetwork waits on the channel so it never
 	// races ahead of an in-flight creation and orphans the freshly built tap.
 	creating map[string]chan struct{}
-
-	// createGroup deduplicates concurrent EnsureNetwork calls for the same
-	// sandbox ID into a single creation, sharing the resulting managed state.
-	createGroup singleflight.Group
 
 	version uint32
 
@@ -193,54 +188,55 @@ func (s *localService) EnsureNetwork(ctx context.Context, req *EnsureNetworkRequ
 		formatCubeNetworkConfig(req.CubeNetworkConfig),
 		req.PersistMetadata,
 	)
-	// Fast path: already created. Avoid entering the singleflight machinery for
-	// the common idempotent re-request.
 	s.mu.Lock()
+	// Fast path: already created. The common idempotent re-request returns its
+	// own response clone (ensureResponse copies all slices/maps) without doing
+	// any creation work.
 	if existing, ok := s.states[req.SandboxID]; ok {
 		resp := existing.ensureResponse()
 		s.mu.Unlock()
 		return resp, nil
 	}
+	// Deduplicate concurrent creates for the same sandbox: if one is already in
+	// flight, wait on its guard channel and then return the committed state.
+	if done, ok := s.creating[req.SandboxID]; ok {
+		s.mu.Unlock()
+		<-done
+		s.mu.Lock()
+		existing, ok := s.states[req.SandboxID]
+		s.mu.Unlock()
+		if ok {
+			return existing.ensureResponse(), nil
+		}
+		return nil, fmt.Errorf("concurrent network creation for sandbox %q failed", req.SandboxID)
+	}
+	// We are the creator. Register the guard in the SAME critical section as the
+	// states/creating check, before unlocking. This closes the TOCTOU window
+	// where ReleaseNetwork could observe neither states[id] nor creating[id] and
+	// return a no-op release, orphaning the tap this call is about to build.
+	// Different sandbox IDs still run fully in parallel: the heavy work (tap
+	// creation, eBPF/cubevs map updates, state persistence) happens outside the
+	// global mutex inside createState.
+	if s.creating == nil {
+		s.creating = make(map[string]chan struct{})
+	}
+	done := make(chan struct{})
+	s.creating[req.SandboxID] = done
 	s.mu.Unlock()
 
-	// Coalesce concurrent duplicate requests for the same sandbox into a single
-	// creation. Different sandbox IDs run fully in parallel: the heavy work
-	// (tap creation, eBPF/cubevs map updates, state persistence) happens outside
-	// the global mutex inside createState.
-	v, err, _ := s.createGroup.Do(req.SandboxID, func() (interface{}, error) {
-		s.mu.Lock()
-		if existing, ok := s.states[req.SandboxID]; ok {
-			s.mu.Unlock()
-			return existing, nil
-		}
-		done := make(chan struct{})
-		if s.creating == nil {
-			s.creating = make(map[string]chan struct{})
-		}
-		s.creating[req.SandboxID] = done
-		s.mu.Unlock()
+	state, createErr := s.createState(ctx, req)
 
-		state, createErr := s.createState(ctx, req)
-
-		s.mu.Lock()
-		delete(s.creating, req.SandboxID)
-		if createErr == nil {
-			s.states[state.SandboxID] = state
-		}
-		close(done)
-		s.mu.Unlock()
-		if createErr != nil {
-			return nil, createErr
-		}
-		return state, nil
-	})
-	if err != nil {
-		return nil, err
+	s.mu.Lock()
+	delete(s.creating, req.SandboxID)
+	if createErr == nil {
+		s.states[state.SandboxID] = state
 	}
-	// Every caller (the singleflight leader plus any coalesced followers) builds
-	// its own response from the shared managed state; ensureResponse clones all
-	// slices/maps so callers never share mutable response data.
-	return v.(*managedState).ensureResponse(), nil
+	close(done)
+	s.mu.Unlock()
+	if createErr != nil {
+		return nil, createErr
+	}
+	return state.ensureResponse(), nil
 }
 
 func (s *localService) ReleaseNetwork(ctx context.Context, req *ReleaseNetworkRequest) (*ReleaseNetworkResponse, error) {
@@ -396,7 +392,12 @@ func (s *localService) createState(ctx context.Context, req *EnsureNetworkReques
 		policyKnown: true,
 	}
 	if err := s.store.Save(&state.persistedState); err != nil {
-		_ = cubevsDelTAPDevice(uint32(tap.Index), tap.IP.To4())
+		if delErr := cubevsDelTAPDevice(uint32(tap.Index), tap.IP.To4()); delErr != nil {
+			CubeLog.WithContext(ctx).Warnf(
+				"network-agent createState rollback: cubevs del tap failed (stale eBPF entries may leak): sandbox_id=%s ifindex=%d ip=%s err=%v",
+				req.SandboxID, tap.Index, tap.IP.String(), delErr,
+			)
+		}
 		s.clearPortMappings(tap)
 		s.releaseAcquiredTap(tap, fromPool)
 		return nil, err
@@ -703,7 +704,7 @@ func (s *localService) cleanupConflictingTap(ip net.IP) error {
 	if !ok {
 		return nil
 	}
-	if err := s.checkTapConflictLocked(tap, ip); err != nil {
+	if err := s.checkTapConflict(tap, ip); err != nil {
 		return err
 	}
 	if err := destroyTapFunc(tap.Index); err != nil {
@@ -712,10 +713,11 @@ func (s *localService) cleanupConflictingTap(ip net.IP) error {
 	return nil
 }
 
-// checkTapConflictLocked reports an error if the given tap is still referenced
-// by any in-memory collection (active states or any of the pools). It acquires
-// s.mu for the duration of the scan.
-func (s *localService) checkTapConflictLocked(tap *tapDevice, ip net.IP) error {
+// checkTapConflict reports an error if the given tap is still referenced by any
+// in-memory collection (active states or any of the pools). It acquires s.mu
+// itself for the duration of the scan, so callers must NOT already hold it
+// (hence no "Locked" suffix, which would imply the opposite).
+func (s *localService) checkTapConflict(tap *tapDevice, ip net.IP) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, state := range s.states {

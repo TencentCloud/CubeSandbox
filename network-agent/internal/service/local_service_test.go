@@ -6,6 +6,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"slices"
@@ -697,6 +698,120 @@ func TestGetTapFileRestoresMissingFD(t *testing.T) {
 	}
 	if openCalls != 1 {
 		t.Fatalf("openCalls=%d, want 1 (on-demand reopen)", openCalls)
+	}
+}
+
+// TestGetTapFileHotPathOpenFailureSelfHeals asserts that when the cheap reopen
+// (openTapFdByName) fails transiently, GetTapFile does NOT propagate the error
+// but falls through to the restoreTap recovery path, which re-validates and
+// retries fd acquisition so the sandbox create self-heals.
+func TestGetTapFileHotPathOpenFailureSelfHeals(t *testing.T) {
+	oldList := listCubeTapsFunc
+	oldRestore := restoreTapFunc
+	oldOpen := openTapFdByNameFunc
+	oldListCubeVSTaps := cubevsListTAPDevices
+	oldListPortMappings := cubevsListPortMappings
+	oldAttach := cubevsAttachFilter
+	oldGetTap := cubevsGetTAPDevice
+	oldAddTap := cubevsAddTAPDevice
+	oldUpsert := cubevsUpsertTAPDevice
+	oldARP := addARPEntryFunc
+	oldRouteList := netlinkRouteListFiltered
+	oldRouteReplace := netlinkRouteReplace
+	t.Cleanup(func() {
+		listCubeTapsFunc = oldList
+		restoreTapFunc = oldRestore
+		openTapFdByNameFunc = oldOpen
+		cubevsListTAPDevices = oldListCubeVSTaps
+		cubevsListPortMappings = oldListPortMappings
+		cubevsAttachFilter = oldAttach
+		cubevsGetTAPDevice = oldGetTap
+		cubevsAddTAPDevice = oldAddTap
+		cubevsUpsertTAPDevice = oldUpsert
+		addARPEntryFunc = oldARP
+		netlinkRouteListFiltered = oldRouteList
+		netlinkRouteReplace = oldRouteReplace
+	})
+
+	store, err := newStateStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("newStateStore error=%v", err)
+	}
+	persisted := &persistedState{
+		SandboxID:     "sandbox-1",
+		NetworkHandle: "sandbox-1",
+		TapName:       "z192.168.0.3",
+		TapIfIndex:    13,
+		SandboxIP:     "192.168.0.3",
+	}
+	if err := store.Save(persisted); err != nil {
+		t.Fatalf("store.Save error=%v", err)
+	}
+
+	listCubeTapsFunc = func() (map[string]*tapDevice, error) {
+		return map[string]*tapDevice{
+			"192.168.0.3": {
+				Name:  "z192.168.0.3",
+				Index: 13,
+				IP:    net.ParseIP("192.168.0.3").To4(),
+			},
+		}, nil
+	}
+	restoreCalls := 0
+	restoreTapFunc = func(tap *tapDevice, _ int, _ string, _ int) (*tapDevice, error) {
+		restoreCalls++
+		tap.File = newTestTapFile(t)
+		return tap, nil
+	}
+	openCalls := 0
+	openTapFdByNameFunc = func(string) (*os.File, error) {
+		openCalls++
+		return nil, fmt.Errorf("device or resource busy")
+	}
+	cubevsListTAPDevices = func() ([]cubevs.TAPDevice, error) { return nil, nil }
+	cubevsListPortMappings = func() (map[uint16]cubevs.MVMPort, error) { return map[uint16]cubevs.MVMPort{}, nil }
+	cubevsAttachFilter = func(uint32) error { return nil }
+	cubevsGetTAPDevice = func(uint32) (*cubevs.TAPDevice, error) { return &cubevs.TAPDevice{}, nil }
+	cubevsAddTAPDevice = func(uint32, net.IP, string, uint32, cubevs.MVMOptions) error { return nil }
+	cubevsUpsertTAPDevice = func(uint32, net.IP, string, uint32, cubevs.MVMOptions) error { return nil }
+	addARPEntryFunc = func(net.IP, string, int) error { return nil }
+	netlinkRouteListFiltered = func(_ int, _ *netlink.Route, _ uint64) ([]netlink.Route, error) { return nil, nil }
+	netlinkRouteReplace = func(_ *netlink.Route) error { return nil }
+
+	allocator, err := newIPAllocator("192.168.0.0/18")
+	if err != nil {
+		t.Fatalf("newIPAllocator error=%v", err)
+	}
+	svc := &localService{
+		store:             store,
+		allocator:         allocator,
+		ports:             &portAllocator{},
+		cfg:               Config{CIDR: "192.168.0.0/18", MVMMacAddr: "20:90:6f:fc:fc:fc", MvmMtu: 1500},
+		cubeDev:           &cubeDev{Index: 16},
+		states:            make(map[string]*managedState),
+		destroyFailedTaps: make(map[string]*tapDevice),
+	}
+	if err := svc.recover(); err != nil {
+		t.Fatalf("recover error=%v", err)
+	}
+	svc.states["sandbox-1"].tap.File = nil
+	file, ifindex, err := svc.GetTapFile("sandbox-1", "z192.168.0.3")
+	if err != nil {
+		t.Fatalf("GetTapFile error=%v", err)
+	}
+	if file == nil {
+		t.Fatal("GetTapFile returned nil file")
+	}
+	if ifindex != 13 {
+		t.Fatalf("ifindex=%d, want 13", ifindex)
+	}
+	if openCalls != 1 {
+		t.Fatalf("openCalls=%d, want 1 (one failed fast-reopen attempt)", openCalls)
+	}
+	// recover() restores once; the failed fast reopen must fall through to a
+	// second restoreTap instead of propagating the error.
+	if restoreCalls != 2 {
+		t.Fatalf("restoreCalls=%d, want 2 (recover + self-heal fallback)", restoreCalls)
 	}
 }
 
