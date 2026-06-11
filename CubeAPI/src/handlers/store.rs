@@ -93,6 +93,23 @@ fn fallback_catalog() -> Vec<StoreCatalogItem> {
             writable_layer_size: "1G".into(),
             official: true,
         },
+        StoreCatalogItem {
+            id: "sandbox-nginx".into(),
+            name_key: "items.sandbox-nginx.name".into(),
+            description_key: "items.sandbox-nginx.description".into(),
+            image_cn: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest".into(),
+            image_intl: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest".into(),
+            image: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest".into(),
+            digest: None,
+            tags: vec!["nginx".into(), "web".into(), "official".into()],
+            category: "web".into(),
+            size_mb: 120,
+            expose_ports: vec![49983, 80],
+            probe_port: 49983,
+            probe_path: "/health".into(),
+            writable_layer_size: "1G".into(),
+            official: true,
+        },
     ]
 }
 
