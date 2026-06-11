@@ -280,7 +280,54 @@ export interface StoreMeta {
   images: ImageMeta[];
 }
 
+export interface StoreCatalogItem {
+  id: string;
+  name_key: string;
+  description_key: string;
+  image_cn: string;
+  image_intl: string;
+  image: string;
+  digest: string | null;
+  tags: string[];
+  category: string;
+  size_mb: number;
+  expose_ports: number[];
+  probe_port: number;
+  probe_path: string;
+  writable_layer_size: string;
+  official: boolean;
+}
+
+export interface StoreCatalogResponse {
+  items: StoreCatalogItem[];
+}
+
+export interface UpsertStoreCatalogRequest {
+  id: string;
+  name_key: string;
+  description_key: string;
+  image_cn: string;
+  image_intl: string;
+  digest?: string | null;
+  tags?: string[];
+  category: string;
+  size_mb?: number;
+  expose_ports?: number[];
+  probe_port?: number;
+  probe_path?: string;
+  writable_layer_size?: string;
+  official?: boolean;
+  sort_order?: number;
+}
+
 export const storeApi = {
+  catalog: () => api<StoreCatalogResponse>('/store/catalog').then((r) => r.items),
+  createCatalogItem: (body: UpsertStoreCatalogRequest) =>
+    api<StoreCatalogItem>('/store/catalog', { method: 'POST', body: JSON.stringify(body) }),
+  updateCatalogItem: (id: string, body: UpsertStoreCatalogRequest) =>
+    api<StoreCatalogItem>(`/store/catalog/${id}`, { method: 'PATCH', body: JSON.stringify({ ...body, id }) }),
+  deleteCatalogItem: (id: string) =>
+    api<void>(`/store/catalog/${id}`, { method: 'DELETE' }),
   meta: () => api<StoreMeta>('/store/meta'),
   refresh: () => api<StoreMeta>('/store/refresh', { method: 'POST' }),
 };

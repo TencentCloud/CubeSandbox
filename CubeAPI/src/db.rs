@@ -84,6 +84,26 @@ pub struct AgentHubOperationRecord {
     pub updated_at: Option<String>,
 }
 
+// ── Store Template records ──────────────────────────────────────────────────
+
+pub struct StoreTemplateRecord {
+    pub item_id: String,
+    pub name_key: String,
+    pub description_key: String,
+    pub image_cn: String,
+    pub image_intl: String,
+    pub digest: Option<String>,
+    pub tags: Vec<String>,
+    pub category: String,
+    pub size_mb: i32,
+    pub expose_ports: Vec<i32>,
+    pub probe_port: i32,
+    pub probe_path: String,
+    pub writable_layer_size: String,
+    pub official: bool,
+    pub sort_order: i32,
+}
+
 impl AgentHubStore {
     pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
         let pool = MySqlPoolOptions::new()
@@ -103,6 +123,7 @@ impl AgentHubStore {
     /// by Rust-side crypto helpers. INSERT IGNORE keeps any password the
     /// operator has already changed it to.
     async fn seed_default_admin(&self) -> anyhow::Result<()> {
+        self.seed_store_templates().await?;
         let admin_hash = crate::crypto::hash_password("admin")?;
         sqlx::query(
             r#"INSERT IGNORE INTO t_agenthub_user (username, password) VALUES ('admin', ?)"#,
@@ -1246,6 +1267,308 @@ LIMIT 1
             .bind(token)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    // ── Store Template CRUD ──────────────────────────────────────────────────
+
+    /// Seed default store templates if the table is empty.
+    async fn seed_store_templates(&self) -> anyhow::Result<()> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM t_store_template WHERE deleted_at IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        if count > 0 {
+            return Ok(());
+        }
+
+        let seeds: Vec<(&str, &str, &str, &str, &str, Option<&str>, &[&str], &str, i32, &[i32], i32, &str, &str, bool, i32)> = vec![
+            (
+                "sandbox-code",
+                "items.sandbox-code.name",
+                "items.sandbox-code.description",
+                "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest",
+                "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest",
+                Some("sha256:a7b8654aac5b90e241b98e195ae1d8c85d59fe1fb8c282bcccf1071f877db20f"),
+                &["python", "jupyter", "official"],
+                "code",
+                207,
+                &[49983, 49999],
+                49999,
+                "/",
+                "1G",
+                true,
+                0,
+            ),
+            (
+                "sandbox-browser",
+                "items.sandbox-browser.name",
+                "items.sandbox-browser.description",
+                "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest",
+                "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest",
+                Some("sha256:1786786af8510c34eda64ebec5b0a61a98583cb311c3045c0222910ec0680d60"),
+                &["browser", "chromium", "official"],
+                "browser",
+                1530,
+                &[49983],
+                49983,
+                "/health",
+                "1G",
+                true,
+                1,
+            ),
+            (
+                "openclaw",
+                "items.openclaw.name",
+                "items.openclaw.description",
+                "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest",
+                "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest",
+                Some("sha256:47680d7bc13ea7c57aeb88dff59ef2c44b0facb508e8c9066d479d7d458e0a66"),
+                &["agent", "openclaw", "browser", "deepseek"],
+                "ai",
+                6350,
+                &[49983, 18789, 8080],
+                49983,
+                "/health",
+                "4G",
+                true,
+                2,
+            ),
+            (
+                "cubesandbox-base",
+                "items.cubesandbox-base.name",
+                "items.cubesandbox-base.description",
+                "ghcr.io/tencentcloud/cubesandbox-base:latest",
+                "ghcr.io/tencentcloud/cubesandbox-base:latest",
+                None,
+                &["base", "envd", "official"],
+                "base",
+                98,
+                &[49983],
+                49983,
+                "/health",
+                "1G",
+                true,
+                3,
+            ),
+        ];
+
+        for s in &seeds {
+            let tags = serde_json::to_value(&s.6)?;
+            let ports = serde_json::to_value(&s.9)?;
+            sqlx::query(
+                r#"
+INSERT INTO t_store_template (
+  item_id, name_key, description_key, image_cn, image_intl, digest,
+  tags, category, size_mb, expose_ports, probe_port, probe_path,
+  writable_layer_size, official, sort_order, deleted_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+"#,
+            )
+            .bind(s.0)
+            .bind(s.1)
+            .bind(s.2)
+            .bind(s.3)
+            .bind(s.4)
+            .bind(s.5)
+            .bind(tags)
+            .bind(s.7)
+            .bind(s.8)
+            .bind(ports)
+            .bind(s.10)
+            .bind(s.11)
+            .bind(s.12)
+            .bind(s.13)
+            .bind(s.14)
+            .execute(&self.pool)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn list_store_templates(&self) -> anyhow::Result<Vec<StoreTemplateRecord>> {
+        let rows = sqlx::query(
+            r#"
+SELECT item_id, name_key, description_key, image_cn, image_intl, digest,
+       tags, category, size_mb, expose_ports, probe_port, probe_path,
+       writable_layer_size, official, sort_order
+FROM t_store_template
+WHERE deleted_at IS NULL
+ORDER BY sort_order, id
+"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let tags_value: Option<Value> = row.try_get("tags")?;
+                let ports_value: Option<Value> = row.try_get("expose_ports")?;
+                Ok::<StoreTemplateRecord, sqlx::Error>(StoreTemplateRecord {
+                    item_id: row.try_get("item_id")?,
+                    name_key: row.try_get("name_key")?,
+                    description_key: row.try_get("description_key")?,
+                    image_cn: row.try_get("image_cn")?,
+                    image_intl: row.try_get("image_intl")?,
+                    digest: row.try_get("digest")?,
+                    tags: tags_value
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default(),
+                    category: row.try_get("category")?,
+                    size_mb: row.try_get("size_mb")?,
+                    expose_ports: ports_value
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default(),
+                    probe_port: row.try_get("probe_port")?,
+                    probe_path: row.try_get("probe_path")?,
+                    writable_layer_size: row.try_get("writable_layer_size")?,
+                    official: row.try_get::<i8, _>("official")? != 0,
+                    sort_order: row.try_get("sort_order")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(anyhow::Error::from)
+    }
+
+    pub async fn get_store_template(&self, item_id: &str) -> anyhow::Result<Option<StoreTemplateRecord>> {
+        let row = sqlx::query(
+            r#"
+SELECT item_id, name_key, description_key, image_cn, image_intl, digest,
+       tags, category, size_mb, expose_ports, probe_port, probe_path,
+       writable_layer_size, official, sort_order
+FROM t_store_template
+WHERE item_id = ? AND deleted_at IS NULL
+LIMIT 1
+"#,
+        )
+        .bind(item_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            let tags_value: Option<Value> = row.try_get("tags")?;
+            let ports_value: Option<Value> = row.try_get("expose_ports")?;
+            Ok::<StoreTemplateRecord, sqlx::Error>(StoreTemplateRecord {
+                item_id: row.try_get("item_id")?,
+                name_key: row.try_get("name_key")?,
+                description_key: row.try_get("description_key")?,
+                image_cn: row.try_get("image_cn")?,
+                image_intl: row.try_get("image_intl")?,
+                digest: row.try_get("digest")?,
+                tags: tags_value
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default(),
+                category: row.try_get("category")?,
+                size_mb: row.try_get("size_mb")?,
+                expose_ports: ports_value
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default(),
+                probe_port: row.try_get("probe_port")?,
+                probe_path: row.try_get("probe_path")?,
+                writable_layer_size: row.try_get("writable_layer_size")?,
+                official: row.try_get::<i8, _>("official")? != 0,
+                sort_order: row.try_get("sort_order")?,
+            })
+        })
+        .transpose()
+        .map_err(anyhow::Error::from)
+    }
+
+    pub async fn create_store_template(&self, record: &StoreTemplateRecord) -> anyhow::Result<()> {
+        let tags = serde_json::to_value(&record.tags)?;
+        let ports = serde_json::to_value(&record.expose_ports)?;
+        sqlx::query(
+            r#"
+INSERT INTO t_store_template (
+  item_id, name_key, description_key, image_cn, image_intl, digest,
+  tags, category, size_mb, expose_ports, probe_port, probe_path,
+  writable_layer_size, official, sort_order, deleted_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+ON DUPLICATE KEY UPDATE
+  name_key = VALUES(name_key),
+  description_key = VALUES(description_key),
+  image_cn = VALUES(image_cn),
+  image_intl = VALUES(image_intl),
+  digest = VALUES(digest),
+  tags = VALUES(tags),
+  category = VALUES(category),
+  size_mb = VALUES(size_mb),
+  expose_ports = VALUES(expose_ports),
+  probe_port = VALUES(probe_port),
+  probe_path = VALUES(probe_path),
+  writable_layer_size = VALUES(writable_layer_size),
+  official = VALUES(official),
+  sort_order = VALUES(sort_order),
+  deleted_at = NULL
+"#,
+        )
+        .bind(&record.item_id)
+        .bind(&record.name_key)
+        .bind(&record.description_key)
+        .bind(&record.image_cn)
+        .bind(&record.image_intl)
+        .bind(&record.digest)
+        .bind(tags)
+        .bind(&record.category)
+        .bind(record.size_mb)
+        .bind(ports)
+        .bind(record.probe_port)
+        .bind(&record.probe_path)
+        .bind(&record.writable_layer_size)
+        .bind(record.official)
+        .bind(record.sort_order)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_store_template(&self, record: &StoreTemplateRecord) -> anyhow::Result<()> {
+        let tags = serde_json::to_value(&record.tags)?;
+        let ports = serde_json::to_value(&record.expose_ports)?;
+        sqlx::query(
+            r#"
+UPDATE t_store_template SET
+  name_key = ?, description_key = ?, image_cn = ?, image_intl = ?,
+  digest = ?, tags = ?, category = ?, size_mb = ?, expose_ports = ?,
+  probe_port = ?, probe_path = ?, writable_layer_size = ?,
+  official = ?, sort_order = ?
+WHERE item_id = ? AND deleted_at IS NULL
+"#,
+        )
+        .bind(&record.name_key)
+        .bind(&record.description_key)
+        .bind(&record.image_cn)
+        .bind(&record.image_intl)
+        .bind(&record.digest)
+        .bind(tags)
+        .bind(&record.category)
+        .bind(record.size_mb)
+        .bind(ports)
+        .bind(record.probe_port)
+        .bind(&record.probe_path)
+        .bind(&record.writable_layer_size)
+        .bind(record.official)
+        .bind(record.sort_order)
+        .bind(&record.item_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn soft_delete_store_template(&self, item_id: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+UPDATE t_store_template
+SET deleted_at = CURRENT_TIMESTAMP
+WHERE item_id = ? AND deleted_at IS NULL
+"#,
+        )
+        .bind(item_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
