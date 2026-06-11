@@ -11,6 +11,7 @@ export const CATEGORIES = [
   { id: 'code', label: '代码执行' },
   { id: 'browser', label: '浏览器' },
   { id: 'ai', label: 'AI · LLM' },
+  { id: 'web', label: 'Web 服务' },
   { id: 'base', label: '基础镜像' },
 ] as const;
 
