@@ -14,7 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Code2, Globe, Bot, Box, Search, X, ChevronDown, Package, Loader2, Plus, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Code2, Globe, Bot, Box, Server, Search, X, ChevronDown, Package, Loader2, Plus, AlertTriangle, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -24,6 +24,7 @@ function categoryIcon(category: StoreCatalogItem['category']) {
     case 'code':    return Code2;
     case 'browser': return Globe;
     case 'ai':      return Bot;
+    case 'web':     return Server;
     case 'base':    return Box;
   }
 }
