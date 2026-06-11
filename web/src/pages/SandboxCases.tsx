@@ -60,7 +60,6 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { CodeEditor, type EditorLanguage } from '@/components/CodeEditor';
 import { TopologyGraph } from '@/components/TopologyGraph';
-import { StepTimeline } from '@/components/StepTimeline';
 import {
   EXAMPLE_CATEGORIES,
   EXAMPLE_SCENARIOS,
@@ -499,10 +498,6 @@ function RunOutput({ stdout, stderr, exitCode, success, elapsedMs, ranEdited }: 
             {t('output.failed')} · exit {exitCode}
           </span>
         )}
-        <span className="inline-flex items-center gap-1 rounded-full bg-muted/60 px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground ring-1 ring-border/60">
-          <Timer size={10} />
-          {t('output.elapsed', { ms: elapsedMs } as unknown as Record<string, unknown>)}
-        </span>
         {ranEdited && (
           <span className="inline-flex items-center gap-1 rounded-full bg-cube-amber/10 px-2.5 py-1 text-[10.5px] font-medium text-cube-amber ring-1 ring-cube-amber/30">
             {t('output.runEdited')}
@@ -931,9 +926,15 @@ export default function SandboxCasesPage() {
                     )}
                   </div>
                   {runMutation.data && (
-                    <span className="text-[10px] text-muted-foreground/70">
-                      {runMutation.data.success ? t('output.completed') : t('output.failed')}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-muted-foreground/70">
+                        {runMutation.data.success ? t('output.completed') : t('output.failed')}
+                      </span>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-muted/60 px-2.5 py-1 font-mono text-[10.5px] font-medium tabular-nums text-muted-foreground ring-1 ring-border/60">
+                        <Timer size={10} />
+                        {t('output.elapsed', { ms: runMutation.data.elapsed_ms } as unknown as Record<string, unknown>)}
+                      </span>
+                    </div>
                   )}
                 </div>
                 <div className="p-4">
@@ -973,54 +974,30 @@ export default function SandboxCasesPage() {
                 </div>
               </Card>
 
-              {/* Topology + Step timeline */}
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
-                <Card className="overflow-hidden p-0 lg:col-span-3">
-                  <div className="flex items-center justify-between border-b border-border/60 bg-muted/20 px-4 py-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-cube-cyan/10 text-cube-cyan">
-                        <Network size={13} />
-                      </span>
-                      <span className="text-sm font-medium text-foreground">{t('topology.title')}</span>
-                      <Badge tone="info" className="text-[9px]">
-                        {isZh ? selectedScenario.titleZh : selectedScenario.titleEn}
-                      </Badge>
-                    </div>
-                    <span className="text-[10px] text-muted-foreground/60">
-                      {t('topology.hint')}
+              {/* Topology */}
+              <Card className="overflow-hidden p-0">
+                <div className="flex items-center justify-between border-b border-border/60 bg-muted/20 px-4 py-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-6 w-6 items-center justify-center rounded-md bg-cube-cyan/10 text-cube-cyan">
+                      <Network size={13} />
                     </span>
+                    <span className="text-sm font-medium text-foreground">{t('topology.title')}</span>
+                    <Badge tone="info" className="text-[9px]">
+                      {isZh ? selectedScenario.titleZh : selectedScenario.titleEn}
+                    </Badge>
                   </div>
-                  <div className="p-3">
-                    <TopologyGraph
-                      nodes={selectedScenario.topology.nodes}
-                      edges={selectedScenario.topology.edges}
-                      height={360}
-                    />
-                  </div>
-                </Card>
-
-                <Card className="overflow-hidden p-0 lg:col-span-2">
-                  <div className="flex items-center justify-between border-b border-border/60 bg-muted/20 px-4 py-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-cube-violet/10 text-cube-violet">
-                        <Timer size={13} />
-                      </span>
-                      <span className="text-sm font-medium text-foreground">{t('timeline.title')}</span>
-                    </div>
-                    {runMutation.data && (
-                      <span className="font-mono text-[10px] text-muted-foreground/70">
-                        {runMutation.data.elapsed_ms}ms
-                      </span>
-                    )}
-                  </div>
-                  <div className="p-4">
-                    <StepTimeline
-                      steps={runMutation.data?.steps ?? []}
-                      totalMs={runMutation.data?.elapsed_ms}
-                    />
-                  </div>
-                </Card>
-              </div>
+                  <span className="text-[10px] text-muted-foreground/60">
+                    {t('topology.hint')}
+                  </span>
+                </div>
+                <div className="p-3">
+                  <TopologyGraph
+                    nodes={selectedScenario.topology.nodes}
+                    edges={selectedScenario.topology.edges}
+                    height={420}
+                  />
+                </div>
+              </Card>
             </>
           )}
         </div>
