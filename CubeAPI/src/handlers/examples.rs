@@ -746,82 +746,6 @@ fn resolve_visible(id: &str) -> Option<(ExampleMeta, &'static ScenarioSpec, &'st
 // is baked into `ScenarioSpec::topology` and resolved directly in the
 // request handlers via `sc.topology.clone()`.
 
-// ─── Step log synthesis ───────────────────────────────────────────────────────
-
-fn synthetic_steps(
-    elapsed_ms: u64,
-    success: bool,
-    stdout: &str,
-) -> Vec<StepLog> {
-    // Without per-RPC tracing we approximate four coarse phases:
-    //   1. control plane routing (CubeAPI validation + CubeMaster schedule)
-    //   2. data plane bring-up (envd handshake + runner fork)
-    //   3. workload execution (proportional to elapsed time)
-    //   4. cleanup
-    // These four buckets are stable across scenarios; the per-run output
-    // panel renders them in order, so the user always sees something
-    // meaningful even when we cannot trace individual RPCs.
-    let phase_total = elapsed_ms.max(1);
-    let p1 = (phase_total / 6).max(20);
-    let p2 = (phase_total / 5).max(30);
-    let p4 = (phase_total / 8).max(15);
-    let p3 = phase_total.saturating_sub(p1 + p2 + p4).max(1);
-
-    let workload_msg = if stdout.is_empty() {
-        "(no stdout)".to_string()
-    } else {
-        let first_line = stdout.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-        // Use char-based truncation to avoid slicing inside a multi-byte
-        // Unicode character (e.g. box-drawing chars from `rich` output).
-        if first_line.chars().count() > 80 {
-            format!("{}…", first_line.chars().take(80).collect::<String>())
-        } else {
-            first_line.to_string()
-        }
-    };
-
-    let exec_status = if success { "ok" } else { "err" };
-    let cleanup_status = if success { "ok" } else { "warn" };
-
-    vec![
-        StepLog {
-            name: "Validate request".to_string(),
-            plane: "control".into(),
-            status: "ok".into(),
-            duration_ms: p1 / 4,
-            message: "CubeAPI parsed the example id and resolved the template.".into(),
-        },
-        StepLog {
-            name: "Schedule & boot VM".to_string(),
-            plane: "control".into(),
-            duration_ms: p1 * 3 / 4,
-            status: if success { "ok".into() } else { "warn".into() },
-            message: "CubeMaster picked a Cubelet; KVM MicroVM booted from the template.".into(),
-        },
-        StepLog {
-            name: "Handshake envd".to_string(),
-            plane: "data".into(),
-            status: "ok".into(),
-            duration_ms: p2,
-            message: "WSS tunnel established between CubeProxy and envd :49983.".into(),
-        },
-        StepLog {
-            name: "Execute workload".to_string(),
-            plane: "data".into(),
-            status: exec_status.into(),
-            duration_ms: p3,
-            message: workload_msg,
-        },
-        StepLog {
-            name: "Cleanup & return".to_string(),
-            plane: "control".into(),
-            status: cleanup_status.into(),
-            duration_ms: p4,
-            message: "Captured stdout/stderr; sandbox returned to idle.".into(),
-        },
-    ]
-}
-
 fn topology_with_status(t: TopologyTemplate, success: bool) -> TopologyGraph {
     let mut t = t;
     // Mark the user / runner nodes with the run status so the UI can color
@@ -1330,7 +1254,7 @@ pub async fn run_example(
                 "example run complete"
             );
 
-            let steps = synthetic_steps(elapsed_ms, success, &stdout);
+            let steps: Vec<StepLog> = Vec::new();
             let topology = topology_with_status(sc.topology.clone(), success);
 
             Ok(Json(RunExampleResponse {
@@ -1353,7 +1277,7 @@ pub async fn run_example(
                 exit_code: -1,
                 success: false,
                 elapsed_ms,
-                steps: synthetic_steps(elapsed_ms, false, ""),
+                steps: Vec::new(),
                 topology,
                 ran_edited: req.code.is_some(),
             }),
@@ -1367,7 +1291,7 @@ pub async fn run_example(
                 exit_code: -1,
                 success: false,
                 elapsed_ms,
-                steps: synthetic_steps(elapsed_ms, false, ""),
+                steps: Vec::new(),
                 topology,
                 ran_edited: req.code.is_some(),
             }),
