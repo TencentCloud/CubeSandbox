@@ -677,9 +677,7 @@ func shouldAppendDNSAllowOut(cfg *networkagentclient.CubeNetworkConfig) bool {
 	if cfg == nil {
 		return false
 	}
-	if cfg.AllowInternetAccess != nil && !*cfg.AllowInternetAccess {
-		return false
-	}
+
 	for _, target := range cfg.AllowOut {
 		if isAllowOutDomainTarget(target) {
 			return true
