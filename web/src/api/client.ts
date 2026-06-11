@@ -340,6 +340,7 @@ export interface ExampleMeta {
   description: string;
   category: string;
   language: string;
+  store_item_id: string | null;
 }
 
 export interface ExampleSource {

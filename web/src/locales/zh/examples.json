@@ -39,6 +39,10 @@
     "searchPlaceholder": "按 ID / 类型搜索…",
     "empty": "没有匹配的模板",
     "hint": "点击外部区域关闭",
+    "needsInstall": "需先安装推荐镜像",
+    "needsInstallWithName": "需先安装 {{name}}",
+    "templateReady": "推荐模板已就绪",
+    "templateBuilding": "推荐模板构建中…",
     "group": {
       "ready": "可用",
       "building": "构建中",
