@@ -868,6 +868,9 @@ int from_cube(struct __sk_buff *skb)
 		mvm_port.listen_port = l4->source;
 		host_port = bpf_map_lookup_elem(&local_port_mapping, &mvm_port);
 		if (host_port) {
+			if (l4->syn && !l4->ack)
+				return TC_ACT_SHOT;
+
 			err = snat_tcp(skb, ifindex, l2, l3, l4, l4->source, *host_port);
 			if (err)
 				return TC_ACT_SHOT;
