@@ -13,6 +13,8 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
+import { formatSandboxActionError } from '@/lib/sandboxActionError';
+import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -58,11 +60,16 @@ export default function SandboxDetailPage() {
     }
   }, [logs.data]);
 
-
+  const [actionError, setActionError] = useState<string | null>(null);
+  const onLifecycleError = (err: unknown) => {
+    setActionError(formatSandboxActionError(err, t));
+  };
 
   // ── Lifecycle mutations ─────────────────────────────────────────────────
   const kill = useMutation({
     mutationFn: () => sandboxApi.kill(sandboxID),
+    onMutate: () => setActionError(null),
+    onError: onLifecycleError,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandboxes'] });
       nav('/sandboxes');
@@ -70,6 +77,8 @@ export default function SandboxDetailPage() {
   });
   const pause = useMutation({
     mutationFn: () => sandboxApi.pause(sandboxID),
+    onMutate: () => setActionError(null),
+    onError: onLifecycleError,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandboxes'] });
       qc.invalidateQueries({ queryKey: ['sandbox', sandboxID] });
@@ -77,6 +86,8 @@ export default function SandboxDetailPage() {
   });
   const resume = useMutation({
     mutationFn: () => sandboxApi.resume(sandboxID),
+    onMutate: () => setActionError(null),
+    onError: onLifecycleError,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandboxes'] });
       qc.invalidateQueries({ queryKey: ['sandbox', sandboxID] });
@@ -120,6 +131,8 @@ export default function SandboxDetailPage() {
           </Button>
         </div>
       </div>
+
+      <SandboxActionErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
 
       {/* ── Info cards ── */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">

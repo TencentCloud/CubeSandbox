@@ -26,5 +26,13 @@
     "resume": "恢复",
     "pause": "暂停",
     "kill": "终止"
+  },
+  "errors": {
+    "unknown": "未知错误",
+    "actionFailed": "操作失败: {{message}}",
+    "conflict": "{{message}}",
+    "resumeCapacity": "节点资源不足, 无法恢复该沙箱, 请先释放其他实例容量",
+    "resumeCapacityDetail": "节点内存不足, 无法恢复 (还需 {{need}}, 已用 {{used}}, 配额 {{quota}})",
+    "resumeCapacityDetailCpu": "节点 CPU 不足, 无法恢复 (还需 {{need}}, 已用 {{used}}, 配额 {{quota}})"
   }
 }

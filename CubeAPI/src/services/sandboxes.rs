@@ -191,7 +191,7 @@ impl SandboxService {
             .cubemaster
             .update_sandbox(&self.build_update_request(sandbox_id, "pause", None))
             .await
-            .map_err(internal_error)?;
+            .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
 
         ensure_update_result(
             resp.ret.ret_code,
@@ -206,7 +206,7 @@ impl SandboxService {
             .cubemaster
             .update_sandbox(&self.build_update_request(sandbox_id, "resume", Some(timeout)))
             .await
-            .map_err(internal_error)?;
+            .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
 
         ensure_update_result(
             resp.ret.ret_code,
@@ -227,7 +227,7 @@ impl SandboxService {
                 .cubemaster
                 .update_sandbox(&self.build_update_request(sandbox_id, "resume", Some(timeout)))
                 .await
-                .map_err(internal_error)?;
+                .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
 
             ensure_update_result(
                 resp.ret.ret_code,
@@ -497,6 +497,26 @@ fn sandbox_not_found_or_internal(e: CubeMasterError, sandbox_id: &str) -> AppErr
     }
 }
 
+// parse_response treats any non-success ret_code as CubeMasterError::Api before the
+// caller sees the envelope, so pause/resume/connect must remap business codes here
+// (ensure_update_result alone never runs on that path).
+fn map_update_cubemaster_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
+    match e {
+        CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_NOT_FOUND => {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        CubeMasterError::Api { ret_code, ret_msg } if ret_code == RET_CODE_CONFLICT => {
+            let detail = if ret_msg.trim().is_empty() {
+                format!("sandbox {} conflict", sandbox_id)
+            } else {
+                ret_msg // owned, moved out of e -- no clone
+            };
+            AppError::Conflict(detail)
+        }
+        other => sandbox_not_found_or_internal(other, sandbox_id),
+    }
+}
+
 fn ensure_update_result(
     ret_code: i32,
     ret_msg: String,
@@ -513,10 +533,15 @@ fn ensure_update_result(
         )));
     }
     if ret_code == RET_CODE_CONFLICT {
-        return Err(AppError::Conflict(format!(
-            "sandbox {} {}",
-            sandbox_id, conflict_message
-        )));
+        // Prefer the backend's own reason (e.g. the paused_resource_release_ratio
+        // capacity rejection on resume) so the client sees why it conflicted;
+        // fall back to the generic templated message when none was provided.
+        let detail = if ret_msg.trim().is_empty() {
+            format!("sandbox {} {}", sandbox_id, conflict_message)
+        } else {
+            ret_msg
+        };
+        return Err(AppError::Conflict(detail));
     }
     Err(AppError::Internal(anyhow::anyhow!(ret_msg)))
 }
