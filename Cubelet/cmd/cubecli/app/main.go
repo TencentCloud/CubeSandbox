@@ -92,6 +92,7 @@ func New() *cli.App {
 		cubebox.MultiRun,
 		unsafe.Command,
 		cubebox.ListCommand,
+		cubebox.LogsCommand,
 		image.ImageCommand(),
 		image.GlobalListImageCommand,
 		image.Load,
