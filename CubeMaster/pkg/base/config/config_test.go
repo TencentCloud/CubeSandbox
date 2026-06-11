@@ -217,3 +217,24 @@ func TestNodeAffinitySelectorAllowedKeySet(t *testing.T) {
 	assert.Contains(t, allowed, "gpu")
 	assert.NotContains(t, allowed, constants.AffinityKeyDisaterRecoverGroup)
 }
+
+func TestNodeAffinitySelectorAllowedKeySet_NilReceiver(t *testing.T) {
+	var sconf *SchedulerConf
+	allowed := sconf.NodeAffinitySelectorAllowedKeySet()
+	assert.Contains(t, allowed, constants.AffinityKeyZone)
+	assert.Contains(t, allowed, constants.AffinityKeyClusterID)
+	assert.Contains(t, allowed, constants.AffinityKeyInstanceType)
+	assert.NotContains(t, allowed, "gpu")
+}
+
+func TestDefaultNodeAffinitySelectorAllowedKeySet(t *testing.T) {
+	allowed := DefaultNodeAffinitySelectorAllowedKeySet()
+	assert.Contains(t, allowed, constants.AffinityKeyZone)
+	assert.Contains(t, allowed, constants.AffinityKeyClusterID)
+	assert.Contains(t, allowed, constants.AffinityKeyCPUType)
+	assert.Contains(t, allowed, constants.AffinityKeyMemorySize)
+	assert.Contains(t, allowed, constants.AffinityKeyCPUCores)
+	assert.Contains(t, allowed, constants.AffinityKeyInstanceType)
+	assert.NotContains(t, allowed, "gpu")
+	assert.NotContains(t, allowed, constants.AffinityKeyDisaterRecoverGroup)
+}

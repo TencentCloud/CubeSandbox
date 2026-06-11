@@ -355,20 +355,20 @@ func (s *SchedulerConf) GetLargeSizeAffinityConf(serviceName string) LargeSizeAf
 	return s.LargeSizeAffinityConf[serviceName]
 }
 
-func (s *SchedulerConf) NodeAffinitySelectorAllowedKeySet() map[string]struct{} {
-	extraKeyCount := 0
-	if s != nil {
-		extraKeyCount = len(s.NodeAffinitySelectorAllowedKeys)
-	}
-	allowed := make(map[string]struct{}, len(defaultNodeAffinitySelectorAllowedKeys)+extraKeyCount)
+func DefaultNodeAffinitySelectorAllowedKeySet() map[string]struct{} {
+	allowed := make(map[string]struct{}, len(defaultNodeAffinitySelectorAllowedKeys))
 	for _, key := range defaultNodeAffinitySelectorAllowedKeys {
 		allowed[key] = struct{}{}
 	}
-	if s == nil {
-		return allowed
-	}
-	for _, key := range s.NodeAffinitySelectorAllowedKeys {
-		allowed[key] = struct{}{}
+	return allowed
+}
+
+func (s *SchedulerConf) NodeAffinitySelectorAllowedKeySet() map[string]struct{} {
+	allowed := DefaultNodeAffinitySelectorAllowedKeySet()
+	if s != nil {
+		for _, key := range s.NodeAffinitySelectorAllowedKeys {
+			allowed[key] = struct{}{}
+		}
 	}
 	return allowed
 }

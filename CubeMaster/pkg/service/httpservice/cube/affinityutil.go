@@ -236,8 +236,7 @@ func parseNodeAffinitySelector(selectorJSON string) ([]affinity.NodeSelectorRequ
 func nodeAffinitySelectorAllowedKeys() map[string]struct{} {
 	cfg := config.GetConfig()
 	if cfg == nil || cfg.Scheduler == nil {
-		var schedulerConf *config.SchedulerConf
-		return schedulerConf.NodeAffinitySelectorAllowedKeySet()
+		return config.DefaultNodeAffinitySelectorAllowedKeySet()
 	}
 	return cfg.Scheduler.NodeAffinitySelectorAllowedKeySet()
 }
