@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"math"
 	"syscall"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -15,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	metrictype "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/metric/types"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
@@ -122,9 +124,58 @@ type aggregatedSandboxView struct {
 }
 
 func (l *local) aggregateAllocated() aggregatedSandboxView {
-	cpuUsage := resource.MustParse("0")
-	memUsage := resource.MustParse("0")
-	sbs := l.cubeboxManger.List()
+	return aggregateSandboxResources(
+		l.cubeboxManger.List(),
+		config.GetHostConf().Quota.PausedResourceReleaseRatio,
+	)
+}
+
+// clampRatio bounds the release ratio to [0,1], the operator's
+// density<->resume-headroom dial: 0 reserves everything (legacy, resume
+// guaranteed), 1 releases everything (max density, resume best-effort), and a
+// value in (0,1) releases that fraction while reserving the rest as headroom.
+// Out-of-range and non-finite inputs are clamped to the safe extremes
+// (NaN/-Inf -> 0, +Inf -> 1). The NaN guard is load-bearing: a malformed config
+// value (e.g. ".nan" from a templating error) would otherwise flow into
+// scaleInt64, where int64(v*NaN) collapses to math.MinInt64 and corrupts both
+// the reported quota and the resume admission decision.
+func clampRatio(r float64) float64 {
+	if math.IsNaN(r) || r < 0 {
+		return 0
+	}
+	if r > 1 {
+		return 1
+	}
+	return r
+}
+
+func scaleInt64(v int64, factor float64) int64 {
+	return int64(float64(v) * factor)
+}
+
+// aggregateSandboxResources is the pure accounting kernel behind
+// aggregateAllocated, split out so the release-ratio policy can be exercised
+// directly in tests without standing up the full config/store stack.
+//
+// releaseRatio drives how paused/pausing sandboxes are accounted. When it is >0
+// the policy is active: a paused sandbox counts only (1-releaseRatio) of its
+// CPU/memory quota and never as running / NIC queues, because it has been
+// snapshotted to disk and its MicroVM shut down, so it holds no live host
+// CPU/RAM. Lowering its reported quota lets cubemaster's scheduler reuse the
+// freed capacity, while a ratio in (0,1) keeps partial headroom so resume can
+// still land and pause-heavy nodes stay visible to the quota scoring factors.
+// Disk always counts (the pause snapshot occupies storage) and MvmNum always
+// counts them (the sandbox object lives on). When releaseRatio is 0 the result
+// is identical to the legacy behaviour: paused sandboxes keep their full quota
+// and count as running, so resume is guaranteed.
+func aggregateSandboxResources(sbs []*cubeboxstore.CubeBox, releaseRatio float64) aggregatedSandboxView {
+	// Resolve the ratio once: factor is the paused-quota fraction still counted
+	// (1-ratio), and the policy is active only for a strictly positive ratio.
+	ratio := clampRatio(releaseRatio)
+	factor := 1 - ratio
+	policyActive := ratio > 0
+	cpuMilli := int64(0)
+	memBytes := int64(0)
 	runningBox := int64(0)
 	nicQueues := int64(0)
 	dataDiskMB := int64(0)
@@ -133,19 +184,32 @@ func (l *local) aggregateAllocated() aggregatedSandboxView {
 		if sb.GetStatus() == nil || !isContainerInGoodState(sb.GetStatus().Get().State()) {
 			continue
 		}
-		runningBox++
+		// A paused sandbox under the policy keeps only `factor` of its quota.
+		paused := policyActive && sb.GetStatus().IsPaused()
 
 		if sb.ResourceWithOverHead != nil {
-			cpuUsage.Add(sb.ResourceWithOverHead.HostCpuQ)
-			memUsage.Add(sb.ResourceWithOverHead.HostMemQ)
+			if paused {
+				cpuMilli += scaleInt64(sb.ResourceWithOverHead.HostCpuQ.MilliValue(), factor)
+				memBytes += scaleInt64(sb.ResourceWithOverHead.HostMemQ.Value(), factor)
+			} else {
+				cpuMilli += sb.ResourceWithOverHead.HostCpuQ.MilliValue()
+				memBytes += sb.ResourceWithOverHead.HostMemQ.Value()
+			}
 			dataDiskMB += sb.ResourceWithOverHead.HostDataDiskMB
 			storageDiskMB += sb.ResourceWithOverHead.HostStorageDiskMB
 		}
+		if paused {
+			// Not running: a paused VM holds no live vCPU / NIC queues
+			// regardless of reserveRatio (the ratio only governs quota
+			// headroom, not liveness).
+			continue
+		}
+		runningBox++
 		nicQueues += sb.Queues
 	}
 	return aggregatedSandboxView{
-		MilliCPU:      cpuUsage.MilliValue(),
-		MemoryMB:      memUsage.Value() / 1024 / 1024,
+		MilliCPU:      cpuMilli,
+		MemoryMB:      memBytes / 1024 / 1024,
 		MvmNum:        int64(len(sbs)),
 		MvmRunningNum: runningBox,
 		NicQueues:     nicQueues,
