@@ -39,6 +39,10 @@
     "searchPlaceholder": "Search by ID / type…",
     "empty": "No matching templates",
     "hint": "Click outside to close",
+    "needsInstall": "Install recommended image first",
+    "needsInstallWithName": "Install {{name}} first",
+    "templateReady": "Recommended template ready",
+    "templateBuilding": "Recommended template building…",
     "group": {
       "ready": "Available",
       "building": "Building",

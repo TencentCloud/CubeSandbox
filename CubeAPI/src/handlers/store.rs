@@ -23,7 +23,7 @@ use crate::state::AppState;
 
 /// Fallback catalog when no database is available.  Kept in sync with the
 /// seed data in `db.rs`.
-fn fallback_catalog() -> Vec<StoreCatalogItem> {
+pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
     vec![
         StoreCatalogItem {
             id: "sandbox-code".into(),
