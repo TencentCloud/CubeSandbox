@@ -40,7 +40,8 @@
     "code": "代码执行",
     "browser": "浏览器",
     "ai": "AI · LLM",
-    "base": "基础镜像"
+    "base": "基础镜像",
+    "web": "Web 服务"
   },
   "items": {
     "sandbox-code": {
@@ -76,6 +77,8 @@
     "aio": "All-in-One",
     "deepseek": "DeepSeek",
     "base": "基础",
-    "envd": "envd"
+    "envd": "envd",
+    "nginx": "Nginx",
+    "web": "Web"
   }
 }
