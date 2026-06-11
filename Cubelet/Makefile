@@ -63,7 +63,7 @@ DYNAMIC_CONF_DIR=$(BUILD_DIR)/cube-cubelet-conf
 DYNAMIC_PUBLISH_NAME=cube-cubelet-conf-$(CONF_VERSION).zip
 
 
-.PHONY: build deps check-proto-tools
+.PHONY: build deps check-proto-tools fmt lint dep clean
 build: $(APPS)
 deps:
 	$(call msg,Download modules)

@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  BUILDER_IMAGE_REMOTE: ghcr.io/tencentcloud/cubesandbox-builder:latest
+  BUILDER_IMAGE_REMOTE: ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
   BUILDER_IMAGE_LOCAL: cube-sandbox-builder:ci
 
 jobs:
