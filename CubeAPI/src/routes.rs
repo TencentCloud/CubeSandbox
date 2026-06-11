@@ -274,6 +274,12 @@ fn build_cluster_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/nodes", get(cluster::list_nodes))
         .route("/nodes/:nodeID", get(cluster::get_node))
         .route("/config", get(config::get_config))
+        .route("/store/catalog", get(store::list_store_catalog))
+        .route("/store/catalog", post(store::create_store_catalog_item))
+        .route(
+            "/store/catalog/:itemID",
+            patch(store::update_store_catalog_item).delete(store::delete_store_catalog_item),
+        )
         .route("/store/meta", get(store::get_store_meta))
         .route(
             "/store/refresh",
