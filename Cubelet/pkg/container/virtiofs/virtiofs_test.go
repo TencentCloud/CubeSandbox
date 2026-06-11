@@ -5,6 +5,7 @@
 package virtiofs
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -59,6 +60,25 @@ func TestGenVirtiofsConfig(t *testing.T) {
 		"/data/cubelet/a/overlay1",
 		"/data/cubelet/b/overlay2",
 	}, virtiofsConfig.VirtioBackendFsConfig.AllowedDirs)
+}
+
+func TestGenVirtiofsConfig_EmptyAllowedDirs(t *testing.T) {
+	virtiofsConfig, err := GenVirtiofsConfig([]string{})
+	require.NoError(t, err)
+	require.NotNil(t, virtiofsConfig)
+	require.NotNil(t, virtiofsConfig.VirtioBackendFsConfig.AllowedDirs)
+	assert.Empty(t, virtiofsConfig.VirtioBackendFsConfig.AllowedDirs)
+
+	data, err := json.Marshal(virtiofsConfig)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"allowed_dirs":[]`)
+}
+
+func TestGenEmptyVirtiofsConfig_AllowsNilAllowedDirs(t *testing.T) {
+	virtiofsConfig, err := GenEmptyVirtiofsConfig(true, 0)
+	require.NoError(t, err)
+	require.NotNil(t, virtiofsConfig)
+	assert.Nil(t, virtiofsConfig.VirtioBackendFsConfig.AllowedDirs)
 }
 
 func TestGenVirtiofsConfig_Error(t *testing.T) {

@@ -109,7 +109,7 @@ func GenVirtiofsConfig(shared []string) (*VirtiofsConfig, error) {
 	sharedNames := sets.NewString()
 	sharedDirSet := sets.NewString()
 
-	var shareDirs []string
+	shareDirs := make([]string, 0, len(shared))
 	for _, dir := range shared {
 		if sharedDirSet.Has(dir) {
 			continue

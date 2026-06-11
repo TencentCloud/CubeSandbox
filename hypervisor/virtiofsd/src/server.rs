@@ -67,9 +67,12 @@ pub fn get_basename_from_path(path: &str) -> Option<&str> {
 
 pub struct FilterList {
     root_ino: u64,
+    enabled: bool,
     allowed_dirs: HashMap<String, (String, stat::StatExt)>,
     root_dirents: Vec<DirEntry2>,
 }
+
+type RootDirentSnapshot = (libc::ino64_t, u64, u32, String);
 
 impl FilterList {
     // Init filter base whitelist.
@@ -91,6 +94,7 @@ impl FilterList {
             name: "..".to_string(),
         });
         // dir should be absolute path
+        self.enabled = whitelist.is_some();
         match whitelist {
             Some(dirs) => {
                 // Sort and Dedup dirs.
@@ -150,6 +154,7 @@ impl FilterList {
     pub fn new(root_ino: u64, whitelist: &Option<Vec<String>>) -> Result<FilterList> {
         let mut filter = FilterList {
             root_ino,
+            enabled: false,
             allowed_dirs: HashMap::new(),
             root_dirents: Vec::<DirEntry2>::new(),
         };
@@ -171,6 +176,11 @@ impl FilterList {
         self.allowed_dirs.is_empty()
     }
 
+    // whether allowed_dirs filter is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     // return allow dire entry.
     pub fn get_allow_dir(&self, key: String) -> Result<(String, stat::StatExt)> {
         if !self.allowed_dirs.contains_key(&key) {
@@ -183,6 +193,51 @@ impl FilterList {
     // return root dirent.
     pub fn get_root_dirents(&self) -> &Vec<DirEntry2> {
         &self.root_dirents
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn filter_list_distinguishes_none_from_empty_whitelist() {
+        let filter = FilterList::new(ROOT_ID, &None).unwrap();
+        assert!(!filter.is_enabled());
+        assert!(filter.is_empty());
+
+        let filter = FilterList::new(ROOT_ID, &Some(Vec::new())).unwrap();
+        assert!(filter.is_enabled());
+        assert!(filter.is_empty());
+        assert!(filter.get_allow_dir("missing".to_string()).is_err());
+        assert_eq!(filter.get_root_dirents().len(), 2);
+    }
+
+    #[test]
+    fn filter_list_allows_only_configured_basenames() {
+        let test_dir =
+            std::env::temp_dir().join(format!("virtiofsd-filter-{}-allowed", std::process::id()));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let dir = test_dir.to_string_lossy().to_string();
+        let filter = FilterList::new(ROOT_ID, &Some(vec![dir.clone()])).unwrap();
+
+        assert!(filter.is_enabled());
+        assert!(!filter.is_empty());
+        assert!(filter
+            .get_allow_dir("virtiofsd-filter-".to_string())
+            .is_err());
+        assert_eq!(
+            filter
+                .get_allow_dir(test_dir.file_name().unwrap().to_string_lossy().to_string())
+                .unwrap()
+                .0,
+            dir
+        );
+        assert_eq!(filter.get_root_dirents().len(), 3);
+
+        fs::remove_dir_all(test_dir).unwrap();
     }
 }
 
@@ -406,8 +461,14 @@ impl<F: FileSystem + Sync> Server<F> {
         let mut f_info = None;
         if par_id == ROOT_ID {
             let filter = self.root_filter.as_ref().lock().unwrap();
-            if !filter.is_empty() {
-                match filter.get_allow_dir(name.to_str().unwrap().to_string()) {
+            if filter.is_enabled() {
+                let name = match name.to_str() {
+                    Ok(name) => name,
+                    Err(_) => {
+                        return reply_error(ErrorKind::NotFound.into(), in_header.unique, w);
+                    }
+                };
+                match filter.get_allow_dir(name.to_string()) {
                     Ok(entry) => f_info = Some(entry),
                     Err(_) => {
                         return reply_error(ErrorKind::NotFound.into(), in_header.unique, w);
@@ -1226,19 +1287,26 @@ impl<F: FileSystem + Sync> Server<F> {
         }
     }
 
+    fn root_dirents_snapshot(&self) -> Vec<RootDirentSnapshot> {
+        let filter = self.root_filter.as_ref().lock().unwrap();
+        filter
+            .get_root_dirents()
+            .iter()
+            .map(|dirent| (dirent.ino, dirent.offset, dirent.type_, dirent.name.clone()))
+            .collect()
+    }
+
     fn mock_readdir(&self, size: u32, offset: u64, cursor: &mut Writer) -> io::Result<usize> {
         let mut total_written = 0;
         let mut err = None;
-        let filter = self.root_filter.as_ref().lock().unwrap();
-        let root_dirents = filter.get_root_dirents();
+        let root_dirents = self.root_dirents_snapshot();
 
-        for i in (offset as usize)..root_dirents.len() {
-            let dirent2 = &root_dirents[i];
-            let dirent2_name = CString::new(dirent2.name.clone().into_bytes()).unwrap();
+        for (ino, offset, type_, name) in root_dirents.iter().skip(offset as usize) {
+            let dirent2_name = CString::new(name.clone().into_bytes()).unwrap();
             let dirent = DirEntry {
-                ino: dirent2.ino,
-                offset: dirent2.offset,
-                type_: dirent2.type_,
+                ino: *ino,
+                offset: *offset,
+                type_: *type_,
                 name: dirent2_name.as_c_str(),
             };
             //            info!("dirent: {:?}", dirent);
@@ -1251,6 +1319,61 @@ impl<F: FileSystem + Sync> Server<F> {
                 }
                 Err(e) => {
                     err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        if let Some(err) = err {
+            Err(err)
+        } else {
+            Ok(total_written)
+        }
+    }
+
+    fn mock_readdirplus(
+        &self,
+        in_header: &InHeader,
+        size: u32,
+        offset: u64,
+        cursor: &mut Writer,
+    ) -> io::Result<usize> {
+        let mut total_written = 0;
+        let mut err = None;
+        let root_dirents = self.root_dirents_snapshot();
+
+        for (ino, offset, type_, name) in root_dirents.iter().skip(offset as usize) {
+            let dirent2_name = CString::new(name.clone().into_bytes()).unwrap();
+            let dirent = DirEntry {
+                ino: *ino,
+                offset: *offset,
+                type_: *type_,
+                name: dirent2_name.as_c_str(),
+            };
+            let mut entry_inode = None;
+            let bytes_written = self.handle_dirent(in_header, dirent).and_then(|(d, e)| {
+                entry_inode = Some(e.inode);
+                let remaining = (size as usize).saturating_sub(total_written);
+                add_dirent(cursor, remaining, d, Some(e))
+            });
+            match bytes_written {
+                Ok(0) => {
+                    if let Some(inode) = entry_inode {
+                        self.fs.forget(Context::from(*in_header), inode.into(), 1);
+                    }
+                    break;
+                }
+                Ok(bytes_written) => {
+                    total_written += bytes_written;
+                }
+                Err(e) => {
+                    if let Some(inode) = entry_inode {
+                        self.fs.forget(Context::from(*in_header), inode.into(), 1);
+                    }
+
+                    if total_written == 0 {
+                        err = Some(e);
+                    }
                     break;
                 }
             }
@@ -1290,7 +1413,7 @@ impl<F: FileSystem + Sync> Server<F> {
         let mut cursor = w.split_at(size_of::<OutHeader>()).unwrap();
 
         let result = if in_header.nodeid == ROOT_ID
-            && !self.root_filter.as_ref().lock().unwrap().is_empty()
+            && self.root_filter.as_ref().lock().unwrap().is_enabled()
         {
             self.mock_readdir(size, offset, &mut cursor)
         } else {
@@ -1358,8 +1481,22 @@ impl<F: FileSystem + Sync> Server<F> {
                 entry_timeout: Duration::from_secs(0),
             }
         } else {
+            let mut f_info = None;
+            if in_header.nodeid == ROOT_ID {
+                let filter = self.root_filter.as_ref().lock().unwrap();
+                if filter.is_enabled() {
+                    let name = dir_entry.name.to_str().map_err(|_| {
+                        io::Error::new(ErrorKind::InvalidInput, "invalid dir entry name")
+                    })?;
+                    f_info = Some(
+                        filter
+                            .get_allow_dir(name.to_string())
+                            .map_err(|_| ErrorKind::NotFound)?,
+                    );
+                }
+            }
             self.fs
-                .lookup(Context::from(*in_header), parent, dir_entry.name, None)?
+                .lookup(Context::from(*in_header), parent, dir_entry.name, f_info)?
         };
 
         Ok((dir_entry, entry))
@@ -1390,62 +1527,68 @@ impl<F: FileSystem + Sync> Server<F> {
         // Skip over enough bytes for the header.
         let unique = in_header.unique;
         let mut cursor = w.split_at(size_of::<OutHeader>()).unwrap();
-        let result = match self.fs.readdir(
-            Context::from(in_header),
-            in_header.nodeid.into(),
-            fh.into(),
-            size,
-            offset,
-        ) {
-            Ok(mut entries) => {
-                let mut total_written = 0;
-                let mut err = None;
-                while let Some(dirent) = entries.next() {
-                    let mut entry_inode = None;
-                    let bytes_written =
-                        self.handle_dirent(&in_header, dirent).and_then(|(d, e)| {
-                            entry_inode = Some(e.inode);
-                            let remaining = (size as usize).saturating_sub(total_written);
-                            add_dirent(&mut cursor, remaining, d, Some(e))
-                        });
-                    match bytes_written {
-                        Ok(0) => {
-                            // No more space left in the buffer but we need to undo the lookup
-                            // that created the Entry or we will end up with mismatched lookup
-                            // counts.
-                            if let Some(inode) = entry_inode {
-                                self.fs.forget(Context::from(in_header), inode.into(), 1);
+        let result = if in_header.nodeid == ROOT_ID
+            && self.root_filter.as_ref().lock().unwrap().is_enabled()
+        {
+            self.mock_readdirplus(&in_header, size, offset, &mut cursor)
+        } else {
+            match self.fs.readdir(
+                Context::from(in_header),
+                in_header.nodeid.into(),
+                fh.into(),
+                size,
+                offset,
+            ) {
+                Ok(mut entries) => {
+                    let mut total_written = 0;
+                    let mut err = None;
+                    while let Some(dirent) = entries.next() {
+                        let mut entry_inode = None;
+                        let bytes_written =
+                            self.handle_dirent(&in_header, dirent).and_then(|(d, e)| {
+                                entry_inode = Some(e.inode);
+                                let remaining = (size as usize).saturating_sub(total_written);
+                                add_dirent(&mut cursor, remaining, d, Some(e))
+                            });
+                        match bytes_written {
+                            Ok(0) => {
+                                // No more space left in the buffer but we need to undo the lookup
+                                // that created the Entry or we will end up with mismatched lookup
+                                // counts.
+                                if let Some(inode) = entry_inode {
+                                    self.fs.forget(Context::from(in_header), inode.into(), 1);
+                                }
+                                break;
                             }
-                            break;
-                        }
-                        Ok(bytes_written) => {
-                            total_written += bytes_written;
-                        }
-                        Err(e) => {
-                            if let Some(inode) = entry_inode {
-                                self.fs.forget(Context::from(in_header), inode.into(), 1);
+                            Ok(bytes_written) => {
+                                total_written += bytes_written;
                             }
+                            Err(e) => {
+                                if let Some(inode) = entry_inode {
+                                    self.fs.forget(Context::from(in_header), inode.into(), 1);
+                                }
 
-                            if total_written == 0 {
-                                // We haven't filled any entries yet so we can just propagate
-                                // the error.
-                                err = Some(e);
-                            }
+                                if total_written == 0 {
+                                    // We haven't filled any entries yet so we can just propagate
+                                    // the error.
+                                    err = Some(e);
+                                }
 
-                            // We already filled in some entries. Returning an error now will
-                            // cause lookup count mismatches for those entries so just return
-                            // whatever we already have.
-                            break;
+                                // We already filled in some entries. Returning an error now will
+                                // cause lookup count mismatches for those entries so just return
+                                // whatever we already have.
+                                break;
+                            }
                         }
                     }
+                    if let Some(err) = err {
+                        Err(err)
+                    } else {
+                        Ok(total_written)
+                    }
                 }
-                if let Some(err) = err {
-                    Err(err)
-                } else {
-                    Ok(total_written)
-                }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
         };
 
         match result {
