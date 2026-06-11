@@ -183,11 +183,11 @@ func TestPropagationDir(t *testing.T) {
 
 	got := GenPropagationVirtioDirs()
 	t.Logf("got: %s", got)
-	expect := `[{"name":"virtio_ro_22eb8f02"},{"name":"virtio_rw_44e51c2a"}]`
+	expect := `[{"name":"virtio_ro"},{"name":"virtio_rw"}]`
 	assert.Equal(t, got, expect)
 
 	got = GenPropagationContainerDirs()
 	t.Logf("got: %s", got)
-	expect = `[{"name":"virtio_ro_22eb8f02","container_dir":"/.container_ro_22eb8f02"},{"name":"virtio_rw_44e51c2a","container_dir":"/.container_rw_44e51c2a"}]`
+	expect = `[{"name":"virtio_ro","container_dir":"/.container_ro"},{"name":"virtio_rw","container_dir":"/.container_rw"}]`
 	assert.Equal(t, got, expect)
 }

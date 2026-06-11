@@ -94,7 +94,7 @@ impl FilterList {
             name: "..".to_string(),
         });
         // dir should be absolute path
-        self.enabled = whitelist.is_some();
+        let enabled = whitelist.is_some();
         match whitelist {
             Some(dirs) => {
                 // Sort and Dedup dirs.
@@ -145,6 +145,7 @@ impl FilterList {
             }
         }
 
+        self.enabled = enabled;
         self.allowed_dirs = dic;
         self.root_dirents = dirents;
 
@@ -182,12 +183,8 @@ impl FilterList {
     }
 
     // return allow dire entry.
-    pub fn get_allow_dir(&self, key: String) -> Result<(String, stat::StatExt)> {
-        if !self.allowed_dirs.contains_key(&key) {
-            return Err(Error::DisAllowed);
-        }
-
-        Ok(self.allowed_dirs[&key].clone())
+    pub fn get_allow_dir(&self, key: &str) -> Result<(String, stat::StatExt)> {
+        self.allowed_dirs.get(key).cloned().ok_or(Error::DisAllowed)
     }
 
     // return root dirent.
@@ -210,7 +207,7 @@ mod tests {
         let filter = FilterList::new(ROOT_ID, &Some(Vec::new())).unwrap();
         assert!(filter.is_enabled());
         assert!(filter.is_empty());
-        assert!(filter.get_allow_dir("missing".to_string()).is_err());
+        assert!(filter.get_allow_dir("missing").is_err());
         assert_eq!(filter.get_root_dirents().len(), 2);
     }
 
@@ -225,12 +222,10 @@ mod tests {
 
         assert!(filter.is_enabled());
         assert!(!filter.is_empty());
-        assert!(filter
-            .get_allow_dir("virtiofsd-filter-".to_string())
-            .is_err());
+        assert!(filter.get_allow_dir("virtiofsd-filter-").is_err());
         assert_eq!(
             filter
-                .get_allow_dir(test_dir.file_name().unwrap().to_string_lossy().to_string())
+                .get_allow_dir(&test_dir.file_name().unwrap().to_string_lossy())
                 .unwrap()
                 .0,
             dir
@@ -238,6 +233,46 @@ mod tests {
         assert_eq!(filter.get_root_dirents().len(), 3);
 
         fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[test]
+    fn filter_list_update_failure_preserves_previous_state() {
+        let test_dir =
+            std::env::temp_dir().join(format!("virtiofsd-filter-{}-stable", std::process::id()));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let dir = test_dir.to_string_lossy().to_string();
+        let basename = test_dir.file_name().unwrap().to_string_lossy().to_string();
+        let mut filter = FilterList::new(ROOT_ID, &Some(vec![dir.clone()])).unwrap();
+        assert!(filter.is_enabled());
+        assert_eq!(filter.get_allow_dir(&basename).unwrap().0, dir);
+        assert_eq!(filter.get_root_dirents().len(), 3);
+
+        let missing = test_dir.join("missing").to_string_lossy().to_string();
+        assert!(filter.update(&Some(vec![missing])).is_err());
+
+        assert!(filter.is_enabled());
+        assert_eq!(filter.get_allow_dir(&basename).unwrap().0, dir);
+        assert_eq!(filter.get_root_dirents().len(), 3);
+
+        fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[test]
+    fn filter_list_update_failure_preserves_disabled_filter() {
+        let mut filter = FilterList::new(ROOT_ID, &None).unwrap();
+        assert!(!filter.is_enabled());
+        assert_eq!(filter.get_root_dirents().len(), 2);
+
+        let missing = std::env::temp_dir()
+            .join(format!("virtiofsd-filter-{}-missing", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        assert!(filter.update(&Some(vec![missing])).is_err());
+
+        assert!(!filter.is_enabled());
+        assert!(filter.is_empty());
+        assert_eq!(filter.get_root_dirents().len(), 2);
     }
 }
 
@@ -468,7 +503,7 @@ impl<F: FileSystem + Sync> Server<F> {
                         return reply_error(ErrorKind::NotFound.into(), in_header.unique, w);
                     }
                 };
-                match filter.get_allow_dir(name.to_string()) {
+                match filter.get_allow_dir(name) {
                     Ok(entry) => f_info = Some(entry),
                     Err(_) => {
                         return reply_error(ErrorKind::NotFound.into(), in_header.unique, w);
@@ -1490,7 +1525,7 @@ impl<F: FileSystem + Sync> Server<F> {
                     })?;
                     f_info = Some(
                         filter
-                            .get_allow_dir(name.to_string())
+                            .get_allow_dir(name)
                             .map_err(|_| ErrorKind::NotFound)?,
                     );
                 }
