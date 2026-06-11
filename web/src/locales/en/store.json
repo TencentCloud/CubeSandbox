@@ -40,7 +40,8 @@
     "code": "Code Execution",
     "browser": "Browser",
     "ai": "AI · LLM",
-    "base": "Base Image"
+    "base": "Base Image",
+    "web": "Web Service"
   },
   "items": {
     "sandbox-code": {
@@ -62,6 +63,10 @@
     "cubesandbox-base": {
       "name": "Base Image",
       "description": "Minimal base image with envd only, ideal for custom builds."
+    },
+    "sandbox-nginx": {
+      "name": "Nginx Web Sandbox",
+      "description": "Base image + Nginx, ideal for web service and BYOI demos. Exposes port 80."
     }
   },
   "tagLabels": {
@@ -76,6 +81,8 @@
     "aio": "All-in-One",
     "deepseek": "DeepSeek",
     "base": "Base",
-    "envd": "envd"
+    "envd": "envd",
+    "nginx": "Nginx",
+    "web": "Web"
   }
 }
