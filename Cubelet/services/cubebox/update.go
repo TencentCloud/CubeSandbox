@@ -13,8 +13,11 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/ttrpc"
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
@@ -208,6 +211,10 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 		return rsp, nil
 	}
 
+	if rejected := s.admitResume(ctx, sb, rsp); rejected != nil {
+		return rejected, nil
+	}
+
 	ns := sb.Namespace
 	if ns == "" {
 		ns = namespaces.Default
@@ -241,6 +248,95 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 	}
 	convergeResumeStateAfterOpaqueRestore(sb, time.Now().UTC())
 	return rsp, nil
+}
+
+// admitResume enforces the resume side of the release-paused-resources policy.
+// When the policy is off it is a no-op (resume is always admitted, matching
+// the legacy guaranteed-resume behaviour). When on, pausing this sandbox
+// already released its CPU/memory quota so the scheduler could fill the node;
+// resuming would re-add that demand, so we re-check against the node's local,
+// real-time quota usage and reject when the sandbox no longer fits. Rejecting
+// here -- rather than overcommitting host RAM and risking an OOM -- is the
+// explicit trade-off the policy makes.
+//
+// It returns a non-nil response (already populated) when resume must be
+// rejected, or nil to proceed. Under a release ratio r the still-paused sandbox
+// already contributes (1-r) of its quota to aggregateAllocated, so resuming it
+// (a full reservation) only adds the remaining r fraction; we check that
+// incremental demand against the node quota to model the post-resume state.
+//
+// The check is best-effort, not a hard reservation: concurrent resumes of
+// different sandboxes each read their own snapshot of aggregateAllocated, so a
+// burst can momentarily admit past the quota (the OS/cgroup remains the hard
+// backstop). This matches how create scheduling is optimistic too; operators
+// who want more headroom can lower the release ratio so the reserved fraction
+// absorbs concurrent-resume overshoot.
+func (s *service) admitResume(
+	ctx context.Context,
+	sb *cubeboxstore.CubeBox,
+	rsp *cubebox.UpdateCubeSandboxResponse,
+) *cubebox.UpdateCubeSandboxResponse {
+	// GetHostConf always returns a non-nil config (it falls back to defaults).
+	hostConf := config.GetHostConf()
+	releaseRatio := clampRatio(hostConf.Quota.PausedResourceReleaseRatio)
+	if releaseRatio <= 0 {
+		// Policy off: paused sandboxes kept their full quota, so resume is
+		// guaranteed and needs no admission check (legacy behaviour).
+		return nil
+	}
+	if sb.ResourceWithOverHead == nil {
+		// Policy is active but we cannot size this sandbox's demand, so fail
+		// open (admit) rather than block legacy/untracked sandboxes. Log it so
+		// the admission bypass is visible instead of silent.
+		log.G(ctx).Warnf("admitResume: sandbox=%s missing resource info, "+
+			"admitting without capacity check under paused_resource_release_ratio policy", sb.ID)
+		return nil
+	}
+
+	alloc := s.cubeboxMgr.aggregateAllocated()
+	memQuotaMB := int64(0)
+	if memQuota, err := resource.ParseQuantity(hostConf.Quota.Mem); err == nil {
+		memQuotaMB = memQuota.Value() / 1024 / 1024
+	}
+	// Only the released fraction is the incremental demand of resuming.
+	needMemMB := scaleInt64(sb.ResourceWithOverHead.HostMemQ.Value()/1024/1024, releaseRatio)
+	needCPU := scaleInt64(sb.ResourceWithOverHead.HostCpuQ.MilliValue(), releaseRatio)
+
+	if reason := resumeQuotaRejection(
+		alloc.MemoryMB, needMemMB, memQuotaMB,
+		alloc.MilliCPU, needCPU, int64(hostConf.Quota.Cpu),
+	); reason != "" {
+		rsp.Ret.RetMsg = "resume rejected by paused_resource_release_ratio policy: " + reason
+		// Conflict (not TaskResumeFailed) so the capacity rejection surfaces as
+		// HTTP 409 at the API edge: this is an expected, retriable state (free
+		// up capacity and retry), not a backend failure that should read as a
+		// 500. The descriptive RetMsg is carried through to the client.
+		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
+		log.G(ctx).Warnf("admitResume reject sandbox=%s: %s", sb.ID, rsp.Ret.RetMsg)
+		return rsp
+	}
+
+	return nil
+}
+
+// resumeQuotaRejection is the pure decision behind admitResume: it returns a
+// non-empty human-readable reason when bringing a paused sandbox back would
+// push the node past its CPU or memory quota, or "" when the resume fits. A
+// non-positive quota means "unbounded" for that dimension and is skipped, which
+// matches how the rest of the cubelet treats an unset host quota.
+func resumeQuotaRejection(
+	usedMemMB, needMemMB, memQuotaMB,
+	usedCPUMilli, needCPUMilli, cpuQuotaMilli int64,
+) string {
+	if memQuotaMB > 0 && usedMemMB+needMemMB > memQuotaMB {
+		return fmt.Sprintf("need %dMB + used %dMB > mem quota %dMB",
+			needMemMB, usedMemMB, memQuotaMB)
+	}
+	if cpuQuotaMilli > 0 && usedCPUMilli+needCPUMilli > cpuQuotaMilli {
+		return fmt.Sprintf("need %dm + used %dm > cpu quota %dm",
+			needCPUMilli, usedCPUMilli, cpuQuotaMilli)
+	}
+	return ""
 }
 
 // Upper bound for the Pause/Resume ttrpc calls. 30s is used because cubeshim

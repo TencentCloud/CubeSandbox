@@ -26,5 +26,13 @@
     "resume": "Resume",
     "pause": "Pause",
     "kill": "Kill"
+  },
+  "errors": {
+    "unknown": "Unknown error",
+    "actionFailed": "Action failed: {{message}}",
+    "conflict": "{{message}}",
+    "resumeCapacity": "Insufficient node capacity to resume this sandbox. Free capacity and retry.",
+    "resumeCapacityDetail": "Insufficient memory to resume (need {{need}}, used {{used}}, quota {{quota}})",
+    "resumeCapacityDetailCpu": "Insufficient CPU to resume (need {{need}}, used {{used}}, quota {{quota}})"
   }
 }
