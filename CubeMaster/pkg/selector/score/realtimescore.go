@@ -89,7 +89,11 @@ func (l *realTimeWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes
 }
 
 func getRealTimeTotalWeight() (float64, error) {
-	sconf := config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage
+	schedConf := config.GetConfig().Scheduler
+	if schedConf == nil || schedConf.Score == nil {
+		return 0, errors.New("scheduler score conf is nil")
+	}
+	sconf := schedConf.Score.ScorePluginConf.RealTimeWeightedAverage
 	if sconf == nil {
 		return 0, errors.New("RealTime conf is nil")
 	}
@@ -101,7 +105,11 @@ func getRealTimeTotalWeight() (float64, error) {
 }
 
 func getRealtimeWeightedAverageScore(n *node.Node, cpuq, memq *resource.Quantity) float64 {
-	sconf := config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage
+	schedConf := config.GetConfig().Scheduler
+	if schedConf == nil || schedConf.Score == nil {
+		return 0
+	}
+	sconf := schedConf.Score.ScorePluginConf.RealTimeWeightedAverage
 	if sconf == nil {
 		return 0
 	}
@@ -111,14 +119,16 @@ func getRealtimeWeightedAverageScore(n *node.Node, cpuq, memq *resource.Quantity
 	if cpuq != nil {
 
 		cpuReqValue := cpuq.MilliValue()
-		cpuLeft := getReciprocal(n.QuotaCpu-n.QuotaCpuUsage-cpuReqValue, n.QuotaCpu)
+		effCpu := schedConf.EffectiveQuotaCpu(n.InstanceType, n.QuotaCpu)
+		cpuLeft := getReciprocal(effCpu-schedConf.EffectiveAllocated(n.QuotaCpuUsage)-cpuReqValue, effCpu)
 		scores += cpuLeft * getFactorWeight(constants.WeightFactorReqCpu)
 	}
 
 	if memq != nil {
 
 		memReqValue := memq.Value() / 1024 / 1024
-		memLeft := getReciprocal(n.QuotaMem-n.QuotaMemUsage-memReqValue, n.QuotaMem)
+		effMem := schedConf.EffectiveQuotaMem(n.InstanceType, n.QuotaMem)
+		memLeft := getReciprocal(effMem-schedConf.EffectiveAllocated(n.QuotaMemUsage)-memReqValue, effMem)
 		scores += memLeft * getFactorWeight(constants.WeightFactorReqMem)
 	}
 	return scores

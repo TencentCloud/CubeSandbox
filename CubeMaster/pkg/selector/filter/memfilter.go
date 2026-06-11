@@ -38,7 +38,8 @@ func (l *memFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	inList := selCtx.Nodes()
 	nodes := make(node.NodeList, 0, inList.Len())
 	for i := range inList {
-		quotaMemFree := inList[i].QuotaMem - inList[i].QuotaMemUsage
+		quotaMemFree := sconf.EffectiveQuotaMem(inList[i].InstanceType, inList[i].QuotaMem) -
+			sconf.EffectiveAllocated(inList[i].QuotaMemUsage)
 
 		if quotaMemFree <= memq.Value()/1024/1024 {
 			log.G(selCtx.Ctx).Warnf("%v select:%v, quotaMemFree:%v, memq:%v",

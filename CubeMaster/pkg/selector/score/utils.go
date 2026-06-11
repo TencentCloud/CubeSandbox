@@ -61,7 +61,7 @@ func getReciprocal(v int64, base int64) float64 {
 
 func getFactorWeight(k string) float64 {
 	sconf := config.GetConfig().Scheduler
-	if sconf == nil {
+	if sconf == nil || sconf.Score == nil {
 		return 0.0
 	}
 	v, ok := sconf.Score.ResourceWeights[k]
@@ -103,16 +103,29 @@ func getMvmNumScore(n *node.Node) float64 {
 }
 
 func getQuotaCpuUsageScore(n *node.Node) float64 {
-	if n.QuotaCpu <= 0 {
+	sconf := config.GetConfig().Scheduler
+	if sconf == nil {
+		return 0.0
+	}
+	effCpu := sconf.EffectiveQuotaCpu(n.InstanceType, n.QuotaCpu)
+	if effCpu <= 0 {
 
 		return 0.0
 	}
-	f := getReciprocal(n.QuotaCpuUsage, n.QuotaCpu)
+	f := getReciprocal(sconf.EffectiveAllocated(n.QuotaCpuUsage), effCpu)
 	return 100.0 - f*100.0
 }
 
 func getQuotaMemMbUsageScore(n *node.Node) float64 {
-	f := getReciprocal(n.QuotaMemUsage, n.QuotaMem)
+	sconf := config.GetConfig().Scheduler
+	if sconf == nil {
+		return 0.0
+	}
+	effMem := sconf.EffectiveQuotaMem(n.InstanceType, n.QuotaMem)
+	if effMem <= 0 {
+		return 0.0
+	}
+	f := getReciprocal(sconf.EffectiveAllocated(n.QuotaMemUsage), effMem)
 	return 100.0 - f*100.0
 }
 

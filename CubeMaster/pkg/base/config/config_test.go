@@ -7,6 +7,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,4 +65,141 @@ func TestGetEffectiveNodeMaxMemReservedInMBKeepsConfiguredValue(t *testing.T) {
 
 	got := sconf.GetEffectiveNodeMaxMemReservedInMB("cubebox", 9450)
 	assert.Equal(t, int64(512), got)
+}
+
+func TestPreHandleSchedulerOvercommitAndIgnoreDefaults(t *testing.T) {
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{}}
+	err := preHandleScheduler(cfg)
+	assert.NoError(t, err)
+
+	assert.NotNil(t, cfg.Scheduler.IgnoreRedisAllocation)
+	assert.False(t, cfg.Scheduler.ShouldIgnoreRedisAllocation())
+
+	ratio := cfg.Scheduler.GetEffectiveOvercommitRatio("cubebox")
+	assert.Equal(t, 3.0, ratio.CPURatio)
+	assert.Equal(t, 2.0, ratio.MemRatio)
+}
+
+func TestGetEffectiveOvercommitRatioPrecedence(t *testing.T) {
+	sconf := &SchedulerConf{
+		OvercommitRatio: &OvercommitRatioConf{CPURatio: 6.0, MemRatio: 4.0},
+		OvercommitRatioByType: map[string]OvercommitRatioConf{
+			"cubebox_gpu": {CPURatio: 1.0, MemRatio: 1.0},
+		},
+	}
+
+	// per-type override wins
+	gpu := sconf.GetEffectiveOvercommitRatio("cubebox_gpu")
+	assert.Equal(t, 1.0, gpu.CPURatio)
+	assert.Equal(t, 1.0, gpu.MemRatio)
+
+	// fall back to global ratio
+	other := sconf.GetEffectiveOvercommitRatio("cubebox")
+	assert.Equal(t, 6.0, other.CPURatio)
+	assert.Equal(t, 4.0, other.MemRatio)
+
+	// fall back to built-in default when nothing configured
+	empty := &SchedulerConf{}
+	def := empty.GetEffectiveOvercommitRatio("cubebox")
+	assert.Equal(t, 3.0, def.CPURatio)
+	assert.Equal(t, 2.0, def.MemRatio)
+}
+
+func TestEffectiveQuotaAndAllocated(t *testing.T) {
+	ignore := false
+	sconf := &SchedulerConf{
+		IgnoreRedisAllocation: &ignore,
+		OvercommitRatio:       &OvercommitRatioConf{CPURatio: 6.0, MemRatio: 4.0},
+	}
+
+	assert.Equal(t, int64(48000), sconf.EffectiveQuotaCpu("cubebox", 8000))
+	assert.Equal(t, int64(64000), sconf.EffectiveQuotaMem("cubebox", 16000))
+	// allocation kept when not ignoring
+	assert.Equal(t, int64(1234), sconf.EffectiveAllocated(1234))
+
+	// allocation kept by default (not ignoring)
+	defaultConf := &SchedulerConf{}
+	assert.Equal(t, int64(1234), defaultConf.EffectiveAllocated(1234))
+
+	// allocation zeroed when explicitly ignoring
+	ignoreTrue := true
+	ignoring := &SchedulerConf{IgnoreRedisAllocation: &ignoreTrue}
+	assert.Equal(t, int64(0), ignoring.EffectiveAllocated(1234))
+}
+
+func TestOvercommitRatioSanitizesNonPositive(t *testing.T) {
+	sconf := &SchedulerConf{
+		OvercommitRatio: &OvercommitRatioConf{CPURatio: 0, MemRatio: -1},
+	}
+	ratio := sconf.GetEffectiveOvercommitRatio("cubebox")
+	assert.Equal(t, 3.0, ratio.CPURatio)
+	assert.Equal(t, 2.0, ratio.MemRatio)
+}
+
+func TestOvercommitRatioSanitizesNaNAndInf(t *testing.T) {
+	cases := []OvercommitRatioConf{
+		{CPURatio: math.NaN(), MemRatio: math.NaN()},
+		{CPURatio: math.Inf(1), MemRatio: math.Inf(1)},
+		{CPURatio: math.Inf(-1), MemRatio: math.Inf(-1)},
+	}
+	for _, c := range cases {
+		sconf := &SchedulerConf{OvercommitRatio: &c}
+		ratio := sconf.GetEffectiveOvercommitRatio("cubebox")
+		assert.Equal(t, 3.0, ratio.CPURatio)
+		assert.Equal(t, 2.0, ratio.MemRatio)
+
+		// capacity arithmetic must stay finite after sanitizing
+		assert.Equal(t, int64(24000), sconf.EffectiveQuotaCpu("cubebox", 8000))
+		assert.Equal(t, int64(32000), sconf.EffectiveQuotaMem("cubebox", 16000))
+	}
+}
+
+func TestPreHandleSchedulerSanitizesPerTypeRatios(t *testing.T) {
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			OvercommitRatioByType: map[string]OvercommitRatioConf{
+				"bad_zero": {CPURatio: 0, MemRatio: -1},
+				"bad_nan":  {CPURatio: math.NaN(), MemRatio: math.Inf(1)},
+				"good":     {CPURatio: 8, MemRatio: 5},
+			},
+		},
+	}}
+	err := preHandleScheduler(cfg)
+	assert.NoError(t, err)
+
+	// malformed per-type ratios are normalized to defaults at init time
+	bz := cfg.Scheduler.OvercommitRatioByType["bad_zero"]
+	assert.Equal(t, 3.0, bz.CPURatio)
+	assert.Equal(t, 2.0, bz.MemRatio)
+
+	bn := cfg.Scheduler.OvercommitRatioByType["bad_nan"]
+	assert.Equal(t, 3.0, bn.CPURatio)
+	assert.Equal(t, 2.0, bn.MemRatio)
+
+	// valid per-type ratios are preserved
+	g := cfg.Scheduler.OvercommitRatioByType["good"]
+	assert.Equal(t, 8.0, g.CPURatio)
+	assert.Equal(t, 5.0, g.MemRatio)
+}
+
+func TestFloatToInt64Clamped(t *testing.T) {
+	assert.Equal(t, int64(0), floatToInt64Clamped(math.NaN()))
+	assert.Equal(t, int64(math.MaxInt64), floatToInt64Clamped(math.Inf(1)))
+	assert.Equal(t, int64(math.MinInt64), floatToInt64Clamped(math.Inf(-1)))
+	// overflow beyond int64 range clamps instead of wrapping to garbage
+	assert.Equal(t, int64(math.MaxInt64), floatToInt64Clamped(1e30))
+	assert.Equal(t, int64(math.MinInt64), floatToInt64Clamped(-1e30))
+	// normal values convert (truncate toward zero) as usual
+	assert.Equal(t, int64(42), floatToInt64Clamped(42.9))
+	assert.Equal(t, int64(0), floatToInt64Clamped(0))
+}
+
+func TestEffectiveQuotaClampsOverflow(t *testing.T) {
+	// A huge quota combined with a large overcommit ratio must not wrap to a
+	// garbage int64; it clamps to MaxInt64 instead.
+	sconf := &SchedulerConf{
+		OvercommitRatio: &OvercommitRatioConf{CPURatio: 1e6, MemRatio: 1e6},
+	}
+	assert.Equal(t, int64(math.MaxInt64), sconf.EffectiveQuotaCpu("cubebox", math.MaxInt64))
+	assert.Equal(t, int64(math.MaxInt64), sconf.EffectiveQuotaMem("cubebox", math.MaxInt64))
 }

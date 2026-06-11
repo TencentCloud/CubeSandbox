@@ -97,6 +97,24 @@ scheduler:
   priority_select_num: 1
   metric_update_timeout: 300s
   local_metric_update_timeout: 300s
+  # Whether to ignore the per-node allocated CPU/Mem usage recorded in Redis
+  # during scheduling. Defaults to false: account for the Redis allocation
+  # records when computing schedulable capacity.
+  ignore_redis_allocation: false
+  # Global CPU/Mem overcommit ratio applied to the node-reported quota capacity.
+  # Defaults to CPU=3, Mem=2.
+  overcommit_ratio:
+    cpu_ratio: 3.0
+    mem_ratio: 2.0
+  # Per-instance-type overcommit ratio (takes precedence over the global
+  # overcommit_ratio).
+  # overcommit_ratio_conf:
+  #   cubebox:
+  #     cpu_ratio: 6.0
+  #     mem_ratio: 4.0
+  #   cubebox_gpu:
+  #     cpu_ratio: 1.0
+  #     mem_ratio: 1.0
   filter:
     enable_filters:
       - "cpu"

@@ -173,6 +173,121 @@ type SchedulerConf struct {
 	DisableBackoffFilterInstanceType map[string]bool                   `yaml:"disable_backoff_filter_instance_type"`
 	ThirtpartyFilterInstanceType     map[string]bool                   `yaml:"thirtparty_filter_instance_type"`
 	InstanceTypeConf                 map[string]InstanceTypeConf       `yaml:"instance_type_conf"`
+
+	// IgnoreRedisAllocation, when true, makes the scheduler ignore the
+	// per-node allocated CPU/Mem usage recorded in Redis (treat allocated as
+	// 0). A pointer is used so an unset value can default to false while still
+	// allowing operators to explicitly enable it. Defaults to false.
+	IgnoreRedisAllocation *bool `yaml:"ignore_redis_allocation"`
+	// OvercommitRatio is the global CPU/Mem overcommit ratio applied to the
+	// node-reported quota during scheduling. Defaults to CPU=3, Mem=2.
+	OvercommitRatio *OvercommitRatioConf `yaml:"overcommit_ratio"`
+	// OvercommitRatioByType overrides OvercommitRatio for specific instance
+	// types and takes precedence over the global ratio.
+	OvercommitRatioByType map[string]OvercommitRatioConf `yaml:"overcommit_ratio_conf"`
+}
+
+// OvercommitRatioConf describes the CPU/Mem overcommit multipliers applied to
+// a node's reported quota when computing schedulable capacity.
+type OvercommitRatioConf struct {
+	CPURatio float64 `yaml:"cpu_ratio"`
+	MemRatio float64 `yaml:"mem_ratio"`
+}
+
+const (
+	defaultCPUOvercommitRatio = 3.0
+	defaultMemOvercommitRatio = 2.0
+)
+
+// GetEffectiveOvercommitRatio returns the overcommit ratio for the given
+// instance type, falling back to the global ratio and then to the built-in
+// defaults (CPU=3, Mem=2).
+func (s *SchedulerConf) GetEffectiveOvercommitRatio(instanceType string) OvercommitRatioConf {
+	if s.OvercommitRatioByType != nil {
+		if v, ok := s.OvercommitRatioByType[instanceType]; ok {
+			return v.sanitized()
+		}
+	}
+	if s.OvercommitRatio != nil {
+		return s.OvercommitRatio.sanitized()
+	}
+	return OvercommitRatioConf{CPURatio: defaultCPUOvercommitRatio, MemRatio: defaultMemOvercommitRatio}
+}
+
+// sanitized guarantees non-positive, NaN, or infinite ratios fall back to the
+// defaults so a malformed config never shrinks a node's schedulable capacity to
+// zero or produces a garbage (NaN/Inf) capacity when multiplied with the quota.
+func (c OvercommitRatioConf) sanitized() OvercommitRatioConf {
+	out := c
+	if !isValidRatio(out.CPURatio) {
+		out.CPURatio = defaultCPUOvercommitRatio
+	}
+	if !isValidRatio(out.MemRatio) {
+		out.MemRatio = defaultMemOvercommitRatio
+	}
+	return out
+}
+
+// isValidRatio reports whether r is a usable overcommit multiplier: it must be
+// a finite, positive number. NaN and ±Inf (e.g. ".nan"/".inf" in YAML) are
+// rejected so they never propagate into capacity arithmetic.
+func isValidRatio(r float64) bool {
+	if math.IsNaN(r) || math.IsInf(r, 0) {
+		return false
+	}
+	return r > 0
+}
+
+// ShouldIgnoreRedisAllocation reports whether the scheduler must ignore the
+// allocated CPU/Mem usage recorded in Redis. Defaults to false when unset.
+func (s *SchedulerConf) ShouldIgnoreRedisAllocation() bool {
+	if s.IgnoreRedisAllocation == nil {
+		return false
+	}
+	return *s.IgnoreRedisAllocation
+}
+
+// EffectiveQuotaCpu returns the schedulable CPU capacity (milli-cores) for a
+// node after applying the configured overcommit ratio to its reported quota.
+func (s *SchedulerConf) EffectiveQuotaCpu(instanceType string, quotaCpu int64) int64 {
+	ratio := s.GetEffectiveOvercommitRatio(instanceType)
+	return floatToInt64Clamped(float64(quotaCpu) * ratio.CPURatio)
+}
+
+// EffectiveQuotaMem returns the schedulable memory capacity (MB) for a node
+// after applying the configured overcommit ratio to its reported quota.
+func (s *SchedulerConf) EffectiveQuotaMem(instanceType string, quotaMem int64) int64 {
+	ratio := s.GetEffectiveOvercommitRatio(instanceType)
+	return floatToInt64Clamped(float64(quotaMem) * ratio.MemRatio)
+}
+
+// floatToInt64Clamped safely converts a float64 to int64. Converting an
+// out-of-range or non-finite float64 to int64 is implementation-defined in Go
+// and yields a garbage value, so NaN maps to 0 and values beyond the int64
+// range (including ±Inf) are clamped to math.MaxInt64 / math.MinInt64. This
+// guards capacity computation against quota * ratio overflowing int64.
+func floatToInt64Clamped(f float64) int64 {
+	if math.IsNaN(f) {
+		return 0
+	}
+	// float64(math.MaxInt64) rounds up to 2^63, so use >= to treat the
+	// boundary and any larger value (incl. +Inf) as overflow.
+	if f >= float64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	if f <= float64(math.MinInt64) {
+		return math.MinInt64
+	}
+	return int64(f)
+}
+
+// EffectiveAllocated returns the allocated usage the scheduler should account
+// for, which is 0 when Redis allocation records are ignored.
+func (s *SchedulerConf) EffectiveAllocated(usage int64) int64 {
+	if s.ShouldIgnoreRedisAllocation() {
+		return 0
+	}
+	return usage
 }
 
 type WrapperSchedulerConf struct {
@@ -733,6 +848,29 @@ func preHandleScheduler(config *Config) error {
 	}
 
 	preHandOverhead(config)
+
+	// Account for Redis allocation records during scheduling by default.
+	if config.Scheduler.IgnoreRedisAllocation == nil {
+		ignore := false
+		config.Scheduler.IgnoreRedisAllocation = &ignore
+	}
+	// Default overcommit ratio: CPU=3, Mem=2. sanitized() guards against
+	// non-positive, NaN, or infinite values supplied by operators.
+	if config.Scheduler.OvercommitRatio == nil {
+		config.Scheduler.OvercommitRatio = &OvercommitRatioConf{
+			CPURatio: defaultCPUOvercommitRatio,
+			MemRatio: defaultMemOvercommitRatio,
+		}
+	} else {
+		sanitized := config.Scheduler.OvercommitRatio.sanitized()
+		config.Scheduler.OvercommitRatio = &sanitized
+	}
+	// Sanitize per-instance-type overrides at init time as well so malformed
+	// (non-positive/NaN/Inf) ratios are normalized once up front rather than
+	// relying solely on the lazy sanitize in GetEffectiveOvercommitRatio.
+	for k, v := range config.Scheduler.OvercommitRatioByType {
+		config.Scheduler.OvercommitRatioByType[k] = v.sanitized()
+	}
 
 	if config.Scheduler.NodeMaxMvmNum == 0 {
 		config.Scheduler.NodeMaxMvmNum = 3000
