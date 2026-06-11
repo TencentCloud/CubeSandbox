@@ -6,17 +6,18 @@ package templatecenter
 
 import (
 	"fmt"
+	"net/url"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
-	"net/url"
-	"os"
-	"sort"
-	"strconv"
-	"strings"
 )
 
 func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifact *models.RootfsArtifact, imageCfg image.DockerImageConfig, downloadBaseURL string) (*types.CreateCubeSandboxReq, error) {
@@ -116,21 +117,21 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 		Annotations:     containerAnnotations,
 	}
 	return &types.CreateCubeSandboxReq{
-		Request:       &types.Request{RequestID: req.RequestID},
-		Volumes:       []*types.Volume{rootVolume},
-		Containers:    []*types.Container{container},
-		Annotations:   annotations,
-		InstanceType:  req.InstanceType,
-		NetworkType:   req.NetworkType,
-		CubeVSContext: cloneCubeVSContext(req.CubeVSContext),
+		Request:           &types.Request{RequestID: req.RequestID},
+		Volumes:           []*types.Volume{rootVolume},
+		Containers:        []*types.Container{container},
+		Annotations:       annotations,
+		InstanceType:      req.InstanceType,
+		NetworkType:       req.NetworkType,
+		CubeNetworkConfig: cloneCubeNetworkConfig(req.CubeNetworkConfig),
 	}, nil
 }
 
-func cloneCubeVSContext(in *types.CubeVSContext) *types.CubeVSContext {
+func cloneCubeNetworkConfig(in *types.CubeNetworkConfig) *types.CubeNetworkConfig {
 	if in == nil {
 		return nil
 	}
-	out := &types.CubeVSContext{
+	out := &types.CubeNetworkConfig{
 		AllowOut: append([]string(nil), in.AllowOut...),
 		DenyOut:  append([]string(nil), in.DenyOut...),
 	}
@@ -141,15 +142,16 @@ func cloneCubeVSContext(in *types.CubeVSContext) *types.CubeVSContext {
 	return out
 }
 
-func formatTemplateImageCubeVSContext(in *types.CubeVSContext) string {
+func formatTemplateImageCubeNetworkConfig(in *types.CubeNetworkConfig) string {
 	if in == nil {
-		return "allow_internet_access=default(true) allow_out=[] deny_out=[]"
+		return "allow_internet_access=default(true) allow_out=[] deny_out=[] rules=0"
 	}
 	allowInternetAccess := "default(true)"
 	if in.AllowInternetAccess != nil {
 		allowInternetAccess = fmt.Sprintf("%t", *in.AllowInternetAccess)
 	}
-	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v", allowInternetAccess, in.AllowOut, in.DenyOut)
+	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v rules=%d",
+		allowInternetAccess, in.AllowOut, in.DenyOut, len(in.Rules))
 }
 
 func dnsConfigOrNil(overrides *types.ContainerOverrides) *types.DNSConfig {

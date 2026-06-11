@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-
 type Entry struct {
 	ctx    context.Context
 	logger *Logger
@@ -37,19 +36,12 @@ const (
 
 	KeyNamespace contextKey = "namespace"
 
-
 	KeyInstanceId contextKey = "instance_id"
-
-
 
 	KeyAppID contextKey = "app_id"
 
 	KeyModuleVersion contextKey = "version"
 	KeyContainerId   contextKey = "container_id"
-
-
-
-
 
 	KeyRegion        contextKey = "region"
 	KeyCluster       contextKey = "cluster"
@@ -59,7 +51,6 @@ const (
 	KeyInstanceType  contextKey = "instance_type"
 )
 
-
 func SuccinctCallerPath(f *runtime.Frame) string {
 	s := strings.Split(f.File, "/")
 	len := len(s)
@@ -68,7 +59,6 @@ func SuccinctCallerPath(f *runtime.Frame) string {
 	}
 	return strings.Join(s[(len-2):], "/")
 }
-
 
 func (entry *Entry) WithFields(fields Fields) *Entry {
 	data := make(Fields, len(entry.data)+len(fields))
@@ -100,7 +90,6 @@ func (entry *Entry) WithFields(fields Fields) *Entry {
 	return &Entry{ctx: entry.ctx, logger: entry.logger, data: data, err: fieldErr}
 }
 
-
 func NewEntry(logger *Logger) *Entry {
 	return &Entry{
 		ctx:    context.TODO(),
@@ -108,7 +97,6 @@ func NewEntry(logger *Logger) *Entry {
 		data:   make(Fields, 7),
 	}
 }
-
 
 func (entry *Entry) WithContext(ctx context.Context) *Entry {
 	data := make(Fields, len(entry.data)+16)
@@ -129,12 +117,10 @@ func (entry *Entry) WithContext(ctx context.Context) *Entry {
 	return &Entry{ctx: ctx, logger: entry.logger, data: data, err: entry.err}
 }
 
-
 func getCallerPath() string {
 	if !reportCaller {
 		return ""
 	}
-
 
 	pcs := make([]uintptr, maximumCallerDepth)
 	depth := runtime.Callers(minimumCallerDepth, pcs)
@@ -143,7 +129,6 @@ func getCallerPath() string {
 	sd := skipCallerDepth
 	for f, again := frames.Next(); again; f, again = frames.Next() {
 		pkg := getPackageName(f.Function)
-
 
 		if pkg != cubelogPackage {
 			if sd == 0 {
@@ -156,7 +141,6 @@ func getCallerPath() string {
 			sd = sd - 1
 		}
 	}
-
 
 	return "errorCallerPath"
 }
@@ -188,16 +172,8 @@ func makeLogFields(ctx context.Context) Fields {
 	namespace, _ := ctx.Value(KeyNamespace).(string)
 	fields["Namespace"] = namespace
 
-
-
-
 	instanceId, _ := ctx.Value(KeyInstanceId).(string)
 	fields["InstanceId"] = instanceId
-
-
-
-
-
 
 	version, _ := ctx.Value(KeyModuleVersion).(string)
 	if version == "" {
@@ -209,21 +185,6 @@ func makeLogFields(ctx context.Context) Fields {
 	fields["ContainerId"] = containerId
 	functionType, _ := ctx.Value(KeyFunctionType).(string)
 	fields["FunctionType"] = functionType
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 	if region, ok := ctx.Value(KeyRegion).(string); ok {
 		fields["Region"] = region
@@ -255,7 +216,6 @@ func makeLogFieldsFromTrace(rt *RequestTrace) Fields {
 	}
 	fields["Version"] = version
 	fields["InstanceType"] = rt.InstanceType
-
 
 	if rt.AppID > 0 {
 		fields["AppId"] = rt.AppID
@@ -298,18 +258,9 @@ func (entry *Entry) writef(ctx context.Context, level LogLevel, format string, v
 	fields["@timestamp"] = now.Format(time.RFC3339Nano)
 	fields["LogLevel"] = level.String()
 
-
-
-
-
-
-
-
-
 	for k, v := range entry.data {
 		fields[k] = v
 	}
-
 
 	if format == "" {
 		fields["LogContent"] = fmt.Sprint(v...)
@@ -363,51 +314,41 @@ func (entry *Entry) writef(ctx context.Context, level LogLevel, format string, v
 	}
 }
 
-
 func (entry *Entry) Debug(v ...interface{}) {
 	entry.writef(entry.ctx, DEBUG, "", v)
 }
-
 
 func (entry *Entry) Info(v ...interface{}) {
 	entry.writef(entry.ctx, INFO, "", v)
 }
 
-
 func (entry *Entry) Warn(v ...interface{}) {
 	entry.writef(entry.ctx, WARN, "", v)
 }
-
 
 func (entry *Entry) Error(v ...interface{}) {
 	entry.writef(entry.ctx, ERROR, "", v)
 }
 
-
 func (entry *Entry) Fatal(v ...interface{}) {
 	entry.writef(entry.ctx, FATAL, "", v)
 }
-
 
 func (entry *Entry) Debugf(format string, v ...interface{}) {
 	entry.writef(entry.ctx, DEBUG, format, v)
 }
 
-
 func (entry *Entry) Infof(format string, v ...interface{}) {
 	entry.writef(entry.ctx, INFO, format, v)
 }
-
 
 func (entry *Entry) Warnf(format string, v ...interface{}) {
 	entry.writef(entry.ctx, WARN, format, v)
 }
 
-
 func (entry *Entry) Errorf(format string, v ...interface{}) {
 	entry.writef(entry.ctx, ERROR, format, v)
 }
-
 
 func (entry *Entry) Fatalf(format string, v ...interface{}) {
 	entry.writef(entry.ctx, FATAL, format, v)

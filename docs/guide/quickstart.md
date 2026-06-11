@@ -64,7 +64,7 @@ Choose the format for your Linux distribution:
 
 #### RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora)
 
-Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `kernel-*cube.pvm.host*.x86_64.rpm`, right-click and copy the download link:
+Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `kernel-*opencloudos.oc9.cubesandbox.pvm.host*.x86_64.rpm`, right-click and copy the download link:
 
 ```bash
 # Replace the URL below with the actual download link you copied from the Releases page
@@ -95,13 +95,13 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/pvm/grub/
 
 #### DEB-based (Ubuntu, Debian)
 
-Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `linux-image-*cube.pvm.host*_amd64.deb`, right-click and copy the download link:
+Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `linux-image-*opencloudos.oc9.cubesandbox.pvm.host*_amd64.deb`, right-click and copy the download link:
 
 ```bash
 # Replace the URL below with the actual download link you copied from the Releases page
 wget "<linux-image deb download link>"
 
-dpkg -i linux-image-*cube.pvm.host*.deb
+dpkg -i linux-image-*opencloudos.oc9.cubesandbox.pvm.host*.deb
 ```
 
 Set the PVM kernel as the default boot entry:
@@ -111,7 +111,7 @@ Set the PVM kernel as the default boot entry:
 ls /boot/vmlinuz-*
 
 # Point GRUB default to the PVM kernel (replace with the actual version string from above)
-KVER="$(ls /boot/vmlinuz-*cube.pvm.host* | sed 's|/boot/vmlinuz-||' | tail -1)"
+KVER="$(ls /boot/vmlinuz-*opencloudos.oc9.cubesandbox.pvm.host* | sed 's|/boot/vmlinuz-||' | tail -1)"
 sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"Advanced options for Ubuntu>Ubuntu, with Linux ${KVER}\"|" \
   /etc/default/grub
 ```
@@ -133,7 +133,7 @@ After rebooting, confirm you're running the PVM kernel and the KVM module is loa
 ```bash
 # Verify kernel version
 uname -r
-# Expected output contains: cube.pvm.host
+# Expected output contains: opencloudos.oc9.cubesandbox.pvm.host
 
 # Load the PVM KVM module
 modprobe kvm_pvm

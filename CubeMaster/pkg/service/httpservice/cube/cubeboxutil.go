@@ -73,7 +73,7 @@ func dealCubeboxReqTemplateByLocalConfig(ctx context.Context, reqInOut *types.Cr
 	}
 
 	applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
-	reqInOut.CubeVSContext = mergeCubeVSContexts(templateReq.CubeVSContext, reqInOut.CubeVSContext)
+	reqInOut.CubeNetworkConfig = mergeCubeNetworkConfigs(templateReq.CubeNetworkConfig, reqInOut.CubeNetworkConfig)
 
 	if templateReq.NetworkType != "" {
 		reqInOut.NetworkType = templateReq.NetworkType
@@ -256,39 +256,119 @@ func applyTemplateAnnotationsAndLabels(reqIn *types.CreateCubeSandboxReq, reqOut
 	}
 }
 
-func mergeCubeVSContexts(templateCtx *types.CubeVSContext, requestCtx *types.CubeVSContext) *types.CubeVSContext {
+func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *types.CubeNetworkConfig) *types.CubeNetworkConfig {
 	switch {
-	case templateCtx == nil:
-		return cloneCubeVSContext(requestCtx)
-	case requestCtx == nil:
-		return cloneCubeVSContext(templateCtx)
+	case templateCfg == nil:
+		return cloneCubeNetworkConfig(requestCfg)
+	case requestCfg == nil:
+		return cloneCubeNetworkConfig(templateCfg)
 	}
 
-	out := cloneCubeVSContext(templateCtx)
-	if requestCtx.AllowInternetAccess != nil {
-		allowInternetAccess := *requestCtx.AllowInternetAccess
+	out := cloneCubeNetworkConfig(templateCfg)
+	if requestCfg.AllowInternetAccess != nil {
+		allowInternetAccess := *requestCfg.AllowInternetAccess
 		out.AllowInternetAccess = &allowInternetAccess
 	}
-	if len(requestCtx.AllowOut) > 0 {
-		out.AllowOut = appendUniqueCIDRs(out.AllowOut, requestCtx.AllowOut)
+	if len(requestCfg.AllowOut) > 0 {
+		out.AllowOut = appendUniqueCIDRs(out.AllowOut, requestCfg.AllowOut)
 	}
-	if len(requestCtx.DenyOut) > 0 {
-		out.DenyOut = appendUniqueCIDRs(out.DenyOut, requestCtx.DenyOut)
+	if len(requestCfg.DenyOut) > 0 {
+		out.DenyOut = appendUniqueCIDRs(out.DenyOut, requestCfg.DenyOut)
+	}
+	if len(requestCfg.Rules) > 0 {
+		out.Rules = mergeEgressRules(out.Rules, requestCfg.Rules)
 	}
 	return out
 }
 
-func cloneCubeVSContext(in *types.CubeVSContext) *types.CubeVSContext {
+func cloneCubeNetworkConfig(in *types.CubeNetworkConfig) *types.CubeNetworkConfig {
 	if in == nil {
 		return nil
 	}
-	out := &types.CubeVSContext{
+	out := &types.CubeNetworkConfig{
 		AllowOut: append([]string(nil), in.AllowOut...),
 		DenyOut:  append([]string(nil), in.DenyOut...),
+		Rules:    cloneEgressRules(in.Rules),
 	}
 	if in.AllowInternetAccess != nil {
 		allowInternetAccess := *in.AllowInternetAccess
 		out.AllowInternetAccess = &allowInternetAccess
+	}
+	return out
+}
+
+// mergeEgressRules combines template + request rules. Rules sharing the same
+// Name are overridden by the request side; otherwise request rules are
+// appended after template rules to preserve first-match-wins ordering with
+// the template's policy taking precedence on overlap.
+func mergeEgressRules(base []*types.EgressRule, extra []*types.EgressRule) []*types.EgressRule {
+	if len(extra) == 0 {
+		return base
+	}
+	indexByName := make(map[string]int, len(base))
+	out := cloneEgressRules(base)
+	for i, r := range out {
+		if r != nil {
+			indexByName[r.Name] = i
+		}
+	}
+	for _, r := range extra {
+		if r == nil {
+			continue
+		}
+		cloned := cloneEgressRule(r)
+		if idx, ok := indexByName[r.Name]; ok {
+			out[idx] = cloned
+			continue
+		}
+		indexByName[r.Name] = len(out)
+		out = append(out, cloned)
+	}
+	return out
+}
+
+func cloneEgressRules(in []*types.EgressRule) []*types.EgressRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*types.EgressRule, 0, len(in))
+	for _, r := range in {
+		out = append(out, cloneEgressRule(r))
+	}
+	return out
+}
+
+func cloneEgressRule(in *types.EgressRule) *types.EgressRule {
+	if in == nil {
+		return nil
+	}
+	out := &types.EgressRule{Name: in.Name}
+	if in.Match != nil {
+		match := *in.Match
+		match.Method = append([]string(nil), in.Match.Method...)
+		out.Match = &match
+	}
+	if in.Action != nil {
+		action := &types.EgressRuleAction{Allow: in.Action.Allow}
+		if in.Action.Audit != nil {
+			audit := *in.Action.Audit
+			action.Audit = &audit
+		}
+		if len(in.Action.Inject) > 0 {
+			action.Inject = make([]*types.EgressRuleInject, 0, len(in.Action.Inject))
+			for _, inj := range in.Action.Inject {
+				if inj == nil {
+					continue
+				}
+				cp := *inj
+				if inj.Format != nil {
+					format := *inj.Format
+					cp.Format = &format
+				}
+				action.Inject = append(action.Inject, &cp)
+			}
+		}
+		out.Action = action
 	}
 	return out
 }
@@ -417,7 +497,7 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 			return err
 		}
 	}
-	reqInOut.CubeVSContext = mergeCubeVSContexts(templateReq.CubeVSContext, reqInOut.CubeVSContext)
+	reqInOut.CubeNetworkConfig = mergeCubeNetworkConfigs(templateReq.CubeNetworkConfig, reqInOut.CubeNetworkConfig)
 
 	reqInOut.Volumes = append(reqInOut.Volumes, templateReq.Volumes...)
 
@@ -551,7 +631,7 @@ func summarizeTemplateRequest(req *types.CreateCubeSandboxReq) string {
 		return "request=nil"
 	}
 	return fmt.Sprintf(
-		"containers=%d volumes=%d labels=%d annotations=%d network=%s runtime=%s namespace=%s cubevs_context=%s",
+		"containers=%d volumes=%d labels=%d annotations=%d network=%s runtime=%s namespace=%s cube_network_config=%s",
 		len(req.Containers),
 		len(req.Volumes),
 		len(req.Labels),
@@ -559,19 +639,19 @@ func summarizeTemplateRequest(req *types.CreateCubeSandboxReq) string {
 		req.NetworkType,
 		req.RuntimeHandler,
 		req.Namespace,
-		formatCubeVSContextSummary(req.CubeVSContext),
+		formatCubeNetworkConfigSummary(req.CubeNetworkConfig),
 	)
 }
 
-func formatCubeVSContextSummary(ctx *types.CubeVSContext) string {
-	if ctx == nil {
-		return "allow_internet_access=default(true) allow_out=[] deny_out=[]"
+func formatCubeNetworkConfigSummary(cfg *types.CubeNetworkConfig) string {
+	if cfg == nil {
+		return "allow_internet_access=default(true) allow_out=[] deny_out=[] rules=0"
 	}
 	allowInternetAccess := "default(true)"
-	if ctx.AllowInternetAccess != nil {
-		allowInternetAccess = fmt.Sprintf("%t", *ctx.AllowInternetAccess)
+	if cfg.AllowInternetAccess != nil {
+		allowInternetAccess = fmt.Sprintf("%t", *cfg.AllowInternetAccess)
 	}
-	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v", allowInternetAccess, ctx.AllowOut, ctx.DenyOut)
+	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v rules=%d", allowInternetAccess, cfg.AllowOut, cfg.DenyOut, len(cfg.Rules))
 }
 
 func dealVolumeTemplate(volumes []*types.Volume, templateVolumes []*types.Volume) {

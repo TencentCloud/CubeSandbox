@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/cube_egress_ca"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 	"gorm.io/gorm"
 	"strings"
@@ -21,7 +22,12 @@ import (
 
 func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, source *image.PreparedSource, downloadBaseURL string) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, bool, error) {
 	var generatedReq *types.CreateCubeSandboxReq
-	fingerprint := buildTemplateSpecFingerprint(req, source.Digest)
+	withCubeCA := resolveWithCubeCA(req.WithCubeCA)
+	caPEM, caFingerprint, err := loadCubeEgressCA(ctx, withCubeCA)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	fingerprint := buildTemplateSpecFingerprintWithCA(req, source.Digest, caFingerprint)
 	artifactID := buildArtifactID(fingerprint)
 	record, wasDeleted, err := findReusableRootfsArtifact(ctx, fingerprint, artifactID)
 	if err == nil && wasDeleted {
@@ -80,7 +86,7 @@ func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImag
 		"status":                    ArtifactStatusBuilding,
 		"last_error":                "",
 	})
-	record, generatedReq, err = buildRootfsArtifact(ctx, record, req, source, downloadBaseURL)
+	record, generatedReq, err = buildRootfsArtifact(ctx, record, req, source, downloadBaseURL, caPEM, caFingerprint)
 	if err != nil {
 		_ = updateRootfsArtifact(ctx, artifactID, map[string]any{
 			"status":     ArtifactStatusFailed,
@@ -154,17 +160,27 @@ func restoreRootfsArtifact(ctx context.Context, artifactID string) error {
 	return nil
 }
 
-func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req *types.CreateTemplateFromImageReq, source *image.PreparedSource, downloadBaseURL string) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
-	result, err := image.BuildExt4(ctx, source, image.BuildOptions{ArtifactID: record.ArtifactID})
+func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req *types.CreateTemplateFromImageReq, source *image.PreparedSource, downloadBaseURL string, caPEM []byte, caFingerprint string) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
+	var caBakeResult cube_egress_ca.Result
+	opts := image.BuildOptions{ArtifactID: record.ArtifactID}
+	// Bake the CubeEgress root CA into the rootfs while it's still a mutable
+	// host-side directory, before mkfs.ext4 freezes the layout. See
+	// design/cube-egress-ca-bake.md for the contract.
+	opts.PostRootfsExport = func(ctx context.Context, rootfsDir string) error {
+		var err error
+		caBakeResult, err = applyCubeEgressCAToRootfs(ctx, rootfsDir, caPEM, caFingerprint)
+		return err
+	}
+	result, err := image.BuildExt4(ctx, source, opts)
 	if err != nil {
 		return nil, nil, err
 	}
-	return finalizeArtifact(ctx, record, source, result.Ext4Path, result.SHA256, result.SizeBytes, downloadBaseURL, req)
+	return finalizeArtifact(ctx, record, source, result.Ext4Path, result.SHA256, result.SizeBytes, downloadBaseURL, req, caBakeResult)
 }
 
 // finalizeArtifact populates the artifact record with computed values, persists it,
 // and returns the latest version.
-func finalizeArtifact(ctx context.Context, record *models.RootfsArtifact, source *image.PreparedSource, ext4Path, shaValue string, sizeBytes int64, downloadBaseURL string, req *types.CreateTemplateFromImageReq) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
+func finalizeArtifact(ctx context.Context, record *models.RootfsArtifact, source *image.PreparedSource, ext4Path, shaValue string, sizeBytes int64, downloadBaseURL string, req *types.CreateTemplateFromImageReq, caBakeResult cube_egress_ca.Result) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
 	downloadToken := uuid.New().String()
 	record.SourceImageDigest = source.Digest
 	record.MasterNodeIP = source.MasterNodeIP
@@ -175,6 +191,9 @@ func finalizeArtifact(ctx context.Context, record *models.RootfsArtifact, source
 	record.DownloadToken = downloadToken
 	record.Status = ArtifactStatusReady
 	record.GCDeadline = time.Now().Add(defaultTemplateArtifactTTL).Unix()
+	record.CubeEgressCABaked = caBakeResult.Baked
+	record.CubeEgressCAFingerprint = caBakeResult.Fingerprint
+	record.CubeEgressCATargetsWritten = caBakeResult.TargetsWritten
 
 	generatedReq, err := generateTemplateCreateRequest(req, record, source.Config, downloadBaseURL)
 	if err != nil {
@@ -186,17 +205,20 @@ func finalizeArtifact(ctx context.Context, record *models.RootfsArtifact, source
 	}
 	record.GeneratedRequestJSON = string(reqPayload)
 	if err := updateRootfsArtifact(ctx, record.ArtifactID, map[string]any{
-		"source_image_digest":    record.SourceImageDigest,
-		"master_node_ip":         record.MasterNodeIP,
-		"ext4_path":              record.Ext4Path,
-		"ext4_sha256":            record.Ext4SHA256,
-		"ext4_size_bytes":        record.Ext4SizeBytes,
-		"image_config_json":      record.ImageConfigJSON,
-		"generated_request_json": record.GeneratedRequestJSON,
-		"download_token":         record.DownloadToken,
-		"status":                 record.Status,
-		"gc_deadline":            record.GCDeadline,
-		"last_error":             "",
+		"source_image_digest":            record.SourceImageDigest,
+		"master_node_ip":                 record.MasterNodeIP,
+		"ext4_path":                      record.Ext4Path,
+		"ext4_sha256":                    record.Ext4SHA256,
+		"ext4_size_bytes":                record.Ext4SizeBytes,
+		"image_config_json":              record.ImageConfigJSON,
+		"generated_request_json":         record.GeneratedRequestJSON,
+		"download_token":                 record.DownloadToken,
+		"status":                         record.Status,
+		"gc_deadline":                    record.GCDeadline,
+		"last_error":                     "",
+		"cube_egress_ca_baked":           record.CubeEgressCABaked,
+		"cube_egress_ca_fingerprint":     record.CubeEgressCAFingerprint,
+		"cube_egress_ca_targets_written": record.CubeEgressCATargetsWritten,
 	}); err != nil {
 		return nil, nil, err
 	}

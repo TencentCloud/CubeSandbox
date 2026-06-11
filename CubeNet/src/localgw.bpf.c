@@ -41,9 +41,15 @@ int from_envoy(struct __sk_buff *skb)
 	if (ret != TC_ACT_OK)
 		return ret;
 
-	err = snat(skb, l3, mvm_gateway_ip);
-	if (err)
-		return TC_ACT_SHOT;
+	/* Keep IP_TRANSPARENT proxy replies sourced from the original remote IP.
+	 * Only gateway-originated overlay traffic needs to be SNATed to the
+	 * sandbox gateway address.
+	 */
+	if (l3->saddr == cubegw0_ip) {
+		err = snat(skb, l3, mvm_gateway_ip);
+		if (err)
+			return TC_ACT_SHOT;
+	}
 
 	ifindex = bpf_map_lookup_elem(&mvmip_to_ifindex, &daddr);
 	if (!ifindex)

@@ -63,7 +63,7 @@ DYNAMIC_CONF_DIR=$(BUILD_DIR)/cube-cubelet-conf
 DYNAMIC_PUBLISH_NAME=cube-cubelet-conf-$(CONF_VERSION).zip
 
 
-.PHONY: build deps check-proto-tools
+.PHONY: build deps check-proto-tools fmt lint dep clean
 build: $(APPS)
 deps:
 	$(call msg,Download modules)
@@ -117,6 +117,9 @@ proto: check-proto-tools
 		protoc $(PROTOC_INCLUDE_FLAGS) $(PROTOC_GO_FLAGS) \
 		api/$$pkg/v1/*.proto ;\
 	done)
+	@echo pkg/networkagentclient/pb
+	$(Q)protoc $(PROTOC_INCLUDE_FLAGS) $(PROTOC_GO_FLAGS) \
+		pkg/networkagentclient/pb/network_agent.proto
 	@if command -v protoc-gen-doc >/dev/null 2>&1; then \
 		printf '  %-8s %s\n' "Generate" "proto doc"; \
 		protoc $(PROTOC_INCLUDE_FLAGS) --doc_out=./doc/ --doc_opt=markdown,cubelet-api.md $(PROTO_DOC_FILES); \
@@ -146,6 +149,10 @@ coverage:
 view:
 	$(call msg,Show coverage report)
 	$(Q)go tool cover -html=$(COVERAGE_PROFILE)
+
+fmt:
+	$(call msg,Format code)
+	$(Q)go fmt ./...
 
 lint:
 	$(call msg,Run linters)

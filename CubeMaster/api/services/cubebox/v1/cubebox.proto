@@ -551,8 +551,8 @@ message RunCubeSandboxRequest {
   // user define namespace
   string namespace = 15;
 
-  // CubeVS egress policy for the sandbox template/runtime.
-  optional CubeVSContext cubevs_context = 16;
+  // Egress network policy for the sandbox template/runtime.
+  optional CubeNetworkConfig cube_network_config = 16;
 }
 
 message RunCubeSandboxResponse {
@@ -585,10 +585,38 @@ message PortMapping {
   int32 host_port = 2;
 }
 
-message CubeVSContext {
+message CubeNetworkConfig {
   optional bool allow_internet_access = 1;
   repeated string allow_out = 2;
   repeated string deny_out = 3;
+  // L7 egress rules, evaluated first-match-wins in list order.
+  repeated EgressRule rules = 4;
+}
+
+message EgressRule {
+  string name = 1;
+  optional EgressRuleMatch match = 2;
+  optional EgressRuleAction action = 3;
+}
+
+message EgressRuleMatch {
+  optional string sni = 1;
+  optional string host = 3;
+  repeated string method = 4;
+  optional string path = 5;
+  optional string scheme = 7;
+}
+
+message EgressRuleAction {
+  bool allow = 1;
+  optional string audit = 2;
+  repeated EgressRuleInject inject = 3;
+}
+
+message EgressRuleInject {
+  string header = 1;
+  string secret = 2;
+  optional string format = 3;
 }
 
 message DestroyCubeSandboxRequest {

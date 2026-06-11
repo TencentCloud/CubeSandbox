@@ -65,6 +65,7 @@ RUN apt-get update -o Acquire::Retries=3 \
         libcap-ng-dev \
         libdevmapper-dev \
         libelf-dev \
+        libbpf-dev \
         libglib2.0-dev \
         libiberty-dev \
         libpixman-1-dev \

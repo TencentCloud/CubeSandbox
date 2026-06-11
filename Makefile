@@ -34,7 +34,7 @@ ifneq ($(wildcard $(HOME)/.git-credentials),)
 DOCKER_GIT_CRED += -v $(TMP_GIT_CREDENTIALS):$(BUILDER_CONTAINER_HOME)/.git-credentials
 endif
 
-.PHONY: help builder-image builder-shell builder-run prepare-builder-home prepare-tmp-git-credentials all cubemaster cubelet cubecow-sdk cubecow-clean cubecow-smoke cubecow-test-native network-agent agent cubeapi cube-api shim manual-release web-install web-dev web-build web-preview web-lint web-api-sync web-sync-dev-env
+.PHONY: help builder-image builder-shell builder-run prepare-builder-home prepare-tmp-git-credentials all cubemaster cubelet cubecow-sdk cubecow-clean cubecow-smoke cubecow-test-native network-agent agent cubeapi cube-api shim manual-release web-install web-dev web-build web-preview web-lint web-api-sync web-sync-dev-env cubevsmapdump fmt
 
 help:
 	@printf "Targets:\n"
@@ -43,6 +43,7 @@ help:
 	@printf "  builder-run    Run command inside builder image (BUILDER_CMD=...)\n"
 	@printf "  cubemaster    Build cubemaster and cubemastercli in Docker\n"
 	@printf "  cubelet       Build cubelet and cubecli in Docker\n"
+	@printf "  cubevsmapdump Build CubeVS eBPF business map dump tool in Docker\n"
 	@printf "  cubecow-sdk   Build cubecow static library for Cubelet\n"
 	@printf "  cubecow-smoke Build cubecow smoke test CLI in Docker\n"
 	@printf "  cubecow-test-native Build SDK artifacts and run native tests in Docker\n"
@@ -51,13 +52,14 @@ help:
 	@printf "  cubeapi       Build CubeAPI (cube-api) in Docker\n"
 	@printf "  cube-api      Alias of cubeapi\n"
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
-	@printf "  all           Build cubemaster, cubelet and network-agent in Docker\n"
+	@printf "  all           Build cubemaster, cubelet, network-agent and cubevsmapdump in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
 	@printf "  web-install   Install WebUI npm dependencies\n"
 	@printf "  web-dev       Start WebUI Vite dev server\n"
 	@printf "  web-build     Build WebUI static assets\n"
 	@printf "  web-preview   Preview built WebUI assets\n"
 	@printf "  web-lint      Run WebUI lint checks\n"
+	@printf "  fmt            Format code in all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
 	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
 	@printf "\nNotes:\n"
@@ -121,7 +123,7 @@ builder-run: prepare-builder-home prepare-tmp-git-credentials
 		$(BUILDER_IMAGE) \
 		bash -lc 'mkdir -p "$$HOME" "$$CARGO_HOME" "$$GOPATH" "$$HOME/.cache" "$$HOME/.config" && exec bash -lc "$$BUILDER_CMD"'
 
-all: cubemaster cubelet network-agent
+all: cubemaster cubelet network-agent cubevsmapdump
 
 cubecow-sdk:
 ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
@@ -153,6 +155,10 @@ cubelet: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && make build && cp build/cubelet build/cubecli /workspace/_output/bin/'
 
+cubevsmapdump: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeNet/cubevs && go build -o /workspace/_output/bin/cubevsmapdump ./cmd/cubevsmapdump'
+
 network-agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/network-agent && make proto && make build && cp bin/network-agent /workspace/_output/bin/network-agent'
@@ -175,7 +181,7 @@ manual-release: all
 	@mkdir -p "$(RELEASE_DIR)"
 	@PKG_TS="$$(date +%Y%m%d-%H%M%S)"; \
 	PKG_NAME="cube-manual-update-$${PKG_TS}.tar.gz"; \
-	tar -C "$(OUTPUT_DIR)" -czf "$(RELEASE_DIR)/$${PKG_NAME}" cubemaster cubemastercli cubelet cubecli network-agent; \
+	tar -C "$(OUTPUT_DIR)" -czf "$(RELEASE_DIR)/$${PKG_NAME}" cubemaster cubemastercli cubelet cubecli network-agent cubevsmapdump; \
 	sha256sum "$(RELEASE_DIR)/$${PKG_NAME}" > "$(RELEASE_DIR)/$${PKG_NAME}.sha256"; \
 	install -m 0755 "$(MANUAL_DEPLOY_SCRIPT)" "$(RELEASE_DIR)/deploy-manual.sh"; \
 	printf 'Manual release ready:\n  %s\n  %s\n  %s\n' \
@@ -203,3 +209,25 @@ web-api-sync:
 
 web-sync-dev-env:
 	"$(ROOT_DIR)/dev-env/internal/sync_web_to_vm.sh"
+
+# Run make fmt in each component directory that has a fmt target.
+# Components without formattable code (e.g. CubeProxy) are skipped.
+fmt:
+	@printf '  %-8s %s\n' "FMT" "agent"
+	@$(MAKE) -C agent fmt
+	@printf '  %-8s %s\n' "FMT" "cubecow"
+	@$(MAKE) -C cubecow fmt
+	@printf '  %-8s %s\n' "FMT" "CubeAPI"
+	@$(MAKE) -C CubeAPI fmt
+	@printf '  %-8s %s\n' "FMT" "Cubelet"
+	@$(MAKE) -C Cubelet fmt
+	@printf '  %-8s %s\n' "FMT" "cubelog"
+	@$(MAKE) -C cubelog fmt
+	@printf '  %-8s %s\n' "FMT" "CubeMaster"
+	@$(MAKE) -C CubeMaster fmt
+	@printf '  %-8s %s\n' "FMT" "CubeShim"
+	@$(MAKE) -C CubeShim fmt
+	@printf '  %-8s %s\n' "FMT" "hypervisor"
+	@$(MAKE) -C hypervisor fmt
+	@printf '  %-8s %s\n' "FMT" "network-agent"
+	@$(MAKE) -C network-agent fmt

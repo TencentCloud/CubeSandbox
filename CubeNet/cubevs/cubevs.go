@@ -42,10 +42,11 @@ type TAPDevice struct {
 // mvmMetadata is used to retrieve BPF map values.
 // The struct layout should be exactly the same as BPF side.
 type mvmMetadata struct {
-	Version  uint32
-	IP       uint32
-	UUID     [64]byte
-	Reserved [56]uint8
+	Version        uint32
+	IP             uint32
+	UUID           [64]byte
+	DNSPolicyFlags uint8
+	Reserved       [55]uint8
 }
 
 // TCDirection is used to specified attach point of a TC filter.
@@ -71,20 +72,81 @@ type lpmKey struct {
 	IP        uint32
 }
 
+// netPolicyValueV2 mirrors struct net_policy_value_v2 on the BPF side.
+type netPolicyValueV2 struct {
+	ExpiresAtNS uint64
+	Flags       uint8
+	Reserved    [7]uint8
+}
+
+// dnsAllowKey mirrors struct dns_allow_key on the BPF side.
+type dnsAllowKey struct {
+	Prefixlen uint32
+	Name      [maxDNSNameLen]byte
+}
+
+// dnsAllowValue mirrors struct dns_allow_value on the BPF side.
+type dnsAllowValue struct {
+	NameLen  uint32
+	Flags    uint8
+	Reserved [3]uint8
+}
+
+// dnsQueryTrackKey mirrors struct dns_query_track_key on the BPF side.
+type dnsQueryTrackKey struct {
+	Ifindex    uint32
+	ServerIP   uint32
+	SourcePort uint16
+	DNSID      uint16
+	Reserved   uint32
+	QnameHash  uint64
+}
+
+// dnsQueryTrackValue mirrors struct dns_query_track_value on the BPF side.
+type dnsQueryTrackValue struct {
+	ExpiresAtNS uint64
+	Flags       uint8
+	Reserved    [7]uint8
+}
+
 const (
 	// max length of MVM ID.
 	maxIDLength = 64
+	// DNS allow map layout. Must match src/cubevs.h.
+	maxDNSAllowEntries = 1024
+	maxDNSNameLen      = 256
+	// DNS policy flags. Must match src/cubevs.h.
+	dnsPolicyFlagLearningEnabled = 1 << 0
+	dnsPolicyFlagFilterEnabled   = 1 << 1
+	// Network policy flags. Must match src/cubevs.h.
+	netPolicyFlagL7Required = 1 << 0
+	// Network policy value marker. Must match src/cubevs.h.
+	netPolicyValueStatic = 1
 	// programs that power CubeVS.
 	programNameFromEnvoy = "from_envoy"
 	programNameFromCube  = "from_cube"
 	programNameFromWorld = "from_world"
+
+	// DNS tail-call programs and slot layout. Must match src/dns_query.h.
+	programNameDNSParseChunk        = "dns_parse_chunk"
+	programNameDNSRevChunk          = "dns_rev_chunk"
+	programNameDNSFinish            = "dns_finish"
+	mapNameDNSTailCalls             = "dns_tail_calls"
+	dnsTailCallParse         uint32 = 0
+	dnsTailCallReverse       uint32 = 1
+	dnsTailCallFinish        uint32 = 2
+
 	// MapNameIfindexToMVMMetadata and the following are maps created by CubeVS.
 	MapNameIfindexToMVMMetadata = "ifindex_to_mvmmeta"
 	MapNameMVMIPToIfindex       = "mvmip_to_ifindex"
 	MapNameRemotePortMapping    = "remote_port_mapping"
 	MapNameLocalPortMapping     = "local_port_mapping"
-	MapNameAllowOut             = "allow_out"
-	MapNameDenyOut              = "deny_out"
+	// MapNameAllowOut is the cube-v0.2.0 legacy migration source.
+	MapNameAllowOut      = "allow_out"
+	MapNameAllowOutV2    = "allow_out_v2"
+	MapNameDenyOut       = "deny_out"
+	MapNameDNSAllow      = "dns_allow"
+	MapNameDNSQueryTrack = "dns_query_track"
 	// constants referenced by BPF programs.
 	globalNameMVMInnerIP           = "mvm_inner_ip"
 	globalNameMVMMacaddrP1         = "mvm_macaddr_p1"
@@ -183,5 +245,50 @@ func _() {
 		const size = unsafe.Sizeof(obj)
 		_ = arr[size-1] // error if size > 8
 		_ = arr[size-8] // error if size < 8
+	}
+
+	{
+		// static assert, make sure netPolicyValueV2 is of size 16
+		var arr [16]struct{}
+		var obj netPolicyValueV2
+		const size = unsafe.Sizeof(obj)
+		_ = arr[size-1]  // error if size > 16
+		_ = arr[size-16] // error if size < 16
+	}
+
+	{
+		// static assert, make sure dnsAllowKey is of size 260
+		var arr [260]struct{}
+		var obj dnsAllowKey
+		const size = unsafe.Sizeof(obj)
+		_ = arr[size-1]   // error if size > 260
+		_ = arr[size-260] // error if size < 260
+	}
+
+	{
+		// static assert, make sure dnsAllowValue is of size 8
+		var arr [8]struct{}
+		var obj dnsAllowValue
+		const size = unsafe.Sizeof(obj)
+		_ = arr[size-1] // error if size > 8
+		_ = arr[size-8] // error if size < 8
+	}
+
+	{
+		// static assert, make sure dnsQueryTrackKey is of size 24
+		var arr [24]struct{}
+		var obj dnsQueryTrackKey
+		const size = unsafe.Sizeof(obj)
+		_ = arr[size-1]  // error if size > 24
+		_ = arr[size-24] // error if size < 24
+	}
+
+	{
+		// static assert, make sure dnsQueryTrackValue is of size 16
+		var arr [16]struct{}
+		var obj dnsQueryTrackValue
+		const size = unsafe.Sizeof(obj)
+		_ = arr[size-1]  // error if size > 16
+		_ = arr[size-16] // error if size < 16
 	}
 }

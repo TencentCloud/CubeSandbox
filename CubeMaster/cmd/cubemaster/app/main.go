@@ -52,7 +52,6 @@ func (a *App) Run() {
 	)
 	defer cancel()
 
-
 	cfg := config.GetConfig()
 
 	if err := coreInit(ctx, cfg); err != nil {

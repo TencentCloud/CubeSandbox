@@ -27,6 +27,14 @@ type RootfsArtifact struct {
 	Status                  string `json:"status" gorm:"column:status"`
 	LastError               string `json:"last_error" gorm:"column:last_error"`
 	GCDeadline              int64  `json:"gc_deadline" gorm:"column:gc_deadline"`
+
+	// CubeEgress CA bake metadata (see design/cube-egress-ca-bake.md).
+	// Used for audit/triage; the artifact reuse cache key folds
+	// CubeEgressCAFingerprint into TemplateSpecFingerprint, so a CA
+	// rotation invalidates stale artifacts automatically.
+	CubeEgressCABaked          bool   `json:"cube_egress_ca_baked" gorm:"column:cube_egress_ca_baked"`
+	CubeEgressCAFingerprint    string `json:"cube_egress_ca_fingerprint" gorm:"column:cube_egress_ca_fingerprint"`
+	CubeEgressCATargetsWritten int    `json:"cube_egress_ca_targets_written" gorm:"column:cube_egress_ca_targets_written"`
 }
 
 func (RootfsArtifact) TableName() string {

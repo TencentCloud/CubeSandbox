@@ -303,6 +303,48 @@ func TestBuildTemplateSpecFingerprintUsesDNSConfig(t *testing.T) {
 	}
 }
 
+func TestBuildTemplateSpecFingerprintEmptyCAMatchesLegacy(t *testing.T) {
+	// Critical invariant: an environment with no CubeEgress configured
+	// must produce the SAME fingerprint as before the CA feature
+	// existed. Otherwise every dev/test deployment would rebuild every
+	// artifact on first run after upgrade, even though no CA was ever
+	// involved. The "" CA fingerprint omitempty's out of the JSON.
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-1",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	legacy := buildTemplateSpecFingerprint(req, "repo@sha256:aaa")
+	withEmptyCA := buildTemplateSpecFingerprintWithCA(req, "repo@sha256:aaa", "")
+	if legacy != withEmptyCA {
+		t.Fatalf("empty CA fingerprint must yield the legacy spec fingerprint:\n legacy=%s\n withEmptyCA=%s", legacy, withEmptyCA)
+	}
+}
+
+func TestBuildTemplateSpecFingerprintWithCAChangesOnRotation(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-1",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	a := buildTemplateSpecFingerprintWithCA(req, "repo@sha256:aaa", "fp-old")
+	b := buildTemplateSpecFingerprintWithCA(req, "repo@sha256:aaa", "fp-new")
+	if a == b {
+		t.Fatal("CA fingerprint rotation must yield a different spec fingerprint, otherwise the artifact reuse cache would serve stale CAs")
+	}
+	// Same CA → same fingerprint (idempotent for identical inputs).
+	again := buildTemplateSpecFingerprintWithCA(req, "repo@sha256:aaa", "fp-old")
+	if a != again {
+		t.Fatal("fingerprint should be deterministic for identical inputs")
+	}
+}
+
 func TestNewCreateTemplateImageJobRecordPersistsRequestID(t *testing.T) {
 	record := newCreateTemplateImageJobRecord(
 		"job-1",
@@ -851,7 +893,7 @@ func TestBuildRootfsArtifactFinalizesBuildResult(t *testing.T) {
 		return &latest, nil
 	})
 
-	got, generatedReq, err := buildRootfsArtifact(context.Background(), artifact, req, source, "http://master.example")
+	got, generatedReq, err := buildRootfsArtifact(context.Background(), artifact, req, source, "http://master.example", nil, "")
 	if err != nil {
 		t.Fatalf("buildRootfsArtifact failed: %v", err)
 	}

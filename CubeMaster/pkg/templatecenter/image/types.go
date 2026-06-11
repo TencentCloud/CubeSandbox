@@ -15,6 +15,12 @@ type SourceSpec struct {
 
 type BuildOptions struct {
 	ArtifactID string
+	// PostRootfsExport is invoked after the image rootfs has been exported to
+	// the working directory but before mkfs.ext4 runs, so callers can mutate
+	// the rootfs (e.g. bake the CubeEgress root CA into the trust store). The
+	// callback receives the rootfs directory path that mkfs.ext4 will consume.
+	// A non-nil error aborts the build.
+	PostRootfsExport func(ctx context.Context, rootfsDir string) error
 }
 
 type BuildResult struct {

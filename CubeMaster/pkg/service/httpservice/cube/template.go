@@ -22,13 +22,16 @@ var getTemplateRequestFn = templatecenter.GetTemplateRequest
 
 type templateResponse struct {
 	*types.Res
-	TemplateID    string                         `json:"template_id,omitempty"`
-	InstanceType  string                         `json:"instance_type,omitempty"`
-	Version       string                         `json:"version,omitempty"`
-	Status        string                         `json:"status,omitempty"`
-	LastError     string                         `json:"last_error,omitempty"`
-	Replicas      []templatecenter.ReplicaStatus `json:"replicas,omitempty"`
-	CreateRequest *types.CreateCubeSandboxReq    `json:"create_request,omitempty"`
+	TemplateID                 string                         `json:"template_id,omitempty"`
+	InstanceType               string                         `json:"instance_type,omitempty"`
+	Version                    string                         `json:"version,omitempty"`
+	Status                     string                         `json:"status,omitempty"`
+	LastError                  string                         `json:"last_error,omitempty"`
+	Replicas                   []templatecenter.ReplicaStatus `json:"replicas,omitempty"`
+	CreateRequest              *types.CreateCubeSandboxReq    `json:"create_request,omitempty"`
+	CubeEgressCABaked          bool                           `json:"cube_egress_ca_baked,omitempty"`
+	CubeEgressCAFingerprint    string                         `json:"cube_egress_ca_fingerprint,omitempty"`
+	CubeEgressCATargetsWritten int                            `json:"cube_egress_ca_targets_written,omitempty"`
 }
 
 type templateListResponse struct {
@@ -187,12 +190,15 @@ func createTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestT
 				RetMsg:  "success",
 			},
 		},
-		TemplateID:   info.TemplateID,
-		InstanceType: info.InstanceType,
-		Version:      info.Version,
-		Status:       info.Status,
-		LastError:    info.LastError,
-		Replicas:     info.Replicas,
+		TemplateID:                 info.TemplateID,
+		InstanceType:               info.InstanceType,
+		Version:                    info.Version,
+		Status:                     info.Status,
+		LastError:                  info.LastError,
+		Replicas:                   info.Replicas,
+		CubeEgressCABaked:          info.CubeEgressCABaked,
+		CubeEgressCAFingerprint:    info.CubeEgressCAFingerprint,
+		CubeEgressCATargetsWritten: info.CubeEgressCATargetsWritten,
 	}
 }
 
@@ -244,13 +250,16 @@ func getTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrac
 				RetMsg:  "success",
 			},
 		},
-		TemplateID:    info.TemplateID,
-		InstanceType:  info.InstanceType,
-		Version:       info.Version,
-		Status:        info.Status,
-		LastError:     info.LastError,
-		Replicas:      info.Replicas,
-		CreateRequest: createReq,
+		TemplateID:                 info.TemplateID,
+		InstanceType:               info.InstanceType,
+		Version:                    info.Version,
+		Status:                     info.Status,
+		LastError:                  info.LastError,
+		Replicas:                   info.Replicas,
+		CreateRequest:              createReq,
+		CubeEgressCABaked:          info.CubeEgressCABaked,
+		CubeEgressCAFingerprint:    info.CubeEgressCAFingerprint,
+		CubeEgressCATargetsWritten: info.CubeEgressCATargetsWritten,
 	}
 }
 

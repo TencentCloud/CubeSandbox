@@ -36,6 +36,7 @@ print_path_hint() {
     echo "[one-click]   cube-runtime"
     echo "[one-click]   containerd-shim-cube-rs"
     echo "[one-click]   cubecli"
+    echo "[one-click]   cubevsmapdump"
     if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
       echo "[one-click]   cubemastercli"
     fi
@@ -480,9 +481,22 @@ systemd_target_for_role() {
 }
 
 stop_existing_systemd_deployment() {
+  # Disable + stop the targets first; PartOf= on each child service is
+  # supposed to cascade the stop. In practice, units that are stuck in
+  # `failed` or `activating` state don't always get cleaned up by the
+  # target stop alone — typically `cube-sandbox-cube-egress-net.service`
+  # blocked on a missing cube-dev interface, leaving its requirer
+  # `cube-sandbox-cube-egress.service` perpetually inactive.
+  #
+  # So we belt-and-suspenders explicitly stop every cube-sandbox-*
+  # service afterwards, which both forces failed units back to inactive
+  # and guarantees the next `enable --now <target>` actually re-runs
+  # ExecStart instead of returning a "no-op, already active" exit 0.
   systemctl disable --now \
     cube-sandbox-control.target \
     cube-sandbox-compute.target >/dev/null 2>&1 || true
+  systemctl reset-failed 'cube-sandbox-*.service' >/dev/null 2>&1 || true
+  systemctl stop 'cube-sandbox-*.service' >/dev/null 2>&1 || true
 }
 
 stop_existing_legacy_deployment() {
@@ -669,11 +683,12 @@ if [[ -n "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR" "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR}"
 fi
 
-chmod +x "${INSTALL_PREFIX}/network-agent/bin/network-agent"
+chmod +x "${INSTALL_PREFIX}/network-agent/bin/"*
 chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*
 chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"
 chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
+chmod +x "${INSTALL_PREFIX}/scripts/cube-egress/"*.sh 2>/dev/null || true
 
 if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
   cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"
@@ -737,6 +752,7 @@ fi
 ln -sf "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" /usr/local/bin/containerd-shim-cube-rs
 ln -sf "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime" /usr/local/bin/cube-runtime
 ln -sf "${INSTALL_PREFIX}/Cubelet/bin/cubecli" /usr/local/bin/cubecli
+ln -sf "${INSTALL_PREFIX}/network-agent/bin/cubevsmapdump" /usr/local/bin/cubevsmapdump
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   ln -sf "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli" /usr/local/bin/cubemastercli
 else

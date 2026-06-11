@@ -25,6 +25,7 @@ CUBE_SUPPORT_TEMPLATE_DIR="${SCRIPT_DIR}/support"
 CUBE_WEBUI_TEMPLATE_DIR="${SCRIPT_DIR}/webui"
 CUBE_SYSTEMD_TEMPLATE_DIR="${SCRIPT_DIR}/systemd"
 CUBE_PROXY_SOURCE_DIR="${ONE_CLICK_CUBE_PROXY_SOURCE_DIR:-${ROOT_DIR}/CubeProxy}"
+CUBE_EGRESS_SOURCE_DIR="${ONE_CLICK_CUBE_EGRESS_SOURCE_DIR:-${ROOT_DIR}/CubeEgress}"
 WEB_SOURCE_DIR="${ONE_CLICK_WEB_SOURCE_DIR:-${ROOT_DIR}/web}"
 WEB_DIST_OVERRIDE="${ONE_CLICK_WEB_DIST_DIR:-}"
 MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert}"
@@ -46,6 +47,7 @@ CUBEMASTER_BUILD_MODE="${ONE_CLICK_CUBEMASTER_BUILD_MODE:-local}"
 CUBELET_BUILD_MODE="${ONE_CLICK_CUBELET_BUILD_MODE:-local}"
 API_BUILD_MODE="${ONE_CLICK_CUBE_API_BUILD_MODE:-local}"
 NETWORK_AGENT_BUILD_MODE="${ONE_CLICK_NETWORK_AGENT_BUILD_MODE:-local}"
+CUBEVSMAPDUMP_BUILD_MODE="${ONE_CLICK_CUBEVSMAPDUMP_BUILD_MODE:-local}"
 
 CUBEMASTER_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTER_BIN:-}"
 CUBEMASTERCLI_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTERCLI_BIN:-}"
@@ -53,6 +55,7 @@ CUBELET_BIN_OVERRIDE="${ONE_CLICK_CUBELET_BIN:-}"
 CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
 NETWORK_AGENT_BIN_OVERRIDE="${ONE_CLICK_NETWORK_AGENT_BIN:-}"
+CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
 
 go_version_ldflags() {
   local version_pkg="$1"
@@ -470,6 +473,10 @@ build_or_copy_go_binary \
   "network-agent" "${NETWORK_AGENT_BIN_OVERRIDE}" \
   "${ROOT_DIR}/network-agent" "${NETWORK_AGENT_BUILD_MODE}" \
   "${CORE_BIN_DIR}/network-agent" ./cmd/network-agent "${NETAGENT_VERSION_PKG}"
+build_or_copy_go_binary \
+  "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/CubeNet/cubevs" "${CUBEVSMAPDUMP_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/cubevsmapdump" ./cmd/cubevsmapdump
 
 mkdir -p \
   "${PACKAGE_ROOT}/network-agent/bin" \
@@ -490,9 +497,11 @@ mkdir -p \
   "${PACKAGE_ROOT}/cube-snapshot" \
   "${PACKAGE_ROOT}/scripts/one-click" \
   "${PACKAGE_ROOT}/scripts/systemd" \
+  "${PACKAGE_ROOT}/scripts/cube-egress" \
   "${PACKAGE_ROOT}/sql"
 
 copy_file "${CORE_BIN_DIR}/network-agent" "${PACKAGE_ROOT}/network-agent/bin/network-agent"
+copy_file "${CORE_BIN_DIR}/cubevsmapdump" "${PACKAGE_ROOT}/network-agent/bin/cubevsmapdump"
 copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/network-agent/network-agent.yaml"
 
 copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
@@ -541,12 +550,20 @@ copy_dir_contents "${SCRIPT_DIR}/scripts/systemd" "${PACKAGE_ROOT}/scripts/syste
 # it must ship in the release bundle so the install layout exposes
 # ${INSTALL_PREFIX}/scripts/cube-diag/collect-logs.sh.
 copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cube-diag"
+# CubeEgress's host-side iptables/sysctl init script. Lives in the
+# CubeEgress repo subtree (CubeEgress/scripts/) — copy a single file
+# rather than the whole dir so we don't pull in the legacy
+# cube-proxy-net.service unit that conflicts with our deploy/one-click
+# integration.
+copy_file "${CUBE_EGRESS_SOURCE_DIR}/scripts/cube-proxy-iptables-init.sh" \
+          "${PACKAGE_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh"
 copy_dir_contents "${SCRIPT_DIR}/sql" "${PACKAGE_ROOT}/sql"
 
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/systemd" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/scripts/cube-egress" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
 tar -C "${WORK_ROOT}" -czf "${PACKAGE_TAR}" "sandbox-package"

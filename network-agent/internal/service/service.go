@@ -14,6 +14,18 @@ type Service interface {
 	GetNetwork(ctx context.Context, req *GetNetworkRequest) (*GetNetworkResponse, error)
 	ListNetworks(ctx context.Context, req *ListNetworksRequest) (*ListNetworksResponse, error)
 	Health(ctx context.Context) error
+
+	// DumpEgressPolicies returns every active sandbox's L7 egress
+	// policy in the JSON shape CubeEgress's bootstrap.lua expects.
+	// Used by GET /v1/policies/dump (CUBE_EGRESS_BOOTSTRAP_URL points
+	// at this endpoint). Sandboxes without rules are omitted, so an
+	// empty map is the correct response when no L7 policy is in play.
+	//
+	// Returns marshal-ready map: keys are sandbox IPs, values are the
+	// `{policy_id, rules: [...]}` body that PUT /admin/v1/policies/<ip>
+	// would carry — guaranteeing the per-sandbox push and the bulk
+	// dump never disagree about how a rule is encoded.
+	DumpEgressPolicies(ctx context.Context) (map[string]map[string]any, error)
 }
 
 type noopService struct{}
@@ -59,4 +71,8 @@ func (s *noopService) ListNetworks(ctx context.Context, req *ListNetworksRequest
 
 func (s *noopService) Health(ctx context.Context) error {
 	return nil
+}
+
+func (s *noopService) DumpEgressPolicies(ctx context.Context) (map[string]map[string]any, error) {
+	return map[string]map[string]any{}, nil
 }

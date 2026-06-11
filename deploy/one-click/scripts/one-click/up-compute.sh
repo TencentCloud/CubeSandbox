@@ -9,7 +9,7 @@ require_cmd sed
 
 NETWORK_AGENT_BIN="${TOOLBOX_ROOT}/network-agent/bin/network-agent"
 NETWORK_AGENT_CFG="${TOOLBOX_ROOT}/network-agent/network-agent.yaml"
-NETWORK_AGENT_STATE_DIR="${TOOLBOX_ROOT}/network-agent/state"
+NETWORK_AGENT_STATE_DIR="/data/cubelet/network-agent/state"
 NETWORK_AGENT_HEALTH_ADDR="${NETWORK_AGENT_HEALTH_ADDR:-127.0.0.1:19090}"
 NETWORK_AGENT_READY_TIMEOUT="${NETWORK_AGENT_READY_TIMEOUT:-120}"
 CUBELET_BIN="${TOOLBOX_ROOT}/Cubelet/bin/cubelet"

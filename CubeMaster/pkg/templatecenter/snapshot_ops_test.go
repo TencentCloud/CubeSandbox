@@ -197,7 +197,7 @@ func TestSubmitSandboxSnapshotReturnsStoredFailureForExistingRequest(t *testing.
 // error.  This is the load-bearing invariant that lets CubeAPI / external
 // SDKs treat `DeleteSnapshot` as a synchronous RPC — see
 // SDKs treat `DeleteSnapshot` as a synchronous RPC — CubeAPI waits for
-	// a terminal state and does not expose a polling interface.  If a future refactor
+// a terminal state and does not expose a polling interface.  If a future refactor
 // would start observing "the API said success but the snapshot is still
 // being deleted" races; this test fails first.
 func TestFinalizeSynchronousSnapshotJobEnforcesTerminalContract(t *testing.T) {

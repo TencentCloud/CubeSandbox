@@ -1,0 +1,15 @@
+[Unit]
+Description=CubeSandbox transparent proxy — host network rules (TPROXY + selector-based ip rule)
+After=network-online.target
+Wants=network-online.target
+Before=docker.service
+ConditionPathExists=/sys/class/net/cube-dev
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cube-proxy-iptables-init.sh up
+ExecStop=/usr/local/sbin/cube-proxy-iptables-init.sh down
+
+[Install]
+WantedBy=multi-user.target

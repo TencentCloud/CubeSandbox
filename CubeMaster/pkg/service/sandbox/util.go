@@ -130,20 +130,20 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	}
 
 	out := &cubebox.RunCubeSandboxRequest{
-		RequestID:      req.RequestID,
-		Labels:         req.Labels,
-		InstanceType:   req.InstanceType,
-		NetworkType:    req.NetworkType,
-		Annotations:    make(map[string]string),
-		RuntimeHandler: req.RuntimeHandler,
-		Namespace:      req.Namespace,
-		CubevsContext:  mapCubeVSContext(req.CubeVSContext),
+		RequestID:         req.RequestID,
+		Labels:            req.Labels,
+		InstanceType:      req.InstanceType,
+		NetworkType:       req.NetworkType,
+		Annotations:       make(map[string]string),
+		RuntimeHandler:    req.RuntimeHandler,
+		Namespace:         req.Namespace,
+		CubeNetworkConfig: mapCubeNetworkConfig(req.CubeNetworkConfig),
 	}
 	log.G(ctx).Infof(
-		"ConstructCubeletReq: instance_type=%s network_type=%s cubevs_context=%s",
+		"ConstructCubeletReq: instance_type=%s network_type=%s cube_network_config=%s",
 		req.InstanceType,
 		req.NetworkType,
-		formatConstructCubeVSContext(out.CubevsContext),
+		formatConstructCubeNetworkConfig(out.CubeNetworkConfig),
 	)
 
 	err := checkAndGetAnnotation(req, out)
@@ -171,13 +171,14 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	return out, nil
 }
 
-func mapCubeVSContext(in *types.CubeVSContext) *cubebox.CubeVSContext {
+func mapCubeNetworkConfig(in *types.CubeNetworkConfig) *cubebox.CubeNetworkConfig {
 	if in == nil {
 		return nil
 	}
-	out := &cubebox.CubeVSContext{
+	out := &cubebox.CubeNetworkConfig{
 		AllowOut: append([]string(nil), in.AllowOut...),
 		DenyOut:  append([]string(nil), in.DenyOut...),
+		Rules:    mapEgressRules(in.Rules),
 	}
 	if in.AllowInternetAccess != nil {
 		allowInternetAccess := *in.AllowInternetAccess
@@ -186,15 +187,70 @@ func mapCubeVSContext(in *types.CubeVSContext) *cubebox.CubeVSContext {
 	return out
 }
 
-func formatConstructCubeVSContext(in *cubebox.CubeVSContext) string {
+func mapEgressRules(in []*types.EgressRule) []*cubebox.EgressRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*cubebox.EgressRule, 0, len(in))
+	for _, r := range in {
+		if r == nil {
+			continue
+		}
+		out = append(out, &cubebox.EgressRule{
+			Name:   r.Name,
+			Match:  mapEgressRuleMatch(r.Match),
+			Action: mapEgressRuleAction(r.Action),
+		})
+	}
+	return out
+}
+
+func mapEgressRuleMatch(in *types.EgressRuleMatch) *cubebox.EgressRuleMatch {
 	if in == nil {
-		return "allow_internet_access=default(true) allow_out=[] deny_out=[]"
+		return nil
+	}
+	return &cubebox.EgressRuleMatch{
+		Sni:    in.SNI,
+		Host:   in.Host,
+		Method: append([]string(nil), in.Method...),
+		Path:   in.Path,
+		Scheme: in.Scheme,
+	}
+}
+
+func mapEgressRuleAction(in *types.EgressRuleAction) *cubebox.EgressRuleAction {
+	if in == nil {
+		return nil
+	}
+	out := &cubebox.EgressRuleAction{
+		Allow: in.Allow,
+		Audit: in.Audit,
+	}
+	if len(in.Inject) > 0 {
+		out.Inject = make([]*cubebox.EgressRuleInject, 0, len(in.Inject))
+		for _, inj := range in.Inject {
+			if inj == nil {
+				continue
+			}
+			out.Inject = append(out.Inject, &cubebox.EgressRuleInject{
+				Header: inj.Header,
+				Secret: inj.Secret,
+				Format: inj.Format,
+			})
+		}
+	}
+	return out
+}
+
+func formatConstructCubeNetworkConfig(in *cubebox.CubeNetworkConfig) string {
+	if in == nil {
+		return "allow_internet_access=default(true) allow_out=[] deny_out=[] rules=0"
 	}
 	allowInternetAccess := "default(true)"
 	if in.AllowInternetAccess != nil {
 		allowInternetAccess = fmt.Sprintf("%t", in.GetAllowInternetAccess())
 	}
-	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v", allowInternetAccess, in.GetAllowOut(), in.GetDenyOut())
+	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v rules=%d", allowInternetAccess, in.GetAllowOut(), in.GetDenyOut(), len(in.GetRules()))
 }
 
 func getExposedPorts(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {

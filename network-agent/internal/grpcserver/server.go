@@ -89,14 +89,14 @@ type networkAgentServer struct {
 
 func (s *networkAgentServer) EnsureNetwork(ctx context.Context, req *networkagentv1.EnsureNetworkRequest) (*networkagentv1.EnsureNetworkResponse, error) {
 	resp, err := s.svc.EnsureNetwork(ctx, &service.EnsureNetworkRequest{
-		SandboxID:       req.GetSandboxId(),
-		IdempotencyKey:  req.GetIdempotencyKey(),
-		Interfaces:      mapInterfacesFromProto(req.GetInterfaces()),
-		Routes:          mapRoutesFromProto(req.GetRoutes()),
-		ARPNeighbors:    mapARPNeighborsFromProto(req.GetArpNeighbors()),
-		PortMappings:    mapPortMappingsFromProto(req.GetPortMappings()),
-		CubeVSContext:   mapCubeVSContextFromProto(req.GetCubevsContext()),
-		PersistMetadata: req.GetPersistMetadata(),
+		SandboxID:         req.GetSandboxId(),
+		IdempotencyKey:    req.GetIdempotencyKey(),
+		Interfaces:        mapInterfacesFromProto(req.GetInterfaces()),
+		Routes:            mapRoutesFromProto(req.GetRoutes()),
+		ARPNeighbors:      mapARPNeighborsFromProto(req.GetArpNeighbors()),
+		PortMappings:      mapPortMappingsFromProto(req.GetPortMappings()),
+		CubeNetworkConfig: mapCubeNetworkConfigFromProto(req.GetCubeNetworkConfig()),
+		PersistMetadata:   req.GetPersistMetadata(),
 	})
 	if err != nil {
 		return nil, err
@@ -130,15 +130,15 @@ func (s *networkAgentServer) ReleaseNetwork(ctx context.Context, req *networkage
 
 func (s *networkAgentServer) ReconcileNetwork(ctx context.Context, req *networkagentv1.ReconcileNetworkRequest) (*networkagentv1.ReconcileNetworkResponse, error) {
 	resp, err := s.svc.ReconcileNetwork(ctx, &service.ReconcileNetworkRequest{
-		SandboxID:       req.GetSandboxId(),
-		NetworkHandle:   req.GetNetworkHandle(),
-		IdempotencyKey:  req.GetIdempotencyKey(),
-		Interfaces:      mapInterfacesFromProto(req.GetInterfaces()),
-		Routes:          mapRoutesFromProto(req.GetRoutes()),
-		ARPNeighbors:    mapARPNeighborsFromProto(req.GetArpNeighbors()),
-		PortMappings:    mapPortMappingsFromProto(req.GetPortMappings()),
-		CubeVSContext:   mapCubeVSContextFromProto(req.GetCubevsContext()),
-		PersistMetadata: req.GetPersistMetadata(),
+		SandboxID:         req.GetSandboxId(),
+		NetworkHandle:     req.GetNetworkHandle(),
+		IdempotencyKey:    req.GetIdempotencyKey(),
+		Interfaces:        mapInterfacesFromProto(req.GetInterfaces()),
+		Routes:            mapRoutesFromProto(req.GetRoutes()),
+		ARPNeighbors:      mapARPNeighborsFromProto(req.GetArpNeighbors()),
+		PortMappings:      mapPortMappingsFromProto(req.GetPortMappings()),
+		CubeNetworkConfig: mapCubeNetworkConfigFromProto(req.GetCubeNetworkConfig()),
+		PersistMetadata:   req.GetPersistMetadata(),
 	})
 	if err != nil {
 		return nil, err
@@ -299,17 +299,73 @@ func mapPortMappingsToProto(items []service.PortMapping) []*networkagentv1.PortM
 	return out
 }
 
-func mapCubeVSContextFromProto(item *networkagentv1.CubeVSContext) *service.CubeVSContext {
+func mapCubeNetworkConfigFromProto(item *networkagentv1.CubeNetworkConfig) *service.CubeNetworkConfig {
 	if item == nil {
 		return nil
 	}
-	out := &service.CubeVSContext{
+	out := &service.CubeNetworkConfig{
 		AllowOut: item.GetAllowOut(),
 		DenyOut:  item.GetDenyOut(),
+		Rules:    mapEgressRulesFromProto(item.GetRules()),
 	}
 	if item.AllowInternetAccess != nil {
 		v := item.GetAllowInternetAccess()
 		out.AllowInternetAccess = &v
+	}
+	return out
+}
+
+func mapEgressRulesFromProto(items []*networkagentv1.EgressRule) []*service.EgressRule {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]*service.EgressRule, 0, len(items))
+	for _, r := range items {
+		if r == nil {
+			continue
+		}
+		out = append(out, &service.EgressRule{
+			Name:   r.GetName(),
+			Match:  mapEgressRuleMatchFromProto(r.GetMatch()),
+			Action: mapEgressRuleActionFromProto(r.GetAction()),
+		})
+	}
+	return out
+}
+
+func mapEgressRuleMatchFromProto(m *networkagentv1.EgressRuleMatch) *service.EgressRuleMatch {
+	if m == nil {
+		return nil
+	}
+	return &service.EgressRuleMatch{
+		SNI:    m.Sni,
+		Host:   m.Host,
+		Method: append([]string(nil), m.GetMethod()...),
+		Path:   m.Path,
+		Scheme: m.Scheme,
+	}
+}
+
+func mapEgressRuleActionFromProto(a *networkagentv1.EgressRuleAction) *service.EgressRuleAction {
+	if a == nil {
+		return nil
+	}
+	out := &service.EgressRuleAction{
+		Allow: a.GetAllow(),
+		Audit: a.Audit,
+	}
+	if len(a.GetInject()) > 0 {
+		out.Inject = make([]*service.EgressRuleInject, 0, len(a.GetInject()))
+		for _, inj := range a.GetInject() {
+			if inj == nil {
+				continue
+			}
+			out.Inject = append(out.Inject, &service.EgressRuleInject{
+				Header: inj.GetHeader(),
+				Secret: inj.GetSecret(),
+				Format: inj.Format,
+			})
+		}
 	}
 	return out
 }

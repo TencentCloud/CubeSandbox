@@ -57,14 +57,14 @@ func grpcTargetFromEndpoint(endpoint string) (string, error) {
 
 func (c *grpcHealthClient) EnsureNetwork(ctx context.Context, req *EnsureNetworkRequest) (*EnsureNetworkResponse, error) {
 	resp, err := c.na.EnsureNetwork(ctx, &networkagentv1.EnsureNetworkRequest{
-		SandboxId:       req.SandboxID,
-		IdempotencyKey:  req.IdempotencyKey,
-		Interfaces:      mapInterfacesToProto(req.Interfaces),
-		Routes:          mapRoutesToProto(req.Routes),
-		ArpNeighbors:    mapARPNeighborsToProto(req.ARPNeighbors),
-		PortMappings:    mapPortMappingsToProto(req.PortMappings),
-		CubevsContext:   mapCubeVSContextToProto(req.CubeVSContext),
-		PersistMetadata: req.PersistMetadata,
+		SandboxId:         req.SandboxID,
+		IdempotencyKey:    req.IdempotencyKey,
+		Interfaces:        mapInterfacesToProto(req.Interfaces),
+		Routes:            mapRoutesToProto(req.Routes),
+		ArpNeighbors:      mapARPNeighborsToProto(req.ARPNeighbors),
+		PortMappings:      mapPortMappingsToProto(req.PortMappings),
+		CubeNetworkConfig: mapCubeNetworkConfigToProto(req.CubeNetworkConfig),
+		PersistMetadata:   req.PersistMetadata,
 	})
 	if err != nil {
 		return nil, err
@@ -92,15 +92,15 @@ func (c *grpcHealthClient) ReleaseNetwork(ctx context.Context, req *ReleaseNetwo
 
 func (c *grpcHealthClient) ReconcileNetwork(ctx context.Context, req *ReconcileNetworkRequest) (*ReconcileNetworkResponse, error) {
 	resp, err := c.na.ReconcileNetwork(ctx, &networkagentv1.ReconcileNetworkRequest{
-		SandboxId:       req.SandboxID,
-		NetworkHandle:   req.NetworkHandle,
-		IdempotencyKey:  req.IdempotencyKey,
-		Interfaces:      mapInterfacesToProto(req.Interfaces),
-		Routes:          mapRoutesToProto(req.Routes),
-		ArpNeighbors:    mapARPNeighborsToProto(req.ARPNeighbors),
-		PortMappings:    mapPortMappingsToProto(req.PortMappings),
-		CubevsContext:   mapCubeVSContextToProto(req.CubeVSContext),
-		PersistMetadata: req.PersistMetadata,
+		SandboxId:         req.SandboxID,
+		NetworkHandle:     req.NetworkHandle,
+		IdempotencyKey:    req.IdempotencyKey,
+		Interfaces:        mapInterfacesToProto(req.Interfaces),
+		Routes:            mapRoutesToProto(req.Routes),
+		ArpNeighbors:      mapARPNeighborsToProto(req.ARPNeighbors),
+		PortMappings:      mapPortMappingsToProto(req.PortMappings),
+		CubeNetworkConfig: mapCubeNetworkConfigToProto(req.CubeNetworkConfig),
+		PersistMetadata:   req.PersistMetadata,
 	})
 	if err != nil {
 		return nil, err
@@ -265,14 +265,70 @@ func mapPortMappingsFromProto(in []*networkagentv1.PortMapping) []PortMapping {
 	return out
 }
 
-func mapCubeVSContextToProto(in *CubeVSContext) *networkagentv1.CubeVSContext {
+func mapCubeNetworkConfigToProto(in *CubeNetworkConfig) *networkagentv1.CubeNetworkConfig {
 	if in == nil {
 		return nil
 	}
-	out := &networkagentv1.CubeVSContext{
+	out := &networkagentv1.CubeNetworkConfig{
 		AllowInternetAccess: in.AllowInternetAccess,
 		AllowOut:            in.AllowOut,
 		DenyOut:             in.DenyOut,
+		Rules:               mapEgressRulesToProto(in.Rules),
+	}
+	return out
+}
+
+func mapEgressRulesToProto(in []*EgressRule) []*networkagentv1.EgressRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*networkagentv1.EgressRule, 0, len(in))
+	for _, r := range in {
+		if r == nil {
+			continue
+		}
+		out = append(out, &networkagentv1.EgressRule{
+			Name:   r.Name,
+			Match:  mapEgressRuleMatchToProto(r.Match),
+			Action: mapEgressRuleActionToProto(r.Action),
+		})
+	}
+	return out
+}
+
+func mapEgressRuleMatchToProto(in *EgressRuleMatch) *networkagentv1.EgressRuleMatch {
+	if in == nil {
+		return nil
+	}
+	return &networkagentv1.EgressRuleMatch{
+		Sni:    in.SNI,
+		Host:   in.Host,
+		Method: append([]string(nil), in.Method...),
+		Path:   in.Path,
+		Scheme: in.Scheme,
+	}
+}
+
+func mapEgressRuleActionToProto(in *EgressRuleAction) *networkagentv1.EgressRuleAction {
+	if in == nil {
+		return nil
+	}
+	out := &networkagentv1.EgressRuleAction{
+		Allow: in.Allow,
+		Audit: in.Audit,
+	}
+	if len(in.Inject) > 0 {
+		out.Inject = make([]*networkagentv1.EgressRuleInject, 0, len(in.Inject))
+		for _, inj := range in.Inject {
+			if inj == nil {
+				continue
+			}
+			out.Inject = append(out.Inject, &networkagentv1.EgressRuleInject{
+				Header: inj.Header,
+				Secret: inj.Secret,
+				Format: inj.Format,
+			})
+		}
 	}
 	return out
 }

@@ -59,7 +59,7 @@ COVERAGE_PACKAGES=$(shell go list ./... \
 	| grep -v github.com/tencentcloud/CubeSandbox/CubeMaster/cmd )
 
 
-.PHONY: build deps check-proto-tools
+.PHONY: build deps check-proto-tools fmt lint clean
 build: $(APPS)
 deps:
 	$(call msg,Download modules)
@@ -80,6 +80,9 @@ $(APPS): deps
 		cmd/$@/*.go
 
 
+
+fmt:
+	$(Q)go fmt ./...
 
 lint:
 	$(Q)go fmt ./...

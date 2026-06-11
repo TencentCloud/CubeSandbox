@@ -14,8 +14,8 @@ ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/network-
 ExecStartPost=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/network-agent-postcheck.sh
 Restart=on-failure
 RestartSec=2s
-# Override short distro defaults explicitly.
-TimeoutStartSec=60s
+# network-agent-postcheck.sh computes a bounded startup wait from tap_init_num.
+TimeoutStartSec=infinity
 TimeoutStopSec=30s
 
 [Install]

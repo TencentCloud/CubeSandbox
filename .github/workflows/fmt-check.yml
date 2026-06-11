@@ -1,0 +1,149 @@
+name: Format Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**/*.go'
+      - '**/*.rs'
+      - 'Makefile'
+      - 'agent/Makefile'
+      - 'CubeAPI/Makefile'
+      - 'Cubelet/Makefile'
+      - 'CubeMaster/Makefile'
+      - 'CubeShim/Makefile'
+      - 'cubecow/Makefile'
+      - 'cubelog/Makefile'
+      - 'hypervisor/Makefile'
+      - 'network-agent/Makefile'
+      - '.github/workflows/fmt-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: fmt-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILDER_IMAGE_REMOTE: ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
+  BUILDER_IMAGE_LOCAL: cube-sandbox-builder:ci
+
+jobs:
+  fmt:
+    name: Code Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect builder changes
+        id: builder_changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_ref="${{ github.event.pull_request.base.sha }}"
+            head_ref="${{ github.event.pull_request.head.sha }}"
+          else
+            base_ref="${{ github.event.before }}"
+            head_ref="${GITHUB_SHA}"
+          fi
+
+          if [[ -z "${base_ref}" || "${base_ref}" == "0000000000000000000000000000000000000000" ]]; then
+            changed_files="$(git diff-tree --no-commit-id --name-only -r "${head_ref}")"
+          else
+            changed_files="$(git diff --name-only "${base_ref}" "${head_ref}")"
+          fi
+
+          printf 'Changed files:\n%s\n' "${changed_files}"
+
+          builder_inputs_changed="false"
+          while IFS= read -r file; do
+            case "${file}" in
+              docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
+                builder_inputs_changed="true"
+                break
+                ;;
+            esac
+          done <<< "${changed_files}"
+
+          echo "changed=${builder_inputs_changed}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GitHub Container Registry
+        id: ghcr_login
+        if: steps.builder_changes.outputs.changed != 'true'
+        continue-on-error: true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Warn about GHCR login failure
+        if: steps.ghcr_login.outcome == 'failure'
+        shell: bash
+        run: echo "::warning::GHCR login failed - will attempt pull as anonymous or build locally"
+
+      - name: Resolve builder image
+        id: builder_image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          build_local_builder_image() {
+            docker build \
+              -t "${BUILDER_IMAGE_LOCAL}" \
+              -f docker/Dockerfile.builder \
+              --build-arg GITHUB_ACTIONS=true \
+              --build-arg RUSTUP_DIST_SERVER=https://static.rust-lang.org \
+              --build-arg RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup \
+              .
+          }
+
+          image="${BUILDER_IMAGE_REMOTE}"
+
+          if [[ "${{ steps.builder_changes.outputs.changed }}" == "true" ]]; then
+            echo "Builder inputs changed, building local builder image..."
+            build_local_builder_image
+            image="${BUILDER_IMAGE_LOCAL}"
+          elif docker pull "${BUILDER_IMAGE_REMOTE}"; then
+            echo "Using published builder image ${BUILDER_IMAGE_REMOTE}"
+          else
+            echo "Failed to pull ${BUILDER_IMAGE_REMOTE}, building local fallback image..."
+            build_local_builder_image
+            image="${BUILDER_IMAGE_LOCAL}"
+          fi
+
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run make fmt in builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          make builder-run \
+            BUILDER_IMAGE="${{ steps.builder_image.outputs.image }}" \
+            BUILDER_CMD='make fmt'
+
+      - name: Check for uncommitted formatting changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! git diff --exit-code; then
+            echo ""
+            echo "::error::Code is not properly formatted. Run 'make fmt' locally and commit the changes."
+            echo ""
+            echo "Unformatted files listed above. To fix:"
+            echo "  make fmt"
+            echo "  git add -u"
+            echo "  git commit -m 'chore: apply code formatting'"
+            exit 1
+          fi
+
+          echo "All files are properly formatted."

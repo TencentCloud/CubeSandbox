@@ -15,21 +15,13 @@ import (
 )
 
 var (
-
 	cubelogPackage string = "github.com/tencentcloud/CubeSandbox/cubelog"
-
 
 	minimumCallerDepth int
 
-
 	callerInitOnce sync.Once
 
-
 	skipCallerDepth int
-
-
-
-
 
 	CallerPrettyfier func(*runtime.Frame) (file string)
 )
@@ -38,21 +30,17 @@ const (
 	maximumCallerDepth int = 25
 )
 
-
 const (
 	KeyAlarmType contextKey = "alarm_type"
 	KeyAlarmName contextKey = "alarm_name"
 )
 
-
 type logFormat int
-
 
 const (
 	TextFormat logFormat = iota
 	JSONFormat
 )
-
 
 const (
 	DEBUG LogLevel = iota
@@ -66,7 +54,6 @@ const (
 var (
 	logLevel = DEBUG
 
-
 	longFilePath = false
 
 	mu           sync.Mutex
@@ -74,7 +61,6 @@ var (
 	logQueueSize = 10000
 	logQueue     = make(chan *logValue, logQueueSize)
 )
-
 
 type Logger struct {
 	name         string
@@ -84,9 +70,7 @@ type Logger struct {
 	mu           sync.Mutex
 	entryPool    sync.Pool
 	customFields Fields
-
 }
-
 
 type LogLevel uint8
 
@@ -104,7 +88,6 @@ func init() {
 	go flushLog(true)
 }
 
-
 func (lv *LogLevel) String() string {
 	switch *lv {
 	case DEBUG:
@@ -121,7 +104,6 @@ func (lv *LogLevel) String() string {
 		return "UNKNOWN"
 	}
 }
-
 
 func GetLogger(name string) *Logger {
 	mu.Lock()
@@ -141,32 +123,25 @@ func GetLogger(name string) *Logger {
 	return lg
 }
 
-
 func SetLevel(level LogLevel) {
 	logLevel = level
 }
-
 
 func GetLevel() LogLevel {
 	return logLevel
 }
 
-
 func SetSkipCallerDepth(depth int) {
 	skipCallerDepth = depth
 }
-
 
 func SetCallerPrettyfier(f func(*runtime.Frame) (file string)) {
 	CallerPrettyfier = f
 }
 
-
-
 func EnableLongFilePath() {
 	longFilePath = true
 }
-
 
 func StringToLevel(level string) LogLevel {
 	switch level {
@@ -185,21 +160,17 @@ func StringToLevel(level string) LogLevel {
 	}
 }
 
-
 func (logger *Logger) SetLogName(name string) {
 	logger.name = name
 }
-
 
 func (logger *Logger) SetLogFormat(format logFormat) {
 	logger.format = format
 }
 
-
 func (logger *Logger) EnableFileLog() {
 	logger.debug = true
 }
-
 
 func (logger *Logger) SetFileRoller(logpath string, num int, sizeMB int) error {
 	if err := os.MkdirAll(logpath, 0755); err != nil {
@@ -210,7 +181,6 @@ func (logger *Logger) SetFileRoller(logpath string, num int, sizeMB int) error {
 	return nil
 }
 
-
 func (logger *Logger) IsConsoleWriter() bool {
 	if reflect.TypeOf(logger.writer) == reflect.TypeOf(&ConsoleWriter{}) {
 		return true
@@ -218,11 +188,9 @@ func (logger *Logger) IsConsoleWriter() bool {
 	return false
 }
 
-
 func (logger *Logger) SetOutput(w io.Writer) {
 	logger.writer = w
 }
-
 
 func (logger *Logger) SetDayRoller(logpath string, num int) error {
 	if err := os.MkdirAll(logpath, 0755); err != nil {
@@ -233,7 +201,6 @@ func (logger *Logger) SetDayRoller(logpath string, num int) error {
 	return nil
 }
 
-
 func (logger *Logger) SetHourRoller(logpath string, num int) error {
 	if err := os.MkdirAll(logpath, 0755); err != nil {
 		return err
@@ -243,11 +210,9 @@ func (logger *Logger) SetHourRoller(logpath string, num int) error {
 	return nil
 }
 
-
 func (logger *Logger) SetConsole() {
 	logger.writer = &ConsoleWriter{}
 }
-
 
 func (logger *Logger) SetCustomFields(fields Fields) {
 	logger.mu.Lock()
@@ -255,19 +220,16 @@ func (logger *Logger) SetCustomFields(fields Fields) {
 	logger.customFields = fields
 }
 
-
 func (logger *Logger) GetCustomFields() Fields {
 	logger.mu.Lock()
 	defer logger.mu.Unlock()
 	return logger.customFields
 }
 
-
 func (logger *Logger) WithContext(ctx context.Context) *Entry {
 	e := logger.newEntry()
 	defer logger.releaseEntry(e)
 	entry := e.WithContext(ctx)
-
 
 	if logger.customFields != nil && len(logger.customFields) > 0 {
 		entry = entry.WithFields(logger.customFields)
@@ -276,11 +238,9 @@ func (logger *Logger) WithContext(ctx context.Context) *Entry {
 	return entry
 }
 
-
 func (logger *Logger) WithFields(fields Fields) *Entry {
 	e := logger.newEntry()
 	defer logger.releaseEntry(e)
-
 
 	if logger.customFields != nil && len(logger.customFields) > 0 {
 		mergedFields := make(Fields, len(logger.customFields)+len(fields))
@@ -300,7 +260,6 @@ func (logger *Logger) writef(ctx context.Context, level LogLevel, format string,
 	e := logger.newEntry()
 	defer logger.releaseEntry(e)
 
-
 	if logger.customFields != nil && len(logger.customFields) > 0 {
 		e = e.WithFields(logger.customFields)
 	}
@@ -308,57 +267,45 @@ func (logger *Logger) writef(ctx context.Context, level LogLevel, format string,
 	e.writef(ctx, level, format, v)
 }
 
-
 func (logger *Logger) Debug(v ...interface{}) {
 	logger.writef(context.TODO(), DEBUG, "", v)
 }
-
 
 func (logger *Logger) Info(v ...interface{}) {
 	logger.writef(context.TODO(), INFO, "", v)
 }
 
-
 func (logger *Logger) Warn(v ...interface{}) {
 	logger.writef(context.TODO(), WARN, "", v)
 }
-
 
 func (logger *Logger) Error(v ...interface{}) {
 	logger.writef(context.TODO(), ERROR, "", v)
 }
 
-
 func (logger *Logger) Fatal(v ...interface{}) {
 	logger.writef(context.TODO(), FATAL, "", v)
 }
-
 
 func (logger *Logger) Debugf(format string, v ...interface{}) {
 	logger.writef(context.TODO(), DEBUG, format, v)
 }
 
-
 func (logger *Logger) Infof(format string, v ...interface{}) {
 	logger.writef(context.TODO(), INFO, format, v)
 }
-
 
 func (logger *Logger) Warnf(format string, v ...interface{}) {
 	logger.writef(context.TODO(), WARN, format, v)
 }
 
-
 func (logger *Logger) Errorf(format string, v ...interface{}) {
 	logger.writef(context.TODO(), ERROR, format, v)
 }
 
-
 func (logger *Logger) Fatalf(format string, v ...interface{}) {
 	logger.writef(context.TODO(), FATAL, format, v)
 }
-
-
 
 func getPackageName(f string) string {
 	for {
@@ -374,9 +321,6 @@ func getPackageName(f string) string {
 	return f
 }
 
-
-
-
 func (logger *Logger) newEntry() *Entry {
 	entry, ok := logger.entryPool.Get().(*Entry)
 	if ok {
@@ -389,7 +333,6 @@ func (logger *Logger) releaseEntry(entry *Entry) {
 	entry.data = map[string]interface{}{}
 	logger.entryPool.Put(entry)
 }
-
 
 func (l *Logger) WriteLog(msg []byte) {
 	select {
@@ -408,12 +351,6 @@ func flushLog(sync bool) {
 		for {
 			select {
 			case v := <-logQueue:
-
-
-
-
-
-
 
 				v.logger.writer.Write(v.value)
 				continue

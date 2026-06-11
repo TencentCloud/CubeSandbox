@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
@@ -27,21 +28,31 @@ func buildTemplateSpecFingerprint(req *types.CreateTemplateFromImageReq, sourceI
 	// such as the active guest kernel identity must stay out of this payload:
 	// changing the kernel should invalidate/rebuild snapshots or template
 	// replicas, not the ext4 rootfs artifact derived from the source image.
+	return buildTemplateSpecFingerprintWithCA(req, sourceImageDigest, "")
+}
+
+// buildTemplateSpecFingerprintWithCA folds the CubeEgress CA fingerprint into
+// the template spec fingerprint so that a CA rotation invalidates artifact
+// reuse automatically. cubeEgressCAFingerprint is empty when CA baking is
+// disabled for this request.
+func buildTemplateSpecFingerprintWithCA(req *types.CreateTemplateFromImageReq, sourceImageDigest, cubeEgressCAFingerprint string) string {
 	type fingerprintPayload struct {
-		SourceImageDigest  string                    `json:"source_image_digest"`
-		WritableLayerSize  string                    `json:"writable_layer_size"`
-		ExposedPorts       []int32                   `json:"exposed_ports,omitempty"`
-		InstanceType       string                    `json:"instance_type"`
-		NetworkType        string                    `json:"network_type"`
-		ContainerOverrides *types.ContainerOverrides `json:"container_overrides,omitempty"`
+		SourceImageDigest       string                    `json:"source_image_digest"`
+		WritableLayerSize       string                    `json:"writable_layer_size"`
+		ExposedPorts            []int32                   `json:"exposed_ports,omitempty"`
+		InstanceType            string                    `json:"instance_type"`
+		NetworkType             string                    `json:"network_type"`
+		ContainerOverrides      *types.ContainerOverrides `json:"container_overrides,omitempty"`
+		CubeEgressCAFingerprint string                    `json:"cube_egress_ca_fingerprint,omitempty"`
 	}
 	payload, _ := json.Marshal(fingerprintPayload{
-		SourceImageDigest:  sourceImageDigest,
-		WritableLayerSize:  req.WritableLayerSize,
-		ExposedPorts:       req.ExposedPorts,
-		InstanceType:       req.InstanceType,
-		NetworkType:        req.NetworkType,
-		ContainerOverrides: req.ContainerOverrides,
+		SourceImageDigest:       sourceImageDigest,
+		WritableLayerSize:       req.WritableLayerSize,
+		ExposedPorts:            req.ExposedPorts,
+		InstanceType:            req.InstanceType,
+		NetworkType:             req.NetworkType,
+		ContainerOverrides:      req.ContainerOverrides,
+		CubeEgressCAFingerprint: cubeEgressCAFingerprint,
 	})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])

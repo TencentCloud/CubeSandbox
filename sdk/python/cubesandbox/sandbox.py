@@ -13,6 +13,7 @@ from ._config import Config
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
 from ._filesystem import Filesystem
 from ._models import Execution, ExecutionError, OutputMessage, Result, SnapshotInfo
+from ._policy import Rule, _serialize_rule
 from ._stream import _parse_line
 from ._transport import build_client
 
@@ -102,6 +103,12 @@ class Sandbox:
             timeout: Sandbox TTL in seconds. Defaults to ``Config.timeout`` (300).
             env_vars: Environment variables injected into the sandbox.
             metadata: Arbitrary key-value metadata (e.g. network-policy, host-mount).
+            network: Egress network policy. Accepts keys:
+
+                - ``allow_out`` / ``deny_out``: lists of CIDRs or hostnames (L3/L4).
+                - ``rules``: list of :class:`~cubesandbox.Rule` dataclasses (or
+                  equivalent dicts with snake_case keys) for L7 host/path/SNI
+                  matching, audit, and credential injection.
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
@@ -131,6 +138,8 @@ class Sandbox:
                 net["allowOut"] = network["allow_out"]
             if "deny_out" in network:
                 net["denyOut"] = network["deny_out"]
+            if "rules" in network and network["rules"]:
+                net["rules"] = [_serialize_rule(r) for r in network["rules"]]
             if net:
                 payload["network"] = net
         payload.update(kwargs)

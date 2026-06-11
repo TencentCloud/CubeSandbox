@@ -211,8 +211,7 @@ impl ReflinkBench {
         let tag = unique_suffix();
         let backing_file = PathBuf::from(format!("/tmp/reflink-bench-{tag}.img"));
         let mount_point = PathBuf::from(format!("/tmp/reflink-bench-mnt-{tag}"));
-        std::fs::create_dir_all(&mount_point)
-            .map_err(|e| format!("create mount_point: {e}"))?;
+        std::fs::create_dir_all(&mount_point).map_err(|e| format!("create mount_point: {e}"))?;
 
         // Sparse `truncate`: a 4 GiB declared size only costs a few
         // MiB of real disk because every block we never touch stays
@@ -371,7 +370,9 @@ impl Drop for ReflinkBench {
 
         // Detach loop device.
         for _ in 0..10 {
-            let st = Command::new("losetup").args(["-d", &self.loop_dev]).status();
+            let st = Command::new("losetup")
+                .args(["-d", &self.loop_dev])
+                .status();
             if matches!(st, Ok(s) if s.success()) {
                 break;
             }
@@ -628,9 +629,7 @@ fn bench_concurrent_sweep(bench: &ReflinkBench, sweep: &[usize], per_worker: usi
     }
     let mut summary: Vec<(usize, Duration, Duration, f64)> = Vec::new(); // (threads, p50, p99, ops_per_s)
     for &threads in sweep {
-        let label = format!(
-            "create_snapshot concurrent threads={threads} per_worker={per_worker}"
-        );
+        let label = format!("create_snapshot concurrent threads={threads} per_worker={per_worker}");
         let (samples, wall) = run_concurrent_fanout(bench, threads, per_worker);
         report(&label, &samples);
         let total_ops = samples.len() as f64;
@@ -654,7 +653,10 @@ fn bench_concurrent_sweep(bench: &ReflinkBench, sweep: &[usize], per_worker: usi
     // didn't include threads=1 in the sweep, fall back to the smallest
     // configured count.
     println!();
-    println!("# concurrency scaling (relative to threads={}):", summary[0].0);
+    println!(
+        "# concurrency scaling (relative to threads={}):",
+        summary[0].0
+    );
     println!(
         "  {:<10}  {:<12}  {:<12}  {:<14}  {:<10}",
         "threads", "p50", "p99", "throughput", "speedup"
@@ -689,12 +691,7 @@ fn bench_concurrent_sweep(bench: &ReflinkBench, sweep: &[usize], per_worker: usi
 /// that's bookkeeping-stable should have first-half p99 ≈
 /// second-half p99; a regressor will show the second half noticeably
 /// slower.
-fn bench_dirty_io_interleave(
-    bench: &ReflinkBench,
-    n: usize,
-    dirty_bytes: u64,
-    block: u64,
-) {
+fn bench_dirty_io_interleave(bench: &ReflinkBench, n: usize, dirty_bytes: u64, block: u64) {
     if n == 0 || dirty_bytes == 0 {
         return;
     }
@@ -707,8 +704,7 @@ fn bench_dirty_io_interleave(
         .expect("scenario 4 create_volume");
 
     let main_path = bench.vol_main_file(origin);
-    let f =
-        open_volume_for_dirty_io(&main_path).expect("scenario 4 open volume for dirty-IO");
+    let f = open_volume_for_dirty_io(&main_path).expect("scenario 4 open volume for dirty-IO");
 
     // Pre-fill a single block of payload data once. We pwrite the same
     // buffer at different offsets each iteration; the *content* doesn't
@@ -771,10 +767,8 @@ fn bench_dirty_io_interleave(
         let second: Vec<_> = samples[half..].to_vec();
         let first_p99 = percentile(first.clone(), 0.99);
         let second_p99 = percentile(second.clone(), 0.99);
-        let first_mean: Duration =
-            first.iter().copied().sum::<Duration>() / first.len() as u32;
-        let second_mean: Duration =
-            second.iter().copied().sum::<Duration>() / second.len() as u32;
+        let first_mean: Duration = first.iter().copied().sum::<Duration>() / first.len() as u32;
+        let second_mean: Duration = second.iter().copied().sum::<Duration>() / second.len() as u32;
         let drift_pct = if first_p99.as_nanos() > 0 {
             (second_p99.as_secs_f64() / first_p99.as_secs_f64() - 1.0) * 100.0
         } else {

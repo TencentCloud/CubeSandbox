@@ -26,10 +26,19 @@
 #define ARPHRD_ETHER			1	/* Ethernet */
 
 #define MAX_ENTRIES			8192
+#define MAX_IP_RULE_ENTRIES		8192
+#define MAX_DOMAIN_RULE_ENTRIES		1024
 #define MAX_PORTS			65536
 #define MAX_SESSIONS			1048576
 #define MAX_SNAT_IPS			4
 #define MAX_PORT_START			30000
+#define MAX_DNS_QUERY_TRACK_ENTRIES	65536
+#define MAX_DNS_NAME_LEN		256
+#define DNS_POLICY_FLAG_LEARNING_ENABLED	1
+#define DNS_POLICY_FLAG_FILTER_ENABLED	2
+#define NET_POLICY_FLAG_L7_REQUIRED	1
+#define NSEC_PER_SEC			1000000000ULL
+#define DNS_QUERY_TRACK_TTL_NS		(10ULL * NSEC_PER_SEC)
 
 /* https://en.wikipedia.org/wiki/IPv4#Header
  *
@@ -89,8 +98,24 @@ struct mvm_meta {
 	__u32 version;
 	__u32 ip;
 	__u8 uuid[64];
-	__u8 reserved[56];
+	__u8 dns_policy_flags;
+	__u8 reserved[55];
 };
+
+static __always_inline bool dns_policy_learning_enabled(const struct mvm_meta *mvm_meta)
+{
+	return mvm_meta && (mvm_meta->dns_policy_flags & DNS_POLICY_FLAG_LEARNING_ENABLED);
+}
+
+static __always_inline bool dns_policy_filter_enabled(const struct mvm_meta *mvm_meta)
+{
+	return mvm_meta && (mvm_meta->dns_policy_flags & DNS_POLICY_FLAG_FILTER_ENABLED);
+}
+
+static __always_inline bool dns_policy_enabled(const struct mvm_meta *mvm_meta)
+{
+	return mvm_meta && mvm_meta->dns_policy_flags;
+}
 
 /* https://elixir.bootlin.com/linux/v5.4.217/source/include/uapi/linux/if_arp.h#L144 */
 /* Linux kernel defines struct arphdr ONLY, we need the Ethernet part */
@@ -117,6 +142,52 @@ union macaddr {
 struct lpm_key {
 	__u32 prefixlen;
 	__u32 ip;
+};
+
+struct dns_allow_key {
+	__u32 prefixlen;
+	char name[MAX_DNS_NAME_LEN];
+};
+
+struct dns_allow_value {
+	__u32 name_len;
+	__u8 flags;
+	__u8 reserved[3];
+};
+
+struct dns_query_track_key {
+	__u32 ifindex;
+	__u32 server_ip;
+	__u16 source_port;
+	__u16 dns_id;
+	__u32 reserved;
+	__u64 qname_hash;
+};
+
+struct dns_query_track_value {
+	__u64 expires_at_ns;
+	__u8 flags;
+	__u8 reserved[7];
+};
+
+/* Per-packet query parser state shared by the DNS tail-call pipeline. */
+struct dns_query_state {
+	__u32 dns_off;
+	__u32 ifindex;
+	__u16 flags;
+	__u32 cursor;
+	__u32 label_remaining;
+	__u32 dotted_len;
+	__u32 reverse_pos;
+	bool failed;
+	bool done;
+	char name[MAX_DNS_NAME_LEN];
+};
+
+struct net_policy_value_v2 {
+	__u64 expires_at_ns;
+	__u8 flags;
+	__u8 reserved[7];
 };
 
 struct mvm_port {
@@ -176,6 +247,11 @@ static __always_inline int _()
 {
 	int b[sizeof(struct mvm_meta) == 128 ? 1 : -1] = {};
 	int d[sizeof(struct lpm_key) == 8 ? 1 : -1] = {};
+	int r[sizeof(struct net_policy_value_v2) == 16 ? 1 : -1] = {};
+	int f[sizeof(struct dns_allow_key) == MAX_DNS_NAME_LEN + 4 ? 1 : -1] = {};
+	int g[sizeof(struct dns_allow_value) == 8 ? 1 : -1] = {};
+	int h[sizeof(struct dns_query_track_key) == 24 ? 1 : -1] = {};
+	int i[sizeof(struct dns_query_track_value) == 16 ? 1 : -1] = {};
 	int l[sizeof(struct mvm_port) == 8 ? 1 : -1] = {};
 	int m[sizeof(struct csum_buff) % 4 == 0 ? 1 : -1] = {};
 	int n[sizeof(struct session_key) % 20 == 0 ? 1 : -1] = {};
@@ -183,7 +259,7 @@ static __always_inline int _()
 	int p[sizeof(struct ingress_session) % 16 == 0 ? 1 : -1] = {};
 	int q[sizeof(struct snat_ip) % 16 == 0 ? 1 : -1] = {};
 
-	return b[0] + d[0] + l[0] + m[0] + n[0] + o[0] + p[0] + q[0];
+	return b[0] + d[0] + r[0] + f[0] + g[0] + h[0] + i[0] + l[0] + m[0] + n[0] + o[0] + p[0] + q[0];
 }
 
 static __always_inline __u16 csum_fold(__wsum sum)

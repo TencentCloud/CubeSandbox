@@ -26,17 +26,17 @@ const (
 )
 
 type EnsureNetworkRequest struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	SandboxId       string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
-	IdempotencyKey  string                 `protobuf:"bytes,2,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
-	Interfaces      []*Interface           `protobuf:"bytes,3,rep,name=interfaces,proto3" json:"interfaces,omitempty"`
-	Routes          []*Route               `protobuf:"bytes,4,rep,name=routes,proto3" json:"routes,omitempty"`
-	ArpNeighbors    []*ARPNeighbor         `protobuf:"bytes,5,rep,name=arp_neighbors,json=arpNeighbors,proto3" json:"arp_neighbors,omitempty"`
-	PortMappings    []*PortMapping         `protobuf:"bytes,6,rep,name=port_mappings,json=portMappings,proto3" json:"port_mappings,omitempty"`
-	PersistMetadata map[string]string      `protobuf:"bytes,7,rep,name=persist_metadata,json=persistMetadata,proto3" json:"persist_metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	CubevsContext   *CubeVSContext         `protobuf:"bytes,8,opt,name=cubevs_context,json=cubevsContext,proto3,oneof" json:"cubevs_context,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId         string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	IdempotencyKey    string                 `protobuf:"bytes,2,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	Interfaces        []*Interface           `protobuf:"bytes,3,rep,name=interfaces,proto3" json:"interfaces,omitempty"`
+	Routes            []*Route               `protobuf:"bytes,4,rep,name=routes,proto3" json:"routes,omitempty"`
+	ArpNeighbors      []*ARPNeighbor         `protobuf:"bytes,5,rep,name=arp_neighbors,json=arpNeighbors,proto3" json:"arp_neighbors,omitempty"`
+	PortMappings      []*PortMapping         `protobuf:"bytes,6,rep,name=port_mappings,json=portMappings,proto3" json:"port_mappings,omitempty"`
+	PersistMetadata   map[string]string      `protobuf:"bytes,7,rep,name=persist_metadata,json=persistMetadata,proto3" json:"persist_metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	CubeNetworkConfig *CubeNetworkConfig     `protobuf:"bytes,8,opt,name=cube_network_config,json=cubeNetworkConfig,proto3,oneof" json:"cube_network_config,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *EnsureNetworkRequest) Reset() {
@@ -118,9 +118,9 @@ func (x *EnsureNetworkRequest) GetPersistMetadata() map[string]string {
 	return nil
 }
 
-func (x *EnsureNetworkRequest) GetCubevsContext() *CubeVSContext {
+func (x *EnsureNetworkRequest) GetCubeNetworkConfig() *CubeNetworkConfig {
 	if x != nil {
-		return x.CubevsContext
+		return x.CubeNetworkConfig
 	}
 	return nil
 }
@@ -338,18 +338,18 @@ func (x *ReleaseNetworkResponse) GetPersistMetadata() map[string]string {
 }
 
 type ReconcileNetworkRequest struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	SandboxId       string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
-	NetworkHandle   string                 `protobuf:"bytes,2,opt,name=network_handle,json=networkHandle,proto3" json:"network_handle,omitempty"`
-	IdempotencyKey  string                 `protobuf:"bytes,3,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
-	Interfaces      []*Interface           `protobuf:"bytes,4,rep,name=interfaces,proto3" json:"interfaces,omitempty"`
-	Routes          []*Route               `protobuf:"bytes,5,rep,name=routes,proto3" json:"routes,omitempty"`
-	ArpNeighbors    []*ARPNeighbor         `protobuf:"bytes,6,rep,name=arp_neighbors,json=arpNeighbors,proto3" json:"arp_neighbors,omitempty"`
-	PortMappings    []*PortMapping         `protobuf:"bytes,7,rep,name=port_mappings,json=portMappings,proto3" json:"port_mappings,omitempty"`
-	PersistMetadata map[string]string      `protobuf:"bytes,8,rep,name=persist_metadata,json=persistMetadata,proto3" json:"persist_metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	CubevsContext   *CubeVSContext         `protobuf:"bytes,9,opt,name=cubevs_context,json=cubevsContext,proto3,oneof" json:"cubevs_context,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId         string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	NetworkHandle     string                 `protobuf:"bytes,2,opt,name=network_handle,json=networkHandle,proto3" json:"network_handle,omitempty"`
+	IdempotencyKey    string                 `protobuf:"bytes,3,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	Interfaces        []*Interface           `protobuf:"bytes,4,rep,name=interfaces,proto3" json:"interfaces,omitempty"`
+	Routes            []*Route               `protobuf:"bytes,5,rep,name=routes,proto3" json:"routes,omitempty"`
+	ArpNeighbors      []*ARPNeighbor         `protobuf:"bytes,6,rep,name=arp_neighbors,json=arpNeighbors,proto3" json:"arp_neighbors,omitempty"`
+	PortMappings      []*PortMapping         `protobuf:"bytes,7,rep,name=port_mappings,json=portMappings,proto3" json:"port_mappings,omitempty"`
+	PersistMetadata   map[string]string      `protobuf:"bytes,8,rep,name=persist_metadata,json=persistMetadata,proto3" json:"persist_metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	CubeNetworkConfig *CubeNetworkConfig     `protobuf:"bytes,9,opt,name=cube_network_config,json=cubeNetworkConfig,proto3,oneof" json:"cube_network_config,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ReconcileNetworkRequest) Reset() {
@@ -438,9 +438,9 @@ func (x *ReconcileNetworkRequest) GetPersistMetadata() map[string]string {
 	return nil
 }
 
-func (x *ReconcileNetworkRequest) GetCubevsContext() *CubeVSContext {
+func (x *ReconcileNetworkRequest) GetCubeNetworkConfig() *CubeNetworkConfig {
 	if x != nil {
-		return x.CubevsContext
+		return x.CubeNetworkConfig
 	}
 	return nil
 }
@@ -1213,29 +1213,31 @@ func (x *ARPNeighbor) GetDevice() string {
 	return ""
 }
 
-type CubeVSContext struct {
+type CubeNetworkConfig struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	AllowInternetAccess *bool                  `protobuf:"varint,1,opt,name=allow_internet_access,json=allowInternetAccess,proto3,oneof" json:"allow_internet_access,omitempty"`
 	AllowOut            []string               `protobuf:"bytes,2,rep,name=allow_out,json=allowOut,proto3" json:"allow_out,omitempty"`
 	DenyOut             []string               `protobuf:"bytes,3,rep,name=deny_out,json=denyOut,proto3" json:"deny_out,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// L7 egress rules, evaluated first-match-wins in list order.
+	Rules         []*EgressRule `protobuf:"bytes,4,rep,name=rules,proto3" json:"rules,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
-func (x *CubeVSContext) Reset() {
-	*x = CubeVSContext{}
+func (x *CubeNetworkConfig) Reset() {
+	*x = CubeNetworkConfig{}
 	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *CubeVSContext) String() string {
+func (x *CubeNetworkConfig) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*CubeVSContext) ProtoMessage() {}
+func (*CubeNetworkConfig) ProtoMessage() {}
 
-func (x *CubeVSContext) ProtoReflect() protoreflect.Message {
+func (x *CubeNetworkConfig) ProtoReflect() protoreflect.Message {
 	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1247,37 +1249,300 @@ func (x *CubeVSContext) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use CubeVSContext.ProtoReflect.Descriptor instead.
-func (*CubeVSContext) Descriptor() ([]byte, []int) {
+// Deprecated: Use CubeNetworkConfig.ProtoReflect.Descriptor instead.
+func (*CubeNetworkConfig) Descriptor() ([]byte, []int) {
 	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{17}
 }
 
-func (x *CubeVSContext) GetAllowInternetAccess() bool {
+func (x *CubeNetworkConfig) GetAllowInternetAccess() bool {
 	if x != nil && x.AllowInternetAccess != nil {
 		return *x.AllowInternetAccess
 	}
 	return false
 }
 
-func (x *CubeVSContext) GetAllowOut() []string {
+func (x *CubeNetworkConfig) GetAllowOut() []string {
 	if x != nil {
 		return x.AllowOut
 	}
 	return nil
 }
 
-func (x *CubeVSContext) GetDenyOut() []string {
+func (x *CubeNetworkConfig) GetDenyOut() []string {
 	if x != nil {
 		return x.DenyOut
 	}
 	return nil
 }
 
+func (x *CubeNetworkConfig) GetRules() []*EgressRule {
+	if x != nil {
+		return x.Rules
+	}
+	return nil
+}
+
+type EgressRule struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Match         *EgressRuleMatch       `protobuf:"bytes,2,opt,name=match,proto3,oneof" json:"match,omitempty"`
+	Action        *EgressRuleAction      `protobuf:"bytes,3,opt,name=action,proto3,oneof" json:"action,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EgressRule) Reset() {
+	*x = EgressRule{}
+	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EgressRule) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EgressRule) ProtoMessage() {}
+
+func (x *EgressRule) ProtoReflect() protoreflect.Message {
+	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EgressRule.ProtoReflect.Descriptor instead.
+func (*EgressRule) Descriptor() ([]byte, []int) {
+	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *EgressRule) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *EgressRule) GetMatch() *EgressRuleMatch {
+	if x != nil {
+		return x.Match
+	}
+	return nil
+}
+
+func (x *EgressRule) GetAction() *EgressRuleAction {
+	if x != nil {
+		return x.Action
+	}
+	return nil
+}
+
+type EgressRuleMatch struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Sni           *string                `protobuf:"bytes,1,opt,name=sni,proto3,oneof" json:"sni,omitempty"`
+	Host          *string                `protobuf:"bytes,3,opt,name=host,proto3,oneof" json:"host,omitempty"`
+	Method        []string               `protobuf:"bytes,4,rep,name=method,proto3" json:"method,omitempty"`
+	Path          *string                `protobuf:"bytes,5,opt,name=path,proto3,oneof" json:"path,omitempty"`
+	Scheme        *string                `protobuf:"bytes,7,opt,name=scheme,proto3,oneof" json:"scheme,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EgressRuleMatch) Reset() {
+	*x = EgressRuleMatch{}
+	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EgressRuleMatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EgressRuleMatch) ProtoMessage() {}
+
+func (x *EgressRuleMatch) ProtoReflect() protoreflect.Message {
+	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EgressRuleMatch.ProtoReflect.Descriptor instead.
+func (*EgressRuleMatch) Descriptor() ([]byte, []int) {
+	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *EgressRuleMatch) GetSni() string {
+	if x != nil && x.Sni != nil {
+		return *x.Sni
+	}
+	return ""
+}
+
+func (x *EgressRuleMatch) GetHost() string {
+	if x != nil && x.Host != nil {
+		return *x.Host
+	}
+	return ""
+}
+
+func (x *EgressRuleMatch) GetMethod() []string {
+	if x != nil {
+		return x.Method
+	}
+	return nil
+}
+
+func (x *EgressRuleMatch) GetPath() string {
+	if x != nil && x.Path != nil {
+		return *x.Path
+	}
+	return ""
+}
+
+func (x *EgressRuleMatch) GetScheme() string {
+	if x != nil && x.Scheme != nil {
+		return *x.Scheme
+	}
+	return ""
+}
+
+type EgressRuleAction struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Allow         bool                   `protobuf:"varint,1,opt,name=allow,proto3" json:"allow,omitempty"`
+	Audit         *string                `protobuf:"bytes,2,opt,name=audit,proto3,oneof" json:"audit,omitempty"`
+	Inject        []*EgressRuleInject    `protobuf:"bytes,3,rep,name=inject,proto3" json:"inject,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EgressRuleAction) Reset() {
+	*x = EgressRuleAction{}
+	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EgressRuleAction) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EgressRuleAction) ProtoMessage() {}
+
+func (x *EgressRuleAction) ProtoReflect() protoreflect.Message {
+	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EgressRuleAction.ProtoReflect.Descriptor instead.
+func (*EgressRuleAction) Descriptor() ([]byte, []int) {
+	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *EgressRuleAction) GetAllow() bool {
+	if x != nil {
+		return x.Allow
+	}
+	return false
+}
+
+func (x *EgressRuleAction) GetAudit() string {
+	if x != nil && x.Audit != nil {
+		return *x.Audit
+	}
+	return ""
+}
+
+func (x *EgressRuleAction) GetInject() []*EgressRuleInject {
+	if x != nil {
+		return x.Inject
+	}
+	return nil
+}
+
+type EgressRuleInject struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Header        string                 `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	Secret        string                 `protobuf:"bytes,2,opt,name=secret,proto3" json:"secret,omitempty"`
+	Format        *string                `protobuf:"bytes,3,opt,name=format,proto3,oneof" json:"format,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EgressRuleInject) Reset() {
+	*x = EgressRuleInject{}
+	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EgressRuleInject) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EgressRuleInject) ProtoMessage() {}
+
+func (x *EgressRuleInject) ProtoReflect() protoreflect.Message {
+	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EgressRuleInject.ProtoReflect.Descriptor instead.
+func (*EgressRuleInject) Descriptor() ([]byte, []int) {
+	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *EgressRuleInject) GetHeader() string {
+	if x != nil {
+		return x.Header
+	}
+	return ""
+}
+
+func (x *EgressRuleInject) GetSecret() string {
+	if x != nil {
+		return x.Secret
+	}
+	return ""
+}
+
+func (x *EgressRuleInject) GetFormat() string {
+	if x != nil && x.Format != nil {
+		return *x.Format
+	}
+	return ""
+}
+
 var File_Cubelet_pkg_networkagentclient_pb_network_agent_proto protoreflect.FileDescriptor
 
 const file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc = "" +
 	"\n" +
-	"5Cubelet/pkg/networkagentclient/pb/network_agent.proto\x12\x14network_agent.api.v1\"\xf8\x04\n" +
+	"5Cubelet/pkg/networkagentclient/pb/network_agent.proto\x12\x14network_agent.api.v1\"\x8a\x05\n" +
 	"\x14EnsureNetworkRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12'\n" +
@@ -1288,12 +1553,12 @@ const file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc = "" +
 	"\x06routes\x18\x04 \x03(\v2\x1b.network_agent.api.v1.RouteR\x06routes\x12F\n" +
 	"\rarp_neighbors\x18\x05 \x03(\v2!.network_agent.api.v1.ARPNeighborR\farpNeighbors\x12F\n" +
 	"\rport_mappings\x18\x06 \x03(\v2!.network_agent.api.v1.PortMappingR\fportMappings\x12j\n" +
-	"\x10persist_metadata\x18\a \x03(\v2?.network_agent.api.v1.EnsureNetworkRequest.PersistMetadataEntryR\x0fpersistMetadata\x12O\n" +
-	"\x0ecubevs_context\x18\b \x01(\v2#.network_agent.api.v1.CubeVSContextH\x00R\rcubevsContext\x88\x01\x01\x1aB\n" +
+	"\x10persist_metadata\x18\a \x03(\v2?.network_agent.api.v1.EnsureNetworkRequest.PersistMetadataEntryR\x0fpersistMetadata\x12\\\n" +
+	"\x13cube_network_config\x18\b \x01(\v2'.network_agent.api.v1.CubeNetworkConfigH\x00R\x11cubeNetworkConfig\x88\x01\x01\x1aB\n" +
 	"\x14PersistMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x11\n" +
-	"\x0f_cubevs_context\"\x94\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x16\n" +
+	"\x14_cube_network_config\"\x94\x04\n" +
 	"\x15EnsureNetworkResponse\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12%\n" +
@@ -1322,7 +1587,7 @@ const file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc = "" +
 	"\x10persist_metadata\x18\x02 \x03(\v2A.network_agent.api.v1.ReleaseNetworkResponse.PersistMetadataEntryR\x0fpersistMetadata\x1aB\n" +
 	"\x14PersistMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa5\x05\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb7\x05\n" +
 	"\x17ReconcileNetworkRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12%\n" +
@@ -1334,12 +1599,12 @@ const file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc = "" +
 	"\x06routes\x18\x05 \x03(\v2\x1b.network_agent.api.v1.RouteR\x06routes\x12F\n" +
 	"\rarp_neighbors\x18\x06 \x03(\v2!.network_agent.api.v1.ARPNeighborR\farpNeighbors\x12F\n" +
 	"\rport_mappings\x18\a \x03(\v2!.network_agent.api.v1.PortMappingR\fportMappings\x12m\n" +
-	"\x10persist_metadata\x18\b \x03(\v2B.network_agent.api.v1.ReconcileNetworkRequest.PersistMetadataEntryR\x0fpersistMetadata\x12O\n" +
-	"\x0ecubevs_context\x18\t \x01(\v2#.network_agent.api.v1.CubeVSContextH\x00R\rcubevsContext\x88\x01\x01\x1aB\n" +
+	"\x10persist_metadata\x18\b \x03(\v2B.network_agent.api.v1.ReconcileNetworkRequest.PersistMetadataEntryR\x0fpersistMetadata\x12\\\n" +
+	"\x13cube_network_config\x18\t \x01(\v2'.network_agent.api.v1.CubeNetworkConfigH\x00R\x11cubeNetworkConfig\x88\x01\x01\x1aB\n" +
 	"\x14PersistMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x11\n" +
-	"\x0f_cubevs_context\"\xb8\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x16\n" +
+	"\x14_cube_network_config\"\xb8\x04\n" +
 	"\x18ReconcileNetworkResponse\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12%\n" +
@@ -1412,12 +1677,40 @@ const file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc = "" +
 	"\x02ip\x18\x01 \x01(\tR\x02ip\x12\x1f\n" +
 	"\vmac_address\x18\x02 \x01(\tR\n" +
 	"macAddress\x12\x16\n" +
-	"\x06device\x18\x03 \x01(\tR\x06device\"\x9a\x01\n" +
-	"\rCubeVSContext\x127\n" +
+	"\x06device\x18\x03 \x01(\tR\x06device\"\xd6\x01\n" +
+	"\x11CubeNetworkConfig\x127\n" +
 	"\x15allow_internet_access\x18\x01 \x01(\bH\x00R\x13allowInternetAccess\x88\x01\x01\x12\x1b\n" +
 	"\tallow_out\x18\x02 \x03(\tR\ballowOut\x12\x19\n" +
-	"\bdeny_out\x18\x03 \x03(\tR\adenyOutB\x18\n" +
-	"\x16_allow_internet_access2\xf5\x04\n" +
+	"\bdeny_out\x18\x03 \x03(\tR\adenyOut\x126\n" +
+	"\x05rules\x18\x04 \x03(\v2 .network_agent.api.v1.EgressRuleR\x05rulesB\x18\n" +
+	"\x16_allow_internet_access\"\xbc\x01\n" +
+	"\n" +
+	"EgressRule\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12@\n" +
+	"\x05match\x18\x02 \x01(\v2%.network_agent.api.v1.EgressRuleMatchH\x00R\x05match\x88\x01\x01\x12C\n" +
+	"\x06action\x18\x03 \x01(\v2&.network_agent.api.v1.EgressRuleActionH\x01R\x06action\x88\x01\x01B\b\n" +
+	"\x06_matchB\t\n" +
+	"\a_action\"\xb4\x01\n" +
+	"\x0fEgressRuleMatch\x12\x15\n" +
+	"\x03sni\x18\x01 \x01(\tH\x00R\x03sni\x88\x01\x01\x12\x17\n" +
+	"\x04host\x18\x03 \x01(\tH\x01R\x04host\x88\x01\x01\x12\x16\n" +
+	"\x06method\x18\x04 \x03(\tR\x06method\x12\x17\n" +
+	"\x04path\x18\x05 \x01(\tH\x02R\x04path\x88\x01\x01\x12\x1b\n" +
+	"\x06scheme\x18\a \x01(\tH\x03R\x06scheme\x88\x01\x01B\x06\n" +
+	"\x04_sniB\a\n" +
+	"\x05_hostB\a\n" +
+	"\x05_pathB\t\n" +
+	"\a_scheme\"\x8d\x01\n" +
+	"\x10EgressRuleAction\x12\x14\n" +
+	"\x05allow\x18\x01 \x01(\bR\x05allow\x12\x19\n" +
+	"\x05audit\x18\x02 \x01(\tH\x00R\x05audit\x88\x01\x01\x12>\n" +
+	"\x06inject\x18\x03 \x03(\v2&.network_agent.api.v1.EgressRuleInjectR\x06injectB\b\n" +
+	"\x06_audit\"j\n" +
+	"\x10EgressRuleInject\x12\x16\n" +
+	"\x06header\x18\x01 \x01(\tR\x06header\x12\x16\n" +
+	"\x06secret\x18\x02 \x01(\tR\x06secret\x12\x1b\n" +
+	"\x06format\x18\x03 \x01(\tH\x00R\x06format\x88\x01\x01B\t\n" +
+	"\a_format2\xf5\x04\n" +
 	"\fNetworkAgent\x12h\n" +
 	"\rEnsureNetwork\x12*.network_agent.api.v1.EnsureNetworkRequest\x1a+.network_agent.api.v1.EnsureNetworkResponse\x12k\n" +
 	"\x0eReleaseNetwork\x12+.network_agent.api.v1.ReleaseNetworkRequest\x1a,.network_agent.api.v1.ReleaseNetworkResponse\x12q\n" +
@@ -1439,7 +1732,7 @@ func file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP() []
 	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescData
 }
 
-var file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_goTypes = []any{
 	(*EnsureNetworkRequest)(nil),     // 0: network_agent.api.v1.EnsureNetworkRequest
 	(*EnsureNetworkResponse)(nil),    // 1: network_agent.api.v1.EnsureNetworkResponse
@@ -1458,64 +1751,72 @@ var file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_goTypes = []any{
 	(*Interface)(nil),                // 14: network_agent.api.v1.Interface
 	(*Route)(nil),                    // 15: network_agent.api.v1.Route
 	(*ARPNeighbor)(nil),              // 16: network_agent.api.v1.ARPNeighbor
-	(*CubeVSContext)(nil),            // 17: network_agent.api.v1.CubeVSContext
-	nil,                              // 18: network_agent.api.v1.EnsureNetworkRequest.PersistMetadataEntry
-	nil,                              // 19: network_agent.api.v1.EnsureNetworkResponse.PersistMetadataEntry
-	nil,                              // 20: network_agent.api.v1.ReleaseNetworkRequest.PersistMetadataEntry
-	nil,                              // 21: network_agent.api.v1.ReleaseNetworkResponse.PersistMetadataEntry
-	nil,                              // 22: network_agent.api.v1.ReconcileNetworkRequest.PersistMetadataEntry
-	nil,                              // 23: network_agent.api.v1.ReconcileNetworkResponse.PersistMetadataEntry
-	nil,                              // 24: network_agent.api.v1.GetNetworkResponse.PersistMetadataEntry
+	(*CubeNetworkConfig)(nil),        // 17: network_agent.api.v1.CubeNetworkConfig
+	(*EgressRule)(nil),               // 18: network_agent.api.v1.EgressRule
+	(*EgressRuleMatch)(nil),          // 19: network_agent.api.v1.EgressRuleMatch
+	(*EgressRuleAction)(nil),         // 20: network_agent.api.v1.EgressRuleAction
+	(*EgressRuleInject)(nil),         // 21: network_agent.api.v1.EgressRuleInject
+	nil,                              // 22: network_agent.api.v1.EnsureNetworkRequest.PersistMetadataEntry
+	nil,                              // 23: network_agent.api.v1.EnsureNetworkResponse.PersistMetadataEntry
+	nil,                              // 24: network_agent.api.v1.ReleaseNetworkRequest.PersistMetadataEntry
+	nil,                              // 25: network_agent.api.v1.ReleaseNetworkResponse.PersistMetadataEntry
+	nil,                              // 26: network_agent.api.v1.ReconcileNetworkRequest.PersistMetadataEntry
+	nil,                              // 27: network_agent.api.v1.ReconcileNetworkResponse.PersistMetadataEntry
+	nil,                              // 28: network_agent.api.v1.GetNetworkResponse.PersistMetadataEntry
 }
 var file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_depIdxs = []int32{
 	14, // 0: network_agent.api.v1.EnsureNetworkRequest.interfaces:type_name -> network_agent.api.v1.Interface
 	15, // 1: network_agent.api.v1.EnsureNetworkRequest.routes:type_name -> network_agent.api.v1.Route
 	16, // 2: network_agent.api.v1.EnsureNetworkRequest.arp_neighbors:type_name -> network_agent.api.v1.ARPNeighbor
 	13, // 3: network_agent.api.v1.EnsureNetworkRequest.port_mappings:type_name -> network_agent.api.v1.PortMapping
-	18, // 4: network_agent.api.v1.EnsureNetworkRequest.persist_metadata:type_name -> network_agent.api.v1.EnsureNetworkRequest.PersistMetadataEntry
-	17, // 5: network_agent.api.v1.EnsureNetworkRequest.cubevs_context:type_name -> network_agent.api.v1.CubeVSContext
+	22, // 4: network_agent.api.v1.EnsureNetworkRequest.persist_metadata:type_name -> network_agent.api.v1.EnsureNetworkRequest.PersistMetadataEntry
+	17, // 5: network_agent.api.v1.EnsureNetworkRequest.cube_network_config:type_name -> network_agent.api.v1.CubeNetworkConfig
 	14, // 6: network_agent.api.v1.EnsureNetworkResponse.interfaces:type_name -> network_agent.api.v1.Interface
 	15, // 7: network_agent.api.v1.EnsureNetworkResponse.routes:type_name -> network_agent.api.v1.Route
 	16, // 8: network_agent.api.v1.EnsureNetworkResponse.arp_neighbors:type_name -> network_agent.api.v1.ARPNeighbor
 	13, // 9: network_agent.api.v1.EnsureNetworkResponse.port_mappings:type_name -> network_agent.api.v1.PortMapping
-	19, // 10: network_agent.api.v1.EnsureNetworkResponse.persist_metadata:type_name -> network_agent.api.v1.EnsureNetworkResponse.PersistMetadataEntry
-	20, // 11: network_agent.api.v1.ReleaseNetworkRequest.persist_metadata:type_name -> network_agent.api.v1.ReleaseNetworkRequest.PersistMetadataEntry
-	21, // 12: network_agent.api.v1.ReleaseNetworkResponse.persist_metadata:type_name -> network_agent.api.v1.ReleaseNetworkResponse.PersistMetadataEntry
+	23, // 10: network_agent.api.v1.EnsureNetworkResponse.persist_metadata:type_name -> network_agent.api.v1.EnsureNetworkResponse.PersistMetadataEntry
+	24, // 11: network_agent.api.v1.ReleaseNetworkRequest.persist_metadata:type_name -> network_agent.api.v1.ReleaseNetworkRequest.PersistMetadataEntry
+	25, // 12: network_agent.api.v1.ReleaseNetworkResponse.persist_metadata:type_name -> network_agent.api.v1.ReleaseNetworkResponse.PersistMetadataEntry
 	14, // 13: network_agent.api.v1.ReconcileNetworkRequest.interfaces:type_name -> network_agent.api.v1.Interface
 	15, // 14: network_agent.api.v1.ReconcileNetworkRequest.routes:type_name -> network_agent.api.v1.Route
 	16, // 15: network_agent.api.v1.ReconcileNetworkRequest.arp_neighbors:type_name -> network_agent.api.v1.ARPNeighbor
 	13, // 16: network_agent.api.v1.ReconcileNetworkRequest.port_mappings:type_name -> network_agent.api.v1.PortMapping
-	22, // 17: network_agent.api.v1.ReconcileNetworkRequest.persist_metadata:type_name -> network_agent.api.v1.ReconcileNetworkRequest.PersistMetadataEntry
-	17, // 18: network_agent.api.v1.ReconcileNetworkRequest.cubevs_context:type_name -> network_agent.api.v1.CubeVSContext
+	26, // 17: network_agent.api.v1.ReconcileNetworkRequest.persist_metadata:type_name -> network_agent.api.v1.ReconcileNetworkRequest.PersistMetadataEntry
+	17, // 18: network_agent.api.v1.ReconcileNetworkRequest.cube_network_config:type_name -> network_agent.api.v1.CubeNetworkConfig
 	14, // 19: network_agent.api.v1.ReconcileNetworkResponse.interfaces:type_name -> network_agent.api.v1.Interface
 	15, // 20: network_agent.api.v1.ReconcileNetworkResponse.routes:type_name -> network_agent.api.v1.Route
 	16, // 21: network_agent.api.v1.ReconcileNetworkResponse.arp_neighbors:type_name -> network_agent.api.v1.ARPNeighbor
 	13, // 22: network_agent.api.v1.ReconcileNetworkResponse.port_mappings:type_name -> network_agent.api.v1.PortMapping
-	23, // 23: network_agent.api.v1.ReconcileNetworkResponse.persist_metadata:type_name -> network_agent.api.v1.ReconcileNetworkResponse.PersistMetadataEntry
+	27, // 23: network_agent.api.v1.ReconcileNetworkResponse.persist_metadata:type_name -> network_agent.api.v1.ReconcileNetworkResponse.PersistMetadataEntry
 	14, // 24: network_agent.api.v1.GetNetworkResponse.interfaces:type_name -> network_agent.api.v1.Interface
 	15, // 25: network_agent.api.v1.GetNetworkResponse.routes:type_name -> network_agent.api.v1.Route
 	16, // 26: network_agent.api.v1.GetNetworkResponse.arp_neighbors:type_name -> network_agent.api.v1.ARPNeighbor
 	13, // 27: network_agent.api.v1.GetNetworkResponse.port_mappings:type_name -> network_agent.api.v1.PortMapping
-	24, // 28: network_agent.api.v1.GetNetworkResponse.persist_metadata:type_name -> network_agent.api.v1.GetNetworkResponse.PersistMetadataEntry
+	28, // 28: network_agent.api.v1.GetNetworkResponse.persist_metadata:type_name -> network_agent.api.v1.GetNetworkResponse.PersistMetadataEntry
 	12, // 29: network_agent.api.v1.ListNetworksResponse.networks:type_name -> network_agent.api.v1.NetworkState
 	13, // 30: network_agent.api.v1.NetworkState.port_mappings:type_name -> network_agent.api.v1.PortMapping
-	0,  // 31: network_agent.api.v1.NetworkAgent.EnsureNetwork:input_type -> network_agent.api.v1.EnsureNetworkRequest
-	2,  // 32: network_agent.api.v1.NetworkAgent.ReleaseNetwork:input_type -> network_agent.api.v1.ReleaseNetworkRequest
-	4,  // 33: network_agent.api.v1.NetworkAgent.ReconcileNetwork:input_type -> network_agent.api.v1.ReconcileNetworkRequest
-	6,  // 34: network_agent.api.v1.NetworkAgent.GetNetwork:input_type -> network_agent.api.v1.GetNetworkRequest
-	8,  // 35: network_agent.api.v1.NetworkAgent.Health:input_type -> network_agent.api.v1.HealthRequest
-	10, // 36: network_agent.api.v1.NetworkAgent.ListNetworks:input_type -> network_agent.api.v1.ListNetworksRequest
-	1,  // 37: network_agent.api.v1.NetworkAgent.EnsureNetwork:output_type -> network_agent.api.v1.EnsureNetworkResponse
-	3,  // 38: network_agent.api.v1.NetworkAgent.ReleaseNetwork:output_type -> network_agent.api.v1.ReleaseNetworkResponse
-	5,  // 39: network_agent.api.v1.NetworkAgent.ReconcileNetwork:output_type -> network_agent.api.v1.ReconcileNetworkResponse
-	7,  // 40: network_agent.api.v1.NetworkAgent.GetNetwork:output_type -> network_agent.api.v1.GetNetworkResponse
-	9,  // 41: network_agent.api.v1.NetworkAgent.Health:output_type -> network_agent.api.v1.HealthResponse
-	11, // 42: network_agent.api.v1.NetworkAgent.ListNetworks:output_type -> network_agent.api.v1.ListNetworksResponse
-	37, // [37:43] is the sub-list for method output_type
-	31, // [31:37] is the sub-list for method input_type
-	31, // [31:31] is the sub-list for extension type_name
-	31, // [31:31] is the sub-list for extension extendee
-	0,  // [0:31] is the sub-list for field type_name
+	18, // 31: network_agent.api.v1.CubeNetworkConfig.rules:type_name -> network_agent.api.v1.EgressRule
+	19, // 32: network_agent.api.v1.EgressRule.match:type_name -> network_agent.api.v1.EgressRuleMatch
+	20, // 33: network_agent.api.v1.EgressRule.action:type_name -> network_agent.api.v1.EgressRuleAction
+	21, // 34: network_agent.api.v1.EgressRuleAction.inject:type_name -> network_agent.api.v1.EgressRuleInject
+	0,  // 35: network_agent.api.v1.NetworkAgent.EnsureNetwork:input_type -> network_agent.api.v1.EnsureNetworkRequest
+	2,  // 36: network_agent.api.v1.NetworkAgent.ReleaseNetwork:input_type -> network_agent.api.v1.ReleaseNetworkRequest
+	4,  // 37: network_agent.api.v1.NetworkAgent.ReconcileNetwork:input_type -> network_agent.api.v1.ReconcileNetworkRequest
+	6,  // 38: network_agent.api.v1.NetworkAgent.GetNetwork:input_type -> network_agent.api.v1.GetNetworkRequest
+	8,  // 39: network_agent.api.v1.NetworkAgent.Health:input_type -> network_agent.api.v1.HealthRequest
+	10, // 40: network_agent.api.v1.NetworkAgent.ListNetworks:input_type -> network_agent.api.v1.ListNetworksRequest
+	1,  // 41: network_agent.api.v1.NetworkAgent.EnsureNetwork:output_type -> network_agent.api.v1.EnsureNetworkResponse
+	3,  // 42: network_agent.api.v1.NetworkAgent.ReleaseNetwork:output_type -> network_agent.api.v1.ReleaseNetworkResponse
+	5,  // 43: network_agent.api.v1.NetworkAgent.ReconcileNetwork:output_type -> network_agent.api.v1.ReconcileNetworkResponse
+	7,  // 44: network_agent.api.v1.NetworkAgent.GetNetwork:output_type -> network_agent.api.v1.GetNetworkResponse
+	9,  // 45: network_agent.api.v1.NetworkAgent.Health:output_type -> network_agent.api.v1.HealthResponse
+	11, // 46: network_agent.api.v1.NetworkAgent.ListNetworks:output_type -> network_agent.api.v1.ListNetworksResponse
+	41, // [41:47] is the sub-list for method output_type
+	35, // [35:41] is the sub-list for method input_type
+	35, // [35:35] is the sub-list for extension type_name
+	35, // [35:35] is the sub-list for extension extendee
+	0,  // [0:35] is the sub-list for field type_name
 }
 
 func init() { file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_init() }
@@ -1526,13 +1827,17 @@ func file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_init() {
 	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[0].OneofWrappers = []any{}
 	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[4].OneofWrappers = []any{}
 	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[17].OneofWrappers = []any{}
+	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[18].OneofWrappers = []any{}
+	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[19].OneofWrappers = []any{}
+	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[20].OneofWrappers = []any{}
+	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[21].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc), len(file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   25,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

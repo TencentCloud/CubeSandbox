@@ -115,7 +115,10 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 	keepStoreDir := false
 
 	// Phase 2: loop-mount streaming build (optional, auto-detects capability).
-	if loopMountExt4Enabled() && canUseLoopMount() && !source.UseDockerless {
+	// Skip when a PostRootfsExport hook is requested — the streaming path
+	// writes directly into the ext4 image and offers no rootfs directory to
+	// mutate before mkfs.ext4.
+	if opts.PostRootfsExport == nil && loopMountExt4Enabled() && canUseLoopMount() && !source.UseDockerless {
 		estimatedPhase2, err := estimateImageSizeFromInspect(ctx, source)
 		if err != nil {
 			log.G(ctx).Warnf("cannot estimate image size for Phase 2, falling back to Phase 1: %v", err)
@@ -189,6 +192,12 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 	if workDir != "" {
 		if err := os.RemoveAll(workDir); err != nil {
 			log.G(ctx).Warnf("cleanup workDir %s failed: %v", workDir, err)
+		}
+	}
+
+	if opts.PostRootfsExport != nil {
+		if err := opts.PostRootfsExport(ctx, storeRootfsDir); err != nil {
+			return BuildResult{}, err
 		}
 	}
 

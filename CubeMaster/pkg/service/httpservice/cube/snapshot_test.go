@@ -320,7 +320,6 @@ func TestBindSnapshotCreateReplicaInjectsRuntimeAnnotations(t *testing.T) {
 	assert.NotEmpty(t, req.Annotations[constants.CubeAnnotationRuntimeSnapshotAttachedAt])
 }
 
-
 // TestBindAppSnapshotTemplateReplicaRequiresReadyReplica verifies that even
 // though no physical refs are written, the replica resolution still runs as
 // a fail-fast gate (no ready replica -> error).

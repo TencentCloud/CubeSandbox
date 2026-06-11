@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -51,7 +52,26 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	if source.Cleanup != nil {
 		defer source.Cleanup(ctx)
 	}
-	fingerprint := buildTemplateSpecFingerprint(req, source.Digest)
+	// Load the CubeEgress CA fingerprint so the job's recorded
+	// artifact_id matches what ensureRootfsArtifact will compute
+	// downstream. We deliberately discard the PEM bytes here and
+	// re-read inside ensureRootfsArtifact — small file, called once
+	// per template build, simpler than threading the bytes through
+	// runTemplateImageJob's existing structure. The early call
+	// surfaces a missing/corrupt CA at JobPhasePulling instead of
+	// halfway through ext4 build.
+	withCubeCA := resolveWithCubeCA(req.WithCubeCA)
+	_, caFingerprint, err := loadCubeEgressCA(ctx, withCubeCA)
+	if err != nil {
+		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+			"status":        JobStatusFailed,
+			"phase":         JobPhasePulling,
+			"progress":      100,
+			"error_message": err.Error(),
+		})
+		return
+	}
+	fingerprint := buildTemplateSpecFingerprintWithCA(req, source.Digest, caFingerprint)
 	artifactID := buildArtifactID(fingerprint)
 	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
 		"artifact_id":               artifactID,

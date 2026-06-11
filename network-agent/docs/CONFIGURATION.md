@@ -40,7 +40,7 @@ Network Agent 支持三种配置方式，优先级从高到低:
 | `--mvm-gw-dest-ip` | `169.254.68.5` | Guest 网关 IP |
 | `--mvm-gw-mac-addr` | `20:90:6f:cf:cf:cf` | Gateway MAC 地址 |
 | `--mvm-mask` | `30` | Guest 网络掩码位数 |
-| `--mvm-mtu` | `1300` | Guest MTU 大小 |
+| `--mvm-mtu` | `1500` | Guest MTU 大小 |
 
 ### 其他配置
 
@@ -76,7 +76,7 @@ Network Agent 支持三种配置方式，优先级从高到低:
     --mvm-gw-dest-ip=169.254.68.5 \
     --mvm-gw-mac-addr=20:90:6f:cf:cf:cf \
     --mvm-mask=30 \
-    --mvm-mtu=1300 \
+    --mvm-mtu=1500 \
     --state-dir=/var/lib/network-agent/state \
     --host-proxy-bind-ip=127.0.0.1 \
     --tap-init-num=10
@@ -113,7 +113,7 @@ mac_addr = "20:90:6f:fc:fc:fc"
 gw_dest_ip = "169.254.68.5"
 gw_mac_addr = "20:90:6f:cf:cf:cf"
 mask = 30
-mtu = 1300
+mtu = 1500
 
 [network.tap]
 init_num = 10
@@ -216,7 +216,7 @@ ports = [22, 80, 443]
 │  eth0: 169.254.68.6/30              │
 │  gateway: 169.254.68.5              │
 │  MAC: 20:90:6f:fc:fc:fc             │
-│  MTU: 1300                           │
+│  MTU: 1500                           │
 └─────────────────────────────────────┘
 ```
 
@@ -224,7 +224,7 @@ ports = [22, 80, 443]
 - `mvm-inner-ip`: Guest 看到的自己的 IP
 - `mvm-gw-dest-ip`: Guest 的默认网关
 - `mvm-mask`: 网络掩码位数 (30 = /30 = 4 个地址)
-- `mvm-mtu`: 建议设置为 1300 以适应隧道封装
+- `mvm-mtu`: Guest 网络接口 MTU，默认 1500
 
 ### 状态持久化目录
 
@@ -303,7 +303,7 @@ Network Agent 目前不支持环境变量配置。所有配置必须通过命令
     --cidr=192.168.0.0/16 \
     --state-dir=/var/lib/network-agent/state \
     --tap-init-num=20 \
-    --mvm-mtu=1300
+    --mvm-mtu=1500
 ```
 
 ### 性能调优

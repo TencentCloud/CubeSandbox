@@ -44,3 +44,7 @@ docs/webui-init.md
 docs/dev-log.md
 docs/image-1.png
 docs/image.png
+
+__pycache__
+/design
+/tests

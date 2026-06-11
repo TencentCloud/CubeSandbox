@@ -15,6 +15,7 @@
 #include "skb.h"
 #include "tcp.h"
 #include "udp.h"
+#include "dns_query.h"
 
 /*
  * Handle ARP request and send ARP reply
@@ -108,20 +109,26 @@ static __always_inline bool should_do_nat(const struct iphdr *l3)
 /*
  * Check egress network policy for a packet.
  *
- * Priority: allow_out > deny_out > default allow
+ * Priority: allow_out_v2 > deny_out > default allow
  *
- *   1. If allow_out has an inner map for this ifindex and daddr matches,
+ *   1. If allow_out_v2 has an inner map for this ifindex and daddr matches,
  *      the packet is explicitly allowed (even if deny_out would match).
  *   2. If deny_out has an inner map for this ifindex and daddr matches,
  *      the packet is denied.
  *   3. Otherwise the packet is allowed.
  *
- * Returns true if the packet is allowed, false if denied.
+ * Returns true if the packet is allowed, false if denied. When allow_out_v2
+ * matches, policy_value receives the matched flags for later L7 routing.
  */
-static __always_inline bool check_net_policy(__u32 ifindex, __u32 daddr)
+static __always_inline bool check_net_policy(__u32 ifindex, __u32 daddr,
+					     struct net_policy_value_v2 *policy_value)
 {
 	struct lpm_key key = { .prefixlen = 32, .ip = daddr };
+	struct net_policy_value_v2 *value;
 	void *inner_map;
+
+	policy_value->expires_at_ns = 0;
+	policy_value->flags = 0;
 
 	/* Traffic to mvm_gateway_ip is internal (destined for cube-dev),
 	 * skip network policy enforcement.
@@ -129,12 +136,16 @@ static __always_inline bool check_net_policy(__u32 ifindex, __u32 daddr)
 	if (daddr == mvm_gateway_ip)
 		return true;
 
-	/* allow_out takes precedence */
-	inner_map = bpf_map_lookup_elem(&allow_out, &ifindex);
+	/* allow_out_v2 takes precedence. */
+	inner_map = bpf_map_lookup_elem(&allow_out_v2, &ifindex);
 	if (inner_map) {
-		if (bpf_map_lookup_elem(inner_map, &key))
+		value = bpf_map_lookup_elem(inner_map, &key);
+		if (value && (value->expires_at_ns == 0 ||
+			      value->expires_at_ns > bpf_ktime_get_ns())) {
+			*policy_value = *value;
 			return true;
-		/* allow_out map exists but daddr not in it,
+		}
+		/* allow_out_v2 map exists but daddr not in it or entry expired,
 		 * fall through to deny_out check.
 		 */
 	}
@@ -148,6 +159,155 @@ static __always_inline bool check_net_policy(__u32 ifindex, __u32 daddr)
 
 	/* default: allow */
 	return true;
+}
+
+static __always_inline bool should_redirect_to_l7_proxy(const struct net_policy_value_v2 *policy_value,
+							const struct tcphdr *l4)
+{
+	if (!(policy_value->flags & NET_POLICY_FLAG_L7_REQUIRED))
+		return false;
+
+	return l4->dest == bpf_htons(80) || l4->dest == bpf_htons(443);
+}
+
+struct tcp_ipv4_pseudo_header {
+	__u32 saddr;
+	__u32 daddr;
+	__u8 zero;
+	__u8 protocol;
+	__u16 length;
+};
+
+struct ip_tot_len_csum {
+	__u16 tot_len;
+	__u16 padding;
+};
+
+enum tcp_nat_result {
+	TCP_NAT_DROP = 0,
+	TCP_NAT_OK,
+	TCP_NAT_RESET,
+};
+
+static __always_inline bool tcp_segment_len(const struct iphdr *l3, const struct tcphdr *l4,
+					    __u32 *seg_len)
+{
+	__u16 ip_hlen, tcp_hlen, total_len;
+
+	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
+	ip_hlen <<= 2;
+	tcp_hlen = BPF_CORE_READ_BITFIELD(l4, doff);
+	tcp_hlen <<= 2;
+	total_len = bpf_ntohs(l3->tot_len);
+	if (ip_hlen < sizeof(struct iphdr) || tcp_hlen < sizeof(struct tcphdr) ||
+	    total_len < ip_hlen + tcp_hlen)
+		return false;
+
+	*seg_len = total_len - ip_hlen - tcp_hlen;
+	if (l4->syn)
+		(*seg_len)++;
+	if (l4->fin)
+		(*seg_len)++;
+
+	return true;
+}
+
+static __always_inline void rewrite_l3_tot_len(struct iphdr *l3, __u16 new_tot_len)
+{
+	struct ip_tot_len_csum old_len = { .tot_len = l3->tot_len };
+	struct ip_tot_len_csum new_len = { .tot_len = new_tot_len };
+	__u32 old_csum = l3->check;
+	__u32 new_csum;
+
+	new_csum = bpf_csum_diff((void *)&old_len, sizeof(old_len),
+				 (void *)&new_len, sizeof(new_len), ~old_csum);
+	l3->check = csum_fold(new_csum);
+	l3->tot_len = new_tot_len;
+}
+
+static __always_inline __u16 tcp_ipv4_checksum(__u32 saddr, __u32 daddr,
+					       const struct tcphdr *tcp)
+{
+	struct tcp_ipv4_pseudo_header pseudo = {
+		.saddr = saddr,
+		.daddr = daddr,
+		.protocol = IPPROTO_TCP,
+		.length = bpf_htons(sizeof(*tcp)),
+	};
+	__u32 csum;
+
+	csum = bpf_csum_diff(NULL, 0, (void *)&pseudo, sizeof(pseudo), 0);
+	csum = bpf_csum_diff(NULL, 0, (void *)tcp, sizeof(*tcp), csum);
+
+	return csum_fold(csum);
+}
+
+static __always_inline int tcp_reply_reset(struct __sk_buff *skb, __u32 ifindex)
+{
+	struct tcphdr new_tcp = {};
+	struct ethhdr *l2;
+	struct iphdr *l3;
+	struct tcphdr *l4;
+	__u32 new_saddr, new_daddr;
+	__u32 seq, ack_seq, new_skb_len;
+	__u32 seg_len;
+	__u16 ip_hlen, new_ip_len;
+
+	/* bpf_skb_change_tail() may fail on GSO skbs or leave segmentation
+	 * state inconsistent. Fall back to drop instead of sending RST.
+	 */
+	if (skb->gso_segs)
+		return TC_ACT_SHOT;
+
+	if (!__pull_headers(skb, &l2, &l3, &l4))
+		return TC_ACT_SHOT;
+
+	if ((l3->frag_off & IP_FLAG_MF) || (l3->frag_off & IP_FRAG_OFF_MASK))
+		return TC_ACT_SHOT;
+
+	/* Never send a reset in response to a reset. */
+	if (l4->rst)
+		return TC_ACT_SHOT;
+
+	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
+	ip_hlen <<= 2;
+	seq = l4->seq;
+	ack_seq = l4->ack_seq;
+	if (!tcp_segment_len(l3, l4, &seg_len))
+		return TC_ACT_SHOT;
+
+	new_saddr = l3->daddr;
+	new_daddr = mvm_inner_ip;
+	new_tcp.source = l4->dest;
+	new_tcp.dest = l4->source;
+	new_tcp.doff = sizeof(new_tcp) >> 2;
+	new_tcp.rst = 1;
+	if (l4->ack) {
+		new_tcp.seq = ack_seq;
+	} else {
+		new_tcp.ack_seq = bpf_htonl(bpf_ntohl(seq) + seg_len);
+		new_tcp.ack = 1;
+	}
+
+	new_ip_len = ip_hlen + sizeof(new_tcp);
+	new_skb_len = sizeof(struct ethhdr) + new_ip_len;
+	if (bpf_skb_change_tail(skb, new_skb_len, 0))
+		return TC_ACT_SHOT;
+
+	/* bpf_skb_change_tail invalidates all packet pointers. */
+	if (!__pull_headers(skb, &l2, &l3, &l4))
+		return TC_ACT_SHOT;
+
+	new_tcp.check = tcp_ipv4_checksum(new_saddr, new_daddr, &new_tcp);
+	*l4 = new_tcp;
+
+	rewrite_l3_tot_len(l3, bpf_htons(new_ip_len));
+	rewrite_l3_addr(l3, &l3->saddr, new_saddr);
+	rewrite_l3_addr(l3, &l3->daddr, new_daddr);
+	set_mac_pair(l2, cubegw0_macaddr_p1, cubegw0_macaddr_p2,
+		     mvm_macaddr_p1, mvm_macaddr_p2);
+
+	return bpf_redirect(ifindex, 0);
 }
 
 static __always_inline struct snat_ip *pick_snat_ip_port(__u32 mvm_ip, const struct session_key *ekey,
@@ -398,7 +558,17 @@ do_nat:
 	return true;
 }
 
-static bool do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *dst_ifindex)
+static __always_inline int finish_udp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta)
+{
+	__u32 dst_ifindex;
+
+	if (do_udp_nat(skb, mvm_meta, &dst_ifindex))
+		return bpf_redirect(dst_ifindex, 0);
+
+	return TC_ACT_SHOT;
+}
+
+static enum tcp_nat_result do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *dst_ifindex)
 {
 	__u32 old_saddr, new_saddr, tcp_csum_off;
 	__u16 old_sport, new_sport;
@@ -417,7 +587,7 @@ static bool do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *
 	bool ok;
 
 	if (!__pull_headers(skb, &l2, &l3, &l4))
-		return false;
+		return TCP_NAT_DROP;
 
 	now = bpf_ktime_get_ns();
 	syn = l4->syn;
@@ -446,19 +616,19 @@ do_create:
 		/* create new session */
 		snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
 		if (!snat_ip || !snat_ip->ip || !snat_port)
-			return false;
+			return TCP_NAT_DROP;
 		ok = create_new_sessions(&key, now, skb->ingress_ifindex, snat_ip, snat_port);
 		if (!ok)
-			return false;
+			return TCP_NAT_DROP;
 		sess = bpf_map_lookup_elem(&egress_sessions, &key);
 		if (!sess)
-			return false;
+			return TCP_NAT_DROP;
 		goto do_nat;
 	} else {
 		/* lookup existing session */
 		sess = bpf_map_lookup_elem(&egress_sessions, &key);
 		if (!sess)
-			return false;
+			return rst ? TCP_NAT_DROP : TCP_NAT_RESET;
 	}
 
 do_update:
@@ -506,7 +676,114 @@ do_nat:
 		return false;
 
 	*dst_ifindex = sess->node_ifindex;
-	return true;
+	return TCP_NAT_OK;
+}
+
+/* Parse one DNS QNAME chunk and dispatch to reverse or finish stage. */
+SEC("tc")
+int dns_parse_chunk(struct __sk_buff *skb)
+{
+	struct dns_query_state *state;
+	__u32 key = 0;
+
+	state = bpf_map_lookup_elem(&dns_query_state, &key);
+	if (!state)
+		return TC_ACT_SHOT;
+
+	dns_parse_query_name_chunk(skb, state);
+	if (state->failed)
+		goto finish;
+	if (state->done) {
+		if (state->label_remaining != 0 || state->dotted_len == 0 ||
+		    state->dotted_len >= DNS_MAX_NAME_LEN)
+			state->failed = true;
+		goto reverse;
+	}
+
+	bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_PARSE);
+	state->failed = true;
+	goto finish;
+
+reverse:
+	bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_REVERSE);
+	state->failed = true;
+
+finish:
+	bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_FINISH);
+	return TC_ACT_SHOT;
+}
+
+/* Reverse one DNS QNAME chunk into the trie lookup key. */
+SEC("tc")
+int dns_rev_chunk(struct __sk_buff *skb)
+{
+	struct dns_allow_key *question;
+	struct dns_query_state *state;
+	__u32 key = 0;
+
+	state = bpf_map_lookup_elem(&dns_query_state, &key);
+	question = bpf_map_lookup_elem(&dns_query_scratch, &key);
+	if (!state || !question)
+		return TC_ACT_SHOT;
+
+	if (state->failed || dns_reverse_query_name_chunk(state, question))
+		goto finish;
+
+	bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_REVERSE);
+	state->failed = true;
+
+finish:
+	bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_FINISH);
+	return TC_ACT_SHOT;
+}
+
+/* Finish DNS query filtering and continue UDP NAT for allowed queries. */
+SEC("tc")
+int dns_finish(struct __sk_buff *skb)
+{
+	struct dns_allow_value *matched;
+	struct dns_allow_key *question;
+	struct dns_query_state *state;
+	struct mvm_meta *mvm_meta;
+	struct dns_question_footer question_footer;
+	__u64 qname_hash = 0;
+	__u32 key = 0;
+	__u32 ifindex;
+	__u32 question_cursor;
+	void *inner_map;
+
+	state = bpf_map_lookup_elem(&dns_query_state, &key);
+	question = bpf_map_lookup_elem(&dns_query_scratch, &key);
+	if (!state || !question)
+		return TC_ACT_SHOT;
+	ifindex = state->ifindex;
+
+	mvm_meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &ifindex);
+	if (!mvm_meta)
+		return TC_ACT_SHOT;
+	if (!dns_policy_enabled(mvm_meta))
+		return finish_udp_nat(skb, mvm_meta);
+
+	inner_map = bpf_map_lookup_elem(&dns_allow, &ifindex);
+	if (!inner_map)
+		return finish_udp_nat(skb, mvm_meta);
+
+	question_cursor = state->dns_off + DNS_HDR_LEN;
+	if (state->failed)
+		return finish_udp_nat(skb, mvm_meta);
+	if (!dns_hash_qname(skb, &question_cursor, &question_footer,
+					&qname_hash))
+		return finish_udp_nat(skb, mvm_meta);
+
+	matched = dns_allow_match_value(inner_map, question);
+	if (!matched) {
+		if (dns_policy_filter_enabled(mvm_meta))
+			return dns_reply_nxdomain(skb, state->dns_off, ifindex, state->flags);
+		return finish_udp_nat(skb, mvm_meta);
+	}
+
+	dns_track_allowed_query(skb, state, matched->flags, qname_hash);
+	return finish_udp_nat(skb, mvm_meta);
 }
 
 /* This filter will be attached to the ingress path of Sandbox TAP devices.
@@ -516,12 +793,15 @@ SEC("tc")
 int from_cube(struct __sk_buff *skb)
 {
 	__u32 daddr, ifindex, dst_ifindex;
+	struct net_policy_value_v2 policy_value = {};
 	struct mvm_port mvm_port = {};
 	struct mvm_meta *mvm_meta;
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct tcphdr *l4;
+	struct udphdr *udp;
 	__u16 *host_port;
+	__u32 dns_off;
 	__u8 proto;
 	long err;
 	int ret;
@@ -596,27 +876,49 @@ int from_cube(struct __sk_buff *skb)
 		}
 	}
 
-	/* Enforce egress network policy before NAT */
-	if (!check_net_policy(ifindex, daddr))
+	/* Enforce egress network policy before NAT. */
+	if (!check_net_policy(ifindex, daddr, &policy_value)) {
+		if (proto == IPPROTO_TCP)
+			return tcp_reply_reset(skb, ifindex);
 		return TC_ACT_SHOT;
+	}
 
 	ret = pull_headers(skb, &l2, &l3);
 	if (ret != TC_ACT_OK)
 		return ret;
 
-	if (should_do_nat(l3)) {
-		if (proto == IPPROTO_TCP) {
-			if (do_tcp_nat(skb, mvm_meta, &dst_ifindex))
-				return bpf_redirect(dst_ifindex, 0);
+	if (!should_do_nat(l3))
+		return TC_ACT_SHOT;
+
+	if (proto == IPPROTO_TCP) {
+		if (!__pull_headers(skb, &l2, &l3, &l4))
+			return TC_ACT_SHOT;
+		if (should_redirect_to_l7_proxy(&policy_value, l4))
+			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
+		ret = do_tcp_nat(skb, mvm_meta, &dst_ifindex);
+		if (ret == TCP_NAT_OK)
+			return bpf_redirect(dst_ifindex, 0);
+		if (ret == TCP_NAT_RESET)
+			return tcp_reply_reset(skb, ifindex);
+	}
+
+	if (proto == IPPROTO_UDP) {
+		if (!__pull_headers_udp(skb, &l2, &l3, &udp))
+			return TC_ACT_SHOT;
+
+		if (udp->dest == DNS_PORT && dns_policy_enabled(mvm_meta) &&
+		    dns_payload_offset(l3, udp, &dns_off)) {
+			ret = dns_handle_query(skb, dns_off, ifindex);
+			if (ret != CUBE_DNS_PASS)
+				return ret;
 		}
-		if (proto == IPPROTO_UDP) {
-			if (do_udp_nat(skb, mvm_meta, &dst_ifindex))
-				return bpf_redirect(dst_ifindex, 0);
-		}
-		if (proto == IPPROTO_ICMP) {
-			if (do_icmp_nat(skb, mvm_meta, &dst_ifindex))
-				return bpf_redirect(dst_ifindex, 0);
-		}
+
+		return finish_udp_nat(skb, mvm_meta);
+	}
+
+	if (proto == IPPROTO_ICMP) {
+		if (do_icmp_nat(skb, mvm_meta, &dst_ifindex))
+			return bpf_redirect(dst_ifindex, 0);
 	}
 
 	return TC_ACT_SHOT;

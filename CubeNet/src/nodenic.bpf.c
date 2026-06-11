@@ -14,6 +14,7 @@
 #include "skb.h"
 #include "tcp.h"
 #include "udp.h"
+#include "dns_response.h"
 
 static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4,
 			 struct mvm_port *mvm_port)
@@ -162,9 +163,9 @@ static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	__u16 old_dport, new_dport, old_csum;
 	struct session_key key = {};
 	struct nat_session *sess;
+	__u64 now, flags;
+	__u32 dns_off;
 	__u16 ip_hlen;
-	__u64 flags;
-	__u64 now;
 	long err;
 
 	key.src_ip = l3->saddr;
@@ -176,6 +177,10 @@ static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	sess = lookup_session(&key);
 	if (!sess)
 		return TC_ACT_OK;
+
+	/* Learn A records from allowed DNS replies before reverse NAT. */
+	if (l4->source == DNS_PORT && dns_payload_offset(l3, l4, &dns_off))
+		dns_handle_response(skb, dns_off, sess->vm_ifindex, l3->saddr, sess->vm_port);
 
 	/* update session */
 	now = bpf_ktime_get_ns();

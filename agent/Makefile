@@ -133,6 +133,11 @@ clean:
 test:
 	@cargo test --all $(EXTRA_RUSTFEATURES) -- --nocapture
 
+##TARGET fmt: format code
+fmt: $(GENERATED_FILES)
+	@if [ ! -f libs/protocols/src/agent.rs ]; then cargo check -p protocols; fi
+	cargo fmt
+
 ##TARGET check: run lint/fmt check
 check: $(GENERATED_FILES)
 	cargo fmt -- --check
@@ -176,6 +181,7 @@ generate-protocols:
 	clean \
 	default \
 	docker \
+	fmt \
 	FORCE \
 	generate-protocols \
 	help \

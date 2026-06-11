@@ -29,12 +29,16 @@ LDFLAGS := -ldflags "-s -w \
 
 export PATH := $(GO_BIN_DIR):$(PATH)
 
-.PHONY: build proto test clean check-proto-tools sync-client-proto
+.PHONY: build fmt proto test clean check-proto-tools sync-client-proto
 
 build:
 	$(call msg,Build app,$(APP))
 	$(Q)mkdir -p "$(BUILD_DIR)"
 	$(Q)go build $(LDFLAGS) -o "$(BUILD_DIR)/$(APP)" ./cmd/$(APP)
+
+fmt:
+	$(call msg,Format code,$(APP))
+	$(Q)go fmt ./...
 
 check-proto-tools:
 	@command -v protoc >/dev/null 2>&1 || { echo "error: protoc not installed"; exit 1; }

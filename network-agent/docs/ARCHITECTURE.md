@@ -207,7 +207,7 @@ JSON 文件存储，每个沙箱一个文件:
     "routes": [...],
     "arpNeighbors": [...],
     "portMappings": [...],
-    "cubevsContext": {...}
+    "cubeNetworkConfig": {...}
 }
 ```
 

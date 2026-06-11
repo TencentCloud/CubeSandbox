@@ -26,7 +26,7 @@ Network Agent 提供三种接口:
     "macAddress": "20:90:6f:fc:fc:fc",
     "ipCIDRs": ["169.254.68.6/30"],
     "gateway": "169.254.68.5",
-    "mtu": 1300
+    "mtu": 1500
 }
 ```
 
@@ -88,7 +88,7 @@ Network Agent 提供三种接口:
 | `hostPort` | uint16 | 主机端口 |
 | `hostIP` | string | 主机绑定 IP |
 
-### CubeVSContext (CubeVS 上下文)
+### CubeNetworkConfig (网络配置)
 
 ```json
 {
@@ -159,7 +159,7 @@ Network Agent 提供三种接口:
             "containerPort": 80
         }
     ],
-    "cubevsContext": {
+    "cubeNetworkConfig": {
         "appID": 12345,
         "businessType": "normal"
     }
@@ -171,7 +171,7 @@ Network Agent 提供三种接口:
 | `sandboxID` | string | 是 | 沙箱唯一标识 |
 | `networkHandle` | string | 否 | 网络句柄 |
 | `portMappings` | []PortMapping | 否 | 端口映射列表 |
-| `cubevsContext` | CubeVSContext | 否 | CubeVS 上下文 |
+| `cubeNetworkConfig` | CubeNetworkConfig | 否 | 网络配置 |
 
 **响应:**
 
@@ -354,7 +354,7 @@ message EnsureNetworkRequest {
     string sandbox_id = 1;
     string network_handle = 2;
     repeated PortMapping port_mappings = 3;
-    CubeVSContext cubevs_context = 4;
+    CubeNetworkConfig cube_network_config = 4;
 }
 ```
 

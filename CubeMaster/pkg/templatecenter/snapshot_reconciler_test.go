@@ -13,9 +13,9 @@ import (
 	"github.com/agiledragon/gomonkey/v2"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 )
 
 // resetSnapshotStorageCachesForTest clears the in-process snapshotStorageCache
@@ -68,7 +68,7 @@ func TestGetOrRefreshSkipsTTLForUnknown(t *testing.T) {
 	})
 
 	// Seed an unknown entry within TTL: under the old short-circuit logic,
-		// GetStorageMetrics would not be called and Mode would never flip to healthy.
+	// GetStorageMetrics would not be called and Mode would never flip to healthy.
 	cacheSnapshotStorageState("node-1", "10.0.0.1", snapshotStorageState{
 		NodeID:        "node-1",
 		NodeIP:        "10.0.0.1",
@@ -157,7 +157,7 @@ func TestRefreshSnapshotStorageMetricsRetriesCachedUnknown(t *testing.T) {
 	})
 
 	// Write an unknown node directly into localcache (simulating dirty state left
-		// from a previous cold-start failure; snapshotStorageCache retains a copy too).
+	// from a previous cold-start failure; snapshotStorageCache retains a copy too).
 	cacheSnapshotStorageState("stale-node", "10.0.0.7", snapshotStorageState{
 		NodeID:        "stale-node",
 		NodeIP:        "10.0.0.7",

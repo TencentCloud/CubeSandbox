@@ -23,17 +23,21 @@
     - [ContainerStateValue](#cubelet-services-cubebox-v1-ContainerStateValue)
     - [CowObjectRef](#cubelet-services-cubebox-v1-CowObjectRef)
     - [CowObjectStatus](#cubelet-services-cubebox-v1-CowObjectStatus)
+    - [CubeNetworkConfig](#cubelet-services-cubebox-v1-CubeNetworkConfig)
     - [CubeSandbox](#cubelet-services-cubebox-v1-CubeSandbox)
     - [CubeSandbox.LabelsEntry](#cubelet-services-cubebox-v1-CubeSandbox-LabelsEntry)
     - [CubeSandboxFilter](#cubelet-services-cubebox-v1-CubeSandboxFilter)
     - [CubeSandboxFilter.LabelSelectorEntry](#cubelet-services-cubebox-v1-CubeSandboxFilter-LabelSelectorEntry)
-    - [CubeVSContext](#cubelet-services-cubebox-v1-CubeVSContext)
     - [DNSConfig](#cubelet-services-cubebox-v1-DNSConfig)
     - [DestroyCubeSandboxRequest](#cubelet-services-cubebox-v1-DestroyCubeSandboxRequest)
     - [DestroyCubeSandboxRequest.AnnotationsEntry](#cubelet-services-cubebox-v1-DestroyCubeSandboxRequest-AnnotationsEntry)
     - [DestroyCubeSandboxResponse](#cubelet-services-cubebox-v1-DestroyCubeSandboxResponse)
     - [DestroyCubeSandboxResponse.ExtInfoEntry](#cubelet-services-cubebox-v1-DestroyCubeSandboxResponse-ExtInfoEntry)
     - [Device](#cubelet-services-cubebox-v1-Device)
+    - [EgressRule](#cubelet-services-cubebox-v1-EgressRule)
+    - [EgressRuleAction](#cubelet-services-cubebox-v1-EgressRuleAction)
+    - [EgressRuleInject](#cubelet-services-cubebox-v1-EgressRuleInject)
+    - [EgressRuleMatch](#cubelet-services-cubebox-v1-EgressRuleMatch)
     - [EmptyDirVolumeSource](#cubelet-services-cubebox-v1-EmptyDirVolumeSource)
     - [ExecCubeSandboxRequest](#cubelet-services-cubebox-v1-ExecCubeSandboxRequest)
     - [ExecCubeSandboxResponse](#cubelet-services-cubebox-v1-ExecCubeSandboxResponse)
@@ -570,6 +574,24 @@ ContainerStateValue is the wrapper of ContainerState.
 
 
 
+<a name="cubelet-services-cubebox-v1-CubeNetworkConfig"></a>
+
+### CubeNetworkConfig
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| allow_internet_access | [bool](#bool) | optional |  |
+| allow_out | [string](#string) | repeated |  |
+| deny_out | [string](#string) | repeated |  |
+| rules | [EgressRule](#cubelet-services-cubebox-v1-EgressRule) | repeated | L7 egress rules, evaluated first-match-wins in list order. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-CubeSandbox"></a>
 
 ### CubeSandbox
@@ -637,23 +659,6 @@ All those fields are combined with &#39;AND&#39;
 | ----- | ---- | ----- | ----------- |
 | key | [string](#string) |  |  |
 | value | [string](#string) |  |  |
-
-
-
-
-
-
-<a name="cubelet-services-cubebox-v1-CubeVSContext"></a>
-
-### CubeVSContext
-
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| allow_internet_access | [bool](#bool) | optional |  |
-| allow_out | [string](#string) | repeated |  |
-| deny_out | [string](#string) | repeated |  |
 
 
 
@@ -756,6 +761,76 @@ Device specifies a host device to mount into a container.
 | container_path | [string](#string) |  | Path of the device within the container. |
 | host_path | [string](#string) |  | Path of the device on the host. |
 | permissions | [string](#string) |  | Cgroups permissions of the device, candidates are one or more of * r - allows container to read from the specified device. * w - allows container to write to the specified device. * m - allows container to create device files that do not yet exist. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-EgressRule"></a>
+
+### EgressRule
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  |  |
+| match | [EgressRuleMatch](#cubelet-services-cubebox-v1-EgressRuleMatch) | optional |  |
+| action | [EgressRuleAction](#cubelet-services-cubebox-v1-EgressRuleAction) | optional |  |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-EgressRuleAction"></a>
+
+### EgressRuleAction
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| allow | [bool](#bool) |  |  |
+| audit | [string](#string) | optional |  |
+| inject | [EgressRuleInject](#cubelet-services-cubebox-v1-EgressRuleInject) | repeated |  |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-EgressRuleInject"></a>
+
+### EgressRuleInject
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| header | [string](#string) |  |  |
+| secret | [string](#string) |  |  |
+| format | [string](#string) | optional |  |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-EgressRuleMatch"></a>
+
+### EgressRuleMatch
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| sni | [string](#string) | optional |  |
+| host | [string](#string) | optional |  |
+| method | [string](#string) | repeated |  |
+| path | [string](#string) | optional |  |
+| scheme | [string](#string) | optional |  |
 
 
 
@@ -1495,7 +1570,7 @@ ref by https://kubernetes.io/zh-cn/docs/reference/kubernetes-api/common-definiti
 | instance_type | [string](#string) |  | There are some specific instance types for different scenarios. Each type has its own special logic during its lifecycle. |
 | network_type | [string](#string) |  | NetworkType default to tap |
 | namespace | [string](#string) |  | user define namespace |
-| cubevs_context | [CubeVSContext](#cubelet-services-cubebox-v1-CubeVSContext) | optional | CubeVS egress policy for the sandbox template/runtime. |
+| cube_network_config | [CubeNetworkConfig](#cubelet-services-cubebox-v1-CubeNetworkConfig) | optional | Egress network policy for the sandbox template/runtime. |
 
 
 
