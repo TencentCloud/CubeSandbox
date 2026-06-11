@@ -134,7 +134,8 @@ test:
 	@cargo test --all $(EXTRA_RUSTFEATURES) -- --nocapture
 
 ##TARGET fmt: format code
-fmt:
+fmt: $(GENERATED_FILES)
+	@if [ ! -f libs/protocols/src/agent.rs ]; then cargo check -p protocols; fi
 	cargo fmt
 
 ##TARGET check: run lint/fmt check
