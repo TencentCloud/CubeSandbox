@@ -50,6 +50,29 @@ type HostConfigQuota struct {
 	Mem                   string `yaml:"mem_limit"`
 	MvmLimit              int    `yaml:"mvm_limit"`
 	CreationConcurrentNum int    `yaml:"creation_concurrent_num"`
+
+	// PausedResourceReleaseRatio is the paused-resource scheduling dial.
+	// Pausing a sandbox snapshots it to disk and shuts the MicroVM down, so its
+	// host CPU/RAM is already reclaimed; this ratio decides how much of that
+	// quota is released back to the scheduler vs kept reserved as resume
+	// headroom. It is in [0,1] (out-of-range values are clamped) and is applied
+	// symmetrically to CPU and memory:
+	//   0.0 (default) -- release nothing: paused sandboxes keep their full
+	//                    quota, so resume is guaranteed. Identical to the legacy
+	//                    behaviour (the safe zero-value default).
+	//   1.0           -- release everything: maximum density, resume is purely
+	//                    best-effort and rejected when the node can no longer
+	//                    fit the sandbox (see UpdateWithResume admission).
+	//   0 < r < 1     -- release a fraction r and reserve (1-r) as headroom. A
+	//                    pause-heavy node then (a) keeps room for its own
+	//                    resumes and (b), because the reserved quota still shows
+	//                    up in QuotaCpuUsage/QuotaMemUsage, is naturally
+	//                    deprioritised by the cpu/mem quota scoring factors, so
+	//                    the scheduler stops piling new sandboxes onto nodes
+	//                    that already hold many paused ones.
+	// Disk is intentionally still counted (the pause snapshot occupies storage)
+	// and paused sandboxes still count toward MvmNum, regardless of the ratio.
+	PausedResourceReleaseRatio float64 `yaml:"paused_resource_release_ratio"`
 }
 
 type HostConfigGC struct {

@@ -21,6 +21,19 @@ host:
     mem_limit: ""
     mvm_limit: 0
     creation_concurrent_num: 0
+    # Fraction of a paused sandbox's CPU/memory quota to release back to the
+    # scheduler, in [0,1], applied symmetrically to CPU and memory. A paused
+    # sandbox is snapshotted to disk with its MicroVM shut down, so the quota is
+    # physically free; this ratio trades density against resume headroom:
+    #   0.0 (default) release nothing -- paused keeps full quota, resume
+    #                 guaranteed (legacy behaviour, safe zero-value default).
+    #   1.0           release everything -- max density, resume best-effort and
+    #                 rejected when the node can no longer fit the sandbox.
+    #   0 < r < 1     release r, reserve (1-r) as headroom; the reserved quota
+    #                 still shows up in QuotaCpuUsage/QuotaMemUsage, so
+    #                 pause-heavy nodes are deprioritised by the cpu/mem scoring
+    #                 factors.
+    paused_resource_release_ratio: 0.0
   gc:
     code_expiration_time: "72h"
     image_expiration_time: "24h"

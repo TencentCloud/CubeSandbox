@@ -14,6 +14,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Pause, Play, Trash2, Search, Plus } from 'lucide-react';
 import { formatBytes, formatRelative, short } from '@/lib/utils';
 import { cn } from '@/lib/utils';
+import { formatSandboxActionError } from '@/lib/sandboxActionError';
+import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
 
 type StateFilter = 'all' | 'running' | 'paused';
 
@@ -31,17 +33,28 @@ export default function SandboxesPage() {
   });
 
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const onLifecycleError = (err: unknown) => {
+    setActionError(formatSandboxActionError(err, t));
+  };
 
   const killMut = useMutation({
     mutationFn: (id: string) => { setPendingId(id); return sandboxApi.kill(id); },
+    onMutate: () => setActionError(null),
+    onError: onLifecycleError,
     onSettled: () => { setPendingId(null); qc.invalidateQueries({ queryKey: ['sandboxes'] }); },
   });
   const pauseMut = useMutation({
     mutationFn: (id: string) => { setPendingId(id); return sandboxApi.pause(id); },
+    onMutate: () => setActionError(null),
+    onError: onLifecycleError,
     onSettled: () => { setPendingId(null); qc.invalidateQueries({ queryKey: ['sandboxes'] }); },
   });
   const resumeMut = useMutation({
     mutationFn: (id: string) => { setPendingId(id); return sandboxApi.resume(id); },
+    onMutate: () => setActionError(null),
+    onError: onLifecycleError,
     onSettled: () => { setPendingId(null); qc.invalidateQueries({ queryKey: ['sandboxes'] }); },
   });
 
@@ -75,6 +88,8 @@ export default function SandboxesPage() {
           </Button>
         </Link>
       </header>
+
+      <SandboxActionErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
 
       <Card className="!p-3">
         <div className="flex items-center gap-2">
