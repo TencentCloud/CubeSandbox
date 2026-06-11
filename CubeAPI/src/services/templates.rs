@@ -74,8 +74,16 @@ impl TemplateService {
             .as_ref()
             .and_then(|v| v.get("network_type"))
             .and_then(|v| v.as_str())
-            .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) });
-        let allow_internet_access = resp.create_request.as_ref()
+            .and_then(|s| {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            });
+        let allow_internet_access = resp
+            .create_request
+            .as_ref()
             .and_then(|v| v.get("cube_network_config"))
             .and_then(|v| v.get("allowInternetAccess"))
             .and_then(|v| v.as_bool());

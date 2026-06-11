@@ -64,8 +64,8 @@ type local struct {
 	hostInfo             *HostStorageMeta
 	cubeboxAPI           cubes.CubeboxAPI
 	multiLock            *multilock.MultiLock
-	cowEngine        *cubecow.Engine
-	cowManager       cowVolumeManager
+	cowEngine            *cubecow.Engine
+	cowManager           cowVolumeManager
 }
 
 type HostStorageMeta struct {

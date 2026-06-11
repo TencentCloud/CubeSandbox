@@ -660,8 +660,7 @@ pub extern "C" fn cubecow_list_volumes(
             Some(unsafe { c_str_to_str(page_token) }?)
         };
 
-        let (volumes, next_token, total) =
-            eng.list_volumes(page_size as usize, token_filter);
+        let (volumes, next_token, total) = eng.list_volumes(page_size as usize, token_filter);
 
         // Serialize volumes to JSON
         let json_items: Vec<serde_json::Value> = volumes

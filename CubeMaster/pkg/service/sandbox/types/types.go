@@ -35,12 +35,12 @@ type HostChangeEvent struct {
 type CreateCubeSandboxReq struct {
 	*Request
 
-	Timeout            int                `json:"timeout,omitempty" d:"60"`
-	SnapshotDir        string             `json:"snapshot_dir,omitempty"`
-	InsId              string             `json:"ins_id,omitempty"`
-	InsIp              string             `json:"ins_ip,omitempty"`
-	Volumes            []*Volume          `json:"volumes,omitempty"`
-	CubeNetworkConfig  *CubeNetworkConfig `json:"cube_network_config,omitempty"`
+	Timeout           int                `json:"timeout,omitempty" d:"60"`
+	SnapshotDir       string             `json:"snapshot_dir,omitempty"`
+	InsId             string             `json:"ins_id,omitempty"`
+	InsIp             string             `json:"ins_ip,omitempty"`
+	Volumes           []*Volume          `json:"volumes,omitempty"`
+	CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
 
 	Containers []*Container `json:"containers,omitempty"`
 

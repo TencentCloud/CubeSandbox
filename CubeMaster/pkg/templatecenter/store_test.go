@@ -40,7 +40,7 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 			constants.CubeAnnotationsAppSnapshotCreate:        "true",
 			constants.CubeAnnotationRuntimeSnapshotID:         "snap-stale",
 			constants.CubeAnnotationRuntimeSnapshotAttachedAt: "2026-05-01T00:00:00Z",
-			"unrelated":                                       "keep-me",
+			"unrelated": "keep-me",
 		},
 	}
 

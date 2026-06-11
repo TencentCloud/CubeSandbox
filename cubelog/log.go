@@ -22,31 +22,18 @@ const (
 	CloudSupport Net = "CloudSupport"
 )
 
-
 type Config struct {
-
 	Net Net
 
-
-
-
-
 	Path string
-
 
 	Count int
 
 	Size int
 
-
-
-
-
 	AsyncFlush string
 	asyncFlush bool
 }
-
-
 
 func Init(cfg Config) {
 	config = cfg
@@ -67,19 +54,15 @@ func Init(cfg Config) {
 		return
 	}
 
-
 	config.asyncFlush = false
 	if cfg.AsyncFlush == "true" {
 		config.asyncFlush = true
 	}
 }
 
-
 type RemoteConfig struct {
-
 	EnableLocal string
 	enablelocal bool
-
 
 	RetmoteLogAddr string
 	RetmoteLogPort int
@@ -89,9 +72,7 @@ type RemoteConfig struct {
 
 var config Config
 
-
 func GetLoggerByName(name string) *Logger {
-
 
 	if name == "" || name == "Trace" {
 		return GetLogger(name)

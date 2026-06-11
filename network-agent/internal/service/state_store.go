@@ -37,18 +37,18 @@ type persistedState struct {
 //
 // Drop the legacy field one release after this lands.
 type persistedStateOnDisk struct {
-	SandboxID             string             `json:"sandboxID"`
-	NetworkHandle         string             `json:"networkHandle"`
-	TapName               string             `json:"tapName"`
-	TapIfIndex            int                `json:"tapIfIndex"`
-	SandboxIP             string             `json:"sandboxIP"`
-	Interfaces            []Interface        `json:"interfaces"`
-	Routes                []Route            `json:"routes"`
-	ARPNeighbors          []ARPNeighbor      `json:"arpNeighbors"`
-	PortMappings          []PortMapping      `json:"portMappings"`
-	CubeNetworkConfig     *CubeNetworkConfig `json:"cubeNetworkConfig,omitempty"`
-	LegacyCubeVSContext   *CubeNetworkConfig `json:"cubevsContext,omitempty"` // TODO: remove after one release
-	PersistMetadata       map[string]string  `json:"persistMetadata"`
+	SandboxID           string             `json:"sandboxID"`
+	NetworkHandle       string             `json:"networkHandle"`
+	TapName             string             `json:"tapName"`
+	TapIfIndex          int                `json:"tapIfIndex"`
+	SandboxIP           string             `json:"sandboxIP"`
+	Interfaces          []Interface        `json:"interfaces"`
+	Routes              []Route            `json:"routes"`
+	ARPNeighbors        []ARPNeighbor      `json:"arpNeighbors"`
+	PortMappings        []PortMapping      `json:"portMappings"`
+	CubeNetworkConfig   *CubeNetworkConfig `json:"cubeNetworkConfig,omitempty"`
+	LegacyCubeVSContext *CubeNetworkConfig `json:"cubevsContext,omitempty"` // TODO: remove after one release
+	PersistMetadata     map[string]string  `json:"persistMetadata"`
 }
 
 func (s *persistedState) MarshalJSON() ([]byte, error) {

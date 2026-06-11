@@ -34,7 +34,7 @@ ifneq ($(wildcard $(HOME)/.git-credentials),)
 DOCKER_GIT_CRED += -v $(TMP_GIT_CREDENTIALS):$(BUILDER_CONTAINER_HOME)/.git-credentials
 endif
 
-.PHONY: help builder-image builder-shell builder-run prepare-builder-home prepare-tmp-git-credentials all cubemaster cubelet cubecow-sdk cubecow-clean cubecow-smoke cubecow-test-native network-agent agent cubeapi cube-api shim manual-release web-install web-dev web-build web-preview web-lint web-api-sync web-sync-dev-env cubevsmapdump
+.PHONY: help builder-image builder-shell builder-run prepare-builder-home prepare-tmp-git-credentials all cubemaster cubelet cubecow-sdk cubecow-clean cubecow-smoke cubecow-test-native network-agent agent cubeapi cube-api shim manual-release web-install web-dev web-build web-preview web-lint web-api-sync web-sync-dev-env cubevsmapdump fmt
 
 help:
 	@printf "Targets:\n"
@@ -59,6 +59,7 @@ help:
 	@printf "  web-build     Build WebUI static assets\n"
 	@printf "  web-preview   Preview built WebUI assets\n"
 	@printf "  web-lint      Run WebUI lint checks\n"
+	@printf "  fmt            Format code in all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
 	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
 	@printf "\nNotes:\n"
@@ -208,3 +209,25 @@ web-api-sync:
 
 web-sync-dev-env:
 	"$(ROOT_DIR)/dev-env/internal/sync_web_to_vm.sh"
+
+# Run make fmt in each component directory that has a fmt target.
+# Components without formattable code (e.g. CubeProxy) are skipped.
+fmt:
+	@printf '  %-8s %s\n' "FMT" "agent"
+	@$(MAKE) -C agent fmt
+	@printf '  %-8s %s\n' "FMT" "cubecow"
+	@$(MAKE) -C cubecow fmt
+	@printf '  %-8s %s\n' "FMT" "CubeAPI"
+	@$(MAKE) -C CubeAPI fmt
+	@printf '  %-8s %s\n' "FMT" "Cubelet"
+	@$(MAKE) -C Cubelet fmt
+	@printf '  %-8s %s\n' "FMT" "cubelog"
+	@$(MAKE) -C cubelog fmt
+	@printf '  %-8s %s\n' "FMT" "CubeMaster"
+	@$(MAKE) -C CubeMaster fmt
+	@printf '  %-8s %s\n' "FMT" "CubeShim"
+	@$(MAKE) -C CubeShim fmt
+	@printf '  %-8s %s\n' "FMT" "hypervisor"
+	@$(MAKE) -C hypervisor fmt
+	@printf '  %-8s %s\n' "FMT" "network-agent"
+	@$(MAKE) -C network-agent fmt

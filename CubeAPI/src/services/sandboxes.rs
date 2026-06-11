@@ -9,11 +9,11 @@ use uuid::Uuid;
 use crate::{
     constants::ENVD_VERSION,
     cubemaster::{
-        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient, CubeMasterError,
-        DeleteSandboxRequest, ListSandboxRequest, SandboxInfo, SandboxLogsRequest,
-        SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest, SandboxUpdateRequest,
-        CubeEgressRule, CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch,
-        CubeNetworkConfig,
+        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
+        CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
+        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
+        SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
+        SandboxUpdateRequest,
     },
     error::{AppError, AppResult},
     models::{
@@ -144,7 +144,10 @@ impl SandboxService {
             containers: vec![],
             exposed_ports: vec![],
             network_type: Some("tap".to_string()),
-            cube_network_config: build_cube_network_config(body.allow_internet_access, body.network.as_ref()),
+            cube_network_config: build_cube_network_config(
+                body.allow_internet_access,
+                body.network.as_ref(),
+            ),
         };
 
         let resp = self

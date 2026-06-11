@@ -621,7 +621,10 @@ pub struct CreateSandboxRequest {
     pub network_type: Option<String>,
 
     /// Network egress policy.
-    #[serde(rename = "cube_network_config", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "cube_network_config",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cube_network_config: Option<CubeNetworkConfig>,
 }
 
@@ -1632,7 +1635,10 @@ pub struct CreateTemplateFromImageReq {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_overrides: Option<CreateTemplateContainerOverrides>,
     /// Network / internet-access context.
-    #[serde(rename = "cube_network_config", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "cube_network_config",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cube_network_config: Option<CreateTemplateCubeNetworkConfig>,
 }
 
@@ -1674,7 +1680,10 @@ pub struct CreateTemplateEnv {
 /// Network config for template creation.
 #[derive(Debug, Serialize)]
 pub struct CreateTemplateCubeNetworkConfig {
-    #[serde(rename = "allowInternetAccess", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "allowInternetAccess",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub allow_internet_access: Option<bool>,
     #[serde(rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
     pub allow_out: Vec<String>,

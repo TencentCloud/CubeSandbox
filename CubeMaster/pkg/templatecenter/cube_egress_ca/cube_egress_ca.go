@@ -96,9 +96,9 @@ var bundleFiles = []string{
 // a workload that runs apt install some-package and triggers a
 // post-install hook) pick the CA up too.
 var anchorDirs = []string{
-	"usr/local/share/ca-certificates",       // Debian/Ubuntu
-	"etc/pki/ca-trust/source/anchors",       // RHEL/Fedora/CentOS
-	"etc/ca-certificates/trust-source",      // Arch
+	"usr/local/share/ca-certificates",  // Debian/Ubuntu
+	"etc/pki/ca-trust/source/anchors",  // RHEL/Fedora/CentOS
+	"etc/ca-certificates/trust-source", // Arch
 }
 
 // Bake runs against rootfsDir, applying caPEM to every bundle/anchor

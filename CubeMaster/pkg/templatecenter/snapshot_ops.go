@@ -567,7 +567,7 @@ func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, n
 //     next `DeleteSnapshot` call for the same id will re-attempt cleanly.
 //
 // The snapshot API is synchronous — CubeAPI waits for a terminal state
-	// and does not expose a polling interface to callers.
+// and does not expose a polling interface to callers.
 func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType string) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
@@ -1337,4 +1337,3 @@ func snapshotDeleteRequestMatches(raw, requestID, snapshotID string) bool {
 	}
 	return existing.RequestID == requestID && existing.SnapshotID == snapshotID
 }
-

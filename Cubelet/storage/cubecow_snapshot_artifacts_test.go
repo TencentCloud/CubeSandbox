@@ -17,7 +17,7 @@ func useTestCowStorage(t *testing.T, engine *fakeCowEngine) {
 	t.Helper()
 	previousLocalStorage := localStorage
 	localStorage = &local{
-		config:         &Config{StorageBackend: "cubecow"},
+		config:     &Config{StorageBackend: "cubecow"},
 		cowManager: &CowVolumeManager{engine: engine},
 	}
 	t.Cleanup(func() {

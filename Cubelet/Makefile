@@ -150,6 +150,10 @@ view:
 	$(call msg,Show coverage report)
 	$(Q)go tool cover -html=$(COVERAGE_PROFILE)
 
+fmt:
+	$(call msg,Format code)
+	$(Q)go fmt ./...
+
 lint:
 	$(call msg,Run linters)
 	$(Q)go fmt ./...

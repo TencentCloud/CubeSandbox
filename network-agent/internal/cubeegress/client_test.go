@@ -212,4 +212,3 @@ func TestClientHonorsContextDeadline(t *testing.T) {
 		t.Fatalf("elapsed=%s; deadline was 50ms", elapsed)
 	}
 }
-

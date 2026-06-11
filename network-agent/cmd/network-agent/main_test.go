@@ -87,4 +87,3 @@ func TestInitServiceRejectsNilFactoryResult(t *testing.T) {
 		})
 	}
 }
-
