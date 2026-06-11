@@ -494,10 +494,15 @@ fn ensure_update_result(
         )));
     }
     if ret_code == RET_CODE_CONFLICT {
-        return Err(AppError::Conflict(format!(
-            "sandbox {} {}",
-            sandbox_id, conflict_message
-        )));
+        // Prefer the backend's own reason (e.g. the paused_resource_release_ratio
+        // capacity rejection on resume) so the client sees why it conflicted;
+        // fall back to the generic templated message when none was provided.
+        let detail = if ret_msg.trim().is_empty() {
+            format!("sandbox {} {}", sandbox_id, conflict_message)
+        } else {
+            ret_msg
+        };
+        return Err(AppError::Conflict(detail));
     }
     Err(AppError::Internal(anyhow::anyhow!(ret_msg)))
 }
