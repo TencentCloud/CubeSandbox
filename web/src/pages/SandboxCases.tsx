@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import {
   Boxes,
   Check,
@@ -32,6 +33,7 @@ import {
   GitBranch,
   Inbox,
   Layers,
+  Loader2,
   Monitor,
   Network,
   PauseCircle,
@@ -43,17 +45,19 @@ import {
   Timer,
   TimerReset,
   XCircle,
+  AlertTriangle,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
-import { api } from '@/lib/api';
 import {
   clusterApi,
   examplesApi,
+  storeApi,
   templateApi,
   type RunExampleBody,
   type TemplateSummary,
 } from '@/api/client';
+import { getTemplateMatchStatus, type TemplateMatchStatus } from '@/lib/template-match';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -561,6 +565,7 @@ export default function SandboxCasesPage() {
   const { data: templates } = useQuery({
     queryKey: ['templates'],
     queryFn: () => templateApi.list(),
+    refetchInterval: 30_000,
   });
 
   const { data: config } = useQuery({
@@ -568,15 +573,14 @@ export default function SandboxCasesPage() {
     queryFn: () => clusterApi.config(),
   });
 
+  const { data: storeCatalog } = useQuery({
+    queryKey: ['store-catalog'],
+    queryFn: storeApi.catalog,
+    staleTime: 5 * 60 * 1000,
+  });
+
   const defaultTemplateId = config?.defaultTemplateId;
   const firstTemplateId = templates?.[0]?.templateID;
-  const effectiveTemplateId = selectedTemplateId ?? defaultTemplateId ?? firstTemplateId;
-
-  useEffect(() => {
-    if (effectiveTemplateId && selectedTemplateId === undefined) {
-      setSelectedTemplateId(effectiveTemplateId);
-    }
-  }, [effectiveTemplateId, selectedTemplateId]);
 
   // ── Pick initial selection: first scenario, first file ─────────────
   useEffect(() => {
@@ -621,26 +625,6 @@ export default function SandboxCasesPage() {
     mutationFn: (body: RunExampleBody) => examplesApi.run(body),
   });
 
-  const handleRun = useCallback(() => {
-    if (!selectedId) return;
-    const body: RunExampleBody = {
-      id: selectedId,
-      template_id: effectiveTemplateId,
-      language: sourceData?.language,
-    };
-    if (codeDirty) {
-      body.code = editedCode;
-    }
-    runMutation.mutate(body);
-  }, [
-    selectedId,
-    effectiveTemplateId,
-    sourceData?.language,
-    codeDirty,
-    editedCode,
-    runMutation,
-  ]);
-
   const handleCopySource = useCallback(() => {
     const text = codeDirty ? editedCode : sourceCode;
     if (!text) return;
@@ -660,6 +644,56 @@ export default function SandboxCasesPage() {
       selectedScenario?.files.find((f) => f.id === selectedFileId) ?? null,
     [selectedScenario, selectedFileId],
   );
+
+  // ── Template match status based on storeItemId ────────────────────
+  const templateMatchStatus = useMemo<TemplateMatchStatus>(() => {
+    const sid = selectedScenario?.storeItemId;
+    if (!sid || !storeCatalog || !templates) return { kind: 'not_installed' } as TemplateMatchStatus;
+    const catalogItem = storeCatalog.find((c) => c.id === sid);
+    if (!catalogItem) return { kind: 'not_installed' } as TemplateMatchStatus;
+    return getTemplateMatchStatus(catalogItem, templates);
+  }, [selectedScenario, storeCatalog, templates]);
+
+  const recommendedTemplateId = templateMatchStatus.kind === 'ready'
+    ? templateMatchStatus.templates[0]?.templateID
+    : undefined;
+
+  const needsInstall = templateMatchStatus.kind === 'not_installed' && !!selectedScenario?.storeItemId;
+
+  const missingImageName = useMemo(() => {
+    const sid = selectedScenario?.storeItemId;
+    if (!sid || !storeCatalog) return '';
+    const catalogItem = storeCatalog.find((c) => c.id === sid);
+    if (!catalogItem) return '';
+    return catalogItem.image.split('/').pop() ?? '';
+  }, [selectedScenario, storeCatalog]);
+
+  // Reset template selection when scenario changes so recommended template auto-applies
+  useEffect(() => {
+    setSelectedTemplateId(undefined);
+  }, [selectedScenarioId]);
+
+  const effectiveTemplateId = selectedTemplateId ?? recommendedTemplateId ?? defaultTemplateId ?? firstTemplateId;
+
+  const handleRun = useCallback(() => {
+    if (!selectedId) return;
+    const body: RunExampleBody = {
+      id: selectedId,
+      template_id: effectiveTemplateId,
+      language: sourceData?.language,
+    };
+    if (codeDirty) {
+      body.code = editedCode;
+    }
+    runMutation.mutate(body);
+  }, [
+    selectedId,
+    effectiveTemplateId,
+    sourceData?.language,
+    codeDirty,
+    editedCode,
+    runMutation,
+  ]);
 
   // ── Filter scenarios by category + search ─────────────────────────
   const filteredScenarios = useMemo(() => {
@@ -843,6 +877,27 @@ export default function SandboxCasesPage() {
                       value={effectiveTemplateId}
                       onChange={setSelectedTemplateId}
                     />
+                    {templateMatchStatus.kind === 'ready' && recommendedTemplateId && (
+                      <span className="inline-flex items-center gap-1.5 rounded-md border border-cube-emerald/40 bg-cube-emerald/10 px-2 py-1 text-[11px] font-medium text-cube-emerald">
+                        <CheckCircle2 size={12} />
+                        {t('templateSelector.templateReady')}
+                      </span>
+                    )}
+                    {templateMatchStatus.kind === 'building' && (
+                      <span className="inline-flex items-center gap-1.5 rounded-md border border-cube-amber/40 bg-cube-amber/10 px-2 py-1 text-[11px] font-medium text-cube-amber">
+                        <Loader2 size={12} className="animate-spin" />
+                        {t('templateSelector.templateBuilding')}
+                      </span>
+                    )}
+                    {needsInstall && missingImageName && (
+                      <Link
+                        to={`/store?search=${encodeURIComponent(missingImageName)}`}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-orange-500/40 bg-orange-500/10 px-2 py-1 text-[11px] font-medium text-orange-600 dark:text-orange-400 transition-colors hover:bg-orange-500/20"
+                      >
+                        <AlertTriangle size={12} />
+                        {t('templateSelector.needsInstallWithName', { name: missingImageName })}
+                      </Link>
+                    )}
                     {codeDirty && (
                       <Button
                         variant="outline"

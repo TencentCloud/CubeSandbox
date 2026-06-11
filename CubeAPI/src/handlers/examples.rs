@@ -43,6 +43,9 @@ pub struct ExampleMeta {
     /// Source language: python | go | bash | markdown. Surfaced to the UI so
     /// the editor can pick a syntax mode without re-reading the file.
     pub language: String,
+    /// Associated store catalog item ID. When present, the frontend uses it
+    /// to auto-select a matching template or prompt the user to install one.
+    pub store_item_id: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -138,6 +141,12 @@ struct ScenarioSpec {
     /// per-run response augments this with a "ran ok / failed" node status
     /// before shipping it to the UI.
     topology: TopologyTemplate,
+    /// Associated store catalog item ID (e.g. "sandbox-browser").
+    /// When set, the run_example handler uses it to find a template whose
+    /// image matches the catalog item's image, instead of falling back to
+    /// the default template. The frontend also uses this to auto-select
+    /// the recommended template or show an "install first" prompt.
+    store_item_id: Option<&'static str>,
 }
 
 /// Either a fixed graph or a closure that emits nodes/edges dynamically
@@ -508,6 +517,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             ],
             timeout_secs: None,
             topology: topology_for("code-sandbox-quickstart"),
+            store_item_id: Some("sandbox-code"),
         },
         ScenarioSpec {
             id: "network-policy",
@@ -538,6 +548,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             ],
             timeout_secs: None,
             topology: topology_for("network-policy"),
+            store_item_id: Some("sandbox-code"),
         },
         ScenarioSpec {
             id: "host-mount",
@@ -552,6 +563,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             }],
             timeout_secs: None,
             topology: topology_for("host-mount"),
+            store_item_id: Some("sandbox-code"),
         },
         ScenarioSpec {
             id: "browser-sandbox",
@@ -566,6 +578,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             }],
             timeout_secs: Some(600),
             topology: topology_for("browser-sandbox"),
+            store_item_id: Some("sandbox-browser"),
         },
         ScenarioSpec {
             id: "snapshot-rollback-clone",
@@ -588,6 +601,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             ],
             timeout_secs: None,
             topology: topology_for("snapshot-rollback-clone"),
+            store_item_id: Some("sandbox-code"),
         },
         ScenarioSpec {
             id: "e2b-dev-sidecar",
@@ -602,6 +616,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             }],
             timeout_secs: None,
             topology: topology_for("e2b-dev-sidecar"),
+            store_item_id: Some("sandbox-code"),
         },
         ScenarioSpec {
             id: "cubesandbox-base-nginx",
@@ -616,6 +631,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             }],
             timeout_secs: None,
             topology: topology_for("cubesandbox-base-nginx"),
+            store_item_id: Some("sandbox-nginx"),
         },
         ScenarioSpec {
             id: "cube-bench",
@@ -630,6 +646,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             }],
             timeout_secs: None,
             topology: topology_for("cube-bench"),
+            store_item_id: Some("sandbox-code"),
         },
         // ── Hidden: AI / LLM scenarios. Intentionally NOT exposed via the
         // HTTP surface. They live here so that toggling `hidden: false`
@@ -642,6 +659,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             files: &[],
             timeout_secs: None,
             topology: topology_for("code-sandbox-quickstart"),
+            store_item_id: None,
         },
         ScenarioSpec {
             id: "openai-agents-example",
@@ -650,6 +668,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             files: &[],
             timeout_secs: None,
             topology: topology_for("code-sandbox-quickstart"),
+            store_item_id: None,
         },
         ScenarioSpec {
             id: "openai-agents-code-interpreter",
@@ -658,6 +677,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             files: &[],
             timeout_secs: None,
             topology: topology_for("code-sandbox-quickstart"),
+            store_item_id: None,
         },
         ScenarioSpec {
             id: "mini-rl-training",
@@ -666,6 +686,7 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             files: &[],
             timeout_secs: None,
             topology: topology_for("code-sandbox-quickstart"),
+            store_item_id: None,
         },
     ]))
 }
@@ -705,6 +726,7 @@ fn list_visible() -> Vec<ExampleMeta> {
                 description: f.description.to_string(),
                 category: sc.category.to_string(),
                 language,
+                store_item_id: sc.store_item_id.map(|s| s.to_string()),
             });
         }
     }
@@ -734,6 +756,7 @@ fn resolve_visible(id: &str) -> Option<(ExampleMeta, &'static ScenarioSpec, &'st
                     description: f.description.to_string(),
                     category: sc.category.to_string(),
                     language,
+                    store_item_id: sc.store_item_id.map(|s| s.to_string()),
                 };
                 return Some((meta, sc, f));
             }
@@ -917,7 +940,12 @@ pub async fn run_example(
     let base_dir = examples_root().join(&meta.scenario);
     let script_path = base_dir.join(&meta.filename);
 
-    // ── Template ID resolution (same fallback chain as before) ──────
+    // ── Template ID resolution ──────────────────────────────────────
+    // Priority:
+    //   1. User-explicit template_id (from frontend)
+    //   2. store_item_id → match by image_info against catalog image
+    //   3. Config default_template_id / env CUBE_TEMPLATE_ID
+    //   4. Any healthy/ready template
     let candidates: Vec<String> = [
         req.template_id.filter(|s| !s.trim().is_empty()),
         state.config.default_template_id.clone(),
@@ -940,6 +968,41 @@ pub async fn run_example(
                     error = %e,
                     "template candidate failed validation, trying next"
                 );
+            }
+        }
+    }
+
+    // ── store_item_id-based lookup ──────────────────────────────────
+    // If no template found yet and the scenario has a store_item_id,
+    // find a template whose image_info matches the catalog item's image.
+    if template_id.is_empty() {
+        if let Some(ref sid) = sc.store_item_id {
+            let catalog_image = crate::handlers::store::fallback_catalog()
+                .into_iter()
+                .find(|item| item.id == *sid)
+                .map(|item| item.image_cn);
+
+            if let Some(ref image_ref) = catalog_image {
+                match state.services.templates.list_templates().await {
+                    Ok(templates) => {
+                        let matched = templates.iter().find(|t| {
+                            (t.status == "healthy" || t.status == "ready")
+                                && t.image_info.as_deref() == Some(image_ref.as_str())
+                        });
+                        if let Some(t) = matched {
+                            tracing::info!(
+                                store_item_id = %sid,
+                                image = %image_ref,
+                                template_id = %t.template_id,
+                                "matched template via store_item_id"
+                            );
+                            template_id = t.template_id.clone();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to list templates for store_item_id lookup");
+                    }
+                }
             }
         }
     }
