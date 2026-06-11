@@ -743,6 +743,22 @@ func safePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {
 			v.Image.Token = "*"
 		}
 	}
+
+	if tmpReq.CubeNetworkConfig != nil {
+		for _, r := range tmpReq.CubeNetworkConfig.Rules {
+			if r == nil || r.Action == nil {
+				continue
+			}
+			for _, inj := range r.Action.Inject {
+				if inj == nil {
+					continue
+				}
+				if inj.Secret != "" {
+					inj.Secret = "***REDACTED***"
+				}
+			}
+		}
+	}
 	return utils.InterfaceToString(tmpReq)
 }
 
