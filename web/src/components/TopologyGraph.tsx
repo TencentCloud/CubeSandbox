@@ -42,10 +42,10 @@ export interface TopologyGraphProps {
   showLegend?: boolean;
 }
 
-const COL_WIDTH = 220;
-const ROW_HEIGHT_CONTROL = 88;
-const ROW_HEIGHT_DATA = 88;
-const COL_GAP = 70;
+const COL_WIDTH = 250;
+const ROW_HEIGHT_CONTROL = 120;
+const ROW_HEIGHT_DATA = 120;
+const COL_GAP = 60;
 
 // Layer ordering used by the layout. Each entry is a list of node ids that
 // share the same x-coordinate. Unknown nodes are appended at the end in
@@ -57,31 +57,34 @@ function topoLayeredOrder(nodes: ScenarioNode[]): string[][] {
   const knownLayers: Record<string, number> = {
     // Layer 0: Entry point
     user: 0,
-    // Layer 1: Gateway (dual-plane)
+    // Layer 1: Gateway
     cubeapi: 1,
-    cubeproxy: 1,
-    sidecar: 2,
+    sidecar: 1,
     // Layer 2: Orchestration
     cubemaster: 2,
-    // Layer 3: Node agent + external stores
+    // Layer 3: Node agent + data-plane entry (max 2 per column)
     cubelet: 3,
-    hostdir: 3,
-    snapshot: 3,
-    cubevs: 4,
-    // Layer 4: Sandbox boundary (MicroVM)
-    microvm: 5,
-    'microvm-0': 5,
-    'microvm-1': 5,
-    'microvm-2': 5,
-    'microvm-3': 5,
-    // Layer 5: In-sandbox daemon
-    envd: 6,
-    // Layer 6: Workload
-    runner: 7,
-    playwright: 7,
-    nginx: 7,
-    // Layer 7: Sub-workload
-    chromium: 8,
+    cubeproxy: 3,
+    // Layer 4: Runtime shim + Network agent (max 2 per column)
+    cubeshim: 4,
+    'network-agent': 4,
+    // Layer 5: Hypervisor
+    'cube-hypervisor': 5,
+    // Layer 6: Sandbox boundary (MicroVM) + external stores
+    microvm: 6,
+    'microvm-0': 6,
+    'microvm-1': 6,
+    'microvm-2': 6,
+    'microvm-3': 6,
+    hostdir: 6,
+    snapshot: 6,
+    // Layer 7: Sandbox runtime
+    'cube-runtime': 7,
+    // Layer 8: Workload
+    playwright: 8,
+    nginx: 8,
+    // Layer 9: Sub-workload
+    chromium: 9,
   };
   const seen = new Set<string>();
   const layers: string[][] = [];
@@ -196,7 +199,7 @@ function TopologyNodeView({ data, selected }: NodeProps<Node<TopologyNodeData>>)
   return (
     <div
       className={cn(
-        'group relative flex w-[200px] flex-col gap-1 rounded-lg border border-border/60 bg-card/80 px-3 py-2 shadow-sm backdrop-blur-md transition-all',
+        'group relative flex w-[220px] flex-col gap-1.5 rounded-lg border border-border/60 bg-card/80 px-3 py-2.5 shadow-sm backdrop-blur-md transition-all',
         tone.ring,
         'ring-1',
         selected && 'shadow-md ring-2',
@@ -220,7 +223,7 @@ function TopologyNodeView({ data, selected }: NodeProps<Node<TopologyNodeData>>)
 
 const NODE_TYPES: NodeTypes = { topologyNode: TopologyNodeView };
 
-function TopologyGraphInner({ nodes, edges, className, height = 360, showLegend = true }: TopologyGraphProps) {
+function TopologyGraphInner({ nodes, edges, className, height = 460, showLegend = true }: TopologyGraphProps) {
   const { t, i18n } = useTranslation('examples');
   const [expanded, setExpanded] = useState(false);
   const isZh = (i18n.language ?? 'en').toLowerCase().startsWith('zh');
@@ -249,7 +252,7 @@ function TopologyGraphInner({ nodes, edges, className, height = 360, showLegend 
         'relative overflow-hidden rounded-lg border border-border/60 bg-[#0b0d12]/80',
         className,
       )}
-      style={{ height: expanded ? 560 : height }}
+      style={{ height: expanded ? 700 : height }}
     >
       {/* Plane labels on the canvas sides */}
       <div className="pointer-events-none absolute left-3 top-3 z-10 flex flex-col gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
@@ -288,20 +291,10 @@ function TopologyGraphInner({ nodes, edges, className, height = 360, showLegend 
         elementsSelectable
       >
         <Background gap={20} size={1} color="#1f2937" />
-        <MiniMap
-          pannable
-          zoomable
-          maskColor="rgba(11,13,18,0.6)"
-          nodeColor={(n) => {
-            const data = n.data as TopologyNodeData;
-            const plane = data?.node?.plane;
-            return plane === 'data' ? '#a78bfa' : '#22d3ee';
-          }}
-          style={{ background: '#0b0d12', border: '1px solid #1f2937' }}
-        />
+
         <Controls
           showInteractive={false}
-          className="!bg-background/60 !backdrop-blur"
+          className="!bg-transparent !backdrop-blur-none !border-none !shadow-none [&>button]:!h-6 [&>button]:!w-6 [&>button]:!bg-card/40 [&>button]:!backdrop-blur [&>button]:!border-border/40 [&>button]:!text-muted-foreground hover:[&>button]:!bg-card/70 hover:[&>button]:!text-foreground [&>button>svg]:!h-3 [&>button>svg]:!w-3"
           position="bottom-right"
         />
       </ReactFlow>
