@@ -84,10 +84,6 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		ctx = namespaces.WithNamespace(ctx, namespaces.Default)
 	}
 
-	if !sandboxDeletable(sb, opts.DestroyInfo.GetFilter()) {
-		return ret.Err(errorcode.ErrorCode_PreConditionFailed, "unmatched filter")
-	}
-
 	sb.GetStatus().Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 		status.Removing = true
 		return status, nil
@@ -116,12 +112,14 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	for _, ci := range sb.All() {
 		containers = append(containers, ci)
 	}
+	// A paused VM can't serve its runtime API; force it down out-of-band instead.
 	if sb.GetStatus().IsPaused() {
-
 		ctx = constants.WithSkipRuntimeAPI(ctx)
-		if _, err := l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{
-			ContainerID: sb.ID,
-		}); err != nil {
+	}
+
+	if constants.SkipRuntimeAPI(ctx) {
+
+		if err := l.destroySandboxByBinary(ctx, sb); err != nil {
 			result = multierror.Append(result, fmt.Errorf("delete sandbox by binary failed: %w", err))
 		}
 	} else {
@@ -171,6 +169,56 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		return ret.Errorf(errorcode.ErrorCode_RemoveContainerFailed, "%s", er.Error())
 	}
 	return nil
+}
+
+// destroySandboxByBinary force-deletes a sandbox without using the shim's runtime
+// API: it SIGKILLs the shim (reaping the in-process VMM) and detaches it, letting
+// containerd's dead-shim cleanup reclaim the VM workdir and pause snapshot.
+func (l *local) destroySandboxByBinary(ctx context.Context, sb *cubeboxstore.CubeBox) error {
+	// The stored shim PID may be stale (shim already gone, PID recycled), so only
+	// SIGKILL it after /proc confirms it is still this sandbox's cube shim.
+	if pid := int(sb.Endpoint.Pid); pid != 0 && isCubeShimPid(pid, sb.ID) {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			// Don't detach a shim we couldn't kill: shims.Delete would drop it from
+			// containerd's management and orphan the shim (and its in-process VMM).
+			return fmt.Errorf("kill shim %d of sandbox %s: %w", pid, sb.ID, err)
+		}
+	}
+
+	if err := l.shims.Delete(ctx, sb.ID); err != nil && !errdefs.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// isCubeShimPid reports whether pid is the live cube shim serving sandboxID. It
+// guards destroySandboxByBinary against signaling a recycled PID when the stored
+// shim PID is stale.
+func isCubeShimPid(pid int, sandboxID string) bool {
+	p, err := procfs.NewProc(pid)
+	if err != nil {
+		return false
+	}
+	cmdline, err := p.CmdLine()
+	if err != nil {
+		return false
+	}
+	return cmdlineServesSandbox(cmdline, sandboxID)
+}
+
+// cmdlineServesSandbox matches the shim's "-id <sandboxID>" launch argument
+// specifically (rather than the id appearing as any token), so an unrelated
+// process that merely mentions the id in its cmdline is not mistaken for the shim.
+func cmdlineServesSandbox(cmdline []string, sandboxID string) bool {
+	for i, arg := range cmdline {
+		if arg == "-id" && i+1 < len(cmdline) && cmdline[i+1] == sandboxID {
+			return true
+		}
+		if arg == "-id="+sandboxID {
+			return true
+		}
+	}
+	return false
 }
 
 func sandboxDeletable(sb *cubeboxstore.CubeBox, filter *cubebox.CubeSandboxFilter) bool {

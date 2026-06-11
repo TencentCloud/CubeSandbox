@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -268,5 +269,52 @@ func TestSandboxDeletable(t *testing.T) {
 	filter = &cubebox.CubeSandboxFilter{LabelSelector: map[string]string{"app": ""}}
 	if sandboxDeletable(sb, filter) {
 		t.Error("Expected false, got true")
+	}
+}
+
+func TestCmdlineServesSandbox(t *testing.T) {
+	const id = "5d89e529677e4550b12531e45a1f431d"
+	shim := []string{
+		"/usr/local/services/cubetoolbox/cube-shim/bin/containerd-shim-cube-rs",
+		"-namespace", "default",
+		"-id", id,
+		"-address", "/data/cubelet/cubelet.sock",
+		"-socket", "unix:///run/containerd/s/abc",
+	}
+
+	cases := []struct {
+		name    string
+		cmdline []string
+		id      string
+		want    bool
+	}{
+		{"real shim layout", shim, id, true},
+		{"id= form", []string{"containerd-shim-cube-rs", "-id=" + id}, id, true},
+		{"wrong id", shim, "other-sandbox-id", false},
+		// A recycled/unrelated PID that merely mentions the id (not after -id) must
+		// not be mistaken for the shim, so the stale PID is never SIGKILLed.
+		{"id as bare token", []string{"grep", id}, id, false},
+		{"id as namespace value", []string{"shim", "-namespace", id, "-id", "real"}, id, false},
+		{"dangling -id", []string{"shim", "-id"}, id, false},
+		{"empty", nil, id, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := cmdlineServesSandbox(c.cmdline, c.id); got != c.want {
+				t.Errorf("cmdlineServesSandbox(%v, %q) = %v, want %v", c.cmdline, c.id, got, c.want)
+			}
+		})
+	}
+}
+
+func TestIsCubeShimPid(t *testing.T) {
+	// A PID that cannot exist must never be treated as the shim (guards against
+	// SIGKILLing a recycled/unrelated PID when the stored shim PID is stale).
+	if isCubeShimPid(1<<30, "anything") {
+		t.Error("expected nonexistent pid to return false")
+	}
+	// The current test process is live but is not a cube shim (no "-id <sandboxID>").
+	if isCubeShimPid(os.Getpid(), "any-sandbox-id") {
+		t.Error("expected non-shim live process to return false")
 	}
 }

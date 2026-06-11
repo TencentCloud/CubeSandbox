@@ -454,10 +454,18 @@ func (l *local) CleanUp(ctx context.Context, opts *workflow.CleanContext) error 
 		ctrLists = append(ctrLists, ctr)
 	}
 	ctrLists = append(ctrLists, info.FirstContainer())
-	for _, ctr := range ctrLists {
-		err = l.stopTask(ctx, ctr.Container)
-		if err != nil {
-			stepLog.Warnf("CleanUp stopTask %s fail: %v", sandBoxID, err)
+	// A paused VM can't serve its runtime API; force it down out-of-band (mirrors
+	// Destroy) so GC/compensation can reclaim it instead of looping forever.
+	if info.GetStatus().IsPaused() {
+		if er := l.destroySandboxByBinary(ctx, info); er != nil {
+			stepLog.Warnf("CleanUp force delete sandbox %s by binary fail: %v", sandBoxID, er)
+		}
+	} else {
+		for _, ctr := range ctrLists {
+			err = l.stopTask(ctx, ctr.Container)
+			if err != nil {
+				stepLog.Warnf("CleanUp stopTask %s fail: %v", sandBoxID, err)
+			}
 		}
 	}
 	if info.GetStatus() != nil &&
