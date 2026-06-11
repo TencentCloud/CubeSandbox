@@ -8,6 +8,7 @@ package node
 import (
 	"fmt"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -88,7 +89,19 @@ type Node struct {
 	NicQueues      int64 `json:"nic_queues,omitempty"`
 
 	NodeLabels map[string]string `json:"NodeLabels,omitempty"`
+
+	labelsCache *nodeLabelsCacheStore
 }
+
+type nodeLabelsCache struct {
+	labels map[string]string
+}
+
+type nodeLabelsCacheStore struct {
+	cache atomic.Pointer[nodeLabelsCache]
+}
+
+var nodeLabelsCacheInitMu sync.Mutex
 
 func (n *Node) Clone() *Node {
 	if n == nil {
@@ -100,6 +113,7 @@ func (n *Node) Clone() *Node {
 	localCreateNum := atomic.LoadInt64(&n.LocalCreateNum)
 	cloned := *n
 	cloned.LocalCreateNum = localCreateNum
+	cloned.labelsCache = nil
 	if n.VirtualNodeQuotaArray != nil {
 		cloned.VirtualNodeQuotaArray = append([]int64(nil), n.VirtualNodeQuotaArray...)
 	}
@@ -110,6 +124,18 @@ func (n *Node) Clone() *Node {
 		}
 	}
 	return &cloned
+}
+
+func (n *Node) labelsCacheStore() *nodeLabelsCacheStore {
+	if n.labelsCache != nil {
+		return n.labelsCache
+	}
+	nodeLabelsCacheInitMu.Lock()
+	defer nodeLabelsCacheInitMu.Unlock()
+	if n.labelsCache == nil {
+		n.labelsCache = &nodeLabelsCacheStore{}
+	}
+	return n.labelsCache
 }
 
 func (n *Node) ID() string {
@@ -126,9 +152,14 @@ func (n *Node) LocalCreateNumIncrBy(i int64) int64 {
 }
 
 func (n *Node) Labels() map[string]string {
+	cacheStore := n.labelsCacheStore()
+	if cache := cacheStore.cache.Load(); cache != nil {
+		return cache.labels
+	}
+
 	// Canonical affinity keys derived from Node struct fields always take
 	// priority over node-reported labels, so they are written last.
-	labels := make(map[string]string)
+	labels := make(map[string]string, len(n.NodeLabels)+6)
 	for k, v := range n.NodeLabels {
 		labels[k] = v
 	}
@@ -138,7 +169,20 @@ func (n *Node) Labels() map[string]string {
 	labels[constants.AffinityKeyMemorySize] = fmt.Sprintf("%dMi", n.QuotaMem)
 	labels[constants.AffinityKeyCPUCores] = fmt.Sprintf("%dm", n.QuotaCpu)
 	labels[constants.AffinityKeyInstanceType] = n.InstanceType
+	cache := &nodeLabelsCache{labels: labels}
+	if cacheStore.cache.CompareAndSwap(nil, cache) {
+		return labels
+	}
+	if cache := cacheStore.cache.Load(); cache != nil {
+		return cache.labels
+	}
 	return labels
+}
+
+func (n *Node) InvalidateLabelsCache() {
+	if n.labelsCache != nil {
+		n.labelsCache.cache.Store(nil)
+	}
 }
 
 type NodeList []*Node

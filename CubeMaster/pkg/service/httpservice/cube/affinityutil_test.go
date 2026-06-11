@@ -16,6 +16,16 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
+func withNodeAffinitySelectorAllowedKeys(t *testing.T, keys ...string) {
+	t.Helper()
+	scheduler := config.GetConfig().Scheduler
+	original := append([]string(nil), scheduler.NodeAffinitySelectorAllowedKeys...)
+	scheduler.NodeAffinitySelectorAllowedKeys = append([]string(nil), keys...)
+	t.Cleanup(func() {
+		scheduler.NodeAffinitySelectorAllowedKeys = original
+	})
+}
+
 func Test_isLargeMemSize(t *testing.T) {
 	type args struct {
 		ctx          context.Context
@@ -476,11 +486,12 @@ func TestGetTemplateVolumes(t *testing.T) {
 
 func Test_parseNodeAffinitySelector(t *testing.T) {
 	tests := []struct {
-		name    string
-		json    string
-		wantErr bool
-		errMsg  string
-		check   func(t *testing.T, result []affinity.NodeSelectorRequirement)
+		name        string
+		json        string
+		allowedKeys []string
+		wantErr     bool
+		errMsg      string
+		check       func(t *testing.T, result []affinity.NodeSelectorRequirement)
 	}{
 		// ---- valid cases ----
 		{
@@ -491,8 +502,9 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 			},
 		},
 		{
-			name: "In with single value",
-			json: `[{"key":"custom-label","operator":"In","values":["val1"]}]`,
+			name:        "In with single value",
+			json:        `[{"key":"custom-label","operator":"In","values":["val1"]}]`,
+			allowedKeys: []string{"custom-label"},
 			check: func(t *testing.T, result []affinity.NodeSelectorRequirement) {
 				assert.Len(t, result, 1)
 				assert.Equal(t, "custom-label", result[0].Key)
@@ -501,8 +513,9 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 			},
 		},
 		{
-			name: "In with multiple values",
-			json: `[{"key":"zone","operator":"In","values":["zone-a","zone-b","zone-c"]}]`,
+			name:        "In with multiple values",
+			json:        `[{"key":"zone","operator":"In","values":["zone-a","zone-b","zone-c"]}]`,
+			allowedKeys: []string{"zone"},
 			check: func(t *testing.T, result []affinity.NodeSelectorRequirement) {
 				assert.Len(t, result, 1)
 				assert.Equal(t, "zone", result[0].Key)
@@ -514,8 +527,9 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 			},
 		},
 		{
-			name: "In deduplicates values",
-			json: `[{"key":"label","operator":"In","values":["v","v","v"]}]`,
+			name:        "In deduplicates values",
+			json:        `[{"key":"label","operator":"In","values":["v","v","v"]}]`,
+			allowedKeys: []string{"label"},
 			check: func(t *testing.T, result []affinity.NodeSelectorRequirement) {
 				assert.Len(t, result, 1)
 				assert.Len(t, result[0].Values, 1)
@@ -523,8 +537,9 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 			},
 		},
 		{
-			name: "NotIn with values",
-			json: `[{"key":"instance-type","operator":"NotIn","values":["gpu","fpga"]}]`,
+			name:        "NotIn with values",
+			json:        `[{"key":"instance-type","operator":"NotIn","values":["gpu","fpga"]}]`,
+			allowedKeys: []string{"instance-type"},
 			check: func(t *testing.T, result []affinity.NodeSelectorRequirement) {
 				assert.Len(t, result, 1)
 				assert.Equal(t, "instance-type", result[0].Key)
@@ -533,8 +548,9 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 			},
 		},
 		{
-			name: "Exists operator",
-			json: `[{"key":"gpu","operator":"Exists"}]`,
+			name:        "Exists operator",
+			json:        `[{"key":"gpu","operator":"Exists"}]`,
+			allowedKeys: []string{"gpu"},
 			check: func(t *testing.T, result []affinity.NodeSelectorRequirement) {
 				assert.Len(t, result, 1)
 				assert.Equal(t, "gpu", result[0].Key)
@@ -543,8 +559,9 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 			},
 		},
 		{
-			name: "DoesNotExist operator",
-			json: `[{"key":"tainted","operator":"DoesNotExist"}]`,
+			name:        "DoesNotExist operator",
+			json:        `[{"key":"tainted","operator":"DoesNotExist"}]`,
+			allowedKeys: []string{"tainted"},
 			check: func(t *testing.T, result []affinity.NodeSelectorRequirement) {
 				assert.Len(t, result, 1)
 				assert.Equal(t, "tainted", result[0].Key)
@@ -590,6 +607,7 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 				{"key":"kubernetes.io/memory-size","operator":"Gt","values":["2048Mi"]},
 				{"key":"custom-label","operator":"In","values":["a","b"]}
 			]`,
+			allowedKeys: []string{"gpu", "custom-label"},
 			check: func(t *testing.T, result []affinity.NodeSelectorRequirement) {
 				assert.Len(t, result, 3)
 				assert.Equal(t, affinity.NodeSelectorOpExists, result[0].Operator)
@@ -622,42 +640,48 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 
 		// ---- In/NotIn with empty values ----
 		{
-			name:    "In with empty values array",
-			json:    `[{"key":"label","operator":"In","values":[]}]`,
-			wantErr: true,
-			errMsg:  "requires non-empty values",
+			name:        "In with empty values array",
+			json:        `[{"key":"label","operator":"In","values":[]}]`,
+			allowedKeys: []string{"label"},
+			wantErr:     true,
+			errMsg:      "requires non-empty values",
 		},
 		{
-			name:    "In with omitted values",
-			json:    `[{"key":"label","operator":"In"}]`,
-			wantErr: true,
-			errMsg:  "requires non-empty values",
+			name:        "In with omitted values",
+			json:        `[{"key":"label","operator":"In"}]`,
+			allowedKeys: []string{"label"},
+			wantErr:     true,
+			errMsg:      "requires non-empty values",
 		},
 		{
-			name:    "NotIn with empty values array",
-			json:    `[{"key":"label","operator":"NotIn","values":[]}]`,
-			wantErr: true,
-			errMsg:  "requires non-empty values",
+			name:        "NotIn with empty values array",
+			json:        `[{"key":"label","operator":"NotIn","values":[]}]`,
+			allowedKeys: []string{"label"},
+			wantErr:     true,
+			errMsg:      "requires non-empty values",
 		},
 		{
-			name:    "NotIn with omitted values",
-			json:    `[{"key":"label","operator":"NotIn"}]`,
-			wantErr: true,
-			errMsg:  "requires non-empty values",
+			name:        "NotIn with omitted values",
+			json:        `[{"key":"label","operator":"NotIn"}]`,
+			allowedKeys: []string{"label"},
+			wantErr:     true,
+			errMsg:      "requires non-empty values",
 		},
 
 		// ---- Exists/DoesNotExist with values ----
 		{
-			name:    "Exists with values",
-			json:    `[{"key":"label","operator":"Exists","values":["x"]}]`,
-			wantErr: true,
-			errMsg:  "requires empty values",
+			name:        "Exists with values",
+			json:        `[{"key":"label","operator":"Exists","values":["x"]}]`,
+			allowedKeys: []string{"label"},
+			wantErr:     true,
+			errMsg:      "requires empty values",
 		},
 		{
-			name:    "DoesNotExist with values",
-			json:    `[{"key":"label","operator":"DoesNotExist","values":["x"]}]`,
-			wantErr: true,
-			errMsg:  "requires empty values",
+			name:        "DoesNotExist with values",
+			json:        `[{"key":"label","operator":"DoesNotExist","values":["x"]}]`,
+			allowedKeys: []string{"label"},
+			wantErr:     true,
+			errMsg:      "requires empty values",
 		},
 
 		// ---- Gt/Lt with wrong value count ----
@@ -700,30 +724,46 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 			errMsg:  "is only supported for keys",
 		},
 		{
-			name:    "Gt on custom key",
-			json:    `[{"key":"custom-label","operator":"Gt","values":["100"]}]`,
-			wantErr: true,
-			errMsg:  "is only supported for keys",
+			name:        "Gt on custom key",
+			json:        `[{"key":"custom-label","operator":"Gt","values":["100"]}]`,
+			allowedKeys: []string{"custom-label"},
+			wantErr:     true,
+			errMsg:      "is only supported for keys",
 		},
 		{
-			name:    "Lt on custom key",
-			json:    `[{"key":"custom-label","operator":"Lt","values":["100"]}]`,
-			wantErr: true,
-			errMsg:  "is only supported for keys",
+			name:        "Lt on custom key",
+			json:        `[{"key":"custom-label","operator":"Lt","values":["100"]}]`,
+			allowedKeys: []string{"custom-label"},
+			wantErr:     true,
+			errMsg:      "is only supported for keys",
 		},
 
 		// ---- unsupported operator ----
 		{
-			name:    "unsupported operator",
-			json:    `[{"key":"label","operator":"BadOp"}]`,
-			wantErr: true,
-			errMsg:  "unsupported operator",
+			name:        "unsupported operator",
+			json:        `[{"key":"label","operator":"BadOp"}]`,
+			allowedKeys: []string{"label"},
+			wantErr:     true,
+			errMsg:      "unsupported operator",
 		},
 		{
-			name:    "empty operator string",
-			json:    `[{"key":"label","operator":""}]`,
+			name:        "empty operator string",
+			json:        `[{"key":"label","operator":""}]`,
+			allowedKeys: []string{"label"},
+			wantErr:     true,
+			errMsg:      "unsupported operator",
+		},
+		{
+			name:    "unauthorized custom key",
+			json:    `[{"key":"gpu","operator":"Exists"}]`,
 			wantErr: true,
-			errMsg:  "unsupported operator",
+			errMsg:  `node selector key "gpu" is not allowed`,
+		},
+		{
+			name:    "unauthorized internal key probe",
+			json:    `[{"key":"topology.kubernetes.io/disaster-recover-group-id","operator":"Exists"}]`,
+			wantErr: true,
+			errMsg:  `node selector key "topology.kubernetes.io/disaster-recover-group-id" is not allowed`,
 		},
 
 		// ---- size / complexity limits (DoS hardening) ----
@@ -749,13 +789,14 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 				{"key":"k10","operator":"Exists"}
 			]`,
 			wantErr: true,
-			errMsg: "allows at most",
+			errMsg:  "allows at most",
 		},
 		{
-			name:    "In with more than 50 values",
-			json:    `[{"key":"label","operator":"In","values":[` + strings.Repeat(`"v",`, 50) + `"v"]}]`,
-			wantErr: true,
-			errMsg:  "allows at most",
+			name:        "In with more than 50 values",
+			json:        `[{"key":"label","operator":"In","values":[` + strings.Repeat(`"v",`, 50) + `"v"]}]`,
+			allowedKeys: []string{"label"},
+			wantErr:     true,
+			errMsg:      "allows at most",
 		},
 
 		// ---- second element fails validation ----
@@ -765,13 +806,17 @@ func Test_parseNodeAffinitySelector(t *testing.T) {
 				{"key":"gpu","operator":"Exists"},
 				{"key":"","operator":"In","values":["v"]}
 			]`,
-			wantErr: true,
-			errMsg:  "node selector key must not be empty",
+			allowedKeys: []string{"gpu"},
+			wantErr:     true,
+			errMsg:      "node selector key must not be empty",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.allowedKeys != nil {
+				withNodeAffinitySelectorAllowedKeys(t, tt.allowedKeys...)
+			}
 			result, err := parseNodeAffinitySelector(tt.json)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -797,11 +842,12 @@ func Test_constructNodeAffinity(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name    string
-		req     *types.CreateCubeSandboxReq
-		wantErr bool
-		errMsg  string
-		check   func(t *testing.T, result []affinity.NodeSelectorRequirement)
+		name        string
+		req         *types.CreateCubeSandboxReq
+		allowedKeys []string
+		wantErr     bool
+		errMsg      string
+		check       func(t *testing.T, result []affinity.NodeSelectorRequirement)
 	}{
 		{
 			name: "nil annotations",
@@ -873,7 +919,8 @@ func Test_constructNodeAffinity(t *testing.T) {
 			},
 		},
 		{
-			name: "valid affinity selector only",
+			name:        "valid affinity selector only",
+			allowedKeys: []string{"gpu"},
 			req: &types.CreateCubeSandboxReq{
 				Request: &types.Request{RequestID: "req-5"},
 				Annotations: map[string]string{
@@ -894,7 +941,8 @@ func Test_constructNodeAffinity(t *testing.T) {
 			},
 		},
 		{
-			name: "cluster label + instance type + selector combined",
+			name:        "cluster label + instance type + selector combined",
+			allowedKeys: []string{"gpu", "custom"},
 			req: &types.CreateCubeSandboxReq{
 				Request: &types.Request{RequestID: "req-6"},
 				Annotations: map[string]string{
@@ -917,7 +965,8 @@ func Test_constructNodeAffinity(t *testing.T) {
 			},
 		},
 		{
-			name: "selector with Gt and Lt and Exists",
+			name:        "selector with Gt and Lt and Exists",
+			allowedKeys: []string{"ssd"},
 			req: &types.CreateCubeSandboxReq{
 				Request: &types.Request{RequestID: "req-7"},
 				Annotations: map[string]string{
@@ -999,7 +1048,8 @@ func Test_constructNodeAffinity(t *testing.T) {
 			errMsg:  "node selector key must not be empty",
 		},
 		{
-			name: "selector with unsupported Gt key returns error",
+			name:        "selector with unsupported Gt key returns error",
+			allowedKeys: []string{"bad-key"},
 			req: &types.CreateCubeSandboxReq{
 				Request: &types.Request{RequestID: "req-err-3"},
 				Annotations: map[string]string{
@@ -1010,6 +1060,19 @@ func Test_constructNodeAffinity(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "is only supported for keys",
+		},
+		{
+			name: "selector with unauthorized custom key returns error",
+			req: &types.CreateCubeSandboxReq{
+				Request: &types.Request{RequestID: "req-err-4"},
+				Annotations: map[string]string{
+					"com.nodeaffinity.selector": `[{"key":"gpu","operator":"Exists"}]`,
+				},
+				Containers:   []*types.Container{},
+				InstanceType: "cubebox",
+			},
+			wantErr: true,
+			errMsg:  `node selector key "gpu" is not allowed`,
 		},
 		{
 			name: "empty selector string is silently ignored",
@@ -1029,6 +1092,9 @@ func Test_constructNodeAffinity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.allowedKeys != nil {
+				withNodeAffinitySelectorAllowedKeys(t, tt.allowedKeys...)
+			}
 			result, err := constructNodeAffinity(ctx, tt.req)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -1065,6 +1131,7 @@ func Test_runInsReq2Affinity(t *testing.T) {
 	})
 
 	t.Run("valid selector stores NodeSelector in context", func(t *testing.T) {
+		withNodeAffinitySelectorAllowedKeys(t, "gpu")
 		req := &types.CreateCubeSandboxReq{
 			Request: &types.Request{RequestID: "req-2"},
 			Annotations: map[string]string{
@@ -1097,6 +1164,7 @@ func Test_runInsReq2Affinity(t *testing.T) {
 	})
 
 	t.Run("instance type annotation also sets backoff NodeSelector", func(t *testing.T) {
+		withNodeAffinitySelectorAllowedKeys(t, "ssd")
 		req := &types.CreateCubeSandboxReq{
 			Request: &types.Request{RequestID: "req-4"},
 			Annotations: map[string]string{

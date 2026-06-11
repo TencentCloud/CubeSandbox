@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -304,4 +305,75 @@ func TestQuotaCpu(t *testing.T) {
 	afCpuSize := resource.MustParse(fmt.Sprintf("%dm", n.QuotaCpu))
 	gotCpu := resource.MustParse("90")
 	assert.Equal(t, gotCpu.Value(), afCpuSize.Value())
+}
+
+func TestNodeLabelsCachesMergedLabels(t *testing.T) {
+	n := &Node{
+		Zone:         "zone-a",
+		ClusterLabel: "cluster-a",
+		CPUType:      "x86",
+		QuotaMem:     4096,
+		QuotaCpu:     2000,
+		InstanceType: "SA2",
+		NodeLabels: map[string]string{
+			"gpu":                         "true",
+			constants.AffinityKeyZone:     "reported-zone",
+			constants.AffinityKeyCPUCores: "reported-cpu",
+		},
+	}
+
+	labels := n.Labels()
+	assert.Equal(t, "true", labels["gpu"])
+	assert.Equal(t, "zone-a", labels[constants.AffinityKeyZone])
+	assert.Equal(t, "2000m", labels[constants.AffinityKeyCPUCores])
+
+	labelsPtr := fmt.Sprintf("%p", labels)
+	assert.Equal(t, labelsPtr, fmt.Sprintf("%p", n.Labels()))
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = n.Labels()
+	})
+	assert.Zero(t, allocs)
+}
+
+func TestNodeLabelsCacheInvalidation(t *testing.T) {
+	n := &Node{
+		Zone:       "zone-a",
+		QuotaMem:   4096,
+		QuotaCpu:   2000,
+		NodeLabels: map[string]string{"gpu": "true"},
+	}
+
+	oldLabels := n.Labels()
+	n.Zone = "zone-b"
+	n.QuotaMem = 8192
+	n.NodeLabels = map[string]string{"ssd": "true"}
+	n.InvalidateLabelsCache()
+
+	newLabels := n.Labels()
+	assert.NotEqual(t, fmt.Sprintf("%p", oldLabels), fmt.Sprintf("%p", newLabels))
+	assert.Equal(t, "zone-b", newLabels[constants.AffinityKeyZone])
+	assert.Equal(t, "8192Mi", newLabels[constants.AffinityKeyMemorySize])
+	assert.NotContains(t, newLabels, "gpu")
+	assert.Equal(t, "true", newLabels["ssd"])
+}
+
+func TestNodeCloneDoesNotShareLabelsCache(t *testing.T) {
+	n := &Node{
+		Zone:       "zone-a",
+		QuotaMem:   4096,
+		QuotaCpu:   2000,
+		NodeLabels: map[string]string{"gpu": "true"},
+	}
+	_ = n.Labels()
+
+	cloned := n.Clone()
+	cloned.Zone = "zone-b"
+	cloned.NodeLabels["gpu"] = "false"
+
+	sourceLabels := n.Labels()
+	clonedLabels := cloned.Labels()
+	assert.Equal(t, "zone-a", sourceLabels[constants.AffinityKeyZone])
+	assert.Equal(t, "true", sourceLabels["gpu"])
+	assert.Equal(t, "zone-b", clonedLabels[constants.AffinityKeyZone])
+	assert.Equal(t, "false", clonedLabels["gpu"])
 }

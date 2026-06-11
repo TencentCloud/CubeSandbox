@@ -146,9 +146,10 @@ func (w *wrapPreferredSchedulingTerms) Score(n NodeLabels) int64 {
 		return 0
 	}
 
-	if len(n.Labels()) == 0 {
+	labels := n.Labels()
+	if len(labels) == 0 {
 		return 0
 	}
 
-	return w.preferredSchedulingTerms.Score(&v1.Node{ObjectMeta: metav1.ObjectMeta{Labels: n.Labels()}})
+	return w.preferredSchedulingTerms.Score(&v1.Node{ObjectMeta: metav1.ObjectMeta{Labels: labels}})
 }

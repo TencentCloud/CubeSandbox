@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -202,4 +203,17 @@ func TestEffectiveQuotaClampsOverflow(t *testing.T) {
 	}
 	assert.Equal(t, int64(math.MaxInt64), sconf.EffectiveQuotaCpu("cubebox", math.MaxInt64))
 	assert.Equal(t, int64(math.MaxInt64), sconf.EffectiveQuotaMem("cubebox", math.MaxInt64))
+}
+
+func TestNodeAffinitySelectorAllowedKeySet(t *testing.T) {
+	sconf := &SchedulerConf{
+		NodeAffinitySelectorAllowedKeys: []string{"gpu"},
+	}
+
+	allowed := sconf.NodeAffinitySelectorAllowedKeySet()
+	assert.Contains(t, allowed, constants.AffinityKeyZone)
+	assert.Contains(t, allowed, constants.AffinityKeyClusterID)
+	assert.Contains(t, allowed, constants.AffinityKeyMemorySize)
+	assert.Contains(t, allowed, "gpu")
+	assert.NotContains(t, allowed, constants.AffinityKeyDisaterRecoverGroup)
 }

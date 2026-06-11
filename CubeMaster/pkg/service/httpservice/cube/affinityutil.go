@@ -191,10 +191,14 @@ func parseNodeAffinitySelector(selectorJSON string) ([]affinity.NodeSelectorRequ
 			constants.AnnotationsNodeAffinitySelector, maxSelectorRequirements, len(raw))
 	}
 
+	allowedKeys := nodeAffinitySelectorAllowedKeys()
 	result := make([]affinity.NodeSelectorRequirement, 0, len(raw))
 	for _, r := range raw {
 		if r.Key == "" {
 			return nil, fmt.Errorf("node selector key must not be empty")
+		}
+		if _, ok := allowedKeys[r.Key]; !ok {
+			return nil, fmt.Errorf("node selector key %q is not allowed", r.Key)
 		}
 		switch r.Operator {
 		case affinity.NodeSelectorOpIn, affinity.NodeSelectorOpNotIn:
@@ -227,4 +231,13 @@ func parseNodeAffinitySelector(selectorJSON string) ([]affinity.NodeSelectorRequ
 		result = append(result, req)
 	}
 	return result, nil
+}
+
+func nodeAffinitySelectorAllowedKeys() map[string]struct{} {
+	cfg := config.GetConfig()
+	if cfg == nil || cfg.Scheduler == nil {
+		var schedulerConf *config.SchedulerConf
+		return schedulerConf.NodeAffinitySelectorAllowedKeySet()
+	}
+	return cfg.Scheduler.NodeAffinitySelectorAllowedKeySet()
 }

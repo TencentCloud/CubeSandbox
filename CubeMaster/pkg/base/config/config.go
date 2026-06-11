@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/hotswap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
@@ -173,6 +174,7 @@ type SchedulerConf struct {
 	DisableBackoffFilterInstanceType map[string]bool                   `yaml:"disable_backoff_filter_instance_type"`
 	ThirtpartyFilterInstanceType     map[string]bool                   `yaml:"thirtparty_filter_instance_type"`
 	InstanceTypeConf                 map[string]InstanceTypeConf       `yaml:"instance_type_conf"`
+	NodeAffinitySelectorAllowedKeys  []string                          `yaml:"node_affinity_selector_allowed_keys"`
 
 	// IgnoreRedisAllocation, when true, makes the scheduler ignore the
 	// per-node allocated CPU/Mem usage recorded in Redis (treat allocated as
@@ -185,6 +187,15 @@ type SchedulerConf struct {
 	// OvercommitRatioByType overrides OvercommitRatio for specific instance
 	// types and takes precedence over the global ratio.
 	OvercommitRatioByType map[string]OvercommitRatioConf `yaml:"overcommit_ratio_conf"`
+}
+
+var defaultNodeAffinitySelectorAllowedKeys = []string{
+	constants.AffinityKeyZone,
+	constants.AffinityKeyClusterID,
+	constants.AffinityKeyCPUType,
+	constants.AffinityKeyMemorySize,
+	constants.AffinityKeyCPUCores,
+	constants.AffinityKeyInstanceType,
 }
 
 // OvercommitRatioConf describes the CPU/Mem overcommit multipliers applied to
@@ -342,6 +353,24 @@ func (s *SchedulerConf) GetLargeSizeAffinityConf(serviceName string) LargeSizeAf
 		}
 	}
 	return s.LargeSizeAffinityConf[serviceName]
+}
+
+func (s *SchedulerConf) NodeAffinitySelectorAllowedKeySet() map[string]struct{} {
+	extraKeyCount := 0
+	if s != nil {
+		extraKeyCount = len(s.NodeAffinitySelectorAllowedKeys)
+	}
+	allowed := make(map[string]struct{}, len(defaultNodeAffinitySelectorAllowedKeys)+extraKeyCount)
+	for _, key := range defaultNodeAffinitySelectorAllowedKeys {
+		allowed[key] = struct{}{}
+	}
+	if s == nil {
+		return allowed
+	}
+	for _, key := range s.NodeAffinitySelectorAllowedKeys {
+		allowed[key] = struct{}{}
+	}
+	return allowed
 }
 
 func (s *SchedulerConf) MaxMvmCPURes() resource.Quantity {
