@@ -286,11 +286,23 @@ impl Process {
         self.notify_term_close();
     }
 
+    /// Close the agent's copy of container stdout/stderr write ends after spawn.
+    /// The child keeps its inherited fds; the agent only retains parent_* read ends
+    /// for log forwarding via do_read_stream.
+    pub fn close_inherited_write_ends(&mut self) {
+        if self.tty || !self.log_forwarding {
+            return;
+        }
+        close_process_stream!(self, stdout, Stdout);
+        close_process_stream!(self, stderr, Stderr);
+    }
+
     pub fn cleanup_process_stream(&mut self) {
         close_process_stream!(self, parent_stdin, ParentStdin);
         close_process_stream!(self, parent_stdout, ParentStdout);
         close_process_stream!(self, parent_stderr, ParentStderr);
         close_process_stream!(self, term_master, TermMaster);
+        self.close_inherited_write_ends();
 
         self.notify_term_close();
     }

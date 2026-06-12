@@ -63,7 +63,7 @@ pub struct Container {
     /// Background task forwarding container stdout/stderr to log files.
     /// Template creation: /data/log/template/<id>/stdout|stderr (755 dir).
     /// Normal sandbox: ./stdout and ./stderr relative to the bundle directory.
-    /// Aborted on pause/snapshot/disconnect; restarted on resume via start_log_forward.
+    /// Aborted on pause/snapshot/disconnect/kill/destroy; restarted on resume via start_log_forward.
     log_forward_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
     /// Cancel sender for the log-forwarding task.  Sending true on this watch
     /// channel wakes both forward_stdout and forward_stderr select! loops so
@@ -150,19 +150,14 @@ impl Container {
         }
     }
 
-    pub async fn unset_client(&mut self) {
-        // Signal the log-forwarding task to exit, then await its termination
-        // so we are certain the vsock read loop has stopped and the connection
-        // is no longer in use before the caller proceeds with pause / snapshot.
-        // Sending true on the watch channel wakes the select! in both
-        // forward_stdout and forward_stderr immediately.
+    /// Stop init log forwarding (stdout/stderr).  Wakes the select! loops in
+    /// forward_init_log_stdout/stderr and awaits the background task so vsock
+    /// reads are finished before pause, snapshot, or destroy proceeds.
+    pub async fn stop_log_forward(&mut self) {
         if let Some(tx) = self.log_forward_cancel.take() {
             let _ = tx.send(true);
         }
         if let Some(handle) = self.log_forward_handle.take() {
-            // Arc::try_unwrap: we are the sole owner after take(); the task
-            // holds only a weak reference via the spawned closure captures.
-            // If another clone somehow holds it, fall back to abort().
             match Arc::try_unwrap(handle) {
                 Ok(h) => {
                     let _ = h.await;
@@ -172,6 +167,10 @@ impl Container {
                 }
             }
         }
+    }
+
+    pub async fn unset_client(&mut self) {
+        self.stop_log_forward().await;
         //terminate the wait req
         if self.state.is_some() {
             self.state.as_ref().unwrap().notify_vm_pause().await;
@@ -495,8 +494,9 @@ impl Container {
     /// normal sandbox restore writes to `./stdout` and `./stderr` relative
     /// to the shim's current working directory (the bundle directory).
     ///
-    /// The task exits cleanly when `unset_client` is called (pause / snapshot /
-    /// destroy): a oneshot cancel signal is sent first so the forwarding loops
+    /// The task exits cleanly when `stop_log_forward` is called (pause /
+    /// snapshot / kill / destroy): a watch cancel signal is sent first so the
+    /// forwarding loops
     /// wake immediately, then the caller awaits the handle to confirm the vsock
     /// read has stopped before proceeding.
     pub async fn start_log_forward(&mut self) -> CResult<()> {
@@ -627,6 +627,9 @@ impl Container {
                     if self.sb_conf.app_snapshot_create {
                         state.set_container_stoped().await;
                     }
+                    if exec_id.is_empty() {
+                        self.stop_log_forward().await;
+                    }
                     return Ok(());
                 }
                 infof!(
@@ -676,11 +679,15 @@ impl Container {
             .await
             .map_err(|e| Error::Other(e.to_string()))?;
 
+        if exec_id.is_empty() && (sig == (libc::SIGKILL as u32) || sig == (libc::SIGTERM as u32)) {
+            self.stop_log_forward().await;
+        }
+
         Ok(())
     }
 
     pub async fn destroy_container(&mut self) -> Result<(u32, DateTime<Utc>)> {
-        //kill
+        // kill then stop log forwarding (also done inside signal_container)
         self.signal_container(&"".to_string(), libc::SIGKILL as u32)
             .await?;
 

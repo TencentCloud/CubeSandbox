@@ -982,6 +982,10 @@ impl BaseContainer for LinuxContainer {
 
         child.spawn()?;
 
+        // Drop the agent's copy of log-pipe write ends so only the container
+        // child holds them; the agent reads via parent_stdout/parent_stderr.
+        p.close_inherited_write_ends();
+
         unistd::close(crfd)?;
         unistd::close(cwfd)?;
         unistd::close(cfd_log)?;
