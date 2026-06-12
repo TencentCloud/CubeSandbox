@@ -5,6 +5,8 @@
   "section": {
     "info": "基础信息",
     "infoDesc": "模板的基本属性与当前状态。",
+    "network": "网络策略",
+    "networkDesc": "模板的网络类型与出站流量规则。",
     "replicas": "Replicas",
     "replicasDesc": "该模板在各节点上的快照副本状态。",
     "danger": "删除模板",
@@ -22,7 +24,12 @@
     "snapshotPath": "快照路径",
     "lastJob": "最近任务",
     "lastError": "错误信息",
-    "env": "环境变量"
+    "env": "环境变量",
+    "networkType": "网络类型",
+    "internetAccess": "公网访问",
+    "dns": "DNS 服务器",
+    "allowOut": "允许出站",
+    "denyOut": "拒绝出站"
   },
   "status": {
     "ready": "就绪",
@@ -49,10 +56,15 @@
     "deleting": "删除中…"
   },
   "empty": {
-    "replicas": "暂无副本信息。"
+    "replicas": "暂无副本信息。",
+    "noNetworkPolicy": "使用默认网络配置"
   },
   "building": "模板正在构建中，请稍后刷新。",
   "buildFailed": "模板构建失败。",
+  "network": {
+    "allowed": "允许",
+    "blocked": "禁止"
+  },
   "specs": "规格",
   "attributes": "属性",
   "copy": "复制",

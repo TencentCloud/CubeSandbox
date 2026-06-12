@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
+import { CheckCircle2, XCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 type Size = 'xs' | 'sm' | 'base';
@@ -92,5 +93,32 @@ export function Code({
     >
       {children}
     </code>
+  );
+}
+
+/**
+ * BoolBadge — compact yes/no indicator. Renders an em-dash placeholder
+ * when value is null/undefined. Use for boolean runtime flags (auth,
+ * internet access, readiness) where the absence of a value carries
+ * different meaning from "false".
+ */
+export function BoolBadge({
+  value,
+  trueLabel,
+  falseLabel,
+}: {
+  value?: boolean | null;
+  trueLabel?: string;
+  falseLabel?: string;
+}) {
+  if (value == null) return <span className="text-muted-foreground/50 text-xs">—</span>;
+  return value ? (
+    <span className="inline-flex items-center gap-1 text-cube-ok text-xs font-medium">
+      <CheckCircle2 size={12} /> {trueLabel ?? 'Yes'}
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1 text-cube-err text-xs font-medium">
+      <XCircle size={12} /> {falseLabel ?? 'No'}
+    </span>
   );
 }

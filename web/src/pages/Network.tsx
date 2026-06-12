@@ -4,13 +4,12 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { clusterApi, templateApi, type TemplateDetail } from '@/api/client';
+import { clusterApi } from '@/api/client';
 import { useRuntimeConfig } from '@/hooks/useRuntimeConfig';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Shield, Globe, Gauge, Server, ExternalLink, CheckCircle2, XCircle, Minus } from 'lucide-react';
+import { Shield, Gauge, Server, ExternalLink, Minus } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { extractTemplateNetworkPolicy } from '@/lib/templateConfig';
-import { MetricValue } from '@/components/ui/typography';
+import { BoolBadge, MetricValue } from '@/components/ui/typography';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -44,28 +43,6 @@ function InfoRow({ label, value, mono, badge }: {
   );
 }
 
-function PolicyCell({ value }: { value?: string | null }) {
-  if (!value) return <Minus size={12} className="text-muted-foreground/40" />;
-  return (
-    <span className="font-mono text-xs text-foreground/80 truncate max-w-[220px] block" title={value}>
-      {value}
-    </span>
-  );
-}
-
-function BoolBadge({ value, trueLabel, falseLabel }: { value?: boolean | null; trueLabel?: string; falseLabel?: string }) {
-  if (value == null) return <span className="text-muted-foreground/50 text-xs">—</span>;
-  return value ? (
-    <span className="inline-flex items-center gap-1 text-cube-ok text-xs font-medium">
-      <CheckCircle2 size={12} /> {trueLabel ?? 'Yes'}
-    </span>
-  ) : (
-    <span className="inline-flex items-center gap-1 text-cube-err text-xs font-medium">
-      <XCircle size={12} /> {falseLabel ?? 'No'}
-    </span>
-  );
-}
-
 // ── Section 1: API Gateway ────────────────────────────────────────────────────
 
 function GatewaySection() {
@@ -96,133 +73,7 @@ function GatewaySection() {
   );
 }
 
-// ── Section 2: Egress policy (per template) ───────────────────────────────────
-
-function EgressSection() {
-  const { t } = useTranslation('network');
-  const { data: templates, isLoading } = useQuery({
-    queryKey: ['templates'],
-    queryFn: () => templateApi.list(),
-    staleTime: 30_000,
-  });
-
-  // fetch details for all templates to get networkType, allowInternetAccess, and egress policy
-  const { data: details, isLoading: detailsLoading } = useQuery({
-    queryKey: ['templates-details-network'],
-    queryFn: async () => {
-      if (!templates || templates.length === 0) return [];
-      const results = await Promise.allSettled(
-        templates.map(t => templateApi.get(t.templateID))
-      );
-      return results
-        .map((r, i): TemplateDetail => {
-          if (r.status === 'fulfilled') return r.value;
-          return {
-            ...templates[i],
-            replicas: [],
-            createRequest: undefined,
-            networkType: null,
-            allowInternetAccess: null,
-          };
-        })
-        .filter(Boolean);
-    },
-    enabled: !!templates && templates.length > 0,
-    staleTime: 30_000,
-  });
-
-  const loading = isLoading || detailsLoading;
-
-  return (
-    <div>
-      <SectionHeader icon={Globe} title={t('egress.title')} description={t('egress.desc')} />
-      <div className="rounded-xl border border-border/60 bg-card/40 overflow-x-auto">
-        <table className="w-full text-sm" style={{ minWidth: '1120px' }}>
-          <thead>
-            <tr className="border-b border-border/50">
-              {[
-                t('egress.colTemplate'),
-                t('egress.colStatus'),
-                t('egress.colNetwork'),
-                t('egress.colInternet'),
-                t('egress.colDns'),
-                t('egress.colAllowOut'),
-                t('egress.colDenyOut'),
-              ].map(h => (
-                <th key={h} className="tbl-th">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border/40">
-            {loading ? (
-              Array.from({ length: 3 }).map((_, i) => (
-                <tr key={i}>
-                  {[1, 2, 3, 4, 5, 6, 7].map(j => (
-                    <td key={j} className="px-5 py-3"><Skeleton className="h-4 w-24" /></td>
-                  ))}
-                </tr>
-              ))
-            ) : !details || details.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="px-5 py-6 text-sm text-muted-foreground text-center">{t('egress.empty')}</td>
-              </tr>
-            ) : (
-              details.map((tpl) => {
-                const policy = extractTemplateNetworkPolicy(tpl.createRequest);
-                const statusColor = tpl.status?.toUpperCase() === 'READY'
-                  ? 'text-cube-ok'
-                  : tpl.status?.toUpperCase() === 'BUILDING'
-                  ? 'text-cube-warn'
-                  : 'text-cube-err';
-                return (
-                  <tr key={tpl.templateID} className="hover:bg-muted/30 transition-colors">
-                    <td className="px-5 py-3">
-                      <Link
-                        to={`/templates/${tpl.templateID}`}
-                        className="inline-flex items-center gap-1.5 font-mono text-xs text-foreground/80 hover:text-primary transition-colors"
-                      >
-                        {tpl.templateID}
-                        <ExternalLink size={10} className="opacity-50" />
-                      </Link>
-                    </td>
-                    <td className="px-5 py-3">
-                      <span className={cn('text-xs font-medium', statusColor)}>{tpl.status ?? '—'}</span>
-                    </td>
-                    <td className="px-5 py-3">
-                      {(tpl as { networkType?: string | null }).networkType
-                        ? <span className="chip-net">
-                            {(tpl as { networkType?: string | null }).networkType}
-                          </span>
-                        : <Minus size={12} className="text-muted-foreground/40" />}
-                    </td>
-                    <td className="px-5 py-3">
-                      <BoolBadge
-                        value={(tpl as { allowInternetAccess?: boolean | null }).allowInternetAccess}
-                        trueLabel={t('egress.allowed')}
-                        falseLabel={t('egress.blocked')}
-                      />
-                    </td>
-                    <td className="px-5 py-3">
-                      <PolicyCell value={policy.dns} />
-                    </td>
-                    <td className="px-5 py-3">
-                      <PolicyCell value={policy.allowOut} />
-                    </td>
-                    <td className="px-5 py-3">
-                      <PolicyCell value={policy.denyOut} />
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-// ── Section 3: Node quota / concurrency ───────────────────────────────────────
+// ── Section 2: Node quota / concurrency ───────────────────────────────────────
 
 function NodeQuotaSection() {
   const { t } = useTranslation('network');
@@ -318,7 +169,6 @@ export default function NetworkPage() {
       </div>
 
       <GatewaySection />
-      <EgressSection />
       <NodeQuotaSection />
     </div>
   );

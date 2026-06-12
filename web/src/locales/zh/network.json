@@ -1,6 +1,6 @@
 {
   "title": "网络",
-  "description": "API 网关配置、出口策略与节点限流概览。",
+  "description": "API 网关配置与节点限流概览。",
   "gateway": {
     "title": "API 网关",
     "desc": "CubeAPI 运行时配置，包含限流策略与认证状态。",
@@ -10,20 +10,6 @@
     "authOff": "未启用",
     "domain": "沙箱域名",
     "instanceType": "默认实例类型"
-  },
-  "egress": {
-    "title": "出口策略",
-    "desc": "各模板创建时配置的网络类型与公网访问策略。",
-    "colTemplate": "模板 ID",
-    "colStatus": "状态",
-    "colNetwork": "网络类型",
-    "colInternet": "公网访问",
-    "colDns": "DNS",
-    "colAllowOut": "Allow Out",
-    "colDenyOut": "Deny Out",
-    "allowed": "允许",
-    "blocked": "禁止",
-    "empty": "暂无模板数据。"
   },
   "quota": {
     "title": "节点限流 / Quota",

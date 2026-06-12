@@ -1,6 +1,6 @@
 {
   "title": "Network",
-  "description": "API gateway config, egress policies, and node rate limits.",
+  "description": "API gateway config and node rate limits.",
   "gateway": {
     "title": "API Gateway",
     "desc": "CubeAPI runtime configuration — rate limiting and auth status.",
@@ -10,20 +10,6 @@
     "authOff": "Disabled",
     "domain": "Sandbox Domain",
     "instanceType": "Default Instance Type"
-  },
-  "egress": {
-    "title": "Egress Policy",
-    "desc": "Network type and public internet access configured per template.",
-    "colTemplate": "Template ID",
-    "colStatus": "Status",
-    "colNetwork": "Network Type",
-    "colInternet": "Internet Access",
-    "colDns": "DNS",
-    "colAllowOut": "Allow Out",
-    "colDenyOut": "Deny Out",
-    "allowed": "Allowed",
-    "blocked": "Blocked",
-    "empty": "No templates found."
   },
   "quota": {
     "title": "Node Quota / Rate Limits",

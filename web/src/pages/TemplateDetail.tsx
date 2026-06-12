@@ -12,7 +12,8 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowLeft, RefreshCw, Trash2, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 import { cn, formatDeleteError, copyToClipboard } from '@/lib/utils';
-import { extractTemplateRuntimeConfig } from '@/lib/templateConfig';
+import { extractTemplateRuntimeConfig, extractTemplateNetworkPolicy } from '@/lib/templateConfig';
+import { BoolBadge } from '@/components/ui/typography';
 
 // ── status helpers ────────────────────────────────────────────────────────────
 
@@ -128,6 +129,32 @@ function Section({ title, description, children, danger, className }: {
         {description && <p className="text-xs text-muted-foreground mt-1">{description}</p>}
       </div>
       {children}
+    </div>
+  );
+}
+
+// ── monoblock ─────────────────────────────────────────────────────────────────
+// Labeled single-line-or-list display for network rule strings (DNS /
+// allowOut / denyOut). Visually matches the env vars block; returns null
+// when the value is empty so the calling Section can skip it cleanly.
+// Copy button is absolute-positioned inside the pre block, vertically
+// centered, so long wrapped text never collides with it (right padding
+// reserves a clear column for the icon).
+
+function Monoblock({ label, value }: { label: string; value?: string | null }) {
+  if (!value) return null;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{label}</span>
+      <div className="relative">
+        <pre className="rounded-md border border-border/50 bg-muted/30 pl-3 pr-10 py-2 font-mono text-xs whitespace-pre-wrap break-all leading-relaxed text-foreground/90">
+          {value}
+        </pre>
+        <CopyButton
+          text={value}
+          className="absolute top-1/2 -translate-y-1/2 right-2 p-1.5"
+        />
+      </div>
     </div>
   );
 }
@@ -475,6 +502,52 @@ export default function TemplateDetailPage() {
             <p className="font-mono text-xs break-all text-destructive/80 leading-relaxed">{data.lastError}</p>
           </div>
         )}
+      </Section>
+
+      {/* ── network policy ── */}
+      <Section title={t('section.network')} description={t('section.networkDesc')}>
+        {(() => {
+          const policy = extractTemplateNetworkPolicy(data.createRequest);
+          const netType = data.networkType ?? null;
+          const internet = data.allowInternetAccess ?? null;
+          const hasAny = !!(netType || internet != null || policy.dns || policy.allowOut || policy.denyOut);
+          if (!hasAny) {
+            return (
+              <p className="text-sm text-muted-foreground">{t('empty.noNetworkPolicy')}</p>
+            );
+          }
+          return (
+            <div className="space-y-5">
+              <div className="grid grid-cols-2 gap-x-8 gap-y-5">
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">
+                    {t('fields.networkType')}
+                  </span>
+                  <div>
+                    {netType
+                      ? <span className="chip-net">{netType}</span>
+                      : <span className="text-sm text-muted-foreground">—</span>}
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">
+                    {t('fields.internetAccess')}
+                  </span>
+                  <div>
+                    <BoolBadge
+                      value={internet}
+                      trueLabel={t('network.allowed')}
+                      falseLabel={t('network.blocked')}
+                    />
+                  </div>
+                </div>
+              </div>
+              <Monoblock label={t('fields.dns')} value={policy.dns} />
+              <Monoblock label={t('fields.allowOut')} value={policy.allowOut} />
+              <Monoblock label={t('fields.denyOut')} value={policy.denyOut} />
+            </div>
+          );
+        })()}
       </Section>
 
       {/* ── replicas ── */}

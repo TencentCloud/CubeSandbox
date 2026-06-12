@@ -29,6 +29,8 @@ export interface TemplateSummary {
   lastError?: string | null;
   createdAt?: string | null;
   imageInfo?: string | null;
+  networkType?: string | null;
+  allowInternetAccess?: boolean | null;
 }
 
 export interface TemplateDetail extends TemplateSummary {
@@ -124,6 +126,8 @@ function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
     lastError: dto.lastError,
     createdAt: dto.createdAt,
     imageInfo: dto.imageInfo,
+    networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
+    allowInternetAccess: (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
   };
 }
 
