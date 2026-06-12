@@ -296,6 +296,7 @@ export interface StoreCatalogItem {
   probe_path: string;
   writable_layer_size: string;
   official: boolean;
+  dns: string[];
 }
 
 export interface StoreCatalogResponse {
@@ -317,6 +318,7 @@ export interface UpsertStoreCatalogRequest {
   probe_path?: string;
   writable_layer_size?: string;
   official?: boolean;
+  dns?: string[];
   sort_order?: number;
 }
 
