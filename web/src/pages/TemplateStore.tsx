@@ -128,6 +128,7 @@ function InstallModal({ item, enableForAgentHub = false, onClose }: InstallModal
         probePort: item.probe_port,
         probePath: item.probe_path,
         writableLayerSize: writableLayerSize.trim() || item.writable_layer_size,
+        dns: item.dns.length > 0 ? item.dns : undefined,
       }),
     onMutate: () => setPhase({ kind: 'submitting' }),
     onSuccess: (data) => {
@@ -169,6 +170,9 @@ function InstallModal({ item, enableForAgentHub = false, onClose }: InstallModal
             <div><span className="text-muted-foreground">expose-port: </span>{item.expose_ports.join(', ')}</div>
             <div><span className="text-muted-foreground">probe: </span>{item.probe_port}</div>
             <div><span className="text-muted-foreground">probe-path: </span>{item.probe_path}</div>
+            {item.dns.length > 0 && (
+              <div><span className="text-muted-foreground">dns: </span>{item.dns.join(', ')}</div>
+            )}
           </div>
 
           {/* 可编辑参数 */}
