@@ -11,8 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/urfave/cli/v2"
@@ -33,8 +31,6 @@ const (
 	envLogsMode = "CUBECLI_LOGS_MODE"
 )
 
-// LogsCommand prints container stdout (or stderr) for a given sandbox ID.
-//
 // LogsCommand prints container stdout (or stderr) for a given sandbox or template ID.
 //
 // Sandbox log files live at:
@@ -43,8 +39,9 @@ const (
 //
 // Template log files live at:
 //
-//	<templateLogDir>/<templateID>_<attempt>/stdout|stderr  (host filesystem, no ns needed)
+//	<templateLogDir>/<templateID>_0/stdout|stderr  (host filesystem, no ns needed)
 //
+// The "_0" suffix is the container index within the sandbox (currently always 0).
 // For sandbox logs the process re-execs itself with CUBEMNT=1 so the C
 // constructor in pkg/cubemnt/nsenter.c enters the mount namespace while still
 // single-threaded.  Template logs are on the host filesystem and need no
@@ -54,22 +51,16 @@ var LogsCommand = &cli.Command{
 	Usage: "show container stdout/stderr log for a sandbox or template",
 	ArgsUsage: "<id>\n\n" +
 		"Examples:\n" +
-		"  cubecli logs <sandbox-id>             # last 100 lines of sandbox stdout\n" +
-		"  cubecli logs --tpl <template-id>      # last 100 lines of latest template build\n" +
-		"  cubecli logs --tpl --attempt 2 <id>  # specific build attempt\n" +
-		"  cubecli logs --stderr <id>            # stderr\n" +
-		"  cubecli logs --all <id>               # full log\n" +
-		"  cubecli logs -t 50 <id>              # last 50 lines\n" +
-		"  cubecli logs -H 20 <id>              # first 20 lines",
+		"  cubecli logs <sandbox-id>        # last 100 lines of sandbox stdout\n" +
+		"  cubecli logs --tpl <template-id> # last 100 lines of template build (container _0)\n" +
+		"  cubecli logs --stderr <id>       # stderr\n" +
+		"  cubecli logs --all <id>          # full log\n" +
+		"  cubecli logs -t 50 <id>          # last 50 lines\n" +
+		"  cubecli logs -H 20 <id>          # first 20 lines",
 	Flags: []cli.Flag{
 		&cli.BoolFlag{
 			Name:  "tpl",
-			Usage: "treat the id as a template ID; reads from /data/log/template/ without entering a namespace",
-		},
-		&cli.IntFlag{
-			Name:  "attempt",
-			Usage: "template build attempt number (default: latest)",
-			Value: -1,
+			Usage: "treat the id as a template ID; reads from /data/log/template/<id>_0/ without entering a namespace",
 		},
 		&cli.BoolFlag{
 			Name:    "stderr",
@@ -116,7 +107,7 @@ var LogsCommand = &cli.Command{
 
 		// Template log: read directly from host filesystem, no namespace needed.
 		if cliCtx.Bool("tpl") {
-			return readTemplateLog(id, stream, all, tailN, headN, cliCtx.Int("attempt"))
+			return readTemplateLog(id, stream, all, tailN, headN)
 		}
 
 		// Already inside the namespace: do the real work.
@@ -220,38 +211,12 @@ func printTail(r io.Reader, n int) error {
 	return nil
 }
 
-// readTemplateLog reads log files from /data/log/template/<templateID>_<attempt>/.
-// If attempt is -1 (default), the latest attempt (highest number) is used.
+// readTemplateLog reads log files from /data/log/template/<templateID>_0/.
+// The "_0" suffix is the container index within the sandbox (always 0 for
+// single-container templates).
 // Template logs are on the host filesystem; no namespace entry is needed.
-func readTemplateLog(templateID, stream string, all bool, tailN, headN, attempt int) error {
-	var dir string
-	if attempt >= 0 {
-		dir = filepath.Join(templateLogDir, fmt.Sprintf("%s_%d", templateID, attempt))
-	} else {
-		// Find the latest attempt by listing all <templateID>_N subdirectories.
-		entries, err := os.ReadDir(templateLogDir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return fmt.Errorf("template log directory not found: %s", templateLogDir)
-			}
-			return fmt.Errorf("read template log dir: %w", err)
-		}
-		prefix := templateID + "_"
-		var matches []string
-		for _, e := range entries {
-			if e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
-				matches = append(matches, e.Name())
-			}
-		}
-		if len(matches) == 0 {
-			return fmt.Errorf("no log directories found for template %s under %s", templateID, templateLogDir)
-		}
-		// Sort lexicographically; since attempt numbers are appended as integers
-		// after the last underscore, lexicographic order matches numeric order
-		// for reasonable attempt counts (< 10).
-		sort.Strings(matches)
-		dir = filepath.Join(templateLogDir, matches[len(matches)-1])
-	}
+func readTemplateLog(templateID, stream string, all bool, tailN, headN int) error {
+	dir := filepath.Join(templateLogDir, templateID+"_0")
 
 	logPath := filepath.Join(dir, stream)
 	f, err := os.Open(logPath)
