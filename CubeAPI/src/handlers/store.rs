@@ -41,6 +41,7 @@ pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
             probe_path: "/".into(),
             writable_layer_size: "1G".into(),
             official: true,
+            dns: vec![],
         },
         StoreCatalogItem {
             id: "sandbox-browser".into(),
@@ -53,11 +54,17 @@ pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
             tags: vec!["browser".into(), "chromium".into(), "official".into()],
             category: "browser".into(),
             size_mb: 1530,
-            expose_ports: vec![49983],
-            probe_port: 49983,
-            probe_path: "/health".into(),
+            expose_ports: vec![49983, 9000],
+            probe_port: 9000,
+            probe_path: "/cdp/json/version".into(),
             writable_layer_size: "1G".into(),
             official: true,
+            dns: vec![
+                "183.60.83.19".into(),    // China Telecom — verified in Tencent Cloud
+                "114.114.114.114".into(), // 114DNS — most common public DNS in China
+                "223.5.5.5".into(),       // Alibaba DNS — broad domestic coverage
+                "8.8.8.8".into(),         // Google DNS — international fallback
+            ],
         },
         StoreCatalogItem {
             id: "openclaw".into(),
@@ -75,6 +82,7 @@ pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
             probe_path: "/health".into(),
             writable_layer_size: "4G".into(),
             official: true,
+            dns: vec![],
         },
         StoreCatalogItem {
             id: "cubesandbox-base".into(),
@@ -92,6 +100,7 @@ pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
             probe_path: "/health".into(),
             writable_layer_size: "1G".into(),
             official: true,
+            dns: vec![],
         },
         StoreCatalogItem {
             id: "sandbox-nginx".into(),
@@ -109,6 +118,7 @@ pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
             probe_path: "/health".into(),
             writable_layer_size: "1G".into(),
             official: true,
+            dns: vec![],
         },
     ]
 }
@@ -149,6 +159,9 @@ pub struct StoreCatalogItem {
     pub writable_layer_size: String,
     /// Whether this is an officially maintained template.
     pub official: bool,
+    /// DNS servers to configure in the sandbox (ordered by priority).
+    #[serde(default)]
+    pub dns: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -194,6 +207,9 @@ pub struct UpsertStoreCatalogRequest {
     /// Official flag.
     #[serde(default)]
     pub official: bool,
+    /// DNS servers to configure in the sandbox (ordered by priority).
+    #[serde(default)]
+    pub dns: Vec<String>,
     /// Display order (lower first).
     #[serde(default)]
     pub sort_order: i32,
@@ -224,6 +240,7 @@ impl From<StoreTemplateRecord> for StoreCatalogItem {
             probe_path: r.probe_path,
             writable_layer_size: r.writable_layer_size,
             official: r.official,
+            dns: r.dns,
         }
     }
 }
@@ -245,6 +262,7 @@ impl From<&UpsertStoreCatalogRequest> for StoreTemplateRecord {
             probe_path: r.probe_path.clone(),
             writable_layer_size: r.writable_layer_size.clone(),
             official: r.official,
+            dns: r.dns.clone(),
             sort_order: r.sort_order,
         }
     }
