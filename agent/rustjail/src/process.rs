@@ -9,13 +9,13 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use tokio::sync::mpsc::Sender;
 
 use nix::errno::Errno;
-use nix::fcntl::{self, FcntlArg, FdFlag};
+use nix::fcntl::{self, FcntlArg, FdFlag, OFlag};
 use nix::pty;
 use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, Pid};
 use nix::Result;
 use oci::Process as OCIProcess;
-use slog::Logger;
+use slog::{debug, warn, Logger};
 use std::result;
 
 use crate::pipestream::PipeStream;
@@ -35,6 +35,21 @@ macro_rules! close_process_stream {
             $self.$stream = None;
         }
     };
+}
+
+fn set_log_pipe_size(fd: RawFd, requested: i32, logger: &Logger, label: &str) {
+    match fcntl::fcntl(fd, FcntlArg::F_SETPIPE_SZ(requested)) {
+        Ok(actual) if actual < requested => {
+            warn!(
+                logger,
+                "{} pipe buffer clamped to {} bytes (requested {})", label, actual, requested
+            );
+        }
+        Err(e) => {
+            warn!(logger, "F_SETPIPE_SZ {} pipe failed: {:?}", label, e);
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -64,6 +79,11 @@ pub struct Process {
     pub term_master: Option<RawFd>,
     pub term_slave: Option<RawFd>,
     pub tty: bool,
+    /// Init process only.  Set by rpc.do_create_container from the
+    /// `cube.container.log_forwarding` annotation.  When true, open_io()
+    /// creates stdout/stderr log pipes for the init process.  Exec processes
+    /// (`init == false`) never consult this flag.
+    pub log_forwarding: bool,
     pub parent_stdin: Option<RawFd>,
     pub parent_stdout: Option<RawFd>,
     pub parent_stderr: Option<RawFd>,
@@ -140,6 +160,7 @@ impl Process {
             exit_rx: Some(exit_rx),
             extra_files: Vec::new(),
             tty: ocip.terminal,
+            log_forwarding: false,
             term_master: None,
             term_slave: None,
             cubemsg_dev: None,
@@ -184,6 +205,72 @@ impl Process {
             }
             return Ok(());
         }
+
+        // Exec processes: unchanged from pre-log-forwarding (no agent-side pipes).
+        if !self.init {
+            return Ok(());
+        }
+
+        // Init process: create log pipes only when log forwarding is enabled.
+        if !self.log_forwarding {
+            return Ok(());
+        }
+
+        // Init log-forwarding path: create pipes so the shim can poll container
+        // stdout/stderr via do_read_stream over vsock.
+        //
+        // Pipe layout:
+        //   container process  --> [child_w]  pipe  [parent_r] --> agent do_read_stream
+        //
+        // The write end (child_w) is NOT O_CLOEXEC so the child process
+        // inherits it; the read end (parent_r) IS O_CLOEXEC so it stays
+        // only in the agent.
+        //
+        // We intentionally set O_NONBLOCK on the write end: during snapshot
+        // restore there is a window between the container resuming and the shim
+        // calling start_log_forward.  If the pipe fills up in that window,
+        // O_NONBLOCK makes the container's write() return EAGAIN (log line
+        // dropped) rather than blocking the container process indefinitely.
+        //
+        // Request a 1 MiB pipe buffer to reduce drops during the restore window.
+        // This matches the kernel's /proc/sys/fs/pipe-max-size limit (1 MiB),
+        // so no clamping occurs.
+        const LOG_PIPE_SIZE: i32 = 1024 * 1024; // 1 MiB
+
+        let (parent_stdout_r, child_stdout_w) = unistd::pipe2(OFlag::O_CLOEXEC)
+            .map_err(|e| format!("create stdout pipe failed: {:?}", e))?;
+        set_log_pipe_size(child_stdout_w, LOG_PIPE_SIZE, logger, "stdout");
+        // Clear O_CLOEXEC on the write end so the container inherits it.
+        let _ = fcntl::fcntl(child_stdout_w, FcntlArg::F_SETFD(FdFlag::empty()));
+        let _ = fcntl::fcntl(child_stdout_w, FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
+
+        let (parent_stderr_r, child_stderr_w) = match unistd::pipe2(OFlag::O_CLOEXEC) {
+            Ok(fds) => fds,
+            Err(e) => {
+                let _ = unistd::close(parent_stdout_r);
+                let _ = unistd::close(child_stdout_w);
+                return Err(format!("create stderr pipe failed: {:?}", e));
+            }
+        };
+        set_log_pipe_size(child_stderr_w, LOG_PIPE_SIZE, logger, "stderr");
+        let _ = fcntl::fcntl(child_stderr_w, FcntlArg::F_SETFD(FdFlag::empty()));
+        let _ = fcntl::fcntl(child_stderr_w, FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
+
+        debug!(
+            logger,
+            "container log pipes created: \
+             stdout child_w={} parent_r={}, stderr child_w={} parent_r={}",
+            child_stdout_w,
+            parent_stdout_r,
+            child_stderr_w,
+            parent_stderr_r,
+        );
+
+        self.stdout = Some(child_stdout_w);
+        self.stderr = Some(child_stderr_w);
+        self.parent_stdout = Some(parent_stdout_r);
+        self.parent_stderr = Some(parent_stderr_r);
+
         Ok(())
     }
 

@@ -9,6 +9,7 @@ use cgroups::freezer::FreezerState;
 use cube::rootfs::ANNO_PROPAGATION_CONTAINER_UMNTS;
 use cube::rootfs::ANNO_PROPAGATION_EXEC_MNTS;
 use cube::utils::ANNO_APP_SNAPSHOT_CONTAINER_ID;
+use cube::utils::ANNO_CONTAINER_LOG_FORWARDING;
 use oci::{LinuxNamespace, Mount, Root, Spec};
 use protobuf::MessageDyn;
 use protobuf::MessageField;
@@ -260,6 +261,11 @@ impl AgentService {
         };
         let duration_init_container = start.elapsed().as_millis();
         start = Instant::now();
+        p.log_forwarding = oci
+            .annotations
+            .get(ANNO_CONTAINER_LOG_FORWARDING)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         p.open_io(&sl!(), None).map_err(|e| anyhow!(e))?;
         ctr.start(p).await?;
         s.update_shared_pidns(&ctr)?;

@@ -28,6 +28,7 @@ use tokio::sync::mpsc::Sender;
 
 use serde_json;
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,6 +37,14 @@ use ttrpc::context::{self, Context};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
+
+fn validate_log_path_component(id: &str) -> CResult<()> {
+    if id.is_empty() || id.contains('/') || id.contains("..") || id.contains('\0') {
+        return Err(format!("invalid container id for log path: {}", id));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct Container {
     sandbox_id: String,
@@ -51,6 +60,16 @@ pub struct Container {
     tx_containerd: Sender<(String, Box<dyn MessageDyn>)>,
     execs: Arc<Mutex<HashMap<String, Exec>>>,
     app_snapshot: bool,
+    /// Background task forwarding container stdout/stderr to log files.
+    /// Template creation: /data/log/template/<id>/stdout|stderr (755 dir).
+    /// Normal sandbox: ./stdout and ./stderr relative to the bundle directory.
+    /// Aborted on pause/snapshot/disconnect; restarted on resume via start_log_forward.
+    log_forward_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+    /// Cancel sender for the log-forwarding task.  Sending true on this watch
+    /// channel wakes both forward_stdout and forward_stderr select! loops so
+    /// they exit immediately; paired with log_forward_handle so callers can
+    /// await clean termination before proceeding with pause / snapshot.
+    log_forward_cancel: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl Container {
@@ -92,6 +111,8 @@ impl Container {
             execs: Arc::new(Mutex::new(HashMap::new())),
             tx_containerd,
             app_snapshot,
+            log_forward_handle: None,
+            log_forward_cancel: None,
         };
         Ok(c)
     }
@@ -118,9 +139,39 @@ impl Container {
         state
             .wait_process(client_wait, cid, real_id, String::new(), tx_containerd)
             .await;
+
+        // Drop the client lock before attempting the async vsock connection.
+        drop(cli);
+
+        // Restart log forwarding after resume.  Errors are non-fatal: the
+        // container keeps running; we just lose log streaming for this session.
+        if let Err(e) = self.start_log_forward().await {
+            warnf!(self.log, "restart log forward failed after resume: {}", e);
+        }
     }
 
     pub async fn unset_client(&mut self) {
+        // Signal the log-forwarding task to exit, then await its termination
+        // so we are certain the vsock read loop has stopped and the connection
+        // is no longer in use before the caller proceeds with pause / snapshot.
+        // Sending true on the watch channel wakes the select! in both
+        // forward_stdout and forward_stderr immediately.
+        if let Some(tx) = self.log_forward_cancel.take() {
+            let _ = tx.send(true);
+        }
+        if let Some(handle) = self.log_forward_handle.take() {
+            // Arc::try_unwrap: we are the sole owner after take(); the task
+            // holds only a weak reference via the spawned closure captures.
+            // If another clone somehow holds it, fall back to abort().
+            match Arc::try_unwrap(handle) {
+                Ok(h) => {
+                    let _ = h.await;
+                }
+                Err(h) => {
+                    h.abort();
+                }
+            }
+        }
         //terminate the wait req
         if self.state.is_some() {
             self.state.as_ref().unwrap().notify_vm_pause().await;
@@ -291,12 +342,9 @@ impl Container {
         if let Some(pmem_rootfs) = anno.get(rootfs::ANNOTATION_K_ROOTFS_INFO) {
             let mut rootfs = rootfs::RootfsInfo::new(pmem_rootfs)?;
 
-            if self.app_snapshot {
-                if rootfs.overlay_info.is_some() || rootfs.mounts.is_some() {
-                    rootfs.overlay_info = None;
-                    rootfs.mounts = None;
-                    //return Err("Overlay info and mounts is not supported in app snapshot".to_string());
-                }
+            if self.app_snapshot && (rootfs.overlay_info.is_some() || rootfs.mounts.is_some()) {
+                rootfs.overlay_info = None;
+                rootfs.mounts = None;
             }
 
             if let Some(pmem_file) = rootfs.pmem_file.clone() {
@@ -331,6 +379,16 @@ impl Container {
                 break;
             }
         }
+
+        // Signal to the agent that this shim supports container log forwarding.
+        // The agent reads this annotation in do_create_container and sets
+        // p.log_forwarding = true causes open_io() to create init log pipes only
+        // (exec processes are unaffected; they use the pre-log-forwarding path).
+        spec.mut_annotations().insert(
+            common::ANNO_CONTAINER_LOG_FORWARDING.to_string(),
+            "true".to_string(),
+        );
+
         Ok(spec)
     }
 
@@ -394,6 +452,15 @@ impl Container {
     }
 
     pub async fn start_container(&mut self) -> CResult<()> {
+        // Start log forwarding BEFORE waking the container process.
+        // This ensures the stdout/stderr pipes in the agent are drained
+        // from the very first byte and can never fill up and stall the
+        // container before the shim has a chance to open the connection.
+        // During template creation (app_snapshot_create) logs go to
+        // /data/log/template/<id>-stdout|stderr; on restore they go to
+        // <bundle>/stdout|stderr.
+        self.start_log_forward().await?;
+
         let client = self.client.as_ref().unwrap().lock().await;
         if self.is_cold_start() {
             let req = agent::StartContainerRequest {
@@ -407,7 +474,7 @@ impl Container {
         }
         if !self.sb_conf.app_snapshot_create {
             if self.state.is_none() {
-                return Err(format!("BUG: start container failed, state is none"));
+                return Err("BUG: start container failed, state is none".to_string());
             }
             let state = self.state.as_mut().unwrap();
             let client_wait = client.clone();
@@ -418,6 +485,97 @@ impl Container {
                 .wait_process(client_wait, cid, real_id, String::new(), tx_containerd)
                 .await;
         }
+
+        Ok(())
+    }
+
+    /// Spawn a background task that streams container stdout/stderr from the
+    /// agent (via a fresh vsock connection) and appends them to log files.
+    /// Template creation writes to `/data/log/template/<id>/stdout|stderr`;
+    /// normal sandbox restore writes to `./stdout` and `./stderr` relative
+    /// to the shim's current working directory (the bundle directory).
+    ///
+    /// The task exits cleanly when `unset_client` is called (pause / snapshot /
+    /// destroy): a oneshot cancel signal is sent first so the forwarding loops
+    /// wake immediately, then the caller awaits the handle to confirm the vsock
+    /// read has stopped before proceeding.
+    pub async fn start_log_forward(&mut self) -> CResult<()> {
+        // Cancel and await any previous instance before starting a new one.
+        if let Some(tx) = self.log_forward_cancel.take() {
+            let _ = tx.send(true);
+        }
+        if let Some(handle) = self.log_forward_handle.take() {
+            match Arc::try_unwrap(handle) {
+                Ok(h) => {
+                    let _ = h.await;
+                }
+                Err(h) => {
+                    h.abort();
+                }
+            }
+        }
+
+        // Open a dedicated vsock connection for streaming I/O so that the
+        // main client connection used for control-plane RPCs is never blocked.
+        let log_conn = AsyncUtils::connect_agent(&self.sandbox_id)
+            .await
+            .map_err(|e| format!("connect agent for log forwarding failed:{}", e))?;
+        let log_client = agent_ttrpc::AgentServiceClient::new(log_conn);
+
+        // Write log files:
+        //   - template creation: /data/log/template/<id>/stdout|stderr
+        //   - sandbox (restore): current working directory (bundle dir)
+        let (stdout_path, stderr_path) = if self.sb_conf.app_snapshot_create {
+            validate_log_path_component(&self.info.id)?;
+            let log_dir = format!("/data/log/template/{}", self.info.id);
+            tokio::fs::create_dir_all(&log_dir)
+                .await
+                .map_err(|e| format!("create log dir {} failed: {}", log_dir, e))?;
+            let log_dir_for_perm = log_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                std::fs::set_permissions(&log_dir_for_perm, std::fs::Permissions::from_mode(0o700))
+            })
+            .await
+            .map_err(|e| format!("set log dir permissions task failed: {}", e))?
+            .map_err(|e| format!("set log dir {} permissions failed: {}", log_dir, e))?;
+            (format!("{}/stdout", log_dir), format!("{}/stderr", log_dir))
+        } else {
+            ("stdout".to_string(), "stderr".to_string())
+        };
+
+        // Init log forwarding is separate from exec I/O relay (forward_std).
+        // exec_id must be empty so agent read_stdout/read_stderr target the init process.
+        let log_exec = Exec {
+            container_id: self.id.clone(),
+            id: String::new(),
+            tty: Tty {
+                stdin: String::new(),
+                stdout: stdout_path.clone(),
+                stderr: stderr_path.clone(),
+                ..Default::default()
+            },
+            state: self.state.clone(),
+            ..Default::default()
+        };
+
+        infof!(
+            self.log,
+            "starting log forwarding for container:{} stdout:{} stderr:{}",
+            self.real_id,
+            stdout_path,
+            stderr_path
+        );
+
+        // Create a watch cancel channel.  unset_client() sends true on the tx
+        // side; the rx is cloned into each of forward_stdout and forward_stderr
+        // so both loops wake and exit immediately via tokio::select!.
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        let handle = log_exec
+            .start_log_forward(log_client, self.log.clone(), cancel_rx)
+            .await;
+        self.log_forward_handle = Some(Arc::new(handle));
+        self.log_forward_cancel = Some(cancel_tx);
 
         Ok(())
     }
