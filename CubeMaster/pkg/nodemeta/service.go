@@ -180,6 +180,7 @@ func Init(ctx context.Context) error {
 	}
 	localcache.RegisterNodeLoader(ListSchedulerNodes)
 	global.ready = true
+	go global.loopReload(ctx)
 	return nil
 }
 
@@ -598,10 +599,79 @@ func (s *service) reload() error {
 	for _, snap := range next {
 		snap.versionsHash = versionsHash(snap.Versions)
 	}
-	s.mu.Lock()
-	s.nodes = next
-	s.mu.Unlock()
+	s.applyReloadResult(next)
 	return nil
+}
+
+// applyReloadResult merges a DB snapshot (next) into the live in-memory map.
+// Registration fields and versions always take the DB value; status/heartbeat
+// fields keep the in-memory value when it is fresher than the DB snapshot.
+func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for nodeID, newSnap := range next {
+		if existing, ok := s.nodes[nodeID]; ok {
+			// Registration fields: always take from DB.  RegisterNode writes to
+			// MySQL before updating in-memory, so any value appearing in the DB
+			// has already been committed and is safe to copy even when the
+			// in-memory heartbeat is fresher (arrived on this replica during the
+			// DB scan).
+			existing.Labels = cloneStringMap(newSnap.Labels)
+			existing.Capacity = newSnap.Capacity
+			existing.Allocatable = newSnap.Allocatable
+			existing.InstanceType = newSnap.InstanceType
+			existing.ClusterLabel = newSnap.ClusterLabel
+			existing.QuotaCPU = newSnap.QuotaCPU
+			existing.QuotaMemMB = newSnap.QuotaMemMB
+			existing.CreateConcurrentNum = newSnap.CreateConcurrentNum
+			existing.MaxMvmNum = newSnap.MaxMvmNum
+			existing.HostIP = newSnap.HostIP
+			existing.GRPCPort = newSnap.GRPCPort
+			existing.Versions = append([]ComponentVersion(nil), newSnap.Versions...)
+			existing.versionsHash = newSnap.versionsHash
+			// Status fields: keep in-memory version if fresher to avoid
+			// regressing heartbeat state that arrived during the DB scan.
+			if newSnap.HeartbeatTime.After(existing.HeartbeatTime) {
+				existing.Conditions = newSnap.Conditions
+				existing.Images = newSnap.Images
+				existing.LocalTemplates = newSnap.LocalTemplates
+				existing.HeartbeatTime = newSnap.HeartbeatTime
+				existing.ReportedReady = newSnap.ReportedReady
+			}
+			applyCurrentHealth(existing, time.Now())
+		} else {
+			// New node discovered from DB (registered on another replica).
+			s.nodes[nodeID] = newSnap
+		}
+	}
+}
+
+func (s *service) loopReload(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	checkDeadline := time.Now().Add(config.GetConfig().Common.SyncMetaDataInterval)
+	for {
+		select {
+		case <-ticker.C:
+			recov.WithRecover(func() {
+				if checkDeadline.After(time.Now()) {
+					return
+				}
+				defer func() {
+					checkDeadline = time.Now().Add(config.GetConfig().Common.SyncMetaDataInterval)
+				}()
+				if err := s.reload(); err != nil {
+					log.G(ctx).Warnf("nodemeta periodic reload failed: %v", err)
+				}
+			}, func(panicError interface{}) {
+				checkDeadline = time.Now().Add(config.GetConfig().Common.SyncMetaDataInterval)
+				log.G(context.Background()).Fatalf("nodemeta loopReload panic: %v", panicError)
+			})
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func healthTimeout() time.Duration {
