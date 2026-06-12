@@ -11,6 +11,8 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use ttrpc::context;
 
+const LOG_FILE_MODE: u32 = 0o600;
+
 #[derive(Clone, Default)]
 pub struct Exec {
     pub container_id: String,
@@ -44,10 +46,11 @@ impl Exec {
         let log_in = log.clone();
 
         let exec_in = self.clone();
-        // exec processes have no external cancel; create a channel that is
-        // never signalled so forward_stdin/stdout/stderr run until the stream closes.
-        let (_cancel_tx_in, cancel_rx_in) = tokio::sync::watch::channel(false);
+        // exec processes have no external cancel; keep the sender alive inside
+        // each spawned task so the watch receiver is not immediately closed.
+        let (cancel_tx_in, cancel_rx_in) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
+            let _keep_alive = cancel_tx_in;
             exec_in
                 .forward_stdin(state_in, client_in, log_in, cancel_rx_in)
                 .await;
@@ -56,18 +59,19 @@ impl Exec {
         let state_out = state.clone();
         let client_out = client.clone();
         let log_out = log.clone();
-        let (_cancel_tx_out, cancel_rx_out) = tokio::sync::watch::channel(false);
-        let (_cancel_tx_err, cancel_rx_err) = tokio::sync::watch::channel(false);
-
         let exec_out = self.clone();
+        let (cancel_tx_out, cancel_rx_out) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
+            let _keep_alive = cancel_tx_out;
             exec_out
                 .forward_stdout(state_out, client_out, log_out, cancel_rx_out)
                 .await;
         });
 
         let exec = self.clone();
+        let (cancel_tx_err, cancel_rx_err) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
+            let _keep_alive = cancel_tx_err;
             exec.forward_stderr(state, client, log, cancel_rx_err).await;
         });
     }
@@ -155,14 +159,18 @@ impl Exec {
             exec_id: self.id.clone(),
             ..Default::default()
         };
-        let ctx = context::with_timeout(1000 * 1000 * 1000 * 3);
+        let ctx = context::Context::default();
 
         loop {
             let res = tokio::select! {
                 _ = cancel.changed() => {
-                    infof!(log, "exec:{} forward stdin cancelled", self.id.clone());
-                    return;
+                    if *cancel.borrow() {
+                        infof!(log, "exec:{} forward stdin cancelled", self.id.clone());
+                        return;
+                    }
+                    continue;
                 }
+                // Block until user input or FIFO close; no timeout on idle.
                 res = file.read(&mut buf) => res,
             };
             if let Err(e) = res {
@@ -226,6 +234,7 @@ impl Exec {
         let mut file = match tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(LOG_FILE_MODE)
             .open(self.tty.stdout.clone())
             .await
         {
@@ -248,14 +257,18 @@ impl Exec {
             len: 4096,
             ..Default::default()
         };
+        // No RPC timeout: log/exec stdout reads may idle for long periods between
+        // lines; exit is driven by cancel (pause/snapshot) or vsock/RPC errors.
         let ctx = context::Context::default();
         loop {
             tokio::select! {
                 // Cancel signal: pause / snapshot / destroy path.
                 // watch::changed() resolves as soon as the sender sends true.
                 _ = cancel.changed() => {
-                    infof!(log, "exec:{} forward stdout cancelled", self.id.clone());
-                    return;
+                    if *cancel.borrow() {
+                        infof!(log, "exec:{} forward stdout cancelled", self.id.clone());
+                        return;
+                    }
                 }
                 res = client.read_stdout(ctx.clone(), &req) => {
                     match res {
@@ -276,6 +289,7 @@ impl Exec {
                                     self.id.clone(),
                                     e
                                 );
+                                return;
                             }
                         }
                     }
@@ -300,6 +314,7 @@ impl Exec {
         let mut file = match tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(LOG_FILE_MODE)
             .open(self.tty.stderr.clone())
             .await
         {
@@ -326,8 +341,10 @@ impl Exec {
         loop {
             tokio::select! {
                 _ = cancel.changed() => {
-                    infof!(log, "exec:{} forward stderr cancelled", self.id.clone());
-                    return;
+                    if *cancel.borrow() {
+                        infof!(log, "exec:{} forward stderr cancelled", self.id.clone());
+                        return;
+                    }
                 }
                 res = client.read_stderr(ctx.clone(), &req) => {
                     match res {
@@ -348,6 +365,7 @@ impl Exec {
                                     self.id.clone(),
                                     e
                                 );
+                                return;
                             }
                         }
                     }

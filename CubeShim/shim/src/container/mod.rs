@@ -28,7 +28,7 @@ use tokio::sync::mpsc::Sender;
 
 use serde_json;
 use std::collections::HashMap;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -37,6 +37,14 @@ use ttrpc::context::{self, Context};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
+
+fn validate_log_path_component(id: &str) -> CResult<()> {
+    if id.is_empty() || id.contains('/') || id.contains("..") || id.contains('\0') {
+        return Err(format!("invalid container id for log path: {}", id));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct Container {
     sandbox_id: String,
@@ -518,14 +526,21 @@ impl Container {
         //   - template creation: /data/log/template/<id>/stdout|stderr
         //   - sandbox (restore): current working directory (bundle dir)
         let (stdout_path, stderr_path) = if self.sb_conf.app_snapshot_create {
+            validate_log_path_component(&self.info.id)?;
             let log_dir = format!("/data/log/template/{}", self.info.id);
-            if let Err(e) = std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o755)
-                .create(&log_dir)
-            {
-                return Err(format!("create log dir {} failed: {}", log_dir, e));
-            }
+            tokio::fs::create_dir_all(&log_dir)
+                .await
+                .map_err(|e| format!("create log dir {} failed: {}", log_dir, e))?;
+            let log_dir_for_perm = log_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                std::fs::set_permissions(
+                    &log_dir_for_perm,
+                    std::fs::Permissions::from_mode(0o700),
+                )
+            })
+            .await
+            .map_err(|e| format!("set log dir permissions task failed: {}", e))?
+            .map_err(|e| format!("set log dir {} permissions failed: {}", log_dir, e))?;
             (format!("{}/stdout", log_dir), format!("{}/stderr", log_dir))
         } else {
             ("stdout".to_string(), "stderr".to_string())

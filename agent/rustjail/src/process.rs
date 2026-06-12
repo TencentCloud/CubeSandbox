@@ -15,7 +15,7 @@ use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, Pid};
 use nix::Result;
 use oci::Process as OCIProcess;
-use slog::Logger;
+use slog::{debug, warn, Logger};
 use std::result;
 
 use crate::pipestream::PipeStream;
@@ -35,6 +35,24 @@ macro_rules! close_process_stream {
             $self.$stream = None;
         }
     };
+}
+
+fn set_log_pipe_size(fd: RawFd, requested: i32, logger: &Logger, label: &str) {
+    match fcntl::fcntl(fd, FcntlArg::F_SETPIPE_SZ(requested)) {
+        Ok(actual) if actual < requested => {
+            warn!(
+                logger,
+                "{} pipe buffer clamped to {} bytes (requested {})",
+                label,
+                actual,
+                requested
+            );
+        }
+        Err(e) => {
+            warn!(logger, "F_SETPIPE_SZ {} pipe failed: {:?}", label, e);
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -226,14 +244,20 @@ impl Process {
 
         let (parent_stdout_r, child_stdout_w) = unistd::pipe2(OFlag::O_CLOEXEC)
             .map_err(|e| format!("create stdout pipe failed: {:?}", e))?;
-        let _ = fcntl::fcntl(child_stdout_w, FcntlArg::F_SETPIPE_SZ(LOG_PIPE_SIZE));
+        set_log_pipe_size(child_stdout_w, LOG_PIPE_SIZE, logger, "stdout");
         // Clear O_CLOEXEC on the write end so the container inherits it.
         let _ = fcntl::fcntl(child_stdout_w, FcntlArg::F_SETFD(FdFlag::empty()));
         let _ = fcntl::fcntl(child_stdout_w, FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
 
-        let (parent_stderr_r, child_stderr_w) = unistd::pipe2(OFlag::O_CLOEXEC)
-            .map_err(|e| format!("create stderr pipe failed: {:?}", e))?;
-        let _ = fcntl::fcntl(child_stderr_w, FcntlArg::F_SETPIPE_SZ(LOG_PIPE_SIZE));
+        let (parent_stderr_r, child_stderr_w) = match unistd::pipe2(OFlag::O_CLOEXEC) {
+            Ok(fds) => fds,
+            Err(e) => {
+                let _ = unistd::close(parent_stdout_r);
+                let _ = unistd::close(child_stdout_w);
+                return Err(format!("create stderr pipe failed: {:?}", e));
+            }
+        };
+        set_log_pipe_size(child_stderr_w, LOG_PIPE_SIZE, logger, "stderr");
         let _ = fcntl::fcntl(child_stderr_w, FcntlArg::F_SETFD(FdFlag::empty()));
         let _ = fcntl::fcntl(child_stderr_w, FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
 

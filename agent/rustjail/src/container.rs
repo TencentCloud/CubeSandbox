@@ -1626,10 +1626,10 @@ pub async fn execute_hook(logger: &Logger, h: &Hook, st: &OCIState) -> Result<()
     });
     match tokio::time::timeout(Duration::new(timeout, 0), join_handle).await {
         Ok(r) => match r {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                error!(logger2, "hook join error: {:?}", e);
-                Err(anyhow!(e))
+            Ok(hook_result) => hook_result,
+            Err(join_err) => {
+                error!(logger2, "hook join error: {:?}", join_err);
+                Err(anyhow!(join_err))
             }
         },
         Err(e) => {
@@ -1769,13 +1769,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_hook_with_error() {
-        let ls = which("ls").await;
+        let false_bin = which("false").await;
 
         let res = execute_hook(
             &slog_scope::logger(),
             &Hook {
-                path: ls,
-                args: vec!["ls".to_string(), "/tmp/not-exist".to_string()],
+                path: false_bin,
+                args: vec!["false".to_string()],
                 env: vec![],
                 timeout: None,
             },

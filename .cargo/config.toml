@@ -1,0 +1,6 @@
+# Build artifacts on /data (repo root), not /tmp tmpfs.
+[build]
+target-dir = ".cargo-target"
+
+[env]
+TMPDIR = { value = ".tmp", relative = true }

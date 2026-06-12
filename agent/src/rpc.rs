@@ -263,7 +263,9 @@ impl AgentService {
         start = Instant::now();
         p.log_forwarding = oci
             .annotations
-            .contains_key(ANNO_CONTAINER_LOG_FORWARDING);
+            .get(ANNO_CONTAINER_LOG_FORWARDING)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         p.open_io(&sl!(), None).map_err(|e| anyhow!(e))?;
         ctr.start(p).await?;
         s.update_shared_pidns(&ctr)?;
