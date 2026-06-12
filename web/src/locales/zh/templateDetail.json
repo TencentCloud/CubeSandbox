@@ -9,6 +9,8 @@
     "networkDesc": "模板的网络类型与出站流量规则。",
     "replicas": "Replicas",
     "replicasDesc": "该模板在各节点上的快照副本状态。",
+    "compat": "兼容性",
+    "compatDesc": "模板副本绑定的组件版本与当前节点环境的对比。",
     "danger": "删除模板",
     "dangerDesc": "删除后无法恢复，该模板下所有 replica 将一并删除。"
   },
@@ -20,6 +22,7 @@
     "spec": "规格",
     "node": "节点",
     "phase": "阶段",
+    "compat": "兼容性",
     "artifactID": "Artifact ID",
     "snapshotPath": "快照路径",
     "lastJob": "最近任务",
@@ -29,7 +32,9 @@
     "internetAccess": "公网访问",
     "dns": "DNS 服务器",
     "allowOut": "允许出站",
-    "denyOut": "拒绝出站"
+    "denyOut": "拒绝出站",
+    "memory": "内存",
+    "writableLayerSize": "可写层大小"
   },
   "status": {
     "ready": "就绪",
@@ -64,6 +69,23 @@
   "network": {
     "allowed": "允许",
     "blocked": "禁止"
+  },
+  "compat": {
+    "staleTitle": "该模板在当前节点环境下需要重建",
+    "staleDesc": "{{count}} 个副本绑定的 guest-image 或 cube-agent 版本与当前节点不一致。模板构建状态仍可为就绪，但这些副本不可用于创建新沙箱。",
+    "loading": "正在读取兼容性信息…",
+    "empty": "暂无兼容性信息。",
+    "status": {
+      "OK": "正常",
+      "STALE": "需重建",
+      "UNKNOWN": "未知",
+      "MISSING": "缺失"
+    },
+    "components": {
+      "guestImage": "guest-image",
+      "agent": "cube-agent",
+      "kernel": "kernel"
+    }
   },
   "specs": "规格",
   "attributes": "属性",

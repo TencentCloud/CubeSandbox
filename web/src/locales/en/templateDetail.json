@@ -9,6 +9,8 @@
     "networkDesc": "Network type and outbound traffic rules for this template.",
     "replicas": "Replicas",
     "replicasDesc": "Snapshot replicas of this template across nodes.",
+    "compat": "Compatibility",
+    "compatDesc": "Component versions bound to template replicas compared with the current node environment.",
     "danger": "Delete Template",
     "dangerDesc": "This action cannot be undone. All replicas of this template will also be deleted."
   },
@@ -20,6 +22,7 @@
     "spec": "Spec",
     "node": "Node",
     "phase": "Phase",
+    "compat": "Compatibility",
     "artifactID": "Artifact ID",
     "snapshotPath": "Snapshot Path",
     "lastJob": "Last Job",
@@ -29,7 +32,9 @@
     "internetAccess": "Internet Access",
     "dns": "DNS Servers",
     "allowOut": "Allow Out",
-    "denyOut": "Deny Out"
+    "denyOut": "Deny Out",
+    "memory": "Memory",
+    "writableLayerSize": "Writable Layer Size"
   },
   "status": {
     "ready": "Ready",
@@ -64,6 +69,23 @@
   "network": {
     "allowed": "Allowed",
     "blocked": "Blocked"
+  },
+  "compat": {
+    "staleTitle": "This template needs rebuilding for the current node environment",
+    "staleDesc": "{{count}} replica has guest-image or cube-agent versions that differ from the current node. The template build status can still be ready, but these replicas cannot create new sandboxes.",
+    "loading": "Loading compatibility information…",
+    "empty": "No compatibility information available.",
+    "status": {
+      "OK": "OK",
+      "STALE": "Needs rebuild",
+      "UNKNOWN": "Unknown",
+      "MISSING": "Missing"
+    },
+    "components": {
+      "guestImage": "guest-image",
+      "agent": "cube-agent",
+      "kernel": "kernel"
+    }
   },
   "specs": "Specs",
   "attributes": "Attributes",

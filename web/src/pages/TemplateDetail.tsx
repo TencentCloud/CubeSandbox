@@ -5,12 +5,12 @@ import { useState, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { templateApi } from '@/api/client';
+import { templateApi, type TemplateNodeCompat, type TemplateCompatRow } from '@/api/client';
 import { ApiError } from '@/lib/api';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, RefreshCw, Trash2, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
+import { ArrowLeft, RefreshCw, Trash2, ChevronDown, ChevronUp, Copy, Check, AlertTriangle } from 'lucide-react';
 import { cn, formatDeleteError, copyToClipboard } from '@/lib/utils';
 import { extractTemplateRuntimeConfig, extractTemplateNetworkPolicy } from '@/lib/templateConfig';
 import { BoolBadge } from '@/components/ui/typography';
@@ -49,6 +49,29 @@ function StatusBadge({ status }: { status: string }) {
   return (
     <span className={cn('inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium', tone)}>
       {t(`status.${status.toLowerCase()}` as 'status.ready', { defaultValue: status })}
+    </span>
+  );
+}
+
+function compatTone(status: string) {
+  switch (status.toUpperCase()) {
+    case 'OK':      return 'bg-cube-ok/15 text-cube-ok border-cube-ok/30';
+    case 'STALE':   return 'bg-destructive/10 text-destructive border-destructive/30';
+    case 'UNKNOWN': return 'bg-cube-warn/15 text-cube-warn border-cube-warn/30';
+    default:        return 'bg-muted text-muted-foreground border-border';
+  }
+}
+
+function isStaleCompat(status: string) {
+  return status.toUpperCase() === 'STALE';
+}
+
+function CompatBadge({ status }: { status: string }) {
+  const { t } = useTranslation('templateDetail');
+  const normalizedStatus = status.toUpperCase();
+  return (
+    <span className={cn('inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium', compatTone(normalizedStatus))}>
+      {t(`compat.status.${normalizedStatus}` as 'compat.status.OK', { defaultValue: status })}
     </span>
   );
 }
@@ -198,56 +221,208 @@ function LogViewer({ templateID, buildID }: { templateID: string; buildID: strin
 interface Replica {
   node_id?: string; node_ip?: string; phase?: string; status?: string;
   spec?: string; artifact_id?: string; snapshot_path?: string; last_job_id?: string;
+  compat_status?: string;
 }
 
-function ReplicaTable({ replicas }: { replicas: Replica[] }) {
+function nodeCompatKey(node?: string | null) {
+  return (node ?? '').trim();
+}
+
+function compatNodeKey(node: TemplateNodeCompat) {
+  return `${node.nodeID}-${node.nodeIP ?? ''}`;
+}
+
+function compatNodeLabel(node: TemplateNodeCompat) {
+  return node.nodeIP ?? node.nodeID;
+}
+
+function findCompatForReplica(replica: Replica, compatNodes: TemplateNodeCompat[]) {
+  const replicaNodeID = nodeCompatKey(replica.node_id);
+  const replicaNodeIP = nodeCompatKey(replica.node_ip);
+  return compatNodes.find((node) => {
+    const nodeID = nodeCompatKey(node.nodeID);
+    const nodeIP = nodeCompatKey(node.nodeIP);
+    return (!!replicaNodeID && replicaNodeID === nodeID) || (!!replicaNodeIP && replicaNodeIP === nodeIP);
+  });
+}
+
+function versionDeltaItems(node: TemplateNodeCompat) {
+  return [
+    {
+      key: 'guestImage',
+      bound: node.boundGuestImageVersion,
+      current: node.currentGuestImageVersion,
+    },
+    {
+      key: 'agent',
+      bound: node.boundAgentVersion,
+      current: node.currentAgentVersion,
+    },
+    {
+      key: 'kernel',
+      bound: node.boundKernelVersion,
+      current: node.currentKernelVersion,
+    },
+  ].filter((item) => item.bound && item.current);
+}
+
+function VersionDeltaList({ node }: { node: TemplateNodeCompat }) {
+  const { t } = useTranslation('templateDetail');
+  const deltas = versionDeltaItems(node);
+  if (deltas.length === 0) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  return (
+    <div className="space-y-1">
+      {deltas.map((item) => {
+        const changed = item.bound !== item.current;
+        return (
+          <div key={item.key} className="text-xs">
+            <span className="text-muted-foreground">{t(`compat.components.${item.key}` as 'compat.components.guestImage')}</span>
+            <span className={cn('ml-1 font-mono', changed ? 'text-destructive' : 'text-muted-foreground')}>
+              {item.bound ?? '—'} -&gt; {item.current ?? '—'}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CompatNodeCard({ node, variant = 'default' }: {
+  node: TemplateNodeCompat;
+  variant?: 'default' | 'warning';
+}) {
+  const warning = variant === 'warning';
+  return (
+    <div className={cn(
+      'rounded-md border p-3',
+      warning ? 'border-destructive/15 bg-background/60' : 'border-border/60 bg-muted/20',
+    )}>
+      <div className={cn('flex items-center justify-between gap-3', warning && 'mb-2')}>
+        <div className="min-w-0">
+          <p className={cn('font-mono font-medium text-foreground', warning ? 'text-xs' : 'text-sm')}>
+            {compatNodeLabel(node)}
+          </p>
+          {!warning && node.nodeIP && node.nodeIP !== node.nodeID && (
+            <p className="font-mono text-xs text-muted-foreground">{node.nodeID}</p>
+          )}
+        </div>
+        <CompatBadge status={node.compatStatus} />
+      </div>
+      <div className={cn(!warning && 'mt-3')}>
+        <VersionDeltaList node={node} />
+      </div>
+    </div>
+  );
+}
+
+function ReplicaTable({ replicas, compatNodes }: { replicas: Replica[]; compatNodes: TemplateNodeCompat[] }) {
   const { t } = useTranslation('templateDetail');
   if (replicas.length === 0) {
     return <p className="text-sm text-muted-foreground">{t('empty.replicas')}</p>;
   }
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm" style={{ minWidth: '860px' }}>
+      <table className="w-full text-sm" style={{ minWidth: '1040px' }}>
         <thead>
           <tr className="border-b border-border/50">
-            {[t('fields.node'), t('fields.phase'), t('fields.spec'), t('fields.artifactID'), t('fields.lastJob')].map(h => (
+            {[t('fields.node'), t('fields.phase'), t('fields.compat'), t('fields.spec'), t('fields.artifactID'), t('fields.lastJob')].map(h => (
               <th key={h} className="tbl-th pl-0 pr-8 py-2">{h}</th>
             ))}
           </tr>
         </thead>
         <tbody className="divide-y divide-border/30">
-          {replicas.map((r, i) => (
-            <tr key={i} className="hover:bg-cube-ok/5 transition-colors">
-              <td className="py-3 pr-8 text-sm font-medium text-num whitespace-nowrap">{r.node_ip ?? r.node_id ?? '—'}</td>
-              <td className="py-3 pr-8 whitespace-nowrap">
-                <span className="inline-flex items-center gap-1.5">
-                  <span className={cn('h-1.5 w-1.5 rounded-full', statusDotClass(r.phase ?? r.status ?? ''))} />
-                  <span className={cn('text-sm', statusTextClass(r.phase ?? r.status ?? ''))}>{r.phase ?? r.status ?? '—'}</span>
-                </span>
-              </td>
-              <td className="py-3 pr-8 font-mono text-sm text-muted-foreground whitespace-nowrap">{r.spec ?? '—'}</td>
-              <td className="py-3 pr-8 font-mono text-sm text-muted-foreground">
-                {r.artifact_id
-                  ? <CopyableText
-                      text={r.artifact_id}
-                      display={r.artifact_id.slice(0, 28) + '…'}
-                      className="font-mono text-sm text-muted-foreground"
-                    />
-                  : '—'}
-              </td>
-              <td className="py-3 font-mono text-sm text-muted-foreground">
-                {r.last_job_id
-                  ? <CopyableText
-                      text={r.last_job_id}
-                      display={r.last_job_id.slice(0, 28) + '…'}
-                      className="font-mono text-sm text-muted-foreground"
-                    />
-                  : '—'}
-              </td>
-            </tr>
-          ))}
+          {replicas.map((r, i) => {
+            const nodeCompat = findCompatForReplica(r, compatNodes);
+            const compatStatus = nodeCompat?.compatStatus ?? r.compat_status ?? 'UNKNOWN';
+            return (
+              <tr key={i} className="hover:bg-cube-ok/5 transition-colors">
+                <td className="py-3 pr-8 text-sm font-medium text-num whitespace-nowrap">{r.node_ip ?? r.node_id ?? '—'}</td>
+                <td className="py-3 pr-8 whitespace-nowrap">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className={cn('h-1.5 w-1.5 rounded-full', statusDotClass(r.phase ?? r.status ?? ''))} />
+                    <span className={cn('text-sm', statusTextClass(r.phase ?? r.status ?? ''))}>{r.phase ?? r.status ?? '—'}</span>
+                  </span>
+                </td>
+                <td className="py-3 pr-8 whitespace-nowrap">
+                  <CompatBadge status={compatStatus} />
+                </td>
+                <td className="py-3 pr-8 font-mono text-sm text-muted-foreground whitespace-nowrap">{r.spec ?? '—'}</td>
+                <td className="py-3 pr-8 font-mono text-sm text-muted-foreground">
+                  {r.artifact_id
+                    ? <CopyableText
+                        text={r.artifact_id}
+                        display={r.artifact_id.slice(0, 28) + '…'}
+                        className="font-mono text-sm text-muted-foreground"
+                      />
+                    : '—'}
+                </td>
+                <td className="py-3 font-mono text-sm text-muted-foreground">
+                  {r.last_job_id
+                    ? <CopyableText
+                        text={r.last_job_id}
+                        display={r.last_job_id.slice(0, 28) + '…'}
+                        className="font-mono text-sm text-muted-foreground"
+                      />
+                    : '—'}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function CompatWarning({ row, onRebuild, disabled }: {
+  row: TemplateCompatRow;
+  onRebuild: () => void;
+  disabled: boolean;
+}) {
+  const { t } = useTranslation('templateDetail');
+  const staleNodes = row.nodes.filter((node) => isStaleCompat(node.compatStatus));
+  if (staleNodes.length === 0) return null;
+  return (
+    <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-destructive">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <p className="text-sm font-semibold">{t('compat.staleTitle')}</p>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t('compat.staleDesc', { count: staleNodes.length })}
+          </p>
+        </div>
+        <Button variant="destructive" size="sm" disabled={disabled} onClick={onRebuild} className="shrink-0">
+          <RefreshCw className={cn('h-4 w-4 mr-1.5', disabled && 'animate-spin')} />
+          {t('rebuild.button')}
+        </Button>
+      </div>
+      <div className="mt-4 space-y-3">
+        {staleNodes.map((node) => (
+          <CompatNodeCard key={compatNodeKey(node)} node={node} variant="warning" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CompatSection({ row }: { row?: TemplateCompatRow }) {
+  const { t } = useTranslation('templateDetail');
+  if (!row) {
+    return <p className="text-sm text-muted-foreground">{t('compat.loading')}</p>;
+  }
+  if (row.nodes.length === 0) {
+    return <p className="text-sm text-muted-foreground">{t('compat.empty')}</p>;
+  }
+  return (
+    <div className="space-y-3">
+      {row.nodes.map((node) => (
+        <CompatNodeCard key={compatNodeKey(node)} node={node} />
+      ))}
     </div>
   );
 }
@@ -281,6 +456,13 @@ export default function TemplateDetailPage() {
     refetchInterval: activeBuildID ? 3000 : false,
   });
 
+  const { data: compat } = useQuery({
+    queryKey: ['templates', 'compat'],
+    queryFn: templateApi.compat,
+    enabled: !!templateID,
+    refetchInterval: 30_000,
+  });
+
   const cachedSummary = qc.getQueryData<Array<{
     templateID: string; status: string; imageInfo?: string | null; createdAt?: string | null;
   }>>(['templates'])?.find(t => t.templateID === templateID);
@@ -299,6 +481,7 @@ export default function TemplateDetailPage() {
     if (s === 'READY' || s === 'FAILED') {
       setActiveBuildID(null);
       qc.invalidateQueries({ queryKey: ['template', templateID] });
+      qc.invalidateQueries({ queryKey: ['templates', 'compat'] });
     }
   }, [buildStatus, templateID, qc]);
 
@@ -309,6 +492,7 @@ export default function TemplateDetailPage() {
       if (j.jobID) setActiveBuildID(j.jobID);
       setShowRebuildConfirm(false);
       setShowLogs(true);
+      qc.invalidateQueries({ queryKey: ['templates', 'compat'] });
     },
   });
 
@@ -379,6 +563,11 @@ export default function TemplateDetailPage() {
   const imgShort = shortImage(cachedSummary?.imageInfo ?? (data as { imageInfo?: string }).imageInfo);
   const createdAt = cachedSummary?.createdAt ?? (data as { createdAt?: string }).createdAt;
   const status = data.status ?? 'UNKNOWN';
+  const compatRow = compat?.templates.find((row) => row.templateID === templateID);
+  const compatStatus = compatRow?.overall ?? 'UNKNOWN';
+  const compatNodes = compatRow?.nodes ?? [];
+  const isStale = isStaleCompat(compatStatus);
+  const headerAccentClass = isStale ? 'border-destructive' : 'border-cube-ok';
 
   return (
     <div className="px-6 py-8">
@@ -391,7 +580,7 @@ export default function TemplateDetailPage() {
       {/* ── hero header ── */}
       <div className="flex items-start justify-between gap-6 pb-6 border-b border-border/50">
         {/* left: id + meta */}
-        <div className="min-w-0 space-y-2 border-l-[3px] border-cube-ok pl-3">
+        <div className={cn('min-w-0 space-y-2 border-l-[3px] pl-3', headerAccentClass)}>
           <div className="flex items-center gap-1.5">
             <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{t('templateId')}</span>
           </div>
@@ -419,15 +608,16 @@ export default function TemplateDetailPage() {
         </div>
 
         {/* right: status kpi strip — 竖线分隔，无边框格子 */}
-        <div className="flex items-stretch shrink-0 divide-x divide-cube-ok/20">
+        <div className={cn('flex items-stretch shrink-0 divide-x', isStale ? 'divide-destructive/20' : 'divide-cube-ok/20')}>
           {[
-            { label: '状态', content: (
+            { label: t('fields.status'), content: (
               <span className="inline-flex items-center gap-1.5">
                 <span className={cn('h-2 w-2 rounded-full', statusDotClass(status))} />
                 <span className={cn('text-sm font-semibold', statusTextClass(status))}>{t(`status.${status.toLowerCase()}` as 'status.ready', { defaultValue: status })}</span>
               </span>
             )},
-            { label: '版本', content: <span className="text-base font-semibold text-num">{data.version ?? '—'}</span> },
+            { label: t('fields.compat'), content: <CompatBadge status={compatStatus} /> },
+            { label: t('fields.version'), content: <span className="text-base font-semibold text-num">{data.version ?? '—'}</span> },
             { label: 'Replicas', content: <span className="text-base font-semibold text-num">{replicas.length}</span> },
           ].map(({ label, content }) => (
             <div key={label} className="px-5 flex flex-col gap-1 first:pl-0 last:pr-0">
@@ -437,6 +627,14 @@ export default function TemplateDetailPage() {
           ))}
         </div>
       </div>
+
+      {compatRow && (
+        <CompatWarning
+          row={compatRow}
+          disabled={isBuilding || rebuildMutation.isPending}
+          onRebuild={() => setShowRebuildConfirm(true)}
+        />
+      )}
 
       {/* ── build progress ── */}
       {isBuilding && (
@@ -467,8 +665,8 @@ export default function TemplateDetailPage() {
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-5 mb-6">
               {cfg.cpu && <Field label="CPU" value={cfg.cpu} mono />}
-              {cfg.mem && <Field label="内存" value={cfg.mem} mono />}
-              {cfg.writableLayerSize && <Field label="可写层大小" value={cfg.writableLayerSize} mono />}
+              {cfg.mem && <Field label={t('fields.memory')} value={cfg.mem} mono />}
+              {cfg.writableLayerSize && <Field label={t('fields.writableLayerSize')} value={cfg.writableLayerSize} mono />}
             </div>
           </>
         )}
@@ -552,7 +750,12 @@ export default function TemplateDetailPage() {
 
       {/* ── replicas ── */}
       <Section title={t('section.replicas')} description={t('section.replicasDesc')}>
-        <ReplicaTable replicas={replicas} />
+        <ReplicaTable replicas={replicas} compatNodes={compatNodes} />
+      </Section>
+
+      {/* ── compatibility ── */}
+      <Section title={t('section.compat')} description={t('section.compatDesc')}>
+        <CompatSection row={compatRow} />
       </Section>
 
       {/* ── rebuild action ── */}
