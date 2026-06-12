@@ -53,6 +53,14 @@ type mvmtapDnsQueryTrackValue struct {
 	Reserved    [7]uint8
 }
 
+type mvmtapDnsResponseState struct {
+	DnsOff     uint32
+	Ifindex    uint32
+	ServerIp   uint32
+	SourcePort uint16
+	Reserved   uint16
+}
+
 type mvmtapIngressSession struct {
 	Version  uint32
 	VmIp     uint32
@@ -175,6 +183,7 @@ type mvmtapMapSpecs struct {
 	DnsQueryScratch   *ebpf.MapSpec `ebpf:"dns_query_scratch"`
 	DnsQueryState     *ebpf.MapSpec `ebpf:"dns_query_state"`
 	DnsQueryTrack     *ebpf.MapSpec `ebpf:"dns_query_track"`
+	DnsResponseState  *ebpf.MapSpec `ebpf:"dns_response_state"`
 	DnsTailCalls      *ebpf.MapSpec `ebpf:"dns_tail_calls"`
 	EgressSessions    *ebpf.MapSpec `ebpf:"egress_sessions"`
 	IfindexToMvmmeta  *ebpf.MapSpec `ebpf:"ifindex_to_mvmmeta"`
@@ -233,6 +242,7 @@ type mvmtapMaps struct {
 	DnsQueryScratch   *ebpf.Map `ebpf:"dns_query_scratch"`
 	DnsQueryState     *ebpf.Map `ebpf:"dns_query_state"`
 	DnsQueryTrack     *ebpf.Map `ebpf:"dns_query_track"`
+	DnsResponseState  *ebpf.Map `ebpf:"dns_response_state"`
 	DnsTailCalls      *ebpf.Map `ebpf:"dns_tail_calls"`
 	EgressSessions    *ebpf.Map `ebpf:"egress_sessions"`
 	IfindexToMvmmeta  *ebpf.Map `ebpf:"ifindex_to_mvmmeta"`
@@ -253,6 +263,7 @@ func (m *mvmtapMaps) Close() error {
 		m.DnsQueryScratch,
 		m.DnsQueryState,
 		m.DnsQueryTrack,
+		m.DnsResponseState,
 		m.DnsTailCalls,
 		m.EgressSessions,
 		m.IfindexToMvmmeta,

@@ -164,3 +164,66 @@ def _serialize_rule(rule: Any) -> Dict[str, Any]:
     if "action" in rule and rule["action"] is not None:
         out["action"] = _normalize_action_dict(rule["action"])
     return out
+
+
+DENY_ALL_IPV4_CIDR = "0.0.0.0/0"
+ALLOW_OUT_DOMAIN_REQUIRES_DENY_ALL = (
+    "When specifying allowed domains in allow_out, you must disable public "
+    "outbound traffic or include '0.0.0.0/0' in deny_out to block all other traffic."
+)
+
+
+def _validate_allow_out_domains_require_deny_all(
+    allow_out: list[str] | None,
+    deny_out: list[str] | None,
+    *,
+    default_deny_all: bool = False,
+) -> None:
+    if not any(_is_domain_allow_out_target(target) for target in allow_out or []):
+        return
+    if default_deny_all or any(str(target).strip() == DENY_ALL_IPV4_CIDR for target in deny_out or []):
+        return
+    from ._exceptions import ApiError
+
+    raise ApiError(ALLOW_OUT_DOMAIN_REQUIRES_DENY_ALL, 400)
+
+
+def _is_domain_allow_out_target(target: object) -> bool:
+    import ipaddress
+
+    if not isinstance(target, str):
+        return False
+    target = target.strip()
+    if not target or "/" in target:
+        return False
+    try:
+        ipaddress.ip_address(target)
+        return False
+    except ValueError:
+        pass
+    if _is_dotted_decimal_like_target(target):
+        return False
+
+    domain = target.rstrip(".").lower()
+    if domain.startswith("*."):
+        domain = domain[2:]
+    elif "*" in domain:
+        return False
+    return _is_valid_dns_domain_name(domain)
+
+
+def _is_dotted_decimal_like_target(target: str) -> bool:
+    parts = target.rstrip(".").split(".")
+    return len(parts) == 4 and all(part and part.isdigit() for part in parts)
+
+
+def _is_valid_dns_domain_name(domain: str) -> bool:
+    labels = domain.split(".")
+    return bool(domain) and len(domain) < 255 and all(
+        label
+        and len(label) <= 63
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and all(ch.isalnum() or ch == "-" for ch in label)
+        for label in labels
+    )

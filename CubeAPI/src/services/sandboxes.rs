@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+use super::validate_allow_out_domains_require_deny_all;
 use crate::{
     constants::ENVD_VERSION,
     cubemaster::{
@@ -134,6 +135,9 @@ impl SandboxService {
             meta
         });
 
+        let cube_network_config =
+            build_cube_network_config(body.allow_internet_access, body.network.as_ref())?;
+
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
             instance_type: self.instance_type.clone(),
@@ -144,10 +148,7 @@ impl SandboxService {
             containers: vec![],
             exposed_ports: vec![],
             network_type: Some("tap".to_string()),
-            cube_network_config: build_cube_network_config(
-                body.allow_internet_access,
-                body.network.as_ref(),
-            ),
+            cube_network_config,
         };
 
         let resp = self
@@ -628,7 +629,7 @@ fn new_request_id() -> String {
 pub(crate) fn build_cube_network_config(
     allow_internet_access: Option<bool>,
     network: Option<&SandboxNetworkConfig>,
-) -> Option<CubeNetworkConfig> {
+) -> AppResult<Option<CubeNetworkConfig>> {
     let effective_allow = network
         .and_then(|n| n.allow_public_traffic)
         .or(allow_internet_access);
@@ -636,6 +637,12 @@ pub(crate) fn build_cube_network_config(
         .and_then(|n| n.allow_out.clone())
         .unwrap_or_default();
     let deny_out = network.and_then(|n| n.deny_out.clone()).unwrap_or_default();
+    validate_allow_out_domains_require_deny_all(
+        &allow_out,
+        &deny_out,
+        effective_allow == Some(false),
+    )?;
+
     let rules: Vec<CubeEgressRule> = network
         .and_then(|n| n.rules.as_ref())
         .map(|rs| rs.iter().map(map_egress_rule).collect())
@@ -643,15 +650,15 @@ pub(crate) fn build_cube_network_config(
 
     if effective_allow.is_none() && allow_out.is_empty() && deny_out.is_empty() && rules.is_empty()
     {
-        return None;
+        return Ok(None);
     }
 
-    Some(CubeNetworkConfig {
+    Ok(Some(CubeNetworkConfig {
         allow_internet_access: effective_allow,
         allow_out,
         deny_out,
         rules,
-    })
+    }))
 }
 
 fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
@@ -714,15 +721,54 @@ mod tests {
             Some(&SandboxNetworkConfig {
                 allow_public_traffic: Some(true),
                 allow_out: Some(vec!["github.com".to_string()]),
+                deny_out: Some(vec!["0.0.0.0/0".to_string()]),
+                mask_request_host: None,
+                rules: None,
+            }),
+        )
+        .expect("network config should be valid")
+        .expect("context should exist");
+
+        assert_eq!(context.allow_internet_access, Some(true));
+        assert_eq!(context.allow_out, vec!["github.com".to_string()]);
+    }
+
+    #[test]
+    fn network_context_rejects_allow_out_domain_without_deny_all() {
+        let err = build_cube_network_config(
+            None,
+            Some(&SandboxNetworkConfig {
+                allow_public_traffic: None,
+                allow_out: Some(vec!["api.example.com".to_string()]),
+                deny_out: Some(vec!["203.0.113.0/24".to_string()]),
+                mask_request_host: None,
+                rules: None,
+            }),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("must disable public outbound traffic or include '0.0.0.0/0' in deny_out"));
+    }
+
+    #[test]
+    fn network_context_accepts_allow_out_domain_when_public_traffic_disabled() {
+        let context = build_cube_network_config(
+            None,
+            Some(&SandboxNetworkConfig {
+                allow_public_traffic: Some(false),
+                allow_out: Some(vec!["api.example.com".to_string()]),
                 deny_out: None,
                 mask_request_host: None,
                 rules: None,
             }),
         )
+        .expect("network config should be valid")
         .expect("context should exist");
 
-        assert_eq!(context.allow_internet_access, Some(true));
-        assert_eq!(context.allow_out, vec!["github.com".to_string()]);
+        assert_eq!(context.allow_internet_access, Some(false));
+        assert_eq!(context.allow_out, vec!["api.example.com".to_string()]);
     }
 
     #[test]
@@ -755,6 +801,7 @@ mod tests {
                 }]),
             }),
         )
+        .expect("network config should be valid")
         .expect("context should exist for rules-only config");
 
         assert_eq!(context.rules.len(), 1);
@@ -796,6 +843,7 @@ mod tests {
                 }]),
             }),
         )
+        .expect("network config should be valid")
         .expect("context should exist");
 
         let json = serde_json::to_value(&context).expect("serialize");

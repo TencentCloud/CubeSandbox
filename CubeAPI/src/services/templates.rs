@@ -4,6 +4,7 @@
 
 use uuid::Uuid;
 
+use super::validate_allow_out_domains_require_deny_all;
 use crate::{
     cubemaster::{
         CreateTemplateContainerOverrides, CreateTemplateCubeNetworkConfig, CreateTemplateEnv,
@@ -112,7 +113,7 @@ impl TemplateService {
 
         let dns_servers = validate_dns_servers(body.dns.as_deref())?;
         let container_overrides = build_template_container_overrides(&body, dns_servers.as_deref());
-        let cube_network_config = build_template_cube_network_config(&body);
+        let cube_network_config = build_template_cube_network_config(&body)?;
 
         let req = CreateTemplateFromImageReq {
             request_id: new_request_id(),
@@ -484,17 +485,23 @@ fn build_template_container_overrides(
 
 fn build_template_cube_network_config(
     body: &CreateTemplateRequest,
-) -> Option<CreateTemplateCubeNetworkConfig> {
+) -> AppResult<Option<CreateTemplateCubeNetworkConfig>> {
     let allow_out = body.allow_out.clone().unwrap_or_default();
     let deny_out = body.deny_out.clone().unwrap_or_default();
+    validate_allow_out_domains_require_deny_all(
+        &allow_out,
+        &deny_out,
+        body.allow_internet_access == Some(false),
+    )?;
+
     if body.allow_internet_access.is_none() && allow_out.is_empty() && deny_out.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(CreateTemplateCubeNetworkConfig {
+    Ok(Some(CreateTemplateCubeNetworkConfig {
         allow_internet_access: body.allow_internet_access,
         allow_out,
         deny_out,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -549,10 +556,39 @@ mod tests {
     #[test]
     fn build_template_cube_network_config_includes_egress_rules() {
         let body = sample_request();
-        let cfg = build_template_cube_network_config(&body).expect("cube_network_config");
+        let cfg = build_template_cube_network_config(&body)
+            .expect("network config should be valid")
+            .expect("cube_network_config");
         assert_eq!(cfg.allow_internet_access, Some(true));
         assert_eq!(cfg.allow_out, vec!["172.67.0.0/16".to_string()]);
         assert_eq!(cfg.deny_out, vec!["10.0.0.0/8".to_string()]);
+    }
+
+    #[test]
+    fn build_template_cube_network_config_rejects_allow_out_domain_without_deny_all() {
+        let mut body = sample_request();
+        body.allow_internet_access = Some(true);
+        body.allow_out = Some(vec!["api.example.com".to_string()]);
+        body.deny_out = Some(vec!["203.0.113.0/24".to_string()]);
+
+        let err = build_template_cube_network_config(&body).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("must disable public outbound traffic or include '0.0.0.0/0' in deny_out"));
+    }
+
+    #[test]
+    fn build_template_cube_network_config_accepts_domain_when_internet_disabled() {
+        let mut body = sample_request();
+        body.allow_internet_access = Some(false);
+        body.allow_out = Some(vec!["api.example.com".to_string()]);
+        body.deny_out = None;
+
+        let cfg = build_template_cube_network_config(&body)
+            .expect("network config should be valid")
+            .expect("cube_network_config");
+        assert_eq!(cfg.allow_internet_access, Some(false));
+        assert_eq!(cfg.allow_out, vec!["api.example.com".to_string()]);
     }
 
     #[test]

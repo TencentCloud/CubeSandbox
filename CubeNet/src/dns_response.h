@@ -6,6 +6,89 @@
 #include "dns_parser.h"
 #include "map.h"
 
+/* Inline twins of the dns_parser.h helpers used on the response path.
+ *
+ * The query pipeline calls the __noinline originals from a program that has
+ * other bpf-to-bpf calls — those can sit in their own verifier frames. The
+ * response path, however, runs from a SEC("tc") tail-called program that
+ * must contain zero bpf-to-bpf calls so it is allowed to bpf_tail_call into
+ * the UDP NAT finish program on kernel 5.4. We keep duplicate __always_inline
+ * copies here so we can have it both ways without breaking the query path.
+ */
+
+static __always_inline bool dns_skip_name_inline(struct __sk_buff *skb, __u32 *cursor)
+{
+	__u32 off = *cursor;
+	int i;
+
+#pragma clang loop unroll(disable)
+	for (i = 0; i < DNS_MAX_NAME_LEN; i++) {
+		__u8 c;
+
+		if (bpf_skb_load_bytes(skb, off, &c, sizeof(c)))
+			return false;
+		off++;
+
+		if ((c & DNS_COMPRESS_PTR_MASK) == DNS_COMPRESS_PTR_MASK) {
+			if (bpf_skb_load_bytes(skb, off, &c, sizeof(c)))
+				return false;
+			off++;
+			*cursor = off;
+			return true;
+		}
+		if ((c & DNS_COMPRESS_PTR_MASK) != 0 || c > DNS_MAX_LABEL_LEN)
+			return false;
+		if (c == 0) {
+			*cursor = off;
+			return true;
+		}
+		off += c;
+	}
+
+	return false;
+}
+
+static __always_inline bool dns_hash_qname_inline(struct __sk_buff *skb, __u32 *cursor,
+						  struct dns_question_footer *question,
+						  __u64 *qname_hash)
+{
+	__u32 label_remaining = 0;
+	__u64 hash = DNS_QNAME_HASH_OFFSET;
+	__u32 off = *cursor;
+	int i;
+
+#pragma clang loop unroll(disable)
+	for (i = 0; i < DNS_MAX_NAME_LEN; i++) {
+		__u8 c;
+
+		if (bpf_skb_load_bytes(skb, off, &c, sizeof(c)))
+			return false;
+		dns_hash_qname_byte(&hash, c);
+		off++;
+
+		if (label_remaining == 0) {
+			if (c == 0)
+				goto read_footer;
+			if ((c & DNS_COMPRESS_PTR_MASK) != 0 || c > DNS_MAX_LABEL_LEN)
+				return false;
+			label_remaining = c;
+			continue;
+		}
+
+		label_remaining--;
+	}
+
+	return false;
+
+read_footer:
+	if (!dns_read_question_footer(skb, off, question))
+		return false;
+
+	*cursor = off + sizeof(*question);
+	*qname_hash = hash;
+	return true;
+}
+
 /* Check whether DNS response learning is enabled for this sandbox. */
 static __always_inline bool dns_response_learning_enabled(__u32 ifindex)
 {
@@ -51,17 +134,22 @@ static __always_inline bool dns_response_record_is_ipv4_a(const struct dns_rr_he
 	       rdlength == DNS_IPV4_RDATA_LEN;
 }
 
-/* Parse one answer RR and learn its IPv4 address when it is an A record. */
-static __noinline bool dns_process_response_answer(struct __sk_buff *skb,
-						   __u32 *cursor, __u32 ifindex,
-						   __u8 flags)
+/* Parse one answer RR and learn its IPv4 address when it is an A record.
+ *
+ * Marked __always_inline (and using the *_inline DNS-name helpers above) so
+ * the calling SEC("tc") program contains no bpf-to-bpf calls and can issue
+ * bpf_tail_call on kernel 5.4.
+ */
+static __always_inline bool dns_process_response_answer(struct __sk_buff *skb,
+							__u32 *cursor, __u32 ifindex,
+							__u8 flags)
 {
 	struct dns_rr_header rr;
 	__u16 rdlength;
 	__u32 ip;
 	__u32 ttl;
 
-	if (!dns_skip_name(skb, cursor))
+	if (!dns_skip_name_inline(skb, cursor))
 		return false;
 	if (bpf_skb_load_bytes(skb, *cursor, &rr, sizeof(rr)))
 		return false;
@@ -103,10 +191,15 @@ static __always_inline struct dns_query_track_value *dns_lookup_response_query(_
  *
  * The path learns IPv4 A records into allow_out_v2 as temporary DNS-learned IP
  * policy entries. It intentionally preserves the existing filtering semantics.
+ *
+ * Marked __always_inline so the calling SEC("tc") program contains no
+ * bpf-to-bpf calls; kernel 5.4 forbids mixing tail calls with bpf-to-bpf
+ * calls in the same program, and we need the tail call to hand the packet
+ * off to the post-DNS UDP NAT finish program.
  */
-static __noinline void dns_handle_response(struct __sk_buff *skb, __u32 dns_off,
-					   __u32 ifindex, __u32 server_ip,
-					   __u16 source_port)
+static __always_inline void dns_handle_response(struct __sk_buff *skb, __u32 dns_off,
+						__u32 ifindex, __u32 server_ip,
+						__u16 source_port)
 {
 	struct dns_query_track_value *query;
 	struct dns_query_track_key track_key = {};
@@ -127,7 +220,7 @@ static __noinline void dns_handle_response(struct __sk_buff *skb, __u32 dns_off,
 
 	if (bpf_ntohs(hdr.qdcount) != 1)
 		return;
-	if (!dns_hash_qname(skb, &cursor, &question, &qname_hash))
+	if (!dns_hash_qname_inline(skb, &cursor, &question, &qname_hash))
 		return;
 	if (!dns_question_footer_is_ipv4_a(&question))
 		return;

@@ -100,6 +100,65 @@ func TestNormalizeTemplateImageRequestAllowsEmptyExposedPortsWhenEnabled(t *test
 	}
 }
 
+func TestNormalizeTemplateImageRequestRejectsDomainAllowOutWithoutDenyAll(t *testing.T) {
+	_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		CubeNetworkConfig: &types.CubeNetworkConfig{
+			AllowOut: []string{"example.com"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "0.0.0.0/0") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNormalizeTemplateImageRequestAllowsDomainAllowOutWithDenyAll(t *testing.T) {
+	_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		CubeNetworkConfig: &types.CubeNetworkConfig{
+			AllowOut: []string{"*.example.com"},
+			DenyOut:  []string{"0.0.0.0/0"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalizeTemplateImageRequest failed: %v", err)
+	}
+}
+
+func TestNormalizeTemplateImageRequestAllowsDomainAllowOutWithDisabledInternet(t *testing.T) {
+	allowInternetAccess := false
+	_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		CubeNetworkConfig: &types.CubeNetworkConfig{
+			AllowInternetAccess: &allowInternetAccess,
+			AllowOut:            []string{"example.com"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalizeTemplateImageRequest failed: %v", err)
+	}
+}
+
+func TestNormalizeTemplateImageRequestAllowsCIDRAllowOutWithoutDenyAll(t *testing.T) {
+	_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		CubeNetworkConfig: &types.CubeNetworkConfig{
+			AllowOut: []string{"203.0.113.0/24", "8.8.8.8"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalizeTemplateImageRequest failed: %v", err)
+	}
+}
+
 func TestNormalizeTemplateImageRequestRejectsTooManyCustomExposedPorts(t *testing.T) {
 
 	_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
@@ -161,6 +220,21 @@ func TestNormalizeRequestGeneratesTemplateIDWhenMissing(t *testing.T) {
 	}
 	if got := req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]; got != templateID {
 		t.Fatalf("template annotation mismatch: %q", got)
+	}
+}
+
+func TestNormalizeRequestRejectsDomainAllowOutWithoutDenyAll(t *testing.T) {
+	_, _, err := NormalizeRequest(&types.CreateCubeSandboxReq{
+		Request: &types.Request{RequestID: "req-1"},
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
+		},
+		CubeNetworkConfig: &types.CubeNetworkConfig{
+			AllowOut: []string{"example.com"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "0.0.0.0/0") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

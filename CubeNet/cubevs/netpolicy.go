@@ -263,31 +263,15 @@ func validateNetPolicyEntryCount(field string, count int, maxEntries int) error 
 	return fmt.Errorf("%s exceeds maximum entries: got %d, max %d", field, count, maxEntries) //nolint:err113
 }
 
-func dnsPolicyFlags(filterEnabled, learningEnabled bool) uint8 {
-	if filterEnabled {
-		learningEnabled = true
-	}
-
-	var flags uint8
-	if learningEnabled {
-		flags |= dnsPolicyFlagLearningEnabled
-	}
-	if filterEnabled {
-		flags |= dnsPolicyFlagFilterEnabled
-	}
-	return flags
-}
-
 func dnsPolicyFlagsForDomains(allowDomains, l7Domains []string) uint8 {
-	return dnsPolicyFlags(len(allowDomains) > 0, len(allowDomains)+len(l7Domains) > 0)
+	if len(allowDomains)+len(l7Domains) == 0 {
+		return 0
+	}
+	return dnsPolicyFlagLearningEnabled
 }
 
 func dnsPolicyLearningEnabled(flags uint8) bool {
 	return flags&uint8(dnsPolicyFlagLearningEnabled) != 0
-}
-
-func dnsPolicyFilterEnabled(flags uint8) bool {
-	return flags&uint8(dnsPolicyFlagFilterEnabled) != 0
 }
 
 func setDNSPolicyFlags(ifindex uint32, flags uint8) error {

@@ -189,6 +189,16 @@ enum tcp_nat_result {
 	TCP_NAT_RESET,
 };
 
+/* do_tcp_nat() returns a 64-bit value that encodes both the status enum
+ * (low 32 bits) and the destination ifindex (upper 32 bits). This avoids
+ * passing the ifindex through a stack pointer arg, which older BPF
+ * verifiers do not track across subprog calls.
+ */
+#define TCP_NAT_PACK(ifindex, status) \
+	((((__u64)(ifindex)) << 32) | (__u32)(status))
+#define TCP_NAT_STATUS(ret)	((enum tcp_nat_result)((__u32)(ret)))
+#define TCP_NAT_IFINDEX(ret)	((__u32)((__u64)(ret) >> 32))
+
 static __always_inline bool tcp_segment_len(const struct iphdr *l3, const struct tcphdr *l4,
 					    __u32 *seg_len)
 {
@@ -371,7 +381,12 @@ static __always_inline void del_session(struct session_key *ekey, struct nat_ses
 	bpf_map_delete_elem(&ingress_sessions, &ikey);
 }
 
-static bool do_icmp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *dst_ifindex)
+/* Returns the destination ifindex on success, or 0 on failure.
+ * Returning the value (rather than writing through a pointer arg) avoids
+ * "invalid read from stack" errors on older BPF verifiers that do not
+ * propagate subprog pointer-arg writes back to the caller's stack slot.
+ */
+static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta)
 {
 	__u32 old_saddr, new_saddr, icmp_csum_off;
 	__u16 old_id, new_id;
@@ -389,11 +404,11 @@ static bool do_icmp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 
 	bool ok;
 
 	if (!__pull_headers_icmp(skb, &l2, &l3, &l4))
-		return false;
+		return 0;
 
 	/* Only handle Echo Request outbound; drop other ICMP types */
 	if (l4->type != ICMP_ECHO)
-		return false;
+		return 0;
 
 	now = bpf_ktime_get_ns();
 	/* Use ICMP identifier as the "port" identifier in the session key */
@@ -413,13 +428,13 @@ static bool do_icmp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 
 	/* create new session */
 	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_id);
 	if (!snat_ip || !snat_ip->ip || !snat_id)
-		return false;
+		return 0;
 	ok = create_icmp_sessions(&key, now, skb->ingress_ifindex, snat_ip, snat_id);
 	if (!ok)
-		return false;
+		return 0;
 	sess = bpf_map_lookup_elem(&egress_sessions, &key);
 	if (!sess)
-		return false;
+		return 0;
 
 do_nat:
 	old_saddr = l3->saddr;
@@ -442,27 +457,39 @@ do_nat:
 	flags = sizeof(old_id);
 	err = bpf_l4_csum_replace(skb, icmp_csum_off, old_id, new_id, flags);
 	if (err)
-		return false;
+		return 0;
 
 	/* write the new ICMP echo identifier */
 	err = bpf_skb_store_bytes(skb, ICMP_ECHO_ID_OFF(ip_hlen), &new_id, sizeof(new_id), 0);
 	if (err)
-		return false;
+		return 0;
 
 	/* update IP csum and write new saddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_saddr, new_saddr, sizeof(old_saddr));
 	if (err)
-		return false;
+		return 0;
 
 	err = bpf_skb_store_bytes(skb, IP_SADDR_OFF, &new_saddr, sizeof(new_saddr), 0);
 	if (err)
-		return false;
+		return 0;
 
-	*dst_ifindex = sess->node_ifindex;
-	return true;
+	return sess->node_ifindex;
 }
 
-static bool do_udp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *dst_ifindex)
+/* Core UDP NAT implementation as a forced-inline helper.
+ *
+ * Returns the destination ifindex on success, or 0 on failure. Returning a
+ * value (rather than writing through a pointer arg) avoids "invalid read
+ * from stack" errors on older BPF verifiers that don't propagate subprog
+ * pointer-arg writes back to the caller's stack slot.
+ *
+ * Inlining this body matters for from_cube(), which already contains a
+ * bpf_tail_call() (via the inlined dns_handle_query). Older kernels reject
+ * "tail_calls in programs with bpf-to-bpf calls", so from_cube() must have
+ * no subprog calls.
+ */
+static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
+					       struct mvm_meta *mvm_meta)
 {
 	__u32 old_saddr, new_saddr, udp_csum_off;
 	__u16 old_sport, new_sport, old_csum;
@@ -480,7 +507,7 @@ static bool do_udp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *
 	bool ok;
 
 	if (!__pull_headers_udp(skb, &l2, &l3, &l4))
-		return false;
+		return 0;
 
 	now = bpf_ktime_get_ns();
 	key.src_ip = mvm_meta->ip;
@@ -499,13 +526,13 @@ static bool do_udp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *
 	/* create new session */
 	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
 	if (!snat_ip || !snat_ip->ip || !snat_port)
-		return false;
+		return 0;
 	ok = create_udp_sessions(&key, now, skb->ingress_ifindex, snat_ip, snat_port);
 	if (!ok)
-		return false;
+		return 0;
 	sess = bpf_map_lookup_elem(&egress_sessions, &key);
 	if (!sess)
-		return false;
+		return 0;
 
 do_nat:
 	old_saddr = l3->saddr;
@@ -531,44 +558,79 @@ do_nat:
 		flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(old_saddr);
 		err = bpf_l4_csum_replace(skb, udp_csum_off, old_saddr, new_saddr, flags);
 		if (err)
-			return false;
+			return 0;
 
 		/* port is not part of pseudo-header */
 		flags = BPF_F_MARK_MANGLED_0 | sizeof(old_sport);
 		err = bpf_l4_csum_replace(skb, udp_csum_off, old_sport, new_sport, flags);
 		if (err)
-			return false;
+			return 0;
 	}
 
 	/* write new UDP source port */
 	err = bpf_skb_store_bytes(skb, UDP_SRC_OFF(ip_hlen), &new_sport, sizeof(new_sport), 0);
 	if (err)
-		return false;
+		return 0;
 
 	/* update IP csum and write new saddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_saddr, new_saddr, sizeof(old_saddr));
 	if (err)
-		return false;
+		return 0;
 
 	err = bpf_skb_store_bytes(skb, IP_SADDR_OFF, &new_saddr, sizeof(new_saddr), 0);
 	if (err)
-		return false;
+		return 0;
 
-	*dst_ifindex = sess->node_ifindex;
-	return true;
+	return sess->node_ifindex;
 }
 
-static __always_inline int finish_udp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta)
+/* Non-inline wrapper used by dns_finish.
+ *
+ * dns_finish reaches the UDP NAT path with a verifier state that already
+ * carries the dns_hash_qname loop complexity. Inlining the NAT body there
+ * causes the verifier to blow past its 1M-insn complexity limit on 5.4
+ * kernels. Keeping a real subprog isolates the verification cost.
+ *
+ * __noinline + noinline attribute force the compiler to keep this as a
+ * real bpf-to-bpf call even with only one caller.
+ */
+static __noinline __attribute__((noinline)) __u32 do_udp_nat(struct __sk_buff *skb,
+							     struct mvm_meta *mvm_meta)
 {
-	__u32 dst_ifindex;
+	return do_udp_nat_inline(skb, mvm_meta);
+}
 
-	if (do_udp_nat(skb, mvm_meta, &dst_ifindex))
+/* Inline version: redirects on UDP NAT success. Used by from_cube(), which
+ * cannot make bpf-to-bpf calls (see do_udp_nat_inline()'s comment).
+ */
+static __always_inline int finish_udp_nat_inline(struct __sk_buff *skb,
+						 struct mvm_meta *mvm_meta)
+{
+	__u32 dst_ifindex = do_udp_nat_inline(skb, mvm_meta);
+
+	if (dst_ifindex)
 		return bpf_redirect(dst_ifindex, 0);
 
 	return TC_ACT_SHOT;
 }
 
-static enum tcp_nat_result do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta, __u32 *dst_ifindex)
+/* Subprog-based version used by dns_finish. */
+static __always_inline int finish_udp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta)
+{
+	__u32 dst_ifindex = do_udp_nat(skb, mvm_meta);
+
+	if (dst_ifindex)
+		return bpf_redirect(dst_ifindex, 0);
+
+	return TC_ACT_SHOT;
+}
+
+/* Returns a packed value: see TCP_NAT_PACK / TCP_NAT_STATUS / TCP_NAT_IFINDEX.
+ * Returning the ifindex via the upper bits (rather than through a pointer
+ * arg) avoids "invalid read from stack" errors on older BPF verifiers that
+ * do not propagate subprog pointer-arg writes back to the caller's stack.
+ */
+static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *mvm_meta)
 {
 	__u32 old_saddr, new_saddr, tcp_csum_off;
 	__u16 old_sport, new_sport;
@@ -653,30 +715,29 @@ do_nat:
 	flags = BPF_F_PSEUDO_HDR | sizeof(old_saddr);
 	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_saddr, new_saddr, flags);
 	if (err)
-		return false;
+		return TCP_NAT_DROP;
 
 	/* update TCP csum for port change (not part of pseudo-header) */
 	flags = sizeof(old_sport);
 	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_sport, new_sport, flags);
 	if (err)
-		return false;
+		return TCP_NAT_DROP;
 
 	/* write new TCP source port */
 	err = bpf_skb_store_bytes(skb, TCP_SRC_OFF(ip_hlen), &new_sport, sizeof(new_sport), 0);
 	if (err)
-		return false;
+		return TCP_NAT_DROP;
 
 	/* update IP csum and write new saddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_saddr, new_saddr, sizeof(old_saddr));
 	if (err)
-		return false;
+		return TCP_NAT_DROP;
 
 	err = bpf_skb_store_bytes(skb, IP_SADDR_OFF, &new_saddr, sizeof(new_saddr), 0);
 	if (err)
-		return false;
+		return TCP_NAT_DROP;
 
-	*dst_ifindex = sess->node_ifindex;
-	return TCP_NAT_OK;
+	return TCP_NAT_PACK(sess->node_ifindex, TCP_NAT_OK);
 }
 
 /* Parse one DNS QNAME chunk and dispatch to reverse or finish stage. */
@@ -776,11 +837,8 @@ int dns_finish(struct __sk_buff *skb)
 		return finish_udp_nat(skb, mvm_meta);
 
 	matched = dns_allow_match_value(inner_map, question);
-	if (!matched) {
-		if (dns_policy_filter_enabled(mvm_meta))
-			return dns_reply_nxdomain(skb, state->dns_off, ifindex, state->flags);
+	if (!matched)
 		return finish_udp_nat(skb, mvm_meta);
-	}
 
 	dns_track_allowed_query(skb, state, matched->flags, qname_hash);
 	return finish_udp_nat(skb, mvm_meta);
@@ -793,6 +851,7 @@ SEC("tc")
 int from_cube(struct __sk_buff *skb)
 {
 	__u32 daddr, ifindex, dst_ifindex;
+	__u64 tcp_ret;
 	struct net_policy_value_v2 policy_value = {};
 	struct mvm_port mvm_port = {};
 	struct mvm_meta *mvm_meta;
@@ -898,10 +957,10 @@ int from_cube(struct __sk_buff *skb)
 			return TC_ACT_SHOT;
 		if (should_redirect_to_l7_proxy(&policy_value, l4))
 			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
-		ret = do_tcp_nat(skb, mvm_meta, &dst_ifindex);
-		if (ret == TCP_NAT_OK)
-			return bpf_redirect(dst_ifindex, 0);
-		if (ret == TCP_NAT_RESET)
+		tcp_ret = do_tcp_nat(skb, mvm_meta);
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)
+			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), 0);
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
 			return tcp_reply_reset(skb, ifindex);
 	}
 
@@ -916,11 +975,12 @@ int from_cube(struct __sk_buff *skb)
 				return ret;
 		}
 
-		return finish_udp_nat(skb, mvm_meta);
+		return finish_udp_nat_inline(skb, mvm_meta);
 	}
 
 	if (proto == IPPROTO_ICMP) {
-		if (do_icmp_nat(skb, mvm_meta, &dst_ifindex))
+		dst_ifindex = do_icmp_nat(skb, mvm_meta);
+		if (dst_ifindex)
 			return bpf_redirect(dst_ifindex, 0);
 	}
 

@@ -24,7 +24,6 @@
 #define DNS_RCODE_MASK		0x000f
 #define DNS_OPCODE_STANDARD	0
 #define DNS_RCODE_NOERROR	0
-#define DNS_RCODE_NXDOMAIN	3
 #define DNS_COMPRESS_PTR_MASK	0xc0
 #define DNS_TYPE_A		1
 #define DNS_CLASS_IN		1
@@ -157,7 +156,7 @@ static __always_inline bool dns_read_response_header(struct __sk_buff *skb, __u3
 }
 
 /* Skip a DNS name, accepting normal labels and answer-section compression. */
-static __noinline bool dns_skip_name(struct __sk_buff *skb, __u32 *cursor)
+static __always_inline bool dns_skip_name(struct __sk_buff *skb, __u32 *cursor)
 {
 	__u32 off = *cursor;
 	int i;
@@ -229,7 +228,11 @@ static __noinline bool dns_hash_qname(struct __sk_buff *skb, __u32 *cursor,
 			continue;
 		}
 
-		label_remaining--;
+		/* Re-bound label_remaining for the verifier on older kernels
+		 * that lose unsigned precision across the loop-back edge and
+		 * track it as a signed value, causing state explosion.
+		 */
+		label_remaining = (label_remaining - 1) & DNS_MAX_LABEL_LEN;
 	}
 
 	return false;

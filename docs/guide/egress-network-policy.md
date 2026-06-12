@@ -1,6 +1,6 @@
 # Egress Network Policy
 
-Cube Sandbox egress control is not a single switch. It is a chain formed by **API validation, template merging, network-agent programming, the CubeVS eBPF data plane, and the CubeEgress L7 proxy**. Once you understand this chain, it becomes much easier to predict whether a packet will be forwarded directly, rejected, blocked by DNS policy, or redirected into the HTTP/HTTPS proxy.
+Cube Sandbox egress control is not a single switch. It is a chain formed by **API validation, template merging, network-agent programming, the CubeVS eBPF data plane, and the CubeEgress L7 proxy**. Once you understand this chain, it becomes much easier to predict whether a packet will be forwarded directly, rejected, ignored by DNS learning, or redirected into the HTTP/HTTPS proxy.
 
 This page explains:
 
@@ -36,7 +36,7 @@ Each component has a distinct responsibility:
 | CubeAPI | Receives SDK/API requests, maps the network configuration, and forwards a CubeMaster request. |
 | CubeMaster | Merges template network configuration with the current create request and schedules the sandbox through Cubelet/network-agent. |
 | network-agent | Converts `CubeNetworkConfig` into CubeVS `MVMOptions`, extracts network reachability targets from L7 `rules`, and registers or updates the TAP eBPF maps. |
-| CubeVS | Runs in the host eBPF data plane. It enforces per-sandbox L3/L4 allow/deny policy, DNS filtering, DNS A-record learning, session/NAT, TCP RST rejection, and L7 proxy routing decisions. |
+| CubeVS | Runs in the host eBPF data plane. It enforces per-sandbox L3/L4 allow/deny policy, DNS A-record learning for configured domains, session/NAT, TCP RST rejection, and L7 proxy routing decisions. |
 | CubeEgress | Transparent HTTP/HTTPS proxy. It only receives TCP/80 and TCP/443 traffic that CubeVS marked as requiring L7 checks, then evaluates the complete `rules` list. |
 
 A key point: **active outbound policy decisions happen in the `from_cube` direction**, after sandbox traffic enters the TAP device. The host-NIC `from_world` direction mainly handles reverse NAT for existing sessions, port-mapped inbound traffic, and DNS response learning. It is not the primary allow/deny decision point for outbound policy.
@@ -107,6 +107,13 @@ Wildcard domains match subdomains only, not the apex domain:
 | `example.com` | `example.com` | `api.example.com` |
 
 Domains are lowercased and trailing dots are removed. Only valid DNS names are accepted. Dotted-decimal strings that are not valid IPv4 addresses, such as `999.999.999.999`, are rejected or ignored depending on where they appear.
+
+When `allow_out` contains a DNS name, the request must also establish a deny-all fallback. Do one of the following:
+
+- Set `allow_internet_access=false`; CubeVS will install `0.0.0.0/0` in `deny_out` automatically.
+- Or explicitly include `0.0.0.0/0` in `deny_out`.
+
+This is required because domain `allow_out` entries are learned into temporary IP allow entries after DNS A responses. Without a deny-all fallback, unmatched destinations would still be allowed by the default-allow policy, making the domain allow list misleading.
 
 ### `deny_out`
 
@@ -240,9 +247,9 @@ network-agent finally programs different sources into different maps:
 | Source | Map | `L7_REQUIRED`? | Purpose |
 | --- | --- | --- | --- |
 | `allow_out` IPv4/CIDR | `allow_out_v2[ifindex]` | No | Allow direct L3/L4 egress. |
-| `allow_out` domain | `dns_allow[ifindex]` | No | Allow the domain's DNS A queries; learn response A records into `allow_out_v2`. |
+| `allow_out` domain | `dns_allow[ifindex]` | No | Track matching DNS A queries and learn response A records into `allow_out_v2`. Requires `allow_internet_access=false` or explicit `deny_out=["0.0.0.0/0"]` so non-learned IPs are not default-allowed. |
 | `rules[].match.host/sni` IPv4/CIDR | `allow_out_v2[ifindex]` | Yes | Allow the IP/CIDR and route TCP/80 and TCP/443 to CubeEgress. |
-| `rules[].match.host/sni` domain | `dns_allow[ifindex]` | Yes | Track matching DNS A queries and learn IPs with the L7 flag without enabling DNS filtering by itself. |
+| `rules[].match.host/sni` domain | `dns_allow[ifindex]` | Yes | Track matching DNS A queries and learn IPs with the L7 flag without changing unrelated DNS names. |
 | `deny_out` | `deny_out[ifindex]` | N/A | Reject matching destination IP/CIDR unless allow matched first. |
 | Built-in internal CIDRs | `deny_out[ifindex]` | N/A | Prevent access to Cube internal infrastructure. |
 | `allow_internet_access=false` | `deny_out[ifindex]` | N/A | Install `0.0.0.0/0` deny-all. |
@@ -337,7 +344,7 @@ SNAT rewrites the sandbox source address `169.254.68.6` to a routable host SNAT 
 
 ## DNS domain allow-listing and learning
 
-Domain policy is the easiest part to misunderstand. CubeVS does not directly "allow a domain", because real packets only carry destination IPs. Instead, it **optionally filters DNS A queries, tracks configured domains, and learns matching A-record answers into temporary IP allow entries**.
+Domain policy is the easiest part to misunderstand. CubeVS does not directly "allow a domain", because real packets only carry destination IPs. Instead, it **tracks configured DNS A queries and learns matching A-record answers into temporary IP allow entries**. DNS names that are not configured are not blocked at DNS time; they simply do not create learned IP allow entries.
 
 ### DNS allow map layout
 
@@ -353,10 +360,9 @@ Each sandbox has a `dns_allow[ifindex]` inner map. It is an LPM trie keyed by re
 | Mode | Domain sources | Query behavior | Learning behavior |
 | --- | --- | --- | --- |
 | Off | No `allow_out` domains and no L7 rule domains | DNS follows normal UDP egress. | No DNS response learning. |
-| Track-only | L7 rule domains only | All DNS names are allowed; matching L7 domains are tracked. | Matching A-record responses are learned with `L7_REQUIRED`. |
-| Filter + Track | At least one `allow_out` domain | Unmatched IN A queries receive synthetic NXDOMAIN. | Matching `allow_out` and L7 domains are learned; L7 flags are preserved. |
+| Track | At least one `allow_out` domain or L7 rule domain | All DNS names are allowed; matching configured domains are tracked. | Matching A-record responses are learned into `allow_out_v2`; L7 flags are preserved. |
 
-Only an `allow_out` domain sets the filter flag. L7-only domains set the learning flag but do not turn DNS into an allow-list.
+Both `allow_out` domains and L7 rule domains enable DNS learning. Neither source turns DNS itself into an allow-list, and CubeVS no longer returns synthetic NXDOMAIN for unmatched domains.
 
 ### DNS query path
 
@@ -366,9 +372,7 @@ When the sandbox sends a UDP/53 query, `from_cube` tries to parse the DNS payloa
 2. CubeVS parses the QNAME, lowercases it, and reverses it into an LPM-trie key.
 3. If the mode is Off, the query follows normal UDP NAT.
 4. CubeVS matches the reversed QNAME against the domain rules.
-5. If the domain does not match:
-   - Filter + Track: CubeVS returns a synthetic NXDOMAIN; the upstream resolver never sees the query.
-   - Track-only: the query follows normal UDP NAT without creating a pending learning entry.
+5. If the domain does not match, the query follows normal UDP NAT without creating a pending learning entry.
 6. If the domain matches, CubeVS inserts a pending query into `dns_query_track`. The key includes:
    - sandbox ifindex
    - DNS server IP
@@ -378,7 +382,7 @@ When the sandbox sends a UDP/53 query, `from_cube` tries to parse the DNS payloa
 7. The pending query lifetime is `10` seconds.
 8. The query then continues through UDP NAT to the real DNS server.
 
-As a result, unmatched domains fail quickly only in Filter + Track mode. Track-only mode leaves unrelated DNS names untouched.
+As a result, DNS resolution for unrelated domains still succeeds if normal UDP egress is available. In strict domain allow-list configurations, the failure point for unrelated destinations is the later IP connection: because no DNS-learned allow entry is created, the destination IP is rejected by the deny-all fallback.
 
 ### DNS response path
 
@@ -419,7 +423,7 @@ CubeEgress does not see every egress packet. Traffic reaches CubeEgress only whe
 | TCP destination port `443`, destination IP matches `allow_out_v2` with `L7_REQUIRED` | Yes | HTTPS must be evaluated by CubeEgress using SNI/Host and other rule fields. |
 | TCP `80/443`, but destination IP came only from plain `allow_out` without L7 flag | No | It is L3/L4 allowed and NATed directly. |
 | TCP ports other than `80/443`, even if the IP came from an L7 target | No | CubeEgress is an HTTP/HTTPS transparent proxy and only intercepts 80/443. |
-| UDP/53 DNS queries | No | Handled by CubeVS DNS filtering and learning. |
+| UDP/53 DNS queries | No | Handled by CubeVS DNS learning. |
 | UDP, ICMP, other TCP ports | No | Handled by CubeVS NAT/session tracking. |
 | Traffic matching `deny_out` without a prior allow match | No | Rejected by CubeVS. |
 | `from_world` reply traffic | No | Reply direction uses session reverse NAT, not the L7 proxy entry decision. |
@@ -690,10 +694,10 @@ Useful fields:
 | Field | Meaning |
 | --- | --- |
 | `ifindex_to_mvmmeta[].dns_policy_flags` | Raw sandbox-level DNS policy mode flags. |
-| `ifindex_to_mvmmeta[].dns_learning_enabled` / `dns_filter_enabled` | Whether the sandbox is in track-only or filter-and-track mode. |
+| `ifindex_to_mvmmeta[].dns_learning_enabled` | Whether DNS response learning is enabled for this sandbox. |
 | `dns_allow[].rules[].domain` | Domain policy rule installed for the sandbox. |
 | `dns_allow[].rules[].l7_required` | Whether IPs learned from this domain should later enter CubeEgress. |
-| `dns_allow[].enabled` / `learning_enabled` / `filter_enabled` / `flags` | Compatibility view derived from `ifindex_to_mvmmeta`, not entries stored in `dns_allow`. |
+| `dns_allow[].enabled` / `learning_enabled` / `flags` | Compatibility view derived from `ifindex_to_mvmmeta`, not entries stored in `dns_allow`. |
 | `dns_query_track` | DNS queries currently waiting for responses; usually short-lived. |
 | `allow_out_v2[].entries[].expires_at_ns` / `expires_in` | `0` or empty means static allow; non-zero means DNS-learned temporary entry. |
 | `allow_out_v2[].entries[].l7_required` | Whether TCP/80 and TCP/443 flows to this IP should enter CubeEgress. |

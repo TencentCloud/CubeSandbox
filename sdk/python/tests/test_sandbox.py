@@ -180,8 +180,12 @@ class TestDomainFiltering:
         "example.com",
     ])
     def test_create_network_allow_out_accepts_domain_target(self, domain):
-        body = self._payload_for_network({"allow_out": [domain]})
+        body = self._payload_for_network({
+            "allow_out": [domain],
+            "deny_out": ["0.0.0.0/0"],
+        })
         assert body["network"]["allowOut"] == [domain]
+        assert body["network"]["denyOut"] == ["0.0.0.0/0"]
         assert "rules" not in body["network"]
 
     @pytest.mark.parametrize("domain", [
@@ -190,22 +194,25 @@ class TestDomainFiltering:
         "*.internal.example.org",
     ])
     def test_create_network_allow_out_accepts_wildcard_domain_target(self, domain):
-        body = self._payload_for_network({"allow_out": [domain]})
+        body = self._payload_for_network({
+            "allow_out": [domain],
+            "deny_out": ["0.0.0.0/0"],
+        })
         assert body["network"]["allowOut"] == [domain]
 
     def test_create_network_allow_out_preserves_mixed_domain_and_cidr_targets(self):
         allow_out = ["api.deepseek.com", "172.67.0.0/16", "*.githubusercontent.com"]
-        body = self._payload_for_network({"allow_out": allow_out})
+        body = self._payload_for_network({"allow_out": allow_out, "deny_out": ["0.0.0.0/0"]})
         assert body["network"]["allowOut"] == allow_out
 
     def test_create_network_allow_out_preserves_order_and_duplicates(self):
         allow_out = ["api.example.com", "*.example.com", "api.example.com"]
-        body = self._payload_for_network({"allow_out": allow_out})
+        body = self._payload_for_network({"allow_out": allow_out, "deny_out": ["0.0.0.0/0"]})
         assert body["network"]["allowOut"] == allow_out
 
     def test_create_network_domain_filtering_preserves_literal_domain_values(self):
         allow_out = ["API.Example.COM", "service.example.com."]
-        body = self._payload_for_network({"allow_out": allow_out})
+        body = self._payload_for_network({"allow_out": allow_out, "deny_out": ["0.0.0.0/0"]})
         assert body["network"]["allowOut"] == allow_out
 
     def test_create_network_domain_filtering_with_deny_all_mode(self):
@@ -216,6 +223,7 @@ class TestDomainFiltering:
         )
         assert body["allow_internet_access"] is False
         assert body["network"]["allowOut"] == allow_out
+        assert "denyOut" not in body["network"]
 
     def test_create_network_domain_filtering_with_allow_public_traffic_false(self):
         allow_out = ["api.example.com"]
@@ -225,10 +233,19 @@ class TestDomainFiltering:
         })
         assert body["network"]["allowPublicTraffic"] is False
         assert body["network"]["allowOut"] == allow_out
+        assert "denyOut" not in body["network"]
 
-    def test_create_network_domain_filtering_alongside_deny_out_cidr(self):
+    def test_create_network_domain_filtering_rejects_without_deny_all(self):
+        with pytest.raises(ApiError, match="must disable public outbound traffic or include '0.0.0.0/0' in deny_out") as exc:
+            Sandbox.create(
+                network={"allow_out": ["api.example.com"], "deny_out": ["203.0.113.0/24"]},
+                config=make_config(),
+            )
+        assert exc.value.status_code == 400
+
+    def test_create_network_domain_filtering_accepts_deny_all_among_other_deny_out(self):
         allow_out = ["api.example.com", "*.example.org"]
-        deny_out = ["203.0.113.0/24"]
+        deny_out = ["203.0.113.0/24", "0.0.0.0/0"]
         body = self._payload_for_network({
             "allow_out": allow_out,
             "deny_out": deny_out,
@@ -244,8 +261,13 @@ class TestDomainFiltering:
             match=Match(host="api.github.com", path="/repos/*"),
             action=Action(allow=True, audit="metadata"),
         )]
-        body = self._payload_for_network({"allow_out": allow_out, "rules": rules})
+        body = self._payload_for_network({
+            "allow_out": allow_out,
+            "deny_out": ["0.0.0.0/0"],
+            "rules": rules,
+        })
         assert body["network"]["allowOut"] == allow_out
+        assert body["network"]["denyOut"] == ["0.0.0.0/0"]
         assert body["network"]["rules"] == [{
             "name": "github_api",
             "match": {"host": "api.github.com", "path": "/repos/*"},
@@ -330,6 +352,15 @@ class TestNetworkRules:
         body = m.call_args.kwargs["json"]
         assert body["network"]["allowOut"] == ["1.2.3.0/24"]
         assert len(body["network"]["rules"]) == 1
+
+    def test_create_network_rules_domain_only_does_not_require_deny_all(self):
+        from cubesandbox import Action, Match, Rule
+        rules = [Rule(name="r1", match=Match(host="x.com"), action=Action(allow=True))]
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network={"rules": rules}, config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert body["network"]["rules"][0]["match"]["host"] == "x.com"
+        assert "denyOut" not in body["network"]
 
     def test_create_network_rules_empty_list_omitted(self):
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
@@ -1639,6 +1670,55 @@ class TestTemplateAPI:
             },
             headers={"Content-Type": "application/json"},
         )
+
+    def test_build_rejects_allow_out_domain_without_deny_all(self):
+        with pytest.raises(ApiError, match="must disable public outbound traffic or include '0.0.0.0/0' in deny_out") as exc:
+            Template.build(
+                image="registry.example.com/app:latest",
+                allow_out=["api.example.com"],
+                config=make_config(),
+            )
+        assert exc.value.status_code == 400
+
+    def test_build_accepts_allow_out_domain_when_internet_disabled(self):
+        body = {
+            "jobID": "job-domain",
+            "templateID": "tpl-domain",
+            "status": "accepted",
+        }
+
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(
+                image="registry.example.com/app:latest",
+                allow_out=["api.example.com"],
+                allow_internet_access=False,
+                config=make_config(),
+            )
+
+        sent = post.call_args.kwargs["json"]
+        assert sent["allowOut"] == ["api.example.com"]
+        assert sent["allowInternetAccess"] is False
+        assert "denyOut" not in sent
+
+    def test_build_accepts_allow_out_domain_with_deny_all(self):
+        body = {
+            "jobID": "job-domain",
+            "templateID": "tpl-domain",
+            "status": "accepted",
+        }
+        config = make_config()
+
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(
+                image="registry.example.com/app:latest",
+                allow_out=["api.example.com"],
+                deny_out=["0.0.0.0/0"],
+                config=config,
+            )
+
+        sent = post.call_args.kwargs["json"]
+        assert sent["allowOut"] == ["api.example.com"]
+        assert sent["denyOut"] == ["0.0.0.0/0"]
 
     def test_template_info_from_dict_handles_empty_aliases(self):
         info = TemplateInfo.from_dict({

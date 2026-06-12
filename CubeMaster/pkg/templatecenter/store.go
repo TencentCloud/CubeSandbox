@@ -336,6 +336,9 @@ func NormalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.Cre
 	if cloned.InstanceType == "" {
 		cloned.InstanceType = cubeboxv1.InstanceType_cubebox.String()
 	}
+	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
+		return nil, "", err
+	}
 	version := constants.GetAppSnapshotVersion(cloned.Annotations)
 	if version == "" {
 		version = DefaultTemplateVersion

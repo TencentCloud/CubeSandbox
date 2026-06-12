@@ -1,6 +1,6 @@
 # 出网网络策略
 
-Cube Sandbox 的出网控制不是单一开关，而是由 **API 校验、模板合并、network-agent 下发、CubeVS eBPF 数据面、CubeEgress L7 代理** 共同完成的一条链路。理解这条链路后，配置 `allow_out`、`deny_out` 和 `rules` 时会更容易判断：某个包会被直接转发、被拒绝、被 DNS 策略拦截，还是进入 HTTP/HTTPS 代理。
+Cube Sandbox 的出网控制不是单一开关，而是由 **API 校验、模板合并、network-agent 下发、CubeVS eBPF 数据面、CubeEgress L7 代理** 共同完成的一条链路。理解这条链路后，配置 `allow_out`、`deny_out` 和 `rules` 时会更容易判断：某个包会被直接转发、被拒绝、被 DNS 学习忽略，还是进入 HTTP/HTTPS 代理。
 
 本文重点说明：
 
@@ -36,7 +36,7 @@ flowchart LR
 | CubeAPI | 接收 SDK/API 请求，映射网络配置，并转成 CubeMaster 请求。 |
 | CubeMaster | 将模板里的网络配置和本次创建请求里的网络配置合并，然后调度到 Cubelet/network-agent。 |
 | network-agent | 把 `CubeNetworkConfig` 转成 CubeVS 可理解的 `MVMOptions`；从 L7 `rules` 中抽取网络可达目标；注册或更新 TAP 的 eBPF map。 |
-| CubeVS | 运行在宿主机 eBPF 数据面。负责 per-sandbox L3/L4 allow/deny、DNS 域名过滤、DNS A 记录学习、session/NAT、TCP RST 拒绝，以及是否把流量送到 L7 代理。 |
+| CubeVS | 运行在宿主机 eBPF 数据面。负责 per-sandbox L3/L4 allow/deny、配置域名的 DNS A 记录学习、session/NAT、TCP RST 拒绝，以及是否把流量送到 L7 代理。 |
 | CubeEgress | 透明 HTTP/HTTPS 代理。只处理被 CubeVS 标记为需要 L7 检查的 TCP/80、TCP/443 流量，执行完整 `rules`。 |
 
 一个关键点是：**出站策略的主动判断发生在沙箱流量进入 TAP 后的 `from_cube` 方向**。宿主机网卡上的 `from_world` 方向主要处理已有会话的回包反向 NAT、端口映射流量，以及 DNS 响应学习；它不是出站 allow/deny 的主判断入口。
@@ -107,6 +107,13 @@ network.dns_allow exceeds maximum entries: got 1025, max 1024
 | `example.com` | `example.com` | `api.example.com` |
 
 域名会被转换成小写并去掉尾部的 `.`。只支持合法 DNS 域名；类似 `999.999.999.999` 这种 dotted-decimal 但不是合法 IPv4 的值会被拒绝或忽略。
+
+当 `allow_out` 包含 DNS 域名时，请求必须同时建立 deny-all 兜底。可以二选一：
+
+- 设置 `allow_internet_access=false`，CubeVS 会自动把 `0.0.0.0/0` 写入 `deny_out`。
+- 或者显式在 `deny_out` 中包含 `0.0.0.0/0`。
+
+这是因为域名 `allow_out` 需要先通过 DNS A 响应学习成临时 IP allow 条目。如果没有 deny-all 兜底，未学习到的目的 IP 仍会被默认放行，域名 allow-list 就会产生误导。
 
 ### `deny_out`
 
@@ -240,9 +247,9 @@ network-agent 最终把不同来源写入不同 map：
 | 来源 | 写入位置 | 是否带 `L7_REQUIRED` | 作用 |
 | --- | --- | --- | --- |
 | `allow_out` IPv4/CIDR | `allow_out_v2[ifindex]` | 否 | 允许直接 L3/L4 出网。 |
-| `allow_out` 域名 | `dns_allow[ifindex]` | 否 | 允许该域名的 DNS A 查询；响应中的 A 记录临时学习到 `allow_out_v2`。 |
+| `allow_out` 域名 | `dns_allow[ifindex]` | 否 | 跟踪匹配的 DNS A 查询，并把响应中的 A 记录临时学习到 `allow_out_v2`。要求同时设置 `allow_internet_access=false` 或显式 `deny_out=["0.0.0.0/0"]`，避免未学习 IP 被默认放行。 |
 | `rules[].match.host/sni` IPv4/CIDR | `allow_out_v2[ifindex]` | 是 | 允许访问该 IP/CIDR，并让 TCP/80、TCP/443 进入 CubeEgress。 |
-| `rules[].match.host/sni` 域名 | `dns_allow[ifindex]` | 是 | 跟踪匹配的 DNS A 查询并学习带 L7 标记的 IP；它本身不会开启 DNS 过滤。 |
+| `rules[].match.host/sni` 域名 | `dns_allow[ifindex]` | 是 | 跟踪匹配的 DNS A 查询并学习带 L7 标记的 IP；它本身不会影响无关 DNS 名称。 |
 | `deny_out` | `deny_out[ifindex]` | 不适用 | 拒绝匹配目的 IP/CIDR 的流量，除非先命中 allow。 |
 | 内置内部网段 | `deny_out[ifindex]` | 不适用 | 防止访问 Cube 内部基础设施。 |
 | `allow_internet_access=false` | `deny_out[ifindex]` | 不适用 | 写入 `0.0.0.0/0` deny-all。 |
@@ -337,7 +344,7 @@ SNAT 会把沙箱内部源地址 `169.254.68.6` 改写为宿主机可路由的 S
 
 ## DNS 域名 allow-list 和学习
 
-域名策略是这套机制里最容易误解的部分。CubeVS 并不是直接“允许域名”，因为真实数据包只有目的 IP。它的做法是：**按模式决定是否过滤 DNS A 查询，跟踪配置的域名，再把匹配响应中的 A 记录学习成临时 IP allow 条目**。
+域名策略是这套机制里最容易误解的部分。CubeVS 并不是直接“允许域名”，因为真实数据包只有目的 IP。它的做法是：**跟踪已配置域名的 DNS A 查询，再把匹配响应中的 A 记录学习成临时 IP allow 条目**。没有配置的域名不会在 DNS 阶段被拦截；它们只是不会创建学习到的 IP allow 条目。
 
 ### DNS allow map 的结构
 
@@ -353,10 +360,9 @@ SNAT 会把沙箱内部源地址 `169.254.68.6` 改写为宿主机可路由的 S
 | 模式 | 域名来源 | 查询行为 | 学习行为 |
 | --- | --- | --- | --- |
 | Off | `allow_out` 和 L7 rules 都没有域名 | DNS 按普通 UDP 出站。 | 不进行 DNS 响应学习。 |
-| Track-only | 只有 L7 rules 域名 | 所有域名都放行；只跟踪命中的 L7 域名。 | 命中的 A 记录会学习并带 `L7_REQUIRED`。 |
-| Filter + Track | 至少有一个 `allow_out` 域名 | 未命中的 IN A 查询返回合成 NXDOMAIN。 | 学习命中的 `allow_out` 和 L7 域名，并保留 L7 标记。 |
+| Track | 至少有一个 `allow_out` 域名或 L7 rules 域名 | 所有域名都放行；只跟踪命中的已配置域名。 | 命中的 A 记录会学习到 `allow_out_v2`，并保留 L7 标记。 |
 
-只有 `allow_out` 域名会设置 filter flag。仅有 L7 域名时只设置 learning flag，不会把 DNS 变成 allow-list。
+`allow_out` 域名和 L7 rule 域名都会开启 DNS 学习。两者都不会把 DNS 本身变成 allow-list，CubeVS 也不再为未命中的域名返回合成 NXDOMAIN。
 
 ### DNS 查询阶段
 
@@ -366,9 +372,7 @@ SNAT 会把沙箱内部源地址 `169.254.68.6` 改写为宿主机可路由的 S
 2. 解析 QNAME，转成小写，再反转成 LPM trie key。
 3. 如果模式为 Off，走普通 UDP NAT。
 4. CubeVS 用反转后的 QNAME 匹配域名规则。
-5. 如果域名未命中：
-   - Filter + Track：返回合成 NXDOMAIN，上游 DNS server 不会收到查询。
-   - Track-only：查询正常走 UDP NAT，但不会创建 pending learning entry。
+5. 如果域名未命中，查询正常走 UDP NAT，但不会创建 pending learning entry。
 6. 如果域名匹配，CubeVS 会在 `dns_query_track` 写入一个 pending query，key 包含：
    - sandbox ifindex
    - DNS server IP
@@ -378,7 +382,7 @@ SNAT 会把沙箱内部源地址 `169.254.68.6` 改写为宿主机可路由的 S
 7. pending query 的生命周期是 `10` 秒。
 8. 查询本身继续走 UDP NAT 发往真实 DNS server。
 
-因此，只有 Filter + Track 模式下的未命中域名会快速表现为 DNS 失败；Track-only 模式不会影响无关域名。
+因此，无关域名的 DNS 解析在普通 UDP 出网可用时仍会成功。在严格域名 allow-list 配置下，无关目标的失败点在后续 IP 连接阶段：由于没有 DNS 学习出的 allow 条目，目的 IP 会被 deny-all 兜底拒绝。
 
 ### DNS 响应阶段
 
@@ -419,7 +423,7 @@ CubeEgress 并不会看到所有出站包。进入 CubeEgress 必须同时满足
 | TCP 目的端口 `443`，目的 IP 命中带 `L7_REQUIRED` 的 `allow_out_v2` | 是 | HTTPS 需要由 CubeEgress 根据 SNI/Host 等执行规则。 |
 | TCP `80/443`，但目的 IP 只来自普通 `allow_out`，没有 L7 标记 | 否 | 只做 L3/L4 放行和 NAT。 |
 | TCP 非 `80/443`，即使命中 L7 目标 | 否 | CubeEgress 是 HTTP/HTTPS 透明代理，目前只接管 80/443。 |
-| UDP/53 DNS 查询 | 否 | 由 CubeVS DNS 过滤和学习逻辑处理。 |
+| UDP/53 DNS 查询 | 否 | 由 CubeVS DNS 学习逻辑处理。 |
 | UDP、ICMP、其他 TCP 端口 | 否 | 走 CubeVS NAT/session。 |
 | 命中 `deny_out` 且没有先命中 allow 的流量 | 否 | 在 CubeVS 侧拒绝。 |
 | `from_world` 回包 | 否 | 回包方向按 session 做反向 NAT，不做 L7 代理入口判断。 |
@@ -690,10 +694,10 @@ sudo cubevsmapdump --ifindex tapxxx --map dns_allow,allow_out_v2,deny_out
 | 字段 | 含义 |
 | --- | --- |
 | `ifindex_to_mvmmeta[].dns_policy_flags` | 沙箱级 DNS policy mode 的原始 flags。 |
-| `ifindex_to_mvmmeta[].dns_learning_enabled` / `dns_filter_enabled` | 用于区分 track-only 和 filter-and-track 模式。 |
+| `ifindex_to_mvmmeta[].dns_learning_enabled` | 表示当前沙箱是否启用 DNS 响应学习。 |
 | `dns_allow[].rules[].domain` | 当前沙箱安装的域名策略规则。 |
 | `dns_allow[].rules[].l7_required` | 这个域名学习出的 IP 后续是否需要进入 CubeEgress。 |
-| `dns_allow[].enabled` / `learning_enabled` / `filter_enabled` / `flags` | 兼容展示字段，数据来自 `ifindex_to_mvmmeta`，不是 `dns_allow` 中存储的条目。 |
+| `dns_allow[].enabled` / `learning_enabled` / `flags` | 兼容展示字段，数据来自 `ifindex_to_mvmmeta`，不是 `dns_allow` 中存储的条目。 |
 | `dns_query_track` | 当前正在等待响应的 DNS 查询，通常生命周期很短。 |
 | `allow_out_v2[].entries[].expires_at_ns` / `expires_in` | `0` 或空表示静态 allow；非零表示 DNS 学习出的临时条目。 |
 | `allow_out_v2[].entries[].l7_required` | 访问该 IP 的 TCP/80、TCP/443 是否进入 CubeEgress。 |

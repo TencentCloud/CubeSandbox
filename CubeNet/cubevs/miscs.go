@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
@@ -54,35 +55,30 @@ func dnsTailCallBindings() []dnsTailCallBinding {
 		{dnsTailCallParse, programNameDNSParseChunk},
 		{dnsTailCallReverse, programNameDNSRevChunk},
 		{dnsTailCallFinish, programNameDNSFinish},
+		{dnsTailCallResponse, programNameDNSHandleResponse},
+		{dnsTailCallResponseFinish, programNameDNSResponseFinish},
 	}
 }
 
 // populateDNSTailCalls binds DNS tail-call slots to their BPF programs.
+//
+// map.h is shared by multiple BPF objects, so the dns_tail_calls jump table
+// shows up in every spec. Each object only owns a subset of the tail-called
+// programs (mvmtap owns the query pipeline, nodenic owns the response
+// handler), so we register only the bindings the current spec can satisfy.
+// The remaining slots get populated at runtime via refreshDNSTailCalls once
+// the other objects have been loaded and pinned.
 func populateDNSTailCalls(spec *ebpf.CollectionSpec) error {
 	jumpTable, ok := spec.Maps[mapNameDNSTailCalls]
 	if !ok {
 		return nil
 	}
 
-	bindings := dnsTailCallBindings()
-
-	// map.h is shared by multiple BPF objects; only mvmtap owns DNS tail-call programs.
-	hasDNSTailCallProgram := false
-	for _, binding := range bindings {
-		if _, ok := spec.Programs[binding.programName]; ok {
-			hasDNSTailCallProgram = true
-			break
-		}
-	}
-	if !hasDNSTailCallProgram {
-		return nil
-	}
-
-	// Rebuild static contents so the object loads with a complete jump table.
+	// Rebuild static contents so the object loads with a deterministic jump table.
 	jumpTable.Contents = jumpTable.Contents[:0]
-	for _, binding := range bindings {
+	for _, binding := range dnsTailCallBindings() {
 		if _, ok := spec.Programs[binding.programName]; !ok {
-			return fmt.Errorf("DNS tail call program not exists: %s", binding.programName)
+			continue
 		}
 		jumpTable.Contents = append(jumpTable.Contents, ebpf.MapKV{
 			Key:   binding.slot,
@@ -92,10 +88,14 @@ func populateDNSTailCalls(spec *ebpf.CollectionSpec) error {
 	return nil
 }
 
+func isPinnedObjectNotExist(err error) bool {
+	return err != nil && (errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) || strings.Contains(err.Error(), "no such file or directory"))
+}
+
 func refreshDNSTailCalls() error {
 	jumpTable, err := loadPinnedMap(mapNameDNSTailCalls)
 	if err != nil {
-		if errors.Is(err, ebpf.ErrKeyNotExist) || os.IsNotExist(err) {
+		if errors.Is(err, ebpf.ErrKeyNotExist) || isPinnedObjectNotExist(err) {
 			return nil
 		}
 		return err
@@ -105,6 +105,13 @@ func refreshDNSTailCalls() error {
 	for _, binding := range dnsTailCallBindings() {
 		prog, err := ebpf.LoadPinnedProgram(pinPath(binding.programName), nil)
 		if err != nil {
+			// Programs are pinned by different objects (mvmtap owns the
+			// query pipeline, nodenic owns the response handler), so a
+			// missing pin just means the owning object hasn't been
+			// loaded yet. A later refresh will fill the slot in.
+			if isPinnedObjectNotExist(err) {
+				continue
+			}
 			return fmt.Errorf("ebpf.LoadPinnedProgram failed: %w, name: %s", err, binding.programName)
 		}
 
@@ -188,6 +195,11 @@ func Init(params Params) error {
 
 	err = loadObject(params, loadNodenic, "loadNodenic")
 	if err != nil {
+		return err
+	}
+	// Re-run refresh now that nodenic's response handler is pinned, so the
+	// DNS_TAIL_CALL_RESPONSE slot owned by nodenic gets wired up at runtime.
+	if err := refreshDNSTailCalls(); err != nil {
 		return err
 	}
 

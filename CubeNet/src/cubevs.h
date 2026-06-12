@@ -35,7 +35,6 @@
 #define MAX_DNS_QUERY_TRACK_ENTRIES	65536
 #define MAX_DNS_NAME_LEN		256
 #define DNS_POLICY_FLAG_LEARNING_ENABLED	1
-#define DNS_POLICY_FLAG_FILTER_ENABLED	2
 #define NET_POLICY_FLAG_L7_REQUIRED	1
 #define NSEC_PER_SEC			1000000000ULL
 #define DNS_QUERY_TRACK_TTL_NS		(10ULL * NSEC_PER_SEC)
@@ -105,11 +104,6 @@ struct mvm_meta {
 static __always_inline bool dns_policy_learning_enabled(const struct mvm_meta *mvm_meta)
 {
 	return mvm_meta && (mvm_meta->dns_policy_flags & DNS_POLICY_FLAG_LEARNING_ENABLED);
-}
-
-static __always_inline bool dns_policy_filter_enabled(const struct mvm_meta *mvm_meta)
-{
-	return mvm_meta && (mvm_meta->dns_policy_flags & DNS_POLICY_FLAG_FILTER_ENABLED);
 }
 
 static __always_inline bool dns_policy_enabled(const struct mvm_meta *mvm_meta)

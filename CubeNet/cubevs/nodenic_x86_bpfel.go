@@ -53,6 +53,14 @@ type nodenicDnsQueryTrackValue struct {
 	Reserved    [7]uint8
 }
 
+type nodenicDnsResponseState struct {
+	DnsOff     uint32
+	Ifindex    uint32
+	ServerIp   uint32
+	SourcePort uint16
+	Reserved   uint16
+}
+
 type nodenicIngressSession struct {
 	Version  uint32
 	VmIp     uint32
@@ -158,7 +166,9 @@ type nodenicSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type nodenicProgramSpecs struct {
-	FromWorld *ebpf.ProgramSpec `ebpf:"from_world"`
+	DnsHandleResponseProg *ebpf.ProgramSpec `ebpf:"dns_handle_response_prog"`
+	DnsResponseFinishProg *ebpf.ProgramSpec `ebpf:"dns_response_finish_prog"`
+	FromWorld             *ebpf.ProgramSpec `ebpf:"from_world"`
 }
 
 // nodenicMapSpecs contains maps before they are loaded into the kernel.
@@ -172,6 +182,7 @@ type nodenicMapSpecs struct {
 	DnsQueryScratch   *ebpf.MapSpec `ebpf:"dns_query_scratch"`
 	DnsQueryState     *ebpf.MapSpec `ebpf:"dns_query_state"`
 	DnsQueryTrack     *ebpf.MapSpec `ebpf:"dns_query_track"`
+	DnsResponseState  *ebpf.MapSpec `ebpf:"dns_response_state"`
 	DnsTailCalls      *ebpf.MapSpec `ebpf:"dns_tail_calls"`
 	EgressSessions    *ebpf.MapSpec `ebpf:"egress_sessions"`
 	IfindexToMvmmeta  *ebpf.MapSpec `ebpf:"ifindex_to_mvmmeta"`
@@ -230,6 +241,7 @@ type nodenicMaps struct {
 	DnsQueryScratch   *ebpf.Map `ebpf:"dns_query_scratch"`
 	DnsQueryState     *ebpf.Map `ebpf:"dns_query_state"`
 	DnsQueryTrack     *ebpf.Map `ebpf:"dns_query_track"`
+	DnsResponseState  *ebpf.Map `ebpf:"dns_response_state"`
 	DnsTailCalls      *ebpf.Map `ebpf:"dns_tail_calls"`
 	EgressSessions    *ebpf.Map `ebpf:"egress_sessions"`
 	IfindexToMvmmeta  *ebpf.Map `ebpf:"ifindex_to_mvmmeta"`
@@ -250,6 +262,7 @@ func (m *nodenicMaps) Close() error {
 		m.DnsQueryScratch,
 		m.DnsQueryState,
 		m.DnsQueryTrack,
+		m.DnsResponseState,
 		m.DnsTailCalls,
 		m.EgressSessions,
 		m.IfindexToMvmmeta,
@@ -286,11 +299,15 @@ type nodenicVariables struct {
 //
 // It can be passed to loadNodenicObjects or ebpf.CollectionSpec.LoadAndAssign.
 type nodenicPrograms struct {
-	FromWorld *ebpf.Program `ebpf:"from_world"`
+	DnsHandleResponseProg *ebpf.Program `ebpf:"dns_handle_response_prog"`
+	DnsResponseFinishProg *ebpf.Program `ebpf:"dns_response_finish_prog"`
+	FromWorld             *ebpf.Program `ebpf:"from_world"`
 }
 
 func (p *nodenicPrograms) Close() error {
 	return _NodenicClose(
+		p.DnsHandleResponseProg,
+		p.DnsResponseFinishProg,
 		p.FromWorld,
 	)
 }

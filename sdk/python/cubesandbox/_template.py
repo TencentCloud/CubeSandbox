@@ -10,6 +10,7 @@ import requests
 
 from ._config import Config
 from ._exceptions import ApiError, AuthenticationError, TemplateNotFoundError
+from ._policy import _validate_allow_out_domains_require_deny_all
 
 
 def _check_response(resp: requests.Response) -> None:
@@ -280,6 +281,11 @@ class Template:
             raise ValueError("start_cmd is not supported by CubeAPI /templates")
         if not image or not image.strip():
             raise ValueError("image is required")
+        _validate_allow_out_domains_require_deny_all(
+            allow_out,
+            deny_out,
+            default_deny_all=allow_internet_access is False,
+        )
 
         cfg = config or Config()
         payload: dict = {"image": image.strip()}
@@ -429,4 +435,3 @@ class Template:
         s = requests.Session()
         resp = s.delete(f"{cfg.api_url}/templates/{template_id}")
         _check_response(resp)
-

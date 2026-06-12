@@ -15,9 +15,11 @@
 /* Internal query hook return value: keep the caller's normal packet path. */
 #define CUBE_DNS_PASS	-1
 
-#define DNS_TAIL_CALL_PARSE	0
-#define DNS_TAIL_CALL_REVERSE	1
-#define DNS_TAIL_CALL_FINISH	2
+#define DNS_TAIL_CALL_PARSE		0
+#define DNS_TAIL_CALL_REVERSE		1
+#define DNS_TAIL_CALL_FINISH		2
+#define DNS_TAIL_CALL_RESPONSE		3
+#define DNS_TAIL_CALL_RESPONSE_FINISH	4
 
 /* Query name parsing and reversing are split into fixed-size chunks so each
  * tail-called program stays small and verifier-friendly. With the current
@@ -204,54 +206,6 @@ static __always_inline void dns_track_allowed_query(struct __sk_buff *skb,
 	bpf_map_update_elem(&dns_query_track, &track_key, &track_value, BPF_ANY);
 }
 
-/* Synthetic NXDOMAIN response ------------------------------------------- */
-
-/* Swap UDP ports while turning an outbound query into an inline reply. */
-static __always_inline void dns_swap_ports(struct udphdr *udp)
-{
-	__be16 port;
-
-	port = udp->source;
-	udp->source = udp->dest;
-	udp->dest = port;
-}
-
-/* Rewrite a denied DNS query into an NXDOMAIN response to the sandbox. */
-static __noinline int dns_reply_nxdomain(struct __sk_buff *skb, __u32 dns_off,
-					 __u32 ifindex, __u16 req_flags)
-{
-	struct dns_wire_header hdr;
-	struct ethhdr *l2;
-	struct iphdr *l3;
-	struct udphdr *udp;
-	__u32 old_daddr;
-
-	if (bpf_skb_load_bytes(skb, dns_off, &hdr, sizeof(hdr)))
-		return TC_ACT_SHOT;
-	if (!__pull_headers_udp(skb, &l2, &l3, &udp))
-		return TC_ACT_SHOT;
-
-	/* Reuse the query packet buffer and flip it back toward the sandbox. */
-	old_daddr = l3->daddr;
-	rewrite_l3_addr(l3, &l3->saddr, old_daddr);
-	rewrite_l3_addr(l3, &l3->daddr, mvm_inner_ip);
-	dns_swap_ports(udp);
-	udp->check = 0;
-	set_mac_pair(l2, cubegw0_macaddr_p1, cubegw0_macaddr_p2,
-		     mvm_macaddr_p1, mvm_macaddr_p2);
-
-	/* Keep the original question and clear response sections. */
-	hdr.flags = bpf_htons(DNS_FLAG_QR | DNS_FLAG_RA | (req_flags & DNS_FLAG_RD) |
-			      DNS_RCODE_NXDOMAIN);
-	hdr.ancount = 0;
-	hdr.nscount = 0;
-	hdr.arcount = 0;
-	if (bpf_skb_store_bytes(skb, dns_off, &hdr, sizeof(hdr), 0))
-		return TC_ACT_SHOT;
-
-	return bpf_redirect(ifindex, 0);
-}
-
 /* Query entry ------------------------------------------------------------ */
 
 /* Reset parser state before the tail-call query pipeline starts. */
@@ -277,8 +231,8 @@ static __always_inline void dns_init_query_state(struct dns_query_state *state,
  * ifindex_to_mvmmeta enable DNS policy processing. The DNS allow trie stores
  * only reversed lower-case domain rules and their rule-specific flags.
  */
-static __noinline int dns_handle_query(struct __sk_buff *skb, __u32 dns_off,
-				       __u32 ifindex)
+static __always_inline int dns_handle_query(struct __sk_buff *skb, __u32 dns_off,
+					    __u32 ifindex)
 {
 	struct dns_query_state *state;
 	struct dns_wire_header hdr;

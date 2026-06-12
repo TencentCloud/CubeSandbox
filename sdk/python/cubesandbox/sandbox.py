@@ -13,7 +13,7 @@ from ._config import Config
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
 from ._filesystem import Filesystem
 from ._models import Execution, ExecutionError, OutputMessage, Result, SnapshotInfo
-from ._policy import Rule, _serialize_rule
+from ._policy import Rule, _serialize_rule, _validate_allow_out_domains_require_deny_all
 from ._stream import _parse_line
 from ._transport import build_client
 
@@ -131,6 +131,14 @@ class Sandbox:
         if not allow_internet_access:
             payload["allow_internet_access"] = False
         if network:
+            _validate_allow_out_domains_require_deny_all(
+                network.get("allow_out"),
+                network.get("deny_out"),
+                default_deny_all=(
+                    not allow_internet_access
+                    or network.get("allow_public_traffic") is False
+                ),
+            )
             net: dict = {}
             if "allow_public_traffic" in network:
                 net["allowPublicTraffic"] = network["allow_public_traffic"]

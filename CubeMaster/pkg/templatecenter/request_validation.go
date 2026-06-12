@@ -7,11 +7,13 @@ package templatecenter
 import (
 	"errors"
 	"fmt"
+	"net"
+	"sort"
+	"strings"
+
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"sort"
-	"strings"
 )
 
 func resolveTemplateNodes(instanceType string, scope []string) ([]*node.Node, error) {
@@ -95,7 +97,94 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if cloned.NetworkType == "" {
 		cloned.NetworkType = cubeboxv1.NetworkType_tap.String()
 	}
+	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
+		return nil, err
+	}
 	return &cloned, nil
+}
+
+func validateTemplateCubeNetworkConfig(cfg *types.CubeNetworkConfig) error {
+	if cfg == nil || !hasDomainAllowOutTarget(cfg.AllowOut) {
+		return nil
+	}
+	if cfg.AllowInternetAccess != nil && !*cfg.AllowInternetAccess {
+		return nil
+	}
+	if hasDenyAllIPv4Target(cfg.DenyOut) {
+		return nil
+	}
+	return errors.New("when specifying allowed domains in allow_out, you must disable public outbound traffic or include '0.0.0.0/0' in deny_out to block all other traffic")
+}
+
+func hasDomainAllowOutTarget(targets []string) bool {
+	for _, target := range targets {
+		if isDomainAllowOutTarget(target) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDenyAllIPv4Target(targets []string) bool {
+	for _, target := range targets {
+		if strings.TrimSpace(target) == "0.0.0.0/0" {
+			return true
+		}
+	}
+	return false
+}
+
+func isDomainAllowOutTarget(target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" || strings.Contains(target, "/") || net.ParseIP(target) != nil {
+		return false
+	}
+	if isDottedDecimalLikeTarget(target) {
+		return false
+	}
+	domain := strings.ToLower(strings.TrimSuffix(target, "."))
+	if strings.HasPrefix(domain, "*.") {
+		domain = strings.TrimPrefix(domain, "*.")
+	} else if strings.Contains(domain, "*") {
+		return false
+	}
+	return isValidDNSDomainName(domain)
+}
+
+func isDottedDecimalLikeTarget(target string) bool {
+	parts := strings.Split(strings.TrimSuffix(target, "."), ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isValidDNSDomainName(domain string) bool {
+	if domain == "" || len(domain) >= 255 {
+		return false
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, ch := range label {
+			if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func containsString(items []string, target string) bool {

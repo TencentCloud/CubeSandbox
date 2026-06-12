@@ -117,7 +117,6 @@ const (
 	maxDNSNameLen      = 256
 	// DNS policy flags. Must match src/cubevs.h.
 	dnsPolicyFlagLearningEnabled = 1 << 0
-	dnsPolicyFlagFilterEnabled   = 1 << 1
 	// Network policy flags. Must match src/cubevs.h.
 	netPolicyFlagL7Required = 1 << 0
 	// Network policy value marker. Must match src/cubevs.h.
@@ -128,13 +127,17 @@ const (
 	programNameFromWorld = "from_world"
 
 	// DNS tail-call programs and slot layout. Must match src/dns_query.h.
-	programNameDNSParseChunk        = "dns_parse_chunk"
-	programNameDNSRevChunk          = "dns_rev_chunk"
-	programNameDNSFinish            = "dns_finish"
-	mapNameDNSTailCalls             = "dns_tail_calls"
-	dnsTailCallParse         uint32 = 0
-	dnsTailCallReverse       uint32 = 1
-	dnsTailCallFinish        uint32 = 2
+	programNameDNSParseChunk            = "dns_parse_chunk"
+	programNameDNSRevChunk              = "dns_rev_chunk"
+	programNameDNSFinish                = "dns_finish"
+	programNameDNSHandleResponse        = "dns_handle_response_prog"
+	programNameDNSResponseFinish        = "dns_response_finish_prog"
+	mapNameDNSTailCalls                 = "dns_tail_calls"
+	dnsTailCallParse             uint32 = 0
+	dnsTailCallReverse           uint32 = 1
+	dnsTailCallFinish            uint32 = 2
+	dnsTailCallResponse          uint32 = 3
+	dnsTailCallResponseFinish    uint32 = 4
 
 	// MapNameIfindexToMVMMetadata and the following are maps created by CubeVS.
 	MapNameIfindexToMVMMetadata = "ifindex_to_mvmmeta"

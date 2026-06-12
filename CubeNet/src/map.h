@@ -241,6 +241,30 @@ struct {
 	__type(value, struct dns_query_state);
 } dns_query_state SEC(".maps");
 
+/* Tail-call state for DNS response handling on the ingress UDP NAT path.
+ *
+ * The response handler is split into its own tail-called program to keep the
+ * from_world verifier complexity within the 1M instruction budget. We stash
+ * the values the caller already derived (DNS payload offset, target sandbox
+ * ifindex, DNS server IP, sandbox-side port) so the tail-called program can
+ * re-pull headers, learn A records, and finish UDP NAT without re-deriving
+ * them from scratch.
+ */
+struct dns_response_state {
+	__u32 dns_off;
+	__u32 ifindex;		/* sandbox tap ifindex (sess->vm_ifindex) */
+	__u32 server_ip;	/* DNS server IP (l3->saddr in network byte order) */
+	__u16 source_port;	/* sandbox-side UDP port (sess->vm_port in nbo) */
+	__u16 reserved;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct dns_response_state);
+} dns_response_state SEC(".maps");
+
 /* Tail-call jump table for the DNS parser pipeline. */
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);

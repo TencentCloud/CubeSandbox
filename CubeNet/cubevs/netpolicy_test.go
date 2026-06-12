@@ -186,30 +186,24 @@ func TestMakeDNSAllowWildcardRulePreservesL7Flag(t *testing.T) {
 	}
 }
 
-func TestDNSPolicyFlags(t *testing.T) {
+func TestDNSPolicyFlagsForDomainsLearningOnly(t *testing.T) {
 	tests := []struct {
-		name            string
-		filterEnabled   bool
-		learningEnabled bool
-		want            uint8
+		name         string
+		allowDomains []string
+		l7Domains    []string
+		want         uint8
 	}{
 		{name: "disabled", want: 0},
-		{name: "learning only", learningEnabled: true, want: dnsPolicyFlagLearningEnabled},
-		{name: "filter implies learning", filterEnabled: true, want: dnsPolicyFlagLearningEnabled | dnsPolicyFlagFilterEnabled},
-		{name: "filter and learning", filterEnabled: true, learningEnabled: true, want: dnsPolicyFlagLearningEnabled | dnsPolicyFlagFilterEnabled},
+		{name: "allow_out domain", allowDomains: []string{"api.example.com"}, want: dnsPolicyFlagLearningEnabled},
+		{name: "l7 domain", l7Domains: []string{"api.example.com"}, want: dnsPolicyFlagLearningEnabled},
+		{name: "allow_out and l7 domains", allowDomains: []string{"api.example.com"}, l7Domains: []string{"api.example.org"}, want: dnsPolicyFlagLearningEnabled},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := dnsPolicyFlags(tt.filterEnabled, tt.learningEnabled)
+			got := dnsPolicyFlagsForDomains(tt.allowDomains, tt.l7Domains)
 			if got != tt.want {
-				t.Fatalf("dnsPolicyFlags()=%d, want %d", got, tt.want)
-			}
-			if dnsPolicyLearningEnabled(got) != (tt.want&dnsPolicyFlagLearningEnabled != 0) {
-				t.Fatalf("dnsPolicyLearningEnabled(%d) returned unexpected value", got)
-			}
-			if dnsPolicyFilterEnabled(got) != (tt.want&dnsPolicyFlagFilterEnabled != 0) {
-				t.Fatalf("dnsPolicyFilterEnabled(%d) returned unexpected value", got)
+				t.Fatalf("dnsPolicyFlagsForDomains()=%d, want %d", got, tt.want)
 			}
 		})
 	}
@@ -225,9 +219,6 @@ func TestMVMMetadataLayoutAndDNSPolicyFlags(t *testing.T) {
 	}
 	if dnsPolicyFlagLearningEnabled != 1 {
 		t.Fatalf("dnsPolicyFlagLearningEnabled=%d, want 1", dnsPolicyFlagLearningEnabled)
-	}
-	if dnsPolicyFlagFilterEnabled != 2 {
-		t.Fatalf("dnsPolicyFlagFilterEnabled=%d, want 2", dnsPolicyFlagFilterEnabled)
 	}
 }
 

@@ -14,6 +14,7 @@
 #include "skb.h"
 #include "tcp.h"
 #include "udp.h"
+#include "dns_query.h"
 #include "dns_response.h"
 
 static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4,
@@ -157,34 +158,23 @@ static int tcp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 
-static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct udphdr *l4)
+/* Rewrite an ingress UDP packet into the sandbox's reverse-NAT form.
+ *
+ * Marked __always_inline because both the from_world UDP path and the DNS
+ * response tail-called program share this exact rewrite. The non-inline
+ * variant would create deep verifier paths in two SEC programs at once.
+ */
+static __always_inline int udp_nat_rewrite(struct __sk_buff *skb,
+					   struct ethhdr *l2,
+					   struct iphdr *l3,
+					   struct udphdr *l4,
+					   const struct nat_session *sess)
 {
 	__u32 old_daddr, new_daddr, udp_csum_off;
 	__u16 old_dport, new_dport, old_csum;
-	struct session_key key = {};
-	struct nat_session *sess;
-	__u64 now, flags;
-	__u32 dns_off;
 	__u16 ip_hlen;
+	__u64 flags;
 	long err;
-
-	key.src_ip = l3->saddr;
-	key.dst_ip = l3->daddr;
-	key.src_port = l4->source;
-	key.dst_port = l4->dest;
-	key.version = 0;
-	key.protocol = IPPROTO_UDP;
-	sess = lookup_session(&key);
-	if (!sess)
-		return TC_ACT_OK;
-
-	/* Learn A records from allowed DNS replies before reverse NAT. */
-	if (l4->source == DNS_PORT && dns_payload_offset(l3, l4, &dns_off))
-		dns_handle_response(skb, dns_off, sess->vm_ifindex, l3->saddr, sess->vm_port);
-
-	/* update session */
-	now = bpf_ktime_get_ns();
-	update_udp_session(IP_CT_DIR_REPLY, sess, now);
 
 	old_daddr = l3->daddr;
 	new_daddr = mvm_inner_ip;
@@ -233,6 +223,62 @@ static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 		return TC_ACT_OK;
 
 	return bpf_redirect(sess->vm_ifindex, 0);
+}
+
+static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct udphdr *l4)
+{
+	struct dns_response_state *rstate;
+	struct session_key key = {};
+	struct nat_session *sess;
+	__u32 scratch_key = 0;
+	__u32 dns_off;
+	__u64 now;
+
+	key.src_ip = l3->saddr;
+	key.dst_ip = l3->daddr;
+	key.src_port = l4->source;
+	key.dst_port = l4->dest;
+	key.version = 0;
+	key.protocol = IPPROTO_UDP;
+	sess = lookup_session(&key);
+	if (!sess)
+		return TC_ACT_OK;
+
+	/* DNS replies need IP-learning before reverse NAT. The handler walks
+	 * up to DNS_MAX_RESPONSE_ANSWERS RRs and inlining it here pushes the
+	 * from_world verifier graph past the 1M insn budget, so we hand the
+	 * packet off to a tail-called program that finishes UDP NAT itself.
+	 *
+	 * bpf_tail_call invalidates packet pointers, so we MUST NOT touch
+	 * l2/l3/l4 after attempting the tail call. If the tail call succeeds
+	 * we never return; if it fails (slot unpopulated) we drop the packet
+	 * — the sandbox will retry. Doing reverse NAT here would require
+	 * re-pulling and re-looking up after the tail call, which the
+	 * verifier on kernel 5.4 cannot prove safe within the 1M insn budget.
+	 */
+	if (l4->source == DNS_PORT && dns_payload_offset(l3, l4, &dns_off)) {
+		rstate = bpf_map_lookup_elem(&dns_response_state, &scratch_key);
+		if (rstate) {
+			rstate->dns_off = dns_off;
+			rstate->ifindex = sess->vm_ifindex;
+			rstate->server_ip = l3->saddr;
+			rstate->source_port = sess->vm_port;
+			rstate->reserved = 0;
+			bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_RESPONSE);
+			/* Tail call failed (slot unpopulated): drop the packet.
+			 * Packet pointers are considered invalidated by the
+			 * verifier after bpf_tail_call, so we cannot continue
+			 * the reverse-NAT path here.
+			 */
+			return TC_ACT_OK;
+		}
+	}
+
+	/* update session */
+	now = bpf_ktime_get_ns();
+	update_udp_session(IP_CT_DIR_REPLY, sess, now);
+
+	return udp_nat_rewrite(skb, l2, l3, l4, sess);
 }
 
 static int icmp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct icmphdr *l4)
@@ -374,6 +420,68 @@ int from_world(struct __sk_buff *skb)
 		return do_icmp_nat(skb);
 
 	return TC_ACT_OK;
+}
+
+/* Tail-called from udp_nat_session when an ingress UDP packet is a DNS reply.
+ *
+ * Owns just the heavy DNS answer-RR walk. All DNS helpers it calls are
+ * __always_inline so this program contains no bpf-to-bpf calls, which is a
+ * hard requirement on kernel 5.4: programs that mix bpf-to-bpf calls with
+ * tail calls are rejected. After learning A records we tail-call the UDP
+ * NAT finish program; splitting the work this way keeps each program's
+ * verifier graph well under the 1M instruction budget.
+ */
+SEC("tc")
+int dns_handle_response_prog(struct __sk_buff *skb)
+{
+	struct dns_response_state *rstate;
+	__u32 scratch_key = 0;
+
+	rstate = bpf_map_lookup_elem(&dns_response_state, &scratch_key);
+	if (!rstate)
+		return TC_ACT_OK;
+
+	/* Learn A records into allow_out_v2 before reverse NAT. */
+	dns_handle_response(skb, rstate->dns_off, rstate->ifindex,
+			    rstate->server_ip, rstate->source_port);
+
+	bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_RESPONSE_FINISH);
+	/* Tail call failed (slot unpopulated): drop, the sandbox will retry. */
+	return TC_ACT_OK;
+}
+
+/* Tail-called from dns_handle_response_prog to finish ingress UDP NAT.
+ *
+ * Pointers and map element references from the previous tail call did not
+ * survive, so we re-pull headers and re-look-up the session here.
+ */
+SEC("tc")
+int dns_response_finish_prog(struct __sk_buff *skb)
+{
+	struct session_key key = {};
+	struct nat_session *sess;
+	struct ethhdr *l2;
+	struct iphdr *l3;
+	struct udphdr *l4;
+	__u64 now;
+
+	if (!__pull_headers_udp(skb, &l2, &l3, &l4))
+		return TC_ACT_OK;
+
+	key.src_ip = l3->saddr;
+	key.dst_ip = l3->daddr;
+	key.src_port = l4->source;
+	key.dst_port = l4->dest;
+	key.version = 0;
+	key.protocol = IPPROTO_UDP;
+	sess = lookup_session(&key);
+	if (!sess)
+		return TC_ACT_OK;
+
+	now = bpf_ktime_get_ns();
+	update_udp_session(IP_CT_DIR_REPLY, sess, now);
+
+	return udp_nat_rewrite(skb, l2, l3, l4, sess);
 }
 
 char __license[] SEC("license") = "Dual BSD/GPL";
