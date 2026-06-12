@@ -149,10 +149,26 @@ end
 local function h_health()
     local meta = ngx.shared.meta_store
     local bootstrap_status = (meta and meta:get("bootstrap_status")) or "unknown"
+
+    -- Read version info from the build-time metadata file.
+    local version_info = {version = "unknown", commit = "unknown", build_time = "unknown"}
+    local f, err = io.open("/etc/cube/version.json", "rb")
+    if f then
+        local raw = f:read("*a")
+        f:close()
+        local decoded = cjson.decode(raw)
+        if decoded then
+            version_info = decoded
+        end
+    end
+
     return send_json(200, {
         status            = "ok",
         bootstrap_status  = bootstrap_status,
         policy_count      = policy.count(),
+        version           = version_info.version,
+        commit            = version_info.commit,
+        build_time        = version_info.build_time,
     })
 end
 

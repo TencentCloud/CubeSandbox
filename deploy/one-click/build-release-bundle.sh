@@ -299,6 +299,13 @@ components["cube-runtime"] = {
     "digest_sha256": required_sha256(runtime_bin),
 }
 
+# ── Docker-based components (no single-binary digest) ──
+components["cube-egress"] = {
+    "version": cube_version,
+    "commit": cube_commit,
+    "build_time": cube_build_time,
+}
+
 # ── Guest image ──
 guest_image = {
     "version": guest_image_ver,
@@ -498,6 +505,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/scripts/one-click" \
   "${PACKAGE_ROOT}/scripts/systemd" \
   "${PACKAGE_ROOT}/scripts/cube-egress" \
+  "${PACKAGE_ROOT}/cube-egress" \
   "${PACKAGE_ROOT}/sql"
 
 copy_file "${CORE_BIN_DIR}/network-agent" "${PACKAGE_ROOT}/network-agent/bin/network-agent"
@@ -557,6 +565,13 @@ copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cub
 # integration.
 copy_file "${CUBE_EGRESS_SOURCE_DIR}/scripts/cube-proxy-iptables-init.sh" \
           "${PACKAGE_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh"
+
+# Host-side version marker for cube-egress: cubelet's versioninfo.Collector
+# detects the component by the presence of cube-egress/version and reports
+# the content as the installed version. Must match cube_version so the
+# declared-vs-actual comparison in CubeMaster's version matrix works.
+printf '%s\n' "${DIST_VERSION}" > "${PACKAGE_ROOT}/cube-egress/version"
+
 copy_dir_contents "${SCRIPT_DIR}/sql" "${PACKAGE_ROOT}/sql"
 
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;

@@ -34,6 +34,7 @@ func writeManifest(t *testing.T, dir string) {
     "network-agent": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "containerd-shim-cube-rs": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cube-runtime": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
+    "cube-egress": {"version": "v0.5.0", "commit": "abc", "build_time": "t"},
     "cube-agent": {"version": "v0.5.0", "commit": "abc", "build_time": "t"}
   },
   "guest_image": {"version": "cube-image/2026.01", "agent_version": "agent-1.2.3"},
@@ -123,6 +124,7 @@ func TestCollectRecognizesOneClickInstallLayout(t *testing.T) {
 	mkComponentFile(t, dir, "network-agent", "bin", "network-agent")
 	mkComponentFile(t, dir, "cube-shim", "bin", "containerd-shim-cube-rs")
 	mkComponentFile(t, dir, "cube-shim", "bin", "cube-runtime")
+	mkComponentFile(t, dir, "cube-egress", "version")
 
 	c := NewCollector(dir)
 	got := c.Collect()
@@ -139,6 +141,13 @@ func TestCollectRecognizesOneClickInstallLayout(t *testing.T) {
 		if _, ok := versionOf(t, got, name); !ok {
 			t.Errorf("%s should be reported when the one-click install path exists", name)
 		}
+	}
+	// cube-egress is reported from the host-side version marker file (Source=File),
+	// not from the manifest loop, so check it separately.
+	if v, ok := versionOf(t, got, "cube-egress"); !ok {
+		t.Errorf("cube-egress should be reported when the version marker exists")
+	} else if v.Source != SourceFile {
+		t.Errorf("cube-egress Source should be file, got %s", v.Source)
 	}
 }
 
@@ -353,5 +362,56 @@ func TestGuestImageMTimeReread(t *testing.T) {
 	}
 	if img, _ := versionOf(t, c.Collect(), ComponentGuestImage); img.Version != "v2" {
 		t.Errorf("expected v2 after mtime change, got %q", img.Version)
+	}
+}
+
+func TestCollectCubeEgressFromVersionMarker(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir)
+	// Create the version marker file that the deploy system writes.
+	markerDir := filepath.Join(dir, "cube-egress")
+	if err := os.MkdirAll(markerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(markerDir, "version"), []byte("v0.5.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewCollector(dir)
+	got := c.Collect()
+
+	egress, ok := versionOf(t, got, ComponentCubeEgress)
+	if !ok {
+		t.Fatalf("cube-egress must be reported when version marker exists")
+	}
+	if egress.Version != "v0.5.0" {
+		t.Errorf("cube-egress version should be v0.5.0, got %q", egress.Version)
+	}
+	if egress.Source != SourceFile {
+		t.Errorf("cube-egress Source should be file, got %s", egress.Source)
+	}
+
+	// cube-egress must not appear twice (manifest skip verification).
+	count := 0
+	for _, v := range got {
+		if v.Component == ComponentCubeEgress {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("cube-egress should appear exactly once, got %d", count)
+	}
+}
+
+func TestCollectCubeEgressDegradesWithoutMarker(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir)
+	// Deliberately do NOT create cube-egress/version.
+
+	c := NewCollector(dir)
+	got := c.Collect()
+
+	if _, ok := versionOf(t, got, ComponentCubeEgress); ok {
+		t.Errorf("cube-egress must NOT be reported when version marker is absent")
 	}
 }

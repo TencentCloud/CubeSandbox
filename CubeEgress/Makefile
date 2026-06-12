@@ -1,5 +1,8 @@
-IMAGE_TAG   := latest
-IMAGE_LOCAL := cube-egress
+IMAGE_TAG              ?= latest
+IMAGE_LOCAL             := cube-egress
+CUBE_EGRESS_VERSION     ?= 0.0.0-dev
+CUBE_EGRESS_COMMIT      ?= unknown
+CUBE_EGRESS_BUILD_TIME  ?= unknown
 
 IMAGES := \
 	cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-egress \
@@ -23,8 +26,11 @@ endif
 .PHONY: build
 build:
 	$(call msg,BUILD IMAGE $(IMAGE_LOCAL):$(IMAGE_TAG))
-	$(Q)docker build --rm $(QUIET) --network host	\
-		-t $(IMAGE_LOCAL):$(IMAGE_TAG)		\
+	$(Q)docker build --rm $(QUIET) --network host \
+		--build-arg CUBE_EGRESS_VERSION=$(CUBE_EGRESS_VERSION) \
+		--build-arg CUBE_EGRESS_COMMIT=$(CUBE_EGRESS_COMMIT) \
+		--build-arg CUBE_EGRESS_BUILD_TIME=$(CUBE_EGRESS_BUILD_TIME) \
+		-t $(IMAGE_LOCAL):$(IMAGE_TAG) \
 		.
 
 .PHONY: push

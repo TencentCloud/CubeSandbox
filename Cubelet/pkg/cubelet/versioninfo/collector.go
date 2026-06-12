@@ -50,12 +50,14 @@ const (
 	ComponentCubeAgent  = "cube-agent"
 	ComponentGuestImage = "guest-image"
 	ComponentKernel     = "kernel"
+	ComponentCubeEgress = "cube-egress"
 )
 
 const (
 	manifestFileName  = "release-manifest.json"
 	guestImageVerPath = "cube-image/version"
 	kernelVmlinuxPath = "cube-kernel-scf/vmlinux"
+	cubeEgressVerPath = "cube-egress/version"
 )
 
 // oneClickInstallLayout maps manifest component keys to the concrete one-click
@@ -71,6 +73,7 @@ var oneClickInstallLayout = map[string][][]string{
 	"network-agent":           {{"network-agent", "bin", "network-agent"}},
 	"containerd-shim-cube-rs": {{"cube-shim", "bin", "containerd-shim-cube-rs"}},
 	"cube-runtime":            {{"cube-shim", "bin", "cube-runtime"}},
+	"cube-egress":             {{"cube-egress", "version"}},
 }
 
 // ComponentVersion is a pure-data version record. It mirrors
@@ -156,7 +159,7 @@ func (c *Collector) Collect() []ComponentVersion {
 		// installed on this node. cubelet handled above; cube-agent handled
 		// from guest_image.agent_version below.
 		for name, mc := range man.Components {
-			if name == ComponentCubelet || name == ComponentCubeAgent {
+			if name == ComponentCubelet || name == ComponentCubeAgent || name == ComponentCubeEgress {
 				continue
 			}
 			if !c.componentInstalledLocked(name) {
@@ -189,6 +192,18 @@ func (c *Collector) Collect() []ComponentVersion {
 	if ver := c.guestImageVersionLocked(); ver != "" {
 		out = append(out, ComponentVersion{
 			Component: ComponentGuestImage,
+			Version:   ver,
+			Source:    SourceFile,
+		})
+	}
+
+	// (6) cube-egress: version marker written by the deploy system.
+	// The marker file cube-egress/version is present only when the
+	// CubeEgress container is deployed on this node; when absent the
+	// component is silently omitted (graceful degradation).
+	if ver := c.cubeEgressVersionLocked(); ver != "" {
+		out = append(out, ComponentVersion{
+			Component: ComponentCubeEgress,
 			Version:   ver,
 			Source:    SourceFile,
 		})
@@ -318,6 +333,18 @@ func (c *Collector) guestImageVersionLocked() string {
 	}
 	c.guestImageVer = firstLine(data)
 	return c.guestImageVer
+}
+
+// cubeEgressVersionLocked returns the single-line cube-egress version from the
+// host-side marker file written by the deploy system at install time. The file
+// is static between deployments, so we read it directly without mtime caching.
+func (c *Collector) cubeEgressVersionLocked() string {
+	path := filepath.Join(c.baseDir, cubeEgressVerPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return firstLine(data)
 }
 
 // firstLine returns the first line of data, trimmed of surrounding
