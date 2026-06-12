@@ -101,6 +101,7 @@ pub struct StoreTemplateRecord {
     pub probe_path: String,
     pub writable_layer_size: String,
     pub official: bool,
+    pub dns: Vec<String>,
     pub sort_order: i32,
 }
 
@@ -1240,7 +1241,7 @@ LIMIT 1
             return Ok(());
         }
 
-        let seeds: Vec<(&str, &str, &str, &str, &str, Option<&str>, &[&str], &str, i32, &[i32], i32, &str, &str, bool, i32)> = vec![
+        let seeds: Vec<(&str, &str, &str, &str, &str, Option<&str>, &[&str], &str, i32, &[i32], i32, &str, &str, bool, &[&str], i32)> = vec![
             (
                 "sandbox-code",
                 "items.sandbox-code.name",
@@ -1256,6 +1257,7 @@ LIMIT 1
                 "/",
                 "1G",
                 true,
+                &[],
                 0,
             ),
             (
@@ -1268,11 +1270,12 @@ LIMIT 1
                 &["browser", "chromium", "official"],
                 "browser",
                 1530,
-                &[49983],
-                49983,
-                "/health",
+                &[49983, 9000],
+                9000,
+                "/cdp/json/version",
                 "1G",
                 true,
+                &["183.60.83.19", "114.114.114.114", "223.5.5.5", "8.8.8.8"],
                 1,
             ),
             (
@@ -1290,6 +1293,7 @@ LIMIT 1
                 "/health",
                 "4G",
                 true,
+                &[],
                 2,
             ),
             (
@@ -1307,6 +1311,7 @@ LIMIT 1
                 "/health",
                 "1G",
                 true,
+                &[],
                 3,
             ),
             (
@@ -1324,6 +1329,7 @@ LIMIT 1
                 "/health",
                 "1G",
                 true,
+                &[],
                 4,
             ),
         ];
@@ -1331,13 +1337,31 @@ LIMIT 1
         for s in &seeds {
             let tags = serde_json::to_value(&s.6)?;
             let ports = serde_json::to_value(&s.9)?;
+            let dns = serde_json::to_value(&s.14)?;
             sqlx::query(
                 r#"
 INSERT INTO t_store_template (
   item_id, name_key, description_key, image_cn, image_intl, digest,
   tags, category, size_mb, expose_ports, probe_port, probe_path,
-  writable_layer_size, official, sort_order, deleted_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+  writable_layer_size, official, dns, sort_order, deleted_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+ON DUPLICATE KEY UPDATE
+  name_key = VALUES(name_key),
+  description_key = VALUES(description_key),
+  image_cn = VALUES(image_cn),
+  image_intl = VALUES(image_intl),
+  digest = VALUES(digest),
+  tags = VALUES(tags),
+  category = VALUES(category),
+  size_mb = VALUES(size_mb),
+  expose_ports = VALUES(expose_ports),
+  probe_port = VALUES(probe_port),
+  probe_path = VALUES(probe_path),
+  writable_layer_size = VALUES(writable_layer_size),
+  official = VALUES(official),
+  dns = VALUES(dns),
+  sort_order = VALUES(sort_order),
+  deleted_at = NULL
 "#,
             )
             .bind(s.0)
@@ -1354,7 +1378,8 @@ INSERT INTO t_store_template (
             .bind(s.11)
             .bind(s.12)
             .bind(s.13)
-            .bind(s.14)
+            .bind(dns)
+            .bind(s.15)
             .execute(&self.pool)
             .await?;
         }
@@ -1367,7 +1392,7 @@ INSERT INTO t_store_template (
             r#"
 SELECT item_id, name_key, description_key, image_cn, image_intl, digest,
        tags, category, size_mb, expose_ports, probe_port, probe_path,
-       writable_layer_size, official, sort_order
+       writable_layer_size, official, dns, sort_order
 FROM t_store_template
 WHERE deleted_at IS NULL
 ORDER BY sort_order, id
@@ -1380,6 +1405,7 @@ ORDER BY sort_order, id
             .map(|row| {
                 let tags_value: Option<Value> = row.try_get("tags")?;
                 let ports_value: Option<Value> = row.try_get("expose_ports")?;
+                let dns_value: Option<Value> = row.try_get("dns")?;
                 Ok::<StoreTemplateRecord, sqlx::Error>(StoreTemplateRecord {
                     item_id: row.try_get("item_id")?,
                     name_key: row.try_get("name_key")?,
@@ -1399,6 +1425,9 @@ ORDER BY sort_order, id
                     probe_path: row.try_get("probe_path")?,
                     writable_layer_size: row.try_get("writable_layer_size")?,
                     official: row.try_get::<i8, _>("official")? != 0,
+                    dns: dns_value
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default(),
                     sort_order: row.try_get("sort_order")?,
                 })
             })
@@ -1411,7 +1440,7 @@ ORDER BY sort_order, id
             r#"
 SELECT item_id, name_key, description_key, image_cn, image_intl, digest,
        tags, category, size_mb, expose_ports, probe_port, probe_path,
-       writable_layer_size, official, sort_order
+       writable_layer_size, official, dns, sort_order
 FROM t_store_template
 WHERE item_id = ? AND deleted_at IS NULL
 LIMIT 1
@@ -1424,6 +1453,7 @@ LIMIT 1
         row.map(|row| {
             let tags_value: Option<Value> = row.try_get("tags")?;
             let ports_value: Option<Value> = row.try_get("expose_ports")?;
+            let dns_value: Option<Value> = row.try_get("dns")?;
             Ok::<StoreTemplateRecord, sqlx::Error>(StoreTemplateRecord {
                 item_id: row.try_get("item_id")?,
                 name_key: row.try_get("name_key")?,
@@ -1443,6 +1473,9 @@ LIMIT 1
                 probe_path: row.try_get("probe_path")?,
                 writable_layer_size: row.try_get("writable_layer_size")?,
                 official: row.try_get::<i8, _>("official")? != 0,
+                dns: dns_value
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default(),
                 sort_order: row.try_get("sort_order")?,
             })
         })
@@ -1453,13 +1486,14 @@ LIMIT 1
     pub async fn create_store_template(&self, record: &StoreTemplateRecord) -> anyhow::Result<()> {
         let tags = serde_json::to_value(&record.tags)?;
         let ports = serde_json::to_value(&record.expose_ports)?;
+        let dns = serde_json::to_value(&record.dns)?;
         sqlx::query(
             r#"
 INSERT INTO t_store_template (
   item_id, name_key, description_key, image_cn, image_intl, digest,
   tags, category, size_mb, expose_ports, probe_port, probe_path,
-  writable_layer_size, official, sort_order, deleted_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+  writable_layer_size, official, dns, sort_order, deleted_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 ON DUPLICATE KEY UPDATE
   name_key = VALUES(name_key),
   description_key = VALUES(description_key),
@@ -1474,6 +1508,7 @@ ON DUPLICATE KEY UPDATE
   probe_path = VALUES(probe_path),
   writable_layer_size = VALUES(writable_layer_size),
   official = VALUES(official),
+  dns = VALUES(dns),
   sort_order = VALUES(sort_order),
   deleted_at = NULL
 "#,
@@ -1492,6 +1527,7 @@ ON DUPLICATE KEY UPDATE
         .bind(&record.probe_path)
         .bind(&record.writable_layer_size)
         .bind(record.official)
+        .bind(dns)
         .bind(record.sort_order)
         .execute(&self.pool)
         .await?;
@@ -1501,13 +1537,14 @@ ON DUPLICATE KEY UPDATE
     pub async fn update_store_template(&self, record: &StoreTemplateRecord) -> anyhow::Result<()> {
         let tags = serde_json::to_value(&record.tags)?;
         let ports = serde_json::to_value(&record.expose_ports)?;
+        let dns = serde_json::to_value(&record.dns)?;
         sqlx::query(
             r#"
 UPDATE t_store_template SET
   name_key = ?, description_key = ?, image_cn = ?, image_intl = ?,
   digest = ?, tags = ?, category = ?, size_mb = ?, expose_ports = ?,
   probe_port = ?, probe_path = ?, writable_layer_size = ?,
-  official = ?, sort_order = ?
+  official = ?, dns = ?, sort_order = ?
 WHERE item_id = ? AND deleted_at IS NULL
 "#,
         )
@@ -1524,6 +1561,7 @@ WHERE item_id = ? AND deleted_at IS NULL
         .bind(&record.probe_path)
         .bind(&record.writable_layer_size)
         .bind(record.official)
+        .bind(dns)
         .bind(record.sort_order)
         .bind(&record.item_id)
         .execute(&self.pool)
