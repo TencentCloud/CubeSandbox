@@ -172,7 +172,7 @@ impl FilterList {
         Ok(())
     }
 
-    // whether allowd_dirs is empty.
+    // whether allowed_dirs is empty.
     pub fn is_empty(&self) -> bool {
         self.allowed_dirs.is_empty()
     }
@@ -182,13 +182,13 @@ impl FilterList {
         self.enabled
     }
 
-    // return allow dire entry.
+    // return allowed dir entry.
     pub fn get_allow_dir(&self, key: &str) -> Result<(String, stat::StatExt)> {
         self.allowed_dirs.get(key).cloned().ok_or(Error::DisAllowed)
     }
 
     // return root dirent.
-    pub fn get_root_dirents(&self) -> &Vec<DirEntry2> {
+    pub fn get_root_dirents(&self) -> &[DirEntry2] {
         &self.root_dirents
     }
 }
@@ -500,7 +500,7 @@ impl<F: FileSystem + Sync> Server<F> {
                 let name = match name.to_str() {
                     Ok(name) => name,
                     Err(_) => {
-                        return reply_error(ErrorKind::NotFound.into(), in_header.unique, w);
+                        return reply_error(invalid_dir_entry_name_error(), in_header.unique, w);
                     }
                 };
                 match filter.get_allow_dir(name) {
@@ -1322,22 +1322,67 @@ impl<F: FileSystem + Sync> Server<F> {
         }
     }
 
-    fn root_dirents_snapshot(&self) -> Vec<RootDirentSnapshot> {
+    fn root_dirents_snapshot_if_enabled(&self) -> Option<Vec<RootDirentSnapshot>> {
         let filter = self.root_filter.as_ref().lock().unwrap();
-        filter
-            .get_root_dirents()
-            .iter()
-            .map(|dirent| (dirent.ino, dirent.offset, dirent.type_, dirent.name.clone()))
-            .collect()
+        if !filter.is_enabled() {
+            return None;
+        }
+
+        Some(
+            filter
+                .get_root_dirents()
+                .iter()
+                .map(|dirent| (dirent.ino, dirent.offset, dirent.type_, dirent.name.clone()))
+                .collect(),
+        )
     }
 
-    fn mock_readdir(&self, size: u32, offset: u64, cursor: &mut Writer) -> io::Result<usize> {
+    fn passthrough_readdir(
+        &self,
+        in_header: &InHeader,
+        fh: u64,
+        size: u32,
+        offset: u64,
+        cursor: &mut Writer,
+    ) -> io::Result<usize> {
+        let mut entries = self.fs.readdir(
+            Context::from(*in_header),
+            in_header.nodeid.into(),
+            fh.into(),
+            size,
+            offset,
+        )?;
+
         let mut total_written = 0;
-        let mut err = None;
-        let root_dirents = self.root_dirents_snapshot();
+        while let Some(dirent) = entries.next() {
+            let remaining = (size as usize).saturating_sub(total_written);
+            match add_dirent(cursor, remaining, dirent, None) {
+                // No more space left in the buffer.
+                Ok(0) => break,
+                Ok(bytes_written) => {
+                    total_written += bytes_written;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(total_written)
+    }
+
+    fn mock_readdir(
+        &self,
+        size: u32,
+        offset: u64,
+        cursor: &mut Writer,
+    ) -> io::Result<Option<usize>> {
+        let mut total_written = 0;
+        let root_dirents = match self.root_dirents_snapshot_if_enabled() {
+            Some(root_dirents) => root_dirents,
+            None => return Ok(None),
+        };
 
         for (ino, offset, type_, name) in root_dirents.iter().skip(offset as usize) {
-            let dirent2_name = CString::new(name.clone().into_bytes()).unwrap();
+            let dirent2_name = CString::new(name.as_bytes().to_vec()).unwrap();
             let dirent = DirEntry {
                 ino: *ino,
                 offset: *offset,
@@ -1352,18 +1397,11 @@ impl<F: FileSystem + Sync> Server<F> {
                 Ok(bytes_written) => {
                     total_written += bytes_written;
                 }
-                Err(e) => {
-                    err = Some(e);
-                    break;
-                }
+                Err(e) => return Err(e),
             }
         }
 
-        if let Some(err) = err {
-            Err(err)
-        } else {
-            Ok(total_written)
-        }
+        Ok(Some(total_written))
     }
 
     fn mock_readdirplus(
@@ -1372,13 +1410,15 @@ impl<F: FileSystem + Sync> Server<F> {
         size: u32,
         offset: u64,
         cursor: &mut Writer,
-    ) -> io::Result<usize> {
+    ) -> io::Result<Option<usize>> {
         let mut total_written = 0;
-        let mut err = None;
-        let root_dirents = self.root_dirents_snapshot();
+        let root_dirents = match self.root_dirents_snapshot_if_enabled() {
+            Some(root_dirents) => root_dirents,
+            None => return Ok(None),
+        };
 
         for (ino, offset, type_, name) in root_dirents.iter().skip(offset as usize) {
-            let dirent2_name = CString::new(name.clone().into_bytes()).unwrap();
+            let dirent2_name = CString::new(name.as_bytes().to_vec()).unwrap();
             let dirent = DirEntry {
                 ino: *ino,
                 offset: *offset,
@@ -1407,18 +1447,14 @@ impl<F: FileSystem + Sync> Server<F> {
                     }
 
                     if total_written == 0 {
-                        err = Some(e);
+                        return Err(e);
                     }
                     break;
                 }
             }
         }
 
-        if let Some(err) = err {
-            Err(err)
-        } else {
-            Ok(total_written)
-        }
+        Ok(Some(total_written))
     }
 
     fn readdir(&self, in_header: InHeader, mut r: Reader, mut w: Writer) -> Result<usize> {
@@ -1447,43 +1483,14 @@ impl<F: FileSystem + Sync> Server<F> {
         let unique = in_header.unique;
         let mut cursor = w.split_at(size_of::<OutHeader>()).unwrap();
 
-        let result = if in_header.nodeid == ROOT_ID
-            && self.root_filter.as_ref().lock().unwrap().is_enabled()
-        {
-            self.mock_readdir(size, offset, &mut cursor)
-        } else {
-            match self.fs.readdir(
-                Context::from(in_header),
-                in_header.nodeid.into(),
-                fh.into(),
-                size,
-                offset,
-            ) {
-                Ok(mut entries) => {
-                    let mut total_written = 0;
-                    let mut err = None;
-                    while let Some(dirent) = entries.next() {
-                        let remaining = (size as usize).saturating_sub(total_written);
-                        match add_dirent(&mut cursor, remaining, dirent, None) {
-                            // No more space left in the buffer.
-                            Ok(0) => break,
-                            Ok(bytes_written) => {
-                                total_written += bytes_written;
-                            }
-                            Err(e) => {
-                                err = Some(e);
-                                break;
-                            }
-                        }
-                    }
-                    if let Some(err) = err {
-                        Err(err)
-                    } else {
-                        Ok(total_written)
-                    }
-                }
+        let result = if in_header.nodeid == ROOT_ID {
+            match self.mock_readdir(size, offset, &mut cursor) {
+                Ok(Some(total_written)) => Ok(total_written),
+                Ok(None) => self.passthrough_readdir(&in_header, fh, size, offset, &mut cursor),
                 Err(e) => Err(e),
             }
+        } else {
+            self.passthrough_readdir(&in_header, fh, size, offset, &mut cursor)
         };
 
         match result {
@@ -1520,9 +1527,10 @@ impl<F: FileSystem + Sync> Server<F> {
             if in_header.nodeid == ROOT_ID {
                 let filter = self.root_filter.as_ref().lock().unwrap();
                 if filter.is_enabled() {
-                    let name = dir_entry.name.to_str().map_err(|_| {
-                        io::Error::new(ErrorKind::InvalidInput, "invalid dir entry name")
-                    })?;
+                    let name = dir_entry
+                        .name
+                        .to_str()
+                        .map_err(|_| invalid_dir_entry_name_error())?;
                     f_info = Some(
                         filter
                             .get_allow_dir(name)
@@ -1535,6 +1543,63 @@ impl<F: FileSystem + Sync> Server<F> {
         };
 
         Ok((dir_entry, entry))
+    }
+
+    fn passthrough_readdirplus(
+        &self,
+        in_header: &InHeader,
+        fh: u64,
+        size: u32,
+        offset: u64,
+        cursor: &mut Writer,
+    ) -> io::Result<usize> {
+        let mut entries = self.fs.readdir(
+            Context::from(*in_header),
+            in_header.nodeid.into(),
+            fh.into(),
+            size,
+            offset,
+        )?;
+
+        let mut total_written = 0;
+        while let Some(dirent) = entries.next() {
+            let mut entry_inode = None;
+            let bytes_written = self.handle_dirent(in_header, dirent).and_then(|(d, e)| {
+                entry_inode = Some(e.inode);
+                let remaining = (size as usize).saturating_sub(total_written);
+                add_dirent(cursor, remaining, d, Some(e))
+            });
+            match bytes_written {
+                Ok(0) => {
+                    // No more space left in the buffer but we need to undo the lookup
+                    // that created the Entry or we will end up with mismatched lookup
+                    // counts.
+                    if let Some(inode) = entry_inode {
+                        self.fs.forget(Context::from(*in_header), inode.into(), 1);
+                    }
+                    break;
+                }
+                Ok(bytes_written) => {
+                    total_written += bytes_written;
+                }
+                Err(e) => {
+                    if let Some(inode) = entry_inode {
+                        self.fs.forget(Context::from(*in_header), inode.into(), 1);
+                    }
+
+                    if total_written == 0 {
+                        // We haven't filled any entries yet so we can just propagate the error.
+                        return Err(e);
+                    }
+
+                    // We already filled in some entries. Returning an error now will cause lookup
+                    // count mismatches for those entries so just return whatever we already have.
+                    break;
+                }
+            }
+        }
+
+        Ok(total_written)
     }
 
     fn readdirplus(&self, in_header: InHeader, mut r: Reader, mut w: Writer) -> Result<usize> {
@@ -1562,68 +1627,14 @@ impl<F: FileSystem + Sync> Server<F> {
         // Skip over enough bytes for the header.
         let unique = in_header.unique;
         let mut cursor = w.split_at(size_of::<OutHeader>()).unwrap();
-        let result = if in_header.nodeid == ROOT_ID
-            && self.root_filter.as_ref().lock().unwrap().is_enabled()
-        {
-            self.mock_readdirplus(&in_header, size, offset, &mut cursor)
-        } else {
-            match self.fs.readdir(
-                Context::from(in_header),
-                in_header.nodeid.into(),
-                fh.into(),
-                size,
-                offset,
-            ) {
-                Ok(mut entries) => {
-                    let mut total_written = 0;
-                    let mut err = None;
-                    while let Some(dirent) = entries.next() {
-                        let mut entry_inode = None;
-                        let bytes_written =
-                            self.handle_dirent(&in_header, dirent).and_then(|(d, e)| {
-                                entry_inode = Some(e.inode);
-                                let remaining = (size as usize).saturating_sub(total_written);
-                                add_dirent(&mut cursor, remaining, d, Some(e))
-                            });
-                        match bytes_written {
-                            Ok(0) => {
-                                // No more space left in the buffer but we need to undo the lookup
-                                // that created the Entry or we will end up with mismatched lookup
-                                // counts.
-                                if let Some(inode) = entry_inode {
-                                    self.fs.forget(Context::from(in_header), inode.into(), 1);
-                                }
-                                break;
-                            }
-                            Ok(bytes_written) => {
-                                total_written += bytes_written;
-                            }
-                            Err(e) => {
-                                if let Some(inode) = entry_inode {
-                                    self.fs.forget(Context::from(in_header), inode.into(), 1);
-                                }
-
-                                if total_written == 0 {
-                                    // We haven't filled any entries yet so we can just propagate
-                                    // the error.
-                                    err = Some(e);
-                                }
-
-                                // We already filled in some entries. Returning an error now will
-                                // cause lookup count mismatches for those entries so just return
-                                // whatever we already have.
-                                break;
-                            }
-                        }
-                    }
-                    if let Some(err) = err {
-                        Err(err)
-                    } else {
-                        Ok(total_written)
-                    }
-                }
+        let result = if in_header.nodeid == ROOT_ID {
+            match self.mock_readdirplus(&in_header, size, offset, &mut cursor) {
+                Ok(Some(total_written)) => Ok(total_written),
+                Ok(None) => self.passthrough_readdirplus(&in_header, fh, size, offset, &mut cursor),
                 Err(e) => Err(e),
             }
+        } else {
+            self.passthrough_readdirplus(&in_header, fh, size, offset, &mut cursor)
         };
 
         match result {
@@ -2055,6 +2066,10 @@ fn bytes_to_cstr(buf: &[u8]) -> Result<&CStr> {
     // Convert to a `CStr` first so that we can drop the '\0' byte at the end
     // and make sure there are no interior '\0' bytes.
     CStr::from_bytes_with_nul(buf).map_err(Error::InvalidCString)
+}
+
+fn invalid_dir_entry_name_error() -> io::Error {
+    io::Error::from_raw_os_error(libc::EILSEQ)
 }
 
 fn add_dirent(
