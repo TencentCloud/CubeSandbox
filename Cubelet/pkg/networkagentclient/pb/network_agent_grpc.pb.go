@@ -6,7 +6,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.1
 // - protoc             v5.28.3
-// source: Cubelet/pkg/networkagentclient/pb/network_agent.proto
+// source: pkg/networkagentclient/pb/network_agent.proto
 
 package networkagentv1
 
@@ -323,5 +323,5 @@ var NetworkAgent_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "Cubelet/pkg/networkagentclient/pb/network_agent.proto",
+	Metadata: "pkg/networkagentclient/pb/network_agent.proto",
 }

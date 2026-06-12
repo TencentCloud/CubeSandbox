@@ -382,7 +382,10 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate sandbox dns annotation failed: %v", err)
 	}
 	if len(dnsServers) > 0 {
-		data, _ := jsoniter.Marshal(dnsServers)
+		data, err := jsoniter.Marshal(dnsServers)
+		if err != nil {
+			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "marshal dns servers failed: %v", err)
+		}
 		additionalSandboxOpt = append(additionalSandboxOpt, oci.WithAnnotations(map[string]string{
 			constants.AnnotationsSandboxDNS: string(data),
 		}))
@@ -617,25 +620,34 @@ func WithCubeFsAnnotation(ctx context.Context,
 		rootfsC = append(rootfsC, ci.CubeRootfsInfo)
 	}
 
-	virtiofsConfig, err := virtiofs.GenVirtiofsConfig(shareDirs)
-	if err != nil {
-		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate virtiofs config failed: %v", err)
-	}
-	limit, err := workflow.GetQosFromReq(realReq, constants.MasterAnnotationsFSQos)
-	if err != nil {
-		return nil, err
-	}
-	if limit != nil {
-		virtiofsConfig.RateLimiter = *limit
-	}
+	if len(shareDirs) > 0 {
+		virtiofsConfig, err := virtiofs.GenVirtiofsConfig(shareDirs)
+		if err != nil {
+			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate virtiofs config failed: %v", err)
+		}
+		limit, err := workflow.GetQosFromReq(realReq, constants.MasterAnnotationsFSQos)
+		if err != nil {
+			return nil, err
+		}
+		if limit != nil {
+			virtiofsConfig.RateLimiter = *limit
+		}
 
-	if sandBox.VirtiofsMap == nil {
-		sandBox.VirtiofsMap = make(map[string]*virtiofs.VirtiofsConfig)
+		if sandBox.VirtiofsMap == nil {
+			sandBox.VirtiofsMap = make(map[string]*virtiofs.VirtiofsConfig)
+		}
+		sandBox.VirtiofsMap[constants.CubeDefaultNamespace] = virtiofsConfig
+		vc, err := jsoniter.Marshal(virtiofsConfig)
+		if err != nil {
+			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "marshal virtiofs config failed: %v", err)
+		}
+		fsstr := string(vc)
+		sandBox.FirstContainer().AddAnnotations(map[string]string{constants.AnnotationsFSKey: fsstr})
+		log.G(ctx).WithFields(CubeLog.Fields{
+			"method":  "WithCubeFsAnnotation",
+			"cube.fs": fsstr,
+		}).Debugf("with cube fs annotation")
 	}
-	sandBox.VirtiofsMap[constants.CubeDefaultNamespace] = virtiofsConfig
-	vc, _ := jsoniter.Marshal(virtiofsConfig)
-	fsstr := string(vc)
-	sandBox.FirstContainer().AddAnnotations(map[string]string{constants.AnnotationsFSKey: fsstr})
 	opts = append(opts, func(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
 		if s.Annotations == nil {
 			s.Annotations = make(map[string]string)
@@ -643,10 +655,6 @@ func WithCubeFsAnnotation(ctx context.Context,
 		for k, v := range sandBox.FirstContainer().Annotations {
 			s.Annotations[k] = v
 		}
-		log.G(ctx).WithFields(CubeLog.Fields{
-			"method":  "WithCubeFsAnnotation",
-			"cube.fs": fsstr,
-		}).Debugf("with cube fs annotation")
 		return nil
 	})
 	return opts, nil

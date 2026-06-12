@@ -6,7 +6,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v5.28.3
-// source: Cubelet/pkg/networkagentclient/pb/network_agent.proto
+// source: pkg/networkagentclient/pb/network_agent.proto
 
 package networkagentv1
 
@@ -41,7 +41,7 @@ type EnsureNetworkRequest struct {
 
 func (x *EnsureNetworkRequest) Reset() {
 	*x = EnsureNetworkRequest{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[0]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -53,7 +53,7 @@ func (x *EnsureNetworkRequest) String() string {
 func (*EnsureNetworkRequest) ProtoMessage() {}
 
 func (x *EnsureNetworkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[0]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -66,7 +66,7 @@ func (x *EnsureNetworkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureNetworkRequest.ProtoReflect.Descriptor instead.
 func (*EnsureNetworkRequest) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{0}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *EnsureNetworkRequest) GetSandboxId() string {
@@ -140,7 +140,7 @@ type EnsureNetworkResponse struct {
 
 func (x *EnsureNetworkResponse) Reset() {
 	*x = EnsureNetworkResponse{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[1]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -152,7 +152,7 @@ func (x *EnsureNetworkResponse) String() string {
 func (*EnsureNetworkResponse) ProtoMessage() {}
 
 func (x *EnsureNetworkResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[1]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -165,7 +165,7 @@ func (x *EnsureNetworkResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureNetworkResponse.ProtoReflect.Descriptor instead.
 func (*EnsureNetworkResponse) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{1}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *EnsureNetworkResponse) GetSandboxId() string {
@@ -229,7 +229,7 @@ type ReleaseNetworkRequest struct {
 
 func (x *ReleaseNetworkRequest) Reset() {
 	*x = ReleaseNetworkRequest{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[2]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -241,7 +241,7 @@ func (x *ReleaseNetworkRequest) String() string {
 func (*ReleaseNetworkRequest) ProtoMessage() {}
 
 func (x *ReleaseNetworkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[2]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -254,7 +254,7 @@ func (x *ReleaseNetworkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseNetworkRequest.ProtoReflect.Descriptor instead.
 func (*ReleaseNetworkRequest) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{2}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ReleaseNetworkRequest) GetSandboxId() string {
@@ -295,7 +295,7 @@ type ReleaseNetworkResponse struct {
 
 func (x *ReleaseNetworkResponse) Reset() {
 	*x = ReleaseNetworkResponse{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[3]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -307,7 +307,7 @@ func (x *ReleaseNetworkResponse) String() string {
 func (*ReleaseNetworkResponse) ProtoMessage() {}
 
 func (x *ReleaseNetworkResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[3]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -320,7 +320,7 @@ func (x *ReleaseNetworkResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseNetworkResponse.ProtoReflect.Descriptor instead.
 func (*ReleaseNetworkResponse) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{3}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ReleaseNetworkResponse) GetReleased() bool {
@@ -354,7 +354,7 @@ type ReconcileNetworkRequest struct {
 
 func (x *ReconcileNetworkRequest) Reset() {
 	*x = ReconcileNetworkRequest{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[4]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -366,7 +366,7 @@ func (x *ReconcileNetworkRequest) String() string {
 func (*ReconcileNetworkRequest) ProtoMessage() {}
 
 func (x *ReconcileNetworkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[4]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -379,7 +379,7 @@ func (x *ReconcileNetworkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileNetworkRequest.ProtoReflect.Descriptor instead.
 func (*ReconcileNetworkRequest) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{4}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ReconcileNetworkRequest) GetSandboxId() string {
@@ -461,7 +461,7 @@ type ReconcileNetworkResponse struct {
 
 func (x *ReconcileNetworkResponse) Reset() {
 	*x = ReconcileNetworkResponse{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[5]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -473,7 +473,7 @@ func (x *ReconcileNetworkResponse) String() string {
 func (*ReconcileNetworkResponse) ProtoMessage() {}
 
 func (x *ReconcileNetworkResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[5]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -486,7 +486,7 @@ func (x *ReconcileNetworkResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileNetworkResponse.ProtoReflect.Descriptor instead.
 func (*ReconcileNetworkResponse) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{5}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ReconcileNetworkResponse) GetSandboxId() string {
@@ -555,7 +555,7 @@ type GetNetworkRequest struct {
 
 func (x *GetNetworkRequest) Reset() {
 	*x = GetNetworkRequest{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[6]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -567,7 +567,7 @@ func (x *GetNetworkRequest) String() string {
 func (*GetNetworkRequest) ProtoMessage() {}
 
 func (x *GetNetworkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[6]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -580,7 +580,7 @@ func (x *GetNetworkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNetworkRequest.ProtoReflect.Descriptor instead.
 func (*GetNetworkRequest) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{6}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetNetworkRequest) GetSandboxId() string {
@@ -612,7 +612,7 @@ type GetNetworkResponse struct {
 
 func (x *GetNetworkResponse) Reset() {
 	*x = GetNetworkResponse{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[7]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -624,7 +624,7 @@ func (x *GetNetworkResponse) String() string {
 func (*GetNetworkResponse) ProtoMessage() {}
 
 func (x *GetNetworkResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[7]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -637,7 +637,7 @@ func (x *GetNetworkResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNetworkResponse.ProtoReflect.Descriptor instead.
 func (*GetNetworkResponse) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{7}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetNetworkResponse) GetSandboxId() string {
@@ -698,7 +698,7 @@ type HealthRequest struct {
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[8]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -710,7 +710,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[8]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -723,7 +723,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{8}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *HealthRequest) GetSandboxId() string {
@@ -743,7 +743,7 @@ type HealthResponse struct {
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[9]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -755,7 +755,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[9]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -768,7 +768,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{9}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *HealthResponse) GetOk() bool {
@@ -793,7 +793,7 @@ type ListNetworksRequest struct {
 
 func (x *ListNetworksRequest) Reset() {
 	*x = ListNetworksRequest{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[10]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -805,7 +805,7 @@ func (x *ListNetworksRequest) String() string {
 func (*ListNetworksRequest) ProtoMessage() {}
 
 func (x *ListNetworksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[10]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -818,7 +818,7 @@ func (x *ListNetworksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListNetworksRequest.ProtoReflect.Descriptor instead.
 func (*ListNetworksRequest) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{10}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{10}
 }
 
 type ListNetworksResponse struct {
@@ -830,7 +830,7 @@ type ListNetworksResponse struct {
 
 func (x *ListNetworksResponse) Reset() {
 	*x = ListNetworksResponse{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[11]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -842,7 +842,7 @@ func (x *ListNetworksResponse) String() string {
 func (*ListNetworksResponse) ProtoMessage() {}
 
 func (x *ListNetworksResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[11]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -855,7 +855,7 @@ func (x *ListNetworksResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListNetworksResponse.ProtoReflect.Descriptor instead.
 func (*ListNetworksResponse) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{11}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ListNetworksResponse) GetNetworks() []*NetworkState {
@@ -879,7 +879,7 @@ type NetworkState struct {
 
 func (x *NetworkState) Reset() {
 	*x = NetworkState{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[12]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -891,7 +891,7 @@ func (x *NetworkState) String() string {
 func (*NetworkState) ProtoMessage() {}
 
 func (x *NetworkState) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[12]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -904,7 +904,7 @@ func (x *NetworkState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkState.ProtoReflect.Descriptor instead.
 func (*NetworkState) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{12}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *NetworkState) GetSandboxId() string {
@@ -961,7 +961,7 @@ type PortMapping struct {
 
 func (x *PortMapping) Reset() {
 	*x = PortMapping{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[13]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -973,7 +973,7 @@ func (x *PortMapping) String() string {
 func (*PortMapping) ProtoMessage() {}
 
 func (x *PortMapping) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[13]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -986,7 +986,7 @@ func (x *PortMapping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PortMapping.ProtoReflect.Descriptor instead.
 func (*PortMapping) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{13}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PortMapping) GetProtocol() string {
@@ -1030,7 +1030,7 @@ type Interface struct {
 
 func (x *Interface) Reset() {
 	*x = Interface{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[14]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1042,7 +1042,7 @@ func (x *Interface) String() string {
 func (*Interface) ProtoMessage() {}
 
 func (x *Interface) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[14]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1055,7 +1055,7 @@ func (x *Interface) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Interface.ProtoReflect.Descriptor instead.
 func (*Interface) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{14}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Interface) GetName() string {
@@ -1104,7 +1104,7 @@ type Route struct {
 
 func (x *Route) Reset() {
 	*x = Route{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[15]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1116,7 +1116,7 @@ func (x *Route) String() string {
 func (*Route) ProtoMessage() {}
 
 func (x *Route) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[15]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1129,7 +1129,7 @@ func (x *Route) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Route.ProtoReflect.Descriptor instead.
 func (*Route) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{15}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Route) GetDestinationCidr() string {
@@ -1164,7 +1164,7 @@ type ARPNeighbor struct {
 
 func (x *ARPNeighbor) Reset() {
 	*x = ARPNeighbor{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[16]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1176,7 +1176,7 @@ func (x *ARPNeighbor) String() string {
 func (*ARPNeighbor) ProtoMessage() {}
 
 func (x *ARPNeighbor) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[16]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1189,7 +1189,7 @@ func (x *ARPNeighbor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ARPNeighbor.ProtoReflect.Descriptor instead.
 func (*ARPNeighbor) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{16}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ARPNeighbor) GetIp() string {
@@ -1226,7 +1226,7 @@ type CubeNetworkConfig struct {
 
 func (x *CubeNetworkConfig) Reset() {
 	*x = CubeNetworkConfig{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[17]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1238,7 +1238,7 @@ func (x *CubeNetworkConfig) String() string {
 func (*CubeNetworkConfig) ProtoMessage() {}
 
 func (x *CubeNetworkConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[17]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1251,7 +1251,7 @@ func (x *CubeNetworkConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CubeNetworkConfig.ProtoReflect.Descriptor instead.
 func (*CubeNetworkConfig) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{17}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CubeNetworkConfig) GetAllowInternetAccess() bool {
@@ -1293,7 +1293,7 @@ type EgressRule struct {
 
 func (x *EgressRule) Reset() {
 	*x = EgressRule{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[18]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1305,7 +1305,7 @@ func (x *EgressRule) String() string {
 func (*EgressRule) ProtoMessage() {}
 
 func (x *EgressRule) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[18]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1318,7 +1318,7 @@ func (x *EgressRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EgressRule.ProtoReflect.Descriptor instead.
 func (*EgressRule) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{18}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *EgressRule) GetName() string {
@@ -1355,7 +1355,7 @@ type EgressRuleMatch struct {
 
 func (x *EgressRuleMatch) Reset() {
 	*x = EgressRuleMatch{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[19]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1367,7 +1367,7 @@ func (x *EgressRuleMatch) String() string {
 func (*EgressRuleMatch) ProtoMessage() {}
 
 func (x *EgressRuleMatch) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[19]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1380,7 +1380,7 @@ func (x *EgressRuleMatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EgressRuleMatch.ProtoReflect.Descriptor instead.
 func (*EgressRuleMatch) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{19}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *EgressRuleMatch) GetSni() string {
@@ -1429,7 +1429,7 @@ type EgressRuleAction struct {
 
 func (x *EgressRuleAction) Reset() {
 	*x = EgressRuleAction{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[20]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1441,7 +1441,7 @@ func (x *EgressRuleAction) String() string {
 func (*EgressRuleAction) ProtoMessage() {}
 
 func (x *EgressRuleAction) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[20]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1454,7 +1454,7 @@ func (x *EgressRuleAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EgressRuleAction.ProtoReflect.Descriptor instead.
 func (*EgressRuleAction) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{20}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *EgressRuleAction) GetAllow() bool {
@@ -1489,7 +1489,7 @@ type EgressRuleInject struct {
 
 func (x *EgressRuleInject) Reset() {
 	*x = EgressRuleInject{}
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[21]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1501,7 +1501,7 @@ func (x *EgressRuleInject) String() string {
 func (*EgressRuleInject) ProtoMessage() {}
 
 func (x *EgressRuleInject) ProtoReflect() protoreflect.Message {
-	mi := &file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[21]
+	mi := &file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1514,7 +1514,7 @@ func (x *EgressRuleInject) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EgressRuleInject.ProtoReflect.Descriptor instead.
 func (*EgressRuleInject) Descriptor() ([]byte, []int) {
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{21}
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *EgressRuleInject) GetHeader() string {
@@ -1538,11 +1538,11 @@ func (x *EgressRuleInject) GetFormat() string {
 	return ""
 }
 
-var File_Cubelet_pkg_networkagentclient_pb_network_agent_proto protoreflect.FileDescriptor
+var File_pkg_networkagentclient_pb_network_agent_proto protoreflect.FileDescriptor
 
-const file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc = "" +
+const file_pkg_networkagentclient_pb_network_agent_proto_rawDesc = "" +
 	"\n" +
-	"5Cubelet/pkg/networkagentclient/pb/network_agent.proto\x12\x14network_agent.api.v1\"\x8a\x05\n" +
+	"-pkg/networkagentclient/pb/network_agent.proto\x12\x14network_agent.api.v1\"\x8a\x05\n" +
 	"\x14EnsureNetworkRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12'\n" +
@@ -1721,19 +1721,19 @@ const file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc = "" +
 	"\fListNetworks\x12).network_agent.api.v1.ListNetworksRequest\x1a*.network_agent.api.v1.ListNetworksResponseBIZGgithub.com/tencentcloud/CubeSandbox/network-agent/api/v1;networkagentv1b\x06proto3"
 
 var (
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescOnce sync.Once
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescData []byte
+	file_pkg_networkagentclient_pb_network_agent_proto_rawDescOnce sync.Once
+	file_pkg_networkagentclient_pb_network_agent_proto_rawDescData []byte
 )
 
-func file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP() []byte {
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescOnce.Do(func() {
-		file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc), len(file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc)))
+func file_pkg_networkagentclient_pb_network_agent_proto_rawDescGZIP() []byte {
+	file_pkg_networkagentclient_pb_network_agent_proto_rawDescOnce.Do(func() {
+		file_pkg_networkagentclient_pb_network_agent_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_pkg_networkagentclient_pb_network_agent_proto_rawDesc), len(file_pkg_networkagentclient_pb_network_agent_proto_rawDesc)))
 	})
-	return file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDescData
+	return file_pkg_networkagentclient_pb_network_agent_proto_rawDescData
 }
 
-var file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
-var file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_goTypes = []any{
+var file_pkg_networkagentclient_pb_network_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_pkg_networkagentclient_pb_network_agent_proto_goTypes = []any{
 	(*EnsureNetworkRequest)(nil),     // 0: network_agent.api.v1.EnsureNetworkRequest
 	(*EnsureNetworkResponse)(nil),    // 1: network_agent.api.v1.EnsureNetworkResponse
 	(*ReleaseNetworkRequest)(nil),    // 2: network_agent.api.v1.ReleaseNetworkRequest
@@ -1764,7 +1764,7 @@ var file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_goTypes = []any{
 	nil,                              // 27: network_agent.api.v1.ReconcileNetworkResponse.PersistMetadataEntry
 	nil,                              // 28: network_agent.api.v1.GetNetworkResponse.PersistMetadataEntry
 }
-var file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_depIdxs = []int32{
+var file_pkg_networkagentclient_pb_network_agent_proto_depIdxs = []int32{
 	14, // 0: network_agent.api.v1.EnsureNetworkRequest.interfaces:type_name -> network_agent.api.v1.Interface
 	15, // 1: network_agent.api.v1.EnsureNetworkRequest.routes:type_name -> network_agent.api.v1.Route
 	16, // 2: network_agent.api.v1.EnsureNetworkRequest.arp_neighbors:type_name -> network_agent.api.v1.ARPNeighbor
@@ -1819,33 +1819,33 @@ var file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_depIdxs = []int32
 	0,  // [0:35] is the sub-list for field type_name
 }
 
-func init() { file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_init() }
-func file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_init() {
-	if File_Cubelet_pkg_networkagentclient_pb_network_agent_proto != nil {
+func init() { file_pkg_networkagentclient_pb_network_agent_proto_init() }
+func file_pkg_networkagentclient_pb_network_agent_proto_init() {
+	if File_pkg_networkagentclient_pb_network_agent_proto != nil {
 		return
 	}
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[0].OneofWrappers = []any{}
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[4].OneofWrappers = []any{}
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[17].OneofWrappers = []any{}
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[18].OneofWrappers = []any{}
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[19].OneofWrappers = []any{}
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[20].OneofWrappers = []any{}
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes[21].OneofWrappers = []any{}
+	file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[0].OneofWrappers = []any{}
+	file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[4].OneofWrappers = []any{}
+	file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[17].OneofWrappers = []any{}
+	file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[18].OneofWrappers = []any{}
+	file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[19].OneofWrappers = []any{}
+	file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[20].OneofWrappers = []any{}
+	file_pkg_networkagentclient_pb_network_agent_proto_msgTypes[21].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc), len(file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_networkagentclient_pb_network_agent_proto_rawDesc), len(file_pkg_networkagentclient_pb_network_agent_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_goTypes,
-		DependencyIndexes: file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_depIdxs,
-		MessageInfos:      file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_msgTypes,
+		GoTypes:           file_pkg_networkagentclient_pb_network_agent_proto_goTypes,
+		DependencyIndexes: file_pkg_networkagentclient_pb_network_agent_proto_depIdxs,
+		MessageInfos:      file_pkg_networkagentclient_pb_network_agent_proto_msgTypes,
 	}.Build()
-	File_Cubelet_pkg_networkagentclient_pb_network_agent_proto = out.File
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_goTypes = nil
-	file_Cubelet_pkg_networkagentclient_pb_network_agent_proto_depIdxs = nil
+	File_pkg_networkagentclient_pb_network_agent_proto = out.File
+	file_pkg_networkagentclient_pb_network_agent_proto_goTypes = nil
+	file_pkg_networkagentclient_pb_network_agent_proto_depIdxs = nil
 }
