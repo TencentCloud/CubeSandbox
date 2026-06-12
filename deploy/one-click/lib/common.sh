@@ -525,6 +525,403 @@ upsert_env_kv() {
   mv -f "${tmp_file}" "${env_file}"
 }
 
+# ---------------------------------------------------------------------------
+# Config-preserving upgrade helpers (M3-1/M3-2/M3-3).
+#
+# These power install.sh's `--mode upgrade` flow:
+#   * detect_existing_install  - is there a prior one-click install?
+#   * read_env_key             - read a KEY from an env file without sourcing
+#   * read_version_field       - read a field from VERSION.txt
+#   * version_lt               - best-effort semver "<" comparison
+#   * merge_env_three_way      - merge old runtime env with new env.example
+#   * resolve_install_mode     - decide install vs upgrade (with TTY prompt)
+#   * preflight_upgrade        - role/downgrade/disk checks before upgrade
+#   * backup_before_upgrade    - snapshot config before replacing artifacts
+# ---------------------------------------------------------------------------
+
+# detect_existing_install: an install is "present" when its runtime env file
+# exists under the given prefix.
+detect_existing_install() {
+  local install_prefix="$1"
+  [[ -f "${install_prefix}/.one-click.env" ]]
+}
+
+# read_env_key: extract the raw value of an active KEY=VALUE line from a file
+# WITHOUT sourcing it (avoids executing arbitrary shell during preflight).
+read_env_key() {
+  local file="$1"
+  local key="$2"
+  [[ -f "${file}" ]] || return 0
+  sed -n "/^${key}=/{s/^${key}=//;p;q;}" "${file}" 2>/dev/null || true
+}
+
+# read_version_field: read `field=value` from a VERSION.txt-style file.
+read_version_field() {
+  local file="$1"
+  local field="$2"
+  [[ -f "${file}" ]] || return 0
+  sed -n "/^${field}=/{s/^${field}=//;p;q;}" "${file}" 2>/dev/null || true
+}
+
+# version_lt: return success when version $1 is strictly less than $2.
+# Only compares when BOTH look like dotted numeric versions (optionally
+# v-prefixed / with a pre-release suffix). Non-comparable inputs (e.g. git
+# SHAs) return failure so callers never block on them.
+version_lt() {
+  local a="${1#v}"
+  local b="${2#v}"
+  local ver_re='^[0-9]+(\.[0-9]+)*([.-].*)?$'
+  [[ "${a}" =~ ${ver_re} ]] || return 1
+  [[ "${b}" =~ ${ver_re} ]] || return 1
+  [[ "${a}" == "${b}" ]] && return 1
+  local first
+  first="$(printf '%s\n%s\n' "${a}" "${b}" | sort -V | head -n1)"
+  [[ "${first}" == "${a}" ]]
+}
+
+# merge_env_three_way: produce a merged runtime env that preserves the user's
+# existing values while adopting new keys/defaults from the new env.example.
+#
+#   merge_env_three_way NEW_EXAMPLE OLD_RUNTIME OLD_BASELINE NEW_DOTENV OUT DIFF
+#
+# OLD_BASELINE / NEW_DOTENV may be empty strings (absent). The merge is purely
+# line-based: every value is preserved with its original right-hand side, so
+# shell-sensitive payloads (${VAR} expansions, URLs with ://@, quotes) survive
+# untouched. The new env.example provides the structural template (comments,
+# ordering, new keys); old-only keys are appended verbatim and never dropped.
+merge_env_three_way() {
+  local new_example="$1"
+  local old_runtime="$2"
+  local old_baseline="$3"
+  local new_dotenv="$4"
+  local out_file="$5"
+  local diff_file="$6"
+
+  require_cmd python3
+  ensure_file "${new_example}"
+  ensure_file "${old_runtime}"
+
+  python3 - "${new_example}" "${old_runtime}" "${old_baseline}" "${new_dotenv}" "${out_file}" "${diff_file}" <<'PY'
+import re
+import sys
+
+new_example, old_runtime, old_baseline, new_dotenv, out_file, diff_file = sys.argv[1:7]
+
+KV_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
+
+
+def parse(path):
+    """Ordered dict key -> raw value for active KEY=VALUE lines (last wins).
+
+    KEY must start at column 0 (KV_RE is anchored); indented `KEY=value` lines
+    are treated as structural text and preserved verbatim. The one-click env
+    files never indent keys, so this is safe.
+    """
+    kv = {}
+    if not path:
+        return kv
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                # Strip both \n and a trailing \r so CRLF inputs compare and
+                # serialize consistently with the template's splitlines().
+                line = raw.rstrip("\r\n")
+                stripped = line.lstrip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                m = KV_RE.match(line)
+                if m:
+                    kv[m.group(1)] = m.group(2)
+    except FileNotFoundError:
+        pass
+    return kv
+
+
+new_defaults = parse(new_example)
+old_values = parse(old_runtime)
+old_baseline_vals = parse(old_baseline) if old_baseline else {}
+new_overrides = parse(new_dotenv) if new_dotenv else {}
+has_baseline = bool(old_baseline_vals)
+
+added = []
+updated_default = []
+preserved = []
+explicit = []
+
+out_lines = []
+with open(new_example, "r", encoding="utf-8") as fh:
+    template = fh.read().splitlines()
+
+for line in template:
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith("#"):
+        out_lines.append(line)
+        continue
+    m = KV_RE.match(line)
+    if not m:
+        out_lines.append(line)
+        continue
+    key = m.group(1)
+    tmpl_val = m.group(2)
+    chosen = tmpl_val
+    # Treat a new-bundle .env value as an explicit operator override ONLY when it
+    # differs from the new env.example default. This is intentional: the common
+    # way to create a .env is `cp env.example .env`, which would otherwise make
+    # every key an "override" and clobber the user's existing customizations.
+    if key in new_overrides and new_overrides[key] != new_defaults.get(key):
+        chosen = new_overrides[key]
+        explicit.append(key)
+    elif key in old_values:
+        ov = old_values[key]
+        if (has_baseline and key in old_baseline_vals
+                and ov == old_baseline_vals[key] and ov != tmpl_val):
+            chosen = tmpl_val
+            updated_default.append((key, ov, tmpl_val))
+        else:
+            chosen = ov
+            if ov != tmpl_val:
+                preserved.append((key, ov))
+    else:
+        added.append((key, tmpl_val))
+    out_lines.append("%s=%s" % (key, chosen))
+
+# Old-only keys (present in old runtime, absent from the new template) are
+# host/user specific (NODE_IP, ROLE, control-plane addr, custom vars). Never
+# drop them: append verbatim so the running system keeps working.
+extra = [(k, v) for k, v in old_values.items() if k not in new_defaults]
+if extra:
+    out_lines.append("")
+    out_lines.append("# --- preserved custom settings (not in env.example) ---")
+    for k, v in extra:
+        out_lines.append("%s=%s" % (k, v))
+
+with open(out_file, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(out_lines) + "\n")
+
+report = []
+report.append("env merge report (mode=%s)" % ("three-way" if has_baseline else "two-way-fallback"))
+report.append("")
+report.append("[added] new keys filled with new defaults: %d" % len(added))
+for k, v in added:
+    report.append("  + %s=%s" % (k, v))
+report.append("[default-updated] untouched keys adopting new default: %d" % len(updated_default))
+for k, ov, nv in updated_default:
+    report.append("  ~ %s: %s -> %s" % (k, ov, nv))
+report.append("[preserved] kept your customized values: %d" % len(preserved))
+for k, v in preserved:
+    report.append("  = %s=%s" % (k, v))
+report.append("[explicit] taken from new .env overrides: %d" % len(explicit))
+for k in explicit:
+    report.append("  ! %s" % k)
+report.append("[kept-extra] old-only keys not in new env.example (kept): %d" % len(extra))
+for k, v in extra:
+    report.append("  > %s=%s" % (k, v))
+
+with open(diff_file, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(report) + "\n")
+
+sys.stderr.write(
+    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, >%d kept-extra%s\n" % (
+        len(added), len(updated_default), len(preserved), len(extra),
+        "" if has_baseline else " (two-way fallback: no baseline)"))
+PY
+}
+
+# resolve_install_mode: decide between "install" (full reinstall) and
+# "upgrade" (config preserving). Prints the resolved mode to stdout; all
+# human-facing output goes to stderr so it can be captured via $(...).
+#
+#   resolve_install_mode REQUESTED_MODE INSTALL_PREFIX ASSUME_YES
+#
+# REQUESTED_MODE is one of "", install, upgrade, auto. When empty and an
+# existing install is detected, prompts on a TTY (default: upgrade) and falls
+# back to a full reinstall (with a loud warning) when non-interactive.
+resolve_install_mode() {
+  local requested="$1"
+  local install_prefix="$2"
+  local assume_yes="$3"
+
+  local existing="no"
+  detect_existing_install "${install_prefix}" && existing="yes"
+
+  case "${requested}" in
+    install)
+      printf 'install\n'
+      return 0
+      ;;
+    upgrade)
+      if [[ "${existing}" != "yes" ]]; then
+        die "no existing installation found under ${install_prefix} (missing .one-click.env); cannot upgrade. Run without --mode=upgrade for a fresh install."
+      fi
+      printf 'upgrade\n'
+      return 0
+      ;;
+    auto)
+      if [[ "${existing}" == "yes" ]]; then
+        printf 'upgrade\n'
+      else
+        printf 'install\n'
+      fi
+      return 0
+      ;;
+  esac
+
+  # Unset mode: default to install, but protect an existing install.
+  if [[ "${existing}" != "yes" ]]; then
+    printf 'install\n'
+    return 0
+  fi
+
+  if [[ "${assume_yes}" == "1" ]]; then
+    log "existing installation detected; --yes given, running config-preserving upgrade."
+    printf 'upgrade\n'
+    return 0
+  fi
+
+  if [[ -t 0 ]]; then
+    printf '%s' "[one-click] Existing installation detected under ${install_prefix}.
+[one-click] Run a config-preserving UPGRADE (keep your .one-click.env)? [Y/n]: " >&2
+    local reply=""
+    read -r reply || reply=""
+    case "${reply}" in
+      [Nn]|[Nn][Oo])
+        log "proceeding with full reinstall; existing config WILL be reset."
+        printf 'install\n'
+        ;;
+      *)
+        log "proceeding with config-preserving upgrade."
+        printf 'upgrade\n'
+        ;;
+    esac
+    return 0
+  fi
+
+  log "WARNING: existing installation detected but running non-interactively without --mode."
+  log "WARNING: defaulting to a full REINSTALL; your .one-click.env customizations WILL be reset."
+  log "WARNING: to preserve configuration, re-run with --mode=upgrade (or --yes)."
+  printf 'install\n'
+  return 0
+}
+
+# preflight_upgrade: fail-fast checks before a config-preserving upgrade.
+#
+#   preflight_upgrade INSTALL_PREFIX BUNDLE_DIR PACKAGE_TAR NEW_ROLE \
+#                     ALLOW_ROLE_CHANGE ALLOW_DOWNGRADE
+preflight_upgrade() {
+  local install_prefix="$1"
+  local bundle_dir="$2"
+  local package_tar="$3"
+  local new_role="$4"
+  local allow_role_change="$5"
+  local allow_downgrade="$6"
+
+  if [[ ! -d "${install_prefix}/scripts" ]]; then
+    log "WARNING: ${install_prefix}/scripts not found; existing install may be incomplete"
+  fi
+
+  local old_role
+  old_role="$(read_env_key "${install_prefix}/.one-click.env" ONE_CLICK_DEPLOY_ROLE)"
+  old_role="${old_role:-control}"
+  if [[ "${old_role}" != "${new_role}" ]]; then
+    if [[ "${allow_role_change}" == "1" ]]; then
+      log "WARNING: changing node role on upgrade: ${old_role} -> ${new_role} (--allow-role-change)"
+    else
+      die "refusing to change node role on upgrade: installed=${old_role}, requested=${new_role}. Re-run with the matching role, or pass --allow-role-change to override."
+    fi
+  fi
+
+  local old_ver new_ver
+  old_ver="$(read_version_field "${install_prefix}/VERSION.txt" release_version)"
+  new_ver="$(read_version_field "${bundle_dir}/VERSION.txt" release_version)"
+  if [[ -n "${old_ver}" && -n "${new_ver}" ]]; then
+    log "upgrade version: ${old_ver} -> ${new_ver}"
+    if [[ "${old_ver}" == "${new_ver}" ]]; then
+      log "note: re-installing the same version (${new_ver})."
+    elif version_lt "${new_ver}" "${old_ver}"; then
+      if [[ "${allow_downgrade}" == "1" ]]; then
+        log "WARNING: downgrade allowed: ${old_ver} -> ${new_ver} (--allow-downgrade)"
+      else
+        die "refusing to downgrade: installed=${old_ver}, package=${new_ver}. Pass --allow-downgrade to override."
+      fi
+    fi
+  else
+    log "version comparison skipped (missing/unparseable VERSION.txt); proceeding."
+  fi
+
+  preflight_upgrade_disk_space "${install_prefix}" "${package_tar}"
+}
+
+# preflight_upgrade_disk_space: ensure enough free space for extract + copy +
+# backup. Best-effort: skips silently when df/stat are unavailable.
+preflight_upgrade_disk_space() {
+  local install_prefix="$1"
+  local package_tar="$2"
+
+  command -v df >/dev/null 2>&1 || { log "df unavailable; skipping disk space preflight"; return 0; }
+  command -v stat >/dev/null 2>&1 || { log "stat unavailable; skipping disk space preflight"; return 0; }
+  [[ -f "${package_tar}" ]] || return 0
+
+  local pkg_bytes need_kb avail_kb check
+  pkg_bytes="$(stat -c %s "${package_tar}" 2>/dev/null || echo 0)"
+  # New artifacts + extraction headroom: ~3x the compressed package + 100MB.
+  need_kb=$(( (pkg_bytes / 1024) * 3 + 102400 ))
+
+  check="${install_prefix}"
+  while [[ ! -e "${check}" ]]; do
+    local parent
+    parent="$(dirname "${check}")"
+    [[ "${parent}" != "${check}" ]] || break
+    check="${parent}"
+  done
+
+  avail_kb="$(df -Pk "${check}" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [[ -n "${avail_kb}" && "${avail_kb}" =~ ^[0-9]+$ && "${need_kb}" -gt 0 && "${avail_kb}" -lt "${need_kb}" ]]; then
+    die "insufficient disk space for upgrade under ${check}: need ~$((need_kb / 1024))MB, available $((avail_kb / 1024))MB"
+  fi
+  if [[ -n "${avail_kb}" && "${avail_kb}" =~ ^[0-9]+$ ]]; then
+    log "disk space preflight OK ($((avail_kb / 1024))MB available, ~$((need_kb / 1024))MB required)"
+  fi
+}
+
+# backup_before_upgrade: snapshot the runtime env + component configs + version
+# metadata into a timestamped backup dir. Prints the backup dir to stdout.
+backup_before_upgrade() {
+  local install_prefix="$1"
+  local ts backup_dir rel
+  ts="$(date +%Y%m%d-%H%M%S)"
+  backup_dir="${install_prefix}/.backup/upgrade-${ts}"
+  mkdir -p "${backup_dir}"
+
+  for rel in \
+    ".one-click.env" \
+    "env.example" \
+    "VERSION.txt" \
+    "release-manifest.json" \
+    "CubeMaster/conf.yaml" \
+    "Cubelet/config/config.toml" \
+    "cube-shim/conf/config-cube.toml" \
+    "network-agent/network-agent.yaml" \
+    "cubeproxy/global.conf" \
+    "cubeproxy/nginx.conf" \
+    "coredns/Corefile" \
+    "coredns/resolv.conf.upstream" \
+    "webui/nginx.generated.conf"
+  do
+    if [[ -f "${install_prefix}/${rel}" ]]; then
+      mkdir -p "${backup_dir}/$(dirname "${rel}")"
+      cp -a "${install_prefix}/${rel}" "${backup_dir}/${rel}"
+    fi
+  done
+
+  if [[ -d "${install_prefix}/Cubelet/dynamicconf" ]]; then
+    mkdir -p "${backup_dir}/Cubelet"
+    cp -a "${install_prefix}/Cubelet/dynamicconf" "${backup_dir}/Cubelet/dynamicconf"
+  fi
+
+  log "backed up existing config to ${backup_dir}"
+  printf '%s\n' "${backup_dir}"
+}
+
 detect_pkg_manager() {
   if command -v apt-get >/dev/null 2>&1; then
     printf 'apt'
@@ -818,6 +1215,12 @@ _check_cidr_conflict() {
 # to prevent sed command injection (sed 'w' flag) and env file shell injection.
 check_cidr_preflight() {
   local cidr="${1:-}"
+  # Optional second arg forces skipping host-conflict detection (format
+  # validation is always enforced). Defaults to the env bypass flag. The
+  # upgrade flow passes 1 here: the preserved CIDR is already in use by this
+  # cluster's own cubevs bridge/route, which would otherwise be misdetected as
+  # a conflict and block the upgrade.
+  local skip_conflict="${2:-${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}}"
 
   # When env var not set: skip validation, use config.toml default
   if [[ -z "${cidr}" ]]; then
@@ -889,8 +1292,8 @@ check_cidr_preflight() {
   # ======================================================================
 
   # 5. Check bypass flag -- only skips conflict detection, not format validation
-  if [[ "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}" == "1" ]]; then
-    log "CUBE_SANDBOX_NETWORK_CIDR conflict check SKIPPED (bypass flag set) -- CIDR: ${cidr}"
+  if [[ "${skip_conflict}" == "1" ]]; then
+    log "CUBE_SANDBOX_NETWORK_CIDR conflict check SKIPPED -- CIDR: ${cidr}"
     return 0
   fi
 

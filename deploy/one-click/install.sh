@@ -7,13 +7,44 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
+# Install mode and upgrade-related flags (M3-1/M3-2/M3-3).
+#   --mode=install   full reinstall (default; existing config is reset)
+#   --mode=upgrade   config-preserving upgrade (requires an existing install)
+#   --mode=auto      upgrade when an existing install is detected, else install
+# When --mode is omitted and an existing install is detected, the installer
+# prompts on a TTY and falls back to a full reinstall (with a warning) when
+# running non-interactively.
+ONE_CLICK_MODE="${ONE_CLICK_MODE:-}"
+ONE_CLICK_ASSUME_YES="${ONE_CLICK_ASSUME_YES:-0}"
+ONE_CLICK_ALLOW_DOWNGRADE="${ONE_CLICK_ALLOW_DOWNGRADE:-0}"
+ONE_CLICK_ALLOW_ROLE_CHANGE="${ONE_CLICK_ALLOW_ROLE_CHANGE:-0}"
+
 for arg in "$@"; do
   case "${arg}" in
     --node-ip=*)
       export CUBE_SANDBOX_NODE_IP="${arg#--node-ip=}"
       ;;
+    --mode=*)
+      ONE_CLICK_MODE="${arg#--mode=}"
+      ;;
+    -y|--yes)
+      ONE_CLICK_ASSUME_YES=1
+      ;;
+    --allow-downgrade)
+      ONE_CLICK_ALLOW_DOWNGRADE=1
+      ;;
+    --allow-role-change)
+      ONE_CLICK_ALLOW_ROLE_CHANGE=1
+      ;;
   esac
 done
+
+case "${ONE_CLICK_MODE}" in
+  ""|install|upgrade|auto) ;;
+  *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
+esac
+
+require_root
 
 ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
 if [[ -f "${ENV_FILE}" ]]; then
@@ -23,28 +54,27 @@ fi
 DEPLOY_ROLE="$(one_click_deploy_role)"
 
 # ---- External MySQL / Redis support ----
-# Set CUBE_EXTERNAL_MYSQL_HOST to point CubeSandbox at an existing MySQL server
-# instead of the bundled local Docker container. When set, install.sh will:
-#   1. Patch CubeMaster conf.yaml with the external connection details
-#   2. Persist the external endpoint to .one-click.env so every systemd unit
-#      and helper script (CubeAPI DATABASE_URL, cube-proxy redis, quickcheck...)
-#      consumes it instead of the local container
-#   3. Mask the cube-sandbox-mysql systemd service so it never starts
-CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
-CUBE_EXTERNAL_MYSQL_PORT="${CUBE_EXTERNAL_MYSQL_PORT:-3306}"
-CUBE_EXTERNAL_MYSQL_USER="${CUBE_EXTERNAL_MYSQL_USER:-cube}"
-CUBE_EXTERNAL_MYSQL_PASSWORD="${CUBE_EXTERNAL_MYSQL_PASSWORD:-cube_pass}"
-# Default the external DB name from CUBE_SANDBOX_MYSQL_DB so it resolves to the
-# same value up-with-deps.sh derives independently. Otherwise a custom
-# CUBE_SANDBOX_MYSQL_DB (without an explicit CUBE_EXTERNAL_MYSQL_DB) would make
-# the persisted .one-click.env and the seed step disagree on the database name.
-CUBE_EXTERNAL_MYSQL_DB="${CUBE_EXTERNAL_MYSQL_DB:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}"
+# Set CUBE_EXTERNAL_MYSQL_HOST / CUBE_EXTERNAL_REDIS_HOST to use external
+# services instead of the bundled local Docker containers. Defaults are filled
+# after the optional upgrade env merge so they are based on the final runtime
+# configuration.
+init_external_dep_defaults() {
+  CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
+  CUBE_EXTERNAL_MYSQL_PORT="${CUBE_EXTERNAL_MYSQL_PORT:-3306}"
+  CUBE_EXTERNAL_MYSQL_USER="${CUBE_EXTERNAL_MYSQL_USER:-cube}"
+  CUBE_EXTERNAL_MYSQL_PASSWORD="${CUBE_EXTERNAL_MYSQL_PASSWORD:-cube_pass}"
+  # Default the external DB name from CUBE_SANDBOX_MYSQL_DB so it resolves to the
+  # same value up-with-deps.sh derives independently. Otherwise a custom
+  # CUBE_SANDBOX_MYSQL_DB (without an explicit CUBE_EXTERNAL_MYSQL_DB) would make
+  # the persisted .one-click.env and the seed step disagree on the database name.
+  CUBE_EXTERNAL_MYSQL_DB="${CUBE_EXTERNAL_MYSQL_DB:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}"
 
-# Set CUBE_EXTERNAL_REDIS_HOST to use an external Redis instance. Mirrors the
-# MySQL behaviour above (patch conf.yaml, persist env, mask local redis unit).
-CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
-CUBE_EXTERNAL_REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-6379}"
-CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-ceuhvu123}"
+  # Mirrors the MySQL behaviour above (patch conf.yaml, persist env, mask local
+  # redis unit).
+  CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
+  CUBE_EXTERNAL_REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-6379}"
+  CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-ceuhvu123}"
+}
 
 # Guard against shipping the example/default credentials to a real external
 # server. The defaults (cube_pass / ceuhvu123) are published in env.example and
@@ -63,6 +93,62 @@ warn_default_external_credentials() {
 
 TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
 INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
+
+# Resolve install vs upgrade mode and, for upgrades, run preflight + backup and
+# build the config-preserving merged env BEFORE any destructive change. The
+# merged env is sourced so the rest of the installer operates with the user's
+# existing values (ports, CIDR, node IP, role, ...).
+PACKAGE_TAR="${ONE_CLICK_PACKAGE_TAR:-${SCRIPT_DIR}/assets/package/sandbox-package.tar.gz}"
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "${WORK_DIR}"' EXIT
+
+INSTALL_MODE="$(resolve_install_mode "${ONE_CLICK_MODE}" "${INSTALL_PREFIX}" "${ONE_CLICK_ASSUME_YES}")"
+log "install mode: ${INSTALL_MODE}"
+
+MERGED_ENV=""
+ENV_DIFF_FILE=""
+UPGRADE_BACKUP_DIR=""
+if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
+  RUNTIME_ENV_OLD="${INSTALL_PREFIX}/.one-click.env"
+  ensure_file "${RUNTIME_ENV_OLD}"
+
+  preflight_upgrade \
+    "${INSTALL_PREFIX}" \
+    "${SCRIPT_DIR}" \
+    "${PACKAGE_TAR}" \
+    "${DEPLOY_ROLE}" \
+    "${ONE_CLICK_ALLOW_ROLE_CHANGE}" \
+    "${ONE_CLICK_ALLOW_DOWNGRADE}"
+
+  # Build the merged env into WORK_DIR (the on-disk config backup is taken later,
+  # only after all fail-fast preflights pass, to avoid leaving stray backups).
+  MERGED_ENV="${WORK_DIR}/merged.env"
+  ENV_DIFF_FILE="${WORK_DIR}/env-diff.txt"
+
+  MERGE_NEW_DOTENV=""
+  [[ -f "${ENV_FILE}" ]] && MERGE_NEW_DOTENV="${ENV_FILE}"
+  MERGE_OLD_BASELINE=""
+  [[ -f "${INSTALL_PREFIX}/env.example" ]] && MERGE_OLD_BASELINE="${INSTALL_PREFIX}/env.example"
+
+  merge_env_three_way \
+    "${SCRIPT_DIR}/env.example" \
+    "${RUNTIME_ENV_OLD}" \
+    "${MERGE_OLD_BASELINE}" \
+    "${MERGE_NEW_DOTENV}" \
+    "${MERGED_ENV}" \
+    "${ENV_DIFF_FILE}"
+  if [[ -z "${MERGE_OLD_BASELINE}" ]]; then
+    log "note: no env.example baseline from the previous install; used two-way merge. Future upgrades will use a full three-way merge."
+  fi
+
+  # Override bundle/default values with the merged (old-priority) env so the
+  # rest of the installer keeps the user's existing configuration.
+  load_env_file "${MERGED_ENV}"
+  DEPLOY_ROLE="$(one_click_deploy_role)"
+fi
+
+init_external_dep_defaults
+
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
 case "${CUBE_PVM_ENABLE}" in
   0|1) ;;
@@ -780,8 +866,6 @@ mask_external_dep_services() {
   systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
-require_root
-
 # Run critical preflight checks that do not depend on dependency installation first
 # to ensure we fail fast before installing or modifying any local system packages.
 check_hardware_preflight
@@ -804,7 +888,15 @@ fi
 # Validate cubevs CIDR from env var (if set)
 CUBE_SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-}"
 if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR}" ]]; then
-  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}"
+  # On upgrade the CIDR is the cluster's own (preserved from the old install);
+  # its existing cubevs bridge/route would self-trigger the host-conflict scan,
+  # so skip conflict detection (format validation still runs) while still
+  # honoring an explicit user bypass flag.
+  cidr_skip_conflict=0
+  if [[ "${INSTALL_MODE}" == "upgrade" || "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}" == "1" ]]; then
+    cidr_skip_conflict=1
+  fi
+  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}"
   export CUBE_SANDBOX_NETWORK_CIDR
 fi
 
@@ -815,10 +907,6 @@ check_external_deps_preflight
 if needs_docker_for_install; then
   configure_tencent_docker_mirror
 fi
-
-PACKAGE_TAR="${ONE_CLICK_PACKAGE_TAR:-${SCRIPT_DIR}/assets/package/sandbox-package.tar.gz}"
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "${WORK_DIR}"' EXIT
 
 ensure_file "${PACKAGE_TAR}"
 validate_declared_release_manifest "${SCRIPT_DIR}"
@@ -839,6 +927,16 @@ log "stopping existing systemd deployment under ${INSTALL_PREFIX}"
 stop_existing_systemd_deployment
 stop_existing_legacy_deployment "${installed_role}"
 
+# Upgrade: snapshot existing config now that all fail-fast preflights have
+# passed and right before any destructive change, then stash the env diff.
+if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
+  UPGRADE_BACKUP_DIR="$(backup_before_upgrade "${INSTALL_PREFIX}")"
+  if [[ -n "${ENV_DIFF_FILE}" && -f "${ENV_DIFF_FILE}" ]]; then
+    cp -f "${ENV_DIFF_FILE}" "${UPGRADE_BACKUP_DIR}/env-diff.txt"
+    log "env merge diff written to ${UPGRADE_BACKUP_DIR}/env-diff.txt"
+  fi
+fi
+
 if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
   rm -rf \
     "${INSTALL_PREFIX}/network-agent" \
@@ -857,7 +955,9 @@ if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
     "${INSTALL_PREFIX}/sql" \
     "${INSTALL_PREFIX}/.one-click.env"
 else
-  rm -rf "${INSTALL_PREFIX}"
+  # Full wipe of a custom prefix, but preserve any upgrade backup directory so
+  # the config snapshot survives for recovery/rollback.
+  find "${INSTALL_PREFIX}" -mindepth 1 -maxdepth 1 ! -name '.backup' -exec rm -rf {} +
 fi
 
 mkdir -p "${INSTALL_PREFIX}"
@@ -895,7 +995,10 @@ if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
 fi
 
 RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env"
-if [[ -f "${ENV_FILE}" ]]; then
+if [[ "${INSTALL_MODE}" == "upgrade" && -n "${MERGED_ENV}" ]]; then
+  # Upgrade: write the config-preserving merged env as the runtime env.
+  cp -f "${MERGED_ENV}" "${RUNTIME_ENV_FILE}"
+elif [[ -f "${ENV_FILE}" ]]; then
   cp -f "${ENV_FILE}" "${RUNTIME_ENV_FILE}"
 else
   : > "${RUNTIME_ENV_FILE}"
@@ -911,6 +1014,12 @@ chmod 600 "${RUNTIME_ENV_FILE}"
 if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then
   cp -f "${SCRIPT_DIR}/VERSION.txt" "${INSTALL_PREFIX}/VERSION.txt"
   log "installed VERSION.txt to ${INSTALL_PREFIX}/VERSION.txt"
+fi
+# Persist the env template as a baseline so the NEXT upgrade can perform a full
+# three-way merge (distinguishing user-customized values from old defaults).
+if [[ -f "${SCRIPT_DIR}/env.example" ]]; then
+  cp -f "${SCRIPT_DIR}/env.example" "${INSTALL_PREFIX}/env.example"
+  log "installed env.example baseline to ${INSTALL_PREFIX}/env.example"
 fi
 manifest_rel="$(declared_release_manifest_relpath "${SCRIPT_DIR}/VERSION.txt")"
 if [[ -n "${manifest_rel}" ]]; then
@@ -978,6 +1087,11 @@ chmod +x "${INSTALL_PREFIX}/scripts/cube-egress/"*.sh 2>/dev/null || true
 
 if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
   cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"
+  # SECURITY: refuse to patch a symlink -- sed -i follows symlinks, which could
+  # let an attacker with write access to the prefix overwrite arbitrary files.
+  if [[ -L "${cubelet_config}" ]]; then
+    die "refusing to patch a symlink target: ${cubelet_config} -> $(readlink "${cubelet_config}")"
+  fi
   if grep -Eq '^[[:space:]]*eth_name = "' "${cubelet_config}"; then
     sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"/" "${cubelet_config}"
     if ! grep -Fq "eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"" "${cubelet_config}"; then
