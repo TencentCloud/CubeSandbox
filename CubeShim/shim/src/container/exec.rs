@@ -33,6 +33,11 @@ pub struct Tty {
 }
 
 impl Exec {
+    /// True when forwarding the init container log (exec_id is empty).
+    fn is_init_log(&self) -> bool {
+        self.id.is_empty()
+    }
+
     /// Spawn stdout/stderr forwarding sub-tasks for exec processes.
     /// Returns immediately; the spawned tasks run until the stream closes.
     pub async fn forward_std(
@@ -44,15 +49,10 @@ impl Exec {
         let state_in = state.clone();
         let client_in = client.clone();
         let log_in = log.clone();
-
         let exec_in = self.clone();
-        // exec processes have no external cancel; keep the sender alive inside
-        // each spawned task so the watch receiver is not immediately closed.
-        let (cancel_tx_in, cancel_rx_in) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
-            let _keep_alive = cancel_tx_in;
             exec_in
-                .forward_stdin(state_in, client_in, log_in, cancel_rx_in)
+                .forward_stdin(state_in, client_in, log_in)
                 .await;
         });
 
@@ -60,19 +60,15 @@ impl Exec {
         let client_out = client.clone();
         let log_out = log.clone();
         let exec_out = self.clone();
-        let (cancel_tx_out, cancel_rx_out) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
-            let _keep_alive = cancel_tx_out;
             exec_out
-                .forward_stdout(state_out, client_out, log_out, cancel_rx_out)
+                .forward_stdout(state_out, client_out, log_out, None)
                 .await;
         });
 
         let exec = self.clone();
-        let (cancel_tx_err, cancel_rx_err) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
-            let _keep_alive = cancel_tx_err;
-            exec.forward_stderr(state, client, log, cancel_rx_err).await;
+            exec.forward_stderr(state, client, log, None).await;
         });
     }
 
@@ -86,9 +82,6 @@ impl Exec {
         log: Log,
         cancel_rx: tokio::sync::watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
-        // ContainerState is required for the forwarding loops (they select on
-        // the process exit / VM-pause channel).  If it is somehow absent we
-        // cannot forward; return a no-op task.
         let (state_out, state_err) = match self.state.clone() {
             Some(s) => (s.clone(), s),
             None => {
@@ -107,17 +100,14 @@ impl Exec {
         tokio::spawn(async move {
             let h_out = tokio::spawn(async move {
                 exec_out
-                    .forward_stdout(state_out, client_out, log_out, cancel_out)
+                    .forward_stdout(state_out, client_out, log_out, Some(cancel_out))
                     .await;
             });
             let h_err = tokio::spawn(async move {
                 exec_err
-                    .forward_stderr(state_err, client, log, cancel_err)
+                    .forward_stderr(state_err, client, log, Some(cancel_err))
                     .await;
             });
-            // Await both sub-tasks so the outer JoinHandle represents true
-            // completion: when the caller awaits this handle it knows both
-            // vsock reads have finished.
             let _ = tokio::join!(h_out, h_err);
         })
     }
@@ -127,7 +117,6 @@ impl Exec {
         _state: ContainerState,
         client: agent_ttrpc::AgentServiceClient,
         log: Log,
-        mut cancel: tokio::sync::watch::Receiver<bool>,
     ) {
         infof!(log, "forward stdin start");
         if self.tty.stdin.is_empty() {
@@ -162,17 +151,7 @@ impl Exec {
         let ctx = context::Context::default();
 
         loop {
-            let res = tokio::select! {
-                _ = cancel.changed() => {
-                    if *cancel.borrow() {
-                        infof!(log, "exec:{} forward stdin cancelled", self.id.clone());
-                        return;
-                    }
-                    continue;
-                }
-                // Block until user input or FIFO close; no timeout on idle.
-                res = file.read(&mut buf) => res,
-            };
+            let res = file.read(&mut buf).await;
             if let Err(e) = res {
                 infof!(
                     log,
@@ -218,12 +197,102 @@ impl Exec {
         }
     }
 
+    async fn open_stdout_sink(
+        &self,
+        log: &Log,
+    ) -> Result<tokio::fs::File, ()> {
+        if self.is_init_log() {
+            match tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(LOG_FILE_MODE)
+                .open(self.tty.stdout.clone())
+                .await
+            {
+                Ok(file) => Ok(file),
+                Err(e) => {
+                    errf!(
+                        log,
+                        "exec:{}, open stdout log file:{} failed:{}",
+                        self.id.clone(),
+                        self.tty.stdout.clone(),
+                        e
+                    );
+                    Err(())
+                }
+            }
+        } else {
+            match OpenOptions::new()
+                .write(true)
+                .open(self.tty.stdout.clone())
+                .await
+            {
+                Ok(file) => Ok(file),
+                Err(e) => {
+                    errf!(
+                        log,
+                        "exec:{}, open stdout fifo:{} failed:{}",
+                        self.id.clone(),
+                        self.tty.stdout.clone(),
+                        e
+                    );
+                    Err(())
+                }
+            }
+        }
+    }
+
+    async fn open_stderr_sink(
+        &self,
+        log: &Log,
+    ) -> Result<tokio::fs::File, ()> {
+        if self.is_init_log() {
+            match tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(LOG_FILE_MODE)
+                .open(self.tty.stderr.clone())
+                .await
+            {
+                Ok(file) => Ok(file),
+                Err(e) => {
+                    errf!(
+                        log,
+                        "exec:{}, open stderr log file:{} failed:{}",
+                        self.id.clone(),
+                        self.tty.stderr.clone(),
+                        e
+                    );
+                    Err(())
+                }
+            }
+        } else {
+            match OpenOptions::new()
+                .write(true)
+                .open(self.tty.stderr.clone())
+                .await
+            {
+                Ok(file) => Ok(file),
+                Err(e) => {
+                    errf!(
+                        log,
+                        "exec:{}, open stderr fifo:{} failed:{}",
+                        self.id.clone(),
+                        self.tty.stderr.clone(),
+                        e
+                    );
+                    Err(())
+                }
+            }
+        }
+    }
+
     pub async fn forward_stdout(
         &self,
         _state: ContainerState,
         client: agent_ttrpc::AgentServiceClient,
         log: Log,
-        mut cancel: tokio::sync::watch::Receiver<bool>,
+        cancel: Option<tokio::sync::watch::Receiver<bool>>,
     ) {
         infof!(log, "forward stdout start");
         if self.tty.stdout.is_empty() {
@@ -231,24 +300,9 @@ impl Exec {
             return;
         }
 
-        let mut file = match tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(LOG_FILE_MODE)
-            .open(self.tty.stdout.clone())
-            .await
-        {
+        let mut file = match self.open_stdout_sink(&log).await {
             Ok(file) => file,
-            Err(e) => {
-                errf!(
-                    log,
-                    "exec:{}, open stdout file:{} failed:{}",
-                    self.id.clone(),
-                    self.tty.stdout.clone(),
-                    e
-                );
-                return;
-            }
+            Err(()) => return,
         };
 
         let req = agent::ReadStreamRequest {
@@ -257,42 +311,29 @@ impl Exec {
             len: 4096,
             ..Default::default()
         };
-        // No RPC timeout: log/exec stdout reads may idle for long periods between
-        // lines; exit is driven by cancel (pause/snapshot) or vsock/RPC errors.
         let ctx = context::Context::default();
-        loop {
-            tokio::select! {
-                // Cancel signal: pause / snapshot / destroy path.
-                // watch::changed() resolves as soon as the sender sends true.
-                _ = cancel.changed() => {
-                    if *cancel.borrow() {
-                        infof!(log, "exec:{} forward stdout cancelled", self.id.clone());
-                        return;
-                    }
-                }
-                res = client.read_stdout(ctx.clone(), &req) => {
-                    match res {
-                        Err(e) => {
-                            debugf!(
-                                log,
-                                "exec:{}, read process stdout failed:{}",
-                                self.id.clone(),
-                                e
-                            );
+
+        if let Some(mut cancel) = cancel {
+            loop {
+                tokio::select! {
+                    _ = cancel.changed() => {
+                        if *cancel.borrow() {
+                            infof!(log, "exec:{} forward stdout cancelled", self.id.clone());
                             return;
                         }
-                        Ok(rsp) => {
-                            if let Err(e) = file.write_all(&rsp.data).await {
-                                infof!(
-                                    log,
-                                    "exec:{}, write process stdout failed:{}",
-                                    self.id.clone(),
-                                    e
-                                );
-                                return;
-                            }
+                    }
+                    res = client.read_stdout(ctx.clone(), &req) => {
+                        if !Self::handle_read_stdout(&log, &self.id, &mut file, res).await {
+                            return;
                         }
                     }
+                }
+            }
+        } else {
+            loop {
+                let res = client.read_stdout(ctx.clone(), &req).await;
+                if !Self::handle_read_stdout(&log, &self.id, &mut file, res).await {
+                    return;
                 }
             }
         }
@@ -303,7 +344,7 @@ impl Exec {
         _state: ContainerState,
         client: agent_ttrpc::AgentServiceClient,
         log: Log,
-        mut cancel: tokio::sync::watch::Receiver<bool>,
+        cancel: Option<tokio::sync::watch::Receiver<bool>>,
     ) {
         infof!(log, "forward stderr start");
         if self.tty.stderr.is_empty() {
@@ -311,24 +352,9 @@ impl Exec {
             return;
         }
 
-        let mut file = match tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(LOG_FILE_MODE)
-            .open(self.tty.stderr.clone())
-            .await
-        {
+        let mut file = match self.open_stderr_sink(&log).await {
             Ok(file) => file,
-            Err(e) => {
-                errf!(
-                    log,
-                    "exec:{}, open stderr file:{} failed:{}",
-                    self.id.clone(),
-                    self.tty.stderr.clone(),
-                    e
-                );
-                return;
-            }
+            Err(()) => return,
         };
 
         let req = agent::ReadStreamRequest {
@@ -338,38 +364,83 @@ impl Exec {
             ..Default::default()
         };
         let ctx = context::Context::default();
-        loop {
-            tokio::select! {
-                _ = cancel.changed() => {
-                    if *cancel.borrow() {
-                        infof!(log, "exec:{} forward stderr cancelled", self.id.clone());
-                        return;
-                    }
-                }
-                res = client.read_stderr(ctx.clone(), &req) => {
-                    match res {
-                        Err(e) => {
-                            debugf!(
-                                log,
-                                "exec:{}, read process stderr failed:{}",
-                                self.id.clone(),
-                                e
-                            );
+
+        if let Some(mut cancel) = cancel {
+            loop {
+                tokio::select! {
+                    _ = cancel.changed() => {
+                        if *cancel.borrow() {
+                            infof!(log, "exec:{} forward stderr cancelled", self.id.clone());
                             return;
                         }
-                        Ok(rsp) => {
-                            if let Err(e) = file.write_all(&rsp.data).await {
-                                infof!(
-                                    log,
-                                    "exec:{}, write process stderr failed:{}",
-                                    self.id.clone(),
-                                    e
-                                );
-                                return;
-                            }
+                    }
+                    res = client.read_stderr(ctx.clone(), &req) => {
+                        if !Self::handle_read_stderr(&log, &self.id, &mut file, res).await {
+                            return;
                         }
                     }
                 }
+            }
+        } else {
+            loop {
+                let res = client.read_stderr(ctx.clone(), &req).await;
+                if !Self::handle_read_stderr(&log, &self.id, &mut file, res).await {
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn handle_read_stdout(
+        log: &Log,
+        exec_id: &str,
+        file: &mut tokio::fs::File,
+        res: Result<agent::ReadStreamResponse, ttrpc::Error>,
+    ) -> bool {
+        match res {
+            Err(e) => {
+                debugf!(log, "exec:{}, read process stdout failed:{}", exec_id, e);
+                false
+            }
+            Ok(rsp) => {
+                if let Err(e) = file.write_all(&rsp.data).await {
+                    infof!(
+                        log,
+                        "exec:{}, write process stdout failed:{}",
+                        exec_id, e
+                    );
+                    if exec_id.is_empty() {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    async fn handle_read_stderr(
+        log: &Log,
+        exec_id: &str,
+        file: &mut tokio::fs::File,
+        res: Result<agent::ReadStreamResponse, ttrpc::Error>,
+    ) -> bool {
+        match res {
+            Err(e) => {
+                debugf!(log, "exec:{}, read process stderr failed:{}", exec_id, e);
+                false
+            }
+            Ok(rsp) => {
+                if let Err(e) = file.write_all(&rsp.data).await {
+                    infof!(
+                        log,
+                        "exec:{}, write process stderr failed:{}",
+                        exec_id, e
+                    );
+                    if exec_id.is_empty() {
+                        return false;
+                    }
+                }
+                true
             }
         }
     }
