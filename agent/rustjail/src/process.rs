@@ -82,10 +82,10 @@ pub struct Process {
     pub term_master: Option<RawFd>,
     pub term_slave: Option<RawFd>,
     pub tty: bool,
-    /// Set by rpc.do_create_container after reading the
-    /// `cube.container.log_forwarding` annotation from the OCI spec.
-    /// When true, open_io() creates stdout/stderr pipes; when false (default)
-    /// the original behaviour is preserved (streams stay None → /dev/null).
+    /// Init process only.  Set by rpc.do_create_container from the
+    /// `cube.container.log_forwarding` annotation.  When true, open_io()
+    /// creates stdout/stderr log pipes for the init process.  Exec processes
+    /// (`init == false`) never consult this flag.
     pub log_forwarding: bool,
     pub parent_stdin: Option<RawFd>,
     pub parent_stdout: Option<RawFd>,
@@ -209,19 +209,17 @@ impl Process {
             return Ok(());
         }
 
-        // Non-tty path: create pipes so the shim can poll container
-        // stdout/stderr via do_read_stream over vsock.
-        //
-        // Only create pipes when log_forwarding is enabled.  log_forwarding is
-        // set by rpc.do_create_container after reading the
-        // "cube.container.log_forwarding" annotation injected by the shim.
-        // When the annotation is absent (old shim) we preserve the original
-        // behaviour: stdout/stderr stay None so the container writes to /dev/null.
+        // Exec processes: unchanged from pre-log-forwarding (no agent-side pipes).
+        if !self.init {
+            return Ok(());
+        }
+
+        // Init process: create log pipes only when log forwarding is enabled.
         if !self.log_forwarding {
             return Ok(());
         }
 
-        // Log-forwarding path: create pipes so the shim can poll container
+        // Init log-forwarding path: create pipes so the shim can poll container
         // stdout/stderr via do_read_stream over vsock.
         //
         // Pipe layout:

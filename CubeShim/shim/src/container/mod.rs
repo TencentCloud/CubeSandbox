@@ -382,8 +382,8 @@ impl Container {
 
         // Signal to the agent that this shim supports container log forwarding.
         // The agent reads this annotation in do_create_container and sets
-        // p.log_forwarding = true, which causes open_io() to create stdout/stderr
-        // pipes instead of leaving the streams pointing at /dev/null.
+        // p.log_forwarding = true causes open_io() to create init log pipes only
+        // (exec processes are unaffected; they use the pre-log-forwarding path).
         spec.mut_annotations().insert(
             common::ANNO_CONTAINER_LOG_FORWARDING.to_string(),
             "true".to_string(),
@@ -546,12 +546,10 @@ impl Container {
             ("stdout".to_string(), "stderr".to_string())
         };
 
-        // Reuse the exec forward_std infrastructure.  stdin is left empty so
-        // the write_stdin loop is skipped immediately.
+        // Init log forwarding is separate from exec I/O relay (forward_std).
+        // exec_id must be empty so agent read_stdout/read_stderr target the init process.
         let log_exec = Exec {
             container_id: self.id.clone(),
-            // exec_id must be empty string to address the init process;
-            // a non-empty exec_id would look up a named exec that doesn't exist.
             id: String::new(),
             tty: Tty {
                 stdin: String::new(),
