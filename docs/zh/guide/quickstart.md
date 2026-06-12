@@ -220,8 +220,16 @@ cubemastercli tpl watch --job-id <job_id>
 
 安装 Python SDK：
 
-```bash
+::: code-group
+```bash [yum (RPM)]
 yum install -y python3 python3-pip
+```
+```bash [apt (DEB)]
+apt update && apt install -y python3 python3-pip
+```
+:::
+
+```bash
 pip config set global.index-url https://mirrors.ustc.edu.cn/pypi/simple
 
 pip install e2b-code-interpreter

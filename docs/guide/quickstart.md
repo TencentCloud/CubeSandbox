@@ -218,9 +218,16 @@ For the full template creation workflow and more options, see [Creating Template
 
 Install the Python SDK:
 
-```bash
+::: code-group
+```bash [yum (RPM)]
 yum install -y python3 python3-pip
+```
+```bash [apt (DEB)]
+apt update && apt install -y python3 python3-pip
+```
+:::
 
+```bash
 pip install e2b-code-interpreter
 ```
 
