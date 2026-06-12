@@ -177,6 +177,11 @@ impl FilterList {
         self.allowed_dirs.is_empty()
     }
 
+    // whether allowed_dirs has entries to filter root directory listing.
+    pub fn has_allowed_dirs(&self) -> bool {
+        !self.allowed_dirs.is_empty()
+    }
+
     // whether allowed_dirs filter is enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -203,10 +208,12 @@ mod tests {
         let filter = FilterList::new(ROOT_ID, &None).unwrap();
         assert!(!filter.is_enabled());
         assert!(filter.is_empty());
+        assert!(!filter.has_allowed_dirs());
 
         let filter = FilterList::new(ROOT_ID, &Some(Vec::new())).unwrap();
         assert!(filter.is_enabled());
         assert!(filter.is_empty());
+        assert!(!filter.has_allowed_dirs());
         assert!(filter.get_allow_dir("missing").is_err());
         assert_eq!(filter.get_root_dirents().len(), 2);
     }
@@ -222,6 +229,7 @@ mod tests {
 
         assert!(filter.is_enabled());
         assert!(!filter.is_empty());
+        assert!(filter.has_allowed_dirs());
         assert!(filter.get_allow_dir("virtiofsd-filter-").is_err());
         assert_eq!(
             filter
@@ -1322,9 +1330,9 @@ impl<F: FileSystem + Sync> Server<F> {
         }
     }
 
-    fn root_dirents_snapshot_if_enabled(&self) -> Option<Vec<RootDirentSnapshot>> {
+    fn root_dirents_snapshot_if_active(&self) -> Option<Vec<RootDirentSnapshot>> {
         let filter = self.root_filter.as_ref().lock().unwrap();
-        if !filter.is_enabled() {
+        if !filter.has_allowed_dirs() {
             return None;
         }
 
@@ -1376,7 +1384,7 @@ impl<F: FileSystem + Sync> Server<F> {
         cursor: &mut Writer,
     ) -> io::Result<Option<usize>> {
         let mut total_written = 0;
-        let root_dirents = match self.root_dirents_snapshot_if_enabled() {
+        let root_dirents = match self.root_dirents_snapshot_if_active() {
             Some(root_dirents) => root_dirents,
             None => return Ok(None),
         };
@@ -1412,7 +1420,7 @@ impl<F: FileSystem + Sync> Server<F> {
         cursor: &mut Writer,
     ) -> io::Result<Option<usize>> {
         let mut total_written = 0;
-        let root_dirents = match self.root_dirents_snapshot_if_enabled() {
+        let root_dirents = match self.root_dirents_snapshot_if_active() {
             Some(root_dirents) => root_dirents,
             None => return Ok(None),
         };
@@ -1526,7 +1534,7 @@ impl<F: FileSystem + Sync> Server<F> {
             let mut f_info = None;
             if in_header.nodeid == ROOT_ID {
                 let filter = self.root_filter.as_ref().lock().unwrap();
-                if filter.is_enabled() {
+                if filter.has_allowed_dirs() {
                     let name = dir_entry
                         .name
                         .to_str()
