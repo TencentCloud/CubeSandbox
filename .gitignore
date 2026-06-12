@@ -1,8 +1,5 @@
 # Rust build artifacts (per-module)
 **/target/
-.cargo-target/
-.cargo-home/
-.tmp/
 
 # IDE
 .idea/

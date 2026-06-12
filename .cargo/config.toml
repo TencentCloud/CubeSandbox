@@ -1,4 +1,0 @@
-# Optional: keep build artifacts under the repo (see scripts/build-env.sh for
-# CARGO_TARGET_DIR / TMPDIR overrides in constrained local environments).
-[build]
-target-dir = ".cargo-target"
