@@ -217,7 +217,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		failRedoTemplateImageJob(ctx, jobID, jobRecord.ResumePhase, err.Error())
 		return
 	}
-	workingReq := newRedoWorkingRequest(sourceReq, targets)
+	workingReq := newRedoWorkingRequest(sourceReq, req.TemplateID, targets)
 
 	var artifact *models.RootfsArtifact
 	resumePhase := jobRecord.ResumePhase
@@ -248,9 +248,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		if source.Cleanup != nil {
 			defer source.Cleanup(ctx)
 		}
-		var generatedReq *types.CreateCubeSandboxReq
-		var builtFresh bool
-		artifact, generatedReq, builtFresh, err = ensureRootfsArtifact(ctx, &workingReq, source, downloadBaseURL)
+		artifact, _, _, err = ensureRootfsArtifact(ctx, &workingReq, source, downloadBaseURL)
 		if err != nil {
 			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 				"status":          JobStatusFailed,
@@ -261,9 +259,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			})
 			return
 		}
-		workingReq = newRedoWorkingRequest(sourceReq, targets)
-		_ = generatedReq
-		_ = builtFresh
+		workingReq = newRedoWorkingRequest(sourceReq, req.TemplateID, targets)
 		jobRecord.ArtifactID = artifact.ArtifactID
 		if err := updateTemplateImageJob(ctx, jobID, map[string]any{
 			"artifact_id":               artifact.ArtifactID,
@@ -284,24 +280,24 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		}
 	}
 
-	var generatedReq *types.CreateCubeSandboxReq
-	if strings.TrimSpace(artifact.GeneratedRequestJSON) != "" {
-		generatedReq = &types.CreateCubeSandboxReq{}
-		if err := json.Unmarshal([]byte(artifact.GeneratedRequestJSON), generatedReq); err != nil {
-			generatedReq = nil
+	var imageCfg image.DockerImageConfig
+	if strings.TrimSpace(artifact.ImageConfigJSON) != "" {
+		if err := json.Unmarshal([]byte(artifact.ImageConfigJSON), &imageCfg); err != nil {
+			failRedoTemplateImageJob(ctx, jobID, resumePhase, fmt.Sprintf("decode artifact image config fail: %v", err))
+			return
 		}
 	}
-	if generatedReq == nil {
-		generatedReq, err = generateTemplateCreateRequest(&workingReq, artifact, image.DockerImageConfig{}, downloadBaseURL)
-		if artifact.ImageConfigJSON != "" {
-			var imageCfg image.DockerImageConfig
-			if json.Unmarshal([]byte(artifact.ImageConfigJSON), &imageCfg) == nil {
-				generatedReq, err = generateTemplateCreateRequest(&workingReq, artifact, imageCfg, downloadBaseURL)
-			}
-		}
-	}
+	generatedReq, err := generateTemplateCreateRequest(&workingReq, artifact, imageCfg, downloadBaseURL)
 	if err != nil {
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
+		return
+	}
+	generatedTemplateID := ""
+	if generatedReq.Annotations != nil {
+		generatedTemplateID = strings.TrimSpace(generatedReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	}
+	if generatedTemplateID != req.TemplateID {
+		failRedoTemplateImageJob(ctx, jobID, resumePhase, fmt.Sprintf("generated template request id mismatch: got %q, want %q", generatedTemplateID, req.TemplateID))
 		return
 	}
 

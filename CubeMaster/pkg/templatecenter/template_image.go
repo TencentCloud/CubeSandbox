@@ -37,8 +37,9 @@ func distributionScopeFromTargets(targets []*node.Node) []string {
 	return scope
 }
 
-func newRedoWorkingRequest(sourceReq *types.CreateTemplateFromImageReq, targets []*node.Node) types.CreateTemplateFromImageReq {
+func newRedoWorkingRequest(sourceReq *types.CreateTemplateFromImageReq, templateID string, targets []*node.Node) types.CreateTemplateFromImageReq {
 	workingReq := *sourceReq
+	workingReq.TemplateID = templateID
 	workingReq.Request = &types.Request{RequestID: uuid.NewString()}
 	workingReq.DistributionScope = distributionScopeFromTargets(targets)
 	return workingReq
@@ -201,6 +202,7 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 		if err != nil {
 			return fmt.Errorf("decode latest template image request fail: %w", err)
 		}
+		sourceReq.TemplateID = normalized.TemplateID
 		replicas, err := ListReplicas(ctx, normalized.TemplateID)
 		if err != nil {
 			return err

@@ -1201,6 +1201,116 @@ func TestRunRedoTemplateImageJobStopsOnArtifactCleanupFailure(t *testing.T) {
 	}
 }
 
+func TestRunRedoTemplateImageJobRegeneratesRequestForRedoTemplateID(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	const redoTemplateID = "tpl-redo"
+	const staleTemplateID = "tpl-stale"
+	targets := []*node.Node{{InsID: "node-a", IP: "10.0.0.1", Healthy: true}}
+	staleReqPayload, _ := json.Marshal(&types.CreateCubeSandboxReq{
+		InstanceType: cubeboxv1.InstanceType_cubebox.String(),
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateID:      staleTemplateID,
+			constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
+		},
+	})
+	imageConfigPayload, _ := json.Marshal(image.DockerImageConfig{
+		Entrypoint: []string{"/bin/sh"},
+		Cmd:        []string{"-c", "echo ok"},
+	})
+
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{
+			JobID:       jobID,
+			TemplateID:  redoTemplateID,
+			ResumePhase: JobPhaseSnapshotting,
+			ArtifactID:  "artifact-1",
+		}, nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		return nil
+	})
+	patches.ApplyFunc(unmarshalTemplateImageJobRequest, func(payload string) (*types.CreateTemplateFromImageReq, error) {
+		return &types.CreateTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-1"},
+			TemplateID:        staleTemplateID,
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			NetworkType:       cubeboxv1.NetworkType_tap.String(),
+			WritableLayerSize: "20Gi",
+			SourceImageRef:    "docker.io/library/nginx:latest",
+		}, nil
+	})
+	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
+		return []models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusFailed}}, nil
+	})
+	patches.ApplyFunc(resolveRedoTargets, func(instanceType string, req *types.RedoTemplateFromImageReq, replicas []models.TemplateReplica) ([]*node.Node, error) {
+		return targets, nil
+	})
+	patches.ApplyFunc(getRootfsArtifactByID, func(ctx context.Context, artifactID string) (*models.RootfsArtifact, error) {
+		return &models.RootfsArtifact{
+			ArtifactID:              artifactID,
+			TemplateSpecFingerprint: "fingerprint-1",
+			Ext4SHA256:              "sha256",
+			Ext4SizeBytes:           1024,
+			DownloadToken:           "token-1",
+			GeneratedRequestJSON:    string(staleReqPayload),
+			ImageConfigJSON:         string(imageConfigPayload),
+			SourceImageDigest:       "sha256:digest",
+			WritableLayerSize:       "20Gi",
+			Status:                  ArtifactStatusReady,
+		}, nil
+	})
+	patches.ApplyFunc(cleanupTemplateReplicasOnNodes, func(ctx context.Context, templateID string, replicas []models.TemplateReplica, targets []*node.Node) error {
+		if templateID != redoTemplateID {
+			t.Fatalf("cleanup templateID = %q, want %q", templateID, redoTemplateID)
+		}
+		return nil
+	})
+	patches.ApplyFunc(ensureTemplateDefinition, func(ctx context.Context, templateID string, storedReq *types.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
+		if templateID != redoTemplateID {
+			t.Fatalf("definition templateID = %q, want %q", templateID, redoTemplateID)
+		}
+		if got := storedReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]; got != redoTemplateID {
+			t.Fatalf("stored request templateID = %q, want %q", got, redoTemplateID)
+		}
+		return true, nil
+	})
+
+	var capturedReq *types.CreateCubeSandboxReq
+	patches.ApplyFunc(createTemplateReplicasOnNodes, func(ctx context.Context, templateID string, req *types.CreateCubeSandboxReq, targets []*node.Node, opts replicaRunOptions) ([]ReplicaStatus, error) {
+		if templateID != redoTemplateID {
+			t.Fatalf("replica templateID = %q, want %q", templateID, redoTemplateID)
+		}
+		capturedReq = req
+		return []ReplicaStatus{{NodeID: "node-a", Status: ReplicaStatusReady}}, nil
+	})
+	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID string) error {
+		return nil
+	})
+	patches.ApplyFunc(GetTemplateInfo, func(ctx context.Context, templateID string) (*TemplateInfo, error) {
+		return &TemplateInfo{TemplateID: templateID, Status: StatusReady}, nil
+	})
+
+	runRedoTemplateImageJob(context.Background(), "job-1", &types.RedoTemplateFromImageReq{
+		Request:    &types.Request{RequestID: "req-redo"},
+		TemplateID: redoTemplateID,
+	}, "http://master.example")
+
+	if capturedReq == nil {
+		t.Fatal("expected generated request to be passed to replica creation")
+	}
+	if got := capturedReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]; got != redoTemplateID {
+		t.Fatalf("generated request templateID = %q, want %q", got, redoTemplateID)
+	}
+	if got := capturedReq.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL]; !strings.Contains(got, "artifact_id=artifact-1") {
+		t.Fatalf("generated request should rebuild artifact URL, got %q", got)
+	}
+	if got := capturedReq.Containers[0].Command; !reflect.DeepEqual(got, []string{"/bin/sh"}) {
+		t.Fatalf("generated request command = %v, want image config entrypoint", got)
+	}
+}
+
 func TestRunRedoTemplateImageJobRequiresLocalImageForBuildRedo(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
