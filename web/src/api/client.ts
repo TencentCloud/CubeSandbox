@@ -213,7 +213,7 @@ export const sandboxApi = {
 export const templateApi = {
   list: () => api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
   get: (id: string) => api<TemplateDetailDto>(`/templates/${id}`).then(mapTemplateDetail),
-  create: (body: { templateID?: string; image: string; instanceType?: string; writableLayerSize?: string; exposedPorts?: number[]; probePort?: number; probePath?: string; cpu?: number; memory?: number; env?: string[]; allowInternetAccess?: boolean }) =>
+  create: (body: { templateID?: string; image: string; instanceType?: string; writableLayerSize?: string; exposedPorts?: number[]; probePort?: number; probePath?: string; cpu?: number; memory?: number; env?: string[]; allowInternetAccess?: boolean; dns?: string[] }) =>
     api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) }),
   rebuild: (id: string) => api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
   getBuildStatus: (id: string, buildID: string) =>
@@ -272,6 +272,7 @@ export interface StoreCatalogItem {
   probe_path: string;
   writable_layer_size: string;
   official: boolean;
+  dns: string[];
 }
 
 export interface StoreCatalogResponse {
@@ -293,6 +294,7 @@ export interface UpsertStoreCatalogRequest {
   probe_path?: string;
   writable_layer_size?: string;
   official?: boolean;
+  dns?: string[];
   sort_order?: number;
 }
 
