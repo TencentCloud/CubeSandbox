@@ -52,6 +52,7 @@ impl TemplateService {
                 last_error: non_empty(s.last_error),
                 created_at: non_empty(s.created_at),
                 image_info: non_empty(s.image_info),
+                job_id: non_empty(s.job_id),
             })
             .collect())
     }
@@ -100,6 +101,7 @@ impl TemplateService {
             create_request: resp.create_request,
             network_type,
             allow_internet_access,
+            job_id: non_empty(resp.job_id),
         })
     }
 

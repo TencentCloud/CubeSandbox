@@ -29,7 +29,8 @@
     "instance": "Instance",
     "created": "Created",
     "version": "version",
-    "image": "image"
+    "image": "image",
+    "jobID": "Job ID"
   },
   "instanceDefault": "standard",
   "create": {

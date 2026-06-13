@@ -517,6 +517,8 @@ export interface components {
             /** @description Whether public internet access is allowed for sandboxes from this template. */
             allowInternetAccess?: boolean | null;
             createRequest?: unknown;
+            /** @description Latest create/rebuild job id for the template. */
+            jobID?: string | null;
             instanceType?: string | null;
             lastError?: string | null;
             /** @description Network type used when the template was created, e.g. "tap". */
@@ -546,6 +548,8 @@ export interface components {
             status: string;
             templateID: string;
             version?: string | null;
+            /** @description Latest create/rebuild job id for the template. */
+            jobID?: string | null;
         };
         /** @description Full node x component version matrix. */
         VersionMatrixView: {

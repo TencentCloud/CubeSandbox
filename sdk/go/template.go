@@ -29,6 +29,7 @@ type TemplateInfo struct {
 	LastError           string `json:"lastError,omitempty"`
 	CreatedAt           string `json:"createdAt,omitempty"`
 	ImageInfo           string `json:"imageInfo,omitempty"`
+	JobID               string `json:"jobID,omitempty"`
 	NetworkType         string `json:"networkType,omitempty"`
 	AllowInternetAccess *bool  `json:"allowInternetAccess,omitempty"`
 }

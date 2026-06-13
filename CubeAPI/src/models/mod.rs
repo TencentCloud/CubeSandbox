@@ -556,6 +556,9 @@ pub struct TemplateSummary {
     pub created_at: Option<String>,
     #[serde(rename = "imageInfo", skip_serializing_if = "Option::is_none")]
     pub image_info: Option<String>,
+    /// Latest create/rebuild job id for the template.
+    #[serde(rename = "jobID", skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 /// Detailed template response (GET /templates/:id).
@@ -582,6 +585,9 @@ pub struct TemplateDetail {
         skip_serializing_if = "Option::is_none"
     )]
     pub allow_internet_access: Option<bool>,
+    /// Latest create/rebuild job id for the template.
+    #[serde(rename = "jobID", skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 /// Body for POST /templates (create from image).

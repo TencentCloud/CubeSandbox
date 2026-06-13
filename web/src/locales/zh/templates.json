@@ -29,7 +29,8 @@
     "instance": "实例类型",
     "created": "创建时间",
     "version": "版本",
-    "image": "镜像"
+    "image": "镜像",
+    "jobID": "Job ID"
   },
   "instanceDefault": "标准",
   "create": {

@@ -76,6 +76,7 @@ class TemplateInfo:
     last_error: str = ""
     created_at: str = ""
     image_info: str = ""
+    job_id: str = ""
     public: bool = False
     cpu_count: int = 0
     memory_mb: int = 0
@@ -98,6 +99,7 @@ class TemplateInfo:
             last_error=data.get("lastError") or data.get("last_error", ""),
             created_at=data.get("createdAt") or data.get("created_at", ""),
             image_info=data.get("imageInfo") or data.get("image_info", ""),
+            job_id=data.get("jobID") or data.get("job_id", ""),
             public=bool(data.get("public", False)),
             cpu_count=data.get("cpuCount") or data.get("cpu_count", 0),
             memory_mb=data.get("memoryMB") or data.get("memory_mb", 0),

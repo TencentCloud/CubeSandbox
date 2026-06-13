@@ -763,6 +763,35 @@ func TestFormatUTCRFC3339(t *testing.T) {
 	}
 }
 
+func TestTemplateInfoFromJobIncludesLatestJobID(t *testing.T) {
+	info := templateInfoFromJob(&models.TemplateImageJob{
+		TemplateID: "tpl-a",
+		JobID:      "job-build-1",
+		Status:     JobStatusRunning,
+	})
+	if info.JobID != "job-build-1" {
+		t.Fatalf("expected running job id, got %q", info.JobID)
+	}
+
+	done := templateInfoFromJob(&models.TemplateImageJob{
+		TemplateID: "tpl-b",
+		JobID:      "job-done-1",
+		Status:     JobStatusReady,
+	})
+	if done.JobID != "job-done-1" {
+		t.Fatalf("expected terminal job id, got %q", done.JobID)
+	}
+
+	failed := templateInfoFromJob(&models.TemplateImageJob{
+		TemplateID: "tpl-c",
+		JobID:      "job-failed-1",
+		Status:     JobStatusFailed,
+	})
+	if failed.JobID != "job-failed-1" {
+		t.Fatalf("expected failed job id, got %q", failed.JobID)
+	}
+}
+
 func TestTemplateInfoFromJobPrefersTemplateStatus(t *testing.T) {
 	info := templateInfoFromJob(&models.TemplateImageJob{
 		TemplateID:     "tpl-a",

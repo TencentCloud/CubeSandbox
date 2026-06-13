@@ -368,6 +368,9 @@ export default function TemplatesPage() {
                 <div className="mt-3 space-y-1 text-xs text-muted-foreground">
                   <div className="truncate">{t('col.version')}: <span className="text-foreground/80">{tpl.version ?? '—'}</span></div>
                   <div className="truncate">{t('col.image')}: <span className="text-foreground/80">{tpl.imageInfo ?? '—'}</span></div>
+                  {tpl.jobID ? (
+                    <div className="truncate font-mono">{t('col.jobID')}: <span className="text-foreground/80">{tpl.jobID}</span></div>
+                  ) : null}
                 </div>
               </Card>
             </Link>

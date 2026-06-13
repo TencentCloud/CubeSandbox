@@ -151,6 +151,7 @@ type TemplateInfo struct {
 	LastError                 string          `json:"last_error,omitempty"`
 	CreatedAt                 string          `json:"created_at,omitempty"`
 	ImageInfo                 string          `json:"image_info,omitempty"`
+	JobID                     string          `json:"job_id,omitempty"`
 	Replicas                  []ReplicaStatus `json:"replicas,omitempty"`
 
 	// CubeEgress CA bake metadata, surfaced for ops triage. Populated
@@ -227,6 +228,9 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 		info := templateInfoFromDefinition(def)
 		info.CreatedAt = formatUTCRFC3339(def.CreatedAt)
 		info.ImageInfo = imageInfo
+		if latestJob := latestJobByTemplateID[def.TemplateID]; latestJob != nil {
+			info.JobID = latestJobIDFromJob(latestJob)
+		}
 		out = append(out, info)
 	}
 	seen := make(map[string]struct{}, len(out))
@@ -683,6 +687,7 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 	out.ImageInfo = extractImageInfoFromRequestJSON(def.RequestJSON)
 	if latestJob, jobErr := getLatestTemplateImageJobByTemplateID(ctx, templateID); jobErr == nil && latestJob != nil {
 		out.ImageInfo = composeImageInfo(latestJob.SourceImageRef, latestJob.SourceImageDigest)
+		out.JobID = latestJobIDFromJob(latestJob)
 	}
 	out.Replicas = make([]ReplicaStatus, 0, len(replicas))
 	for _, replica := range replicas {
@@ -727,6 +732,7 @@ func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
 		LastError:    job.ErrorMessage,
 		CreatedAt:    formatUTCRFC3339(job.CreatedAt),
 		ImageInfo:    composeImageInfo(job.SourceImageRef, job.SourceImageDigest),
+		JobID:        latestJobIDFromJob(job),
 	}
 }
 

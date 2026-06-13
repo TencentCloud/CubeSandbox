@@ -1658,6 +1658,8 @@ pub struct TemplateSummaryItem {
     pub created_at: String,
     #[serde(default)]
     pub image_info: String,
+    #[serde(default)]
+    pub job_id: String,
 }
 
 /// Envelope for GET /cube/template (list mode).
@@ -1689,6 +1691,8 @@ pub struct TemplateResponse {
     pub status: String,
     #[serde(default)]
     pub last_error: String,
+    #[serde(default)]
+    pub job_id: String,
     /// Opaque replica list (node placement). Left as raw JSON to avoid
     /// coupling to CubeMaster-internal types.
     #[serde(default)]

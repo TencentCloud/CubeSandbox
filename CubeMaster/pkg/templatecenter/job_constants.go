@@ -6,7 +6,10 @@ package templatecenter
 
 import (
 	"errors"
+	"strings"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 )
 
 const (
@@ -66,3 +69,10 @@ const (
 )
 
 var ErrNoFailedTemplateReplicas = errors.New("no failed template replicas matched redo request")
+
+func latestJobIDFromJob(job *models.TemplateImageJob) string {
+	if job == nil {
+		return ""
+	}
+	return strings.TrimSpace(job.JobID)
+}
