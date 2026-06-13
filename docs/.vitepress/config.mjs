@@ -135,6 +135,7 @@ export default withMermaid(defineConfig({
             {
               text: 'Operations',
               items: [
+                { text: 'WebUI Dashboard', link: '/guide/webui' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
                 { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
@@ -239,6 +240,7 @@ export default withMermaid(defineConfig({
             {
               text: '安全与运维',
               items: [
+                { text: 'WebUI 控制台', link: '/zh/guide/webui' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
                 { text: 'HTTPS 证书与域名解析', link: '/zh/guide/https-and-domain' },
