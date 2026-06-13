@@ -64,7 +64,13 @@ const (
 	CubeAnnotationsFallbackToSlowPath       = "cube.master.fallback_to_slow_path"
 	CubeAnnotationsSystemDiskSize           = "cube.master.system_disk_size"
 
-	CubeAnnotationsAppSnapshotCreate         = "cube.master.appsnapshot.create"
+	CubeAnnotationsAppSnapshotCreate = "cube.master.appsnapshot.create"
+	// CubeAnnotationSandboxCreateEnvVars carries create-time env_vars as a JSON
+	// object string. It is written by CubeAPI and consumed by Cubelet (which
+	// injects them via envd /init). As per-invocation runtime metadata it must be
+	// stripped on template commit so instance-level secrets are not persisted
+	// into template snapshots.
+	CubeAnnotationSandboxCreateEnvVars       = "cube.master.sandbox.create_env_vars"
 	CubeAnnotationAppSnapshotTemplateID      = "cube.master.appsnapshot.template.id"
 	CubeAnnotationAppSnapshotVersion         = "cube.master.appsnapshot.version"
 	CubeAnnotationAppSnapshotTemplateVersion = "cube.master.appsnapshot.template.version"

@@ -331,6 +331,12 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		if err := l.doProbe(param.ctxTmp, param.cntrReq, param.ci); err != nil {
 			return err
 		}
+		// Once the sandbox is ready, inject create-time env_vars into the guest
+		// envd (via its native /init) so later commands.run / run_code can read
+		// them. No-op when the annotation is absent.
+		if err := l.syncCreateEnvToEnvd(param.ctxTmp, sandBox, param.ci); err != nil {
+			return err
+		}
 		err = l.cbriManager.PostCreateContainer(ctx, sandBox, param.ci)
 		if err != nil {
 			containerLog.Errorf("post create container failed, err: %v", err)

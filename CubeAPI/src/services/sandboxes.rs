@@ -28,6 +28,9 @@ const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
+/// Annotation carrying create-time env_vars as a JSON object string {"K":"V"}.
+/// The cube.master prefix ensures CubeMaster forwards it to Cubelet.
+const CREATE_ENV_VARS_ANNOTATION: &str = "cube.master.sandbox.create_env_vars";
 
 #[derive(Clone)]
 pub struct SandboxService {
@@ -134,6 +137,16 @@ impl SandboxService {
             }
             meta
         });
+
+        // Carry create-time env_vars as sandbox runtime metadata for Cubelet:
+        // once the sandbox is ready Cubelet injects them through envd's native
+        // POST /init, so later commands.run can read them (same as E2B), without
+        // writing to rootfs/profile or the OCI container spec. The annotation uses
+        // the cube.master prefix so CubeMaster forwards it to Cubelet automatically.
+        if let Some(env_vars) = body.env_vars.as_ref().filter(|m| !m.is_empty()) {
+            let encoded = serde_json::to_string(env_vars).map_err(internal_error)?;
+            annotations.insert(CREATE_ENV_VARS_ANNOTATION.to_string(), encoded);
+        }
 
         let cube_network_config =
             build_cube_network_config(body.allow_internet_access, body.network.as_ref())?;
