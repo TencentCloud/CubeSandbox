@@ -386,6 +386,9 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sa
 	// longer exist).
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotID)
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
+	// Create-time env_vars are per-instance runtime metadata (may contain
+	// secrets) and must not be persisted with the template snapshot.
+	delete(cloned.Annotations, constants.CubeAnnotationSandboxCreateEnvVars)
 	cloned.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
 	return cloned, nil
 }

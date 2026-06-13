@@ -60,6 +60,35 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 	assert.Empty(t, out.SnapshotDir)
 }
 
+// TestNormalizeStoredTemplateRequestStripsCreateEnvVars verifies that the
+// per-invocation create-time env_vars annotation (which may carry secrets) is
+// scrubbed from the stored template request so it is never persisted into a
+// template snapshot, while unrelated annotations are preserved.
+func TestNormalizeStoredTemplateRequestStripsCreateEnvVars(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(NormalizeRequest, func(in *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, string, error) {
+		return in, "tpl-after-norm", nil
+	})
+
+	req := &sandboxtypes.CreateCubeSandboxReq{
+		InstanceType: "cubebox",
+		Timeout:      1,
+		Annotations: map[string]string{
+			constants.CubeAnnotationSandboxCreateEnvVars: `{"TOKEN":"secret"}`,
+			"unrelated": "keep-me",
+		},
+	}
+
+	out, err := normalizeStoredTemplateRequest(req)
+	require.NoError(t, err)
+
+	_, present := out.Annotations[constants.CubeAnnotationSandboxCreateEnvVars]
+	assert.Falsef(t, present, "annotation %q must be stripped from stored template request",
+		constants.CubeAnnotationSandboxCreateEnvVars)
+	assert.Equal(t, "keep-me", out.Annotations["unrelated"])
+}
+
 func TestResolveTemplateNodesFiltersRequestedHealthyNodes(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()

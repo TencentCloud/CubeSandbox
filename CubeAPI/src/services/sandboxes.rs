@@ -18,8 +18,9 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        EgressRule, EnvVars, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail,
+        SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
+        SandboxState,
     },
 };
 
@@ -28,6 +29,18 @@ const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
+/// Annotation carrying create-time env_vars as a JSON object string {"K":"V"}.
+/// The cube.master prefix ensures CubeMaster forwards it to Cubelet.
+const CREATE_ENV_VARS_ANNOTATION: &str = "cube.master.sandbox.create_env_vars";
+
+/// Encode create-time env_vars into the annotation value (a JSON object string).
+/// Returns `None` when there is nothing to inject (absent or empty map), so the
+/// annotation is only added when the caller actually passed variables.
+fn encode_create_env_vars(env_vars: Option<&EnvVars>) -> Option<String> {
+    let env_vars = env_vars.filter(|m| !m.is_empty())?;
+    // EnvVars is a String->String map, so serialization cannot fail.
+    serde_json::to_string(env_vars).ok()
+}
 
 #[derive(Clone)]
 pub struct SandboxService {
@@ -134,6 +147,15 @@ impl SandboxService {
             }
             meta
         });
+
+        // Carry create-time env_vars as sandbox runtime metadata for Cubelet:
+        // once the sandbox is ready Cubelet injects them through envd's native
+        // POST /init, so later commands.run can read them (same as E2B), without
+        // writing to rootfs/profile or the OCI container spec. The annotation uses
+        // the cube.master prefix so CubeMaster forwards it to Cubelet automatically.
+        if let Some(encoded) = encode_create_env_vars(body.env_vars.as_ref()) {
+            annotations.insert(CREATE_ENV_VARS_ANNOTATION.to_string(), encoded);
+        }
 
         let cube_network_config =
             build_cube_network_config(body.allow_internet_access, body.network.as_ref())?;
@@ -691,12 +713,41 @@ fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{build_cube_network_config, filter_by_metadata, from_cubemaster_info};
+    use super::{
+        build_cube_network_config, encode_create_env_vars, filter_by_metadata,
+        from_cubemaster_info, CREATE_ENV_VARS_ANNOTATION,
+    };
     use crate::cubemaster::{ListSandboxResponse, SandboxInfo};
     use crate::models::{
-        EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, SandboxNetworkConfig,
-        SandboxState,
+        EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, EnvVars,
+        SandboxNetworkConfig, SandboxState,
     };
+
+    #[test]
+    fn create_env_vars_annotation_uses_cube_master_prefix() {
+        // CubeMaster only forwards annotations under the cube.master prefix to
+        // Cubelet, so this prefix is part of the wiring contract.
+        assert!(CREATE_ENV_VARS_ANNOTATION.starts_with("cube.master"));
+    }
+
+    #[test]
+    fn encode_create_env_vars_skips_absent_and_empty() {
+        assert!(encode_create_env_vars(None).is_none());
+        let empty: EnvVars = HashMap::new();
+        assert!(encode_create_env_vars(Some(&empty)).is_none());
+    }
+
+    #[test]
+    fn encode_create_env_vars_serializes_to_json_object() {
+        let mut env = EnvVars::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+
+        let encoded = encode_create_env_vars(Some(&env)).expect("non-empty env should encode");
+        let decoded: HashMap<String, String> =
+            serde_json::from_str(&encoded).expect("annotation must be a JSON object");
+
+        assert_eq!(decoded.get("FOO"), Some(&"bar".to_string()));
+    }
 
     #[test]
     fn metadata_filter_matches_all_pairs() {
