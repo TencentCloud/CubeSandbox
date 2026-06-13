@@ -76,6 +76,25 @@ func TestNewConfigFromEnv(t *testing.T) {
 
 func TestCreateSendsPythonCompatiblePayload(t *testing.T) {
 	var got map[string]any
+	var initPath string
+	var initHost string
+	var initBody map[string]any
+
+	dataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/init" {
+			t.Fatalf("data request = %s %s", r.Method, r.URL.Path)
+		}
+		initPath = r.URL.Path
+		initHost = r.Host
+		if err := json.NewDecoder(r.Body).Decode(&initBody); err != nil {
+			t.Fatalf("decode init body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer dataServer.Close()
+
+	dataHost, dataPort := serverHostPort(t, dataServer.URL)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/sandboxes" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
@@ -100,6 +119,8 @@ func TestCreateSendsPythonCompatiblePayload(t *testing.T) {
 		Timeout:        300 * time.Second,
 		RequestTimeout: time.Second,
 		SandboxDomain:  "cube.app",
+		ProxyNodeIP:    dataHost,
+		ProxyPortHTTP:  dataPort,
 	})
 
 	sb, err := client.Create(context.Background(), CreateOptions{
@@ -135,6 +156,49 @@ func TestCreateSendsPythonCompatiblePayload(t *testing.T) {
 	assertStringSlice(t, network["denyOut"], []string{"0.0.0.0/0"})
 	if _, ok := got["mcp"].(map[string]any); !ok {
 		t.Fatalf("extra field not preserved: %#v", got["mcp"])
+	}
+
+	if initPath != "/init" {
+		t.Fatalf("init path=%q", initPath)
+	}
+	if initHost != fmt.Sprintf("%d-%s.cube.app", JupyterPort, testSandboxID) {
+		t.Fatalf("init Host=%q", initHost)
+	}
+	assertMapString(t, initBody["envVars"], "FOO", "bar")
+	if _, ok := initBody["timestamp"].(string); !ok {
+		t.Fatalf("init timestamp missing: %#v", initBody["timestamp"])
+	}
+}
+
+func TestCreateWithoutEnvVarsSkipsInit(t *testing.T) {
+	dataCalled := false
+	dataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dataCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer dataServer.Close()
+
+	dataHost, dataPort := serverHostPort(t, dataServer.URL)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-no-init"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		APIURL:         server.URL,
+		TemplateID:     "tpl-no-init",
+		Timeout:        300 * time.Second,
+		RequestTimeout: time.Second,
+		ProxyNodeIP:    dataHost,
+		ProxyPortHTTP:  dataPort,
+	})
+	if _, err := client.Create(context.Background(), CreateOptions{}); err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if dataCalled {
+		t.Fatal("data plane was called without env_vars")
 	}
 }
 

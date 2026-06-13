@@ -74,6 +74,11 @@ func (c *Client) Create(ctx context.Context, opts CreateOptions) (*Sandbox, erro
 		return nil, err
 	}
 	c.attachSandbox(&sandbox)
+	if len(opts.EnvVars) > 0 {
+		if err := sandbox.initEnvVars(ctx, opts.EnvVars); err != nil {
+			return nil, err
+		}
+	}
 	return &sandbox, nil
 }
 

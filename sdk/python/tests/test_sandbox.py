@@ -105,10 +105,31 @@ class TestCreate:
         assert body["timeout"] == 600
 
     def test_create_sends_env_vars(self):
-        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m, \
+                patch.object(Sandbox, "_build_data_client", return_value=client):
             Sandbox.create(env_vars={"FOO": "bar"}, config=make_config())
+
         body = m.call_args.kwargs["json"]
         assert body["envVars"] == {"FOO": "bar"}
+        # SDK transparently pushes create-time env_vars into the guest via
+        # envd's native /init so later commands.run can read them.
+        assert captured["url"].endswith("/init")
+        assert captured["body"]["envVars"] == {"FOO": "bar"}
+
+    def test_create_without_env_vars_skips_init(self):
+        build = MagicMock()
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)), \
+                patch.object(Sandbox, "_build_data_client", new=build):
+            Sandbox.create(config=make_config())
+        build.assert_not_called()
 
     def test_create_sends_metadata(self):
         meta = {"network-policy": "deny-all"}

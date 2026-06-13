@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import random
+import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict
 
 import httpx
 import requests
 
-from ._commands import CommandResult, Commands
+from ._commands import CommandResult, Commands, ENVD_PORT
 from ._config import Config
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
 from ._filesystem import Filesystem
@@ -18,6 +21,10 @@ from ._stream import _parse_line
 from ._transport import build_client
 
 JUPYTER_PORT = 49999
+ENVD_INIT_MAX_ATTEMPTS = 5
+ENVD_INIT_RETRY_BASE_SECS = 0.8
+ENVD_INIT_RETRY_JITTER_SECS = 0.4
+ENVD_INIT_REQ_TIMEOUT_SECS = 10.0
 
 
 def _check_response(resp: requests.Response) -> None:
@@ -156,7 +163,10 @@ class Sandbox:
         resp = s.post(f"{cfg.api_url}/sandboxes", json=payload,
                       headers={"Content-Type": "application/json"})
         _check_response(resp)
-        return cls(resp.json(), config=cfg)
+        sandbox = cls(resp.json(), config=cfg)
+        if env_vars:
+            sandbox._init_env_vars(env_vars)
+        return sandbox
 
     @classmethod
     def connect(cls, sandbox_id: str, *, config: Config | None = None) -> "Sandbox":
@@ -667,3 +677,64 @@ class Sandbox:
     def _build_data_client(self) -> httpx.Client:
         """Build an HTTP client for CubeProxy-routed sandbox data-plane APIs."""
         return build_client(self._config)
+
+    def _init_env_vars(self, env_vars: Dict[str, str]) -> None:
+        """Make create-time env_vars visible to later commands.run / run_code.
+
+        The control plane only records env_vars as sandbox metadata; it never
+        loads them into the guest runtime. So once the sandbox is up we push
+        them into the guest via envd's native POST /init, reusing the exact
+        CubeProxy data-plane channel commands.run already uses. envd stores them
+        as global defaults and merges them into every later process execution,
+        giving the precedence ``template env < create env < per-command env``.
+
+        Routing through the configured data-plane client means no extra
+        deployment configuration is required: whatever address commands.run
+        reaches envd on, /init reaches it on too.
+        """
+        if not env_vars:
+            return
+        if self._client is None:
+            self._client = self._build_data_client()
+
+        headers = {}
+        access_token = self._data.get("envdAccessToken")
+        if access_token:
+            headers["X-Access-Token"] = access_token
+
+        url = f"http://{self.get_host(ENVD_PORT)}/init"
+        body = {
+            "envVars": env_vars,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # The proxy route to a freshly created sandbox may settle a moment after
+        # create returns, so retry briefly before surfacing a hard failure.
+        last_error: Exception | None = None
+        for attempt in range(ENVD_INIT_MAX_ATTEMPTS):
+            if attempt:
+                delay = ENVD_INIT_RETRY_BASE_SECS + random.uniform(
+                    0, ENVD_INIT_RETRY_JITTER_SECS
+                )
+                time.sleep(delay)
+            try:
+                resp = self._client.post(
+                    url,
+                    json=body,
+                    headers=headers,
+                    timeout=ENVD_INIT_REQ_TIMEOUT_SECS,
+                )
+                try:
+                    if resp.status_code < 400:
+                        return
+                    last_error = RuntimeError(
+                        f"envd /init returned HTTP {resp.status_code}"
+                    )
+                finally:
+                    resp.close()
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                last_error = exc
+
+        raise CubeSandboxError(f"failed to inject create env_vars into sandbox: {last_error}")

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -24,7 +25,17 @@ const (
 	connectEndStreamFlag   = byte(0x02)
 	connectCompressedFlag  = byte(0x01)
 	maxConnectEnvelopeSize = 64 * 1024 * 1024
+
+	envdInitMaxAttempts = 5
+	envdInitRetryDelay  = 800 * time.Millisecond
+	envdInitRetryJitter = 400 * time.Millisecond
+	envdInitReqTimeout  = 10 * time.Second
 )
+
+type envdInitRequest struct {
+	EnvVars   map[string]string `json:"envVars"`
+	Timestamp string            `json:"timestamp"`
+}
 
 type processStartRequest struct {
 	Process processConfig `json:"process"`
@@ -81,6 +92,62 @@ type connectEndStream struct {
 type connectError struct {
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
+}
+
+func (s *Sandbox) initEnvVars(ctx context.Context, envVars map[string]string) error {
+	if err := s.ensureClient(); err != nil {
+		return err
+	}
+	if len(envVars) == 0 {
+		return nil
+	}
+
+	raw, err := json.Marshal(envdInitRequest{
+		EnvVars:   envVars,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return err
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < envdInitMaxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := envdInitRetryDelay + time.Duration(rand.Int63n(int64(envdInitRetryJitter)))
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		reqCtx, cancel := context.WithTimeout(ctx, envdInitReqTimeout)
+		req, err := s.newEnvdRequest(reqCtx, http.MethodPost, "/init", nil, bytes.NewReader(raw))
+		if err != nil {
+			cancel()
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := s.client.dataHTTP.Do(req)
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		statusOK := resp.StatusCode < http.StatusBadRequest
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if statusOK {
+			return nil
+		}
+		lastErr = fmt.Errorf("envd /init returned HTTP %d", resp.StatusCode)
+	}
+
+	return fmt.Errorf("failed to inject create env_vars into sandbox: %w", lastErr)
 }
 
 func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest, opts CommandOptions) (*processStartResult, error) {
