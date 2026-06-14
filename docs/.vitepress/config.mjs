@@ -158,7 +158,8 @@ export default withMermaid(defineConfig({
                   link: '/guide/troubleshooting/',
                   items: [
                     { text: 'Deployment', link: '/guide/troubleshooting/deployment' },
-                    { text: 'Templates', link: '/guide/troubleshooting/templates' }
+                    { text: 'Templates', link: '/guide/troubleshooting/templates' },
+                    { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' }
                   ]
                 },
                 {
@@ -263,7 +264,8 @@ export default withMermaid(defineConfig({
                   link: '/zh/guide/troubleshooting/',
                   items: [
                     { text: '部署相关', link: '/zh/guide/troubleshooting/deployment' },
-                    { text: '模板相关', link: '/zh/guide/troubleshooting/templates' }
+                    { text: '模板相关', link: '/zh/guide/troubleshooting/templates' },
+                    { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' }
                   ]
                 },
                 {

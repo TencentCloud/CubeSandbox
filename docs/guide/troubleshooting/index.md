@@ -56,4 +56,5 @@ lang: en-US
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
 | [Template Creation Times Out When the Sandbox CIDR Overlaps the LAN](./local-network-cidr-conflict.md) | luzhixing12345 | 2026-05-20 | deployment, networking, one-click |
+| [Host Mounts Fail with Permission Denied](./host-mount-permissions.md) | barry166 | 2026-06-14 | runtime, host-mount, permissions |
 | _Add your article here_ | - | - | - |
