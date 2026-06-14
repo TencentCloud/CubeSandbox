@@ -205,10 +205,10 @@ func TestBakeMultiFamily(t *testing.T) {
 	}
 }
 
-// Distroless / scratch-style image: nothing for the bake to touch.
-// This is NOT an error — the design says it's a soft skip; the caller
-// upstream decides whether to treat it as fatal via the
-// cube_egress_ca_required flag.
+// Distroless / scratch-style image: nothing for the bake to append to.
+// Instead of failing, the bake SEEDS the canonical bundle from scratch
+// with the CubeEgress root (safe under the egress-MITM model), so the
+// trust root still lands.
 func TestBakeDistroless(t *testing.T) {
 	caPEM, _ := makeCA(t, "cube-egress-root")
 	root := t.TempDir() // empty rootfs
@@ -217,21 +217,36 @@ func TestBakeDistroless(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bake err=%v", err)
 	}
-	if res.Baked {
-		t.Fatalf("Baked=true on empty rootfs; want false (no targets exist)")
+	if !res.Baked {
+		t.Fatal("Baked=false on empty rootfs; want true (seeded canonical bundle)")
 	}
-	if res.TargetsWritten != 0 {
-		t.Fatalf("TargetsWritten=%d, want 0", res.TargetsWritten)
+	if !res.Seeded {
+		t.Fatal("Seeded=false; want true (image had no trust store)")
 	}
-	if len(res.SkippedReasons) == 0 {
-		t.Fatal("expected SkippedReasons populated for triage")
+	if res.TargetsWritten != 1 {
+		t.Fatalf("TargetsWritten=%d, want 1 (seeded bundle)", res.TargetsWritten)
 	}
-	// Fingerprint is filled even on an empty bake — the CA itself was
-	// valid, just nothing to write to. This matters because the reuse
-	// cache needs a stable fingerprint regardless of whether anything
-	// landed on disk.
+	// The seeded bundle exists at the canonical path and is exactly our CA.
+	seeded := mustReadFile(t, filepath.Join(root, "etc/ssl/certs/ca-certificates.crt"))
+	if seeded != string(caPEM) {
+		t.Fatalf("seeded bundle content mismatch:\ngot=%q\nwant=%q", seeded, caPEM)
+	}
 	if res.Fingerprint == "" {
-		t.Fatal("Fingerprint empty on no-op bake; reuse cache would lose CA-rotation invalidation")
+		t.Fatal("Fingerprint empty on seeded bake; reuse cache would lose CA-rotation invalidation")
+	}
+
+	// Re-bake must be idempotent: the seeded bundle now contains the CA,
+	// so the second pass writes nothing and does not seed again.
+	res2, err := Bake(root, caPEM)
+	if err != nil {
+		t.Fatalf("second bake err=%v", err)
+	}
+	if res2.Baked || res2.Seeded || res2.TargetsWritten != 0 {
+		t.Fatalf("re-bake of seeded rootfs not idempotent: res=%+v", res2)
+	}
+	seededAgain := mustReadFile(t, filepath.Join(root, "etc/ssl/certs/ca-certificates.crt"))
+	if seededAgain != string(caPEM) {
+		t.Fatal("seeded bundle mutated on idempotent re-bake")
 	}
 }
 

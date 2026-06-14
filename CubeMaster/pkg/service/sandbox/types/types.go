@@ -517,7 +517,9 @@ type CreateTemplateFromImageReq struct {
 	// three-state wire encoding so the CLI can ship a "default true"
 	// without ambiguating it with an explicit --with-cube-ca=false:
 	//   nil   → server-side default (true, see resolveWithCubeCA)
-	//   true  → bake; hard-error on missing CA file or distroless image
+	//   true  → bake; hard-error only on a missing host CA file.
+	//           Distroless / scratch images (no trust store of their
+	//           own) are seeded with a fresh bundle, not rejected.
 	//   false → skip the bake entirely
 	// See design/cube-egress-ca-bake.md.
 	WithCubeCA *bool `json:"with_cube_ca,omitempty"`

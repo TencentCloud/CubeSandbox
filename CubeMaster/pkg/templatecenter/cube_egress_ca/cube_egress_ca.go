@@ -26,6 +26,18 @@
 // Mozilla's public CA list; replacing it would break trust for every
 // public HTTPS endpoint a workload talks to. PEM bundles are designed
 // to be concatenated.
+//
+// Distroless / scratch seeding: an image that ships NEITHER a ca-bundle
+// file NOR any anchor directory (e.g. gcr.io/distroless/static, FROM
+// scratch) has no trust store to append to. Rather than fail the build,
+// we *seed* the canonical bundle path (seedBundlePath) from scratch with
+// just the CubeEgress root. This is safe and sufficient precisely
+// because CubeEgress is the egress MITM: it re-signs every outbound TLS
+// connection with this root, so the workload only needs to trust this
+// one CA — it does not need the public Mozilla set (egress to the wider
+// internet is brokered by CubeEgress, not made directly). Seeding only
+// kicks in when nothing else exists and the CA is not already present,
+// so it never clobbers an image's own roots.
 package cube_egress_ca
 
 import (
@@ -69,6 +81,13 @@ type Result struct {
 	// no-op). Surfaced via the cubemastercli template info command for
 	// triage; not load-bearing for any decision.
 	SkippedReasons []string
+
+	// Seeded is true iff the bake created a fresh ca-bundle from scratch
+	// at seedBundlePath because the image carried no trust store of its
+	// own (distroless / scratch). When Seeded is true, Baked is also
+	// true. Recorded for audit so operators can tell "appended to the
+	// image's bundle" apart from "we had to fabricate one".
+	Seeded bool
 }
 
 // AnchorFileName is the basename used for the dropped anchor copy,
@@ -101,6 +120,16 @@ var anchorDirs = []string{
 	"etc/ca-certificates/trust-source", // Arch
 }
 
+// seedBundlePath is the bundle file we *create* from scratch when an
+// image has no trust store of its own (distroless / scratch). It is the
+// Debian/Ubuntu canonical path, which is also Go's first-choice probe
+// location (crypto/x509) and the value distroless images point
+// SSL_CERT_FILE at — so seeding here is picked up by the widest set of
+// runtimes. It is intentionally identical to bundleFiles[0]: the append
+// pass runs first and, on a distroless image, records it "missing"; the
+// seed pass then creates it.
+const seedBundlePath = "etc/ssl/certs/ca-certificates.crt"
+
 // Bake runs against rootfsDir, applying caPEM to every bundle/anchor
 // location it finds. Returns the structured Result plus an error iff
 // the bake encountered a *hard* failure: i.e. either some target had a
@@ -109,6 +138,11 @@ var anchorDirs = []string{
 // or the input PEM is itself invalid. Targets that simply don't exist
 // in this image are NOT errors — they're recorded in
 // Result.SkippedReasons.
+//
+// Distroless / scratch images that ship no bundle and no anchor dir are
+// not skipped: Bake seeds seedBundlePath with the CA (Result.Seeded set)
+// so the trust root still lands. See the package doc for why this is
+// safe under the CubeEgress MITM model.
 //
 // Concurrency: not safe for parallel callers writing to the same
 // rootfsDir. The artifact-build pipeline serializes per-rootfs builds
@@ -130,6 +164,10 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	canonical := pem.EncodeToMemory(caBlock)
 
 	res := Result{Fingerprint: fingerprint}
+	// caPresent tracks whether the CA already lives in some bundle/anchor
+	// (idempotent no-op). It gates the distroless seed so a re-bake of an
+	// already-seeded image doesn't fabricate a second copy.
+	caPresent := false
 
 	for _, rel := range bundleFiles {
 		full := filepath.Join(rootfsDir, rel)
@@ -140,6 +178,9 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 		if written {
 			res.TargetsWritten++
 			res.Baked = true
+		}
+		if reason == "present" {
+			caPresent = true
 		}
 		if reason != "" {
 			res.SkippedReasons = append(res.SkippedReasons, rel+": "+reason)
@@ -156,8 +197,33 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 			res.TargetsWritten++
 			res.Baked = true
 		}
+		if reason == "present" {
+			caPresent = true
+		}
 		if reason != "" {
 			res.SkippedReasons = append(res.SkippedReasons, rel+": "+reason)
+		}
+	}
+
+	// Distroless / scratch fallback: the image had no trust store to
+	// append to and the CA isn't already present anywhere, so seed the
+	// canonical bundle from scratch. Safe under the CubeEgress MITM model
+	// (see package doc) and never clobbers an image's own roots because
+	// it only runs when nothing else matched.
+	if !res.Baked && !caPresent {
+		full := filepath.Join(rootfsDir, seedBundlePath)
+		written, reason, err := seedBundle(full, canonical)
+		if err != nil {
+			return res, fmt.Errorf("cube_egress_ca: seed %s: %w", seedBundlePath, err)
+		}
+		if written {
+			res.TargetsWritten++
+			res.Baked = true
+			res.Seeded = true
+			res.SkippedReasons = append(res.SkippedReasons,
+				seedBundlePath+": seeded (image shipped no trust store)")
+		} else if reason != "" {
+			res.SkippedReasons = append(res.SkippedReasons, seedBundlePath+": "+reason)
 		}
 	}
 
@@ -268,6 +334,41 @@ func dropAnchor(dir string, canonical []byte) (bool, string, error) {
 		return false, "present", nil
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, "", err
+	}
+	tmp := full + ".cube-egress-tmp"
+	if err := os.WriteFile(tmp, canonical, 0o644); err != nil {
+		return false, "", err
+	}
+	if err := os.Rename(tmp, full); err != nil {
+		_ = os.Remove(tmp)
+		return false, "", err
+	}
+	return true, "", nil
+}
+
+// seedBundle creates a fresh ca-bundle at `full` containing only the
+// canonical CA, for distroless / scratch images that ship no trust
+// store of their own. It mkdir -p's the parent directory first and
+// writes atomically (temp + rename) for the same crash-safety reason as
+// appendBundle.
+//
+// Callers only reach this when no existing bundle/anchor matched, so the
+// file normally does not exist. We still guard the rare "already there"
+// case (identical content) to keep redo paths a no-op.
+//
+//	written=true,  reason=""        bundle was created
+//	written=false, reason="present" identical bundle already exists
+//	written=false, err!=nil         mkdir / write attempt failed
+func seedBundle(full string, canonical []byte) (bool, string, error) {
+	if existing, err := os.ReadFile(full); err == nil { // #nosec G304 — fixed path from a closed list
+		if bytes.Equal(existing, canonical) {
+			return false, "present", nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return false, "", err
 	}
 	tmp := full + ".cube-egress-tmp"

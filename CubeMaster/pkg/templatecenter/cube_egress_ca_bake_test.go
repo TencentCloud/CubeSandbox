@@ -137,17 +137,22 @@ func TestApplyCubeEgressCAToRootfsNoopWhenPemEmpty(t *testing.T) {
 	}
 }
 
-func TestApplyCubeEgressCAToRootfsHardErrorOnDistroless(t *testing.T) {
+func TestApplyCubeEgressCAToRootfsSeedsDistroless(t *testing.T) {
 	// Empty rootfs (no bundle, no anchor dir) → distroless equivalent.
-	// withCubeCA=true semantics: caller asked for trust to be installed,
-	// image can't host it → hard error.
+	// withCubeCA=true semantics: caller asked for trust to be installed;
+	// the bake seeds a canonical bundle so the root still lands instead
+	// of failing the build.
+	root := t.TempDir()
 	caPEM := makeCAForBakeTest(t)
-	_, err := applyCubeEgressCAToRootfs(context.Background(), t.TempDir(), caPEM, "")
-	if err == nil {
-		t.Fatal("expected hard error on distroless rootfs when CA was loaded")
+	res, err := applyCubeEgressCAToRootfs(context.Background(), root, caPEM, "")
+	if err != nil {
+		t.Fatalf("expected distroless rootfs to be seeded, got err=%v", err)
 	}
-	if !strings.Contains(err.Error(), "no ca-bundle") {
-		t.Fatalf("err=%v should mention 'no ca-bundle'", err)
+	if !res.Baked || !res.Seeded {
+		t.Fatalf("res=%+v, want Baked=true Seeded=true", res)
+	}
+	if _, err := os.Stat(filepath.Join(root, "etc/ssl/certs/ca-certificates.crt")); err != nil {
+		t.Fatalf("seeded bundle missing: %v", err)
 	}
 }
 

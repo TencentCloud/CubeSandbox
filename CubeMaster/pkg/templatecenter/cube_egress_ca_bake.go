@@ -87,11 +87,13 @@ func loadCubeEgressCAFromPath(ctx context.Context, withCubeCA bool, caPath strin
 // with_cube_ca=false), this is a no-op and returns a zero Result.
 //
 // When pemBytes is non-empty, the caller has explicitly asked for the
-// CA to land in the rootfs, so we hard-error if the bake produces zero
-// writes. Distroless / scratch images that have neither a ca-bundle
-// nor any anchor dir fail the build under with_cube_ca=true; that's
-// the contract — the user asked for trust to be installed, the image
-// can't accept it, the request is unsatisfiable.
+// CA to land in the rootfs. Distroless / scratch images that have
+// neither a ca-bundle nor any anchor dir no longer fail: Bake seeds a
+// canonical bundle so the trust root still lands (res.Seeded=true) —
+// safe under the CubeEgress MITM model. The hard-error below therefore
+// only trips on a genuinely degenerate result (no write AND nothing
+// already present AND no seed), which in practice means the rootfs was
+// unwritable in a way Bake didn't already surface as an error.
 func applyCubeEgressCAToRootfs(ctx context.Context, rootfsDir string, pemBytes []byte, fingerprint string) (cube_egress_ca.Result, error) {
 	if len(pemBytes) == 0 {
 		return cube_egress_ca.Result{Fingerprint: fingerprint}, nil
@@ -102,12 +104,12 @@ func applyCubeEgressCAToRootfs(ctx context.Context, rootfsDir string, pemBytes [
 	}
 	if !res.Baked {
 		return res, fmt.Errorf(
-			"with_cube_ca=true but the image rootfs has no ca-bundle file and no anchor directory; "+
-				"distroless / scratch-style images cannot host the trust root. reasons=%v",
+			"with_cube_ca=true but the cube_egress CA could not be installed into the image rootfs; "+
+				"no trust store was written or seeded. reasons=%v",
 			res.SkippedReasons)
 	}
 	CubeLog.WithContext(ctx).Infof(
-		"cube_egress CA baked into rootfs: targets_written=%d fingerprint=%s",
-		res.TargetsWritten, res.Fingerprint)
+		"cube_egress CA baked into rootfs: targets_written=%d seeded=%t fingerprint=%s",
+		res.TargetsWritten, res.Seeded, res.Fingerprint)
 	return res, nil
 }
