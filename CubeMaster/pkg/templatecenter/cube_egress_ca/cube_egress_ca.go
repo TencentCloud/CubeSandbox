@@ -55,15 +55,16 @@ import (
 // Result describes the outcome of a bake. Callers persist these onto
 // the RootfsArtifact row for audit / debug.
 type Result struct {
-	// Baked is true iff at least one bundle or anchor write succeeded.
-	// A baked=false result with no error is not a failure on its own
-	// (e.g. distroless image with no bundles to update); the caller
-	// decides whether that's acceptable based on the "required" flag.
+	// Baked is true iff at least one bundle or anchor write (or seed)
+	// succeeded this pass. A baked=false result with no error means
+	// every target was already up-to-date (idempotent no-op); the caller
+	// decides whether that's acceptable based on context.
 	Baked bool
 
-	// TargetsWritten counts the bundle and anchor locations that
-	// received the CA, including no-op idempotent skips (counted as
-	// "already there"). The exact number is informational; downstream
+	// TargetsWritten counts the bundle and anchor locations that were
+	// actually written to this pass (new append, new anchor, or fresh
+	// seed). Idempotent skips ("already there") are NOT counted because
+	// no write occurred. The exact number is informational; downstream
 	// alarms should care about Baked + the err path, not this number.
 	TargetsWritten int
 
@@ -85,8 +86,9 @@ type Result struct {
 	// Seeded is true iff the bake created a fresh ca-bundle from scratch
 	// at seedBundlePath because the image carried no trust store of its
 	// own (distroless / scratch). When Seeded is true, Baked is also
-	// true. Recorded for audit so operators can tell "appended to the
-	// image's bundle" apart from "we had to fabricate one".
+	// true. Surfaced in the bake log line for diagnostics; not persisted
+	// separately to the DB because Baked + TargetsWritten + image
+	// metadata are sufficient to infer how the trust root landed.
 	Seeded bool
 }
 
