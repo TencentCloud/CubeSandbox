@@ -1,3 +1,4 @@
+version: "3"
 services:
   coredns:
     image: cube-sandbox-image.tencentcloudcr.com/opensource/coredns/coredns:1.14.2
