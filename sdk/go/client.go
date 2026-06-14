@@ -138,12 +138,26 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 		payload["allowInternetAccess"] = false
 	}
 
+	// Allowing specific domains is only enforceable when all other egress is
+	// denied (public traffic off, or 0.0.0.0/0 in denyOut).
+	defaultDenyAll := (opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess) ||
+		(opts.Network.AllowPublicTraffic != nil && !*opts.Network.AllowPublicTraffic)
+	if err := validateAllowOutDomainsRequireDenyAll(opts.Network.AllowOut, opts.Network.DenyOut, defaultDenyAll); err != nil {
+		return nil, err
+	}
+
 	network := map[string]any{}
+	if opts.Network.AllowPublicTraffic != nil {
+		network["allowPublicTraffic"] = *opts.Network.AllowPublicTraffic
+	}
 	if len(opts.Network.AllowOut) > 0 {
 		network["allowOut"] = opts.Network.AllowOut
 	}
 	if len(opts.Network.DenyOut) > 0 {
 		network["denyOut"] = opts.Network.DenyOut
+	}
+	if len(opts.Network.Rules) > 0 {
+		network["rules"] = opts.Network.Rules
 	}
 	if len(network) > 0 {
 		payload["network"] = network

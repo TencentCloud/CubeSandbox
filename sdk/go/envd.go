@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -24,6 +25,7 @@ const (
 	connectEndStreamFlag   = byte(0x02)
 	connectCompressedFlag  = byte(0x01)
 	maxConnectEnvelopeSize = 64 * 1024 * 1024
+	defaultEnvdUser        = "root"
 )
 
 type processStartRequest struct {
@@ -105,6 +107,7 @@ func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest,
 	}
 	req.Header.Set("Content-Type", connectContentType)
 	req.Header.Set("Connect-Protocol-Version", connectProtocolVersion)
+	req.Header.Set("Authorization", basicAuthUser(opts.User))
 	setConnectTimeout(req, opts.Timeout)
 
 	resp, err := s.client.dataHTTP.Do(req)
@@ -156,6 +159,68 @@ func (s *Sandbox) readFile(ctx context.Context, path string) (string, error) {
 	return string(raw), nil
 }
 
+// writeFile uploads data through envd's POST /files API. It first tries a raw
+// octet-stream body and, if the envd version rejects that, retries as a
+// multipart upload — mirroring the Python SDK's fallback.
+func (s *Sandbox) writeFile(ctx context.Context, path string, data []byte) error {
+	if err := s.ensureClient(); err != nil {
+		return err
+	}
+	query := url.Values{"path": []string{path}}
+
+	resp, err := s.doEnvdUpload(ctx, query, bytes.NewReader(data), "application/octet-stream")
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode < http.StatusBadRequest {
+		return nil
+	}
+
+	multipartBody, contentType, err := multipartFileBody(path, data)
+	if err != nil {
+		return err
+	}
+	resp, err = s.doEnvdUpload(ctx, query, multipartBody, contentType)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		message := readErrorMessage(resp)
+		if message == "" {
+			message = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		}
+		return fmt.Errorf("failed to write %s: %s", path, message)
+	}
+	return nil
+}
+
+func (s *Sandbox) doEnvdUpload(ctx context.Context, query url.Values, body io.Reader, contentType string) (*http.Response, error) {
+	req, err := s.newEnvdRequest(ctx, http.MethodPost, "/files", query, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	return s.client.dataHTTP.Do(req)
+}
+
+func multipartFileBody(path string, data []byte) (io.Reader, string, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	part, err := writer.CreateFormFile("file", path)
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := part.Write(data); err != nil {
+		return nil, "", err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", err
+	}
+	return &buf, writer.FormDataContentType(), nil
+}
+
 func (s *Sandbox) newEnvdRequest(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Request, error) {
 	target := url.URL{
 		Scheme:   s.client.config.ProxyScheme,
@@ -179,6 +244,15 @@ func setConnectTimeout(req *http.Request, timeout time.Duration) {
 		return
 	}
 	req.Header.Set("Connect-Timeout-Ms", strconv.FormatInt(timeout.Milliseconds(), 10))
+}
+
+// basicAuthUser builds the envd "Basic <user>:" auth header. An empty user
+// defaults to root to match the Python SDK.
+func basicAuthUser(user string) string {
+	if user == "" {
+		user = defaultEnvdUser
+	}
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"))
 }
 
 func parseProcessStartStream(r io.Reader) (*processStartResult, error) {

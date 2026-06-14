@@ -43,8 +43,13 @@ type VolumeMount struct {
 }
 
 type NetworkOptions struct {
-	AllowOut []string
-	DenyOut  []string
+	// AllowPublicTraffic gates default public egress; nil leaves it to the
+	// server default. AllowOut/DenyOut are L3/L4 CIDRs or hostnames; Rules are
+	// L7 host/path/SNI matches with audit and credential injection.
+	AllowPublicTraffic *bool
+	AllowOut           []string
+	DenyOut            []string
+	Rules              []Rule
 }
 
 type CreateOptions struct {
@@ -78,6 +83,9 @@ type CommandOptions struct {
 	Timeout time.Duration
 	Envs    map[string]string
 	Cwd     string
+	// User authenticates the envd process call (Basic auth). Empty defaults to
+	// "root" to match the Python SDK and avoid old-envd "no user specified".
+	User string
 }
 
 type CommandResult struct {

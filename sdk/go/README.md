@@ -1,6 +1,6 @@
 # cubesandbox Go SDK
 
-Go SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox). It matches the current Python SDK surface: sandbox lifecycle, code execution, commands, and file reads only.
+Go SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox). It matches the current Python SDK surface: sandbox lifecycle, code execution, commands, file read/write, snapshots, clone, rollback, and L7 egress policy.
 
 ## Install
 
@@ -75,9 +75,49 @@ fmt.Println(result.Stdout, result.Stderr, result.ExitCode)
 
 ```go
 content, err := sb.Files().Read(ctx, "/etc/hosts")
+
+err = sb.Files().Write(ctx, "/tmp/hello.txt", []byte("hi"))
 ```
 
 `Files.Read` downloads content through envd's `GET /files?path=...` file API.
+`Files.Write` uploads through `POST /files`, falling back to a multipart body when the envd version rejects a raw octet-stream.
+
+## Snapshots, Clone, Rollback
+
+```go
+snap, err := sb.CreateSnapshot(ctx, "") // POST /sandboxes/:id/snapshots
+
+snaps, nextToken, err := client.ListSnapshots(ctx, cubesandbox.ListSnapshotsOptions{
+	SandboxID: sb.SandboxID,
+	Limit:     100,
+})
+
+err = client.DeleteSnapshot(ctx, snap.SnapshotID) // DELETE /templates/:id
+
+_, err = sb.Rollback(ctx, snap.SnapshotID) // POST /sandboxes/:id/rollback
+
+clones, err := sb.Clone(ctx, cubesandbox.CloneOptions{N: 3, Concurrency: 3})
+```
+
+`Clone` snapshots the sandbox, creates `N` sandboxes from it (capped by `Concurrency`), then deletes the ephemeral snapshot. If any create fails, all successful siblings are killed and the first error is returned. `Rollback` restarts the sandbox process and drops pooled data-plane connections so the next call reconnects.
+
+## L7 Egress Policy
+
+```go
+sb, err := client.Create(ctx, cubesandbox.CreateOptions{
+	Network: cubesandbox.NetworkOptions{
+		Rules: []cubesandbox.Rule{{
+			Name:  "github-api",
+			Match: cubesandbox.Match{Host: "api.github.com", Scheme: "https"},
+			Action: cubesandbox.Action{
+				Allow:  true,
+				Audit:  "metadata",
+				Inject: []cubesandbox.Inject{{Header: "Authorization", Secret: "token", Format: "Bearer ${SECRET}"}},
+			},
+		}},
+	},
+})
+```
 
 ## Pause And Connect
 
