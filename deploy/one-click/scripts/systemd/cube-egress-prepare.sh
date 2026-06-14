@@ -114,10 +114,25 @@ else
   # cert-store inspection inside a sandbox.
   tmp_key="$(mktemp -p "${CA_DIR}" .ca.key.XXXXXX)"
   tmp_crt="$(mktemp -p "${CA_DIR}" .ca.crt.XXXXXX)"
-  trap 'rm -f "${tmp_key}" "${tmp_crt}"' EXIT
+  tmp_cnf="$(mktemp -p "${CA_DIR}" .ca.cnf.XXXXXX)"
+  trap 'rm -f "${tmp_key}" "${tmp_crt}" "${tmp_cnf}"' EXIT
+
+  # Minimal config to suppress the system openssl.cnf's default x509v3
+  # extensions (specifically [v3_ca]'s basicConstraints + subjectKeyIdentifier).
+  # Without this, OpenSSL 1.1.1 doubles them up with our -addext values and
+  # produces a certificate that Go's crypto/x509 parser rejects (RFC 5280
+  # prohibits duplicate extensions).
+  cat > "${tmp_cnf}" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+prompt = no
+[req_distinguished_name]
+EOF
+
   openssl ecparam -name prime256v1 -genkey -noout -out "${tmp_key}"
   openssl req -x509 -new -key "${tmp_key}" \
     -sha256 -days 3650 \
+    -config "${tmp_cnf}" \
     -subj '/CN=CubeSandbox Egress MITM CA' \
     -addext 'basicConstraints=critical,CA:TRUE' \
     -addext 'keyUsage=critical,keyCertSign,cRLSign' \
@@ -125,7 +140,7 @@ else
     -out "${tmp_crt}"
   install -m 0644 -o root -g root "${tmp_crt}" "${CA_CERT}"
   install -m 0640 -o root -g "${WORKER_GID}" "${tmp_key}" "${CA_KEY}"
-  rm -f "${tmp_key}" "${tmp_crt}"
+  rm -f "${tmp_key}" "${tmp_crt}" "${tmp_cnf}"
   trap - EXIT
 fi
 
