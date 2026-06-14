@@ -57,7 +57,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		defer source.Cleanup(ctx)
 	}
 	pullProgressFlushed := false
-	if !source.UseDockerless {
+	if source.ExportMode == image.ExportModeDocker {
 		// Docker/Podman Engine pulls happen during PrepareSource. Flush before
 		// moving to UNPACKING so stale live cache cannot show 13/14 after
 		// PULLING has already completed.

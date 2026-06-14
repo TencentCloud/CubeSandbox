@@ -55,18 +55,30 @@ func createExt4Image(ctx context.Context, rootfsDir, ext4Path string) error {
 	return nil
 }
 
+// EnsureArtifactBuildPreflight asserts that the host has all necessary tools
+// installed to build images before starting a long-running workflow.
 func EnsureArtifactBuildPreflight(ctx context.Context) error {
 	requiredCommands := []string{"mkfs.ext4", "truncate", "cp"}
-	if hasDockerlessRootfsExportTools() {
-		requiredCommands = append(requiredCommands, "skopeo", "umoci")
-	} else {
-		requiredCommands = append(requiredCommands, "docker", "tar")
-	}
-	for _, cmd := range requiredCommands {
-		if _, err := executableLookPath(cmd); err != nil {
-			return fmt.Errorf("required command %q is not available on cubemaster node", cmd)
+	if !nativeRootfsExportEnabled() {
+		if hasDockerlessRootfsExportTools() {
+			requiredCommands = append(requiredCommands, "skopeo", "umoci")
+		} else {
+			requiredCommands = append(requiredCommands, "docker", "tar")
 		}
 	}
+	if loopMountExt4Enabled() {
+		requiredCommands = append(requiredCommands, "losetup", "mount", "umount", "resize2fs")
+	}
+
+	for _, cmd := range requiredCommands {
+		if _, err := executableLookPath(cmd); err != nil {
+			return fmt.Errorf("required command %q is not available: %w", cmd, err)
+		}
+	}
+	return checkMkfsExt4DSupport(ctx)
+}
+
+func checkMkfsExt4DSupport(ctx context.Context) error {
 	output, err := exec.CommandContext(ctx, "mkfs.ext4", "-h").CombinedOutput()
 	helpText := string(output)
 	if err != nil && helpText == "" {
@@ -115,10 +127,9 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 	keepStoreDir := false
 
 	// Phase 2: loop-mount streaming build (optional, auto-detects capability).
-	// Skip when a PostRootfsExport hook is requested — the streaming path
-	// writes directly into the ext4 image and offers no rootfs directory to
-	// mutate before mkfs.ext4.
-	if opts.PostRootfsExport == nil && loopMountExt4Enabled() && canUseLoopMount() && !source.UseDockerless {
+	// Passes PostRootfsExport down to be executed before unmounting the loop device.
+	// Streaming Phase 2 is currently only implemented for docker and native modes.
+	if loopMountExt4Enabled() && canUseLoopMount() && (source.ExportMode == ExportModeDocker || source.ExportMode == ExportModeNative) {
 		estimatedPhase2, err := estimateImageSizeFromInspect(ctx, source)
 		if err != nil {
 			log.G(ctx).Warnf("cannot estimate image size for Phase 2, falling back to Phase 1: %v", err)
@@ -126,7 +137,7 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 			if err := checkDiskSpace(ctx, storeDir, estimatedPhase2); err != nil {
 				return BuildResult{}, err
 			}
-			if err := createExt4ImageStreaming(ctx, source, workDir, ext4Path, estimatedPhase2); err != nil {
+			if err := createExt4ImageStreaming(ctx, source, workDir, ext4Path, estimatedPhase2, opts.PostRootfsExport); err != nil {
 				log.G(ctx).Warnf("loop-mount streaming ext4 build failed, falling back to phase-1: %v", err)
 				_ = os.RemoveAll(workDir)
 				_ = os.Remove(ext4Path)

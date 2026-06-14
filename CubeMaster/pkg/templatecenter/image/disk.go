@@ -41,7 +41,7 @@ func sourceRefForLog(source *PreparedSource) string {
 // an ext4 image, avoiding any intermediate rootfs directory on disk (Phase 2).
 // Falls back to Phase 1 when prerequisites are not met.
 // estimatedSizeBytes should be obtained from estimateImageSizeFromInspect.
-func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workDir, ext4Path string, estimatedSizeBytes int64) error {
+func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workDir, ext4Path string, estimatedSizeBytes int64, postExport func(context.Context, string) error) error {
 	if !canUseLoopMount() {
 		return fmt.Errorf("loop mount not available")
 	}
@@ -92,18 +92,31 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 		return fmt.Errorf("mount loop device %s: %w", loopDevice, err)
 	}
 
-	// 4. Create container and stream export directly into the mounted ext4.
-	containerIDBytes, err := dockerOutput(ctx, "", "create", "--", source.LocalRef)
-	if err != nil {
-		return fmt.Errorf("docker create for streaming: %w", err)
-	}
-	containerID := strings.TrimSpace(string(containerIDBytes))
-	defer func() {
-		_ = dockerRun(cleanupCtx, "", "rm", "-f", containerID)
-	}()
+	// 4. Stream export directly into the mounted ext4.
+	if source.ExportMode == ExportModeNative {
+		if err := StreamRegistryToDir(ctx, source, mountPoint); err != nil {
+			return fmt.Errorf("native streaming to mount point: %w", err)
+		}
+	} else {
+		containerIDBytes, err := dockerOutput(ctx, "", "create", "--", source.LocalRef)
+		if err != nil {
+			return fmt.Errorf("docker create for streaming: %w", err)
+		}
+		containerID := strings.TrimSpace(string(containerIDBytes))
+		defer func() {
+			_ = dockerRun(cleanupCtx, "", "rm", "-f", containerID)
+		}()
 
-	if err := pipeExportToDir(ctx, containerID, mountPoint); err != nil {
-		return fmt.Errorf("pipe export to mount point: %w", err)
+		if err := pipeExportToDir(ctx, containerID, mountPoint); err != nil {
+			return fmt.Errorf("pipe export to mount point: %w", err)
+		}
+	}
+
+	// 4.5 Execute post-export hook before unmounting.
+	if postExport != nil {
+		if err := postExport(ctx, mountPoint); err != nil {
+			return fmt.Errorf("post-rootfs export hook failed during streaming: %w", err)
+		}
 	}
 
 	// 5. Unmount (via cleanup).
@@ -195,17 +208,17 @@ func skopeoLayersTotalSize(info skopeoInspectImage) int64 {
 // time via `skopeo inspect`. The docker path keeps using the per-image
 // cumulative Size field from `docker image inspect`.
 func estimateImageSizeFromInspect(ctx context.Context, source *PreparedSource) (int64, error) {
-	if source != nil && source.UseDockerless {
-		return estimateImageSizeFromSkopeo(source)
+	if source != nil && (source.ExportMode == ExportModeDockerless || source.ExportMode == ExportModeNative) {
+		return estimateImageSizeFromCompressedBytes(source)
 	}
 	return estimateImageSizeFromDocker(ctx, source)
 }
 
-// estimateImageSizeFromSkopeo derives the estimate from the compressed layer
-// sizes captured by `skopeo inspect`, avoiding any docker invocation.
-func estimateImageSizeFromSkopeo(source *PreparedSource) (int64, error) {
+// estimateImageSizeFromCompressedBytes derives the estimate from the compressed layer
+// sizes recorded during PrepareSource, avoiding any docker invocation.
+func estimateImageSizeFromCompressedBytes(source *PreparedSource) (int64, error) {
 	if source == nil || source.CompressedSizeBytes <= 0 {
-		return 0, fmt.Errorf("skopeo inspect did not report any layer sizes for %s", sourceRefForLog(source))
+		return 0, fmt.Errorf("did not find any compressed layer sizes for %s", sourceRefForLog(source))
 	}
 	return source.CompressedSizeBytes * skopeoInspectSizeMultiplier, nil
 }
