@@ -1,8 +1,8 @@
 IMAGE_TAG              ?= latest
 IMAGE_LOCAL             := cube-egress
-CUBE_EGRESS_VERSION     ?= 0.0.0-dev
-CUBE_EGRESS_COMMIT      ?= unknown
-CUBE_EGRESS_BUILD_TIME  ?= unknown
+CUBE_EGRESS_VERSION     ?= v1.0.0
+CUBE_EGRESS_COMMIT      ?= $(shell git rev-parse HEAD | cut -c1-8)
+CUBE_EGRESS_BUILD_TIME  ?= $(shell date +'%Y%m%d')
 
 IMAGES := \
 	cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-egress \
