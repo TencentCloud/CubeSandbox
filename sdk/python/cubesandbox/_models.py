@@ -13,8 +13,11 @@ class Logs:
     stdout: list[str] = field(default_factory=list)
     stderr: list[str] = field(default_factory=list)
 
+    def to_dict(self) -> dict[str, list[str]]:
+        return {"stdout": self.stdout, "stderr": self.stderr}
+
     def to_json(self) -> str:
-        return jsonlib.dumps({"stdout": self.stdout, "stderr": self.stderr})
+        return jsonlib.dumps(self.to_dict())
 
 
 @dataclass
@@ -31,8 +34,11 @@ class ExecutionError:
         else:
             self.traceback = traceback or ""
 
+    def to_dict(self) -> dict[str, str]:
+        return {"name": self.name, "value": self.value, "traceback": self.traceback}
+
     def to_json(self) -> str:
-        return jsonlib.dumps({"name": self.name, "value": self.value, "traceback": self.traceback})
+        return jsonlib.dumps(self.to_dict())
 
 
 @dataclass
@@ -177,8 +183,8 @@ class Execution:
     def to_json(self) -> str:
         data = {
             "results": _serialize_results(self.results),
-            "logs": self.logs.to_json(),
-            "error": self.error.to_json() if self.error else None,
+            "logs": self.logs.to_dict(),
+            "error": self.error.to_dict() if self.error else None,
         }
         return jsonlib.dumps(data)
 

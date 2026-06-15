@@ -642,6 +642,26 @@ class TestExecutionModel:
         assert '"results"' in ex.to_json()
         assert '"text": "2"' in ex.to_json()
 
+    def test_logs_to_json_returns_json_string(self):
+        logs = Logs(stdout=["a"], stderr=["b"])
+        assert json.loads(logs.to_json()) == {"stdout": ["a"], "stderr": ["b"]}
+
+    def test_execution_error_to_json_returns_json_string(self):
+        error = ExecutionError("e", "v")
+        assert json.loads(error.to_json()) == {"name": "e", "value": "v", "traceback": ""}
+
+    def test_execution_to_json_roundtrip_preserves_nested_objects(self):
+        execution = Execution(
+            results=[],
+            logs=Logs(stdout=["a"], stderr=["b"]),
+            error=ExecutionError("e", "v"),
+        )
+
+        parsed = json.loads(execution.to_json())
+        assert isinstance(parsed["logs"], dict)
+        assert parsed["logs"]["stdout"] == ["a"]
+        assert isinstance(parsed["error"], dict)
+
     def test_output_message_e2b_and_legacy_aliases(self):
         msg = OutputMessage("hello\n", 123, True)
         assert msg.line == "hello\n"
