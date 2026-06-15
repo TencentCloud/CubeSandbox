@@ -25,8 +25,13 @@ export function useGlobalHotkeys() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable;
+      const target = e.target as HTMLElement;
+      const tag = target.tagName;
+      const isInput =
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        target.isContentEditable ||
+        target.closest('.monaco-editor') !== null;
 
       // ── ⌘K / Ctrl+K → Command Palette ──────────────────────────────
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
