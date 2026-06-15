@@ -91,6 +91,7 @@ func (s *internalHttp) registerHandlers() {
 	cubeGroup.HandleFunc(cube.SandboxUpdateAction, cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.SandboxCommitAction, cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.SandboxRollbackAction, cube.HttpHandler).Methods(http.MethodPost)
+	cubeGroup.HandleFunc(cube.SandboxPreviewAction, cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.SandboxAction+"/{sandbox_id}/rollback", cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.SnapshotAction, cube.HttpHandler).Methods(http.MethodGet, http.MethodPost)
 	cubeGroup.HandleFunc(cube.SnapshotAction+"/{snapshot_id}", cube.HttpHandler).Methods(http.MethodGet, http.MethodDelete)
