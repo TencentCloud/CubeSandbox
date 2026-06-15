@@ -47,6 +47,8 @@ use vmm_sys_util::eventfd::EventFd;
 const SECTOR_SHIFT: u8 = 9;
 pub const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
 
+pub const MINIMUM_BLOCK_QUEUE_SIZE: u16 = 2;
+
 // New descriptors are pending on the virtio queue.
 const QUEUE_AVAIL_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
 // New completed tasks are pending on the completion ring.
@@ -508,6 +510,7 @@ impl Block {
                 | (1u64 << VIRTIO_BLK_F_CONFIG_WCE)
                 | (1u64 << VIRTIO_BLK_F_BLK_SIZE)
                 | (1u64 << VIRTIO_BLK_F_TOPOLOGY)
+                | (1u64 << VIRTIO_BLK_F_SEG_MAX)
                 | (1u64 << VIRTIO_RING_F_EVENT_IDX);
 
             if iommu {
@@ -543,6 +546,7 @@ impl Block {
                 physical_block_exp,
                 min_io_size: (topology.minimum_io_size / logical_block_size) as u16,
                 opt_io_size: (topology.optimal_io_size / logical_block_size) as u32,
+                seg_max: (queue_size - MINIMUM_BLOCK_QUEUE_SIZE) as u32,
                 ..Default::default()
             };
 

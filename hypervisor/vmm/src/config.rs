@@ -10,6 +10,7 @@ pub use virtio_devices::fs::{
 };
 pub use virtio_devices::{RateLimiterConfig, TokenBucketConfig};
 
+use crate::vm_config::*;
 use clap::ArgMatches;
 use option_parser::{
     ByteSized, IntegerList, OptionParser, OptionParserError, StringList, Toggle, Tuple,
@@ -23,9 +24,8 @@ use std::result;
 use std::str::FromStr;
 use std::{fmt, fs};
 use thiserror::Error;
+use virtio_devices::block::MINIMUM_BLOCK_QUEUE_SIZE;
 use virtiofsd::passthrough::xattrmap::XattrMap;
-
-use crate::vm_config::*;
 
 const MAX_NUM_PCI_SEGMENTS: u16 = 16;
 
@@ -173,6 +173,8 @@ pub enum ValidationError {
     TdxFirmwareMissing,
     /// Insuffient vCPUs for queues
     TooManyQueues,
+    /// Invalid queue size
+    InvalidQueueSize(u16),
     /// Need shared memory for vfio-user
     UserDevicesRequireSharedMemory,
     /// Memory zone is reused across NUMA nodes
@@ -249,6 +251,12 @@ impl fmt::Display for ValidationError {
             }
             TooManyQueues => {
                 write!(f, "Number of vCPUs is insufficient for number of queues")
+            }
+            InvalidQueueSize(s) => {
+                write!(
+                    f,
+                    "Queue size is smaller than {MINIMUM_BLOCK_QUEUE_SIZE}: {s}"
+                )
             }
             UserDevicesRequireSharedMemory => {
                 write!(
@@ -1073,6 +1081,10 @@ impl DiskConfig {
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
         if self.num_queues > vm_config.cpus.boot_vcpus as usize {
             return Err(ValidationError::TooManyQueues);
+        }
+
+        if self.queue_size <= MINIMUM_BLOCK_QUEUE_SIZE {
+            return Err(ValidationError::InvalidQueueSize(self.queue_size));
         }
 
         if self.vhost_user && self.iommu {
