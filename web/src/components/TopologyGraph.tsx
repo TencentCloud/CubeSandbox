@@ -83,8 +83,7 @@ function topoLayeredOrder(nodes: ScenarioNode[]): string[][] {
     // Layer 8: Workload
     playwright: 8,
     nginx: 8,
-    // Layer 9: Sub-workload
-    chromium: 9,
+    chromium: 8,
   };
   const seen = new Set<string>();
   const layers: string[][] = [];

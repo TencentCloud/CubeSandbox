@@ -291,7 +291,10 @@ function topologyHostMount(): ScenarioTopology {
 
 function topologyBrowser(): ScenarioTopology {
   const t = cloneSharedTopology();
-  // Add Chromium + Playwright as workload under CubeRuntime.
+  // Add Playwright + Chromium as workload under CubeRuntime.
+  // VNC preview (Xvfb → x11vnc → websockify) is pre-installed in the
+  // browser template image; the detail is folded into the Chromium
+  // description to keep the topology focused on user-facing data flow.
   t.nodes.push(
     {
       id: 'playwright',
@@ -308,8 +311,8 @@ function topologyBrowser(): ScenarioTopology {
       labelEn: 'Chromium :9000',
       plane: 'data',
       kind: 'data',
-      descriptionZh: '沙箱内启用 CDP 的无头 Chromium 浏览器。',
-      descriptionEn: 'Headless Chromium inside the sandbox with CDP enabled.',
+      descriptionZh: '沙箱内启用 CDP 的 Chromium，运行在 Xvfb 虚拟显示器上，通过 websockify :6080 提供 noVNC 实时预览。',
+      descriptionEn: 'Chromium with CDP on Xvfb virtual display. Live desktop preview via websockify :6080 (noVNC).',
     },
   );
   t.edges.push(

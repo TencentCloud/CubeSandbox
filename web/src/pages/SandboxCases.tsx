@@ -474,7 +474,7 @@ function ScenarioGroup({ scenario, selectedFileId, onSelect }: ScenarioGroupProp
 // ─── Run output panel ───────────────────────────────────────────────────────
 
 function extractNoVncUrl(text: string): string | null {
-  const m = text.match(/https:\/\/[^\s]+\/novnc\/[^\s]+/);
+  const m = text.match(/https?:\/\/[^\s]*vnc\.html[^\s]*/);
   return m ? m[0] : null;
 }
 
@@ -524,7 +524,7 @@ function RunOutput({ stdout, stderr, exitCode, success, elapsedMs, ranEdited }: 
             <iframe
               src={novncUrl}
               title="Sandbox noVNC"
-              className="h-[360px] w-full"
+              className="h-[660px] w-full"
               style={{ border: 'none' }}
             />
           </div>
