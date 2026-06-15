@@ -71,6 +71,13 @@
     "dataPlane": "数据流",
     "hint": "拖动节点可重新排列 · 滚轮缩放"
   },
+  "clusterConfig": {
+    "label": "连接配置",
+    "apiUrl": "CubeAPI",
+    "proxyIp": "CubeProxy",
+    "save": "保存",
+    "cancel": "取消"
+  },
   "timeline": {
     "title": "步骤时间线",
     "empty": "运行一次案例后,这里会显示分步日志。",
