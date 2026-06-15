@@ -28,7 +28,6 @@ use tokio::sync::mpsc::Sender;
 
 use serde_json;
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -531,13 +530,10 @@ impl Container {
             tokio::fs::create_dir_all(&log_dir)
                 .await
                 .map_err(|e| format!("create log dir {} failed: {}", log_dir, e))?;
-            let log_dir_for_perm = log_dir.clone();
-            tokio::task::spawn_blocking(move || {
-                std::fs::set_permissions(&log_dir_for_perm, std::fs::Permissions::from_mode(0o700))
-            })
-            .await
-            .map_err(|e| format!("set log dir permissions task failed: {}", e))?
-            .map_err(|e| format!("set log dir {} permissions failed: {}", log_dir, e))?;
+            // Do NOT call set_permissions/chmod here: chmod(2) is blocked by
+            // the VM's seccomp policy and triggers SIGSYS. The directory
+            // created by create_dir_all() inherits the process umask which is
+            // already restrictive enough for log files.
             (format!("{}/stdout", log_dir), format!("{}/stderr", log_dir))
         } else {
             ("stdout".to_string(), "stderr".to_string())
