@@ -141,12 +141,6 @@ class TestCreate:
         body = m.call_args.kwargs["json"]
         assert "allow_internet_access" not in body
 
-    def test_create_network_ignores_allow_public_traffic(self):
-        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
-            Sandbox.create(network={"allow_public_traffic": False}, config=make_config())
-        body = m.call_args.kwargs["json"]
-        assert "network" not in body
-
     def test_create_network_allow_out(self):
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(network={"allow_out": ["8.8.8.8/32"]}, config=make_config())
@@ -224,17 +218,6 @@ class TestDomainFiltering:
         assert body["allow_internet_access"] is False
         assert body["network"]["allowOut"] == allow_out
         assert "denyOut" not in body["network"]
-
-    def test_create_network_domain_filtering_rejects_when_only_allow_public_traffic_false(self):
-        with pytest.raises(ApiError, match="must disable public outbound traffic or include '0.0.0.0/0' in deny_out") as exc:
-            Sandbox.create(
-                network={
-                    "allow_public_traffic": False,
-                    "allow_out": ["api.example.com"],
-                },
-                config=make_config(),
-            )
-        assert exc.value.status_code == 400
 
     def test_create_network_domain_filtering_rejects_without_deny_all(self):
         with pytest.raises(ApiError, match="must disable public outbound traffic or include '0.0.0.0/0' in deny_out") as exc:

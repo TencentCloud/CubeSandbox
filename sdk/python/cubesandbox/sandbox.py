@@ -141,6 +141,8 @@ class Sandbox:
                 net["allowOut"] = network["allow_out"]
             if "deny_out" in network:
                 net["denyOut"] = network["deny_out"]
+            if "allow_public_traffic" in network:
+                net["allowPublicTraffic"] = network["allow_public_traffic"]
             if "rules" in network and network["rules"]:
                 net["rules"] = [_serialize_rule(r) for r in network["rules"]]
             if net:
