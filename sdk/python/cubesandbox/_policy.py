@@ -166,6 +166,162 @@ def _serialize_rule(rule: Any) -> Dict[str, Any]:
     return out
 
 
+# ── E2B per-host request transforms compatibility ───────────────────────────
+#
+# E2B's ``network.rules`` accepts a host-keyed mapping of transforms:
+#
+#     network = {
+#         "rules": {
+#             "api.example.com": [
+#                 {"transform": {"headers": {"X-Header": "Content"}}}
+#             ]
+#         }
+#     }
+#
+# CubeEgress expresses the same intent as a list of L7 rules with credential
+# ``inject`` entries:
+#
+#     Rule(
+#         name="e2b-transform-api.example.com-0",
+#         match=Match(host="api.example.com"),
+#         action=Action(
+#             allow=True,
+#             inject=[Inject(header="X-Header", secret="Content")],
+#         ),
+#     )
+#
+# ``_convert_e2b_per_host_rules`` is the bridge: given an E2B-shaped dict, it
+# returns a list of dicts that ``_serialize_rule`` can consume directly.
+# A bare list (already CubeEgress-shaped) is passed through untouched so
+# existing callers keep working.
+
+
+def _is_e2b_per_host_rules(rules: Any) -> bool:
+    """Return True iff *rules* looks like E2B's per-host transform mapping.
+
+    The current CubeSandbox ``rules`` field is a list; E2B's is a dict keyed
+    by host. The two shapes are unambiguous, so we use the type alone as the
+    discriminator.
+    """
+    return isinstance(rules, dict)
+
+
+def _convert_e2b_transform_to_inject(transform: Dict[str, Any]) -> List[Inject]:
+    """Convert one E2B ``transform`` block to a list of :class:`Inject`.
+
+    Today only ``transform.headers`` is documented; additional transform
+    kinds are reported as ``ValueError`` so that silent drops never produce
+    a sandbox that's missing credential injection the caller asked for.
+    """
+    if not isinstance(transform, dict):
+        raise ValueError(
+            f"network.rules transform must be a dict, got {type(transform).__name__}"
+        )
+    headers = transform.get("headers")
+    if headers is None:
+        raise ValueError("network.rules transform requires a 'headers' field")
+    if not isinstance(headers, dict):
+        raise ValueError(
+            f"network.rules transform.headers must be a dict, got {type(headers).__name__}"
+        )
+    unknown = set(transform.keys()) - {"headers"}
+    if unknown:
+        raise ValueError(
+            f"network.rules transform has unsupported keys: {sorted(unknown)!r}; "
+            "only 'headers' is supported by the CubeEgress compatibility layer"
+        )
+    injects: List[Inject] = []
+    for name, value in headers.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("network.rules transform.headers keys must be non-empty strings")
+        if not isinstance(value, str):
+            raise ValueError(
+                f"network.rules transform.headers[{name!r}] must be a string, "
+                f"got {type(value).__name__}"
+            )
+        injects.append(Inject(header=name, secret=value))
+    return injects
+
+
+def _convert_e2b_per_host_rules(rules: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Convert E2B's per-host transform mapping to CubeEgress rule dicts.
+
+    Each ``host -> [transform_entry, ...]`` pair fans out into one Rule per
+    entry, preserving the original list order so audit logs and rule
+    evaluation remain stable. The generated rule names use the
+    ``e2b-transform-<host>[-<index>]`` convention to make compat-layer
+    output identifiable in audit logs.
+
+    The result is a list of plain dicts (not :class:`Rule` instances) so it
+    flows through ``_serialize_rule`` unchanged and matches the shape that
+    callers can already pass via ``network={"rules": [...]}``.
+    """
+    converted: List[Dict[str, Any]] = []
+    for host, entries in rules.items():
+        if not isinstance(host, str) or not host:
+            raise ValueError(
+                "network.rules host keys must be non-empty strings"
+            )
+        if not isinstance(entries, list):
+            raise ValueError(
+                f"network.rules[{host!r}] must be a list of transform entries, "
+                f"got {type(entries).__name__}"
+            )
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"network.rules[{host!r}][{index}] must be a dict, "
+                    f"got {type(entry).__name__}"
+                )
+            transform = entry.get("transform")
+            if transform is None:
+                raise ValueError(
+                    f"network.rules[{host!r}][{index}] is missing the 'transform' field"
+                )
+            unknown = set(entry.keys()) - {"transform"}
+            if unknown:
+                raise ValueError(
+                    f"network.rules[{host!r}][{index}] has unsupported keys: "
+                    f"{sorted(unknown)!r}; only 'transform' is supported"
+                )
+            injects = _convert_e2b_transform_to_inject(transform)
+            suffix = "" if len(entries) == 1 else f"-{index}"
+            converted.append({
+                "name": f"e2b-transform-{host}{suffix}",
+                "match": {"host": host},
+                "action": {
+                    "allow": True,
+                    "inject": [i.to_wire() for i in injects],
+                },
+            })
+    return converted
+
+
+def _normalize_rules_arg(rules: Any) -> List[Any]:
+    """Return a list of rule items suitable for :func:`_serialize_rule`.
+
+    Accepts:
+    - ``None`` / empty → ``[]``.
+    - ``dict`` → treated as E2B per-host transforms, expanded via
+      :func:`_convert_e2b_per_host_rules`.
+    - ``list`` / other iterable of ``Rule`` or rule-shaped dicts → returned
+      as a list, untouched.
+    """
+    if not rules:
+        return []
+    if _is_e2b_per_host_rules(rules):
+        return _convert_e2b_per_host_rules(rules)
+    if isinstance(rules, list):
+        return rules
+    # Tolerate any other iterable so SDK callers can pass tuples/generators.
+    try:
+        return list(rules)
+    except TypeError as exc:
+        raise TypeError(
+            f"network.rules must be a list or dict, got {type(rules).__name__}"
+        ) from exc
+
+
 DENY_ALL_IPV4_CIDR = "0.0.0.0/0"
 ALLOW_OUT_DOMAIN_REQUIRES_DENY_ALL = (
     "When specifying allowed domains in allow_out, you must disable public "

@@ -370,6 +370,176 @@ class TestNetworkRules:
         assert Action(allow=False).to_wire() == {"allow": False}
 
 
+# ── E2B per-host request transforms compatibility ───────────────────────────
+
+class TestE2BPerHostTransforms:
+    """Verify that E2B's host-keyed ``network.rules`` mapping is converted
+    to the equivalent CubeEgress L7 inject rules on the wire.
+
+    The compatibility layer must:
+    - Translate ``{host: [{transform: {headers: {...}}}]}`` into one Rule per
+      transform entry, with ``match.host`` set and ``action.allow=True``.
+    - Materialize each header pair as one :class:`Inject` (header/secret).
+    - Coexist with ``allow_out`` / ``deny_out`` and the typed list-of-Rule shape.
+    - Reject malformed inputs eagerly (better than silently dropping rules).
+    """
+
+    def _payload(self, network, **kwargs):
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(network=network, config=make_config(), **kwargs)
+        return m.call_args.kwargs["json"]
+
+    def test_single_host_single_header(self):
+        body = self._payload({
+            "rules": {
+                "api.example.com": [
+                    {"transform": {"headers": {"X-Header": "Content"}}},
+                ],
+            },
+        })
+        rules = body["network"]["rules"]
+        assert rules == [{
+            "name": "e2b-transform-api.example.com",
+            "match": {"host": "api.example.com"},
+            "action": {
+                "allow": True,
+                "inject": [{"header": "X-Header", "secret": "Content"}],
+            },
+        }]
+
+    def test_single_host_multiple_headers(self):
+        body = self._payload({
+            "rules": {
+                "api.example.com": [
+                    {"transform": {"headers": {
+                        "Authorization": "Bearer sk_xxx",
+                        "X-Trace": "on",
+                    }}},
+                ],
+            },
+        })
+        inject = body["network"]["rules"][0]["action"]["inject"]
+        # Order follows dict insertion order — preserve it for deterministic
+        # audit logs and to match the user's intent.
+        assert inject == [
+            {"header": "Authorization", "secret": "Bearer sk_xxx"},
+            {"header": "X-Trace", "secret": "on"},
+        ]
+
+    def test_multiple_hosts(self):
+        body = self._payload({
+            "rules": {
+                "api.example.com": [{"transform": {"headers": {"X-A": "1"}}}],
+                "api.other.com":   [{"transform": {"headers": {"X-B": "2"}}}],
+            },
+        })
+        rules = body["network"]["rules"]
+        hosts = [r["match"]["host"] for r in rules]
+        assert hosts == ["api.example.com", "api.other.com"]
+        assert all(r["action"]["allow"] is True for r in rules)
+
+    def test_multiple_transform_entries_per_host_get_indexed_names(self):
+        body = self._payload({
+            "rules": {
+                "api.example.com": [
+                    {"transform": {"headers": {"X-A": "1"}}},
+                    {"transform": {"headers": {"X-B": "2"}}},
+                ],
+            },
+        })
+        rules = body["network"]["rules"]
+        assert [r["name"] for r in rules] == [
+            "e2b-transform-api.example.com-0",
+            "e2b-transform-api.example.com-1",
+        ]
+        assert rules[0]["action"]["inject"] == [{"header": "X-A", "secret": "1"}]
+        assert rules[1]["action"]["inject"] == [{"header": "X-B", "secret": "2"}]
+
+    def test_alongside_allow_out_and_deny_out(self):
+        # Mirrors the canonical E2B usage: the host must still be referenced
+        # via allow_out for traffic to flow at all — registering a rule alone
+        # does not grant egress.
+        body = self._payload({
+            "allow_out": ["api.example.com"],
+            "deny_out": ["0.0.0.0/0"],
+            "rules": {
+                "api.example.com": [{"transform": {"headers": {"X-Header": "Content"}}}],
+            },
+        })
+        assert body["network"]["allowOut"] == ["api.example.com"]
+        assert body["network"]["denyOut"] == ["0.0.0.0/0"]
+        assert body["network"]["rules"][0]["match"]["host"] == "api.example.com"
+
+    def test_empty_dict_rules_omits_network(self):
+        body = self._payload({"rules": {}})
+        # ``rules={}`` is just as empty as ``rules=[]``: the SDK should not
+        # emit a stub network block when no policy was configured.
+        assert "network" not in body
+
+    def test_typed_rule_list_unaffected(self):
+        # Regression: switching the converter on must not change the
+        # behaviour of the existing typed-Rule path.
+        from cubesandbox import Action, Match, Rule
+        rules = [Rule(name="r1", match=Match(host="x.com"), action=Action(allow=True))]
+        body = self._payload({"rules": rules})
+        assert body["network"]["rules"] == [{
+            "name": "r1",
+            "match": {"host": "x.com"},
+            "action": {"allow": True},
+        }]
+
+    def test_rejects_non_dict_transform(self):
+        with pytest.raises(ValueError, match="transform must be a dict"):
+            Sandbox.create(
+                network={"rules": {"api.example.com": [{"transform": "oops"}]}},
+                config=make_config(),
+            )
+
+    def test_rejects_missing_headers(self):
+        with pytest.raises(ValueError, match="requires a 'headers' field"):
+            Sandbox.create(
+                network={"rules": {"api.example.com": [{"transform": {}}]}},
+                config=make_config(),
+            )
+
+    def test_rejects_unsupported_transform_keys(self):
+        # We refuse silently dropping unknown transform kinds — better to
+        # surface the gap than ship a sandbox that's missing the rewrite the
+        # caller expected.
+        with pytest.raises(ValueError, match="unsupported keys"):
+            Sandbox.create(
+                network={"rules": {"api.example.com": [
+                    {"transform": {"headers": {"X-A": "1"}, "body": "ignored"}},
+                ]}},
+                config=make_config(),
+            )
+
+    def test_rejects_non_string_header_value(self):
+        with pytest.raises(ValueError, match="must be a string"):
+            Sandbox.create(
+                network={"rules": {"api.example.com": [
+                    {"transform": {"headers": {"X-Count": 42}}},
+                ]}},
+                config=make_config(),
+            )
+
+    def test_rejects_unsupported_entry_keys(self):
+        with pytest.raises(ValueError, match="unsupported keys"):
+            Sandbox.create(
+                network={"rules": {"api.example.com": [
+                    {"transform": {"headers": {"X-A": "1"}}, "extra": True},
+                ]}},
+                config=make_config(),
+            )
+
+    def test_rejects_non_list_entries(self):
+        with pytest.raises(ValueError, match="must be a list of transform entries"):
+            Sandbox.create(
+                network={"rules": {"api.example.com": {"transform": {"headers": {}}}}},
+                config=make_config(),
+            )
+
+
 # ── POST /sandboxes/:id/connect ───────────────────────────────────────────────
 
 class TestConnect:

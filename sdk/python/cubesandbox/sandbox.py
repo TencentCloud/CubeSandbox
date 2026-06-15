@@ -13,7 +13,12 @@ from ._config import Config
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
 from ._filesystem import Filesystem
 from ._models import Execution, ExecutionError, OutputMessage, Result, SnapshotInfo
-from ._policy import Rule, _serialize_rule, _validate_allow_out_domains_require_deny_all
+from ._policy import (
+    Rule,
+    _normalize_rules_arg,
+    _serialize_rule,
+    _validate_allow_out_domains_require_deny_all,
+)
 from ._stream import _parse_line
 from ._transport import build_client
 
@@ -108,7 +113,11 @@ class Sandbox:
                 - ``allow_out`` / ``deny_out``: lists of CIDRs or hostnames (L3/L4).
                 - ``rules``: list of :class:`~cubesandbox.Rule` dataclasses (or
                   equivalent dicts with snake_case keys) for L7 host/path/SNI
-                  matching, audit, and credential injection.
+                  matching, audit, and credential injection. For E2B parity,
+                  a host-keyed mapping of per-host request transforms (e.g.
+                  ``{"api.example.com": [{"transform": {"headers": {...}}}]}``)
+                  is also accepted and converted into equivalent CubeEgress
+                  inject rules.
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
@@ -144,7 +153,13 @@ class Sandbox:
             if "allow_public_traffic" in network:
                 net["allowPublicTraffic"] = network["allow_public_traffic"]
             if "rules" in network and network["rules"]:
-                net["rules"] = [_serialize_rule(r) for r in network["rules"]]
+                # ``rules`` accepts either CubeEgress's list-of-Rule shape or
+                # E2B's per-host transform mapping (``{host: [{transform: {...}}]}``).
+                # ``_normalize_rules_arg`` collapses both into a list of rule
+                # dicts that ``_serialize_rule`` understands.
+                normalized_rules = _normalize_rules_arg(network["rules"])
+                if normalized_rules:
+                    net["rules"] = [_serialize_rule(r) for r in normalized_rules]
             if net:
                 payload["network"] = net
         payload.update(kwargs)

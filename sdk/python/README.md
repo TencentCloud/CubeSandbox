@@ -148,6 +148,38 @@ with Sandbox.create(
 Rules are evaluated **first-match-wins** in list order. Credential injection
 only runs on HTTPS requests where SNI and Host match (server-enforced).
 
+#### E2B per-host request transforms (compat shape)
+
+For drop-in compatibility with E2B's
+[per-host request transforms](https://e2b.dev/docs/network/internet-access#per-host-request-transforms),
+`network["rules"]` also accepts a host-keyed mapping. Each `transform.headers`
+entry is converted into a CubeEgress L7 rule whose `action.inject` injects
+the same headers on outbound HTTPS requests to that host:
+
+```python
+from cubesandbox import Sandbox
+
+with Sandbox.create(
+    network={
+        # The host must still be referenced via allow_out — registering a
+        # rule alone does not grant egress.
+        "allow_out": ["api.example.com"],
+        "deny_out": ["0.0.0.0/0"],
+        "rules": {
+            "api.example.com": [
+                {"transform": {"headers": {"X-Header": "Content"}}},
+            ],
+        },
+    },
+) as sb:
+    sb.run_code("import requests; requests.get('https://api.example.com/')")
+```
+
+The compat shape is interchangeable with the typed-Rule shape: pick whichever
+fits the codebase. Mixing the two on a single `Sandbox.create` call is not
+supported — pass either a list of `Rule` (typed) **or** a host-keyed dict
+(E2B-shaped).
+
 The legacy `metadata={"network-policy": ...}` interface is still accepted
 for IP-only deny-all / custom allow-list scenarios.
 
