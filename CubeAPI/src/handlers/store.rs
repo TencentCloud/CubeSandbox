@@ -54,7 +54,7 @@ pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
             tags: vec!["browser".into(), "chromium".into(), "official".into()],
             category: "browser".into(),
             size_mb: 1530,
-            expose_ports: vec![49983, 9000],
+            expose_ports: vec![49983, 9000, 6080],
             probe_port: 9000,
             probe_path: "/cdp/json/version".into(),
             writable_layer_size: "1G".into(),
