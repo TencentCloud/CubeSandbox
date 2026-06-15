@@ -65,6 +65,13 @@ pub struct RunExampleRequest {
     /// an editable Monaco buffer while keeping the registry on disk
     /// authoritative for read access.
     pub code: Option<String>,
+    /// Optional CubeAPI URL override. When provided, takes priority over
+    /// the server-configured CUBE_API_URL, so the frontend can direct
+    /// example scripts to a specific CubeAPI instance.
+    pub api_url: Option<String>,
+    /// Optional CubeProxy node IP override. When provided, takes priority
+    /// over the server-configured CUBE_PROXY_NODE_IP.
+    pub proxy_node_ip: Option<String>,
 }
 
 #[derive(Serialize, Clone, ToSchema)]
@@ -409,29 +416,6 @@ fn topology_for(scenario: &str) -> TopologyTemplate {
                 plane: "control".into(),
             });
         }
-        "e2b-dev-sidecar" => {
-            // Local sidecar proxies requests through header rewriting.
-            nodes.push(TopologyNode {
-                id: "sidecar".into(),
-                label: "Dev Sidecar".into(),
-                plane: "data".into(),
-                kind: "control".into(),
-                description: "Local reverse-proxy that rewrites Host headers for e2b compatibility.".into(),
-            });
-            edges.retain(|e| !(e.from == "cubeapi" && e.to == "cubeproxy"));
-            edges.push(TopologyEdge {
-                from: "cubeapi".into(),
-                to: "sidecar".into(),
-                label: "HTTPS".into(),
-                plane: "data".into(),
-            });
-            edges.push(TopologyEdge {
-                from: "sidecar".into(),
-                to: "cubeproxy".into(),
-                label: "Host rewrite".into(),
-                plane: "data".into(),
-            });
-        }
         "cubesandbox-base-nginx" => {
             // Replace runner with nginx so the topology reflects a web workload.
             nodes.retain(|n| n.id != "runner");
@@ -502,7 +486,6 @@ fn file_languages() -> std::collections::HashMap<&'static str, &'static str> {
         ("snapshot-rollback-clone:11_delete_snapshot", "python"),
         ("snapshot-rollback-clone:clone_demo", "python"),
         ("snapshot-rollback-clone:rollback_demo", "python"),
-        ("e2b-dev-sidecar:demo", "python"),
         ("cubesandbox-base-nginx:test_files", "python"),
         ("cube-bench:main", "go"),
     ]
@@ -646,21 +629,6 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             ],
             timeout_secs: None,
             topology: topology_for("snapshot-rollback-clone"),
-            store_item_id: Some("sandbox-code"),
-        },
-        ScenarioSpec {
-            id: "e2b-dev-sidecar",
-            category: "advanced",
-            hidden: false,
-            files: &[FileSpec {
-                id: "demo",
-                filename: "demo.py",
-                title: "Sidecar Demo",
-                description: "Start a sidecar proxy in front of CubeAPI.",
-                language: "python",
-            }],
-            timeout_secs: None,
-            topology: topology_for("e2b-dev-sidecar"),
             store_item_id: Some("sandbox-code"),
         },
         ScenarioSpec {
@@ -1101,11 +1069,17 @@ pub async fn run_example(
             .into_response());
     }
 
-    let cube_api_url = state
-        .config
-        .cube_api_url
+    let cube_api_url = req
+        .api_url
         .clone()
-        .unwrap_or_else(|| "http://127.0.0.1:3000".to_string());
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            state
+                .config
+                .cube_api_url
+                .clone()
+                .unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
+        });
 
     tracing::info!(
         example_id = %req.id,
@@ -1287,51 +1261,21 @@ pub async fn run_example(
         cmd.env("CUBE_API_KEY", "cube_0000000000000000000000000000000000000000");
     }
 
-    if let Some(ref proxy_ip) = state.config.cube_proxy_node_ip {
+    // ── Scenario-specific environment variables ──────────────────
+    // Compute the effective proxy IP once so both the common env var and the
+    // e2b-dev-sidecar proxy_base use the same resolved value.
+    let effective_proxy_ip = req
+        .proxy_node_ip
+        .clone()
+        .or_else(|| state.config.cube_proxy_node_ip.clone());
+
+    if let Some(ref proxy_ip) = effective_proxy_ip {
         cmd.env("CUBE_PROXY_NODE_IP", proxy_ip);
     }
     if let Some(proxy_port) = state.config.cube_proxy_port_http {
         cmd.env("CUBE_PROXY_PORT_HTTP", proxy_port.to_string());
     }
     cmd.env("CUBE_SANDBOX_DOMAIN", &state.config.sandbox_domain);
-
-    // ── Scenario-specific environment variables ──────────────────
-    if meta.scenario == "e2b-dev-sidecar" {
-        // The e2b SDK reads E2B_API_URL (not CUBE_API_URL) for the
-        // control-plane endpoint. Map it to the same CubeAPI URL.
-        cmd.env("E2B_API_URL", &cube_api_url);
-        // The e2b SDK also reads E2B_API_KEY. Map it from CUBE_API_KEY
-        // or use the same placeholder.
-        if std::env::var("E2B_API_KEY").is_err() {
-            cmd.env("E2B_API_KEY", "e2b_0000000000000000000000000000000000000000");
-        }
-        // Data-plane: the sidecar proxies to CubeProxy. Derive the
-        // base URL from the proxy config.
-        let proxy_base = if let Some(ref ip) = state.config.cube_proxy_node_ip {
-            let port_suffix = state
-                .config
-                .cube_proxy_port_http
-                .filter(|&p| p != 443)
-                .map(|p| format!(":{}", p))
-                .unwrap_or_default();
-            format!("https://{}{}", ip, port_suffix)
-        } else {
-            // No explicit proxy IP configured; assume CubeProxy (nginx)
-            // is on localhost at the standard HTTPS port.
-            let port_suffix = state
-                .config
-                .cube_proxy_port_http
-                .filter(|&p| p != 443)
-                .map(|p| format!(":{}", p))
-                .unwrap_or_default();
-            format!("https://127.0.0.1{}", port_suffix)
-        };
-        cmd.env("CUBE_REMOTE_PROXY_BASE", &proxy_base);
-        cmd.env("CUBE_REMOTE_PROXY_VERIFY_SSL", "false");
-        // The sidecar reads CUBE_REMOTE_SANDBOX_DOMAIN for the Host
-        // header sent to CubeProxy. Map it from the same domain config.
-        cmd.env("CUBE_REMOTE_SANDBOX_DOMAIN", &state.config.sandbox_domain);
-    }
 
     let start = Instant::now();
     let max_secs = sc.timeout_secs.unwrap_or(120);
