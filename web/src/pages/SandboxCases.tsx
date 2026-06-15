@@ -561,6 +561,11 @@ export default function SandboxCasesPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | undefined>(undefined);
   const [editedCode, setEditedCode] = useState<string>('');
   const [codeDirty, setCodeDirty] = useState(false);
+  const [cubeApiUrl, setCubeApiUrl] = useState<string>('');
+  const [cubeProxyIp, setCubeProxyIp] = useState<string>('');
+  const [configExpanded, setConfigExpanded] = useState(false);
+  const [draftApiUrl, setDraftApiUrl] = useState('');
+  const [draftProxyIp, setDraftProxyIp] = useState('');
 
   const { data: templates } = useQuery({
     queryKey: ['templates'],
@@ -572,6 +577,20 @@ export default function SandboxCasesPage() {
     queryKey: ['config'],
     queryFn: () => clusterApi.config(),
   });
+
+  // Pre-fill cluster config overrides from server config (only on first load)
+  useEffect(() => {
+    if (!config) return;
+    if (!cubeApiUrl && config.apiEndpoint) {
+      setCubeApiUrl(config.apiEndpoint);
+      setDraftApiUrl(config.apiEndpoint);
+    }
+    if (!cubeProxyIp && config.proxyNodeIp) {
+      setCubeProxyIp(config.proxyNodeIp);
+      setDraftProxyIp(config.proxyNodeIp);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config]);
 
   const { data: storeCatalog } = useQuery({
     queryKey: ['store-catalog'],
@@ -685,6 +704,13 @@ export default function SandboxCasesPage() {
     if (codeDirty) {
       body.code = editedCode;
     }
+    // Pass cluster config overrides if user has edited them
+    if (cubeApiUrl.trim() && cubeApiUrl !== config?.apiEndpoint) {
+      body.api_url = cubeApiUrl.trim();
+    }
+    if (cubeProxyIp.trim() && cubeProxyIp !== config?.proxyNodeIp) {
+      body.proxy_node_ip = cubeProxyIp.trim();
+    }
     runMutation.mutate(body);
   }, [
     selectedId,
@@ -692,6 +718,10 @@ export default function SandboxCasesPage() {
     sourceData?.language,
     codeDirty,
     editedCode,
+    cubeApiUrl,
+    cubeProxyIp,
+    config?.apiEndpoint,
+    config?.proxyNodeIp,
     runMutation,
   ]);
 
@@ -754,6 +784,135 @@ export default function SandboxCasesPage() {
           </div>
         </div>
       </header>
+
+      {/* ── Connection Config Bar ─────────────────────────── */}
+      <div className="rounded-lg border border-border/60 bg-muted/30 shadow-sm">
+        {/* Collapsed header — always visible */}
+        <button
+          type="button"
+          onClick={() => {
+            if (!configExpanded) {
+              // Open: sync draft from current effective values
+              setDraftApiUrl(cubeApiUrl);
+              setDraftProxyIp(cubeProxyIp);
+            }
+            setConfigExpanded((v) => !v);
+          }}
+          className={cn(
+            'flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors',
+            'hover:bg-muted/40',
+          )}
+        >
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+            <Globe2 size={12} />
+          </span>
+          <span className="text-xs font-semibold tracking-wide text-foreground/80">
+            {t('clusterConfig.label')}
+          </span>
+          {/* Collapsed preview of current values */}
+          <span className="flex flex-1 items-center gap-3 truncate">
+            {cubeApiUrl && (
+              <span className="inline-flex items-center gap-1 truncate text-[11px] font-mono text-muted-foreground">
+                <span className="text-[10px] font-sans font-medium uppercase tracking-wider text-muted-foreground/70">
+                  {t('clusterConfig.apiUrl')}
+                </span>
+                <span className="truncate">{cubeApiUrl}</span>
+              </span>
+            )}
+            {cubeProxyIp && (
+              <span className="inline-flex items-center gap-1 truncate text-[11px] font-mono text-muted-foreground">
+                <span className="text-[10px] font-sans font-medium uppercase tracking-wider text-muted-foreground/70">
+                  {t('clusterConfig.proxyIp')}
+                </span>
+                <span className="truncate">{cubeProxyIp}</span>
+              </span>
+            )}
+          </span>
+          <ChevronRight
+            size={14}
+            className={cn(
+              'shrink-0 text-muted-foreground/50 transition-transform duration-200',
+              configExpanded && 'rotate-90',
+            )}
+          />
+        </button>
+
+        {/* Expanded edit panel */}
+        {configExpanded && (
+          <div className="border-t border-border/40 bg-background/60 px-4 py-3">
+            <div className="flex flex-col gap-3">
+              {/* CubeAPI row */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/80">
+                  {t('clusterConfig.apiUrl')}
+                </label>
+                <input
+                  value={draftApiUrl}
+                  onChange={(e) => setDraftApiUrl(e.target.value)}
+                  placeholder="http://127.0.0.1:3000"
+                  className={cn(
+                    'h-8 rounded-md border border-input bg-background px-2.5',
+                    'text-xs font-mono text-foreground/90',
+                    'placeholder:text-muted-foreground/40',
+                    'transition-all duration-150',
+                    'hover:border-primary/30',
+                    'focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/15',
+                  )}
+                />
+              </div>
+              {/* CubeProxy row */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/80">
+                  {t('clusterConfig.proxyIp')}
+                </label>
+                <input
+                  value={draftProxyIp}
+                  onChange={(e) => setDraftProxyIp(e.target.value)}
+                  placeholder="127.0.0.1"
+                  className={cn(
+                    'h-8 w-64 rounded-md border border-input bg-background px-2.5',
+                    'text-xs font-mono text-foreground/90',
+                    'placeholder:text-muted-foreground/40',
+                    'transition-all duration-150',
+                    'hover:border-primary/30',
+                    'focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/15',
+                  )}
+                />
+              </div>
+            </div>
+            {/* Actions */}
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setCubeApiUrl(draftApiUrl.trim());
+                  setCubeProxyIp(draftProxyIp.trim());
+                  setConfigExpanded(false);
+                }}
+                className={cn(
+                  'inline-flex h-7 items-center gap-1 rounded-md bg-primary px-3',
+                  'text-[11px] font-medium text-primary-foreground',
+                  'transition-colors hover:bg-primary/90',
+                )}
+              >
+                <Check size={12} />
+                {t('clusterConfig.save')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfigExpanded(false)}
+                className={cn(
+                  'inline-flex h-7 items-center gap-1 rounded-md border border-border/60 px-3',
+                  'text-[11px] font-medium text-muted-foreground',
+                  'transition-colors hover:bg-muted/50',
+                )}
+              >
+                {t('clusterConfig.cancel')}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* ── Toolbar ───────────────────────────────────────────── */}
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
