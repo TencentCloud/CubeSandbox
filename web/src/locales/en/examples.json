@@ -71,6 +71,13 @@
     "dataPlane": "Data plane",
     "hint": "Drag nodes to rearrange · scroll to zoom"
   },
+  "clusterConfig": {
+    "label": "Connection Config",
+    "apiUrl": "CubeAPI",
+    "proxyIp": "CubeProxy",
+    "save": "Save",
+    "cancel": "Cancel"
+  },
   "timeline": {
     "title": "Step timeline",
     "empty": "Run a case to see the step-by-step log here.",
