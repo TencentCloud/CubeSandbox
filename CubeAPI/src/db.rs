@@ -1314,7 +1314,7 @@ LIMIT 1
                 &["browser", "chromium", "official"],
                 "browser",
                 1530,
-                &[49983, 9000],
+                &[49983, 9000, 6080],
                 9000,
                 "/cdp/json/version",
                 "1G",
