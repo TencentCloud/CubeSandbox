@@ -21,7 +21,6 @@ import {
   type LucideIcon,
   Network,
   Rocket,
-  Server,
   ShieldCheck,
   TimerReset,
 } from 'lucide-react';
@@ -342,27 +341,6 @@ function topologySnapshot(): ScenarioTopology {
   return t;
 }
 
-function topologySidecar(): ScenarioTopology {
-  const t = cloneSharedTopology();
-  // Insert a dev-sidecar between CubeAPI and CubeProxy that rewrites
-  // the Host header to mimic the e2b client.
-  t.nodes.push({
-    id: 'sidecar',
-    labelZh: 'Dev Sidecar',
-    labelEn: 'Dev Sidecar',
-    plane: 'data',
-    kind: 'control',
-    descriptionZh: '本地反向代理：重写 Host 头以模拟 e2b 兼容客户端。',
-    descriptionEn: 'Local reverse-proxy that rewrites Host headers for e2b compatibility.',
-  });
-  t.edges = t.edges.filter((e) => !(e.from === 'cubeapi' && e.to === 'cubeproxy'));
-  t.edges.push(
-    { from: 'cubeapi', to: 'sidecar', labelZh: 'HTTPS', labelEn: 'HTTPS', plane: 'data' },
-    { from: 'sidecar', to: 'cubeproxy', labelZh: 'Host 改写', labelEn: 'Host rewrite', plane: 'data' },
-  );
-  return t;
-}
-
 function topologyNginx(): ScenarioTopology {
   const t = cloneSharedTopology();
   // Add nginx as workload under CubeRuntime.
@@ -575,24 +553,6 @@ export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
         titleZh: '回滚 Demo', titleEn: 'Rollback Demo',
         descriptionZh: '端到端回滚示例。',
         descriptionEn: 'End-to-end rollback walkthrough.' },
-    ],
-  },
-  {
-    id: 'e2b-dev-sidecar',
-    titleZh: 'e2b Dev Sidecar',
-    titleEn: 'e2b Dev Sidecar',
-    descriptionZh: '本地 Sidecar 反代到 CubeProxy，并改写 Host 头模拟 e2b 客户端。',
-    descriptionEn: 'A local dev-sidecar proxies to CubeProxy and rewrites the Host header to mimic the e2b client.',
-    category: 'advanced',
-    icon: Server,
-    accent: 'from-cube-violet/15 via-cube-violet/5 to-transparent',
-    topology: topologySidecar(),
-    storeItemId: 'sandbox-code',
-    files: [
-      { id: 'demo', filename: 'demo.py', language: 'python',
-        titleZh: 'Sidecar Demo', titleEn: 'Sidecar Demo',
-        descriptionZh: '在 CubeAPI 前面起一个 Sidecar 反向代理。',
-        descriptionEn: 'Start a sidecar proxy in front of CubeAPI.' },
     ],
   },
   {

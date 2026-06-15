@@ -241,6 +241,8 @@ export const clusterApi = {
     sandboxDomain: string;
     instanceType: string;
     defaultTemplateId?: string;
+    proxyNodeIp?: string;
+    proxyPortHttp?: number;
   }>('/config'),
 };
 
@@ -373,6 +375,8 @@ export interface RunExampleBody {
   template_id?: string;
   language?: string;
   code?: string;
+  api_url?: string;
+  proxy_node_ip?: string;
 }
 
 export const examplesApi = {
@@ -397,6 +401,8 @@ export const examplesApi = {
         template_id: body.template_id,
         language: body.language,
         code: body.code,
+        api_url: body.api_url,
+        proxy_node_ip: body.proxy_node_ip,
       }),
     }),
 };
