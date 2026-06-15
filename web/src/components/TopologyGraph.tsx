@@ -289,6 +289,7 @@ function TopologyGraphInner({ nodes, edges, className, height = 460, showLegend 
         proOptions={{ hideAttribution: true }}
         nodesDraggable
         elementsSelectable
+        panActivationKeyCode={null}
       >
         <Background gap={20} size={1} color="#1f2937" />
 
