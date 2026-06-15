@@ -312,7 +312,7 @@ fn topology_for(scenario: &str) -> TopologyTemplate {
             });
         }
         "browser-sandbox" => {
-            // Replace the runner with Chromium + Playwright.
+            // Replace the runner with Chromium + Playwright + VNC stack.
             nodes.retain(|n| n.id != "runner");
             edges.retain(|e| e.from != "envd" || e.to != "runner");
             nodes.push(TopologyNode {
@@ -329,6 +329,27 @@ fn topology_for(scenario: &str) -> TopologyTemplate {
                 kind: "data".into(),
                 description: "Python client driving Chromium over the Chrome DevTools Protocol.".into(),
             });
+            nodes.push(TopologyNode {
+                id: "xvfb".into(),
+                label: "Xvfb :99".into(),
+                plane: "data".into(),
+                kind: "data".into(),
+                description: "X Virtual Framebuffer providing a virtual display for Chromium.".into(),
+            });
+            nodes.push(TopologyNode {
+                id: "x11vnc".into(),
+                label: "x11vnc :5900".into(),
+                plane: "data".into(),
+                kind: "data".into(),
+                description: "VNC server mirroring the Xvfb display on port 5900.".into(),
+            });
+            nodes.push(TopologyNode {
+                id: "novnc".into(),
+                label: "noVNC :6080".into(),
+                plane: "data".into(),
+                kind: "data".into(),
+                description: "WebSocket-to-VNC gateway: browser-based desktop viewable via CubeProxy.".into(),
+            });
             edges.push(TopologyEdge {
                 from: "envd".into(),
                 to: "playwright".into(),
@@ -339,6 +360,30 @@ fn topology_for(scenario: &str) -> TopologyTemplate {
                 from: "playwright".into(),
                 to: "chromium".into(),
                 label: "CDP WS".into(),
+                plane: "data".into(),
+            });
+            edges.push(TopologyEdge {
+                from: "envd".into(),
+                to: "xvfb".into(),
+                label: "exec".into(),
+                plane: "data".into(),
+            });
+            edges.push(TopologyEdge {
+                from: "xvfb".into(),
+                to: "chromium".into(),
+                label: "DISPLAY=:99".into(),
+                plane: "data".into(),
+            });
+            edges.push(TopologyEdge {
+                from: "xvfb".into(),
+                to: "x11vnc".into(),
+                label: "mirrors".into(),
+                plane: "data".into(),
+            });
+            edges.push(TopologyEdge {
+                from: "x11vnc".into(),
+                to: "novnc".into(),
+                label: "RFB".into(),
                 plane: "data".into(),
             });
         }
