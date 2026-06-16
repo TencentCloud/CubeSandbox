@@ -73,10 +73,12 @@
   },
   "clusterConfig": {
     "label": "Connection Config",
-    "apiUrl": "CubeAPI",
-    "proxyIp": "CubeProxy",
+    "apiUrl": "CubeAPI URL",
+    "proxyIp": "CubeProxy IP",
     "save": "Save",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "hint": "These values are injected into the sandbox environment when running examples. Leave empty to use server defaults.",
+    "notSet": "Not set"
   },
   "timeline": {
     "title": "Step timeline",
