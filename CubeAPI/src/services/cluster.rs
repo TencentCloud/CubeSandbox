@@ -209,6 +209,7 @@ pub(crate) fn to_view_with_used(
 }
 
 /// Keep the old signature for tests (no sandbox data, pure CubeMaster values).
+#[cfg(test)]
 pub(crate) fn to_view(s: NodeSnapshot) -> NodeView {
     to_view_with_used(s, &HashMap::new())
 }
