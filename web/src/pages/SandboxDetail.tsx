@@ -9,6 +9,7 @@ import { sandboxApi } from '@/api/client';
 import { Card, CardTitle, CardDescription, CardHeader } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { CodeTerminal } from '@/components/CodeTerminal';
 
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
@@ -248,6 +249,12 @@ export default function SandboxDetailPage() {
           )}
         </pre>
       </Card>
+
+      {/* ── Code Terminal ── */}
+      <CodeTerminal
+        sandboxId={sandboxID}
+        disabled={state !== 'running'}
+      />
     </div>
   );
 }

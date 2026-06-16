@@ -188,6 +188,29 @@ const DEFAULT_RESUME_BODY: SandboxResumeRequest = {
   autoPause: false,
 };
 
+export interface JupyterResult {
+  type: 'result';
+  text?: string | null;
+  html?: string | null;
+  png?: string | null;
+  jpeg?: string | null;
+  svg?: string | null;
+  markdown?: string | null;
+  json?: Record<string, unknown> | null;
+  is_main_result?: boolean;
+  [key: string]: unknown;
+}
+
+export interface ExecCodeResult {
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  success: boolean;
+  elapsed_ms: number;
+  /** Rich results from the Jupyter kernel (Python mode only). */
+  results?: JupyterResult[] | null;
+}
+
 export const sandboxApi = {
   list: (params?: { metadata?: string; state?: RunningSandbox['state']; nextToken?: string; limit?: number }) =>
     api<ListedSandboxDto[]>('/v2/sandboxes', { params }).then((items) => items.map(mapSandbox)),
@@ -208,6 +231,11 @@ export const sandboxApi = {
     metadata?: Record<string, string>;
   }) =>
     api<SandboxSessionDto>('/sandboxes', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  execCode: (id: string, body: { code: string; language: string; timeout_secs?: number }) =>
+    api<ExecCodeResult>(`/sandboxes/${id}/exec-code`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
