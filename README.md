@@ -47,26 +47,26 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 <table>
   <tr>
     <td align="right" valign="top" width="100">
+      <a href="./docs/changelog/v0.4.0.md">
+        <img src="https://img.shields.io/badge/v0.4.0-New!-6f42c1?style=flat-square" alt="v0.4.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>CubeEgress security proxy</strong><br/>
+      CubeSandbox 0.4.0 introduces <b>CubeEgress</b>, an OpenResty-based egress gateway for credential injection, domain filtering, and access auditing. Also new: container log forwarding (<code>cubecli cubebox logs</code>) and component version management. 58 commits, 15 contributors.
+      <a href="./docs/changelog/v0.4.0.md">Changelog →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
       <a href="./docs/changelog/v0.3.0.md">
-        <img src="https://img.shields.io/badge/v0.3.0-New!-6f42c1?style=flat-square" alt="v0.3.0" />
+        <img src="https://img.shields.io/badge/v0.3.0-2026.06.02-007bff?style=flat-square" alt="v0.3.0" />
       </a>
     </td>
     <td valign="top">
       <strong>Snapshot, Clone &amp; Rollback at hundred-millisecond granularity</strong><br/>
       CubeSandbox 0.3.0 introduces the <b>CubeCoW</b> Copy-on-Write snapshot engine, enabling event-level snapshots, instant cloning, and rollback to any saved state.
       <a href="./docs/changelog/v0.3.0.md">Changelog →</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="right" valign="top" width="100">
-      <a href="./docs/changelog/v0.2.2.md">
-        <img src="https://img.shields.io/badge/v0.2.2-2026.05.18-007bff?style=flat-square" alt="v0.2.2" />
-      </a>
-    </td>
-    <td valign="top">
-      <strong>Security hardening &amp; E2B compatibility improvements</strong><br/>
-      Patched CVE-2023-50711 and other vulnerabilities, aligned default ports with the E2B protocol, and shipped critical stability fixes.
-      <a href="./docs/changelog/v0.2.2.md">Changelog →</a>
     </td>
   </tr>
   <tr>
