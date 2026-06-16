@@ -14,6 +14,7 @@
 // scenario registry).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
@@ -561,8 +562,8 @@ export default function SandboxCasesPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | undefined>(undefined);
   const [editedCode, setEditedCode] = useState<string>('');
   const [codeDirty, setCodeDirty] = useState(false);
-  const [cubeApiUrl, setCubeApiUrl] = useState<string>('');
-  const [cubeProxyIp, setCubeProxyIp] = useState<string>('');
+  const [cubeApiUrl, setCubeApiUrl] = usePersistedState<string>('cube-api-url', '');
+  const [cubeProxyIp, setCubeProxyIp] = usePersistedState<string>('cube-proxy-ip', '');
   const [configExpanded, setConfigExpanded] = useState(false);
   const [draftApiUrl, setDraftApiUrl] = useState('');
   const [draftProxyIp, setDraftProxyIp] = useState('');
