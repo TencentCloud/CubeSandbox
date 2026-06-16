@@ -49,9 +49,21 @@ func installFakeCommand(t *testing.T, dir, name, body string) {
 	}
 }
 
+func disableEngineClient(t *testing.T) {
+	t.Helper()
+	orig := newEngineClient
+	newEngineClient = func() (engineClient, error) {
+		return nil, errors.New("engine unavailable")
+	}
+	t.Cleanup(func() {
+		newEngineClient = orig
+	})
+}
+
 func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
+	disableEngineClient(t)
 	withExecutableLookPath(t, func(file string) (string, error) {
 		return "", errors.New("not found")
 	})
@@ -88,6 +100,7 @@ func TestPrepareSourceImageSkipsPullWhenImageExistsLocally(t *testing.T) {
 func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
+	disableEngineClient(t)
 	withExecutableLookPath(t, func(file string) (string, error) {
 		return "", errors.New("not found")
 	})
@@ -132,6 +145,7 @@ func TestPrepareSourceImagePullsAfterLocalInspectMiss(t *testing.T) {
 func TestPrepareSourceImageReturnsPullErrorAfterInspectMiss(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
+	disableEngineClient(t)
 	withExecutableLookPath(t, func(file string) (string, error) {
 		return "", errors.New("not found")
 	})

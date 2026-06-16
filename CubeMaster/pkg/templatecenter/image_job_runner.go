@@ -41,8 +41,10 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		})
 		return
 	}
-	source, err := image.PrepareSource(ctx, image.SourceSpec{ImageRef: req.SourceImageRef, RegistryUsername: req.RegistryUsername, RegistryPassword: req.RegistryPassword, DownloadBaseURL: downloadBaseURL})
+	pullProgress := newJobPullProgressSink(ctx, jobID)
+	source, err := image.PrepareSource(ctx, image.SourceSpec{ImageRef: req.SourceImageRef, RegistryUsername: req.RegistryUsername, RegistryPassword: req.RegistryPassword, DownloadBaseURL: downloadBaseURL, OnPullProgress: pullProgress.onProgress})
 	if err != nil {
+		pullProgress.flush(false)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":        JobStatusFailed,
 			"phase":         JobPhasePulling,
@@ -53,6 +55,14 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	}
 	if source.Cleanup != nil {
 		defer source.Cleanup(ctx)
+	}
+	pullProgressFlushed := false
+	if !source.UseDockerless {
+		// Docker/Podman Engine pulls happen during PrepareSource. Flush before
+		// moving to UNPACKING so stale live cache cannot show 13/14 after
+		// PULLING has already completed.
+		pullProgress.flush(true)
+		pullProgressFlushed = true
 	}
 	// Load the CubeEgress CA fingerprint so the job's recorded
 	// artifact_id matches what ensureRootfsArtifact will compute
@@ -86,6 +96,10 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	}
 	artifact, generatedReq, builtFreshArtifact, err := ensureRootfsArtifact(ctx, req, source, downloadBaseURL)
 	if err != nil {
+		if !pullProgressFlushed {
+			pullProgress.flush(false)
+			pullProgressFlushed = true
+		}
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":                    JobStatusFailed,
 			"phase":                     JobPhaseBuildingExt4,
@@ -96,6 +110,11 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 			"progress":                  100,
 		})
 		return
+	}
+	// Dockerless pulls happen during BuildExt4/export, so flush only after the
+	// artifact phase has completed and all possible pull callbacks have fired.
+	if !pullProgressFlushed {
+		pullProgress.flush(true)
 	}
 	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
 		"artifact_id":               artifact.ArtifactID,

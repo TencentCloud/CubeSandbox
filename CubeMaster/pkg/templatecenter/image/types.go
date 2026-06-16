@@ -11,6 +11,11 @@ type SourceSpec struct {
 	RegistryUsername string
 	RegistryPassword string
 	DownloadBaseURL  string
+	// OnPullProgress, when non-nil, receives best-effort source-image pull
+	// progress updates while the image is fetched (docker pull on the docker
+	// path, skopeo copy on the dockerless path). A nil value disables progress
+	// streaming and preserves the original buffered-exec behaviour.
+	OnPullProgress ProgressFunc
 }
 
 type BuildOptions struct {
@@ -74,4 +79,8 @@ type PreparedSource struct {
 	// without invoking the docker daemon. Zero means "unknown".
 	CompressedSizeBytes int64
 	Cleanup             func(context.Context)
+	// OnPullProgress is propagated from SourceSpec so that the export phase
+	// (skopeo copy on the dockerless path) can stream pull progress even
+	// though it runs after PrepareSource has returned.
+	OnPullProgress ProgressFunc
 }

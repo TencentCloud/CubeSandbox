@@ -35,6 +35,11 @@ func jobModelToInfo(ctx context.Context, record *models.TemplateImageJob) (*type
 		FailedNodeCount:         record.FailedNodeCount,
 		TemplateStatus:          record.TemplateStatus,
 		ArtifactStatus:          record.ArtifactStatus,
+		PullTotalBytes:          record.PullTotalBytes,
+		PullDownloadedBytes:     record.PullDownloadedBytes,
+		PullTotalLayers:         record.PullTotalLayers,
+		PullCompletedLayers:     record.PullCompletedLayers,
+		PullSpeedBPS:            record.PullSpeedBPS,
 	}
 	if record.ArtifactID != "" {
 		if artifact, err := getRootfsArtifactByID(ctx, record.ArtifactID); err == nil {

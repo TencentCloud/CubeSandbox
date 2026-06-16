@@ -312,6 +312,31 @@ func GetDescribeTask(ctx context.Context, taskID string) (*types.DescribeTaskMap
 	}
 }
 
+func SetTemplateImageJobPullProgress(ctx context.Context, progress *types.TemplateImageJobPullProgressMap) error {
+	if progress == nil || progress.JobID == "" {
+		return errors.New("template image job pull progress requires job id")
+	}
+	return l.setTemplateImageJobPullProgressToRedis(ctx, templateImageJobPullProgressKey(progress.JobID), progress)
+}
+
+func GetTemplateImageJobPullProgress(ctx context.Context, jobID string) (*types.TemplateImageJobPullProgressMap, bool) {
+	if jobID == "" {
+		return nil, false
+	}
+	progress, err := l.getTemplateImageJobPullProgressFromRedis(ctx, templateImageJobPullProgressKey(jobID))
+	if err != nil || progress == nil {
+		return nil, false
+	}
+	return progress, true
+}
+
+func DeleteTemplateImageJobPullProgress(ctx context.Context, jobID string) error {
+	if jobID == "" {
+		return nil
+	}
+	return l.deleteKeyFromRedis(ctx, templateImageJobPullProgressKey(jobID))
+}
+
 func RangeDBHost(index, size int, product string) ([]*node.Node, int) {
 	l.lockSortedNodes.RLock()
 	defer l.lockSortedNodes.RUnlock()

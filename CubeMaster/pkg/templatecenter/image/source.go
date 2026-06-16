@@ -40,11 +40,12 @@ func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, 
 		return nil, fmt.Errorf("marshal image Config: %w", err)
 	}
 	return &PreparedSource{
-		LocalRef:     spec.ImageRef,
-		Digest:       firstNonEmptyDigest(inspectInfo),
-		Config:       inspectInfo.Config,
-		ConfigJSON:   string(configJSON),
-		MasterNodeIP: NormalizeBaseURL(spec.DownloadBaseURL),
+		LocalRef:       spec.ImageRef,
+		Digest:         firstNonEmptyDigest(inspectInfo),
+		Config:         inspectInfo.Config,
+		ConfigJSON:     string(configJSON),
+		MasterNodeIP:   NormalizeBaseURL(spec.DownloadBaseURL),
+		OnPullProgress: spec.OnPullProgress,
 	}, nil
 }
 
@@ -99,6 +100,7 @@ func prepareDockerlessSource(ctx context.Context, spec SourceSpec) (*PreparedSou
 		UseDockerless:       true,
 		SkopeoAuthFile:      authFile,
 		CompressedSizeBytes: skopeoLayersTotalSize(inspectInfo),
+		OnPullProgress:      spec.OnPullProgress,
 		Cleanup: func(context.Context) {
 			cleanup()
 		},
@@ -106,6 +108,37 @@ func prepareDockerlessSource(ctx context.Context, spec SourceSpec) (*PreparedSou
 }
 
 func prepareDockerSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
+	// Validate the reference up front so the docker prepare path enforces the
+	// same argument-injection guard as the dockerless path before the ref is
+	// handed to docker subprocesses.
+	if err := validateImageRef(spec.ImageRef); err != nil {
+		return nil, err
+	}
+	if source, err := prepareDockerSourceWithEngine(ctx, spec); err == nil {
+		return source, nil
+	}
+	return prepareDockerSourceWithCLI(ctx, spec)
+}
+
+func prepareDockerSourceWithEngine(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
+	inspectInfo, err := engineImageInspect(ctx, spec.ImageRef)
+	imageExistsLocally := err == nil
+	if err != nil && !errors.Is(err, errEngineImageNotFound) {
+		return nil, err
+	}
+	if !imageExistsLocally {
+		if err := engineImagePull(ctx, spec); err != nil {
+			return nil, err
+		}
+		inspectInfo, err = engineImageInspect(ctx, spec.ImageRef)
+		if err != nil {
+			return nil, fmt.Errorf("engine image inspect %s failed after pull: %w", spec.ImageRef, err)
+		}
+	}
+	return dockerInspectToPreparedSource(spec, *inspectInfo, imageExistsLocally, "")
+}
+
+func prepareDockerSourceWithCLI(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
 	var (
 		dockerConfigDir       string
 		removeDockerConfigDir bool
@@ -134,7 +167,7 @@ func prepareDockerSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 		}
 	}
 	if !imageExistsLocally {
-		if err := dockerRun(ctx, dockerConfigDir, "pull", "--", spec.ImageRef); err != nil {
+		if err := dockerPull(ctx, dockerConfigDir, spec.ImageRef, spec.OnPullProgress); err != nil {
 			return nil, fmt.Errorf("docker pull %s failed: %w", spec.ImageRef, err)
 		}
 		inspectOutput, err = dockerOutput(ctx, dockerConfigDir, "image", "inspect", "--", spec.ImageRef)
@@ -149,17 +182,26 @@ func prepareDockerSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 	if len(inspectList) == 0 {
 		return nil, fmt.Errorf("docker image inspect returned empty result for %s", spec.ImageRef)
 	}
-	inspectInfo := inspectList[0]
+	source, err := dockerInspectToPreparedSource(spec, inspectList[0], imageExistsLocally, dockerConfigDir)
+	if err != nil {
+		return nil, err
+	}
+	removeDockerConfigDir = false
+	return source, nil
+}
+
+func dockerInspectToPreparedSource(spec SourceSpec, inspectInfo dockerInspectImage, imageExistsLocally bool, dockerConfigDir string) (*PreparedSource, error) {
 	configJSON, err := json.Marshal(inspectInfo.Config)
 	if err != nil {
 		return nil, fmt.Errorf("marshal image Config: %w", err)
 	}
 	source := &PreparedSource{
-		LocalRef:     spec.ImageRef,
-		Digest:       firstNonEmptyDigest(inspectInfo),
-		Config:       inspectInfo.Config,
-		ConfigJSON:   string(configJSON),
-		MasterNodeIP: NormalizeBaseURL(spec.DownloadBaseURL),
+		LocalRef:       spec.ImageRef,
+		Digest:         firstNonEmptyDigest(inspectInfo),
+		Config:         inspectInfo.Config,
+		ConfigJSON:     string(configJSON),
+		MasterNodeIP:   NormalizeBaseURL(spec.DownloadBaseURL),
+		OnPullProgress: spec.OnPullProgress,
 		Cleanup: func(cleanupCtx context.Context) {
 			if dockerConfigDir != "" {
 				_ = os.RemoveAll(dockerConfigDir)
@@ -169,7 +211,6 @@ func prepareDockerSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 			}
 		},
 	}
-	removeDockerConfigDir = false
 	return source, nil
 }
 

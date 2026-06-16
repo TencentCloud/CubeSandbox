@@ -13,11 +13,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	basetypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"gorm.io/gorm"
 	"os"
 	"strings"
 )
+
+var getTemplateImageJobPullProgress = localcache.GetTemplateImageJobPullProgress
 
 func nextAttemptNoFromLatest(latestAttemptNo int32) int32 {
 	if latestAttemptNo <= 0 {
@@ -238,7 +242,34 @@ func GetTemplateImageJobInfo(ctx context.Context, jobID string) (*types.Template
 		Where("job_id = ?", jobID).First(record).Error; err != nil {
 		return nil, err
 	}
-	return jobModelToInfo(ctx, record)
+	info, err := jobModelToInfo(ctx, record)
+	if err != nil {
+		return nil, err
+	}
+	overlayTemplateImageJobPullProgress(ctx, info)
+	return info, nil
+}
+
+func overlayTemplateImageJobPullProgress(ctx context.Context, info *types.TemplateImageJobInfo) {
+	if info == nil || info.JobID == "" || info.Status != JobStatusRunning {
+		return
+	}
+	progress, ok := getTemplateImageJobPullProgress(ctx, info.JobID)
+	if !ok || progress == nil {
+		return
+	}
+	applyTemplateImageJobPullProgress(info, progress)
+}
+
+func applyTemplateImageJobPullProgress(info *types.TemplateImageJobInfo, progress *basetypes.TemplateImageJobPullProgressMap) {
+	if info == nil || progress == nil {
+		return
+	}
+	info.PullTotalBytes = progress.PullTotalBytes
+	info.PullDownloadedBytes = progress.PullDownloadedBytes
+	info.PullTotalLayers = progress.PullTotalLayers
+	info.PullCompletedLayers = progress.PullCompletedLayers
+	info.PullSpeedBPS = progress.PullSpeedBPS
 }
 
 func GetRootfsArtifactInfo(ctx context.Context, artifactID string) (*types.RootfsArtifactInfo, error) {

@@ -74,6 +74,11 @@ type TemplateImageJob struct {
 	FailedNodeCount         int32  `json:"failed_node_count" gorm:"column:failed_node_count"`
 	TemplateStatus          string `json:"template_status" gorm:"column:template_status"`
 	ArtifactStatus          string `json:"artifact_status" gorm:"column:artifact_status"`
+	PullTotalBytes          int64  `json:"pull_total_bytes" gorm:"column:pull_total_bytes"`
+	PullDownloadedBytes     int64  `json:"pull_downloaded_bytes" gorm:"column:pull_downloaded_bytes"`
+	PullTotalLayers         int32  `json:"pull_total_layers" gorm:"column:pull_total_layers"`
+	PullCompletedLayers     int32  `json:"pull_completed_layers" gorm:"column:pull_completed_layers"`
+	PullSpeedBPS            int64  `json:"pull_speed_bps" gorm:"column:pull_speed_bps"`
 	RequestJSON             string `json:"request_json" gorm:"column:request_json"`
 	ResultJSON              string `json:"result_json" gorm:"column:result_json"`
 }

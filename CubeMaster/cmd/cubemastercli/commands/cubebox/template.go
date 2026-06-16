@@ -662,6 +662,15 @@ var TemplateCommitCommand = cli.Command{
 			Usage: "append a denied egress CIDR to create_request.cube_network_config; repeat the flag to specify multiple CIDRs",
 		},
 		cli.BoolFlag{
+			Name:  "detach, no-wait",
+			Usage: "submit and exit immediately instead of watching the build to completion",
+		},
+		cli.DurationFlag{
+			Name:  "interval",
+			Value: defaultWatchInterval,
+			Usage: "poll interval while watching the build",
+		},
+		cli.BoolFlag{
 			Name:  "json",
 			Usage: "print raw json response",
 		},
@@ -730,7 +739,10 @@ var TemplateCommitCommand = cli.Command{
 		}
 		log.Printf("template_id: %s\n", rsp.TemplateID)
 		log.Printf("build_id: %s\n", rsp.BuildID)
-		return nil
+		if detachRequested(c) || rsp.BuildID == "" {
+			return nil
+		}
+		return runBuildWatch(c, rsp.BuildID)
 	},
 }
 
@@ -759,6 +771,8 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
+		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the job to completion"},
+		cli.DurationFlag{Name: "interval", Value: defaultWatchInterval, Usage: "poll interval while watching the job"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
 	},
 	Action: func(c *cli.Context) error {
@@ -823,8 +837,12 @@ var TemplateCreateFromImageCommand = cli.Command{
 			commands.PrintAsJSON(rsp)
 			return nil
 		}
-		printTemplateImageJob(rsp.Job)
-		return nil
+		if detachRequested(c) || rsp.Job == nil {
+			printTemplateImageJob(rsp.Job)
+			return nil
+		}
+		log.Printf("submitted template image job: job_id=%s template_id=%s\n", rsp.Job.JobID, rsp.Job.TemplateID)
+		return runImageJobWatch(c, rsp.Job.JobID)
 	},
 }
 
@@ -835,8 +853,9 @@ var TemplateRedoCommand = cli.Command{
 		cli.StringFlag{Name: "template-id", Usage: "template id to redo"},
 		cli.StringSliceFlag{Name: "node", Usage: "redo only the specified node id or host ip; repeat to specify multiple nodes"},
 		cli.BoolFlag{Name: "failed-only", Usage: "redo only failed nodes"},
-		cli.BoolFlag{Name: "wait", Usage: "wait until redo job finishes"},
-		cli.DurationFlag{Name: "interval", Value: 2 * time.Second, Usage: "poll interval when --wait is set"},
+		cli.BoolFlag{Name: "wait", Usage: "deprecated: redo now waits by default; use --detach to opt out"},
+		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the redo job to completion"},
+		cli.DurationFlag{Name: "interval", Value: defaultWatchInterval, Usage: "poll interval while watching the job"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
 	},
 	Action: func(c *cli.Context) error {
@@ -872,42 +891,16 @@ var TemplateRedoCommand = cli.Command{
 		if rsp.Ret.RetCode != 200 {
 			return errors.New(rsp.Ret.RetMsg)
 		}
-		if c.Bool("json") && !c.Bool("wait") {
+		if c.Bool("json") {
 			commands.PrintAsJSON(rsp)
 			return nil
 		}
-		printTemplateImageJob(rsp.Job)
-		if !c.Bool("wait") {
+		if detachRequested(c) || rsp.Job == nil {
+			printTemplateImageJob(rsp.Job)
 			return nil
 		}
-		var lastPrinted string
-		for {
-			latest, err := fetchTemplateImageJob(c, rsp.Job.JobID)
-			if err != nil {
-				return err
-			}
-			if latest.Job == nil {
-				printTemplateImageJobWatchLine(nil)
-				printTemplateImageJobCompletionSummary(nil)
-				return errors.New("empty job")
-			}
-			current := formatTemplateImageJobWatchLine(latest.Job)
-			if current != lastPrinted {
-				printTemplateImageJobWatchLine(latest.Job)
-				lastPrinted = current
-			}
-			if latest.Job.Status == "READY" || latest.Job.Status == "FAILED" {
-				printTemplateImageJobCompletionSummary(latest.Job)
-				if c.Bool("json") {
-					commands.PrintAsJSON(latest)
-				}
-				if latest.Job.Status == "FAILED" {
-					return errors.New(latest.Job.ErrorMessage)
-				}
-				return nil
-			}
-			time.Sleep(c.Duration("interval"))
-		}
+		log.Printf("submitted redo job: job_id=%s template_id=%s\n", rsp.Job.JobID, rsp.Job.TemplateID)
+		return runImageJobWatch(c, rsp.Job.JobID)
 	},
 }
 
@@ -949,34 +942,7 @@ var TemplateWatchCommand = cli.Command{
 		if jobID == "" {
 			return errors.New("job-id is required")
 		}
-		var lastPrinted string
-		for {
-			rsp, err := fetchTemplateImageJob(c, jobID)
-			if err != nil {
-				return err
-			}
-			if rsp.Job == nil {
-				printTemplateImageJobWatchLine(nil)
-				printTemplateImageJobCompletionSummary(nil)
-				return errors.New("empty job")
-			}
-			current := formatTemplateImageJobWatchLine(rsp.Job)
-			if current != lastPrinted {
-				printTemplateImageJobWatchLine(rsp.Job)
-				lastPrinted = current
-			}
-			if rsp.Job.Status == "READY" || rsp.Job.Status == "FAILED" {
-				printTemplateImageJobCompletionSummary(rsp.Job)
-				if c.Bool("json") {
-					commands.PrintAsJSON(rsp)
-				}
-				if rsp.Job.Status == "FAILED" {
-					return errors.New(rsp.Job.ErrorMessage)
-				}
-				return nil
-			}
-			time.Sleep(c.Duration("interval"))
-		}
+		return runImageJobWatch(c, jobID)
 	},
 }
 
@@ -1018,28 +984,7 @@ var TemplateBuildWatchCommand = cli.Command{
 		if buildID == "" {
 			return errors.New("build-id is required")
 		}
-		var lastPrinted string
-		for {
-			rsp, err := fetchTemplateBuildStatus(c, buildID)
-			if err != nil {
-				return err
-			}
-			current := fmt.Sprintf("%s/%d/%s", rsp.Status, rsp.Progress, rsp.Message)
-			if current != lastPrinted {
-				printTemplateBuildStatus(rsp)
-				lastPrinted = current
-			}
-			if rsp.Status == "ready" || rsp.Status == "error" {
-				if c.Bool("json") {
-					commands.PrintAsJSON(rsp)
-				}
-				if rsp.Status == "error" {
-					return errors.New(rsp.Message)
-				}
-				return nil
-			}
-			time.Sleep(c.Duration("interval"))
-		}
+		return runBuildWatch(c, buildID)
 	},
 }
 
@@ -1229,6 +1174,16 @@ func printTemplateImageJob(job *types.TemplateImageJobInfo) {
 	log.Printf("status: %s\n", job.Status)
 	log.Printf("phase: %s\n", job.Phase)
 	log.Printf("progress: %d%%\n", job.Progress)
+	if job.PullTotalBytes > 0 {
+		pullLine := fmt.Sprintf("pull: %s/%s", humanBytes(job.PullDownloadedBytes), humanBytes(job.PullTotalBytes))
+		if job.PullSpeedBPS > 0 {
+			pullLine += fmt.Sprintf(" %s/s", humanBytes(job.PullSpeedBPS))
+		}
+		log.Printf("%s\n", pullLine)
+	}
+	if job.PullTotalLayers > 0 {
+		log.Printf("pull_layers: %d/%d\n", job.PullCompletedLayers, job.PullTotalLayers)
+	}
 	log.Printf("distribution: %d/%d ready, %d failed\n", job.ReadyNodeCount, job.ExpectedNodeCount, job.FailedNodeCount)
 	if job.TemplateSpecFingerprint != "" {
 		log.Printf("template_spec_fingerprint: %s\n", job.TemplateSpecFingerprint)

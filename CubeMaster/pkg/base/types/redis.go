@@ -47,3 +47,13 @@ type DescribeTaskMap struct {
 	Status       string `json:"Status,omitempty" redis:"status"`
 	TaskID       string `json:"TaskId,omitempty" redis:"task_id"`
 }
+
+type TemplateImageJobPullProgressMap struct {
+	JobID               string `json:"JobID,omitempty" redis:"job_id"`
+	PullTotalBytes      int64  `json:"PullTotalBytes,omitempty" redis:"pull_total_bytes"`
+	PullDownloadedBytes int64  `json:"PullDownloadedBytes,omitempty" redis:"pull_downloaded_bytes"`
+	PullTotalLayers     int32  `json:"PullTotalLayers,omitempty" redis:"pull_total_layers"`
+	PullCompletedLayers int32  `json:"PullCompletedLayers,omitempty" redis:"pull_completed_layers"`
+	PullSpeedBPS        int64  `json:"PullSpeedBPS,omitempty" redis:"pull_speed_bps"`
+	UpdatedAtMs         int64  `json:"UpdatedAtMs,omitempty" redis:"updated_at_ms"`
+}
