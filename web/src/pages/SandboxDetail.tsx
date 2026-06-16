@@ -185,6 +185,12 @@ export default function SandboxDetailPage() {
         </Card>
       </div>
 
+      {/* ── Code Terminal ── */}
+      <CodeTerminal
+        sandboxId={sandboxID}
+        disabled={state !== 'running'}
+      />
+
       {/* ── Logs ── */}
       <Card>
         <CardHeader>
@@ -236,12 +242,6 @@ export default function SandboxDetailPage() {
           )}
         </pre>
       </Card>
-
-      {/* ── Code Terminal ── */}
-      <CodeTerminal
-        sandboxId={sandboxID}
-        disabled={state !== 'running'}
-      />
     </div>
   );
 }
