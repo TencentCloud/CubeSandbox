@@ -175,8 +175,8 @@ export function CodeTerminal({ sandboxId, disabled = false }: CodeTerminalProps)
           value={code}
           language={editorLang}
           onChange={setCode}
-          height={280}
-          minHeight={180}
+          height={560}
+          minHeight={400}
           readOnly={disabled}
           ariaLabel={t('terminalCodeLabel')}
         />
