@@ -21,16 +21,31 @@
   "terminalFailed": "执行失败",
   "terminalExitCode": "退出码",
   "terminalCodeLabel": "代码输入",
+  "tab": {
+    "management": "沙箱管理",
+    "monitor": "详情",
+    "events": "事件",
+    "metadata": "元数据",
+    "logs": "日志"
+  },
+  "eventsTimestamp": "时间",
+  "eventsLevel": "级别",
+  "eventsMessage": "消息",
+  "eventsSortAsc": "正序",
+  "eventsSortDesc": "倒序",
+  "logsComingSoon": "日志功能开发中，敬请期待",
   "fields": {
     "vcpu": "vCPU",
     "memory": "内存",
     "client": "客户端",
+    "nodeIP": "所在节点IP",
+    "sandboxID": "沙箱ID",
     "alias": "别名",
     "ends": "到期时间",
     "domain": "域名",
-    "started": "启动时间",
+    "started": "创建时间",
     "state": "状态",
-    "envd": "envd"
+    "envd": "envd版本"
   },
   "actions": {
     "resume": "恢复",
