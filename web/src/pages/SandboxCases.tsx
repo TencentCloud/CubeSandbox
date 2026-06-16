@@ -786,7 +786,7 @@ export default function SandboxCasesPage() {
       </header>
 
       {/* ── Connection Config Bar ─────────────────────────── */}
-      <div className="rounded-lg border border-border/60 bg-muted/30 shadow-sm">
+      <div className="overflow-hidden rounded-xl border border-border/60 bg-card/50 shadow-sm backdrop-blur-sm">
         {/* Collapsed header — always visible */}
         <button
           type="button"
@@ -799,34 +799,26 @@ export default function SandboxCasesPage() {
             setConfigExpanded((v) => !v);
           }}
           className={cn(
-            'flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors',
-            'hover:bg-muted/40',
+            'flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors',
+            'hover:bg-muted/30',
           )}
         >
-          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-            <Globe2 size={12} />
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/15 to-cube-violet/10 text-primary">
+            <Globe2 size={13} />
           </span>
-          <span className="text-xs font-semibold tracking-wide text-foreground/80">
+          <span className="text-sm font-semibold tracking-wide text-foreground/80">
             {t('clusterConfig.label')}
           </span>
           {/* Collapsed preview of current values */}
-          <span className="flex flex-1 items-center gap-3 truncate">
-            {cubeApiUrl && (
-              <span className="inline-flex items-center gap-1 truncate text-[11px] font-mono text-muted-foreground">
-                <span className="text-[10px] font-sans font-medium uppercase tracking-wider text-muted-foreground/70">
-                  {t('clusterConfig.apiUrl')}
-                </span>
-                <span className="truncate">{cubeApiUrl}</span>
-              </span>
-            )}
-            {cubeProxyIp && (
-              <span className="inline-flex items-center gap-1 truncate text-[11px] font-mono text-muted-foreground">
-                <span className="text-[10px] font-sans font-medium uppercase tracking-wider text-muted-foreground/70">
-                  {t('clusterConfig.proxyIp')}
-                </span>
-                <span className="truncate">{cubeProxyIp}</span>
-              </span>
-            )}
+          <span className="flex flex-1 items-center gap-2.5 overflow-x-auto">
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-border/50 bg-muted/40 px-3 py-1">
+              <span className="text-xs font-semibold text-muted-foreground/70">CubeAPI</span>
+              <span className={cn('truncate font-mono text-xs', cubeApiUrl ? 'text-foreground/80' : 'text-muted-foreground/50 italic')}>{cubeApiUrl || t('clusterConfig.notSet')}</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-border/50 bg-muted/40 px-3 py-1">
+              <span className="text-xs font-semibold text-muted-foreground/70">CubeProxy</span>
+              <span className={cn('truncate font-mono text-xs', cubeProxyIp ? 'text-foreground/80' : 'text-muted-foreground/50 italic')}>{cubeProxyIp || t('clusterConfig.notSet')}</span>
+            </span>
           </span>
           <ChevronRight
             size={14}
@@ -839,49 +831,63 @@ export default function SandboxCasesPage() {
 
         {/* Expanded edit panel */}
         {configExpanded && (
-          <div className="border-t border-border/40 bg-background/60 px-4 py-3">
-            <div className="flex flex-col gap-3">
+          <div className="border-t border-border/40 bg-background/60 px-5 py-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               {/* CubeAPI row */}
               <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/80">
+                <label className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground/80">
+                  <Boxes size={12} className="text-primary/60" />
                   {t('clusterConfig.apiUrl')}
                 </label>
-                <input
-                  value={draftApiUrl}
-                  onChange={(e) => setDraftApiUrl(e.target.value)}
-                  placeholder="http://127.0.0.1:3000"
-                  className={cn(
-                    'h-8 rounded-md border border-input bg-background px-2.5',
-                    'text-xs font-mono text-foreground/90',
-                    'placeholder:text-muted-foreground/40',
-                    'transition-all duration-150',
-                    'hover:border-primary/30',
-                    'focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/15',
-                  )}
-                />
+                <div className="relative">
+                  <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/40">
+                    <Globe2 size={12} />
+                  </span>
+                  <input
+                    value={draftApiUrl}
+                    onChange={(e) => setDraftApiUrl(e.target.value)}
+                    placeholder="http://127.0.0.1:3000"
+                    className={cn(
+                      'h-9 w-full rounded-lg border border-input bg-background pl-8 pr-3',
+                      'text-xs font-mono text-foreground/90',
+                      'placeholder:text-muted-foreground/40',
+                      'transition-all duration-150',
+                      'hover:border-primary/30',
+                      'focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/15',
+                    )}
+                  />
+                </div>
               </div>
               {/* CubeProxy row */}
               <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/80">
+                <label className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground/80">
+                  <Network size={12} className="text-cube-violet/60" />
                   {t('clusterConfig.proxyIp')}
                 </label>
-                <input
-                  value={draftProxyIp}
-                  onChange={(e) => setDraftProxyIp(e.target.value)}
-                  placeholder="127.0.0.1"
-                  className={cn(
-                    'h-8 w-64 rounded-md border border-input bg-background px-2.5',
-                    'text-xs font-mono text-foreground/90',
-                    'placeholder:text-muted-foreground/40',
-                    'transition-all duration-150',
-                    'hover:border-primary/30',
-                    'focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/15',
-                  )}
-                />
+                <div className="relative">
+                  <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/40">
+                    <Network size={12} />
+                  </span>
+                  <input
+                    value={draftProxyIp}
+                    onChange={(e) => setDraftProxyIp(e.target.value)}
+                    placeholder="127.0.0.1"
+                    className={cn(
+                      'h-9 w-full rounded-lg border border-input bg-background pl-8 pr-3',
+                      'text-xs font-mono text-foreground/90',
+                      'placeholder:text-muted-foreground/40',
+                      'transition-all duration-150',
+                      'hover:border-primary/30',
+                      'focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/15',
+                    )}
+                  />
+                </div>
               </div>
             </div>
+            {/* Hint */}
+            <p className="mt-3 text-[10.5px] text-muted-foreground/60">{t('clusterConfig.hint')}</p>
             {/* Actions */}
-            <div className="mt-3 flex items-center gap-2">
+            <div className="mt-4 flex items-center gap-3">
               <button
                 type="button"
                 onClick={() => {
@@ -890,21 +896,26 @@ export default function SandboxCasesPage() {
                   setConfigExpanded(false);
                 }}
                 className={cn(
-                  'inline-flex h-7 items-center gap-1 rounded-md bg-primary px-3',
-                  'text-[11px] font-medium text-primary-foreground',
-                  'transition-colors hover:bg-primary/90',
+                  'inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-5',
+                  'text-xs font-semibold text-primary-foreground',
+                  'shadow-sm shadow-primary/25',
+                  'transition-all duration-150',
+                  'hover:bg-primary/90 hover:shadow-md hover:shadow-primary/20',
+                  'active:scale-[0.97]',
                 )}
               >
-                <Check size={12} />
+                <Check size={13} strokeWidth={2.5} />
                 {t('clusterConfig.save')}
               </button>
               <button
                 type="button"
                 onClick={() => setConfigExpanded(false)}
                 className={cn(
-                  'inline-flex h-7 items-center gap-1 rounded-md border border-border/60 px-3',
-                  'text-[11px] font-medium text-muted-foreground',
-                  'transition-colors hover:bg-muted/50',
+                  'inline-flex h-9 items-center gap-1.5 rounded-lg border border-border/60 bg-background px-5',
+                  'text-xs font-medium text-muted-foreground',
+                  'transition-all duration-150',
+                  'hover:border-border hover:bg-muted/40 hover:text-foreground/80',
+                  'active:scale-[0.97]',
                 )}
               >
                 {t('clusterConfig.cancel')}
