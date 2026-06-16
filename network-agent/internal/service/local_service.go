@@ -94,7 +94,7 @@ func NewLocalService(cfg Config) (Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	ports, err := newPortAllocator()
+	ports, err := newPortAllocator(cfg.HostPortMin, cfg.HostPortMax)
 	if err != nil {
 		return nil, err
 	}

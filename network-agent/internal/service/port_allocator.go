@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	portMin uint16 = 20000
-	portMax uint16 = 29999
+	defaultPortMin uint16 = 20000
+	defaultPortMax uint16 = 29999
 )
 
 type portAllocator struct {
@@ -25,11 +25,20 @@ type portAllocator struct {
 	assigned map[uint16]struct{}
 }
 
-func newPortAllocator() (*portAllocator, error) {
+func newPortAllocator(min, max uint16) (*portAllocator, error) {
+	if min == 0 && max == 0 {
+		min, max = defaultPortMin, defaultPortMax
+	}
+	if min > max {
+		return nil, fmt.Errorf("invalid host port range: min=%d > max=%d", min, max)
+	}
+	if min < 1024 {
+		return nil, fmt.Errorf("invalid host port range: min=%d must be >= 1024", min)
+	}
 	alloc := &portAllocator{
-		min:      portMin,
-		max:      portMax,
-		next:     portMin,
+		min:      min,
+		max:      max,
+		next:     min,
 		assigned: make(map[uint16]struct{}),
 	}
 	reservedPorts, err := getReservedPorts()
@@ -37,7 +46,7 @@ func newPortAllocator() (*portAllocator, error) {
 		return nil, err
 	}
 	for _, port := range reservedPorts {
-		if port < portMin || port > portMax {
+		if port < min || port > max {
 			continue
 		}
 		alloc.assigned[port] = struct{}{}

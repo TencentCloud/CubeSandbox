@@ -49,6 +49,17 @@ type Config struct {
 	// shared-dict op should be sub-millisecond; this is generous on
 	// purpose so a transient kernel hiccup doesn't fail the push.
 	CubeEgressPushTimeout time.Duration
+
+	// HostPortMin / HostPortMax bound the inclusive range from which
+	// network-agent allocates host-side ports for sandbox port-mapping
+	// NAT rules. With the defaults (20000-29999, 10000 ports total) and
+	// 4 default exposed ports per sandbox, a node caps at ~2500 alive
+	// sandboxes regardless of cpu/mem quotas. Operators can widen the
+	// range (e.g. 20000-59999) to push the ceiling closer to the
+	// underlying mem quota wall. When both are zero the allocator falls
+	// back to 20000-29999 for backwards compatibility.
+	HostPortMin uint16
+	HostPortMax uint16
 }
 
 func DefaultConfig() Config {
@@ -69,6 +80,8 @@ func DefaultConfig() Config {
 		ConnectTimeout:        5 * time.Second,
 		CubeEgressAdminURL:    "http://127.0.0.1:9090",
 		CubeEgressPushTimeout: 2 * time.Second,
+		HostPortMin:           defaultPortMin,
+		HostPortMax:           defaultPortMax,
 	}
 }
 
@@ -89,6 +102,8 @@ type cubeletNetworkConfig struct {
 	MvmMtu                int    `toml:"mvm_mtu"`
 	CubeEgressAdminURL    string `toml:"cube_egress_admin_url"`
 	CubeEgressPushTimeout string `toml:"cube_egress_push_timeout"`
+	HostPortMin           uint16 `toml:"host_port_min"`
+	HostPortMax           uint16 `toml:"host_port_max"`
 }
 
 const cubeletNetworkPluginKey = "io.cubelet.internal.v1.network"
@@ -153,6 +168,12 @@ func LoadConfigFromCubeletTOML(base Config, path string) (Config, error) {
 				path, networkCfg.CubeEgressPushTimeout, perr)
 		}
 		base.CubeEgressPushTimeout = d
+	}
+	if networkCfg.HostPortMin != 0 {
+		base.HostPortMin = networkCfg.HostPortMin
+	}
+	if networkCfg.HostPortMax != 0 {
+		base.HostPortMax = networkCfg.HostPortMax
 	}
 	return base, nil
 }
