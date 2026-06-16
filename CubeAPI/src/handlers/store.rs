@@ -273,6 +273,7 @@ impl From<&UpsertStoreCatalogRequest> for StoreTemplateRecord {
 #[derive(Deserialize)]
 struct InspectResult {
     #[serde(rename = "Id")]
+    #[allow(dead_code)]
     id: String,
     #[serde(rename = "Size")]
     size: u64,
