@@ -236,6 +236,7 @@ impl Snapshot {
             (libc::SYS_mkdirat, vec![]),
             (libc::SYS_getsockopt, vec![]),
             (libc::SYS_setsockopt, vec![]),
+            (libc::SYS_faccessat2, vec![]),
         ]);
         let mut vmm_config = vmm_config::VmmConfig {
             sandbox_id: self.id.clone(),
