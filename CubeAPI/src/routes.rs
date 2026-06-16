@@ -165,6 +165,10 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
             "/sandboxes/:sandboxID/connect",
             post(sandboxes::connect_sandbox),
         )
+        .route(
+            "/sandboxes/:sandboxID/exec-code",
+            post(sandboxes::exec_code),
+        )
         .route("/snapshots", get(snapshots::list_snapshots));
 
     with_auth_and_rate_limit(routes, state, auth_configured)
