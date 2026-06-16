@@ -69,7 +69,7 @@
     "title": "执行拓扑",
     "controlPlane": "管理流",
     "dataPlane": "数据流",
-    "hint": "拖动节点可重新排列 · 滚轮缩放"
+    "hint": "支持滚轮缩放"
   },
   "clusterConfig": {
     "label": "连接配置",
