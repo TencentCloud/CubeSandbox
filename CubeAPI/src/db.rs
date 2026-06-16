@@ -1479,6 +1479,7 @@ ORDER BY sort_order, id
             .map_err(anyhow::Error::from)
     }
 
+    #[allow(dead_code)]
     pub async fn get_store_template(&self, item_id: &str) -> anyhow::Result<Option<StoreTemplateRecord>> {
         let row = sqlx::query(
             r#"
