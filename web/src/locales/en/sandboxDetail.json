@@ -21,16 +21,31 @@
   "terminalFailed": "Failed",
   "terminalExitCode": "Exit Code",
   "terminalCodeLabel": "Code input",
+  "tab": {
+    "management": "Sandbox Management",
+    "monitor": "Monitoring",
+    "events": "Events",
+    "metadata": "Metadata",
+    "logs": "Logs"
+  },
+  "eventsTimestamp": "Timestamp",
+  "eventsLevel": "Level",
+  "eventsMessage": "Message",
+  "eventsSortAsc": "Oldest",
+  "eventsSortDesc": "Newest",
+  "logsComingSoon": "Logs feature coming soon.",
   "fields": {
     "vcpu": "vCPU",
     "memory": "Memory",
     "client": "Client",
+    "nodeIP": "Node IP",
+    "sandboxID": "Sandbox ID",
     "alias": "Alias",
     "ends": "Ends",
     "domain": "Domain",
-    "started": "Started",
+    "started": "Created",
     "state": "State",
-    "envd": "envd"
+    "envd": "envd Version"
   },
   "actions": {
     "resume": "Resume",
