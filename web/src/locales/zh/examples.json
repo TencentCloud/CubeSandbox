@@ -73,10 +73,12 @@
   },
   "clusterConfig": {
     "label": "连接配置",
-    "apiUrl": "CubeAPI",
-    "proxyIp": "CubeProxy",
+    "apiUrl": "CubeAPI 地址",
+    "proxyIp": "CubeProxy 地址",
     "save": "保存",
-    "cancel": "取消"
+    "cancel": "取消",
+    "hint": "配置连接参数后，运行案例时会将这些值注入到沙箱环境中。",
+    "notSet": "未设置"
   },
   "timeline": {
     "title": "步骤时间线",
