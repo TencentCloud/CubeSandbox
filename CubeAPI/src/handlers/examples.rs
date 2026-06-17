@@ -187,7 +187,8 @@ fn topology_for(scenario: &str) -> TopologyTemplate {
             label: "CubeAPI :3000".into(),
             plane: "control".into(),
             kind: "control".into(),
-            description: "HTTP gateway: validates requests, schedules sandbox creation, proxies data.".into(),
+            description:
+                "HTTP gateway: validates requests, schedules sandbox creation, proxies data.".into(),
         },
         TopologyNode {
             id: "cubemaster".into(),
@@ -208,14 +209,16 @@ fn topology_for(scenario: &str) -> TopologyTemplate {
             label: "CubeProxy".into(),
             plane: "data".into(),
             kind: "control".into(),
-            description: "TLS-terminating reverse proxy: forwards via WSS tunnel to in-sandbox envd.".into(),
+            description:
+                "TLS-terminating reverse proxy: forwards via WSS tunnel to in-sandbox envd.".into(),
         },
         TopologyNode {
             id: "microvm".into(),
             label: "KVM MicroVM".into(),
             plane: "data".into(),
             kind: "vm".into(),
-            description: "QEMU/KVM MicroVM: sandbox isolation boundary running envd and the workload.".into(),
+            description:
+                "QEMU/KVM MicroVM: sandbox isolation boundary running envd and the workload.".into(),
         },
         TopologyNode {
             id: "envd".into(),
@@ -229,7 +232,8 @@ fn topology_for(scenario: &str) -> TopologyTemplate {
             label: "Python / Shell".into(),
             plane: "data".into(),
             kind: "data".into(),
-            description: "The interpreter process that runs the example code, forked by envd.".into(),
+            description: "The interpreter process that runs the example code, forked by envd."
+                .into(),
         },
     ];
     let mut edges = vec![
@@ -334,14 +338,16 @@ fn topology_for(scenario: &str) -> TopologyTemplate {
                 label: "Playwright (CDP)".into(),
                 plane: "data".into(),
                 kind: "data".into(),
-                description: "Python client driving Chromium over the Chrome DevTools Protocol.".into(),
+                description: "Python client driving Chromium over the Chrome DevTools Protocol."
+                    .into(),
             });
             nodes.push(TopologyNode {
                 id: "xvfb".into(),
                 label: "Xvfb :99".into(),
                 plane: "data".into(),
                 kind: "data".into(),
-                description: "X Virtual Framebuffer providing a virtual display for Chromium.".into(),
+                description: "X Virtual Framebuffer providing a virtual display for Chromium."
+                    .into(),
             });
             nodes.push(TopologyNode {
                 id: "x11vnc".into(),
@@ -401,7 +407,9 @@ fn topology_for(scenario: &str) -> TopologyTemplate {
                 label: "Snapshot (LVM)".into(),
                 plane: "control".into(),
                 kind: "store".into(),
-                description: "CoW snapshot of the root LV. Outlives the sandbox; clones & rollback source.".into(),
+                description:
+                    "CoW snapshot of the root LV. Outlives the sandbox; clones & rollback source."
+                        .into(),
             });
             edges.push(TopologyEdge {
                 from: "cubelet".into(),
@@ -477,12 +485,18 @@ fn file_languages() -> std::collections::HashMap<&'static str, &'static str> {
         ("snapshot-rollback-clone:02_list_snapshots", "python"),
         ("snapshot-rollback-clone:03_clone_from_snapshot", "python"),
         ("snapshot-rollback-clone:04_state_preserved", "python"),
-        ("snapshot-rollback-clone:05_snapshot_outlives_sandbox", "python"),
+        (
+            "snapshot-rollback-clone:05_snapshot_outlives_sandbox",
+            "python",
+        ),
         ("snapshot-rollback-clone:06_clone_n", "python"),
         ("snapshot-rollback-clone:07_clone_concurrent", "python"),
         ("snapshot-rollback-clone:08_fork_three_axis", "python"),
         ("snapshot-rollback-clone:09_rollback", "python"),
-        ("snapshot-rollback-clone:10_rollback_then_continue", "python"),
+        (
+            "snapshot-rollback-clone:10_rollback_then_continue",
+            "python",
+        ),
         ("snapshot-rollback-clone:11_delete_snapshot", "python"),
         ("snapshot-rollback-clone:clone_demo", "python"),
         ("snapshot-rollback-clone:rollback_demo", "python"),
@@ -613,19 +627,97 @@ fn scenario_registry() -> &'static [ScenarioSpec] {
             category: "lifecycle",
             hidden: false,
             files: &[
-                FileSpec { id: "01_create_snapshot", filename: "01_create_snapshot.py", title: "01 Create Snapshot", description: "Capture a snapshot from a running sandbox.", language: "python" },
-                FileSpec { id: "02_list_snapshots", filename: "02_list_snapshots.py", title: "02 List Snapshots", description: "List snapshots attached to the cluster.", language: "python" },
-                FileSpec { id: "03_clone_from_snapshot", filename: "03_clone_from_snapshot.py", title: "03 Clone From Snapshot", description: "Create a new sandbox from a snapshot.", language: "python" },
-                FileSpec { id: "04_state_preserved", filename: "04_state_preserved.py", title: "04 State Preserved", description: "Verify state survives the clone.", language: "python" },
-                FileSpec { id: "05_snapshot_outlives_sandbox", filename: "05_snapshot_outlives_sandbox.py", title: "05 Snapshot Outlives", description: "Snapshot outlives its source sandbox.", language: "python" },
-                FileSpec { id: "06_clone_n", filename: "06_clone_n.py", title: "06 Clone N Times", description: "Spin up N clones in sequence.", language: "python" },
-                FileSpec { id: "07_clone_concurrent", filename: "07_clone_concurrent.py", title: "07 Clone Concurrently", description: "Spin up N clones in parallel.", language: "python" },
-                FileSpec { id: "08_fork_three_axis", filename: "08_fork_three_axis.py", title: "08 Fork Three-axis", description: "Three orthogonal dimensions of clone/rollback.", language: "python" },
-                FileSpec { id: "09_rollback", filename: "09_rollback.py", title: "09 Rollback", description: "Roll the sandbox back to a previous snapshot.", language: "python" },
-                FileSpec { id: "10_rollback_then_continue", filename: "10_rollback_then_continue.py", title: "10 Rollback Then Continue", description: "Rollback, then resume normal execution.", language: "python" },
-                FileSpec { id: "11_delete_snapshot", filename: "11_delete_snapshot.py", title: "11 Delete Snapshot", description: "Clean up a snapshot from the cluster.", language: "python" },
-                FileSpec { id: "clone_demo", filename: "clone_demo.py", title: "Clone Demo", description: "End-to-end clone walkthrough.", language: "python" },
-                FileSpec { id: "rollback_demo", filename: "rollback_demo.py", title: "Rollback Demo", description: "End-to-end rollback walkthrough.", language: "python" },
+                FileSpec {
+                    id: "01_create_snapshot",
+                    filename: "01_create_snapshot.py",
+                    title: "01 Create Snapshot",
+                    description: "Capture a snapshot from a running sandbox.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "02_list_snapshots",
+                    filename: "02_list_snapshots.py",
+                    title: "02 List Snapshots",
+                    description: "List snapshots attached to the cluster.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "03_clone_from_snapshot",
+                    filename: "03_clone_from_snapshot.py",
+                    title: "03 Clone From Snapshot",
+                    description: "Create a new sandbox from a snapshot.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "04_state_preserved",
+                    filename: "04_state_preserved.py",
+                    title: "04 State Preserved",
+                    description: "Verify state survives the clone.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "05_snapshot_outlives_sandbox",
+                    filename: "05_snapshot_outlives_sandbox.py",
+                    title: "05 Snapshot Outlives",
+                    description: "Snapshot outlives its source sandbox.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "06_clone_n",
+                    filename: "06_clone_n.py",
+                    title: "06 Clone N Times",
+                    description: "Spin up N clones in sequence.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "07_clone_concurrent",
+                    filename: "07_clone_concurrent.py",
+                    title: "07 Clone Concurrently",
+                    description: "Spin up N clones in parallel.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "08_fork_three_axis",
+                    filename: "08_fork_three_axis.py",
+                    title: "08 Fork Three-axis",
+                    description: "Three orthogonal dimensions of clone/rollback.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "09_rollback",
+                    filename: "09_rollback.py",
+                    title: "09 Rollback",
+                    description: "Roll the sandbox back to a previous snapshot.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "10_rollback_then_continue",
+                    filename: "10_rollback_then_continue.py",
+                    title: "10 Rollback Then Continue",
+                    description: "Rollback, then resume normal execution.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "11_delete_snapshot",
+                    filename: "11_delete_snapshot.py",
+                    title: "11 Delete Snapshot",
+                    description: "Clean up a snapshot from the cluster.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "clone_demo",
+                    filename: "clone_demo.py",
+                    title: "Clone Demo",
+                    description: "End-to-end clone walkthrough.",
+                    language: "python",
+                },
+                FileSpec {
+                    id: "rollback_demo",
+                    filename: "rollback_demo.py",
+                    title: "Rollback Demo",
+                    description: "End-to-end rollback walkthrough.",
+                    language: "python",
+                },
             ],
             timeout_secs: None,
             topology: topology_for("snapshot-rollback-clone"),
@@ -896,7 +988,10 @@ async fn ensure_requirements(base_dir: &PathBuf) -> bool {
         }
     }
 
-    tracing::info!("installing scenario requirements from {}", req_file.display());
+    tracing::info!(
+        "installing scenario requirements from {}",
+        req_file.display()
+    );
     let install_result = Command::new("pip3")
         .args(["install", "--quiet", "-r"])
         .arg(&req_file)
@@ -962,7 +1057,9 @@ pub async fn run_example(
     let candidates: Vec<String> = [
         req.template_id.filter(|s| !s.trim().is_empty()),
         state.config.default_template_id.clone(),
-        std::env::var("CUBE_TEMPLATE_ID").ok().filter(|s| !s.is_empty()),
+        std::env::var("CUBE_TEMPLATE_ID")
+            .ok()
+            .filter(|s| !s.is_empty()),
     ]
     .into_iter()
     .flatten()
@@ -1149,11 +1246,7 @@ pub async fn run_example(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(RunExampleResponse {
                         stdout: String::new(),
-                        stderr: format!(
-                            "Failed to create temp dir {}: {}",
-                            dir.display(),
-                            io_err
-                        ),
+                        stderr: format!("Failed to create temp dir {}: {}", dir.display(), io_err),
                         exit_code: 1,
                         success: false,
                         elapsed_ms: 0,
@@ -1258,7 +1351,10 @@ pub async fn run_example(
     // non-empty API key. For local dev any placeholder satisfies the
     // check. Prefer an explicitly set key if one exists.
     if std::env::var("CUBE_API_KEY").is_err() {
-        cmd.env("CUBE_API_KEY", "cube_0000000000000000000000000000000000000000");
+        cmd.env(
+            "CUBE_API_KEY",
+            "cube_0000000000000000000000000000000000000000",
+        );
     }
 
     // ── Scenario-specific environment variables ──────────────────
