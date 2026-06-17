@@ -22,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -611,11 +612,13 @@ func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
 	defer s.mu.Unlock()
 	for nodeID, newSnap := range next {
 		if existing, ok := s.nodes[nodeID]; ok {
-			// Registration fields: always take from DB.  RegisterNode writes to
-			// MySQL before updating in-memory, so any value appearing in the DB
-			// has already been committed and is safe to copy even when the
-			// in-memory heartbeat is fresher (arrived on this replica during the
-			// DB scan).
+			// Registration fields: take from DB.  A theoretical race exists
+			// where the reload() DB scan captures a row before a concurrent
+			// RegisterNode write commits, causing applyReloadResult to
+			// overwrite a fresher in-memory value with a stale DB snapshot.
+			// This is an accepted trade-off: registration field changes are
+			// rare, and any inconsistency self-corrects on the next reload
+			// cycle (≤ SyncMetaDataInterval).
 			existing.Labels = cloneStringMap(newSnap.Labels)
 			existing.Capacity = newSnap.Capacity
 			existing.Allocatable = newSnap.Allocatable
