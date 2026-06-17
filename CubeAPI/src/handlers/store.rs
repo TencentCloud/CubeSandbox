@@ -30,9 +30,12 @@ pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
             name_key: "items.sandbox-code.name".into(),
             description_key: "items.sandbox-code.description".into(),
             image_cn: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest".into(),
-            image_intl: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest".into(),
+            image_intl: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
+                .into(),
             image: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest".into(),
-            digest: Some("sha256:a7b8654aac5b90e241b98e195ae1d8c85d59fe1fb8c282bcccf1071f877db20f".into()),
+            digest: Some(
+                "sha256:a7b8654aac5b90e241b98e195ae1d8c85d59fe1fb8c282bcccf1071f877db20f".into(),
+            ),
             tags: vec!["python".into(), "jupyter".into(), "official".into()],
             category: "code".into(),
             size_mb: 207,
@@ -47,10 +50,14 @@ pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
             id: "sandbox-browser".into(),
             name_key: "items.sandbox-browser.name".into(),
             description_key: "items.sandbox-browser.description".into(),
-            image_cn: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest".into(),
-            image_intl: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest".into(),
+            image_cn: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest"
+                .into(),
+            image_intl: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest"
+                .into(),
             image: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest".into(),
-            digest: Some("sha256:1786786af8510c34eda64ebec5b0a61a98583cb311c3045c0222910ec0680d60".into()),
+            digest: Some(
+                "sha256:1786786af8510c34eda64ebec5b0a61a98583cb311c3045c0222910ec0680d60".into(),
+            ),
             tags: vec!["browser".into(), "chromium".into(), "official".into()],
             category: "browser".into(),
             size_mb: 1530,
@@ -70,11 +77,21 @@ pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
             id: "openclaw".into(),
             name_key: "items.openclaw.name".into(),
             description_key: "items.openclaw.description".into(),
-            image_cn: "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest".into(),
-            image_intl: "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest".into(),
-            image: "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest".into(),
-            digest: Some("sha256:47680d7bc13ea7c57aeb88dff59ef2c44b0facb508e8c9066d479d7d458e0a66".into()),
-            tags: vec!["agent".into(), "openclaw".into(), "browser".into(), "deepseek".into()],
+            image_cn: "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest"
+                .into(),
+            image_intl:
+                "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest".into(),
+            image: "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest"
+                .into(),
+            digest: Some(
+                "sha256:47680d7bc13ea7c57aeb88dff59ef2c44b0facb508e8c9066d479d7d458e0a66".into(),
+            ),
+            tags: vec![
+                "agent".into(),
+                "openclaw".into(),
+                "browser".into(),
+                "deepseek".into(),
+            ],
             category: "ai".into(),
             size_mb: 6350,
             expose_ports: vec![49983, 18789, 8080],
@@ -107,7 +124,8 @@ pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
             name_key: "items.sandbox-nginx.name".into(),
             description_key: "items.sandbox-nginx.description".into(),
             image_cn: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest".into(),
-            image_intl: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest".into(),
+            image_intl: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest"
+                .into(),
             image: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest".into(),
             digest: None,
             tags: vec!["nginx".into(), "web".into(), "official".into()],
@@ -363,7 +381,10 @@ async fn collect_store_images(state: &AppState) -> Vec<String> {
         }
     }
     // fallback: extract image_cn from hardcoded list
-    fallback_catalog().iter().map(|t| t.image_cn.clone()).collect()
+    fallback_catalog()
+        .iter()
+        .map(|t| t.image_cn.clone())
+        .collect()
 }
 
 // ── catalog handlers ───────────────────────────────────────────────────────
@@ -372,9 +393,7 @@ async fn collect_store_images(state: &AppState) -> Vec<String> {
 ///
 /// List all store template catalog entries.  When no database is configured,
 /// returns the built-in fallback catalog.
-pub async fn list_store_catalog(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn list_store_catalog(State(state): State<AppState>) -> impl IntoResponse {
     if let Some(store) = &state.agenthub_store {
         match store.list_store_templates().await {
             Ok(rows) => {
@@ -413,11 +432,7 @@ pub async fn create_store_catalog_item(
 
     let record = StoreTemplateRecord::from(&body);
     match store.create_store_template(&record).await {
-        Ok(()) => (
-            StatusCode::CREATED,
-            Json(StoreCatalogItem::from(record)),
-        )
-            .into_response(),
+        Ok(()) => (StatusCode::CREATED, Json(StoreCatalogItem::from(record))).into_response(),
         Err(err) => {
             tracing::error!(error = %err, "failed to create store catalog item");
             (
@@ -453,11 +468,7 @@ pub async fn update_store_catalog_item(
     record.item_id = item_id;
 
     match store.update_store_template(&record).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(StoreCatalogItem::from(record)),
-        )
-            .into_response(),
+        Ok(()) => (StatusCode::OK, Json(StoreCatalogItem::from(record))).into_response(),
         Err(err) => {
             tracing::error!(error = %err, "failed to update store catalog item");
             (
