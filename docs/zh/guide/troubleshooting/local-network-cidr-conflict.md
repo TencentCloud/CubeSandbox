@@ -133,7 +133,7 @@ $ ip route
 先停止服务
 
 ```bash
-sudo /usr/local/services/cubetoolbox/scripts/one-click/down-with-deps.sh
+sudo systemctl stop 'cube-sandbox-*.target'
 ```
 
 修改配置把 Cubelet 的网络 CIDR 改成不和宿主机局域网冲突的网段，例如改为 `172.31.64.0/18`：
@@ -146,18 +146,42 @@ sudo sed -i 's#cidr = "192.168.0.0/18"#cidr = "172.31.64.0/18"#' \
 删除旧的持久化 TAP 网卡和 cube-dev 网卡
 
 ```bash
-sudo ip tuntap show \
-    | awk '/^z192[.]168[.]/ {sub(":", "", $1); print $1}' \
-    | while read -r dev; do
-        sudo ip tuntap del dev "$dev" mode tap
-      done
-sudo ip link delete cube-dev
+sudo ip link delete cube-dev 2>/dev/null || true
+ip tuntap show | awk -F: '/^z[0-9]+\./{print $1}' \
+  | xargs -r -n1 -I{} sudo ip tuntap del dev {} mode tap
 ```
 
 重启服务
 
 ```bash
-sudo /usr/local/services/cubetoolbox/scripts/one-click/up-with-deps.sh
+sudo systemctl start 'cube-sandbox-*.target'
 ```
 
 网段不再和宿主机局域网重叠后，重新创建模板，成功。
+
+## 相关：调整沙箱网段时的 CIDR 冲突（残留 `cube-dev`）
+
+停止 Cube Sandbox 服务并不会删除 `cube-dev` dummy 网卡和持久化的 `z<ip>` TAP 设备，它们会一直残留，直到 reboot 或手动清理。用相同网段重装会自动复用现有 `cube-dev`，无需处理；但**调整网段**时，若新 CIDR 与残留的 `cube-dev` 网络重叠，预检会拦截并给出明确指引：
+
+```
+[one-click] ERROR: CUBE_SANDBOX_NETWORK_CIDR '192.168.0.0/17' overlaps an existing cube-dev network (192.168.0.0/18).
+
+  Changing the sandbox CIDR on a host that already has a cube network is
+  disruptive: the old cube-dev and the persistent z* TAP devices are left
+  stale. A reboot alone is NOT enough -- the systemd target is enabled and
+  network-agent rebuilds the old network from config.toml on boot.
+
+  To change the CIDR, fully reset the cube network first:
+    sudo systemctl stop 'cube-sandbox-*.target'
+    sudo ip link delete cube-dev 2>/dev/null || true
+    ip tuntap show | awk -F: '/^z[0-9]+\./{print $1}' \
+      | xargs -r -n1 -I{} sudo ip tuntap del dev {} mode tap
+  then re-run install with the new CIDR.
+
+  Or keep the existing CIDR (192.168.0.0/18) to reuse the current network.
+
+  To bypass this check (not recommended), set:
+    CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1
+```
+
+仅 reboot 并不够 —— systemd target 是 enabled 的，开机后 `network-agent` 会按 `config.toml` 重建 `cube-dev` 和 TAP 设备。按报错中给出的步骤做确定性清理，再用新的 `CUBE_SANDBOX_NETWORK_CIDR` 重新安装。若新网段不与残留 `cube-dev` 重叠，预检放行，`network-agent` 会把 `cube-dev` 协调到新网段。

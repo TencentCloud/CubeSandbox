@@ -469,6 +469,9 @@ _check_cidr_conflict() {
   local cidr_net_end=$(( cidr_net_start | (0xFFFFFFFF & ~cidr_mask_int) ))
 
   local conflicts=()
+  # cubesandbox's own gateway interface network (e.g., "192.168.0.1/18"),
+  # recorded when the residual cube-dev interface is found. Empty otherwise.
+  local cubedev_cidr=""
 
   # --- Check interface addresses ---
   # Format: "IP/MASK IFACE" (e.g., "10.0.0.5/24 eth0")
@@ -477,6 +480,19 @@ _check_cidr_conflict() {
     [[ -n "${line}" ]] || continue
     local iface_cidr="${line%% *}"
     local iface_name="${line#* }"
+
+    # cubesandbox's own dummy gateway (constant name "cube-dev"): record its
+    # network for reuse/change detection below and skip -- it is cube's own
+    # residue, not a foreign host conflict.
+    if [[ "${iface_name}" == "cube-dev" ]]; then
+      cubedev_cidr="${iface_cidr}"
+      continue
+    fi
+    # cubesandbox's persistent TAP devices are named "z<ipv4>" (tapNamePrefix
+    # "z"). They belong to cube and must not be treated as host conflicts.
+    if [[ "${iface_name}" =~ ^z[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      continue
+    fi
 
     local iface_ip="${iface_cidr%%/*}"
     local iface_mask="${iface_cidr##*/}"
@@ -499,39 +515,52 @@ _check_cidr_conflict() {
   done < <(ip -4 addr show scope global 2>/dev/null | awk '/inet / {print $2, $NF}' || true)
 
   # --- Check routes for overlap ---
-  # Use grep -oP to extract ANY CIDR token from each route line (handles
-  # policy routes like "from 10.0.0.0/8 table 100" where the CIDR is not
-  # the first field).
+  # Parse line-by-line so we can read each route's output device and skip
+  # routes owned by cube-dev (cube's own residue). grep -oP then extracts ANY
+  # CIDR token from the surviving line (handles policy routes like
+  # "from 10.0.0.0/8 table 100" where the CIDR is not the first field).
   local route_text
   route_text="$(ip -4 route show 2>/dev/null || true)"
   if [[ -n "${route_text}" ]]; then
-    while IFS= read -r route_cidr; do
-      [[ -n "${route_cidr}" ]] || continue
+    local route_line
+    while IFS= read -r route_line; do
+      [[ -n "${route_line}" ]] || continue
 
-      # Skip well-known non-conflicting ranges
-      [[ "${route_cidr}" != 169.254.* ]] || continue
-      [[ "${route_cidr}" != 224.* ]] || continue
-      [[ "${route_cidr}" != 127.* ]] || continue
-      # Skip default route (0.0.0.0/0 should never conflict)
-      [[ "${route_cidr}" != "0.0.0.0/0" ]] || continue
-
-      local route_ip="${route_cidr%/*}"
-      local route_mask="${route_cidr#*/}"
-      [[ "${route_mask}" =~ ^[0-9]+$ ]] || continue
-
-      local route_int
-      route_int=$(ip_to_int "${route_ip}")
-      local route_host_bits=$(( 32 - route_mask ))
-      local route_mask_int=$(( (0xFFFFFFFF << route_host_bits) & 0xFFFFFFFF ))
-      local route_net_start=$(( route_int & route_mask_int ))
-      local route_net_end=$(( route_net_start | (0xFFFFFFFF & ~route_mask_int) ))
-
-      if (( cidr_net_start <= route_net_end && cidr_net_end >= route_net_start )); then
-        conflicts+=("route ${route_cidr}")
+      # Skip routes attached to cubesandbox's own gateway interface.
+      if [[ "${route_line}" =~ dev[[:space:]]+([^[:space:]]+) ]]; then
+        [[ "${BASH_REMATCH[1]}" != "cube-dev" ]] || continue
       fi
-    done < <(echo "${route_text}" | grep -oP '\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+\b' || true)
+
+      local route_cidr
+      while IFS= read -r route_cidr; do
+        [[ -n "${route_cidr}" ]] || continue
+
+        # Skip well-known non-conflicting ranges
+        [[ "${route_cidr}" != 169.254.* ]] || continue
+        [[ "${route_cidr}" != 224.* ]] || continue
+        [[ "${route_cidr}" != 127.* ]] || continue
+        # Skip default route (0.0.0.0/0 should never conflict)
+        [[ "${route_cidr}" != "0.0.0.0/0" ]] || continue
+
+        local route_ip="${route_cidr%/*}"
+        local route_mask="${route_cidr#*/}"
+        [[ "${route_mask}" =~ ^[0-9]+$ ]] || continue
+
+        local route_int
+        route_int=$(ip_to_int "${route_ip}")
+        local route_host_bits=$(( 32 - route_mask ))
+        local route_mask_int=$(( (0xFFFFFFFF << route_host_bits) & 0xFFFFFFFF ))
+        local route_net_start=$(( route_int & route_mask_int ))
+        local route_net_end=$(( route_net_start | (0xFFFFFFFF & ~route_mask_int) ))
+
+        if (( cidr_net_start <= route_net_end && cidr_net_end >= route_net_start )); then
+          conflicts+=("route ${route_cidr}")
+        fi
+      done < <(echo "${route_line}" | grep -oP '\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+\b' || true)
+    done < <(echo "${route_text}")
   fi
 
+  # A genuine conflict with a foreign host interface/route -> hard fail.
   if [[ "${#conflicts[@]}" -gt 0 ]]; then
     local conflict_list
     conflict_list="$(printf '\n  - %s' "${conflicts[@]}")"
@@ -545,6 +574,56 @@ _check_cidr_conflict() {
 
   To bypass this check (not recommended), set:
     CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1"
+  fi
+
+  # No foreign conflict. If a residual cube-dev exists (leftover from a
+  # previous cubesandbox deployment), decide between reuse and CIDR change.
+  if [[ -n "${cubedev_cidr}" ]]; then
+    local cd_ip="${cubedev_cidr%/*}"
+    local cd_mask="${cubedev_cidr#*/}"
+    if [[ "${cd_ip}" == "${cubedev_cidr}" ]]; then
+      cd_mask="32"
+    fi
+
+    local cd_int
+    cd_int=$(ip_to_int "${cd_ip}")
+    local cd_host_bits=$(( 32 - 10#${cd_mask} ))
+    local cd_mask_int=$(( (0xFFFFFFFF << cd_host_bits) & 0xFFFFFFFF ))
+    local cd_net_start=$(( cd_int & cd_mask_int ))
+    local cd_net_end=$(( cd_net_start | (0xFFFFFFFF & ~cd_mask_int) ))
+    local cd_network
+    cd_network="$(ip_int_to_dot "${cd_net_start}")"
+
+    if (( cd_net_start == cidr_net_start )) && (( 10#${cd_mask} == 10#${mask} )); then
+      # Same network -> reinstall reuse. The residual cube-dev IS this CIDR's
+      # gateway; not a conflict.
+      log "reusing existing cube-dev network (${cd_network}/${cd_mask}); CIDR self-conflict skipped"
+    elif (( cidr_net_start <= cd_net_end && cidr_net_end >= cd_net_start )); then
+      # Different network that overlaps the requested CIDR -> disruptive change
+      # on a host that already has a cube network. A reboot alone is NOT enough
+      # because the systemd target is enabled and network-agent rebuilds the old
+      # network from config.toml; a deterministic reset is required.
+      die "CUBE_SANDBOX_NETWORK_CIDR '${cidr}' overlaps an existing cube-dev network (${cd_network}/${cd_mask}).
+
+  Changing the sandbox CIDR on a host that already has a cube network is
+  disruptive: the old cube-dev and the persistent z* TAP devices are left
+  stale. A reboot alone is NOT enough -- the systemd target is enabled and
+  network-agent rebuilds the old network from config.toml on boot.
+
+  To change the CIDR, fully reset the cube network first:
+    sudo systemctl stop 'cube-sandbox-*.target'
+    sudo ip link delete cube-dev 2>/dev/null || true
+    ip tuntap show | awk -F: '/^z[0-9]+\\./{print \$1}' \\
+      | xargs -r -n1 -I{} sudo ip tuntap del dev {} mode tap
+  then re-run install with the new CIDR.
+
+  Or keep the existing CIDR (${cd_network}/${cd_mask}) to reuse the current network.
+
+  To bypass this check (not recommended), set:
+    CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1"
+    fi
+    # else: cube-dev exists but does not overlap the requested CIDR -> allow;
+    # network-agent will reconcile cube-dev to the new network.
   fi
 }
 

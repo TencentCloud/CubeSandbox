@@ -133,7 +133,7 @@ $ ip route
 Stop the services first:
 
 ```bash
-sudo /usr/local/services/cubetoolbox/scripts/one-click/down-with-deps.sh
+sudo systemctl stop 'cube-sandbox-*.target'
 ```
 
 Change the Cubelet network CIDR to a range that does not overlap with the host LAN. For example, change it to `172.31.64.0/18`:
@@ -146,18 +146,42 @@ sudo sed -i 's#cidr = "192.168.0.0/18"#cidr = "172.31.64.0/18"#' \
 Remove the old persistent TAP devices and the `cube-dev` interface:
 
 ```bash
-sudo ip tuntap show \
-    | awk '/^z192[.]168[.]/ {sub(":", "", $1); print $1}' \
-    | while read -r dev; do
-        sudo ip tuntap del dev "$dev" mode tap
-      done
-sudo ip link delete cube-dev
+sudo ip link delete cube-dev 2>/dev/null || true
+ip tuntap show | awk -F: '/^z[0-9]+\./{print $1}' \
+  | xargs -r -n1 -I{} sudo ip tuntap del dev {} mode tap
 ```
 
 Restart the services:
 
 ```bash
-sudo /usr/local/services/cubetoolbox/scripts/one-click/up-with-deps.sh
+sudo systemctl start 'cube-sandbox-*.target'
 ```
 
 After the sandbox CIDR no longer overlaps with the host LAN, recreate the template. The template creation should complete successfully.
+
+## Related: Changing the CIDR (Residual `cube-dev`)
+
+Stopping Cube Sandbox does NOT remove the `cube-dev` dummy interface or the persistent `z<ip>` TAP devices — they linger until a reboot or manual cleanup. A same-CIDR reinstall reuses the existing `cube-dev` automatically, no action needed; but **changing the CIDR** while a residual `cube-dev` overlaps the new range is rejected, because it is disruptive:
+
+```
+[one-click] ERROR: CUBE_SANDBOX_NETWORK_CIDR '192.168.0.0/17' overlaps an existing cube-dev network (192.168.0.0/18).
+
+  Changing the sandbox CIDR on a host that already has a cube network is
+  disruptive: the old cube-dev and the persistent z* TAP devices are left
+  stale. A reboot alone is NOT enough -- the systemd target is enabled and
+  network-agent rebuilds the old network from config.toml on boot.
+
+  To change the CIDR, fully reset the cube network first:
+    sudo systemctl stop 'cube-sandbox-*.target'
+    sudo ip link delete cube-dev 2>/dev/null || true
+    ip tuntap show | awk -F: '/^z[0-9]+\./{print $1}' \
+      | xargs -r -n1 -I{} sudo ip tuntap del dev {} mode tap
+  then re-run install with the new CIDR.
+
+  Or keep the existing CIDR (192.168.0.0/18) to reuse the current network.
+
+  To bypass this check (not recommended), set:
+    CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1
+```
+
+A reboot alone is NOT enough — the systemd target is enabled, so on boot `network-agent` rebuilds `cube-dev` and the TAP devices from `config.toml`. Perform the deterministic reset shown in the error, then re-run the installer with the new `CUBE_SANDBOX_NETWORK_CIDR`. If the new CIDR does not overlap the residual `cube-dev`, the pre-flight allows it and `network-agent` reconciles `cube-dev` to the new network.
