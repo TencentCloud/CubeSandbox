@@ -30,6 +30,211 @@ require_cmd() {
   command -v "${cmd}" >/dev/null 2>&1 || die "required command not found: ${cmd}"
 }
 
+_version_trim_leading_zeroes() {
+  local value="$1"
+  value="${value#${value%%[!0]*}}"
+  printf '%s\n' "${value:-0}"
+}
+
+_version_compare_numbers() {
+  local LC_ALL=C
+  local left right
+  left="$(_version_trim_leading_zeroes "$1")"
+  right="$(_version_trim_leading_zeroes "$2")"
+
+  if [[ "${#left}" -lt "${#right}" ]]; then
+    printf '%s\n' "-1"
+  elif [[ "${#left}" -gt "${#right}" ]]; then
+    printf '%s\n' "1"
+  elif [[ "${left}" < "${right}" ]]; then
+    printf '%s\n' "-1"
+  elif [[ "${left}" > "${right}" ]]; then
+    printf '%s\n' "1"
+  else
+    printf '%s\n' "0"
+  fi
+}
+
+# Parse [v]X.Y.Z[-PRERELEASE][+BUILD] into unit-separator-delimited fields:
+# major\037minor\037patch\037prerelease. Return 1 when the core has extra
+# fields, non-ASCII digits, or invalid prerelease identifiers.
+_version_split_semver() {
+  local LC_ALL=C
+  local version="$1"
+  version="${version#v}"
+  version="${version%%+*}"
+
+  local core="${version%%-*}"
+  local pre=""
+  if [[ "${version}" == *-* ]]; then
+    pre="${version#*-}"
+    [[ "${pre}" =~ ^[0123456789A-Za-z-]+(\.[0123456789A-Za-z-]+)*$ ]] || return 1
+  fi
+
+  local major minor patch extra
+  IFS='.' read -r major minor patch extra <<<"${core}"
+  [[ -z "${extra:-}" ]] || return 1
+  [[ "${major}" =~ ^[0123456789]+$ ]] || return 1
+  [[ "${minor}" =~ ^[0123456789]+$ ]] || return 1
+  [[ "${patch}" =~ ^[0123456789]+$ ]] || return 1
+
+  printf '%s\037%s\037%s\037%s\n' "${major}" "${minor}" "${patch}" "${pre}"
+}
+
+# C-locale lexical fallback for versions that do not match the semver subset.
+_version_compare_lexical() {
+  local LC_ALL=C
+  local left="$1"
+  local right="$2"
+
+  if [[ "${left}" < "${right}" ]]; then
+    printf '%s\n' "-1"
+  elif [[ "${left}" > "${right}" ]]; then
+    printf '%s\n' "1"
+  else
+    printf '%s\n' "0"
+  fi
+}
+
+_version_compare_prerelease_identifier() {
+  local LC_ALL=C
+  local left="$1"
+  local right="$2"
+
+  if [[ "${left}" == "${right}" ]]; then
+    printf '%s\n' "0"
+    return 0
+  fi
+
+  local left_numeric=0
+  local right_numeric=0
+  [[ "${left}" =~ ^[0123456789]+$ ]] && left_numeric=1
+  [[ "${right}" =~ ^[0123456789]+$ ]] && right_numeric=1
+
+  if [[ "${left_numeric}" == "1" && "${right_numeric}" == "1" ]]; then
+    _version_compare_numbers "${left}" "${right}"
+  elif [[ "${left_numeric}" == "1" ]]; then
+    printf '%s\n' "-1"
+  elif [[ "${right_numeric}" == "1" ]]; then
+    printf '%s\n' "1"
+  else
+    local left_prefix="" left_suffix="" right_prefix="" right_suffix=""
+    if [[ "${left}" =~ ^([A-Za-z-]+)([0123456789]+)$ ]]; then
+      left_prefix="${BASH_REMATCH[1]}"
+      left_suffix="${BASH_REMATCH[2]}"
+    fi
+    if [[ "${right}" =~ ^([A-Za-z-]+)([0123456789]+)$ ]]; then
+      right_prefix="${BASH_REMATCH[1]}"
+      right_suffix="${BASH_REMATCH[2]}"
+    fi
+
+    if [[ -n "${left_prefix}" && "${left_prefix}" == "${right_prefix}" ]]; then
+      # Deployment tags often use rc1/rc2; compare matching suffixes numerically
+      # so rc10 sorts after rc2, even though strict semver compares them lexically.
+      _version_compare_numbers "${left_suffix}" "${right_suffix}"
+    else
+      _version_compare_lexical "${left}" "${right}"
+    fi
+  fi
+}
+
+_version_compare_prerelease() {
+  local left="$1"
+  local right="$2"
+
+  if [[ -z "${left}" && -z "${right}" ]]; then
+    printf '%s\n' "0"
+    return 0
+  elif [[ -z "${left}" ]]; then
+    printf '%s\n' "1"
+    return 0
+  elif [[ -z "${right}" ]]; then
+    printf '%s\n' "-1"
+    return 0
+  fi
+
+  local left_ids right_ids
+  IFS='.' read -r -a left_ids <<<"${left}"
+  IFS='.' read -r -a right_ids <<<"${right}"
+
+  local max_count="${#left_ids[@]}"
+  if [[ "${#right_ids[@]}" -gt "${max_count}" ]]; then
+    max_count="${#right_ids[@]}"
+  fi
+
+  local i cmp
+  for ((i = 0; i < max_count; i++)); do
+    if [[ "${i}" -ge "${#left_ids[@]}" ]]; then
+      printf '%s\n' "-1"
+      return 0
+    elif [[ "${i}" -ge "${#right_ids[@]}" ]]; then
+      printf '%s\n' "1"
+      return 0
+    fi
+
+    cmp="$(_version_compare_prerelease_identifier "${left_ids[i]}" "${right_ids[i]}")"
+    [[ "${cmp}" == "0" ]] || {
+      printf '%s\n' "${cmp}"
+      return 0
+    }
+  done
+
+  printf '%s\n' "0"
+}
+
+# semver_compare: Compare two semantic versions and print -1, 0, or 1 to stdout.
+# The comparison accepts an optional leading "v" and ignores build metadata
+# after "+". If either input cannot be parsed as semver, both original inputs
+# are compared with a C-locale lexical fallback instead. Set
+# ONE_CLICK_VERSION_COMPARE_DEBUG=1 to log fallback diagnostics to stderr.
+# Matching prerelease identifiers such as rc1/rc10 sort by numeric suffix to
+# match deployment tag conventions.
+semver_compare() {
+  local left_parts right_parts
+  if ! left_parts="$(_version_split_semver "$1")" || ! right_parts="$(_version_split_semver "$2")"; then
+    # Preserve deterministic ordering for legacy/non-semver release strings.
+    if [[ "${ONE_CLICK_VERSION_COMPARE_DEBUG:-}" == "1" ]]; then
+      log "DEBUG: falling back to lexical version comparison for '$1' and '$2'"
+    fi
+    _version_compare_lexical "$1" "$2"
+    return 0
+  fi
+
+  local left_major left_minor left_patch left_pre
+  local right_major right_minor right_patch right_pre
+  local parts_sep=$'\037'
+  IFS="${parts_sep}" read -r left_major left_minor left_patch left_pre <<<"${left_parts}"
+  IFS="${parts_sep}" read -r right_major right_minor right_patch right_pre <<<"${right_parts}"
+
+  local cmp
+  cmp="$(_version_compare_numbers "${left_major}" "${right_major}")"
+  [[ "${cmp}" == "0" ]] || {
+    printf '%s\n' "${cmp}"
+    return 0
+  }
+
+  cmp="$(_version_compare_numbers "${left_minor}" "${right_minor}")"
+  [[ "${cmp}" == "0" ]] || {
+    printf '%s\n' "${cmp}"
+    return 0
+  }
+
+  cmp="$(_version_compare_numbers "${left_patch}" "${right_patch}")"
+  [[ "${cmp}" == "0" ]] || {
+    printf '%s\n' "${cmp}"
+    return 0
+  }
+
+  _version_compare_prerelease "${left_pre}" "${right_pre}"
+}
+
+# version_lt: Return success when the first version is lower than the second.
+# Delegates to semver_compare, including its v-prefix, build metadata, rc suffix,
+# and lexical fallback behavior.
+version_lt() {
+  [[ "$(semver_compare "$1" "$2")" == "-1" ]]
+}
+
 one_click_cow_required_commands() {
   printf '%s\n' \
     mkfs.ext4 \
