@@ -227,6 +227,36 @@ CUBE_PROXY_POSTCHECK_DELAY=0" \
     8081
 }
 
+test_postcheck_skips_when_external_host_set() {
+  # When an external endpoint is configured the local container is never
+  # started, so the postcheck must short-circuit with exit 0 instead of
+  # blocking on wait_for_container_health (which would otherwise need docker
+  # and ~80s before failing into Restart=on-failure).
+  CUBE_EXTERNAL_MYSQL_HOST=db.example.com \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" \
+    || fail "mysql-postcheck must exit 0 when CUBE_EXTERNAL_MYSQL_HOST is set"
+  CUBE_EXTERNAL_REDIS_HOST=cache.example.com \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
+    || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_HOST is set"
+}
+
+test_mask_external_dep_services_remove_then_mask() {
+  local path="${ONE_CLICK_DIR}/install.sh"
+
+  # Both local dependency units are routed through the shared masking helper.
+  assert_contains "${path}" "mask_local_dep_service cube-sandbox-mysql.service"
+  assert_contains "${path}" "mask_local_dep_service cube-sandbox-redis.service"
+  # Core fix: remove the installed regular file BEFORE masking, otherwise plain
+  # `systemctl mask` fails to overlay its /dev/null symlink on an existing file.
+  assert_contains "${path}" "rm -f \"\${unit_dir}/\${unit}\""
+  assert_contains "${path}" "systemctl mask \"\${unit}\""
+  # Switch-back-to-local path still unmasks both units, and a daemon-reload
+  # follows so the new (un)masked state is picked up before the target starts.
+  assert_contains "${path}" "systemctl unmask cube-sandbox-mysql.service"
+  assert_contains "${path}" "systemctl unmask cube-sandbox-redis.service"
+  assert_contains "${path}" "systemctl daemon-reload"
+}
+
 test_render_template_replaces_empty_directory
 test_render_template_rejects_non_empty_directory
 test_unit_prepare_hooks_are_wired
@@ -243,5 +273,7 @@ test_cube_proxy_postcheck_follows_http_port
 test_cube_proxy_postcheck_ignores_https_port
 test_cube_proxy_postcheck_ignores_deprecated_host_port
 test_cube_proxy_postcheck_prefers_http_over_deprecated_host_port
+test_postcheck_skips_when_external_host_set
+test_mask_external_dep_services_remove_then_mask
 
 echo "runtime file safety tests OK"

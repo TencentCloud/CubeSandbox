@@ -731,11 +731,40 @@ start_systemd_target() {
 # only `Wants` these units, so masking is non-fatal for the rest of the stack.
 # Must run after install_systemd_units (units installed + daemon-reload) and
 # before start_systemd_target.
+#
+# install-units.sh installs every unit as a *regular file* under
+# /etc/systemd/system. A plain `systemctl mask` cannot overlay its /dev/null
+# symlink on top of an existing regular file -- it fails with
+# "File ... already exists". The previous implementation swallowed that error,
+# so the unit only *appeared* masked and was actually left merely "disabled".
+# A disabled-but-present unit is still pulled in by the target's Wants=, so the
+# local mysql/redis units would start, their ExecStartPost would wait ~60-80s on
+# a container that (correctly) was never started, fail, and Restart=on-failure
+# loop -- stalling `systemctl enable --now <target>` for many minutes.
+# We therefore remove the installed file first so mask can create a *persistent*
+# /dev/null override; a later switch back to local re-installs the real file via
+# install-units.sh, whose `install` call replaces the /dev/null mask symlink with
+# the real unit (unlink + create, not an atomic rename).
+mask_local_dep_service() {
+  local unit="$1"
+  local unit_dir="${ONE_CLICK_SYSTEMD_UNIT_INSTALL_DIR:-/etc/systemd/system}"
+  systemctl stop "${unit}" >/dev/null 2>&1 || true
+  # Removing the unit file is the primary safeguard; mask is belt-and-suspenders.
+  # Keep this tolerant under `set -e` so a rare failure here (e.g. a stray
+  # directory left at the path) warns rather than aborting the whole install.
+  rm -f "${unit_dir}/${unit}" || true
+  if ! systemctl mask "${unit}" >/dev/null 2>&1; then
+    # The unit file is already gone, so the target's Wants= just resolves to a
+    # missing unit and nothing starts now. The only residual risk is that the
+    # mask did not persist, so a later install_systemd_units run could restore it.
+    log "WARNING: removed ${unit} but failed to persist its mask; a later re-install may restore it"
+  fi
+}
+
 mask_external_dep_services() {
   if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
     log "masking local MySQL service (external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST} in use)"
-    systemctl stop cube-sandbox-mysql.service >/dev/null 2>&1 || true
-    systemctl mask cube-sandbox-mysql.service >/dev/null 2>&1 || true
+    mask_local_dep_service cube-sandbox-mysql.service
   else
     # Re-enable in case a previous install masked it and the user switched back.
     systemctl unmask cube-sandbox-mysql.service >/dev/null 2>&1 || true
@@ -743,11 +772,12 @@ mask_external_dep_services() {
 
   if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
     log "masking local Redis service (external Redis at ${CUBE_EXTERNAL_REDIS_HOST} in use)"
-    systemctl stop cube-sandbox-redis.service >/dev/null 2>&1 || true
-    systemctl mask cube-sandbox-redis.service >/dev/null 2>&1 || true
+    mask_local_dep_service cube-sandbox-redis.service
   else
     systemctl unmask cube-sandbox-redis.service >/dev/null 2>&1 || true
   fi
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
 require_root
