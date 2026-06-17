@@ -97,10 +97,42 @@ func TestJobPullProgressSinkFlushPartialKeepsPartialSnapshot(t *testing.T) {
 	}
 }
 
+func TestJobPullProgressSinkFlushIgnoresCanceledJobContext(t *testing.T) {
+	restore := stubPullProgressIO(t)
+	defer restore()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s := newJobPullProgressSink(ctx, "job-canceled")
+	s.lastSnap = image.PullProgress{
+		TotalBytes:      100,
+		DownloadedBytes: 40,
+		TotalLayers:     5,
+		CompletedLayers: 2,
+	}
+	s.flush(true)
+
+	if updatePullProgressCalls != 1 {
+		t.Fatalf("flush should write MySQL despite canceled job context, got %d calls", updatePullProgressCalls)
+	}
+	if deletePullProgressCalls != 1 {
+		t.Fatalf("flush should delete Redis despite canceled job context, got %d calls", deletePullProgressCalls)
+	}
+	if updatePullProgressCtxErr != nil {
+		t.Fatalf("update used canceled context: %v", updatePullProgressCtxErr)
+	}
+	if deletePullProgressCtxErr != nil {
+		t.Fatalf("delete used canceled context: %v", deletePullProgressCtxErr)
+	}
+}
+
 var (
-	updatePullProgressCalls int
-	deletePullProgressCalls int
-	lastPullProgressUpdate  map[string]any
+	updatePullProgressCalls  int
+	deletePullProgressCalls  int
+	lastPullProgressUpdate   map[string]any
+	updatePullProgressCtxErr error
+	deletePullProgressCtxErr error
 )
 
 func stubPullProgressIO(t *testing.T) func() {
@@ -111,15 +143,19 @@ func stubPullProgressIO(t *testing.T) func() {
 	updatePullProgressCalls = 0
 	deletePullProgressCalls = 0
 	lastPullProgressUpdate = nil
+	updatePullProgressCtxErr = nil
+	deletePullProgressCtxErr = nil
 	cacheTemplateImageJobPullProgress = func(context.Context, *basetypes.TemplateImageJobPullProgressMap) error {
 		return nil
 	}
-	deleteTemplateImageJobPullProgress = func(context.Context, string) error {
+	deleteTemplateImageJobPullProgress = func(ctx context.Context, _ string) error {
 		deletePullProgressCalls++
+		deletePullProgressCtxErr = ctx.Err()
 		return nil
 	}
-	updateTemplateImageJobPullProgress = func(_ context.Context, _ string, values map[string]any) error {
+	updateTemplateImageJobPullProgress = func(ctx context.Context, _ string, values map[string]any) error {
 		updatePullProgressCalls++
+		updatePullProgressCtxErr = ctx.Err()
 		lastPullProgressUpdate = values
 		return nil
 	}

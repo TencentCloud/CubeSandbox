@@ -61,6 +61,7 @@ func runImageJobWatch(c *cli.Context, jobID string) error {
 	}
 	final, ok := model.(imageJobTUI)
 	if !ok {
+		log.Printf("template watch TUI returned unexpected model type %T\n", model)
 		return nil
 	}
 	if final.canceled {
@@ -116,6 +117,7 @@ func runBuildWatch(c *cli.Context, buildID string) error {
 	}
 	final, ok := model.(buildJobTUI)
 	if !ok {
+		log.Printf("template build-watch TUI returned unexpected model type %T\n", model)
 		return nil
 	}
 	if final.canceled {

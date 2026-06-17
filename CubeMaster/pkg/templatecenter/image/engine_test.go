@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -19,6 +20,12 @@ import (
 type fakeEngineClient struct {
 	inspect func(context.Context, string) (*dockerInspectImage, error)
 	pull    func(context.Context, string, string) (io.ReadCloser, error)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func (c *fakeEngineClient) ImageInspect(ctx context.Context, imageRef string) (*dockerInspectImage, error) {
@@ -106,6 +113,52 @@ func TestEngineRegistryAuthEncodesCredentialsWithoutPlaintext(t *testing.T) {
 	}
 	if payload["username"] != "alice" || payload["password"] != "s3cret" || payload["serveraddress"] != "registry.example.com" {
 		t.Fatalf("auth payload mismatch: %+v", payload)
+	}
+}
+
+func TestHTTPDockerEngineClientImageInspectEscapesImageRefPath(t *testing.T) {
+	var gotPath string
+	cli := &httpDockerEngineClient{
+		baseURL: "http://docker",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotPath = req.URL.EscapedPath()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"RepoDigests":["registry.example.com/ns/app@sha256:test"],"Config":{"Cmd":["run"]}}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})},
+	}
+
+	inspect, err := cli.ImageInspect(context.Background(), "registry.example.com/ns/app:tag")
+	if err != nil {
+		t.Fatalf("ImageInspect: %v", err)
+	}
+	if gotPath != "/images/registry.example.com%2Fns%2Fapp:tag/json" {
+		t.Fatalf("escaped path=%q", gotPath)
+	}
+	if len(inspect.RepoDigests) != 1 || len(inspect.Config.Cmd) != 1 {
+		t.Fatalf("unexpected inspect result: %+v", inspect)
+	}
+}
+
+func TestHTTPDockerEngineClientImageInspectMapsNotFound(t *testing.T) {
+	cli := &httpDockerEngineClient{
+		baseURL: "http://docker",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("not found")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})},
+	}
+
+	_, err := cli.ImageInspect(context.Background(), "registry.example.com/ns/missing:tag")
+	if !errors.Is(err, errEngineImageNotFound) {
+		t.Fatalf("ImageInspect error=%v, want errEngineImageNotFound", err)
 	}
 }
 

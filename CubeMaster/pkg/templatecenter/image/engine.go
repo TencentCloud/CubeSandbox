@@ -105,7 +105,7 @@ func newHTTPDockerEngineClient() (engineClient, error) {
 }
 
 func (c *httpDockerEngineClient) ImageInspect(ctx context.Context, imageRef string) (*dockerInspectImage, error) {
-	resp, err := c.do(ctx, http.MethodGet, "/images/"+imageRef+"/json", nil, "")
+	resp, err := c.do(ctx, http.MethodGet, "/images/"+url.PathEscape(imageRef)+"/json", nil, "")
 	if err != nil {
 		return nil, err
 	}

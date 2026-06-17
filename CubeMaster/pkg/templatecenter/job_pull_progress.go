@@ -21,6 +21,8 @@ var (
 	updateTemplateImageJobPullProgress = updateTemplateImageJob
 )
 
+const pullProgressFlushTimeout = 5 * time.Second
+
 // jobPullProgressSink turns the high-frequency pull-progress callbacks emitted
 // by the image package into Redis live snapshots, leaving MySQL for durable
 // terminal snapshots. It also derives a smoothed download speed from successive
@@ -69,18 +71,28 @@ func (s *jobPullProgressSink) flush(completed bool) {
 	if completed && p.TotalLayers > 0 {
 		p.CompletedLayers = p.TotalLayers
 	}
-	if err := updateTemplateImageJobPullProgress(s.ctx, s.jobID, map[string]any{
+	flushCtx, cancel := s.flushContext()
+	defer cancel()
+
+	if err := updateTemplateImageJobPullProgress(flushCtx, s.jobID, map[string]any{
 		"pull_total_bytes":      p.TotalBytes,
 		"pull_downloaded_bytes": p.DownloadedBytes,
 		"pull_total_layers":     p.TotalLayers,
 		"pull_completed_layers": p.CompletedLayers,
 		"pull_speed_bps":        int64(0),
 	}); err != nil {
-		log.G(s.ctx).Debugf("flush pull progress for job %s failed: %v", s.jobID, err)
+		log.G(s.ctx).Warnf("flush pull progress for job %s failed: %v", s.jobID, err)
 	}
-	if err := deleteTemplateImageJobPullProgress(s.ctx, s.jobID); err != nil {
-		log.G(s.ctx).Debugf("delete pull progress cache for job %s failed: %v", s.jobID, err)
+	if err := deleteTemplateImageJobPullProgress(flushCtx, s.jobID); err != nil {
+		log.G(s.ctx).Warnf("delete pull progress cache for job %s failed: %v", s.jobID, err)
 	}
+}
+
+func (s *jobPullProgressSink) flushContext() (context.Context, context.CancelFunc) {
+	if s.ctx == nil {
+		return context.WithTimeout(context.Background(), pullProgressFlushTimeout)
+	}
+	return context.WithTimeout(context.WithoutCancel(s.ctx), pullProgressFlushTimeout)
 }
 
 // computeSpeedLocked derives bytes/sec from the delta against the previous
