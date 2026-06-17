@@ -540,7 +540,8 @@ pub async fn exec_code(
             // unavailable (e.g. 502 from the proxy because the sandbox
             // image lacks a Jupyter service), fall back to envd one-shot
             // Python execution so the endpoint still works.
-            let jupyter_result = run_jupyter_execute(&state, &sandbox_id, &domain, &body.code).await;
+            let jupyter_result =
+                run_jupyter_execute(&state, &sandbox_id, &domain, &body.code).await;
 
             let output = match jupyter_result {
                 Ok(out) => out,
@@ -702,7 +703,9 @@ async fn run_jupyter_execute(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("jupyter execute request failed: {}", e)))?;
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("jupyter execute request failed: {}", e))
+        })?;
 
     if !resp.status().is_success() {
         return Err(AppError::Internal(anyhow::anyhow!(
@@ -711,10 +714,12 @@ async fn run_jupyter_execute(
         )));
     }
 
-    let body = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("failed reading jupyter execute response: {}", e)))?;
+    let body = resp.bytes().await.map_err(|e| {
+        AppError::Internal(anyhow::anyhow!(
+            "failed reading jupyter execute response: {}",
+            e
+        ))
+    })?;
 
     parse_jupyter_ndjson(&body)
 }
@@ -735,8 +740,9 @@ fn parse_jupyter_ndjson(bytes: &[u8]) -> AppResult<JupyterOutput> {
         if line.trim().is_empty() {
             continue;
         }
-        let v: serde_json::Value = serde_json::from_str(line)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("invalid jupyter ndjson line: {}", e)))?;
+        let v: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("invalid jupyter ndjson line: {}", e))
+        })?;
 
         let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
@@ -826,10 +832,9 @@ async fn run_envd_command(
         )));
     }
 
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("failed reading envd command stream: {}", e)))?;
+    let bytes = resp.bytes().await.map_err(|e| {
+        AppError::Internal(anyhow::anyhow!("failed reading envd command stream: {}", e))
+    })?;
     parse_connect_stream(&bytes)
 }
 
