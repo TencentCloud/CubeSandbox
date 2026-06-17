@@ -696,6 +696,11 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 	}
 	info := templateInfoFromDefinition(*def)
 	out := &info
+	out.CreatedAt = formatUTCRFC3339(def.CreatedAt)
+	out.ImageInfo = extractImageInfoFromRequestJSON(def.RequestJSON)
+	if latestJob, jobErr := getLatestTemplateImageJobByTemplateID(ctx, templateID); jobErr == nil && latestJob != nil {
+		out.ImageInfo = composeImageInfo(latestJob.SourceImageRef, latestJob.SourceImageDigest)
+	}
 	out.Replicas = make([]ReplicaStatus, 0, len(replicas))
 	for _, replica := range replicas {
 		out.Replicas = append(out.Replicas, replicaModelToStatus(replica))
