@@ -466,6 +466,58 @@ wait_for_pidfile() {
   return 1
 }
 
+# one_click_parse_args: parse install.sh CLI flags into CLI_* globals.
+#
+# Supports BOTH `--flag=value` and space-separated `--flag value` forms so
+# that documented invocations like `--mode upgrade` work as expected. Value
+# flags reported missing a value fail fast (no silent empty assignment).
+# Unknown tokens are warned about but ignored to preserve backward
+# compatibility with existing callers that pass extra positional arguments.
+#
+# Resets and populates the following globals (caller declares/uses them):
+#   CLI_MODE CLI_NODE_IP CLI_ASSUME_YES CLI_ALLOW_DOWNGRADE CLI_ALLOW_ROLE_CHANGE
+one_click_parse_args() {
+  CLI_MODE=""
+  CLI_NODE_IP=""
+  CLI_ASSUME_YES=""
+  CLI_ALLOW_DOWNGRADE=""
+  CLI_ALLOW_ROLE_CHANGE=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --node-ip=*)
+        CLI_NODE_IP="${1#--node-ip=}"
+        ;;
+      --node-ip)
+        [[ $# -ge 2 ]] || die "--node-ip requires a value"
+        shift
+        CLI_NODE_IP="$1"
+        ;;
+      --mode=*)
+        CLI_MODE="${1#--mode=}"
+        ;;
+      --mode)
+        [[ $# -ge 2 ]] || die "--mode requires a value (install|upgrade|auto)"
+        shift
+        CLI_MODE="$1"
+        ;;
+      -y|--yes)
+        CLI_ASSUME_YES=1
+        ;;
+      --allow-downgrade)
+        CLI_ALLOW_DOWNGRADE=1
+        ;;
+      --allow-role-change)
+        CLI_ALLOW_ROLE_CHANGE=1
+        ;;
+      *)
+        log "WARNING: ignoring unknown argument: $1"
+        ;;
+    esac
+    shift
+  done
+}
+
 one_click_deploy_role() {
   local role="${ONE_CLICK_DEPLOY_ROLE:-control}"
   case "${role}" in
@@ -539,6 +591,68 @@ upsert_env_kv() {
 #   * backup_before_upgrade    - snapshot config before replacing artifacts
 # ---------------------------------------------------------------------------
 
+# assert_safe_install_prefix: refuse to perform a destructive full wipe of an
+# obviously unsafe install prefix. Guards against a mis-set
+# ONE_CLICK_INSTALL_PREFIX (e.g. "/" or "/usr", or a foreign dir like
+# "/usr/local" / "/var/lib") turning the custom-prefix wipe into a
+# system-destroying `rm -rf`. Beyond the root/system/top-level denylist, a
+# non-empty existing prefix is only wiped when it is a recognised CubeSandbox
+# install (presence of a marker artifact such as .one-click.env / CubeMaster)
+# or effectively empty -- the wipe preserves '.backup', so a lone '.backup'
+# left over from an interrupted upgrade is fine. Non-existent prefixes are
+# allowed (a fresh path the installer is about to create).
+assert_safe_install_prefix() {
+  local prefix="$1"
+
+  [[ -n "${prefix}" ]] || die "refusing to wipe an empty install prefix"
+  [[ "${prefix}" == /* ]] || die "refusing to wipe a non-absolute install prefix: ${prefix}"
+
+  # Normalize: drop a single trailing slash (but keep "/" detectable).
+  local norm="${prefix%/}"
+  [[ -n "${norm}" ]] || die "refusing to wipe the filesystem root: ${prefix}"
+
+  case "${norm}" in
+    /usr|/bin|/sbin|/lib|/lib64|/etc|/var|/boot|/dev|/proc|/sys|/run|/root|/home|/opt)
+      die "refusing to wipe a system directory: ${prefix}"
+      ;;
+  esac
+
+  if [[ -n "${HOME:-}" && "${norm}" == "${HOME%/}" ]]; then
+    die "refusing to wipe the home directory: ${prefix}"
+  fi
+
+  # Require at least two non-empty path components (e.g. /a/b), so shallow
+  # top-level directories cannot be wiped wholesale.
+  local trimmed="${norm#/}"
+  if [[ "${trimmed}" != */* ]]; then
+    die "refusing to wipe a top-level directory: ${prefix} (install prefix must be at least two levels deep)"
+  fi
+
+  # Content sanity check: the custom-prefix wipe deletes every top-level entry
+  # except '.backup'. Refuse unless the prefix is a recognised CubeSandbox
+  # install (a marker artifact is present) or effectively empty (nothing to
+  # destroy; '.backup' alone is harmless since the wipe preserves it). This
+  # closes the denylist gap -- e.g. /usr/local or /var/lib are deep enough and
+  # not blacklisted, but hold foreign content with no CubeSandbox markers.
+  if [[ -d "${norm}" ]]; then
+    local cube_marker=""
+    local m
+    for m in .one-click.env CubeMaster CubeAPI Cubelet; do
+      if [[ -e "${norm}/${m}" ]]; then
+        cube_marker=1
+        break
+      fi
+    done
+    if [[ -z "${cube_marker}" ]]; then
+      local stray
+      stray="$(find "${norm}" -mindepth 1 -maxdepth 1 ! -name '.backup' -print -quit 2>/dev/null || true)"
+      if [[ -n "${stray}" ]]; then
+        die "refusing to wipe custom install prefix ${prefix}: directory is not empty and contains no CubeSandbox installation markers (.one-click.env / CubeMaster / CubeAPI / Cubelet). Point ONE_CLICK_INSTALL_PREFIX at a dedicated CubeSandbox prefix, or remove the foreign content first."
+      fi
+    fi
+  fi
+}
+
 # detect_existing_install: an install is "present" when its runtime env file
 # exists under the given prefix.
 detect_existing_install() {
@@ -551,6 +665,10 @@ detect_existing_install() {
 read_env_key() {
   local file="$1"
   local key="$2"
+  # Validate the key is a plain env identifier before interpolating it into the
+  # sed address; this prevents sed pattern/command injection if a future caller
+  # passes user-controlled data.
+  [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid env key name: ${key}"
   [[ -f "${file}" ]] || return 0
   sed -n "/^${key}=/{s/^${key}=//;p;q;}" "${file}" 2>/dev/null || true
 }
@@ -559,6 +677,8 @@ read_env_key() {
 read_version_field() {
   local file="$1"
   local field="$2"
+  # Validate the field name before interpolating it into the sed address.
+  [[ "${field}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid version field name: ${field}"
   [[ -f "${file}" ]] || return 0
   sed -n "/^${field}=/{s/^${field}=//;p;q;}" "${file}" 2>/dev/null || true
 }
@@ -698,24 +818,36 @@ if extra:
 with open(out_file, "w", encoding="utf-8") as fh:
     fh.write("\n".join(out_lines) + "\n")
 
+# Redact secret-bearing values in the human-readable diff report. The report
+# is persisted to the (on-disk) upgrade backup directory, so it must not leak
+# passwords/tokens/connection strings in plaintext. The merged output file
+# (out_file) intentionally keeps the real values -- it IS the runtime env.
+SECRET_RE = re.compile(
+    r'(PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|PRIVATE_KEY|DATABASE_URL)', re.I)
+
+
+def redact(key, val):
+    return "***REDACTED***" if SECRET_RE.search(key) else val
+
+
 report = []
 report.append("env merge report (mode=%s)" % ("three-way" if has_baseline else "two-way-fallback"))
 report.append("")
 report.append("[added] new keys filled with new defaults: %d" % len(added))
 for k, v in added:
-    report.append("  + %s=%s" % (k, v))
+    report.append("  + %s=%s" % (k, redact(k, v)))
 report.append("[default-updated] untouched keys adopting new default: %d" % len(updated_default))
 for k, ov, nv in updated_default:
-    report.append("  ~ %s: %s -> %s" % (k, ov, nv))
+    report.append("  ~ %s: %s -> %s" % (k, redact(k, ov), redact(k, nv)))
 report.append("[preserved] kept your customized values: %d" % len(preserved))
 for k, v in preserved:
-    report.append("  = %s=%s" % (k, v))
+    report.append("  = %s=%s" % (k, redact(k, v)))
 report.append("[explicit] taken from new .env overrides: %d" % len(explicit))
 for k in explicit:
     report.append("  ! %s" % k)
 report.append("[kept-extra] old-only keys not in new env.example (kept): %d" % len(extra))
 for k, v in extra:
-    report.append("  > %s=%s" % (k, v))
+    report.append("  > %s=%s" % (k, redact(k, v)))
 
 with open(diff_file, "w", encoding="utf-8") as fh:
     fh.write("\n".join(report) + "\n")
@@ -891,6 +1023,10 @@ backup_before_upgrade() {
   ts="$(date +%Y%m%d-%H%M%S)"
   backup_dir="${install_prefix}/.backup/upgrade-${ts}"
   mkdir -p "${backup_dir}"
+  # The backup holds secret-bearing config (.one-click.env, conf files); keep
+  # it owner-only so secrets are not world/group readable on disk.
+  chmod 700 "${install_prefix}/.backup" 2>/dev/null || true
+  chmod 700 "${backup_dir}" 2>/dev/null || true
 
   for rel in \
     ".one-click.env" \
@@ -910,6 +1046,12 @@ backup_before_upgrade() {
     if [[ -f "${install_prefix}/${rel}" ]]; then
       mkdir -p "${backup_dir}/$(dirname "${rel}")"
       cp -a "${install_prefix}/${rel}" "${backup_dir}/${rel}"
+      # Secret-bearing config files: restrict to owner-only in the backup.
+      case "${rel}" in
+        ".one-click.env"|"env.example"|*conf.yaml|*config.toml|*.yaml|*.conf)
+          chmod 600 "${backup_dir}/${rel}" 2>/dev/null || true
+          ;;
+      esac
     fi
   done
 

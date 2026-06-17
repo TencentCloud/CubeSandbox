@@ -99,13 +99,93 @@ test_assume_yes_existing_is_upgrade() {
   [[ "${got}" == "upgrade" ]] || fail "default+existing+--yes should be upgrade (got ${got})"
 }
 
+test_parse_args_space_and_equals_forms() {
+  one_click_parse_args --mode upgrade
+  [[ "${CLI_MODE}" == "upgrade" ]] || fail "--mode upgrade (space) should set CLI_MODE (got '${CLI_MODE}')"
+  one_click_parse_args --mode=upgrade
+  [[ "${CLI_MODE}" == "upgrade" ]] || fail "--mode=upgrade should set CLI_MODE (got '${CLI_MODE}')"
+
+  one_click_parse_args --node-ip 10.0.0.7
+  [[ "${CLI_NODE_IP}" == "10.0.0.7" ]] || fail "--node-ip (space) should set CLI_NODE_IP (got '${CLI_NODE_IP}')"
+  one_click_parse_args --node-ip=10.0.0.8
+  [[ "${CLI_NODE_IP}" == "10.0.0.8" ]] || fail "--node-ip= should set CLI_NODE_IP (got '${CLI_NODE_IP}')"
+
+  one_click_parse_args -y --allow-downgrade --allow-role-change
+  [[ "${CLI_ASSUME_YES}" == "1" ]] || fail "-y should set CLI_ASSUME_YES"
+  [[ "${CLI_ALLOW_DOWNGRADE}" == "1" ]] || fail "--allow-downgrade should set CLI_ALLOW_DOWNGRADE"
+  [[ "${CLI_ALLOW_ROLE_CHANGE}" == "1" ]] || fail "--allow-role-change should set CLI_ALLOW_ROLE_CHANGE"
+}
+
+test_parse_args_missing_value_fails() {
+  if ( one_click_parse_args --mode ) >/dev/null 2>&1; then
+    fail "bare --mode should fail (missing value)"
+  fi
+  if ( one_click_parse_args --node-ip ) >/dev/null 2>&1; then
+    fail "bare --node-ip should fail (missing value)"
+  fi
+}
+
+test_parse_args_unknown_is_ignored() {
+  # Unknown tokens warn but do not fail, and do not set any CLI_* value.
+  one_click_parse_args --not-a-flag positional 2>/dev/null
+  [[ -z "${CLI_MODE}" ]] || fail "unknown args should not set CLI_MODE"
+}
+
+test_assert_safe_install_prefix() {
+  for bad in "/" "/usr" "/etc" "/home" "relative/path" "/toplevel"; do
+    if ( assert_safe_install_prefix "${bad}" ) >/dev/null 2>&1; then
+      fail "assert_safe_install_prefix should reject: ${bad}"
+    fi
+  done
+  ( assert_safe_install_prefix "/usr/local/services/cubetoolbox" ) >/dev/null 2>&1 \
+    || fail "assert_safe_install_prefix should accept a normal deep prefix"
+  ( assert_safe_install_prefix "/opt/cube/custom/" ) >/dev/null 2>&1 \
+    || fail "assert_safe_install_prefix should accept a deep prefix with trailing slash"
+
+  # Content sanity check: a non-empty prefix with no CubeSandbox marker is
+  # foreign (e.g. a mis-set ONE_CLICK_INSTALL_PREFIX=/usr/local) and must be
+  # refused so the wipe does not rm -rf unrelated content.
+  local foreign="${TMP_DIR}/foreign"
+  mkdir -p "${foreign}/somedir"
+  : > "${foreign}/notes.txt"
+  if ( assert_safe_install_prefix "${foreign}" ) >/dev/null 2>&1; then
+    fail "assert_safe_install_prefix should reject a non-empty foreign prefix (no CubeSandbox marker)"
+  fi
+
+  # A real CubeSandbox install (marker present) is accepted even when non-empty.
+  local cube="${TMP_DIR}/cube"
+  mkdir -p "${cube}/cubeproxy"
+  : > "${cube}/.one-click.env"
+  : > "${cube}/CubeMaster"
+  ( assert_safe_install_prefix "${cube}" ) >/dev/null 2>&1 \
+    || fail "assert_safe_install_prefix should accept a prefix with a CubeSandbox marker"
+
+  # An empty prefix is accepted (fresh install, nothing to destroy).
+  local empty="${TMP_DIR}/empty"
+  mkdir -p "${empty}"
+  ( assert_safe_install_prefix "${empty}" ) >/dev/null 2>&1 \
+    || fail "assert_safe_install_prefix should accept an empty prefix"
+
+  # A prefix holding only '.backup' is accepted (the wipe preserves .backup,
+  # e.g. after an interrupted upgrade).
+  local onlybak="${TMP_DIR}/onlybak"
+  mkdir -p "${onlybak}/.backup"
+  ( assert_safe_install_prefix "${onlybak}" ) >/dev/null 2>&1 \
+    || fail "assert_safe_install_prefix should accept a prefix holding only .backup"
+}
+
 test_install_sh_wires_upgrade_flow() {
   local f="${ONE_CLICK_DIR}/install.sh"
   assert_contains "${f}" "resolve_install_mode"
   assert_contains "${f}" "preflight_upgrade"
   assert_contains "${f}" "backup_before_upgrade"
   assert_contains "${f}" "merge_env_three_way"
-  assert_contains "${f}" '--mode=*'
+  # CLI parsing is delegated to one_click_parse_args (supports --mode/--node-ip
+  # in both = and space forms) and CLI values are re-applied after .env load.
+  assert_contains "${f}" 'one_click_parse_args "$@"'
+  assert_contains "${f}" "apply_cli_overrides"
+  # custom-prefix wipe is guarded against unsafe install prefixes
+  assert_contains "${f}" 'assert_safe_install_prefix "${INSTALL_PREFIX}"'
   # env.example baseline is installed for future three-way merges
   assert_contains "${f}" 'cp -f "${SCRIPT_DIR}/env.example" "${INSTALL_PREFIX}/env.example"'
   # upgrade writes the merged env as the runtime env
@@ -123,6 +203,10 @@ test_auto_mode
 test_default_fresh_is_install
 test_default_existing_non_interactive_is_install
 test_assume_yes_existing_is_upgrade
+test_parse_args_space_and_equals_forms
+test_parse_args_missing_value_fails
+test_parse_args_unknown_is_ignored
+test_assert_safe_install_prefix
 test_install_sh_wires_upgrade_flow
 
 echo "install mode tests OK"

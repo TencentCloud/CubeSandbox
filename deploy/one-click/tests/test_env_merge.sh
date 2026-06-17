@@ -243,6 +243,42 @@ test_version_lt() {
   ! version_lt 1.0.0 a1b2c3d || fail "mixed semver/sha should not compare as <"
 }
 
+test_diff_report_redacts_secrets() {
+  local new="${TMP_DIR}/new_sec.example" old="${TMP_DIR}/old_sec.env"
+  local out="${TMP_DIR}/out_sec.env" diff="${TMP_DIR}/diff_sec.txt"
+  write_new_example "${new}"
+  # User customized the secret values -> they appear in [preserved].
+  cat > "${old}" <<'EOF'
+CUBE_SANDBOX_REDIS_PASSWORD=topsecret123
+DATABASE_URL=mysql://u:p@host:3306/realdb
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  # The diff report must NOT leak plaintext secrets...
+  assert_contains "${diff}" "CUBE_SANDBOX_REDIS_PASSWORD=***REDACTED***"
+  assert_contains "${diff}" "DATABASE_URL=***REDACTED***"
+  assert_not_contains "${diff}" "topsecret123"
+  assert_not_contains "${diff}" "realdb"
+
+  # ...but the merged runtime env MUST keep the real values intact.
+  assert_value "${out}" CUBE_SANDBOX_REDIS_PASSWORD topsecret123
+  assert_value "${out}" DATABASE_URL "mysql://u:p@host:3306/realdb"
+}
+
+test_read_helpers_reject_invalid_key() {
+  local f="${TMP_DIR}/inv.env"
+  cat > "${f}" <<'EOF'
+ONE_CLICK_DEPLOY_ROLE=control
+EOF
+  if ( read_env_key "${f}" 'bad/key' ) >/dev/null 2>&1; then
+    fail "read_env_key should reject an invalid key name"
+  fi
+  if ( read_version_field "${f}" 'bad.field' ) >/dev/null 2>&1; then
+    fail "read_version_field should reject an invalid field name"
+  fi
+}
+
 test_read_helpers() {
   local f="${TMP_DIR}/ver.txt"
   cat > "${f}" <<'EOF'
@@ -308,6 +344,8 @@ test_preserves_comments_and_structure
 test_two_way_fallback_without_baseline
 test_new_dotenv_overrides_take_priority
 test_version_lt
+test_diff_report_redacts_secrets
+test_read_helpers_reject_invalid_key
 test_read_helpers
 test_detect_existing_install
 test_crlf_inputs_do_not_leak_carriage_returns

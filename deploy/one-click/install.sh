@@ -19,25 +19,21 @@ ONE_CLICK_ASSUME_YES="${ONE_CLICK_ASSUME_YES:-0}"
 ONE_CLICK_ALLOW_DOWNGRADE="${ONE_CLICK_ALLOW_DOWNGRADE:-0}"
 ONE_CLICK_ALLOW_ROLE_CHANGE="${ONE_CLICK_ALLOW_ROLE_CHANGE:-0}"
 
-for arg in "$@"; do
-  case "${arg}" in
-    --node-ip=*)
-      export CUBE_SANDBOX_NODE_IP="${arg#--node-ip=}"
-      ;;
-    --mode=*)
-      ONE_CLICK_MODE="${arg#--mode=}"
-      ;;
-    -y|--yes)
-      ONE_CLICK_ASSUME_YES=1
-      ;;
-    --allow-downgrade)
-      ONE_CLICK_ALLOW_DOWNGRADE=1
-      ;;
-    --allow-role-change)
-      ONE_CLICK_ALLOW_ROLE_CHANGE=1
-      ;;
-  esac
-done
+# Parse CLI flags into CLI_* globals (supports both `--flag=value` and
+# `--flag value`). The values are applied to the canonical variables here AND
+# re-applied after the .env file is sourced below, establishing the precedence:
+#   CLI flags > .env file > process environment > built-in defaults.
+one_click_parse_args "$@"
+
+apply_cli_overrides() {
+  [[ -n "${CLI_MODE}" ]] && ONE_CLICK_MODE="${CLI_MODE}"
+  [[ -n "${CLI_ASSUME_YES}" ]] && ONE_CLICK_ASSUME_YES="${CLI_ASSUME_YES}"
+  [[ -n "${CLI_ALLOW_DOWNGRADE}" ]] && ONE_CLICK_ALLOW_DOWNGRADE="${CLI_ALLOW_DOWNGRADE}"
+  [[ -n "${CLI_ALLOW_ROLE_CHANGE}" ]] && ONE_CLICK_ALLOW_ROLE_CHANGE="${CLI_ALLOW_ROLE_CHANGE}"
+  [[ -n "${CLI_NODE_IP}" ]] && export CUBE_SANDBOX_NODE_IP="${CLI_NODE_IP}"
+  return 0
+}
+apply_cli_overrides
 
 case "${ONE_CLICK_MODE}" in
   ""|install|upgrade|auto) ;;
@@ -49,6 +45,13 @@ require_root
 ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
 if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
+  # CLI flags must win over .env values: load_env_file uses `set -a; source`,
+  # which would otherwise clobber the CLI-provided values set above.
+  apply_cli_overrides
+  case "${ONE_CLICK_MODE}" in
+    ""|install|upgrade|auto) ;;
+    *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
+  esac
 fi
 
 DEPLOY_ROLE="$(one_click_deploy_role)"
@@ -957,6 +960,8 @@ if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
 else
   # Full wipe of a custom prefix, but preserve any upgrade backup directory so
   # the config snapshot survives for recovery/rollback.
+  # SAFETY: validate the prefix is not a system root before the destructive wipe.
+  assert_safe_install_prefix "${INSTALL_PREFIX}"
   find "${INSTALL_PREFIX}" -mindepth 1 -maxdepth 1 ! -name '.backup' -exec rm -rf {} +
 fi
 
