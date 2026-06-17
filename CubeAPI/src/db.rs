@@ -1231,17 +1231,33 @@ LIMIT 1
 
     /// Seed default store templates if the table is empty.
     async fn seed_store_templates(&self) -> anyhow::Result<()> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM t_store_template WHERE deleted_at IS NULL",
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM t_store_template WHERE deleted_at IS NULL")
+                .fetch_one(&self.pool)
+                .await?;
 
         if count > 0 {
             return Ok(());
         }
 
-        let seeds: Vec<(&str, &str, &str, &str, &str, Option<&str>, &[&str], &str, i32, &[i32], i32, &str, &str, bool, &[&str], i32)> = vec![
+        let seeds: Vec<(
+            &str,
+            &str,
+            &str,
+            &str,
+            &str,
+            Option<&str>,
+            &[&str],
+            &str,
+            i32,
+            &[i32],
+            i32,
+            &str,
+            &str,
+            bool,
+            &[&str],
+            i32,
+        )> = vec![
             (
                 "sandbox-code",
                 "items.sandbox-code.name",
@@ -1436,7 +1452,10 @@ ORDER BY sort_order, id
     }
 
     #[allow(dead_code)]
-    pub async fn get_store_template(&self, item_id: &str) -> anyhow::Result<Option<StoreTemplateRecord>> {
+    pub async fn get_store_template(
+        &self,
+        item_id: &str,
+    ) -> anyhow::Result<Option<StoreTemplateRecord>> {
         let row = sqlx::query(
             r#"
 SELECT item_id, name_key, description_key, image_cn, image_intl, digest,

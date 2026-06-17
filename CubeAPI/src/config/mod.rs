@@ -130,7 +130,9 @@ fn default_database_url() -> Option<String> {
         .or_else(default_cube_sandbox_mysql_url)
 }
 fn default_template_id() -> Option<String> {
-    std::env::var("CUBE_TEMPLATE_ID").ok().filter(|s| !s.is_empty())
+    std::env::var("CUBE_TEMPLATE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 fn default_cube_api_url() -> Option<String> {
     std::env::var("CUBE_API_URL")
