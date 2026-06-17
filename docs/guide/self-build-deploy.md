@@ -285,8 +285,8 @@ You can also point to prebuilt binaries to skip compilation:
 | `ONE_CLICK_CONTROL_PLANE_IP` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
 | `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
 | `CUBE_SANDBOX_NODE_IP` | auto-detected from `eth0` | Node's primary network interface IP. Auto-detected if unset; set explicitly if your interface differs. |
-| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` (from `Cubelet/config/config.toml`) | cubevs local network CIDR for sandbox IP allocation. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /8–/30. Automatically detected for host network conflicts at install time. Uses the `config.toml` default when unset. |
-| `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | Set to `1` to skip CIDR conflict detection (not recommended). Used together with `CUBE_SANDBOX_NETWORK_CIDR`. |
+| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` | cubevs local network CIDR for sandbox IP allocation. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /8–/30. Conflicts with host interfaces, routes, or resolver nameservers abort installation during preflight. Uses the fixed default when unset. |
+| `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | Set to `1` to skip CIDR conflict detection for the default or custom sandbox CIDR (not recommended). |
 | `ONE_CLICK_INSTALL_PREFIX` | `/usr/local/services/cubetoolbox` | Installation directory |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | Run health check after installation |
 | `ONE_CLICK_RUNTIME_DIR` | `/var/run/cube-sandbox-one-click` | PID and runtime files directory |

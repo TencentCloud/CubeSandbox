@@ -558,11 +558,14 @@ else
   log "primary network interface not detected; keeping packaged Cubelet eth_name"
 fi
 
-# Validate cubevs CIDR from env var (if set)
+# Validate the effective cubevs CIDR before installing packages or replacing
+# the existing deployment. If unset, use CubeSandbox's fixed packaged default.
 CUBE_SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-}"
 if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR}" ]]; then
-  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}"
+  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "CUBE_SANDBOX_NETWORK_CIDR"
   export CUBE_SANDBOX_NETWORK_CIDR
+else
+  check_cidr_preflight "192.168.0.0/18" "default CubeSandbox network CIDR"
 fi
 
 install_required_dependencies
@@ -729,9 +732,7 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   # Persist CIDR to env file AFTER successful config patch (defense-in-depth:
   # env file and config.toml should always be in sync; if the script crashes
   # between patching and persistence, the env file stays clean).
-  if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
-    upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR" "${CUBE_SANDBOX_NETWORK_CIDR}"
-  fi
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR" "${CUBE_SANDBOX_NETWORK_CIDR}"
   if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-}" ]]; then
     case "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}" in
       0|1) ;;
