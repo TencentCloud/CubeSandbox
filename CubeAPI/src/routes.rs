@@ -18,7 +18,9 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{agenthub, auth, cluster, config, examples, health, sandboxes, snapshots, store, templates},
+    handlers::{
+        agenthub, auth, cluster, config, examples, health, sandboxes, snapshots, store, templates,
+    },
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -396,7 +398,10 @@ fn build_examples_routes(state: &AppState, auth_configured: bool) -> Router<AppS
     // (e.g. browser-sandbox scenarios).
     let routes = Router::new()
         .route("/examples", get(examples::list_examples))
-        .route("/examples/:scenario/:file", get(examples::get_example_source));
+        .route(
+            "/examples/:scenario/:file",
+            get(examples::get_example_source),
+        );
     if auth_configured {
         routes.layer(middleware::from_fn_with_state(state.clone(), unified_auth))
     } else {
