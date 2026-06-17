@@ -373,6 +373,7 @@ sudo journalctl -u cube-sandbox-<service>.service -n 200 --no-pager
 
 - 容器镜像构建依赖外网（如 `cube-proxy` 的 `apk update`）暂时不可达 → 检查网络，或参阅[部署相关排障](./troubleshooting/deployment.md)
 - `ExecStartPost` 健康端口超时（端口被占用 / 上游服务还没起来）
+- 对 `cube-sandbox-cube-proxy.service`，`CUBE_PROXY_HTTP_PORT` 是 nginx 实际 HTTP 代理监听端口，也是启动后 TCP 检查使用的端口。`CUBE_PROXY_HOST_PORT` 已废弃且会被忽略；如果需要改检查端口，请改 `CUBE_PROXY_HTTP_PORT`。
 - `/data/log` 或 `/data/cubelet` 目录不存在 / 权限不对 / XFS 挂载错位
 
 ### Dashboard / API 无法访问

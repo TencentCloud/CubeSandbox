@@ -373,6 +373,7 @@ Common root causes:
 
 - Container build needs the network (e.g. `cube-proxy`'s `apk update`) and the upstream mirror is flaky — see [Deployment Troubleshooting](./troubleshooting/deployment.md)
 - `ExecStartPost` health probe timeout (port already in use, upstream not yet ready)
+- For `cube-sandbox-cube-proxy.service`, `CUBE_PROXY_HTTP_PORT` is the actual nginx HTTP proxy listener used by the post-start TCP check. `CUBE_PROXY_HOST_PORT` is deprecated and ignored; set `CUBE_PROXY_HTTP_PORT` instead if you need a non-default check port.
 - `/data/log` or `/data/cubelet` missing / wrong permissions / XFS not mounted
 
 ### Dashboard / API unreachable

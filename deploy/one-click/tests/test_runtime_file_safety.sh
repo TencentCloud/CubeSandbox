@@ -42,6 +42,33 @@ assert_not_contains() {
   fi
 }
 
+run_cube_proxy_postcheck_case() {
+  local env_content="$1"
+  local listen_port="$2"
+  local expected_port="$3"
+  local case_dir="${TMP_DIR}/cube-proxy-postcheck-${expected_port}"
+  local env_file="${case_dir}/.one-click.env"
+  local stub_dir="${case_dir}/bin"
+  local ss_log="${case_dir}/ss.args"
+
+  mkdir -p "${stub_dir}"
+  printf '%s\n' "${env_content}" > "${env_file}"
+  cat > "${stub_dir}/ss" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${SS_ARGS_LOG}"
+printf 'LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n' "${SS_LISTEN_PORT}"
+SH
+  chmod +x "${stub_dir}/ss"
+
+  PATH="${stub_dir}:${PATH}" \
+    ONE_CLICK_RUNTIME_ENV_FILE="${env_file}" \
+    SS_ARGS_LOG="${ss_log}" \
+    SS_LISTEN_PORT="${listen_port}" \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/cube-proxy-postcheck.sh" >/dev/null
+
+  assert_contains "${ss_log}" "sport = :${expected_port}"
+}
+
 test_render_template_replaces_empty_directory() {
   local template="${TMP_DIR}/template.conf"
   local output="${TMP_DIR}/generated.conf"
@@ -155,6 +182,51 @@ test_quickcheck_reports_node_registration_failure_explicitly() {
   assert_not_contains "${path}" "| rg -q"
 }
 
+test_cube_proxy_postcheck_defaults_to_http_port_80() {
+  run_cube_proxy_postcheck_case \
+    "CUBE_PROXY_POSTCHECK_RETRIES=1
+CUBE_PROXY_POSTCHECK_DELAY=0" \
+    80 \
+    80
+}
+
+test_cube_proxy_postcheck_follows_http_port() {
+  run_cube_proxy_postcheck_case \
+    "CUBE_PROXY_HTTP_PORT=8081
+CUBE_PROXY_POSTCHECK_RETRIES=1
+CUBE_PROXY_POSTCHECK_DELAY=0" \
+    8081 \
+    8081
+}
+
+test_cube_proxy_postcheck_ignores_https_port() {
+  run_cube_proxy_postcheck_case \
+    "CUBE_PROXY_HTTPS_PORT=8843
+CUBE_PROXY_POSTCHECK_RETRIES=1
+CUBE_PROXY_POSTCHECK_DELAY=0" \
+    80 \
+    80
+}
+
+test_cube_proxy_postcheck_ignores_deprecated_host_port() {
+  run_cube_proxy_postcheck_case \
+    "CUBE_PROXY_HOST_PORT=9443
+CUBE_PROXY_POSTCHECK_RETRIES=1
+CUBE_PROXY_POSTCHECK_DELAY=0" \
+    80 \
+    80
+}
+
+test_cube_proxy_postcheck_prefers_http_over_deprecated_host_port() {
+  run_cube_proxy_postcheck_case \
+    "CUBE_PROXY_HTTP_PORT=8081
+CUBE_PROXY_HOST_PORT=9443
+CUBE_PROXY_POSTCHECK_RETRIES=1
+CUBE_PROXY_POSTCHECK_DELAY=0" \
+    8081 \
+    8081
+}
+
 test_render_template_replaces_empty_directory
 test_render_template_rejects_non_empty_directory
 test_unit_prepare_hooks_are_wired
@@ -166,5 +238,10 @@ test_detect_glibc_version_consumes_full_ldd_output
 test_online_install_glibc_detection_avoids_head_pipe
 test_one_click_scripts_do_not_require_ripgrep
 test_quickcheck_reports_node_registration_failure_explicitly
+test_cube_proxy_postcheck_defaults_to_http_port_80
+test_cube_proxy_postcheck_follows_http_port
+test_cube_proxy_postcheck_ignores_https_port
+test_cube_proxy_postcheck_ignores_deprecated_host_port
+test_cube_proxy_postcheck_prefers_http_over_deprecated_host_port
 
 echo "runtime file safety tests OK"
