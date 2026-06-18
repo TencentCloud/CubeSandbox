@@ -8,7 +8,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { agentHubApi, templateApi, storeApi, type TemplateSummary, type ImageMeta, type StoreCatalogItem } from '@/api/client';
 import { showToast } from '@/components/ui/ToastProvider';
-import { CATEGORIES, type CategoryId } from '@/data/templateStore';
+import { CATEGORIES, type CategoryId, type StoreTemplate } from '@/data/templateStore';
 import { getInstalledTemplates } from '@/lib/template-match';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -27,6 +27,7 @@ function categoryIcon(category: StoreCatalogItem['category']) {
     case 'ai':      return Bot;
     case 'web':     return Server;
     case 'base':    return Box;
+    default:        return Box;
   }
 }
 
@@ -65,7 +66,7 @@ function InstallModal({ item, enableForAgentHub = false, onClose }: InstallModal
       try {
         await agentHubApi.registerMarketTemplate({
           templateId: templateID,
-          name: t(item.nameKey as 'official', { defaultValue: item.id }),
+          name: t(item.name_key as 'official', { defaultValue: item.id }),
           model: 'deepseek/deepseek-v4-flash',
           version: item.id,
           recommended: true,
@@ -554,7 +555,7 @@ export default function TemplateStorePage() {
       try {
         await agentHubApi.registerMarketTemplate({
           templateId: template.templateID,
-          name: t(item.nameKey as 'official', { defaultValue: item.id }),
+          name: t(item.name_key as 'official', { defaultValue: item.id }),
           model: 'deepseek/deepseek-v4-flash',
           version: item.id,
           recommended: true,

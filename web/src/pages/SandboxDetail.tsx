@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { sandboxApi } from '@/api/client';
 import { Card, CardTitle, CardDescription, CardHeader } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
+import { Badge, type Tone } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { CodeTerminal } from '@/components/CodeTerminal';
 
@@ -107,7 +107,7 @@ export default function SandboxDetailPage() {
   });
 
   const state = data?.state ?? 'running';
-  const tone = state === 'paused' || state === 'pausing' ? 'warn' : state === 'running' ? 'ok' : 'mute';
+  const tone: Tone = state === 'paused' || state === 'pausing' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   const entries = logs.data?.logs ?? [];
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
 
@@ -174,7 +174,7 @@ export default function SandboxDetailPage() {
         <div className="flex-1">
           <div className="flex items-center gap-2">
             <h1 className="font-mono text-xl font-medium tracking-tight">{sandboxID}</h1>
-            <Badge tone={tone as any} className="text-sm px-2.5 py-1">{state}</Badge>
+            <Badge tone={tone} className="text-sm px-2.5 py-1">{state}</Badge>
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
             {data?.templateID ?? '—'} · {t('started', { time: formatRelative(data?.startedAt) })}

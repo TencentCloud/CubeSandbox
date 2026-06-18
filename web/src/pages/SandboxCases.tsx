@@ -31,20 +31,17 @@ import {
   FlaskConical,
   FolderOpen,
   Globe2,
-  GitBranch,
   Inbox,
   Layers,
   Loader2,
   Monitor,
   Network,
-  PauseCircle,
   Play,
   RotateCcw,
   Search,
   Sparkles,
   Terminal,
   Timer,
-  TimerReset,
   XCircle,
   AlertTriangle,
 } from 'lucide-react';
@@ -1232,7 +1229,4 @@ export default function SandboxCasesPage() {
   );
 }
 
-// Avoid an "unused import" warning for PauseCircle/Globe2/TimerReset which
-// are kept around for legacy / future category icon usage.
-const _LEGACY_ICONS = [PauseCircle, Globe2, TimerReset, GitBranch];
-void _LEGACY_ICONS;
+
