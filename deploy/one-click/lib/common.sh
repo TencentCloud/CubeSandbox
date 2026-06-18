@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-set -euo pipefail
+#
+# This file is a sourced library. Do not set shell options here: entrypoint
+# scripts/tests that source it are responsible for their own strict mode
+# (`set -euo pipefail`) policy.
 
 ONE_CLICK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ONE_CLICK_DIR="$(cd "${ONE_CLICK_LIB_DIR}/.." && pwd)"
@@ -12,6 +15,9 @@ die() {
   echo "[one-click] ERROR: $*" >&2
   exit 1
 }
+
+# shellcheck source=../scripts/common/validation.sh
+source "${ONE_CLICK_DIR}/scripts/common/validation.sh"
 
 # Avoid `ldd --version | head -1` under strict mode: `head` may exit early and
 # SIGPIPE `ldd`, which turns a valid glibc probe into a false failure.
@@ -228,10 +234,14 @@ semver_compare() {
   _version_compare_prerelease "${left_pre}" "${right_pre}"
 }
 
-# version_lt: Return success when the first version is lower than the second.
-# Delegates to semver_compare, including its v-prefix, build metadata, rc suffix,
-# and lexical fallback behavior.
+# version_lt: Return success when the first version is lower than the second
+# ONLY when both inputs are comparable semantic versions. This is used by the
+# upgrade downgrade guard, so legacy/SHA-like versions must not block upgrades.
+# Use semver_compare directly when lexical fallback for non-semver labels is
+# desired.
 version_lt() {
+  _version_split_semver "$1" >/dev/null || return 1
+  _version_split_semver "$2" >/dev/null || return 1
   [[ "$(semver_compare "$1" "$2")" == "-1" ]]
 }
 
@@ -577,6 +587,51 @@ upsert_env_kv() {
   mv -f "${tmp_file}" "${env_file}"
 }
 
+validate_interface_name() {
+  local value="$1"
+  local name="${2:-interface name}"
+  [[ -n "${value}" ]] || die "${name} must not be empty"
+  # Linux IFNAMSIZ is 16 including NUL, so names are at most 15 bytes. Restrict
+  # to characters that are safe in the TOML replacement and shell logs.
+  [[ "${value}" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] \
+    || die "invalid ${name}: ${value} (expected 1-15 chars: letters, digits, '_', '.', ':', '-')"
+}
+
+patch_cubelet_config_template() {
+  local cubelet_config="$1"
+  local eth_name="${2:-}"
+  local network_cidr="${3:-}"
+
+  ensure_file "${cubelet_config}"
+  if [[ -L "${cubelet_config}" ]]; then
+    die "refusing to patch a symlink target: ${cubelet_config} -> $(readlink "${cubelet_config}")"
+  fi
+
+  if [[ -n "${eth_name}" ]]; then
+    validate_interface_name "${eth_name}" "CUBE_SANDBOX_ETH_NAME"
+    if grep -Eq '^[[:space:]]*eth_name = "' "${cubelet_config}"; then
+      sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${eth_name}\"/" "${cubelet_config}"
+      if ! grep -Fq "eth_name = \"${eth_name}\"" "${cubelet_config}"; then
+        log "WARNING: failed to patch eth_name in Cubelet config (${cubelet_config})"
+      fi
+    else
+      log "WARNING: Cubelet config missing eth_name key; skipped NIC patch (${cubelet_config})"
+    fi
+  fi
+
+  if [[ -n "${network_cidr}" ]]; then
+    if grep -Eq '^[[:space:]]*cidr = "' "${cubelet_config}"; then
+      sed -i "s|cidr = \"[^\"]*\"|cidr = \"${network_cidr}\"|" "${cubelet_config}"
+      if ! grep -Fq "cidr = \"${network_cidr}\"" "${cubelet_config}"; then
+        log "WARNING: failed to patch cidr in Cubelet config (${cubelet_config})"
+      fi
+      log "patched cubevs CIDR: ${network_cidr}"
+    else
+      log "WARNING: Cubelet config missing cidr key; skipped CIDR patch (${cubelet_config})"
+    fi
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Config-preserving upgrade helpers (M3-1/M3-2/M3-3).
 #
@@ -606,10 +661,12 @@ assert_safe_install_prefix() {
 
   [[ -n "${prefix}" ]] || die "refusing to wipe an empty install prefix"
   [[ "${prefix}" == /* ]] || die "refusing to wipe a non-absolute install prefix: ${prefix}"
+  [[ ! -L "${prefix}" ]] || die "refusing to wipe a symlink install prefix: ${prefix}"
 
   # Normalize: drop a single trailing slash (but keep "/" detectable).
   local norm="${prefix%/}"
   [[ -n "${norm}" ]] || die "refusing to wipe the filesystem root: ${prefix}"
+  [[ ! -L "${norm}" ]] || die "refusing to wipe a symlink install prefix: ${prefix}"
 
   case "${norm}" in
     /usr|/bin|/sbin|/lib|/lib64|/etc|/var|/boot|/dev|/proc|/sys|/run|/root|/home|/opt)
@@ -635,22 +692,57 @@ assert_safe_install_prefix() {
   # closes the denylist gap -- e.g. /usr/local or /var/lib are deep enough and
   # not blacklisted, but hold foreign content with no CubeSandbox markers.
   if [[ -d "${norm}" ]]; then
-    local cube_marker=""
-    local m
-    for m in .one-click.env CubeMaster CubeAPI Cubelet; do
-      if [[ -e "${norm}/${m}" ]]; then
-        cube_marker=1
-        break
-      fi
-    done
-    if [[ -z "${cube_marker}" ]]; then
-      local stray
-      stray="$(find "${norm}" -mindepth 1 -maxdepth 1 ! -name '.backup' -print -quit 2>/dev/null || true)"
-      if [[ -n "${stray}" ]]; then
-        die "refusing to wipe custom install prefix ${prefix}: directory is not empty and contains no CubeSandbox installation markers (.one-click.env / CubeMaster / CubeAPI / Cubelet). Point ONE_CLICK_INSTALL_PREFIX at a dedicated CubeSandbox prefix, or remove the foreign content first."
-      fi
+    _assert_cube_prefix_marker_or_empty "${norm}" "${prefix}"
+  fi
+}
+
+_assert_cube_prefix_marker_or_empty() {
+  local dir="$1"
+  local display="$2"
+  local cube_marker=""
+  local m
+  for m in .one-click.env CubeMaster CubeAPI Cubelet; do
+    if [[ -e "${dir}/${m}" ]]; then
+      cube_marker=1
+      break
+    fi
+  done
+  if [[ -z "${cube_marker}" ]]; then
+    local stray
+    stray="$(find "${dir}" -mindepth 1 -maxdepth 1 ! -name '.backup' -print -quit 2>/dev/null || true)"
+    if [[ -n "${stray}" ]]; then
+      die "refusing to wipe custom install prefix ${display}: directory is not empty and contains no CubeSandbox installation markers (.one-click.env / CubeMaster / CubeAPI / Cubelet). Point ONE_CLICK_INSTALL_PREFIX at a dedicated CubeSandbox prefix, or remove the foreign content first."
     fi
   fi
+}
+
+wipe_custom_install_prefix_contents() {
+  local prefix="$1"
+  local norm before after
+
+  assert_safe_install_prefix "${prefix}"
+  norm="${prefix%/}"
+
+  if [[ ! -d "${norm}" ]]; then
+    mkdir -p "${norm}"
+    return 0
+  fi
+
+  before="$(stat -c '%d:%i' -- "${norm}")" \
+    || die "failed to stat install prefix before wipe: ${prefix}"
+
+  (
+    cd -- "${norm}" || die "failed to enter install prefix: ${prefix}"
+    after="$(stat -c '%d:%i' -- .)" \
+      || die "failed to stat install prefix after cd: ${prefix}"
+    [[ "${before}" == "${after}" ]] \
+      || die "install prefix changed while preparing to wipe: ${prefix}"
+
+    # Re-run the marker/empty check against the pinned cwd. This closes the
+    # gap between path validation and destructive deletion.
+    _assert_cube_prefix_marker_or_empty "." "${prefix}"
+    find . -mindepth 1 -maxdepth 1 ! -name '.backup' -exec rm -rf -- {} +
+  )
 }
 
 # detect_existing_install: an install is "present" when its runtime env file
@@ -681,22 +773,6 @@ read_version_field() {
   [[ "${field}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid version field name: ${field}"
   [[ -f "${file}" ]] || return 0
   sed -n "/^${field}=/{s/^${field}=//;p;q;}" "${file}" 2>/dev/null || true
-}
-
-# version_lt: return success when version $1 is strictly less than $2.
-# Only compares when BOTH look like dotted numeric versions (optionally
-# v-prefixed / with a pre-release suffix). Non-comparable inputs (e.g. git
-# SHAs) return failure so callers never block on them.
-version_lt() {
-  local a="${1#v}"
-  local b="${2#v}"
-  local ver_re='^[0-9]+(\.[0-9]+)*([.-].*)?$'
-  [[ "${a}" =~ ${ver_re} ]] || return 1
-  [[ "${b}" =~ ${ver_re} ]] || return 1
-  [[ "${a}" == "${b}" ]] && return 1
-  local first
-  first="$(printf '%s\n%s\n' "${a}" "${b}" | sort -V | head -n1)"
-  [[ "${first}" == "${a}" ]]
 }
 
 # merge_env_three_way: produce a merged runtime env that preserves the user's
@@ -730,6 +806,23 @@ new_example, old_runtime, old_baseline, new_dotenv, out_file, diff_file = sys.ar
 KV_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
 
 
+def fail(message):
+    sys.stderr.write("[one-click] ERROR: %s\n" % message)
+    sys.exit(1)
+
+
+def read_lines(path, required=True):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read().splitlines()
+    except FileNotFoundError:
+        if required:
+            fail("env merge input not found: %s" % path)
+        return []
+    except UnicodeDecodeError:
+        fail("env merge input is not valid UTF-8: %s" % path)
+
+
 def parse(path):
     """Ordered dict key -> raw value for active KEY=VALUE lines (last wins).
 
@@ -740,20 +833,13 @@ def parse(path):
     kv = {}
     if not path:
         return kv
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for raw in fh:
-                # Strip both \n and a trailing \r so CRLF inputs compare and
-                # serialize consistently with the template's splitlines().
-                line = raw.rstrip("\r\n")
-                stripped = line.lstrip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                m = KV_RE.match(line)
-                if m:
-                    kv[m.group(1)] = m.group(2)
-    except FileNotFoundError:
-        pass
+    for line in read_lines(path, required=False):
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = KV_RE.match(line)
+        if m:
+            kv[m.group(1)] = m.group(2)
     return kv
 
 
@@ -769,8 +855,7 @@ preserved = []
 explicit = []
 
 out_lines = []
-with open(new_example, "r", encoding="utf-8") as fh:
-    template = fh.read().splitlines()
+template = read_lines(new_example)
 
 for line in template:
     stripped = line.lstrip()
@@ -823,7 +908,8 @@ with open(out_file, "w", encoding="utf-8") as fh:
 # passwords/tokens/connection strings in plaintext. The merged output file
 # (out_file) intentionally keeps the real values -- it IS the runtime env.
 SECRET_RE = re.compile(
-    r'(PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|PRIVATE_KEY|DATABASE_URL)', re.I)
+    r'(PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|PRIVATE_KEY|DATABASE_URL|API_KEY|ACCESS_KEY|CLIENT_SECRET|AUTH_TOKEN)',
+    re.I)
 
 
 def redact(key, val):

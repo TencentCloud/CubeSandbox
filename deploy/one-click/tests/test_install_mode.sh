@@ -137,9 +137,9 @@ test_assert_safe_install_prefix() {
       fail "assert_safe_install_prefix should reject: ${bad}"
     fi
   done
-  ( assert_safe_install_prefix "/usr/local/services/cubetoolbox" ) >/dev/null 2>&1 \
+  ( assert_safe_install_prefix "${TMP_DIR}/usr/local/services/cubetoolbox" ) >/dev/null 2>&1 \
     || fail "assert_safe_install_prefix should accept a normal deep prefix"
-  ( assert_safe_install_prefix "/opt/cube/custom/" ) >/dev/null 2>&1 \
+  ( assert_safe_install_prefix "${TMP_DIR}/opt/cube/custom/" ) >/dev/null 2>&1 \
     || fail "assert_safe_install_prefix should accept a deep prefix with trailing slash"
 
   # Content sanity check: a non-empty prefix with no CubeSandbox marker is
@@ -174,24 +174,126 @@ test_assert_safe_install_prefix() {
     || fail "assert_safe_install_prefix should accept a prefix holding only .backup"
 }
 
+test_wipe_custom_install_prefix_contents() {
+  local prefix="${TMP_DIR}/wipe-prefix"
+  mkdir -p "${prefix}/.backup/keep" "${prefix}/Cubelet" "${prefix}/foreign"
+  : > "${prefix}/.one-click.env"
+  : > "${prefix}/foreign/file.txt"
+
+  wipe_custom_install_prefix_contents "${prefix}"
+  [[ -d "${prefix}/.backup" ]] || fail "wipe should preserve .backup"
+  [[ ! -e "${prefix}/Cubelet" ]] || fail "wipe should remove Cubelet"
+  [[ ! -e "${prefix}/foreign" ]] || fail "wipe should remove foreign top-level entries inside a marker-bearing prefix"
+  [[ ! -e "${prefix}/.one-click.env" ]] || fail "wipe should remove runtime env"
+
+  local foreign="${TMP_DIR}/wipe-foreign"
+  mkdir -p "${foreign}"
+  : > "${foreign}/file.txt"
+  if ( wipe_custom_install_prefix_contents "${foreign}" ) >/dev/null 2>&1; then
+    fail "wipe should reject a non-empty prefix without CubeSandbox markers"
+  fi
+  [[ -e "${foreign}/file.txt" ]] || fail "rejected foreign prefix must remain untouched"
+}
+
+test_control_plane_validators() {
+  validate_ipv4_literal "10.0.0.11" "ONE_CLICK_CONTROL_PLANE_IP"
+  validate_host_port "control.example.internal:8089" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
+  validate_host_port "10.0.0.11:8089" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
+
+  if ( validate_ipv4_literal "999.0.0.1" "ONE_CLICK_CONTROL_PLANE_IP" ) >/dev/null 2>&1; then
+    fail "validate_ipv4_literal should reject out-of-range octets"
+  fi
+  if ( validate_host_port 'bad/host:8089' "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR" ) >/dev/null 2>&1; then
+    fail "validate_host_port should reject slash-containing hosts"
+  fi
+  if ( validate_host_port "host:70000" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR" ) >/dev/null 2>&1; then
+    fail "validate_host_port should reject out-of-range ports"
+  fi
+}
+
+test_patch_cubelet_config_template_refuses_symlink() {
+  local cfg="${TMP_DIR}/cubelet-config.toml"
+  cat > "${cfg}" <<'EOF'
+eth_name = "eth0"
+cidr = "192.168.0.0/18"
+EOF
+
+  patch_cubelet_config_template "${cfg}" "ens3" "10.123.0.0/16" >/dev/null 2>&1
+  grep -Fq 'eth_name = "ens3"' "${cfg}" || fail "patch should update eth_name"
+  grep -Fq 'cidr = "10.123.0.0/16"' "${cfg}" || fail "patch should update cidr"
+
+  local target="${TMP_DIR}/symlink-target.toml" link="${TMP_DIR}/symlink-config.toml"
+  cat > "${target}" <<'EOF'
+eth_name = "eth0"
+cidr = "192.168.0.0/18"
+EOF
+  ln -s "${target}" "${link}"
+  if ( patch_cubelet_config_template "${link}" "ens4" "10.124.0.0/16" ) >/dev/null 2>&1; then
+    fail "patch_cubelet_config_template should reject symlink configs"
+  fi
+  grep -Fq 'eth_name = "eth0"' "${target}" || fail "symlink target must not be modified"
+  grep -Fq 'cidr = "192.168.0.0/18"' "${target}" || fail "symlink target CIDR must not be modified"
+}
+
+test_upgrade_preflight_and_backup() {
+  local inst="${TMP_DIR}/preflight-inst" bundle="${TMP_DIR}/preflight-bundle" pkg="${TMP_DIR}/pkg.tar.gz"
+  mkdir -p "${inst}/scripts" "${inst}/Cubelet/config" "${bundle}"
+  cat > "${inst}/.one-click.env" <<'EOF'
+ONE_CLICK_DEPLOY_ROLE=control
+EOF
+  cat > "${inst}/VERSION.txt" <<'EOF'
+release_version=v0.4.0
+EOF
+  cat > "${bundle}/VERSION.txt" <<'EOF'
+release_version=v0.5.0
+EOF
+  printf 'fake-package' > "${pkg}"
+  printf 'config' > "${inst}/Cubelet/config/config.toml"
+
+  preflight_upgrade "${inst}" "${bundle}" "${pkg}" control 0 0 >/dev/null 2>&1 \
+    || fail "preflight_upgrade should pass for matching role and upgrade version"
+
+  if ( preflight_upgrade "${inst}" "${bundle}" "${pkg}" compute 0 0 ) >/dev/null 2>&1; then
+    fail "preflight_upgrade should reject role change without allow flag"
+  fi
+
+  cat > "${bundle}/VERSION.txt" <<'EOF'
+release_version=v0.3.0
+EOF
+  if ( preflight_upgrade "${inst}" "${bundle}" "${pkg}" control 0 0 ) >/dev/null 2>&1; then
+    fail "preflight_upgrade should reject downgrade without allow flag"
+  fi
+
+  local backup_dir
+  backup_dir="$(backup_before_upgrade "${inst}" 2>/dev/null)"
+  [[ -f "${backup_dir}/.one-click.env" ]] || fail "backup should include .one-click.env"
+  [[ -f "${backup_dir}/Cubelet/config/config.toml" ]] || fail "backup should include Cubelet config"
+  local mode
+  mode="$(stat -c '%a' "${backup_dir}" 2>/dev/null || echo "")"
+  [[ "${mode}" == "700" ]] || fail "backup dir should be 700 (got ${mode})"
+  mode="$(stat -c '%a' "${backup_dir}/.one-click.env" 2>/dev/null || echo "")"
+  [[ "${mode}" == "600" ]] || fail ".one-click.env backup should be 600 (got ${mode})"
+}
+
 test_install_sh_wires_upgrade_flow() {
   local f="${ONE_CLICK_DIR}/install.sh"
   assert_contains "${f}" "resolve_install_mode"
   assert_contains "${f}" "preflight_upgrade"
   assert_contains "${f}" "backup_before_upgrade"
   assert_contains "${f}" "merge_env_three_way"
+  assert_contains "${f}" "patch_cubelet_config_template"
   # CLI parsing is delegated to one_click_parse_args (supports --mode/--node-ip
   # in both = and space forms) and CLI values are re-applied after .env load.
   assert_contains "${f}" 'one_click_parse_args "$@"'
   assert_contains "${f}" "apply_cli_overrides"
   # custom-prefix wipe is guarded against unsafe install prefixes
-  assert_contains "${f}" 'assert_safe_install_prefix "${INSTALL_PREFIX}"'
+  assert_contains "${f}" 'wipe_custom_install_prefix_contents "${INSTALL_PREFIX}"'
   # env.example baseline is installed for future three-way merges
   assert_contains "${f}" 'cp -f "${SCRIPT_DIR}/env.example" "${INSTALL_PREFIX}/env.example"'
   # upgrade writes the merged env as the runtime env
   assert_contains "${f}" 'cp -f "${MERGED_ENV}" "${RUNTIME_ENV_FILE}"'
-  # full-wipe branch preserves the upgrade backup directory (M1)
-  assert_contains "${f}" "! -name '.backup'"
+  # full-wipe branch delegates to the helper that preserves the upgrade backup.
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "! -name '.backup'"
   # on upgrade, CIDR host-conflict detection is skipped (M2)
   assert_contains "${f}" 'check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}"'
 }
@@ -207,6 +309,10 @@ test_parse_args_space_and_equals_forms
 test_parse_args_missing_value_fails
 test_parse_args_unknown_is_ignored
 test_assert_safe_install_prefix
+test_wipe_custom_install_prefix_contents
+test_control_plane_validators
+test_patch_cubelet_config_template_refuses_symlink
+test_upgrade_preflight_and_backup
 test_install_sh_wires_upgrade_flow
 
 echo "install mode tests OK"

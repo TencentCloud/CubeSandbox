@@ -238,9 +238,10 @@ test_version_lt() {
   version_lt v0.2.2 v0.2.3 || fail "v0.2.2 < v0.2.3 should be true"
   ! version_lt 2.0.0 1.0.0 || fail "2.0.0 < 1.0.0 should be false"
   ! version_lt 1.2.3 1.2.3 || fail "equal versions should not be <"
-  # non-comparable (git shas) -> never less-than (no downgrade block)
-  ! version_lt a1b2c3d e5f6a7b || fail "non-semver should not compare as <"
-  ! version_lt 1.0.0 a1b2c3d || fail "mixed semver/sha should not compare as <"
+  # non-semver / SHA-like inputs are intentionally not comparable by version_lt:
+  # the upgrade downgrade guard must not block on legacy labels.
+  ! version_lt a1b2c3d e5f6a7b || fail "git SHA-like versions should not compare as <"
+  ! version_lt 1.0.0 a1b2c3d || fail "mixed semver/SHA-like inputs should not compare as <"
 }
 
 test_diff_report_redacts_secrets() {
@@ -251,6 +252,8 @@ test_diff_report_redacts_secrets() {
   cat > "${old}" <<'EOF'
 CUBE_SANDBOX_REDIS_PASSWORD=topsecret123
 DATABASE_URL=mysql://u:p@host:3306/realdb
+AGENTHUB_DEEPSEEK_API_KEY=sk-agenthub-secret
+OPENCLAW_DEEPSEEK_API_KEY=sk-openclaw-secret
 EOF
 
   merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
@@ -258,12 +261,32 @@ EOF
   # The diff report must NOT leak plaintext secrets...
   assert_contains "${diff}" "CUBE_SANDBOX_REDIS_PASSWORD=***REDACTED***"
   assert_contains "${diff}" "DATABASE_URL=***REDACTED***"
+  assert_contains "${diff}" "AGENTHUB_DEEPSEEK_API_KEY=***REDACTED***"
+  assert_contains "${diff}" "OPENCLAW_DEEPSEEK_API_KEY=***REDACTED***"
   assert_not_contains "${diff}" "topsecret123"
   assert_not_contains "${diff}" "realdb"
+  assert_not_contains "${diff}" "sk-agenthub-secret"
+  assert_not_contains "${diff}" "sk-openclaw-secret"
 
   # ...but the merged runtime env MUST keep the real values intact.
   assert_value "${out}" CUBE_SANDBOX_REDIS_PASSWORD topsecret123
   assert_value "${out}" DATABASE_URL "mysql://u:p@host:3306/realdb"
+  assert_value "${out}" AGENTHUB_DEEPSEEK_API_KEY "sk-agenthub-secret"
+  assert_value "${out}" OPENCLAW_DEEPSEEK_API_KEY "sk-openclaw-secret"
+}
+
+test_non_utf8_env_fails_cleanly() {
+  local new="${TMP_DIR}/new_bad_utf8.example" old="${TMP_DIR}/old_bad_utf8.env"
+  local out="${TMP_DIR}/out_bad_utf8.env" diff="${TMP_DIR}/diff_bad_utf8.txt" err="${TMP_DIR}/bad_utf8.err"
+  write_new_example "${new}"
+  printf 'CUBE_SANDBOX_MYSQL_PORT=3307\nBAD=\xff\n' > "${old}"
+
+  if merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>"${err}"; then
+    fail "merge_env_three_way should reject non-UTF-8 input"
+  fi
+  assert_contains "${err}" "env merge input is not valid UTF-8"
+  assert_contains "${err}" "${old}"
+  [[ ! -e "${out}" || ! -s "${out}" ]] || fail "merged env should not be written for invalid UTF-8 input"
 }
 
 test_read_helpers_reject_invalid_key() {
@@ -345,6 +368,7 @@ test_two_way_fallback_without_baseline
 test_new_dotenv_overrides_take_priority
 test_version_lt
 test_diff_report_redacts_secrets
+test_non_utf8_env_fails_cleanly
 test_read_helpers_reject_invalid_key
 test_read_helpers
 test_detect_existing_install

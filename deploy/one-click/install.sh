@@ -919,6 +919,10 @@ tar -xzf "${PACKAGE_TAR}" -C "${WORK_DIR}"
 PKG_ROOT="${WORK_DIR}/sandbox-package"
 ensure_dir "${PKG_ROOT}"
 validate_cubelet_cow_startup_deps "${PKG_ROOT}/Cubelet/config/config.toml"
+patch_cubelet_config_template \
+  "${PKG_ROOT}/Cubelet/config/config.toml" \
+  "${CUBE_SANDBOX_ETH_NAME:-}" \
+  "${CUBE_SANDBOX_NETWORK_CIDR:-}"
 
 installed_role="${DEPLOY_ROLE}"
 detected_installed_role="$(detect_installed_role)"
@@ -960,9 +964,7 @@ if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
 else
   # Full wipe of a custom prefix, but preserve any upgrade backup directory so
   # the config snapshot survives for recovery/rollback.
-  # SAFETY: validate the prefix is not a system root before the destructive wipe.
-  assert_safe_install_prefix "${INSTALL_PREFIX}"
-  find "${INSTALL_PREFIX}" -mindepth 1 -maxdepth 1 ! -name '.backup' -exec rm -rf {} +
+  wipe_custom_install_prefix_contents "${INSTALL_PREFIX}"
 fi
 
 mkdir -p "${INSTALL_PREFIX}"
@@ -1041,13 +1043,26 @@ if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NODE_IP" "${CUBE_SANDBOX_NODE_IP}"
 fi
 if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
+  validate_interface_name "${CUBE_SANDBOX_ETH_NAME}" "CUBE_SANDBOX_ETH_NAME"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_ETH_NAME" "${CUBE_SANDBOX_ETH_NAME}"
 fi
 if [[ -n "${ONE_CLICK_CONTROL_PLANE_IP:-}" ]]; then
+  validate_ipv4_literal "${ONE_CLICK_CONTROL_PLANE_IP}" "ONE_CLICK_CONTROL_PLANE_IP"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_IP" "${ONE_CLICK_CONTROL_PLANE_IP}"
 fi
 if [[ -n "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}" ]]; then
+  validate_host_port "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR" "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR}"
+fi
+if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR" "${CUBE_SANDBOX_NETWORK_CIDR}"
+  if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-}" ]]; then
+    case "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}" in
+      0|1) ;;
+      *) die "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK must be 0 or 1 (got: '${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}')" ;;
+    esac
+    upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK" "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}"
+  fi
 fi
 
 # Persist external MySQL config so every systemd unit / helper picks it up
@@ -1090,60 +1105,7 @@ chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/cube-egress/"*.sh 2>/dev/null || true
 
-if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
-  cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"
-  # SECURITY: refuse to patch a symlink -- sed -i follows symlinks, which could
-  # let an attacker with write access to the prefix overwrite arbitrary files.
-  if [[ -L "${cubelet_config}" ]]; then
-    die "refusing to patch a symlink target: ${cubelet_config} -> $(readlink "${cubelet_config}")"
-  fi
-  if grep -Eq '^[[:space:]]*eth_name = "' "${cubelet_config}"; then
-    sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"/" "${cubelet_config}"
-    if ! grep -Fq "eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"" "${cubelet_config}"; then
-      log "WARNING: failed to patch eth_name in Cubelet config (${cubelet_config})"
-    fi
-  else
-    log "WARNING: Cubelet config missing eth_name key; skipped NIC patch (${cubelet_config})"
-  fi
-fi
-
-# Patch cubevs CIDR if env var is set
-if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
-  cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"
-
-  # SECURITY: Refuse to patch a symlink -- sed -i follows symlinks, which
-  # could allow an attacker with write access to ONE_CLICK_INSTALL_PREFIX
-  # to overwrite arbitrary files via symlink.
-  if [[ -L "${cubelet_config}" ]]; then
-    die "refusing to patch a symlink target: ${cubelet_config} -> $(readlink "${cubelet_config}")"
-  fi
-
-  if grep -Eq '^[[:space:]]*cidr = "' "${cubelet_config}"; then
-    # NOTE: Use '|' as sed delimiter -- CIDR values always contain '/', so
-    # the default '/' delimiter would break the sed command.
-    sed -i "s|cidr = \"[^\"]*\"|cidr = \"${CUBE_SANDBOX_NETWORK_CIDR}\"|" "${cubelet_config}"
-    if ! grep -Fq "cidr = \"${CUBE_SANDBOX_NETWORK_CIDR}\"" "${cubelet_config}"; then
-      log "WARNING: failed to patch cidr in Cubelet config (${cubelet_config})"
-    fi
-    log "patched cubevs CIDR: ${CUBE_SANDBOX_NETWORK_CIDR}"
-  else
-    log "WARNING: Cubelet config missing cidr key; skipped CIDR patch (${cubelet_config})"
-  fi
-
-  # Persist CIDR to env file AFTER successful config patch (defense-in-depth:
-  # env file and config.toml should always be in sync; if the script crashes
-  # between patching and persistence, the env file stays clean).
-  if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
-    upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR" "${CUBE_SANDBOX_NETWORK_CIDR}"
-  fi
-  if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-}" ]]; then
-    case "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}" in
-      0|1) ;;
-      *) die "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK must be 0 or 1 (got: '${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}')" ;;
-    esac
-    upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK" "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}"
-  fi
-else
+if [[ -z "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   # Log current CIDR for debugging
   current_cidr="$(sed -nE '/^[[:space:]]*cidr[[:space:]]*=[[:space:]]*"/{s/.*"([^"]+)".*/\1/p;q;}' "${INSTALL_PREFIX}/Cubelet/config/config.toml" 2>/dev/null || echo "unknown")"
   log "using cubevs CIDR from config.toml: ${current_cidr} (CUBE_SANDBOX_NETWORK_CIDR not set)"
