@@ -13,6 +13,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { CodeTerminal } from '@/components/CodeTerminal';
 
 import { Skeleton } from '@/components/ui/skeleton';
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu';
 import {
   ArrowLeft, Pause, Play, Trash2, RefreshCw, FileText,
   Cpu, MemoryStick, User, Clock, Globe, Server, Activity,
@@ -131,25 +132,44 @@ export default function SandboxDetailPage() {
     return sortOrder === 'desc' ? tb - ta : ta - tb;
   });
 
-  function downloadEvents() {
+  function exportEvents(format: 'csv' | 'txt') {
     if (sortedEntries.length === 0) return;
-    const header = 'Timestamp,Level,Message';
+
     const rows = sortedEntries.map((entry) => {
       const d = new Date(entry.timestamp as unknown as string);
       const ts = Number.isNaN(d.getTime())
-        ? entry.timestamp
+        ? String(entry.timestamp)
         : d.toISOString().replace('T', ' ').slice(0, 19);
       const level = (entry.level ?? 'info').toString();
       const message = entry.message ?? '';
-      return `${escapeCsvField(String(ts))},${escapeCsvField(level)},${escapeCsvField(message)}`;
+      return { ts, level, message };
     });
-    const csv = [header, ...rows].join('\r\n');
+
+    let content: string;
+    let mimeType: string;
+    let ext: string;
+
+    if (format === 'csv') {
+      const header = 'Timestamp,Level,Message';
+      const csvRows = rows.map((r) =>
+        `${escapeCsvField(r.ts)},${escapeCsvField(r.level)},${escapeCsvField(r.message)}`
+      );
+      content = [header, ...csvRows].join('\r\n');
+      mimeType = 'text/csv;charset=utf-8;';
+      ext = 'csv';
+    } else {
+      const txtRows = rows.map((r) => `[${r.ts}] [${r.level}] ${r.message}`);
+      content = txtRows.join('\n');
+      mimeType = 'text/plain;charset=utf-8;';
+      ext = 'txt';
+    }
+
     const bom = '\uFEFF';
-    const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob([bom + content], { type: mimeType });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `sandbox-${sandboxID}-events.csv`;
+    a.download = `sandbox-${sandboxID}-events.${ext}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -362,15 +382,28 @@ export default function SandboxDetailPage() {
                 >
                   <RefreshCw size={14} className={cn(logs.isFetching && 'animate-spin')} />
                 </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  title={t('eventsExport')}
-                  onClick={downloadEvents}
-                  disabled={entries.length === 0}
-                >
-                  <Download size={14} />
-                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      title={t('eventsExport')}
+                      disabled={entries.length === 0}
+                    >
+                      <Download size={14} />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={() => exportEvents('csv')}>
+                      <FileText size={14} />
+                      {t('eventsExportCsv')}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => exportEvents('txt')}>
+                      <FileText size={14} />
+                      {t('eventsExportTxt')}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
             </CardHeader>
             <div className="-mt-2 px-5 pb-3 text-xs text-muted-foreground">

@@ -34,6 +34,8 @@
   "eventsSortAsc": "Oldest",
   "eventsSortDesc": "Newest",
   "eventsExport": "Export events",
+  "eventsExportCsv": "Export as CSV",
+  "eventsExportTxt": "Export as TXT",
   "logsComingSoon": "Logs feature coming soon.",
   "fields": {
     "vcpu": "vCPU",
