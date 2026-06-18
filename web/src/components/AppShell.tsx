@@ -17,7 +17,7 @@ export function AppShell() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <Rail />
-      <main className="ml-[190px] min-h-screen px-6 pb-10">
+      <main className="ml-[68px] min-h-screen px-6 pb-10">
         <TopBar />
         <div className="mx-auto max-w-[1800px]">
           <Outlet />
