@@ -565,6 +565,8 @@ copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cub
 # integration.
 copy_file "${CUBE_EGRESS_SOURCE_DIR}/scripts/cube-proxy-iptables-init.sh" \
           "${PACKAGE_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh"
+mkdir -p "${PACKAGE_ROOT}/scripts/common"
+copy_file "${SCRIPT_DIR}/scripts/common/validation.sh" "${PACKAGE_ROOT}/scripts/common/validation.sh"
 
 # Host-side version marker for cube-egress: cubelet's versioninfo.Collector
 # detects the component by the presence of cube-egress/version and reports
@@ -577,13 +579,14 @@ copy_dir_contents "${SCRIPT_DIR}/sql" "${PACKAGE_ROOT}/sql"
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/systemd" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/scripts/common" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-egress" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
 tar -C "${WORK_ROOT}" -czf "${PACKAGE_TAR}" "sandbox-package"
 
-mkdir -p "${DIST_ROOT}/assets/package" "${DIST_ROOT}/assets/kernel-artifacts" "${DIST_ROOT}/lib"
+mkdir -p "${DIST_ROOT}/assets/package" "${DIST_ROOT}/assets/kernel-artifacts" "${DIST_ROOT}/lib" "${DIST_ROOT}/scripts/common"
 copy_file "${SCRIPT_DIR}/README.md" "${DIST_ROOT}/README.md"
 copy_file "${SCRIPT_DIR}/install.sh" "${DIST_ROOT}/install.sh"
 copy_file "${SCRIPT_DIR}/install-compute.sh" "${DIST_ROOT}/install-compute.sh"
@@ -592,6 +595,7 @@ copy_file "${SCRIPT_DIR}/smoke.sh" "${DIST_ROOT}/smoke.sh"
 copy_file "${SCRIPT_DIR}/online-install.sh" "${DIST_ROOT}/online-install.sh"
 copy_file "${SCRIPT_DIR}/env.example" "${DIST_ROOT}/env.example"
 copy_file "${SCRIPT_DIR}/lib/common.sh" "${DIST_ROOT}/lib/common.sh"
+copy_file "${SCRIPT_DIR}/scripts/common/validation.sh" "${DIST_ROOT}/scripts/common/validation.sh"
 copy_file "${PACKAGE_TAR}" "${DIST_ROOT}/assets/package/sandbox-package.tar.gz"
 copy_file "${KERNEL_ARTIFACT_ZIP}" "${DIST_ROOT}/assets/kernel-artifacts/cube-kernel-scf.zip"
 chmod +x \
