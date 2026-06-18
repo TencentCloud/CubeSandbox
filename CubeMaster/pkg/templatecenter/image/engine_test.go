@@ -143,6 +143,28 @@ func TestHTTPDockerEngineClientImageInspectEscapesImageRefPath(t *testing.T) {
 	}
 }
 
+func TestNewHTTPDockerEngineClientUsesDedicatedHTTPClient(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+
+	cli, err := newHTTPDockerEngineClient()
+	if err != nil {
+		t.Fatalf("newHTTPDockerEngineClient: %v", err)
+	}
+	httpCli, ok := cli.(*httpDockerEngineClient)
+	if !ok {
+		t.Fatalf("client type=%T want *httpDockerEngineClient", cli)
+	}
+	if httpCli.client == http.DefaultClient {
+		t.Fatalf("engine client must not share http.DefaultClient")
+	}
+	if httpCli.client.Timeout != 0 {
+		t.Fatalf("client timeout=%v want no whole-request timeout", httpCli.client.Timeout)
+	}
+	if httpCli.client.Transport == nil {
+		t.Fatalf("engine client should still configure transport-level timeouts")
+	}
+}
+
 func TestHTTPDockerEngineClientImageInspectMapsNotFound(t *testing.T) {
 	cli := &httpDockerEngineClient{
 		baseURL: "http://docker",
@@ -159,6 +181,51 @@ func TestHTTPDockerEngineClientImageInspectMapsNotFound(t *testing.T) {
 	_, err := cli.ImageInspect(context.Background(), "registry.example.com/ns/missing:tag")
 	if !errors.Is(err, errEngineImageNotFound) {
 		t.Fatalf("ImageInspect error=%v, want errEngineImageNotFound", err)
+	}
+}
+
+func TestPrepareDockerSourceWithEngineReusesClientForPullFlow(t *testing.T) {
+	withExecutableLookPath(t, func(file string) (string, error) {
+		return "", errors.New("not found")
+	})
+
+	orig := newEngineClient
+	defer func() {
+		newEngineClient = orig
+	}()
+
+	constructCalls := 0
+	inspectCalls := 0
+	pullCalled := false
+	newEngineClient = func() (engineClient, error) {
+		constructCalls++
+		return &fakeEngineClient{
+			inspect: func(_ context.Context, imageRef string) (*dockerInspectImage, error) {
+				inspectCalls++
+				if inspectCalls == 1 {
+					return nil, errEngineImageNotFound
+				}
+				return &dockerInspectImage{RepoDigests: []string{imageRef + "@sha256:pulled"}}, nil
+			},
+			pull: func(context.Context, string, string) (io.ReadCloser, error) {
+				pullCalled = true
+				return io.NopCloser(strings.NewReader(`{"id":"a","status":"Pull complete","progressDetail":{"current":10,"total":10}}` + "\n")), nil
+			},
+		}, nil
+	}
+
+	got, err := prepareDockerSource(context.Background(), SourceSpec{ImageRef: "docker.io/library/nginx:latest"})
+	if err != nil {
+		t.Fatalf("prepareDockerSource: %v", err)
+	}
+	if constructCalls != 1 {
+		t.Fatalf("newEngineClient calls=%d want 1", constructCalls)
+	}
+	if !pullCalled || inspectCalls != 2 {
+		t.Fatalf("pullCalled=%v inspectCalls=%d", pullCalled, inspectCalls)
+	}
+	if got.Digest != "sha256:pulled" {
+		t.Fatalf("unexpected digest: %s", got.Digest)
 	}
 }
 

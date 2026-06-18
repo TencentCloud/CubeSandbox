@@ -59,10 +59,14 @@ func runImageJobWatch(c *cli.Context, jobID string) error {
 		// If the TUI cannot start (e.g. terminal quirk), degrade gracefully.
 		return runImageJobWatchPlain(c, jobID)
 	}
+	return finishImageJobWatch(c, jobID, model, runImageJobWatchPlain)
+}
+
+func finishImageJobWatch(c *cli.Context, jobID string, model tea.Model, fallback func(*cli.Context, string) error) error {
 	final, ok := model.(imageJobTUI)
 	if !ok {
 		log.Printf("template watch TUI returned unexpected model type %T\n", model)
-		return nil
+		return fallback(c, jobID)
 	}
 	if final.canceled {
 		log.Printf("stopped watching; job still running, resume with: template watch --job-id %s\n", jobID)
@@ -115,10 +119,14 @@ func runBuildWatch(c *cli.Context, buildID string) error {
 	if err != nil {
 		return runBuildWatchPlain(c, buildID)
 	}
+	return finishBuildWatch(c, buildID, model, runBuildWatchPlain)
+}
+
+func finishBuildWatch(c *cli.Context, buildID string, model tea.Model, fallback func(*cli.Context, string) error) error {
 	final, ok := model.(buildJobTUI)
 	if !ok {
 		log.Printf("template build-watch TUI returned unexpected model type %T\n", model)
-		return nil
+		return fallback(c, buildID)
 	}
 	if final.canceled {
 		log.Printf("stopped watching; build still running, resume with: template build-watch --build-id %s\n", buildID)

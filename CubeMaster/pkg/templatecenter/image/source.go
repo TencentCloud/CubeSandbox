@@ -121,16 +121,20 @@ func prepareDockerSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 }
 
 func prepareDockerSourceWithEngine(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
-	inspectInfo, err := engineImageInspect(ctx, spec.ImageRef)
+	cli, err := newEngineClient()
+	if err != nil {
+		return nil, err
+	}
+	inspectInfo, err := engineImageInspectWithClient(ctx, cli, spec.ImageRef)
 	imageExistsLocally := err == nil
 	if err != nil && !errors.Is(err, errEngineImageNotFound) {
 		return nil, err
 	}
 	if !imageExistsLocally {
-		if err := engineImagePull(ctx, spec); err != nil {
+		if err := engineImagePullWithClient(ctx, cli, spec); err != nil {
 			return nil, err
 		}
-		inspectInfo, err = engineImageInspect(ctx, spec.ImageRef)
+		inspectInfo, err = engineImageInspectWithClient(ctx, cli, spec.ImageRef)
 		if err != nil {
 			return nil, fmt.Errorf("engine image inspect %s failed after pull: %w", spec.ImageRef, err)
 		}

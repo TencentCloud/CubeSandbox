@@ -33,7 +33,7 @@ func engineImageInspect(ctx context.Context, imageRef string) (*dockerInspectIma
 	if err != nil {
 		return nil, err
 	}
-	return cli.ImageInspect(ctx, imageRef)
+	return engineImageInspectWithClient(ctx, cli, imageRef)
 }
 
 func engineImagePull(ctx context.Context, spec SourceSpec) error {
@@ -41,8 +41,17 @@ func engineImagePull(ctx context.Context, spec SourceSpec) error {
 	if err != nil {
 		return err
 	}
+	return engineImagePullWithClient(ctx, cli, spec)
+}
+
+func engineImageInspectWithClient(ctx context.Context, cli engineClient, imageRef string) (*dockerInspectImage, error) {
+	return cli.ImageInspect(ctx, imageRef)
+}
+
+func engineImagePullWithClient(ctx context.Context, cli engineClient, spec SourceSpec) error {
 	registryAuth := ""
 	if spec.RegistryUsername != "" || spec.RegistryPassword != "" {
+		var err error
 		registryAuth, err = engineRegistryAuth(spec)
 		if err != nil {
 			return err
@@ -79,11 +88,15 @@ func newHTTPDockerEngineClient() (engineClient, error) {
 		if socketPath == "" {
 			return nil, errors.New("empty docker unix socket path")
 		}
+		dialer := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
 		transport := &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", socketPath)
+				return dialer.DialContext(ctx, "unix", socketPath)
 			},
+			IdleConnTimeout: 90 * time.Second,
 		}
 		return &httpDockerEngineClient{
 			client:  &http.Client{Transport: transport},
@@ -91,16 +104,31 @@ func newHTTPDockerEngineClient() (engineClient, error) {
 		}, nil
 	case "tcp":
 		return &httpDockerEngineClient{
-			client:  http.DefaultClient,
+			client:  newDockerEngineHTTPClient(),
 			baseURL: "http://" + u.Host,
 		}, nil
 	case "http", "https":
 		return &httpDockerEngineClient{
-			client:  http.DefaultClient,
+			client:  newDockerEngineHTTPClient(),
 			baseURL: strings.TrimRight(host, "/"),
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported DOCKER_HOST scheme %q", u.Scheme)
+	}
+}
+
+func newDockerEngineHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
 	}
 }
 

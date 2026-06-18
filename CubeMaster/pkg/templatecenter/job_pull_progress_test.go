@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	basetypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
@@ -42,6 +43,49 @@ func TestJobPullProgressSinkCachesLiveProgressOnly(t *testing.T) {
 	}
 	if deletePullProgressCalls != 0 {
 		t.Fatalf("onProgress must not delete Redis, got %d calls", deletePullProgressCalls)
+	}
+}
+
+func TestJobPullProgressSinkSetsCacheTTLOnlyOnce(t *testing.T) {
+	restore := stubPullProgressIO(t)
+	defer restore()
+
+	s := newJobPullProgressSink(context.Background(), "job-live")
+	s.onProgress(image.PullProgress{TotalBytes: 100, DownloadedBytes: 10})
+	s.onProgress(image.PullProgress{TotalBytes: 100, DownloadedBytes: 20})
+
+	if cachePullProgressCalls != 1 {
+		t.Fatalf("initial cache write with TTL calls=%d want 1", cachePullProgressCalls)
+	}
+	if updatePullProgressCacheCalls != 1 {
+		t.Fatalf("subsequent cache update calls=%d want 1", updatePullProgressCacheCalls)
+	}
+}
+
+func TestJobPullProgressSinkRetriesTTLAfterInitialCacheFailure(t *testing.T) {
+	restore := stubPullProgressIO(t)
+	defer restore()
+
+	failFirstCache := true
+	cacheTemplateImageJobPullProgress = func(context.Context, *basetypes.TemplateImageJobPullProgressMap) error {
+		cachePullProgressCalls++
+		if failFirstCache {
+			failFirstCache = false
+			return errors.New("redis expire failed")
+		}
+		return nil
+	}
+
+	s := newJobPullProgressSink(context.Background(), "job-live")
+	s.onProgress(image.PullProgress{TotalBytes: 100, DownloadedBytes: 10})
+	s.onProgress(image.PullProgress{TotalBytes: 100, DownloadedBytes: 20})
+	s.onProgress(image.PullProgress{TotalBytes: 100, DownloadedBytes: 30})
+
+	if cachePullProgressCalls != 2 {
+		t.Fatalf("cache writes with TTL=%d want 2", cachePullProgressCalls)
+	}
+	if updatePullProgressCacheCalls != 1 {
+		t.Fatalf("no-TTL cache updates=%d want 1", updatePullProgressCacheCalls)
 	}
 }
 
@@ -128,24 +172,34 @@ func TestJobPullProgressSinkFlushIgnoresCanceledJobContext(t *testing.T) {
 }
 
 var (
-	updatePullProgressCalls  int
-	deletePullProgressCalls  int
-	lastPullProgressUpdate   map[string]any
-	updatePullProgressCtxErr error
-	deletePullProgressCtxErr error
+	cachePullProgressCalls       int
+	updatePullProgressCacheCalls int
+	updatePullProgressCalls      int
+	deletePullProgressCalls      int
+	lastPullProgressUpdate       map[string]any
+	updatePullProgressCtxErr     error
+	deletePullProgressCtxErr     error
 )
 
 func stubPullProgressIO(t *testing.T) func() {
 	t.Helper()
 	origCache := cacheTemplateImageJobPullProgress
+	origUpdateCache := updateTemplateImageJobPullProgressCache
 	origDelete := deleteTemplateImageJobPullProgress
 	origUpdate := updateTemplateImageJobPullProgress
+	cachePullProgressCalls = 0
+	updatePullProgressCacheCalls = 0
 	updatePullProgressCalls = 0
 	deletePullProgressCalls = 0
 	lastPullProgressUpdate = nil
 	updatePullProgressCtxErr = nil
 	deletePullProgressCtxErr = nil
 	cacheTemplateImageJobPullProgress = func(context.Context, *basetypes.TemplateImageJobPullProgressMap) error {
+		cachePullProgressCalls++
+		return nil
+	}
+	updateTemplateImageJobPullProgressCache = func(context.Context, *basetypes.TemplateImageJobPullProgressMap) error {
+		updatePullProgressCacheCalls++
 		return nil
 	}
 	deleteTemplateImageJobPullProgress = func(ctx context.Context, _ string) error {
@@ -161,6 +215,7 @@ func stubPullProgressIO(t *testing.T) func() {
 	}
 	return func() {
 		cacheTemplateImageJobPullProgress = origCache
+		updateTemplateImageJobPullProgressCache = origUpdateCache
 		deleteTemplateImageJobPullProgress = origDelete
 		updateTemplateImageJobPullProgress = origUpdate
 	}

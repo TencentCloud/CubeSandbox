@@ -319,6 +319,13 @@ func SetTemplateImageJobPullProgress(ctx context.Context, progress *types.Templa
 	return l.setTemplateImageJobPullProgressToRedis(ctx, templateImageJobPullProgressKey(progress.JobID), progress)
 }
 
+func SetTemplateImageJobPullProgressNoTTL(ctx context.Context, progress *types.TemplateImageJobPullProgressMap) error {
+	if progress == nil || progress.JobID == "" {
+		return errors.New("template image job pull progress requires job id")
+	}
+	return l.setTemplateImageJobPullProgressFieldsToRedis(ctx, templateImageJobPullProgressKey(progress.JobID), progress)
+}
+
 func GetTemplateImageJobPullProgress(ctx context.Context, jobID string) (*types.TemplateImageJobPullProgressMap, bool) {
 	if jobID == "" {
 		return nil, false

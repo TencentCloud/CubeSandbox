@@ -38,9 +38,19 @@ type boundedBuffer struct {
 }
 
 func (b *boundedBuffer) add(line string) {
+	if b.max <= 0 {
+		return
+	}
+	if len(line)+1 > b.max {
+		keep := b.max - 1
+		if keep < 0 {
+			keep = 0
+		}
+		line = line[len(line)-keep:]
+	}
 	b.lines = append(b.lines, line)
 	b.size += len(line) + 1
-	for b.size > b.max && len(b.lines) > 1 {
+	for b.size > b.max && len(b.lines) > 0 {
 		b.size -= len(b.lines[0]) + 1
 		b.lines = b.lines[1:]
 	}
@@ -172,20 +182,20 @@ func streamCommand(ctx context.Context, dir, name string, parser progressParser,
 		haveLatest  bool
 		latestDirty bool
 	)
-	emit := func(p PullProgress) {
+	recordProgressLocked := func(p PullProgress) (PullProgress, bool) {
 		if onProgress == nil {
-			return
+			return PullProgress{}, false
 		}
 		latest = p
 		haveLatest = true
 		now := time.Now()
 		if now.Sub(lastEmit) < progressEmitInterval {
 			latestDirty = true
-			return
+			return PullProgress{}, false
 		}
 		lastEmit = now
 		latestDirty = false
-		onProgress(p)
+		return p, true
 	}
 	scan := func(r io.Reader) {
 		sc := bufio.NewScanner(r)
@@ -193,14 +203,21 @@ func streamCommand(ctx context.Context, dir, name string, parser progressParser,
 		sc.Split(scanLinesCR)
 		for sc.Scan() {
 			line := sc.Text()
+			var (
+				emitProgress PullProgress
+				shouldEmit   bool
+			)
 			mu.Lock()
 			buf.add(line)
 			if parser != nil {
 				if p, ok := parser.feed(line); ok {
-					emit(p)
+					emitProgress, shouldEmit = recordProgressLocked(p)
 				}
 			}
 			mu.Unlock()
+			if shouldEmit {
+				onProgress(emitProgress)
+			}
 		}
 		// Always drain whatever remains (e.g. a single line longer than the
 		// scanner's max token size aborts Scan with ErrTooLong). If we returned
@@ -218,12 +235,20 @@ func streamCommand(ctx context.Context, dir, name string, parser progressParser,
 
 	// Flush the final snapshot so consumers always observe the terminal
 	// progress state even if the last update was throttled.
+	var (
+		emitProgress PullProgress
+		shouldEmit   bool
+	)
 	mu.Lock()
 	if onProgress != nil && haveLatest && latestDirty {
-		onProgress(latest)
+		emitProgress = latest
+		shouldEmit = true
 	}
 	output := []byte(buf.String())
 	mu.Unlock()
+	if shouldEmit {
+		onProgress(emitProgress)
+	}
 
 	if waitErr != nil {
 		return output, fmt.Errorf("%w: %s", waitErr, strings.TrimSpace(string(output)))
@@ -239,7 +264,11 @@ func scanLinesCR(data []byte, atEOF bool) (advance int, token []byte, err error)
 		return 0, nil, nil
 	}
 	if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
-		return i + 1, data[:i], nil
+		advance := i + 1
+		if data[i] == '\r' && i+1 < len(data) && data[i+1] == '\n' {
+			advance++
+		}
+		return advance, data[:i], nil
 	}
 	if atEOF {
 		return len(data), data, nil

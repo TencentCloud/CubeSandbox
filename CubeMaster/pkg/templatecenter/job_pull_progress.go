@@ -16,9 +16,10 @@ import (
 )
 
 var (
-	cacheTemplateImageJobPullProgress  = localcache.SetTemplateImageJobPullProgress
-	deleteTemplateImageJobPullProgress = localcache.DeleteTemplateImageJobPullProgress
-	updateTemplateImageJobPullProgress = updateTemplateImageJob
+	cacheTemplateImageJobPullProgress       = localcache.SetTemplateImageJobPullProgress
+	updateTemplateImageJobPullProgressCache = localcache.SetTemplateImageJobPullProgressNoTTL
+	deleteTemplateImageJobPullProgress      = localcache.DeleteTemplateImageJobPullProgress
+	updateTemplateImageJobPullProgress      = updateTemplateImageJob
 )
 
 const pullProgressFlushTimeout = 5 * time.Second
@@ -35,6 +36,7 @@ type jobPullProgressSink struct {
 	lastBytes   int64
 	lastSpeedAt time.Time
 	lastSnap    image.PullProgress
+	cacheTTLSet bool
 }
 
 func newJobPullProgressSink(ctx context.Context, jobID string) *jobPullProgressSink {
@@ -50,10 +52,22 @@ func (s *jobPullProgressSink) onProgress(p image.PullProgress) {
 	speed := s.computeSpeedLocked(p.DownloadedBytes, now)
 	p.SpeedBPS = speed
 	s.lastSnap = p
+	cacheWithTTL := !s.cacheTTLSet
 	s.mu.Unlock()
 
-	if err := cacheTemplateImageJobPullProgress(s.ctx, pullProgressMap(s.jobID, p, now)); err != nil {
+	progress := pullProgressMap(s.jobID, p, now)
+	cacheFn := updateTemplateImageJobPullProgressCache
+	if cacheWithTTL {
+		cacheFn = cacheTemplateImageJobPullProgress
+	}
+	if err := cacheFn(s.ctx, progress); err != nil {
 		log.G(s.ctx).Debugf("cache pull progress for job %s failed: %v", s.jobID, err)
+		return
+	}
+	if cacheWithTTL {
+		s.mu.Lock()
+		s.cacheTTLSet = true
+		s.mu.Unlock()
 	}
 }
 

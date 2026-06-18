@@ -37,3 +37,49 @@ func TestTemplateImageJobPullProgressRedisStructRoundTrip(t *testing.T) {
 		t.Fatalf("scan mismatch: %+v", out)
 	}
 }
+
+func TestTemplateImageJobPullProgressSetArgs(t *testing.T) {
+	progress := &types.TemplateImageJobPullProgressMap{
+		JobID:               "job-1",
+		PullTotalBytes:      100,
+		PullDownloadedBytes: 60,
+		PullTotalLayers:     5,
+		PullCompletedLayers: 3,
+		PullSpeedBPS:        20,
+		UpdatedAtMs:         123456,
+	}
+	args := templateImageJobPullProgressSetArgs("progress:key", progress)
+	if len(args) < 4 {
+		t.Fatalf("args too short: %v", args)
+	}
+	if args[0] != templateImageJobPullProgressSetScript {
+		t.Fatalf("unexpected script arg")
+	}
+	if args[1] != 1 {
+		t.Fatalf("numkeys=%v want 1", args[1])
+	}
+	if args[2] != "progress:key" {
+		t.Fatalf("key=%v want progress:key", args[2])
+	}
+	if args[3] != templateImageJobPullProgressExpireSeconds {
+		t.Fatalf("ttl=%v want %d", args[3], templateImageJobPullProgressExpireSeconds)
+	}
+
+	fields := map[string]interface{}{}
+	for i := 4; i+1 < len(args); i += 2 {
+		field, ok := args[i].(string)
+		if !ok {
+			t.Fatalf("field arg %d has type %T", i, args[i])
+		}
+		fields[field] = args[i+1]
+	}
+	if fields["job_id"] != "job-1" ||
+		fields["pull_total_bytes"] != int64(100) ||
+		fields["pull_downloaded_bytes"] != int64(60) ||
+		fields["pull_total_layers"] != int32(5) ||
+		fields["pull_completed_layers"] != int32(3) ||
+		fields["pull_speed_bps"] != int64(20) ||
+		fields["updated_at_ms"] != int64(123456) {
+		t.Fatalf("unexpected fields: %+v", fields)
+	}
+}

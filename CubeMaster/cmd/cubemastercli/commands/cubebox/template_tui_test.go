@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/urfave/cli"
 )
 
 func TestHumanBytes(t *testing.T) {
@@ -103,6 +105,17 @@ func TestImageJobTUITransientErrorKeepsPolling(t *testing.T) {
 	}
 }
 
+func TestImageJobWatchUnexpectedModelFallsBack(t *testing.T) {
+	ctx := newCreateFromImageContext(t, nil)
+	fallbackErr := errString("fallback used")
+	err := finishImageJobWatch(ctx, "job-1", fakeTeaModel{}, func(*cli.Context, string) error {
+		return fallbackErr
+	})
+	if err != fallbackErr {
+		t.Fatalf("finishImageJobWatch error=%v want fallback error", err)
+	}
+}
+
 func TestImageJobStepsRendering(t *testing.T) {
 	if got := stepIndexForPhase("DISTRIBUTING"); got != 4 {
 		t.Fatalf("DISTRIBUTING index=%d want 4", got)
@@ -144,6 +157,92 @@ func TestImageJobPullRenderingBytes(t *testing.T) {
 	}
 }
 
+func TestBuildJobTUITerminalTransitions(t *testing.T) {
+	ctx := newCreateFromImageContext(t, nil)
+
+	m := newBuildJobTUI(ctx, "build-1")
+	updated, cmd := m.Update(buildStatusMsg{rsp: &templateBuildStatusResponse{Status: "ready", Progress: 100}})
+	model := updated.(buildJobTUI)
+	if !model.done || model.fatal != nil {
+		t.Fatalf("ready should finish without fatal: done=%v fatal=%v", model.done, model.fatal)
+	}
+	if cmd == nil {
+		t.Fatalf("expected quit cmd on ready")
+	}
+
+	m = newBuildJobTUI(ctx, "build-1")
+	updated, _ = m.Update(buildStatusMsg{rsp: &templateBuildStatusResponse{Status: "error", Message: "boom"}})
+	model = updated.(buildJobTUI)
+	if !model.done || model.fatal == nil || model.fatal.Error() != "boom" {
+		t.Fatalf("error should set fatal: %+v", model.fatal)
+	}
+
+	m = newBuildJobTUI(ctx, "build-1")
+	updated, _ = m.Update(buildStatusMsg{rsp: &templateBuildStatusResponse{Status: "error"}})
+	model = updated.(buildJobTUI)
+	if model.fatal == nil || model.fatal.Error() != "sandbox commit build failed" {
+		t.Fatalf("empty error message fatal=%v", model.fatal)
+	}
+
+	m = newBuildJobTUI(ctx, "build-1")
+	updated, cmd = m.Update(buildStatusMsg{rsp: &templateBuildStatusResponse{Status: "building", Progress: 5}})
+	model = updated.(buildJobTUI)
+	if model.done {
+		t.Fatalf("building must not be terminal")
+	}
+	if cmd == nil {
+		t.Fatalf("expected next poll tick cmd")
+	}
+}
+
+func TestBuildJobTUITransientErrorKeepsPolling(t *testing.T) {
+	ctx := newCreateFromImageContext(t, nil)
+	m := newBuildJobTUI(ctx, "build-1")
+	updated, cmd := m.Update(buildStatusMsg{err: errString("temporary")})
+	model := updated.(buildJobTUI)
+	if model.done {
+		t.Fatalf("transient error must not finish watch")
+	}
+	if model.pollErr == nil {
+		t.Fatalf("pollErr should be recorded")
+	}
+	if cmd == nil {
+		t.Fatalf("expected retry tick cmd")
+	}
+}
+
+func TestBuildJobTUICancel(t *testing.T) {
+	ctx := newCreateFromImageContext(t, nil)
+	m := newBuildJobTUI(ctx, "build-1")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	model := updated.(buildJobTUI)
+	if !model.done || !model.canceled {
+		t.Fatalf("q should cancel watch: done=%v canceled=%v", model.done, model.canceled)
+	}
+	if cmd == nil {
+		t.Fatalf("expected quit cmd on cancel")
+	}
+}
+
+func TestBuildWatchUnexpectedModelFallsBack(t *testing.T) {
+	ctx := newCreateFromImageContext(t, nil)
+	fallbackErr := errString("fallback used")
+	err := finishBuildWatch(ctx, "build-1", fakeTeaModel{}, func(*cli.Context, string) error {
+		return fallbackErr
+	})
+	if err != fallbackErr {
+		t.Fatalf("finishBuildWatch error=%v want fallback error", err)
+	}
+}
+
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+type fakeTeaModel struct{}
+
+func (fakeTeaModel) Init() tea.Cmd { return nil }
+
+func (fakeTeaModel) Update(tea.Msg) (tea.Model, tea.Cmd) { return fakeTeaModel{}, nil }
+
+func (fakeTeaModel) View() string { return "" }

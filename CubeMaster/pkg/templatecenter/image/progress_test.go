@@ -5,7 +5,9 @@
 package image
 
 import (
+	"bufio"
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -146,11 +148,22 @@ func TestBoundedBufferKeepsTailWithinLimit(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		b.add("0123456789")
 	}
-	if b.size > 32+11 { // allow one over-limit line to remain
+	if b.size > 32 {
 		t.Fatalf("bounded buffer exceeded cap: size=%d", b.size)
 	}
 	if b.String() == "" {
 		t.Fatalf("bounded buffer should retain the tail")
+	}
+}
+
+func TestBoundedBufferTruncatesSingleOversizedLine(t *testing.T) {
+	b := &boundedBuffer{max: 32}
+	b.add(strings.Repeat("a", 128))
+	if b.size > b.max {
+		t.Fatalf("bounded buffer exceeded cap: size=%d max=%d", b.size, b.max)
+	}
+	if got := strings.TrimSpace(b.String()); len(got) != b.max-1 {
+		t.Fatalf("retained line length=%d want %d", len(got), b.max-1)
 	}
 }
 
@@ -175,6 +188,33 @@ func TestStreamCommandDrainsOversizedLineWithoutHang(t *testing.T) {
 	}
 }
 
+type blockingProgressParser struct {
+	release chan struct{}
+}
+
+func (p *blockingProgressParser) feed(line string) (PullProgress, bool) {
+	switch line {
+	case "emit":
+		return PullProgress{TotalLayers: 1}, true
+	case "release":
+		close(p.release)
+	}
+	return PullProgress{}, false
+}
+
+func TestStreamCommandProgressCallbackDoesNotHoldScanMutex(t *testing.T) {
+	release := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := streamCommand(ctx, "", "sh", &blockingProgressParser{release: release}, func(PullProgress) {
+		<-release
+	}, "-c", "(printf 'emit\\n'; sleep 0.1; printf 'done\\n') & (sleep 0.05; printf 'release\\n' >&2) & wait")
+	if err != nil {
+		t.Fatalf("streamCommand should let stderr progress release a blocking callback: %v", err)
+	}
+}
+
 func TestScanLinesCR(t *testing.T) {
 	// carriage returns must split into discrete tokens.
 	advance, token, err := scanLinesCR([]byte("abc\rdef"), false)
@@ -183,5 +223,21 @@ func TestScanLinesCR(t *testing.T) {
 	}
 	if advance != 4 || string(token) != "abc" {
 		t.Fatalf("advance=%d token=%q", advance, token)
+	}
+}
+
+func TestScanLinesCRSkipsCRLFAsSingleSeparator(t *testing.T) {
+	sc := bufio.NewScanner(strings.NewReader("abc\r\ndef\n"))
+	sc.Split(scanLinesCR)
+
+	var tokens []string
+	for sc.Scan() {
+		tokens = append(tokens, sc.Text())
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got, want := strings.Join(tokens, ","), "abc,def"; got != want {
+		t.Fatalf("tokens=%q want %q", got, want)
 	}
 }

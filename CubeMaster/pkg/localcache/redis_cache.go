@@ -81,10 +81,26 @@ type NodeMetric struct {
 	SysDiskUsagePer     float64
 }
 
-const templateImageJobPullProgressExpireSeconds = int64(time.Hour / time.Second)
+const (
+	templateImageJobPullProgressExpireSeconds = int64(time.Hour / time.Second)
+	templateImageJobPullProgressSetScript     = `
+redis.call('HSET', KEYS[1], unpack(ARGV, 2))
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+return 1
+`
+)
 
 func templateImageJobPullProgressKey(jobID string) string {
 	return "template_image_job_pull_progress" + ":" + jobID
+}
+
+func templateImageJobPullProgressSetArgs(key string, progress *types.TemplateImageJobPullProgressMap) redis.Args {
+	return redis.Args{
+		templateImageJobPullProgressSetScript,
+		1,
+		key,
+		templateImageJobPullProgressExpireSeconds,
+	}.AddFlat(progress)
 }
 
 // WriteNodeMetric persists a cubelet-reported metric snapshot to Redis so
@@ -427,23 +443,28 @@ func (l *local) getDescribeTaskFromRedis(ctx context.Context, key string) (*type
 
 func (l *local) setTemplateImageJobPullProgressToRedis(ctx context.Context, key string, progress *types.TemplateImageJobPullProgressMap) (err error) {
 	start := time.Now()
-	conn := wrapredis.GetRedis(wrapredis.RedisWrite)
-	defer traceRedis(ctx, "Create", "HSET", key, start, err)
-	defer func() {
-		if err == nil {
-			_, expireErr := conn.Do("EXPIRE", key, templateImageJobPullProgressExpireSeconds)
-			if expireErr != nil {
-				log.G(ctx).Warnf("redis EXPIRE error, key: %s, err: %s", key, expireErr)
-			}
-		}
-	}()
-	_, err = conn.Do("HSET", redis.Args{key}.AddFlat(progress)...)
+	defer traceRedis(ctx, "Create", "EVAL", key, start, err)
+	_, err = wrapredis.GetRedis(wrapredis.RedisWrite).Do("EVAL", templateImageJobPullProgressSetArgs(key, progress)...)
 	if err != nil {
 		log.G(ctx).Warnf("redis set template image job pull progress error, key: %s, err: %s", key, err)
 		return err
 	}
 	if log.IsDebug() {
 		log.G(ctx).Debugf("setTemplateImageJobPullProgressToRedis:%s:%s", key, utils.InterfaceToString(progress))
+	}
+	return nil
+}
+
+func (l *local) setTemplateImageJobPullProgressFieldsToRedis(ctx context.Context, key string, progress *types.TemplateImageJobPullProgressMap) (err error) {
+	start := time.Now()
+	defer traceRedis(ctx, "Create", "HSET", key, start, err)
+	_, err = wrapredis.GetRedis(wrapredis.RedisWrite).Do("HSET", redis.Args{key}.AddFlat(progress)...)
+	if err != nil {
+		log.G(ctx).Warnf("redis update template image job pull progress error, key: %s, err: %s", key, err)
+		return err
+	}
+	if log.IsDebug() {
+		log.G(ctx).Debugf("setTemplateImageJobPullProgressFieldsToRedis:%s:%s", key, utils.InterfaceToString(progress))
 	}
 	return nil
 }
