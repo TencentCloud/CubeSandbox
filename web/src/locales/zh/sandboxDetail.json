@@ -33,6 +33,7 @@
   "eventsMessage": "消息",
   "eventsSortAsc": "正序",
   "eventsSortDesc": "倒序",
+  "eventsExport": "导出事件",
   "logsComingSoon": "日志功能开发中，敬请期待",
   "fields": {
     "vcpu": "vCPU",
