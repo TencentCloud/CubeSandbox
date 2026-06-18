@@ -33,6 +33,7 @@
   "eventsMessage": "Message",
   "eventsSortAsc": "Oldest",
   "eventsSortDesc": "Newest",
+  "eventsExport": "Export events",
   "logsComingSoon": "Logs feature coming soon.",
   "fields": {
     "vcpu": "vCPU",
