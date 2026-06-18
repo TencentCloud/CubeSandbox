@@ -16,7 +16,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import {
   ArrowLeft, Pause, Play, Trash2, RefreshCw, FileText,
   Cpu, MemoryStick, User, Clock, Globe, Server, Activity,
-  ArrowUp, ArrowDown,
+  ArrowUpDown, Download,
 } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 
@@ -43,6 +43,13 @@ function formatLogDateTime(ts: string): string {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: false,
   }).format(d);
+}
+
+function escapeCsvField(field: string): string {
+  if (field.includes(',') || field.includes('"') || field.includes('\n')) {
+    return `"${field.replace(/"/g, '""')}"`;
+  }
+  return field;
 }
 
 // ── Main page ───────────────────────────────────────────────────────────────
@@ -109,6 +116,31 @@ export default function SandboxDetailPage() {
     const tb = new Date(b.timestamp as unknown as string).getTime();
     return sortOrder === 'desc' ? tb - ta : ta - tb;
   });
+
+  function downloadEvents() {
+    if (sortedEntries.length === 0) return;
+    const header = 'Timestamp,Level,Message';
+    const rows = sortedEntries.map((entry) => {
+      const d = new Date(entry.timestamp as unknown as string);
+      const ts = Number.isNaN(d.getTime())
+        ? entry.timestamp
+        : d.toISOString().replace('T', ' ').slice(0, 19);
+      const level = (entry.level ?? 'info').toString();
+      const message = entry.message ?? '';
+      return `${escapeCsvField(String(ts))},${escapeCsvField(level)},${escapeCsvField(message)}`;
+    });
+    const csv = [header, ...rows].join('\r\n');
+    const bom = '\uFEFF';
+    const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sandbox-${sandboxID}-events.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -303,7 +335,7 @@ export default function SandboxDetailPage() {
                   title={sortOrder === 'desc' ? t('eventsSortDesc') : t('eventsSortAsc')}
                   onClick={() => setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')}
                 >
-                  {sortOrder === 'desc' ? <ArrowDown size={14} /> : <ArrowUp size={14} />}
+                  <ArrowUpDown size={14} className={cn(sortOrder === 'desc' ? 'rotate-0' : 'rotate-180 transition-transform')} />
                 </Button>
                 <Button
                   size="icon"
@@ -313,6 +345,15 @@ export default function SandboxDetailPage() {
                   disabled={logs.isFetching}
                 >
                   <RefreshCw size={14} className={cn(logs.isFetching && 'animate-spin')} />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title={t('eventsExport')}
+                  onClick={downloadEvents}
+                  disabled={entries.length === 0}
+                >
+                  <Download size={14} />
                 </Button>
               </div>
             </CardHeader>
