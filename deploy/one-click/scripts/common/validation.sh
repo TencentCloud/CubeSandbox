@@ -9,6 +9,13 @@ if [[ "${ONE_CLICK_VALIDATION_LIB_LOADED:-0}" == "1" ]]; then
 fi
 ONE_CLICK_VALIDATION_LIB_LOADED=1
 
+if ! type die >/dev/null 2>&1; then
+  die() {
+    echo "[validation] ERROR: $*" >&2
+    exit 1
+  }
+fi
+
 validate_ipv4_literal() {
   local value="$1"
   local name="${2:-IPv4 address}"

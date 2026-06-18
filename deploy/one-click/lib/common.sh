@@ -653,9 +653,9 @@ patch_cubelet_config_template() {
 # system-destroying `rm -rf`. Beyond the root/system/top-level denylist, a
 # non-empty existing prefix is only wiped when it is a recognised CubeSandbox
 # install (presence of a marker artifact such as .one-click.env / CubeMaster)
-# or effectively empty -- the wipe preserves '.backup', so a lone '.backup'
-# left over from an interrupted upgrade is fine. Non-existent prefixes are
-# allowed (a fresh path the installer is about to create).
+# or effectively empty. A lone '.backup' left over from an interrupted upgrade
+# is fine only when it is a real directory, not a symlink. Non-existent prefixes
+# are allowed (a fresh path the installer is about to create).
 assert_safe_install_prefix() {
   local prefix="$1"
 
@@ -688,11 +688,22 @@ assert_safe_install_prefix() {
   # Content sanity check: the custom-prefix wipe deletes every top-level entry
   # except '.backup'. Refuse unless the prefix is a recognised CubeSandbox
   # install (a marker artifact is present) or effectively empty (nothing to
-  # destroy; '.backup' alone is harmless since the wipe preserves it). This
+  # destroy; '.backup' alone is accepted only when it is a real directory). This
   # closes the denylist gap -- e.g. /usr/local or /var/lib are deep enough and
   # not blacklisted, but hold foreign content with no CubeSandbox markers.
   if [[ -d "${norm}" ]]; then
+    _assert_no_top_level_symlinks "${norm}" "${prefix}"
     _assert_cube_prefix_marker_or_empty "${norm}" "${prefix}"
+  fi
+}
+
+_assert_no_top_level_symlinks() {
+  local dir="$1"
+  local display="$2"
+  local symlink
+  symlink="$(find "${dir}" -mindepth 1 -maxdepth 1 -type l -print -quit 2>/dev/null || true)"
+  if [[ -n "${symlink}" ]]; then
+    die "refusing to wipe custom install prefix ${display}: contains top-level symlink (${symlink}); move it away and retry"
   fi
 }
 
@@ -740,6 +751,7 @@ wipe_custom_install_prefix_contents() {
 
     # Re-run the marker/empty check against the pinned cwd. This closes the
     # gap between path validation and destructive deletion.
+    _assert_no_top_level_symlinks "." "${prefix}"
     _assert_cube_prefix_marker_or_empty "." "${prefix}"
     find . -mindepth 1 -maxdepth 1 ! -name '.backup' -exec rm -rf -- {} +
   )
@@ -1105,13 +1117,15 @@ preflight_upgrade_disk_space() {
 # metadata into a timestamped backup dir. Prints the backup dir to stdout.
 backup_before_upgrade() {
   local install_prefix="$1"
-  local ts backup_dir rel
+  local ts backup_root backup_dir rel
   ts="$(date +%Y%m%d-%H%M%S)"
-  backup_dir="${install_prefix}/.backup/upgrade-${ts}"
+  backup_root="${install_prefix}/.backup"
+  [[ ! -L "${backup_root}" ]] || die "refusing to use symlink backup directory: ${backup_root}"
+  backup_dir="${backup_root}/upgrade-${ts}"
   mkdir -p "${backup_dir}"
   # The backup holds secret-bearing config (.one-click.env, conf files); keep
   # it owner-only so secrets are not world/group readable on disk.
-  chmod 700 "${install_prefix}/.backup" 2>/dev/null || true
+  chmod 700 "${backup_root}" 2>/dev/null || true
   chmod 700 "${backup_dir}" 2>/dev/null || true
 
   for rel in \

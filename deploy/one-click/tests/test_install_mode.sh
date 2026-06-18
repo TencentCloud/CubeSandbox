@@ -167,11 +167,27 @@ test_assert_safe_install_prefix() {
     || fail "assert_safe_install_prefix should accept an empty prefix"
 
   # A prefix holding only '.backup' is accepted (the wipe preserves .backup,
-  # e.g. after an interrupted upgrade).
+  # e.g. after an interrupted upgrade) when .backup is a real directory.
   local onlybak="${TMP_DIR}/onlybak"
   mkdir -p "${onlybak}/.backup"
   ( assert_safe_install_prefix "${onlybak}" ) >/dev/null 2>&1 \
     || fail "assert_safe_install_prefix should accept a prefix holding only .backup"
+
+  local symlink_target="${TMP_DIR}/symlink-target"
+  mkdir -p "${symlink_target}"
+  local symlink_prefix="${TMP_DIR}/symlink-prefix"
+  mkdir -p "${symlink_prefix}"
+  ln -s "${symlink_target}" "${symlink_prefix}/linked"
+  if ( assert_safe_install_prefix "${symlink_prefix}" ) >/dev/null 2>&1; then
+    fail "assert_safe_install_prefix should reject top-level symlinks"
+  fi
+
+  local backup_link_prefix="${TMP_DIR}/backup-link-prefix"
+  mkdir -p "${backup_link_prefix}" "${TMP_DIR}/backup-link-target"
+  ln -s "${TMP_DIR}/backup-link-target" "${backup_link_prefix}/.backup"
+  if ( assert_safe_install_prefix "${backup_link_prefix}" ) >/dev/null 2>&1; then
+    fail "assert_safe_install_prefix should reject a .backup symlink"
+  fi
 }
 
 test_wipe_custom_install_prefix_contents() {
@@ -193,6 +209,16 @@ test_wipe_custom_install_prefix_contents() {
     fail "wipe should reject a non-empty prefix without CubeSandbox markers"
   fi
   [[ -e "${foreign}/file.txt" ]] || fail "rejected foreign prefix must remain untouched"
+
+  local with_symlink="${TMP_DIR}/wipe-with-symlink" external="${TMP_DIR}/external-target"
+  mkdir -p "${with_symlink}" "${external}"
+  : > "${with_symlink}/.one-click.env"
+  : > "${external}/keep.txt"
+  ln -s "${external}" "${with_symlink}/linked"
+  if ( wipe_custom_install_prefix_contents "${with_symlink}" ) >/dev/null 2>&1; then
+    fail "wipe should reject a marker-bearing prefix with a top-level symlink"
+  fi
+  [[ -e "${external}/keep.txt" ]] || fail "wipe must not touch symlink target content"
 }
 
 test_control_plane_validators() {
@@ -273,6 +299,34 @@ EOF
   [[ "${mode}" == "700" ]] || fail "backup dir should be 700 (got ${mode})"
   mode="$(stat -c '%a' "${backup_dir}/.one-click.env" 2>/dev/null || echo "")"
   [[ "${mode}" == "600" ]] || fail ".one-click.env backup should be 600 (got ${mode})"
+
+  local bad_inst="${TMP_DIR}/backup-symlink-inst" outside="${TMP_DIR}/backup-outside"
+  mkdir -p "${bad_inst}" "${outside}"
+  : > "${bad_inst}/.one-click.env"
+  ln -s "${outside}" "${bad_inst}/.backup"
+  if ( backup_before_upgrade "${bad_inst}" ) >/dev/null 2>&1; then
+    fail "backup_before_upgrade should reject a symlink .backup directory"
+  fi
+  if compgen -G "${outside}/upgrade-*" >/dev/null; then
+    fail "backup_before_upgrade must not write through a .backup symlink"
+  fi
+}
+
+test_validation_library_fallback_die() {
+  local err="${TMP_DIR}/validation-fallback.err"
+  if (
+    unset -f die 2>/dev/null || true
+    unset ONE_CLICK_VALIDATION_LIB_LOADED
+    # shellcheck source=../scripts/common/validation.sh
+    source "${ONE_CLICK_DIR}/scripts/common/validation.sh"
+    validate_host_port "bad/host:8089" "TEST_ADDR"
+  ) >/dev/null 2>"${err}"; then
+    fail "validation.sh fallback die should fail invalid input"
+  fi
+  assert_contains "${err}" "[validation] ERROR:"
+  if grep -Fq "command not found" "${err}"; then
+    fail "validation.sh fallback should not produce command-not-found"
+  fi
 }
 
 test_install_sh_wires_upgrade_flow() {
@@ -313,6 +367,7 @@ test_wipe_custom_install_prefix_contents
 test_control_plane_validators
 test_patch_cubelet_config_template_refuses_symlink
 test_upgrade_preflight_and_backup
+test_validation_library_fallback_die
 test_install_sh_wires_upgrade_flow
 
 echo "install mode tests OK"
