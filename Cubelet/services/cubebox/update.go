@@ -300,11 +300,10 @@ func (s *service) admitResume(
 	alloc := s.cubeboxMgr.aggregateAllocated()
 	memQuotaMB := int64(0)
 	if memQuota, err := resource.ParseQuantity(hostConf.Quota.Mem); err == nil {
-		memQuotaMB = memQuota.Value() / 1024 / 1024
+		memQuotaMB = bytesToMB(memQuota.Value())
 	}
 	// Only the released fraction is the incremental demand of resuming.
-	needMemMB := scaleInt64(sb.ResourceWithOverHead.HostMemQ.Value()/1024/1024, releaseRatio)
-	needCPU := scaleInt64(sb.ResourceWithOverHead.HostCpuQ.MilliValue(), releaseRatio)
+	needMemMB, needCPU := resumeDemand(sb.ResourceWithOverHead, releaseRatio)
 
 	if reason := resumeQuotaRejection(resumeQuotaCheck{
 		usedMemMB:     alloc.MemoryMB,
@@ -327,6 +326,19 @@ func (s *service) admitResume(
 	return nil
 }
 
+// resumeDemand returns the incremental CPU/memory a resume re-adds to the node
+// under releaseRatio. While paused, the sandbox already contributes (1-ratio)
+// of its quota to aggregateAllocated, so resuming it (a full reservation) only
+// adds back the released `ratio` fraction. The memory side scales at byte
+// precision and truncates to MB only at the very end, identical to
+// aggregateSandboxResources, so the admission and accounting paths cannot
+// disagree by a sub-MB rounding gap. Callers must pass a clamped ratio.
+func resumeDemand(r *cubeboxstore.ResourceWithOverHead, releaseRatio float64) (needMemMB, needCPUMilli int64) {
+	needMemMB = bytesToMB(scaleInt64(r.HostMemQ.Value(), releaseRatio))
+	needCPUMilli = scaleInt64(r.HostCpuQ.MilliValue(), releaseRatio)
+	return needMemMB, needCPUMilli
+}
+
 // resumeQuotaCheck bundles the post-resume quota inputs so call sites name each
 // value explicitly (six positional int64s are easy to transpose) and future
 // dimensions (e.g. disk) can be added without reshuffling arguments.
@@ -341,6 +353,13 @@ type resumeQuotaCheck struct {
 // non-positive quota means "unbounded" for that dimension and is skipped, which
 // matches how the rest of the cubelet treats an unset host quota.
 func resumeQuotaRejection(c resumeQuotaCheck) string {
+	// NOTE: these two reason formats are an explicit cross-language contract:
+	// the WebUI parses them by regex in web/src/lib/sandboxActionError.ts
+	// (formatSandboxActionError) to render the localized capacity banner. Keep
+	// the exact wording ("need %dMB + used %dMB > mem quota %dMB" and the "%dm"
+	// CPU variant) in sync with that regex, or the frontend silently falls back
+	// to a generic message. TestResumeQuotaRejectionMessageFormat locks the
+	// format on this side.
 	if c.memQuotaMB > 0 && c.usedMemMB+c.needMemMB > c.memQuotaMB {
 		return fmt.Sprintf("need %dMB + used %dMB > mem quota %dMB",
 			c.needMemMB, c.usedMemMB, c.memQuotaMB)

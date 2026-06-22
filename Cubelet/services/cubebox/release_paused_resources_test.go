@@ -175,10 +175,69 @@ func TestScaleInt64(t *testing.T) {
 func TestAdmitResumeNoOpWhenPolicyDisabled(t *testing.T) {
 	// With no config loaded, GetHostConf() returns defaults where the policy is
 	// off, so resume must always be admitted regardless of node pressure.
-	s := &service{}
+	//
+	// Inject a real (empty) cubebox manager rather than leaving cubeboxMgr nil:
+	// the no-op must hold because the policy is off, not because admitResume
+	// happens to early-return before touching s.cubeboxMgr. A future refactor
+	// that reorders the policy-off check would otherwise nil-panic here instead
+	// of failing loudly on the actual behaviour.
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{}}}
 	sb := sandboxWithResourceForTest("sb", cubeboxstore.Status{PausedAt: time.Now().UnixNano()}, "1000m", "2Gi", 1, 0, 0)
 	rsp := &cubebox.UpdateCubeSandboxResponse{Ret: &errorcode.Ret{RetCode: errorcode.ErrorCode_Success}}
 
 	require.Nil(t, s.admitResume(context.Background(), sb, rsp))
 	assert.Equal(t, errorcode.ErrorCode_Success, rsp.Ret.RetCode)
+}
+
+// TestResumeDemandUsesBytePrecision locks the fix for the admission/accounting
+// precision mismatch: resumeDemand must scale at byte precision and truncate to
+// MB only at the end, exactly like aggregateSandboxResources, so the released
+// fraction (need) plus the reserved fraction equals the sandbox's full quota
+// with no off-by-one drift.
+func TestResumeDemandUsesBytePrecision(t *testing.T) {
+	// A HostMemQ deliberately NOT MiB-aligned (~101.9 MiB in raw bytes) so the
+	// legacy truncate-then-scale ordering and the byte-precision
+	// scale-then-truncate ordering diverge by 1 MB at this ratio.
+	r := &cubeboxstore.ResourceWithOverHead{
+		HostMemQ: resource.MustParse("106850713"),
+		HostCpuQ: resource.MustParse("2000m"),
+	}
+
+	needMemMB, needCPU := resumeDemand(r, 0.9)
+
+	// Byte precision: floor(floor(106850713 * 0.9) / 1MiB) = 91.
+	assert.Equal(t, int64(91), needMemMB)
+	assert.Equal(t, int64(1800), needCPU)
+
+	// The old truncate-then-scale path would have produced 90; assert the fix
+	// no longer matches it. Crucially this keeps need + reserved == full:
+	// reserved = bytesToMB(scaleInt64(bytes, 1-0.9)) = 10, full = 101.
+	legacyNeedMemMB := scaleInt64(r.HostMemQ.Value()/1024/1024, 0.9)
+	assert.Equal(t, int64(90), legacyNeedMemMB)
+	assert.NotEqual(t, legacyNeedMemMB, needMemMB)
+
+	reservedMemMB := bytesToMB(scaleInt64(r.HostMemQ.Value(), 1-0.9))
+	fullMemMB := bytesToMB(r.HostMemQ.Value())
+	assert.Equal(t, fullMemMB, needMemMB+reservedMemMB, "need + reserved must equal full quota")
+}
+
+// TestResumeQuotaRejectionMessageFormat locks the exact reason wording, which
+// is a cross-language contract parsed by regex in
+// web/src/lib/sandboxActionError.ts. If either format string changes, the
+// WebUI regex must change in lockstep or it silently falls back to a generic
+// message; this test fails first to flag the drift.
+func TestResumeQuotaRejectionMessageFormat(t *testing.T) {
+	mem := resumeQuotaRejection(resumeQuotaCheck{
+		usedMemMB:  6144,
+		needMemMB:  4096,
+		memQuotaMB: 8192,
+	})
+	assert.Equal(t, "need 4096MB + used 6144MB > mem quota 8192MB", mem)
+
+	cpu := resumeQuotaRejection(resumeQuotaCheck{
+		usedCPUMilli:  7000,
+		needCPUMilli:  2000,
+		cpuQuotaMilli: 8000,
+	})
+	assert.Equal(t, "need 2000m + used 7000m > cpu quota 8000m", cpu)
 }

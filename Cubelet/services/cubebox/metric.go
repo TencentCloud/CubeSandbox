@@ -153,6 +153,15 @@ func scaleInt64(v int64, factor float64) int64 {
 	return int64(float64(v) * factor)
 }
 
+// bytesToMB is the single byte->MiB conversion shared by the accounting side
+// (aggregateSandboxResources) and the resume-admission side (admitResume), so
+// both truncate to MB at exactly the same point. Keeping it in one place
+// prevents the two paths from drifting on "scale-then-truncate" vs
+// "truncate-then-scale" ordering.
+func bytesToMB(b int64) int64 {
+	return b / 1024 / 1024
+}
+
 // aggregateSandboxResources is the pure accounting kernel behind
 // aggregateAllocated, split out so the release-ratio policy can be exercised
 // directly in tests without standing up the full config/store stack.
@@ -218,7 +227,7 @@ func aggregateSandboxResources(sbs []*cubeboxstore.CubeBox, releaseRatio float64
 	}
 	return aggregatedSandboxView{
 		MilliCPU:      cpuMilli,
-		MemoryMB:      memBytes / 1024 / 1024,
+		MemoryMB:      bytesToMB(memBytes),
 		MvmNum:        int64(len(sbs)),
 		MvmRunningNum: runningBox,
 		NicQueues:     nicQueues,

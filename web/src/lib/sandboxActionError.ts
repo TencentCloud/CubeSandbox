@@ -13,6 +13,13 @@ export function formatSandboxActionError(err: unknown, t: TranslateFn): string {
   if (status === 409 && /resume rejected by paused_resource_release_ratio/i.test(raw)) {
     // Cubelet rejects on whichever dimension overflows first, so handle both
     // the memory (MB) and the CPU (milli, "m") reason formats.
+    //
+    // NOTE: these regexes mirror the exact reason strings produced by
+    // resumeQuotaRejection in Cubelet/services/cubebox/update.go. They are a
+    // cross-language contract; if the Go format strings change, update these
+    // regexes too (the Go side guards its format via
+    // TestResumeQuotaRejectionMessageFormat). On a mismatch we fall back to the
+    // generic errors.resumeCapacity message below.
     const mem = raw.match(/need (\d+MB) \+ used (\d+MB) > mem quota (\d+MB)/);
     if (mem) {
       return t('errors.resumeCapacityDetail', {
