@@ -7,10 +7,11 @@
 //
 // CubeMaster is the single writer for the canonical view:
 //
-//   - cube:sandbox:meta            HSet, field=sandboxID, value=JSON snapshot.
-//     Sidecars HGETALL it on startup to bootstrap the registry.
-//   - cube:sandbox:events          Stream, append-only event log of
-//     create/delete operations. Sidecars consume via XREADGROUP for
+//   - cube:v1:shared:sandbox:lifecycle:meta    HSet, field=sandboxID,
+//     value=JSON snapshot. Sidecars HGETALL it on startup to bootstrap
+//     the registry.
+//   - cube:v1:shared:sandbox:lifecycle:events  Stream, append-only event
+//     log of create/delete operations. Sidecars consume via XREADGROUP for
 //     incremental updates after the bootstrap.
 //
 // Updates (pause/resume action) intentionally do NOT publish to the stream:
@@ -18,17 +19,21 @@
 // CubeMaster also publish them would just be a redundant round trip.
 package lifecycle
 
-// Redis key / field constants. Keep them centralized so the sidecar (Go) and
-// any other consumer can import the same source of truth.
-const (
+import "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/rediskey"
+
+// Redis key constants. Keep them centralized so the sidecar (Go) and any
+// other consumer can import the same source of truth.
+var (
 	// MetaKey is the HSet snapshot of every live sandbox the sidecar should
 	// know about. Field = sandbox ID, value = JSON-encoded SandboxLifecycleMeta.
-	MetaKey = "cube:sandbox:meta"
+	MetaKey = rediskey.SandboxLifecycleMeta()
 
 	// EventStreamKey is the append-only stream of create/delete events. The
 	// sidecar maintains a consumer group on it; entries trim with MAXLEN ~.
-	EventStreamKey = "cube:sandbox:events"
+	EventStreamKey = rediskey.SandboxLifecycleEvents()
+)
 
+const (
 	// EventStreamMaxLen caps the stream so an offline sidecar cannot drive
 	// unbounded Redis growth. Sidecars also bootstrap from MetaKey, so any
 	// trimmed events are recovered on the next full sync.

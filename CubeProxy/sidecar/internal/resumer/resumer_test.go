@@ -272,7 +272,8 @@ func TestResumer_WaitsWhenPeerHoldsLock(t *testing.T) {
 
 func TestResumer_OwnsResumeWhenStateIsTerminalPaused(t *testing.T) {
 	// The race we hit in production: sweeper successfully paused the
-	// sandbox, leaving cube:sandbox:state:<id>="paused". A subsequent
+	// sandbox, leaving cube:v1:shared:sandbox:lifecycle:state:<id>="paused".
+	// A subsequent
 	// request hits the gate, which calls /_sidecar_resume. The resumer
 	// must NOT mistake the terminal "paused" for a peer's in-flight lock
 	// — it must claim ownership and drive the resume RPC.

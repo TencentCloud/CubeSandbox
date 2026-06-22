@@ -22,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/rediskey"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/wrapredis"
@@ -209,60 +210,42 @@ func NotifyEvent(e *Event) error {
 }
 
 func SetSandboxProxyMap(ctx context.Context, proxyInfo *types.SandboxProxyMap) error {
-	keyByPass := "bypass_host_proxy" + ":" + proxyInfo.SandboxID
-	err := l.setByPassProsyToRedis(ctx, keyByPass, proxyInfo)
-	if err != nil {
-		return err
-	}
-	return nil
+	return l.setByPassProsyToRedis(ctx, rediskey.SandboxProxy(proxyInfo.SandboxID), proxyInfo)
 }
 
 func GetSandboxProxyMap(ctx context.Context, sandboxID string) (*types.SandboxProxyMap, bool) {
-
-	keyByPass := "bypass_host_proxy" + ":" + sandboxID
-	proxyMap, err := l.getByPassProsyFromRedis(ctx, keyByPass)
-	if err != nil {
-		return nil, false
+	for _, key := range rediskey.ReadKeysWithFallback(rediskey.SandboxProxy(sandboxID), rediskey.LegacySandboxProxy(sandboxID)) {
+		proxyMap, err := l.getByPassProsyFromRedis(ctx, key)
+		if err == nil && proxyMap != nil {
+			return proxyMap, true
+		}
 	}
-
-	if proxyMap != nil {
-		return proxyMap, true
-	} else {
-		return nil, false
-	}
+	return nil, false
 }
 
 func GetInstanceInfoMap(ctx context.Context, insID string) (*types.InstanceInfoMap, bool) {
-	keyByIns := "cube_instance_info" + ":" + insID
-	proxyMap, err := l.getInsInfoFromRedis(ctx, keyByIns)
-	if err != nil {
-		return nil, false
-	}
-
-	if proxyMap != nil {
-		return proxyMap, true
+	for _, key := range rediskey.ReadKeysWithFallback(rediskey.InstanceInfo(insID), rediskey.LegacyInstanceInfo(insID)) {
+		insMap, err := l.getInsInfoFromRedis(ctx, key)
+		if err == nil && insMap != nil {
+			return insMap, true
+		}
 	}
 	return nil, false
 }
 
 func SetInstanceInfoMap(ctx context.Context, insInfo *types.InstanceInfoMap) error {
-	keyByIns := "cube_instance_info" + ":" + insInfo.InsID
-	err := l.setInstanceInfoMapToRedis(ctx, keyByIns, insInfo)
-	if err != nil {
-		return err
-	}
-	return nil
+	return l.setInstanceInfoMapToRedis(ctx, rediskey.InstanceInfo(insInfo.InsID), insInfo)
 }
 
 func SetInstanceInfoField(ctx context.Context, insID string, kv ...string) error {
-	keyByIns := "cube_instance_info" + ":" + insID
 	fieldValues := []interface{}{}
 	for i := 0; i < len(kv); i += 2 {
 		fieldValues = append(fieldValues, kv[i], kv[i+1])
 	}
-	_, err := wrapredis.GetRedis().Do("HSET", redis.Args{keyByIns}.AddFlat(fieldValues)...)
+	key := rediskey.InstanceInfo(insID)
+	_, err := wrapredis.GetRedis().Do("HSET", redis.Args{key}.AddFlat(fieldValues)...)
 	if err != nil {
-		log.G(ctx).Errorf("redis set error, key: %s, err: %s", keyByIns, err)
+		log.G(ctx).Errorf("redis set error, key: %s, err: %s", key, err)
 		return err
 	}
 	if log.IsDebug() {
@@ -272,44 +255,37 @@ func SetInstanceInfoField(ctx context.Context, insID string, kv ...string) error
 }
 
 func DeleteInstanceInfoMap(ctx context.Context, insID string) error {
-	keyByIns := "cube_instance_info" + ":" + insID
-	err := l.deleteKeyFromRedis(ctx, keyByIns)
-	if err != nil {
-		return err
+	var firstErr error
+	for _, key := range rediskey.DeleteKeys(rediskey.InstanceInfo(insID), rediskey.LegacyInstanceInfo(insID)) {
+		if err := l.deleteKeyFromRedis(ctx, key); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+	return firstErr
 }
 
 func DeleteSandboxProxyMap(ctx context.Context, sandboxID string) error {
-	keyByPass := "bypass_host_proxy" + ":" + sandboxID
-	err := l.deleteKeyFromRedis(ctx, keyByPass)
-	if err != nil {
-		return err
+	var firstErr error
+	for _, key := range rediskey.DeleteKeys(rediskey.SandboxProxy(sandboxID), rediskey.LegacySandboxProxy(sandboxID)) {
+		if err := l.deleteKeyFromRedis(ctx, key); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+	return firstErr
 }
 
 func SetDescribeTask(ctx context.Context, taskInfo *types.DescribeTaskMap) error {
-	key := "describetask" + ":" + taskInfo.TaskID
-	err := l.setDescribeTaskToRedis(ctx, key, taskInfo)
-	if err != nil {
-		return err
-	}
-	return nil
+	return l.setDescribeTaskToRedis(ctx, rediskey.DescribeTask(taskInfo.TaskID), taskInfo)
 }
 
 func GetDescribeTask(ctx context.Context, taskID string) (*types.DescribeTaskMap, bool) {
-	key := "describetask" + ":" + taskID
-	taskInfo, err := l.getDescribeTaskFromRedis(ctx, key)
-	if err != nil {
-		return nil, false
+	for _, key := range rediskey.ReadKeysWithFallback(rediskey.DescribeTask(taskID), rediskey.LegacyDescribeTask(taskID)) {
+		taskInfo, err := l.getDescribeTaskFromRedis(ctx, key)
+		if err == nil && taskInfo != nil {
+			return taskInfo, true
+		}
 	}
-
-	if taskInfo != nil {
-		return taskInfo, true
-	} else {
-		return nil, false
-	}
+	return nil, false
 }
 
 func SetTemplateImageJobPullProgress(ctx context.Context, progress *types.TemplateImageJobPullProgressMap) error {

@@ -140,6 +140,17 @@ type RedisConf struct {
 
 	Nodes    string `yaml:"nodes"`
 	MaxRetry int    `yaml:"max_retry"`
+
+	// NodeMetricTTLSec is the safety TTL (seconds) for node-metric keys so an
+	// offline node's entry auto-expires; refreshed on every heartbeat write.
+	// A value <= 0 disables the TTL.
+	NodeMetricTTLSec int `yaml:"node_metric_ttl_sec"`
+	// SandboxProxyTTLSec is an OPTIONAL safety TTL (seconds) for sandbox proxy
+	// routing keys. It defaults to 0 (disabled) because the route key has no
+	// refresh path; enabling it is only safe if the TTL exceeds the maximum
+	// sandbox lifetime, otherwise a live route would expire and break routing.
+	// Normal teardown removes the key via DEL.
+	SandboxProxyTTLSec int `yaml:"sandbox_proxy_ttl_sec"`
 }
 
 type SchedulerConf struct {
@@ -761,6 +772,19 @@ func preComHandleConf(config *Config) error {
 
 	if config.Common.DescribeTaskExpireTime == 0 {
 		config.Common.DescribeTaskExpireTime = 86400
+	}
+
+	if config.RedisConf != nil {
+		if config.RedisConf.NodeMetricTTLSec == 0 {
+			// Node metrics are rewritten on every heartbeat, so a short safety
+			// TTL only auto-cleans offline nodes and never expires live ones.
+			config.RedisConf.NodeMetricTTLSec = 600
+		}
+		// SandboxProxyTTLSec intentionally has no positive default: the proxy
+		// route key is written once at sandbox creation with no refresh path, so
+		// any TTL shorter than the max sandbox lifetime would expire a live
+		// route and break CubeProxy. Lifecycle is managed by explicit DEL.
+		// Leave it 0 (disabled) unless a refresh mechanism is added first.
 	}
 	if config.Common.DbMaxRetryCount == 0 {
 		config.Common.DbMaxRetryCount = 5

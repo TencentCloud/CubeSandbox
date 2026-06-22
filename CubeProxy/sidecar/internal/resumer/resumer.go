@@ -100,11 +100,11 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 		return errors.New("auto_resume not enabled for sandbox")
 	}
 
-	// cube:sandbox:state:<id> is dual-purpose: terminal markers (paused /
-	// running) AND in-flight transition locks (pausing / resuming) live in
-	// the same key. SETNX alone can't distinguish "I'm resuming this" from
-	// "this sandbox is parked at terminal-paused waiting for someone to
-	// resume it" — we need to peek first.
+	// cube:v1:shared:sandbox:lifecycle:state:<id> is dual-purpose: terminal
+	// markers (paused / running) AND in-flight transition locks (pausing /
+	// resuming) live in the same key. SETNX alone can't distinguish "I'm
+	// resuming this" from "this sandbox is parked at terminal-paused waiting
+	// for someone to resume it" — we need to peek first.
 	switch ownErr := r.acquireResumeOwnership(ctx, sandboxID); {
 	case ownErr == nil:
 		// We own the resume; call CubeMaster.
@@ -263,8 +263,8 @@ func (r *Resumer) acquireResumeOwnership(ctx context.Context, sandboxID string) 
 var errAlreadyRunning = errors.New("sandbox already running")
 
 // waitForRunning is invoked when AcquireState lost the SETNX race — i.e.
-// some other key/holder occupies cube:sandbox:state:<id>. We poll that key
-// for one of three terminal outcomes:
+// some other key/holder occupies cube:v1:shared:sandbox:lifecycle:state:<id>.
+// We poll that key for one of three terminal outcomes:
 //
 //   - state == "running"    → peer succeeded, request can proceed.
 //   - state == "paused"     → peer gave up; bail with an error so

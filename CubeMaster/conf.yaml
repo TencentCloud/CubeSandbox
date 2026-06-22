@@ -74,6 +74,9 @@ redis:
   max_active: 32
   idle_timeout: 30
   max_retry: 2
+  node_metric_ttl_sec: 600
+  # 0 = disabled; route key has no refresh path (see cubemaster.yaml comment).
+  sandbox_proxy_ttl_sec: 0
 
 scheduler:
   priority_select_num: 1

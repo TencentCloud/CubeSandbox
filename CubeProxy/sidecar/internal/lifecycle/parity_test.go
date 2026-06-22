@@ -18,9 +18,9 @@ func TestSchemaConstants(t *testing.T) {
 	cases := []struct {
 		name, got, want string
 	}{
-		{"MetaKey", MetaKey, "cube:sandbox:meta"},
-		{"EventStreamKey", EventStreamKey, "cube:sandbox:events"},
-		{"StateKeyPrefix", StateKeyPrefix, "cube:sandbox:state:"},
+		{"MetaKey", MetaKey, "cube:v1:shared:sandbox:lifecycle:meta"},
+		{"EventStreamKey", EventStreamKey, "cube:v1:shared:sandbox:lifecycle:events"},
+		{"StateKey", StateKey("test-id"), "cube:v1:shared:sandbox:lifecycle:state:test-id"},
 		{"OpCreate", OpCreate, "create"},
 		{"OpDelete", OpDelete, "delete"},
 		{"FieldOp", FieldOp, "op"},

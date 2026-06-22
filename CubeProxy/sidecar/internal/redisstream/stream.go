@@ -30,8 +30,8 @@ func New(rdb *redis.Client, log *zap.Logger) *Client {
 	return &Client{rdb: rdb, log: log}
 }
 
-// Bootstrap returns every sandbox in cube:sandbox:meta. Empty result is fine —
-// it just means CubeMaster hasn't published anything yet.
+// Bootstrap returns every sandbox in cube:v1:shared:sandbox:lifecycle:meta.
+// Empty result is fine — it just means CubeMaster hasn't published anything yet.
 func (c *Client) Bootstrap(ctx context.Context) (map[string]lifecycle.SandboxLifecycleMeta, error) {
 	raw, err := c.rdb.HGetAll(ctx, lifecycle.MetaKey).Result()
 	if err != nil {
@@ -124,11 +124,12 @@ func (c *Client) Ack(ctx context.Context, group, id string) error {
 	return c.rdb.XAck(ctx, lifecycle.EventStreamKey, group, id).Err()
 }
 
-// AcquireState performs a SET NX EX on cube:sandbox:state:<id> with the
-// supplied desired state. Returns true on success. Used to coordinate concurrent
-// pause/resume across sidecars: whoever wins the SETNX owns the transition.
+// AcquireState performs a SET NX EX on the per-sandbox lifecycle state key with
+// the supplied desired state. Returns true on success. Used to coordinate
+// concurrent pause/resume across sidecars: whoever wins the SETNX owns the
+// transition.
 func (c *Client) AcquireState(ctx context.Context, sandboxID, state string, ttl time.Duration) (bool, error) {
-	key := lifecycle.StateKeyPrefix + sandboxID
+	key := lifecycle.StateKey(sandboxID)
 	ok, err := c.rdb.SetNX(ctx, key, state, ttl).Result()
 	if err != nil {
 		return false, fmt.Errorf("setnx %s: %w", key, err)
@@ -140,20 +141,20 @@ func (c *Client) AcquireState(ctx context.Context, sandboxID, state string, ttl 
 // transition pausing → paused or resuming → running once the underlying
 // operation has actually completed.
 func (c *Client) SetState(ctx context.Context, sandboxID, state string, ttl time.Duration) error {
-	key := lifecycle.StateKeyPrefix + sandboxID
+	key := lifecycle.StateKey(sandboxID)
 	return c.rdb.Set(ctx, key, state, ttl).Err()
 }
 
 // ClearState drops the key altogether. Used on rollback (operation failed)
 // and on sandbox delete.
 func (c *Client) ClearState(ctx context.Context, sandboxID string) error {
-	key := lifecycle.StateKeyPrefix + sandboxID
+	key := lifecycle.StateKey(sandboxID)
 	return c.rdb.Del(ctx, key).Err()
 }
 
 // GetState returns the current state and whether the key exists.
 func (c *Client) GetState(ctx context.Context, sandboxID string) (string, bool, error) {
-	key := lifecycle.StateKeyPrefix + sandboxID
+	key := lifecycle.StateKey(sandboxID)
 	v, err := c.rdb.Get(ctx, key).Result()
 	if errors.Is(err, redis.Nil) {
 		return "", false, nil

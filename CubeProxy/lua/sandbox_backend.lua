@@ -8,6 +8,7 @@
 -- upstream host:port that the nginx balancer phase should connect to.
 
 local utils = require "utils"
+local redis_keys = require "redis_keys"
 
 local _M = { _VERSION = "0.01" }
 
@@ -34,26 +35,42 @@ local function load_sandbox_proxy_metadata(ins_id)
         redis_index = ngx.var.redis_index
     })
 
-    local key = "bypass_host_proxy:" .. ins_id
-    local value, err
-    for i = 1, 3 do
-        value, err = red:hgetall(key)
-        if not err then
-            break
+    -- During migration we try the new namespaced key first and fall back to the
+    -- legacy "bypass_host_proxy:<id>" key.
+    local keys = redis_keys.read_keys_with_fallback(
+        redis_keys.sandbox_proxy(ins_id),
+        redis_keys.legacy_sandbox_proxy(ins_id))
+
+    local last_err
+    for _, key in ipairs(keys) do
+        local value, err
+        for i = 1, 3 do
+            value, err = red:hgetall(key)
+            if not err then
+                break
+            end
+            ngx.log(ngx.ERR, "LEVEL_WARN||",
+                string.format("request %s using key %s get redis err: %s, retry %d",
+                    ngx.var.http_x_cube_request_id, key, err, i))
         end
-        ngx.log(ngx.ERR, "LEVEL_WARN||",
-            string.format("request %s using key %s get redis err: %s, retry %d",
-                ngx.var.http_x_cube_request_id, key, err, i))
+        if err then
+            last_err = err
+        elseif value and #value > 0 then
+            return value, nil
+        else
+            -- This Redis command succeeded but the key is empty/missing. Clear
+            -- any previous key's transport error so the final result is a
+            -- truthful "not found" instead of a stale connectivity error.
+            last_err = nil
+        end
     end
-    if err then
-        return nil, string.format("request %s using key %s get redis err: %s",
-            ngx.var.http_x_cube_request_id, key, err)
+
+    if last_err then
+        return nil, string.format("request %s using keys for %s get redis err: %s",
+            ngx.var.http_x_cube_request_id, ins_id, last_err)
     end
-    if not value then
-        return nil, string.format("request %s using key %s get redis nil",
-            ngx.var.http_x_cube_request_id, key)
-    end
-    return value, nil
+    return nil, string.format("request %s using keys for %s get redis nil",
+        ngx.var.http_x_cube_request_id, ins_id)
 end
 
 --[[

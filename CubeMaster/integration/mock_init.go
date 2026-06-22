@@ -123,12 +123,15 @@ func mocktest_InitGlobalResources() {
 
 func mocktest_CleanupGlobalResources() {
 
-	conn := wrapredis.GetRedis()
-
-	redisKeysBefore, _ := redis.Int(conn.Do("DBSIZE"))
-	conn.Do("FLUSHDB")
-
-	redisRecordsCleaned := redisKeysBefore
+	// Clear only this test's dedicated miniredis instance instead of issuing a
+	// raw FLUSHDB over the shared connection. If RedisConf.Nodes were ever
+	// pointed at a real shared Redis (multiple services share db_no=0), FLUSHDB
+	// would wipe other services' data. Flushing the owned mock server is safe.
+	redisRecordsCleaned := 0
+	if mocktest_RedisSrv != nil {
+		redisRecordsCleaned = len(mocktest_RedisSrv.Keys())
+		mocktest_RedisSrv.FlushDB()
+	}
 	stdlog.Printf("Redis database cleanup completed, cleaned %d keys", redisRecordsCleaned)
 
 	if mocktest_OssDb != nil {

@@ -12,27 +12,29 @@
 // pointer to the canonical definition) is cheaper than the cross-module wire.
 //
 // Source of truth:
-//   /data/cube-opensource-dev/CubeSandbox/CubeMaster/pkg/lifecycle/schema.go
+//   CubeMaster/pkg/lifecycle/schema.go
 //
 // Whenever you change one side, change the other in the same commit.
 package lifecycle
 
 const (
 	// MetaKey is the HSet snapshot of every live sandbox.
-	MetaKey = "cube:sandbox:meta"
+	MetaKey = "cube:v1:shared:sandbox:lifecycle:meta"
 
 	// EventStreamKey is the append-only stream of create/delete events.
-	EventStreamKey = "cube:sandbox:events"
+	EventStreamKey = "cube:v1:shared:sandbox:lifecycle:events"
 
 	// EventStreamMaxLen caps the stream so an offline sidecar cannot drive
 	// unbounded Redis growth.
 	EventStreamMaxLen = 100000
-
-	// StateKeyPrefix + sandboxID stores "running" | "pausing" | "paused" |
-	// "resuming". The sidecar uses these as cross-process locks (SETNX with
-	// TTL) to coordinate concurrent pause/resume.
-	StateKeyPrefix = "cube:sandbox:state:"
 )
+
+// StateKey returns the per-sandbox pause/resume coordination key. Values are
+// "running" | "pausing" | "paused" | "resuming". The sidecar uses SETNX with
+// TTL to coordinate concurrent pause/resume across replicas.
+func StateKey(sandboxID string) string {
+	return "cube:v1:shared:sandbox:lifecycle:state:" + sandboxID
+}
 
 // Op codes carried in stream entries.
 const (

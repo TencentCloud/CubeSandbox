@@ -74,6 +74,13 @@ redis:
   max_active: 32
   idle_timeout: 30
   max_retry: 2
+  # Safety TTL (seconds) for node-metric keys; refreshed on every heartbeat so
+  # live nodes never expire, offline nodes auto-clean. <=0 disables.
+  node_metric_ttl_sec: 600
+  # Sandbox proxy route TTL. Keep 0 (disabled): the route key has no refresh
+  # path, so any TTL below the max sandbox lifetime would break live routing.
+  # Teardown removes it via DEL. Only set > max sandbox lifetime if needed.
+  sandbox_proxy_ttl_sec: 0
 
 scheduler:
   priority_select_num: 1

@@ -96,6 +96,7 @@ export default withMermaid(defineConfig({
           { text: 'Home', link: '/' },
           { text: 'Guide', link: '/guide/introduction' },
           { text: 'Architecture', link: '/architecture/overview' },
+          { text: 'Developer', link: '/dev/' },
           { text: 'Blog', link: '/blog/' },
           { text: 'About us', link: '/about-us' },
           { text: 'Changelog', link: '/changelog/' },
@@ -146,7 +147,7 @@ export default withMermaid(defineConfig({
               ]
             },
             {
-              text: 'Developer Docs',
+              text: 'Integration',
               items: [
                 { text: 'Connect to an Existing Cube Cluster', link: '/guide/connect-existing-cluster' }
               ]
@@ -188,6 +189,15 @@ export default withMermaid(defineConfig({
                 { text: 'Networking (CubeVS)', link: '/architecture/network' }
               ]
             }
+          ],
+          '/dev/': [
+            {
+              text: 'Developer Docs',
+              items: [
+                { text: 'Overview', link: '/dev/' },
+                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' }
+              ]
+            }
           ]
         }
       }
@@ -203,6 +213,7 @@ export default withMermaid(defineConfig({
           { text: '首页', link: '/zh/' },
           { text: '指南', link: '/zh/guide/introduction' },
           { text: '架构', link: '/zh/architecture/overview' },
+          { text: '开发者', link: '/zh/dev/' },
           { text: '博客', link: '/zh/blog/' },
           { text: '关于我们', link: '/zh/about-us' },
           { text: '更新日志', link: '/zh/changelog/' },
@@ -253,7 +264,7 @@ export default withMermaid(defineConfig({
               ]
             },
             {
-              text: '开发文档',
+              text: '集成',
               items: [
                 { text: '连接到已有 Cube 集群', link: '/zh/guide/connect-existing-cluster' }
               ]
@@ -293,6 +304,15 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '架构概览 (Overview)', link: '/zh/architecture/overview' },
                 { text: 'CubeVS 网络模型', link: '/zh/architecture/network' }
+              ]
+            }
+          ],
+          '/zh/dev/': [
+            {
+              text: '开发者文档',
+              items: [
+                { text: '概览', link: '/zh/dev/' },
+                { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' }
               ]
             }
           ]

@@ -24,8 +24,9 @@ import (
 // traffic. Callers (main.go) should log a warning and proceed.
 //
 // We use the single shared wrapredis pool. The sidecar consumes lifecycle
-// metadata and the bypass_host_proxy map from the same Redis instance, so
-// any pool that can write proxy entries can also write lifecycle entries.
+// metadata and the sandbox proxy map (cube:v1:shared:sandbox:proxy) from the
+// same Redis instance, so any pool that can write proxy entries can also write
+// lifecycle entries.
 func Init(ctx context.Context) error {
 	pool := wrapredis.GetRedis()
 	if isNilPool(pool) {
