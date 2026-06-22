@@ -19,128 +19,6 @@ use utoipa::ToSchema;
 use crate::db::StoreTemplateRecord;
 use crate::state::AppState;
 
-// ── fallback hardcoded list (used when DB is not configured) ────────────────
-
-/// Fallback catalog when no database is available.  Kept in sync with the
-/// seed data in `db.rs`.
-pub(crate) fn fallback_catalog() -> Vec<StoreCatalogItem> {
-    vec![
-        StoreCatalogItem {
-            id: "sandbox-code".into(),
-            name_key: "items.sandbox-code.name".into(),
-            description_key: "items.sandbox-code.description".into(),
-            image_cn: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest".into(),
-            image_intl: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
-                .into(),
-            image: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest".into(),
-            digest: Some(
-                "sha256:a7b8654aac5b90e241b98e195ae1d8c85d59fe1fb8c282bcccf1071f877db20f".into(),
-            ),
-            tags: vec!["python".into(), "jupyter".into(), "official".into()],
-            category: "code".into(),
-            size_mb: 207,
-            expose_ports: vec![49983, 49999],
-            probe_port: 49999,
-            probe_path: "/".into(),
-            writable_layer_size: "1G".into(),
-            official: true,
-            dns: vec![],
-        },
-        StoreCatalogItem {
-            id: "sandbox-browser".into(),
-            name_key: "items.sandbox-browser.name".into(),
-            description_key: "items.sandbox-browser.description".into(),
-            image_cn: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest"
-                .into(),
-            image_intl: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest"
-                .into(),
-            image: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest".into(),
-            digest: Some(
-                "sha256:1786786af8510c34eda64ebec5b0a61a98583cb311c3045c0222910ec0680d60".into(),
-            ),
-            tags: vec!["browser".into(), "chromium".into(), "official".into()],
-            category: "browser".into(),
-            size_mb: 1530,
-            expose_ports: vec![49983, 9000, 6080],
-            probe_port: 9000,
-            probe_path: "/cdp/json/version".into(),
-            writable_layer_size: "1G".into(),
-            official: true,
-            dns: vec![
-                "183.60.83.19".into(),    // China Telecom — verified in Tencent Cloud
-                "114.114.114.114".into(), // 114DNS — most common public DNS in China
-                "223.5.5.5".into(),       // Alibaba DNS — broad domestic coverage
-                "8.8.8.8".into(),         // Google DNS — international fallback
-            ],
-        },
-        StoreCatalogItem {
-            id: "openclaw".into(),
-            name_key: "items.openclaw.name".into(),
-            description_key: "items.openclaw.description".into(),
-            image_cn: "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest"
-                .into(),
-            image_intl:
-                "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest".into(),
-            image: "cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest"
-                .into(),
-            digest: Some(
-                "sha256:47680d7bc13ea7c57aeb88dff59ef2c44b0facb508e8c9066d479d7d458e0a66".into(),
-            ),
-            tags: vec![
-                "agent".into(),
-                "openclaw".into(),
-                "browser".into(),
-                "deepseek".into(),
-            ],
-            category: "ai".into(),
-            size_mb: 6350,
-            expose_ports: vec![49983, 18789, 8080],
-            probe_port: 49983,
-            probe_path: "/health".into(),
-            writable_layer_size: "4G".into(),
-            official: true,
-            dns: vec![],
-        },
-        StoreCatalogItem {
-            id: "cubesandbox-base".into(),
-            name_key: "items.cubesandbox-base.name".into(),
-            description_key: "items.cubesandbox-base.description".into(),
-            image_cn: "ghcr.io/tencentcloud/cubesandbox-base:latest".into(),
-            image_intl: "ghcr.io/tencentcloud/cubesandbox-base:latest".into(),
-            image: "ghcr.io/tencentcloud/cubesandbox-base:latest".into(),
-            digest: None,
-            tags: vec!["base".into(), "envd".into(), "official".into()],
-            category: "base".into(),
-            size_mb: 98,
-            expose_ports: vec![49983],
-            probe_port: 49983,
-            probe_path: "/health".into(),
-            writable_layer_size: "1G".into(),
-            official: true,
-            dns: vec![],
-        },
-        StoreCatalogItem {
-            id: "sandbox-nginx".into(),
-            name_key: "items.sandbox-nginx.name".into(),
-            description_key: "items.sandbox-nginx.description".into(),
-            image_cn: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest".into(),
-            image_intl: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest"
-                .into(),
-            image: "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest".into(),
-            digest: None,
-            tags: vec!["nginx".into(), "web".into(), "official".into()],
-            category: "web".into(),
-            size_mb: 120,
-            expose_ports: vec![49983, 80],
-            probe_port: 49983,
-            probe_path: "/health".into(),
-            writable_layer_size: "1G".into(),
-            official: true,
-            dns: vec![],
-        },
-    ]
-}
-
 // ── catalog response types ─────────────────────────────────────────────────
 
 /// A single store template catalog entry.
@@ -373,42 +251,33 @@ fn inspect_image(image: &str) -> Option<ImageMeta> {
 
 /// Collect all image references that need to be inspected.
 /// When the DB is available we use the catalog from the database;
-/// otherwise we fall back to the hardcoded list.
+/// otherwise returns an empty list (no images to inspect).
 async fn collect_store_images(state: &AppState) -> Vec<String> {
     if let Some(store) = &state.agenthub_store {
         if let Ok(catalog) = store.list_store_templates().await {
             return catalog.iter().map(|t| t.image_cn.clone()).collect();
         }
     }
-    // fallback: extract image_cn from hardcoded list
-    fallback_catalog()
-        .iter()
-        .map(|t| t.image_cn.clone())
-        .collect()
+    Vec::new()
 }
 
 // ── catalog handlers ───────────────────────────────────────────────────────
 
 /// GET /cubeapi/v1/store/catalog
 ///
-/// List all store template catalog entries.  When no database is configured,
-/// returns the built-in fallback catalog.
+/// List all store template catalog entries.  Requires a configured database;
+/// returns an empty list when no database is available.
 pub async fn list_store_catalog(State(state): State<AppState>) -> impl IntoResponse {
-    if let Some(store) = &state.agenthub_store {
-        match store.list_store_templates().await {
-            Ok(rows) => {
-                let items: Vec<StoreCatalogItem> =
-                    rows.into_iter().map(StoreCatalogItem::from).collect();
-                return (StatusCode::OK, Json(StoreCatalogResponse { items })).into_response();
-            }
+    let items: Vec<StoreCatalogItem> = match &state.agenthub_store {
+        Some(store) => match store.list_store_templates().await {
+            Ok(rows) => rows.into_iter().map(StoreCatalogItem::from).collect(),
             Err(err) => {
-                tracing::warn!(error = %err, "failed to read store catalog from DB, using fallback");
+                tracing::warn!(error = %err, "failed to read store catalog from DB");
+                Vec::new()
             }
-        }
-    }
-
-    // fallback
-    let items = fallback_catalog();
+        },
+        None => Vec::new(),
+    };
     (StatusCode::OK, Json(StoreCatalogResponse { items })).into_response()
 }
 
