@@ -48,7 +48,6 @@
     },
     "source": {
       "database": "数据库",
-      "env": "环境变量",
       "none": "未配置"
     },
     "errors": {

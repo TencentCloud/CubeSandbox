@@ -67,7 +67,7 @@ pub struct ServerConfig {
 
     /// Optional MySQL database URL used by AgentHub persistence.
     ///
-    /// Env vars checked by default: DATABASE_URL, then CUBE_API_DATABASE_URL.
+    /// Env var: `DATABASE_URL`. When unset, built from `CUBE_SANDBOX_MYSQL_*`.
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
@@ -107,7 +107,6 @@ fn default_log_prefix() -> String {
 fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
-        .or_else(|| std::env::var("CUBE_API_DATABASE_URL").ok())
         .or_else(default_cube_sandbox_mysql_url)
 }
 

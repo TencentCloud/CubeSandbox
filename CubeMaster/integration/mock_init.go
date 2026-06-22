@@ -123,7 +123,7 @@ func mocktest_InitGlobalResources() {
 
 func mocktest_CleanupGlobalResources() {
 
-	conn := wrapredis.GetRedis(wrapredis.RedisWrite)
+	conn := wrapredis.GetRedis()
 
 	redisKeysBefore, _ := redis.Int(conn.Do("DBSIZE"))
 	conn.Do("FLUSHDB")
@@ -182,12 +182,6 @@ func mock_Redis() {
 	if config.GetConfig().RedisConf != nil {
 		config.GetConfig().RedisConf.Nodes = mocktest_RedisSrv.Addr()
 	}
-	if config.GetConfig().RedisReadConf != nil {
-		config.GetConfig().RedisReadConf.Nodes = mocktest_RedisSrv.Addr()
-	}
-	if config.GetConfig().RedisWriteConf != nil {
-		config.GetConfig().RedisWriteConf.Nodes = mocktest_RedisSrv.Addr()
-	}
 	go func() {
 		for {
 			select {
@@ -216,7 +210,7 @@ func mocktest_reportMetric(insID string) {
 		RealTimeCreateNum: get_realtime_create_num(insID),
 		MetricUpdate:      string(metricNow()),
 	}
-	wrapredis.GetRedis(wrapredis.RedisWrite).Do("HSET", redis.Args{insID}.AddFlat(redisNode)...)
+	wrapredis.GetRedis().Do("HSET", redis.Args{insID}.AddFlat(redisNode)...)
 }
 
 func mock_getHostInfoByIP(ip string) *models.HostInfo {

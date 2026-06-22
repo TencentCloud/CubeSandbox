@@ -20,6 +20,8 @@ func newInnerDNSAllowMap() (*ebpf.Map, error) {
 		ValueSize:  uint32(unsafe.Sizeof(dnsAllowValue{})),
 		MaxEntries: maxDNSAllowEntries,
 		Flags:      unix.BPF_F_NO_PREALLOC,
+		Key:        btfTypeDNSAllowKey,
+		Value:      btfTypeDNSAllowValue,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ebpf.NewMap(LPMTrie) failed: %w", err)

@@ -855,6 +855,28 @@ def parse(path):
     return kv
 
 
+# Obsolete keys: removed from env.example and no longer read by any component.
+# They are actively dropped on upgrade (rather than kept verbatim) so that stale
+# plaintext secrets do not linger in the runtime env file. The AgentHub LLM
+# config (key/provider/base_url/model/credential_mode) now lives encrypted in the
+# database (configured via the WebUI), and the DB master key is auto-bootstrapped
+# by CubeAPI, so AGENTHUB_SECRET_KEY is obsolete too.
+DEPRECATED_KEYS = {
+    "AGENTHUB_DEEPSEEK_API_KEY",
+    "OPENCLAW_DEEPSEEK_API_KEY",
+    "AGENTHUB_LLM_API_KEY",
+    "OPENCLAW_LLM_API_KEY",
+    "AGENTHUB_LLM_PROVIDER",
+    "OPENCLAW_LLM_PROVIDER",
+    "AGENTHUB_LLM_BASE_URL",
+    "OPENCLAW_LLM_BASE_URL",
+    "AGENTHUB_LLM_MODEL",
+    "OPENCLAW_DEFAULT_MODEL",
+    "AGENTHUB_LLM_CREDENTIAL_MODE",
+    "AGENTHUB_SECRET_KEY",
+    "CUBE_API_DATABASE_URL",
+}
+
 new_defaults = parse(new_example)
 old_values = parse(old_runtime)
 old_baseline_vals = parse(old_baseline) if old_baseline else {}
@@ -865,6 +887,7 @@ added = []
 updated_default = []
 preserved = []
 explicit = []
+dropped = []
 
 out_lines = []
 template = read_lines(new_example)
@@ -905,7 +928,9 @@ for line in template:
 # Old-only keys (present in old runtime, absent from the new template) are
 # host/user specific (NODE_IP, ROLE, control-plane addr, custom vars). Never
 # drop them: append verbatim so the running system keeps working.
-extra = [(k, v) for k, v in old_values.items() if k not in new_defaults]
+dropped = [k for k in old_values if k in DEPRECATED_KEYS]
+extra = [(k, v) for k, v in old_values.items()
+         if k not in new_defaults and k not in DEPRECATED_KEYS]
 if extra:
     out_lines.append("")
     out_lines.append("# --- preserved custom settings (not in env.example) ---")
@@ -946,13 +971,16 @@ for k in explicit:
 report.append("[kept-extra] old-only keys not in new env.example (kept): %d" % len(extra))
 for k, v in extra:
     report.append("  > %s=%s" % (k, redact(k, v)))
+report.append("[dropped] obsolete keys removed on upgrade: %d" % len(dropped))
+for k in dropped:
+    report.append("  - %s" % k)
 
 with open(diff_file, "w", encoding="utf-8") as fh:
     fh.write("\n".join(report) + "\n")
 
 sys.stderr.write(
-    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, >%d kept-extra%s\n" % (
-        len(added), len(updated_default), len(preserved), len(extra),
+    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, >%d kept-extra, -%d dropped%s\n" % (
+        len(added), len(updated_default), len(preserved), len(extra), len(dropped),
         "" if has_baseline else " (two-way fallback: no baseline)"))
 PY
 }
@@ -1321,9 +1349,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# CIDR / network helper functions for CUBE_SANDBOX_NETWORK_CIDR feature.
-# Added as part of the cubevs local network CIDR env var configuration plan.
-# See docs/plan/cubevs-cidr-env-var-plan.md for details.
+# CIDR / network helper functions for CubeSandbox local network validation.
 # ---------------------------------------------------------------------------
 
 # ip_to_int: Convert an IPv4 dotted-quad string to a 32-bit integer.
@@ -1351,10 +1377,38 @@ ip_int_to_dot() {
   echo "$(( (n >> 24) & 255 )).$(( (n >> 16) & 255 )).$(( (n >> 8) & 255 )).$(( n & 255 ))"
 }
 
+is_cube_tap_netdev() {
+  local iface="$1"
+  iface="${iface%%@*}"
+  [[ "${iface}" =~ ^z[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+resolv_conf_candidates() {
+  printf '%s\n' \
+    "/run/systemd/resolve/resolv.conf" \
+    "/run/systemd/resolve/stub-resolv.conf" \
+    "/run/NetworkManager/no-stub-resolv.conf" \
+    "/var/run/NetworkManager/no-stub-resolv.conf" \
+    "/run/resolvconf/resolv.conf" \
+    "/etc/resolvconf/run/resolv.conf" \
+    "/etc/resolv.conf"
+}
+
+canonicalize_resolv_conf_path() {
+  local path="$1"
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f "${path}" 2>/dev/null || printf '%s\n' "${path}"
+    return 0
+  fi
+  printf '%s\n' "${path}"
+}
+
 # _check_cidr_conflict: Detect overlap between the specified CIDR and
-# existing host network interfaces + routes. Exits with die() on conflict.
+# existing host network interfaces, routes and DNS nameservers. Exits with die()
+# on conflict.
 _check_cidr_conflict() {
   local cidr="$1"
+  local cidr_label="${2:-CUBE_SANDBOX_NETWORK_CIDR}"
   require_cmd ip
 
   local ip="${cidr%/*}"
@@ -1370,6 +1424,9 @@ _check_cidr_conflict() {
   local cidr_net_end=$(( cidr_net_start | (0xFFFFFFFF & ~cidr_mask_int) ))
 
   local conflicts=()
+  # cubesandbox's own gateway interface network (e.g., "192.168.0.1/18"),
+  # recorded when the residual cube-dev interface is found. Empty otherwise.
+  local cubedev_cidr=""
 
   # --- Check interface addresses ---
   # Format: "IP/MASK IFACE" (e.g., "10.0.0.5/24 eth0")
@@ -1378,6 +1435,19 @@ _check_cidr_conflict() {
     [[ -n "${line}" ]] || continue
     local iface_cidr="${line%% *}"
     local iface_name="${line#* }"
+
+    # cubesandbox's own dummy gateway (constant name "cube-dev"): record its
+    # network for reuse/change detection below and skip -- it is cube's own
+    # residue, not a foreign host conflict.
+    if [[ "${iface_name}" == "cube-dev" ]]; then
+      cubedev_cidr="${iface_cidr}"
+      continue
+    fi
+    # cubesandbox's persistent TAP devices are named "z<ipv4>" (tapNamePrefix
+    # "z"). They belong to cube and must not be treated as host conflicts.
+    if is_cube_tap_netdev "${iface_name}"; then
+      continue
+    fi
 
     local iface_ip="${iface_cidr%%/*}"
     local iface_mask="${iface_cidr##*/}"
@@ -1400,45 +1470,94 @@ _check_cidr_conflict() {
   done < <(ip -4 addr show scope global 2>/dev/null | awk '/inet / {print $2, $NF}' || true)
 
   # --- Check routes for overlap ---
-  # Use grep -oP to extract ANY CIDR token from each route line (handles
-  # policy routes like "from 10.0.0.0/8 table 100" where the CIDR is not
-  # the first field).
+  # Parse line-by-line so we can read each route's output device and skip
+  # routes owned by cube-dev (cube's own residue). grep -oP then extracts ANY
+  # CIDR token from the surviving line (handles policy routes like
+  # "from 10.0.0.0/8 table 100" where the CIDR is not the first field).
   local route_text
   route_text="$(ip -4 route show 2>/dev/null || true)"
   if [[ -n "${route_text}" ]]; then
-    while IFS= read -r route_cidr; do
-      [[ -n "${route_cidr}" ]] || continue
+    local route_line
+    while IFS= read -r route_line; do
+      [[ -n "${route_line}" ]] || continue
 
-      # Skip well-known non-conflicting ranges
-      [[ "${route_cidr}" != 169.254.* ]] || continue
-      [[ "${route_cidr}" != 224.* ]] || continue
-      [[ "${route_cidr}" != 127.* ]] || continue
-      # Skip default route (0.0.0.0/0 should never conflict)
-      [[ "${route_cidr}" != "0.0.0.0/0" ]] || continue
-
-      local route_ip="${route_cidr%/*}"
-      local route_mask="${route_cidr#*/}"
-      [[ "${route_mask}" =~ ^[0-9]+$ ]] || continue
-
-      local route_int
-      route_int=$(ip_to_int "${route_ip}")
-      local route_host_bits=$(( 32 - route_mask ))
-      local route_mask_int=$(( (0xFFFFFFFF << route_host_bits) & 0xFFFFFFFF ))
-      local route_net_start=$(( route_int & route_mask_int ))
-      local route_net_end=$(( route_net_start | (0xFFFFFFFF & ~route_mask_int) ))
-
-      if (( cidr_net_start <= route_net_end && cidr_net_end >= route_net_start )); then
-        conflicts+=("route ${route_cidr}")
+      # Skip routes attached to cubesandbox's own gateway interface.
+      if [[ "${route_line}" =~ dev[[:space:]]+([^[:space:]]+) ]]; then
+        if [[ "${BASH_REMATCH[1]}" == "cube-dev" ]] || is_cube_tap_netdev "${BASH_REMATCH[1]}"; then
+          continue
+        fi
       fi
-    done < <(echo "${route_text}" | grep -oP '\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+\b' || true)
+
+      local route_cidr
+      while IFS= read -r route_cidr; do
+        [[ -n "${route_cidr}" ]] || continue
+
+        # Skip well-known non-conflicting ranges
+        [[ "${route_cidr}" != 169.254.* ]] || continue
+        [[ "${route_cidr}" != 224.* ]] || continue
+        [[ "${route_cidr}" != 127.* ]] || continue
+        # Skip default route (0.0.0.0/0 should never conflict)
+        [[ "${route_cidr}" != "0.0.0.0/0" ]] || continue
+
+        local route_ip="${route_cidr%/*}"
+        local route_mask="${route_cidr#*/}"
+        [[ "${route_mask}" =~ ^[0-9]+$ ]] || continue
+
+        local route_int
+        route_int=$(ip_to_int "${route_ip}")
+        local route_host_bits=$(( 32 - route_mask ))
+        local route_mask_int=$(( (0xFFFFFFFF << route_host_bits) & 0xFFFFFFFF ))
+        local route_net_start=$(( route_int & route_mask_int ))
+        local route_net_end=$(( route_net_start | (0xFFFFFFFF & ~route_mask_int) ))
+
+        if (( cidr_net_start <= route_net_end && cidr_net_end >= route_net_start )); then
+          conflicts+=("route ${route_cidr}")
+        fi
+      done < <(echo "${route_line}" | grep -oP '\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+\b' || true)
+    done < <(echo "${route_text}")
   fi
 
+  # --- Check resolver nameservers for overlap ---
+  # A host DNS upstream inside the sandbox CIDR can later route DNS/image-pull
+  # traffic into Cube-owned addresses even when routes do not make it obvious.
+  local resolv_path
+  local seen_resolv_paths=()
+  while IFS= read -r resolv_path; do
+    [[ -n "${resolv_path}" && -f "${resolv_path}" ]] || continue
+
+    local canonical_resolv_path
+    canonical_resolv_path="$(canonicalize_resolv_conf_path "${resolv_path}")"
+
+    local already_seen=0
+    local seen_path
+    for seen_path in "${seen_resolv_paths[@]}"; do
+      if [[ "${seen_path}" == "${canonical_resolv_path}" ]]; then
+        already_seen=1
+        break
+      fi
+    done
+    [[ "${already_seen}" -eq 0 ]] || continue
+    seen_resolv_paths+=("${canonical_resolv_path}")
+
+    local nameserver
+    while IFS= read -r nameserver; do
+      [[ "${nameserver}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+
+      local ns_int
+      ns_int=$(ip_to_int "${nameserver}")
+      if (( ns_int >= cidr_net_start && ns_int <= cidr_net_end )); then
+        conflicts+=("nameserver ${nameserver} (${resolv_path})")
+      fi
+    done < <(awk '$1 == "nameserver" {print $2}' "${resolv_path}")
+  done < <(resolv_conf_candidates)
+
+  # A genuine conflict with a foreign host interface/route/resolver -> hard fail.
   if [[ "${#conflicts[@]}" -gt 0 ]]; then
     local conflict_list
     conflict_list="$(printf '\n  - %s' "${conflicts[@]}")"
-    die "CUBE_SANDBOX_NETWORK_CIDR '${cidr}' conflicts with existing host network:${conflict_list}
+    die "${cidr_label} '${cidr}' conflicts with existing host network:${conflict_list}
 
-  The cubevs CIDR must not overlap with any existing interface IPs or routes.
+  The cubevs CIDR must not overlap with any existing interface IPs, routes, or DNS nameservers.
   Choose a private IP range that does not conflict, such as:
     10.0.0.0/8      (any subnet within)
     172.16.0.0/12   (any subnet within)
@@ -1447,11 +1566,62 @@ _check_cidr_conflict() {
   To bypass this check (not recommended), set:
     CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1"
   fi
+
+  # No foreign conflict. If a residual cube-dev exists (leftover from a
+  # previous cubesandbox deployment), decide between reuse and CIDR change.
+  if [[ -n "${cubedev_cidr}" ]]; then
+    local cd_ip="${cubedev_cidr%/*}"
+    local cd_mask="${cubedev_cidr#*/}"
+    if [[ "${cd_ip}" == "${cubedev_cidr}" ]]; then
+      cd_mask="32"
+    fi
+
+    local cd_int
+    cd_int=$(ip_to_int "${cd_ip}")
+    local cd_host_bits=$(( 32 - 10#${cd_mask} ))
+    local cd_mask_int=$(( (0xFFFFFFFF << cd_host_bits) & 0xFFFFFFFF ))
+    local cd_net_start=$(( cd_int & cd_mask_int ))
+    local cd_net_end=$(( cd_net_start | (0xFFFFFFFF & ~cd_mask_int) ))
+    local cd_network
+    cd_network="$(ip_int_to_dot "${cd_net_start}")"
+
+    if (( cd_net_start == cidr_net_start )) && (( 10#${cd_mask} == 10#${mask} )); then
+      # Same network -> reinstall reuse. The residual cube-dev IS this CIDR's
+      # gateway; not a conflict.
+      log "reusing existing cube-dev network (${cd_network}/${cd_mask}); CIDR self-conflict skipped"
+    elif (( cidr_net_start <= cd_net_end && cidr_net_end >= cd_net_start )); then
+      # Different network that overlaps the requested CIDR -> disruptive change
+      # on a host that already has a cube network. A reboot alone is NOT enough
+      # because the systemd target is enabled and network-agent rebuilds the old
+      # network from config.toml; a deterministic reset is required.
+      die "${cidr_label} '${cidr}' overlaps an existing cube-dev network (${cd_network}/${cd_mask}).
+
+  Changing the sandbox CIDR on a host that already has a cube network is
+  disruptive: the old cube-dev and the persistent z* TAP devices are left
+  stale. A reboot alone is NOT enough -- the systemd target is enabled and
+  network-agent rebuilds the old network from config.toml on boot.
+
+  To change the CIDR, fully reset the cube network first:
+    sudo systemctl stop 'cube-sandbox-*.target'
+    sudo ip link delete cube-dev 2>/dev/null || true
+    ip tuntap show | awk -F: '/^z[0-9]+\\./{print \$1}' \\
+      | xargs -r -n1 -I{} sudo ip tuntap del dev {} mode tap
+  then re-run install with the new CIDR.
+
+  Or keep the existing CIDR (${cd_network}/${cd_mask}) to reuse the current network.
+
+  To bypass this check (not recommended), set:
+    CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1"
+    fi
+    # else: cube-dev exists but does not overlap the requested CIDR -> allow;
+    # network-agent will reconcile cube-dev to the new network.
+  fi
 }
 
 # check_cidr_preflight: Validate CIDR format and detect host network conflicts.
-# Called during install preflight (before any system modification).
-# Only validates if CUBE_SANDBOX_NETWORK_CIDR is set; when unset, does nothing.
+# Called during install preflight before dependency installation or deployment
+# replacement. The caller passes either CUBE_SANDBOX_NETWORK_CIDR or the fixed
+# packaged default.
 #
 # SECURITY: Format validation MUST run before the SKIP_CONFLICT_CHECK bypass
 # to prevent sed command injection (sed 'w' flag) and env file shell injection.
@@ -1463,8 +1633,9 @@ check_cidr_preflight() {
   # cluster's own cubevs bridge/route, which would otherwise be misdetected as
   # a conflict and block the upgrade.
   local skip_conflict="${2:-${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}}"
+  local cidr_label="${3:-CUBE_SANDBOX_NETWORK_CIDR}"
 
-  # When env var not set: skip validation, use config.toml default
+  # Empty CIDR means there is nothing to validate.
   if [[ -z "${cidr}" ]]; then
     return 0
   fi
@@ -1481,7 +1652,7 @@ check_cidr_preflight() {
 
   # 1. Format validation (IPv4 dotted + mask)
   if ! [[ "${cidr}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
-    die "CUBE_SANDBOX_NETWORK_CIDR '${cidr}' is not a valid IPv4 CIDR format (e.g., 10.0.0.0/16)"
+    die "${cidr_label} '${cidr}' is not a valid IPv4 CIDR format (e.g., 10.0.0.0/16)"
   fi
 
   local ip="${cidr%/*}"
@@ -1494,16 +1665,16 @@ check_cidr_preflight() {
   for octet in "${octets[@]}"; do
     # Reject IP octets with more than 3 digits (bash arithmetic overflow)
     if [[ "${#octet}" -gt 3 ]]; then
-      die "CUBE_SANDBOX_NETWORK_CIDR '${cidr}' has an invalid IP octet: '${octet}' (max 3 digits)"
+      die "${cidr_label} '${cidr}' has an invalid IP octet: '${octet}' (max 3 digits)"
     fi
     if (( 10#${octet} < 0 || 10#${octet} > 255 )); then
-      die "CUBE_SANDBOX_NETWORK_CIDR '${cidr}' has an invalid IP octet: ${octet}"
+      die "${cidr_label} '${cidr}' has an invalid IP octet: ${octet}"
     fi
   done
 
   # 3. Valid mask range [8, 30] (use 10# prefix to prevent octal interpretation)
   if ! [[ "${mask}" =~ ^[0-9]+$ ]] || (( 10#${mask} < 8 || 10#${mask} > 30 )); then
-    die "CUBE_SANDBOX_NETWORK_CIDR mask must be between 8 and 30 (got: ${mask})"
+    die "${cidr_label} mask must be between 8 and 30 (got: ${mask})"
   fi
 
   # 4. Network address alignment check
@@ -1518,13 +1689,11 @@ check_cidr_preflight() {
   if (( ip_int != network_int )); then
     local suggested
     suggested=$(ip_int_to_dot ${network_int})
-    die "CUBE_SANDBOX_NETWORK_CIDR '${cidr}' is not aligned to its network address. Did you mean: ${suggested}/${mask}?"
+    die "${cidr_label} '${cidr}' is not aligned to its network address. Did you mean: ${suggested}/${mask}?"
   fi
 
-  # NOTE: CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK is read from the
-  # process environment (not passed as a parameter). This mirrors the
-  # existing pattern in the codebase (e.g., detect_node_ip reads
-  # CUBE_SANDBOX_NODE_IP directly).
+  # If the caller does not pass skip_conflict, the env bypass flag controls
+  # whether only host-network conflict detection is skipped.
 
   # ======================================================================
   # CONFLICT DETECTION -- bypassable with SKIP_CONFLICT_CHECK
@@ -1535,14 +1704,14 @@ check_cidr_preflight() {
 
   # 5. Check bypass flag -- only skips conflict detection, not format validation
   if [[ "${skip_conflict}" == "1" ]]; then
-    log "CUBE_SANDBOX_NETWORK_CIDR conflict check SKIPPED -- CIDR: ${cidr}"
+    log "${cidr_label} conflict check SKIPPED -- CIDR: ${cidr}"
     return 0
   fi
 
-  # 6. CIDR conflict detection with host interfaces
-  _check_cidr_conflict "${cidr}"
+  # 6. CIDR conflict detection with host interfaces, routes and resolvers
+  _check_cidr_conflict "${cidr}" "${cidr_label}"
 
-  log "CUBE_SANDBOX_NETWORK_CIDR preflight OK: ${cidr}"
+  log "${cidr_label} preflight OK: ${cidr}"
 }
 
 # check_glibc_preflight: Verify the system glibc version meets the minimum

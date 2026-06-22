@@ -676,6 +676,7 @@ dependencies = [
  "dashmap",
  "dotenvy",
  "futures",
+ "getrandom 0.2.17",
  "governor",
  "reqwest",
  "serde",

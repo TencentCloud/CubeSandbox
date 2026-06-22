@@ -888,19 +888,22 @@ else
   log "primary network interface not detected; keeping packaged Cubelet eth_name"
 fi
 
-# Validate cubevs CIDR from env var (if set)
+# Validate the effective cubevs CIDR before installing packages or replacing
+# the existing deployment. If unset, use CubeSandbox's fixed packaged default.
 CUBE_SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-}"
+# On upgrade the CIDR is the cluster's own (preserved from the old install);
+# its existing cubevs bridge/route would self-trigger the host-conflict scan,
+# so skip conflict detection (format validation still runs) while still
+# honoring an explicit user bypass flag.
+cidr_skip_conflict=0
+if [[ "${INSTALL_MODE}" == "upgrade" || "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}" == "1" ]]; then
+  cidr_skip_conflict=1
+fi
 if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR}" ]]; then
-  # On upgrade the CIDR is the cluster's own (preserved from the old install);
-  # its existing cubevs bridge/route would self-trigger the host-conflict scan,
-  # so skip conflict detection (format validation still runs) while still
-  # honoring an explicit user bypass flag.
-  cidr_skip_conflict=0
-  if [[ "${INSTALL_MODE}" == "upgrade" || "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}" == "1" ]]; then
-    cidr_skip_conflict=1
-  fi
-  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}"
+  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR"
   export CUBE_SANDBOX_NETWORK_CIDR
+else
+  check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR"
 fi
 
 install_required_dependencies
@@ -1085,6 +1088,15 @@ if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
   database_url_port="$(urlencode "${CUBE_EXTERNAL_MYSQL_PORT}")"
   database_url_db="$(urlencode "${CUBE_EXTERNAL_MYSQL_DB}")"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
+else
+  # Local MySQL (bundled container): persist DATABASE_URL so CubeAPI and other
+  # components can reach the database without relying on per-script defaults.
+  local_mysql_host="127.0.0.1"
+  local_mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  local_mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+  local_mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+  local_mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://$(urlencode "${local_mysql_user}"):$(urlencode "${local_mysql_password}")@$(urlencode "${local_mysql_host}"):$(urlencode "${local_mysql_port}")/$(urlencode "${local_mysql_db}")"
 fi
 
 # Persist external Redis config. cube-proxy reads CUBE_PROXY_REDIS_* from the

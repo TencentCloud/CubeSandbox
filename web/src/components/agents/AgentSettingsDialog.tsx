@@ -17,6 +17,12 @@ interface Props {
   onSaved?: (settings: AgentSettingsDto) => void;
 }
 
+type SettingsSourceKey = 'database' | 'none';
+
+function settingsSourceKey(source: string | undefined): SettingsSourceKey {
+  return source === 'database' ? 'database' : 'none';
+}
+
 export function AgentSettingsDialog({ open, onOpenChange, onSaved }: Props) {
   const { t } = useTranslation('agentHub');
   const [settings, setSettings] = useState<AgentSettingsDto | null>(null);
@@ -171,7 +177,9 @@ export function AgentSettingsDialog({ open, onOpenChange, onSaved }: Props) {
                         provider: settings?.llmProvider ?? 'deepseek',
                         model: settings?.llmModel ?? 'deepseek/deepseek-v4-flash',
                         masked: settings?.llmApiKeyMasked ?? settings?.deepseekApiKeyMasked ?? '',
-                        source: t(`settings.source.${settings?.llmApiKeySource ?? settings?.source ?? 'none'}`),
+                        source: t(
+                          `settings.source.${settingsSourceKey(settings?.llmApiKeySource ?? settings?.source)}`
+                        ),
                         mode: t(`settings.credentialMode.${settings?.llmCredentialMode ?? 'egress'}`),
                       })
                     : t('settings.status.missing')}

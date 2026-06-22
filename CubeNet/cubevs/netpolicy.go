@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 	"golang.org/x/sys/unix"
 )
 
@@ -23,16 +24,18 @@ var alwaysDeniedSandboxCIDRs = []string{
 
 // newInnerLPMMap creates a new LPM trie map with uint32 values for deny_out.
 func newInnerLPMMap() (*ebpf.Map, error) {
-	return newInnerLPMMapWithValueSize(uint32(unsafe.Sizeof(uint32(0))))
+	return newInnerLPMMapWithValueSize(uint32(unsafe.Sizeof(uint32(0))), btfTypeLPMKey, btfTypeU32)
 }
 
-func newInnerLPMMapWithValueSize(valueSize uint32) (*ebpf.Map, error) {
+func newInnerLPMMapWithValueSize(valueSize uint32, keyType, valueType btf.Type) (*ebpf.Map, error) {
 	m, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:       ebpf.LPMTrie,
 		KeySize:    uint32(unsafe.Sizeof(lpmKey{})),
 		ValueSize:  valueSize,
 		MaxEntries: maxNetPolicyEntries,
 		Flags:      unix.BPF_F_NO_PREALLOC,
+		Key:        keyType,
+		Value:      valueType,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ebpf.NewMap(LPMTrie) failed: %w", err)
@@ -41,7 +44,7 @@ func newInnerLPMMapWithValueSize(valueSize uint32) (*ebpf.Map, error) {
 }
 
 func newInnerAllowOutMap() (*ebpf.Map, error) {
-	return newInnerLPMMapWithValueSize(uint32(unsafe.Sizeof(netPolicyValueV2{})))
+	return newInnerLPMMapWithValueSize(uint32(unsafe.Sizeof(netPolicyValueV2{})), btfTypeLPMKey, btfTypePolicyValue)
 }
 
 func ensureAllowOutV2InnerMap(outerMap *ebpf.Map, ifindex uint32) error {
@@ -50,12 +53,6 @@ func ensureAllowOutV2InnerMap(outerMap *ebpf.Map, ifindex uint32) error {
 
 func ensureDenyOutInnerMap(outerMap *ebpf.Map, ifindex uint32) error {
 	return ensureInnerMapWithFactory(outerMap, ifindex, MapNameDenyOut, newInnerLPMMap)
-}
-
-// ensureInnerMap checks whether the outer hash-of-maps already has an
-// inner map for the given ifindex.  If not, it creates one and inserts it.
-func ensureInnerMap(outerMap *ebpf.Map, ifindex uint32, mapName string) error {
-	return ensureInnerMapWithFactory(outerMap, ifindex, mapName, newInnerLPMMap)
 }
 
 func ensureInnerMapWithFactory(outerMap *ebpf.Map, ifindex uint32, mapName string,

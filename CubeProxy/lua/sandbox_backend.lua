@@ -134,27 +134,4 @@ function _M.resolve_backend(ins_id, container_port)
     return host_ip, host_port
 end
 
---[[
-    Check whether the resolved backend is currently marked faulty.
-
-    2 args:
-        - host_ip: string, the resolved upstream ip
-        - ins_id: string, sandbox id (for logging)
-
-    On a faulty backend this function calls ngx.exit() and does not return.
---]]
-function _M.assert_backend_healthy(host_ip, ins_id)
-    local faulty_backend, err = utils:is_faulty_backend(host_ip, true)
-    if err then
-        ngx.log(ngx.ERR, "LEVEL_ERROR||", "check backend fault err: ", err)
-    end
-    if faulty_backend == true then
-        ngx.log(ngx.ERR, "LEVEL_ERROR||",
-            string.format("request %s use instance %s hits faulty_backend %s",
-                ngx.var.http_x_cube_request_id, ins_id, host_ip))
-        ngx.var.cube_retcode = "340500"
-        ngx.exit(500)
-    end
-end
-
 return _M

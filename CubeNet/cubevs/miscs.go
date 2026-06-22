@@ -7,7 +7,24 @@ import (
 	"strings"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/rlimit"
+)
+
+const (
+	typeNameU32           = "__u32"
+	typeNameLPMKey        = "lpm_key"
+	typeNamePolicyValue   = "net_policy_value_v2"
+	typeNameDNSAllowKey   = "dns_allow_key"
+	typeNameDNSAllowValue = "dns_allow_value"
+)
+
+var (
+	btfTypeU32           btf.Type
+	btfTypeLPMKey        btf.Type
+	btfTypePolicyValue   btf.Type
+	btfTypeDNSAllowKey   btf.Type
+	btfTypeDNSAllowValue btf.Type
 )
 
 func init() {
@@ -134,6 +151,26 @@ func loadObject(params Params, loader func() (*ebpf.CollectionSpec, error), name
 	spec, err := loader()
 	if err != nil {
 		return fmt.Errorf("%s failed: %w", name, err)
+	}
+
+	btfSpec := spec.Types
+	iter := btfSpec.Iterate()
+	for iter.Next() {
+		if iter.Type.TypeName() == typeNameU32 {
+			btfTypeU32 = iter.Type
+		}
+		if iter.Type.TypeName() == typeNameLPMKey {
+			btfTypeLPMKey = iter.Type
+		}
+		if iter.Type.TypeName() == typeNamePolicyValue {
+			btfTypePolicyValue = iter.Type
+		}
+		if iter.Type.TypeName() == typeNameDNSAllowKey {
+			btfTypeDNSAllowKey = iter.Type
+		}
+		if iter.Type.TypeName() == typeNameDNSAllowValue {
+			btfTypeDNSAllowValue = iter.Type
+		}
 	}
 
 	err = populateDNSTailCalls(spec)

@@ -7,6 +7,9 @@ use sqlx::{mysql::MySqlPoolOptions, MySqlPool, Row};
 use crate::handlers::agenthub::{AgentInstanceResponse, AgentSetupResult, AgentWeComConfig};
 use crate::models::{SnapshotInfo, SnapshotListItem};
 
+/// Setting key for the persisted AgentHub master encryption key (base64).
+const SETTING_MASTER_KEY: &str = "secret_master_key";
+
 #[derive(Clone)]
 pub struct AgentHubStore {
     pool: MySqlPool,
@@ -88,249 +91,18 @@ impl AgentHubStore {
             .connect(database_url)
             .await?;
         let store = Self { pool };
-        store.migrate().await?;
+        store.seed_default_admin().await?;
+        store.bootstrap_master_key().await?;
         Ok(store)
     }
 
-    async fn migrate(&self) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"
-CREATE TABLE IF NOT EXISTS `t_agenthub_instance` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `agent_id` varchar(128) NOT NULL,
-  `sandbox_id` varchar(128) NOT NULL,
-  `template_id` varchar(128) NOT NULL,
-  `name` varchar(128) NOT NULL,
-  `engine` varchar(32) NOT NULL,
-  `env` varchar(32) NOT NULL,
-  `model` varchar(128) NOT NULL,
-  `version` varchar(64) NOT NULL,
-  `status` varchar(32) NOT NULL,
-  `bots` json DEFAULT NULL,
-  `avatar` varchar(128) NOT NULL,
-  `avatar_tone` varchar(32) NOT NULL,
-  `domain` varchar(255) NOT NULL DEFAULT '',
-  `gateway_port` int NOT NULL DEFAULT 18789,
-  `env_port` int NOT NULL DEFAULT 8080,
-  `gateway_token` varchar(255) DEFAULT NULL,
-  `persistence_mode` varchar(32) DEFAULT NULL,
-  `rootfs_source_type` varchar(32) DEFAULT NULL,
-  `rootfs_source_id` varchar(128) DEFAULT NULL,
-  `openclaw_persist_id` varchar(128) DEFAULT NULL,
-  `openclaw_state_path` varchar(512) DEFAULT NULL,
-  `wecom_bot_id` varchar(255) DEFAULT NULL,
-  `wecom_bot_secret` varchar(255) DEFAULT NULL,
-  `last_error` text DEFAULT NULL,
-  `setup_exit_code` int DEFAULT NULL,
-  `base_snapshot_id` varchar(128) DEFAULT NULL,
-  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  `deleted_at` datetime DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_agenthub_agent_id` (`agent_id`),
-  UNIQUE KEY `uk_agenthub_sandbox_id` (`sandbox_id`),
-  KEY `idx_agenthub_status` (`status`),
-  KEY `idx_agenthub_deleted_at` (`deleted_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-"#,
-        )
-        .execute(&self.pool)
-        .await?;
-        self.ensure_column("wecom_bot_id", "`wecom_bot_id` varchar(255) DEFAULT NULL")
-            .await?;
-        self.ensure_column(
-            "persistence_mode",
-            "`persistence_mode` varchar(32) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_column(
-            "rootfs_source_type",
-            "`rootfs_source_type` varchar(32) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_column(
-            "rootfs_source_id",
-            "`rootfs_source_id` varchar(128) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_column(
-            "openclaw_persist_id",
-            "`openclaw_persist_id` varchar(128) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_column(
-            "openclaw_state_path",
-            "`openclaw_state_path` varchar(512) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_column(
-            "wecom_bot_secret",
-            "`wecom_bot_secret` varchar(255) DEFAULT NULL",
-        )
-        .await?;
-        sqlx::query(
-            r#"
-CREATE TABLE IF NOT EXISTS `t_agenthub_snapshot` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `snapshot_id` varchar(128) NOT NULL,
-  `agent_id` varchar(128) NOT NULL,
-  `sandbox_id` varchar(128) NOT NULL,
-  `name` varchar(255) DEFAULT NULL,
-  `status` varchar(32) NOT NULL DEFAULT 'unknown',
-  `snapshot_kind` varchar(32) DEFAULT NULL,
-  `origin_sandbox_id` varchar(128) DEFAULT NULL,
-  `published_template_id` varchar(128) DEFAULT NULL,
-  `rootfs_source_type` varchar(32) DEFAULT NULL,
-  `rootfs_source_id` varchar(128) DEFAULT NULL,
-  `rootfs_snapshot_id` varchar(128) DEFAULT NULL,
-  `openclaw_state_snapshot_path` varchar(512) DEFAULT NULL,
-  `parent_snapshot_id` varchar(128) DEFAULT NULL,
-  `is_healthy` tinyint(1) NOT NULL DEFAULT 0,
-  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  `deleted_at` datetime DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_agenthub_snapshot_id` (`snapshot_id`),
-  KEY `idx_agenthub_snapshot_agent` (`agent_id`, `deleted_at`),
-  KEY `idx_agenthub_snapshot_sandbox` (`sandbox_id`, `deleted_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-"#,
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            r#"
-CREATE TABLE IF NOT EXISTS `t_agenthub_template` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `template_id` varchar(128) NOT NULL,
-  `name` varchar(255) NOT NULL,
-  `source_agent_id` varchar(128) NOT NULL,
-  `source_snapshot_id` varchar(128) NOT NULL,
-  `source_sandbox_id` varchar(128) NOT NULL,
-  `model` varchar(128) NOT NULL,
-  `version` varchar(64) NOT NULL,
-  `persistence_mode` varchar(32) DEFAULT NULL,
-  `recommended` tinyint(1) NOT NULL DEFAULT 0,
-  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  `deleted_at` datetime DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_agenthub_template_id` (`template_id`),
-  KEY `idx_agenthub_template_deleted_at` (`deleted_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-"#,
-        )
-        .execute(&self.pool)
-        .await?;
-        self.ensure_table_column(
-            "t_agenthub_template",
-            "recommended",
-            "`recommended` tinyint(1) NOT NULL DEFAULT 0",
-        )
-        .await?;
-        self.ensure_table_column(
-            "t_agenthub_template",
-            "persistence_mode",
-            "`persistence_mode` varchar(32) DEFAULT NULL",
-        )
-        .await?;
-        sqlx::query(
-            r#"
-CREATE TABLE IF NOT EXISTS `t_agenthub_operation` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `operation_id` varchar(128) NOT NULL,
-  `agent_id` varchar(128) NOT NULL,
-  `sandbox_id` varchar(128) NOT NULL,
-  `operation_type` varchar(32) NOT NULL,
-  `status` varchar(32) NOT NULL,
-  `target_id` varchar(128) DEFAULT NULL,
-  `error_message` text DEFAULT NULL,
-  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_agenthub_operation_id` (`operation_id`),
-  KEY `idx_agenthub_operation_agent` (`agent_id`, `created_at`),
-  KEY `idx_agenthub_operation_status` (`status`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-"#,
-        )
-        .execute(&self.pool)
-        .await?;
-        self.ensure_table_column(
-            "t_agenthub_snapshot",
-            "snapshot_kind",
-            "`snapshot_kind` varchar(32) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_table_column(
-            "t_agenthub_snapshot",
-            "rootfs_source_type",
-            "`rootfs_source_type` varchar(32) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_table_column(
-            "t_agenthub_snapshot",
-            "rootfs_source_id",
-            "`rootfs_source_id` varchar(128) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_table_column(
-            "t_agenthub_snapshot",
-            "rootfs_snapshot_id",
-            "`rootfs_snapshot_id` varchar(128) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_table_column(
-            "t_agenthub_snapshot",
-            "openclaw_state_snapshot_path",
-            "`openclaw_state_snapshot_path` varchar(512) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_table_column(
-            "t_agenthub_snapshot",
-            "parent_snapshot_id",
-            "`parent_snapshot_id` varchar(128) DEFAULT NULL",
-        )
-        .await?;
-        self.ensure_table_column(
-            "t_agenthub_snapshot",
-            "is_healthy",
-            "`is_healthy` tinyint(1) NOT NULL DEFAULT 0",
-        )
-        .await?;
-        self.ensure_column(
-            "base_snapshot_id",
-            "`base_snapshot_id` varchar(128) DEFAULT NULL",
-        )
-        .await?;
-        sqlx::query(
-            r#"
-CREATE TABLE IF NOT EXISTS `t_agenthub_setting` (
-  `setting_key` varchar(128) NOT NULL,
-  `setting_value` text DEFAULT NULL,
-  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`setting_key`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-"#,
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            r#"
-CREATE TABLE IF NOT EXISTS `t_agenthub_user` (
-  `username` varchar(128) NOT NULL,
-  `password` varchar(255) NOT NULL,
-  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`username`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-"#,
-        )
-        .execute(&self.pool)
-        .await?;
-        // Seed the default admin account (admin/admin) on first run. The
-        // password is stored as a bcrypt hash. INSERT IGNORE keeps any password
-        // the operator has already changed it to.
+    /// Seeds the default WebUI admin account (admin/admin) on first connect.
+    ///
+    /// CubeMaster owns AgentHub schema migrations through goose. CubeAPI only
+    /// seeds the default WebUI account because the bcrypt hash is generated
+    /// by Rust-side crypto helpers. INSERT IGNORE keeps any password the
+    /// operator has already changed it to.
+    async fn seed_default_admin(&self) -> anyhow::Result<()> {
         let admin_hash = crate::crypto::hash_password("admin")?;
         sqlx::query(
             r#"INSERT IGNORE INTO t_agenthub_user (username, password) VALUES ('admin', ?)"#,
@@ -338,60 +110,30 @@ CREATE TABLE IF NOT EXISTS `t_agenthub_user` (
         .bind(&admin_hash)
         .execute(&self.pool)
         .await?;
-        sqlx::query(
-            r#"
-CREATE TABLE IF NOT EXISTS `t_agenthub_session` (
-  `token` varchar(128) NOT NULL,
-  `username` varchar(128) NOT NULL,
-  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `expires_at` datetime NOT NULL,
-  PRIMARY KEY (`token`),
-  KEY `idx_agenthub_session_expires` (`expires_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-"#,
-        )
-        .execute(&self.pool)
-        .await?;
         Ok(())
     }
 
-    async fn ensure_column(
-        &self,
-        column_name: &str,
-        column_definition: &str,
-    ) -> anyhow::Result<()> {
-        self.ensure_table_column("t_agenthub_instance", column_name, column_definition)
-            .await
-    }
-
-    async fn ensure_table_column(
-        &self,
-        table_name: &str,
-        column_name: &str,
-        column_definition: &str,
-    ) -> anyhow::Result<()> {
-        let exists: i64 = sqlx::query_scalar(
-            r#"
-SELECT COUNT(*)
-FROM information_schema.COLUMNS
-WHERE TABLE_SCHEMA = DATABASE()
-  AND TABLE_NAME = ?
-  AND COLUMN_NAME = ?
-"#,
-        )
-        .bind(table_name)
-        .bind(column_name)
-        .fetch_one(&self.pool)
-        .await?;
-
-        if exists == 0 {
-            let sql = format!(
-                "ALTER TABLE `{}` ADD COLUMN {}",
-                table_name, column_definition
-            );
-            sqlx::query(&sql).execute(&self.pool).await?;
-        }
-
+    /// Bootstraps the AgentHub master encryption key on first startup.
+    ///
+    /// Generates a random key only when the row does not yet exist; concurrent
+    /// CubeAPI instances converge on the single persisted value via the
+    /// `INSERT IGNORE` semantics of [`Self::get_or_create_setting`]. The decoded
+    /// key is then installed into process memory for the rest of the lifetime.
+    async fn bootstrap_master_key(&self) -> anyhow::Result<()> {
+        // Common path (already initialized): a plain read, no key generation.
+        let b64 = match self.get_setting(SETTING_MASTER_KEY).await? {
+            Some(existing) if !existing.trim().is_empty() => existing,
+            // First start: generate a candidate and let the concurrency-safe
+            // get-or-create pick the single winning value across processes.
+            _ => {
+                self.get_or_create_setting(
+                    SETTING_MASTER_KEY,
+                    &crate::crypto::generate_master_key_b64(),
+                )
+                .await?
+            }
+        };
+        crate::crypto::install_master_key(&b64)?;
         Ok(())
     }
 
@@ -1355,6 +1097,30 @@ WHERE agent_id = ? AND deleted_at IS NULL
         .await?
         .flatten();
         Ok(value)
+    }
+
+    /// Atomically returns the stored value for `key`, inserting `default_value`
+    /// only when the row does not exist yet.
+    ///
+    /// Concurrency-safe across processes: the `INSERT IGNORE` makes only the
+    /// first writer's value win at the row level (primary key on `setting_key`),
+    /// and the subsequent `SELECT` returns that single persisted value, so all
+    /// callers converge on the same result without an application-level lock.
+    pub async fn get_or_create_setting(
+        &self,
+        key: &str,
+        default_value: &str,
+    ) -> anyhow::Result<String> {
+        sqlx::query(
+            r#"INSERT IGNORE INTO t_agenthub_setting (setting_key, setting_value) VALUES (?, ?)"#,
+        )
+        .bind(key)
+        .bind(default_value)
+        .execute(&self.pool)
+        .await?;
+        self.get_setting(key)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("setting {key} missing after insert"))
     }
 
     /// Upserts a global AgentHub setting.

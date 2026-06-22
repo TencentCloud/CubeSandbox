@@ -28,21 +28,18 @@ import (
 var cfg *Config
 
 type Config struct {
-	Common            *CommonConf           `yaml:"common"`
-	AuthConf          *AuthConf             `yaml:"auth"`
-	Log               *log.Conf             `yaml:"log"`
-	CubeletConf       *CubeletConf          `yaml:"cubelet_conf"`
-	OssDBConfig       *DBConfig             `yaml:"ossdb_config"`
-	InstanceDBConfig  *DBConfig             `yaml:"instance_db_config"`
-	RedisConf         *RedisConf            `yaml:"redis"`
-	RedisReadConf     *RedisConf            `yaml:"redis_read"`
-	RedisWriteConf    *RedisConf            `yaml:"redis_write"`
-	RedisMetadataConf *RedisConf            `yaml:"redis_metadata"`
-	ExtraConf         *ExtraConf            `yaml:"extra_conf"`
-	Scheduler         *WrapperSchedulerConf `yaml:"scheduler"`
-	ReqTemplateConf   *ReqTemplateConf      `yaml:"req_template_conf"`
-	HookWhitelist     *HookWhitelist        `yaml:"hook_whitelist"`
-	CubeEgressConf    *CubeEgressConf       `yaml:"cube_egress_conf"`
+	Common           *CommonConf           `yaml:"common"`
+	AuthConf         *AuthConf             `yaml:"auth"`
+	Log              *log.Conf             `yaml:"log"`
+	CubeletConf      *CubeletConf          `yaml:"cubelet_conf"`
+	OssDBConfig      *DBConfig             `yaml:"ossdb_config"`
+	InstanceDBConfig *DBConfig             `yaml:"instance_db_config"`
+	RedisConf        *RedisConf            `yaml:"redis"`
+	ExtraConf        *ExtraConf            `yaml:"extra_conf"`
+	Scheduler        *WrapperSchedulerConf `yaml:"scheduler"`
+	ReqTemplateConf  *ReqTemplateConf      `yaml:"req_template_conf"`
+	HookWhitelist    *HookWhitelist        `yaml:"hook_whitelist"`
+	CubeEgressConf   *CubeEgressConf       `yaml:"cube_egress_conf"`
 }
 
 type CommonConf struct {

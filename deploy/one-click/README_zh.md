@@ -172,19 +172,9 @@ http://<target-host>:12088
 ```bash
 # 可选；未设置时由 one-click 自动拼接。
 DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
-# CubeAPI 也支持备用变量名。
-CUBE_API_DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
 ```
 
-创建或重新配置 OpenClaw 数字助手时，还需要在 `.env` 中配置 DeepSeek API Key。CubeAPI 会优先读取 `AGENTHUB_DEEPSEEK_API_KEY`，未设置时读取 `OPENCLAW_DEEPSEEK_API_KEY`，再通过 envd 注入到 sandbox 内的 OpenClaw 配置：
-
-```bash
-AGENTHUB_DEEPSEEK_API_KEY=sk-...
-# 或：
-OPENCLAW_DEEPSEEK_API_KEY=sk-...
-```
-
-该 key 会作为 `OPENCLAW_DEEPSEEK_API_KEY` 传入 sandbox，并写入 `/root/.openclaw/agents/main/agent/auth-profiles.json`。不要把真实 key 提交到仓库；只在目标机 `.env` 或安全的部署系统中配置。
+创建或重新配置 OpenClaw 数字助手前，请在 WebUI 的 **AgentHub 设置** 中填写 LLM API Key（以及 provider、Base URL、模型）。
 
 ### 计算节点安装
 

@@ -67,51 +67,21 @@ CubeAPI uses MySQL to persist Digital Assistant metadata, including assistant in
 DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
 ```
 
-If `DATABASE_URL` is not set, CubeAPI also checks:
+In one-click deployments, when `DATABASE_URL` is omitted, the startup script builds it from `CUBE_SANDBOX_MYSQL_*`.
 
-```bash
-CUBE_API_DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
-```
+### LLM API Key
 
-In one-click deployments, when `DATABASE_URL` is omitted, the startup script builds it from `CUBE_SANDBOX_MYSQL_HOST`, `CUBE_SANDBOX_MYSQL_PORT`, `CUBE_SANDBOX_MYSQL_USER`, `CUBE_SANDBOX_MYSQL_PASSWORD`, and `CUBE_SANDBOX_MYSQL_DB`.
+Before creating a digital assistant, configure the LLM API key (and provider, base URL, model) on the **AgentHub settings** page in the WebUI.
 
-### DeepSeek API Key
+You cannot create or reconfigure an assistant until this is done; the UI will prompt you to finish setup first.
 
-Creating or reconfiguring OpenClaw-based digital assistants requires a DeepSeek API key. CubeAPI reads the variables in this order:
-
-```bash
-AGENTHUB_DEEPSEEK_API_KEY=sk-...
-# fallback:
-OPENCLAW_DEEPSEEK_API_KEY=sk-...
-```
-
-CubeAPI injects the resolved key into the sandbox through envd as:
-
-```bash
-OPENCLAW_DEEPSEEK_API_KEY
-```
-
-The OpenClaw setup script inside the sandbox writes the key to:
-
-```text
-/root/.openclaw/agents/main/agent/auth-profiles.json
-```
-
-It also updates:
-
-```text
-/root/.openclaw/openclaw.json
-/root/.openclaw/agents/main/agent/models.json
-```
-
-to configure the DeepSeek provider and default model.
+Once configured, CubeAPI injects the key into OpenClaw inside the sandbox and writes the relevant config files (such as `auth-profiles.json`) so the assistant can reach the LLM service.
 
 ## Template Fast Path
 
-When creating a new assistant from a published assistant template, and no WeCom re-binding is required, CubeAPI uses a template fast path. The new sandbox reuses the OpenClaw configuration already stored in the template snapshot, so CubeAPI does not inject the DeepSeek API key again.
+When creating a new assistant from a published assistant template, and no WeCom re-binding is required, CubeAPI uses a template fast path. The new sandbox reuses the OpenClaw configuration already stored in the template snapshot, so CubeAPI does not inject the LLM API key again.
 
 ## Security Notes
 
-- Do not commit real API keys to Git.
-- For one-click deployments, put the key in the target machine `.env`.
-- For other deployment systems, inject it through a Secret or controlled environment variable.
+- Keep your LLM API key confidential; do not commit it to Git.
+- Protect database backups and access (the key is stored in the database).

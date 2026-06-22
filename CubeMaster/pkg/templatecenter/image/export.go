@@ -65,7 +65,22 @@ func dockerlessExportImageRootfs(ctx context.Context, source *PreparedSource, de
 	}
 
 	umociImageRef := ociLayoutImageRef(ociDir, source.LocalRef)
-	if err := runCommand(ctx, "", "umoci", "unpack", "--rootless", "--image", umociImageRef, bundleDir); err != nil {
+	// Only pass --rootless when we are NOT running as root. --rootless makes
+	// umoci squash every file's owner to the unpacking user (and skip device
+	// nodes), so when cubemaster runs as root it rewrites every image uid/gid
+	// to 0. That silently mutates the image's ownership and breaks any image
+	// relying on non-root-owned files with restrictive modes — e.g. a
+	// python/browser image whose /home/user is uid 1000 mode 0700 becomes
+	// root:root 0700, so the in-sandbox "user" account can no longer access
+	// its own home: envd exec fails (fork/exec /bin/sh EACCES) and chromium
+	// can't write its profile (crash-loop, CDP port never binds). Running as
+	// root without --rootless preserves the image's original uid/gid exactly.
+	umociArgs := []string{"unpack"}
+	if os.Geteuid() != 0 {
+		umociArgs = append(umociArgs, "--rootless")
+	}
+	umociArgs = append(umociArgs, "--image", umociImageRef, bundleDir)
+	if err := runCommand(ctx, "", "umoci", umociArgs...); err != nil {
 		return fmt.Errorf("umoci unpack %s failed: %w", source.LocalRef, err)
 	}
 	// The OCI layout is no longer needed once unpacked; drop it early to reduce

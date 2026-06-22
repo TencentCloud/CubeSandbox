@@ -260,7 +260,7 @@ func SetInstanceInfoField(ctx context.Context, insID string, kv ...string) error
 	for i := 0; i < len(kv); i += 2 {
 		fieldValues = append(fieldValues, kv[i], kv[i+1])
 	}
-	_, err := wrapredis.GetRedis(wrapredis.RedisWrite).Do("HSET", redis.Args{keyByIns}.AddFlat(fieldValues)...)
+	_, err := wrapredis.GetRedis().Do("HSET", redis.Args{keyByIns}.AddFlat(fieldValues)...)
 	if err != nil {
 		log.G(ctx).Errorf("redis set error, key: %s, err: %s", keyByIns, err)
 		return err

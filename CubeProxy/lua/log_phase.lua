@@ -11,4 +11,3 @@ local function get_currtime()
 end
 
 ngx.var.access_time = get_currtime()
-ngx.var.cache_free_space = ngx.shared.local_cache:get("cache_free_space")

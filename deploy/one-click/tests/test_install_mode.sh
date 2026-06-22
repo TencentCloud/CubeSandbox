@@ -349,7 +349,8 @@ test_install_sh_wires_upgrade_flow() {
   # full-wipe branch delegates to the helper that preserves the upgrade backup.
   assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "! -name '.backup'"
   # on upgrade, CIDR host-conflict detection is skipped (M2)
-  assert_contains "${f}" 'check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}"'
+  assert_contains "${f}" 'check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR"'
+  assert_contains "${f}" 'check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR"'
 }
 
 test_explicit_install_mode

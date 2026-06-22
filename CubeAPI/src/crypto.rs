@@ -8,11 +8,15 @@
 //    WeCom bot secret) are encrypted with AES-256-GCM and stored as
 //    `enc:v1:<base64(nonce|ciphertext)>`.
 //
-// The symmetric key is taken from the `AGENTHUB_SECRET_KEY` environment
-// variable. Set it to a strong, stable value in production (e.g. a 32-byte
-// key, base64-encoded). When unset, a built-in development key is used so the
-// feature works out of the box — this only obfuscates data at rest and MUST
-// be overridden for any real deployment.
+// The symmetric key (the "master key") is generated once per installation and
+// persisted in the AgentHub database (`t_agenthub_setting`, key
+// `secret_master_key`). CubeAPI bootstraps it on first startup (see
+// `db::AgentHubStore::connect`) and caches the decoded bytes in process memory,
+// so the runtime encrypt/decrypt path is a pure in-memory read with no database
+// round-trip. There is no environment variable and no built-in fallback key:
+// secrets cannot be encrypted or decrypted until the master key is installed.
+
+use std::sync::OnceLock;
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -22,45 +26,55 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 const ENC_PREFIX: &str = "enc:v1:";
 const NONCE_LEN: usize = 12;
-/// 32-byte development fallback key. Override with AGENTHUB_SECRET_KEY.
-const DEFAULT_DEV_KEY: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
+const MASTER_KEY_LEN: usize = 32;
 
-/// Derives a 32-byte AES key from `AGENTHUB_SECRET_KEY` (base64 preferred,
-/// otherwise raw bytes), padded/truncated to 32 bytes; falls back to the dev key.
-fn load_key() -> [u8; 32] {
-    let mut key = *DEFAULT_DEV_KEY;
-    if let Ok(value) = std::env::var("AGENTHUB_SECRET_KEY") {
-        let value = value.trim();
-        if !value.is_empty() {
-            let bytes = BASE64
-                .decode(value)
-                .unwrap_or_else(|_| value.as_bytes().to_vec());
-            if bytes.len() >= 32 {
-                key.copy_from_slice(&bytes[..32]);
-            } else {
-                key[..bytes.len()].copy_from_slice(&bytes);
-            }
-        }
-    }
-    key
+/// Process-global master key, installed once at startup from the database.
+static MASTER_KEY: OnceLock<[u8; MASTER_KEY_LEN]> = OnceLock::new();
+
+/// Generates a fresh random master key encoded as base64, suitable for storing
+/// in the database and later installing with [`install_master_key`].
+pub fn generate_master_key_b64() -> String {
+    let mut bytes = [0u8; MASTER_KEY_LEN];
+    getrandom::getrandom(&mut bytes).expect("OS CSPRNG must be available");
+    BASE64.encode(bytes)
 }
 
-/// Emits a startup warning when the process is using the built-in development
-/// encryption key for reversible AgentHub secrets.
-pub fn warn_if_using_dev_key() {
-    let configured = std::env::var("AGENTHUB_SECRET_KEY")
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false);
-    if !configured {
-        tracing::warn!(
-            "AGENTHUB_SECRET_KEY not set; using INSECURE development key. DO NOT use in production."
-        );
+/// Installs the process-wide master key from its base64 representation.
+///
+/// Idempotent: installing the same key again (e.g. from tests) is a no-op. The
+/// value must decode to exactly 32 bytes.
+pub fn install_master_key(b64: &str) -> anyhow::Result<()> {
+    let bytes = BASE64
+        .decode(b64.trim())
+        .map_err(|e| anyhow::anyhow!("master key is not valid base64: {e}"))?;
+    let key: [u8; MASTER_KEY_LEN] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("master key must be exactly {MASTER_KEY_LEN} bytes"))?;
+    // The key is installed once per process lifetime. OnceLock::set returns
+    // Err if already initialised — that is normal (e.g. tests calling it
+    // multiple times). Log only when the *value differs*, as that signals a
+    // real misconfiguration (two sources disagree on the master key).
+    if let Err(_) = MASTER_KEY.set(key) {
+        if MASTER_KEY.get() != Some(&key) {
+            tracing::debug!("ignoring attempt to install a different AgentHub master key");
+        }
     }
+    Ok(())
+}
+
+/// Returns the installed master key, or an error when it has not been
+/// bootstrapped yet (no database configured / startup init not run).
+fn load_key() -> anyhow::Result<[u8; MASTER_KEY_LEN]> {
+    MASTER_KEY
+        .get()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("AgentHub master key is not initialized"))
 }
 
 /// Encrypts a UTF-8 secret, returning an `enc:v1:` tagged, base64 payload.
 pub fn encrypt_secret(plaintext: &str) -> anyhow::Result<String> {
-    let key = load_key();
+    let key = load_key()?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
     // 96-bit nonce from a fresh UUIDv4 (random) — unique per message.
     let uuid_bytes = *uuid::Uuid::new_v4().as_bytes();
@@ -84,7 +98,7 @@ pub fn decrypt_secret(stored: &str) -> anyhow::Result<String> {
         anyhow::bail!("ciphertext too short");
     }
     let (nonce_bytes, ciphertext) = raw.split_at(NONCE_LEN);
-    let key = load_key();
+    let key = load_key()?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
     let plaintext = cipher
         .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
@@ -97,13 +111,22 @@ pub fn is_encrypted(stored: &str) -> bool {
     stored.starts_with(ENC_PREFIX)
 }
 
-/// Decrypts an encrypted value, or returns the input unchanged when it is not
-/// in the encrypted format (legacy plaintext rows) or cannot be decrypted.
+/// Decrypts a stored secret for use.
+///
+/// - Values without the `enc:v1:` envelope are legacy plaintext rows and are
+///   returned unchanged.
+/// - Encrypted values that decrypt successfully return their plaintext.
+/// - Encrypted values that CANNOT be decrypted (e.g. encrypted under a previous
+///   master key) are treated as **unset** and return an empty string, rather
+///   than leaking the ciphertext downstream as if it were a valid secret. This
+///   makes callers (which check for emptiness) report "not configured" so the
+///   operator is prompted to re-enter the secret instead of hitting a silent
+///   authentication failure later.
 pub fn decrypt_or_passthrough(stored: &str) -> String {
     if is_encrypted(stored) {
         decrypt_secret(stored).unwrap_or_else(|err| {
-            tracing::warn!(error = %err, "failed to decrypt AgentHub secret; using stored value");
-            stored.to_string()
+            tracing::warn!(error = %err, "failed to decrypt AgentHub secret; treating as unset");
+            String::new()
         })
     } else {
         stored.to_string()
@@ -127,19 +150,18 @@ pub fn verify_password(stored: &str, candidate: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
     use super::*;
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    /// Installs a fixed 32-byte test key. All tests share the same value so the
+    /// idempotent `OnceLock` install is order-independent across parallel tests.
+    fn install_test_key() {
+        const TEST_KEY: [u8; MASTER_KEY_LEN] = *b"0123456789abcdef0123456789ABCDEF";
+        install_master_key(&BASE64.encode(TEST_KEY)).expect("install test key");
     }
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        std::env::set_var("AGENTHUB_SECRET_KEY", "test-secret-key-32-bytes-long-value");
+        install_test_key();
 
         let encrypted = encrypt_secret("wecom-secret").expect("encrypt should succeed");
 
@@ -153,14 +175,23 @@ mod tests {
 
     #[test]
     fn decrypt_or_passthrough_handles_plaintext_and_bad_ciphertext() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        std::env::set_var("AGENTHUB_SECRET_KEY", "test-secret-key-32-bytes-long-value");
+        install_test_key();
 
+        // Legacy plaintext (no envelope) passes through unchanged.
         assert_eq!(decrypt_or_passthrough("legacy-secret"), "legacy-secret");
-        assert_eq!(
-            decrypt_or_passthrough("enc:v1:not-base64"),
-            "enc:v1:not-base64"
-        );
+        // Encrypted envelope with non-base64 body cannot be decrypted -> unset.
+        assert_eq!(decrypt_or_passthrough("enc:v1:not-base64"), "");
+        // Well-formed envelope that does not authenticate (e.g. encrypted under a
+        // different/previous master key) also fails closed to unset, instead of
+        // leaking the ciphertext string downstream.
+        let undecryptable = format!("enc:v1:{}", BASE64.encode([0u8; 32]));
+        assert_eq!(decrypt_or_passthrough(&undecryptable), "");
+    }
+
+    #[test]
+    fn install_master_key_rejects_wrong_length() {
+        assert!(install_master_key(&BASE64.encode(b"too-short")).is_err());
+        assert!(install_master_key("not-base64!!!").is_err());
     }
 
     #[test]

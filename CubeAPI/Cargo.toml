@@ -89,6 +89,8 @@ sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio
 # (DeepSeek API key, WeCom bot secret).
 bcrypt = "0.15"
 aes-gcm = "0.10"
+# getrandom: OS CSPRNG used to generate the AgentHub master encryption key.
+getrandom = "0.2"
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────
 # (tokio::signal + axum::serve().with_graceful_shutdown is sufficient)

@@ -37,5 +37,3 @@ ngx.req.set_uri(rest, false)
 local host_ip, host_port = sb.resolve_backend(ins_id, container_port)
 ngx.var.backend_ip = host_ip
 ngx.var.backend_port = host_port
-
-sb.assert_backend_healthy(host_ip, ins_id)
