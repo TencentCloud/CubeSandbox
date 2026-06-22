@@ -10,6 +10,7 @@ import { Card, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Play, Loader2, Terminal } from 'lucide-react';
+import DOMPurify from 'dompurify';
 
 type SupportedLang = 'python' | 'bash';
 
@@ -45,7 +46,7 @@ function RichResultItem({ result }: { result: JupyterResult }) {
     return (
       <div
         className="jupyter-html-output max-h-[300px] overflow-auto rounded-md bg-white p-2 text-xs ring-1 ring-border/60 [&_table]:border-collapse [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:px-2 [&_th]:py-1 [&_th]:bg-muted/40"
-        dangerouslySetInnerHTML={{ __html: result.html }}
+        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(result.html) }}
       />
     );
   }
@@ -74,7 +75,11 @@ function RichResultItem({ result }: { result: JupyterResult }) {
     return (
       <div
         className="jupyter-svg-output max-h-[300px] overflow-auto rounded-md bg-white p-2 ring-1 ring-border/60"
-        dangerouslySetInnerHTML={{ __html: result.svg }}
+        dangerouslySetInnerHTML={{
+          __html: DOMPurify.sanitize(result.svg, {
+            USE_PROFILES: { svg: true, svgFilters: true },
+          }),
+        }}
       />
     );
   }

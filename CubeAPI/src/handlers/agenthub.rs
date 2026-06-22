@@ -1389,8 +1389,7 @@ pub async fn get_agent_gateway_health(
     Path(agent_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let record = read_agenthub_instance(&state, &agent_id).await?;
-    let proxy_base = std::env::var("AGENTHUB_SANDBOX_PROXY_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1".to_string());
+    let proxy_base = state.config.sandbox_proxy_url.clone();
     let url = format!(
         "{}/sandbox/{}/{}/",
         proxy_base.trim_end_matches('/'),
@@ -3796,9 +3795,10 @@ async fn run_envd_command(
     req: Value,
 ) -> AppResult<CommandOutput> {
     let host = format!("{}-{}.{}", ENVD_PORT, sandbox_id, domain);
-    let url = std::env::var("AGENTHUB_SANDBOX_PROXY_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1".to_string());
-    let url = format!("{}/process.Process/Start", url.trim_end_matches('/'));
+    let url = format!(
+        "{}/process.Process/Start",
+        state.config.sandbox_proxy_url.trim_end_matches('/')
+    );
 
     let body = connect_envelope(&serde_json::to_vec(&req).map_err(anyhow::Error::from)?);
     let resp = state
@@ -3806,7 +3806,7 @@ async fn run_envd_command(
         .post(url)
         .header("Host", host)
         .header("Content-Type", CONNECT_JSON)
-        .header("Authorization", "Basic cm9vdDo=")
+        .header("Authorization", &state.config.envd_auth)
         .body(body)
         .send()
         .await

@@ -50,7 +50,7 @@ impl AppState {
             .expect("failed to build HTTP client");
 
         let cubemaster = CubeMasterClient::new(config.cubemaster_url.clone(), http_client.clone());
-        let services = AppServices::new(&config, cubemaster.clone());
+        let services = AppServices::new(&config, cubemaster.clone(), http_client.clone());
         let agenthub_store = match config
             .database_url
             .as_deref()

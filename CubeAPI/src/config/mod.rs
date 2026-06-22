@@ -91,6 +91,23 @@ pub struct ServerConfig {
     /// Env var: CUBE_PROXY_PORT_HTTP (default "80")
     #[serde(default = "default_cube_proxy_port_http")]
     pub cube_proxy_port_http: Option<u16>,
+
+    /// Base URL of the sandbox proxy used to reach in-sandbox services
+    /// (envd / Jupyter). Env var: AGENTHUB_SANDBOX_PROXY_URL (default
+    /// "http://127.0.0.1").
+    #[serde(default = "default_sandbox_proxy_url")]
+    pub sandbox_proxy_url: String,
+
+    /// `Authorization` header value used for internal service-to-service auth
+    /// with the in-sandbox envd / Jupyter endpoints.
+    ///
+    /// **Security**: this is a credential and must never be hardcoded in
+    /// business logic. It is sourced from the environment so deployments can
+    /// rotate it without code changes. Env var: CUBE_API_ENVD_AUTH (default
+    /// `Basic cm9vdDo=`, i.e. the envd built-in `root:` with an empty
+    /// password — override it in any non-local environment).
+    #[serde(default = "default_envd_auth")]
+    pub envd_auth: String,
 }
 
 fn default_bind() -> String {
@@ -146,6 +163,12 @@ fn default_cube_proxy_port_http() -> Option<u16> {
         .ok()
         .and_then(|s| s.parse().ok())
 }
+fn default_sandbox_proxy_url() -> String {
+    std::env::var("AGENTHUB_SANDBOX_PROXY_URL").unwrap_or_else(|_| "http://127.0.0.1".to_string())
+}
+fn default_envd_auth() -> String {
+    std::env::var("CUBE_API_ENVD_AUTH").unwrap_or_else(|_| "Basic cm9vdDo=".to_string())
+}
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
     let host = std::env::var("CUBE_SANDBOX_MYSQL_HOST").ok()?;
@@ -189,6 +212,8 @@ impl Default for ServerConfig {
             cube_api_url: default_cube_api_url(),
             cube_proxy_node_ip: None,
             cube_proxy_port_http: default_cube_proxy_port_http(),
+            sandbox_proxy_url: default_sandbox_proxy_url(),
+            envd_auth: default_envd_auth(),
         }
     }
 }

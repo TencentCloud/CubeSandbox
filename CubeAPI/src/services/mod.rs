@@ -3,6 +3,7 @@
 //
 
 pub mod cluster;
+pub mod exec;
 pub mod sandboxes;
 pub mod snapshots;
 pub mod templates;
@@ -83,15 +84,25 @@ fn is_valid_dns_domain_name(domain: &str) -> bool {
 #[derive(Clone)]
 pub struct AppServices {
     pub cluster: cluster::ClusterService,
+    pub exec: exec::ExecService,
     pub sandboxes: sandboxes::SandboxService,
     pub snapshots: snapshots::SnapshotService,
     pub templates: templates::TemplateService,
 }
 
 impl AppServices {
-    pub fn new(config: &ServerConfig, cubemaster: CubeMasterClient) -> Self {
+    pub fn new(
+        config: &ServerConfig,
+        cubemaster: CubeMasterClient,
+        http_client: reqwest::Client,
+    ) -> Self {
         Self {
             cluster: cluster::ClusterService::new(cubemaster.clone()),
+            exec: exec::ExecService::new(
+                http_client,
+                config.sandbox_proxy_url.clone(),
+                config.envd_auth.clone(),
+            ),
             sandboxes: sandboxes::SandboxService::new(
                 cubemaster.clone(),
                 config.instance_type.clone(),
