@@ -8,6 +8,7 @@ mod crypto;
 mod cubemaster;
 mod db;
 mod error;
+mod examples;
 mod handlers;
 mod logging;
 mod middleware;
