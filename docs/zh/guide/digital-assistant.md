@@ -77,6 +77,15 @@ DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
 
 配置完成后，CubeAPI 会自动把 key 注入 sandbox 内的 OpenClaw，并写入相关配置文件（如 `auth-profiles.json`），用于连接 LLM 服务。
 
+### 凭证交付方式与模型命名空间
+
+凭证交付支持两种方式：
+
+- **凭证托管（推荐）**：托管的只是 **API Key**。出站请求由 CubeEgress 仅对配置的 LLM Base URL 注入 `Authorization` 头，真实 Key 不进入沙箱，OpenClaw 配置里只保存一个占位 Key。
+- **环境变量注入（兼容旧版）**：把真实 API Key 直接写入 OpenClaw 环境与配置，仅建议在未启用 CubeEgress 的环境使用。
+
+无论哪种方式，模型 ID 注入 OpenClaw 时都会归一化为 `{Provider}/{模型ID}` 的命名空间：`{Provider}` 取自 AgentHub 设置中的 Provider，斜杠后的部分作为真实模型名发往上游。使用**自定义上游**时，请确保 Provider 与模型 ID 与上游一致，否则 OpenClaw 可能报 `Unknown model`。例如 Provider 为 `openai-compatible`、模型为 `deepseek-v4-flash` 时，OpenClaw 内部解析为 `openai-compatible/deepseek-v4-flash`，上游收到的模型名为 `deepseek-v4-flash`。
+
 ## 模板快路径
 
 如果从已发布的助手模板创建新助手，并且不需要重新绑定企业微信，CubeAPI 会使用模板快路径：新 sandbox 直接沿用模板快照里已有的 OpenClaw 配置，不会重新注入 LLM API Key。

@@ -24,7 +24,7 @@
     },
     "model": {
       "label": "模型 ID",
-      "hint": "注入到 OpenClaw 的默认模型，例如 deepseek/deepseek-v4-flash。"
+      "hint": "注入到 OpenClaw 的默认模型，例如 deepseek/deepseek-v4-flash。自定义上游时会按 {Provider}/{模型ID} 归一化注入，斜杠后的部分作为真实模型名发往上游。"
     },
     "apiKey": {
       "label": "LLM API Key",

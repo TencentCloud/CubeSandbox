@@ -1218,13 +1218,9 @@ function AgentCard({
 
       {/* Field rows */}
       <div className="mt-5 space-y-2.5 text-xs">
-        <Row
-          label={t('card.fields.model')}
-          value={agent.model}
-          action={t('card.fields.modifyModel')}
-          actionDisabled={actionDisabled}
-          onAction={() => onChangeModel(agent)}
-        />
+        {/* Runtime model changes are disabled; the model is fixed when the
+            instance is provisioned. Clone or recreate to switch models. */}
+        <Row label={t('card.fields.model')} value={agent.model} />
         <Row
           label={t('card.fields.version')}
           value={agent.version}

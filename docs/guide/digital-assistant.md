@@ -77,6 +77,15 @@ You cannot create or reconfigure an assistant until this is done; the UI will pr
 
 Once configured, CubeAPI injects the key into OpenClaw inside the sandbox and writes the relevant config files (such as `auth-profiles.json`) so the assistant can reach the LLM service.
 
+### Credential delivery and model namespace
+
+There are two credential delivery modes:
+
+- **Credential hosting (recommended)**: only the **API Key** is hosted. CubeEgress injects the `Authorization` header for the configured LLM Base URL on outbound requests, so the real key never enters the sandbox and OpenClaw stores only a placeholder key.
+- **Environment injection (legacy)**: writes the real API key directly into OpenClaw's environment and config. Use this only when CubeEgress is unavailable.
+
+In both modes the model ID is normalized into a `{Provider}/{ModelID}` namespace when injected into OpenClaw: `{Provider}` comes from the AgentHub Provider setting, and the part after the slash is sent upstream as the real model name. When using a **custom upstream**, make sure the Provider and model ID match the upstream, or OpenClaw may report `Unknown model`. For example, with Provider `openai-compatible` and model `deepseek-v4-flash`, OpenClaw resolves it as `openai-compatible/deepseek-v4-flash` while the upstream receives the model name `deepseek-v4-flash`.
+
 ## Template Fast Path
 
 When creating a new assistant from a published assistant template, and no WeCom re-binding is required, CubeAPI uses a template fast path. The new sandbox reuses the OpenClaw configuration already stored in the template snapshot, so CubeAPI does not inject the LLM API key again.

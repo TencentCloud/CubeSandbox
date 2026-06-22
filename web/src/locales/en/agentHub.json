@@ -24,7 +24,7 @@
     },
     "model": {
       "label": "Model ID",
-      "hint": "Default model injected into OpenClaw, e.g. deepseek/deepseek-v4-flash."
+      "hint": "Default model injected into OpenClaw, e.g. deepseek/deepseek-v4-flash. For a custom upstream it is normalized to {Provider}/{ModelID}; the part after the slash is sent upstream as the real model name."
     },
     "apiKey": {
       "label": "LLM API Key",

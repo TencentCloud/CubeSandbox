@@ -120,6 +120,9 @@ pub struct UpdateWeComConfigRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateAgentModelRequest {
+    // Runtime model updates are intentionally disabled this round, but the
+    // request shape is kept so the endpoint can still parse client payloads.
+    #[allow(dead_code)]
     pub model: String,
 }
 
@@ -477,65 +480,43 @@ pub async fn create_agent_instance(
         .clone()
         .unwrap_or_else(|| state.config.sandbox_domain.clone());
 
-    // In shared-files mode /root/.openclaw is backed by a fresh host mount, so
-    // paths that used to rely on snapshot-bundled config still need setup.
-    let fixed_gateway_token = if should_bind_wecom {
+    // Published-template sandboxes already carry OpenClaw state, so the fast
+    // path only merges LLM settings. Shared-files mounts and app-market
+    // templates start empty and still need a full init.
+    let has_openclaw_state =
+        use_template_fastpath && (!shared_files || template_openclaw_state_source.is_some());
+    // Merge mode preserves the bundled gateway token; it is read back from the
+    // sandbox/host below. Full init writes a token Rust controls.
+    let fixed_gateway_token = if has_openclaw_state {
         None
     } else {
         Some(new_gateway_token())
     };
 
-    let setup = if should_bind_wecom {
-        match configure_openclaw(
-            &state,
-            &sandbox_id,
-            &domain,
-            &llm_config,
-            &body.bot_id,
-            &body.bot_secret,
-        )
-        .await
-        {
-            Ok(setup) => setup,
-            Err(err) => {
-                let _ = state.services.sandboxes.kill_sandbox(&sandbox_id).await;
-                return Err(err);
-            }
+    let plan = LlmRuntimePlan::resolve(&llm_config, &llm_config.model);
+    let apply_options = if should_bind_wecom {
+        OpenClawApplyOptions {
+            mode: OpenClawApplyMode::FullInit,
+            gateway_token: fixed_gateway_token.clone(),
+            preserve_gateway_token: false,
+            configure_wecom: true,
+            bot_id: body.bot_id.clone(),
+            bot_secret: body.bot_secret.clone(),
         }
-    } else if use_template_fastpath && (!shared_files || template_openclaw_state_source.is_some()) {
-        match configure_openclaw_model(&state, &sandbox_id, &domain, &llm_config).await {
-            Ok(setup) => setup,
-            Err(err) => {
-                let _ = state.services.sandboxes.kill_sandbox(&sandbox_id).await;
-                return Err(err);
-            }
-        }
-    } else if use_template_fastpath {
-        let gateway_token = fixed_gateway_token
-            .clone()
-            .unwrap_or_else(new_gateway_token);
-        match configure_ds_openclaw(&state, &sandbox_id, &domain, &llm_config, &gateway_token).await
-        {
-            Ok(setup) => setup,
-            Err(err) => {
-                let _ = state.services.sandboxes.kill_sandbox(&sandbox_id).await;
-                return Err(err);
-            }
-        }
+    } else if has_openclaw_state {
+        OpenClawApplyOptions::merge_llm()
     } else {
-        let gateway_token = fixed_gateway_token
-            .clone()
-            .unwrap_or_else(new_gateway_token);
+        OpenClawApplyOptions::full_init(fixed_gateway_token.clone())
+    };
 
-        match configure_ds_openclaw(&state, &sandbox_id, &domain, &llm_config, &gateway_token).await
-        {
+    let setup =
+        match apply_openclaw_runtime(&state, &sandbox_id, &domain, &plan, &apply_options).await {
             Ok(setup) => setup,
             Err(err) => {
                 let _ = state.services.sandboxes.kill_sandbox(&sandbox_id).await;
                 return Err(err);
             }
-        }
-    };
+        };
 
     let bots = if should_bind_wecom {
         vec!["wecom".to_string()]
@@ -715,6 +696,67 @@ impl LlmConfig {
             OPENCLAW_EGRESS_MANAGED_KEY
         } else {
             &self.api_key
+        }
+    }
+}
+
+/// OpenClaw resolves a model as `{provider}/{suffix}`. Any caller-supplied
+/// prefix is dropped so the suffix is the bare upstream model id, which is also
+/// the value sent to the upstream API as the request body `model` field.
+fn openclaw_model_suffix(model: &str) -> &str {
+    model
+        .split_once('/')
+        .map(|(_, rest)| rest)
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(model)
+}
+
+/// Fully resolved view of the LLM for a single sandbox.
+///
+/// This is the one place that decides how a model string maps onto OpenClaw's
+/// provider/model namespace, so the sandbox-side apply script never has to
+/// reason about prefixes, providers, or credential modes.
+#[derive(Debug, Clone)]
+struct LlmRuntimePlan {
+    /// Original model string as stored/displayed (e.g. `deepseek/deepseek-v4-flash`).
+    public_model: String,
+    /// Bare model id sent upstream as the request body `model` field.
+    upstream_model_id: String,
+    /// Provider literal from settings (e.g. `deepseek`, `openai-compatible`).
+    upstream_provider: String,
+    upstream_base_url: String,
+    /// Namespaced primary OpenClaw resolves against, `{provider}/{model_id}`.
+    openclaw_primary: String,
+    openclaw_model_name: String,
+    /// Key OpenClaw stores. In egress mode this is a managed placeholder; the
+    /// real key only lives in the egress rule.
+    openclaw_api_key: String,
+    credential_mode: String,
+}
+
+impl LlmRuntimePlan {
+    /// Resolves the runtime plan from the persisted LLM config and the
+    /// effective public model chosen by the caller (request / template / clone).
+    fn resolve(llm: &LlmConfig, public_model: &str) -> Self {
+        let public_model = {
+            let trimmed = public_model.trim();
+            if trimmed.is_empty() {
+                DEFAULT_OPENCLAW_MODEL.to_string()
+            } else {
+                trimmed.to_string()
+            }
+        };
+        let upstream_model_id = openclaw_model_suffix(&public_model).to_string();
+        let openclaw_primary = format!("{}/{}", llm.provider, upstream_model_id);
+        Self {
+            openclaw_model_name: model_display_name(&public_model),
+            upstream_model_id,
+            upstream_provider: llm.provider.clone(),
+            upstream_base_url: llm.base_url.clone(),
+            openclaw_primary,
+            openclaw_api_key: llm.openclaw_api_key().to_string(),
+            credential_mode: llm.credential_mode.clone(),
+            public_model,
         }
     }
 }
@@ -1987,17 +2029,23 @@ pub async fn clone_agent_instance(
     let copied_openclaw_state = openclaw_persist
         .as_ref()
         .is_some_and(|(_, _, _, copied)| *copied);
-    let gateway_token = if copied_openclaw_state || !shared_files {
+    // A copied/full-snapshot sandbox already carries OpenClaw state, so we only
+    // merge LLM settings and keep its gateway token; a fresh shared-files mount
+    // needs a full init with a new token.
+    let has_openclaw_state = copied_openclaw_state || !shared_files;
+    let gateway_token = if has_openclaw_state {
         record.gateway_token.clone()
     } else {
         Some(new_gateway_token())
     };
-    let setup_result = if copied_openclaw_state || !shared_files {
-        configure_openclaw_model(&state, &sandbox_id, &domain, &llm_config).await
+    let plan = LlmRuntimePlan::resolve(&llm_config, &llm_config.model);
+    let apply_options = if has_openclaw_state {
+        OpenClawApplyOptions::merge_llm()
     } else {
-        let token = gateway_token.clone().unwrap_or_else(new_gateway_token);
-        configure_ds_openclaw(&state, &sandbox_id, &domain, &llm_config, &token).await
+        OpenClawApplyOptions::full_init(gateway_token.clone())
     };
+    let setup_result =
+        apply_openclaw_runtime(&state, &sandbox_id, &domain, &plan, &apply_options).await;
     let setup = match setup_result {
         Ok(setup) => setup,
         Err(err) => {
@@ -2836,45 +2884,16 @@ async fn read_agenthub_instance(
 }
 
 pub async fn update_agent_model(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Json(body): Json<UpdateAgentModelRequest>,
+    State(_state): State<AppState>,
+    Path(_agent_id): Path<String>,
+    Json(_body): Json<UpdateAgentModelRequest>,
 ) -> AppResult<impl IntoResponse> {
-    let requested_model = body.model.trim();
-    let Some((model_label, model_id)) = normalize_agent_model(requested_model) else {
-        return Err(AppError::BadRequest(format!(
-            "unsupported AgentHub model: {}",
-            requested_model
-        )));
-    };
-
-    let Some(store) = &state.agenthub_store else {
-        return Err(AppError::BadRequest(
-            "AgentHub database persistence is not configured".to_string(),
-        ));
-    };
-
-    let Some(record) = store.get_instance(&agent_id).await.map_err(|e| {
-        AppError::Internal(anyhow::anyhow!("failed to read AgentHub instance: {}", e))
-    })?
-    else {
-        return Err(AppError::BadRequest(format!(
-            "AgentHub instance {} not found",
-            agent_id
-        )));
-    };
-
-    let mut llm_config = resolve_llm_config(&state).await?;
-    llm_config.model = model_id.to_string();
-    let setup =
-        configure_openclaw_model(&state, &record.sandbox_id, &record.domain, &llm_config).await?;
-    let updated = store
-        .update_model(&agent_id, model_label, &setup)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("failed to update model: {}", e)))?
-        .ok_or_else(|| AppError::BadRequest(format!("AgentHub instance {} not found", agent_id)))?;
-
-    Ok((StatusCode::OK, Json(updated.into_response())))
+    // Changing a model on a running instance is intentionally not supported in
+    // this round: the model namespace is resolved once when the sandbox is
+    // provisioned. Create a new instance (or clone) to switch models.
+    Err::<axum::Json<()>, _>(AppError::NotImplemented(
+        "updating an AgentHub instance's model at runtime is not supported; create or clone an instance instead".to_string(),
+    ))
 }
 
 pub async fn update_agent_wecom_config(
@@ -2907,16 +2926,23 @@ pub async fn update_agent_wecom_config(
     };
 
     let llm_config = resolve_llm_config(&state).await?;
-
-    let bot_id_value = Some(bot_id.to_string());
-    let bot_secret_value = Some(bot_secret.to_string());
-    let setup = configure_openclaw(
+    let plan = LlmRuntimePlan::resolve(&llm_config, &llm_config.model);
+    // Reconfiguring the WeCom channel rewrites the full OpenClaw config, but the
+    // existing gateway token MUST be preserved or the stored gateway URL breaks.
+    let apply_options = OpenClawApplyOptions {
+        mode: OpenClawApplyMode::FullInit,
+        gateway_token: record.gateway_token.clone(),
+        preserve_gateway_token: true,
+        configure_wecom: true,
+        bot_id: Some(bot_id.to_string()),
+        bot_secret: Some(bot_secret.to_string()),
+    };
+    let setup = apply_openclaw_runtime(
         &state,
         &record.sandbox_id,
         &record.domain,
-        &llm_config,
-        &bot_id_value,
-        &bot_secret_value,
+        &plan,
+        &apply_options,
     )
     .await?;
     let gateway_token = read_openclaw_gateway_token(&state, &record.sandbox_id, &record.domain)
@@ -2973,43 +2999,100 @@ pub async fn get_agent_wecom_config(
     Ok((StatusCode::OK, Json(config)))
 }
 
-async fn configure_openclaw(
+/// How `apply_openclaw_runtime` should treat the existing on-disk OpenClaw
+/// state in the sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenClawApplyMode {
+    /// Write the full OpenClaw structure (gateway/workspace/plugins + LLM).
+    /// Used for fresh sandboxes, app-market templates and shared-files mounts
+    /// without bundled state.
+    FullInit,
+    /// Only merge the LLM-related blocks into existing config, preserving the
+    /// gateway (and its token). Used when the sandbox already carries OpenClaw
+    /// state (published template fast path / clone from snapshot).
+    MergeLlm,
+}
+
+/// Per-call knobs for the unified OpenClaw apply path. Everything the sandbox
+/// script needs to decide behaviour is captured here in Rust.
+struct OpenClawApplyOptions {
+    mode: OpenClawApplyMode,
+    /// Explicit gateway token to write. When `None` in `FullInit`, the script
+    /// reuses the existing token if `preserve_gateway_token` is set, otherwise
+    /// it generates a fresh one.
+    gateway_token: Option<String>,
+    preserve_gateway_token: bool,
+    configure_wecom: bool,
+    bot_id: Option<String>,
+    bot_secret: Option<String>,
+}
+
+impl OpenClawApplyOptions {
+    fn full_init(gateway_token: Option<String>) -> Self {
+        Self {
+            mode: OpenClawApplyMode::FullInit,
+            gateway_token,
+            preserve_gateway_token: false,
+            configure_wecom: false,
+            bot_id: None,
+            bot_secret: None,
+        }
+    }
+
+    fn merge_llm() -> Self {
+        Self {
+            mode: OpenClawApplyMode::MergeLlm,
+            gateway_token: None,
+            preserve_gateway_token: true,
+            configure_wecom: false,
+            bot_id: None,
+            bot_secret: None,
+        }
+    }
+}
+
+/// Renders the structured config patch handed to the sandbox apply script.
+/// This is pure so it can be unit-tested without a sandbox.
+fn openclaw_apply_spec(plan: &LlmRuntimePlan, options: &OpenClawApplyOptions) -> Value {
+    let mode = match options.mode {
+        OpenClawApplyMode::FullInit => "full_init",
+        OpenClawApplyMode::MergeLlm => "merge_llm",
+    };
+    serde_json::json!({
+        "mode": mode,
+        "provider": plan.upstream_provider,
+        "baseUrl": plan.upstream_base_url,
+        "apiKey": plan.openclaw_api_key,
+        "openclawPrimary": plan.openclaw_primary,
+        "upstreamModelId": plan.upstream_model_id,
+        "modelName": plan.openclaw_model_name,
+        "credentialMode": plan.credential_mode,
+        "configureWecom": options.configure_wecom,
+        "gateway": {
+            "manage": options.mode == OpenClawApplyMode::FullInit,
+            "token": options.gateway_token,
+            "preserveExisting": options.preserve_gateway_token,
+        },
+    })
+}
+
+/// Single entry point for writing an OpenClaw runtime into a sandbox.
+///
+/// Rust resolves the entire configuration (`LlmRuntimePlan` + options), encodes
+/// it as a JSON patch and hands it to a thin, branch-free sandbox script that
+/// only writes files, restarts the gateway and probes readiness.
+async fn apply_openclaw_runtime(
     state: &AppState,
     sandbox_id: &str,
     domain: &str,
-    llm: &LlmConfig,
-    bot_id: &Option<String>,
-    bot_secret: &Option<String>,
+    plan: &LlmRuntimePlan,
+    options: &OpenClawApplyOptions,
 ) -> AppResult<AgentSetupResult> {
+    let spec = openclaw_apply_spec(plan, options);
+    let spec_b64 = BASE64.encode(serde_json::to_vec(&spec).map_err(anyhow::Error::from)?);
+
     let mut envs = serde_json::Map::from_iter([
-        (
-            "OPENCLAW_LLM_PROVIDER".to_string(),
-            Value::String(llm.provider.clone()),
-        ),
-        (
-            "OPENCLAW_LLM_BASE_URL".to_string(),
-            Value::String(llm.base_url.clone()),
-        ),
-        (
-            "OPENCLAW_LLM_API_KEY".to_string(),
-            Value::String(llm.openclaw_api_key().to_string()),
-        ),
-        (
-            "OPENCLAW_DEEPSEEK_API_KEY".to_string(),
-            Value::String(llm.openclaw_api_key().to_string()),
-        ),
-        (
-            "OPENCLAW_LLM_CREDENTIAL_MODE".to_string(),
-            Value::String(llm.credential_mode.clone()),
-        ),
-        (
-            "OPENCLAW_DEFAULT_MODEL".to_string(),
-            Value::String(llm.model.clone()),
-        ),
-        (
-            "OPENCLAW_DEFAULT_MODEL_NAME".to_string(),
-            Value::String(model_display_name(&llm.model).to_string()),
-        ),
+        ("OPENCLAW_APPLY_SPEC".to_string(), Value::String(spec_b64)),
         (
             "OPENCLAW_ALLOWED_ORIGINS".to_string(),
             Value::String("*".to_string()),
@@ -3031,25 +3114,26 @@ async fn configure_openclaw(
             Value::String(std::env::var("CUBE_SANDBOX_NODE_IP").unwrap_or_default()),
         ),
     ]);
-    if let Some(v) = bot_id.as_deref().filter(|v| !v.trim().is_empty()) {
-        envs.insert("OPENCLAW_BOT_ID".to_string(), Value::String(v.to_string()));
+    if options.configure_wecom {
+        if let Some(v) = options.bot_id.as_deref().filter(|v| !v.trim().is_empty()) {
+            envs.insert("OPENCLAW_BOT_ID".to_string(), Value::String(v.to_string()));
+        }
+        if let Some(v) = options
+            .bot_secret
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+        {
+            envs.insert(
+                "OPENCLAW_BOT_SECRET".to_string(),
+                Value::String(v.to_string()),
+            );
+        }
     }
-    if let Some(v) = bot_secret.as_deref().filter(|v| !v.trim().is_empty()) {
-        envs.insert(
-            "OPENCLAW_BOT_SECRET".to_string(),
-            Value::String(v.to_string()),
-        );
-    }
-
-    let setup_script = openclaw_setup_script(
-        bot_id.as_deref().is_some_and(|v| !v.trim().is_empty())
-            && bot_secret.as_deref().is_some_and(|v| !v.trim().is_empty()),
-    );
 
     let req = serde_json::json!({
         "process": {
             "cmd": "/bin/bash",
-            "args": ["-l", "-c", setup_script],
+            "args": ["-l", "-c", openclaw_apply_script()],
             "envs": envs,
             "cwd": "/root"
         },
@@ -3066,285 +3150,7 @@ async fn configure_openclaw(
     }
     if output.exit_code != 0 {
         return Err(AppError::Internal(anyhow::anyhow!(
-            "OpenClaw setup failed with exit code {}: {}",
-            output.exit_code,
-            output.stderr
-        )));
-    }
-
-    Ok(AgentSetupResult {
-        exit_code: output.exit_code,
-        stdout: output.stdout,
-        stderr: output.stderr,
-    })
-}
-
-async fn configure_openclaw_model(
-    state: &AppState,
-    sandbox_id: &str,
-    domain: &str,
-    llm: &LlmConfig,
-) -> AppResult<AgentSetupResult> {
-    let model = &llm.model;
-    let model_name = model_display_name(model);
-    let req = serde_json::json!({
-        "process": {
-            "cmd": "/bin/bash",
-            "args": [
-                "-l",
-                "-c",
-                r#"python3 - <<'PY'
-import json, os
-from pathlib import Path
-
-model = os.environ["OPENCLAW_DEFAULT_MODEL"]
-model_name = os.environ["OPENCLAW_DEFAULT_MODEL_NAME"]
-model_id = model.split("/", 1)[-1]
-provider = os.environ.get("OPENCLAW_LLM_PROVIDER", "deepseek").strip() or "deepseek"
-base_url = os.environ.get("OPENCLAW_LLM_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
-api_key = os.environ.get("OPENCLAW_LLM_API_KEY") or os.environ.get("OPENCLAW_DEEPSEEK_API_KEY", "")
-auth_profile = f"{provider}:default"
-config_path = Path("/root/.openclaw/openclaw.json")
-agent_dir = Path("/root/.openclaw/agents/main/agent")
-ca_pem = os.environ.get("CUBE_EGRESS_CA_PEM", "").strip()
-ca_path = Path(os.environ.get("OPENCLAW_NODE_EXTRA_CA_CERTS", "/root/.openclaw/cube-egress-ca.crt"))
-
-if ca_pem:
-    ca_path.parent.mkdir(parents=True, exist_ok=True)
-    ca_path.write_text(ca_pem + ("\n" if not ca_pem.endswith("\n") else ""))
-    os.environ["NODE_EXTRA_CA_CERTS"] = str(ca_path)
-
-data = json.loads(config_path.read_text())
-agents = data.setdefault("agents", {}).setdefault("defaults", {})
-agents["model"] = {"primary": model}
-agents["models"] = {model: {"alias": model_name}}
-models = data.setdefault("models", {})
-if not isinstance(models, dict):
-    models = {}
-    data["models"] = models
-models["mode"] = models.get("mode") or "merge"
-models.pop("deepseek", None)
-providers = models.setdefault("providers", {})
-provider_config = providers.setdefault(provider, {})
-provider_config.update({
-    "baseUrl": base_url,
-    "api": "openai-completions",
-})
-provider_config["models"] = [{
-    "id": model_id,
-    "name": model_name,
-    "reasoning": True,
-    "input": ["text"],
-    "contextWindow": 1000000,
-    "maxTokens": 384000,
-    "compat": {
-        "supportsReasoningEffort": True,
-        "supportsUsageInStreaming": True,
-        "maxTokensField": "max_tokens",
-    },
-    "api": "openai-completions",
-}]
-config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-agent_dir.mkdir(parents=True, exist_ok=True)
-(agent_dir / "models.json").write_text(json.dumps(models, ensure_ascii=False, indent=2) + "\n")
-if api_key:
-    data["auth"] = {"profiles": {auth_profile: {"provider": provider, "mode": "api_key"}}}
-    (agent_dir / "auth-profiles.json").write_text(json.dumps({
-        "version": 1,
-        "profiles": {
-            auth_profile: {
-                "type": "api_key",
-                "provider": provider,
-                "key": api_key,
-            }
-        },
-    }, ensure_ascii=False, indent=2) + "\n")
-    config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-
-supervisor_conf = Path("/opt/gem/supervisord/openclaw.conf")
-if supervisor_conf.exists():
-    lines = supervisor_conf.read_text().splitlines()
-    ca_env = f',NODE_EXTRA_CA_CERTS="{ca_path}"' if ca_pem else ""
-    env_line = f'environment=NODE_ENV="production",OPENCLAW_DEFAULT_MODEL="{model}"{ca_env}'
-    for idx, line in enumerate(lines):
-        if line.startswith("environment="):
-            lines[idx] = env_line
-            break
-    else:
-        lines.append(env_line)
-    supervisor_conf.write_text("\n".join(lines) + "\n")
-PY
-restart_openclaw_service() {
-  if command -v supervisorctl >/dev/null 2>&1; then
-    supervisorctl reread || true
-    supervisorctl update openclaw || true
-    supervisorctl restart openclaw
-  else
-    pkill -f '(^|[ /])openclaw([ ]|$)' 2>/dev/null || true
-    pkill -f 'node .*openclaw' 2>/dev/null || true
-    mkdir -p /var/log
-    if command -v openclaw >/dev/null 2>&1; then
-      nohup openclaw gateway run >/var/log/openclaw.log 2>&1 &
-    elif [ -x /opt/openclaw/openclaw ]; then
-      nohup /opt/openclaw/openclaw gateway run >/var/log/openclaw.log 2>&1 &
-    elif [ -f /opt/openclaw/package.json ] && command -v npm >/dev/null 2>&1; then
-      (cd /opt/openclaw && nohup npm start >/var/log/openclaw.log 2>&1 &)
-    elif [ -f /app/package.json ] && command -v npm >/dev/null 2>&1; then
-      (cd /app && nohup npm start >/var/log/openclaw.log 2>&1 &)
-    elif [ -f /opt/openclaw/package.json ] && command -v pnpm >/dev/null 2>&1; then
-      (cd /opt/openclaw && nohup pnpm start >/var/log/openclaw.log 2>&1 &)
-    elif [ -f /app/package.json ] && command -v pnpm >/dev/null 2>&1; then
-      (cd /app && nohup pnpm start >/var/log/openclaw.log 2>&1 &)
-    else
-      echo "Neither supervisorctl nor a direct OpenClaw startup command was found" >&2
-      return 127
-    fi
-  fi
-}
-openclaw_ready() {
-  python3 - <<'PY'
-import json, os, socket, sys
-try:
-    token = json.load(open("/root/.openclaw/openclaw.json")).get("gateway", {}).get("auth", {}).get("token", "")
-    port = int(os.environ.get("OPENCLAW_PORT", "18789"))
-    if not token:
-        sys.exit(1)
-    s = socket.create_connection(("127.0.0.1", port), timeout=0.5)
-    s.close()
-except Exception:
-    sys.exit(1)
-PY
-}
-restart_openclaw_service
-for i in $(seq 1 30); do
-  if openclaw_ready; then
-    if command -v supervisorctl >/dev/null 2>&1; then supervisorctl status openclaw; else ps -ef | grep -E '[o]penclaw|node .*openclaw' || true; fi
-    exit 0
-  fi
-  sleep 0.5
-done
-[ -f /var/log/openclaw.log ] && tail -80 /var/log/openclaw.log >&2 || true
-exit 1"#
-            ],
-            "envs": {
-                "OPENCLAW_DEFAULT_MODEL": model,
-                "OPENCLAW_DEFAULT_MODEL_NAME": model_name,
-                "OPENCLAW_LLM_PROVIDER": llm.provider,
-                "OPENCLAW_LLM_BASE_URL": llm.base_url,
-                "OPENCLAW_LLM_API_KEY": llm.openclaw_api_key(),
-                "OPENCLAW_DEEPSEEK_API_KEY": llm.openclaw_api_key(),
-                "OPENCLAW_LLM_CREDENTIAL_MODE": llm.credential_mode.clone(),
-                "CUBE_EGRESS_CA_PEM": egress_ca_pem(),
-                "NODE_EXTRA_CA_CERTS": OPENCLAW_NODE_EXTRA_CA_CERTS,
-                "OPENCLAW_NODE_EXTRA_CA_CERTS": OPENCLAW_NODE_EXTRA_CA_CERTS,
-            },
-            "cwd": "/root"
-        },
-        "stdin": false
-    });
-
-    let output = run_envd_command(state, sandbox_id, domain, req).await?;
-    if output.exit_code != 0 {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "OpenClaw model update failed with exit code {}: {}",
-            output.exit_code,
-            output.stderr
-        )));
-    }
-
-    Ok(AgentSetupResult {
-        exit_code: output.exit_code,
-        stdout: output.stdout,
-        stderr: output.stderr,
-    })
-}
-
-async fn configure_ds_openclaw(
-    state: &AppState,
-    sandbox_id: &str,
-    domain: &str,
-    llm: &LlmConfig,
-    gateway_token: &str,
-) -> AppResult<AgentSetupResult> {
-    let envs = serde_json::Map::from_iter([
-        (
-            "OPENCLAW_LLM_PROVIDER".to_string(),
-            Value::String(llm.provider.clone()),
-        ),
-        (
-            "OPENCLAW_LLM_BASE_URL".to_string(),
-            Value::String(llm.base_url.clone()),
-        ),
-        (
-            "OPENCLAW_LLM_API_KEY".to_string(),
-            Value::String(llm.openclaw_api_key().to_string()),
-        ),
-        (
-            "OPENCLAW_DEEPSEEK_API_KEY".to_string(),
-            Value::String(llm.openclaw_api_key().to_string()),
-        ),
-        (
-            "OPENCLAW_LLM_CREDENTIAL_MODE".to_string(),
-            Value::String(llm.credential_mode.clone()),
-        ),
-        (
-            "OPENCLAW_DEFAULT_MODEL".to_string(),
-            Value::String(llm.model.clone()),
-        ),
-        (
-            "OPENCLAW_DEFAULT_MODEL_NAME".to_string(),
-            Value::String(model_display_name(&llm.model).to_string()),
-        ),
-        (
-            "OPENCLAW_ALLOWED_ORIGINS".to_string(),
-            Value::String("*".to_string()),
-        ),
-        (
-            "OPENCLAW_GATEWAY_TOKEN".to_string(),
-            Value::String(gateway_token.to_string()),
-        ),
-        (
-            "CUBE_EGRESS_CA_PEM".to_string(),
-            Value::String(egress_ca_pem()),
-        ),
-        (
-            "NODE_EXTRA_CA_CERTS".to_string(),
-            Value::String(OPENCLAW_NODE_EXTRA_CA_CERTS.to_string()),
-        ),
-        (
-            "OPENCLAW_NODE_EXTRA_CA_CERTS".to_string(),
-            Value::String(OPENCLAW_NODE_EXTRA_CA_CERTS.to_string()),
-        ),
-        (
-            "CUBE_SANDBOX_NODE_IP".to_string(),
-            Value::String(std::env::var("CUBE_SANDBOX_NODE_IP").unwrap_or_default()),
-        ),
-    ]);
-
-    let setup_script = openclaw_setup_script(false);
-
-    let req = serde_json::json!({
-        "process": {
-            "cmd": "/bin/bash",
-            "args": ["-l", "-c", setup_script],
-            "envs": envs,
-            "cwd": "/root"
-        },
-        "stdin": false
-    });
-
-    let mut output = run_envd_command(state, sandbox_id, domain, req.clone()).await?;
-    for _ in 0..2 {
-        if output.exit_code == 0 || !is_openclaw_config_conflict(&output) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        output = run_envd_command(state, sandbox_id, domain, req.clone()).await?;
-    }
-
-    if output.exit_code != 0 {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "ds-openclaw async setup failed with exit code {}: {}",
+            "OpenClaw runtime apply failed with exit code {}: {}",
             output.exit_code,
             output.stderr
         )));
@@ -3453,8 +3259,14 @@ fn model_display_name(model: &str) -> String {
     }
 }
 
-fn openclaw_setup_script(configure_wecom: bool) -> String {
-    let script = r#"kill_openclaw_listeners() {
+/// Thin, branch-free OpenClaw apply script run inside the sandbox.
+///
+/// All business logic (model namespace, provider, credential mode, gateway
+/// token policy, wecom binding) is decided in Rust and handed in as a base64
+/// JSON patch via `OPENCLAW_APPLY_SPEC`. This script only writes files,
+/// restarts the gateway and probes readiness.
+fn openclaw_apply_script() -> &'static str {
+    r#"kill_openclaw_listeners() {
            python3 - <<'PY'
 import os, pathlib, signal, time
 port = int(os.environ.get("OPENCLAW_PORT", "18789"))
@@ -3497,6 +3309,8 @@ PY
          restart_openclaw_service() {
            kill_openclaw_listeners || true
            if command -v supervisorctl >/dev/null 2>&1; then
+             supervisorctl reread || true
+             supervisorctl update openclaw || true
              (supervisorctl restart openclaw || supervisorctl start openclaw) || return $?
            else
              pkill -f '(^|[ /])openclaw([ ]|$)' 2>/dev/null || true
@@ -3553,33 +3367,32 @@ PY
          }
          (command -v supervisorctl >/dev/null 2>&1 && supervisorctl stop openclaw || true) && \
          install_wecom_plugin_if_needed && \
-         gateway_token="${OPENCLAW_GATEWAY_TOKEN:-$(openssl rand -hex 16)}" && \
-         export OPENCLAW_GATEWAY_TOKEN="$gateway_token" && \
-         cat >/tmp/agenthub-openclaw-setup.py <<'PY'
-import json, os
+         cat >/tmp/agenthub-openclaw-apply.py <<'PY'
+import base64, json, os, secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-configure_wecom = __CONFIGURE_WECOM__
-model = os.environ.get("OPENCLAW_DEFAULT_MODEL", "deepseek/deepseek-v4-flash")
-model_id = model.split("/", 1)[-1]
-model_name = os.environ.get("OPENCLAW_DEFAULT_MODEL_NAME", model_id)
-provider = os.environ.get("OPENCLAW_LLM_PROVIDER", "deepseek").strip() or "deepseek"
-base_url = os.environ.get("OPENCLAW_LLM_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
-api_key = os.environ.get("OPENCLAW_LLM_API_KEY") or os.environ["OPENCLAW_DEEPSEEK_API_KEY"]
+spec = json.loads(base64.b64decode(os.environ["OPENCLAW_APPLY_SPEC"]))
+mode = spec["mode"]
+provider = spec["provider"]
+base_url = spec["baseUrl"].strip().rstrip("/")
+api_key = spec["apiKey"]
+openclaw_primary = spec["openclawPrimary"]
+model_id = spec["upstreamModelId"]
+model_name = spec["modelName"]
+configure_wecom = bool(spec.get("configureWecom"))
+gateway_spec = spec.get("gateway", {})
 auth_profile = f"{provider}:default"
-token = os.environ["OPENCLAW_GATEWAY_TOKEN"]
+
 config_path = Path("/root/.openclaw/openclaw.json")
+agent_dir = Path("/root/.openclaw/agents/main/agent")
 workspace = Path("/root/.openclaw/workspace")
 sessions = Path("/root/.openclaw/agents/main/sessions")
-agent_dir = Path("/root/.openclaw/agents/main/agent")
+config_path.parent.mkdir(parents=True, exist_ok=True)
+agent_dir.mkdir(parents=True, exist_ok=True)
+
 ca_pem = os.environ.get("CUBE_EGRESS_CA_PEM", "").strip()
 ca_path = Path(os.environ.get("OPENCLAW_NODE_EXTRA_CA_CERTS", "/root/.openclaw/cube-egress-ca.crt"))
-
-workspace.mkdir(parents=True, exist_ok=True)
-sessions.mkdir(parents=True, exist_ok=True)
-agent_dir.mkdir(parents=True, exist_ok=True)
-config_path.parent.mkdir(parents=True, exist_ok=True)
 if ca_pem:
     ca_path.parent.mkdir(parents=True, exist_ok=True)
     ca_path.write_text(ca_pem + ("\n" if not ca_pem.endswith("\n") else ""))
@@ -3589,40 +3402,11 @@ try:
     data = json.loads(config_path.read_text())
 except Exception:
     data = {}
+if not isinstance(data, dict):
+    data = {}
 
-gateway = data.setdefault("gateway", {})
-gateway["bind"] = os.environ.get("OPENCLAW_BIND", "auto")
-gateway["port"] = int(os.environ.get("OPENCLAW_PORT", "18789"))
-gateway["mode"] = "local"
-gateway["tailscale"] = {"mode": "off", "resetOnExit": False}
-gateway["auth"] = {"mode": "token", "token": token}
-trusted_proxies = [
-    "169.254.68.5",
-    "169.254.68.0/24",
-    os.environ.get("CUBE_SANDBOX_NODE_IP", "").strip(),
-    "127.0.0.1",
-    "::1",
-]
-gateway["trustedProxies"] = [v for v in trusted_proxies if v]
-origins = os.environ.get("OPENCLAW_ALLOWED_ORIGINS", "*")
-gateway["controlUi"] = {
-    "allowedOrigins": [o.strip() for o in origins.split(",") if o.strip()],
-    "dangerouslyDisableDeviceAuth": os.environ.get("OPENCLAW_DISABLE_DEVICE_AUTH", "true").lower() == "true",
-    "allowInsecureAuth": os.environ.get("OPENCLAW_ALLOW_INSECURE_AUTH", "true").lower() == "true",
-    "dangerouslyAllowHostHeaderOriginFallback": os.environ.get("OPENCLAW_ALLOW_HOST_HEADER_ORIGIN_FALLBACK", "true").lower() == "true",
-}
-
-agents = data.setdefault("agents", {}).setdefault("defaults", {})
-agents["model"] = {"primary": model}
-agents["models"] = {model: {"alias": model_name}}
-agents["workspace"] = str(workspace)
-
-data["session"] = {"dmScope": "per-channel-peer"}
-tools = data.setdefault("tools", {})
-tools["profile"] = "full"
-plugins = data.setdefault("plugins", {}).setdefault("entries", {})
-plugins[provider] = {"enabled": True}
-data["auth"] = {"profiles": {auth_profile: {"provider": provider, "mode": "api_key"}}}
+# LLM blocks are written identically in both modes. Rebuilding models from
+# scratch drops stale provider namespaces left by earlier configurations.
 data["models"] = {
     "mode": "merge",
     "providers": {
@@ -3646,31 +3430,79 @@ data["models"] = {
         }
     },
 }
-data["skills"] = {"install": {"nodeManager": "npm"}}
-data["meta"] = {
-    "lastTouchedVersion": data.get("meta", {}).get("lastTouchedVersion", "2026.5.7"),
-    "lastTouchedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-}
 
-if configure_wecom:
-    plugins["wecom-openclaw-plugin"] = {"enabled": True}
-    tools["alsoAllow"] = sorted(set(tools.get("alsoAllow", []) + ["wecom_mcp"]))
-    channels = data.setdefault("channels", {})
-    channels["wecom"] = {
-        "enabled": True,
-        "connectionMode": "websocket",
-        "botId": os.environ["OPENCLAW_BOT_ID"],
-        "secret": os.environ["OPENCLAW_BOT_SECRET"],
-        "name": "企业微信",
+agents = data.setdefault("agents", {}).setdefault("defaults", {})
+agents["model"] = {"primary": openclaw_primary}
+agents["models"] = {openclaw_primary: {"alias": model_name}}
+
+plugins = data.setdefault("plugins", {}).setdefault("entries", {})
+# A provider is not a plugin. Older builds registered the provider name here,
+# which OpenClaw reports as "plugin not found"; drop that stale entry.
+plugins.pop(provider, None)
+data["auth"] = {"profiles": {auth_profile: {"provider": provider, "mode": "api_key"}}}
+
+if mode == "full_init":
+    workspace.mkdir(parents=True, exist_ok=True)
+    sessions.mkdir(parents=True, exist_ok=True)
+    agents["workspace"] = str(workspace)
+    if gateway_spec.get("manage"):
+        gateway = data.setdefault("gateway", {})
+        existing = gateway.get("auth", {}).get("token", "") or ""
+        token = (gateway_spec.get("token") or "").strip()
+        if not token and gateway_spec.get("preserveExisting") and existing:
+            token = existing
+        if not token:
+            token = secrets.token_hex(16)
+        gateway["bind"] = os.environ.get("OPENCLAW_BIND", "auto")
+        gateway["port"] = int(os.environ.get("OPENCLAW_PORT", "18789"))
+        gateway["mode"] = "local"
+        gateway["tailscale"] = {"mode": "off", "resetOnExit": False}
+        gateway["auth"] = {"mode": "token", "token": token}
+        trusted_proxies = [
+            "169.254.68.5",
+            "169.254.68.0/24",
+            os.environ.get("CUBE_SANDBOX_NODE_IP", "").strip(),
+            "127.0.0.1",
+            "::1",
+        ]
+        gateway["trustedProxies"] = [v for v in trusted_proxies if v]
+        origins = os.environ.get("OPENCLAW_ALLOWED_ORIGINS", "*")
+        gateway["controlUi"] = {
+            "allowedOrigins": [o.strip() for o in origins.split(",") if o.strip()],
+            "dangerouslyDisableDeviceAuth": os.environ.get("OPENCLAW_DISABLE_DEVICE_AUTH", "true").lower() == "true",
+            "allowInsecureAuth": os.environ.get("OPENCLAW_ALLOW_INSECURE_AUTH", "true").lower() == "true",
+            "dangerouslyAllowHostHeaderOriginFallback": os.environ.get("OPENCLAW_ALLOW_HOST_HEADER_ORIGIN_FALLBACK", "true").lower() == "true",
+        }
+        token_file = Path(os.environ.get("OPENCLAW_TOKEN_FILE", "/var/log/openclaw.token"))
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(token + "\n")
+    data["session"] = {"dmScope": "per-channel-peer"}
+    tools = data.setdefault("tools", {})
+    tools["profile"] = "full"
+    data["skills"] = {"install": {"nodeManager": "npm"}}
+    data["meta"] = {
+        "lastTouchedVersion": data.get("meta", {}).get("lastTouchedVersion", "2026.5.7"),
+        "lastTouchedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    # Keep a small AgentHub-owned copy so the backend can return/edit the
-    # binding without parsing plugin-specific channel config.
-    wecom_path = config_path.parent / "agenthub-wecom.json"
-    wecom_path.write_text(json.dumps({
-        "botId": os.environ["OPENCLAW_BOT_ID"],
-        "secret": os.environ["OPENCLAW_BOT_SECRET"],
-        "enabled": True,
-    }, ensure_ascii=False, indent=2) + "\n")
+    if configure_wecom:
+        plugins["wecom-openclaw-plugin"] = {"enabled": True}
+        tools["alsoAllow"] = sorted(set(tools.get("alsoAllow", []) + ["wecom_mcp"]))
+        channels = data.setdefault("channels", {})
+        channels["wecom"] = {
+            "enabled": True,
+            "connectionMode": "websocket",
+            "botId": os.environ["OPENCLAW_BOT_ID"],
+            "secret": os.environ["OPENCLAW_BOT_SECRET"],
+            "name": "企业微信",
+        }
+        # Keep a small AgentHub-owned copy so the backend can return/edit the
+        # binding without parsing plugin-specific channel config.
+        wecom_path = config_path.parent / "agenthub-wecom.json"
+        wecom_path.write_text(json.dumps({
+            "botId": os.environ["OPENCLAW_BOT_ID"],
+            "secret": os.environ["OPENCLAW_BOT_SECRET"],
+            "enabled": True,
+        }, ensure_ascii=False, indent=2) + "\n")
 
 tmp = config_path.with_suffix(".json.tmp")
 tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
@@ -3688,15 +3520,11 @@ tmp.replace(config_path)
 }, ensure_ascii=False, indent=2) + "\n")
 (agent_dir / "models.json").write_text(json.dumps(data["models"], ensure_ascii=False, indent=2) + "\n")
 
-token_file = Path(os.environ.get("OPENCLAW_TOKEN_FILE", "/var/log/openclaw.token"))
-token_file.parent.mkdir(parents=True, exist_ok=True)
-token_file.write_text(token + "\n")
-
 supervisor_conf = Path("/opt/gem/supervisord/openclaw.conf")
 if supervisor_conf.exists():
     lines = supervisor_conf.read_text().splitlines()
     ca_env = f',NODE_EXTRA_CA_CERTS="{ca_path}"' if ca_pem else ""
-    env_line = f'environment=NODE_ENV="production",OPENCLAW_DEFAULT_MODEL="{model}"{ca_env}'
+    env_line = f'environment=NODE_ENV="production",OPENCLAW_DEFAULT_MODEL="{openclaw_primary}"{ca_env}'
     for idx, line in enumerate(lines):
         if line.startswith("environment="):
             lines[idx] = env_line
@@ -3705,11 +3533,9 @@ if supervisor_conf.exists():
         lines.append(env_line)
     supervisor_conf.write_text("\n".join(lines) + "\n")
 
-print("Updated ~/.openclaw/openclaw.json")
-print("Workspace OK: ~/.openclaw/workspace")
-print("Sessions OK: ~/.openclaw/agents/main/sessions")
+print("Applied ~/.openclaw/openclaw.json")
 PY
-         python3 /tmp/agenthub-openclaw-setup.py && \
+         python3 /tmp/agenthub-openclaw-apply.py && \
          restart_openclaw_service && \
          for i in $(seq 1 30); do \
            if openclaw_ready; then \
@@ -3718,15 +3544,8 @@ PY
            fi; \
            sleep 0.5; \
          done && \
-         test "$(python3 -c 'import json; print(json.load(open("/root/.openclaw/openclaw.json")).get("gateway", {}).get("auth", {}).get("mode", ""))')" = token && \
-         test -n "$(python3 -c 'import json; print(json.load(open("/root/.openclaw/openclaw.json")).get("gateway", {}).get("auth", {}).get("token", ""))')" && \
          openclaw_ready
-"#;
-
-    script.replace(
-        "__CONFIGURE_WECOM__",
-        if configure_wecom { "True" } else { "False" },
-    )
+"#
 }
 
 fn is_openclaw_config_conflict(output: &CommandOutput) -> bool {
@@ -3860,4 +3679,101 @@ pub(crate) fn tokenized_gateway_url(url: String, token: Option<String>) -> Strin
         return url;
     };
     format!("{}#token={}", url, token.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn llm(provider: &str, credential_mode: &str) -> LlmConfig {
+        LlmConfig {
+            provider: provider.to_string(),
+            base_url: "https://upstream.example.com".to_string(),
+            model: "deepseek/deepseek-v4-flash".to_string(),
+            api_key: "sk-real-secret".to_string(),
+            credential_mode: credential_mode.to_string(),
+        }
+    }
+
+    #[test]
+    fn model_suffix_strips_only_the_first_prefix() {
+        assert_eq!(
+            openclaw_model_suffix("deepseek-v4-flash"),
+            "deepseek-v4-flash"
+        );
+        assert_eq!(
+            openclaw_model_suffix("deepseek/deepseek-v4-flash"),
+            "deepseek-v4-flash"
+        );
+        assert_eq!(openclaw_model_suffix("a/b/c"), "b/c");
+        // A trailing slash leaves nothing useful, so fall back to the input.
+        assert_eq!(openclaw_model_suffix("deepseek/"), "deepseek/");
+    }
+
+    #[test]
+    fn custom_upstream_namespaces_primary_under_its_provider() {
+        // Reproduces the reported bug: a custom provider with a prefixed model
+        // must resolve to `{provider}/{suffix}`, never `openai/...`.
+        let plan =
+            LlmRuntimePlan::resolve(&llm("openai-compatible", "egress"), "deepseek-v4-flash");
+        assert_eq!(plan.upstream_model_id, "deepseek-v4-flash");
+        assert_eq!(plan.openclaw_primary, "openai-compatible/deepseek-v4-flash");
+        assert_eq!(plan.upstream_provider, "openai-compatible");
+
+        // A stale prefix on the input is dropped and re-namespaced.
+        let plan = LlmRuntimePlan::resolve(
+            &llm("openai-compatible", "egress"),
+            "deepseek/deepseek-v4-flash",
+        );
+        assert_eq!(plan.upstream_model_id, "deepseek-v4-flash");
+        assert_eq!(plan.openclaw_primary, "openai-compatible/deepseek-v4-flash");
+        assert_eq!(plan.public_model, "deepseek/deepseek-v4-flash");
+    }
+
+    #[test]
+    fn official_deepseek_model_keeps_its_namespace() {
+        let plan =
+            LlmRuntimePlan::resolve(&llm("deepseek", "egress"), "deepseek/deepseek-v4-flash");
+        assert_eq!(plan.openclaw_primary, "deepseek/deepseek-v4-flash");
+        assert_eq!(plan.openclaw_model_name, DEEPSEEK_V4_FLASH_MODEL_LABEL);
+    }
+
+    #[test]
+    fn egress_mode_hides_the_real_key_from_openclaw() {
+        let plan = LlmRuntimePlan::resolve(&llm("deepseek", "egress"), "deepseek-v4-flash");
+        assert_eq!(plan.openclaw_api_key, OPENCLAW_EGRESS_MANAGED_KEY);
+        assert_eq!(plan.credential_mode, "egress");
+
+        let plan = LlmRuntimePlan::resolve(&llm("deepseek", "env"), "deepseek-v4-flash");
+        assert_eq!(plan.openclaw_api_key, "sk-real-secret");
+    }
+
+    #[test]
+    fn full_init_spec_manages_gateway_with_explicit_token() {
+        let plan =
+            LlmRuntimePlan::resolve(&llm("openai-compatible", "egress"), "deepseek-v4-flash");
+        let options = OpenClawApplyOptions::full_init(Some("tok-123".to_string()));
+        let spec = openclaw_apply_spec(&plan, &options);
+        assert_eq!(spec["mode"], "full_init");
+        assert_eq!(spec["gateway"]["manage"], true);
+        assert_eq!(spec["gateway"]["token"], "tok-123");
+        assert_eq!(
+            spec["openclawPrimary"],
+            "openai-compatible/deepseek-v4-flash"
+        );
+        assert_eq!(spec["upstreamModelId"], "deepseek-v4-flash");
+        // egress: the real key never reaches the sandbox patch.
+        assert_eq!(spec["apiKey"], OPENCLAW_EGRESS_MANAGED_KEY);
+    }
+
+    #[test]
+    fn merge_llm_spec_leaves_the_gateway_alone() {
+        let plan = LlmRuntimePlan::resolve(&llm("deepseek", "env"), "deepseek-v4-flash");
+        let options = OpenClawApplyOptions::merge_llm();
+        let spec = openclaw_apply_spec(&plan, &options);
+        assert_eq!(spec["mode"], "merge_llm");
+        assert_eq!(spec["gateway"]["manage"], false);
+        assert_eq!(spec["gateway"]["preserveExisting"], true);
+        assert_eq!(spec["configureWecom"], false);
+    }
 }
