@@ -1087,10 +1087,19 @@ pub async fn run_example(
     // find a template whose image_info matches the catalog item's image.
     if template_id.is_empty() {
         if let Some(ref sid) = sc.store_item_id {
-            let catalog_image = crate::handlers::store::fallback_catalog()
-                .into_iter()
-                .find(|item| item.id == *sid)
-                .map(|item| item.image_cn);
+            let catalog_image: Option<String> = match state.agenthub_store.as_ref() {
+                Some(store) => store
+                    .list_store_templates()
+                    .await
+                    .ok()
+                    .and_then(|catalog| {
+                        catalog
+                            .into_iter()
+                            .find(|item| item.item_id == *sid)
+                            .map(|item| item.image_cn)
+                    }),
+                None => None,
+            };
 
             if let Some(ref image_ref) = catalog_image {
                 match state.services.templates.list_templates().await {
