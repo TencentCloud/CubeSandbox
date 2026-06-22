@@ -129,7 +129,15 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 // directory via tar -xf -.
 func pipeExportToDir(ctx context.Context, containerID, destDir string) error {
 	exportCmd := exec.CommandContext(ctx, "docker", "export", containerID)
-	tarCmd := exec.CommandContext(ctx, "tar", "-xf", "-", "-C", destDir)
+	// --same-owner --numeric-owner preserves the image's original uid/gid.
+	// GNU tar restores ownership only with --same-owner (the default for root,
+	// set explicitly to be robust); --numeric-owner avoids name lookups
+	// against the host's passwd/group. Without this, files owned by non-root
+	// uids with restrictive modes (e.g. /home/user uid 1000 mode 0700)
+	// collapse to the extracting user and the in-sandbox account loses access
+	// to its own files (envd exec EACCES, chromium profile write failures).
+	// Mirrors the umoci (no --rootless) fix in export.go.
+	tarCmd := exec.CommandContext(ctx, "tar", "--same-owner", "--numeric-owner", "-xf", "-", "-C", destDir)
 
 	pipe, err := exportCmd.StdoutPipe()
 	if err != nil {
