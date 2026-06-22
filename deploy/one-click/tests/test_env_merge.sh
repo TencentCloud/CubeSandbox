@@ -288,17 +288,30 @@ CUBE_SANDBOX_MYSQL_PORT=3306
 AGENTHUB_DEEPSEEK_API_KEY=sk-agenthub-secret
 OPENCLAW_DEEPSEEK_API_KEY=sk-openclaw-secret
 AGENTHUB_LLM_API_KEY=sk-llm-secret
+OPENCLAW_LLM_API_KEY=sk-openclaw-llm-secret
 AGENTHUB_LLM_PROVIDER=deepseek
+OPENCLAW_LLM_PROVIDER=openai
+AGENTHUB_LLM_BASE_URL=https://api.example.com
+OPENCLAW_LLM_BASE_URL=https://api.openclaw.example.com
+AGENTHUB_LLM_MODEL=custom-model
 OPENCLAW_DEFAULT_MODEL=deepseek/deepseek-v4-flash
+AGENTHUB_LLM_CREDENTIAL_MODE=egress
 AGENTHUB_SECRET_KEY=base64key
+CUBE_API_DATABASE_URL=mysql://old:pass@host:3306/db
 MY_CUSTOM_KEEP=stays
 EOF
 
   merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
 
-  # Obsolete keys are removed from the merged runtime env (no lingering secrets).
-  for k in AGENTHUB_DEEPSEEK_API_KEY OPENCLAW_DEEPSEEK_API_KEY AGENTHUB_LLM_API_KEY \
-           AGENTHUB_LLM_PROVIDER OPENCLAW_DEFAULT_MODEL AGENTHUB_SECRET_KEY; do
+  # All 13 DEPRECATED_KEYS must be removed from the merged runtime env.
+  for k in \
+    AGENTHUB_DEEPSEEK_API_KEY OPENCLAW_DEEPSEEK_API_KEY \
+    AGENTHUB_LLM_API_KEY OPENCLAW_LLM_API_KEY \
+    AGENTHUB_LLM_PROVIDER OPENCLAW_LLM_PROVIDER \
+    AGENTHUB_LLM_BASE_URL OPENCLAW_LLM_BASE_URL \
+    AGENTHUB_LLM_MODEL OPENCLAW_DEFAULT_MODEL \
+    AGENTHUB_LLM_CREDENTIAL_MODE \
+    AGENTHUB_SECRET_KEY CUBE_API_DATABASE_URL; do
     if grep -q "^${k}=" "${out}"; then
       fail "obsolete key ${k} should have been dropped from ${out}"
     fi

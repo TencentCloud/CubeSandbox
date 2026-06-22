@@ -51,8 +51,15 @@ pub fn install_master_key(b64: &str) -> anyhow::Result<()> {
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("master key must be exactly {MASTER_KEY_LEN} bytes"))?;
-    // Ignore AlreadySet: the key is installed once and never changes per process.
-    let _ = MASTER_KEY.set(key);
+    // The key is installed once per process lifetime. OnceLock::set returns
+    // Err if already initialised — that is normal (e.g. tests calling it
+    // multiple times). Log only when the *value differs*, as that signals a
+    // real misconfiguration (two sources disagree on the master key).
+    if let Err(_) = MASTER_KEY.set(key) {
+        if MASTER_KEY.get() != Some(&key) {
+            tracing::debug!("ignoring attempt to install a different AgentHub master key");
+        }
+    }
     Ok(())
 }
 
