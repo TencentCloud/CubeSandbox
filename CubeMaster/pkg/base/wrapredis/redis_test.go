@@ -34,18 +34,14 @@ func TestDo(t *testing.T) {
 }
 
 func TestDoType(t *testing.T) {
-	redis := GetRedis(RedisDefault)
+	redis := GetRedis()
 	assert.NotNil(t, redis)
 	_, err := redis.Do("HGETALL", "test", "test")
 	assert.NotNil(t, err)
 
-	redis = GetRedis(RedisRead)
-	assert.NotNil(t, redis)
 	_, err = redis.Do("GET", "test", "test")
 	assert.NotNil(t, err)
 
-	redis = GetRedis(RedisWrite)
-	assert.NotNil(t, redis)
 	_, err = redis.Do("SET", "test", "test")
 	assert.NotNil(t, err)
 }

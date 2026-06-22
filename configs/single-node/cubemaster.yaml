@@ -75,24 +75,6 @@ redis:
   idle_timeout: 30
   max_retry: 2
 
-redis_read:
-  nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"
-  password: "ceuhvu123"
-  db_no: 0
-  max_idle: 8
-  max_active: 32
-  idle_timeout: 30
-  max_retry: 2
-
-redis_write:
-  nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"
-  password: "ceuhvu123"
-  db_no: 0
-  max_idle: 8
-  max_active: 32
-  idle_timeout: 30
-  max_retry: 2
-
 scheduler:
   priority_select_num: 1
   metric_update_timeout: 300s

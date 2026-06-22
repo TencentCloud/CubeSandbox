@@ -26,58 +26,32 @@ type RedisWrap struct {
 	connectPeak   int64
 }
 
-const (
-	RedisRead     = "RedisRead"
-	RedisWrite    = "RedisWrite"
-	RedisDefault  = "Redisdefault"
-	RedisMetaData = "RedisMetaData"
-)
+const redisPoolKey = "redis"
 
 var (
 	safeMap sync.Map
 	mutex   sync.Mutex
 )
 
-func GetRedis(t string) *RedisWrap {
-	r, ok := safeMap.Load(t)
+func GetRedis() *RedisWrap {
+	r, ok := safeMap.Load(redisPoolKey)
 	if ok {
 		return r.(*RedisWrap)
 	}
 
 	mutex.Lock()
 	defer mutex.Unlock()
-	if config.GetConfig().RedisReadConf == nil && config.GetConfig().RedisWriteConf == nil &&
-		config.GetConfig().RedisConf == nil {
+	if config.GetConfig().RedisConf == nil {
 		panic("redis conf is nil")
 	}
 
-	r, ok = safeMap.Load(t)
+	r, ok = safeMap.Load(redisPoolKey)
 	if ok {
 		return r.(*RedisWrap)
 	}
 
-	var v *RedisWrap
-	switch t {
-	case RedisRead:
-		v = GetRedisConnPoolWrap(RedisRead, config.GetConfig().RedisReadConf)
-	case RedisWrite:
-		v = GetRedisConnPoolWrap(RedisWrite, config.GetConfig().RedisWriteConf)
-	case RedisMetaData:
-		v = GetRedisConnPoolWrap(RedisMetaData, config.GetConfig().RedisMetadataConf)
-	default:
-		v = GetRedisConnPoolWrap(RedisDefault, config.GetConfig().RedisConf)
-	}
-
-	if v == nil {
-		r, ok = safeMap.Load(RedisDefault)
-		if ok {
-			v = r.(*RedisWrap)
-		} else {
-			v = GetRedisConnPoolWrap(RedisDefault, config.GetConfig().RedisConf)
-			safeMap.Store(RedisDefault, v)
-		}
-	}
-	safeMap.Store(t, v)
+	v := GetRedisConnPoolWrap(redisPoolKey, config.GetConfig().RedisConf)
+	safeMap.Store(redisPoolKey, v)
 	return v
 }
 

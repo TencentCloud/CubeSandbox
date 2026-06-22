@@ -124,7 +124,7 @@ func WriteNodeMetric(ctx context.Context, m *NodeMetric) error {
 			"sys_disk_usage_per", m.SysDiskUsagePer,
 		)
 	}
-	if _, err := wrapredis.GetRedis(wrapredis.RedisWrite).Do("HSET", args...); err != nil {
+	if _, err := wrapredis.GetRedis().Do("HSET", args...); err != nil {
 		log.G(ctx).Errorf("WriteNodeMetric HSET %s failed: %v", m.NodeID, err)
 		return err
 	}
@@ -232,7 +232,7 @@ func (l *local) loopUpdateMetric(ctx context.Context) {
 }
 
 func (l *local) getNodeMetricFromRedis(ctx context.Context, key string) (*node.Node, bool, error) {
-	values, err := redis.Values(wrapredis.GetRedis(wrapredis.RedisRead).Do("HGETALL", key))
+	values, err := redis.Values(wrapredis.GetRedis().Do("HGETALL", key))
 	if err != nil {
 		CubeLog.WithContext(ctx).Fatalf("getNodeMetricFromRedis %s err:%s", key, err)
 		return nil, false, err
@@ -268,7 +268,7 @@ func (l *local) getNodeMetricFromRedis(ctx context.Context, key string) (*node.N
 }
 
 func (l *local) getByPassProsyFromRedis(ctx context.Context, key string) (*types.SandboxProxyMap, error) {
-	mapvalues, err := redis.StringMap(wrapredis.GetRedis(wrapredis.RedisRead).Do("HGETALL", key))
+	mapvalues, err := redis.StringMap(wrapredis.GetRedis().Do("HGETALL", key))
 	if err != nil {
 		if errors.Is(err, redis.ErrNil) {
 			log.G(ctx).Debugf("no such key in redis:%s", key)
@@ -312,7 +312,7 @@ func (l *local) getByPassProsyFromRedis(ctx context.Context, key string) (*types
 }
 
 func (l *local) getInsInfoFromRedis(ctx context.Context, key string) (*types.InstanceInfoMap, error) {
-	values, err := redis.Values(wrapredis.GetRedis(wrapredis.RedisRead).Do("HGETALL", key))
+	values, err := redis.Values(wrapredis.GetRedis().Do("HGETALL", key))
 	if err != nil {
 		if errors.Is(err, redis.ErrNil) {
 			log.G(ctx).Debugf("no such key in redis:%s", key)
@@ -337,7 +337,7 @@ func (l *local) getInsInfoFromRedis(ctx context.Context, key string) (*types.Ins
 func (l *local) setInstanceInfoMapToRedis(ctx context.Context, key string, info *types.InstanceInfoMap) (err error) {
 	start := time.Now()
 	defer traceRedis(ctx, "Create", "HSET", key, start, err)
-	_, err = wrapredis.GetRedis(wrapredis.RedisWrite).Do("HSET", redis.Args{key}.AddFlat(info)...)
+	_, err = wrapredis.GetRedis().Do("HSET", redis.Args{key}.AddFlat(info)...)
 	if err != nil {
 		log.G(ctx).Errorf("redis set error, key: %s, err: %s", key, err)
 		return err
@@ -362,7 +362,7 @@ func (l *local) setByPassProsyToRedis(ctx context.Context, key string, byPassPro
 	for k, v := range byPassProsy.ContainerToHostPorts {
 		fieldValues = append(fieldValues, k, v)
 	}
-	_, err = wrapredis.GetRedis(wrapredis.RedisWrite).Do("HSET", redis.Args{key}.AddFlat(fieldValues)...)
+	_, err = wrapredis.GetRedis().Do("HSET", redis.Args{key}.AddFlat(fieldValues)...)
 	if err != nil {
 		log.G(ctx).Errorf("redis set error, key: %s, err: %s", key, err)
 		return err
@@ -375,7 +375,7 @@ func (l *local) setByPassProsyToRedis(ctx context.Context, key string, byPassPro
 
 func (l *local) setDescribeTaskToRedis(ctx context.Context, key string, taskInfo *types.DescribeTaskMap) (err error) {
 	start := time.Now()
-	conn := wrapredis.GetRedis(wrapredis.RedisWrite)
+	conn := wrapredis.GetRedis()
 	defer traceRedis(ctx, "Create", "HSET", key, start, err)
 	defer func() {
 		if err == nil {
@@ -397,7 +397,7 @@ func (l *local) setDescribeTaskToRedis(ctx context.Context, key string, taskInfo
 }
 
 func (l *local) getDescribeTaskFromRedis(ctx context.Context, key string) (*types.DescribeTaskMap, error) {
-	values, err := redis.Values(wrapredis.GetRedis(wrapredis.RedisRead).Do("HGETALL", key))
+	values, err := redis.Values(wrapredis.GetRedis().Do("HGETALL", key))
 	if err != nil {
 		if errors.Is(err, redis.ErrNil) {
 			log.G(ctx).Debugf("no such key in redis:%s", key)
@@ -422,7 +422,7 @@ func (l *local) getDescribeTaskFromRedis(ctx context.Context, key string) (*type
 func (l *local) deleteKeyFromRedis(ctx context.Context, key string) (err error) {
 	start := time.Now()
 	defer traceRedis(ctx, "Delete", "DEL", key, start, err)
-	_, err = wrapredis.GetRedis(wrapredis.RedisWrite).Do("DEL", key)
+	_, err = wrapredis.GetRedis().Do("DEL", key)
 	if err != nil {
 		log.G(ctx).Errorf("redis del error, key: %s, err: %s", key, err)
 		return err

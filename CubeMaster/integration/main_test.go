@@ -56,9 +56,9 @@ func TestDemo(t *testing.T) {
 	mocktest_InitGlobalResources()
 	registerCleanup(t)
 	t.Log("test main demo")
-	_, err := wrapredis.GetRedis(wrapredis.RedisDefault).Do("SET", "key", "value")
+	_, err := wrapredis.GetRedis().Do("SET", "key", "value")
 	assert.NoError(t, err)
-	v, err := redis.String(wrapredis.GetRedis(wrapredis.RedisDefault).Do("GET", "key"))
+	v, err := redis.String(wrapredis.GetRedis().Do("GET", "key"))
 	assert.NoError(t, err)
 	assert.Equal(t, "value", v)
 

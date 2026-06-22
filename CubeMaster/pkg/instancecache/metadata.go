@@ -44,7 +44,7 @@ func MetadataSet(ctx context.Context, key string, value string) (err error) {
 	)
 	start := time.Now()
 	defer trace(ctx, "Create", redisOp, start, err)
-	_, err = wrapredis.GetRedis(wrapredis.RedisMetaData).Do(redisOp, key, value)
+	_, err = wrapredis.GetRedis().Do(redisOp, key, value)
 	if err != nil {
 		log.G(ctx).Errorf("redis %s error, key: %s, err: %s", redisOp, key, err)
 		return err
@@ -62,7 +62,7 @@ func MetadataPush(ctx context.Context, key string, value string) (err error) {
 	start := time.Now()
 	defer trace(ctx, "Create", redisOp, start, err)
 
-	_, err = wrapredis.GetRedis(wrapredis.RedisMetaData).Do(redisOp, key, value)
+	_, err = wrapredis.GetRedis().Do(redisOp, key, value)
 	if err != nil {
 		log.G(ctx).Errorf("redis %s error, key: %s, err: %s", redisOp, key, err)
 		return err
@@ -80,7 +80,7 @@ func MetadataLRem(ctx context.Context, key string, value string) (err error) {
 	start := time.Now()
 	defer trace(ctx, "Destroy", redisOp, start, err)
 
-	_, err = wrapredis.GetRedis(wrapredis.RedisMetaData).Do(redisOp, key, 0, value)
+	_, err = wrapredis.GetRedis().Do(redisOp, key, 0, value)
 	if err != nil {
 		log.G(ctx).Errorf("redis %s error, key: %s, err: %s", redisOp, key, err)
 		return err
@@ -97,7 +97,7 @@ func MetadataDel(ctx context.Context, key string) (err error) {
 	)
 	start := time.Now()
 	defer trace(ctx, "Destroy", redisOp, start, err)
-	_, err = wrapredis.GetRedis(wrapredis.RedisMetaData).Do(redisOp, key)
+	_, err = wrapredis.GetRedis().Do(redisOp, key)
 	if err != nil {
 		log.G(ctx).Errorf("redis %s error, key: %s, err: %s", redisOp, key, err)
 		return err
