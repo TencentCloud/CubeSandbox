@@ -17,6 +17,12 @@ import (
 )
 
 func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
+	// Validate the reference up front so both the docker and dockerless branches
+	// enforce the same argument-injection guard before the ref is handed to
+	// external CLI subprocesses (docker / skopeo).
+	if err := validateImageRef(spec.ImageRef); err != nil {
+		return nil, err
+	}
 	// In dockerless mode there is no local docker daemon to hold the image, so a
 	// redo re-resolves the source from the registry via skopeo. This intentionally
 	// relaxes the docker-path requirement that the image still exist locally.

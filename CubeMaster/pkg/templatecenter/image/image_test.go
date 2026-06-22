@@ -1032,3 +1032,25 @@ func TestPrepareLocalSourceRequiresLocalDockerImage(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestPrepareLocalSourceRejectsInvalidImageRef(t *testing.T) {
+	invalidRefs := []string{
+		"",
+		"-rm -rf",
+		"image;rm -rf /",
+		"image$(whoami)",
+		"image\n--flag",
+	}
+	for _, ref := range invalidRefs {
+		_, err := PrepareLocalSource(context.Background(), SourceSpec{ImageRef: ref})
+		if err == nil {
+			t.Errorf("PrepareLocalSource(%q) returned nil error, want validation failure", ref)
+			continue
+		}
+		// validateImageRef returns "empty image reference" for blank refs
+		// and "invalid image reference" for refs with forbidden characters.
+		if !strings.Contains(err.Error(), "invalid image reference") && !strings.Contains(err.Error(), "empty image reference") {
+			t.Errorf("PrepareLocalSource(%q) error=%v, want validation failure", ref, err)
+		}
+	}
+}

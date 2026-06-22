@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -102,7 +103,7 @@ func runImageJobWatchPlain(c *cli.Context, jobID string) error {
 				commands.PrintAsJSON(rsp)
 			}
 			if rsp.Job.Status == "FAILED" {
-				return errors.New(rsp.Job.ErrorMessage)
+				return errors.New(imageJobFailureMessage(rsp.Job))
 			}
 			return nil
 		}
@@ -156,7 +157,11 @@ func runBuildWatchPlain(c *cli.Context, buildID string) error {
 				commands.PrintAsJSON(rsp)
 			}
 			if rsp.Status == "error" {
-				return errors.New(rsp.Message)
+				msg := rsp.Message
+				if strings.TrimSpace(msg) == "" {
+					msg = "sandbox commit build failed"
+				}
+				return errors.New(msg)
 			}
 			return nil
 		}
