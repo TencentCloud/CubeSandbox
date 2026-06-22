@@ -516,7 +516,7 @@ fn default_page_limit() -> i32 {
 
 // ─── Sandbox — exec code ──────────────────────────────────────────────────
 
-/// Request body for POST /sandboxes/{sandboxID}/exec-code
+/// Request body for POST /cube/sandboxes/{sandboxID}/exec-code
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ExecCodeRequest {
     /// Code to execute inside the sandbox.
@@ -533,7 +533,7 @@ fn default_exec_timeout() -> Option<i32> {
     Some(30)
 }
 
-/// Response for POST /sandboxes/{sandboxID}/exec-code
+/// Response for POST /cube/sandboxes/{sandboxID}/exec-code
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ExecCodeResponse {
     pub stdout: String,

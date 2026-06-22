@@ -235,7 +235,7 @@ export const sandboxApi = {
       body: JSON.stringify(body),
     }),
   execCode: (id: string, body: { code: string; language: string; timeout_secs?: number }) =>
-    api<ExecCodeResult>(`/sandboxes/${id}/exec-code`, {
+    api<ExecCodeResult>(`/cube/sandboxes/${id}/exec-code`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

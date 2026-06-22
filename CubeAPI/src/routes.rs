@@ -19,7 +19,8 @@ use tower_http::{
 
 use crate::{
     handlers::{
-        agenthub, auth, cluster, config, examples, health, sandboxes, snapshots, store, templates,
+        agenthub, auth, cluster, config, cube, examples, health, sandboxes, snapshots, store,
+        templates,
     },
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
@@ -56,6 +57,7 @@ pub fn build_router(state: AppState) -> Router {
     let standard_router = apply_http_layers(
         Router::new()
             .merge(build_e2b_router(&state, auth_configured))
+            .nest("/cube", build_cube_routes(&state, auth_configured))
             .nest("/cubeapi/v1", build_cubeapi_router(&state, auth_configured)),
         DEFAULT_ROUTE_TIMEOUT,
     );
@@ -107,6 +109,7 @@ fn build_cubeapi_router(state: &AppState, auth_configured: bool) -> Router<AppSt
         .merge(build_cluster_routes(state, auth_configured))
         .merge(build_agenthub_routes(state, auth_configured))
         .merge(build_examples_routes(state, auth_configured))
+        .nest("/cube", build_cube_routes(state, auth_configured))
 }
 
 /// WebUI login routes. These are intentionally left unauthenticated (like
@@ -167,11 +170,19 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
             "/sandboxes/:sandboxID/connect",
             post(sandboxes::connect_sandbox),
         )
-        .route(
-            "/sandboxes/:sandboxID/exec-code",
-            post(sandboxes::exec_code),
-        )
         .route("/snapshots", get(snapshots::list_snapshots));
+
+    with_auth_and_rate_limit(routes, state, auth_configured)
+}
+
+/// Cube-specific (NON e2b-compatible) routes.
+///
+/// These endpoints are Cube extensions that have no equivalent in the e2b API
+/// surface, so they are grouped here and mounted behind the `/cube` prefix
+/// (e.g. `/cube/sandboxes/:id/exec-code`) to keep the e2b-compatible surface
+/// clean and the two contracts clearly separated.
+fn build_cube_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new().route("/sandboxes/:sandboxID/exec-code", post(cube::exec_code));
 
     with_auth_and_rate_limit(routes, state, auth_configured)
 }
