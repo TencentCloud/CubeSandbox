@@ -141,23 +141,31 @@ sandbox = Sandbox.create(
 - 通过 SDK 调用：`sandbox.run_code(...)`、`sandbox.commands.run(...)`、`sandbox.files.read(...)` / `write(...)`。
 - 通过 HTTP 直连沙箱内的服务（例如 `getHost()` 返回的 URL）。
 
-未配置 `auto_pause` / 不传 `lifecycle` 的沙箱完全保留旧行为：空闲超时直接销毁。
+未配置 `auto_pause` / 不传 `lifecycle` 的沙箱默认行为是 `on_timeout="kill"`：空闲超过 `timeout` 秒后，平台会主动销毁该沙箱。这与 e2b `lifecycle.on_timeout="kill"` 语义一致。如果完全不希望被自动回收，请在创建时把 `timeout` 设得足够大、或主动在客户端发心跳调用刷新 idle 计时。
 
 ### 端到端示例
 
-[`examples/code-sandbox-quickstart/auto-resume.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/auto-resume.py) 是一个 TUI 演示：创建带 `lifecycle.on_timeout=pause` 的沙箱、空闲触发自动暂停、再发请求触发自动恢复，最终对比"内核内存 + 文件系统"两层状态，验证全状态保留。
+平台提供两个**互为镜像**的端到端演示，对应 `on_timeout` 的两种取值：
+
+- [`examples/code-sandbox-quickstart/auto-resume.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/auto-resume.py) —— `on_timeout="pause"` + `auto_resume=True`。创建沙箱、空闲触发**自动暂停**、再发请求触发**自动恢复**，最终对比"内核内存 + 文件系统"两层状态，验证全状态保留。
+- [`examples/code-sandbox-quickstart/auto-kill.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/auto-kill.py) —— `on_timeout="kill"`（默认行为）。创建沙箱、空闲触发**自动销毁**、验证后续请求以 410 Gone 快速失败、`Sandbox.list()` 不再返回该沙箱，并通过创建一个对照沙箱排除集群整体故障。
 
 ```bash
 export CUBE_TEMPLATE_ID=<your-template>
+
+# 自动暂停 + 自动恢复
 python examples/code-sandbox-quickstart/auto-resume.py
+
+# 自动销毁（不可恢复）
+python examples/code-sandbox-quickstart/auto-kill.py
 ```
 
 ## 设计与运维要点
 
 - **暂停的状态保真度**：CPU 寄存器、进程内存、TCP 连接（无外部对端）、文件系统改动都会随快照保留；面向外部的连接（如 sandbox 主动建立的 outbound socket）会在暂停时断开，恢复后由应用层自行重连。
 - **集群一致性**：自动暂停由部署在 CubeProxy 容器内的 `cube-proxy-sidecar` 协调；它消费 CubeMaster 通过 Redis stream 发布的生命周期事件，对所有 CubeProxy 实例广播状态。多副本环境下用 Redis SETNX 互斥锁确保同一沙箱不会被并发暂停或恢复。
-- **失败回退**：自动恢复 RPC 失败时，CubeProxy 直接对客户端返回 503 + `Retry-After`，不会让用户卡在长超时上。
-- **故障排查**：`/data/log/cube-proxy/sidecar.log` 是 sidecar 的运行日志，关键事件包括 `create event applied`、`auto-paused sandbox`、`auto-resumed sandbox`。
+- **失败回退**：自动恢复 RPC 失败时，CubeProxy 直接对客户端返回 503 + `Retry-After`，不会让用户卡在长超时上；当沙箱已经被销毁（`killing` / `killed`），则返回 410 Gone 让客户端立即停止重试。
+- **故障排查**：`/data/log/cube-proxy/sidecar.log` 是 sidecar 的运行日志，关键事件包括 `create event applied`、`auto-paused sandbox`、`auto-resumed sandbox`、`timeout-killed sandbox`。
 
 ## 下一步
 

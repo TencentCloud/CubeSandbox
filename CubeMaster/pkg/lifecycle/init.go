@@ -44,9 +44,61 @@ func Init(ctx context.Context) error {
 	sandbox.RegisterAfterDestroySandboxSuccessHook(onAfterDestroy)
 	task.RegisterAfterDestroyTaskSuccessHook(onAfterDestroy)
 
+	sandbox.SetTimeoutProvider(&storeTimeoutProvider{store: store})
+
 	log.G(ctx).Infof("lifecycle: auto-pause metadata channel ready (key=%s, stream=%s)",
 		MetaKey, EventStreamKey)
 	return nil
+}
+
+// storeTimeoutProvider adapts our *Store to sandbox.TimeoutProvider.
+type storeTimeoutProvider struct {
+	store *Store
+}
+
+// RefreshTimeout reads the existing meta (preserving fields the request
+// doesn't carry: AutoPause / AutoResume / TemplateID / HostID / HostIP /
+// InstanceType), rewrites CreatedAt + TimeoutSeconds + EndAt, and publishes
+// an OpUpdate event so every sidecar replica converges on the new view.
+func (p *storeTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (int64, error) {
+	if p == nil || p.store == nil {
+		return 0, nil
+	}
+	meta, err := p.store.LoadMeta(ctx, sandboxID)
+	if err != nil {
+		return 0, err
+	}
+	if meta == nil {
+		return 0, nil
+	}
+
+	now := time.Now().UnixMilli()
+	meta.TimeoutSeconds = timeoutSeconds
+	meta.CreatedAt = now
+	meta.EndAt = now + int64(timeoutSeconds)*1000
+	p.store.PublishUpdate(ctx, meta)
+	return meta.EndAt, nil
+}
+
+// LookupEndAt reads the latest meta.EndAt straight from the lifecycle snapshot in Redis.
+func (p *storeTimeoutProvider) LookupEndAt(ctx context.Context, sandboxID string) (int64, error) {
+	if p == nil || p.store == nil {
+		return 0, nil
+	}
+	meta, err := p.store.LoadMeta(ctx, sandboxID)
+	if err != nil {
+		return 0, err
+	}
+	if meta == nil {
+		return 0, nil
+	}
+	if meta.EndAt > 0 {
+		return meta.EndAt, nil
+	}
+	if meta.CreatedAt > 0 && meta.TimeoutSeconds > 0 {
+		return meta.CreatedAt + int64(meta.TimeoutSeconds)*1000, nil
+	}
+	return 0, nil
 }
 
 // isNilPool guards against wrapredis.GetRedis returning a typed-nil
@@ -61,6 +113,7 @@ func onAfterCreate(ctx context.Context, sandboxID, hostID, hostIP string, req *s
 	if store == nil || req == nil {
 		return nil
 	}
+	now := time.Now().UnixMilli()
 	meta := &SandboxLifecycleMeta{
 		SandboxID:      sandboxID,
 		HostID:         hostID,
@@ -69,7 +122,8 @@ func onAfterCreate(ctx context.Context, sandboxID, hostID, hostIP string, req *s
 		TimeoutSeconds: req.Timeout,
 		AutoPause:      req.AutoPause,
 		AutoResume:     req.AutoResume,
-		CreatedAt:      time.Now().UnixMilli(),
+		CreatedAt:      now,
+		EndAt:          now + int64(req.Timeout)*1000,
 	}
 	if req.Annotations != nil {
 		// Template ID is conventionally carried via annotations from CubeAPI;

@@ -1020,12 +1020,12 @@ pub struct SandboxInfo {
     pub host_id: String,
     #[serde(default, deserialize_with = "deserialize_sandbox_status")]
     pub status: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub started_at: Option<DateTime<Utc>>,
     /// Unix nanoseconds from Cubelet container.created_at — used as fallback for started_at
     #[serde(default)]
     pub create_at: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default, alias = "cpuCount")]
     pub cpu_count: i32,
@@ -1071,6 +1071,8 @@ pub struct GetSandboxDataItem {
     pub containers: Vec<GetSandboxContainerItem>,
     #[serde(default)]
     pub namespace: String,
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
+    pub end_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1136,6 +1138,62 @@ pub(crate) fn datetime_from_unix_nanos(value: i64) -> Option<DateTime<Utc>> {
     let seconds = value.div_euclid(1_000_000_000);
     let nanos = value.rem_euclid(1_000_000_000) as u32;
     DateTime::<Utc>::from_timestamp(seconds, nanos)
+}
+
+pub(crate) fn datetime_from_unix_millis(value: i64) -> Option<DateTime<Utc>> {
+    if value <= 0 {
+        return None;
+    }
+    let seconds = value.div_euclid(1_000);
+    let nanos = (value.rem_euclid(1_000) as u32) * 1_000_000;
+    DateTime::<Utc>::from_timestamp(seconds, nanos)
+}
+
+/// Deserialise an `Option<DateTime<Utc>>` from one of three on-the-wire
+/// shapes our CubeMaster fleet has used over time:
+///
+///   * `null` or missing                 → `None`
+///   * RFC 3339 string  ("2026-..Z")     → parsed via `DateTime::parse_from_rfc3339`
+///   * integer / numeric string          → treated as unix-milliseconds
+///
+pub(crate) fn deserialize_optional_datetime<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum DateTimeValue {
+        Null,
+        Int(i64),
+        Float(f64),
+        Str(String),
+    }
+
+    let raw = Option::<DateTimeValue>::deserialize(deserializer)?;
+    let parsed = match raw {
+        None | Some(DateTimeValue::Null) => None,
+        Some(DateTimeValue::Int(ms)) => datetime_from_unix_millis(ms),
+        Some(DateTimeValue::Float(ms)) => datetime_from_unix_millis(ms.round() as i64),
+        Some(DateTimeValue::Str(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else if let Ok(ms) = trimmed.parse::<i64>() {
+                datetime_from_unix_millis(ms)
+            } else {
+                Some(
+                    DateTime::parse_from_rfc3339(trimmed)
+                        .map_err(D::Error::custom)?
+                        .with_timezone(&Utc),
+                )
+            }
+        }
+    };
+    Ok(parsed)
 }
 
 #[derive(Deserialize)]
@@ -1228,7 +1286,7 @@ impl GetSandboxResponse {
             status,
             template_id,
             started_at: primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at)),
-            end_at: None,
+            end_at: item.end_at,
             cpu_count,
             memory_mb,
             disk_size_mb: 0,
@@ -1269,7 +1327,7 @@ pub struct SandboxUpdateResponse {
 }
 
 // ─── Set sandbox timeout (absolute) ───────────────────────────────────────
-// ❌ New API — not yet implemented on CubeMaster
+// ✅ Implemented: POST /cube/sandbox/timeout
 
 #[derive(Debug, Serialize)]
 pub struct SandboxTimeoutRequest {
@@ -1290,12 +1348,13 @@ pub struct SandboxTimeoutResponse {
     pub request_id: String,
     #[serde(rename = "sandboxID", default)]
     pub sandbox_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
     pub ret: RetCode,
 }
 
 // ─── Refresh sandbox TTL (relative extend) ────────────────────────────────
-// ❌ New API — not yet implemented on CubeMaster
+// ✅ Implemented: POST /cube/sandbox/refresh
 
 #[derive(Debug, Serialize)]
 pub struct SandboxRefreshRequest {
@@ -1316,6 +1375,7 @@ pub struct SandboxRefreshResponse {
     pub request_id: String,
     #[serde(rename = "sandboxID", default)]
     pub sandbox_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
     pub ret: RetCode,
 }

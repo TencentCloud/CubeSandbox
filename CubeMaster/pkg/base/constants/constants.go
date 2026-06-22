@@ -47,6 +47,7 @@ const (
 	CubeAnnotationsInsDataDisk              = "cube.master.instance.data_disk"
 	CubeAnnotationsInsUserData              = "cube.master.instance.user_data"
 	CubeAnnotationsInsType                  = "cube.master.instance.type"
+	CubeAnnotationsKillReason               = "cube.master.instance.kill_reason"
 	CubeAnnotationsInsSecurityGroupIDS      = "cube.master.instance.sg_ids"
 	CubeAnnotationsInsRetainIP              = "cube.master.instance.retain_ip"
 	CubeAnnotationsInsRegion                = "cube.master.instance.region"

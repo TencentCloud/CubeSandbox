@@ -12,7 +12,8 @@
 // pointer to the canonical definition) is cheaper than the cross-module wire.
 //
 // Source of truth:
-//   CubeMaster/pkg/lifecycle/schema.go
+//
+//	CubeMaster/pkg/lifecycle/schema.go
 //
 // Whenever you change one side, change the other in the same commit.
 package lifecycle
@@ -40,6 +41,7 @@ func StateKey(sandboxID string) string {
 const (
 	OpCreate = "create"
 	OpDelete = "delete"
+	OpUpdate = "update"
 )
 
 // Stream entry field names.
@@ -61,4 +63,5 @@ type SandboxLifecycleMeta struct {
 	AutoPause      bool   `json:"auto_pause,omitempty"`
 	AutoResume     bool   `json:"auto_resume,omitempty"`
 	CreatedAt      int64  `json:"created_at,omitempty"`
+	EndAt          int64  `json:"end_at,omitempty"`
 }

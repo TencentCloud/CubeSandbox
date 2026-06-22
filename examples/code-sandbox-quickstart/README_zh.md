@@ -120,6 +120,7 @@ hello cube
 | `read.py` | `sandbox.files.read()` — 读取沙箱文件系统中的文件 |
 | `pause.py` | `sandbox.pause()` / `sandbox.connect()` — 快照与恢复 |
 | `auto_resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — 平台在空闲超时后自动暂停沙箱，下一次请求自动恢复 |
+| `auto_kill.py` | `lifecycle={"on_timeout": "kill"}` — 平台在空闲超时后直接销毁沙箱（默认行为，销毁不可逆，沙箱无法恢复） |
 | `network_no_internet.py` | `allow_internet_access=False` — 完全断网沙箱 |
 | `network_allowlist.py` | `allow_out` — 白名单 CIDR，拦截其余所有出口 |
 | `network_denylist.py` | `deny_out` — 黑名单 CIDR，其余放行 |
@@ -170,6 +171,29 @@ sandbox.run_code("print('back from a transparent resume')")
 sandbox.kill()
 ```
 
+### auto_kill.py — 空闲超时后自动销毁
+
+`auto_resume.py` 的孪生销毁版本。`on_timeout="kill"`（不传 `lifecycle`
+时的默认值）告诉平台：沙箱空闲超过 `timeout` 后直接拆除 VM，不
+保留快照，下一次请求会以 **410 Gone** 快速失败：
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    timeout=30,             # 扫描器使用的空闲阈值
+    lifecycle={"on_timeout": "kill"},
+)
+sandbox.run_code("print('first call')")
+time.sleep(50)              # 超过空闲阈值，扫描器销毁沙箱
+try:
+    sandbox.run_code("print('should never run')")
+except Exception as exc:
+    print(f"sandbox is gone: {exc!r}")  # 销毁不可逆
+```
+
+TUI 版本额外交叉校验 `Sandbox.list()` 不再返回该沙箱，并创建一个对照
+沙箱来排除集群整体故障造成的假阳性。
+
 ### 网络策略
 
 ```bash
@@ -204,6 +228,7 @@ code-sandbox-quickstart/
 ├── read.py                    # 读取沙箱文件系统中的文件
 ├── pause.py                   # 暂停与恢复沙箱
 ├── auto_resume.py             # 自动暂停 / 自动恢复（基于空闲超时）
+├── auto_kill.py               # 空闲超时后自动销毁（不可恢复）
 ├── network_no_internet.py     # 完全断网沙箱
 ├── network_allowlist.py       # 出口 CIDR 白名单
 ├── network_denylist.py        # 出口 CIDR 黑名单

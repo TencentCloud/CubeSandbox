@@ -23,6 +23,7 @@ func TestSchemaConstants(t *testing.T) {
 		{"StateKey", StateKey("test-id"), "cube:v1:shared:sandbox:lifecycle:state:test-id"},
 		{"OpCreate", OpCreate, "create"},
 		{"OpDelete", OpDelete, "delete"},
+		{"OpUpdate", OpUpdate, "update"},
 		{"FieldOp", FieldOp, "op"},
 		{"FieldSandboxID", FieldSandboxID, "sandbox_id"},
 		{"FieldPayload", FieldPayload, "payload"},

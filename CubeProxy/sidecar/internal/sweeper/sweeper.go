@@ -25,7 +25,7 @@ import (
 type Options struct {
 	Registry           *registry.Registry
 	Redis              stateStore
-	CubeMaster         pauser
+	CubeMaster         pauseKiller
 	ProxyPush          stateNotifier
 	DefaultIdleTimeout time.Duration
 
@@ -59,6 +59,8 @@ type Sweeper struct {
 	// metrics — exposed for testing rather than via Prometheus for now.
 	pauseTriggered atomic.Int64
 	pauseFailed    atomic.Int64
+	killTriggered  atomic.Int64
+	killFailed     atomic.Int64
 }
 
 func New(o Options) *Sweeper {
@@ -107,9 +109,6 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 	withinWarmup := now.Sub(s.o.StartedAt) < s.o.BootstrapWarmup
 
 	for _, e := range s.o.Registry.Snapshot() {
-		if !e.Meta.AutoPause {
-			continue
-		}
 		// Bootstrap entries during warmup → skip. `FirstSeenAt <= StartedAt`
 		// (we backdate FirstSeenAt during bootstrap, so equality means
 		// "loaded from HGETALL", inequality means "new event").
@@ -141,34 +140,54 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 			continue
 		}
 
-		// Already-paused fast path: if Redis says the sandbox is parked
-		// at terminal "paused", there is nothing for us to do — the
-		// dataplane will resume it on demand. Without this guard the
-		// sweeper logs "idle threshold exceeded" every Interval and the
-		// state-key TTL (StateLockTTL=60s) expires periodically, causing
-		// a pointless RPC churn against CubeMaster every minute.
+		// Already-terminal fast path: if Redis says the sandbox is parked
+		// at "paused", "pausing", "killing", or "killed", there is nothing
+		// for us to do — either the dataplane will resume it on demand
+		// (paused) or the sandbox is on its way out (killing/killed).
+		// Without this guard the sweeper logs "idle threshold exceeded"
+		// every Interval and the state-key TTL (StateLockTTL=60s) expires
+		// periodically, causing a pointless RPC churn against CubeMaster
+		// every minute.
 		curState, _, stateErr := s.o.Redis.GetState(ctx, e.Meta.SandboxID)
 		if stateErr != nil {
-			s.o.Log.Warn("get state failed; will attempt pause anyway",
+			s.o.Log.Warn("get state failed; will attempt action anyway",
 				zap.String("sandbox_id", e.Meta.SandboxID),
 				zap.Error(stateErr))
-		} else if curState == "paused" || curState == "pausing" {
-			// Nothing to do. "pausing" means a peer (or our own previous
-			// invocation) is mid-flight; let it finish.
+		} else if curState == "paused" || curState == "pausing" ||
+			curState == "killing" || curState == "killed" {
+			// Nothing to do. "pausing" / "killing" mean a peer (or our own
+			// previous invocation) is mid-flight; let it finish.
 			continue
 		}
 
-		s.o.Log.Info("idle threshold exceeded; pausing",
-			zap.String("sandbox_id", e.Meta.SandboxID),
-			zap.Duration("idle_for", idleFor),
-			zap.Int("timeout_seconds", e.Meta.TimeoutSeconds))
-
-		if err := s.tryPause(ctx, e); err != nil {
-			s.pauseFailed.Add(1)
-			s.o.Log.Warn("auto-pause failed",
+		switch {
+		case e.Meta.AutoPause:
+			s.o.Log.Info("idle threshold exceeded; pausing",
 				zap.String("sandbox_id", e.Meta.SandboxID),
 				zap.Duration("idle_for", idleFor),
-				zap.Error(err))
+				zap.Int("timeout_seconds", e.Meta.TimeoutSeconds))
+
+			if err := s.tryPause(ctx, e); err != nil {
+				s.pauseFailed.Add(1)
+				s.o.Log.Warn("auto-pause failed",
+					zap.String("sandbox_id", e.Meta.SandboxID),
+					zap.Duration("idle_for", idleFor),
+					zap.Error(err))
+			}
+		default:
+			s.o.Log.Info("idle threshold exceeded; killing",
+				zap.String("sandbox_id", e.Meta.SandboxID),
+				zap.Duration("idle_for", idleFor),
+				zap.Int("timeout_seconds", e.Meta.TimeoutSeconds),
+				zap.String("kill_reason", cubemasterclient.KillReasonTimeout))
+
+			if err := s.tryKill(ctx, e); err != nil {
+				s.killFailed.Add(1)
+				s.o.Log.Warn("timeout-kill failed",
+					zap.String("sandbox_id", e.Meta.SandboxID),
+					zap.Duration("idle_for", idleFor),
+					zap.Error(err))
+			}
 		}
 	}
 }
@@ -260,4 +279,72 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 // Stats returns the running counters, useful for tests and /metrics.
 func (s *Sweeper) Stats() (triggered, failed int64) {
 	return s.pauseTriggered.Load(), s.pauseFailed.Load()
+}
+
+// KillStats returns the kill-path counters, kept separate from Stats() so
+// existing callers / tests that only care about the pause path don't have to
+// change. Mirrors the (triggered, failed) shape of Stats.
+func (s *Sweeper) KillStats() (triggered, failed int64) {
+	return s.killTriggered.Load(), s.killFailed.Load()
+}
+
+// tryKill is the kill-path counterpart of tryPause. Same coordination
+// pattern (SETNX → notify proxy → RPC → finalise), but the terminal state is
+// non-recoverable: on success we evict the registry entry and tell every
+// CubeProxy replica to forget the sandbox. The Lua gate maps `killing` /
+// `killed` to 410 Gone so any in-flight client request fails fast instead of
+// hanging on a doomed retry.
+func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
+	sid := e.Meta.SandboxID
+	got, err := s.o.Redis.AcquireState(ctx, sid, "killing", s.o.StateLockTTL)
+	if err != nil {
+		return err
+	}
+	if !got {
+		// A peer sidecar (or our own resume / pause path) holds the state.
+		// Skip — the holder will drive the transition.
+		return nil
+	}
+
+	if err := s.o.ProxyPush.SetState(ctx, sid, "killing"); err != nil {
+		s.o.Log.Warn("push killing state failed",
+			zap.String("sandbox_id", sid), zap.Error(err))
+	}
+
+	killErr := s.o.CubeMaster.Kill(ctx, sid, e.Meta.InstanceType, cubemasterclient.KillReasonTimeout)
+	if killErr != nil {
+		var apiErr *cubemasterclient.APIError
+		switch {
+		case errors.As(killErr, &apiErr) && apiErr.IsNotFound():
+			s.o.Log.Info("sandbox not found on cubemaster during kill; evicting from registry",
+				zap.String("sandbox_id", sid),
+				zap.Int("ret_code", apiErr.RetCode),
+				zap.String("ret_msg", apiErr.RetMsg))
+		case errors.As(killErr, &apiErr) && apiErr.IsAlreadyInState():
+			s.o.Log.Info("sandbox already in terminal state on cubemaster; reconciling",
+				zap.String("sandbox_id", sid),
+				zap.Int("ret_code", apiErr.RetCode))
+		default:
+			_ = s.o.Redis.ClearState(ctx, sid)
+			_ = s.o.ProxyPush.SetState(ctx, sid, "running")
+			return errors.New("cubemaster kill: " + killErr.Error())
+		}
+	}
+
+	if err := s.o.Redis.SetState(ctx, sid, "killed", s.o.StateLockTTL); err != nil {
+		s.o.Log.Warn("write killed state failed",
+			zap.String("sandbox_id", sid), zap.Error(err))
+	}
+	if err := s.o.ProxyPush.DeleteMeta(ctx, sid); err != nil {
+		s.o.Log.Warn("delete meta after kill failed",
+			zap.String("sandbox_id", sid), zap.Error(err))
+	}
+	s.o.Registry.Delete(sid)
+
+	s.killTriggered.Add(1)
+	s.o.Log.Info("timeout-killed sandbox",
+		zap.String("sandbox_id", sid),
+		zap.Int("timeout_seconds", e.Meta.TimeoutSeconds),
+		zap.String("kill_reason", cubemasterclient.KillReasonTimeout))
+	return nil
 }

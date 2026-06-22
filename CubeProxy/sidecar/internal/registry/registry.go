@@ -90,6 +90,19 @@ func (r *Registry) MergeLastActive(sandboxID string, tsMs int64) bool {
 	return false
 }
 
+// ResetLastActive clears LastActiveMs back to 0 for a single sandbox.
+func (r *Registry) ResetLastActive(sandboxID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	e, ok := r.entries[sandboxID]
+	if !ok {
+		return false
+	}
+	e.LastActiveMs = 0
+	return true
+}
+
 // Get returns a copy of the entry for inspection. Returns nil when absent.
 func (r *Registry) Get(sandboxID string) *Entry {
 	r.mu.RLock()

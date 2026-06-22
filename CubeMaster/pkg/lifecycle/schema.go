@@ -44,6 +44,7 @@ const (
 const (
 	OpCreate = "create"
 	OpDelete = "delete"
+	OpUpdate = "update"
 )
 
 // Stream entry field names. Stream values are flat key/value pairs in redigo,
@@ -70,4 +71,9 @@ type SandboxLifecycleMeta struct {
 	// CreatedAt is unix milliseconds. Sidecars use it as the initial
 	// "last active" baseline before they ever observe a real request.
 	CreatedAt int64 `json:"created_at,omitempty"`
+	// EndAt is unix milliseconds, the projected next-timeout instant
+	// (CreatedAt + TimeoutSeconds*1000). Filled in by the master so
+	// API consumers (and the SDK's get_info endpoint) can return it
+	// without recomputing.
+	EndAt int64 `json:"end_at,omitempty"`
 }

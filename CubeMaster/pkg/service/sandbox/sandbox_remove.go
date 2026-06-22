@@ -44,6 +44,11 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 		destroyReq.Annotations = make(map[string]string)
 		destroyReq.Annotations[constants.CubeAnnotationsInsType] = req.InstanceType
 	}
+	reason := req.KillReason
+	if reason == "" {
+		reason = "request"
+	}
+	destroyReq.Annotations[constants.CubeAnnotationsKillReason] = reason
 	collectMemoryOption(req, destroyReq)
 	if config.GetConfig().Common.CubeDestroyCheckFilter {
 

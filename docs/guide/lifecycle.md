@@ -142,23 +142,31 @@ Any of these resets the idle clock:
 - SDK calls: `sandbox.run_code(...)`, `sandbox.commands.run(...)`, `sandbox.files.read(...)` / `write(...)`.
 - Direct HTTP traffic to a service inside the sandbox (e.g. via the URL returned by `getHost()`).
 
-Sandboxes that don't opt in (no `lifecycle` argument) keep the original behaviour: idle timeout → destroy.
+Sandboxes that don't opt in (no `lifecycle` argument) default to `on_timeout="kill"`: once they sit idle for `timeout` seconds the platform destroys them. This matches e2b's `lifecycle.on_timeout="kill"` semantic. If you want a sandbox that never gets reaped automatically, set `timeout` high enough or have the client send periodic activity to reset the idle clock.
 
-### End-to-end example
+### End-to-end examples
 
-[`examples/code-sandbox-quickstart/auto-resume.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/auto-resume.py) is a TUI demo that creates a `lifecycle.on_timeout=pause` sandbox, idles past the timeout to trigger auto-pause, then issues a fresh request to trigger auto-resume — and verifies that both kernel memory and the filesystem are byte-identical across the cycle.
+The platform ships two **mirror-image** end-to-end demos, one per `on_timeout` value:
+
+- [`examples/code-sandbox-quickstart/auto-resume.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/auto-resume.py) — `on_timeout="pause"` + `auto_resume=True`. Creates a sandbox, idles past the timeout to trigger **auto-pause**, then issues a fresh request to trigger **auto-resume**, and verifies that both kernel memory and the filesystem are byte-identical across the cycle.
+- [`examples/code-sandbox-quickstart/auto-kill.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/auto-kill.py) — `on_timeout="kill"` (the default). Creates a sandbox, idles past the timeout to trigger **auto-kill**, verifies that the next request fails fast with 410 Gone, that the sandbox no longer appears in `Sandbox.list()`, and spawns a control sandbox to rule out cluster-wide failures.
 
 ```bash
 export CUBE_TEMPLATE_ID=<your-template>
+
+# Auto-pause + auto-resume
 python examples/code-sandbox-quickstart/auto-resume.py
+
+# Auto-kill (irreversible)
+python examples/code-sandbox-quickstart/auto-kill.py
 ```
 
 ## Operational Notes
 
 - **Pause fidelity**: CPU registers, process memory, TCP state (with no external peer), and filesystem mutations all survive the snapshot. Outbound sockets the sandbox itself opened are dropped on pause and must be reopened by the application after resume.
 - **Cluster coordination**: auto-pause is driven by `cube-proxy-sidecar`, co-resident with each CubeProxy container. It consumes lifecycle events CubeMaster publishes via Redis stream and broadcasts state to every CubeProxy instance. Cross-replica races are resolved by Redis `SETNX` state locks so the same sandbox is never paused or resumed twice concurrently.
-- **Failure mode**: when an auto-resume RPC fails, CubeProxy returns `503 + Retry-After` to the client immediately rather than hanging on a long timeout.
-- **Diagnostics**: `/data/log/cube-proxy/sidecar.log` is the sidecar's runtime log. Look for `create event applied`, `auto-paused sandbox`, `auto-resumed sandbox`.
+- **Failure mode**: when an auto-resume RPC fails, CubeProxy returns `503 + Retry-After` to the client immediately rather than hanging on a long timeout. When the sandbox has already been killed (`killing` / `killed`) the proxy returns `410 Gone` instead, telling SDK clients to stop retrying.
+- **Diagnostics**: `/data/log/cube-proxy/sidecar.log` is the sidecar's runtime log. Look for `create event applied`, `auto-paused sandbox`, `auto-resumed sandbox`, `timeout-killed sandbox`.
 
 ## Next Steps
 

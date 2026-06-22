@@ -39,6 +39,21 @@ const (
 	RetCodeTaskStateInvalid = 130490
 )
 
+const (
+	// KillReasonRequest is an explicit Sandbox.kill() / DELETE call from a
+	// human or SDK client. Used by CubeAPI's kill_sandbox path.
+	KillReasonRequest = "request"
+
+	// KillReasonTimeout is the sidecar sweeper reaping an idle sandbox that
+	// did not opt into auto_pause (lifecycle.on_timeout=kill, the default).
+	KillReasonTimeout = "timeout"
+
+	// KillReasonOrphaned is reserved for future use: a sandbox observed on a
+	// node but missing from the registry / Redis source-of-truth. Mirrors
+	// e2b's orphan reaper.
+	KillReasonOrphaned = "orphaned"
+)
+
 // APIError is returned by the client whenever CubeMaster replies with a
 // non-success ret_code. Callers can errors.As-extract it to react to
 // specific conditions (e.g. "sandbox already paused" → treat as success).
@@ -93,6 +108,14 @@ type updateResponse struct {
 	} `json:"ret"`
 }
 
+type killRequest struct {
+	RequestID    string `json:"requestID"`
+	SandboxID    string `json:"sandbox_id"`
+	InstanceType string `json:"instance_type"`
+	Sync         bool   `json:"sync"`
+	KillReason   string `json:"kill_reason,omitempty"`
+}
+
 // Pause asks CubeMaster to pause the given sandbox. instanceType is required
 // by the master; for the cubebox runtime that's "cubebox".
 //
@@ -107,6 +130,54 @@ func (c *Client) Pause(ctx context.Context, sandboxID, instanceType string) erro
 // as Pause.
 func (c *Client) Resume(ctx context.Context, sandboxID, instanceType string) error {
 	return c.update(ctx, sandboxID, instanceType, "resume")
+}
+
+// Kill asks CubeMaster to destroy the given sandbox.
+func (c *Client) Kill(ctx context.Context, sandboxID, instanceType, reason string) error {
+	if sandboxID == "" || instanceType == "" {
+		return errors.New("sandbox_id and instance_type are required")
+	}
+
+	body, err := json.Marshal(killRequest{
+		RequestID:    uuid.NewString(),
+		SandboxID:    sandboxID,
+		InstanceType: instanceType,
+		Sync:         true,
+		KillReason:   reason,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		c.baseURL+"/cube/sandbox", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read body: %w", err)
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("http %d: %s", resp.StatusCode, raw)
+	}
+
+	var ur updateResponse
+	if err := json.Unmarshal(raw, &ur); err != nil {
+		return fmt.Errorf("decode response: %w (body=%q)", err, raw)
+	}
+	if ur.Ret.RetCode == RetCodeSuccess {
+		return nil
+	}
+	return &APIError{RetCode: ur.Ret.RetCode, RetMsg: ur.Ret.RetMsg}
 }
 
 func (c *Client) update(ctx context.Context, sandboxID, instanceType, action string) error {

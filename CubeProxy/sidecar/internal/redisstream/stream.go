@@ -184,7 +184,7 @@ func decodeEvent(msg redis.XMessage) *Event {
 			ev.Timestamp = t
 		}
 	}
-	if op == lifecycle.OpCreate {
+	if op == lifecycle.OpCreate || op == lifecycle.OpUpdate {
 		if payload, ok := msg.Values[lifecycle.FieldPayload].(string); ok && payload != "" {
 			var meta lifecycle.SandboxLifecycleMeta
 			if err := json.Unmarshal([]byte(payload), &meta); err == nil {

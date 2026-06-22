@@ -190,6 +190,7 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 					NameSpace:   sandbox.GetNamespace(),
 					CreateAt:    sandbox.GetCreatedAt(),
 					PauseAt:     container.GetPausedAt(),
+					EndAt:       LookupSandboxEndAt(ctx, sandbox.GetId()),
 				}:
 				}
 				break

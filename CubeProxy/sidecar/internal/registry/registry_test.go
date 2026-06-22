@@ -53,6 +53,24 @@ func TestMergeLastActive_TakesMaxAndIgnoresUnknown(t *testing.T) {
 	}
 }
 
+func TestResetLastActive(t *testing.T) {
+	r := New()
+	r.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx"})
+	if !r.MergeLastActive("sbx", 1234) {
+		t.Fatal("seed: MergeLastActive must advance")
+	}
+
+	if !r.ResetLastActive("sbx") {
+		t.Fatal("ResetLastActive must return true for an existing sandbox")
+	}
+	if got := r.Get("sbx").LastActiveMs; got != 0 {
+		t.Fatalf("ResetLastActive must zero LastActiveMs, got %d", got)
+	}
+	if r.ResetLastActive("nope") {
+		t.Fatal("ResetLastActive on unknown sandbox should return false")
+	}
+}
+
 func TestSnapshot_StableOrderAndCopy(t *testing.T) {
 	r := New()
 	r.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "b"})

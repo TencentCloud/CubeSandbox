@@ -125,6 +125,7 @@ hello cube
 | `read.py` | `sandbox.files.read()` — read a file from the sandbox filesystem |
 | `pause.py` | `sandbox.pause()` / `sandbox.connect()` — snapshot and restore |
 | `auto_resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — let the platform pause idle sandboxes and resume them on the next request |
+| `auto_kill.py` | `lifecycle={"on_timeout": "kill"}` — let the platform tear down idle sandboxes (the default — destruction is irreversible, the sandbox cannot be resumed) |
 | `network_no_internet.py` | `allow_internet_access=False` — fully air-gapped sandbox |
 | `network_allowlist.py` | `allow_out` — whitelist specific CIDRs, block everything else |
 | `network_denylist.py` | `deny_out` — block specific CIDRs, allow the rest |
@@ -176,6 +177,30 @@ sandbox.run_code("print('back from a transparent resume')")
 sandbox.kill()
 ```
 
+### auto_kill.py — Auto Kill on Idle Timeout
+
+The destructive twin of `auto_resume.py`. Setting `on_timeout="kill"` (also the
+default when no `lifecycle` is passed) tells the platform to tear the sandbox
+down once it idles past `timeout` — no snapshot is kept, the next request
+fails fast with **410 Gone**:
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    timeout=30,             # idle threshold the sweeper uses
+    lifecycle={"on_timeout": "kill"},
+)
+sandbox.run_code("print('first call')")
+time.sleep(50)              # exceeds the timeout — sweeper kills the sandbox
+try:
+    sandbox.run_code("print('should never run')")
+except Exception as exc:
+    print(f"sandbox is gone: {exc!r}")  # destruction is final
+```
+
+The TUI version of this demo additionally cross-checks `Sandbox.list()` and
+spawns a control sandbox to rule out cluster-wide failures.
+
 ### Network Policies
 
 ```bash
@@ -210,6 +235,7 @@ code-sandbox-quickstart/
 ├── read.py                    # Read files from the sandbox filesystem
 ├── pause.py                   # Pause and resume a sandbox
 ├── auto_resume.py             # Auto-pause / auto-resume on idle timeout
+├── auto_kill.py               # Auto-kill on idle timeout (destruction is final)
 ├── network_no_internet.py     # Fully air-gapped sandbox
 ├── network_allowlist.py       # Outbound CIDR allowlist
 ├── network_denylist.py        # Outbound CIDR denylist

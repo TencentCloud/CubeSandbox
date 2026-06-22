@@ -232,6 +232,25 @@ func handleEvent(ctx context.Context, ev redisstream.Event, push *proxypush.Clie
 			log.Warn("delete event push failed",
 				zap.String("sandbox_id", ev.SandboxID), zap.Error(err))
 		}
+	case lifecycle.OpUpdate:
+		if ev.Meta == nil {
+			log.Warn("update event missing payload",
+				zap.String("sandbox_id", ev.SandboxID))
+			return
+		}
+		reg.Upsert(*ev.Meta)
+		reg.ResetLastActive(ev.SandboxID)
+		log.Info("update event applied",
+			zap.String("sandbox_id", ev.SandboxID),
+			zap.Bool("auto_pause", ev.Meta.AutoPause),
+			zap.Bool("auto_resume", ev.Meta.AutoResume),
+			zap.Int("timeout_seconds", ev.Meta.TimeoutSeconds),
+			zap.Int64("created_at_ms", ev.Meta.CreatedAt),
+			zap.Int64("end_at_ms", ev.Meta.EndAt))
+		if err := push.UpsertMeta(ctx, *ev.Meta); err != nil {
+			log.Warn("update event push failed",
+				zap.String("sandbox_id", ev.SandboxID), zap.Error(err))
+		}
 	default:
 		log.Warn("unknown event op",
 			zap.String("op", ev.Op),

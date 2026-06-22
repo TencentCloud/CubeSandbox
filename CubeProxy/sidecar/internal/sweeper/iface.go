@@ -20,9 +20,11 @@ type stateStore interface {
 	GetState(ctx context.Context, sandboxID string) (string, bool, error)
 }
 
-// pauser is the subset of cubemasterclient.Client that the sweeper needs.
-type pauser interface {
+// pauseKiller is the subset of cubemasterclient.Client that the sweeper needs.
+// Pause + Kill are the two terminal transitions the sweeper can trigger.
+type pauseKiller interface {
 	Pause(ctx context.Context, sandboxID, instanceType string) error
+	Kill(ctx context.Context, sandboxID, instanceType, reason string) error
 }
 
 // stateNotifier is the subset of proxypush.Client that the sweeper needs.
