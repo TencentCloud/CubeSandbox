@@ -255,7 +255,13 @@ impl MsixConfig {
     }
 
     pub fn write_table(&mut self, offset: u64, data: &[u8]) {
-        assert!((data.len() == 4 || data.len() == 8));
+        if data.len() != 4 && data.len() != 8 {
+            error!(
+                "invalid MSI-X table write size: {} (allowed: 4 or 8)",
+                data.len()
+            );
+            return;
+        }
 
         let index: usize = (offset / MSIX_TABLE_ENTRIES_MODULO) as usize;
         let modulo_offset = offset % MSIX_TABLE_ENTRIES_MODULO;
