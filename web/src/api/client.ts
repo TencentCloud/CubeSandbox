@@ -276,6 +276,11 @@ export interface AgentInstanceDto {
   templateId: string;
   gatewayUrl: string;
   envUrl: string;
+  persistenceMode?: 'full_snapshot' | 'shared_files';
+  rootfsSourceType?: 'template' | 'snapshot';
+  rootfsSourceId?: string;
+  openclawPersistId?: string;
+  openclawStatePath?: string;
   wecomConfig?: {
     botId: string;
     botSecret: string;
@@ -306,8 +311,13 @@ export interface AgentSnapshotDto {
   snapshotID: string;
   names: string[];
   status?: string;
+  snapshotKind?: 'sandbox' | 'agenthub_state';
   originSandboxID?: string;
   publishedTemplateId?: string;
+  rootfsSourceType?: 'template' | 'snapshot';
+  rootfsSourceId?: string;
+  rootfsSnapshotId?: string;
+  openclawStateSnapshotPath?: string;
   templateReferenced: boolean;
   isHealthy: boolean;
   parentSnapshotID?: string;
@@ -342,6 +352,7 @@ export interface AgentTemplateDto {
   sourceSandboxId: string;
   model: string;
   version: string;
+  persistenceMode?: 'full_snapshot' | 'shared_files';
   recommended: boolean;
   createdAt?: string;
 }
@@ -363,14 +374,93 @@ export interface AgentSnapshotJobDto {
   status: string;
 }
 
+export interface SessionDto {
+  authRequired: boolean;
+  authenticated: boolean;
+  username?: string;
+}
+
+export interface LoginResponseDto {
+  token: string;
+  username: string;
+  expiresInSecs: number;
+}
+
+export const authApi = {
+  session: () => api<SessionDto>('/auth/session'),
+  login: (body: { username: string; password: string }) =>
+    api<LoginResponseDto>('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
+  logout: () => api<void>('/auth/logout', { method: 'POST' }),
+  changePassword: (body: { username: string; oldPassword: string; newPassword: string }) =>
+    api<void>('/auth/change-password', { method: 'POST', body: JSON.stringify(body) }),
+};
+
+export interface AgentSettingsDto {
+  /** Backward-compatible alias for the default LLM API key state. */
+  deepseekApiKeyConfigured: boolean;
+  /** Backward-compatible masked preview. Never the full key. */
+  deepseekApiKeyMasked?: string;
+  /** Backward-compatible key source. */
+  source: 'database' | 'env' | 'none';
+  /** LLM provider id, e.g. "deepseek" or "custom". */
+  llmProvider: string;
+  /** OpenAI-compatible base URL. */
+  llmBaseUrl: string;
+  /** Default model id injected into OpenClaw. */
+  llmModel: string;
+  /** Whether a usable default LLM API key is available. */
+  llmApiKeyConfigured: boolean;
+  /** Masked preview of the default LLM API key. Never the full key. */
+  llmApiKeyMasked?: string;
+  /** Where the LLM API key comes from. */
+  llmApiKeySource: 'database' | 'env' | 'none';
+  /** How the LLM credential is delivered to OpenClaw. */
+  llmCredentialMode: 'egress' | 'env';
+  /** Whether settings can be persisted (requires the AgentHub database). */
+  persistenceEnabled: boolean;
+  /**
+   * Configured gateway domain (e.g. "cube.app"), or undefined when not set.
+   * Assistants open their OpenClaw gateway via `<port>-<sandboxId>.<domain>`
+   * (subdomain origin) when this is present.
+   */
+  gatewayDomain?: string;
+}
+
 export const agentHubApi = {
   list: () => api<AgentInstanceDto[]>('/agenthub/instances'),
   listTemplates: () => api<AgentTemplateDto[]>('/agenthub/templates'),
+  registerMarketTemplate: (body: {
+    templateId: string;
+    name?: string;
+    model?: string;
+    version?: string;
+    recommended?: boolean;
+  }) =>
+    api<AgentTemplateDto>('/agenthub/templates/market', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  getSettings: () => api<AgentSettingsDto>('/agenthub/settings'),
+  updateSettings: (body: {
+    deepseekApiKey?: string;
+    llmProvider?: string;
+    llmBaseUrl?: string;
+    llmModel?: string;
+    llmApiKey?: string;
+    llmCredentialMode?: 'egress' | 'env';
+    gatewayDomain?: string;
+  }) =>
+    api<AgentSettingsDto>('/agenthub/settings', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
   create: (body: {
     name: string;
     engine: 'openclaw';
-    model: string;
+    model?: string;
     templateId?: string;
+    snapshotId?: string;
+    persistenceMode?: 'full_snapshot' | 'shared_files';
     botId?: string;
     botSecret?: string;
   }) =>

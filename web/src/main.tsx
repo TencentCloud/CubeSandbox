@@ -25,6 +25,8 @@ import NetworkPage from '@/pages/Network';
 import ObservabilityPage from '@/pages/Observability';
 import TemplateStorePage from '@/pages/TemplateStore';
 import AgentHubPage from '@/pages/AgentHub';
+import LoginPage from '@/pages/Login';
+import { AuthGuard } from '@/components/AuthGuard';
 import { Placeholder } from '@/pages/Placeholder';
 import { Network, Activity, Settings, Package } from 'lucide-react';
 
@@ -44,7 +46,9 @@ const App = () => (
       <ThemeProvider>
         <BrowserRouter>
           <Routes>
-            <Route element={<AppShell />}>
+            <Route path="/login" element={<LoginPage />} />
+            <Route element={<AuthGuard />}>
+              <Route element={<AppShell />}>
               <Route path="/" element={<OverviewPage />} />
               <Route path="/sandboxes" element={<SandboxesPage />} />
               <Route path="/sandboxes/new" element={<SandboxNewPage />} />
@@ -64,6 +68,7 @@ const App = () => (
               <Route path="/keys" element={<KeysPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
+              </Route>
             </Route>
           </Routes>
         </BrowserRouter>

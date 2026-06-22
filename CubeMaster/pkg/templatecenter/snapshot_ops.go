@@ -431,11 +431,10 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 		if err != nil {
 			return err
 		}
-		sandboxSizeBytes, err := resolveSandboxDesiredSizeBytes(ctx, sandboxInfo)
-		if err != nil {
-			return err
-		}
-		desiredSize = maxUint64(def.RootfsSizeBytesAtSnapshot, sandboxSizeBytes)
+		// Rollback derives the sandbox rootfs from a cubecow snapshot. Reflink
+		// snapshots are not resizable, so the restored rootfs must keep the
+		// committed snapshot size instead of expanding to the current spec size.
+		desiredSize = 0
 		payload, err := marshalSnapshotRollbackRequest(requestID, sandboxID, snapshotID, nodeID, nodeIP, newGen, desiredSize)
 		if err != nil {
 			return err
@@ -936,35 +935,59 @@ func nextSnapshotAttempt(ctx context.Context, snapshotID string) (int32, string,
 }
 
 func allocateNextRollbackGen(ctx context.Context, sandboxID string) (uint32, error) {
+	var maxGen uint32
 	if ref, err := GetActiveSnapshotRuntimeRefBySandbox(ctx, sandboxID); err == nil && ref != nil {
-		if ref.SandboxGen == 0 {
-			return 1, nil
-		}
-		return ref.SandboxGen + 1, nil
+		maxGen = maxUint32(maxGen, ref.SandboxGen)
 	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, err
 	}
-	record := &models.TemplateImageJob{}
+
+	var records []models.TemplateImageJob
 	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
-		Where("sandbox_id = ? AND operation = ? AND status = ?", sandboxID, JobOperationSnapshotRollback, JobStatusReady).
-		Order("id desc").First(record).Error
+		Where("sandbox_id = ? AND operation = ?", sandboxID, JobOperationSnapshotRollback).
+		Order("id desc").
+		Limit(100).
+		Find(&records).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 1, nil
-		}
 		return 0, err
 	}
-	if strings.TrimSpace(record.ResultJSON) == "" {
+	for _, record := range records {
+		if gen, ok, err := rollbackGenFromJSON(record.ResultJSON); err != nil {
+			return 0, err
+		} else if ok {
+			maxGen = maxUint32(maxGen, gen)
+		}
+		if gen, ok, err := rollbackGenFromJSON(record.RequestJSON); err != nil {
+			return 0, err
+		} else if ok {
+			maxGen = maxUint32(maxGen, gen)
+		}
+	}
+	if maxGen == 0 {
 		return 1, nil
+	}
+	return maxGen + 1, nil
+}
+
+func rollbackGenFromJSON(raw string) (uint32, bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return 0, false, nil
 	}
 	var result snapshotRollbackResult
-	if err := json.Unmarshal([]byte(record.ResultJSON), &result); err != nil {
-		return 0, err
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return 0, false, err
 	}
 	if result.NewGen == 0 {
-		return 1, nil
+		return 0, false, nil
 	}
-	return result.NewGen + 1, nil
+	return result.NewGen, true, nil
+}
+
+func maxUint32(a, b uint32) uint32 {
+	if a >= b {
+		return a
+	}
+	return b
 }
 
 func updateDefinitionFields(ctx context.Context, templateID string, values map[string]any) error {

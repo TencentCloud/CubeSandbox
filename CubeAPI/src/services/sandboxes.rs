@@ -144,6 +144,7 @@ impl SandboxService {
             timeout: Some(body.timeout),
             annotations,
             labels,
+            distribution_scope: body.distribution_scope,
             volumes: None,
             containers: vec![],
             exposed_ports: vec![],

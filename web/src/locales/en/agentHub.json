@@ -4,8 +4,79 @@
   "preview": {
     "badge": "Preview",
     "title": "Digital Assistant Preview",
-    "description": "This feature is intended for demos and early validation. APIs, deployment options, and UX may change. The default template is built from a large all-in-one OpenClaw image; initial template creation takes about 15 minutes. If you keep only 1 template, 2 snapshots, and a few running instances, reserve about 12~15 GB of free disk space.",
+    "description": "This feature is intended for demos and early validation. APIs, deployment options, and UX may change.",
     "close": "Close preview notice"
+  },
+  "settings": {
+    "openAction": "Model Service Settings",
+    "title": "Digital Assistant Settings",
+    "description": "Configure the default LLM service for OpenClaw assistants. The API key is encrypted in the database and, by default, injected by CubeEgress at outbound request time so it never enters the assistant sandbox.",
+    "loading": "Loading settings...",
+    "provider": {
+      "label": "Provider",
+      "deepseek": "DeepSeek",
+      "openaiCompatible": "OpenAI Compatible",
+      "custom": "Custom"
+    },
+    "baseUrl": {
+      "label": "LLM Base URL",
+      "hint": "OpenAI-compatible API endpoint, e.g. https://api.deepseek.com or an internal gateway."
+    },
+    "model": {
+      "label": "Model ID",
+      "hint": "Default model injected into OpenClaw, e.g. deepseek/deepseek-v4-flash."
+    },
+    "apiKey": {
+      "label": "LLM API Key",
+      "hint": "Bound to the current Provider / Base URL. The full key is never shown again after saving — only a masked preview."
+    },
+    "credentialMode": {
+      "label": "Credential delivery",
+      "egress": "Credential hosting (recommended)",
+      "env": "Environment injection (legacy)",
+      "egressHint": "When an assistant is created, CubeEgress injects the Authorization header only for this LLM Base URL. OpenClaw stores only a managed placeholder key.",
+      "envHint": "Legacy mode writes the real API key into OpenClaw env/config. Use only when CubeEgress is unavailable."
+    },
+    "gatewayDomain": {
+      "label": "Gateway domain",
+      "hint": "Optional. When set, each assistant's gateway opens on its own subdomain (port-sandboxId.domain, e.g. cube.app), fully isolating WebSocket sessions and preventing crosstalk. Leave blank to keep using the same-origin proxy path. Requires wildcard DNS and a certificate for the domain."
+    },
+    "persistenceDisabled": "No database configured, so the model service configuration cannot be saved. Set DATABASE_URL for CubeAPI and try again.",
+    "status": {
+      "configured": "Configured {{provider}} / {{model}} (key: {{masked}}, source: {{source}}, mode: {{mode}})",
+      "missing": "No LLM API key configured yet — assistants cannot be created."
+    },
+    "source": {
+      "database": "database",
+      "env": "environment",
+      "none": "none"
+    },
+    "errors": {
+      "required": "Please enter or change at least one model service setting"
+    },
+    "actions": {
+      "close": "Close",
+      "save": "Save",
+      "saved": "Saved"
+    }
+  },
+  "onboarding": {
+    "title": "Get started with Digital Assistants",
+    "description": "Complete the steps below to create your first digital assistant.",
+    "steps": {
+      "apiKey": {
+        "title": "Configure the LLM service",
+        "desc": "Drives the LLM calls behind OpenClaw assistants. Provider / Base URL / Model / API Key are saved globally.",
+        "action": "Configure",
+        "doneAction": "Configured · Edit"
+      },
+      "template": {
+        "title": "Prepare a 龙虾助手 template",
+        "desc": "Install the lightweight or all-in-one 龙虾助手 image from the template market as the system template for new assistants.",
+        "action": "Open Market",
+        "doneAction": "Ready · View"
+      }
+    }
   },
   "tabs": {
     "personal": "Personal",
@@ -218,6 +289,7 @@
       "info": "Assistant info",
       "engine": "Work engine",
       "template": "Assistant template",
+      "persistence": "State mode",
       "model": "Model",
       "botConfig": "Bot config"
     },
@@ -239,13 +311,26 @@
     "templateFields": {
       "model": "Model",
       "version": "Version",
+      "persistence": "State mode",
       "sourceAgent": "Source assistant",
       "createdAt": "Published at"
     },
     "templateOptions": {
       "default": "System default template"
     },
-    "modelHint": "DeepSeek V4 Flash · Internal model",
+    "persistenceHint": "Full Snapshot captures the whole Sandbox. File Sharing persists OpenClaw files on the host and snapshots/clones copy only that shared file state.",
+    "persistenceInheritedHint": "A digital assistant template is selected, so the state mode is inherited from the template.",
+    "persistenceOptions": {
+      "sharedFiles": {
+        "title": "File Sharing",
+        "description": "Mount OpenClaw files from the host, suitable for long-lived sessions, config, and managed credential state."
+      },
+      "fullSnapshot": {
+        "title": "Full Snapshot",
+        "description": "Do not use host mounts; snapshot and rollback submit the whole Sandbox rootfs."
+      }
+    },
+    "modelHint": "Uses the default model from Model Service Settings",
     "botConfigHint": "Paste Bot ID & Secret from the smart bot 'API config - long-connection' panel; when provided, AgentHub installs the WeCom plugin and binds the bot automatically",
     "fields": {
       "botId": "Bot ID",
@@ -253,13 +338,19 @@
       "secret": "Secret",
       "secretPlaceholder": "Enter Secret"
     },
+    "apiKeyRequired": {
+      "title": "LLM API key not configured",
+      "description": "Configure a valid LLM API key in “Model Service Settings” before creating a digital assistant.",
+      "action": "Configure"
+    },
     "actions": {
       "cancel": "Cancel",
       "submit": "Create",
       "submitting": "Incubating…"
     },
     "errors": {
-      "nameRequired": "Please name your assistant"
+      "nameRequired": "Please name your assistant",
+      "apiKeyRequired": "Configure an LLM API key before creating an assistant"
     }
   },
   "wecomDialog": {

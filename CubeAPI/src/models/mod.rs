@@ -164,6 +164,13 @@ pub struct NewSandbox {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<SandboxMetadata>,
 
+    #[serde(
+        rename = "distributionScope",
+        alias = "distribution_scope",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub distribution_scope: Option<Vec<String>>,
+
     #[serde(rename = "envVars", skip_serializing_if = "Option::is_none")]
     pub env_vars: Option<EnvVars>,
 

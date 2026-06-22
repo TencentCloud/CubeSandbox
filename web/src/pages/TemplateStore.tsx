@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { templateApi, storeApi, type TemplateSummary, type ImageMeta } from '@/api/client';
+import { agentHubApi, templateApi, storeApi, type TemplateSummary, type ImageMeta } from '@/api/client';
 import { showToast } from '@/components/ui/ToastProvider';
 import { STORE_TEMPLATES, CATEGORIES, type StoreTemplate, type CategoryId } from '@/data/templateStore';
 import { Card, CardContent } from '@/components/ui/card';
@@ -40,6 +40,10 @@ function getInstalledTemplates(item: StoreTemplate, templates: TemplateSummary[]
   });
 }
 
+function isOpenClawTemplate(item: StoreTemplate): boolean {
+  return item.id === 'openclaw-lite' || item.id === 'openclaw-aio';
+}
+
 // ── InstallModal ──────────────────────────────────────────────────────────────
 
 type InstallPhase =
@@ -51,16 +55,41 @@ type InstallPhase =
 
 interface InstallModalProps {
   item: StoreTemplate;
+  enableForAgentHub?: boolean;
   onClose: () => void;
 }
 
-function InstallModal({ item, onClose }: InstallModalProps) {
+function InstallModal({ item, enableForAgentHub = false, onClose }: InstallModalProps) {
   const { t } = useTranslation('store');
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [writableLayerSize, setWritableLayerSize] = useState(item.writable_layer_size);
   const [phase, setPhase] = useState<InstallPhase>({ kind: 'idle' });
+  const [enabling, setEnabling] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const enableAgentTemplate = useCallback(
+    async (templateID: string) => {
+      setEnabling(true);
+      try {
+        await agentHubApi.registerMarketTemplate({
+          templateId: templateID,
+          name: t(item.nameKey as 'official', { defaultValue: item.id }),
+          model: 'deepseek/deepseek-v4-flash',
+          version: item.id,
+          recommended: true,
+        });
+        showToast(t('toast.agentTemplateEnabled'));
+        onClose();
+        navigate(`/agenthub?createTemplate=${encodeURIComponent(templateID)}`);
+      } catch (err) {
+        setPhase({ kind: 'failed', message: err instanceof Error ? err.message : String(err) });
+      } finally {
+        setEnabling(false);
+      }
+    },
+    [item, navigate, onClose, t],
+  );
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -84,6 +113,7 @@ function InstallModal({ item, onClose }: InstallModalProps) {
           if (found?.status?.toUpperCase() === 'READY') {
             stopPolling();
             setPhase({ kind: 'ready', templateID: tplID });
+            if (enableForAgentHub) void enableAgentTemplate(tplID);
           } else if (found?.status?.toUpperCase() === 'FAILED') {
             stopPolling();
             setPhase({ kind: 'failed', message: found.lastError ?? t('installModal.buildFailed') });
@@ -96,7 +126,7 @@ function InstallModal({ item, onClose }: InstallModalProps) {
         }
       }, 2000);
     },
-    [qc, stopPolling],
+    [enableAgentTemplate, enableForAgentHub, qc, stopPolling],
   );
 
   const mutation = useMutation({
@@ -164,12 +194,12 @@ function InstallModal({ item, onClose }: InstallModalProps) {
           </div>
 
           {/* 安装进度 */}
-          {phase.kind === 'polling' && (
+          {(phase.kind === 'polling' || enabling) && (
             <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
               <span>
-                {t('installModal.building')}
-                {phase.templateID && (
+                {enabling ? t('installModal.enablingAgentHub') : t('installModal.building')}
+                {phase.kind === 'polling' && phase.templateID && (
                   <span className="ml-1 font-mono text-foreground">{phase.templateID}</span>
                 )}
               </span>
@@ -207,10 +237,10 @@ function InstallModal({ item, onClose }: InstallModalProps) {
             {!isDone && (
               <Button
                 size="sm"
-                disabled={isBuilding}
+                disabled={isBuilding || enabling}
                 onClick={() => mutation.mutate()}
               >
-                {isBuilding ? (
+                {isBuilding || enabling ? (
                   <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />{t('installModal.installing')}</>
                 ) : phase.kind === 'failed' ? (
                   t('installModal.retry')
@@ -345,10 +375,13 @@ interface StoreCardProps {
   item: StoreTemplate;
   installed: TemplateSummary[];
   onInstall: () => void;
+  onInstallAndEnable: () => void;
+  onEnableInstalled: (template: TemplateSummary) => void;
+  enabling?: boolean;
   liveMeta?: ImageMeta;
 }
 
-function StoreCard({ item, installed, onInstall, liveMeta }: StoreCardProps) {
+function StoreCard({ item, installed, onInstall, onInstallAndEnable, onEnableInstalled, enabling = false, liveMeta }: StoreCardProps) {
   const { t } = useTranslation('store');
   const installedDigest = installed.length > 0
     ? (installed[0].imageInfo ?? '').split('sha256:')[1]
@@ -407,9 +440,24 @@ function StoreCard({ item, installed, onInstall, liveMeta }: StoreCardProps) {
         <p className="text-xs text-muted-foreground font-mono break-all leading-relaxed">
           {item.image}
         </p>
-        <div className="flex justify-end">
+        <div className="flex flex-wrap justify-end gap-2">
+          {isInstalled && isOpenClawTemplate(item) && (
+            <Button
+              size="sm"
+              disabled={enabling}
+              onClick={() => onEnableInstalled(installed[0])}
+            >
+              {enabling ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+              {t('enableAgentHub')}
+            </Button>
+          )}
           {isInstalled ? (
             <InstalledDropdown installed={installed} onInstallAnother={onInstall} />
+          ) : isOpenClawTemplate(item) ? (
+            <>
+              <Button size="sm" onClick={onInstallAndEnable}>{t('installAndEnableAgentHub')}</Button>
+              <Button size="sm" variant="outline" onClick={onInstall}>{t('installOnly')}</Button>
+            </>
           ) : (
             <Button size="sm" onClick={onInstall}>{t('install')}</Button>
           )}
@@ -425,8 +473,11 @@ export default function TemplateStorePage() {
   const [category, setCategory] = useState<CategoryId>('all');
   const [search, setSearch] = useState('');
   const [installing, setInstalling] = useState<StoreTemplate | null>(null);
+  const [enableAfterInstall, setEnableAfterInstall] = useState(false);
+  const [enablingTemplateId, setEnablingTemplateId] = useState<string | null>(null);
   const { t } = useTranslation('store');
   const qc = useQueryClient();
+  const navigate = useNavigate();
 
   const { data: templates, isLoading } = useQuery({
     queryKey: ['templates'],
@@ -487,6 +538,28 @@ export default function TemplateStorePage() {
     }
     return true;
   });
+
+  const enableInstalledTemplate = useCallback(
+    async (item: StoreTemplate, template: TemplateSummary) => {
+      setEnablingTemplateId(template.templateID);
+      try {
+        await agentHubApi.registerMarketTemplate({
+          templateId: template.templateID,
+          name: t(item.nameKey as 'official', { defaultValue: item.id }),
+          model: 'deepseek/deepseek-v4-flash',
+          version: item.id,
+          recommended: true,
+        });
+        showToast(t('toast.agentTemplateEnabled'));
+        navigate(`/agenthub?createTemplate=${encodeURIComponent(template.templateID)}`);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : String(err), 'warn');
+      } finally {
+        setEnablingTemplateId(null);
+      }
+    },
+    [navigate, t],
+  );
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -550,7 +623,16 @@ export default function TemplateStorePage() {
               key={item.id}
               item={item}
               installed={getInstalledTemplates(item, templates ?? [])}
-              onInstall={() => setInstalling(item)}
+              onInstall={() => {
+                setEnableAfterInstall(false);
+                setInstalling(item);
+              }}
+              onInstallAndEnable={() => {
+                setEnableAfterInstall(true);
+                setInstalling(item);
+              }}
+              onEnableInstalled={(template) => enableInstalledTemplate(item, template)}
+              enabling={getInstalledTemplates(item, templates ?? []).some((tpl) => tpl.templateID === enablingTemplateId)}
               liveMeta={storeMeta?.images.find((m) => m.image === item.image)}
             />
           ))}
@@ -563,7 +645,11 @@ export default function TemplateStorePage() {
       )}
 
       {installing && (
-        <InstallModal item={installing} onClose={() => setInstalling(null)} />
+        <InstallModal
+          item={installing}
+          enableForAgentHub={enableAfterInstall}
+          onClose={() => setInstalling(null)}
+        />
       )}
     </div>
   );

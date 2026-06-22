@@ -18,7 +18,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{agenthub, cluster, config, health, sandboxes, snapshots, store, templates},
+    handlers::{agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates},
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -83,10 +83,26 @@ fn build_e2b_snapshot_long_router(state: &AppState, auth_configured: bool) -> Ro
 fn build_cubeapi_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
     Router::new()
         .route("/health", get(health::health))
+        .merge(build_auth_routes(state))
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
         .merge(build_cluster_routes(state, auth_configured))
         .merge(build_agenthub_routes(state, auth_configured))
+}
+
+/// WebUI login routes. These are intentionally left unauthenticated (like
+/// `/health`) so the login/session flow itself is always reachable.
+fn build_auth_routes(state: &AppState) -> Router<AppState> {
+    let rate_limited_routes = Router::new()
+        .route("/auth/login", post(auth::login))
+        .route("/auth/change-password", post(auth::change_password));
+    let open_routes = Router::new()
+        .route("/auth/logout", post(auth::logout))
+        .route("/auth/session", get(auth::session))
+        .merge(
+            rate_limited_routes.layer(middleware::from_fn_with_state(state.clone(), rate_limit)),
+        );
+    open_routes
 }
 
 /// Same long-budget routes mounted under the `/cubeapi/v1` prefix.
@@ -258,6 +274,10 @@ fn build_agenthub_routes(state: &AppState, auth_configured: bool) -> Router<AppS
         )
         .route("/agenthub/templates", get(agenthub::list_agent_templates))
         .route(
+            "/agenthub/templates/market",
+            post(agenthub::register_market_agent_template),
+        )
+        .route(
             "/agenthub/templates/:templateID",
             patch(agenthub::update_agent_template).delete(agenthub::delete_agent_template),
         )
@@ -296,6 +316,10 @@ fn build_agenthub_routes(state: &AppState, auth_configured: bool) -> Router<AppS
         .route(
             "/agenthub/instances/:agentID/wecom",
             get(agenthub::get_agent_wecom_config).put(agenthub::update_agent_wecom_config),
+        )
+        .route(
+            "/agenthub/settings",
+            get(agenthub::get_agent_settings).put(agenthub::update_agent_settings),
         );
 
     with_auth(routes, state, auth_configured)
@@ -392,6 +416,31 @@ mod tests {
                 .status_code(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn auth_login_route_is_rate_limited_without_auth_middleware() {
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = "http://127.0.0.1:9".to_string();
+        config.rate_limit_per_sec = 1;
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+        let login_body = serde_json::json!({
+            "username": "admin",
+            "password": "admin"
+        });
+
+        let first = server
+            .post("/cubeapi/v1/auth/login")
+            .json(&login_body)
+            .await;
+        assert_ne!(first.status_code(), StatusCode::TOO_MANY_REQUESTS);
+
+        server
+            .post("/cubeapi/v1/auth/login")
+            .json(&login_body)
+            .await
+            .assert_status(StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

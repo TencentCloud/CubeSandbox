@@ -22,6 +22,7 @@ import enSettings from '@/locales/en/settings.json';
 import enObservability from '@/locales/en/observability.json';
 import enStore from '@/locales/en/store.json';
 import enAgentHub from '@/locales/en/agentHub.json';
+import enAuth from '@/locales/en/auth.json';
 
 import zhCommon from '@/locales/zh/common.json';
 import zhNav from '@/locales/zh/nav.json';
@@ -44,6 +45,7 @@ import zhSettings from '@/locales/zh/settings.json';
 import zhObservability from '@/locales/zh/observability.json';
 import zhStore from '@/locales/zh/store.json';
 import zhAgentHub from '@/locales/zh/agentHub.json';
+import zhAuth from '@/locales/zh/auth.json';
 
 export const resources = {
   en: {
@@ -68,6 +70,7 @@ export const resources = {
     observability: enObservability,
     store: enStore,
     agentHub: enAgentHub,
+    auth: enAuth,
   },
   zh: {
     common: zhCommon,
@@ -91,6 +94,7 @@ export const resources = {
     observability: zhObservability,
     store: zhStore,
     agentHub: zhAgentHub,
+    auth: zhAuth,
   },
 } as const;
 

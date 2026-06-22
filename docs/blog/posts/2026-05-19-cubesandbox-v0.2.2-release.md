@@ -3,8 +3,7 @@ title: "Cube Sandbox v0.2.2: One Step Closer to Drop-in E2B Compatibility, with 
 date: 2026-05-19
 author: Cube Sandbox Team
 description: Following v0.2.0, Cube Sandbox shipped v0.2.2 on May 18. This release extends E2B compatibility from the SDK layer down to the wire-protocol layer, fixes seven recurring stability issues from the v0.1.x era, and lands the first round of CVE remediations for the 0.2 series.
-featured: true
-weight: 2
+featured: false
 ---
 
 # Cube Sandbox v0.2.2: One Step Closer to Drop-in E2B Compatibility, with a Stability Sweep

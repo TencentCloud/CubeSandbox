@@ -33,12 +33,14 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
   const query = buildQuery(params);
 
   const apiKey = localStorage.getItem('cube.apiKey') ?? '';
+  const sessionToken = localStorage.getItem('cube.session') ?? '';
   const url = `${BASE}${path}${query}`;
   const resp = await fetch(url, {
     ...rest,
     headers: {
       ...(rest.body != null ? { 'Content-Type': 'application/json' } : {}),
       ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+      ...(sessionToken ? { 'X-Session-Token': sessionToken } : {}),
       ...(headers ?? {}),
     },
   });

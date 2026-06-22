@@ -7,22 +7,151 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
-for arg in "$@"; do
-  case "${arg}" in
-    --node-ip=*)
-      export CUBE_SANDBOX_NODE_IP="${arg#--node-ip=}"
-      ;;
-  esac
-done
+# Install mode and upgrade-related flags (M3-1/M3-2/M3-3).
+#   --mode=install   full reinstall (default; existing config is reset)
+#   --mode=upgrade   config-preserving upgrade (requires an existing install)
+#   --mode=auto      upgrade when an existing install is detected, else install
+# When --mode is omitted and an existing install is detected, the installer
+# prompts on a TTY and falls back to a full reinstall (with a warning) when
+# running non-interactively.
+ONE_CLICK_MODE="${ONE_CLICK_MODE:-}"
+ONE_CLICK_ASSUME_YES="${ONE_CLICK_ASSUME_YES:-0}"
+ONE_CLICK_ALLOW_DOWNGRADE="${ONE_CLICK_ALLOW_DOWNGRADE:-0}"
+ONE_CLICK_ALLOW_ROLE_CHANGE="${ONE_CLICK_ALLOW_ROLE_CHANGE:-0}"
+
+# Parse CLI flags into CLI_* globals (supports both `--flag=value` and
+# `--flag value`). The values are applied to the canonical variables here AND
+# re-applied after the .env file is sourced below, establishing the precedence:
+#   CLI flags > .env file > process environment > built-in defaults.
+one_click_parse_args "$@"
+
+apply_cli_overrides() {
+  [[ -n "${CLI_MODE}" ]] && ONE_CLICK_MODE="${CLI_MODE}"
+  [[ -n "${CLI_ASSUME_YES}" ]] && ONE_CLICK_ASSUME_YES="${CLI_ASSUME_YES}"
+  [[ -n "${CLI_ALLOW_DOWNGRADE}" ]] && ONE_CLICK_ALLOW_DOWNGRADE="${CLI_ALLOW_DOWNGRADE}"
+  [[ -n "${CLI_ALLOW_ROLE_CHANGE}" ]] && ONE_CLICK_ALLOW_ROLE_CHANGE="${CLI_ALLOW_ROLE_CHANGE}"
+  [[ -n "${CLI_NODE_IP}" ]] && export CUBE_SANDBOX_NODE_IP="${CLI_NODE_IP}"
+  return 0
+}
+apply_cli_overrides
+
+case "${ONE_CLICK_MODE}" in
+  ""|install|upgrade|auto) ;;
+  *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
+esac
+
+require_root
 
 ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
 if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
+  # CLI flags must win over .env values: load_env_file uses `set -a; source`,
+  # which would otherwise clobber the CLI-provided values set above.
+  apply_cli_overrides
+  case "${ONE_CLICK_MODE}" in
+    ""|install|upgrade|auto) ;;
+    *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
+  esac
 fi
 
 DEPLOY_ROLE="$(one_click_deploy_role)"
+
+# ---- External MySQL / Redis support ----
+# Set CUBE_EXTERNAL_MYSQL_HOST / CUBE_EXTERNAL_REDIS_HOST to use external
+# services instead of the bundled local Docker containers. Defaults are filled
+# after the optional upgrade env merge so they are based on the final runtime
+# configuration.
+init_external_dep_defaults() {
+  CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
+  CUBE_EXTERNAL_MYSQL_PORT="${CUBE_EXTERNAL_MYSQL_PORT:-3306}"
+  CUBE_EXTERNAL_MYSQL_USER="${CUBE_EXTERNAL_MYSQL_USER:-cube}"
+  CUBE_EXTERNAL_MYSQL_PASSWORD="${CUBE_EXTERNAL_MYSQL_PASSWORD:-cube_pass}"
+  # Default the external DB name from CUBE_SANDBOX_MYSQL_DB so it resolves to the
+  # same value up-with-deps.sh derives independently. Otherwise a custom
+  # CUBE_SANDBOX_MYSQL_DB (without an explicit CUBE_EXTERNAL_MYSQL_DB) would make
+  # the persisted .one-click.env and the seed step disagree on the database name.
+  CUBE_EXTERNAL_MYSQL_DB="${CUBE_EXTERNAL_MYSQL_DB:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}"
+
+  # Mirrors the MySQL behaviour above (patch conf.yaml, persist env, mask local
+  # redis unit).
+  CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
+  CUBE_EXTERNAL_REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-6379}"
+  CUBE_EXTERNAL_REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-ceuhvu123}"
+}
+
+# Guard against shipping the example/default credentials to a real external
+# server. The defaults (cube_pass / ceuhvu123) are published in env.example and
+# are trivially guessable, so warn loudly when an external endpoint is wired up
+# without overriding them.
+warn_default_external_credentials() {
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" && "${CUBE_EXTERNAL_MYSQL_PASSWORD}" == "cube_pass" ]]; then
+    log "WARNING: external MySQL (${CUBE_EXTERNAL_MYSQL_HOST}) configured with the default password 'cube_pass'."
+    log "WARNING: set CUBE_EXTERNAL_MYSQL_PASSWORD to a strong value in your .env before exposing this deployment."
+  fi
+  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" && "${CUBE_EXTERNAL_REDIS_PASSWORD}" == "ceuhvu123" ]]; then
+    log "WARNING: external Redis (${CUBE_EXTERNAL_REDIS_HOST}) configured with the default password 'ceuhvu123'."
+    log "WARNING: set CUBE_EXTERNAL_REDIS_PASSWORD to a strong value in your .env before exposing this deployment."
+  fi
+}
+
 TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
 INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
+
+# Resolve install vs upgrade mode and, for upgrades, run preflight + backup and
+# build the config-preserving merged env BEFORE any destructive change. The
+# merged env is sourced so the rest of the installer operates with the user's
+# existing values (ports, CIDR, node IP, role, ...).
+PACKAGE_TAR="${ONE_CLICK_PACKAGE_TAR:-${SCRIPT_DIR}/assets/package/sandbox-package.tar.gz}"
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "${WORK_DIR}"' EXIT
+
+INSTALL_MODE="$(resolve_install_mode "${ONE_CLICK_MODE}" "${INSTALL_PREFIX}" "${ONE_CLICK_ASSUME_YES}")"
+log "install mode: ${INSTALL_MODE}"
+
+MERGED_ENV=""
+ENV_DIFF_FILE=""
+UPGRADE_BACKUP_DIR=""
+if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
+  RUNTIME_ENV_OLD="${INSTALL_PREFIX}/.one-click.env"
+  ensure_file "${RUNTIME_ENV_OLD}"
+
+  preflight_upgrade \
+    "${INSTALL_PREFIX}" \
+    "${SCRIPT_DIR}" \
+    "${PACKAGE_TAR}" \
+    "${DEPLOY_ROLE}" \
+    "${ONE_CLICK_ALLOW_ROLE_CHANGE}" \
+    "${ONE_CLICK_ALLOW_DOWNGRADE}"
+
+  # Build the merged env into WORK_DIR (the on-disk config backup is taken later,
+  # only after all fail-fast preflights pass, to avoid leaving stray backups).
+  MERGED_ENV="${WORK_DIR}/merged.env"
+  ENV_DIFF_FILE="${WORK_DIR}/env-diff.txt"
+
+  MERGE_NEW_DOTENV=""
+  [[ -f "${ENV_FILE}" ]] && MERGE_NEW_DOTENV="${ENV_FILE}"
+  MERGE_OLD_BASELINE=""
+  [[ -f "${INSTALL_PREFIX}/env.example" ]] && MERGE_OLD_BASELINE="${INSTALL_PREFIX}/env.example"
+
+  merge_env_three_way \
+    "${SCRIPT_DIR}/env.example" \
+    "${RUNTIME_ENV_OLD}" \
+    "${MERGE_OLD_BASELINE}" \
+    "${MERGE_NEW_DOTENV}" \
+    "${MERGED_ENV}" \
+    "${ENV_DIFF_FILE}"
+  if [[ -z "${MERGE_OLD_BASELINE}" ]]; then
+    log "note: no env.example baseline from the previous install; used two-way merge. Future upgrades will use a full three-way merge."
+  fi
+
+  # Override bundle/default values with the merged (old-priority) env so the
+  # rest of the installer keeps the user's existing configuration.
+  load_env_file "${MERGED_ENV}"
+  DEPLOY_ROLE="$(one_click_deploy_role)"
+fi
+
+init_external_dep_defaults
+
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
 case "${CUBE_PVM_ENABLE}" in
   0|1) ;;
@@ -155,6 +284,155 @@ generate_cubemaster_config_ports() {
     -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
     -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
     "${cfg}"
+}
+
+# When external MySQL/Redis is configured, patch CubeMaster conf.yaml to replace
+# the default 127.0.0.1 endpoints with the external connection details. Must run
+# after generate_cubemaster_config_ports so the port placeholders are resolved.
+patch_cubemaster_external_deps() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+
+  local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
+
+  # Validate once up front; both branches patch the same file.
+  if [[ -z "${CUBE_EXTERNAL_MYSQL_HOST}" && -z "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+    return 0
+  fi
+  ensure_file "${cfg}"
+
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+    log "patching conf.yaml for external MySQL: ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}/${CUBE_EXTERNAL_MYSQL_DB}"
+    # SECURITY: escape user-supplied values for the sed '|' delimiter so that a
+    # '|', '\', '&' or '"' in a host/user/password does not corrupt conf.yaml
+    # or break the double-quoted sed replacement strings below.
+    local mysql_addr_esc mysql_user_esc mysql_pwd_esc mysql_db_esc
+    mysql_addr_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}")"
+    mysql_user_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_USER}")"
+    mysql_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_PASSWORD}")"
+    mysql_db_esc="$(escape_sed "${CUBE_EXTERNAL_MYSQL_DB}")"
+    # Match only on the YAML key prefix ('addr:'/'user:'/'pwd:'/'db_name:') and
+    # accept any current value, so these patterns keep working even if the
+    # conf.yaml template is regenerated with different defaults. These keys only
+    # appear in the MySQL sections (ossdb_config/instance_db_config), so without
+    # a trailing 'g' flag each line is patched exactly once and Redis fields
+    # (nodes:/password:) are never touched.
+    sed -i \
+      -e "s|addr: \".*\"|addr: \"${mysql_addr_esc}\"|" \
+      -e "s|user: \".*\"|user: \"${mysql_user_esc}\"|" \
+      -e "s|pwd: \".*\"|pwd: \"${mysql_pwd_esc}\"|" \
+      -e "s|db_name: \".*\"|db_name: \"${mysql_db_esc}\"|" \
+      "${cfg}"
+  fi
+
+  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+    log "patching conf.yaml for external Redis: ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
+    local redis_nodes_esc redis_pwd_esc
+    redis_nodes_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}")"
+    redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD}")"
+    # Match only on the YAML key prefix so these patterns survive template
+    # default changes. 'nodes:'/'password:' only appear in the redis* sections,
+    # so every Redis endpoint is repointed while MySQL fields stay untouched.
+    sed -i \
+      -e "s|nodes: \".*\"|nodes: \"${redis_nodes_esc}\"|" \
+      -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|" \
+      "${cfg}"
+  fi
+}
+
+# Fail fast when an external MySQL/Redis endpoint is unreachable or rejects the
+# configured credentials. Without this, a misconfigured host/port/password only
+# surfaces much later during up-with-deps.sh seeding. The check is best-effort:
+# if the corresponding client binary is missing we skip rather than block, since
+# the seed step (which requires the client) runs later anyway.
+check_external_deps_preflight() {
+  local connect_timeout="${ONE_CLICK_EXTERNAL_DEP_TIMEOUT:-5}"
+
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+    if command -v mysqladmin >/dev/null 2>&1; then
+      log "checking connectivity to external MySQL ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT}"
+      local mysql_cnf
+      # SECURITY: tighten umask before mktemp so the credential file is created
+      # 0600 from the start -- this closes the brief race window between mktemp's
+      # default (umask-derived) permissions and the chmod 600 below.
+      local old_umask
+      old_umask="$(umask)"
+      umask 077
+      mysql_cnf="$(mktemp)"
+      umask "${old_umask}"
+      # SECURITY: trap on EXIT so the plaintext password is removed even if the
+      # script is killed abruptly between here and the explicit rm-f below.
+      # Mirrors the trap pattern in up-with-deps.sh.
+      trap 'rm -f "${mysql_cnf}"' EXIT
+      chmod 600 "${mysql_cnf}"
+      cat > "${mysql_cnf}" <<EOF
+[client]
+password="${CUBE_EXTERNAL_MYSQL_PASSWORD}"
+EOF
+      if ! mysqladmin --defaults-extra-file="${mysql_cnf}" \
+          -h "${CUBE_EXTERNAL_MYSQL_HOST}" \
+          -P "${CUBE_EXTERNAL_MYSQL_PORT}" \
+          -u "${CUBE_EXTERNAL_MYSQL_USER}" \
+          --connect-timeout="${connect_timeout}" ping >/dev/null 2>&1; then
+        rm -f "${mysql_cnf}"
+        trap - EXIT
+        die "cannot reach external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST}:${CUBE_EXTERNAL_MYSQL_PORT} as user '${CUBE_EXTERNAL_MYSQL_USER}'.
+  Verify CUBE_EXTERNAL_MYSQL_HOST / _PORT / _USER / _PASSWORD and that the server is reachable from this host."
+      fi
+      rm -f "${mysql_cnf}"
+      trap - EXIT
+      log "external MySQL connectivity OK"
+    else
+      log "mysqladmin not found; skipping external MySQL connectivity preflight"
+    fi
+  fi
+
+  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+    if command -v redis-cli >/dev/null 2>&1; then
+      log "checking connectivity to external Redis ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
+      local redis_reply
+      if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
+        # SECURITY: PING is NOT an authenticated command. A reachable server that
+        # has no 'requirepass' set answers PONG even when a (wrong/extraneous)
+        # password is configured, so a misconfigured credential would slip
+        # through this preflight and only surface much later when CubeMaster /
+        # cube-proxy actually try to use Redis. Validate the credential directly
+        # by issuing AUTH and requiring an "OK" reply.
+        #
+        # The password is fed via stdin (`-x AUTH`) rather than as a command-line
+        # argument so it is not exposed in /proc/<pid>/cmdline to other local
+        # users; --no-auth-warning keeps redis-cli from echoing it on stderr.
+        # --connect-timeout bounds the TCP handshake; --timeout bounds Redis
+        # protocol I/O so a middlebox that accepts the socket but stalls the
+        # response (broken proxy / overloaded server) cannot hang this preflight
+        # indefinitely.
+        redis_reply="$(printf '%s' "${CUBE_EXTERNAL_REDIS_PASSWORD}" | redis-cli \
+          -h "${CUBE_EXTERNAL_REDIS_HOST}" \
+          -p "${CUBE_EXTERNAL_REDIS_PORT}" \
+          --connect-timeout "${connect_timeout}" \
+          --timeout "${connect_timeout}" \
+          --no-auth-warning \
+          -x AUTH 2>&1 || true)"
+        if [[ "${redis_reply}" != "OK" ]]; then
+          die "external Redis at ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT} is unreachable or rejected the configured password (AUTH replied: ${redis_reply:-<no response>}).
+  Verify CUBE_EXTERNAL_REDIS_HOST / _PORT / _PASSWORD and that the server is reachable from this host."
+        fi
+      else
+        local redis_pong
+        redis_pong="$(redis-cli \
+          -h "${CUBE_EXTERNAL_REDIS_HOST}" \
+          -p "${CUBE_EXTERNAL_REDIS_PORT}" \
+          --connect-timeout "${connect_timeout}" \
+          --timeout "${connect_timeout}" ping 2>/dev/null || true)"
+        if [[ "${redis_pong}" != "PONG" ]]; then
+          die "cannot reach external Redis at ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT} (PING did not return PONG).
+  Verify CUBE_EXTERNAL_REDIS_HOST / _PORT and that the server is reachable from this host."
+        fi
+      fi
+      log "external Redis connectivity OK"
+    else
+      log "redis-cli not found; skipping external Redis connectivity preflight"
+    fi
+  fi
 }
 
 check_hardware_preflight() {
@@ -537,7 +815,59 @@ start_systemd_target() {
   systemctl enable --now "${target}"
 }
 
-require_root
+# When external MySQL/Redis is configured, mask the local container systemd
+# services so the control target never starts (or restarts) them. The target
+# only `Wants` these units, so masking is non-fatal for the rest of the stack.
+# Must run after install_systemd_units (units installed + daemon-reload) and
+# before start_systemd_target.
+#
+# install-units.sh installs every unit as a *regular file* under
+# /etc/systemd/system. A plain `systemctl mask` cannot overlay its /dev/null
+# symlink on top of an existing regular file -- it fails with
+# "File ... already exists". The previous implementation swallowed that error,
+# so the unit only *appeared* masked and was actually left merely "disabled".
+# A disabled-but-present unit is still pulled in by the target's Wants=, so the
+# local mysql/redis units would start, their ExecStartPost would wait ~60-80s on
+# a container that (correctly) was never started, fail, and Restart=on-failure
+# loop -- stalling `systemctl enable --now <target>` for many minutes.
+# We therefore remove the installed file first so mask can create a *persistent*
+# /dev/null override; a later switch back to local re-installs the real file via
+# install-units.sh, whose `install` call replaces the /dev/null mask symlink with
+# the real unit (unlink + create, not an atomic rename).
+mask_local_dep_service() {
+  local unit="$1"
+  local unit_dir="${ONE_CLICK_SYSTEMD_UNIT_INSTALL_DIR:-/etc/systemd/system}"
+  systemctl stop "${unit}" >/dev/null 2>&1 || true
+  # Removing the unit file is the primary safeguard; mask is belt-and-suspenders.
+  # Keep this tolerant under `set -e` so a rare failure here (e.g. a stray
+  # directory left at the path) warns rather than aborting the whole install.
+  rm -f "${unit_dir}/${unit}" || true
+  if ! systemctl mask "${unit}" >/dev/null 2>&1; then
+    # The unit file is already gone, so the target's Wants= just resolves to a
+    # missing unit and nothing starts now. The only residual risk is that the
+    # mask did not persist, so a later install_systemd_units run could restore it.
+    log "WARNING: removed ${unit} but failed to persist its mask; a later re-install may restore it"
+  fi
+}
+
+mask_external_dep_services() {
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+    log "masking local MySQL service (external MySQL at ${CUBE_EXTERNAL_MYSQL_HOST} in use)"
+    mask_local_dep_service cube-sandbox-mysql.service
+  else
+    # Re-enable in case a previous install masked it and the user switched back.
+    systemctl unmask cube-sandbox-mysql.service >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+    log "masking local Redis service (external Redis at ${CUBE_EXTERNAL_REDIS_HOST} in use)"
+    mask_local_dep_service cube-sandbox-redis.service
+  else
+    systemctl unmask cube-sandbox-redis.service >/dev/null 2>&1 || true
+  fi
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
 
 # Run critical preflight checks that do not depend on dependency installation first
 # to ensure we fail fast before installing or modifying any local system packages.
@@ -561,22 +891,28 @@ fi
 # Validate the effective cubevs CIDR before installing packages or replacing
 # the existing deployment. If unset, use CubeSandbox's fixed packaged default.
 CUBE_SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-}"
+# On upgrade the CIDR is the cluster's own (preserved from the old install);
+# its existing cubevs bridge/route would self-trigger the host-conflict scan,
+# so skip conflict detection (format validation still runs) while still
+# honoring an explicit user bypass flag.
+cidr_skip_conflict=0
+if [[ "${INSTALL_MODE}" == "upgrade" || "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}" == "1" ]]; then
+  cidr_skip_conflict=1
+fi
 if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR}" ]]; then
-  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "CUBE_SANDBOX_NETWORK_CIDR"
+  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR"
   export CUBE_SANDBOX_NETWORK_CIDR
 else
-  check_cidr_preflight "192.168.0.0/18" "default CubeSandbox network CIDR"
+  check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR"
 fi
 
 install_required_dependencies
 check_install_preflight
+warn_default_external_credentials
+check_external_deps_preflight
 if needs_docker_for_install; then
   configure_tencent_docker_mirror
 fi
-
-PACKAGE_TAR="${ONE_CLICK_PACKAGE_TAR:-${SCRIPT_DIR}/assets/package/sandbox-package.tar.gz}"
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "${WORK_DIR}"' EXIT
 
 ensure_file "${PACKAGE_TAR}"
 validate_declared_release_manifest "${SCRIPT_DIR}"
@@ -586,6 +922,10 @@ tar -xzf "${PACKAGE_TAR}" -C "${WORK_DIR}"
 PKG_ROOT="${WORK_DIR}/sandbox-package"
 ensure_dir "${PKG_ROOT}"
 validate_cubelet_cow_startup_deps "${PKG_ROOT}/Cubelet/config/config.toml"
+patch_cubelet_config_template \
+  "${PKG_ROOT}/Cubelet/config/config.toml" \
+  "${CUBE_SANDBOX_ETH_NAME:-}" \
+  "${CUBE_SANDBOX_NETWORK_CIDR:-}"
 
 installed_role="${DEPLOY_ROLE}"
 detected_installed_role="$(detect_installed_role)"
@@ -596,6 +936,16 @@ fi
 log "stopping existing systemd deployment under ${INSTALL_PREFIX}"
 stop_existing_systemd_deployment
 stop_existing_legacy_deployment "${installed_role}"
+
+# Upgrade: snapshot existing config now that all fail-fast preflights have
+# passed and right before any destructive change, then stash the env diff.
+if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
+  UPGRADE_BACKUP_DIR="$(backup_before_upgrade "${INSTALL_PREFIX}")"
+  if [[ -n "${ENV_DIFF_FILE}" && -f "${ENV_DIFF_FILE}" ]]; then
+    cp -f "${ENV_DIFF_FILE}" "${UPGRADE_BACKUP_DIR}/env-diff.txt"
+    log "env merge diff written to ${UPGRADE_BACKUP_DIR}/env-diff.txt"
+  fi
+fi
 
 if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
   rm -rf \
@@ -615,7 +965,9 @@ if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
     "${INSTALL_PREFIX}/sql" \
     "${INSTALL_PREFIX}/.one-click.env"
 else
-  rm -rf "${INSTALL_PREFIX}"
+  # Full wipe of a custom prefix, but preserve any upgrade backup directory so
+  # the config snapshot survives for recovery/rollback.
+  wipe_custom_install_prefix_contents "${INSTALL_PREFIX}"
 fi
 
 mkdir -p "${INSTALL_PREFIX}"
@@ -630,6 +982,7 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
   generate_cubemaster_config_ports
+  patch_cubemaster_external_deps
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
 
@@ -652,16 +1005,31 @@ if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
 fi
 
 RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env"
-if [[ -f "${ENV_FILE}" ]]; then
+if [[ "${INSTALL_MODE}" == "upgrade" && -n "${MERGED_ENV}" ]]; then
+  # Upgrade: write the config-preserving merged env as the runtime env.
+  cp -f "${MERGED_ENV}" "${RUNTIME_ENV_FILE}"
+elif [[ -f "${ENV_FILE}" ]]; then
   cp -f "${ENV_FILE}" "${RUNTIME_ENV_FILE}"
 else
   : > "${RUNTIME_ENV_FILE}"
 fi
+# SECURITY: this file holds DATABASE_URL and CUBE_EXTERNAL_*_PASSWORD secrets.
+# Restrict it to root before any secrets are written so they are never readable
+# by other local users. Note that upsert_env_kv rewrites the file via an atomic
+# mktemp+mv, which replaces the inode; it sets 0600 on its temp file so this
+# mode is preserved across every later upsert rather than reverting to 0644.
+chmod 600 "${RUNTIME_ENV_FILE}"
 
 # Install version files so the installed system can report its version.
 if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then
   cp -f "${SCRIPT_DIR}/VERSION.txt" "${INSTALL_PREFIX}/VERSION.txt"
   log "installed VERSION.txt to ${INSTALL_PREFIX}/VERSION.txt"
+fi
+# Persist the env template as a baseline so the NEXT upgrade can perform a full
+# three-way merge (distinguishing user-customized values from old defaults).
+if [[ -f "${SCRIPT_DIR}/env.example" ]]; then
+  cp -f "${SCRIPT_DIR}/env.example" "${INSTALL_PREFIX}/env.example"
+  log "installed env.example baseline to ${INSTALL_PREFIX}/env.example"
 fi
 manifest_rel="$(declared_release_manifest_relpath "${SCRIPT_DIR}/VERSION.txt")"
 if [[ -n "${manifest_rel}" ]]; then
@@ -678,13 +1046,59 @@ if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NODE_IP" "${CUBE_SANDBOX_NODE_IP}"
 fi
 if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
+  validate_interface_name "${CUBE_SANDBOX_ETH_NAME}" "CUBE_SANDBOX_ETH_NAME"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_ETH_NAME" "${CUBE_SANDBOX_ETH_NAME}"
 fi
 if [[ -n "${ONE_CLICK_CONTROL_PLANE_IP:-}" ]]; then
+  validate_ipv4_literal "${ONE_CLICK_CONTROL_PLANE_IP}" "ONE_CLICK_CONTROL_PLANE_IP"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_IP" "${ONE_CLICK_CONTROL_PLANE_IP}"
 fi
 if [[ -n "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}" ]]; then
+  validate_host_port "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR" "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR}"
+fi
+if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR" "${CUBE_SANDBOX_NETWORK_CIDR}"
+  if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-}" ]]; then
+    case "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}" in
+      0|1) ;;
+      *) die "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK must be 0 or 1 (got: '${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}')" ;;
+    esac
+    upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK" "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}"
+  fi
+fi
+
+# Persist external MySQL config so every systemd unit / helper picks it up
+# instead of the local container. The CUBE_EXTERNAL_* markers let quickcheck
+# and the up/down helpers skip the local service entirely; DATABASE_URL points
+# CubeAPI at the external server (CubeMaster reads the patched conf.yaml).
+if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_HOST" "${CUBE_EXTERNAL_MYSQL_HOST}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_PORT" "${CUBE_EXTERNAL_MYSQL_PORT}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_USER" "${CUBE_EXTERNAL_MYSQL_USER}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_PASSWORD" "${CUBE_EXTERNAL_MYSQL_PASSWORD}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_MYSQL_DB" "${CUBE_EXTERNAL_MYSQL_DB}"
+  # Percent-encode every URI component so values containing URL metacharacters
+  # (@, :, /, #, %, ...) cannot corrupt the connection string. This covers the
+  # userinfo (user/password) as well as the host, port, and database name (e.g.
+  # a '/' in the db name would otherwise be parsed as a path separator).
+  database_url_user="$(urlencode "${CUBE_EXTERNAL_MYSQL_USER}")"
+  database_url_pass="$(urlencode "${CUBE_EXTERNAL_MYSQL_PASSWORD}")"
+  database_url_host="$(urlencode "${CUBE_EXTERNAL_MYSQL_HOST}")"
+  database_url_port="$(urlencode "${CUBE_EXTERNAL_MYSQL_PORT}")"
+  database_url_db="$(urlencode "${CUBE_EXTERNAL_MYSQL_DB}")"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
+fi
+
+# Persist external Redis config. cube-proxy reads CUBE_PROXY_REDIS_* from the
+# env file when rendering global.conf (CubeMaster reads the patched conf.yaml).
+if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_HOST" "${CUBE_EXTERNAL_REDIS_HOST}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PORT" "${CUBE_EXTERNAL_REDIS_PORT}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_IP" "${CUBE_EXTERNAL_REDIS_HOST}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PORT" "${CUBE_EXTERNAL_REDIS_PORT}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
 fi
 
 chmod +x "${INSTALL_PREFIX}/network-agent/bin/"*
@@ -694,53 +1108,7 @@ chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/cube-egress/"*.sh 2>/dev/null || true
 
-if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
-  cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"
-  if grep -Eq '^[[:space:]]*eth_name = "' "${cubelet_config}"; then
-    sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"/" "${cubelet_config}"
-    if ! grep -Fq "eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"" "${cubelet_config}"; then
-      log "WARNING: failed to patch eth_name in Cubelet config (${cubelet_config})"
-    fi
-  else
-    log "WARNING: Cubelet config missing eth_name key; skipped NIC patch (${cubelet_config})"
-  fi
-fi
-
-# Patch cubevs CIDR if env var is set
-if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
-  cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"
-
-  # SECURITY: Refuse to patch a symlink -- sed -i follows symlinks, which
-  # could allow an attacker with write access to ONE_CLICK_INSTALL_PREFIX
-  # to overwrite arbitrary files via symlink.
-  if [[ -L "${cubelet_config}" ]]; then
-    die "refusing to patch a symlink target: ${cubelet_config} -> $(readlink "${cubelet_config}")"
-  fi
-
-  if grep -Eq '^[[:space:]]*cidr = "' "${cubelet_config}"; then
-    # NOTE: Use '|' as sed delimiter -- CIDR values always contain '/', so
-    # the default '/' delimiter would break the sed command.
-    sed -i "s|cidr = \"[^\"]*\"|cidr = \"${CUBE_SANDBOX_NETWORK_CIDR}\"|" "${cubelet_config}"
-    if ! grep -Fq "cidr = \"${CUBE_SANDBOX_NETWORK_CIDR}\"" "${cubelet_config}"; then
-      log "WARNING: failed to patch cidr in Cubelet config (${cubelet_config})"
-    fi
-    log "patched cubevs CIDR: ${CUBE_SANDBOX_NETWORK_CIDR}"
-  else
-    log "WARNING: Cubelet config missing cidr key; skipped CIDR patch (${cubelet_config})"
-  fi
-
-  # Persist CIDR to env file AFTER successful config patch (defense-in-depth:
-  # env file and config.toml should always be in sync; if the script crashes
-  # between patching and persistence, the env file stays clean).
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR" "${CUBE_SANDBOX_NETWORK_CIDR}"
-  if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-}" ]]; then
-    case "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}" in
-      0|1) ;;
-      *) die "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK must be 0 or 1 (got: '${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}')" ;;
-    esac
-    upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK" "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}"
-  fi
-else
+if [[ -z "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   # Log current CIDR for debugging
   current_cidr="$(sed -nE '/^[[:space:]]*cidr[[:space:]]*=[[:space:]]*"/{s/.*"([^"]+)".*/\1/p;q;}' "${INSTALL_PREFIX}/Cubelet/config/config.toml" 2>/dev/null || echo "unknown")"
   log "using cubevs CIDR from config.toml: ${current_cidr} (CUBE_SANDBOX_NETWORK_CIDR not set)"
@@ -763,6 +1131,7 @@ fi
 
 restore_selinux_contexts
 install_systemd_units
+mask_external_dep_services
 check_runtime_file_paths_not_directories
 start_systemd_target
 

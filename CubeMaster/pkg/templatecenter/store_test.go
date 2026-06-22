@@ -10,11 +10,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"gorm.io/gorm"
@@ -199,5 +201,50 @@ func TestGetTemplateRequestAssignsRuntimeRequestID(t *testing.T) {
 	}
 	if first.RequestID == second.RequestID {
 		t.Fatalf("expected a fresh runtime requestID per fetch, got duplicate %q", first.RequestID)
+	}
+}
+
+func TestGetTemplateInfoPopulatesCreatedAtAndImageInfoFromDefinitionAndLatestJob(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	createdAt := time.Date(2026, time.June, 17, 15, 53, 40, 0, time.FixedZone("UTC+8", 8*3600))
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
+		return &models.TemplateDefinition{
+			TemplateID:   templateID,
+			InstanceType: "cubebox",
+			Version:      "v2",
+			Status:       "READY",
+			RequestJSON: `{
+				"containers":[
+					{"image":{"image":"rfs-deadbeef"}}
+				]
+			}`,
+			Model: gorm.Model{CreatedAt: createdAt},
+		}, nil
+	})
+	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
+		return nil, nil
+	})
+	patches.ApplyFunc(getLatestTemplateImageJobByTemplateID, func(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{
+			TemplateID:        templateID,
+			SourceImageRef:    "docker.io/library/python:3.12",
+			SourceImageDigest: "sha256:abcd",
+		}, nil
+	})
+
+	info, err := GetTemplateInfo(context.Background(), "tpl-a")
+	if err != nil {
+		t.Fatalf("GetTemplateInfo returned error: %v", err)
+	}
+	if info == nil {
+		t.Fatal("expected template info, got nil")
+	}
+	if info.CreatedAt != "2026-06-17T07:53:40Z" {
+		t.Fatalf("unexpected created_at: %q", info.CreatedAt)
+	}
+	if info.ImageInfo != "docker.io/library/python:3.12@sha256:abcd" {
+		t.Fatalf("unexpected image_info: %q", info.ImageInfo)
 	}
 }

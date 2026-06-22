@@ -20,6 +20,9 @@ die() {
   exit 1
 }
 
+# shellcheck source=../common/validation.sh
+source "${SYSTEMD_HELPER_DIR}/../common/validation.sh"
+
 require_cmd() {
   local cmd="$1"
   command -v "${cmd}" >/dev/null 2>&1 || die "required command not found: ${cmd}"
@@ -135,11 +138,14 @@ resolve_control_plane_cubemaster_addr() {
   fi
 
   if [[ -n "${addr}" ]]; then
+    validate_host_port "${addr}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
     printf '%s\n' "${addr}"
     return 0
   fi
 
   if [[ -n "${ip}" ]]; then
+    validate_ipv4_literal "${ip}" "ONE_CLICK_CONTROL_PLANE_IP"
+    validate_host_port "${ip}:${port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
     printf '%s:%s\n' "${ip}" "${port}"
     return 0
   fi

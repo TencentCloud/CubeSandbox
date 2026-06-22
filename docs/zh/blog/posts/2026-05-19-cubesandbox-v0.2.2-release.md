@@ -3,8 +3,7 @@ title: "Cube Sandbox v0.2.2：E2B 兼容更进一步，高频踩坑集中收敛"
 date: 2026-05-19
 author: Cube Sandbox 团队
 description: 继 v0.2.0 之后，Cube Sandbox 在 5 月 18 日发布了 v0.2.2。本次更新把 E2B 兼容性从 SDK 层延伸到端口协议层，集中修复了 v0.1.x 以来用户反馈的 7 个高频稳定性问题，并完成了 0.2 系列首批 CVE 处置。
-featured: true
-weight: 2
+featured: false
 ---
 
 # Cube Sandbox v0.2.2：E2B 兼容更进一步，高频踩坑集中收敛

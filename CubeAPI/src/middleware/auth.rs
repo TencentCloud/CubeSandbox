@@ -191,10 +191,10 @@ mod tests {
         format!("http://{}/auth", addr)
     }
 
-    fn build_test_server_with_callback(callback_url: &str) -> TestServer {
+    async fn build_test_server_with_callback(callback_url: &str) -> TestServer {
         let mut config = ServerConfig::default();
         config.auth_callback_url = Some(callback_url.to_string());
-        let state = AppState::new(config, arc(NoopLogger));
+        let state = AppState::new(config, arc(NoopLogger)).await;
         let router = Router::new()
             .route("/templates/:id", any(|| async { "ok" }))
             .route("/sandboxes/:id", any(|| async { "ok" }))
@@ -212,7 +212,7 @@ mod tests {
     async fn callback_receives_distinct_method_for_same_path() {
         let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let callback_url = spawn_callback_server(StatusCode::OK, captured.clone()).await;
-        let server = build_test_server_with_callback(&callback_url);
+        let server = build_test_server_with_callback(&callback_url).await;
 
         server
             .method(Method::GET, "/templates/demo")
@@ -251,7 +251,7 @@ mod tests {
     async fn callback_receives_request_path() {
         let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let callback_url = spawn_callback_server(StatusCode::OK, captured.clone()).await;
-        let server = build_test_server_with_callback(&callback_url);
+        let server = build_test_server_with_callback(&callback_url).await;
 
         server
             .get("/templates/abc-123")
@@ -276,7 +276,7 @@ mod tests {
     async fn callback_rejection_returns_401() {
         let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let callback_url = spawn_callback_server(StatusCode::FORBIDDEN, captured.clone()).await;
-        let server = build_test_server_with_callback(&callback_url);
+        let server = build_test_server_with_callback(&callback_url).await;
 
         server
             .delete("/templates/secret")
@@ -292,7 +292,7 @@ mod tests {
     #[tokio::test]
     async fn no_callback_configured_passthrough() {
         let config = ServerConfig::default(); // auth_callback_url = None
-        let state = AppState::new(config, arc(NoopLogger));
+        let state = AppState::new(config, arc(NoopLogger)).await;
         let router = Router::new()
             .route("/sandboxes/:id", any(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
@@ -310,7 +310,7 @@ mod tests {
     async fn missing_credential_returns_401() {
         let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let callback_url = spawn_callback_server(StatusCode::OK, captured.clone()).await;
-        let server = build_test_server_with_callback(&callback_url);
+        let server = build_test_server_with_callback(&callback_url).await;
 
         server
             .get("/templates/any")
@@ -323,7 +323,7 @@ mod tests {
     async fn callback_receives_correct_method_for_write_operations() {
         let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let callback_url = spawn_callback_server(StatusCode::OK, captured.clone()).await;
-        let server = build_test_server_with_callback(&callback_url);
+        let server = build_test_server_with_callback(&callback_url).await;
 
         for method in [Method::POST, Method::PATCH] {
             server

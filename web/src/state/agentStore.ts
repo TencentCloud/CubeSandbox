@@ -11,10 +11,19 @@ interface AgentState {
   addAgent: (agent: Agent) => void;
   updateAgent: (agent: Agent) => void;
   removeAgent: (id: string) => void;
+  /**
+   * Configured gateway domain (e.g. "cube.app"). When set, assistants open
+   * their OpenClaw gateway via `<port>-<sandboxId>.<domain>` (subdomain origin)
+   * instead of the same-origin `/sandbox/` proxy path.
+   */
+  gatewayDomain: string;
+  setGatewayDomain: (domain: string) => void;
 }
 
 export const useAgentStore = create<AgentState>()((set) => ({
   userAgents: [],
+  gatewayDomain: '',
+  setGatewayDomain: (domain) => set({ gatewayDomain: domain }),
   setAgents: (agents) => set({ userAgents: agents }),
   addAgent: (agent) => set((s) => ({ userAgents: [agent, ...s.userAgents] })),
   updateAgent: (agent) =>

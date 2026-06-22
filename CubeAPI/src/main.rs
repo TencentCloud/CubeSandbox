@@ -4,6 +4,7 @@
 
 mod config;
 mod constants;
+mod crypto;
 mod cubemaster;
 mod db;
 mod error;
@@ -183,6 +184,7 @@ fn main() -> anyhow::Result<()> {
         auth_enabled = cfg.auth_callback_url.is_some(),
         "cube-api starting"
     );
+    crypto::warn_if_using_dev_key();
 
     // ── Tokio runtime ──────────────────────────────────────────────────────
     let mut builder = tokio::runtime::Builder::new_multi_thread();

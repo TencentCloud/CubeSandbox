@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useLocation } from 'react-router-dom';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import {
@@ -25,6 +26,7 @@ import {
   GitBranch,
   HeartPulse,
   Loader2,
+  Settings as SettingsIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -33,13 +35,15 @@ import { ROBOT_CHANNELS, type Agent, type RobotChannel } from '@/data/agents';
 import { useAgentStore } from '@/state/agentStore';
 import { AgentAvatar } from '@/components/agents/AgentAvatar';
 import { CreateAgentDialog } from '@/components/agents/CreateAgentDialog';
-import { agentHubApi, type AgentOperationDto, type AgentSnapshotDto, type AgentTemplateDto } from '@/api/client';
+import { AgentSettingsDialog } from '@/components/agents/AgentSettingsDialog';
+import { OnboardingGuide } from '@/components/agents/OnboardingGuide';
+import { agentHubApi, templateApi, type AgentOperationDto, type AgentSnapshotDto, type AgentTemplateDto } from '@/api/client';
 
 type Tab = 'personal' | 'team';
 
 const HIDE_AGENT_RECOVER = import.meta.env.VITE_HIDE_AGENT_RECOVER === '1';
 const OPENCLAW_GATEWAY_PORT = 18789;
-const LOGIN_ENV_PORT = 8080;
+const LOGIN_ENV_PORT = 49999;
 
 const MODEL_OPTIONS = [
   { value: 'DeepSeek V4 Flash', labelKey: 'modelDialog.options.deepseekV4Flash' },
@@ -56,8 +60,25 @@ function gatewayTokenFromUrl(sourceUrl?: string): string | undefined {
   }
 }
 
-function buildCubeProxyUrl(agent: Agent, port: number, sourceUrl?: string, options?: { gateway?: boolean }): string | undefined {
+function buildCubeProxyUrl(
+  agent: Agent,
+  port: number,
+  sourceUrl?: string,
+  options?: { gateway?: boolean; gatewayDomain?: string },
+): string | undefined {
   if (!agent.sandboxId || typeof window === 'undefined') return sourceUrl;
+
+  // When a gateway domain is configured, each assistant gets its own origin via
+  // the `<port>-<sandboxId>.<domain>` subdomain. A distinct origin gives the
+  // OpenClaw UI its own localStorage, eliminating WebSocket "crosstalk" without
+  // the same-origin clearing workaround. The token rides along in the hash.
+  const gatewayDomain = options?.gatewayDomain?.trim();
+  if (options?.gateway && gatewayDomain) {
+    const token = gatewayTokenFromUrl(sourceUrl);
+    return `https://${port}-${agent.sandboxId}.${gatewayDomain}/${
+      token ? `#token=${encodeURIComponent(token)}` : ''
+    }`;
+  }
 
   let source: URL | undefined;
   if (sourceUrl) {
@@ -69,7 +90,10 @@ function buildCubeProxyUrl(agent: Agent, port: number, sourceUrl?: string, optio
   }
 
   const sourcePath = source?.pathname.replace(/^\/+/, '') ?? '';
-  const cubeProxyBase = `${window.location.protocol}//${window.location.hostname}`;
+  // Keep the sandbox proxy URL on the SAME origin as the dashboard (including port)
+  // so it is served through the WebUI nginx /sandbox/ forward. Same-origin is what
+  // lets clearOpenclawClientState() actually clear the OpenClaw UI's localStorage.
+  const cubeProxyBase = window.location.origin;
   const target = new URL(
     `/sandbox/${encodeURIComponent(agent.sandboxId)}/${port}/${sourcePath}`,
     cubeProxyBase,
@@ -78,7 +102,7 @@ function buildCubeProxyUrl(agent: Agent, port: number, sourceUrl?: string, optio
   source?.searchParams.forEach((value, key) => target.searchParams.set(key, value));
   if (options?.gateway) {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.hostname}/sandbox/${encodeURIComponent(agent.sandboxId)}/${port}/`;
+    const wsUrl = `${wsProtocol}//${window.location.host}/sandbox/${encodeURIComponent(agent.sandboxId)}/${port}/`;
     const token = gatewayTokenFromUrl(sourceUrl);
     target.hash = `ws=${wsUrl}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
   }
@@ -86,8 +110,31 @@ function buildCubeProxyUrl(agent: Agent, port: number, sourceUrl?: string, optio
   return target.toString();
 }
 
+// Demo-grade mitigation for OpenClaw WebSocket "crosstalk": all assistants are
+// proxied under the same dashboard origin (/sandbox/<id>/<port>/), so the OpenClaw
+// control UI shares one localStorage bucket and may reuse a cached gateway/token
+// from another assistant instead of the one in the URL. Clearing the OpenClaw keys
+// (everything not prefixed with the dashboard's own `cube.` namespace) right before
+// opening forces the freshly opened tab to read the wss address + token from the URL.
+// NOTE: real deployments should give each assistant a distinct origin (subdomain),
+// which makes this unnecessary.
+function clearOpenclawClientState(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const toRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i);
+      if (key && !key.startsWith('cube.')) toRemove.push(key);
+    }
+    toRemove.forEach((key) => window.localStorage.removeItem(key));
+  } catch {
+    // Storage may be unavailable (private mode / blocked); ignore.
+  }
+}
+
 export default function AgentHubPage() {
   const { t } = useTranslation('agentHub');
+  const location = useLocation();
   const [tab, setTab] = useState<Tab>('personal');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [templateListOpen, setTemplateListOpen] = useState(false);
@@ -97,12 +144,18 @@ export default function AgentHubPage() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [previewNoticeDismissed, setPreviewNoticeDismissed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [onboardingLoading, setOnboardingLoading] = useState(true);
+  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
+  const [llmModel, setLlmModel] = useState('deepseek/deepseek-v4-flash');
+  const [templateReady, setTemplateReady] = useState(false);
 
   const userAgents = useAgentStore((s) => s.userAgents);
   const setAgents = useAgentStore((s) => s.setAgents);
   const addAgent = useAgentStore((s) => s.addAgent);
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const removeAgent = useAgentStore((s) => s.removeAgent);
+  const setGatewayDomain = useAgentStore((s) => s.setGatewayDomain);
   const agents = useMemo(() => userAgents, [userAgents]);
   const personalCount = agents.length;
   const teamCount = 0;
@@ -122,6 +175,52 @@ export default function AgentHubPage() {
     };
   }, [setAgents]);
 
+  // First-run readiness: a DeepSeek API key must be configured and at least one
+  // 龙虾助手 template (cluster template installed from the market, or a published
+  // assistant template) must exist before assistants can be created.
+  const refreshOnboarding = useCallback(() => {
+    setOnboardingLoading(true);
+    return Promise.allSettled([
+      agentHubApi.getSettings(),
+      templateApi.list(),
+      agentHubApi.listTemplates(),
+    ]).then(([settingsRes, clusterRes, agentRes]) => {
+      setApiKeyConfigured(
+        settingsRes.status === 'fulfilled'
+          ? settingsRes.value.llmApiKeyConfigured ?? settingsRes.value.deepseekApiKeyConfigured
+          : false,
+      );
+      setLlmModel(
+        settingsRes.status === 'fulfilled'
+          ? settingsRes.value.llmModel || 'deepseek/deepseek-v4-flash'
+          : 'deepseek/deepseek-v4-flash',
+      );
+      setGatewayDomain(
+        settingsRes.status === 'fulfilled' ? settingsRes.value.gatewayDomain ?? '' : '',
+      );
+      const clusterHasOpenclaw =
+        clusterRes.status === 'fulfilled' &&
+        clusterRes.value.some(
+          (tpl) =>
+            /openclaw|wecom-ds/i.test(tpl.templateID) || /openclaw/i.test(tpl.imageInfo ?? ''),
+        );
+      const hasAgentTemplate = agentRes.status === 'fulfilled' && agentRes.value.length > 0;
+      setTemplateReady(clusterHasOpenclaw || hasAgentTemplate);
+      setOnboardingLoading(false);
+    });
+  }, []);
+
+  useEffect(() => {
+    void refreshOnboarding();
+  }, [refreshOnboarding]);
+
+  useEffect(() => {
+    const templateId = new URLSearchParams(location.search).get('createTemplate')?.trim();
+    if (!templateId) return;
+    setInitialTemplateId(templateId);
+    setDialogOpen(true);
+  }, [location.search]);
+
   return (
     <div className="animate-fade-in space-y-6">
       <header className="flex items-end justify-between gap-4">
@@ -129,15 +228,26 @@ export default function AgentHubPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('title')}</h1>
           <p className="mt-1 text-sm text-muted-foreground">{t('subtitle')}</p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          className="gap-2"
-          onClick={() => setTemplateListOpen(true)}
-        >
-          <LayoutTemplate size={16} />
-          {t('templates.actions.open')}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            className="gap-2"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <SettingsIcon size={16} />
+            {t('settings.openAction')}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            className="gap-2"
+            onClick={() => setTemplateListOpen(true)}
+          >
+            <LayoutTemplate size={16} />
+            {t('templates.actions.open')}
+          </Button>
+        </div>
       </header>
 
       {!previewNoticeDismissed && (
@@ -163,6 +273,13 @@ export default function AgentHubPage() {
           </div>
         </div>
       )}
+
+      <OnboardingGuide
+        loading={onboardingLoading}
+        apiKeyConfigured={apiKeyConfigured}
+        templateReady={templateReady}
+        onConfigureApiKey={() => setSettingsOpen(true)}
+      />
 
       <div className="flex items-center gap-2 rounded-full bg-muted/40 p-1 ring-1 ring-border/60 w-fit">
         <TabButton
@@ -201,7 +318,20 @@ export default function AgentHubPage() {
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         initialTemplateId={initialTemplateId}
+        apiKeyConfigured={apiKeyConfigured}
+        llmModel={llmModel}
+        onConfigureApiKey={() => {
+          setDialogOpen(false);
+          setSettingsOpen(true);
+        }}
         onError={setCreateError}
+      />
+      <AgentSettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        onSaved={() => {
+          void refreshOnboarding();
+        }}
       />
       <ActionErrorDialog
         message={createError}
@@ -623,6 +753,7 @@ function AgentCard({
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const addAgent = useAgentStore((s) => s.addAgent);
   const removeAgent = useAgentStore((s) => s.removeAgent);
+  const gatewayDomain = useAgentStore((s) => s.gatewayDomain);
   const isRunning = agent.status === 'running';
   const bots = agent.bots.filter(isSupportedRobotChannel);
   const botsAvailable = agent.botsAvailable.filter(isSupportedRobotChannel);
@@ -1563,8 +1694,16 @@ function AgentCard({
           className="gap-1.5"
           disabled={!isRunning || !agent.sandboxId || !gatewayReady}
           onClick={() => {
-            const url = buildCubeProxyUrl(agent, OPENCLAW_GATEWAY_PORT, agent.gatewayUrl, { gateway: true });
-            if (url) window.open(url, '_blank', 'noopener,noreferrer');
+            const url = buildCubeProxyUrl(agent, OPENCLAW_GATEWAY_PORT, agent.gatewayUrl, {
+              gateway: true,
+              gatewayDomain,
+            });
+            if (url) {
+              // Subdomain origins isolate localStorage on their own, so the
+              // same-origin clearing workaround is only needed for the proxy path.
+              if (!gatewayDomain.trim()) clearOpenclawClientState();
+              window.open(url, '_blank', 'noopener,noreferrer');
+            }
           }}
           title={!isRunning ? t('card.status.stopped') : undefined}
         >

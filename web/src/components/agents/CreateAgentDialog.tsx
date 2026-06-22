@@ -4,25 +4,39 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import * as Dialog from '@radix-ui/react-dialog';
-import { X, Check, Wrench } from 'lucide-react';
+import { X, Check, Wrench, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { AgentAvatar } from './AgentAvatar';
 import { useAgentStore } from '@/state/agentStore';
-import type { Agent, AgentEngine } from '@/data/agents';
+import type { Agent, AgentEngine, AgentPersistenceMode } from '@/data/agents';
 import { agentHubApi, type AgentTemplateDto } from '@/api/client';
 
-const FIXED_MODEL = 'DeepSeek V4 Flash';
+const DEFAULT_LLM_MODEL = 'deepseek/deepseek-v4-flash';
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   initialTemplateId?: string;
+  /** Whether a DeepSeek API key is configured; when false, creation is blocked. */
+  apiKeyConfigured?: boolean;
+  /** Default LLM model configured in AgentHub settings. */
+  llmModel?: string;
+  /** Opens the API key settings flow from the guidance banner. */
+  onConfigureApiKey?: () => void;
   onError?: (message: string) => void;
 }
 
-export function CreateAgentDialog({ open, onOpenChange, initialTemplateId = '', onError }: Props) {
+export function CreateAgentDialog({
+  open,
+  onOpenChange,
+  initialTemplateId = '',
+  apiKeyConfigured = true,
+  llmModel = DEFAULT_LLM_MODEL,
+  onConfigureApiKey,
+  onError,
+}: Props) {
   const { t } = useTranslation('agentHub');
 
   const addAgent = useAgentStore((s) => s.addAgent);
@@ -32,6 +46,8 @@ export function CreateAgentDialog({ open, onOpenChange, initialTemplateId = '', 
   const [engine, setEngine] = useState<AgentEngine>('openclaw');
   const [botId, setBotId] = useState('');
   const [secret, setSecret] = useState('');
+  const [persistenceMode, setPersistenceMode] =
+    useState<AgentPersistenceMode>('shared_files');
   const [templates, setTemplates] = useState<AgentTemplateDto[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [templatesLoading, setTemplatesLoading] = useState(false);
@@ -63,12 +79,15 @@ export function CreateAgentDialog({ open, onOpenChange, initialTemplateId = '', 
   }, [initialTemplateId, open]);
 
   const selectedTemplate = templates.find((template) => template.templateId === selectedTemplateId);
+  const inheritedPersistenceMode = selectedTemplate?.persistenceMode;
+  const effectivePersistenceMode = inheritedPersistenceMode ?? persistenceMode;
 
   const reset = () => {
     setName('');
     setEngine('openclaw');
     setBotId('');
     setSecret('');
+    setPersistenceMode('shared_files');
     setSelectedTemplateId('');
     setError(null);
     setSubmitting(false);
@@ -80,11 +99,15 @@ export function CreateAgentDialog({ open, onOpenChange, initialTemplateId = '', 
       setError(t('dialog.errors.nameRequired'));
       return;
     }
+    if (!apiKeyConfigured) {
+      setError(t('dialog.errors.apiKeyRequired'));
+      return;
+    }
     const payload = {
       name: n,
       engine: 'openclaw' as const,
-      model: FIXED_MODEL,
       templateId: selectedTemplateId || undefined,
+      persistenceMode: effectivePersistenceMode,
       botId: botId.trim() || undefined,
       botSecret: secret.trim() || undefined,
     };
@@ -96,12 +119,13 @@ export function CreateAgentDialog({ open, onOpenChange, initialTemplateId = '', 
       status: 'starting',
       engine: 'openclaw',
       env: 'linux',
-      model: FIXED_MODEL,
+      model: llmModel,
       version: '-',
       bots: [],
       botsAvailable: [],
       avatar: n,
       avatarTone: 'sky',
+      persistenceMode: effectivePersistenceMode,
     };
     setSubmitting(true);
     setError(null);
@@ -154,6 +178,20 @@ export function CreateAgentDialog({ open, onOpenChange, initialTemplateId = '', 
 
           {/* Body */}
           <div className="space-y-6 overflow-y-auto px-6 py-5">
+            {!apiKeyConfigured && (
+              <div className="flex items-start gap-3 rounded-lg border border-amber-200/70 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+                <TriangleAlert size={16} className="mt-0.5 shrink-0" />
+                <div className="flex-1">
+                  <p className="font-medium">{t('dialog.apiKeyRequired.title')}</p>
+                  <p className="mt-0.5 text-xs leading-relaxed text-amber-800/90 dark:text-amber-100/80">
+                    {t('dialog.apiKeyRequired.description')}
+                  </p>
+                </div>
+                <Button size="sm" variant="outline" onClick={() => onConfigureApiKey?.()}>
+                  {t('dialog.apiKeyRequired.action')}
+                </Button>
+              </div>
+            )}
             {/* * 助手信息 */}
             <Section label={t('dialog.sections.info')} required>
               <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-background px-3 py-2 focus-within:border-primary/60 focus-within:ring-2 focus-within:ring-primary/15">
@@ -222,11 +260,51 @@ export function CreateAgentDialog({ open, onOpenChange, initialTemplateId = '', 
                   <div className="mt-2 grid gap-1.5 text-muted-foreground sm:grid-cols-2">
                     <span>{t('dialog.templateFields.model')}: {selectedTemplate.model}</span>
                     <span>{t('dialog.templateFields.version')}: {selectedTemplate.version}</span>
+                    {inheritedPersistenceMode && (
+                      <span>
+                        {t('dialog.templateFields.persistence')}: {t(`dialog.persistenceOptions.${inheritedPersistenceMode === 'shared_files' ? 'sharedFiles' : 'fullSnapshot'}.title`)}
+                      </span>
+                    )}
                     <span>{t('dialog.templateFields.sourceAgent')}: {selectedTemplate.sourceAgentId}</span>
                     <span>{t('dialog.templateFields.createdAt')}: {selectedTemplate.createdAt || '-'}</span>
                   </div>
                 </div>
               )}
+            </Section>
+
+            {/* * 状态管理模式 */}
+            <Section
+              label={t('dialog.sections.persistence')}
+              hint={
+                inheritedPersistenceMode
+                  ? t('dialog.persistenceInheritedHint')
+                  : t('dialog.persistenceHint')
+              }
+            >
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <EngineCard
+                  selected={effectivePersistenceMode === 'shared_files'}
+                  disabled={Boolean(inheritedPersistenceMode)}
+                  title={t('dialog.persistenceOptions.sharedFiles.title')}
+                  desc={t('dialog.persistenceOptions.sharedFiles.description')}
+                  glyph="F"
+                  glyphBg="bg-emerald-500/10 text-emerald-500 ring-emerald-500/30"
+                  onClick={() => {
+                    if (!inheritedPersistenceMode) setPersistenceMode('shared_files');
+                  }}
+                />
+                <EngineCard
+                  selected={effectivePersistenceMode === 'full_snapshot'}
+                  disabled={Boolean(inheritedPersistenceMode)}
+                  title={t('dialog.persistenceOptions.fullSnapshot.title')}
+                  desc={t('dialog.persistenceOptions.fullSnapshot.description')}
+                  glyph="S"
+                  glyphBg="bg-sky-500/10 text-sky-500 ring-sky-500/30"
+                  onClick={() => {
+                    if (!inheritedPersistenceMode) setPersistenceMode('full_snapshot');
+                  }}
+                />
+              </div>
             </Section>
 
             {/* * 模型 */}
@@ -236,7 +314,7 @@ export function CreateAgentDialog({ open, onOpenChange, initialTemplateId = '', 
                   <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-primary/15 text-[10px] font-bold text-primary">
                     DS
                   </span>
-                  <span className="font-medium">{FIXED_MODEL}</span>
+                  <span className="font-medium">{llmModel}</span>
                 </div>
                 <span className="text-xs text-muted-foreground">
                   {t('dialog.modelHint')}
@@ -277,7 +355,7 @@ export function CreateAgentDialog({ open, onOpenChange, initialTemplateId = '', 
             <Button
               size="sm"
               onClick={handleSubmit}
-              disabled={!name.trim() || submitting}
+              disabled={!name.trim() || submitting || !apiKeyConfigured}
               className="min-w-[88px]"
             >
               {submitting ? t('dialog.actions.submitting') : t('dialog.actions.submit')}
@@ -338,7 +416,7 @@ function EngineCard({
       onClick={onClick}
       className={cn(
         'relative flex w-full items-start gap-3 rounded-xl border p-4 text-left transition-all',
-        selected && !disabled
+        selected
           ? 'border-primary/60 bg-primary/5 ring-2 ring-primary/30'
           : 'border-border/60 bg-background hover:bg-muted/40',
         disabled && 'cursor-not-allowed opacity-60 hover:bg-background'

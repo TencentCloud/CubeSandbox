@@ -189,3 +189,34 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 	}
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
 }
+
+func TestGetTemplateIncludesDisplayMetadata(t *testing.T) {
+	origGetTemplateInfoFn := getTemplateInfoFn
+	t.Cleanup(func() {
+		getTemplateInfoFn = origGetTemplateInfoFn
+	})
+	getTemplateInfoFn = func(ctx context.Context, templateID string) (*templatecenter.TemplateInfo, error) {
+		return &templatecenter.TemplateInfo{
+			TemplateID:   templateID,
+			InstanceType: "cubebox",
+			Version:      "v2",
+			Status:       "READY",
+			DisplayName:  "python-template",
+			CreatedAt:    "2026-06-17 12:00:00",
+			ImageInfo:    "docker.io/library/python:3.12",
+		}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/template?template_id=tpl-metadata", nil)
+	rt := &CubeLog.RequestTrace{}
+	resp := getTemplate(httptest.NewRecorder(), req, rt)
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, "python-template", got.DisplayName)
+	assert.Equal(t, "2026-06-17 12:00:00", got.CreatedAt)
+	assert.Equal(t, "docker.io/library/python:3.12", got.ImageInfo)
+	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}

@@ -46,6 +46,9 @@ type templateResponse struct {
 	Version                    string                      `json:"version,omitempty"`
 	Status                     string                      `json:"status,omitempty"`
 	LastError                  string                      `json:"last_error,omitempty"`
+	DisplayName                string                      `json:"display_name,omitempty"`
+	CreatedAt                  string                      `json:"created_at,omitempty"`
+	ImageInfo                  string                      `json:"image_info,omitempty"`
 	Replicas                   []templateReplicaStatus     `json:"replicas,omitempty"`
 	CreateRequest              *types.CreateCubeSandboxReq `json:"create_request,omitempty"`
 	CubeEgressCABaked          bool                        `json:"cube_egress_ca_baked,omitempty"`
@@ -1103,9 +1106,18 @@ var TemplateListCommand = cli.Command{
 
 func printTemplateSummary(rsp *templateResponse) {
 	log.Printf("template_id: %s\n", rsp.TemplateID)
+	if rsp.DisplayName != "" {
+		log.Printf("display_name: %s\n", rsp.DisplayName)
+	}
 	log.Printf("instance_type: %s\n", rsp.InstanceType)
 	log.Printf("version: %s\n", rsp.Version)
 	log.Printf("status: %s\n", rsp.Status)
+	if rsp.CreatedAt != "" {
+		log.Printf("created_at: %s\n", rsp.CreatedAt)
+	}
+	if rsp.ImageInfo != "" {
+		log.Printf("image_info: %s\n", rsp.ImageInfo)
+	}
 	if rsp.LastError != "" {
 		log.Printf("last_error: %s\n", rsp.LastError)
 	}

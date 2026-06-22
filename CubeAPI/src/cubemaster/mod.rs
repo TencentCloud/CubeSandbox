@@ -637,6 +637,9 @@ pub struct CreateSandboxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<HashMap<String, String>>,
 
+    #[serde(rename = "distribution_scope", skip_serializing_if = "Option::is_none")]
+    pub distribution_scope: Option<Vec<String>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volumes: Option<Vec<VolumeSpec>>,
 

@@ -5,7 +5,9 @@
 package cubebox
 
 import (
+	"bytes"
 	"flag"
+	"log"
 	"strings"
 	"testing"
 
@@ -392,5 +394,41 @@ func TestFormatTemplateImageJobWatchHelpersHandleNil(t *testing.T) {
 	}
 	if got := formatTemplateImageJobCompletionSummary(nil); got == "" {
 		t.Fatal("expected non-empty completion summary for nil job")
+	}
+}
+
+func TestPrintTemplateSummaryIncludesOptionalMetadata(t *testing.T) {
+	var logBuf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+	})
+
+	stdout := captureStdout(t, func() {
+		printTemplateSummary(&templateResponse{
+			TemplateID:   "tpl-1",
+			DisplayName:  "python-template",
+			InstanceType: "cubebox",
+			Version:      "v2",
+			Status:       "READY",
+			CreatedAt:    "2026-06-17 12:00:00",
+			ImageInfo:    "docker.io/library/python:3.12",
+		})
+	})
+
+	logOutput := logBuf.String()
+	for _, want := range []string{
+		"template_id: tpl-1",
+		"display_name: python-template",
+		"created_at: 2026-06-17 12:00:00",
+		"image_info: docker.io/library/python:3.12",
+	} {
+		if !strings.Contains(logOutput, want) {
+			t.Fatalf("log output=%q, missing %q", logOutput, want)
+		}
+	}
+	if !strings.Contains(stdout, "NODE_ID") {
+		t.Fatalf("stdout=%q, missing replica table header", stdout)
 	}
 }

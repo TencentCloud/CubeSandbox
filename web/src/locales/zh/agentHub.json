@@ -4,8 +4,79 @@
   "preview": {
     "badge": "Preview",
     "title": "数字助手预览版",
-    "description": "当前功能主要用于演示和早期试用，API、部署配置和交互细节后续可能调整。默认模板基于 all-in-one OpenClaw 镜像制作，镜像较大，首次制作模板约需 15 分钟；如果只保留 1 个模板、2 个 snapshot 和几个运行实例，建议预留约 12~15 GB 可用磁盘空间。",
+    "description": "当前功能主要用于演示和早期试用，API、部署配置和交互细节后续可能调整。",
     "close": "关闭预览版提示"
+  },
+  "settings": {
+    "openAction": "模型服务设置",
+    "title": "数字助手设置",
+    "description": "配置创建 OpenClaw 数字助手所需的默认 LLM 服务。API Key 会加密存入数据库，推荐通过 CubeEgress 凭证托管在出站请求时注入，避免进入助手沙箱。",
+    "loading": "读取设置中...",
+    "provider": {
+      "label": "Provider",
+      "deepseek": "DeepSeek",
+      "openaiCompatible": "OpenAI Compatible",
+      "custom": "自定义"
+    },
+    "baseUrl": {
+      "label": "LLM Base URL",
+      "hint": "OpenAI-compatible API 地址，例如 https://api.deepseek.com 或内部网关。"
+    },
+    "model": {
+      "label": "模型 ID",
+      "hint": "注入到 OpenClaw 的默认模型，例如 deepseek/deepseek-v4-flash。"
+    },
+    "apiKey": {
+      "label": "LLM API Key",
+      "hint": "与当前 Provider / Base URL 绑定；保存后页面不再回显完整 Key，只展示掩码。"
+    },
+    "credentialMode": {
+      "label": "凭证交付方式",
+      "egress": "凭证托管（推荐）",
+      "env": "环境变量注入（兼容旧版）",
+      "egressHint": "创建助手时自动生成 CubeEgress 规则，仅对该 LLM Base URL 注入 Authorization 头；OpenClaw 配置里只保存托管占位 Key。",
+      "envHint": "沿用旧方式把真实 API Key 写入 OpenClaw 环境和配置，仅建议在未启用 CubeEgress 的环境使用。"
+    },
+    "gatewayDomain": {
+      "label": "网关域名",
+      "hint": "可选。配置后助手网关将通过 端口-沙箱ID.域名（如 cube.app）以独立子域访问，可彻底避免多个助手 WebSocket 串台；留空则继续使用同源代理路径。需要为该域名配置泛域名解析与证书。"
+    },
+    "persistenceDisabled": "未配置数据库，无法保存模型服务配置。请先为 CubeAPI 配置 DATABASE_URL 后再试。",
+    "status": {
+      "configured": "已配置 {{provider}} / {{model}}（Key：{{masked}}，来源：{{source}}，方式：{{mode}}）",
+      "missing": "尚未配置 LLM API Key，暂时无法创建数字助手。"
+    },
+    "source": {
+      "database": "数据库",
+      "env": "环境变量",
+      "none": "未配置"
+    },
+    "errors": {
+      "required": "请填写或修改至少一项模型服务配置"
+    },
+    "actions": {
+      "close": "关闭",
+      "save": "保存",
+      "saved": "已保存"
+    }
+  },
+  "onboarding": {
+    "title": "开始使用数字助手",
+    "description": "完成以下准备步骤后即可创建你的第一个数字助手。",
+    "steps": {
+      "apiKey": {
+        "title": "配置 LLM 模型服务",
+        "desc": "用于驱动 OpenClaw 助手的大模型调用，Provider / Base URL / Model / API Key 保存后全局生效。",
+        "action": "去设置",
+        "doneAction": "已配置 · 修改"
+      },
+      "template": {
+        "title": "准备龙虾助手模板",
+        "desc": "在应用市场安装轻量版或 all-in-one 龙虾助手镜像，作为创建助手的系统模板。",
+        "action": "去应用市场",
+        "doneAction": "已就绪 · 查看"
+      }
+    }
   },
   "tabs": {
     "personal": "个人助手",
@@ -218,6 +289,7 @@
       "info": "助手信息",
       "engine": "工作引擎",
       "template": "助手模板",
+      "persistence": "状态管理模式",
       "model": "模型",
       "botConfig": "填入配置"
     },
@@ -239,13 +311,26 @@
     "templateFields": {
       "model": "模型",
       "version": "版本",
+      "persistence": "状态管理模式",
       "sourceAgent": "来源助手",
       "createdAt": "发布时间"
     },
     "templateOptions": {
       "default": "系统默认模板"
     },
-    "modelHint": "DeepSeek V4 Flash · 内部模型",
+    "persistenceHint": "完整快照型支持整个 Sandbox 制作快照；文件共享型会把 OpenClaw 文件持久化到 host，快照/分身只复制共享文件状态。",
+    "persistenceInheritedHint": "已选择数字助手模板，状态管理模式将直接继承模板发布时的设置。",
+    "persistenceOptions": {
+      "sharedFiles": {
+        "title": "文件共享型",
+        "description": "OpenClaw 文件挂载到 host，适合长期保存会话、配置和凭证托管状态。"
+      },
+      "fullSnapshot": {
+        "title": "完整快照型",
+        "description": "不使用 host mount，快照/回档提交整个 Sandbox rootfs。"
+      }
+    },
+    "modelHint": "使用「模型服务设置」中的默认模型",
     "botConfigHint": "粘贴智能机器人「API配置-长连接」中的 Bot ID 与 Secret 信息；填写后会自动安装企业微信插件并绑定机器人",
     "fields": {
       "botId": "Bot ID",
@@ -253,13 +338,19 @@
       "secret": "Secret",
       "secretPlaceholder": "请输入 Secret"
     },
+    "apiKeyRequired": {
+      "title": "尚未配置 LLM API Key",
+      "description": "创建数字助手前需要先在「模型服务设置」中配置可用的 LLM API Key。",
+      "action": "去设置"
+    },
     "actions": {
       "cancel": "取消",
       "submit": "创建",
       "submitting": "孵化中…"
     },
     "errors": {
-      "nameRequired": "请填写助手名称"
+      "nameRequired": "请填写助手名称",
+      "apiKeyRequired": "请先配置 LLM API Key 再创建助手"
     }
   },
   "wecomDialog": {

@@ -4,7 +4,7 @@ date: 2026-06-03
 author: Cube Sandbox 团队
 description: 在主流 AI Agent 架构中，沙箱服务承担着"安全运行时"的角色。Cube Sandbox v0.3.0 在 22 位贡献者合入的 82 个 commits 之上，完成了一次面向 Agent 高并发、长链路与强化学习场景的关键架构升级——围绕 snapshot / clone / rollback 三组接口，把"环境复制"和"出错恢复"从分钟级压到毫秒级。
 featured: true
-weight: 1
+weight: 3
 ---
 
 # Cube Sandbox v0.3.0：让 AI Agent 拥有「时光机」和「分身术」

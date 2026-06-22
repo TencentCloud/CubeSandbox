@@ -9,11 +9,13 @@ import { useRuntimeConfig } from '@/hooks/useRuntimeConfig';
 import {
   Palette, Plug, Keyboard, Info,
   Sun, Moon, Monitor, Check, ExternalLink,
-  Loader2, Wifi, WifiOff,
+  Loader2, Wifi, WifiOff, UserCog, LogOut, KeyRound,
 } from 'lucide-react';
 import { useThemeStore, type ThemeMode } from '@/store/theme';
-import { clusterApi } from '@/api/client';
+import { clusterApi, authApi } from '@/api/client';
 import { useControlPlaneVersion } from '@/hooks/useControlPlaneVersion';
+import { ApiError } from '@/lib/api';
+import { clearSession, getSessionUser } from '@/lib/session';
 import { cn } from '@/lib/utils';
 
 // ── Sidebar nav ───────────────────────────────────────────────────────────────
@@ -21,6 +23,7 @@ import { cn } from '@/lib/utils';
 const SECTIONS = [
   { key: 'appearance', icon: Palette },
   { key: 'cluster',    icon: Plug },
+  { key: 'account',    icon: UserCog },
   { key: 'shortcuts',  icon: Keyboard },
   { key: 'about',      icon: Info },
 ] as const;
@@ -208,6 +211,119 @@ function ClusterSection() {
   );
 }
 
+// ── Section: Account ──────────────────────────────────────────────────────────
+
+function AccountSection() {
+  const { t } = useTranslation('auth');
+  const navigate = useNavigate();
+  const username = getSessionUser() || 'admin';
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const handleLogout = async () => {
+    try {
+      await authApi.logout();
+    } catch {
+      // ignore network errors on logout
+    }
+    clearSession();
+    navigate('/login', { replace: true });
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMsg(null);
+    if (newPassword.length < 4) {
+      setMsg({ ok: false, text: t('changePassword.tooShort') });
+      return;
+    }
+    if (newPassword !== confirm) {
+      setMsg({ ok: false, text: t('changePassword.mismatch') });
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await authApi.changePassword({ username, oldPassword, newPassword });
+      setMsg({ ok: true, text: t('changePassword.success') });
+      setOldPassword('');
+      setNewPassword('');
+      setConfirm('');
+    } catch (err) {
+      const text =
+        err instanceof ApiError && err.status === 401
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : t('changePassword.error');
+      setMsg({ ok: false, text });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const inputClass =
+    'w-full rounded-lg border border-border/60 bg-card/40 px-3 py-2 text-sm outline-none transition-colors focus:border-primary/50 focus:ring-2 focus:ring-primary/15';
+
+  return (
+    <div className="space-y-8">
+      <SectionHeader icon={UserCog} title={t('account.title')} desc={t('account.description')} />
+
+      <SettingRow label={t('account.title')} desc={t('account.loggedInAs', { username })}>
+        <button
+          onClick={handleLogout}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/40 px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-rose-400/40 hover:text-rose-500"
+        >
+          <LogOut size={14} />
+          {t('account.logout')}
+        </button>
+      </SettingRow>
+
+      <SettingRow label={t('changePassword.title')}>
+        <form onSubmit={handleChangePassword} className="max-w-sm space-y-3">
+          <input
+            type="password"
+            className={inputClass}
+            placeholder={t('changePassword.oldPlaceholder')}
+            autoComplete="current-password"
+            value={oldPassword}
+            onChange={(e) => setOldPassword(e.target.value)}
+          />
+          <input
+            type="password"
+            className={inputClass}
+            placeholder={t('changePassword.newPlaceholder')}
+            autoComplete="new-password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+          />
+          <input
+            type="password"
+            className={inputClass}
+            placeholder={t('changePassword.confirmPlaceholder')}
+            autoComplete="new-password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+          />
+          <button
+            type="submit"
+            disabled={submitting || !oldPassword || !newPassword}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            {submitting ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
+            {submitting ? t('changePassword.submitting') : t('changePassword.submit')}
+          </button>
+          {msg && (
+            <p className={cn('text-sm', msg.ok ? 'text-cube-emerald' : 'text-rose-500')}>{msg.text}</p>
+          )}
+        </form>
+      </SettingRow>
+    </div>
+  );
+}
+
 // ── Section: Shortcuts ────────────────────────────────────────────────────────
 
 const isMac = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform);
@@ -335,6 +451,7 @@ function SettingRow({ label, desc, children }: { label: string; desc?: string; c
 const SECTION_COMPONENTS: Record<string, React.ComponentType> = {
   appearance: AppearanceSection,
   cluster:    ClusterSection,
+  account:    AccountSection,
   shortcuts:  ShortcutsSection,
   about:      AboutSection,
 };

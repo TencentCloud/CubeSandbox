@@ -189,7 +189,7 @@ cubecow-test-native: builder-image
 .PHONY: cubemaster
 cubemaster: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && make proto && make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && make proto && CGO_ENABLED=0 make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
 
 .PHONY: cubelet
 cubelet: builder-image
@@ -214,7 +214,7 @@ agent: builder-image
 .PHONY: cubeapi
 cubeapi: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeAPI && cargo build --release --locked && install -m 0755 /workspace/CubeAPI/target/release/cube-api /workspace/_output/bin/cube-api'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeAPI && cargo build --release --locked --target x86_64-unknown-linux-musl && install -m 0755 /workspace/CubeAPI/target/x86_64-unknown-linux-musl/release/cube-api /workspace/_output/bin/cube-api'
 
 .PHONY: cube-api
 cube-api: cubeapi

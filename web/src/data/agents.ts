@@ -5,6 +5,7 @@ export type AgentEngine = 'openclaw' | 'hermes';
 export type AgentEnv = 'linux' | 'mac';
 export type AgentStatus = 'running' | 'starting' | 'stopped' | 'error';
 export type RobotChannel = 'wecom';
+export type AgentPersistenceMode = 'full_snapshot' | 'shared_files';
 
 export interface Agent {
   id: string;
@@ -26,6 +27,11 @@ export interface Agent {
   templateId?: string;
   gatewayUrl?: string;
   envUrl?: string;
+  persistenceMode?: AgentPersistenceMode;
+  rootfsSourceType?: 'template' | 'snapshot';
+  rootfsSourceId?: string;
+  openclawPersistId?: string;
+  openclawStatePath?: string;
   wecomConfig?: {
     botId: string;
     botSecret: string;

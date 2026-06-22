@@ -65,10 +65,6 @@ install_mkcert() {
   command -v mkcert >/dev/null 2>&1 || die "failed to install mkcert from bundled binary"
 }
 
-escape_sed() {
-  printf '%s' "$1" | sed 's/[\/&]/\\&/g'
-}
-
 prepare_proxy_certs() {
   mkdir -p "${CERT_DIR}"
   if [[ -f "${CERT_DIR}/${CUBE_PROXY_SSL_CERT}" && -f "${CERT_DIR}/${CUBE_PROXY_SSL_KEY}" ]]; then
@@ -114,12 +110,12 @@ render_template_atomic \
 render_template_atomic \
   "${COMPOSE_TEMPLATE}" \
   "${COMPOSE_FILE}" \
-  -e "s#__CUBE_PROXY_IMAGE__#$(escape_sed "${CUBE_PROXY_IMAGE_TAG}")#g" \
-  -e "s#__CUBE_PROXY_CONTAINER_NAME__#$(escape_sed "${CUBE_PROXY_CONTAINER_NAME}")#g" \
-  -e "s#__CUBE_PROXY_BUILD_CONTEXT__#$(escape_sed "${BUILD_CONTEXT_DIR}")#g" \
-  -e "s#__CUBE_PROXY_CERT_DIR__#$(escape_sed "${CERT_DIR}")#g" \
-  -e "s#__CUBE_PROXY_GLOBAL_CONF__#$(escape_sed "${GLOBAL_CONF}")#g" \
-  -e "s#__CUBE_PROXY_NGINX_CONF__#$(escape_sed "${NGINX_CONF}")#g"
+  -e "s#__CUBE_PROXY_IMAGE__#$(escape_sed "${CUBE_PROXY_IMAGE_TAG}" '#')#g" \
+  -e "s#__CUBE_PROXY_CONTAINER_NAME__#$(escape_sed "${CUBE_PROXY_CONTAINER_NAME}" '#')#g" \
+  -e "s#__CUBE_PROXY_BUILD_CONTEXT__#$(escape_sed "${BUILD_CONTEXT_DIR}" '#')#g" \
+  -e "s#__CUBE_PROXY_CERT_DIR__#$(escape_sed "${CERT_DIR}" '#')#g" \
+  -e "s#__CUBE_PROXY_GLOBAL_CONF__#$(escape_sed "${GLOBAL_CONF}" '#')#g" \
+  -e "s#__CUBE_PROXY_NGINX_CONF__#$(escape_sed "${NGINX_CONF}" '#')#g"
 
 if [[ "${PREPARE_ONLY}" == "1" ]]; then
   log "cube proxy runtime files prepared under ${PROXY_DIR}"

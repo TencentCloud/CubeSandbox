@@ -8,6 +8,9 @@
   "official": "Official",
   "hasUpdate": "Update Available",
   "install": "Install",
+  "installAndEnableAgentHub": "Install and Enable Assistant",
+  "installOnly": "Install Only",
+  "enableAgentHub": "Enable Assistant",
   "installed": "Installed",
   "installedCount": "Installed {{count}}",
   "installAdditionalHint": "Install with different parameters",
@@ -20,6 +23,7 @@
     "cancel": "Cancel",
     "confirm": "Confirm Install",
     "installing": "Installing…",
+    "enablingAgentHub": "Enabling for Digital Assistant…",
     "retry": "Retry",
     "failed": "Installation failed, please retry.",
     "buildFailed": "Build failed",
@@ -28,7 +32,8 @@
   "toast": {
     "updatesFound": "Found {{count}} image(s) with new versions",
     "upToDate": "All images are up to date",
-    "checkFailed": "Check updates failed, please retry"
+    "checkFailed": "Check updates failed, please retry",
+    "agentTemplateEnabled": "Enabled for Digital Assistant"
   },
   "categories": {
     "all": "All",
@@ -46,9 +51,13 @@
       "name": "Browser Sandbox",
       "description": "Preinstalled Chromium, ready for web automation."
     },
-    "openclaw": {
-      "name": "OpenClaw · AI Agent",
-      "description": "OpenClaw AI Agent platform with browser automation, code execution, and multi-model access."
+    "openclaw-lite": {
+      "name": "龙虾助手 · Lite",
+      "description": "Lightweight OpenClaw assistant image — faster to pull and smaller on disk, ideal for chat-first assistants without the full browser toolchain."
+    },
+    "openclaw-aio": {
+      "name": "龙虾助手 · All-in-One",
+      "description": "Full OpenClaw AI Agent platform with browser automation, code execution, and multi-model access bundled in."
     },
     "cubesandbox-base": {
       "name": "Base Image",
@@ -63,6 +72,8 @@
     "chromium": "Chromium",
     "agent": "AI Agent",
     "openclaw": "OpenClaw",
+    "lite": "Lite",
+    "aio": "All-in-One",
     "deepseek": "DeepSeek",
     "base": "Base",
     "envd": "envd"

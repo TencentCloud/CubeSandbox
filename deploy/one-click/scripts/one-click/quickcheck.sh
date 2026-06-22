@@ -12,6 +12,11 @@ CUBE_API_HEALTH_ADDR="${CUBE_API_HEALTH_ADDR:-127.0.0.1:3000}"
 ROLE="$(one_click_deploy_role)"
 NODE_ID="${CUBE_SANDBOX_NODE_IP:-}"
 
+# When external MySQL/Redis is configured the local container + systemd unit do
+# not exist, so the corresponding checks must be skipped.
+EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
+EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
+
 require_cmd systemctl
 
 check_unit_active() {
@@ -61,8 +66,16 @@ echo "[quickcheck] check systemd units"
 check_unit_active cube-sandbox-network-agent.service
 check_unit_active cube-sandbox-cubelet.service
 if [[ "${ROLE}" != "compute" ]]; then
-  check_unit_active cube-sandbox-mysql.service
-  check_unit_active cube-sandbox-redis.service
+  if [[ -n "${EXTERNAL_MYSQL_HOST}" ]]; then
+    echo "[quickcheck] external MySQL (${EXTERNAL_MYSQL_HOST}); skipping local mysql unit check"
+  else
+    check_unit_active cube-sandbox-mysql.service
+  fi
+  if [[ -n "${EXTERNAL_REDIS_HOST}" ]]; then
+    echo "[quickcheck] external Redis (${EXTERNAL_REDIS_HOST}); skipping local redis unit check"
+  else
+    check_unit_active cube-sandbox-redis.service
+  fi
   check_unit_active cube-sandbox-cubemaster.service
   check_unit_active cube-sandbox-cube-api.service
   check_unit_active cube-sandbox-cube-proxy.service
@@ -75,8 +88,8 @@ fi
 
 if command -v docker >/dev/null 2>&1 && [[ "${ROLE}" != "compute" ]]; then
   echo "[quickcheck] check container runtime state"
-  check_container_ready "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
-  check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
+  [[ -n "${EXTERNAL_MYSQL_HOST}" ]] || check_container_ready "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
+  [[ -n "${EXTERNAL_REDIS_HOST}" ]] || check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
   check_container_ready "${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
   check_container_ready "${CUBE_PROXY_COREDNS_CONTAINER:-cube-proxy-coredns}"
   if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then

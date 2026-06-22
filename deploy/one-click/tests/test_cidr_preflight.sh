@@ -132,10 +132,32 @@ test_rejects_host_interface_overlap() {
   assert_contains_text "${output}" "interface eth0 (192.168.0.5/24)"
 }
 
+test_custom_label_is_used_for_format_errors() {
+  local output
+  if output="$(TEST_RESOLV_CANDIDATES="" IP_SCENARIO=empty check_cidr_preflight "not-a-cidr" 0 "default CubeSandbox network CIDR" 2>&1)"; then
+    fail "expected invalid CIDR to be rejected"
+  fi
+
+  assert_contains_text "${output}" "default CubeSandbox network CIDR 'not-a-cidr'"
+}
+
+test_skip_conflict_keeps_format_validation() {
+  if ( TEST_RESOLV_CANDIDATES="" IP_SCENARIO=host_overlap check_cidr_preflight "not-a-cidr" 1 "test CIDR" ) >/dev/null 2>&1; then
+    fail "skip_conflict should not bypass format validation"
+  fi
+}
+
+test_skip_conflict_allows_host_overlap() {
+  TEST_RESOLV_CANDIDATES="" IP_SCENARIO=host_overlap check_cidr_preflight "192.168.0.0/18" 1 "test CIDR" >/dev/null 2>&1
+}
+
 test_rejects_nameserver_overlap
 test_dedupes_equivalent_resolver_paths
 test_allows_same_cidr_cube_dev_reinstall
 test_rejects_overlapping_cube_dev_cidr_change
 test_rejects_host_interface_overlap
+test_custom_label_is_used_for_format_errors
+test_skip_conflict_keeps_format_validation
+test_skip_conflict_allows_host_overlap
 
 echo "cidr preflight tests OK"

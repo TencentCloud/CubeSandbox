@@ -30,6 +30,9 @@ die() {
   exit 1
 }
 
+# shellcheck source=../common/validation.sh
+source "${ONE_CLICK_RUNTIME_SCRIPT_DIR}/../common/validation.sh"
+
 require_cmd() {
   local cmd="$1"
   command -v "${cmd}" >/dev/null 2>&1 || die "required command not found: ${cmd}"
@@ -120,6 +123,24 @@ ensure_bind_mount_file() {
   [[ -f "${path}" ]] || die "required bind mount source file not found: ${path}"
 }
 
+# Escape VALUE so it can be safely interpolated into the replacement text of a
+# sed `s<delim>...<delim>...<delim>` expression. Escapes backslashes, '&' (the
+# whole-match reference) and the substitution delimiter (default '/'); pass the
+# delimiter actually used at the call site (e.g. '#') so values containing it do
+# not terminate the command. Backslash is written as '\\' in the bracket
+# expression so it is unambiguously a member across POSIX and GNU sed (GNU sed
+# treats a bare '\<delim>' as the plain delimiter, dropping backslash from the
+# set). Embedded newlines / carriage returns are stripped as defense-in-depth:
+# an unescaped newline would terminate the sed command and allow a crafted value
+# (e.g. a password read from .env) to inject arbitrary sed script. This is the
+# single shared helper for every one-click runtime script; do not re-define it
+# per-script (that historically caused inconsistent escaping semantics).
+escape_sed() {
+  local value="$1"
+  local delim="${2:-/}"
+  printf '%s' "${value}" | tr -d '\n\r' | sed "s/[\\\\${delim}&]/\\\\&/g"
+}
+
 render_template_atomic() {
   local template="$1"
   local output="$2"
@@ -170,11 +191,14 @@ resolve_control_plane_cubemaster_addr() {
   fi
 
   if [[ -n "${addr}" ]]; then
+    validate_host_port "${addr}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
     printf '%s\n' "${addr}"
     return 0
   fi
 
   if [[ -n "${ip}" ]]; then
+    validate_ipv4_literal "${ip}" "ONE_CLICK_CONTROL_PLANE_IP"
+    validate_host_port "${ip}:${port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
     printf '%s:%s\n' "${ip}" "${port}"
     return 0
   fi

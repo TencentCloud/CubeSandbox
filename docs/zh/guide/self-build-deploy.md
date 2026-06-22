@@ -311,7 +311,8 @@ sudo ./down.sh
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `CUBE_PROXY_ENABLE` | `1` | 启用 CubeProxy（一键部署必须为 `1`） |
-| `CUBE_PROXY_HOST_PORT` | `443` | CubeProxy 监听端口 |
+| `CUBE_PROXY_HTTPS_PORT` | `443` | CubeProxy HTTPS 监听端口 |
+| `CUBE_PROXY_HTTP_PORT` | `80` | CubeProxy HTTP 监听端口；systemd 启动后 TCP listener 检查跟随该端口 |
 | `CUBE_PROXY_DNS_ENABLE` | `1` | 启用 CoreDNS（一键部署必须为 `1`） |
 | `CUBE_PROXY_DNS_ANSWER_IP` | `${CUBE_SANDBOX_NODE_IP}` | CoreDNS 对 `cube.app` 返回的 IP |
 | `CUBE_PROXY_COREDNS_BIND_ADDR` | `127.0.0.54` | CoreDNS 绑定地址 |

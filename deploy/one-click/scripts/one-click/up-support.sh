@@ -38,10 +38,6 @@ ensure_dir "${SUPPORT_DIR}"
 ensure_dir "${SQL_DIR}"
 ensure_file "${SUPPORT_TEMPLATE}"
 
-escape_sed() {
-  printf '%s' "$1" | sed 's/[\/&]/\\&/g'
-}
-
 render_support_compose() {
   mkdir -p "$(dirname "${SUPPORT_COMPOSE_LOCK}")"
   (
@@ -51,8 +47,8 @@ render_support_compose() {
       "${SUPPORT_COMPOSE_FILE}" \
       -e "s/__MYSQL_CONTAINER__/$(escape_sed "${MYSQL_CONTAINER}")/g" \
       -e "s/__REDIS_CONTAINER__/$(escape_sed "${REDIS_CONTAINER}")/g" \
-      -e "s#__MYSQL_IMAGE__#$(escape_sed "${MYSQL_IMAGE}")#g" \
-      -e "s#__REDIS_IMAGE__#$(escape_sed "${REDIS_IMAGE}")#g" \
+      -e "s#__MYSQL_IMAGE__#$(escape_sed "${MYSQL_IMAGE}" '#')#g" \
+      -e "s#__REDIS_IMAGE__#$(escape_sed "${REDIS_IMAGE}" '#')#g" \
       -e "s/__MYSQL_VOLUME__/$(escape_sed "${MYSQL_VOLUME}")/g" \
       -e "s/__REDIS_VOLUME__/$(escape_sed "${REDIS_VOLUME}")/g" \
       -e "s/__MYSQL_PORT__/$(escape_sed "${MYSQL_PORT}")/g" \
@@ -62,7 +58,7 @@ render_support_compose() {
       -e "s/__MYSQL_USER__/$(escape_sed "${MYSQL_USER}")/g" \
       -e "s/__MYSQL_PASSWORD__/$(escape_sed "${MYSQL_PASSWORD}")/g" \
       -e "s/__MYSQL_ROOT_PASSWORD__/$(escape_sed "${MYSQL_ROOT_PASSWORD}")/g" \
-      -e "s#__SQL_DIR__#$(escape_sed "${SQL_DIR}")#g"
+      -e "s#__SQL_DIR__#$(escape_sed "${SQL_DIR}" '#')#g"
   ) 9>"${SUPPORT_COMPOSE_LOCK}"
 }
 
@@ -77,6 +73,42 @@ case "${COMPOSE_DETACH}" in
   0|1) ;;
   *) die "unsupported ONE_CLICK_COMPOSE_DETACH: ${COMPOSE_DETACH} (expected 0 or 1)" ;;
 esac
+
+# When MySQL/Redis is provided externally, never start the matching local
+# container. Filter it out of the requested service set; for the legacy
+# "all services" path (empty SUPPORT_SERVICES) restrict the run to the local
+# services only so we don't accidentally launch a conflicting container.
+CUBE_EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
+CUBE_EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
+if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" || -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+  requested_services="${SUPPORT_SERVICES:-mysql redis}"
+  filtered_services=""
+  # Split on whitespace into an array so SUPPORT_SERVICES (user-controllable) is
+  # not subject to glob expansion / pathname matching while iterating.
+  read -ra requested_services_arr <<< "${requested_services}"
+  for svc in "${requested_services_arr[@]}"; do
+    case "${svc}" in
+      mysql)
+        if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
+          log "using external MySQL (${CUBE_EXTERNAL_MYSQL_HOST}), skipping local mysql container"
+          continue
+        fi
+        ;;
+      redis)
+        if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
+          log "using external Redis (${CUBE_EXTERNAL_REDIS_HOST}), skipping local redis container"
+          continue
+        fi
+        ;;
+    esac
+    filtered_services="${filtered_services}${filtered_services:+ }${svc}"
+  done
+  if [[ -z "${filtered_services}" ]]; then
+    log "all support services are external; nothing to start under ${SUPPORT_DIR}"
+    exit 0
+  fi
+  SUPPORT_SERVICES="${filtered_services}"
+fi
 
 if [[ -z "${SUPPORT_SERVICES}" ]]; then
   support_compose_run down --remove-orphans >/dev/null 2>&1 || true

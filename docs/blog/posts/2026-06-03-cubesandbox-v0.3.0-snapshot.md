@@ -4,7 +4,7 @@ date: 2026-06-03
 author: Cube Sandbox Team
 description: In modern AI Agent stacks, the sandbox plays the role of a "secure runtime" — executing model-generated code and tool calls. Cube Sandbox v0.3.0, with 82 commits from 22 contributors, is a foundational architecture upgrade aimed at high-concurrency, long-horizon, and reinforcement-learning workloads. Around three new SDK primitives — snapshot / clone / rollback — it brings "environment replication" and "error recovery" down from minutes to milliseconds.
 featured: true
-weight: 1
+weight: 3
 ---
 
 # Cube Sandbox v0.3.0: A Time Machine and a Cloning Booth for Your AI Agents
