@@ -1042,6 +1042,12 @@ elif [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
+MIRROR="${MIRROR:-}"
+case "${MIRROR}" in
+  ""|cn) ;;
+  *) die "unsupported MIRROR: ${MIRROR} (expected empty or cn)" ;;
+esac
+upsert_env_kv "${RUNTIME_ENV_FILE}" "MIRROR" "${MIRROR}"
 if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NODE_IP" "${CUBE_SANDBOX_NODE_IP}"
 fi

@@ -6,6 +6,11 @@ GITHUB_API_BASE="https://api.github.com/repos/${GITHUB_REPO}"
 
 CN_MIRROR_LATEST_URL="https://download.cubesandbox.com/release/latest.json"
 MIRROR="${MIRROR:-}"
+case "${MIRROR}" in
+  ""|cn) ;;
+  *) echo "[online-install] ERROR: unsupported MIRROR '${MIRROR}' (expected empty or cn)." >&2; exit 2 ;;
+esac
+export MIRROR
 
 SKIP_PRECHECK="${ONE_CLICK_SKIP_PRECHECK:-0}"
 DOWNLOAD_URL="${CUBE_SANDBOX_DOWNLOAD_URL:-}"
