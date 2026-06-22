@@ -1088,6 +1088,15 @@ if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" ]]; then
   database_url_port="$(urlencode "${CUBE_EXTERNAL_MYSQL_PORT}")"
   database_url_db="$(urlencode "${CUBE_EXTERNAL_MYSQL_DB}")"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
+else
+  # Local MySQL (bundled container): persist DATABASE_URL so CubeAPI and other
+  # components can reach the database without relying on per-script defaults.
+  local_mysql_host="127.0.0.1"
+  local_mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  local_mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+  local_mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+  local_mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://$(urlencode "${local_mysql_user}"):$(urlencode "${local_mysql_password}")@$(urlencode "${local_mysql_host}"):$(urlencode "${local_mysql_port}")/$(urlencode "${local_mysql_db}")"
 fi
 
 # Persist external Redis config. cube-proxy reads CUBE_PROXY_REDIS_* from the
