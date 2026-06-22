@@ -202,7 +202,14 @@ impl MsixConfig {
     }
 
     pub fn read_table(&self, offset: u64, data: &mut [u8]) {
-        assert!((data.len() == 4 || data.len() == 8));
+        if data.len() != 4 && data.len() != 8 {
+            error!(
+                "invalid MSI-X table read size: {} (allowed: 4 or 8)",
+                data.len()
+            );
+            data.fill(0xff);
+            return;
+        }
 
         let index: usize = (offset / MSIX_TABLE_ENTRIES_MODULO) as usize;
         let modulo_offset = offset % MSIX_TABLE_ENTRIES_MODULO;
@@ -356,7 +363,14 @@ impl MsixConfig {
     }
 
     pub fn read_pba(&mut self, offset: u64, data: &mut [u8]) {
-        assert!((data.len() == 4 || data.len() == 8));
+        if data.len() != 4 && data.len() != 8 {
+            error!(
+                "invalid MSI-X PBA read size: {} (allowed: 4 or 8)",
+                data.len()
+            );
+            data.fill(0xff);
+            return;
+        }
 
         let index: usize = (offset / MSIX_PBA_ENTRIES_MODULO) as usize;
         let modulo_offset = offset % MSIX_PBA_ENTRIES_MODULO;
