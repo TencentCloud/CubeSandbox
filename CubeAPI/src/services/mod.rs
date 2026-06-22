@@ -3,8 +3,8 @@
 //
 
 pub mod cluster;
-pub mod exec;
 pub mod examples;
+pub mod exec;
 pub mod sandboxes;
 pub mod snapshots;
 pub mod templates;

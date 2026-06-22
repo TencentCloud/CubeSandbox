@@ -75,8 +75,7 @@ pub fn topology_for(scenario: &str) -> TopologyTemplate {
             plane: "control".into(),
             kind: "control".into(),
             description:
-                "HTTP gateway: validates requests, schedules sandbox creation, proxies data."
-                    .into(),
+                "HTTP gateway: validates requests, schedules sandbox creation, proxies data.".into(),
         },
         TopologyNode {
             id: "cubemaster".into(),
@@ -98,8 +97,7 @@ pub fn topology_for(scenario: &str) -> TopologyTemplate {
             plane: "data".into(),
             kind: "control".into(),
             description:
-                "TLS-terminating reverse proxy: forwards via WSS tunnel to in-sandbox envd."
-                    .into(),
+                "TLS-terminating reverse proxy: forwards via WSS tunnel to in-sandbox envd.".into(),
         },
         TopologyNode {
             id: "microvm".into(),
@@ -107,8 +105,7 @@ pub fn topology_for(scenario: &str) -> TopologyTemplate {
             plane: "data".into(),
             kind: "vm".into(),
             description:
-                "QEMU/KVM MicroVM: sandbox isolation boundary running envd and the workload."
-                    .into(),
+                "QEMU/KVM MicroVM: sandbox isolation boundary running envd and the workload.".into(),
         },
         TopologyNode {
             id: "envd".into(),
@@ -178,8 +175,7 @@ pub fn topology_for(scenario: &str) -> TopologyTemplate {
                 label: "CubeVS (eBPF)".into(),
                 plane: "data".into(),
                 kind: "control".into(),
-                description: "eBPF datapath enforcing allow/deny rules on the guest's veth."
-                    .into(),
+                description: "eBPF datapath enforcing allow/deny rules on the guest's veth.".into(),
             });
             edges.push(TopologyEdge {
                 from: "cubelet".into(),

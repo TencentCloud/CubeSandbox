@@ -16,11 +16,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::{
-    error::AppResult,
-    examples::TopologyGraph,
-    state::AppState,
-};
+use crate::{error::AppResult, examples::TopologyGraph, state::AppState};
 
 // ─── Request / Response models ────────────────────────────────────────────────
 
@@ -111,7 +107,11 @@ pub async fn run_example(
     let result = state
         .services
         .examples
-        .run(req, &state.services.templates, state.agenthub_store.as_ref())
+        .run(
+            req,
+            &state.services.templates,
+            state.agenthub_store.as_ref(),
+        )
         .await;
 
     match result {

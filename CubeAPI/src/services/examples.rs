@@ -17,9 +17,7 @@ use uuid::Uuid;
 use crate::{
     db::AgentHubStore,
     error::{AppError, AppResult},
-    examples::{
-        file_languages, scenario_registry, topology_with_status, FileSpec, ScenarioSpec,
-    },
+    examples::{file_languages, scenario_registry, topology_with_status, FileSpec, ScenarioSpec},
     handlers::examples::{ExampleMeta, RunExampleRequest, RunExampleResponse},
     services::templates::TemplateService,
 };
@@ -555,5 +553,3 @@ async fn ensure_requirements(base_dir: &PathBuf) -> bool {
         }
     }
 }
-
-
