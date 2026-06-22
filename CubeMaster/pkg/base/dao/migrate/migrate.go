@@ -23,6 +23,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 
@@ -39,13 +40,19 @@ type dialectSpec struct {
 	dialect database.Dialect
 	rootFS  fs.FS
 	subdir  string
+	// fingerprints enables the content-fingerprint defence layer. The
+	// fingerprint store SQL is MySQL-specific (ON DUPLICATE KEY UPDATE,
+	// information_schema, ENGINE=InnoDB), so a future dialect must provide its
+	// own implementation before flipping this on.
+	fingerprints bool
 }
 
 var dialectSpecs = map[string]dialectSpec{
 	"mysql": {
-		dialect: database.DialectMySQL,
-		rootFS:  mysqlMigrations,
-		subdir:  "migrations/mysql",
+		dialect:      database.DialectMySQL,
+		rootFS:       mysqlMigrations,
+		subdir:       "migrations/mysql",
+		fingerprints: true,
 	},
 }
 
@@ -71,18 +78,71 @@ func Run(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.Session
 	}
 	opts := []goose.ProviderOption{
 		goose.WithVerbose(true),
+		// New migrations use immutable, globally-unique UTC-timestamp version
+		// numbers (see migrations/<dialect>/README.md), so a migration authored
+		// earlier but merged later can legitimately have a version lower than an
+		// environment's current max. Allow goose to apply such out-of-order
+		// migrations instead of hard-failing startup. Safe because every
+		// migration is written idempotently via the *_if_missing helpers.
+		goose.WithAllowOutofOrder(true),
 	}
 	if locker != nil {
 		opts = append(opts, goose.WithSessionLocker(locker))
 	}
+
+	// Defence layer (MySQL only): detect (and loudly reject) the case where an
+	// already-applied migration version's content changed on disk, which goose
+	// would otherwise skip silently. Must run before goose.Up.
+	//
+	// Note: the preflight reads goose_db_version / the fingerprint table WITHOUT
+	// holding goose's session lock (goose only takes it inside provider.Up). A
+	// concurrent instance's Up()/DownTo() could therefore move the bookkeeping
+	// between our read and goose's run. This is safe: InnoDB MVCC prevents dirty
+	// reads, and the worst case is a false-positive (startup blocked), never a
+	// false-negative (silent pass). Concurrent DownTo is an operator-only path.
+	var fsFP map[int64]fileFingerprint
+	if spec.fingerprints {
+		fsFP, err = collectFSFingerprints(subFS)
+		if err != nil {
+			return fmt.Errorf("migrate: collect migration fingerprints: %w", err)
+		}
+		if err := ensureFingerprintTable(ctx, sqlDB); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+		if err := preflightFingerprints(ctx, sqlDB, fsFP); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+
 	provider, err := goose.NewProvider(spec.dialect, sqlDB, subFS, opts...)
 	if err != nil {
 		return fmt.Errorf("migrate: new provider: %w", err)
 	}
-	if _, err := provider.Up(ctx); err != nil {
-		return fmt.Errorf("migrate: goose up: %w", err)
+	results, upErr := provider.Up(ctx)
+	// Record fingerprints for everything that actually applied — even on partial
+	// failure — so a fixed re-deploy never leaves an applied version
+	// unfingerprinted (which would reopen the silent-skip gap).
+	if spec.fingerprints {
+		if recErr := recordFingerprints(ctx, sqlDB, fsFP, appliedResults(results, upErr)); recErr != nil && upErr == nil {
+			return fmt.Errorf("migrate: %w", recErr)
+		}
+	}
+	if upErr != nil {
+		return fmt.Errorf("migrate: goose up: %w", upErr)
 	}
 	return nil
+}
+
+// appliedResults returns the migrations goose actually applied. On partial
+// failure goose returns (nil, *PartialError) with the successfully-applied
+// migrations in PartialError.Applied rather than in the results slice, so we
+// must unwrap it to avoid losing fingerprints for the migrations that did run.
+func appliedResults(results []*goose.MigrationResult, upErr error) []*goose.MigrationResult {
+	var pErr *goose.PartialError
+	if errors.As(upErr, &pErr) {
+		return pErr.Applied
+	}
+	return results
 }
 
 // DownTo rolls back migrations to (and including) the given version. It
@@ -97,7 +157,10 @@ func DownTo(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.Sess
 	if err != nil {
 		return fmt.Errorf("migrate: fs.Sub %q: %w", spec.subdir, err)
 	}
-	opts := []goose.ProviderOption{goose.WithVerbose(true)}
+	opts := []goose.ProviderOption{
+		goose.WithVerbose(true),
+		goose.WithAllowOutofOrder(true),
+	}
 	if locker != nil {
 		opts = append(opts, goose.WithSessionLocker(locker))
 	}

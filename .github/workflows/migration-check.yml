@@ -1,0 +1,132 @@
+name: Migration Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'CubeMaster/pkg/base/dao/migrate/**'
+      - '.github/workflows/migration-check.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'CubeMaster/pkg/base/dao/migrate/**'
+      - '.github/workflows/migration-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migration-check:
+    name: Migration naming & immutability
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: CubeMaster/go.mod
+          cache-dependency-path: CubeMaster/go.sum
+
+      - name: Validate migration filenames
+        shell: bash
+        working-directory: CubeMaster
+        run: |
+          set -euo pipefail
+          go test ./pkg/base/dao/migrate/ \
+            -run 'TestMigrationFilenames|TestMigrationsDirHasReadme' -v
+
+      - name: Reject changes to already-merged migrations
+        # Applied migrations are immutable: goose tracks them by integer version
+        # only, so editing/renaming/deleting a merged migration silently changes
+        # what new environments apply (or skips it entirely). Only NEW migration
+        # files (status A) are allowed; M/D/R on existing *.sql is rejected.
+        # Runs on both PRs and direct pushes to master so the rule cannot be
+        # bypassed by pushing straight to a branch.
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          migrations_dir="CubeMaster/pkg/base/dao/migrate/migrations"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_sha="${PR_BASE_SHA}"
+            head_sha="${PR_HEAD_SHA}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            base_sha="${PUSH_BEFORE_SHA}"
+            head_sha="${PUSH_AFTER_SHA}"
+          else
+            echo "Event ${GITHUB_EVENT_NAME} has no diff base; skipping immutability check."
+            exit 0
+          fi
+
+          # New branch / initial push: no meaningful base to diff against.
+          if [[ -z "${base_sha}" || "${base_sha}" == "0000000000000000000000000000000000000000" ]]; then
+            echo "No base ref to diff against; skipping immutability check."
+            exit 0
+          fi
+
+          # On a force-push, github.event.before can point at a commit that is no
+          # longer reachable (orphaned/gc'd), which would make `git diff` fail or
+          # behave oddly. Verify the base is present; if not, fall back to the
+          # merge-base with origin/master, and skip only if even that is absent.
+          if ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+            echo "::warning::base ${base_sha} is unreachable (likely a force-push); falling back to merge-base."
+            git fetch --no-tags --depth=1 origin master 2>/dev/null || true
+            if fallback_base="$(git merge-base "${head_sha}" origin/master 2>/dev/null)" && [[ -n "${fallback_base}" ]]; then
+              base_sha="${fallback_base}"
+            else
+              echo "::warning::No reachable base to diff against; skipping immutability check."
+              exit 0
+            fi
+          fi
+
+          # --find-renames so a rename shows up as R (which we reject), not as
+          # an add+delete pair.
+          changes="$(git diff --name-status --find-renames "${base_sha}" "${head_sha}" -- "${migrations_dir}")"
+
+          if [[ -z "${changes}" ]]; then
+            echo "No migration file changes."
+            exit 0
+          fi
+
+          printf 'Migration changes:\n%s\n\n' "${changes}"
+
+          violations=0
+          while IFS=$'\t' read -r status path rest; do
+            [[ -n "${status}" ]] || continue
+            # Only police versioned .sql migrations; docs/README may change.
+            case "${status}" in
+              A*)
+                # New file: allowed.
+                ;;
+              M*|D*|R*|C*)
+                # For renames/copies the original path is in $path.
+                if [[ "${path}" == *.sql ]]; then
+                  echo "::error file=${path}::Forbidden change (${status}) to an already-merged migration: ${path}. Applied migrations are immutable; add a new timestamped migration instead."
+                  violations=$((violations + 1))
+                fi
+                ;;
+            esac
+          done <<< "${changes}"
+
+          if [[ "${violations}" -gt 0 ]]; then
+            echo ""
+            echo "::error::${violations} forbidden migration change(s). See CubeMaster/pkg/base/dao/migrate/migrations/mysql/README.md"
+            exit 1
+          fi
+
+          echo "All migration changes are additive (new files only)."

@@ -365,6 +365,61 @@ func TestRun_ContinuesFromPartialV022ToHeadDDL(t *testing.T) {
 	assertHeadSchema(t, db)
 }
 
+// TestRun_FingerprintDetectsContentDrift proves the content-fingerprint
+// defence: after a clean migrate, tampering with a recorded fingerprint so it
+// no longer matches the on-disk content makes the next Run fail loudly (instead
+// of goose silently skipping), and the escape-hatch env var bypasses the check.
+func TestRun_FingerprintDetectsContentDrift(t *testing.T) {
+	env := newMySQL(t)
+	defer env.teardown()
+	db := openDB(t, env.dsn)
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if err := migrate.Run(ctx, db, "mysql", testSessionLocker()); err != nil {
+		t.Fatalf("initial migrate.Run: %v", err)
+	}
+
+	// The fingerprint table must have been populated for applied versions.
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM t_cubemaster_migration_fingerprint`).Scan(&n); err != nil {
+		t.Fatalf("count fingerprints: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("expected fingerprints to be recorded after fresh migrate")
+	}
+
+	// Simulate "version 2 was applied with different content than what is now on
+	// disk" by corrupting the stored hash for an applied version.
+	res, err := db.ExecContext(ctx,
+		`UPDATE t_cubemaster_migration_fingerprint SET sha256 = ? WHERE version = 2`,
+		"0000000000000000000000000000000000000000000000000000000000000000")
+	if err != nil {
+		t.Fatalf("corrupt fingerprint: %v", err)
+	}
+	if affected, _ := res.RowsAffected(); affected != 1 {
+		t.Fatalf("expected to corrupt exactly 1 fingerprint row, got %d", affected)
+	}
+
+	// Next Run must fail loudly.
+	err = migrate.Run(ctx, db, "mysql", testSessionLocker())
+	if err == nil {
+		t.Fatal("expected fingerprint mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "fingerprint check failed") {
+		t.Fatalf("expected fingerprint error, got: %v", err)
+	}
+
+	// The escape hatch lets an operator bypass the check.
+	t.Setenv("CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK", "1")
+	if err := migrate.Run(ctx, db, "mysql", testSessionLocker()); err != nil {
+		t.Fatalf("migrate.Run with skip env should succeed: %v", err)
+	}
+}
+
 // assertHeadSchema verifies a set of HEAD-only signals: new tables exist,
 // new columns exist, deprecated columns are gone, expected indexes are
 // present. The intent is to catch drift between the SQL migrations and
