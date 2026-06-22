@@ -234,7 +234,8 @@ static __always_inline long snat_tcp(struct __sk_buff *skb,
 	if (err)
 		return err;
 
-	flags = BPF_F_PSEUDO_HDR | sizeof(listen_port);
+	/* update TCP csum for port change (not part of pseudo-header) */
+	flags = sizeof(listen_port);
 	err = bpf_l4_csum_replace(skb, offset, listen_port, host_port, flags);
 	if (err)
 		return err;
