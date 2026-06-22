@@ -444,7 +444,7 @@ func (l *local) getDescribeTaskFromRedis(ctx context.Context, key string) (*type
 func (l *local) setTemplateImageJobPullProgressToRedis(ctx context.Context, key string, progress *types.TemplateImageJobPullProgressMap) (err error) {
 	start := time.Now()
 	defer traceRedis(ctx, "Create", "EVAL", key, start, err)
-	_, err = wrapredis.GetRedis(wrapredis.RedisWrite).Do("EVAL", templateImageJobPullProgressSetArgs(key, progress)...)
+	_, err = wrapredis.GetRedis().Do("EVAL", templateImageJobPullProgressSetArgs(key, progress)...)
 	if err != nil {
 		log.G(ctx).Warnf("redis set template image job pull progress error, key: %s, err: %s", key, err)
 		return err
@@ -458,7 +458,7 @@ func (l *local) setTemplateImageJobPullProgressToRedis(ctx context.Context, key 
 func (l *local) setTemplateImageJobPullProgressFieldsToRedis(ctx context.Context, key string, progress *types.TemplateImageJobPullProgressMap) (err error) {
 	start := time.Now()
 	defer traceRedis(ctx, "Create", "HSET", key, start, err)
-	_, err = wrapredis.GetRedis(wrapredis.RedisWrite).Do("HSET", redis.Args{key}.AddFlat(progress)...)
+	_, err = wrapredis.GetRedis().Do("HSET", redis.Args{key}.AddFlat(progress)...)
 	if err != nil {
 		log.G(ctx).Warnf("redis update template image job pull progress error, key: %s, err: %s", key, err)
 		return err
@@ -470,7 +470,7 @@ func (l *local) setTemplateImageJobPullProgressFieldsToRedis(ctx context.Context
 }
 
 func (l *local) getTemplateImageJobPullProgressFromRedis(ctx context.Context, key string) (*types.TemplateImageJobPullProgressMap, error) {
-	values, err := redis.Values(wrapredis.GetRedis(wrapredis.RedisRead).Do("HGETALL", key))
+	values, err := redis.Values(wrapredis.GetRedis().Do("HGETALL", key))
 	if err != nil {
 		if errors.Is(err, redis.ErrNil) {
 			log.G(ctx).Debugf("no such key in redis:%s", key)
