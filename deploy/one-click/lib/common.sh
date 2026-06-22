@@ -855,6 +855,28 @@ def parse(path):
     return kv
 
 
+# Obsolete keys: removed from env.example and no longer read by any component.
+# They are actively dropped on upgrade (rather than kept verbatim) so that stale
+# plaintext secrets do not linger in the runtime env file. The AgentHub LLM
+# config (key/provider/base_url/model/credential_mode) now lives encrypted in the
+# database (configured via the WebUI), and the DB master key is auto-bootstrapped
+# by CubeAPI, so AGENTHUB_SECRET_KEY is obsolete too.
+DEPRECATED_KEYS = {
+    "AGENTHUB_DEEPSEEK_API_KEY",
+    "OPENCLAW_DEEPSEEK_API_KEY",
+    "AGENTHUB_LLM_API_KEY",
+    "OPENCLAW_LLM_API_KEY",
+    "AGENTHUB_LLM_PROVIDER",
+    "OPENCLAW_LLM_PROVIDER",
+    "AGENTHUB_LLM_BASE_URL",
+    "OPENCLAW_LLM_BASE_URL",
+    "AGENTHUB_LLM_MODEL",
+    "OPENCLAW_DEFAULT_MODEL",
+    "AGENTHUB_LLM_CREDENTIAL_MODE",
+    "AGENTHUB_SECRET_KEY",
+    "CUBE_API_DATABASE_URL",
+}
+
 new_defaults = parse(new_example)
 old_values = parse(old_runtime)
 old_baseline_vals = parse(old_baseline) if old_baseline else {}
@@ -865,6 +887,7 @@ added = []
 updated_default = []
 preserved = []
 explicit = []
+dropped = []
 
 out_lines = []
 template = read_lines(new_example)
@@ -905,7 +928,9 @@ for line in template:
 # Old-only keys (present in old runtime, absent from the new template) are
 # host/user specific (NODE_IP, ROLE, control-plane addr, custom vars). Never
 # drop them: append verbatim so the running system keeps working.
-extra = [(k, v) for k, v in old_values.items() if k not in new_defaults]
+dropped = [k for k in old_values if k in DEPRECATED_KEYS]
+extra = [(k, v) for k, v in old_values.items()
+         if k not in new_defaults and k not in DEPRECATED_KEYS]
 if extra:
     out_lines.append("")
     out_lines.append("# --- preserved custom settings (not in env.example) ---")
@@ -946,13 +971,16 @@ for k in explicit:
 report.append("[kept-extra] old-only keys not in new env.example (kept): %d" % len(extra))
 for k, v in extra:
     report.append("  > %s=%s" % (k, redact(k, v)))
+report.append("[dropped] obsolete keys removed on upgrade: %d" % len(dropped))
+for k in dropped:
+    report.append("  - %s" % k)
 
 with open(diff_file, "w", encoding="utf-8") as fh:
     fh.write("\n".join(report) + "\n")
 
 sys.stderr.write(
-    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, >%d kept-extra%s\n" % (
-        len(added), len(updated_default), len(preserved), len(extra),
+    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, >%d kept-extra, -%d dropped%s\n" % (
+        len(added), len(updated_default), len(preserved), len(extra), len(dropped),
         "" if has_baseline else " (two-way fallback: no baseline)"))
 PY
 }

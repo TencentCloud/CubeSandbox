@@ -978,54 +978,6 @@ async fn resolve_gateway_domain(state: &AppState) -> Option<String> {
     }
 }
 
-fn env_deepseek_api_key() -> Option<String> {
-    std::env::var("AGENTHUB_DEEPSEEK_API_KEY")
-        .or_else(|_| std::env::var("OPENCLAW_DEEPSEEK_API_KEY"))
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
-fn env_llm_api_key() -> Option<String> {
-    std::env::var("AGENTHUB_LLM_API_KEY")
-        .or_else(|_| std::env::var("OPENCLAW_LLM_API_KEY"))
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .or_else(env_deepseek_api_key)
-}
-
-fn env_llm_provider() -> Option<String> {
-    std::env::var("AGENTHUB_LLM_PROVIDER")
-        .or_else(|_| std::env::var("OPENCLAW_LLM_PROVIDER"))
-        .ok()
-        .map(|v| normalize_llm_provider(&v))
-        .filter(|v| !v.is_empty())
-}
-
-fn env_llm_base_url() -> Option<String> {
-    std::env::var("AGENTHUB_LLM_BASE_URL")
-        .or_else(|_| std::env::var("OPENCLAW_LLM_BASE_URL"))
-        .ok()
-        .map(|v| normalize_llm_base_url(&v))
-        .filter(|v| !v.is_empty())
-}
-
-fn env_llm_model() -> Option<String> {
-    std::env::var("AGENTHUB_LLM_MODEL")
-        .or_else(|_| std::env::var("OPENCLAW_DEFAULT_MODEL"))
-        .ok()
-        .map(|v| normalize_llm_model(&v))
-        .filter(|v| !v.is_empty())
-}
-
-fn env_llm_credential_mode() -> Option<String> {
-    std::env::var("AGENTHUB_LLM_CREDENTIAL_MODE")
-        .ok()
-        .map(|v| normalize_llm_credential_mode(&v))
-        .filter(|v| !v.is_empty())
-}
-
 async fn read_setting_trimmed(state: &AppState, key: &str) -> Option<String> {
     let store = state.agenthub_store.as_ref()?;
     let value = store.get_setting(key).await.ok()??;
@@ -1057,9 +1009,6 @@ async fn read_llm_api_key(state: &AppState) -> (Option<String>, String) {
             }
         }
     }
-    if let Some(value) = env_llm_api_key() {
-        return (Some(value), "env".to_string());
-    }
     (None, "none".to_string())
 }
 
@@ -1067,22 +1016,18 @@ async fn read_llm_api_key(state: &AppState) -> (Option<String>, String) {
 async fn resolve_llm_config(state: &AppState) -> AppResult<LlmConfig> {
     let provider = read_setting_trimmed(state, SETTING_LLM_PROVIDER)
         .await
-        .or_else(env_llm_provider)
         .map(|v| normalize_llm_provider(&v))
         .unwrap_or_else(|| DEFAULT_LLM_PROVIDER.to_string());
     let base_url = read_setting_trimmed(state, SETTING_LLM_BASE_URL)
         .await
-        .or_else(env_llm_base_url)
         .map(|v| normalize_llm_base_url(&v))
         .unwrap_or_else(|| DEFAULT_LLM_BASE_URL.to_string());
     let model = read_setting_trimmed(state, SETTING_LLM_MODEL)
         .await
-        .or_else(env_llm_model)
         .map(|v| normalize_llm_model(&v))
         .unwrap_or_else(|| DEFAULT_OPENCLAW_MODEL.to_string());
     let credential_mode = read_setting_trimmed(state, SETTING_LLM_CREDENTIAL_MODE)
         .await
-        .or_else(env_llm_credential_mode)
         .map(|v| normalize_llm_credential_mode(&v))
         .unwrap_or_else(|| DEFAULT_LLM_CREDENTIAL_MODE.to_string());
     let (api_key, _) = read_llm_api_key(state).await;
@@ -1116,22 +1061,18 @@ async fn current_settings(state: &AppState) -> AgentSettingsResponse {
     let persistence_enabled = state.agenthub_store.is_some();
     let llm_provider = read_setting_trimmed(state, SETTING_LLM_PROVIDER)
         .await
-        .or_else(env_llm_provider)
         .map(|v| normalize_llm_provider(&v))
         .unwrap_or_else(|| DEFAULT_LLM_PROVIDER.to_string());
     let llm_base_url = read_setting_trimmed(state, SETTING_LLM_BASE_URL)
         .await
-        .or_else(env_llm_base_url)
         .map(|v| normalize_llm_base_url(&v))
         .unwrap_or_else(|| DEFAULT_LLM_BASE_URL.to_string());
     let llm_model = read_setting_trimmed(state, SETTING_LLM_MODEL)
         .await
-        .or_else(env_llm_model)
         .map(|v| normalize_llm_model(&v))
         .unwrap_or_else(|| DEFAULT_OPENCLAW_MODEL.to_string());
     let llm_credential_mode = read_setting_trimmed(state, SETTING_LLM_CREDENTIAL_MODE)
         .await
-        .or_else(env_llm_credential_mode)
         .map(|v| normalize_llm_credential_mode(&v))
         .unwrap_or_else(|| DEFAULT_LLM_CREDENTIAL_MODE.to_string());
     let (active, source) = read_llm_api_key(state).await;

@@ -48,7 +48,6 @@
     },
     "source": {
       "database": "database",
-      "env": "environment",
       "none": "none"
     },
     "errors": {

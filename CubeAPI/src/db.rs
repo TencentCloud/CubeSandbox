@@ -7,6 +7,9 @@ use sqlx::{mysql::MySqlPoolOptions, MySqlPool, Row};
 use crate::handlers::agenthub::{AgentInstanceResponse, AgentSetupResult, AgentWeComConfig};
 use crate::models::{SnapshotInfo, SnapshotListItem};
 
+/// Setting key for the persisted AgentHub master encryption key (base64).
+const SETTING_MASTER_KEY: &str = "secret_master_key";
+
 #[derive(Clone)]
 pub struct AgentHubStore {
     pool: MySqlPool,
@@ -89,14 +92,17 @@ impl AgentHubStore {
             .await?;
         let store = Self { pool };
         store.seed_default_admin().await?;
+        store.bootstrap_master_key().await?;
         Ok(store)
     }
 
+    /// Seeds the default WebUI admin account (admin/admin) on first connect.
+    ///
+    /// CubeMaster owns AgentHub schema migrations through goose. CubeAPI only
+    /// seeds the default WebUI account because the bcrypt hash is generated
+    /// by Rust-side crypto helpers. INSERT IGNORE keeps any password the
+    /// operator has already changed it to.
     async fn seed_default_admin(&self) -> anyhow::Result<()> {
-        // CubeMaster owns AgentHub schema migrations through goose. CubeAPI only
-        // seeds the default WebUI account because the bcrypt hash is generated
-        // by Rust-side crypto helpers. INSERT IGNORE keeps any password the
-        // operator has already changed it to.
         let admin_hash = crate::crypto::hash_password("admin")?;
         sqlx::query(
             r#"INSERT IGNORE INTO t_agenthub_user (username, password) VALUES ('admin', ?)"#,
@@ -104,6 +110,30 @@ impl AgentHubStore {
         .bind(&admin_hash)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Bootstraps the AgentHub master encryption key on first startup.
+    ///
+    /// Generates a random key only when the row does not yet exist; concurrent
+    /// CubeAPI instances converge on the single persisted value via the
+    /// `INSERT IGNORE` semantics of [`Self::get_or_create_setting`]. The decoded
+    /// key is then installed into process memory for the rest of the lifetime.
+    async fn bootstrap_master_key(&self) -> anyhow::Result<()> {
+        // Common path (already initialized): a plain read, no key generation.
+        let b64 = match self.get_setting(SETTING_MASTER_KEY).await? {
+            Some(existing) if !existing.trim().is_empty() => existing,
+            // First start: generate a candidate and let the concurrency-safe
+            // get-or-create pick the single winning value across processes.
+            _ => {
+                self.get_or_create_setting(
+                    SETTING_MASTER_KEY,
+                    &crate::crypto::generate_master_key_b64(),
+                )
+                .await?
+            }
+        };
+        crate::crypto::install_master_key(&b64)?;
         Ok(())
     }
 
@@ -1067,6 +1097,30 @@ WHERE agent_id = ? AND deleted_at IS NULL
         .await?
         .flatten();
         Ok(value)
+    }
+
+    /// Atomically returns the stored value for `key`, inserting `default_value`
+    /// only when the row does not exist yet.
+    ///
+    /// Concurrency-safe across processes: the `INSERT IGNORE` makes only the
+    /// first writer's value win at the row level (primary key on `setting_key`),
+    /// and the subsequent `SELECT` returns that single persisted value, so all
+    /// callers converge on the same result without an application-level lock.
+    pub async fn get_or_create_setting(
+        &self,
+        key: &str,
+        default_value: &str,
+    ) -> anyhow::Result<String> {
+        sqlx::query(
+            r#"INSERT IGNORE INTO t_agenthub_setting (setting_key, setting_value) VALUES (?, ?)"#,
+        )
+        .bind(key)
+        .bind(default_value)
+        .execute(&self.pool)
+        .await?;
+        self.get_setting(key)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("setting {key} missing after insert"))
     }
 
     /// Upserts a global AgentHub setting.

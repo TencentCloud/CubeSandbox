@@ -401,7 +401,7 @@ export interface AgentSettingsDto {
   /** Backward-compatible masked preview. Never the full key. */
   deepseekApiKeyMasked?: string;
   /** Backward-compatible key source. */
-  source: 'database' | 'env' | 'none';
+  source: 'database' | 'none';
   /** LLM provider id, e.g. "deepseek" or "custom". */
   llmProvider: string;
   /** OpenAI-compatible base URL. */
@@ -413,7 +413,7 @@ export interface AgentSettingsDto {
   /** Masked preview of the default LLM API key. Never the full key. */
   llmApiKeyMasked?: string;
   /** Where the LLM API key comes from. */
-  llmApiKeySource: 'database' | 'env' | 'none';
+  llmApiKeySource: 'database' | 'none';
   /** How the LLM credential is delivered to OpenClaw. */
   llmCredentialMode: 'egress' | 'env';
   /** Whether settings can be persisted (requires the AgentHub database). */

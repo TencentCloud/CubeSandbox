@@ -248,12 +248,14 @@ test_diff_report_redacts_secrets() {
   local new="${TMP_DIR}/new_sec.example" old="${TMP_DIR}/old_sec.env"
   local out="${TMP_DIR}/out_sec.env" diff="${TMP_DIR}/diff_sec.txt"
   write_new_example "${new}"
-  # User customized the secret values -> they appear in [preserved].
+  # User customized the secret values -> they appear in [preserved]/[kept-extra].
+  # Use neutral secret-bearing var names (matched by the redaction regex via
+  # API_KEY/TOKEN) that are NOT in the obsolete deny-list, so they are preserved.
   cat > "${old}" <<'EOF'
 CUBE_SANDBOX_REDIS_PASSWORD=topsecret123
 DATABASE_URL=mysql://u:p@host:3306/realdb
-AGENTHUB_DEEPSEEK_API_KEY=sk-agenthub-secret
-OPENCLAW_DEEPSEEK_API_KEY=sk-openclaw-secret
+CUSTOM_THIRD_PARTY_API_KEY=sk-custom-secret
+MY_SERVICE_AUTH_TOKEN=tok-openclaw-secret
 EOF
 
   merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
@@ -261,18 +263,53 @@ EOF
   # The diff report must NOT leak plaintext secrets...
   assert_contains "${diff}" "CUBE_SANDBOX_REDIS_PASSWORD=***REDACTED***"
   assert_contains "${diff}" "DATABASE_URL=***REDACTED***"
-  assert_contains "${diff}" "AGENTHUB_DEEPSEEK_API_KEY=***REDACTED***"
-  assert_contains "${diff}" "OPENCLAW_DEEPSEEK_API_KEY=***REDACTED***"
+  assert_contains "${diff}" "CUSTOM_THIRD_PARTY_API_KEY=***REDACTED***"
+  assert_contains "${diff}" "MY_SERVICE_AUTH_TOKEN=***REDACTED***"
   assert_not_contains "${diff}" "topsecret123"
   assert_not_contains "${diff}" "realdb"
-  assert_not_contains "${diff}" "sk-agenthub-secret"
-  assert_not_contains "${diff}" "sk-openclaw-secret"
+  assert_not_contains "${diff}" "sk-custom-secret"
+  assert_not_contains "${diff}" "tok-openclaw-secret"
 
   # ...but the merged runtime env MUST keep the real values intact.
   assert_value "${out}" CUBE_SANDBOX_REDIS_PASSWORD topsecret123
   assert_value "${out}" DATABASE_URL "mysql://u:p@host:3306/realdb"
-  assert_value "${out}" AGENTHUB_DEEPSEEK_API_KEY "sk-agenthub-secret"
-  assert_value "${out}" OPENCLAW_DEEPSEEK_API_KEY "sk-openclaw-secret"
+  assert_value "${out}" CUSTOM_THIRD_PARTY_API_KEY "sk-custom-secret"
+  assert_value "${out}" MY_SERVICE_AUTH_TOKEN "tok-openclaw-secret"
+}
+
+test_drops_obsolete_agenthub_keys() {
+  local new="${TMP_DIR}/new_obs.example" old="${TMP_DIR}/old_obs.env"
+  local out="${TMP_DIR}/out_obs.env" diff="${TMP_DIR}/diff_obs.txt"
+  write_new_example "${new}"
+  # Old runtime carries the now-obsolete AgentHub LLM env vars plus a legit
+  # custom key. Only the obsolete ones must be dropped.
+  cat > "${old}" <<'EOF'
+CUBE_SANDBOX_MYSQL_PORT=3306
+AGENTHUB_DEEPSEEK_API_KEY=sk-agenthub-secret
+OPENCLAW_DEEPSEEK_API_KEY=sk-openclaw-secret
+AGENTHUB_LLM_API_KEY=sk-llm-secret
+AGENTHUB_LLM_PROVIDER=deepseek
+OPENCLAW_DEFAULT_MODEL=deepseek/deepseek-v4-flash
+AGENTHUB_SECRET_KEY=base64key
+MY_CUSTOM_KEEP=stays
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  # Obsolete keys are removed from the merged runtime env (no lingering secrets).
+  for k in AGENTHUB_DEEPSEEK_API_KEY OPENCLAW_DEEPSEEK_API_KEY AGENTHUB_LLM_API_KEY \
+           AGENTHUB_LLM_PROVIDER OPENCLAW_DEFAULT_MODEL AGENTHUB_SECRET_KEY; do
+    if grep -q "^${k}=" "${out}"; then
+      fail "obsolete key ${k} should have been dropped from ${out}"
+    fi
+  done
+  assert_not_contains "${out}" "sk-agenthub-secret"
+  assert_not_contains "${out}" "sk-llm-secret"
+  # The report records the drops without leaking secrets.
+  assert_contains "${diff}" "[dropped] obsolete keys removed on upgrade:"
+  assert_not_contains "${diff}" "sk-agenthub-secret"
+  # A non-obsolete custom key is still preserved verbatim.
+  assert_value "${out}" MY_CUSTOM_KEEP stays
 }
 
 test_non_utf8_env_fails_cleanly() {
@@ -368,6 +405,7 @@ test_two_way_fallback_without_baseline
 test_new_dotenv_overrides_take_priority
 test_version_lt
 test_diff_report_redacts_secrets
+test_drops_obsolete_agenthub_keys
 test_non_utf8_env_fails_cleanly
 test_read_helpers_reject_invalid_key
 test_read_helpers
