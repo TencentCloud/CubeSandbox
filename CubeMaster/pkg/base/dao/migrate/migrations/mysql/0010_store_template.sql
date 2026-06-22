@@ -93,17 +93,52 @@ ON DUPLICATE KEY UPDATE
   `sort_order` = VALUES(`sort_order`),
   `deleted_at` = NULL;
 
+-- Soft-delete the legacy single openclaw entry in case it was seeded by
+-- a previous run of the CubeAPI Rust seed_store_templates() function.
+UPDATE `t_store_template`
+  SET `deleted_at` = NOW()
+WHERE `item_id` = 'openclaw' AND `deleted_at` IS NULL;
+
 INSERT INTO `t_store_template` (
   `item_id`, `name_key`, `description_key`, `image_cn`, `image_intl`, `digest`,
   `tags`, `category`, `size_mb`, `expose_ports`, `probe_port`, `probe_path`,
   `writable_layer_size`, `official`, `dns`, `sort_order`, `deleted_at`
 ) VALUES
-  ('openclaw', 'items.openclaw.name', 'items.openclaw.description',
+  ('openclaw-lite', 'items.openclaw-lite.name', 'items.openclaw-lite.description',
+   'cube-sandbox-image.tencentcloudcr.com/demo/lightweight-openclaw-deepseek-wecom:latest',
+   'cube-sandbox-image.tencentcloudcr.com/demo/lightweight-openclaw-deepseek-wecom:latest',
+   NULL,
+   '["agent", "openclaw", "lite", "deepseek"]', 'ai', 2600, '[49983, 18789, 49999]', 49983, '/health',
+   '2G', 1, '[]', 2, NULL)
+ON DUPLICATE KEY UPDATE
+  `name_key` = VALUES(`name_key`),
+  `description_key` = VALUES(`description_key`),
+  `image_cn` = VALUES(`image_cn`),
+  `image_intl` = VALUES(`image_intl`),
+  `digest` = VALUES(`digest`),
+  `tags` = VALUES(`tags`),
+  `category` = VALUES(`category`),
+  `size_mb` = VALUES(`size_mb`),
+  `expose_ports` = VALUES(`expose_ports`),
+  `probe_port` = VALUES(`probe_port`),
+  `probe_path` = VALUES(`probe_path`),
+  `writable_layer_size` = VALUES(`writable_layer_size`),
+  `official` = VALUES(`official`),
+  `dns` = VALUES(`dns`),
+  `sort_order` = VALUES(`sort_order`),
+  `deleted_at` = NULL;
+
+INSERT INTO `t_store_template` (
+  `item_id`, `name_key`, `description_key`, `image_cn`, `image_intl`, `digest`,
+  `tags`, `category`, `size_mb`, `expose_ports`, `probe_port`, `probe_path`,
+  `writable_layer_size`, `official`, `dns`, `sort_order`, `deleted_at`
+) VALUES
+  ('openclaw-aio', 'items.openclaw-aio.name', 'items.openclaw-aio.description',
    'cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest',
    'cube-sandbox-image.tencentcloudcr.com/demo/aio-sandbox-envd-openclaw:latest',
    'sha256:47680d7bc13ea7c57aeb88dff59ef2c44b0facb508e8c9066d479d7d458e0a66',
-   '["agent", "openclaw", "browser", "deepseek"]', 'ai', 6350, '[49983, 18789, 8080]', 49983, '/health',
-   '4G', 1, '[]', 2, NULL)
+   '["agent", "openclaw", "aio", "browser", "deepseek"]', 'ai', 6350, '[49983, 18789, 8080]', 49983, '/health',
+   '4G', 1, '[]', 3, NULL)
 ON DUPLICATE KEY UPDATE
   `name_key` = VALUES(`name_key`),
   `description_key` = VALUES(`description_key`),
@@ -132,7 +167,7 @@ INSERT INTO `t_store_template` (
    'ghcr.io/tencentcloud/cubesandbox-base:latest',
    NULL,
    '["base", "envd", "official"]', 'base', 98, '[49983]', 49983, '/health',
-   '1G', 1, '[]', 3, NULL)
+  '1G', 1, '[]', 4, NULL)
 ON DUPLICATE KEY UPDATE
   `name_key` = VALUES(`name_key`),
   `description_key` = VALUES(`description_key`),
@@ -161,7 +196,7 @@ INSERT INTO `t_store_template` (
    'cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-nginx:latest',
    NULL,
    '["nginx", "web", "official"]', 'web', 120, '[49983, 80]', 49983, '/health',
-   '1G', 1, '[]', 4, NULL)
+  '1G', 1, '[]', 5, NULL)
 ON DUPLICATE KEY UPDATE
   `name_key` = VALUES(`name_key`),
   `description_key` = VALUES(`description_key`),
