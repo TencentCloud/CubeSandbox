@@ -1228,8 +1228,6 @@ LIMIT 1
 
     // ── Store Template CRUD ──────────────────────────────────────────────────
 
-
-
     pub async fn list_store_templates(&self) -> anyhow::Result<Vec<StoreTemplateRecord>> {
         let rows = sqlx::query(
             r#"
