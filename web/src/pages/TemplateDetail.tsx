@@ -581,11 +581,17 @@ export default function TemplateDetailPage() {
       <div className="flex items-start justify-between gap-6 pb-6 border-b border-border/50">
         {/* left: id + meta */}
         <div className={cn('min-w-0 space-y-2 border-l-[3px] pl-3', headerAccentClass)}>
+          {data.displayName && (
+            <h1 className="text-xl font-semibold tracking-tight truncate">{data.displayName}</h1>
+          )}
           <div className="flex items-center gap-1.5">
             <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{t('templateId')}</span>
           </div>
           <div className="flex items-center gap-2">
-            <h1 className="text-lg font-semibold font-mono tracking-tight truncate">{data.templateID}</h1>
+            <h1 className={cn(
+              'font-semibold font-mono tracking-tight truncate',
+              data.displayName ? 'text-sm text-muted-foreground' : 'text-lg',
+            )}>{data.templateID}</h1>
             <CopyButton text={data.templateID} />
           </div>
           {imgShort && (

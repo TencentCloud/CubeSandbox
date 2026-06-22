@@ -24,6 +24,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
   const { t } = useTranslation('templates');
   const qc = useQueryClient();
   const [image, setImage] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [instanceType, setInstanceType] = useState('');
   const [writableLayerSize, setWritableLayerSize] = useState('1G');
   const [exposedPorts, setExposedPorts] = useState('');
@@ -40,6 +41,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
       const envList = envVars.split('\n').map(s => s.trim()).filter(Boolean);
       return templateApi.create({
         image,
+        displayName: displayName.trim() || undefined,
         instanceType: instanceType.trim() || undefined,
         writableLayerSize: writableLayerSize.trim() || undefined,
         exposedPorts: ports.length > 0 ? ports : undefined,
@@ -69,6 +71,19 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
           </button>
         </CardHeader>
         <CardContent className="space-y-4">
+          {/* Row 0: display name (optional) */}
+          <div className="grid grid-cols-1 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">
+                {t('create.displayName')}
+              </label>
+              <Input
+                placeholder={t('create.displayNameHint')}
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+            </div>
+          </div>
           {/* Row 1: image */}
           <div className="grid grid-cols-1 gap-3">
             <div className="space-y-1.5">
@@ -343,7 +358,7 @@ export default function TemplatesPage() {
                       <Package size={18} />
                     </span>
                     <div>
-                      <CardTitle className="text-base">{tpl.templateID}</CardTitle>
+                      <CardTitle className="text-base">{tpl.displayName || tpl.templateID}</CardTitle>
                       <CardDescription className="font-mono text-xs">{tpl.templateID}</CardDescription>
                     </div>
                   </div>

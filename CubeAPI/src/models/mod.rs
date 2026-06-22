@@ -517,6 +517,8 @@ pub struct ListTemplatesQuery {
 pub struct TemplateSummary {
     #[serde(rename = "templateID")]
     pub template_id: String,
+    #[serde(rename = "displayName", skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(rename = "instanceType", skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -535,6 +537,8 @@ pub struct TemplateSummary {
 pub struct TemplateDetail {
     #[serde(rename = "templateID")]
     pub template_id: String,
+    #[serde(rename = "displayName", skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(rename = "instanceType", skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -566,6 +570,9 @@ pub struct CreateTemplateRequest {
     pub template_id: String,
     #[serde(rename = "instanceType", default)]
     pub instance_type: Option<String>,
+    /// Optional human-friendly display name for the template.
+    #[serde(rename = "displayName", default)]
+    pub display_name: Option<String>,
     /// Container image reference, e.g. `registry.example.com/code:latest`.
     #[validate(length(min = 1))]
     pub image: String,

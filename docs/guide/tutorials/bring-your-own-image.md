@@ -87,6 +87,10 @@ Once you have a `template_id` you can boot sandboxes from it with the
 Cube SDK or `cubemastercli`; the full SDK usage is covered in
 [Create Templates from OCI Image](./template-from-image.md).
 
+> **Tip:** add `--name "<friendly name>"` to give the template a human-readable
+> display name shown in `tpl list`, `tpl info`, and the WebUI. It's optional and
+> does not change the `template_id`.
+
 ### Available base image tags
 
 | Tag                       | Base OS       | envd version |

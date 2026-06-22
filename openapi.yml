@@ -1019,6 +1019,10 @@ components:
           - 'null'
           description: Whether public internet access is allowed for sandboxes from this template.
         createRequest: {}
+        displayName:
+          type:
+          - string
+          - 'null'
         instanceType:
           type:
           - string
@@ -1089,6 +1093,10 @@ components:
       - status
       properties:
         createdAt:
+          type:
+          - string
+          - 'null'
+        displayName:
           type:
           - string
           - 'null'

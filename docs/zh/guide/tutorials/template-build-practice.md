@@ -87,6 +87,9 @@ status:      PENDING
 phase:       PULLING
 ```
 
+> 💡 **提示：** 可加 `--name "<友好名称>"` 为模板设置一个可选的展示名称，
+> 在 `tpl list`、`tpl info` 和 WebUI 中显示，便于人工识别；它不会改变 `template_id`。
+
 ### Step 5：等待模板就绪
 
 ```bash

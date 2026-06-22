@@ -503,6 +503,7 @@ type CreateTemplateFromImageReq struct {
 	RegistryUsername   string              `json:"registry_username,omitempty"`
 	RegistryPassword   string              `json:"registry_password,omitempty"`
 	TemplateID         string              `json:"template_id,omitempty" p:"template_id"`
+	DisplayName        string              `json:"display_name,omitempty" p:"display_name"`
 	InstanceType       string              `json:"instance_type,omitempty"`
 	NetworkType        string              `json:"network_type,omitempty"`
 	CubeNetworkConfig  *CubeNetworkConfig  `json:"cube_network_config,omitempty"`

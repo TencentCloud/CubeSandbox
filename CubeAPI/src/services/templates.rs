@@ -46,6 +46,7 @@ impl TemplateService {
             .into_iter()
             .map(|s| TemplateSummary {
                 template_id: s.template_id,
+                display_name: non_empty(s.display_name),
                 instance_type: non_empty(s.instance_type),
                 version: non_empty(s.version),
                 status: s.status,
@@ -92,6 +93,7 @@ impl TemplateService {
 
         Ok(TemplateDetail {
             template_id: string_or(resp.template_id, template_id),
+            display_name: non_empty(resp.display_name),
             instance_type: non_empty(resp.instance_type),
             version: non_empty(resp.version),
             status: resp.status,
@@ -124,6 +126,7 @@ impl TemplateService {
             // auto-generates it with the "tpl-" prefix via
             // normalizeTemplateImageRequest.
             template_id: String::new(),
+            display_name: non_empty_option(body.display_name),
             source_image_ref: body.image.trim().to_string(),
             writable_layer_size: body.writable_layer_size,
             exposed_ports: body.exposed_ports,
@@ -512,6 +515,7 @@ mod tests {
         CreateTemplateRequest {
             template_id: String::new(),
             instance_type: Some("cubebox".to_string()),
+            display_name: Some("My Template".to_string()),
             image: "python:3.11-slim".to_string(),
             writable_layer_size: Some("1G".to_string()),
             exposed_ports: Some(vec![8080]),

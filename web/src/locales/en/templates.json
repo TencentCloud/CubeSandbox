@@ -35,6 +35,8 @@
   "create": {
     "button": "New Template",
     "title": "New Template",
+    "displayName": "Template Name",
+    "displayNameHint": "Optional friendly name for this template",
     "templateID": "Template ID",
     "image": "image",
     "instanceType": "instance-type",

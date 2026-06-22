@@ -47,6 +47,7 @@ Typical response shape:
 ```json
 {
   "template_id": "tpl-xxx",
+  "display_name": "My Dev Environment",
   "instance_type": "cubebox",
   "status": "READY",
   "replicas": [
@@ -68,6 +69,7 @@ Typical response shape:
 How to read `create_request`:
 
 - It is the request body stored with the template definition.
+- `display_name` is the optional human-readable name set via `--name` at creation time; it is omitted when no name was provided.
 - It is useful when you want to inspect what the template was originally built from or committed with.
 - It is not the final request for every future sandbox creation. Later user input can still be merged on top.
 

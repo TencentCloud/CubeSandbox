@@ -625,12 +625,16 @@ func createDefinitionWithOptions(ctx context.Context, templateID string, storedR
 }
 
 func ensureTemplateDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
+	return ensureTemplateDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, definitionCreateOptions{})
+}
+
+func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) (bool, error) {
 	if _, err := GetDefinition(ctx, templateID); err == nil {
 		return false, nil
 	} else if !errors.Is(err, ErrTemplateNotFound) {
 		return false, err
 	}
-	if err := createDefinition(ctx, templateID, storedReq, instanceType, version); err != nil {
+	if err := createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, opts); err != nil {
 		return false, err
 	}
 	if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {

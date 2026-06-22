@@ -491,6 +491,7 @@ export interface components {
             /** @description Whether public internet access is allowed for sandboxes from this template. */
             allowInternetAccess?: boolean | null;
             createRequest?: unknown;
+            displayName?: string | null;
             instanceType?: string | null;
             lastError?: string | null;
             /** @description Network type used when the template was created, e.g. "tap". */
@@ -514,6 +515,7 @@ export interface components {
         /** @description Summary row returned by GET /templates. */
         TemplateSummary: {
             createdAt?: string | null;
+            displayName?: string | null;
             imageInfo?: string | null;
             instanceType?: string | null;
             lastError?: string | null;

@@ -77,6 +77,27 @@ phase:       PULLING
 progress:    0%
 ```
 
+#### Optional — assign a custom display name
+
+Template IDs are auto-generated (e.g. `tpl-4ff5adc5eea44c14b1c8dbb3`) and are
+not human-friendly. Pass `--name` to attach an optional, human-readable display
+name to the template. The name is purely cosmetic — it does **not** replace the
+`template_id` used to create sandboxes — but it makes templates much easier to
+recognize in `tpl list`, `tpl info`, and the WebUI.
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  --writable-layer-size 1G \
+  --expose-port 9000 \
+  --probe 9000 \
+  --probe-path / \
+  --name "My Dev Environment"
+```
+
+`--name` is optional. When omitted, the template has no display name and tools
+fall back to showing the `template_id`.
+
 #### Example — multiple ports, custom probe path, env var
 
 ```bash
@@ -169,14 +190,16 @@ cubemastercli tpl list
 Output:
 
 ```
-TEMPLATE_ID                  INSTANCE_TYPE   STATUS   CREATED_AT             IMAGE_INFO
-tpl-748094d2f2374b0a8a37e6ec cubebox         READY    2026-04-02T08:10:30Z   docker.io/library/nginx:latest@sha256:abcd...
-tpl-4ff5adc5eea44c14b1c8dbb3 cubebox         READY    2026-04-01T17:42:11Z   docker.io/library/python:3.11
+TEMPLATE_ID                  NAME                STATUS   CREATED_AT             IMAGE_INFO
+tpl-748094d2f2374b0a8a37e6ec My Dev Environment  READY    2026-04-02T08:10:30Z   docker.io/library/nginx:latest@sha256:abcd...
+tpl-4ff5adc5eea44c14b1c8dbb3 -                   READY    2026-04-01T17:42:11Z   docker.io/library/python:3.11
 ```
 
-`CREATED_AT` is returned in UTC RFC3339 format. `IMAGE_INFO` shows image reference
-and digest when available (`image@sha256:...`), and falls back to the image
-reference when digest is unavailable.
+`NAME` shows the custom display name set via `--name` at creation time, or `-`
+when none was provided. `CREATED_AT` is returned in UTC RFC3339 format.
+`IMAGE_INFO` shows image reference and digest when available
+(`image@sha256:...`), and falls back to the image reference when digest is
+unavailable.
 
 Use wide output when you need `VERSION` and `LAST_ERROR`:
 

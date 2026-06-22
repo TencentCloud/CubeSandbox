@@ -23,6 +23,7 @@ export interface SandboxDetail extends SandboxDetailDto {}
 
 export interface TemplateSummary {
   templateID: string;
+  displayName?: string | null;
   instanceType?: string | null;
   version?: string | null;
   status: string;
@@ -120,6 +121,7 @@ function mapSandboxDetail(dto: SandboxDetailDto): SandboxDetail {
 function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
   return {
     templateID: dto.templateID,
+    displayName: (dto as unknown as { displayName?: string }).displayName ?? null,
     instanceType: dto.instanceType,
     version: dto.version,
     status: dto.status,
@@ -134,6 +136,7 @@ function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
 function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
   return {
     templateID: dto.templateID,
+    displayName: (dto as unknown as { displayName?: string }).displayName ?? null,
     instanceType: dto.instanceType,
     version: dto.version,
     status: dto.status,
@@ -213,7 +216,7 @@ export const sandboxApi = {
 export const templateApi = {
   list: () => api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
   get: (id: string) => api<TemplateDetailDto>(`/templates/${id}`).then(mapTemplateDetail),
-  create: (body: { templateID?: string; image: string; instanceType?: string; writableLayerSize?: string; exposedPorts?: number[]; probePort?: number; probePath?: string; cpu?: number; memory?: number; env?: string[]; allowInternetAccess?: boolean }) =>
+  create: (body: { templateID?: string; displayName?: string; image: string; instanceType?: string; writableLayerSize?: string; exposedPorts?: number[]; probePort?: number; probePath?: string; cpu?: number; memory?: number; env?: string[]; allowInternetAccess?: boolean }) =>
     api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) }),
   rebuild: (id: string) => api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
   getBuildStatus: (id: string, buildID: string) =>

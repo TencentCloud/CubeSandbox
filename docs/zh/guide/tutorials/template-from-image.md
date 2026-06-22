@@ -62,6 +62,25 @@ phase:       PULLING
 progress:    0%
 ```
 
+#### 可选 — 指定自定义名称
+
+`template_id` 是自动生成的（如 `tpl-4ff5adc5eea44c14b1c8dbb3`），不便于人工识别。
+可通过 `--name` 为模板附加一个可选的、人类可读的展示名称。该名称仅用于展示，
+**不会**替代用于创建沙箱的 `template_id`，但能让模板在 `tpl list`、`tpl info`
+以及 WebUI 中更易辨认。
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  --writable-layer-size 1G \
+  --expose-port 9000 \
+  --probe 9000 \
+  --probe-path / \
+  --name "我的开发环境"
+```
+
+`--name` 为可选项。不指定时模板没有展示名称，相关工具会回退为展示 `template_id`。
+
 #### 示例 — 多端口 + 自定义探针路径 + 环境变量
 
 ```bash
@@ -152,12 +171,13 @@ cubemastercli tpl list
 输出示例：
 
 ```
-TEMPLATE_ID                  INSTANCE_TYPE   STATUS   CREATED_AT             IMAGE_INFO
-tpl-748094d2f2374b0a8a37e6ec cubebox         READY    2026-04-02T08:10:30Z   docker.io/library/nginx:latest@sha256:abcd...
-tpl-4ff5adc5eea44c14b1c8dbb3 cubebox         READY    2026-04-01T17:42:11Z   docker.io/library/python:3.11
+TEMPLATE_ID                  NAME            STATUS   CREATED_AT             IMAGE_INFO
+tpl-748094d2f2374b0a8a37e6ec 我的开发环境     READY    2026-04-02T08:10:30Z   docker.io/library/nginx:latest@sha256:abcd...
+tpl-4ff5adc5eea44c14b1c8dbb3 -               READY    2026-04-01T17:42:11Z   docker.io/library/python:3.11
 ```
 
-`CREATED_AT` 使用 UTC RFC3339 格式输出。`IMAGE_INFO` 会优先展示镜像引用 +
+`NAME` 列展示创建时通过 `--name` 设置的自定义名称；未设置时显示 `-`。`CREATED_AT`
+使用 UTC RFC3339 格式输出。`IMAGE_INFO` 会优先展示镜像引用 +
 digest（`image@sha256:...`）；当 digest 不可用时降级为仅展示镜像引用。
 
 如果需要同时查看 `VERSION` 和 `LAST_ERROR`，使用宽格式输出：

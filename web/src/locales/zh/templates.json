@@ -35,6 +35,8 @@
   "create": {
     "button": "新建模板",
     "title": "新建模板",
+    "displayName": "模板名称",
+    "displayNameHint": "可选，给模板取一个友好的名称",
     "templateID": "Template ID",
     "image": "image",
     "instanceType": "instance-type",

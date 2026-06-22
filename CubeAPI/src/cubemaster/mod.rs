@@ -1568,6 +1568,8 @@ pub struct TemplateSummaryItem {
     #[serde(default)]
     pub template_id: String,
     #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
     pub instance_type: String,
     #[serde(default)]
     pub version: String,
@@ -1602,6 +1604,8 @@ pub struct TemplateResponse {
     pub ret: RetCode,
     #[serde(default)]
     pub template_id: String,
+    #[serde(default)]
+    pub display_name: String,
     #[serde(default)]
     pub instance_type: String,
     #[serde(default)]
@@ -1728,6 +1732,9 @@ pub struct CreateTemplateFromImageReq {
     pub instance_type: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub template_id: String,
+    /// Optional human-friendly display name for the template.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// CubeMaster field name for the source image.
     pub source_image_ref: String,
     /// Writable layer size, e.g. "1G".

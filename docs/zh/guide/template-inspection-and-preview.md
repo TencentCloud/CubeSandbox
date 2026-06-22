@@ -47,6 +47,7 @@ cubemastercli tpl info --template-id <template-id> --json --include-request
 ```json
 {
   "template_id": "tpl-xxx",
+  "display_name": "我的开发环境",
   "instance_type": "cubebox",
   "status": "READY",
   "replicas": [
@@ -68,6 +69,7 @@ cubemastercli tpl info --template-id <template-id> --json --include-request
 其中 `create_request` 可以这样理解：
 
 - 它是模板定义里保存下来的请求体。
+- `display_name` 是创建时通过 `--name` 设置的可选展示名称；未设置时该字段会被省略。
 - 它适合回答“这个模板最初是基于什么请求构建或提交出来的”。
 - 它不是未来每次创建沙箱都会直接使用的最终请求，因为后续用户输入还可能继续叠加合并。
 
