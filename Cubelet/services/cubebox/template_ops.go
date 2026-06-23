@@ -451,7 +451,7 @@ func resolveCleanupRefs(ctx context.Context, templateID string, objects []*cubeb
 		if err != nil {
 			return nil, "", err
 		}
-		return refs, callerSnapshotPath, nil
+		return refs, ensureSnapshotCleanupPath(ctx, templateID, callerSnapshotPath), nil
 	}
 	entry, err := storage.GetLocalSnapshot(ctx, templateID)
 	if err == nil && entry != nil {
@@ -460,14 +460,38 @@ func resolveCleanupRefs(ctx context.Context, templateID string, objects []*cubeb
 		if snapshotPath == "" {
 			snapshotPath = callerSnapshotPath
 		}
-		return refs, snapshotPath, nil
+		return refs, ensureSnapshotCleanupPath(ctx, templateID, snapshotPath), nil
 	}
 	if err != nil && !errors.Is(err, storage.ErrSnapshotCatalogNotFound) {
 		log.G(ctx).Warnf("CleanupTemplate %s: catalog lookup failed (%v); falling back to deterministic refs", templateID, err)
 	} else {
 		log.G(ctx).Warnf("CleanupTemplate %s: catalog miss; falling back to deterministic refs", templateID)
 	}
-	return storage.DefaultTemplateObjectRefs(templateID), callerSnapshotPath, nil
+	return storage.DefaultTemplateObjectRefs(templateID), ensureSnapshotCleanupPath(ctx, templateID, callerSnapshotPath), nil
+}
+
+// ensureSnapshotCleanupPath implements FIX-4: when neither the caller nor the
+// local catalog supplies a snapshot path (catalog miss / legacy master), derive
+// the deterministic snapshot directory used by CommitSandbox so the on-disk
+// snapshot is not orphaned (L11). The derived path is the templateID-level dir
+// (`<DefaultSnapshotDir>/cubebox/<templateID>`) which contains every spec
+// variant, and is bounded by ValidatePathUnderBase (S3). On any validation
+// failure we return the original (empty) path rather than an unsafe guess.
+func ensureSnapshotCleanupPath(ctx context.Context, templateID, snapshotPath string) string {
+	if strings.TrimSpace(snapshotPath) != "" {
+		return snapshotPath
+	}
+	if err := pathutil.ValidateSafeID(templateID); err != nil {
+		log.G(ctx).Warnf("CleanupTemplate %s: cannot derive snapshot dir, unsafe templateID: %v", templateID, err)
+		return snapshotPath
+	}
+	guessed := filepath.Join(DefaultSnapshotDir, "cubebox", templateID)
+	if _, err := pathutil.ValidatePathUnderBase(DefaultSnapshotDir, guessed); err != nil {
+		log.G(ctx).Warnf("CleanupTemplate %s: derived snapshot dir %q rejected: %v", templateID, guessed, err)
+		return snapshotPath
+	}
+	log.G(ctx).Infof("CleanupTemplate %s: derived deterministic snapshot dir %q for cleanup", templateID, guessed)
+	return guessed
 }
 
 func cubecowRefsFromCatalogEntry(templateID string, entry *storage.SnapshotCatalogEntry) []storage.CowObjectRef {

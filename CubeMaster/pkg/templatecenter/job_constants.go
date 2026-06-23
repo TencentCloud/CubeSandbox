@@ -14,6 +14,14 @@ const (
 	ArtifactStatusBuilding = "BUILDING"
 	ArtifactStatusReady    = "READY"
 	ArtifactStatusFailed   = "FAILED"
+	// ArtifactStatusCleanupPending marks an artifact whose logical references
+	// have reached zero and whose physical files are being / awaiting removal.
+	// A row in this state must never be reused; the create/reuse path rebuilds
+	// instead. GC retries cleanup until the artifact row can be safely deleted.
+	ArtifactStatusCleanupPending = "CLEANUP_PENDING"
+	// ArtifactStatusOrphaned marks an artifact with no surviving references that
+	// was never fully built/distributed (e.g. interrupted build); GC reclaims it.
+	ArtifactStatusOrphaned = "ORPHANED"
 
 	JobStatusPending = "PENDING"
 	JobStatusRunning = "RUNNING"

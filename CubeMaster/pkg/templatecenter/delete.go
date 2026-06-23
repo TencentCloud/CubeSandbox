@@ -8,19 +8,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"gorm.io/gorm"
 )
 
 var ErrTemplateInUse = errors.New("template is still in use")
@@ -262,87 +261,31 @@ func cleanupTemplateJobs(ctx context.Context, templateID string) error {
 		Where("template_id = ?", templateID).Delete(&models.TemplateImageJob{}).Error
 }
 
+// cleanupTemplateArtifact runs reference-aware, last-owner cleanup for every
+// artifact this template references. Artifacts are processed in lexical order
+// of artifact_id so concurrent deletions of templates sharing multiple
+// artifacts acquire the per-artifact row locks in a consistent order (deadlock
+// avoidance). Each artifact's physical removal and metadata deletion are
+// delegated to cleanupArtifactFully (three-phase, lock-free RPC).
 func cleanupTemplateArtifact(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
 	if targets == nil || len(targets.ArtifactIDs) == 0 {
 		return nil
 	}
-	var cleanupErr error
+	artifactIDs := make([]string, 0, len(targets.ArtifactIDs))
 	for artifactID := range targets.ArtifactIDs {
-		artifactTargets := resolveArtifactCleanupNodes(targets, artifactID)
-		if len(artifactTargets) == 0 {
-			artifactTargets = healthyTemplateNodes(targets.InstanceType)
+		if strings.TrimSpace(artifactID) != "" {
+			artifactIDs = append(artifactIDs, artifactID)
 		}
-		distributionErr := cleanupArtifactOnNodes(ctx, artifactID, artifactTargets)
-		artifact, lookupErr := getRootfsArtifactByID(ctx, artifactID)
-		if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
-			cleanupErr = errors.Join(cleanupErr, lookupErr)
+	}
+	sort.Strings(artifactIDs)
+
+	var cleanupErr error
+	for _, artifactID := range artifactIDs {
+		if err := cleanupArtifactFully(ctx, artifactID, targets.InstanceType, templateID); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
-		var artifactCleanupErr error
-		if lookupErr == nil {
-			if artifact.Ext4Path != "" {
-				if err := cleanupLocalRootfsArtifact(artifact.ArtifactID, artifact.Ext4Path); err != nil {
-					artifactCleanupErr = errors.Join(artifactCleanupErr, err)
-				}
-			}
-			if distributionErr == nil && artifactCleanupErr == nil {
-				if err := store.db.WithContext(ctx).Unscoped().Table(constants.RootfsArtifactTableName).
-					Where("artifact_id = ?", artifactID).Delete(&models.RootfsArtifact{}).Error; err != nil {
-					artifactCleanupErr = errors.Join(artifactCleanupErr, err)
-				}
-			}
-		}
-		cleanupErr = errors.Join(cleanupErr, distributionErr, artifactCleanupErr)
 	}
 	return cleanupErr
-}
-
-func resolveArtifactCleanupNodes(targets *templateCleanupTargets, artifactID string) []*node.Node {
-	if targets == nil || strings.TrimSpace(artifactID) == "" {
-		return nil
-	}
-	out := make([]*node.Node, 0)
-	seen := make(map[string]struct{})
-	appendNode := func(nodeID, nodeIP string) {
-		nodeID = strings.TrimSpace(nodeID)
-		nodeIP = strings.TrimSpace(nodeIP)
-		if nodeIP == "" && nodeID != "" {
-			if cachedNode, ok := localcache.GetNode(nodeID); ok && cachedNode != nil {
-				nodeIP = strings.TrimSpace(cachedNode.HostIP())
-				if nodeID == "" {
-					nodeID = strings.TrimSpace(cachedNode.ID())
-				}
-			}
-		}
-		if nodeIP == "" {
-			return
-		}
-		key := nodeID + "|" + nodeIP
-		if _, ok := seen[key]; ok {
-			return
-		}
-		out = append(out, &node.Node{
-			InsID: nodeID,
-			IP:    nodeIP,
-		})
-		seen[key] = struct{}{}
-	}
-	for _, replica := range targets.Replicas {
-		if strings.TrimSpace(replica.ArtifactID) != artifactID {
-			continue
-		}
-		appendNode(replica.NodeID, replica.NodeIP)
-	}
-	for _, job := range targets.Jobs {
-		if strings.TrimSpace(job.ArtifactID) != artifactID {
-			continue
-		}
-		appendNode(job.NodeID, job.NodeIP)
-	}
-	return out
-}
-
-func cleanupDistributedArtifact(ctx context.Context, artifactID, instanceType string) error {
-	return cleanupArtifactOnNodes(ctx, artifactID, healthyTemplateNodes(instanceType))
 }
 
 func cleanupTemplateReplicas(ctx context.Context, templateID string) error {

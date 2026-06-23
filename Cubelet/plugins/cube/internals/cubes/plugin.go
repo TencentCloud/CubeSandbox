@@ -33,6 +33,7 @@ type CubeboxAPI interface {
 	Get(ctx context.Context, id string) (*cubeboxstore.CubeBox, error)
 	FindContainerOfCubebox(ctx context.Context, ID string) (*cubeboxstore.Container, *cubeboxstore.CubeBox, error)
 	List() []*cubeboxstore.CubeBox
+	IsImageInUse(imageID string) (bool, error)
 
 	Save(ctx context.Context, info *cubeboxstore.CubeBox, opts ...UpdateCubeboxOpt) error
 	SyncByID(ctx context.Context, id string, opts ...UpdateCubeboxOpt) error

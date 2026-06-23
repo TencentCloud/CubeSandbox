@@ -50,6 +50,11 @@ const PERSISTENCE_MODE_SHARED_FILES: &str = "shared_files";
 const ROOTFS_SOURCE_TEMPLATE: &str = "template";
 const ROOTFS_SOURCE_SNAPSHOT: &str = "snapshot";
 const SNAPSHOT_KIND_SANDBOX: &str = "sandbox";
+// OpenClaw shared-files snapshots persist as a host directory rooted at
+// OPENCLAW_HOST_SNAPSHOT_ROOT and are recorded with this kind (db.rs upsert).
+// They are NOT CubeMaster snapshots, so cascade cleanup must remove the host
+// directory rather than calling the snapshot service.
+const SNAPSHOT_KIND_AGENTHUB_STATE: &str = "agenthub_state";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -873,6 +878,103 @@ fn copy_openclaw_state_dir(source: &str, target: &str) -> AppResult<()> {
     Ok(())
 }
 
+// is_valid_agenthub_snapshot_id enforces the exact shape produced by
+// new_agenthub_snapshot_id (`agenthub-` + 32 lowercase hex). Any other value is
+// rejected before it is used to build a filesystem path, so a polluted /
+// attacker-controlled id can never traverse outside the managed snapshot root.
+fn is_valid_agenthub_snapshot_id(snapshot_id: &str) -> bool {
+    let Some(hex) = snapshot_id.strip_prefix("agenthub-") else {
+        return false;
+    };
+    hex.len() == 32
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+// remove_openclaw_snapshot_dir idempotently removes the host directory backing
+// an OpenClaw shared-files snapshot. It is hardened against path traversal and
+// symlink escape (S2/R8):
+//   - the id must match the system-generated shape;
+//   - the snapshot root is canonicalized and the target must remain under it;
+//   - a symlink at the top level is unlinked (never followed);
+//   - canonicalize failure on an existing path is fail-closed (refuse, do not
+//     fall back to an unresolved path);
+//   - a missing root/target is treated as success (idempotent).
+fn remove_openclaw_snapshot_dir(snapshot_id: &str) -> AppResult<()> {
+    if !is_valid_agenthub_snapshot_id(snapshot_id) {
+        return Err(AppError::BadRequest(format!(
+            "invalid openclaw snapshot id: {}",
+            snapshot_id
+        )));
+    }
+    let root = FsPath::new(OPENCLAW_HOST_SNAPSHOT_ROOT);
+    let canon_root = match fs::canonicalize(root) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "openclaw snapshot root {} not resolvable: {}",
+                OPENCLAW_HOST_SNAPSHOT_ROOT,
+                e
+            )));
+        }
+    };
+    let path = canon_root.join(snapshot_id);
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "failed to stat openclaw snapshot dir {}: {}",
+                snapshot_id,
+                e
+            )));
+        }
+    };
+    if meta.file_type().is_symlink() {
+        // Remove only the link entry; never follow it to a target outside root.
+        let _ = fs::remove_file(&path);
+        return Ok(());
+    }
+    let canon = fs::canonicalize(&path).map_err(|e| {
+        AppError::Internal(anyhow::anyhow!(
+            "failed to resolve openclaw snapshot dir {}: {}",
+            snapshot_id,
+            e
+        ))
+    })?;
+    if !canon.starts_with(&canon_root) {
+        return Err(AppError::BadRequest(format!(
+            "openclaw snapshot path escapes managed root: {}",
+            snapshot_id
+        )));
+    }
+    match fs::remove_dir_all(&canon) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AppError::Internal(anyhow::anyhow!(
+            "failed to remove openclaw snapshot dir {}: {}",
+            snapshot_id,
+            e
+        ))),
+    }
+}
+
+// delete_cubemaster_snapshot_idempotent wraps the snapshot service delete so a
+// NotFound (already removed) is success — the cascade and any retry must be
+// idempotent (C3/F4: the underlying delete is not).
+async fn delete_cubemaster_snapshot_idempotent(
+    state: &AppState,
+    snapshot_id: &str,
+) -> AppResult<()> {
+    match state.services.snapshots.delete(snapshot_id).await {
+        Ok(_) => Ok(()),
+        Err(AppError::NotFound(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 fn openclaw_host_mount_metadata(host_path: &str) -> AppResult<String> {
     serde_json::to_string(&serde_json::json!([{
         "hostPath": host_path,
@@ -1422,6 +1524,10 @@ pub async fn delete_agent_snapshot(
     Path((agent_id, snapshot_id)): Path<(String, String)>,
 ) -> AppResult<impl IntoResponse> {
     let record = read_agenthub_instance(&state, &agent_id).await?;
+    // Resolve the snapshot kind up front so we route physical cleanup to the
+    // right backend (OpenClaw host dir vs CubeMaster snapshot). The referenced
+    // guard is preserved.
+    let mut snapshot_kind: Option<String> = None;
     if let Some(store) = &state.agenthub_store {
         if let Ok(records) = store.list_snapshots(&agent_id).await {
             if records
@@ -1433,9 +1539,20 @@ pub async fn delete_agent_snapshot(
                 ));
             }
         }
+        if let Ok(Some(snap)) = store.get_snapshot(&record.agent_id, &snapshot_id).await {
+            snapshot_kind = snap.snapshot_kind;
+        }
     }
 
-    state.services.snapshots.delete(&snapshot_id).await?;
+    match snapshot_kind.as_deref() {
+        Some(kind) if kind == SNAPSHOT_KIND_AGENTHUB_STATE => {
+            remove_openclaw_snapshot_dir(&snapshot_id)?;
+        }
+        _ => {
+            delete_cubemaster_snapshot_idempotent(&state, &snapshot_id).await?;
+        }
+    }
+
     if let Some(store) = &state.agenthub_store {
         store
             .soft_delete_snapshot(&record.agent_id, &snapshot_id)
@@ -1525,6 +1642,26 @@ pub async fn delete_agent_template(
     let store = state.agenthub_store.as_ref().ok_or_else(|| {
         AppError::BadRequest("AgentHub database persistence is not configured".to_string())
     })?;
+
+    // Cascade to the backing snapshot before removing the registration row
+    // (先物理后元数据). Market templates intentionally do NOT cascade to their
+    // shared `tpl-*` infrastructure template; that is reclaimed by the
+    // infrastructure DELETE /templates path + reference counting.
+    if let Some(record) = store.get_template(&template_id).await.map_err(|e| {
+        AppError::Internal(anyhow::anyhow!("failed to load AgentHub template: {}", e))
+    })? {
+        if record.source_agent_id != "market" {
+            cascade_delete_backing_snapshot(
+                &state,
+                store,
+                &template_id,
+                &record.source_agent_id,
+                &record.source_snapshot_id,
+            )
+            .await?;
+        }
+    }
+
     store
         .soft_delete_template(&template_id)
         .await
@@ -1532,6 +1669,64 @@ pub async fn delete_agent_template(
             AppError::Internal(anyhow::anyhow!("failed to delete AgentHub template: {}", e))
         })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// cascade_delete_backing_snapshot removes the snapshot backing an AgentHub
+// template (its host OpenClaw state dir or CubeMaster sandbox snapshot) and
+// soft-deletes the snapshot row. It never deletes a snapshot still referenced
+// by another (non-deleted) template, and never cascades to shared rootfs.
+async fn cascade_delete_backing_snapshot(
+    state: &AppState,
+    store: &crate::db::AgentHubStore,
+    template_id: &str,
+    agent_id: &str,
+    snapshot_id: &str,
+) -> AppResult<()> {
+    if snapshot_id.trim().is_empty() {
+        return Ok(());
+    }
+    // Guard against shared snapshots: if any other live template still points at
+    // this snapshot, leave the physical snapshot intact. Fail-safe — if we
+    // cannot determine sharing (DB error), do NOT delete the physical snapshot.
+    let templates = store.list_templates().await.map_err(|e| {
+        AppError::Internal(anyhow::anyhow!(
+            "failed to check snapshot sharing before cascade delete: {}",
+            e
+        ))
+    })?;
+    let still_shared = templates
+        .iter()
+        .any(|t| t.template_id != template_id && t.source_snapshot_id == snapshot_id);
+    if still_shared {
+        return Ok(());
+    }
+
+    let snap = store
+        .get_snapshot(agent_id, snapshot_id)
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("failed to load AgentHub snapshot: {}", e))
+        })?;
+    let Some(snap) = snap else {
+        // Snapshot row already gone; nothing to cascade.
+        return Ok(());
+    };
+
+    match snap.snapshot_kind.as_deref() {
+        Some(kind) if kind == SNAPSHOT_KIND_AGENTHUB_STATE => {
+            remove_openclaw_snapshot_dir(snapshot_id)?;
+        }
+        _ => {
+            delete_cubemaster_snapshot_idempotent(state, snapshot_id).await?;
+        }
+    }
+    store
+        .soft_delete_snapshot(agent_id, snapshot_id)
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("failed to delete AgentHub snapshot: {}", e))
+        })?;
+    Ok(())
 }
 
 pub async fn list_agent_operations(

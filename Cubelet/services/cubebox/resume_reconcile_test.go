@@ -65,6 +65,10 @@ func (f *fakeCubeboxAPI) Delete(ctx context.Context, opt *cubes.DeleteOption) er
 	return nil
 }
 
+func (f *fakeCubeboxAPI) IsImageInUse(imageID string) (bool, error) {
+	return false, nil
+}
+
 func TestConvergeResumeStateAfterOpaqueRestoreClearsPauseStateAndInvalidatesBindings(t *testing.T) {
 	cb := newCubeboxWithStatusForTest("sb-resume-helper", cubeboxstore.Status{
 		PausedAt:  time.Now().Add(-2 * time.Minute).UnixNano(),

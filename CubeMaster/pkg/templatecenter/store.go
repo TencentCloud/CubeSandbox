@@ -265,6 +265,7 @@ func Init(ctx context.Context) error {
 			log.G(ctx).Warnf("warm ready template locality fail:%v", warmErr)
 		}
 		startSnapshotReconciler(ctx)
+		startArtifactGC(ctx)
 		scheduleInitialCompatScan(ctx)
 	})
 	return initErr

@@ -872,48 +872,38 @@ func TestCleanupLocalRootfsArtifactRemovesManagedDirectory(t *testing.T) {
 	}
 }
 
-func TestCleanupFailedRootfsArtifactKeepsMetadataOnCleanupFailure(t *testing.T) {
+func TestCleanupFailedRootfsArtifactDelegatesToLastOwnerCleanup(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
-	distributionErr := errors.New("delete image on node-a failed")
-	updateCalled := false
-	deleteCalled := false
-
-	patches.ApplyFunc(cleanupDistributedArtifact, func(ctx context.Context, artifactID, instanceType string) error {
-		return distributionErr
-	})
-	patches.ApplyFunc(cleanupLocalRootfsArtifact, func(artifactID, ext4Path string) error {
-		return nil
-	})
-	patches.ApplyFunc(deleteRootfsArtifactRecord, func(ctx context.Context, artifactID string) error {
-		deleteCalled = true
-		return nil
-	})
-	patches.ApplyFunc(updateRootfsArtifact, func(ctx context.Context, artifactID string, values map[string]any) error {
-		updateCalled = true
-		if values["status"] != ArtifactStatusFailed {
-			t.Fatalf("unexpected status update: %+v", values)
-		}
-		lastError, _ := values["last_error"].(string)
-		if !strings.Contains(lastError, distributionErr.Error()) {
-			t.Fatalf("last_error=%q does not contain cleanup error", lastError)
-		}
+	var (
+		gotArtifactID   string
+		gotInstanceType string
+		gotExclude      string
+	)
+	patches.ApplyFunc(cleanupArtifactFully, func(ctx context.Context, artifactID, instanceType, excludeTemplateID string) error {
+		gotArtifactID = artifactID
+		gotInstanceType = instanceType
+		gotExclude = excludeTemplateID
 		return nil
 	})
 
-	err := cleanupFailedRootfsArtifact(context.Background(), &models.RootfsArtifact{
+	if err := cleanupFailedRootfsArtifact(context.Background(), &models.RootfsArtifact{
 		ArtifactID: "artifact-1",
 		Ext4Path:   filepath.Join(t.TempDir(), "artifact-1", "artifact-1.ext4"),
-	}, cubeboxv1.InstanceType_cubebox.String())
-	if !errors.Is(err, distributionErr) {
-		t.Fatalf("expected distribution cleanup error, got %v", err)
+	}, cubeboxv1.InstanceType_cubebox.String(), "tpl-owner"); err != nil {
+		t.Fatalf("cleanupFailedRootfsArtifact returned error: %v", err)
 	}
-	if deleteCalled {
-		t.Fatal("rootfs artifact record should not be deleted when cleanup fails")
+	if gotArtifactID != "artifact-1" {
+		t.Fatalf("artifactID not forwarded, got %q", gotArtifactID)
 	}
-	if !updateCalled {
-		t.Fatal("rootfs artifact record should be marked failed when cleanup is incomplete")
+	if gotInstanceType != cubeboxv1.InstanceType_cubebox.String() {
+		t.Fatalf("instanceType not forwarded, got %q", gotInstanceType)
+	}
+	// The build's own template must be excluded so its in-flight job/definition
+	// does not pin the artifact and block its own failure cleanup.
+	if gotExclude != "tpl-owner" {
+		t.Fatalf("expected own template excluded, got %q", gotExclude)
 	}
 }
 
@@ -1177,7 +1167,7 @@ func TestRunRedoTemplateImageJobStopsOnArtifactCleanupFailure(t *testing.T) {
 			GeneratedRequestJSON: string(generatedReqPayload),
 		}, nil
 	})
-	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID string, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
 		return errors.New("cleanup image failed")
 	})
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {

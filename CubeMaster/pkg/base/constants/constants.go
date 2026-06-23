@@ -171,6 +171,11 @@ const (
 	TemplateImageJobTableName   = "t_cube_template_image_job"
 	SnapshotRuntimeRefTableName = "t_cube_snapshot_runtime_ref"
 	SandboxSpecTableName        = "t_cube_sandbox_spec"
+	// ArtifactNodePlacementTableName records on which nodes an ext4 rootfs
+	// artifact is physically present, independent of replica lifecycle, so the
+	// last-owner-cleanup / GC paths can enumerate every node that ever held an
+	// artifact even after the referencing replica rows are gone.
+	ArtifactNodePlacementTableName = "t_cube_artifact_node_placement"
 )
 
 const (

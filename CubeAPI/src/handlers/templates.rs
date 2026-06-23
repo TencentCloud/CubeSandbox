@@ -174,16 +174,49 @@ pub async fn delete_template(
         if let Ok(value) = HeaderValue::from_str(&resp.operation_id) {
             headers.insert("x-operation-id", value);
         }
+        reverse_sync_agenthub_template(&state, &template_id).await;
         return Ok((StatusCode::NO_CONTENT, headers).into_response());
     }
 
     state
         .services
         .templates
-        .delete_template(template_id, params.instance_type, params.sync)
+        .delete_template(template_id.clone(), params.instance_type, params.sync)
         .await?;
 
+    reverse_sync_agenthub_template(&state, &template_id).await;
+
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// reverse_sync_agenthub_template best-effort soft-deletes any AgentHub template
+// registration backed by the just-deleted infrastructure template/snapshot
+// (FIX-5b, L15/H5). It keeps the AgentHub registry from referencing a snapshot
+// that no longer exists. Failures are logged, never propagated, so they cannot
+// block the primary deletion.
+async fn reverse_sync_agenthub_template(state: &AppState, id: &str) {
+    let Some(store) = state.agenthub_store.as_ref() else {
+        return;
+    };
+    match store.list_templates().await {
+        Ok(templates) => {
+            for t in templates
+                .iter()
+                .filter(|t| t.template_id == id || t.source_snapshot_id == id)
+            {
+                if let Err(e) = store.soft_delete_template(&t.template_id).await {
+                    tracing::warn!(
+                        "reverse sync: failed to soft-delete AgentHub template {}: {}",
+                        t.template_id,
+                        e
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("reverse sync: list AgentHub templates failed: {}", e);
+        }
+    }
 }
 
 // ─── POST /templates/:templateID/builds/:buildID ──────────────────────────────

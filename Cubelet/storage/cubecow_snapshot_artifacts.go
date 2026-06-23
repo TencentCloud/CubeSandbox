@@ -6,6 +6,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -263,19 +264,27 @@ func CleanupCowTemplateObjects(ctx context.Context, refs []CowObjectRef) error {
 	if err != nil {
 		return err
 	}
+	// FIX-3: best-effort cleanup. A single object failing (e.g. a missing or
+	// kind-mismatched entry) must not abort cleanup of the remaining objects,
+	// otherwise sibling cubecow objects leak. Errors are aggregated; the caller
+	// (CubeMaster) keeps template metadata on failure and retries, and each
+	// DeleteByKind is idempotent (NotFound -> success).
+	var cleanupErr error
 	for _, ref := range refs {
 		if strings.TrimSpace(ref.Name) == "" {
 			continue
 		}
-		kind, err := normalizeCowKind(ref.Kind)
+		kind, err := normalizeCowKindForRole(ref.Kind, ref.Role)
 		if err != nil {
-			return fmt.Errorf("cleanup cubecow object %q: %w", ref.Name, err)
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup cubecow object %q: %w", ref.Name, err))
+			continue
 		}
 		if err := manager.DeleteByKind(ctx, ref.Name, kind); err != nil {
-			return fmt.Errorf("cleanup cubecow object %q: %w", ref.Name, err)
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup cubecow object %q: %w", ref.Name, err))
+			continue
 		}
 	}
-	return nil
+	return cleanupErr
 }
 
 func InspectCowObjects(ctx context.Context, refs []CowObjectRef) ([]CowObjectStatus, error) {
@@ -477,4 +486,21 @@ func normalizeCowKind(kind string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported cubecow kind %q", kind)
 	}
+}
+
+// normalizeCowKindForRole resolves a cubecow kind, defaulting an empty/blank
+// kind from the object role instead of failing. CubeMaster catalog entries do
+// not always carry an explicit kind; defaulting keeps cleanup from aborting,
+// and DeleteByKind auto-recovers if the guessed kind is wrong.
+func normalizeCowKindForRole(kind, role string) (string, error) {
+	if strings.TrimSpace(kind) == "" {
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "rootfs":
+			return cowKindSnapshot, nil
+		default:
+			// memory / build_rootfs / unknown -> volume (matches rollback path)
+			return cowKindVolume, nil
+		}
+	}
+	return normalizeCowKind(kind)
 }

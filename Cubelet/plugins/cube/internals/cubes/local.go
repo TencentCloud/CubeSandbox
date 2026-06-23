@@ -186,3 +186,16 @@ func (l *local) FindContainerOfCubebox(ctx context.Context, id string) (cntr *cu
 func (l *local) List() []*cubeboxstore.CubeBox {
 	return l.cubeboxStore.List()
 }
+
+// IsImageInUse reports whether the given image/artifact id is currently
+// referenced by any sandbox tracked on this node. It mirrors the protection in
+// cubeboxImageDeleteHook and is used by the ext4 artifact destroy path
+// (DestroyImage) to refuse removing an OS image that a running sandbox depends
+// on, without invoking the runtemplate catalog delete hook.
+func (l *local) IsImageInUse(imageID string) (bool, error) {
+	cbs, err := l.cubeboxStore.GetCubeboxByImageID(imageID)
+	if err != nil {
+		return false, err
+	}
+	return len(cbs) > 0, nil
+}
