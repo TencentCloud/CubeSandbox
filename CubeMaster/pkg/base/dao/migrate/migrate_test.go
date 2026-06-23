@@ -7,6 +7,7 @@ package migrate_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -400,7 +401,11 @@ func TestRun_FingerprintDetectsContentDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("corrupt fingerprint: %v", err)
 	}
-	if affected, _ := res.RowsAffected(); affected != 1 {
+	affected, err := res.RowsAffected()
+	if err != nil {
+		t.Fatalf("RowsAffected: %v", err)
+	}
+	if affected != 1 {
 		t.Fatalf("expected to corrupt exactly 1 fingerprint row, got %d", affected)
 	}
 
@@ -409,8 +414,8 @@ func TestRun_FingerprintDetectsContentDrift(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected fingerprint mismatch error, got nil")
 	}
-	if !strings.Contains(err.Error(), "fingerprint check failed") {
-		t.Fatalf("expected fingerprint error, got: %v", err)
+	if !errors.Is(err, migrate.ErrFingerprintMismatch) {
+		t.Fatalf("expected fingerprint mismatch error, got: %v", err)
 	}
 
 	// The escape hatch lets an operator bypass the check.

@@ -56,25 +56,20 @@ var dialectSpecs = map[string]dialectSpec{
 	},
 }
 
-// Run applies every pending migration for the given dialect. The caller
-// is responsible for opening sqlDB; this function never closes it.
-//
-// Run is idempotent: if the database is already at HEAD it returns nil
-// without touching the schema, so it is safe to call on every process
-// start.
-//
-// When locker is non-nil, the goose Provider takes a cluster-wide lock
-// for the duration of the run (outer layer). Per-file inner locks are
-// asserted by the SQL migrations themselves via the helper procedure
-// established in the baseline migration.
-func Run(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.SessionLocker) error {
+// newProvider creates a goose Provider wired with this package's conventions:
+// verbose logging and allow-out-of-order for timestamped migrations.
+func newProvider(
+	dialect string,
+	sqlDB *sql.DB,
+	locker lock.SessionLocker,
+) (*goose.Provider, fs.FS, bool, error) {
 	spec, ok := dialectSpecs[dialect]
 	if !ok {
-		return fmt.Errorf("migrate: unknown dialect %q", dialect)
+		return nil, nil, false, fmt.Errorf("migrate: unknown dialect %q", dialect)
 	}
 	subFS, err := fs.Sub(spec.rootFS, spec.subdir)
 	if err != nil {
-		return fmt.Errorf("migrate: fs.Sub %q: %w", spec.subdir, err)
+		return nil, nil, false, fmt.Errorf("migrate: fs.Sub %q: %w", spec.subdir, err)
 	}
 	opts := []goose.ProviderOption{
 		goose.WithVerbose(true),
@@ -89,6 +84,29 @@ func Run(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.Session
 	if locker != nil {
 		opts = append(opts, goose.WithSessionLocker(locker))
 	}
+	provider, err := goose.NewProvider(spec.dialect, sqlDB, subFS, opts...)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("migrate: new provider: %w", err)
+	}
+	return provider, subFS, spec.fingerprints, nil
+}
+
+// Run applies every pending migration for the given dialect. The caller
+// is responsible for opening sqlDB; this function never closes it.
+//
+// Run is idempotent: if the database is already at HEAD it returns nil
+// without touching the schema, so it is safe to call on every process
+// start.
+//
+// When locker is non-nil, the goose Provider takes a cluster-wide lock
+// for the duration of the run (outer layer). Per-file inner locks are
+// asserted by the SQL migrations themselves via the helper procedure
+// established in the baseline migration.
+func Run(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.SessionLocker) error {
+	provider, subFS, fpEnabled, err := newProvider(dialect, sqlDB, locker)
+	if err != nil {
+		return err
+	}
 
 	// Defence layer (MySQL only): detect (and loudly reject) the case where an
 	// already-applied migration version's content changed on disk, which goose
@@ -101,7 +119,7 @@ func Run(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.Session
 	// reads, and the worst case is a false-positive (startup blocked), never a
 	// false-negative (silent pass). Concurrent DownTo is an operator-only path.
 	var fsFP map[int64]fileFingerprint
-	if spec.fingerprints {
+	if fpEnabled {
 		fsFP, err = collectFSFingerprints(subFS)
 		if err != nil {
 			return fmt.Errorf("migrate: collect migration fingerprints: %w", err)
@@ -114,16 +132,18 @@ func Run(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.Session
 		}
 	}
 
-	provider, err := goose.NewProvider(spec.dialect, sqlDB, subFS, opts...)
-	if err != nil {
-		return fmt.Errorf("migrate: new provider: %w", err)
-	}
 	results, upErr := provider.Up(ctx)
 	// Record fingerprints for everything that actually applied — even on partial
 	// failure — so a fixed re-deploy never leaves an applied version
 	// unfingerprinted (which would reopen the silent-skip gap).
-	if spec.fingerprints {
-		if recErr := recordFingerprints(ctx, sqlDB, fsFP, appliedResults(results, upErr)); recErr != nil && upErr == nil {
+	if fpEnabled {
+		recErr := recordFingerprints(ctx, sqlDB, fsFP, appliedResults(results, upErr))
+		if recErr != nil {
+			if upErr != nil {
+				// Both goose and fingerprinting failed: surface both so the
+				// operator sees the fingerprint gap alongside the goose error.
+				return fmt.Errorf("migrate: goose up: %w; fingerprint recording: %w", upErr, recErr)
+			}
 			return fmt.Errorf("migrate: %w", recErr)
 		}
 	}
@@ -149,24 +169,9 @@ func appliedResults(results []*goose.MigrationResult, upErr error) []*goose.Migr
 // is intended for tests and emergency operator use; production startup
 // only ever calls Run.
 func DownTo(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.SessionLocker, version int64) error {
-	spec, ok := dialectSpecs[dialect]
-	if !ok {
-		return fmt.Errorf("migrate: unknown dialect %q", dialect)
-	}
-	subFS, err := fs.Sub(spec.rootFS, spec.subdir)
+	provider, _, _, err := newProvider(dialect, sqlDB, locker)
 	if err != nil {
-		return fmt.Errorf("migrate: fs.Sub %q: %w", spec.subdir, err)
-	}
-	opts := []goose.ProviderOption{
-		goose.WithVerbose(true),
-		goose.WithAllowOutofOrder(true),
-	}
-	if locker != nil {
-		opts = append(opts, goose.WithSessionLocker(locker))
-	}
-	provider, err := goose.NewProvider(spec.dialect, sqlDB, subFS, opts...)
-	if err != nil {
-		return fmt.Errorf("migrate: new provider: %w", err)
+		return err
 	}
 	if _, err := provider.DownTo(ctx, version); err != nil {
 		return fmt.Errorf("migrate: goose down-to %d: %w", version, err)

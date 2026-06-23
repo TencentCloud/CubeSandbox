@@ -34,6 +34,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -59,6 +60,10 @@ const (
 	// disables the preflight check (recording still happens).
 	skipFingerprintEnv = "CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK"
 )
+
+// ErrFingerprintMismatch is returned by the preflight check when the on-disk
+// content of an already-applied migration differs from the recorded fingerprint.
+var ErrFingerprintMismatch = errors.New("migration fingerprint check failed")
 
 // fileFingerprint is the on-disk view of a single migration file.
 type fileFingerprint struct {
@@ -236,8 +241,7 @@ func preflightFingerprints(
 	// Operational visibility: surface applied versions that have no fingerprint
 	// baseline (typically migrations applied before this feature existed, or one
 	// that lost its fingerprint to a partial-failure gap). They are NOT
-	// protected against silent content changes. See REMEDIATION.md for how to
-	// establish a one-time baseline.
+	// protected against silent content changes.
 	logUnprotectedVersions(applied, stored)
 
 	if len(stored) == 0 {
@@ -273,11 +277,11 @@ func preflightFingerprints(
 	}
 	sort.Strings(mismatches)
 	return fmt.Errorf(
-		"migration fingerprint check failed: an already-applied migration "+
+		"%w: an already-applied migration "+
 			"version was modified or reused, which goose would otherwise skip "+
 			"SILENTLY. Never edit/rename/reuse an applied migration; add a new "+
 			"timestamped migration instead. To bypass intentionally, set %s=1.\n  - %s",
-		skipFingerprintEnv, strings.Join(mismatches, "\n  - "),
+		ErrFingerprintMismatch, skipFingerprintEnv, strings.Join(mismatches, "\n  - "),
 	)
 }
 
@@ -302,7 +306,7 @@ func logUnprotectedVersions(applied map[int64]bool, stored map[int64]storedFinge
 	}
 	log.Printf("migrate: %d applied migration version(s) have no fingerprint "+
 		"baseline and are NOT content-checked (e.g. applied before fingerprinting "+
-		"existed): %s. See REMEDIATION.md to establish a baseline.",
+		"existed): %s",
 		len(unprotected), strings.Join(strs, ","))
 }
 

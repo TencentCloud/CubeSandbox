@@ -5,8 +5,11 @@
 package migrate
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
+	"log"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -133,4 +136,59 @@ func TestCollectFSFingerprints_IgnoresNonMigrations(t *testing.T) {
 	if _, ok := fp[20260622143000]; !ok {
 		t.Errorf("expected timestamp version 20260622143000 to be collected")
 	}
+}
+
+// TestLogUnprotectedVersions covers both branches of logUnprotectedVersions.
+func TestLogUnprotectedVersions(t *testing.T) {
+	t.Run("all protected, no output", func(t *testing.T) {
+		var buf bytes.Buffer
+		oldWriter := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+		applied := map[int64]bool{1: true, 2: true}
+		stored := map[int64]storedFingerprint{
+			1: {sum: "aa", source: "1.sql"},
+			2: {sum: "bb", source: "2.sql"},
+		}
+		logUnprotectedVersions(applied, stored)
+		if buf.Len() > 0 {
+			t.Errorf("expected no output, got: %s", buf.String())
+		}
+	})
+
+	t.Run("unprotected versions present, logs warning", func(t *testing.T) {
+		var buf bytes.Buffer
+		oldWriter := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+		applied := map[int64]bool{1: true, 2: true, 3: true}
+		stored := map[int64]storedFingerprint{
+			1: {sum: "aa", source: "1.sql"},
+		}
+		logUnprotectedVersions(applied, stored)
+		out := buf.String()
+		if !strings.Contains(out, "NOT content-checked") {
+			t.Errorf("expected warning about unprotected versions, got: %s", out)
+		}
+		if !strings.Contains(out, "2") || !strings.Contains(out, "3") {
+			t.Errorf("expected versions 2 and 3 to be listed, got: %s", out)
+		}
+	})
+
+	t.Run("all versions unprotected, logs warning", func(t *testing.T) {
+		var buf bytes.Buffer
+		oldWriter := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+		applied := map[int64]bool{1: true, 2: true, 3: true}
+		stored := map[int64]storedFingerprint{} // nothing fingerprinted
+		logUnprotectedVersions(applied, stored)
+		out := buf.String()
+		if !strings.Contains(out, "NOT content-checked") {
+			t.Errorf("expected warning about unprotected versions, got: %s", out)
+		}
+	})
 }
