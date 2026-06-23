@@ -47,4 +47,4 @@ lang: en-US
 
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
-| _Add your article here_ | - | - | - |
+| [CrewAI Integration Guide](./crewai.md) | ruirui6946 | 2026-06-23 | integration, crewai |

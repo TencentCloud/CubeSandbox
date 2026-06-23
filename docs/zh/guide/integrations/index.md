@@ -47,4 +47,4 @@ lang: zh-CN
 
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
-| _在这里补充你的文章_ | - | - | - |
+| [CrewAI 集成指南](./crewai.md) | ruirui6946 | 2026-06-23 | integration, crewai |
