@@ -340,6 +340,71 @@ func TestGetHealthyNodesByInstanceTypeFiltersExpiredHeartbeat(t *testing.T) {
 	}
 }
 
+func TestGetHealthyNodesByInstanceTypeExcludesIsolated(t *testing.T) {
+	origNodesByClusters := l.sortedNodesByClusters
+	defer func() {
+		l.sortedNodesByClusters = origNodesByClusters
+	}()
+
+	schedulable := &node.Node{
+		InsID:            "node-ok",
+		ReportedReady:    true,
+		Healthy:          true,
+		MetaDataUpdateAt: time.Now(),
+	}
+	isolated := &node.Node{
+		InsID:            "node-isolated",
+		ReportedReady:    true,
+		Healthy:          true,
+		Isolated:         true,
+		MetaDataUpdateAt: time.Now(),
+	}
+	l.sortedNodesByClusters = map[string]node.NodeList{
+		"valid": {schedulable, isolated},
+	}
+
+	got := GetHealthyNodesByInstanceType(-1, "valid")
+	if got.Len() != 1 {
+		t.Fatalf("schedulable node count=%d want 1", got.Len())
+	}
+	if got[0].ID() != schedulable.ID() {
+		t.Fatalf("schedulable node=%s want %s", got[0].ID(), schedulable.ID())
+	}
+	if !isolated.Isolated {
+		t.Fatal("read path should not mutate source node isolation state")
+	}
+}
+
+func TestGetHealthyNodesExcludesIsolated(t *testing.T) {
+	origCache := l.cache
+	defer func() {
+		l.cache = origCache
+	}()
+
+	l.cache = cache.New(0, 0)
+	l.cache.SetDefault("node-ok", &node.Node{
+		InsID:            "node-ok",
+		ReportedReady:    true,
+		Healthy:          true,
+		MetaDataUpdateAt: time.Now(),
+	})
+	l.cache.SetDefault("node-isolated", &node.Node{
+		InsID:            "node-isolated",
+		ReportedReady:    true,
+		Healthy:          true,
+		Isolated:         true,
+		MetaDataUpdateAt: time.Now(),
+	})
+
+	got := GetHealthyNodes(-1)
+	if got.Len() != 1 {
+		t.Fatalf("schedulable node count=%d want 1", got.Len())
+	}
+	if got[0].ID() != "node-ok" {
+		t.Fatalf("schedulable node=%s want node-ok", got[0].ID())
+	}
+}
+
 func TestGetNodesByIpRefreshesCurrentHealthFromCachedFacts(t *testing.T) {
 	origCache := l.cache
 	defer func() {

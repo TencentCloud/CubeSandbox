@@ -11,7 +11,7 @@
 -- +goose NO TRANSACTION
 -- +goose Up
 
-CALL cubemaster_acquire_migration_lock('cubemaster_migration_0009_template_image_pull_progress', 60);
+CALL cubemaster_acquire_migration_lock('cubemaster_migration_0010_template_image_pull_progress', 60);
 
 CALL cubemaster_assert_table_exists('t_cube_template_image_job');
 
@@ -41,11 +41,11 @@ CALL cubemaster_add_column_if_missing(
   "bigint NOT NULL DEFAULT 0 COMMENT 'source image pull speed bytes per second' AFTER `pull_completed_layers`"
 );
 
-SELECT RELEASE_LOCK('cubemaster_migration_0009_template_image_pull_progress');
+SELECT RELEASE_LOCK('cubemaster_migration_0010_template_image_pull_progress');
 
 -- +goose Down
 
-CALL cubemaster_acquire_migration_lock('cubemaster_migration_0009_template_image_pull_progress', 60);
+CALL cubemaster_acquire_migration_lock('cubemaster_migration_0010_template_image_pull_progress', 60);
 
 CALL cubemaster_drop_column_if_exists('t_cube_template_image_job', 'pull_speed_bps');
 CALL cubemaster_drop_column_if_exists('t_cube_template_image_job', 'pull_completed_layers');
@@ -53,4 +53,4 @@ CALL cubemaster_drop_column_if_exists('t_cube_template_image_job', 'pull_total_l
 CALL cubemaster_drop_column_if_exists('t_cube_template_image_job', 'pull_downloaded_bytes');
 CALL cubemaster_drop_column_if_exists('t_cube_template_image_job', 'pull_total_bytes');
 
-SELECT RELEASE_LOCK('cubemaster_migration_0009_template_image_pull_progress');
+SELECT RELEASE_LOCK('cubemaster_migration_0010_template_image_pull_progress');

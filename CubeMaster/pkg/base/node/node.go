@@ -61,6 +61,11 @@ type Node struct {
 
 	UnhealthyReason string `json:"UnhealthyReason,omitempty"`
 
+	// Isolated is an operator-applied cordon. When true the scheduler must not
+	// place new instances on this node. It is independent of Healthy and is
+	// carried by value through Clone.
+	Isolated bool `json:"Isolated,omitempty"`
+
 	Score float64 `json:"Score,omitempty"`
 
 	QuotaCpuUsage int64 `json:"QuotaCpuUsage,omitempty"`

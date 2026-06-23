@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { clusterApi, sandboxApi, templateApi } from '@/api/client';
+import { IsolateNodeDialog } from '@/components/IsolateNodeDialog';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Package, Box, Activity } from 'lucide-react';
+import { ArrowLeft, Package, Box, Activity, Ban, ShieldCheck } from 'lucide-react';
 import { cn, formatRelative } from '@/lib/utils';
 
 // ── Resource bar ──────────────────────────────────────────────────────────────
@@ -125,6 +128,9 @@ export default function NodeDetailPage() {
     refetchInterval: 10_000,
   });
 
+  // null = dialog closed; true = confirm isolate; false = confirm resume.
+  const [pendingIsolate, setPendingIsolate] = useState<boolean | null>(null);
+
   const { data: allSandboxes, isLoading: sandboxesLoading } = useQuery({
     queryKey: ['sandboxes'],
     queryFn: () => sandboxApi.list(),
@@ -192,6 +198,7 @@ export default function NodeDetailPage() {
               <span className={cn('relative inline-flex rounded-full h-2 w-2', isReady ? 'bg-cube-ok' : 'bg-cube-warn')} />
             </span>
             <h1 className="text-2xl font-semibold tracking-tight">{data.hostname ?? data.nodeID}</h1>
+            {data.isolated && <Badge tone="warn">{t('isolation.badge')}</Badge>}
           </div>
           <div className="flex items-center gap-3 pl-4.5">
             <span className="font-mono text-sm text-muted-foreground/70">{data.nodeID}</span>
@@ -209,11 +216,58 @@ export default function NodeDetailPage() {
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0 pt-1">
-          <Activity size={13} className="text-muted-foreground/50" />
-          <span className="text-sm text-muted-foreground">{formatRelative(data.heartbeatTime)}</span>
+        <div className="flex items-center gap-4 shrink-0 pt-1">
+          <div className="flex items-center gap-2">
+            <Activity size={13} className="text-muted-foreground/50" />
+            <span className="text-sm text-muted-foreground">{formatRelative(data.heartbeatTime)}</span>
+          </div>
+          {data.isolated ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              onClick={() => setPendingIsolate(false)}
+            >
+              <ShieldCheck size={13} />
+              {t('isolation.unisolate')}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5 text-cube-warn"
+              onClick={() => setPendingIsolate(true)}
+            >
+              <Ban size={13} />
+              {t('isolation.isolate')}
+            </Button>
+          )}
         </div>
       </div>
+
+      {/* isolation banner */}
+      {data.isolated && (
+        <div className="rounded-xl border border-cube-warn/30 bg-cube-warn/5 px-4 py-3 text-sm">
+          <div className="flex items-center gap-2 font-medium text-cube-warn">
+            <Ban size={14} />
+            {t('isolation.badge')}
+          </div>
+          <div className="mt-1.5 space-y-0.5 text-muted-foreground">
+            {data.isolatedBy && <div>{t('isolation.isolatedBy')}: {data.isolatedBy}</div>}
+            {data.isolatedAt ? <div>{t('isolation.isolatedAt')}: {formatRelative(new Date(data.isolatedAt * 1000).toISOString())}</div> : null}
+            {data.isolatedReason && <div className="break-all">{t('isolation.reason')}: {data.isolatedReason}</div>}
+          </div>
+        </div>
+      )}
+
+      <IsolateNodeDialog
+        open={pendingIsolate !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingIsolate(null);
+        }}
+        nodeID={nodeID!}
+        isCurrentlyIsolated={data.isolated}
+      />
 
       {/* resource KPIs */}
       <Section title={t('section.resources')}>

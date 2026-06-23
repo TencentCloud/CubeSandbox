@@ -87,6 +87,7 @@ fn build_cubeapi_router(state: &AppState, auth_configured: bool) -> Router<AppSt
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
         .merge(build_cluster_routes(state, auth_configured))
+        .merge(build_node_write_routes(state, auth_configured))
         .merge(build_agenthub_routes(state, auth_configured))
 }
 
@@ -264,6 +265,20 @@ fn build_cluster_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         );
 
     with_auth(routes, state, auth_configured)
+}
+
+/// Node administrative write operations (isolate / un-isolate). Kept in a
+/// dedicated router so the destructive cordon endpoint carries rate limiting
+/// (stricter than the read-only node GETs in `build_cluster_routes`): isolating
+/// every node is a cluster-wide denial-of-service, so it must not be scriptable
+/// at unbounded rate.
+fn build_node_write_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new().route(
+        "/nodes/:nodeID/isolation",
+        post(cluster::set_node_isolation),
+    );
+
+    with_auth_and_rate_limit(routes, state, auth_configured)
 }
 
 fn build_agenthub_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {

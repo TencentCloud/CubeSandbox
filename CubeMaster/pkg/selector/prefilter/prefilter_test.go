@@ -68,6 +68,49 @@ func TestPreFilterExcludesUnhealthyNode(t *testing.T) {
 	}
 }
 
+func TestPreFilterExcludesIsolatedNode(t *testing.T) {
+	now := time.Now()
+	schedulable := &node.Node{
+		InsID:               "node-ok",
+		IP:                  "10.0.0.1",
+		Healthy:             true,
+		MetaDataUpdateAt:    now,
+		MetricUpdate:        now,
+		MetricLocalUpdateAt: now,
+	}
+	isolated := &node.Node{
+		InsID:               "node-isolated",
+		IP:                  "10.0.0.2",
+		Healthy:             true,
+		Isolated:            true,
+		MetaDataUpdateAt:    now,
+		MetricUpdate:        now,
+		MetricLocalUpdateAt: now,
+	}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	// Return the isolated node from the cache as defense-in-depth coverage: even
+	// if the read-path filter were bypassed, prefilter must drop it.
+	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(n int, product string) node.NodeList {
+		return node.NodeList{schedulable, isolated}
+	})
+
+	got, err := NewPreFilter().Select(&selctx.SelectorCtx{
+		Ctx:          context.Background(),
+		InstanceType: "valid",
+	})
+	if err != nil {
+		t.Fatalf("Select returned error: %v", err)
+	}
+	if got.Len() != 1 {
+		t.Fatalf("got %d nodes want 1", got.Len())
+	}
+	if got[0].ID() != schedulable.ID() {
+		t.Fatalf("got node %s want %s", got[0].ID(), schedulable.ID())
+	}
+}
+
 func TestPreFilterExcludesMetricTimeoutNode(t *testing.T) {
 	now := time.Now()
 	timeout := config.GetConfig().Scheduler.MetricUpdateTimeout

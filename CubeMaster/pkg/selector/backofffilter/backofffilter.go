@@ -53,6 +53,11 @@ func (l *backofffilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error
 	for i := range nodes {
 		n := nodes[i]
 
+		if n.Isolated {
+			log.G(selCtx.Ctx).Warnf("%s isolated", n.IP)
+			continue
+		}
+
 		if selCtx.Affinity.BackoffNodeSelector != nil && !selCtx.Affinity.BackoffNodeSelector.Match(n) {
 			log.G(selCtx.Ctx).Warnf("%s backoff affinity_out", n.IP)
 			continue

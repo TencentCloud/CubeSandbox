@@ -53,6 +53,21 @@ export const handlers = [
     return node ? HttpResponse.json(node) : notFound(`node ${params.nodeID} not found`);
   }),
 
+  http.post('/cubeapi/v1/nodes/:nodeID/isolation', async ({ params, request }) => {
+    await mockDelay();
+    const node = getNode(String(params.nodeID));
+    if (!node) return notFound(`node ${params.nodeID} not found`);
+    const body = (await request.json().catch(() => ({}))) as { isolated?: boolean; reason?: string };
+    const isolated = Boolean(body.isolated);
+    return HttpResponse.json({
+      ...node,
+      isolated,
+      isolatedAt: isolated ? Math.floor(Date.now() / 1000) : undefined,
+      isolatedBy: isolated ? 'admin' : undefined,
+      isolatedReason: isolated ? body.reason : undefined,
+    });
+  }),
+
   http.get('/cubeapi/v1/templates', async () => {
     await mockDelay();
     return HttpResponse.json(listTemplates());

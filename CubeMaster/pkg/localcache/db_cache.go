@@ -99,9 +99,16 @@ func (l *local) syncAllFromDB(update bool) error {
 		}
 	}
 
+	allHostIDs := make([]string, 0, len(all))
+	for _, elem := range all {
+		allHostIDs = append(allHostIDs, elem.InsID)
+	}
+	isolatedSet, isolatedErr := l.loadIsolatedSet(allHostIDs)
+
 	allFromDb := make(map[string]struct{})
 	for _, elem := range all {
 		n := constructNode(elem)
+		l.applyIsolationState(n, isolatedSet, isolatedErr, update)
 		if v, ok := instanceCpuType[elem.InstanceType]; ok {
 			n.CPUType = v.CPUType
 		}
@@ -174,6 +181,8 @@ func (l *local) loadFromDBByIDs(hostIDs []string) ([]*node.Node, error) {
 		}
 	}
 
+	isolatedSet, isolatedErr := l.loadIsolatedSet(hostIDs)
+
 	nodes := make([]*node.Node, 0, len(elems))
 	for _, elem := range elems {
 		n := constructNode(elem)
@@ -195,9 +204,54 @@ func (l *local) loadFromDBByIDs(hostIDs []string) ([]*node.Node, error) {
 		} else {
 			log.G(context.Background()).Fatalf("HostSubInfo is empty: %v", n.InsID)
 		}
+		l.applyIsolationState(n, isolatedSet, isolatedErr, true)
 		nodes = append(nodes, n)
 	}
 	return nodes, nil
+}
+
+// loadIsolatedSet reads the operator-applied isolation flag from the node
+// registration table for the given node ids. The legacy host-meta load paths
+// (constructNode) read t_cube_host_meta, which has no isolation column, so
+// without this backfill a /notify/host ADD/UPDATE event would reset an
+// isolated node's cordon to false in the scheduler cache until the next
+// nodemeta reconcile. Errors are returned explicitly so callers can preserve
+// the existing cache state instead of treating a failed read as "not isolated".
+func (l *local) loadIsolatedSet(insIDs []string) (map[string]bool, error) {
+	if len(insIDs) == 0 {
+		return map[string]bool{}, nil
+	}
+	regs := make([]*models.NodeRegistration, 0, len(insIDs))
+	if err := l.DB().Table(constants.NodeMetaRegistrationTable).
+		Select("node_id", "isolated").
+		Where("node_id in ?", insIDs).
+		Find(&regs).Error; err != nil {
+		log.G(context.Background()).Warnf("loadIsolatedSet failed: %v", err)
+		return nil, err
+	}
+	out := make(map[string]bool, len(regs))
+	for _, reg := range regs {
+		out[reg.NodeID] = reg.Isolated
+	}
+	return out, nil
+}
+
+func (l *local) applyIsolationState(n *node.Node, isolatedSet map[string]bool, loadErr error, preserveCached bool) {
+	if n == nil {
+		return
+	}
+	if loadErr == nil {
+		n.Isolated = isolatedSet[n.InsID]
+		return
+	}
+	if !preserveCached {
+		return
+	}
+	if cached, ok := l.cache.Get(n.ID()); ok {
+		if old, ok := cached.(*node.Node); ok && old != nil {
+			n.Isolated = old.Isolated
+		}
+	}
 }
 
 func constructNode(elem *models.HostInfo) *node.Node {

@@ -5,7 +5,10 @@
 use std::collections::HashMap;
 
 use crate::{
-    cubemaster::{CubeMasterClient, CubeMasterError, ListSandboxRequest, NodeSnapshot},
+    cubemaster::{
+        CubeMasterClient, CubeMasterError, ListSandboxRequest, NodeSnapshot,
+        SetNodeIsolationRequest,
+    },
     error::{AppError, AppResult},
     models::{
         ClusterOverview, ComponentMatrixRowView, ComponentVersionGroupView, ComponentVersionView,
@@ -42,6 +45,32 @@ impl ClusterService {
 
     pub async fn get_node(&self, node_id: &str) -> AppResult<NodeView> {
         let resp = self.cubemaster.get_node(node_id).await.map_err(map_err)?;
+        let snapshot = resp
+            .data
+            .ok_or_else(|| AppError::NotFound(format!("node {} not found", node_id)))?;
+        let used_map = self.fetch_used_resources().await;
+        Ok(to_view_with_used(snapshot, &used_map))
+    }
+
+    /// Apply or clear an administrative cordon on a node. `operator` is the
+    /// authenticated principal (derived server-side), forwarded to CubeMaster as
+    /// the trustworthy audit identity. Returns the updated node view.
+    pub async fn set_node_isolation(
+        &self,
+        node_id: &str,
+        operator: &str,
+        isolated: bool,
+        reason: Option<String>,
+    ) -> AppResult<NodeView> {
+        let req = SetNodeIsolationRequest {
+            isolated,
+            reason: reason.filter(|r| !r.trim().is_empty()),
+        };
+        let resp = self
+            .cubemaster
+            .set_node_isolation(node_id, operator, &req)
+            .await
+            .map_err(map_err)?;
         let snapshot = resp
             .data
             .ok_or_else(|| AppError::NotFound(format!("node {} not found", node_id)))?;
@@ -93,6 +122,10 @@ impl ClusterService {
 fn map_err(e: CubeMasterError) -> AppError {
     if e.is_not_found() || e.is_endpoint_missing() {
         AppError::NotFound(e.to_string())
+    } else if e.is_invalid_path_parameter() {
+        // A rejected node_id is a client error, not a backend failure; surface
+        // it as 400 to match the handler/OpenAPI contract instead of 500.
+        AppError::BadRequest(e.to_string())
     } else {
         AppError::Internal(anyhow::anyhow!(e))
     }
@@ -163,6 +196,14 @@ pub(crate) fn to_view_with_used(
         host_ip: s.host_ip,
         instance_type: s.instance_type,
         healthy: s.healthy,
+        isolated: s.isolated,
+        isolated_at: if s.isolated_at > 0 {
+            Some(s.isolated_at)
+        } else {
+            None
+        },
+        isolated_by: s.isolated_by,
+        isolated_reason: s.isolated_reason,
         capacity: NodeResourcesView {
             cpu_milli: cap_cpu_milli,
             memory_mb: cap_mem,
@@ -316,6 +357,8 @@ mod tests {
         assert_eq!(view.capacity.cpu_milli, 2200);
         assert_eq!(view.allocatable.cpu_milli, 1000);
         assert_eq!(view.local_templates, vec!["tmpl-1".to_string()]);
+        assert!(!view.isolated);
+        assert_eq!(view.isolated_at, None);
 
         let overview = build_overview(&[snapshot]);
         assert_eq!(overview.node_count, 1);
@@ -323,5 +366,25 @@ mod tests {
         assert_eq!(overview.total_cpu_milli, 2200);
         assert_eq!(overview.allocatable_cpu_milli, 1000);
         assert_eq!(overview.max_mvm_slots, 3);
+    }
+
+    #[test]
+    fn maps_isolation_fields_into_view() {
+        let snapshot = NodeSnapshot {
+            node_id: "node-iso".to_string(),
+            host_ip: "10.0.0.2".to_string(),
+            healthy: true,
+            isolated: true,
+            isolated_at: 1_700_000_000,
+            isolated_by: "admin".to_string(),
+            isolated_reason: "maintenance".to_string(),
+            ..Default::default()
+        };
+
+        let view = to_view(snapshot);
+        assert!(view.isolated);
+        assert_eq!(view.isolated_at, Some(1_700_000_000));
+        assert_eq!(view.isolated_by, "admin");
+        assert_eq!(view.isolated_reason, "maintenance");
     }
 }

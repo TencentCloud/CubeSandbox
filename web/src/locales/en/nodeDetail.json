@@ -23,5 +23,28 @@
   },
   "empty": {
     "sandboxes": "No sandboxes running on this node."
+  },
+  "isolation": {
+    "badge": "Isolated",
+    "isolate": "Isolate node",
+    "unisolate": "Resume scheduling",
+    "reasonLabel": "Reason (optional)",
+    "reasonPlaceholder": "e.g. hardware maintenance",
+    "isolatedBy": "Isolated by",
+    "isolatedAt": "Isolated at",
+    "reason": "Reason",
+    "dialog": {
+      "isolateTitle": "Isolate this node?",
+      "isolateDesc": "New instances will no longer be scheduled onto this node. Running instances keep running. You can resume scheduling at any time.",
+      "unisolateTitle": "Resume scheduling on this node?",
+      "unisolateDesc": "This node will become eligible for new instance scheduling again."
+    },
+    "actions": {
+      "cancel": "Cancel",
+      "confirmIsolate": "Isolate",
+      "confirmUnisolate": "Resume",
+      "processing": "Processing…"
+    },
+    "error": "Operation failed. Please try again."
   }
 }

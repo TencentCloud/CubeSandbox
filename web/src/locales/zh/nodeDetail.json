@@ -23,5 +23,28 @@
   },
   "empty": {
     "sandboxes": "该节点上暂无运行中的沙箱。"
+  },
+  "isolation": {
+    "badge": "已隔离",
+    "isolate": "隔离节点",
+    "unisolate": "恢复调度",
+    "reasonLabel": "原因（可选）",
+    "reasonPlaceholder": "例如：硬件维护",
+    "isolatedBy": "隔离操作人",
+    "isolatedAt": "隔离时间",
+    "reason": "原因",
+    "dialog": {
+      "isolateTitle": "确认隔离该节点？",
+      "isolateDesc": "隔离后将不再向该节点调度新实例，已有实例继续运行。你可以随时恢复调度。",
+      "unisolateTitle": "确认恢复该节点的调度？",
+      "unisolateDesc": "恢复后该节点将重新参与新实例的调度。"
+    },
+    "actions": {
+      "cancel": "取消",
+      "confirmIsolate": "隔离",
+      "confirmUnisolate": "恢复",
+      "processing": "处理中…"
+    },
+    "error": "操作失败，请重试。"
   }
 }

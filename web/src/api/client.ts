@@ -103,6 +103,10 @@ export interface ClusterNodeView {
   memorySaturationPct: number;
   heartbeatTime?: string | null;
   healthy: boolean;
+  isolated: boolean;
+  isolatedAt?: number | null;
+  isolatedBy?: string;
+  isolatedReason?: string;
   localTemplates: string[];
   versions: ComponentVersionDto[];
 }
@@ -175,6 +179,10 @@ function mapNode(dto: ApiNodeView): ClusterNodeView {
     memorySaturationPct: Math.round(dto.memorySaturation),
     heartbeatTime: dto.heartbeatTime,
     healthy: dto.healthy,
+    isolated: dto.isolated ?? false,
+    isolatedAt: dto.isolatedAt ?? null,
+    isolatedBy: dto.isolatedBy ?? undefined,
+    isolatedReason: dto.isolatedReason ?? undefined,
     localTemplates: dto.localTemplates ?? [],
     versions: dto.versions ?? [],
   };
@@ -234,6 +242,11 @@ export const clusterApi = {
   overview: () => api<ClusterOverviewDto>('/cluster/overview'),
   nodes: () => api<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
   node: (id: string) => api<ApiNodeView>(`/nodes/${id}`).then(mapNode),
+  setNodeIsolation: (id: string, isolated: boolean, reason?: string) =>
+    api<ApiNodeView>(`/nodes/${id}/isolation`, {
+      method: 'POST',
+      body: JSON.stringify({ isolated, ...(reason ? { reason } : {}) }),
+    }).then(mapNode),
   config: () => api<{
     apiEndpoint: string;
     rateLimitPerSec: number;

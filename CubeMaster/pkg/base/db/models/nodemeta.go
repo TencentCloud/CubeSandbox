@@ -25,6 +25,13 @@ type NodeRegistration struct {
 	QuotaMemMB          int64  `gorm:"column:quota_mem_mb"`
 	CreateConcurrentNum int64  `gorm:"column:create_concurrent_num"`
 	MaxMvmNum           int64  `gorm:"column:max_mvm_num"`
+	// Isolation (cordon) state. Managed exclusively by the operator-facing
+	// isolation API; never written by cubelet register/heartbeat upserts so
+	// re-registration cannot clear an administrative isolation.
+	Isolated       bool   `gorm:"column:isolated"`
+	IsolatedAt     int64  `gorm:"column:isolated_at"`
+	IsolatedBy     string `gorm:"column:isolated_by"`
+	IsolatedReason string `gorm:"column:isolated_reason"`
 }
 
 func (NodeRegistration) TableName() string {

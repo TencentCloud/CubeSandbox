@@ -85,6 +85,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/nodes/{nodeID}/isolation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["set_node_isolation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sandboxes/{sandboxID}": {
         parameters: {
             query?: never;
@@ -372,6 +388,16 @@ export interface components {
             heartbeatTime?: string | null;
             hostIP: string;
             instanceType?: string;
+            /**
+             * @description Whether an operator has manually isolated (cordoned) this node. When
+             *     true the scheduler will not place new instances on it; existing
+             *     instances keep running.
+             */
+            isolated: boolean;
+            /** Format: int64 */
+            isolatedAt?: number | null;
+            isolatedBy?: string;
+            isolatedReason?: string;
             localTemplates?: string[];
             /** Format: int64 */
             maxMvmSlots: number;
@@ -680,6 +706,63 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NodeView"];
+                };
+            };
+            /** @description Node not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    set_node_isolation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Node identifier */
+                nodeID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    isolated: boolean;
+                    reason?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated node detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeView"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description Node not found */

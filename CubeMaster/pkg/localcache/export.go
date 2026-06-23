@@ -115,7 +115,7 @@ func GetHealthyNodes(n int) node.NodeList {
 		h, ok := v.Object.(*node.Node)
 		if ok {
 			current := cloneNodeWithCurrentHealth(h, now)
-			if current.Healthy {
+			if current.Healthy && !current.Isolated {
 				nodes.Append(current)
 			}
 		}
@@ -144,7 +144,7 @@ func GetHealthyNodesByInstanceType(n int, product string) node.NodeList {
 		}
 
 		current := cloneNodeWithCurrentHealth(v, now)
-		if current.Healthy {
+		if current.Healthy && !current.Isolated {
 			nodes.Append(current)
 		}
 	}

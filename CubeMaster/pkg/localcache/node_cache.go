@@ -298,6 +298,7 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.ReportedReady = n.ReportedReady
 		old.Healthy = n.Healthy
 		old.UnhealthyReason = n.UnhealthyReason
+		old.Isolated = n.Isolated
 		old.HostStatus = n.HostStatus
 		old.CreateConcurrentNum = n.CreateConcurrentNum
 		old.MaxMvmLimit = n.MaxMvmLimit

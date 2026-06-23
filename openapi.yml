@@ -1,8 +1,3 @@
----
-# Copyright (c) 2026 Tencent Inc.
-# SPDX-License-Identifier: Apache-2.0
-#
-
 openapi: 3.1.0
 info:
   title: CubeAPI
@@ -114,6 +109,62 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NodeView'
+        '404':
+          description: Node not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /nodes/{nodeID}/isolation:
+    post:
+      tags:
+      - handlers::cluster
+      operationId: set_node_isolation
+      parameters:
+      - name: nodeID
+        in: path
+        description: Node identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              description: |-
+                Request body for the node isolation endpoint. The audit identity is never
+                taken from the body; it is derived server-side from the authenticated
+                principal (see `resolve_operator`).
+              required:
+              - isolated
+              properties:
+                isolated:
+                  type: boolean
+                reason:
+                  type:
+                  - string
+                  - 'null'
+        required: true
+      responses:
+        '200':
+          description: Updated node detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeView'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Node not found
           content:
@@ -724,6 +775,7 @@ components:
       - nodeID
       - hostIP
       - healthy
+      - isolated
       - capacity
       - allocatable
       - cpuSaturation
@@ -759,6 +811,21 @@ components:
         hostIP:
           type: string
         instanceType:
+          type: string
+        isolated:
+          type: boolean
+          description: |-
+            Whether an operator has manually isolated (cordoned) this node. When
+            true the scheduler will not place new instances on it; existing
+            instances keep running.
+        isolatedAt:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        isolatedBy:
+          type: string
+        isolatedReason:
           type: string
         localTemplates:
           type: array

@@ -808,6 +808,16 @@ pub struct NodeView {
     #[serde(rename = "instanceType", skip_serializing_if = "String::is_empty")]
     pub instance_type: String,
     pub healthy: bool,
+    /// Whether an operator has manually isolated (cordoned) this node. When
+    /// true the scheduler will not place new instances on it; existing
+    /// instances keep running.
+    pub isolated: bool,
+    #[serde(rename = "isolatedAt", skip_serializing_if = "Option::is_none")]
+    pub isolated_at: Option<i64>,
+    #[serde(rename = "isolatedBy", skip_serializing_if = "String::is_empty")]
+    pub isolated_by: String,
+    #[serde(rename = "isolatedReason", skip_serializing_if = "String::is_empty")]
+    pub isolated_reason: String,
     pub capacity: NodeResourcesView,
     pub allocatable: NodeResourcesView,
     /// Percentage (0-100) of CPU currently in use.

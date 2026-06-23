@@ -5,13 +5,16 @@
 package localcache
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/patrickmn/go-cache"
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -29,6 +32,73 @@ func init() {
 	}
 	if _, err := config.Init(); err != nil {
 		panic(err)
+	}
+}
+
+func TestUpdateNodeFromMetaDataPropagatesIsolated(t *testing.T) {
+	origCache := l.cache
+	origNodesByClusters := l.sortedNodesByClusters
+	defer func() {
+		l.cache = origCache
+		l.sortedNodesByClusters = origNodesByClusters
+	}()
+
+	l.cache = cache.New(0, 0)
+	l.sortedNodesByClusters = make(map[string]node.NodeList)
+	l.cache.SetDefault("node-a", &node.Node{
+		InsID:            "node-a",
+		IP:               "10.0.0.1",
+		ReportedReady:    true,
+		Healthy:          true,
+		MetaDataUpdateAt: time.Now(),
+	})
+
+	UpsertNode(&node.Node{
+		InsID:            "node-a",
+		IP:               "10.0.0.1",
+		ReportedReady:    true,
+		Healthy:          true,
+		Isolated:         true,
+		MetaDataUpdateAt: time.Now(),
+	})
+
+	raw, ok := l.cache.Get("node-a")
+	if !ok {
+		t.Fatal("expected node to remain cached")
+	}
+	if cached := raw.(*node.Node); !cached.Isolated {
+		t.Fatal("updateNodeFromMetaData should propagate Isolated onto the cached node")
+	}
+}
+
+func TestLoadIsolatedSetPreservesCacheOnDBError(t *testing.T) {
+	origCache := l.cache
+	defer func() {
+		l.cache = origCache
+	}()
+
+	l.cache = cache.New(0, 0)
+	l.cache.SetDefault("node-isolated", &node.Node{
+		InsID:    "node-isolated",
+		Isolated: true,
+	})
+
+	n := &node.Node{InsID: "node-isolated"}
+	l.applyIsolationState(n, nil, errors.New("db unavailable"), true)
+	if !n.Isolated {
+		t.Fatal("isolation read failure should preserve cached isolated=true")
+	}
+
+	coldStart := &node.Node{InsID: "node-isolated"}
+	l.applyIsolationState(coldStart, nil, errors.New("db unavailable"), false)
+	if coldStart.Isolated {
+		t.Fatal("cold start without a reliable isolation read should keep the zero value")
+	}
+
+	cleared := &node.Node{InsID: "node-isolated", Isolated: true}
+	l.applyIsolationState(cleared, map[string]bool{"node-isolated": false}, nil, true)
+	if cleared.Isolated {
+		t.Fatal("successful isolation read should override the cached value")
 	}
 }
 

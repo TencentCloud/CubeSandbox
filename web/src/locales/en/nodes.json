@@ -3,5 +3,12 @@
   "subtitle": "Host capacity, saturation and conditions across the fleet.",
   "noNodes": "No nodes registered.",
   "cpu": "CPU",
-  "memory": "Memory"
+  "memory": "Memory",
+  "isolated": "Isolated",
+  "degraded": "Degraded",
+  "moreOptions": "More options",
+  "isolation": {
+    "isolate": "Isolate node",
+    "unisolate": "Resume scheduling"
+  }
 }

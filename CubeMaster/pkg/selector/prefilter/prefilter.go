@@ -49,6 +49,10 @@ func (l *prefilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 			log.G(selCtx.Ctx).Warnf("%s not healthy", n.IP)
 			continue
 		}
+		if n.Isolated {
+			log.G(selCtx.Ctx).Warnf("%s isolated", n.IP)
+			continue
+		}
 		if !sconf.DisableCircuitFilter {
 			if selCtx.FilterOut(n) {
 				log.G(selCtx.Ctx).Warnf("%s filter_out", n.IP)

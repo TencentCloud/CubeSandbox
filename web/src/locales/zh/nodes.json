@@ -3,5 +3,12 @@
   "subtitle": "集群中各主机的容量、饱和度与状态。",
   "noNodes": "暂无已注册节点。",
   "cpu": "CPU",
-  "memory": "内存"
+  "memory": "内存",
+  "isolated": "已隔离",
+  "degraded": "异常",
+  "moreOptions": "更多操作",
+  "isolation": {
+    "isolate": "隔离节点",
+    "unisolate": "恢复调度"
+  }
 }

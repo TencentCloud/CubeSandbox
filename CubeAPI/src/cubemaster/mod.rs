@@ -476,10 +476,37 @@ impl CubeMasterClient {
 
     /// GET /internal/meta/nodes/{id} — single node detail.
     pub async fn get_node(&self, node_id: &str) -> Result<NodeResponse, CubeMasterError> {
+        validate_node_id(node_id)?;
         let url = format!("{}/internal/meta/nodes/{}", self.base_url, node_id);
         let resp = self
             .inner
             .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// POST /internal/meta/nodes/{id}/isolation — apply or clear an
+    /// administrative cordon. `operator` is the authenticated principal and is
+    /// forwarded via the X-Operator header so CubeMaster records a trustworthy
+    /// audit identity rather than trusting a client-supplied field.
+    pub async fn set_node_isolation(
+        &self,
+        node_id: &str,
+        operator: &str,
+        req: &SetNodeIsolationRequest,
+    ) -> Result<NodeResponse, CubeMasterError> {
+        validate_node_id(node_id)?;
+        let url = format!(
+            "{}/internal/meta/nodes/{}/isolation",
+            self.base_url, node_id
+        );
+        let resp = self
+            .inner
+            .post(&url)
+            .header("X-Operator", operator)
+            .json(req)
             .send()
             .await
             .map_err(CubeMasterError::Http)?;
@@ -577,6 +604,31 @@ fn validate_path_segment(name: &'static str, value: &str) -> Result<(), CubeMast
             name,
             value: value.to_string(),
         })
+    }
+}
+
+/// Validate a node id before interpolating it into a CubeMaster URL path.
+///
+/// Unlike [`validate_path_segment`], node ids in the open-source deployment are
+/// commonly IPv4 addresses (e.g. `10.0.0.10`), so `.` and `:` must be allowed.
+/// The allowed set (`A-Za-z0-9.-_:`) is URL-path-safe, and `..` / `/` / `\` /
+/// whitespace are rejected, so the validated value needs no percent-encoding to
+/// be safe against path traversal or routing ambiguity.
+fn validate_node_id(node_id: &str) -> Result<(), CubeMasterError> {
+    let invalid = |value: &str| CubeMasterError::InvalidPathParameter {
+        name: "node_id",
+        value: value.to_string(),
+    };
+    if node_id.is_empty() || node_id.len() > 255 || node_id.contains("..") {
+        return Err(invalid(node_id));
+    }
+    let ok = node_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_' || b == b':');
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid(node_id))
     }
 }
 
@@ -1976,6 +2028,14 @@ pub struct NodeSnapshot {
     pub heartbeat_time: Option<DateTime<Utc>>,
     #[serde(default)]
     pub healthy: bool,
+    #[serde(default)]
+    pub isolated: bool,
+    #[serde(default)]
+    pub isolated_at: i64,
+    #[serde(default)]
+    pub isolated_by: String,
+    #[serde(default)]
+    pub isolated_reason: String,
 }
 
 /// One component's version on a node, as reported by cubelet.
@@ -2012,6 +2072,15 @@ pub struct NodeResponse {
     pub ret: RetCode,
     #[serde(default)]
     pub data: Option<NodeSnapshot>,
+}
+
+/// Request body for the node isolation endpoint. The audit identity is carried
+/// out-of-band in the X-Operator header, never here, so it cannot be forged.
+#[derive(Debug, Serialize)]
+pub struct SetNodeIsolationRequest {
+    pub isolated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 // ─── Version matrix ─────────────────────────────────────────────────────────
@@ -2097,8 +2166,36 @@ pub struct VersionMatrixResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        non_empty_str, validate_path_segment, CubeMasterError, GetSandboxResponse, SandboxInfo,
+        non_empty_str, validate_node_id, validate_path_segment, CubeMasterError,
+        GetSandboxResponse, SandboxInfo,
     };
+
+    #[test]
+    fn validate_node_id_accepts_ip_and_hostname_ids() {
+        for value in [
+            "10.0.0.10",
+            "192.168.1.1",
+            "fe80::1",
+            "cube-edge-01",
+            "node_a1",
+            "ABC123",
+        ] {
+            if let Err(err) = validate_node_id(value) {
+                panic!("expected {value:?} to be accepted, got {err:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn validate_node_id_rejects_traversal_and_separators() {
+        for value in ["", "../etc/passwd", "a/b", "a\\b", "node a", "a..b"] {
+            assert!(
+                validate_node_id(value).is_err(),
+                "expected {value:?} to be rejected"
+            );
+        }
+        assert!(validate_node_id(&"a".repeat(256)).is_err());
+    }
 
     #[test]
     fn non_empty_str_trims_surrounding_whitespace() {

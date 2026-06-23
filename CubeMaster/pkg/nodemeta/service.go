@@ -22,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -133,6 +134,14 @@ type NodeSnapshot struct {
 	ReportedReady       bool                   `json:"-"`
 	Healthy             bool                   `json:"healthy"`
 	UnhealthyReason     string                 `json:"unhealthy_reason,omitempty"`
+	// Isolated marks an operator-applied cordon: the node stays visible and
+	// keeps running existing instances, but the scheduler will not place new
+	// instances on it. It is an administrative flag, independent of the
+	// heartbeat-derived Healthy state.
+	Isolated       bool   `json:"isolated"`
+	IsolatedAt     int64  `json:"isolated_at,omitempty"`
+	IsolatedBy     string `json:"isolated_by,omitempty"`
+	IsolatedReason string `json:"isolated_reason,omitempty"`
 	// versionsHash is the content hash of Versions, used to skip redundant DB
 	// writes on every heartbeat. Not serialised to JSON.
 	versionsHash string
@@ -154,6 +163,19 @@ type service struct {
 	// node so concurrent heartbeats cannot race each other and issue redundant
 	// version writes or overwrite a newer in-memory hash with an older one.
 	versionWriteLocks sync.Map
+
+	// isolationWriteLocks serialises isolation read-modify-write per node so
+	// concurrent isolate/un-isolate requests cannot interleave DB and in-memory
+	// updates into an inconsistent state.
+	isolationWriteLocks sync.Map
+}
+
+// isolationState mirrors the persisted isolation columns of a node.
+type isolationState struct {
+	Isolated       bool
+	IsolatedAt     int64
+	IsolatedBy     string
+	IsolatedReason string
 }
 
 var global = &service{
@@ -168,7 +190,6 @@ var global = &service{
 var OnGuestAgentVersionChanged func(nodeID string)
 
 func Init(ctx context.Context) error {
-	_ = ctx
 	// Schema is owned by pkg/base/dao/migrate and applied at startup
 	// before any package Init runs.
 	global.db = db.Init(config.GetDbConfig())
@@ -179,8 +200,91 @@ func Init(ctx context.Context) error {
 		return err
 	}
 	localcache.RegisterNodeLoader(ListSchedulerNodes)
+	recov.GoWithRecover(func() {
+		global.loopReconcileIsolation(ctx)
+	}, func(panicErr interface{}) {
+		log.G(ctx).Errorf("loopReconcileIsolation panic: %v", panicErr)
+	})
 	global.ready = true
 	return nil
+}
+
+// isolationReconcileInterval controls how quickly an isolation change applied
+// on one cubemaster replica propagates to the others. The registration table
+// is the source of truth; each replica polls only the isolation columns and
+// patches its in-memory snapshots. Kept short so the cordon "leak window" on
+// peer replicas stays small.
+const isolationReconcileInterval = 5 * time.Second
+
+// loopReconcileIsolation periodically reconciles the isolation columns from the
+// registration table into the in-memory snapshots. This is the cross-replica
+// propagation mechanism: a write done via SetNodeIsolated on replica A becomes
+// visible to replica B within one interval, even though B's snapshots are
+// otherwise only mutated by the cubelets that heartbeat to B.
+func (s *service) loopReconcileIsolation(ctx context.Context) {
+	ticker := time.NewTicker(isolationReconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.reconcileIsolation(ctx)
+		}
+	}
+}
+
+func (s *service) reconcileIsolation(ctx context.Context) {
+	isolatedNodeIDs := s.listInMemoryIsolatedNodeIDs()
+	regs := make([]*models.NodeRegistration, 0)
+	query := s.db.Table(constants.NodeMetaRegistrationTable).
+		Select("node_id", "isolated", "isolated_at", "isolated_by", "isolated_reason")
+	if len(isolatedNodeIDs) > 0 {
+		query = query.Where("isolated = ? OR node_id IN ?", true, isolatedNodeIDs)
+	} else {
+		query = query.Where("isolated = ?", true)
+	}
+	if err := query.Find(&regs).Error; err != nil {
+		log.G(ctx).Warnf("reconcile isolation: load registrations failed: %v", err)
+		return
+	}
+	changed := make([]*NodeSnapshot, 0)
+	s.mu.Lock()
+	for _, reg := range regs {
+		snap, ok := s.nodes[reg.NodeID]
+		if !ok || snap == nil {
+			continue
+		}
+		if snap.Isolated == reg.Isolated &&
+			snap.IsolatedAt == reg.IsolatedAt &&
+			snap.IsolatedBy == reg.IsolatedBy &&
+			snap.IsolatedReason == reg.IsolatedReason {
+			continue
+		}
+		snap.Isolated = reg.Isolated
+		snap.IsolatedAt = reg.IsolatedAt
+		snap.IsolatedBy = reg.IsolatedBy
+		snap.IsolatedReason = reg.IsolatedReason
+		changed = append(changed, cloneSnapshot(snap))
+	}
+	s.mu.Unlock()
+	for _, snap := range changed {
+		log.G(ctx).Infof("reconcile isolation: node=%s isolated=%v", snap.NodeID, snap.Isolated)
+		syncLocalcache(snap)
+	}
+}
+
+func (s *service) listInMemoryIsolatedNodeIDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ids := make([]string, 0)
+	for nodeID, snap := range s.nodes {
+		if snap != nil && snap.Isolated {
+			ids = append(ids, nodeID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func Ready() bool {
@@ -221,6 +325,20 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 		return nil, err
 	}
 
+	// Re-read the persisted isolation columns: the register upsert above
+	// deliberately does not touch them, so a node that was isolated on another
+	// replica (or before a restart) must have that administrative state
+	// reflected here. Without this backfill a cubelet re-registration would
+	// leave the in-memory snapshot with Isolated=false and silently allow the
+	// scheduler on this replica to place new instances on a cordoned node.
+	//
+	// Hold the per-node isolation lock across the read+apply so a concurrent
+	// SetNodeIsolated cannot land its DB+memory write in between (which would
+	// otherwise let this stale read clobber a just-applied cordon until the
+	// next reconcile tick).
+	unlockIso := global.lockIsolationWrite(req.NodeID)
+	iso := loadIsolationFromDB(req.NodeID)
+
 	snap := global.ensureNode(req.NodeID)
 	global.mu.Lock()
 	snap.NodeID = req.NodeID
@@ -235,9 +353,16 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 	snap.QuotaMemMB = req.QuotaMemMB
 	snap.CreateConcurrentNum = req.CreateConcurrentNum
 	snap.MaxMvmNum = req.MaxMvmNum
+	if iso != nil {
+		snap.Isolated = iso.Isolated
+		snap.IsolatedAt = iso.IsolatedAt
+		snap.IsolatedBy = iso.IsolatedBy
+		snap.IsolatedReason = iso.IsolatedReason
+	}
 	applyCurrentHealth(snap, time.Now())
 	global.mu.Unlock()
 	syncLocalcache(snap)
+	unlockIso()
 	global.persistVersions(ctx, req.NodeID, req.Versions)
 	return cloneSnapshot(snap), nil
 }
@@ -341,6 +466,99 @@ func (s *service) lockVersionWrite(nodeID string) func() {
 	lock := lockAny.(*sync.Mutex)
 	lock.Lock()
 	return lock.Unlock
+}
+
+func (s *service) lockIsolationWrite(nodeID string) func() {
+	lockAny, _ := s.isolationWriteLocks.LoadOrStore(nodeID, &sync.Mutex{})
+	lock := lockAny.(*sync.Mutex)
+	lock.Lock()
+	return lock.Unlock
+}
+
+// loadIsolationFromDB reads the persisted isolation columns for a node. Returns
+// nil when the registration row does not exist or the read fails, so callers
+// fall back to the existing in-memory value rather than wrongly clearing it.
+func loadIsolationFromDB(nodeID string) *isolationState {
+	reg := &models.NodeRegistration{}
+	if err := global.db.Table(constants.NodeMetaRegistrationTable).
+		Select("isolated", "isolated_at", "isolated_by", "isolated_reason").
+		Where("node_id = ?", nodeID).
+		Take(reg).Error; err != nil {
+		return nil
+	}
+	return &isolationState{
+		Isolated:       reg.Isolated,
+		IsolatedAt:     reg.IsolatedAt,
+		IsolatedBy:     reg.IsolatedBy,
+		IsolatedReason: reg.IsolatedReason,
+	}
+}
+
+// SetNodeIsolated applies or clears an administrative cordon on a node. The
+// node must already be registered (no ghost nodes are created). The isolation
+// columns are persisted to the registration row, the in-memory snapshot is
+// updated, and the scheduler cache is synced immediately so this replica stops
+// (or resumes) placing new instances on the node without waiting for the next
+// heartbeat. Peer replicas converge via loopReconcileIsolation.
+func SetNodeIsolated(ctx context.Context, nodeID string, isolated bool, by, reason string) (*NodeSnapshot, error) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil, fmt.Errorf("node_id is required")
+	}
+
+	unlock := global.lockIsolationWrite(nodeID)
+	defer unlock()
+
+	// Require an existing registration row. ensureNode would otherwise create a
+	// phantom snapshot for an arbitrary id supplied by the caller.
+	existing := &models.NodeRegistration{}
+	if err := global.db.Table(constants.NodeMetaRegistrationTable).
+		Select("node_id").
+		Where("node_id = ?", nodeID).
+		Take(existing).Error; err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	updates := map[string]interface{}{
+		"isolated":   isolated,
+		"updated_at": now,
+	}
+	if isolated {
+		updates["isolated_at"] = now.Unix()
+		updates["isolated_by"] = by
+		updates["isolated_reason"] = reason
+	} else {
+		// Explicitly clear the metadata on un-isolate so a later reconcile or
+		// reload does not resurrect stale operator/reason values.
+		updates["isolated_at"] = 0
+		updates["isolated_by"] = ""
+		updates["isolated_reason"] = ""
+	}
+	if err := global.db.Table(constants.NodeMetaRegistrationTable).
+		Where("node_id = ?", nodeID).
+		Updates(updates).Error; err != nil {
+		return nil, err
+	}
+
+	snap := global.ensureNode(nodeID)
+	global.mu.Lock()
+	snap.Isolated = isolated
+	if isolated {
+		snap.IsolatedAt = now.Unix()
+		snap.IsolatedBy = by
+		snap.IsolatedReason = reason
+	} else {
+		snap.IsolatedAt = 0
+		snap.IsolatedBy = ""
+		snap.IsolatedReason = ""
+	}
+	out := cloneSnapshotWithCurrentHealth(snap, time.Now())
+	global.mu.Unlock()
+
+	syncLocalcache(out)
+	log.G(ctx).Infof("set node isolation node=%s isolated=%v by=%s", nodeID, isolated, by)
+	return out, nil
 }
 
 // writeVersions upserts the reported component rows and physically removes
@@ -558,6 +776,10 @@ func (s *service) reload() error {
 			QuotaMemMB:          reg.QuotaMemMB,
 			CreateConcurrentNum: reg.CreateConcurrentNum,
 			MaxMvmNum:           reg.MaxMvmNum,
+			Isolated:            reg.Isolated,
+			IsolatedAt:          reg.IsolatedAt,
+			IsolatedBy:          reg.IsolatedBy,
+			IsolatedReason:      reg.IsolatedReason,
 		}
 		_ = json.Unmarshal([]byte(reg.LabelsJSON), &snap.Labels)
 		_ = json.Unmarshal([]byte(reg.CapacityJSON), &snap.Capacity)
@@ -662,6 +884,7 @@ func toSchedulerNode(snap *NodeSnapshot) *node.Node {
 		CreateConcurrentNum: snap.CreateConcurrentNum,
 		MaxMvmLimit:         snap.MaxMvmNum,
 		MetaDataUpdateAt:    snap.HeartbeatTime,
+		Isolated:            snap.Isolated,
 		NodeLabels:          cloneStringMap(snap.Labels),
 		// MetricUpdate / MetricLocalUpdateAt are intentionally left
 		// zero-valued here. They are owned by the resource-metric path
