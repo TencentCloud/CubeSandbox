@@ -40,7 +40,7 @@ req_template_conf:
     Poststop: true
     Prestop: true
   cube_box_req_template: >-
-    {"volumes":[{"name":"tmp","volume_source":{"empty_dir":{"medium":0}}}],"containers":[{"name":"cubebox-default","envs":[{"key":"TZ","value":"Asia/Shanghai"},{"key":"TERM","value":"xterm"}],"volume_mounts":[{"name":"tmp","container_path":"/"}],"security_context":{"privileged":true,"readonly_rootfs":false,"no_new_privs":false}}],"network_type":"tap","cubevs_context":{"allowInternetAccess":true,"denyOut":["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/18"]}}
+    {"volumes":[{"name":"tmp","volume_source":{"empty_dir":{"medium":0}}}],"containers":[{"name":"cubebox-default","envs":[{"key":"TZ","value":"Asia/Shanghai"},{"key":"TERM","value":"xterm"}],"volume_mounts":[{"name":"tmp","container_path":"/"}],"security_context":{"privileged":true,"readonly_rootfs":false,"no_new_privs":false}}],"network_type":"tap","cube_network_config":{"allowInternetAccess":true,"denyOut":["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/16"]}}
 
 ossdb_config:
   addr: "127.0.0.1:__CUBE_SANDBOX_MYSQL_PORT__"

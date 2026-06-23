@@ -18,6 +18,7 @@ This directory is used to build and deliver the single-machine one-click release
 - `env.example`: Shared environment variable template for both the build machine and the target machine.
 - `lib/common.sh`: Common shell utility functions.
 - `scripts/one-click/`: Validation and maintenance helpers used by the systemd-managed deployment after installation.
+- `terraform/tencentcloud/`: Terraform deployer for a **clustered** CubeSandbox on Tencent Cloud (TKE control plane + CVM compute nodes). `create.sh` is the entry point; `destroy.sh` tears everything down. These files are shipped both at the release-bundle top level and inside `sandbox-package` (see "Tencent Cloud Cluster Deployment").
 
 ## Build Inputs
 
@@ -426,3 +427,187 @@ sudo yum install -y e2fsprogs util-linux
 - Verify the host stub resolver path also routes through the new entry point: `cat /etc/resolv.conf` should show `nameserver 169.254.254.53` on both paths.
 - Verify the container view: `docker run --rm alpine cat /etc/resolv.conf` should also show `nameserver 169.254.254.53`. If it shows `nameserver 8.8.8.8` instead, the host's `/etc/resolv.conf` regressed to a loopback nameserver and Docker fell back to its built-in public DNS.
 - On the `systemd-resolved` path, the local CoreDNS address should appear only on the dedicated dummy link, not on the default network interface.
+
+## Tencent Cloud Cluster Deployment (Terraform)
+
+In addition to the single-machine `install.sh`, the release bundle ships a
+Terraform-based deployer that stands up a **clustered** CubeSandbox on Tencent
+Cloud: a managed TKE control plane running `cubemaster` / `cube-api` /
+`cube-proxy` / `cube-webui`, backed by cloud MySQL + Redis, with one or more CVM
+PVM compute nodes. A jumpserver (SSH on port `443`) is the build host and bastion
+for the otherwise-private VPC.
+
+The deployer is surfaced at the **top level** of the extracted bundle, so right
+after extracting the package you can run it directly:
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+
+export TENCENTCLOUD_SECRET_ID="your-secret-id"
+export TENCENTCLOUD_SECRET_KEY="your-secret-key"
+
+./terraform/tencentcloud/create.sh
+```
+
+`create.sh` runs entirely from the extracted bundle:
+
+- It auto-detects the local bundle (the outer `cube-sandbox-one-click-<version>.tar.gz`,
+  or re-packs the extracted directory if the tarball is gone) and uses it as the
+  offline source for component images and compute-node installation. When a local
+  bundle is detected or set via `TENCENTCLOUD_LOCAL_BUNDLE=/path/to.tar.gz`, no
+  public download is required; otherwise the jumpserver falls back to an **online
+  install** (it downloads `online-install.sh` and the package), which needs public
+  network access.
+- It generates an SSH key pair under `terraform/tencentcloud/.ssh/` if none exists.
+- It generates the cube-proxy CLB's TLS certificate (`cube.app` / `*.cube.app`)
+  on the jumpserver using the bundled `mkcert` (shipped inside
+  `assets/package/sandbox-package.tar.gz`, i.e. `sandbox-package/support/bin/mkcert`
+  once that inner package is extracted; the same flow as
+  `scripts/one-click/up-cube-proxy.sh`), keeping a copy under
+  `/root/cubeproxy-certs` on the jumpserver and downloading it to
+  `terraform/tencentcloud/cubeproxy-certs/` for the Secret mount.
+- It builds and pushes the four component images to the TCR instance it creates,
+  then deploys the TKE addons and the CVM compute nodes. At least one compute node
+  is always created by `create.sh`; use `TENCENTCLOUD_COMPUTE_NODE_COUNT` to change
+  the count.
+
+cube-webui's nginx config (`webui-nginx.conf`) is not maintained separately: it
+is derived from the canonical `deploy/one-click/webui/nginx.conf` (placed there
+by the bundle build, or copied by `create.sh` when run from the source tree).
+
+Requirements on the machine running `create.sh`: `ssh`, `scp`, `nc`, and network
+access to the Tencent Cloud APIs. `terraform` and `jq` are auto-installed if
+missing — `terraform` from the HashiCorp release site (needs `curl`/`wget` +
+`unzip`), `jq` from the system package manager or, failing that, a static binary
+from GitHub. `mkcert`/`openssl` are not required locally — certificates are
+produced on the jumpserver.
+
+Common environment overrides (these match the `create.sh` and `variables.tf`
+defaults):
+
+```bash
+export TENCENTCLOUD_REGION=ap-guangzhou
+export TENCENTCLOUD_COMPUTE_NODE_COUNT=2    # CVM PVM compute nodes (default 1)
+export TENCENTCLOUD_TKE_NODE_COUNT=2        # TKE worker nodes (default 2)
+export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=S5.2XLARGE16
+export TENCENTCLOUD_CUBE_IMAGE_TAG=latest   # shared tag for the four images
+```
+
+For non-interactive / CI runs, also set these (without a TTY the interactive
+menus fall back to defaults, so set them explicitly to stay in control). The
+password variables are the exception: a non-interactive run refuses to start
+with the built-in, publicly-known demo passwords and requires them to be set —
+or set `TENCENTCLOUD_ALLOW_INSECURE_DEFAULTS=1` to opt into the insecure
+defaults for a throwaway sandbox.
+
+```bash
+export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-3    # else first queried zone / <region>-3
+export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=S5.2XLARGE16  # else the preferred default
+export TENCENTCLOUD_LOCAL_BUNDLE=/path/to/cube-sandbox-one-click-<version>.tar.gz  # auto-detected when run from inside an extracted bundle
+export TENCENTCLOUD_PVM_KERNEL_VMLINUX=/path/to/vmlinux-pvm  # only needed if the bundle ships no vmlinux-pvm
+export TENCENTCLOUD_MYSQL_PASSWORD=...      # required for non-interactive runs (no insecure fallback)
+export TENCENTCLOUD_REDIS_PASSWORD=...      # required for non-interactive runs
+export TENCENTCLOUD_CUBE_PASSWORD=...       # required for non-interactive runs
+export TENCENTCLOUD_BUILD_IMAGES=0          # reuse already-pushed images
+```
+
+Tear everything down with:
+
+```bash
+./terraform/tencentcloud/destroy.sh
+```
+
+`destroy.sh` also needs `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY` and
+reuses the selections saved in `terraform/tencentcloud/.env` from `create.sh`. It
+runs without prompting — running `destroy.sh` itself confirms the teardown.
+
+> **⚠ Avoid unexpected billing:** if `destroy.sh` cannot remove every resource
+> (for example MySQL/Redis stuck in the recycle bin / isolated state, or
+> leftovers Terraform can no longer see), log in to the Tencent Cloud console and
+> delete the remaining resources by hand so you are not billed for orphans:
+> [VPC / network](https://console.cloud.tencent.com/vpc),
+> [MySQL recycle bin](https://console.cloud.tencent.com/cdb/recycle),
+> [Redis recycle bin](https://console.cloud.tencent.com/redis/recycle).
+> `destroy.sh` also prints these same links when a teardown step fails or a
+> recycle-bin cleanup is not confirmed.
+
+The same files are also embedded inside `assets/package/sandbox-package.tar.gz`
+(consumed by the jumpserver-side `build_images.sh`); the top-level copy simply
+makes the deployer reachable without first extracting the inner package.
+
+### Environment requirements & how Terraform is used
+
+`create.sh` drives Terraform from your local machine; you do not need a
+pre-installed Terraform:
+
+- **Credentials:** export `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY`
+  (create an API key pair at <https://console.cloud.tencent.com/cam/capi>). The
+  common `TENCENTCLOUD_*` variables are listed in
+  `terraform/tencentcloud/env.example`; advanced toggles are documented in the
+  `create.sh` header comments.
+- **Local tools:** `ssh`, `scp`, `nc`, plus network access to the Tencent Cloud
+  APIs. `terraform` and `jq` are auto-installed when missing — into
+  `/usr/local/bin` when it is writable (e.g. running as root), otherwise into a
+  local `.bin/`. `terraform` is fetched from the HashiCorp release site (needs
+  `curl`/`wget` + `unzip`); `jq` comes from the system package manager, falling
+  back to a static binary from GitHub.
+  `mkcert` / `openssl` are **not** needed locally — the cube-proxy certificate is
+  produced on the jumpserver.
+- **Terraform state lives locally** under `terraform/tencentcloud/` (`*.tfstate`,
+  gitignored — there is no remote backend). Keep that directory and the generated
+  `.env`, so a later `destroy.sh` or re-run can find and manage the same
+  resources. Do not run `create.sh` from a throwaway copy and then expect a
+  different copy to clean it up.
+- **Phased, fail-fast apply:** resources are created in order — network
+  (VPC / subnet / NAT) → TCR → CVMs (jump-server + compute) → image build/push on
+  the jump-server → MySQL / Redis → TKE cluster + Kubernetes addons → health
+  checks → compute-node setup. The Kubernetes provider is only engaged after the
+  TKE API server exists.
+- Resolved selections are saved to `terraform/tencentcloud/.env` and auto-loaded
+  on the next run; explicit environment variables always win.
+
+### Retrying after a partial failure
+
+If a stage fails part-way (for example an instance type or availability zone that
+is sold out in the chosen region/zone, an account quota limit, or a transient API
+error), you do **not** have to destroy everything and start over:
+
+- Fix the cause — most often by **changing configuration**: pick a different
+  `TENCENTCLOUD_AVAILABILITY_ZONE` / `TENCENTCLOUD_COMPUTE_INSTANCE_TYPE` /
+  `TENCENTCLOUD_REGION`, raise the quota, set a password, etc. — then simply
+  **re-run `./terraform/tencentcloud/create.sh`**.
+- On a re-run, `create.sh` reloads the saved selections from `.env`, reconciles
+  state with what already exists in the cloud (refreshing and importing stateful
+  resources rather than recreating them), and **continues from where it left
+  off**. Existing compute nodes are kept (it never scales down).
+- Availability genuinely varies by region **and** availability zone — a type
+  offered in one zone may be unavailable in another. The interactive zone /
+  instance-type menus are queried live for your region, and the final choice is
+  validated at apply time.
+- Only run `destroy.sh` when you actually want to tear the deployment down; it is
+  not required between ordinary retries.
+
+### Advanced: cube-proxy TLS certificates (bring your own)
+
+`cube-proxy` terminates TLS for `cube.app` / `*.cube.app`, and its bundled nginx
+config hard-codes the certificate paths `…/certs/cube.app+3.pem` and
+`…/certs/cube.app+3-key.pem`:
+
+- By default, `create.sh` (`prepare_cubeproxy_certs`) generates a **self-signed**
+  pair on the jumpserver with the bundled `mkcert` (SANs: `cube.app`,
+  `*.cube.app`, `localhost`, `127.0.0.1`), downloads it to
+  `terraform/tencentcloud/cubeproxy-certs/`, and Terraform packs every file in
+  that directory into the `cubeproxy-certs` Secret (a Secret, not a ConfigMap,
+  because it holds the TLS private key), mounted read-only into the cube-proxy
+  pod at `/usr/local/openresty/nginx/certs/`.
+- **Bring your own certificate:** before running `create.sh`, drop your PEM cert +
+  key into `terraform/tencentcloud/cubeproxy-certs/`, named exactly
+  `cube.app+3.pem` and `cube.app+3-key.pem` (the names nginx expects) and covering
+  the `cube.app` and `*.cube.app` SANs. `create.sh` reuses existing files instead
+  of generating new ones, so a CA-signed certificate (for example a real domain
+  mapped onto `cube.app`) is used as-is, with no self-signed warning.
+- **Rotate a certificate:** replace the two files and re-run `create.sh`; the
+  deploy stage refreshes the `cubeproxy-certs` Secret and restarts cube-proxy
+  to pick up the new material. The self-signed default trips browsers/clients with
+  an "untrusted CA" warning, so replace it for any non-throwaway use.

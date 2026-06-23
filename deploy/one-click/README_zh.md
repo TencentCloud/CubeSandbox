@@ -18,6 +18,7 @@
 - `env.example`：构建机和目标机共用的环境变量模板。
 - `lib/common.sh`：公共 shell 函数。
 - `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
+- `terraform/tencentcloud/`：在腾讯云上部署**集群版** CubeSandbox 的 Terraform 部署器（TKE 控制面 + CVM 计算节点）。`create.sh` 为入口，`destroy.sh` 负责整体销毁。这些文件同时位于发布包顶层和 `sandbox-package` 内（见“腾讯云集群部署”）。
 
 ## 构建输入
 
@@ -327,18 +328,16 @@ export E2B_API_KEY=e2b_000000
 
 - Debian / Ubuntu：`e2fsprogs`、`util-linux`
 - OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`
-- 若目标机是极简镜像，安装完上面三类包后仍缺 `dmsetup`，再补装同名包 `dmsetup`
-
 可直接执行的安装示例：
 
 ```bash
 # Debian / Ubuntu
 sudo apt-get update
-sudo apt-get install -y lvm2 thin-provisioning-tools util-linux
+sudo apt-get install -y e2fsprogs util-linux
 
 # OpenCloudOS / RHEL / CentOS
-sudo dnf install -y lvm2 device-mapper-persistent-data util-linux || \
-sudo yum install -y lvm2 device-mapper-persistent-data util-linux
+sudo dnf install -y e2fsprogs util-linux || \
+sudo yum install -y e2fsprogs util-linux
 ```
 
 ### control 角色（`install.sh`，默认）
@@ -373,18 +372,16 @@ sudo yum install -y lvm2 device-mapper-persistent-data util-linux
 
 - Debian / Ubuntu：`e2fsprogs`、`util-linux`
 - OpenCloudOS / RHEL / CentOS：`e2fsprogs`、`util-linux`
-- 若目标机是极简镜像，安装完上面三类包后仍缺 `dmsetup`，再补装同名包 `dmsetup`
-
 可直接执行的安装示例：
 
 ```bash
 # Debian / Ubuntu
 sudo apt-get update
-sudo apt-get install -y lvm2 thin-provisioning-tools util-linux
+sudo apt-get install -y e2fsprogs util-linux
 
 # OpenCloudOS / RHEL / CentOS
-sudo dnf install -y lvm2 device-mapper-persistent-data util-linux || \
-sudo yum install -y lvm2 device-mapper-persistent-data util-linux
+sudo dnf install -y e2fsprogs util-linux || \
+sudo yum install -y e2fsprogs util-linux
 ```
 
 ## 前置条件
@@ -415,3 +412,128 @@ sudo yum install -y lvm2 device-mapper-persistent-data util-linux
 - 验证宿主 `/etc/resolv.conf` 是否走该入口：`cat /etc/resolv.conf` 应能看到 `nameserver 169.254.254.53`（两条路径均如此）。
 - 验证容器视角：`docker run --rm alpine cat /etc/resolv.conf` 也应是 `nameserver 169.254.254.53`。如果看到 `nameserver 8.8.8.8`，说明宿主 `/etc/resolv.conf` 退化到了 loopback nameserver，导致 Docker 回退到内置公网 DNS。
 - 若使用 `systemd-resolved` 路径，正常情况下默认网卡不应承载本地 CoreDNS 地址；该地址应只出现在专用 dummy link 上。
+
+## 腾讯云集群部署 (Terraform)
+
+除了单机的 `install.sh` 之外，发布包还附带一个基于 Terraform 的部署器，可在腾讯云上拉起**集群版** CubeSandbox：由托管的 TKE 控制面运行 `cubemaster` / `cube-api` / `cube-proxy` / `cube-webui`，后端使用云上 MySQL + Redis，并带一个或多个 CVM PVM 计算节点。跳板机（SSH 端口 `443`）既是构建主机，也是这个原本私有 VPC 的堡垒机。
+
+该部署器被放在解压后发布包的**顶层**，因此解压后即可直接运行：
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+
+export TENCENTCLOUD_SECRET_ID="your-secret-id"
+export TENCENTCLOUD_SECRET_KEY="your-secret-key"
+
+./terraform/tencentcloud/create.sh
+```
+
+`create.sh` 完全在解压后的发布包内运行：
+
+- 它会自动探测本地 bundle（外层的 `cube-sandbox-one-click-<version>.tar.gz`，若该 tar 包已不存在则重新打包解压目录），并将其作为组件镜像和计算节点安装的离线源。当探测到本地 bundle 或通过 `TENCENTCLOUD_LOCAL_BUNDLE=/path/to.tar.gz` 指定时，无需任何公网下载；否则跳板机会回退到**在线安装**（下载 `online-install.sh` 与安装包），此时需要公网访问。
+- 如果不存在 SSH 密钥对，它会在 `terraform/tencentcloud/.ssh/` 下自动生成。
+- 它会在跳板机上使用内置的 `mkcert`（随 `assets/package/sandbox-package.tar.gz` 发布，即解压内层包后的 `sandbox-package/support/bin/mkcert`，与 `scripts/one-click/up-cube-proxy.sh` 流程一致）生成 cube-proxy CLB 的 TLS 证书（`cube.app` / `*.cube.app`），在跳板机的 `/root/cubeproxy-certs` 保留一份副本，并下载到本地 `terraform/tencentcloud/cubeproxy-certs/` 供 Secret 挂载。
+- 它会构建并推送四个组件镜像到它创建的 TCR 实例，然后部署 TKE addons 和 CVM 计算节点。`create.sh` 始终至少创建一个计算节点；用 `TENCENTCLOUD_COMPUTE_NODE_COUNT` 调整数量。
+
+cube-webui 的 nginx 配置（`webui-nginx.conf`）不单独维护：它派生自规范文件 `deploy/one-click/webui/nginx.conf`（由发布包构建时放入，或在源码树中运行 `create.sh` 时复制）。
+
+运行 `create.sh` 的机器要求：`ssh`、`scp`、`nc`，以及对腾讯云 API 的网络访问。`terraform` 和 `jq` 缺失时会自动安装——`terraform` 从 HashiCorp 发布站点下载（需要 `curl`/`wget` + `unzip`），`jq` 优先用系统包管理器安装，失败时回退到从 GitHub 下载静态二进制。本地无需 `mkcert`/`openssl` —— 证书在跳板机上生成。
+
+常用环境变量覆盖（下方默认值与 `create.sh`、`variables.tf` 中的默认值一致）：
+
+```bash
+export TENCENTCLOUD_REGION=ap-guangzhou
+export TENCENTCLOUD_COMPUTE_NODE_COUNT=2    # CVM PVM 计算节点数（默认 1）
+export TENCENTCLOUD_TKE_NODE_COUNT=2        # TKE worker 节点数（默认 2）
+export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=S5.2XLARGE16
+export TENCENTCLOUD_CUBE_IMAGE_TAG=latest   # 四个镜像共用的 tag
+```
+
+非交互 / CI 运行时建议显式设置以下变量（没有 TTY 时交互菜单会回退到默认值，显式设置可避免意外）。密码变量是例外：非交互运行会拒绝使用仓库中公开可见的内置演示密码并要求显式设置；如需在临时沙箱中使用不安全的默认密码，可设置 `TENCENTCLOUD_ALLOW_INSECURE_DEFAULTS=1`。
+
+```bash
+export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-3    # 否则取首个查询到的可用区 / <region>-3
+export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=S5.2XLARGE16  # 否则取首选默认机型
+export TENCENTCLOUD_LOCAL_BUNDLE=/path/to/cube-sandbox-one-click-<version>.tar.gz  # 在已解压的发布包内运行时会自动探测
+export TENCENTCLOUD_PVM_KERNEL_VMLINUX=/path/to/vmlinux-pvm  # 仅当发布包不含 vmlinux-pvm 时需要
+export TENCENTCLOUD_MYSQL_PASSWORD=...      # 非交互运行必填（无不安全回退）
+export TENCENTCLOUD_REDIS_PASSWORD=...      # 非交互运行必填
+export TENCENTCLOUD_CUBE_PASSWORD=...       # 非交互运行必填
+export TENCENTCLOUD_BUILD_IMAGES=0          # 复用已推送的镜像
+```
+
+整体销毁：
+
+```bash
+./terraform/tencentcloud/destroy.sh
+```
+
+`destroy.sh` 同样需要 `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY`，并复用 `create.sh` 保存在 `terraform/tencentcloud/.env` 中的选择。不再询问、直接销毁——运行 `destroy.sh` 本身即视为确认。
+
+> **⚠ 避免不合理计费：** 当 `destroy.sh` 无法正常删除全部资源时（例如 MySQL/Redis 处于回收站/隔离状态，或 Terraform 已无法感知的残留资源），请登录腾讯云控制台手动删除残留资源，以免被继续计费：
+> [VPC / 网络资源](https://console.cloud.tencent.com/vpc)、
+> [MySQL 回收站](https://console.cloud.tencent.com/cdb/recycle)、
+> [Redis 回收站](https://console.cloud.tencent.com/redis/recycle)。
+> 当某个销毁步骤失败或回收站清理未确认成功时，`destroy.sh` 也会打印这些链接进行提醒。
+
+上述文件也内嵌在 `assets/package/sandbox-package.tar.gz` 中（供跳板机侧的 `build_images.sh` 使用）；顶层副本只是让部署器无需先解压内层包即可访问。
+
+### 运行环境要求与 Terraform 说明
+
+`create.sh` 在你的本地机器上驱动 Terraform，无需事先手动安装 Terraform：
+
+- **凭证：** 必须导出 `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY`（在
+  <https://console.cloud.tencent.com/cam/capi> 创建 API 密钥对）。常用的
+  `TENCENTCLOUD_*` 变量见 `terraform/tencentcloud/env.example`；更高级的开关在
+  `create.sh` 头部注释中说明。
+- **本地工具：** `ssh`、`scp`、`nc`，以及对腾讯云 API 的网络访问。`terraform` 和
+  `jq` 缺失时会自动安装——当 `/usr/local/bin` 可写时（例如以 root 运行）装到该目录，
+  否则装到本地 `.bin/`。`terraform` 从 HashiCorp 发布站点下载（需要 `curl`/`wget` +
+  `unzip`）；`jq` 优先用系统包管理器安装，失败时回退到从 GitHub 下载静态二进制。
+  本地**无需** `mkcert` / `openssl`——cube-proxy 证书在跳板机上生成。
+- **Terraform 状态保存在本地** `terraform/tencentcloud/` 下（`*.tfstate`，已
+  gitignore——没有远端 backend）。请保留该目录与生成的 `.env`，以便后续 `destroy.sh`
+  或重新运行能找到并管理同一批资源。不要在临时副本里运行 `create.sh` 后又指望另一个
+  副本来清理。
+- **分阶段、fail-fast 的 apply：** 资源按顺序创建——网络（VPC / 子网 / NAT）→ TCR →
+  CVM（跳板机 + 计算节点）→ 在跳板机上构建并推送镜像 → MySQL / Redis → TKE 集群 +
+  Kubernetes addons → 健康检查 → 计算节点初始化。Kubernetes provider 只有在 TKE API
+  Server 就绪后才会启用。
+- 解析后的选择会保存到 `terraform/tencentcloud/.env` 并在下次运行时自动加载；显式设置
+  的环境变量始终优先。
+
+### 部分资源创建失败后的重试
+
+如果某个阶段中途失败（例如所选地域/可用区下机型或可用区售罄、账号配额限制、或临时的
+API 错误），**无需**销毁全部资源重头再来：
+
+- 先修复原因——最常见的是**调整配置**：换一个 `TENCENTCLOUD_AVAILABILITY_ZONE` /
+  `TENCENTCLOUD_COMPUTE_INSTANCE_TYPE` / `TENCENTCLOUD_REGION`、提升配额、设置密码等
+  ——然后直接**重新运行 `./terraform/tencentcloud/create.sh`**。
+- 重新运行时，`create.sh` 会从 `.env` 重新加载已保存的选择，与云上已存在的资源做状态
+  对账（刷新并导入有状态资源，而不是重建），并**从上次中断处继续**。已存在的计算节点
+  会被保留（绝不缩容）。
+- 资源可用情况确实因**地域**与**可用区**而异：某个机型在一个可用区可用，在另一个可能
+  不可用。交互式的可用区 / 机型菜单会针对你的地域在线查询，最终选择会在 apply 阶段
+  校验。
+- 只有当你确实想拆除整个部署时才需要 `destroy.sh`；普通重试之间不需要它。
+
+### 高级用法：cube-proxy TLS 证书（使用你自己的证书）
+
+`cube-proxy` 负责为 `cube.app` / `*.cube.app` 终结 TLS，其内置 nginx 配置硬编码了
+证书路径 `…/certs/cube.app+3.pem` 和 `…/certs/cube.app+3-key.pem`：
+
+- 默认情况下，`create.sh`（`prepare_cubeproxy_certs`）会在跳板机上用内置 `mkcert`
+  生成一对**自签名**证书（SAN：`cube.app`、`*.cube.app`、`localhost`、`127.0.0.1`），
+  下载到 `terraform/tencentcloud/cubeproxy-certs/`；Terraform 会把该目录下的所有文件
+  打进 `cubeproxy-certs` Secret（因其包含 TLS 私钥，使用 Secret 而非 ConfigMap），
+  以只读方式挂载到 cube-proxy Pod 的 `/usr/local/openresty/nginx/certs/`。
+- **使用你自己的证书：** 在运行 `create.sh` 前，把你的 PEM 证书 + 私钥放进
+  `terraform/tencentcloud/cubeproxy-certs/`，文件名必须正好是 `cube.app+3.pem` 和
+  `cube.app+3-key.pem`（nginx 期望的名字），并覆盖 `cube.app` 与 `*.cube.app` 这两个
+  SAN。`create.sh` 会复用已存在的文件而不再生成，因此 CA 签发的证书（例如映射到
+  `cube.app` 的真实域名）会被原样使用，不再有自签名告警。
+- **轮换证书：** 替换这两个文件并重新运行 `create.sh`；部署阶段会刷新 `cubeproxy-certs`
+  Secret 并重启 cube-proxy 以加载新证书。自签名默认证书会让浏览器/客户端报“不受信任
+  的 CA”告警，任何非一次性用途都应替换它。

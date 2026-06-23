@@ -1,0 +1,789 @@
+########################
+# TKE Addons — Kubernetes resources (Terraform instead of kubectl)
+#   Deployed only when create_tke=true
+########################
+
+locals {
+  # All four component images share var.image_tag (matching build_images.sh's TAG).
+  # registry/namespace default to the TCR instance created by this run: before
+  # deploying the addons, create.sh calls build_images.sh to build and push these
+  # four images to that TCR. Override with var.image_registry / var.image_namespace
+  # (e.g. to reuse a public image source).
+  image_registry    = var.image_registry != "" ? var.image_registry : "${tencentcloud_tcr_instance.demo.name}.tencentcloudcr.com"
+  image_namespace   = var.image_namespace != "" ? var.image_namespace : tencentcloud_tcr_namespace.demo.name
+  cube_master_image = "${local.image_registry}/${local.image_namespace}/cubemaster:${var.image_tag}"
+  cube_api_image    = "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
+  cube_proxy_image  = "${local.image_registry}/${local.image_namespace}/cubeproxy:${var.image_tag}"
+  cube_webui_image  = "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
+
+  # cube_db / cube_user are wired through Terraform (var.cube_db / var.cube_user)
+  # so the MySQL account/database created in main.tf, the cube-master conf Secret
+  # here, and create.sh's later health checks all agree on the same names. They
+  # default to cube_mvp / cube; create.sh maps TENCENTCLOUD_CUBE_DB /
+  # TENCENTCLOUD_CUBE_USER onto these variables.
+  cube_db       = var.cube_db
+  cube_user     = var.cube_user
+  cube_password = var.cube_password
+
+  # cube-master URL: in-cluster Service DNS (cube-api / cube-proxy reach
+  # cube-master over the cluster network, so the internal CLB IP is not needed).
+  cubemaster_url = "http://cubemaster.cubesandbox.svc.cluster.local:8089"
+
+  # All files under the certificate directory
+  cert_files = fileset("${path.module}/cubeproxy-certs", "*")
+
+  # Precondition for creating the TKE addons
+  deploy_addons = var.create_tke && var.deploy_tke_addons
+}
+
+# Write the kubeconfig to a local file (written as soon as TKE is created, independent of the addons).
+# The apiserver is intranet-only, so use the intranet kubeconfig. create.sh then
+# rewrites this local file to reach the endpoint through the jumpserver tunnel.
+resource "local_file" "tke_kubeconfig" {
+  count    = var.create_tke ? 1 : 0
+  content  = tencentcloud_kubernetes_cluster.tke[0].kube_config_intranet
+  filename = "${path.module}/.kube/config"
+
+  # On CREATE this makes the kubeconfig file be (re)written LAST — after every
+  # kubernetes_* addon — so it never clobbers the jumpserver-tunnel kubeconfig
+  # that create.sh points the provider at while the addons are being applied.
+  #
+  # NOTE: depends_on couples "create after" with "destroy BEFORE", so a plain
+  # `terraform destroy` would tear this down FIRST, deleting .kube/config and
+  # breaking the provider mid-delete (Delete http://localhost ... connection
+  # refused). destroy.sh therefore detaches this resource from state before the
+  # addon/cluster teardown and removes the file itself at the very end (so the
+  # kubeconfig outlives the cluster). See destroy.sh Phase 1.
+  depends_on = [
+    kubernetes_deployment.cube_webui,
+    kubernetes_service.cube_webui,
+    kubernetes_deployment.cube_proxy,
+    kubernetes_service.cube_proxy,
+    kubernetes_deployment.cube_api,
+    kubernetes_service.cube_api,
+    kubernetes_deployment.cubemaster,
+    kubernetes_service.cubemaster,
+  ]
+}
+
+# ---------------------------------------------------------------
+# Namespace
+# ---------------------------------------------------------------
+resource "kubernetes_namespace" "cubesandbox" {
+  count      = local.deploy_addons ? 1 : 0
+  depends_on = [tencentcloud_tcr_instance.demo, tencentcloud_tcr_namespace.demo]
+  metadata {
+    name = "cubesandbox"
+  }
+}
+
+# ---------------------------------------------------------------
+# CubeEgress MITM root CA
+#
+# `cubemastercli tpl create-from-image` defaults --with-cube-ca=true, so
+# CubeMaster bakes this root cert into every template rootfs (read from
+# the hardcoded path /etc/cube/ca/cube-root-ca.crt inside its container —
+# see CubeMaster/pkg/templatecenter/cube_egress_ca_bake.go). Without the
+# cert on disk the build fails with "CubeEgress root CA is missing".
+#
+# We generate the CA in Terraform (ECDSA P-256, 10 yr, matching the
+# systemd path's cube-egress-prepare.sh) and store both halves in a
+# Secret. Only the public cert is mounted into the cubemaster pod; the
+# private key stays in the Secret for a future CubeEgress data plane to
+# sign leaf certs with. Keeping CA generation in Terraform state means a
+# re-apply reuses the same CA (no needless template-rebake churn).
+# ---------------------------------------------------------------
+resource "tls_private_key" "cube_egress_ca" {
+  count       = local.deploy_addons ? 1 : 0
+  algorithm   = "ECDSA"
+  ecdsa_curve = "P256"
+}
+
+resource "tls_self_signed_cert" "cube_egress_ca" {
+  count           = local.deploy_addons ? 1 : 0
+  private_key_pem = tls_private_key.cube_egress_ca[0].private_key_pem
+
+  subject {
+    common_name = "CubeSandbox Egress MITM CA"
+  }
+
+  validity_period_hours = 87600 # 10 years
+  is_ca_certificate     = true
+  set_subject_key_id    = true
+
+  allowed_uses = [
+    "cert_signing",
+    "crl_signing",
+  ]
+}
+
+resource "kubernetes_secret" "cube_egress_ca" {
+  count = local.deploy_addons ? 1 : 0
+  metadata {
+    name      = "cube-egress-ca"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+  }
+  type = "Opaque"
+  data = {
+    "cube-root-ca.crt" = tls_self_signed_cert.cube_egress_ca[0].cert_pem
+    "cube-root-ca.key" = tls_private_key.cube_egress_ca[0].private_key_pem
+  }
+}
+
+# ---------------------------------------------------------------
+# cube-master: Secret → Deployment → CLB Service (private network)
+# ---------------------------------------------------------------
+
+# cube-master configuration file. It embeds the MySQL and Redis credentials, so
+# it is stored as a Secret (not a ConfigMap) and mounted as a file into the pod.
+resource "kubernetes_secret" "cubemaster_conf" {
+  count = local.deploy_addons ? 1 : 0
+  type  = "Opaque"
+  metadata {
+    name      = "cubemaster-conf"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+  }
+
+  data = {
+    "conf.yaml" = yamlencode({
+      common = {
+        http_port                          = 8089
+        http_readtimeout                   = 120
+        http_writetimeout                  = 360
+        http_idletimeout                   = 360
+        sync_meta_data_interval            = "30s"
+        sync_metric_data_interval          = "1s"
+        collect_metric_interval            = "1s"
+        default_headless_service_nodes_num = 1
+        enable_check_com_net_id_param      = false
+      }
+      log = {
+        module    = "cubemaster"
+        path      = "/data/log/CubeMaster"
+        file_size = 100
+        file_num  = 10
+        level     = "info"
+      }
+      cubelet_conf = {
+        grpc = {
+          grpc_port = 9999
+        }
+        common_timeout_insec       = 30
+        create_image_timeout_insec = 300
+        create_concurrent_limit    = 100
+        destroy_concurent_limit    = 100
+        enable_exposed_port        = true
+        exposed_port_list          = ["80"]
+        disable_redis_proxy_port   = true
+      }
+      auth = {
+        enable = false
+      }
+      req_template_conf = {
+        whitelist_req_tag = {
+          WorkingDir  = true
+          RLimit      = true
+          DnsConfig   = true
+          HostAliases = true
+          Poststop    = true
+          Prestop     = true
+        }
+        # The default egress policy lives under "cube_network_config": that is the
+        # only key CubeMaster deserializes (CreateCubeSandboxReq.CubeNetworkConfig,
+        # json:"cube_network_config"). The legacy "cubevs_context" key is silently
+        # dropped, so the policy below would never apply. Two guards keep this in
+        # sync: a Go regression test
+        # (CubeMaster/pkg/service/httpservice/cube/cubebox_req_template_test.go)
+        # deserializes the shipped configs' template and asserts the network config
+        # is populated, and deploy/one-click/tests/test_package_layout.sh statically
+        # checks THIS template uses cube_network_config (and not cubevs_context).
+        cube_box_req_template = "{\"volumes\":[{\"name\":\"tmp\",\"volume_source\":{\"empty_dir\":{\"medium\":0}}}],\"containers\":[{\"name\":\"cubebox-default\",\"envs\":[{\"key\":\"TZ\",\"value\":\"Asia/Shanghai\"},{\"key\":\"TERM\",\"value\":\"xterm\"}],\"volume_mounts\":[{\"name\":\"tmp\",\"container_path\":\"/\"}],\"security_context\":{\"privileged\":true,\"readonly_rootfs\":false,\"no_new_privs\":false}}],\"network_type\":\"tap\",\"cube_network_config\":{\"allowInternetAccess\":true,\"denyOut\":[\"10.0.0.0/8\",\"100.64.0.0/10\",\"172.16.0.0/12\",\"192.168.0.0/16\"]}}"
+      }
+      ossdb_config = {
+        addr                       = "${tencentcloud_mysql_instance.mysql.intranet_ip}:3306"
+        user                       = local.cube_user
+        pwd                        = local.cube_password
+        db_name                    = local.cube_db
+        conn_timeout               = 5
+        read_timeout               = 5
+        write_timeout              = 5
+        max_idle_conns             = 5
+        max_open_conns             = 20
+        max_conn_life_time_seconds = 300
+      }
+      instance_db_config = {
+        addr                       = "${tencentcloud_mysql_instance.mysql.intranet_ip}:3306"
+        user                       = local.cube_user
+        pwd                        = local.cube_password
+        db_name                    = local.cube_db
+        conn_timeout               = 5
+        read_timeout               = 5
+        write_timeout              = 5
+        max_idle_conns             = 5
+        max_open_conns             = 20
+        max_conn_life_time_seconds = 300
+      }
+      # CubeMaster only consumes a single Redis pool (config.Config.RedisConf,
+      # yaml:"redis"). There is no read/write split in the server-side config, so
+      # do not emit redis_read / redis_write here — they would be dead config that
+      # implies a capability the control plane ignores.
+      redis = {
+        nodes        = "${tencentcloud_redis_instance.redis.ip}:6379"
+        password     = var.redis_password
+        db_no        = 0
+        max_idle     = 8
+        max_active   = 32
+        idle_timeout = 30
+        max_retry    = 2
+      }
+      scheduler = {
+        priority_select_num         = 1
+        metric_update_timeout       = "300s"
+        local_metric_update_timeout = "300s"
+        filter = {
+          enable_filters = ["cpu", "mem", "template_locality", "realtime_create_num"]
+        }
+      }
+    })
+  }
+
+  depends_on = [tencentcloud_mysql_instance.mysql, tencentcloud_redis_instance.redis]
+}
+
+# cube-master Deployment
+resource "kubernetes_deployment" "cubemaster" {
+  count      = local.deploy_addons ? 1 : 0
+  depends_on = [null_resource.mysql_init_db]
+
+  metadata {
+    name      = "cubemaster"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cubemaster" }
+  }
+  spec {
+    replicas = 1
+    selector {
+      match_labels = { app = "cubemaster" }
+    }
+    template {
+      metadata {
+        labels = { app = "cubemaster" }
+      }
+      spec {
+        container {
+          name  = "cubemaster"
+          image = local.cube_master_image
+          env {
+            name  = "CUBE_MASTER_CONFIG_PATH"
+            value = "/etc/cubemaster/conf.yaml"
+          }
+          port {
+            name           = "http"
+            container_port = 8089
+          }
+          port {
+            name           = "grpc"
+            container_port = 9999
+          }
+          readiness_probe {
+            http_get {
+              path = "/notify/health"
+              port = 8089
+            }
+            initial_delay_seconds = 10
+            period_seconds        = 10
+          }
+          volume_mount {
+            name       = "conf"
+            mount_path = "/etc/cubemaster"
+          }
+          # CubeEgress root CA, read by the --with-cube-ca template bake.
+          volume_mount {
+            name       = "cube-egress-ca"
+            mount_path = "/etc/cube/ca"
+            read_only  = true
+          }
+        }
+        volume {
+          name = "conf"
+          secret {
+            secret_name = kubernetes_secret.cubemaster_conf[0].metadata[0].name
+          }
+        }
+        # Only the public cert is projected here; the matching key stays in
+        # the Secret so the cubemaster pod never holds the CA private key.
+        volume {
+          name = "cube-egress-ca"
+          secret {
+            secret_name = kubernetes_secret.cube_egress_ca[0].metadata[0].name
+            items {
+              key  = "cube-root-ca.crt"
+              path = "cube-root-ca.crt"
+            }
+          }
+        }
+        dns_config {
+          nameservers = ["183.60.83.19", "183.60.82.98"]
+        }
+      }
+    }
+  }
+}
+
+# cube-master private-network CLB Service
+resource "kubernetes_service" "cubemaster" {
+  count = local.deploy_addons ? 1 : 0
+  metadata {
+    name      = "cubemaster"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    annotations = {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
+      "service.cloud.tencent.com/modification-protection"           = "false"
+      "service.cloud.tencent.com/pass-to-target"                    = "true"
+      "service.cloud.tencent.com/security-groups"                   = tencentcloud_security_group.demo.id
+    }
+  }
+  lifecycle {
+    ignore_changes = [
+      metadata[0].annotations,
+    ]
+  }
+
+  spec {
+    type     = "LoadBalancer"
+    selector = { app = "cubemaster" }
+    port {
+      name     = "http"
+      port     = 8089
+      protocol = "TCP"
+    }
+  }
+}
+
+# ---------------------------------------------------------------
+# cube-api: Deployment → CLB Service (public network)
+# ---------------------------------------------------------------
+
+resource "kubernetes_deployment" "cube_api" {
+  count = local.deploy_addons ? 1 : 0
+  metadata {
+    name      = "cube-api"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-api" }
+  }
+  spec {
+    replicas = 3
+    selector {
+      match_labels = { app = "cube-api" }
+    }
+    template {
+      metadata {
+        labels = { app = "cube-api" }
+      }
+      spec {
+        container {
+          name  = "cube-api"
+          image = local.cube_api_image
+          args = [
+            "--cubemaster-url",
+            local.cubemaster_url,
+            "--sandbox-domain",
+            "cube.app",
+          ]
+          env {
+            name  = "CUBE_MASTER_ADDR"
+            value = local.cubemaster_url
+          }
+          port {
+            container_port = 3000
+          }
+          readiness_probe {
+            http_get {
+              path = "/health"
+              port = 3000
+            }
+            initial_delay_seconds = 5
+            period_seconds        = 5
+          }
+        }
+      }
+    }
+  }
+}
+
+resource "kubernetes_service" "cube_api" {
+  count = local.deploy_addons ? 1 : 0
+  metadata {
+    name      = "cube-api"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    annotations = {
+      "service.cloud.tencent.com/modification-protection" = "false"
+      "service.cloud.tencent.com/pass-to-target"          = "true"
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.demo.id
+    }
+  }
+  lifecycle {
+    ignore_changes = [
+      metadata[0].annotations,
+    ]
+  }
+
+  spec {
+    type     = "LoadBalancer"
+    selector = { app = "cube-api" }
+    port {
+      port     = 3000
+      protocol = "TCP"
+    }
+  }
+}
+
+# ---------------------------------------------------------------
+# cube-proxy: Secrets → Deployment → CLB Service (public network)
+# ---------------------------------------------------------------
+
+# global.conf — embeds the Redis password, so store it as a Secret (not a
+# ConfigMap) and mount it as a file into the cube-proxy pod.
+resource "kubernetes_secret" "cubeproxy_global" {
+  count = local.deploy_addons ? 1 : 0
+  type  = "Opaque"
+  metadata {
+    name      = "cubeproxy-global"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+  }
+  data = {
+    "global.conf" = <<-EOT
+      set $redis_ip "${tencentcloud_redis_instance.redis.ip}";
+      set $redis_port "6379";
+      set $redis_pd "${var.redis_password}";
+      set $redis_index 0;
+      set $timeout_min 500;
+      set $timeout_max 700;
+      set $cube_proxy_host_ip "127.0.0.1";
+    EOT
+    # Same Redis password exposed as a discrete key so the cube-proxy container
+    # can read it via secret_key_ref instead of a plaintext Deployment env value
+    # (which would show up in `kubectl get deploy -o yaml`). Projected out of the
+    # global.conf volume mount via that mount's explicit `items` below.
+    "redis-password" = var.redis_password
+  }
+}
+
+# Certificate Secret (from the cubeproxy-certs/ directory). This holds the
+# cube-proxy server cert AND its PRIVATE key (cube.app+3-key.pem), so it must be
+# a Secret, not a ConfigMap — a ConfigMap is stored unencrypted in etcd and is
+# readable by anyone with `get configmap`, which would leak the TLS private key.
+resource "kubernetes_secret" "cubeproxy_certs" {
+  count = local.deploy_addons && length(local.cert_files) > 0 ? 1 : 0
+  type  = "Opaque"
+  metadata {
+    name      = "cubeproxy-certs"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+  }
+  data = {
+    for f in local.cert_files : lower(replace(f, "/[^a-zA-Z0-9-]/", "-")) => file("${path.module}/cubeproxy-certs/${f}")
+  }
+}
+
+# cube-proxy Deployment
+resource "kubernetes_deployment" "cube_proxy" {
+  count = local.deploy_addons ? 1 : 0
+  metadata {
+    name      = "cube-proxy"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-proxy" }
+  }
+  spec {
+    replicas = 3
+    selector {
+      match_labels = { app = "cube-proxy" }
+    }
+    template {
+      metadata {
+        labels = { app = "cube-proxy" }
+      }
+      spec {
+        container {
+          name  = "cube-proxy"
+          image = local.cube_proxy_image
+          port {
+            name           = "proxy"
+            container_port = 8080
+            protocol       = "TCP"
+          }
+          port {
+            name           = "http"
+            container_port = 8081
+            protocol       = "TCP"
+          }
+          port {
+            name           = "http80"
+            container_port = 80
+            protocol       = "TCP"
+          }
+          port {
+            name           = "https"
+            container_port = 443
+            protocol       = "TCP"
+          }
+          env {
+            name  = "CUBE_PROXY_REDIS_IP"
+            value = tencentcloud_redis_instance.redis.ip
+          }
+          env {
+            name  = "CUBE_PROXY_REDIS_PORT"
+            value = "6379"
+          }
+          env {
+            name = "CUBE_PROXY_REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cubeproxy_global[0].metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
+
+          # global.conf mount
+          volume_mount {
+            name       = "global-conf"
+            mount_path = "/usr/local/openresty/nginx/conf/global"
+            read_only  = true
+          }
+
+          # Certificate volume mounts (dynamic)
+          dynamic "volume_mount" {
+            for_each = local.cert_files
+            content {
+              name       = "cert-${lower(replace(volume_mount.value, "/[^a-zA-Z0-9-]/", "-"))}"
+              mount_path = "/usr/local/openresty/nginx/certs/${volume_mount.value}"
+              sub_path   = lower(replace(volume_mount.value, "/[^a-zA-Z0-9-]/", "-"))
+              read_only  = true
+            }
+          }
+        }
+
+        # global.conf volume (Secret: contains the Redis password). Project ONLY
+        # global.conf so the discrete redis-password key in the same Secret is not
+        # also surfaced as a file under conf/global/.
+        volume {
+          name = "global-conf"
+          secret {
+            secret_name = kubernetes_secret.cubeproxy_global[0].metadata[0].name
+            items {
+              key  = "global.conf"
+              path = "global.conf"
+            }
+          }
+        }
+
+        # Certificate volume (dynamic). Sourced from the Secret above so the TLS
+        # private key is never projected from a ConfigMap.
+        dynamic "volume" {
+          for_each = local.cert_files
+          content {
+            name = "cert-${lower(replace(volume.value, "/[^a-zA-Z0-9-]/", "-"))}"
+            secret {
+              secret_name = kubernetes_secret.cubeproxy_certs[0].metadata[0].name
+              items {
+                key  = lower(replace(volume.value, "/[^a-zA-Z0-9-]/", "-"))
+                path = lower(replace(volume.value, "/[^a-zA-Z0-9-]/", "-"))
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+# cube-proxy CLB Service (public network 80/443)
+resource "kubernetes_service" "cube_proxy" {
+  count = local.deploy_addons ? 1 : 0
+  metadata {
+    name      = "cube-proxy"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    annotations = {
+      "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
+      "service.cloud.tencent.com/specify-protocol"                     = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]}}"
+      "service.cloud.tencent.com/modification-protection"              = "false"
+      "service.cloud.tencent.com/pass-to-target"                       = "true"
+      "service.cloud.tencent.com/security-groups"                      = tencentcloud_security_group.demo.id
+    }
+  }
+  lifecycle {
+    ignore_changes = [
+      metadata[0].annotations,
+    ]
+  }
+
+  spec {
+    type     = "LoadBalancer"
+    selector = { app = "cube-proxy" }
+    port {
+      name        = "tcp-80"
+      port        = 80
+      target_port = 8081
+      protocol    = "TCP"
+    }
+    port {
+      name        = "tcp-ssl-443"
+      port        = 443
+      target_port = 8080
+      protocol    = "TCP"
+    }
+  }
+}
+
+# ---------------------------------------------------------------
+# cube-webui: ConfigMap (nginx.conf) → Deployment → CLB Service (public network 80)
+# ---------------------------------------------------------------
+
+resource "kubernetes_config_map" "cube_webui_nginx_conf" {
+  count = local.deploy_addons ? 1 : 0
+  metadata {
+    name      = "cube-webui-nginx-conf"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-webui" }
+  }
+  data = {
+    # webui/nginx.conf has two upstream placeholders that must both be replaced,
+    # otherwise nginx rejects the leftover literal with "invalid URL prefix".
+    # webui runs inside the cluster, so it reaches the backends over the internal
+    # (VPC) network via their Service ClusterIPs instead of the public CLB IPs:
+    #   __WEB_UI_UPSTREAM__        → cube-api   (the /cubeapi/ backend, port 3000)
+    #   __SANDBOX_PROXY_UPSTREAM__ → cube-proxy (the /sandbox/ backend, port 80)
+    "nginx.conf" = replace(
+      replace(
+        file("${path.module}/webui-nginx.conf"),
+        "__WEB_UI_UPSTREAM__",
+        "http://${kubernetes_service.cube_api[0].spec[0].cluster_ip}:3000"
+      ),
+      "__SANDBOX_PROXY_UPSTREAM__",
+      "http://${kubernetes_service.cube_proxy[0].spec[0].cluster_ip}"
+    )
+  }
+
+  depends_on = [kubernetes_service.cube_api, kubernetes_service.cube_proxy]
+}
+
+resource "kubernetes_deployment" "cube_webui" {
+  count = local.deploy_addons ? 1 : 0
+  metadata {
+    name      = "cube-webui"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-webui" }
+  }
+  spec {
+    replicas = 3
+    selector {
+      match_labels = { app = "cube-webui" }
+    }
+    template {
+      metadata {
+        labels = { app = "cube-webui" }
+      }
+      spec {
+        container {
+          name              = "webui"
+          image             = local.cube_webui_image
+          image_pull_policy = "Always"
+          port {
+            name           = "http"
+            container_port = 80
+            protocol       = "TCP"
+          }
+          volume_mount {
+            name       = "nginx-conf"
+            mount_path = "/usr/local/openresty/nginx/conf/nginx.conf"
+            sub_path   = "nginx.conf"
+            read_only  = true
+          }
+          resources {
+            requests = {
+              cpu    = "100m"
+              memory = "128Mi"
+            }
+            limits = {
+              cpu    = "500m"
+              memory = "256Mi"
+            }
+          }
+          liveness_probe {
+            http_get {
+              path = "/"
+              port = "http"
+            }
+            initial_delay_seconds = 10
+            period_seconds        = 10
+            timeout_seconds       = 3
+            failure_threshold     = 6
+          }
+          readiness_probe {
+            http_get {
+              path = "/"
+              port = "http"
+            }
+            initial_delay_seconds = 5
+            period_seconds        = 5
+            timeout_seconds       = 3
+            failure_threshold     = 3
+          }
+        }
+        volume {
+          name = "nginx-conf"
+          config_map {
+            name = kubernetes_config_map.cube_webui_nginx_conf[0].metadata[0].name
+          }
+        }
+      }
+    }
+  }
+}
+
+resource "kubernetes_service" "cube_webui" {
+  count = local.deploy_addons ? 1 : 0
+  metadata {
+    name      = "cube-webui"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    annotations = {
+      "service.cloud.tencent.com/modification-protection" = "false"
+      "service.cloud.tencent.com/pass-to-target"          = "true"
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.demo.id
+    }
+  }
+  lifecycle {
+    ignore_changes = [
+      metadata[0].annotations,
+    ]
+  }
+
+  spec {
+    type     = "LoadBalancer"
+    selector = { app = "cube-webui" }
+    port {
+      name     = "http"
+      port     = 80
+      protocol = "TCP"
+    }
+  }
+}
+
+# ---------------------------------------------------------------
+# Output the TKE CLB IPs
+# ---------------------------------------------------------------
+output "tke_cubemaster_clb_ip" {
+  value = local.deploy_addons ? kubernetes_service.cubemaster[0].status[0].load_balancer[0].ingress[0].ip : ""
+}
+
+output "tke_cube_api_clb_ip" {
+  value = local.deploy_addons ? kubernetes_service.cube_api[0].status[0].load_balancer[0].ingress[0].ip : ""
+}
+
+output "tke_cube_proxy_clb_ip" {
+  value = local.deploy_addons ? kubernetes_service.cube_proxy[0].status[0].load_balancer[0].ingress[0].ip : ""
+}
+
+output "tke_cube_webui_clb_ip" {
+  value = local.deploy_addons ? kubernetes_service.cube_webui[0].status[0].load_balancer[0].ingress[0].ip : ""
+}

@@ -534,14 +534,22 @@ mkdir -p \
   "${PACKAGE_ROOT}/scripts/one-click" \
   "${PACKAGE_ROOT}/scripts/systemd" \
   "${PACKAGE_ROOT}/scripts/cube-egress" \
-  "${PACKAGE_ROOT}/cube-egress"
+  "${PACKAGE_ROOT}/cube-egress" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud"
 
 copy_file "${CORE_BIN_DIR}/network-agent" "${PACKAGE_ROOT}/network-agent/bin/network-agent"
 copy_file "${CORE_BIN_DIR}/cubevsmapdump" "${PACKAGE_ROOT}/network-agent/bin/cubevsmapdump"
 copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/network-agent/network-agent.yaml"
 
+# Lay down the one-click CubeAPI assets (Dockerfile, etc.) first, then copy the
+# binary on top: copy_dir_contents rm -rf's the destination, so copying the
+# binary afterwards keeps both coexisting in the package.
+copy_dir_contents "${SCRIPT_DIR}/CubeAPI" "${PACKAGE_ROOT}/CubeAPI"
 copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
 
+# Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the
+# copy_dir_contents wipe and coexist with the one-click CubeMaster assets.
+copy_dir_contents "${SCRIPT_DIR}/CubeMaster" "${PACKAGE_ROOT}/CubeMaster"
 copy_file "${CORE_BIN_DIR}/cubemaster" "${PACKAGE_ROOT}/CubeMaster/bin/cubemaster"
 copy_file "${CORE_BIN_DIR}/cubemastercli" "${PACKAGE_ROOT}/CubeMaster/bin/cubemastercli"
 copy_file "${ROOT_DIR}/configs/single-node/cubemaster.yaml" "${PACKAGE_ROOT}/CubeMaster/conf.yaml"
@@ -596,6 +604,9 @@ copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image" "${PACKAGE_ROOT}/cube-image
 # siblings), so the runtime needs every script in this directory.
 copy_dir_contents "${SCRIPT_DIR}/scripts/one-click" "${PACKAGE_ROOT}/scripts/one-click"
 copy_dir_contents "${SCRIPT_DIR}/scripts/systemd" "${PACKAGE_ROOT}/scripts/systemd"
+# scripts/{one-click,systemd}/common.sh both `source ../common/validation.sh`,
+# so the shared scripts/common helpers must ship alongside them in the package.
+copy_dir_contents "${SCRIPT_DIR}/scripts/common" "${PACKAGE_ROOT}/scripts/common"
 # cube-diag is the documented diagnostic entry point (see docs/guide/service-management.md);
 # it must ship in the release bundle so the install layout exposes
 # ${INSTALL_PREFIX}/scripts/cube-diag/collect-logs.sh.
@@ -607,8 +618,6 @@ copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cub
 # integration.
 copy_file "${CUBE_EGRESS_SOURCE_DIR}/scripts/cube-proxy-iptables-init.sh" \
           "${PACKAGE_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh"
-mkdir -p "${PACKAGE_ROOT}/scripts/common"
-copy_file "${SCRIPT_DIR}/scripts/common/validation.sh" "${PACKAGE_ROOT}/scripts/common/validation.sh"
 
 # Host-side version marker for cube-egress: cubelet's versioninfo.Collector
 # detects the component by the presence of cube-egress/version and reports
@@ -616,12 +625,42 @@ copy_file "${SCRIPT_DIR}/scripts/common/validation.sh" "${PACKAGE_ROOT}/scripts/
 # declared-vs-actual comparison in CubeMaster's version matrix works.
 printf '%s\n' "${DIST_VERSION}" > "${PACKAGE_ROOT}/cube-egress/version"
 
+copy_dir_contents "${SCRIPT_DIR}/terraform/tencentcloud" "${PACKAGE_ROOT}/terraform/tencentcloud"
+# Strip any developer-local terraform state / kubeconfig / SSH keys / TLS
+# material / saved credentials so they never ship inside sandbox-package either.
+rm -rf \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/.terraform" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/.bin" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/.kube" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/.ssh" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/cubeproxy-certs"
+# .env holds the operator's saved selections INCLUDING passwords (mode 600); it
+# must never end up in a published tarball. Match every secret-bearing pattern
+# the deployer's .gitignore anticipates (.env / .env.* / *.pem / *.key /
+# credentials* / *.tfvars[.json] / state).
+find "${PACKAGE_ROOT}/terraform/tencentcloud" -maxdepth 1 -type f \
+  \( -name "*.tfstate" -o -name "*.tfstate.*" -o -name ".terraform.lock.hcl" \
+     -o -name ".env" -o -name ".env.*" -o -name "*.pem" -o -name "*.key" \
+     -o -name "credentials*" -o -name "*.tfvars" -o -name "*.tfvars.json" \) -delete 2>/dev/null || true
+# tke-addons.tf renders cube-webui's nginx config from webui-nginx.conf; it is
+# not maintained separately but derived from the canonical webui/nginx.conf so
+# the two never drift.
+copy_file "${CUBE_WEBUI_TEMPLATE_DIR}/nginx.conf" "${PACKAGE_ROOT}/terraform/tencentcloud/webui-nginx.conf"
+# Verify the terraform deployer actually shipped (mirrors the guarding done for
+# the other components), so a renamed/emptied source dir fails the build loudly
+# instead of producing a bundle with an absent/broken deployer.
+for _tf in create.sh destroy.sh build_images.sh lib-state-sync.sh lib-phases.sh \
+  main.tf variables.tf tke-addons.tf query_outputs.tf webui-nginx.conf; do
+  ensure_file "${PACKAGE_ROOT}/terraform/tencentcloud/${_tf}"
+done
+
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/systemd" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/common" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-egress" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
 tar -C "${WORK_ROOT}" -czf "${PACKAGE_TAR}" "sandbox-package"
@@ -635,9 +674,47 @@ copy_file "${SCRIPT_DIR}/smoke.sh" "${DIST_ROOT}/smoke.sh"
 copy_file "${SCRIPT_DIR}/online-install.sh" "${DIST_ROOT}/online-install.sh"
 copy_file "${SCRIPT_DIR}/env.example" "${DIST_ROOT}/env.example"
 copy_file "${SCRIPT_DIR}/lib/common.sh" "${DIST_ROOT}/lib/common.sh"
-copy_file "${SCRIPT_DIR}/scripts/common/validation.sh" "${DIST_ROOT}/scripts/common/validation.sh"
+# lib/common.sh `source`s ${ONE_CLICK_DIR}/scripts/common/validation.sh, so the
+# shared helpers must ship at the bundle top level too (install.sh /
+# install-compute.sh source lib/common.sh from here).
+copy_dir_contents "${SCRIPT_DIR}/scripts/common" "${DIST_ROOT}/scripts/common"
 copy_file "${PACKAGE_TAR}" "${DIST_ROOT}/assets/package/sandbox-package.tar.gz"
 copy_file "${KERNEL_ARTIFACT_ZIP}" "${DIST_ROOT}/assets/kernel-artifacts/cube-kernel-scf.zip"
+
+# Ship the Tencent Cloud terraform cluster deployer at the bundle top level so
+# that, right after `tar xzf cube-sandbox-one-click-<version>.tar.gz`, the user
+# can run:
+#     cd cube-sandbox-one-click-<version>
+#     ./terraform/tencentcloud/create.sh
+# to spin up a clustered CubeSandbox (TKE control plane + CVM compute nodes).
+# The same files are also embedded inside sandbox-package (consumed by the
+# jumpserver-side build_images.sh), but those stay buried in the inner package
+# until it is extracted; surfacing them here makes the deployer reachable.
+copy_dir_contents "${SCRIPT_DIR}/terraform/tencentcloud" "${DIST_ROOT}/terraform/tencentcloud"
+# Never leak a developer's local terraform state, kubeconfig, SSH keys,
+# TLS material or saved credentials (.env) into the release; create.sh
+# regenerates them.
+rm -rf \
+  "${DIST_ROOT}/terraform/tencentcloud/.terraform" \
+  "${DIST_ROOT}/terraform/tencentcloud/.bin" \
+  "${DIST_ROOT}/terraform/tencentcloud/.kube" \
+  "${DIST_ROOT}/terraform/tencentcloud/.ssh" \
+  "${DIST_ROOT}/terraform/tencentcloud/cubeproxy-certs"
+find "${DIST_ROOT}/terraform/tencentcloud" -maxdepth 1 -type f \
+  \( -name "*.tfstate" -o -name "*.tfstate.*" -o -name ".terraform.lock.hcl" \
+     -o -name ".env" -o -name ".env.*" -o -name "*.pem" -o -name "*.key" \
+     -o -name "credentials*" -o -name "*.tfvars" -o -name "*.tfvars.json" \) -delete 2>/dev/null || true
+# Derive cube-webui's nginx config from the canonical webui/nginx.conf (see the
+# sandbox-package copy above) so create.sh can apply tke-addons.tf straight from
+# the extracted bundle without the source tree present.
+copy_file "${CUBE_WEBUI_TEMPLATE_DIR}/nginx.conf" "${DIST_ROOT}/terraform/tencentcloud/webui-nginx.conf"
+# Verify the top-level terraform deployer copy shipped intact too.
+for _tf in create.sh destroy.sh build_images.sh lib-state-sync.sh lib-phases.sh \
+  main.tf variables.tf tke-addons.tf query_outputs.tf webui-nginx.conf; do
+  ensure_file "${DIST_ROOT}/terraform/tencentcloud/${_tf}"
+done
+find "${DIST_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
+
 chmod +x \
   "${DIST_ROOT}/install.sh" \
   "${DIST_ROOT}/install-compute.sh" \
