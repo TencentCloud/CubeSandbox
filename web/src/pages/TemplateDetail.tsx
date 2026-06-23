@@ -9,8 +9,9 @@ import { templateApi, type TemplateNodeCompat, type TemplateCompatRow } from '@/
 import { ApiError } from '@/lib/api';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, RefreshCw, Trash2, ChevronDown, ChevronUp, Copy, Check, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, RefreshCw, Trash2, ChevronDown, ChevronUp, Copy, Check, AlertTriangle, Pencil } from 'lucide-react';
 import { cn, formatDeleteError, copyToClipboard } from '@/lib/utils';
 import { extractTemplateRuntimeConfig, extractTemplateNetworkPolicy } from '@/lib/templateConfig';
 import { BoolBadge } from '@/components/ui/typography';
@@ -443,6 +444,8 @@ export default function TemplateDetailPage() {
 
   const [showRebuildConfirm, setShowRebuildConfirm] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
   const [activeBuildID, setActiveBuildID] = useState<string | null>(null);
   const [showLogs, setShowLogs] = useState(false);
 
@@ -464,7 +467,12 @@ export default function TemplateDetailPage() {
   });
 
   const cachedSummary = qc.getQueryData<Array<{
-    templateID: string; status: string; imageInfo?: string | null; createdAt?: string | null; jobID?: string | null;
+    templateID: string;
+    names?: string[];
+    status: string;
+    imageInfo?: string | null;
+    createdAt?: string | null;
+    jobID?: string | null;
   }>>(['templates'])?.find(t => t.templateID === templateID);
   const cachedStatus = cachedSummary?.status?.toUpperCase();
 
@@ -511,6 +519,26 @@ export default function TemplateDetailPage() {
     mutationFn: () => templateApi.remove(templateID!),
     onSuccess: () => navigate('/templates'),
   });
+
+  const renameMutation = useMutation({
+    mutationFn: (name: string) => templateApi.update(templateID!, { name }),
+    onSuccess: () => {
+      setRenaming(false);
+      qc.invalidateQueries({ queryKey: ['template', templateID] });
+      qc.invalidateQueries({ queryKey: ['templates'] });
+    },
+  });
+
+  const currentDisplayName =
+    data?.names?.[0]?.trim() ||
+    cachedSummary?.names?.[0]?.trim() ||
+    '';
+
+  useEffect(() => {
+    if (!renaming) {
+      setRenameValue(currentDisplayName);
+    }
+  }, [currentDisplayName, renaming]);
 
   // ── loading ──
   if (isLoading) {
@@ -579,6 +607,28 @@ export default function TemplateDetailPage() {
   const compatNodes = compatRow?.nodes ?? [];
   const isStale = isStaleCompat(compatStatus);
   const headerAccentClass = isStale ? 'border-destructive' : 'border-cube-ok';
+  const displayName = currentDisplayName;
+  const hasDisplayName = !!displayName;
+
+  const startRename = () => {
+    setRenameValue(displayName);
+    setRenaming(true);
+  };
+
+  const cancelRename = () => {
+    setRenaming(false);
+    setRenameValue(displayName);
+    renameMutation.reset();
+  };
+
+  const submitRename = () => {
+    const nextName = renameValue.trim();
+    if (!nextName || nextName === displayName) {
+      cancelRename();
+      return;
+    }
+    renameMutation.mutate(nextName);
+  };
 
   return (
     <div className="px-6 py-8">
@@ -592,13 +642,28 @@ export default function TemplateDetailPage() {
       <div className="flex items-start justify-between gap-6 pb-6 border-b border-border/50">
         {/* left: id + meta */}
         <div className={cn('min-w-0 space-y-2 border-l-[3px] pl-3', headerAccentClass)}>
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{t('templateId')}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-lg font-semibold font-mono tracking-tight truncate">{data.templateID}</h1>
-            <CopyButton text={data.templateID} />
-          </div>
+          {hasDisplayName ? (
+            <>
+              <h1 className="text-lg font-semibold tracking-tight truncate">{displayName}</h1>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{t('templateId')}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-mono text-muted-foreground truncate">{data.templateID}</p>
+                <CopyButton text={data.templateID} />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{t('templateId')}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-lg font-semibold font-mono tracking-tight truncate">{data.templateID}</h1>
+                <CopyButton text={data.templateID} />
+              </div>
+            </>
+          )}
           {imgShort && (
             <div className="flex items-center gap-1.5 group">
               <p
@@ -688,6 +753,49 @@ export default function TemplateDetailPage() {
           {/* attributes */}<span className="text-sm font-semibold text-foreground/80">{t('attributes')}</span>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-5">
+          <div className="flex flex-col gap-1.5 sm:col-span-2">
+            <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">{t('fields.name')}</span>
+            {renaming ? (
+              <div className="space-y-2">
+                <Input
+                  value={renameValue}
+                  disabled={renameMutation.isPending || isBuilding}
+                  placeholder={t('rename.placeholder')}
+                  onChange={(event) => setRenameValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') submitRename();
+                    if (event.key === 'Escape') cancelRename();
+                  }}
+                  autoFocus
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    disabled={renameMutation.isPending || isBuilding || !renameValue.trim() || renameValue.trim() === displayName}
+                    onClick={submitRename}
+                  >
+                    {renameMutation.isPending ? t('rename.saving') : t('rename.save')}
+                  </Button>
+                  <Button size="sm" variant="outline" disabled={renameMutation.isPending} onClick={cancelRename}>
+                    {t('rename.cancel')}
+                  </Button>
+                </div>
+                {renameMutation.isError && (
+                  <p className="text-xs text-destructive">
+                    {(renameMutation.error as Error)?.message ?? t('rename.error')}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm text-foreground/90">{displayName ?? '—'}</span>
+                <Button size="sm" variant="outline" disabled={isBuilding} onClick={startRename}>
+                  <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                  {t('rename.button')}
+                </Button>
+              </div>
+            )}
+          </div>
           <Field label={t('fields.templateID')} value={data.templateID} mono copyable />
           <Field label={t('fields.instanceType')} value={data.instanceType ?? '—'} />
           {cfg?.exposedPorts && <Field label={t('exposedPorts')} value={cfg.exposedPorts} mono />}

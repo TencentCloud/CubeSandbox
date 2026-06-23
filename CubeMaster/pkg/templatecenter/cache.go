@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,12 @@ import (
 const (
 	templateDefinitionCacheTTL = 360 * time.Minute
 	templateLocalityCacheTTL   = 360 * time.Minute
+	// Per-process only; multi-replica deployments may serve stale hits until TTL
+	// or until this replica handles a mutating path (see invalidateTemplateDisplayNameCache).
+	templateDisplayNameCacheTTL            = 300 * time.Second
+	templateDisplayNameCacheMaxLen         = 4096
+	templateDisplayNameNotFoundCacheTTL    = 30 * time.Second
+	templateDisplayNameNotFoundCacheMaxLen = 1024
 )
 
 type templateLocalitySnapshot struct {
@@ -48,9 +55,15 @@ var (
 	// keyed by templateID. The kind is derived from a single column in
 	// t_cube_template_definition, so its only mutation source is the same
 	// definition write paths that already call invalidateTemplateCaches.
-	templateKindCache         = cache.New(templateDefinitionCacheTTL, templateDefinitionCacheTTL)
-	templateRequestFetchGroup = &templateFetchGroup{calls: make(map[string]*templateFetchCall)}
-	templateRequestLockGroup  = &templateLockGroup{}
+	templateKindCache                = cache.New(templateDefinitionCacheTTL, templateDefinitionCacheTTL)
+	templateDisplayNameCache         = cache.New(templateDisplayNameCacheTTL, templateDisplayNameCacheTTL)
+	templateDisplayNameNotFoundCache = cache.New(templateDisplayNameNotFoundCacheTTL, templateDisplayNameNotFoundCacheTTL)
+	templateRequestFetchGroup        = &templateFetchGroup{calls: make(map[string]*templateFetchCall)}
+	templateDisplayNameFetchGroup    = &templateFetchGroup{calls: make(map[string]*templateFetchCall)}
+	templateRequestLockGroup         = &templateLockGroup{}
+	displayNamePositiveFIFO          []string
+	displayNameNotFoundFIFO          []string
+	displayNameCacheFIFOMu           sync.Mutex
 )
 
 func (g *templateLockGroup) get(templateID string) *sync.RWMutex {
@@ -67,6 +80,13 @@ func (g *templateLockGroup) get(templateID string) *sync.RWMutex {
 	actual, _ := g.locks.LoadOrStore(templateID, lock)
 	lock, _ = actual.(*sync.RWMutex)
 	return lock
+}
+
+func (g *templateLockGroup) delete(key string) {
+	if key == "" {
+		return
+	}
+	g.locks.Delete(key)
 }
 
 func withTemplateReadLock(templateID string, fn func() error) error {
@@ -100,12 +120,17 @@ func (g *templateFetchGroup) Do(key string, fn func() (interface{}, error)) (int
 	g.calls[key] = call
 	g.mu.Unlock()
 
-	call.val, call.err = fn()
-	close(call.done)
+	defer func() {
+		if r := recover(); r != nil {
+			call.err = fmt.Errorf("template fetch panicked: %v", r)
+		}
+		close(call.done)
+		g.mu.Lock()
+		delete(g.calls, key)
+		g.mu.Unlock()
+	}()
 
-	g.mu.Lock()
-	delete(g.calls, key)
-	g.mu.Unlock()
+	call.val, call.err = fn()
 	return call.val, call.err
 }
 
@@ -198,6 +223,159 @@ func invalidateTemplateCaches(templateID string) {
 	templateLocalityReadyCache.Delete(templateID)
 	templateKindCache.Delete(templateID)
 	localcache.InvalidateImageState(templateID)
+}
+
+func displayNameCacheKey(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func getCachedTemplateIDByDisplayName(key string) (string, bool) {
+	if key == "" {
+		return "", false
+	}
+	if _, ok := templateDisplayNameNotFoundCache.Get(key); ok {
+		return "", false
+	}
+	v, ok := templateDisplayNameCache.Get(key)
+	if !ok {
+		return "", false
+	}
+	templateID, ok := v.(string)
+	if !ok || strings.TrimSpace(templateID) == "" {
+		templateDisplayNameCache.Delete(key)
+		return "", false
+	}
+	return templateID, true
+}
+
+func isDisplayNameNotFoundCached(key string) bool {
+	if key == "" {
+		return false
+	}
+	_, ok := templateDisplayNameNotFoundCache.Get(key)
+	return ok
+}
+
+func setTemplateDisplayNameNotFoundCache(key string) {
+	key = displayNameCacheKey(key)
+	if key == "" {
+		return
+	}
+	_, alreadyCached := templateDisplayNameNotFoundCache.Get(key)
+	if !alreadyCached && templateDisplayNameNotFoundCache.ItemCount() >= templateDisplayNameNotFoundCacheMaxLen {
+		evictOneDisplayNameNotFoundCacheEntry()
+	}
+	templateDisplayNameNotFoundCache.Set(key, true, templateDisplayNameNotFoundCacheTTL)
+	if !alreadyCached {
+		appendDisplayNameNotFoundFIFO(key)
+	}
+}
+
+func setTemplateDisplayNameCache(key, templateID string) {
+	key = displayNameCacheKey(key)
+	templateID = strings.TrimSpace(templateID)
+	if key == "" || templateID == "" {
+		return
+	}
+	templateDisplayNameNotFoundCache.Delete(key)
+	removeDisplayNameNotFoundFIFOKey(key)
+	_, alreadyCached := templateDisplayNameCache.Get(key)
+	if !alreadyCached && templateDisplayNameCache.ItemCount() >= templateDisplayNameCacheMaxLen {
+		evictOneDisplayNameCacheEntry()
+	}
+	templateDisplayNameCache.Set(key, templateID, templateDisplayNameCacheTTL)
+	if !alreadyCached {
+		appendDisplayNamePositiveFIFO(key)
+	}
+}
+
+func appendDisplayNamePositiveFIFO(key string) {
+	displayNameCacheFIFOMu.Lock()
+	displayNamePositiveFIFO = append(displayNamePositiveFIFO, key)
+	displayNameCacheFIFOMu.Unlock()
+}
+
+func appendDisplayNameNotFoundFIFO(key string) {
+	displayNameCacheFIFOMu.Lock()
+	displayNameNotFoundFIFO = append(displayNameNotFoundFIFO, key)
+	displayNameCacheFIFOMu.Unlock()
+}
+
+func removeDisplayNamePositiveFIFOKey(key string) {
+	displayNameCacheFIFOMu.Lock()
+	displayNamePositiveFIFO = removeFIFOKey(displayNamePositiveFIFO, key)
+	displayNameCacheFIFOMu.Unlock()
+}
+
+func removeDisplayNameNotFoundFIFOKey(key string) {
+	displayNameCacheFIFOMu.Lock()
+	displayNameNotFoundFIFO = removeFIFOKey(displayNameNotFoundFIFO, key)
+	displayNameCacheFIFOMu.Unlock()
+}
+
+func removeFIFOKey(keys []string, key string) []string {
+	for i, existing := range keys {
+		if existing == key {
+			return append(keys[:i], keys[i+1:]...)
+		}
+	}
+	return keys
+}
+
+func resetDisplayNameCacheFIFOForTest() {
+	displayNameCacheFIFOMu.Lock()
+	displayNamePositiveFIFO = nil
+	displayNameNotFoundFIFO = nil
+	displayNameCacheFIFOMu.Unlock()
+}
+
+func evictOneDisplayNameCacheEntry() {
+	displayNameCacheFIFOMu.Lock()
+	if len(displayNamePositiveFIFO) == 0 {
+		displayNameCacheFIFOMu.Unlock()
+		for key := range templateDisplayNameCache.Items() {
+			templateDisplayNameCache.Delete(key)
+			templateRequestLockGroup.delete(displayNameLockKey(key))
+			return
+		}
+		return
+	}
+	key := displayNamePositiveFIFO[0]
+	displayNamePositiveFIFO = displayNamePositiveFIFO[1:]
+	displayNameCacheFIFOMu.Unlock()
+	templateDisplayNameCache.Delete(key)
+	templateRequestLockGroup.delete(displayNameLockKey(key))
+}
+
+func evictOneDisplayNameNotFoundCacheEntry() {
+	displayNameCacheFIFOMu.Lock()
+	if len(displayNameNotFoundFIFO) == 0 {
+		displayNameCacheFIFOMu.Unlock()
+		for key := range templateDisplayNameNotFoundCache.Items() {
+			templateDisplayNameNotFoundCache.Delete(key)
+			templateRequestLockGroup.delete(displayNameLockKey(key))
+			return
+		}
+		return
+	}
+	key := displayNameNotFoundFIFO[0]
+	displayNameNotFoundFIFO = displayNameNotFoundFIFO[1:]
+	displayNameCacheFIFOMu.Unlock()
+	templateDisplayNameNotFoundCache.Delete(key)
+	templateRequestLockGroup.delete(displayNameLockKey(key))
+}
+
+func invalidateTemplateDisplayNameCache(names ...string) {
+	for _, name := range names {
+		key := displayNameCacheKey(name)
+		if key == "" {
+			continue
+		}
+		templateDisplayNameCache.Delete(key)
+		templateDisplayNameNotFoundCache.Delete(key)
+		removeDisplayNamePositiveFIFOKey(key)
+		removeDisplayNameNotFoundFIFOKey(key)
+	}
 }
 
 // getCachedTemplateKind returns the cached kind for a templateID.

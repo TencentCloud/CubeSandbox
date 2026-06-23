@@ -242,7 +242,7 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 		if _, ok := seen[job.TemplateID]; ok {
 			continue
 		}
-		out = append(out, templateInfoFromJob(&job))
+		out = append(out, templateInfoFromJob(ctx, &job))
 		seen[job.TemplateID] = struct{}{}
 	}
 	return out, nil
@@ -692,19 +692,31 @@ func createDefinitionWithOptions(ctx context.Context, templateID string, storedR
 	return createDefinitionTx(ctx, store.db.WithContext(ctx), templateID, storedReq, instanceType, version, opts)
 }
 
-func ensureTemplateDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
+func ensureTemplateDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version, displayName string) (bool, error) {
 	if _, err := GetDefinition(ctx, templateID); err == nil {
 		return false, nil
 	} else if !errors.Is(err, ErrTemplateNotFound) {
 		return false, err
 	}
-	if err := createDefinition(ctx, templateID, storedReq, instanceType, version); err != nil {
+	created := false
+	if err := withDisplayNameCreateLock(ctx, displayName, templateID, func() error {
+		if err := createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, definitionCreateOptions{
+			DisplayName: displayName,
+		}); err != nil {
+			return err
+		}
+		created = true
+		if strings.TrimSpace(displayName) != "" {
+			setTemplateDisplayNameCache(displayName, templateID)
+		}
+		if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
+			log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
+		}
+		return nil
+	}); err != nil {
 		return false, err
 	}
-	if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
-		log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
-	}
-	return true, nil
+	return created, nil
 }
 
 func finalizeTemplateReplicas(ctx context.Context, templateID, instanceType, version string, replicas []ReplicaStatus) (*TemplateInfo, error) {
@@ -755,7 +767,7 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 		if jobErr != nil {
 			return nil, err
 		}
-		info := templateInfoFromJob(job)
+		info := templateInfoFromJob(ctx, job)
 		return &info, nil
 	}
 	replicas, err := ListReplicas(ctx, templateID)
@@ -794,7 +806,7 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 	return out, nil
 }
 
-func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
+func templateInfoFromJob(ctx context.Context, job *models.TemplateImageJob) TemplateInfo {
 	if job == nil {
 		return TemplateInfo{}
 	}
@@ -811,6 +823,7 @@ func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
 		Version:      DefaultTemplateVersion,
 		Status:       status,
 		LastError:    job.ErrorMessage,
+		DisplayName:  displayNameFromTemplateImageJob(ctx, job),
 		CreatedAt:    formatUTCRFC3339(job.CreatedAt),
 		ImageInfo:    composeImageInfo(job.SourceImageRef, job.SourceImageDigest),
 		JobID:        latestJobIDFromJob(job),

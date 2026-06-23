@@ -112,7 +112,7 @@ func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *
 	if err := runArtifactCleanup(ctx, templateID, targets); err != nil {
 		return err
 	}
-	if err := runMetadataCleanup(ctx, templateID); err != nil {
+	if err := runMetadataCleanup(ctx, templateID, displayNameFromDefinition(targets.Definition)); err != nil {
 		invalidateTemplateCaches(templateID)
 		return err
 	}
@@ -243,7 +243,16 @@ func (t *templateCleanupTargets) shouldCheckInUse() bool {
 	return !strings.EqualFold(t.Definition.Status, StatusFailed)
 }
 
-func cleanupTemplateMetadata(ctx context.Context, templateID string) error {
+func cleanupTemplateMetadata(ctx context.Context, templateID string, knownDisplayName ...string) error {
+	displayName := ""
+	if len(knownDisplayName) > 0 {
+		displayName = strings.TrimSpace(knownDisplayName[0])
+	}
+	if displayName == "" {
+		if def, err := GetDefinition(ctx, templateID); err == nil {
+			displayName = strings.TrimSpace(def.DisplayName)
+		}
+	}
 	var cleanupErr error
 	if err := store.db.WithContext(ctx).Unscoped().Table(constants.TemplateReplicaTableName).
 		Where("template_id = ?", templateID).Delete(&models.TemplateReplica{}).Error; err != nil {
@@ -252,6 +261,9 @@ func cleanupTemplateMetadata(ctx context.Context, templateID string) error {
 	if err := store.db.WithContext(ctx).Unscoped().Table(constants.TemplateDefinitionTableName).
 		Where("template_id = ?", templateID).Delete(&models.TemplateDefinition{}).Error; err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)
+	}
+	if cleanupErr == nil && displayName != "" {
+		invalidateTemplateDisplayNameCache(displayName)
 	}
 	return cleanupErr
 }

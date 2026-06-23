@@ -15,6 +15,7 @@
     "dangerDesc": "删除后无法恢复，该模板下所有 replica 将一并删除。"
   },
   "fields": {
+    "name": "名称",
     "templateID": "模板 ID",
     "status": "状态",
     "instanceType": "实例类型",
@@ -59,6 +60,14 @@
     "confirmDesc": "删除后无法恢复，该模板下所有 replica 将一并删除。确认继续？",
     "cancel": "取消",
     "deleting": "删除中…"
+  },
+  "rename": {
+    "button": "重命名",
+    "save": "保存",
+    "cancel": "取消",
+    "saving": "保存中…",
+    "placeholder": "输入模板名称",
+    "error": "重命名失败，请重试。"
   },
   "empty": {
     "replicas": "暂无副本信息。",

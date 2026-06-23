@@ -187,6 +187,7 @@ fn build_template_routes(state: &AppState, auth_configured: bool) -> Router<AppS
         .route("/templates", get(templates::list_templates))
         .route("/templates", post(templates::create_template))
         .route("/templates/compat", get(templates::template_compat))
+        .route("/templates/lookup", get(templates::lookup_template_name))
         .route(
             "/templates/compat/:templateID/adopt-baseline",
             post(templates::adopt_template_compat_baseline),

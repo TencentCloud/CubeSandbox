@@ -541,6 +541,9 @@ type ContainerOverrides struct {
 
 type CreateTemplateFromImageReq struct {
 	*Request
+	// DisplayName is the human-readable template name (E2B "name"). Stored in
+	// t_cube_template_definition.display_name and used for name→templateID lookup.
+	DisplayName        string              `json:"display_name,omitempty"`
 	SourceImageRef     string              `json:"source_image_ref,omitempty" p:"source_image_ref" v:"required"`
 	RegistryUsername   string              `json:"registry_username,omitempty"`
 	RegistryPassword   string              `json:"registry_password,omitempty"`

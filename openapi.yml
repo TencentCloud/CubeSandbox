@@ -1,8 +1,3 @@
----
-# Copyright (c) 2026 Tencent Inc.
-# SPDX-License-Identifier: Apache-2.0
-#
-
 openapi: 3.1.0
 info:
   title: CubeAPI
@@ -294,6 +289,41 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+    post:
+      tags:
+      - handlers::templates
+      operationId: create_template
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTemplateRequest'
+        required: true
+      responses:
+        '202':
+          description: Template build accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateBuildJob'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Name already in use
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /templates/compat:
     get:
       tags:
@@ -320,7 +350,7 @@ paths:
       parameters:
       - name: templateID
         in: path
-        description: Template identifier
+        description: Template identifier (tpl-*) or human-readable display name
         required: true
         schema:
           type: string
@@ -331,8 +361,51 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TemplateCompatAdoptResponseView'
+        '400':
+          description: Invalid or ambiguous template name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /templates/lookup:
+    get:
+      tags:
+      - handlers::templates
+      operationId: lookup_template_name
+      parameters:
+      - name: name
+        in: query
+        description: Human-readable template display name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Name resolves to a template
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateNameLookupResponse'
+        '400':
+          description: Invalid or ambiguous template name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Template name not found
           content:
             application/json:
               schema:
@@ -351,7 +424,7 @@ paths:
       parameters:
       - name: templateID
         in: path
-        description: Template identifier
+        description: Template identifier (tpl-*) or human-readable display name
         required: true
         schema:
           type: string
@@ -362,8 +435,62 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TemplateDetail'
+        '400':
+          description: Invalid or ambiguous template name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    patch:
+      tags:
+      - handlers::templates
+      operationId: update_template
+      parameters:
+      - name: templateID
+        in: path
+        description: Template identifier (tpl-*) or human-readable display name
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTemplateRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated template display name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateDetail'
+        '400':
+          description: Invalid name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Name already in use
           content:
             application/json:
               schema:
@@ -577,6 +704,140 @@ components:
           type: string
         version:
           type: string
+    CreateTemplateRequest:
+      type: object
+      description: Body for POST /templates (create from image).
+      required:
+      - image
+      properties:
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Allow internet (public) access.
+        allowOut:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Allowed outbound CIDRs for CubeVS egress policy.
+        args:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Override container CMD args.
+        command:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Override container ENTRYPOINT.
+        cpu:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: CPU in millicores, e.g. 2000 means 2000m.
+          minimum: 0
+        denyOut:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Denied outbound CIDRs for CubeVS egress policy.
+        dns:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Container DNS nameservers.
+        env:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Environment variables as "KEY=VALUE" strings.
+        exposedPorts:
+          type:
+          - array
+          - 'null'
+          items:
+            type: integer
+            format: int32
+            minimum: 0
+          description: Ports the container listens on.
+        image:
+          type: string
+          description: Container image reference, e.g. `registry.example.com/code:latest`.
+        instanceType:
+          type:
+          - string
+          - 'null'
+        memory:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Memory in MiB, e.g. 2000.
+          minimum: 0
+        name:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Optional human-readable template name (ASCII letters, digits, hyphen,
+            underscore; must start with a letter or digit; max 256 characters; must not
+            use tpl- or snap- prefix; cluster-wide case-insensitive unique among templates
+            that currently hold the name (assigned when the definition is created;
+            released after failed builds). Duplicate names fail during the build when
+            the definition row is written. Sandboxes may reference this name only after
+            the template build succeeds (template ready on a node).
+        networkType:
+          type:
+          - string
+          - 'null'
+          description: Network mode, e.g. "tap".
+        nodes:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Limit template distribution to these node IDs or host IPs.
+        probePath:
+          type:
+          - string
+          - 'null'
+          description: HTTP probe path, e.g. "/health". Defaults to "/health" when `probePort` is set.
+        probePort:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: HTTP probe port.
+          minimum: 0
+        registryPassword:
+          type:
+          - string
+          - 'null'
+          description: Registry password for private source images.
+        registryUsername:
+          type:
+          - string
+          - 'null'
+          description: Registry username for private source images.
+        writableLayerSize:
+          type:
+          - string
+          - 'null'
+          description: Writable layer size for the rootfs, e.g. "1G".
     HashMap:
       type: object
       additionalProperties:
@@ -942,6 +1203,37 @@ components:
           type: string
         path:
           type: string
+    TemplateBuildJob:
+      type: object
+      description: Job envelope returned by create / rebuild.
+      required:
+      - jobID
+      - buildID
+      - templateID
+      - status
+      - phase
+      - progress
+      properties:
+        buildID:
+          type: string
+        errorMessage:
+          type: string
+        jobID:
+          type: string
+        names:
+          type: array
+          items:
+            type: string
+          description: Human-readable template name (set on create when `name` is provided; empty on rebuild).
+        phase:
+          type: string
+        progress:
+          type: integer
+          format: int32
+        status:
+          type: string
+        templateID:
+          type: string
     TemplateCompatAdoptResponseView:
       type: object
       required:
@@ -1005,9 +1297,17 @@ components:
         unknownReplicas:
           type: integer
           format: int32
+    TemplateNameLookupResponse:
+      type: object
+      description: Display name lookup result (GET /templates/lookup).
+      required:
+      - templateID
+      properties:
+        templateID:
+          type: string
     TemplateDetail:
       type: object
-      description: Detailed template response (GET /templates/:id).
+      description: Detailed template response (GET /templates/{templateID}).
       required:
       - templateID
       - status
@@ -1032,6 +1332,11 @@ components:
           type:
           - string
           - 'null'
+        names:
+          type: array
+          items:
+            type: string
+          description: Human-readable template name (0 or 1 entry; empty when unset).
         networkType:
           type:
           - string
@@ -1109,6 +1414,11 @@ components:
           type:
           - string
           - 'null'
+        names:
+          type: array
+          items:
+            type: string
+          description: Human-readable template name (0 or 1 entry; empty when unset).
         status:
           type: string
         templateID:
@@ -1122,6 +1432,18 @@ components:
           - string
           - 'null'
           description: Latest create/rebuild job id for the template.
+    UpdateTemplateRequest:
+      type: object
+      description: Body for PATCH /templates/:templateID (update display name).
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          description: |-
+            Required display name (ASCII letters, digits, hyphen, underscore;
+            must start with a letter or digit; max 256 characters; must not use
+            tpl- or snap- prefix; case-insensitive unique).
     VersionMatrixView:
       type: object
       description: Full node x component version matrix.

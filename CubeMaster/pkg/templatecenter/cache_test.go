@@ -5,6 +5,7 @@
 package templatecenter
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -139,6 +140,81 @@ func TestTemplateKindCacheRoundTrip(t *testing.T) {
 	setTemplateKindCache("", "ignored")
 	if _, hit := getCachedTemplateKind(""); hit {
 		t.Fatal("expected miss for empty key")
+	}
+}
+
+func TestTemplateDisplayNameCacheRoundTrip(t *testing.T) {
+	templateDisplayNameCache.Flush()
+	templateDisplayNameNotFoundCache.Flush()
+
+	setTemplateDisplayNameCache("My-Env", "tpl-1")
+	if got, ok := getCachedTemplateIDByDisplayName("my-env"); !ok || got != "tpl-1" {
+		t.Fatalf("expected cache hit for tpl-1, got %q ok=%v", got, ok)
+	}
+
+	invalidateTemplateDisplayNameCache("My-Env")
+	if _, ok := getCachedTemplateIDByDisplayName("my-env"); ok {
+		t.Fatal("expected cache miss after invalidation")
+	}
+}
+
+func TestDisplayNameNotFoundCache(t *testing.T) {
+	templateDisplayNameCache.Flush()
+	templateDisplayNameNotFoundCache.Flush()
+
+	setTemplateDisplayNameNotFoundCache("missing")
+	if !isDisplayNameNotFoundCached("missing") {
+		t.Fatal("expected not-found cache hit")
+	}
+	if _, ok := getCachedTemplateIDByDisplayName("missing"); ok {
+		t.Fatal("expected positive cache miss when not-found is cached")
+	}
+
+	invalidateTemplateDisplayNameCache("missing")
+	if isDisplayNameNotFoundCached("missing") {
+		t.Fatal("expected not-found cache cleared after invalidation")
+	}
+}
+
+func TestDisplayNameNotFoundCacheBounded(t *testing.T) {
+	templateDisplayNameNotFoundCache.Flush()
+	resetDisplayNameCacheFIFOForTest()
+	for i := 0; i < templateDisplayNameNotFoundCacheMaxLen+10; i++ {
+		setTemplateDisplayNameNotFoundCache(fmt.Sprintf("missing-%d", i))
+	}
+	if got := templateDisplayNameNotFoundCache.ItemCount(); got > templateDisplayNameNotFoundCacheMaxLen {
+		t.Fatalf("not-found cache len = %d, want <= %d", got, templateDisplayNameNotFoundCacheMaxLen)
+	}
+}
+
+func TestDisplayNamePositiveCacheBounded(t *testing.T) {
+	templateDisplayNameCache.Flush()
+	templateDisplayNameNotFoundCache.Flush()
+	resetDisplayNameCacheFIFOForTest()
+	for i := 0; i < templateDisplayNameCacheMaxLen+10; i++ {
+		setTemplateDisplayNameCache(fmt.Sprintf("name-%d", i), fmt.Sprintf("tpl-%d", i))
+	}
+	if got := templateDisplayNameCache.ItemCount(); got > templateDisplayNameCacheMaxLen {
+		t.Fatalf("positive cache len = %d, want <= %d", got, templateDisplayNameCacheMaxLen)
+	}
+}
+
+func TestDisplayNameCacheEvictionClearsPerNameLock(t *testing.T) {
+	templateDisplayNameCache.Flush()
+	templateDisplayNameNotFoundCache.Flush()
+	resetDisplayNameCacheFIFOForTest()
+
+	lockKey := displayNameLockKey("evict-me")
+	templateRequestLockGroup.get(lockKey)
+	setTemplateDisplayNameCache("evict-me", "tpl-evict")
+
+	evictOneDisplayNameCacheEntry()
+
+	if _, ok := templateDisplayNameCache.Get("evict-me"); ok {
+		t.Fatal("expected cache entry evicted")
+	}
+	if _, ok := templateRequestLockGroup.locks.Load(lockKey); ok {
+		t.Fatal("expected per-name lock removed when cache entry is evicted")
 	}
 }
 

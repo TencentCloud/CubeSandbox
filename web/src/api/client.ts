@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import type { components } from './generated/schema';
 
 export type ClusterOverviewDto = components['schemas']['ClusterOverview'];
@@ -23,6 +23,7 @@ export interface SandboxDetail extends SandboxDetailDto {}
 
 export interface TemplateSummary {
   templateID: string;
+  names?: string[];
   instanceType?: string | null;
   version?: string | null;
   status: string;
@@ -121,6 +122,7 @@ function mapSandboxDetail(dto: SandboxDetailDto): SandboxDetail {
 function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
   return {
     templateID: dto.templateID,
+    names: dto.names ?? [],
     instanceType: dto.instanceType,
     version: dto.version,
     status: dto.status,
@@ -136,6 +138,7 @@ function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
 function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
   return {
     templateID: dto.templateID,
+    names: dto.names ?? [],
     instanceType: dto.instanceType,
     version: dto.version,
     status: dto.status,
@@ -214,10 +217,44 @@ export const sandboxApi = {
     }),
 };
 
+export type TemplateDisplayNameCheck = 'available' | 'taken' | 'invalid' | 'unknown';
+
+function displayNameHeldLocally(name: string, templates?: TemplateSummary[]): boolean {
+  const key = name.trim().toLowerCase();
+  if (!key) return false;
+  return (templates ?? []).some((tpl) =>
+    tpl.names?.some((n) => n.trim().toLowerCase() === key),
+  );
+}
+
 export const templateApi = {
   list: () => api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
   get: (id: string) => api<TemplateDetailDto>(`/templates/${id}`).then(mapTemplateDetail),
+  /** Best-effort hint for create modal; build-time assignment is authoritative. */
+  checkDisplayName: async (
+    name: string,
+    knownTemplates?: TemplateSummary[],
+  ): Promise<TemplateDisplayNameCheck> => {
+    const trimmed = name.trim();
+    if (!trimmed) return 'available';
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith('tpl-') || lower.startsWith('snap-')) return 'invalid';
+    if (displayNameHeldLocally(trimmed, knownTemplates)) return 'taken';
+    try {
+      await api<{ templateID: string }>('/templates/lookup', { params: { name: trimmed } });
+      return 'taken';
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.status === 404) return 'available';
+        if (err.status === 400) return 'invalid';
+        if (err.status === 409) return 'taken';
+        if (err.status === 502 || err.status === 503) return 'unknown';
+      }
+      return 'unknown';
+    }
+  },
   create: (body: {
+    name?: string;
     templateID?: string;
     image: string;
     instanceType?: string;
@@ -240,6 +277,8 @@ export const templateApi = {
     denyOut?: string[];
     with_cube_ca?: boolean;
   }) => api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) }),
+  update: (id: string, body: { name?: string }) =>
+    api<TemplateDetailDto>(`/templates/${id}`, { method: 'PATCH', body: JSON.stringify(body) }).then(mapTemplateDetail),
   rebuild: (id: string) => api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
   getBuildStatus: (id: string, buildID: string) =>
     api<unknown>(`/templates/${id}/builds/${buildID}/status`),

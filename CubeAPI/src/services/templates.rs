@@ -16,21 +16,119 @@ use crate::{
     models::{
         CreateTemplateRequest, RebuildTemplateRequest, TemplateBuildJob, TemplateBuildStatus,
         TemplateCompatMatrixView, TemplateCompatRowView, TemplateCompatSummaryView, TemplateDetail,
-        TemplateNodeCompatView, TemplateSummary,
+        TemplateNodeCompatView, TemplateSummary, UpdateTemplateRequest,
     },
 };
+
+// Resolve human-readable template names to template IDs at CubeAPI entry points.
+// References that already look like `tpl-*` or `snap-*` ids bypass lookup.
+// Read paths use CubeMaster's brief display-name cache; mutating paths (create
+// sandbox, rename, delete, rebuild) pass fresh=true to bypass that cache.
+
+#[derive(Clone)]
+pub struct TemplateNameCache {
+    cubemaster: CubeMasterClient,
+}
+
+impl TemplateNameCache {
+    pub fn new(cubemaster: CubeMasterClient) -> Self {
+        Self { cubemaster }
+    }
+
+    /// Returns true when the reference should be resolved via display_name lookup.
+    pub fn needs_resolution(reference: &str) -> bool {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            return false;
+        }
+        let lower = reference.to_ascii_lowercase();
+        !lower.starts_with("tpl-") && !lower.starts_with("snap-")
+    }
+
+    /// Resolve a template reference via CubeMaster name lookup.
+    pub async fn resolve_template_ref(&self, reference: &str) -> AppResult<String> {
+        self.resolve(reference, false).await
+    }
+
+    /// Resolve bypassing CubeMaster read cache (mutating API paths).
+    pub async fn resolve_template_ref_fresh(&self, reference: &str) -> AppResult<String> {
+        self.resolve(reference, true).await
+    }
+
+    async fn resolve(&self, reference: &str, fresh: bool) -> AppResult<String> {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            return Err(AppError::BadRequest(
+                "template reference is empty".to_string(),
+            ));
+        }
+        if !Self::needs_resolution(reference) {
+            return Ok(reference.to_string());
+        }
+        if fresh {
+            self.cubemaster
+                .resolve_template_by_name_fresh(reference)
+                .await
+                .map_err(map_resolve_err(reference))
+        } else {
+            self.cubemaster
+                .resolve_template_by_name(reference)
+                .await
+                .map_err(map_resolve_err(reference))
+        }
+    }
+}
+
+pub fn template_names(display_name: &str) -> Vec<String> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        Vec::new()
+    } else {
+        vec![display_name.to_string()]
+    }
+}
+
+fn map_resolve_err(reference: &str) -> impl FnOnce(CubeMasterError) -> AppError {
+    let reference = reference.to_string();
+    move |err| match err {
+        CubeMasterError::Api { ret_code, .. } if ret_code == 130404 => {
+            AppError::NotFound(format!("template name {reference} not found"))
+        }
+        CubeMasterError::Api {
+            ret_code, ret_msg, ..
+        } if ret_code == 130409 => AppError::Conflict(ret_msg),
+        CubeMasterError::Api {
+            ret_code, ret_msg, ..
+        } if ret_code == 130400 => AppError::BadRequest(ret_msg),
+        CubeMasterError::Http(e) if e.is_timeout() || e.is_connect() => {
+            AppError::ServiceUnavailable("CubeMaster unavailable".to_string())
+        }
+        CubeMasterError::Http(_) => AppError::BadGateway("CubeMaster request failed".to_string()),
+        other => AppError::Internal(anyhow::anyhow!(other)),
+    }
+}
+
+fn trim_display_name(raw: &str) -> String {
+    raw.trim().to_string()
+}
 
 #[derive(Clone)]
 pub struct TemplateService {
     cubemaster: CubeMasterClient,
     instance_type: String,
+    template_names: TemplateNameCache,
 }
 
 impl TemplateService {
-    pub fn new(cubemaster: CubeMasterClient, instance_type: String) -> Self {
+    pub fn new(
+        cubemaster: CubeMasterClient,
+        instance_type: String,
+        template_names: TemplateNameCache,
+    ) -> Self {
         Self {
             cubemaster,
             instance_type,
+            template_names,
         }
     }
 
@@ -46,6 +144,7 @@ impl TemplateService {
             .into_iter()
             .map(|s| TemplateSummary {
                 template_id: s.template_id,
+                names: template_names(&s.display_name),
                 instance_type: non_empty(s.instance_type),
                 version: non_empty(s.version),
                 status: s.status,
@@ -57,52 +156,25 @@ impl TemplateService {
             .collect())
     }
 
-    pub async fn get_template(&self, template_id: &str) -> AppResult<TemplateDetail> {
+    pub async fn get_template(&self, template_ref: &str) -> AppResult<TemplateDetail> {
+        let template_id = self
+            .template_names
+            .resolve_template_ref(template_ref)
+            .await?;
         let resp = self
-            .cubemaster
-            .get_template(template_id)
-            .await
-            .map_err(map_err)?;
+            .fetch_resolved_template(template_ref, &template_id)
+            .await?;
 
-        if resp.template_id.is_empty() && resp.status.is_empty() {
-            return Err(AppError::NotFound(format!(
-                "template {} not found",
-                template_id
-            )));
-        }
+        Ok(template_detail_from_cm_response(
+            &resp,
+            &template_id,
+            resp.display_name.as_str(),
+        ))
+    }
 
-        // Extract network fields from create_request JSON (stored by CubeMaster)
-        let network_type = resp
-            .create_request
-            .as_ref()
-            .and_then(|v| v.get("network_type"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.to_string())
-                }
-            });
-        let allow_internet_access = resp
-            .create_request
-            .as_ref()
-            .and_then(|v| v.get("cube_network_config"))
-            .and_then(|v| v.get("allowInternetAccess"))
-            .and_then(|v| v.as_bool());
-
-        Ok(TemplateDetail {
-            template_id: string_or(resp.template_id, template_id),
-            instance_type: non_empty(resp.instance_type),
-            version: non_empty(resp.version),
-            status: resp.status,
-            last_error: non_empty(resp.last_error),
-            replicas: resp.replicas,
-            create_request: resp.create_request,
-            network_type,
-            allow_internet_access,
-            job_id: non_empty(resp.job_id),
-        })
+    /// Resolve a display name to template ID (lightweight lookup for UI hints).
+    pub async fn lookup_template_name(&self, name: &str) -> AppResult<String> {
+        self.template_names.resolve_template_ref(name).await
     }
 
     pub async fn create_template(
@@ -113,6 +185,11 @@ impl TemplateService {
             return Err(AppError::BadRequest("image is required".to_string()));
         }
 
+        let display_name = body
+            .name
+            .as_deref()
+            .map(trim_display_name)
+            .filter(|name| !name.is_empty());
         let dns_servers = validate_dns_servers(body.dns.as_deref())?;
         let container_overrides = build_template_container_overrides(&body, dns_servers.as_deref());
         let cube_network_config = build_template_cube_network_config(&body)?;
@@ -127,6 +204,7 @@ impl TemplateService {
             // normalizeTemplateImageRequest.
             template_id: String::new(),
             source_image_ref: body.image.trim().to_string(),
+            display_name: display_name.clone(),
             writable_layer_size: body.writable_layer_size,
             exposed_ports: body.exposed_ports,
             network_type: non_empty_option(body.network_type),
@@ -144,14 +222,48 @@ impl TemplateService {
             .await
             .map_err(map_err)?;
 
-        Ok(to_job(resp))
+        Ok(to_job(resp, display_name.as_deref()))
+    }
+
+    pub async fn update_template_name(
+        &self,
+        template_ref: String,
+        body: UpdateTemplateRequest,
+    ) -> AppResult<TemplateDetail> {
+        let template_id = self
+            .template_names
+            .resolve_template_ref_fresh(&template_ref)
+            .await?;
+        let name = trim_display_name(&body.name);
+        if name.is_empty() {
+            return Err(AppError::BadRequest("name is required".to_string()));
+        }
+
+        let existing = self
+            .fetch_resolved_template(&template_ref, &template_id)
+            .await?;
+
+        self.cubemaster
+            .update_template_display_name(&template_id, &name)
+            .await
+            .map_err(map_err)?;
+
+        Ok(template_detail_from_cm_response(
+            &existing,
+            &template_id,
+            &name,
+        ))
     }
 
     pub async fn rebuild_template(
         &self,
-        template_id: String,
+        template_ref: String,
         body: RebuildTemplateRequest,
     ) -> AppResult<TemplateBuildJob> {
+        let template_id = self
+            .template_names
+            .resolve_template_ref_fresh(&template_ref)
+            .await?;
         let req = RedoTemplateReq {
             request_id: new_request_id(),
             template_id,
@@ -160,15 +272,19 @@ impl TemplateService {
 
         let resp = self.cubemaster.redo_template(&req).await.map_err(map_err)?;
 
-        Ok(to_job(resp))
+        Ok(to_job(resp, None))
     }
 
     pub async fn delete_template(
         &self,
-        template_id: String,
+        template_ref: String,
         instance_type: Option<String>,
         sync: Option<bool>,
     ) -> AppResult<()> {
+        let template_id = self
+            .template_names
+            .resolve_template_ref_fresh(&template_ref)
+            .await?;
         let req = TemplateDeleteRequest {
             request_id: new_request_id(),
             template_id,
@@ -184,7 +300,11 @@ impl TemplateService {
         Ok(())
     }
 
-    pub async fn start_template_build(&self, template_id: String) -> AppResult<TemplateBuildJob> {
+    pub async fn start_template_build(&self, template_ref: String) -> AppResult<TemplateBuildJob> {
+        let template_id = self
+            .template_names
+            .resolve_template_ref_fresh(&template_ref)
+            .await?;
         let req = RedoTemplateReq {
             request_id: new_request_id(),
             template_id,
@@ -193,35 +313,51 @@ impl TemplateService {
 
         let resp = self.cubemaster.redo_template(&req).await.map_err(map_err)?;
 
-        Ok(to_job(resp))
+        Ok(to_job(resp, None))
     }
 
     pub async fn get_template_build_status(
         &self,
-        template_id: &str,
+        template_ref: &str,
         build_id: &str,
     ) -> AppResult<TemplateBuildStatus> {
+        let template_id = self
+            .template_names
+            .resolve_template_ref(template_ref)
+            .await?;
         let resp = self
             .cubemaster
             .get_template_build_status(build_id)
             .await
             .map_err(map_err)?;
 
+        ensure_build_belongs_to_template(resp.template_id.as_str(), &template_id, build_id)?;
+
         Ok(TemplateBuildStatus {
             build_id: string_or(resp.build_id, build_id),
-            template_id: string_or(resp.template_id, template_id),
+            template_id: string_or(resp.template_id, &template_id),
             status: resp.status,
             progress: resp.progress,
             message: resp.message,
         })
     }
 
-    pub async fn get_template_build_logs(&self, build_id: &str) -> AppResult<serde_json::Value> {
+    pub async fn get_template_build_logs(
+        &self,
+        template_ref: &str,
+        build_id: &str,
+    ) -> AppResult<serde_json::Value> {
+        let template_id = self
+            .template_names
+            .resolve_template_ref(template_ref)
+            .await?;
         let resp = self
             .cubemaster
             .get_template_build_status(build_id)
             .await
             .map_err(map_err)?;
+
+        ensure_build_belongs_to_template(resp.template_id.as_str(), &template_id, build_id)?;
 
         let line = build_log_line(&resp.status, resp.progress, &resp.message);
 
@@ -242,7 +378,11 @@ impl TemplateService {
         Ok(to_compat_matrix_view(resp.data.unwrap_or_default()))
     }
 
-    pub async fn adopt_compat_baseline(&self, template_id: String) -> AppResult<i32> {
+    pub async fn adopt_compat_baseline(&self, template_ref: String) -> AppResult<i32> {
+        let template_id = self
+            .template_names
+            .resolve_template_ref_fresh(&template_ref)
+            .await?;
         let req = TemplateCompatAdoptRequest {
             action: "adopt_baseline".to_string(),
             template_id,
@@ -254,10 +394,50 @@ impl TemplateService {
             .map_err(map_err)?;
         Ok(resp.updated)
     }
+
+    async fn fetch_resolved_template(
+        &self,
+        template_ref: &str,
+        template_id: &str,
+    ) -> AppResult<crate::cubemaster::TemplateResponse> {
+        let resp = self
+            .cubemaster
+            .get_template(template_id)
+            .await
+            .map_err(map_err)?;
+
+        if resp.template_id.is_empty() && resp.status.is_empty() {
+            return Err(AppError::NotFound(format!(
+                "template {} not found",
+                template_ref
+            )));
+        }
+
+        Ok(resp)
+    }
+}
+
+fn ensure_build_belongs_to_template(
+    build_template_id: &str,
+    expected_template_id: &str,
+    build_id: &str,
+) -> AppResult<()> {
+    let build_template_id = build_template_id.trim();
+    if build_template_id.is_empty() {
+        return Err(AppError::NotFound(format!(
+            "build {build_id} not found for template {expected_template_id}"
+        )));
+    }
+    if build_template_id != expected_template_id {
+        return Err(AppError::NotFound(format!(
+            "build {build_id} not found for template {expected_template_id}"
+        )));
+    }
+    Ok(())
 }
 
 fn map_err(e: CubeMasterError) -> AppError {
-    if e.is_invalid_path_parameter() {
+    if e.is_invalid_path_parameter() || e.is_bad_request() {
         AppError::BadRequest(e.to_string())
     } else if e.is_not_found() || e.is_endpoint_missing() {
         AppError::NotFound(e.to_string())
@@ -265,6 +445,45 @@ fn map_err(e: CubeMasterError) -> AppError {
         AppError::Conflict(e.to_string())
     } else {
         AppError::Internal(anyhow::anyhow!(e))
+    }
+}
+
+fn template_detail_from_cm_response(
+    resp: &crate::cubemaster::TemplateResponse,
+    fallback_template_id: &str,
+    display_name: &str,
+) -> TemplateDetail {
+    let network_type = resp
+        .create_request
+        .as_ref()
+        .and_then(|v| v.get("network_type"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        });
+    let allow_internet_access = resp
+        .create_request
+        .as_ref()
+        .and_then(|v| v.get("cube_network_config"))
+        .and_then(|v| v.get("allowInternetAccess"))
+        .and_then(|v| v.as_bool());
+
+    TemplateDetail {
+        template_id: string_or(resp.template_id.clone(), fallback_template_id),
+        names: template_names(display_name),
+        instance_type: non_empty(resp.instance_type.clone()),
+        version: non_empty(resp.version.clone()),
+        status: resp.status.clone(),
+        last_error: non_empty(resp.last_error.clone()),
+        replicas: resp.replicas.clone(),
+        create_request: resp.create_request.clone(),
+        network_type,
+        allow_internet_access,
+        job_id: non_empty(resp.job_id.clone()),
     }
 }
 
@@ -332,16 +551,24 @@ fn to_compat_matrix_view(src: crate::cubemaster::TemplateCompatMatrix) -> Templa
     }
 }
 
-fn to_job(resp: TemplateJobResponse) -> TemplateBuildJob {
+fn to_job(resp: TemplateJobResponse, display_name: Option<&str>) -> TemplateBuildJob {
     let job = resp.job.unwrap_or_else(default_template_job);
     TemplateBuildJob {
-        job_id: job.job_id,
+        job_id: job.job_id.clone(),
+        build_id: job.job_id,
         template_id: job.template_id,
+        names: display_name.map(template_names).unwrap_or_default(),
         status: job.status,
         phase: job.phase,
         progress: job.progress,
         error_message: job.error_message,
     }
+}
+
+fn optional_name(name: Option<&str>) -> Option<String> {
+    name.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn default_template_job() -> TemplateJob {
@@ -510,10 +737,12 @@ fn build_template_cube_network_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cubemaster::CubeMasterClient;
+    use crate::models::UpdateTemplateRequest;
 
     fn sample_request() -> CreateTemplateRequest {
         CreateTemplateRequest {
-            template_id: String::new(),
+            name: Some("my-python-env".to_string()),
             instance_type: Some("cubebox".to_string()),
             image: "python:3.11-slim".to_string(),
             writable_layer_size: Some("1G".to_string()),
@@ -599,5 +828,461 @@ mod tests {
     fn validate_dns_servers_rejects_invalid_ip() {
         let err = validate_dns_servers(Some(&["not-an-ip".to_string()])).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn template_detail_from_cm_response_overrides_display_name() {
+        let resp = crate::cubemaster::TemplateResponse {
+            request_id: String::new(),
+            ret: crate::cubemaster::RetCode {
+                ret_code: 200,
+                ret_msg: "ok".to_string(),
+            },
+            template_id: "tpl-1".to_string(),
+            display_name: "old-name".to_string(),
+            job_id: String::new(),
+            status: "ready".to_string(),
+            instance_type: String::new(),
+            version: String::new(),
+            last_error: String::new(),
+            replicas: Vec::new(),
+            create_request: None,
+        };
+        let detail = template_detail_from_cm_response(&resp, "tpl-1", "new-name");
+        assert_eq!(detail.names, vec!["new-name".to_string()]);
+        assert_eq!(detail.template_id, "tpl-1");
+    }
+
+    #[test]
+    fn needs_resolution_skips_system_ids() {
+        assert!(!TemplateNameCache::needs_resolution("tpl-abc"));
+        assert!(!TemplateNameCache::needs_resolution("snap-abc"));
+        assert!(!TemplateNameCache::needs_resolution("TPL-abc"));
+        assert!(TemplateNameCache::needs_resolution("cubesandbox-template"));
+    }
+
+    #[tokio::test]
+    async fn map_resolve_err_maps_http_connect_failure_to_service_unavailable() {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(50))
+            .build()
+            .expect("client");
+        let err = client
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .expect_err("connect should fail");
+        let mapped = super::map_resolve_err("my-env")(CubeMasterError::Http(err));
+        match mapped {
+            AppError::ServiceUnavailable(msg) => {
+                assert_eq!(msg, "CubeMaster unavailable");
+            }
+            AppError::BadGateway(msg) => {
+                assert_eq!(msg, "CubeMaster request failed");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trim_display_name_strips_whitespace() {
+        assert_eq!(super::trim_display_name(" my-env_1 "), "my-env_1");
+        assert_eq!(super::trim_display_name("  "), "");
+    }
+
+    #[test]
+    fn map_resolve_err_maps_not_found_conflict_and_bad_request() {
+        let not_found = CubeMasterError::Api {
+            ret_code: 130404,
+            ret_msg: "template name not found".to_string(),
+        };
+        assert!(matches!(
+            super::map_resolve_err("my-env")(not_found),
+            AppError::NotFound(_)
+        ));
+
+        let conflict = CubeMasterError::Api {
+            ret_code: 130409,
+            ret_msg: "template name is already in use".to_string(),
+        };
+        assert!(matches!(
+            super::map_resolve_err("my-env")(conflict),
+            AppError::Conflict(_)
+        ));
+
+        let bad_request = CubeMasterError::Api {
+            ret_code: 130400,
+            ret_msg: "template name is invalid".to_string(),
+        };
+        assert!(matches!(
+            super::map_resolve_err("my-env")(bad_request),
+            AppError::BadRequest(_)
+        ));
+    }
+
+    #[test]
+    fn ensure_build_belongs_to_template_rejects_empty_build_template_id() {
+        let err = super::ensure_build_belongs_to_template("", "tpl-1", "build-1").unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn template_names_omits_empty_display_name() {
+        assert_eq!(template_names("my-env"), vec!["my-env"]);
+        assert!(template_names("").is_empty());
+        assert!(template_names("  ").is_empty());
+    }
+
+    #[test]
+    fn ensure_build_belongs_to_template_accepts_matching_ids() {
+        ensure_build_belongs_to_template("tpl-1", "tpl-1", "job-1").expect("matching ids");
+    }
+
+    #[test]
+    fn ensure_build_belongs_to_template_rejects_mismatch() {
+        let err = ensure_build_belongs_to_template("tpl-other", "tpl-1", "job-1").unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_template_by_display_name_uses_fresh_lookup() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            extract::{Query, State},
+            routing::{delete, get},
+            Json, Router,
+        };
+        use serde_json::Value;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            lookups: Arc<Mutex<Vec<(String, bool)>>>,
+            delete_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn lookup_handler(
+            Query(params): Query<HashMap<String, String>>,
+            State(capture): State<Capture>,
+        ) -> Json<Value> {
+            let name = params.get("name").cloned().unwrap_or_default();
+            let fresh = params.get("fresh").is_some_and(|v| v == "true" || v == "1");
+            capture.lookups.lock().unwrap().push((name, fresh));
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "template_id": "tpl-from-name"
+            }))
+        }
+
+        async fn delete_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.delete_body.lock().unwrap() = Some(body);
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/lookup", get(lookup_handler))
+                .route("/cube/template", delete(delete_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let cubemaster = CubeMasterClient::new(cubemaster_url, reqwest::Client::new());
+        let service = TemplateService::new(
+            cubemaster.clone(),
+            "cubebox".to_string(),
+            TemplateNameCache::new(cubemaster),
+        );
+
+        service
+            .delete_template("my-env".to_string(), None, None)
+            .await
+            .expect("delete by display name should succeed");
+
+        let lookups = capture.lookups.lock().unwrap().clone();
+        assert_eq!(lookups.len(), 1);
+        assert_eq!(lookups[0].0, "my-env");
+        assert!(lookups[0].1, "mutating path should use fresh lookup");
+
+        let delete_body = capture
+            .delete_body
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("delete body");
+        assert_eq!(delete_body["template_id"], "tpl-from-name");
+    }
+
+    #[tokio::test]
+    async fn delete_template_by_tpl_id_skips_lookup() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            extract::State,
+            routing::{delete, get},
+            Json, Router,
+        };
+        use serde_json::Value;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            lookup_hits: Arc<Mutex<usize>>,
+            delete_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn lookup_handler(State(capture): State<Capture>) -> Json<Value> {
+            *capture.lookup_hits.lock().unwrap() += 1;
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "template_id": "tpl-should-not-be-used"
+            }))
+        }
+
+        async fn delete_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.delete_body.lock().unwrap() = Some(body);
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/lookup", get(lookup_handler))
+                .route("/cube/template", delete(delete_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let cubemaster = CubeMasterClient::new(cubemaster_url, reqwest::Client::new());
+        let service = TemplateService::new(
+            cubemaster.clone(),
+            "cubebox".to_string(),
+            TemplateNameCache::new(cubemaster),
+        );
+
+        service
+            .delete_template("tpl-direct".to_string(), None, None)
+            .await
+            .expect("delete by tpl id should succeed");
+
+        assert_eq!(*capture.lookup_hits.lock().unwrap(), 0);
+        let delete_body = capture
+            .delete_body
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("delete body");
+        assert_eq!(delete_body["template_id"], "tpl-direct");
+    }
+
+    #[tokio::test]
+    async fn update_template_name_by_display_name_uses_fresh_lookup_and_existing_fetch() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            extract::{Query, State},
+            routing::{get, post},
+            Json, Router,
+        };
+        use serde_json::Value;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            lookups: Arc<Mutex<Vec<(String, bool)>>>,
+            display_name_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn lookup_handler(
+            Query(params): Query<HashMap<String, String>>,
+            State(capture): State<Capture>,
+        ) -> Json<Value> {
+            let name = params.get("name").cloned().unwrap_or_default();
+            let fresh = params.get("fresh").is_some_and(|v| v == "true" || v == "1");
+            capture.lookups.lock().unwrap().push((name, fresh));
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "template_id": "tpl-rename"
+            }))
+        }
+
+        async fn get_template_handler(
+            Query(params): Query<HashMap<String, String>>,
+        ) -> Json<Value> {
+            assert_eq!(
+                params.get("template_id").map(String::as_str),
+                Some("tpl-rename")
+            );
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "template_id": "tpl-rename",
+                "display_name": "old-name",
+                "status": "ready"
+            }))
+        }
+
+        async fn display_name_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.display_name_body.lock().unwrap() = Some(body);
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/lookup", get(lookup_handler))
+                .route("/cube/template", get(get_template_handler))
+                .route("/cube/template/display-name", post(display_name_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let cubemaster = CubeMasterClient::new(cubemaster_url, reqwest::Client::new());
+        let service = TemplateService::new(
+            cubemaster.clone(),
+            "cubebox".to_string(),
+            TemplateNameCache::new(cubemaster),
+        );
+
+        let detail = service
+            .update_template_name(
+                "old-name".to_string(),
+                UpdateTemplateRequest {
+                    name: "new-name".to_string(),
+                },
+            )
+            .await
+            .expect("rename by display name should succeed");
+
+        let lookups = capture.lookups.lock().unwrap().clone();
+        assert_eq!(lookups.len(), 1);
+        assert_eq!(lookups[0].0, "old-name");
+        assert!(lookups[0].1, "rename should use fresh lookup");
+        assert_eq!(detail.template_id, "tpl-rename");
+        assert_eq!(detail.names, vec!["new-name".to_string()]);
+
+        let rename_body = capture
+            .display_name_body
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("display-name body");
+        assert_eq!(rename_body["template_id"], "tpl-rename");
+        assert_eq!(rename_body["display_name"], "new-name");
+    }
+
+    #[tokio::test]
+    async fn resolve_template_ref_read_uses_cached_lookup() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            extract::{Query, State},
+            routing::get,
+            Json, Router,
+        };
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            lookups: Arc<Mutex<Vec<(String, bool)>>>,
+        }
+
+        async fn lookup_handler(
+            Query(params): Query<HashMap<String, String>>,
+            State(capture): State<Capture>,
+        ) -> Json<serde_json::Value> {
+            let name = params.get("name").cloned().unwrap_or_default();
+            let fresh = params.get("fresh").is_some_and(|v| v == "true" || v == "1");
+            capture.lookups.lock().unwrap().push((name, fresh));
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "template_id": "tpl-read"
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/lookup", get(lookup_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let cubemaster = CubeMasterClient::new(cubemaster_url, reqwest::Client::new());
+        let cache = TemplateNameCache::new(cubemaster);
+
+        let first = cache
+            .resolve_template_ref("my-env")
+            .await
+            .expect("first read lookup");
+        let second = cache
+            .resolve_template_ref("my-env")
+            .await
+            .expect("second read lookup");
+
+        assert_eq!(first, "tpl-read");
+        assert_eq!(second, "tpl-read");
+        let lookups = capture.lookups.lock().unwrap().clone();
+        assert_eq!(lookups.len(), 2);
+        assert!(lookups.iter().all(|(_, fresh)| !*fresh));
     }
 }

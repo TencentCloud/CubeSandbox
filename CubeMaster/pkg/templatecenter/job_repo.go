@@ -6,10 +6,13 @@ package templatecenter
 
 import (
 	"context"
+	"strings"
+	"time"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"gorm.io/gorm"
-	"time"
 )
 
 func getTemplateImageJobRecordByID(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
@@ -143,6 +146,16 @@ func updateTemplateImageJob(ctx context.Context, jobID string, values map[string
 		return gorm.ErrRecordNotFound
 	}
 	return nil
+}
+
+func failTemplateImageJob(ctx context.Context, jobID, templateID string, values map[string]any) {
+	if err := updateTemplateImageJob(ctx, jobID, values); err != nil {
+		log.G(ctx).Warnf("update failed template image job: job_id=%s err=%v", jobID, err)
+	}
+	if templateStatus, ok := values["template_status"].(string); ok &&
+		strings.EqualFold(templateStatus, StatusFailed) {
+		ReleaseTemplateDisplayNameAfterBuildFailure(ctx, templateID)
+	}
 }
 
 func updateRootfsArtifact(ctx context.Context, artifactID string, values map[string]any) error {

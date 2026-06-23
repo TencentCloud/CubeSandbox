@@ -32,6 +32,7 @@ use chrono::{DateTime, Utc};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 const TEMPLATE_ID_LABEL_KEY: &str = "cube.master.appsnapshot.template.id";
 
@@ -384,6 +385,86 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
+    /// GET /cube/template/lookup?name=… — map a display name to its templateID.
+    /// This is a name-to-ID lookup, distinct from CubeMaster's internal template
+    /// "resolve" (node/locality binding).
+    pub async fn resolve_template_by_name(&self, name: &str) -> Result<String, CubeMasterError> {
+        self.lookup_template_by_name(name, false).await
+    }
+
+    /// Same as [`resolve_template_by_name`] but bypasses CubeMaster read cache.
+    pub async fn resolve_template_by_name_fresh(
+        &self,
+        name: &str,
+    ) -> Result<String, CubeMasterError> {
+        self.lookup_template_by_name(name, true).await
+    }
+
+    async fn lookup_template_by_name(
+        &self,
+        name: &str,
+        fresh: bool,
+    ) -> Result<String, CubeMasterError> {
+        let url = format!("{}/cube/template/lookup", self.base_url);
+        let mut query = vec![("name", name)];
+        if fresh {
+            query.push(("fresh", "true"));
+        }
+        let resp = self
+            .inner
+            .get(&url)
+            .query(&query)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        let body: TemplateLookupResponse = parse_response(resp).await?;
+        if body.template_id.trim().is_empty() {
+            return Err(CubeMasterError::Api {
+                ret_code: 130404,
+                ret_msg: format!("template name {name} not found"),
+            });
+        }
+        Ok(body.template_id)
+    }
+
+    /// POST /cube/template/display-name — update template display name.
+    pub async fn update_template_display_name(
+        &self,
+        template_id: &str,
+        display_name: &str,
+    ) -> Result<RetEnvelope, CubeMasterError> {
+        let url = format!("{}/cube/template/display-name", self.base_url);
+        let req = UpdateTemplateDisplayNameRequest {
+            request_id: Uuid::new_v4().to_string(),
+            template_id: template_id.to_string(),
+            display_name: display_name.to_string(),
+        };
+        let resp = self
+            .inner
+            .post(&url)
+            .json(&req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/template/from-image?job_id=… — poll a create-from-image job.
+    pub async fn get_template_from_image_job(
+        &self,
+        job_id: &str,
+    ) -> Result<TemplateJobResponse, CubeMasterError> {
+        let url = format!("{}/cube/template/from-image", self.base_url);
+        let resp = self
+            .inner
+            .get(&url)
+            .query(&[("job_id", job_id)])
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
     /// POST /cube/template/redo — rebuild an existing template.
     pub async fn redo_template(
         &self,
@@ -518,6 +599,17 @@ impl CubeMasterError {
             self,
             Self::Api {
                 ret_code: 130409,
+                ..
+            }
+        )
+    }
+
+    /// True when CubeMaster returned 130400 (parameter / validation error).
+    pub fn is_bad_request(&self) -> bool {
+        matches!(
+            self,
+            Self::Api {
+                ret_code: 130400,
                 ..
             }
         )
@@ -1664,6 +1756,8 @@ pub struct TemplateSummaryItem {
     pub image_info: String,
     #[serde(default)]
     pub job_id: String,
+    #[serde(default)]
+    pub display_name: String,
 }
 
 /// Envelope for GET /cube/template (list mode).
@@ -1703,6 +1797,8 @@ pub struct TemplateResponse {
     pub replicas: Vec<serde_json::Value>,
     #[serde(default)]
     pub create_request: Option<serde_json::Value>,
+    #[serde(default)]
+    pub display_name: String,
 }
 
 /// Body for DELETE /cube/template.
@@ -1723,6 +1819,25 @@ pub struct RetEnvelope {
     #[serde(rename = "RequestID", alias = "requestID", default)]
     pub request_id: String,
     pub ret: RetCode,
+}
+
+/// Response for GET /cube/template/lookup. The `ret` envelope is validated
+/// centrally by `parse_response`, so only the resolved id is consumed here.
+#[derive(Debug, Deserialize)]
+pub struct TemplateLookupResponse {
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub display_name: String,
+}
+
+/// Body for POST /cube/template/display-name.
+#[derive(Debug, Serialize)]
+pub struct UpdateTemplateDisplayNameRequest {
+    #[serde(rename = "RequestID")]
+    pub request_id: String,
+    pub template_id: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -1817,6 +1932,9 @@ pub struct CreateTemplateFromImageReq {
     pub template_id: String,
     /// CubeMaster field name for the source image.
     pub source_image_ref: String,
+    /// Human-readable template name (E2B `name`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Writable layer size, e.g. "1G".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub writable_layer_size: Option<String>,

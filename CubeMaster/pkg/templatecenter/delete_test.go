@@ -53,7 +53,7 @@ func TestDeleteTemplateWithTargetsAllowsJobOnlyCleanup(t *testing.T) {
 		}
 		return nil
 	}
-	runMetadataCleanup = func(ctx context.Context, templateID string) error {
+	runMetadataCleanup = func(ctx context.Context, templateID string, _ ...string) error {
 		metadataCalled = true
 		return nil
 	}
@@ -146,7 +146,7 @@ func TestDeleteTemplateWithTargetsAllowsOrphanedJobCleanup(t *testing.T) {
 	runArtifactCleanup = func(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
 		return nil
 	}
-	runMetadataCleanup = func(ctx context.Context, templateID string) error {
+	runMetadataCleanup = func(ctx context.Context, templateID string, _ ...string) error {
 		metadataCalled = true
 		return nil
 	}
@@ -200,7 +200,7 @@ func TestDeleteTemplateWithTargetsAllowsArtifactOnlyCleanupWithoutLocator(t *tes
 		}
 		return nil
 	}
-	runMetadataCleanup = func(ctx context.Context, templateID string) error {
+	runMetadataCleanup = func(ctx context.Context, templateID string, _ ...string) error {
 		metadataCalled = true
 		return nil
 	}
@@ -244,7 +244,7 @@ func TestDeleteTemplateWithTargetsPreservesJobsAfterPartialFailure(t *testing.T)
 	runArtifactCleanup = func(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
 		return nil
 	}
-	runMetadataCleanup = func(ctx context.Context, templateID string) error {
+	runMetadataCleanup = func(ctx context.Context, templateID string, _ ...string) error {
 		metadataCalled = true
 		return nil
 	}
@@ -298,7 +298,7 @@ func TestDeleteTemplateWithTargetsPreservesMetadataAfterArtifactFailure(t *testi
 	runArtifactCleanup = func(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
 		return artifactErr
 	}
-	runMetadataCleanup = func(ctx context.Context, templateID string) error {
+	runMetadataCleanup = func(ctx context.Context, templateID string, _ ...string) error {
 		metadataCalled = true
 		return nil
 	}

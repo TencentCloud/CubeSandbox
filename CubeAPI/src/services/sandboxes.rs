@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use super::validate_allow_out_domains_require_deny_all;
+use super::{templates::TemplateNameCache, validate_allow_out_domains_require_deny_all};
 use crate::{
     constants::{ENVD_VERSION_ANNOTATION, ENVD_VERSION_FALLBACK},
     cubemaster::{
@@ -62,6 +62,7 @@ pub struct SandboxService {
     cubemaster: CubeMasterClient,
     instance_type: String,
     sandbox_domain: String,
+    template_names: TemplateNameCache,
 }
 
 impl SandboxService {
@@ -69,11 +70,13 @@ impl SandboxService {
         cubemaster: CubeMasterClient,
         instance_type: String,
         sandbox_domain: String,
+        template_names: TemplateNameCache,
     ) -> Self {
         Self {
             cubemaster,
             instance_type,
             sandbox_domain,
+            template_names,
         }
     }
 
@@ -148,7 +151,7 @@ impl SandboxService {
 
     pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox> {
         let NewSandbox {
-            template_id,
+            template_id: template_ref,
             timeout,
             lifecycle,
             allow_internet_access,
@@ -161,6 +164,10 @@ impl SandboxService {
         if let Some(env_vars) = env_vars.as_ref() {
             validate_env_vars(env_vars)?;
         }
+        let template_id = self
+            .template_names
+            .resolve_template_ref_fresh(&template_ref)
+            .await?;
         let mut annotations = HashMap::from([
             (
                 "cube.master.appsnapshot.template.id".to_string(),
@@ -222,7 +229,13 @@ impl SandboxService {
             .await
             .map_err(internal_error)?;
 
-        resp.ret.into_result().map_err(internal_error)?;
+        if let Err(err) = resp.ret.into_result() {
+            return Err(if err.is_not_found() {
+                AppError::NotFound(err.to_string())
+            } else {
+                internal_error(err)
+            });
+        }
 
         let envd_version = envd_version_from_annotations(&resp.ext_info);
         Ok(self.sandbox_response(
@@ -911,8 +924,9 @@ mod tests {
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
         SandboxNetworkConfig, SandboxState,
     };
+    use crate::services::templates::TemplateNameCache;
     use axum::{
-        extract::State,
+        extract::{Query, State},
         routing::{delete, get, post},
         Json, Router,
     };
@@ -1389,10 +1403,12 @@ mod tests {
         )
         .await;
 
+        let cubemaster = CubeMasterClient::new(cubemaster_url.clone(), reqwest::Client::new());
         let service = SandboxService::new(
-            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            cubemaster.clone(),
             "cubebox".to_string(),
             "cube.app".to_string(),
+            TemplateNameCache::new(cubemaster),
         );
 
         let env_vars = HashMap::from([(
@@ -1468,10 +1484,12 @@ mod tests {
         )
         .await;
 
+        let cubemaster = CubeMasterClient::new(cubemaster_url.clone(), reqwest::Client::new());
         let service = SandboxService::new(
-            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            cubemaster.clone(),
             "cubebox".to_string(),
             "cube.app".to_string(),
+            TemplateNameCache::new(cubemaster),
         );
 
         let sandbox = service
@@ -1527,10 +1545,12 @@ mod tests {
 
         let cubemaster_url =
             spawn_server(Router::new().route("/cube/sandbox", delete(delete_handler))).await;
+        let cubemaster = CubeMasterClient::new(cubemaster_url, reqwest::Client::new());
         let service = SandboxService::new(
-            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            cubemaster.clone(),
             "cubebox".to_string(),
             "cube.app".to_string(),
+            TemplateNameCache::new(cubemaster),
         );
 
         let err = service
@@ -1590,10 +1610,12 @@ mod tests {
         )
         .await;
 
+        let cubemaster = CubeMasterClient::new(cubemaster_url, reqwest::Client::new());
         let service = SandboxService::new(
-            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            cubemaster.clone(),
             "cubebox".to_string(),
             "cube.app".to_string(),
+            TemplateNameCache::new(cubemaster),
         );
 
         let err = service
@@ -1603,6 +1625,92 @@ mod tests {
 
         assert!(matches!(err, crate::error::AppError::Conflict(_)));
         assert!(err.to_string().contains("resume it before deleting"));
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_by_display_name_uses_fresh_lookup() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            lookups: Arc<Mutex<Vec<(String, bool)>>>,
+            create_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn lookup_handler(
+            Query(params): Query<HashMap<String, String>>,
+            State(capture): State<Capture>,
+        ) -> Json<Value> {
+            let name = params.get("name").cloned().unwrap_or_default();
+            let fresh = params.get("fresh").is_some_and(|v| v == "true" || v == "1");
+            capture.lookups.lock().await.push((name, fresh));
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "template_id": "tpl-by-name"
+            }))
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.create_body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-1",
+                "sandbox_id": "sb-by-name",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/lookup", get(lookup_handler))
+                .route("/cube/sandbox", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let cubemaster = CubeMasterClient::new(cubemaster_url, reqwest::Client::new());
+        let service = SandboxService::new(
+            cubemaster.clone(),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+            TemplateNameCache::new(cubemaster),
+        );
+
+        let sandbox = service
+            .create_sandbox(NewSandbox {
+                template_id: "my-python-env".to_string(),
+                timeout: Some(15),
+                lifecycle: None,
+                secure: None,
+                allow_internet_access: None,
+                network: None,
+                metadata: None,
+                distribution_scope: None,
+                env_vars: None,
+                mcp: None,
+                volume_mounts: None,
+            })
+            .await
+            .expect("create by display name should succeed");
+
+        assert_eq!(sandbox.sandbox_id, "sb-by-name");
+        assert_eq!(sandbox.template_id, "tpl-by-name");
+        let lookups = capture.lookups.lock().await.clone();
+        assert_eq!(lookups.len(), 1);
+        assert_eq!(lookups[0].0, "my-python-env");
+        assert!(lookups[0].1, "sandbox create should use fresh lookup");
     }
 
     #[test]

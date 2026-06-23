@@ -100,6 +100,11 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
 		return nil, err
 	}
+	displayName, err := NormalizeTemplateDisplayName(cloned.DisplayName)
+	if err != nil {
+		return nil, err
+	}
+	cloned.DisplayName = displayName
 	return &cloned, nil
 }
 

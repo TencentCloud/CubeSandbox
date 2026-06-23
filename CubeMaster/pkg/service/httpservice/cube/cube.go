@@ -37,6 +37,8 @@ const (
 	TemplateRedoAction             = "/template/redo"
 	TemplateBuildStatusAction      = "/template/build"
 	TemplateFromImageAction        = "/template/from-image"
+	TemplateLookupAction           = "/template/lookup"
+	TemplateDisplayNameAction      = "/template/display-name"
 	TemplateArtifactDownloadAction = "/template/artifact/download"
 	RootfsArtifactAction           = "/rootfs-artifact"
 	CADownloadActionPrefix         = "/ca/"
@@ -100,6 +102,10 @@ func HttpHandler(w http.ResponseWriter, r *http.Request) {
 		rsp = handleRedoTemplateAction(w, r, rt)
 	case r.URL.Path == actionURI(TemplateFromImageAction):
 		rsp = handleTemplateFromImageAction(w, r, rt)
+	case r.URL.Path == actionURI(TemplateLookupAction):
+		rsp = handleTemplateLookupAction(w, r, rt)
+	case r.URL.Path == actionURI(TemplateDisplayNameAction):
+		rsp = handleTemplateDisplayNameAction(w, r, rt)
 	case r.URL.Path == actionURI(TemplateArtifactDownloadAction):
 		rsp = handleTemplateArtifactDownloadAction(w, r, rt)
 	case strings.HasPrefix(r.URL.Path, actionURI(CADownloadActionPrefix)):

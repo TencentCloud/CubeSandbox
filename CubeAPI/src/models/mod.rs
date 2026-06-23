@@ -613,11 +613,21 @@ pub struct ListTemplatesQuery {
     pub instance_type: Option<String>,
 }
 
+/// Response for GET /templates/lookup (display name → template ID).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TemplateNameLookupResponse {
+    #[serde(rename = "templateID")]
+    pub template_id: String,
+}
+
 /// Summary row returned by GET /templates.
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct TemplateSummary {
     #[serde(rename = "templateID")]
     pub template_id: String,
+    /// Human-readable template name (0 or 1 entry; empty when unset).
+    #[serde(default)]
+    pub names: Vec<String>,
     #[serde(rename = "instanceType", skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -634,11 +644,14 @@ pub struct TemplateSummary {
     pub job_id: Option<String>,
 }
 
-/// Detailed template response (GET /templates/:id).
+/// Detailed template response (GET /templates/{templateID}).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TemplateDetail {
     #[serde(rename = "templateID")]
     pub template_id: String,
+    /// Human-readable template name (0 or 1 entry; empty when unset).
+    #[serde(default)]
+    pub names: Vec<String>,
     #[serde(rename = "instanceType", skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -666,11 +679,14 @@ pub struct TemplateDetail {
 /// Body for POST /templates (create from image).
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateTemplateRequest {
-    /// Deprecated and ignored. Template IDs are always generated server-side
-    /// with the `tpl-` prefix; clients must use the returned `templateID`.
-    #[serde(rename = "templateID", default)]
-    #[allow(dead_code)]
-    pub template_id: String,
+    /// Optional human-readable template name (ASCII letters, digits, hyphen,
+    /// underscore; must start with a letter or digit; max 256 characters; must not
+    /// use `tpl-` or `snap-` prefix; cluster-wide case-insensitive unique among templates
+    /// that currently hold the name (assigned when the definition is created;
+    /// released after failed builds). Sandboxes may reference this name only after
+    /// the template build succeeds (template ready on a node).
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(rename = "instanceType", default)]
     pub instance_type: Option<String>,
     /// Container image reference, e.g. `registry.example.com/code:latest`.
@@ -733,6 +749,14 @@ pub struct CreateTemplateRequest {
     pub with_cube_ca: Option<bool>,
 }
 
+/// Body for PATCH /templates/:templateID (update display name).
+/// Syntax and uniqueness are validated by CubeMaster (authoritative source).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateTemplateRequest {
+    /// Required display name. CubeMaster enforces charset, length, prefix, and uniqueness.
+    pub name: String,
+}
+
 /// Body for POST /templates/:id (rebuild).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RebuildTemplateRequest {
@@ -745,8 +769,13 @@ pub struct RebuildTemplateRequest {
 pub struct TemplateBuildJob {
     #[serde(rename = "jobID")]
     pub job_id: String,
+    #[serde(rename = "buildID")]
+    pub build_id: String,
     #[serde(rename = "templateID")]
     pub template_id: String,
+    /// Human-readable template name (set on create when `name` is provided; empty on rebuild).
+    #[serde(default)]
+    pub names: Vec<String>,
     pub status: String,
     pub phase: String,
     pub progress: i32,

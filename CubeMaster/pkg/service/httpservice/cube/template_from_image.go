@@ -104,10 +104,17 @@ func createTemplateFromImage(w http.ResponseWriter, r *http.Request, rt *CubeLog
 	}))
 	job, err := templatecenter.SubmitTemplateFromImage(ctx, req, requestBaseURL(r))
 	if err != nil {
+		code := int(errorcode.ErrorCode_MasterParamsError)
+		switch {
+		case errors.Is(err, templatecenter.ErrTemplateNameInUse):
+			code = int(errorcode.ErrorCode_Conflict)
+		case errors.Is(err, templatecenter.ErrTemplateNameInvalid):
+			code = int(errorcode.ErrorCode_MasterParamsError)
+		}
 		return &types.CreateTemplateFromImageRes{
 			RequestID: req.RequestID,
 			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetCode: code,
 				RetMsg:  err.Error(),
 			},
 		}

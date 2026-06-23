@@ -142,7 +142,7 @@ export interface paths {
         };
         get: operations["list_templates"];
         put?: never;
-        post?: never;
+        post: operations["create_template"];
         delete?: never;
         options?: never;
         head?: never;
@@ -181,6 +181,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/templates/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["lookup_template_name"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/templates/{templateID}": {
         parameters: {
             query?: never;
@@ -194,7 +210,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        patch: operations["update_template"];
         trace?: never;
     };
     "/v2/sandboxes": {
@@ -293,6 +309,65 @@ export interface components {
             buildTime?: string;
             commit?: string;
             version: string;
+        };
+        /** @description Body for POST /templates (create from image). */
+        CreateTemplateRequest: {
+            /** @description Allow internet (public) access. */
+            allowInternetAccess?: boolean | null;
+            /** @description Allowed outbound CIDRs for CubeVS egress policy. */
+            allowOut?: string[] | null;
+            /** @description Override container CMD args. */
+            args?: string[] | null;
+            /** @description Override container ENTRYPOINT. */
+            command?: string[] | null;
+            /**
+             * Format: int32
+             * @description CPU in millicores, e.g. 2000 means 2000m.
+             */
+            cpu?: number | null;
+            /** @description Denied outbound CIDRs for CubeVS egress policy. */
+            denyOut?: string[] | null;
+            /** @description Container DNS nameservers. */
+            dns?: string[] | null;
+            /** @description Environment variables as "KEY=VALUE" strings. */
+            env?: string[] | null;
+            /** @description Ports the container listens on. */
+            exposedPorts?: number[] | null;
+            /** @description Container image reference, e.g. `registry.example.com/code:latest`. */
+            image: string;
+            instanceType?: string | null;
+            /**
+             * Format: int32
+             * @description Memory in MiB, e.g. 2000.
+             */
+            memory?: number | null;
+            /**
+             * @description Optional human-readable template name (ASCII letters, digits, hyphen,
+             *     underscore; must start with a letter or digit; max 256 characters; must not
+             *     use tpl- or snap- prefix; cluster-wide case-insensitive unique among templates
+             *     that currently hold the name (assigned when the definition is created;
+             *     released after failed builds). Duplicate names fail during the build when
+             *     the definition row is written. Sandboxes may reference this name only after
+             *     the template build succeeds (template ready on a node).
+             */
+            name?: string | null;
+            /** @description Network mode, e.g. "tap". */
+            networkType?: string | null;
+            /** @description Limit template distribution to these node IDs or host IPs. */
+            nodes?: string[] | null;
+            /** @description HTTP probe path, e.g. "/health". Defaults to "/health" when `probePort` is set. */
+            probePath?: string | null;
+            /**
+             * Format: int32
+             * @description HTTP probe port.
+             */
+            probePort?: number | null;
+            /** @description Registry password for private source images. */
+            registryPassword?: string | null;
+            /** @description Registry username for private source images. */
+            registryUsername?: string | null;
+            /** @description Writable layer size for the rootfs, e.g. "1G". */
+            writableLayerSize?: string | null;
         };
         HashMap: {
             [key: string]: string;
@@ -460,6 +535,19 @@ export interface components {
             name: string;
             path: string;
         };
+        /** @description Job envelope returned by create / rebuild. */
+        TemplateBuildJob: {
+            buildID: string;
+            errorMessage?: string;
+            jobID: string;
+            /** @description Human-readable template name (set on create when `name` is provided; empty on rebuild). */
+            names?: string[];
+            phase: string;
+            /** Format: int32 */
+            progress: number;
+            status: string;
+            templateID: string;
+        };
         TemplateCompatAdoptResponseView: {
             /** Format: int32 */
             updated: number;
@@ -486,7 +574,11 @@ export interface components {
             /** Format: int32 */
             unknownReplicas: number;
         };
-        /** @description Detailed template response (GET /templates/:id). */
+        /** @description Display name lookup result (GET /templates/lookup). */
+        TemplateNameLookupResponse: {
+            templateID: string;
+        };
+        /** @description Detailed template response (GET /templates/{templateID}). */
         TemplateDetail: {
             /** @description Whether public internet access is allowed for sandboxes from this template. */
             allowInternetAccess?: boolean | null;
@@ -495,6 +587,8 @@ export interface components {
             jobID?: string | null;
             instanceType?: string | null;
             lastError?: string | null;
+            /** @description Human-readable template name (0 or 1 entry; empty when unset). */
+            names?: string[];
             /** @description Network type used when the template was created, e.g. "tap". */
             networkType?: string | null;
             replicas: unknown[];
@@ -519,11 +613,22 @@ export interface components {
             imageInfo?: string | null;
             instanceType?: string | null;
             lastError?: string | null;
+            /** @description Human-readable template name (0 or 1 entry; empty when unset). */
+            names?: string[];
             status: string;
             templateID: string;
             version?: string | null;
             /** @description Latest create/rebuild job id for the template. */
             jobID?: string | null;
+        };
+        /** @description Body for PATCH /templates/:templateID (update display name). */
+        UpdateTemplateRequest: {
+            /**
+             * @description Required display name (ASCII letters, digits, hyphen, underscore;
+             *     must start with a letter or digit; max 256 characters; must not use
+             *     tpl- or snap- prefix; case-insensitive unique).
+             */
+            name: string;
         };
         /** @description Full node x component version matrix. */
         VersionMatrixView: {
@@ -932,6 +1037,57 @@ export interface operations {
             };
         };
     };
+    create_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description Template build accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateBuildJob"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Name already in use */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     template_compat: {
         parameters: {
             query?: never;
@@ -966,7 +1122,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Template identifier */
+                /** @description Template identifier (tpl-*) or human-readable display name */
                 templateID: string;
             };
             cookie?: never;
@@ -982,7 +1138,66 @@ export interface operations {
                     "application/json": components["schemas"]["TemplateCompatAdoptResponseView"];
                 };
             };
+            /** @description Invalid or ambiguous template name */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
             /** @description Template not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    lookup_template_name: {
+        parameters: {
+            query: {
+                /** @description Human-readable template display name */
+                name: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Name resolves to a template */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateNameLookupResponse"];
+                };
+            };
+            /** @description Invalid or ambiguous template name */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Template name not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1007,7 +1222,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Template identifier */
+                /** @description Template identifier (tpl-*) or human-readable display name */
                 templateID: string;
             };
             cookie?: never;
@@ -1023,8 +1238,80 @@ export interface operations {
                     "application/json": components["schemas"]["TemplateDetail"];
                 };
             };
+            /** @description Invalid or ambiguous template name */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
             /** @description Template not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    update_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier (tpl-*) or human-readable display name */
+                templateID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated template display name */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateDetail"];
+                };
+            };
+            /** @description Invalid name */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Template not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Name already in use */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

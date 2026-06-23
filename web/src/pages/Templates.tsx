@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight } from 'lucide-react';
-import { templateApi, type TemplateCompatMatrix, type TemplateCompatRow } from '@/api/client';
+import {
+  templateApi,
+  type TemplateCompatMatrix,
+  type TemplateCompatRow,
+  type TemplateDisplayNameCheck,
+  type TemplateSummary,
+} from '@/api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -22,6 +28,7 @@ interface CreateModalProps {
 }
 
 interface CreateFormState {
+  name: string;
   image: string;
   instanceType: string;
   writableLayerSize: string;
@@ -46,6 +53,7 @@ interface CreateFormState {
 }
 
 const INITIAL_FORM: CreateFormState = {
+  name: '',
   image: '',
   instanceType: '',
   writableLayerSize: '1G',
@@ -114,6 +122,7 @@ function buildCreateBody(state: CreateFormState): Record<string, unknown> {
     if (list.length > 0) body[k] = list;
   };
 
+  setStr('name', state.name);
   setStr('instanceType', state.instanceType);
   setStr('writableLayerSize', state.writableLayerSize);
   const ports = parsePorts(state.exposedPorts);
@@ -144,6 +153,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
   const qc = useQueryClient();
   const [form, setForm] = useState<CreateFormState>(INITIAL_FORM);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [nameCheck, setNameCheck] = useState<'idle' | 'checking' | TemplateDisplayNameCheck>('idle');
 
   const portsValidation = useMemo(() => parsePorts(form.exposedPorts), [form.exposedPorts]);
   const portsInvalid = !portsValidation.ok;
@@ -173,6 +183,26 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
     });
   };
 
+  useEffect(() => {
+    const trimmed = form.name.trim();
+    if (!trimmed) {
+      setNameCheck('idle');
+      return;
+    }
+    setNameCheck('checking');
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      const known = qc.getQueryData<TemplateSummary[]>(['templates']);
+      void templateApi.checkDisplayName(trimmed, known).then((result) => {
+        if (!cancelled) setNameCheck(result);
+      });
+    }, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [form.name, qc]);
+
   const mutation = useMutation({
     mutationFn: () => templateApi.create(buildCreateBody(form) as Parameters<typeof templateApi.create>[0]),
     onSuccess: () => {
@@ -191,6 +221,31 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
           </button>
         </CardHeader>
         <CardContent className="space-y-5 text-base [&_label]:text-sm [&_label]:font-medium [&_p]:text-sm [&_input[type='text']]:h-10 [&_input[type='text']]:text-base [&_input[type='text']]:px-3.5 [&_input[type='number']]:h-10 [&_input[type='number']]:text-base [&_input[type='password']]:h-10 [&_input[type='password']]:text-base [&_textarea]:text-base [&_textarea]:min-h-[80px] [&_textarea]:p-3">
+          {/* name */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">
+              {t('create.name')}
+            </label>
+            <Input
+              placeholder={t('create.namePlaceholder')}
+              value={form.name}
+              onChange={(e) => update('name', e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">{t('create.nameHint')}</p>
+            {nameCheck === 'checking' && (
+              <p className="text-xs text-muted-foreground">{t('create.nameChecking')}</p>
+            )}
+            {nameCheck === 'taken' && (
+              <p className="text-xs text-destructive">{t('create.nameTaken')}</p>
+            )}
+            {nameCheck === 'invalid' && (
+              <p className="text-xs text-destructive">{t('create.nameInvalid')}</p>
+            )}
+            {nameCheck === 'unknown' && (
+              <p className="text-xs text-muted-foreground">{t('create.nameUnknown')}</p>
+            )}
+          </div>
+
           {/* image */}
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-muted-foreground">
@@ -639,7 +694,9 @@ export default function TemplatesPage() {
       )}
 
       {tab === 'list' && <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {data?.map((tpl) => (
+        {data?.map((tpl) => {
+          const displayName = tpl.names?.[0]?.trim();
+          return (
           <div key={tpl.templateID} className="relative group">
             <Link to={`/templates/${tpl.templateID}`} className="block">
               <Card className="panel-hover h-full">
@@ -648,9 +705,13 @@ export default function TemplatesPage() {
                     <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-cube-accent/20 text-primary ring-1 ring-primary/20">
                       <Package size={18} />
                     </span>
-                    <div>
-                      <CardTitle className="text-base">{tpl.templateID}</CardTitle>
-                      <CardDescription className="font-mono text-xs">{tpl.templateID}</CardDescription>
+                    <div className="min-w-0">
+                      <CardTitle className="text-base truncate">
+                        {displayName || tpl.templateID}
+                      </CardTitle>
+                      <CardDescription className="font-mono text-xs truncate">
+                        {displayName ? tpl.templateID : null}
+                      </CardDescription>
                     </div>
                   </div>
                   {compatByTemplate.get(tpl.templateID)?.overall === 'STALE' ? (
@@ -701,7 +762,7 @@ export default function TemplatesPage() {
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           </div>
-        ))}
+        );})}
       </div>}
 
       {showCreate && <CreateTemplateModal onClose={() => setShowCreate(false)} />}

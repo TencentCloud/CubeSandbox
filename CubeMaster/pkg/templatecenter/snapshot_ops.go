@@ -1093,10 +1093,7 @@ func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, sto
 		model.StorageBackend = StorageBackendCow
 	}
 	if err := tx.Table(constants.TemplateDefinitionTableName).Create(model).Error; err != nil {
-		if strings.Contains(err.Error(), "1062") || strings.Contains(err.Error(), "Duplicate entry") {
-			return ErrDuplicateTemplate
-		}
-		return err
+		return mapDefinitionCreateDuplicateError(ctx, err, opts.DisplayName)
 	}
 	return nil
 }

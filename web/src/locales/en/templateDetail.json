@@ -15,6 +15,7 @@
     "dangerDesc": "This action cannot be undone. All replicas of this template will also be deleted."
   },
   "fields": {
+    "name": "Name",
     "templateID": "Template ID",
     "status": "Status",
     "instanceType": "Instance Type",
@@ -59,6 +60,14 @@
     "confirmDesc": "This action cannot be undone. All replicas of this template will also be deleted. Continue?",
     "cancel": "Cancel",
     "deleting": "Deleting…"
+  },
+  "rename": {
+    "button": "Rename",
+    "save": "Save",
+    "cancel": "Cancel",
+    "saving": "Saving…",
+    "placeholder": "Enter template name",
+    "error": "Rename failed. Please try again."
   },
   "empty": {
     "replicas": "No replica info available.",

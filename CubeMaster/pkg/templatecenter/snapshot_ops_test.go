@@ -629,7 +629,7 @@ func TestRunSnapshotDeleteJobCleansTemplateJobs(t *testing.T) {
 	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
 		return nil
 	}
-	runMetadataCleanup = func(ctx context.Context, templateID string) error {
+	runMetadataCleanup = func(ctx context.Context, templateID string, _ ...string) error {
 		return nil
 	}
 	runTemplateJobCleanup = func(ctx context.Context, templateID string) error {

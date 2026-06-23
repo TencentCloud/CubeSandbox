@@ -341,7 +341,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return
 	}
-	if _, err := ensureTemplateDefinition(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations)); err != nil {
+	if _, err := ensureTemplateDefinition(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), sourceReq.DisplayName); err != nil {
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return
 	}

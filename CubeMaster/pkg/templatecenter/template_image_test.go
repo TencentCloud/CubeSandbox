@@ -100,6 +100,18 @@ func TestNormalizeTemplateImageRequestAllowsEmptyExposedPortsWhenEnabled(t *test
 	}
 }
 
+func TestNormalizeTemplateImageRequestRejectsInvalidDisplayName(t *testing.T) {
+	_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		DisplayName:       "<script>",
+	})
+	if !errors.Is(err, ErrTemplateNameInvalid) {
+		t.Fatalf("expected ErrTemplateNameInvalid, got %v", err)
+	}
+}
+
 func TestNormalizeTemplateImageRequestRejectsDomainAllowOutWithoutDenyAll(t *testing.T) {
 	_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
@@ -734,7 +746,7 @@ func TestBuildCommitTemplateSpecFingerprintIgnoresRequestID(t *testing.T) {
 
 func TestTemplateInfoFromJobFallsBackToLatestAttemptStatus(t *testing.T) {
 	createdAt := time.Date(2026, time.April, 2, 8, 10, 30, 0, time.FixedZone("UTC+8", 8*3600))
-	info := templateInfoFromJob(&models.TemplateImageJob{
+	info := templateInfoFromJob(context.Background(), &models.TemplateImageJob{
 		TemplateID:        "tpl-a",
 		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
 		Status:            JobStatusRunning,
@@ -849,7 +861,7 @@ func TestFormatUTCRFC3339(t *testing.T) {
 }
 
 func TestTemplateInfoFromJobIncludesLatestJobID(t *testing.T) {
-	info := templateInfoFromJob(&models.TemplateImageJob{
+	info := templateInfoFromJob(context.Background(), &models.TemplateImageJob{
 		TemplateID: "tpl-a",
 		JobID:      "job-build-1",
 		Status:     JobStatusRunning,
@@ -858,7 +870,7 @@ func TestTemplateInfoFromJobIncludesLatestJobID(t *testing.T) {
 		t.Fatalf("expected running job id, got %q", info.JobID)
 	}
 
-	done := templateInfoFromJob(&models.TemplateImageJob{
+	done := templateInfoFromJob(context.Background(), &models.TemplateImageJob{
 		TemplateID: "tpl-b",
 		JobID:      "job-done-1",
 		Status:     JobStatusReady,
@@ -867,7 +879,7 @@ func TestTemplateInfoFromJobIncludesLatestJobID(t *testing.T) {
 		t.Fatalf("expected terminal job id, got %q", done.JobID)
 	}
 
-	failed := templateInfoFromJob(&models.TemplateImageJob{
+	failed := templateInfoFromJob(context.Background(), &models.TemplateImageJob{
 		TemplateID: "tpl-c",
 		JobID:      "job-failed-1",
 		Status:     JobStatusFailed,
@@ -878,7 +890,7 @@ func TestTemplateInfoFromJobIncludesLatestJobID(t *testing.T) {
 }
 
 func TestTemplateInfoFromJobPrefersTemplateStatus(t *testing.T) {
-	info := templateInfoFromJob(&models.TemplateImageJob{
+	info := templateInfoFromJob(context.Background(), &models.TemplateImageJob{
 		TemplateID:     "tpl-a",
 		Status:         JobStatusRunning,
 		TemplateStatus: StatusReady,
@@ -1371,7 +1383,7 @@ func TestRunRedoTemplateImageJobRegeneratesRequestForRedoTemplateID(t *testing.T
 		}
 		return nil
 	})
-	patches.ApplyFunc(ensureTemplateDefinition, func(ctx context.Context, templateID string, storedReq *types.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
+	patches.ApplyFunc(ensureTemplateDefinition, func(ctx context.Context, templateID string, storedReq *types.CreateCubeSandboxReq, instanceType, version, displayName string) (bool, error) {
 		if templateID != redoTemplateID {
 			t.Fatalf("definition templateID = %q, want %q", templateID, redoTemplateID)
 		}

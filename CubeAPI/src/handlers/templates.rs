@@ -13,13 +13,15 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
-    error::{AppError, AppResult},
+    error::AppResult,
     models::{
         ApiError, CreateTemplateRequest, ListTemplatesQuery, RebuildTemplateRequest,
-        TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateDetail, TemplateSummary,
+        TemplateBuildJob, TemplateCompatAdoptResponseView, TemplateCompatMatrixView,
+        TemplateDetail, TemplateNameLookupResponse, TemplateSummary, UpdateTemplateRequest,
     },
     state::AppState,
 };
+use validator::Validate;
 
 // ─── GET /templates ───────────────────────────────────────────────────────────
 
@@ -41,16 +43,52 @@ pub async fn list_templates(
     Ok((StatusCode::OK, Json(items)))
 }
 
+// ─── GET /templates/lookup ──────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct TemplateNameLookupQuery {
+    pub name: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/templates/lookup",
+    params(
+        ("name" = String, Query, description = "Human-readable template display name")
+    ),
+    responses(
+        (status = 200, description = "Name resolves to a template", body = TemplateNameLookupResponse),
+        (status = 400, description = "Invalid or ambiguous template name", body = ApiError),
+        (status = 404, description = "Template name not found", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn lookup_template_name(
+    State(state): State<AppState>,
+    Query(query): Query<TemplateNameLookupQuery>,
+) -> AppResult<impl IntoResponse> {
+    let template_id = state
+        .services
+        .templates
+        .lookup_template_name(&query.name)
+        .await?;
+    Ok((
+        StatusCode::OK,
+        Json(TemplateNameLookupResponse { template_id }),
+    ))
+}
+
 // ─── GET /templates/:templateID ───────────────────────────────────────────────
 
 #[utoipa::path(
     get,
     path = "/templates/{templateID}",
     params(
-        ("templateID" = String, Path, description = "Template identifier")
+        ("templateID" = String, Path, description = "Template identifier (tpl-*) or human-readable display name")
     ),
     responses(
         (status = 200, description = "Template detail", body = TemplateDetail),
+        (status = 400, description = "Invalid or ambiguous template name", body = ApiError),
         (status = 404, description = "Template not found", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
@@ -84,10 +122,11 @@ pub async fn template_compat(State(state): State<AppState>) -> AppResult<impl In
     post,
     path = "/templates/compat/{templateID}/adopt-baseline",
     params(
-        ("templateID" = String, Path, description = "Template identifier")
+        ("templateID" = String, Path, description = "Template identifier (tpl-*) or human-readable display name")
     ),
     responses(
         (status = 200, description = "Adopted UNKNOWN replicas to current baseline", body = TemplateCompatAdoptResponseView),
+        (status = 400, description = "Invalid or ambiguous template name", body = ApiError),
         (status = 404, description = "Template not found", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
@@ -109,6 +148,17 @@ pub async fn adopt_template_compat_baseline(
 
 // ─── POST /templates ──────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/templates",
+    request_body = CreateTemplateRequest,
+    responses(
+        (status = 202, description = "Template build accepted", body = TemplateBuildJob),
+        (status = 400, description = "Invalid request", body = ApiError),
+        (status = 409, description = "Name already in use", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn create_template(
     State(state): State<AppState>,
     Json(body): Json<CreateTemplateRequest>,
@@ -134,17 +184,32 @@ pub async fn rebuild_template(
 
 // ─── PATCH /templates/:templateID ─────────────────────────────────────────────
 
+#[utoipa::path(
+    patch,
+    path = "/templates/{templateID}",
+    params(
+        ("templateID" = String, Path, description = "Template identifier (tpl-*) or human-readable display name")
+    ),
+    request_body = UpdateTemplateRequest,
+    responses(
+        (status = 200, description = "Updated template display name", body = TemplateDetail),
+        (status = 400, description = "Invalid name", body = ApiError),
+        (status = 404, description = "Template not found", body = ApiError),
+        (status = 409, description = "Name already in use", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
 pub async fn update_template(
-    State(_): State<AppState>,
-    Path(_template_id): Path<String>,
-    _body: Json<serde_json::Value>,
+    State(state): State<AppState>,
+    Path(template_id): Path<String>,
+    Json(body): Json<UpdateTemplateRequest>,
 ) -> AppResult<impl IntoResponse> {
-    // CubeMaster exposes no dedicated PATCH; clients should use POST
-    // /templates/:id (rebuild) or DELETE + re-create.
-    Err::<(), _>(AppError::NotImplemented(
-        "template metadata update is not supported; use POST /templates/{id} to rebuild"
-            .to_string(),
-    ))
+    let detail = state
+        .services
+        .templates
+        .update_template_name(template_id, body)
+        .await?;
+    Ok((StatusCode::OK, Json(detail)))
 }
 
 // ─── DELETE /templates/:templateID ────────────────────────────────────────────
@@ -168,7 +233,11 @@ pub async fn delete_template(
     // branch additionally exposes the operation id via a response header so
     // audit trails / debugging can still correlate the deletion with its
     // CubeMaster job, but no body is returned.
-    if state.services.snapshots.has_snapshot(&template_id).await? {
+    // Snapshot IDs use the snap- prefix; template display names must not, so
+    // only treat snap-* paths as snapshot deletion when the snapshot exists.
+    if template_id.trim().to_ascii_lowercase().starts_with("snap-")
+        && state.services.snapshots.has_snapshot(&template_id).await?
+    {
         let resp = state.services.snapshots.delete(&template_id).await?;
         let mut headers = HeaderMap::new();
         if let Ok(value) = HeaderValue::from_str(&resp.operation_id) {
@@ -272,13 +341,13 @@ fn default_log_limit() -> i32 {
 
 pub async fn get_template_build_logs(
     State(state): State<AppState>,
-    Path((_template_id, build_id)): Path<(String, String)>,
+    Path((template_id, build_id)): Path<(String, String)>,
     Query(_params): Query<BuildLogsQuery>,
 ) -> AppResult<impl IntoResponse> {
     let logs = state
         .services
         .templates
-        .get_template_build_logs(&build_id)
+        .get_template_build_logs(&template_id, &build_id)
         .await?;
     Ok((StatusCode::OK, Json(logs)))
 }

@@ -22,6 +22,12 @@ pub enum AppError {
     #[allow(dead_code)]
     BadRequest(String),
 
+    #[error("bad gateway: {0}")]
+    BadGateway(String),
+
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
 
@@ -41,6 +47,10 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, 404, msg.clone()),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, 401, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, 400, msg.clone()),
+            AppError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, 502, msg.clone()),
+            AppError::ServiceUnavailable(msg) => {
+                (StatusCode::SERVICE_UNAVAILABLE, 503, msg.clone())
+            }
             AppError::Internal(e) => (StatusCode::INTERNAL_SERVER_ERROR, 500, e.to_string()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, 409, msg.clone()),
             AppError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, 429, msg.clone()),

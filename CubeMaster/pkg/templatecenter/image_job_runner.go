@@ -154,7 +154,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	var info *TemplateInfo
 	storedReq, err := normalizeStoredTemplateRequest(generatedReq)
 	if err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+		failTemplateImageJob(ctx, jobID, req.TemplateID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseCreatingTemplate,
 			"progress":        100,
@@ -163,8 +163,8 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		})
 		return
 	}
-	if _, err := ensureTemplateDefinition(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations)); err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+	if _, err := ensureTemplateDefinition(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), req.DisplayName); err != nil {
+		failTemplateImageJob(ctx, jobID, req.TemplateID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseCreatingTemplate,
 			"progress":        100,
@@ -188,7 +188,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 				logger.Errorf("cleanup fresh rootfs artifact after create template error fail: %v", cleanupErr)
 			}
 		}
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+		failTemplateImageJob(ctx, jobID, req.TemplateID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseCreatingTemplate,
 			"progress":        100,

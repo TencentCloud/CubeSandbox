@@ -90,18 +90,24 @@ pub struct AppServices {
 
 impl AppServices {
     pub fn new(config: &ServerConfig, cubemaster: CubeMasterClient) -> Self {
+        let template_names = templates::TemplateNameCache::new(cubemaster.clone());
         Self {
             cluster: cluster::ClusterService::new(cubemaster.clone()),
             sandboxes: sandboxes::SandboxService::new(
                 cubemaster.clone(),
                 config.instance_type.clone(),
                 config.sandbox_domain.clone(),
+                template_names.clone(),
             ),
             snapshots: snapshots::SnapshotService::new(
                 cubemaster.clone(),
                 config.instance_type.clone(),
             ),
-            templates: templates::TemplateService::new(cubemaster, config.instance_type.clone()),
+            templates: templates::TemplateService::new(
+                cubemaster,
+                config.instance_type.clone(),
+                template_names,
+            ),
         }
     }
 }
