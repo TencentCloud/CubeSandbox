@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Package build for cube-webui.
+#
+# Unlike webui/Dockerfile (a multi-stage build that compiles web/ from the
+# repository root), this Dockerfile serves the PREBUILT dashboard that ships in
+# the one-click package under webui/dist/. The build context is the package's
+# webui/ directory, so it builds straight from an extracted release bundle:
+#
+#   docker build -f webui/Dockerfile.package -t cube-webui:TAG webui/
+#
+# See terraform/tencentcloud/build_images.sh.
+FROM cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+
+RUN sed -i 's#https\?://dl-cdn.alpinelinux.org#http://mirrors.tencent.com#g' /etc/apk/repositories \
+    && apk add --no-cache tzdata wget \
+    && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone
+
+# Default upstreams baked into the image's nginx.conf. In the TKE deployment
+# these are overridden by the cube-webui-nginx-conf ConfigMap mount (see
+# terraform/tencentcloud/tke-addons.tf); for standalone `docker run` use
+# --build-arg WEB_UI_UPSTREAM=... / --build-arg SANDBOX_PROXY_UPSTREAM=... or
+# mount a custom nginx.conf. Both placeholders MUST be substituted, otherwise
+# nginx rejects the leftover literal with "invalid URL prefix".
+#   WEB_UI_UPSTREAM        → cube-api   (the /cubeapi/ backend)
+#   SANDBOX_PROXY_UPSTREAM → cube-proxy (the /sandbox/ backend, port 80)
+ARG WEB_UI_UPSTREAM=http://host.docker.internal:3000
+ARG SANDBOX_PROXY_UPSTREAM=http://host.docker.internal:80
+
+COPY dist /usr/share/nginx/html
+COPY nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
+
+# Escape sed-significant characters (& # \) so an upstream URL passed via
+# --build-arg cannot corrupt the sed substitution. Both placeholders MUST be
+# substituted, otherwise OpenResty refuses to start with "invalid URL prefix";
+# the grep guard fails the build loudly if any placeholder is left behind.
+RUN upstream_escaped=$(printf '%s' "${WEB_UI_UPSTREAM}" | sed -e 's/[&#\\]/\\&/g') \
+    && sandbox_upstream_escaped=$(printf '%s' "${SANDBOX_PROXY_UPSTREAM}" | sed -e 's/[&#\\]/\\&/g') \
+    && sed -i "s#__WEB_UI_UPSTREAM__#${upstream_escaped}#g" /usr/local/openresty/nginx/conf/nginx.conf \
+    && sed -i "s#__SANDBOX_PROXY_UPSTREAM__#${sandbox_upstream_escaped}#g" /usr/local/openresty/nginx/conf/nginx.conf \
+    && if grep -Eq '__[A-Z_]+__' /usr/local/openresty/nginx/conf/nginx.conf; then \
+           echo "FATAL: unsubstituted placeholder remains in nginx.conf" >&2; exit 1; \
+       fi
+
+EXPOSE 80
+
+STOPSIGNAL SIGQUIT
+
+HEALTHCHECK --interval=10s --timeout=3s --retries=6 \
+    CMD wget -q -O /dev/null http://127.0.0.1/
+
+ENTRYPOINT ["/usr/local/openresty/bin/openresty", "-g", "daemon off;"]
