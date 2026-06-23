@@ -18,7 +18,6 @@ This directory is used to build and deliver the single-machine one-click release
 - `env.example`: Shared environment variable template for both the build machine and the target machine.
 - `lib/common.sh`: Common shell utility functions.
 - `scripts/one-click/`: Validation and maintenance helpers used by the systemd-managed deployment after installation.
-- `sql/`: MySQL initialization schema and seed data.
 
 ## Build Inputs
 
@@ -174,7 +173,7 @@ Before installation, you can explicitly set the current node's internal IP in `.
 # CUBE_SANDBOX_NODE_IP=10.0.0.10
 ```
 
-If `CUBE_SANDBOX_NODE_IP` is explicitly set, the installation script will use that value directly; otherwise, the auto-detected node IP is written to MySQL's `t_cube_host_info.ip` and `t_cube_sub_host_info.host_ip`, and used to render `cube proxy` / DNS addresses.
+If `CUBE_SANDBOX_NODE_IP` is explicitly set, the installation script will use that value directly; otherwise, the auto-detected node IP is persisted in the runtime environment and used to render `cube proxy` / DNS addresses.
 
 ### Digital Assistant Environment Variables
 
@@ -268,9 +267,7 @@ When `CUBE_EXTERNAL_MYSQL_HOST` (and/or `CUBE_EXTERNAL_REDIS_HOST`) is set, `ins
 - makes `quickcheck.sh` and `up-support.sh` skip lifecycle management of the now-external dependency. (`down-support.sh` has no external-dep awareness and still issues a `docker compose down`, but this is a harmless no-op because the local containers were never started for the external dependency.)
 
 The external MySQL must already grant the configured user access to the target
-database; CubeMaster runs its own schema migrations on first start, and the
-single-node seed rows are applied through a host-side `mysql` client (install
-the MySQL client package on the control node when seeding an external DB).
+database. CubeMaster runs its own embedded schema migrations on first start.
 
 `cube proxy` and its DNS resolution are mandatory capabilities in one-click. The following two values in `.env` must remain `1`:
 

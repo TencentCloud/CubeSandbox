@@ -534,8 +534,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/scripts/one-click" \
   "${PACKAGE_ROOT}/scripts/systemd" \
   "${PACKAGE_ROOT}/scripts/cube-egress" \
-  "${PACKAGE_ROOT}/cube-egress" \
-  "${PACKAGE_ROOT}/sql"
+  "${PACKAGE_ROOT}/cube-egress"
 
 copy_file "${CORE_BIN_DIR}/network-agent" "${PACKAGE_ROOT}/network-agent/bin/network-agent"
 copy_file "${CORE_BIN_DIR}/cubevsmapdump" "${PACKAGE_ROOT}/network-agent/bin/cubevsmapdump"
@@ -616,8 +615,6 @@ copy_file "${SCRIPT_DIR}/scripts/common/validation.sh" "${PACKAGE_ROOT}/scripts/
 # the content as the installed version. Must match cube_version so the
 # declared-vs-actual comparison in CubeMaster's version matrix works.
 printf '%s\n' "${DIST_VERSION}" > "${PACKAGE_ROOT}/cube-egress/version"
-
-copy_dir_contents "${SCRIPT_DIR}/sql" "${PACKAGE_ROOT}/sql"
 
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;

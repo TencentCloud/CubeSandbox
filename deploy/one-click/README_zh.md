@@ -18,7 +18,6 @@
 - `env.example`：构建机和目标机共用的环境变量模板。
 - `lib/common.sh`：公共 shell 函数。
 - `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
-- `sql/`：MySQL 初始化 schema 和 seed 数据。
 
 ## 构建输入
 
@@ -163,7 +162,7 @@ http://<target-host>:12088
 # CUBE_SANDBOX_NODE_IP=10.0.0.10
 ```
 
-如果显式设置了 `CUBE_SANDBOX_NODE_IP`，安装脚本会优先使用该值；否则会把自动探测到的节点 IP 写入 MySQL 的 `t_cube_host_info.ip` 和 `t_cube_sub_host_info.host_ip`，并用于 `cube proxy` / DNS 的地址渲染。
+如果显式设置了 `CUBE_SANDBOX_NODE_IP`，安装脚本会优先使用该值；否则会把自动探测到的节点 IP 写入运行时环境，并用于 `cube proxy` / DNS 的地址渲染。
 
 ### 数字助手环境变量
 
@@ -255,7 +254,7 @@ CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
 - mask 对应的 `cube-sandbox-mysql.service` / `cube-sandbox-redis.service`，本地容器不会再被启动；
 - 让 `quickcheck.sh` 和 `up-support.sh` 跳过对已外置依赖的本地生命周期管理（`down-support.sh` 未感知外部依赖，仍会执行 `docker compose down`，但由于本地容器从未被启动，这是无害的空操作）。
 
-外部 MySQL 需要预先授予所配置用户对目标库的访问权限；CubeMaster 首次启动会自行执行 schema 迁移，单机种子数据通过宿主机上的 `mysql` 客户端写入（在控制节点上需安装 MySQL 客户端用于对外部库做 seed）。
+外部 MySQL 需要预先授予所配置用户对目标库的访问权限；CubeMaster 首次启动会自行执行内置 schema 迁移。
 
 `cube proxy` 和它的 DNS 解析在 one-click 里是必选能力，`.env` 中这两个值必须保持为 `1`：
 
