@@ -49,3 +49,5 @@ __pycache__
 /design
 /plan
 /tests
+
+web/tsconfig.tsbuildinfo
