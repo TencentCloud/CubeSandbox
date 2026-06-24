@@ -206,6 +206,33 @@ var defaultNodeAffinitySelectorAllowedKeys = []string{
 	constants.AffinityKeyInstanceType,
 }
 
+// reservedLabelNamespaces defines label key prefixes that are owned by the
+// system. Labels whose namespace (the part before '/') matches any entry, or
+// whose whole key (when no '/' is present) matches any entry, are reserved and
+// cannot be created or deleted via the admin API.
+var reservedLabelNamespaces = []string{
+	"kubernetes.io",
+	"beta.kubernetes.io",
+	"cube.cloud.tencentcloud.com",
+}
+
+// IsReservedLabelKey reports whether k is a system-reserved label key
+// that cannot be created or deleted via the admin API.
+// It checks the namespace prefix of the key (the part before '/'),
+// or the whole key if no '/' is present.
+func IsReservedLabelKey(k string) bool {
+	ns := k
+	if prefix, _, ok := strings.Cut(k, "/"); ok {
+		ns = prefix
+	}
+	for _, reserved := range reservedLabelNamespaces {
+		if ns == reserved || strings.HasSuffix(ns, "."+reserved) {
+			return true
+		}
+	}
+	return false
+}
+
 // OvercommitRatioConf describes the CPU/Mem overcommit multipliers applied to
 // a node's reported quota when computing schedulable capacity.
 type OvercommitRatioConf struct {
