@@ -427,7 +427,7 @@ pub async fn create_agent_instance(
             .as_deref()
             .filter(|path| FsPath::new(path).is_dir())
         {
-            copy_openclaw_state_dir(source_path, &state_path)?;
+            copy_openclaw_state_dir(source_path, &state_path).await?;
         }
         let mount_metadata = openclaw_host_mount_metadata(&state_path)?;
         Some((persist_id, state_path, mount_metadata))
@@ -842,7 +842,20 @@ fn prepare_openclaw_state_dir(persist_id: &str) -> AppResult<String> {
     Ok(path)
 }
 
-fn copy_openclaw_state_dir(source: &str, target: &str) -> AppResult<()> {
+async fn copy_openclaw_state_dir(source: &str, target: &str) -> AppResult<()> {
+    let source = source.to_string();
+    let target = target.to_string();
+    tokio::task::spawn_blocking(move || copy_openclaw_state_dir_blocking(&source, &target))
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!(
+                "OpenClaw state copy task failed to join: {}",
+                e
+            ))
+        })?
+}
+
+fn copy_openclaw_state_dir_blocking(source: &str, target: &str) -> AppResult<()> {
     if source.trim().is_empty() || !FsPath::new(source).is_dir() {
         return Ok(());
     }
@@ -899,8 +912,21 @@ fn is_valid_agenthub_snapshot_id(snapshot_id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn remove_openclaw_snapshot_dir(snapshot_id: &str) -> AppResult<()> {
-    remove_openclaw_snapshot_dir_under(FsPath::new(OPENCLAW_HOST_SNAPSHOT_ROOT), snapshot_id)
+async fn remove_openclaw_snapshot_dir(snapshot_id: &str) -> AppResult<()> {
+    let snapshot_id = snapshot_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        remove_openclaw_snapshot_dir_under_blocking(
+            FsPath::new(OPENCLAW_HOST_SNAPSHOT_ROOT),
+            &snapshot_id,
+        )
+    })
+    .await
+    .map_err(|e| {
+        AppError::Internal(anyhow::anyhow!(
+            "OpenClaw snapshot removal task failed to join: {}",
+            e
+        ))
+    })?
 }
 
 // remove_openclaw_snapshot_dir_under idempotently removes the host directory
@@ -912,10 +938,10 @@ fn remove_openclaw_snapshot_dir(snapshot_id: &str) -> AppResult<()> {
 //   - the leaf is never canonicalized, so a top-level symlink is unlinked rather
 //     than followed;
 //   - a missing root/target is treated as success (idempotent).
-fn remove_openclaw_snapshot_dir_under(root: &FsPath, snapshot_id: &str) -> AppResult<()> {
+fn remove_openclaw_snapshot_dir_under_blocking(root: &FsPath, snapshot_id: &str) -> AppResult<()> {
     if !is_valid_agenthub_snapshot_id(snapshot_id) {
         return Err(AppError::BadRequest(format!(
-            "invalid openclaw snapshot id: {}",
+            "invalid AgentHub snapshot id: {}",
             snapshot_id
         )));
     }
@@ -1561,7 +1587,7 @@ pub async fn delete_agent_snapshot(
 
     match snapshot_kind.as_deref() {
         Some(kind) if kind == SNAPSHOT_KIND_AGENTHUB_STATE => {
-            remove_openclaw_snapshot_dir(&snapshot_id)?;
+            remove_openclaw_snapshot_dir(&snapshot_id).await?;
         }
         _ => {
             delete_cubemaster_snapshot_idempotent(&state, &snapshot_id).await?;
@@ -1729,7 +1755,7 @@ async fn cascade_delete_backing_snapshot(
 
     match snap.snapshot_kind.as_deref() {
         Some(kind) if kind == SNAPSHOT_KIND_AGENTHUB_STATE => {
-            remove_openclaw_snapshot_dir(snapshot_id)?;
+            remove_openclaw_snapshot_dir(snapshot_id).await?;
         }
         _ => {
             delete_cubemaster_snapshot_idempotent(state, snapshot_id).await?;
@@ -1804,7 +1830,7 @@ pub async fn create_agent_snapshot(
             let snapshot_id = new_agenthub_snapshot_id();
             let snapshot_path = openclaw_host_snapshot_path(&snapshot_id);
             let result = async {
-                copy_openclaw_state_dir(source_openclaw_path, &snapshot_path)?;
+                copy_openclaw_state_dir(source_openclaw_path, &snapshot_path).await?;
                 let Some(store) = &task_state.agenthub_store else {
                     return Err(AppError::BadRequest(
                         "AgentHub database persistence is not configured".to_string(),
@@ -1971,7 +1997,7 @@ pub async fn rollback_agent_to_snapshot(
                     "current assistant does not have an OpenClaw host state directory".to_string(),
                 )
             })?;
-        if let Err(err) = copy_openclaw_state_dir(source_path, target_path) {
+        if let Err(err) = copy_openclaw_state_dir(source_path, target_path).await {
             finish_agent_operation(
                 &state,
                 operation_id.as_deref(),
@@ -2166,7 +2192,7 @@ pub async fn clone_agent_instance(
             .as_ref()
             .is_some_and(|source_path| FsPath::new(source_path).is_dir());
         if let Some(source_path) = source_openclaw_state_path.filter(|_| copied_state) {
-            copy_openclaw_state_dir(source_path, &state_path)?;
+            copy_openclaw_state_dir(source_path, &state_path).await?;
         }
         let mount_metadata = openclaw_host_mount_metadata(&state_path)?;
         Some((persist_id, state_path, mount_metadata, copied_state))
@@ -2396,7 +2422,7 @@ pub async fn publish_agent_template(
                     })?;
                 let snapshot_id = new_agenthub_snapshot_id();
                 let snapshot_path = openclaw_host_snapshot_path(&snapshot_id);
-                copy_openclaw_state_dir(source_openclaw_path, &snapshot_path)?;
+                copy_openclaw_state_dir(source_openclaw_path, &snapshot_path).await?;
                 let rootfs_snapshot_id = record
                     .base_snapshot_id
                     .clone()
@@ -3927,7 +3953,8 @@ mod tests {
     #[test]
     fn remove_openclaw_snapshot_rejects_invalid_id() {
         let root = temp_test_dir("invalid-id");
-        let err = remove_openclaw_snapshot_dir_under(&root, "../escape").expect_err("must reject");
+        let err = remove_openclaw_snapshot_dir_under_blocking(&root, "../escape")
+            .expect_err("must reject");
         assert!(matches!(err, AppError::BadRequest(_)));
         let _ = test_fs::remove_dir_all(root);
     }
@@ -3936,8 +3963,11 @@ mod tests {
     fn remove_openclaw_snapshot_missing_root_is_idempotent() {
         let root = temp_test_dir("missing-root");
         test_fs::remove_dir_all(&root).expect("remove temp root");
-        remove_openclaw_snapshot_dir_under(&root, "agenthub-0123456789abcdef0123456789abcdef")
-            .expect("missing root should be success");
+        remove_openclaw_snapshot_dir_under_blocking(
+            &root,
+            "agenthub-0123456789abcdef0123456789abcdef",
+        )
+        .expect("missing root should be success");
     }
 
     #[test]
@@ -3948,7 +3978,8 @@ mod tests {
         test_fs::create_dir_all(&snapshot_dir).expect("create snapshot dir");
         test_fs::write(snapshot_dir.join("state.json"), "{}").expect("write snapshot file");
 
-        remove_openclaw_snapshot_dir_under(&root, snapshot_id).expect("remove snapshot dir");
+        remove_openclaw_snapshot_dir_under_blocking(&root, snapshot_id)
+            .expect("remove snapshot dir");
 
         assert!(!snapshot_dir.exists());
         assert!(root.exists());
@@ -3963,7 +3994,8 @@ mod tests {
         test_fs::write(outside.join("keep.txt"), "keep").expect("write outside file");
         unix_fs::symlink(&outside, root.join(snapshot_id)).expect("create leaf symlink");
 
-        remove_openclaw_snapshot_dir_under(&root, snapshot_id).expect("remove snapshot symlink");
+        remove_openclaw_snapshot_dir_under_blocking(&root, snapshot_id)
+            .expect("remove snapshot symlink");
 
         assert!(!root.join(snapshot_id).exists());
         assert!(outside.join("keep.txt").exists());

@@ -76,6 +76,7 @@ func destroyArtifactOnNode(ctx context.Context, artifactID, instanceType string,
 	}
 	instanceType = strings.TrimSpace(instanceType)
 	if instanceType == "" {
+		log.G(ctx).Warnf("artifact cleanup: empty instanceType for artifact %s on node %s, defaulting to cubebox", artifactID, target.ID())
 		instanceType = cubeboxv1.InstanceType_cubebox.String()
 	}
 	rsp, err := deleteImageOnCubelet(ctx, getCubeletAddrForDelete(target.HostIP()), &imagev1.DestroyImageRequest{

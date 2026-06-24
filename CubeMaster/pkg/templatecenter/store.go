@@ -600,25 +600,7 @@ func refreshTemplateReplicaSummary(ctx context.Context, templateID string) error
 }
 
 func createDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
-	payload, err := json.Marshal(storedReq)
-	if err != nil {
-		return err
-	}
-	model := &models.TemplateDefinition{
-		TemplateID:   templateID,
-		InstanceType: instanceType,
-		Version:      version,
-		Status:       StatusPending,
-		Kind:         TemplateKindTemplate,
-		RequestJSON:  string(payload),
-	}
-	if err = store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).Create(model).Error; err != nil {
-		if strings.Contains(err.Error(), "1062") || strings.Contains(err.Error(), "Duplicate entry") {
-			return ErrDuplicateTemplate
-		}
-		return err
-	}
-	return nil
+	return createDefinitionTx(ctx, store.db.WithContext(ctx), templateID, storedReq, instanceType, version, definitionCreateOptions{})
 }
 
 func createDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {

@@ -19,15 +19,13 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+var cleanupLocalRootfsArtifactForLifecycle = cleanupLocalRootfsArtifact
+
 // countArtifactReferencesTx counts the live references to artifactID inside the
 // given transaction: surviving template replicas, active (PENDING/RUNNING)
-// build jobs, and template definitions whose stored request still embeds the
-// artifact id. When excludeTemplateID is non-empty its own rows are excluded so
-// the caller can decide based on "everyone else" while deleting that template.
-//
-// Definitions are matched with a LIKE on request_json because the artifact id
-// is embedded as the `cube.master.rootfs.artifact.id` annotation value; the id
-// is a controlled `rfs-<hex>` token with no LIKE metacharacters.
+// build jobs, and template definitions indexed by rootfs_artifact_id. When
+// excludeTemplateID is non-empty its own rows are excluded so the caller can
+// decide based on "everyone else" while deleting that template.
 func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, excludeTemplateID string) (int64, error) {
 	_ = ctx
 	artifactID = strings.TrimSpace(artifactID)
@@ -35,7 +33,7 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 		return 0, nil
 	}
 	if strings.ContainsAny(artifactID, "%_") {
-		return 0, errors.New("artifact id contains SQL LIKE wildcard characters")
+		return 0, errors.New("artifact id contains SQL wildcard characters")
 	}
 	excludeTemplateID = strings.TrimSpace(excludeTemplateID)
 
@@ -60,7 +58,7 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 
 	var defCount int64
 	dq := tx.Table(constants.TemplateDefinitionTableName).
-		Where("request_json LIKE ?", "%"+artifactID+"%")
+		Where("rootfs_artifact_id = ?", artifactID)
 	if excludeTemplateID != "" {
 		dq = dq.Where("template_id <> ?", excludeTemplateID)
 	}
@@ -80,11 +78,13 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 //	  remain, keep the artifact. Otherwise snapshot the placement nodes and
 //	  mark the row CLEANUP_PENDING.
 //	Phase 2 (no lock, no TX, idempotent): destroy the ext4 files on every
-//	  placement node and on the master-local store.
-//	Phase 3 (short TX, FOR UPDATE): only if every physical delete succeeded,
-//	  re-check that references are still zero, then delete placement rows and
-//	  the artifact row; if it was re-referenced meanwhile, leave status as-is
-//	  and return so Phase 1 / claimRootfsArtifactForBuild can converge it.
+//	  placement node.
+//	Phase 3 (short TX, FOR UPDATE): only if node-side physical deletes
+//	  succeeded, re-check that references are still zero and status is still
+//	  CLEANUP_PENDING, then remove the master-local ext4 under the row lock
+//	  before deleting placement rows and the artifact row; if it was
+//	  re-referenced meanwhile, leave status as-is and return so Phase 1 /
+//	  claimRootfsArtifactForBuild can converge it.
 //
 // Partial physical failures (a node still running a sandbox, transient RPC
 // errors) leave the row in CLEANUP_PENDING and return nil so template deletion
@@ -98,9 +98,8 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 
 	// ── Phase 1 ──────────────────────────────────────────────────────────────
 	var (
-		proceed  bool
-		ext4Path string
-		nodes    []models.ArtifactNodePlacement
+		proceed bool
+		nodes   []models.ArtifactNodePlacement
 	)
 	if err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var artifact models.RootfsArtifact
@@ -144,7 +143,6 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			Update("status", ArtifactStatusCleanupPending).Error; err != nil {
 			return err
 		}
-		ext4Path = artifact.Ext4Path
 		proceed = true
 		return nil
 	}); err != nil {
@@ -176,11 +174,6 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			logger.Warnf("artifact cleanup: destroy on node %s failed: %v", target.ID(), err)
 		}
 	}
-	if err := cleanupLocalRootfsArtifact(artifactID, ext4Path); err != nil {
-		allPhysicalOK = false
-		logger.Warnf("artifact cleanup: master-local ext4 removal failed: %v", err)
-	}
-
 	if !allPhysicalOK {
 		// Keep the row in CLEANUP_PENDING; GC retries after sandboxes exit.
 		return nil
@@ -214,7 +207,12 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 		// NOT clobber that build's status (reverting to READY would expose a row
 		// pointing at the files we just deleted). Back off and let the build /
 		// GC converge.
-		if remaining > 0 || artifact.Status != ArtifactStatusCleanupPending {
+		canFinalize, err := cleanupMasterLocalArtifactForFinalDelete(artifact, remaining)
+		if err != nil {
+			logger.Warnf("artifact cleanup: master-local ext4 removal failed: %v", err)
+			return nil
+		}
+		if !canFinalize {
 			return nil
 		}
 		if err := deleteArtifactNodePlacementsTx(tx, artifactID); err != nil {
@@ -223,6 +221,16 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 		return tx.Unscoped().Table(constants.RootfsArtifactTableName).
 			Where("artifact_id = ?", artifactID).Delete(&models.RootfsArtifact{}).Error
 	})
+}
+
+func cleanupMasterLocalArtifactForFinalDelete(artifact models.RootfsArtifact, remaining int64) (bool, error) {
+	if remaining > 0 || artifact.Status != ArtifactStatusCleanupPending {
+		return false, nil
+	}
+	if err := cleanupLocalRootfsArtifactForLifecycle(artifact.ArtifactID, artifact.Ext4Path); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // placementToNode resolves a placement row to a node with a usable host ip,

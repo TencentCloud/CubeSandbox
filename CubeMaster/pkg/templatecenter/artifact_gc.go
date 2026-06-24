@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"context"
 	"database/sql"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -16,12 +17,16 @@ import (
 )
 
 const (
-	artifactGCInterval   = 10 * time.Minute
-	artifactGCLockName   = "cubemaster_templatecenter_artifact_gc_v1"
-	artifactGCMaxPerPass = 100
+	artifactGCInterval    = 10 * time.Minute
+	artifactGCLockName    = "cubemaster_templatecenter_artifact_gc_v1"
+	artifactGCMaxPerPass  = 100
+	artifactGCWorkerLimit = 5
 )
 
-var artifactGCOnce sync.Once
+var (
+	artifactGCOnce         sync.Once
+	cleanupArtifactFullyGC = cleanupArtifactFully
+)
 
 // startArtifactGC launches the orphan/expired rootfs-artifact garbage
 // collector. It is registered alongside the snapshot reconciler (not folded
@@ -61,12 +66,48 @@ func runArtifactGCPass(ctx context.Context) {
 		return
 	}
 	logger.Infof("artifact gc: evaluating %d candidate artifacts", len(candidates))
+	processArtifactGCCandidates(ctx, candidates)
+}
+
+func processArtifactGCCandidates(ctx context.Context, candidates []models.RootfsArtifact) {
+	if len(candidates) == 0 {
+		return
+	}
+	workerCount := artifactGCWorkerLimit
+	if len(candidates) < workerCount {
+		workerCount = len(candidates)
+	}
+	jobs := make(chan models.RootfsArtifact)
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for artifact := range jobs {
+				cleanupArtifactGCCandidate(ctx, artifact)
+			}
+		}()
+	}
 	for i := range candidates {
-		artifactID := candidates[i].ArtifactID
+		jobs <- candidates[i]
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func cleanupArtifactGCCandidate(ctx context.Context, artifact models.RootfsArtifact) {
+	logger := log.G(ctx).WithFields(map[string]any{"component": "artifact_gc"})
+	artifactID := artifact.ArtifactID
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Errorf("artifact gc: cleanup %s panic: %v\n%s", artifactID, r, string(debug.Stack()))
+		}
+	}()
+	if artifactID != "" {
 		// exclude="" => globally unreferenced artifacts are cleaned; referenced
 		// ones are kept and their TTL renewed by cleanupArtifactFully. ext4
 		// instanceType defaults to cubebox inside the node destroy path.
-		if err := cleanupArtifactFully(ctx, artifactID, "", ""); err != nil {
+		if err := cleanupArtifactFullyGC(ctx, artifactID, "", ""); err != nil {
 			logger.Warnf("artifact gc: cleanup %s failed: %v", artifactID, err)
 		}
 	}

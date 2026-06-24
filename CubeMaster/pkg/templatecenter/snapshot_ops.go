@@ -1005,6 +1005,24 @@ func deleteSnapshotMetadataOnly(ctx context.Context, snapshotID string) error {
 	return cleanupTemplateMetadata(ctx, snapshotID)
 }
 
+func rootfsArtifactIDFromCreateRequest(req *sandboxtypes.CreateCubeSandboxReq) string {
+	if req == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(req.Annotations[constants.CubeAnnotationRootfsArtifactID]); id != "" {
+		return id
+	}
+	for _, container := range req.Containers {
+		if container == nil || container.Image == nil {
+			continue
+		}
+		if id := strings.TrimSpace(container.Image.Annotations[constants.CubeAnnotationRootfsArtifactID]); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
 func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
 	payload, err := json.Marshal(storedReq)
 	if err != nil {
@@ -1030,6 +1048,7 @@ func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, sto
 		StorageBackend:            opts.StorageBackend,
 		Retain:                    opts.Retain,
 		RootfsSizeBytesAtSnapshot: opts.RootfsSizeBytesAtSnapshot,
+		RootfsArtifactID:          rootfsArtifactIDFromCreateRequest(storedReq),
 		RequestJSON:               string(payload),
 	}
 	if kind == TemplateKindSnapshot && model.StorageBackend == "" {
