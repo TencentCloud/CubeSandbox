@@ -715,19 +715,47 @@ pub(crate) fn build_cube_network_config(
 ///   - Empty `command`/`args` fall back to the image `Entrypoint`/`Cmd` inside
 ///     Cubelet's `command.WithProcessArgs`, so the entrypoint (cube-entrypoint.sh)
 ///     still runs and envd still starts.
-/// With no env vars we return an empty list, preserving the prior behaviour
-/// where `containers` was an empty `vec![]`.
+/// Env vars are validated before being forwarded:
+///   - Entries with an empty key or empty value are dropped (they carry no
+///     usable value and only add noise).
+///   - Reserved names a sandbox owner must not set are dropped. `LD_PRELOAD`
+///     and `LD_AUDIT` would inject a shared library into every dynamically
+///     linked process in the sandbox (including envd), so they are blocked at
+///     the API boundary as defence-in-depth.
+///
+/// With no env vars left after validation we return an empty list, preserving
+/// the prior behaviour where `containers` was an empty `vec![]`.
 pub(crate) fn build_env_container(env_vars: Option<EnvVars>) -> Vec<ContainerSpec> {
     let Some(vars) = env_vars else {
         return Vec::new();
     };
-    if vars.is_empty() {
-        return Vec::new();
+    // Reserved env var names a sandbox owner must not set via the API.
+    const RESERVED_ENV_KEYS: &[&str] = &["LD_PRELOAD", "LD_AUDIT"];
+
+    // Warn about reserved names we are about to drop so a misconfigured caller
+    // is not silently surprised. Empty key/value entries are dropped quietly.
+    let dropped: Vec<&String> = vars
+        .keys()
+        .filter(|k| RESERVED_ENV_KEYS.contains(&k.as_str()))
+        .collect();
+    if !dropped.is_empty() {
+        tracing::warn!(
+            dropped = ?dropped,
+            "dropping reserved env var names from sandbox create request; \
+             LD_PRELOAD/LD_AUDIT can inject a library into every process and are not allowed"
+        );
     }
-    let envs = vars
+
+    let envs: Vec<EnvVar> = vars
         .into_iter()
+        .filter(|(key, value)| {
+            !key.is_empty() && !value.is_empty() && !RESERVED_ENV_KEYS.contains(&key.as_str())
+        })
         .map(|(key, value)| EnvVar { key, value })
         .collect();
+    if envs.is_empty() {
+        return Vec::new();
+    }
     vec![ContainerSpec {
         name: None,
         image: ImageSpec {
@@ -821,6 +849,26 @@ mod tests {
             .collect();
         assert_eq!(lookup.get("API_KEY").copied(), Some("sk-123"));
         assert_eq!(lookup.get("DEBUG").copied(), Some("true"));
+    }
+
+    #[test]
+    fn env_container_drops_reserved_and_empty_entries() {
+        // Reserved names (LD_PRELOAD/LD_AUDIT) and empty key/value entries are
+        // filtered out; only the valid entry survives.
+        let vars = HashMap::from([
+            ("API_KEY".to_string(), "sk-123".to_string()),
+            ("LD_PRELOAD".to_string(), "/tmp/x.so".to_string()),
+            ("LD_AUDIT".to_string(), "/tmp/y.so".to_string()),
+            ("".to_string(), "no-key".to_string()),
+            ("EMPTY".to_string(), "".to_string()),
+        ]);
+
+        let containers = build_env_container(Some(vars));
+        assert_eq!(containers.len(), 1);
+        let envs = containers[0].envs.as_ref().expect("envs should be set");
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].key, "API_KEY");
+        assert_eq!(envs[0].value, "sk-123");
     }
 
     #[test]
@@ -1104,7 +1152,7 @@ mod tests {
     /// covers each meaningful combination.
     #[test]
     fn lifecycle_object_translates_to_cubemaster_bools() {
-        use crate::models::{NewSandbox, SandboxLifecycleConfig, SandboxOnTimeout};
+        use crate::models::{NewSandbox, SandboxOnTimeout};
 
         // Helper that mimics services::create_sandbox's lifecycle decoding.
         fn translate(body: &NewSandbox) -> (bool, bool) {
