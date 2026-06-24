@@ -197,3 +197,62 @@ func assertRawKernelVersionMatches(t *testing.T, instanceType, imageRef string, 
 		t.Fatalf("kernel version=%q, want %q", strings.TrimSpace(string(got)), kernelVersionForContent(kernel))
 	}
 }
+
+func TestDestroyPmemArtifactResolvesSymlinkedBase(t *testing.T) {
+	dataDir := t.TempDir()
+	realBase := filepath.Join(t.TempDir(), "cubebox_os_image")
+	if err := os.MkdirAll(realBase, 0o755); err != nil {
+		t.Fatalf("MkdirAll real base error=%v", err)
+	}
+	if err := os.Symlink(realBase, filepath.Join(dataDir, "cubebox_os_image")); err != nil {
+		t.Fatalf("Symlink base error=%v", err)
+	}
+	pmem.Init(dataDir)
+
+	artifactDir := filepath.Join(realBase, "artifact-6")
+	writeTestFile(t, filepath.Join(artifactDir, "artifact-6.ext4"), []byte("rootfs"))
+
+	if err := DestroyPmemArtifact(context.Background(), "cubebox", "artifact-6", nil); err != nil {
+		t.Fatalf("DestroyPmemArtifact error=%v", err)
+	}
+	if _, err := os.Stat(artifactDir); !os.IsNotExist(err) {
+		t.Fatalf("artifact dir should be removed, stat err=%v", err)
+	}
+}
+
+func TestDestroyPmemArtifactUnlinksLeafSymlinkOnly(t *testing.T) {
+	dataDir := t.TempDir()
+	pmem.Init(dataDir)
+	base := pmem.GetPmemBasePath("cubebox")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatalf("MkdirAll base error=%v", err)
+	}
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "keep.txt")
+	if err := os.WriteFile(outsideFile, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("WriteFile outside error=%v", err)
+	}
+	leaf := filepath.Join(base, "artifact-7")
+	if err := os.Symlink(outside, leaf); err != nil {
+		t.Fatalf("Symlink leaf error=%v", err)
+	}
+
+	if err := DestroyPmemArtifact(context.Background(), "cubebox", "artifact-7", nil); err != nil {
+		t.Fatalf("DestroyPmemArtifact error=%v", err)
+	}
+	if _, err := os.Lstat(leaf); !os.IsNotExist(err) {
+		t.Fatalf("artifact symlink should be removed, lstat err=%v", err)
+	}
+	if _, err := os.Stat(outsideFile); err != nil {
+		t.Fatalf("outside target should remain, stat err=%v", err)
+	}
+}
+
+func TestDestroyPmemArtifactMissingBaseIsIdempotent(t *testing.T) {
+	dataDir := t.TempDir()
+	pmem.Init(dataDir)
+
+	if err := DestroyPmemArtifact(context.Background(), "cubebox", "artifact-8", nil); err != nil {
+		t.Fatalf("missing pmem base should be success, got %v", err)
+	}
+}

@@ -198,23 +198,23 @@ async fn reverse_sync_agenthub_template(state: &AppState, id: &str) {
     let Some(store) = state.agenthub_store.as_ref() else {
         return;
     };
-    match store.list_templates().await {
-        Ok(templates) => {
-            for t in templates
-                .iter()
-                .filter(|t| t.template_id == id || t.source_snapshot_id == id)
-            {
-                if let Err(e) = store.soft_delete_template(&t.template_id).await {
+    match store
+        .find_template_ids_by_template_or_source_snapshot(id)
+        .await
+    {
+        Ok(template_ids) => {
+            for template_id in template_ids {
+                if let Err(e) = store.soft_delete_template(&template_id).await {
                     tracing::warn!(
                         "reverse sync: failed to soft-delete AgentHub template {}: {}",
-                        t.template_id,
+                        template_id,
                         e
                     );
                 }
             }
         }
         Err(e) => {
-            tracing::warn!("reverse sync: list AgentHub templates failed: {}", e);
+            tracing::warn!("reverse sync: query AgentHub templates failed: {}", e);
         }
     }
 }

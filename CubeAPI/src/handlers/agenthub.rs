@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, fs, path::Path as FsPath, time::Duration};
+use std::{collections::HashMap, fs, path::Path as FsPath, sync::Mutex, time::Duration};
 
 use axum::{extract::Path, extract::State, http::StatusCode, response::IntoResponse, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -55,6 +55,8 @@ const SNAPSHOT_KIND_SANDBOX: &str = "sandbox";
 // They are NOT CubeMaster snapshots, so cascade cleanup must remove the host
 // directory rather than calling the snapshot service.
 const SNAPSHOT_KIND_AGENTHUB_STATE: &str = "agenthub_state";
+
+static OPENCLAW_SNAPSHOT_FS_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -844,6 +846,11 @@ fn copy_openclaw_state_dir(source: &str, target: &str) -> AppResult<()> {
     if source.trim().is_empty() || !FsPath::new(source).is_dir() {
         return Ok(());
     }
+    let _guard = OPENCLAW_SNAPSHOT_FS_LOCK.lock().map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "openclaw snapshot filesystem lock poisoned"
+        ))
+    })?;
     fs::create_dir_all(target).map_err(|e| {
         AppError::Internal(anyhow::anyhow!(
             "failed to create cloned OpenClaw state directory {}: {}",
@@ -892,23 +899,31 @@ fn is_valid_agenthub_snapshot_id(snapshot_id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-// remove_openclaw_snapshot_dir idempotently removes the host directory backing
-// an OpenClaw shared-files snapshot. It is hardened against path traversal and
-// symlink escape (S2/R8):
-//   - the id must match the system-generated shape;
-//   - the snapshot root is canonicalized and the target must remain under it;
-//   - a symlink at the top level is unlinked (never followed);
-//   - canonicalize failure on an existing path is fail-closed (refuse, do not
-//     fall back to an unresolved path);
-//   - a missing root/target is treated as success (idempotent).
 fn remove_openclaw_snapshot_dir(snapshot_id: &str) -> AppResult<()> {
+    remove_openclaw_snapshot_dir_under(FsPath::new(OPENCLAW_HOST_SNAPSHOT_ROOT), snapshot_id)
+}
+
+// remove_openclaw_snapshot_dir_under idempotently removes the host directory
+// backing an OpenClaw shared-files snapshot. It is hardened against path
+// traversal and symlink escape (S2/R8):
+//   - the id must match the system-generated shape;
+//   - the snapshot root is canonicalized and the target is constructed as a
+//     direct child of that root;
+//   - the leaf is never canonicalized, so a top-level symlink is unlinked rather
+//     than followed;
+//   - a missing root/target is treated as success (idempotent).
+fn remove_openclaw_snapshot_dir_under(root: &FsPath, snapshot_id: &str) -> AppResult<()> {
     if !is_valid_agenthub_snapshot_id(snapshot_id) {
         return Err(AppError::BadRequest(format!(
             "invalid openclaw snapshot id: {}",
             snapshot_id
         )));
     }
-    let root = FsPath::new(OPENCLAW_HOST_SNAPSHOT_ROOT);
+    let _guard = OPENCLAW_SNAPSHOT_FS_LOCK.lock().map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "openclaw snapshot filesystem lock poisoned"
+        ))
+    })?;
     let canon_root = match fs::canonicalize(root) {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -934,23 +949,23 @@ fn remove_openclaw_snapshot_dir(snapshot_id: &str) -> AppResult<()> {
     };
     if meta.file_type().is_symlink() {
         // Remove only the link entry; never follow it to a target outside root.
-        let _ = fs::remove_file(&path);
-        return Ok(());
+        return match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(AppError::Internal(anyhow::anyhow!(
+                "failed to remove openclaw snapshot symlink {}: {}",
+                snapshot_id,
+                e
+            ))),
+        };
     }
-    let canon = fs::canonicalize(&path).map_err(|e| {
-        AppError::Internal(anyhow::anyhow!(
-            "failed to resolve openclaw snapshot dir {}: {}",
-            snapshot_id,
-            e
-        ))
-    })?;
-    if !canon.starts_with(&canon_root) {
-        return Err(AppError::BadRequest(format!(
-            "openclaw snapshot path escapes managed root: {}",
+    if !meta.is_dir() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "openclaw snapshot path {} is not a directory",
             snapshot_id
         )));
     }
-    match fs::remove_dir_all(&canon) {
+    match fs::remove_dir_all(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(AppError::Internal(anyhow::anyhow!(
@@ -1688,15 +1703,15 @@ async fn cascade_delete_backing_snapshot(
     // Guard against shared snapshots: if any other live template still points at
     // this snapshot, leave the physical snapshot intact. Fail-safe — if we
     // cannot determine sharing (DB error), do NOT delete the physical snapshot.
-    let templates = store.list_templates().await.map_err(|e| {
-        AppError::Internal(anyhow::anyhow!(
-            "failed to check snapshot sharing before cascade delete: {}",
-            e
-        ))
-    })?;
-    let still_shared = templates
-        .iter()
-        .any(|t| t.template_id != template_id && t.source_snapshot_id == snapshot_id);
+    let still_shared = store
+        .snapshot_has_other_live_template_refs(snapshot_id, template_id)
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!(
+                "failed to check snapshot sharing before cascade delete: {}",
+                e
+            ))
+        })?;
     if still_shared {
         return Ok(());
     }
@@ -3877,6 +3892,12 @@ pub(crate) fn tokenized_gateway_url(url: String, token: Option<String>) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs as test_fs,
+        os::unix::fs as unix_fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn llm(provider: &str, credential_mode: &str) -> LlmConfig {
         LlmConfig {
@@ -3886,6 +3907,68 @@ mod tests {
             api_key: "sk-real-secret".to_string(),
             credential_mode: credential_mode.to_string(),
         }
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "cube-api-agenthub-{}-{}-{}",
+            name,
+            std::process::id(),
+            nanos
+        ));
+        test_fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
+    }
+
+    #[test]
+    fn remove_openclaw_snapshot_rejects_invalid_id() {
+        let root = temp_test_dir("invalid-id");
+        let err = remove_openclaw_snapshot_dir_under(&root, "../escape").expect_err("must reject");
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let _ = test_fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_openclaw_snapshot_missing_root_is_idempotent() {
+        let root = temp_test_dir("missing-root");
+        test_fs::remove_dir_all(&root).expect("remove temp root");
+        remove_openclaw_snapshot_dir_under(&root, "agenthub-0123456789abcdef0123456789abcdef")
+            .expect("missing root should be success");
+    }
+
+    #[test]
+    fn remove_openclaw_snapshot_removes_directory_leaf() {
+        let root = temp_test_dir("dir-leaf");
+        let snapshot_id = "agenthub-0123456789abcdef0123456789abcdef";
+        let snapshot_dir = root.join(snapshot_id);
+        test_fs::create_dir_all(&snapshot_dir).expect("create snapshot dir");
+        test_fs::write(snapshot_dir.join("state.json"), "{}").expect("write snapshot file");
+
+        remove_openclaw_snapshot_dir_under(&root, snapshot_id).expect("remove snapshot dir");
+
+        assert!(!snapshot_dir.exists());
+        assert!(root.exists());
+        let _ = test_fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_openclaw_snapshot_unlinks_leaf_symlink_only() {
+        let root = temp_test_dir("symlink-leaf");
+        let outside = temp_test_dir("symlink-target");
+        let snapshot_id = "agenthub-0123456789abcdef0123456789abcdef";
+        test_fs::write(outside.join("keep.txt"), "keep").expect("write outside file");
+        unix_fs::symlink(&outside, root.join(snapshot_id)).expect("create leaf symlink");
+
+        remove_openclaw_snapshot_dir_under(&root, snapshot_id).expect("remove snapshot symlink");
+
+        assert!(!root.join(snapshot_id).exists());
+        assert!(outside.join("keep.txt").exists());
+        let _ = test_fs::remove_dir_all(root);
+        let _ = test_fs::remove_dir_all(outside);
     }
 
     #[test]

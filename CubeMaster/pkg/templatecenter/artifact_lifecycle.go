@@ -34,6 +34,9 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 	if artifactID == "" {
 		return 0, nil
 	}
+	if strings.ContainsAny(artifactID, "%_") {
+		return 0, errors.New("artifact id contains SQL LIKE wildcard characters")
+	}
 	excludeTemplateID = strings.TrimSpace(excludeTemplateID)
 
 	var replicaCount int64
@@ -80,7 +83,8 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 //	  placement node and on the master-local store.
 //	Phase 3 (short TX, FOR UPDATE): only if every physical delete succeeded,
 //	  re-check that references are still zero, then delete placement rows and
-//	  the artifact row; if it was re-referenced meanwhile, revert to READY.
+//	  the artifact row; if it was re-referenced meanwhile, leave status as-is
+//	  and return so Phase 1 / claimRootfsArtifactForBuild can converge it.
 //
 // Partial physical failures (a node still running a sandbox, transient RPC
 // errors) leave the row in CLEANUP_PENDING and return nil so template deletion

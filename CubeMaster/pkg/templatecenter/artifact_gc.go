@@ -27,9 +27,10 @@ var artifactGCOnce sync.Once
 // collector. It is registered alongside the snapshot reconciler (not folded
 // into it) and converges the cases online deletion cannot finish in one pass:
 // interrupted builds, artifacts whose nodes were busy (CLEANUP_PENDING), and
-// TTL-expired artifacts. A component-scoped MySQL GET_LOCK keeps a single
-// instance active across the HA cluster; the lock name is intentionally distinct
-// from schema-migration locks (`cubemaster_schema_migration_global` and
+// TTL-expired artifacts. A component-scoped MySQL GET_LOCK keeps candidate
+// selection single-instance across the HA cluster without covering slow
+// cross-node cleanup RPCs; the lock name is intentionally distinct from
+// schema-migration locks (`cubemaster_schema_migration_global` and
 // `cubemaster_migration_*`).
 func startArtifactGC(ctx context.Context) {
 	artifactGCOnce.Do(func() {
@@ -55,16 +56,37 @@ func runArtifactGCPass(ctx context.Context) {
 	}
 	logger := log.G(ctx).WithFields(map[string]any{"component": "artifact_gc"})
 
+	candidates, ok := listArtifactGCCandidatesLocked(ctx)
+	if !ok || len(candidates) == 0 {
+		return
+	}
+	logger.Infof("artifact gc: evaluating %d candidate artifacts", len(candidates))
+	for i := range candidates {
+		artifactID := candidates[i].ArtifactID
+		// exclude="" => globally unreferenced artifacts are cleaned; referenced
+		// ones are kept and their TTL renewed by cleanupArtifactFully. ext4
+		// instanceType defaults to cubebox inside the node destroy path.
+		if err := cleanupArtifactFully(ctx, artifactID, "", ""); err != nil {
+			logger.Warnf("artifact gc: cleanup %s failed: %v", artifactID, err)
+		}
+	}
+}
+
+func listArtifactGCCandidatesLocked(ctx context.Context) ([]models.RootfsArtifact, bool) {
+	logger := log.G(ctx).WithFields(map[string]any{"component": "artifact_gc"})
 	// Single-instance execution across the cluster: GET_LOCK with a 0s timeout
 	// returns immediately; another instance holding it means we skip this pass.
+	// The lock protects only candidate selection. cleanupArtifactFully performs
+	// its own row-level serialisation and idempotent physical deletes, so slow
+	// RPCs must not keep this HA-wide lock held.
 	var lockRes sql.NullInt64
 	if err := store.db.WithContext(ctx).
 		Raw("SELECT GET_LOCK(?, ?)", artifactGCLockName, 0).Scan(&lockRes).Error; err != nil {
 		logger.Warnf("artifact gc: acquire lock failed: %v", err)
-		return
+		return nil, false
 	}
 	if !lockRes.Valid || lockRes.Int64 != 1 {
-		return // another instance is running this pass
+		return nil, false // another instance is selecting candidates
 	}
 	defer func() {
 		if err := store.db.WithContext(ctx).Exec("SELECT RELEASE_LOCK(?)", artifactGCLockName).Error; err != nil {
@@ -79,19 +101,7 @@ func runArtifactGCPass(ctx context.Context) {
 			[]string{ArtifactStatusFailed, ArtifactStatusOrphaned, ArtifactStatusCleanupPending}, now).
 		Limit(artifactGCMaxPerPass).Find(&candidates).Error; err != nil {
 		logger.Warnf("artifact gc: list candidates failed: %v", err)
-		return
+		return nil, false
 	}
-	if len(candidates) == 0 {
-		return
-	}
-	logger.Infof("artifact gc: evaluating %d candidate artifacts", len(candidates))
-	for i := range candidates {
-		artifactID := candidates[i].ArtifactID
-		// exclude="" => globally unreferenced artifacts are cleaned; referenced
-		// ones are kept and their TTL renewed by cleanupArtifactFully. ext4
-		// instanceType defaults to cubebox inside the node destroy path.
-		if err := cleanupArtifactFully(ctx, artifactID, "", ""); err != nil {
-			logger.Warnf("artifact gc: cleanup %s failed: %v", artifactID, err)
-		}
-	}
+	return candidates, true
 }

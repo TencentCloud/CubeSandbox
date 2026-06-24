@@ -811,6 +811,50 @@ LIMIT 1
         .map_err(anyhow::Error::from)
     }
 
+    pub async fn find_template_ids_by_template_or_source_snapshot(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query(
+            r#"
+SELECT template_id
+FROM t_agenthub_template
+WHERE deleted_at IS NULL
+  AND (template_id = ? OR source_snapshot_id = ?)
+"#,
+        )
+        .bind(id)
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| row.try_get("template_id").map_err(anyhow::Error::from))
+            .collect()
+    }
+
+    pub async fn snapshot_has_other_live_template_refs(
+        &self,
+        snapshot_id: &str,
+        exclude_template_id: &str,
+    ) -> anyhow::Result<bool> {
+        let row = sqlx::query(
+            r#"
+SELECT 1
+FROM t_agenthub_template
+WHERE deleted_at IS NULL
+  AND source_snapshot_id = ?
+  AND template_id <> ?
+LIMIT 1
+"#,
+        )
+        .bind(snapshot_id)
+        .bind(exclude_template_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     pub async fn soft_delete_snapshot(
         &self,
         agent_id: &str,

@@ -39,8 +39,8 @@ type ArtifactInUseFunc func(artifactID string) (bool, error)
 //
 // Safety invariants:
 //   - instanceType/artifactID must pass ValidateSafeID (no separators/traversal).
-//   - the resolved directory must live under the managed pmem base
-//     (ValidatePathUnderBase), defending against a corrupt/forged id from Master.
+//   - the managed pmem base is resolved before constructing the artifact leaf,
+//     and the final directory must live under that resolved base.
 //   - if inUse reports the artifact is referenced by a running sandbox, deletion
 //     is refused with ErrArtifactInUse (no physical removal).
 //   - a missing directory is treated as success (idempotent).
@@ -63,8 +63,15 @@ func DestroyPmemArtifact(ctx context.Context, instanceType, artifactID string, i
 	}
 
 	base := pmem.GetPmemBasePath(instanceType)
-	dir := filepath.Join(base, artifactID)
-	resolved, err := pathutil.ValidatePathUnderBase(base, dir)
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("resolve pmem base %q: %w", base, err)
+	}
+	dir := filepath.Join(resolvedBase, artifactID)
+	resolved, err := pathutil.ValidatePathUnderBase(resolvedBase, dir)
 	if err != nil {
 		return fmt.Errorf("artifact path validation failed: %w", err)
 	}

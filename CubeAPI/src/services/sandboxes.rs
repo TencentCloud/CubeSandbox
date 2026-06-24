@@ -988,6 +988,7 @@ mod tests {
             exposed_ports: vec![],
             network_type: None,
             cube_network_config: None,
+            distribution_scope: None,
             auto_pause: false,
             auto_resume: false,
         };
