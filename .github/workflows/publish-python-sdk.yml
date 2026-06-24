@@ -1,0 +1,68 @@
+name: Publish Python SDK to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'   # global release tag, e.g. v0.4.0
+
+jobs:
+  build-and-publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if sdk/python/ changed since last tag
+        id: check_changes
+        run: |
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          echo "Current tag: $CURRENT_TAG"
+
+          PREV_TAG=$(git tag --list 'v*' \
+            --sort=-creatordate \
+            | grep -v "^${CURRENT_TAG}$" \
+            | head -1)
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous tag found -- first release, proceeding."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Comparing $PREV_TAG -> $CURRENT_TAG for sdk/python/ changes"
+            CHANGED=$(git diff --name-only "$PREV_TAG" "$CURRENT_TAG" -- sdk/python/)
+            if [ -n "$CHANGED" ]; then
+              echo "sdk/python/ has changes:"
+              echo "$CHANGED"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "No changes in sdk/python/ since $PREV_TAG -- skipping publish."
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Set up Python
+        if: steps.check_changes.outputs.changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        if: steps.check_changes.outputs.changed == 'true'
+        run: pip install build
+
+      - name: Build package
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/python
+        run: python -m build
+
+      - name: Publish to PyPI
+        if: steps.check_changes.outputs.changed == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist/
+          password: ${{ secrets.CUBE_PYPI_TOKEN }}
