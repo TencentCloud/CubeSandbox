@@ -559,14 +559,17 @@ func UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]stri
 	if err := validateNodeLabels(labels); err != nil {
 		return err
 	}
-
-	return global.db.Transaction(func(tx *gorm.DB) error {
+	var nodeLabels map[string]string
+	if err := global.db.Transaction(func(tx *gorm.DB) error {
 		existing, err := readLabelsJSONForUpdate(tx, nodeID)
 		if err != nil {
 			return err
 		}
 		for k, v := range labels {
 			existing[k] = v
+		}
+		if len(existing) > maxLabelsPerNode {
+			return fmt.Errorf("a node cannot have more than %d labels, got %d after merge", maxLabelsPerNode, len(existing))
 		}
 		if err := tx.Table(constants.NodeMetaRegistrationTable).
 			Where("node_id = ?", nodeID).
@@ -576,14 +579,18 @@ func UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]stri
 			}).Error; err != nil {
 			return err
 		}
-
-		snap := global.ensureNode(nodeID)
-		global.mu.Lock()
-		snap.Labels = cloneStringMap(existing)
-		global.mu.Unlock()
-		syncLocalcache(snap)
+		nodeLabels = existing
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	snap := global.ensureNode(nodeID)
+	global.mu.Lock()
+	snap.Labels = cloneStringMap(nodeLabels)
+	global.mu.Unlock()
+	syncLocalcache(snap)
+	return nil
 }
 
 func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
@@ -596,8 +603,8 @@ func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
 	if config.IsReservedLabelKey(key) {
 		return fmt.Errorf("label key %q is reserved for system use and cannot be deleted", key)
 	}
-
-	return global.db.Transaction(func(tx *gorm.DB) error {
+	var nodeLabels map[string]string
+	if err := global.db.Transaction(func(tx *gorm.DB) error {
 		existing, err := readLabelsJSONForUpdate(tx, nodeID)
 		if err != nil {
 			return err
@@ -611,14 +618,17 @@ func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
 			}).Error; err != nil {
 			return err
 		}
-
-		snap := global.ensureNode(nodeID)
-		global.mu.Lock()
-		snap.Labels = cloneStringMap(existing)
-		global.mu.Unlock()
-		syncLocalcache(snap)
+		nodeLabels = existing
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	snap := global.ensureNode(nodeID)
+	global.mu.Lock()
+	snap.Labels = cloneStringMap(nodeLabels)
+	global.mu.Unlock()
+	syncLocalcache(snap)
+	return nil
 }
 
 // readLabelsJSONForUpdate reads the labels_json column with a row-level lock
@@ -626,7 +636,8 @@ func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
 // read-modify-write races on the same node's labels.
 func readLabelsJSONForUpdate(tx *gorm.DB, nodeID string) (map[string]string, error) {
 	var reg models.NodeRegistration
-	if err := tx.Table(constants.NodeMetaRegistrationTable).
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Table(constants.NodeMetaRegistrationTable).
 		Where("node_id = ?", nodeID).
 		Take(&reg).Error; err != nil {
 		return nil, err
@@ -661,6 +672,8 @@ const (
 	dns1123SubdomainFmt = `[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*`
 
 	dns1123SubdomainErrMsg = `a DNS-1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character`
+
+	maxLabelsPerNode = 64
 )
 
 var (
@@ -669,6 +682,9 @@ var (
 )
 
 func validateNodeLabels(labels map[string]string) error {
+	if len(labels) > maxLabelsPerNode {
+		return fmt.Errorf("a node cannot have more than %d labels, got %d", maxLabelsPerNode, len(labels))
+	}
 	for k, v := range labels {
 		if errs := isQualifiedLabelKey(k); len(errs) != 0 {
 			return fmt.Errorf("label key %q is invalid: %s", k, strings.Join(errs, ", "))

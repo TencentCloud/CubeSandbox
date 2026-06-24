@@ -5,6 +5,7 @@
 package nodemeta
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -147,6 +148,17 @@ func TestValidateNodeLabels(t *testing.T) {
 		{
 			name:   "value with dots and dashes valid",
 			labels: map[string]string{"env": "prod-west.zone1"},
+		},
+		{
+			name: "too many labels rejected",
+			labels: func() map[string]string {
+				m := make(map[string]string, 65)
+				for i := 0; i < 65; i++ {
+					m[fmt.Sprintf("k%d", i)] = "v"
+				}
+				return m
+			}(),
+			wantErr: "a node cannot have more than 64 labels",
 		},
 	}
 
