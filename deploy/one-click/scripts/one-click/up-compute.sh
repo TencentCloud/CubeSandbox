@@ -62,13 +62,13 @@ start_with_pidfile \
 
 refresh_pidfile_from_pattern "cubelet" "^${CUBELET_BIN} --config" 10 1 || log "cubelet pidfile refresh skipped"
 
-for _ in {1..30}; do
-  if "${SCRIPT_DIR}/quickcheck.sh" >/dev/null 2>&1; then
-    "${SCRIPT_DIR}/quickcheck.sh"
-    log "compute services ready"
-    exit 0
-  fi
-  sleep 2
-done
+# quickcheck.sh now waits for each runtime signal to become ready within a single
+# shared budget (CUBE_QUICKCHECK_READY_TIMEOUT), so a single invocation is
+# already race-tolerant. Do NOT wrap it in an outer retry loop: that would
+# multiply quickcheck's budget on a genuinely broken node.
+if "${SCRIPT_DIR}/quickcheck.sh"; then
+  log "compute services ready"
+  exit 0
+fi
 
 die "compute services did not become ready, check logs under ${LOG_DIR}"
