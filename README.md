@@ -52,9 +52,11 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
       </a>
     </td>
     <td valign="top">
-      <strong>CubeEgress security proxy</strong><br/>
-      CubeSandbox 0.4.0 introduces <b>CubeEgress</b>, an OpenResty-based egress gateway for credential injection, domain filtering, and access auditing. Also new: container log forwarding (<code>cubecli cubebox logs</code>) and component version management. 58 commits, 15 contributors.
-      <a href="./docs/changelog/v0.4.0.md">Changelog →</a>
+      <strong>v0.4: Safer egress, easier ops</strong><br/>
+      <b>Credential vault</b> — Agents call external APIs as usual; keys never enter the sandbox. <b>Dashboard</b> — version matrix and template health checks; see at a glance whether templates need rebuilding after upgrades.<br/>
+      <a href="./docs/changelog/v0.4.0.md">Changelog →</a> ·
+      <a href="./docs/guide/security-proxy.md">Security proxy guide →</a> ·
+      <a href="./docs/guide/webui.md">WebUI guide →</a>
     </td>
   </tr>
   <tr>
@@ -83,18 +85,77 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
   </tr>
 </table>
 
+## Product Highlights
+
+<table align="center">
+  <tr align="center" valign="top">
+    <td width="33%">
+      <strong>⚡ Sub-60ms boot · High density</strong><br/><br/>
+      Average &lt;60ms cold start, &lt;5MB overhead per instance — run thousands of Agents on one node<br/><br/>
+      <a href="./docs/guide/quickstart.md">Quick start →</a>
+    </td>
+    <td width="33%">
+      <strong>🔒 Hardware-level isolation</strong><br/><br/>
+      Each sandbox gets its own Guest OS kernel — no Docker shared-kernel escapes; run untrusted LLM-generated code safely<br/><br/>
+      <a href="./docs/architecture/overview.md">Architecture →</a>
+    </td>
+    <td width="33%">
+      <strong>🔌 Seamless E2B migration</strong><br/><br/>
+      Native E2B SDK compatibility — swap one URL env var, zero business code changes<br/><br/>
+      <a href="./docs/guide/tutorials/examples.md">Examples →</a>
+    </td>
+  </tr>
+  <tr align="center" valign="top">
+    <td width="33%">
+      <strong>🖥️ Web console</strong><br/><br/>
+      Manage sandboxes, templates, nodes, and version matrix in the browser — open <code>:12088</code> right after install<br/><br/>
+      <a href="./docs/guide/webui.md">WebUI guide →</a>
+    </td>
+    <td width="33%">
+      <strong>🔐 Credential vault</strong><br/><br/>
+      Agents call LLMs and external APIs as usual — keys never enter the sandbox, model context, or logs<br/><br/>
+      <a href="./docs/guide/security-proxy.md">Security proxy guide →</a>
+    </td>
+    <td width="33%">
+      <strong>🛡️ Egress control</strong><br/><br/>
+      Domain allowlists, instant block on unauthorized egress, full audit logs for compliance<br/><br/>
+      <a href="./docs/guide/security-proxy.md">Security proxy guide →</a>
+    </td>
+  </tr>
+  <tr align="center" valign="top">
+    <td width="33%">
+      <strong>📸 Snapshot · Clone · Rollback</strong><br/><br/>
+      Hundred-millisecond checkpoints on running sandboxes — roll back or fork from any saved state<br/><br/>
+      <a href="./docs/changelog/v0.3.0.md">v0.3 changelog →</a>
+    </td>
+    <td width="33%">
+      <strong>📦 Template system</strong><br/><br/>
+      Turn OCI images into templates in one step, install official presets from the Template Store, auto-distribute across nodes<br/><br/>
+      <a href="./docs/guide/templates.md">Templates guide →</a>
+    </td>
+    <td width="33%">
+      <strong>🤖 AgentHub digital assistants</strong><br/><br/>
+      Spin up OpenClaw assistants in one click — snapshots, rollback, and assistant template publishing<br/><br/>
+      <a href="./docs/guide/digital-assistant.md">Digital assistant →</a>
+    </td>
+  </tr>
+</table>
+
 ## Demos
 
 <table align="center">
   <tr align="center" valign="middle">
-    <td width="33%" valign="middle">
+    <td width="25%" valign="middle">
       <video src="https://github.com/user-attachments/assets/f87c409e-29fc-4e86-9eac-dbeaff2aca18" controls="controls" muted="muted" style="max-width: 100%;"></video>
     </td>
-    <td width="33%" valign="middle">
+    <td width="25%" valign="middle">
       <video src="https://github.com/user-attachments/assets/50e7126e-bb73-4abc-aa85-677fdf2e8c67" controls="controls" muted="muted" style="max-width: 100%;"></video>
     </td>
-    <td width="33%" valign="middle">
+    <td width="25%" valign="middle">
       <video src="https://github.com/user-attachments/assets/052e0e77-e2d9-409e-90b8-d13c28b80495" controls="controls" muted="muted" style="max-width: 100%;"></video>
+    </td>
+    <td width="25%" valign="middle">
+      <video src="https://github.com/user-attachments/assets/c8845a84-5792-4062-ae9d-4787c24f5a58" controls="controls" muted="muted" style="max-width: 100%;"></video>
     </td>
   </tr>
   <tr align="center" valign="top">
@@ -107,20 +168,12 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
     <td>
       <em>RL (SWE-Bench)</em>
     </td>
+    <td>
+      <em>Snapshot · Clone · Rollback</em>
+    </td>
   </tr>
 </table>
 
-
-## Core Highlights
-
-- **Blazing-fast cold start:** Built on resource pool pre-provisioning and snapshot cloning technology, skipping time-consuming initialization entirely. Average end-to-end cold start time for a fully serviceable sandbox is < 60ms.
-- **High-density deployment on a single node:** Extreme memory reuse via CoW technology combined with a Rust-rebuilt, aggressively trimmed runtime keeps per-instance memory overhead below 5MB — run thousands of Agents on a single machine.
-- **True kernel-level isolation:** No more unsafe Docker shared-kernel (Namespace) hacks. Each Agent runs with its own dedicated Guest OS kernel, eliminating container escape risks and enabling safe execution of any LLM-generated code.
-- **Zero-cost migration (E2B drop-in replacement):** Natively compatible with the E2B SDK interface. Just swap one URL environment variable — no business logic changes needed — to migrate from expensive closed-source sandboxes to free Cube Sandbox with better performance.
-- **Network security:** CubeVS, powered by eBPF, enforces strict inter-sandbox network isolation at the kernel level with fine-grained egress traffic filtering policies.
-- **Ready to use out of the box:** One-click deployment with support for both single-node and cluster setups.
-- **Event-level snapshot rollback:** High-frequency snapshot rollback at millisecond granularity. Create checkpoints on running sandboxes, roll back to any saved state, or fork into parallel exploration environments from any saved state.
-- **Production-ready:** Cube Sandbox has been validated at scale in Tencent Cloud production environments, proven stable and reliable.
 
 ## Benchmarks
 
@@ -164,10 +217,9 @@ For detailed metrics on startup latency and resource overhead, please refer to:
   </tr>
 </table>
 
+## Quick Start
 
 </br>
-
-## Quick Start
 
 <p align="center">
   <img src="docs/assets/fast-start.gif" alt="Cube Sandbox fast start walkthrough" width="720" />
@@ -242,14 +294,40 @@ The guide walks you through everything in **four steps** — provisioning a serv
   </tr>
 </table>
 
-### Deep Dive
+### First thing after install: open the Web console
 
-- 📖 [Documentation Home](./docs/index.md) - Complete guide and API reference
-- 🔧 [Template Concepts](./docs/guide/templates.md) - Image-to-Template concepts and workflows
-- 🌟 [Example Projects](./docs/guide/tutorials/examples.md) - Hands-on examples (code execution, browser automation, OpenClaw integration, RL training, etc.)
-- 📂 [`examples/`](./examples/) - Runnable example code covering Shell commands, file operations, network policies, pause/resume, and more
-- 💻 [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) - No KVM? Spin up a disposable VM and run Cube Sandbox inside it
-- ☁️ [PVM Deployment](./docs/guide/pvm-deploy.md) - Deploy on ordinary cloud VMs without bare-metal or nested virtualization
+<p align="center">
+  <img src="docs/assets/webui-demo.gif" alt="WebUI console walkthrough" width="720" />
+</p>
+
+<p align="center">
+  <em>🖥️ Visual management — from overview to creating a sandbox and streaming logs, all in your browser.</em>
+</p>
+
+After one-click deployment, open in your browser:
+
+```
+http://<control-node IP>:12088
+```
+
+**Recommended three steps:**
+
+1. **Check overview** — Open **Overview**, confirm nodes are Ready and capacity looks healthy
+2. **Prepare a template** — Install an official preset from **Template Store**; skip if you already have a `READY` template under **Templates**
+3. **Create a sandbox** — **Sandboxes → + New sandbox**, pick a `READY` template, and view live logs on the detail page within seconds
+
+See the full [WebUI console guide](./docs/guide/webui.md).
+
+## Deep Dive
+
+- [Documentation Home](./docs/index.md) — complete guide navigation
+- ☁️ [PVM Deployment](./docs/guide/pvm-deploy.md) — deploy on ordinary cloud VMs without bare metal or nested virtualization
+- [Template Concepts](./docs/guide/templates.md) — image-to-template concepts and workflows
+- [Example Projects](./docs/guide/tutorials/examples.md) — hands-on examples (code execution, browser automation, OpenClaw integration, RL training, and more)
+- 🖥️ [WebUI Console](./docs/guide/webui.md) — visual management right after install (`:12088`)
+- 🔐 [Security Proxy & Credential Vault](./docs/guide/security-proxy.md) — CubeEgress domain filtering, injection, and auditing
+- 🤖 [Digital Assistant AgentHub](./docs/guide/digital-assistant.md) — create and manage OpenClaw assistants (Preview)
+- 💻 [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) — no KVM access? Try Cube Sandbox inside a disposable OpenCloudOS 9 VM
 
 ## Architecture
 
@@ -264,13 +342,14 @@ The guide walks you through everything in **four steps** — provisioning a serv
 | **CubeProxy** | Reverse proxy, compatible with the E2B protocol, routing requests to the appropriate sandbox instances. |
 | **Cubelet** | Compute node local scheduling component. Manages the complete lifecycle of all sandbox instances on the node. |
 | **CubeVS** | eBPF-based virtual switch, providing kernel-level network isolation and security policy enforcement. |
+| **CubeEgress** | OpenResty-based egress security gateway: L7 domain filtering, credential injection, and access auditing; works with CubeVS kernel policies so sandbox traffic cannot bypass inspection. |
 | **CubeHypervisor & CubeShim** | Virtualization layer — CubeHypervisor manages KVM MicroVMs, CubeShim implements the containerd Shim v2 API to integrate sandboxes into the container runtime. |
 
 👉 For more details, please read the [Architecture Design Document](./docs/architecture/overview.md) and [CubeVS Network Model](./docs/architecture/network.md).
 
 ## Community & Contributing
 
-We welcome contributions of all kinds—whether it’s a bug report, feature suggestion, documentation improvement, or code submission!
+We welcome contributions of all kinds—whether it's a bug report, feature suggestion, documentation improvement, or code submission!
 
 - 🐞 **Found a Bug or have questions?** Submit an issue on <a href="https://github.com/tencentcloud/CubeSandbox/issues" target="_blank">GitHub Issues</a>.
 - 💡 **Have an Idea?** Join the conversation in <a href="https://github.com/tencentcloud/CubeSandbox/discussions" target="_blank">GitHub Discussions</a>.
