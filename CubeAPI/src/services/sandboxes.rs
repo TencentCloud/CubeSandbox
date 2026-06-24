@@ -10,16 +10,17 @@ use super::validate_allow_out_domains_require_deny_all;
 use crate::{
     constants::ENVD_VERSION,
     cubemaster::{
-        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
-        CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
-        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
-        SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest,
+        datetime_from_unix_nanos, extract_template_id, ContainerSpec, CreateSandboxRequest,
+        CubeEgressRule, CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch,
+        CubeMasterClient, CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, EnvVar,
+        ImageSpec, ListSandboxRequest, SandboxInfo, SandboxLogsRequest, SandboxRefreshRequest,
+        SandboxStatus, SandboxTimeoutRequest, SandboxUpdateRequest,
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        EgressRule, EnvVars, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail,
+        SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
+        SandboxState,
     },
 };
 
@@ -161,7 +162,7 @@ impl SandboxService {
             labels,
             distribution_scope: body.distribution_scope,
             volumes: None,
-            containers: vec![],
+            containers: build_env_container(body.env_vars),
             exposed_ports: vec![],
             network_type: Some("tap".to_string()),
             cube_network_config,
@@ -704,6 +705,49 @@ pub(crate) fn build_cube_network_config(
     }))
 }
 
+/// Build the single-container payload that carries the user-supplied env vars
+/// down to CubeMaster.
+///
+/// Each sandbox is modelled as one container. The env vars are attached to that
+/// container's `envs` and every other field is left empty:
+///   - The empty `image` is overwritten with the template image by CubeMaster's
+///     `applyTemplateToContainer`, after which Cubelet resolves the image config.
+///   - Empty `command`/`args` fall back to the image `Entrypoint`/`Cmd` inside
+///     Cubelet's `command.WithProcessArgs`, so the entrypoint (cube-entrypoint.sh)
+///     still runs and envd still starts.
+/// With no env vars we return an empty list, preserving the prior behaviour
+/// where `containers` was an empty `vec![]`.
+pub(crate) fn build_env_container(env_vars: Option<EnvVars>) -> Vec<ContainerSpec> {
+    let Some(vars) = env_vars else {
+        return Vec::new();
+    };
+    if vars.is_empty() {
+        return Vec::new();
+    }
+    let envs = vars
+        .into_iter()
+        .map(|(key, value)| EnvVar { key, value })
+        .collect();
+    vec![ContainerSpec {
+        name: None,
+        image: ImageSpec {
+            image: String::new(),
+            storage_media: None,
+        },
+        command: None,
+        args: None,
+        working_dir: None,
+        resources: None,
+        envs: Some(envs),
+        volume_mounts: None,
+        dns_config: None,
+        r_limit: None,
+        security_context: None,
+        probe: None,
+        annotations: None,
+    }]
+}
+
 fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
     CubeEgressRule {
         name: rule.name.clone(),
@@ -734,12 +778,50 @@ fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{build_cube_network_config, filter_by_metadata, from_cubemaster_info};
+    use super::{
+        build_cube_network_config, build_env_container, filter_by_metadata, from_cubemaster_info,
+    };
     use crate::cubemaster::{CreateSandboxRequest, ListSandboxResponse, SandboxInfo};
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, SandboxNetworkConfig,
         SandboxState,
     };
+
+    #[test]
+    fn env_container_is_empty_when_no_env_vars() {
+        // No env vars at all (the SDK omits the field) and an explicitly empty
+        // map both keep the prior `containers: vec![]` behaviour.
+        assert!(build_env_container(None).is_empty());
+        assert!(build_env_container(Some(HashMap::new())).is_empty());
+    }
+
+    #[test]
+    fn env_container_wraps_each_var_as_an_envvar() {
+        let vars = HashMap::from([
+            ("API_KEY".to_string(), "sk-123".to_string()),
+            ("DEBUG".to_string(), "true".to_string()),
+        ]);
+
+        let containers = build_env_container(Some(vars));
+        assert_eq!(containers.len(), 1);
+
+        let container = &containers[0];
+        // The image is intentionally empty: CubeMaster's template merge fills it
+        // from the resolved template. command/args stay unset so Cubelet falls
+        // back to the image entrypoint.
+        assert!(container.image.image.is_empty());
+        assert!(container.command.is_none());
+        assert!(container.args.is_none());
+
+        let envs = container.envs.as_ref().expect("envs should be set");
+        assert_eq!(envs.len(), 2);
+        let lookup: HashMap<&str, &str> = envs
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_str()))
+            .collect();
+        assert_eq!(lookup.get("API_KEY").copied(), Some("sk-123"));
+        assert_eq!(lookup.get("DEBUG").copied(), Some("true"));
+    }
 
     #[test]
     fn metadata_filter_matches_all_pairs() {
@@ -983,6 +1065,7 @@ mod tests {
             timeout: Some(60),
             annotations: HashMap::new(),
             labels: None,
+            distribution_scope: None,
             volumes: None,
             containers: vec![],
             exposed_ports: vec![],
