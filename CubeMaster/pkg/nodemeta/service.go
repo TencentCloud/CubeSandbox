@@ -625,15 +625,14 @@ func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
 // (SELECT ... FOR UPDATE) inside an ongoing transaction, preventing concurrent
 // read-modify-write races on the same node's labels.
 func readLabelsJSONForUpdate(tx *gorm.DB, nodeID string) (map[string]string, error) {
-	var raw string
-	if err := tx.Raw(
-		"SELECT labels_json FROM "+constants.NodeMetaRegistrationTable+" WHERE node_id = ? FOR UPDATE",
-		nodeID,
-	).Scan(&raw).Error; err != nil {
+	var reg models.NodeRegistration
+	if err := tx.Table(constants.NodeMetaRegistrationTable).
+		Where("node_id = ?", nodeID).
+		Take(&reg).Error; err != nil {
 		return nil, err
 	}
 	m := map[string]string{}
-	err := json.Unmarshal([]byte(raw), &m)
+	err := json.Unmarshal([]byte(reg.LabelsJSON), &m)
 	if err != nil {
 		return nil, err
 	}
