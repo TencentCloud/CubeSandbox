@@ -121,7 +121,7 @@ func (s *internalHttp) registerHandlers() {
 	metaGroup.HandleFunc(metahttp.NodeAction(), metahttp.GetNodeHandler).Methods(http.MethodGet)
 	metaGroup.HandleFunc(metahttp.NodeStatusAction(), metahttp.UpdateNodeStatusHandler).Methods(http.MethodPost)
 	metaGroup.HandleFunc(metahttp.NodeLabelsAction(), metahttp.UpdateNodeLabelsHandler).Methods(http.MethodPost)
-	metaGroup.HandleFunc(metahttp.NodeLabelKeyAction(), metahttp.DeleteNodeLabelHandler).Methods(http.MethodDelete)
+	metaGroup.HandleFunc(metahttp.NodeLabelsAction(), metahttp.DeleteNodeLabelHandler).Methods(http.MethodDelete)
 }
 
 func (s *internalHttp) Start() error {

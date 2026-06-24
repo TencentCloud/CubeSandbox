@@ -225,7 +225,10 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 
 	// Read existing labels from DB, merge cubelet labels (cubelet wins on conflict),
 	// then write back the merged result.
-	existing := global.readLabelsJSON(req.NodeID)
+	existing, err := global.readLabelsJSON(req.NodeID)
+	if err != nil {
+		return nil, err
+	}
 	for k, v := range req.Labels {
 		existing[k] = v
 	}
@@ -549,25 +552,30 @@ func UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]stri
 		return err
 	}
 
-	existing := global.readLabelsJSON(nodeID)
-	for k, v := range labels {
-		existing[k] = v
-	}
-	if err := global.db.Table(constants.NodeMetaRegistrationTable).
-		Where("node_id = ?", nodeID).
-		Updates(map[string]interface{}{
-			"labels_json": mustJSON(existing),
-			"updated_at":  time.Now(),
-		}).Error; err != nil {
-		return err
-	}
+	return global.db.Transaction(func(tx *gorm.DB) error {
+		existing, err := readLabelsJSONForUpdate(tx, nodeID)
+		if err != nil {
+			return err
+		}
+		for k, v := range labels {
+			existing[k] = v
+		}
+		if err := tx.Table(constants.NodeMetaRegistrationTable).
+			Where("node_id = ?", nodeID).
+			Updates(map[string]interface{}{
+				"labels_json": mustJSON(existing),
+				"updated_at":  time.Now(),
+			}).Error; err != nil {
+			return err
+		}
 
-	snap := global.ensureNode(nodeID)
-	global.mu.Lock()
-	snap.Labels = cloneStringMap(existing)
-	global.mu.Unlock()
-	syncLocalcache(snap)
-	return nil
+		snap := global.ensureNode(nodeID)
+		global.mu.Lock()
+		snap.Labels = cloneStringMap(existing)
+		global.mu.Unlock()
+		syncLocalcache(snap)
+		return nil
+	})
 }
 
 func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
@@ -581,38 +589,61 @@ func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
 		return fmt.Errorf("label key %q is reserved for system use and cannot be deleted", key)
 	}
 
-	existing := global.readLabelsJSON(nodeID)
-	delete(existing, key)
-	if err := global.db.Table(constants.NodeMetaRegistrationTable).
-		Where("node_id = ?", nodeID).
-		Updates(map[string]interface{}{
-			"labels_json": mustJSON(existing),
-			"updated_at":  time.Now(),
-		}).Error; err != nil {
-		return err
-	}
+	return global.db.Transaction(func(tx *gorm.DB) error {
+		existing, err := readLabelsJSONForUpdate(tx, nodeID)
+		if err != nil {
+			return err
+		}
+		delete(existing, key)
+		if err := tx.Table(constants.NodeMetaRegistrationTable).
+			Where("node_id = ?", nodeID).
+			Updates(map[string]interface{}{
+				"labels_json": mustJSON(existing),
+				"updated_at":  time.Now(),
+			}).Error; err != nil {
+			return err
+		}
 
-	snap := global.ensureNode(nodeID)
-	global.mu.Lock()
-	snap.Labels = existing
-	global.mu.Unlock()
-	syncLocalcache(snap)
-	return nil
+		snap := global.ensureNode(nodeID)
+		global.mu.Lock()
+		snap.Labels = cloneStringMap(existing)
+		global.mu.Unlock()
+		syncLocalcache(snap)
+		return nil
+	})
+}
+
+// readLabelsJSONForUpdate reads the labels_json column with a row-level lock
+// (SELECT ... FOR UPDATE) inside an ongoing transaction, preventing concurrent
+// read-modify-write races on the same node's labels.
+func readLabelsJSONForUpdate(tx *gorm.DB, nodeID string) (map[string]string, error) {
+	var raw string
+	if err := tx.Raw(
+		"SELECT labels_json FROM "+constants.NodeMetaRegistrationTable+" WHERE node_id = ? FOR UPDATE",
+		nodeID,
+	).Scan(&raw).Error; err != nil {
+		return nil, err
+	}
+	m := map[string]string{}
+	_ = json.Unmarshal([]byte(raw), &m)
+	return m, nil
 }
 
 // readLabelsJSON reads the labels_json column for a node and returns it as a map.
-// Returns an empty map (not nil) if the row is missing or the column is empty.
-func (s *service) readLabelsJSON(nodeID string) map[string]string {
+// Returns an empty map (not nil) if the column is empty. Returns an error if the
+// DB read itself fails, so callers never accidentally persist an empty map on
+// transient failures.
+func (s *service) readLabelsJSON(nodeID string) (map[string]string, error) {
 	var raw string
 	if err := s.db.Table(constants.NodeMetaRegistrationTable).
 		Select("labels_json").
 		Where("node_id = ?", nodeID).
 		Scan(&raw).Error; err != nil {
-		return map[string]string{}
+		return nil, err
 	}
 	m := map[string]string{}
 	_ = json.Unmarshal([]byte(raw), &m)
-	return m
+	return m, nil
 }
 
 // Label validation follows Kubernetes conventions.

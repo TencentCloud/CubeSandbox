@@ -23,7 +23,6 @@ const (
 	nodeAction          = "/nodes/{node_id}"
 	nodeStatusAction    = "/nodes/{node_id}/status"
 	nodeLabelsAction    = "/nodes/{node_id}/labels"
-	nodeLabelKeyAction  = "/nodes/{node_id}/labels/{key}"
 	versionMatrixAction = "/version-matrix"
 )
 
@@ -75,10 +74,6 @@ func VersionMatrixAction() string {
 
 func NodeLabelsAction() string {
 	return nodeLabelsAction
-}
-
-func NodeLabelKeyAction() string {
-	return nodeLabelKeyAction
 }
 
 func ReadyzHandler(w http.ResponseWriter, r *http.Request) {
@@ -188,7 +183,7 @@ func UpdateNodeLabelsHandler(w http.ResponseWriter, r *http.Request) {
 
 func DeleteNodeLabelHandler(w http.ResponseWriter, r *http.Request) {
 	nodeID := mux.Vars(r)["node_id"]
-	key := mux.Vars(r)["key"]
+	key := r.URL.Query().Get("key")
 	if err := nodemeta.DeleteNodeLabel(r.Context(), nodeID, key); err != nil {
 		writeErr(w, http.StatusOK, err)
 		return
