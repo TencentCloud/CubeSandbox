@@ -177,7 +177,12 @@ impl SandboxService {
 
         resp.ret.into_result().map_err(internal_error)?;
 
-        Ok(self.sandbox_response(template_id, resp.sandbox_id, resp.request_id))
+        Ok(self.sandbox_response(
+            template_id,
+            resp.sandbox_id,
+            resp.request_id,
+            resp.traffic_access_token,
+        ))
     }
 
     pub async fn kill_sandbox(&self, sandbox_id: &str) -> AppResult<()> {
@@ -233,7 +238,11 @@ impl SandboxService {
         )?;
 
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
-        Ok(self.sandbox_response(d.template_id, sandbox_id.to_string(), d.host_id))
+        // resume/connect paths reload the sandbox via fetch_sandbox_detail,
+        // which does not surface the traffic_access_token. The token only
+        // matters at create time (so the caller can persist it); afterward
+        // CubeProxy reads it directly from Redis. None here is correct.
+        Ok(self.sandbox_response(d.template_id, sandbox_id.to_string(), d.host_id, None))
     }
 
     pub async fn connect_sandbox(&self, sandbox_id: &str, timeout: i32) -> AppResult<Sandbox> {
@@ -256,7 +265,7 @@ impl SandboxService {
             d = self.fetch_sandbox_detail(sandbox_id).await?;
         }
 
-        Ok(self.sandbox_response(d.template_id, sandbox_id.to_string(), d.host_id))
+        Ok(self.sandbox_response(d.template_id, sandbox_id.to_string(), d.host_id, None))
     }
 
     pub async fn get_logs(
@@ -447,6 +456,7 @@ impl SandboxService {
         template_id: String,
         sandbox_id: String,
         client_id: String,
+        traffic_access_token: Option<String>,
     ) -> Sandbox {
         Sandbox {
             template_id,
@@ -455,7 +465,9 @@ impl SandboxService {
             client_id,
             envd_version: ENVD_VERSION.to_string(),
             envd_access_token: None,
-            traffic_access_token: None,
+            // Empty string from CubeMaster (publicly reachable sandbox) is
+            // normalized to None so the JSON field is omitted on the wire.
+            traffic_access_token: traffic_access_token.filter(|s| !s.is_empty()),
             domain: Some(self.sandbox_domain.clone()),
         }
     }
@@ -688,7 +700,10 @@ pub(crate) fn build_cube_network_config(
         .map(|rs| rs.iter().map(map_egress_rule).collect())
         .unwrap_or_default();
 
+    let allow_public_traffic = network.and_then(|n| n.allow_public_traffic);
+
     if allow_internet_access.is_none()
+        && allow_public_traffic.is_none()
         && allow_out.is_empty()
         && deny_out.is_empty()
         && rules.is_empty()
@@ -698,6 +713,7 @@ pub(crate) fn build_cube_network_config(
 
     Ok(Some(CubeNetworkConfig {
         allow_internet_access,
+        allow_public_traffic,
         allow_out,
         deny_out,
         rules,

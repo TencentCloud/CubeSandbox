@@ -123,6 +123,7 @@ hello cube
 | `network_no_internet.py` | `allow_internet_access=False` — 完全断网沙箱 |
 | `network_allowlist.py` | `allow_out` — 白名单 CIDR，拦截其余所有出口 |
 | `network_denylist.py` | `deny_out` — 黑名单 CIDR，其余放行 |
+| `restrict_public_access.py` | `network={"allow_public_traffic": False}` — 公网 URL 必须携带 per-sandbox token 才可访问 |
 
 ### exec_code.py — 运行 Python 代码
 
@@ -183,6 +184,31 @@ python network_allowlist.py
 python network_denylist.py
 ```
 
+### restrict_public_access.py — 限制公网 URL 访问
+
+默认情况下沙箱的公网 URL 任何知道地址的人都可访问。对敏感场景，可以在创建沙箱时
+传入 `network={"allow_public_traffic": False}`：CubeMaster 会为该沙箱签发一个
+`traffic_access_token`，CubeProxy 随后会拒绝所有未携带该 token 的请求
+（参考 [e2b 文档](https://e2b.dev/docs/network/restrict-public-access)）。
+请求方可以使用以下任一 header：
+
+- `e2b-traffic-access-token`（与 E2B 完全兼容）
+- `cube-traffic-access-token`（CubeSandbox 原生别名）
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    network={"allow_public_traffic": False},
+)
+url = f"http://{sandbox.get_host(80)}/"
+
+# 不带 token → 403
+requests.get(url)
+
+# 带 token → 200
+requests.get(url, headers={"e2b-traffic-access-token": sandbox.traffic_access_token})
+```
+
 ## 5. 常见问题
 
 | 现象 | 可能原因 | 解决方法 |
@@ -207,6 +233,7 @@ code-sandbox-quickstart/
 ├── network_no_internet.py     # 完全断网沙箱
 ├── network_allowlist.py       # 出口 CIDR 白名单
 ├── network_denylist.py        # 出口 CIDR 黑名单
+├── restrict_public_access.py  # 公网 URL 鉴权 token
 ├── requirements.txt           # Python 依赖
 └── .env.example               # 环境变量模板
 ```

@@ -92,12 +92,15 @@ func (r *CreateCubeSandboxReq) UnmarshalJSON(data []byte) error {
 
 type CreateCubeSandboxRes struct {
 	RequestID string
-	Ret       *Ret              `json:"ret,omitempty"`
-	SandboxID string            `json:"sandbox_id,omitempty"`
-	SandboxIP string            `json:"sandbox_ip,omitempty"`
-	HostID    string            `json:"host_id,omitempty"`
-	HostIP    string            `json:"host_ip,omitempty"`
-	ExtInfo   map[string]string `json:"ext_info,omitempty"`
+	Ret       *Ret   `json:"ret,omitempty"`
+	SandboxID string `json:"sandbox_id,omitempty"`
+	SandboxIP string `json:"sandbox_ip,omitempty"`
+	HostID    string `json:"host_id,omitempty"`
+	HostIP    string `json:"host_ip,omitempty"`
+	// TrafficAccessToken is populated only when the request set
+	// CubeNetworkConfig.AllowPublicTraffic = false. Empty otherwise.
+	TrafficAccessToken string            `json:"traffic_access_token,omitempty"`
+	ExtInfo            map[string]string `json:"ext_info,omitempty"`
 }
 
 type Resource struct {
@@ -115,10 +118,15 @@ type RequestLimit struct {
 }
 
 type CubeNetworkConfig struct {
-	AllowInternetAccess *bool         `json:"allowInternetAccess,omitempty"`
-	AllowOut            []string      `json:"allowOut,omitempty"`
-	DenyOut             []string      `json:"denyOut,omitempty"`
-	Rules               []*EgressRule `json:"rules,omitempty"`
+	AllowInternetAccess *bool `json:"allowInternetAccess,omitempty"`
+	// AllowPublicTraffic gates inbound public-URL access. nil leaves the
+	// server-side default (true / publicly reachable). false makes the
+	// sandbox require a matching traffic-access-token header on every
+	// request hitting CubeProxy. See plan/restrict-public-access.md.
+	AllowPublicTraffic *bool         `json:"allowPublicTraffic,omitempty"`
+	AllowOut           []string      `json:"allowOut,omitempty"`
+	DenyOut            []string      `json:"denyOut,omitempty"`
+	Rules              []*EgressRule `json:"rules,omitempty"`
 }
 
 // EgressRule is an L7 egress rule, evaluated first-match-wins.

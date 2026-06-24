@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/gomodule/redigo/redis"
@@ -365,6 +366,18 @@ func (l *local) getByPassProsyFromRedis(ctx context.Context, key string) (*types
 		nodeIdIp.SandboxIP = sandboxIP
 		delete(mapvalues, "SandboxIP")
 	}
+	if v, ok := mapvalues["AllowPublicTraffic"]; ok {
+		// Missing field on legacy entries is treated as the historical
+		// default (true / publicly reachable).
+		nodeIdIp.AllowPublicTraffic, _ = strconv.ParseBool(v)
+		delete(mapvalues, "AllowPublicTraffic")
+	} else {
+		nodeIdIp.AllowPublicTraffic = true
+	}
+	if v, ok := mapvalues["TrafficAccessToken"]; ok {
+		nodeIdIp.TrafficAccessToken = v
+		delete(mapvalues, "TrafficAccessToken")
+	}
 
 	if len(mapvalues) == 0 {
 		log.G(ctx).Warnf("key: %s,has no ContainerToHostPorts", key)
@@ -425,9 +438,16 @@ func (l *local) setByPassProsyToRedis(ctx context.Context, key string, byPassPro
 	fieldValues := []interface{}{
 		"HostIP", byPassProsy.HostIP,
 		"CreatedAt", byPassProsy.CreatedAt,
+		// Always written so CubeProxy can distinguish "explicit public" from
+		// a legacy entry written before this field existed (legacy → field
+		// missing → treated as public).
+		"AllowPublicTraffic", strconv.FormatBool(byPassProsy.AllowPublicTraffic),
 	}
 	if byPassProsy.SandboxIP != "" {
 		fieldValues = append(fieldValues, "SandboxIP", byPassProsy.SandboxIP)
+	}
+	if byPassProsy.TrafficAccessToken != "" {
+		fieldValues = append(fieldValues, "TrafficAccessToken", byPassProsy.TrafficAccessToken)
 	}
 	for k, v := range byPassProsy.ContainerToHostPorts {
 		fieldValues = append(fieldValues, k, v)

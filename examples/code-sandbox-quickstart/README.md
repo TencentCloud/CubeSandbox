@@ -128,6 +128,7 @@ hello cube
 | `network_no_internet.py` | `allow_internet_access=False` — fully air-gapped sandbox |
 | `network_allowlist.py` | `allow_out` — whitelist specific CIDRs, block everything else |
 | `network_denylist.py` | `deny_out` — block specific CIDRs, allow the rest |
+| `restrict_public_access.py` | `network={"allow_public_traffic": False}` — require a per-sandbox token on every public-URL request |
 
 ### exec_code.py — Run Python Code
 
@@ -189,6 +190,31 @@ python network_allowlist.py
 python network_denylist.py
 ```
 
+### restrict_public_access.py — Require a Token on Every Public-URL Request
+
+By default a sandbox's public URL is reachable by anyone who knows it. For
+sensitive workloads, set `network={"allow_public_traffic": False}` at create
+time. CubeMaster issues a per-sandbox `traffic_access_token`; CubeProxy then
+rejects every request that doesn't carry it in either of these headers
+([reference](https://e2b.dev/docs/network/restrict-public-access)):
+
+- `e2b-traffic-access-token` (E2B-compatible)
+- `cube-traffic-access-token` (CubeSandbox-native alias)
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    network={"allow_public_traffic": False},
+)
+url = f"http://{sandbox.get_host(80)}/"
+
+# Without the token → 403
+requests.get(url)
+
+# With the token → 200
+requests.get(url, headers={"e2b-traffic-access-token": sandbox.traffic_access_token})
+```
+
 ## 5. Troubleshooting
 
 | Symptom | Likely Cause | Fix |
@@ -213,6 +239,7 @@ code-sandbox-quickstart/
 ├── network_no_internet.py     # Fully air-gapped sandbox
 ├── network_allowlist.py       # Outbound CIDR allowlist
 ├── network_denylist.py        # Outbound CIDR denylist
+├── restrict_public_access.py  # Token-gated public URL access
 ├── requirements.txt           # Python dependencies
 └── .env.example               # Environment variable template
 ```

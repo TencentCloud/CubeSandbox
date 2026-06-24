@@ -269,6 +269,15 @@ func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *t
 		allowInternetAccess := *requestCfg.AllowInternetAccess
 		out.AllowInternetAccess = &allowInternetAccess
 	}
+	// AllowPublicTraffic: per-create override wins over the template. Templates
+	// rarely set this; the request side carries the user's explicit decision
+	// (e2b SDK shape: network.allowPublicTraffic). Without this the request's
+	// false would silently fall back to the template's (usually nil) value and
+	// CubeProxy would never enforce the gate.
+	if requestCfg.AllowPublicTraffic != nil {
+		allowPublicTraffic := *requestCfg.AllowPublicTraffic
+		out.AllowPublicTraffic = &allowPublicTraffic
+	}
 	if len(requestCfg.AllowOut) > 0 {
 		out.AllowOut = appendUniqueCIDRs(out.AllowOut, requestCfg.AllowOut)
 	}
@@ -293,6 +302,10 @@ func cloneCubeNetworkConfig(in *types.CubeNetworkConfig) *types.CubeNetworkConfi
 	if in.AllowInternetAccess != nil {
 		allowInternetAccess := *in.AllowInternetAccess
 		out.AllowInternetAccess = &allowInternetAccess
+	}
+	if in.AllowPublicTraffic != nil {
+		allowPublicTraffic := *in.AllowPublicTraffic
+		out.AllowPublicTraffic = &allowPublicTraffic
 	}
 	return out
 }

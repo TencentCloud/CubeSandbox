@@ -40,12 +40,17 @@ class IPOverrideTransport(httpx.HTTPTransport):
         return super().handle_request(proxied)
 
 
-def build_client(config: Config) -> httpx.Client:
+def build_client(config: Config, headers: dict[str, str] | None = None) -> httpx.Client:
     """Build an httpx client for sandbox stream requests.
 
     When ``config.proxy_node_ip`` is set, all connections are routed directly
     to that IP, bypassing DNS. The ``Host`` header retains the virtual hostname
     so CubeProxy can route to the correct sandbox.
+
+    ``headers`` are set as default headers on the client so they apply to every
+    request without each call site having to pass them. Used to attach the
+    per-sandbox ``e2b-traffic-access-token`` header when the sandbox restricts
+    public traffic.
     """
     if config.proxy_node_ip:
         transport = IPOverrideTransport(config.proxy_node_ip, config.proxy_port)
@@ -56,4 +61,5 @@ def build_client(config: Config) -> httpx.Client:
         transport=transport,
         timeout=httpx.Timeout(connect=config.request_timeout, read=None, write=30, pool=30),
         follow_redirects=True,
+        headers=headers,
     )

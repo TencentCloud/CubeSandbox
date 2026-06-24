@@ -171,6 +171,9 @@ def _envd_rpc_base_url_and_headers(sandbox: "Sandbox") -> tuple[str, dict[str, s
     access_token = sandbox._data.get("envdAccessToken")
     if access_token:
         headers["X-Access-Token"] = access_token
+    traffic_token = sandbox.traffic_access_token
+    if traffic_token:
+        headers["e2b-traffic-access-token"] = traffic_token
 
     if sandbox._config.proxy_node_ip:
         headers["Host"] = sandbox.get_host(ENVD_PORT)

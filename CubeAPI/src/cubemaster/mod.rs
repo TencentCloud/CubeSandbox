@@ -734,6 +734,14 @@ pub struct CubeNetworkConfig {
     )]
     pub allow_internet_access: Option<bool>,
 
+    /// Gate inbound public-URL access. When Some(false), CubeMaster mints a
+    /// per-sandbox traffic_access_token that CubeProxy then enforces via the
+    /// e2b-traffic-access-token / cube-traffic-access-token request headers.
+    /// Omitted on the wire when None to keep request bodies minimal for the
+    /// public-by-default case. Maps to CubeMaster allowPublicTraffic.
+    #[serde(rename = "allowPublicTraffic", skip_serializing_if = "Option::is_none")]
+    pub allow_public_traffic: Option<bool>,
+
     /// Allowed outbound CIDRs whitelist.
     #[serde(rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
     pub allow_out: Vec<String>,
@@ -946,6 +954,12 @@ pub struct CreateSandboxResponse {
     pub request_id: String,
     #[serde(default)]
     pub sandbox_id: String,
+    /// Per-sandbox token CubeProxy enforces against
+    /// e2b-traffic-access-token / cube-traffic-access-token request
+    /// headers. Populated only when the create request set
+    /// allowPublicTraffic = false. Empty/None otherwise.
+    #[serde(default)]
+    pub traffic_access_token: Option<String>,
     pub ret: RetCode,
 }
 

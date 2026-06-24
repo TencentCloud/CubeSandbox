@@ -12,6 +12,37 @@ local redis_keys = require "redis_keys"
 
 local _M = { _VERSION = "0.01" }
 
+-- enforce_traffic_token rejects (403) requests targeting a sandbox whose
+-- AllowPublicTraffic flag is "false" unless the request carries a matching
+-- token in either the e2b-traffic-access-token (E2B-compatible) or
+-- cube-traffic-access-token (CubeSandbox-native) header.
+--
+-- Both args are the raw values stored in Redis (string form). expected_token
+-- being empty while allow_public is "false" indicates a server-side
+-- inconsistency and yields 500 instead of 403, on the principle that
+-- silently letting the request through would be worse.
+local function enforce_traffic_token(allow_public, expected_token, ins_id)
+    if allow_public ~= "false" then
+        return
+    end
+    if utils:is_null(expected_token) then
+        ngx.log(ngx.ERR, "LEVEL_ERROR||",
+            string.format("request %s sandbox %s marked restricted but token missing in metadata",
+                ngx.var.http_x_cube_request_id, ins_id))
+        ngx.var.cube_retcode = "310507"
+        ngx.exit(500)
+    end
+    local provided = ngx.var.http_e2b_traffic_access_token
+                  or ngx.var.http_cube_traffic_access_token
+    if not provided or provided ~= expected_token then
+        ngx.log(ngx.ERR, "LEVEL_WARN||",
+            string.format("request %s sandbox %s traffic token mismatch",
+                ngx.var.http_x_cube_request_id, ins_id))
+        ngx.var.cube_retcode = "310403"
+        ngx.exit(ngx.HTTP_FORBIDDEN)
+    end
+end
+
 local function get_cache_timeout()
     return math.random(tonumber(ngx.var.timeout_min), tonumber(ngx.var.timeout_max))
 end
@@ -93,9 +124,25 @@ function _M.resolve_backend(ins_id, container_port)
     local cache_backend_port_key = string.format("%s:%s:%s", ins_id, container_port, "backend_port")
     local host_ip = cache:get(cache_backend_ip_key)
     local host_port = cache:get(cache_backend_port_key)
-    if host_ip and host_port then
+    if host_ip and host_port
+        and cache:get(ins_id .. ":meta_cached") then
+        -- Cache-hit path must still enforce the per-sandbox traffic token,
+        -- otherwise a single warm entry would let unauthenticated callers
+        -- bypass the gate for the whole cache TTL. The meta_cached sentinel
+        -- shares the TTL of the auth fields; if it is absent the auth
+        -- metadata has expired (or predates this feature), so fall through
+        -- to the Redis reload below instead of trusting a nil that may just
+        -- mean "expired". Refresh the auth keys alongside the backend keys
+        -- so their TTLs never drift apart under steady traffic.
+        local allow_public = cache:get(ins_id .. ":AllowPublicTraffic")
+        local traffic_token = cache:get(ins_id .. ":TrafficAccessToken")
+        enforce_traffic_token(allow_public, traffic_token, ins_id)
+
+        cache:set(ins_id .. ":meta_cached", "1", timeout)
         cache:set(cache_backend_ip_key, host_ip, timeout)
         cache:set(cache_backend_port_key, host_port, timeout)
+        cache:set(ins_id .. ":AllowPublicTraffic", allow_public, timeout)
+        cache:set(ins_id .. ":TrafficAccessToken", traffic_token, timeout)
         return host_ip, host_port
     end
 
@@ -106,6 +153,7 @@ function _M.resolve_backend(ins_id, container_port)
         ngx.exit(500)
     end
 
+    cache:set(ins_id .. ":meta_cached", "1", timeout)
     local metadata_map = {}
     for i = 1, #metadata, 2 do
         local k = metadata[i]
@@ -113,6 +161,15 @@ function _M.resolve_backend(ins_id, container_port)
         metadata_map[k] = v
         cache:set(ins_id .. ":" .. k, v, timeout)
     end
+
+    -- Restrict Public Access: gate the request before exposing any backend
+    -- info. Legacy entries written before this feature have no
+    -- AllowPublicTraffic field, which evaluates as nil here and therefore
+    -- skips enforcement (publicly reachable, the historical default).
+    enforce_traffic_token(
+        metadata_map["AllowPublicTraffic"],
+        metadata_map["TrafficAccessToken"],
+        ins_id)
 
     local target_host_ip = metadata_map["HostIP"]
     local target_sandbox_ip = metadata_map["SandboxIP"]

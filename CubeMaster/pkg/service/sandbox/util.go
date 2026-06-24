@@ -762,6 +762,33 @@ func safePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {
 	return utils.InterfaceToString(tmpReq)
 }
 
+func safePrintCreateCubeSandboxRes(rsp *types.CreateCubeSandboxRes) string {
+	if rsp == nil {
+		return "<nil>"
+	}
+	tmp := &types.CreateCubeSandboxRes{
+		RequestID:          rsp.RequestID,
+		Ret:                rsp.Ret,
+		SandboxID:          rsp.SandboxID,
+		SandboxIP:          rsp.SandboxIP,
+		HostID:             rsp.HostID,
+		HostIP:             rsp.HostIP,
+		TrafficAccessToken: redactToken(rsp.TrafficAccessToken),
+		ExtInfo:            rsp.ExtInfo,
+	}
+	return utils.InterfaceToString(tmp)
+}
+
+// redactToken returns a boolean indicator instead of the raw token value,
+// preserving enough context for log triage ("was a token issued?") without
+// leaking the secret itself.
+func redactToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	return "***REDACTED***"
+}
+
 func simplePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {
 	tmp := types.CreateCubeSandboxReq{
 		Request: req.Request,

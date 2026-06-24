@@ -6,6 +6,8 @@ package sandbox
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -15,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
@@ -131,7 +134,7 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 				"RetCode": int64(rsp.Ret.RetCode),
 			}).Errorf("CreateSandbox_rsp fail:%+v", msg)
 		} else {
-			log.G(ctx).Infof("CreateSandbox_rsp:%s", utils.InterfaceToString(rsp))
+			log.G(ctx).Infof("CreateSandbox_rsp:%s", safePrintCreateCubeSandboxRes(rsp))
 		}
 	}()
 
@@ -521,19 +524,43 @@ func (c *createSandboxContext) setProxyToRedis() error {
 	}
 	switch c.cubeletReq.GetInstanceType() {
 	case cubebox.InstanceType_cubebox.String():
+		// allow_public_traffic defaults to true (publicly reachable) to keep
+		// pre-feature behavior intact. Only an explicit false unlocks the
+		// per-sandbox token flow.
+		allowPublic := true
+		if origReq := createOriginRequestFromContext(c.ctx); origReq != nil &&
+			origReq.CubeNetworkConfig != nil &&
+			origReq.CubeNetworkConfig.AllowPublicTraffic != nil {
+			allowPublic = *origReq.CubeNetworkConfig.AllowPublicTraffic
+		}
+		var token string
+		if !allowPublic {
+			sum := sha256.Sum256([]byte(uuid.NewString()))
+			token = hex.EncodeToString(sum[:])
+		}
+
 		proxy := &proxytypes.SandboxProxyMap{
-			HostIP:      c.selectHost.HostIP(),
-			SandboxID:   c.masterRsp.SandboxID,
-			SandboxIP:   c.masterRsp.SandboxIP,
-			SandboxPort: "8080",
-			CreatedAt:   strconv.FormatInt(time.Now().UnixNano(), 10),
+			HostIP:             c.selectHost.HostIP(),
+			SandboxID:          c.masterRsp.SandboxID,
+			SandboxIP:          c.masterRsp.SandboxIP,
+			SandboxPort:        "8080",
+			CreatedAt:          strconv.FormatInt(time.Now().UnixNano(), 10),
+			AllowPublicTraffic: allowPublic,
+			TrafficAccessToken: token,
 		}
 
 		if config.GetConfig().CubeletConf.EnableExposedPort {
 			proxy.ContainerToHostPorts = c.cubeletRspPorts
 		}
 
-		return localcache.SetSandboxProxyMap(c.ctx, proxy)
+		if err := localcache.SetSandboxProxyMap(c.ctx, proxy); err != nil {
+			return err
+		}
+		// Surface the token to the master response only after the proxy
+		// metadata is durably in Redis — avoids the window where API
+		// callers receive a token CubeProxy cannot yet validate.
+		c.masterRsp.TrafficAccessToken = token
+		return nil
 	}
 	return nil
 }

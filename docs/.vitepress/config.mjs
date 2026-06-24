@@ -135,15 +135,21 @@ export default withMermaid(defineConfig({
               ]
             },
             {
+              text: 'Networking',
+              items: [
+                { text: 'Network Policy', link: '/guide/network-policy' },
+                { text: 'Security Proxy', link: '/guide/security-proxy' },
+                { text: 'Restrict Public Access', link: '/guide/restrict-public-access' }
+              ]
+            },
+            {
               text: 'Operations',
               items: [
                 { text: 'WebUI Dashboard', link: '/guide/webui' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
                 { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
-                { text: 'Authentication', link: '/guide/authentication' },
-                { text: 'Egress Network Policy', link: '/guide/egress-network-policy' },
-                { text: 'Security Proxy', link: '/guide/security-proxy' }
+                { text: 'Authentication', link: '/guide/authentication' }
               ]
             },
             {
@@ -252,15 +258,21 @@ export default withMermaid(defineConfig({
               ]
             },
             {
+              text: '网络',
+              items: [
+                { text: '网络策略', link: '/zh/guide/network-policy' },
+                { text: '安全代理', link: '/zh/guide/security-proxy' },
+                { text: '限制公开访问', link: '/zh/guide/restrict-public-access' }
+              ]
+            },
+            {
               text: '安全与运维',
               items: [
                 { text: 'WebUI 控制台', link: '/zh/guide/webui' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
                 { text: 'HTTPS 证书与域名解析', link: '/zh/guide/https-and-domain' },
-                { text: '鉴权', link: '/zh/guide/authentication' },
-                { text: '出网网络策略', link: '/zh/guide/egress-network-policy' },
-                { text: '安全代理', link: '/zh/guide/security-proxy' }
+                { text: '鉴权', link: '/zh/guide/authentication' }
               ]
             },
             {

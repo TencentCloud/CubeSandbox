@@ -97,6 +97,25 @@ class Sandbox:
     def domain(self) -> str:
         return self._data.get("domain") or self._config.sandbox_domain
 
+    @property
+    def traffic_access_token(self) -> str | None:
+        """Per-sandbox token returned when ``network.allow_public_traffic=False``.
+
+        Send it as either the ``e2b-traffic-access-token`` (E2B-compatible)
+        or ``cube-traffic-access-token`` header on every request to the
+        sandbox's public URL — CubeProxy rejects unauthenticated traffic
+        with HTTP 403 when the sandbox was created with public access
+        restricted.
+
+        ``None`` for sandboxes with the default (publicly reachable)
+        configuration, including instances obtained via :meth:`connect` /
+        :meth:`resume` (the token is only delivered on the original create
+        response). Persist it client-side at create time if you need it
+        later.
+        """
+        token = self._data.get("trafficAccessToken")
+        return token or None
+
     def get_host(self, port: int) -> str:
         """Return the virtual hostname for a sandbox port.
 
@@ -726,4 +745,15 @@ class Sandbox:
 
     def _build_data_client(self) -> httpx.Client:
         """Build an HTTP client for CubeProxy-routed sandbox data-plane APIs."""
-        return build_client(self._config)
+        return build_client(self._config, headers=self._traffic_token_headers())
+
+    def _traffic_token_headers(self) -> dict[str, str]:
+        """Headers that must accompany every CubeProxy data-plane request.
+
+        When the sandbox was created with ``network.allow_public_traffic=False``,
+        CubeProxy rejects unauthenticated traffic with 403. Attaching the token
+        as a default header on the httpx client covers run_code, the Connect
+        fallback path, and filesystem read/write in one place.
+        """
+        token = self.traffic_access_token
+        return {"e2b-traffic-access-token": token} if token else {}
