@@ -224,17 +224,25 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 	}
 
 	// Read existing labels from DB, merge cubelet labels (cubelet wins on conflict),
-	// then write back the merged result.
-	existing, err := global.readLabelsJSON(req.NodeID)
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range req.Labels {
-		existing[k] = v
-	}
-	if err := global.db.Table(constants.NodeMetaRegistrationTable).
-		Where("node_id = ?", req.NodeID).
-		Update("labels_json", mustJSON(existing)).Error; err != nil {
+	// then write back the merged result. Use SELECT ... FOR UPDATE inside a
+	// transaction to prevent concurrent admin label writes from being lost.
+	var mergedLabels map[string]string
+	if err := global.db.Transaction(func(tx *gorm.DB) error {
+		existing, err := readLabelsJSONForUpdate(tx, req.NodeID)
+		if err != nil {
+			return err
+		}
+		for k, v := range req.Labels {
+			existing[k] = v
+		}
+		if err := tx.Table(constants.NodeMetaRegistrationTable).
+			Where("node_id = ?", req.NodeID).
+			Update("labels_json", mustJSON(existing)).Error; err != nil {
+			return err
+		}
+		mergedLabels = existing
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 
@@ -243,7 +251,7 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 	snap.NodeID = req.NodeID
 	snap.HostIP = req.HostIP
 	snap.GRPCPort = req.GRPCPort
-	snap.Labels = cloneStringMap(existing)
+	snap.Labels = cloneStringMap(mergedLabels)
 	snap.Capacity = req.Capacity
 	snap.Allocatable = req.Allocatable
 	snap.InstanceType = req.InstanceType
@@ -625,24 +633,10 @@ func readLabelsJSONForUpdate(tx *gorm.DB, nodeID string) (map[string]string, err
 		return nil, err
 	}
 	m := map[string]string{}
-	_ = json.Unmarshal([]byte(raw), &m)
-	return m, nil
-}
-
-// readLabelsJSON reads the labels_json column for a node and returns it as a map.
-// Returns an empty map (not nil) if the column is empty. Returns an error if the
-// DB read itself fails, so callers never accidentally persist an empty map on
-// transient failures.
-func (s *service) readLabelsJSON(nodeID string) (map[string]string, error) {
-	var raw string
-	if err := s.db.Table(constants.NodeMetaRegistrationTable).
-		Select("labels_json").
-		Where("node_id = ?", nodeID).
-		Scan(&raw).Error; err != nil {
+	err := json.Unmarshal([]byte(raw), &m)
+	if err != nil {
 		return nil, err
 	}
-	m := map[string]string{}
-	_ = json.Unmarshal([]byte(raw), &m)
 	return m, nil
 }
 
@@ -722,8 +716,7 @@ func isQualifiedLabelKey(key string) []string {
 		errs = append(errs, "name part must not be empty")
 	} else if len(name) > qualifiedNameMaxLength {
 		errs = append(errs, fmt.Sprintf("name part must be no more than %d characters", qualifiedNameMaxLength))
-	}
-	if !qualifiedNameRegexp.MatchString(name) {
+	} else if !qualifiedNameRegexp.MatchString(name) {
 		errs = append(errs, "name part "+qualifiedNameErrMsg)
 	}
 
