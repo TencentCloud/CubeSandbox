@@ -11,6 +11,7 @@ RUN sed -i 's#https\?://dl-cdn.alpinelinux.org#http://mirrors.tencent.com#g' /et
 
 WORKDIR /usr/local/openresty/nginx/
 COPY lua/ /usr/local/openresty/nginx/lua/
+COPY conf/includes/ /usr/local/openresty/nginx/conf/includes/
 COPY nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
 COPY rotate_nginx_log.sh /usr/local/openresty/nginx/sbin/rotate_nginx_log.sh
 COPY root /etc/crontabs/root
