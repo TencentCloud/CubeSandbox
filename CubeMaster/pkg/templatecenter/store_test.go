@@ -62,6 +62,16 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 	assert.Empty(t, out.SnapshotDir)
 }
 
+func TestConvergeEnvdVersionUsesNodeCollectionResults(t *testing.T) {
+	got := convergeEnvdVersion(context.Background(), []nodeEnvdVersion{
+		{NodeID: "node-a", Version: ""},
+		{NodeID: "node-b", Version: "envd version 0.5.11"},
+		{NodeID: "node-c", Version: "0.6.0"},
+	})
+
+	assert.Equal(t, "0.5.11", got)
+}
+
 func TestResolveTemplateNodesFiltersRequestedHealthyNodes(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()

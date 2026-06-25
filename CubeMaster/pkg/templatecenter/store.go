@@ -132,10 +132,6 @@ type ReplicaStatus struct {
 	GuestImageVersion string `json:"guest_image_version,omitempty"`
 	AgentVersion      string `json:"agent_version,omitempty"`
 	KernelVersion     string `json:"kernel_version,omitempty"`
-	// EnvdVersion is a transient per-node collection result. It is NOT persisted
-	// to the replica row; the template-level value is converged and written once
-	// to the definition annotation (see createTemplateReplicasOnNodes).
-	EnvdVersion       string `json:"envd_version,omitempty"`
 	CompatStatus      string `json:"compat_status,omitempty"`
 	CompatPolicy      string `json:"compat_policy,omitempty"`
 	CompatCheckedUnix int64  `json:"compat_checked_unix,omitempty"`
@@ -460,6 +456,7 @@ func healthyTemplateNodes(instanceType string) []*node.Node {
 
 func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *sandboxtypes.CreateCubeSandboxReq, targets []*node.Node, opts replicaRunOptions) ([]ReplicaStatus, error) {
 	replicas := make([]ReplicaStatus, 0, len(targets))
+	envdVersions := make([]nodeEnvdVersion, 0, len(targets))
 	var lock sync.Mutex
 	var persistErr error
 	sem := make(chan struct{}, 4)
@@ -476,9 +473,13 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			replica := createReplicaOnNode(ctx, target, req, opts)
+			replica, envdVersion := createReplicaOnNode(ctx, target, req, opts)
 			lock.Lock()
 			replicas = append(replicas, replica)
+			envdVersions = append(envdVersions, nodeEnvdVersion{
+				NodeID:  target.ID(),
+				Version: envdVersion,
+			})
 			lock.Unlock()
 
 			if upsertErr := UpsertReplica(ctx, templateID, req.InstanceType, replica); upsertErr != nil {
@@ -492,7 +493,7 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 	wg.Wait()
 	// Converge per-node envd versions into a single template value and persist it
 	// once to the definition annotation (idempotent; covers create and redo).
-	if envdVersion := convergeEnvdVersion(ctx, replicas); envdVersion != "" {
+	if envdVersion := convergeEnvdVersion(ctx, envdVersions); envdVersion != "" {
 		if err := persistTemplateEnvdVersion(ctx, templateID, envdVersion); err != nil {
 			log.G(ctx).Warnf("persist template envd version fail, template=%s err=%v", templateID, err)
 		}
@@ -500,13 +501,18 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 	return replicas, persistErr
 }
 
+type nodeEnvdVersion struct {
+	NodeID  string
+	Version string
+}
+
 // convergeEnvdVersion picks a single template-level envd version from the
-// per-node replica results: the first valid semver wins, and any divergence
+// per-node collection results: the first valid semver wins, and any divergence
 // across nodes is logged but not treated as an error.
-func convergeEnvdVersion(ctx context.Context, replicas []ReplicaStatus) string {
+func convergeEnvdVersion(ctx context.Context, versions []nodeEnvdVersion) string {
 	chosen := ""
-	for _, replica := range replicas {
-		v := sanitizeEnvdVersion(replica.EnvdVersion)
+	for _, item := range versions {
+		v := sanitizeEnvdVersion(item.Version)
 		if v == "" {
 			continue
 		}
@@ -515,7 +521,7 @@ func convergeEnvdVersion(ctx context.Context, replicas []ReplicaStatus) string {
 			continue
 		}
 		if v != chosen {
-			log.G(ctx).Warnf("envd version mismatch across nodes: keeping=%s saw=%s", chosen, v)
+			log.G(ctx).Warnf("envd version mismatch across nodes: keeping=%s saw=%s node=%s", chosen, v, item.NodeID)
 		}
 	}
 	return chosen
@@ -562,7 +568,7 @@ func persistTemplateEnvdVersion(ctx context.Context, templateID, version string)
 	})
 }
 
-func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtypes.CreateCubeSandboxReq, opts replicaRunOptions) ReplicaStatus {
+func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtypes.CreateCubeSandboxReq, opts replicaRunOptions) (ReplicaStatus, string) {
 	replica := ReplicaStatus{
 		NodeID:          target.ID(),
 		NodeIP:          target.HostIP(),
@@ -579,14 +585,14 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	if err != nil {
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
-		return replica
+		return replica, ""
 	}
 	ensureRuntimeTemplateRequest(nodeReq)
 	cubeletReq, err := sandbox.ConstructCubeletReq(ctx, nodeReq)
 	if err != nil {
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
-		return replica
+		return replica, ""
 	}
 	rsp, err := cubelet.AppSnapshot(ctx, cubelet.GetCubeletAddr(target.HostIP()), &cubeboxv1.AppSnapshotRequest{
 		CreateRequest: cubeletReq,
@@ -595,7 +601,7 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	if err != nil {
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
-		return replica
+		return replica, ""
 	}
 	if rsp.GetRet() == nil || int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
 		replica.Phase = ReplicaPhaseFailed
@@ -604,14 +610,12 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 		} else {
 			replica.ErrorMessage = "empty appsnapshot response"
 		}
-		return replica
+		return replica, ""
 	}
 	replica.Status = ReplicaStatusReady
 	replica.Phase = ReplicaPhaseReady
 	bindGuestVersionToReplica(&replica, rsp.GetGuestImageVersion(), rsp.GetAgentVersion(), rsp.GetKernelVersion())
-	// Stash the per-node envd version in-memory only; convergence + the single
-	// definition write happen in createTemplateReplicasOnNodes after wg.Wait().
-	replica.EnvdVersion = sanitizeEnvdVersion(rsp.GetEnvdVersion())
+	envdVersion := sanitizeEnvdVersion(rsp.GetEnvdVersion())
 	// v4: AppSnapshot replica is "thin" -- physical refs are owned by cubelet's
 	// local catalog. Master only persists control-plane state (status / phase /
 	// last job / error) so we deliberately ignore SnapshotPath/RootfsVol/
@@ -619,7 +623,7 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	replica.LastErrorPhase = ""
 	replica.CleanupRequired = false
 	replica.ErrorMessage = ""
-	return replica
+	return replica, envdVersion
 }
 
 func summarizeStatus(replicas []ReplicaStatus) (status string, lastError string) {
