@@ -3,7 +3,7 @@ name: Publish Python SDK to PyPI
 on:
   push:
     tags:
-      - 'v*'   # global release tag, e.g. v0.4.0
+      - 'v*'
 
 jobs:
   build-and-publish:
@@ -13,10 +13,11 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout (full history)
+      - name: Checkout (full history, blobless)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          filter: 'blob:none'
 
       - name: Check if sdk/python/ changed since last tag
         id: check_changes
@@ -24,10 +25,7 @@ jobs:
           CURRENT_TAG="${GITHUB_REF_NAME}"
           echo "Current tag: $CURRENT_TAG"
 
-          PREV_TAG=$(git tag --list 'v*' \
-            --sort=-creatordate \
-            | grep -v "^${CURRENT_TAG}$" \
-            | head -1)
+          PREV_TAG=$(git describe --tags --first-parent --match 'v*' --abbrev=0 "${CURRENT_TAG}^" 2>/dev/null || true)
 
           if [ -z "$PREV_TAG" ]; then
             echo "No previous tag found -- first release, proceeding."
@@ -53,12 +51,24 @@ jobs:
 
       - name: Install build tools
         if: steps.check_changes.outputs.changed == 'true'
-        run: pip install build
+        run: pip install build twine
+
+      - name: Run tests
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/python
+        run: |
+          pip install -e ".[dev]" 2>/dev/null || pip install -e .
+          python -m pytest tests/ -v
 
       - name: Build package
         if: steps.check_changes.outputs.changed == 'true'
         working-directory: sdk/python
         run: python -m build
+
+      - name: Validate distributions
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/python
+        run: twine check dist/*
 
       - name: Publish to PyPI
         if: steps.check_changes.outputs.changed == 'true'
