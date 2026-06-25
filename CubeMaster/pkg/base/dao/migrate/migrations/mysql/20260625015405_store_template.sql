@@ -8,7 +8,7 @@
 -- +goose NO TRANSACTION
 -- +goose Up
 
-CALL cubemaster_acquire_migration_lock('cubemaster_migration_0010_store_template', 60);
+CALL cubemaster_acquire_migration_lock('cubemaster_migration_20260625015405_store_template', 60);
 
 CREATE TABLE IF NOT EXISTS `t_store_template` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -215,12 +215,12 @@ ON DUPLICATE KEY UPDATE
   `sort_order` = VALUES(`sort_order`),
   `deleted_at` = NULL;
 
-SELECT RELEASE_LOCK('cubemaster_migration_0010_store_template');
+SELECT RELEASE_LOCK('cubemaster_migration_20260625015405_store_template');
 
 -- +goose Down
 
-CALL cubemaster_acquire_migration_lock('cubemaster_migration_0010_store_template', 60);
+CALL cubemaster_acquire_migration_lock('cubemaster_migration_20260625015405_store_template', 60);
 
 DROP TABLE IF EXISTS `t_store_template`;
 
-SELECT RELEASE_LOCK('cubemaster_migration_0010_store_template');
+SELECT RELEASE_LOCK('cubemaster_migration_20260625015405_store_template');
