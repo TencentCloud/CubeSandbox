@@ -437,4 +437,3 @@ fn parse_exit_status(status: Option<&str>) -> Option<i64> {
         .strip_prefix("exit status ")
         .and_then(|v| v.trim().parse::<i64>().ok())
 }
-

@@ -675,5 +675,4 @@ mod tests {
             resp.text(),
         );
     }
-
 }
