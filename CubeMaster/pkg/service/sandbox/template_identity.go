@@ -16,6 +16,7 @@ import "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 var runtimeSnapshotAnnotationKeys = []string{
 	constants.CubeAnnotationRuntimeSnapshotID,
 	constants.CubeAnnotationRuntimeSnapshotAttachedAt,
+	constants.CubeAnnotationComponentEnvdVersion,
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

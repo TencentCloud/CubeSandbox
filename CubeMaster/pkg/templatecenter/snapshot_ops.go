@@ -322,6 +322,13 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	}); err != nil {
 		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err)
 	}
+	// Commit yields a single authoritative envd version; persist it (best-effort)
+	// to the snapshot definition annotation so created sandboxes inherit it.
+	if envdVersion := sanitizeEnvdVersion(commitRsp.GetEnvdVersion()); envdVersion != "" {
+		if err := persistTemplateEnvdVersion(ctx, snapshotID, envdVersion); err != nil {
+			logger.Warnf("persist snapshot envd version fail, snapshot=%s err=%v", snapshotID, err)
+		}
+	}
 	resultPayload, _ := json.Marshal(map[string]any{
 		"snapshot_path":     snapshotPath,
 		"rootfs_vol":        commitRsp.GetRootfsVol(),

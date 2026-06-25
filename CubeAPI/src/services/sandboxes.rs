@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::validate_allow_out_domains_require_deny_all;
 use crate::{
-    constants::ENVD_VERSION,
+    constants::{ENVD_VERSION_ANNOTATION, ENVD_VERSION_FALLBACK},
     cubemaster::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
@@ -96,6 +96,7 @@ impl SandboxService {
             .or(d.end_at)
             .unwrap_or(started_at);
 
+        let envd_version = envd_version_from_annotations(&d.annotations);
         Ok(SandboxDetail {
             template_id: d.template_id,
             alias: None,
@@ -103,7 +104,7 @@ impl SandboxService {
             client_id: d.host_id,
             started_at,
             end_at,
-            envd_version: ENVD_VERSION.to_string(),
+            envd_version,
             envd_access_token: None,
             domain: Some(self.sandbox_domain.clone()),
             cpu_count: d.cpu_count,
@@ -177,10 +178,12 @@ impl SandboxService {
 
         resp.ret.into_result().map_err(internal_error)?;
 
+        let envd_version = envd_version_from_annotations(&resp.ext_info);
         Ok(self.sandbox_response(
             template_id,
             resp.sandbox_id,
             resp.request_id,
+            envd_version,
             resp.traffic_access_token,
         ))
     }
@@ -238,11 +241,18 @@ impl SandboxService {
         )?;
 
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
+        let envd_version = envd_version_from_annotations(&d.annotations);
         // resume/connect paths reload the sandbox via fetch_sandbox_detail,
         // which does not surface the traffic_access_token. The token only
         // matters at create time (so the caller can persist it); afterward
         // CubeProxy reads it directly from Redis. None here is correct.
-        Ok(self.sandbox_response(d.template_id, sandbox_id.to_string(), d.host_id, None))
+        Ok(self.sandbox_response(
+            d.template_id,
+            sandbox_id.to_string(),
+            d.host_id,
+            envd_version,
+            None,
+        ))
     }
 
     pub async fn connect_sandbox(&self, sandbox_id: &str, timeout: i32) -> AppResult<Sandbox> {
@@ -265,7 +275,14 @@ impl SandboxService {
             d = self.fetch_sandbox_detail(sandbox_id).await?;
         }
 
-        Ok(self.sandbox_response(d.template_id, sandbox_id.to_string(), d.host_id, None))
+        let envd_version = envd_version_from_annotations(&d.annotations);
+        Ok(self.sandbox_response(
+            d.template_id,
+            sandbox_id.to_string(),
+            d.host_id,
+            envd_version,
+            None,
+        ))
     }
 
     pub async fn get_logs(
@@ -456,6 +473,7 @@ impl SandboxService {
         template_id: String,
         sandbox_id: String,
         client_id: String,
+        envd_version: String,
         traffic_access_token: Option<String>,
     ) -> Sandbox {
         Sandbox {
@@ -463,7 +481,7 @@ impl SandboxService {
             sandbox_id,
             alias: None,
             client_id,
-            envd_version: ENVD_VERSION.to_string(),
+            envd_version,
             envd_access_token: None,
             // Empty string from CubeMaster (publicly reachable sandbox) is
             // normalized to None so the JSON field is omitted on the wire.
@@ -575,11 +593,24 @@ fn ensure_update_result(
     Err(AppError::Internal(anyhow::anyhow!(ret_msg)))
 }
 
+/// Resolve the reported `envdVersion` from a sandbox/template annotation map,
+/// falling back to the conservative default when the annotation is absent or
+/// blank (e.g. legacy templates created before version collection existed).
+pub(crate) fn envd_version_from_annotations(annotations: &HashMap<String, String>) -> String {
+    annotations
+        .get(ENVD_VERSION_ANNOTATION)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| ENVD_VERSION_FALLBACK.to_string())
+}
+
 pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandbox {
     use crate::models::ListedSandbox;
 
     let now = chrono::Utc::now();
     let template_id = extract_template_id(&s.template_id, &s.annotations, &s.labels);
+    let envd_version = envd_version_from_annotations(&s.annotations);
 
     // Prefer explicit started_at; fall back to create_at (Unix nanos from Cubelet); last resort: now
     let started_at = s
@@ -599,7 +630,7 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         disk_size_mb: Some(0),
         metadata: optional_metadata(s.labels),
         state: sandbox_state_from_str(&s.status),
-        envd_version: ENVD_VERSION.to_string(),
+        envd_version,
         volume_mounts: None,
     }
 }
@@ -1038,7 +1069,7 @@ mod tests {
     /// covers each meaningful combination.
     #[test]
     fn lifecycle_object_translates_to_cubemaster_bools() {
-        use crate::models::{NewSandbox, SandboxLifecycleConfig, SandboxOnTimeout};
+        use crate::models::{NewSandbox, SandboxOnTimeout};
 
         // Helper that mimics services::create_sandbox's lifecycle decoding.
         fn translate(body: &NewSandbox) -> (bool, bool) {

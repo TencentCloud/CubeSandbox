@@ -83,6 +83,15 @@ func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTr
 		if err := registerCreatedSandboxRuntimeRef(ctx, req, ret); err != nil {
 			log.G(ctx).Warnf("register snapshot runtime ref after create failed: %v", err)
 		}
+		// Echo the envd version (propagated from the template annotation onto the
+		// create request) back to the caller via the existing ext_info map, so
+		// CubeAPI can surface it without an extra round-trip. Success branch only.
+		if v := strings.TrimSpace(req.Annotations[constants.CubeAnnotationComponentEnvdVersion]); v != "" {
+			if ret.ExtInfo == nil {
+				ret.ExtInfo = make(map[string]string)
+			}
+			ret.ExtInfo[constants.CubeAnnotationComponentEnvdVersion] = v
+		}
 	}
 	rt.RetCode = int64(ret.Ret.RetCode)
 	return ret

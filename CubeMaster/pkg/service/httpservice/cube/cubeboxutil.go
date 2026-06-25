@@ -254,6 +254,12 @@ func applyTemplateAnnotationsAndLabels(reqIn *types.CreateCubeSandboxReq, reqOut
 		}
 		maps.Copy(reqOut.Labels, reqIn.Labels)
 	}
+	if v := strings.TrimSpace(reqOut.Annotations[constants.CubeAnnotationComponentEnvdVersion]); v != "" {
+		if reqOut.Labels == nil {
+			reqOut.Labels = make(map[string]string)
+		}
+		reqOut.Labels[constants.CubeAnnotationComponentEnvdVersion] = v
+	}
 }
 
 func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *types.CubeNetworkConfig) *types.CubeNetworkConfig {

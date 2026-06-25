@@ -961,6 +961,10 @@ pub struct CreateSandboxResponse {
     #[serde(default)]
     pub traffic_access_token: Option<String>,
     pub ret: RetCode,
+    /// Generic extension metadata echoed by CubeMaster on success (e.g. the
+    /// collected envd version). Not surfaced wholesale to the external API.
+    #[serde(default)]
+    pub ext_info: HashMap<String, String>,
 }
 
 // ─── Delete sandbox ────────────────────────────────────────────────────────

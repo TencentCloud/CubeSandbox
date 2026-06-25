@@ -245,6 +245,9 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	rsp.GuestImageVersion = versions.GuestImage
 	rsp.AgentVersion = versions.Agent
 	rsp.KernelVersion = versions.Kernel
+	// The source sandbox stays running through commit, so probe its real envd
+	// version in-guest after the memory snapshot. Best-effort: empty on failure.
+	rsp.EnvdVersion = s.collectEnvdVersion(ctx, rsp.SandboxID)
 	if err := storage.WriteSnapshotCatalog(&storage.SnapshotCatalogEntry{
 		SnapshotID:      rsp.TemplateID,
 		InstanceType:    "cubebox",

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -131,6 +132,10 @@ type ReplicaStatus struct {
 	GuestImageVersion string `json:"guest_image_version,omitempty"`
 	AgentVersion      string `json:"agent_version,omitempty"`
 	KernelVersion     string `json:"kernel_version,omitempty"`
+	// EnvdVersion is a transient per-node collection result. It is NOT persisted
+	// to the replica row; the template-level value is converged and written once
+	// to the definition annotation (see createTemplateReplicasOnNodes).
+	EnvdVersion       string `json:"envd_version,omitempty"`
 	CompatStatus      string `json:"compat_status,omitempty"`
 	CompatPolicy      string `json:"compat_policy,omitempty"`
 	CompatCheckedUnix int64  `json:"compat_checked_unix,omitempty"`
@@ -485,7 +490,76 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 		}()
 	}
 	wg.Wait()
+	// Converge per-node envd versions into a single template value and persist it
+	// once to the definition annotation (idempotent; covers create and redo).
+	if envdVersion := convergeEnvdVersion(ctx, replicas); envdVersion != "" {
+		if err := persistTemplateEnvdVersion(ctx, templateID, envdVersion); err != nil {
+			log.G(ctx).Warnf("persist template envd version fail, template=%s err=%v", templateID, err)
+		}
+	}
 	return replicas, persistErr
+}
+
+// convergeEnvdVersion picks a single template-level envd version from the
+// per-node replica results: the first valid semver wins, and any divergence
+// across nodes is logged but not treated as an error.
+func convergeEnvdVersion(ctx context.Context, replicas []ReplicaStatus) string {
+	chosen := ""
+	for _, replica := range replicas {
+		v := sanitizeEnvdVersion(replica.EnvdVersion)
+		if v == "" {
+			continue
+		}
+		if chosen == "" {
+			chosen = v
+			continue
+		}
+		if v != chosen {
+			log.G(ctx).Warnf("envd version mismatch across nodes: keeping=%s saw=%s", chosen, v)
+		}
+	}
+	return chosen
+}
+
+// persistTemplateEnvdVersion writes the converged envd version into the template
+// definition's request_json annotation exactly once (read-modify-write), then
+// invalidates the cached request so new sandboxes inherit the annotation. It is
+// idempotent: a no-op when the annotation already holds the same value.
+func persistTemplateEnvdVersion(ctx context.Context, templateID, version string) error {
+	version = sanitizeEnvdVersion(version)
+	if templateID == "" || version == "" {
+		return nil
+	}
+	// Serialize the request_json read-modify-write against concurrent template
+	// request reads/writes for the same template to avoid a lost update.
+	return withTemplateWriteLock(templateID, func() error {
+		def, err := GetDefinition(ctx, templateID)
+		if err != nil {
+			return err
+		}
+		req := &sandboxtypes.CreateCubeSandboxReq{}
+		if err := json.Unmarshal([]byte(def.RequestJSON), req); err != nil {
+			return err
+		}
+		if req.Annotations == nil {
+			req.Annotations = make(map[string]string)
+		}
+		if req.Annotations[constants.CubeAnnotationComponentEnvdVersion] == version {
+			return nil
+		}
+		req.Annotations[constants.CubeAnnotationComponentEnvdVersion] = version
+		payload, err := json.Marshal(req)
+		if err != nil {
+			return err
+		}
+		if err := updateDefinitionFields(ctx, templateID, map[string]any{"request_json": string(payload)}); err != nil {
+			return err
+		}
+		// Drop the stale cache entry so the next GetTemplateRequest reloads the
+		// definition (now carrying the envd annotation) from the database.
+		templateDefinitionCache.Delete(templateID)
+		return nil
+	})
 }
 
 func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtypes.CreateCubeSandboxReq, opts replicaRunOptions) ReplicaStatus {
@@ -535,6 +609,9 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	replica.Status = ReplicaStatusReady
 	replica.Phase = ReplicaPhaseReady
 	bindGuestVersionToReplica(&replica, rsp.GetGuestImageVersion(), rsp.GetAgentVersion(), rsp.GetKernelVersion())
+	// Stash the per-node envd version in-memory only; convergence + the single
+	// definition write happen in createTemplateReplicasOnNodes after wg.Wait().
+	replica.EnvdVersion = sanitizeEnvdVersion(rsp.GetEnvdVersion())
 	// v4: AppSnapshot replica is "thin" -- physical refs are owned by cubelet's
 	// local catalog. Master only persists control-plane state (status / phase /
 	// last job / error) so we deliberately ignore SnapshotPath/RootfsVol/
@@ -869,6 +946,18 @@ func normalizeComponentVersion(value string) string {
 		return ""
 	}
 	return value
+}
+
+// envdSemverRe matches a major.minor.patch semantic version anywhere in the
+// input; the captured group is the version we keep.
+var envdSemverRe = regexp.MustCompile(`\d+\.\d+\.\d+`)
+
+// sanitizeEnvdVersion validates an envd version reported by the collection side
+// and returns the extracted semver, or "" when absent/malformed. This is a
+// defense-in-depth check on top of the cubelet-side validation, run before the
+// value is persisted into a template annotation.
+func sanitizeEnvdVersion(value string) string {
+	return envdSemverRe.FindString(strings.TrimSpace(value))
 }
 
 func normalizeCompatStatus(status string) string {

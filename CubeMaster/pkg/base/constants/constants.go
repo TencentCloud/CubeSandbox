@@ -80,6 +80,13 @@ const (
 	CubeAnnotationTemplateSpecFingerprint    = "cube.master.template.spec_fingerprint"
 
 	CubeAnnotationsVirtiofsCache = "cube.master.virtiofs.cache"
+
+	// CubeAnnotationComponentsPrefix is the namespace for pre-installed
+	// runtime-component metadata carried on templates/sandboxes.
+	CubeAnnotationComponentsPrefix = "cube.master.components."
+	// CubeAnnotationComponentEnvdVersion carries the real envd semantic version
+	// collected at template-creation time and propagated to sandbox instances.
+	CubeAnnotationComponentEnvdVersion = "cube.master.components.envd.version"
 )
 const (
 	CubeAnnotationsUseNetFileCache = "cube.instance.use_netfile_cache"
