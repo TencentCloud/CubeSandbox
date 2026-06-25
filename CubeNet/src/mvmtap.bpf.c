@@ -1028,6 +1028,9 @@ int from_cube(struct __sk_buff *skb)
 	if (!should_do_nat(l3))
 		return TC_ACT_SHOT;
 
+	if (l3->daddr == nodenic_ip)
+		return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
+
 	if (proto == IPPROTO_TCP) {
 		if (!__pull_headers(skb, &l2, &l3, &l4))
 			return TC_ACT_SHOT;
