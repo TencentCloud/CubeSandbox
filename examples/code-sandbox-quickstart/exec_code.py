@@ -16,5 +16,5 @@ print("hello cube")
 """
 
 with Sandbox.create(template=template_id) as sandbox:
-    
+
     print(sandbox.run_code(python_code, on_stdout=lambda data: print(data)))

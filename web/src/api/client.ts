@@ -383,14 +383,6 @@ export interface ExampleSource {
   source: string;
 }
 
-export interface StepLogDto {
-  name: string;
-  plane: 'control' | 'data' | string;
-  status: 'ok' | 'warn' | 'err' | 'skipped' | string;
-  duration_ms: number;
-  message: string;
-}
-
 export interface TopologyNodeDto {
   id: string;
   label: string;
@@ -417,7 +409,6 @@ export interface ExampleRunResult {
   exit_code: number;
   success: boolean;
   elapsed_ms: number;
-  steps: StepLogDto[];
   topology: TopologyGraphDto;
   ran_edited: boolean;
 }

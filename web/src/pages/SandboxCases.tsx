@@ -1228,5 +1228,3 @@ export default function SandboxCasesPage() {
     </div>
   );
 }
-
-

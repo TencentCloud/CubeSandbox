@@ -216,13 +216,6 @@ export const handlers = [
       success: true,
       elapsed_ms: 820,
       ran_edited: !!body.code,
-      steps: [
-        { name: 'Validate request', plane: 'control', status: 'ok', duration_ms: 18, message: 'Parsed example id.' },
-        { name: 'Schedule & boot VM', plane: 'control', status: 'ok', duration_ms: 220, message: 'CubeMaster picked a Cubelet.' },
-        { name: 'Handshake envd', plane: 'data', status: 'ok', duration_ms: 90, message: 'WSS tunnel up.' },
-        { name: 'Execute workload', plane: 'data', status: 'ok', duration_ms: 480, message: 'Sample stdout line' },
-        { name: 'Cleanup & return', plane: 'control', status: 'ok', duration_ms: 12, message: 'Sandbox returned to idle.' },
-      ],
       topology: {
         nodes: [
           { id: 'user', label: 'User Script', plane: 'control', kind: 'user', description: 'mock user' },

@@ -424,11 +424,7 @@ fn build_examples_routes(state: &AppState, auth_configured: bool) -> Router<AppS
 /// the 30 s default HTTP timeout does not kill long-running example scripts.
 fn build_examples_run_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
     let routes = Router::new().route("/examples/run", post(examples::run_example));
-    if auth_configured {
-        routes.layer(middleware::from_fn_with_state(state.clone(), unified_auth))
-    } else {
-        routes
-    }
+    with_auth_and_rate_limit(routes, state, auth_configured)
 }
 
 #[cfg(test)]

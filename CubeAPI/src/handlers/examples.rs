@@ -53,24 +53,12 @@ pub struct RunExampleRequest {
 }
 
 #[derive(Serialize, Clone, ToSchema)]
-pub struct StepLog {
-    pub name: String,
-    /// `"control"` (CubeAPI / CubeMaster) or `"data"` (envd / sandbox runtime).
-    pub plane: String,
-    /// `"ok"` | `"warn"` | `"err"` | `"skipped"`.
-    pub status: String,
-    pub duration_ms: u64,
-    pub message: String,
-}
-
-#[derive(Serialize, Clone, ToSchema)]
 pub struct RunExampleResponse {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
     pub success: bool,
     pub elapsed_ms: u64,
-    pub steps: Vec<StepLog>,
     pub topology: TopologyGraph,
     pub ran_edited: bool,
 }
@@ -98,8 +86,8 @@ pub async fn get_example_source(
 
 // ─── POST /cubeapi/v1/examples/run ───────────────────────────────────────────
 
-/// Run an example script in a subprocess and return stdout / stderr plus a
-/// synthetic step log and the topology graph for the scenario.
+/// Run an example script in a subprocess and return stdout / stderr and the
+/// topology graph for the scenario.
 pub async fn run_example(
     State(state): State<AppState>,
     Json(req): Json<RunExampleRequest>,

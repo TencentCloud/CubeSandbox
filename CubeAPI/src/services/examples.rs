@@ -330,7 +330,6 @@ impl ExampleService {
                     exit_code,
                     success,
                     elapsed_ms,
-                    steps: Vec::new(),
                     topology: topology_with_status(sc.topology.clone(), success),
                     ran_edited: req.code.is_some(),
                 })
