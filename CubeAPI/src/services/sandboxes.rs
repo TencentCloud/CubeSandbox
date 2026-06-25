@@ -716,12 +716,29 @@ pub(crate) fn build_cube_network_config(
 ///     Cubelet's `command.WithProcessArgs`, so the entrypoint (cube-entrypoint.sh)
 ///     still runs and envd still starts.
 /// Env vars are validated before being forwarded:
-///   - Entries with an empty key or empty value are dropped (they carry no
-///     usable value and only add noise).
-///   - Reserved names a sandbox owner must not set are dropped. `LD_PRELOAD`
-///     and `LD_AUDIT` would inject a shared library into every dynamically
-///     linked process in the sandbox (including envd), so they are blocked at
-///     the API boundary as defence-in-depth.
+///   - A key must be a usable name: non-empty, with no surrounding whitespace,
+///     no `=` and no control characters (see [`is_valid_env_key`]).
+///   - A value must be non-empty, not whitespace-only, and contain no NUL byte
+///     (a NUL would truncate the `KEY=VALUE` C string at execve).
+///   - Reserved names a sandbox owner must not set are dropped. `LD_PRELOAD`,
+///     `LD_AUDIT`, `LD_LIBRARY_PATH`, `GCONV_PATH` and `GCONV_MODULES` can
+///     inject or hijack code into every dynamically linked process in the
+///     sandbox (including envd) — via the dynamic linker or glibc's gconv
+///     mechanism — so they are blocked at the API boundary as defence-in-depth.
+///     The check is intentionally case-sensitive: glibc's dynamic linker is
+///     case-sensitive, so lowercase variants such as `ld_preload` are inert.
+///
+/// Merge / override order (this is why image-owned vars stay protected, and why
+/// the reserved names above are not): CubeMaster concatenates the user envs with
+/// the template envs (`append(ctr.Envs, templateCtr.Envs...)`, where the template
+/// envs are a copy of the image ENV), and Cubelet's `env.GenOpt` feeds first the
+/// image ENV and then the container envs into containerd's `oci.WithEnv`.
+/// `oci.WithEnv` dedupes by key keeping the last value, so on a key collision
+/// the template/image value wins — a user env var cannot override image-owned
+/// vars such as `ENVD_*` or `PATH`. `LD_PRELOAD`/`LD_AUDIT` are not in the image
+/// ENV, so no template copy shadows them; they are dropped here instead. Note
+/// this differs from E2B's "user value wins" semantics for colliding keys;
+/// flipping the CubeMaster append order is tracked as a follow-up.
 ///
 /// With no env vars left after validation we return an empty list, preserving
 /// the prior behaviour where `containers` was an empty `vec![]`.
@@ -730,29 +747,55 @@ pub(crate) fn build_env_container(env_vars: Option<EnvVars>) -> Vec<ContainerSpe
         return Vec::new();
     };
     // Reserved env var names a sandbox owner must not set via the API.
-    const RESERVED_ENV_KEYS: &[&str] = &["LD_PRELOAD", "LD_AUDIT"];
+    // Sorted; kept to pure code-injection vectors with no legitimate use.
+    const RESERVED_ENV_KEYS: &[&str] = &[
+        "GCONV_MODULES",
+        "GCONV_PATH",
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+    ];
 
-    // Warn about reserved names we are about to drop so a misconfigured caller
-    // is not silently surprised. Empty key/value entries are dropped quietly.
-    let dropped: Vec<&String> = vars
-        .keys()
-        .filter(|k| RESERVED_ENV_KEYS.contains(&k.as_str()))
-        .collect();
-    if !dropped.is_empty() {
-        tracing::warn!(
-            dropped = ?dropped,
-            "dropping reserved env var names from sandbox create request; \
-             LD_PRELOAD/LD_AUDIT can inject a library into every process and are not allowed"
-        );
-    }
-
+    // One pass: collect the entries we drop (so a misconfigured caller is not
+    // silently surprised) while building the forwarded list.
+    let mut dropped_reserved: Vec<String> = Vec::new();
+    let mut dropped_invalid: Vec<String> = Vec::new();
     let envs: Vec<EnvVar> = vars
         .into_iter()
-        .filter(|(key, value)| {
-            !key.is_empty() && !value.is_empty() && !RESERVED_ENV_KEYS.contains(&key.as_str())
+        .filter_map(|(key, value)| {
+            if RESERVED_ENV_KEYS.contains(&key.as_str()) {
+                dropped_reserved.push(key);
+                return None;
+            }
+            if !is_valid_env_key(&key) || value.contains('\0') {
+                dropped_invalid.push(key);
+                return None;
+            }
+            if value.trim().is_empty() {
+                // Empty or whitespace-only values carry no usable value.
+                return None;
+            }
+            Some(EnvVar { key, value })
         })
-        .map(|(key, value)| EnvVar { key, value })
         .collect();
+    if !dropped_reserved.is_empty() {
+        tracing::warn!(
+            dropped = ?dropped_reserved,
+            "dropping reserved env var names from sandbox create request; \
+             LD_PRELOAD/LD_AUDIT/LD_LIBRARY_PATH (dynamic linker) and \
+             GCONV_PATH/GCONV_MODULES (glibc gconv) can inject or hijack code \
+             into every dynamically linked process in the sandbox and are not \
+             allowed"
+        );
+    }
+    if !dropped_invalid.is_empty() {
+        tracing::warn!(
+            dropped = ?dropped_invalid,
+            "dropping env var entries with an invalid key or value (empty/blank \
+             key, key with '=' or a control character, or value with a NUL) \
+             from sandbox create request"
+        );
+    }
     if envs.is_empty() {
         return Vec::new();
     }
@@ -774,6 +817,24 @@ pub(crate) fn build_env_container(env_vars: Option<EnvVars>) -> Vec<ContainerSpe
         probe: None,
         annotations: None,
     }]
+}
+
+/// A permissive, correctness-focused check for an env var name.
+///
+/// We deliberately do *not* restrict the key to the POSIX `[A-Za-z_][A-Za-z0-9_]*`
+/// shape: real-world names use lowercase, digits, dots and dashes, and rejecting
+/// them would break legitimate callers. We only reject names that cannot round-trip
+/// into the container or are meaningless: an empty or whitespace-only key, one with
+/// leading/trailing whitespace (which would not match the reserved-name check after
+/// a potential downstream trim), one containing `=` (env entries are serialised as
+/// `KEY=VALUE` and downstream code splits on the first `=`), or one containing a
+/// control character (e.g. a newline, which would break the `KEY=VALUE` line
+/// format).
+fn is_valid_env_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.trim() == key
+        && !key.contains('=')
+        && !key.chars().any(|c| c.is_control())
 }
 
 fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
@@ -808,6 +869,7 @@ mod tests {
 
     use super::{
         build_cube_network_config, build_env_container, filter_by_metadata, from_cubemaster_info,
+        is_valid_env_key,
     };
     use crate::cubemaster::{CreateSandboxRequest, ListSandboxResponse, SandboxInfo};
     use crate::models::{
@@ -853,22 +915,93 @@ mod tests {
 
     #[test]
     fn env_container_drops_reserved_and_empty_entries() {
-        // Reserved names (LD_PRELOAD/LD_AUDIT) and empty key/value entries are
-        // filtered out; only the valid entry survives.
+        // Reserved names (incl. GCONV_*), a whitespace-padded reserved name
+        // (would bypass a naive exact match), whitespace-only/invalid keys,
+        // and empty/whitespace-only/NUL values are filtered out; only valid
+        // entries survive.
         let vars = HashMap::from([
             ("API_KEY".to_string(), "sk-123".to_string()),
             ("LD_PRELOAD".to_string(), "/tmp/x.so".to_string()),
-            ("LD_AUDIT".to_string(), "/tmp/y.so".to_string()),
+            (" LD_AUDIT".to_string(), "/tmp/y.so".to_string()),
+            ("LD_LIBRARY_PATH".to_string(), "/tmp/hijack".to_string()),
+            ("GCONV_PATH".to_string(), "/tmp/gconv".to_string()),
+            ("GCONV_MODULES".to_string(), "/tmp/mods".to_string()),
             ("".to_string(), "no-key".to_string()),
+            ("   ".to_string(), "ws-key".to_string()),
             ("EMPTY".to_string(), "".to_string()),
+            ("BLANK".to_string(), "   \t ".to_string()),
+            ("NULLVAL".to_string(), "a\0b".to_string()),
+            ("lower_var".to_string(), "ok".to_string()),
+        ]);
+
+        let containers = build_env_container(Some(vars));
+        assert_eq!(containers.len(), 1);
+        let container = &containers[0];
+        // Spot-check the contract this function owns: a single container whose
+        // image is left empty (CubeMaster fills it) and whose envs survive. We
+        // don't exhaustively assert every `None` field — that would break on any
+        // unrelated ContainerSpec change.
+        assert!(container.image.image.is_empty());
+        let envs = container.envs.as_ref().expect("envs should be set");
+        assert_eq!(envs.len(), 2);
+        let lookup: HashMap<&str, &str> = envs
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_str()))
+            .collect();
+        assert_eq!(lookup.get("API_KEY").copied(), Some("sk-123"));
+        assert_eq!(lookup.get("lower_var").copied(), Some("ok"));
+    }
+
+    #[test]
+    fn env_container_returns_empty_when_all_entries_dropped() {
+        // Non-empty input where every entry is filtered out must yield an empty
+        // list (the early-return path), not a container carrying empty envs.
+        let vars = HashMap::from([
+            ("LD_PRELOAD".to_string(), "/tmp/x.so".to_string()),
+            ("GCONV_PATH".to_string(), "/tmp/gconv".to_string()),
+            ("EMPTY".to_string(), "".to_string()),
+            ("BAD=KEY".to_string(), "v".to_string()),
+        ]);
+        assert!(build_env_container(Some(vars)).is_empty());
+    }
+
+    #[test]
+    fn env_container_drops_entries_with_an_invalid_key() {
+        // Keys with '=' corrupt the downstream KEY=VALUE split, and keys with
+        // control characters break the line format; a permissive-but-correct
+        // check drops them while keeping ordinary names (incl. lowercase/dash).
+        let vars = HashMap::from([
+            ("FOO=BAR".to_string(), "x".to_string()),
+            ("BAD\nKEY".to_string(), "y".to_string()),
+            ("\0NULL".to_string(), "z".to_string()),
+            ("dash-key".to_string(), "kept".to_string()),
         ]);
 
         let containers = build_env_container(Some(vars));
         assert_eq!(containers.len(), 1);
         let envs = containers[0].envs.as_ref().expect("envs should be set");
         assert_eq!(envs.len(), 1);
-        assert_eq!(envs[0].key, "API_KEY");
-        assert_eq!(envs[0].value, "sk-123");
+        assert_eq!(envs[0].key, "dash-key");
+        assert_eq!(envs[0].value, "kept");
+    }
+
+    #[test]
+    fn is_valid_env_key_accepts_ordinary_names() {
+        // Deliberately permissive: lowercase, digits, dashes, dots and unicode
+        // are all fine — only structural breakers (=, control chars) are rejected.
+        assert!(is_valid_env_key("API_KEY"));
+        assert!(is_valid_env_key("lower_var"));
+        assert!(is_valid_env_key("dash-key"));
+        assert!(is_valid_env_key("app.db.url"));
+        assert!(is_valid_env_key("1startsWithDigit"));
+        assert!(!is_valid_env_key(""));
+        assert!(!is_valid_env_key(" "));
+        assert!(!is_valid_env_key("   "));
+        assert!(!is_valid_env_key(" PADDED"));
+        assert!(!is_valid_env_key("PADDED "));
+        assert!(!is_valid_env_key("FOO=BAR"));
+        assert!(!is_valid_env_key("BAD\nKEY"));
+        assert!(!is_valid_env_key("with\0null"));
     }
 
     #[test]
