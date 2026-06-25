@@ -107,11 +107,19 @@ RUN . /etc/buildenv \
         xz-utils \
         zip \
         zlib1g-dev \
+        gnupg \
+        lsb-release \
+        software-properties-common \
     && if [ "${TARGETARCH}" = "amd64" ]; then \
        apt-get install -y --no-install-recommends gcc-multilib; \
     fi \
     && rm -rf /var/lib/apt/lists/*
-RUN if [ -x /usr/bin/llvm-strip-14 ] && [ ! -e /usr/local/bin/llvm-strip ]; then ln -s /usr/bin/llvm-strip-14 /usr/local/bin/llvm-strip; fi \
+# Install clang-14
+RUN wget -O - https://apt.llvm.org/llvm.sh | bash -s -- 14 && apt-get install -y llvm-14 \
+    && rm -rf /var/lib/apt/lists/* && clang-14 --version && llvm-strip-14 --version \
+    && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100 \
+    && if [ -x /usr/bin/llvm-strip-14 ] && [ ! -e /usr/local/bin/llvm-strip ]; then ln -s /usr/bin/llvm-strip-14 /usr/local/bin/llvm-strip; fi \
     && if [ ! -e /usr/bin/musl-g++ ]; then ln -s /usr/bin/g++ /usr/bin/musl-g++; fi
 
 RUN . /etc/buildenv \
