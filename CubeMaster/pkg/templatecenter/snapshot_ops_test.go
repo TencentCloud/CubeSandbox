@@ -608,3 +608,96 @@ func TestDeleteSnapshotDoesNotBlockWhenRuntimeRefsExist(t *testing.T) {
 		t.Fatalf("DeleteSnapshot error = %q, runtime-ref guard should no longer reject", err.Error())
 	}
 }
+
+func TestRunSnapshotDeleteJobCleansTemplateJobs(t *testing.T) {
+	origReplicaCleanup := runReplicaCleanup
+	origMetadataCleanup := runMetadataCleanup
+	origJobCleanup := runTemplateJobCleanup
+	t.Cleanup(func() {
+		runReplicaCleanup = origReplicaCleanup
+		runMetadataCleanup = origMetadataCleanup
+		runTemplateJobCleanup = origJobCleanup
+	})
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	jobsCleaned := false
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error {
+		return nil
+	})
+	patches.ApplyFunc(discoverTemplateCleanupTargets, func(ctx context.Context, templateID, instanceType string) (*templateCleanupTargets, error) {
+		return &templateCleanupTargets{}, nil
+	})
+	patches.ApplyFunc(snapshotDeleteLocators, func(targets *templateCleanupTargets) ([]templateCleanupLocator, error) {
+		return nil, nil
+	})
+	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
+	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
+		return nil
+	}
+	runMetadataCleanup = func(ctx context.Context, templateID string) error {
+		return nil
+	}
+	runTemplateJobCleanup = func(ctx context.Context, templateID string) error {
+		if templateID != "snap-del" {
+			t.Fatalf("runTemplateJobCleanup templateID = %q, want snap-del", templateID)
+		}
+		jobsCleaned = true
+		return nil
+	}
+
+	if err := runSnapshotDeleteJob(context.Background(), "job-del", "snap-del"); err != nil {
+		t.Fatalf("runSnapshotDeleteJob returned error: %v", err)
+	}
+	if !jobsCleaned {
+		t.Fatal("expected runTemplateJobCleanup to be called")
+	}
+}
+
+func TestExecuteSnapshotDeleteJobReturnsReadyWithoutJobLookup(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(claimSnapshotJobExecution, func(ctx context.Context, jobID, phase string, progress int32) (bool, error) {
+		return true, nil
+	})
+	patches.ApplyFunc(runSnapshotDeleteJob, func(ctx context.Context, jobID, snapshotID string) error {
+		return nil
+	})
+	getJobInfoCallCount := 0
+	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
+		getJobInfoCallCount++
+		return nil, nil
+	})
+
+	info, err := executeSnapshotDeleteJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{
+		JobID:      "job-del",
+		TemplateID: "snap-del",
+		Status:     JobStatusPending,
+	}, "snap-del")
+	if err != nil {
+		t.Fatalf("executeSnapshotDeleteJob returned error: %v", err)
+	}
+	if info == nil {
+		t.Fatal("expected non-nil job info")
+	}
+	if info.JobID != "job-del" {
+		t.Fatalf("jobID = %q, want %q", info.JobID, "job-del")
+	}
+	if info.TemplateID != "snap-del" {
+		t.Fatalf("templateID = %q, want %q", info.TemplateID, "snap-del")
+	}
+	if info.Status != JobStatusReady {
+		t.Fatalf("status = %q, want %q", info.Status, JobStatusReady)
+	}
+	if info.Phase != JobPhaseReady {
+		t.Fatalf("phase = %q, want %q", info.Phase, JobPhaseReady)
+	}
+	if info.Progress != 100 {
+		t.Fatalf("progress = %d, want 100", info.Progress)
+	}
+	if getJobInfoCallCount != 0 {
+		t.Fatalf("GetTemplateImageJobInfo called %d time(s), want 0", getJobInfoCallCount)
+	}
+}

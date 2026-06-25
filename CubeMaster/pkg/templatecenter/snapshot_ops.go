@@ -708,16 +708,13 @@ func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 	if err := runReplicaCleanup(ctx, snapshotID, locators); err != nil {
 		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
 	}
-	if err := deleteSnapshotMetadataOnly(ctx, snapshotID); err != nil {
+	if err := runMetadataCleanup(ctx, snapshotID); err != nil {
 		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
 	}
 	invalidateTemplateCaches(snapshotID)
-	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
-		"status":      JobStatusReady,
-		"phase":       JobPhaseReady,
-		"progress":    100,
-		"result_json": `{"deleted":true}`,
-	}); err != nil {
+	// Mirror template delete: drop job rows so ListTemplates does not
+	// resurrect the snapshot from orphan job fallback entries.
+	if err := runTemplateJobCleanup(ctx, snapshotID); err != nil {
 		return err
 	}
 	success = true
@@ -1274,7 +1271,13 @@ func executeSnapshotDeleteJob(ctx context.Context, info *sandboxtypes.TemplateIm
 	if err := runSnapshotDeleteJob(jobCtx, info.JobID, snapshotID); err != nil {
 		return nil, err
 	}
-	return finalizeSnapshotJobByID(ctx, info.JobID)
+	// runSnapshotDeleteJob removes job rows on success; return a terminal
+	// READY view without re-querying the deleted job record.
+	result := cloneTemplateImageJobInfo(info)
+	result.Status = JobStatusReady
+	result.Phase = JobPhaseReady
+	result.Progress = 100
+	return result, nil
 }
 
 func resolveExistingSnapshotJobByID(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
