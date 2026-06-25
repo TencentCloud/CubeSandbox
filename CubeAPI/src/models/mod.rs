@@ -648,6 +648,10 @@ pub struct CreateTemplateRequest {
     /// Denied outbound CIDRs for CubeVS egress policy.
     #[serde(rename = "denyOut", default)]
     pub deny_out: Option<Vec<String>>,
+    /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
+    /// Omitted or null defaults to true on CubeMaster.
+    #[serde(rename = "with_cube_ca", default)]
+    pub with_cube_ca: Option<bool>,
 }
 
 /// Body for POST /templates/:id (rebuild).
