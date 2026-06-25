@@ -1320,58 +1320,6 @@ ORDER BY sort_order, id
             .map_err(anyhow::Error::from)
     }
 
-    #[allow(dead_code)]
-    pub async fn get_store_template(
-        &self,
-        item_id: &str,
-    ) -> anyhow::Result<Option<StoreTemplateRecord>> {
-        let row = sqlx::query(
-            r#"
-SELECT item_id, name_key, description_key, image_cn, image_intl, digest,
-       tags, category, size_mb, expose_ports, probe_port, probe_path,
-       writable_layer_size, official, dns, sort_order
-FROM t_store_template
-WHERE item_id = ? AND deleted_at IS NULL
-LIMIT 1
-"#,
-        )
-        .bind(item_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(|row| {
-            let tags_value: Option<Value> = row.try_get("tags")?;
-            let ports_value: Option<Value> = row.try_get("expose_ports")?;
-            let dns_value: Option<Value> = row.try_get("dns")?;
-            Ok::<StoreTemplateRecord, sqlx::Error>(StoreTemplateRecord {
-                item_id: row.try_get("item_id")?,
-                name_key: row.try_get("name_key")?,
-                description_key: row.try_get("description_key")?,
-                image_cn: row.try_get("image_cn")?,
-                image_intl: row.try_get("image_intl")?,
-                digest: row.try_get("digest")?,
-                tags: tags_value
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default(),
-                category: row.try_get("category")?,
-                size_mb: row.try_get("size_mb")?,
-                expose_ports: ports_value
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default(),
-                probe_port: row.try_get("probe_port")?,
-                probe_path: row.try_get("probe_path")?,
-                writable_layer_size: row.try_get("writable_layer_size")?,
-                official: row.try_get::<i8, _>("official")? != 0,
-                dns: dns_value
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default(),
-                sort_order: row.try_get("sort_order")?,
-            })
-        })
-        .transpose()
-        .map_err(anyhow::Error::from)
-    }
-
     pub async fn create_store_template(&self, record: &StoreTemplateRecord) -> anyhow::Result<()> {
         let tags = serde_json::to_value(&record.tags)?;
         let ports = serde_json::to_value(&record.expose_ports)?;

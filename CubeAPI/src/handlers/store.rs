@@ -14,6 +14,8 @@ use axum::extract::{Path, State};
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use utoipa::ToSchema;
 
 use crate::db::StoreTemplateRecord;
@@ -407,15 +409,27 @@ pub async fn get_store_meta(State(state): State<AppState>) -> impl IntoResponse 
 pub async fn refresh_store_meta(State(state): State<AppState>) -> impl IntoResponse {
     let images = collect_store_images(&state).await;
 
+    // Limit concurrent docker pulls to avoid saturating the Docker daemon and
+    // network bandwidth when the store catalog is large.
+    const MAX_CONCURRENT_PULLS: usize = 3;
+    let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_PULLS));
+
     let handles: Vec<_> = images
         .iter()
         .map(|img| {
             let img = img.clone();
-            tokio::task::spawn_blocking(move || {
-                let _ = Command::new("docker")
-                    .args(["pull", "--quiet", &img])
-                    .output();
-                inspect_image(&img)
+            let sem = Arc::clone(&sem);
+            tokio::task::spawn(async move {
+                let _permit = sem.acquire_owned().await;
+                tokio::task::spawn_blocking(move || {
+                    let _ = Command::new("docker")
+                        .args(["pull", "--quiet", &img])
+                        .output();
+                    inspect_image(&img)
+                })
+                .await
+                .ok()
+                .flatten()
             })
         })
         .collect();

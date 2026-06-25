@@ -108,6 +108,15 @@ pub struct ServerConfig {
     /// password — override it in any non-local environment).
     #[serde(default = "default_envd_auth")]
     pub envd_auth: String,
+
+    /// Fallback CUBE_API_KEY injected into example subprocesses when the
+    /// parent process does not export CUBE_API_KEY.
+    ///
+    /// Intended for sandbox/demo deployments to provide an out-of-the-box
+    /// experience. In production, leave this unset and export CUBE_API_KEY
+    /// directly. Env var: CUBE_API_DEFAULT_KEY
+    #[serde(default = "default_api_key")]
+    pub default_api_key: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -169,6 +178,12 @@ fn default_sandbox_proxy_url() -> String {
 fn default_envd_auth() -> String {
     std::env::var("CUBE_API_ENVD_AUTH").unwrap_or_else(|_| "Basic cm9vdDo=".to_string())
 }
+fn default_api_key() -> Option<String> {
+    std::env::var("CUBE_API_DEFAULT_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| Some("cube_0000000000000000000000000000000000000000".to_string()))
+}
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
     let host = std::env::var("CUBE_SANDBOX_MYSQL_HOST").ok()?;
@@ -214,6 +229,7 @@ impl Default for ServerConfig {
             cube_proxy_port_http: default_cube_proxy_port_http(),
             sandbox_proxy_url: default_sandbox_proxy_url(),
             envd_auth: default_envd_auth(),
+            default_api_key: default_api_key(),
         }
     }
 }

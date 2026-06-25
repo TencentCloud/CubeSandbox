@@ -41,6 +41,10 @@ pub struct ExampleService {
     sandbox_proxy_url: String,
     /// Authorization header for internal envd calls.
     envd_auth: String,
+    /// Fallback API key injected into example subprocesses when the parent
+    /// process does not export CUBE_API_KEY. Sourced from config/env only;
+    /// never hardcoded here.
+    default_api_key: Option<String>,
 }
 
 impl ExampleService {
@@ -53,6 +57,7 @@ impl ExampleService {
         sandbox_domain: String,
         sandbox_proxy_url: String,
         envd_auth: String,
+        default_api_key: Option<String>,
     ) -> Self {
         Self {
             cube_api_url,
@@ -62,6 +67,7 @@ impl ExampleService {
             sandbox_domain,
             sandbox_proxy_url,
             envd_auth,
+            default_api_key,
         }
     }
 
@@ -274,10 +280,9 @@ impl ExampleService {
             .current_dir(&work_dir);
 
         if std::env::var("CUBE_API_KEY").is_err() {
-            cmd.env(
-                "CUBE_API_KEY",
-                "cube_0000000000000000000000000000000000000000",
-            );
+            if let Some(ref fallback_key) = self.default_api_key {
+                cmd.env("CUBE_API_KEY", fallback_key);
+            }
         }
 
         let effective_proxy_ip = req
@@ -445,7 +450,6 @@ impl ExampleService {
             let list_candidates: Vec<_> = tpls
                 .iter()
                 .filter(|t| t.status == "healthy" || t.status == "ready")
-                .chain(tpls.iter())
                 .map(|t| t.template_id.as_str())
                 .collect();
             for candidate in list_candidates {
@@ -505,21 +509,10 @@ async fn ensure_requirements(base_dir: &PathBuf) -> bool {
         }
     };
 
-    let fingerprint = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        req_content.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
-    };
-
     let stamp_file = base_dir.join(".requirements_installed");
     if let Ok(stamp) = std::fs::read_to_string(&stamp_file) {
-        if stamp == fingerprint {
-            tracing::debug!(
-                "requirements unchanged (fingerprint={}), skipping pip install",
-                fingerprint
-            );
+        if stamp == req_content {
+            tracing::debug!("requirements unchanged, skipping pip install");
             return true;
         }
     }
@@ -537,7 +530,7 @@ async fn ensure_requirements(base_dir: &PathBuf) -> bool {
     match install_result {
         Ok(output) => {
             if output.status.success() {
-                let _ = std::fs::write(&stamp_file, &fingerprint);
+                let _ = std::fs::write(&stamp_file, &req_content);
                 true
             } else {
                 tracing::warn!(
