@@ -17,6 +17,7 @@
 ARG ENVD_REF=2026.16
 ARG GO_VERSION=1.25.4
 ARG UBUNTU_VERSION=22.04
+ARG TARGETARCH
 
 # -------- Stage 1: compile envd from e2b-dev/infra --------
 FROM golang:${GO_VERSION}-bookworm AS envd-builder
@@ -39,7 +40,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     commit_sha="$(git -C /src/infra rev-parse --short HEAD)" \
     && echo "Building envd from ${ENVD_UPSTREAM_REPO}@${ENVD_REF} (commit=${commit_sha})" \
-    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
        go build -a \
            -ldflags "-X=main.commitSHA=${commit_sha} -s -w" \
            -o /out/envd \
