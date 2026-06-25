@@ -6,6 +6,7 @@
 
 ONE_CLICK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ONE_CLICK_DIR="$(cd "${ONE_CLICK_LIB_DIR}/.." && pwd)"
+CUBE_SANDBOX_INSTALL_ROOT="/usr/local/services/cubetoolbox"
 
 log() {
   echo "[one-click] $*" >&2
@@ -647,10 +648,9 @@ patch_cubelet_config_template() {
 # ---------------------------------------------------------------------------
 
 # assert_safe_install_prefix: refuse to perform a destructive full wipe of an
-# obviously unsafe install prefix. Guards against a mis-set
-# ONE_CLICK_INSTALL_PREFIX (e.g. "/" or "/usr", or a foreign dir like
-# "/usr/local" / "/var/lib") turning the custom-prefix wipe into a
-# system-destroying `rm -rf`. Beyond the root/system/top-level denylist, a
+# obviously unsafe install root. Guards against a bad caller accidentally
+# pointing a wipe at "/" or "/usr", or a foreign dir like "/usr/local" /
+# "/var/lib", turning the wipe into a system-destroying `rm -rf`. Beyond the root/system/top-level denylist, a
 # non-empty existing prefix is only wiped when it is a recognised CubeSandbox
 # install (presence of a marker artifact such as .one-click.env / CubeMaster)
 # or effectively empty. A lone '.backup' left over from an interrupted upgrade
@@ -659,14 +659,14 @@ patch_cubelet_config_template() {
 assert_safe_install_prefix() {
   local prefix="$1"
 
-  [[ -n "${prefix}" ]] || die "refusing to wipe an empty install prefix"
-  [[ "${prefix}" == /* ]] || die "refusing to wipe a non-absolute install prefix: ${prefix}"
-  [[ ! -L "${prefix}" ]] || die "refusing to wipe a symlink install prefix: ${prefix}"
+  [[ -n "${prefix}" ]] || die "refusing to wipe an empty install root"
+  [[ "${prefix}" == /* ]] || die "refusing to wipe a non-absolute install root: ${prefix}"
+  [[ ! -L "${prefix}" ]] || die "refusing to wipe a symlink install root: ${prefix}"
 
   # Normalize: drop a single trailing slash (but keep "/" detectable).
   local norm="${prefix%/}"
   [[ -n "${norm}" ]] || die "refusing to wipe the filesystem root: ${prefix}"
-  [[ ! -L "${norm}" ]] || die "refusing to wipe a symlink install prefix: ${prefix}"
+  [[ ! -L "${norm}" ]] || die "refusing to wipe a symlink install root: ${prefix}"
 
   case "${norm}" in
     /usr|/bin|/sbin|/lib|/lib64|/etc|/var|/boot|/dev|/proc|/sys|/run|/root|/home|/opt)
@@ -682,7 +682,7 @@ assert_safe_install_prefix() {
   # top-level directories cannot be wiped wholesale.
   local trimmed="${norm#/}"
   if [[ "${trimmed}" != */* ]]; then
-    die "refusing to wipe a top-level directory: ${prefix} (install prefix must be at least two levels deep)"
+    die "refusing to wipe a top-level directory: ${prefix} (install root must be at least two levels deep)"
   fi
 
   # Content sanity check: the custom-prefix wipe deletes every top-level entry
@@ -703,7 +703,7 @@ _assert_no_top_level_symlinks() {
   local symlink
   symlink="$(find "${dir}" -mindepth 1 -maxdepth 1 -type l -print -quit 2>/dev/null || true)"
   if [[ -n "${symlink}" ]]; then
-    die "refusing to wipe custom install prefix ${display}: contains top-level symlink (${symlink}); move it away and retry"
+    die "refusing to wipe install root ${display}: contains top-level symlink (${symlink}); move it away and retry"
   fi
 }
 
@@ -722,7 +722,7 @@ _assert_cube_prefix_marker_or_empty() {
     local stray
     stray="$(find "${dir}" -mindepth 1 -maxdepth 1 ! -name '.backup' -print -quit 2>/dev/null || true)"
     if [[ -n "${stray}" ]]; then
-      die "refusing to wipe custom install prefix ${display}: directory is not empty and contains no CubeSandbox installation markers (.one-click.env / CubeMaster / CubeAPI / Cubelet). Point ONE_CLICK_INSTALL_PREFIX at a dedicated CubeSandbox prefix, or remove the foreign content first."
+      die "refusing to wipe install root ${display}: directory is not empty and contains no CubeSandbox installation markers (.one-click.env / CubeMaster / CubeAPI / Cubelet). Remove the foreign content first."
     fi
   fi
 }
@@ -740,14 +740,14 @@ wipe_custom_install_prefix_contents() {
   fi
 
   before="$(stat -c '%d:%i' -- "${norm}")" \
-    || die "failed to stat install prefix before wipe: ${prefix}"
+    || die "failed to stat install root before wipe: ${prefix}"
 
   (
-    cd -- "${norm}" || die "failed to enter install prefix: ${prefix}"
+    cd -- "${norm}" || die "failed to enter install root: ${prefix}"
     after="$(stat -c '%d:%i' -- .)" \
-      || die "failed to stat install prefix after cd: ${prefix}"
+      || die "failed to stat install root after cd: ${prefix}"
     [[ "${before}" == "${after}" ]] \
-      || die "install prefix changed while preparing to wipe: ${prefix}"
+      || die "install root changed while preparing to wipe: ${prefix}"
 
     # Re-run the marker/empty check against the pinned cwd. This closes the
     # gap between path validation and destructive deletion.
@@ -862,6 +862,8 @@ def parse(path):
 # database (configured via the WebUI), and the DB master key is auto-bootstrapped
 # by CubeAPI, so AGENTHUB_SECRET_KEY is obsolete too.
 DEPRECATED_KEYS = {
+    "ONE_CLICK_INSTALL_PREFIX",
+    "ONE_CLICK_TOOLBOX_ROOT",
     "AGENTHUB_DEEPSEEK_API_KEY",
     "OPENCLAW_DEEPSEEK_API_KEY",
     "AGENTHUB_LLM_API_KEY",
@@ -876,6 +878,18 @@ DEPRECATED_KEYS = {
     "AGENTHUB_SECRET_KEY",
     "CUBE_API_DATABASE_URL",
 }
+
+LEGACY_CUBE_PROXY_CERT_DIR_DEFAULTS = {
+    '"${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"',
+    "${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs",
+}
+
+
+def normalize_legacy_value(key, val, tmpl_val):
+    if key == "CUBE_PROXY_CERT_DIR" and val in LEGACY_CUBE_PROXY_CERT_DIR_DEFAULTS:
+        return tmpl_val
+    return val
+
 
 new_defaults = parse(new_example)
 old_values = parse(old_runtime)
@@ -912,7 +926,7 @@ for line in template:
         chosen = new_overrides[key]
         explicit.append(key)
     elif key in old_values:
-        ov = old_values[key]
+        ov = normalize_legacy_value(key, old_values[key], tmpl_val)
         if (has_baseline and key in old_baseline_vals
                 and ov == old_baseline_vals[key] and ov != tmpl_val):
             chosen = tmpl_val

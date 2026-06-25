@@ -146,7 +146,7 @@ cp env.example .env
 sudo ./install.sh
 ```
 
-The default installation path is `/usr/local/services/cubetoolbox`.
+The one-click installation path is fixed at `/usr/local/services/cubetoolbox`.
 
 New one-click installations are managed by systemd only:
 
@@ -284,7 +284,7 @@ Other common parameters:
 CUBE_PROXY_HTTPS_PORT=443
 CUBE_PROXY_HTTP_PORT=80
 # Deprecated: CUBE_PROXY_HOST_PORT is ignored; configure CUBE_PROXY_HTTP_PORT instead.
-CUBE_PROXY_CERT_DIR="${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"
+CUBE_PROXY_CERT_DIR=/usr/local/services/cubetoolbox/cubeproxy/certs
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
 WEB_UI_ENABLE=1
 WEB_UI_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat

@@ -151,7 +151,6 @@ Compute nodes use the same `.env` file format. The following variables are speci
 | `CUBE_SANDBOX_NODE_IP` | `10.0.0.10` | **Required.** This node's primary network interface IP |
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` (from `config.toml`) | cubevs local network CIDR. Should match the control-plane value. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /8–/30. Auto-detected for host network conflicts at install time. |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | Set to `1` to skip CIDR conflict detection (not recommended). |
-| `ONE_CLICK_INSTALL_PREFIX` | `/usr/local/services/cubetoolbox` | Installation directory |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | Run health check after installation |
 
 For the full configuration reference (build-time options, database, proxy, etc.), see [Self-Build Deployment — Configuration Reference](./self-build-deploy.md#configuration-reference).

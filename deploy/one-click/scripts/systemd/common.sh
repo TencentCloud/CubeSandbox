@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SYSTEMD_HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
+TOOLBOX_ROOT="/usr/local/services/cubetoolbox"
 ENV_FILE="${ONE_CLICK_RUNTIME_ENV_FILE:-${TOOLBOX_ROOT}/.one-click.env}"
 UNIT_SOURCE_DIR="${ONE_CLICK_SYSTEMD_UNIT_SOURCE_DIR:-${TOOLBOX_ROOT}/systemd}"
 UNIT_INSTALL_DIR="${ONE_CLICK_SYSTEMD_UNIT_INSTALL_DIR:-/etc/systemd/system}"

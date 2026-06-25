@@ -94,8 +94,7 @@ warn_default_external_credentials() {
   fi
 }
 
-TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
-INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
+INSTALL_PREFIX="${CUBE_SANDBOX_INSTALL_ROOT}"
 
 # Resolve install vs upgrade mode and, for upgrades, run preflight + backup and
 # build the config-preserving merged env BEFORE any destructive change. The
@@ -782,7 +781,7 @@ stop_existing_systemd_deployment() {
 stop_existing_legacy_deployment() {
   # Legacy bridge for upgrading pre-systemd one-click installs.
   # New installs are systemd-only; this path only stops old nohup/pidfile deployments
-  # before the install prefix is replaced.
+  # before the install root is replaced.
   local installed_role="$1"
   local legacy_stop_script=""
 
@@ -794,18 +793,14 @@ stop_existing_legacy_deployment() {
 
   if [[ -n "${legacy_stop_script}" ]]; then
     log "stopping legacy pre-systemd deployment under ${INSTALL_PREFIX}"
-    ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
-    ONE_CLICK_RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env" \
-      "${legacy_stop_script}" || true
+    "${legacy_stop_script}" || true
   fi
 }
 
 install_systemd_units() {
   local install_units_script="${INSTALL_PREFIX}/scripts/systemd/install-units.sh"
   ensure_file "${install_units_script}"
-  ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
-  ONE_CLICK_RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env" \
-    "${install_units_script}"
+  "${install_units_script}"
 }
 
 start_systemd_target() {
@@ -950,28 +945,22 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   fi
 fi
 
-if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
-  rm -rf \
-    "${INSTALL_PREFIX}/network-agent" \
-    "${INSTALL_PREFIX}/CubeAPI" \
-    "${INSTALL_PREFIX}/CubeMaster" \
-    "${INSTALL_PREFIX}/Cubelet" \
-    "${INSTALL_PREFIX}/cubeproxy" \
-    "${INSTALL_PREFIX}/coredns" \
-    "${INSTALL_PREFIX}/webui" \
-    "${INSTALL_PREFIX}/support" \
-    "${INSTALL_PREFIX}/systemd" \
-    "${INSTALL_PREFIX}/cube-shim" \
-    "${INSTALL_PREFIX}/cube-kernel-scf" \
-    "${INSTALL_PREFIX}/cube-image" \
-    "${INSTALL_PREFIX}/scripts" \
-    "${INSTALL_PREFIX}/sql" \
-    "${INSTALL_PREFIX}/.one-click.env"
-else
-  # Full wipe of a custom prefix, but preserve any upgrade backup directory so
-  # the config snapshot survives for recovery/rollback.
-  wipe_custom_install_prefix_contents "${INSTALL_PREFIX}"
-fi
+rm -rf \
+  "${INSTALL_PREFIX}/network-agent" \
+  "${INSTALL_PREFIX}/CubeAPI" \
+  "${INSTALL_PREFIX}/CubeMaster" \
+  "${INSTALL_PREFIX}/Cubelet" \
+  "${INSTALL_PREFIX}/cubeproxy" \
+  "${INSTALL_PREFIX}/coredns" \
+  "${INSTALL_PREFIX}/webui" \
+  "${INSTALL_PREFIX}/support" \
+  "${INSTALL_PREFIX}/systemd" \
+  "${INSTALL_PREFIX}/cube-shim" \
+  "${INSTALL_PREFIX}/cube-kernel-scf" \
+  "${INSTALL_PREFIX}/cube-image" \
+  "${INSTALL_PREFIX}/scripts" \
+  "${INSTALL_PREFIX}/sql" \
+  "${INSTALL_PREFIX}/.one-click.env"
 
 mkdir -p "${INSTALL_PREFIX}"
 if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
@@ -1154,9 +1143,7 @@ check_runtime_file_paths_not_directories
 start_systemd_target
 
 if [[ "${ONE_CLICK_RUN_QUICKCHECK:-1}" == "1" ]]; then
-  ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
-  ONE_CLICK_RUNTIME_ENV_FILE="${RUNTIME_ENV_FILE}" \
-    "${INSTALL_PREFIX}/scripts/one-click/quickcheck.sh"
+  "${INSTALL_PREFIX}/scripts/one-click/quickcheck.sh"
 fi
 
 log "install complete (role=${DEPLOY_ROLE})"

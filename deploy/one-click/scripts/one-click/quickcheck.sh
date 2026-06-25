@@ -281,7 +281,6 @@ quickcheck_main() {
   require_cmd curl
   require_cmd grep
 
-  local TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
   local MASTER_ADDR
   MASTER_ADDR="$(resolve_control_plane_cubemaster_addr)"
   local NA_HEALTH_ADDR="${NETWORK_AGENT_HEALTH_ADDR:-127.0.0.1:19090}"

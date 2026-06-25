@@ -70,7 +70,6 @@ Options:
   --help            Show this help message and exit
 
 Environment variables:
-  ONE_CLICK_TOOLBOX_ROOT   Installation root (default: /usr/local/services/cubetoolbox)
   ONE_CLICK_LOG_DIR        Runtime log directory (default: /var/log/cube-sandbox-one-click)
   ONE_CLICK_RUNTIME_DIR    PID file directory (default: /var/run/cube-sandbox-one-click)
   CUBE_DATA_LOG_DIR        Structured log root (default: /data/log)
@@ -96,7 +95,7 @@ EOF
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
+TOOLBOX_ROOT="/usr/local/services/cubetoolbox"
 RUNTIME_LOG_DIR="${ONE_CLICK_LOG_DIR:-/var/log/cube-sandbox-one-click}"
 RUNTIME_PID_DIR="${ONE_CLICK_RUNTIME_DIR:-/var/run/cube-sandbox-one-click}"
 DATA_LOG_DIR="${CUBE_DATA_LOG_DIR:-/data/log}"

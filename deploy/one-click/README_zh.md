@@ -135,7 +135,7 @@ cp env.example .env
 sudo ./install.sh
 ```
 
-默认会安装到 `/usr/local/services/cubetoolbox`。
+one-click 固定安装到 `/usr/local/services/cubetoolbox`。
 
 新的 one-click 安装统一只使用 systemd 托管：
 
@@ -271,7 +271,7 @@ CUBE_PROXY_DNS_ENABLE=1
 CUBE_PROXY_HTTPS_PORT=443
 CUBE_PROXY_HTTP_PORT=80
 # 已废弃：CUBE_PROXY_HOST_PORT 会被忽略；如需调整启动后检查端口，请配置 CUBE_PROXY_HTTP_PORT。
-CUBE_PROXY_CERT_DIR="${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"
+CUBE_PROXY_CERT_DIR=/usr/local/services/cubetoolbox/cubeproxy/certs
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
 WEB_UI_ENABLE=1
 WEB_UI_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat

@@ -151,7 +151,6 @@ sudo ./down.sh
 | `CUBE_SANDBOX_NODE_IP` | `10.0.0.10` | **必须修改。** 当前节点主网卡 IP |
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18`（取自 `config.toml`） | cubevs 本地网络 CIDR。需与控制节点一致。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /8~/30。安装时自动检测宿主机冲突。 |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | 设为 `1` 跳过冲突检测（不推荐）。 |
-| `ONE_CLICK_INSTALL_PREFIX` | `/usr/local/services/cubetoolbox` | 安装目录 |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |
 
 完整配置参考（构建选项、数据库、代理等）请参阅[本地构建部署 — 配置参考](./self-build-deploy.md#配置参考）。

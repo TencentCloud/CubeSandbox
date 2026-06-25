@@ -142,9 +142,8 @@ test_assert_safe_install_prefix() {
   ( assert_safe_install_prefix "${TMP_DIR}/opt/cube/custom/" ) >/dev/null 2>&1 \
     || fail "assert_safe_install_prefix should accept a deep prefix with trailing slash"
 
-  # Content sanity check: a non-empty prefix with no CubeSandbox marker is
-  # foreign (e.g. a mis-set ONE_CLICK_INSTALL_PREFIX=/usr/local) and must be
-  # refused so the wipe does not rm -rf unrelated content.
+  # Content sanity check: a non-empty install root with no CubeSandbox marker is
+  # foreign and must be refused so the wipe does not rm -rf unrelated content.
   local foreign="${TMP_DIR}/foreign"
   mkdir -p "${foreign}/somedir"
   : > "${foreign}/notes.txt"
@@ -406,14 +405,15 @@ test_install_sh_wires_upgrade_flow() {
   # in both = and space forms) and CLI values are re-applied after .env load.
   assert_contains "${f}" 'one_click_parse_args "$@"'
   assert_contains "${f}" "apply_cli_overrides"
-  # custom-prefix wipe is guarded against unsafe install prefixes
-  assert_contains "${f}" 'wipe_custom_install_prefix_contents "${INSTALL_PREFIX}"'
+  # The install root is fixed; custom-prefix wipe is no longer part of install.sh.
+  assert_contains "${f}" 'INSTALL_PREFIX="${CUBE_SANDBOX_INSTALL_ROOT}"'
+  if grep -Fq 'wipe_custom_install_prefix_contents "${INSTALL_PREFIX}"' "${f}"; then
+    fail "install.sh should not invoke custom-prefix wipe"
+  fi
   # env.example baseline is installed for future three-way merges
   assert_contains "${f}" 'cp -f "${SCRIPT_DIR}/env.example" "${INSTALL_PREFIX}/env.example"'
   # upgrade writes the merged env as the runtime env
   assert_contains "${f}" 'cp -f "${MERGED_ENV}" "${RUNTIME_ENV_FILE}"'
-  # full-wipe branch delegates to the helper that preserves the upgrade backup.
-  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "! -name '.backup'"
   # on upgrade, CIDR host-conflict detection is skipped (M2)
   assert_contains "${f}" 'check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR"'
   assert_contains "${f}" 'check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR"'

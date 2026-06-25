@@ -17,7 +17,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-export ONE_CLICK_TOOLBOX_ROOT="${TMP_DIR}/toolbox"
+: > "${TMP_DIR}/empty-runtime.env"
+export ONE_CLICK_RUNTIME_ENV_FILE="${TMP_DIR}/empty-runtime.env"
 export ONE_CLICK_RUNTIME_DIR="${TMP_DIR}/run"
 export ONE_CLICK_LOG_DIR="${TMP_DIR}/log"
 

@@ -132,7 +132,7 @@ sudo ./install.sh
 安装脚本会依次执行：
 
 1. 可选配置 Docker 镜像加速（如 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1`）
-2. 解压沙箱包到 `/usr/local/services/cubetoolbox`（可配置）
+2. 解压沙箱包到固定安装根 `/usr/local/services/cubetoolbox`
 3. 创建日志和数据目录
 4. 将 CubeShim 二进制文件软链接到 `/usr/local/bin/`
 5. 安装内置的 `mkcert`（若系统尚无此命令），为 `cube.app` 域名生成 TLS 证书
@@ -287,7 +287,6 @@ sudo ./down.sh
 | `CUBE_SANDBOX_NODE_IP` | 自动从 `eth0` 探测 | 节点主网卡 IP 地址。未设置时自动探测；若网卡名称不同请显式指定。 |
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` | cubevs 本地网络 CIDR，用于沙箱 IP 分配。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /8~/30。若与宿主机网卡、路由或 DNS 解析器地址冲突，安装前置检测会直接中止安装。未设置时使用固定默认值。 |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | 设为 `1` 可跳过默认或自定义沙箱 CIDR 的冲突检测（不推荐）。 |
-| `ONE_CLICK_INSTALL_PREFIX` | `/usr/local/services/cubetoolbox` | 安装目录 |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |
 | `ONE_CLICK_RUNTIME_DIR` | `/var/run/cube-sandbox-one-click` | PID 和运行时文件目录 |
 | `ONE_CLICK_LOG_DIR` | `/var/log/cube-sandbox-one-click` | 进程标准输出/错误日志目录 |
@@ -337,7 +336,7 @@ sudo ./down.sh
 
 ## 安装后目录结构
 
-安装完成后，部署目录位于 `/usr/local/services/cubetoolbox/`（默认）：
+安装完成后，部署目录位于 `/usr/local/services/cubetoolbox/`：
 
 ```
 /usr/local/services/cubetoolbox/
