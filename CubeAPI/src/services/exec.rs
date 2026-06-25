@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
+use tokio::time::{timeout, Duration};
 
 use crate::{
     error::{AppError, AppResult},
@@ -56,25 +57,40 @@ impl ExecService {
         domain: &str,
         req: &ExecCodeRequest,
     ) -> AppResult<ExecCodeResponse> {
-        let timeout_ms = (req.timeout_secs.unwrap_or(30).clamp(1, 300) as u64) * 1000;
+        let timeout_secs = req.timeout_secs.unwrap_or(30).clamp(1, 300) as u64;
+        let timeout_ms = timeout_secs * 1000;
         let start = Instant::now();
 
-        let output = match req.language.as_str() {
-            "python" => self.exec_python(sandbox_id, domain, &req.code).await?,
-            "bash" => {
-                let cmd = self.exec_bash(sandbox_id, domain, &req.code).await?;
-                JupyterOutput {
-                    exit_code: cmd.exit_code,
-                    stdout: cmd.stdout,
-                    stderr: cmd.stderr,
-                    results: None,
+        let exec_future = async {
+            match req.language.as_str() {
+                "python" => self.exec_python(sandbox_id, domain, &req.code).await,
+                "bash" => {
+                    let cmd = self.exec_bash(sandbox_id, domain, &req.code).await?;
+                    Ok(JupyterOutput {
+                        exit_code: cmd.exit_code,
+                        stdout: cmd.stdout,
+                        stderr: cmd.stderr,
+                        results: None,
+                    })
                 }
-            }
-            other => {
-                return Err(AppError::BadRequest(format!(
+                other => Err(AppError::BadRequest(format!(
                     "unsupported language: {}",
                     other
-                )));
+                ))),
+            }
+        };
+
+        let output = match timeout(Duration::from_secs(timeout_secs), exec_future).await {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                return Ok(ExecCodeResponse {
+                    stdout: String::new(),
+                    stderr: format!("execution timed out after {}s", timeout_secs),
+                    exit_code: -1,
+                    success: false,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    results: None,
+                });
             }
         };
 
@@ -421,3 +437,4 @@ fn parse_exit_status(status: Option<&str>) -> Option<i64> {
         .strip_prefix("exit status ")
         .and_then(|v| v.trim().parse::<i64>().ok())
 }
+

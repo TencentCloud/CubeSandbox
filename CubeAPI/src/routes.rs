@@ -48,6 +48,16 @@ const SNAPSHOT_LONG_ROUTE_TIMEOUT: Duration = Duration::from_secs(240);
 /// outer HTTP timeout must be at least as large as the longest inner timeout.
 const EXAMPLES_RUN_ROUTE_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Timeout budget for `POST /cube/sandboxes/:id/exec-code` (and its
+/// `/cubeapi/v1/cube/…` mirror).  The request body carries a `timeout_secs`
+/// field that is clamped to [1, 300] inside the service layer; the inner
+/// `tokio::time::timeout` enforces that budget.  This outer HTTP timeout must
+/// be strictly greater than the maximum inner timeout so the HTTP connection
+/// is never killed before the service layer has a chance to return a proper
+/// timed-out response.  5 s of headroom covers connection setup and JSON
+/// serialisation overhead.
+const EXEC_CODE_ROUTE_TIMEOUT: Duration = Duration::from_secs(305);
+
 pub fn build_router(state: AppState) -> Router {
     let auth_configured = state
         .config
@@ -77,11 +87,24 @@ pub fn build_router(state: AppState) -> Router {
         ),
         EXAMPLES_RUN_ROUTE_TIMEOUT,
     );
+    let exec_code_router = apply_http_layers(
+        Router::new()
+            .nest(
+                "/cube",
+                build_cube_exec_code_routes(&state, auth_configured),
+            )
+            .nest(
+                "/cubeapi/v1/cube",
+                build_cube_exec_code_routes(&state, auth_configured),
+            ),
+        EXEC_CODE_ROUTE_TIMEOUT,
+    );
 
     Router::new()
         .merge(standard_router)
         .merge(snapshot_long_router)
         .merge(examples_run_router)
+        .merge(exec_code_router)
         .with_state(state)
 }
 
@@ -175,13 +198,20 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
     with_auth_and_rate_limit(routes, state, auth_configured)
 }
 
-/// Cube-specific (NON e2b-compatible) routes.
+/// Cube-specific (NON e2b-compatible) routes on the standard 30 s budget.
 ///
-/// These endpoints are Cube extensions that have no equivalent in the e2b API
-/// surface, so they are grouped here and mounted behind the `/cube` prefix
-/// (e.g. `/cube/sandboxes/:id/exec-code`) to keep the e2b-compatible surface
-/// clean and the two contracts clearly separated.
-fn build_cube_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+/// NOTE: `POST /sandboxes/:id/exec-code` is intentionally NOT included here.
+/// It lives in `build_cube_exec_code_routes` on the long (305 s) router
+/// because its inner `timeout_secs` can be up to 300 s; mounting it here
+/// would let the 30 s HTTP timeout silently override the user-supplied value.
+fn build_cube_routes(_state: &AppState, _auth_configured: bool) -> Router<AppState> {
+    Router::new()
+}
+
+/// Long-budget route for `POST /sandboxes/:id/exec-code`.  Mounted on its own
+/// router so the 30 s default HTTP timeout does not kill executions whose
+/// `timeout_secs` field exceeds 30 s.
+fn build_cube_exec_code_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
     let routes = Router::new().route("/sandboxes/:sandboxID/exec-code", post(cube::exec_code));
 
     with_auth_and_rate_limit(routes, state, auth_configured)
@@ -645,4 +675,5 @@ mod tests {
             resp.text(),
         );
     }
+
 }
