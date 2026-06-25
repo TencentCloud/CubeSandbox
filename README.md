@@ -190,8 +190,7 @@ In the context of AI Agent code execution, CubeSandbox achieves the perfect bala
 *   *Cold start benchmarked on bare-metal. 60ms at single concurrency; under 50 concurrent creations, avg 67ms, P95 90ms, P99 137ms — consistently sub-150ms.*
 *   *Memory overhead measured with sandbox specs ≤ 32GB. Larger configurations may see a marginal increase.*
 
-For detailed metrics on startup latency and resource overhead, please refer to:
-
+For detailed metrics on startup latency and resource overhead, see the [Core Operations Performance Benchmark Report](./docs/blog/posts/2026-06-01-cubesandbox-perf-benchmark.md) (bare metal) and the [PVM Cloud Server Benchmark Report](./docs/blog/posts/2026-06-03-cubesandbox-perf-benchmark-pvm.md).
 
 <table align="center">
   <tr align="center" valign="middle">
