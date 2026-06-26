@@ -46,7 +46,12 @@ function RichResultItem({ result }: { result: JupyterResult }) {
     return (
       <div
         className="jupyter-html-output max-h-[300px] overflow-auto rounded-md bg-white p-2 text-xs ring-1 ring-border/60 [&_table]:border-collapse [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:px-2 [&_th]:py-1 [&_th]:bg-muted/40"
-        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(result.html) }}
+        dangerouslySetInnerHTML={{
+          __html: DOMPurify.sanitize(result.html, {
+            FORBID_TAGS: ['svg', 'use', 'animate', 'animateTransform', 'set'],
+            SANITIZE_NAMED_PROPS: true,
+          }),
+        }}
       />
     );
   }

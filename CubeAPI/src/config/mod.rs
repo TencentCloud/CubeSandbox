@@ -88,7 +88,7 @@ pub struct ServerConfig {
     pub cube_proxy_node_ip: Option<String>,
 
     /// CubeProxy HTTP port (passed as CUBE_PROXY_PORT_HTTP).
-    /// Env var: CUBE_PROXY_PORT_HTTP (default "80")
+    /// Env var: CUBE_PROXY_PORT_HTTP (no default; omitted when unset)
     #[serde(default = "default_cube_proxy_port_http")]
     pub cube_proxy_port_http: Option<u16>,
 

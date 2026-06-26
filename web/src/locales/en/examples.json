@@ -80,6 +80,7 @@
     "hint": "These values are injected into the sandbox environment when running examples. Leave empty to use server defaults.",
     "notSet": "Not set"
   },
+  "novncPreview": "Sandbox desktop preview (noVNC)",
   "timeline": {
     "title": "Step timeline",
     "empty": "Run a case to see the step-by-step log here.",

@@ -516,7 +516,7 @@ function RunOutput({ stdout, stderr, exitCode, success, elapsedMs, ranEdited }: 
         <div className="space-y-1.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-foreground/80">
             <Monitor size={12} />
-            Sandbox desktop preview (noVNC)
+            {t('novncPreview')}
           </div>
           <div className="overflow-hidden rounded-lg border border-border/60">
             <iframe
