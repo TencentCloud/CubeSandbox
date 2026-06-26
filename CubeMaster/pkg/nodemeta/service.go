@@ -212,28 +212,30 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 		CreateConcurrentNum: req.CreateConcurrentNum,
 		MaxMvmNum:           req.MaxMvmNum,
 	}
-	if err := global.db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "node_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"host_ip", "grpc_port", "capacity_json", "allocatable_json",
-			"instance_type", "cluster_label", "quota_cpu", "quota_mem_mb",
-			"create_concurrent_num", "max_mvm_num", "updated_at",
-		}),
-	}).Create(reg).Error; err != nil {
-		return nil, err
-	}
-
 	// Read existing labels from DB, merge cubelet labels (cubelet wins on conflict),
 	// then write back the merged result. Use SELECT ... FOR UPDATE inside a
 	// transaction to prevent concurrent admin label writes from being lost.
 	var mergedLabels map[string]string
 	if err := global.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "node_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"host_ip", "grpc_port", "capacity_json", "allocatable_json",
+				"instance_type", "cluster_label", "quota_cpu", "quota_mem_mb",
+				"create_concurrent_num", "max_mvm_num", "updated_at",
+			}),
+		}).Create(reg).Error; err != nil {
+			return err
+		}
 		existing, err := readLabelsJSONForUpdate(tx, req.NodeID)
 		if err != nil {
 			return err
 		}
 		for k, v := range req.Labels {
 			existing[k] = v
+		}
+		if len(existing) > maxLabelsPerNode {
+			return fmt.Errorf("a node cannot have more than %d labels, got %d after merge", maxLabelsPerNode, len(existing))
 		}
 		if err := tx.Table(constants.NodeMetaRegistrationTable).
 			Where("node_id = ?", req.NodeID).
@@ -597,11 +599,8 @@ func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
 	if nodeID == "" {
 		return fmt.Errorf("node_id is required")
 	}
-	if key == "" {
-		return fmt.Errorf("label key is required")
-	}
-	if config.IsReservedLabelKey(key) {
-		return fmt.Errorf("label key %q is reserved for system use and cannot be deleted", key)
+	if err := validateNodeLabelKey(key); err != nil {
+		return err
 	}
 	var nodeLabels map[string]string
 	if err := global.db.Transaction(func(tx *gorm.DB) error {
@@ -642,10 +641,19 @@ func readLabelsJSONForUpdate(tx *gorm.DB, nodeID string) (map[string]string, err
 		Take(&reg).Error; err != nil {
 		return nil, err
 	}
+	return parseLabelsJSON(reg.LabelsJSON)
+}
+
+func parseLabelsJSON(raw string) (map[string]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]string{}, nil
+	}
 	m := map[string]string{}
-	err := json.Unmarshal([]byte(reg.LabelsJSON), &m)
-	if err != nil {
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return nil, err
+	}
+	if m == nil {
+		return map[string]string{}, nil
 	}
 	return m, nil
 }
@@ -683,15 +691,22 @@ var (
 
 func validateNodeLabels(labels map[string]string) error {
 	if len(labels) > maxLabelsPerNode {
-		return fmt.Errorf("a node cannot have more than %d labels, got %d", maxLabelsPerNode, len(labels))
+		return fmt.Errorf("label update request cannot contain more than %d labels, got %d", maxLabelsPerNode, len(labels))
 	}
 	for k, v := range labels {
-		if errs := isQualifiedLabelKey(k); len(errs) != 0 {
-			return fmt.Errorf("label key %q is invalid: %s", k, strings.Join(errs, ", "))
+		if err := validateNodeLabelKey(k); err != nil {
+			return err
 		}
 		if errs := isValidLabelValue(v); len(errs) != 0 {
 			return fmt.Errorf("label value for key %q is invalid: %s", k, strings.Join(errs, ", "))
 		}
+	}
+	return nil
+}
+
+func validateNodeLabelKey(key string) error {
+	if errs := isQualifiedLabelKey(key); len(errs) != 0 {
+		return fmt.Errorf("label key %q is invalid: %s", key, strings.Join(errs, ", "))
 	}
 	return nil
 }

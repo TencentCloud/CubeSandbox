@@ -158,7 +158,7 @@ func TestValidateNodeLabels(t *testing.T) {
 				}
 				return m
 			}(),
-			wantErr: "a node cannot have more than 64 labels",
+			wantErr: "label update request cannot contain more than 64 labels",
 		},
 	}
 
@@ -167,6 +167,108 @@ func TestValidateNodeLabels(t *testing.T) {
 			err := validateNodeLabels(tt.labels)
 			if tt.wantErr == "" {
 				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateNodeLabelKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		wantErr string
+	}{
+		{
+			name:    "empty key rejected",
+			key:     "",
+			wantErr: "must not be empty",
+		},
+		{
+			name:    "too many slashes rejected",
+			key:     "a//b/c/",
+			wantErr: "must be in the form prefix/name or name",
+		},
+		{
+			name:    "slash only rejected",
+			key:     "//",
+			wantErr: "must be in the form prefix/name or name",
+		},
+		{
+			name:    "invalid character rejected",
+			key:     "name@bad",
+			wantErr: "qualified name must consist of",
+		},
+		{
+			name:    "reserved key rejected",
+			key:     "kubernetes.io/os",
+			wantErr: "is reserved for system use",
+		},
+		{
+			name: "simple key accepted",
+			key:  "env",
+		},
+		{
+			name: "prefixed key accepted",
+			key:  "example.com/env",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateNodeLabelKey(tt.key)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseLabelsJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    map[string]string
+		wantErr string
+	}{
+		{
+			name: "empty string becomes empty map",
+			raw:  "",
+			want: map[string]string{},
+		},
+		{
+			name: "whitespace becomes empty map",
+			raw:  "   \n\t",
+			want: map[string]string{},
+		},
+		{
+			name: "json null becomes empty map",
+			raw:  "null",
+			want: map[string]string{},
+		},
+		{
+			name: "valid labels",
+			raw:  `{"env":"prod","zone":"ap-guangzhou"}`,
+			want: map[string]string{"env": "prod", "zone": "ap-guangzhou"},
+		},
+		{
+			name:    "invalid json returns error",
+			raw:     "{",
+			wantErr: "unexpected end of JSON input",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseLabelsJSON(tt.raw)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, got)
 			} else {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
