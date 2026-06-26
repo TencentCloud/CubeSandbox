@@ -419,6 +419,8 @@ sudo yum install -y e2fsprogs util-linux
 
 除了单机的 `install.sh` 之外，发布包还附带一个基于 Terraform 的部署器，可在腾讯云上拉起**集群版** CubeSandbox：由托管的 TKE 控制面运行 `cubemaster` / `cube-api` / `cube-proxy` / `cube-webui`，后端使用云上 MySQL + Redis，并带一个或多个 CVM PVM 计算节点。跳板机（SSH 端口 `443`）既是构建主机，也是这个原本私有 VPC 的堡垒机。
 
+`cubemaster` 运行 3 个副本，通过一块以 ReadWriteMany 方式挂载的 CFS（文件存储，通用标准型）NFS 共享盘共用 `/data/CubeMaster/storage` 目录——该文件系统弹性按量计费，会在部署 addons 之前先行创建，使 3 个副本读写同一份模板 / 存档 / 运行时状态。
+
 该部署器被放在解压后发布包的**顶层**，因此解压后即可直接运行：
 
 ```bash
@@ -499,9 +501,10 @@ export TENCENTCLOUD_BUILD_IMAGES=0          # 复用已推送的镜像
   或重新运行能找到并管理同一批资源。不要在临时副本里运行 `create.sh` 后又指望另一个
   副本来清理。
 - **分阶段、fail-fast 的 apply：** 资源按顺序创建——网络（VPC / 子网 / NAT）→ TCR →
-  CVM（跳板机 + 计算节点）→ 在跳板机上构建并推送镜像 → MySQL / Redis → TKE 集群 +
-  Kubernetes addons → 健康检查 → 计算节点初始化。Kubernetes provider 只有在 TKE API
-  Server 就绪后才会启用。
+  CVM（跳板机 + 计算节点）→ 在跳板机上构建并推送镜像 → MySQL / Redis → CFS 共享存储 →
+  TKE 集群 + Kubernetes addons → 健康检查 → 计算节点初始化。Kubernetes provider 只有在
+  TKE API Server 就绪后才会启用。销毁时会在删除子网之前先删除 CFS（其 NFS 挂载点是该子网
+  内的一块弹性网卡）。
 - 解析后的选择会保存到 `terraform/tencentcloud/.env` 并在下次运行时自动加载；显式设置
   的环境变量始终优先。
 

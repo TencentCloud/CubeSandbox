@@ -305,6 +305,47 @@ resource "tencentcloud_security_group_rule_set" "demo" {
 }
 
 ########################
+# Cloud File Storage (CFS) — shared persistent storage for cube-master
+#   The cube-master Deployment runs 3 replicas that must share the same
+#   template / snapshot / runtime state under /data/CubeMaster/storage, so the
+#   backing volume has to be ReadWriteMany. A CBS disk (ReadWriteOnce) cannot
+#   attach to three pods/nodes at once, so we use a CFS NFS share instead.
+#
+#   storage_type = "SD" is CFS "General Standard" — an elastic,
+#   pay-as-you-go NFS file system that needs no pre-provisioned capacity
+#   (`capacity` is required only for the Turbo series, so it is left unset here).
+#   No fixed quota is set on the Kubernetes side either: the cube-master pod
+#   mounts this share as a plain in-tree NFS volume (no PVC), so the share simply
+#   grows with usage.
+########################
+
+resource "tencentcloud_cfs_access_group" "cubemaster_data" {
+  name        = "cubesandbox-cubemaster-${random_string.deploy_suffix.result}"
+  description = "Allow the CubeSandbox VPC to mount the cube-master CFS share"
+}
+
+# The NFS mount is performed by the TKE worker node (kubelet), whose client
+# address is its VPC private IP — so authorize the whole VPC CIDR. no_root_squash
+# keeps root so cube-master (running as root) owns the files it writes.
+resource "tencentcloud_cfs_access_rule" "cubemaster_data" {
+  access_group_id = tencentcloud_cfs_access_group.cubemaster_data.id
+  auth_client_ip  = "10.0.0.0/16"
+  priority        = 1
+  rw_permission   = "RW"
+  user_permission = "no_root_squash"
+}
+
+resource "tencentcloud_cfs_file_system" "cubemaster_data" {
+  name              = "cubesandbox-cubemaster-data"
+  availability_zone = local.primary_zone
+  access_group_id   = tencentcloud_cfs_access_group.cubemaster_data.id
+  protocol          = "NFS"
+  storage_type      = "SD"
+  vpc_id            = tencentcloud_vpc.demo.id
+  subnet_id         = tencentcloud_subnet.demo.id
+}
+
+########################
 # Cloud Database MySQL (optional)
 ########################
 

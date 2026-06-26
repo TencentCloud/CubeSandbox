@@ -847,12 +847,15 @@ _td_status "VPC        " tencentcloud_vpc.demo "$VPC_ID"
 _td_status "jumpserver " tencentcloud_instance.jumpserver "${JS_INSTANCE_ID:-$JS_IP}" "(destroyed last — kept for cleanup)"
 
 # ============================================================
-# Teardown runs in the REVERSE order of create.sh. create.sh provisions:
+# Teardown runs (mostly) in the REVERSE order of create.sh. create.sh provisions:
 #   1) subnet + NAT gateway   2) TCR   3) jump-server + compute nodes
 #   4) image build/push on the jump-server (no cloud resource to destroy)
-#   5) MySQL + Redis          6) TKE cluster + addons
-# so destroy runs 6 → 5 → 3 → 2 → 1 (step 4 builds images, nothing to tear
-# down). Each phase waits for completion and is
+#   5) MySQL + Redis   5b) CFS shared storage   6) TKE cluster + addons
+# so destroy runs 6 → 5 → 3 → 2 → 5b (CFS) → 1 (step 4 builds images, nothing to
+# tear down). CFS is the one deviation from strict reverse order: it is created at
+# step 5b but torn down late (Phase 4.5, just before the subnet) because its NFS
+# mount target is an ENI inside the subnet, so the subnet cannot be deleted while
+# the CFS share still exists. Each phase waits for completion and is
 # fail-fast: if any phase fails the teardown STOPS (remaining resources are left
 # intact) so the failure can be inspected and ./destroy.sh re-run to continue.
 # The jump-server is intentionally kept alive until phase 3 because it runs the
@@ -1093,6 +1096,28 @@ if [ "${#phase_tcr_targets[@]}" -gt 0 ]; then
 	run_destroy "${phase_tcr_targets[@]}" || destroy_fail "TCR destroy"
 else
 	echo -e "  ${CYAN}No TCR resources in state; skipping.${NC}"
+fi
+
+# ============================================================
+# Phase 4.5/6 — CFS shared storage (cube-master /data/CubeMaster/storage).
+#   Must be torn down BEFORE the subnet it lives in: the CFS NFS mount target is
+#   an ENI inside tencentcloud_subnet.demo, so destroying the subnet first would
+#   fail with "subnet in use". The file system is destroyed before its access
+#   rule/group (dependency order within the same targeted run).
+# ============================================================
+echo ""
+echo -e "${CYAN}━━━ Destroy CFS shared storage ━━━${NC}"
+phase_cfs_targets=()
+for _res in \
+	tencentcloud_cfs_file_system.cubemaster_data \
+	tencentcloud_cfs_access_rule.cubemaster_data \
+	tencentcloud_cfs_access_group.cubemaster_data; do
+	in_state "$_res" && phase_cfs_targets+=(-target="$_res")
+done
+if [ "${#phase_cfs_targets[@]}" -gt 0 ]; then
+	run_destroy "${phase_cfs_targets[@]}" || destroy_fail "CFS destroy"
+else
+	echo -e "  ${CYAN}No CFS resources in state; skipping.${NC}"
 fi
 
 # ============================================================

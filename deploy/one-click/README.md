@@ -439,6 +439,12 @@ Cloud: a managed TKE control plane running `cubemaster` / `cube-api` /
 PVM compute nodes. A jumpserver (SSH on port `443`) is the build host and bastion
 for the otherwise-private VPC.
 
+`cubemaster` runs 3 replicas that share their `/data/CubeMaster/storage`
+directory through a CFS (Cloud File Storage, "通用标准型" / General Standard) NFS
+share mounted ReadWriteMany — an elastic, pay-as-you-go file system provisioned
+before the addons so all replicas read/write the same template / snapshot /
+runtime state.
+
 The deployer is surfaced at the **top level** of the extracted bundle, so right
 after extracting the package you can run it directly:
 
@@ -563,9 +569,10 @@ pre-installed Terraform:
   different copy to clean it up.
 - **Phased, fail-fast apply:** resources are created in order — network
   (VPC / subnet / NAT) → TCR → CVMs (jump-server + compute) → image build/push on
-  the jump-server → MySQL / Redis → TKE cluster + Kubernetes addons → health
-  checks → compute-node setup. The Kubernetes provider is only engaged after the
-  TKE API server exists.
+  the jump-server → MySQL / Redis → CFS shared storage → TKE cluster + Kubernetes
+  addons → health checks → compute-node setup. The Kubernetes provider is only
+  engaged after the TKE API server exists. On teardown the CFS share is destroyed
+  before its subnet (its NFS mount target is an ENI in that subnet).
 - Resolved selections are saved to `terraform/tencentcloud/.env` and auto-loaded
   on the next run; explicit environment variables always win.
 

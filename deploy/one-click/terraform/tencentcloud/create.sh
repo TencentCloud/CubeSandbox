@@ -4727,6 +4727,22 @@ main() {
 	_init_redis
 
 	# ============================================================
+	# Step 5b/9 — CFS shared storage for cube-master
+	#   Provision the CFS (Cloud File Storage) NFS share BEFORE the TKE addons so
+	#   the cube-master Deployment can mount it (ReadWriteMany) at
+	#   /data/CubeMaster/storage across all 3 replicas. CFS is base infra
+	#   (tencentcloud provider), so it is created here with the kubernetes provider
+	#   still OFF. Targeting the file system + access rule pulls in the access
+	#   group; the VPC/subnet already exist from Step 1.
+	# ============================================================
+	_apply_phase "Step: Configure CFS shared storage" \
+		tencentcloud_cfs_access_rule.cubemaster_data \
+		tencentcloud_cfs_file_system.cubemaster_data || {
+		echo -e "${RED}✗ CFS provisioning failed; aborting deployment.${NC}"
+		exit 1
+	}
+
+	# ============================================================
 	# Step 6/9 — TKE cluster + addons
 	#   6a) create the managed cluster + node pool (with instance-type fallback)
 	#       and write the kubeconfig; deploy_tke_addons stays OFF so the kubernetes

@@ -29,6 +29,16 @@ locals {
   # cube-master over the cluster network, so the internal CLB IP is not needed).
   cubemaster_url = "http://cubemaster.cubesandbox.svc.cluster.local:8089"
 
+  # cube-master runs as an HA Deployment backed by the shared CFS store. This is
+  # the single source of truth for BOTH spec.replicas AND the conf's
+  # default_headless_service_nodes_num, which MUST agree: cube-master apportions
+  # the global create/destroy concurrency per master as (total / master_count)
+  # and estimates global in-flight load as (local * master_count) — see
+  # HealthyMasterNodes() in pkg/localcache and pkg/scheduler. If the master count
+  # is under-reported (e.g. left at 1 while 3 replicas run), each replica enforces
+  # the full global limit, oversubscribing the compute nodes by that factor.
+  cubemaster_replicas = 3
+
   # All files under the certificate directory
   cert_files = fileset("${path.module}/cubeproxy-certs", "*")
 
@@ -162,7 +172,7 @@ resource "kubernetes_secret" "cubemaster_conf" {
         sync_meta_data_interval            = "30s"
         sync_metric_data_interval          = "1s"
         collect_metric_interval            = "1s"
-        default_headless_service_nodes_num = 1
+        default_headless_service_nodes_num = local.cubemaster_replicas
         enable_check_com_net_id_param      = false
       }
       log = {
@@ -269,7 +279,7 @@ resource "kubernetes_deployment" "cubemaster" {
     labels    = { app = "cubemaster" }
   }
   spec {
-    replicas = 1
+    replicas = local.cubemaster_replicas
     selector {
       match_labels = { app = "cubemaster" }
     }
@@ -305,6 +315,12 @@ resource "kubernetes_deployment" "cubemaster" {
             name       = "conf"
             mount_path = "/etc/cubemaster"
           }
+          # Shared CFS (NFS, ReadWriteMany): all 3 replicas read/write the same
+          # template / snapshot / runtime state.
+          volume_mount {
+            name       = "data"
+            mount_path = "/data/CubeMaster/storage"
+          }
           # CubeEgress root CA, read by the --with-cube-ca template bake.
           volume_mount {
             name       = "cube-egress-ca"
@@ -316,6 +332,17 @@ resource "kubernetes_deployment" "cubemaster" {
           name = "conf"
           secret {
             secret_name = kubernetes_secret.cubemaster_conf[0].metadata[0].name
+          }
+        }
+        # CFS-backed shared storage (provisioned in main.tf). Mounted directly as
+        # an in-tree NFS volume — the TKE node mounts the CFS share (negotiating
+        # NFS 4.0, whose mount root is "/") and bind-mounts it into every pod, so
+        # the 3 cube-master replicas share /data/CubeMaster/storage.
+        volume {
+          name = "data"
+          nfs {
+            server = tencentcloud_cfs_file_system.cubemaster_data.mount_ip
+            path   = "/"
           }
         }
         # Both the public cert and the private key are projected here:
