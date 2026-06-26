@@ -301,6 +301,31 @@ func TestValidateCommitSandboxTargetRejectsHostDirVolume(t *testing.T) {
 	assert.Contains(t, err.Error(), "host_dir")
 }
 
+func TestValidateCommitSandboxTargetAllowsReadonlyHostDirVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "host",
+		VolumeSource: &cubeboxv1.VolumeSource{
+			HostDirVolumes: &cubeboxv1.HostDirVolumeSources{
+				VolumeSources: []*cubeboxv1.HostDirSource{{
+					Name:     "host",
+					HostPath: "/var/lib/data",
+				}},
+			},
+		},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "host",
+		ContainerPath: "/data",
+		Readonly:      true,
+	}})
+
+	rootVolume, err := validateCommitSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", rootVolume)
+}
+
 func TestValidateCommitSandboxTargetRejectsSandboxPathHostBind(t *testing.T) {
 	for _, sandboxPathType := range []string{
 		cubeboxv1.SandboxPathType_Directory.String(),

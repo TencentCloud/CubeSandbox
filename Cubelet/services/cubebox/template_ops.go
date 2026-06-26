@@ -334,6 +334,9 @@ func validateCommitVolumeSources(cb *cubeboxstore.CubeBox) error {
 		return nil
 	}
 	usedVolumes := map[string]struct{}{}
+	// Only a writable host_dir blocks commit; a read-only one holds no guest
+	// writes the snapshot could lose. Track which volumes are mounted writable.
+	writableVolumes := map[string]struct{}{}
 	for _, container := range cb.AllContainers() {
 		if container == nil || container.Config == nil {
 			continue
@@ -343,6 +346,9 @@ func validateCommitVolumeSources(cb *cubeboxstore.CubeBox) error {
 				continue
 			}
 			usedVolumes[mount.GetName()] = struct{}{}
+			if !mount.GetReadonly() {
+				writableVolumes[mount.GetName()] = struct{}{}
+			}
 		}
 	}
 	for _, volume := range cb.Volumes {
@@ -357,9 +363,11 @@ func validateCommitVolumeSources(cb *cubeboxstore.CubeBox) error {
 			continue
 		}
 		if hostDirs := source.GetHostDirVolumes(); hostDirs != nil {
-			for _, hostDir := range hostDirs.GetVolumeSources() {
-				if hostDir != nil && hostDir.GetHostPath() != "" {
-					return fmt.Errorf("host_dir volume %s is not supported by CommitSandbox", volume.GetName())
+			if _, writable := writableVolumes[volume.GetName()]; writable {
+				for _, hostDir := range hostDirs.GetVolumeSources() {
+					if hostDir != nil && hostDir.GetHostPath() != "" {
+						return fmt.Errorf("writable host_dir volume %s is not supported by CommitSandbox", volume.GetName())
+					}
 				}
 			}
 		}
