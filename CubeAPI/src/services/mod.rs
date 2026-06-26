@@ -107,8 +107,8 @@ impl AppServices {
                 config.cube_proxy_port_http,
                 config.sandbox_domain.clone(),
                 config.sandbox_proxy_url.clone(),
-                config.envd_auth.clone(),
                 config.default_api_key.clone(),
+                config.auth_callback_url.clone(),
             ),
             exec: exec::ExecService::new(
                 http_client,

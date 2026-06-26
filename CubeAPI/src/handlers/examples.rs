@@ -78,7 +78,7 @@ pub async fn get_example_source(
     State(state): State<AppState>,
     axum::extract::Path((scenario, file)): axum::extract::Path<(String, String)>,
 ) -> AppResult<impl IntoResponse> {
-    match state.services.examples.get_source(&scenario, &file) {
+    match state.services.examples.get_source(&scenario, &file).await {
         Ok(body) => Ok((StatusCode::OK, Json(body)).into_response()),
         Err(e) => Ok(e.into_response()),
     }

@@ -7,7 +7,7 @@
 //! listing available examples, fetching source, and running a script.
 //! Handlers stay thin and delegate the actual work here.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tokio::process::Command;
@@ -39,12 +39,15 @@ pub struct ExampleService {
     sandbox_domain: String,
     /// Sandbox proxy base URL (envd / Jupyter reachability).
     sandbox_proxy_url: String,
-    /// Authorization header for internal envd calls.
-    envd_auth: String,
     /// Fallback API key injected into example subprocesses when the parent
     /// process does not export CUBE_API_KEY. Sourced from config/env only;
     /// never hardcoded here.
     default_api_key: Option<String>,
+    /// Auth callback URL mirrored from ServerConfig.
+    /// When set, the server enforces per-request authentication; the
+    /// hardcoded fallback key MUST NOT be injected in that mode because
+    /// it is a publicly known value and would constitute a shared credential.
+    auth_callback_url: Option<String>,
 }
 
 impl ExampleService {
@@ -56,8 +59,8 @@ impl ExampleService {
         cube_proxy_port_http: Option<u16>,
         sandbox_domain: String,
         sandbox_proxy_url: String,
-        envd_auth: String,
         default_api_key: Option<String>,
+        auth_callback_url: Option<String>,
     ) -> Self {
         Self {
             cube_api_url,
@@ -66,8 +69,8 @@ impl ExampleService {
             cube_proxy_port_http,
             sandbox_domain,
             sandbox_proxy_url,
-            envd_auth,
             default_api_key,
+            auth_callback_url,
         }
     }
 
@@ -106,7 +109,7 @@ impl ExampleService {
     // ─── get_source ───────────────────────────────────────────────────────
 
     /// Read and return the source code of a single visible example.
-    pub fn get_source(&self, scenario: &str, file: &str) -> AppResult<serde_json::Value> {
+    pub async fn get_source(&self, scenario: &str, file: &str) -> AppResult<serde_json::Value> {
         let id = format!("{}:{}", scenario, file);
         let (meta, _sc, _f) = self
             .resolve_visible(&id)
@@ -115,7 +118,7 @@ impl ExampleService {
         let base_dir = examples_root().join(&meta.scenario);
         let script_path = base_dir.join(&meta.filename);
 
-        let source = std::fs::read_to_string(&script_path).map_err(|e| {
+        let source = tokio::fs::read_to_string(&script_path).await.map_err(|e| {
             AppError::Internal(anyhow::anyhow!(
                 "Failed to read '{}': {}",
                 script_path.display(),
@@ -213,8 +216,11 @@ impl ExampleService {
         let run_path: PathBuf = if let Some(user_code) = req.code.as_ref() {
             if program == "go" {
                 let dir_name = format!(".tmp_run_{}", Uuid::new_v4());
-                let dir = base_dir.join(&dir_name);
-                std::fs::create_dir_all(&dir).map_err(|e| {
+                let dir = base_dir
+                    .parent()
+                    .unwrap_or(base_dir.as_path())
+                    .join(&dir_name);
+                tokio::fs::create_dir_all(&dir).await.map_err(|e| {
                     AppError::Internal(anyhow::anyhow!(
                         "Failed to create temp dir {}: {}",
                         dir.display(),
@@ -222,7 +228,8 @@ impl ExampleService {
                     ))
                 })?;
                 let tmp = dir.join(&meta.filename);
-                std::fs::write(&tmp, user_code).map_err(|e| {
+                tokio::fs::write(&tmp, user_code).await.map_err(|e| {
+                    // best-effort sync cleanup in error path; std::fs is acceptable here
                     let _ = std::fs::remove_dir_all(&dir);
                     AppError::Internal(anyhow::anyhow!(
                         "Failed to write edited code to {}: {}",
@@ -232,8 +239,22 @@ impl ExampleService {
                 })?;
                 for go_file in &["go.mod", "go.sum"] {
                     let src = base_dir.join(go_file);
-                    if src.exists() {
-                        let _ = std::fs::copy(&src, dir.join(go_file));
+                    if tokio::fs::try_exists(&src).await.unwrap_or(false) {
+                        let _ = tokio::fs::copy(&src, dir.join(go_file)).await;
+                    }
+                }
+                // Copy all other .go files in the same package so the build
+                // has the full set of sources; the user-edited file is already
+                // written above and must not be overwritten here.
+                if let Ok(mut entries) = tokio::fs::read_dir(&base_dir).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let src = entry.path();
+                        if src.extension().and_then(|e| e.to_str()) == Some("go") {
+                            let fname = entry.file_name();
+                            if fname != meta.filename.as_str() {
+                                let _ = tokio::fs::copy(&src, dir.join(&fname)).await;
+                            }
+                        }
                     }
                 }
                 tmp_path = Some(tmp);
@@ -242,7 +263,7 @@ impl ExampleService {
             } else {
                 let tmp_name = format!(".tmp_run_{}.{}", Uuid::new_v4(), ext);
                 let tmp = base_dir.join(&tmp_name);
-                std::fs::write(&tmp, user_code).map_err(|e| {
+                tokio::fs::write(&tmp, user_code).await.map_err(|e| {
                     AppError::Internal(anyhow::anyhow!(
                         "Failed to write edited code to {}: {}",
                         tmp.display(),
@@ -272,14 +293,26 @@ impl ExampleService {
         for a in &argv {
             cmd.arg(a);
         }
+        // SECURITY: envd_auth is an internal server-side credential and MUST
+        // NOT be forwarded to user-controlled subprocesses. Example scripts
+        // access the proxy via CUBE_PROXY_NODE_IP / CUBE_PROXY_PORT_HTTP
+        // (public HTTP endpoints) and never need direct envd credentials.
         cmd.env("CUBE_API_URL", &cube_api_url)
             .env("CUBE_TEMPLATE_ID", &template_id)
             .env("SSL_CERT_FILE", ssl_cert)
             .env("AGENTHUB_SANDBOX_PROXY_URL", &self.sandbox_proxy_url)
-            .env("CUBE_API_ENVD_AUTH", &self.envd_auth)
             .current_dir(&work_dir);
 
-        if std::env::var("CUBE_API_KEY").is_err() {
+        // Inject a fallback CUBE_API_KEY only when:
+        //   1. The parent process did not already export one, AND
+        //   2. Authentication is disabled (no auth_callback_url).
+        //
+        // When auth is enabled the default_api_key may be a publicly known
+        // value (cube_0000...). Injecting it would hand subprocesses a shared
+        // credential that could pass the callback check — a security risk.
+        // In that mode the operator must export a real CUBE_API_KEY or set
+        // CUBE_API_DEFAULT_KEY to a secret value before starting cube-api.
+        if std::env::var("CUBE_API_KEY").is_err() && self.auth_callback_url.is_none() {
             if let Some(ref fallback_key) = self.default_api_key {
                 cmd.env("CUBE_API_KEY", fallback_key);
             }
@@ -304,9 +337,9 @@ impl ExampleService {
 
         // Always remove temp file/dir, even on error paths.
         if let Some(d) = tmp_dir.take() {
-            let _ = std::fs::remove_dir_all(&d);
+            let _ = tokio::fs::remove_dir_all(&d).await;
         } else if let Some(p) = tmp_path.take() {
-            let _ = std::fs::remove_file(&p);
+            let _ = tokio::fs::remove_file(&p).await;
         }
 
         match run_result {
@@ -414,6 +447,10 @@ impl ExampleService {
             }
         }
 
+        // Fetch the full template list once; reused by both stage 2 and stage 3
+        // to avoid duplicate HTTP round-trips to CubeMaster.
+        let all_templates = templates.list_templates().await.ok();
+
         // 2. store_item_id → match by image_info
         if let Some(ref sid) = sc.store_item_id {
             let catalog_image: Option<String> = match agenthub_store {
@@ -426,7 +463,7 @@ impl ExampleService {
                 None => None,
             };
             if let Some(ref image_ref) = catalog_image {
-                if let Ok(tpls) = templates.list_templates().await {
+                if let Some(ref tpls) = all_templates {
                     let matched = tpls.iter().find(|t| {
                         (t.status == "healthy" || t.status == "ready")
                             && t.image_info.as_deref() == Some(image_ref.as_str())
@@ -445,23 +482,19 @@ impl ExampleService {
         }
 
         // 3. Any healthy/ready template
-        if let Ok(tpls) = templates.list_templates().await {
-            let list_candidates: Vec<_> = tpls
+        // The status field from list_templates() is authoritative enough for
+        // fallback selection; a redundant get_template() per candidate is not
+        // needed and was the source of the N+1 cascade.
+        if let Some(ref tpls) = all_templates {
+            if let Some(t) = tpls
                 .iter()
-                .filter(|t| t.status == "healthy" || t.status == "ready")
-                .map(|t| t.template_id.as_str())
-                .collect();
-            for candidate in list_candidates {
-                match templates.get_template(candidate).await {
-                    Ok(_) => return Ok(candidate.to_string()),
-                    Err(e) => {
-                        tracing::warn!(
-                            candidate = %candidate,
-                            error = %e,
-                            "listed template failed validation, skipping"
-                        );
-                    }
-                }
+                .find(|t| t.status == "healthy" || t.status == "ready")
+            {
+                tracing::info!(
+                    template_id = %t.template_id,
+                    "resolved template: first healthy/ready from list"
+                );
+                return Ok(t.template_id.clone());
             }
         }
 
@@ -494,13 +527,13 @@ pub fn examples_root() -> PathBuf {
 /// Uses a lightweight fingerprint file (`.requirements_installed`) to skip
 /// redundant installs when the requirements have not changed since the last
 /// successful install.
-async fn ensure_requirements(base_dir: &PathBuf) -> bool {
+async fn ensure_requirements(base_dir: &Path) -> bool {
     let req_file = base_dir.join("requirements.txt");
-    if !req_file.exists() {
+    if !tokio::fs::try_exists(&req_file).await.unwrap_or(false) {
         return true;
     }
 
-    let req_content = match std::fs::read_to_string(&req_file) {
+    let req_content = match tokio::fs::read_to_string(&req_file).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("cannot read {}: {}", req_file.display(), e);
@@ -509,7 +542,7 @@ async fn ensure_requirements(base_dir: &PathBuf) -> bool {
     };
 
     let stamp_file = base_dir.join(".requirements_installed");
-    if let Ok(stamp) = std::fs::read_to_string(&stamp_file) {
+    if let Ok(stamp) = tokio::fs::read_to_string(&stamp_file).await {
         if stamp == req_content {
             tracing::debug!("requirements unchanged, skipping pip install");
             return true;
@@ -529,7 +562,7 @@ async fn ensure_requirements(base_dir: &PathBuf) -> bool {
     match install_result {
         Ok(output) => {
             if output.status.success() {
-                let _ = std::fs::write(&stamp_file, &req_content);
+                let _ = tokio::fs::write(&stamp_file, &req_content).await;
                 true
             } else {
                 tracing::warn!(

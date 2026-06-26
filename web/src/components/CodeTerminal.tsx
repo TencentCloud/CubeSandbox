@@ -71,18 +71,7 @@ function RichResultItem({ result }: { result: JupyterResult }) {
       </div>
     );
   }
-  if (result.svg) {
-    return (
-      <div
-        className="jupyter-svg-output max-h-[300px] overflow-auto rounded-md bg-white p-2 ring-1 ring-border/60"
-        dangerouslySetInnerHTML={{
-          __html: DOMPurify.sanitize(result.svg, {
-            USE_PROFILES: { svg: true, svgFilters: true },
-          }),
-        }}
-      />
-    );
-  }
+
   if (result.markdown) {
     return (
       <pre className="max-h-[240px] overflow-auto rounded-md bg-muted/60 p-3 text-xs leading-relaxed ring-1 ring-border/60 whitespace-pre-wrap">

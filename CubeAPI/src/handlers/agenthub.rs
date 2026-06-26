@@ -725,6 +725,7 @@ fn openclaw_model_suffix(model: &str) -> &str {
 #[derive(Debug, Clone)]
 struct LlmRuntimePlan {
     /// Original model string as stored/displayed (e.g. `deepseek/deepseek-v4-flash`).
+    #[allow(dead_code)]
     public_model: String,
     /// Bare model id sent upstream as the request body `model` field.
     upstream_model_id: String,
@@ -2145,7 +2146,7 @@ pub async fn clone_agent_instance(
                 .snapshots
                 .create(&record.sandbox_id, Some(format!("{} 分身源", record.name)))
                 .await
-                .map_err(|err| {
+                .inspect_err(|err| {
                     finish_agent_operation_blocking(
                         &state,
                         operation_id.as_deref(),
@@ -2153,7 +2154,6 @@ pub async fn clone_agent_instance(
                         None,
                         Some(&err.to_string()),
                     );
-                    err
                 })?;
             if let Some(store) = &state.agenthub_store {
                 let _ = store
@@ -2243,7 +2243,7 @@ pub async fn clone_agent_instance(
             volume_mounts: None,
         })
         .await
-        .map_err(|err| {
+        .inspect_err(|err| {
             finish_agent_operation_blocking(
                 &state,
                 operation_id.as_deref(),
@@ -2251,7 +2251,6 @@ pub async fn clone_agent_instance(
                 Some(&snapshot_id),
                 Some(&err.to_string()),
             );
-            err
         })?;
 
     let sandbox_id = created.sandbox_id.clone();
@@ -2465,7 +2464,7 @@ pub async fn publish_agent_template(
                     .snapshots
                     .create(&record.sandbox_id, body.name.clone())
                     .await
-                    .map_err(|err| {
+                    .inspect_err(|err| {
                         finish_agent_operation_blocking(
                             &state,
                             operation_id.as_deref(),
@@ -2473,7 +2472,6 @@ pub async fn publish_agent_template(
                             None,
                             Some(&err.to_string()),
                         );
-                        err
                     })?;
                 if let Some(store) = &state.agenthub_store {
                     let _ = store
@@ -2653,7 +2651,7 @@ pub async fn recover_agent_openclaw(
         .snapshots
         .rollback(&record.sandbox_id, &snapshot_id)
         .await
-        .map_err(|err| {
+        .inspect_err(|err| {
             finish_agent_operation_blocking(
                 &state,
                 operation_id.as_deref(),
@@ -2661,7 +2659,6 @@ pub async fn recover_agent_openclaw(
                 Some(&snapshot_id),
                 Some(&err.to_string()),
             );
-            err
         })?;
 
     if let Err(err) = restart_openclaw_for_record(&state, &record).await {

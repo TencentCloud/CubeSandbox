@@ -186,6 +186,23 @@ fn main() -> anyhow::Result<()> {
         "cube-api starting"
     );
 
+    // Warn operators who enable auth but forget to provide a real API key for
+    // example subprocesses. In this mode the hardcoded fallback is NOT injected
+    // (it is a publicly known value), so subprocesses won't have CUBE_API_KEY
+    // unless the parent process exports one or CUBE_API_DEFAULT_KEY is set.
+    if cfg.auth_callback_url.is_some()
+        && std::env::var("CUBE_API_KEY").is_err()
+        && cfg.default_api_key.as_deref().map_or(true, |k| {
+            k == "cube_0000000000000000000000000000000000000000"
+        })
+    {
+        tracing::warn!(
+            "AUTH_CALLBACK_URL is set but no real API key is available for example \
+             subprocesses. Export CUBE_API_KEY or set CUBE_API_DEFAULT_KEY to a \
+             secret value, otherwise example scripts will not receive CUBE_API_KEY."
+        );
+    }
+
     // ── Tokio runtime ──────────────────────────────────────────────────────
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     if cfg.worker_threads > 0 {

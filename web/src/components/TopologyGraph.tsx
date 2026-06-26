@@ -98,16 +98,17 @@ function topoLayeredOrder(nodes: ScenarioNode[]): string[][] {
 }
 
 function layoutNodes(nodes: LocalizedNode[]): Node<TopologyNodeData>[] {
+  const nodeMap = new Map<string, LocalizedNode>(nodes.map((n) => [n.id, n]));
   const layers = topoLayeredOrder(nodes);
   const out: Node<TopologyNodeData>[] = [];
   for (let col = 0; col < layers.length; col++) {
     const layer = layers[col];
-    const controlInLayer = layer.filter((id) => nodes.find((n) => n.id === id)?.plane === 'control');
-    const dataInLayer = layer.filter((id) => nodes.find((n) => n.id === id)?.plane === 'data');
+    const controlInLayer = layer.filter((id) => nodeMap.get(id)?.plane === 'control');
+    const dataInLayer = layer.filter((id) => nodeMap.get(id)?.plane === 'data');
     let controlIdx = 0;
     let dataIdx = 0;
     for (const id of layer) {
-      const node = nodes.find((n) => n.id === id);
+      const node = nodeMap.get(id);
       if (!node) continue;
       const x = col * (COL_WIDTH + COL_GAP);
       if (node.plane === 'control') {
