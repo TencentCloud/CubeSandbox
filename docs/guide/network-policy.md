@@ -194,7 +194,7 @@ If the template also carries a `CubeNetworkConfig`, CubeMaster merges template c
 - `allowInternetAccess`: request value overrides the template value when explicitly set.
 - `allowOut`: request entries are appended to template entries and deduplicated by string.
 - `denyOut`: request entries are appended to template entries and deduplicated by string.
-- `rules`: merged by `name`. A request rule with the same name overrides the template rule; rules with new names are appended after template rules, preserving first-match-wins order.
+- `rules`: request rules are placed before template rules. If both contain the same `name`, CubeEgress matches the request rule first because the rule list uses first-match-wins semantics. The template rule with the same name is not overwritten or removed; it remains later in the merged list.
 
 The merged `CubeNetworkConfig` is sent to Cubelet/network-agent. CubeVS validates the final unique eBPF map keys after network-agent extracts L7 reachability targets.
 

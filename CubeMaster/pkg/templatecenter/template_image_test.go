@@ -578,6 +578,91 @@ func TestGenerateTemplateCreateRequestAppliesDNSConfigOverride(t *testing.T) {
 	}
 }
 
+func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
+	allowInternetAccess := false
+	sni := "sni.example.com"
+	host := "api.example.com"
+	path := "/v1"
+	scheme := "https"
+	audit := "log-only"
+	format := "bearer %s"
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-1",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		CubeNetworkConfig: &types.CubeNetworkConfig{
+			AllowInternetAccess: &allowInternetAccess,
+			Rules: []*types.EgressRule{{
+				Name: "allow-api",
+				Match: &types.EgressRuleMatch{
+					SNI:    &sni,
+					Host:   &host,
+					Method: []string{"GET"},
+					Path:   &path,
+					Scheme: &scheme,
+				},
+				Action: &types.EgressRuleAction{
+					Allow: true,
+					Audit: &audit,
+					Inject: []*types.EgressRuleInject{{
+						Header: "Authorization",
+						Secret: "secret-id",
+						Format: &format,
+					}},
+				},
+			}},
+		},
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-1",
+		TemplateSpecFingerprint: "fingerprint-1",
+		Ext4SHA256:              "sha256-1",
+		Ext4SizeBytes:           1024,
+		DownloadToken:           "token-1",
+	}
+
+	got, err := generateTemplateCreateRequest(req, artifact, image.DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.CubeNetworkConfig == nil {
+		t.Fatal("expected CubeNetworkConfig to be propagated")
+	}
+	if len(got.CubeNetworkConfig.Rules) != 1 {
+		t.Fatalf("expected 1 egress rule, got %d", len(got.CubeNetworkConfig.Rules))
+	}
+	if got.CubeNetworkConfig.Rules[0] == req.CubeNetworkConfig.Rules[0] {
+		t.Fatal("expected egress rule to be cloned, got shared pointer")
+	}
+	if got.CubeNetworkConfig.Rules[0].Match == nil || got.CubeNetworkConfig.Rules[0].Match.Host == nil || *got.CubeNetworkConfig.Rules[0].Match.Host != "api.example.com" {
+		t.Fatalf("unexpected cloned egress rule: %+v", got.CubeNetworkConfig.Rules[0])
+	}
+	if got.CubeNetworkConfig.Rules[0].Match == req.CubeNetworkConfig.Rules[0].Match {
+		t.Fatal("expected egress rule match to be cloned, got shared pointer")
+	}
+	if got.CubeNetworkConfig.Rules[0].Match.SNI == req.CubeNetworkConfig.Rules[0].Match.SNI ||
+		got.CubeNetworkConfig.Rules[0].Match.Host == req.CubeNetworkConfig.Rules[0].Match.Host ||
+		got.CubeNetworkConfig.Rules[0].Match.Path == req.CubeNetworkConfig.Rules[0].Match.Path ||
+		got.CubeNetworkConfig.Rules[0].Match.Scheme == req.CubeNetworkConfig.Rules[0].Match.Scheme {
+		t.Fatal("expected egress rule match string pointers to be deep-cloned")
+	}
+	if got.CubeNetworkConfig.Rules[0].Action == nil || got.CubeNetworkConfig.Rules[0].Action == req.CubeNetworkConfig.Rules[0].Action {
+		t.Fatal("expected egress rule action to be cloned")
+	}
+	if got.CubeNetworkConfig.Rules[0].Action.Audit == req.CubeNetworkConfig.Rules[0].Action.Audit {
+		t.Fatal("expected egress rule audit pointer to be deep-cloned")
+	}
+	if len(got.CubeNetworkConfig.Rules[0].Action.Inject) != 1 || got.CubeNetworkConfig.Rules[0].Action.Inject[0] == req.CubeNetworkConfig.Rules[0].Action.Inject[0] {
+		t.Fatal("expected egress rule inject entries to be cloned")
+	}
+	if got.CubeNetworkConfig.Rules[0].Action.Inject[0].Format == req.CubeNetworkConfig.Rules[0].Action.Inject[0].Format {
+		t.Fatal("expected egress rule inject format pointer to be deep-cloned")
+	}
+}
+
 func TestMarshalTemplateImageJobRequestIgnoresRequestIDAndPassword(t *testing.T) {
 	reqA := &types.CreateTemplateFromImageReq{
 		Request:            &types.Request{RequestID: "req-a"},

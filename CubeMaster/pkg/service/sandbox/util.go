@@ -107,11 +107,11 @@ func getReqResource(req *types.CreateCubeSandboxReq) (cpu, mem resource.Quantity
 
 	if config.GetConfig().Scheduler != nil {
 		if cpu.Cmp(config.GetConfig().Scheduler.MaxMvmCPURes()) >= 0 {
-			err = ret.Errorf(errorcode.ErrorCode_MasterParamsError, "request Resources cpu[%dm] is invalid",
+			return cpu, mem, ret.Errorf(errorcode.ErrorCode_MasterParamsError, "request Resources cpu[%dm] is invalid",
 				cpu.MilliValue())
 		}
 		if mem.Cmp(config.GetConfig().Scheduler.MaxMvmMemoryRes()) >= 0 {
-			err = ret.Errorf(errorcode.ErrorCode_MasterParamsError, "request Resources  mem[%dKB] is invalid",
+			return cpu, mem, ret.Errorf(errorcode.ErrorCode_MasterParamsError, "request Resources  mem[%dKB] is invalid",
 				mem.Value()/1024)
 		}
 	}
