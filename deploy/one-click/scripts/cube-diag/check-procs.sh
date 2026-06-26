@@ -106,7 +106,8 @@ _resolve_master_addr() {
   fi
   local addr="${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}"
   local ip="${ONE_CLICK_CONTROL_PLANE_IP:-}"
-  local port="${CUBEMASTER_ADDR##*:}"
+  # 8089 is the cubemaster protocol port (fixed), not derived from CUBEMASTER_ADDR.
+  local port=8089
   if [[ -n "${addr}" ]]; then printf '%s\n' "${addr}"; return; fi
   if [[ -n "${ip}" ]];   then printf '%s:%s\n' "${ip}" "${port}"; return; fi
   printf '%s\n' "${CUBEMASTER_ADDR}"

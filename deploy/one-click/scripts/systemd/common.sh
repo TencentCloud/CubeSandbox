@@ -130,7 +130,10 @@ resolve_control_plane_cubemaster_addr() {
   local addr="${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}"
   local ip="${ONE_CLICK_CONTROL_PLANE_IP:-}"
   local default_addr="${CUBEMASTER_ADDR:-127.0.0.1:8089}"
-  local port="${default_addr##*:}"
+  # 8089 is the cubemaster protocol port (a fixed constant), NOT derived from
+  # CUBEMASTER_ADDR -- that variable is the control node's local listen address;
+  # using its port here was an accidental coupling that broke when they differed.
+  local cubemaster_port=8089
 
   if [[ "${role}" != "compute" ]]; then
     printf '%s\n' "${default_addr}"
@@ -145,8 +148,8 @@ resolve_control_plane_cubemaster_addr() {
 
   if [[ -n "${ip}" ]]; then
     validate_ipv4_literal "${ip}" "ONE_CLICK_CONTROL_PLANE_IP"
-    validate_host_port "${ip}:${port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
-    printf '%s:%s\n' "${ip}" "${port}"
+    validate_host_port "${ip}:${cubemaster_port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
+    printf '%s:%s\n' "${ip}" "${cubemaster_port}"
     return 0
   fi
 

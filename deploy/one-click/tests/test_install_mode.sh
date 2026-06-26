@@ -237,6 +237,72 @@ test_control_plane_validators() {
   fi
 }
 
+test_compute_control_plane_preflight() {
+  # Control role: always passes (no-op).
+  ONE_CLICK_DEPLOY_ROLE=control check_compute_control_plane_preflight \
+    || fail "control role should pass without control plane addr"
+
+  # Compute role without either variable: must fail.
+  if ( ONE_CLICK_DEPLOY_ROLE=compute check_compute_control_plane_preflight ) >/dev/null 2>&1; then
+    fail "compute role should fail without control plane addr"
+  fi
+
+  # Compute role with ONE_CLICK_CONTROL_PLANE_IP: should pass.
+  ONE_CLICK_DEPLOY_ROLE=compute \
+  ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11 \
+    check_compute_control_plane_preflight \
+    || fail "compute role should pass with ONE_CLICK_CONTROL_PLANE_IP"
+
+  # Compute role with ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR: should pass.
+  ONE_CLICK_DEPLOY_ROLE=compute \
+  ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=10.0.0.11:8089 \
+    check_compute_control_plane_preflight \
+    || fail "compute role should pass with ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
+
+  # Both set and resolve to the same address: should pass (env.example pattern).
+  ONE_CLICK_DEPLOY_ROLE=compute \
+  ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11 \
+  ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=10.0.0.11:8089 \
+    check_compute_control_plane_preflight \
+    || fail "should pass when both vars resolve to the same address"
+
+  # Both set to different addresses: must fail (configuration conflict).
+  if ( ONE_CLICK_DEPLOY_ROLE=compute \
+    ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11 \
+    ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=10.0.0.99:8089 \
+    check_compute_control_plane_preflight ) >/dev/null 2>&1; then
+    fail "should fail when ONE_CLICK_CONTROL_PLANE_IP and _CUBEMASTER_ADDR conflict"
+  fi
+
+  # IP-branch port is ALWAYS 8089: CUBEMASTER_ADDR must not leak into the
+  # compute IP branch. Previously CUBEMASTER_ADDR=...:9999 made the resolved
+  # port 9999; now it is ignored and the fixed cubemaster protocol port is used.
+  local preflight_out
+  preflight_out="$(ONE_CLICK_DEPLOY_ROLE=compute \
+    ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11 \
+    CUBEMASTER_ADDR=192.168.1.1:9999 \
+    check_compute_control_plane_preflight 2>&1)" \
+    || fail "compute role IP branch should pass regardless of CUBEMASTER_ADDR"
+  if grep -Fq "9999" <<<"${preflight_out}"; then
+    fail "CUBEMASTER_ADDR port 9999 must not leak into IP-branch resolution (got: ${preflight_out})"
+  fi
+  grep -Fq "cubemaster port 8089" <<<"${preflight_out}" \
+    || fail "IP branch should resolve to fixed cubemaster port 8089 (got: ${preflight_out})"
+
+  # Compute role with invalid IP: must fail.
+  if ( ONE_CLICK_DEPLOY_ROLE=compute ONE_CLICK_CONTROL_PLANE_IP=999.0.0.1 \
+    check_compute_control_plane_preflight ) >/dev/null 2>&1; then
+    fail "compute role should fail with invalid IP"
+  fi
+
+  # Compute role with invalid addr format: must fail.
+  if ( ONE_CLICK_DEPLOY_ROLE=compute \
+    ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR='bad/host:8089' \
+    check_compute_control_plane_preflight ) >/dev/null 2>&1; then
+    fail "compute role should fail with invalid addr"
+  fi
+}
+
 test_patch_cubelet_config_template_refuses_symlink() {
   local cfg="${TMP_DIR}/cubelet-config.toml"
   cat > "${cfg}" <<'EOF'
@@ -366,6 +432,7 @@ test_parse_args_unknown_is_ignored
 test_assert_safe_install_prefix
 test_wipe_custom_install_prefix_contents
 test_control_plane_validators
+test_compute_control_plane_preflight
 test_patch_cubelet_config_template_refuses_symlink
 test_upgrade_preflight_and_backup
 test_validation_library_fallback_die

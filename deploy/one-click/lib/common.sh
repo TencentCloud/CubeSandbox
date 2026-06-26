@@ -1756,3 +1756,71 @@ EOF
 
   log "glibc version ${glibc_ver} OK (>= ${min_major}.${min_minor})"
 }
+
+# check_compute_control_plane_preflight: fail fast when a compute node is
+# missing the mandatory control plane address. This mirrors the resolution
+# logic in resolve_control_plane_cubemaster_addr() (both scripts/one-click/
+# and scripts/systemd/) and must run before package extraction or dependency
+# installation so the user gets a friendly, actionable error before any
+# destructive change.
+check_compute_control_plane_preflight() {
+  local role
+  role="$(one_click_deploy_role)"
+
+  [[ "${role}" == "compute" ]] || return 0
+
+  local addr="${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}"
+  local ip="${ONE_CLICK_CONTROL_PLANE_IP:-}"
+  # 8089 is the cubemaster protocol port (a fixed constant); do not derive it
+  # from CUBEMASTER_ADDR, which is the control node's local listen address.
+  local cubemaster_port=8089
+
+  # Guard: when both variables are set they MUST resolve to the same address.
+  # ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR takes priority at runtime; silently
+  # ignoring a conflicting ONE_CLICK_CONTROL_PLANE_IP would be a configuration
+  # trap — the user would believe they are connecting to IP when they are not.
+  if [[ -n "${addr}" && -n "${ip}" ]]; then
+    local ip_resolved="${ip}:${cubemaster_port}"
+    if [[ "${addr}" != "${ip_resolved}" ]]; then
+      die "ONE_CLICK_CONTROL_PLANE_IP (resolves to ${ip_resolved}) and ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR (${addr}) conflict. Use only one of them; if you need a custom port, use ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=<host>:<port>."
+    fi
+  fi
+
+  if [[ -n "${addr}" ]]; then
+    validate_host_port "${addr}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
+    log "control plane cubemaster address preflight OK: ${addr}"
+    return 0
+  fi
+
+  if [[ -n "${ip}" ]]; then
+    validate_ipv4_literal "${ip}" "ONE_CLICK_CONTROL_PLANE_IP"
+    validate_host_port "${ip}:${cubemaster_port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
+    log "control plane IP preflight OK: ${ip} (cubemaster port ${cubemaster_port})"
+    return 0
+  fi
+
+  cat >&2 <<'EOF'
+
+╔══════════════════════════════════════════════════════════════════╗
+║  [!!] CONTROL PLANE ADDRESS NOT CONFIGURED                     ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  This is a COMPUTE node (ONE_CLICK_DEPLOY_ROLE=compute).         ║
+║  The control plane address is REQUIRED but not configured.       ║
+║                                                                  ║
+║  Set ONE of these variables in your .env file:                   ║
+║                                                                  ║
+║    Option A — control plane IP (recommended):                    ║
+║      ONE_CLICK_CONTROL_PLANE_IP=<control-plane-ip>               ║
+║                                                                  ║
+║    Option B — full CubeMaster host:port:                         ║
+║      ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=<host>:<port>       ║
+║                                                                  ║
+║  Or pass as environment variables:                               ║
+║    ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11 ./install-compute.sh     ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+EOF
+  die "ONE_CLICK_CONTROL_PLANE_IP or ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR is required for compute role"
+}
