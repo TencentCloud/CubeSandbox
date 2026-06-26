@@ -182,13 +182,15 @@ detect_installed_role() {
 }
 
 needs_docker_for_install() {
-  if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
-    return 0
-  fi
-
-  local installed_role
-  installed_role="$(detect_installed_role)"
-  [[ -n "${installed_role}" && "${installed_role}" != "compute" ]]
+  # docker is required for EVERY role. cube-egress (the transparent egress
+  # MITM proxy) runs as a docker container and is wired into both
+  # cube-sandbox-control.target and cube-sandbox-compute.target, so compute
+  # nodes need docker just as much as control nodes — even though the sandboxes
+  # themselves run on the cube runtime (cubelet + containerd-shim-cube-rs +
+  # PVM/KVM), not docker. Skipping docker on compute leaves cube-egress unable
+  # to start, silently disabling per-sandbox egress policy enforcement on that
+  # node.
+  return 0
 }
 
 require_any_cmd() {

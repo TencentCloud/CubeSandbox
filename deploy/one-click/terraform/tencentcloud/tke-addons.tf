@@ -88,10 +88,18 @@ resource "kubernetes_namespace" "cubesandbox" {
 #
 # We generate the CA in Terraform (ECDSA P-256, 10 yr, matching the
 # systemd path's cube-egress-prepare.sh) and store both halves in a
-# Secret. Only the public cert is mounted into the cubemaster pod; the
-# private key stays in the Secret for a future CubeEgress data plane to
-# sign leaf certs with. Keeping CA generation in Terraform state means a
-# re-apply reuses the same CA (no needless template-rebake churn).
+# Secret. BOTH halves are mounted into the cubemaster pod at
+# /etc/cube/ca: the public cert is baked into template rootfs, and the
+# private key is served to compute nodes over /cube/ca/cube-root-ca.key
+# (CubeMaster/pkg/service/httpservice/cube/ca_download.go reads them from
+# /etc/cube/ca). Each compute-node CubeEgress pulls this same CA via
+# cube-egress-prepare.sh and signs leaf certs with the matching key, so
+# templates baked on master are trusted by sandboxes whose traffic the
+# compute-node CubeEgress MITMs. The cube-master CLB is VPC-internal and
+# port 8089 is firewalled to the VPC/pod CIDR, so the unauthenticated key
+# endpoint is reachable only from inside the cluster network. Keeping CA
+# generation in Terraform state means a re-apply reuses the same CA (no
+# needless template-rebake churn).
 # ---------------------------------------------------------------
 resource "tls_private_key" "cube_egress_ca" {
   count       = local.deploy_addons ? 1 : 0
@@ -310,8 +318,12 @@ resource "kubernetes_deployment" "cubemaster" {
             secret_name = kubernetes_secret.cubemaster_conf[0].metadata[0].name
           }
         }
-        # Only the public cert is projected here; the matching key stays in
-        # the Secret so the cubemaster pod never holds the CA private key.
+        # Both the public cert and the private key are projected here:
+        # cubemaster bakes the cert into template rootfs AND serves both
+        # files to compute nodes via /cube/ca/<file> (ca_download.go), so a
+        # compute-node CubeEgress signs leaf certs with the same CA the
+        # templates trust. The key is exposed only inside the VPC (internal
+        # CLB + SG-restricted 8089).
         volume {
           name = "cube-egress-ca"
           secret {
@@ -319,6 +331,10 @@ resource "kubernetes_deployment" "cubemaster" {
             items {
               key  = "cube-root-ca.crt"
               path = "cube-root-ca.crt"
+            }
+            items {
+              key  = "cube-root-ca.key"
+              path = "cube-root-ca.key"
             }
           }
         }

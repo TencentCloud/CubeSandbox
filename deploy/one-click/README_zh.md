@@ -207,8 +207,9 @@ sudo ./install-compute.sh
 
 计算节点模式会：
 
-- 只安装 `Cubelet`、`network-agent`、`cube-shim`、`cube-image`、`cube-kernel-scf` 和运行所需脚本
-- 只启动 `network-agent`、`cubelet`
+- 安装 `Cubelet`、`network-agent`、`cube-shim`、`cube-image`、`cube-kernel-scf`、`cube-egress` 和运行所需脚本，并安装 `docker`
+- 启动 `network-agent`、`cubelet`，并通过 `cube-sandbox-compute.target` 拉起 `cube-egress`（透明出网 MITM 代理，以 docker 容器运行，用于强制执行沙箱出网策略）
+- `cube-egress` 启动前会通过主节点的 `/cube/ca/<file>` 接口拉取与模板一致的 MITM 根 CA（含私钥），保证模板信任 compute 节点上 `cube-egress` 签发的叶子证书
 - 将 `Cubelet` 的 `meta_server_endpoint` 指向 `ONE_CLICK_CONTROL_PLANE_IP:8089`
 - 通过主节点的 `/internal/meta` 接口自动注册节点
 
@@ -309,6 +310,7 @@ export E2B_API_KEY=e2b_000000
 
 必需命令：
 
+- `docker`（cube-egress 以 docker 容器运行，安装器会自动安装；docker 是硬性前置依赖，离线/无法自动安装的环境请提前装好 Docker）
 - `tar`
 - `ss`
 - `bash`

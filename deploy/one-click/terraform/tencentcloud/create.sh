@@ -3440,6 +3440,15 @@ step8_init_compute_nodes() {
 	local cm_clb_ip
 	cm_clb_ip=$(terraform output -raw tke_cubemaster_clb_ip 2>/dev/null || echo "")
 
+	# cube-egress image mirror for the compute nodes. This terraform deployer
+	# always runs inside Tencent Cloud, so the China-region pull-through
+	# (cube-sandbox-cn.tencentcloudcr.com, selected by MIRROR=cn in
+	# cube-egress-start.sh) is the right source; the image is published to both
+	# the cn and int registries at the same digest, and a per-node override is
+	# still possible via CUBE_SANDBOX_CUBE_EGRESS_IMAGE. Both compute install
+	# paths below pass this same value.
+	local egress_mirror="cn"
+
 	# Read the compute node outputs once: they do not change during this function,
 	# so caching avoids re-spawning `terraform output` (which parses the whole
 	# state) 2-3x per node inside the loops below.
@@ -3647,6 +3656,7 @@ CUBE_EXTERNAL_MYSQL_HOST=${mysql_ip}
 CUBE_EXTERNAL_REDIS_HOST=${redis_ip}
 CUBE_PVM_ENABLE=1
 ONE_CLICK_CONTROL_PLANE_IP=\"${control_plane_ip}\"
+MIRROR=${egress_mirror}
 EOF
 echo '[local-bundle] .env created:'
 cat .env"
@@ -3678,7 +3688,7 @@ echo '[local-bundle] Done'"
          CUBE_SANDBOX_NODE_IP='${compute_private_ip}' \
          ONE_CLICK_CONTROL_PLANE_IP='${cm_clb_ip}' \
          CUBE_PVM_ENABLE=1 \
-         MIRROR=cn bash 2>&1" 2>&1 | tee "$install_log"
+         MIRROR='${egress_mirror}' bash 2>&1" 2>&1 | tee "$install_log"
 			install_rc=${PIPESTATUS[0]}
 			set -e
 		fi
