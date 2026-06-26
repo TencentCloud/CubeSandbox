@@ -256,12 +256,6 @@ func Init(params Params) error {
 		return err
 	}
 
-	// attach TC filter to lo
-	err = attachTCFilter(programNameFromWorld, 1, TCIngress)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
