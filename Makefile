@@ -18,6 +18,7 @@ CUBECOW_DIR ?= $(ROOT_DIR)/cubecow
 CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
+TARGET_ARCH ?= $(shell uname -m | sed 's/^arm64$$/aarch64/')
 
 # Top-level Rust project directories. Each owns its own Cargo workspace and
 # `target/`; sub-crates share their workspace's target dir, so cleaning these
@@ -200,7 +201,7 @@ cubelet: builder-image
 .PHONY: cubevsmapdump
 cubevsmapdump: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeNet/cubevs && go build -o /workspace/_output/bin/cubevsmapdump ./cmd/cubevsmapdump'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeNet/cubevs && make gen && go build -o /workspace/_output/bin/cubevsmapdump ./cmd/cubevsmapdump'
 
 .PHONY: network-agent
 network-agent: builder-image
@@ -210,7 +211,7 @@ network-agent: builder-image
 .PHONY: cube-proxy-sidecar
 cube-proxy-sidecar: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeProxy/sidecar && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -tags "netgo osusergo" -ldflags "-s -w" -o /workspace/_output/bin/cube-proxy-sidecar ./cmd/sidecar'
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeProxy/sidecar && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -trimpath -tags 'netgo osusergo' -ldflags '-s -w' -o /workspace/_output/bin/cube-proxy-sidecar ./cmd/sidecar"
 
 .PHONY: agent
 agent: builder-image
@@ -220,7 +221,7 @@ agent: builder-image
 .PHONY: cubeapi
 cubeapi: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeAPI && cargo build --release --locked --target x86_64-unknown-linux-musl && install -m 0755 /workspace/CubeAPI/target/x86_64-unknown-linux-musl/release/cube-api /workspace/_output/bin/cube-api'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeAPI && CC_$(TARGET_ARCH)_unknown_linux_musl=musl-gcc cargo build --release --locked --target $(TARGET_ARCH)-unknown-linux-musl && install -m 0755 /workspace/CubeAPI/target/$(TARGET_ARCH)-unknown-linux-musl/release/cube-api /workspace/_output/bin/cube-api'
 
 .PHONY: cube-api
 cube-api: cubeapi
