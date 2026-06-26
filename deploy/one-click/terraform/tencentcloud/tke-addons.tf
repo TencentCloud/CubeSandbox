@@ -29,15 +29,12 @@ locals {
   # cube-master over the cluster network, so the internal CLB IP is not needed).
   cubemaster_url = "http://cubemaster.cubesandbox.svc.cluster.local:8089"
 
-  # cube-master runs as an HA Deployment backed by the shared CFS store. This is
-  # the single source of truth for BOTH spec.replicas AND the conf's
-  # default_headless_service_nodes_num, which MUST agree: cube-master apportions
-  # the global create/destroy concurrency per master as (total / master_count)
-  # and estimates global in-flight load as (local * master_count) — see
-  # HealthyMasterNodes() in pkg/localcache and pkg/scheduler. If the master count
-  # is under-reported (e.g. left at 1 while 3 replicas run), each replica enforces
-  # the full global limit, oversubscribing the compute nodes by that factor.
-  cubemaster_replicas = 3
+  # cube-master runs as an HA Deployment backed by the shared CFS store. The
+  # replica count is the single source of truth for BOTH spec.replicas AND the
+  # conf's default_headless_service_nodes_num, which MUST agree — see the
+  # var.cubemaster_replicas docs in variables.tf for why under-reporting the
+  # master count oversubscribes the compute nodes.
+  cubemaster_replicas = var.cubemaster_replicas
 
   # All files under the certificate directory
   cert_files = fileset("${path.module}/cubeproxy-certs", "*")
@@ -315,7 +312,7 @@ resource "kubernetes_deployment" "cubemaster" {
             name       = "conf"
             mount_path = "/etc/cubemaster"
           }
-          # Shared CFS (NFS, ReadWriteMany): all 3 replicas read/write the same
+          # Shared CFS (NFS, ReadWriteMany): all replicas read/write the same
           # template / snapshot / runtime state.
           volume_mount {
             name       = "data"
@@ -337,7 +334,7 @@ resource "kubernetes_deployment" "cubemaster" {
         # CFS-backed shared storage (provisioned in main.tf). Mounted directly as
         # an in-tree NFS volume — the TKE node mounts the CFS share (negotiating
         # NFS 4.0, whose mount root is "/") and bind-mounts it into every pod, so
-        # the 3 cube-master replicas share /data/CubeMaster/storage.
+        # the cube-master replicas share /data/CubeMaster/storage.
         volume {
           name = "data"
           nfs {
@@ -415,7 +412,7 @@ resource "kubernetes_deployment" "cube_api" {
     labels    = { app = "cube-api" }
   }
   spec {
-    replicas = 3
+    replicas = var.cube_api_replicas
     selector {
       match_labels = { app = "cube-api" }
     }
@@ -537,7 +534,7 @@ resource "kubernetes_deployment" "cube_proxy" {
     labels    = { app = "cube-proxy" }
   }
   spec {
-    replicas = 3
+    replicas = var.cube_proxy_replicas
     selector {
       match_labels = { app = "cube-proxy" }
     }
@@ -718,7 +715,7 @@ resource "kubernetes_deployment" "cube_webui" {
     labels    = { app = "cube-webui" }
   }
   spec {
-    replicas = 3
+    replicas = var.cube_webui_replicas
     selector {
       match_labels = { app = "cube-webui" }
     }

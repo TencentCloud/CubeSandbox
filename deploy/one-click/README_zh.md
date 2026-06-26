@@ -419,7 +419,7 @@ sudo yum install -y e2fsprogs util-linux
 
 除了单机的 `install.sh` 之外，发布包还附带一个基于 Terraform 的部署器，可在腾讯云上拉起**集群版** CubeSandbox：由托管的 TKE 控制面运行 `cubemaster` / `cube-api` / `cube-proxy` / `cube-webui`，后端使用云上 MySQL + Redis，并带一个或多个 CVM PVM 计算节点。跳板机（SSH 端口 `443`）既是构建主机，也是这个原本私有 VPC 的堡垒机。
 
-`cubemaster` 运行 3 个副本，通过一块以 ReadWriteMany 方式挂载的 CFS（文件存储，通用标准型）NFS 共享盘共用 `/data/CubeMaster/storage` 目录——该文件系统弹性按量计费，会在部署 addons 之前先行创建，使 3 个副本读写同一份模板 / 存档 / 运行时状态。
+`cubemaster` 运行多个副本，通过一块以 ReadWriteMany 方式挂载的 CFS（文件存储，通用标准型）NFS 共享盘共用 `/data/CubeMaster/storage` 目录——该文件系统弹性按量计费，会在部署 addons 之前先行创建，使各副本读写同一份模板 / 存档 / 运行时状态。
 
 该部署器被放在解压后发布包的**顶层**，因此解压后即可直接运行：
 

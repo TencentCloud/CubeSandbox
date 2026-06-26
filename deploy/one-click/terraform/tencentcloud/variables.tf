@@ -221,3 +221,58 @@ variable "image_namespace" {
   type        = string
   default     = ""
 }
+
+# Per-component replica counts. All four default to 2 (HA) and are independently
+# tunable via -var / TF_VAR_* / the TENCENTCLOUD_*_REPLICAS env knobs wired by
+# create.sh.
+#
+# cubemaster_replicas is special: it is the single source of truth for BOTH the
+# cube-master Deployment's spec.replicas AND the conf's
+# default_headless_service_nodes_num, which MUST agree (cube-master apportions the
+# global create/destroy concurrency per master as total/master_count and estimates
+# global in-flight load as local*master_count — see HealthyMasterNodes() in
+# pkg/localcache and pkg/scheduler). Driving both from this one variable keeps them
+# from drifting.
+variable "cubemaster_replicas" {
+  description = "cube-master Deployment replica count (also feeds the conf's default_headless_service_nodes_num)"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.cubemaster_replicas >= 1 && floor(var.cubemaster_replicas) == var.cubemaster_replicas
+    error_message = "cubemaster_replicas must be an integer >= 1."
+  }
+}
+
+variable "cube_api_replicas" {
+  description = "cube-api Deployment replica count"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.cube_api_replicas >= 1 && floor(var.cube_api_replicas) == var.cube_api_replicas
+    error_message = "cube_api_replicas must be an integer >= 1."
+  }
+}
+
+variable "cube_proxy_replicas" {
+  description = "cube-proxy Deployment replica count"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.cube_proxy_replicas >= 1 && floor(var.cube_proxy_replicas) == var.cube_proxy_replicas
+    error_message = "cube_proxy_replicas must be an integer >= 1."
+  }
+}
+
+variable "cube_webui_replicas" {
+  description = "cube-webui Deployment replica count"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.cube_webui_replicas >= 1 && floor(var.cube_webui_replicas) == var.cube_webui_replicas
+    error_message = "cube_webui_replicas must be an integer >= 1."
+  }
+}

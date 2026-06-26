@@ -760,6 +760,11 @@ setup_env() {
 	[ -n "${TENCENTCLOUD_REDIS_PASSWORD:-}" ] && export TF_VAR_redis_password="$TENCENTCLOUD_REDIS_PASSWORD"
 	[ -n "${TENCENTCLOUD_TKE_CLUSTER_VERSION:-}" ] && export TF_VAR_tke_cluster_version="$TENCENTCLOUD_TKE_CLUSTER_VERSION"
 	[ -n "${TENCENTCLOUD_TKE_NODE_COUNT:-}" ] && export TF_VAR_tke_node_count="$TENCENTCLOUD_TKE_NODE_COUNT"
+	# Optional per-component replica overrides (default 2 in variables.tf).
+	[ -n "${TENCENTCLOUD_CUBEMASTER_REPLICAS:-}" ] && export TF_VAR_cubemaster_replicas="$TENCENTCLOUD_CUBEMASTER_REPLICAS"
+	[ -n "${TENCENTCLOUD_CUBE_API_REPLICAS:-}" ] && export TF_VAR_cube_api_replicas="$TENCENTCLOUD_CUBE_API_REPLICAS"
+	[ -n "${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-}" ] && export TF_VAR_cube_proxy_replicas="$TENCENTCLOUD_CUBE_PROXY_REPLICAS"
+	[ -n "${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-}" ] && export TF_VAR_cube_webui_replicas="$TENCENTCLOUD_CUBE_WEBUI_REPLICAS"
 	export TF_VAR_ssh_public_key_path="$SSH_PUB_KEY"
 	export TF_VAR_ssh_private_key_path="$SSH_PRI_KEY"
 
@@ -3918,6 +3923,10 @@ TENCENTCLOUD_CUBE_PASSWORD='${TENCENTCLOUD_CUBE_PASSWORD:-}'
 TENCENTCLOUD_CUBE_IMAGE_TAG='${TENCENTCLOUD_CUBE_IMAGE_TAG:-latest}'
 TENCENTCLOUD_TKE_CLUSTER_VERSION='${TKE_CLUSTER_VERSION:-1.34.1}'
 TENCENTCLOUD_TKE_NODE_COUNT='${TKE_NODE_COUNT:-2}'
+TENCENTCLOUD_CUBEMASTER_REPLICAS='${TF_VAR_cubemaster_replicas:-${TENCENTCLOUD_CUBEMASTER_REPLICAS:-2}}'
+TENCENTCLOUD_CUBE_API_REPLICAS='${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-2}}'
+TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-2}}'
+TENCENTCLOUD_CUBE_WEBUI_REPLICAS='${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-2}}'
 TENCENTCLOUD_LOCAL_BUNDLE='${LOCAL_BUNDLE:-${TENCENTCLOUD_LOCAL_BUNDLE:-}}'
 TENCENTCLOUD_PVM_KERNEL_VMLINUX='${PVM_KERNEL_VMLINUX:-${TENCENTCLOUD_PVM_KERNEL_VMLINUX:-}}'
 TENCENTCLOUD_VERBOSE='${VERBOSE:-1}'
@@ -4730,7 +4739,7 @@ main() {
 	# Step 5b/9 — CFS shared storage for cube-master
 	#   Provision the CFS (Cloud File Storage) NFS share BEFORE the TKE addons so
 	#   the cube-master Deployment can mount it (ReadWriteMany) at
-	#   /data/CubeMaster/storage across all 3 replicas. CFS is base infra
+	#   /data/CubeMaster/storage across all replicas. CFS is base infra
 	#   (tencentcloud provider), so it is created here with the kubernetes provider
 	#   still OFF. Targeting the file system + access rule pulls in the access
 	#   group; the VPC/subnet already exist from Step 1.

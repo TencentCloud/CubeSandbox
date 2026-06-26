@@ -439,7 +439,7 @@ Cloud: a managed TKE control plane running `cubemaster` / `cube-api` /
 PVM compute nodes. A jumpserver (SSH on port `443`) is the build host and bastion
 for the otherwise-private VPC.
 
-`cubemaster` runs 3 replicas that share their `/data/CubeMaster/storage`
+`cubemaster` runs multiple replicas that share their `/data/CubeMaster/storage`
 directory through a CFS (Cloud File Storage, "通用标准型" / General Standard) NFS
 share mounted ReadWriteMany — an elastic, pay-as-you-go file system provisioned
 before the addons so all replicas read/write the same template / snapshot /

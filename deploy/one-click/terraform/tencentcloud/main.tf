@@ -306,10 +306,10 @@ resource "tencentcloud_security_group_rule_set" "demo" {
 
 ########################
 # Cloud File Storage (CFS) — shared persistent storage for cube-master
-#   The cube-master Deployment runs 3 replicas that must share the same
+#   The cube-master Deployment runs multiple replicas that must share the same
 #   template / snapshot / runtime state under /data/CubeMaster/storage, so the
 #   backing volume has to be ReadWriteMany. A CBS disk (ReadWriteOnce) cannot
-#   attach to three pods/nodes at once, so we use a CFS NFS share instead.
+#   attach to multiple pods/nodes at once, so we use a CFS NFS share instead.
 #
 #   storage_type = "SD" is CFS "General Standard" — an elastic,
 #   pay-as-you-go NFS file system that needs no pre-provisioned capacity
