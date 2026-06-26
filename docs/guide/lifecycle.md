@@ -58,7 +58,7 @@ Key parameters of `Sandbox.create()`:
 |-------------------------|----------------------------------------------------------------------------------------------|
 | `template`              | Template ID used to boot the sandbox; defaults to env var `CUBE_TEMPLATE_ID`.                |
 | `timeout`               | Idle timeout in **seconds**. (Note: e2b's `timeoutMs` is milliseconds; Cube uses seconds.)   |
-| `lifecycle`             | Lifecycle policy — see [Platform-managed auto-pause / auto-resume](#platform-managed-auto-pause--auto-resume) below. |
+| `lifecycle`             | Lifecycle policy — see [Platform-managed auto-pause / auto-resume](#platform-managed-auto-pause-auto-resume) below. |
 | `metadata`              | Arbitrary key/value pairs stored on the sandbox; readable from the list / detail endpoints. |
 | `env_vars`              | Environment variables injected into the sandbox process.                                     |
 | `allow_internet_access` | Whether outbound internet is allowed; `network` provides finer-grained egress control.       |

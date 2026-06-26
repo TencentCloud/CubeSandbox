@@ -70,7 +70,7 @@ The full TUI version of this script — with side-by-side probe
 summaries and a verdict panel — lives at
 [`examples/code-sandbox-quickstart/restrict_public_access.py`][demo].
 
-[demo]: https://github.com/tencentcloud/CubeSandbox/blob/main/examples/code-sandbox-quickstart/restrict_public_access.py
+[demo]: https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/restrict_public_access.py
 
 ## Default behavior
 

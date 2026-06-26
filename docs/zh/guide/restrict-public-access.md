@@ -65,7 +65,7 @@ assert resp.status_code == 200
 带 rich TUI 的完整版示例（含并排 probe 汇总和最终判定面板）位于
 [`examples/code-sandbox-quickstart/restrict_public_access.py`][demo]。
 
-[demo]: https://github.com/tencentcloud/CubeSandbox/blob/main/examples/code-sandbox-quickstart/restrict_public_access.py
+[demo]: https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/restrict_public_access.py
 
 ## 默认行为
 
