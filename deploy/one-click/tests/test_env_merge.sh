@@ -225,6 +225,8 @@ EOF
 
   assert_not_contains "${out}" "ONE_CLICK_INSTALL_PREFIX="
   assert_value "${out}" CUBE_PROXY_CERT_DIR "/usr/local/services/cubetoolbox/cubeproxy/certs"
+  assert_contains "${diff}" "[migrated-legacy]"
+  assert_contains "${diff}" 'CUBE_PROXY_CERT_DIR: "${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs" -> /usr/local/services/cubetoolbox/cubeproxy/certs'
   (
     set -a
     # shellcheck disable=SC1090
@@ -233,6 +235,31 @@ EOF
     [[ "${CUBE_PROXY_CERT_DIR}" == "/usr/local/services/cubetoolbox/cubeproxy/certs" ]] \
       || { echo "unexpected cert dir: ${CUBE_PROXY_CERT_DIR}" >&2; exit 1; }
   ) || fail "legacy CUBE_PROXY_CERT_DIR default was not migrated to fixed path"
+}
+
+test_two_way_migrates_single_quoted_legacy_cube_proxy_cert_dir_default() {
+  local new="${TMP_DIR}/new_proxy_single_default.example" old="${TMP_DIR}/old_proxy_single_default.env"
+  local out="${TMP_DIR}/out_proxy_single_default.env" diff="${TMP_DIR}/diff_proxy_single_default.txt"
+  write_new_example "${new}"
+  cat > "${old}" <<'EOF'
+ONE_CLICK_INSTALL_PREFIX=/usr/local/services/cubetoolbox
+CUBE_PROXY_CERT_DIR='${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs'
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_not_contains "${out}" "ONE_CLICK_INSTALL_PREFIX="
+  assert_value "${out}" CUBE_PROXY_CERT_DIR "/usr/local/services/cubetoolbox/cubeproxy/certs"
+  assert_contains "${diff}" "[migrated-legacy]"
+  assert_contains "${diff}" "CUBE_PROXY_CERT_DIR: '\${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs' -> /usr/local/services/cubetoolbox/cubeproxy/certs"
+  (
+    set -a
+    # shellcheck disable=SC1090
+    source "${out}"
+    set +a
+    [[ "${CUBE_PROXY_CERT_DIR}" == "/usr/local/services/cubetoolbox/cubeproxy/certs" ]] \
+      || { echo "unexpected cert dir: ${CUBE_PROXY_CERT_DIR}" >&2; exit 1; }
+  ) || fail "single-quoted legacy CUBE_PROXY_CERT_DIR default was not migrated to fixed path"
 }
 
 test_two_way_preserves_custom_cube_proxy_cert_dir() {
@@ -453,6 +480,7 @@ test_keeps_old_only_host_keys
 test_preserves_comments_and_structure
 test_two_way_fallback_without_baseline
 test_two_way_migrates_legacy_cube_proxy_cert_dir_default
+test_two_way_migrates_single_quoted_legacy_cube_proxy_cert_dir_default
 test_two_way_preserves_custom_cube_proxy_cert_dir
 test_new_dotenv_overrides_take_priority
 test_version_lt

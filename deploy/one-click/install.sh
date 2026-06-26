@@ -945,6 +945,7 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   fi
 fi
 
+assert_safe_install_prefix "${INSTALL_PREFIX}"
 rm -rf \
   "${INSTALL_PREFIX}/network-agent" \
   "${INSTALL_PREFIX}/CubeAPI" \
@@ -958,6 +959,7 @@ rm -rf \
   "${INSTALL_PREFIX}/cube-shim" \
   "${INSTALL_PREFIX}/cube-kernel-scf" \
   "${INSTALL_PREFIX}/cube-image" \
+  "${INSTALL_PREFIX}/cube-egress" \
   "${INSTALL_PREFIX}/scripts" \
   "${INSTALL_PREFIX}/sql" \
   "${INSTALL_PREFIX}/.one-click.env"

@@ -134,6 +134,65 @@ test_tke_addons_network_config_key() {
   fi
 }
 
+# 3d) Reinstall first removes packaged component directories, then lays the new
+#     package down. Guard that list against drifting when build-release-bundle.sh
+#     adds a new top-level package component.
+extract_package_root_dirs() {
+  { grep -oE '\$\{PACKAGE_ROOT\}/[^"[:space:]]+' "${BUNDLE_SH}" |
+    sed -E 's#.*\$\{PACKAGE_ROOT\}/([^/"]+).*#\1#' |
+    sort -u; } || true
+}
+
+extract_reinstall_cleanup_dirs() {
+  { sed -n '/^rm -rf \\/,/^$/p' "${ONE_CLICK_DIR}/install.sh" |
+    grep -oE '\$\{INSTALL_PREFIX\}/[^"[:space:]]+' |
+    sed -E 's#.*\$\{INSTALL_PREFIX\}/([^/"]+).*#\1#' |
+    sort -u; } || true
+}
+
+is_reinstall_cleanup_exception() {
+  case "$1" in
+    # Runtime data/object directories are intentionally preserved across reinstall.
+    cube-snapshot|cube-vs)
+      return 0
+      ;;
+    # The bundled Tencent Cloud deployer may hold local terraform state if an
+    # operator runs it from an installed tree instead of the extracted bundle.
+    terraform)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+test_reinstall_cleanup_tracks_packaged_components() {
+  local packaged cleaned dir
+  local missing=()
+  packaged="$(extract_package_root_dirs)"
+  cleaned="$(extract_reinstall_cleanup_dirs)"
+
+  if [[ -z "${packaged}" ]]; then
+    fail "could not extract package-root directories from build-release-bundle.sh"
+  fi
+  if [[ -z "${cleaned}" ]]; then
+    fail "could not extract reinstall cleanup directories from install.sh"
+  fi
+
+  while IFS= read -r dir; do
+    [[ -n "${dir}" ]] || continue
+    is_reinstall_cleanup_exception "${dir}" && continue
+    if ! grep -qxF "${dir}" <<<"${cleaned}"; then
+      missing+=("${dir}")
+    fi
+  done <<<"${packaged}"
+
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    fail "install.sh reinstall cleanup is missing packaged component dir(s): ${missing[*]}"
+  fi
+}
+
 # 4) The build entrypoints AND every shipped Terraform deployer script must at
 #    least be syntactically valid — a cheap, cloud-free guard so a broken script
 #    fails here instead of only when a user runs it from the bundle.
@@ -150,6 +209,7 @@ test_component_build_inputs_exist
 test_image_names_match
 test_webui_nginx_placeholders
 test_tke_addons_network_config_key
+test_reinstall_cleanup_tracks_packaged_components
 test_terraform_deployer_files_present
 test_build_scripts_parse
 

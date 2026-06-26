@@ -6,7 +6,10 @@
 
 ONE_CLICK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ONE_CLICK_DIR="$(cd "${ONE_CLICK_LIB_DIR}/.." && pwd)"
-CUBE_SANDBOX_INSTALL_ROOT="/usr/local/services/cubetoolbox"
+if [[ "${CUBE_SANDBOX_INSTALL_ROOT:-}" != "/usr/local/services/cubetoolbox" ]]; then
+  CUBE_SANDBOX_INSTALL_ROOT="/usr/local/services/cubetoolbox"
+fi
+readonly CUBE_SANDBOX_INSTALL_ROOT
 
 log() {
   echo "[one-click] $*" >&2
@@ -881,14 +884,15 @@ DEPRECATED_KEYS = {
 
 LEGACY_CUBE_PROXY_CERT_DIR_DEFAULTS = {
     '"${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"',
+    "'${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs'",
     "${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs",
 }
 
 
 def normalize_legacy_value(key, val, tmpl_val):
     if key == "CUBE_PROXY_CERT_DIR" and val in LEGACY_CUBE_PROXY_CERT_DIR_DEFAULTS:
-        return tmpl_val
-    return val
+        return tmpl_val, True
+    return val, False
 
 
 new_defaults = parse(new_example)
@@ -901,6 +905,7 @@ added = []
 updated_default = []
 preserved = []
 explicit = []
+migrated_legacy = []
 dropped = []
 
 out_lines = []
@@ -926,7 +931,9 @@ for line in template:
         chosen = new_overrides[key]
         explicit.append(key)
     elif key in old_values:
-        ov = normalize_legacy_value(key, old_values[key], tmpl_val)
+        ov, migrated = normalize_legacy_value(key, old_values[key], tmpl_val)
+        if migrated:
+            migrated_legacy.append((key, old_values[key], ov))
         if (has_baseline and key in old_baseline_vals
                 and ov == old_baseline_vals[key] and ov != tmpl_val):
             chosen = tmpl_val
@@ -979,6 +986,9 @@ for k, ov, nv in updated_default:
 report.append("[preserved] kept your customized values: %d" % len(preserved))
 for k, v in preserved:
     report.append("  = %s=%s" % (k, redact(k, v)))
+report.append("[migrated-legacy] legacy defaults rewritten to new fixed defaults: %d" % len(migrated_legacy))
+for k, ov, nv in migrated_legacy:
+    report.append("  ^ %s: %s -> %s" % (k, redact(k, ov), redact(k, nv)))
 report.append("[explicit] taken from new .env overrides: %d" % len(explicit))
 for k in explicit:
     report.append("  ! %s" % k)
@@ -993,8 +1003,8 @@ with open(diff_file, "w", encoding="utf-8") as fh:
     fh.write("\n".join(report) + "\n")
 
 sys.stderr.write(
-    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, >%d kept-extra, -%d dropped%s\n" % (
-        len(added), len(updated_default), len(preserved), len(extra), len(dropped),
+    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, ^%d migrated-legacy, >%d kept-extra, -%d dropped%s\n" % (
+        len(added), len(updated_default), len(preserved), len(migrated_legacy), len(extra), len(dropped),
         "" if has_baseline else " (two-way fallback: no baseline)"))
 PY
 }

@@ -131,6 +131,21 @@ test_parse_args_unknown_is_ignored() {
   [[ -z "${CLI_MODE}" ]] || fail "unknown args should not set CLI_MODE"
 }
 
+test_install_root_readonly() {
+  ( source "${ONE_CLICK_DIR}/lib/common.sh" ) >/dev/null 2>&1 \
+    || fail "common.sh should tolerate being sourced after CUBE_SANDBOX_INSTALL_ROOT is readonly"
+
+  if ( CUBE_SANDBOX_INSTALL_ROOT=/tmp/cube ) >/dev/null 2>&1; then
+    fail "CUBE_SANDBOX_INSTALL_ROOT should be readonly"
+  fi
+
+  local env_file="${TMP_DIR}/override-root.env"
+  printf '%s\n' 'CUBE_SANDBOX_INSTALL_ROOT=/tmp/cube' > "${env_file}"
+  if ( load_env_file "${env_file}" ) >/dev/null 2>&1; then
+    fail "load_env_file should reject CUBE_SANDBOX_INSTALL_ROOT overrides"
+  fi
+}
+
 test_assert_safe_install_prefix() {
   for bad in "/" "/usr" "/etc" "/home" "relative/path" "/toplevel"; do
     if ( assert_safe_install_prefix "${bad}" ) >/dev/null 2>&1; then
@@ -407,6 +422,7 @@ test_install_sh_wires_upgrade_flow() {
   assert_contains "${f}" "apply_cli_overrides"
   # The install root is fixed; custom-prefix wipe is no longer part of install.sh.
   assert_contains "${f}" 'INSTALL_PREFIX="${CUBE_SANDBOX_INSTALL_ROOT}"'
+  assert_contains "${f}" 'assert_safe_install_prefix "${INSTALL_PREFIX}"'
   if grep -Fq 'wipe_custom_install_prefix_contents "${INSTALL_PREFIX}"' "${f}"; then
     fail "install.sh should not invoke custom-prefix wipe"
   fi
@@ -429,6 +445,7 @@ test_assume_yes_existing_is_upgrade
 test_parse_args_space_and_equals_forms
 test_parse_args_missing_value_fails
 test_parse_args_unknown_is_ignored
+test_install_root_readonly
 test_assert_safe_install_prefix
 test_wipe_custom_install_prefix_contents
 test_control_plane_validators
