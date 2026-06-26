@@ -2,7 +2,6 @@ package nodemeta
 
 import (
 	"context"
-	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -71,22 +70,5 @@ func TestPersistVersionsSkipsDuplicateConcurrentWrite(t *testing.T) {
 	}
 	if len(snap.Versions) != len(versions) || snap.Versions[0] != versions[0] {
 		t.Fatalf("versions = %#v, want %#v", snap.Versions, versions)
-	}
-}
-
-func TestListInMemoryIsolatedNodeIDs(t *testing.T) {
-	s := &service{
-		nodes: map[string]*NodeSnapshot{
-			"node-b": {NodeID: "node-b", Isolated: true},
-			"node-a": {NodeID: "node-a", Isolated: true},
-			"node-c": {NodeID: "node-c", Isolated: false},
-			"node-d": nil,
-		},
-	}
-
-	got := s.listInMemoryIsolatedNodeIDs()
-	want := []string{"node-a", "node-b"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("isolated node ids = %#v, want %#v", got, want)
 	}
 }

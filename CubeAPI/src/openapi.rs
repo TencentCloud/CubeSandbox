@@ -56,7 +56,6 @@ impl Modify for SecurityAddon {
         handlers::cluster::cluster_versions,
         handlers::cluster::list_nodes,
         handlers::cluster::get_node,
-        handlers::cluster::set_node_isolation,
         handlers::templates::list_templates,
         handlers::templates::get_template,
         handlers::templates::template_compat,
