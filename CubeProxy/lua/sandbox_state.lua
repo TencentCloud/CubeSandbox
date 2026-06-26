@@ -21,6 +21,8 @@
 --   * Sidecar resume fails / times out   -> 503 with Retry-After to let the
 --                                            client back off.
 
+local utils = require "utils"
+
 local _M = { _VERSION = "0.01" }
 
 -- gate runs from rewrite phase. On a successful resume it returns to the
@@ -51,9 +53,8 @@ function _M.gate(ins_id)
         ngx.log(ngx.WARN, "LEVEL_WARN||",
             string.format("request %s sandbox %s is pausing; returning 503",
                 ngx.var.http_x_cube_request_id or "-", ins_id))
-        ngx.var.cube_retcode = "310503"
         ngx.header["Retry-After"] = "2"
-        ngx.exit(503)
+        utils:respond_unavailable()
     end
 
     if state ~= "paused" then
@@ -104,9 +105,8 @@ function _M.gate(ins_id)
             string.format("request %s sidecar resume for sandbox %s failed: status=%s body=%s",
                 rid or "-", ins_id, tostring(status),
                 (res and res.body) and string.sub(res.body, 1, 200) or "-"))
-        ngx.var.cube_retcode = "310503"
         ngx.header["Retry-After"] = "5"
-        ngx.exit(503)
+        utils:respond_unavailable()
     end
 
     -- Resume succeeded. Optimistically mark the sandbox running locally so a

@@ -6,6 +6,7 @@
 -- then resolves the same Redis-backed backend metadata used by host-mode
 -- routing in rewrite_phase.lua.
 
+local utils = require "utils"
 local sb = require "sandbox_backend"
 local state = require "sandbox_state"
 
@@ -15,8 +16,7 @@ if not ins_id or not container_port then
     ngx.log(ngx.ERR, "LEVEL_WARN||",
         string.format("request %s invalid path for sandbox/<id>/<port> parse: %s",
             ngx.var.http_x_cube_request_id, uri))
-    ngx.var.cube_retcode = "310400"
-    ngx.exit(400)
+    utils:respond_bad_request()
 end
 
 if rest == nil or rest == "" then

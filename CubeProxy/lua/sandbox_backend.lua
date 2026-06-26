@@ -12,15 +12,17 @@ local redis_keys = require "redis_keys"
 
 local _M = { _VERSION = "0.01" }
 
--- enforce_traffic_token rejects (403) requests targeting a sandbox whose
+-- enforce_traffic_token rejects requests targeting a sandbox whose
 -- AllowPublicTraffic flag is "false" unless the request carries a matching
 -- token in either the e2b-traffic-access-token (E2B-compatible) or
 -- cube-traffic-access-token (CubeSandbox-native) header.
 --
 -- Both args are the raw values stored in Redis (string form). expected_token
 -- being empty while allow_public is "false" indicates a server-side
--- inconsistency and yields 500 instead of 403, on the principle that
--- silently letting the request through would be worse.
+-- inconsistency. Both failure paths return 404 (not 403/500) so that a
+-- caller cannot distinguish "sandbox exists but access denied" from
+-- "sandbox does not exist"; silently letting the request through would be
+-- worse.
 local function enforce_traffic_token(allow_public, expected_token, ins_id)
     if allow_public ~= "false" then
         return
@@ -29,8 +31,7 @@ local function enforce_traffic_token(allow_public, expected_token, ins_id)
         ngx.log(ngx.ERR, "LEVEL_ERROR||",
             string.format("request %s sandbox %s marked restricted but token missing in metadata",
                 ngx.var.http_x_cube_request_id, ins_id))
-        ngx.var.cube_retcode = "310507"
-        ngx.exit(500)
+        utils:respond_not_found()
     end
     local provided = ngx.var.http_e2b_traffic_access_token
                   or ngx.var.http_cube_traffic_access_token
@@ -38,8 +39,7 @@ local function enforce_traffic_token(allow_public, expected_token, ins_id)
         ngx.log(ngx.ERR, "LEVEL_WARN||",
             string.format("request %s sandbox %s traffic token mismatch",
                 ngx.var.http_x_cube_request_id, ins_id))
-        ngx.var.cube_retcode = "310403"
-        ngx.exit(ngx.HTTP_FORBIDDEN)
+        utils:respond_not_found()
     end
 end
 
@@ -149,8 +149,7 @@ function _M.resolve_backend(ins_id, container_port)
     local metadata, err = load_sandbox_proxy_metadata(ins_id)
     if err then
         ngx.log(ngx.ERR, "LEVEL_ERROR||", err)
-        ngx.var.cube_retcode = "310500"
-        ngx.exit(500)
+        utils:respond_unavailable()
     end
 
     cache:set(ins_id .. ":meta_cached", "1", timeout)
@@ -177,8 +176,7 @@ function _M.resolve_backend(ins_id, container_port)
         ngx.log(ngx.ERR, "LEVEL_WARN||",
             string.format("request %s using instance %s misses HostIP",
                 ngx.var.http_x_cube_request_id, ins_id))
-        ngx.var.cube_retcode = "310507"
-        ngx.exit(500)
+        utils:respond_not_found()
     end
 
     if not utils:is_null(caller_host_ip) and caller_host_ip == target_host_ip then
@@ -186,8 +184,7 @@ function _M.resolve_backend(ins_id, container_port)
             ngx.log(ngx.ERR, "LEVEL_ERROR||",
                 string.format("request %s instance %s on local host %s misses SandboxIP",
                     ngx.var.http_x_cube_request_id, ins_id, caller_host_ip))
-            ngx.var.cube_retcode = "310507"
-            ngx.exit(500)
+            utils:respond_not_found()
         end
         host_ip = target_sandbox_ip
         host_port = container_port
@@ -198,8 +195,7 @@ function _M.resolve_backend(ins_id, container_port)
             ngx.log(ngx.ERR, "LEVEL_ERROR||",
                 string.format("request %s instance %s misses host port mapping for container_port %s",
                     ngx.var.http_x_cube_request_id, ins_id, container_port))
-            ngx.var.cube_retcode = "310507"
-            ngx.exit(500)
+            utils:respond_not_found()
         end
     end
 
