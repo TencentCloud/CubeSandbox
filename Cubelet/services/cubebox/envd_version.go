@@ -7,6 +7,8 @@ package cubebox
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"regexp"
 	"sync"
 	"syscall"
@@ -16,6 +18,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/google/uuid"
 
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 )
 
@@ -60,6 +63,70 @@ func (b *boundedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// parseEnvdVersionFromOutput prefers semver from stdout; falls back to stderr
+// only when stdout has no match (e.g. envd logs warnings to stderr).
+func parseEnvdVersionFromOutput(stdout, stderr string) string {
+	if v := envdSemverRe.FindString(stdout); v != "" {
+		return v
+	}
+	return envdSemverRe.FindString(stderr)
+}
+
+// runProbeCall runs fn in a goroutine so a blocking containerd/shim RPC cannot
+// stall the snapshot/commit path past execCtx's deadline.
+func runProbeCall[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	type probeResult struct {
+		value T
+		err   error
+	}
+	done := make(chan probeResult, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				var zero T
+				done <- probeResult{value: zero, err: fmt.Errorf("probe panic: %v", r)}
+			}
+		}()
+		v, err := fn()
+		done <- probeResult{value: v, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	case r := <-done:
+		return r.value, r.err
+	}
+}
+
+func probeCallTimedOut(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+// killProbeProcess sends SIGKILL and, when statusCh is available, waits for the
+// exec to reap so the deferred Delete does not race a still-running process.
+func killProbeProcess(process containerd.Process, statusCh <-chan containerd.ExitStatus, logger *log.CubeWrapperLogEntry) {
+	_ = process.Kill(context.Background(), syscall.SIGKILL)
+	if statusCh == nil {
+		return
+	}
+	select {
+	case <-statusCh:
+	case <-time.After(envdVersionExecTimeout):
+		logger.Warnf("collect envd version: exec did not reap after kill")
+	}
+}
+
+// abortProbe logs a wait/start failure and best-effort kills the probe process.
+func abortProbe(process containerd.Process, statusCh <-chan containerd.ExitStatus, logger *log.CubeWrapperLogEntry, phase string, err error) {
+	if probeCallTimedOut(err) {
+		logger.Warnf("collect envd version: %s timed out: %v", phase, err)
+	} else {
+		logger.Warnf("collect envd version: %s failed: %v", phase, err)
+	}
+	killProbeProcess(process, statusCh, logger)
 }
 
 // collectEnvdVersion runs `envd --version` inside the running guest of sandboxID
@@ -122,11 +189,18 @@ func (s *service) collectEnvdVersion(ctx context.Context, sandboxID string) (ver
 	pspec.Terminal = true
 	pspec.Args = []string{"envd", "--version"}
 
-	out := &boundedBuffer{limit: envdVersionOutputLimit}
+	stdout := &boundedBuffer{limit: envdVersionOutputLimit}
+	stderr := &boundedBuffer{limit: envdVersionOutputLimit}
 	execID := envdVersionExecIDPrefix + uuid.New().String()
-	process, err := task.Exec(execCtx, execID, pspec, cio.NewCreator(cio.WithStreams(nil, out, out), cio.WithTerminal))
+	process, err := runProbeCall(execCtx, func() (containerd.Process, error) {
+		return task.Exec(execCtx, execID, pspec, cio.NewCreator(cio.WithStreams(nil, stdout, stderr), cio.WithTerminal))
+	})
 	if err != nil {
-		logger.Warnf("collect envd version: exec failed: %v", err)
+		if probeCallTimedOut(err) {
+			logger.Warnf("collect envd version: exec timed out: %v", err)
+		} else {
+			logger.Warnf("collect envd version: exec failed: %v", err)
+		}
 		return ""
 	}
 	defer func() {
@@ -136,26 +210,24 @@ func (s *service) collectEnvdVersion(ctx context.Context, sandboxID string) (ver
 		}
 	}()
 
-	statusCh, err := process.Wait(execCtx)
+	statusCh, err := runProbeCall(execCtx, func() (<-chan containerd.ExitStatus, error) {
+		return process.Wait(execCtx)
+	})
 	if err != nil {
-		logger.Warnf("collect envd version: wait failed: %v", err)
+		abortProbe(process, nil, logger, "wait", err)
 		return ""
 	}
-	if err := process.Start(execCtx); err != nil {
-		logger.Warnf("collect envd version: start failed: %v", err)
+	_, err = runProbeCall(execCtx, func() (struct{}, error) {
+		return struct{}{}, process.Start(execCtx)
+	})
+	if err != nil {
+		abortProbe(process, statusCh, logger, "start", err)
 		return ""
 	}
 
 	select {
 	case <-execCtx.Done():
-		// Kill the exec process and wait for it to reap so the deferred Delete
-		// does not race a still-running process and leak shim resources.
-		_ = process.Kill(context.Background(), syscall.SIGKILL)
-		select {
-		case <-statusCh:
-		case <-time.After(envdVersionExecTimeout):
-			logger.Warnf("collect envd version: exec did not reap after kill")
-		}
+		killProbeProcess(process, statusCh, logger)
 		logger.Warnf("collect envd version: timed out after %s", envdVersionExecTimeout)
 		return ""
 	case status := <-statusCh:
@@ -165,7 +237,7 @@ func (s *service) collectEnvdVersion(ctx context.Context, sandboxID string) (ver
 		}
 	}
 
-	version = envdSemverRe.FindString(out.String())
+	version = parseEnvdVersionFromOutput(stdout.String(), stderr.String())
 	if version == "" {
 		logger.Warnf("collect envd version: no semver in output")
 		return ""
