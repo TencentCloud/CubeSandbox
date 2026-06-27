@@ -22,6 +22,7 @@ COREDNS_COMPOSE_TEMPLATE="${COREDNS_DIR}/docker-compose.yaml.template"
 COREDNS_COMPOSE_FILE="${COREDNS_DIR}/docker-compose.yaml"
 RESOLV_UPSTREAM_PATH="${COREDNS_DIR}/resolv.conf.upstream"
 COREDNS_CONTAINER="${CUBE_PROXY_COREDNS_CONTAINER:-cube-proxy-coredns}"
+COREDNS_IMAGE="${CUBE_PROXY_COREDNS_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/coredns/coredns:1.14.2}"
 CUBE_SANDBOX_NODE_IP="${CUBE_SANDBOX_NODE_IP:-}"
 DNS_ANSWER_IP="${CUBE_PROXY_DNS_ANSWER_IP:-${CUBE_SANDBOX_NODE_IP:-127.0.0.1}}"
 DEFAULT_COREDNS_BIND_ADDR="${CUBE_PROXY_COREDNS_BIND_ADDR:-127.0.0.54}"
@@ -163,6 +164,7 @@ render_template_atomic \
 render_template_atomic \
   "${COREDNS_COMPOSE_TEMPLATE}" \
   "${COREDNS_COMPOSE_FILE}" \
+  -e "s#__COREDNS_IMAGE__#$(escape_sed "${COREDNS_IMAGE}" '#')#g" \
   -e "s/__COREDNS_CONTAINER__/${COREDNS_CONTAINER//\//\\/}/g" \
   -e "s#__COREDNS_DIR__#${COREDNS_DIR//\//\\/}#g"
 

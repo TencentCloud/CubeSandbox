@@ -1,4 +1,9 @@
-FROM cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+# Base image is overridable at build time (e.g. to point at a private registry
+# mirror or a pinned @sha256 digest). The one-click deploy passes this build
+# arg from CUBE_PROXY_BASE_IMAGE in .one-click.env via the compose build.args;
+# the default below keeps `docker build CubeProxy/` working standalone.
+ARG CUBE_PROXY_BASE_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+FROM ${CUBE_PROXY_BASE_IMAGE}
 
 LABEL maintainer="staryxchen <staryxchen@tencent.com>"
 

@@ -1,7 +1,7 @@
 version: "3"
 services:
   coredns:
-    image: cube-sandbox-image.tencentcloudcr.com/opensource/coredns/coredns:1.14.2
+    image: __COREDNS_IMAGE__
     container_name: __COREDNS_CONTAINER__
     restart: unless-stopped
     network_mode: host
