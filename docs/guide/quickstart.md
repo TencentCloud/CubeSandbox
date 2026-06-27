@@ -11,7 +11,7 @@ If you plan to use Cube Sandbox in a production environment, please refer to the
 :::
 
 ::: tip Already have a server with KVM enabled?
-If you already have an x86_64 Linux server with KVM enabled (bare-metal or physical machine), skip to [Bare-Metal Deployment](./bare-metal-deploy.md) to install directly without PVM.
+If you already have an x86_64 or aarch64 (ARM64) Linux server with KVM enabled (bare-metal or physical machine), skip to [Bare-Metal Deployment](./bare-metal-deploy.md) to install directly without PVM.
 :::
 
 ## Prerequisites
@@ -19,6 +19,10 @@ If you already have an x86_64 Linux server with KVM enabled (bare-metal or physi
 - **x86_64** cloud server (any standard cloud VM works — `/dev/kvm` not required)
 - **Root access**
 - Internet access (for downloading release packages and Docker images)
+
+::: warning ARM64 (aarch64) hosts
+This Quick Start uses **PVM** to enable KVM on standard cloud VMs, and the PVM host kernel is **x86_64-only** (release attachments are `*.x86_64.rpm` / `*_amd64.deb`). On **aarch64 (ARM64)**, use a machine that already exposes native KVM (a physical/bare-metal ARM64 server) and follow [Bare-Metal Deployment](./bare-metal-deploy.md) or [Self-Build Deployment](./self-build-deploy.md) instead — both support aarch64.
+:::
 
 ### 🖥 Supported Systems
 

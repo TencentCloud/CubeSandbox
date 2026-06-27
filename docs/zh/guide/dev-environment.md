@@ -109,9 +109,10 @@ bare-metal 机器上执行。
 
 宿主机需要的软件依赖：
 
-- Linux x86_64，已启用 KVM（存在 `/dev/kvm`）
+- Linux x86_64 或 aarch64（ARM64），已启用 KVM（存在 `/dev/kvm`）
 - 开启了 nested virtualization
-- 已安装 `qemu-system-x86_64`、`qemu-img`、`curl`、`ssh`、`scp`、`setsid`
+- 已安装 `qemu-system-x86_64`（ARM64 上为 `qemu-system-aarch64`）、`qemu-img`、`curl`、`ssh`、`scp`、`setsid`
+  - 在 aarch64 上，开发环境虚拟机使用 QEMU 的 `virt` 机型并以 UEFI 固件启动，因此还需安装 EDK2/AAVMF 固件（`QEMU_EFI.fd`，例如 `qemu-efi-aarch64` 包）。脚本会自动检测宿主机架构，必要时可用 `TARGET_ARCH` 覆盖。
 
 快速自检：
 

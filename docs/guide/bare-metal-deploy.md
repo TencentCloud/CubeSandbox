@@ -1,6 +1,6 @@
 # Bare-Metal / Physical Machine Deployment
 
-> **Use case:** You already have an x86_64 Linux machine with KVM support (`/dev/kvm` available), such as a physical machine, bare-metal server, or a cloud VM with nested virtualization enabled.
+> **Use case:** You already have an x86_64 or aarch64 (ARM64) Linux machine with KVM support (`/dev/kvm` available), such as a physical machine, bare-metal server, or a cloud VM with nested virtualization enabled.
 >
 > If you're on an **ordinary cloud VM** without `/dev/kvm`, you don't need bare-metal — use PVM to enable KVM on standard cloud VMs, see [Quick Start](./quickstart.md).
 
@@ -10,7 +10,7 @@ If you plan to use Cube Sandbox in a production environment, please refer to the
 
 ## Prerequisites
 
-- **x86_64** Linux machine
+- **x86_64** or **aarch64** (ARM64) Linux machine
 - `/dev/kvm` present and read/writable (`ls -la /dev/kvm`)
 - **Root access**
 - **Docker** installed and running
