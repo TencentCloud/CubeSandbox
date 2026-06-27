@@ -1,3 +1,5 @@
+[![Listed on TakoAPI](https://img.shields.io/badge/Listed%20on-TakoAPI-7c3aed)](https://takoapi.com/agents/tencentcloud-cubesandbox)
+
 <p align="center">
   <img src="docs/assets/cube-sandbox-logo.png" alt="Cube Sandbox Logo" width="140" />
 </p>
