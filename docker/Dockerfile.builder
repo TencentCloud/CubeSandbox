@@ -112,6 +112,10 @@ RUN . /etc/buildenv \
         software-properties-common \
     && if [ "${TARGETARCH}" = "amd64" ]; then \
        apt-get install -y --no-install-recommends gcc-multilib; \
+       apt-get install -y gcc-aarch64-linux-gnu; \
+    else \
+       apt-get install -y --no-install-recommends; \
+       apt-get install -y gcc-x86-64-linux-gnu; \
     fi \
     && rm -rf /var/lib/apt/lists/*
 # Install clang-14

@@ -7,6 +7,7 @@ BUILDER_HOME ?= $(HOME)/.cache/cube-sandbox-builder
 BUILDER_CONTAINER_HOME ?= /home/builder
 TMP_GIT_CREDENTIALS ?= /tmp/.cube-sandbox-builder-tmp-git-credentials
 BUILDER_CMD ?= bash
+BUILDER_RUN_EXTRA_MOUNTS ?=
 ROOT_DIR := $(shell pwd)
 UID := $(shell id -u)
 GID := $(shell id -g)
@@ -19,6 +20,22 @@ CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
 TARGET_ARCH ?= $(shell uname -m | sed 's/^arm64$$/aarch64/')
+
+# ---- Guest kernel image build ----
+# `make kernel KERNEL_SRC=/path/to/linux` builds a vmlinux from the in-tree
+# kernel config (configs/kernel-oc9.<arch>.config) inside the unified builder
+# image.
+# Supports native builds (x86_64 or aarch64) and cross builds (x86_64 <-> aarch64).
+# The kernel is built out-of-tree (O=) so KERNEL_SRC is left pristine. Override
+# KERNEL_TARGET_ARCH to cross-compile for an architecture other than the host;
+# the matching CROSS_COMPILE prefix is selected automatically (override with
+# KERNEL_CROSS_COMPILE if your toolchain uses a different prefix).
+KERNEL_TARGET_ARCH ?= $(TARGET_ARCH)
+KERNEL_CONFIG ?= $(ROOT_DIR)/configs/kernel-oc9.$(KERNEL_TARGET_ARCH).config
+KERNEL_OUTPUT_DIR ?= $(ROOT_DIR)/_output/kernel/$(KERNEL_TARGET_ARCH)
+KERNEL_IMAGE_TARGET ?= vmlinux
+KERNEL_BUILD_JOBS ?=
+KERNEL_CROSS_COMPILE ?=
 
 # Top-level Rust project directories. Each owns its own Cargo workspace and
 # `target/`; sub-crates share their workspace's target dir, so cleaning these
@@ -76,6 +93,7 @@ help:
 	@printf "  cubeapi       Build CubeAPI (cube-api) in Docker\n"
 	@printf "  cube-api      Alias of cubeapi\n"
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
+	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
 	@printf "  all           Build cubemaster, cubelet, network-agent and cubevsmapdump in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
 	@printf "  clean-rust-target-dirs Remove target/ in every top-level Rust project\n"
@@ -148,6 +166,7 @@ builder-run: prepare-builder-home prepare-tmp-git-credentials
 		-e CUBE_BUILD_TIME \
 		-v "$(ROOT_DIR)":/workspace \
 		-v "$(BUILDER_HOME)":$(BUILDER_CONTAINER_HOME) \
+		$(BUILDER_RUN_EXTRA_MOUNTS) \
 		$(DOCKER_GIT_CRED) \
 		-w /workspace \
 		$(BUILDER_IMAGE) \
@@ -230,6 +249,25 @@ cube-api: cubeapi
 shim: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeShim && cargo build --release --locked && install -m 0755 /workspace/CubeShim/target/release/containerd-shim-cube-rs /workspace/_output/bin/containerd-shim-cube-rs && install -m 0755 /workspace/CubeShim/target/release/cube-runtime /workspace/_output/bin/cube-runtime'
+
+# Build a guest kernel image (vmlinux for x86_64, Image for aarch64) from an external kernel source tree.
+#   make guest-kernel KERNEL_SRC=/path/to/linux                            # native build for the host arch
+#   make guest-kernel KERNEL_SRC=/path/to/linux KERNEL_TARGET_ARCH=aarch64 # cross build
+# KERNEL_SRC is mounted into the builder at /kernel-src; the config is taken
+# from configs/kernel-oc9.$(KERNEL_TARGET_ARCH).config and the resulting Linux kernel image
+# is written to $(KERNEL_OUTPUT_DIR) on the host with name as vmlinux.
+.PHONY: guest-kernel
+guest-kernel: kernel-precheck builder-image
+	@mkdir -p "$(KERNEL_OUTPUT_DIR)"
+	$(MAKE) builder-run \
+		BUILDER_RUN_EXTRA_MOUNTS='-v $(abspath $(KERNEL_SRC)):/kernel-src' \
+		BUILDER_CMD='KERNEL_SRC_DIR=/kernel-src KERNEL_TARGET_ARCH=$(KERNEL_TARGET_ARCH) KERNEL_CONFIG=/workspace/configs/kernel-oc9.$(KERNEL_TARGET_ARCH).config KERNEL_OUTPUT_DIR=/workspace/_output/kernel/$(KERNEL_TARGET_ARCH) KERNEL_CROSS_COMPILE=$(strip $(KERNEL_CROSS_COMPILE)) KERNEL_BUILD_JOBS=$(strip $(KERNEL_BUILD_JOBS)) bash /workspace/scripts/build-kernel.sh'
+
+.PHONY: kernel-precheck
+kernel-precheck:
+	@test -n "$(strip $(KERNEL_SRC))" || { echo "ERROR: KERNEL_SRC must point to a Linux kernel source tree (e.g. make guest-kernel KERNEL_SRC=/path/to/linux)"; exit 1; }
+	@test -d "$(KERNEL_SRC)" || { echo "ERROR: KERNEL_SRC '$(KERNEL_SRC)' is not a directory"; exit 1; }
+	@test -f "$(KERNEL_CONFIG)" || { echo "ERROR: kernel config not found: $(KERNEL_CONFIG)"; exit 1; }
 
 .PHONY: manual-release
 manual-release: all
