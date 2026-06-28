@@ -405,7 +405,7 @@ sudo yum install -y e2fsprogs util-linux
 
 > **Security**: All core services bind `0.0.0.0` by default. Before deploying on
 > a machine reachable from untrusted networks, review the
-> [Network Hardening Guide](/guide/network-hardening) for bind-address
+> [Network Hardening Guide](https://cubesandbox.com/guide/network-hardening.html) for bind-address
 > configuration, firewall rules, and credential rotation.
 
 - The target machine requires `root` privileges.

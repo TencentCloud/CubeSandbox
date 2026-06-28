@@ -389,7 +389,7 @@ sudo yum install -y e2fsprogs util-linux
 ## 前置条件
 
 > **安全提示**：所有核心服务默认绑定 `0.0.0.0`。在将部署放到可被不可信网络访问的
-> 机器上之前，请参阅[网络加固指南](/zh/guide/network-hardening)，了解绑定地址
+> 机器上之前，请参阅[网络加固指南](https://cubesandbox.com/zh/guide/network-hardening.html)，了解绑定地址
 > 配置、防火墙规则与凭据轮换。
 
 - 目标机需要 `root` 权限。
