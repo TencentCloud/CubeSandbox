@@ -2,6 +2,10 @@
 
 > **When to use this guide:** Your cloud server does not expose `/dev/kvm` (nested virtualization is blocked by the cloud provider). If your machine already has KVM support, refer to [Quick Start](./quickstart.md) or [Self-Build Deployment](./self-build-deploy.md) instead.
 
+::: warning Production Use
+If you plan to use Cube Sandbox in a production environment, please refer to the [Network Hardening](./network-hardening.md) guide to secure your deployment before exposing services to untrusted networks.
+:::
+
 PVM enables you to deploy Cube Sandbox on an **ordinary cloud server**, with all sandbox instances running inside PVM-backed Micro-VMs.
 
 Compared to a standard deployment, PVM adds only two extra steps:

@@ -6,6 +6,10 @@ The steps below guide you through provisioning a cloud server, enabling KVM via 
 
 ⚠️ Follow this guide step by step — you can be up and running with Cube Sandbox in just a few minutes!
 
+::: warning Production Use
+If you plan to use Cube Sandbox in a production environment, please refer to the [Network Hardening](./network-hardening.md) guide to secure your deployment before exposing services to untrusted networks.
+:::
+
 ::: tip Already have a server with KVM enabled?
 If you already have an x86_64 Linux server with KVM enabled (bare-metal or physical machine), skip to [Bare-Metal Deployment](./bare-metal-deploy.md) to install directly without PVM.
 :::

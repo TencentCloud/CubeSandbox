@@ -2,6 +2,10 @@
 
 This guide explains how to expand a single-node Cube Sandbox deployment into a multi-node cluster by adding **compute nodes**. Compute nodes run only the sandbox runtime components (`Cubelet`, `network-agent`, `CubeShim`) and register themselves to the control plane on the first machine.
 
+::: warning Production Use
+If you plan to use Cube Sandbox in a production environment, please refer to the [Network Hardening](./network-hardening.md) guide to secure your deployment before exposing services to untrusted networks.
+:::
+
 ::: tip Prerequisite
 You must have a working control node deployed via the [Self-Build Deployment Guide](./self-build-deploy.md) before adding compute nodes.
 :::

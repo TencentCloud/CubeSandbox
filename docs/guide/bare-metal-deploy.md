@@ -4,6 +4,10 @@
 >
 > If you're on an **ordinary cloud VM** without `/dev/kvm`, you don't need bare-metal — use PVM to enable KVM on standard cloud VMs, see [Quick Start](./quickstart.md).
 
+::: warning Production Use
+If you plan to use Cube Sandbox in a production environment, please refer to the [Network Hardening](./network-hardening.md) guide to secure your deployment before exposing services to untrusted networks.
+:::
+
 ## Prerequisites
 
 - **x86_64** Linux machine

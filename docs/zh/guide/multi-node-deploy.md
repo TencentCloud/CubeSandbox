@@ -2,6 +2,10 @@
 
 本指南介绍如何将单机 Cube Sandbox 部署扩展为多机集群，通过添加**计算节点**来实现。计算节点只运行沙箱运行时组件（`Cubelet`、`network-agent`、`CubeShim`），并向第一台机器上的控制面注册。
 
+::: warning 生产环境注意
+如果您计划在生产环境中使用 Cube Sandbox，请参阅[网络加固](./network-hardening.md)指南，在将服务暴露到不可信网络之前完成安全加固。
+:::
+
 ::: tip 前置条件
 添加计算节点前，你必须先通过[本地构建部署指南](./self-build-deploy.md)完成控制节点的部署。
 :::
