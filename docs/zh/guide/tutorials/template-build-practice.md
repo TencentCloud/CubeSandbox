@@ -5,7 +5,7 @@
 - **方式一：本地构建镜像**（镜像只在当前机器，无需推送到远端）
 - **方式二：远程镜像**（镜像已推送到 Registry，集群从远端拉取）
 
-> 友情链接，建议同步阅读 [从 OCI 镜像制作模板](https://github.com/TencentCloud/CubeSandbox/blob/v0.2.0/docs/guide/tutorials/template-from-image.md) 和 [自带镜像接入](https://github.com/TencentCloud/CubeSandbox/blob/v0.2.0/docs/guide/tutorials/bring-your-own-image.md) 文档。
+> 友情链接，建议同步阅读 [从 OCI 镜像制作模板](./template-from-image.md) 和 [自带镜像接入](./bring-your-own-image.md) 文档。
 
 ---
 
