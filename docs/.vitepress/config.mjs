@@ -149,6 +149,7 @@ export default withMermaid(defineConfig({
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
                 { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
+                { text: 'Network Hardening', link: '/guide/network-hardening' },
                 { text: 'Authentication', link: '/guide/authentication' }
               ]
             },
@@ -272,6 +273,7 @@ export default withMermaid(defineConfig({
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
                 { text: 'HTTPS 证书与域名解析', link: '/zh/guide/https-and-domain' },
+                { text: '网络加固', link: '/zh/guide/network-hardening' },
                 { text: '鉴权', link: '/zh/guide/authentication' }
               ]
             },

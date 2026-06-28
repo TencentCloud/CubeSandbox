@@ -388,6 +388,10 @@ sudo yum install -y e2fsprogs util-linux
 
 ## 前置条件
 
+> **安全提示**：所有核心服务默认绑定 `0.0.0.0`。在将部署放到可被不可信网络访问的
+> 机器上之前，请参阅[网络加固指南](/zh/guide/network-hardening)，了解绑定地址
+> 配置、防火墙规则与凭据轮换。
+
 - 目标机需要 `root` 权限。
 - 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会回退到 `NetworkManager + dnsmasq`：同样创建该 dummy link，并通过 `listen-address` / `bind-interfaces` 让 `dnsmasq` 同时绑定 `127.0.0.1` 和 `169.254.254.53`；随后安装器自己写 `/etc/resolv.conf`（NetworkManager 切到 `rc-manager=unmanaged`），把 nameserver 指向 `169.254.254.53`，让宿主应用和 Docker 容器看到同一个非 loopback 解析器。
 - 目标机默认联网拉取 `mysql:8.0` 和 `redis:7-alpine`。

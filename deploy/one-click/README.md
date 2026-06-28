@@ -403,6 +403,11 @@ sudo yum install -y e2fsprogs util-linux
 
 ## Prerequisites
 
+> **Security**: All core services bind `0.0.0.0` by default. Before deploying on
+> a machine reachable from untrusted networks, review the
+> [Network Hardening Guide](/guide/network-hardening) for bind-address
+> configuration, firewall rules, and credential rotation.
+
 - The target machine requires `root` privileges.
 - The target machine preferentially uses `systemd-resolved` / `resolvectl` for split DNS of `cube.app`. The current implementation creates a dedicated dummy link (default `cube-dns0`), assigns it a local `/32` address, binds CoreDNS to `169.254.254.53` on that link by default, and attaches that address plus `~cube.app` to the link. If that capability is unavailable, the installation script will fall back to `NetworkManager + dnsmasq`: the same dummy link is created and `dnsmasq` is configured (via `listen-address` / `bind-interfaces`) to listen on both `127.0.0.1` and `169.254.254.53`. `/etc/resolv.conf` is then written by the installer (NetworkManager runs with `rc-manager=unmanaged`) to point at `169.254.254.53`, so host applications and Docker containers see the same non-loopback resolver.
 - The target machine pulls `mysql:8.0` and `redis:7-alpine` from the internet by default.
