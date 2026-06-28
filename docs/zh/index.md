@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "Cube Sandbox"
   text: "Empowering your AI Agents."
-  tagline: "极速启动、高并发、安全且轻量化的 AI Agent 沙箱。"
+  tagline: "极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务"
   actions:
     - theme: brand
       text: 快速开始
@@ -20,7 +20,7 @@ features:
   - title: "📦 高密度部署"
     details: 单沙箱额外开销仅 MB 级，通过内核共享与写时复制（CoW），单机可运行数千个实例。
   - title: "🛡️ 网络安全"
-    details: 基于 eBPF 的 CubeVS 在内核态实现严格的沙箱间网络隔离，支持细粒度出站流量过滤策略。
+    details: 基于 eBPF 的内核态沙箱间网络隔离与出站过滤；内置 L7 安全代理支持按域名/路径/方法的精细策略及自动凭证注入，密钥对沙箱内代码不可见。
   - title: "📸 灵活的状态管理"
     details: 百毫秒级的高频快照与回滚。支持对运行中沙箱创建检查点，随时回滚到任意快照状态，或从指定状态快速创建分叉探索环境。
 ---

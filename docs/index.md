@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "Cube Sandbox"
   text: "Empowering your AI Agents."
-  tagline: "Instant, Concurrent, Secure & Lightweight Sandbox for AI Agents."
+  tagline: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents"
   actions:
     - theme: brand
       text: Quick Start
@@ -20,7 +20,7 @@ features:
   - title: "📦 High-density Deployment"
     details: MB-level per-sandbox overhead enables thousands of instances per server via kernel sharing and Copy-on-Write.
   - title: "🛡️ Network Security"
-    details: eBPF-based CubeVS enforces strict inter-sandbox isolation and fine-grained egress filtering at the kernel level.
+    details: eBPF-based inter-sandbox isolation and egress filtering at kernel level; built-in L7 security proxy enables per-domain/path/method policies with automatic credential injection — secrets never visible to sandbox code.
   - title: "📸 State Management"
     details: "Create checkpoints on running sandboxes, roll back to any saved state, or fork into parallel exploration environments at millisecond granularity."
 ---
