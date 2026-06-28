@@ -55,6 +55,9 @@ type CommonConf struct {
 	CubeDestroyCheckFilter          bool              `yaml:"cube_destroy_check_filter"`
 	Debug                           Debug             `toml:"debug"`
 	HttpPort                        int               `yaml:"http_port"`
+	// HttpBind is the HTTP listen address. Empty means 0.0.0.0 (all
+	// interfaces); set to 127.0.0.1 to keep the API loopback-only.
+	HttpBind                        string            `yaml:"http_bind"`
 	WriteTimeout                    int               `yaml:"http_writetimeout"`
 	ReadTimeout                     int               `yaml:"http_readtimeout"`
 	IdleTimeout                     int               `yaml:"http_idletimeout"`
@@ -752,6 +755,10 @@ func preComHandleConf(config *Config) error {
 	}
 	if config.Common.HttpPort == 0 {
 		config.Common.HttpPort = 8089
+	}
+	// Default to all interfaces; deployments can override via http_bind.
+	if config.Common.HttpBind == "" {
+		config.Common.HttpBind = "0.0.0.0"
 	}
 	if config.Common.ReadTimeout == 0 {
 		config.Common.ReadTimeout = 120

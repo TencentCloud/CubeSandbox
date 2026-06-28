@@ -1,5 +1,8 @@
 common:
   http_port: 8089
+  # Listen address; 0.0.0.0 = all interfaces. Set to 127.0.0.1 to harden a
+  # single all-in-one node (breaks compute nodes / host-net proxy reaching it).
+  http_bind: __CUBEMASTER_HTTP_BIND__
   http_readtimeout: 120
   http_writetimeout: 360
   http_idletimeout: 360

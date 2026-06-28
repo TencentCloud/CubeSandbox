@@ -279,11 +279,16 @@ generate_cubemaster_config_ports() {
   local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
   local mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
   local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+  # Decoupled from the TKE path: one-click decides CubeMaster's listen address
+  # here. Defaults to 0.0.0.0 to stay reachable from compute nodes / host-net
+  # cube-proxy; set CUBEMASTER_HTTP_BIND=127.0.0.1 to harden a lone node.
+  local http_bind="${CUBEMASTER_HTTP_BIND:-0.0.0.0}"
 
   ensure_file "${cfg}"
   sed -i \
     -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
     -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
+    -e "s|__CUBEMASTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
     "${cfg}"
 }
 

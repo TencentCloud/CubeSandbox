@@ -59,7 +59,7 @@ func NewInternalHttp(ctx context.Context, cfg *config.Config) (*internalHttp, er
 	router := mux.NewRouter()
 	s := &internalHttp{
 		Server: &http.Server{
-			Addr:         fmt.Sprintf("0.0.0.0:%d", cfg.Common.HttpPort),
+			Addr:         fmt.Sprintf("%s:%d", cfg.Common.HttpBind, cfg.Common.HttpPort),
 			ReadTimeout:  time.Second * time.Duration(cfg.Common.ReadTimeout),
 			WriteTimeout: time.Second * time.Duration(cfg.Common.WriteTimeout),
 			IdleTimeout:  time.Second * time.Duration(cfg.Common.IdleTimeout),
