@@ -122,10 +122,11 @@ hello cube
 | `exec_code.py` | `sandbox.run_code()` — execute Python code inside a sandbox |
 | `cmd.py` | `sandbox.commands.run()` — execute shell commands |
 | `create.py` | `sandbox.get_info()` — retrieve sandbox metadata |
+| `create_with_envs.py` | `Sandbox.create(envs=...)` — pass create-time environment variables |
 | `read.py` | `sandbox.files.read()` — read a file from the sandbox filesystem |
 | `pause.py` | `sandbox.pause()` / `sandbox.connect()` — snapshot and restore |
-| `auto_resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — let the platform pause idle sandboxes and resume them on the next request |
-| `auto_kill.py` | `lifecycle={"on_timeout": "kill"}` — let the platform tear down idle sandboxes (the default — destruction is irreversible, the sandbox cannot be resumed) |
+| `auto-resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — let the platform pause idle sandboxes and resume them on the next request |
+| `auto-kill.py` | `lifecycle={"on_timeout": "kill"}` — let the platform tear down idle sandboxes (the default — destruction is irreversible, the sandbox cannot be resumed) |
 | `network_no_internet.py` | `allow_internet_access=False` — fully air-gapped sandbox |
 | `network_allowlist.py` | `allow_out` — whitelist specific CIDRs, block everything else |
 | `network_denylist.py` | `deny_out` — block specific CIDRs, allow the rest |
@@ -146,6 +147,21 @@ with Sandbox.create(template=template_id) as sandbox:
     print(result.stdout)
 ```
 
+### Create-Time Environment Variables
+
+You can pass environment variables when creating a sandbox. They are then
+available to subsequent command execution in that sandbox:
+
+```python
+python create_with_envs.py
+```
+
+Expected output:
+
+```text
+user-session-test
+```
+
 ### pause.py — Pause & Resume
 
 Snapshot a running sandbox to free compute resources, then restore it later:
@@ -158,7 +174,7 @@ with Sandbox.create(template=template_id) as sandbox:
     print(sandbox.get_info())
 ```
 
-### auto_resume.py — Auto Pause & Auto Resume
+### auto-resume.py — Auto Pause & Auto Resume
 
 Like `pause.py`, but the platform handles the pause/resume cycle on its own.
 The `lifecycle` argument mirrors the e2b SDK
@@ -178,9 +194,9 @@ sandbox.run_code("print('back from a transparent resume')")
 sandbox.kill()
 ```
 
-### auto_kill.py — Auto Kill on Idle Timeout
+### auto-kill.py — Auto Kill on Idle Timeout
 
-The destructive twin of `auto_resume.py`. Setting `on_timeout="kill"` (also the
+The destructive twin of `auto-resume.py`. Setting `on_timeout="kill"` (also the
 default when no `lifecycle` is passed) tells the platform to tear the sandbox
 down once it idles past `timeout` — no snapshot is kept, the next request
 fails fast with **410 Gone**:
@@ -258,10 +274,12 @@ code-sandbox-quickstart/
 ├── exec_code.py               # Run Python code inside a sandbox
 ├── cmd.py                     # Execute shell commands
 ├── create.py                  # Create sandbox and inspect metadata
+├── create_with_envs.py        # Create sandbox with create-time env vars
+├── env_utils.py               # Shared .env loader helper
 ├── read.py                    # Read files from the sandbox filesystem
 ├── pause.py                   # Pause and resume a sandbox
-├── auto_resume.py             # Auto-pause / auto-resume on idle timeout
-├── auto_kill.py               # Auto-kill on idle timeout (destruction is final)
+├── auto-resume.py             # Auto-pause / auto-resume on idle timeout
+├── auto-kill.py               # Auto-kill on idle timeout (destruction is final)
 ├── network_no_internet.py     # Fully air-gapped sandbox
 ├── network_allowlist.py       # Outbound CIDR allowlist
 ├── network_denylist.py        # Outbound CIDR denylist

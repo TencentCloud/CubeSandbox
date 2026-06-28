@@ -44,8 +44,12 @@ type CreateCubeSandboxReq struct {
 
 	Containers []*Container `json:"containers,omitempty"`
 
-	Annotations       map[string]string `json:"annotations,omitempty" `
-	Labels            map[string]string `json:"labels,omitempty" `
+	Annotations map[string]string `json:"annotations,omitempty" `
+	Labels      map[string]string `json:"labels,omitempty" `
+	// CreateTimeEnvVars carries sandbox-level env vars requested at create
+	// time. CubeMaster serializes them into an internal annotation so cubelet
+	// can initialize envd after sandbox startup.
+	CreateTimeEnvVars map[string]string `json:"create_time_env_vars,omitempty"`
 	DistributionScope []string          `json:"distribution_scope,omitempty"`
 	InstanceType      string            `json:"instance_type,omitempty"`
 	NetworkType       string            `json:"network_type,omitempty"`

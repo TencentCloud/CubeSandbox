@@ -5,7 +5,9 @@
 package cubebox
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"net/url"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
@@ -28,6 +31,42 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 )
+
+const (
+	envdInitPath = "/init"
+	// Keep create-time envd init within a bounded sub-second budget so the
+	// safeguard absorbs brief restore jitter without turning sandbox create
+	// into an unbounded slow path.
+	envdInitAttemptTimeout = 150 * time.Millisecond
+	envdInitMaxAttempts    = 3
+	envdInitRetryDelay     = 25 * time.Millisecond
+	defaultEnvdInitPort    = 49983
+)
+
+func (l *local) getEnvdInitPort() int {
+	if l != nil && l.envdInitPort > 0 {
+		return l.envdInitPort
+	}
+	return defaultEnvdInitPort
+}
+
+func (l *local) getEnvdHTTPClient() *http.Client {
+	if l != nil && l.envdHTTPClient != nil {
+		return l.envdHTTPClient
+	}
+	return newEnvdHTTPClient()
+}
+
+func newEnvdHTTPClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+	}
+}
 
 func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cubeboxstore.Container) (retErr error) {
 	startTime := time.Now()
@@ -140,6 +179,125 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 	default:
 	}
 	return nil
+}
+
+func (l *local) doCreateTimeEnvdInit(ctx context.Context, req *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) error {
+	if req == nil || sandBox == nil || req.Annotations == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(req.Annotations[constants.MasterAnnotationCreateTimeEnvVars])
+	if raw == "" {
+		return nil
+	}
+	// The propagated envd semantic-version annotation is the runtime capability
+	// signal for envd-backed templates. When callers request create-time env
+	// injection, missing this signal means the sandbox cannot satisfy the envd
+	// init contract, so fail fast instead of silently dropping the request.
+	if strings.TrimSpace(req.Annotations[constants.MasterAnnotationComponentEnvdVersion]) == "" {
+		return ret.Err(errorcode.ErrorCode_PreConditionFailed, "create_time_env_vars requires an envd-backed template")
+	}
+
+	envVars := map[string]string{}
+	if err := json.Unmarshal([]byte(raw), &envVars); err != nil {
+		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid create_time_env_vars annotation: %v", err)
+	}
+	if len(envVars) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(sandBox.IP) == "" {
+		return ret.Err(errorcode.ErrorCode_CreateNetworkFailed, "sandbox IP is empty for create_time_env_vars init")
+	}
+
+	body, err := json.Marshal(struct {
+		EnvVars map[string]string `json:"envVars"`
+	}{
+		EnvVars: envVars,
+	})
+	if err != nil {
+		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "marshal create_time_env_vars init request failed: %v", err)
+	}
+
+	return l.doCreateTimeEnvdInitWithRetry(ctx, sandBox.IP, body)
+}
+
+func (l *local) doCreateTimeEnvdInitWithRetry(ctx context.Context, sandboxIP string, body []byte) error {
+	var lastErr error
+	for attempt := 1; attempt <= envdInitMaxAttempts; attempt++ {
+		innerCtx, cancel := context.WithTimeout(ctx, envdInitAttemptTimeout)
+		retryable, err := l.doCreateTimeEnvdInitAttempt(innerCtx, sandboxIP, body)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !retryable || attempt == envdInitMaxAttempts {
+			return err
+		}
+		log.G(ctx).Warnf("envd init transient failure on attempt %d/%d for sandbox %s: %v",
+			attempt, envdInitMaxAttempts, sandboxIP, err)
+		select {
+		case <-time.After(envdInitRetryDelay):
+		case <-ctx.Done():
+			return lastErr
+		}
+	}
+	return lastErr
+}
+
+func (l *local) doCreateTimeEnvdInitAttempt(ctx context.Context, sandboxIP string, body []byte) (bool, error) {
+	reqURL := formatURL("http", sandboxIP, l.getEnvdInitPort(), envdInitPath)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL.String(), bytes.NewReader(body))
+	if err != nil {
+		return false, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "build envd init request failed: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := l.getEnvdHTTPClient().Do(httpReq)
+	if err != nil {
+		return isRetryableEnvdInitTransportErr(err), ret.Errorf(errorcode.ErrorCode_ExecCommandInSandboxFailed, "envd init request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, ret.Errorf(errorcode.ErrorCode_ExecCommandInSandboxFailed, "read envd init response body failed: %v", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return isRetryableEnvdInitStatusCode(resp.StatusCode), ret.Errorf(
+			errorcode.ErrorCode_ExecCommandInSandboxFailed,
+			"envd init request returned HTTP %d: %s",
+			resp.StatusCode,
+			strings.TrimSpace(string(respBody)),
+		)
+	}
+	return false, nil
+}
+
+func isRetryableEnvdInitStatusCode(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func isRetryableEnvdInitTransportErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "eof")
 }
 
 func doPreStop(ctx context.Context, ci *cubeboxstore.Container) {

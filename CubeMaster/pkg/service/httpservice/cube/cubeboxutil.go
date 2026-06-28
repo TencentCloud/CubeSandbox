@@ -530,7 +530,6 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 			return err
 		}
 	}
-
 	if templateReq.NetworkType != "" {
 		reqInOut.NetworkType = templateReq.NetworkType
 	}

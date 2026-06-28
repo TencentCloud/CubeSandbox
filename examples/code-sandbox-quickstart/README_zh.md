@@ -117,10 +117,11 @@ hello cube
 | `exec_code.py` | `sandbox.run_code()` — 在沙箱中执行 Python 代码 |
 | `cmd.py` | `sandbox.commands.run()` — 执行 Shell 命令 |
 | `create.py` | `sandbox.get_info()` — 获取沙箱元数据 |
+| `create_with_envs.py` | `Sandbox.create(envs=...)` — 创建时注入环境变量 |
 | `read.py` | `sandbox.files.read()` — 读取沙箱文件系统中的文件 |
 | `pause.py` | `sandbox.pause()` / `sandbox.connect()` — 快照与恢复 |
-| `auto_resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — 平台在空闲超时后自动暂停沙箱，下一次请求自动恢复 |
-| `auto_kill.py` | `lifecycle={"on_timeout": "kill"}` — 平台在空闲超时后直接销毁沙箱（默认行为，销毁不可逆，沙箱无法恢复） |
+| `auto-resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — 平台在空闲超时后自动暂停沙箱，下一次请求自动恢复 |
+| `auto-kill.py` | `lifecycle={"on_timeout": "kill"}` — 平台在空闲超时后直接销毁沙箱（默认行为，销毁不可逆，沙箱无法恢复） |
 | `network_no_internet.py` | `allow_internet_access=False` — 完全断网沙箱 |
 | `network_allowlist.py` | `allow_out` — 白名单 CIDR，拦截其余所有出口 |
 | `network_denylist.py` | `deny_out` — 黑名单 CIDR，其余放行 |
@@ -141,6 +142,20 @@ with Sandbox.create(template=template_id) as sandbox:
     print(result.stdout)
 ```
 
+### 创建时注入环境变量
+
+可以在创建沙箱时传入环境变量，后续在该沙箱中的命令执行也可以读取到这些变量：
+
+```python
+python create_with_envs.py
+```
+
+预期输出:
+
+```text
+user-session-test
+```
+
 ### pause.py — 暂停与恢复
 
 将运行中的沙箱快照以释放计算资源，之后恢复：
@@ -153,7 +168,7 @@ with Sandbox.create(template=template_id) as sandbox:
     print(sandbox.get_info())
 ```
 
-### auto_resume.py — 自动暂停与自动恢复
+### auto-resume.py — 自动暂停与自动恢复
 
 与 `pause.py` 类似，但暂停/恢复完全交给平台自动管理。`lifecycle` 参数与 e2b SDK 对齐
 （参考 [e2b 文档](https://e2b.dev/docs/sandbox/auto-resume)）：`on_timeout="pause"`
@@ -172,9 +187,9 @@ sandbox.run_code("print('back from a transparent resume')")
 sandbox.kill()
 ```
 
-### auto_kill.py — 空闲超时后自动销毁
+### auto-kill.py — 空闲超时后自动销毁
 
-`auto_resume.py` 的孪生销毁版本。`on_timeout="kill"`（不传 `lifecycle`
+`auto-resume.py` 的孪生销毁版本。`on_timeout="kill"`（不传 `lifecycle`
 时的默认值）告诉平台：沙箱空闲超过 `timeout` 后直接拆除 VM，不
 保留快照，下一次请求会以 **410 Gone** 快速失败：
 
@@ -251,10 +266,12 @@ code-sandbox-quickstart/
 ├── exec_code.py               # 在沙箱中运行 Python 代码
 ├── cmd.py                     # 执行 Shell 命令
 ├── create.py                  # 创建沙箱并查看元数据
+├── create_with_envs.py        # 创建时注入环境变量
+├── env_utils.py               # 共享的 .env 加载辅助脚本
 ├── read.py                    # 读取沙箱文件系统中的文件
 ├── pause.py                   # 暂停与恢复沙箱
-├── auto_resume.py             # 自动暂停 / 自动恢复（基于空闲超时）
-├── auto_kill.py               # 空闲超时后自动销毁（不可恢复）
+├── auto-resume.py             # 自动暂停 / 自动恢复（基于空闲超时）
+├── auto-kill.py               # 空闲超时后自动销毁（不可恢复）
 ├── network_no_internet.py     # 完全断网沙箱
 ├── network_allowlist.py       # 出口 CIDR 白名单
 ├── network_denylist.py        # 出口 CIDR 黑名单

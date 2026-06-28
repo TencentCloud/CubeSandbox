@@ -26,6 +26,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
+const maxCreateTimeEnvVarsAnnotationBytes = 16 * 1024
+
 func checkAndGetReqResource(req *types.CreateCubeSandboxReq) (*selctx.RequestResource, error) {
 	res := &selctx.RequestResource{
 		Cpu: resource.MustParse("0"),
@@ -683,6 +685,33 @@ func checkAndGetAnnotation(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 	if v, ok := req.Annotations[constants.CubeAnnotationsInsRegion]; !ok || v == "" {
 		out.Annotations[constants.CubeAnnotationsInsRegion] = config.GetConfig().Log.Region
 	}
+	if err := setCreateTimeEnvVarsAnnotation(out.Annotations, req.CreateTimeEnvVars); err != nil {
+		return err
+	}
+	return nil
+}
+
+func setCreateTimeEnvVarsAnnotation(out map[string]string, envVars map[string]string) error {
+	if len(envVars) == 0 {
+		return nil
+	}
+	if out == nil {
+		return errors.New("annotation output map is nil")
+	}
+	// Carry the create-time env map to cubelet so the sandbox runtime can
+	// initialize envd after startup for envd-backed command execution.
+	payload, err := utils.JSONTool.Marshal(envVars)
+	if err != nil {
+		return fmt.Errorf("marshal create_time_env_vars failed: %w", err)
+	}
+	if len(payload) > maxCreateTimeEnvVarsAnnotationBytes {
+		return fmt.Errorf(
+			"create_time_env_vars annotation payload too large: %d bytes exceeds limit %d",
+			len(payload),
+			maxCreateTimeEnvVarsAnnotationBytes,
+		)
+	}
+	out[constants.CubeAnnotationCreateTimeEnvVars] = string(payload)
 	return nil
 }
 

@@ -564,7 +564,10 @@ impl CubeMasterError {
 ///   as a potential source of routing ambiguity;
 /// * `.` and `..` are reserved for relative path resolution and easily slip
 ///   through naive equality checks.
-fn validate_path_segment(name: &'static str, value: &str) -> Result<(), CubeMasterError> {
+pub(crate) fn validate_path_segment(
+    name: &'static str,
+    value: &str,
+) -> Result<(), CubeMasterError> {
     let is_valid = !value.is_empty()
         && value
             .bytes()
@@ -636,6 +639,15 @@ pub struct CreateSandboxRequest {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<HashMap<String, String>>,
+
+    #[serde(
+        rename = "create_time_env_vars",
+        skip_serializing_if = "Option::is_none"
+    )]
+    /// Sandbox-level env vars requested at create time. CubeMaster forwards
+    /// them to cubelet via an internal annotation, and cubelet uses them to
+    /// initialize envd after sandbox startup.
+    pub create_time_env_vars: Option<HashMap<String, String>>,
 
     #[serde(rename = "distribution_scope", skip_serializing_if = "Option::is_none")]
     pub distribution_scope: Option<Vec<String>>,
