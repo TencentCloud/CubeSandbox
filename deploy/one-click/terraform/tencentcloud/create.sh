@@ -718,6 +718,8 @@ setup_env() {
 	[ -n "${TENCENTCLOUD_IMAGE_NAME:-}" ] && export TF_VAR_image_name_regex="$TENCENTCLOUD_IMAGE_NAME"
 	[ -n "${TENCENTCLOUD_JUMPSERVER_INSTANCE_TYPE:-}" ] && export TF_VAR_jumpserver_instance_type="$TENCENTCLOUD_JUMPSERVER_INSTANCE_TYPE"
 	[ -n "${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-}" ] && export TF_VAR_compute_instance_type="$TENCENTCLOUD_COMPUTE_INSTANCE_TYPE"
+	[ -n "${TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE:-}" ] && export TF_VAR_compute_data_disk_size="$TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE"
+	[ -n "${TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE:-}" ] && export TF_VAR_tke_worker_instance_type="$TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE"
 	[ -n "${TENCENTCLOUD_REGION:-}" ] && export TF_VAR_region="$TENCENTCLOUD_REGION"
 	[ -n "${TENCENTCLOUD_VPC_NAME:-}" ] && export TF_VAR_vpc_name="$TENCENTCLOUD_VPC_NAME"
 
@@ -1608,7 +1610,7 @@ prompt_deployment_env() {
 		echo -e "  ${GREEN}✓ OS image name: ${TENCENTCLOUD_IMAGE_NAME} ${CYAN}(fixed; only validated image)${NC}"
 	fi
 	select_env TENCENTCLOUD_JUMPSERVER_INSTANCE_TYPE "Jumpserver instance type" \
-		"S5.MEDIUM4" "S5.MEDIUM8" "S5.LARGE8" "SA5.MEDIUM4" "SA5.MEDIUM8"
+		"SA9.MEDIUM4" "SA9.MEDIUM8" "SA9.LARGE8" "SA5.MEDIUM4" "SA5.MEDIUM8"
 	select_env_secret TENCENTCLOUD_MYSQL_PASSWORD "MySQL root password" "CubeSandbox123!"
 	select_env_secret TENCENTCLOUD_REDIS_PASSWORD "Redis password" "ceuhvu123"
 	select_env TENCENTCLOUD_CUBE_DB "Cube database name" "cube_mvp"
@@ -1835,7 +1837,7 @@ select_tke() {
 	# it back on for the final cluster + addons step).
 	echo ""
 	echo -e "${GREEN}✓ Creating the TKE Kubernetes cluster${NC}"
-	echo -e "  Spec: standard cluster L20 | K8s ${TKE_CLUSTER_VERSION:-1.34.1} | ${TKE_NODE_COUNT:-2} nodes | preferred ${TF_VAR_compute_instance_type:-S5.2XLARGE16}"
+	echo -e "  Spec: standard cluster L20 | K8s ${TKE_CLUSTER_VERSION:-1.34.1} | ${TKE_NODE_COUNT:-2} nodes | preferred ${TF_VAR_tke_worker_instance_type:-SA9.LARGE8}"
 	echo ""
 	export TF_VAR_create_tke=true
 	_prompt_tke_env
@@ -1998,11 +2000,11 @@ _fallback_instance_types() {
 	CVM_MEMS=()
 
 	local -a fb=(
-		"S5.LARGE8|4|8"
-		"S5.LARGE16|4|16"
-		"S5.2XLARGE16|8|16"
-		"S5.2XLARGE32|8|32"
-		"S5.4XLARGE32|16|32"
+		"SA9.LARGE8|4|8"
+		"SA9.LARGE16|4|16"
+		"SA9.2XLARGE16|8|16"
+		"SA9.2XLARGE32|8|32"
+		"SA9.4XLARGE32|16|32"
 		"SA5.2XLARGE16|8|16"
 	)
 	local entry t cpu mem
@@ -2019,7 +2021,7 @@ _fallback_instance_types() {
 # _fallback_jumpserver_instance_types — curated jumpserver candidates
 # ---------------------------------------------------------------
 _fallback_jumpserver_instance_types() {
-	JUMPSERVER_TYPES=("S5.MEDIUM4" "S5.MEDIUM8" "S5.LARGE8" "SA5.MEDIUM4" "SA5.MEDIUM8")
+	JUMPSERVER_TYPES=("SA9.MEDIUM4" "SA9.MEDIUM8" "SA9.LARGE8" "SA5.MEDIUM4" "SA5.MEDIUM8")
 	JUMPSERVER_CPUS=(2 2 4 2 2)
 	JUMPSERVER_MEMS=(4 8 8 4 8)
 }
@@ -2122,7 +2124,7 @@ _role_zone_var() {
 # _compute_preferred_type — user preference (TENCENTCLOUD_COMPUTE_INSTANCE_TYPE)
 # ---------------------------------------------------------------
 _compute_preferred_type() {
-	echo "${COMPUTE_PREFERRED_TYPE:-${TF_VAR_compute_instance_type:-${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-S5.2XLARGE16}}}"
+	echo "${COMPUTE_PREFERRED_TYPE:-${TF_VAR_compute_instance_type:-${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-SA9.2XLARGE16}}}"
 }
 
 # ---------------------------------------------------------------
@@ -2538,7 +2540,7 @@ select_instance_type() {
 		done
 		echo ""
 		while true; do
-			read -r -p "$(echo -e "${YELLOW}Enter an instance type (e.g. S5.LARGE8): ${NC}")" manual
+			read -r -p "$(echo -e "${YELLOW}Enter an instance type (e.g. SA9.LARGE8): ${NC}")" manual
 			if [ -n "$manual" ]; then
 				break
 			fi
@@ -2630,7 +2632,7 @@ step2_apply() {
 		echo -e "    Jumpserver zone     : $(_get_role_zone jumpserver)"
 		echo -e "    Compute zone        : $(_get_role_zone compute)"
 		echo -e "    TKE worker zone     : $(_get_role_zone tke)"
-		echo -e "    Jumpserver type     : ${TF_VAR_jumpserver_instance_type:-S5.MEDIUM4}"
+		echo -e "    Jumpserver type     : ${TF_VAR_jumpserver_instance_type:-SA9.MEDIUM4}"
 		if [ "${STEP2_COMPUTE_NODE_INDEX:-}" -ge 0 ] 2>/dev/null; then
 			echo -e "    Compute preference  : $(_compute_preferred_type) (node $((STEP2_COMPUTE_NODE_INDEX + 1)) trying ${TF_VAR_compute_instance_type:-?})"
 			if [ "${#COMPUTE_PURCHASED_TYPES[@]}" -gt 0 ]; then
@@ -2638,7 +2640,7 @@ step2_apply() {
 			fi
 		else
 			echo -e "    Compute preference  : $(_compute_preferred_type)"
-			echo -e "    TKE worker type     : ${TF_VAR_compute_instance_type:-S5.2XLARGE16}"
+			echo -e "    TKE worker type     : ${TF_VAR_tke_worker_instance_type:-SA9.LARGE8}"
 		fi
 		echo -e "    Operating system    : ${TF_VAR_image_name_regex:-OpenCloudOS Server 9}"
 		echo ""
@@ -4143,10 +4145,10 @@ print_cluster_operator_help() {
 	# CLB IPs only exist for the TKE (cluster edition) deployment.
 	[ -z "$tke_id" ] && return 0
 
-	local key_file js_ip sg_id
+	local key_file js_ip clb_sg_id
 	key_file="${TENCENTCLOUD_SSH_PRIVATE_KEY_PATH:-$SSH_PRI_KEY}"
 	js_ip=$(terraform output -raw jumpserver_public_ip 2>/dev/null || echo "")
-	sg_id=$(terraform output -raw security_group_id 2>/dev/null || echo "")
+	clb_sg_id=$(terraform output -json security_group_ids 2>/dev/null | jq -r '.clb // empty' 2>/dev/null || echo "")
 
 	local webui_ip proxy_ip api_ip master_ip
 	webui_ip=$(terraform output -raw tke_cube_webui_clb_ip 2>/dev/null || echo "")
@@ -4195,14 +4197,20 @@ print_cluster_operator_help() {
 	# 4) Controlling which ports are exposed publicly
 	echo ""
 	echo -e "${CYAN}▶ 4. Control which ports each IP exposes to the internet${NC}"
-	echo -e "    All CLBs above share one security group:"
-	echo -e "      ${GREEN}${sg_id:-cubesandbox-demo-sg}${NC} (name: cubesandbox-demo-sg)"
-	echo -e "    Current inbound rules open to 0.0.0.0/0 (the whole internet):"
-	echo -e "      • 443  → jumpserver SSH"
+	echo -e "    The deployment uses 4 per-role security groups (least privilege):"
+	echo -e "      ${GREEN}cubesandbox-sg-jumpserver${NC} : jumpserver SSH 443 + VPC internal"
+	echo -e "      ${GREEN}cubesandbox-sg-compute${NC}    : TKE pod CIDR + VPC internal only (no public ingress)"
+	echo -e "      ${GREEN}cubesandbox-sg-tke-pod${NC}    : pod-to-pod + VPC internal only (no public ingress)"
+	echo -e "      ${GREEN}cubesandbox-sg-clb${NC}        : public service ports for the CLBs below"
+	echo -e "    All CLBs above share the CLB security group:"
+	echo -e "      ${GREEN}${clb_sg_id:-cubesandbox-sg-clb}${NC} (name: cubesandbox-sg-clb)"
+	echo -e "    Its inbound rules open to 0.0.0.0/0 (the whole internet):"
 	echo -e "      • 80   → cube-webui + cube-proxy (HTTP)"
+	echo -e "      • 443  → cube-proxy (HTTPS)"
 	echo -e "      • 3000 → cube-api"
 	echo -e "    VPC-internal only (not reachable from the internet):"
 	echo -e "      • 8089 → cube-master (internal CLB)"
+	echo -e "    Jumpserver SSH 443 lives on cubesandbox-sg-jumpserver, not the CLB group."
 	echo ""
 }
 
@@ -4621,7 +4629,10 @@ main() {
 		tencentcloud_subnet.demo \
 		tencentcloud_nat_gateway.demo \
 		tencentcloud_route_table_entry.nat \
-		tencentcloud_security_group_rule_set.demo \
+		tencentcloud_security_group_rule_set.jumpserver \
+		tencentcloud_security_group_rule_set.compute \
+		tencentcloud_security_group_rule_set.tke_pod \
+		tencentcloud_security_group_rule_set.clb \
 		tencentcloud_key_pair.demo || {
 		echo -e "${RED}✗ Network provisioning failed; aborting deployment.${NC}"
 		exit 1

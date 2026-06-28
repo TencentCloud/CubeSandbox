@@ -40,13 +40,13 @@ variable "image_name_regex" {
 }
 
 variable "jumpserver_instance_type" {
-  description = "Jumpserver instance type, e.g. S5.MEDIUM4, S5.LARGE8"
-  default     = "S5.MEDIUM4"
+  description = "Jumpserver instance type, e.g. SA9.MEDIUM4, SA9.LARGE8"
+  default     = "SA9.MEDIUM4"
 }
 
 variable "compute_instance_type" {
   description = "Preferred compute-node instance type (fallback default when compute_instance_types is shorter than compute_node_count). Actual purchased types are recorded in compute_instance_types."
-  default     = "S5.2XLARGE16"
+  default     = "SA9.2XLARGE16"
 }
 
 variable "compute_instance_types" {
@@ -79,6 +79,17 @@ variable "compute_node_count" {
   validation {
     condition     = var.compute_node_count >= 0 && floor(var.compute_node_count) == var.compute_node_count
     error_message = "compute_node_count must be a non-negative integer."
+  }
+}
+
+variable "compute_data_disk_size" {
+  description = "Per compute-node CBS data disk size in GB; formatted as XFS and mounted at /data/cubelet (override with TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE)"
+  type        = number
+  default     = 200
+
+  validation {
+    condition     = var.compute_data_disk_size >= 10 && floor(var.compute_data_disk_size) == var.compute_data_disk_size
+    error_message = "compute_data_disk_size must be an integer >= 10 (GB)."
   }
 }
 
@@ -174,6 +185,12 @@ variable "tke_node_count" {
     condition     = var.tke_node_count >= 1 && floor(var.tke_node_count) == var.tke_node_count
     error_message = "tke_node_count must be an integer >= 1."
   }
+}
+
+variable "tke_worker_instance_type" {
+  description = "TKE worker node instance type; leave empty to use compute_instance_type"
+  type        = string
+  default     = "SA9.LARGE8"
 }
 
 variable "tke_cluster_cidr" {

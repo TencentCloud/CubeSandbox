@@ -380,7 +380,7 @@ resource "kubernetes_service" "cubemaster" {
       "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
       "service.cloud.tencent.com/modification-protection"           = "false"
       "service.cloud.tencent.com/pass-to-target"                    = "true"
-      "service.cloud.tencent.com/security-groups"                   = tencentcloud_security_group.demo.id
+      "service.cloud.tencent.com/security-groups"                   = tencentcloud_security_group.clb.id
     }
   }
   lifecycle {
@@ -459,7 +459,7 @@ resource "kubernetes_service" "cube_api" {
     annotations = {
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
-      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.demo.id
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
     }
   }
   lifecycle {
@@ -648,7 +648,7 @@ resource "kubernetes_service" "cube_proxy" {
       "service.cloud.tencent.com/specify-protocol"                     = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]}}"
       "service.cloud.tencent.com/modification-protection"              = "false"
       "service.cloud.tencent.com/pass-to-target"                       = "true"
-      "service.cloud.tencent.com/security-groups"                      = tencentcloud_security_group.demo.id
+      "service.cloud.tencent.com/security-groups"                      = tencentcloud_security_group.clb.id
     }
   }
   lifecycle {
@@ -789,7 +789,7 @@ resource "kubernetes_service" "cube_webui" {
     annotations = {
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
-      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.demo.id
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
     }
   }
   lifecycle {
