@@ -548,10 +548,42 @@ is_compute_role() {
   [[ "$(one_click_deploy_role)" == "compute" ]]
 }
 
+env_value_is_plain_scalar() {
+  local value="${1-}"
+  [[ -z "${value}" ]] && return 0
+  [[ "${value}" =~ ^[A-Za-z0-9_./:@%+=,-]*$ ]]
+}
+
+render_env_assignment_value() {
+  local key="$1"
+  local value="$2"
+
+  if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    die "env value for ${key} must not contain newlines"
+  fi
+
+  # Keep shell-safe scalars unquoted so preflight readers that deliberately do
+  # not source the file (for example, ONE_CLICK_DEPLOY_ROLE checks during
+  # upgrade preflight) continue to see plain values.
+  if env_value_is_plain_scalar "${value}"; then
+    printf '%s' "${value}"
+    return 0
+  fi
+
+  # Runtime helpers load .one-click.env via `set -a; source`, so persist any
+  # shell-sensitive value in a quoted form that preserves bytes literally.
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//\$/\\$}"
+  value="${value//\`/\\\`}"
+  printf '"%s"' "${value}"
+}
+
 upsert_env_kv() {
   local env_file="$1"
   local key="$2"
   local value="$3"
+  local rendered_value
   local tmp_file
   # SECURITY: tighten umask before mktemp so the temp file is created 0600 from
   # the start, closing the race window between creation and the chmod below.
@@ -572,11 +604,12 @@ upsert_env_kv() {
   # with looser permissions or mktemp honored a non-default mode.
   chmod 600 "${tmp_file}"
   local replaced=false
+  rendered_value="$(render_env_assignment_value "${key}" "${value}")"
 
   if [[ -f "${env_file}" ]]; then
     while IFS= read -r line || [[ -n "${line}" ]]; do
       if [[ "${line}" == "${key}="* ]]; then
-        printf '%s=%s\n' "${key}" "${value}" >> "${tmp_file}"
+        printf '%s=%s\n' "${key}" "${rendered_value}" >> "${tmp_file}"
         replaced=true
       else
         printf '%s\n' "${line}" >> "${tmp_file}"
@@ -585,10 +618,49 @@ upsert_env_kv() {
   fi
 
   if [[ "${replaced}" != "true" ]]; then
-    printf '%s=%s\n' "${key}" "${value}" >> "${tmp_file}"
+    printf '%s=%s\n' "${key}" "${rendered_value}" >> "${tmp_file}"
   fi
 
   mv -f "${tmp_file}" "${env_file}"
+}
+
+redis_cli_help_output() {
+  command -v redis-cli >/dev/null 2>&1 || return 1
+  redis-cli --help 2>&1 || true
+}
+
+redis_cli_help_supports_flag() {
+  local help_output="$1"
+  local flag="$2"
+
+  printf '%s\n' "${help_output}" | grep -Eq "(^|[[:space:]])${flag}([[:space:]]|$)"
+}
+
+run_with_timeout_if_available() {
+  local timeout_secs="$1"
+  shift
+
+  if command -v timeout >/dev/null 2>&1; then
+    if timeout --help 2>&1 | grep -q -- '-k'; then
+      timeout -k 1 "${timeout_secs}" "$@"
+    else
+      timeout "${timeout_secs}" "$@"
+    fi
+  else
+    "$@"
+  fi
+}
+
+run_redis_preflight_cmd() {
+  local use_timeout_wrapper="$1"
+  local connect_timeout="$2"
+  shift 2
+
+  if [[ "${use_timeout_wrapper}" == "1" ]]; then
+    run_with_timeout_if_available "${connect_timeout}" "$@"
+  else
+    "$@"
+  fi
 }
 
 validate_interface_name() {

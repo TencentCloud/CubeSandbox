@@ -395,7 +395,43 @@ EOF
   if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
     if command -v redis-cli >/dev/null 2>&1; then
       log "checking connectivity to external Redis ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
+      local redis_help_output
       local redis_reply
+      local redis_base_cmd=()
+      local redis_timeout_args=()
+      local use_timeout_wrapper=0
+      local supports_redis_connect_timeout=0
+      local supports_redis_timeout=0
+      redis_help_output="$(redis_cli_help_output)"
+      if redis_cli_help_supports_flag "${redis_help_output}" "--connect-timeout"; then
+        redis_timeout_args+=(--connect-timeout "${connect_timeout}")
+        supports_redis_connect_timeout=1
+      fi
+      if redis_cli_help_supports_flag "${redis_help_output}" "--timeout"; then
+        redis_timeout_args+=(--timeout "${connect_timeout}")
+        supports_redis_timeout=1
+      fi
+      if [[ "${supports_redis_connect_timeout}" != "1" ]]; then
+        log "redis-cli does not support --connect-timeout; continuing without that client-side timeout bound"
+      fi
+      if [[ "${supports_redis_timeout}" != "1" ]]; then
+        log "redis-cli does not support --timeout; continuing without that client-side timeout bound"
+      fi
+      if [[ "${supports_redis_connect_timeout}" != "1" || "${supports_redis_timeout}" != "1" ]]; then
+        if command -v timeout >/dev/null 2>&1; then
+          # Some redis-cli builds lack one or both timeout flags. Bound the
+          # whole client process so connectivity preflight still fails fast.
+          use_timeout_wrapper=1
+        else
+          log "timeout command not found; Redis preflight may block longer when redis-cli lacks timeout flags"
+        fi
+      fi
+      redis_base_cmd=(
+        redis-cli
+        -h "${CUBE_EXTERNAL_REDIS_HOST}"
+        -p "${CUBE_EXTERNAL_REDIS_PORT}"
+        "${redis_timeout_args[@]}"
+      )
       if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
         # SECURITY: PING is NOT an authenticated command. A reachable server that
         # has no 'requirepass' set answers PONG even when a (wrong/extraneous)
@@ -407,15 +443,13 @@ EOF
         # The password is fed via stdin (`-x AUTH`) rather than as a command-line
         # argument so it is not exposed in /proc/<pid>/cmdline to other local
         # users; --no-auth-warning keeps redis-cli from echoing it on stderr.
-        # --connect-timeout bounds the TCP handshake; --timeout bounds Redis
-        # protocol I/O so a middlebox that accepts the socket but stalls the
-        # response (broken proxy / overloaded server) cannot hang this preflight
-        # indefinitely.
-        redis_reply="$(printf '%s' "${CUBE_EXTERNAL_REDIS_PASSWORD}" | redis-cli \
-          -h "${CUBE_EXTERNAL_REDIS_HOST}" \
-          -p "${CUBE_EXTERNAL_REDIS_PORT}" \
-          --connect-timeout "${connect_timeout}" \
-          --timeout "${connect_timeout}" \
+        # When the local redis-cli supports them, timeout flags bound the TCP
+        # handshake and Redis protocol I/O so a middlebox that accepts the
+        # socket but stalls the response cannot hang this preflight indefinitely.
+        redis_reply="$(printf '%s' "${CUBE_EXTERNAL_REDIS_PASSWORD}" | run_redis_preflight_cmd \
+          "${use_timeout_wrapper}" \
+          "${connect_timeout}" \
+          "${redis_base_cmd[@]}" \
           --no-auth-warning \
           -x AUTH 2>&1 || true)"
         if [[ "${redis_reply}" != "OK" ]]; then
@@ -424,11 +458,7 @@ EOF
         fi
       else
         local redis_pong
-        redis_pong="$(redis-cli \
-          -h "${CUBE_EXTERNAL_REDIS_HOST}" \
-          -p "${CUBE_EXTERNAL_REDIS_PORT}" \
-          --connect-timeout "${connect_timeout}" \
-          --timeout "${connect_timeout}" ping 2>/dev/null || true)"
+        redis_pong="$(run_redis_preflight_cmd "${use_timeout_wrapper}" "${connect_timeout}" "${redis_base_cmd[@]}" ping 2>/dev/null || true)"
         if [[ "${redis_pong}" != "PONG" ]]; then
           die "cannot reach external Redis at ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT} (PING did not return PONG).
   Verify CUBE_EXTERNAL_REDIS_HOST / _PORT and that the server is reachable from this host."
