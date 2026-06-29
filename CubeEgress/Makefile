@@ -1,8 +1,12 @@
-IMAGE_TAG              ?= latest
-IMAGE_LOCAL             := cube-egress
-CUBE_EGRESS_VERSION     ?= v1.0.0
-CUBE_EGRESS_COMMIT      ?= $(shell git rev-parse HEAD | cut -c1-8)
-CUBE_EGRESS_BUILD_TIME  ?= $(shell date +'%Y%m%d')
+IMAGE_TAG              ?= v0.4.0
+IMAGE_LOCAL            := cube-egress
+CUBE_EGRESS_VERSION    ?= v1.0.0
+CUBE_EGRESS_COMMIT     ?= $(shell git rev-parse HEAD | cut -c1-8)
+CUBE_EGRESS_BUILD_TIME ?= $(shell date +'%Y%m%d')
+
+# Target architecture; defaults to the host architecture.
+# Override with: make build ARCH=amd64  or  make build ARCH=arm64
+ARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
 IMAGES := \
 	cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-egress \
@@ -25,18 +29,35 @@ endif
 
 .PHONY: build
 build:
-	$(call msg,BUILD IMAGE $(IMAGE_LOCAL):$(IMAGE_TAG))
+	$(call msg,BUILD IMAGE $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH))
 	$(Q)docker build --rm $(QUIET) --network host \
+		--platform linux/$(ARCH) \
 		--build-arg CUBE_EGRESS_VERSION=$(CUBE_EGRESS_VERSION) \
 		--build-arg CUBE_EGRESS_COMMIT=$(CUBE_EGRESS_COMMIT) \
 		--build-arg CUBE_EGRESS_BUILD_TIME=$(CUBE_EGRESS_BUILD_TIME) \
-		-t $(IMAGE_LOCAL):$(IMAGE_TAG) \
+		-t $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH) \
 		.
 
+# Push the architecture-specific image to all registries.
+# Run `make push` on an amd64 host, then again on an arm64 host.
 .PHONY: push
 push: $(IMAGES)
 
 $(IMAGES):
-	$(call msg,TAG and PUSH $@)
-	$(Q)docker tag $(IMAGE_LOCAL):$(IMAGE_TAG) $@:$(IMAGE_TAG)
-	$(Q)docker push $(QUIET) $@:$(IMAGE_TAG)
+	$(call msg,TAG and PUSH $@:$(IMAGE_TAG)-$(ARCH))
+	$(Q)docker tag $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH) $@:$(IMAGE_TAG)-$(ARCH)
+	$(Q)docker push $(QUIET) $@:$(IMAGE_TAG)-$(ARCH)
+
+# Create and push multi-arch manifest lists for $(IMAGE_TAG) and `latest`.
+# Requires both amd64 and arm64 images to have been pushed to all registries first.
+.PHONY: manifest
+manifest:
+	$(Q)for image in $(IMAGES); do \
+		for tag in $(IMAGE_TAG) latest; do \
+			docker manifest create $$image:$$tag \
+				$$image:$(IMAGE_TAG)-amd64 \
+				$$image:$(IMAGE_TAG)-arm64; \
+			docker manifest push $$image:$$tag; \
+			docker manifest rm $$image:$$tag; \
+		done; \
+	done

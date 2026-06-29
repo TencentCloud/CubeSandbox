@@ -1,4 +1,4 @@
-FROM cube-egress/openresty:1.29.2.5-tproxy
+FROM cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/openresty-tproxy
 
 ARG CUBE_EGRESS_VERSION=0.0.0-dev
 ARG CUBE_EGRESS_COMMIT=unknown
