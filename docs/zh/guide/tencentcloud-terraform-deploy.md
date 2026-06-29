@@ -3,7 +3,7 @@
 本指南介绍如何使用发布包中自带的 Terraform 部署器，在腾讯云上一键拉起一个**集群版** Cube Sandbox：托管的 TKE 控制面运行 `cube-master` / `cube-api` / `cube-proxy` / `cube-webui`，后端使用云数据库 MySQL + Redis，并配备一个或多个 CVM PVM 计算节点。一台跳板机（SSH 端口为 `443`）作为构建主机和私有 VPC 的堡垒机。
 
 ::: tip 网络加固
-集群版的网络加固由**腾讯云安全组**完成：部署器按角色创建 **4 个独立安全组**（跳板机 / 计算节点 / TKE Pod / CLB），各自按最小权限放行（如对公网仅放行必要的入口，计算节点与 TKE 节点无任何公网入站），计算节点不分配公网 IP。如需进一步收紧，可在[腾讯云安全组控制台](https://console.cloud.tencent.com/vpc/securitygroup)按需对上述各个安全组（`cubesandbox-sg-jumpserver` / `cubesandbox-sg-compute` / `cubesandbox-sg-tke-pod` / `cubesandbox-sg-clb`）分别调整入站 / 出站规则。对于 WebUI / cube-api / cube-proxy 这三个对公网开放的服务，请额外参阅[公网服务加固建议](#公网服务加固建议)。
+集群版的网络加固由**腾讯云安全组**完成：部署器按角色创建 **4 个独立安全组**（跳板机 / 计算节点 / TKE Pod / CLB），各自按最小权限放行（如对公网仅放行必要的入口，计算节点与 TKE 节点无任何公网入站），计算节点不分配公网 IP。**默认采用内网模式**（`TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='false'`）：WebUI / cube-api / cube-proxy 三个用户侧服务关联**内网 CLB**，仅 VPC 内部（经跳板机 / VPN）可访问，不对公网暴露；如需公网访问，须显式设置 `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='true'` 切换为公网 CLB。如需进一步收紧，可在[腾讯云安全组控制台](https://console.cloud.tencent.com/vpc/securitygroup)按需对上述各个安全组（`cubesandbox-sg-jumpserver` / `cubesandbox-sg-compute` / `cubesandbox-sg-tke-pod` / `cubesandbox-sg-clb`）分别调整入站 / 出站规则。**当开启公网模式时**，请额外参阅[公网服务加固建议](#公网服务加固建议)。
 :::
 
 ::: tip 适用场景
@@ -96,18 +96,22 @@
 
 **4. `cubesandbox-sg-clb`（负载均衡 CLB）**
 
-| 端口 / 范围 | 来源 | 用途 |
+下表中 80 / 443 / 3000 三个入口的来源取决于 `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK`：**默认内网模式（`false`）**下来源为 VPC CIDR `10.0.0.0/16`，仅 VPC 内网可达；**开启公网模式（`true`）**时来源为 `0.0.0.0/0`，对公网开放。
+
+| 端口 / 范围 | 来源（内网模式 / 公网模式） | 用途 |
 |------------|------|------|
-| TCP 80 | `0.0.0.0/0` | cube-proxy + cube-webui 的 CLB（HTTP） |
-| TCP 443 | `0.0.0.0/0` | cube-proxy 的 CLB（HTTPS） |
-| TCP 3000 | `0.0.0.0/0` | cube-api 的 CLB（公网访问） |
-| TCP 8089 | `10.0.0.0/16`（仅 VPC 内网） | cube-master 的内网 CLB |
+| TCP 80 | `10.0.0.0/16` / `0.0.0.0/0` | cube-proxy + cube-webui 的 CLB（HTTP） |
+| TCP 443 | `10.0.0.0/16` / `0.0.0.0/0` | cube-proxy 的 CLB（HTTPS） |
+| TCP 3000 | `10.0.0.0/16` / `0.0.0.0/0` | cube-api 的 CLB |
+| TCP 8089 | `10.0.0.0/16`（始终仅 VPC 内网） | cube-master 的内网 CLB（不受公网开关影响） |
 
 四个安全组出站均默认放行全部（`0.0.0.0/0` ALL）。数据库、TKE API Server 等均**不开公网**，仅限 VPC 内网访问。
 
 ### 公网服务加固建议
 
-`cubesandbox-sg-clb` 默认对 `0.0.0.0/0` 放行 WebUI（80）、cube-proxy（80 / 443）与 cube-api（3000）三个公网入口。三者的安全模型不同，建议按服务分别加固：
+> 本节仅在**开启公网模式**（`TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='true'`）时适用。默认内网模式下三个服务均不对公网暴露，可跳过本节。
+
+开启公网模式后，`cubesandbox-sg-clb` 会对 `0.0.0.0/0` 放行 WebUI（80）、cube-proxy（80 / 443）与 cube-api（3000）三个公网入口。三者的安全模型不同，建议按服务分别加固：
 
 - **WebUI（CLB 80）**：WebUI 控制台**目前不带任何鉴权 / 权限控制**，任何能访问到它的人都能操作沙箱。强烈建议为 WebUI 的 CLB **单独创建一个安全组**，并在其中配置**严格的源 IP 白名单**（仅放行你的办公网 / 管理机出口 IP），而不是沿用对公网放行的 `cubesandbox-sg-clb`。可在[腾讯云安全组控制台](https://console.cloud.tencent.com/vpc/securitygroup)新建安全组后，绑定到 WebUI 对应的 CLB 实例。
 - **cube-api（CLB 3000）**：cube-api 默认**对所有请求放行、不做凭证校验**。对外暴露前请务必启用 **Auth Callback** 鉴权，把鉴权决策委托给你自己的鉴权服务，详见[鉴权配置](./authentication.md)。
@@ -168,6 +172,8 @@ export TENCENTCLOUD_CUBE_IMAGE_TAG=latest            # 四个组件镜像共用�
 
 ### 常用变量
 
+> 交互式运行 `create.sh` 时，"Deployment configuration" 阶段会逐项引导确认下列大部分配置（地域 / VPC / 机型 / 密码 / 镜像 tag 等），其中也包含**是否开启公网模式**的 `[y/N]` 询问（默认 N = 内网）。下表的变量可在运行前显式设置以跳过对应交互；无 TTY 的非交互运行则一律采用默认值。
+
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY` | 无 | **必填。** 腾讯云 API 凭证 |
@@ -187,6 +193,7 @@ export TENCENTCLOUD_CUBE_IMAGE_TAG=latest            # 四个组件镜像共用�
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `2` | cube-api 副本数（默认 2 = 高可用） |
 | `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy 副本数。**默认 1**：自动暂停 / 恢复仅单副本下正确；要 >1 须前端 LB 按 SandboxID hash |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `2` | cube-webui 副本数（默认 2 = 高可用） |
+| `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK` | `false` | cube-api / cube-proxy / cube-webui 的网络暴露模式。**默认 `false`**：关联内网 CLB，仅 VPC 内网（经跳板机 / VPN）可访问；设为 `true` 则关联公网 CLB，对公网开放，安全组同步放行 `0.0.0.0/0`。cube-master 始终为内网 CLB，不受此开关影响。开启公网前请阅读[公网服务加固建议](#公网服务加固建议) |
 
 ### 非交互 / CI 运行
 
@@ -220,7 +227,7 @@ export TENCENTCLOUD_BUILD_IMAGES=0        # 复用已推送的镜像
 | 云数据库 MySQL | `charge_type` | `POSTPAID` | 按量计费 |
 | 云数据库 Redis | `charge_type` | `POSTPAID` | 按量计费 |
 | NAT 网关 EIP | `internet_charge_type` | `TRAFFIC_POSTPAID_BY_HOUR` | 按流量按量 |
-| CLB（cube-proxy） | 注解 | `TRAFFIC_POSTPAID_BY_HOUR` | 按流量按量 |
+| CLB（cube-proxy） | 注解 | `TRAFFIC_POSTPAID_BY_HOUR` | 按流量按量（仅公网模式下生效；内网模式无此注解） |
 
 之所以默认使用按量计费，是因为本部署面向**快速评估**场景：用完即可通过 `destroy.sh`（即 `terraform destroy`）完全释放，避免持续计费。
 

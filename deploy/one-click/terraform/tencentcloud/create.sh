@@ -769,6 +769,10 @@ setup_env() {
 	[ -n "${TENCENTCLOUD_CUBE_API_REPLICAS:-}" ] && export TF_VAR_cube_api_replicas="$TENCENTCLOUD_CUBE_API_REPLICAS"
 	[ -n "${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-}" ] && export TF_VAR_cube_proxy_replicas="$TENCENTCLOUD_CUBE_PROXY_REPLICAS"
 	[ -n "${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-}" ] && export TF_VAR_cube_webui_replicas="$TENCENTCLOUD_CUBE_WEBUI_REPLICAS"
+	# Network exposure mode. Default (false) fronts cube-api/cube-proxy/cube-webui
+	# with VPC-internal CLBs; set to 'true' for public CLBs reachable from the
+	# internet (see the "Hardening the Public-Facing Services" doc section).
+	[ -n "${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-}" ] && export TF_VAR_enable_public_network="$TENCENTCLOUD_ENABLE_PUBLIC_NETWORK"
 	export TF_VAR_ssh_public_key_path="$SSH_PUB_KEY"
 	export TF_VAR_ssh_private_key_path="$SSH_PRI_KEY"
 
@@ -1596,6 +1600,34 @@ select_env_secret() {
 # ---------------------------------------------------------------
 prompt_deployment_env() {
 	banner "Deployment configuration"
+
+	# Network exposure mode for cube-api / cube-proxy / cube-webui. Asked FIRST
+	# because it is the most security-sensitive choice of the run. The default is
+	# internal (VPC-only) CLBs — the safe default with no public exposure.
+	# Runs before setup_env so the resolved value maps to TF_VAR_enable_public_network.
+	# An explicit TENCENTCLOUD_ENABLE_PUBLIC_NETWORK takes precedence and skips the
+	# prompt; a non-interactive shell keeps the internal default (variables.tf).
+	if [ -n "${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-}" ]; then
+		echo -e "  ${GREEN}✓ Public-network mode (from \$TENCENTCLOUD_ENABLE_PUBLIC_NETWORK): ${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK}${NC}"
+	elif [ -t 0 ]; then
+		echo -e "${YELLOW}Network exposure for cube-api / cube-proxy / cube-webui:${NC}"
+		echo -e "  ${YELLOW}- ${CYAN}No${YELLOW}  (default): VPC-internal CLBs, reachable only via the jumpserver / VPN (no public exposure).${NC}"
+		echo -e "  ${YELLOW}- ${CYAN}Yes${YELLOW}: PUBLIC CLBs reachable from the internet. WebUI ships with no auth and cube-api${NC}"
+		echo -e "  ${YELLOW}       passes all requests by default — harden them before exposing (see the deployment doc).${NC}"
+		local _pub
+		read -r -p "$(echo -e "${YELLOW}Expose these services via PUBLIC-network CLBs? [y/N]: ${NC}")" _pub
+		case "${_pub}" in
+		[Yy] | [Yy][Ee][Ss])
+			export TENCENTCLOUD_ENABLE_PUBLIC_NETWORK=true
+			echo -e "  ${GREEN}✓ Public-network mode: on ${YELLOW}(services will be reachable from the internet)${NC}"
+			;;
+		*)
+			export TENCENTCLOUD_ENABLE_PUBLIC_NETWORK=false
+			echo -e "  ${GREEN}✓ Public-network mode: off ${CYAN}(default; VPC-internal only)${NC}"
+			;;
+		esac
+	fi
+
 	select_env TENCENTCLOUD_REGION "Tencent Cloud region" \
 		"ap-guangzhou" "ap-shanghai" "ap-beijing" "ap-nanjing" "ap-chengdu" \
 		"ap-chongqing" "ap-hongkong" "ap-singapore" "ap-tokyo" "ap-seoul"
@@ -3931,6 +3963,7 @@ TENCENTCLOUD_CUBEMASTER_REPLICAS='${TENCENTCLOUD_CUBEMASTER_REPLICAS:-2}'
 TENCENTCLOUD_CUBE_API_REPLICAS='${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-2}}'
 TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_WEBUI_REPLICAS='${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-2}}'
+TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='${TF_VAR_enable_public_network:-${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-false}}'
 TENCENTCLOUD_LOCAL_BUNDLE='${LOCAL_BUNDLE:-${TENCENTCLOUD_LOCAL_BUNDLE:-}}'
 TENCENTCLOUD_PVM_KERNEL_VMLINUX='${PVM_KERNEL_VMLINUX:-${TENCENTCLOUD_PVM_KERNEL_VMLINUX:-}}'
 TENCENTCLOUD_VERBOSE='${VERBOSE:-1}'
@@ -4203,15 +4236,26 @@ print_cluster_operator_help() {
 	echo -e "      ${GREEN}cubesandbox-sg-jumpserver${NC} : jumpserver SSH 443 + VPC internal"
 	echo -e "      ${GREEN}cubesandbox-sg-compute${NC}    : TKE pod CIDR + VPC internal only (no public ingress)"
 	echo -e "      ${GREEN}cubesandbox-sg-tke-pod${NC}    : pod-to-pod + VPC internal only (no public ingress)"
-	echo -e "      ${GREEN}cubesandbox-sg-clb${NC}        : public service ports for the CLBs below"
-	echo -e "    All CLBs above share the CLB security group:"
-	echo -e "      ${GREEN}${clb_sg_id:-cubesandbox-sg-clb}${NC} (name: cubesandbox-sg-clb)"
-	echo -e "    Its inbound rules open to 0.0.0.0/0 (the whole internet):"
-	echo -e "      • 80   → cube-webui + cube-proxy (HTTP)"
-	echo -e "      • 443  → cube-proxy (HTTPS)"
-	echo -e "      • 3000 → cube-api"
-	echo -e "    VPC-internal only (not reachable from the internet):"
-	echo -e "      • 8089 → cube-master (internal CLB)"
+	if [ "${TF_VAR_enable_public_network:-false}" = "true" ]; then
+		echo -e "      ${GREEN}cubesandbox-sg-clb${NC}        : public service ports for the CLBs below"
+		echo -e "    All CLBs above share the CLB security group:"
+		echo -e "      ${GREEN}${clb_sg_id:-cubesandbox-sg-clb}${NC} (name: cubesandbox-sg-clb)"
+		echo -e "    Its inbound rules open to 0.0.0.0/0 (the whole internet):"
+		echo -e "      • 80   → cube-webui + cube-proxy (HTTP)"
+		echo -e "      • 443  → cube-proxy (HTTPS)"
+		echo -e "      • 3000 → cube-api"
+		echo -e "    VPC-internal only (not reachable from the internet):"
+		echo -e "      • 8089 → cube-master (internal CLB)"
+	else
+		echo -e "      ${GREEN}cubesandbox-sg-clb${NC}        : VPC-internal service ports for the CLBs below"
+		echo -e "    All CLBs above share the CLB security group:"
+		echo -e "      ${GREEN}${clb_sg_id:-cubesandbox-sg-clb}${NC} (name: cubesandbox-sg-clb)"
+		echo -e "    Its inbound rules are scoped to the VPC CIDR 10.0.0.0/16 (no public exposure):"
+		echo -e "      • 80   → cube-webui + cube-proxy (HTTP)"
+		echo -e "      • 443  → cube-proxy (HTTPS)"
+		echo -e "      • 3000 → cube-api"
+		echo -e "      • 8089 → cube-master"
+	fi
 	echo -e "    Jumpserver SSH 443 lives on cubesandbox-sg-jumpserver, not the CLB group."
 	echo ""
 }

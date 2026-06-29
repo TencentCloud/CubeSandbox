@@ -359,9 +359,14 @@ resource "tencentcloud_security_group" "clb" {
 resource "tencentcloud_security_group_rule_set" "clb" {
   security_group_id = tencentcloud_security_group.clb.id
 
+  # cube-proxy (80/443) + cube-webui (80) + cube-api (3000) front-end ingress.
+  # When enable_public_network is true the CLBs get public VIPs, so open these
+  # to the internet; when false (default) the CLBs are VPC-internal only, so
+  # scope the ingress to the VPC CIDR. Keep this in sync with the per-Service
+  # internal-subnetid annotations in tke-addons.tf.
   ingress {
     action      = "ACCEPT"
-    cidr_block  = "0.0.0.0/0"
+    cidr_block  = var.enable_public_network ? "0.0.0.0/0" : "10.0.0.0/16"
     protocol    = "TCP"
     port        = "80"
     description = "Allow CLB HTTP (cube-proxy + cube-webui)"
@@ -369,7 +374,7 @@ resource "tencentcloud_security_group_rule_set" "clb" {
 
   ingress {
     action      = "ACCEPT"
-    cidr_block  = "0.0.0.0/0"
+    cidr_block  = var.enable_public_network ? "0.0.0.0/0" : "10.0.0.0/16"
     protocol    = "TCP"
     port        = "443"
     description = "Allow CLB HTTPS (cube-proxy)"
@@ -377,7 +382,7 @@ resource "tencentcloud_security_group_rule_set" "clb" {
 
   ingress {
     action      = "ACCEPT"
-    cidr_block  = "0.0.0.0/0"
+    cidr_block  = var.enable_public_network ? "0.0.0.0/0" : "10.0.0.0/16"
     protocol    = "TCP"
     port        = "3000"
     description = "Allow cube-api CLB (jumpserver public access)"

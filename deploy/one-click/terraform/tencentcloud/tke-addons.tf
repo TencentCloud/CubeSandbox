@@ -456,11 +456,16 @@ resource "kubernetes_service" "cube_api" {
   metadata {
     name      = "cube-api"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
-    annotations = {
+    # When enable_public_network is false (default), pin the CLB to a
+    # VPC-internal subnet so it only gets a private VIP. When true, omit the
+    # internal-subnetid annotation so TKE provisions a public CLB.
+    annotations = merge({
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
       "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
-    }
+      }, var.enable_public_network ? {} : {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
+    })
   }
   lifecycle {
     ignore_changes = [
@@ -677,13 +682,18 @@ resource "kubernetes_service" "cube_proxy" {
   metadata {
     name      = "cube-proxy"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
-    annotations = {
+    # Public mode: a public CLB billed by traffic (internet-charge-type).
+    # Internal mode (default): pin to a VPC-internal subnet for a private VIP.
+    annotations = merge({
+      "service.cloud.tencent.com/specify-protocol"        = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]}}"
+      "service.cloud.tencent.com/modification-protection" = "false"
+      "service.cloud.tencent.com/pass-to-target"          = "true"
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
+      }, var.enable_public_network ? {
       "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
-      "service.cloud.tencent.com/specify-protocol"                     = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]}}"
-      "service.cloud.tencent.com/modification-protection"              = "false"
-      "service.cloud.tencent.com/pass-to-target"                       = "true"
-      "service.cloud.tencent.com/security-groups"                      = tencentcloud_security_group.clb.id
-    }
+      } : {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
+    })
   }
   lifecycle {
     ignore_changes = [
@@ -820,11 +830,16 @@ resource "kubernetes_service" "cube_webui" {
   metadata {
     name      = "cube-webui"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
-    annotations = {
+    # When enable_public_network is false (default), pin the CLB to a
+    # VPC-internal subnet so it only gets a private VIP. When true, omit the
+    # internal-subnetid annotation so TKE provisions a public CLB.
+    annotations = merge({
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
       "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
-    }
+      }, var.enable_public_network ? {} : {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
+    })
   }
   lifecycle {
     ignore_changes = [

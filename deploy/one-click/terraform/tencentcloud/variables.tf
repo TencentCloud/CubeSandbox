@@ -221,6 +221,26 @@ variable "deploy_tke_addons" {
   default     = true
 }
 
+# Network exposure mode for the three user-facing Services (cube-api /
+# cube-proxy / cube-webui).
+#
+#   false (default): each Service is fronted by a VPC-INTERNAL CLB (private VIP
+#     only, reachable from inside the VPC / via the jumpserver / VPN). The
+#     cubesandbox-sg-clb ingress for 80 / 443 / 3000 is scoped to the VPC CIDR
+#     instead of 0.0.0.0/0. This is the safe default: no public exposure.
+#   true: each Service is fronted by a PUBLIC CLB (public VIP reachable from the
+#     internet) and cubesandbox-sg-clb opens 80 / 443 / 3000 to 0.0.0.0/0. Opt
+#     into this only when you genuinely need public access, and read the
+#     "Hardening the Public-Facing Services" doc section first.
+#
+# cube-master is unaffected: it always uses a VPC-internal CLB regardless of
+# this flag.
+variable "enable_public_network" {
+  description = "Expose cube-api / cube-proxy / cube-webui through PUBLIC CLBs. false (default) = VPC-internal CLBs only (no public exposure); true = public CLBs reachable from the internet. cube-master always stays VPC-internal."
+  type        = bool
+  default     = false
+}
+
 variable "image_tag" {
   description = "Shared image tag for the Cube components (cube-master/cube-api/cube-proxy/cube-webui); must match the TAG built/pushed by build_images.sh"
   type        = string

@@ -3,7 +3,7 @@
 This guide explains how to use the Terraform deployer shipped in the release bundle to stand up a **clustered** Cube Sandbox on Tencent Cloud in one shot: a managed TKE control plane running `cube-master` / `cube-api` / `cube-proxy` / `cube-webui`, backed by cloud MySQL + Redis, with one or more CVM PVM compute nodes. A jumpserver (SSH on port `443`) acts as the build host and the bastion for the otherwise-private VPC.
 
 ::: tip Network Hardening
-Network hardening for the cluster deployment is handled by **Tencent Cloud security groups**: the deployer creates **4 per-role security groups** (jumpserver / compute / TKE pod / CLB), each opening only the ingress that role actually needs on a least-privilege basis (compute and TKE nodes get no public ingress at all), and assigns no public IP to compute nodes. To tighten further, adjust the inbound/outbound rules of each individual group (`cubesandbox-sg-jumpserver` / `cubesandbox-sg-compute` / `cubesandbox-sg-tke-pod` / `cubesandbox-sg-clb`) as needed in the [Tencent Cloud security group console](https://console.cloud.tencent.com/vpc/securitygroup). For the three public-facing services — WebUI / cube-api / cube-proxy — also see [Hardening the Public-Facing Services](#hardening-the-public-facing-services).
+Network hardening for the cluster deployment is handled by **Tencent Cloud security groups**: the deployer creates **4 per-role security groups** (jumpserver / compute / TKE pod / CLB), each opening only the ingress that role actually needs on a least-privilege basis (compute and TKE nodes get no public ingress at all), and assigns no public IP to compute nodes. **The default is internal mode** (`TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='false'`): the three user-facing services — WebUI / cube-api / cube-proxy — are fronted by **VPC-internal CLBs**, reachable only from inside the VPC (via the jumpserver / VPN) with no public exposure. To allow public access, explicitly set `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='true'` to switch them to public CLBs. To tighten further, adjust the inbound/outbound rules of each individual group (`cubesandbox-sg-jumpserver` / `cubesandbox-sg-compute` / `cubesandbox-sg-tke-pod` / `cubesandbox-sg-clb`) as needed in the [Tencent Cloud security group console](https://console.cloud.tencent.com/vpc/securitygroup). **When public mode is enabled**, also see [Hardening the Public-Facing Services](#hardening-the-public-facing-services).
 :::
 
 ::: tip When to use this
@@ -96,18 +96,22 @@ The deployer creates **4 per-role security groups** on a **least-privilege** bas
 
 **4. `cubesandbox-sg-clb` (load balancers)**
 
-| Port / Range | Source | Purpose |
+The source for the 80 / 443 / 3000 entrypoints below depends on `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK`: in the **default internal mode (`false`)** the source is the VPC CIDR `10.0.0.0/16` (VPC-internal only); in **public mode (`true`)** the source is `0.0.0.0/0` (open to the internet).
+
+| Port / Range | Source (internal / public mode) | Purpose |
 |--------------|--------|---------|
-| TCP 80 | `0.0.0.0/0` | CLB for cube-proxy + cube-webui (HTTP) |
-| TCP 443 | `0.0.0.0/0` | CLB for cube-proxy (HTTPS) |
-| TCP 3000 | `0.0.0.0/0` | CLB for cube-api (public access) |
-| TCP 8089 | `10.0.0.0/16` (VPC-internal only) | Internal CLB for cube-master |
+| TCP 80 | `10.0.0.0/16` / `0.0.0.0/0` | CLB for cube-proxy + cube-webui (HTTP) |
+| TCP 443 | `10.0.0.0/16` / `0.0.0.0/0` | CLB for cube-proxy (HTTPS) |
+| TCP 3000 | `10.0.0.0/16` / `0.0.0.0/0` | CLB for cube-api |
+| TCP 8089 | `10.0.0.0/16` (always VPC-internal only) | Internal CLB for cube-master (unaffected by the flag) |
 
 Egress allows all (`0.0.0.0/0` ALL) by default on every group. Databases, the TKE API server, etc. are **not exposed publicly** — VPC-internal access only.
 
 ### Hardening the Public-Facing Services
 
-By default `cubesandbox-sg-clb` opens three public entrypoints to `0.0.0.0/0`: WebUI (80), cube-proxy (80 / 443), and cube-api (3000). Their security models differ, so harden each one separately:
+> This section applies only when **public mode is enabled** (`TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='true'`). In the default internal mode none of the three services are exposed publicly, so you can skip it.
+
+With public mode enabled, `cubesandbox-sg-clb` opens three public entrypoints to `0.0.0.0/0`: WebUI (80), cube-proxy (80 / 443), and cube-api (3000). Their security models differ, so harden each one separately:
 
 - **WebUI (CLB 80):** the WebUI console currently ships **without any authentication or access control** — anyone who can reach it can operate sandboxes. Strongly consider creating a **dedicated security group** for the WebUI CLB and configuring a **strict source-IP allowlist** (only your office / management egress IPs) instead of reusing the publicly-open `cubesandbox-sg-clb`. Create the group in the [Tencent Cloud security group console](https://console.cloud.tencent.com/vpc/securitygroup) and bind it to the WebUI CLB instance.
 - **cube-api (CLB 3000):** cube-api **lets every request through without credential checks** by default. Before exposing it publicly, enable **Auth Callback** authentication to delegate authorization decisions to your own auth service — see [Authentication](./authentication.md).
@@ -168,6 +172,8 @@ export TENCENTCLOUD_CUBE_IMAGE_TAG=latest            # shared tag for the four i
 
 ### Common Variables
 
+> When running `create.sh` interactively, the "Deployment configuration" step walks you through most of the settings below (region / VPC / instance types / passwords / image tag, etc.), including a `[y/N]` prompt for **whether to enable public-network mode** (default N = internal). Set any of these variables beforehand to skip the matching prompt; a non-interactive run (no TTY) silently uses the defaults.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY` | none | **Required.** Tencent Cloud API credentials |
@@ -187,6 +193,7 @@ export TENCENTCLOUD_CUBE_IMAGE_TAG=latest            # shared tag for the four i
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `2` | cube-api replica count (default 2 = HA) |
 | `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy replica count. **Default 1**: auto-pause/auto-resume only works in single-replica mode. Going >1 requires the LB to hash on SandboxID |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `2` | cube-webui replica count (default 2 = HA) |
+| `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK` | `false` | Network exposure mode for cube-api / cube-proxy / cube-webui. **Default `false`**: VPC-internal CLBs, reachable only from inside the VPC (via jumpserver / VPN). Set to `true` for public CLBs reachable from the internet, with the security group opening `0.0.0.0/0` accordingly. cube-master always stays VPC-internal. Read [Hardening the Public-Facing Services](#hardening-the-public-facing-services) before enabling |
 
 ### Non-interactive / CI runs
 
@@ -220,7 +227,7 @@ The charge type of each resource is fixed as follows:
 | Cloud MySQL | `charge_type` | `POSTPAID` | Pay-as-you-go |
 | Cloud Redis | `charge_type` | `POSTPAID` | Pay-as-you-go |
 | NAT gateway EIP | `internet_charge_type` | `TRAFFIC_POSTPAID_BY_HOUR` | Pay by traffic |
-| CLB (cube-proxy) | annotation | `TRAFFIC_POSTPAID_BY_HOUR` | Pay by traffic |
+| CLB (cube-proxy) | annotation | `TRAFFIC_POSTPAID_BY_HOUR` | Pay by traffic (only in public mode; the annotation is absent in internal mode) |
 
 Pay-as-you-go is the default because this deployment targets **fast evaluation**: everything can be fully released with `destroy.sh` (`terraform destroy`) when you are done, avoiding ongoing charges.
 
