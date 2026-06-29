@@ -235,8 +235,14 @@ variable "deploy_tke_addons" {
 #
 # cube-master is unaffected: it always uses a VPC-internal CLB regardless of
 # this flag.
+#
+# IMPORTANT: Changing this value on an existing deployment will RECREATE the
+# affected CLB Services (cube-api / cube-proxy / cube-webui). Public↔internal
+# are fundamentally different CLB types, so Terraform destroys the old CLB and
+# provisions a new one — the VIP address will change. Update any DNS records or
+# client configurations that reference the old VIP after the apply completes.
 variable "enable_public_network" {
-  description = "Expose cube-api / cube-proxy / cube-webui through PUBLIC CLBs. false (default) = VPC-internal CLBs only (no public exposure); true = public CLBs reachable from the internet. cube-master always stays VPC-internal."
+  description = "Expose cube-api / cube-proxy / cube-webui through PUBLIC CLBs. false (default) = VPC-internal CLBs only (no public exposure); true = public CLBs reachable from the internet. cube-master always stays VPC-internal. WARNING: toggling this value recreates the CLB Services and changes the VIP addresses."
   type        = bool
   default     = false
 }

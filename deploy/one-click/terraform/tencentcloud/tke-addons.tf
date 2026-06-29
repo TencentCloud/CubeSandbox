@@ -371,6 +371,8 @@ resource "kubernetes_deployment" "cubemaster" {
 }
 
 # cube-master private-network CLB Service
+# NOTE: cubemaster always stays VPC-internal regardless of enable_public_network,
+# so it does NOT use replace_triggered_by — its CLB type never changes.
 resource "kubernetes_service" "cubemaster" {
   count = local.deploy_addons ? 1 : 0
   metadata {
@@ -384,6 +386,7 @@ resource "kubernetes_service" "cubemaster" {
     }
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations; ignore to avoid drift.
     ignore_changes = [
       metadata[0].annotations,
     ]
@@ -397,6 +400,19 @@ resource "kubernetes_service" "cubemaster" {
       port     = 8089
       protocol = "TCP"
     }
+  }
+}
+
+# ---------------------------------------------------------------
+# Network mode trigger — forces Service (CLB) recreation when
+# enable_public_network flips. Public↔internal requires a new CLB
+# instance (different type / different VIP), so recreation is the
+# correct behaviour. Without this, the lifecycle ignore_changes on
+# annotations would silently suppress the CLB type switch.
+# ---------------------------------------------------------------
+resource "null_resource" "network_mode_trigger" {
+  triggers = {
+    enable_public_network = tostring(var.enable_public_network)
   }
 }
 
@@ -468,8 +484,16 @@ resource "kubernetes_service" "cube_api" {
     })
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations (e.g. bindedip,
+    # loadbalanceId) that would otherwise cause perpetual drift on every plan.
     ignore_changes = [
       metadata[0].annotations,
+    ]
+    # Force Service (and hence CLB) recreation when the network mode flips.
+    # Public↔internal requires a brand-new CLB instance, so recreation is safe
+    # and expected — the VIP will change.
+    replace_triggered_by = [
+      null_resource.network_mode_trigger,
     ]
   }
 
@@ -696,8 +720,16 @@ resource "kubernetes_service" "cube_proxy" {
     })
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations (e.g. bindedip,
+    # loadbalanceId) that would otherwise cause perpetual drift on every plan.
     ignore_changes = [
       metadata[0].annotations,
+    ]
+    # Force Service (and hence CLB) recreation when the network mode flips.
+    # Public↔internal requires a brand-new CLB instance, so recreation is safe
+    # and expected — the VIP will change.
+    replace_triggered_by = [
+      null_resource.network_mode_trigger,
     ]
   }
 
@@ -842,8 +874,16 @@ resource "kubernetes_service" "cube_webui" {
     })
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations (e.g. bindedip,
+    # loadbalanceId) that would otherwise cause perpetual drift on every plan.
     ignore_changes = [
       metadata[0].annotations,
+    ]
+    # Force Service (and hence CLB) recreation when the network mode flips.
+    # Public↔internal requires a brand-new CLB instance, so recreation is safe
+    # and expected — the VIP will change.
+    replace_triggered_by = [
+      null_resource.network_mode_trigger,
     ]
   }
 
