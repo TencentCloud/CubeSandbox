@@ -43,18 +43,18 @@ type Config struct {
 }
 
 type CommonConf struct {
-	MockUpdateAction                bool              `yaml:"mock_update_action"`
-	DebugDumpHttpBody               bool              `yaml:"debug_dump_http_body"`
-	MockDebug                       bool              `yaml:"mock_debug"`
-	MockNodeNum                     int               `yaml:"mock_node_num"`
-	MockCreateDirect                bool              `yaml:"mock_create_direct"`
-	MockCreateDirectHandle          bool              `yaml:"mock_create_direct_handle"`
-	MockHttpDirect                  bool              `yaml:"mock_http_direct"`
-	MockCreateSleep                 time.Duration     `yaml:"mock_create_sleep"`
-	MockPercents                    []float64         `yaml:"mock_percents"`
-	CubeDestroyCheckFilter          bool              `yaml:"cube_destroy_check_filter"`
-	Debug                           Debug             `toml:"debug"`
-	HttpPort                        int               `yaml:"http_port"`
+	MockUpdateAction       bool          `yaml:"mock_update_action"`
+	DebugDumpHttpBody      bool          `yaml:"debug_dump_http_body"`
+	MockDebug              bool          `yaml:"mock_debug"`
+	MockNodeNum            int           `yaml:"mock_node_num"`
+	MockCreateDirect       bool          `yaml:"mock_create_direct"`
+	MockCreateDirectHandle bool          `yaml:"mock_create_direct_handle"`
+	MockHttpDirect         bool          `yaml:"mock_http_direct"`
+	MockCreateSleep        time.Duration `yaml:"mock_create_sleep"`
+	MockPercents           []float64     `yaml:"mock_percents"`
+	CubeDestroyCheckFilter bool          `yaml:"cube_destroy_check_filter"`
+	Debug                  Debug         `toml:"debug"`
+	HttpPort               int           `yaml:"http_port"`
 	// HttpBind is the HTTP listen address. Empty means 0.0.0.0 (all
 	// interfaces); set to 127.0.0.1 to keep the API loopback-only.
 	HttpBind                        string            `yaml:"http_bind"`
