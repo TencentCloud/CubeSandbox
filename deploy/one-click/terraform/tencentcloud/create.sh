@@ -4672,14 +4672,14 @@ main() {
 	#   dependencies; everything else attaches to this network.
 	# ============================================================
 	_apply_phase "Step: Configure subnet + NAT gateway" \
-		tencentcloud_subnet.demo \
-		tencentcloud_nat_gateway.demo \
+		tencentcloud_subnet.cluster \
+		tencentcloud_nat_gateway.cluster \
 		tencentcloud_route_table_entry.nat \
 		tencentcloud_security_group_rule_set.jumpserver \
 		tencentcloud_security_group_rule_set.compute \
 		tencentcloud_security_group_rule_set.tke_pod \
 		tencentcloud_security_group_rule_set.clb \
-		tencentcloud_key_pair.demo || {
+		tencentcloud_key_pair.cluster || {
 		echo -e "${RED}✗ Network provisioning failed; aborting deployment.${NC}"
 		exit 1
 	}
@@ -4688,9 +4688,9 @@ main() {
 	# Step 2/9 — TCR (container registry) service
 	# ============================================================
 	_apply_phase "Step: Configure TCR service" \
-		tencentcloud_tcr_vpc_attachment.demo \
-		tencentcloud_tcr_namespace.demo \
-		tencentcloud_tcr_token.demo || {
+		tencentcloud_tcr_vpc_attachment.cluster \
+		tencentcloud_tcr_namespace.cluster \
+		tencentcloud_tcr_token.cluster || {
 		echo -e "${RED}✗ TCR provisioning failed; aborting deployment.${NC}"
 		exit 1
 	}

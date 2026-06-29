@@ -9,8 +9,8 @@ locals {
   # deploying the addons, create.sh calls build_images.sh to build and push these
   # four images to that TCR. Override with var.image_registry / var.image_namespace
   # (e.g. to reuse a public image source).
-  image_registry    = var.image_registry != "" ? var.image_registry : "${tencentcloud_tcr_instance.demo.name}.tencentcloudcr.com"
-  image_namespace   = var.image_namespace != "" ? var.image_namespace : tencentcloud_tcr_namespace.demo.name
+  image_registry    = var.image_registry != "" ? var.image_registry : "${tencentcloud_tcr_instance.cluster.name}.tencentcloudcr.com"
+  image_namespace   = var.image_namespace != "" ? var.image_namespace : tencentcloud_tcr_namespace.cluster.name
   cube_master_image = "${local.image_registry}/${local.image_namespace}/cubemaster:${var.image_tag}"
   cube_api_image    = "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
   cube_proxy_image  = "${local.image_registry}/${local.image_namespace}/cubeproxy:${var.image_tag}"
@@ -78,7 +78,7 @@ resource "local_file" "tke_kubeconfig" {
 # ---------------------------------------------------------------
 resource "kubernetes_namespace" "cubesandbox" {
   count      = local.deploy_addons ? 1 : 0
-  depends_on = [tencentcloud_tcr_instance.demo, tencentcloud_tcr_namespace.demo]
+  depends_on = [tencentcloud_tcr_instance.cluster, tencentcloud_tcr_namespace.cluster]
   metadata {
     name = "cubesandbox"
   }
@@ -377,7 +377,7 @@ resource "kubernetes_service" "cubemaster" {
     name      = "cubemaster"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
     annotations = {
-      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
       "service.cloud.tencent.com/modification-protection"           = "false"
       "service.cloud.tencent.com/pass-to-target"                    = "true"
       "service.cloud.tencent.com/security-groups"                   = tencentcloud_security_group.clb.id
@@ -464,7 +464,7 @@ resource "kubernetes_service" "cube_api" {
       "service.cloud.tencent.com/pass-to-target"          = "true"
       "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
       }, var.enable_public_network ? {} : {
-      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
     })
   }
   lifecycle {
@@ -692,7 +692,7 @@ resource "kubernetes_service" "cube_proxy" {
       }, var.enable_public_network ? {
       "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
       } : {
-      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
     })
   }
   lifecycle {
@@ -838,7 +838,7 @@ resource "kubernetes_service" "cube_webui" {
       "service.cloud.tencent.com/pass-to-target"          = "true"
       "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
       }, var.enable_public_network ? {} : {
-      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
     })
   }
   lifecycle {

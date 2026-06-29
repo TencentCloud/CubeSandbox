@@ -29,10 +29,10 @@
 #   --push | PUSH=1            also `docker push` each image after building
 #   TAG=...                    shared image tag for ALL four images (default latest)
 #   REGISTRY=...               registry host (default cube-sandbox-image.tencentcloudcr.com)
-#   NAMESPACE=...              registry namespace (default demo for standalone use).
+#   NAMESPACE=...              registry namespace (default cluster for standalone use).
 #                              When pushing to the TCR created by this deployment,
 #                              create.sh passes the Terraform namespace
-#                              (`cubesandbox-demo`, from `terraform output
+#                              (`cubesandbox-cluster`, from `terraform output
 #                              tcr_namespace`); set NAMESPACE to match for manual runs.
 #   CUBE_API_IMAGE=...         fully-qualified ref overrides (per component);
 #   CUBE_MASTER_IMAGE=...      default to ${REGISTRY}/${NAMESPACE}/<name>:${TAG},
@@ -63,7 +63,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 REGISTRY="${REGISTRY:-cube-sandbox-image.tencentcloudcr.com}"
-NAMESPACE="${NAMESPACE:-demo}"
+NAMESPACE="${NAMESPACE:-cluster}"
 # One shared, externally overridable tag for all four component images. Keep in
 # sync with terraform/tencentcloud (var.image_tag) so the default TKE deployment
 # consumes exactly what this script builds.

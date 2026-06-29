@@ -159,11 +159,11 @@ locals {
   # regions it must fall back to a single-zone deployment or the apply fails.
   mysql_multi_az = length(local.available_zones) > 1
 
-  jumpserver_subnet_id = local.jumpserver_zone == local.primary_zone ? tencentcloud_subnet.demo.id : tencentcloud_subnet.cvm[local.jumpserver_zone].id
-  tke_worker_subnet_id = local.tke_worker_zone == local.primary_zone ? tencentcloud_subnet.demo.id : tencentcloud_subnet.cvm[local.tke_worker_zone].id
+  jumpserver_subnet_id = local.jumpserver_zone == local.primary_zone ? tencentcloud_subnet.cluster.id : tencentcloud_subnet.cvm[local.jumpserver_zone].id
+  tke_worker_subnet_id = local.tke_worker_zone == local.primary_zone ? tencentcloud_subnet.cluster.id : tencentcloud_subnet.cvm[local.tke_worker_zone].id
 
   tke_node_pool_subnet_ids = distinct(compact([
-    tencentcloud_subnet.demo.id,
+    tencentcloud_subnet.cluster.id,
     local.tke_worker_zone != local.primary_zone ? tencentcloud_subnet.cvm[local.tke_worker_zone].id : "",
   ]))
 }
@@ -172,8 +172,8 @@ locals {
 # SSH key: automatically reads the local ./.ssh/id_rsa.pub
 ########################
 
-resource "tencentcloud_key_pair" "demo" {
-  key_name   = "cubesandbox_demo_${random_string.deploy_suffix.result}"
+resource "tencentcloud_key_pair" "cluster" {
+  key_name   = "cubesandbox_cluster_${random_string.deploy_suffix.result}"
   public_key = file(pathexpand(var.ssh_public_key_path))
 }
 
@@ -181,14 +181,14 @@ resource "tencentcloud_key_pair" "demo" {
 # Network
 ########################
 
-resource "tencentcloud_vpc" "demo" {
+resource "tencentcloud_vpc" "cluster" {
   name       = var.vpc_name
   cidr_block = "10.0.0.0/16"
 }
 
-resource "tencentcloud_subnet" "demo" {
-  vpc_id            = tencentcloud_vpc.demo.id
-  name              = "cubesandbox-demo-subnet"
+resource "tencentcloud_subnet" "cluster" {
+  vpc_id            = tencentcloud_vpc.cluster.id
+  name              = "cubesandbox-cluster-subnet"
   cidr_block        = "10.0.1.0/24"
   availability_zone = local.primary_zone
 }
@@ -197,7 +197,7 @@ resource "tencentcloud_subnet" "demo" {
 resource "tencentcloud_subnet" "cvm" {
   for_each = local.cvm_subnet_cidrs
 
-  vpc_id            = tencentcloud_vpc.demo.id
+  vpc_id            = tencentcloud_vpc.cluster.id
   name              = "cubesandbox-cvm-${replace(each.key, "-", "")}"
   cidr_block        = each.value
   availability_zone = each.key
@@ -213,9 +213,9 @@ resource "tencentcloud_eip" "nat" {
   internet_max_bandwidth_out = 200
 }
 
-resource "tencentcloud_nat_gateway" "demo" {
+resource "tencentcloud_nat_gateway" "cluster" {
   name             = "cubesandbox-nat"
-  vpc_id           = tencentcloud_vpc.demo.id
+  vpc_id           = tencentcloud_vpc.cluster.id
   bandwidth        = 200
   max_concurrent   = 1000000
   assigned_eip_set = [tencentcloud_eip.nat.public_ip]
@@ -223,10 +223,10 @@ resource "tencentcloud_nat_gateway" "demo" {
 
 # Route: 0.0.0.0/0 → NAT gateway
 resource "tencentcloud_route_table_entry" "nat" {
-  route_table_id         = tencentcloud_vpc.demo.default_route_table_id
+  route_table_id         = tencentcloud_vpc.cluster.default_route_table_id
   destination_cidr_block = "0.0.0.0/0"
   next_type              = "NAT"
-  next_hub               = tencentcloud_nat_gateway.demo.id
+  next_hub               = tencentcloud_nat_gateway.cluster.id
 }
 
 ########################
@@ -444,8 +444,8 @@ resource "tencentcloud_cfs_file_system" "cubemaster_data" {
   access_group_id   = tencentcloud_cfs_access_group.cubemaster_data.id
   protocol          = "NFS"
   storage_type      = "SD"
-  vpc_id            = tencentcloud_vpc.demo.id
-  subnet_id         = tencentcloud_subnet.demo.id
+  vpc_id            = tencentcloud_vpc.cluster.id
+  subnet_id         = tencentcloud_subnet.cluster.id
 }
 
 ########################
@@ -471,8 +471,8 @@ resource "tencentcloud_mysql_instance" "mysql" {
   slave_deploy_mode = local.mysql_multi_az ? 1 : 0 # 1 = multi-AZ, 0 = single-AZ
   slave_sync_mode   = 1                            # semi-sync
 
-  vpc_id        = tencentcloud_vpc.demo.id
-  subnet_id     = tencentcloud_subnet.demo.id
+  vpc_id        = tencentcloud_vpc.cluster.id
+  subnet_id     = tencentcloud_subnet.cluster.id
   intranet_port = 3306
 
   parameters = {
@@ -562,8 +562,8 @@ resource "tencentcloud_redis_instance" "redis" {
   availability_zone = local.primary_zone
   type_id           = 9 # Redis 7.0 standard architecture (master/replica)
   mem_size          = var.redis_mem_size
-  vpc_id            = tencentcloud_vpc.demo.id
-  subnet_id         = tencentcloud_subnet.demo.id
+  vpc_id            = tencentcloud_vpc.cluster.id
+  subnet_id         = tencentcloud_subnet.cluster.id
   charge_type       = "POSTPAID"
   port              = 6379
   password          = var.redis_password
@@ -579,18 +579,18 @@ resource "tencentcloud_redis_instance" "redis" {
 
 resource "tencentcloud_kubernetes_cluster" "tke" {
   count      = var.create_tke ? 1 : 0
-  depends_on = [tencentcloud_tcr_instance.demo, tencentcloud_tcr_namespace.demo]
+  depends_on = [tencentcloud_tcr_instance.cluster, tencentcloud_tcr_namespace.cluster]
 
   cluster_name               = var.tke_cluster_name
   cluster_version            = var.tke_cluster_version
   cluster_cidr               = var.tke_cluster_cidr
   service_cidr               = var.tke_service_cidr
-  vpc_id                     = tencentcloud_vpc.demo.id
+  vpc_id                     = tencentcloud_vpc.cluster.id
   cluster_deploy_type        = "MANAGED_CLUSTER"
   cluster_level              = "L20"
   cluster_internet           = false # kube-apiserver: NO public-network access
   cluster_intranet           = true  # kube-apiserver: intranet (VPC-internal) access only
-  cluster_intranet_subnet_id = tencentcloud_subnet.demo.id
+  cluster_intranet_subnet_id = tencentcloud_subnet.cluster.id
   cluster_max_pod_num        = 256
   cluster_max_service_num    = 4096 # matches the number of IPs in service_cidr /20
   network_type               = "GR"
@@ -608,7 +608,7 @@ resource "tencentcloud_kubernetes_cluster" "tke" {
     subnet_id          = local.tke_worker_subnet_id
     public_ip_assigned = false
     security_group_ids = [tencentcloud_security_group.tke_pod.id]
-    key_ids            = [tencentcloud_key_pair.demo.id]
+    key_ids            = [tencentcloud_key_pair.cluster.id]
   }
 
   tags = {
@@ -621,7 +621,7 @@ resource "tencentcloud_kubernetes_node_pool" "tke" {
 
   name       = "${var.tke_cluster_name}-pool"
   cluster_id = tencentcloud_kubernetes_cluster.tke[0].id
-  vpc_id     = tencentcloud_vpc.demo.id
+  vpc_id     = tencentcloud_vpc.cluster.id
   subnet_ids = local.tke_node_pool_subnet_ids
 
   max_size            = var.tke_node_count + 2
@@ -635,7 +635,7 @@ resource "tencentcloud_kubernetes_node_pool" "tke" {
     system_disk_size           = 50
     orderly_security_group_ids = [tencentcloud_security_group.tke_pod.id]
     public_ip_assigned         = false
-    key_ids                    = [tencentcloud_key_pair.demo.id]
+    key_ids                    = [tencentcloud_key_pair.cluster.id]
   }
 
   tags = {
@@ -647,7 +647,7 @@ resource "tencentcloud_kubernetes_node_pool" "tke" {
 # Tencent Container Registry (TCR)
 ########################
 
-resource "tencentcloud_tcr_instance" "demo" {
+resource "tencentcloud_tcr_instance" "cluster" {
   name          = "cubesandbox-${random_string.deploy_suffix.result}"
   instance_type = "basic"
   # Delete the auto-created COS backend bucket together with the instance so a
@@ -662,37 +662,37 @@ resource "tencentcloud_tcr_instance" "demo" {
   }
 }
 
-resource "tencentcloud_tcr_namespace" "demo" {
-  instance_id = tencentcloud_tcr_instance.demo.id
-  name        = "cubesandbox-demo"
+resource "tencentcloud_tcr_namespace" "cluster" {
+  instance_id = tencentcloud_tcr_instance.cluster.id
+  name        = "cubesandbox-cluster"
   is_public   = true
 }
 
 # VPC private-network access
-resource "tencentcloud_tcr_vpc_attachment" "demo" {
-  instance_id              = tencentcloud_tcr_instance.demo.id
-  vpc_id                   = tencentcloud_vpc.demo.id
-  subnet_id                = tencentcloud_subnet.demo.id
+resource "tencentcloud_tcr_vpc_attachment" "cluster" {
+  instance_id              = tencentcloud_tcr_instance.cluster.id
+  vpc_id                   = tencentcloud_vpc.cluster.id
+  subnet_id                = tencentcloud_subnet.cluster.id
   enable_public_domain_dns = true
   enable_vpc_domain_dns    = true
 }
 
 # Long-lived access token (used for docker login)
-resource "tencentcloud_tcr_token" "demo" {
-  instance_id = tencentcloud_tcr_instance.demo.id
+resource "tencentcloud_tcr_token" "cluster" {
+  instance_id = tencentcloud_tcr_instance.cluster.id
   description = "CubeSandbox deploy token"
 }
 
 # Write the TCR token onto the jumpserver for docker login
 resource "null_resource" "tcr_token_deploy" {
-  depends_on = [tencentcloud_tcr_token.demo, tencentcloud_instance.jumpserver]
+  depends_on = [tencentcloud_tcr_token.cluster, tencentcloud_instance.jumpserver]
 
   # Re-push the token when it is rotated (new token id) or the jumpserver is
   # replaced (new id) — otherwise the regenerated token would never reach
   # /root/.tcr_token and the later docker login / image build would fail with a
   # confusing auth error. Mirrors null_resource.mysql_init_db's trigger guard.
   triggers = {
-    tcr_token_id  = tencentcloud_tcr_token.demo.id
+    tcr_token_id  = tencentcloud_tcr_token.cluster.id
     jumpserver_id = tencentcloud_instance.jumpserver.id
   }
 
@@ -702,7 +702,7 @@ resource "null_resource" "tcr_token_deploy" {
     # rendered plan command, then pipe it over stdin to the jump-server (read back
     # by $(cat)) so it never appears in the remote argv / `ps` output (CWE-214).
     environment = {
-      TCR_TOKEN = tencentcloud_tcr_token.demo.token
+      TCR_TOKEN = tencentcloud_tcr_token.cluster.token
     }
     # The jumpserver runs cloud-init on first boot (switching SSH to port 443),
     # which can take a few minutes. Retry until the token lands instead of
@@ -738,7 +738,7 @@ resource "tencentcloud_instance" "jumpserver" {
   image_id          = data.tencentcloud_images.default.images.0.image_id
   instance_type     = var.jumpserver_instance_type
 
-  vpc_id    = tencentcloud_vpc.demo.id
+  vpc_id    = tencentcloud_vpc.cluster.id
   subnet_id = local.jumpserver_subnet_id
 
   instance_charge_type = "POSTPAID_BY_HOUR"
@@ -750,7 +750,7 @@ resource "tencentcloud_instance" "jumpserver" {
   allocate_public_ip         = true
   internet_max_bandwidth_out = 200
 
-  key_ids = [tencentcloud_key_pair.demo.id]
+  key_ids = [tencentcloud_key_pair.cluster.id]
 
   orderly_security_groups = [tencentcloud_security_group.jumpserver.id]
 
@@ -795,10 +795,10 @@ resource "tencentcloud_instance" "compute" {
   image_id          = data.tencentcloud_images.default.images.0.image_id
   instance_type     = local.compute_types[count.index]
 
-  vpc_id = tencentcloud_vpc.demo.id
+  vpc_id = tencentcloud_vpc.cluster.id
   subnet_id = (
     local.compute_zones[count.index] == local.primary_zone ?
-    tencentcloud_subnet.demo.id :
+    tencentcloud_subnet.cluster.id :
     tencentcloud_subnet.cvm[local.compute_zones[count.index]].id
   )
 
@@ -864,7 +864,7 @@ resource "tencentcloud_instance" "compute" {
   # Private network only (accessed through the jumpserver)
   allocate_public_ip = false
 
-  key_ids = [tencentcloud_key_pair.demo.id]
+  key_ids = [tencentcloud_key_pair.cluster.id]
 
   orderly_security_groups = [tencentcloud_security_group.compute.id]
 }
@@ -884,7 +884,7 @@ output "security_group_ids" {
 }
 
 output "subnet_id" {
-  value = tencentcloud_subnet.demo.id
+  value = tencentcloud_subnet.cluster.id
 }
 
 # Jumpserver
@@ -902,22 +902,22 @@ output "jumpserver_ssh_command" {
 
 # TCR outputs
 output "tcr_id" {
-  value = tencentcloud_tcr_instance.demo.id
+  value = tencentcloud_tcr_instance.cluster.id
 }
 
 output "tcr_registry_name" {
-  value = "${tencentcloud_tcr_instance.demo.name}.tencentcloudcr.com"
+  value = "${tencentcloud_tcr_instance.cluster.name}.tencentcloudcr.com"
 }
 output "tcr_registry_url" {
-  value = "${tencentcloud_tcr_instance.demo.name}.tencentcloudcr.com/${tencentcloud_tcr_namespace.demo.name}"
+  value = "${tencentcloud_tcr_instance.cluster.name}.tencentcloudcr.com/${tencentcloud_tcr_namespace.cluster.name}"
 }
 
 output "tcr_namespace" {
-  value = tencentcloud_tcr_namespace.demo.name
+  value = tencentcloud_tcr_namespace.cluster.name
 }
 
 output "tcr_token_user" {
-  value     = tencentcloud_tcr_token.demo.user_name
+  value     = tencentcloud_tcr_token.cluster.user_name
   sensitive = true
 }
 

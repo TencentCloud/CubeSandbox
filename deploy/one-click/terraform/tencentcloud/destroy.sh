@@ -567,7 +567,7 @@ destroy_tcr() {
 		echo -e "  ${CYAN}No TCR instance id; nothing to delete via tccli.${NC}"
 		return 1
 	}
-	[ -z "$ns" ] && ns="cubesandbox-demo"
+	[ -z "$ns" ] && ns="cubesandbox-cluster"
 
 	# A tccli runner is required (the repos/bucket cannot be removed any other
 	# way). Without one, print the manual commands and let the caller fall back.
@@ -679,10 +679,10 @@ tcr_state_prune() {
 	local _res
 	for _res in \
 		null_resource.tcr_token_deploy \
-		tencentcloud_tcr_token.demo \
-		tencentcloud_tcr_vpc_attachment.demo \
-		tencentcloud_tcr_namespace.demo \
-		tencentcloud_tcr_instance.demo; do
+		tencentcloud_tcr_token.cluster \
+		tencentcloud_tcr_vpc_attachment.cluster \
+		tencentcloud_tcr_namespace.cluster \
+		tencentcloud_tcr_instance.cluster; do
 		if in_state "$_res"; then
 			echo -e "    ${CYAN}terraform state rm ${_res}${NC}"
 			terraform state rm "$_res" >/dev/null 2>&1 || true
@@ -797,9 +797,9 @@ REGION="${TENCENTCLOUD_REGION:-${TF_VAR_region:-ap-guangzhou}}"
 TCR_INSTANCE_ID="$(terraform output -raw tcr_id 2>/dev/null || echo '')"
 TCR_NAMESPACE="$(terraform output -raw tcr_namespace 2>/dev/null || echo '')"
 if [ -z "$TCR_INSTANCE_ID" ]; then
-	TCR_INSTANCE_ID="$(terraform state show tencentcloud_tcr_instance.demo 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
+	TCR_INSTANCE_ID="$(terraform state show tencentcloud_tcr_instance.cluster 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
 fi
-[ -z "$TCR_NAMESPACE" ] && TCR_NAMESPACE="cubesandbox-demo"
+[ -z "$TCR_NAMESPACE" ] && TCR_NAMESPACE="cubesandbox-cluster"
 
 # Capture the TKE cluster's worker-node CVM IDs while the cluster still exists, so
 # the orphaned node-pool workers (kept on node-pool delete) can be terminated later.
@@ -817,20 +817,20 @@ echo -e "  ${CYAN}Resolving VPC id from terraform state...${NC}"
 # the VPC can be terminated before the security group is deleted, while keeping the
 # jumpserver until the very end.
 _TF_JSON="$(terraform show -json 2>/dev/null || true)"
-VPC_ID="$(echo "$_TF_JSON" | jq -r '.values.root_module.resources[]? | select(.address=="tencentcloud_vpc.demo") | .values.id' 2>/dev/null | head -n1 || true)"
+VPC_ID="$(echo "$_TF_JSON" | jq -r '.values.root_module.resources[]? | select(.address=="tencentcloud_vpc.cluster") | .values.id' 2>/dev/null | head -n1 || true)"
 JS_INSTANCE_ID="$(echo "$_TF_JSON" | jq -r '.values.root_module.resources[]? | select(.address=="tencentcloud_instance.jumpserver") | .values.id' 2>/dev/null | head -n1 || true)"
-NAT_GATEWAY_ID="$(echo "$_TF_JSON" | jq -r '.values.root_module.resources[]? | select(.address=="tencentcloud_nat_gateway.demo") | .values.id' 2>/dev/null | head -n1 || true)"
+NAT_GATEWAY_ID="$(echo "$_TF_JSON" | jq -r '.values.root_module.resources[]? | select(.address=="tencentcloud_nat_gateway.cluster") | .values.id' 2>/dev/null | head -n1 || true)"
 unset _TF_JSON
 # Fallbacks: parse the resource id straight from the state if the JSON path above
 # did not resolve it (so the VPC CVM sweep is never silently skipped).
 if [ -z "$VPC_ID" ]; then
-	VPC_ID="$(terraform state show tencentcloud_vpc.demo 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
+	VPC_ID="$(terraform state show tencentcloud_vpc.cluster 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
 fi
 if [ -z "$JS_INSTANCE_ID" ]; then
 	JS_INSTANCE_ID="$(terraform state show tencentcloud_instance.jumpserver 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
 fi
 if [ -z "$NAT_GATEWAY_ID" ]; then
-	NAT_GATEWAY_ID="$(terraform state show tencentcloud_nat_gateway.demo 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
+	NAT_GATEWAY_ID="$(terraform state show tencentcloud_nat_gateway.cluster 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
 fi
 
 # Teardown status: which resources are still tracked in state (→ will be
@@ -841,9 +841,9 @@ echo -e "  ${CYAN}Teardown status (present → will be destroyed; absent → alr
 _td_status "MySQL      " tencentcloud_mysql_instance.mysql "$MYSQL_ID"
 _td_status "Redis      " tencentcloud_redis_instance.redis "$REDIS_ID"
 _td_status "Compute    " tencentcloud_instance.compute ""
-_td_status "TCR        " tencentcloud_tcr_instance.demo "$TCR_INSTANCE_ID" "namespace=${TCR_NAMESPACE}"
-_td_status "NAT gateway" tencentcloud_nat_gateway.demo "$NAT_GATEWAY_ID"
-_td_status "VPC        " tencentcloud_vpc.demo "$VPC_ID"
+_td_status "TCR        " tencentcloud_tcr_instance.cluster "$TCR_INSTANCE_ID" "namespace=${TCR_NAMESPACE}"
+_td_status "NAT gateway" tencentcloud_nat_gateway.cluster "$NAT_GATEWAY_ID"
+_td_status "VPC        " tencentcloud_vpc.cluster "$VPC_ID"
 _td_status "jumpserver " tencentcloud_instance.jumpserver "${JS_INSTANCE_ID:-$JS_IP}" "(destroyed last — kept for cleanup)"
 
 # ============================================================
@@ -1041,7 +1041,7 @@ terminate_vpc_cvms "$VPC_ID" "$JS_INSTANCE_ID" || echo -e "${YELLOW}⚠ VPC CVM 
 # so do it here via tccli for the same reason as the recycle-bin cleanup above,
 # then drop the TCR resources from state so the later phases don't retry them.
 # Phase 4 falls back to a terraform-based destroy if no tccli runner was found.
-if in_state 'tencentcloud_tcr_instance.demo'; then
+if in_state 'tencentcloud_tcr_instance.cluster'; then
 	echo -e "  ${CYAN}Tearing down TCR (images → namespace → instance + backend bucket)...${NC}"
 	if destroy_tcr "$TCR_INSTANCE_ID" "$TCR_NAMESPACE"; then
 		echo -e "  ${CYAN}Pruning TCR resources from terraform state (deleted out-of-band)...${NC}"
@@ -1071,7 +1071,7 @@ fi
 echo ""
 echo -e "${CYAN}━━━ Phase 4/6: Destroy TCR ━━━${NC}"
 # Retry the full ordered tccli teardown if the instance is still in state.
-if in_state 'tencentcloud_tcr_instance.demo'; then
+if in_state 'tencentcloud_tcr_instance.cluster'; then
 	echo -e "  ${CYAN}TCR status: ${TCR_INSTANCE_ID:-present} (namespace=${TCR_NAMESPACE}) still present; retrying the ordered teardown (images → namespace → instance + bucket)...${NC}"
 	if destroy_tcr "$TCR_INSTANCE_ID" "$TCR_NAMESPACE"; then
 		echo -e "  ${CYAN}Pruning TCR resources from terraform state (deleted out-of-band)...${NC}"
@@ -1086,10 +1086,10 @@ fi
 phase_tcr_targets=()
 for _res in \
 	null_resource.tcr_token_deploy \
-	tencentcloud_tcr_token.demo \
-	tencentcloud_tcr_vpc_attachment.demo \
-	tencentcloud_tcr_namespace.demo \
-	tencentcloud_tcr_instance.demo; do
+	tencentcloud_tcr_token.cluster \
+	tencentcloud_tcr_vpc_attachment.cluster \
+	tencentcloud_tcr_namespace.cluster \
+	tencentcloud_tcr_instance.cluster; do
 	in_state "$_res" && phase_tcr_targets+=(-target="$_res")
 done
 if [ "${#phase_tcr_targets[@]}" -gt 0 ]; then
@@ -1101,7 +1101,7 @@ fi
 # ============================================================
 # Phase 4.5/6 — CFS shared storage (cube-master /data/CubeMaster/storage).
 #   Must be torn down BEFORE the subnet it lives in: the CFS NFS mount target is
-#   an ENI inside tencentcloud_subnet.demo, so destroying the subnet first would
+#   an ENI inside tencentcloud_subnet.cluster, so destroying the subnet first would
 #   fail with "subnet in use". The file system is destroyed before its access
 #   rule/group (dependency order within the same targeted run).
 # ============================================================
@@ -1127,7 +1127,7 @@ fi
 # ============================================================
 echo ""
 echo -e "${CYAN}━━━ Phase 5/6: Destroy NAT gateway + subnet ━━━${NC}"
-if in_state 'tencentcloud_nat_gateway.demo'; then
+if in_state 'tencentcloud_nat_gateway.cluster'; then
 	echo -e "  ${CYAN}NAT gateway status: ${NAT_GATEWAY_ID:-present} → destroying (also releases its EIP + the NAT route)${NC}"
 else
 	echo -e "  ${GREEN}NAT gateway status: already destroyed (absent)${NC}"
@@ -1135,9 +1135,9 @@ fi
 phase_net_targets=()
 for _res in \
 	tencentcloud_route_table_entry.nat \
-	tencentcloud_nat_gateway.demo \
+	tencentcloud_nat_gateway.cluster \
 	tencentcloud_eip.nat \
-	tencentcloud_subnet.demo; do
+	tencentcloud_subnet.cluster; do
 	in_state "$_res" && phase_net_targets+=(-target="$_res")
 done
 while IFS= read -r _cvm_subnet; do
