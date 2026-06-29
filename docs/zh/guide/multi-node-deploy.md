@@ -117,6 +117,38 @@ curl http://127.0.0.1:8089/internal/meta/nodes
 
 返回结果中应包含计算节点的 IP 和健康状态。
 
+## 配置 CubeMaster 调度评分
+
+多机部署时，应在控制节点的 CubeMaster 配置中设置 `scheduler.score`。如果未配置评分，CubeMaster 会先过滤可用节点，再按照过滤后的节点顺序进行选择，新的沙箱可能集中到第一个可用节点，直到资源过滤器把流量推到其他节点。
+
+可以将下面这些调度字段合并到 `cubemaster.yaml` 中已有的 `scheduler` 段。请保留当前部署已有的 `filter`、超时、overcommit 和其他 scheduler 配置。
+
+```yaml
+scheduler:
+  # 保留当前部署已有的 filter、超时、overcommit 和其他 scheduler 配置。
+  priority_select_num: 3
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    resource_weights:
+      mvm_num: 2
+      local_create_num: 3
+      quota_cpu_usage: 1
+      quota_mem_usage: 1
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - mvm_num
+          - local_create_num
+          - quota_cpu_usage
+          - quota_mem_usage
+```
+
+对于多机集群，建议将 `scheduler.priority_select_num` 设置为大于 `1` 的值，让 CubeMaster 从评分最高的一组节点中随机选择。随项目提供的默认配置使用 `priority_select_num: 1`，这意味着评分只会决定下一个沙箱落到哪一个节点，而不会在多个高分节点之间分散放置。小规模集群可以从 `3` 开始，并根据节点数量继续调整。`scheduler.least_select_name` 默认值为 `random`，通常不需要显式设置。
+
+更新 `cubemaster.yaml` 后，请按当前部署方式重启 CubeMaster，让调度器加载新的评分配置。
+
 ## 常用操作
 
 ### 停止计算节点服务

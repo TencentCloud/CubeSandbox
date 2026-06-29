@@ -117,6 +117,38 @@ curl http://127.0.0.1:8089/internal/meta/nodes
 
 The response should include the compute node's IP and a healthy status.
 
+## Configure CubeMaster Scheduler Scoring
+
+For multi-node deployments, configure CubeMaster's `scheduler.score` on the control node. If scoring is omitted, CubeMaster filters eligible nodes and then selects from the filtered node order, which can concentrate new sandboxes on the first eligible node until resource filters push traffic elsewhere.
+
+Merge the following scheduler fields into the existing `scheduler` section of `cubemaster.yaml`. Keep your existing `filter`, timeout, overcommit, and other scheduler settings.
+
+```yaml
+scheduler:
+  # Keep your existing filter, timeout, overcommit, and other scheduler settings.
+  priority_select_num: 3
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    resource_weights:
+      mvm_num: 2
+      local_create_num: 3
+      quota_cpu_usage: 1
+      quota_mem_usage: 1
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - mvm_num
+          - local_create_num
+          - quota_cpu_usage
+          - quota_mem_usage
+```
+
+For multi-node clusters, set `scheduler.priority_select_num` to a value greater than `1` so CubeMaster randomly selects from the top scored nodes. The shipped default config uses `priority_select_num: 1`, which means scoring only determines which single node receives the next sandbox. Use `3` as a starting point for small clusters and tune it based on your node count. `scheduler.least_select_name` defaults to `random`, so it usually does not need to be set explicitly.
+
+After updating `cubemaster.yaml`, restart CubeMaster with your normal deployment procedure so the scheduler loads the new scoring configuration.
+
 ## Common Operations
 
 ### Stop Compute Node Services
