@@ -183,7 +183,10 @@ export TENCENTCLOUD_CUBE_IMAGE_TAG=latest            # shared tag for the four i
 | `TENCENTCLOUD_MYSQL_PASSWORD` | insecure demo value | MySQL root password (change for real use) |
 | `TENCENTCLOUD_REDIS_PASSWORD` | insecure demo value | Redis password (change for real use) |
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / demo | Application DB name / account / password |
-| `TENCENTCLOUD_CUBEMASTER_REPLICAS`, etc. | `2` | Per-component replica counts (default 2 = HA) |
+| `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `2` | cube-master replica count (default 2 = HA) |
+| `TENCENTCLOUD_CUBE_API_REPLICAS` | `2` | cube-api replica count (default 2 = HA) |
+| `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy replica count. **Default 1**: auto-pause/auto-resume only works in single-replica mode. Going >1 requires the LB to hash on SandboxID |
+| `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `2` | cube-webui replica count (default 2 = HA) |
 
 ### Non-interactive / CI runs
 

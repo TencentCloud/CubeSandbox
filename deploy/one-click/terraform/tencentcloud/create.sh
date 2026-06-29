@@ -762,7 +762,9 @@ setup_env() {
 	[ -n "${TENCENTCLOUD_REDIS_PASSWORD:-}" ] && export TF_VAR_redis_password="$TENCENTCLOUD_REDIS_PASSWORD"
 	[ -n "${TENCENTCLOUD_TKE_CLUSTER_VERSION:-}" ] && export TF_VAR_tke_cluster_version="$TENCENTCLOUD_TKE_CLUSTER_VERSION"
 	[ -n "${TENCENTCLOUD_TKE_NODE_COUNT:-}" ] && export TF_VAR_tke_node_count="$TENCENTCLOUD_TKE_NODE_COUNT"
-	# Optional per-component replica overrides (default 2 in variables.tf).
+	# Optional per-component replica overrides (default 2 in variables.tf; note
+	# cube-proxy defaults to 1 — auto-pause/auto-resume is single-replica only,
+	# and >1 replica requires the front-end LB to hash on SandboxID).
 	[ -n "${TENCENTCLOUD_CUBEMASTER_REPLICAS:-}" ] && export TF_VAR_cubemaster_replicas="$TENCENTCLOUD_CUBEMASTER_REPLICAS"
 	[ -n "${TENCENTCLOUD_CUBE_API_REPLICAS:-}" ] && export TF_VAR_cube_api_replicas="$TENCENTCLOUD_CUBE_API_REPLICAS"
 	[ -n "${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-}" ] && export TF_VAR_cube_proxy_replicas="$TENCENTCLOUD_CUBE_PROXY_REPLICAS"
@@ -3927,7 +3929,7 @@ TENCENTCLOUD_TKE_CLUSTER_VERSION='${TKE_CLUSTER_VERSION:-1.34.1}'
 TENCENTCLOUD_TKE_NODE_COUNT='${TKE_NODE_COUNT:-2}'
 TENCENTCLOUD_CUBEMASTER_REPLICAS='${TENCENTCLOUD_CUBEMASTER_REPLICAS:-2}'
 TENCENTCLOUD_CUBE_API_REPLICAS='${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-2}}'
-TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-2}}'
+TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_WEBUI_REPLICAS='${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-2}}'
 TENCENTCLOUD_LOCAL_BUNDLE='${LOCAL_BUNDLE:-${TENCENTCLOUD_LOCAL_BUNDLE:-}}'
 TENCENTCLOUD_PVM_KERNEL_VMLINUX='${PVM_KERNEL_VMLINUX:-${TENCENTCLOUD_PVM_KERNEL_VMLINUX:-}}'

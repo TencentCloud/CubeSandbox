@@ -534,6 +534,10 @@ resource "kubernetes_deployment" "cube_proxy" {
     labels    = { app = "cube-proxy" }
   }
   spec {
+    # Defaults to 1. auto-pause/auto-resume (driven by the co-resident
+    # cube-proxy-sidecar sweeper) is only correct in single-replica mode; with
+    # >1 replica the front-end LB MUST hash on SandboxID, otherwise per-replica
+    # idle detection misfires. See var.cube_proxy_replicas in variables.tf.
     replicas = var.cube_proxy_replicas
     selector {
       match_labels = { app = "cube-proxy" }
@@ -600,6 +604,36 @@ resource "kubernetes_deployment" "cube_proxy" {
               sub_path   = lower(replace(volume_mount.value, "/[^a-zA-Z0-9-]/", "-"))
               read_only  = true
             }
+          }
+
+          # --- Health probes ---
+          # liveness: if nginx stops accepting connections on the dataplane port
+          # (process hang / deadlock), kubelet restarts the container. A plain
+          # crash/OOM is already covered by restartPolicy: Always; this catches
+          # the "still alive but unresponsive" case.
+          liveness_probe {
+            tcp_socket {
+              port = 8081
+            }
+            initial_delay_seconds = 5
+            period_seconds        = 10
+            timeout_seconds       = 3
+            failure_threshold     = 3
+            success_threshold     = 1
+          }
+
+          # readiness: only route traffic once nginx is accepting connections, so
+          # the endpoint is removed from the Service during restart and the CLB
+          # stops forwarding to this pod before it is ready (avoids 502s).
+          readiness_probe {
+            tcp_socket {
+              port = 8081
+            }
+            initial_delay_seconds = 3
+            period_seconds        = 5
+            timeout_seconds       = 2
+            failure_threshold     = 2
+            success_threshold     = 1
           }
         }
 

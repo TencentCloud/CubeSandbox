@@ -450,6 +450,12 @@ share mounted ReadWriteMany — an elastic, pay-as-you-go file system provisione
 before the addons so all replicas read/write the same template / snapshot /
 runtime state.
 
+`cube-proxy` runs a **single replica** by default
+(`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`). Auto-pause/auto-resume only works
+correctly with one replica, because each sidecar sweeper only sees traffic
+hitting its own pod. To scale beyond 1 replica the front-end LB must hash on
+SandboxID (session affinity); otherwise auto-pause/auto-resume will misfire.
+
 The deployer is surfaced at the **top level** of the extracted bundle, so right
 after extracting the package you can run it directly:
 

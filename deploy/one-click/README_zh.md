@@ -425,6 +425,8 @@ sudo yum install -y e2fsprogs util-linux
 
 `cubemaster` 运行多个副本，通过一块以 ReadWriteMany 方式挂载的 CFS（文件存储，通用标准型）NFS 共享盘共用 `/data/CubeMaster/storage` 目录——该文件系统弹性按量计费，会在部署 addons 之前先行创建，使各副本读写同一份模板 / 存档 / 运行时状态。
 
+`cube-proxy` 默认运行**单副本**（`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`）。自动暂停 / 自动恢复只有在单副本下才正确，因为每个 sidecar sweeper 只能看到打到自身 Pod 的流量。若要扩展到多副本，前端 LB 必须按 SandboxID 做 hash（会话保持），否则自动暂停 / 自动恢复会误判。
+
 该部署器被放在解压后发布包的**顶层**，因此解压后即可直接运行：
 
 ```bash

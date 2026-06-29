@@ -155,7 +155,9 @@ python examples/code-sandbox-quickstart/auto-resume.py
 ## 设计与运维要点
 
 - **暂停的状态保真度**：CPU 寄存器、进程内存、TCP 连接（无外部对端）、文件系统改动都会随快照保留；面向外部的连接（如 sandbox 主动建立的 outbound socket）会在暂停时断开，恢复后由应用层自行重连。
-- **集群一致性**：自动暂停由部署在 CubeProxy 容器内的 `cube-proxy-sidecar` 协调；它消费 CubeMaster 通过 Redis stream 发布的生命周期事件，对所有 CubeProxy 实例广播状态。多副本环境下用 Redis SETNX 互斥锁确保同一沙箱不会被并发暂停或恢复。
+- **集群一致性**：自动暂停由部署在 CubeProxy 容器内的 `cube-proxy-sidecar` 协调；它消费 CubeMaster 通过 Redis stream 发布的生命周期事件，并据此维护沙箱状态。
+- **副本模式（重要）**：自动暂停 / 自动恢复目前**仅在 CubeProxy 单副本部署下保证正确**，这也是默认部署形态（`cube_proxy_replicas=1`）。每个 CubeProxy 内的 sidecar sweeper 只能看到**打到自己这一副本**的请求活跃时间戳来判断沙箱是否空闲。如果 CubeProxy 多副本部署且前端 LB 采用轮询 / 最少连接等策略，单个沙箱的请求会被分散到不同副本上，没有任何一个 sidecar 能看到完整的活跃流，**未收到近期请求的副本会误判沙箱空闲并将其暂停**，从而造成 "暂停 → 自动恢复" 的反复抖动。
+- **开启多副本的前提**：若确需将 CubeProxy 扩到多副本（HA / 吞吐），**前端 LB 必须按 SandboxID 做 hash**（会话保持 / 一致性哈希），保证同一沙箱的所有流量固定路由到同一副本；否则自动暂停 / 自动恢复会误判。
 - **失败回退**：自动恢复 RPC 失败时，CubeProxy 直接对客户端返回 503 + `Retry-After`，不会让用户卡在长超时上。
 - **故障排查**：`/data/log/cube-proxy/sidecar.log` 是 sidecar 的运行日志，关键事件包括 `create event applied`、`auto-paused sandbox`、`auto-resumed sandbox`。
 

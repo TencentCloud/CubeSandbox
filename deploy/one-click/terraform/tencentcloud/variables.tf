@@ -272,10 +272,26 @@ variable "cube_api_replicas" {
   }
 }
 
+# cube-proxy defaults to a SINGLE replica (unlike the other components, which
+# default to 2). This is deliberate: the auto-pause/auto-resume feature is only
+# correct in single-replica mode.
+#
+# Each cube-proxy pod runs a co-resident cube-proxy-sidecar whose sweeper decides
+# when a sandbox is idle based on the last-active timestamps it observes on its
+# OWN cube-proxy. With >1 replica behind a round-robin / least-conn CLB, requests
+# for a single sandbox are spread across replicas, so no individual sidecar sees
+# the full activity stream. A replica that happened not to serve recent requests
+# will believe the sandbox is idle and pause it out from under an actively-used
+# session, producing a pause -> auto-resume churn loop.
+#
+# If you must scale cube-proxy to >1 replica for HA/throughput, the front-end
+# load balancer MUST be configured to hash on the sandbox ID so that all traffic
+# for a given sandbox is pinned to one replica (consistent session affinity by
+# SandboxID). Without that, auto-pause/auto-resume will misfire.
 variable "cube_proxy_replicas" {
-  description = "cube-proxy Deployment replica count"
+  description = "cube-proxy Deployment replica count. Defaults to 1: auto-pause/auto-resume is only correct in single-replica mode. Setting >1 REQUIRES the front-end LB to hash on SandboxID (session affinity), otherwise auto-pause/auto-resume will misfire."
   type        = number
-  default     = 2
+  default     = 1
 
   validation {
     condition     = var.cube_proxy_replicas >= 1 && floor(var.cube_proxy_replicas) == var.cube_proxy_replicas

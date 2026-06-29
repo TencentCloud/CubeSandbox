@@ -183,7 +183,10 @@ export TENCENTCLOUD_CUBE_IMAGE_TAG=latest            # 四个组件镜像共用�
 | `TENCENTCLOUD_MYSQL_PASSWORD` | 不安全的演示值 | MySQL root 密码（生产必改） |
 | `TENCENTCLOUD_REDIS_PASSWORD` | 不安全的演示值 | Redis 密码（生产必改） |
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / 演示值 | 应用库名 / 账号 / 密码 |
-| `TENCENTCLOUD_CUBEMASTER_REPLICAS` 等 | `2` | 各组件副本数（默认 2 = 高可用） |
+| `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `2` | cube-master 副本数（默认 2 = 高可用） |
+| `TENCENTCLOUD_CUBE_API_REPLICAS` | `2` | cube-api 副本数（默认 2 = 高可用） |
+| `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy 副本数。**默认 1**：自动暂停 / 恢复仅单副本下正确；要 >1 须前端 LB 按 SandboxID hash |
+| `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `2` | cube-webui 副本数（默认 2 = 高可用） |
 
 ### 非交互 / CI 运行
 
