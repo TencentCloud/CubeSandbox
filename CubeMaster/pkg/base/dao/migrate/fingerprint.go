@@ -221,68 +221,14 @@ func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
 // Versions that are NOT currently applied are intentionally skipped: this lets
 // the operator remediation runbook (delete a goose_db_version row to force a
 // re-apply) work without tripping the check.
+// Deprecated: delegates to preflightFingerprintsWithStore using the MySQL store
+// for backward compatibility. New callers should use preflightFingerprintsWithStore.
 func preflightFingerprints(
 	ctx context.Context,
 	db *sql.DB,
 	fsFP map[int64]fileFingerprint,
 ) error {
-	if v := os.Getenv(skipFingerprintEnv); v != "" {
-		return nil
-	}
-	applied, err := currentlyAppliedVersions(ctx, db)
-	if err != nil {
-		return err
-	}
-	stored, err := loadStoredFingerprints(ctx, db)
-	if err != nil {
-		return err
-	}
-
-	// Operational visibility: surface applied versions that have no fingerprint
-	// baseline (typically migrations applied before this feature existed, or one
-	// that lost its fingerprint to a partial-failure gap). They are NOT
-	// protected against silent content changes.
-	logUnprotectedVersions(applied, stored)
-
-	if len(stored) == 0 {
-		return nil
-	}
-
-	var mismatches []string
-	for version, sf := range stored {
-		if !applied[version] {
-			continue
-		}
-		ff, ok := fsFP[version]
-		if !ok {
-			// A previously-applied migration file vanished from the tree. That
-			// is itself a dangerous change (renames/deletes of applied
-			// migrations are forbidden) and worth surfacing.
-			mismatches = append(mismatches, fmt.Sprintf(
-				"version %d: applied file %q is missing from the migrations tree",
-				version, sf.source,
-			))
-			continue
-		}
-		if ff.sum != sf.sum {
-			mismatches = append(mismatches, fmt.Sprintf(
-				"version %d: content changed since it was applied "+
-					"(recorded %q sha256=%s, on-disk %q sha256=%s)",
-				version, sf.source, sf.sum, ff.source, ff.sum,
-			))
-		}
-	}
-	if len(mismatches) == 0 {
-		return nil
-	}
-	sort.Strings(mismatches)
-	return fmt.Errorf(
-		"%w: an already-applied migration "+
-			"version was modified or reused, which goose would otherwise skip "+
-			"SILENTLY. Never edit/rename/reuse an applied migration; add a new "+
-			"timestamped migration instead. To bypass intentionally, set %s=1.\n  - %s",
-		ErrFingerprintMismatch, skipFingerprintEnv, strings.Join(mismatches, "\n  - "),
-	)
+	return preflightFingerprintsWithStore(ctx, db, fsFP, &mysqlFingerprintStore{})
 }
 
 // logUnprotectedVersions emits a single concise line listing currently-applied
@@ -313,11 +259,82 @@ func logUnprotectedVersions(applied map[int64]bool, stored map[int64]storedFinge
 // recordFingerprints upserts the fingerprint for every version that goose
 // reported as successfully applied in this run. We only record what was
 // actually applied (no backfill of historical versions).
+// Deprecated: used by existing MySQL-only callers; prefer recordFingerprintsWithStore.
 func recordFingerprints(
 	ctx context.Context,
 	db *sql.DB,
 	fsFP map[int64]fileFingerprint,
 	results []*goose.MigrationResult,
+) error {
+	return recordFingerprintsWithStore(ctx, db, fsFP, results, &mysqlFingerprintStore{})
+}
+
+// preflightFingerprintsWithStore is the multi-dialect version of preflightFingerprints.
+func preflightFingerprintsWithStore(
+	ctx context.Context,
+	db *sql.DB,
+	fsFP map[int64]fileFingerprint,
+	store fingerprintStore,
+) error {
+	if v := os.Getenv(skipFingerprintEnv); v != "" {
+		return nil
+	}
+	applied, err := store.CurrentlyApplied(ctx, db)
+	if err != nil {
+		return err
+	}
+	stored, err := store.LoadStored(ctx, db)
+	if err != nil {
+		return err
+	}
+
+	logUnprotectedVersions(applied, stored)
+
+	if len(stored) == 0 {
+		return nil
+	}
+
+	var mismatches []string
+	for version, sf := range stored {
+		if !applied[version] {
+			continue
+		}
+		ff, ok := fsFP[version]
+		if !ok {
+			mismatches = append(mismatches, fmt.Sprintf(
+				"version %d: applied file %q is missing from the migrations tree",
+				version, sf.source,
+			))
+			continue
+		}
+		if ff.sum != sf.sum {
+			mismatches = append(mismatches, fmt.Sprintf(
+				"version %d: content changed since it was applied "+
+					"(recorded %q sha256=%s, on-disk %q sha256=%s)",
+				version, sf.source, sf.sum, ff.source, ff.sum,
+			))
+		}
+	}
+	if len(mismatches) == 0 {
+		return nil
+	}
+	sort.Strings(mismatches)
+	return fmt.Errorf(
+		"%w: an already-applied migration "+
+			"version was modified or reused, which goose would otherwise skip "+
+			"SILENTLY. Never edit/rename/reuse an applied migration; add a new "+
+			"timestamped migration instead. To bypass intentionally, set %s=1.\n  - %s",
+		ErrFingerprintMismatch, skipFingerprintEnv, strings.Join(mismatches, "\n  - "),
+	)
+}
+
+// recordFingerprintsWithStore upserts fingerprints using the given store.
+func recordFingerprintsWithStore(
+	ctx context.Context,
+	db *sql.DB,
+	fsFP map[int64]fileFingerprint,
+	results []*goose.MigrationResult,
+	store fingerprintStore,
 ) error {
 	for _, r := range results {
 		if r == nil || r.Error != nil || r.Source == nil {
@@ -325,25 +342,14 @@ func recordFingerprints(
 		}
 		ff, ok := fsFP[r.Source.Version]
 		if !ok {
-			// Should not happen: file discovery is aligned with goose
-			// (fs.Glob), so any version goose applied must be collectable. If
-			// it ever does happen, do NOT stay silent — that version would lose
-			// content-drift protection, defeating this defence layer. We log
-			// loudly rather than failing startup of an otherwise-successful
-			// migration run.
 			log.Printf("migrate: WARNING: applied migration version %d (%q) "+
 				"has no on-disk fingerprint source; it will NOT be protected "+
 				"against silent content changes",
 				r.Source.Version, r.Source.Path)
 			continue
 		}
-		if _, err := db.ExecContext(ctx,
-			`INSERT INTO `+fingerprintTable+` (version, sha256, source)
-			 VALUES (?, ?, ?)
-			 ON DUPLICATE KEY UPDATE sha256 = VALUES(sha256), source = VALUES(source)`,
-			ff.version, ff.sum, ff.source,
-		); err != nil {
-			return fmt.Errorf("record fingerprint for version %d: %w", ff.version, err)
+		if err := store.RecordOne(ctx, db, ff); err != nil {
+			return err
 		}
 	}
 	return nil

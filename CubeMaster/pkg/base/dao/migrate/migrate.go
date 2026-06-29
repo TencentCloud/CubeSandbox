@@ -35,6 +35,9 @@ import (
 //go:embed migrations/mysql/*.sql
 var mysqlMigrations embed.FS
 
+//go:embed migrations/postgres/*.sql
+var postgresMigrations embed.FS
+
 // dialectSpec wires a goose dialect to its embedded migrations FS.
 type dialectSpec struct {
 	dialect database.Dialect
@@ -52,6 +55,12 @@ var dialectSpecs = map[string]dialectSpec{
 		dialect:      database.DialectMySQL,
 		rootFS:       mysqlMigrations,
 		subdir:       "migrations/mysql",
+		fingerprints: true,
+	},
+	"postgres": {
+		dialect:      database.DialectPostgres,
+		rootFS:       postgresMigrations,
+		subdir:       "migrations/postgres",
 		fingerprints: true,
 	},
 }
@@ -108,26 +117,31 @@ func Run(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.Session
 		return err
 	}
 
-	// Defence layer (MySQL only): detect (and loudly reject) the case where an
+	// Defence layer: detect (and loudly reject) the case where an
 	// already-applied migration version's content changed on disk, which goose
 	// would otherwise skip silently. Must run before goose.Up.
 	//
 	// Note: the preflight reads goose_db_version / the fingerprint table WITHOUT
 	// holding goose's session lock (goose only takes it inside provider.Up). A
 	// concurrent instance's Up()/DownTo() could therefore move the bookkeeping
-	// between our read and goose's run. This is safe: InnoDB MVCC prevents dirty
+	// between our read and goose's run. This is safe: MVCC prevents dirty
 	// reads, and the worst case is a false-positive (startup blocked), never a
 	// false-negative (silent pass). Concurrent DownTo is an operator-only path.
 	var fsFP map[int64]fileFingerprint
+	var fpStore fingerprintStore
 	if fpEnabled {
+		fpStore, err = resolveFingerprintStore(dialect)
+		if err != nil {
+			return err
+		}
 		fsFP, err = collectFSFingerprints(subFS)
 		if err != nil {
 			return fmt.Errorf("migrate: collect migration fingerprints: %w", err)
 		}
-		if err := ensureFingerprintTable(ctx, sqlDB); err != nil {
+		if err := fpStore.EnsureTable(ctx, sqlDB); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
-		if err := preflightFingerprints(ctx, sqlDB, fsFP); err != nil {
+		if err := preflightFingerprintsWithStore(ctx, sqlDB, fsFP, fpStore); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
@@ -137,7 +151,7 @@ func Run(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.Session
 	// failure — so a fixed re-deploy never leaves an applied version
 	// unfingerprinted (which would reopen the silent-skip gap).
 	if fpEnabled {
-		recErr := recordFingerprints(ctx, sqlDB, fsFP, appliedResults(results, upErr))
+		recErr := recordFingerprintsWithStore(ctx, sqlDB, fsFP, appliedResults(results, upErr), fpStore)
 		if recErr != nil {
 			if upErr != nil {
 				// Both goose and fingerprinting failed: surface both so the
