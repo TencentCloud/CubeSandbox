@@ -55,10 +55,10 @@ The table below lists every cloud resource created under the **default configura
 | Route table entry | 1 | `0.0.0.0/0` → NAT gateway |
 | Security group | 4 | Per-role (jumpserver / compute / TKE pod / CLB), least privilege, see below |
 | SSH key pair | 1 | Auto-generated under `terraform/tencentcloud/.ssh/` |
-| Jumpserver CVM | 1 | `SA9.MEDIUM4` (2C4G), 50GB premium system disk, 200 Mbps public bandwidth, SSH on port 443 |
-| Compute CVM | 1 | `SA9.2XLARGE16` (8C16G), 50GB system disk, **plus a 200GB CBS data disk** (XFS, mounted at `/data/cubelet`), **no public IP** |
+| Jumpserver CVM | 1 | `SA9.MEDIUM4` (2C4G), 50GB general-purpose SSD system disk, 200 Mbps public bandwidth, SSH on port 443 |
+| Compute CVM | 1 | `SA9.2XLARGE16` (8C16G), 50GB general-purpose SSD system disk, **plus a 200GB general-purpose SSD CBS data disk** (XFS, mounted at `/data/cubelet`), **no public IP** |
 | TKE managed cluster | 1 | Managed L20, Kubernetes `1.34.1`, Pod CIDR `10.200.0.0/16`, Service CIDR `192.168.0.0/20`, VPC-internal API only |
-| TKE worker nodes | 1 initial + node pool desired 2 (min 1 / max 4) | `SA9.LARGE8` (4C8G), 50GB premium system disk |
+| TKE worker nodes | 1 initial + node pool desired 2 (min 1 / max 4) | `SA9.LARGE8` (4C8G), 50GB general-purpose SSD system disk |
 | Cloud MySQL | 1 | 8.0 InnoDB universal, 4GB memory / 200GB storage, multi-AZ (when the region has ≥2 zones) / semi-sync, intranet 3306 only |
 | Cloud Redis | 1 | 7.0 standard architecture (master/replica), 1GB memory, port 6379, intranet only |
 | CFS file system | 1 | General Standard NFS (elastic pay-as-you-go), ReadWriteMany, shared by cube-master replicas |

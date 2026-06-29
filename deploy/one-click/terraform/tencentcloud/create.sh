@@ -2430,6 +2430,9 @@ _try_next_instance_type() {
 			_export_compute_node_config_var "$STEP2_COMPUTE_NODE_INDEX" "${TF_VAR_compute_node_count:-1}"
 		fi
 		if [ "$role" = "tke" ]; then
+			# tke_worker_instance_type is used directly (no ternary fallback), so we
+			# must override it here to avoid retrying the sold-out type.
+			export TF_VAR_tke_worker_instance_type="$next_type"
 			echo -e "  ${GREEN}-> Auto-fallback (TKE workers): trying ${next_type} (${CVM_CPUS[$next_idx]}C${CVM_MEMS[$next_idx]}G) [$(($next_idx + 1))/${#CVM_TYPES[@]}]${NC}"
 		else
 			echo -e "  ${GREEN}-> Auto-fallback (compute): trying ${next_type} (${CVM_CPUS[$next_idx]}C${CVM_MEMS[$next_idx]}G) [$(($next_idx + 1))/${#CVM_TYPES[@]}]${NC}"

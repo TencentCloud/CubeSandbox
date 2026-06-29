@@ -188,7 +188,7 @@ variable "tke_node_count" {
 }
 
 variable "tke_worker_instance_type" {
-  description = "TKE worker node instance type; leave empty to use compute_instance_type"
+  description = "TKE worker node instance type (4C8G is sufficient for control-plane pods)"
   type        = string
   default     = "SA9.LARGE8"
 }

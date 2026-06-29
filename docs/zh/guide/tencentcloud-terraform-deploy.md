@@ -55,10 +55,10 @@
 | 路由表条目 | 1 | `0.0.0.0/0` → NAT 网关 |
 | 安全组 | 4 | 按角色拆分（跳板机 / 计算节点 / TKE Pod / CLB），最小权限，见下表 |
 | SSH 密钥对 | 1 | 自动生成于 `terraform/tencentcloud/.ssh/` |
-| 跳板机 CVM | 1 | `SA9.MEDIUM4`（2C4G），系统盘 50GB 高性能云硬盘，公网带宽 200 Mbps，SSH 端口 443 |
-| 计算节点 CVM | 1 | `SA9.2XLARGE16`（8C16G），系统盘 50GB，**额外挂载 1 块 200GB CBS 数据盘**（XFS，挂载于 `/data/cubelet`），**无公网 IP** |
+| 跳板机 CVM | 1 | `SA9.MEDIUM4`（2C4G），系统盘 50GB 通用型 SSD 云硬盘，公网带宽 200 Mbps，SSH 端口 443 |
+| 计算节点 CVM | 1 | `SA9.2XLARGE16`（8C16G），系统盘 50GB 通用型 SSD 云硬盘，**额外挂载 1 块 200GB 通用型 SSD CBS 数据盘**（XFS，挂载于 `/data/cubelet`），**无公网 IP** |
 | TKE 托管集群 | 1 | 托管集群 L20，Kubernetes `1.34.1`，Pod CIDR `10.200.0.0/16`，Service CIDR `192.168.0.0/20`，仅 VPC 内网 API |
-| TKE worker 节点 | 1 初始 + 节点池期望 2（min 1 / max 4） | `SA9.LARGE8`（4C8G），系统盘 50GB 高性能云硬盘 |
+| TKE worker 节点 | 1 初始 + 节点池期望 2（min 1 / max 4） | `SA9.LARGE8`（4C8G），系统盘 50GB 通用型 SSD 云硬盘 |
 | 云数据库 MySQL | 1 | 8.0 InnoDB 通用型，4GB 内存 / 200GB 存储，跨可用区双机（地域有 ≥2 可用区时）/ 半同步，仅内网 3306 |
 | 云数据库 Redis | 1 | 7.0 标准架构（主从），1GB 内存，端口 6379，仅内网 |
 | CFS 文件系统 | 1 | 通用标准型 NFS（弹性按量），ReadWriteMany，供 cube-master 多副本共享 |

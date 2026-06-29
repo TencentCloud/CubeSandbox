@@ -122,7 +122,7 @@ locals {
   compute_zone    = var.compute_availability_zone != "" ? var.compute_availability_zone : local.primary_zone
   tke_worker_zone = var.tke_worker_availability_zone != "" ? var.tke_worker_availability_zone : local.primary_zone
 
-  tke_worker_type = var.tke_worker_instance_type != "" ? var.tke_worker_instance_type : var.compute_instance_type
+  tke_worker_type = var.tke_worker_instance_type
 
   compute_zones = [
     for i in range(var.compute_node_count) :
@@ -603,7 +603,7 @@ resource "tencentcloud_kubernetes_cluster" "tke" {
     count              = 1
     availability_zone  = local.tke_worker_zone
     instance_type      = local.tke_worker_type
-    system_disk_type   = "CLOUD_PREMIUM"
+    system_disk_type   = "CLOUD_BSSD"
     system_disk_size   = 50
     subnet_id          = local.tke_worker_subnet_id
     public_ip_assigned = false
@@ -631,7 +631,7 @@ resource "tencentcloud_kubernetes_node_pool" "tke" {
 
   auto_scaling_config {
     instance_type              = local.tke_worker_type
-    system_disk_type           = "CLOUD_PREMIUM"
+    system_disk_type           = "CLOUD_BSSD"
     system_disk_size           = 50
     orderly_security_group_ids = [tencentcloud_security_group.tke_pod.id]
     public_ip_assigned         = false
@@ -743,7 +743,7 @@ resource "tencentcloud_instance" "jumpserver" {
 
   instance_charge_type = "POSTPAID_BY_HOUR"
 
-  system_disk_type = "CLOUD_PREMIUM"
+  system_disk_type = "CLOUD_BSSD"
   system_disk_size = 50
 
   # Public network (the jumpserver needs a public IP as the entry point)
@@ -804,13 +804,13 @@ resource "tencentcloud_instance" "compute" {
 
   instance_charge_type = "POSTPAID_BY_HOUR"
 
-  system_disk_type = "CLOUD_PREMIUM"
+  system_disk_type = "CLOUD_BSSD"
   system_disk_size = 50
 
   # Dedicated CBS data disk per compute node, formatted as XFS and mounted at
   # /data/cubelet by the user_data script below. Sized via compute_data_disk_size.
   data_disks {
-    data_disk_type       = "CLOUD_PREMIUM"
+    data_disk_type       = "CLOUD_BSSD"
     data_disk_size       = var.compute_data_disk_size
     delete_with_instance = true
   }
@@ -827,12 +827,16 @@ resource "tencentcloud_instance" "compute" {
 
     # Find the unformatted, unmounted data disk (excludes the system disk, which
     # already carries a partition table / filesystem).
+    # Covers virtio (vdX), SCSI/SATA (sdX), and NVMe (nvmeXnY) device naming.
     DATA_DISK=""
     for i in $(seq 1 30); do
-      for dev in /dev/vd? /dev/sd?; do
+      for dev in /dev/vd? /dev/sd? /dev/nvme?n? /dev/nvme??n?; do
         [ -b "$dev" ] || continue
         # Skip disks that already have partitions or a filesystem.
-        if lsblk -no NAME "$dev" | grep -q "$(basename "$dev")[0-9]"; then
+        # NVMe partitions are named nvmeXnYpZ (with a 'p' separator), while
+        # sd/vd partitions are sdX1, vdX1 (digit appended directly).
+        devbase="$(basename "$dev")"
+        if lsblk -no NAME "$dev" | grep -qE "^$devbase""p?[0-9]"; then
           continue
         fi
         if blkid "$dev" >/dev/null 2>&1; then
@@ -846,16 +850,37 @@ resource "tencentcloud_instance" "compute" {
     done
 
     if [ -z "$DATA_DISK" ]; then
-      echo "cubelet data disk not found; skipping data-disk setup" >&2
+      echo "============================================================" >&2
+      echo "WARNING: cubelet data disk not found after 30 retries (150s)." >&2
+      echo "         /data/cubelet will fall back to the system disk." >&2
+      echo "         Sandbox images and runtime data may exhaust the 50GB" >&2
+      echo "         system disk and cause 'no space left on device' later." >&2
+      echo "         Check CBS data disk provisioning in the TencentCloud console." >&2
+      echo "============================================================" >&2
       exit 0
     fi
 
     mkfs.xfs -f "$DATA_DISK"
     mkdir -p "$MOUNT_POINT"
 
-    DISK_UUID="$(blkid -s UUID -o value "$DATA_DISK")"
+    # Wait for udev to settle so blkid can read the fresh UUID reliably.
+    udevadm settle --timeout=10 2>/dev/null || true
+
+    DISK_UUID=""
+    for _retry in 1 2 3 4 5; do
+      DISK_UUID="$(blkid -s UUID -o value "$DATA_DISK" 2>/dev/null)" && [ -n "$DISK_UUID" ] && break
+      sleep 1
+    done
+
+    if [ -z "$DISK_UUID" ]; then
+      echo "ERROR: failed to obtain UUID for $DATA_DISK after retries; falling back to device path" >&2
+      FSTAB_SRC="$DATA_DISK"
+    else
+      FSTAB_SRC="UUID=$DISK_UUID"
+    fi
+
     if ! grep -q "$MOUNT_POINT" /etc/fstab; then
-      echo "UUID=$DISK_UUID $MOUNT_POINT xfs defaults,nofail 0 2" >> /etc/fstab
+      echo "$FSTAB_SRC $MOUNT_POINT xfs defaults,noatime,nofail 0 2" >> /etc/fstab
     fi
     mount "$MOUNT_POINT"
   EOF
