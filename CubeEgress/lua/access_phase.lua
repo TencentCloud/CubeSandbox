@@ -48,11 +48,16 @@
 --               admin → access_phase path without needing an
 --               external admin server.
 --   "pending" — bootstrap fetch in flight (init_worker scheduled
---               a timer that hasn't completed). Fail-open with a
---               one-shot WARN: brief startup window, alternative
---               is dropping the very first connections.
+--               a timer that hasn't completed). Fail CLOSED: return
+--               403. CubeEgress is the outbound security boundary
+--               for untrusted sandbox code, so serving traffic
+--               without policies would let a sandbox bypass
+--               host/SNI/method/path controls during every startup
+--               or restart window. bootstrap.lua's own header says
+--               cube-egress MUST NOT serve data-plane traffic
+--               without policies; this gate enforces that invariant.
 --   "unknown" — meta_store unavailable (shouldn't happen). Same
---               fail-open as "pending"; a missing meta_store means
+--               fail-closed as "pending"; a missing meta_store means
 --               we also can't safely look up policies.
 --   any other — treated like "unknown" for safety.
 --
@@ -390,14 +395,19 @@ function _M.decide()
         security_event   = false,
     }
 
-    -- Bootstrap escape hatch (see module header).
+    -- Bootstrap gate (see module header).
     -- "ready" and "skipped" both proceed to normal policy enforcement.
-    -- "pending" / "unknown" / anything else fail open with a one-shot
-    -- WARN, since the brief startup window between init_worker and
-    -- the bootstrap timer firing shouldn't drop traffic.
+    -- "pending" / "unknown" / anything else fail CLOSED. CubeEgress is
+    -- the documented outbound security boundary for untrusted sandbox
+    -- code, so serving data-plane traffic before policies are loaded
+    -- would let a sandbox exfiltrate data or bypass host/SNI/method/path
+    -- controls during every startup or restart window. bootstrap.lua's
+    -- own header says cube-egress MUST NOT serve data-plane traffic
+    -- without policies; we enforce that invariant here.
     local meta = ngx.shared.meta_store
     local bootstrap_status = (meta and meta:get("bootstrap_status")) or "unknown"
     if bootstrap_status ~= "ready" and bootstrap_status ~= "skipped" then
+        decision.security_event = true
         decision.reason = "bootstrap_not_ready:" .. bootstrap_status
         decision.audit_level = "metadata"
         ngx.ctx.cube_decision = decision
@@ -408,13 +418,12 @@ function _M.decide()
             local newly = meta:add(seen_key, 1)
             if newly then
                 ngx.log(ngx.WARN, "[access] bootstrap_status=", bootstrap_status,
-                                   "; allowing all traffic without policy ",
-                                   "enforcement. Set CUBE_EGRESS_BOOTSTRAP_URL ",
+                                   "; denying all traffic until bootstrap ",
+                                   "completes. Set CUBE_EGRESS_BOOTSTRAP_URL ",
                                    "and load policies for production behavior.")
             end
         end
-        decision.allow = true
-        return
+        return ngx.exit(403)
     end
 
     if not ctx.sandbox_ip then
