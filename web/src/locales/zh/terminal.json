@@ -1,0 +1,24 @@
+{
+  "toolbar": {
+    "fontSizeUp": "增大字号",
+    "fontSizeDown": "减小字号",
+    "fullscreen": "全屏",
+    "exitFullscreen": "退出全屏",
+    "close": "关闭终端",
+    "reconnect": "重新连接"
+  },
+  "status": {
+    "disconnected": "已断开",
+    "connecting": "连接中...",
+    "connected": "已连接",
+    "reconnecting": "重连中..."
+  },
+  "error": {
+    "sandboxNotRunning": "沙箱必须处于运行状态才能打开终端",
+    "reconnectFailed": "无法重新连接，请重试。"
+  },
+  "actions": {
+    "openTerminal": "终端",
+    "openTerminalDetail": "打开终端"
+  }
+}

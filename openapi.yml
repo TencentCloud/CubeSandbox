@@ -259,6 +259,77 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/terminal:
+    get:
+      tags:
+      - handlers::terminal
+      summary: Web Terminal WebSocket upgrade
+      description: |
+        Upgrades an HTTP connection to a WebSocket for interactive terminal
+        access to a sandbox container.  The WebSocket carries raw binary
+        frames: client→server frames contain stdin bytes; server→client
+        frames contain stdout/stderr bytes (stderr is prefixed with byte
+        0x02).  Text frames carry JSON control messages (e.g. resize).
+
+        Authentication is via query parameter (`?token=...`) because
+        browsers cannot set custom headers on WebSocket upgrade requests.
+      operationId: terminal_ws_upgrade
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      - name: token
+        in: query
+        description: Session authentication token
+        required: false
+        schema:
+          type: string
+      - name: container
+        in: query
+        description: Target container name (defaults to "default")
+        required: false
+        schema:
+          type: string
+      responses:
+        '101':
+          description: WebSocket upgrade successful
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Sandbox is not running
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, state]
+                properties:
+                  error:
+                    type: string
+                    example: sandbox not running
+                    description: Human-readable error description
+                  state:
+                    type: string
+                    enum: [paused, pausing]
+                    description: Current sandbox state
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /templates:
     get:
       tags:
@@ -1158,3 +1229,5 @@ tags:
   description: Template catalog
 - name: sandboxes
   description: Sandbox lifecycle and logs
+- name: terminal
+  description: Interactive terminal access

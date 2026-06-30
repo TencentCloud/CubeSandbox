@@ -21,6 +21,7 @@ use crate::{
     handlers::{agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates},
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
+    terminal::ws_handler::ws_terminal_handler,
 };
 
 const DEFAULT_ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -70,6 +71,7 @@ fn build_e2b_router(state: &AppState, auth_configured: bool) -> Router<AppState>
         .route("/health", get(health::health))
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
+        .merge(build_terminal_routes(state))
 }
 
 /// Routes that need the longer 240 s timeout when surfaced under the e2b
@@ -88,6 +90,7 @@ fn build_cubeapi_router(state: &AppState, auth_configured: bool) -> Router<AppSt
         .merge(build_template_routes(state, auth_configured))
         .merge(build_cluster_routes(state, auth_configured))
         .merge(build_agenthub_routes(state, auth_configured))
+        .merge(build_terminal_routes(state))
 }
 
 /// WebUI login routes. These are intentionally left unauthenticated (like
@@ -359,6 +362,19 @@ fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppS
             .layer(TimeoutLayer::new(timeout))
             .layer(CompressionLayer::new())
             .layer(CorsLayer::permissive()),
+    )
+}
+
+/// Terminal WebSocket routes.
+///
+/// Auth middleware is intentionally NOT applied here — the terminal WS handler
+/// authenticates via query parameter (`?token=...`) because browsers cannot
+/// set custom headers on WebSocket upgrade requests. Rate limiting is also
+/// skipped because a single terminal session can produce many data frames.
+fn build_terminal_routes(_state: &AppState) -> Router<AppState> {
+    Router::new().route(
+        "/sandboxes/:sandboxID/terminal",
+        axum::routing::get(ws_terminal_handler),
     )
 }
 

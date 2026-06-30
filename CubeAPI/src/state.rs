@@ -6,6 +6,7 @@ use crate::cubemaster::CubeMasterClient;
 use crate::db::AgentHubStore;
 use crate::logging::ArcLogger;
 use crate::services::AppServices;
+use crate::terminal::TerminalState;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -32,6 +33,9 @@ pub struct AppState {
 
     /// Optional database-backed AgentHub instance store.
     pub agenthub_store: Option<AgentHubStore>,
+
+    /// Terminal session tracker and configuration.
+    pub terminal_state: TerminalState,
 }
 
 impl AppState {
@@ -73,6 +77,12 @@ impl AppState {
             logger,
             config: Arc::new(config),
             agenthub_store,
+            terminal_state: TerminalState::new(
+                std::env::var("TERMINAL_IDLE_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(crate::terminal::DEFAULT_IDLE_TIMEOUT_SECS),
+            ),
         }
     }
 }

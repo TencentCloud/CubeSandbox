@@ -1,0 +1,24 @@
+{
+  "toolbar": {
+    "fontSizeUp": "Increase font size",
+    "fontSizeDown": "Decrease font size",
+    "fullscreen": "Fullscreen",
+    "exitFullscreen": "Exit fullscreen",
+    "close": "Close terminal",
+    "reconnect": "Reconnect"
+  },
+  "status": {
+    "disconnected": "Disconnected",
+    "connecting": "Connecting...",
+    "connected": "Connected",
+    "reconnecting": "Reconnecting..."
+  },
+  "error": {
+    "sandboxNotRunning": "Sandbox must be running to open a terminal",
+    "reconnectFailed": "Unable to reconnect. Please try again."
+  },
+  "actions": {
+    "openTerminal": "Terminal",
+    "openTerminalDetail": "Open Terminal"
+  }
+}

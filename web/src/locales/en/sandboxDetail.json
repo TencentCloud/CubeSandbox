@@ -25,7 +25,13 @@
   "actions": {
     "resume": "Resume",
     "pause": "Pause",
-    "kill": "Kill"
+    "kill": "Kill",
+    "openTerminal": "Open Terminal"
+  },
+  "terminal": {
+    "error": {
+      "sandboxNotRunning": "Sandbox must be running to open a terminal"
+    }
   },
   "errors": {
     "unknown": "Unknown error",

@@ -11,10 +11,11 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Pause, Play, Trash2, RefreshCw, TerminalIcon } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import TerminalPanel from '@/components/TerminalPanel';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -61,6 +62,7 @@ export default function SandboxDetailPage() {
   }, [logs.data]);
 
   const [actionError, setActionError] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const onLifecycleError = (err: unknown) => {
     setActionError(formatSandboxActionError(err, t));
   };
@@ -128,6 +130,14 @@ export default function SandboxDetailPage() {
           )}
           <Button variant="destructive" onClick={() => kill.mutate()} disabled={kill.isPending}>
             <Trash2 size={14} /> {t('actions.kill')}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => setTerminalOpen(true)}
+            disabled={state !== 'running'}
+            title={state !== 'running' ? t('terminal.error.sandboxNotRunning') : undefined}
+          >
+            <TerminalIcon size={14} /> {t('actions.openTerminal')}
           </Button>
         </div>
       </div>
@@ -248,6 +258,13 @@ export default function SandboxDetailPage() {
           )}
         </pre>
       </Card>
+
+      {/* ── Terminal panel ── */}
+      <TerminalPanel
+        sandboxID={sandboxID}
+        open={terminalOpen}
+        onClose={() => setTerminalOpen(false)}
+      />
     </div>
   );
 }

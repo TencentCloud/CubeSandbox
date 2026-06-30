@@ -11,11 +11,12 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Pause, Play, Trash2, Search, Plus } from 'lucide-react';
+import { Pause, Play, Trash2, Search, Plus, TerminalIcon } from 'lucide-react';
 import { formatBytes, formatRelative, short } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import TerminalPanel from '@/components/TerminalPanel';
 
 type StateFilter = 'all' | 'running' | 'paused';
 
@@ -34,6 +35,7 @@ export default function SandboxesPage() {
 
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [terminalSandbox, setTerminalSandbox] = useState<string | null>(null);
 
   const onLifecycleError = (err: unknown) => {
     setActionError(formatSandboxActionError(err, t));
@@ -162,6 +164,7 @@ export default function SandboxesPage() {
             onKill={() => killMut.mutate(sb.sandboxID)}
             onPause={() => pauseMut.mutate(sb.sandboxID)}
             onResume={() => resumeMut.mutate(sb.sandboxID)}
+            onTerminal={() => setTerminalSandbox(sb.sandboxID)}
             busy={pendingId === sb.sandboxID}
           />
         ))}
@@ -169,6 +172,15 @@ export default function SandboxesPage() {
           <div className="py-16 text-center text-sm text-muted-foreground">{t('noMatch')}</div>
         )}
       </Card>
+
+      {/* ── Terminal ── */}
+      {terminalSandbox && (
+        <TerminalPanel
+          sandboxID={terminalSandbox}
+          open={!!terminalSandbox}
+          onClose={() => setTerminalSandbox(null)}
+        />
+      )}
     </div>
   );
 }
@@ -178,12 +190,14 @@ function Row({
   onKill,
   onPause,
   onResume,
+  onTerminal,
   busy,
 }: {
   sb: RunningSandbox;
   onKill: () => void;
   onPause: () => void;
   onResume: () => void;
+  onTerminal: () => void;
   busy: boolean;
 }) {
   const { t } = useTranslation('sandboxes');
@@ -224,6 +238,15 @@ function Row({
         )}
         <Button size="icon" variant="ghost" title={t('actions.kill')} onClick={onKill} disabled={busy}>
           <Trash2 size={14} className="text-cube-err" />
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          title={state !== 'running' ? t('terminal.error.sandboxNotRunning') : t('actions.terminal')}
+          onClick={onTerminal}
+          disabled={state !== 'running' || busy}
+        >
+          <TerminalIcon size={14} />
         </Button>
       </div>
     </div>
