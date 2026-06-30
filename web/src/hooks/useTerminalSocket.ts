@@ -19,14 +19,13 @@ interface UseTerminalSocketReturn {
   disconnect: () => void;
 }
 
-const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY_MS = 1000;
 
 /**
  * Manages the WebSocket lifecycle for a terminal session.
  *
  * Features:
- * - Automatic reconnection with exponential backoff (max 3 retries)
+ * - Indefinite reconnection with exponential backoff (30s ceiling)
  * - Connection state tracking
  * - Binary and text frame sending (text for resize control messages)
  */
@@ -41,6 +40,7 @@ export function useTerminalSocket({
   const retryCountRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
+  const explicitDisconnectRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -66,6 +66,7 @@ export function useTerminalSocket({
       return;
     }
 
+    explicitDisconnectRef.current = false;
     setConnectionState(retryCountRef.current > 0 ? 'reconnecting' : 'connecting');
     const url = buildWsUrl();
     const ws = new WebSocket(url);
@@ -89,25 +90,21 @@ export function useTerminalSocket({
       if (!mountedRef.current) return;
       const reason = event.reason || 'connection closed';
 
-      if (event.code === 1000) {
-        // Clean close
+      if (event.code === 1000 || explicitDisconnectRef.current) {
+        // Clean close or explicit disconnect
+        explicitDisconnectRef.current = false;
         setConnectionState('disconnected');
         onClose(reason);
         return;
       }
 
-      // Unexpected close — attempt reconnect
-      if (retryCountRef.current < MAX_RETRIES) {
-        retryCountRef.current += 1;
-        setConnectionState('reconnecting');
-        const delay = Math.min(INITIAL_RETRY_DELAY_MS * Math.pow(2, retryCountRef.current - 1), 30000);
-        retryTimerRef.current = setTimeout(() => {
-          if (mountedRef.current) connect();
-        }, delay);
-      } else {
-        setConnectionState('disconnected');
-        onClose(reason);
-      }
+      // Unexpected close — retry indefinitely with exponential backoff
+      retryCountRef.current += 1;
+      setConnectionState('reconnecting');
+      const delay = Math.min(INITIAL_RETRY_DELAY_MS * Math.pow(2, retryCountRef.current - 1), 30000);
+      retryTimerRef.current = setTimeout(() => {
+        if (mountedRef.current) connect();
+      }, delay);
     };
 
     ws.onerror = () => {
@@ -120,7 +117,7 @@ export function useTerminalSocket({
       clearTimeout(retryTimerRef.current);
       retryTimerRef.current = null;
     }
-    retryCountRef.current = MAX_RETRIES; // prevent reconnect
+    explicitDisconnectRef.current = true; // prevent reconnect
     if (wsRef.current) {
       wsRef.current.close(1000, 'user disconnect');
       wsRef.current = null;

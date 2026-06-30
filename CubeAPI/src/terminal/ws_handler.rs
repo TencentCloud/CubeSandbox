@@ -175,7 +175,17 @@ pub async fn ws_terminal_handler(
         let state_str = match detail.state {
             SandboxState::Paused => "paused",
             SandboxState::Pausing => "pausing",
-            _ => unreachable!("filtered by outer if: state != Running"),
+            s => {
+                tracing::warn!(state = ?s, "unexpected sandbox state in terminal handler");
+                return Ok((
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "sandbox not running",
+                        "state": "unknown"
+                    })),
+                )
+                    .into_response());
+            }
         };
         return Ok((
             StatusCode::CONFLICT,
@@ -428,7 +438,6 @@ async fn handle_terminal_socket(
         .header("Content-Type", "application/connect+json")
         .header("Connect-Protocol-Version", "1")
         .header("X-Access-Token", &envd_access_token)
-        .header("Authorization", format!("Basic {}", base64_encode("root:")))
         .body(reqwest::Body::wrap_stream(body_stream))
         .send()
         .await

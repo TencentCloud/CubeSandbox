@@ -55,7 +55,7 @@ impl TerminalCloseReason {
 }
 
 /// In-memory record of a single terminal session.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TerminalSession {
     /// Unique session identifier (UUID v4).
     pub session_id: SessionId,
@@ -113,28 +113,64 @@ impl TerminalSession {
 ///
 /// Sessions are keyed by `SessionId` and indexed by `sandbox_id` for
 /// bulk cleanup (e.g. when a sandbox is destroyed).
+///
+/// Maintains secondary O(1) counters for per-sandbox and per-user
+/// session limits so connection handshakes avoid full-table scans.
 #[derive(Clone)]
 pub struct SessionTracker {
     sessions: Arc<DashMap<SessionId, TerminalSession>>,
+    sandbox_counts: Arc<DashMap<String, usize>>,
+    user_counts: Arc<DashMap<String, usize>>,
 }
 
 impl SessionTracker {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(DashMap::new()),
+            sandbox_counts: Arc::new(DashMap::new()),
+            user_counts: Arc::new(DashMap::new()),
         }
     }
 
     /// Register a new session and return its ID.
     pub fn create(&self, session: TerminalSession) -> SessionId {
         let id = session.session_id;
+        // Increment O(1) counters.
+        self.sandbox_counts
+            .entry(session.sandbox_id.clone())
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+        self.user_counts
+            .entry(session.user.clone())
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
         self.sessions.insert(id, session);
         id
     }
 
     /// Remove a session from the tracker. Returns the removed session if it existed.
     pub fn remove(&self, session_id: &SessionId) -> Option<TerminalSession> {
-        self.sessions.remove(session_id).map(|(_, s)| s)
+        let removed = self.sessions.remove(session_id).map(|(_, s)| s);
+        if let Some(ref session) = removed {
+            // Decrement O(1) counters.
+            self.dec_counter(&self.sandbox_counts, &session.sandbox_id);
+            self.dec_counter(&self.user_counts, &session.user);
+        }
+        removed
+    }
+
+    /// Decrement a counter, removing the entry when it reaches zero.
+    fn dec_counter(&self, map: &DashMap<String, usize>, key: &str) {
+        // Use remove_if_mut-like pattern: get_mut + check.
+        // If not found or already 0, leave things consistent.
+        if let Some(mut entry) = map.get_mut(key) {
+            if *entry <= 1 {
+                drop(entry);
+                map.remove(key);
+            } else {
+                *entry -= 1;
+            }
+        }
     }
 
     /// Look up a session by ID.
@@ -152,31 +188,39 @@ impl SessionTracker {
     }
 
     /// Remove and return all sessions for a given sandbox.
+    ///
+    /// Uses `retain()` for single-pass atomic-style removal within each
+    /// shard instead of collect-then-remove.
     pub fn remove_by_sandbox(&self, sandbox_id: &str) -> Vec<TerminalSession> {
-        self.sessions
-            .iter()
-            .filter(|entry| entry.sandbox_id == sandbox_id)
-            .map(|entry| entry.session_id)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .filter_map(|id| self.remove(&id))
-            .collect()
+        let mut removed = Vec::new();
+        self.sessions.retain(|_, session| {
+            if session.sandbox_id == sandbox_id {
+                self.dec_counter(&self.user_counts, &session.user);
+                removed.push(session.clone());
+                false
+            } else {
+                true
+            }
+        });
+        // Remove the sandbox counter entirely — all sessions gone.
+        self.sandbox_counts.remove(sandbox_id);
+        removed
     }
 
-    /// Count the number of active sessions for a given sandbox.
+    /// Count the number of active sessions for a given sandbox (O(1)).
     pub fn count_by_sandbox(&self, sandbox_id: &str) -> usize {
-        self.sessions
-            .iter()
-            .filter(|entry| entry.sandbox_id == sandbox_id)
-            .count()
+        self.sandbox_counts
+            .get(sandbox_id)
+            .map(|entry| *entry)
+            .unwrap_or(0)
     }
 
-    /// Count the number of active sessions for a given user.
+    /// Count the number of active sessions for a given user (O(1)).
     pub fn count_by_user(&self, user: &str) -> usize {
-        self.sessions
-            .iter()
-            .filter(|entry| entry.user == user)
-            .count()
+        self.user_counts
+            .get(user)
+            .map(|entry| *entry)
+            .unwrap_or(0)
     }
 
     /// Find all sessions that have exceeded their idle timeout.
