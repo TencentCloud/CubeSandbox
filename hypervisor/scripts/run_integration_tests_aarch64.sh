@@ -285,4 +285,9 @@ else
     exit $RES
 fi
 
+if [ $RES -eq 0 ]; then
+    time cargo test "ivshmem::$test_filter" --target $BUILD_TARGET -- ${test_binary_args[*]}
+    RES=$?
+fi
+
 exit $RES
