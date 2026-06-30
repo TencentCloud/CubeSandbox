@@ -56,6 +56,8 @@ start_with_pidfile \
 
 wait_for_http "http://${NETWORK_AGENT_HEALTH_ADDR}/readyz" "${NETWORK_AGENT_READY_TIMEOUT}" 1 || die "network-agent did not become ready, check logs under ${LOG_DIR}"
 
+"${SCRIPT_DIR}/up-cube-egress.sh"
+
 start_with_pidfile \
   "cubelet" \
   "export CUBE_SANDBOX_NODE_IP=\"${CUBE_SANDBOX_NODE_IP}\"; \"${CUBELET_BIN}\" --config \"${CUBELET_CONFIG}\" --dynamic-conf-path \"${CUBELET_DYNAMICCONF}\""

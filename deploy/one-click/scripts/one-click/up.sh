@@ -77,6 +77,8 @@ start_with_pidfile \
 
 wait_for_http "http://${NETWORK_AGENT_HEALTH_ADDR}/readyz" "${NETWORK_AGENT_READY_TIMEOUT}" 1 || die "network-agent did not become ready, check logs under ${LOG_DIR}"
 
+"${SCRIPT_DIR}/up-cube-egress.sh"
+
 start_with_pidfile \
   "cubemaster" \
   "export CUBE_MASTER_CONFIG_PATH=\"${CUBEMASTER_CFG}\"; ${CUBEMASTER_ARTIFACT_STORE_EXPORT} \"${CUBEMASTER_BIN}\""
