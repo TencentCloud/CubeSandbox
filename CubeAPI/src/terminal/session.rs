@@ -11,6 +11,7 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 /// Unique identifier for a terminal session.
@@ -121,6 +122,11 @@ pub struct SessionTracker {
     sessions: Arc<DashMap<SessionId, TerminalSession>>,
     sandbox_counts: Arc<DashMap<String, usize>>,
     user_counts: Arc<DashMap<String, usize>>,
+    /// Per-session shutdown signals. When a sandbox is paused or destroyed,
+    /// `close_sessions_for_sandbox` sends `Some(reason)` through these
+    /// channels so running tasks can send WS close frames before exiting.
+    /// Initial value is `None` (no shutdown requested).
+    shutdown_senders: Arc<DashMap<SessionId, watch::Sender<Option<TerminalCloseReason>>>>,
 }
 
 impl SessionTracker {
@@ -129,6 +135,7 @@ impl SessionTracker {
             sessions: Arc::new(DashMap::new()),
             sandbox_counts: Arc::new(DashMap::new()),
             user_counts: Arc::new(DashMap::new()),
+            shutdown_senders: Arc::new(DashMap::new()),
         }
     }
 
@@ -230,6 +237,39 @@ impl SessionTracker {
             .filter(|entry| entry.is_idle())
             .map(|entry| (entry.session_id, TerminalCloseReason::IdleTimeout))
             .collect()
+    }
+
+    /// Register a shutdown sender for a session. Called by
+    /// `handle_terminal_socket` before entering the main event loop.
+    pub fn register_shutdown_sender(
+        &self,
+        session_id: SessionId,
+        sender: watch::Sender<Option<TerminalCloseReason>>,
+    ) {
+        self.shutdown_senders.insert(session_id, sender);
+    }
+
+    /// Remove the shutdown sender for a session. Called by
+    /// `cleanup_session` to prevent stale entries.
+    pub fn remove_shutdown_sender(&self, session_id: &SessionId) {
+        self.shutdown_senders.remove(session_id);
+    }
+
+    /// Send a shutdown signal to all sessions for a given sandbox.
+    /// Returns the session IDs that were signaled (before removal).
+    /// Used by `close_sessions_for_sandbox` before bulk removal.
+    pub fn signal_shutdown_for_sandbox(
+        &self,
+        sandbox_id: &str,
+        reason: TerminalCloseReason,
+    ) -> Vec<SessionId> {
+        let session_ids: Vec<SessionId> = self.list_by_sandbox(sandbox_id);
+        for sid in &session_ids {
+            if let Some(sender) = self.shutdown_senders.get(sid) {
+                let _ = sender.send(Some(reason));
+            }
+        }
+        session_ids
     }
 
     /// Returns the total count of active sessions.

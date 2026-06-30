@@ -54,6 +54,16 @@ export function useTerminalSocket({
   }, []);
 
   const buildWsUrl = useCallback(() => {
+    // NOTE: The session token is placed in the URL query parameter because
+    // browsers cannot set custom headers on WebSocket upgrade requests.
+    // This means the token may appear in:
+    //   - Server access logs (CubeAPI, reverse proxy, load balancer)
+    //   - Browser developer tools (Network tab)
+    //   - Referer headers from any resources loaded during the session
+    //
+    // Mitigations:
+    //   - Set `Referrer-Policy: no-referrer` on pages serving the terminal
+    //   - Consider a short-lived sub-token scoped to the terminal endpoint
     const sessionToken = localStorage.getItem('cube.session') ?? '';
     const isSecure = window.location.protocol === 'https:';
     const proto = isSecure ? 'wss' : 'ws';

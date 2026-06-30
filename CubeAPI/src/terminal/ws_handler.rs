@@ -8,6 +8,22 @@
 //! authenticates the user, validates the sandbox state, then bridges
 //! the WebSocket to an envd `process.Process/Connect` stream inside the
 //! target container.
+//!
+//! ## Security note: token in query parameter
+//!
+//! The auth token is carried in the WebSocket URL query parameter because
+//! browsers cannot set custom headers (`Authorization`, etc.) on the
+//! WebSocket upgrade handshake. This means the token will appear in:
+//!
+//! - Server access logs (this service, reverse proxies, load balancers)
+//! - The `Referer` header of any resource requests initiated during the
+//!   terminal session
+//!
+//! Mitigations:
+//! - Pages serving the terminal SHOULD set `Referrer-Policy: no-referrer`
+//! - Consider issuing short-lived sub-tokens scoped to this endpoint
+//! - The `SameSite=Strict` cookie approach is not viable here due to
+//!   the `token` parameter being in the query string, not a cookie
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -409,8 +425,8 @@ fn build_envd_url(cubemaster_url: &str, sandbox_id: &str) -> Result<String, AppE
 /// - A Tokio mpsc channel feeds WS stdin frames into a streaming reqwest body.
 /// - The envd response is read as a byte stream and decoded into events,
 ///   which are forwarded to the WS as binary frames.
-/// - An idle timer ticks every 30s; if no activity for the configured timeout,
-///   both sides are closed.
+/// - An idle timer ticks at half the configured idle timeout (capped at 15s);
+///   if no activity for the configured timeout, both sides are closed.
 async fn handle_terminal_socket(
     mut ws_socket: WebSocket,
     session_id: crate::terminal::session::SessionId,
@@ -426,12 +442,37 @@ async fn handle_terminal_socket(
     // Channel for stdin: WS frames → envd request body stream.
     let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
 
-    // Build the streaming request body from the stdin channel.
-    let body_stream = tokio_stream::wrappers::ReceiverStream::new(stdin_rx)
-        .map(|chunk| Ok::<_, std::io::Error>(proxy::encode_stdin_frame(&chunk)))
-        .chain(futures::stream::once(async {
-            Ok::<_, std::io::Error>(proxy::encode_end_stream_frame())
-        }));
+    // Build the streaming request body: ProcessStartRequest, then stdin frames,
+    // then end-of-stream marker. The initial ProcessStartRequest tells envd what
+    // command to run (interactive bash login shell).
+    let connect_req = proxy::build_connect_request("/bin/bash", &["-l".to_string()]);
+    let connect_req_bytes = match serde_json::to_vec(&connect_req) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(session_id = %session_id, error = %e, "connect request serialization failed");
+            let _ = ws_socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: "internal error".into(),
+                })))
+                .await;
+            cleanup_session(
+                &tracker, session_id, TerminalCloseReason::Error,
+                &sandbox_id, &container_name, &user,
+            );
+            return;
+        }
+    };
+    let body_stream = futures::stream::once(async move {
+        Ok::<_, std::io::Error>(proxy::encode_frame(proxy::FLAG_DATA, &connect_req_bytes))
+    })
+    .chain(
+        tokio_stream::wrappers::ReceiverStream::new(stdin_rx)
+            .map(|chunk| Ok::<_, std::io::Error>(proxy::encode_stdin_frame(&chunk)))
+    )
+    .chain(futures::stream::once(async {
+        Ok::<_, std::io::Error>(proxy::encode_end_stream_frame())
+    }));
 
     let envd_resp = match http_client
         .post(&envd_url)
@@ -475,10 +516,15 @@ async fn handle_terminal_socket(
 
     tracing::info!(session_id = %session_id, "bidirectional proxy started");
 
+    // Create a shutdown signal channel so close_sessions_for_sandbox can
+    // notify this task to send a WS close frame on sandbox pause/destroy.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(None);
+    tracker.register_shutdown_sender(session_id, shutdown_tx);
+
     let mut envd_body = envd_resp.bytes_stream();
     let mut envd_buf = FrameBuffer::new();
     // Tick at half the idle timeout (capped at 30s) to catch idle sessions promptly.
-    let idle_tick = Duration::from_secs(idle_timeout_secs.min(30) / 2);
+    let idle_tick = Duration::from_secs((idle_timeout_secs.min(30) / 2).max(1));
     let mut idle_timer = tokio::time::interval(idle_tick);
 
     loop {
@@ -487,7 +533,7 @@ async fn handle_terminal_socket(
             ws_msg = ws_socket.recv() => {
                 let touched = match ws_msg {
                     Some(Ok(Message::Binary(data))) => {
-                        if stdin_tx.try_send(data.to_vec()).is_err() {
+                        if stdin_tx.try_send(data).is_err() {
                             tracing::warn!(session_id = %session_id, "stdin channel full, dropping input");
                         }
                         true
@@ -532,12 +578,19 @@ async fn handle_terminal_socket(
                             );
                             return;
                         }
-                        if let Err(e) = process_envd_frames(
+                        match process_envd_frames(
                             &mut envd_buf, &mut ws_socket, session_id,
                             &tracker, &sandbox_id, &container_name, &user,
                         ).await {
-                            tracing::error!(session_id = %session_id, error = %e);
-                            return;
+                            FrameResult::Continue => {}
+                            FrameResult::NormalExit(reason) => {
+                                tracing::info!(session_id = %session_id, reason = %reason, "envd session ended");
+                                return;
+                            }
+                            FrameResult::Error(reason) => {
+                                tracing::error!(session_id = %session_id, error = %reason, "envd session error");
+                                return;
+                            }
                         }
                     }
                     Some(Err(e)) => {
@@ -567,6 +620,28 @@ async fn handle_terminal_socket(
                         return;
                     }
                 }
+            }
+
+            // ── Shutdown signal (sandbox pause/destroy) ──────────────
+            _ = shutdown_rx.changed() => {
+                let reason = shutdown_rx.borrow_and_update().unwrap_or(TerminalCloseReason::Error);
+                tracing::info!(session_id = %session_id, reason = reason.as_str(), "shutdown signal received");
+                let ws_code = match reason {
+                    TerminalCloseReason::SandboxPaused => 1001, // going away
+                    TerminalCloseReason::SandboxDestroyed => 1001,
+                    _ => 1000,
+                };
+                let _ = ws_socket.send(Message::Close(Some(
+                    axum::extract::ws::CloseFrame {
+                        code: ws_code,
+                        reason: reason.ws_close_reason().into(),
+                    }
+                ))).await;
+                cleanup_session(
+                    &tracker, session_id, reason,
+                    &sandbox_id, &container_name, &user,
+                );
+                return;
             }
 
             // ── Idle timeout ──────────────────────────────────────────
@@ -628,8 +703,22 @@ fn handle_ws_text(text: &str, stdin_tx: &tokio::sync::mpsc::Sender<Vec<u8>>) {
     }
 }
 
+/// Return type for `process_envd_frames` that distinguishes normal termination
+/// from actual errors, so the caller can log at the appropriate level.
+enum FrameResult {
+    /// More frames may be available; caller should continue.
+    Continue,
+    /// The envd connection ended normally (end-of-stream, process exit).
+    /// Cleanup has already been performed.
+    NormalExit(String),
+    /// An actual error occurred (e.g., WS send failure).
+    /// Cleanup has already been performed.
+    Error(String),
+}
+
 /// Process all complete frames in the envd buffer, forwarding events to WS.
-/// Returns `Ok(())` to continue, or `Err(msg)` if the connection should end.
+/// Returns `FrameResult::Continue` to keep processing, or a terminal variant if
+/// the connection should end.
 async fn process_envd_frames(
     buf: &mut FrameBuffer,
     ws: &mut WebSocket,
@@ -638,7 +727,7 @@ async fn process_envd_frames(
     sandbox_id: &str,
     container_name: &str,
     user: &str,
-) -> Result<(), String> {
+) -> FrameResult {
     loop {
         match buf.try_take_frame() {
             Ok(Some((flags, payload))) => {
@@ -654,7 +743,7 @@ async fn process_envd_frames(
                         tracker, session_id, TerminalCloseReason::ClientDisconnect,
                         sandbox_id, container_name, user,
                     );
-                    return Err("envd end-of-stream".to_string());
+                    return FrameResult::NormalExit("envd end-of-stream".to_string());
                 }
                 if flags == proxy::FLAG_COMPRESSED {
                     tracing::warn!(session_id = %session_id, "unsupported compressed frame");
@@ -695,12 +784,16 @@ async fn process_envd_frames(
                                         tracker, session_id, TerminalCloseReason::ClientDisconnect,
                                         sandbox_id, container_name, user,
                                     );
-                                    return Err("envd process ended".to_string());
+                                    return FrameResult::NormalExit("envd process ended".to_string());
                                 }
                                 EnvdEvent::Keepalive => Ok(()),
                             };
                             if send_result.is_err() {
-                                return Err("WS send error".to_string());
+                                cleanup_session(
+                                    tracker, session_id, TerminalCloseReason::Error,
+                                    sandbox_id, container_name, user,
+                                );
+                                return FrameResult::Error("WS send error".to_string());
                             }
                         }
                     }
@@ -709,10 +802,10 @@ async fn process_envd_frames(
                     }
                 }
             }
-            Ok(None) => return Ok(()),
+            Ok(None) => return FrameResult::Continue,
             Err(e) => {
                 tracing::warn!(session_id = %session_id, error = %e, "envd frame decode error");
-                return Ok(());
+                return FrameResult::Continue;
             }
         }
     }
@@ -727,6 +820,10 @@ fn cleanup_session(
     container_name: &str,
     user: &str,
 ) {
+    // Always remove the shutdown sender — prevents stale entries when a
+    // session exits before receiving an external shutdown signal.
+    tracker.remove_shutdown_sender(&session_id);
+
     if let Some(session) = tracker.remove(&session_id) {
         tracing::info!(
             event_type = "terminal_session_end",
@@ -758,14 +855,23 @@ fn base64_encode(s: &str) -> String {
 }
 
 /// Close all terminal sessions for a given sandbox (called on pause/destroy).
+///
+/// Sends a shutdown signal to each active session task via its watch channel,
+/// then removes any sessions that haven't already self-cleaned up.
 pub async fn close_sessions_for_sandbox(
     tracker: &SessionTracker,
     sandbox_id: &str,
     reason: TerminalCloseReason,
 ) {
+    // 1. Signal each session task to send a WS close frame and exit.
+    let signaled = tracker.signal_shutdown_for_sandbox(sandbox_id, reason);
+
+    // 2. Remove any remaining sessions (tasks that didn't self-clean).
     let sessions = tracker.remove_by_sandbox(sandbox_id);
     let count = sessions.len();
     for session in &sessions {
+        // Also clean up stale shutdown senders.
+        tracker.remove_shutdown_sender(&session.session_id);
         tracing::info!(
             event_type = "terminal_session_end",
             session_id = %session.session_id,
@@ -777,10 +883,11 @@ pub async fn close_sessions_for_sandbox(
             "terminal audit"
         );
     }
-    if count > 0 {
+    if signaled.len() + count > 0 {
         tracing::info!(
             sandbox_id = %sandbox_id,
-            count = sessions.len(),
+            signaled = signaled.len(),
+            removed = count,
             reason = reason.as_str(),
             "closed terminal sessions for sandbox"
         );
