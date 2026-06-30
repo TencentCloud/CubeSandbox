@@ -329,9 +329,9 @@ func TestCleanupAfterEnvdInitFailurePassesExpectedContextAndRequest(t *testing.T
 	flowOpts := &workflow.CreateContext{CubeBoxCreated: true}
 	req := &cubebox.RunCubeSandboxRequest{RequestID: "req-cleanup"}
 	sb := &cubeboxstore.CubeBox{
+		Namespace: "ns-cleanup",
 		Metadata: cubeboxstore.Metadata{
-			ID:        "sb-cleanup",
-			Namespace: "ns-cleanup",
+			ID: "sb-cleanup",
 		},
 	}
 

@@ -310,10 +310,13 @@ func TestDoCreateTimeEnvdInitRetriesTransportError(t *testing.T) {
 	assert.Equal(t, envdInitMaxAttempts, callCount)
 }
 
-func TestDoCreateTimeEnvdInitFailsWhenTemplateHasNoEnvdSignal(t *testing.T) {
+func TestDoCreateTimeEnvdInitFallsBackWithoutEnvdSupportAnnotation(t *testing.T) {
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
+		if r.URL.Path != "/init" {
+			t.Fatalf("path=%q, want /init", r.URL.Path)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
@@ -335,16 +338,35 @@ func TestDoCreateTimeEnvdInitFailsWhenTemplateHasNoEnvdSignal(t *testing.T) {
 	sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
 
 	l := &local{envdHTTPClient: server.Client(), envdInitPort: port}
+	if err := l.doCreateTimeEnvdInit(context.Background(), req, sandBox); err != nil {
+		t.Fatalf("doCreateTimeEnvdInit err=%v", err)
+	}
+	if !called {
+		t.Fatal("expected missing envd support annotation to still issue envd init request")
+	}
+}
+
+func TestDoCreateTimeEnvdInitFailsWithoutEnvdSupportAnnotationWhenEnvdUnavailable(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("dial tcp %s: connection refused", r.URL.Host)
+		}),
+	}
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			constants.MasterAnnotationCreateTimeEnvVars: `{"SESSION_ID":"user-session-test"}`,
+		},
+	}
+	sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
+
+	l := &local{envdHTTPClient: client, envdInitPort: 49983}
 	retErr := l.doCreateTimeEnvdInit(context.Background(), req, sandBox)
 	if retErr == nil {
-		t.Fatal("expected failure when envd signal is absent")
+		t.Fatal("expected init failure when envd init cannot be reached without envd support annotation")
 	}
 	errInfo, _ := ret.FromError(retErr)
-	assert.Equal(t, errorcode.ErrorCode_PreConditionFailed, errInfo.Code())
-	assert.Contains(t, errInfo.Message(), "envd-backed template")
-	if called {
-		t.Fatal("expected no envd init request when envd signal is absent")
-	}
+	assert.Equal(t, errorcode.ErrorCode_ExecCommandInSandboxFailed, errInfo.Code())
+	assert.Contains(t, errInfo.Message(), "connection refused")
 }
 
 func TestProbe(t *testing.T) {

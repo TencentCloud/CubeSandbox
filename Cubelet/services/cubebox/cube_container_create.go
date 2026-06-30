@@ -389,7 +389,7 @@ func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,
 	if flowOpts.CubeBoxCreated {
 		cleanupCtx = constants.WithCubeboxCreated(cleanupCtx)
 	}
-	return l.destroySandbox(cleanupCtx, &workflow.DestroyContext{
+	return l.destroySandboxAfterEnvdInitFailure(cleanupCtx, &workflow.DestroyContext{
 		BaseWorkflowInfo: workflow.BaseWorkflowInfo{
 			SandboxID: sandBox.ID,
 		},
@@ -400,7 +400,7 @@ func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,
 	})
 }
 
-func (l *local) destroySandbox(ctx context.Context, opts *workflow.DestroyContext) error {
+func (l *local) destroySandboxAfterEnvdInitFailure(ctx context.Context, opts *workflow.DestroyContext) error {
 	if l != nil && l.destroyFn != nil {
 		return l.destroyFn(ctx, opts)
 	}

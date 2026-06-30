@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 const (
@@ -37,11 +38,21 @@ const (
 	// Keep create-time envd init within a bounded sub-second budget so the
 	// safeguard absorbs brief restore jitter without turning sandbox create
 	// into an unbounded slow path.
-	envdInitAttemptTimeout = 150 * time.Millisecond
-	envdInitMaxAttempts    = 3
-	envdInitRetryDelay     = 25 * time.Millisecond
-	defaultEnvdInitPort    = 49983
+	envdInitAttemptTimeout             = 150 * time.Millisecond
+	envdInitMaxAttempts                = 3
+	envdInitRetryDelay                 = 25 * time.Millisecond
+	defaultEnvdInitPort                = 49983
+	missingEnvdSupportAnnotationDetail = "template does not carry envd support annotation"
 )
+
+func newEnvdInitFailure(msg string, hasEnvdCapability bool, err error) error {
+	if !hasEnvdCapability {
+		return ret.Errorf(errorcode.ErrorCode_ExecCommandInSandboxFailed,
+			"%s; %s: %v", msg, missingEnvdSupportAnnotationDetail, err)
+	}
+	return ret.Errorf(errorcode.ErrorCode_ExecCommandInSandboxFailed,
+		"%s: %v", msg, err)
+}
 
 func (l *local) getEnvdInitPort() int {
 	if l != nil && l.envdInitPort > 0 {
@@ -189,14 +200,6 @@ func (l *local) doCreateTimeEnvdInit(ctx context.Context, req *cubebox.RunCubeSa
 	if raw == "" {
 		return nil
 	}
-	// The propagated envd semantic-version annotation is the runtime capability
-	// signal for envd-backed templates. When callers request create-time env
-	// injection, missing this signal means the sandbox cannot satisfy the envd
-	// init contract, so fail fast instead of silently dropping the request.
-	if strings.TrimSpace(req.Annotations[constants.MasterAnnotationComponentEnvdVersion]) == "" {
-		return ret.Err(errorcode.ErrorCode_PreConditionFailed, "create_time_env_vars requires an envd-backed template")
-	}
-
 	envVars := map[string]string{}
 	if err := json.Unmarshal([]byte(raw), &envVars); err != nil {
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid create_time_env_vars annotation: %v", err)
@@ -217,35 +220,46 @@ func (l *local) doCreateTimeEnvdInit(ctx context.Context, req *cubebox.RunCubeSa
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "marshal create_time_env_vars init request failed: %v", err)
 	}
 
-	return l.doCreateTimeEnvdInitWithRetry(ctx, sandBox.IP, body)
+	port := l.getEnvdInitPort()
+	hasEnvdCapability := strings.TrimSpace(req.Annotations[constants.MasterAnnotationComponentEnvdVersion]) != ""
+	if !hasEnvdCapability {
+		// Templates built before envd capability propagation do not carry the
+		// annotation. Keep them backward-compatible by probing the default envd
+		// init endpoint with the same bounded retry instead of rejecting upfront.
+		log.G(ctx).WithFields(CubeLog.Fields{
+			"sandboxID":    sandBox.ID,
+			"templateID":   strings.TrimSpace(req.Annotations[constants.MasterAnnotationAppSnapshotTemplateID]),
+			"envdInitPort": port,
+		}).Warnf("missing envd support annotation; probing default envd init endpoint with bounded retry")
+	}
+
+	return l.doCreateTimeEnvdInitWithRetry(ctx, sandBox.IP, port, hasEnvdCapability, body)
 }
 
-func (l *local) doCreateTimeEnvdInitWithRetry(ctx context.Context, sandboxIP string, body []byte) error {
+func (l *local) doCreateTimeEnvdInitWithRetry(ctx context.Context, sandboxIP string, port int, hasEnvdCapability bool, body []byte) error {
 	var lastErr error
 	for attempt := 1; attempt <= envdInitMaxAttempts; attempt++ {
 		innerCtx, cancel := context.WithTimeout(ctx, envdInitAttemptTimeout)
-		retryable, err := l.doCreateTimeEnvdInitAttempt(innerCtx, sandboxIP, body)
+		retryable, err := l.doCreateTimeEnvdInitAttempt(innerCtx, sandboxIP, port, body)
 		cancel()
 		if err == nil {
 			return nil
 		}
 		lastErr = err
 		if !retryable || attempt == envdInitMaxAttempts {
-			return err
+			return newEnvdInitFailure("create_time_env_vars init failed after bounded retry", hasEnvdCapability, err)
 		}
-		log.G(ctx).Warnf("envd init transient failure on attempt %d/%d for sandbox %s: %v",
-			attempt, envdInitMaxAttempts, sandboxIP, err)
 		select {
 		case <-time.After(envdInitRetryDelay):
 		case <-ctx.Done():
-			return lastErr
+			return newEnvdInitFailure("create_time_env_vars init canceled during bounded retry", hasEnvdCapability, lastErr)
 		}
 	}
-	return lastErr
+	return newEnvdInitFailure("create_time_env_vars init failed after bounded retry", hasEnvdCapability, lastErr)
 }
 
-func (l *local) doCreateTimeEnvdInitAttempt(ctx context.Context, sandboxIP string, body []byte) (bool, error) {
-	reqURL := formatURL("http", sandboxIP, l.getEnvdInitPort(), envdInitPath)
+func (l *local) doCreateTimeEnvdInitAttempt(ctx context.Context, sandboxIP string, port int, body []byte) (bool, error) {
+	reqURL := formatURL("http", sandboxIP, port, envdInitPath)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL.String(), bytes.NewReader(body))
 	if err != nil {
 		return false, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "build envd init request failed: %v", err)
