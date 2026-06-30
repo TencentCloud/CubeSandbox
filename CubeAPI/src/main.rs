@@ -186,6 +186,14 @@ fn main() -> anyhow::Result<()> {
         "cube-api starting"
     );
 
+    // Prime the examples-root resolver at startup so that misconfiguration
+    // (missing examples/ directory, wrong CUBE_EXAMPLES_DIR, etc.) surfaces
+    // as an immediate fail-fast — with the full candidate list printed —
+    // instead of as a confusing HTTP 500 the first time a user opens an
+    // example. The resolver caches the result in a OnceLock, so subsequent
+    // calls are free.
+    let _ = services::examples::examples_root();
+
     // Warn operators who enable auth but forget to provide a real API key for
     // example subprocesses. In this mode the hardcoded fallback is NOT injected
     // (it is a publicly known value), so subprocesses won't have CUBE_API_KEY

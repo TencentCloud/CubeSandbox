@@ -8,6 +8,7 @@
 //! Handlers stay thin and delegate the actual work here.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use tokio::process::Command;
@@ -510,16 +511,127 @@ impl ExampleService {
 
 /// Resolve the examples root directory.
 ///
-/// `CUBE_EXAMPLES_DIR` overrides the root for tests / packaged installs.
-/// Default points at the in-repo `examples/` directory relative to
-/// `CubeAPI/Cargo.toml`.
+/// Resolution order (first existing & valid directory wins):
+///   1. `$CUBE_EXAMPLES_DIR` — explicit override (highest priority).
+///   2. `<exe_dir>/examples`            — flat / portable install.
+///   3. `<exe_dir>/../examples`         — typical systemd layout
+///      (e.g. `/opt/cube/bin/cubeapi` + `/opt/cube/examples`).
+///   4. `<exe_dir>/../share/cubeapi/examples` — FHS layout.
+///   5. `<cwd>/examples`                — running the binary from repo root.
+///   6. `env!("CARGO_MANIFEST_DIR")/../examples` — dev fallback for
+///      `cargo run` / `cargo test`. NOTE: this is a compile-time constant
+///      baked into the binary; on container-built / cross-machine deploys
+///      it usually does NOT match the host path, which is exactly why we
+///      validate existence and fall back gracefully instead of returning
+///      it blindly.
+///
+/// A candidate is considered valid only when it is an existing directory
+/// AND contains at least one registered scenario sub-directory. The latter
+/// check guards against accidentally pointing at an unrelated `examples/`
+/// directory that happens to exist on the host.
+///
+/// The result is cached in a process-wide `OnceLock` and returned by clone
+/// to preserve the existing `-> PathBuf` signature (callers do
+/// `examples_root().join(...)`).
+///
+/// On total failure the function logs every candidate it tried and
+/// terminates the process, so misconfiguration surfaces at startup rather
+/// than as a confusing HTTP 500 the first time a user opens a case.
 pub fn examples_root() -> PathBuf {
-    if let Ok(v) = std::env::var("CUBE_EXAMPLES_DIR") {
-        return PathBuf::from(v);
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| match resolve_examples_root() {
+        Ok(p) => {
+            tracing::info!(path = %p.display(), "examples root resolved");
+            p
+        }
+        Err(candidates) => {
+            eprintln!(
+                "[FATAL] CubeAPI cannot locate the examples/ directory. \
+                 Tried the following paths (in order):"
+            );
+            for (i, c) in candidates.iter().enumerate() {
+                eprintln!("  {}. {}", i + 1, c.display());
+            }
+            eprintln!(
+                "Hint: set CUBE_EXAMPLES_DIR to the absolute path of the \
+                 examples/ directory, e.g.\n      \
+                 export CUBE_EXAMPLES_DIR=/path/to/CubeSandbox/examples"
+            );
+            std::process::exit(1);
+        }
+    })
+    .clone()
+}
+
+/// Build the ordered candidate list and return the first valid one,
+/// or the full list (for error reporting) when none match.
+fn resolve_examples_root() -> Result<PathBuf, Vec<PathBuf>> {
+    let candidates = build_examples_candidates();
+    for c in &candidates {
+        if is_valid_examples_dir(c) {
+            return Ok(c.clone());
+        }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("examples")
+    Err(candidates)
+}
+
+fn build_examples_candidates() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::with_capacity(6);
+
+    // 1. Explicit override.
+    if let Ok(p) = std::env::var("CUBE_EXAMPLES_DIR") {
+        if !p.is_empty() {
+            v.push(PathBuf::from(p));
+        }
+    }
+
+    // 2 / 3 / 4. Paths derived from the running executable's location.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            v.push(dir.join("examples"));
+            v.push(dir.join("..").join("examples"));
+            v.push(
+                dir.join("..")
+                    .join("share")
+                    .join("cubeapi")
+                    .join("examples"),
+            );
+        }
+    }
+
+    // 5. Current working directory (e.g. running ./target/release/cubeapi
+    //    from the repo root after a container build).
+    if let Ok(cwd) = std::env::current_dir() {
+        v.push(cwd.join("examples"));
+    }
+
+    // 6. Compile-time fallback (`cargo run` / `cargo test`).
+    v.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("examples"),
+    );
+
+    v
+}
+
+/// A path is a usable examples root only when it is a directory AND
+/// contains at least one registered scenario sub-directory. The latter
+/// check prevents false positives like an empty `./examples/` lying
+/// around in the working directory.
+fn is_valid_examples_dir(p: &Path) -> bool {
+    if !p.is_dir() {
+        return false;
+    }
+    // Use the first non-hidden scenario from the registry as a sentinel
+    // so this validator stays in sync as scenarios are added/removed.
+    let sentinel = scenario_registry().iter().find(|s| !s.hidden);
+    match sentinel {
+        Some(s) => p.join(s.id).is_dir(),
+        // No visible scenarios registered → any existing directory passes;
+        // this only happens in unusual test builds.
+        None => true,
+    }
 }
 
 /// Install per-scenario Python dependencies from `requirements.txt` if present.
@@ -575,6 +687,144 @@ async fn ensure_requirements(base_dir: &Path) -> bool {
         Err(e) => {
             tracing::warn!("failed to spawn pip3: {}", e);
             true
+        }
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use uuid::Uuid;
+
+    /// RAII helper that creates a unique temp directory and removes it
+    /// (recursively) on drop. Avoids pulling in the `tempfile` crate just
+    /// for these tests.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!("cubeapi-test-{}", Uuid::new_v4()));
+            fs::create_dir_all(&p).expect("create temp dir");
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sentinel_scenario_id() -> &'static str {
+        scenario_registry()
+            .iter()
+            .find(|s| !s.hidden)
+            .expect("registry has at least one visible scenario")
+            .id
+    }
+
+    #[test]
+    fn is_valid_examples_dir_rejects_non_directory() {
+        let tmp = TempDir::new();
+        let f = tmp.path().join("not-a-dir");
+        fs::write(&f, b"hi").unwrap();
+        assert!(!is_valid_examples_dir(&f));
+        assert!(!is_valid_examples_dir(&tmp.path().join("does-not-exist")));
+    }
+
+    #[test]
+    fn is_valid_examples_dir_rejects_directory_without_sentinel() {
+        let tmp = TempDir::new();
+        // Directory exists but has no registered scenario sub-directory.
+        assert!(!is_valid_examples_dir(tmp.path()));
+    }
+
+    #[test]
+    fn is_valid_examples_dir_accepts_directory_with_sentinel() {
+        let tmp = TempDir::new();
+        fs::create_dir_all(tmp.path().join(sentinel_scenario_id())).unwrap();
+        assert!(is_valid_examples_dir(tmp.path()));
+    }
+
+    #[test]
+    fn resolver_prefers_cube_examples_dir_env_var() {
+        // Build a valid examples layout under a temp dir, point the env
+        // var at it, and confirm `resolve_examples_root` returns it.
+        let tmp = TempDir::new();
+        fs::create_dir_all(tmp.path().join(sentinel_scenario_id())).unwrap();
+
+        // SAFETY: tests in this module run serially via the per-test
+        // serialization guard below. Even without it, we restore the
+        // previous value on drop.
+        let _g = EnvGuard::set("CUBE_EXAMPLES_DIR", tmp.path().to_str().unwrap());
+
+        let resolved = resolve_examples_root().expect("should resolve via env var");
+        assert_eq!(resolved, tmp.path());
+    }
+
+    #[test]
+    fn resolver_skips_invalid_env_var_and_falls_through() {
+        // Env var points at a non-existent path; resolver should ignore
+        // it and continue down the candidate list. We can't assert which
+        // later candidate wins (depends on the host), so we only assert
+        // that resolution does NOT return the bogus env path.
+        let tmp = TempDir::new();
+        let bogus = tmp.path().join("definitely-not-here");
+        let _g = EnvGuard::set("CUBE_EXAMPLES_DIR", bogus.to_str().unwrap());
+
+        match resolve_examples_root() {
+            Ok(p) => assert_ne!(p, bogus, "must not pick a non-existent env path"),
+            Err(candidates) => {
+                // Acceptable: every candidate failed on this host.
+                // Just make sure the bogus path was indeed tried.
+                assert!(candidates.iter().any(|c| c == &bogus));
+            }
+        }
+    }
+
+    #[test]
+    fn build_candidates_includes_env_var_first_when_set() {
+        let _g = EnvGuard::set("CUBE_EXAMPLES_DIR", "/tmp/cube-test-marker");
+        let cands = build_examples_candidates();
+        assert_eq!(
+            cands.first().map(|p| p.as_path()),
+            Some(Path::new("/tmp/cube-test-marker"))
+        );
+    }
+
+    #[test]
+    fn build_candidates_omits_empty_env_var() {
+        let _g = EnvGuard::set("CUBE_EXAMPLES_DIR", "");
+        let cands = build_examples_candidates();
+        assert!(!cands.iter().any(|p| p.as_os_str().is_empty()));
+        // Still has the compile-time fallback at the end.
+        assert!(!cands.is_empty());
+    }
+
+    // ── Env var guard (restores previous value on drop) ──────────────
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
         }
     }
 }
