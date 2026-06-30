@@ -12,7 +12,6 @@ import {
   Boxes,
   Camera,
   CircuitBoard,
-  Cpu,
   FlaskConical,
   FolderOpen,
   GitBranch,
@@ -32,7 +31,6 @@ export type ExampleCategoryId =
   | 'network'
   | 'browser'
   | 'image'
-  | 'perf'
   | 'advanced';
 
 export interface ExampleCategory {
@@ -95,14 +93,6 @@ export const EXAMPLE_CATEGORIES: ExampleCategory[] = [
     accent: 'from-cube-rose/20 via-cube-rose/5 to-transparent',
     hintZh: '基于自定义镜像(nginx 等)启动沙箱并验证。',
     hintEn: 'Boot a sandbox from a custom image (nginx, …) and verify.',
-  },
-  {
-    id: 'perf',
-    i18nKey: 'categories.perf',
-    icon: Cpu,
-    accent: 'from-cube-amber/15 via-cube-amber/5 to-transparent',
-    hintZh: '并发建沙箱、跑压测，拿到真实吞吐数字。',
-    hintEn: 'Concurrent sandbox creation, throughput numbers.',
   },
   {
     id: 'advanced',
@@ -363,29 +353,6 @@ function topologyNginx(): ScenarioTopology {
   return t;
 }
 
-function topologyBench(): ScenarioTopology {
-  const t = cloneSharedTopology();
-  // Fan out: replace single MicroVM + CubeRuntime with N parallel clones.
-  t.nodes = t.nodes.filter((n) => n.id !== 'microvm' && n.id !== 'cube-runtime');
-  t.edges = t.edges.filter((e) => e.to !== 'microvm' && e.from !== 'microvm');
-  for (let i = 0; i < 4; i++) {
-    t.nodes.push({
-      id: `microvm-${i}`,
-      labelZh: `MicroVM #${i}`,
-      labelEn: `MicroVM #${i}`,
-      plane: 'data',
-      kind: 'vm',
-      descriptionZh: '并发压测的目标沙箱。',
-      descriptionEn: 'Concurrent benchmark target sandbox.',
-    });
-    t.edges.push(
-      { from: 'network-agent', to: `microvm-${i}`, labelZh: 'eBPF 策略', labelEn: 'eBPF Policy', plane: 'data' },
-      { from: 'cube-hypervisor', to: `microvm-${i}`, labelZh: 'QMP', labelEn: 'QMP', plane: 'control' },
-    );
-  }
-  return t;
-}
-
 // ─── Scenario registry ──────────────────────────────────────────────────────
 //
 // 8 scenarios — none of them AI / LLM. The Rust handler enforces the same
@@ -571,24 +538,6 @@ export const EXAMPLE_SCENARIOS: ExampleScenario[] = [
         titleZh: 'Test Files', titleEn: 'Test Files',
         descriptionZh: '通过代理访问 nginx 服务的文件。',
         descriptionEn: 'Reach the nginx-served files via the proxy.' },
-    ],
-  },
-  {
-    id: 'cube-bench',
-    titleZh: 'cube-bench',
-    titleEn: 'cube-bench',
-    descriptionZh: '用 Go 写的并发建沙箱基准测试，输出真实吞吐。',
-    descriptionEn: 'Concurrent sandbox creation benchmark written in Go, with throughput numbers.',
-    category: 'perf',
-    icon: Cpu,
-    accent: 'from-cube-amber/15 via-cube-amber/5 to-transparent',
-    topology: topologyBench(),
-    storeItemId: 'sandbox-code',
-    files: [
-      { id: 'main', filename: 'main.go', language: 'go',
-        titleZh: '运行压测', titleEn: 'Run Benchmark',
-        descriptionZh: '并发启动 N 个沙箱并报告吞吐。',
-        descriptionEn: 'Spawn N sandboxes in parallel and report throughput.' },
     ],
   },
 ];
