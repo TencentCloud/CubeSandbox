@@ -71,7 +71,7 @@ instance_db_config:
 
 redis:
   nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"
-  password: "ceuhvu123"
+  password: "__CUBE_SANDBOX_REDIS_PASSWORD__"
   db_no: 0
   max_idle: 8
   max_active: 32
