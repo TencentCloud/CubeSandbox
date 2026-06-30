@@ -479,7 +479,9 @@ resource "kubernetes_service" "cube_api" {
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
       "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
-      }, var.enable_public_network ? {} : {
+      }, var.enable_public_network ? {
+      "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
+      } : {
       "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
     })
   }
@@ -863,13 +865,15 @@ resource "kubernetes_service" "cube_webui" {
     name      = "cube-webui"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
     # When enable_public_network is false (default), pin the CLB to a
-    # VPC-internal subnet so it only gets a private VIP. When true, omit the
-    # internal-subnetid annotation so TKE provisions a public CLB.
+    # VPC-internal subnet so it only gets a private VIP. When true, bill by
+    # traffic (matching cube-api / cube-proxy) for cost predictability.
     annotations = merge({
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
       "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
-      }, var.enable_public_network ? {} : {
+      }, var.enable_public_network ? {
+      "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
+      } : {
       "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
     })
   }
