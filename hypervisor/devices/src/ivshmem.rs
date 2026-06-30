@@ -4,6 +4,7 @@
 //
 
 use std::any::Any;
+use std::path::PathBuf;
 use std::result;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
@@ -35,10 +36,49 @@ type GuestRegionMmap = vm_memory::GuestRegionMmap<AtomicBitmap>;
 
 #[derive(Debug, Error)]
 pub enum IvshmemError {
-    #[error("Failed to retrieve PciConfigurationState: {0}")]
-    RetrievePciConfigurationState(#[source] anyhow::Error),
     #[error("Failed to retrieve IvshmemDeviceState: {0}")]
     RetrieveIvshmemDeviceStateState(#[source] anyhow::Error),
+    #[error("Failed to remove user memory region")]
+    RemoveUserMemoryRegion,
+    #[error("Failed to create user memory region.")]
+    CreateUserMemoryRegion,
+    #[error("Failed to create userspace mapping.")]
+    CreateUserspaceMapping,
+    #[error("Failed to remove old userspace mapping.")]
+    RemoveUserspaceMapping,
+    #[error("Failed to add device region.")]
+    AddDeviceRegion,
+    #[error("Failed to remove device region.")]
+    RemoveDeviceRegion,
+}
+
+/// Userspace mapping descriptor used by ivshmem to track the host-side
+/// memory region that backs the BAR2 shared memory.
+///
+/// Mirrors the layout of `virtio_devices::UserspaceMapping`. It is defined
+/// here to avoid a cyclic dependency between the `devices` crate and
+/// `virtio-devices`.
+#[derive(Clone)]
+pub struct IvshmemUserspaceMapping {
+    pub host_addr: u64,
+    pub mem_slot: u32,
+    pub addr: GuestAddress,
+    pub len: u64,
+    pub mergeable: bool,
+}
+
+/// Operations the VMM must provide so that ivshmem can (re)map its shared
+/// memory region into the guest at runtime, e.g. when the guest reprograms
+/// BAR2 to a new address.
+pub trait IvshmemOps: Send + Sync {
+    fn map_ram_region(
+        &mut self,
+        start_addr: u64,
+        size: usize,
+        backing_file: Option<PathBuf>,
+    ) -> Result<(Arc<GuestRegionMmap>, IvshmemUserspaceMapping), IvshmemError>;
+
+    fn unmap_ram_region(&mut self, mapping: IvshmemUserspaceMapping) -> Result<(), IvshmemError>;
 }
 
 #[derive(Copy, Clone)]
@@ -52,10 +92,16 @@ impl PciSubclass for IvshmemSubclass {
     }
 }
 
+/// Inner-Vm Shared Memory Device (Ivshmem device)
+///
+/// This device can share memory between host and guest(ivshmem-plain)
+/// and share memory between guests(ivshmem-doorbell).
+/// But only ivshmem-plain support now, ivshmem-doorbell doesn't support yet.
 pub struct IvshmemDevice {
     id: String,
 
     // ivshmem device registers
+    // (only used for ivshmem-doorbell, ivshmem-doorbell don't support yet)
     interrupt_mask: u32,
     interrupt_status: Arc<AtomicU32>,
     iv_position: u32,
@@ -65,8 +111,11 @@ pub struct IvshmemDevice {
     configuration: PciConfiguration,
     bar_regions: Vec<PciBarConfiguration>,
 
-    region: Option<Arc<GuestRegionMmap>>,
     region_size: u64,
+    ivshmem_ops: Arc<Mutex<dyn IvshmemOps>>,
+    backend_file: Option<PathBuf>,
+    region: Option<Arc<GuestRegionMmap>>,
+    userspace_mapping: Option<IvshmemUserspaceMapping>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -81,6 +130,8 @@ impl IvshmemDevice {
     pub fn new(
         id: String,
         region_size: u64,
+        backend_file: Option<PathBuf>,
+        ivshmem_ops: Arc<Mutex<dyn IvshmemOps>>,
         snapshot: Option<Snapshot>,
     ) -> Result<Self, IvshmemError> {
         let state: Option<IvshmemDeviceState> = snapshot
@@ -136,7 +187,10 @@ impl IvshmemDevice {
                 iv_position: s.iv_position,
                 doorbell: s.doorbell,
                 region_size,
+                ivshmem_ops,
+                backend_file,
                 region: None,
+                userspace_mapping: None,
             }
         } else {
             IvshmemDevice {
@@ -148,10 +202,22 @@ impl IvshmemDevice {
                 iv_position: 0,
                 doorbell: 0,
                 region_size,
+                ivshmem_ops,
+                backend_file,
                 region: None,
+                userspace_mapping: None,
             }
         };
         Ok(device)
+    }
+
+    pub fn set_region(
+        &mut self,
+        region: Arc<GuestRegionMmap>,
+        userspace_mapping: IvshmemUserspaceMapping,
+    ) {
+        self.region = Some(region);
+        self.userspace_mapping = Some(userspace_mapping);
     }
 
     pub fn config_bar_addr(&self) -> u64 {
@@ -330,6 +396,30 @@ impl PciDevice for IvshmemDevice {
     }
 
     fn move_bar(&mut self, old_base: u64, new_base: u64) -> result::Result<(), std::io::Error> {
+        // BAR2 holds the shared memory mapping. When the guest reprograms
+        // BAR2 to a new address, we must tear down the old userspace mapping
+        // and create a new one at the new GPA so that guest accesses to the
+        // new BAR address actually hit the same host backing memory.
+        if new_base == self.data_bar_addr() {
+            if let Some(old_mapping) = self.userspace_mapping.take() {
+                self.ivshmem_ops
+                    .lock()
+                    .unwrap()
+                    .unmap_ram_region(old_mapping)
+                    .map_err(std::io::Error::other)?;
+            }
+            let (region, new_mapping) = self
+                .ivshmem_ops
+                .lock()
+                .unwrap()
+                .map_ram_region(
+                    new_base,
+                    self.region_size as usize,
+                    self.backend_file.clone(),
+                )
+                .map_err(std::io::Error::other)?;
+            self.set_region(region, new_mapping);
+        }
         for bar in self.bar_regions.iter_mut() {
             if bar.addr() == old_base {
                 *bar = bar.set_address(new_base);
