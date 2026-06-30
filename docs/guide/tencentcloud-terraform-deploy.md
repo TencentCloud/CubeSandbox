@@ -8,36 +8,56 @@ Network hardening for the cluster deployment is handled by **Tencent Cloud secur
 
 ::: tip When to use this
 This deployment uses cloud resources to **quickly stand up a highly-available CubeSandbox service**: all cloud resources default to pay-as-you-go billing (see [Billing Mode](#billing-mode) below) and can be released in one shot with `destroy.sh`. For long-term use, switch to **prepaid (monthly/yearly subscription)** resources for better cost savings (see [Billing Mode](#billing-mode)). If you only need a single-machine deployment for validation, see the earlier deployment guides: [PVM Deployment](./pvm-deploy.md) or [Bare-Metal Deployment](./bare-metal-deploy.md).
+
+**Note**: The default deploys only a single 8C16G compute node, which can host a very limited number of sandboxes. For large-scale production usage, you must adjust the compute node and TKE node specs and counts — see [Node Specifications & Capacity Planning](#node-specifications--capacity-planning).
 :::
 
 ## Architecture Overview
 
 ```
-                       Internet
-                          │
-                 ┌────────┴────────┐
-                 │  Jumpserver CVM │  SSH:443, build host / bastion
-                 │  (public IP)    │  docker build & push → TCR
-                 └────────┬────────┘
-                          │ VPC internal
-   ┌──────────────────────┼─────────────────────────────┐
-   │                      │                              │
-┌──┴───────────────┐  ┌───┴───────────┐         ┌────────┴────────┐
-│  TKE managed CP  │  │ Compute CVM   │  …      │  Cloud DB        │
-│  cube-master     │  │  Cubelet      │         │  MySQL + Redis  │
-│  cube-api        │  │  network-agent│         └─────────────────┘
-│  cube-proxy      │  └───────────────┘
-│  cube-webui      │         ▲
-└────────┬─────────┘         │ CFS (NFS, RWX) shared storage
-         │                   │
-         └───────────────────┘  cube-master replicas share /data/CubeMaster/storage
+                          Internet
+                            │
+               ┌────────────┴────────────────────┐
+               │                                 │
+      ┌────────┴────────┐             ┌──────────┴─────────┐
+      │  Jumpserver CVM │             │ CLB (internal/     │
+      │  (public IP)    │             │      public)       │
+      │  SSH:443        │             │  cube-api :3000    │
+      │  build & push   │             │  cube-proxy :80/443 │
+      └────────┬────────┘             │  cube-webui :80    │
+               │                      └──────────┬─────────┘
+               │                                 │
+  ┌────────────┼─────────────────────────────────┼──────────┐
+  │            │            VPC internal          │           │
+  │  ┌─────────┴────────┐       ┌───────────────┴─────┐    │
+  │  │ Compute CVM ×N   │       │  TKE managed cluster │    │
+  │  │  Cubelet         │       │  cube-master (×2)   │    │
+  │  │  network-agent   │       │  cube-api (×2)      │    │
+  │  │  CubeEgress      │       │  cube-proxy (×1)    │    │
+  │  └──────────────────┘       │  cube-webui (×2)    │    │
+  │                             └───┬─────────────┬───┘    │
+  │                                 │             │         │
+  │                         ┌───────┴───────┐     │         │
+  │                         │  CFS (NFS)    │     │         │
+  │                         │  shared store  │     │         │
+  │                         └───────────────┘     │         │
+  │                                               │         │
+  │                         ┌─────────────────────┴───┐     │
+  │                         │  Cloud DB: MySQL + Redis │     │
+  │                         └─────────────────────────┘     │
+  │                                                         │
+  │  ┌──────────────┐       ┌──────────────┐                │
+  │  │  TCR registry │       │  NAT + EIP   │→ public egress │
+  │  └──────────────┘       └──────────────┘                │
+  └─────────────────────────────────────────────────────────┘
 ```
 
 | Component | Form | Notes |
 |-----------|------|-------|
 | Jumpserver | CVM (public IP, SSH 443) | Builds images, pushes to TCR, bastion into the private VPC |
+| Load balancer | CLB (internal/public) | Fronts `cube-api` / `cube-proxy` / `cube-webui`; internal mode by default, user traffic entry point |
 | Control plane | Managed TKE cluster | Runs `cube-master` / `cube-api` / `cube-proxy` / `cube-webui` |
-| Compute node | CVM PVM | Runs `Cubelet` / `network-agent`, hosts sandboxes |
+| Compute node | CVM PVM | Runs `Cubelet` / `network-agent` / `CubeEgress`, hosts sandboxes |
 | Database | Cloud MySQL 8.0 + Redis 7.0 | VPC-internal only, no public access |
 | Shared storage | CFS (General Standard NFS) | `cube-master` replicas share templates/snapshots/runtime state as ReadWriteMany |
 | Registry | TCR (basic) | Created by this run; the jumpserver pushes the four component images |
@@ -211,6 +231,107 @@ export TENCENTCLOUD_BUILD_IMAGES=0        # reuse already-pushed images
 ```
 
 More advanced toggles (`TENCENTCLOUD_VERBOSE`, `TENCENTCLOUD_REINSTALL`, `TENCENTCLOUD_RESET_DB`, SSH port/key paths, etc.) are documented in the `create.sh` header comments.
+
+## Node Specifications & Capacity Planning
+
+### Default Configuration
+
+The default deployment provisions only **a single 8C16G compute node** (`SA9.2XLARGE16`, 200GB data disk), which can host a very limited number of sandboxes. The default specs for each role are:
+
+| Role | Default Type | Specs | Count |
+|------|-------------|-------|-------|
+| Compute Node | `SA9.2XLARGE16` | 8C16G + 200GB data disk | 1 |
+| TKE Worker | `SA9.LARGE8` | 4C8G | 1 initial + 2 node pool |
+| Jumpserver | `SA9.MEDIUM4` | 2C4G | 1 |
+
+::: warning
+The default configuration is only suitable for functional validation and small-scale evaluation. For large-scale production usage, you **must adjust the compute node and TKE node specs and counts**, otherwise you will encounter CPU/memory exhaustion, Pod scheduling failures, and sandbox creation timeouts.
+:::
+
+### Adjusting Compute Nodes
+
+Compute nodes are the machines that actually run sandbox containers. Use the following environment variables to adjust their specs, count, and disk size:
+
+| Environment Variable | Description |
+|---------------------|-------------|
+| `TENCENTCLOUD_COMPUTE_INSTANCE_TYPE` | Compute node instance type |
+| `TENCENTCLOUD_COMPUTE_NODE_COUNT` | Number of compute nodes |
+| `TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE` | Data disk size (GB) |
+
+**Example: scale up specs and count** (`.env` configuration):
+
+```bash
+TENCENTCLOUD_COMPUTE_INSTANCE_TYPE='SA9.4XLARGE32'
+TENCENTCLOUD_COMPUTE_NODE_COUNT='4'
+TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE='500'
+```
+
+**Example: use higher specs** (`.env` configuration):
+
+```bash
+TENCENTCLOUD_COMPUTE_INSTANCE_TYPE='SA9.16XLARGE128'
+TENCENTCLOUD_COMPUTE_NODE_COUNT='8'
+TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE='1000'
+```
+
+::: tip Bare Metal Servers
+For stronger compute isolation and performance (avoiding virtualization overhead), you can use [Tencent Cloud Bare Metal Servers](https://cloud.tencent.com/product/cbm) as compute nodes. Simply set `TENCENTCLOUD_COMPUTE_INSTANCE_TYPE` to a bare metal instance type (e.g. `BMS5.12XLARGE192`) — the rest of the deployment process remains the same.
+:::
+
+**Example: heterogeneous mix** (using Terraform variables directly, per-node instance types):
+
+```bash
+export TF_VAR_compute_node_count=5
+export TF_VAR_compute_instance_types='["SA9.8XLARGE64","SA9.8XLARGE64","SA9.4XLARGE32","SA9.4XLARGE32","SA9.4XLARGE32"]'
+export TF_VAR_compute_availability_zones='["ap-guangzhou-6","ap-guangzhou-7","ap-guangzhou-6","ap-guangzhou-7","ap-guangzhou-3"]'
+export TF_VAR_compute_data_disk_size=1000
+```
+
+### Adjusting TKE Worker Nodes
+
+TKE Workers run cube-master, cube-api, cube-proxy, cube-webui and other control-plane Pods. At larger scale, control-plane request volume and scheduling pressure increase significantly, requiring more resources.
+
+| Environment Variable | Description |
+|---------------------|-------------|
+| `TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE` | TKE Worker node instance type |
+| `TENCENTCLOUD_TKE_NODE_COUNT` | Number of TKE Worker nodes |
+
+**Example: upgrade TKE Worker specs**:
+
+```bash
+TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE='SA9.2XLARGE16'
+TENCENTCLOUD_TKE_NODE_COUNT='4'
+```
+
+Also consider increasing control-plane replica counts for higher throughput and availability:
+
+```bash
+TENCENTCLOUD_CUBEMASTER_REPLICAS='4'
+TENCENTCLOUD_CUBE_API_REPLICAS='4'
+TENCENTCLOUD_CUBE_WEBUI_REPLICAS='3'
+```
+
+### Full Example: Production Configuration
+
+```bash
+# --- Compute nodes
+TENCENTCLOUD_COMPUTE_INSTANCE_TYPE='SA9.8XLARGE64'
+TENCENTCLOUD_COMPUTE_NODE_COUNT='6'
+TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE='1000'
+
+# --- TKE control plane
+TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE='SA9.2XLARGE16'
+TENCENTCLOUD_TKE_NODE_COUNT='4'
+
+# --- Control-plane replicas
+TENCENTCLOUD_CUBEMASTER_REPLICAS='3'
+TENCENTCLOUD_CUBE_API_REPLICAS='3'
+TENCENTCLOUD_CUBE_WEBUI_REPLICAS='2'
+
+# --- Jumpserver can stay at default (build-only, no runtime load)
+TENCENTCLOUD_JUMPSERVER_INSTANCE_TYPE='SA9.MEDIUM4'
+```
+
 
 ## Billing Mode
 

@@ -8,36 +8,55 @@
 
 ::: tip 适用场景
 本部署利用云上资源**快速搭建一套高可用的 CubeSandbox 沙箱服务**：所有云资源默认按量计费（详见下文[计费模式](#计费模式)），用完即可通过 `destroy.sh` 一键释放。如果想长期使用，推荐改用**包年包月**资源以获得更优的成本节省（见[计费模式](#计费模式)）。如果只需要单机部署验证，请参阅之前的部署文档：[PVM 部署](./pvm-deploy.md)或[裸金属部署](./bare-metal-deploy.md)。
+
+**注意**：默认仅配置了 1 台 8C16G 的计算节点，承载沙箱数量非常有限。大规模生产环境使用时，需调整计算节点和 TKE 节点的规格与数量，详见[节点规格与容量规划](#节点规格与容量规划)。
 :::
 
 ## 架构概览
 
 ```
-                        公网
-                          │
-                 ┌────────┴────────┐
-                 │   跳板机 CVM    │  SSH:443，构建主机 / 堡垒机
-                 │  (公网 IP)      │  docker build & push → TCR
-                 └────────┬────────┘
-                          │ VPC 内网
-   ┌──────────────────────┼─────────────────────────────┐
-   │                      │                              │
-┌──┴───────────────┐  ┌───┴───────────┐         ┌────────┴────────┐
-│  TKE 托管控制面  │  │  CVM 计算节点  │  …      │  云数据库        │
-│  cube-master     │  │  Cubelet      │         │  MySQL + Redis  │
-│  cube-api        │  │  network-agent│         └─────────────────┘
-│  cube-proxy      │  └───────────────┘
-│  cube-webui      │         ▲
-└────────┬─────────┘         │ CFS (NFS, RWX) 共享存储
-         │                   │
-         └───────────────────┘  cube-master 多副本共享 /data/CubeMaster/storage
+                          公网 / Internet
+                            │
+               ┌────────────┴────────────────────┐
+               │                                 │
+      ┌────────┴────────┐             ┌──────────┴─────────┐
+      │   跳板机 CVM    │             │  CLB (内网/公网)    │
+      │  (公网 IP)      │             │  cube-api :3000    │
+      │  SSH:443        │             │  cube-proxy :80/443 │
+      │  build & push   │             │  cube-webui :80    │
+      └────────┬────────┘             └──────────┬─────────┘
+               │                                 │
+  ┌────────────┼─────────────────────────────────┼──────────┐
+  │            │            VPC 内网              │           │
+  │  ┌─────────┴────────┐       ┌───────────────┴─────┐    │
+  │  │  CVM 计算节点 ×N │       │    TKE 托管集群      │    │
+  │  │  Cubelet         │       │  cube-master (×2)   │    │
+  │  │  network-agent   │       │  cube-api (×2)      │    │
+  │  │  CubeEgress      │       │  cube-proxy (×1)    │    │
+  │  └──────────────────┘       │  cube-webui (×2)    │    │
+  │                             └───┬─────────────┬───┘    │
+  │                                 │             │         │
+  │                         ┌───────┴───────┐     │         │
+  │                         │  CFS (NFS)    │     │         │
+  │                         │  共享存储      │     │         │
+  │                         └───────────────┘     │         │
+  │                                               │         │
+  │                         ┌─────────────────────┴───┐     │
+  │                         │  云数据库 MySQL + Redis  │     │
+  │                         └─────────────────────────┘     │
+  │                                                         │
+  │  ┌──────────────┐       ┌──────────────┐                │
+  │  │  TCR 镜像仓库 │       │  NAT + EIP   │→ 公网出口     │
+  │  └──────────────┘       └──────────────┘                │
+  └─────────────────────────────────────────────────────────┘
 ```
 
 | 组件 | 形态 | 说明 |
 |------|------|------|
 | 跳板机 | CVM（公网 IP，SSH 443） | 构建镜像、推送 TCR、作为私有 VPC 的堡垒机 |
+| 负载均衡 | CLB（内网/公网） | 前置 `cube-api` / `cube-proxy` / `cube-webui`，默认内网模式，用户流量入口 |
 | 控制面 | TKE 托管集群 | 运行 `cube-master` / `cube-api` / `cube-proxy` / `cube-webui` |
-| 计算节点 | CVM PVM | 运行 `Cubelet` / `network-agent`，承载沙箱 |
+| 计算节点 | CVM PVM | 运行 `Cubelet` / `network-agent` / `CubeEgress`，承载沙箱 |
 | 数据库 | 云数据库 MySQL 8.0 + Redis 7.0 | 仅 VPC 内网访问，不开公网 |
 | 共享存储 | CFS（通用标准型 NFS） | `cube-master` 多副本以 ReadWriteMany 共享模板/快照/运行时状态 |
 | 镜像仓库 | TCR（基础版） | 由本次部署创建，跳板机推送四个组件镜像 |
@@ -211,6 +230,107 @@ export TENCENTCLOUD_BUILD_IMAGES=0        # 复用已推送的镜像
 ```
 
 更多高级开关（`TENCENTCLOUD_VERBOSE`、`TENCENTCLOUD_REINSTALL`、`TENCENTCLOUD_RESET_DB`、SSH 端口/密钥路径等）见 `create.sh` 头部注释。
+
+## 节点规格与容量规划
+
+### 默认配置
+
+默认部署仅配置了 **1 台 8C16G 的计算节点**（`SA9.2XLARGE16`，200GB 数据盘），承载沙箱数量非常有限。各角色默认规格如下：
+
+| 角色 | 默认机型 | 规格 | 数量 |
+|------|---------|------|------|
+| 计算节点 | `SA9.2XLARGE16` | 8C16G + 200GB 数据盘 | 1 台 |
+| TKE Worker | `SA9.LARGE8` | 4C8G | 1 初始 + 2 节点池 |
+| 跳板机 | `SA9.MEDIUM4` | 2C4G | 1 台 |
+
+::: warning
+默认配置仅适合功能验证和小规模评估。大规模生产环境使用时，**必须调整计算节点和 TKE 节点的规格与数量**，否则会遇到 CPU/内存不足、Pod 调度失败、沙箱创建超时等问题。
+:::
+
+### 调整计算节点
+
+计算节点是实际运行沙箱容器的机器，可通过以下环境变量调整其规格、数量和磁盘大小：
+
+| 环境变量 | 说明 |
+|---------|------|
+| `TENCENTCLOUD_COMPUTE_INSTANCE_TYPE` | 计算节点机型 |
+| `TENCENTCLOUD_COMPUTE_NODE_COUNT` | 计算节点数量 |
+| `TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE` | 数据盘大小（GB） |
+
+**示例：提升单台规格并增加数量**（`.env` 配置）：
+
+```bash
+TENCENTCLOUD_COMPUTE_INSTANCE_TYPE='SA9.4XLARGE32'
+TENCENTCLOUD_COMPUTE_NODE_COUNT='4'
+TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE='500'
+```
+
+**示例：使用更高规格**（`.env` 配置）：
+
+```bash
+TENCENTCLOUD_COMPUTE_INSTANCE_TYPE='SA9.16XLARGE128'
+TENCENTCLOUD_COMPUTE_NODE_COUNT='8'
+TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE='1000'
+```
+
+::: tip 裸金属服务器
+如需更强的计算隔离性和性能（避免虚拟化开销），可选配[腾讯云裸金属服务器](https://cloud.tencent.com/product/cbm)作为计算节点。将 `TENCENTCLOUD_COMPUTE_INSTANCE_TYPE` 设为裸金属机型（如 `BMS5.12XLARGE192`）即可，其余部署流程不变。
+:::
+
+**示例：异构混部**（直接使用 Terraform 变量，逐台指定不同机型）：
+
+```bash
+export TF_VAR_compute_node_count=5
+export TF_VAR_compute_instance_types='["SA9.8XLARGE64","SA9.8XLARGE64","SA9.4XLARGE32","SA9.4XLARGE32","SA9.4XLARGE32"]'
+export TF_VAR_compute_availability_zones='["ap-guangzhou-6","ap-guangzhou-7","ap-guangzhou-6","ap-guangzhou-7","ap-guangzhou-3"]'
+export TF_VAR_compute_data_disk_size=1000
+```
+
+### 调整 TKE Worker 节点
+
+TKE Worker 运行 cube-master、cube-api、cube-proxy、cube-webui 等控制面 Pod。大规模场景下控制面的请求量和调度压力会增大，需要更多资源。
+
+| 环境变量 | 说明 |
+|---------|------|
+| `TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE` | TKE Worker 节点机型 |
+| `TENCENTCLOUD_TKE_NODE_COUNT` | TKE Worker 节点数量 |
+
+**示例：升级 TKE Worker 规格**：
+
+```bash
+TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE='SA9.2XLARGE16'
+TENCENTCLOUD_TKE_NODE_COUNT='4'
+```
+
+同时可增加控制面副本数以提高吞吐和可用性：
+
+```bash
+TENCENTCLOUD_CUBEMASTER_REPLICAS='4'
+TENCENTCLOUD_CUBE_API_REPLICAS='4'
+TENCENTCLOUD_CUBE_WEBUI_REPLICAS='3'
+```
+
+### 综合示例：生产环境配置
+
+```bash
+# --- 计算节点
+TENCENTCLOUD_COMPUTE_INSTANCE_TYPE='SA9.8XLARGE64'
+TENCENTCLOUD_COMPUTE_NODE_COUNT='6'
+TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE='1000'
+
+# --- TKE 控制面
+TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE='SA9.2XLARGE16'
+TENCENTCLOUD_TKE_NODE_COUNT='4'
+
+# --- 控制面副本数
+TENCENTCLOUD_CUBEMASTER_REPLICAS='3'
+TENCENTCLOUD_CUBE_API_REPLICAS='3'
+TENCENTCLOUD_CUBE_WEBUI_REPLICAS='2'
+
+# --- 跳板机可保持默认（仅构建用，不承载运行时负载）
+TENCENTCLOUD_JUMPSERVER_INSTANCE_TYPE='SA9.MEDIUM4'
+```
+
 
 ## 计费模式
 
