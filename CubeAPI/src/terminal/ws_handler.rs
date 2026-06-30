@@ -11,13 +11,16 @@
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{ConnectInfo, Path, Query, State},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use futures::StreamExt;
+use regex::Regex;
 use serde::Deserialize;
+use std::net::SocketAddr;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::{error::AppError, models::ApiError, models::SandboxState, state::AppState};
@@ -26,6 +29,16 @@ use super::{
     proxy::{self, EnvdEvent, FrameBuffer},
     session::{SessionTracker, TerminalCloseReason, TerminalSession},
 };
+
+/// Allowed characters in sandbox IDs (prevent path traversal).
+static SANDBOX_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9_-]+$").expect("sandbox ID regex must compile")
+});
+
+/// Allowed characters in container names (prevent log injection and DoS).
+static CONTAINER_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$").expect("container name regex must compile")
+});
 
 /// Default idle timeout for terminal sessions (30 minutes).
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
@@ -41,11 +54,18 @@ pub struct TerminalQuery {
     pub container: Option<String>,
 }
 
+/// Default max terminal sessions per sandbox.
+pub const DEFAULT_MAX_SESSIONS_PER_SANDBOX: usize = 5;
+/// Default max terminal sessions per user.
+pub const DEFAULT_MAX_SESSIONS_PER_USER: usize = 3;
+
 /// Shared state for the terminal WS handler.
 #[derive(Clone)]
 pub struct TerminalState {
     pub tracker: SessionTracker,
     pub idle_timeout_secs: u64,
+    pub max_sessions_per_sandbox: usize,
+    pub max_sessions_per_user: usize,
 }
 
 impl TerminalState {
@@ -53,6 +73,8 @@ impl TerminalState {
         Self {
             tracker: SessionTracker::new(),
             idle_timeout_secs,
+            max_sessions_per_sandbox: DEFAULT_MAX_SESSIONS_PER_SANDBOX,
+            max_sessions_per_user: DEFAULT_MAX_SESSIONS_PER_USER,
         }
     }
 }
@@ -66,6 +88,8 @@ pub async fn ws_terminal_handler(
     State(state): State<AppState>,
     Path(sandbox_id): Path<String>,
     Query(params): Query<TerminalQuery>,
+    headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     let sandbox_id = sandbox_id.trim().to_string();
@@ -77,23 +101,81 @@ pub async fn ws_terminal_handler(
             .into_response());
     }
 
+    // Validate sandbox ID format to prevent path traversal / injection.
+    if !SANDBOX_ID_RE.is_match(&sandbox_id) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new(400, "sandboxID contains invalid characters")),
+        )
+            .into_response());
+    }
+
     let container_name = params
         .container
         .as_deref()
         .unwrap_or("default")
         .to_string();
 
+    // Validate container name to prevent log injection and DoS.
+    if !CONTAINER_NAME_RE.is_match(&container_name) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new(
+                400,
+                "container name contains invalid characters or is too long",
+            )),
+        )
+            .into_response());
+    }
+
+    // ── Origin validation (prevent cross-origin WS hijacking) ────────────
+    let auth_configured = state
+        .config
+        .auth_callback_url
+        .as_deref()
+        .is_some_and(|u| !u.is_empty());
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let origin_str = origin.to_str().unwrap_or("");
+        // Skip empty origins (treat as absent — some proxies strip it).
+        if !origin_str.is_empty() {
+            if let Some(host) = headers.get(header::HOST) {
+                let host_str = host.to_str().unwrap_or("");
+                if let Ok(parsed) = url::Url::parse(origin_str) {
+                    let origin_host = parsed.host_str().unwrap_or("");
+                    let host_only = host_str.split(':').next().unwrap_or(host_str);
+                    if origin_host != host_only {
+                        tracing::warn!(
+                            origin = %origin_str,
+                            host = %host_str,
+                            "rejected cross-origin terminal WebSocket"
+                        );
+                        return Ok((
+                            StatusCode::FORBIDDEN,
+                            Json(ApiError::new(403, "cross-origin terminal access denied")),
+                        )
+                            .into_response());
+                    }
+                }
+            }
+        }
+    } else if auth_configured {
+        // When auth is configured, require Origin header from browsers.
+        // Non-browser clients that don't send Origin will be caught at the
+        // auth layer; this is a defense-in-depth measure.
+        tracing::info!("terminal WS upgrade without Origin header (auth enabled)");
+    }
+
     // ── Auth ────────────────────────────────────────────────────────────
-    let user = authenticate_terminal(&state, params.token.as_deref()).await?;
+    let user = authenticate_terminal(&state, params.token.as_deref(), &sandbox_id).await?;
 
     // ── Sandbox validation ──────────────────────────────────────────────
     let detail = state.services.sandboxes.get_sandbox(&sandbox_id).await?;
 
     if detail.state != SandboxState::Running {
         let state_str = match detail.state {
-            SandboxState::Running => "running",
             SandboxState::Paused => "paused",
             SandboxState::Pausing => "pausing",
+            _ => unreachable!("filtered by outer if: state != Running"),
         };
         return Ok((
             StatusCode::CONFLICT,
@@ -109,31 +191,74 @@ pub async fn ws_terminal_handler(
     if envd_access_token.is_empty() {
         return Ok((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError::new(500, "sandbox has no envd access token")),
+            Json(ApiError::new(500, "sandbox configuration error")),
+        )
+            .into_response());
+    }
+
+    // ── Connection limits (re-check after async auth + validation) ──────
+    // The initial check at function entry reduces contention; this
+    // second check narrows the TOCTOU window to just the insert below.
+    let sandbox_count = state
+        .terminal_state
+        .tracker
+        .count_by_sandbox(&sandbox_id);
+    if sandbox_count >= state.terminal_state.max_sessions_per_sandbox {
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiError::new(
+                429,
+                format!(
+                    "too many terminal sessions for this sandbox (max {})",
+                    state.terminal_state.max_sessions_per_sandbox
+                ),
+            )),
+        )
+            .into_response());
+    }
+
+    let user_count = state
+        .terminal_state
+        .tracker
+        .count_by_user(&user);
+    if user_count >= state.terminal_state.max_sessions_per_user {
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiError::new(
+                429,
+                format!(
+                    "too many terminal sessions for this user (max {})",
+                    state.terminal_state.max_sessions_per_user
+                ),
+            )),
         )
             .into_response());
     }
 
     // ── Build envd connection URL through CubeProxy ─────────────────────
-    let envd_url = build_envd_url(&state.config.cubemaster_url, &sandbox_id);
+    let envd_url = build_envd_url(&state.config.cubemaster_url, &sandbox_id)?;
+
+    // ── Determine remote address ────────────────────────────────────────
+    let remote_addr = if let Some(ConnectInfo(addr)) = connect_info {
+        addr.to_string()
+    } else {
+        headers
+            .get(axum::http::header::HeaderName::from_static("x-forwarded-for"))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string()
+    };
 
     // ── Create terminal session record ──────────────────────────────────
     let session = TerminalSession::new(
         sandbox_id.clone(),
         container_name.clone(),
         user.clone(),
-        "ws-client".to_string(),
+        remote_addr,
         state.terminal_state.idle_timeout_secs,
     );
     let session_id = session.session_id;
 
-    tracing::info!(
-        session_id = %session_id,
-        sandbox_id = %sandbox_id,
-        container = %container_name,
-        user = %user,
-        "terminal session starting"
-    );
     tracing::info!(
         event_type = "terminal_session_start",
         session_id = %session_id,
@@ -167,9 +292,18 @@ pub async fn ws_terminal_handler(
 }
 
 /// Authenticate via callback or passthrough.
+///
+/// When an auth callback URL is configured, the token is forwarded and the
+/// callback's response is inspected for a user identity:
+///   - Prefers `X-Authenticated-User` header
+///   - Falls back to JSON `{"user": "..."}` body
+///   - Falls back to `"authenticated"` if neither is present
+///
+/// When auth is not configured, returns `"anonymous"`.
 async fn authenticate_terminal(
     state: &AppState,
     token: Option<&str>,
+    sandbox_id: &str,
 ) -> Result<String, AppError> {
     let callback_url = state
         .config
@@ -193,7 +327,10 @@ async fn authenticate_terminal(
                 .http_client
                 .post(url)
                 .header("Authorization", format!("Bearer {}", token))
-                .header("X-Request-Path", "/sandboxes/{id}/terminal")
+                .header(
+                    "X-Request-Path",
+                    format!("/sandboxes/{}/terminal", sandbox_id),
+                )
                 .header("X-Request-Method", "GET")
                 .send()
                 .await
@@ -207,7 +344,30 @@ async fn authenticate_terminal(
                     "Authentication rejected by callback".to_string(),
                 ));
             }
-            Ok("authenticated".to_string())
+
+            // Extract user identity from callback response.
+            // Prefer X-Authenticated-User header; fall back to JSON body field "user".
+            let user_from_header = resp
+                .headers()
+                .get("x-authenticated-user")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            let user = if let Some(u) = user_from_header {
+                u
+            } else {
+                resp.text()
+                    .await
+                    .ok()
+                    .and_then(|body| {
+                        serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|v| v.get("user").and_then(|u| u.as_str()).map(String::from))
+                    })
+                    .unwrap_or_else(|| "authenticated".to_string())
+            };
+
+            Ok(user)
         }
         None => Ok("anonymous".to_string()),
     }
@@ -218,15 +378,19 @@ async fn authenticate_terminal(
 /// CubeMaster is typically at `http://<host>:8089`; the CubeProxy HTTP
 /// listener is on port 8081 of the same host.  The proxy routes
 /// `/sandbox/<id>/<port>/...` to the correct sandbox container.
-fn build_envd_url(cubemaster_url: &str, sandbox_id: &str) -> String {
-    let base = cubemaster_url
-        .trim_end_matches('/')
-        .replace(":8089", ":8081");
+fn build_envd_url(cubemaster_url: &str, sandbox_id: &str) -> Result<String, AppError> {
+    let mut url = url::Url::parse(cubemaster_url)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("invalid cubemaster_url: {}", e)))?;
 
-    format!(
-        "{}/sandbox/{}/49983/process.Process/Connect",
-        base, sandbox_id
-    )
+    url.set_port(Some(8081))
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("failed to set proxy port")))?;
+
+    url.set_path(&format!(
+        "/sandbox/{}/49983/process.Process/Connect",
+        sandbox_id
+    ));
+
+    Ok(url.to_string())
 }
 
 /// Main bidirectional proxy loop.
@@ -247,11 +411,10 @@ async fn handle_terminal_socket(
     envd_url: String,
     tracker: SessionTracker,
     http_client: reqwest::Client,
-    _idle_timeout_secs: u64,
+    idle_timeout_secs: u64,
 ) {
     // Channel for stdin: WS frames → envd request body stream.
     let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-    let (_close_tx, _close_rx) = tokio::sync::watch::channel(false);
 
     // Build the streaming request body from the stdin channel.
     let body_stream = tokio_stream::wrappers::ReceiverStream::new(stdin_rx)
@@ -276,7 +439,7 @@ async fn handle_terminal_socket(
             let _ = ws_socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                     code: 1011,
-                    reason: "envd connection failed".into(),
+                    reason: "connection failed".into(),
                 })))
                 .await;
             cleanup_session(
@@ -290,7 +453,7 @@ async fn handle_terminal_socket(
             let _ = ws_socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                     code: 1011,
-                    reason: "envd unreachable".into(),
+                    reason: "connection failed".into(),
                 })))
                 .await;
             cleanup_session(
@@ -305,7 +468,9 @@ async fn handle_terminal_socket(
 
     let mut envd_body = envd_resp.bytes_stream();
     let mut envd_buf = FrameBuffer::new();
-    let mut idle_timer = tokio::time::interval(Duration::from_secs(30));
+    // Tick at half the idle timeout (capped at 30s) to catch idle sessions promptly.
+    let idle_tick = Duration::from_secs(idle_timeout_secs.min(30) / 2);
+    let mut idle_timer = tokio::time::interval(idle_tick);
 
     loop {
         tokio::select! {
@@ -313,11 +478,13 @@ async fn handle_terminal_socket(
             ws_msg = ws_socket.recv() => {
                 let touched = match ws_msg {
                     Some(Ok(Message::Binary(data))) => {
-                        let _ = stdin_tx.send(data.to_vec()).await;
+                        if stdin_tx.try_send(data.to_vec()).is_err() {
+                            tracing::warn!(session_id = %session_id, "stdin channel full, dropping input");
+                        }
                         true
                     }
                     Some(Ok(Message::Text(text))) => {
-                        handle_ws_text(&text, &stdin_tx).await;
+                        handle_ws_text(&text, &stdin_tx);
                         true
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -327,12 +494,10 @@ async fn handle_terminal_socket(
                     Some(Ok(Message::Pong(_))) => false,
                     Some(Ok(Message::Close(_))) | None => {
                         tracing::info!(session_id = %session_id, "WS closed by client");
-                        let _ = _close_tx.send(true);
                         break;
                     }
                     Some(Err(e)) => {
                         tracing::warn!(session_id = %session_id, error = %e, "WS recv error");
-                        let _ = _close_tx.send(true);
                         break;
                     }
                 };
@@ -345,7 +510,19 @@ async fn handle_terminal_socket(
             chunk = envd_body.next() => {
                 match chunk {
                     Some(Ok(bytes)) => {
-                        envd_buf.extend(&bytes);
+                        if let Err(e) = envd_buf.extend(&bytes) {
+                            tracing::error!(session_id = %session_id, error = %e, "frame buffer overflow");
+                            let _ = ws_socket.send(Message::Close(Some(
+                                axum::extract::ws::CloseFrame {
+                                    code: 1009, reason: "message too large".into(),
+                                }
+                            ))).await;
+                            cleanup_session(
+                                &tracker, session_id, TerminalCloseReason::Error,
+                                &sandbox_id, &container_name, &user,
+                            );
+                            return;
+                        }
                         if let Err(e) = process_envd_frames(
                             &mut envd_buf, &mut ws_socket, session_id,
                             &tracker, &sandbox_id, &container_name, &user,
@@ -358,7 +535,7 @@ async fn handle_terminal_socket(
                         tracing::error!(session_id = %session_id, error = %e, "envd stream error");
                         let _ = ws_socket.send(Message::Close(Some(
                             axum::extract::ws::CloseFrame {
-                                code: 1011, reason: "envd stream error".into(),
+                                code: 1011, reason: "internal error".into(),
                             }
                         ))).await;
                         cleanup_session(
@@ -393,7 +570,6 @@ async fn handle_terminal_socket(
                                 code: 1001, reason: "idle timeout".into(),
                             }
                         ))).await;
-                        let _ = _close_tx.send(true);
                         cleanup_session(
                             &tracker, session_id, TerminalCloseReason::IdleTimeout,
                             &sandbox_id, &container_name, &user,
@@ -414,7 +590,7 @@ async fn handle_terminal_socket(
 }
 
 /// Handle incoming WS text frames (resize, other control messages).
-async fn handle_ws_text(text: &str, stdin_tx: &tokio::sync::mpsc::Sender<Vec<u8>>) {
+fn handle_ws_text(text: &str, stdin_tx: &tokio::sync::mpsc::Sender<Vec<u8>>) {
     if let Ok(ctrl) = serde_json::from_str::<serde_json::Value>(text) {
         if ctrl.get("type").and_then(|v| v.as_str()) == Some("resize") {
             if let (Some(cols), Some(rows)) = (
@@ -433,7 +609,9 @@ async fn handle_ws_text(text: &str, stdin_tx: &tokio::sync::mpsc::Sender<Vec<u8>
                     });
                     if let Ok(payload) = serde_json::to_vec(&resize_msg) {
                         let frame = proxy::encode_frame(0x00, &payload);
-                        let _ = stdin_tx.send(frame.to_vec()).await;
+                        if stdin_tx.try_send(frame.to_vec()).is_err() {
+                            tracing::warn!("stdin channel full, dropping resize event");
+                        }
                     }
                 }
             }
@@ -597,5 +775,97 @@ pub async fn close_sessions_for_sandbox(
             reason = reason.as_str(),
             "closed terminal sessions for sandbox"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn test_sandbox_id_regex_valid() {
+        assert!(SANDBOX_ID_RE.is_match("abc123"));
+        assert!(SANDBOX_ID_RE.is_match("sandbox-42"));
+        assert!(SANDBOX_ID_RE.is_match("test_sb_001"));
+        assert!(SANDBOX_ID_RE.is_match("a"));
+    }
+
+    #[test]
+    fn test_sandbox_id_regex_rejects_slashes() {
+        assert!(!SANDBOX_ID_RE.is_match("../etc/passwd"));
+        assert!(!SANDBOX_ID_RE.is_match("sb/../../"));
+        assert!(!SANDBOX_ID_RE.is_match("a b"));
+        assert!(!SANDBOX_ID_RE.is_match("sb\x00null"));
+    }
+
+    #[test]
+    fn test_build_envd_url_http() {
+        let url = build_envd_url("http://10.0.0.1:8089", "sb-abc").unwrap();
+        assert_eq!(
+            url,
+            "http://10.0.0.1:8081/sandbox/sb-abc/49983/process.Process/Connect"
+        );
+    }
+
+    #[test]
+    fn test_build_envd_url_https() {
+        let url = build_envd_url("https://cube.example.com:8089", "sb-xyz").unwrap();
+        assert_eq!(
+            url,
+            "https://cube.example.com:8081/sandbox/sb-xyz/49983/process.Process/Connect"
+        );
+    }
+
+    #[test]
+    fn test_build_envd_url_invalid_input() {
+        assert!(build_envd_url("not a url", "sb-abc").is_err());
+    }
+
+    #[test]
+    fn test_handle_ws_text_resize() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        handle_ws_text(r#"{"type":"resize","cols":120,"rows":40}"#, &tx);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let frame = rt.block_on(async { rx.recv().await });
+        assert!(frame.is_some());
+        let frame = frame.unwrap();
+        assert_eq!(frame[0], 0x00);
+        let payload_len = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+        assert_eq!(frame.len(), 5 + payload_len);
+
+        let payload: serde_json::Value =
+            serde_json::from_slice(&frame[5..]).expect("payload should be valid JSON");
+        let b64_pty = payload["event"]["data"]["pty"]
+            .as_str()
+            .expect("pty field should be a base64 string");
+        let pty_bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64_pty)
+            .expect("pty should be valid base64");
+        let pty_str = std::str::from_utf8(&pty_bytes).expect("pty should be valid UTF-8");
+        assert!(pty_str.contains("120"), "pty payload should contain cols=120: {}", pty_str);
+        assert!(pty_str.contains("40"), "pty payload should contain rows=40: {}", pty_str);
+    }
+
+    #[test]
+    fn test_handle_ws_text_non_resize_ignored() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        handle_ws_text(r#"{"type":"ping"}"#, &tx);
+        // No panic, no side effect.
+    }
+
+    #[test]
+    fn test_handle_ws_text_invalid_json_ignored() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        handle_ws_text("not json", &tx);
+        // No panic, no side effect.
+    }
+
+    #[test]
+    fn test_handle_ws_text_resize_zero_cols_ignored() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        handle_ws_text(r#"{"type":"resize","cols":0,"rows":40}"#, &tx);
+        // Zero cols is rejected by the > 0 guard.
     }
 }

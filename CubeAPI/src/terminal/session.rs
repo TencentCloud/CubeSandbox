@@ -153,10 +153,30 @@ impl SessionTracker {
 
     /// Remove and return all sessions for a given sandbox.
     pub fn remove_by_sandbox(&self, sandbox_id: &str) -> Vec<TerminalSession> {
-        let ids: Vec<SessionId> = self.list_by_sandbox(sandbox_id);
-        ids.into_iter()
+        self.sessions
+            .iter()
+            .filter(|entry| entry.sandbox_id == sandbox_id)
+            .map(|entry| entry.session_id)
+            .collect::<Vec<_>>()
+            .into_iter()
             .filter_map(|id| self.remove(&id))
             .collect()
+    }
+
+    /// Count the number of active sessions for a given sandbox.
+    pub fn count_by_sandbox(&self, sandbox_id: &str) -> usize {
+        self.sessions
+            .iter()
+            .filter(|entry| entry.sandbox_id == sandbox_id)
+            .count()
+    }
+
+    /// Count the number of active sessions for a given user.
+    pub fn count_by_user(&self, user: &str) -> usize {
+        self.sessions
+            .iter()
+            .filter(|entry| entry.user == user)
+            .count()
     }
 
     /// Find all sessions that have exceeded their idle timeout.

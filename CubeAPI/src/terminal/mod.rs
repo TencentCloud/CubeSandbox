@@ -19,5 +19,4 @@ pub mod proxy;
 pub mod session;
 pub mod ws_handler;
 
-pub use session::SessionTracker;
 pub use ws_handler::{close_sessions_for_sandbox, TerminalState, DEFAULT_IDLE_TIMEOUT_SECS};

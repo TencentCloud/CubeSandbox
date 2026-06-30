@@ -31,6 +31,10 @@ use serde::Deserialize;
 /// Maximum allowed envelope payload size (64 MiB — matches Go SDK).
 const MAX_ENVELOPE_SIZE: u32 = 64 * 1024 * 1024;
 
+/// Maximum total frame buffer size before the connection is considered
+/// malicious or broken (2× max envelope = one frame + partial header).
+const MAX_BUFFER_SIZE: usize = 2 * MAX_ENVELOPE_SIZE as usize;
+
 /// Connect envelope flag: regular data frame.
 pub const FLAG_DATA: u8 = 0x00;
 /// Connect envelope flag: compressed (unsupported).
@@ -220,8 +224,18 @@ impl FrameBuffer {
     }
 
     /// Append received bytes to the internal buffer.
-    pub fn extend(&mut self, data: &[u8]) {
+    /// Returns an error if the total buffer exceeds `MAX_BUFFER_SIZE`.
+    pub fn extend(&mut self, data: &[u8]) -> Result<(), String> {
+        if self.buf.len() + data.len() > MAX_BUFFER_SIZE {
+            return Err(format!(
+                "frame buffer overflow: {} + {} > {}",
+                self.buf.len(),
+                data.len(),
+                MAX_BUFFER_SIZE
+            ));
+        }
         self.buf.put_slice(data);
+        Ok(())
     }
 
     /// Try to extract one complete frame from the buffer.
@@ -370,6 +384,59 @@ mod tests {
         buf.extend(&frame[7..]);
         let result = buf.try_take_frame().unwrap();
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_event_stderr() {
+        let encoded = BASE64.encode(b"error output");
+        let json = format!(r#"{{"event":{{"data":{{"stderr":"{}"}}}}}}"#, encoded);
+        let events = parse_event(json.as_bytes()).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            EnvdEvent::Stderr(data) => assert_eq!(data, b"error output"),
+            _ => panic!("expected Stderr"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_pty() {
+        let encoded = BASE64.encode(b"pty data");
+        let json = format!(r#"{{"event":{{"data":{{"pty":"{}"}}}}}}"#, encoded);
+        let events = parse_event(json.as_bytes()).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            EnvdEvent::Pty(data) => assert_eq!(data, b"pty data"),
+            _ => panic!("expected Pty"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_keepalive() {
+        let json = r#"{"event":{"keepalive":{}}}"#;
+        let events = parse_event(json.as_bytes()).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            EnvdEvent::Keepalive => {},
+            _ => panic!("expected Keepalive"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_multiple_fields() {
+        let stdout_b64 = BASE64.encode(b"hello");
+        let stderr_b64 = BASE64.encode(b"error");
+        let json = format!(
+            r#"{{"event":{{"data":{{"stdout":"{}","stderr":"{}"}},"start":{{"pid":1}}}}}}"#,
+            stdout_b64, stderr_b64
+        );
+        let events = parse_event(json.as_bytes()).unwrap();
+        assert_eq!(events.len(), 3); // Start + Stdout + Stderr
+        let has_start = events.iter().any(|e| matches!(e, EnvdEvent::Start { .. }));
+        let has_stdout = events.iter().any(|e| matches!(e, EnvdEvent::Stdout(..)));
+        let has_stderr = events.iter().any(|e| matches!(e, EnvdEvent::Stderr(..)));
+        assert!(has_start);
+        assert!(has_stdout);
+        assert!(has_stderr);
     }
 
     #[test]

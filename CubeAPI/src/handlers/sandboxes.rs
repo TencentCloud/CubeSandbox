@@ -216,6 +216,14 @@ pub async fn kill_sandbox(
 
     state.services.sandboxes.kill_sandbox(&sandbox_id).await?;
 
+    // Close any active terminal sessions for this sandbox.
+    crate::terminal::close_sessions_for_sandbox(
+        &state.terminal_state.tracker,
+        &sandbox_id,
+        crate::terminal::session::TerminalCloseReason::SandboxDestroyed,
+    )
+    .await;
+
     tracing::info!(sandbox_id = %sandbox_id, "kill_sandbox: success");
     state
         .logger
@@ -253,6 +261,14 @@ pub async fn pause_sandbox(
         .await;
     tracing::info!(sandbox_id = %sandbox_id, "pause sandbox request");
     state.services.sandboxes.pause_sandbox(&sandbox_id).await?;
+
+    // Close any active terminal sessions for this sandbox.
+    crate::terminal::close_sessions_for_sandbox(
+        &state.terminal_state.tracker,
+        &sandbox_id,
+        crate::terminal::session::TerminalCloseReason::SandboxPaused,
+    )
+    .await;
 
     tracing::info!(sandbox_id = %sandbox_id, "pause_sandbox: success");
     state

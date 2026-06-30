@@ -112,21 +112,29 @@ export default function TerminalPanel({
     instance.loadAddon(new WebLinksAddon());
     term.current = instance;
 
+    // Schedule mount into DOM on next microtask so terminalRef is attached.
+    requestAnimationFrame(() => {
+      if (terminalRef.current && term.current === instance) {
+        instance.open(terminalRef.current);
+        fitAddon.fit();
+      }
+    });
+
     return () => {
       instance.dispose();
       term.current = null;
       fitAddonRef.current = null;
     };
-  }, [open, fontSize]);
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  // ^ fontSize intentionally excluded: changing font size via `terminal.options.fontSize`
+  //   is zero-cost and preserves the terminal state (scrollback, etc.).
 
-  // ── Mount terminal into DOM ─────────────────────────────────────────────
+  // ── Apply font size changes without recreating terminal ────────────────
   useEffect(() => {
-    if (!term.current || !terminalRef.current) return;
-    if (terminalRef.current.hasChildNodes()) return; // already mounted
-
-    term.current.open(terminalRef.current);
+    if (!term.current) return;
+    term.current.options.fontSize = fontSize;
     fitAddonRef.current?.fit();
-  }, []);
+  }, [fontSize]);
 
   // ── WebSocket ───────────────────────────────────────────────────────────
   const onMessage = useCallback((data: ArrayBuffer) => {
@@ -163,6 +171,7 @@ export default function TerminalPanel({
   useTerminalResize({
     terminal: term.current,
     containerRef: terminalRef,
+    fitAddon: fitAddonRef.current,
     onResize,
     enabled: open && connectionState === 'connected',
   });
@@ -190,14 +199,7 @@ export default function TerminalPanel({
 
   // ── Font size ───────────────────────────────────────────────────────────
   const changeFontSize = useCallback((delta: number) => {
-    setFontSize((prev) => {
-      const next = Math.max(10, Math.min(24, prev + delta));
-      if (term.current) {
-        term.current.options.fontSize = next;
-        fitAddonRef.current?.fit();
-      }
-      return next;
-    });
+    setFontSize((prev) => Math.max(10, Math.min(24, prev + delta)));
   }, []);
 
   // ── Reconnect ───────────────────────────────────────────────────────────
@@ -209,6 +211,9 @@ export default function TerminalPanel({
   // ── Container switch ────────────────────────────────────────────────────
   const handleContainerChange = useCallback((name: string) => {
     disconnect();
+    if (term.current) {
+      term.current.clear();
+    }
     setCloseReason(null);
     setSelectedContainer(name);
     // connect() will be called by the useEffect when selectedContainer changes

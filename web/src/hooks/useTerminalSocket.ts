@@ -100,7 +100,7 @@ export function useTerminalSocket({
       if (retryCountRef.current < MAX_RETRIES) {
         retryCountRef.current += 1;
         setConnectionState('reconnecting');
-        const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, retryCountRef.current - 1);
+        const delay = Math.min(INITIAL_RETRY_DELAY_MS * Math.pow(2, retryCountRef.current - 1), 30000);
         retryTimerRef.current = setTimeout(() => {
           if (mountedRef.current) connect();
         }, delay);

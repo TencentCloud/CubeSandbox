@@ -271,6 +271,11 @@ paths:
         frames contain stdout/stderr bytes (stderr is prefixed with byte
         0x02).  Text frames carry JSON control messages (e.g. resize).
 
+        **Resize control message** (client → server, text frame):
+        ```json
+        {"type": "resize", "cols": 80, "rows": 24}
+        ```
+
         Authentication is via query parameter (`?token=...`) because
         browsers cannot set custom headers on WebSocket upgrade requests.
       operationId: terminal_ws_upgrade
@@ -302,6 +307,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Cross-origin access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Sandbox not found
           content:
@@ -324,6 +335,12 @@ paths:
                     type: string
                     enum: [paused, pausing]
                     description: Current sandbox state
+        '429':
+          description: Too many terminal sessions (per-user or per-sandbox limit exceeded)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '500':
           description: Unexpected backend error
           content:
