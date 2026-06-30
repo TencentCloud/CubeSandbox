@@ -152,6 +152,18 @@ _tf_keep_stderr() {
 #     - /usr/local/bin when writable (root), otherwise ${SCRIPT_DIR}/.bin which is
 #       prepended to PATH for the rest of this run.
 # ---------------------------------------------------------------
+# _release_platform — OS slug used by HashiCorp / jq release artifacts (linux|darwin).
+_release_platform() {
+	case "$(uname -s)" in
+		Linux) echo linux ;;
+		Darwin) echo darwin ;;
+		*)
+			echo -e "${RED}✗ Unsupported OS for auto-install: $(uname -s); install terraform/jq manually${NC}" >&2
+			exit 1
+			;;
+	esac
+}
+
 TERRAFORM_VERSION="${TERRAFORM_VERSION:-1.15.6}"
 ensure_terraform() {
 	if command -v terraform >/dev/null 2>&1; then
@@ -161,7 +173,8 @@ ensure_terraform() {
 	echo -e "${YELLOW}terraform not found, installing v${TERRAFORM_VERSION}...${NC}"
 
 	# Map uname arch to the naming used by HashiCorp release artifacts
-	local arch
+	local arch os
+	os="$(_release_platform)"
 	case "$(uname -m)" in
 		x86_64 | amd64) arch="amd64" ;;
 		aarch64 | arm64) arch="arm64" ;;
@@ -181,7 +194,7 @@ ensure_terraform() {
 		export PATH="${bin_dir}:${PATH}"
 	fi
 
-	local url="https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${arch}.zip"
+	local url="https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_${os}_${arch}.zip"
 	local tmp_zip
 	tmp_zip="$(mktemp -t terraform.XXXXXX.zip)"
 
@@ -238,9 +251,10 @@ ensure_jq() {
 
 	# 1) Prefer the system package manager (works offline against cloud mirrors).
 	local pm
-	for pm in dnf yum apt-get zypper apk; do
+	for pm in brew dnf yum apt-get zypper apk; do
 		command -v "$pm" >/dev/null 2>&1 || continue
 		case "$pm" in
+			brew) "$pm" install jq >/dev/null 2>&1 || true ;;
 			apt-get) DEBIAN_FRONTEND=noninteractive "$pm" install -y jq >/dev/null 2>&1 || true ;;
 			apk) "$pm" add --no-cache jq >/dev/null 2>&1 || true ;;
 			*) "$pm" install -y jq >/dev/null 2>&1 || true ;;
@@ -253,7 +267,12 @@ ensure_jq() {
 	done
 
 	# 2) Fall back to a static jq binary from GitHub releases.
-	local jq_arch
+	local jq_arch os jq_os
+	os="$(_release_platform)"
+	case "$os" in
+		linux) jq_os="linux" ;;
+		darwin) jq_os="macos" ;;
+	esac
 	case "$(uname -m)" in
 		x86_64 | amd64) jq_arch="amd64" ;;
 		aarch64 | arm64) jq_arch="arm64" ;;
@@ -272,7 +291,7 @@ ensure_jq() {
 		export PATH="${bin_dir}:${PATH}"
 	fi
 
-	local url="https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-linux-${jq_arch}"
+	local url="https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${jq_os}-${jq_arch}"
 	if command -v curl >/dev/null 2>&1; then
 		curl -fsSL -o "${bin_dir}/jq" "${url}" || true
 	elif command -v wget >/dev/null 2>&1; then

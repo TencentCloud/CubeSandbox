@@ -492,8 +492,11 @@ resource "tencentcloud_mysql_account" "cube" {
   host     = "%"
 }
 
-# Database-level privileges
+# Database-level privileges (after mysql_init_db creates var.cube_db — granting on a
+# missing database races with the local-exec CREATE DATABASE and can fail apply).
 resource "tencentcloud_mysql_privilege" "cube" {
+  depends_on = [null_resource.mysql_init_db]
+
   mysql_id     = tencentcloud_mysql_instance.mysql.id
   account_name = tencentcloud_mysql_account.cube.name
   account_host = tencentcloud_mysql_account.cube.host
