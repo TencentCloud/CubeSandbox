@@ -161,7 +161,8 @@ export default withMermaid(defineConfig({
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
                 { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
                 { text: 'Network Hardening', link: '/guide/network-hardening' },
-                { text: 'Authentication', link: '/guide/authentication' }
+                { text: 'Authentication', link: '/guide/authentication' },
+                { text: 'Webhook Events', link: '/guide/webhook-events' }
               ]
             },
             {
@@ -295,7 +296,8 @@ export default withMermaid(defineConfig({
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
                 { text: 'HTTPS 证书与域名解析', link: '/zh/guide/https-and-domain' },
                 { text: '网络加固', link: '/zh/guide/network-hardening' },
-                { text: '鉴权', link: '/zh/guide/authentication' }
+                { text: '鉴权', link: '/zh/guide/authentication' },
+                { text: 'Webhook 事件通知', link: '/zh/guide/webhook-events' }
               ]
             },
             {

@@ -37,6 +37,11 @@ impl MultiLogger {
         self.backends.push(backend);
         self
     }
+
+    #[cfg(test)]
+    pub(crate) fn backend_count(&self) -> usize {
+        self.backends.len()
+    }
 }
 
 #[async_trait]
