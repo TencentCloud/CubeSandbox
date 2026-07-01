@@ -47,4 +47,4 @@ lang: zh-CN
 
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
-| _在这里补充你的文章_ | - | - | - |
+| [Claude Code 集成指南](./claude-code.md) | LangQi99 | 2026-07-01 | integration, claude-code, anthropic, agent |

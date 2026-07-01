@@ -47,4 +47,4 @@ lang: en-US
 
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
-| _Add your article here_ | - | - | - |
+| [Claude Code Integration Guide](./claude-code.md) | LangQi99 | 2026-07-01 | integration, claude-code, anthropic, agent |
