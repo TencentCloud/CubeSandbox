@@ -199,7 +199,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()> {
-    use logging::{arc, file::FileLogger, filtered::FilteredLogger, multi::MultiLogger, LogLevel};
+    use logging::{
+        arc, file::FileLogger, filtered::FilteredLogger, http::HttpLogger, multi::MultiLogger,
+        LogLevel,
+    };
 
     // ── Logger ────────────────────────────────────────────────────────────
     let min_level = if debug {
@@ -209,16 +212,25 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     };
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
+    let mut multi_logger = MultiLogger::new().add(arc(file_logger));
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
-    let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
-        min_level,
-    ));
+    if !cfg.webhook.endpoints.is_empty() {
+        let http_logger = HttpLogger::new(cfg.webhook.clone())?;
+        multi_logger = multi_logger.add(arc(http_logger));
+
+        tracing::info!(
+            endpoint_count = cfg.webhook.endpoints.len(),
+            queue_capacity = cfg.webhook.queue_capacity,
+            timeout_secs = cfg.webhook.timeout_secs,
+            max_retries = cfg.webhook.max_retries,
+            max_concurrency = cfg.webhook.max_concurrency,
+            flush_timeout_secs = cfg.webhook.flush_timeout_secs,
+            "HTTP webhook logger enabled"
+        );
+    }
+
+    // FilteredLogger gates by level → MultiLogger fans out to configured backends.
+    let logger: logging::ArcLogger = arc(FilteredLogger::new(arc(multi_logger), min_level));
 
     tracing::info!(
         log_dir = %cfg.log_dir,
