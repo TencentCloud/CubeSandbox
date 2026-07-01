@@ -163,9 +163,9 @@ python examples/code-sandbox-quickstart/auto-kill.py
 ## 设计与运维要点
 
 - **暂停的状态保真度**：CPU 寄存器、进程内存、TCP 连接（无外部对端）、文件系统改动都会随快照保留；面向外部的连接（如 sandbox 主动建立的 outbound socket）会在暂停时断开，恢复后由应用层自行重连。
-- **集群一致性**：自动暂停由部署在 CubeProxy 容器内的 `cube-proxy-sidecar` 协调；它消费 CubeMaster 通过 Redis stream 发布的生命周期事件，对所有 CubeProxy 实例广播状态。多副本环境下用 Redis SETNX 互斥锁确保同一沙箱不会被并发暂停或恢复。
+- **集群一致性**：自动暂停由部署在 control 节点上的 `cube-lifecycle-manager` 服务统一协调；它消费 CubeMaster 通过 Redis stream 发布的生命周期事件，通过 Redis 注册表实时发现所有在线的 CubeProxy 副本并广播状态。多副本环境下用 Redis SETNX 互斥锁确保同一沙箱不会被并发暂停或恢复。
 - **失败回退**：自动恢复 RPC 失败时，CubeProxy 直接对客户端返回 503 + `Retry-After`，不会让用户卡在长超时上；当沙箱已经被销毁（`killing` / `killed`），则返回 410 Gone 让客户端立即停止重试。
-- **故障排查**：`/data/log/cube-proxy/sidecar.log` 是 sidecar 的运行日志，关键事件包括 `create event applied`、`auto-paused sandbox`、`auto-resumed sandbox`、`timeout-killed sandbox`。
+- **故障排查**：控制节点上执行 `docker logs cube-lifecycle-manager` 查看运行日志，关键事件包括 `create event applied`、`auto-paused sandbox`、`auto-resumed sandbox`、`timeout-killed sandbox`。每个 CubeProxy 副本额外提供 `GET http://<node-ip>:8082/admin/healthz`，其中 `heartbeat_last_pushed_ms` 表示该副本最近一次向 manager 上报心跳的时间戳。
 
 ### 暂停资源释放与节点调度配额
 

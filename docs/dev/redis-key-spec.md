@@ -61,9 +61,11 @@ The following are the standard keys currently registered in the system (`v1`). N
 | Instance info | `cube:v1:master:instance:info:{insID}` | Hash | master | CubeMaster | CubeMaster | none |
 | Describe task result | `cube:v1:master:task:describe:{taskID}` | Hash | master | CubeMaster | CubeMaster / external | 86400s (configurable) |
 | Instance metadata (reserved) | `cube:v1:master:instance:meta:{...}` | string / list | master | CubeMaster | CubeMaster | none |
-| Sandbox lifecycle registry | `cube:v1:shared:sandbox:lifecycle:meta` | Hash | shared | CubeMaster | cube-proxy-sidecar | none (lifecycle via `HDEL`) |
-| Sandbox lifecycle events | `cube:v1:shared:sandbox:lifecycle:events` | Stream | shared | CubeMaster | cube-proxy-sidecar | MAXLEN ~ 100000 |
-| Sandbox lifecycle state | `cube:v1:shared:sandbox:lifecycle:state:{sandboxID}` | String | shared | cube-proxy-sidecar | cube-proxy-sidecar | SET TTL (default 60s) |
+| Sandbox lifecycle registry | `cube:v1:shared:sandbox:lifecycle:meta` | Hash | shared | CubeMaster | cube-lifecycle-manager | none (lifecycle via `HDEL`) |
+| Sandbox lifecycle events | `cube:v1:shared:sandbox:lifecycle:events` | Stream | shared | CubeMaster | cube-lifecycle-manager | MAXLEN ~ 100000 |
+| Sandbox lifecycle state | `cube:v1:shared:sandbox:lifecycle:state:{sandboxID}` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET TTL (default 60s) |
+| CubeProxy replica registry | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | none (evicted on heartbeat expiry via `HDEL`) |
+| CubeProxy replica heartbeat | `cube:v1:shared:cube_proxy:heartbeat` | Sorted Set | shared | CubeProxy | cube-lifecycle-manager | none (`ZREMRANGEBYSCORE` on expiry, default 15s) |
 
 ### 5.1 Hash field conventions
 
@@ -126,7 +128,9 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 | `instance:info` / `instance:meta` | No TTL | Managed per instance lifecycle; may be augmented later |
 | `sandbox:lifecycle:meta` | No TTL | Written on sandbox create, `HDEL` on destroy |
 | `sandbox:lifecycle:events` | MAXLEN ~ | Stream trimmed on each `XADD` (default ~100000) |
-| `sandbox:lifecycle:state` | SET TTL | `EX` on each write (sidecar default 60s); released on rollback or sandbox delete |
+| `sandbox:lifecycle:state` | SET TTL | `EX` on each write (cube-lifecycle-manager default 60s); released on rollback or sandbox delete |
+| `cube_proxy:registry` | No TTL (heartbeat-derived) | Written by each CubeProxy replica on startup; entries are `HDEL`'d by cube-lifecycle-manager once the corresponding heartbeat expires |
+| `cube_proxy:heartbeat` | Sorted Set expiry | Score = last heartbeat unix ms; entries older than `heartbeat_ttl` (default 15s) are removed via `ZREMRANGEBYSCORE` |
 | Cache keys (future) | TTL required | Must be declared on write and registered in this document |
 
 ## 7. Per-service implementation

@@ -1022,6 +1022,7 @@ rm -rf \
   "${INSTALL_PREFIX}/cube-kernel-scf" \
   "${INSTALL_PREFIX}/cube-image" \
   "${INSTALL_PREFIX}/cube-egress" \
+  "${INSTALL_PREFIX}/cube-lifecycle-manager" \
   "${INSTALL_PREFIX}/scripts" \
   "${INSTALL_PREFIX}/sql" \
   "${INSTALL_PREFIX}/.one-click.env"

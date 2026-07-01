@@ -22,6 +22,10 @@ fi
 
 "${SCRIPT_DIR}/up-support.sh"
 
+# cube-lifecycle-manager owns paused-sandbox resume; it must be reachable
+# before cube-proxy starts routing paused traffic through /_sidecar_resume,
+# otherwise the first paused request would 502.
+"${SCRIPT_DIR}/up-cube-lifecycle-manager.sh"
 "${SCRIPT_DIR}/up-cube-proxy.sh"
 "${SCRIPT_DIR}/up-dns.sh"
 

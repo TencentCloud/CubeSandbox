@@ -1,8 +1,8 @@
 [Unit]
 Description=Cube Sandbox cube-proxy container
-After=docker.service network-online.target cube-sandbox-redis.service cube-sandbox-dns.service
+After=docker.service network-online.target cube-sandbox-redis.service cube-sandbox-dns.service cube-sandbox-cube-lifecycle-manager.service
 Requires=docker.service
-Wants=network-online.target cube-sandbox-redis.service cube-sandbox-dns.service
+Wants=network-online.target cube-sandbox-redis.service cube-sandbox-dns.service cube-sandbox-cube-lifecycle-manager.service
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 PartOf=cube-sandbox-control.target
 

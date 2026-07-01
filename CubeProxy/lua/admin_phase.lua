@@ -1,12 +1,13 @@
 -- admin_phase.lua
 --
--- Loopback-only admin endpoints used by CubeProxy-sidecar to drive the
--- auto-pause / auto-resume coordination dicts. See nginx.conf admin server
--- block for routing.
+-- Admin endpoints called by cube-lifecycle-manager (CLM) to drive the
+-- auto-pause / auto-resume coordination dicts on this CubeProxy replica.
+-- See nginx.conf admin server block for routing.
 --
--- All requests are loopback-bound (the listen directive is 127.0.0.1:8082);
--- additionally, when $cube_admin_token is non-empty, requests must carry
--- a matching X-Cube-Admin-Token header. Mismatch → 403.
+-- The admin server's listen address is templated at deploy time (defaults
+-- to the node IP so CLM can reach it from the control node); access
+-- control relies on $cube_admin_token — when non-empty, requests must
+-- carry a matching X-Cube-Admin-Token header, mismatch → 403.
 --
 -- Request bodies are JSON; responses are JSON. Errors carry HTTP status +
 -- {"error": "..."} body.
@@ -71,9 +72,10 @@ end
 
 -- POST /admin/meta/upsert
 --   body: {"sandbox_id": "...", ...arbitrary metadata...}
---   semantics: stores the JSON-encoded metadata under sandbox_id. Sidecar
---              re-pushes the full snapshot on reconnect, so "set" is enough;
---              we don't merge.
+--   semantics: stores the JSON-encoded metadata under sandbox_id. CLM
+--              replays the full snapshot when it first discovers this
+--              replica (discovery onJoin), so "set" is enough; we don't
+--              merge.
 local function handle_meta_upsert()
     local obj, err = read_json_body()
     if not obj then return reply_error(ngx.HTTP_BAD_REQUEST, err) end
@@ -139,16 +141,16 @@ end
 -- GET /admin/last_active?since=<unix_ms>
 --   Returns {"now": <unix_ms>, "entries": {"<sandbox_id>": <ts_ms>, ...}}.
 --   `since` filters: only entries with ts > since are included. Useful for
---   the sidecar's incremental polling loop.
+--   CLM's incremental polling loop.
 local function handle_last_active()
     local args = ngx.req.get_uri_args(2)
     local since = tonumber(args.since) or 0
 
     local entries = {}
     -- get_keys(0) returns up to 1024 keys; we iterate until exhausted.
-    -- For the dict size we set (8m → ~10w entries) the sidecar should pull
-    -- often enough that any single response stays bounded; if not, the
-    -- sidecar must use ?since= incrementally.
+    -- For the dict size we set (8m → ~10w entries) CLM should pull often
+    -- enough that any single response stays bounded; if not, CLM must use
+    -- ?since= incrementally.
     local keys = LAST:get_keys(0)
     for _, k in ipairs(keys) do
         local v = LAST:get(k)
@@ -166,11 +168,19 @@ local function handle_last_active()
 end
 
 local function handle_healthz()
+    -- heartbeat_last_pushed_ms is written by proxy_registry.lua's timer;
+    -- absent when the registry feature is disabled or has never succeeded.
+    local hb_ms
+    local ldict = ngx.shared.local_cache
+    if ldict then
+        hb_ms = ldict:get("cube_proxy_heartbeat_last_pushed_ms")
+    end
     return reply(ngx.HTTP_OK, {
-        ok    = true,
-        meta  = META and META:free_space() or nil,
-        state = STATE and STATE:free_space() or nil,
-        last  = LAST and LAST:free_space() or nil,
+        ok                          = true,
+        meta                        = META and META:free_space() or nil,
+        state                       = STATE and STATE:free_space() or nil,
+        last                        = LAST and LAST:free_space() or nil,
+        heartbeat_last_pushed_ms    = hb_ms,
     })
 end
 

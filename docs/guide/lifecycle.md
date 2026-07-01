@@ -164,9 +164,9 @@ python examples/code-sandbox-quickstart/auto-kill.py
 ## Operational Notes
 
 - **Pause fidelity**: CPU registers, process memory, TCP state (with no external peer), and filesystem mutations all survive the snapshot. Outbound sockets the sandbox itself opened are dropped on pause and must be reopened by the application after resume.
-- **Cluster coordination**: auto-pause is driven by `cube-proxy-sidecar`, co-resident with each CubeProxy container. It consumes lifecycle events CubeMaster publishes via Redis stream and broadcasts state to every CubeProxy instance. Cross-replica races are resolved by Redis `SETNX` state locks so the same sandbox is never paused or resumed twice concurrently.
+- **Cluster coordination**: auto-pause is driven by the `cube-lifecycle-manager` service that runs on the control node. It consumes lifecycle events CubeMaster publishes via Redis stream, discovers every live CubeProxy replica through a Redis-backed registration table, and broadcasts state to each of them. Cross-replica races are resolved by Redis `SETNX` state locks so the same sandbox is never paused or resumed twice concurrently.
 - **Failure mode**: when an auto-resume RPC fails, CubeProxy returns `503 + Retry-After` to the client immediately rather than hanging on a long timeout. When the sandbox has already been killed (`killing` / `killed`) the proxy returns `410 Gone` instead, telling SDK clients to stop retrying.
-- **Diagnostics**: `/data/log/cube-proxy/sidecar.log` is the sidecar's runtime log. Look for `create event applied`, `auto-paused sandbox`, `auto-resumed sandbox`, `timeout-killed sandbox`.
+- **Diagnostics**: `docker logs cube-lifecycle-manager` (control node) is the runtime log for the auto-pause coordinator. Look for `create event applied`, `auto-paused sandbox`, `auto-resumed sandbox`, `timeout-killed sandbox`. Each CubeProxy replica additionally exposes `GET http://<node-ip>:8082/admin/healthz` reporting `heartbeat_last_pushed_ms` (the last time it announced itself to the manager).
 
 ### Paused Resource Release & Scheduling Quota
 
