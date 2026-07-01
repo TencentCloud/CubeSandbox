@@ -124,13 +124,13 @@ pip install -r requirements.txt
 
 ### 4. 运行时配置与 API Key 注入
 
-Pi 命令以无交互（无 TUI）方式构造，显式指定 provider/model 并使用 `--mode json`，便于宿主端捕获机器可读结果。两种密钥流转方式共用同一个模板：
+Pi 命令以无交互方式构造：`--print` 表示处理完 prompt 即退出（不启动 TUI，否则会在 E2B exec 通道上挂死），配合显式 provider/model 与 `--mode json` 输出机器可读的 JSONL 事件流；`--approve` 是布尔开关，表示本次运行信任沙箱内的项目本地文件，prompt 作为末尾的位置参数传入。两种密钥流转方式共用同一个模板：
 
 **直连方式** —— 逐命令传入密钥。`e2b` 的 `commands.run(envs=...)` 把环境放进 exec 信封，而非 VM 内的持久文件，因此密钥只在该命令执行期间存在：
 
 ```python
 result = sandbox.commands.run(
-    "cd /workspace && pi --mode json --provider anthropic "
+    "cd /workspace && pi --print --mode json --provider anthropic "
     "--model claude-sonnet-4-6 --approve 'do something'",
     envs={"ANTHROPIC_API_KEY": key},
     user="root",
@@ -217,7 +217,7 @@ sandbox = Sandbox.create(
 
 ```python
 cmd = (
-    "cd /workspace && pi --mode json "
+    "cd /workspace && pi --print --mode json "
     "--provider anthropic --model claude-sonnet-4-6 "
     "--approve 'Inspect the project, run app.py, and summarize the result.'"
 )
@@ -237,7 +237,7 @@ version = sandbox.commands.run("pi --version", timeout=60)
 - **CubeEgress CA。** 保险柜方式要求沙箱信任 CubeEgress 根 CA。通过
   `cubemastercli tpl create-from-image` 构建的模板默认已开启。
 - **出网副作用。** 需要 `npm install` 或拉取 MCP 工具的任务，要放行相应 host 或预装进模板。
-- **交互式 TTY 功能。** Pi TUI 在 E2B 协议下不可用。请用无交互 `--mode json`，多轮对话由宿主脚本驱动。
+- **交互式 TTY 功能。** Pi TUI 在 E2B 协议下不可用。请用无交互 `--print --mode json`，多轮对话由宿主脚本驱动。
 
 ## 排错
 

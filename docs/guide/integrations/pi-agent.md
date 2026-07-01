@@ -131,9 +131,11 @@ pip install -r requirements.txt
 
 ### 4. Runtime Configuration and API Key Injection
 
-The Pi command is built headlessly (no TUI) with an explicit provider/model and
-`--mode json` so the host can capture a machine-readable result. Two key-flow
-flavors share the same template:
+The Pi command is built headlessly with `--print` (process the prompt and exit,
+no TUI), an explicit provider/model, and `--mode json` so the host can capture a
+machine-readable JSONL event stream. `--approve` trusts the project-local files
+in the sandbox for this run, and the prompt is the trailing positional argument.
+Two key-flow flavors share the same template:
 
 **Direct flavor** — forward the key per command. `e2b`'s `commands.run(envs=...)`
 puts the environment into the exec envelope, not into a persistent file inside
@@ -141,7 +143,7 @@ the VM, so the key lives only for the lifetime of that command:
 
 ```python
 result = sandbox.commands.run(
-    "cd /workspace && pi --mode json --provider anthropic "
+    "cd /workspace && pi --print --mode json --provider anthropic "
     "--model claude-sonnet-4-6 --approve 'do something'",
     envs={"ANTHROPIC_API_KEY": key},
     user="root",
@@ -238,7 +240,7 @@ inside the sandbox.
 
 ```python
 cmd = (
-    "cd /workspace && pi --mode json "
+    "cd /workspace && pi --print --mode json "
     "--provider anthropic --model claude-sonnet-4-6 "
     "--approve 'Inspect the project, run app.py, and summarize the result.'"
 )
@@ -264,8 +266,8 @@ version = sandbox.commands.run("pi --version", timeout=60)
 - **Egress side-effects.** Tasks that `npm install` or fetch MCP tools need those
   hosts allowed or preinstalled into the template.
 - **Interactive TTY features.** The Pi TUI is not available over the E2B
-  protocol. Use headless `--mode json` and drive multi-turn conversations from
-  the host script.
+  protocol. Use headless `--print --mode json` and drive multi-turn
+  conversations from the host script.
 
 ## Troubleshooting
 

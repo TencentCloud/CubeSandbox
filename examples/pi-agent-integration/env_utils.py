@@ -209,7 +209,15 @@ def provider_inject(provider: str, secret: str) -> list[dict[str, str]]:
 
 
 def pi_command(prompt: str, *, mode: str = "json", name: str | None = None) -> str:
-    args = ["pi"]
+    """Build a headless (non-interactive) Pi invocation.
+
+    ``--print`` makes Pi process the prompt and exit instead of launching the
+    interactive TUI (which would hang over the E2B exec channel). ``--mode json``
+    streams machine-readable JSONL events. ``--approve`` is a boolean flag that
+    trusts project-local files (AGENTS.md/CLAUDE.md) for this run; the prompt is
+    passed as the trailing positional message.
+    """
+    args = ["pi", "--print"]
     if mode:
         args.extend(["--mode", mode])
     provider = pi_provider()
@@ -223,7 +231,8 @@ def pi_command(prompt: str, *, mode: str = "json", name: str | None = None) -> s
         args.extend(["--thinking", thinking])
     if name:
         args.extend(["--name", name])
-    args.extend(["--approve", prompt])
+    args.append("--approve")
+    args.append(prompt)
     return " ".join(shlex.quote(arg) for arg in args)
 
 
