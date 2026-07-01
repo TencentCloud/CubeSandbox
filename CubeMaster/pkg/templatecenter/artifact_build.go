@@ -259,6 +259,9 @@ func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req
 	// design/cube-egress-ca-bake.md for the contract.
 	opts.PostRootfsExport = func(ctx context.Context, rootfsDir string) error {
 		var err error
+		if _, err = injectEnvdIntoRootfs(ctx, rootfsDir, req); err != nil {
+			return err
+		}
 		caBakeResult, err = applyCubeEgressCAToRootfs(ctx, rootfsDir, caPEM, caFingerprint)
 		return err
 	}

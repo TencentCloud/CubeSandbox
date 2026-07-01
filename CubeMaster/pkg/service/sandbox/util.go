@@ -255,6 +255,10 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
 
+	if err = injectEnvdSidecar(ctx, req, out); err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+	}
+
 	if err = checkAndGetVolumes(req, out); err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
@@ -488,6 +492,10 @@ func checkAndGetContainerAnnotation(c *cubebox.ContainerConfig, cnt *types.Conta
 		}
 
 		if strings.HasPrefix(k, constants.CubeAnnotationsPrefix) {
+			c.Annotations[k] = v
+		}
+
+		if strings.HasPrefix(k, "cube.container.") {
 			c.Annotations[k] = v
 		}
 

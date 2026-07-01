@@ -788,6 +788,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
+		cli.BoolFlag{Name: "disable-inject-envd", Usage: "disable cubesandbox-envd injection for this template build"},
 		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the job to completion"},
 		cli.DurationFlag{Name: "interval", Value: defaultWatchInterval, Usage: "poll interval while watching the job"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
@@ -1382,8 +1383,9 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	probePort := c.Int("probe")
 	cpuMillicores := c.Int("cpu")
 	memoryMB := c.Int("memory")
+	disableInjectEnvd := c.Bool("disable-inject-envd")
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") {
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !disableInjectEnvd {
 		return nil, nil
 	}
 
@@ -1437,6 +1439,12 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 			FailureThreshold: 60,
 			SuccessThreshold: 1,
 		}
+	}
+	if disableInjectEnvd {
+		if overrides.Annotations == nil {
+			overrides.Annotations = map[string]string{}
+		}
+		overrides.Annotations[constants.CubeAnnotationsInjectEnvd] = "false"
 	}
 	return overrides, nil
 }

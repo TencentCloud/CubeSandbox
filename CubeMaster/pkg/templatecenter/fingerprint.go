@@ -44,6 +44,13 @@ func buildTemplateSpecFingerprintWithCA(req *types.CreateTemplateFromImageReq, s
 		NetworkType             string                    `json:"network_type"`
 		ContainerOverrides      *types.ContainerOverrides `json:"container_overrides,omitempty"`
 		CubeEgressCAFingerprint string                    `json:"cube_egress_ca_fingerprint,omitempty"`
+		EnvdBinarySHA256        string                    `json:"envd_binary_sha256,omitempty"`
+	}
+	envdSHA := ""
+	if shouldInjectEnvdIntoTemplate(req) {
+		if sha, err := envdBinarySHA256(); err == nil {
+			envdSHA = sha
+		}
 	}
 	payload, _ := json.Marshal(fingerprintPayload{
 		SourceImageDigest:       sourceImageDigest,
@@ -53,6 +60,7 @@ func buildTemplateSpecFingerprintWithCA(req *types.CreateTemplateFromImageReq, s
 		NetworkType:             req.NetworkType,
 		ContainerOverrides:      req.ContainerOverrides,
 		CubeEgressCAFingerprint: cubeEgressCAFingerprint,
+		EnvdBinarySHA256:        envdSHA,
 	})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])

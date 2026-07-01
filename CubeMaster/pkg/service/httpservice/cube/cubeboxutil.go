@@ -378,6 +378,7 @@ func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.Creat
 	if reqInOut.InstanceType != cubebox.InstanceType_cubebox.String() {
 		return nil
 	}
+	stripPerRequestEnvdAnnotations(ctx, reqInOut)
 	constants.NormalizeAppSnapshotAnnotations(reqInOut.Annotations)
 
 	templateID, hasTemplateID := reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
