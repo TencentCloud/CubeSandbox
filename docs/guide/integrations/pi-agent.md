@@ -198,7 +198,7 @@ rules = [
             "audit": "metadata",
             "inject": [
                 {"header": "x-api-key", "secret": ANTHROPIC_API_KEY, "format": "${SECRET}"},
-                {"header": "anthropic-version", "secret": "2023-06-01"},
+                {"header": "anthropic-version", "secret": "2023-06-01", "format": "${SECRET}"},
             ],
         },
     },
@@ -206,7 +206,7 @@ rules = [
 
 sandbox = Sandbox.create(
     template=CUBE_TEMPLATE_ID,
-    allow_internet_access=True,
+    allow_internet_access=False,  # default-deny at L3/L4; the rule's host is auto-allowed
     network={"rules": rules},
 )
 ```
@@ -215,7 +215,7 @@ Effect:
 
 - `printenv ANTHROPIC_API_KEY` inside the sandbox shows only a placeholder.
 - Every request to the LLM host gets the auth header attached on the wire.
-- Anything else is default-denied and returned as `403 Forbidden - CubeEgress`.
+- Anything else is dropped by CubeVS at L3/L4 (`allow_internet_access=False`) and never leaves the sandbox.
 - Every allow / deny decision lands in the egress audit log.
 
 For non-Anthropic providers the example injects `Authorization: Bearer ${SECRET}`

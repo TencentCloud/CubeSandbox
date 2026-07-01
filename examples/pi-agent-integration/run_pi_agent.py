@@ -109,8 +109,11 @@ def run_command(
 
     try:
         return sandbox.commands.run(command, **kwargs)
-    except TypeError:
-        if "envs" not in kwargs:
+    except TypeError as exc:
+        # Older SDKs name the parameter ``env`` instead of ``envs``. Only retry
+        # for that specific signature mismatch; re-raise any other TypeError so
+        # real bugs (e.g. a wrong-type command or timeout) are not masked.
+        if "envs" not in kwargs or "envs" not in str(exc):
             raise
         kwargs["env"] = kwargs.pop("envs")
         return sandbox.commands.run(command, **kwargs)

@@ -181,7 +181,7 @@ rules = [
             "audit": "metadata",
             "inject": [
                 {"header": "x-api-key", "secret": ANTHROPIC_API_KEY, "format": "${SECRET}"},
-                {"header": "anthropic-version", "secret": "2023-06-01"},
+                {"header": "anthropic-version", "secret": "2023-06-01", "format": "${SECRET}"},
             ],
         },
     },
@@ -189,7 +189,7 @@ rules = [
 
 sandbox = Sandbox.create(
     template=CUBE_TEMPLATE_ID,
-    allow_internet_access=True,
+    allow_internet_access=False,  # L3/L4 默认拒绝；规则里的 host 会被自动放行
     network={"rules": rules},
 )
 ```
@@ -198,7 +198,7 @@ sandbox = Sandbox.create(
 
 - 沙箱内 `printenv ANTHROPIC_API_KEY` 只显示占位值。
 - 每次访问 LLM host 都会在链路上被附加鉴权头。
-- 其他任何目的地都被默认拒绝，返回 `403 Forbidden - CubeEgress`。
+- 其他任何目的地都会被 CubeVS 在 L3/L4 层丢弃（`allow_internet_access=False`），根本无法离开沙箱。
 - 每条 allow / deny 决策都会记入出网审计日志。
 
 非 Anthropic provider 时，示例会改注入 `Authorization: Bearer ${SECRET}`。若某 provider 不接受 header 注入的密钥，可回退到直连方式（`envs=...`）—— 但绝不要把密钥写进沙箱内的持久文件。

@@ -6,8 +6,9 @@
 
 This is the recommended production ("credential vault") pattern:
 
-* Default-deny egress — only the LLM API host is reachable. Everything else is
-  rejected by CubeEgress with ``403 Forbidden`` before leaving the sandbox.
+* Default-deny egress — the sandbox is created with ``allow_internet_access=False``,
+  so CubeVS drops all outbound traffic at L3/L4 except the LLM API host, which is
+  auto-allowed because it is extracted from the L7 ``rules`` below.
 * The provider API key is attached by CubeEgress as an HTTP header on the
   matched outbound requests, so the real key never enters the sandbox VM. The
   agent inside only sees a placeholder value.
@@ -114,17 +115,16 @@ def build_llm_rule(provider: str, host: str, secret: str) -> dict:
 
 
 def create_sandbox(template_id: str, rules: list[dict], timeout: int) -> Sandbox:
-    kwargs = {
-        "template": template_id,
-        "allow_internet_access": True,
-        "network": {"rules": rules},
-        "timeout": timeout,
-    }
-    try:
-        return Sandbox.create(**kwargs)
-    except TypeError:
-        kwargs.pop("allow_internet_access", None)
-        return Sandbox.create(**kwargs)
+    # allow_internet_access=False is what makes egress default-deny at L3/L4:
+    # CubeVS drops everything except the hosts extracted from the L7 rules (the
+    # LLM API), which it auto-adds as allow targets. This flag must never be
+    # silently dropped on error, or full internet egress would be re-enabled.
+    return Sandbox.create(
+        template=template_id,
+        allow_internet_access=False,
+        network={"rules": rules},
+        timeout=timeout,
+    )
 
 
 def sandbox_identifier(sandbox: Sandbox) -> str:

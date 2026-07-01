@@ -203,7 +203,7 @@ def provider_inject(provider: str, secret: str) -> list[dict[str, str]]:
     if provider == "anthropic":
         return [
             {"header": "x-api-key", "secret": secret, "format": "${SECRET}"},
-            {"header": "anthropic-version", "secret": "2023-06-01"},
+            {"header": "anthropic-version", "secret": "2023-06-01", "format": "${SECRET}"},
         ]
     return [{"header": "Authorization", "secret": secret, "format": "Bearer ${SECRET}"}]
 
