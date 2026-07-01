@@ -136,6 +136,17 @@ cp env.example .env
 pip install -r requirements.txt
 ```
 
+| 变量 | 流向 | 说明 |
+|---|---|---|
+| `E2B_API_URL` | 本地进程 | CubeAPI（`http://<node>:3000`） |
+| `E2B_API_KEY` | 本地进程 | 任意非空字符串 |
+| `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | 步骤 2 获得 |
+| `ANTHROPIC_API_KEY` | 通过 `envs=...` 逐条命令注入 | 走 CubeEgress 注入时可省 |
+| `ANTHROPIC_MODEL` | 可选，例如 `claude-sonnet-4-5` | 透传给 `claude` |
+| `ANTHROPIC_BASE_URL` | 可选：Anthropic 兼容网关 | 例如 Bedrock 代理 |
+| `CLAUDE_CODE_USE_BEDROCK` | 可选，`true` 走 AWS Bedrock | 沙箱 exec env 需 AWS 凭证；**与 Vertex 互斥** |
+| `CLAUDE_CODE_USE_VERTEX` | 可选，`true` 走 Google Vertex AI | 沙箱内需 `GOOGLE_APPLICATION_CREDENTIALS`；**与 Bedrock 互斥** |
+
 直连模式冒烟测试：
 
 ```bash
@@ -213,7 +224,8 @@ result = sandbox.commands.run(
 )
 ```
 
-需要机读事件流时加 `--verbose --output-format stream-json`（每一步作为一个 JSON 对象输出）。
+需要机读事件流时加 `--stream-json`（脚本内部会展开为 `--verbose --output-format stream-json`，
+每一步作为一个 JSON 对象输出）。
 
 ### 通过 `envs` 传递密钥（直连模式）
 

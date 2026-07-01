@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def run_claude(sandbox: Sandbox, prompt: str, workspace: str, envs: dict[str, str]) -> None:
+def run_claude(sandbox: Sandbox, prompt: str, workspace: str, envs: dict[str, str]) -> int:
     cmd = (
         f"cd {shlex.quote(workspace)} && "
         f"claude --print --allowedTools 'Edit,Write,Read,Bash(ls:*)' -- {shlex.quote(prompt)}"
@@ -57,6 +57,7 @@ def run_claude(sandbox: Sandbox, prompt: str, workspace: str, envs: dict[str, st
         on_stderr=lambda m: sys.stderr.write(m),
     )
     print(f"\n[claude] exit_code={result.exit_code}")
+    return result.exit_code or 0
 
 
 def main() -> int:
@@ -68,14 +69,17 @@ def main() -> int:
 
     print(f"[cube] creating sandbox from template={template_id}")
     sandbox = Sandbox.create(template=template_id, timeout=1800)
-    sid = sandbox.sandbox_id
-    print(f"[cube] sandbox_id={sid}")
 
+    sid: str | None = None
+    failures = 0
     try:
+        sid = sandbox.sandbox_id
+        print(f"[cube] sandbox_id={sid}")
+
         sandbox.commands.run(f"mkdir -p {shlex.quote(args.workspace)}", user="root", timeout=15)
 
         print("\n=== Step 1: initial task ===")
-        run_claude(sandbox, PROMPT_1, args.workspace, envs)
+        failures += 1 if run_claude(sandbox, PROMPT_1, args.workspace, envs) else 0
 
         listing1 = sandbox.commands.run(f"ls -la {shlex.quote(args.workspace)}", user="root")
         print(listing1.stdout)
@@ -89,7 +93,7 @@ def main() -> int:
 
         print("\n=== Step 3: resume + continue ===")
         sandbox = Sandbox.connect(sid)
-        run_claude(sandbox, PROMPT_2, args.workspace, envs)
+        failures += 1 if run_claude(sandbox, PROMPT_2, args.workspace, envs) else 0
 
         listing2 = sandbox.commands.run(f"ls -la {shlex.quote(args.workspace)}", user="root")
         print(listing2.stdout)
@@ -100,7 +104,7 @@ def main() -> int:
         print("\n=== rationale.md ===")
         print(rationale.stdout)
 
-        return 0
+        return 0 if failures == 0 else 1
     finally:
         try:
             sandbox.kill()

@@ -32,7 +32,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    && claude --version
+    && claude --version \
+    && npm cache clean --force \
+    && rm -rf /root/.npm
 
 ENV CLAUDE_CODE_HOME=/root/.claude \
     ANTHROPIC_MODEL="" \

@@ -95,6 +95,8 @@ pip install -r requirements.txt
 | `ANTHROPIC_API_KEY` | Forwarded per-command via `envs=...` | Or omit when using CubeEgress inject |
 | `ANTHROPIC_MODEL` | Optional, e.g. `claude-sonnet-4-5` | Passed straight to `claude` |
 | `ANTHROPIC_BASE_URL` | Optional custom Anthropic-compatible gateway | e.g. Bedrock proxy |
+| `CLAUDE_CODE_USE_BEDROCK` | Optional, `true` to route through AWS Bedrock | Requires AWS creds in the sandbox exec env; **mutually exclusive with Vertex** |
+| `CLAUDE_CODE_USE_VERTEX` | Optional, `true` to route through Google Vertex AI | Requires `GOOGLE_APPLICATION_CREDENTIALS` in the sandbox; **mutually exclusive with Bedrock** |
 
 ## 3. One-shot run
 
@@ -111,7 +113,7 @@ Under the hood the script:
 4. Streams stdout/stderr back to the host in real time.
 5. Lists `/workspace` so you can see the files the agent produced.
 
-Add `--verbose` for `--output-format stream-json` (each turn emitted as a
+Add `--stream-json` for `--output-format stream-json` (each turn emitted as a
 JSON event — handy for orchestration systems that want to watch the tool
 calls). Add `--seed ./my_project.py` to upload a local file into the
 workspace before the agent runs.

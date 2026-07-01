@@ -91,6 +91,8 @@ pip install -r requirements.txt
 | `ANTHROPIC_API_KEY` | 通过 `envs=...` 逐条命令注入 | 若走 CubeEgress 注入模式可省 |
 | `ANTHROPIC_MODEL` | 可选，例如 `claude-sonnet-4-5` | 直接透传给 `claude` |
 | `ANTHROPIC_BASE_URL` | 可选：Anthropic 兼容网关 | 例如 Bedrock 代理 |
+| `CLAUDE_CODE_USE_BEDROCK` | 可选，`true` 走 AWS Bedrock | 需在沙箱 exec env 中提供 AWS 凭证；**与 Vertex 互斥** |
+| `CLAUDE_CODE_USE_VERTEX` | 可选，`true` 走 Google Vertex AI | 需在沙箱内提供 `GOOGLE_APPLICATION_CREDENTIALS`；**与 Bedrock 互斥** |
 
 ## 3. 单次任务
 
@@ -107,7 +109,7 @@ python run_claude.py --prompt "Create hello.py that prints 'Hello from CubeSandb
 4. stdout / stderr 实时透传回宿主端；
 5. 打印 `/workspace` 的目录列表，便于验收 Agent 产出的文件。
 
-添加 `--verbose` 会启用 `--output-format stream-json`（Claude Code 每一步输出为 JSON 事件，
+添加 `--stream-json` 会启用 `--output-format stream-json`（Claude Code 每一步输出为 JSON 事件，
 便于外部编排）。用 `--seed ./my_project.py` 可以在 Agent 运行前把宿主端文件上传到工作区。
 
 ## 4. 使用 pause/resume 支撑长任务

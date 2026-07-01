@@ -144,6 +144,17 @@ cp env.example .env
 pip install -r requirements.txt
 ```
 
+| Variable | Where it flows | Notes |
+|---|---|---|
+| `E2B_API_URL` | Local process | Points at CubeAPI (`http://<node>:3000`) |
+| `E2B_API_KEY` | Local process | Any non-empty string |
+| `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | From step 2 |
+| `ANTHROPIC_API_KEY` | Forwarded per-command via `envs=...` | Or omit when using CubeEgress inject |
+| `ANTHROPIC_MODEL` | Optional, e.g. `claude-sonnet-4-5` | Passed straight to `claude` |
+| `ANTHROPIC_BASE_URL` | Optional custom Anthropic-compatible gateway | e.g. Bedrock proxy |
+| `CLAUDE_CODE_USE_BEDROCK` | Optional, `true` to route through AWS Bedrock | Requires AWS creds in sandbox exec env; **mutually exclusive with Vertex** |
+| `CLAUDE_CODE_USE_VERTEX` | Optional, `true` to route through Google Vertex AI | Requires `GOOGLE_APPLICATION_CREDENTIALS` in sandbox; **mutually exclusive with Bedrock** |
+
 Direct-flavor smoke test:
 
 ```bash
@@ -227,8 +238,8 @@ result = sandbox.commands.run(
 )
 ```
 
-Add `--verbose --output-format stream-json` when the caller wants a
-machine-readable event stream (one JSON object per turn).
+Add `--stream-json` when the caller wants a machine-readable event stream
+(implies `--verbose --output-format stream-json`; one JSON object per turn).
 
 ### Passing secrets via `envs` (direct flavor)
 

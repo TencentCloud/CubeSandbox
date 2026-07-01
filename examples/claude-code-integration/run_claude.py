@@ -73,9 +73,10 @@ def parse_args() -> argparse.Namespace:
              "destroying it. The sandbox_id is printed on exit.",
     )
     p.add_argument(
-        "--verbose",
+        "--stream-json",
         action="store_true",
-        help="Emit `--output-format stream-json` events; otherwise plain text.",
+        help="Emit `--output-format stream-json` events (machine-readable, "
+             "one JSON object per turn). Implies `claude --verbose`.",
     )
     return p.parse_args()
 
@@ -103,7 +104,7 @@ def upload_seed(sandbox: Sandbox, workspace: str, seed: str) -> None:
     print(f"[seed] {seed_path} -> {dst}")
 
 
-def build_command(prompt: str, allowed_tools: str, verbose: bool) -> str:
+def build_command(prompt: str, allowed_tools: str, stream_json: bool) -> str:
     """
     Compose a headless `claude` invocation. `--print` disables the interactive
     TUI so we can capture stdout linearly. `--output-format stream-json` is
@@ -114,7 +115,7 @@ def build_command(prompt: str, allowed_tools: str, verbose: bool) -> str:
         "--print",
         "--allowedTools", allowed_tools,
     ]
-    if verbose:
+    if stream_json:
         parts.extend(["--verbose", "--output-format", "stream-json"])
     parts.append("--")
     parts.append(prompt)
@@ -138,7 +139,7 @@ def run(args: argparse.Namespace) -> int:
         if args.seed:
             upload_seed(sandbox, args.workspace, args.seed)
 
-        cmd = build_command(args.prompt, args.allowed_tools, args.verbose)
+        cmd = build_command(args.prompt, args.allowed_tools, args.stream_json)
         wrapped = f"cd {shlex.quote(args.workspace)} && {cmd}"
 
         print(f"[claude] $ {cmd}")
