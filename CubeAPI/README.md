@@ -10,6 +10,7 @@ No client code changes are needed — simply point `E2B_API_URL` and `E2B_API_KE
 
 - [Supported Features](#supported-features)
 - [Quick Start](#quick-start)
+- [Webhook Event Notifications](#webhook-event-notifications)
 - [Examples](#examples)
 
 ---
@@ -73,6 +74,94 @@ CubeAPI also exposes dashboard-oriented routes under `/cubeapi/v1`. The one-clic
 
 ---
 
+## Webhook Event Notifications
+
+CubeAPI can send best-effort notifications for these sandbox lifecycle events:
+
+- `sandbox.created`
+- `sandbox.deleted`
+- `sandbox.paused`
+- `sandbox.resumed`
+
+Webhooks are implemented as an internal logging backend, not as a new REST API route. API handlers emit `LogEvent` values, and the existing `MultiLogger` fans them out to `FileLogger` and, when configured, `HttpLogger`. HTTP delivery and retries run asynchronously; a failed delivery does not change the sandbox API response. If an explicitly configured endpoint is invalid, CubeAPI fails during startup.
+
+### Configuration
+
+Set `CUBE_API_WEBHOOK_ENDPOINTS` to a JSON array:
+
+```bash
+export CUBE_API_WEBHOOK_ENDPOINTS='[
+  {
+    "url": "http://127.0.0.1:18080/webhook",
+    "events": ["sandbox.created", "sandbox.deleted", "sandbox.paused", "sandbox.resumed"],
+    "secret": "test-secret",
+    "enabled": true
+  }
+]'
+```
+
+Each endpoint supports:
+
+| Field | Description |
+|-------|-------------|
+| `url` | Webhook receiver URL. |
+| `events` | Event names subscribed to by this endpoint. |
+| `secret` | Optional HMAC secret. When omitted, the request is unsigned. |
+| `enabled` | Whether the endpoint is active. |
+
+Event filtering follows these rules:
+
+- `enabled = false`: skip the endpoint.
+- `events = []`: subscribe to the four sandbox lifecycle events listed above.
+- `events = ["*"]`: subscribe to every `LogEvent`.
+- Any other non-empty list: match event names exactly.
+
+### Request Format
+
+Each event is sent as one HTTP POST per matching endpoint. Requests include:
+
+```text
+Content-Type: application/json
+X-Cube-Webhook-Event: <event>
+X-Cube-Webhook-Delivery: <uuid>
+X-Cube-Webhook-Timestamp: <unix-seconds>
+X-Cube-Webhook-Signature: v1=<lowercase-hex>
+```
+
+`X-Cube-Webhook-Signature` is present only when the endpoint has a `secret`. It is an HMAC-SHA256 over the exact bytes below:
+
+```text
+timestamp + "." + delivery_id + "." + raw_request_body
+```
+
+The `timestamp` and `delivery_id` values are taken from their corresponding request headers. The signature header format is exactly `v1=<lowercase-hex>`; receivers must not expect `sha256=<hex>`.
+
+The JSON payload contains delivery metadata and flattened event fields:
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "timestamp": "2026-07-01T08:00:00Z",
+  "level": "info",
+  "event": "sandbox.created",
+  "sandbox_id": "sandbox-123",
+  "template_id": "template-456"
+}
+```
+
+The payload is not a complete `Sandbox` object. Sensitive fields such as tokens and secrets are not included.
+
+### Delivery Semantics
+
+- Any `2xx` response is successful.
+- Network errors, request timeouts, `408`, `425`, `429`, and `5xx` responses are retried with bounded exponential backoff.
+- `3xx` and other `4xx` responses are not retried.
+- Delivery is best-effort. CubeAPI does not currently use a database outbox or disk spool, so queued deliveries are not persisted across process crashes.
+
+For a local standard-library receiver, see [`examples/webhook-receiver/`](examples/webhook-receiver/README.md).
+
+---
+
 ## Examples
 
 The [`examples/`](examples/) directory provides complete examples based on the official `e2b` / `e2b-code-interpreter` Python SDK.
@@ -132,4 +221,5 @@ python pause.py
 python create_with_mount.py
 python browser.py
 python test.py
+```
 

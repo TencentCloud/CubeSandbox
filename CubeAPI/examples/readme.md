@@ -6,3 +6,4 @@ See the top-level [examples/](../../examples/) directory for standalone, runnabl
 - [network-policy](../../examples/network-policy/) — control outbound network access
 - [browser-sandbox](../../examples/browser-sandbox/) — Playwright browser automation via CDP
 - [code-sandbox-quickstart](../../examples/code-sandbox-quickstart/) — basic sandbox operations
+- [webhook-receiver](webhook-receiver/README.md) — local CubeAPI webhook receiver with optional HMAC verification
