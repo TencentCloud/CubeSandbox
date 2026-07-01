@@ -255,9 +255,7 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
 
-	if err = injectEnvdSidecar(ctx, req, out); err != nil {
-		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
-	}
+	injectEnvdSidecar(ctx, req, out)
 
 	if err = checkAndGetVolumes(req, out); err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())

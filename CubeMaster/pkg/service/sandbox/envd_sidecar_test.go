@@ -26,11 +26,9 @@ func TestInjectEnvdSidecarWrapsEntrypoint(t *testing.T) {
 	}
 	out := &cubebox.RunCubeSandboxRequest{}
 
-	err := injectEnvdSidecar(context.Background(), req, out)
-
-	assert.NoError(t, err)
+	injectEnvdSidecar(context.Background(), req, out)
 	assert.Equal(t, []string{"/bin/sh", "-c"}, req.Containers[0].Command)
-	assert.Contains(t, req.Containers[0].Args[0], envdInImagePathDefault)
+	assert.Contains(t, req.Containers[0].Args[0], constants.CubeEnvdInImagePath)
 	assert.Equal(t, []string{"--", "python3", "app.py"}, req.Containers[0].Args[1:])
 	assert.Contains(t, out.ExposedPorts, int64(envdDefaultPort))
 }
@@ -46,9 +44,7 @@ func TestInjectEnvdSidecarIsIdempotent(t *testing.T) {
 	}
 	out := &cubebox.RunCubeSandboxRequest{}
 
-	err := injectEnvdSidecar(context.Background(), req, out)
-
-	assert.NoError(t, err)
+	injectEnvdSidecar(context.Background(), req, out)
 	assert.Equal(t, originalArgs, container.Args)
 	assert.Empty(t, out.ExposedPorts)
 }
@@ -58,9 +54,7 @@ func TestInjectEnvdSidecarSkipsWhenAnnotationMissing(t *testing.T) {
 	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}, Containers: []*types.Container{container}}
 	out := &cubebox.RunCubeSandboxRequest{}
 
-	err := injectEnvdSidecar(context.Background(), req, out)
-
-	assert.NoError(t, err)
+	injectEnvdSidecar(context.Background(), req, out)
 	assert.Equal(t, []string{"sleep"}, container.Command)
 	assert.Equal(t, []string{"infinity"}, container.Args)
 	assert.Empty(t, out.ExposedPorts)

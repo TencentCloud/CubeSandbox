@@ -88,6 +88,7 @@ const (
 
 	CubeAnnotationsInjectEnvd       = "cube.master.inject_envd"
 	CubeAnnotationsEnvdSidecarImage = "cube.master.envd_sidecar_image"
+	CubeEnvdInImagePath             = "/usr/local/bin/envd"
 
 	// CubeAnnotationComponentsPrefix is the namespace for pre-installed
 	// runtime-component metadata carried on templates/sandboxes.

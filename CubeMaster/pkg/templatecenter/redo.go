@@ -248,7 +248,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		if source.Cleanup != nil {
 			defer source.Cleanup(ctx)
 		}
-		artifact, _, _, err = ensureRootfsArtifact(ctx, &workingReq, source, downloadBaseURL)
+		artifact, _, _, err = ensureRootfsArtifact(ctx, &workingReq, source, downloadBaseURL, nil)
 		if err != nil {
 			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 				"status":          JobStatusFailed,

@@ -92,6 +92,28 @@ cubemastercli tpl create-from-image \
 
 > **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
 
+#### Optional — inject envd at template build time
+
+By default, Cube uses the image as-is and does not inject `envd`. For dev or code-sandbox images that do not already include `envd`, or that need a controlled `envd` version, opt in explicitly:
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     <your-image> \
+  --writable-layer-size 1G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health \
+  --enable-inject-envd \
+  --envd-path /path/to/envd
+```
+
+| Flag | Description |
+|------|-------------|
+| `--enable-inject-envd` | Bake the selected host-side `envd` binary into the template rootfs and start it when sandboxes are created from this template. |
+| `--envd-path` | Optional full path to the host-side `envd` binary. If omitted, CubeMaster reads `$CUBE_MASTER_ENVD_HOST_DIR/envd`; when that environment variable is unset, it uses `/usr/local/share/cubesandbox-envd/envd`. |
+
+The injected binary is written inside the template rootfs at `/usr/local/bin/envd`. Changing the selected `envd` binary changes the template fingerprint, so builds do not reuse artifacts baked with an older `envd` binary.
+
 ---
 
 ## Step 2 — Monitor Progress

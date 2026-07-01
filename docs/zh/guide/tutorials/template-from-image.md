@@ -77,6 +77,28 @@ cubemastercli tpl create-from-image \
 
 > **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`。
 
+#### 可选 — 在模板构建阶段注入 envd
+
+默认情况下，Cube 会按原样使用镜像，不会注入 `envd`。如果你的开发环境或代码沙箱镜像尚未包含 `envd`，或需要使用受控版本的 `envd`，可以显式开启：
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     <your-image> \
+  --writable-layer-size 1G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health \
+  --enable-inject-envd \
+  --envd-path /path/to/envd
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--enable-inject-envd` | 将选定的宿主机侧 `envd` 二进制写入模板 rootfs，并在基于该模板创建沙箱时启动它。 |
+| `--envd-path` | 可选的宿主机侧 `envd` 二进制完整路径。若未设置，CubeMaster 会读取 `$CUBE_MASTER_ENVD_HOST_DIR/envd`；若该环境变量也未设置，则使用 `/usr/local/share/cubesandbox-envd/envd`。 |
+
+注入后的二进制位于模板 rootfs 内的 `/usr/local/bin/envd`。更换选定的 `envd` 二进制会改变模板指纹，避免复用由旧版 `envd` 构建出的 artifact。
+
 ---
 
 ## 第二步 — 监控进度

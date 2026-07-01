@@ -83,7 +83,21 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		})
 		return
 	}
-	fingerprint := buildTemplateSpecFingerprintWithCA(req, source.Digest, caFingerprint)
+	envdPayload, err := prepareEnvdInjectionPayload(req)
+	if err != nil {
+		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+			"status":        JobStatusFailed,
+			"phase":         JobPhasePulling,
+			"progress":      100,
+			"error_message": err.Error(),
+		})
+		return
+	}
+	envdSHA := ""
+	if envdPayload != nil {
+		envdSHA = envdPayload.SHA256
+	}
+	fingerprint := buildTemplateSpecFingerprintWithEnvdSHA(req, source.Digest, caFingerprint, envdSHA)
 	artifactID := buildArtifactID(fingerprint)
 	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
 		"artifact_id":               artifactID,
@@ -94,7 +108,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	}); err != nil {
 		logger.Errorf("update job source metadata fail: %v", err)
 	}
-	artifact, generatedReq, builtFreshArtifact, err := ensureRootfsArtifact(ctx, req, source, downloadBaseURL)
+	artifact, generatedReq, builtFreshArtifact, err := ensureRootfsArtifact(ctx, req, source, downloadBaseURL, envdPayload)
 	if err != nil {
 		if !pullProgressFlushed {
 			pullProgress.flush(false)

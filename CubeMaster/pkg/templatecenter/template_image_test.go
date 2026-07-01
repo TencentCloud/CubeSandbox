@@ -1181,7 +1181,7 @@ func TestBuildRootfsArtifactFinalizesBuildResult(t *testing.T) {
 		return &latest, nil
 	})
 
-	got, generatedReq, err := buildRootfsArtifact(context.Background(), artifact, req, source, "http://master.example", nil, "")
+	got, generatedReq, err := buildRootfsArtifact(context.Background(), artifact, req, source, "http://master.example", nil, "", nil)
 	if err != nil {
 		t.Fatalf("buildRootfsArtifact failed: %v", err)
 	}

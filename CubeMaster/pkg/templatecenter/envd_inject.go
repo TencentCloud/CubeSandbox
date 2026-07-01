@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -22,8 +21,6 @@ const (
 	envdHostDirDefault        = "/usr/local/share/cubesandbox-envd"
 	envdHostDirEnv            = "CUBE_MASTER_ENVD_HOST_DIR"
 	envdBinaryName            = "envd"
-	envdInImageDir            = "/usr/local/bin"
-	envdInImagePath           = "/usr/local/bin/envd"
 	envdInjectAnnotationOptIn = "true"
 	envdInjectionFileMode     = 0o755
 	envdInjectionDirMode      = 0o755
@@ -47,49 +44,50 @@ func shouldInjectEnvdIntoTemplate(req *types.CreateTemplateFromImageReq) bool {
 	return req.ContainerOverrides.Annotations[constants.CubeAnnotationsInjectEnvd] == envdInjectAnnotationOptIn
 }
 
-func injectEnvdIntoRootfs(ctx context.Context, rootfsDir string, req *types.CreateTemplateFromImageReq) (string, error) {
+type envdInjectionPayload struct {
+	HostPath string
+	SHA256   string
+	Data     []byte
+}
+
+func prepareEnvdInjectionPayload(req *types.CreateTemplateFromImageReq) (*envdInjectionPayload, error) {
 	if !shouldInjectEnvdIntoTemplate(req) {
-		return "", nil
+		return nil, nil
 	}
 	srcPath := envdHostPath(req)
-	src, err := os.Open(srcPath)
+	data, err := os.ReadFile(srcPath)
 	if err != nil {
-		return "", fmt.Errorf("envd-inject: open %q (set %s to override): %w", srcPath, envdHostDirEnv, err)
+		return nil, fmt.Errorf("envd-inject: read %q (set %s or --envd-path to override): %w", srcPath, envdHostDirEnv, err)
 	}
-	defer src.Close()
+	sum := sha256.Sum256(data)
+	return &envdInjectionPayload{
+		HostPath: srcPath,
+		SHA256:   hex.EncodeToString(sum[:]),
+		Data:     data,
+	}, nil
+}
 
-	dstDir := filepath.Join(rootfsDir, envdInImageDir)
+func injectEnvdIntoRootfs(ctx context.Context, rootfsDir string, req *types.CreateTemplateFromImageReq) (string, error) {
+	payload, err := prepareEnvdInjectionPayload(req)
+	if err != nil {
+		return "", err
+	}
+	return injectEnvdPayloadIntoRootfs(ctx, rootfsDir, payload)
+}
+
+func injectEnvdPayloadIntoRootfs(ctx context.Context, rootfsDir string, payload *envdInjectionPayload) (string, error) {
+	if payload == nil {
+		return "", nil
+	}
+	dstDir := filepath.Join(rootfsDir, filepath.Dir(constants.CubeEnvdInImagePath))
 	if err := os.MkdirAll(dstDir, envdInjectionDirMode); err != nil {
 		return "", fmt.Errorf("envd-inject: mkdir %q: %w", dstDir, err)
 	}
-	dstPath := filepath.Join(rootfsDir, envdInImagePath)
-	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, envdInjectionFileMode)
-	if err != nil {
-		return "", fmt.Errorf("envd-inject: create %q: %w", dstPath, err)
-	}
-	hasher := sha256.New()
-	if _, err := io.Copy(dst, io.TeeReader(src, hasher)); err != nil {
-		_ = dst.Close()
+	dstPath := filepath.Join(rootfsDir, constants.CubeEnvdInImagePath)
+	if err := os.WriteFile(dstPath, payload.Data, envdInjectionFileMode); err != nil {
 		_ = os.Remove(dstPath)
-		return "", fmt.Errorf("envd-inject: copy to %q: %w", dstPath, err)
+		return "", fmt.Errorf("envd-inject: write %q: %w", dstPath, err)
 	}
-	if err := dst.Close(); err != nil {
-		return "", fmt.Errorf("envd-inject: close %q: %w", dstPath, err)
-	}
-	sha := hex.EncodeToString(hasher.Sum(nil))
-	log.G(ctx).Infof("envd-inject: copied %s -> rootfs%s sha256=%s", srcPath, envdInImagePath, sha)
-	return sha, nil
-}
-
-func envdBinarySHA256(req *types.CreateTemplateFromImageReq) (string, error) {
-	src, err := os.Open(envdHostPath(req))
-	if err != nil {
-		return "", err
-	}
-	defer src.Close()
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, src); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
+	log.G(ctx).Infof("envd-inject: copied %s -> rootfs%s sha256=%s", payload.HostPath, constants.CubeEnvdInImagePath, payload.SHA256)
+	return payload.SHA256, nil
 }

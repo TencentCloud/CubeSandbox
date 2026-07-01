@@ -36,6 +36,10 @@ func buildTemplateSpecFingerprint(req *types.CreateTemplateFromImageReq, sourceI
 // reuse automatically. cubeEgressCAFingerprint is empty when CA baking is
 // disabled for this request.
 func buildTemplateSpecFingerprintWithCA(req *types.CreateTemplateFromImageReq, sourceImageDigest, cubeEgressCAFingerprint string) string {
+	return buildTemplateSpecFingerprintWithEnvdSHA(req, sourceImageDigest, cubeEgressCAFingerprint, "")
+}
+
+func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageReq, sourceImageDigest, cubeEgressCAFingerprint, envdSHA string) string {
 	type fingerprintPayload struct {
 		SourceImageDigest       string                    `json:"source_image_digest"`
 		WritableLayerSize       string                    `json:"writable_layer_size"`
@@ -45,12 +49,6 @@ func buildTemplateSpecFingerprintWithCA(req *types.CreateTemplateFromImageReq, s
 		ContainerOverrides      *types.ContainerOverrides `json:"container_overrides,omitempty"`
 		CubeEgressCAFingerprint string                    `json:"cube_egress_ca_fingerprint,omitempty"`
 		EnvdBinarySHA256        string                    `json:"envd_binary_sha256,omitempty"`
-	}
-	envdSHA := ""
-	if shouldInjectEnvdIntoTemplate(req) {
-		if sha, err := envdBinarySHA256(req); err == nil {
-			envdSHA = sha
-		}
 	}
 	payload, _ := json.Marshal(fingerprintPayload{
 		SourceImageDigest:       sourceImageDigest,
