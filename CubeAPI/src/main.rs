@@ -209,16 +209,22 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     };
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
+    let http_client = reqwest::Client::builder()
+        .pool_max_idle_per_host(100)
+        .build()?;
+    let mut multi_logger = MultiLogger::new().add(arc(file_logger));
+    if let Some(webhook_logger) =
+        logging::http::WebhookLogger::new(cfg.webhooks.clone(), http_client)
+    {
+        tracing::info!(
+            endpoints = cfg.webhooks.len(),
+            "webhook event delivery enabled"
+        );
+        multi_logger = multi_logger.add(arc(webhook_logger));
+    }
 
     // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
-    let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
-        min_level,
-    ));
+    let logger: logging::ArcLogger = arc(FilteredLogger::new(arc(multi_logger), min_level));
 
     tracing::info!(
         log_dir = %cfg.log_dir,

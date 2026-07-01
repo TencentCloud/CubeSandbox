@@ -71,6 +71,34 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+
+    /// Webhook endpoints for structured lifecycle events.
+    ///
+    /// Env var: CUBE_API_WEBHOOKS. Value is a JSON array, for example:
+    /// [{"url":"http://127.0.0.1:9000/webhook","events":["sandbox.created"],"secret":"..."}]
+    #[serde(default = "default_webhooks")]
+    pub webhooks: Vec<WebhookEndpointConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WebhookEndpointConfig {
+    pub url: String,
+
+    /// Subscribed event names. Empty means all events.
+    #[serde(default)]
+    pub events: Vec<String>,
+
+    /// Optional HMAC-SHA256 secret.
+    #[serde(default)]
+    pub secret: Option<String>,
+
+    /// HTTP request timeout in seconds.
+    #[serde(default = "default_webhook_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// Number of retries after the initial attempt.
+    #[serde(default = "default_webhook_max_retries")]
+    pub max_retries: usize,
 }
 
 fn default_bind() -> String {
@@ -108,6 +136,31 @@ fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .or_else(default_cube_sandbox_mysql_url)
+}
+
+fn default_webhook_timeout_secs() -> u64 {
+    3
+}
+
+fn default_webhook_max_retries() -> usize {
+    3
+}
+
+fn default_webhooks() -> Vec<WebhookEndpointConfig> {
+    let Ok(raw) = std::env::var("CUBE_API_WEBHOOKS") else {
+        return Vec::new();
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    match serde_json::from_str::<Vec<WebhookEndpointConfig>>(trimmed) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, "invalid CUBE_API_WEBHOOKS, webhook delivery disabled");
+            Vec::new()
+        }
+    }
 }
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
@@ -148,6 +201,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
+            webhooks: default_webhooks(),
         }
     }
 }

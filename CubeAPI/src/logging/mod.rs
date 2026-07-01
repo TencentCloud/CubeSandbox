@@ -11,7 +11,7 @@
 //! file **asynchronously** via a background Tokio task (channel → writer loop).
 //!
 //! Additional backends can be plugged in by implementing [`Logger`] and
-//! registering them in [`MultiLogger`].  Ready-made stubs are provided for:
+//! registering them in [`MultiLogger`]. Ready-made backends are provided for:
 //!
 //! | Module         | Backend                        | Status   |
 //! |----------------|-------------------------------|----------|
@@ -20,7 +20,7 @@
 //! | `multi`        | Fan-out to N backends         | ✅ Ready |
 //! | `filtered`     | Min-level gate wrapper        | ✅ Ready |
 //! | `otlp`         | OpenTelemetry OTLP exporter   | 🔲 Stub  |
-//! | `http`         | Generic HTTP webhook          | 🔲 Stub  |
+//! | `http`         | Generic HTTP webhook          | ✅ Ready |
 
 pub mod file;
 pub mod filtered;

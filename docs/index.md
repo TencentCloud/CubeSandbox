@@ -31,6 +31,7 @@ features:
 - [Self-Build Deployment](./guide/self-build-deploy.md) — build from source and deploy on a single machine
 - [Multi-Node Cluster](./guide/multi-node-deploy.md) — scale to multiple nodes
 - [Architecture Overview](./architecture/overview.md) — understand the system design and core components
+- [Webhooks](./guide/webhooks.md) — subscribe to sandbox lifecycle events
 
 
 ## Examples

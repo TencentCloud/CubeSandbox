@@ -31,6 +31,7 @@ features:
 - [本地构建部署](./guide/self-build-deploy.md) — 从源码构建并在单机上部署
 - [多机集群部署](./guide/multi-node-deploy.md) — 扩展到多节点集群
 - [架构概览](./architecture/overview.md) — 了解系统设计与核心组件
+- [Webhook 事件通知](./guide/webhooks.md) — 订阅沙箱生命周期事件
 
 ## 场景示例
 
