@@ -19,8 +19,7 @@ import (
 const (
 	envdInImagePathDefault = "/usr/local/bin/envd"
 	envdInImagePathEnv     = "CUBE_MASTER_ENVD_IN_IMAGE_PATH"
-	envdInjectAnnotationOn = "true"
-	envdPort               = 49983
+	envdDefaultPort        = 49983
 )
 
 func envdInImagePath() string {
@@ -32,7 +31,7 @@ func envdInImagePath() string {
 
 func injectEnvdSidecar(ctx context.Context, req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {
 	val, ok := req.Annotations[constants.CubeAnnotationsInjectEnvd]
-	if !ok || val != envdInjectAnnotationOn {
+	if !ok || val != "true" {
 		return nil
 	}
 	if req.InstanceType != "" && req.InstanceType != cubebox.InstanceType_cubebox.String() {
@@ -48,7 +47,7 @@ func injectEnvdSidecar(ctx context.Context, req *types.CreateCubeSandboxReq, out
 		return nil
 	}
 	wrapEntrypointForEnvd(mainContainer)
-	out.ExposedPorts = append(out.ExposedPorts, envdPort)
+	out.ExposedPorts = append(out.ExposedPorts, envdDefaultPort)
 	log.G(ctx).Infof("envd: wrapped entrypoint of container %q (envd path=%s, baked into template rootfs)", mainContainer.Name, envdInImagePath())
 	return nil
 }

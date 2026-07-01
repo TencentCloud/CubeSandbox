@@ -32,7 +32,7 @@ func TestInjectEnvdSidecarWrapsEntrypoint(t *testing.T) {
 	assert.Equal(t, []string{"/bin/sh", "-c"}, req.Containers[0].Command)
 	assert.Contains(t, req.Containers[0].Args[0], envdInImagePathDefault)
 	assert.Equal(t, []string{"--", "python3", "app.py"}, req.Containers[0].Args[1:])
-	assert.Contains(t, out.ExposedPorts, int64(envdPort))
+	assert.Contains(t, out.ExposedPorts, int64(envdDefaultPort))
 }
 
 func TestInjectEnvdSidecarIsIdempotent(t *testing.T) {
