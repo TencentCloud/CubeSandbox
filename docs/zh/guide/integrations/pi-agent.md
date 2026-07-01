@@ -131,7 +131,7 @@ Pi 命令以无交互（无 TUI）方式构造，显式指定 provider/model 并
 ```python
 result = sandbox.commands.run(
     "cd /workspace && pi --mode json --provider anthropic "
-    "--model claude-sonnet-4-20250514 --approve 'do something'",
+    "--model claude-sonnet-4-6 --approve 'do something'",
     envs={"ANTHROPIC_API_KEY": key},
     user="root",
     timeout=900,
@@ -218,7 +218,7 @@ sandbox = Sandbox.create(
 ```python
 cmd = (
     "cd /workspace && pi --mode json "
-    "--provider anthropic --model claude-sonnet-4-20250514 "
+    "--provider anthropic --model claude-sonnet-4-6 "
     "--approve 'Inspect the project, run app.py, and summarize the result.'"
 )
 result = sandbox.commands.run(cmd, envs=pi_env, user="root", timeout=900)

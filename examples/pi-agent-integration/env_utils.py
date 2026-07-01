@@ -102,9 +102,9 @@ def pi_model() -> str:
         return (
             os.environ.get("PI_MODEL")
             or os.environ.get("ANTHROPIC_MODEL")
-            or "claude-sonnet-4-20250514"
+            or "claude-sonnet-4-6"
         )
-    return optional("PI_MODEL", "claude-sonnet-4-20250514")
+    return optional("PI_MODEL", "claude-sonnet-4-6")
 
 
 def pi_workspace() -> str:
