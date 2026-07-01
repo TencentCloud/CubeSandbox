@@ -47,4 +47,5 @@ lang: zh-CN
 
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
+| [OpenCode 集成指南](./opencode.md) | xie-guangzhen | 2026-07-01 | integration, opencode, coding-agent |
 | _在这里补充你的文章_ | - | - | - |

@@ -47,4 +47,5 @@ lang: en-US
 
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
+| [OpenCode Integration Guide](./opencode.md) | xie-guangzhen | 2026-07-01 | integration, opencode, coding-agent |
 | _Add your article here_ | - | - | - |
