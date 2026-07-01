@@ -4,7 +4,7 @@
 from .sandbox import Sandbox
 from ._config import Config
 from ._models import Execution, Result, Logs, ExecutionError, OutputMessage, SnapshotInfo
-from ._exceptions import CubeSandboxError, SandboxNotFoundError, ApiError, TemplateNotFoundError
+from ._exceptions import CubeSandboxError, SandboxNotFoundError, ApiError, TemplateNotFoundError, FilesystemNotFoundError, PartialWriteError
 from ._commands import CommandResult
 from ._template import Template, TemplateInfo, TemplateBuild
 from ._policy import Rule, Match, Action, Inject
@@ -22,6 +22,8 @@ __all__ = [
     "SandboxNotFoundError",
     "TemplateNotFoundError",
     "ApiError",
+    "FilesystemNotFoundError",
+    "PartialWriteError",
     "CommandResult",
     "Template",
     "TemplateInfo",

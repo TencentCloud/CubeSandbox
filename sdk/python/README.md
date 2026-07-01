@@ -183,6 +183,36 @@ supported — pass either a list of `Rule` (typed) **or** a host-keyed dict
 The legacy `metadata={"network-policy": ...}` interface is still accepted
 for IP-only deny-all / custom allow-list scenarios.
 
+### Filesystem
+
+```python
+from cubesandbox import Sandbox
+
+with Sandbox.create() as sb:
+    # Read & write
+    sb.files.write("/tmp/hello.txt", "Hello, world!")
+    print(sb.files.read("/tmp/hello.txt"))  # "Hello, world!"
+
+    # Batch write
+    sb.files.write_files([
+        ("/tmp/a.txt", "aaa"),
+        ("/tmp/b.txt", b"bbb"),  # bytes also accepted
+    ])
+
+    # Directory operations
+    sb.files.make_dir("/tmp/mydir")
+    entries = sb.files.list("/tmp")          # list of dicts
+    info = sb.files.stat("/tmp/hello.txt")   # dict with name, type, size, ...
+    print(sb.files.exists("/tmp/hello.txt")) # True
+    sb.files.rename("/tmp/hello.txt", "/tmp/renamed.txt")
+    sb.files.remove("/tmp/renamed.txt")
+
+    # Watch for changes
+    with sb.files.watch_dir("/tmp") as watcher:
+        for event in watcher:
+            print(event.name, event.type)  # e.g. "a.txt" "EVENT_TYPE_CREATE"
+```
+
 ### Host-directory mount
 
 ```python
@@ -251,6 +281,21 @@ with Sandbox.create(config=cfg) as sb:
 | `sb.resume(timeout)` | `POST /sandboxes/:id/resume` — resume (deprecated, use `connect`) |
 | `sb.kill()` | `DELETE /sandboxes/:id` — destroy sandbox |
 | `sb.get_host(port)` | Return virtual hostname `{port}-{id}.{domain}` |
+
+### `sb.files` — Filesystem
+
+| Method | Description |
+|---|---|
+| `sb.files.read(path)` | Download file content via `GET /files` |
+| `sb.files.write(path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
+| `sb.files.write_files(files)` | Batch write `[(path, data), ...]`, stops on first error |
+| `sb.files.list(path)` | List directory entries → `list[dict]` |
+| `sb.files.stat(path)` | File/directory metadata → `dict` |
+| `sb.files.exists(path)` | `True` if path exists (stat + 404 check) |
+| `sb.files.make_dir(path)` | Create directory → `dict` |
+| `sb.files.rename(old, new)` | Move/rename → `dict` |
+| `sb.files.remove(path)` | Delete file or directory |
+| `sb.files.watch_dir(path)` | Stream filesystem events → `Watcher` (context manager + iterator) |
 
 ### `Execution` object
 

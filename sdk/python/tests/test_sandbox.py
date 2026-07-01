@@ -1343,6 +1343,248 @@ class TestFilesystem:
         assert "multipart/form-data" in seen["content_type"]
         assert b"file content" in seen["body"]
 
+    def test_list_success(self):
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["method"] = request.method
+            seen["host"] = request.url.host
+            seen["path"] = request.url.path
+            seen["content_type"] = request.headers.get("content-type")
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={
+                "entries": [
+                    {"name": "a.txt", "type": "FILE_TYPE_FILE", "path": "/tmp/a.txt",
+                     "size": "10", "permissions": "-rw-r--r--"},
+                    {"name": "sub", "type": "FILE_TYPE_DIRECTORY", "path": "/tmp/sub",
+                     "size": "0", "permissions": "drwxr-xr-x"},
+                ]
+            })
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            entries = sb.files.list("/tmp")
+        assert seen["method"] == "POST"
+        assert seen["host"] == f"49983-{SANDBOX_ID}.{DOMAIN}"
+        assert seen["path"] == "/filesystem.Filesystem/ListDir"
+        assert seen["content_type"] == "application/json"
+        assert seen["body"] == {"path": "/tmp"}
+        assert len(entries) == 2
+        assert entries[0]["name"] == "a.txt"
+        assert entries[1]["type"] == "FILE_TYPE_DIRECTORY"
+
+    def test_list_returns_empty_for_empty_dir(self):
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            entries = sb.files.list("/empty")
+        assert entries == []
+
+    def test_stat_success(self):
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={
+                "entry": {"name": "hello.txt", "type": "FILE_TYPE_FILE",
+                          "path": "/tmp/hello.txt", "size": "30"}
+            })
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            entry = sb.files.stat("/tmp/hello.txt")
+        assert seen["body"] == {"path": "/tmp/hello.txt"}
+        assert entry["name"] == "hello.txt"
+        assert entry["size"] == "30"
+
+    def test_exists_returns_true(self):
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "entry": {"name": "f.txt", "type": "FILE_TYPE_FILE", "path": "/tmp/f.txt"}
+            })
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            assert sb.files.exists("/tmp/f.txt") is True
+
+    def test_exists_returns_false_on_404(self):
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={
+                "code": "not_found", "message": "file not found: /tmp/missing.txt"
+            })
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            assert sb.files.exists("/tmp/missing.txt") is False
+
+    def test_remove_success(self):
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            seen["path"] = request.url.path
+            return httpx.Response(200, json={})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            sb.files.remove("/tmp/old.txt")
+        assert seen["path"] == "/filesystem.Filesystem/Remove"
+        assert seen["body"] == {"path": "/tmp/old.txt"}
+
+    def test_rename_success(self):
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={
+                "entry": {"name": "new.txt", "type": "FILE_TYPE_FILE",
+                          "path": "/tmp/new.txt"}
+            })
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            entry = sb.files.rename("/tmp/old.txt", "/tmp/new.txt")
+        assert seen["body"] == {"source": "/tmp/old.txt", "destination": "/tmp/new.txt"}
+        assert entry["name"] == "new.txt"
+
+    def test_make_dir_success(self):
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={
+                "entry": {"name": "newdir", "type": "FILE_TYPE_DIRECTORY",
+                          "path": "/tmp/newdir"}
+            })
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            entry = sb.files.make_dir("/tmp/newdir")
+        assert seen["body"] == {"path": "/tmp/newdir"}
+        assert entry["type"] == "FILE_TYPE_DIRECTORY"
+
+    def test_write_files_success(self):
+        sb = make_sandbox()
+        paths = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.params.get("path"))
+            return httpx.Response(200, json=[{"path": request.url.params.get("path")}])
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            n = sb.files.write_files([
+                ("/tmp/a.txt", "aaa"),
+                ("/tmp/b.txt", b"bbb"),
+                ("/tmp/c.txt", "ccc"),
+            ])
+        assert n == 3
+        assert paths == ["/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt"]
+
+    def test_write_files_stops_on_error(self):
+        sb = make_sandbox()
+        calls = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["count"] += 1
+            path = request.url.params.get("path", "")
+            if path == "/tmp/b.txt":
+                return httpx.Response(500, json={"message": "disk full"})
+            return httpx.Response(200, json=[])
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            with pytest.raises(IOError, match="write_files failed at /tmp/b.txt"):
+                sb.files.write_files([
+                    ("/tmp/a.txt", "ok"),
+                    ("/tmp/b.txt", "fail"),
+                    ("/tmp/c.txt", "skip"),
+                ])
+
+    def test_filesystem_rpc_raises_on_error(self):
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, json={"message": "internal error"})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            with pytest.raises(IOError, match="Filesystem ListDir failed"):
+                sb.files.list("/tmp")
+
+    def test_watch_dir_receives_events(self):
+        sb = make_sandbox()
+
+        def _connect_frame(flags, payload_str):
+            raw = payload_str.encode()
+            return struct.pack(">bI", flags, len(raw)) + raw
+
+        stream_data = b"".join([
+            _connect_frame(0, '{"start":{}}'),
+            _connect_frame(0, '{"filesystem":{"name":"a.txt","type":"EVENT_TYPE_CREATE"}}'),
+            _connect_frame(0, '{"filesystem":{"name":"a.txt","type":"EVENT_TYPE_WRITE"}}'),
+            _connect_frame(0, '{"filesystem":{"name":"b.txt","type":"EVENT_TYPE_REMOVE"}}'),
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=httpx.ByteStream(stream_data))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            with sb.files.watch_dir("/tmp/test") as watcher:
+                events = list(watcher)
+
+        assert len(events) == 3
+        assert events[0]["name"] == "a.txt"
+        assert events[0]["type"] == "EVENT_TYPE_CREATE"
+        assert events[1]["type"] == "EVENT_TYPE_WRITE"
+        assert events[2]["name"] == "b.txt"
+        assert events[2]["type"] == "EVENT_TYPE_REMOVE"
+
+    def test_watch_dir_error_from_server(self):
+        sb = make_sandbox()
+
+        def _connect_frame(flags, payload_str):
+            raw = payload_str.encode()
+            return struct.pack(">bI", flags, len(raw)) + raw
+
+        stream_data = _connect_frame(
+            0x02, '{"error":{"code":"not_found","message":"path not found"}}'
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=httpx.ByteStream(stream_data))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            with sb.files.watch_dir("/nonexistent") as watcher:
+                with pytest.raises(IOError, match="path not found"):
+                    list(watcher)
+
+    def test_watch_dir_http_error(self):
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, text="not found")
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            with pytest.raises(IOError, match="WatchDir failed"):
+                sb.files.watch_dir("/tmp/test")
+
     def test_files_property(self):
         assert isinstance(make_sandbox().files, Filesystem)
 
