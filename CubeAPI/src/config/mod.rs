@@ -4,6 +4,62 @@
 
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebhookConfig {
+    #[serde(default = "default_webhook_endpoints")]
+    pub endpoints: Vec<WebhookEndpointConfig>,
+
+    #[serde(default = "default_webhook_queue_capacity")]
+    pub queue_capacity: usize,
+
+    #[serde(default = "default_webhook_timeout_secs")]
+    pub timeout_secs: u64,
+
+    #[serde(default = "default_webhook_max_retries")]
+    pub max_retries: usize,
+
+    #[serde(default = "default_webhook_initial_backoff_ms")]
+    pub initial_backoff_ms: u64,
+
+    #[serde(default = "default_webhook_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+
+    #[serde(default = "default_webhook_max_concurrency")]
+    pub max_concurrency: usize,
+
+    #[serde(default = "default_webhook_flush_timeout_secs")]
+    pub flush_timeout_secs: u64,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            endpoints: default_webhook_endpoints(),
+            queue_capacity: default_webhook_queue_capacity(),
+            timeout_secs: default_webhook_timeout_secs(),
+            max_retries: default_webhook_max_retries(),
+            initial_backoff_ms: default_webhook_initial_backoff_ms(),
+            max_backoff_ms: default_webhook_max_backoff_ms(),
+            max_concurrency: default_webhook_max_concurrency(),
+            flush_timeout_secs: default_webhook_flush_timeout_secs(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebhookEndpointConfig {
+    pub url: String,
+
+    #[serde(default)]
+    pub events: Vec<String>,
+
+    #[serde(default)]
+    pub secret: Option<String>,
+
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
     /// Bind address, e.g. "0.0.0.0:3000". Env var: CUBE_API_BIND (default "0.0.0.0:3000")
@@ -41,6 +97,10 @@ pub struct ServerConfig {
     /// File log prefix, e.g. "cube-api" → "cube-api-2026-03-16.log"
     #[serde(default = "default_log_prefix")]
     pub log_prefix: String,
+
+    /// Outbound webhook delivery configuration.
+    #[serde(default)]
+    pub webhook: WebhookConfig,
 
     /// Auth callback URL for HTTP authentication.
     ///
@@ -104,6 +164,52 @@ fn default_log_dir() -> String {
 fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
+fn default_webhook_endpoints() -> Vec<WebhookEndpointConfig> {
+    match std::env::var("CUBE_API_WEBHOOK_ENDPOINTS") {
+        Ok(value) => match serde_json::from_str(&value) {
+            Ok(endpoints) => endpoints,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to parse CUBE_API_WEBHOOK_ENDPOINTS; using no webhook endpoints"
+                );
+                Vec::new()
+            }
+        },
+        Err(std::env::VarError::NotPresent) => Vec::new(),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to read CUBE_API_WEBHOOK_ENDPOINTS; using no webhook endpoints"
+            );
+            Vec::new()
+        }
+    }
+}
+fn default_webhook_queue_capacity() -> usize {
+    1024
+}
+fn default_webhook_timeout_secs() -> u64 {
+    5
+}
+fn default_webhook_max_retries() -> usize {
+    3
+}
+fn default_webhook_initial_backoff_ms() -> u64 {
+    200
+}
+fn default_webhook_max_backoff_ms() -> u64 {
+    10_000
+}
+fn default_webhook_max_concurrency() -> usize {
+    32
+}
+fn default_webhook_flush_timeout_secs() -> u64 {
+    15
+}
+fn default_true() -> bool {
+    true
+}
 fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
@@ -146,6 +252,7 @@ impl Default for ServerConfig {
             sandbox_domain: default_sandbox_domain(),
             log_dir: default_log_dir(),
             log_prefix: default_log_prefix(),
+            webhook: WebhookConfig::default(),
             auth_callback_url: None,
             database_url: default_database_url(),
         }
