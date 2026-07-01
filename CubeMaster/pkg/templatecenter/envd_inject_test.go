@@ -58,7 +58,7 @@ func Test_injectEnvdIntoRootfs_optIn_copiesBinary(t *testing.T) {
 	assert.Equal(t, os.FileMode(envdInjectionFileMode), st.Mode().Perm())
 }
 
-func Test_injectEnvdIntoRootfs_optOut_leavesRootfsUntouched(t *testing.T) {
+func Test_injectEnvdIntoRootfs_disabled_leavesRootfsUntouched(t *testing.T) {
 	stageEnvdHostBinary(t, []byte("not-used"))
 
 	tests := []struct {
@@ -66,7 +66,10 @@ func Test_injectEnvdIntoRootfs_optOut_leavesRootfsUntouched(t *testing.T) {
 		req  *types.CreateTemplateFromImageReq
 	}{
 		{name: "nil_request", req: nil},
+		{name: "no_overrides", req: &types.CreateTemplateFromImageReq{}},
+		{name: "no_annotations", req: &types.CreateTemplateFromImageReq{ContainerOverrides: &types.ContainerOverrides{}}},
 		{name: "annotation_false", req: reqWithEnvdAnnotation("false")},
+		{name: "annotation_other", req: reqWithEnvdAnnotation("yes")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -80,31 +83,22 @@ func Test_injectEnvdIntoRootfs_optOut_leavesRootfsUntouched(t *testing.T) {
 	}
 }
 
-func Test_injectEnvdIntoRootfs_defaultInjectsWhenAnnotationAbsent(t *testing.T) {
-	want := []byte("ENVD-DEFAULT-CONTENT")
-	wantSHA := stageEnvdHostBinary(t, want)
+func Test_injectEnvdIntoRootfs_usesRequestEnvdPath(t *testing.T) {
+	want := []byte("ENVD-CUSTOM-PATH-CONTENT")
+	path := filepath.Join(t.TempDir(), "custom-envd")
+	assert.NoError(t, os.WriteFile(path, want, envdInjectionFileMode))
+	sum := sha256.Sum256(want)
+	wantSHA := hex.EncodeToString(sum[:])
+	req := reqWithEnvdAnnotation("true")
+	req.EnvdPath = path
+	rootfs := t.TempDir()
 
-	tests := []struct {
-		name string
-		req  *types.CreateTemplateFromImageReq
-	}{
-		{name: "no_overrides", req: &types.CreateTemplateFromImageReq{}},
-		{name: "no_annotations", req: &types.CreateTemplateFromImageReq{ContainerOverrides: &types.ContainerOverrides{}}},
-		{name: "annotation_true", req: reqWithEnvdAnnotation("true")},
-		{name: "annotation_other_defaults_to_enabled", req: reqWithEnvdAnnotation("yes")},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rootfs := t.TempDir()
-			gotSHA, err := injectEnvdIntoRootfs(context.Background(), rootfs, tt.req)
-			assert.NoError(t, err)
-			assert.Equal(t, wantSHA, gotSHA)
-			got, err := os.ReadFile(filepath.Join(rootfs, envdInImagePath))
-			assert.NoError(t, err)
-			assert.Equal(t, want, got)
-		})
-	}
+	gotSHA, err := injectEnvdIntoRootfs(context.Background(), rootfs, req)
+	assert.NoError(t, err)
+	assert.Equal(t, wantSHA, gotSHA)
+	got, err := os.ReadFile(filepath.Join(rootfs, envdInImagePath))
+	assert.NoError(t, err)
+	assert.Equal(t, want, got)
 }
 
 func Test_injectEnvdIntoRootfs_missingBinary_failsLoud(t *testing.T) {

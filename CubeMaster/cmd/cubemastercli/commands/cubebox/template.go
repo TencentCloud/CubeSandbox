@@ -788,7 +788,8 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
-		cli.BoolFlag{Name: "disable-inject-envd", Usage: "disable cubesandbox-envd injection for this template build"},
+		cli.BoolFlag{Name: "enable-inject-envd", Usage: "enable cubesandbox-envd injection for this template build"},
+		cli.StringFlag{Name: "envd-path", Usage: "host path of the envd binary used when --enable-inject-envd is set"},
 		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the job to completion"},
 		cli.DurationFlag{Name: "interval", Value: defaultWatchInterval, Usage: "poll interval while watching the job"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
@@ -827,6 +828,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 			RegistryUsername:   c.String("registry-username"),
 			RegistryPassword:   c.String("registry-password"),
 			ContainerOverrides: containerOverrides,
+			EnvdPath:           c.String("envd-path"),
 		}
 		// --with-cube-ca defaults true (BoolTFlag). We always materialise
 		// the *bool on the wire so non-CLI callers (HTTP clients, future
@@ -1383,9 +1385,9 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	probePort := c.Int("probe")
 	cpuMillicores := c.Int("cpu")
 	memoryMB := c.Int("memory")
-	disableInjectEnvd := c.Bool("disable-inject-envd")
+	enableInjectEnvd := c.Bool("enable-inject-envd")
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !disableInjectEnvd {
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd {
 		return nil, nil
 	}
 
@@ -1440,11 +1442,11 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 			SuccessThreshold: 1,
 		}
 	}
-	if disableInjectEnvd {
+	if enableInjectEnvd {
 		if overrides.Annotations == nil {
 			overrides.Annotations = map[string]string{}
 		}
-		overrides.Annotations[constants.CubeAnnotationsInjectEnvd] = "false"
+		overrides.Annotations[constants.CubeAnnotationsInjectEnvd] = "true"
 	}
 	return overrides, nil
 }

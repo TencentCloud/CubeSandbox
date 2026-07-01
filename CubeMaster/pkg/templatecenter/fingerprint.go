@@ -48,7 +48,7 @@ func buildTemplateSpecFingerprintWithCA(req *types.CreateTemplateFromImageReq, s
 	}
 	envdSHA := ""
 	if shouldInjectEnvdIntoTemplate(req) {
-		if sha, err := envdBinarySHA256(); err == nil {
+		if sha, err := envdBinarySHA256(req); err == nil {
 			envdSHA = sha
 		}
 	}

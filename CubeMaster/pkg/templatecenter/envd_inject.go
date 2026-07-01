@@ -19,18 +19,20 @@ import (
 )
 
 const (
-	envdHostDirDefault         = "/usr/local/share/cubesandbox-envd"
-	envdHostDirEnv             = "CUBE_MASTER_ENVD_HOST_DIR"
-	envdBinaryName             = "envd"
-	envdInImageDir             = "/usr/local/bin"
-	envdInImagePath            = "/usr/local/bin/envd"
-	envdInjectAnnotationOptIn  = "true"
-	envdInjectAnnotationOptOut = "false"
-	envdInjectionFileMode      = 0o755
-	envdInjectionDirMode       = 0o755
+	envdHostDirDefault        = "/usr/local/share/cubesandbox-envd"
+	envdHostDirEnv            = "CUBE_MASTER_ENVD_HOST_DIR"
+	envdBinaryName            = "envd"
+	envdInImageDir            = "/usr/local/bin"
+	envdInImagePath           = "/usr/local/bin/envd"
+	envdInjectAnnotationOptIn = "true"
+	envdInjectionFileMode     = 0o755
+	envdInjectionDirMode      = 0o755
 )
 
-func envdHostPath() string {
+func envdHostPath(req *types.CreateTemplateFromImageReq) string {
+	if req != nil && req.EnvdPath != "" {
+		return req.EnvdPath
+	}
 	dir := os.Getenv(envdHostDirEnv)
 	if dir == "" {
 		dir = envdHostDirDefault
@@ -39,20 +41,17 @@ func envdHostPath() string {
 }
 
 func shouldInjectEnvdIntoTemplate(req *types.CreateTemplateFromImageReq) bool {
-	if req == nil {
+	if req == nil || req.ContainerOverrides == nil || req.ContainerOverrides.Annotations == nil {
 		return false
 	}
-	if req.ContainerOverrides == nil || req.ContainerOverrides.Annotations == nil {
-		return true
-	}
-	return req.ContainerOverrides.Annotations[constants.CubeAnnotationsInjectEnvd] != envdInjectAnnotationOptOut
+	return req.ContainerOverrides.Annotations[constants.CubeAnnotationsInjectEnvd] == envdInjectAnnotationOptIn
 }
 
 func injectEnvdIntoRootfs(ctx context.Context, rootfsDir string, req *types.CreateTemplateFromImageReq) (string, error) {
 	if !shouldInjectEnvdIntoTemplate(req) {
 		return "", nil
 	}
-	srcPath := envdHostPath()
+	srcPath := envdHostPath(req)
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return "", fmt.Errorf("envd-inject: open %q (set %s to override): %w", srcPath, envdHostDirEnv, err)
@@ -82,8 +81,8 @@ func injectEnvdIntoRootfs(ctx context.Context, rootfsDir string, req *types.Crea
 	return sha, nil
 }
 
-func envdBinarySHA256() (string, error) {
-	src, err := os.Open(envdHostPath())
+func envdBinarySHA256(req *types.CreateTemplateFromImageReq) (string, error) {
+	src, err := os.Open(envdHostPath(req))
 	if err != nil {
 		return "", err
 	}

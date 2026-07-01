@@ -649,6 +649,7 @@ type CreateTemplateFromImageReq struct {
 	ExposedPorts       []int32             `json:"exposed_ports,omitempty"`
 	DistributionScope  []string            `json:"distribution_scope,omitempty"`
 	ContainerOverrides *ContainerOverrides `json:"container_overrides,omitempty"`
+	EnvdPath           string              `json:"envd_path,omitempty"`
 	Wait               bool                `json:"wait,omitempty"`
 
 	// WithCubeCA controls whether CubeMaster bakes the host-side
