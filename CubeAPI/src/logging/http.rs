@@ -483,6 +483,7 @@ async fn send_once(
     request.send().await.map(|response| response.status())
 }
 
+#[cfg(test)]
 fn endpoint_matches_event(endpoint: &WebhookEndpointConfig, event: &str) -> bool {
     endpoint.enabled && events_match(&endpoint.events, event)
 }
