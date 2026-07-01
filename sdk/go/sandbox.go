@@ -179,7 +179,7 @@ func (s *Sandbox) Commands() *Commands {
 }
 
 func (s *Sandbox) Files() *Files {
-	return &Files{reader: s, writer: s}
+	return &Files{reader: s, writer: s, filer: s}
 }
 
 func (s *Sandbox) ensureClient() error {

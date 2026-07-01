@@ -1,6 +1,6 @@
 # cubesandbox Go SDK
 
-Go SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox). It matches the current Python SDK surface: sandbox lifecycle, code execution, commands, file read/write, snapshots, clone, rollback, and L7 egress policy.
+Go SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox). It matches the current Python SDK surface: sandbox lifecycle, code execution, commands, filesystem operations (read, write, list, stat, exists, remove, rename, mkdir, watch), snapshots, clone, rollback, and L7 egress policy.
 
 ## Install
 
@@ -74,13 +74,47 @@ fmt.Println(result.Stdout, result.Stderr, result.ExitCode)
 ## Files
 
 ```go
+// Read & write
 content, err := sb.Files().Read(ctx, "/etc/hosts")
-
 err = sb.Files().Write(ctx, "/tmp/hello.txt", []byte("hi"))
+
+// Batch write
+n, err := sb.Files().WriteFiles(ctx, []cubesandbox.WriteEntry{
+	{Path: "/tmp/a.txt", Data: []byte("aaa")},
+	{Path: "/tmp/b.txt", Data: []byte("bbb")},
+})
+
+// Directory operations
+entries, err := sb.Files().List(ctx, "/tmp")
+entry, err := sb.Files().Stat(ctx, "/tmp/hello.txt")
+exists, err := sb.Files().Exists(ctx, "/tmp/hello.txt")
+entry, err = sb.Files().MakeDir(ctx, "/tmp/mydir")
+entry, err = sb.Files().Rename(ctx, "/tmp/old.txt", "/tmp/new.txt")
+err = sb.Files().Remove(ctx, "/tmp/hello.txt")
+
+// Watch for changes
+watcher, err := sb.Files().WatchDir(ctx, "/tmp")
+if err != nil {
+	panic(err)
+}
+defer watcher.Close()
+for ev := range watcher.Events {
+	fmt.Println(ev.Name, ev.Type) // e.g. "hello.txt" "EVENT_TYPE_CREATE"
+}
 ```
 
-`Files.Read` downloads content through envd's `GET /files?path=...` file API.
-`Files.Write` uploads through `POST /files`, falling back to a multipart body when the envd version rejects a raw octet-stream.
+| Method | Description |
+|---|---|
+| `Read(ctx, path)` | Download file content via `GET /files` |
+| `Write(ctx, path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
+| `WriteFiles(ctx, entries)` | Batch write, stops on first error, returns count |
+| `List(ctx, path)` | List directory entries via `ListDir` RPC |
+| `Stat(ctx, path)` | File/directory metadata via `Stat` RPC |
+| `Exists(ctx, path)` | `true` if path exists (Stat + 404 check) |
+| `MakeDir(ctx, path)` | Create directory via `MakeDir` RPC |
+| `Rename(ctx, old, new)` | Move/rename via `Move` RPC |
+| `Remove(ctx, path)` | Delete file or directory via `Remove` RPC |
+| `WatchDir(ctx, path)` | Stream filesystem events (Connect streaming) |
 
 ## Snapshots, Clone, Rollback
 

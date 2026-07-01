@@ -134,6 +134,45 @@ type OutputMessage struct {
 	IsStderr  bool
 }
 
+// WriteEntry is a path + data pair for Files.WriteFiles.
+type WriteEntry struct {
+	Path string
+	Data []byte
+}
+
+// FileEntry represents a file or directory returned by envd filesystem RPCs.
+type FileEntry struct {
+	Name         string `json:"name"`
+	Type         string `json:"type"`
+	Path         string `json:"path"`
+	Size         int64  `json:"size,string"`
+	Mode         int    `json:"mode"`
+	Permissions  string `json:"permissions"`
+	Owner        string `json:"owner"`
+	Group        string `json:"group"`
+	ModifiedTime string `json:"modifiedTime"`
+}
+
+func (e FileEntry) IsDir() bool {
+	return e.Type == "FILE_TYPE_DIRECTORY"
+}
+
+// NotFoundError is returned when a filesystem path does not exist.
+type NotFoundError struct {
+	Path    string
+	Message string
+}
+
+func (e *NotFoundError) Error() string {
+	return e.Message
+}
+
+// WatchEvent represents a filesystem change detected by WatchDir.
+type WatchEvent struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
 func (e *Execution) mainText() string {
 	if e == nil {
 		return ""

@@ -852,6 +852,371 @@ func assertStringSlice(t *testing.T, value any, want []string) {
 	}
 }
 
+func TestFilesListUsesEnvdFilesystemRPC(t *testing.T) {
+	var gotHost, gotPath, gotCT string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/filesystem.Filesystem/ListDir" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		gotHost = r.Host
+		gotPath = r.URL.Path
+		gotCT = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"entries":[{"name":"a.txt","type":"FILE_TYPE_FILE","path":"/tmp/a.txt","size":"10","mode":420,"permissions":"-rw-r--r--","owner":"root","group":"root","modifiedTime":"2026-06-30T00:00:00Z"}]}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs", EnvdAccessToken: "tok"}
+
+	entries, err := sb.Files().List(context.Background(), "/tmp")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "a.txt" || entries[0].Size != 10 || entries[0].IsDir() {
+		t.Fatalf("entries=%#v", entries)
+	}
+	if gotHost != "49999-sb-fs.cube.test" || gotPath != "/filesystem.Filesystem/ListDir" || gotCT != "application/json" {
+		t.Fatalf("host/path/ct=%q/%q/%q", gotHost, gotPath, gotCT)
+	}
+}
+
+func TestFilesListReturnsEmptySliceForEmptyDir(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	entries, err := sb.Files().List(context.Background(), "/empty")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if entries == nil || len(entries) != 0 {
+		t.Fatalf("entries=%#v, want empty non-nil slice", entries)
+	}
+}
+
+func TestFilesStatReturnsFileEntry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/filesystem.Filesystem/Stat" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body["path"] != "/tmp/f.txt" {
+			t.Fatalf("path=%q", body["path"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"entry":{"name":"f.txt","type":"FILE_TYPE_FILE","path":"/tmp/f.txt","size":"42","mode":420,"permissions":"-rw-r--r--","owner":"user","group":"user","modifiedTime":"2026-06-30T00:00:00Z"}}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	entry, err := sb.Files().Stat(context.Background(), "/tmp/f.txt")
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if entry.Name != "f.txt" || entry.Size != 42 || entry.Owner != "user" || entry.IsDir() {
+		t.Fatalf("entry=%#v", entry)
+	}
+}
+
+func TestFilesExistsReturnsTrueForExistingFile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"entry":{"name":"x","type":"FILE_TYPE_FILE","path":"/x","size":"1","mode":420}}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	exists, err := sb.Files().Exists(context.Background(), "/x")
+	if err != nil || !exists {
+		t.Fatalf("exists=%v err=%v", exists, err)
+	}
+}
+
+func TestFilesExistsReturnsFalseOn404(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"code":"not_found","message":"file not found: no such file or directory"}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	exists, err := sb.Files().Exists(context.Background(), "/missing")
+	if err != nil || exists {
+		t.Fatalf("exists=%v err=%v", exists, err)
+	}
+}
+
+func TestFilesRemoveCallsEnvdRemove(t *testing.T) {
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/filesystem.Filesystem/Remove" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	if err := sb.Files().Remove(context.Background(), "/tmp/gone.txt"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if gotBody["path"] != "/tmp/gone.txt" {
+		t.Fatalf("path=%q", gotBody["path"])
+	}
+}
+
+func TestFilesRenameCallsEnvdMove(t *testing.T) {
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/filesystem.Filesystem/Move" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"entry":{"name":"b.txt","type":"FILE_TYPE_FILE","path":"/tmp/b.txt","size":"5","mode":420}}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	entry, err := sb.Files().Rename(context.Background(), "/tmp/a.txt", "/tmp/b.txt")
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if entry.Name != "b.txt" || entry.Path != "/tmp/b.txt" {
+		t.Fatalf("entry=%#v", entry)
+	}
+	if gotBody["source"] != "/tmp/a.txt" || gotBody["destination"] != "/tmp/b.txt" {
+		t.Fatalf("body=%#v", gotBody)
+	}
+}
+
+func TestFilesMakeDirCallsEnvdMakeDir(t *testing.T) {
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/filesystem.Filesystem/MakeDir" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"entry":{"name":"newdir","type":"FILE_TYPE_DIRECTORY","path":"/tmp/newdir","size":"4096","mode":493,"permissions":"drwxr-xr-x"}}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	entry, err := sb.Files().MakeDir(context.Background(), "/tmp/newdir")
+	if err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	if entry.Name != "newdir" || !entry.IsDir() || entry.Size != 4096 {
+		t.Fatalf("entry=%#v", entry)
+	}
+	if gotBody["path"] != "/tmp/newdir" {
+		t.Fatalf("path=%q", gotBody["path"])
+	}
+}
+
+func TestFilesWriteFilesUploadsMultiple(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Query().Get("path"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	n, err := sb.Files().WriteFiles(context.Background(), []WriteEntry{
+		{Path: "/tmp/a.txt", Data: []byte("aaa")},
+		{Path: "/tmp/b.txt", Data: []byte("bbb")},
+		{Path: "/tmp/c.txt", Data: []byte("ccc")},
+	})
+	if err != nil {
+		t.Fatalf("WriteFiles: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("wrote %d, want 3", n)
+	}
+	if len(paths) != 3 || paths[0] != "/tmp/a.txt" || paths[1] != "/tmp/b.txt" || paths[2] != "/tmp/c.txt" {
+		t.Fatalf("paths=%v", paths)
+	}
+}
+
+func TestFilesWriteFilesStopsOnError(t *testing.T) {
+	var fileCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Query().Get("path")
+		if path == "/tmp/b.txt" {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"message":"disk full"}`)
+			return
+		}
+		fileCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	n, err := sb.Files().WriteFiles(context.Background(), []WriteEntry{
+		{Path: "/tmp/a.txt", Data: []byte("ok")},
+		{Path: "/tmp/b.txt", Data: []byte("fail")},
+		{Path: "/tmp/c.txt", Data: []byte("skip")},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if n != 1 {
+		t.Fatalf("wrote %d, want 1", n)
+	}
+	if fileCount != 1 {
+		t.Fatalf("successful uploads=%d, want 1", fileCount)
+	}
+}
+
+func connectFrame(flags byte, payload []byte) []byte {
+	buf := make([]byte, 5+len(payload))
+	buf[0] = flags
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(payload)))
+	copy(buf[5:], payload)
+	return buf
+}
+
+func TestFilesWatchDirReceivesEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/filesystem.Filesystem/WatchDir" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		if r.Header.Get("Content-Type") != connectContentType {
+			t.Fatalf("content-type=%s", r.Header.Get("Content-Type"))
+		}
+
+		w.Header().Set("Content-Type", connectContentType)
+		w.WriteHeader(http.StatusOK)
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("ResponseWriter is not a Flusher")
+		}
+
+		frames := [][]byte{
+			connectFrame(0, []byte(`{"start":{}}`)),
+			connectFrame(0, []byte(`{"filesystem":{"name":"a.txt","type":"EVENT_TYPE_CREATE"}}`)),
+			connectFrame(0, []byte(`{"filesystem":{"name":"a.txt","type":"EVENT_TYPE_WRITE"}}`)),
+			connectFrame(0, []byte(`{"filesystem":{"name":"a.txt","type":"EVENT_TYPE_REMOVE"}}`)),
+		}
+		for _, f := range frames {
+			w.Write(f)
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: 5 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	watcher, err := sb.Files().WatchDir(context.Background(), "/tmp/test")
+	if err != nil {
+		t.Fatalf("WatchDir: %v", err)
+	}
+	defer watcher.Close()
+
+	var events []WatchEvent
+	for evt := range watcher.Events {
+		events = append(events, evt)
+	}
+
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3", len(events))
+	}
+	if events[0].Name != "a.txt" || events[0].Type != "EVENT_TYPE_CREATE" {
+		t.Fatalf("event[0]=%+v", events[0])
+	}
+	if events[1].Type != "EVENT_TYPE_WRITE" {
+		t.Fatalf("event[1]=%+v", events[1])
+	}
+	if events[2].Type != "EVENT_TYPE_REMOVE" {
+		t.Fatalf("event[2]=%+v", events[2])
+	}
+}
+
+func TestFilesWatchDirErrorFromServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", connectContentType)
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		w.Write(connectFrame(0, []byte(`{"error":{"code":"not_found","message":"path not found"}}`)))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: 5 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	watcher, err := sb.Files().WatchDir(context.Background(), "/nonexistent")
+	if err != nil {
+		t.Fatalf("WatchDir: %v", err)
+	}
+	defer watcher.Close()
+
+	for range watcher.Events {
+		t.Fatal("should not receive events")
+	}
+
+	select {
+	case err := <-watcher.Errors:
+		if err == nil || !strings.Contains(err.Error(), "path not found") {
+			t.Fatalf("expected not_found error, got: %v", err)
+		}
+	default:
+		t.Fatal("expected error on Errors channel")
+	}
+}
+
 func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
