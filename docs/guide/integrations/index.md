@@ -47,4 +47,4 @@ lang: en-US
 
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
-| _Add your article here_ | - | - | - |
+| [Pi Agent Integration Guide](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
