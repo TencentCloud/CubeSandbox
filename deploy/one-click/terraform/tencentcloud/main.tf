@@ -171,7 +171,7 @@ locals {
 ########################
 
 resource "tencentcloud_key_pair" "demo" {
-  key_name   = "cubesandbox_demo_${random_string.deploy_suffix.result}"
+  key_name   = "cube_cluster_${random_string.deploy_suffix.result}"
   public_key = file(pathexpand(var.ssh_public_key_path))
 }
 
