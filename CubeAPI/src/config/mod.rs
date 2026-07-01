@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::fmt;
+
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,7 +48,8 @@ impl Default for WebhookConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebhookEndpointConfig {
     pub url: String,
 
@@ -58,6 +61,18 @@ pub struct WebhookEndpointConfig {
 
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl fmt::Debug for WebhookEndpointConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WebhookEndpointConfig")
+            .field("url", &"<redacted>")
+            .field("events", &self.events)
+            .field("secret_configured", &self.secret.is_some())
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -166,7 +181,7 @@ fn default_log_prefix() -> String {
 }
 fn default_webhook_endpoints() -> Vec<WebhookEndpointConfig> {
     match std::env::var("CUBE_API_WEBHOOK_ENDPOINTS") {
-        Ok(value) => match serde_json::from_str(&value) {
+        Ok(value) => match parse_webhook_endpoints(&value) {
             Ok(endpoints) => endpoints,
             Err(error) => {
                 tracing::warn!(
@@ -177,14 +192,16 @@ fn default_webhook_endpoints() -> Vec<WebhookEndpointConfig> {
             }
         },
         Err(std::env::VarError::NotPresent) => Vec::new(),
-        Err(error) => {
+        Err(std::env::VarError::NotUnicode(_)) => {
             tracing::warn!(
-                error = %error,
-                "failed to read CUBE_API_WEBHOOK_ENDPOINTS; using no webhook endpoints"
+                "CUBE_API_WEBHOOK_ENDPOINTS is not valid Unicode; using no webhook endpoints"
             );
             Vec::new()
         }
     }
+}
+fn parse_webhook_endpoints(value: &str) -> serde_json::Result<Vec<WebhookEndpointConfig>> {
+    serde_json::from_str(value)
 }
 fn default_webhook_queue_capacity() -> usize {
     1024
@@ -256,5 +273,65 @@ impl Default for ServerConfig {
             auth_callback_url: None,
             database_url: default_database_url(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webhook_delivery_defaults_are_bounded() {
+        assert_eq!(default_webhook_queue_capacity(), 1024);
+        assert_eq!(default_webhook_timeout_secs(), 5);
+        assert_eq!(default_webhook_max_retries(), 3);
+        assert_eq!(default_webhook_initial_backoff_ms(), 200);
+        assert_eq!(default_webhook_max_backoff_ms(), 10_000);
+        assert_eq!(default_webhook_max_concurrency(), 32);
+        assert_eq!(default_webhook_flush_timeout_secs(), 15);
+    }
+
+    #[test]
+    fn webhook_endpoints_parse_as_a_json_array_with_safe_defaults() {
+        let endpoints = parse_webhook_endpoints(
+            r#"[
+                {"url":"https://first.example/webhook"},
+                {
+                    "url":"https://second.example/webhook",
+                    "events":["sandbox.created"],
+                    "secret":"test-secret",
+                    "enabled":false
+                }
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(endpoints.len(), 2);
+        assert!(endpoints[0].events.is_empty());
+        assert!(endpoints[0].secret.is_none());
+        assert!(endpoints[0].enabled);
+        assert_eq!(endpoints[1].events, vec!["sandbox.created".to_string()]);
+        assert!(endpoints[1].secret.is_some());
+        assert!(!endpoints[1].enabled);
+    }
+
+    #[test]
+    fn invalid_or_unknown_endpoint_json_is_rejected_without_exposing_secrets() {
+        assert!(parse_webhook_endpoints("not-json").is_err());
+        let unknown_field = parse_webhook_endpoints(
+            r#"[{"url":"https://example.test","secrect":"must-not-be-ignored"}]"#,
+        );
+        assert!(unknown_field.is_err());
+
+        let mut endpoints = parse_webhook_endpoints(
+            r#"[{"url":"https://user:password@example.test/hook?token=sensitive","secret":"super-secret"}]"#,
+        )
+        .unwrap();
+        let endpoint = endpoints.remove(0);
+        let debug = format!("{endpoint:?}");
+        assert!(!debug.contains("super-secret"));
+        assert!(!debug.contains("password"));
+        assert!(!debug.contains("sensitive"));
+        assert!(debug.contains("secret_configured: true"));
     }
 }

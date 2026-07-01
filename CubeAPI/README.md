@@ -76,14 +76,14 @@ CubeAPI also exposes dashboard-oriented routes under `/cubeapi/v1`. The one-clic
 
 ## Webhook Event Notifications
 
-CubeAPI can send best-effort notifications for these sandbox lifecycle events:
+CubeAPI can asynchronously POST best-effort notifications to configured HTTP endpoints when these sandbox lifecycle events occur:
 
 - `sandbox.created`
 - `sandbox.deleted`
 - `sandbox.paused`
 - `sandbox.resumed`
 
-Webhooks are implemented as an internal logging backend, not as a new REST API route. API handlers emit `LogEvent` values, and the existing `MultiLogger` fans them out to `FileLogger` and, when configured, `HttpLogger`. HTTP delivery and retries run asynchronously; a failed delivery does not change the sandbox API response. If an explicitly configured endpoint is invalid, CubeAPI fails during startup.
+Webhooks are implemented as an internal logging backend, not as a new REST API route. API handlers emit `LogEvent` values, and the existing `MultiLogger` fans them out to `FileLogger` and, when configured, `HttpLogger`. HTTP delivery and retries run asynchronously and do not block sandbox create, delete, pause, or resume operations. A failed delivery does not change the sandbox API response. If an explicitly configured endpoint is invalid, CubeAPI fails during startup.
 
 ### Configuration
 
@@ -100,6 +100,8 @@ export CUBE_API_WEBHOOK_ENDPOINTS='[
 ]'
 ```
 
+The array may contain multiple endpoint objects. CubeAPI evaluates each endpoint independently and fans a matching event out to every enabled endpoint.
+
 Each endpoint supports:
 
 | Field | Description |
@@ -115,6 +117,8 @@ Event filtering follows these rules:
 - `events = []`: subscribe to the four sandbox lifecycle events listed above.
 - `events = ["*"]`: subscribe to every `LogEvent`.
 - Any other non-empty list: match event names exactly.
+
+Do not combine `"*"` with explicit event names in the same endpoint. Use either `events = ["*"]` or an explicit list; mixed subscriptions are rejected during startup.
 
 ### Request Format
 
@@ -134,7 +138,7 @@ X-Cube-Webhook-Signature: v1=<lowercase-hex>
 timestamp + "." + delivery_id + "." + raw_request_body
 ```
 
-The `timestamp` and `delivery_id` values are taken from their corresponding request headers. The signature header format is exactly `v1=<lowercase-hex>`; receivers must not expect `sha256=<hex>`.
+The `timestamp` and `delivery_id` values are taken from their corresponding request headers. `raw_request_body` means the exact body bytes received over HTTP, before parsing or reformatting JSON. The signature header format is exactly `v1=<lowercase-hex>`; receivers must not expect `sha256=<hex>`.
 
 The JSON payload contains delivery metadata and flattened event fields:
 
@@ -149,14 +153,26 @@ The JSON payload contains delivery metadata and flattened event fields:
 }
 ```
 
-The payload is not a complete `Sandbox` object. Sensitive fields such as tokens and secrets are not included.
+Lifecycle payloads include `event`, `timestamp`, and `sandbox_id`; they also include the delivery `id` and log `level`. `template_id` is included when it is available, such as for `sandbox.created` and `sandbox.resumed`, but callers must not assume it is present on every event. The payload is not a complete `Sandbox` object. Lifecycle handlers do not add tokens, environment variables, network configuration, or runtime state to these events.
 
 ### Delivery Semantics
 
 - Any `2xx` response is successful.
-- Network errors, request timeouts, `408`, `425`, `429`, and `5xx` responses are retried with bounded exponential backoff.
+- Network errors, request timeouts, `408`, `425`, `429`, and `5xx` responses are retried with exponential backoff capped by `max_backoff_ms`.
 - `3xx` and other `4xx` responses are not retried.
-- Delivery is best-effort. CubeAPI does not currently use a database outbox or disk spool, so queued deliveries are not persisted across process crashes.
+- Delivery failures are logged but do not change the sandbox API result.
+- Delivery is best-effort. CubeAPI does not implement batch delivery, a database outbox, disk spool, persistent replay, dead-letter queues, or exactly-once delivery.
+
+### Alerting and Enterprise IM Integration
+
+CubeAPI sends a generic signed HTTP event and does not implement vendor-specific bot protocols. To integrate WeCom, Feishu, Slack, or another alerting platform, point CubeAPI at a small adapter service that:
+
+1. verifies the CubeAPI HMAC signature against the raw request body;
+2. maps the generic event to the vendor's message format;
+3. stores and uses the vendor webhook key or token outside CubeAPI; and
+4. handles vendor-specific rate limits and errors.
+
+The same adapter pattern works for generic HTTP alerting systems. Do not put bot tokens, credentials, or complete sandbox objects into webhook event fields.
 
 For a local standard-library receiver, see [`examples/webhook-receiver/`](examples/webhook-receiver/README.md).
 

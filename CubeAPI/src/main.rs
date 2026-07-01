@@ -17,6 +17,7 @@ mod routes;
 mod services;
 mod state;
 
+use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -213,13 +214,20 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
     let mut multi_logger = MultiLogger::new().add(arc(file_logger));
+    let enabled_endpoint_count = cfg
+        .webhook
+        .endpoints
+        .iter()
+        .filter(|endpoint| endpoint.enabled)
+        .count();
 
-    if !cfg.webhook.endpoints.is_empty() {
-        let http_logger = HttpLogger::new(cfg.webhook.clone())?;
+    if enabled_endpoint_count > 0 {
+        let http_logger = HttpLogger::new(cfg.webhook.clone())
+            .context("failed to initialize HTTP webhook logger")?;
         multi_logger = multi_logger.add(arc(http_logger));
 
         tracing::info!(
-            endpoint_count = cfg.webhook.endpoints.len(),
+            endpoint_count = enabled_endpoint_count,
             queue_capacity = cfg.webhook.queue_capacity,
             timeout_secs = cfg.webhook.timeout_secs,
             max_retries = cfg.webhook.max_retries,

@@ -60,8 +60,8 @@ struct WebhookPayload {
 
 #[derive(Clone)]
 struct Endpoint {
+    index: usize,
     url: Url,
-    label: String,
     events: Vec<String>,
     secret: Option<String>,
 }
@@ -73,8 +73,8 @@ impl Endpoint {
 }
 
 struct Delivery {
+    endpoint_index: usize,
     url: Url,
-    endpoint_label: String,
     event: String,
     id: String,
     timestamp: String,
@@ -83,7 +83,7 @@ struct Delivery {
 }
 
 impl Delivery {
-    fn new(event: &LogEvent, endpoint: &Endpoint) -> serde_json::Result<Self> {
+    fn new(event: &LogEvent, endpoint: &Endpoint) -> anyhow::Result<Self> {
         let id = Uuid::new_v4().to_string();
         let timestamp = event.timestamp.timestamp().to_string();
         let payload = WebhookPayload {
@@ -97,11 +97,12 @@ impl Delivery {
         let signature = endpoint
             .secret
             .as_deref()
-            .map(|secret| sign_payload(secret, &timestamp, &id, &body));
+            .map(|secret| sign_payload(secret, &timestamp, &id, &body))
+            .transpose()?;
 
         Ok(Self {
+            endpoint_index: endpoint.index,
             url: endpoint.url.clone(),
-            endpoint_label: endpoint.label.clone(),
             event: event.event.clone(),
             id,
             timestamp,
@@ -255,14 +256,9 @@ fn compile_endpoint(config: &WebhookEndpointConfig, index: usize) -> anyhow::Res
         bail!("webhook endpoint {index} must use an absolute HTTP(S) URL");
     }
 
-    let label = match url.port() {
-        Some(port) => format!("{}:{port}", url.host_str().unwrap_or("unknown")),
-        None => url.host_str().unwrap_or("unknown").to_string(),
-    };
-
     Ok(Endpoint {
+        index,
         url,
-        label,
         events: config.events.clone(),
         secret: config.secret.clone(),
     })
@@ -341,9 +337,9 @@ fn spawn_deliveries(
                 ));
             }
             Err(_) => error!(
-                endpoint = %endpoint.label,
+                endpoint_index = endpoint.index,
                 event = %event.event,
-                "failed to serialize webhook payload; dropping delivery"
+                "failed to build webhook delivery; dropping delivery"
             ),
         }
     }
@@ -391,7 +387,7 @@ async fn deliver_with_retry(
             Ok(permit) => permit,
             Err(_) => {
                 error!(
-                    endpoint = %delivery.endpoint_label,
+                    endpoint_index = delivery.endpoint_index,
                     event = %delivery.event,
                     delivery_id = %delivery.id,
                     "HttpLogger concurrency limiter closed; dropping delivery"
@@ -406,7 +402,7 @@ async fn deliver_with_retry(
             Ok(status) if status.is_success() => return,
             Ok(status) if is_retryable_status(status) && attempt < options.max_retries => {
                 warn!(
-                    endpoint = %delivery.endpoint_label,
+                    endpoint_index = delivery.endpoint_index,
                     event = %delivery.event,
                     delivery_id = %delivery.id,
                     status = status.as_u16(),
@@ -416,7 +412,7 @@ async fn deliver_with_retry(
             }
             Ok(status) if is_retryable_status(status) => {
                 error!(
-                    endpoint = %delivery.endpoint_label,
+                    endpoint_index = delivery.endpoint_index,
                     event = %delivery.event,
                     delivery_id = %delivery.id,
                     status = status.as_u16(),
@@ -427,7 +423,7 @@ async fn deliver_with_retry(
             }
             Ok(status) => {
                 warn!(
-                    endpoint = %delivery.endpoint_label,
+                    endpoint_index = delivery.endpoint_index,
                     event = %delivery.event,
                     delivery_id = %delivery.id,
                     status = status.as_u16(),
@@ -438,7 +434,7 @@ async fn deliver_with_retry(
             }
             Err(request_error) if attempt < options.max_retries => {
                 warn!(
-                    endpoint = %delivery.endpoint_label,
+                    endpoint_index = delivery.endpoint_index,
                     event = %delivery.event,
                     delivery_id = %delivery.id,
                     error_kind = request_error_kind(&request_error),
@@ -448,7 +444,7 @@ async fn deliver_with_retry(
             }
             Err(request_error) => {
                 error!(
-                    endpoint = %delivery.endpoint_label,
+                    endpoint_index = delivery.endpoint_index,
                     event = %delivery.event,
                     delivery_id = %delivery.id,
                     error_kind = request_error_kind(&request_error),
@@ -504,15 +500,20 @@ fn is_default_lifecycle_event(event: &str) -> bool {
     DEFAULT_LIFECYCLE_EVENTS.contains(&event)
 }
 
-fn sign_payload(secret: &str, timestamp: &str, delivery_id: &str, body: &[u8]) -> String {
+fn sign_payload(
+    secret: &str,
+    timestamp: &str,
+    delivery_id: &str,
+    body: &[u8],
+) -> anyhow::Result<String> {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC-SHA256 accepts keys of any length");
+        .map_err(|_| anyhow!("failed to initialize HMAC-SHA256"))?;
     mac.update(timestamp.as_bytes());
     mac.update(b".");
     mac.update(delivery_id.as_bytes());
     mac.update(b".");
     mac.update(body);
-    format!("v1={}", hex::encode(mac.finalize().into_bytes()))
+    Ok(format!("v1={}", hex::encode(mac.finalize().into_bytes())))
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -647,6 +648,9 @@ mod tests {
         let created_only = endpoint(&["sandbox.created"]);
         assert!(endpoint_matches_event(&created_only, "sandbox.created"));
         assert!(!endpoint_matches_event(&created_only, "sandbox.deleted"));
+
+        let mixed_wildcard = endpoint(&["*", "sandbox.created"]);
+        assert!(compile_endpoint(&mixed_wildcard, 0).is_err());
     }
 
     #[test]
@@ -656,7 +660,7 @@ mod tests {
         let delivery_id = "550e8400-e29b-41d4-a716-446655440000";
         let body = br#"{"id":"delivery-1","event":"sandbox.created"}"#;
 
-        let signature = sign_payload(secret, timestamp, delivery_id, body);
+        let signature = sign_payload(secret, timestamp, delivery_id, body).unwrap();
 
         let mut expected_mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         expected_mac.update(timestamp.as_bytes());
@@ -671,6 +675,10 @@ mod tests {
         assert!(signature[3..]
             .chars()
             .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character)));
+
+        let unsigned_endpoint = compile_endpoint(&endpoint(&["sandbox.created"]), 0).unwrap();
+        let unsigned_delivery = Delivery::new(&test_event(), &unsigned_endpoint).unwrap();
+        assert!(unsigned_delivery.signature.is_none());
     }
 
     #[test]
@@ -697,6 +705,32 @@ mod tests {
         assert_eq!(payload["sandbox_id"], "sandbox-123");
         assert_eq!(payload["template_id"], "template-456");
         assert!(payload.get("fields").is_none());
+    }
+
+    #[test]
+    fn payload_serialization_removes_sensitive_fields_recursively() {
+        let event = test_event()
+            .field("access_token", "top-level-token")
+            .field_value(
+                "metadata",
+                serde_json::json!({
+                    "safe": "visible",
+                    "secret": "nested-secret",
+                    "credentials": {"password": "nested-password"}
+                }),
+            );
+        let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
+        let delivery = Delivery::new(&event, &compiled).unwrap();
+        let payload: Value = serde_json::from_slice(&delivery.body).unwrap();
+
+        assert!(payload.get("access_token").is_none());
+        assert_eq!(payload["metadata"]["safe"], "visible");
+        assert!(payload["metadata"].get("secret").is_none());
+        assert!(payload["metadata"].get("credentials").is_none());
+        assert!(!delivery
+            .body
+            .windows("nested-password".len())
+            .any(|window| window == b"nested-password"));
     }
 
     #[derive(Clone)]
