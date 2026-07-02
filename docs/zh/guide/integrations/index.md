@@ -47,4 +47,5 @@ lang: zh-CN
 
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
+| [CodeBuddy 集成指南](./codebuddy.md) | toxitoxi | 2026-07-02 | integration, codebuddy |
 | _在这里补充你的文章_ | - | - | - |

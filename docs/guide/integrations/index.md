@@ -47,4 +47,5 @@ lang: en-US
 
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
+| [CodeBuddy Integration Guide](./codebuddy.md) | toxitoxi | 2026-07-02 | integration, codebuddy |
 | _Add your article here_ | - | - | - |
