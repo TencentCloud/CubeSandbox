@@ -41,7 +41,7 @@ from env_utils import (
     required,
     shell_join,
 )
-from run_pi_agent import ensure_success, run_command
+from _pi_common import ensure_success, run_command, sandbox_identifier
 
 PLACEHOLDER_KEY = "cube-egress-managed-placeholder"
 
@@ -131,10 +131,6 @@ def create_sandbox(template_id: str, rules: list[Rule], timeout: int) -> Sandbox
         network={"rules": rules},
         timeout=timeout,
     )
-
-
-def sandbox_identifier(sandbox: Sandbox) -> str:
-    return getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
 
 
 def show_key_not_in_vm(sandbox: Sandbox, key_name: str) -> None:

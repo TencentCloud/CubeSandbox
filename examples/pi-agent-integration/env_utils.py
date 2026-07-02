@@ -210,13 +210,17 @@ def provider_inject(provider: str, secret: str) -> list[dict[str, str]]:
     return [{"header": "Authorization", "secret": secret, "format": "Bearer ${SECRET}"}]
 
 
-def pi_command(prompt: str, *, mode: str = "json", name: str | None = None) -> str:
+def pi_command(
+    prompt: str, *, mode: str = "json", name: str | None = None, approve: bool = True
+) -> str:
     """Build a headless (non-interactive) Pi invocation.
 
     ``--print`` makes Pi process the prompt and exit instead of launching the
     interactive TUI (which would hang over the E2B exec channel). ``--mode json``
-    streams machine-readable JSONL events. ``--approve`` is a boolean flag that
-    trusts project-local files (AGENTS.md/CLAUDE.md) for this run; the prompt is
+    streams machine-readable JSONL events. ``approve`` toggles ``--approve``,
+    which trusts project-local files (AGENTS.md/CLAUDE.md) for this run — handy
+    in an isolated sandbox, but pass ``approve=False`` in high-security workflows
+    where those files could be attacker-controlled between turns. The prompt is
     passed as the trailing positional message.
     """
     args = ["pi", "--print"]
@@ -233,7 +237,8 @@ def pi_command(prompt: str, *, mode: str = "json", name: str | None = None) -> s
         args.extend(["--thinking", thinking])
     if name:
         args.extend(["--name", name])
-    args.append("--approve")
+    if approve:
+        args.append("--approve")
     args.append(prompt)
     return " ".join(shlex.quote(arg) for arg in args)
 

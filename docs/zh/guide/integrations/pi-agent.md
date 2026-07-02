@@ -234,6 +234,7 @@ version = sandbox.commands.run("pi --version", timeout=60)
 
 - **Node.js 版本。** Pi 需要较新的 Node 运行时；基础镜像自带的 apt Node 偏旧，务必通过 NodeSource 安装（Dockerfile 已如此）。
 - **Agent 状态目录。** `/root/.pi/agent` 保存 Pi 的会话缓存。镜像里保持它为空，避免跨租户泄露会话；它在构建时创建但不写入任何凭证。
+- **直连方式的密钥留存。** 直连方式（`envs=`）下密钥仅作用于该 exec 调用，但 Pi 可能把 provider 凭证缓存到其状态目录（`/root/.pi/agent/`），会在 `pause()` / `resume()` 后仍留在盘上。对隔离要求高时优先用保险柜方式（`network_policy.py`），密钥完全不进入 VM。
 - **CubeEgress CA。** 保险柜方式要求沙箱信任 CubeEgress 根 CA。通过
   `cubemastercli tpl create-from-image` 构建的模板默认已开启。
 - **出网副作用。** 需要 `npm install` 或拉取 MCP 工具的任务，要放行相应 host 或预装进模板。

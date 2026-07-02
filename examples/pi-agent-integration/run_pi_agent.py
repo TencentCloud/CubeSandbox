@@ -8,10 +8,10 @@ import argparse
 import os
 import shlex
 import sys
-from collections.abc import Callable
 
 from e2b import Sandbox
 
+from _pi_common import ensure_success, run_command, sandbox_identifier
 from env_utils import (
     build_pi_env,
     int_env,
@@ -81,47 +81,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def stream_writer(stream) -> Callable[[object], None]:
-    def write(chunk: object) -> None:
-        text = getattr(chunk, "line", chunk)
-        stream.write(str(text))
-        stream.flush()
-
-    return write
-
-
-def run_command(
-    sandbox: Sandbox,
-    command: str,
-    *,
-    cwd: str | None = None,
-    envs: dict[str, str] | None = None,
-    timeout: int | float | None = None,
-    stream: bool = False,
-    user: str = "root",
-):
-    # Run as root: /workspace and Pi's state dir (/root/.pi/agent) are root-owned,
-    # and the default e2b exec user ("user") cannot write to them.
-    kwargs = {"cwd": cwd, "timeout": timeout, "user": user}
-    kwargs = {key: value for key, value in kwargs.items() if value is not None}
-    if envs:
-        kwargs["envs"] = envs
-    if stream:
-        kwargs["on_stdout"] = stream_writer(sys.stdout)
-        kwargs["on_stderr"] = stream_writer(sys.stderr)
-
-    try:
-        return sandbox.commands.run(command, **kwargs)
-    except TypeError as exc:
-        # Older SDKs name the parameter ``env`` instead of ``envs``. Only retry
-        # for that specific signature mismatch; re-raise any other TypeError so
-        # real bugs (e.g. a wrong-type command or timeout) are not masked.
-        if "envs" not in kwargs or "envs" not in str(exc):
-            raise
-        kwargs["env"] = kwargs.pop("envs")
-        return sandbox.commands.run(command, **kwargs)
-
-
 def seed_project(sandbox: Sandbox, workspace: str, timeout: int) -> None:
     quoted_workspace = shlex.quote(workspace)
     command = f"""mkdir -p {quoted_workspace}
@@ -141,16 +100,6 @@ EOF
 """
     result = run_command(sandbox, command, timeout=timeout)
     ensure_success(result, "seed workspace")
-
-
-def ensure_success(result, action: str) -> None:
-    exit_code = getattr(result, "exit_code", None)
-    if exit_code not in (None, 0):
-        stdout = getattr(result, "stdout", "")
-        stderr = getattr(result, "stderr", "")
-        raise SystemExit(
-            f"Failed to {action} (exit {exit_code}).\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
-        )
 
 
 def print_result_summary(result) -> None:
@@ -194,7 +143,7 @@ def main() -> int:
     print(f"Creating sandbox from template: {template_id}")
     result = None
     with Sandbox.create(template=template_id, timeout=args.sandbox_timeout) as sandbox:
-        sandbox_id = getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
+        sandbox_id = sandbox_identifier(sandbox)
         print(f"Sandbox ready: {sandbox_id}")
 
         version_result = run_command(sandbox, "pi --version", timeout=60)

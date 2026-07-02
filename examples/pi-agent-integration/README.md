@@ -25,8 +25,9 @@ pi-agent-integration/
 ├── Dockerfile            # CubeSandbox template image (Node.js + Pi CLI)
 ├── .env.example          # Copy to .env and fill in
 ├── .gitignore
-├── requirements.txt      # Host driver deps (e2b, python-dotenv, rich)
+├── requirements.txt      # Host driver deps (e2b, cubesandbox, python-dotenv)
 ├── env_utils.py          # .env loading, provider keys, Pi command builder
+├── _pi_common.py         # Shared sandbox command helpers (run/ensure/id)
 ├── run_pi_agent.py       # One-shot Pi task
 ├── resume_pi_agent.py    # Pause / resume session persistence
 ├── network_policy.py     # Default-deny egress + on-the-wire key injection

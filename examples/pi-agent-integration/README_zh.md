@@ -20,8 +20,9 @@ pi-agent-integration/
 ├── Dockerfile            # CubeSandbox 模板镜像（Node.js + Pi CLI）
 ├── .env.example          # 复制为 .env 并填写
 ├── .gitignore
-├── requirements.txt      # 宿主端驱动依赖（e2b、python-dotenv、rich）
+├── requirements.txt      # 宿主端驱动依赖（e2b、cubesandbox、python-dotenv）
 ├── env_utils.py          # .env 加载、provider key、Pi 命令构造
+├── _pi_common.py         # 共享的沙箱命令辅助（run/ensure/id）
 ├── run_pi_agent.py       # 一次性 Pi 任务
 ├── resume_pi_agent.py    # pause / resume 会话持久化
 ├── network_policy.py     # 默认拒绝出网 + 链路上注入密钥

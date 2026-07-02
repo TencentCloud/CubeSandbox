@@ -34,7 +34,7 @@ from env_utils import (
     required,
     shell_join,
 )
-from run_pi_agent import ensure_success, run_command
+from _pi_common import ensure_success, run_command, sandbox_identifier
 
 DEFAULT_PI_STATE_DIR = "/root/.pi/agent"
 
@@ -86,10 +86,6 @@ def parse_args() -> argparse.Namespace:
         help="Pi command timeout in seconds. Defaults to PI_AGENT_EXEC_TIMEOUT or 900.",
     )
     return parser.parse_args()
-
-
-def sandbox_identifier(sandbox: Sandbox) -> str:
-    return getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
 
 
 def run_turn(

@@ -260,6 +260,11 @@ version = sandbox.commands.run("pi --version", timeout=60)
 - **Agent state directory.** `/root/.pi/agent` holds Pi's session cache. Keep it
   empty in the image to avoid leaking sessions across tenants; it is created at
   build time but not populated with any credentials.
+- **Direct-flavor key persistence.** With the direct flavor (`envs=`) the key is
+  scoped to the exec call, but Pi may cache provider credentials under its state
+  dir (`/root/.pi/agent/`), which survives `pause()` / `resume()`. For strict
+  isolation prefer the vault flavor (`network_policy.py`), where the key never
+  enters the VM.
 - **CubeEgress CA.** For the vault flavor to work, the sandbox must trust the
   CubeEgress root CA. This is on by default for templates built via
   `cubemastercli tpl create-from-image`.
