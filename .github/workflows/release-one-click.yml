@@ -25,7 +25,7 @@ env:
 
 jobs:
   build_pvm_guest_vmlinux:
-    name: Build PVM guest vmlinux for release
+    name: Build PVM guest vmlinux for release (x86_64)
     runs-on: arc-runner-set-16c32g-containerd
     container:
       image: ubuntu:24.04
@@ -64,8 +64,8 @@ jobs:
               | awk '{print $1}'
           )"
           echo "source_hash=${source_hash}" >> "${GITHUB_OUTPUT}"
-          echo "cache_key=vmlinux-pvm-${PVM_KERNEL_TAG}-${source_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
-          echo "artifact_name=vmlinux-pvm-${PVM_KERNEL_TAG}-${source_hash}" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=vmlinux-pvm-${PVM_KERNEL_TAG}-x86_64-${source_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=vmlinux-pvm-${PVM_KERNEL_TAG}-x86_64-${source_hash}" >> "${GITHUB_OUTPUT}"
 
       - name: Restore cached PVM vmlinux
         id: restore_pvm_vmlinux
@@ -109,9 +109,33 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  release:
+  ensure_release:
+    name: Ensure GitHub Release exists
     runs-on: ubuntu-latest
-    needs: build_pvm_guest_vmlinux
+
+    steps:
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Automated one-click release bundle."
+
+  release_amd64:
+    name: Release one-click bundle (amd64)
+    runs-on: ubuntu-latest
+    needs:
+      - ensure_release
+      - build_pvm_guest_vmlinux
+    env:
+      KERNEL_ARCH: x86_64
+      BUNDLE_ARCH: amd64
+      VMLINUX_CACHE_PATH: kernel-cache/x86_64/vmlinux
+      VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
+      PVM_VMLINUX_CACHE_PATH: kernel-cache/x86_64/vmlinux-pvm
+      PVM_VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux-pvm
 
     steps:
       - name: Checkout
@@ -133,10 +157,10 @@ jobs:
       - name: Compute vmlinux cache metadata
         id: vmlinux_metadata
         run: |
-          config_hash="$(sha256sum configs/kernel-oc9.$(uname -m).config | awk '{print $1}')"
+          config_hash="$(sha256sum "configs/kernel-oc9.${KERNEL_ARCH}.config" | awk '{print $1}')"
           echo "config_hash=${config_hash}" >> "${GITHUB_OUTPUT}"
-          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
-          echo "artifact_name=vmlinux-opencloudos-${KERNEL_TAG}-${config_hash}" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}" >> "${GITHUB_OUTPUT}"
 
       - name: Prepare vmlinux directories
         run: |
@@ -170,13 +194,14 @@ jobs:
           if [[ -z "${artifact_url}" ]]; then
             echo "vmlinux cache miss and no unexpired artifact found, triggering build-vmlinux workflow..." >&2
             trigger_epoch="$(date -u +%s)"
-            gh workflow run build-vmlinux.yml --ref "${GITHUB_REF_NAME}"
+            expected_title="Build vmlinux ${KERNEL_ARCH}"
+            gh workflow run build-vmlinux.yml --ref "${GITHUB_REF_NAME}" -f kernel_arch="${KERNEL_ARCH}"
 
             run_id=""
             for attempt in {1..30}; do
               runs_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/build-vmlinux.yml/runs?event=workflow_dispatch&per_page=20")"
               run_id="$(
-                python3 -c 'import json, sys; from datetime import datetime, timezone; head_sha = sys.argv[1]; trigger_epoch = int(sys.argv[2]); data = json.load(sys.stdin); runs = []; [runs.append(run) for run in data.get("workflow_runs", []) if run.get("head_sha") == head_sha and run.get("created_at") and int(datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()) >= trigger_epoch]; runs.sort(key=lambda run: run.get("created_at", ""), reverse=True); print(runs[0].get("id", "") if runs else "")' "${GITHUB_SHA}" "${trigger_epoch}" <<<"${runs_json}"
+                python3 -c 'import json, sys; from datetime import datetime, timezone; head_sha = sys.argv[1]; trigger_epoch = int(sys.argv[2]); expected_title = sys.argv[3]; data = json.load(sys.stdin); runs = []; [runs.append(run) for run in data.get("workflow_runs", []) if run.get("head_sha") == head_sha and run.get("display_title") == expected_title and run.get("created_at") and int(datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()) >= trigger_epoch]; runs.sort(key=lambda run: run.get("created_at", ""), reverse=True); print(runs[0].get("id", "") if runs else "")' "${GITHUB_SHA}" "${trigger_epoch}" "${expected_title}" <<<"${runs_json}"
               )"
               if [[ -n "${run_id}" ]]; then
                 break
@@ -185,7 +210,7 @@ jobs:
             done
 
             if [[ -z "${run_id}" ]]; then
-              echo "failed to locate the dispatched build-vmlinux workflow run" >&2
+              echo "failed to locate the dispatched build-vmlinux workflow run for ${KERNEL_ARCH}" >&2
               exit 1
             fi
 
@@ -245,8 +270,8 @@ jobs:
               | awk '{print $1}'
           )"
           echo "source_hash=${source_hash}" >> "${GITHUB_OUTPUT}"
-          echo "cache_key=vmlinux-pvm-${PVM_KERNEL_TAG}-${source_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
-          echo "artifact_name=vmlinux-pvm-${PVM_KERNEL_TAG}-${source_hash}" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=vmlinux-pvm-${PVM_KERNEL_TAG}-x86_64-${source_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=vmlinux-pvm-${PVM_KERNEL_TAG}-x86_64-${source_hash}" >> "${GITHUB_OUTPUT}"
 
       - name: Download PVM vmlinux artifact
         uses: actions/download-artifact@v4
@@ -277,33 +302,192 @@ jobs:
           # Propagates to Go ldflags, Rust build.rs, web build, and guest-image version.
           CUBE_VERSION: ${{ github.ref_name }}
           CUBE_COMMIT: ${{ github.sha }}
-          ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}
+          ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}-amd64
         run: CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" ./deploy/one-click/build-release-bundle-builder.sh
 
       - name: Resolve bundle path
         id: bundle
         run: |
-          bundle_path="deploy/one-click/dist/cube-sandbox-one-click-${{ github.ref_name }}.tar.gz"
+          bundle_path="deploy/one-click/dist/cube-sandbox-one-click-${{ github.ref_name }}-amd64.tar.gz"
           test -f "${bundle_path}"
           echo "path=${bundle_path}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload one-click bundle artifact
         uses: actions/upload-artifact@v4
         with:
-          name: one-click-bundle-${{ github.ref_name }}
+          name: one-click-bundle-${{ github.ref_name }}-amd64
           path: ${{ steps.bundle.outputs.path }}
           if-no-files-found: error
           retention-days: 14
 
-      - name: Ensure GitHub Release exists
+      - name: Upload one-click bundle to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" "${{ steps.bundle.outputs.path }}" --clobber
+
+  release_arm64:
+    name: Release one-click bundle (arm64)
+    runs-on: ubuntu-24.04-arm
+    needs: ensure_release
+    env:
+      KERNEL_ARCH: aarch64
+      BUNDLE_ARCH: arm64
+      VMLINUX_CACHE_PATH: kernel-cache/aarch64/vmlinux
+      VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Compute vmlinux cache metadata
+        id: vmlinux_metadata
+        run: |
+          config_hash="$(sha256sum "configs/kernel-oc9.${KERNEL_ARCH}.config" | awk '{print $1}')"
+          echo "config_hash=${config_hash}" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}" >> "${GITHUB_OUTPUT}"
+
+      - name: Prepare vmlinux directories
+        run: |
+          mkdir -p "$(dirname "${VMLINUX_CACHE_PATH}")"
+          mkdir -p "$(dirname "${VMLINUX_RELEASE_PATH}")"
+
+      - name: Restore cached vmlinux
+        id: restore_vmlinux
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.VMLINUX_CACHE_PATH }}
+          key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
+
+      - name: Stage cached vmlinux
+        if: steps.restore_vmlinux.outputs.cache-hit == 'true'
+        run: install -D -m 0644 "${VMLINUX_CACHE_PATH}" "${VMLINUX_RELEASE_PATH}"
+
+      - name: Resolve vmlinux artifact fallback
+        id: resolve_vmlinux_artifact
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VMLINUX_ARTIFACT_NAME: ${{ steps.vmlinux_metadata.outputs.artifact_name }}
+        run: |
+          get_latest_artifact_url() {
+            gh api --paginate --slurp "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" | \
+              python3 -c 'import json, sys; artifact_name = sys.argv[1]; artifacts = [artifact for page in json.load(sys.stdin) for artifact in page.get("artifacts", []) if artifact.get("name") == artifact_name and not artifact.get("expired", False)]; artifacts.sort(key=lambda artifact: artifact.get("created_at", ""), reverse=True); print(artifacts[0].get("archive_download_url", "") if artifacts else "")' "${VMLINUX_ARTIFACT_NAME}"
+          }
+
+          artifact_url="$(get_latest_artifact_url)"
+          if [[ -z "${artifact_url}" ]]; then
+            echo "vmlinux cache miss and no unexpired artifact found, triggering build-vmlinux workflow..." >&2
+            trigger_epoch="$(date -u +%s)"
+            expected_title="Build vmlinux ${KERNEL_ARCH}"
+            gh workflow run build-vmlinux.yml --ref "${GITHUB_REF_NAME}" -f kernel_arch="${KERNEL_ARCH}"
+
+            run_id=""
+            for attempt in {1..30}; do
+              runs_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/build-vmlinux.yml/runs?event=workflow_dispatch&per_page=20")"
+              run_id="$(
+                python3 -c 'import json, sys; from datetime import datetime, timezone; head_sha = sys.argv[1]; trigger_epoch = int(sys.argv[2]); expected_title = sys.argv[3]; data = json.load(sys.stdin); runs = []; [runs.append(run) for run in data.get("workflow_runs", []) if run.get("head_sha") == head_sha and run.get("display_title") == expected_title and run.get("created_at") and int(datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()) >= trigger_epoch]; runs.sort(key=lambda run: run.get("created_at", ""), reverse=True); print(runs[0].get("id", "") if runs else "")' "${GITHUB_SHA}" "${trigger_epoch}" "${expected_title}" <<<"${runs_json}"
+              )"
+              if [[ -n "${run_id}" ]]; then
+                break
+              fi
+              sleep 10
+            done
+
+            if [[ -z "${run_id}" ]]; then
+              echo "failed to locate the dispatched build-vmlinux workflow run for ${KERNEL_ARCH}" >&2
+              exit 1
+            fi
+
+            gh run watch "${run_id}" --interval 20 --exit-status
+            artifact_url="$(get_latest_artifact_url)"
+          fi
+
+          if [[ -z "${artifact_url}" ]]; then
+            echo "vmlinux artifact is still unavailable after build-vmlinux completed" >&2
+            exit 1
+          fi
+
+          echo "artifact_url=${artifact_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download vmlinux artifact fallback
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release create "${GITHUB_REF_NAME}" \
-              --title "${GITHUB_REF_NAME}" \
-              --notes "Automated one-click release bundle."
-          fi
+          rm -rf downloaded-vmlinux
+          mkdir -p downloaded-vmlinux/extracted
+          curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${{ steps.resolve_vmlinux_artifact.outputs.artifact_url }}" \
+            -o downloaded-vmlinux/artifact.zip
+          unzip -q downloaded-vmlinux/artifact.zip -d downloaded-vmlinux/extracted
+          install -D -m 0644 \
+            downloaded-vmlinux/extracted/vmlinux \
+            "${VMLINUX_CACHE_PATH}"
+          install -D -m 0644 \
+            "${VMLINUX_CACHE_PATH}" \
+            "${VMLINUX_RELEASE_PATH}"
+
+      - name: Refresh vmlinux cache from artifact
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VMLINUX_CACHE_PATH }}
+          key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
+
+      - name: Verify vmlinux
+        run: |
+          test -f "${VMLINUX_CACHE_PATH}"
+          test -f "${VMLINUX_RELEASE_PATH}"
+          file "${VMLINUX_RELEASE_PATH}"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull builder image
+        run: docker pull "${BUILDER_IMAGE}"
+
+      - name: Build one-click release bundle
+        env:
+          # Propagates to Go ldflags, Rust build.rs, web build, and guest-image version.
+          CUBE_VERSION: ${{ github.ref_name }}
+          CUBE_COMMIT: ${{ github.sha }}
+          ONE_CLICK_DIST_VERSION: ${{ github.ref_name }}-arm64
+        run: CUBE_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" ./deploy/one-click/build-release-bundle-builder.sh
+
+      - name: Resolve bundle path
+        id: bundle
+        run: |
+          bundle_path="deploy/one-click/dist/cube-sandbox-one-click-${{ github.ref_name }}-arm64.tar.gz"
+          test -f "${bundle_path}"
+          echo "path=${bundle_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload one-click bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-click-bundle-${{ github.ref_name }}-arm64
+          path: ${{ steps.bundle.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload one-click bundle to Release
         env:
