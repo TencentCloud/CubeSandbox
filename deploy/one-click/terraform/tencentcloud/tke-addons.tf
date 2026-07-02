@@ -4,17 +4,18 @@
 ########################
 
 locals {
-  # All four component images share var.image_tag (matching build_images.sh's TAG).
-  # registry/namespace default to the TCR instance created by this run: before
-  # deploying the addons, create.sh calls build_images.sh to build and push these
-  # four images to that TCR. Override with var.image_registry / var.image_namespace
-  # (e.g. to reuse a public image source).
-  image_registry    = var.image_registry != "" ? var.image_registry : "${tencentcloud_tcr_instance.demo.name}.tencentcloudcr.com"
-  image_namespace   = var.image_namespace != "" ? var.image_namespace : tencentcloud_tcr_namespace.demo.name
-  cube_master_image = "${local.image_registry}/${local.image_namespace}/cubemaster:${var.image_tag}"
-  cube_api_image    = "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
-  cube_proxy_image  = "${local.image_registry}/${local.image_namespace}/cubeproxy:${var.image_tag}"
-  cube_webui_image  = "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
+  # Default mode uses pinned public images and does not create/use TCR.
+  # If use_tcr=true, create.sh builds/pushes the images into the per-deployment TCR.
+  image_registry = var.use_tcr ? (
+    var.image_registry != "" ? var.image_registry : "${tencentcloud_tcr_instance.cluster[0].name}.tencentcloudcr.com"
+  ) : var.image_registry
+  image_namespace = var.use_tcr ? (
+    var.image_namespace != "" ? var.image_namespace : tencentcloud_tcr_namespace.cluster[0].name
+  ) : var.image_namespace
+  cube_master_image = var.cubemaster_image != "" ? var.cubemaster_image : "${local.image_registry}/${local.image_namespace}/cubemaster:${var.image_tag}"
+  cube_api_image    = var.cubeapi_image != "" ? var.cubeapi_image : "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
+  cube_proxy_image  = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cubeproxy:${var.image_tag}"
+  cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
 
   # cube_db / cube_user are wired through Terraform (var.cube_db / var.cube_user)
   # so the MySQL account/database created in main.tf, the cube-master conf Secret
@@ -38,6 +39,11 @@ locals {
 
   # All files under the certificate directory
   cert_files = fileset("${path.module}/cubeproxy-certs", "*")
+
+  # create.sh writes this file next to the Terraform module before applying
+  # addons. Direct `terraform validate` from the source tree has no generated
+  # file yet, so fall back to the canonical one-click WebUI nginx template.
+  webui_nginx_conf = try(file("${path.module}/webui-nginx.conf"), file("${path.module}/../../webui/nginx.conf"))
 
   # Precondition for creating the TKE addons
   deploy_addons = var.create_tke && var.deploy_tke_addons
@@ -78,7 +84,7 @@ resource "local_file" "tke_kubeconfig" {
 # ---------------------------------------------------------------
 resource "kubernetes_namespace" "cubesandbox" {
   count      = local.deploy_addons ? 1 : 0
-  depends_on = [tencentcloud_tcr_instance.demo, tencentcloud_tcr_namespace.demo]
+  depends_on = [tencentcloud_kubernetes_cluster.tke]
   metadata {
     name = "cubesandbox"
   }
@@ -331,15 +337,24 @@ resource "kubernetes_deployment" "cubemaster" {
             secret_name = kubernetes_secret.cubemaster_conf[0].metadata[0].name
           }
         }
-        # CFS-backed shared storage (provisioned in main.tf). Mounted directly as
-        # an in-tree NFS volume — the TKE node mounts the CFS share (negotiating
-        # NFS 4.0, whose mount root is "/") and bind-mounts it into every pod, so
-        # the cube-master replicas share /data/CubeMaster/storage.
-        volume {
-          name = "data"
-          nfs {
-            server = tencentcloud_cfs_file_system.cubemaster_data.mount_ip
-            path   = "/"
+        # Default no-CFS mode uses pod-local emptyDir storage, suitable for the
+        # default single-replica cube-master. Set use_cfs=true when scaling
+        # cube-master beyond one replica or when persistent shared storage is needed.
+        dynamic "volume" {
+          for_each = var.use_cfs ? [1] : []
+          content {
+            name = "data"
+            nfs {
+              server = tencentcloud_cfs_file_system.cubemaster_data[0].mount_ip
+              path   = "/"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.use_cfs ? [] : [1]
+          content {
+            name = "data"
+            empty_dir {}
           }
         }
         # Both the public cert and the private key are projected here:
@@ -371,19 +386,22 @@ resource "kubernetes_deployment" "cubemaster" {
 }
 
 # cube-master private-network CLB Service
+# NOTE: cubemaster always stays VPC-internal regardless of enable_public_network,
+# so it does NOT use replace_triggered_by — its CLB type never changes.
 resource "kubernetes_service" "cubemaster" {
   count = local.deploy_addons ? 1 : 0
   metadata {
     name      = "cubemaster"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
     annotations = {
-      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
       "service.cloud.tencent.com/modification-protection"           = "false"
       "service.cloud.tencent.com/pass-to-target"                    = "true"
-      "service.cloud.tencent.com/security-groups"                   = tencentcloud_security_group.demo.id
+      "service.cloud.tencent.com/security-groups"                   = tencentcloud_security_group.clb.id
     }
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations; ignore to avoid drift.
     ignore_changes = [
       metadata[0].annotations,
     ]
@@ -397,6 +415,19 @@ resource "kubernetes_service" "cubemaster" {
       port     = 8089
       protocol = "TCP"
     }
+  }
+}
+
+# ---------------------------------------------------------------
+# Network mode trigger — forces Service (CLB) recreation when
+# enable_public_network flips. Public↔internal requires a new CLB
+# instance (different type / different VIP), so recreation is the
+# correct behaviour. Without this, the lifecycle ignore_changes on
+# annotations would silently suppress the CLB type switch.
+# ---------------------------------------------------------------
+resource "null_resource" "network_mode_trigger" {
+  triggers = {
+    enable_public_network = tostring(var.enable_public_network)
   }
 }
 
@@ -456,15 +487,30 @@ resource "kubernetes_service" "cube_api" {
   metadata {
     name      = "cube-api"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
-    annotations = {
+    # When enable_public_network is false (default), pin the CLB to a
+    # VPC-internal subnet so it only gets a private VIP. When true, omit the
+    # internal-subnetid annotation so TKE provisions a public CLB.
+    annotations = merge({
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
-      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.demo.id
-    }
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
+      }, var.enable_public_network ? {
+      "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
+      } : {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
+    })
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations (e.g. bindedip,
+    # loadbalanceId) that would otherwise cause perpetual drift on every plan.
     ignore_changes = [
       metadata[0].annotations,
+    ]
+    # Force Service (and hence CLB) recreation when the network mode flips.
+    # Public↔internal requires a brand-new CLB instance, so recreation is safe
+    # and expected — the VIP will change.
+    replace_triggered_by = [
+      null_resource.network_mode_trigger,
     ]
   }
 
@@ -534,6 +580,10 @@ resource "kubernetes_deployment" "cube_proxy" {
     labels    = { app = "cube-proxy" }
   }
   spec {
+    # Defaults to 1. auto-pause/auto-resume (driven by the co-resident
+    # cube-proxy-sidecar sweeper) is only correct in single-replica mode; with
+    # >1 replica the front-end LB MUST hash on SandboxID, otherwise per-replica
+    # idle detection misfires. See var.cube_proxy_replicas in variables.tf.
     replicas = var.cube_proxy_replicas
     selector {
       match_labels = { app = "cube-proxy" }
@@ -601,6 +651,36 @@ resource "kubernetes_deployment" "cube_proxy" {
               read_only  = true
             }
           }
+
+          # --- Health probes ---
+          # liveness: if nginx stops accepting connections on the dataplane port
+          # (process hang / deadlock), kubelet restarts the container. A plain
+          # crash/OOM is already covered by restartPolicy: Always; this catches
+          # the "still alive but unresponsive" case.
+          liveness_probe {
+            tcp_socket {
+              port = 8081
+            }
+            initial_delay_seconds = 5
+            period_seconds        = 10
+            timeout_seconds       = 3
+            failure_threshold     = 3
+            success_threshold     = 1
+          }
+
+          # readiness: only route traffic once nginx is accepting connections, so
+          # the endpoint is removed from the Service during restart and the CLB
+          # stops forwarding to this pod before it is ready (avoids 502s).
+          readiness_probe {
+            tcp_socket {
+              port = 8081
+            }
+            initial_delay_seconds = 3
+            period_seconds        = 5
+            timeout_seconds       = 2
+            failure_threshold     = 2
+            success_threshold     = 1
+          }
         }
 
         # global.conf volume (Secret: contains the Redis password). Project ONLY
@@ -643,17 +723,30 @@ resource "kubernetes_service" "cube_proxy" {
   metadata {
     name      = "cube-proxy"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
-    annotations = {
+    # Public mode: a public CLB billed by traffic (internet-charge-type).
+    # Internal mode (default): pin to a VPC-internal subnet for a private VIP.
+    annotations = merge({
+      "service.cloud.tencent.com/specify-protocol"        = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]}}"
+      "service.cloud.tencent.com/modification-protection" = "false"
+      "service.cloud.tencent.com/pass-to-target"          = "true"
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
+      }, var.enable_public_network ? {
       "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
-      "service.cloud.tencent.com/specify-protocol"                     = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]}}"
-      "service.cloud.tencent.com/modification-protection"              = "false"
-      "service.cloud.tencent.com/pass-to-target"                       = "true"
-      "service.cloud.tencent.com/security-groups"                      = tencentcloud_security_group.demo.id
-    }
+      } : {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
+    })
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations (e.g. bindedip,
+    # loadbalanceId) that would otherwise cause perpetual drift on every plan.
     ignore_changes = [
       metadata[0].annotations,
+    ]
+    # Force Service (and hence CLB) recreation when the network mode flips.
+    # Public↔internal requires a brand-new CLB instance, so recreation is safe
+    # and expected — the VIP will change.
+    replace_triggered_by = [
+      null_resource.network_mode_trigger,
     ]
   }
 
@@ -695,7 +788,7 @@ resource "kubernetes_config_map" "cube_webui_nginx_conf" {
     #   __SANDBOX_PROXY_UPSTREAM__ → cube-proxy (the /sandbox/ backend, port 80)
     "nginx.conf" = replace(
       replace(
-        file("${path.module}/webui-nginx.conf"),
+        local.webui_nginx_conf,
         "__WEB_UI_UPSTREAM__",
         "http://${kubernetes_service.cube_api[0].spec[0].cluster_ip}:3000"
       ),
@@ -786,15 +879,30 @@ resource "kubernetes_service" "cube_webui" {
   metadata {
     name      = "cube-webui"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
-    annotations = {
+    # When enable_public_network is false (default), pin the CLB to a
+    # VPC-internal subnet so it only gets a private VIP. When true, bill by
+    # traffic (matching cube-api / cube-proxy) for cost predictability.
+    annotations = merge({
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
-      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.demo.id
-    }
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
+      }, var.enable_public_network ? {
+      "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
+      } : {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
+    })
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations (e.g. bindedip,
+    # loadbalanceId) that would otherwise cause perpetual drift on every plan.
     ignore_changes = [
       metadata[0].annotations,
+    ]
+    # Force Service (and hence CLB) recreation when the network mode flips.
+    # Public↔internal requires a brand-new CLB instance, so recreation is safe
+    # and expected — the VIP will change.
+    replace_triggered_by = [
+      null_resource.network_mode_trigger,
     ]
   }
 

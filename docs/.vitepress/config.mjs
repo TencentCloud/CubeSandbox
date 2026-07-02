@@ -113,6 +113,7 @@ export default withMermaid(defineConfig({
                 { text: 'PVM Deployment', link: '/guide/pvm-deploy' },
                 { text: 'Bare-Metal Deployment', link: '/guide/bare-metal-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
+                { text: 'Tencent Cloud Cluster (Terraform)', link: '/guide/tencentcloud-terraform-deploy' },
                 { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' }
               ]
@@ -239,6 +240,7 @@ export default withMermaid(defineConfig({
                 { text: 'PVM部署', link: '/zh/guide/pvm-deploy' },
                 { text: '裸金属/物理机部署', link: '/zh/guide/bare-metal-deploy' },
                 { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },
+                { text: '腾讯云集群部署（Terraform）', link: '/zh/guide/tencentcloud-terraform-deploy' },
                 { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' }
               ]

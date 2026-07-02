@@ -460,14 +460,15 @@ ss_import_compute() {
 	esac
 	[ "$desired" -gt 0 ] 2>/dev/null || return 0
 
-	# Ids already tracked in any compute[i] slot.
-	local -A managed=()
+	# Ids already tracked in any compute[i] slot. Use a string set instead of
+	# a bash 4 associative array so macOS bash 3.2 works.
+	local managed=" "
 	local addr id idx
 	while IFS= read -r addr; do
 		[ -n "$addr" ] || continue
 		id="$(ss_state_id "$addr")"
 		if [ -n "$id" ]; then
-			managed["$id"]=1
+			managed="${managed}${id} "
 		fi
 	done < <(terraform state list 2>/dev/null | grep -E '^tencentcloud_instance\.compute\[' || true)
 
@@ -475,9 +476,10 @@ ss_import_compute() {
 	local -a unmanaged=()
 	for id in $(ss_discover_cvm_ids "$SS_COMPUTE_NAME"); do
 		[ -n "$id" ] || continue
-		if [ -z "${managed[$id]:-}" ]; then
-			unmanaged+=("$id")
-		fi
+		case "$managed" in
+		*" ${id} "*) ;;
+		*) unmanaged+=("$id") ;;
+		esac
 	done
 	[ "${#unmanaged[@]}" -gt 0 ] || return 0
 
@@ -536,9 +538,9 @@ ss_print_sync_summary() {
 	local -a sat=() sup=() fail=() pend=()
 	local addr
 	for addr in "${desired[@]}"; do
-		if ss_in_list "$addr" "${SS_R_FAILED[@]}"; then
+		if ss_in_list "$addr" "${SS_R_FAILED[@]+"${SS_R_FAILED[@]}"}"; then
 			fail+=("$addr")
-		elif ss_in_list "$addr" "${SS_R_SUPPLEMENTED[@]}"; then
+		elif ss_in_list "$addr" "${SS_R_SUPPLEMENTED[@]+"${SS_R_SUPPLEMENTED[@]}"}"; then
 			sup+=("$addr")
 		elif ss_addr_in_state "$addr"; then
 			sat+=("$addr")
@@ -552,26 +554,26 @@ ss_print_sync_summary() {
 	# wording to the caller's intent (SS_MODE): for a destroy the "absent in cloud"
 	# resources are already gone (nothing to destroy) rather than pending creation.
 	if [ "${SS_MODE:-create}" = "destroy" ]; then
-		ss_print_group "${CYAN:-}"   "Tracked in state (will be destroyed)"                          "•" "${sat[@]}"
-		ss_print_group "${CYAN:-}"   "Adopted from cloud, were missing from state (will be destroyed)" "+" "${sup[@]}"
+		ss_print_group "${CYAN:-}"   "Tracked in state (will be destroyed)"                          "•" "${sat[@]+"${sat[@]}"}"
+		ss_print_group "${CYAN:-}"   "Adopted from cloud, were missing from state (will be destroyed)" "+" "${sup[@]+"${sup[@]}"}"
 		if [ "${#fail[@]}" -gt 0 ]; then
-			ss_print_group "${YELLOW:-}" "Exist in cloud but could not be adopted (will NOT be destroyed)" "✗" "${fail[@]}"
+			ss_print_group "${YELLOW:-}" "Exist in cloud but could not be adopted (will NOT be destroyed)" "✗" "${fail[@]+"${fail[@]}"}"
 		fi
 		if [ "$SS_DISCOVERY_RAN" = "1" ]; then
-			ss_print_group "${GREEN:-}" "Already absent in cloud (nothing to destroy)" "✓" "${pend[@]}"
+			ss_print_group "${GREEN:-}" "Already absent in cloud (nothing to destroy)" "✓" "${pend[@]+"${pend[@]}"}"
 		elif [ "${#pend[@]}" -gt 0 ]; then
-			ss_print_group "${YELLOW:-}" "Not in state (cloud not checked — no tccli runner)" "?" "${pend[@]}"
+			ss_print_group "${YELLOW:-}" "Not in state (cloud not checked — no tccli runner)" "?" "${pend[@]+"${pend[@]}"}"
 		fi
 	else
-		ss_print_group "${GREEN:-}"  "Already satisfied (tracked in state)" "✓" "${sat[@]}"
-		ss_print_group "${GREEN:-}"  "Supplemented (imported from cloud, were missing from state)" "+" "${sup[@]}"
+		ss_print_group "${GREEN:-}"  "Already satisfied (tracked in state)" "✓" "${sat[@]+"${sat[@]}"}"
+		ss_print_group "${GREEN:-}"  "Supplemented (imported from cloud, were missing from state)" "+" "${sup[@]+"${sup[@]}"}"
 		if [ "${#fail[@]}" -gt 0 ]; then
-			ss_print_group "${YELLOW:-}" "Exist in cloud but could not be adopted (import failed)" "✗" "${fail[@]}"
+			ss_print_group "${YELLOW:-}" "Exist in cloud but could not be adopted (import failed)" "✗" "${fail[@]+"${fail[@]}"}"
 		fi
 		if [ "$SS_DISCOVERY_RAN" = "1" ]; then
-			ss_print_group "${YELLOW:-}" "To be created by terraform apply (absent in cloud)" "·" "${pend[@]}"
+			ss_print_group "${YELLOW:-}" "To be created by terraform apply (absent in cloud)" "·" "${pend[@]+"${pend[@]}"}"
 		elif [ "${#pend[@]}" -gt 0 ]; then
-			ss_print_group "${YELLOW:-}" "Not yet in state (cloud not checked — no tccli runner)" "?" "${pend[@]}"
+			ss_print_group "${YELLOW:-}" "Not yet in state (cloud not checked — no tccli runner)" "?" "${pend[@]+"${pend[@]}"}"
 		fi
 	fi
 }

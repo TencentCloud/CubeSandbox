@@ -67,7 +67,8 @@ export TF_VAR_ssh_private_key_path="$SSH_PRI_KEY"
 # and would survive as a still-billed orphan. tke_node_count is mapped too so
 # the desired topology matches the state.
 [ -n "${TENCENTCLOUD_COMPUTE_NODE_COUNT:-}" ] && export TF_VAR_compute_node_count="$TENCENTCLOUD_COMPUTE_NODE_COUNT"
-[ -n "${TENCENTCLOUD_TKE_NODE_COUNT:-}" ] && export TF_VAR_tke_node_count="$TENCENTCLOUD_TKE_NODE_COUNT"
+export TF_VAR_compute_node_count="${TF_VAR_compute_node_count:-${TENCENTCLOUD_COMPUTE_NODE_COUNT:-2}}"
+export TF_VAR_tke_node_count="${TF_VAR_tke_node_count:-${TENCENTCLOUD_TKE_NODE_COUNT:-2}}"
 
 mkdir -p "$SCRIPT_DIR/.kube"
 
@@ -119,13 +120,13 @@ fi
 #   `terraform destroy` (e.g. -target=...). Returns non-zero if it ultimately fails.
 # ---------------------------------------------------------------
 run_destroy() {
-	local log attempt max_attempts stale_addrs addr
+	local log attempt max_attempts stale_addrs addr suggested_targets target
 	local -a destroy_extra=()
 	log="$(mktemp "${TMPDIR:-/tmp}/cubesandbox_destroy.XXXXXX")"
 	attempt=1
 	max_attempts=4
 	while :; do
-		if terraform destroy -auto-approve "$@" "${destroy_extra[@]}" 2>&1 | tee "$log"; then
+		if terraform destroy -auto-approve "$@" "${destroy_extra[@]+"${destroy_extra[@]}"}" 2>&1 | tee "$log"; then
 			rm -f "$log"
 			return 0
 		fi
@@ -147,6 +148,58 @@ run_destroy() {
 			continue
 		fi
 
+		# Terraform refuses targeted plans when unrelated resource addresses have
+		# moved (for example after switching TCR resources from singleton to
+		# count-gated addresses). It prints exact -target suggestions; add them and
+		# retry instead of failing the whole teardown.
+		if grep -q 'Moved resource instances excluded by targeting' "$log" 2>/dev/null; then
+			suggested_targets="$(
+				grep -oE -- '-target="[^"]+"' "$log" 2>/dev/null |
+					sed -E 's/-target="([^"]+)"/\1/' | sort -u
+			)"
+			if [ -n "$suggested_targets" ] && [ "$attempt" -lt "$max_attempts" ]; then
+				if echo "$suggested_targets" | grep -qE '(^|\.)(tcr|tcr_|tcr_token_deploy)|tencentcloud_tcr_'; then
+					echo ""
+					echo -e "${YELLOW}Terraform requires TCR moved targets, but TCR namespace deletion must be ordered.${NC}"
+					echo -e "${CYAN}Tearing TCR down via tccli first (repositories → namespace → instance + bucket), then pruning state...${NC}"
+					if destroy_tcr "$TCR_INSTANCE_ID" "$TCR_NAMESPACE"; then
+						tcr_state_prune
+						attempt=$((attempt + 1))
+						echo -e "${CYAN}Retrying terraform destroy (attempt ${attempt}/${max_attempts})...${NC}"
+						continue
+					fi
+					echo -e "${YELLOW}⚠ Could not tear TCR down via tccli; not adding TCR targets directly because repositories can block namespace deletion.${NC}"
+					suggested_targets="$(echo "$suggested_targets" | grep -vE '(^|\.)(tcr|tcr_|tcr_token_deploy)|tencentcloud_tcr_' || true)"
+					[ -n "$suggested_targets" ] || {
+						rm -f "$log"
+						return 1
+					}
+				fi
+				echo ""
+				echo -e "${YELLOW}Terraform needs additional targets for moved resource addresses; retrying with them:${NC}"
+				while IFS= read -r target; do
+					[ -n "$target" ] || continue
+					echo -e "  ${CYAN}-target=${target}${NC}"
+					destroy_extra+=("-target=${target}")
+				done <<EOF
+${suggested_targets}
+EOF
+				attempt=$((attempt + 1))
+				echo -e "${CYAN}Retrying terraform destroy (attempt ${attempt}/${max_attempts})...${NC}"
+				continue
+			fi
+		fi
+
+		if _is_local_apiserver_refused "$log" && [ "$attempt" -lt "$max_attempts" ]; then
+			echo ""
+			if _reopen_apiserver_tunnel; then
+				attempt=$((attempt + 1))
+				echo -e "${CYAN}Retrying terraform destroy with the refreshed API Server tunnel (attempt ${attempt}/${max_attempts})...${NC}"
+				continue
+			fi
+			echo -e "${YELLOW}⚠ Could not reopen the API Server tunnel; Kubernetes addons still need manual attention.${NC}"
+		fi
+
 		# Resource addresses terraform errored on appear as "  with <addr>,".
 		stale_addrs="$(
 			grep -E 'with [a-z][A-Za-z0-9_]*\.' "$log" 2>/dev/null |
@@ -164,6 +217,9 @@ run_destroy() {
 			echo ""
 			echo -e "${RED}✗ terraform destroy failed.${NC}"
 			[ -z "$stale_addrs" ] && echo -e "${YELLOW}  No stale resources were detected to prune automatically.${NC}"
+			if grep -qiE 'ResourceInUse|UsedIp|already in use|resource.*in use' "$log" 2>/dev/null; then
+				used_ip_blocker_hint
+			fi
 			if [ -n "$stale_addrs" ] && [ "$gone_marker" != "1" ]; then
 				echo -e "${YELLOW}  The error does not look like 'resource already gone', so NOTHING was removed${NC}"
 				echo -e "${YELLOW}  from state — pruning here could orphan a still-existing, billable resource.${NC}"
@@ -211,10 +267,29 @@ _localize_kubeconfig() {
 	case "$cur" in
 	*"127.0.0.1:${APISERVER_LOCAL_PORT}"*) return 0 ;; # already localized
 	esac
-	sed -i -E \
-		-e '/^[[:space:]]*certificate-authority-data:/d' \
-		-e "s#^([[:space:]]*)server:[[:space:]]*https?://.*#\1server: https://127.0.0.1:${APISERVER_LOCAL_PORT}\n\1insecure-skip-tls-verify: true#" \
-		"$kubeconfig"
+	local tmp
+	tmp="${kubeconfig}.tmp.$$"
+	awk -v port="${APISERVER_LOCAL_PORT}" '
+		/^[ \t]*certificate-authority-data:/ { next }
+		/^[ \t]*insecure-skip-tls-verify:/ { next }
+		/^[ \t]*server:[ \t]*https?:\/\// {
+			indent = $0
+			sub(/[^ \t].*/, "", indent)
+			print indent "server: https://127.0.0.1:" port
+			print indent "insecure-skip-tls-verify: true"
+			next
+		}
+		{ print }
+	' "$kubeconfig" >"$tmp" && mv "$tmp" "$kubeconfig"
+	chmod 600 "$kubeconfig" 2>/dev/null || true
+}
+
+_local_apiserver_port_open() {
+	if command -v nc >/dev/null 2>&1; then
+		nc -z -w 2 127.0.0.1 "${APISERVER_LOCAL_PORT}" 2>/dev/null
+		return $?
+	fi
+	(: >/dev/tcp/127.0.0.1/"${APISERVER_LOCAL_PORT}") >/dev/null 2>&1
 }
 
 _start_apiserver_tunnel() {
@@ -223,6 +298,10 @@ _start_apiserver_tunnel() {
 	[ -n "${JS_IP:-}" ] || return 1
 	host="${APISERVER_REMOTE_HOSTPORT%:*}"
 	port="${APISERVER_REMOTE_HOSTPORT##*:}"
+	if _local_apiserver_port_open; then
+		_localize_kubeconfig
+		return 0
+	fi
 	_close_apiserver_tunnel
 	ssh -i "${SSH_PRI_KEY}" -p 443 \
 		-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -233,7 +312,73 @@ _start_apiserver_tunnel() {
 	APISERVER_TUNNEL_PID=$(pgrep -f "127.0.0.1:${APISERVER_LOCAL_PORT}:${host}:${port}" 2>/dev/null | head -n1 || echo "")
 	trap _close_apiserver_tunnel EXIT
 	_localize_kubeconfig
+	local i
+	for i in $(seq 1 10); do
+		if _local_apiserver_port_open; then
+			return 0
+		fi
+		sleep 1
+	done
+	echo -e "  ${YELLOW}⚠ API Server tunnel process started but 127.0.0.1:${APISERVER_LOCAL_PORT} is not accepting connections${NC}"
+	_close_apiserver_tunnel
+	return 1
+}
+
+_reopen_apiserver_tunnel() {
+	[ -n "${APISERVER_REMOTE_HOSTPORT:-}" ] || return 1
+	echo -e "  ${YELLOW}Kubernetes provider lost the local API Server tunnel; reopening it and retrying...${NC}"
+	_start_apiserver_tunnel
+}
+
+_is_local_apiserver_refused() {
+	local log="$1"
+	grep -qiE "127\\.0\\.0\\.1:${APISERVER_LOCAL_PORT}.*(connection refused|connect: connection refused)|dial tcp 127\\.0\\.0\\.1:${APISERVER_LOCAL_PORT}" "$log" 2>/dev/null
+}
+
+_ensure_apiserver_tunnel_ready() {
+	if _local_apiserver_port_open; then
+		return 0
+	fi
+	_reopen_apiserver_tunnel
+}
+
+_set_apiserver_remote_from_value() {
+	local value="$1" host port
+	value="${value#https://}"
+	value="${value#http://}"
+	value="${value%%/*}"
+	host="${value%:*}"
+	port="${value##*:}"
+	[ "$port" = "$value" ] && port="443"
+	[ -n "$host" ] || return 1
+	APISERVER_REMOTE_HOSTPORT="${host}:${port}"
 	return 0
+}
+
+_recover_apiserver_remote_hostport() {
+	local kubeconfig="$1" endpoint fresh server
+
+	endpoint="$(terraform output -raw tke_cluster_endpoint 2>/dev/null || echo "")"
+	if [ -n "$endpoint" ] && _set_apiserver_remote_from_value "$endpoint"; then
+		return 0
+	fi
+
+	fresh="$(terraform output -raw tke_kube_config 2>/dev/null || echo "")"
+	if echo "$fresh" | grep -q '^apiVersion'; then
+		server="$(printf '%s\n' "$fresh" | grep -E '^[[:space:]]*server:[[:space:]]*https?://' |
+			head -n1 | sed -E 's#^[[:space:]]*server:[[:space:]]*https?://##' | tr -d '[:space:]')"
+		case "$server" in
+		127.0.0.1:* | "") ;;
+		*)
+			printf '%s\n' "$fresh" >"$kubeconfig"
+			chmod 600 "$kubeconfig" 2>/dev/null || true
+			_set_apiserver_remote_from_value "$server"
+			return $?
+			;;
+		esac
+	fi
+
+	return 1
 }
 
 _open_apiserver_tunnel() {
@@ -253,11 +398,11 @@ _open_apiserver_tunnel() {
 	case "$server" in
 	127.0.0.1:*)
 		# Already localized (e.g. a previous partial run): just (re)start the tunnel.
-		if [ -n "${APISERVER_REMOTE_HOSTPORT}" ]; then
+		if [ -n "${APISERVER_REMOTE_HOSTPORT}" ] || _recover_apiserver_remote_hostport "$kubeconfig"; then
 			_start_apiserver_tunnel
 			return $?
 		fi
-		echo -e "  ${YELLOW}⚠ kubeconfig already points at a local tunnel but the endpoint is unknown${NC}"
+		echo -e "  ${YELLOW}⚠ kubeconfig already points at a local tunnel but the real intranet endpoint could not be recovered${NC}"
 		return 1
 		;;
 	esac
@@ -567,7 +712,7 @@ destroy_tcr() {
 		echo -e "  ${CYAN}No TCR instance id; nothing to delete via tccli.${NC}"
 		return 1
 	}
-	[ -z "$ns" ] && ns="cubesandbox-demo"
+	[ -z "$ns" ] && ns="cubesandbox-cluster"
 
 	# A tccli runner is required (the repos/bucket cannot be removed any other
 	# way). Without one, print the manual commands and let the caller fall back.
@@ -670,7 +815,23 @@ destroy_tcr() {
 }
 
 # in_state — true when the given resource address prefix exists in the state.
-in_state() { terraform state list 2>/dev/null | grep -q "^$1"; }
+# Use fixed-string prefix matching so indexed addresses like resource.foo[0] are
+# not interpreted as regular expressions.
+in_state() { terraform state list 2>/dev/null | awk -v p="$1" 'index($0, p) == 1 { found = 1 } END { exit found ? 0 : 1 }'; }
+
+# state_id_any ADDR... — return the first Terraform state id found for any
+# address. Supports both scalar resources and count/indexed resources.
+state_id_any() {
+	local addr id
+	for addr in "$@"; do
+		id="$(terraform state show "$addr" 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
+		[ -n "$id" ] && {
+			printf '%s\n' "$id"
+			return 0
+		}
+	done
+	return 1
+}
 
 # tcr_state_prune — drop all TCR resources from the Terraform state. Called after
 #   destroy_tcr removed them out-of-band (the instance delete also removes its
@@ -679,10 +840,22 @@ tcr_state_prune() {
 	local _res
 	for _res in \
 		null_resource.tcr_token_deploy \
+		tencentcloud_tcr_token.cluster \
+		'tencentcloud_tcr_token.cluster[0]' \
 		tencentcloud_tcr_token.demo \
+		'tencentcloud_tcr_token.demo[0]' \
+		tencentcloud_tcr_vpc_attachment.cluster \
+		'tencentcloud_tcr_vpc_attachment.cluster[0]' \
 		tencentcloud_tcr_vpc_attachment.demo \
+		'tencentcloud_tcr_vpc_attachment.demo[0]' \
+		tencentcloud_tcr_namespace.cluster \
+		'tencentcloud_tcr_namespace.cluster[0]' \
 		tencentcloud_tcr_namespace.demo \
-		tencentcloud_tcr_instance.demo; do
+		'tencentcloud_tcr_namespace.demo[0]' \
+		tencentcloud_tcr_instance.cluster \
+		'tencentcloud_tcr_instance.cluster[0]' \
+		tencentcloud_tcr_instance.demo \
+		'tencentcloud_tcr_instance.demo[0]'; do
 		if in_state "$_res"; then
 			echo -e "    ${CYAN}terraform state rm ${_res}${NC}"
 			terraform state rm "$_res" >/dev/null 2>&1 || true
@@ -781,6 +954,150 @@ _td_status() {
 	fi
 }
 
+_moved_tcr_targets() {
+	local _res
+	for _res in \
+		null_resource.tcr_token_deploy \
+		tencentcloud_tcr_token.cluster \
+		tencentcloud_tcr_vpc_attachment.cluster \
+		tencentcloud_tcr_namespace.cluster \
+		tencentcloud_tcr_instance.cluster; do
+		in_state "$_res" && printf '%s\n' "-target=$_res"
+	done
+}
+
+_state_count_prefix() {
+	local prefix="$1"
+	terraform state list 2>/dev/null | awk -v p="$prefix" 'index($0, p) == 1 { n++ } END { print n + 0 }'
+}
+
+_tccli_runner_available() {
+	{ [ -n "${JS_IP:-}" ] && nc -z -w 3 "${JS_IP}" 443 2>/dev/null; } || command -v tccli >/dev/null 2>&1
+}
+
+_tcr_repo_count_for_report() {
+	local registry_id="$1" ns="$2" namespaces nsname offset page repos cnt
+	[ -n "$registry_id" ] || {
+		echo "unknown"
+		return 0
+	}
+	if ! _tccli_runner_available; then
+		echo "unknown"
+		return 0
+	fi
+
+	namespaces=""
+	offset=0
+	while :; do
+		page="$(tccli_run tcr DescribeNamespaces --RegistryId "$registry_id" --Limit 100 --Offset "$offset" 2>/dev/null |
+			jq -r '.NamespaceList[]? | .Name' 2>/dev/null || true)"
+		[ -z "${page//[$'\n\t ']/}" ] && break
+		namespaces="${namespaces} $(echo "$page" | tr '\n' ' ')"
+		[ "$(echo "$page" | grep -c .)" -lt 100 ] && break
+		offset=$((offset + 100))
+		[ "$offset" -ge 1000 ] && break
+	done
+	[ -n "$ns" ] || ns="cubesandbox-cluster"
+	case " ${namespaces} " in
+	*" ${ns} "*) ;;
+	*) namespaces="${ns} ${namespaces}" ;;
+	esac
+
+	cnt=0
+	for nsname in $namespaces; do
+		[ -n "$nsname" ] || continue
+		offset=0
+		while :; do
+			repos="$(tccli_run tcr DescribeRepositories --RegistryId "$registry_id" --NamespaceName "$nsname" --Limit 100 --Offset "$offset" 2>/dev/null |
+				jq -r '.RepositoryList[]? | .Name' 2>/dev/null || true)"
+			[ -z "${repos//[$'\n\t ']/}" ] && break
+			cnt=$((cnt + $(echo "$repos" | grep -c .)))
+			[ "$(echo "$repos" | grep -c .)" -lt 100 ] && break
+			offset=$((offset + 100))
+			[ "$offset" -ge 1000 ] && break
+		done
+	done
+	echo "$cnt"
+}
+
+dependency_blocker_report() {
+	local blockers=0 k8s_count clb_ips tcr_repos cfs_present nat_present subnet_count
+
+	echo ""
+	echo -e "${YELLOW}Dependency blocker report (pre-destroy diagnostics):${NC}"
+
+	k8s_count="$(_state_count_prefix kubernetes_)"
+	clb_ips="$(for _out in tke_cubemaster_clb_ip tke_cube_api_clb_ip tke_cube_proxy_clb_ip tke_cube_webui_clb_ip; do
+		tf_output_value "$_out"
+	done | awk 'NF { printf "%s%s", sep, $0; sep=", " }')"
+	if [ "${k8s_count:-0}" -gt 0 ]; then
+		blockers=$((blockers + 1))
+		echo -e "  ${YELLOW}• CLB / Kubernetes addons:${NC} ${k8s_count} kubernetes_* resource(s) still in state${clb_ips:+; CLB IPs: ${clb_ips}}."
+		echo -e "    ${CYAN}Action:${NC} Phase 1 deletes addons before the TKE cluster; if it fails, verify the jumpserver tunnel/kubeconfig and remaining pods in namespace cubesandbox."
+	else
+		echo -e "  ${GREEN}✓ CLB / Kubernetes addons: no kubernetes_* resources in state.${NC}"
+	fi
+
+	if in_state tencentcloud_kubernetes_node_pool.tke || [ -n "${TKE_NODE_CVMS// /}" ]; then
+		blockers=$((blockers + 1))
+		echo -e "  ${YELLOW}• TKE worker CVM:${NC} ${TKE_NODE_CVMS:-node pool still tracked; CVM ids not resolved}."
+		echo -e "    ${CYAN}Action:${NC} Phase 1 destroys the node pool and terminates detected worker CVMs before network cleanup."
+	else
+		echo -e "  ${GREEN}✓ TKE worker CVM: no node pool / worker CVM blocker detected.${NC}"
+	fi
+
+	cfs_present=0
+	for _res in \
+		tencentcloud_cfs_file_system.cubemaster_data \
+		tencentcloud_cfs_access_rule.cubemaster_data \
+		tencentcloud_cfs_access_group.cubemaster_data; do
+		in_state "$_res" && cfs_present=1
+	done
+	if [ "$cfs_present" -eq 1 ]; then
+		blockers=$((blockers + 1))
+		echo -e "  ${YELLOW}• CFS:${NC} cubemaster_data CFS resources still exist; the CFS mount target ENI can block subnet deletion."
+		echo -e "    ${CYAN}Action:${NC} Phase 4.5 destroys CFS before the NAT/subnet phase."
+	else
+		echo -e "  ${GREEN}✓ CFS: no CFS resources in state.${NC}"
+	fi
+
+	tcr_repos="$(_tcr_repo_count_for_report "$TCR_INSTANCE_ID" "$TCR_NAMESPACE")"
+	if in_state tencentcloud_tcr_instance.cluster || in_state tencentcloud_tcr_instance.demo || [ -n "$TCR_INSTANCE_ID" ]; then
+		blockers=$((blockers + 1))
+		if [ "$tcr_repos" = "unknown" ]; then
+			echo -e "  ${YELLOW}• TCR repositories:${NC} TCR ${TCR_INSTANCE_ID:-present} namespace=${TCR_NAMESPACE}; repository count could not be confirmed."
+			echo -e "    ${CYAN}Action:${NC} Keep the jumpserver or local tccli available so Phase 3 can delete image repositories before namespace/instance deletion."
+		else
+			echo -e "  ${YELLOW}• TCR repositories:${NC} ${tcr_repos} repository item(s) detected in TCR ${TCR_INSTANCE_ID:-present}; non-empty repos block namespace deletion."
+			echo -e "    ${CYAN}Action:${NC} Phase 3 deletes repositories/namespaces via tccli before pruning TCR state."
+		fi
+	else
+		echo -e "  ${GREEN}✓ TCR repositories: no TCR instance in state/output.${NC}"
+	fi
+
+	nat_present=0
+	for _res in tencentcloud_route_table_entry.nat tencentcloud_nat_gateway.cluster tencentcloud_eip.nat; do
+		in_state "$_res" && nat_present=1
+	done
+	subnet_count="$(_state_count_prefix tencentcloud_subnet.)"
+	if [ "$nat_present" -eq 1 ] || [ "${subnet_count:-0}" -gt 0 ]; then
+		blockers=$((blockers + 1))
+		echo -e "  ${YELLOW}• NAT / subnet:${NC} NAT=${NAT_GATEWAY_ID:-present/unknown}, subnet resources in state=${subnet_count}."
+		echo -e "    ${CYAN}Action:${NC} Earlier phases must clear CLB/CFS/CVM ENIs first; Phase 5 then deletes NAT, routes, EIP and subnets."
+	else
+		echo -e "  ${GREEN}✓ NAT / subnet: no NAT/subnet resources in state.${NC}"
+	fi
+
+	if [ -n "$VPC_ID" ]; then
+		echo -e "  ${CYAN}VPC scope:${NC} ${VPC_ID}. If subnet/VPC deletion still fails, check remaining ENI/CVM/CLB/NAT/CFS resources in this VPC."
+	fi
+	if [ "$blockers" -eq 0 ]; then
+		echo -e "  ${GREEN}No obvious dependency blockers detected before destroy.${NC}"
+	else
+		echo -e "  ${YELLOW}${blockers} potential blocker group(s) detected; destroy.sh will now remove them in dependency order.${NC}"
+	fi
+}
+
 # Capture the instance IDs / jumpserver access BEFORE anything is destroyed, so the
 # recycle-bin cleanup can still address the MySQL/Redis instances afterwards.
 echo ""
@@ -794,16 +1111,29 @@ REGION="${TENCENTCLOUD_REGION:-${TF_VAR_region:-ap-guangzhou}}"
 # build_images.sh (NOT tracked by Terraform) can be deleted before the TCR
 # namespace/instance are torn down — otherwise the namespace delete is rejected
 # with "the project contains repositories, can not be deleted".
-TCR_INSTANCE_ID="$(terraform output -raw tcr_id 2>/dev/null || echo '')"
-TCR_NAMESPACE="$(terraform output -raw tcr_namespace 2>/dev/null || echo '')"
+# Terraform 1.x exits non-zero for `terraform output -raw` when the output exists
+# but is an empty string. With `set -e`, doing that inside command substitution can
+# abort destroy.sh before Phase 1, leaving all resources untouched. Read outputs via
+# JSON and tolerate empty/missing values instead.
+tf_output_value() {
+	local name="$1"
+	terraform output -json "$name" 2>/dev/null | jq -r '.value // ""' 2>/dev/null || true
+}
+
+TCR_INSTANCE_ID="$(tf_output_value tcr_id)"
+TCR_NAMESPACE="$(tf_output_value tcr_namespace)"
 if [ -z "$TCR_INSTANCE_ID" ]; then
-	TCR_INSTANCE_ID="$(terraform state show tencentcloud_tcr_instance.demo 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
+	TCR_INSTANCE_ID="$(state_id_any \
+		'tencentcloud_tcr_instance.cluster[0]' \
+		tencentcloud_tcr_instance.cluster \
+		'tencentcloud_tcr_instance.demo[0]' \
+		tencentcloud_tcr_instance.demo 2>/dev/null || true)"
 fi
-[ -z "$TCR_NAMESPACE" ] && TCR_NAMESPACE="cubesandbox-demo"
+[ -z "$TCR_NAMESPACE" ] && TCR_NAMESPACE="cubesandbox-cluster"
 
 # Capture the TKE cluster's worker-node CVM IDs while the cluster still exists, so
 # the orphaned node-pool workers (kept on node-pool delete) can be terminated later.
-TKE_CLUSTER_ID="$(terraform output -raw tke_cluster_id 2>/dev/null || echo '')"
+TKE_CLUSTER_ID="$(tf_output_value tke_cluster_id)"
 TKE_NODE_CVMS=""
 if [ -n "$TKE_CLUSTER_ID" ]; then
 	echo -e "  ${CYAN}Querying TKE worker CVMs via tccli (installing tccli on the jumpserver if needed; may take ~1 min)...${NC}"
@@ -817,20 +1147,20 @@ echo -e "  ${CYAN}Resolving VPC id from terraform state...${NC}"
 # the VPC can be terminated before the security group is deleted, while keeping the
 # jumpserver until the very end.
 _TF_JSON="$(terraform show -json 2>/dev/null || true)"
-VPC_ID="$(echo "$_TF_JSON" | jq -r '.values.root_module.resources[]? | select(.address=="tencentcloud_vpc.demo") | .values.id' 2>/dev/null | head -n1 || true)"
+VPC_ID="$(echo "$_TF_JSON" | jq -r '.values.root_module.resources[]? | select(.address=="tencentcloud_vpc.cluster") | .values.id' 2>/dev/null | head -n1 || true)"
 JS_INSTANCE_ID="$(echo "$_TF_JSON" | jq -r '.values.root_module.resources[]? | select(.address=="tencentcloud_instance.jumpserver") | .values.id' 2>/dev/null | head -n1 || true)"
-NAT_GATEWAY_ID="$(echo "$_TF_JSON" | jq -r '.values.root_module.resources[]? | select(.address=="tencentcloud_nat_gateway.demo") | .values.id' 2>/dev/null | head -n1 || true)"
+NAT_GATEWAY_ID="$(echo "$_TF_JSON" | jq -r '.values.root_module.resources[]? | select(.address=="tencentcloud_nat_gateway.cluster") | .values.id' 2>/dev/null | head -n1 || true)"
 unset _TF_JSON
 # Fallbacks: parse the resource id straight from the state if the JSON path above
 # did not resolve it (so the VPC CVM sweep is never silently skipped).
 if [ -z "$VPC_ID" ]; then
-	VPC_ID="$(terraform state show tencentcloud_vpc.demo 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
+	VPC_ID="$(terraform state show tencentcloud_vpc.cluster 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
 fi
 if [ -z "$JS_INSTANCE_ID" ]; then
 	JS_INSTANCE_ID="$(terraform state show tencentcloud_instance.jumpserver 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
 fi
 if [ -z "$NAT_GATEWAY_ID" ]; then
-	NAT_GATEWAY_ID="$(terraform state show tencentcloud_nat_gateway.demo 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
+	NAT_GATEWAY_ID="$(terraform state show tencentcloud_nat_gateway.cluster 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
 fi
 
 # Teardown status: which resources are still tracked in state (→ will be
@@ -841,10 +1171,15 @@ echo -e "  ${CYAN}Teardown status (present → will be destroyed; absent → alr
 _td_status "MySQL      " tencentcloud_mysql_instance.mysql "$MYSQL_ID"
 _td_status "Redis      " tencentcloud_redis_instance.redis "$REDIS_ID"
 _td_status "Compute    " tencentcloud_instance.compute ""
-_td_status "TCR        " tencentcloud_tcr_instance.demo "$TCR_INSTANCE_ID" "namespace=${TCR_NAMESPACE}"
-_td_status "NAT gateway" tencentcloud_nat_gateway.demo "$NAT_GATEWAY_ID"
-_td_status "VPC        " tencentcloud_vpc.demo "$VPC_ID"
+if in_state tencentcloud_tcr_instance.cluster || in_state tencentcloud_tcr_instance.demo; then
+	echo -e "    ${CYAN}TCR        : ${TCR_INSTANCE_ID:-present} namespace=${TCR_NAMESPACE} → will be destroyed${NC}"
+else
+	echo -e "    ${GREEN}TCR        : already destroyed (absent)${NC}"
+fi
+_td_status "NAT gateway" tencentcloud_nat_gateway.cluster "$NAT_GATEWAY_ID"
+_td_status "VPC        " tencentcloud_vpc.cluster "$VPC_ID"
 _td_status "jumpserver " tencentcloud_instance.jumpserver "${JS_INSTANCE_ID:-$JS_IP}" "(destroyed last — kept for cleanup)"
+dependency_blocker_report
 
 # ============================================================
 # Teardown runs (mostly) in the REVERSE order of create.sh. create.sh provisions:
@@ -882,6 +1217,29 @@ remind_manual_cleanup() {
 	echo ""
 }
 
+used_ip_blocker_hint() {
+	echo -e "  ${YELLOW}Detected ResourceInUse/UsedIp while deleting the subnet/VPC.${NC}"
+	echo -e "  ${YELLOW}This means at least one private IP in the VPC/subnet is still attached to a cloud resource.${NC}"
+	echo -e "  ${YELLOW}It is usually NOT caused by MySQL/Redis being in the recycle bin; check these VPC dependencies first:${NC}"
+	echo -e "    ${CYAN}• ENI / private IPs : https://console.cloud.tencent.com/vpc/eni${NC}"
+	echo -e "    ${CYAN}• CLB instances     : https://console.cloud.tencent.com/clb/instance${NC}"
+	echo -e "    ${CYAN}• CVM / TKE workers : https://console.cloud.tencent.com/cvm/instance${NC}"
+	echo -e "    ${CYAN}• TKE clusters      : https://console.cloud.tencent.com/tke2/cluster${NC}"
+	echo -e "    ${CYAN}• NAT gateways      : https://console.cloud.tencent.com/vpc/nat${NC}"
+	echo -e "    ${CYAN}• CFS file systems  : https://console.cloud.tencent.com/cfs${NC}"
+	echo -e "    ${CYAN}• TCR VPC attach    : https://console.cloud.tencent.com/tcr${NC}"
+	if [ -n "${VPC_ID:-}" ]; then
+		echo -e "  ${CYAN}VPC scope:${NC} ${VPC_ID}"
+		echo -e "  ${YELLOW}Optional tccli checks:${NC}"
+		echo -e "    ${CYAN}tccli vpc DescribeNetworkInterfaces --Filters '[{\"Name\":\"vpc-id\",\"Values\":[\"${VPC_ID}\"]}]' --region ${REGION}${NC}"
+		echo -e "    ${CYAN}tccli clb DescribeLoadBalancers --Filters '[{\"Name\":\"vpc-id\",\"Values\":[\"${VPC_ID}\"]}]' --region ${REGION}${NC}"
+		echo -e "    ${CYAN}tccli cvm DescribeInstances --Filters '[{\"Name\":\"vpc-id\",\"Values\":[\"${VPC_ID}\"]}]' --region ${REGION}${NC}"
+	else
+		echo -e "  ${YELLOW}VPC id was not resolved from Terraform state; inspect the VPC named cubesandbox-terraform-vpc in the console.${NC}"
+	fi
+	NEEDS_MANUAL_CLEANUP=1
+}
+
 # destroy_fail — print a clear stop message and abort (fail-fast). The auxiliary
 #   best-effort cleanups (recycle bin / orphan CVMs) stay non-fatal; only the
 #   actual terraform destroy of each phase triggers this.
@@ -911,7 +1269,24 @@ if [ "${#k8s_targets[@]}" -gt 0 ]; then
 		# The apiserver is intranet-only: open the jumpserver tunnel and localize
 		# the kubeconfig so the local kubernetes provider can reach the cluster to
 		# delete the addons (the jumpserver is still alive at this point).
-		_open_apiserver_tunnel || echo -e "  ${YELLOW}⚠ Could not open the intranet API Server tunnel; addon destroy may fail${NC}"
+		if ! _open_apiserver_tunnel; then
+			echo -e "  ${RED}✗ Could not open the intranet API Server tunnel; Kubernetes addons cannot be deleted safely.${NC}"
+			echo -e "  ${YELLOW}  Fix jumpserver SSH(443) / kubeconfig access and re-run ./destroy.sh.${NC}"
+			echo -e "  ${YELLOW}  If you have already deleted the Kubernetes addons and CLBs manually, set${NC}"
+			echo -e "  ${YELLOW}  TENCENTCLOUD_FORCE_PRUNE_K8S_STATE=1 to prune kubernetes_* state and continue.${NC}"
+			if [ "${TENCENTCLOUD_FORCE_PRUNE_K8S_STATE:-0}" = "1" ]; then
+				echo -e "  ${YELLOW}⚠ FORCE_PRUNE_K8S_STATE enabled: pruning kubernetes_* resources from state without API deletion.${NC}"
+				while IFS= read -r _addr; do
+					[ -n "$_addr" ] || continue
+					echo -e "  ${CYAN}terraform state rm ${_addr}${NC}"
+					terraform state rm "$_addr" >/dev/null 2>&1 || true
+				done < <(terraform state list 2>/dev/null | grep -E '^kubernetes_' || true)
+				NEEDS_MANUAL_CLEANUP=1
+				k8s_targets=()
+			else
+				destroy_fail "TKE addon API tunnel setup"
+			fi
+		fi
 
 		# Keep .kube/config alive until AFTER the cluster is gone. The kubeconfig
 		# is written by a local_file.tke_kubeconfig resource that depends_on every
@@ -922,7 +1297,7 @@ if [ "${#k8s_targets[@]}" -gt 0 ]; then
 		# back to http://localhost ("connection refused"). Detach it from state so
 		# the targeted destroy leaves it (and the on-disk file) alone; the file is
 		# managed by this script and removed at the very end of the teardown.
-		if in_state 'local_file.tke_kubeconfig'; then
+		if [ "${#k8s_targets[@]}" -gt 0 ] && in_state 'local_file.tke_kubeconfig'; then
 			echo -e "  ${CYAN}Detaching local_file.tke_kubeconfig from state so .kube/config survives the addon/cluster teardown...${NC}"
 			terraform state rm 'local_file.tke_kubeconfig[0]' >/dev/null 2>&1 ||
 				terraform state rm 'local_file.tke_kubeconfig' >/dev/null 2>&1 || true
@@ -936,7 +1311,7 @@ if [ "${#k8s_targets[@]}" -gt 0 ]; then
 		# drain the leftover pods, then destroy the namespace.
 		ns_targets=()
 		nonns_targets=()
-		for _t in "${k8s_targets[@]}"; do
+		for _t in "${k8s_targets[@]+"${k8s_targets[@]}"}"; do
 			case "$_t" in
 			*kubernetes_namespace.*) ns_targets+=("$_t") ;;
 			*) nonns_targets+=("$_t") ;;
@@ -945,13 +1320,15 @@ if [ "${#k8s_targets[@]}" -gt 0 ]; then
 
 		if [ "${#nonns_targets[@]}" -gt 0 ]; then
 			echo -e "  ${CYAN}Removing Kubernetes addon resources (${#nonns_targets[@]})...${NC}"
-			run_destroy "${nonns_targets[@]}" || destroy_fail "TKE addons destroy"
+			_ensure_apiserver_tunnel_ready || destroy_fail "TKE addon API tunnel setup"
+			run_destroy "${nonns_targets[@]+"${nonns_targets[@]}"}" || destroy_fail "TKE addons destroy"
 		fi
 
 		if [ "${#ns_targets[@]}" -gt 0 ]; then
 			_drain_namespace cubesandbox
 			echo -e "  ${CYAN}Removing the cubesandbox namespace...${NC}"
-			run_destroy "${ns_targets[@]}" || destroy_fail "TKE namespace destroy"
+			_ensure_apiserver_tunnel_ready || destroy_fail "TKE addon API tunnel setup"
+			run_destroy "${ns_targets[@]+"${ns_targets[@]}"}" || destroy_fail "TKE namespace destroy"
 		fi
 	else
 		# Cluster already gone → API unreachable; the orphaned k8s resources can
@@ -1000,7 +1377,7 @@ phase_db_targets=()
 in_state 'tencentcloud_mysql_instance.mysql' && phase_db_targets+=(-target=tencentcloud_mysql_instance.mysql)
 in_state 'tencentcloud_redis_instance.redis' && phase_db_targets+=(-target=tencentcloud_redis_instance.redis)
 if [ "${#phase_db_targets[@]}" -gt 0 ]; then
-	run_destroy "${phase_db_targets[@]}" || destroy_fail "MySQL/Redis destroy"
+	run_destroy "${phase_db_targets[@]+"${phase_db_targets[@]}"}" || destroy_fail "MySQL/Redis destroy"
 else
 	echo -e "  ${CYAN}No MySQL/Redis in state; skipping.${NC}"
 fi
@@ -1010,6 +1387,21 @@ clear_recycle_bin "$MYSQL_ID" "$REDIS_ID" || {
 	echo -e "${YELLOW}⚠ Recycle-bin cleanup had issues; continuing.${NC}"
 	NEEDS_MANUAL_CLEANUP=1
 }
+
+# Fully tear down TCR before targeted CVM destroys. When this bundle has switched
+# between singleton and count-gated TCR resources, Terraform may require TCR
+# moved targets even while destroying unrelated CVMs. Deleting TCR through
+# terraform can fail if repositories still exist, so perform the ordered tccli
+# cleanup first while the jumpserver is still alive, then prune the state.
+if in_state 'tencentcloud_tcr_instance.cluster'; then
+	echo -e "  ${CYAN}Tearing down TCR before CVM teardown (images → namespace → instance + backend bucket)...${NC}"
+	if destroy_tcr "$TCR_INSTANCE_ID" "$TCR_NAMESPACE"; then
+		echo -e "  ${CYAN}Pruning TCR resources from terraform state (deleted out-of-band)...${NC}"
+		tcr_state_prune
+	else
+		echo -e "${YELLOW}⚠ Could not tear TCR down via tccli now; Phase 4 will retry before any terraform TCR fallback.${NC}"
+	fi
+fi
 
 # ============================================================
 # Phase 3/6 — reverse of create step 3: compute nodes, then the jump-server LAST.
@@ -1034,23 +1426,6 @@ ensure_recycle_bin_cleared "$MYSQL_ID" "$REDIS_ID" || {
 echo -e "  ${CYAN}Terminating any remaining CVMs in the VPC (except the jumpserver)...${NC}"
 terminate_vpc_cvms "$VPC_ID" "$JS_INSTANCE_ID" || echo -e "${YELLOW}⚠ VPC CVM cleanup had issues; continuing.${NC}"
 
-# Fully tear down TCR now (images → namespace → instance + backend COS bucket),
-# while the jumpserver (which runs tccli) is still alive. The pushed image
-# repositories are not in Terraform state and otherwise block the namespace
-# delete, and terraform cannot delete the backend bucket of the live instance —
-# so do it here via tccli for the same reason as the recycle-bin cleanup above,
-# then drop the TCR resources from state so the later phases don't retry them.
-# Phase 4 falls back to a terraform-based destroy if no tccli runner was found.
-if in_state 'tencentcloud_tcr_instance.demo'; then
-	echo -e "  ${CYAN}Tearing down TCR (images → namespace → instance + backend bucket)...${NC}"
-	if destroy_tcr "$TCR_INSTANCE_ID" "$TCR_NAMESPACE"; then
-		echo -e "  ${CYAN}Pruning TCR resources from terraform state (deleted out-of-band)...${NC}"
-		tcr_state_prune
-	else
-		echo -e "${YELLOW}⚠ Could not tear TCR down via tccli now; Phase 4 will retry.${NC}"
-	fi
-fi
-
 echo ""
 echo -e "${CYAN}━━━ Phase 3/6: Destroy the jump-server ━━━${NC}"
 if in_state 'tencentcloud_instance.jumpserver'; then
@@ -1071,7 +1446,7 @@ fi
 echo ""
 echo -e "${CYAN}━━━ Phase 4/6: Destroy TCR ━━━${NC}"
 # Retry the full ordered tccli teardown if the instance is still in state.
-if in_state 'tencentcloud_tcr_instance.demo'; then
+if in_state 'tencentcloud_tcr_instance.cluster'; then
 	echo -e "  ${CYAN}TCR status: ${TCR_INSTANCE_ID:-present} (namespace=${TCR_NAMESPACE}) still present; retrying the ordered teardown (images → namespace → instance + bucket)...${NC}"
 	if destroy_tcr "$TCR_INSTANCE_ID" "$TCR_NAMESPACE"; then
 		echo -e "  ${CYAN}Pruning TCR resources from terraform state (deleted out-of-band)...${NC}"
@@ -1086,14 +1461,14 @@ fi
 phase_tcr_targets=()
 for _res in \
 	null_resource.tcr_token_deploy \
-	tencentcloud_tcr_token.demo \
-	tencentcloud_tcr_vpc_attachment.demo \
-	tencentcloud_tcr_namespace.demo \
-	tencentcloud_tcr_instance.demo; do
+	tencentcloud_tcr_token.cluster \
+	tencentcloud_tcr_vpc_attachment.cluster \
+	tencentcloud_tcr_namespace.cluster \
+	tencentcloud_tcr_instance.cluster; do
 	in_state "$_res" && phase_tcr_targets+=(-target="$_res")
 done
 if [ "${#phase_tcr_targets[@]}" -gt 0 ]; then
-	run_destroy "${phase_tcr_targets[@]}" || destroy_fail "TCR destroy"
+	run_destroy "${phase_tcr_targets[@]+"${phase_tcr_targets[@]}"}" || destroy_fail "TCR destroy"
 else
 	echo -e "  ${CYAN}No TCR resources in state; skipping.${NC}"
 fi
@@ -1101,7 +1476,7 @@ fi
 # ============================================================
 # Phase 4.5/6 — CFS shared storage (cube-master /data/CubeMaster/storage).
 #   Must be torn down BEFORE the subnet it lives in: the CFS NFS mount target is
-#   an ENI inside tencentcloud_subnet.demo, so destroying the subnet first would
+#   an ENI inside tencentcloud_subnet.cluster, so destroying the subnet first would
 #   fail with "subnet in use". The file system is destroyed before its access
 #   rule/group (dependency order within the same targeted run).
 # ============================================================
@@ -1115,39 +1490,47 @@ for _res in \
 	in_state "$_res" && phase_cfs_targets+=(-target="$_res")
 done
 if [ "${#phase_cfs_targets[@]}" -gt 0 ]; then
-	run_destroy "${phase_cfs_targets[@]}" || destroy_fail "CFS destroy"
+	run_destroy "${phase_cfs_targets[@]+"${phase_cfs_targets[@]}"}" || destroy_fail "CFS destroy"
 else
 	echo -e "  ${CYAN}No CFS resources in state; skipping.${NC}"
 fi
 
 # ============================================================
 # Phase 5/6 — reverse of create step 1 (part 1): NAT gateway + subnet.
-#   The route entry / NAT gateway / its EIP / the (zone-bound) subnet are torn
-#   down before the VPC + security group + key pair in the final sweep.
+#   Delete NAT dependencies first, then subnets in a second targeted destroy.
+#   Keeping NAT and subnet in separate terraform runs avoids relying on targeted
+#   plan ordering when the subnet is still referenced by NAT/EIP route resources.
 # ============================================================
 echo ""
 echo -e "${CYAN}━━━ Phase 5/6: Destroy NAT gateway + subnet ━━━${NC}"
-if in_state 'tencentcloud_nat_gateway.demo'; then
+if in_state 'tencentcloud_nat_gateway.cluster'; then
 	echo -e "  ${CYAN}NAT gateway status: ${NAT_GATEWAY_ID:-present} → destroying (also releases its EIP + the NAT route)${NC}"
 else
 	echo -e "  ${GREEN}NAT gateway status: already destroyed (absent)${NC}"
 fi
-phase_net_targets=()
+phase_nat_targets=()
 for _res in \
 	tencentcloud_route_table_entry.nat \
-	tencentcloud_nat_gateway.demo \
-	tencentcloud_eip.nat \
-	tencentcloud_subnet.demo; do
-	in_state "$_res" && phase_net_targets+=(-target="$_res")
+	tencentcloud_nat_gateway.cluster \
+	tencentcloud_eip.nat; do
+	in_state "$_res" && phase_nat_targets+=(-target="$_res")
 done
+if [ "${#phase_nat_targets[@]}" -gt 0 ]; then
+	run_destroy "${phase_nat_targets[@]+"${phase_nat_targets[@]}"}" || destroy_fail "NAT gateway/EIP destroy"
+else
+	echo -e "  ${CYAN}No NAT gateway/EIP resources in state; skipping.${NC}"
+fi
+
+phase_subnet_targets=()
+in_state tencentcloud_subnet.cluster && phase_subnet_targets+=(-target=tencentcloud_subnet.cluster)
 while IFS= read -r _cvm_subnet; do
 	[ -n "$_cvm_subnet" ] || continue
-	phase_net_targets+=(-target="$_cvm_subnet")
+	phase_subnet_targets+=(-target="$_cvm_subnet")
 done < <(terraform state list 2>/dev/null | grep -E '^tencentcloud_subnet\.cvm\[' || true)
-if [ "${#phase_net_targets[@]}" -gt 0 ]; then
-	run_destroy "${phase_net_targets[@]}" || destroy_fail "NAT gateway/subnet destroy"
+if [ "${#phase_subnet_targets[@]}" -gt 0 ]; then
+	run_destroy "${phase_subnet_targets[@]+"${phase_subnet_targets[@]}"}" || destroy_fail "subnet destroy"
 else
-	echo -e "  ${CYAN}No NAT gateway/subnet in state; skipping.${NC}"
+	echo -e "  ${CYAN}No subnet resources in state; skipping.${NC}"
 fi
 
 # ============================================================
@@ -1156,7 +1539,7 @@ fi
 # ============================================================
 echo ""
 echo -e "${CYAN}━━━ Phase 6/6: Destroy VPC / security group / key pair (final sweep) ━━━${NC}"
-run_destroy "${EXTRA_ARGS[@]}" || destroy_fail "Final network destroy"
+run_destroy "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" || destroy_fail "Final network destroy"
 
 # Remove the local kubeconfig artifact. It was deliberately kept on disk through
 # the teardown (and detached from terraform state in Phase 1) so the kubernetes

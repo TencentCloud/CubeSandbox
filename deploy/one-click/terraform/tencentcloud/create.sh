@@ -152,7 +152,20 @@ _tf_keep_stderr() {
 #     - /usr/local/bin when writable (root), otherwise ${SCRIPT_DIR}/.bin which is
 #       prepended to PATH for the rest of this run.
 # ---------------------------------------------------------------
+# _release_platform — OS slug used by HashiCorp / jq release artifacts (linux|darwin).
+_release_platform() {
+	case "$(uname -s)" in
+		Linux) echo linux ;;
+		Darwin) echo darwin ;;
+		*)
+			echo -e "${RED}✗ Unsupported OS for auto-install: $(uname -s); install terraform/jq manually${NC}" >&2
+			exit 1
+			;;
+	esac
+}
+
 TERRAFORM_VERSION="${TERRAFORM_VERSION:-1.15.6}"
+TERRAFORM_PARALLELISM="${TERRAFORM_PARALLELISM:-15}"
 ensure_terraform() {
 	if command -v terraform >/dev/null 2>&1; then
 		return 0
@@ -161,7 +174,8 @@ ensure_terraform() {
 	echo -e "${YELLOW}terraform not found, installing v${TERRAFORM_VERSION}...${NC}"
 
 	# Map uname arch to the naming used by HashiCorp release artifacts
-	local arch
+	local arch os
+	os="$(_release_platform)"
 	case "$(uname -m)" in
 		x86_64 | amd64) arch="amd64" ;;
 		aarch64 | arm64) arch="arm64" ;;
@@ -181,7 +195,7 @@ ensure_terraform() {
 		export PATH="${bin_dir}:${PATH}"
 	fi
 
-	local url="https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${arch}.zip"
+	local url="https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_${os}_${arch}.zip"
 	local tmp_zip
 	tmp_zip="$(mktemp -t terraform.XXXXXX.zip)"
 
@@ -238,9 +252,10 @@ ensure_jq() {
 
 	# 1) Prefer the system package manager (works offline against cloud mirrors).
 	local pm
-	for pm in dnf yum apt-get zypper apk; do
+	for pm in brew dnf yum apt-get zypper apk; do
 		command -v "$pm" >/dev/null 2>&1 || continue
 		case "$pm" in
+			brew) "$pm" install jq >/dev/null 2>&1 || true ;;
 			apt-get) DEBIAN_FRONTEND=noninteractive "$pm" install -y jq >/dev/null 2>&1 || true ;;
 			apk) "$pm" add --no-cache jq >/dev/null 2>&1 || true ;;
 			*) "$pm" install -y jq >/dev/null 2>&1 || true ;;
@@ -253,7 +268,12 @@ ensure_jq() {
 	done
 
 	# 2) Fall back to a static jq binary from GitHub releases.
-	local jq_arch
+	local jq_arch os jq_os
+	os="$(_release_platform)"
+	case "$os" in
+		linux) jq_os="linux" ;;
+		darwin) jq_os="macos" ;;
+	esac
 	case "$(uname -m)" in
 		x86_64 | amd64) jq_arch="amd64" ;;
 		aarch64 | arm64) jq_arch="arm64" ;;
@@ -272,7 +292,7 @@ ensure_jq() {
 		export PATH="${bin_dir}:${PATH}"
 	fi
 
-	local url="https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-linux-${jq_arch}"
+	local url="https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${jq_os}-${jq_arch}"
 	if command -v curl >/dev/null 2>&1; then
 		curl -fsSL -o "${bin_dir}/jq" "${url}" || true
 	elif command -v wget >/dev/null 2>&1; then
@@ -711,14 +731,17 @@ prepare_cubeproxy_certs() {
 # Environment variable → Terraform variable mapping
 # ---------------------------------------------------------------
 setup_env() {
+	TENCENTCLOUD_REGION="${TENCENTCLOUD_REGION:-ap-guangzhou}"
+	export TF_VAR_region="$TENCENTCLOUD_REGION"
 	[ -n "${TENCENTCLOUD_AVAILABILITY_ZONE:-}" ] && export TF_VAR_availability_zone="$TENCENTCLOUD_AVAILABILITY_ZONE"
 	[ -n "${TENCENTCLOUD_JUMPSERVER_AVAILABILITY_ZONE:-}" ] && export TF_VAR_jumpserver_availability_zone="$TENCENTCLOUD_JUMPSERVER_AVAILABILITY_ZONE"
 	[ -n "${TENCENTCLOUD_COMPUTE_AVAILABILITY_ZONE:-}" ] && export TF_VAR_compute_availability_zone="$TENCENTCLOUD_COMPUTE_AVAILABILITY_ZONE"
 	[ -n "${TENCENTCLOUD_TKE_WORKER_AVAILABILITY_ZONE:-}" ] && export TF_VAR_tke_worker_availability_zone="$TENCENTCLOUD_TKE_WORKER_AVAILABILITY_ZONE"
-	[ -n "${TENCENTCLOUD_IMAGE_NAME:-}" ] && export TF_VAR_image_name_regex="$TENCENTCLOUD_IMAGE_NAME"
-	[ -n "${TENCENTCLOUD_JUMPSERVER_INSTANCE_TYPE:-}" ] && export TF_VAR_jumpserver_instance_type="$TENCENTCLOUD_JUMPSERVER_INSTANCE_TYPE"
-	[ -n "${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-}" ] && export TF_VAR_compute_instance_type="$TENCENTCLOUD_COMPUTE_INSTANCE_TYPE"
-	[ -n "${TENCENTCLOUD_REGION:-}" ] && export TF_VAR_region="$TENCENTCLOUD_REGION"
+	export TF_VAR_image_name_regex="${TENCENTCLOUD_IMAGE_NAME:-OpenCloudOS Server 9}"
+	export TF_VAR_jumpserver_instance_type="${TENCENTCLOUD_JUMPSERVER_INSTANCE_TYPE:-SA9.MEDIUM4}"
+	export TF_VAR_compute_instance_type="${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-SA9.MEDIUM8}"
+	[ -n "${TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE:-}" ] && export TF_VAR_compute_data_disk_size="$TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE"
+	export TF_VAR_tke_worker_instance_type="${TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE:-SA9.LARGE8}"
 	[ -n "${TENCENTCLOUD_VPC_NAME:-}" ] && export TF_VAR_vpc_name="$TENCENTCLOUD_VPC_NAME"
 
 	SSH_PUB_KEY="${TENCENTCLOUD_SSH_PUBLIC_KEY_PATH:-$SCRIPT_DIR/.ssh/id_rsa.pub}"
@@ -747,24 +770,33 @@ setup_env() {
 	select_bundle
 	REINSTALL="${TENCENTCLOUD_REINSTALL:-0}"
 	RESET_DB="${TENCENTCLOUD_RESET_DB:-0}"
-	# The addon Terraform composes the four component image refs from
-	# image_registry / image_namespace / image_tag (see local.*_image in
-	# tke-addons.tf), so the only image knob this deployer honors is the shared
-	# tag. Per-component image overrides are intentionally NOT supported here: the
-	# registry/namespace default to the TCR created by this run, which create.sh
-	# builds and pushes the four images into before deploying the addons.
-	CUBE_IMAGE_TAG="${TENCENTCLOUD_CUBE_IMAGE_TAG:-latest}"
+	# Default mode uses public pinned images and skips TCR build/push. Set
+	# TENCENTCLOUD_USE_TCR=true to create/use a private TCR and build images.
+	TENCENTCLOUD_USE_TCR="${TENCENTCLOUD_USE_TCR:-false}"
+	TENCENTCLOUD_USE_CFS="${TENCENTCLOUD_USE_CFS:-false}"
+	export TF_VAR_use_tcr="$TENCENTCLOUD_USE_TCR"
+	export TF_VAR_use_cfs="$TENCENTCLOUD_USE_CFS"
+	CUBE_IMAGE_TAG="${TENCENTCLOUD_CUBE_IMAGE_TAG:-cubesandbox002-20260630}"
 	export TF_VAR_image_tag="$CUBE_IMAGE_TAG"
+	export TF_VAR_image_registry="${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-image.tencentcloudcr.com}"
+	export TF_VAR_image_namespace="${TENCENTCLOUD_IMAGE_NAMESPACE:-demo}"
+	export TF_VAR_cubemaster_image="${TENCENTCLOUD_CUBEMASTER_IMAGE:-cube-sandbox-image.tencentcloudcr.com/demo/cubemaster:v0.4.0-591b5b7-package-20260701}"
+	export TF_VAR_cubeapi_image="${TENCENTCLOUD_CUBEAPI_IMAGE:-cube-sandbox-image.tencentcloudcr.com/demo/cubeapi@sha256:bcff401e2f2cef8304b242f8ee3d81f08ca48303c4cbf323692c4c4d331d91ab}"
+	export TF_VAR_cubeproxy_image="${TENCENTCLOUD_CUBEPROXY_IMAGE:-cube-sandbox-image.tencentcloudcr.com/demo/cubeproxy@sha256:dfe82ee66d29a9556197a5332481869be738e9598e29e315185cd5b27c5fc096}"
+	export TF_VAR_webui_image="${TENCENTCLOUD_WEBUI_IMAGE:-cube-sandbox-image.tencentcloudcr.com/demo/webui@sha256:87ec878d252154b1162afa541494b3298ae468caa9b4279d4f109c3f8d79c351}"
 	SSH_PORT="${TENCENTCLOUD_SSH_PORT:-22}"
 	[ -n "${TENCENTCLOUD_MYSQL_PASSWORD:-}" ] && export TF_VAR_mysql_root_password="$TENCENTCLOUD_MYSQL_PASSWORD"
 	[ -n "${TENCENTCLOUD_REDIS_PASSWORD:-}" ] && export TF_VAR_redis_password="$TENCENTCLOUD_REDIS_PASSWORD"
-	[ -n "${TENCENTCLOUD_TKE_CLUSTER_VERSION:-}" ] && export TF_VAR_tke_cluster_version="$TENCENTCLOUD_TKE_CLUSTER_VERSION"
-	[ -n "${TENCENTCLOUD_TKE_NODE_COUNT:-}" ] && export TF_VAR_tke_node_count="$TENCENTCLOUD_TKE_NODE_COUNT"
-	# Optional per-component replica overrides (default 2 in variables.tf).
-	[ -n "${TENCENTCLOUD_CUBEMASTER_REPLICAS:-}" ] && export TF_VAR_cubemaster_replicas="$TENCENTCLOUD_CUBEMASTER_REPLICAS"
-	[ -n "${TENCENTCLOUD_CUBE_API_REPLICAS:-}" ] && export TF_VAR_cube_api_replicas="$TENCENTCLOUD_CUBE_API_REPLICAS"
-	[ -n "${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-}" ] && export TF_VAR_cube_proxy_replicas="$TENCENTCLOUD_CUBE_PROXY_REPLICAS"
-	[ -n "${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-}" ] && export TF_VAR_cube_webui_replicas="$TENCENTCLOUD_CUBE_WEBUI_REPLICAS"
+	export TF_VAR_tke_cluster_version="${TENCENTCLOUD_TKE_CLUSTER_VERSION:-1.34.1}"
+	export TF_VAR_tke_node_count="$TKE_NODE_COUNT"
+	export TF_VAR_cubemaster_replicas="${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}"
+	export TF_VAR_cube_api_replicas="${TENCENTCLOUD_CUBE_API_REPLICAS:-1}"
+	export TF_VAR_cube_proxy_replicas="${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}"
+	export TF_VAR_cube_webui_replicas="${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}"
+	# Network exposure mode. Default (false) fronts cube-api/cube-proxy/cube-webui
+	# with VPC-internal CLBs; set to 'true' for public CLBs reachable from the
+	# internet (see the "Hardening the Public-Facing Services" doc section).
+	export TF_VAR_enable_public_network="${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-false}"
 	export TF_VAR_ssh_public_key_path="$SSH_PUB_KEY"
 	export TF_VAR_ssh_private_key_path="$SSH_PRI_KEY"
 
@@ -1278,7 +1310,7 @@ build_and_push_images() {
 	reg=$(terraform output -raw tcr_registry_name 2>/dev/null || echo "")
 	ns=$(terraform output -raw tcr_namespace 2>/dev/null || echo "")
 	user=$(terraform output -raw tcr_token_user 2>/dev/null || echo "")
-	tag="${CUBE_IMAGE_TAG:-latest}"
+	tag="${CUBE_IMAGE_TAG:-cubesandbox002-20260630}"
 
 	if [ -z "$js_pub_ip" ] || [ -z "$reg" ] || [ -z "$ns" ]; then
 		echo -e "  ${RED}✗ Missing jumpserver / TCR info; cannot build images${NC}"
@@ -1389,7 +1421,7 @@ tcr_build_and_push() {
 	# The image tag was already resolved earlier (env / saved selection /
 	# prompt_deployment_env / default), so don't ask again — just remind which tag
 	# will be built & pushed.
-	echo -e "  ${GREEN}✓ Image tag to build & push: ${CUBE_IMAGE_TAG:-latest}${NC}"
+	echo -e "  ${GREEN}✓ Image tag to build & push: ${CUBE_IMAGE_TAG:-cubesandbox002-20260630}${NC}"
 	echo ""
 
 	# Pre-pull the base images the build needs from the in-VPC TCR mirror first
@@ -1592,6 +1624,34 @@ select_env_secret() {
 # ---------------------------------------------------------------
 prompt_deployment_env() {
 	banner "Deployment configuration"
+
+	# Network exposure mode for cube-api / cube-proxy / cube-webui. Asked FIRST
+	# because it is the most security-sensitive choice of the run. The default is
+	# internal (VPC-only) CLBs — the safe default with no public exposure.
+	# Runs before setup_env so the resolved value maps to TF_VAR_enable_public_network.
+	# An explicit TENCENTCLOUD_ENABLE_PUBLIC_NETWORK takes precedence and skips the
+	# prompt; a non-interactive shell keeps the internal default (variables.tf).
+	if [ -n "${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-}" ]; then
+		echo -e "  ${GREEN}✓ Public-network mode (from \$TENCENTCLOUD_ENABLE_PUBLIC_NETWORK): ${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK}${NC}"
+	elif [ -t 0 ]; then
+		echo -e "${YELLOW}Network exposure for cube-api / cube-proxy / cube-webui:${NC}"
+		echo -e "  ${YELLOW}- ${CYAN}No${YELLOW}  (default): VPC-internal CLBs, reachable only via the jumpserver / VPN (no public exposure).${NC}"
+		echo -e "  ${YELLOW}- ${CYAN}Yes${YELLOW}: PUBLIC CLBs reachable from the internet. WebUI ships with no auth and cube-api${NC}"
+		echo -e "  ${YELLOW}       passes all requests by default — harden them before exposing (see the deployment doc).${NC}"
+		local _pub
+		read -r -p "$(echo -e "${YELLOW}Expose these services via PUBLIC-network CLBs? [y/N]: ${NC}")" _pub
+		case "${_pub}" in
+		[Yy] | [Yy][Ee][Ss])
+			export TENCENTCLOUD_ENABLE_PUBLIC_NETWORK=true
+			echo -e "  ${GREEN}✓ Public-network mode: on ${YELLOW}(services will be reachable from the internet)${NC}"
+			;;
+		*)
+			export TENCENTCLOUD_ENABLE_PUBLIC_NETWORK=false
+			echo -e "  ${GREEN}✓ Public-network mode: off ${CYAN}(default; VPC-internal only)${NC}"
+			;;
+		esac
+	fi
+
 	select_env TENCENTCLOUD_REGION "Tencent Cloud region" \
 		"ap-guangzhou" "ap-shanghai" "ap-beijing" "ap-nanjing" "ap-chengdu" \
 		"ap-chongqing" "ap-hongkong" "ap-singapore" "ap-tokyo" "ap-seoul"
@@ -1608,13 +1668,13 @@ prompt_deployment_env() {
 		echo -e "  ${GREEN}✓ OS image name: ${TENCENTCLOUD_IMAGE_NAME} ${CYAN}(fixed; only validated image)${NC}"
 	fi
 	select_env TENCENTCLOUD_JUMPSERVER_INSTANCE_TYPE "Jumpserver instance type" \
-		"S5.MEDIUM4" "S5.MEDIUM8" "S5.LARGE8" "SA5.MEDIUM4" "SA5.MEDIUM8"
+		"SA9.MEDIUM4" "SA9.MEDIUM8" "SA9.LARGE8" "SA5.MEDIUM4" "SA5.MEDIUM8"
 	select_env_secret TENCENTCLOUD_MYSQL_PASSWORD "MySQL root password" "CubeSandbox123!"
 	select_env_secret TENCENTCLOUD_REDIS_PASSWORD "Redis password" "ceuhvu123"
 	select_env TENCENTCLOUD_CUBE_DB "Cube database name" "cube_mvp"
 	select_env TENCENTCLOUD_CUBE_USER "Cube database user" "cube"
 	select_env_secret TENCENTCLOUD_CUBE_PASSWORD "Cube database password" "cube_pass"
-	select_env TENCENTCLOUD_CUBE_IMAGE_TAG "Cube component image tag" "latest" "dev"
+	select_env TENCENTCLOUD_CUBE_IMAGE_TAG "Cube component image tag" "cubesandbox002-20260630" "dev"
 
 	# Ask whether to print verbose terraform logs (defaults to off). Runs before
 	# setup_env so the resolved value feeds VERBOSE. An explicit
@@ -1687,19 +1747,54 @@ terraform_plan_json() {
 	# never engaged here — otherwise it would try to reach a TKE cluster that does
 	# not exist yet (config_path .kube/config) and fail the whole plan. The base
 	# resources are still planned but never applied (the planfile is discarded).
+	# Use -refresh=false so an existing kubernetes_* state does not try to refresh
+	# through a stale 127.0.0.1 apiserver tunnel during zone/type discovery.
 	local -a _meta_vars=(-var "create_tke=false" -var "deploy_tke_addons=false")
+	local -a _meta_targets=(
+		-target=data.tencentcloud_availability_zones_by_product.default
+		-target=data.tencentcloud_instance_types.spec_8c16g
+		-target=data.tencentcloud_instance_types.spec_4c8g
+		-target=data.tencentcloud_instance_types.spec_2c4g
+	)
 
 	# Capture stderr from THIS plan so a failure can be surfaced without running a
 	# second (slow) plan just to reproduce the error. mktemp keeps it 0600.
 	local _errfile
 	_errfile="$(mktemp "${TMPDIR:-/tmp}/tfplan_cubesandbox_err.XXXXXX")"
-	if terraform plan -out="${planfile}" -input=false -no-color "${_meta_vars[@]}" >/dev/null 2>"${_errfile}"; then
+	if terraform plan -refresh=false -out="${planfile}" -input=false -no-color "${_meta_vars[@]}" "${_meta_targets[@]}" >/dev/null 2>"${_errfile}"; then
 		local _json
 		_json="$(terraform show -json "${planfile}" 2>/dev/null || true)"
 		rm -f "${planfile}" "${_errfile}"
 		_TF_PLAN_JSON_CACHE="${_json}"
 		printf '%s' "${_json}"
 	else
+		# A copied deployment directory can carry a stale terraform.tfstate whose
+		# cloud resources were already deleted. Metadata planning runs before the
+		# normal phased apply retry logic, so prune confirmed-not-found addresses
+		# here and retry once before surfacing the error.
+		if grep -qiE 'not[ -]?found|does not exist|NotFound|ResourceNotFound|CdbInstanceNotFound|not exist' "$_errfile" 2>/dev/null; then
+			local _stale_addrs _addr _pruned=0
+			_stale_addrs="$(
+				grep -E 'with [a-z][A-Za-z0-9_]*\.' "$_errfile" 2>/dev/null |
+					sed -E 's/.*with ([^,]+),.*/\1/' | sort -u
+			)"
+			if [ -n "$_stale_addrs" ]; then
+				echo -e "  ${YELLOW}Metadata plan found resources already gone in cloud; pruning stale state and retrying...${NC}" >&2
+				while IFS= read -r _addr; do
+					[ -n "$_addr" ] || continue
+					echo -e "  ${CYAN}terraform state rm ${_addr}${NC}" >&2
+					terraform state rm "$_addr" >/dev/null 2>&1 && _pruned=1 || true
+				done <<EOF
+${_stale_addrs}
+EOF
+				if [ "$_pruned" = "1" ]; then
+					rm -f "${planfile}" "${_errfile}"
+					_TF_PLAN_JSON_CACHE=""
+					terraform_plan_json
+					return $?
+				fi
+			fi
+		fi
 		# Show the captured error from the same failed plan (to stderr, so it does
 		# not pollute the JSON this function prints on stdout).
 		echo "" >&2
@@ -1800,22 +1895,22 @@ select_compute_nodes() {
 	fi
 
 	# No interactive terminal (CI / non-interactive run): cannot prompt, so
-	# default to 1 (at least one compute node is always created). Set
+	# default to 2 (matches env.example / variables.tf). Set
 	# TENCENTCLOUD_COMPUTE_NODE_COUNT to choose explicitly.
 	if [ ! -t 0 ]; then
-		export TF_VAR_compute_node_count=1
-		echo -e "${YELLOW}⚠ No interactive terminal; defaulting compute node count to 1.${NC}"
+		export TF_VAR_compute_node_count=2
+		echo -e "${YELLOW}⚠ No interactive terminal; defaulting compute node count to 2.${NC}"
 		echo -e "  ${YELLOW}Set TENCENTCLOUD_COMPUTE_NODE_COUNT to choose explicitly.${NC}"
 		return 0
 	fi
 
 	# Prompt for the number of compute nodes (at least 1; Enter keeps the
-	# default of 1). Set TENCENTCLOUD_COMPUTE_NODE_COUNT to skip this prompt.
+	# default of 2). Set TENCENTCLOUD_COMPUTE_NODE_COUNT to skip this prompt.
 	echo ""
 	local count
 	while true; do
-		read -r -p "$(echo -e "${YELLOW}Number of compute nodes to create [${CYAN}1${YELLOW}]: ${NC}")" count
-		count="${count:-1}"
+		read -r -p "$(echo -e "${YELLOW}Number of compute nodes to create [${CYAN}2${YELLOW}]: ${NC}")" count
+		count="${count:-2}"
 		if [[ "$count" =~ ^[0-9]+$ ]] && [ "$count" -ge 1 ]; then
 			break
 		fi
@@ -1835,7 +1930,7 @@ select_tke() {
 	# it back on for the final cluster + addons step).
 	echo ""
 	echo -e "${GREEN}✓ Creating the TKE Kubernetes cluster${NC}"
-	echo -e "  Spec: standard cluster L20 | K8s ${TKE_CLUSTER_VERSION:-1.34.1} | ${TKE_NODE_COUNT:-2} nodes | preferred ${TF_VAR_compute_instance_type:-S5.2XLARGE16}"
+	echo -e "  Spec: standard cluster L5 | K8s ${TKE_CLUSTER_VERSION:-1.34.1} | ${TKE_NODE_COUNT:-2} nodes | preferred ${TF_VAR_tke_worker_instance_type:-SA9.LARGE8}"
 	echo ""
 	export TF_VAR_create_tke=true
 	_prompt_tke_env
@@ -1861,7 +1956,7 @@ select_zone() {
 		_region="${TF_VAR_region:-${TENCENTCLOUD_REGION:-ap-guangzhou}}"
 		_zlist=$(query_zones 2>/dev/null) || _zlist=""
 		_zfirst=$(printf '%s\n' "$_zlist" | head -1 | cut -d'|' -f1)
-		[ -z "$_zfirst" ] && _zfirst="${_region}-3"
+		[ -z "$_zfirst" ] && _zfirst="${TENCENTCLOUD_AVAILABILITY_ZONE:-ap-guangzhou-6}"
 		export TF_VAR_availability_zone="$_zfirst"
 		_init_cvm_zones
 		echo -e "${YELLOW}⚠ No interactive terminal; defaulting availability zone to ${_zfirst}.${NC}"
@@ -1992,17 +2087,17 @@ _fetch_instance_types() {
 #   the selection menu also keeps a manual-input option.
 # ---------------------------------------------------------------
 _fallback_instance_types() {
-	echo -e "${YELLOW}Auto-query failed; showing a curated list of candidate instance types${NC}"
+	[ "${1:-}" = "quiet" ] || echo -e "${YELLOW}Auto-query failed; showing a curated list of candidate instance types${NC}"
 	CVM_TYPES=()
 	CVM_CPUS=()
 	CVM_MEMS=()
 
 	local -a fb=(
-		"S5.LARGE8|4|8"
-		"S5.LARGE16|4|16"
-		"S5.2XLARGE16|8|16"
-		"S5.2XLARGE32|8|32"
-		"S5.4XLARGE32|16|32"
+		"SA9.LARGE8|4|8"
+		"SA9.LARGE16|4|16"
+		"SA9.2XLARGE16|8|16"
+		"SA9.2XLARGE32|8|32"
+		"SA9.4XLARGE32|16|32"
 		"SA5.2XLARGE16|8|16"
 	)
 	local entry t cpu mem
@@ -2015,11 +2110,29 @@ _fallback_instance_types() {
 	return 0
 }
 
+_has_existing_instance_config() {
+	local compute_types state_count
+	compute_types="${TF_VAR_compute_instance_types:-}"
+	if [ -n "$compute_types" ] && [ "$compute_types" != "[]" ] && printf '%s' "$compute_types" | jq -e 'length > 0' >/dev/null 2>&1; then
+		return 0
+	fi
+	state_count="$(terraform state list 2>/dev/null | grep -cE '^(tencentcloud_instance\.compute\[|tencentcloud_kubernetes_cluster\.tke\[0\])' || true)"
+	[ "${state_count:-0}" -gt 0 ] 2>/dev/null
+}
+
+_use_existing_instance_config_for_rerun() {
+	_has_existing_instance_config || return 1
+	echo -e "  ${GREEN}✓ Existing compute/TKE resources or resolved instance config detected; skipping online instance-type query.${NC}"
+	echo -e "  ${CYAN}  Reusing purchased/resolved instance types; curated fallback candidates are kept only for any new retry.${NC}"
+	_fallback_instance_types quiet
+	return 0
+}
+
 # ---------------------------------------------------------------
 # _fallback_jumpserver_instance_types — curated jumpserver candidates
 # ---------------------------------------------------------------
 _fallback_jumpserver_instance_types() {
-	JUMPSERVER_TYPES=("S5.MEDIUM4" "S5.MEDIUM8" "S5.LARGE8" "SA5.MEDIUM4" "SA5.MEDIUM8")
+	JUMPSERVER_TYPES=("SA9.MEDIUM4" "SA9.MEDIUM8" "SA9.LARGE8" "SA5.MEDIUM4" "SA5.MEDIUM8")
 	JUMPSERVER_CPUS=(2 2 4 2 2)
 	JUMPSERVER_MEMS=(4 8 8 4 8)
 }
@@ -2037,14 +2150,14 @@ _init_cvm_zones() {
 }
 
 # ---------------------------------------------------------------
-# _build_fallback_zones — populate the _zones array for auto-fallback
-#   Writes zone names into the caller's _zones array (nameref).
+# _build_fallback_zones — populate _FALLBACK_ZONES for auto-fallback.
+# Uses a global array instead of bash 4 nameref so macOS bash 3.2 works.
 # ---------------------------------------------------------------
+_FALLBACK_ZONES=()
 _build_fallback_zones() {
-	local -n _out_zones=$1
 	local _region="${TF_VAR_region:-${TENCENTCLOUD_REGION:-ap-guangzhou}}" _seen=" " _role_zone _zn _z
 
-	_out_zones=()
+	_FALLBACK_ZONES=()
 	for _role_zone in \
 		"${TF_VAR_jumpserver_availability_zone:-}" \
 		"${TF_VAR_compute_availability_zone:-}" \
@@ -2054,7 +2167,7 @@ _build_fallback_zones() {
 		case "$_seen" in
 		*" ${_role_zone} "*) ;;
 		*)
-			_out_zones+=("$_role_zone")
+			_FALLBACK_ZONES+=("$_role_zone")
 			_seen="${_seen}${_role_zone} "
 			;;
 		esac
@@ -2064,7 +2177,7 @@ _build_fallback_zones() {
 		case "$_seen" in
 		*" ${_z} "*) ;;
 		*)
-			_out_zones+=("$_z")
+			_FALLBACK_ZONES+=("$_z")
 			_seen="${_seen}${_z} "
 			;;
 		esac
@@ -2122,7 +2235,7 @@ _role_zone_var() {
 # _compute_preferred_type — user preference (TENCENTCLOUD_COMPUTE_INSTANCE_TYPE)
 # ---------------------------------------------------------------
 _compute_preferred_type() {
-	echo "${COMPUTE_PREFERRED_TYPE:-${TF_VAR_compute_instance_type:-${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-S5.2XLARGE16}}}"
+	echo "${COMPUTE_PREFERRED_TYPE:-${TF_VAR_compute_instance_type:-${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-SA9.MEDIUM8}}}"
 }
 
 # ---------------------------------------------------------------
@@ -2343,7 +2456,8 @@ _set_role_zone_index() {
 _switch_role_to_next_zone() {
 	local role="$1"
 	local -a _zones=()
-	_build_fallback_zones _zones
+	_build_fallback_zones
+	_zones=("${_FALLBACK_ZONES[@]+"${_FALLBACK_ZONES[@]}"}")
 	[ "${#_zones[@]}" -gt 0 ] || return 1
 
 	local _zi
@@ -2357,7 +2471,7 @@ _switch_role_to_next_zone() {
 	_set_role_zone "$role" "${_zones[$_zi]}"
 	_ensure_cvm_subnet_for_zone "${_zones[$_zi]}" || return 1
 	if [ "$role" = "compute" ] && [ "${STEP2_COMPUTE_NODE_INDEX:-}" -ge 0 ] 2>/dev/null; then
-		_export_compute_node_config_var "$STEP2_COMPUTE_NODE_INDEX" "${TF_VAR_compute_node_count:-1}"
+		_export_compute_node_config_var "$STEP2_COMPUTE_NODE_INDEX" "${TF_VAR_compute_node_count:-2}"
 	fi
 	echo -e "  ${GREEN}-> Auto-switching ${role} zone: now trying $(_get_role_zone "$role")${NC}"
 	return 0
@@ -2391,9 +2505,12 @@ _try_next_instance_type() {
 		next_type="${CVM_TYPES[$next_idx]}"
 		export TF_VAR_compute_instance_type="$next_type"
 		if [ "$role" = "compute" ] && [ "${STEP2_COMPUTE_NODE_INDEX:-}" -ge 0 ] 2>/dev/null; then
-			_export_compute_node_config_var "$STEP2_COMPUTE_NODE_INDEX" "${TF_VAR_compute_node_count:-1}"
+			_export_compute_node_config_var "$STEP2_COMPUTE_NODE_INDEX" "${TF_VAR_compute_node_count:-2}"
 		fi
 		if [ "$role" = "tke" ]; then
+			# tke_worker_instance_type is used directly (no ternary fallback), so we
+			# must override it here to avoid retrying the sold-out type.
+			export TF_VAR_tke_worker_instance_type="$next_type"
 			echo -e "  ${GREEN}-> Auto-fallback (TKE workers): trying ${next_type} (${CVM_CPUS[$next_idx]}C${CVM_MEMS[$next_idx]}G) [$(($next_idx + 1))/${#CVM_TYPES[@]}]${NC}"
 		else
 			echo -e "  ${GREEN}-> Auto-fallback (compute): trying ${next_type} (${CVM_CPUS[$next_idx]}C${CVM_MEMS[$next_idx]}G) [$(($next_idx + 1))/${#CVM_TYPES[@]}]${NC}"
@@ -2458,13 +2575,17 @@ _try_cvm_stock_fallback() {
 # Interactively select an instance type
 # ---------------------------------------------------------------
 select_instance_type() {
-	# If the user already set the environment variable, use it directly
-	if [ -n "${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-}" ]; then
-		echo -e "${GREEN}✓ Compute node preferred instance type (from environment variable): ${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE}${NC}"
+	# If the user/resolved config already set the instance type, use it directly.
+	if [ -n "${TF_VAR_compute_instance_type:-${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-}}" ]; then
+		local _configured_type
+		_configured_type="${TF_VAR_compute_instance_type:-${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-}}"
+		echo -e "${GREEN}✓ Compute node preferred instance type (from configuration): ${_configured_type}${NC}"
 		echo -e "  ${CYAN}(Auto-fallback may purchase other eligible types per node if this type is sold out.)${NC}"
-		check_pvm_compat "$TENCENTCLOUD_COMPUTE_INSTANCE_TYPE"
-		# Still query the available type list for later auto-fallback use
-		_fetch_instance_types || _fallback_instance_types
+		export TF_VAR_compute_instance_type="$_configured_type"
+		check_pvm_compat "$_configured_type"
+		# On re-run, existing state/resolved.auto.tfvars already describes the
+		# purchased shape; avoid metadata plans that can touch stale k8s state.
+		_use_existing_instance_config_for_rerun || _fetch_instance_types || _fallback_instance_types
 		return 0
 	fi
 
@@ -2476,10 +2597,14 @@ select_instance_type() {
 		local _t
 		_t="$(_compute_preferred_type)"
 		export TF_VAR_compute_instance_type="$_t"
-		_fetch_instance_types || _fallback_instance_types
+		_use_existing_instance_config_for_rerun || _fetch_instance_types || _fallback_instance_types
 		check_pvm_compat "$_t" || true
 		echo -e "${YELLOW}⚠ No interactive terminal; defaulting compute instance type to ${_t}.${NC}"
 		echo -e "  ${YELLOW}Set TENCENTCLOUD_COMPUTE_INSTANCE_TYPE to choose explicitly.${NC}"
+		return 0
+	fi
+
+	if _use_existing_instance_config_for_rerun; then
 		return 0
 	fi
 
@@ -2538,7 +2663,7 @@ select_instance_type() {
 		done
 		echo ""
 		while true; do
-			read -r -p "$(echo -e "${YELLOW}Enter an instance type (e.g. S5.LARGE8): ${NC}")" manual
+			read -r -p "$(echo -e "${YELLOW}Enter an instance type (e.g. SA9.LARGE8): ${NC}")" manual
 			if [ -n "$manual" ]; then
 				break
 			fi
@@ -2612,7 +2737,8 @@ step2_apply() {
 	if [ "${STEP2_CVM_FALLBACK:-0}" = "1" ]; then
 		_init_cvm_zones
 		[ "${#JUMPSERVER_TYPES[@]}" -eq 0 ] && _fallback_jumpserver_instance_types
-		_build_fallback_zones _zones
+		_build_fallback_zones
+		_zones=("${_FALLBACK_ZONES[@]+"${_FALLBACK_ZONES[@]}"}")
 		local _ctype_count=${#CVM_TYPES[@]}
 		local _jtype_count=${#JUMPSERVER_TYPES[@]}
 		[ "$_ctype_count" -eq 0 ] && _ctype_count=6
@@ -2630,7 +2756,7 @@ step2_apply() {
 		echo -e "    Jumpserver zone     : $(_get_role_zone jumpserver)"
 		echo -e "    Compute zone        : $(_get_role_zone compute)"
 		echo -e "    TKE worker zone     : $(_get_role_zone tke)"
-		echo -e "    Jumpserver type     : ${TF_VAR_jumpserver_instance_type:-S5.MEDIUM4}"
+		echo -e "    Jumpserver type     : ${TF_VAR_jumpserver_instance_type:-SA9.MEDIUM4}"
 		if [ "${STEP2_COMPUTE_NODE_INDEX:-}" -ge 0 ] 2>/dev/null; then
 			echo -e "    Compute preference  : $(_compute_preferred_type) (node $((STEP2_COMPUTE_NODE_INDEX + 1)) trying ${TF_VAR_compute_instance_type:-?})"
 			if [ "${#COMPUTE_PURCHASED_TYPES[@]}" -gt 0 ]; then
@@ -2638,13 +2764,13 @@ step2_apply() {
 			fi
 		else
 			echo -e "    Compute preference  : $(_compute_preferred_type)"
-			echo -e "    TKE worker type     : ${TF_VAR_compute_instance_type:-S5.2XLARGE16}"
+			echo -e "    TKE worker type     : ${TF_VAR_tke_worker_instance_type:-SA9.LARGE8}"
 		fi
 		echo -e "    Operating system    : ${TF_VAR_image_name_regex:-OpenCloudOS Server 9}"
 		echo ""
 
 		if [ "${STEP2_COMPUTE_NODE_INDEX:-}" -ge 0 ] 2>/dev/null; then
-			_export_compute_node_config_var "$STEP2_COMPUTE_NODE_INDEX" "${TF_VAR_compute_node_count:-1}"
+			_export_compute_node_config_var "$STEP2_COMPUTE_NODE_INDEX" "${TF_VAR_compute_node_count:-2}"
 			_ensure_cvm_subnet_for_zone "${TF_VAR_compute_availability_zone:-$(_compute_preferred_zone)}" || true
 		fi
 
@@ -2653,9 +2779,9 @@ step2_apply() {
 		apply_log="$(mktemp "${TMPDIR:-/tmp}/tfapply_cubesandbox.XXXXXX.log")"
 		local exit_code=0
 		if [ "${VERBOSE}" = "1" ]; then
-			terraform apply -auto-approve -input=false "${_tgt[@]}" 2>&1 | tee "$apply_log" || exit_code=$?
+			terraform apply -parallelism="$TERRAFORM_PARALLELISM" -auto-approve -input=false "${_tgt[@]}" 2>&1 | tee "$apply_log" || exit_code=$?
 		else
-			terraform apply -auto-approve -input=false "${_tgt[@]}" >"$apply_log" 2>&1 || exit_code=$?
+			terraform apply -parallelism="$TERRAFORM_PARALLELISM" -auto-approve -input=false "${_tgt[@]}" >"$apply_log" 2>&1 || exit_code=$?
 		fi
 
 		if [ "$exit_code" -eq 0 ]; then
@@ -2683,7 +2809,7 @@ step2_apply() {
 		# Creation failed
 		echo ""
 		echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-		echo -e "${RED}  ✗ CVM creation failed${NC}"
+		echo -e "${RED}  ✗ ${STEP2_LABEL} failed${NC}"
 		echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 		echo ""
 
@@ -2746,16 +2872,17 @@ step2_apply() {
 				fi
 			fi
 			echo -e "  ${YELLOW}Reason: all candidate instance types / availability zones have been tried or are sold out${NC}"
-		elif grep -qiE 'kex_exchange_identification|Connection closed|connection refused|ZoneNotExists|解析域不存在|i/o timeout|TimeLimitExceeded|RequestLimitExceeded|try again later' "$apply_log" 2>/dev/null; then
+		elif grep -qiE 'kex_exchange_identification|Connection closed|connection refused|ZoneNotExists|解析域不存在|i/o timeout|TimeLimitExceeded|RequestLimitExceeded|try again later|waiting for one of the workers ready|workers? ready' "$apply_log" 2>/dev/null; then
 			# Transient: the jumpserver SSH (443) may still be coming up (cloud-init
-			# switching the port), or a TCR private-zone / rate-limit hiccup. These
-			# usually clear on their own — wait a bit and retry without changing the
-			# config, but only up to max_transient times so a never-clearing
-			# "transient" error eventually falls through to the fail-fast / menu
-			# below instead of looping forever.
+			# switching the port), a TCR private-zone / rate-limit hiccup may still be
+			# settling, or TKE may have created the cluster but not yet reported an
+			# initial worker Ready. These usually clear on their own — wait a bit and
+			# retry without changing the config, but only up to max_transient times so
+			# a never-clearing "transient" error eventually falls through to the
+			# fail-fast / menu below instead of looping forever.
 			transient_attempts=$((transient_attempts + 1))
 			if [ "$transient_attempts" -lt "$max_transient" ]; then
-				echo -e "  ${YELLOW}Transient error (jumpserver SSH / private zone / rate limit not ready); waiting 20s and retrying (${transient_attempts}/${max_transient})...${NC}"
+				echo -e "  ${YELLOW}Transient error (jumpserver SSH / private zone / rate limit / TKE worker not ready); waiting 20s and retrying (${transient_attempts}/${max_transient})...${NC}"
 				rm -f "$apply_log"
 				sleep 20
 				continue
@@ -2899,9 +3026,9 @@ _apply_phase() {
 	log="$(mktemp "${TMPDIR:-/tmp}/tf_phase_apply.XXXXXX.log")"
 	local rc=0
 	if [ "${VERBOSE}" = "1" ]; then
-		terraform apply -auto-approve -input=false "${_tgt[@]}" 2>&1 | tee "$log" || rc=$?
+		terraform apply -parallelism="$TERRAFORM_PARALLELISM" -auto-approve -input=false "${_tgt[@]}" 2>&1 | tee "$log" || rc=$?
 	else
-		terraform apply -auto-approve -input=false "${_tgt[@]}" >"$log" 2>&1 || rc=$?
+		terraform apply -parallelism="$TERRAFORM_PARALLELISM" -auto-approve -input=false "${_tgt[@]}" >"$log" 2>&1 || rc=$?
 	fi
 
 	if [ "$rc" -ne 0 ]; then
@@ -3860,6 +3987,8 @@ echo '[local-bundle] Done'"
 #   the same configuration after a destroy.
 # ---------------------------------------------------------------
 ENV_FILE="${SCRIPT_DIR}/.env"
+RESOLVED_TFVARS_FILE="${SCRIPT_DIR}/resolved.auto.tfvars.json"
+RESOLVED_TFVARS_SUSPENDED=""
 
 # ---------------------------------------------------------------
 # load_saved_env — when re-running create.sh, preload previously saved selections
@@ -3920,13 +4049,14 @@ TENCENTCLOUD_REDIS_PASSWORD='${TENCENTCLOUD_REDIS_PASSWORD:-}'
 TENCENTCLOUD_CUBE_DB='${TENCENTCLOUD_CUBE_DB:-cube_mvp}'
 TENCENTCLOUD_CUBE_USER='${TENCENTCLOUD_CUBE_USER:-cube}'
 TENCENTCLOUD_CUBE_PASSWORD='${TENCENTCLOUD_CUBE_PASSWORD:-}'
-TENCENTCLOUD_CUBE_IMAGE_TAG='${TENCENTCLOUD_CUBE_IMAGE_TAG:-latest}'
+TENCENTCLOUD_CUBE_IMAGE_TAG='${TENCENTCLOUD_CUBE_IMAGE_TAG:-cubesandbox002-20260630}'
 TENCENTCLOUD_TKE_CLUSTER_VERSION='${TKE_CLUSTER_VERSION:-1.34.1}'
 TENCENTCLOUD_TKE_NODE_COUNT='${TKE_NODE_COUNT:-2}'
-TENCENTCLOUD_CUBEMASTER_REPLICAS='${TENCENTCLOUD_CUBEMASTER_REPLICAS:-2}'
-TENCENTCLOUD_CUBE_API_REPLICAS='${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-2}}'
-TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-2}}'
-TENCENTCLOUD_CUBE_WEBUI_REPLICAS='${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-2}}'
+TENCENTCLOUD_CUBEMASTER_REPLICAS='${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}'
+TENCENTCLOUD_CUBE_API_REPLICAS='${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}'
+TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}'
+TENCENTCLOUD_CUBE_WEBUI_REPLICAS='${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}}'
+TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='${TF_VAR_enable_public_network:-${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-false}}'
 TENCENTCLOUD_LOCAL_BUNDLE='${LOCAL_BUNDLE:-${TENCENTCLOUD_LOCAL_BUNDLE:-}}'
 TENCENTCLOUD_PVM_KERNEL_VMLINUX='${PVM_KERNEL_VMLINUX:-${TENCENTCLOUD_PVM_KERNEL_VMLINUX:-}}'
 TENCENTCLOUD_VERBOSE='${VERBOSE:-1}'
@@ -3960,6 +4090,228 @@ EOF
 		echo -e "${GREEN}✓ Saved your selections to ${ENV_FILE}${NC}"
 		echo -e "  ${CYAN}After destroy.sh, you may re-run ./create.sh to recreate with the same config.${NC}"
 	fi
+}
+
+# ---------------------------------------------------------------
+# write_resolved_tfvars_file — persist the ACTUAL resolved Terraform variables.
+#
+# .env records the user's preferred inputs, but auto-fallback can purchase a
+# different compute/TKE instance type or zone. The generated
+# resolved.auto.tfvars.json captures the real deployed shape so later raw
+# terraform plan/apply runs do not drift back to stale .env preferences. It is
+# mode 0600 because it can contain DB/Redis passwords.
+# ---------------------------------------------------------------
+_tf_var_declared() {
+	grep -qE "^variable[[:space:]]+\"$1\"" "${SCRIPT_DIR}/variables.tf" 2>/dev/null
+}
+
+_json_or_default() {
+	local value="$1" default="$2"
+	if [ -n "$value" ] && printf '%s' "$value" | jq -e . >/dev/null 2>&1; then
+		printf '%s' "$value"
+	else
+		printf '%s' "$default"
+	fi
+}
+
+_number_or_default() {
+	local value="$1" default="$2"
+	if [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+		printf '%s' "$value"
+	else
+		printf '%s' "$default"
+	fi
+}
+
+_bool_json() {
+	case "${1:-}" in
+	true | TRUE | True | 1 | yes | YES | y | Y) printf 'true' ;;
+	*) printf 'false' ;;
+	esac
+}
+
+_jq_add_string_if_declared() {
+	local file="$1" key="$2" value="$3" tmp
+	_tf_var_declared "$key" || return 0
+	[ -n "$value" ] || return 0
+	tmp="$(mktemp "${TMPDIR:-/tmp}/resolved_tfvars.XXXXXX")"
+	jq --arg k "$key" --arg v "$value" '. + {($k): $v}' "$file" >"$tmp" && mv "$tmp" "$file"
+}
+
+_jq_add_number_if_declared() {
+	local file="$1" key="$2" value="$3" tmp
+	_tf_var_declared "$key" || return 0
+	[[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 0
+	tmp="$(mktemp "${TMPDIR:-/tmp}/resolved_tfvars.XXXXXX")"
+	jq --arg k "$key" --argjson v "$value" '. + {($k): $v}' "$file" >"$tmp" && mv "$tmp" "$file"
+}
+
+_jq_add_bool_if_declared() {
+	local file="$1" key="$2" value="$3" tmp bool
+	_tf_var_declared "$key" || return 0
+	[ -n "$value" ] || return 0
+	bool="$(_bool_json "$value")"
+	tmp="$(mktemp "${TMPDIR:-/tmp}/resolved_tfvars.XXXXXX")"
+	jq --arg k "$key" --argjson v "$bool" '. + {($k): $v}' "$file" >"$tmp" && mv "$tmp" "$file"
+}
+
+restore_suspended_resolved_tfvars() {
+	if [ -n "${RESOLVED_TFVARS_SUSPENDED:-}" ] && [ ! -f "$RESOLVED_TFVARS_FILE" ] && [ -f "$RESOLVED_TFVARS_SUSPENDED" ]; then
+		mv "$RESOLVED_TFVARS_SUSPENDED" "$RESOLVED_TFVARS_FILE" 2>/dev/null || true
+	fi
+}
+
+load_resolved_tfvars_file() {
+	[ -f "$RESOLVED_TFVARS_FILE" ] || return 0
+	echo -e "${CYAN}Found ${RESOLVED_TFVARS_FILE}; using it as the resolved deployment baseline.${NC}"
+
+	local entry key value var
+	while IFS= read -r entry; do
+		key="$(printf '%s' "$entry" | base64 -d | jq -r '.key' 2>/dev/null || true)"
+		[ -n "$key" ] || continue
+		case "$key" in
+		create_tke | deploy_tke_addons) continue ;;
+		esac
+		_tf_var_declared "$key" || continue
+		value="$(printf '%s' "$entry" | base64 -d | jq -r 'if (.value | type) == "string" then .value else (.value | tojson) end' 2>/dev/null || true)"
+		var="TF_VAR_${key}"
+		export "${var}=${value}"
+	done < <(jq -r 'to_entries[] | @base64' "$RESOLVED_TFVARS_FILE" 2>/dev/null || true)
+
+	# Terraform auto-loads *.auto.tfvars.json with higher precedence than TF_VAR_*.
+	# During create.sh we need fallback code to keep changing TF_VAR_* between
+	# phased applies, so suspend auto-loading and restore the file on failure. A
+	# successful run writes a fresh resolved.auto.tfvars.json at the end.
+	RESOLVED_TFVARS_SUSPENDED="${RESOLVED_TFVARS_FILE}.suspended"
+	mv "$RESOLVED_TFVARS_FILE" "$RESOLVED_TFVARS_SUSPENDED"
+	trap 'restore_suspended_resolved_tfvars' EXIT
+	echo -e "  ${CYAN}Suspended auto-loading while create.sh runs; it will be regenerated on success.${NC}"
+}
+
+write_resolved_tfvars_file() {
+	local cfg compute_types_json compute_zones_json tmp
+	local az js_az cmp_az tke_az jump_type compute_pref
+	local compute_count tke_count
+
+	cfg="$(terraform output -json config_summary 2>/dev/null || echo '{}')"
+	compute_types_json="$(terraform output -json compute_instance_types 2>/dev/null || printf '%s' "${TF_VAR_compute_instance_types:-[]}")"
+	compute_zones_json="$(terraform output -json compute_availability_zones 2>/dev/null || printf '%s' "${TF_VAR_compute_availability_zones:-[]}")"
+	compute_types_json="$(_json_or_default "$compute_types_json" '[]')"
+	compute_zones_json="$(_json_or_default "$compute_zones_json" '[]')"
+
+	az="$(printf '%s' "$cfg" | jq -r '.availability_zone // empty' 2>/dev/null || true)"
+	js_az="$(printf '%s' "$cfg" | jq -r '.jumpserver_availability_zone // empty' 2>/dev/null || true)"
+	cmp_az="$(printf '%s' "$cfg" | jq -r '.compute_availability_zone // empty' 2>/dev/null || true)"
+	tke_az="$(printf '%s' "$cfg" | jq -r '.tke_worker_availability_zone // empty' 2>/dev/null || true)"
+	jump_type="$(printf '%s' "$cfg" | jq -r '.jumpserver_instance_type // empty' 2>/dev/null || true)"
+	compute_pref="$(printf '%s' "$cfg" | jq -r '.compute_instance_type // empty' 2>/dev/null || true)"
+
+	[ -n "$az" ] || az="${TF_VAR_availability_zone:-${TENCENTCLOUD_AVAILABILITY_ZONE:-}}"
+	[ -n "$js_az" ] || js_az="${TF_VAR_jumpserver_availability_zone:-${TENCENTCLOUD_JUMPSERVER_AVAILABILITY_ZONE:-$az}}"
+	[ -n "$cmp_az" ] || cmp_az="${TF_VAR_compute_availability_zone:-${TENCENTCLOUD_COMPUTE_AVAILABILITY_ZONE:-$az}}"
+	[ -n "$tke_az" ] || tke_az="${TF_VAR_tke_worker_availability_zone:-${TENCENTCLOUD_TKE_WORKER_AVAILABILITY_ZONE:-$az}}"
+	[ -n "$jump_type" ] || jump_type="${TF_VAR_jumpserver_instance_type:-${TENCENTCLOUD_JUMPSERVER_INSTANCE_TYPE:-}}"
+	[ -n "$compute_pref" ] || compute_pref="${TF_VAR_compute_instance_type:-${TENCENTCLOUD_COMPUTE_INSTANCE_TYPE:-}}"
+
+	compute_count="${saved_compute_count:-${TF_VAR_compute_node_count:-${TENCENTCLOUD_COMPUTE_NODE_COUNT:-2}}}"
+	tke_count="${TF_VAR_tke_node_count:-${TENCENTCLOUD_TKE_NODE_COUNT:-${TKE_NODE_COUNT:-2}}}"
+	compute_count="$(_number_or_default "$compute_count" 1)"
+	tke_count="$(_number_or_default "$tke_count" 0)"
+
+	tmp="$(mktemp "${TMPDIR:-/tmp}/resolved_tfvars.XXXXXX")"
+	jq -n \
+		--arg vpc_name "${TF_VAR_vpc_name:-${TENCENTCLOUD_VPC_NAME:-cubesandbox-terraform-vpc}}" \
+		--arg region "${TF_VAR_region:-${TENCENTCLOUD_REGION:-ap-guangzhou}}" \
+		--arg availability_zone "$az" \
+		--arg jumpserver_availability_zone "$js_az" \
+		--arg compute_availability_zone "$cmp_az" \
+		--arg tke_worker_availability_zone "$tke_az" \
+		--arg image_name_regex "${TF_VAR_image_name_regex:-${TENCENTCLOUD_IMAGE_NAME:-OpenCloudOS Server 9}}" \
+		--arg jumpserver_instance_type "$jump_type" \
+		--arg compute_instance_type "$compute_pref" \
+		--argjson compute_instance_types "$compute_types_json" \
+		--argjson compute_availability_zones "$compute_zones_json" \
+		--arg ssh_public_key_path "${TF_VAR_ssh_public_key_path:-$SSH_PUB_KEY}" \
+		--arg ssh_private_key_path "${TF_VAR_ssh_private_key_path:-$SSH_PRI_KEY}" \
+		--argjson compute_node_count "$compute_count" \
+		--argjson compute_data_disk_size "$(_number_or_default "${TF_VAR_compute_data_disk_size:-${TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE:-200}}" 200)" \
+		--arg mysql_root_password "${TF_VAR_mysql_root_password:-${TENCENTCLOUD_MYSQL_PASSWORD:-CubeSandbox123!}}" \
+		--arg redis_password "${TF_VAR_redis_password:-${TENCENTCLOUD_REDIS_PASSWORD:-ceuhvu123}}" \
+		--arg cube_password "${TF_VAR_cube_password:-${CUBE_PASSWORD:-${TENCENTCLOUD_CUBE_PASSWORD:-cube_pass}}}" \
+		--arg cube_db "${TF_VAR_cube_db:-${CUBE_DB:-${TENCENTCLOUD_CUBE_DB:-cube_mvp}}}" \
+		--arg cube_user "${TF_VAR_cube_user:-${CUBE_USER:-${TENCENTCLOUD_CUBE_USER:-cube}}}" \
+		--arg tke_cluster_name "${TF_VAR_tke_cluster_name:-cubesandbox-terraform-tke}" \
+		--arg tke_cluster_version "${TF_VAR_tke_cluster_version:-${TKE_CLUSTER_VERSION:-${TENCENTCLOUD_TKE_CLUSTER_VERSION:-1.34.1}}}" \
+		--argjson tke_node_count "$tke_count" \
+		--arg tke_worker_instance_type "${TF_VAR_tke_worker_instance_type:-${TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE:-SA9.LARGE8}}" \
+		--arg tke_cluster_cidr "${TF_VAR_tke_cluster_cidr:-10.200.0.0/16}" \
+		--arg tke_service_cidr "${TF_VAR_tke_service_cidr:-192.168.0.0/20}" \
+		--argjson enable_public_network "$(_bool_json "${TF_VAR_enable_public_network:-${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-false}}")" \
+		--argjson use_tcr "$(_bool_json "${TF_VAR_use_tcr:-${TENCENTCLOUD_USE_TCR:-false}}")" \
+		--argjson use_cfs "$(_bool_json "${TF_VAR_use_cfs:-${TENCENTCLOUD_USE_CFS:-false}}")" \
+		--arg image_tag "${TF_VAR_image_tag:-${CUBE_IMAGE_TAG:-${TENCENTCLOUD_CUBE_IMAGE_TAG:-cubesandbox002-20260630}}}" \
+		--arg image_registry "${TF_VAR_image_registry:-${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-image.tencentcloudcr.com}}" \
+		--arg image_namespace "${TF_VAR_image_namespace:-${TENCENTCLOUD_IMAGE_NAMESPACE:-demo}}" \
+		--arg cubemaster_image "${TF_VAR_cubemaster_image:-${TENCENTCLOUD_CUBEMASTER_IMAGE:-}}" \
+		--arg cubeapi_image "${TF_VAR_cubeapi_image:-${TENCENTCLOUD_CUBEAPI_IMAGE:-}}" \
+		--arg cubeproxy_image "${TF_VAR_cubeproxy_image:-${TENCENTCLOUD_CUBEPROXY_IMAGE:-}}" \
+		--arg webui_image "${TF_VAR_webui_image:-${TENCENTCLOUD_WEBUI_IMAGE:-}}" \
+		--argjson cubemaster_replicas "$(_number_or_default "${TF_VAR_cubemaster_replicas:-${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}}" 1)" \
+		--argjson cube_api_replicas "$(_number_or_default "${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}" 1)" \
+		--argjson cube_proxy_replicas "$(_number_or_default "${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}" 1)" \
+		--argjson cube_webui_replicas "$(_number_or_default "${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}}" 1)" \
+		'{
+			vpc_name: $vpc_name,
+			region: $region,
+			availability_zone: $availability_zone,
+			jumpserver_availability_zone: $jumpserver_availability_zone,
+			compute_availability_zone: $compute_availability_zone,
+			tke_worker_availability_zone: $tke_worker_availability_zone,
+			image_name_regex: $image_name_regex,
+			jumpserver_instance_type: $jumpserver_instance_type,
+			compute_instance_type: $compute_instance_type,
+			compute_instance_types: $compute_instance_types,
+			compute_availability_zones: $compute_availability_zones,
+			ssh_public_key_path: $ssh_public_key_path,
+			ssh_private_key_path: $ssh_private_key_path,
+			compute_node_count: $compute_node_count,
+			compute_data_disk_size: $compute_data_disk_size,
+			mysql_root_password: $mysql_root_password,
+			redis_password: $redis_password,
+			cube_password: $cube_password,
+			cube_db: $cube_db,
+			cube_user: $cube_user,
+			tke_cluster_name: $tke_cluster_name,
+			tke_cluster_version: $tke_cluster_version,
+			tke_node_count: $tke_node_count,
+			tke_worker_instance_type: $tke_worker_instance_type,
+			tke_cluster_cidr: $tke_cluster_cidr,
+			tke_service_cidr: $tke_service_cidr,
+			enable_public_network: $enable_public_network,
+			use_tcr: $use_tcr,
+			use_cfs: $use_cfs,
+			image_tag: $image_tag,
+			image_registry: $image_registry,
+			image_namespace: $image_namespace,
+			cubemaster_image: $cubemaster_image,
+			cubeapi_image: $cubeapi_image,
+			cubeproxy_image: $cubeproxy_image,
+			webui_image: $webui_image,
+			cubemaster_replicas: $cubemaster_replicas,
+			cube_api_replicas: $cube_api_replicas,
+			cube_proxy_replicas: $cube_proxy_replicas,
+			cube_webui_replicas: $cube_webui_replicas
+		}
+		| with_entries(select(.value != "" and .value != null))' >"$tmp"
+
+	(
+		umask 077
+		[ -n "${RESOLVED_TFVARS_SUSPENDED:-}" ] && rm -f "$RESOLVED_TFVARS_SUSPENDED" 2>/dev/null || true
+		mv "$tmp" "$RESOLVED_TFVARS_FILE"
+	)
+	chmod 600 "$RESOLVED_TFVARS_FILE" 2>/dev/null || true
+	echo -e "  ${GREEN}✓ Resolved Terraform variables saved to ${RESOLVED_TFVARS_FILE}${NC}"
+	echo -e "  ${CYAN}  This captures fallback-selected types/zones/counts/images for future Terraform runs.${NC}"
 }
 
 # ---------------------------------------------------------------
@@ -3997,10 +4349,21 @@ _localize_kubeconfig() {
 	case "$cur" in
 	*"127.0.0.1:${APISERVER_LOCAL_PORT}"*) return 0 ;; # already localized
 	esac
-	sed -i -E \
-		-e '/^[[:space:]]*certificate-authority-data:/d' \
-		-e "s#^([[:space:]]*)server:[[:space:]]*https?://.*#\1server: https://127.0.0.1:${APISERVER_LOCAL_PORT}\n\1insecure-skip-tls-verify: true#" \
-		"$kubeconfig"
+	local tmp
+	tmp="${kubeconfig}.tmp.$$"
+	awk -v port="${APISERVER_LOCAL_PORT}" '
+		/^[ \t]*certificate-authority-data:/ { next }
+		/^[ \t]*insecure-skip-tls-verify:/ { next }
+		/^[ \t]*server:[ \t]*https?:\/\// {
+			indent = $0
+			sub(/[^ \t].*/, "", indent)
+			print indent "server: https://127.0.0.1:" port
+			print indent "insecure-skip-tls-verify: true"
+			next
+		}
+		{ print }
+	' "$kubeconfig" >"$tmp" && mv "$tmp" "$kubeconfig"
+	chmod 600 "$kubeconfig" 2>/dev/null || true
 }
 
 # _start_apiserver_tunnel — (re)start the SSH local-forward
@@ -4024,7 +4387,7 @@ _start_apiserver_tunnel() {
 		root@"${js_ip}" 2>/dev/null || return 1
 	APISERVER_TUNNEL_PID=$(pgrep -f "127.0.0.1:${APISERVER_LOCAL_PORT}:${host}:${port}" 2>/dev/null | head -n1 || echo "")
 	APISERVER_PROBE_URL="https://127.0.0.1:${APISERVER_LOCAL_PORT}"
-	trap _close_apiserver_tunnel EXIT
+	trap '_close_apiserver_tunnel; restore_suspended_resolved_tfvars' EXIT
 	_localize_kubeconfig
 	return 0
 }
@@ -4143,10 +4506,10 @@ print_cluster_operator_help() {
 	# CLB IPs only exist for the TKE (cluster edition) deployment.
 	[ -z "$tke_id" ] && return 0
 
-	local key_file js_ip sg_id
+	local key_file js_ip clb_sg_id
 	key_file="${TENCENTCLOUD_SSH_PRIVATE_KEY_PATH:-$SSH_PRI_KEY}"
 	js_ip=$(terraform output -raw jumpserver_public_ip 2>/dev/null || echo "")
-	sg_id=$(terraform output -raw security_group_id 2>/dev/null || echo "")
+	clb_sg_id=$(terraform output -json security_group_ids 2>/dev/null | jq -r '.clb // empty' 2>/dev/null || echo "")
 
 	local webui_ip proxy_ip api_ip master_ip
 	webui_ip=$(terraform output -raw tke_cube_webui_clb_ip 2>/dev/null || echo "")
@@ -4195,14 +4558,31 @@ print_cluster_operator_help() {
 	# 4) Controlling which ports are exposed publicly
 	echo ""
 	echo -e "${CYAN}▶ 4. Control which ports each IP exposes to the internet${NC}"
-	echo -e "    All CLBs above share one security group:"
-	echo -e "      ${GREEN}${sg_id:-cubesandbox-demo-sg}${NC} (name: cubesandbox-demo-sg)"
-	echo -e "    Current inbound rules open to 0.0.0.0/0 (the whole internet):"
-	echo -e "      • 443  → jumpserver SSH"
-	echo -e "      • 80   → cube-webui + cube-proxy (HTTP)"
-	echo -e "      • 3000 → cube-api"
-	echo -e "    VPC-internal only (not reachable from the internet):"
-	echo -e "      • 8089 → cube-master (internal CLB)"
+	echo -e "    The deployment uses 4 per-role security groups (least privilege):"
+	echo -e "      ${GREEN}cubesandbox-sg-jumpserver${NC} : jumpserver SSH 443 + VPC internal"
+	echo -e "      ${GREEN}cubesandbox-sg-compute${NC}    : TKE pod CIDR + VPC internal only (no public ingress)"
+	echo -e "      ${GREEN}cubesandbox-sg-tke-pod${NC}    : pod-to-pod + VPC internal only (no public ingress)"
+	if [ "${TF_VAR_enable_public_network:-false}" = "true" ]; then
+		echo -e "      ${GREEN}cubesandbox-sg-clb${NC}        : public service ports for the CLBs below"
+		echo -e "    All CLBs above share the CLB security group:"
+		echo -e "      ${GREEN}${clb_sg_id:-cubesandbox-sg-clb}${NC} (name: cubesandbox-sg-clb)"
+		echo -e "    Its inbound rules open to 0.0.0.0/0 (the whole internet):"
+		echo -e "      • 80   → cube-webui + cube-proxy (HTTP)"
+		echo -e "      • 443  → cube-proxy (HTTPS)"
+		echo -e "      • 3000 → cube-api"
+		echo -e "    VPC-internal only (not reachable from the internet):"
+		echo -e "      • 8089 → cube-master (internal CLB)"
+	else
+		echo -e "      ${GREEN}cubesandbox-sg-clb${NC}        : VPC-internal service ports for the CLBs below"
+		echo -e "    All CLBs above share the CLB security group:"
+		echo -e "      ${GREEN}${clb_sg_id:-cubesandbox-sg-clb}${NC} (name: cubesandbox-sg-clb)"
+		echo -e "    Its inbound rules are scoped to the VPC CIDR 10.0.0.0/16 (no public exposure):"
+		echo -e "      • 80   → cube-webui + cube-proxy (HTTP)"
+		echo -e "      • 443  → cube-proxy (HTTPS)"
+		echo -e "      • 3000 → cube-api"
+		echo -e "      • 8089 → cube-master"
+	fi
+	echo -e "    Jumpserver SSH 443 lives on cubesandbox-sg-jumpserver, not the CLB group."
 	echo ""
 }
 
@@ -4522,6 +4902,7 @@ main() {
 	# the TENCENTCLOUD_* → TF_VAR_* mapping (e.g. region must be set before plan).
 	prompt_deployment_env
 	setup_env
+	load_resolved_tfvars_file
 	_setup_jump_proxy
 
 	# 1. Initialize terraform
@@ -4618,25 +4999,32 @@ main() {
 	#   dependencies; everything else attaches to this network.
 	# ============================================================
 	_apply_phase "Step: Configure subnet + NAT gateway" \
-		tencentcloud_subnet.demo \
-		tencentcloud_nat_gateway.demo \
+		tencentcloud_subnet.cluster \
+		tencentcloud_nat_gateway.cluster \
 		tencentcloud_route_table_entry.nat \
-		tencentcloud_security_group_rule_set.demo \
-		tencentcloud_key_pair.demo || {
+		tencentcloud_security_group_rule_set.jumpserver \
+		tencentcloud_security_group_rule_set.compute \
+		tencentcloud_security_group_rule_set.tke_pod \
+		tencentcloud_security_group_rule_set.clb \
+		tencentcloud_key_pair.cluster || {
 		echo -e "${RED}✗ Network provisioning failed; aborting deployment.${NC}"
 		exit 1
 	}
 
 	# ============================================================
-	# Step 2/9 — TCR (container registry) service
+	# Step 2/9 — TCR (container registry) service, optional
 	# ============================================================
-	_apply_phase "Step: Configure TCR service" \
-		tencentcloud_tcr_vpc_attachment.demo \
-		tencentcloud_tcr_namespace.demo \
-		tencentcloud_tcr_token.demo || {
-		echo -e "${RED}✗ TCR provisioning failed; aborting deployment.${NC}"
-		exit 1
-	}
+	if [ "${TF_VAR_use_tcr:-false}" = "true" ]; then
+		_apply_phase "Step: Configure TCR service" \
+			tencentcloud_tcr_vpc_attachment.cluster[0] \
+			tencentcloud_tcr_namespace.cluster[0] \
+			tencentcloud_tcr_token.cluster[0] || {
+			echo -e "${RED}✗ TCR provisioning failed; aborting deployment.${NC}"
+			exit 1
+		}
+	else
+		echo -e "${GREEN}✓ TCR disabled; using public component images.${NC}"
+	fi
 
 	# ============================================================
 	# Step 3/9 — Purchase CVMs: jump-server + compute nodes
@@ -4672,28 +5060,27 @@ main() {
 	fi
 
 	# ============================================================
-	# Step 4/9 — jump-server initialization
-	#   Wait for SSH (443), upload the SSH key + bundle + cubemastercli, write the
-	#   TCR token onto the jump-server, then (for a TKE deployment) log in to TCR
-	#   and build/push the four component images.
+	# Step 4/9 — jump-server initialization and optional TCR image build/push
 	# ============================================================
-	banner "Step: Initialize jump-server (TCR login + image build/push)"
+	banner "Step: Initialize jump-server"
 	wait_jumpserver_ready || {
 		echo -e "${RED}✗ jump-server not reachable; aborting deployment.${NC}"
 		exit 1
 	}
-	# Write the TCR access token onto the jump-server (needed for docker login).
-	_apply_phase "Step: Deploy TCR token to jump-server" \
-		null_resource.tcr_token_deploy || {
-		echo -e "${RED}✗ Failed to deploy the TCR token to the jump-server; aborting.${NC}"
-		exit 1
-	}
-	# TKE is always created, so the component images are always built and pushed.
 	IMAGES_OK=1
-	tcr_build_and_push
-	if [ "${IMAGES_OK}" != "1" ]; then
-		echo -e "${RED}✗ Component image build/push failed; aborting deployment.${NC}"
-		exit 1
+	if [ "${TF_VAR_use_tcr:-false}" = "true" ]; then
+		_apply_phase "Step: Deploy TCR token to jump-server" \
+			null_resource.tcr_token_deploy[0] || {
+			echo -e "${RED}✗ Failed to deploy the TCR token to the jump-server; aborting.${NC}"
+			exit 1
+		}
+		tcr_build_and_push
+		if [ "${IMAGES_OK}" != "1" ]; then
+			echo -e "${RED}✗ Component image build/push failed; aborting deployment.${NC}"
+			exit 1
+		fi
+	else
+		echo -e "${GREEN}✓ Public images configured; skipping TCR token deploy and image build/push.${NC}"
 	fi
 
 	# ============================================================
@@ -4736,20 +5123,18 @@ main() {
 	_init_redis
 
 	# ============================================================
-	# Step 5b/9 — CFS shared storage for cube-master
-	#   Provision the CFS (Cloud File Storage) NFS share BEFORE the TKE addons so
-	#   the cube-master Deployment can mount it (ReadWriteMany) at
-	#   /data/CubeMaster/storage across all replicas. CFS is base infra
-	#   (tencentcloud provider), so it is created here with the kubernetes provider
-	#   still OFF. Targeting the file system + access rule pulls in the access
-	#   group; the VPC/subnet already exist from Step 1.
+	# Step 5b/9 — CFS shared storage for cube-master, optional
 	# ============================================================
-	_apply_phase "Step: Configure CFS shared storage" \
-		tencentcloud_cfs_access_rule.cubemaster_data \
-		tencentcloud_cfs_file_system.cubemaster_data || {
-		echo -e "${RED}✗ CFS provisioning failed; aborting deployment.${NC}"
-		exit 1
-	}
+	if [ "${TF_VAR_use_cfs:-false}" = "true" ]; then
+		_apply_phase "Step: Configure CFS shared storage" \
+			tencentcloud_cfs_access_rule.cubemaster_data[0] \
+			tencentcloud_cfs_file_system.cubemaster_data[0] || {
+			echo -e "${RED}✗ CFS provisioning failed; aborting deployment.${NC}"
+			exit 1
+		}
+	else
+		echo -e "${GREEN}✓ CFS disabled; cube-master uses pod-local emptyDir storage (single replica default).${NC}"
+	fi
 
 	# ============================================================
 	# Step 6/9 — TKE cluster + addons
@@ -4806,10 +5191,24 @@ main() {
 	# The apiserver is intranet-only: open the jumpserver tunnel and point the
 	# LOCAL kubeconfig at it, so the kubernetes provider (addons apply below)
 	# and the API-server probe can reach the cluster from outside the VPC.
-	_open_apiserver_tunnel || echo -e "  ${YELLOW}⚠ Could not open the intranet API Server tunnel; addon deployment may fail${NC}"
+	_open_apiserver_tunnel || {
+		echo -e "  ${RED}✗ Could not open the intranet API Server tunnel; aborting before addon deployment.${NC}"
+		echo -e "  ${YELLOW}  Re-run after the jumpserver SSH(443) and TKE intranet endpoint are reachable.${NC}"
+		exit 1
+	}
 
 	# 6b) Deploy the addons once the API Server answers.
-	_wait_tke_api_server || echo -e "  ${YELLOW}⚠ TKE API Server not confirmed ready; attempting addon deployment anyway${NC}"
+	_wait_tke_api_server || {
+		echo -e "  ${RED}✗ TKE API Server was not confirmed ready through the jumpserver tunnel; aborting before addon deployment.${NC}"
+		exit 1
+	}
+	_localize_kubeconfig
+	if ! grep -Eq "^[[:space:]]*server:[[:space:]]*https://127\\.0\\.0\\.1:${APISERVER_LOCAL_PORT}" "${SCRIPT_DIR}/.kube/config" 2>/dev/null; then
+		echo -e "  ${RED}✗ Local kubeconfig is not pointing at the jumpserver tunnel; aborting before addon deployment.${NC}"
+		echo -e "  ${YELLOW}  Expected server: https://127.0.0.1:${APISERVER_LOCAL_PORT}${NC}"
+		echo -e "  ${YELLOW}  Current server: $(grep -E '^[[:space:]]*server:' "${SCRIPT_DIR}/.kube/config" 2>/dev/null | head -n1 || echo 'N/A')${NC}"
+		exit 1
+	fi
 	# Upload the freshly written kubeconfig to the jump-server (for kubectl).
 	_setup_jumpserver_key
 	# addons prerequisite: the cube-proxy TLS certificate (webui-nginx.conf was
@@ -4830,7 +5229,6 @@ main() {
 	_set_phase_flags "$(phase_addons_flags)"
 	STEP2_LABEL="Step: Deploy TKE addons"
 	STEP2_TARGETS=(
-		local_file.tke_kubeconfig[0]
 		kubernetes_namespace.cubesandbox[0]
 		tls_private_key.cube_egress_ca[0]
 		tls_self_signed_cert.cube_egress_ca[0]
@@ -4901,7 +5299,9 @@ main() {
 	# then read the private IPs from the output (refreshing them if they are
 	# stale relative to the state). Always print the reason so it is never a
 	# silent "nothing happened".
-	local compute_in_state compute_ips compute_count
+	compute_in_state=""
+	compute_ips=""
+	compute_count=""
 	compute_in_state=$(terraform state list 2>/dev/null | grep -c '^tencentcloud_instance\.compute\[' 2>/dev/null) || compute_in_state=0
 	compute_ips=$(terraform output -json compute_private_ips 2>/dev/null || echo "[]")
 	compute_count=$(echo "$compute_ips" | jq -r 'length' 2>/dev/null || echo "0")
@@ -4967,7 +5367,7 @@ main() {
 	echo ""
 
 	# MySQL info
-	local mysql_ip
+	mysql_ip=""
 	mysql_ip=$(terraform output -raw mysql_intranet_ip 2>/dev/null || echo "")
 	if [ -n "$mysql_ip" ]; then
 		echo -e "  ${CYAN}MySQL:${NC}"
@@ -4981,7 +5381,7 @@ main() {
 	fi
 
 	# Redis info
-	local redis_ip
+	redis_ip=""
 	redis_ip=$(terraform output -raw redis_intranet_ip 2>/dev/null || echo "")
 	if [ -n "$redis_ip" ]; then
 		echo -e "  ${CYAN}Redis:${NC}"
@@ -4993,10 +5393,10 @@ main() {
 	fi
 
 	# TKE info
-	local tke_id_info
+	tke_id_info=""
 	tke_id_info=$(terraform output -raw tke_cluster_id 2>/dev/null || echo "")
 	if [ -n "$tke_id_info" ]; then
-		local tke_kc
+		tke_kc=""
 		tke_kc=$(terraform output -raw tke_kube_config 2>/dev/null || echo "")
 		echo -e "  ${CYAN}TKE:${NC}"
 		echo -e "    Cluster ID : ${tke_id_info}"
@@ -5014,8 +5414,11 @@ main() {
 	# Web UI, and how to control which ports are exposed). No-op for CVM-only.
 	print_cluster_operator_help
 
-	# Final step: persist the user's selections for an easy re-create after destroy
+	# Final step: persist both the human selections and the actual resolved
+	# Terraform values after fallback, so .env cannot drift from the deployed
+	# resource shape.
 	save_env_file
+	write_resolved_tfvars_file
 	echo ""
 }
 
