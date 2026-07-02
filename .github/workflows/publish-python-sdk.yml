@@ -86,7 +86,7 @@ jobs:
         if: steps.check_changes.outputs.changed == 'true'
         working-directory: sdk/python
         run: |
-          pip install -e ".[dev]" 2>/dev/null || pip install -e .
+          pip install -e ".[dev]"
           python -m pytest tests/ -v
 
       - name: Build package

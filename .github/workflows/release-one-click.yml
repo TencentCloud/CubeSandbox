@@ -3,7 +3,7 @@ name: Release One-Click Bundle
 on:
   push:
     tags:
-      - '*'
+      - 'v*'
 
 concurrency:
   group: release-one-click-${{ github.ref }}
