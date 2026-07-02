@@ -178,7 +178,7 @@ fi
 case "${TARGET_ARCH}" in
   "x86_64")
     VM_MACHINE='q35'
-    BIOS_PARAM=''
+    BIOS_PARAM=()
     ;;
   "aarch64")
     VM_MACHINE=virt;
@@ -201,7 +201,8 @@ QEMU_ARGS=(
   -m "${VM_MEMORY_MB}"
   -smp "${VM_CPUS}"
   -device virtio-rng-pci
-  -drive if=virtio,format=qcow2,file="${IMAGE_PATH}"
+  -drive if=none,id=drive0,format=qcow2,file="${IMAGE_PATH}"
+  -device virtio-blk-pci,drive=drive0
   -nic user,model=virtio-net-pci,hostfwd=tcp::"${SSH_PORT}"-:22,hostfwd=tcp::"${CUBE_API_PORT}"-:3000,hostfwd=tcp::"${CUBE_PROXY_HTTP_PORT}"-:80,hostfwd=tcp::"${CUBE_PROXY_HTTPS_PORT}"-:443,hostfwd=tcp::"${WEB_UI_PORT}"-:12088
 )
 
