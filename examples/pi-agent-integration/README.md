@@ -129,6 +129,10 @@ python network_policy.py
   (`x-api-key` for Anthropic, `Authorization: Bearer` otherwise), so
   `printenv` inside the sandbox never shows the real key — it only sees a
   placeholder.
+- Because Pi runs on Node.js (which ignores the system CA store), the script
+  sets `NODE_EXTRA_CA_CERTS` so Pi trusts the CubeEgress interception CA;
+  without it the vault path fails with `Connection error`. Override the bundle
+  path via `PI_NODE_EXTRA_CA_CERTS` if your image keeps the CA elsewhere.
 - Any other destination returns `403 Forbidden - CubeEgress`.
 
 If the agent needs extra hosts (package registries, MCP servers), add matching
@@ -141,7 +145,7 @@ allow rules or preinstall those dependencies into the template.
 | `pi: command not found` in preflight | Template not rebuilt after CLI change | Rebuild the image, re-register the template |
 | Auth error from the provider | Key not forwarded (direct) or missing inject rule (vault) | Pass `envs={...}` or fix the rule's `sni`/`host` |
 | `403 Forbidden - CubeEgress` | Default-deny with no matching allow rule | Add the LLM host (and any extra hosts) to the rules |
-| SSL handshake failure to the LLM host | Sandbox doesn't trust the CubeEgress CA | Rebuild the template with the Cube CA enabled, or set `SSL_CERT_FILE` |
+| `Connection error` / TLS failure from Pi on the vault path | Pi runs on Node, which ignores the system CA store and won't trust the CubeEgress interception CA | The script sets `NODE_EXTRA_CA_CERTS` to the system bundle; override with `PI_NODE_EXTRA_CA_CERTS` if your CA lives elsewhere |
 | Readiness probe timeout | Image without envd | Ensure `FROM ghcr.io/tencentcloud/cubesandbox-base:...` |
 | `pause()`/`connect()` errors | Platform too old for snapshots | Upgrade the CubeSandbox platform |
 

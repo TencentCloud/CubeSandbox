@@ -45,6 +45,13 @@ from _pi_common import ensure_success, run_command, sandbox_identifier
 
 PLACEHOLDER_KEY = "cube-egress-managed-placeholder"
 
+# Pi runs on Node.js, which uses its own bundled CA store and ignores the system
+# trust store. On the vault path CubeEgress terminates TLS to inject the
+# credential, so Node must trust the CubeEgress root CA or every LLM call fails
+# with "Connection error". Point NODE_EXTRA_CA_CERTS at a bundle that includes
+# it; the CubeSandbox base image installs the CA into the system bundle below.
+DEFAULT_NODE_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+
 DEFAULT_PROMPT = (
     "Reply with a single short sentence confirming you can reach the LLM API, "
     "then write that sentence to {workspace}/egress_check.md."
@@ -195,6 +202,11 @@ def main() -> int:
     sandbox_env = build_pi_env(include_secrets=False)
     key_name = provider_key_name(provider)
     sandbox_env[key_name] = PLACEHOLDER_KEY
+    # Let the Node-based Pi CLI trust the CubeEgress interception CA (see note
+    # on DEFAULT_NODE_CA_BUNDLE); without this the vault path fails TLS.
+    sandbox_env["NODE_EXTRA_CA_CERTS"] = os.environ.get(
+        "PI_NODE_EXTRA_CA_CERTS", DEFAULT_NODE_CA_BUNDLE
+    )
 
     print(f"Provider: {provider}")
     print(f"Allowed LLM host (default-deny for everything else): {host}")

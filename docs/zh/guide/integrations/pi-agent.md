@@ -237,8 +237,9 @@ version = sandbox.commands.run("pi --version", timeout=60)
 - **Node.js 版本。** Pi 需要较新的 Node 运行时；基础镜像自带的 apt Node 偏旧，务必通过 NodeSource 安装（Dockerfile 已如此）。
 - **Agent 状态目录。** `/root/.pi/agent` 保存 Pi 的会话缓存。镜像里保持它为空，避免跨租户泄露会话；它在构建时创建但不写入任何凭证。
 - **直连方式的密钥留存。** 直连方式（`envs=`）下密钥仅作用于该 exec 调用，但 Pi 可能把 provider 凭证缓存到其状态目录（`/root/.pi/agent/`），会在 `pause()` / `resume()` 后仍留在盘上。对隔离要求高时优先用保险柜方式（`network_policy.py`），密钥完全不进入 VM。
-- **CubeEgress CA。** 保险柜方式要求沙箱信任 CubeEgress 根 CA。通过
-  `cubemastercli tpl create-from-image` 构建的模板默认已开启。
+- **CubeEgress CA（Node）。** 保险柜方式要求沙箱信任 CubeEgress 根 CA，基础镜像已把它装入系统 CA 包。
+  但 Pi 基于 Node.js、忽略系统 CA 库，因此 `network_policy.py` 还会设置 `NODE_EXTRA_CA_CERTS`
+  （可用 `PI_NODE_EXTRA_CA_CERTS` 覆盖）——否则 vault 路径会以 `Connection error` 失败。
 - **出网副作用。** 需要 `npm install` 或拉取 MCP 工具的任务，要放行相应 host 或预装进模板。
 - **交互式 TTY 功能。** Pi TUI 在 E2B 协议下不可用。请用无交互 `--print --mode json`，多轮对话由宿主脚本驱动。
 
@@ -249,7 +250,7 @@ version = sandbox.commands.run("pi --version", timeout=60)
 | preflight 报 `pi: command not found` | CLI 变更后未重建模板 | 重建镜像并重新注册模板 |
 | provider 鉴权失败 | 密钥未传入（直连）或缺少 inject 规则（vault） | 传 `envs={...}` 或修正规则的 `sni`/`host` |
 | `403 Forbidden - CubeEgress` | 默认拒绝且无匹配放行规则 | 把 LLM host（及所需其他 host）加入规则 |
-| 到 LLM host 的 SSL 握手失败 | 沙箱不信任 CubeEgress CA | 重建模板启用 Cube CA，或设置 `SSL_CERT_FILE` |
+| vault 下 Pi 报 `Connection error` / TLS 失败 | Pi 的 Node 运行时忽略系统 CA 库，不信任 CubeEgress CA | 示例已设 `NODE_EXTRA_CA_CERTS`；若 CA 在别处用 `PI_NODE_EXTRA_CA_CERTS` 覆盖 |
 | 模板创建卡在 `PULLING` | Cube 节点无法访问 registry | 推送到集群可访问的 registry，必要时提供鉴权 |
 | 就绪探针超时 | 基础镜像缺少 envd | 确认 `FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
 | `pause()` / `connect()` 报错 | 平台版本过低不支持快照 | 升级 CubeSandbox 平台 |

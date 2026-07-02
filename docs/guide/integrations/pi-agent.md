@@ -269,9 +269,11 @@ version = sandbox.commands.run("pi --version", timeout=60)
   dir (`/root/.pi/agent/`), which survives `pause()` / `resume()`. For strict
   isolation prefer the vault flavor (`network_policy.py`), where the key never
   enters the VM.
-- **CubeEgress CA.** For the vault flavor to work, the sandbox must trust the
-  CubeEgress root CA. This is on by default for templates built via
-  `cubemastercli tpl create-from-image`.
+- **CubeEgress CA (Node).** For the vault flavor the sandbox must trust the
+  CubeEgress root CA, which the base image installs into the system bundle. Pi
+  runs on Node.js, which ignores the system store, so `network_policy.py` also
+  sets `NODE_EXTRA_CA_CERTS` (override via `PI_NODE_EXTRA_CA_CERTS`) — without
+  it the vault path fails with `Connection error`.
 - **Egress side-effects.** Tasks that `npm install` or fetch MCP tools need those
   hosts allowed or preinstalled into the template.
 - **Interactive TTY features.** The Pi TUI is not available over the E2B
@@ -285,7 +287,7 @@ version = sandbox.commands.run("pi --version", timeout=60)
 | `pi: command not found` in preflight | Template not rebuilt after CLI change | Rebuild the image, re-register the template |
 | Provider auth failure | Key not forwarded (direct) or missing inject rule (vault) | Pass `envs={...}` or fix the rule's `sni`/`host` |
 | `403 Forbidden - CubeEgress` | Default-deny with no matching allow rule | Add the LLM host (and any extra hosts) to the rules |
-| SSL handshake failure to the LLM host | Sandbox doesn't trust the CubeEgress CA | Rebuild with the Cube CA enabled, or set `SSL_CERT_FILE` |
+| `Connection error` / TLS failure from Pi (vault) | Pi's Node runtime ignores the system CA store, so it won't trust the CubeEgress CA | The example sets `NODE_EXTRA_CA_CERTS`; override with `PI_NODE_EXTRA_CA_CERTS` if the CA lives elsewhere |
 | Template creation stuck in `PULLING` | Registry unreachable from Cube nodes | Push to a registry the cluster can reach; supply auth if needed |
 | Readiness probe timeout | Base image without envd | Ensure `FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
 | `pause()` / `connect()` errors | Platform too old for snapshots | Upgrade the CubeSandbox platform |

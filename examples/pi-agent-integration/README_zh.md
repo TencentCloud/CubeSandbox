@@ -114,6 +114,9 @@ python network_policy.py
 - 出网默认拒绝，仅放行 LLM host（`PI_LLM_HOST`）。
 - CubeEgress 在链路上把 provider 密钥作为 HTTP 头注入（Anthropic 用 `x-api-key`，其他用
   `Authorization: Bearer`），因此沙箱内 `printenv` 看不到真实密钥，只有占位值。
+- Pi 基于 Node.js（忽略系统 CA 库），脚本会设置 `NODE_EXTRA_CA_CERTS` 让 Pi 信任 CubeEgress 的
+  拦截 CA；否则 vault 路径会以 `Connection error` 失败。若镜像里 CA 路径不同，可用
+  `PI_NODE_EXTRA_CA_CERTS` 覆盖。
 - 任何其他目的地都会返回 `403 Forbidden - CubeEgress`。
 
 若 Agent 需要访问额外主机（包镜像源、MCP 服务器等），请增加对应的放行规则，或把这些依赖预装进模板。
@@ -125,7 +128,7 @@ python network_policy.py
 | preflight 报 `pi: command not found` | CLI 变更后未重建模板 | 重建镜像并重新注册模板 |
 | provider 鉴权失败 | 密钥未传入（直连）或缺少 inject 规则（vault） | 传 `envs={...}` 或修正规则的 `sni`/`host` |
 | `403 Forbidden - CubeEgress` | 默认拒绝且无匹配放行规则 | 把 LLM host（及所需其他 host）加入规则 |
-| 到 LLM host 的 SSL 握手失败 | 沙箱不信任 CubeEgress CA | 重建模板启用 Cube CA，或设置 `SSL_CERT_FILE` |
+| vault 路径下 Pi 报 `Connection error` / TLS 失败 | Pi 基于 Node，忽略系统 CA 库，不信任 CubeEgress 拦截 CA | 脚本已把 `NODE_EXTRA_CA_CERTS` 指向系统 CA 包；若 CA 在别处，用 `PI_NODE_EXTRA_CA_CERTS` 覆盖 |
 | 就绪探针超时 | 镜像缺少 envd | 确认 `FROM ghcr.io/tencentcloud/cubesandbox-base:...` |
 | `pause()`/`connect()` 报错 | 平台版本过低不支持快照 | 升级 CubeSandbox 平台 |
 
