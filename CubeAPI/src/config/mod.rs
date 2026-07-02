@@ -75,7 +75,7 @@ impl fmt::Debug for WebhookEndpointConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct ServerConfig {
     /// Bind address, e.g. "0.0.0.0:3000". Env var: CUBE_API_BIND (default "0.0.0.0:3000")
     #[serde(default = "default_bind")]
@@ -146,6 +146,39 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("bind", &self.bind)
+            .field("log_level", &self.log_level)
+            .field("worker_threads", &self.worker_threads)
+            .field("rate_limit_per_sec", &self.rate_limit_per_sec)
+            .field("cubemaster_url", &self.cubemaster_url)
+            .field("instance_type", &self.instance_type)
+            .field("sandbox_domain", &self.sandbox_domain)
+            .field("log_dir", &self.log_dir)
+            .field("log_prefix", &self.log_prefix)
+            .field("webhook", &self.webhook)
+            .field(
+                "auth_callback_url_configured",
+                &self
+                    .auth_callback_url
+                    .as_ref()
+                    .map(|url| !url.is_empty())
+                    .unwrap_or(false),
+            )
+            .field(
+                "database_url_configured",
+                &self
+                    .database_url
+                    .as_ref()
+                    .map(|url| !url.is_empty())
+                    .unwrap_or(false),
+            )
+            .finish()
+    }
 }
 
 fn default_bind() -> String {

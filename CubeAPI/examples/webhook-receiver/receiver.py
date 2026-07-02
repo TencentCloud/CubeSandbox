@@ -14,6 +14,7 @@ from typing import Any, Optional
 HOST = "127.0.0.1"
 PORT = 18080
 PATH = "/webhook"
+MAX_BODY_BYTES = 1024 * 1024
 
 HEADER_EVENT = "X-Cube-Webhook-Event"
 HEADER_DELIVERY = "X-Cube-Webhook-Delivery"
@@ -74,6 +75,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         if length < 0:
             self._respond(400, "invalid Content-Length\n")
+            return None
+        if length > MAX_BODY_BYTES:
+            self._respond(413, "payload too large\n")
             return None
         return self.rfile.read(length)
 

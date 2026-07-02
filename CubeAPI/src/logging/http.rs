@@ -14,6 +14,7 @@ use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use rand::Rng;
 use reqwest::{redirect::Policy, StatusCode, Url};
 use serde::Serialize;
 use serde_json::Value;
@@ -83,7 +84,11 @@ struct Delivery {
 }
 
 impl Delivery {
-    fn new(event: &LogEvent, endpoint: &Endpoint) -> anyhow::Result<Self> {
+    fn new(
+        event: &LogEvent,
+        endpoint: &Endpoint,
+        fields: &HashMap<String, Value>,
+    ) -> anyhow::Result<Self> {
         let id = Uuid::new_v4().to_string();
         let timestamp = event.timestamp.timestamp().to_string();
         let payload = WebhookPayload {
@@ -91,7 +96,7 @@ impl Delivery {
             timestamp: event.timestamp,
             level: event.level,
             event: event.event.clone(),
-            fields: sanitized_fields(&event.fields),
+            fields: fields.clone(),
         };
         let body = serde_json::to_vec(&payload)?;
         let signature = endpoint
@@ -150,9 +155,8 @@ impl HttpLogger {
         let queue_capacity = config.queue_capacity;
         let max_concurrency = config.max_concurrency;
         let flush_timeout = Duration::from_secs(config.flush_timeout_secs);
-        let max_outstanding = queue_capacity
-            .saturating_mul(endpoints.len().max(1))
-            .max(max_concurrency);
+        let max_outstanding =
+            max_outstanding_deliveries(queue_capacity, endpoints.len(), max_concurrency);
         let options = DeliveryOptions {
             max_retries: config.max_retries,
             initial_backoff_ms: config.initial_backoff_ms,
@@ -218,6 +222,19 @@ impl Logger for HttpLogger {
     fn name(&self) -> &'static str {
         "http"
     }
+}
+
+const MAX_OUTSTANDING_DELIVERY_TASKS: usize = 100_000;
+
+fn max_outstanding_deliveries(
+    queue_capacity: usize,
+    endpoint_count: usize,
+    max_concurrency: usize,
+) -> usize {
+    queue_capacity
+        .saturating_mul(endpoint_count.max(1))
+        .max(max_concurrency)
+        .min(MAX_OUTSTANDING_DELIVERY_TASKS)
 }
 
 fn validate_config(config: &WebhookConfig) -> anyhow::Result<()> {
@@ -323,11 +340,19 @@ fn spawn_deliveries(
     semaphore: &Arc<Semaphore>,
     options: DeliveryOptions,
 ) {
-    for endpoint in endpoints
+    let mut matching_endpoints = endpoints
         .iter()
         .filter(|endpoint| endpoint.matches(&event.event))
-    {
-        match Delivery::new(&event, endpoint) {
+        .peekable();
+
+    if matching_endpoints.peek().is_none() {
+        return;
+    }
+
+    let fields = sanitized_fields(&event.fields);
+
+    for endpoint in matching_endpoints {
+        match Delivery::new(&event, endpoint, &fields) {
             Ok(delivery) => {
                 deliveries.spawn(deliver_with_retry(
                     delivery,
@@ -525,10 +550,23 @@ fn is_retryable_status(status: StatusCode) -> bool {
 }
 
 fn backoff_delay(attempt: usize, initial_ms: u64, max_ms: u64) -> Duration {
+    if initial_ms == 0 || max_ms == 0 {
+        return Duration::from_millis(0);
+    }
+
     let multiplier = 1_u64
         .checked_shl(attempt.min(63) as u32)
         .unwrap_or(u64::MAX);
-    Duration::from_millis(initial_ms.saturating_mul(multiplier).min(max_ms))
+    let base_ms = initial_ms.saturating_mul(multiplier).min(max_ms);
+
+    if base_ms <= 1 {
+        return Duration::from_millis(base_ms);
+    }
+
+    let jitter_ms = rand::thread_rng().gen_range(0..base_ms);
+    let delay_ms = (base_ms / 2).saturating_add(jitter_ms).min(max_ms);
+
+    Duration::from_millis(delay_ms)
 }
 
 fn request_error_kind(error: &reqwest::Error) -> &'static str {
@@ -571,18 +609,123 @@ fn is_reserved_field(key: &str) -> bool {
     matches!(key, "id" | "timestamp" | "level" | "event")
 }
 
+/// Returns true for field names that are likely to carry credentials or signing material.
+///
+/// The matcher intentionally avoids unrestricted substring checks. This keeps benign
+/// metadata such as `token_bucket_config`, `password_reset_url`, or
+/// `credentials_verification_status` from being stripped while still redacting common
+/// credential field names and compound names such as `access_token`, `private_key`,
+/// `db_password`, or `webhook_signature`.
 fn is_sensitive_field(key: &str) -> bool {
-    let normalized = key.to_ascii_lowercase().replace('-', "_");
-    normalized.contains("password")
-        || normalized.contains("secret")
-        || normalized.contains("token")
-        || normalized.contains("authorization")
-        || normalized.contains("credential")
-        || normalized.contains("signature")
-        || normalized == "cookie"
-        || normalized == "set_cookie"
-        || normalized == "api_key"
-        || normalized == "apikey"
+    let normalized: String = key
+        .chars()
+        .map(|ch| match ch {
+            '-' | '.' | ' ' => '_',
+            _ => ch.to_ascii_lowercase(),
+        })
+        .collect();
+    let normalized = normalized.trim_matches('_');
+
+    if normalized.is_empty() {
+        return false;
+    }
+
+    const EXACT_FIELDS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "api_token",
+        "auth",
+        "auth_header",
+        "authorization",
+        "authorization_header",
+        "bearer",
+        "bearer_token",
+        "client_secret",
+        "cookie",
+        "credential",
+        "credentials",
+        "csrf",
+        "csrf_token",
+        "hashed_password",
+        "id_token",
+        "idtoken",
+        "jwt",
+        "jwt_token",
+        "passphrase",
+        "password",
+        "password_digest",
+        "password_hash",
+        "passwd",
+        "private_key",
+        "private_key_pem",
+        "privatekey",
+        "refresh_token",
+        "refreshtoken",
+        "secret",
+        "secret_key",
+        "secret_value",
+        "secretkey",
+        "session_token",
+        "set_cookie",
+        "signature",
+        "token",
+        "token_value",
+        "webhook_secret",
+        "webhook_signature",
+        "x_api_key",
+        "xapikey",
+    ];
+
+    if EXACT_FIELDS.contains(&normalized) {
+        return true;
+    }
+
+    const SENSITIVE_SUFFIXES: &[&str] = &[
+        "_api_key",
+        "_auth",
+        "_authorization",
+        "_bearer",
+        "_cookie",
+        "_credential",
+        "_credentials",
+        "_csrf",
+        "_jwt",
+        "_passphrase",
+        "_password",
+        "_passwd",
+        "_private_key",
+        "_secret",
+        "_secret_key",
+        "_signature",
+        "_token",
+    ];
+
+    if SENSITIVE_SUFFIXES
+        .iter()
+        .any(|suffix| normalized.ends_with(suffix))
+    {
+        return true;
+    }
+
+    const SENSITIVE_PREFIXES: &[&str] = &[
+        "access_token_",
+        "api_key_",
+        "authorization_",
+        "bearer_",
+        "client_secret_",
+        "csrf_",
+        "id_token_",
+        "jwt_",
+        "private_key_",
+        "refresh_token_",
+        "secret_key_",
+        "set_cookie_",
+        "x_api_key_",
+    ];
+
+    SENSITIVE_PREFIXES
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
 }
 
 #[cfg(test)]
@@ -598,6 +741,148 @@ mod tests {
     use axum::{extract::State, routing::post, Router};
 
     use super::*;
+
+    fn valid_webhook_config() -> WebhookConfig {
+        WebhookConfig {
+            endpoints: vec![endpoint(&["*"])],
+            queue_capacity: 16,
+            timeout_secs: 5,
+            max_retries: 2,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 1_000,
+            max_concurrency: 4,
+            flush_timeout_secs: 5,
+        }
+    }
+
+    #[test]
+    fn validate_config_accepts_valid_values() {
+        let config = valid_webhook_config();
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_config_rejects_invalid_values() {
+        let mut config = valid_webhook_config();
+        config.queue_capacity = 0;
+        assert!(validate_config(&config).is_err());
+
+        let mut config = valid_webhook_config();
+        config.timeout_secs = 0;
+        assert!(validate_config(&config).is_err());
+
+        let mut config = valid_webhook_config();
+        config.max_concurrency = 0;
+        assert!(validate_config(&config).is_err());
+
+        let mut config = valid_webhook_config();
+        config.flush_timeout_secs = 0;
+        assert!(validate_config(&config).is_err());
+
+        let mut config = valid_webhook_config();
+        config.initial_backoff_ms = 2_000;
+        config.max_backoff_ms = 1_000;
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn backoff_delay_handles_zero_and_single_millisecond_values() {
+        assert_eq!(backoff_delay(0, 0, 1_000), Duration::from_millis(0));
+        assert_eq!(backoff_delay(0, 100, 0), Duration::from_millis(0));
+        assert_eq!(backoff_delay(0, 1, 1_000), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn backoff_delay_applies_exponential_base_with_jitter_bounds() {
+        for attempt in 0..100 {
+            let delay = backoff_delay(2, 100, 1_000);
+            let millis = delay.as_millis() as u64;
+
+            // attempt=2 gives base_ms=400. With jitter, the delay should be in
+            // [base/2, base/2 + base), unless capped by max_ms.
+            assert!(
+                (200..600).contains(&millis),
+                "attempt {attempt}: delay {millis}ms outside expected jitter range"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_delay_caps_extreme_values() {
+        for attempt in [10, 63, 64, usize::MAX] {
+            let delay = backoff_delay(attempt, 1_000, 1_500);
+            let millis = delay.as_millis() as u64;
+
+            assert!(
+                (750..=1_500).contains(&millis),
+                "attempt {attempt}: capped delay {millis}ms outside expected range"
+            );
+        }
+    }
+
+    #[test]
+    fn max_outstanding_preserves_default_scale() {
+        assert_eq!(max_outstanding_deliveries(1024, 1, 32), 1024);
+        assert_eq!(max_outstanding_deliveries(1, 1, 32), 32);
+        assert_eq!(max_outstanding_deliveries(128, 3, 32), 384);
+    }
+
+    #[test]
+    fn max_outstanding_caps_extreme_configurations() {
+        assert_eq!(
+            max_outstanding_deliveries(100_000, 5, 32),
+            MAX_OUTSTANDING_DELIVERY_TASKS
+        );
+        assert_eq!(
+            max_outstanding_deliveries(usize::MAX, usize::MAX, 32),
+            MAX_OUTSTANDING_DELIVERY_TASKS
+        );
+    }
+
+    #[test]
+    fn sensitive_field_matching_redacts_common_credentials() {
+        let sensitive_fields = [
+            "password",
+            "db_password",
+            "passwd",
+            "client_secret",
+            "access_token",
+            "refresh-token",
+            "id.token",
+            "private_key",
+            "private_key_pem",
+            "api_key",
+            "x-api-key",
+            "jwt",
+            "bearer",
+            "auth",
+            "csrf",
+            "authorization",
+            "set-cookie",
+            "webhook_signature",
+        ];
+
+        for field in sensitive_fields {
+            assert!(is_sensitive_field(field), "{field} should be redacted");
+        }
+    }
+
+    #[test]
+    fn sensitive_field_matching_keeps_non_secret_metadata() {
+        let safe_fields = [
+            "token_bucket_config",
+            "password_reset_url",
+            "credentials_verification_status",
+            "signature_algorithm",
+            "secretary_name",
+            "authored_by",
+            "cookie_policy",
+        ];
+
+        for field in safe_fields {
+            assert!(!is_sensitive_field(field), "{field} should not be redacted");
+        }
+    }
 
     fn endpoint(events: &[&str]) -> WebhookEndpointConfig {
         WebhookEndpointConfig {
@@ -678,7 +963,10 @@ mod tests {
             .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character)));
 
         let unsigned_endpoint = compile_endpoint(&endpoint(&["sandbox.created"]), 0).unwrap();
-        let unsigned_delivery = Delivery::new(&test_event(), &unsigned_endpoint).unwrap();
+        let unsigned_event = test_event();
+        let unsigned_fields = sanitized_fields(&unsigned_event.fields);
+        let unsigned_delivery =
+            Delivery::new(&unsigned_event, &unsigned_endpoint, &unsigned_fields).unwrap();
         assert!(unsigned_delivery.signature.is_none());
     }
 
@@ -696,7 +984,8 @@ mod tests {
     fn payload_serialization_flattens_fields_and_includes_delivery_metadata() {
         let event = test_event();
         let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
-        let delivery = Delivery::new(&event, &compiled).unwrap();
+        let fields = sanitized_fields(&event.fields);
+        let delivery = Delivery::new(&event, &compiled, &fields).unwrap();
         let payload: Value = serde_json::from_slice(&delivery.body).unwrap();
 
         assert_eq!(payload["id"], delivery.id);
@@ -721,7 +1010,8 @@ mod tests {
                 }),
             );
         let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
-        let delivery = Delivery::new(&event, &compiled).unwrap();
+        let fields = sanitized_fields(&event.fields);
+        let delivery = Delivery::new(&event, &compiled, &fields).unwrap();
         let payload: Value = serde_json::from_slice(&delivery.body).unwrap();
 
         assert!(payload.get("access_token").is_none());
