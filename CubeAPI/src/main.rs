@@ -136,6 +136,11 @@ fn main() -> anyhow::Result<()> {
     // ── Config ─────────────────────────────────────────────────────────────
     let mut cfg = config::ServerConfig::from_env().unwrap_or_default();
 
+    // Fail fast when CUBE_API_WEBHOOK_ENDPOINTS is set but malformed; otherwise
+    // webhooks would be silently disabled. Must run after from_env() so values
+    // loaded from .env by dotenvy are visible.
+    config::validate_webhook_endpoints_env()?;
+
     // CLI flags override env vars / config file (highest priority)
     if cli.debug {
         cfg.log_level = "debug".to_string();

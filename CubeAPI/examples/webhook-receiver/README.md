@@ -32,11 +32,13 @@ Export the endpoint configuration before starting CubeAPI. The endpoint secret m
 
 ```bash
 cd CubeAPI
-export CUBE_API_WEBHOOK_ENDPOINTS='[{"url":"http://127.0.0.1:18080/webhook","events":["sandbox.created","sandbox.deleted","sandbox.paused","sandbox.resumed"],"secret":"test-secret","enabled":true}]'
+export CUBE_API_WEBHOOK_ENDPOINTS='[{"url":"http://127.0.0.1:18080/webhook","events":["sandbox.created","sandbox.deleted","sandbox.paused","sandbox.resumed"],"secret":"test-secret","enabled":true,"allow_private_urls":true}]'
 cargo run
 ```
 
 Do not set `WEBHOOK_SECRET` in the receiver when testing an unsigned endpoint.
+
+`"allow_private_urls": true` is required here because the receiver listens on the loopback address `127.0.0.1`, which CubeAPI rejects by default. It exists to make local development work; do not enable it for production endpoints unless the target really is a trusted internal or loopback receiver.
 
 ## End-to-End Lifecycle Check
 
@@ -69,6 +71,7 @@ If CubeAPI authentication is enabled in your deployment, add the required authen
 - `400 invalid JSON`: the request body is not valid UTF-8 JSON.
 - Connection refused or delivery retries: the receiver is not running, the port is unavailable, or the configured address is wrong.
 - No callback received: the endpoint may be disabled, its `events` list may not match, or CubeAPI may have been started before loading `CUBE_API_WEBHOOK_ENDPOINTS`.
+- CubeAPI fails to start with a "private, loopback, or link-local address" error: the receiver address is non-public, so the endpoint needs `"allow_private_urls": true`.
 - When CubeAPI runs in a container, `127.0.0.1` refers to that container. Use a reachable host address or container service name for the receiver.
 
 ## Alerting Adapter Pattern

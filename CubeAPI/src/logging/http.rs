@@ -8,7 +8,7 @@
 //! background Tokio task. `Logger::log()` only attempts to enqueue an event;
 //! it never waits for queue capacity or performs network I/O.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
@@ -272,6 +272,20 @@ fn compile_endpoint(config: &WebhookEndpointConfig, index: usize) -> anyhow::Res
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         bail!("webhook endpoint {index} must use an absolute HTTP(S) URL");
     }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("webhook endpoint {index} must not embed credentials in the URL");
+    }
+    match classify_host(&url) {
+        HostClass::Public => {}
+        HostClass::NonPublic if config.allow_private_urls => {}
+        HostClass::NonPublic => bail!(
+            "webhook endpoint {index} targets a private, loopback, or link-local address; \
+             set allow_private_urls=true on this endpoint to permit it"
+        ),
+        HostClass::Invalid => bail!(
+            "webhook endpoint {index} targets an unspecified, broadcast, or multicast address"
+        ),
+    }
 
     Ok(Endpoint {
         index,
@@ -279,6 +293,65 @@ fn compile_endpoint(config: &WebhookEndpointConfig, index: usize) -> anyhow::Res
         events: config.events.clone(),
         secret: config.secret.clone(),
     })
+}
+
+/// Startup-time classification of a webhook endpoint host.
+///
+/// Hostnames are not DNS-resolved; only IP literals and `localhost` are
+/// classified, so domain names that resolve to internal addresses are not
+/// detected here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HostClass {
+    /// Globally routable target; always accepted.
+    Public,
+    /// Loopback, private, link-local, unique-local, or `localhost`; accepted
+    /// only when the endpoint sets `allow_private_urls`.
+    NonPublic,
+    /// Unspecified, broadcast, or multicast; never a valid webhook receiver.
+    Invalid,
+}
+
+fn classify_host(url: &Url) -> HostClass {
+    let Some(host) = url.host_str() else {
+        return HostClass::Invalid;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return HostClass::NonPublic;
+    }
+    let ip_literal = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    match ip_literal.parse::<IpAddr>() {
+        Ok(ip) => classify_ip(ip),
+        Err(_) => HostClass::Public,
+    }
+}
+
+fn classify_ip(ip: IpAddr) -> HostClass {
+    match ip {
+        IpAddr::V4(ip) => {
+            if ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
+                HostClass::Invalid
+            } else if ip.is_loopback() || ip.is_private() || ip.is_link_local() {
+                HostClass::NonPublic
+            } else {
+                HostClass::Public
+            }
+        }
+        IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return classify_ip(IpAddr::V4(mapped));
+            }
+            if ip.is_unspecified() || ip.is_multicast() {
+                HostClass::Invalid
+            } else if ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local() {
+                HostClass::NonPublic
+            } else {
+                HostClass::Public
+            }
+        }
+    }
 }
 
 async fn run_dispatcher(
@@ -890,6 +963,7 @@ mod tests {
             events: events.iter().map(|event| (*event).to_string()).collect(),
             secret: None,
             enabled: true,
+            allow_private_urls: true,
         }
     }
 
@@ -900,6 +974,7 @@ mod tests {
                 events: vec!["*".to_string()],
                 secret: None,
                 enabled: true,
+                allow_private_urls: true,
             }],
             queue_capacity,
             timeout_secs: 1,
@@ -937,6 +1012,136 @@ mod tests {
 
         let mixed_wildcard = endpoint(&["*", "sandbox.created"]);
         assert!(compile_endpoint(&mixed_wildcard, 0).is_err());
+    }
+
+    fn endpoint_with_url(url: &str, allow_private_urls: bool) -> WebhookEndpointConfig {
+        let mut config = endpoint(&["*"]);
+        config.url = url.to_string();
+        config.allow_private_urls = allow_private_urls;
+        config
+    }
+
+    fn compile_endpoint_error(config: &WebhookEndpointConfig) -> String {
+        match compile_endpoint(config, 0) {
+            Ok(_) => panic!("endpoint should be rejected"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[test]
+    fn url_with_embedded_credentials_is_rejected() {
+        for allow_private_urls in [false, true] {
+            let config =
+                endpoint_with_url("http://user:pass@example.com/webhook", allow_private_urls);
+            let error = compile_endpoint_error(&config);
+            assert!(error.contains("must not embed credentials"));
+        }
+    }
+
+    #[test]
+    fn private_ip_is_rejected_by_default() {
+        for url in [
+            "http://10.0.0.1/webhook",
+            "http://172.16.0.1/webhook",
+            "http://192.168.1.1/webhook",
+            "http://[fd00::1]/webhook",
+        ] {
+            let config = endpoint_with_url(url, false);
+            assert!(
+                compile_endpoint(&config, 0).is_err(),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_is_rejected_by_default() {
+        for url in [
+            "http://127.0.0.1:18080/webhook",
+            "http://[::1]:18080/webhook",
+            "http://localhost:18080/webhook",
+            "http://[::ffff:127.0.0.1]/webhook",
+        ] {
+            let config = endpoint_with_url(url, false);
+            assert!(
+                compile_endpoint(&config, 0).is_err(),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn link_local_ip_is_rejected_by_default() {
+        for url in ["http://169.254.1.1/webhook", "http://[fe80::1]/webhook"] {
+            let config = endpoint_with_url(url, false);
+            assert!(
+                compile_endpoint(&config, 0).is_err(),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_private_urls_permits_local_receiver_address() {
+        for url in [
+            "http://127.0.0.1:18080/webhook",
+            "http://localhost:18080/webhook",
+            "http://192.168.1.1/webhook",
+        ] {
+            let config = endpoint_with_url(url, true);
+            assert!(
+                compile_endpoint(&config, 0).is_ok(),
+                "{url} should be permitted"
+            );
+        }
+
+        let public = endpoint_with_url("https://hooks.example.com/webhook", false);
+        assert!(compile_endpoint(&public, 0).is_ok());
+    }
+
+    #[test]
+    fn unspecified_broadcast_and_multicast_are_rejected_even_when_allowed() {
+        for url in [
+            "http://0.0.0.0/webhook",
+            "http://[::]/webhook",
+            "http://255.255.255.255/webhook",
+            "http://224.0.0.1/webhook",
+            "http://[ff02::1]/webhook",
+        ] {
+            let config = endpoint_with_url(url, true);
+            assert!(
+                compile_endpoint(&config, 0).is_err(),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn url_validation_errors_do_not_expose_url_userinfo_or_secret() {
+        let mut config =
+            endpoint_with_url("http://svc-user:super-secret-pass@10.1.2.3/webhook", false);
+        config.secret = Some("endpoint-signing-secret".to_string());
+        let error = compile_endpoint_error(&config);
+        for leaked in [
+            "svc-user",
+            "super-secret-pass",
+            "10.1.2.3",
+            "endpoint-signing-secret",
+        ] {
+            assert!(!error.contains(leaked), "error must not contain {leaked}");
+        }
+
+        let mut config = endpoint_with_url("http://192.168.7.9:9999/hook?token=abc", false);
+        config.secret = Some("endpoint-signing-secret".to_string());
+        let error = compile_endpoint_error(&config);
+        for leaked in [
+            "192.168.7.9",
+            "9999",
+            "token=abc",
+            "endpoint-signing-secret",
+        ] {
+            assert!(!error.contains(leaked), "error must not contain {leaked}");
+        }
     }
 
     #[test]

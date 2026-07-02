@@ -83,7 +83,7 @@ CubeAPI can asynchronously POST best-effort notifications to configured HTTP end
 - `sandbox.paused`
 - `sandbox.resumed`
 
-Webhooks are implemented as an internal logging backend, not as a new REST API route. API handlers emit `LogEvent` values, and the existing `MultiLogger` fans them out to `FileLogger` and, when configured, `HttpLogger`. HTTP delivery and retries run asynchronously and do not block sandbox create, delete, pause, or resume operations. A failed delivery does not change the sandbox API response. If an explicitly configured endpoint is invalid, CubeAPI fails during startup.
+Webhooks are implemented as an internal logging backend, not as a new REST API route. API handlers emit `LogEvent` values, and the existing `MultiLogger` fans them out to `FileLogger` and, when configured, `HttpLogger`. HTTP delivery and retries run asynchronously and do not block sandbox create, delete, pause, or resume operations. A failed delivery does not change the sandbox API response. If `CUBE_API_WEBHOOK_ENDPOINTS` is set but is not valid JSON, or an explicitly configured endpoint is invalid, CubeAPI fails during startup instead of silently disabling webhooks.
 
 ### Configuration
 
@@ -95,7 +95,8 @@ export CUBE_API_WEBHOOK_ENDPOINTS='[
     "url": "http://127.0.0.1:18080/webhook",
     "events": ["sandbox.created", "sandbox.deleted", "sandbox.paused", "sandbox.resumed"],
     "secret": "test-secret",
-    "enabled": true
+    "enabled": true,
+    "allow_private_urls": true
   }
 ]'
 ```
@@ -110,6 +111,18 @@ Each endpoint supports:
 | `events` | Event names subscribed to by this endpoint. |
 | `secret` | Optional HMAC secret. When omitted, the request is unsigned. |
 | `enabled` | Whether the endpoint is active. |
+| `allow_private_urls` | Optional, default `false`. Explicitly permit this endpoint to target a local-development or internal receiver, such as `localhost`, a loopback IP, a private IP, or a link-local IP. |
+
+### Endpoint URL Validation
+
+CubeAPI validates every configured endpoint URL at startup and refuses to start on a violation:
+
+- URLs that embed credentials (`http://user:pass@host/...`) are always rejected, regardless of `allow_private_urls`.
+- URLs targeting obviously invalid or unsafe addresses are always rejected, even when `allow_private_urls` is `true`: the unspecified addresses `0.0.0.0` and `::`, the broadcast address `255.255.255.255`, and multicast addresses (`224.0.0.0/4`, `ff00::/8`).
+- URLs targeting non-public addresses (loopback `127.0.0.0/8` and `::1`, private `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, and `fc00::/7`, link-local `169.254.0.0/16` and `fe80::/10`, or the hostname `localhost`) are rejected by default. Set `"allow_private_urls": true` on that endpoint to permit them; use this only for local development or trusted internal receivers.
+- Validation error messages identify the endpoint by index only; they never include the URL, embedded credentials, or the endpoint secret.
+
+This check classifies IP literals and the hostname `localhost` only. Domain names are not DNS-resolved at startup, so a hostname that resolves to an internal address is not detected; restrict outbound network access at the deployment layer if that matters for your environment.
 
 Event filtering follows these rules:
 

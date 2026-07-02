@@ -61,6 +61,12 @@ pub struct WebhookEndpointConfig {
 
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Allow this endpoint URL to target loopback, private, or link-local
+    /// addresses. Off by default so `CUBE_API_WEBHOOK_ENDPOINTS` cannot be
+    /// abused to reach internal network resources.
+    #[serde(default)]
+    pub allow_private_urls: bool,
 }
 
 impl fmt::Debug for WebhookEndpointConfig {
@@ -71,6 +77,7 @@ impl fmt::Debug for WebhookEndpointConfig {
             .field("events", &self.events)
             .field("secret_configured", &self.secret.is_some())
             .field("enabled", &self.enabled)
+            .field("allow_private_urls", &self.allow_private_urls)
             .finish()
     }
 }
@@ -214,11 +221,13 @@ fn default_log_prefix() -> String {
 }
 fn default_webhook_endpoints() -> Vec<WebhookEndpointConfig> {
     match std::env::var("CUBE_API_WEBHOOK_ENDPOINTS") {
+        Ok(value) if value.trim().is_empty() => Vec::new(),
         Ok(value) => match parse_webhook_endpoints(&value) {
             Ok(endpoints) => endpoints,
             Err(error) => {
                 tracing::warn!(
-                    error = %error,
+                    line = error.line(),
+                    column = error.column(),
                     "failed to parse CUBE_API_WEBHOOK_ENDPOINTS; using no webhook endpoints"
                 );
                 Vec::new()
@@ -235,6 +244,36 @@ fn default_webhook_endpoints() -> Vec<WebhookEndpointConfig> {
 }
 fn parse_webhook_endpoints(value: &str) -> serde_json::Result<Vec<WebhookEndpointConfig>> {
     serde_json::from_str(value)
+}
+
+/// Fails startup when `CUBE_API_WEBHOOK_ENDPOINTS` is set but malformed,
+/// instead of silently disabling webhooks. An empty or whitespace-only value
+/// is treated as unset. Error messages never echo the variable's contents.
+///
+/// Call after `ServerConfig::from_env()` so values loaded from `.env` by
+/// dotenvy are visible.
+pub fn validate_webhook_endpoints_env() -> anyhow::Result<()> {
+    match std::env::var("CUBE_API_WEBHOOK_ENDPOINTS") {
+        Ok(value) => validate_webhook_endpoints_json(&value),
+        Err(std::env::VarError::NotPresent) => Ok(()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("CUBE_API_WEBHOOK_ENDPOINTS is not valid Unicode")
+        }
+    }
+}
+
+fn validate_webhook_endpoints_json(value: &str) -> anyhow::Result<()> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
+    parse_webhook_endpoints(value).map(drop).map_err(|error| {
+        anyhow::anyhow!(
+            "CUBE_API_WEBHOOK_ENDPOINTS contains invalid JSON (error near line {}, column {}); \
+             expected a JSON array of webhook endpoint objects",
+            error.line(),
+            error.column()
+        )
+    })
 }
 fn default_webhook_queue_capacity() -> usize {
     1024
@@ -343,6 +382,7 @@ mod tests {
         assert!(endpoints[0].events.is_empty());
         assert!(endpoints[0].secret.is_none());
         assert!(endpoints[0].enabled);
+        assert!(!endpoints[0].allow_private_urls);
         assert_eq!(endpoints[1].events, vec!["sandbox.created".to_string()]);
         assert!(endpoints[1].secret.is_some());
         assert!(!endpoints[1].enabled);
@@ -366,5 +406,34 @@ mod tests {
         assert!(!debug.contains("password"));
         assert!(!debug.contains("sensitive"));
         assert!(debug.contains("secret_configured: true"));
+    }
+
+    #[test]
+    fn webhook_endpoints_env_validation_accepts_unset_empty_and_valid_values() {
+        assert!(validate_webhook_endpoints_json("").is_ok());
+        assert!(validate_webhook_endpoints_json("   ").is_ok());
+        assert!(validate_webhook_endpoints_json("[]").is_ok());
+        assert!(
+            validate_webhook_endpoints_json(r#"[{"url":"https://hooks.example/webhook"}]"#).is_ok()
+        );
+    }
+
+    #[test]
+    fn malformed_webhook_endpoints_json_fails_validation_without_exposing_input() {
+        let error = validate_webhook_endpoints_json(
+            r#"[{"url":"https://user:password@example.test/hook?token=sensitive","secret":"super-secret""#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("invalid JSON"));
+        for leaked in [
+            "super-secret",
+            "password",
+            "token=sensitive",
+            "example.test",
+        ] {
+            assert!(!error.contains(leaked), "error must not contain {leaked}");
+        }
     }
 }
