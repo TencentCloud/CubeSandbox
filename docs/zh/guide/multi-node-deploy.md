@@ -185,7 +185,7 @@ sudo ./down.sh
 | `ONE_CLICK_CONTROL_PLANE_IP` | 空 | 控制节点 IP，默认拼接为 `<ip>:8089` |
 | `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | 空 | 显式指定 CubeMaster 地址，优先级高于 `ONE_CLICK_CONTROL_PLANE_IP` |
 | `CUBE_SANDBOX_NODE_IP` | `10.0.0.10` | **必须修改。** 当前节点主网卡 IP |
-| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18`（取自 `config.toml`） | cubevs 本地网络 CIDR。需与控制节点一致。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /8~/30。安装时自动检测宿主机冲突。 |
+| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18`（取自 `config.toml`） | cubevs 本地网络 CIDR。需与控制节点一致。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /16~/24。安装时自动检测宿主机冲突。 |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | 设为 `1` 跳过冲突检测（不推荐）。 |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |
 

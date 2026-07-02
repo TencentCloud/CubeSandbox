@@ -7,7 +7,7 @@
 # cube-egress container service starts.
 #
 # We separate this from cube-egress-start.sh so the container service
-# remains a simple long-running unit; the iptables/route/sysctl state
+# remains a simple long-running unit; the iptables/route state
 # is owned by its own systemd unit with a matching ExecStop=down.
 
 set -euo pipefail

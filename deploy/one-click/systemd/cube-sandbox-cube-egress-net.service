@@ -1,5 +1,5 @@
 [Unit]
-Description=Cube Sandbox cube-egress host network rules (TPROXY + ip rule + sysctls)
+Description=Cube Sandbox cube-egress host network rules (TPROXY + ip rule)
 After=network-online.target cube-sandbox-network-agent.service
 Wants=network-online.target
 Requires=cube-sandbox-network-agent.service

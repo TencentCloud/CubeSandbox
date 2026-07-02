@@ -673,10 +673,21 @@ validate_interface_name() {
     || die "invalid ${name}: ${value} (expected 1-15 chars: letters, digits, '_', '.', ':', '-')"
 }
 
+validate_bool_01() {
+  local value="$1"
+  local name="${2:-value}"
+  case "${value}" in
+    0|1) ;;
+    *) die "${name} must be 0 or 1 (got: '${value}')" ;;
+  esac
+}
+
 patch_cubelet_config_template() {
   local cubelet_config="$1"
   local eth_name="${2:-}"
   local network_cidr="${3:-}"
+  local cube_router_enable="${4:-}"
+  local cube_router_cidr="${5:-}"
 
   ensure_file "${cubelet_config}"
   if [[ -L "${cubelet_config}" ]]; then
@@ -704,6 +715,35 @@ patch_cubelet_config_template() {
       log "patched cubevs CIDR: ${network_cidr}"
     else
       log "WARNING: Cubelet config missing cidr key; skipped CIDR patch (${cubelet_config})"
+    fi
+  fi
+
+  if [[ -n "${cube_router_enable}" ]]; then
+    validate_bool_01 "${cube_router_enable}" "CUBE_SANDBOX_CUBE_ROUTER_ENABLE"
+    local cube_router_enable_toml="false"
+    if [[ "${cube_router_enable}" == "1" ]]; then
+      cube_router_enable_toml="true"
+    fi
+    if grep -Eq '^[[:space:]]*cube_router_enable = ' "${cubelet_config}"; then
+      sed -i "s|cube_router_enable = .*|cube_router_enable = ${cube_router_enable_toml}|" "${cubelet_config}"
+      if ! grep -Fq "cube_router_enable = ${cube_router_enable_toml}" "${cubelet_config}"; then
+        log "WARNING: failed to patch cube_router_enable in Cubelet config (${cubelet_config})"
+      fi
+      log "patched cube-router enable: ${cube_router_enable_toml}"
+    else
+      log "WARNING: Cubelet config missing cube_router_enable key; skipped cube-router enable patch (${cubelet_config})"
+    fi
+  fi
+
+  if [[ -n "${cube_router_cidr}" ]]; then
+    if grep -Eq '^[[:space:]]*cube_router_cidr = "' "${cubelet_config}"; then
+      sed -i "s|cube_router_cidr = \"[^\"]*\"|cube_router_cidr = \"${cube_router_cidr}\"|" "${cubelet_config}"
+      if ! grep -Fq "cube_router_cidr = \"${cube_router_cidr}\"" "${cubelet_config}"; then
+        log "WARNING: failed to patch cube_router_cidr in Cubelet config (${cubelet_config})"
+      fi
+      log "patched cube-router CIDR: ${cube_router_cidr}"
+    else
+      log "WARNING: Cubelet config missing cube_router_cidr key; skipped cube-router CIDR patch (${cubelet_config})"
     fi
   fi
 }
@@ -1479,6 +1519,12 @@ is_cube_tap_netdev() {
   [[ "${iface}" =~ ^z[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
+is_cube_managed_netdev() {
+  local iface="$1"
+  iface="${iface%%@*}"
+  [[ "${iface}" == "cube-dev" || "${iface}" == "cube-router" ]] || is_cube_tap_netdev "${iface}"
+}
+
 resolv_conf_candidates() {
   printf '%s\n' \
     "/run/systemd/resolve/resolv.conf" \
@@ -1539,9 +1585,9 @@ _check_cidr_conflict() {
       cubedev_cidr="${iface_cidr}"
       continue
     fi
-    # cubesandbox's persistent TAP devices are named "z<ipv4>" (tapNamePrefix
-    # "z"). They belong to cube and must not be treated as host conflicts.
-    if is_cube_tap_netdev "${iface_name}"; then
+    # Other cube-managed devices, including the optional cube-router and
+    # persistent TAP devices named "z<ipv4>", are also deployment residue.
+    if is_cube_managed_netdev "${iface_name}"; then
       continue
     fi
 
@@ -1577,9 +1623,9 @@ _check_cidr_conflict() {
     while IFS= read -r route_line; do
       [[ -n "${route_line}" ]] || continue
 
-      # Skip routes attached to cubesandbox's own gateway interface.
+      # Skip routes attached to cubesandbox-managed interfaces.
       if [[ "${route_line}" =~ dev[[:space:]]+([^[:space:]]+) ]]; then
-        if [[ "${BASH_REMATCH[1]}" == "cube-dev" ]] || is_cube_tap_netdev "${BASH_REMATCH[1]}"; then
+        if is_cube_managed_netdev "${BASH_REMATCH[1]}"; then
           continue
         fi
       fi
@@ -1700,6 +1746,7 @@ _check_cidr_conflict() {
   To change the CIDR, fully reset the cube network first:
     sudo systemctl stop 'cube-sandbox-*.target'
     sudo ip link delete cube-dev 2>/dev/null || true
+    sudo ip link delete cube-router 2>/dev/null || true
     ip tuntap show | awk -F: '/^z[0-9]+\\./{print \$1}' \\
       | xargs -r -n1 -I{} sudo ip tuntap del dev {} mode tap
   then re-run install with the new CIDR.
@@ -1730,6 +1777,8 @@ check_cidr_preflight() {
   # a conflict and block the upgrade.
   local skip_conflict="${2:-${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}}"
   local cidr_label="${3:-CUBE_SANDBOX_NETWORK_CIDR}"
+  local max_mask="${4:-24}"
+  local min_mask="${5:-16}"
 
   # Empty CIDR means there is nothing to validate.
   if [[ -z "${cidr}" ]]; then
@@ -1768,9 +1817,13 @@ check_cidr_preflight() {
     fi
   done
 
-  # 3. Valid mask range [8, 30] (use 10# prefix to prevent octal interpretation)
-  if ! [[ "${mask}" =~ ^[0-9]+$ ]] || (( 10#${mask} < 8 || 10#${mask} > 30 )); then
-    die "${cidr_label} mask must be between 8 and 30 (got: ${mask})"
+  # 3. Valid mask range [min_mask, max_mask] (use 10# prefix to prevent octal interpretation)
+  if ! [[ "${min_mask}" =~ ^[0-9]+$ ]] || ! [[ "${max_mask}" =~ ^[0-9]+$ ]] \
+    || (( 10#${min_mask} < 0 || 10#${max_mask} > 32 || 10#${min_mask} > 10#${max_mask} )); then
+    die "${cidr_label} mask range must be valid (got: ${min_mask}-${max_mask})"
+  fi
+  if ! [[ "${mask}" =~ ^[0-9]+$ ]] || (( 10#${mask} < 10#${min_mask} || 10#${mask} > 10#${max_mask} )); then
+    die "${cidr_label} mask must be between ${min_mask} and ${max_mask} (got: ${mask})"
   fi
 
   # 4. Network address alignment check

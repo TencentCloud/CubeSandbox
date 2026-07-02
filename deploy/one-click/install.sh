@@ -146,6 +146,7 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   # Override bundle/default values with the merged (old-priority) env so the
   # rest of the installer keeps the user's existing configuration.
   load_env_file "${MERGED_ENV}"
+  apply_cli_overrides
   DEPLOY_ROLE="$(one_click_deploy_role)"
 fi
 
@@ -924,6 +925,9 @@ fi
 # Validate the effective cubevs CIDR before installing packages or replacing
 # the existing deployment. If unset, use CubeSandbox's fixed packaged default.
 CUBE_SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-}"
+CUBE_SANDBOX_CUBE_ROUTER_ENABLE="${CUBE_SANDBOX_CUBE_ROUTER_ENABLE:-0}"
+validate_bool_01 "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}" "CUBE_SANDBOX_CUBE_ROUTER_ENABLE"
+CUBE_SANDBOX_CUBE_ROUTER_CIDR="${CUBE_SANDBOX_CUBE_ROUTER_CIDR:-}"
 # On upgrade the CIDR is the cluster's own (preserved from the old install);
 # its existing cubevs bridge/route would self-trigger the host-conflict scan,
 # so skip conflict detection (format validation still runs) while still
@@ -933,11 +937,16 @@ if [[ "${INSTALL_MODE}" == "upgrade" || "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLI
   cidr_skip_conflict=1
 fi
 if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR}" ]]; then
-  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR"
+  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR" 24 16
   export CUBE_SANDBOX_NETWORK_CIDR
 else
-  check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR"
+  check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR" 24 16
 fi
+if [[ "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}" == "1" && -n "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}" ]]; then
+  check_cidr_preflight "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_CUBE_ROUTER_CIDR" 30 16
+  export CUBE_SANDBOX_CUBE_ROUTER_CIDR
+fi
+export CUBE_SANDBOX_CUBE_ROUTER_ENABLE
 
 install_required_dependencies
 check_install_preflight
@@ -958,7 +967,9 @@ validate_cubelet_cow_startup_deps "${PKG_ROOT}/Cubelet/config/config.toml"
 patch_cubelet_config_template \
   "${PKG_ROOT}/Cubelet/config/config.toml" \
   "${CUBE_SANDBOX_ETH_NAME:-}" \
-  "${CUBE_SANDBOX_NETWORK_CIDR:-}"
+  "${CUBE_SANDBOX_NETWORK_CIDR:-}" \
+  "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}" \
+  "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}"
 
 installed_role="${DEPLOY_ROLE}"
 detected_installed_role="$(detect_installed_role)"
@@ -1101,6 +1112,12 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
     esac
     upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK" "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}"
   fi
+fi
+if [[ "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}" == "1" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_ROUTER_ENABLE" "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}"
+fi
+if [[ -n "${CUBE_SANDBOX_CUBE_ROUTER_CIDR:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_ROUTER_CIDR" "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}"
 fi
 
 # Persist external MySQL config so every systemd unit / helper picks it up

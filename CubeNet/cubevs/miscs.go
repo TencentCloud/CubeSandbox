@@ -41,6 +41,21 @@ func rewriteConstants(vars map[string]*ebpf.VariableSpec, params Params) error {
 	err = errors.Join(err, vars[globalNameCubegw0Ifindex].Set(params.Cubegw0Ifindex))
 	err = errors.Join(err, vars[globalNameCubegw0MacaddrP1].Set(hardwareAddrToUint32(params.Cubegw0MacAddr)))
 	err = errors.Join(err, vars[globalNameCubegw0MacaddrP2].Set(hardwareAddrToUint16(params.Cubegw0MacAddr)))
+	if v := vars[globalNameEgressSMacaddrP1]; v != nil {
+		err = errors.Join(err, v.Set(hardwareAddrToUint32(params.EgressSrcMacAddr)))
+	}
+	if v := vars[globalNameEgressSMacaddrP2]; v != nil {
+		err = errors.Join(err, v.Set(hardwareAddrToUint16(params.EgressSrcMacAddr)))
+	}
+	if v := vars[globalNameEgressDMacaddrP1]; v != nil {
+		err = errors.Join(err, v.Set(hardwareAddrToUint32(params.EgressDstMacAddr)))
+	}
+	if v := vars[globalNameEgressDMacaddrP2]; v != nil {
+		err = errors.Join(err, v.Set(hardwareAddrToUint16(params.EgressDstMacAddr)))
+	}
+	if v := vars[globalNameEgressRedirectFlags]; v != nil {
+		err = errors.Join(err, v.Set(params.EgressRedirectFlags))
+	}
 	err = errors.Join(err, vars[globalNameNodeIP].Set(ipToUint32(params.NodeIP)))
 	err = errors.Join(err, vars[globalNameNodeIfindex].Set(params.NodeIfindex))
 	err = errors.Join(err, vars[globalNameNodeMacaddrP1].Set(hardwareAddrToUint32(params.NodeMacAddr)))
@@ -248,6 +263,14 @@ func Init(params Params) error {
 	err = attachTCFilter(programNameFromEnvoy, params.Cubegw0Ifindex, TCEgress)
 	if err != nil {
 		return err
+	}
+
+	if params.CubeRouterIfindex != 0 {
+		// attach TC filter to cube-router
+		err = attachTCFilter(programNameFromWorld, params.CubeRouterIfindex, TCEgress)
+		if err != nil {
+			return err
+		}
 	}
 
 	// attach TC filter to eth0

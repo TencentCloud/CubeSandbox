@@ -611,7 +611,7 @@ copy_dir_contents "${SCRIPT_DIR}/scripts/common" "${PACKAGE_ROOT}/scripts/common
 # it must ship in the release bundle so the install layout exposes
 # ${INSTALL_PREFIX}/scripts/cube-diag/collect-logs.sh.
 copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cube-diag"
-# CubeEgress's host-side iptables/sysctl init script. Lives in the
+# CubeEgress's host-side iptables/route init script. Lives in the
 # CubeEgress repo subtree (CubeEgress/scripts/) — copy a single file
 # rather than the whole dir so we don't pull in the legacy
 # cube-proxy-net.service unit that conflicts with our deploy/one-click

@@ -140,6 +140,7 @@ export default withMermaid(defineConfig({
               text: 'Networking',
               items: [
                 { text: 'Network Policy', link: '/guide/network-policy' },
+                { text: 'Route-Aware Egress', link: '/guide/route-aware-egress' },
                 { text: 'Security Proxy', link: '/guide/security-proxy' },
                 { text: 'Restrict Public Access', link: '/guide/restrict-public-access' }
               ]
@@ -267,6 +268,7 @@ export default withMermaid(defineConfig({
               text: '网络',
               items: [
                 { text: '网络策略', link: '/zh/guide/network-policy' },
+                { text: '路由感知出网', link: '/zh/guide/route-aware-egress' },
                 { text: '安全代理', link: '/zh/guide/security-proxy' },
                 { text: '限制公开访问', link: '/zh/guide/restrict-public-access' }
               ]

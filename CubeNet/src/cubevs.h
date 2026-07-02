@@ -84,6 +84,16 @@ const volatile __u32 cubegw0_ifindex    = 216;
 const volatile __u32 cubegw0_macaddr_p1 = 0xcf6f9020;	/* 20:90:6f:cf:cf:cf */
 const volatile __u16 cubegw0_macaddr_p2 = 0xcfcf;
 
+/* L2 rewrite and redirect flags for ordinary egress traffic.
+ * direct mode: src=node MAC, dst=node gateway MAC, redirect flags=0.
+ * custom mode: src=MVM MAC, dst=cube-router MAC, redirect flags=BPF_F_INGRESS.
+ */
+const volatile __u32 egress_smacaddr_p1     = 0xfc6f9020;	/* 20:90:6f:fc:fc:fc */
+const volatile __u16 egress_smacaddr_p2     = 0xfcfc;
+const volatile __u32 egress_dmacaddr_p1     = 0xcf6f9022;	/* 22:90:6f:cf:cf:cf */
+const volatile __u16 egress_dmacaddr_p2     = 0xcfcf;
+const volatile __u64 egress_redirect_flags  = BPF_F_INGRESS;
+
 /* Ifindex, IP and MAC address of Node itself */
 const volatile __u32 nodenic_ip         = 0x020a8709;	/* 9.135.10.2, network byte order */
 const volatile __u32 nodenic_ifindex    = 2;

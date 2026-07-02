@@ -523,8 +523,8 @@ do_nat:
 	icmp_csum_off = ICMP_CSUM_OFF(ip_hlen);
 
 	/* update L2 first: csum/store helpers may invalidate packet pointers */
-	set_mac_pair(l2, nodenic_macaddr_p1, nodenic_macaddr_p2,
-		     nodegw_macaddr_p1, nodegw_macaddr_p2);
+	set_mac_pair(l2, egress_smacaddr_p1, egress_smacaddr_p2,
+		     egress_dmacaddr_p1, egress_dmacaddr_p2);
 
 	/* update ICMP csum: ICMP has no pseudo-header, so no BPF_F_PSEUDO_HDR.
 	 * Only the echo identifier change affects the csum (IP saddr is not
@@ -622,8 +622,8 @@ do_nat:
 	udp_csum_off = UDP_CSUM_OFF(ip_hlen);
 
 	/* update L2 first: csum/store helpers may invalidate packet pointers */
-	set_mac_pair(l2, nodenic_macaddr_p1, nodenic_macaddr_p2,
-		     nodegw_macaddr_p1, nodegw_macaddr_p2);
+	set_mac_pair(l2, egress_smacaddr_p1, egress_smacaddr_p2,
+		     egress_dmacaddr_p1, egress_dmacaddr_p2);
 
 	/* update UDP csum only if it was non-zero (UDP csum is optional over IPv4).
 	 * BPF_F_MARK_MANGLED_0 keeps a 0 csum (= disabled) intact in case the
@@ -685,7 +685,7 @@ static __always_inline int finish_udp_nat_inline(struct __sk_buff *skb,
 	__u32 dst_ifindex = do_udp_nat_inline(skb, mvm_meta);
 
 	if (dst_ifindex)
-		return bpf_redirect(dst_ifindex, 0);
+		return bpf_redirect(dst_ifindex, egress_redirect_flags);
 
 	return TC_ACT_SHOT;
 }
@@ -696,7 +696,7 @@ static __always_inline int finish_udp_nat(struct __sk_buff *skb, struct mvm_meta
 	__u32 dst_ifindex = do_udp_nat(skb, mvm_meta);
 
 	if (dst_ifindex)
-		return bpf_redirect(dst_ifindex, 0);
+		return bpf_redirect(dst_ifindex, egress_redirect_flags);
 
 	return TC_ACT_SHOT;
 }
@@ -784,8 +784,8 @@ do_nat:
 	tcp_csum_off = TCP_CSUM_OFF(ip_hlen);
 
 	/* update L2 first: csum/store helpers may invalidate packet pointers */
-	set_mac_pair(l2, nodenic_macaddr_p1, nodenic_macaddr_p2,
-		     nodegw_macaddr_p1, nodegw_macaddr_p2);
+	set_mac_pair(l2, egress_smacaddr_p1, egress_smacaddr_p2,
+		     egress_dmacaddr_p1, egress_dmacaddr_p2);
 
 	/* update TCP csum: IP saddr is part of pseudo-header, so BPF_F_PSEUDO_HDR */
 	flags = BPF_F_PSEUDO_HDR | sizeof(old_saddr);
@@ -1038,7 +1038,7 @@ int from_cube(struct __sk_buff *skb)
 			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 		tcp_ret = do_tcp_nat(skb, mvm_meta);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)
-			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), 0);
+			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), egress_redirect_flags);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
 			return tcp_reply_reset(skb, ifindex);
 	}
@@ -1060,7 +1060,7 @@ int from_cube(struct __sk_buff *skb)
 	if (proto == IPPROTO_ICMP) {
 		dst_ifindex = do_icmp_nat(skb, mvm_meta);
 		if (dst_ifindex)
-			return bpf_redirect(dst_ifindex, 0);
+			return bpf_redirect(dst_ifindex, egress_redirect_flags);
 	}
 
 	return TC_ACT_SHOT;

@@ -322,23 +322,31 @@ test_patch_cubelet_config_template_refuses_symlink() {
   cat > "${cfg}" <<'EOF'
 eth_name = "eth0"
 cidr = "192.168.0.0/18"
+cube_router_enable = false
+cube_router_cidr = ""
 EOF
 
-  patch_cubelet_config_template "${cfg}" "ens3" "10.123.0.0/16" >/dev/null 2>&1
+  patch_cubelet_config_template "${cfg}" "ens3" "10.123.0.0/16" "1" "172.20.0.0/16" >/dev/null 2>&1
   grep -Fq 'eth_name = "ens3"' "${cfg}" || fail "patch should update eth_name"
   grep -Fq 'cidr = "10.123.0.0/16"' "${cfg}" || fail "patch should update cidr"
+  grep -Fq 'cube_router_enable = true' "${cfg}" || fail "patch should update cube_router_enable"
+  grep -Fq 'cube_router_cidr = "172.20.0.0/16"' "${cfg}" || fail "patch should update cube_router_cidr"
 
   local target="${TMP_DIR}/symlink-target.toml" link="${TMP_DIR}/symlink-config.toml"
   cat > "${target}" <<'EOF'
 eth_name = "eth0"
 cidr = "192.168.0.0/18"
+cube_router_enable = false
+cube_router_cidr = ""
 EOF
   ln -s "${target}" "${link}"
-  if ( patch_cubelet_config_template "${link}" "ens4" "10.124.0.0/16" ) >/dev/null 2>&1; then
+  if ( patch_cubelet_config_template "${link}" "ens4" "10.124.0.0/16" "1" "172.21.0.0/16" ) >/dev/null 2>&1; then
     fail "patch_cubelet_config_template should reject symlink configs"
   fi
   grep -Fq 'eth_name = "eth0"' "${target}" || fail "symlink target must not be modified"
   grep -Fq 'cidr = "192.168.0.0/18"' "${target}" || fail "symlink target CIDR must not be modified"
+  grep -Fq 'cube_router_enable = false' "${target}" || fail "symlink target cube-router enable must not be modified"
+  grep -Fq 'cube_router_cidr = ""' "${target}" || fail "symlink target cube-router CIDR must not be modified"
 }
 
 test_upgrade_preflight_and_backup() {
@@ -542,8 +550,8 @@ test_install_sh_wires_upgrade_flow() {
   assert_contains "${f}" 'redis_timeout_args+=(--timeout "${connect_timeout}")'
   assert_contains "${f}" 'run_redis_preflight_cmd "${use_timeout_wrapper}" "${connect_timeout}"'
   # on upgrade, CIDR host-conflict detection is skipped (M2)
-  assert_contains "${f}" 'check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR"'
-  assert_contains "${f}" 'check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR"'
+  assert_contains "${f}" 'check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR" 24 16'
+  assert_contains "${f}" 'check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR" 24 16'
 }
 
 test_explicit_install_mode

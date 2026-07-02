@@ -13,9 +13,14 @@ import (
 )
 
 const (
-	portMin uint16 = 20000
-	portMax uint16 = 29999
+	portMin    uint16 = 20000
+	portMax    uint16 = 29999
+	tcpPortMax uint16 = 65535
 )
+
+func cubeSNATPortRange() (uint16, uint16) {
+	return portMax + 1, tcpPortMax
+}
 
 type portAllocator struct {
 	mu       sync.Mutex

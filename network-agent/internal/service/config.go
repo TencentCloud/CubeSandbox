@@ -49,6 +49,11 @@ type Config struct {
 	// shared-dict op should be sub-millisecond; this is generous on
 	// purpose so a transient kernel hiccup doesn't fail the push.
 	CubeEgressPushTimeout time.Duration
+
+	// Route-aware egress options.
+	CubeRouterEnable  bool
+	CubeRouterCIDR    string
+	CubeRouterMacAddr string
 }
 
 func DefaultConfig() Config {
@@ -69,6 +74,11 @@ func DefaultConfig() Config {
 		ConnectTimeout:        5 * time.Second,
 		CubeEgressAdminURL:    "http://127.0.0.1:9090",
 		CubeEgressPushTimeout: 2 * time.Second,
+
+		// Route-aware egress options.
+		CubeRouterEnable:  false,
+		CubeRouterCIDR:    "",
+		CubeRouterMacAddr: "22:90:6f:cf:cf:cf",
 	}
 }
 
@@ -89,6 +99,11 @@ type cubeletNetworkConfig struct {
 	MvmMtu                int    `toml:"mvm_mtu"`
 	CubeEgressAdminURL    string `toml:"cube_egress_admin_url"`
 	CubeEgressPushTimeout string `toml:"cube_egress_push_timeout"`
+
+	// Route-aware egress options.
+	CubeRouterEnable  bool   `toml:"cube_router_enable"`
+	CubeRouterCIDR    string `toml:"cube_router_cidr"`
+	CubeRouterMacAddr string `toml:"cube_router_mac_addr"`
 }
 
 const cubeletNetworkPluginKey = "io.cubelet.internal.v1.network"
@@ -139,6 +154,13 @@ func LoadConfigFromCubeletTOML(base Config, path string) (Config, error) {
 	}
 	if networkCfg.MvmMtu != 0 {
 		base.MvmMtu = networkCfg.MvmMtu
+	}
+	base.CubeRouterEnable = networkCfg.CubeRouterEnable
+	if networkCfg.CubeRouterCIDR != "" {
+		base.CubeRouterCIDR = networkCfg.CubeRouterCIDR
+	}
+	if networkCfg.CubeRouterMacAddr != "" {
+		base.CubeRouterMacAddr = networkCfg.CubeRouterMacAddr
 	}
 	if networkCfg.TapInitNum != 0 {
 		base.TapInitNum = networkCfg.TapInitNum

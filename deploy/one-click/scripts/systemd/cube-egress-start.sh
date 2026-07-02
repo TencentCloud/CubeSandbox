@@ -10,7 +10,7 @@
 #
 # CA + audit dir come from cube-egress-prepare.sh (run as a oneshot
 # ExecStartPre or independently by the operator).
-# iptables/sysctl come from cube-sandbox-cube-egress-net.service.
+# iptables and policy routing come from cube-sandbox-cube-egress-net.service.
 
 set -euo pipefail
 
