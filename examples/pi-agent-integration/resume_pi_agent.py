@@ -85,6 +85,11 @@ def parse_args() -> argparse.Namespace:
         default=int_env("PI_AGENT_EXEC_TIMEOUT", 900),
         help="Pi command timeout in seconds. Defaults to PI_AGENT_EXEC_TIMEOUT or 900.",
     )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Stream Pi's raw JSONL instead of the concise transcript.",
+    )
     return parser.parse_args()
 
 
@@ -141,6 +146,8 @@ def show_final_workspace(sandbox: Sandbox, workspace: str) -> None:
 def main() -> int:
     load_local_dotenv()
     args = parse_args()
+    if args.raw:
+        os.environ["PI_STREAM_RAW"] = "1"
 
     template_id = args.template or required("CUBE_TEMPLATE_ID")
     required("E2B_API_URL")

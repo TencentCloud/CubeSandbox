@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip writing the demo files into the sandbox workspace.",
     )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Stream Pi's raw JSONL instead of the concise transcript.",
+    )
     args = parser.parse_args()
     if args.prompt is None:
         args.prompt = default_prompt(args.workspace)
@@ -128,6 +133,8 @@ def show_workspace_result(sandbox: Sandbox, workspace: str, timeout: int) -> Non
 def main() -> int:
     load_local_dotenv()
     args = parse_args()
+    if args.raw:
+        os.environ["PI_STREAM_RAW"] = "1"
 
     template_id = args.template or required("CUBE_TEMPLATE_ID")
     required("E2B_API_URL")

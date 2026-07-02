@@ -97,6 +97,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only show the egress checks; skip the actual Pi run.",
     )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Stream Pi's raw JSONL instead of the concise transcript.",
+    )
     args = parser.parse_args()
     if args.prompt is None:
         args.prompt = DEFAULT_PROMPT.format(workspace=args.workspace)
@@ -170,6 +175,8 @@ def run_agent(sandbox: Sandbox, args: argparse.Namespace, envs: dict[str, str]):
 def main() -> int:
     load_local_dotenv()
     args = parse_args()
+    if args.raw:
+        os.environ["PI_STREAM_RAW"] = "1"
 
     template_id = args.template or required("CUBE_TEMPLATE_ID")
     required("E2B_API_URL")

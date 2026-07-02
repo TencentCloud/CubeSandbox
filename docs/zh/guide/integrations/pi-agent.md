@@ -140,6 +140,8 @@ result = sandbox.commands.run(
 
 **保险柜方式** —— 让密钥完全不进入 VM（见第 6 步）。
 
+示例脚本会解析这份 JSONL，默认打印精简转写（助手文本、工具调用、失败项）；加 `--raw`（或设 `PI_STREAM_RAW=1`）可查看原始事件流。
+
 ### 5. 会话持久化（pause / resume）
 
 ```bash

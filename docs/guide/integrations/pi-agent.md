@@ -153,6 +153,10 @@ result = sandbox.commands.run(
 
 **Vault flavor** — keep the key out of the VM entirely (see step 6).
 
+The example scripts parse this JSONL and print a concise transcript by default
+(assistant text, tool calls, and any failures); pass `--raw` (or set
+`PI_STREAM_RAW=1`) to see the raw event stream.
+
 ### 5. Session Persistence (pause / resume)
 
 ```bash

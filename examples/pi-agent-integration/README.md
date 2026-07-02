@@ -101,6 +101,10 @@ The key is forwarded per-command via `sandbox.commands.run(..., envs=...)`, so i
 lives only for the lifetime of that exec call — never written to a persistent
 file inside the VM.
 
+All three scripts run Pi with `--mode json` and render a concise transcript by
+default (assistant text, tool calls, and any failures). Pass `--raw` (or set
+`PI_STREAM_RAW=1`) to stream Pi's raw JSONL events instead.
+
 ## 5. Pause / resume (session persistence)
 
 ```bash
