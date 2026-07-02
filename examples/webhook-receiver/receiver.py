@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SECRET = os.getenv("WEBHOOK_SECRET", "")
 WECOM_BOT_WEBHOOK = os.getenv("WECOM_BOT_WEBHOOK", "")
+MAX_BODY_BYTES = int(os.getenv("WEBHOOK_MAX_BODY_BYTES", str(1024 * 1024)))
 
 
 def verify_signature(body: bytes, signature: str | None) -> bool:
@@ -55,7 +56,20 @@ def forward_to_wecom(payload: dict) -> None:
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_response(411)
+            self.end_headers()
+            self.wfile.write(b"invalid content length\n")
+            return
+
+        if length < 0 or length > MAX_BODY_BYTES:
+            self.send_response(413)
+            self.end_headers()
+            self.wfile.write(b"payload too large\n")
+            return
+
         body = self.rfile.read(length)
 
         if not verify_signature(body, self.headers.get("X-Cube-Signature")):
@@ -82,7 +96,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    host = os.getenv("WEBHOOK_HOST", "0.0.0.0")
+    host = os.getenv("WEBHOOK_HOST", "127.0.0.1")
     port = int(os.getenv("WEBHOOK_PORT", "9000"))
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"listening on http://{host}:{port}/webhook", flush=True)

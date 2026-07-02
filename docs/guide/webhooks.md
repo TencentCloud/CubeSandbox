@@ -32,17 +32,26 @@ export CUBE_API_WEBHOOK_EVENTS='sandbox.created,sandbox.deleted,sandbox.paused,s
 export CUBE_API_WEBHOOK_SECRET='change-me'
 ```
 
+CubeAPI accepts only `http` and `https` webhook URLs without embedded
+credentials. IP-literal URLs that point at private, link-local, multicast, or
+unspecified addresses are rejected; loopback is allowed for local testing.
+Endpoints using `http` with a signing secret are accepted for local development
+but logged as a warning.
+
 Optional delivery tuning:
 
 | Variable | Default | Description |
 |---|---:|---|
 | `CUBE_API_WEBHOOK_QUEUE_CAPACITY` | `1024` | Buffered event queue size |
 | `CUBE_API_WEBHOOK_REQUEST_TIMEOUT_SECS` | `5` | Per-request timeout |
-| `CUBE_API_WEBHOOK_MAX_ATTEMPTS` | `3` | Attempts per endpoint |
+| `CUBE_API_WEBHOOK_MAX_ATTEMPTS` | `3` | Attempts per endpoint; values below `1` are clamped to `1` |
 | `CUBE_API_WEBHOOK_INITIAL_BACKOFF_MILLIS` | `200` | Initial exponential-backoff delay |
 
 Webhook delivery is non-blocking for sandbox API calls. If the receiver is slow
 or unreachable, CubeAPI retries in the background and logs delivery failures.
+Delivery is best-effort and at-most-once after the configured retry budget:
+CubeAPI does not persist webhook events and does not provide a dead-letter
+queue.
 
 ## Payload
 
@@ -93,6 +102,8 @@ WEBHOOK_SECRET=change-me python3 receiver.py
 
 Set the endpoint URL in `CUBE_API_WEBHOOKS`, restart CubeAPI, then create,
 pause, resume, or delete a sandbox. The receiver prints each JSON payload.
+The example listens on `127.0.0.1:9000` by default; set `WEBHOOK_HOST` only when
+you intentionally expose it on another interface.
 
 ## WeCom Or Generic Alerting
 

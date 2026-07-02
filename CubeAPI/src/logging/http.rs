@@ -14,40 +14,33 @@ use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use sha2::Sha256;
-use std::{sync::Arc, time::Duration};
-use tokio::sync::{mpsc, oneshot};
+use std::{fmt, sync::Arc, time::Duration};
+use tokio::{
+    sync::{mpsc, oneshot, Semaphore},
+    task::JoinSet,
+};
 use tracing::{error, warn};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
+const ERROR_BODY_PREVIEW_LIMIT: usize = 2048;
+const DEFAULT_ENDPOINT_CONCURRENCY: usize = 4;
 
-/// Configuration for the HTTP webhook backend.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct HttpLoggerConfig {
-    /// Full URL to POST batches to, e.g. `"http://log-ingest.internal/api/logs"`.
-    pub url: String,
-    /// Max events per batch (default: 100).
-    pub batch_size: usize,
-    /// Flush interval in seconds even if batch is not full (default: 5).
-    pub flush_interval_secs: u64,
-}
-
-impl Default for HttpLoggerConfig {
-    fn default() -> Self {
-        Self {
-            url: String::new(),
-            batch_size: 100,
-            flush_interval_secs: 5,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpWebhookEndpoint {
     pub url: String,
     pub events: Vec<String>,
     pub secret: Option<String>,
+}
+
+impl fmt::Debug for HttpWebhookEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpWebhookEndpoint")
+            .field("url", &self.url)
+            .field("events", &self.events)
+            .field("secret", &self.secret.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 impl From<crate::config::WebhookEndpointConfig> for HttpWebhookEndpoint {
@@ -84,35 +77,34 @@ enum Msg {
     Flush(oneshot::Sender<()>),
 }
 
+#[derive(Clone)]
+struct EndpointWorker {
+    endpoint: HttpWebhookEndpoint,
+    concurrency: Arc<Semaphore>,
+}
+
 /// HTTP webhook log backend.
 #[derive(Clone)]
 pub struct HttpLogger {
     tx: mpsc::Sender<Msg>,
-    endpoints: Arc<Vec<HttpWebhookEndpoint>>,
+    endpoints: Arc<Vec<EndpointWorker>>,
 }
 
 impl HttpLogger {
-    /// Create an `HttpLogger` from the legacy single-URL config.
-    #[allow(dead_code)]
-    pub fn new(config: HttpLoggerConfig) -> Self {
-        let endpoints = if config.url.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![HttpWebhookEndpoint {
-                url: config.url.trim().to_string(),
-                events: Vec::new(),
-                secret: None,
-            }]
-        };
-        Self::from_endpoints(Client::new(), endpoints, HttpWebhookOptions::default())
-    }
-
     pub fn from_endpoints(
         client: Client,
         endpoints: Vec<HttpWebhookEndpoint>,
         options: HttpWebhookOptions,
     ) -> Self {
-        let endpoints = Arc::new(endpoints);
+        let endpoints: Arc<Vec<EndpointWorker>> = Arc::new(
+            endpoints
+                .into_iter()
+                .map(|endpoint| EndpointWorker {
+                    endpoint,
+                    concurrency: Arc::new(Semaphore::new(DEFAULT_ENDPOINT_CONCURRENCY)),
+                })
+                .collect(),
+        );
         let (tx, rx) = mpsc::channel(options.queue_capacity.max(1));
         spawn_worker(client, endpoints.clone(), options, rx);
         Self { tx, endpoints }
@@ -121,7 +113,7 @@ impl HttpLogger {
     fn has_matching_endpoint(&self, event: &str) -> bool {
         self.endpoints
             .iter()
-            .any(|endpoint| endpoint_subscribes(endpoint, event))
+            .any(|endpoint| endpoint_subscribes(&endpoint.endpoint, event))
     }
 }
 
@@ -150,34 +142,61 @@ impl Logger for HttpLogger {
 
 fn spawn_worker(
     client: Client,
-    endpoints: Arc<Vec<HttpWebhookEndpoint>>,
+    endpoints: Arc<Vec<EndpointWorker>>,
     options: HttpWebhookOptions,
     mut rx: mpsc::Receiver<Msg>,
 ) {
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                Msg::Event(event) => {
-                    let deliveries = endpoints
-                        .iter()
-                        .filter(|endpoint| endpoint_subscribes(endpoint, &event.event))
-                        .cloned()
-                        .map(|endpoint| {
-                            deliver_with_retries(
-                                client.clone(),
-                                endpoint,
-                                event.clone(),
-                                options.clone(),
-                            )
-                        });
-                    futures::future::join_all(deliveries).await;
+        let mut deliveries = JoinSet::new();
+
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Some(Msg::Event(event)) => {
+                            for endpoint in endpoints
+                                .iter()
+                                .filter(|endpoint| endpoint_subscribes(&endpoint.endpoint, &event.event))
+                                .cloned()
+                            {
+                                let client = client.clone();
+                                let event = event.clone();
+                                let options = options.clone();
+                                deliveries.spawn(async move {
+                                    let Ok(_permit) = endpoint.concurrency.acquire_owned().await else {
+                                        warn!(url = %endpoint.endpoint.url, "HttpLogger: endpoint semaphore closed, dropping delivery");
+                                        return;
+                                    };
+                                    deliver_with_retries(client, endpoint.endpoint, event, options).await;
+                                });
+                            }
+                        }
+                        Some(Msg::Flush(reply)) => {
+                            drain_deliveries(&mut deliveries).await;
+                            let _ = reply.send(());
+                        }
+                        None => {
+                            drain_deliveries(&mut deliveries).await;
+                            break;
+                        }
+                    }
                 }
-                Msg::Flush(reply) => {
-                    let _ = reply.send(());
+                result = deliveries.join_next(), if !deliveries.is_empty() => {
+                    if let Some(Err(err)) = result {
+                        warn!(error = %err, "HttpLogger: webhook delivery task failed");
+                    }
                 }
             }
         }
     });
+}
+
+async fn drain_deliveries(deliveries: &mut JoinSet<()>) {
+    while let Some(result) = deliveries.join_next().await {
+        if let Err(err) = result {
+            warn!(error = %err, "HttpLogger: webhook delivery task failed");
+        }
+    }
 }
 
 fn endpoint_subscribes(endpoint: &HttpWebhookEndpoint, event: &str) -> bool {
@@ -229,6 +248,10 @@ async fn deliver_once(
     timeout: Duration,
 ) -> anyhow::Result<()> {
     let body = serde_json::to_vec(event)?;
+    let signature = match endpoint.secret.as_deref().filter(|s| !s.is_empty()) {
+        Some(secret) => Some(signature_header(secret, &body)?),
+        None => None,
+    };
     let delivery_id = Uuid::new_v4().to_string();
     let mut request = client
         .post(&endpoint.url)
@@ -237,10 +260,10 @@ async fn deliver_once(
         .header(reqwest::header::USER_AGENT, "CubeSandbox-CubeAPI-Webhook/1")
         .header("X-Cube-Event", &event.event)
         .header("X-Cube-Delivery", delivery_id)
-        .body(body.clone());
+        .body(body);
 
-    if let Some(secret) = endpoint.secret.as_deref().filter(|s| !s.is_empty()) {
-        request = request.header("X-Cube-Signature", signature_header(secret, &body)?);
+    if let Some(signature) = signature {
+        request = request.header("X-Cube-Signature", signature);
     }
 
     let response = request.send().await?;
@@ -249,8 +272,35 @@ async fn deliver_once(
     }
 
     let status = response.status();
-    let text = response.text().await.unwrap_or_default();
+    let text = response_body_preview(response).await;
     anyhow::bail!("webhook endpoint returned {status}: {text}");
+}
+
+async fn response_body_preview(mut response: reqwest::Response) -> String {
+    let mut body = Vec::new();
+    let mut truncated = false;
+
+    while body.len() < ERROR_BODY_PREVIEW_LIMIT {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = ERROR_BODY_PREVIEW_LIMIT - body.len();
+                if chunk.len() > remaining {
+                    body.extend_from_slice(&chunk[..remaining]);
+                    truncated = true;
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(err) => return format!("<failed to read response body: {err}>"),
+        }
+    }
+
+    let mut preview = String::from_utf8_lossy(&body).to_string();
+    if truncated || body.len() >= ERROR_BODY_PREVIEW_LIMIT {
+        preview.push_str("...<truncated>");
+    }
+    preview
 }
 
 fn signature_header(secret: &str, body: &[u8]) -> anyhow::Result<String> {
@@ -298,11 +348,20 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let logger = HttpLogger::new(HttpLoggerConfig {
-            url,
-            batch_size: 1,
-            flush_interval_secs: 1,
-        });
+        let logger = HttpLogger::from_endpoints(
+            Client::new(),
+            vec![HttpWebhookEndpoint {
+                url,
+                events: vec!["sandbox.created".to_string()],
+                secret: None,
+            }],
+            HttpWebhookOptions {
+                queue_capacity: 8,
+                request_timeout: Duration::from_secs(1),
+                max_attempts: 1,
+                initial_backoff: Duration::from_millis(1),
+            },
+        );
 
         logger
             .log(
@@ -423,6 +482,110 @@ mod tests {
         logger.flush().await;
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn logger_does_not_block_queue_on_slow_endpoint_retry() {
+        let (fast_tx, mut fast_rx) = mpsc::channel::<Bytes>(2);
+        let app = Router::new()
+            .route(
+                "/slow-fail",
+                post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+            )
+            .route(
+                "/fast",
+                post(
+                    |State(tx): State<Arc<Mutex<mpsc::Sender<Bytes>>>>, body: Bytes| async move {
+                        let _ = tx.lock().await.send(body).await;
+                        axum::http::StatusCode::NO_CONTENT
+                    },
+                ),
+            )
+            .with_state(Arc::new(Mutex::new(fast_tx)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let logger = HttpLogger::from_endpoints(
+            Client::new(),
+            vec![
+                HttpWebhookEndpoint {
+                    url: format!("{base_url}/slow-fail"),
+                    events: vec!["sandbox.created".to_string()],
+                    secret: None,
+                },
+                HttpWebhookEndpoint {
+                    url: format!("{base_url}/fast"),
+                    events: vec!["sandbox.created".to_string()],
+                    secret: None,
+                },
+            ],
+            HttpWebhookOptions {
+                queue_capacity: 8,
+                request_timeout: Duration::from_secs(1),
+                max_attempts: 2,
+                initial_backoff: Duration::from_millis(500),
+            },
+        );
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sb-one"))
+            .await;
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sb-two"))
+            .await;
+
+        let first = tokio::time::timeout(Duration::from_millis(200), fast_rx.recv())
+            .await
+            .expect("first fast endpoint delivery should not wait for retry")
+            .expect("first fast endpoint payload should be present");
+        let second = tokio::time::timeout(Duration::from_millis(200), fast_rx.recv())
+            .await
+            .expect("second fast endpoint delivery should not wait for retry")
+            .expect("second fast endpoint payload should be present");
+
+        let first_payload: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        let second_payload: serde_json::Value = serde_json::from_slice(&second).unwrap();
+        assert_eq!(first_payload["sandbox_id"], "sb-one");
+        assert_eq!(second_payload["sandbox_id"], "sb-two");
+    }
+
+    #[test]
+    fn endpoint_debug_redacts_secret() {
+        let endpoint = HttpWebhookEndpoint {
+            url: "https://example.test/webhook".to_string(),
+            events: vec!["sandbox.created".to_string()],
+            secret: Some("top-secret".to_string()),
+        };
+
+        let debug = format!("{endpoint:?}");
+        assert!(!debug.contains("top-secret"));
+        assert!(debug.contains("***"));
+    }
+
+    #[test]
+    fn signature_header_uses_sha256_prefix() {
+        let signature = signature_header("secret", br#"{"event":"sandbox.created"}"#).unwrap();
+        assert!(signature.starts_with("sha256="));
+        assert_eq!(signature.len(), "sha256=".len() + 64);
+    }
+
+    #[test]
+    fn backoff_delay_doubles_until_capped() {
+        assert_eq!(
+            backoff_delay(Duration::from_millis(25), 1),
+            Duration::from_millis(25)
+        );
+        assert_eq!(
+            backoff_delay(Duration::from_millis(25), 2),
+            Duration::from_millis(50)
+        );
+        assert_eq!(
+            backoff_delay(Duration::from_millis(25), 3),
+            Duration::from_millis(100)
+        );
     }
 
     #[test]

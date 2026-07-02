@@ -3,6 +3,11 @@
 //
 
 use serde::Deserialize;
+use std::{
+    collections::HashSet,
+    fmt,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
@@ -99,7 +104,7 @@ pub struct ServerConfig {
     pub webhook_initial_backoff_millis: u64,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Clone, PartialEq, Eq)]
 pub struct WebhookEndpointConfig {
     pub url: String,
 
@@ -110,6 +115,16 @@ pub struct WebhookEndpointConfig {
     /// Optional HMAC-SHA256 secret.
     #[serde(default)]
     pub secret: Option<String>,
+}
+
+impl fmt::Debug for WebhookEndpointConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebhookEndpointConfig")
+            .field("url", &self.url)
+            .field("events", &self.events)
+            .field("secret", &self.secret.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 fn default_bind() -> String {
@@ -154,7 +169,8 @@ fn default_webhooks() -> Vec<WebhookEndpointConfig> {
         match serde_json::from_str::<Vec<WebhookEndpointConfig>>(&raw) {
             Ok(endpoints) => return clean_webhook_endpoints(endpoints),
             Err(err) => {
-                tracing::warn!(error = %err, "ignoring invalid CUBE_API_WEBHOOKS");
+                eprintln!("ignoring invalid CUBE_API_WEBHOOKS: {err}");
+                tracing::error!(error = %err, "ignoring invalid CUBE_API_WEBHOOKS");
             }
         }
     }
@@ -191,7 +207,7 @@ fn default_webhooks() -> Vec<WebhookEndpointConfig> {
 }
 
 fn default_webhook_queue_capacity() -> usize {
-    env_parse("CUBE_API_WEBHOOK_QUEUE_CAPACITY", 1024)
+    env_parse("CUBE_API_WEBHOOK_QUEUE_CAPACITY", 1024).max(1)
 }
 
 fn default_webhook_request_timeout_secs() -> u64 {
@@ -212,7 +228,14 @@ where
 {
     std::env::var(key)
         .ok()
-        .and_then(|value| value.parse::<T>().ok())
+        .and_then(|value| match value.parse::<T>() {
+            Ok(parsed) => Some(parsed),
+            Err(_) => {
+                eprintln!("ignoring invalid {key}={value:?}; using default");
+                tracing::warn!(key, value, "invalid environment value, using default");
+                None
+            }
+        })
         .unwrap_or(default)
 }
 
@@ -226,20 +249,89 @@ fn split_csv(value: &str) -> Vec<String> {
 }
 
 fn clean_webhook_endpoints(endpoints: Vec<WebhookEndpointConfig>) -> Vec<WebhookEndpointConfig> {
+    let mut seen_urls = HashSet::new();
+
     endpoints
         .into_iter()
         .filter(|endpoint| !endpoint.url.trim().is_empty())
-        .map(|mut endpoint| {
-            endpoint.url = endpoint.url.trim().to_string();
+        .filter_map(|mut endpoint| {
+            endpoint.url = match validate_webhook_url(endpoint.url.trim(), endpoint.secret.as_ref())
+            {
+                Ok(url) => url,
+                Err(err) => {
+                    eprintln!("ignoring invalid webhook endpoint: {err}");
+                    tracing::warn!(error = %err, "ignoring invalid webhook endpoint");
+                    return None;
+                }
+            };
+            if !seen_urls.insert(endpoint.url.clone()) {
+                eprintln!("ignoring duplicate webhook endpoint URL: {}", endpoint.url);
+                tracing::warn!(url = %endpoint.url, "ignoring duplicate webhook endpoint URL");
+                return None;
+            }
             endpoint.events = endpoint
                 .events
                 .into_iter()
                 .map(|event| event.trim().to_string())
                 .filter(|event| !event.is_empty())
                 .collect();
-            endpoint
+            Some(endpoint)
         })
         .collect()
+}
+
+fn validate_webhook_url(raw_url: &str, secret: Option<&String>) -> anyhow::Result<String> {
+    let url = reqwest::Url::parse(raw_url)?;
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme => anyhow::bail!("unsupported webhook URL scheme {scheme:?}: {raw_url}"),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        anyhow::bail!("webhook URL must not include credentials: {raw_url}");
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("webhook URL must include a host: {raw_url}"))?;
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        validate_webhook_ip_literal(ip, raw_url)?;
+    }
+    if url.scheme() == "http" && secret.is_some() {
+        eprintln!("webhook endpoint with HMAC secret is using HTTP, not HTTPS: {raw_url}");
+        tracing::warn!(
+            url = raw_url,
+            "webhook endpoint with HMAC secret is using HTTP"
+        );
+    }
+
+    Ok(url.to_string())
+}
+
+fn validate_webhook_ip_literal(ip: IpAddr, raw_url: &str) -> anyhow::Result<()> {
+    let allowed = match ip {
+        IpAddr::V4(ip) => is_allowed_webhook_ipv4(ip),
+        IpAddr::V6(ip) => is_allowed_webhook_ipv6(ip),
+    };
+    if allowed {
+        return Ok(());
+    }
+    anyhow::bail!("webhook URL uses a disallowed IP literal: {raw_url}");
+}
+
+fn is_allowed_webhook_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || !(ip.is_private()
+            || ip.is_link_local()
+            || ip.is_multicast()
+            || ip.is_broadcast()
+            || ip.is_unspecified())
+}
+
+fn is_allowed_webhook_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback()
+        || !(ip.is_unique_local()
+            || ip.is_unicast_link_local()
+            || ip.is_multicast()
+            || ip.is_unspecified())
 }
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
@@ -291,7 +383,9 @@ impl Default for ServerConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_webhook_endpoints, WebhookEndpointConfig};
+    use super::{
+        clean_webhook_endpoints, default_webhook_queue_capacity, split_csv, WebhookEndpointConfig,
+    };
 
     #[test]
     fn webhook_endpoint_cleanup_trims_empty_values() {
@@ -311,5 +405,63 @@ mod tests {
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].url, "http://example.test/webhook");
         assert_eq!(endpoints[0].events, vec!["sandbox.created"]);
+    }
+
+    #[test]
+    fn webhook_endpoint_cleanup_rejects_invalid_url_schemes() {
+        let endpoints = clean_webhook_endpoints(vec![
+            WebhookEndpointConfig {
+                url: "file:///tmp/webhook".to_string(),
+                events: vec![],
+                secret: None,
+            },
+            WebhookEndpointConfig {
+                url: "http://127.0.0.1:9000/webhook".to_string(),
+                events: vec![],
+                secret: None,
+            },
+        ]);
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].url, "http://127.0.0.1:9000/webhook");
+    }
+
+    #[test]
+    fn webhook_endpoint_cleanup_rejects_private_ip_literals() {
+        let endpoints = clean_webhook_endpoints(vec![WebhookEndpointConfig {
+            url: "https://10.0.0.10/webhook".to_string(),
+            events: vec![],
+            secret: None,
+        }]);
+
+        assert!(endpoints.is_empty());
+    }
+
+    #[test]
+    fn webhook_endpoint_debug_redacts_secret() {
+        let endpoint = WebhookEndpointConfig {
+            url: "http://example.test/webhook".to_string(),
+            events: vec!["sandbox.created".to_string()],
+            secret: Some("top-secret".to_string()),
+        };
+
+        let debug = format!("{endpoint:?}");
+        assert!(!debug.contains("top-secret"));
+        assert!(debug.contains("***"));
+    }
+
+    #[test]
+    fn csv_parser_trims_empty_items() {
+        assert_eq!(
+            split_csv(" sandbox.created, ,sandbox.deleted "),
+            vec!["sandbox.created", "sandbox.deleted"]
+        );
+    }
+
+    #[test]
+    fn env_parse_clamps_queue_capacity_to_effective_minimum() {
+        std::env::set_var("CUBE_API_WEBHOOK_QUEUE_CAPACITY", "0");
+        assert_eq!(default_webhook_queue_capacity(), 1usize);
+        std::env::remove_var("CUBE_API_WEBHOOK_QUEUE_CAPACITY");
     }
 }

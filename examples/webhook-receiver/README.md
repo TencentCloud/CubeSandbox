@@ -11,6 +11,10 @@ cd examples/webhook-receiver
 WEBHOOK_SECRET=change-me python3 receiver.py
 ```
 
+The receiver listens on `127.0.0.1:9000` by default and rejects request bodies
+larger than 1 MiB. Set `WEBHOOK_HOST`, `WEBHOOK_PORT`, or
+`WEBHOOK_MAX_BODY_BYTES` only when your deployment requires different values.
+
 Expose `http://<receiver-host>:9000/webhook` to CubeAPI, then configure CubeAPI:
 
 ```bash

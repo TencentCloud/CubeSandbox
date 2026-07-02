@@ -31,16 +31,19 @@ export CUBE_API_WEBHOOK_EVENTS='sandbox.created,sandbox.deleted,sandbox.paused,s
 export CUBE_API_WEBHOOK_SECRET='change-me'
 ```
 
+CubeAPI 只接受不包含内嵌用户名/密码的 `http` 和 `https` Webhook URL。使用 IP literal 且指向私网、链路本地、多播或未指定地址的 URL 会被拒绝；本地测试所需的 loopback 地址允许使用。配置签名密钥但仍使用 `http` 时会继续接受，但会记录告警日志。
+
 可选投递参数：
 
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
 | `CUBE_API_WEBHOOK_QUEUE_CAPACITY` | `1024` | 事件队列容量 |
 | `CUBE_API_WEBHOOK_REQUEST_TIMEOUT_SECS` | `5` | 单次 HTTP 请求超时 |
-| `CUBE_API_WEBHOOK_MAX_ATTEMPTS` | `3` | 每个端点最大尝试次数 |
+| `CUBE_API_WEBHOOK_MAX_ATTEMPTS` | `3` | 每个端点最大尝试次数；低于 `1` 时按 `1` 处理 |
 | `CUBE_API_WEBHOOK_INITIAL_BACKOFF_MILLIS` | `200` | 指数退避的初始延迟 |
 
 Webhook 投递不会阻塞沙箱 API 主路径。接收端慢或不可达时，CubeAPI 会在后台重试并记录投递失败日志。
+投递语义是 best-effort、at-most-once：超过配置的重试次数后，CubeAPI 不会持久化事件，也不提供死信队列。
 
 ## Payload
 
@@ -89,6 +92,7 @@ WEBHOOK_SECRET=change-me python3 receiver.py
 ```
 
 把接收端地址写入 `CUBE_API_WEBHOOKS`，重启 CubeAPI，然后创建、暂停、恢复或销毁沙箱，接收端会打印收到的 JSON。
+示例默认监听 `127.0.0.1:9000`；只有在明确需要暴露到其他网卡时才设置 `WEBHOOK_HOST`。
 
 ## 企业微信或通用 HTTP 告警
 
