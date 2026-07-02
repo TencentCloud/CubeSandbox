@@ -26,6 +26,13 @@ type HmacSha256 = Hmac<Sha256>;
 const ERROR_BODY_PREVIEW_LIMIT: usize = 2048;
 const DEFAULT_ENDPOINT_CONCURRENCY: usize = 4;
 
+pub fn build_webhook_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("failed to build webhook HTTP client")
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct HttpWebhookEndpoint {
     pub url: String,
@@ -159,17 +166,26 @@ fn spawn_worker(
                                 .filter(|endpoint| endpoint_subscribes(&endpoint.endpoint, &event.event))
                                 .cloned()
                             {
+                                let permit = match endpoint.concurrency.clone().try_acquire_owned() {
+                                    Ok(permit) => permit,
+                                    Err(err) => {
+                                        warn!(
+                                            error = %err,
+                                            url = %endpoint.endpoint.url,
+                                            "HttpLogger: endpoint concurrency limit reached, dropping delivery"
+                                        );
+                                        continue;
+                                    }
+                                };
                                 let client = client.clone();
                                 let event = event.clone();
                                 let options = options.clone();
                                 deliveries.spawn(async move {
-                                    let Ok(_permit) = endpoint.concurrency.acquire_owned().await else {
-                                        warn!(url = %endpoint.endpoint.url, "HttpLogger: endpoint semaphore closed, dropping delivery");
-                                        return;
-                                    };
+                                    let _permit = permit;
                                     deliver_with_retries(client, endpoint.endpoint, event, options).await;
                                 });
                             }
+                            drain_finished_deliveries(&mut deliveries);
                         }
                         Some(Msg::Flush(reply)) => {
                             drain_deliveries(&mut deliveries).await;
@@ -189,6 +205,18 @@ fn spawn_worker(
             }
         }
     });
+}
+
+fn drain_finished_deliveries(deliveries: &mut JoinSet<()>) {
+    loop {
+        match deliveries.try_join_next() {
+            Some(Ok(())) => {}
+            Some(Err(err)) => {
+                warn!(error = %err, "HttpLogger: webhook delivery task failed");
+            }
+            None => break,
+        }
+    }
 }
 
 async fn drain_deliveries(deliveries: &mut JoinSet<()>) {
@@ -272,11 +300,11 @@ async fn deliver_once(
     }
 
     let status = response.status();
-    let text = response_body_preview(response).await;
+    let text = response_body_summary(response).await;
     anyhow::bail!("webhook endpoint returned {status}: {text}");
 }
 
-async fn response_body_preview(mut response: reqwest::Response) -> String {
+async fn response_body_summary(mut response: reqwest::Response) -> String {
     let mut body = Vec::new();
     let mut truncated = false;
 
@@ -296,7 +324,7 @@ async fn response_body_preview(mut response: reqwest::Response) -> String {
         }
     }
 
-    let mut preview = String::from_utf8_lossy(&body).to_string();
+    let mut preview = format!("<{} response body bytes omitted>", body.len());
     if truncated || body.len() >= ERROR_BODY_PREVIEW_LIMIT {
         preview.push_str("...<truncated>");
     }
@@ -321,7 +349,13 @@ fn backoff_delay(initial: Duration, completed_attempt: usize) -> Duration {
 mod tests {
     use super::*;
     use crate::logging::{LogEvent, LogLevel, Logger};
-    use axum::{body::Bytes, extract::State, http::HeaderMap, routing::post, Router};
+    use axum::{
+        body::Bytes,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+        Router,
+    };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -349,7 +383,7 @@ mod tests {
         });
 
         let logger = HttpLogger::from_endpoints(
-            Client::new(),
+            build_webhook_http_client(),
             vec![HttpWebhookEndpoint {
                 url,
                 events: vec!["sandbox.created".to_string()],
@@ -406,7 +440,7 @@ mod tests {
         });
 
         let logger = HttpLogger::from_endpoints(
-            Client::new(),
+            build_webhook_http_client(),
             vec![HttpWebhookEndpoint {
                 url,
                 events: vec!["sandbox.deleted".to_string()],
@@ -462,7 +496,7 @@ mod tests {
         });
 
         let logger = HttpLogger::from_endpoints(
-            Client::new(),
+            build_webhook_http_client(),
             vec![HttpWebhookEndpoint {
                 url,
                 events: vec!["sandbox.paused".to_string()],
@@ -509,7 +543,7 @@ mod tests {
         });
 
         let logger = HttpLogger::from_endpoints(
-            Client::new(),
+            build_webhook_http_client(),
             vec![
                 HttpWebhookEndpoint {
                     url: format!("{base_url}/slow-fail"),
@@ -570,6 +604,51 @@ mod tests {
         let signature = signature_header("secret", br#"{"event":"sandbox.created"}"#).unwrap();
         assert!(signature.starts_with("sha256="));
         assert_eq!(signature.len(), "sha256=".len() + 64);
+    }
+
+    #[tokio::test]
+    async fn webhook_client_does_not_follow_redirects() {
+        let redirected = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/redirect",
+                post(|| async {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [("Location", "/target")],
+                        "redirecting",
+                    )
+                }),
+            )
+            .route(
+                "/target",
+                post(|State(redirected): State<Arc<AtomicUsize>>| async move {
+                    redirected.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::NO_CONTENT
+                }),
+            )
+            .with_state(redirected.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/redirect", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let err = deliver_once(
+            &build_webhook_http_client(),
+            &HttpWebhookEndpoint {
+                url,
+                events: vec!["sandbox.created".to_string()],
+                secret: None,
+            },
+            &LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sb-test"),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("307"));
+        assert_eq!(redirected.load(Ordering::SeqCst), 0);
     }
 
     #[test]

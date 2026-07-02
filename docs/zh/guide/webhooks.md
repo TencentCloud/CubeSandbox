@@ -31,7 +31,7 @@ export CUBE_API_WEBHOOK_EVENTS='sandbox.created,sandbox.deleted,sandbox.paused,s
 export CUBE_API_WEBHOOK_SECRET='change-me'
 ```
 
-CubeAPI 只接受不包含内嵌用户名/密码的 `http` 和 `https` Webhook URL。使用 IP literal 且指向私网、链路本地、多播或未指定地址的 URL 会被拒绝；本地测试所需的 loopback 地址允许使用。配置签名密钥但仍使用 `http` 时会继续接受，但会记录告警日志。
+CubeAPI 只接受不包含内嵌用户名/密码的 `http` 和 `https` Webhook URL。使用 IP literal 且指向私网、链路本地、多播或未指定地址的 URL 会被拒绝；本地测试所需的 loopback 地址允许使用。域名 URL 会在 CubeAPI 加载配置时解析，所有解析出的地址都必须通过相同的地址检查。配置签名密钥但仍使用 `http` 时会继续接受，但会记录告警日志。Webhook 投递不会跟随 HTTP 重定向。DNS 检查是启动期防护；生产环境如需更强的反 rebinding 保证，建议在网络层做 IP allowlist，或使用由组织控制的稳定域名。
 
 可选投递参数：
 

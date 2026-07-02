@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::{
     collections::HashSet,
     fmt,
+    net::ToSocketAddrs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -269,12 +270,23 @@ fn clean_webhook_endpoints(endpoints: Vec<WebhookEndpointConfig>) -> Vec<Webhook
                 tracing::warn!(url = %endpoint.url, "ignoring duplicate webhook endpoint URL");
                 return None;
             }
+            let had_explicit_events = !endpoint.events.is_empty();
             endpoint.events = endpoint
                 .events
                 .into_iter()
                 .map(|event| event.trim().to_string())
                 .filter(|event| !event.is_empty())
                 .collect();
+            if had_explicit_events && endpoint.events.is_empty() {
+                eprintln!(
+                    "webhook endpoint {} has no valid subscribed events after cleanup; subscribing to all events",
+                    endpoint.url
+                );
+                tracing::warn!(
+                    url = %endpoint.url,
+                    "webhook endpoint has no valid subscribed events after cleanup; subscribing to all events"
+                );
+            }
             Some(endpoint)
         })
         .collect()
@@ -294,6 +306,8 @@ fn validate_webhook_url(raw_url: &str, secret: Option<&String>) -> anyhow::Resul
         .ok_or_else(|| anyhow::anyhow!("webhook URL must include a host: {raw_url}"))?;
     if let Ok(ip) = host.parse::<IpAddr>() {
         validate_webhook_ip_literal(ip, raw_url)?;
+    } else {
+        validate_webhook_hostname(host, url.port_or_known_default(), raw_url)?;
     }
     if url.scheme() == "http" && secret.is_some() {
         eprintln!("webhook endpoint with HMAC secret is using HTTP, not HTTPS: {raw_url}");
@@ -309,12 +323,28 @@ fn validate_webhook_url(raw_url: &str, secret: Option<&String>) -> anyhow::Resul
 fn validate_webhook_ip_literal(ip: IpAddr, raw_url: &str) -> anyhow::Result<()> {
     let allowed = match ip {
         IpAddr::V4(ip) => is_allowed_webhook_ipv4(ip),
-        IpAddr::V6(ip) => is_allowed_webhook_ipv6(ip),
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(is_allowed_webhook_ipv4)
+            .unwrap_or_else(|| is_allowed_webhook_ipv6(ip)),
     };
     if allowed {
         return Ok(());
     }
     anyhow::bail!("webhook URL uses a disallowed IP literal: {raw_url}");
+}
+
+fn validate_webhook_hostname(host: &str, port: Option<u16>, raw_url: &str) -> anyhow::Result<()> {
+    let port = port.ok_or_else(|| anyhow::anyhow!("webhook URL must include a port: {raw_url}"))?;
+    let mut resolved = 0usize;
+    for addr in (host, port).to_socket_addrs()? {
+        validate_webhook_ip_literal(addr.ip(), raw_url)?;
+        resolved += 1;
+    }
+    if resolved == 0 {
+        anyhow::bail!("webhook URL host did not resolve to any address: {raw_url}");
+    }
+    Ok(())
 }
 
 fn is_allowed_webhook_ipv4(ip: Ipv4Addr) -> bool {
@@ -391,7 +421,7 @@ mod tests {
     fn webhook_endpoint_cleanup_trims_empty_values() {
         let endpoints = clean_webhook_endpoints(vec![
             WebhookEndpointConfig {
-                url: "  http://example.test/webhook  ".to_string(),
+                url: "  http://localhost:9000/webhook  ".to_string(),
                 events: vec![" sandbox.created ".to_string(), "".to_string()],
                 secret: None,
             },
@@ -403,7 +433,7 @@ mod tests {
         ]);
 
         assert_eq!(endpoints.len(), 1);
-        assert_eq!(endpoints[0].url, "http://example.test/webhook");
+        assert_eq!(endpoints[0].url, "http://localhost:9000/webhook");
         assert_eq!(endpoints[0].events, vec!["sandbox.created"]);
     }
 
@@ -435,6 +465,28 @@ mod tests {
         }]);
 
         assert!(endpoints.is_empty());
+    }
+
+    #[test]
+    fn webhook_endpoint_cleanup_rejects_ipv4_mapped_ipv6_private_literals() {
+        let endpoints = clean_webhook_endpoints(vec![WebhookEndpointConfig {
+            url: "https://[::ffff:10.0.0.1]/webhook".to_string(),
+            events: vec![],
+            secret: None,
+        }]);
+
+        assert!(endpoints.is_empty());
+    }
+
+    #[test]
+    fn webhook_endpoint_cleanup_accepts_resolvable_loopback_hostnames() {
+        let endpoints = clean_webhook_endpoints(vec![WebhookEndpointConfig {
+            url: "http://localhost:9000/webhook".to_string(),
+            events: vec![],
+            secret: None,
+        }]);
+
+        assert_eq!(endpoints.len(), 1);
     }
 
     #[test]

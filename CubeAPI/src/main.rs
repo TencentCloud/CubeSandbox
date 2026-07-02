@@ -223,7 +223,7 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
         let endpoints: Vec<HttpWebhookEndpoint> =
             cfg.webhooks.clone().into_iter().map(Into::into).collect();
         let webhook_logger = HttpLogger::from_endpoints(
-            reqwest::Client::new(),
+            logging::http::build_webhook_http_client(),
             endpoints,
             HttpWebhookOptions {
                 queue_capacity: cfg.webhook_queue_capacity,

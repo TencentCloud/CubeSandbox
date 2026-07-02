@@ -35,8 +35,13 @@ export CUBE_API_WEBHOOK_SECRET='change-me'
 CubeAPI accepts only `http` and `https` webhook URLs without embedded
 credentials. IP-literal URLs that point at private, link-local, multicast, or
 unspecified addresses are rejected; loopback is allowed for local testing.
-Endpoints using `http` with a signing secret are accepted for local development
-but logged as a warning.
+Hostname URLs are resolved when CubeAPI loads the configuration, and all
+resolved addresses must pass the same address checks. Endpoints using `http`
+with a signing secret are accepted for local development but logged as a
+warning. Webhook delivery does not follow HTTP redirects. The DNS check is a
+startup-time guard; for stronger anti-rebinding guarantees in production, prefer
+IP allowlisting at the network layer or stable hostnames controlled by your
+organization.
 
 Optional delivery tuning:
 
