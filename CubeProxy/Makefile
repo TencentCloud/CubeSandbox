@@ -11,6 +11,11 @@ IMAGE_LOCAL     := cube-proxy
 SIDECAR_SRC     := $(CURDIR)/sidecar
 SIDECAR_OUT_DIR := $(CURDIR)/bin
 SIDECAR_OUT     := $(SIDECAR_OUT_DIR)/cube-proxy-sidecar
+# Target architecture for the sidecar binary. Defaults to the host's Go arch
+# (so an arm64 build box produces an arm64 binary and an amd64 box produces
+# amd64). Override with `make SIDECAR_GOARCH=arm64 ...` for cross-builds. The
+# arch MUST match the openresty base image the sidecar is COPY-ed into.
+SIDECAR_GOARCH  ?= $(shell go env GOARCH)
 
 ifeq ($(V),1)
 	Q =
@@ -39,7 +44,7 @@ build: prebuild-sidecar
 		-t $(IMAGE_LOCAL):$(IMAGE_TAG)		\
 		.
 
-# prebuild-sidecar produces a static linux/amd64 binary at
+# prebuild-sidecar produces a static linux/$(SIDECAR_GOARCH) binary at
 # bin/cube-proxy-sidecar so the Dockerfile can simply COPY it into the
 # musl-based openresty:alpine-fat image. The binary MUST be statically
 # linked — CGO_ENABLED=0 plus the netgo/osusergo build tags forces the
@@ -68,7 +73,7 @@ prebuild-sidecar:
 	fi
 	$(call msg,BUILD,cube-proxy-sidecar)
 	$(Q)cd "$(SIDECAR_SRC)" && \
-		CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$(SIDECAR_GOARCH) \
 			go build -trimpath -tags 'netgo osusergo' -ldflags '-s -w' \
 				-o "$(SIDECAR_OUT)" ./cmd/sidecar
 

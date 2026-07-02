@@ -28,7 +28,16 @@ CUBE_PROXY_SOURCE_DIR="${ONE_CLICK_CUBE_PROXY_SOURCE_DIR:-${ROOT_DIR}/CubeProxy}
 CUBE_EGRESS_SOURCE_DIR="${ONE_CLICK_CUBE_EGRESS_SOURCE_DIR:-${ROOT_DIR}/CubeEgress}"
 WEB_SOURCE_DIR="${ONE_CLICK_WEB_SOURCE_DIR:-${ROOT_DIR}/web}"
 WEB_DIST_OVERRIDE="${ONE_CLICK_WEB_DIST_DIR:-}"
-MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert-v1.4.4-linux-$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')}"
+# Arch (Go/GOARCH naming: amd64|arm64) of the arch-flag-selected release assets:
+# the pre-built cube-proxy-sidecar binary and the bundled mkcert binary. Defaults
+# to the build host's arch (arm64 build box -> arm64, amd64 -> amd64). NOTE: the
+# rest of the bundle is built host-native (cube-api via host cargo, the Go
+# binaries via the default GOARCH), so this is NOT a full cross-build switch —
+# build the bundle on the same arch as the deploy target and leave this at the
+# default. ONE_CLICK_TARGET_ARCH is only an escape hatch and must match the build
+# host arch to produce a self-consistent bundle.
+TARGET_GOARCH="${ONE_CLICK_TARGET_ARCH:-$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')}"
+MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert-v1.4.4-linux-${TARGET_GOARCH}}"
 CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
 KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/cube-kernel-scf.zip"
 
@@ -504,7 +513,7 @@ else
       require_cmd go
       (cd "${ROOT_DIR}/CubeProxy/sidecar" && \
         go mod download && \
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+        CGO_ENABLED=0 GOOS=linux GOARCH="${TARGET_GOARCH}" \
           go build -trimpath -tags 'netgo osusergo' -ldflags '-s -w' \
             -o "${CORE_BIN_DIR}/cube-proxy-sidecar" ./cmd/sidecar) >&2
       ;;

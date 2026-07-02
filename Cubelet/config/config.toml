@@ -178,7 +178,9 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
   [plugins."io.containerd.monitor.v1.cgroups"]
     no_prometheus = false
   [plugins."io.containerd.runtime.v2.task"]
-    platforms = ["linux/amd64"]
+    # Declare both platforms so the same config runs on amd64 and arm64 hosts;
+    # containerd matches image manifests against the host's native platform.
+    platforms = ["linux/amd64", "linux/arm64"]
     sched_core = false
   [plugins."io.cubelet.chi.v1.vsocket-manager"]
     proxyPort = 1032
