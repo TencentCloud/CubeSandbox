@@ -189,24 +189,24 @@ finally:
 default-deny egress plus on-the-wire key injection.
 
 ```python
+# Credential injection uses the native cubesandbox SDK (see security-proxy.md).
+from cubesandbox import Sandbox, Rule, Match, Action, Inject
+
+host = "api.anthropic.com"
 rules = [
-    {
-        "name": "allow_anthropic_llm",
-        "match": {"scheme": "https", "sni": "api.anthropic.com", "host": "api.anthropic.com"},
-        "action": {
-            "allow": True,
-            "audit": "metadata",
-            "inject": [
-                {"header": "x-api-key", "secret": ANTHROPIC_API_KEY, "format": "${SECRET}"},
-                {"header": "anthropic-version", "secret": "2023-06-01", "format": "${SECRET}"},
-            ],
-        },
-    },
+    Rule(
+        name="allow_anthropic_llm",
+        match=Match(scheme="https", sni=host, host=host),
+        action=Action(allow=True, audit="metadata", inject=[
+            Inject(header="x-api-key", secret=ANTHROPIC_API_KEY, format="${SECRET}"),
+            Inject(header="anthropic-version", secret="2023-06-01", format="${SECRET}"),
+        ]),
+    ),
 ]
 
 sandbox = Sandbox.create(
     template=CUBE_TEMPLATE_ID,
-    allow_internet_access=False,  # default-deny at L3/L4; the rule's host is auto-allowed
+    allow_internet_access=False,   # default-deny; the rule's host is auto-allowed
     network={"rules": rules},
 )
 ```
@@ -218,7 +218,7 @@ Effect:
 - Anything else is dropped by CubeVS at L3/L4 (`allow_internet_access=False`) and never leaves the sandbox.
 - Every allow / deny decision lands in the egress audit log.
 
-For non-Anthropic providers the example injects `Authorization: Bearer ${SECRET}`
+For non-Anthropic providers the example injects an `Authorization: Bearer` header
 instead. If a provider does not accept a header-injected key, fall back to the
 direct flavor (`envs=...`) — but never write the key into a persistent file
 inside the sandbox.

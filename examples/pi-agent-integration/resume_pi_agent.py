@@ -174,7 +174,10 @@ def main() -> int:
 
         print(f"\nPausing sandbox {sandbox_id} (snapshotting VM + rootfs)...")
         paused_id = sandbox.pause()
-        if paused_id:
+        # The sandbox_id is stable across pause. Some SDK versions return the
+        # resume handle as a string; others return a bool (success). Only adopt
+        # a string handle, otherwise keep the original id for connect().
+        if isinstance(paused_id, str) and paused_id:
             sandbox_id = paused_id
         print(f"Paused. Resume handle: {sandbox_id}")
 

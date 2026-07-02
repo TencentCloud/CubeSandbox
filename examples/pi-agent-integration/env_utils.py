@@ -193,12 +193,14 @@ def _host_from_url(value: str) -> str:
 
 
 def provider_inject(provider: str, secret: str) -> list[dict[str, str]]:
-    """Build CubeEgress credential-injection headers for a provider.
+    """CubeEgress credential-injection specs for a provider's auth header(s).
 
-    Anthropic uses ``x-api-key`` plus a required API version header; everything
-    else uses an ``Authorization: Bearer`` header. Static values are carried as
-    ``secret`` with the default ``${SECRET}`` format so they satisfy CubeEgress
-    validation (which requires a non-empty ``secret`` on every inject entry).
+    Each dict maps directly to a ``cubesandbox.Inject(header=..., secret=...,
+    format=...)``. CubeEgress attaches these headers to matched outbound
+    requests, so the real key rides the wire and never enters the sandbox VM.
+    ``format`` defaults to ``${SECRET}`` (raw secret); bearer schemes use
+    ``Bearer ${SECRET}``. Anthropic uses ``x-api-key`` plus the required
+    API-version header; every other provider uses ``Authorization: Bearer``.
     """
     if provider == "anthropic":
         return [

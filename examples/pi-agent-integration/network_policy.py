@@ -6,12 +6,13 @@
 
 This is the recommended production ("credential vault") pattern:
 
-* Default-deny egress — the sandbox is created with ``allow_internet_access=False``,
-  so CubeVS drops all outbound traffic at L3/L4 except the LLM API host, which is
-  auto-allowed because it is extracted from the L7 ``rules`` below.
-* The provider API key is attached by CubeEgress as an HTTP header on the
-  matched outbound requests, so the real key never enters the sandbox VM. The
-  agent inside only sees a placeholder value.
+* Default-deny egress — the sandbox is created with ``allow_internet_access=False``
+  and an ``allow_out`` list containing only the LLM API host, so every other
+  destination is dropped before it can leave the sandbox.
+* The provider auth header is attached by CubeEgress via ``inject`` rules
+  (native ``cubesandbox`` SDK; see docs/guide/security-proxy.md), so the real
+  key rides the wire and never enters the sandbox VM. The agent inside only
+  sees a placeholder value.
 
 Run:
     python network_policy.py
@@ -24,7 +25,7 @@ import os
 import shlex
 import sys
 
-from e2b import Sandbox
+from cubesandbox import Sandbox, Rule, Match, Action, Inject
 
 from env_utils import (
     build_pi_env,
@@ -102,23 +103,28 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def build_llm_rule(provider: str, host: str, secret: str) -> dict:
-    return {
-        "name": f"allow_{provider}_llm",
-        "match": {"scheme": "https", "sni": host, "host": host},
-        "action": {
-            "allow": True,
-            "audit": "metadata",
-            "inject": provider_inject(provider, secret),
-        },
-    }
+def build_rules(provider: str, host: str, secret: str) -> list[Rule]:
+    # Canonical CubeEgress rule (see docs/guide/security-proxy.md): allow the LLM
+    # host and attach the provider auth header(s) on the wire via ``inject`` so
+    # the real key never enters the sandbox VM. Anything matching no rule under
+    # default-deny is rejected by CubeEgress with 403.
+    return [
+        Rule(
+            name=f"allow_{provider}_llm",
+            match=Match(scheme="https", sni=host, host=host),
+            action=Action(
+                allow=True,
+                audit="metadata",
+                inject=[Inject(**spec) for spec in provider_inject(provider, secret)],
+            ),
+        )
+    ]
 
 
-def create_sandbox(template_id: str, rules: list[dict], timeout: int) -> Sandbox:
-    # allow_internet_access=False is what makes egress default-deny at L3/L4:
-    # CubeVS drops everything except the hosts extracted from the L7 rules (the
-    # LLM API), which it auto-adds as allow targets. This flag must never be
-    # silently dropped on error, or full internet egress would be re-enabled.
+def create_sandbox(template_id: str, rules: list[Rule], timeout: int) -> Sandbox:
+    # allow_internet_access=False makes egress default-deny at L3/L4; the LLM host
+    # named in the rules is auto-allowed and its requests are injected at L7 by
+    # CubeEgress. Never silently drop this flag, or full egress is re-enabled.
     return Sandbox.create(
         template=template_id,
         allow_internet_access=False,
@@ -181,7 +187,7 @@ def main() -> int:
             "Could not resolve the LLM host. Set PI_LLM_HOST in your .env or pass --host."
         )
 
-    rules = [build_llm_rule(provider, host, secret)]
+    rules = build_rules(provider, host, secret)
 
     sandbox_env = build_pi_env(include_secrets=False)
     key_name = provider_key_name(provider)

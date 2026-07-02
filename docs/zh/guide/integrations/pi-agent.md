@@ -172,24 +172,24 @@ finally:
 `network_policy.py` 展示了推荐用于共享集群的模式：默认拒绝出网 + 链路上注入密钥。
 
 ```python
+# 凭证注入使用原生 cubesandbox SDK(见 security-proxy.md)。
+from cubesandbox import Sandbox, Rule, Match, Action, Inject
+
+host = "api.anthropic.com"
 rules = [
-    {
-        "name": "allow_anthropic_llm",
-        "match": {"scheme": "https", "sni": "api.anthropic.com", "host": "api.anthropic.com"},
-        "action": {
-            "allow": True,
-            "audit": "metadata",
-            "inject": [
-                {"header": "x-api-key", "secret": ANTHROPIC_API_KEY, "format": "${SECRET}"},
-                {"header": "anthropic-version", "secret": "2023-06-01", "format": "${SECRET}"},
-            ],
-        },
-    },
+    Rule(
+        name="allow_anthropic_llm",
+        match=Match(scheme="https", sni=host, host=host),
+        action=Action(allow=True, audit="metadata", inject=[
+            Inject(header="x-api-key", secret=ANTHROPIC_API_KEY, format="${SECRET}"),
+            Inject(header="anthropic-version", secret="2023-06-01", format="${SECRET}"),
+        ]),
+    ),
 ]
 
 sandbox = Sandbox.create(
     template=CUBE_TEMPLATE_ID,
-    allow_internet_access=False,  # L3/L4 默认拒绝；规则里的 host 会被自动放行
+    allow_internet_access=False,   # 默认拒绝；规则里的 host 会被自动放行
     network={"rules": rules},
 )
 ```
@@ -201,7 +201,7 @@ sandbox = Sandbox.create(
 - 其他任何目的地都会被 CubeVS 在 L3/L4 层丢弃（`allow_internet_access=False`），根本无法离开沙箱。
 - 每条 allow / deny 决策都会记入出网审计日志。
 
-非 Anthropic provider 时，示例会改注入 `Authorization: Bearer ${SECRET}`。若某 provider 不接受 header 注入的密钥，可回退到直连方式（`envs=...`）—— 但绝不要把密钥写进沙箱内的持久文件。
+非 Anthropic provider 时，示例会改注入 `Authorization: Bearer` 头。若某 provider 不接受 header 注入的密钥，可回退到直连方式（`envs=...`）—— 但绝不要把密钥写进沙箱内的持久文件。
 
 ## 使用场景与最佳实践
 

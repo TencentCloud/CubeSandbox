@@ -98,8 +98,11 @@ def run_command(
     envs: dict[str, str] | None = None,
     timeout: int | float | None = None,
     stream: bool = False,
+    user: str = "root",
 ):
-    kwargs = {"cwd": cwd, "timeout": timeout}
+    # Run as root: /workspace and Pi's state dir (/root/.pi/agent) are root-owned,
+    # and the default e2b exec user ("user") cannot write to them.
+    kwargs = {"cwd": cwd, "timeout": timeout, "user": user}
     kwargs = {key: value for key, value in kwargs.items() if value is not None}
     if envs:
         kwargs["envs"] = envs
