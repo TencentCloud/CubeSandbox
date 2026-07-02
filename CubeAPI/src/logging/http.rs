@@ -8,7 +8,7 @@
 //! background Tokio task. `Logger::log()` only attempts to enqueue an event;
 //! it never waits for queue capacity or performs network I/O.
 
-use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
@@ -65,6 +65,17 @@ struct Endpoint {
     url: Url,
     events: Vec<String>,
     secret: Option<String>,
+}
+
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Endpoint")
+            .field("index", &self.index)
+            .field("events", &self.events)
+            .field("secret_configured", &self.secret.is_some())
+            .finish()
+    }
 }
 
 impl Endpoint {
@@ -690,14 +701,8 @@ fn is_reserved_field(key: &str) -> bool {
 /// credential field names and compound names such as `access_token`, `private_key`,
 /// `db_password`, or `webhook_signature`.
 fn is_sensitive_field(key: &str) -> bool {
-    let normalized: String = key
-        .chars()
-        .map(|ch| match ch {
-            '-' | '.' | ' ' => '_',
-            _ => ch.to_ascii_lowercase(),
-        })
-        .collect();
-    let normalized = normalized.trim_matches('_');
+    let normalized = normalize_field_name(key);
+    let normalized: &str = normalized.as_ref();
 
     if normalized.is_empty() {
         return false;
@@ -799,6 +804,53 @@ fn is_sensitive_field(key: &str) -> bool {
     SENSITIVE_PREFIXES
         .iter()
         .any(|prefix| normalized.starts_with(prefix))
+}
+
+fn normalize_field_name(key: &str) -> Cow<'_, str> {
+    let trimmed = key.trim_matches('_');
+    if !trimmed
+        .bytes()
+        .any(|byte| byte.is_ascii_uppercase() || matches!(byte, b'-' | b'.' | b' '))
+    {
+        return Cow::Borrowed(trimmed);
+    }
+
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut chars = trimmed.chars().peekable();
+    let mut previous = None;
+
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '_' | '-' | '.' | ' ') {
+            if !normalized.is_empty() {
+                normalized.push('_');
+            }
+            previous = Some(ch);
+            continue;
+        }
+
+        if ch.is_ascii_uppercase() {
+            let follows_lowercase_or_digit = previous
+                .is_some_and(|previous| previous.is_ascii_lowercase() || previous.is_ascii_digit());
+            let ends_acronym = previous.is_some_and(|previous| previous.is_ascii_uppercase())
+                && chars.peek().is_some_and(|next| next.is_ascii_lowercase());
+
+            if !normalized.is_empty()
+                && !normalized.ends_with('_')
+                && (follows_lowercase_or_digit || ends_acronym)
+            {
+                normalized.push('_');
+            }
+        }
+
+        normalized.push(ch.to_ascii_lowercase());
+        previous = Some(ch);
+    }
+
+    while normalized.ends_with('_') {
+        normalized.pop();
+    }
+
+    Cow::Owned(normalized)
 }
 
 #[cfg(test)]
@@ -917,22 +969,33 @@ mod tests {
         let sensitive_fields = [
             "password",
             "db_password",
+            "dbPassword",
             "passwd",
             "client_secret",
+            "clientSecret",
             "access_token",
+            "accessToken",
             "refresh-token",
+            "refreshToken",
             "id.token",
+            "IDToken",
             "private_key",
+            "privateKey",
             "private_key_pem",
             "api_key",
+            "APIKey",
+            "APISecret",
             "x-api-key",
             "jwt",
             "bearer",
             "auth",
+            "authToken",
             "csrf",
             "authorization",
             "set-cookie",
             "webhook_signature",
+            "webhookSignature",
+            "gitlabAccessToken",
         ];
 
         for field in sensitive_fields {
@@ -944,16 +1007,51 @@ mod tests {
     fn sensitive_field_matching_keeps_non_secret_metadata() {
         let safe_fields = [
             "token_bucket_config",
+            "tokenBucketConfig",
             "password_reset_url",
+            "passwordResetUrl",
             "credentials_verification_status",
+            "credentialsVerificationStatus",
             "signature_algorithm",
+            "signatureAlgorithm",
             "secretary_name",
+            "secretaryName",
             "authored_by",
+            "authoredBy",
             "cookie_policy",
+            "cookiePolicy",
         ];
 
         for field in safe_fields {
             assert!(!is_sensitive_field(field), "{field} should not be redacted");
+        }
+    }
+
+    #[test]
+    fn field_name_normalization_handles_case_boundaries_and_acronyms() {
+        assert!(matches!(
+            normalize_field_name("access_token"),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(normalize_field_name("accessToken"), Cow::Owned(_)));
+
+        for (field, expected) in [
+            ("access_token", "access_token"),
+            ("accessToken", "access_token"),
+            ("authToken", "auth_token"),
+            ("ClientSecret", "client_secret"),
+            ("refreshToken", "refresh_token"),
+            ("privateKey", "private_key"),
+            ("webhookSignature", "webhook_signature"),
+            ("dbPassword", "db_password"),
+            ("APIKey", "api_key"),
+            ("APISecret", "api_secret"),
+            ("IDToken", "id_token"),
+            ("gitlabAccessToken", "gitlab_access_token"),
+            ("refresh-token", "refresh_token"),
+            ("private.key", "private_key"),
+        ] {
+            assert_eq!(normalize_field_name(field).as_ref(), expected);
         }
     }
 
@@ -1145,6 +1243,41 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_debug_redacts_url_and_secret_material() {
+        let url = concat!(
+            "https://debug-user:debug-password@private.example.test/webhook/path",
+            "?token=query-token&authorization=Bearer%20header-value"
+        );
+        let endpoint = Endpoint {
+            index: 7,
+            url: Url::parse(url).unwrap(),
+            events: vec!["sandbox.created".to_string()],
+            secret: Some("endpoint-signing-secret".to_string()),
+        };
+
+        let debug = format!("{endpoint:?}");
+
+        assert!(debug.contains("index: 7"));
+        assert!(debug.contains("sandbox.created"));
+        assert!(debug.contains("secret_configured: true"));
+        assert!(!debug.contains(url));
+        for leaked in [
+            "private.example.test",
+            "debug-user",
+            "debug-password",
+            "/webhook/path",
+            "query-token",
+            "header-value",
+            "endpoint-signing-secret",
+        ] {
+            assert!(
+                !debug.contains(leaked),
+                "debug output must not contain {leaked}"
+            );
+        }
+    }
+
+    #[test]
     fn hmac_signature_has_stable_v1_lowercase_hex_format() {
         let secret = "test-secret";
         let timestamp = "1710000000";
@@ -1206,12 +1339,24 @@ mod tests {
     fn payload_serialization_removes_sensitive_fields_recursively() {
         let event = test_event()
             .field("access_token", "top-level-token")
+            .field("authToken", "top-level-camel-token")
             .field_value(
                 "metadata",
                 serde_json::json!({
                     "safe": "visible",
+                    "tokenBucketConfig": "visible-camel-metadata",
                     "secret": "nested-secret",
-                    "credentials": {"password": "nested-password"}
+                    "clientSecret": "nested-client-secret",
+                    "credentials": {
+                        "password": "nested-password"
+                    },
+                    "integration": {
+                        "webhookSignature": "nested-signature",
+                        "details": {
+                            "gitlabAccessToken": "deeply-nested-token",
+                            "region": "visible-region"
+                        }
+                    }
                 }),
             );
         let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
@@ -1220,13 +1365,37 @@ mod tests {
         let payload: Value = serde_json::from_slice(&delivery.body).unwrap();
 
         assert!(payload.get("access_token").is_none());
+        assert!(payload.get("authToken").is_none());
         assert_eq!(payload["metadata"]["safe"], "visible");
+        assert_eq!(
+            payload["metadata"]["tokenBucketConfig"],
+            "visible-camel-metadata"
+        );
         assert!(payload["metadata"].get("secret").is_none());
+        assert!(payload["metadata"].get("clientSecret").is_none());
         assert!(payload["metadata"].get("credentials").is_none());
-        assert!(!delivery
-            .body
-            .windows("nested-password".len())
-            .any(|window| window == b"nested-password"));
+        assert!(payload["metadata"]["integration"]
+            .get("webhookSignature")
+            .is_none());
+        assert!(payload["metadata"]["integration"]["details"]
+            .get("gitlabAccessToken")
+            .is_none());
+        assert_eq!(
+            payload["metadata"]["integration"]["details"]["region"],
+            "visible-region"
+        );
+        for leaked in [
+            "top-level-camel-token",
+            "nested-client-secret",
+            "nested-password",
+            "nested-signature",
+            "deeply-nested-token",
+        ] {
+            assert!(!delivery
+                .body
+                .windows(leaked.len())
+                .any(|window| window == leaked.as_bytes()));
+        }
     }
 
     #[derive(Clone)]
