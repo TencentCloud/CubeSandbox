@@ -19,7 +19,7 @@ const envdDefaultPort = 49983
 
 func injectEnvdSidecar(ctx context.Context, req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) {
 	val, ok := req.Annotations[constants.CubeAnnotationsInjectEnvd]
-	if !ok || val != "true" {
+	if !ok || val != constants.CubeAnnotationsInjectEnvdOptIn {
 		return
 	}
 	if req.InstanceType != "" && req.InstanceType != cubebox.InstanceType_cubebox.String() {
@@ -35,7 +35,7 @@ func injectEnvdSidecar(ctx context.Context, req *types.CreateCubeSandboxReq, out
 		return
 	}
 	wrapEntrypointForEnvd(mainContainer)
-	out.ExposedPorts = append(out.ExposedPorts, envdDefaultPort)
+	appendExposedPortIfMissing(out, envdDefaultPort)
 	log.G(ctx).Infof("envd: wrapped entrypoint of container %q (envd path=%s, pre-baked at build time)", mainContainer.Name, constants.CubeEnvdInImagePath)
 	return
 }

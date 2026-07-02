@@ -103,16 +103,14 @@ cubemastercli tpl create-from-image \
   --expose-port 49983 \
   --probe 49983 \
   --probe-path /health \
-  --enable-inject-envd \
-  --envd-path /path/to/envd
+  --enable-inject-envd
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--enable-inject-envd` | Bake the selected host-side `envd` binary into the template rootfs and start it when sandboxes are created from this template. |
-| `--envd-path` | Optional full path to the host-side `envd` binary. If omitted, CubeMaster reads `$CUBE_MASTER_ENVD_HOST_DIR/envd`; when that environment variable is unset, it uses `/usr/local/share/cubesandbox-envd/envd`. |
+| `--enable-inject-envd` | Bake the CubeMaster host-side `envd` binary into the template rootfs and start it when sandboxes are created from this template. |
 
-The injected binary is written inside the template rootfs at `/usr/local/bin/envd`. Changing the selected `envd` binary changes the template fingerprint, so builds do not reuse artifacts baked with an older `envd` binary.
+CubeMaster reads the host-side binary from `$CUBE_MASTER_ENVD_HOST_DIR/envd`; when that environment variable is unset, it uses `/usr/local/share/cubesandbox-envd/envd`. The injected binary is written inside the template rootfs at `/usr/local/bin/envd`. Changing the selected `envd` binary changes the template fingerprint, so builds do not reuse artifacts baked with an older `envd` binary.
 
 ---
 

@@ -18,18 +18,14 @@ import (
 )
 
 const (
-	envdHostDirDefault        = "/usr/local/share/cubesandbox-envd"
-	envdHostDirEnv            = "CUBE_MASTER_ENVD_HOST_DIR"
-	envdBinaryName            = "envd"
-	envdInjectAnnotationOptIn = "true"
-	envdInjectionFileMode     = 0o755
-	envdInjectionDirMode      = 0o755
+	envdHostDirDefault    = "/usr/local/share/cubesandbox-envd"
+	envdHostDirEnv        = "CUBE_MASTER_ENVD_HOST_DIR"
+	envdBinaryName        = "envd"
+	envdInjectionFileMode = 0o755
+	envdInjectionDirMode  = 0o755
 )
 
 func envdHostPath(req *types.CreateTemplateFromImageReq) string {
-	if req != nil && req.EnvdPath != "" {
-		return req.EnvdPath
-	}
 	dir := os.Getenv(envdHostDirEnv)
 	if dir == "" {
 		dir = envdHostDirDefault
@@ -41,7 +37,7 @@ func shouldInjectEnvdIntoTemplate(req *types.CreateTemplateFromImageReq) bool {
 	if req == nil || req.ContainerOverrides == nil || req.ContainerOverrides.Annotations == nil {
 		return false
 	}
-	return req.ContainerOverrides.Annotations[constants.CubeAnnotationsInjectEnvd] == envdInjectAnnotationOptIn
+	return req.ContainerOverrides.Annotations[constants.CubeAnnotationsInjectEnvd] == constants.CubeAnnotationsInjectEnvdOptIn
 }
 
 type envdInjectionPayload struct {
@@ -57,7 +53,7 @@ func prepareEnvdInjectionPayload(req *types.CreateTemplateFromImageReq) (*envdIn
 	srcPath := envdHostPath(req)
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
-		return nil, fmt.Errorf("envd-inject: read %q (set %s or --envd-path to override): %w", srcPath, envdHostDirEnv, err)
+		return nil, fmt.Errorf("envd-inject: read %q (set %s to override): %w", srcPath, envdHostDirEnv, err)
 	}
 	sum := sha256.Sum256(data)
 	return &envdInjectionPayload{

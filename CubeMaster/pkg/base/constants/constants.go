@@ -87,6 +87,7 @@ const (
 	CubeAnnotationsVirtiofsCache = "cube.master.virtiofs.cache"
 
 	CubeAnnotationsInjectEnvd       = "cube.master.inject_envd"
+	CubeAnnotationsInjectEnvdOptIn  = "true"
 	CubeAnnotationsEnvdSidecarImage = "cube.master.envd_sidecar_image"
 	CubeEnvdInImagePath             = "/usr/local/bin/envd"
 

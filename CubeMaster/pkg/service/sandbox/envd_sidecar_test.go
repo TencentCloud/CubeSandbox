@@ -17,7 +17,7 @@ import (
 func TestInjectEnvdSidecarWrapsEntrypoint(t *testing.T) {
 	req := &types.CreateCubeSandboxReq{
 		InstanceType: cubebox.InstanceType_cubebox.String(),
-		Annotations:  map[string]string{constants.CubeAnnotationsInjectEnvd: "true"},
+		Annotations:  map[string]string{constants.CubeAnnotationsInjectEnvd: constants.CubeAnnotationsInjectEnvdOptIn},
 		Containers: []*types.Container{{
 			Name:    "main",
 			Command: []string{"python3"},
@@ -33,13 +33,29 @@ func TestInjectEnvdSidecarWrapsEntrypoint(t *testing.T) {
 	assert.Contains(t, out.ExposedPorts, int64(envdDefaultPort))
 }
 
+func TestInjectEnvdSidecarDoesNotDuplicateEnvdPort(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{
+		InstanceType: cubebox.InstanceType_cubebox.String(),
+		Annotations:  map[string]string{constants.CubeAnnotationsInjectEnvd: constants.CubeAnnotationsInjectEnvdOptIn},
+		Containers: []*types.Container{{
+			Name:    "main",
+			Command: []string{"python3"},
+			Args:    []string{"app.py"},
+		}},
+	}
+	out := &cubebox.RunCubeSandboxRequest{ExposedPorts: []int64{envdDefaultPort}}
+
+	injectEnvdSidecar(context.Background(), req, out)
+	assert.Equal(t, []int64{envdDefaultPort}, out.ExposedPorts)
+}
+
 func TestInjectEnvdSidecarIsIdempotent(t *testing.T) {
 	container := &types.Container{Name: "main", Command: []string{"sleep"}, Args: []string{"infinity"}}
 	wrapEntrypointForEnvd(container)
 	originalArgs := append([]string(nil), container.Args...)
 	req := &types.CreateCubeSandboxReq{
 		InstanceType: cubebox.InstanceType_cubebox.String(),
-		Annotations:  map[string]string{constants.CubeAnnotationsInjectEnvd: "true"},
+		Annotations:  map[string]string{constants.CubeAnnotationsInjectEnvd: constants.CubeAnnotationsInjectEnvdOptIn},
 		Containers:   []*types.Container{container},
 	}
 	out := &cubebox.RunCubeSandboxRequest{}

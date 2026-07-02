@@ -85,10 +85,11 @@ func Test_injectEnvdIntoRootfs_disabled_leavesRootfsUntouched(t *testing.T) {
 
 func Test_injectEnvdPayloadIntoRootfs_doesNotRereadHostBinary(t *testing.T) {
 	want := []byte("ENVD-PAYLOAD-CONTENT")
-	path := filepath.Join(t.TempDir(), "envd")
+	dir := t.TempDir()
+	path := filepath.Join(dir, envdBinaryName)
 	assert.NoError(t, os.WriteFile(path, want, envdInjectionFileMode))
+	t.Setenv(envdHostDirEnv, dir)
 	req := reqWithEnvdAnnotation("true")
-	req.EnvdPath = path
 	payload, err := prepareEnvdInjectionPayload(req)
 	assert.NoError(t, err)
 	assert.NoError(t, os.Remove(path))
@@ -102,14 +103,15 @@ func Test_injectEnvdPayloadIntoRootfs_doesNotRereadHostBinary(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
-func Test_injectEnvdIntoRootfs_usesRequestEnvdPath(t *testing.T) {
-	want := []byte("ENVD-CUSTOM-PATH-CONTENT")
-	path := filepath.Join(t.TempDir(), "custom-envd")
+func Test_injectEnvdIntoRootfs_usesEnvdHostDir(t *testing.T) {
+	want := []byte("ENVD-CUSTOM-DIR-CONTENT")
+	dir := t.TempDir()
+	path := filepath.Join(dir, envdBinaryName)
 	assert.NoError(t, os.WriteFile(path, want, envdInjectionFileMode))
+	t.Setenv(envdHostDirEnv, dir)
 	sum := sha256.Sum256(want)
 	wantSHA := hex.EncodeToString(sum[:])
 	req := reqWithEnvdAnnotation("true")
-	req.EnvdPath = path
 	rootfs := t.TempDir()
 
 	gotSHA, err := injectEnvdIntoRootfs(context.Background(), rootfs, req)

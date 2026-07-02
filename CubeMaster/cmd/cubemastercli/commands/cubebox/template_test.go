@@ -482,15 +482,8 @@ func TestParseContainerOverridesEnableInjectEnvd(t *testing.T) {
 	if overrides == nil || overrides.Annotations == nil {
 		t.Fatal("expected annotations to be set")
 	}
-	if got := overrides.Annotations[constants.CubeAnnotationsInjectEnvd]; got != "true" {
+	if got := overrides.Annotations[constants.CubeAnnotationsInjectEnvd]; got != constants.CubeAnnotationsInjectEnvdOptIn {
 		t.Fatalf("expected inject envd annotation=true, got %q", got)
-	}
-}
-
-func TestCreateFromImageParsesEnvdPath(t *testing.T) {
-	ctx := newCreateFromImageContext(t, []string{"--envd-path", "/tmp/envd"})
-	if got := ctx.String("envd-path"); got != "/tmp/envd" {
-		t.Fatalf("envd-path=%q", got)
 	}
 }
 

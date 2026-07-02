@@ -361,6 +361,15 @@ func formatConstructCubeNetworkConfig(in *cubebox.CubeNetworkConfig) string {
 	return fmt.Sprintf("allow_internet_access=%s allow_out=%v deny_out=%v rules=%d", allowInternetAccess, in.GetAllowOut(), in.GetDenyOut(), len(in.GetRules()))
 }
 
+func appendExposedPortIfMissing(out *cubebox.RunCubeSandboxRequest, port int64) {
+	for _, existing := range out.ExposedPorts {
+		if existing == port {
+			return
+		}
+	}
+	out.ExposedPorts = append(out.ExposedPorts, port)
+}
+
 func getExposedPorts(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {
 
 	if config.GetConfig().CubeletConf.EnableExposedPort {
@@ -378,7 +387,7 @@ func getExposedPorts(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandbo
 			if err != nil {
 				return ret.Errorf(errorcode.ErrorCode_MasterParamsError, "com.exposed_ports:%s,invalid:%v", p, err.Error())
 			}
-			out.ExposedPorts = append(out.ExposedPorts, v)
+			appendExposedPortIfMissing(out, v)
 		}
 		if len(out.GetExposedPorts()) <= 0 {
 			return ret.Errorf(errorcode.ErrorCode_MasterParamsError, "com.exposed_ports is empty")
@@ -490,10 +499,6 @@ func checkAndGetContainerAnnotation(c *cubebox.ContainerConfig, cnt *types.Conta
 		}
 
 		if strings.HasPrefix(k, constants.CubeAnnotationsPrefix) {
-			c.Annotations[k] = v
-		}
-
-		if strings.HasPrefix(k, "cube.container.") {
 			c.Annotations[k] = v
 		}
 
