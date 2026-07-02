@@ -41,7 +41,12 @@ if [[ "${CREATE_TEMPLATE:-0}" == "1" ]]; then
     if [[ -n "${job_id}" ]]; then
       cubemastercli tpl watch --job-id "${job_id}"
     else
-      echo "Could not infer job_id from create-from-image output; run cubemastercli tpl status manually." >&2
+      {
+        echo "Could not infer job_id from create-from-image output; run cubemastercli tpl status manually."
+        echo "Raw create-from-image output:"
+        printf '%s\n' "${create_output}"
+      } >&2
+      exit 1
     fi
   fi
 fi

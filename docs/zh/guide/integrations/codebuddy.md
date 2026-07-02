@@ -47,11 +47,12 @@ export CODEBUDDY_API_KEY="<your-codebuddy-api-key>"
 2. 将镜像推送到 Cube 节点可访问的 registry。
 3. 使用 `cubemastercli tpl create-from-image` 创建 Cube 模板，并暴露、探测
    envd 的 `49983 /health`。
-4. 复制 `examples/codebuddy-integration/.env.example` 为 `.env`，填写 Cube 与
-   CodeBuddy 配置。
-5. 运行 `python run_codebuddy.py` 创建沙箱并启动 CodeBuddy。
-6. 运行 `python run_codebuddy.py --pause-resume`，验证状态可跨
-   `sandbox.pause()` 与 `sandbox.connect()` 保留。
+4. 复制 `examples/codebuddy-integration/.env.example` 为
+   `examples/codebuddy-integration/.env`，填写 Cube 与 CodeBuddy 配置。
+5. 在仓库根目录运行 `python examples/codebuddy-integration/run_codebuddy.py`
+   创建沙箱并启动 CodeBuddy。
+6. 运行 `python examples/codebuddy-integration/run_codebuddy.py --pause-resume`，
+   验证状态可跨 `sandbox.pause()` 与 `sandbox.connect()` 保留。
 
 示例构建命令：
 
@@ -81,12 +82,20 @@ ENV DISABLE_AUTOUPDATER=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git gnupg python3 python3-pip ripgrep \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && chmod 0644 /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g @tencent-ai/codebuddy-code@2.114.2 \
     && codebuddy --version \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/cube-entrypoint.sh"]
 CMD ["sleep", "infinity"]

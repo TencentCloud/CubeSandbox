@@ -48,11 +48,13 @@ export CODEBUDDY_API_KEY="<your-codebuddy-api-key>"
 2. Push the image to a registry reachable by Cube nodes.
 3. Create a Cube template with `cubemastercli tpl create-from-image`, exposing
    and probing envd on `49983 /health`.
-4. Copy `examples/codebuddy-integration/.env.example` to `.env` and fill in
-   Cube and CodeBuddy settings.
-5. Run `python run_codebuddy.py` to create a sandbox and start CodeBuddy.
-6. Run `python run_codebuddy.py --pause-resume` to verify state survives
-   `sandbox.pause()` and `sandbox.connect()`.
+4. Copy `examples/codebuddy-integration/.env.example` to
+   `examples/codebuddy-integration/.env` and fill in Cube and CodeBuddy
+   settings.
+5. Run `python examples/codebuddy-integration/run_codebuddy.py` from the
+   repository root to create a sandbox and start CodeBuddy.
+6. Run `python examples/codebuddy-integration/run_codebuddy.py --pause-resume`
+   to verify state survives `sandbox.pause()` and `sandbox.connect()`.
 
 The example build command is:
 
@@ -82,12 +84,20 @@ ENV DISABLE_AUTOUPDATER=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git gnupg python3 python3-pip ripgrep \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && chmod 0644 /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g @tencent-ai/codebuddy-code@2.114.2 \
     && codebuddy --version \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/cube-entrypoint.sh"]
 CMD ["sleep", "infinity"]
