@@ -158,7 +158,8 @@ export default withMermaid(defineConfig({
             {
               text: 'Integration',
               items: [
-                { text: 'Connect to an Existing Cube Cluster', link: '/guide/connect-existing-cluster' }
+                { text: 'Connect to an Existing Cube Cluster', link: '/guide/connect-existing-cluster' },
+                { text: 'Webhook Event Notifications', link: '/guide/webhooks' }
               ]
             },
             {
@@ -284,7 +285,8 @@ export default withMermaid(defineConfig({
             {
               text: '集成',
               items: [
-                { text: '连接到已有 Cube 集群', link: '/zh/guide/connect-existing-cluster' }
+                { text: '连接到已有 Cube 集群', link: '/zh/guide/connect-existing-cluster' },
+                { text: 'Webhook 事件通知', link: '/zh/guide/webhooks' }
               ]
             },
             {

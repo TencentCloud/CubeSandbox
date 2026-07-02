@@ -71,6 +71,45 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+
+    /// Webhook endpoint subscriptions for sandbox lifecycle events.
+    ///
+    /// Env var: `CUBE_API_WEBHOOKS` as a JSON array, for example:
+    /// `[{"url":"http://127.0.0.1:9000/webhook","events":["sandbox.created"],"secret":"..."}]`
+    ///
+    /// For simple local setups, `CUBE_API_WEBHOOK_URLS` may be a comma-separated
+    /// list and uses `CUBE_API_WEBHOOK_EVENTS` plus `CUBE_API_WEBHOOK_SECRET`.
+    #[serde(default = "default_webhooks")]
+    pub webhooks: Vec<WebhookEndpointConfig>,
+
+    /// Buffered event capacity before webhook events are dropped.
+    #[serde(default = "default_webhook_queue_capacity")]
+    pub webhook_queue_capacity: usize,
+
+    /// Per-request timeout for webhook deliveries.
+    #[serde(default = "default_webhook_request_timeout_secs")]
+    pub webhook_request_timeout_secs: u64,
+
+    /// Maximum delivery attempts per endpoint.
+    #[serde(default = "default_webhook_max_attempts")]
+    pub webhook_max_attempts: usize,
+
+    /// First retry delay; later retries use exponential backoff.
+    #[serde(default = "default_webhook_initial_backoff_millis")]
+    pub webhook_initial_backoff_millis: u64,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct WebhookEndpointConfig {
+    pub url: String,
+
+    /// Subscribed event names. Empty or `["*"]` subscribes to all events.
+    #[serde(default)]
+    pub events: Vec<String>,
+
+    /// Optional HMAC-SHA256 secret.
+    #[serde(default)]
+    pub secret: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -108,6 +147,99 @@ fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .or_else(default_cube_sandbox_mysql_url)
+}
+
+fn default_webhooks() -> Vec<WebhookEndpointConfig> {
+    if let Ok(raw) = std::env::var("CUBE_API_WEBHOOKS") {
+        match serde_json::from_str::<Vec<WebhookEndpointConfig>>(&raw) {
+            Ok(endpoints) => return clean_webhook_endpoints(endpoints),
+            Err(err) => {
+                tracing::warn!(error = %err, "ignoring invalid CUBE_API_WEBHOOKS");
+            }
+        }
+    }
+
+    let urls = match std::env::var("CUBE_API_WEBHOOK_URLS") {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let events = std::env::var("CUBE_API_WEBHOOK_EVENTS")
+        .ok()
+        .map(|value| split_csv(&value))
+        .unwrap_or_else(|| {
+            vec![
+                "sandbox.created".to_string(),
+                "sandbox.deleted".to_string(),
+                "sandbox.paused".to_string(),
+                "sandbox.resumed".to_string(),
+            ]
+        });
+    let secret = std::env::var("CUBE_API_WEBHOOK_SECRET")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    clean_webhook_endpoints(
+        split_csv(&urls)
+            .into_iter()
+            .map(|url| WebhookEndpointConfig {
+                url,
+                events: events.clone(),
+                secret: secret.clone(),
+            })
+            .collect(),
+    )
+}
+
+fn default_webhook_queue_capacity() -> usize {
+    env_parse("CUBE_API_WEBHOOK_QUEUE_CAPACITY", 1024)
+}
+
+fn default_webhook_request_timeout_secs() -> u64 {
+    env_parse("CUBE_API_WEBHOOK_REQUEST_TIMEOUT_SECS", 5)
+}
+
+fn default_webhook_max_attempts() -> usize {
+    env_parse("CUBE_API_WEBHOOK_MAX_ATTEMPTS", 3).max(1)
+}
+
+fn default_webhook_initial_backoff_millis() -> u64 {
+    env_parse("CUBE_API_WEBHOOK_INITIAL_BACKOFF_MILLIS", 200)
+}
+
+fn env_parse<T>(key: &str, default: T) -> T
+where
+    T: std::str::FromStr,
+{
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<T>().ok())
+        .unwrap_or(default)
+}
+
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn clean_webhook_endpoints(endpoints: Vec<WebhookEndpointConfig>) -> Vec<WebhookEndpointConfig> {
+    endpoints
+        .into_iter()
+        .filter(|endpoint| !endpoint.url.trim().is_empty())
+        .map(|mut endpoint| {
+            endpoint.url = endpoint.url.trim().to_string();
+            endpoint.events = endpoint
+                .events
+                .into_iter()
+                .map(|event| event.trim().to_string())
+                .filter(|event| !event.is_empty())
+                .collect();
+            endpoint
+        })
+        .collect()
 }
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
@@ -148,6 +280,36 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
+            webhooks: default_webhooks(),
+            webhook_queue_capacity: default_webhook_queue_capacity(),
+            webhook_request_timeout_secs: default_webhook_request_timeout_secs(),
+            webhook_max_attempts: default_webhook_max_attempts(),
+            webhook_initial_backoff_millis: default_webhook_initial_backoff_millis(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_webhook_endpoints, WebhookEndpointConfig};
+
+    #[test]
+    fn webhook_endpoint_cleanup_trims_empty_values() {
+        let endpoints = clean_webhook_endpoints(vec![
+            WebhookEndpointConfig {
+                url: "  http://example.test/webhook  ".to_string(),
+                events: vec![" sandbox.created ".to_string(), "".to_string()],
+                secret: None,
+            },
+            WebhookEndpointConfig {
+                url: " ".to_string(),
+                events: vec![],
+                secret: None,
+            },
+        ]);
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].url, "http://example.test/webhook");
+        assert_eq!(endpoints[0].events, vec!["sandbox.created"]);
     }
 }

@@ -82,6 +82,9 @@ clap = { version = "4", features = ["derive"] }
 utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
 base64 = "0.22.1"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "mysql", "chrono", "json"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 # ── Secrets at rest ───────────────────────────────────────────────────────
 # bcrypt: one-way password hashing for WebUI accounts.

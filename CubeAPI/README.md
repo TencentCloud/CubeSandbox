@@ -68,8 +68,14 @@ cargo build --release
 |----------|---------|-------------|
 | `CUBE_API_BIND` | `0.0.0.0:3000` | Listen address |
 | `LOG_LEVEL` | `info` | Log level |
+| `CUBE_API_WEBHOOKS` | unset | JSON array of webhook endpoints with `url`, `events`, and optional `secret` |
+| `CUBE_API_WEBHOOK_URLS` | unset | Comma-separated endpoint URLs for simple webhook setups |
+| `CUBE_API_WEBHOOK_EVENTS` | sandbox lifecycle events | Comma-separated subscribed events when using `CUBE_API_WEBHOOK_URLS` |
+| `CUBE_API_WEBHOOK_SECRET` | unset | HMAC-SHA256 secret applied to endpoints from `CUBE_API_WEBHOOK_URLS` |
 
 CubeAPI also exposes dashboard-oriented routes under `/cubeapi/v1`. The one-click WebUI is served by a separate nginx container on port `12088`; that nginx instance serves the packaged static dashboard and proxies same-origin `/cubeapi` requests back to the host CubeAPI through Docker `host-gateway`.
+
+See [Webhook Event Notifications](../docs/guide/webhooks.md) for payloads, signature verification, retry behavior, and a runnable receiver example.
 
 ---
 
@@ -132,4 +138,3 @@ python pause.py
 python create_with_mount.py
 python browser.py
 python test.py
-

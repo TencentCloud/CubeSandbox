@@ -199,7 +199,15 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()> {
-    use logging::{arc, file::FileLogger, filtered::FilteredLogger, multi::MultiLogger, LogLevel};
+    use logging::{
+        arc,
+        file::FileLogger,
+        filtered::FilteredLogger,
+        http::{HttpLogger, HttpWebhookEndpoint, HttpWebhookOptions},
+        multi::MultiLogger,
+        LogLevel,
+    };
+    use std::time::Duration;
 
     // ── Logger ────────────────────────────────────────────────────────────
     let min_level = if debug {
@@ -210,15 +218,31 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
-    let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
-        min_level,
-    ));
+    let mut multi_logger = MultiLogger::new().add(arc(file_logger));
+    if !cfg.webhooks.is_empty() {
+        let endpoints: Vec<HttpWebhookEndpoint> =
+            cfg.webhooks.clone().into_iter().map(Into::into).collect();
+        let webhook_logger = HttpLogger::from_endpoints(
+            reqwest::Client::new(),
+            endpoints,
+            HttpWebhookOptions {
+                queue_capacity: cfg.webhook_queue_capacity,
+                request_timeout: Duration::from_secs(cfg.webhook_request_timeout_secs),
+                max_attempts: cfg.webhook_max_attempts,
+                initial_backoff: Duration::from_millis(cfg.webhook_initial_backoff_millis),
+            },
+        );
+        tracing::info!(
+            endpoint_count = cfg.webhooks.len(),
+            queue_capacity = cfg.webhook_queue_capacity,
+            max_attempts = cfg.webhook_max_attempts,
+            "webhook event logger enabled"
+        );
+        multi_logger = multi_logger.add(arc(webhook_logger));
+    }
+
+    // FilteredLogger gates by level → MultiLogger fans out to file and webhooks.
+    let logger: logging::ArcLogger = arc(FilteredLogger::new(arc(multi_logger), min_level));
 
     tracing::info!(
         log_dir = %cfg.log_dir,
