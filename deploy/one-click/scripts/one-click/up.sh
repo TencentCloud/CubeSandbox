@@ -77,8 +77,6 @@ start_with_pidfile \
 
 wait_for_http "http://${NETWORK_AGENT_HEALTH_ADDR}/readyz" "${NETWORK_AGENT_READY_TIMEOUT}" 1 || die "network-agent did not become ready, check logs under ${LOG_DIR}"
 
-"${SCRIPT_DIR}/up-cube-egress.sh"
-
 start_with_pidfile \
   "cubemaster" \
   "export CUBE_MASTER_CONFIG_PATH=\"${CUBEMASTER_CFG}\"; ${CUBEMASTER_ARTIFACT_STORE_EXPORT} \"${CUBEMASTER_BIN}\""
@@ -91,6 +89,8 @@ start_with_pidfile \
   "cubelet" \
   "${CUBELET_OPTIONAL_EXPORTS}\"${CUBELET_BIN}\" --config \"${CUBELET_CONFIG}\" --dynamic-conf-path \"${CUBELET_DYNAMICCONF}\""
 refresh_pidfile_from_pattern "cubelet" "^${CUBELET_BIN} --config" 10 1 || log "cubelet pidfile refresh skipped"
+
+"${SCRIPT_DIR}/up-cube-egress.sh"
 
 wait_for_http "http://${CUBE_API_HEALTH_ADDR}/health" 30 1 || die "cube-api did not become ready, check logs under ${LOG_DIR}"
 

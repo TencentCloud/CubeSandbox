@@ -56,13 +56,13 @@ start_with_pidfile \
 
 wait_for_http "http://${NETWORK_AGENT_HEALTH_ADDR}/readyz" "${NETWORK_AGENT_READY_TIMEOUT}" 1 || die "network-agent did not become ready, check logs under ${LOG_DIR}"
 
-"${SCRIPT_DIR}/up-cube-egress.sh"
-
 start_with_pidfile \
   "cubelet" \
   "export CUBE_SANDBOX_NODE_IP=\"${CUBE_SANDBOX_NODE_IP}\"; \"${CUBELET_BIN}\" --config \"${CUBELET_CONFIG}\" --dynamic-conf-path \"${CUBELET_DYNAMICCONF}\""
 
 refresh_pidfile_from_pattern "cubelet" "^${CUBELET_BIN} --config" 10 1 || log "cubelet pidfile refresh skipped"
+
+"${SCRIPT_DIR}/up-cube-egress.sh"
 
 # quickcheck.sh now waits for each runtime signal to become ready within a single
 # shared budget (CUBE_QUICKCHECK_READY_TIMEOUT), so a single invocation is
