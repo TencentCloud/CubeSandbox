@@ -149,6 +149,11 @@ def main() -> int:
 
     print(f"Creating sandbox from template: {template_id}")
     result = None
+    # SECURITY: this direct-key demo keeps egress open (allow_internet_access
+    # defaults to True) for simplicity, and injects the provider key per command
+    # via envs=. A compromised agent with open egress could exfiltrate that key.
+    # For shared/production use prefer network_policy.py, which pairs default-deny
+    # egress with the CubeEgress credential vault (the key never enters the VM).
     with Sandbox.create(template=template_id, timeout=args.sandbox_timeout) as sandbox:
         sandbox_id = sandbox_identifier(sandbox)
         print(f"Sandbox ready: {sandbox_id}")

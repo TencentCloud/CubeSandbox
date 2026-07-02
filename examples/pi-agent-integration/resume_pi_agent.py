@@ -159,6 +159,10 @@ def main() -> int:
     turn_2_prompt = TURN_2_PROMPT.format(workspace=args.workspace)
 
     print(f"Creating sandbox from template: {template_id}")
+    # SECURITY: like run_pi_agent.py this demo keeps egress open and injects the
+    # key per command. The pause() snapshot also captures the in-VM env and any
+    # credentials Pi caches under /root/.pi/agent, widening exposure — for shared
+    # clusters prefer the default-deny + vault pattern in network_policy.py.
     sandbox = Sandbox.create(template=template_id, timeout=args.sandbox_timeout)
     sandbox_id = sandbox_identifier(sandbox)
 

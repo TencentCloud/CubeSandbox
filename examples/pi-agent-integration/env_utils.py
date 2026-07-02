@@ -34,14 +34,12 @@ PROVIDER_DEFAULT_HOST = {
     "openrouter": "openrouter.ai",
 }
 
-SECRET_ENV_NAMES = (
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "OPENROUTER_API_KEY",
-)
+# Only Anthropic ships a default model; other providers must set PI_MODEL
+# explicitly (model IDs are provider-specific and change often), so we fail
+# loudly instead of sending a Claude model name to, say, OpenAI.
+PROVIDER_DEFAULT_MODEL = {
+    "anthropic": "claude-sonnet-4-6",
+}
 
 PASSTHROUGH_ENV_NAMES = (
     "ANTHROPIC_BASE_URL",
@@ -94,17 +92,26 @@ def int_env(name: str, default: int) -> int:
 
 
 def pi_provider() -> str:
-    return optional("PI_PROVIDER", "anthropic")
+    # Normalize case so every downstream comparison and dict lookup
+    # (provider_inject, PROVIDER_DEFAULT_HOST, key candidates, ...) is
+    # case-insensitive; "Anthropic" and "anthropic" must behave the same.
+    return optional("PI_PROVIDER", "anthropic").strip().lower()
 
 
 def pi_model() -> str:
-    if pi_provider() == "anthropic":
-        return (
-            os.environ.get("PI_MODEL")
-            or os.environ.get("ANTHROPIC_MODEL")
-            or "claude-sonnet-4-6"
-        )
-    return optional("PI_MODEL", "claude-sonnet-4-6")
+    provider = pi_provider()
+    explicit = os.environ.get("PI_MODEL")
+    if not explicit and provider == "anthropic":
+        explicit = os.environ.get("ANTHROPIC_MODEL")
+    if explicit:
+        return explicit
+    default = PROVIDER_DEFAULT_MODEL.get(provider)
+    if default:
+        return default
+    raise SystemExit(
+        f"No default model for provider {provider!r}. Set PI_MODEL in your .env "
+        "(model IDs are provider-specific; there is no safe cross-provider default)."
+    )
 
 
 def pi_workspace() -> str:
@@ -133,6 +140,7 @@ def require_provider_key(provider: str | None = None) -> str:
 
 
 def provider_key_candidates(provider: str) -> tuple[str, ...]:
+    provider = provider.strip().lower()
     default_name = PROVIDER_KEY_ENV.get(provider, f"{provider.upper()}_API_KEY")
     return (default_name, *PROVIDER_KEY_ALIASES.get(provider, ()))
 
@@ -157,7 +165,10 @@ def build_pi_env(include_secrets: bool = True) -> dict[str, str]:
         if value:
             env[name] = value
     if include_secrets:
-        for name in SECRET_ENV_NAMES:
+        # Forward ONLY the active provider's key(s), never every known secret —
+        # a host with several provider keys (e.g. a CI matrix) must not leak all
+        # of them into the sandbox.
+        for name in provider_key_candidates(pi_provider()):
             value = os.environ.get(name)
             if value:
                 env[name] = value
@@ -170,7 +181,7 @@ def pi_llm_host(provider: str | None = None) -> str:
     Precedence: explicit ``PI_LLM_HOST`` > host parsed from ``ANTHROPIC_BASE_URL``
     (for Anthropic-compatible endpoints) > the provider default.
     """
-    provider_name = provider or pi_provider()
+    provider_name = (provider or pi_provider()).strip().lower()
     explicit = os.environ.get("PI_LLM_HOST")
     if explicit:
         return _host_from_url(explicit)
@@ -202,7 +213,7 @@ def provider_inject(provider: str, secret: str) -> list[dict[str, str]]:
     ``Bearer ${SECRET}``. Anthropic uses ``x-api-key`` plus the required
     API-version header; every other provider uses ``Authorization: Bearer``.
     """
-    if provider == "anthropic":
+    if provider.strip().lower() == "anthropic":
         return [
             {"header": "x-api-key", "secret": secret, "format": "${SECRET}"},
             {"header": "anthropic-version", "secret": "2023-06-01", "format": "${SECRET}"},

@@ -92,6 +92,8 @@ python run_pi_agent.py --prompt "创建 hello.py 打印 'Hello from CubeSandbox'
 
 密钥通过 `sandbox.commands.run(..., envs=...)` 逐命令传入，只在该命令执行期间存在，不会写入 VM 内的持久文件。
 
+> **安全：** 直连方式出网是放开的，Agent 被攻破可能外泄注入的密钥。共享集群请用保险柜方式（第 6 步）：默认拒绝出网 + 链路上注入密钥。
+
 三个脚本都以 `--mode json` 运行 Pi，默认输出精简转写（助手文本、工具调用、失败项）。加 `--raw`（或设置 `PI_STREAM_RAW=1`）可改为打印 Pi 的原始 JSONL 事件流。
 
 ## 5. pause / resume（会话持久化）

@@ -39,10 +39,14 @@ RUN apt-get update \
         ripgrep \
     && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Pi in its own layer so bumping PI_VERSION does not invalidate the slow
+# OS + Node.js layer above (only this short layer rebuilds on a version bump).
+RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && pi --version \
     && npm cache clean --force \
-    && rm -rf /root/.npm /var/lib/apt/lists/*
+    && rm -rf /root/.npm
 
 ENV PI_CODING_AGENT_DIR=/root/.pi/agent \
     PI_CODING_AGENT_SESSION_DIR=/root/.pi/agent/sessions \
