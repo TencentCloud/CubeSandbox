@@ -47,7 +47,10 @@ def parse_args() -> argparse.Namespace:
         "--seed",
         default=None,
         help="Optional path to a local file uploaded into the workspace before "
-             "Claude Code runs (e.g. an existing project the agent should edit).",
+             "Claude Code runs (e.g. an existing project the agent should edit). "
+             "WARNING: this file will be readable by the agent inside the "
+             "sandbox — do not point it at credentials, SSH keys, or other "
+             "secrets.",
     )
     p.add_argument(
         "--timeout",
@@ -129,7 +132,13 @@ def run(args: argparse.Namespace) -> int:
 
     envs = build_agent_env()
     print(f"[cube] creating sandbox from template={template_id}")
-    with Sandbox.create(template=template_id, timeout=args.timeout) as sandbox:
+
+    # Do not use `with Sandbox.create(...) as sandbox:` when --pause is set —
+    # __exit__ destroys the sandbox on scope exit, defeating the pause. When
+    # --pause is off we still want deterministic cleanup, so a try/finally
+    # around a bare create() covers both cases uniformly.
+    sandbox = Sandbox.create(template=template_id, timeout=args.timeout)
+    try:
         print(f"[cube] sandbox_id={sandbox.sandbox_id}")
         preflight_agent(sandbox)
 
@@ -169,9 +178,19 @@ def run(args: argparse.Namespace) -> int:
 
         if args.pause:
             info = sandbox.pause()
-            print(json.dumps({"paused": True, "sandbox_id": sandbox.sandbox_id, "info": info}, default=str))
+            print(json.dumps(
+                {"paused": True, "sandbox_id": sandbox.sandbox_id, "info": info},
+                default=str,
+            ))
 
-        return 0 if result.exit_code == 0 else result.exit_code or 1
+        exit_code = result.exit_code
+        return 0 if exit_code == 0 else (exit_code if exit_code is not None else 1)
+    finally:
+        if not args.pause:
+            try:
+                sandbox.kill()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[cleanup] sandbox.kill() raised {exc!r}")
 
 
 if __name__ == "__main__":

@@ -57,7 +57,11 @@ def run_claude(sandbox: Sandbox, prompt: str, workspace: str, envs: dict[str, st
         on_stderr=lambda m: sys.stderr.write(m),
     )
     print(f"\n[claude] exit_code={result.exit_code}")
-    return result.exit_code or 0
+    # Treat a missing exit_code (SDK returned None on error) as failure —
+    # `exit_code or 0` would mask this because `None or 0` == 0.
+    if result.exit_code is None:
+        return 1
+    return result.exit_code
 
 
 def main() -> int:
@@ -68,11 +72,11 @@ def main() -> int:
     envs = build_agent_env()
 
     print(f"[cube] creating sandbox from template={template_id}")
-    sandbox = Sandbox.create(template=template_id, timeout=1800)
-
+    sandbox: Sandbox | None = None
     sid: str | None = None
     failures = 0
     try:
+        sandbox = Sandbox.create(template=template_id, timeout=1800)
         sid = sandbox.sandbox_id
         print(f"[cube] sandbox_id={sid}")
 
@@ -106,10 +110,11 @@ def main() -> int:
 
         return 0 if failures == 0 else 1
     finally:
-        try:
-            sandbox.kill()
-        except Exception as exc:  # noqa: BLE001
-            print(f"[cleanup] sandbox.kill() raised {exc!r}")
+        if sandbox is not None:
+            try:
+                sandbox.kill()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[cleanup] sandbox.kill() raised {exc!r}")
 
 
 if __name__ == "__main__":
