@@ -172,6 +172,25 @@ The machine running `create.sh` only needs the following — **no pre-installed 
 - `mkcert` / `openssl` are **not** needed locally — the cube-proxy certificate is produced on the jumpserver.
 - **Build / deploy host:** Linux recommended; `create.sh` / `destroy.sh` also support macOS (including Bash 3.2). Use WSL2 on Windows.
 
+### Terraform Provider Init Acceleration (Recommended)
+
+By default, `terraform init` downloads providers from `registry.terraform.io` and GitHub. In mainland China networks, installing the `tencentcloudstack/tencentcloud` provider may time out while fetching checksums or release packages, with errors such as `failed to retrieve authentication checksums` or `Client.Timeout exceeded while awaiting headers`. Tencent Cloud provides a Terraform provider mirror that can be enabled through the Terraform CLI configuration file. See Tencent Cloud's [Init acceleration guide](https://cloud.tencent.com/document/product/1653/82912).
+
+On Linux / macOS, create or update `~/.terraformrc` for the current user:
+
+```hcl
+provider_installation {
+  network_mirror {
+    url = "https://mirrors.tencent.com/terraform/"
+    include = ["registry.terraform.io/tencentcloudstack/*"]
+  }
+
+  direct {
+    exclude = ["registry.terraform.io/tencentcloudstack/*"]
+  }
+}
+```
+
 ### Pre-deployment setup (service activation & authorization)
 
 Complete these **before the first `create.sh` apply** to avoid half-created resources mid-run.
@@ -267,7 +286,7 @@ export TENCENTCLOUD_TKE_NODE_COUNT=2                 # TKE worker nodes (control
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                    # default: public pre-built images
 export TENCENTCLOUD_USE_CFS=false                    # default: no CFS
-export TENCENTCLOUD_CUBE_IMAGE_TAG=cubesandbox002-20260630
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.0
 ```
 
 ### Common Variables

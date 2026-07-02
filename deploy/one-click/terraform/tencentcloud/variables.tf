@@ -262,43 +262,43 @@ variable "use_cfs" {
 variable "image_tag" {
   description = "Shared image tag for the Cube components when per-component image overrides are empty"
   type        = string
-  default     = "cubesandbox002-20260630"
+  default     = "v0.5.0"
 }
 
 variable "image_registry" {
   description = "Registry domain for the Cube component images. Defaults to the public CubeSandbox image registry when use_tcr=false."
   type        = string
-  default     = "cube-sandbox-image.tencentcloudcr.com"
+  default     = "cube-sandbox-cn.tencentcloudcr.com"
 }
 
 variable "image_namespace" {
-  description = "Namespace for the Cube component images. Defaults to public namespace demo when use_tcr=false."
+  description = "Namespace for the Cube component images. Defaults to public namespace cube-sandbox when use_tcr=false."
   type        = string
-  default     = "demo"
+  default     = "cube-sandbox"
 }
 
 variable "cubemaster_image" {
-  description = "Full cubemaster image override, optionally pinned by digest."
+  description = "Full cubemaster image override."
   type        = string
-  default     = "cube-sandbox-image.tencentcloudcr.com/demo/cubemaster:v0.4.0-591b5b7-package-20260701"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-master:v0.5.0"
 }
 
 variable "cubeapi_image" {
-  description = "Full cube-api image override, optionally pinned by digest."
+  description = "Full cube-api image override."
   type        = string
-  default     = "cube-sandbox-image.tencentcloudcr.com/demo/cubeapi@sha256:bcff401e2f2cef8304b242f8ee3d81f08ca48303c4cbf323692c4c4d331d91ab"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:v0.5.0"
 }
 
 variable "cubeproxy_image" {
-  description = "Full cube-proxy image override, optionally pinned by digest."
+  description = "Full cube-proxy image override."
   type        = string
-  default     = "cube-sandbox-image.tencentcloudcr.com/demo/cubeproxy@sha256:dfe82ee66d29a9556197a5332481869be738e9598e29e315185cd5b27c5fc096"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.5.0"
 }
 
 variable "webui_image" {
-  description = "Full webui image override, optionally pinned by digest."
+  description = "Full webui image override."
   type        = string
-  default     = "cube-sandbox-image.tencentcloudcr.com/demo/webui@sha256:87ec878d252154b1162afa541494b3298ae468caa9b4279d4f109c3f8d79c351"
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/webui:v0.5.0"
 }
 
 # Per-component replica counts. All four default to 1 in env.example / variables.tf

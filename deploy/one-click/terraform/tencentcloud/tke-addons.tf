@@ -4,7 +4,7 @@
 ########################
 
 locals {
-  # Default mode uses pinned public images and does not create/use TCR.
+  # Default mode uses tag-based public images and does not create/use TCR.
   # If use_tcr=true, create.sh builds/pushes the images into the per-deployment TCR.
   image_registry = var.use_tcr ? (
     var.image_registry != "" ? var.image_registry : "${tencentcloud_tcr_instance.cluster[0].name}.tencentcloudcr.com"
@@ -12,10 +12,10 @@ locals {
   image_namespace = var.use_tcr ? (
     var.image_namespace != "" ? var.image_namespace : tencentcloud_tcr_namespace.cluster[0].name
   ) : var.image_namespace
-  cube_master_image = var.cubemaster_image != "" ? var.cubemaster_image : "${local.image_registry}/${local.image_namespace}/cubemaster:${var.image_tag}"
+  cube_master_image = var.cubemaster_image != "" ? var.cubemaster_image : "${local.image_registry}/${local.image_namespace}/cube-master:${var.image_tag}"
   cube_api_image    = var.cubeapi_image != "" ? var.cubeapi_image : "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
-  cube_proxy_image  = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cubeproxy:${var.image_tag}"
-  cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
+  cube_proxy_image  = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cube-proxy:${var.image_tag}"
+  cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/webui:${var.image_tag}"
 
   # cube_db / cube_user are wired through Terraform (var.cube_db / var.cube_user)
   # so the MySQL account/database created in main.tf, the cube-master conf Secret

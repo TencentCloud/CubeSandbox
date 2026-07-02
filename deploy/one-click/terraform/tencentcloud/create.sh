@@ -776,14 +776,14 @@ setup_env() {
 	TENCENTCLOUD_USE_CFS="${TENCENTCLOUD_USE_CFS:-false}"
 	export TF_VAR_use_tcr="$TENCENTCLOUD_USE_TCR"
 	export TF_VAR_use_cfs="$TENCENTCLOUD_USE_CFS"
-	CUBE_IMAGE_TAG="${TENCENTCLOUD_CUBE_IMAGE_TAG:-cubesandbox002-20260630}"
+	CUBE_IMAGE_TAG="${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.5.0}"
 	export TF_VAR_image_tag="$CUBE_IMAGE_TAG"
-	export TF_VAR_image_registry="${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-image.tencentcloudcr.com}"
-	export TF_VAR_image_namespace="${TENCENTCLOUD_IMAGE_NAMESPACE:-demo}"
-	export TF_VAR_cubemaster_image="${TENCENTCLOUD_CUBEMASTER_IMAGE:-cube-sandbox-image.tencentcloudcr.com/demo/cubemaster:v0.4.0-591b5b7-package-20260701}"
-	export TF_VAR_cubeapi_image="${TENCENTCLOUD_CUBEAPI_IMAGE:-cube-sandbox-image.tencentcloudcr.com/demo/cubeapi@sha256:bcff401e2f2cef8304b242f8ee3d81f08ca48303c4cbf323692c4c4d331d91ab}"
-	export TF_VAR_cubeproxy_image="${TENCENTCLOUD_CUBEPROXY_IMAGE:-cube-sandbox-image.tencentcloudcr.com/demo/cubeproxy@sha256:dfe82ee66d29a9556197a5332481869be738e9598e29e315185cd5b27c5fc096}"
-	export TF_VAR_webui_image="${TENCENTCLOUD_WEBUI_IMAGE:-cube-sandbox-image.tencentcloudcr.com/demo/webui@sha256:87ec878d252154b1162afa541494b3298ae468caa9b4279d4f109c3f8d79c351}"
+	export TF_VAR_image_registry="${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-cn.tencentcloudcr.com}"
+	export TF_VAR_image_namespace="${TENCENTCLOUD_IMAGE_NAMESPACE:-cube-sandbox}"
+	export TF_VAR_cubemaster_image="${TENCENTCLOUD_CUBEMASTER_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-master:${CUBE_IMAGE_TAG}}"
+	export TF_VAR_cubeapi_image="${TENCENTCLOUD_CUBEAPI_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:${CUBE_IMAGE_TAG}}"
+	export TF_VAR_cubeproxy_image="${TENCENTCLOUD_CUBEPROXY_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:${CUBE_IMAGE_TAG}}"
+	export TF_VAR_webui_image="${TENCENTCLOUD_WEBUI_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/webui:${CUBE_IMAGE_TAG}}"
 	SSH_PORT="${TENCENTCLOUD_SSH_PORT:-22}"
 	[ -n "${TENCENTCLOUD_MYSQL_PASSWORD:-}" ] && export TF_VAR_mysql_root_password="$TENCENTCLOUD_MYSQL_PASSWORD"
 	[ -n "${TENCENTCLOUD_REDIS_PASSWORD:-}" ] && export TF_VAR_redis_password="$TENCENTCLOUD_REDIS_PASSWORD"
@@ -1310,7 +1310,7 @@ build_and_push_images() {
 	reg=$(terraform output -raw tcr_registry_name 2>/dev/null || echo "")
 	ns=$(terraform output -raw tcr_namespace 2>/dev/null || echo "")
 	user=$(terraform output -raw tcr_token_user 2>/dev/null || echo "")
-	tag="${CUBE_IMAGE_TAG:-cubesandbox002-20260630}"
+	tag="${CUBE_IMAGE_TAG:-v0.5.0}"
 
 	if [ -z "$js_pub_ip" ] || [ -z "$reg" ] || [ -z "$ns" ]; then
 		echo -e "  ${RED}✗ Missing jumpserver / TCR info; cannot build images${NC}"
@@ -1421,7 +1421,7 @@ tcr_build_and_push() {
 	# The image tag was already resolved earlier (env / saved selection /
 	# prompt_deployment_env / default), so don't ask again — just remind which tag
 	# will be built & pushed.
-	echo -e "  ${GREEN}✓ Image tag to build & push: ${CUBE_IMAGE_TAG:-cubesandbox002-20260630}${NC}"
+	echo -e "  ${GREEN}✓ Image tag to build & push: ${CUBE_IMAGE_TAG:-v0.5.0}${NC}"
 	echo ""
 
 	# Pre-pull the base images the build needs from the in-VPC TCR mirror first
@@ -1674,7 +1674,7 @@ prompt_deployment_env() {
 	select_env TENCENTCLOUD_CUBE_DB "Cube database name" "cube_mvp"
 	select_env TENCENTCLOUD_CUBE_USER "Cube database user" "cube"
 	select_env_secret TENCENTCLOUD_CUBE_PASSWORD "Cube database password" "cube_pass"
-	select_env TENCENTCLOUD_CUBE_IMAGE_TAG "Cube component image tag" "cubesandbox002-20260630" "dev"
+	select_env TENCENTCLOUD_CUBE_IMAGE_TAG "Cube component image tag" "v0.5.0" "dev"
 
 	# Ask whether to print verbose terraform logs (defaults to off). Runs before
 	# setup_env so the resolved value feeds VERBOSE. An explicit
@@ -4049,7 +4049,7 @@ TENCENTCLOUD_REDIS_PASSWORD='${TENCENTCLOUD_REDIS_PASSWORD:-}'
 TENCENTCLOUD_CUBE_DB='${TENCENTCLOUD_CUBE_DB:-cube_mvp}'
 TENCENTCLOUD_CUBE_USER='${TENCENTCLOUD_CUBE_USER:-cube}'
 TENCENTCLOUD_CUBE_PASSWORD='${TENCENTCLOUD_CUBE_PASSWORD:-}'
-TENCENTCLOUD_CUBE_IMAGE_TAG='${TENCENTCLOUD_CUBE_IMAGE_TAG:-cubesandbox002-20260630}'
+TENCENTCLOUD_CUBE_IMAGE_TAG='${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.5.0}'
 TENCENTCLOUD_TKE_CLUSTER_VERSION='${TKE_CLUSTER_VERSION:-1.34.1}'
 TENCENTCLOUD_TKE_NODE_COUNT='${TKE_NODE_COUNT:-2}'
 TENCENTCLOUD_CUBEMASTER_REPLICAS='${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}'
@@ -4249,9 +4249,9 @@ write_resolved_tfvars_file() {
 		--argjson enable_public_network "$(_bool_json "${TF_VAR_enable_public_network:-${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-false}}")" \
 		--argjson use_tcr "$(_bool_json "${TF_VAR_use_tcr:-${TENCENTCLOUD_USE_TCR:-false}}")" \
 		--argjson use_cfs "$(_bool_json "${TF_VAR_use_cfs:-${TENCENTCLOUD_USE_CFS:-false}}")" \
-		--arg image_tag "${TF_VAR_image_tag:-${CUBE_IMAGE_TAG:-${TENCENTCLOUD_CUBE_IMAGE_TAG:-cubesandbox002-20260630}}}" \
-		--arg image_registry "${TF_VAR_image_registry:-${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-image.tencentcloudcr.com}}" \
-		--arg image_namespace "${TF_VAR_image_namespace:-${TENCENTCLOUD_IMAGE_NAMESPACE:-demo}}" \
+		--arg image_tag "${TF_VAR_image_tag:-${CUBE_IMAGE_TAG:-${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.5.0}}}" \
+		--arg image_registry "${TF_VAR_image_registry:-${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-cn.tencentcloudcr.com}}" \
+		--arg image_namespace "${TF_VAR_image_namespace:-${TENCENTCLOUD_IMAGE_NAMESPACE:-cube-sandbox}}" \
 		--arg cubemaster_image "${TF_VAR_cubemaster_image:-${TENCENTCLOUD_CUBEMASTER_IMAGE:-}}" \
 		--arg cubeapi_image "${TF_VAR_cubeapi_image:-${TENCENTCLOUD_CUBEAPI_IMAGE:-}}" \
 		--arg cubeproxy_image "${TF_VAR_cubeproxy_image:-${TENCENTCLOUD_CUBEPROXY_IMAGE:-}}" \

@@ -62,17 +62,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # (the extracted sandbox-package/) is two levels up.
 PKG_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-REGISTRY="${REGISTRY:-cube-sandbox-image.tencentcloudcr.com}"
-NAMESPACE="${NAMESPACE:-cluster}"
+REGISTRY="${REGISTRY:-cube-sandbox-cn.tencentcloudcr.com}"
+NAMESPACE="${NAMESPACE:-cube-sandbox}"
 # One shared, externally overridable tag for all four component images. Keep in
 # sync with terraform/tencentcloud (var.image_tag) so the default TKE deployment
 # consumes exactly what this script builds.
-TAG="${TAG:-latest}"
+TAG="${TAG:-v0.5.0}"
 
 CUBE_API_IMAGE="${CUBE_API_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-api:${TAG}}"
-CUBE_MASTER_IMAGE="${CUBE_MASTER_IMAGE:-${REGISTRY}/${NAMESPACE}/cubemaster:${TAG}}"
-CUBE_PROXY_IMAGE="${CUBE_PROXY_IMAGE:-${REGISTRY}/${NAMESPACE}/cubeproxy:${TAG}}"
-CUBE_WEBUI_IMAGE="${CUBE_WEBUI_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-webui:${TAG}}"
+CUBE_MASTER_IMAGE="${CUBE_MASTER_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-master:${TAG}}"
+CUBE_PROXY_IMAGE="${CUBE_PROXY_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-proxy:${TAG}}"
+CUBE_WEBUI_IMAGE="${CUBE_WEBUI_IMAGE:-${REGISTRY}/${NAMESPACE}/webui:${TAG}}"
 
 WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3000}"
 PUSH="${PUSH:-0}"
