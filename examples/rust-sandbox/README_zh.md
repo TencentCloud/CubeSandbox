@@ -174,7 +174,7 @@ with Sandbox.create(template=template_id) as sandbox:
     )
 
     url = f"https://{sandbox.get_host(8080)}/"
-    resp = requests.get(url, verify=False)
+    resp = requests.get(url, verify=False)  # 设置 SSL_CERT_FILE 进行正确验证
     print(resp.json())   # {"status":"ok","runtime":"rust",...}
 ```
 
@@ -191,7 +191,8 @@ with Sandbox.create(
     sandbox.commands.run("cd /tmp/secure-eval && cargo build --release")
 
     result = sandbox.commands.run(
-        "timeout 10 sh -c 'ulimit -v 524288 && /tmp/secure-eval/target/release/secure-eval'"
+        "timeout 10 sh -c 'ulimit -v 524288 && ulimit -f 102400 && ulimit -n 128 && ulimit -u 256 && "
+        "/tmp/secure-eval/target/release/secure-eval'"
     )
 ```
 

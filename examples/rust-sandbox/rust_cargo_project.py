@@ -158,6 +158,9 @@ def main() -> None:
             f"stat -c %s {work_dir}/target/release/{project_name}",
             timeout=5,
         )
+        if r.exit_code != 0 or not r.stdout.strip():
+            print(f"\nBinary size: (unavailable)", file=sys.stderr)
+            return
         size_bytes = int(r.stdout.strip())
         if size_bytes >= 1_048_576:
             size_str = f"{size_bytes / 1_048_576:.1f} MB"

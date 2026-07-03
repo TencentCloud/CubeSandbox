@@ -1,0 +1,18 @@
+# Environment files
+.env
+
+# Python virtual environment
+.venv/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Rust build artifacts
+target/
+
+# Documentation and scripts
+*.md
+*.py
+requirements.txt

@@ -82,6 +82,12 @@ def main() -> None:
         # Show toolchain versions
         rustc_ver = sandbox.commands.run("rustc --version", timeout=10)
         cargo_ver = sandbox.commands.run("cargo --version", timeout=10)
+        if rustc_ver.exit_code != 0:
+            print(f"[toolchain] rustc not found: {rustc_ver.stderr}", file=sys.stderr)
+            sys.exit(1)
+        if cargo_ver.exit_code != 0:
+            print(f"[toolchain] cargo not found: {cargo_ver.stderr}", file=sys.stderr)
+            sys.exit(1)
         print(f"[toolchain] {rustc_ver.stdout.strip()}")
         print(f"[toolchain] {cargo_ver.stdout.strip()}")
         print()
