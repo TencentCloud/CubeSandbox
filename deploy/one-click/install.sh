@@ -220,10 +220,26 @@ check_dns_preflight() {
     return 0
   fi
 
-  require_cmd systemctl
-  local nm_load_state
-  nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
-  [[ "${nm_load_state}" == "loaded" ]] || die "DNS setup requires resolvectl or NetworkManager"
+  # Without resolvectl the DNS scripts fall back to dnsmasq. CUBE_PROXY_DNSMASQ_MODE
+  # picks who owns it (see dns-host-route-up.sh); mirror that check here so the
+  # installer does not reject a host the runtime would actually support.
+  local dnsmasq_mode="${CUBE_PROXY_DNSMASQ_MODE:-networkmanager}"
+  case "${dnsmasq_mode}" in
+    networkmanager)
+      require_cmd systemctl
+      local nm_load_state
+      nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
+      [[ "${nm_load_state}" == "loaded" ]] || \
+        die "DNS setup requires resolvectl or NetworkManager (or set CUBE_PROXY_DNSMASQ_MODE=standalone)"
+      ;;
+    standalone)
+      # standalone mode manages dnsmasq itself and only uses NetworkManager
+      # opportunistically, so it does not require one to be loaded.
+      ;;
+    *)
+      die "unsupported CUBE_PROXY_DNSMASQ_MODE: ${dnsmasq_mode} (expected networkmanager or standalone)"
+      ;;
+  esac
 
   if ! command -v dnsmasq >/dev/null 2>&1; then
     require_any_cmd dnf yum apt-get

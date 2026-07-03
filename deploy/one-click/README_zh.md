@@ -295,7 +295,7 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 - 用 `CUBE_SANDBOX_NODE_IP` 渲染 `cubeproxy/global.conf`
 - 安装 `/etc/systemd/system/cube-sandbox-*.service|target|timer`，并把宿主机进程与容器统一交给 systemd 管理
 - MySQL、Redis、cube proxy、WebUI、CoreDNS 仍使用 Docker 运行，但生命周期改由各自的 systemd service 直接管理，而不是运行期依赖 `docker compose up -d`
-- 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`：同样会创建该 dummy link，并让 `dnsmasq` 在 `169.254.254.53` 上额外监听，安装器同时把 `/etc/resolv.conf` 从 NetworkManager 手里接管（`rc-manager=unmanaged`）并改写为指向该非 loopback IP。这样宿主与 `systemd-resolved` 路径保持对称，避免 Docker 在 `/etc/resolv.conf` 只剩 loopback nameserver 时默默回退到内置公网 DNS（`8.8.8.8`）——一旦回退，宿主上所有依赖域名解析的容器（典型如 `docker build` 跑 `apk update`）都会因为公网 DNS 在内网不可达而失败。
+- 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`：同样会创建该 dummy link，并让 `dnsmasq` 在 `169.254.254.53` 上额外监听，安装器同时把 `/etc/resolv.conf` 从 NetworkManager 手里接管（`rc-manager=unmanaged`）并改写为指向该非 loopback IP。这样宿主与 `systemd-resolved` 路径保持对称，避免 Docker 在 `/etc/resolv.conf` 只剩 loopback nameserver 时默默回退到内置公网 DNS（`8.8.8.8`）——一旦回退，宿主上所有依赖域名解析的容器（典型如 `docker build` 跑 `apk update`）都会因为公网 DNS 在内网不可达而失败。若目标机上 NetworkManager 会初始化其 `dnsmasq` 插件但从不真正拉起子进程（例如通过 `ifcfg` + `assume` 管理的 bond 网卡），可设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本直接拉起并管理 `dnsmasq`，而不再依赖 NetworkManager 插件；面向客户端的解析器布局（dummy link、监听地址、入口 IP）在其它方面完全一致。
 - 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 systemd 状态与业务健康检查
 - 在 `/usr/local/services/cubetoolbox/webui/` 下运行标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/cubeapi/v1/health`
 
@@ -367,8 +367,8 @@ sudo yum install -y e2fsprogs util-linux
 二选一命令：
 
 - 证书准备阶段：`mkcert`（已内置在安装包中，若系统无此命令会自动从包内安装）
-- DNS 分流阶段：`resolvectl`，或 `systemctl + NetworkManager`
-- 若缺少 `dnsmasq` 且走 `NetworkManager` 回退路径，还需包管理器之一：`dnf` / `yum` / `apt-get`
+- DNS 分流阶段：`resolvectl`，或（默认的 `networkmanager` dnsmasq 回退路径需要）`systemctl + NetworkManager`。`standalone` dnsmasq 模式（`CUBE_PROXY_DNSMASQ_MODE=standalone`）不要求已加载/可重启的 `NetworkManager`
+- 若缺少 `dnsmasq` 且走任一 dnsmasq 回退路径（`networkmanager` 或 `standalone`），还需包管理器之一：`dnf` / `yum` / `apt-get`
 
 条件命令：
 
@@ -399,7 +399,7 @@ sudo yum install -y e2fsprogs util-linux
 > 配置、防火墙规则与凭据轮换。
 
 - 目标机需要 `root` 权限。
-- 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会回退到 `NetworkManager + dnsmasq`：同样创建该 dummy link，并通过 `listen-address` / `bind-interfaces` 让 `dnsmasq` 同时绑定 `127.0.0.1` 和 `169.254.254.53`；随后安装器自己写 `/etc/resolv.conf`（NetworkManager 切到 `rc-manager=unmanaged`），把 nameserver 指向 `169.254.254.53`，让宿主应用和 Docker 容器看到同一个非 loopback 解析器。
+- 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会回退到 `NetworkManager + dnsmasq`：同样创建该 dummy link，并通过 `listen-address` / `bind-interfaces` 让 `dnsmasq` 同时绑定 `127.0.0.1` 和 `169.254.254.53`；随后安装器自己写 `/etc/resolv.conf`（NetworkManager 切到 `rc-manager=unmanaged`），把 nameserver 指向 `169.254.254.53`，让宿主应用和 Docker 容器看到同一个非 loopback 解析器。当 NetworkManager 会加载其 `dnsmasq` 插件但从不拉起子进程（例如通过 `ifcfg` + `assume` 管理的 bond 网卡）时，可在 `.one-click.env` 中设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本直接拉起并管理 `dnsmasq`。
 - 目标机默认联网拉取 `mysql:8.0` 和 `redis:7-alpine`。
 - `mkcert` 二进制已内置在发布包中（`support/bin/mkcert`），安装时若系统未预装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
 - `cube proxy` 的 TLS 证书和私钥保存在宿主机 `CUBE_PROXY_CERT_DIR`，并通过 `docker compose` 以只读方式挂载进容器；更新证书后无需重建镜像，只需重启 `cube-proxy` 或在容器内 reload nginx。
@@ -414,13 +414,13 @@ sudo yum install -y e2fsprogs util-linux
 - 如果 `assets/kernel-artifacts/` 下缺少 `vmlinux`，`build-vm-assets.sh` 和 `build-release-bundle.sh` 会立即失败；`vmlinux-pvm` 在构建时是可选制品，但安装时若设置 `CUBE_PVM_ENABLE=1`，发布包内必须包含它；发布包里的 `cube-kernel-scf.zip` 会在打包阶段自动生成。
 - 如果 `deploy/guest-image/Dockerfile` 构建失败，或构建机的 `mkfs.ext4` 不支持 `-d`，guest image 生成会立即失败。
 - `cube-snapshot/spec.json` 在当前 one-click 首版中不是强制产物；缺失时相关插件会退化为告警，而不是阻塞基础启动。
-- 如果目标机既没有 `systemd-resolved` / `resolvectl`，也没有可重启的 `NetworkManager`，当前 one-click 仍会报错，因为这类环境下暂未接入第三套宿主机 DNS 方案。
+- 默认的 `NetworkManager + dnsmasq` 回退路径依赖 NetworkManager 拉起 `dnsmasq` 子进程。在 NetworkManager 会初始化插件但从不真正拉起它的目标机上（例如通过 `ifcfg` + `assume` 管理的 bond 网卡），可设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本自己拉起并管理 `dnsmasq`。standalone 模式不需要可重启的 `NetworkManager`，但在完全没有任何解析器管理器的目标机上，你必须确保之后没有其它组件覆盖 `/etc/resolv.conf`。该模式下 `dnsmasq` 作为一个不受 systemd 托管的裸子进程运行，若之后崩溃不会自动重启；可通过 `systemctl restart cube-sandbox-dns` 恢复。
 
 ## DNS 排障
 
 - 查看当前 split DNS 状态：`resolvectl status`
 - 验证宿主机 stub 是否正常：`dig +tcp +timeout=3 docker.cnb.cool @127.0.0.53`
-- 验证本地 DNS 入口是否正常：两条路径下客户端入口都是同一个 dummy link IP，统一执行 `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`。CoreDNS 内部仍然绑在 `127.0.0.54`，但只有 `systemd-resolved` 路径直连 CoreDNS，`NetworkManager` 回退路径先到 `dnsmasq` 再转发到 CoreDNS。
+- 验证本地 DNS 入口是否正常：在 `systemd-resolved` 路径以及两条 `dnsmasq` 回退路径（`NetworkManager` 托管或 `standalone`）下，客户端入口都是同一个 dummy link IP，统一执行 `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`。CoreDNS 内部仍然绑在 `127.0.0.54`，但只有 `systemd-resolved` 路径直连 CoreDNS，回退路径先到 `dnsmasq` 再转发到 CoreDNS。
 - 验证宿主 `/etc/resolv.conf` 是否走该入口：`cat /etc/resolv.conf` 应能看到 `nameserver 169.254.254.53`（两条路径均如此）。
 - 验证容器视角：`docker run --rm alpine cat /etc/resolv.conf` 也应是 `nameserver 169.254.254.53`。如果看到 `nameserver 8.8.8.8`，说明宿主 `/etc/resolv.conf` 退化到了 loopback nameserver，导致 Docker 回退到内置公网 DNS。
 - 若使用 `systemd-resolved` 路径，正常情况下默认网卡不应承载本地 CoreDNS 地址；该地址应只出现在专用 dummy link 上。

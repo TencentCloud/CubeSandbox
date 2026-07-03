@@ -298,6 +298,60 @@ stop_pid_with_timeout() {
   fi
 }
 
+# True if the process ${pid} was launched with exactly the argument ${want}
+# (NUL-delimited match against /proc/<pid>/cmdline). Unlike a `pgrep -f` substring
+# scan this is an exact, per-argument comparison, so it cannot be fooled by an
+# unrelated process that merely embeds the string somewhere in its argv, and it
+# does not treat the argument as a regex.
+pid_cmdline_has_arg() {
+  local pid="$1"
+  local want="$2"
+  local cmdline="/proc/${pid}/cmdline"
+  local arg
+
+  [[ -n "${pid}" && -r "${cmdline}" ]] || return 1
+  while IFS= read -r -d '' arg; do
+    [[ "${arg}" == "${want}" ]] && return 0
+  done < "${cmdline}"
+  return 1
+}
+
+# Stop a dnsmasq instance we launched directly, identified by its config-file
+# path. Only signal a PID we can confirm belongs to that instance: prefer the
+# pid-file when it still points at our process, otherwise scan the process table
+# for candidates. In both cases the candidate is confirmed by an exact
+# "--conf-file=<path>" argv match (pid_cmdline_has_arg), not a substring/regex
+# scan, so we never SIGTERM/SIGKILL an unrelated process the kernel recycled the
+# PID onto, or one that merely has "dnsmasq" (or the path) somewhere in its argv.
+stop_dnsmasq_by_conf() {
+  local pid_file="$1"
+  local conf_path="$2"
+  local timeout="${3:-10}"
+  local want_arg="--conf-file=${conf_path}"
+  local pid=""
+
+  if [[ -f "${pid_file}" ]]; then
+    pid="$(<"${pid_file}")"
+    if [[ -z "${pid}" ]] || ! pid_cmdline_has_arg "${pid}" "${want_arg}"; then
+      pid=""
+    fi
+  fi
+  if [[ -z "${pid}" ]]; then
+    # pgrep -f only narrows the candidate set (its argument is a regex and can
+    # over-match); pid_cmdline_has_arg then confirms each candidate exactly.
+    local cand
+    for cand in $(pgrep -f -- "conf-file=${conf_path}" 2>/dev/null || true); do
+      if pid_cmdline_has_arg "${cand}" "${want_arg}"; then
+        pid="${cand}"
+        break
+      fi
+    done
+  fi
+  if [[ -n "${pid}" ]]; then
+    stop_pid_with_timeout "${pid}" "${timeout}" || true
+  fi
+}
+
 wait_for_http() {
   local url="$1"
   local retries="${2:-30}"
