@@ -5,8 +5,9 @@
 --      method, path, dst_ip, scheme).
 --   2. Look up the policy for the sandbox source IP.
 --   3. Walk policy.rules in order, first-match-wins.
---   4. On allow: enforce gates G1 (https only) and G4 (Host == SNI),
---      then for each inject{header, secret, format} run
+--   4. On allow: enforce gates G1 (scheme is http or https) and
+--      G4 (HTTPS: Host == SNI; HTTP: Host present), then for each
+--      inject{header, secret, format} run
 --      ngx.req.set_header. The secret value is embedded inline in the
 --      policy entry — no external lookup —
 --      so the only inject-failure shape left is "policy malformed at
@@ -17,10 +18,11 @@
 --   6. On deny, return 403 here without touching upstream.
 --
 -- Gate ownership in this module:
---   G1 https            — checked here (ctx.scheme == "https")
+--   G1 scheme valid     — checked here (ctx.scheme is "http" or "https")
 --   G2 TLS handshake OK — implicit (request reached HTTP layer)
---   G3 SNI matches rule — by rule_matches() above
+--   G3 SNI matches rule — by rule_matches() above (HTTPS only; HTTP has no SNI)
 --   G4 Host == SNI      — checked here, before any inject
+--                         (HTTPS: Host==SNI; HTTP: Host present)
 --   G5 dst IP authentic — implicit via G6 (proxy_ssl_verify)
 --   G6 upstream cert    — Pδ; nginx proxy_ssl_verify on (already in
 --                         http {}-level config)
@@ -180,22 +182,40 @@ end
 --   false, "reason"           → drop ALL injects for this request
 --   false, "reason", true     → drop ALL injects AND mark security_event
 local function inject_gates(ctx)
-    -- G1: scheme must be https. Plain HTTP cannot transport credentials
-    -- safely; rules that target plain HTTP and request inject are an
-    -- operator error. Treat as drop, not security_event.
-    if ctx.scheme ~= "https" then
-        return false, "g1_not_https", false
+    -- G1: scheme must be either "http" or "https". We now allow inject
+    -- on plain HTTP as well as HTTPS — operators may legitimately need
+    -- to inject credentials into plaintext traffic on trusted networks
+    -- (e.g. intra-cluster 80). Any other scheme value means something
+    -- unexpected (ngx.var.scheme is http for the :8080 server block and
+    -- https for :8443, so this branch is only hit on misconfig); drop
+    -- inject, but do not flag security_event.
+    if ctx.scheme ~= "http" and ctx.scheme ~= "https" then
+        return false, "g1_unsupported_scheme", false
     end
-    -- G4: HTTP Host must equal the SNI. The SNI is what we used to pick
-    -- the rule and what proxy_ssl_name will send to the upstream.
-    -- A mismatch means the sandbox is trying to convince us
-    -- "talk to host A's cert/SNI but route the request as if Host=B"
-    -- — exactly the request-smuggling shape we want to block.
-    if not ctx.sni or not ctx.host then
-        return false, "g4_missing_sni_or_host", true
-    end
-    if string.lower(ctx.sni) ~= string.lower(ctx.host) then
-        return false, "g4_host_sni_mismatch", true
+    -- G4: HTTP Host must equal the SNI (HTTPS) or be present (HTTP).
+    --
+    --   HTTPS: SNI is what we used to pick the rule and what
+    --   proxy_ssl_name will send to the upstream. A mismatch means the
+    --   sandbox is trying to convince us "talk to host A's cert/SNI but
+    --   route the request as if Host=B" — exactly the request-smuggling
+    --   shape we want to block.
+    --
+    --   HTTP: there is no SNI, so the Host header is the only routing
+    --   identity. rule_matches() has already validated Host against the
+    --   rule's match constraint, so we only need to assert Host is
+    --   present — an empty Host on an otherwise-matched inject rule is
+    --   a misconfig / smuggling attempt and drops the inject.
+    if ctx.scheme == "https" then
+        if not ctx.sni or not ctx.host then
+            return false, "g4_missing_sni_or_host", true
+        end
+        if string.lower(ctx.sni) ~= string.lower(ctx.host) then
+            return false, "g4_host_sni_mismatch", true
+        end
+    else  -- ctx.scheme == "http"
+        if not ctx.host or ctx.host == "" then
+            return false, "g4_missing_host", true
+        end
     end
     return true
 end
@@ -312,7 +332,8 @@ local function allow(decision)
     -- ALL injects but the request still proceeds ("any G
     -- failure → drop inject; request continues based on action.allow").
     -- Failed gates flag security_event when the failure reason is
-    -- sandbox-controlled (G4 mismatch / missing SNI/Host on https).
+    -- sandbox-controlled (G4 mismatch, missing SNI/Host on https,
+    -- missing Host on http).
     --
     -- Important: when the rule says "we plan to inject header X", we
     -- ALWAYS clear that header from the sandbox-provided request first,
