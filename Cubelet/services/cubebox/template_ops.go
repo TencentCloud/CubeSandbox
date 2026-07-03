@@ -181,6 +181,10 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 
 	_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+	// Probe envd before taking the snapshot so any reported capability reflects
+	// the runtime state captured into this snapshot, not a later post-snapshot
+	// recovery of the service.
+	envdVersion := s.collectReadyEnvdVersion(ctx, rsp.SandboxID)
 	// CommitSandbox snapshots a running sandbox whose memory artifact has
 	// just been prepared above. snapshotTypeForCmd carries the right type
 	// for the path we took: soft-dirty when reflink-cloning a base, or full
@@ -245,9 +249,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	rsp.GuestImageVersion = versions.GuestImage
 	rsp.AgentVersion = versions.Agent
 	rsp.KernelVersion = versions.Kernel
-	// The source sandbox stays running through commit, so probe its real envd
-	// version in-guest after the memory snapshot. Best-effort: empty on failure.
-	rsp.EnvdVersion = s.collectEnvdVersion(ctx, rsp.SandboxID)
+	rsp.EnvdVersion = envdVersion
 	if err := storage.WriteSnapshotCatalog(&storage.SnapshotCatalogEntry{
 		SnapshotID:      rsp.TemplateID,
 		InstanceType:    "cubebox",

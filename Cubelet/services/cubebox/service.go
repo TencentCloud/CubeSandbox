@@ -290,8 +290,6 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.SandboxID = createInfo.SandboxID
 		rsp.SandboxIP = getSandboxIp(createInfo)
 		rsp.PortMappings = getAllocatedPort(createInfo)
-
-		setCubeExtKey(rsp, createInfo)
 	}()
 
 	or, e := s.cubeboxMgr.getSandboxRuntime(req)
@@ -351,11 +349,6 @@ func SetRunCubeSandboxRequestDefaultValue(req *cubebox.RunCubeSandboxRequest) {
 	if req.NetworkType == "" {
 		req.NetworkType = cubebox.NetworkType_tap.String()
 	}
-}
-
-func setCubeExtKey(rsp *cubebox.RunCubeSandboxResponse, createInfo *workflow.CreateContext) {
-	_ = rsp
-	_ = createInfo
 }
 
 func dealCreateInnerMetric(rsp *cubebox.RunCubeSandboxResponse, createInfo *workflow.CreateContext) {

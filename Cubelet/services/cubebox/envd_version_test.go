@@ -7,7 +7,13 @@ package cubebox
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -168,4 +174,233 @@ func TestKillProbeProcessNilStatusCh(t *testing.T) {
 	process := &stubProbeProcess{}
 	killProbeProcess(process, nil, testProbeLogger())
 	assert.Equal(t, 1, process.killCount())
+}
+
+func TestProbeEnvdReadinessSuccess(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, envdReadinessPath, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host, port := testServerHostPort(t, srv)
+	err := probeEnvdReadiness(context.Background(), host, port)
+	require.NoError(t, err)
+}
+
+func TestProbeEnvdReadinessRetriesUntilReady(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host, port := testServerHostPort(t, srv)
+	err := probeEnvdReadiness(context.Background(), host, port)
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, attempts.Load())
+}
+
+func TestProbeEnvdReadinessRejectsNonOK(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	host, port := testServerHostPort(t, srv)
+	err := probeEnvdReadiness(context.Background(), host, port)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "503")
+}
+
+func TestFinalizeReadyEnvdVersionSkipsReadinessWhenVersionMissing(t *testing.T) {
+	t.Parallel()
+
+	lookupCalled := false
+	probeCalled := false
+	version := finalizeReadyEnvdVersion(
+		context.Background(),
+		"sandbox-1",
+		"",
+		testProbeLogger(),
+		func(context.Context, string) (string, error) {
+			lookupCalled = true
+			return "172.31.0.2", nil
+		},
+		func(context.Context, string, int) error {
+			probeCalled = true
+			return nil
+		},
+	)
+
+	assert.Empty(t, version)
+	assert.False(t, lookupCalled)
+	assert.False(t, probeCalled)
+}
+
+func TestFinalizeReadyEnvdVersionReturnsEmptyWhenSandboxLookupFails(t *testing.T) {
+	t.Parallel()
+
+	probeCalled := false
+	version := finalizeReadyEnvdVersion(
+		context.Background(),
+		"sandbox-lookup-fail",
+		"0.5.11",
+		testProbeLogger(),
+		func(context.Context, string) (string, error) {
+			return "", errors.New("lookup failed")
+		},
+		func(context.Context, string, int) error {
+			probeCalled = true
+			return nil
+		},
+	)
+
+	assert.Empty(t, version)
+	assert.False(t, probeCalled)
+}
+
+func TestFinalizeReadyEnvdVersionReturnsEmptyWhenReadinessFails(t *testing.T) {
+	t.Parallel()
+
+	version := finalizeReadyEnvdVersion(
+		context.Background(),
+		"sandbox-not-ready",
+		"0.5.11",
+		testProbeLogger(),
+		func(context.Context, string) (string, error) {
+			return "172.31.0.3", nil
+		},
+		func(context.Context, string, int) error {
+			return errors.New("connection refused")
+		},
+	)
+
+	assert.Empty(t, version)
+}
+
+func TestFinalizeReadyEnvdVersionReturnsVersionWhenReadinessSucceeds(t *testing.T) {
+	t.Parallel()
+
+	version := finalizeReadyEnvdVersion(
+		context.Background(),
+		"sandbox-ready",
+		"0.5.11",
+		testProbeLogger(),
+		func(context.Context, string) (string, error) {
+			return "172.31.0.4", nil
+		},
+		func(context.Context, string, int) error {
+			return nil
+		},
+	)
+
+	assert.Equal(t, "0.5.11", version)
+}
+
+func TestProbeEnvdReadinessReturnsWhenContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	host, port := testServerHostPort(t, srv)
+	cfg, err := buildEnvdReadinessProbe(context.Background(), host, port)
+	require.NoError(t, err)
+	cfg.FailureThreshold = 10
+	cfg.Period = 5 * time.Millisecond
+	cfg.ProbeTimeout = 100 * time.Millisecond
+	cfg.Timeout = time.Second
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err = probeEnvdReadinessWithClient(ctx, cfg, newEnvdReadinessHTTPClient())
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, elapsed, 300*time.Millisecond)
+}
+
+func TestProbeEnvdReadinessReturnsConnectionRefused(t *testing.T) {
+	t.Parallel()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	host, port := testListenerHostPort(t, l)
+	require.NoError(t, l.Close())
+
+	cfg, err := buildEnvdReadinessProbe(context.Background(), host, port)
+	require.NoError(t, err)
+	cfg.FailureThreshold = 1
+	cfg.Period = 0
+	cfg.ProbeTimeout = 100 * time.Millisecond
+	cfg.Timeout = 200 * time.Millisecond
+
+	err = probeEnvdReadinessWithClient(context.Background(), cfg, newEnvdReadinessHTTPClient())
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(err.Error()), "refused")
+}
+
+func TestProbeEnvdReadinessRejectsRedirect(t *testing.T) {
+	t.Parallel()
+
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	host, port := testServerHostPort(t, redirect)
+	cfg, err := buildEnvdReadinessProbe(context.Background(), host, port)
+	require.NoError(t, err)
+	cfg.FailureThreshold = 1
+	cfg.Period = 0
+	cfg.ProbeTimeout = 100 * time.Millisecond
+	cfg.Timeout = 200 * time.Millisecond
+
+	err = probeEnvdReadinessWithClient(context.Background(), cfg, newEnvdReadinessHTTPClient())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "302")
+	assert.Zero(t, redirected.Load())
+}
+
+func testServerHostPort(t *testing.T, srv *httptest.Server) (string, int) {
+	t.Helper()
+
+	host, portText, err := net.SplitHostPort(srv.Listener.Addr().String())
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portText)
+	require.NoError(t, err)
+	return host, port
+}
+
+func testListenerHostPort(t *testing.T, l net.Listener) (string, int) {
+	t.Helper()
+
+	host, portText, err := net.SplitHostPort(l.Addr().String())
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portText)
+	require.NoError(t, err)
+	return host, port
 }

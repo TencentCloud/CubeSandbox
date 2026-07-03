@@ -166,6 +166,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	rsp.SandboxID = sandboxID
 	stepLog = stepLog.WithFields(CubeLog.Fields{"sandboxID": sandboxID})
 	stepLog.Infof("Cubebox created successfully: %s", sandboxID)
+	envdVersion := s.collectReadyEnvdVersion(ctx, sandboxID)
 
 	snapshotSuccess := false
 	temporaryCubeboxDestroyed := false
@@ -275,10 +276,6 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
-
-	// collectEnvdVersion uses containerd Exec, which must run before
-	// cube-runtime marks the guest as app-snapshotting and disables exec.
-	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
 
 	stepLog.Info("Step 4: Executing cube-runtime snapshot...")
 	// AppSnapshot builds a brand-new template from a fresh sandbox: there is

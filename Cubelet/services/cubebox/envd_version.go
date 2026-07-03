@@ -9,7 +9,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,7 +22,9 @@ import (
 	"github.com/google/uuid"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telnet"
 )
 
 const (
@@ -27,6 +32,15 @@ const (
 	// envdVersionExecTimeout caps the in-guest `envd --version` probe so a hung
 	// or unresponsive guest can never stall snapshot/commit.
 	envdVersionExecTimeout = 5 * time.Second
+	envdDefaultPort        = 49983
+	// Template/snapshot creation is already a slow path, so after we have proven
+	// the envd binary exists we can afford a longer bounded wait for the service
+	// itself to come up and pass `/health`.
+	envdReadinessTotalTimeout   = 10 * time.Second
+	envdReadinessAttemptTimeout = 500 * time.Millisecond
+	envdReadinessPeriod         = 500 * time.Millisecond
+	envdReadinessMaxAttempts    = 10
+	envdReadinessPath           = "/health"
 	// envdVersionOutputLimit bounds the captured stdout/stderr to defend against
 	// an image that floods the probe with output.
 	envdVersionOutputLimit = 4 << 10 // 4 KiB
@@ -129,6 +143,196 @@ func abortProbe(process containerd.Process, statusCh <-chan containerd.ExitStatu
 	killProbeProcess(process, statusCh, logger)
 }
 
+func buildEnvdReadinessProbe(ctx context.Context, sandboxIP string, port int) (*telnet.ProbeConfig, error) {
+	path := envdReadinessPath
+	req, err := NewRequestForHTTPGetAction(ctx, &cubeboxv1.HTTPGetAction{
+		Path: &path,
+		Port: int32(port),
+	}, sandboxIP)
+	if err != nil {
+		return nil, err
+	}
+	return &telnet.ProbeConfig{
+		Addr:             sandboxIP,
+		Port:             int32(port),
+		Timeout:          envdReadinessTotalTimeout,
+		Period:           envdReadinessPeriod,
+		SuccessThreshold: 1,
+		FailureThreshold: envdReadinessMaxAttempts,
+		ProbeTimeout:     envdReadinessAttemptTimeout,
+		Action:           telnet.ActionHTTPGet,
+		HttpGetRequest:   req,
+		InstanceType:     "cubebox",
+	}, nil
+}
+
+func probeEnvdReadiness(ctx context.Context, sandboxIP string, port int) error {
+	return (&local{}).probeEnvdReadiness(ctx, sandboxIP, port)
+}
+
+func getEnvdReadinessHTTPClient(l *local) *http.Client {
+	if l != nil && l.envdHTTPClient != nil {
+		return l.envdHTTPClient
+	}
+	return newEnvdReadinessHTTPClient()
+}
+
+func newEnvdReadinessHTTPClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+	}
+}
+
+func (l *local) probeEnvdReadiness(ctx context.Context, sandboxIP string, port int) error {
+	sandboxIP = strings.TrimSpace(sandboxIP)
+	if sandboxIP == "" || sandboxIP == "<nil>" {
+		return fmt.Errorf("sandbox IP is empty")
+	}
+	if port <= 0 {
+		port = envdDefaultPort
+	}
+	cfg, err := buildEnvdReadinessProbe(ctx, sandboxIP, port)
+	if err != nil {
+		return err
+	}
+	return probeEnvdReadinessWithClient(ctx, cfg, getEnvdReadinessHTTPClient(l))
+}
+
+func probeEnvdReadinessWithClient(ctx context.Context, cfg *telnet.ProbeConfig, client *http.Client) error {
+	if cfg == nil || cfg.HttpGetRequest == nil {
+		return fmt.Errorf("envd readiness probe config is incomplete")
+	}
+	if client == nil {
+		client = newEnvdReadinessHTTPClient()
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = envdReadinessTotalTimeout
+	}
+	if cfg.ProbeTimeout <= 0 {
+		cfg.ProbeTimeout = envdReadinessAttemptTimeout
+	}
+	if cfg.Period <= 0 {
+		cfg.Period = envdReadinessPeriod
+	}
+	if cfg.FailureThreshold <= 0 {
+		cfg.FailureThreshold = 1
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+
+	var lastErr error
+	for attempt := int32(0); attempt < cfg.FailureThreshold; attempt++ {
+		if err := probeCtx.Err(); err != nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return err
+		}
+
+		attemptCtx, attemptCancel := context.WithTimeout(probeCtx, cfg.ProbeTimeout)
+		req := cfg.HttpGetRequest.Clone(attemptCtx)
+		req.Header = cfg.HttpGetRequest.Header.Clone()
+		req.Host = cfg.HttpGetRequest.Host
+
+		resp, err := client.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+				attemptCancel()
+				return nil
+			}
+			lastErr = fmt.Errorf("statuscode:%d", resp.StatusCode)
+		} else {
+			lastErr = err
+		}
+		attemptCancel()
+
+		if attempt+1 >= cfg.FailureThreshold {
+			break
+		}
+
+		timer := time.NewTimer(cfg.Period)
+		select {
+		case <-timer.C:
+		case <-probeCtx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			if lastErr != nil {
+				return lastErr
+			}
+			return probeCtx.Err()
+		}
+	}
+
+	if lastErr != nil {
+		return lastErr
+	}
+	return context.DeadlineExceeded
+}
+
+// collectReadyEnvdVersion first proves the envd binary exists via
+// `envd --version`; only then does it spend extra time waiting for the envd
+// service to come up and pass `/health`. This keeps non-envd templates fast
+// while still giving envd-backed templates a generous bounded readiness window.
+func (s *service) collectReadyEnvdVersion(ctx context.Context, sandboxID string) string {
+	if s == nil || s.cubeboxMgr == nil {
+		return ""
+	}
+	return s.cubeboxMgr.collectReadyEnvdVersion(ctx, sandboxID)
+}
+
+func finalizeReadyEnvdVersion(
+	ctx context.Context,
+	sandboxID string,
+	version string,
+	logger *log.CubeWrapperLogEntry,
+	lookupSandboxIP func(context.Context, string) (string, error),
+	probeReadiness func(context.Context, string, int) error,
+) string {
+	if version == "" {
+		return ""
+	}
+	if logger == nil {
+		logger = log.G(ctx).WithField("sandboxID", sandboxID)
+	}
+	sandboxIP, err := lookupSandboxIP(ctx, sandboxID)
+	if err != nil {
+		logger.Warnf("collect envd version: get cubebox for readiness probe failed: %v", err)
+		return ""
+	}
+	if err := probeReadiness(ctx, sandboxIP, envdDefaultPort); err != nil {
+		logger.Warnf("collect envd version: envd readiness probe failed on %s:%d: %v", sandboxIP, envdDefaultPort, err)
+		return ""
+	}
+	logger.Infof("collect envd version: readiness confirmed, version=%s", version)
+	return version
+}
+
+func (l *local) lookupSandboxIP(ctx context.Context, sandboxID string) (string, error) {
+	cb, err := l.cubeboxManger.Get(ctx, sandboxID)
+	if err != nil {
+		return "", err
+	}
+	if cb == nil {
+		return "", fmt.Errorf("cubebox %s not found", sandboxID)
+	}
+	return strings.TrimSpace(cb.IP), nil
+}
+
+func (l *local) collectReadyEnvdVersion(ctx context.Context, sandboxID string) string {
+	logger := log.G(ctx).WithField("sandboxID", sandboxID)
+	version := l.collectEnvdVersion(ctx, sandboxID)
+	return finalizeReadyEnvdVersion(ctx, sandboxID, version, logger, l.lookupSandboxIP, l.probeEnvdReadiness)
+}
+
 // collectEnvdVersion runs `envd --version` inside the running guest of sandboxID
 // via containerd task.Exec and returns the parsed semantic version.
 //
@@ -139,7 +343,7 @@ func abortProbe(process containerd.Process, statusCh <-chan containerd.ExitStatu
 // Security: the command always executes inside the microVM guest (task.Exec),
 // never on the host, so an untrusted custom-image binary stays confined to the
 // sandbox.
-func (s *service) collectEnvdVersion(ctx context.Context, sandboxID string) (version string) {
+func (l *local) collectEnvdVersion(ctx context.Context, sandboxID string) (version string) {
 	logger := log.G(ctx).WithField("sandboxID", sandboxID)
 
 	// Self-contained panic guard: this runs inside the AppSnapshot/CommitSandbox
@@ -152,7 +356,7 @@ func (s *service) collectEnvdVersion(ctx context.Context, sandboxID string) (ver
 		}
 	}()
 
-	cb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, sandboxID)
+	cb, err := l.cubeboxManger.Get(ctx, sandboxID)
 	if err != nil {
 		logger.Warnf("collect envd version: get cubebox failed: %v", err)
 		return ""
@@ -164,7 +368,7 @@ func (s *service) collectEnvdVersion(ctx context.Context, sandboxID string) (ver
 	execCtx, cancel := context.WithTimeout(namespaces.WithNamespace(ctx, ns), envdVersionExecTimeout)
 	defer cancel()
 
-	container, err := s.cubeboxMgr.client.LoadContainer(execCtx, sandboxID)
+	container, err := l.client.LoadContainer(execCtx, sandboxID)
 	if err != nil {
 		logger.Warnf("collect envd version: load container failed: %v", err)
 		return ""
@@ -242,6 +446,5 @@ func (s *service) collectEnvdVersion(ctx context.Context, sandboxID string) (ver
 		logger.Warnf("collect envd version: no semver in output")
 		return ""
 	}
-	logger.Infof("collect envd version: %s", version)
 	return version
 }

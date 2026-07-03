@@ -62,14 +62,175 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 	assert.Empty(t, out.SnapshotDir)
 }
 
-func TestConvergeEnvdVersionUsesNodeCollectionResults(t *testing.T) {
-	got := convergeEnvdVersion(context.Background(), []nodeEnvdVersion{
-		{NodeID: "node-a", Version: ""},
-		{NodeID: "node-b", Version: "envd version 0.5.11"},
-		{NodeID: "node-c", Version: "0.6.0"},
+func TestConvergeEnvdVersionRequiresAllReadyReplicasToAgree(t *testing.T) {
+	tests := []struct {
+		name     string
+		versions []nodeEnvdVersion
+		want     string
+	}{
+		{
+			name: "all ready replicas report same version",
+			versions: []nodeEnvdVersion{
+				{NodeID: "node-a", Ready: true, Version: "envd version 0.5.11"},
+				{NodeID: "node-b", Ready: true, Version: "0.5.11"},
+				{NodeID: "node-c", Ready: false, Version: ""},
+			},
+			want: "0.5.11",
+		},
+		{
+			name: "missing version on ready replica suppresses annotation",
+			versions: []nodeEnvdVersion{
+				{NodeID: "node-a", Ready: true, Version: "0.5.11"},
+				{NodeID: "node-b", Ready: true, Version: ""},
+			},
+			want: "",
+		},
+		{
+			name: "version mismatch across ready replicas suppresses annotation",
+			versions: []nodeEnvdVersion{
+				{NodeID: "node-a", Ready: true, Version: "0.5.11"},
+				{NodeID: "node-b", Ready: true, Version: "0.6.0"},
+			},
+			want: "",
+		},
+		{
+			name: "failed replicas do not participate",
+			versions: []nodeEnvdVersion{
+				{NodeID: "node-a", Ready: false, Version: ""},
+				{NodeID: "node-b", Ready: true, Version: "0.5.11"},
+			},
+			want: "0.5.11",
+		},
+		{
+			name: "no ready replicas means no annotation",
+			versions: []nodeEnvdVersion{
+				{NodeID: "node-a", Ready: false, Version: "0.5.11"},
+				{NodeID: "node-b", Ready: false, Version: ""},
+			},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convergeEnvdVersion(context.Background(), tt.versions)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestCreateTemplateReplicasOnNodesClearsEnvdAnnotationWhenReadyReplicaHasNoEnvdVersion(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	req := &sandboxtypes.CreateCubeSandboxReq{InstanceType: "cubebox"}
+	targets := []*node.Node{{InsID: "node-a", IP: "10.0.0.1", Healthy: true}}
+
+	patches.ApplyFunc(createReplicaOnNode, func(ctx context.Context, target *node.Node, req *sandboxtypes.CreateCubeSandboxReq, opts replicaRunOptions) (ReplicaStatus, string) {
+		return ReplicaStatus{
+			NodeID:       target.ID(),
+			NodeIP:       target.IP,
+			InstanceType: req.InstanceType,
+			Status:       ReplicaStatusReady,
+			Phase:        ReplicaPhaseReady,
+		}, ""
+	})
+	patches.ApplyFunc(UpsertReplica, func(ctx context.Context, templateID, instanceType string, replica ReplicaStatus) error {
+		return nil
 	})
 
-	assert.Equal(t, "0.5.11", got)
+	reconcileCalled := false
+	reconciledVersion := "unexpected"
+	patches.ApplyFunc(reconcileTemplateEnvdVersion, func(ctx context.Context, templateID, version string) error {
+		reconcileCalled = true
+		reconciledVersion = version
+		return nil
+	})
+
+	replicas, err := createTemplateReplicasOnNodes(context.Background(), "tpl-no-envd-annotation", req, targets, replicaRunOptions{})
+	require.NoError(t, err)
+	require.Len(t, replicas, 1)
+	assert.Equal(t, ReplicaStatusReady, replicas[0].Status)
+	assert.True(t, reconcileCalled, "template envd annotation should still be reconciled when convergence is suppressed")
+	assert.Equal(t, "", reconciledVersion, "missing envd version from a READY replica must clear any stale template annotation")
+}
+
+func TestCreateTemplateReplicasOnNodesPersistsConvergedEnvdVersion(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	req := &sandboxtypes.CreateCubeSandboxReq{InstanceType: "cubebox"}
+	targets := []*node.Node{
+		{InsID: "node-a", IP: "10.0.0.1", Healthy: true},
+		{InsID: "node-b", IP: "10.0.0.2", Healthy: true},
+	}
+
+	patches.ApplyFunc(createReplicaOnNode, func(ctx context.Context, target *node.Node, req *sandboxtypes.CreateCubeSandboxReq, opts replicaRunOptions) (ReplicaStatus, string) {
+		return ReplicaStatus{
+			NodeID:       target.ID(),
+			NodeIP:       target.IP,
+			InstanceType: req.InstanceType,
+			Status:       ReplicaStatusReady,
+			Phase:        ReplicaPhaseReady,
+		}, "0.5.11"
+	})
+	patches.ApplyFunc(UpsertReplica, func(ctx context.Context, templateID, instanceType string, replica ReplicaStatus) error {
+		return nil
+	})
+
+	var (
+		reconciledTemplateID string
+		reconciledVersion    string
+	)
+	patches.ApplyFunc(reconcileTemplateEnvdVersion, func(ctx context.Context, templateID, version string) error {
+		reconciledTemplateID = templateID
+		reconciledVersion = version
+		return nil
+	})
+
+	replicas, err := createTemplateReplicasOnNodes(context.Background(), "tpl-envd-annotation", req, targets, replicaRunOptions{})
+	require.NoError(t, err)
+	require.Len(t, replicas, 2)
+	assert.Equal(t, "tpl-envd-annotation", reconciledTemplateID)
+	assert.Equal(t, "0.5.11", reconciledVersion)
+}
+
+func TestReconcileTemplateEnvdVersionClearsStaleAnnotation(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	const templateID = "tpl-stale-envd"
+	def := &models.TemplateDefinition{
+		TemplateID: templateID,
+		RequestJSON: `{
+			"annotations": {
+				"` + constants.CubeAnnotationComponentEnvdVersion + `": "0.5.11",
+				"keep": "value"
+			}
+		}`,
+	}
+
+	patches.ApplyFunc(withTemplateWriteLock, func(templateID string, fn func() error) error {
+		return fn()
+	})
+	patches.ApplyFunc(GetDefinition, func(ctx context.Context, gotTemplateID string) (*models.TemplateDefinition, error) {
+		assert.Equal(t, templateID, gotTemplateID)
+		return def, nil
+	})
+
+	var updatedRequestJSON string
+	patches.ApplyFunc(updateDefinitionFields, func(ctx context.Context, gotTemplateID string, values map[string]any) error {
+		assert.Equal(t, templateID, gotTemplateID)
+		payload, ok := values["request_json"].(string)
+		require.True(t, ok)
+		updatedRequestJSON = payload
+		return nil
+	})
+
+	require.NoError(t, reconcileTemplateEnvdVersion(context.Background(), templateID, ""))
+	assert.NotEmpty(t, updatedRequestJSON)
+	assert.NotContains(t, updatedRequestJSON, constants.CubeAnnotationComponentEnvdVersion)
+	assert.Contains(t, updatedRequestJSON, `"keep":"value"`)
 }
 
 func TestResolveTemplateNodesFiltersRequestedHealthyNodes(t *testing.T) {

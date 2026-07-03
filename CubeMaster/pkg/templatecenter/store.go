@@ -482,6 +482,7 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 			replicas = append(replicas, replica)
 			envdVersions = append(envdVersions, nodeEnvdVersion{
 				NodeID:  target.ID(),
+				Ready:   replica.Status == ReplicaStatusReady,
 				Version: envdVersion,
 			})
 			lock.Unlock()
@@ -495,49 +496,58 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 		}()
 	}
 	wg.Wait()
-	// Converge per-node envd versions into a single template value and persist it
-	// once to the definition annotation (idempotent; covers create and redo).
-	if envdVersion := convergeEnvdVersion(ctx, envdVersions); envdVersion != "" {
-		if err := persistTemplateEnvdVersion(ctx, templateID, envdVersion); err != nil {
-			log.G(ctx).Warnf("persist template envd version fail, template=%s err=%v", templateID, err)
-		}
+	// Converge per-node envd versions into a single template value and reconcile
+	// the definition annotation once (idempotent; covers create and redo).
+	if err := reconcileTemplateEnvdVersion(ctx, templateID, convergeEnvdVersion(ctx, envdVersions)); err != nil {
+		log.G(ctx).Warnf("reconcile template envd version fail, template=%s err=%v", templateID, err)
 	}
 	return replicas, persistErr
 }
 
 type nodeEnvdVersion struct {
 	NodeID  string
+	Ready   bool
 	Version string
 }
 
-// convergeEnvdVersion picks a single template-level envd version from the
-// per-node collection results: the first valid semver wins, and any divergence
-// across nodes is logged but not treated as an error.
+// convergeEnvdVersion only returns a template-level envd version when every
+// READY replica reported a valid and consistent value. Failed/non-ready replicas
+// do not participate in this capability contract.
 func convergeEnvdVersion(ctx context.Context, versions []nodeEnvdVersion) string {
 	chosen := ""
+	readyCount := 0
 	for _, item := range versions {
+		if !item.Ready {
+			continue
+		}
+		readyCount++
 		v := sanitizeEnvdVersion(item.Version)
 		if v == "" {
-			continue
+			log.G(ctx).Warnf("envd version missing on ready node=%s; suppressing template capability annotation", item.NodeID)
+			return ""
 		}
 		if chosen == "" {
 			chosen = v
 			continue
 		}
 		if v != chosen {
-			log.G(ctx).Warnf("envd version mismatch across nodes: keeping=%s saw=%s node=%s", chosen, v, item.NodeID)
+			log.G(ctx).Warnf("envd version mismatch across ready nodes: keeping=%s saw=%s node=%s; suppressing template capability annotation", chosen, v, item.NodeID)
+			return ""
 		}
+	}
+	if readyCount == 0 {
+		return ""
 	}
 	return chosen
 }
 
-// persistTemplateEnvdVersion writes the converged envd version into the template
-// definition's request_json annotation exactly once (read-modify-write), then
-// invalidates the cached request so new sandboxes inherit the annotation. It is
-// idempotent: a no-op when the annotation already holds the same value.
-func persistTemplateEnvdVersion(ctx context.Context, templateID, version string) error {
+// reconcileTemplateEnvdVersion aligns the stored template envd annotation with
+// the latest convergence result. A non-empty version is persisted; an empty
+// version clears any previously persisted annotation so redo cannot leave a
+// stale capability signal behind.
+func reconcileTemplateEnvdVersion(ctx context.Context, templateID, version string) error {
 	version = sanitizeEnvdVersion(version)
-	if templateID == "" || version == "" {
+	if templateID == "" {
 		return nil
 	}
 	// Serialize the request_json read-modify-write against concurrent template
@@ -554,10 +564,17 @@ func persistTemplateEnvdVersion(ctx context.Context, templateID, version string)
 		if req.Annotations == nil {
 			req.Annotations = make(map[string]string)
 		}
-		if req.Annotations[constants.CubeAnnotationComponentEnvdVersion] == version {
+		current := strings.TrimSpace(req.Annotations[constants.CubeAnnotationComponentEnvdVersion])
+		if version == "" {
+			if current == "" {
+				return nil
+			}
+			delete(req.Annotations, constants.CubeAnnotationComponentEnvdVersion)
+		} else if current == version {
 			return nil
+		} else {
+			req.Annotations[constants.CubeAnnotationComponentEnvdVersion] = version
 		}
-		req.Annotations[constants.CubeAnnotationComponentEnvdVersion] = version
 		payload, err := json.Marshal(req)
 		if err != nil {
 			return err
@@ -570,6 +587,10 @@ func persistTemplateEnvdVersion(ctx context.Context, templateID, version string)
 		templateDefinitionCache.Delete(templateID)
 		return nil
 	})
+}
+
+func persistTemplateEnvdVersion(ctx context.Context, templateID, version string) error {
+	return reconcileTemplateEnvdVersion(ctx, templateID, version)
 }
 
 func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtypes.CreateCubeSandboxReq, opts replicaRunOptions) (ReplicaStatus, string) {
