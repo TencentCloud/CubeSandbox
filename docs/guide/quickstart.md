@@ -21,7 +21,9 @@ If you already have an x86_64 or aarch64 (ARM64) Linux server with KVM enabled (
 - Internet access (for downloading release packages and Docker images)
 
 ::: warning ARM64 (aarch64) hosts
-This Quick Start uses **PVM** to enable KVM on standard cloud VMs, and the PVM host kernel is **x86_64-only** (release attachments are `*.x86_64.rpm` / `*_amd64.deb`). On **aarch64 (ARM64)**, use a machine that already exposes native KVM (a physical/bare-metal ARM64 server) and follow [Bare-Metal Deployment](./bare-metal-deploy.md) or [Self-Build Deployment](./self-build-deploy.md) instead — both support aarch64.
+This Quick Start uses **PVM** to enable KVM on standard cloud VMs, and the PVM host kernel is **x86_64-only** (release attachments are `*.x86_64.rpm` / `*_amd64.deb`). PVM does **not** support ARM64.
+
+On **aarch64 (ARM64)**, use a machine that already exposes native KVM (a physical/bare-metal ARM64 server) and follow [Bare-Metal Deployment](./bare-metal-deploy.md) or [Self-Build Deployment](./self-build-deploy.md) instead — both support aarch64.
 :::
 
 ### 🖥 Supported Systems

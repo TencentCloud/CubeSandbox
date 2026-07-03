@@ -28,10 +28,34 @@ sudo su root
 
 ## 第一步：安装
 
+### x86_64（AMD64）
+
 以 root 身份执行：
 
 ```bash
 curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+```
+
+### ARM64（aarch64）主机
+
+::: warning online-install.sh 即将支持 ARM64
+`online-install.sh` 一键安装脚本当前仅自动发现 **x86_64** 包。ARM64 的自动检测与一键安装支持将于近期版本补齐。目前 ARM64 用户请按照以下手动步骤操作。
+:::
+
+**第一步：** 前往对应平台的发布页面，找到包含 ARM64 资产的最新 Release，下载 `cube-sandbox-one-click-*-arm64.tar.gz` 包：
+
+| 平台 | 发布页面 |
+|---|---|
+| GitHub | [TencentCloud/CubeSandbox/releases](https://github.com/TencentCloud/CubeSandbox/releases) |
+| CNB（国内） | [CubeSandbox/CubeSandbox/-/releases](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases) |
+
+**第二步：** 解压并运行安装脚本：
+
+```bash
+# 将 <version> 替换为你实际下载的版本（如 v0.5.0-rc3）
+tar -xzf cube-sandbox-one-click-<version>-arm64.tar.gz
+cd cube-sandbox-one-click-<version>-arm64
+./install.sh
 ```
 
 ::: details 安装了哪些组件
