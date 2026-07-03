@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Keep local verification artifacts and secrets out of the Docker build context.
+workspace/hello-rust/target/
+workspace/hello-rust/tmp/

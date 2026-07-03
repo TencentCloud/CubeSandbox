@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Keep local verification artifacts and secrets out of the Docker build context.
+workspace/hello-go/bin/
+workspace/hello-go/dist/
+workspace/hello-go/tmp/
