@@ -22,6 +22,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -105,12 +106,12 @@ def main() -> None:
         print("      Build OK")
         print()
 
-        # 2. Start the server in the background
+        # 2. Start the server in the background (nohup + & sends it to the
+        #    background inside the sandbox; the shell exits immediately)
         print("[2/4] Start server in background")
         sandbox.commands.run(
             f"cd {DEMO_DIR} && nohup ./target/release/rust-demo > /tmp/server.log 2>&1 &",
             timeout=5,
-            background=True,
         )
 
         # 3. Wait for the server to be ready
@@ -137,7 +138,6 @@ def main() -> None:
         print()
         print("─" * 50)
         try:
-            import json
             data = resp.json()
             for key, value in data.items():
                 print(f"  {key}: {value}")

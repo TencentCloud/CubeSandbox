@@ -9,6 +9,7 @@
 #   docker run --rm -d -p 49983:49983 --name test-rust rust-sandbox:latest
 #   curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:49983/health  # => 204
 #   docker exec test-rust rustc --version
+#   docker exec -u user test-rust rustc --version
 #   docker exec test-rust cargo --version
 #   docker rm -f test-rust
 #
@@ -24,7 +25,7 @@
 ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
 FROM ${CUBE_BASE_IMAGE}
 
-ARG DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive
 ARG RUST_TOOLCHAIN=stable
 
 # ---------------------------------------------------------------------------
@@ -38,47 +39,43 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
-# Install Rust toolchain via rustup (pinned stable for reproducibility).
-# Installed as root; symlinked to /usr/local/bin so both root and the `user`
-# account (uid=1000, used by envd for SDK commands) can invoke rustc/cargo.
+# Install Rust toolchain via rustup as root, then copy the binaries to
+# /usr/local/bin/ so every user (including uid=1000, envd's default) can
+# invoke them without needing to traverse /root.
 # ---------------------------------------------------------------------------
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}"
 
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Symlink toolchain binaries so they are on every user's PATH
+# Copy (don't symlink) toolchain binaries to a world-accessible location.
+# Symlinks into /root would fail for non-root users because /root is mode 700.
 RUN for bin in rustc cargo rustup rustfmt clippy; do \
-        ln -sf /root/.cargo/bin/"${bin}" /usr/local/bin/"${bin}"; \
+        cp /root/.cargo/bin/"${bin}" /usr/local/bin/"${bin}"; \
     done
 
-# Make the cargo registry+git cache readable by the `user` account (uid=1000)
-# so that `sandbox.commands.run("cargo build")` works via envd without
-# needing user="root".
-RUN chmod -R a+rX /root/.cargo
-
-# Verify the toolchain works for root
+# Verify the toolchain works for root.
 RUN rustc --version && cargo --version
 
-# Verify the toolchain works for the `user` account (uid=1000)
+# Verify the toolchain works for the `user` account.
 USER user
 RUN rustc --version && cargo --version
-USER root
 
 # ---------------------------------------------------------------------------
-# Pre-build a demo axum project to warm the cargo registry.
-# We `cargo clean` after the build so the image stays lean, but the crates
-# cached under ~/.cargo/registry/ and ~/.cargo/git/ survive — which means
-# the first `cargo build` inside a sandbox will only recompile, not download.
+# Pre-warm the cargo registry as `user` so the cache lands in
+# /home/user/.cargo/ — the directory that cargo uses when envd runs
+# commands as uid=1000 inside the sandbox.
 # ---------------------------------------------------------------------------
-COPY demo_project /opt/rust-demo
+COPY --chown=user:user demo_project /opt/rust-demo
 RUN cd /opt/rust-demo \
+    && cargo fetch \
     && cargo build --release \
-    && cargo clean
+    && cargo clean \
+    && rm -rf /opt/rust-demo
+
+USER root
 
 EXPOSE 49983 8080
 
 # No CMD — cube-entrypoint.sh keeps envd as the foreground process.
 # All Rust compilation and execution happens through the E2B SDK:
 #   sandbox.commands.run("cargo build --release")
-#   sandbox.commands.run("./target/release/demo")
+#   sandbox.commands.run("./target/release/binary")

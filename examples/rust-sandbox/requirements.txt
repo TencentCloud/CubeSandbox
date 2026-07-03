@@ -1,3 +1,2 @@
 e2b>=2.15.2
 python-dotenv
-rich>=13.0

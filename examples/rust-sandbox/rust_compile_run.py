@@ -28,7 +28,6 @@ load_dotenv(dotenv_path=Path(__file__).with_name(".env"), override=False)
 DEFAULT_CODE = """\
 fn main() {
     println!("Hello from Rust inside CubeSandbox!");
-    println!("rustc version: {}", "built in-sandbox");
     println!();
     println!("Fibonacci(10) = {}", fib(10));
 }
@@ -41,35 +40,6 @@ fn fib(n: u64) -> u64 {
     }
 }
 """
-
-
-def build_and_run(sandbox: Sandbox, code: str, *, timeout: int = 120) -> dict:
-    """Write Rust source to the sandbox, compile, and execute it.
-
-    Returns a dict with keys: exit_code, stdout, stderr, elapsed_ms.
-    """
-    src_path = "/tmp/main.rs"
-    bin_path = "/tmp/main"
-
-    sandbox.files.write(src_path, code)
-
-    compile_cmd = f"rustc -C opt-level=0 -o {bin_path} {src_path}"
-    result = sandbox.commands.run(compile_cmd, timeout=timeout)
-    if result.exit_code != 0:
-        return {
-            "exit_code": result.exit_code,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "elapsed_ms": None,
-        }
-
-    run_result = sandbox.commands.run(bin_path, timeout=timeout)
-    return {
-        "exit_code": run_result.exit_code,
-        "stdout": run_result.stdout,
-        "stderr": run_result.stderr,
-        "elapsed_ms": None,
-    }
 
 
 def main() -> None:

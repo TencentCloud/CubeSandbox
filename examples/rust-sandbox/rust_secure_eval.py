@@ -91,7 +91,7 @@ def evaluate(sandbox: Sandbox, code: str, *, build_timeout: int = 60, run_timeou
         [package]
         name = "secure-eval"
         version = "0.0.0"
-        edition = "2021"
+        edition = "2024"
         [[bin]]
         name = "secure-eval"
         path = "src/main.rs"

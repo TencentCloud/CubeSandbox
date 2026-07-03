@@ -94,25 +94,28 @@ class RustSandboxTester:
             die(f"envd -version failed:\n{r.stderr}")
         ok(f"envd {r.stdout.strip()}")
 
-    def test_rustc(self) -> None:
-        print("[test] rustc --version")
-        r = self.exec("rustc --version")
+    def test_user_rustc(self) -> None:
+        print("[test] rustc --version (as user)")
+        r = self.exec("-u user rustc --version")
         if r.returncode != 0:
-            die(f"rustc not found:\n{r.stderr}")
-        ok(r.stdout.strip())
+            die(f"rustc not found for user:\n{r.stderr}")
+        ok(f"user: {r.stdout.strip()}")
 
-    def test_cargo(self) -> None:
-        print("[test] cargo --version")
-        r = self.exec("cargo --version")
+    def test_user_cargo(self) -> None:
+        print("[test] cargo --version (as user)")
+        r = self.exec("-u user cargo --version")
         if r.returncode != 0:
-            die(f"cargo not found:\n{r.stderr}")
-        ok(r.stdout.strip())
+            die(f"cargo not found for user:\n{r.stderr}")
+        ok(f"user: {r.stdout.strip()}")
 
     def test_rustc_compile(self) -> None:
         print("[test] rustc compile + run")
-        code = r'fn main() { println!("smoke-test-ok"); }'
+        # Use a heredoc to avoid shell quoting issues with the Rust source.
         r = self.exec(
-            f'bash -c \'echo "{code}" > /tmp/test.rs && rustc -o /tmp/test /tmp/test.rs && /tmp/test\''
+            "bash -c 'cat > /tmp/test.rs << \"EOF\"\n"
+            "fn main() { println!(\"smoke-test-ok\"); }\n"
+            "EOF\n"
+            "rustc -o /tmp/test /tmp/test.rs && /tmp/test'"
         )
         if r.returncode != 0:
             die(f"rustc smoke test failed:\n{r.stderr}")
@@ -135,21 +138,14 @@ class RustSandboxTester:
         else:
             ok("cargo new + build OK")
 
-    def test_demo_project(self) -> None:
-        print("[test] /opt/rust-demo exists")
-        r = self.exec("test -f /opt/rust-demo/Cargo.toml && echo exists")
-        if "exists" not in r.stdout:
-            die("/opt/rust-demo/Cargo.toml missing")
-        ok("/opt/rust-demo/Cargo.toml present")
-
     def test_cargo_registry_warm(self) -> None:
-        print("[test] ~/.cargo/registry cache")
-        r = self.exec("du -sh /root/.cargo/registry/ 2>/dev/null || echo empty")
+        print("[test] user ~/.cargo/registry cache")
+        r = self.exec("du -sh /home/user/.cargo/registry/ 2>/dev/null || echo empty")
         out = r.stdout.strip()
         if out == "empty" or out.startswith("0"):
             print(f"  !  registry appears empty ({out}) — pre-warming may have failed")
         else:
-            ok(f"registry cache: {out}")
+            ok(f"user registry cache: {out}")
 
 
 # ---------------------------------------------------------------------------
@@ -181,10 +177,9 @@ def main() -> None:
         # Run all tests
         tester.test_envd_health()
         tester.test_envd_version()
-        tester.test_rustc()
-        tester.test_cargo()
+        tester.test_user_rustc()
+        tester.test_user_cargo()
         tester.test_rustc_compile()
-        tester.test_demo_project()
         tester.test_cargo_registry_warm()
         tester.test_cargo_new_build()
 

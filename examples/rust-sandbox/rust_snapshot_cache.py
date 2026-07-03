@@ -125,17 +125,23 @@ def main() -> None:
         print("[Phase 1] First build (cold)")
         print()
         print("  [1a] cargo new snapshot-demo")
-        sandbox.commands.run(
+        r = sandbox.commands.run(
             f"cd /home/user && cargo new snapshot-demo",
             timeout=30,
         )
+        if r.exit_code != 0:
+            print(f"       cargo new FAILED: {r.stderr}", file=sys.stderr)
+            sys.exit(1)
 
         # --- 1b. Add dependency ---
         print("  [1b] cargo add serde --features derive && cargo add serde_json")
-        sandbox.commands.run(
+        r = sandbox.commands.run(
             f"cd {work_dir} && cargo add serde --features derive && cargo add serde_json",
             timeout=120,
         )
+        if r.exit_code != 0:
+            print(f"       cargo add FAILED: {r.stderr}", file=sys.stderr)
+            sys.exit(1)
 
         # --- 1c. Write v1 source ---
         print(f"  [1c] Write src/main.rs v1 ({len(MAIN_RS_V1)} bytes)")
