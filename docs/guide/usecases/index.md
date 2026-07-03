@@ -49,3 +49,4 @@ lang: en-US
 | Title | Author     | Date | Tags |
 | --- |------------| --- | --- |
 | [trpc-agent-go: A Secure Code Execution Backend Powered by Cube Sandbox](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |
+| [Rust Code Execution Sandbox with Compilation Cache Persistence](./rust-sandbox.md) | Shizuku-in | 2026-07-03 | rust, code-execution, compilation-cache, snapshot |

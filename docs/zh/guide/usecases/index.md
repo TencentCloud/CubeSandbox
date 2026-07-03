@@ -49,3 +49,4 @@ lang: zh-CN
 | 标题 | 作者         | 日期 | 标签 |
 | --- |------------| --- | --- |
 | [trpc-agent-go：基于 Cube Sandbox 的安全代码执行后端](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |
+| [基于 Cube Sandbox 的 Rust 代码执行沙箱与编译缓存持久化方案](./rust-sandbox.md) | Shizuku-in | 2026-07-03 | rust, code-execution, compilation-cache, snapshot |
