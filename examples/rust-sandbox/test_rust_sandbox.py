@@ -67,10 +67,11 @@ class RustSandboxTester:
             print("[stop]")
             run(f"docker rm -f {self.container_id}", check=False)
 
-    def exec(self, cmd: str, **kwargs) -> subprocess.CompletedProcess:
+    def exec(self, cmd: str, *, user: str | None = None, **kwargs) -> subprocess.CompletedProcess:
         """Run a command inside the container."""
         assert self.container_id
-        return run(f"docker exec {self.container_id} {cmd}", **kwargs)
+        opts = f"-u {user} " if user else ""
+        return run(f"docker exec {opts}{self.container_id} {cmd}", **kwargs)
 
     # -- tests ---------------------------------------------------------------
 
@@ -96,14 +97,14 @@ class RustSandboxTester:
 
     def test_user_rustc(self) -> None:
         print("[test] rustc --version (as user)")
-        r = self.exec("-u user rustc --version")
+        r = self.exec("rustc --version", user="user")
         if r.returncode != 0:
             die(f"rustc not found for user:\n{r.stderr}")
         ok(f"user: {r.stdout.strip()}")
 
     def test_user_cargo(self) -> None:
         print("[test] cargo --version (as user)")
-        r = self.exec("-u user cargo --version")
+        r = self.exec("cargo --version", user="user")
         if r.returncode != 0:
             die(f"cargo not found for user:\n{r.stderr}")
         ok(f"user: {r.stdout.strip()}")

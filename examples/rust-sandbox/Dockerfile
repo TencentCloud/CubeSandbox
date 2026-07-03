@@ -39,37 +39,44 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
-# Install Rust toolchain via rustup as root, then copy the binaries to
-# /usr/local/bin/ so every user (including uid=1000, envd's default) can
-# invoke them without needing to traverse /root.
+# Install Rust toolchain via rustup as root.
 # ---------------------------------------------------------------------------
+# Share a single toolchain and cargo home across all users.  /root is mode
+# 700 by default on Ubuntu, so we open the execute bit (711) so non-root
+# users can traverse into /root/.rustup and /root/.cargo.
+ENV RUSTUP_HOME=/root/.rustup \
+    CARGO_HOME=/root/.cargo \
+    PATH="/root/.cargo/bin:${PATH}"
+
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}"
-
-# Copy (don't symlink) toolchain binaries to a world-accessible location.
-# Symlinks into /root would fail for non-root users because /root is mode 700.
-RUN for bin in rustc cargo rustup rustfmt clippy; do \
-        cp /root/.cargo/bin/"${bin}" /usr/local/bin/"${bin}"; \
-    done
-
-# Verify the toolchain works for root.
-RUN rustc --version && cargo --version
-
-# Verify the toolchain works for the `user` account.
-USER user
-RUN rustc --version && cargo --version
+        | sh -s -- -y --default-toolchain none \
+    && chmod a+x /root \
+    && rustup toolchain install "${RUST_TOOLCHAIN}" \
+    && rustup default "${RUST_TOOLCHAIN}" \
+    && rustc --version \
+    && cargo --version \
+    && for bin in rustc cargo rustup; do \
+           cp "/root/.cargo/bin/${bin}" "/usr/local/bin/${bin}"; \
+       done
 
 # ---------------------------------------------------------------------------
-# Pre-warm the cargo registry as `user` so the cache lands in
-# /home/user/.cargo/ — the directory that cargo uses when envd runs
-# commands as uid=1000 inside the sandbox.
+# Pre-warm the cargo registry.  After the pre-warm, open permissions so the
+# `user` account (uid=1000, envd's default) can read and update the cache.
 # ---------------------------------------------------------------------------
-COPY --chown=user:user demo_project /opt/rust-demo
+COPY demo_project /opt/rust-demo
 RUN cd /opt/rust-demo \
     && cargo fetch \
     && cargo build --release \
-    && cargo clean
+    && cargo clean \
+    && chmod -R a+rwX /root/.cargo
 # Leave /opt/rust-demo on disk — rust_web_service.py rebuilds it at runtime.
+
+# ---------------------------------------------------------------------------
+# Verify the `user` account can find the toolchain and the registry cache.
+# ---------------------------------------------------------------------------
+USER user
+RUN rustc --version && cargo --version \
+    && du -sh "${CARGO_HOME}/registry/" 2>/dev/null || true
 
 USER root
 
