@@ -188,11 +188,8 @@ def main() -> None:
         print(" All smoke tests passed!")
         print("=" * 50)
 
-    except Exception:
+    finally:
         tester.stop()
-        raise
-
-    tester.stop()
 
 
 if __name__ == "__main__":
