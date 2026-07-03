@@ -83,52 +83,79 @@ func makeDNSAllowRule(domain string, flags uint8) (dnsAllowKey, dnsAllowValue, e
 	return key, value, nil
 }
 
-// populateDNSAllowInnerMap replaces all DNS allow entries for a sandbox.
-func populateDNSAllowInnerMap(outerMap *ebpf.Map, ifindex uint32, domains, l7Domains []string) error {
-	if count, err := countUniqueDNSAllowEntries(domains, l7Domains); err != nil {
-		return err
-	} else if err := validateNetPolicyEntryCount("network.dns_allow", count, maxDNSAllowDomains); err != nil {
-		return err
-	}
+type dnsAllowRule struct {
+	key    dnsAllowKey
+	value  dnsAllowValue
+	domain string
+}
 
-	inner, err := lookupInnerMap(outerMap, ifindex)
-	if err != nil {
-		return err
-	}
-	defer inner.Close()
+func buildDNSAllowRules(domains, l7Domains []string) ([]dnsAllowRule, error) {
+	rules := make([]dnsAllowRule, 0, len(domains)+len(l7Domains))
+	indexByKey := make(map[dnsAllowKey]int, len(domains)+len(l7Domains))
 
-	if err := flushDNSAllowInnerMap(inner); err != nil {
-		return err
-	}
-
-	for _, domain := range domains {
-		if err := updateDNSAllowRule(inner, domain, 0); err != nil {
-			return err
+	add := func(domains []string, flags uint8) error {
+		for _, domain := range domains {
+			key, value, err := makeDNSAllowRule(domain, flags)
+			if err != nil {
+				return err
+			}
+			if idx, ok := indexByKey[key]; ok {
+				rules[idx].value.Flags |= flags
+				continue
+			}
+			indexByKey[key] = len(rules)
+			rules = append(rules, dnsAllowRule{
+				key:    key,
+				value:  value,
+				domain: domain,
+			})
 		}
+		return nil
 	}
-	for _, domain := range l7Domains {
-		if err := updateDNSAllowRule(inner, domain, uint8(netPolicyFlagL7Required)); err != nil {
+
+	if err := add(domains, 0); err != nil {
+		return nil, err
+	}
+	if err := add(l7Domains, uint8(netPolicyFlagL7Required)); err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+// populateDNSAllowInnerMap installs DNS allow entries for a sandbox.
+func populateDNSAllowInnerMap(inner *ebpf.Map, rules []dnsAllowRule) error {
+	for _, rule := range rules {
+		if err := updateDNSAllowRule(inner, rule); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func updateDNSAllowRule(inner *ebpf.Map, domain string, flags uint8) error {
-	key, value, err := makeDNSAllowRule(domain, flags)
+func flushDNSAllowForIfindex(outerMap *ebpf.Map, ifindex uint32) error {
+	inner, err := lookupInnerMap(outerMap, ifindex)
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
+	defer inner.Close()
 
+	return flushDNSAllowInnerMap(inner)
+}
+
+func updateDNSAllowRule(inner *ebpf.Map, rule dnsAllowRule) error {
+	value := rule.value
 	var oldValue dnsAllowValue
-	if err := inner.Lookup(&key, &oldValue); err == nil {
+	if err := inner.Lookup(&rule.key, &oldValue); err == nil {
 		value.Flags |= oldValue.Flags
 	} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("dns allow lookup failed: %w, domain: %s", err, domain)
+		return fmt.Errorf("dns allow lookup failed: %w, domain: %s", err, rule.domain)
 	}
 
-	if err := inner.Update(&key, &value, ebpf.UpdateAny); err != nil {
-		return fmt.Errorf("dns allow update failed: %w, domain: %s", err, domain)
+	if err := inner.Update(&rule.key, &value, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("dns allow update failed: %w, domain: %s", err, rule.domain)
 	}
 	return nil
 }
@@ -167,15 +194,34 @@ func cleanupDNSAllow(ifindex uint32) error {
 }
 
 // applyDNSAllow installs DNS allow rules parsed from MVMOptions.
-func applyDNSAllow(ifindex uint32, domains, l7Domains []string) error {
+func applyDNSAllow(ifindex uint32, rules []dnsAllowRule, replace bool) error {
+	if len(rules) == 0 && !replace {
+		return nil
+	}
+
 	dnsAllow, err := loadPinnedMap(MapNameDNSAllow)
 	if err != nil {
 		return err
 	}
 	defer dnsAllow.Close()
 
+	if len(rules) == 0 {
+		return flushDNSAllowForIfindex(dnsAllow, ifindex)
+	}
 	if err := ensureDNSAllowInnerMap(dnsAllow, ifindex); err != nil {
 		return err
 	}
-	return populateDNSAllowInnerMap(dnsAllow, ifindex, domains, l7Domains)
+
+	inner, err := lookupInnerMap(dnsAllow, ifindex)
+	if err != nil {
+		return err
+	}
+	defer inner.Close()
+
+	if replace {
+		if err := flushDNSAllowInnerMap(inner); err != nil {
+			return err
+		}
+	}
+	return populateDNSAllowInnerMap(inner, rules)
 }

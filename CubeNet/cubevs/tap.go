@@ -44,7 +44,14 @@ func ListTAPDevices() ([]TAPDevice, error) {
 
 // AddTAPDevice adds a new device to CubeVS.
 func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVMOptions) error {
-	return UpsertTAPDevice(ifindex, ip, id, version, opts)
+	if err := UpsertTAPDeviceMeta(ifindex, ip, id, version); err != nil {
+		return err
+	}
+	if err := applyNetPolicy(ifindex, opts); err != nil {
+		_ = DelTAPDevice(ifindex, ip)
+		return err
+	}
+	return nil
 }
 
 // UpsertTAPDeviceMeta registers or refreshes TAP metadata without touching
