@@ -754,7 +754,7 @@ setup_env() {
 	CUBE_DB="${TENCENTCLOUD_CUBE_DB:-cube_mvp}"
 	CUBE_USER="${TENCENTCLOUD_CUBE_USER:-cube}"
 	CUBE_PASSWORD="${TENCENTCLOUD_CUBE_PASSWORD:-cube_pass}"
-	CUBELET_NODE_STATUS_UPDATE_FREQUENCY="${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-10s}"
+	CUBELET_NODE_STATUS_UPDATE_FREQUENCY="${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}"
 	# Wire the cube DB name/user/password into Terraform so the MySQL account +
 	# database (main.tf), the cube-master conf Secret (tke-addons.tf) and the health
 	# checks below all use the SAME values. Without this the control plane would
@@ -3833,10 +3833,10 @@ echo '[local-bundle] Done'"
 
 		if [ "${install_rc:-1}" -eq 0 ]; then
 			echo -e "  ${GREEN}✓ compute installation complete${NC}"
-			echo -e "  ${CYAN}Configuring cubelet node status update frequency: ${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-10s}${NC}"
-			if ssh "${ssh_opts[@]}" root@"${compute_private_ip}" "CUBELET_NODE_STATUS_UPDATE_FREQUENCY='${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-10s}' bash -s" <<'REMOTE_CUBELET_FREQ'
+			echo -e "  ${CYAN}Configuring cubelet node status update frequency: ${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}${NC}"
+			if ssh "${ssh_opts[@]}" root@"${compute_private_ip}" "CUBELET_NODE_STATUS_UPDATE_FREQUENCY='${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}' bash -s" <<'REMOTE_CUBELET_FREQ'
 set -euo pipefail
-freq="${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-10s}"
+freq="${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}"
 cfg="/usr/local/services/cubetoolbox/Cubelet/config/config.toml"
 if [ ! -f "$cfg" ]; then
   echo "cubelet config not found: $cfg" >&2
@@ -4097,7 +4097,7 @@ TENCENTCLOUD_REDIS_PASSWORD='${TENCENTCLOUD_REDIS_PASSWORD:-}'
 TENCENTCLOUD_CUBE_DB='${TENCENTCLOUD_CUBE_DB:-cube_mvp}'
 TENCENTCLOUD_CUBE_USER='${TENCENTCLOUD_CUBE_USER:-cube}'
 TENCENTCLOUD_CUBE_PASSWORD='${TENCENTCLOUD_CUBE_PASSWORD:-}'
-TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY='${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-10s}}'
+TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY='${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}}'
 TENCENTCLOUD_CUBE_IMAGE_TAG='${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.5.0}'
 TENCENTCLOUD_TKE_CLUSTER_VERSION='${TKE_CLUSTER_VERSION:-1.34.1}'
 TENCENTCLOUD_TKE_NODE_COUNT='${TKE_NODE_COUNT:-2}'
@@ -4289,7 +4289,7 @@ write_resolved_tfvars_file() {
 		--arg cube_password "${TF_VAR_cube_password:-${CUBE_PASSWORD:-${TENCENTCLOUD_CUBE_PASSWORD:-cube_pass}}}" \
 		--arg cube_db "${TF_VAR_cube_db:-${CUBE_DB:-${TENCENTCLOUD_CUBE_DB:-cube_mvp}}}" \
 		--arg cube_user "${TF_VAR_cube_user:-${CUBE_USER:-${TENCENTCLOUD_CUBE_USER:-cube}}}" \
-		--arg cubelet_node_status_update_frequency "${TF_VAR_cubelet_node_status_update_frequency:-${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-10s}}}" \
+		--arg cubelet_node_status_update_frequency "${TF_VAR_cubelet_node_status_update_frequency:-${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}}}" \
 		--arg tke_cluster_name "${TF_VAR_tke_cluster_name:-cubesandbox-terraform-tke}" \
 		--arg tke_cluster_version "${TF_VAR_tke_cluster_version:-${TKE_CLUSTER_VERSION:-${TENCENTCLOUD_TKE_CLUSTER_VERSION:-1.34.1}}}" \
 		--argjson tke_node_count "$tke_count" \

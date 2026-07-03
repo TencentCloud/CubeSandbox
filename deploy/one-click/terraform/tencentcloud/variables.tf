@@ -96,7 +96,7 @@ variable "compute_data_disk_size" {
 variable "cubelet_node_status_update_frequency" {
   description = "Cubelet node status and resource reporting interval. create.sh patches Cubelet/config/config.toml on each compute node."
   type        = string
-  default     = "10s"
+  default     = "1s"
 
   validation {
     condition     = can(regex("^[0-9]+(ns|us|µs|ms|s|m|h)$", var.cubelet_node_status_update_frequency))

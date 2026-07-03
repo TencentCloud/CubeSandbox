@@ -282,7 +282,7 @@ export TENCENTCLOUD_REGION=ap-guangzhou
 export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-6
 export TENCENTCLOUD_COMPUTE_NODE_COUNT=2              # CVM PVM compute nodes
 export TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE=200        # CBS data disk per compute node (GB)
-export TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY=10s
+export TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY=1s
 export TENCENTCLOUD_TKE_NODE_COUNT=2                 # TKE worker nodes (control-plane Pods)
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                    # default: public pre-built images
@@ -304,7 +304,7 @@ export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.0
 | `TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE` | `SA9.LARGE8` | TKE worker instance type (4C8G) |
 | `TENCENTCLOUD_COMPUTE_NODE_COUNT` | `2` | **PVM compute nodes** (run Cubelet / sandboxes) |
 | `TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE` | `200` | CBS data disk size per compute node (GB, XFS, mounted at `/data/cubelet`). Sandbox image templates, snapshots and runtime data on the compute node all live under this directory — size it to your actual needs |
-| `TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY` | `10s` | Cubelet node status/resource reporting interval to CubeMaster. `create.sh` patches `Cubelet/config/config.toml` on each compute node |
+| `TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY` | `1s` | Cubelet node status/resource reporting interval to CubeMaster. `create.sh` patches `Cubelet/config/config.toml` on each compute node |
 | `TENCENTCLOUD_TKE_NODE_COUNT` | `2` | **TKE workers** (run control-plane Pods; maps to `worker_config.count`) |
 | `TENCENTCLOUD_USE_TCR` | `false` | When `true`, create TCR and build/push images on the jumpserver; when `false`, use public pre-built images |
 | `TENCENTCLOUD_USE_CFS` | `false` | When `true` and cubemaster has multiple replicas, create CFS NFS shared storage |

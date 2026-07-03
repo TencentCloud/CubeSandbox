@@ -68,7 +68,7 @@ export TF_VAR_ssh_private_key_path="$SSH_PRI_KEY"
 # the desired topology matches the state.
 [ -n "${TENCENTCLOUD_COMPUTE_NODE_COUNT:-}" ] && export TF_VAR_compute_node_count="$TENCENTCLOUD_COMPUTE_NODE_COUNT"
 export TF_VAR_compute_node_count="${TF_VAR_compute_node_count:-${TENCENTCLOUD_COMPUTE_NODE_COUNT:-2}}"
-export TF_VAR_cubelet_node_status_update_frequency="${TF_VAR_cubelet_node_status_update_frequency:-${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-10s}}"
+export TF_VAR_cubelet_node_status_update_frequency="${TF_VAR_cubelet_node_status_update_frequency:-${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}}"
 export TF_VAR_tke_node_count="${TF_VAR_tke_node_count:-${TENCENTCLOUD_TKE_NODE_COUNT:-2}}"
 
 mkdir -p "$SCRIPT_DIR/.kube"
