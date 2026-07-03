@@ -32,17 +32,7 @@ import time
 from dotenv import load_dotenv
 from e2b_code_interpreter import Sandbox
 
-# ---------------------------------------------------------------------------
-# envd compatibility patches (same as openai-agents-example):
-# 1. envd only supports "root" user
-# 2. envd may not support `stdin` kwarg in commands.run()
-# ---------------------------------------------------------------------------
-# Apply patches if using E2B SDK under the hood
-try:
-    import e2b.envd.rpc as _e2b_rpc
-    _e2b_rpc.default_username = "root"
-except Exception:
-    pass
+
 
 
 def load_env():
@@ -246,25 +236,24 @@ def seed_workspace(sb):
 
 def run_codebuddy_in_sandbox(sb, prompt, max_turns=10):
     """Run CodeBuddy in-sandbox mode."""
-    # Build the command — use JSON output for parseable results
-    # Prefix env vars so the sandbox-internal codebuddy can authenticate and
-    # run without update checks or interactive prompts.
+    # Build the command — use JSON output for parseable results.
+    # Environment variables (API key, auth token, etc.) are passed via the
+    # envs= parameter instead of being inlined in the command string, which
+    # avoids exposing secrets in /proc/*/cmdline.
     api_key = os.environ.get("CODEBUDDY_API_KEY", "")
     auth_token = os.environ.get("CODEBUDDY_AUTH_TOKEN")
 
-    env_prefix = ""
+    env_vars = {
+        "CODEBUDDY_API_KEY": api_key,
+        "DISABLE_AUTOUPDATER": "1",
+        "CODEBUDDY_CONFIG_DIR": "/workspace/.codebuddy",
+    }
     if auth_token:
-        env_prefix = f'CODEBUDDY_AUTH_TOKEN={json.dumps(auth_token)} '
-
-    if not auth_token:
-        print("Tip: Set CODEBUDDY_AUTH_TOKEN for in-sandbox auth (enterprise accounts only). "
-              "Otherwise, codebuddy will require interactive login.")
+        env_vars["CODEBUDDY_AUTH_TOKEN"] = auth_token
+    else:
+        print("Tip: Set CODEBUDDY_AUTH_TOKEN for in-sandbox auth (enterprise/CI accounts only).")
 
     cmd = (
-        f'{env_prefix}'
-        f'CODEBUDDY_API_KEY={json.dumps(api_key)} '
-        f'DISABLE_AUTOUPDATER=1 '
-        f'CODEBUDDY_CONFIG_DIR=/workspace/.codebuddy '
         f'codebuddy -p {json.dumps(prompt)} '
         f'--output-format json '
         f'--max-turns {max_turns} '
@@ -273,7 +262,7 @@ def run_codebuddy_in_sandbox(sb, prompt, max_turns=10):
     print(f"[in-sandbox] Running: codebuddy -p ...")
     t0 = time.monotonic()
     try:
-        result = sb.commands.run(cmd, user="root", timeout=300)
+        result = sb.commands.run(cmd, envs=env_vars, user="root", timeout=300)
     except Exception as e:
         print(f"[in-sandbox] Command failed: {e}")
         print("[in-sandbox] Tip: CodeBuddy inside the sandbox needs product auth.")
@@ -309,29 +298,29 @@ def run_codebuddy_in_sandbox(sb, prompt, max_turns=10):
 def run_codebuddy_http(sb, message="Hello! What can you help me with?"):
     """Run CodeBuddy in HTTP API mode."""
     # Start codebuddy --serve in background
-    # Prefix env vars so the sandbox-internal codebuddy can authenticate and
-    # run without update checks or interactive prompts.
+    # Environment variables are passed via the envs= parameter to avoid
+    # exposing secrets in the command line (/proc/*/cmdline).
     api_key = os.environ.get("CODEBUDDY_API_KEY", "")
     auth_token = os.environ.get("CODEBUDDY_AUTH_TOKEN")
 
-    env_prefix = ""
+    env_vars = {
+        "CODEBUDDY_API_KEY": api_key,
+        "DISABLE_AUTOUPDATER": "1",
+        "CODEBUDDY_CONFIG_DIR": "/workspace/.codebuddy",
+    }
     if auth_token:
-        env_prefix = f'CODEBUDDY_AUTH_TOKEN={json.dumps(auth_token)} '
-
-    if not auth_token:
-        print("Tip: Set CODEBUDDY_AUTH_TOKEN for in-sandbox auth (enterprise accounts only). "
-              "Otherwise, codebuddy will require interactive login.")
+        env_vars["CODEBUDDY_AUTH_TOKEN"] = auth_token
+    else:
+        print("Tip: Set CODEBUDDY_AUTH_TOKEN for in-sandbox auth (enterprise/CI accounts only).")
 
     print("[http] Starting codebuddy --serve on port 8080 ...")
     sb.commands.run(
-        f'nohup env {env_prefix}'
-        f'CODEBUDDY_API_KEY={json.dumps(api_key)} '
-        f'DISABLE_AUTOUPDATER=1 '
-        f'CODEBUDDY_CONFIG_DIR=/workspace/.codebuddy '
-        f'codebuddy --serve --port 8080 --hostname 0.0.0.0 '
+        f'nohup codebuddy --serve --port 8080 --hostname 0.0.0.0 '
         f'--permission-mode bypassPermissions '
         f'> /tmp/codebuddy.log 2>&1 &',
-        user="root"
+        envs=env_vars,
+        user="root",
+        background=True,
     )
 
     # Wait for server to be ready
@@ -392,7 +381,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=300, help="Sandbox timeout in seconds")
 
     mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument("--native-sandbox", action="store_true", default=True,
+    mode_group.add_argument("--native-sandbox", action="store_true",
                             dest="native_sandbox",
                             help="Run native sandbox mode (CodeBuddy on host, tool calls in MicroVM) [default]")
     mode_group.add_argument("--in-sandbox", action="store_true",
@@ -405,26 +394,30 @@ def main():
     if args.template:
         os.environ["CUBE_TEMPLATE_ID"] = args.template
 
-    # Native sandbox mode: CodeBuddy runs on host, no sandbox creation needed
-    if args.native_sandbox:
-        run_native_sandbox(args.prompt, max_turns=args.max_turns)
-        return
-
-    sb = create_sandbox(timeout=args.timeout)
-
-    # Seed the workspace with a small demo project for CodeBuddy to inspect.
-    seed_workspace(sb)
-
-    try:
-        if args.http_api:
-            run_codebuddy_http(sb)
-        else:
+    # Determine mode: in-sandbox and http-api require a sandbox; native runs on host
+    if args.in_sandbox:
+        sb = create_sandbox(timeout=args.timeout)
+        seed_workspace(sb)
+        try:
             run_codebuddy_in_sandbox(sb, args.prompt, max_turns=args.max_turns)
-    finally:
-        print("\n[cleanup] Destroying sandbox ...")
-        t0 = time.monotonic()
-        sb.kill()
-        print(f"[cleanup] Done in {(time.monotonic()-t0)*1000:.0f} ms")
+        finally:
+            print("\n[cleanup] Destroying sandbox ...")
+            t0 = time.monotonic()
+            sb.kill()
+            print(f"[cleanup] Done in {(time.monotonic()-t0)*1000:.0f} ms")
+    elif args.http_api:
+        sb = create_sandbox(timeout=args.timeout)
+        seed_workspace(sb)
+        try:
+            run_codebuddy_http(sb)
+        finally:
+            print("\n[cleanup] Destroying sandbox ...")
+            t0 = time.monotonic()
+            sb.kill()
+            print(f"[cleanup] Done in {(time.monotonic()-t0)*1000:.0f} ms")
+    else:
+        # Default: native sandbox mode — CodeBuddy runs on host, no sandbox needed
+        run_native_sandbox(args.prompt, max_turns=args.max_turns)
 
 
 if __name__ == "__main__":

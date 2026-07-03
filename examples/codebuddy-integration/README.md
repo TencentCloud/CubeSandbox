@@ -106,7 +106,7 @@ python demo.py --http-api
 | `--prompt` | `List the files in /workspace and describe what you see.` | Prompt sent to CodeBuddy (in-sandbox mode) |
 | `--template` | `CUBE_TEMPLATE_ID` | Sandbox template ID |
 | `--timeout` | `300` | Sandbox timeout in seconds |
-| `--max-turns` | `10` | Maximum CodeBuddy tool-call turns |
+| `--max-turns` | `3` | Maximum CodeBuddy tool-call turns |
 | `--http-api` | — | Run HTTP API mode |
 | `--native-sandbox` | — | Run native sandbox mode (CodeBuddy on host, tool calls in MicroVM) |
 
@@ -138,7 +138,7 @@ sb.kill()
 
 ## Template Build
 
-The [`Dockerfile`](Dockerfile) layers Node.js 22 and the CodeBuddy CLI on top of the official CubeSandbox `sandbox-code` base image:
+The [`Dockerfile`](template/Dockerfile) layers Node.js 22 and the CodeBuddy CLI on top of the official CubeSandbox `sandbox-code` base image:
 
 ```dockerfile
 FROM cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
@@ -192,11 +192,12 @@ Without this credential, the conversation step could not be verified.
 codebuddy-integration/
 ├── README.md              # English documentation (this file)
 ├── README_zh.md           # Chinese documentation
-├── Dockerfile             # Image: sandbox-code + Node.js + codebuddy-code
 ├── build_template.sh      # Build image & register as CubeSandbox template
 ├── demo.py                # Integration demo (native sandbox + in-sandbox + HTTP API)
 ├── .env.example           # Environment variable template
-└── requirements.txt       # Python dependencies
+├── requirements.txt       # Python dependencies
+└── template/
+    └── Dockerfile         # Image: sandbox-code + Node.js + codebuddy-code
 ```
 
 ## Related Documents

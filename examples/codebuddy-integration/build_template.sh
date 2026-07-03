@@ -31,7 +31,7 @@ fi
 FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${TAG}"
 
 echo "=== Building Docker image: ${FULL_IMAGE} ==="
-docker build -t "${FULL_IMAGE}" .
+docker build -t "${FULL_IMAGE}" template
 
 echo "=== Pushing to registry ==="
 docker push "${FULL_IMAGE}"

@@ -106,7 +106,7 @@ python demo.py --http-api
 | `--prompt` | `List the files in /workspace and describe what you see.` | 发送给 CodeBuddy 的提示（沙箱内模式） |
 | `--template` | `CUBE_TEMPLATE_ID` | 沙箱模板 ID |
 | `--timeout` | `300` | 沙箱超时（秒） |
-| `--max-turns` | `10` | CodeBuddy 最大工具调用轮数 |
+| `--max-turns` | `3` | CodeBuddy 最大工具调用轮数 |
 | `--http-api` | — | 运行 HTTP API 模式 |
 | `--native-sandbox` | — | 运行原生沙箱模式（CodeBuddy 在主机运行，工具调用在 MicroVM 中执行） |
 
@@ -138,7 +138,7 @@ sb.kill()
 
 ## 模板构建
 
-[`Dockerfile`](Dockerfile) 在官方 CubeSandbox `sandbox-code` 基础镜像之上叠加了 Node.js 22 和 CodeBuddy CLI：
+[`Dockerfile`](template/Dockerfile) 在官方 CubeSandbox `sandbox-code` 基础镜像之上叠加了 Node.js 22 和 CodeBuddy CLI：
 
 ```dockerfile
 FROM cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
@@ -191,11 +191,12 @@ codebuddy 版本检查已验证正常。codebuddy 在沙箱内的实际对话
 codebuddy-integration/
 ├── README.md              # 英文文档
 ├── README_zh.md           # 中文文档（本文件）
-├── Dockerfile             # 镜像：sandbox-code + Node.js + codebuddy-code
 ├── build_template.sh      # 构建镜像并注册为 CubeSandbox 模板
 ├── demo.py                # 集成演示（原生沙箱 + 沙箱内 + HTTP API）
 ├── .env.example           # 环境变量模板
-└── requirements.txt       # Python 依赖
+├── requirements.txt       # Python 依赖
+└── template/
+    └── Dockerfile         # 镜像：sandbox-code + Node.js + codebuddy-code
 ```
 
 ## 相关文档
