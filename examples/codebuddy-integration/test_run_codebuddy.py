@@ -1,5 +1,8 @@
+import io
 import os
+import sys
 import unittest
+from contextlib import redirect_stderr
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -43,6 +46,28 @@ class CodeBuddyRunnerTest(unittest.TestCase):
             str(ctx.exception),
             "Sandbox command did not report an exit code",
         )
+
+    def test_cli_timeout_rejects_non_positive_values(self):
+        for value in ("0", "-5"):
+            with self.subTest(value=value):
+                with patch.object(
+                    sys, "argv", ["run_codebuddy.py", "--timeout", value]
+                ):
+                    with redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as ctx:
+                            run_codebuddy.parse_args()
+
+                self.assertEqual(ctx.exception.code, 2)
+
+    def test_sandbox_env_uses_explicit_api_key(self):
+        with patch.dict(os.environ, {}, clear=True):
+            env = run_codebuddy.sandbox_env(
+                api_key="codebuddy_test_key",
+                config_dir="/workspace/.codebuddy",
+            )
+
+        self.assertEqual(env["CODEBUDDY_API_KEY"], "codebuddy_test_key")
+        self.assertEqual(env["CODEBUDDY_CONFIG_DIR"], "/workspace/.codebuddy")
 
 
 if __name__ == "__main__":

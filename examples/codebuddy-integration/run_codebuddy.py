@@ -27,16 +27,28 @@ def require_env(keys: Iterable[str]) -> Dict[str, str]:
     return {key: os.environ[key] for key in keys}
 
 
-def positive_int(value: Optional[str], default: int) -> int:
-    if value is None or value == "":
-        return default
+def positive_int(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise SystemExit(f"Expected an integer, got: {value}") from exc
+        raise argparse.ArgumentTypeError(
+            f"Expected an integer, got: {value}"
+        ) from exc
     if parsed <= 0:
-        raise SystemExit(f"Expected a positive integer, got: {value}")
+        raise argparse.ArgumentTypeError(
+            f"Expected a positive integer, got: {value}"
+        )
     return parsed
+
+
+def env_positive_int(key: str, default: int) -> int:
+    value = os.environ.get(key)
+    if value is None or value == "":
+        return default
+    try:
+        return positive_int(value)
+    except argparse.ArgumentTypeError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def build_codebuddy_script(
@@ -73,9 +85,9 @@ echo "[codebuddy] running prompt"
 """
 
 
-def sandbox_env(config_dir: str) -> Dict[str, str]:
+def sandbox_env(api_key: str, config_dir: str) -> Dict[str, str]:
     env = {
-        "CODEBUDDY_API_KEY": os.environ["CODEBUDDY_API_KEY"],
+        "CODEBUDDY_API_KEY": api_key,
         "CODEBUDDY_CONFIG_DIR": config_dir,
         "DISABLE_AUTOUPDATER": "1",
     }
@@ -180,8 +192,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--timeout",
-        type=int,
-        default=positive_int(os.environ.get("CUBE_SANDBOX_TIMEOUT"), 600),
+        type=positive_int,
+        default=env_positive_int("CUBE_SANDBOX_TIMEOUT", 600),
         help="Sandbox timeout in seconds.",
     )
     parser.add_argument(
@@ -196,7 +208,7 @@ def main() -> None:
     load_local_dotenv()
     args = parse_args()
 
-    require_env(["E2B_API_URL", "E2B_API_KEY", "CODEBUDDY_API_KEY"])
+    required_env = require_env(["E2B_API_URL", "E2B_API_KEY", "CODEBUDDY_API_KEY"])
     if not args.template:
         raise SystemExit("Missing template: set CUBE_TEMPLATE_ID or pass --template")
 
@@ -210,7 +222,7 @@ def main() -> None:
     with Sandbox.create(
         template=args.template,
         timeout=args.timeout,
-        envs=sandbox_env(args.config_dir),
+        envs=sandbox_env(required_env["CODEBUDDY_API_KEY"], args.config_dir),
     ) as sandbox:
         print(f"[cube] sandbox id: {sandbox.sandbox_id}")
         write_demo_workspace(sandbox)
