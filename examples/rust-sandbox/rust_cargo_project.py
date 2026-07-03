@@ -155,10 +155,17 @@ def main() -> None:
 
         # Show the binary size
         r = sandbox.commands.run(
-            f"ls -lh {work_dir}/target/release/{project_name}",
+            f"stat -c %s {work_dir}/target/release/{project_name}",
             timeout=5,
         )
-        print(f"\nBinary size: {r.stdout.strip().split()[4]}")
+        size_bytes = int(r.stdout.strip())
+        if size_bytes >= 1_048_576:
+            size_str = f"{size_bytes / 1_048_576:.1f} MB"
+        elif size_bytes >= 1024:
+            size_str = f"{size_bytes / 1024:.1f} KB"
+        else:
+            size_str = f"{size_bytes} B"
+        print(f"\nBinary size: {size_str}")
 
 
 if __name__ == "__main__":

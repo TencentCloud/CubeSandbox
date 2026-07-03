@@ -158,7 +158,6 @@ with Sandbox.create(template=template_id) as sandbox:
     sandbox.commands.run("cd /home/user/snapshot-demo && cargo build --release")
 
     sandbox.pause()       # save VM snapshot, release resources
-    time.sleep(3)
     sandbox.connect()     # restore snapshot, resume execution
 
     # Hot build — only changed files recompile (2–5s instead of 30–60s)

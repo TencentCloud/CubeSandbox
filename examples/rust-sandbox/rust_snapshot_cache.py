@@ -200,7 +200,7 @@ def main() -> None:
             sys.exit(1)
 
         # Verify cargo registry is still there
-        r = sandbox.commands.run("du -sh /home/user/.cargo/registry/ 2>/dev/null || echo missing", timeout=5)
+        r = sandbox.commands.run("du -sh /root/.cargo/registry/ 2>/dev/null || echo missing", timeout=5)
         print(f"  [✓] Cargo registry preserved: {r.stdout.strip()}")
         print()
 

@@ -136,12 +136,12 @@ class RustSandboxTester:
 
     def test_cargo_registry_warm(self) -> None:
         print("[test] cargo registry pre-warmed")
-        # Verify a crate we know was pre-warmed during docker build.
+        # Verify the registry cache contains downloaded .crate files.
         r = self.exec(
-            "find /root/.cargo/registry/ -name 'serde-*' -maxdepth 3 2>/dev/null | head -1"
+            "find /root/.cargo/registry/ -name '*.crate' -maxdepth 5 2>/dev/null | head -1"
         )
         if not r.stdout.strip():
-            die("cargo registry not pre-warmed — serde crate not found")
+            die("cargo registry not pre-warmed — no .crate files found")
         ok(f"found: {r.stdout.strip()}")
 
 

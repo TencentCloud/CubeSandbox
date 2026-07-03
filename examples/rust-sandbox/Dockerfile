@@ -55,8 +55,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && rustup default "${RUST_TOOLCHAIN}" \
     && rustc --version \
     && cargo --version \
-    && for bin in rustc cargo rustup; do \
-           cp "/root/.cargo/bin/${bin}" "/usr/local/bin/${bin}"; \
+    && for bin in rustc cargo rustup rustfmt clippy; do \
+           ln -sf "/root/.cargo/bin/${bin}" "/usr/local/bin/${bin}"; \
        done
 
 # ---------------------------------------------------------------------------
@@ -76,7 +76,7 @@ RUN cd /opt/rust-demo \
 # ---------------------------------------------------------------------------
 USER user
 RUN rustc --version && cargo --version \
-    && du -sh "${CARGO_HOME}/registry/" 2>/dev/null || true
+    && du -sh "${CARGO_HOME}/registry/" 2>/dev/null
 
 USER root
 

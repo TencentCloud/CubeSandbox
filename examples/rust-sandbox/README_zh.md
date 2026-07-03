@@ -158,7 +158,6 @@ with Sandbox.create(template=template_id) as sandbox:
     sandbox.commands.run("cd /home/user/snapshot-demo && cargo build --release")
 
     sandbox.pause()       # 保存 VM 快照，释放计算资源
-    time.sleep(3)
     sandbox.connect()     # 从快照恢复，继续执行
 
     # 热构建 — 仅重新编译变更文件（2–5 秒，而非 30–60 秒）
