@@ -11,9 +11,7 @@
 - **rustc** 和 **cargo** — Rust 编译器和包管理器，沙箱内所有用户均可直接使用
 - **预热好的 crate 缓存** — 常用 crate（`serde`、`serde_json`、`axum`、`tokio`）已在构建镜像时下载并缓存，新沙箱中的首次 `cargo build` 仅需编译你的代码，无需等待下载依赖
 
-所有交互通过 E2B SDK 进行——用 `sandbox.files.write()` 写入 Rust 源文件，用
-`sandbox.commands.run("rustc ...")` 编译，再读取运行结果。沙箱是完整的 KVM
-MicroVM，拥有独立内核、文件系统和网络栈。`with` 块退出时，沙箱自动销毁。
+所有交互通过 E2B SDK 进行——用 `sandbox.files.write()` 写入 Rust 源文件，用 `sandbox.commands.run("rustc ...")` 编译，再读取运行结果。沙箱是完整的 KVM MicroVM，拥有独立内核、文件系统和网络栈。`with` 块退出时，沙箱自动销毁。
 
 ```text
   用户脚本 (E2B SDK)
@@ -44,8 +42,7 @@ MicroVM，拥有独立内核、文件系统和网络栈。`with` 块退出时，
 pip install -r requirements.txt
 ```
 
-示例脚本会使用 `python-dotenv` 自动加载脚本所在目录的 `.env` 文件；如果文件
-不存在，则继续使用当前进程的环境变量。
+示例脚本会使用 `python-dotenv` 自动加载脚本所在目录的 `.env` 文件；如果文件不存在，则继续使用当前进程的环境变量。
 
 ## 3. 快速开始
 
@@ -81,8 +78,7 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-> Rust 的 `target/` 目录体积较大。建议可写层至少设为 2G，依赖较多的项目建议 4G
-> 或更大。
+> Rust 的 `target/` 目录体积较大。建议可写层至少设为 2G，依赖较多的项目建议 4G 或更大。
 
 记录输出的 `template_id`。
 
@@ -123,7 +119,7 @@ Fibonacci(10) = 55
 ## 4. 所有脚本
 
 | 脚本 | 展示内容 |
-|------|----------|
+| --- | --- |
 | `rust_compile_run.py` | `sandbox.files.write()` + `sandbox.commands.run("rustc ...")` — 写入 Rust 源码、编译、运行 |
 | `rust_cargo_project.py` | `cargo new` → `cargo build --release` → `cargo run` — 沙箱内完整的 Cargo 工作流 |
 | `rust_snapshot_cache.py` | `sandbox.pause()` / `sandbox.connect()` — 冷构建后快照整个 VM，恢复后增量编译只需几秒 |
@@ -154,9 +150,7 @@ with Sandbox.create(template=template_id) as sandbox:
 
 ### rust_snapshot_cache.py — 快照与恢复
 
-创建带依赖的 Cargo 项目，完成冷构建（约 30–60 秒），暂停沙箱释放资源，之后恢复。
-`target/` 目录和 crate 缓存在暂停/恢复周期中完整保留，下次构建仅重新编译变更的
-文件：
+创建带依赖的 Cargo 项目，完成冷构建（约 30–60 秒），暂停沙箱释放资源，之后恢复。 `target/` 目录和 crate 缓存在暂停/恢复周期中完整保留，下次构建仅重新编译变更的文件：
 
 ```python
 with Sandbox.create(template=template_id) as sandbox:
@@ -203,9 +197,9 @@ with Sandbox.create(
 ## 5. 常见问题
 
 | 现象 | 可能原因 | 解决方法 |
-|------|----------|----------|
+| --- | --- | --- |
 | `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS 缺少 CA 证书 | 设置 `SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem` |
-| `cargo: command not found` | 沙箱内 PATH 未包含 cargo | 检查 Dockerfile 是否将二进制文件链接到了 `/usr/local/bin/`，如缺失请重建镜像 |
+| `cargo: command not found` | 沙箱内 PATH 未包含 cargo | 检查 Dockerfile 是否将二进制文件复制到了 `/usr/local/bin/`，如缺失请重建镜像 |
 | `cargo build` 卡在 "Updating crates.io index" | 沙箱无网络访问 | 在 Docker 镜像中预填充所需 crate，或设置 `allow_internet_access=True` |
 | `Template not found` | 模板 ID 错误 | 重新运行 `cubemastercli tpl list` |
 | `Connection refused` | CubeAPI 不可达 | 检查 `E2B_API_URL` 和 3000 端口 |

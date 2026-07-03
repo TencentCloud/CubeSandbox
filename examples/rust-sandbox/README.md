@@ -2,25 +2,16 @@
 
 [中文文档](README_zh.md)
 
-Compile and run Rust code inside a Cube Sandbox — from a one-liner snippet to
-a full Cargo project, all through the E2B Python SDK.
+Compile and run Rust code inside a Cube Sandbox — from a one-line snippet to a full Cargo project, all through the E2B Python SDK.
 
 ## 1. Background
 
-**Cube Sandbox** is a lightweight MicroVM platform fully compatible with the
-[E2B SDK](https://e2b.dev). This example adds a complete Rust toolchain on top
-of the official `cubesandbox-base` image:
+**Cube Sandbox** is a lightweight MicroVM platform fully compatible with the [E2B SDK](https://e2b.dev). This example adds a complete Rust toolchain on top of the official `cubesandbox-base` image:
 
-- **rustc** and **cargo** — the Rust compiler and package manager, available
-  on `$PATH` for every user inside the sandbox
-- A **pre-warmed crate registry** — common crates (`serde`, `serde_json`,
-  `axum`, `tokio`) are downloaded and cached at image build time, so the first
-  `cargo build` in a new sandbox only compiles your code
+- **rustc** and **cargo** — the Rust compiler and package manager, available on `$PATH` for every user inside the sandbox
+- A **pre-warmed crate registry** — common crates (`serde`, `serde_json`, `axum`, `tokio`) are downloaded and cached at image build time, so the first `cargo build` in a new sandbox only compiles your code
 
-You interact with the sandbox through the E2B SDK — write Rust source files,
-compile with `sandbox.commands.run("rustc ...")`, and read back the output.
-The sandbox is a full KVM MicroVM with its own kernel, filesystem, and network.
-When the `with` block exits, the sandbox is automatically deleted.
+You interact with the sandbox through the E2B SDK — write Rust source files, compile with `sandbox.commands.run("rustc ...")`, and read back the output. The sandbox is a full KVM MicroVM with its own kernel, filesystem, and network. When the `with` block exits, the sandbox is automatically deleted.
 
 ```text
   Your Script (E2B SDK)
@@ -51,9 +42,7 @@ When the `with` block exits, the sandbox is automatically deleted.
 pip install -r requirements.txt
 ```
 
-The example scripts use `python-dotenv` to load a `.env` file from the script
-directory. If no `.env` file exists, they continue with the current process
-environment variables.
+The example scripts use `python-dotenv` to load a `.env` file from the script directory. If no `.env` file exists, they continue with the current process environment variables.
 
 ## 3. Quick Start
 
@@ -89,8 +78,7 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-> Rust `target/` directories can grow large. 2G is a sensible default; raise
-> to 4G or more for projects with many dependencies.
+> Rust `target/` directories can grow large. 2G is a sensible default; raise to 4G or more for projects with many dependencies.
 
 Note the `template_id` printed on success.
 
@@ -101,8 +89,7 @@ cp .env.example .env
 # edit .env and fill in E2B_API_URL and CUBE_TEMPLATE_ID
 ```
 
-After that, you can run any example script directly without manually exporting
-the variables first.
+After that, you can run any example script directly without manually exporting the variables first.
 
 Or export directly:
 
@@ -132,7 +119,7 @@ Fibonacci(10) = 55
 ## 4. All Scripts
 
 | Script | What it shows |
-|--------|---------------|
+| --- | --- |
 | `rust_compile_run.py` | `sandbox.files.write()` + `sandbox.commands.run("rustc ...")` — write Rust source, compile it, run the binary |
 | `rust_cargo_project.py` | `cargo new` → `cargo build --release` → `cargo run` — the full Cargo workflow inside a sandbox |
 | `rust_snapshot_cache.py` | `sandbox.pause()` / `sandbox.connect()` — snapshot the VM after a cold build, resume later, and see incremental compilation finish in seconds |
@@ -163,10 +150,7 @@ with Sandbox.create(template=template_id) as sandbox:
 
 ### rust_snapshot_cache.py — Snapshot & Resume
 
-Create a Cargo project with dependencies, build it (cold, ~30–60s), pause the
-sandbox to free resources, then resume it later. The `target/` directory and
-crate cache survive the pause/resume cycle, so the next build only recompiles
-changed files:
+Create a Cargo project with dependencies, build it (cold, ~30–60s), pause the sandbox to free resources, then resume it later. The `target/` directory and crate cache survive the pause/resume cycle, so the next build only recompiles changed files:
 
 ```python
 with Sandbox.create(template=template_id) as sandbox:
@@ -213,9 +197,9 @@ with Sandbox.create(
 ## 5. Troubleshooting
 
 | Symptom | Likely Cause | Fix |
-|---------|-------------|-----|
+| --- | --- | --- |
 | `SSL: CERTIFICATE_VERIFY_FAILED` | HTTPS without CA cert | Set `SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem` |
-| `cargo: command not found` | PATH not set inside sandbox | Verify Dockerfile symlinks binaries to `/usr/local/bin/`; rebuild if missing |
+| `cargo: command not found` | PATH not set inside sandbox | Verify Dockerfile copied binaries to `/usr/local/bin/`; rebuild if missing |
 | `cargo build` hangs on "Updating crates.io index" | No internet access in sandbox | Pre-populate all needed crates in the Docker image, or set `allow_internet_access=True` |
 | `Template not found` | Wrong template ID | Re-run `cubemastercli tpl list` |
 | `Connection refused` | CubeAPI not reachable | Check `E2B_API_URL` and port 3000 |
