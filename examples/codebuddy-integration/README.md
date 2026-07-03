@@ -93,6 +93,14 @@ the state-preserving workflow used for long-running coding sessions.
 - Keep credentials out of images and Git. For production, prefer CubeSandbox's
   credential handling, security proxy, or an outbound gateway that can inject
   service credentials without exposing them to user code.
+- `CODEBUDDY_API_KEY` is still visible to processes inside the sandbox because
+  CodeBuddy runs there. Use scoped or short-lived credentials for demos, and
+  avoid running untrusted generated code in the same sandbox as long-lived
+  account credentials.
+- Host `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` are not forwarded by default.
+  Set `CODEBUDDY_FORWARD_PROXY_ENV=1` only when your deployment requires it. The
+  runner strips proxy URL userinfo before sandbox injection, but credentials
+  should still be managed by your proxy or egress layer instead of `.env`.
 - The sandbox must be allowed to reach CodeBuddy and the backing LLM API. If
   your deployment uses network allowlists, allow the required domains or route
   traffic through CubeEgress.

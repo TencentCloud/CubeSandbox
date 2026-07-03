@@ -5,6 +5,7 @@ import argparse
 import os
 import shlex
 from typing import Dict, Iterable, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from env_utils import load_local_dotenv
 
@@ -16,6 +17,8 @@ DEFAULT_PROMPT = (
     "Inspect /tmp/codebuddy-demo, run python3 hello.py, "
     "and explain what the script does."
 )
+PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def require_env(keys: Iterable[str]) -> Dict[str, str]:
@@ -41,14 +44,12 @@ def positive_int(value: str) -> int:
     return parsed
 
 
-def env_positive_int(key: str, default: int) -> int:
-    value = os.environ.get(key)
-    if value is None or value == "":
-        return default
-    try:
-        return positive_int(value)
-    except argparse.ArgumentTypeError as exc:
-        raise SystemExit(str(exc)) from exc
+def env_default(key: str, default: str) -> str:
+    return os.environ.get(key) or default
+
+
+def env_flag_enabled(key: str) -> bool:
+    return os.environ.get(key, "").strip().lower() in TRUTHY_ENV_VALUES
 
 
 def build_codebuddy_script(
@@ -85,15 +86,34 @@ echo "[codebuddy] running prompt"
 """
 
 
+def strip_url_userinfo(value: str) -> str:
+    if "@" not in value:
+        return value
+    if "://" not in value:
+        return value.rsplit("@", 1)[1]
+
+    parts = urlsplit(value)
+    if not parts.netloc or "@" not in parts.netloc:
+        return value
+
+    netloc = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 def sandbox_env(api_key: str, config_dir: str) -> Dict[str, str]:
     env = {
         "CODEBUDDY_API_KEY": api_key,
         "CODEBUDDY_CONFIG_DIR": config_dir,
         "DISABLE_AUTOUPDATER": "1",
     }
-    for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
-        if os.environ.get(key):
-            env[key] = os.environ[key]
+    if env_flag_enabled("CODEBUDDY_FORWARD_PROXY_ENV"):
+        for key in PROXY_ENV_KEYS:
+            value = os.environ.get(key)
+            if not value:
+                continue
+            if key in ("HTTP_PROXY", "HTTPS_PROXY"):
+                value = strip_url_userinfo(value)
+            env[key] = value
     return env
 
 
@@ -193,7 +213,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=positive_int,
-        default=env_positive_int("CUBE_SANDBOX_TIMEOUT", 600),
+        default=env_default("CUBE_SANDBOX_TIMEOUT", "600"),
         help="Sandbox timeout in seconds.",
     )
     parser.add_argument(
@@ -215,7 +235,7 @@ def main() -> None:
     from e2b_code_interpreter import Sandbox
 
     print(f"[cube] template: {args.template}")
-    print(f"[cube] api url:  {os.environ['E2B_API_URL']}")
+    print(f"[cube] api url:  {required_env['E2B_API_URL']}")
     print(f"[cube] timeout:  {args.timeout}s")
     print(f"[codebuddy] config dir: {args.config_dir}")
 
@@ -235,7 +255,6 @@ def main() -> None:
             permission_mode=args.permission_mode,
         )
         sandbox.files.write(SCRIPT_PATH, script)
-        sandbox.commands.run(f"chmod +x {shlex.quote(SCRIPT_PATH)}")
 
         result = sandbox.commands.run(f"bash {shlex.quote(SCRIPT_PATH)}")
         print_result(result)

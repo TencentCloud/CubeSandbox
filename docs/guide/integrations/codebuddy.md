@@ -134,6 +134,14 @@ print(result.stdout)
 - CodeBuddy needs outbound access to its service and the backing LLM API. If
   Cube network policy is enabled, allow the required destinations or route
   traffic through CubeEgress.
+- `CODEBUDDY_API_KEY` is injected per sandbox instance, but it is still visible
+  to processes inside that sandbox because CodeBuddy runs there. Prefer scoped
+  or short-lived credentials, a pre-authenticated `CODEBUDDY_CONFIG_DIR`, or
+  CubeSandbox's security proxy for production.
+- Host proxy variables are not forwarded by default. Set
+  `CODEBUDDY_FORWARD_PROXY_ENV=1` only when required; the runner strips
+  `HTTP_PROXY` and `HTTPS_PROXY` URL userinfo before sandbox injection. Avoid
+  storing proxy credentials in `.env`.
 - `CODEBUDDY_ALLOWED_TOOLS` and `CODEBUDDY_PERMISSION_MODE` in the example are
   headless-run defaults. The demo uses `bypassPermissions` so CodeBuddy can run
   `python3 hello.py` without an interactive approval prompt inside the sandbox.

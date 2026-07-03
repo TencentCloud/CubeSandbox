@@ -87,6 +87,11 @@ CodeBuddy 运行完成后，脚本会在 `CODEBUDDY_CONFIG_DIR` 下写入 marker
 
 - 可复现模板中建议保留 `DISABLE_AUTOUPDATER=1`。升级 CodeBuddy 时，通过显式版本重新构建镜像。
 - 不要把凭据写入镜像或 Git。生产环境建议结合 CubeSandbox 的凭据管理、security proxy，或由出口网关托管服务凭据。
+- `CODEBUDDY_API_KEY` 仍会被沙箱内进程读取，因为 CodeBuddy 就运行在该沙箱内。
+  demo 建议使用受限或短期凭据；不要在带有长期账号凭据的同一个沙箱内运行不可信的生成代码。
+- 默认不会把宿主机的 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 注入沙箱。只有在部署必须使用代理时才设置
+  `CODEBUDDY_FORWARD_PROXY_ENV=1`。runner 会在注入前剥离代理 URL 中的 userinfo；
+  代理凭据仍应由代理或出口层托管，而不是写进 `.env`。
 - 沙箱必须能访问 CodeBuddy 和背后的 LLM API。如果部署启用了网络白名单，需要放行相应域名，或通过 CubeEgress 转发。
 - `CODEBUDDY_ALLOWED_TOOLS` 与 `CODEBUDDY_PERMISSION_MODE` 是 headless 示例默认值。示例使用
   `bypassPermissions`，这样 CodeBuddy 在沙箱内执行 `python3 hello.py` 时不需要交互式审批；生产环境应按团队审批策略调整。

@@ -2,7 +2,7 @@ import io
 import os
 import sys
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -59,6 +59,15 @@ class CodeBuddyRunnerTest(unittest.TestCase):
 
                 self.assertEqual(ctx.exception.code, 2)
 
+    def test_help_does_not_validate_timeout_env(self):
+        with patch.dict(os.environ, {"CUBE_SANDBOX_TIMEOUT": "0"}, clear=False):
+            with patch.object(sys, "argv", ["run_codebuddy.py", "--help"]):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as ctx:
+                        run_codebuddy.parse_args()
+
+        self.assertEqual(ctx.exception.code, 0)
+
     def test_sandbox_env_uses_explicit_api_key(self):
         with patch.dict(os.environ, {}, clear=True):
             env = run_codebuddy.sandbox_env(
@@ -68,6 +77,39 @@ class CodeBuddyRunnerTest(unittest.TestCase):
 
         self.assertEqual(env["CODEBUDDY_API_KEY"], "codebuddy_test_key")
         self.assertEqual(env["CODEBUDDY_CONFIG_DIR"], "/workspace/.codebuddy")
+
+    def test_sandbox_env_does_not_forward_proxy_by_default(self):
+        host_env = {
+            "HTTP_PROXY": "http://user:pass@proxy.example:8080",
+            "HTTPS_PROXY": "https://alice:secret@proxy.example:8443",
+            "NO_PROXY": "localhost,127.0.0.1",
+        }
+        with patch.dict(os.environ, host_env, clear=True):
+            env = run_codebuddy.sandbox_env(
+                api_key="codebuddy_test_key",
+                config_dir="/workspace/.codebuddy",
+            )
+
+        self.assertNotIn("HTTP_PROXY", env)
+        self.assertNotIn("HTTPS_PROXY", env)
+        self.assertNotIn("NO_PROXY", env)
+
+    def test_sandbox_env_strips_proxy_credentials_when_forwarding_is_enabled(self):
+        host_env = {
+            "CODEBUDDY_FORWARD_PROXY_ENV": "1",
+            "HTTP_PROXY": "http://user:pass@proxy.example:8080",
+            "HTTPS_PROXY": "https://alice:secret@proxy.example:8443",
+            "NO_PROXY": "localhost,127.0.0.1",
+        }
+        with patch.dict(os.environ, host_env, clear=True):
+            env = run_codebuddy.sandbox_env(
+                api_key="codebuddy_test_key",
+                config_dir="/workspace/.codebuddy",
+            )
+
+        self.assertEqual(env["HTTP_PROXY"], "http://proxy.example:8080")
+        self.assertEqual(env["HTTPS_PROXY"], "https://proxy.example:8443")
+        self.assertEqual(env["NO_PROXY"], "localhost,127.0.0.1")
 
 
 if __name__ == "__main__":

@@ -131,6 +131,12 @@ print(result.stdout)
 
 - CodeBuddy 需要访问自身服务和背后的 LLM API。若 Cube 网络策略已启用，需要放行
   必要目标，或通过 CubeEgress 转发。
+- `CODEBUDDY_API_KEY` 是按沙箱实例注入的，但 CodeBuddy 运行在该沙箱内，因此该密钥
+  仍会被沙箱内进程读取。生产环境建议使用受限或短期凭据、预登录的
+  `CODEBUDDY_CONFIG_DIR`，或结合 CubeSandbox 的 security proxy。
+- 默认不会转发宿主机代理变量。只有在部署必须使用代理时才设置
+  `CODEBUDDY_FORWARD_PROXY_ENV=1`；runner 会在注入沙箱前剥离 `HTTP_PROXY` 与
+  `HTTPS_PROXY` URL 中的 userinfo。不要把代理凭据写进 `.env`。
 - 示例中的 `CODEBUDDY_ALLOWED_TOOLS` 与 `CODEBUDDY_PERMISSION_MODE` 是 headless
   运行默认值。示例使用 `bypassPermissions`，这样 CodeBuddy 在沙箱内执行
   `python3 hello.py` 时不需要交互式审批；生产环境应按团队审批策略调整。
