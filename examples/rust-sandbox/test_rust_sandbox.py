@@ -131,22 +131,18 @@ class RustSandboxTester:
             timeout=180,
         )
         if r.returncode != 0:
-            # First build might fail if cargo registry wasn't pre-warmed.
-            # This is acceptable for the local smoke test — it works when
-            # the image was built with `cargo build` in the Dockerfile.
-            print(f"  !  cargo new/build returned {r.returncode} (may need network)")
-            print(f"     stderr tail: {(r.stderr or '')[-500:]}")
-        else:
-            ok("cargo new + build OK")
+            die(f"cargo new/build failed (exit={r.returncode}):\n{(r.stderr or '')[-500:]}")
+        ok("cargo new + build OK")
 
     def test_cargo_registry_warm(self) -> None:
-        print("[test] user ~/.cargo/registry cache")
-        r = self.exec("du -sh /home/user/.cargo/registry/ 2>/dev/null || echo empty")
-        out = r.stdout.strip()
-        if out == "empty" or out.startswith("0"):
-            print(f"  !  registry appears empty ({out}) — pre-warming may have failed")
-        else:
-            ok(f"user registry cache: {out}")
+        print("[test] cargo registry pre-warmed")
+        # Verify a crate we know was pre-warmed during docker build.
+        r = self.exec(
+            "find /root/.cargo/registry/ -name 'serde-*' -maxdepth 3 2>/dev/null | head -1"
+        )
+        if not r.stdout.strip():
+            die("cargo registry not pre-warmed — serde crate not found")
+        ok(f"found: {r.stdout.strip()}")
 
 
 # ---------------------------------------------------------------------------
