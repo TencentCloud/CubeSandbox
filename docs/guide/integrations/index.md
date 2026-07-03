@@ -47,4 +47,4 @@ lang: en-US
 
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
-| _Add your article here_ | - | - | - |
+| [CodeBuddy CLI Integration Guide](codebuddy) | Mizup79 | 2026-07-03 | integration, codebuddy, cli |

@@ -47,4 +47,4 @@ lang: zh-CN
 
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
-| _在这里补充你的文章_ | - | - | - |
+| [CodeBuddy CLI 集成指南](codebuddy) | Mizup79 | 2026-07-03 | integration, codebuddy, cli |
