@@ -26,7 +26,6 @@ sleep 2
 
 for f in $logPath/access.log $logPath/error.log; do
     files=$(ls $f.* | sort -r -t "." -k 2)
-    # 保留前三个日志文件，删除其余日志文件
     j=0
     for file in $files; do
         j=$((j + 1))
