@@ -21,7 +21,9 @@
 - 可访问互联网（用于下载发布包、拉取 Docker 镜像）
 
 ::: warning ARM64（aarch64）主机
-本快速开始通过 **PVM** 在普通云服务器上启用 KVM，而 PVM 宿主机内核**仅支持 x86_64**（发布附件为 `*.x86_64.rpm` / `*_amd64.deb`）。在 **aarch64（ARM64）** 上，请使用本身已提供原生 KVM 的机器（物理机 / 裸金属 ARM64 服务器），改为参阅[裸金属 / 物理机部署](./bare-metal-deploy.md)或[本地构建部署](./self-build-deploy.md) —— 两者均支持 aarch64。
+本快速开始通过 **PVM** 在普通云服务器上启用 KVM，而 PVM 宿主机内核**仅支持 x86_64**（发布附件为 `*.x86_64.rpm` / `*_amd64.deb`）。PVM **不支持** ARM64。
+
+在 **aarch64（ARM64）** 上，请使用本身已提供原生 KVM 的机器（物理机 / 裸金属 ARM64 服务器），改为参阅[裸金属 / 物理机部署](./bare-metal-deploy.md)或[本地构建部署](./self-build-deploy.md) —— 两者均支持 aarch64。
 :::
 
 ### 🖥 受支持的系统

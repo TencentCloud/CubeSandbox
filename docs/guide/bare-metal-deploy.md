@@ -28,10 +28,35 @@ sudo su root
 
 ## Step 1: Install
 
+### x86_64 (AMD64)
+
 Run as root:
 
 ```bash
 curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+```
+
+### ARM64 (aarch64) Hosts
+
+::: warning online-install.sh ARM64 support coming soon
+The `online-install.sh` one-command installer currently auto-discovers **x86_64** packages only. ARM64 support in `online-install.sh` will be available in an upcoming release. For now, ARM64 users should follow the manual steps below.
+:::
+
+**Step 1:** Go to the release page for your region, find the latest release that includes ARM64 assets, and download the `cube-sandbox-one-click-*-arm64.tar.gz` package:
+
+| Platform | Release Page |
+|---|---|
+| GitHub | [TencentCloud/CubeSandbox/releases](https://github.com/TencentCloud/CubeSandbox/releases) |
+| CNB (China) | [CubeSandbox/CubeSandbox/-/releases](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases) |
+
+**Step 2:** Extract and run the installer:
+
+```bash
+# Replace <version> with the actual version you downloaded (e.g. v0.5.0-rc3)
+tar -xzf cube-sandbox-one-click-<version>-arm64.tar.gz
+cd cube-sandbox-one-click-<version>-arm64
+chmod +x install.sh
+./install.sh
 ```
 
 ::: details What gets installed

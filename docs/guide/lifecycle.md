@@ -168,6 +168,43 @@ python examples/code-sandbox-quickstart/auto-kill.py
 - **Failure mode**: when an auto-resume RPC fails, CubeProxy returns `503 + Retry-After` to the client immediately rather than hanging on a long timeout. When the sandbox has already been killed (`killing` / `killed`) the proxy returns `410 Gone` instead, telling SDK clients to stop retrying.
 - **Diagnostics**: `/data/log/cube-proxy/sidecar.log` is the sidecar's runtime log. Look for `create event applied`, `auto-paused sandbox`, `auto-resumed sandbox`, `timeout-killed sandbox`.
 
+### Paused Resource Release & Scheduling Quota
+
+When a sandbox is paused, its CPU and memory are physically reclaimed — but by default, the node resource accounting still counts `paused`/`pausing` sandboxes as "occupied" against the scheduler quota. This means: even after many idle sandboxes are paused, the host still shows no available capacity to create new ones.
+
+To address this, Cube provides a **node-level tuning knob** `host.quota.paused_resource_release_ratio` (configured in `Cubelet/config/config.toml`), range `[0, 1]`, default `0`:
+
+| Value | Behavior | Best For |
+|---|---|---|
+| `0.0` | Paused sandboxes retain full quota (identical to legacy behavior). Resume is always guaranteed — never rejected due to resource shortage. | Availability-critical environments where resume must never fail |
+| `1.0` | Paused sandbox CPU/memory quota is **fully released** to the scheduler. Resume becomes best-effort — may be rejected when the node is full. | Maximizing deployment density; occasional resume failures are acceptable |
+| `0 < r < 1` | Releases fraction `r`, reserves `(1-r)` as headroom. **Reserved quota still counts toward scheduler CPU/memory usage**, so pause-heavy nodes are **naturally deprioritized** — the scheduler won't keep piling new sandboxes onto nodes that already hold many paused ones. | Balancing availability against utilization |
+
+**Configuration example**:
+
+```toml
+# Cubelet/config/config.toml
+[host.quota]
+paused_resource_release_ratio = 0.5   # release half, reserve half
+```
+
+**Resume admission check**:
+
+When `ratio > 0`, every resume triggers a **local real-time admission check** — if the node lacks enough free capacity to accommodate the released fraction, the resume is rejected:
+
+```
+resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512MB
+```
+
+The rejection travels through the following chain to reach the client: `Cubelet (130409 Conflict)` → `CubeAPI (HTTP 409)` → `WebUI (capacity diagnostic)`. HTTP 409 is a retriable status — when other sandboxes are destroyed or paused later, freeing capacity, the resume can be retried.
+
+**Important notes**:
+
+- Disk and MvmNum are **not affected** by the ratio — pause snapshots still consume storage and the sandbox object still exists.
+- `ratio=0` is the zero-value-safe default: if this setting is never configured, behavior is identical to previous versions. Upgrades won't cause surprises.
+- This is a **node-level setting** — different nodes can use different ratios to accommodate heterogeneous hardware or tiered pools.
+- When a large batch of sandboxes on a single node wakes up simultaneously and exceeds node capacity, the control plane returns 409 with precise quota numbers. Future releases will support **cross-node resume**, allowing sandboxes to migrate between nodes for true cluster-wide utilization maximization.
+
 ## Next Steps
 
 - [Templates Overview](./templates.md) — sandboxes boot from templates; the template's build also shapes cold-start cost.

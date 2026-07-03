@@ -10,7 +10,7 @@ The Digital Assistant is a preview feature intended for demos and early validati
 
 AgentHub creates assistants from a CubeSandbox template. Before deployment, build the Digital Assistant template (see the command below), then copy the auto-generated `tpl-` prefixed template ID into `.env`:
 
-```env
+```bash
 AGENTHUB_DS_OPENCLAW_TEMPLATE=<your-digital-assistant-template-id>
 ```
 
