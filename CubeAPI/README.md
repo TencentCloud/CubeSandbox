@@ -120,9 +120,10 @@ CubeAPI validates every configured endpoint URL at startup and refuses to start 
 - URLs that embed credentials (`http://user:pass@host/...`) are always rejected, regardless of `allow_private_urls`.
 - URLs targeting obviously invalid or unsafe addresses are always rejected, even when `allow_private_urls` is `true`: the unspecified addresses `0.0.0.0` and `::`, the broadcast address `255.255.255.255`, and multicast addresses (`224.0.0.0/4`, `ff00::/8`).
 - URLs targeting non-public addresses (loopback `127.0.0.0/8` and `::1`, private `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, and `fc00::/7`, link-local `169.254.0.0/16` and `fe80::/10`, or the hostname `localhost`) are rejected by default. Set `"allow_private_urls": true` on that endpoint to permit them; use this only for local development or trusted internal receivers.
+- Domain-name endpoints are resolved during startup. Resolution failures and empty results fail startup. Every resolved IPv4 and IPv6 address must pass the same validation rules; mixed public and non-public results are rejected unless the endpoint explicitly sets `"allow_private_urls": true`.
 - Validation error messages identify the endpoint by index only; they never include the URL, embedded credentials, or the endpoint secret.
 
-This check classifies IP literals and the hostname `localhost` only. Domain names are not DNS-resolved at startup, so a hostname that resolves to an internal address is not detected; restrict outbound network access at the deployment layer if that matters for your environment.
+Resolved domain addresses are pinned for the lifetime of the shared HTTP client, while the original hostname remains in the URL for HTTPS certificate validation and SNI. DNS changes or receiver IP rotation require restarting CubeAPI. Continue to restrict outbound network access at the deployment layer as defense in depth.
 
 Event filtering follows these rules:
 

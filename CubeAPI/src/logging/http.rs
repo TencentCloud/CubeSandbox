@@ -8,7 +8,13 @@
 //! background Tokio task. `Logger::log()` only attempts to enqueue an event;
 //! it never waits for queue capacity or performs network I/O.
 
-use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
@@ -50,13 +56,13 @@ enum Msg {
 }
 
 #[derive(Serialize)]
-struct WebhookPayload {
-    id: String,
+struct WebhookPayload<'a> {
+    id: &'a str,
     timestamp: DateTime<Utc>,
     level: LogLevel,
-    event: String,
+    event: &'a str,
     #[serde(flatten)]
-    fields: HashMap<String, Value>,
+    fields: &'a HashMap<String, Value>,
 }
 
 #[derive(Clone)]
@@ -103,18 +109,17 @@ impl Delivery {
         let id = Uuid::new_v4().to_string();
         let timestamp = event.timestamp.timestamp().to_string();
         let payload = WebhookPayload {
-            id: id.clone(),
+            id: &id,
             timestamp: event.timestamp,
             level: event.level,
-            event: event.event.clone(),
-            fields: fields.clone(),
+            event: &event.event,
+            fields,
         };
         let body = serde_json::to_vec(&payload)?;
         let signature = endpoint
             .secret
             .as_deref()
-            .map(|secret| sign_payload(secret, &timestamp, &id, &body))
-            .transpose()?;
+            .map(|secret| sign_payload(secret, &timestamp, &id, &body));
 
         Ok(Self {
             endpoint_index: endpoint.index,
@@ -148,18 +153,38 @@ impl HttpLogger {
     pub fn new(config: WebhookConfig) -> anyhow::Result<Self> {
         validate_config(&config)?;
 
+        let mut pinned_hosts = HashMap::new();
         let endpoints = config
             .endpoints
             .iter()
             .enumerate()
             .filter(|(_, endpoint)| endpoint.enabled)
-            .map(|(index, endpoint)| compile_endpoint(endpoint, index))
+            .map(|(index, endpoint_config)| {
+                let endpoint = compile_endpoint(endpoint_config, index)?;
+                if let Some(host) = domain_host(&endpoint.url) {
+                    resolve_and_validate_hostname(
+                        index,
+                        host,
+                        endpoint_config.allow_private_urls,
+                        &mut pinned_hosts,
+                    )?;
+                }
+                Ok(endpoint)
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let client = reqwest::Client::builder()
+        let mut client_builder = reqwest::Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(config.timeout_secs))
-            .build()?;
+            .connect_timeout(Duration::from_secs(WEBHOOK_CONNECT_TIMEOUT_SECS))
+            .pool_idle_timeout(Duration::from_secs(WEBHOOK_POOL_IDLE_TIMEOUT_SECS))
+            .pool_max_idle_per_host(WEBHOOK_POOL_MAX_IDLE_PER_HOST);
+        for (host, addrs) in pinned_hosts {
+            // Port zero lets reqwest use the URL's explicit port or the scheme default,
+            // so one pinned hostname is safe across endpoints with different ports.
+            client_builder = client_builder.resolve_to_addrs(&host, &addrs);
+        }
+        let client = client_builder.build()?;
         let handle = Handle::try_current()
             .map_err(|_| anyhow!("HttpLogger::new must be called from a Tokio runtime"))?;
 
@@ -236,6 +261,11 @@ impl Logger for HttpLogger {
 }
 
 const MAX_OUTSTANDING_DELIVERY_TASKS: usize = 100_000;
+/// Maximum number of retries after the initial delivery attempt.
+const MAX_WEBHOOK_RETRIES: usize = 20;
+const WEBHOOK_CONNECT_TIMEOUT_SECS: u64 = 5;
+const WEBHOOK_POOL_IDLE_TIMEOUT_SECS: u64 = 30;
+const WEBHOOK_POOL_MAX_IDLE_PER_HOST: usize = 2;
 
 fn max_outstanding_deliveries(
     queue_capacity: usize,
@@ -260,6 +290,9 @@ fn validate_config(config: &WebhookConfig) -> anyhow::Result<()> {
     }
     if config.flush_timeout_secs == 0 {
         bail!("webhook flush_timeout_secs must be greater than zero");
+    }
+    if config.max_retries > MAX_WEBHOOK_RETRIES {
+        bail!("webhook max_retries must not exceed {MAX_WEBHOOK_RETRIES}");
     }
     if config.initial_backoff_ms > config.max_backoff_ms {
         bail!("webhook initial_backoff_ms must not exceed max_backoff_ms");
@@ -306,11 +339,7 @@ fn compile_endpoint(config: &WebhookEndpointConfig, index: usize) -> anyhow::Res
     })
 }
 
-/// Startup-time classification of a webhook endpoint host.
-///
-/// Hostnames are not DNS-resolved; only IP literals and `localhost` are
-/// classified, so domain names that resolve to internal addresses are not
-/// detected here.
+/// Classification shared by literal URL hosts and startup-resolved addresses.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum HostClass {
     /// Globally routable target; always accepted.
@@ -337,6 +366,75 @@ fn classify_host(url: &Url) -> HostClass {
         Ok(ip) => classify_ip(ip),
         Err(_) => HostClass::Public,
     }
+}
+
+fn domain_host(url: &Url) -> Option<&str> {
+    let host = url.host_str()?;
+    let ip_literal = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    ip_literal.parse::<IpAddr>().is_err().then_some(host)
+}
+
+/// Performs blocking system DNS resolution during startup only. The resulting
+/// addresses are later pinned into the shared reqwest client.
+fn resolve_and_validate_hostname(
+    endpoint_index: usize,
+    host: &str,
+    allow_private_urls: bool,
+    pinned_hosts: &mut HashMap<String, Vec<SocketAddr>>,
+) -> anyhow::Result<()> {
+    if let Some(addrs) = pinned_hosts.get(host) {
+        let ips = addrs.iter().map(|address| address.ip()).collect::<Vec<_>>();
+        return validate_resolved_ips(endpoint_index, &ips, allow_private_urls);
+    }
+
+    let addresses = (host, 0)
+        .to_socket_addrs()
+        .map_err(|_| anyhow!("webhook endpoint {endpoint_index} hostname resolution failed"))?;
+    let mut pinned_addrs = Vec::new();
+    for mut address in addresses {
+        address.set_port(0);
+        if !pinned_addrs.contains(&address) {
+            pinned_addrs.push(address);
+        }
+    }
+
+    let ips = pinned_addrs
+        .iter()
+        .map(|address| address.ip())
+        .collect::<Vec<_>>();
+    validate_resolved_ips(endpoint_index, &ips, allow_private_urls)?;
+    pinned_hosts.insert(host.to_string(), pinned_addrs);
+    Ok(())
+}
+
+fn validate_resolved_ips(
+    endpoint_index: usize,
+    ips: &[IpAddr],
+    allow_private_urls: bool,
+) -> anyhow::Result<()> {
+    if ips.is_empty() {
+        bail!("webhook endpoint {endpoint_index} hostname resolved to no addresses");
+    }
+
+    for &ip in ips {
+        match classify_ip(ip) {
+            HostClass::Public => {}
+            HostClass::NonPublic if allow_private_urls => {}
+            HostClass::NonPublic => bail!(
+                "webhook endpoint {endpoint_index} hostname resolves to a private, loopback, unique-local, or \
+                 link-local address; set allow_private_urls=true on this endpoint to permit it"
+            ),
+            HostClass::Invalid => bail!(
+                "webhook endpoint {endpoint_index} hostname resolves to an unspecified, \
+                 broadcast, or multicast address"
+            ),
+        }
+    }
+
+    Ok(())
 }
 
 fn classify_ip(ip: IpAddr) -> HostClass {
@@ -610,20 +708,15 @@ fn is_default_lifecycle_event(event: &str) -> bool {
     DEFAULT_LIFECYCLE_EVENTS.contains(&event)
 }
 
-fn sign_payload(
-    secret: &str,
-    timestamp: &str,
-    delivery_id: &str,
-    body: &[u8],
-) -> anyhow::Result<String> {
+fn sign_payload(secret: &str, timestamp: &str, delivery_id: &str, body: &[u8]) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .map_err(|_| anyhow!("failed to initialize HMAC-SHA256"))?;
+        .expect("HMAC-SHA256 accepts keys of any length");
     mac.update(timestamp.as_bytes());
     mac.update(b".");
     mac.update(delivery_id.as_bytes());
     mac.update(b".");
     mac.update(body);
-    Ok(format!("v1={}", hex::encode(mac.finalize().into_bytes())))
+    format!("v1={}", hex::encode(mac.finalize().into_bytes()))
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -667,6 +760,9 @@ fn request_error_kind(error: &reqwest::Error) -> &'static str {
     }
 }
 
+const MAX_SANITIZE_DEPTH: usize = 64;
+const SANITIZE_DEPTH_TRUNCATION_PLACEHOLDER: &str = "[truncated: maximum nesting depth]";
+
 fn sanitized_fields(fields: &HashMap<String, Value>) -> HashMap<String, Value> {
     fields
         .iter()
@@ -676,15 +772,27 @@ fn sanitized_fields(fields: &HashMap<String, Value>) -> HashMap<String, Value> {
 }
 
 fn sanitize_value(value: &Value) -> Value {
+    sanitize_value_with_depth(value, 0)
+}
+
+fn sanitize_value_with_depth(value: &Value, depth: usize) -> Value {
     match value {
+        Value::Object(_) | Value::Array(_) if depth >= MAX_SANITIZE_DEPTH => {
+            Value::String(SANITIZE_DEPTH_TRUNCATION_PLACEHOLDER.to_string())
+        }
         Value::Object(values) => Value::Object(
             values
                 .iter()
                 .filter(|(key, _)| !is_sensitive_field(key))
-                .map(|(key, value)| (key.clone(), sanitize_value(value)))
+                .map(|(key, value)| (key.clone(), sanitize_value_with_depth(value, depth + 1)))
                 .collect(),
         ),
-        Value::Array(values) => Value::Array(values.iter().map(sanitize_value).collect()),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| sanitize_value_with_depth(value, depth + 1))
+                .collect(),
+        ),
         _ => value.clone(),
     }
 }
@@ -704,6 +812,36 @@ fn is_sensitive_field(key: &str) -> bool {
     let normalized = normalize_field_name(key);
     let normalized: &str = normalized.as_ref();
 
+    if matches_sensitive_name(normalized) {
+        return true;
+    }
+
+    const DERIVED_MATERIAL_SUFFIXES: &[&str] = &[
+        "_hash",
+        "_digest",
+        "_pem",
+        "_der",
+        "_hex",
+        "_b64",
+        "_base64",
+        "_encrypted",
+    ];
+
+    let mut base_name = normalized;
+    while let Some(stripped) = DERIVED_MATERIAL_SUFFIXES
+        .iter()
+        .find_map(|suffix| base_name.strip_suffix(suffix))
+    {
+        base_name = stripped;
+        if matches_sensitive_name(base_name) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn matches_sensitive_name(normalized: &str) -> bool {
     if normalized.is_empty() {
         return false;
     }
@@ -911,6 +1049,39 @@ mod tests {
     }
 
     #[test]
+    fn validate_config_accepts_max_retries_at_upper_bound() {
+        let mut config = valid_webhook_config();
+        config.max_retries = MAX_WEBHOOK_RETRIES;
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_config_rejects_max_retries_above_upper_bound_without_leaking_config() {
+        let mut config = valid_webhook_config();
+        config.max_retries = MAX_WEBHOOK_RETRIES + 1;
+        config.endpoints[0].url = concat!(
+            "https://embedded-user:embedded-password@sensitive.example.test/",
+            "hook?token=query-token"
+        )
+        .to_string();
+        config.endpoints[0].secret = Some("endpoint-signing-secret".to_string());
+
+        let error = validate_config(&config).unwrap_err().to_string();
+
+        assert!(error.contains("max_retries"));
+        assert!(error.contains(&MAX_WEBHOOK_RETRIES.to_string()));
+        for leaked in [
+            "sensitive.example.test",
+            "embedded-user",
+            "embedded-password",
+            "query-token",
+            "endpoint-signing-secret",
+        ] {
+            assert!(!error.contains(leaked), "error must not contain {leaked}");
+        }
+    }
+
+    #[test]
     fn backoff_delay_handles_zero_and_single_millisecond_values() {
         assert_eq!(backoff_delay(0, 0, 1_000), Duration::from_millis(0));
         assert_eq!(backoff_delay(0, 100, 0), Duration::from_millis(0));
@@ -919,15 +1090,19 @@ mod tests {
 
     #[test]
     fn backoff_delay_applies_exponential_base_with_jitter_bounds() {
-        for attempt in 0..100 {
-            let delay = backoff_delay(2, 100, 1_000);
+        for attempt in 0..10 {
+            let delay = backoff_delay(attempt, 100, 1_000);
             let millis = delay.as_millis() as u64;
 
-            // attempt=2 gives base_ms=400. With jitter, the delay should be in
-            // [base/2, base/2 + base), unless capped by max_ms.
+            let multiplier = 1_u64 << attempt;
+            let base_ms = 100_u64.saturating_mul(multiplier).min(1_000);
+            let lower_bound = base_ms / 2;
+            let upper_bound = lower_bound.saturating_add(base_ms - 1).min(1_000);
+
             assert!(
-                (200..600).contains(&millis),
-                "attempt {attempt}: delay {millis}ms outside expected jitter range"
+                (lower_bound..=upper_bound).contains(&millis),
+                "attempt {attempt}: delay {millis}ms outside expected jitter range \
+                 [{lower_bound}, {upper_bound}]"
             );
         }
     }
@@ -1004,6 +1179,22 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_field_matching_redacts_derived_secret_material() {
+        for field in [
+            "db_password_hash",
+            "dbPasswordHash",
+            "user_password_digest",
+            "api_key_hash",
+            "client_secret_b64",
+            "webhook_signature_hash",
+            "password_hash_b64",
+            "dbPasswordHashB64",
+        ] {
+            assert!(is_sensitive_field(field), "{field} should be redacted");
+        }
+    }
+
+    #[test]
     fn sensitive_field_matching_keeps_non_secret_metadata() {
         let safe_fields = [
             "token_bucket_config",
@@ -1020,6 +1211,18 @@ mod tests {
             "authoredBy",
             "cookie_policy",
             "cookiePolicy",
+            "auth_token_status",
+            "authTokenStatus",
+            "token_refresh_interval",
+            "tokenRefreshInterval",
+            "password_expiry_days",
+            "passwordExpiryDays",
+            "commit_hash",
+            "commitHash",
+            "content_hash",
+            "contentHash",
+            "file_digest",
+            "fileDigest",
         ];
 
         for field in safe_fields {
@@ -1123,6 +1326,92 @@ mod tests {
         match compile_endpoint(config, 0) {
             Ok(_) => panic!("endpoint should be rejected"),
             Err(err) => err.to_string(),
+        }
+    }
+
+    fn parsed_ips(addresses: &[&str]) -> Vec<IpAddr> {
+        addresses
+            .iter()
+            .map(|address| address.parse().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn resolved_ip_validation_accepts_all_public_addresses() {
+        let ips = parsed_ips(&["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"]);
+        assert!(validate_resolved_ips(0, &ips, false).is_ok());
+    }
+
+    #[test]
+    fn resolved_ip_validation_rejects_non_public_addresses_by_default() {
+        for address in [
+            "10.0.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "fd00::1",
+            "::1",
+            "fe80::1",
+        ] {
+            let ips = parsed_ips(&[address]);
+            assert!(
+                validate_resolved_ips(0, &ips, false).is_err(),
+                "{address} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_ip_validation_allows_non_public_addresses_when_opted_in() {
+        let ips = parsed_ips(&[
+            "10.0.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "fd00::1",
+            "::1",
+            "fe80::1",
+        ]);
+        assert!(validate_resolved_ips(0, &ips, true).is_ok());
+    }
+
+    #[test]
+    fn resolved_ip_validation_always_rejects_invalid_addresses() {
+        for address in ["0.0.0.0", "255.255.255.255", "224.0.0.1", "::", "ff02::1"] {
+            let ips = parsed_ips(&[address]);
+            assert!(
+                validate_resolved_ips(0, &ips, true).is_err(),
+                "{address} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_ip_validation_rejects_mixed_public_and_private_results() {
+        let ips = parsed_ips(&["8.8.8.8", "10.0.0.1"]);
+        assert!(validate_resolved_ips(0, &ips, false).is_err());
+        assert!(validate_resolved_ips(0, &ips, true).is_ok());
+    }
+
+    #[test]
+    fn resolved_ip_validation_rejects_empty_results() {
+        assert!(validate_resolved_ips(0, &[], false).is_err());
+    }
+
+    #[test]
+    fn resolved_ip_validation_errors_do_not_expose_endpoint_material() {
+        let ips = parsed_ips(&["10.23.45.67"]);
+        let error = validate_resolved_ips(7, &ips, false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("endpoint 7"));
+        for leaked in [
+            "sensitive.example.test",
+            "https://sensitive.example.test/hook?token=query-token",
+            "query-token",
+            "super-secret-value",
+            "10.23.45.67",
+        ] {
+            assert!(!error.contains(leaked), "error must not contain {leaked}");
         }
     }
 
@@ -1284,7 +1573,7 @@ mod tests {
         let delivery_id = "550e8400-e29b-41d4-a716-446655440000";
         let body = br#"{"id":"delivery-1","event":"sandbox.created"}"#;
 
-        let signature = sign_payload(secret, timestamp, delivery_id, body).unwrap();
+        let signature = sign_payload(secret, timestamp, delivery_id, body);
 
         let mut expected_mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         expected_mac.update(timestamp.as_bytes());
@@ -1333,6 +1622,111 @@ mod tests {
         assert_eq!(payload["sandbox_id"], "sandbox-123");
         assert_eq!(payload["template_id"], "template-456");
         assert!(payload.get("fields").is_none());
+    }
+
+    fn nested_object(levels: usize, leaf: Value) -> Value {
+        (0..levels).fold(leaf, |value, _| serde_json::json!({"child": value}))
+    }
+
+    fn nested_array(levels: usize, leaf: Value) -> Value {
+        (0..levels).fold(leaf, |value, _| Value::Array(vec![value]))
+    }
+
+    fn serialized_value_contains(value: &Value, text: &str) -> bool {
+        serde_json::to_string(value).unwrap().contains(text)
+    }
+
+    #[test]
+    fn sanitize_value_preserves_normal_nesting_and_redacts_sensitive_fields() {
+        let value = serde_json::json!({
+            "metadata": {
+                "visible": "kept",
+                "accessToken": "removed-token",
+                "nested": {
+                    "region": "visible-region",
+                    "clientSecret": "removed-secret"
+                }
+            }
+        });
+
+        let sanitized = sanitize_value(&value);
+
+        assert_eq!(sanitized["metadata"]["visible"], "kept");
+        assert_eq!(sanitized["metadata"]["nested"]["region"], "visible-region");
+        assert!(sanitized["metadata"].get("accessToken").is_none());
+        assert!(sanitized["metadata"]["nested"]
+            .get("clientSecret")
+            .is_none());
+    }
+
+    #[test]
+    fn sanitize_value_truncates_deeply_nested_objects_without_exposing_leaf_values() {
+        let value = nested_object(
+            MAX_SANITIZE_DEPTH + 3,
+            serde_json::json!({"value": "deep-object-secret-value"}),
+        );
+
+        let sanitized = sanitize_value(&value);
+
+        assert!(serialized_value_contains(
+            &sanitized,
+            SANITIZE_DEPTH_TRUNCATION_PLACEHOLDER
+        ));
+        assert!(!serialized_value_contains(
+            &sanitized,
+            "deep-object-secret-value"
+        ));
+    }
+
+    #[test]
+    fn sanitize_value_truncates_deeply_nested_arrays_without_exposing_leaf_values() {
+        let value = nested_array(
+            MAX_SANITIZE_DEPTH + 3,
+            Value::String("deep-array-secret-value".to_string()),
+        );
+
+        let sanitized = sanitize_value(&value);
+
+        assert!(serialized_value_contains(
+            &sanitized,
+            SANITIZE_DEPTH_TRUNCATION_PLACEHOLDER
+        ));
+        assert!(!serialized_value_contains(
+            &sanitized,
+            "deep-array-secret-value"
+        ));
+    }
+
+    #[test]
+    fn sanitize_value_enforces_depth_limit_at_composite_boundary() {
+        let within_limit = nested_object(
+            MAX_SANITIZE_DEPTH,
+            Value::String("boundary-value".to_string()),
+        );
+        let beyond_limit = nested_object(
+            MAX_SANITIZE_DEPTH + 1,
+            Value::String("truncated-boundary-value".to_string()),
+        );
+
+        let sanitized_within_limit = sanitize_value(&within_limit);
+        let sanitized_beyond_limit = sanitize_value(&beyond_limit);
+
+        assert!(serialized_value_contains(
+            &sanitized_within_limit,
+            "boundary-value"
+        ));
+        assert!(!serialized_value_contains(
+            &sanitized_within_limit,
+            SANITIZE_DEPTH_TRUNCATION_PLACEHOLDER
+        ));
+        assert!(serialized_value_contains(
+            &sanitized_beyond_limit,
+            SANITIZE_DEPTH_TRUNCATION_PLACEHOLDER
+        ));
+        assert!(!serialized_value_contains(
+            &sanitized_beyond_limit,
+            "truncated-boundary-value"
+        ));
     }
 
     #[test]
@@ -1425,9 +1819,16 @@ mod tests {
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+            let server = axum::serve(listener, app);
+            let _ = ready_tx.send(());
+            let _ = server.await;
         });
+
+        ready_rx.await.expect("mock server task should start");
+        tokio::task::yield_now().await;
         (format!("http://{address}/webhook"), calls)
     }
 
