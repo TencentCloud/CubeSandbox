@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx src/server.ts",
+    "dev": "tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test test/*.test.mjs",
-    "start": "node dist/server.js"
+    "start": "node dist/main.js"
   },
   "dependencies": {
     "fastify": "^5.4.0"

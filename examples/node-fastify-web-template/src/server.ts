@@ -1,11 +1,11 @@
 import { mkdir, readFile, appendFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { arch, argv, platform } from "node:process";
-import { pathToFileURL } from "node:url";
+import { arch, platform } from "node:process";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 
 const defaultPort = Number.parseInt(process.env.PORT ?? "3000", 10);
 const defaultStateDir = process.env.STATE_DIR ?? "/workspace/state";
+const shutdownTimeoutMs = 10_000;
 
 type CounterFile = {
   count: number;
@@ -152,7 +152,9 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
       });
       counterWrite = update.then(
         () => undefined,
-        () => undefined,
+        (error) => {
+          fastify.log.error({ error }, "counter update failed");
+        },
       );
       return { count: await update };
     },
@@ -195,7 +197,7 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
   return fastify;
 }
 
-async function main() {
+export async function main() {
   const fastify = buildServer();
 
   let shuttingDown = false;
@@ -205,10 +207,17 @@ async function main() {
     }
     shuttingDown = true;
     fastify.log.info({ signal }, "received shutdown signal");
+    const forceExit = setTimeout(() => {
+      fastify.log.error({ signal }, "graceful shutdown timed out");
+      process.exit(1);
+    }, shutdownTimeoutMs);
+    forceExit.unref();
+
     try {
       await fastify.close();
-      process.exit(0);
+      clearTimeout(forceExit);
     } catch (error) {
+      clearTimeout(forceExit);
       fastify.log.error({ error }, "graceful shutdown failed");
       process.exit(1);
     }
@@ -222,8 +231,4 @@ async function main() {
   });
 
   await fastify.listen({ host: "0.0.0.0", port: defaultPort });
-}
-
-if (argv[1] && import.meta.url === pathToFileURL(argv[1]).href) {
-  await main();
 }
