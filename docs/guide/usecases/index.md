@@ -48,4 +48,5 @@ lang: en-US
 
 | Title | Author     | Date | Tags |
 | --- |------------| --- | --- |
+| [Node.js Fastify Web Template for Stateful Sandbox Apps](./node-fastify-web-template.md) | Alpaca233114514 | 2026-07-03 | nodejs, fastify, web-template, snapshot |
 | [trpc-agent-go: A Secure Code Execution Backend Powered by Cube Sandbox](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |

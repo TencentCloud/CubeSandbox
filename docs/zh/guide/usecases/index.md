@@ -48,4 +48,5 @@ lang: zh-CN
 
 | 标题 | 作者         | 日期 | 标签 |
 | --- |------------| --- | --- |
+| [面向有状态沙箱 Web 应用的 Node.js Fastify 模板](./node-fastify-web-template.md) | Alpaca233114514 | 2026-07-03 | nodejs, fastify, web-template, snapshot |
 | [trpc-agent-go：基于 Cube Sandbox 的安全代码执行后端](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |
