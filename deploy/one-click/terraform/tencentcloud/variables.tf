@@ -93,6 +93,17 @@ variable "compute_data_disk_size" {
   }
 }
 
+variable "cubelet_node_status_update_frequency" {
+  description = "Cubelet node status and resource reporting interval. create.sh patches Cubelet/config/config.toml on each compute node."
+  type        = string
+  default     = "10s"
+
+  validation {
+    condition     = can(regex("^[0-9]+(ns|us|µs|ms|s|m|h)$", var.cubelet_node_status_update_frequency))
+    error_message = "cubelet_node_status_update_frequency must be a Go duration such as 10s, 500ms, 1m, or 1h."
+  }
+}
+
 # WARNING: these defaults are weak, well-known demo credentials kept only so a
 # zero-config `create.sh` / `terraform apply` succeeds. Always override them for
 # any non-throwaway deployment via TENCENTCLOUD_MYSQL_PASSWORD /

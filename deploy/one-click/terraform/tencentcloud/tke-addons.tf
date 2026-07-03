@@ -36,6 +36,10 @@ locals {
   # var.cubemaster_replicas docs in variables.tf for why under-reporting the
   # master count oversubscribes the compute nodes.
   cubemaster_replicas = var.cubemaster_replicas
+  # Multi-node scheduling: pick randomly from the top scored compute nodes.
+  # The multi-node guide recommends 3 as a small-cluster starting point; cap at
+  # the actual compute-node count so the default 2-node POC uses 2.
+  cubemaster_priority_select_num = max(1, min(var.compute_node_count, 3))
 
   # All files under the certificate directory
   cert_files = fileset("${path.module}/cubeproxy-certs", "*")
@@ -258,11 +262,32 @@ resource "kubernetes_secret" "cubemaster_conf" {
         max_retry    = 2
       }
       scheduler = {
-        priority_select_num         = 1
+        priority_select_num         = local.cubemaster_priority_select_num
         metric_update_timeout       = "300s"
         local_metric_update_timeout = "300s"
         filter = {
           enable_filters = ["cpu", "mem", "template_locality", "realtime_create_num"]
+        }
+        score = {
+          enable_scorers = ["real_time_weighted_average"]
+          resource_weights = {
+            mvm_num          = 2
+            local_create_num = 3
+            cpu_usage        = 1
+            quota_mem_usage  = 1
+          }
+          plugin_conf = {
+            real_time_weighted_average = {
+              weight = 1.0
+              enable_weight_factors = [
+                "mvm_num",
+                "local_create_num",
+                "cpu_usage",
+                "quota_mem_usage",
+              ]
+              time_decay_seconds = 300
+            }
+          }
         }
       }
     })
