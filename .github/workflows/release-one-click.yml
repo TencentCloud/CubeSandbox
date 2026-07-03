@@ -259,6 +259,13 @@ jobs:
           test -f "${VMLINUX_RELEASE_PATH}"
           file "${VMLINUX_RELEASE_PATH}"
 
+      - name: Stage vmlinux release asset
+        run: |
+          rm -rf vmlinux-release-assets
+          install -D -m 0644 \
+            "${VMLINUX_RELEASE_PATH}" \
+            "vmlinux-release-assets/vmlinux-${BUNDLE_ARCH}"
+
       - name: Compute PVM vmlinux cache metadata
         id: pvm_vmlinux_metadata
         run: |
@@ -325,6 +332,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${GITHUB_REF_NAME}" "${{ steps.bundle.outputs.path }}" --repo "${GITHUB_REPOSITORY}" --clobber
+
+      - name: Upload vmlinux to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            "vmlinux-release-assets/vmlinux-${BUNDLE_ARCH}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
 
   release_arm64:
     name: Release one-click bundle (arm64)
@@ -457,6 +473,13 @@ jobs:
           test -f "${VMLINUX_RELEASE_PATH}"
           file "${VMLINUX_RELEASE_PATH}"
 
+      - name: Stage vmlinux release asset
+        run: |
+          rm -rf vmlinux-release-assets
+          install -D -m 0644 \
+            "${VMLINUX_RELEASE_PATH}" \
+            "vmlinux-release-assets/vmlinux-${BUNDLE_ARCH}"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -494,3 +517,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${GITHUB_REF_NAME}" "${{ steps.bundle.outputs.path }}" --repo "${GITHUB_REPOSITORY}" --clobber
+
+      - name: Upload vmlinux to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            "vmlinux-release-assets/vmlinux-${BUNDLE_ARCH}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
