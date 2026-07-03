@@ -6,12 +6,13 @@ COPY --from=cubesandbox-base /usr/bin/envd /usr/bin/envd
 COPY --from=cubesandbox-base /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/node-fastify-web
 
 COPY package*.json tsconfig.json ./
-RUN npm install
+RUN npm ci
 
 COPY src ./src
 RUN npm run build

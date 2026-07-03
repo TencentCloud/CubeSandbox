@@ -1,4 +1,4 @@
-import { mkdir, readFile, appendFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, appendFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { arch, argv, platform } from "node:process";
 import { pathToFileURL } from "node:url";
@@ -24,6 +24,12 @@ async function ensureStateDir(stateDir: string) {
   await mkdir(stateDir, { recursive: true });
 }
 
+async function writeCounter(counterPath: string, count: number) {
+  const tmpPath = `${counterPath}.${process.pid}.tmp`;
+  await writeFile(tmpPath, `${JSON.stringify({ count })}\n`, "utf8");
+  await rename(tmpPath, counterPath);
+}
+
 async function readCounter(counterPath: string): Promise<number> {
   try {
     const raw = await readFile(counterPath, "utf8");
@@ -43,6 +49,7 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
   const stateDir = options.stateDir ?? defaultStateDir;
   const counterPath = join(stateDir, "counter.json");
   const notesPath = join(stateDir, "notes.jsonl");
+  let counterWrite = Promise.resolve();
   const fastify = Fastify({
     ajv: {
       customOptions: {
@@ -51,6 +58,10 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
       },
     },
     logger: options.logger ?? true,
+  });
+
+  fastify.addHook("onReady", async () => {
+    await ensureStateDir(stateDir);
   });
 
   fastify.get("/", async (_request: FastifyRequest, reply: FastifyReply) => {
@@ -134,10 +145,16 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
       },
     },
     async () => {
-      await ensureStateDir(stateDir);
-      const count = (await readCounter(counterPath)) + 1;
-      await writeFile(counterPath, `${JSON.stringify({ count })}\n`, "utf8");
-      return { count };
+      const update = counterWrite.then(async () => {
+        const count = (await readCounter(counterPath)) + 1;
+        await writeCounter(counterPath, count);
+        return count;
+      });
+      counterWrite = update.then(
+        () => undefined,
+        () => undefined,
+      );
+      return { count: await update };
     },
   );
 
@@ -166,7 +183,6 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
       },
     },
     async (request) => {
-      await ensureStateDir(stateDir);
       const line = JSON.stringify({
         note: request.body.note,
         writtenAt: new Date().toISOString(),
@@ -180,8 +196,31 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
 }
 
 async function main() {
-  await ensureStateDir(defaultStateDir);
   const fastify = buildServer();
+
+  let shuttingDown = false;
+  const shutdown = async (signal: NodeJS.Signals) => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    fastify.log.info({ signal }, "received shutdown signal");
+    try {
+      await fastify.close();
+      process.exit(0);
+    } catch (error) {
+      fastify.log.error({ error }, "graceful shutdown failed");
+      process.exit(1);
+    }
+  };
+
+  process.on("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
+  process.on("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+
   await fastify.listen({ host: "0.0.0.0", port: defaultPort });
 }
 

@@ -30,7 +30,7 @@ def wait_for_health(base_url: str, timeout: float = 60.0) -> None:
             if response.status_code == 200 and response.json().get("ok") is True:
                 return
             last_error = RuntimeError(f"unexpected status {response.status_code}: {response.text}")
-        except Exception as error:  # noqa: BLE001 - surfaced in the final error message.
+        except requests.RequestException as error:
             last_error = error
         time.sleep(1)
     raise TimeoutError(f"Fastify service was not ready at {base_url}/health: {last_error}")

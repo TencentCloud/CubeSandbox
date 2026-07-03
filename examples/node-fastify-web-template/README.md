@@ -85,7 +85,10 @@ Port `49983` is for CubeSandbox envd and SDK operations. Port `3000` is the Fast
 Push the image to a registry reachable by CubeSandbox nodes, then create a template:
 
 ```bash
-cubemastercli tpl create-from-image \
+docker tag cube-node-fastify-web:latest <your-registry>/cube-node-fastify-web:latest
+docker push <your-registry>/cube-node-fastify-web:latest
+
+cubemastercli -a 127.0.0.1 -p 8089 tpl create-from-image \
   --image <your-registry>/cube-node-fastify-web:latest \
   --writable-layer-size 1G \
   --expose-port 49983 \
@@ -108,7 +111,7 @@ Edit `.env`:
 | Variable | Description |
 |----------|-------------|
 | `E2B_API_KEY` | CubeSandbox / E2B-compatible API key |
-| `E2B_API_URL` | CubeAPI URL, for example `http://127.0.0.1:3000` |
+| `E2B_API_URL` | CubeAPI URL, for example `http://127.0.0.1:8089` |
 | `CUBE_TEMPLATE_ID` | Template ID created from this Docker image |
 
 Run the basic web API demo:

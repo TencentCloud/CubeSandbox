@@ -85,7 +85,10 @@ docker rm -f cube-node-fastify-web
 先将镜像推送到 CubeSandbox 节点可访问的镜像仓库，然后创建模板：
 
 ```bash
-cubemastercli tpl create-from-image \
+docker tag cube-node-fastify-web:latest <your-registry>/cube-node-fastify-web:latest
+docker push <your-registry>/cube-node-fastify-web:latest
+
+cubemastercli -a 127.0.0.1 -p 8089 tpl create-from-image \
   --image <your-registry>/cube-node-fastify-web:latest \
   --writable-layer-size 1G \
   --expose-port 49983 \
@@ -108,7 +111,7 @@ cp .env.example .env
 | 变量 | 说明 |
 |------|------|
 | `E2B_API_KEY` | CubeSandbox / E2B 兼容 API Key |
-| `E2B_API_URL` | CubeAPI 地址，例如 `http://127.0.0.1:3000` |
+| `E2B_API_URL` | CubeAPI 地址，例如 `http://127.0.0.1:8089` |
 | `CUBE_TEMPLATE_ID` | 基于此 Docker 镜像创建的模板 ID |
 
 运行基础 Web API 演示：

@@ -32,9 +32,11 @@ lang: zh-CN
 
 ```bash
 docker build -t cube-node-fastify-web:latest .
+docker tag cube-node-fastify-web:latest <your-registry>/cube-node-fastify-web:latest
+docker push <your-registry>/cube-node-fastify-web:latest
 
 cubemastercli -a 127.0.0.1 -p 8089 tpl create-from-image \
-  --image cube-node-fastify-web:latest \
+  --image <your-registry>/cube-node-fastify-web:latest \
   --writable-layer-size 1G \
   --expose-port 49983 \
   --expose-port 3000 \
