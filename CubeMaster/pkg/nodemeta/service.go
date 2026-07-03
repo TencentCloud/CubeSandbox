@@ -941,18 +941,52 @@ func (s *service) reload() error {
 	return nil
 }
 
-// applyReloadResult merges a DB snapshot (next) into the live in-memory map.
-// Registration fields take the DB value (same eventual-consistency trade-off as
-// other labels). Status/heartbeat keep in-memory when fresher. After unlocking,
-// nodes whose cordon state changed are synced to localcache.
+// applyReloadResult merges a DB snapshot (next) into the live in-memory map and
+// then re-syncs node health into localcache for every node the reload touched.
+//
+// Registration fields and versions always take the DB value; status/heartbeat
+// fields keep the in-memory value when it is fresher than the DB snapshot.
+//
+// The re-sync pushes ONLY the scheduler node cache (health, capacity, cordon
+// state); see syncLocalcacheNodeHealth. Template locality is deliberately left
+// to templatecenter, the authoritative owner of the imageCache (startup
+// warmReadyTemplateLocality + on-demand EnsureTemplateLocalityReady DB fallback).
+//
+// Why node health must be re-synced here: a replica that only learned a node via
+// DB reload (it registered/heartbeated on another replica) otherwise kept an
+// empty healthy-node set for it. EnsureTemplateLocalityReady matches a DB-Ready
+// template replica against localcache's healthy nodes, so with the node absent
+// it could not match and sandbox creation failed with "template has no ready
+// replica" (130400). Pushing node health here lets that DB fallback match and
+// self-heal template locality on demand.
 func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
-	toSync := make([]*NodeSnapshot, 0)
+	syncSnaps := s.mergeReloadResult(next)
 
+	// s.ready is set true at the end of Init, after the initial reload and
+	// before localcache.Init. The very first reload therefore skips the sync
+	// (localcache caches do not exist yet); localcache.Init then loads all nodes
+	// from the DB itself. Periodic loopReload runs long after both packages are
+	// initialised.
+	if !s.ready {
+		return
+	}
+	// Sync outside s.mu (localcache has its own locks).
+	for _, snap := range syncSnaps {
+		syncNodeHealthFn(snap)
+	}
+}
+
+// mergeReloadResult merges the DB reload snapshot into the in-memory node map
+// under s.mu and returns a clone of every touched node for the caller to sync
+// into localcache outside the lock. The critical section uses
+// defer s.mu.Unlock() so a panic in the merge loop cannot leak the lock and
+// silently deadlock subsequent register/heartbeat handlers.
+func (s *service) mergeReloadResult(next map[string]*NodeSnapshot) []*NodeSnapshot {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	syncSnaps := make([]*NodeSnapshot, 0, len(next))
 	for nodeID, newSnap := range next {
 		if existing, ok := s.nodes[nodeID]; ok {
-			prevDisabled := snapshotSchedulingDisabled(existing)
-
 			existing.Labels = cloneStringMap(newSnap.Labels)
 			existing.labelsJSONCorrupt = newSnap.labelsJSONCorrupt
 			existing.Capacity = newSnap.Capacity
@@ -975,22 +1009,13 @@ func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
 				existing.ReportedReady = newSnap.ReportedReady
 			}
 			applyCurrentHealth(existing, time.Now())
-
-			if prevDisabled != snapshotSchedulingDisabled(existing) {
-				toSync = append(toSync, cloneSnapshot(existing))
-			}
+			syncSnaps = append(syncSnaps, cloneSnapshot(existing))
 		} else {
 			s.nodes[nodeID] = newSnap
+			syncSnaps = append(syncSnaps, cloneSnapshot(newSnap))
 		}
 	}
-	s.mu.Unlock()
-
-	if !s.ready {
-		return
-	}
-	for _, snap := range toSync {
-		syncLocalcache(snap)
-	}
+	return syncSnaps
 }
 
 func (s *service) loopReload(ctx context.Context) {
@@ -1095,6 +1120,24 @@ func toSchedulerNode(snap *NodeSnapshot) *node.Node {
 func syncLocalcache(snap *NodeSnapshot) {
 	localcache.UpsertNode(toSchedulerNode(snap))
 	localcache.SyncNodeTemplates(snap.NodeID, templateIDsFromLocalTemplates(snap.LocalTemplates))
+}
+
+// syncNodeHealthFn is the reload -> localcache sync hook invoked by
+// applyReloadResult for every touched node. It is a package var (not a direct
+// call to syncLocalcacheNodeHealth) so unit tests can observe the sync path
+// without initialising the global localcache singleton.
+var syncNodeHealthFn = syncLocalcacheNodeHealth
+
+// syncLocalcacheNodeHealth pushes only the scheduler node cache (health,
+// capacity, cordon state) into localcache. Unlike syncLocalcache it deliberately
+// does NOT call SyncNodeTemplates: template locality lives in the imageCache,
+// which templatecenter owns authoritatively (warmReadyTemplateLocality at
+// startup + EnsureTemplateLocalityReady's DB fallback on demand). The periodic
+// reload only needs the node itself to be present/healthy so that DB fallback
+// can match a ready template replica to it; having reload also write the
+// imageCache would race that authoritative owner.
+func syncLocalcacheNodeHealth(snap *NodeSnapshot) {
+	localcache.UpsertNode(toSchedulerNode(snap))
 }
 
 func templateIDsFromLocalTemplates(localTemplates []LocalTemplate) []string {
