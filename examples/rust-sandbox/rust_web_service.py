@@ -31,12 +31,15 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 from e2b import Sandbox
-from urllib3.exceptions import InsecureRequestWarning
 
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"), override=False)
 
-# Suppress SSL warnings when hitting sandbox endpoints with self-signed certs.
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+# When no CA cert is configured, fall back to verify=False with a visible warning.
+# Prefer setting SSL_CERT_FILE in your environment for proper validation.
+_SSL_VERIFY = os.environ.get("SSL_CERT_FILE", None)
+if _SSL_VERIFY is None:
+    print("[ssl] SSL_CERT_FILE not set — using verify=False for sandbox endpoints", file=sys.stderr)
+    print("[ssl] Set SSL_CERT_FILE to your Cube CA bundle for proper validation", file=sys.stderr)
 
 DEMO_DIR = "/opt/rust-demo"
 
@@ -46,7 +49,7 @@ def wait_for_http(url: str, timeout: float = 30, interval: float = 0.5) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            resp = requests.get(url, verify=False, timeout=5)
+            resp = requests.get(url, verify=_SSL_VERIFY if _SSL_VERIFY else False, timeout=5)
             if resp.status_code < 400:
                 return True
         except Exception:
@@ -133,7 +136,7 @@ def main() -> None:
 
         # 4. Access the service
         print("[4/4] Call the health endpoint")
-        resp = requests.get(proxy_url, verify=False, timeout=10)
+        resp = requests.get(proxy_url, verify=_SSL_VERIFY if _SSL_VERIFY else False, timeout=10)
         print(f"      HTTP {resp.status_code}")
         print()
         print("─" * 50)

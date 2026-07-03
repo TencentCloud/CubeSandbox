@@ -68,8 +68,8 @@ COPY --chown=user:user demo_project /opt/rust-demo
 RUN cd /opt/rust-demo \
     && cargo fetch \
     && cargo build --release \
-    && cargo clean \
-    && rm -rf /opt/rust-demo
+    && cargo clean
+# Leave /opt/rust-demo on disk — rust_web_service.py rebuilds it at runtime.
 
 USER root
 

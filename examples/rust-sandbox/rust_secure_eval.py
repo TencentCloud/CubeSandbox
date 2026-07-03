@@ -102,7 +102,7 @@ def evaluate(sandbox: Sandbox, code: str, *, build_timeout: int = 60, run_timeou
     # Compile
     t0 = time.monotonic()
     r = sandbox.commands.run(
-        f"cd {WORK_DIR} && cargo build --release 2>&1",
+        f"cd {WORK_DIR} && cargo build --release",
         timeout=build_timeout,
     )
     build_elapsed = time.monotonic() - t0
@@ -111,15 +111,21 @@ def evaluate(sandbox: Sandbox, code: str, *, build_timeout: int = 60, run_timeou
             "verdict": "COMPILE_ERROR",
             "build_elapsed": build_elapsed,
             "run_elapsed": None,
-            "stdout": "",
-            "stderr": r.stderr[-4000:] if r.stderr else "",
+            "stdout": (r.stdout or "")[-4000:],
+            "stderr": (r.stderr or "")[-4000:],
         }
 
-    # Run with resource limits: timeout + 512 MB virtual memory limit.
+    # Run with resource limits: timeout, virtual memory, file size, fd count, process count.
     binary = f"{WORK_DIR}/target/release/secure-eval"
     t0 = time.monotonic()
+    limits = (
+        f"ulimit -v 524288 && "
+        f"ulimit -f 102400 && "
+        f"ulimit -n 128 && "
+        f"ulimit -u 256 && "
+    )
     r = sandbox.commands.run(
-        f"timeout {run_timeout} sh -c 'ulimit -v 524288 && {binary}'",
+        f"timeout {run_timeout} sh -c '{limits} {binary}'",
         timeout=run_timeout + 5,
     )
     run_elapsed = time.monotonic() - t0

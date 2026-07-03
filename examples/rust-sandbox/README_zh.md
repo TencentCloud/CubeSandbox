@@ -144,7 +144,7 @@ with Sandbox.create(template=template_id) as sandbox:
     sandbox.commands.run("cd /home/user && cargo new hello-cube")
     sandbox.files.write("/home/user/hello-cube/src/main.rs", source)
     sandbox.commands.run("cd /home/user/hello-cube && cargo build --release")
-    result = sandbox.commands.run("./target/release/hello-cube 10 42 99")
+    result = sandbox.commands.run("/home/user/hello-cube/target/release/hello-cube 10 42 99")
     print(result.stdout)
 ```
 
@@ -186,11 +186,13 @@ with Sandbox.create(
     template=template_id,
     allow_internet_access=False,  # 完全断网
 ) as sandbox:
-    sandbox.files.write("/tmp/eval/src/main.rs", user_code)
-    sandbox.commands.run("cd /tmp/eval && cargo build --release")
+    # 将 Cargo.toml 和 main.rs 写入工作区
+    sandbox.files.write("/tmp/secure-eval/Cargo.toml", cargo_toml)
+    sandbox.files.write("/tmp/secure-eval/src/main.rs", user_code)
+    sandbox.commands.run("cd /tmp/secure-eval && cargo build --release")
 
     result = sandbox.commands.run(
-        "timeout 10 sh -c 'ulimit -v 524288 && ./target/release/eval'"
+        "timeout 10 sh -c 'ulimit -v 524288 && /tmp/secure-eval/target/release/secure-eval'"
     )
 ```
 
