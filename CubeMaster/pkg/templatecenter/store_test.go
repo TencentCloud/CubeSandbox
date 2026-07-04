@@ -258,3 +258,82 @@ func TestGetTemplateInfoPopulatesCreatedAtAndImageInfoFromDefinitionAndLatestJob
 		t.Fatalf("unexpected image_info: %q", info.ImageInfo)
 	}
 }
+
+// TestGetTemplateByAliasEmptyAliasReturnsNotFound verifies the empty-alias
+// fast path: an empty (or whitespace-only) alias short-circuits to
+// ErrTemplateNotFound without touching the database, because empty is never
+// a valid alias value (it is the "no alias" sentinel).
+func TestGetTemplateByAliasEmptyAliasReturnsNotFound(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	for _, alias := range []string{"", "   "} {
+		_, err := GetTemplateByAlias(context.Background(), alias)
+		if !errors.Is(err, ErrTemplateNotFound) {
+			t.Fatalf("GetTemplateByAlias(%q) error = %v, want ErrTemplateNotFound", alias, err)
+		}
+	}
+}
+
+// TestResolveTemplateIdentifierPassthrough verifies the non-DB code paths of
+// ResolveTemplateIdentifier: template-ID-prefixed identifiers (tpl-/snap-)
+// and the empty identifier are resolved purely from the string, with no
+// alias lookup.
+func TestResolveTemplateIdentifierPassthrough(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	tests := []struct {
+		name       string
+		identifier string
+		want       string
+	}{
+		{name: "tpl-prefix", identifier: "tpl-abc123", want: "tpl-abc123"},
+		{name: "snap-prefix", identifier: "snap-abc123", want: "snap-abc123"},
+		{name: "empty", identifier: "", want: ""},
+		{name: "whitespace-only", identifier: "  ", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveTemplateIdentifier(context.Background(), tc.identifier)
+			if err != nil {
+				t.Fatalf("ResolveTemplateIdentifier(%q) returned error: %v", tc.identifier, err)
+			}
+			if got != tc.want {
+				t.Fatalf("ResolveTemplateIdentifier(%q) = %q, want %q", tc.identifier, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveTemplateIdentifierAliasLookup verifies the alias-resolution path:
+// a bare identifier (no tpl-/snap- prefix) is resolved through
+// GetTemplateByAlias. The DB call itself is stubbed via gomonkey so the test
+// exercises the routing logic, not gorm internals.
+func TestResolveTemplateIdentifierAliasLookup(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(GetTemplateByAlias, func(_ context.Context, alias string) (*models.TemplateDefinition, error) {
+		if alias == "my-alias" {
+			return &models.TemplateDefinition{TemplateID: "tpl-resolved"}, nil
+		}
+		return nil, ErrTemplateNotFound
+	})
+
+	got, err := ResolveTemplateIdentifier(context.Background(), "my-alias")
+	if err != nil {
+		t.Fatalf("ResolveTemplateIdentifier(\"my-alias\") returned error: %v", err)
+	}
+	if got != "tpl-resolved" {
+		t.Fatalf("ResolveTemplateIdentifier(\"my-alias\") = %q, want \"tpl-resolved\"", got)
+	}
+
+	// Not-found alias must propagate the error verbatim.
+	_, err = ResolveTemplateIdentifier(context.Background(), "missing-alias")
+	if !errors.Is(err, ErrTemplateNotFound) {
+		t.Fatalf("ResolveTemplateIdentifier(\"missing-alias\") error = %v, want ErrTemplateNotFound", err)
+	}
+}

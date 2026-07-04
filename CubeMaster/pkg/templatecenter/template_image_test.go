@@ -1478,7 +1478,7 @@ func TestRunRedoTemplateImageJobRegeneratesRequestForRedoTemplateID(t *testing.T
 		}
 		return nil
 	})
-	patches.ApplyFunc(ensureTemplateDefinition, func(ctx context.Context, templateID string, storedReq *types.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
+	patches.ApplyFunc(ensureTemplateDefinitionWithOptions, func(ctx context.Context, templateID string, storedReq *types.CreateCubeSandboxReq, instanceType, version string, _ definitionCreateOptions) (bool, error) {
 		if templateID != redoTemplateID {
 			t.Fatalf("definition templateID = %q, want %q", templateID, redoTemplateID)
 		}

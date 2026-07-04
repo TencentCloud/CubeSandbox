@@ -684,12 +684,30 @@ func refreshTemplateReplicaSummary(ctx context.Context, templateID string) error
 	return nil
 }
 
+// createDefinition and createDefinitionWithOptions wrap createDefinitionTx
+// in a real DB transaction. This is critical for alias correctness: the
+// release-stale-alias UPDATE and the new-row INSERT inside createDefinitionTx
+// must be atomic. Without a transaction, store.db.WithContext(ctx) auto-
+// commits each statement separately, opening a TOCTOU window where two
+// concurrent creators could both release and then both claim the same alias.
+// The snapshot path (snapshot_ops.go) already wraps createDefinitionTx in its
+// own store.db.Transaction, so these wrappers only affect the template
+// (image/redo/commit) paths.
+//
+// Both wrappers call createDefinitionTx independently (rather than one
+// delegating to the other) so that gomonkey test patches on the exact
+// function signature are reliable and the compiler does not inline a trivial
+// delegation past the patch point.
 func createDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
-	return createDefinitionTx(ctx, store.db.WithContext(ctx), templateID, storedReq, instanceType, version, definitionCreateOptions{})
+	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return createDefinitionTx(ctx, tx, templateID, storedReq, instanceType, version, definitionCreateOptions{})
+	})
 }
 
 func createDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
-	return createDefinitionTx(ctx, store.db.WithContext(ctx), templateID, storedReq, instanceType, version, opts)
+	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return createDefinitionTx(ctx, tx, templateID, storedReq, instanceType, version, opts)
+	})
 }
 
 func ensureTemplateDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) (bool, error) {

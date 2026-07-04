@@ -1097,11 +1097,21 @@ func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, sto
 	// old template first. This gives "stable naming across rebuilds" — the
 	// newest template with a given alias wins — without requiring callers to
 	// manually clear stale aliases.
-	if alias := strings.TrimSpace(opts.DisplayName); alias != "" {
-		if err := tx.Table(constants.TemplateDefinitionTableName).
-			Where("display_name = ? AND template_id <> ? AND status <> ?", alias, templateID, StatusDeleting).
-			Update("display_name", "").Error; err != nil {
-			return fmt.Errorf("release stale alias %q fail: %w", alias, err)
+	//
+	// Snapshots are deliberately excluded: their display_name is
+	// informational only (a human label for the snapshot) and must never
+	// steal — or be stolen by — a template's alias. Without this guard, a
+	// snapshot created with displayName='X' would clear a template's
+	// alias='X', breaking alias-based lookups. The functional UNIQUE index
+	// (see migration 20260704120000) is likewise scoped to template-kind
+	// rows, so the two kinds never contend on display_name.
+	if kind == TemplateKindTemplate {
+		if alias := strings.TrimSpace(opts.DisplayName); alias != "" {
+			if err := tx.Table(constants.TemplateDefinitionTableName).
+				Where("kind = ? AND display_name = ? AND template_id <> ? AND status <> ?", TemplateKindTemplate, alias, templateID, StatusDeleting).
+				Update("display_name", "").Error; err != nil {
+				return fmt.Errorf("release stale alias %q fail: %w", alias, err)
+			}
 		}
 	}
 	if err := tx.Table(constants.TemplateDefinitionTableName).Create(model).Error; err != nil {
