@@ -228,6 +228,7 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     if enabled_endpoint_count > 0 {
         let http_logger = HttpLogger::new(cfg.webhook.clone())
+            .await
             .context("failed to initialize HTTP webhook logger")?;
         multi_logger = multi_logger.add(arc(http_logger));
 

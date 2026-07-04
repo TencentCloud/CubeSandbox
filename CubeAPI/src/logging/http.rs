@@ -11,13 +11,14 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
-    net::{IpAddr, SocketAddr, ToSocketAddrs},
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use rand::Rng;
@@ -42,6 +43,7 @@ const HEADER_EVENT: &str = "X-Cube-Webhook-Event";
 const HEADER_DELIVERY: &str = "X-Cube-Webhook-Delivery";
 const HEADER_TIMESTAMP: &str = "X-Cube-Webhook-Timestamp";
 const HEADER_SIGNATURE: &str = "X-Cube-Webhook-Signature";
+const WEBHOOK_USER_AGENT: &str = "CubeAPI-Webhook/1.0";
 
 const DEFAULT_LIFECYCLE_EVENTS: [&str; 4] = [
     "sandbox.created",
@@ -96,7 +98,7 @@ struct Delivery {
     event: String,
     id: String,
     timestamp: String,
-    body: Vec<u8>,
+    body: Bytes,
     signature: Option<String>,
 }
 
@@ -115,11 +117,11 @@ impl Delivery {
             event: &event.event,
             fields,
         };
-        let body = serde_json::to_vec(&payload)?;
+        let body = Bytes::from(serde_json::to_vec(&payload)?);
         let signature = endpoint
             .secret
             .as_deref()
-            .map(|secret| sign_payload(secret, &timestamp, &id, &body));
+            .map(|secret| sign_payload(secret, &timestamp, &id, body.as_ref()));
 
         Ok(Self {
             endpoint_index: endpoint.index,
@@ -150,28 +152,28 @@ pub struct HttpLogger {
 impl HttpLogger {
     /// Validate the configuration, create the shared HTTP client, and start
     /// the background dispatcher.
-    pub fn new(config: WebhookConfig) -> anyhow::Result<Self> {
+    pub async fn new(config: WebhookConfig) -> anyhow::Result<Self> {
         validate_config(&config)?;
 
         let mut pinned_hosts = HashMap::new();
-        let endpoints = config
-            .endpoints
-            .iter()
-            .enumerate()
-            .filter(|(_, endpoint)| endpoint.enabled)
-            .map(|(index, endpoint_config)| {
-                let endpoint = compile_endpoint(endpoint_config, index)?;
-                if let Some(host) = domain_host(&endpoint.url) {
-                    resolve_and_validate_hostname(
-                        index,
-                        host,
-                        endpoint_config.allow_private_urls,
-                        &mut pinned_hosts,
-                    )?;
-                }
-                Ok(endpoint)
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut endpoints = Vec::new();
+        for (index, endpoint_config) in config.endpoints.iter().enumerate() {
+            if !endpoint_config.enabled {
+                continue;
+            }
+
+            let endpoint = compile_endpoint(endpoint_config, index)?;
+            if let Some(host) = domain_host(&endpoint.url).map(str::to_owned) {
+                resolve_and_validate_hostname(
+                    index,
+                    &host,
+                    endpoint_config.allow_private_urls,
+                    &mut pinned_hosts,
+                )
+                .await?;
+            }
+            endpoints.push(endpoint);
+        }
 
         let mut client_builder = reqwest::Client::builder()
             .redirect(Policy::none())
@@ -262,7 +264,7 @@ impl Logger for HttpLogger {
 
 const MAX_OUTSTANDING_DELIVERY_TASKS: usize = 100_000;
 /// Maximum number of retries after the initial delivery attempt.
-const MAX_WEBHOOK_RETRIES: usize = 20;
+const MAX_WEBHOOK_RETRIES: usize = 6;
 const WEBHOOK_CONNECT_TIMEOUT_SECS: u64 = 5;
 const WEBHOOK_POOL_IDLE_TIMEOUT_SECS: u64 = 30;
 const WEBHOOK_POOL_MAX_IDLE_PER_HOST: usize = 2;
@@ -377,9 +379,9 @@ fn domain_host(url: &Url) -> Option<&str> {
     ip_literal.parse::<IpAddr>().is_err().then_some(host)
 }
 
-/// Performs blocking system DNS resolution during startup only. The resulting
-/// addresses are later pinned into the shared reqwest client.
-fn resolve_and_validate_hostname(
+/// Resolves a webhook hostname during startup and validates the addresses
+/// before pinning them into the shared reqwest client.
+async fn resolve_and_validate_hostname(
     endpoint_index: usize,
     host: &str,
     allow_private_urls: bool,
@@ -390,8 +392,8 @@ fn resolve_and_validate_hostname(
         return validate_resolved_ips(endpoint_index, &ips, allow_private_urls);
     }
 
-    let addresses = (host, 0)
-        .to_socket_addrs()
+    let addresses = tokio::net::lookup_host((host, 0))
+        .await
         .map_err(|_| anyhow!("webhook endpoint {endpoint_index} hostname resolution failed"))?;
     let mut pinned_addrs = Vec::new();
     for mut address in addresses {
@@ -678,6 +680,7 @@ async fn send_once(
     let mut request = client
         .post(delivery.url.clone())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::USER_AGENT, WEBHOOK_USER_AGENT)
         .header(HEADER_EVENT, &delivery.event)
         .header(HEADER_DELIVERY, &delivery.id)
         .header(HEADER_TIMESTAMP, &delivery.timestamp)
@@ -1001,7 +1004,11 @@ mod tests {
         },
     };
 
-    use axum::{extract::State, routing::post, Router};
+    use axum::{
+        extract::State,
+        routing::{get, post},
+        Router,
+    };
 
     use super::*;
 
@@ -1613,7 +1620,7 @@ mod tests {
         let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
         let fields = sanitized_fields(&event.fields);
         let delivery = Delivery::new(&event, &compiled, &fields).unwrap();
-        let payload: Value = serde_json::from_slice(&delivery.body).unwrap();
+        let payload: Value = serde_json::from_slice(delivery.body.as_ref()).unwrap();
 
         assert_eq!(payload["id"], delivery.id);
         assert!(payload["timestamp"].is_string());
@@ -1756,7 +1763,7 @@ mod tests {
         let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
         let fields = sanitized_fields(&event.fields);
         let delivery = Delivery::new(&event, &compiled, &fields).unwrap();
-        let payload: Value = serde_json::from_slice(&delivery.body).unwrap();
+        let payload: Value = serde_json::from_slice(delivery.body.as_ref()).unwrap();
 
         assert!(payload.get("access_token").is_none());
         assert!(payload.get("authToken").is_none());
@@ -1816,25 +1823,46 @@ mod tests {
         let calls = state.calls.clone();
         let app = Router::new()
             .route("/webhook", post(mock_webhook))
+            .route("/__ready", get(|| async { StatusCode::NO_CONTENT }))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
         tokio::spawn(async move {
-            let server = axum::serve(listener, app);
-            let _ = ready_tx.send(());
-            let _ = server.await;
+            let _ = axum::serve(listener, app).await;
         });
 
-        ready_rx.await.expect("mock server task should start");
-        tokio::task::yield_now().await;
+        let readiness_url = format!("http://{address}/__ready");
+        let readiness_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("readiness client should build");
+        let mut ready = false;
+        for attempt in 0..100 {
+            if matches!(
+                readiness_client.get(&readiness_url).send().await,
+                Ok(response) if response.status().is_success()
+            ) {
+                ready = true;
+                break;
+            }
+            if attempt < 99 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        assert!(
+            ready,
+            "mock webhook server did not become ready after 100 attempts"
+        );
+
         (format!("http://{address}/webhook"), calls)
     }
 
     async fn delivery_attempts(statuses: Vec<StatusCode>, max_retries: usize) -> usize {
         let (url, calls) = spawn_mock_server(statuses).await;
-        let logger = HttpLogger::new(test_config(url, 8, max_retries)).unwrap();
+        let logger = HttpLogger::new(test_config(url, 8, max_retries))
+            .await
+            .unwrap();
         logger.log(test_event()).await;
         logger.flush().await;
         calls.load(Ordering::SeqCst)
@@ -1875,7 +1903,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn full_queue_drops_events_without_blocking_log() {
         let (url, calls) = spawn_mock_server(vec![StatusCode::OK]).await;
-        let logger = HttpLogger::new(test_config(url, 1, 0)).unwrap();
+        let logger = HttpLogger::new(test_config(url, 1, 0)).await.unwrap();
 
         timeout(Duration::from_millis(50), async {
             for _ in 0..20 {
