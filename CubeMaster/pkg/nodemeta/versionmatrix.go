@@ -307,10 +307,31 @@ func versionIsDeclared(component, actual string, primary map[string]string, sets
 		if _, ok := set[actual]; ok {
 			return true
 		}
+		for declared := range set {
+			if versionMatchesDeclared(declared, actual) {
+				return true
+			}
+		}
 		return false
 	}
 	exp := primary[component]
-	return exp != "" && exp != "unknown" && actual == exp
+	return exp != "" && exp != "unknown" && versionMatchesDeclared(exp, actual)
+}
+
+func versionMatchesDeclared(declared, actual string) bool {
+	if declared == actual {
+		return true
+	}
+	return stripPlatformVersionSuffix(actual) == declared
+}
+
+func stripPlatformVersionSuffix(value string) string {
+	for _, suffix := range []string{"-amd64", "-arm64", "-x86_64", "-aarch64"} {
+		if strings.HasSuffix(value, suffix) {
+			return strings.TrimSuffix(value, suffix)
+		}
+	}
+	return value
 }
 
 func sortedDeclaredVersions(component string, primary map[string]string, sets map[string]map[string]struct{}) []string {

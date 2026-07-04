@@ -42,7 +42,28 @@ function declaredVersionsFor(row: ComponentRow): string[] {
 
 function isVersionUndeclared(row: ComponentRow, version: string): boolean {
   const declared = declaredVersionsFor(row);
-  return declared.length > 0 && version !== '' && version !== 'unknown' && !declared.includes(version);
+  return (
+    declared.length > 0 &&
+    version !== '' &&
+    version !== 'unknown' &&
+    !declared.some((declaredVersion) => versionMatchesDeclared(declaredVersion, version))
+  );
+}
+
+function versionMatchesDeclared(declared: string, actual: string): boolean {
+  if (declared === actual) {
+    return true;
+  }
+  return stripPlatformVersionSuffix(actual) === declared;
+}
+
+function stripPlatformVersionSuffix(version: string): string {
+  for (const suffix of ['-amd64', '-arm64', '-x86_64', '-aarch64']) {
+    if (version.endsWith(suffix)) {
+      return version.slice(0, -suffix.length);
+    }
+  }
+  return version;
 }
 
 function rowHasUndeclaredVersion(row: ComponentRow): boolean {
