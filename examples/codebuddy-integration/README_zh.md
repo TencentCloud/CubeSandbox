@@ -126,7 +126,7 @@ result = sb.commands.run('codebuddy -p "list files" --output-format json', user=
 print(result.stdout)
 
 # 以 HTTP API 模式启动 CodeBuddy
-sb.commands.run('nohup codebuddy --serve --port 8080 > /tmp/codebuddy.log 2>&1 &', user="root")
+sb.commands.run('codebuddy --serve --port 8080 --hostname 0.0.0.0', envs=envs, user="root")
 
 # 文件操作
 sb.files.write("/workspace/note.txt", "hello", user="root")

@@ -41,7 +41,11 @@ def load_env():
     # CubeSandbox is E2B-compatible and does not require a real API key,
     # but codebuddy's --sandbox flag reads E2B_API_KEY. Set a dummy value
     # so the native-sandbox mode works out of the box.
-    os.environ.setdefault("E2B_API_KEY", "e2b_000000")
+    if not os.environ.get("E2B_API_KEY"):
+        os.environ["E2B_API_KEY"] = "e2b_000000"
+        print("[info] E2B_API_KEY not set, using default for local CubeSandbox")
+    elif os.environ["E2B_API_KEY"] == "e2b_000000":
+        print("[info] Using default E2B_API_KEY (local CubeSandbox does not require a real key)")
     required = ("E2B_API_URL", "E2B_API_KEY", "CUBE_TEMPLATE_ID", "CODEBUDDY_API_KEY")
     for key in required:
         if not os.environ.get(key):
@@ -315,9 +319,8 @@ def run_codebuddy_http(sb, message="Hello! What can you help me with?"):
 
     print("[http] Starting codebuddy --serve on port 8080 ...")
     sb.commands.run(
-        f'nohup codebuddy --serve --port 8080 --hostname 0.0.0.0 '
-        f'--permission-mode bypassPermissions '
-        f'> /tmp/codebuddy.log 2>&1 &',
+        f'codebuddy --serve --port 8080 --hostname 0.0.0.0 '
+        f'--permission-mode bypassPermissions',
         envs=env_vars,
         user="root",
         background=True,
