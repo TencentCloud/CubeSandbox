@@ -1524,11 +1524,41 @@ impl FileSystem for PassthroughFs {
     }
 
     fn forget(&self, _ctx: Context, inode: Inode, count: u64) {
+        // Pin filter inodes: guest FORGETs must never evict a filter (whitelist)
+        // entry from `self.inodes`, otherwise `self.filter` and `inode_store` can
+        // desynchronize. A stale filter id left in `self.filter` will poison the
+        // preserialization `path_to_inode` seed (see `build_filter_resolved_map`)
+        // and cause children of that filter to be marked Invalid during migration.
+        if self.filter.read().unwrap().contains_key(&inode) {
+            debug!(
+                "forget: skipping filter-pinned inode {} (count={})",
+                inode, count
+            );
+            return;
+        }
         self.inodes.forget_one(inode, count)
     }
 
     fn batch_forget(&self, _ctx: Context, requests: Vec<(Inode, u64)>) {
-        self.inodes.forget_many(requests)
+        // Same rationale as `forget`: strip filter-pinned inodes from the batch
+        // so they are never evicted from `self.inodes`.
+        let filter = self.filter.read().unwrap();
+        let filtered: Vec<(Inode, u64)> = requests
+            .into_iter()
+            .filter(|(inode, count)| {
+                if filter.contains_key(inode) {
+                    debug!(
+                        "batch_forget: skipping filter-pinned inode {} (count={})",
+                        inode, count
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        drop(filter);
+        self.inodes.forget_many(filtered)
     }
 
     fn opendir(
