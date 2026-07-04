@@ -76,6 +76,46 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Webhook endpoints for structured lifecycle events.
+    #[serde(default)]
+    pub webhook: WebhookConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WebhookConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_webhook_queue_size")]
+    pub queue_size: usize,
+    #[serde(default = "default_webhook_delivery_concurrency")]
+    pub delivery_concurrency: usize,
+    #[serde(default = "default_webhook_timeout_ms")]
+    pub default_timeout_ms: u64,
+    #[serde(default = "default_webhook_max_retries")]
+    pub default_max_retries: usize,
+    #[serde(default = "default_webhook_initial_backoff_ms")]
+    pub default_initial_backoff_ms: u64,
+    #[serde(default = "default_webhook_max_backoff_ms")]
+    pub default_max_backoff_ms: u64,
+    #[serde(default)]
+    pub endpoints: Vec<WebhookEndpointConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct WebhookEndpointConfig {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub secret: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_retries: Option<usize>,
 }
 
 fn default_bind() -> String {
@@ -110,6 +150,25 @@ fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
 
+fn default_webhook_queue_size() -> usize {
+    1024
+}
+fn default_webhook_delivery_concurrency() -> usize {
+    64
+}
+fn default_webhook_timeout_ms() -> u64 {
+    3000
+}
+fn default_webhook_max_retries() -> usize {
+    3
+}
+fn default_webhook_initial_backoff_ms() -> u64 {
+    200
+}
+fn default_webhook_max_backoff_ms() -> u64 {
+    2000
+}
+
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
@@ -118,6 +177,21 @@ impl ServerConfig {
             .build()?
             .try_deserialize()?;
         Ok(cfg)
+    }
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            queue_size: default_webhook_queue_size(),
+            delivery_concurrency: default_webhook_delivery_concurrency(),
+            default_timeout_ms: default_webhook_timeout_ms(),
+            default_max_retries: default_webhook_max_retries(),
+            default_initial_backoff_ms: default_webhook_initial_backoff_ms(),
+            default_max_backoff_ms: default_webhook_max_backoff_ms(),
+            endpoints: Vec::new(),
+        }
     }
 }
 
@@ -135,6 +209,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            webhook: WebhookConfig::default(),
         }
     }
 }

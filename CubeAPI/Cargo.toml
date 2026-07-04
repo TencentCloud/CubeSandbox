@@ -80,6 +80,9 @@ async-trait = "0.1"
 # ── CLI argument parsing ──────────────────────────────────────────────────
 clap = { version = "4", features = ["derive"] }
 utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────
 # (tokio::signal + axum::serve().with_graceful_shutdown is sufficient)
