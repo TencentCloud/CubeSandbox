@@ -437,6 +437,19 @@ func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.Creat
 
 	templateID, hasTemplateID := reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
 
+	// Alias resolution: if the annotation value doesn't look like a template
+	// ID (no tpl-/snap- prefix), treat it as a human-readable alias and
+	// resolve it to the actual template ID. This lets sandboxes reference
+	// templates by a stable name that survives rebuilds.
+	if hasTemplateID && templateID != "" {
+		if resolved, err := templatecenter.ResolveTemplateIdentifier(ctx, templateID); err != nil {
+			return fmt.Errorf("failed to resolve template identifier %q: %w", templateID, err)
+		} else if resolved != "" && resolved != templateID {
+			templateID = resolved
+			reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
+		}
+	}
+
 	if !hasTemplateID && config.GetConfig().Common.EnableAGSColdStartSwitch {
 		return handleColdStartCompatibility(reqInOut)
 	}

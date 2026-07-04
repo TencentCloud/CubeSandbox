@@ -707,6 +707,27 @@ func ensureTemplateDefinition(ctx context.Context, templateID string, storedReq 
 	return true, nil
 }
 
+// ensureTemplateDefinitionWithOptions is the options-aware variant of
+// ensureTemplateDefinition. It is used by the image-job runner to thread the
+// alias (DisplayName) into the newly created definition. The original
+// ensureTemplateDefinition is kept as-is (no options) so existing callers
+// and their test mocks (gomonkey patches on the exact signature) are
+// unaffected.
+func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) (bool, error) {
+	if _, err := GetDefinition(ctx, templateID); err == nil {
+		return false, nil
+	} else if !errors.Is(err, ErrTemplateNotFound) {
+		return false, err
+	}
+	if err := createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, opts); err != nil {
+		return false, err
+	}
+	if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
+		log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
+	}
+	return true, nil
+}
+
 func finalizeTemplateReplicas(ctx context.Context, templateID, instanceType, version string, replicas []ReplicaStatus) (*TemplateInfo, error) {
 	setTemplateLocalityCache(templateID, replicas)
 	registerReadyTemplateReplicas(templateID, replicas)
@@ -884,6 +905,50 @@ func GetDefinition(ctx context.Context, templateID string) (*models.TemplateDefi
 		return nil, err
 	}
 	return def, nil
+}
+
+// GetTemplateByAlias looks up a non-deleted template definition by its
+// display_name (used as a stable alias). Returns ErrTemplateNotFound when no
+// template has the given alias.
+func GetTemplateByAlias(ctx context.Context, alias string) (*models.TemplateDefinition, error) {
+	if !isReady() {
+		return nil, ErrTemplateStoreNotInitialized
+	}
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil, ErrTemplateNotFound
+	}
+	def := &models.TemplateDefinition{}
+	err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
+		Where("display_name = ? AND status <> ?", alias, StatusDeleting).
+		First(def).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTemplateNotFound
+		}
+		return nil, err
+	}
+	return def, nil
+}
+
+// ResolveTemplateIdentifier resolves an identifier that may be either a
+// template ID (tpl-.../snap-...) or a human-readable alias. If the identifier
+// already has a valid template ID prefix it is returned unchanged. Otherwise
+// it is treated as an alias and resolved to the underlying template ID.
+// Returns ("", nil) for an empty identifier.
+func ResolveTemplateIdentifier(ctx context.Context, identifier string) (string, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return "", nil
+	}
+	if hasValidTemplateIDPrefix(identifier) {
+		return identifier, nil
+	}
+	def, err := GetTemplateByAlias(ctx, identifier)
+	if err != nil {
+		return "", err
+	}
+	return def.TemplateID, nil
 }
 
 func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
@@ -1351,6 +1416,16 @@ func ResolveTemplate(ctx context.Context, reqInOut *sandboxtypes.CreateCubeSandb
 	templateID := strings.TrimSpace(reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	if templateID == "" {
 		return nil
+	}
+	// Alias resolution: resolve human-readable aliases to template IDs.
+	if resolved, err := ResolveTemplateIdentifier(ctx, templateID); err != nil {
+		if errors.Is(err, ErrTemplateNotFound) {
+			return ret.Err(errorcode.ErrorCode_NotFound, fmt.Sprintf("template or alias %q not found", templateID))
+		}
+		return err
+	} else if resolved != "" && resolved != templateID {
+		templateID = resolved
+		reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
 	}
 	if constants.GetAppSnapshotVersion(reqInOut.Annotations) == "" {
 		return nil

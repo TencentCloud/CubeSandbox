@@ -550,6 +550,11 @@ type CreateTemplateFromImageReq struct {
 	RegistryUsername   string              `json:"registry_username,omitempty"`
 	RegistryPassword   string              `json:"registry_password,omitempty"`
 	TemplateID         string              `json:"template_id,omitempty" p:"template_id"`
+	// Alias is a human-readable, stable name for the template. When set,
+	// sandboxes can reference the template by this alias instead of the
+	// auto-generated template ID, surviving rebuilds that produce a new ID.
+	// Valid: ^[a-z0-9][a-z0-9-]{0,63}$ , must not start with tpl-/snap-.
+	Alias              string              `json:"alias,omitempty"`
 	InstanceType       string              `json:"instance_type,omitempty"`
 	NetworkType        string              `json:"network_type,omitempty"`
 	CubeNetworkConfig  *CubeNetworkConfig  `json:"cube_network_config,omitempty"`

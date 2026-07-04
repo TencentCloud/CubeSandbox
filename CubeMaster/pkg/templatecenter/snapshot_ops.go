@@ -1092,6 +1092,18 @@ func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, sto
 	if kind == TemplateKindSnapshot && model.StorageBackend == "" {
 		model.StorageBackend = StorageBackendCow
 	}
+	// Alias reassignment: when a new template claims a display_name (alias)
+	// that another non-deleting template already holds, release it from the
+	// old template first. This gives "stable naming across rebuilds" — the
+	// newest template with a given alias wins — without requiring callers to
+	// manually clear stale aliases.
+	if alias := strings.TrimSpace(opts.DisplayName); alias != "" {
+		if err := tx.Table(constants.TemplateDefinitionTableName).
+			Where("display_name = ? AND template_id <> ? AND status <> ?", alias, templateID, StatusDeleting).
+			Update("display_name", "").Error; err != nil {
+			return fmt.Errorf("release stale alias %q fail: %w", alias, err)
+		}
+	}
 	if err := tx.Table(constants.TemplateDefinitionTableName).Create(model).Error; err != nil {
 		if strings.Contains(err.Error(), "1062") || strings.Contains(err.Error(), "Duplicate entry") {
 			return ErrDuplicateTemplate

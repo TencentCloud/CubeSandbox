@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -90,6 +91,9 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 		return nil, err
 	}
 	cloned.ExposedPorts = exposedPorts
+	if err := validateTemplateAlias(cloned.Alias); err != nil {
+		return nil, err
+	}
 	// Always auto-generate the template ID. Users are not allowed to set
 	// custom template IDs because the snapshot system depends on the
 	// tpl- / snap- prefix convention for storage naming and identification.
@@ -107,6 +111,29 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 		return nil, err
 	}
 	return &cloned, nil
+}
+
+// aliasValidationRe matches the allowed alias charset: lowercase alphanumeric
+// and hyphens, starting with an alphanumeric character, max 64 characters.
+var aliasValidationRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+// validateTemplateAlias validates that an alias conforms to the required
+// format: lowercase alphanumeric and hyphens only, must start with an
+// alphanumeric character, max 64 characters, and must NOT collide with the
+// template ID prefix convention (tpl-/snap-). An empty alias is valid (no
+// alias requested).
+func validateTemplateAlias(alias string) error {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil
+	}
+	if hasValidTemplateIDPrefix(alias) {
+		return fmt.Errorf("alias %q must not start with 'tpl-' or 'snap-'", alias)
+	}
+	if !aliasValidationRe.MatchString(alias) {
+		return fmt.Errorf("alias %q is invalid: must match ^[a-z0-9][a-z0-9-]{0,63}$ (lowercase alphanumeric and hyphens, max 64 chars)", alias)
+	}
+	return nil
 }
 
 func validateTemplateCubeNetworkConfig(cfg *types.CubeNetworkConfig) error {
