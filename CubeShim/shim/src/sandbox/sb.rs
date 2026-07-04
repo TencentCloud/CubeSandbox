@@ -716,6 +716,7 @@ impl SandBox {
         vc.set_kernel(self.conf.kernel.clone())
             .set_vcpus(self.conf.vm_res.cpu)
             .set_memory(self.conf.vm_res.memory, false)
+            .set_pmu(self.conf.pmu)
             .add_nets(&self.conf.net)?
             .add_disks(&self.conf.disk)
             .add_virtiofs(&self.conf.virtiofs)
@@ -1375,6 +1376,7 @@ fn normalize_dns_for_agent(entry: &str) -> CResult<String> {
 
 #[cfg(test)]
 mod tests {
+    use cube_hypervisor::vm_config::CpuPmuConfig;
     use protobuf::MessageDyn;
     use std::collections::HashSet;
     use tokio::sync::mpsc::channel;
@@ -1394,6 +1396,7 @@ mod tests {
         sb.conf.vm_res.cpu = 999;
         sb.conf.vm_res.memory = 999;
         sb.conf.product = PRODUCT_CUBEBOX.to_string();
+        sb.conf.pmu = CpuPmuConfig::Off;
         sb.conf.extra_kernel_params = vec![
             "custom.param=42".to_string(),
             "another.param=foo".to_string(),
@@ -1406,6 +1409,7 @@ mod tests {
         assert_eq!(vm_config.vcpus, 999);
         assert_eq!(vm_config.memory_size, 999);
         assert_eq!(vm_config.kernel, "ut_kernel".to_string());
+        assert_eq!(vm_config.pmu, CpuPmuConfig::Off);
         assert!(vm_config.cmdlines.contains(&"custom.param=42".to_string()));
         assert!(vm_config
             .cmdlines

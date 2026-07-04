@@ -119,7 +119,8 @@ fn create_app(default_vcpus: String, default_memory: String, default_rng: String
                     topology=<threads_per_core>:<cores_per_die>:<dies_per_package>:<packages>,\
                     kvm_hyperv=on|off,max_phys_bits=<maximum_number_of_physical_bits>,\
                     affinity=<list_of_vcpus_with_their_associated_cpuset>,\
-                    features=<list_of_features_to_enable>,compatible=vendor|max|ignore",
+                    features=<list_of_features_to_enable>,compatible=vendor|max|ignore,\
+                    pmu=on|off",
                 )
                 .default_value(default_vcpus)
                 .group("vm-config"),
@@ -781,8 +782,8 @@ mod unit_tests {
     use std::path::PathBuf;
     use vmm::config::VmParams;
     use vmm::vm_config::{
-        CompatibleMode, ConsoleConfig, ConsoleOutputMode, CpuFeatures, CpusConfig, HotplugMethod,
-        MemoryConfig, PayloadConfig, RngConfig, VmConfig,
+        CompatibleMode, ConsoleConfig, ConsoleOutputMode, CpuFeatures, CpuPmuConfig, CpusConfig,
+        HotplugMethod, MemoryConfig, PayloadConfig, RngConfig, VmConfig,
     };
 
     fn get_vm_config_from_vec(args: &[&str]) -> VmConfig {
@@ -831,6 +832,7 @@ mod unit_tests {
                 affinity: None,
                 features: CpuFeatures::default(),
                 compatible: CompatibleMode::Vendor,
+                pmu: CpuPmuConfig::On,
             },
             memory: MemoryConfig {
                 size: 536_870_912,

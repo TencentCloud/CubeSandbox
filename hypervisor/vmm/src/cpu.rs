@@ -26,6 +26,8 @@ use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::vm::physical_bits;
 #[cfg(target_arch = "x86_64")]
 use crate::vm_config::CompatibleMode;
+#[cfg(target_arch = "aarch64")]
+use crate::vm_config::CpuPmuConfig;
 use crate::vm_config::CpusConfig;
 use crate::GuestMemoryMmap;
 use crate::CPU_MANAGER_SNAPSHOT_ID;
@@ -345,13 +347,14 @@ impl Vcpu {
         &mut self,
         #[cfg(target_arch = "aarch64")] vm: &Arc<dyn hypervisor::Vm>,
         kernel_entry_point: Option<EntryPoint>,
+        #[cfg(target_arch = "aarch64")] pmu: CpuPmuConfig,
         #[cfg(target_arch = "x86_64")] vm_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
         #[cfg(target_arch = "x86_64")] cpuid: Vec<CpuIdEntry>,
         #[cfg(target_arch = "x86_64")] kvm_hyperv: bool,
     ) -> Result<()> {
         #[cfg(target_arch = "aarch64")]
         {
-            self.init(vm)?;
+            self.init(vm, pmu)?;
             self.mpidr = arch::configure_vcpu(&self.vcpu, self.id, kernel_entry_point)
                 .map_err(Error::VcpuConfiguration)?;
         }
@@ -384,19 +387,22 @@ impl Vcpu {
 
     /// Initializes an aarch64 specific vcpu for booting Linux.
     #[cfg(target_arch = "aarch64")]
-    pub fn init(&self, vm: &Arc<dyn hypervisor::Vm>) -> Result<()> {
+    pub fn init(&self, vm: &Arc<dyn hypervisor::Vm>, pmu: CpuPmuConfig) -> Result<()> {
         let mut kvi: kvm_bindings::kvm_vcpu_init = kvm_bindings::kvm_vcpu_init::default();
 
         // This reads back the kernel's preferred target type.
         vm.get_preferred_target(&mut kvi)
             .map_err(Error::VcpuArmPreferredTarget)?;
-        // We already checked that the capability is supported.
+        // We already checked that PSCI 0.2 is supported.
         kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PSCI_0_2;
-        kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PMU_V3;
+        if pmu == CpuPmuConfig::On {
+            kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PMU_V3;
+        }
         // Non-boot cpus are powered off initially.
         if self.id > 0 {
             kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_POWER_OFF;
         }
+
         self.vcpu.vcpu_init(&kvi).map_err(Error::VcpuArmInit)
     }
 
@@ -805,7 +811,7 @@ impl CpuManager {
         if let Some(snapshot) = snapshot {
             // AArch64 vCPUs should be initialized after created.
             #[cfg(target_arch = "aarch64")]
-            vcpu.init(&self.vm)?;
+            vcpu.init(&self.vm, self.config.pmu)?;
 
             vcpu.restore(snapshot).expect("Failed to restore vCPU");
         } else {
@@ -818,7 +824,7 @@ impl CpuManager {
             )?;
 
             #[cfg(target_arch = "aarch64")]
-            vcpu.configure(&self.vm, entry_point)?;
+            vcpu.configure(&self.vm, entry_point, self.config.pmu)?;
         }
 
         // Adding vCPU to the CpuManager's vCPU list.
@@ -852,18 +858,30 @@ impl CpuManager {
 
     #[cfg(target_arch = "aarch64")]
     pub fn init_pmu(&self, irq: u32) -> Result<bool> {
+        if self.config.pmu == CpuPmuConfig::Off {
+            debug!("PMUv3 is disabled by CPU configuration, skip PMU init!");
+            return Ok(false);
+        }
+
+        // The guest sees PMU as a single device-tree capability, so expose it
+        // only when every created vCPU supports the PMU control attributes.
+        // Both passes below must execute without concurrent vCPU modification;
+        // this is safe because init_pmu is called during VM setup before any
+        // vCPU threads are spawned.
         for cpu in self.vcpus.iter() {
             let cpu = cpu.lock().unwrap();
-            // Check if PMU attr is available, if not, log the information.
-            if cpu.vcpu.has_pmu_support() {
-                cpu.vcpu.init_pmu(irq).map_err(Error::InitPmu)?;
-            } else {
+            if !cpu.vcpu.has_pmu_support() {
                 debug!(
                     "PMU attribute is not supported in vCPU{}, skip PMU init!",
                     cpu.id
                 );
                 return Ok(false);
             }
+        }
+
+        for cpu in self.vcpus.iter() {
+            let cpu = cpu.lock().unwrap();
+            cpu.vcpu.init_pmu(irq).map_err(Error::InitPmu)?;
         }
 
         Ok(true)

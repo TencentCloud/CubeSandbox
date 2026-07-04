@@ -9,6 +9,7 @@ use crate::sandbox::disk::{Disk, ANNO_DISK};
 use crate::sandbox::net::{Net, ANNO_NET};
 use crate::sandbox::pmem::{Pmem, ANNO_PMEM};
 use cube_hypervisor::config::{BackendFsConfig, RateLimiterConfig};
+use cube_hypervisor::vm_config::CpuPmuConfig;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -22,6 +23,7 @@ pub const ANNO_CUBE_VIPS: &str = "cube.net.vips";
 pub const ANNO_SNAPSHOT_DISABLE: &str = "cube.snapshot.disable";
 pub const ANNO_SNAPSHOT_NOTIFY: &str = "cube.snapshot.healthcheck";
 pub const ANNO_VM_KERNEL: &str = "cube.vm.kernel.path";
+pub const ANNO_VM_PMU: &str = "cube.vm.pmu";
 /// Annotation key used to append extra kernel cmdline parameters.
 pub const ANNO_VM_KERNEL_CMDLINE_APPEND: &str = "cube.vm.kernel.cmdline.append";
 pub const ANNO_SNAPSHOT_BASE: &str = "cube.vm.snapshot.base.path";
@@ -60,6 +62,7 @@ pub struct Config {
     pub app_snapshot_restore: bool,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
+    pub pmu: CpuPmuConfig,
 }
 
 impl Config {
@@ -189,6 +192,12 @@ impl Config {
         } else {
             Vec::new()
         };
+        let pmu = if let Some(pmu) = anno.get(ANNO_VM_PMU) {
+            pmu.parse::<CpuPmuConfig>()
+                .map_err(|_| format!("Invalid annotation:{}={}", ANNO_VM_PMU, pmu))?
+        } else {
+            CpuPmuConfig::default()
+        };
 
         let c = Config {
             net,
@@ -212,6 +221,7 @@ impl Config {
             app_snapshot_create,
             app_snapshot_restore,
             extra_kernel_params,
+            pmu,
         };
         Ok(c)
     }
@@ -248,6 +258,8 @@ pub struct VirtioFs {
 mod tests {
     use std::collections::HashMap;
 
+    use cube_hypervisor::vm_config::CpuPmuConfig;
+
     use crate::common::utils::Utils;
     use crate::common::PRODUCT_CUBEBOX;
     use crate::sandbox::config::Config;
@@ -255,6 +267,7 @@ mod tests {
     use crate::sandbox::config::ANNO_SNAPSHOT_MEMORY_VOL_URL;
     use crate::sandbox::config::ANNO_VM_KERNEL;
     use crate::sandbox::config::ANNO_VM_KERNEL_CMDLINE_APPEND;
+    use crate::sandbox::config::ANNO_VM_PMU;
     use crate::sandbox::config::ANNO_VM_RES;
     use crate::sandbox::config::KERNEL_SCF;
 
@@ -276,6 +289,7 @@ mod tests {
         assert_eq!(config.vm_res.memory, 2048);
         assert_eq!(config.vm_res.preserve_memory, 2048);
         assert_eq!(config.vm_res.snap_memory, 2048);
+        assert_eq!(config.pmu, CpuPmuConfig::On);
 
         // product,kernel,snapshot base dir (always CUBEBOX)
         assert_eq!(config.product, PRODUCT_CUBEBOX);
@@ -327,6 +341,16 @@ mod tests {
             config.extra_kernel_params,
             vec!["foo=bar".to_string(), "second=2".to_string()]
         );
+
+        annotations.insert(ANNO_VM_PMU.to_string(), "off".to_string());
+        let ret = Config::new(&Some(annotations.clone()));
+        assert!(ret.is_ok());
+        let config = ret.unwrap();
+        assert_eq!(config.pmu, CpuPmuConfig::Off);
+
+        annotations.insert(ANNO_VM_PMU.to_string(), "maybe".to_string());
+        let ret = Config::new(&Some(annotations.clone()));
+        assert!(ret.is_err());
     }
 
     #[test]

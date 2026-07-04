@@ -17,8 +17,8 @@ use crate::sandbox::pmem::Pmem;
 
 use cube_hypervisor::config::{RateLimiterConfig, TokenBucketConfig};
 use cube_hypervisor::vm_config::{
-    ConsoleConfig, ConsoleOutputMode, CpuTopology, DiskConfig, FsConfig, MacAddr, NetConfig,
-    PayloadConfig, PmemConfig, RngConfig, VmConfig as VC, VsockConfig,
+    ConsoleConfig, ConsoleOutputMode, CpuPmuConfig, CpuTopology, DiskConfig, FsConfig, MacAddr,
+    NetConfig, PayloadConfig, PmemConfig, RngConfig, VmConfig as VC, VsockConfig,
 };
 use cube_hypervisor::vmm_config::VmmConfig;
 
@@ -66,6 +66,7 @@ pub struct VmConfig {
     pub vsock: Option<VsockConfig>,
     pub sys_ctrl: bool,
     pub rng: RngConfig,
+    pub pmu: CpuPmuConfig,
 }
 
 impl Default for VmConfig {
@@ -123,6 +124,7 @@ impl Default for VmConfig {
                 src: PathBuf::from("/dev/urandom"),
                 iommu: false,
             },
+            pmu: CpuPmuConfig::default(),
         }
     }
 }
@@ -133,6 +135,7 @@ impl VmConfig {
 
         vc.cpus.max_vcpus = self.vcpus as u8;
         vc.cpus.boot_vcpus = self.vcpus as u8;
+        vc.cpus.pmu = self.pmu;
         let topology = CpuTopology {
             threads_per_core: 1,
             cores_per_die: self.vcpus as u8,
@@ -235,6 +238,11 @@ impl VmConfig {
 
     pub fn set_kernel(&mut self, kernel: String) -> &mut Self {
         self.kernel = kernel;
+        self
+    }
+
+    pub fn set_pmu(&mut self, pmu: CpuPmuConfig) -> &mut Self {
+        self.pmu = pmu;
         self
     }
 
@@ -436,7 +444,7 @@ pub struct PciDeviceInfo {
 
 #[cfg(test)]
 mod tests {
-    use cube_hypervisor::vm_config::ConsoleOutputMode;
+    use cube_hypervisor::vm_config::{ConsoleOutputMode, CpuPmuConfig};
     use std::path::PathBuf;
 
     use crate::common::utils::Utils;
@@ -455,6 +463,7 @@ mod tests {
         assert_eq!(pmem[0].file, PathBuf::from(IMAGE_PATH));
         assert_eq!(config.console.mode, ConsoleOutputMode::Tty);
         assert_eq!(config.rng.src, PathBuf::from("/dev/urandom"));
+        assert_eq!(config.pmu, CpuPmuConfig::On);
 
         let mut params = vec![
             "root=/dev/pmem0".to_string(),
@@ -498,6 +507,9 @@ mod tests {
         config.set_memory(999, true);
         assert_eq!(config.memory_size, 999);
         assert!(config.dirty_log);
+
+        config.set_pmu(CpuPmuConfig::Off);
+        assert_eq!(config.to_vm_config().cpus.pmu, CpuPmuConfig::Off);
 
         //add_disk
         assert!(config.disks.is_some());

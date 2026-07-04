@@ -591,6 +591,23 @@ impl FromStr for CompatibleMode {
     }
 }
 
+#[derive(Debug)]
+pub enum ParseCpuPmuConfigError {
+    InvalidValue(String),
+}
+
+impl FromStr for CpuPmuConfig {
+    type Err = ParseCpuPmuConfigError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "on" => Ok(CpuPmuConfig::On),
+            "off" => Ok(CpuPmuConfig::Off),
+            _ => Err(ParseCpuPmuConfigError::InvalidValue(s.to_owned())),
+        }
+    }
+}
+
 impl CpusConfig {
     pub fn parse(cpus: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -602,7 +619,8 @@ impl CpusConfig {
             .add("max_phys_bits")
             .add("affinity")
             .add("features")
-            .add("compatible");
+            .add("compatible")
+            .add("pmu");
         parser.parse(cpus).map_err(Error::ParseCpus)?;
 
         let boot_vcpus: u8 = parser
@@ -642,6 +660,10 @@ impl CpusConfig {
             .convert("compatible")
             .map_err(Error::ParseCpus)?
             .unwrap_or_default();
+        let pmu = parser
+            .convert("pmu")
+            .map_err(Error::ParseCpus)?
+            .unwrap_or_default();
 
         // Some ugliness here as the features being checked might be disabled
         // at compile time causing the below allow and the need to specify the
@@ -670,6 +692,7 @@ impl CpusConfig {
             affinity,
             features,
             compatible,
+            pmu,
         })
     }
 }
@@ -2892,6 +2915,16 @@ mod tests {
                 ..Default::default()
             }
         );
+        assert_eq!(
+            CpusConfig::parse("boot=1,pmu=off")?,
+            CpusConfig {
+                boot_vcpus: 1,
+                max_vcpus: 1,
+                pmu: CpuPmuConfig::Off,
+                ..Default::default()
+            }
+        );
+        assert!(CpusConfig::parse("pmu=maybe").is_err());
         assert_eq!(
             CpusConfig::parse("boot=2,affinity=[0@[0,2],1@[1,3]]")?,
             CpusConfig {

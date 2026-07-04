@@ -31,6 +31,14 @@ When containerd needs to create a sandbox, it spawns `containerd-shim-cube-rs` a
 |-------|------|
 | Extended shim API (shimapi) | [`docs/shimapi/`](./docs/shimapi/README.md) |
 
+## Sandbox Annotations
+
+CubeShim reads pod sandbox annotations when constructing the VM configuration.
+
+| Key | Values | Default | Description |
+|-----|--------|---------|-------------|
+| `cube.vm.pmu` | `on`, `off` | `on` | Controls ARM PMUv3 exposure on AArch64 hosts. Set to `off` when the host provides KVM but does not support exposing a virtual PMU. |
+
 ## Sub-components
 
 | Directory | Binary | Description |

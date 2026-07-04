@@ -30,6 +30,19 @@ pub struct CpuFeatures {
     pub amx: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CpuPmuConfig {
+    On,
+    Off,
+}
+
+impl Default for CpuPmuConfig {
+    fn default() -> Self {
+        CpuPmuConfig::On
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct CpuTopology {
     pub threads_per_core: u8,
@@ -63,6 +76,8 @@ pub struct CpusConfig {
     pub features: CpuFeatures,
     #[serde(default)]
     pub compatible: CompatibleMode,
+    #[serde(default)]
+    pub pmu: CpuPmuConfig,
 }
 
 pub const DEFAULT_VCPUS: u8 = 1;
@@ -78,6 +93,7 @@ impl Default for CpusConfig {
             affinity: None,
             features: CpuFeatures::default(),
             compatible: CompatibleMode::Vendor,
+            pmu: CpuPmuConfig::default(),
         }
     }
 }

@@ -2200,7 +2200,7 @@ const DEVICE_MANAGER_SNAPSHOT_ID: &str = "device-manager";
 #[cfg(test)]
 mod unit_tests {
     use super::*;
-    use crate::vm_config::{CompatibleMode, CpuFeatures};
+    use crate::vm_config::{CompatibleMode, CpuFeatures, CpuPmuConfig};
     use vm_config::{
         ConsoleConfig, ConsoleOutputMode, CpusConfig, HotplugMethod, MemoryConfig, PayloadConfig,
         RngConfig, VmConfig,
@@ -2234,6 +2234,7 @@ mod unit_tests {
                 affinity: None,
                 features: CpuFeatures::default(),
                 compatible: CompatibleMode::Vendor,
+                pmu: CpuPmuConfig::On,
             },
             memory: MemoryConfig {
                 size: 536_870_912,

@@ -18,11 +18,12 @@ struct CpusConfig {
     max_phys_bits: u8,
     affinity: Option<Vec<CpuAffinity>>,
     features: CpuFeatures,
+    pmu: CpuPmuConfig,
 }
 ```
 
 ```
---cpus boot=<boot_vcpus>,max=<max_vcpus>,topology=<threads_per_core>:<cores_per_die>:<dies_per_package>:<packages>,kvm_hyperv=on|off,max_phys_bits=<maximum_number_of_physical_bits>,affinity=<list_of_vcpus_with_their_associated_cpuset>,features=<list_of_features_to_enable>
+--cpus boot=<boot_vcpus>,max=<max_vcpus>,topology=<threads_per_core>:<cores_per_die>:<dies_per_package>:<packages>,kvm_hyperv=on|off,max_phys_bits=<maximum_number_of_physical_bits>,affinity=<list_of_vcpus_with_their_associated_cpuset>,features=<list_of_features_to_enable>,pmu=on|off
 ```
 
 ### `boot`
@@ -115,6 +116,23 @@ _Example_
 
 ```
 --cpus kvm_hyperv=on
+```
+
+### `pmu`
+
+Enable ARM PMUv3 exposure to the guest.
+
+When turned off, the VMM does not request `KVM_ARM_VCPU_PMU_V3` during vCPU
+initialization and does not add a PMU node to the guest device tree. This is
+useful for deployments where KVM is available but the host hypervisor does not
+support exposing a virtual PMU.
+
+By default this option is turned on.
+
+_Example_
+
+```
+--cpus pmu=off
 ```
 
 ### `max_phys_bits`
