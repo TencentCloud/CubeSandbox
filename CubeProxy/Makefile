@@ -42,6 +42,10 @@ build:
 		-t $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH) \
 		.
 
+.PHONY: test
+test:
+	bash tests/test_start.sh
+
 # Push the architecture-specific image to all registries.
 # Run `make push` on an amd64 host, then again on an arm64 host, then
 # `make manifest` on either host to combine them.

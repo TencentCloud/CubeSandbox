@@ -113,6 +113,7 @@ help:
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
 	@printf "  cubelet-test  Run Cubelet unit tests in Docker\n"
+	@printf "  cube-proxy-test Run CubeProxy unit tests locally\n"
 	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
 	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
@@ -292,6 +293,10 @@ cubelet-test: builder-image
 .PHONY: network-agent-test
 network-agent-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/network-agent && go mod download && make test'
+
+.PHONY: cube-proxy-test
+cube-proxy-test:
+	$(MAKE) -C CubeProxy test
 
 .PHONY: cube-api-test
 cube-api-test: builder-image
