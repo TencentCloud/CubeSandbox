@@ -50,6 +50,7 @@ type templateSummary struct {
 	Version      string `json:"version,omitempty"`
 	Status       string `json:"status,omitempty"`
 	LastError    string `json:"last_error,omitempty"`
+	DisplayName  string `json:"display_name,omitempty"`
 	CreatedAt    string `json:"created_at,omitempty"`
 	ImageInfo    string `json:"image_info,omitempty"`
 	JobID        string `json:"job_id,omitempty"`
@@ -297,6 +298,7 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			Version:      info.Version,
 			Status:       info.Status,
 			LastError:    info.LastError,
+			DisplayName:  info.DisplayName,
 			CreatedAt:    info.CreatedAt,
 			ImageInfo:    info.ImageInfo,
 			JobID:        info.JobID,
