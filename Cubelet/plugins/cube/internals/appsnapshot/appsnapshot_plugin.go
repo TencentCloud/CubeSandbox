@@ -23,10 +23,10 @@ func init() {
 		Type: constants.InternalPlugin,
 		ID:   constants.APPSnapshotID.ID(),
 		Requires: []plugin.Type{
-			constants.ControllerPlugin,
+			constants.ResourceManagerPlugin,
 		},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-			obj, err := ic.GetByID(constants.ControllerPlugin, constants.PluginRunTemplateManager.ID())
+			obj, err := ic.GetByID(constants.ResourceManagerPlugin, constants.PluginRunTemplateManager.ID())
 			if err != nil {
 				return nil, fmt.Errorf("failed to get run template manager: %w", err)
 			}

@@ -20,7 +20,7 @@ func init() {
 
 func registerCubeRunTemplateResourceManager() {
 	registry.Register(&plugin.Registration{
-		Type: constants.ControllerPlugin,
+		Type: constants.ResourceManagerPlugin,
 		ID:   constants.PluginRunTemplateManager.ID(),
 		Requires: []plugin.Type{
 			constants.CubeMetaStorePlugin,

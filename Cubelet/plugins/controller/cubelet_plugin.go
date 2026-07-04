@@ -51,6 +51,7 @@ func registerCubelet() {
 			plugins.CRIServicePlugin,
 			constants.ControllerPlugin,
 			constants.ControllerConfigPlugin,
+			constants.ResourceManagerPlugin,
 		},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
 			obj, err := ic.GetByID(constants.ControllerConfigPlugin, constants.PluginCubelet)
@@ -91,11 +92,11 @@ func registerCubelet() {
 				if ok {
 					controllerMap[name] = c
 				} else {
-					log.G(ic.Context).Fatalf("controller %s is not a valid CubeMetaController", name)
+					log.G(ic.Context).Warnf("controller %s is not a valid CubeMetaController", name)
 				}
 			}
 
-			obj, err = ic.GetByID(constants.ControllerPlugin, constants.PluginRunTemplateManager.ID())
+			obj, err = ic.GetByID(constants.ResourceManagerPlugin, constants.PluginRunTemplateManager.ID())
 			if err != nil {
 				return nil, fmt.Errorf("failed to get run template manager: %w", err)
 			}
