@@ -48,4 +48,5 @@ lang: zh-CN
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
 | [Pi Agent 集成指南](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
+| [Claude Code 集成指南](./claude-code.md) | shsaihdsaiudh | 2026-07-06 | integration, claude-code, coding-agent |
 | [LangChain 集成指南](./langchain.md) | peerless-hero | 2026-07-07 | integration, langchain, agent |

@@ -1,0 +1,147 @@
+"""Tests for mcp_server.py — MCP protocol handling and sandbox lifecycle."""
+import io
+import json
+import sys
+from unittest.mock import Mock, patch
+
+import pytest
+
+import mcp_server
+
+
+@pytest.fixture(autouse=True)
+def reset_sandbox():
+    """Reset the module-level _sandbox between tests."""
+    old = mcp_server._sandbox
+    mcp_server._sandbox = None
+    yield
+    mcp_server._sandbox = old
+
+
+# ── _read_mcp_message ──────────────────────────────────────────────────
+
+class TestReadMcpMessage:
+    """Tests for _read_mcp_message() — MCP protocol message parsing."""
+
+    def test_valid_message(self):
+        body = json.dumps({"jsonrpc": "2.0", "method": "initialize", "id": 1})
+        stdin = io.StringIO(f"Content-Length: {len(body)}\r\n\r\n{body}")
+        with patch.object(sys, "stdin", stdin):
+            msg = mcp_server._read_mcp_message()
+        assert msg == {"jsonrpc": "2.0", "method": "initialize", "id": 1}
+
+    def test_eof_raises_eoferror(self):
+        """Fix: EOF now raises EOFError instead of returning None, which
+        previously caused main() to loop infinitely on disconnected clients."""
+        stdin = io.StringIO("")
+        with patch.object(sys, "stdin", stdin):
+            with pytest.raises(EOFError):
+                mcp_server._read_mcp_message()
+
+    def test_malformed_content_length_returns_none(self):
+        stdin = io.StringIO("Content-Length: abc\r\n\r\n")
+        with patch.object(sys, "stdin", stdin):
+            msg = mcp_server._read_mcp_message()
+        assert msg is None
+
+    def test_missing_content_length_returns_none(self):
+        stdin = io.StringIO("Some-Header: value\r\n\r\n")
+        with patch.object(sys, "stdin", stdin):
+            msg = mcp_server._read_mcp_message()
+        assert msg is None
+
+    def test_invalid_json_returns_none(self):
+        body = "not json"
+        stdin = io.StringIO(f"Content-Length: {len(body)}\r\n\r\n{body}")
+        with patch.object(sys, "stdin", stdin):
+            msg = mcp_server._read_mcp_message()
+        assert msg is None
+
+    def test_empty_body_with_valid_content_length(self):
+        body = ""
+        stdin = io.StringIO(f"Content-Length: 0\r\n\r\n")
+        with patch.object(sys, "stdin", stdin):
+            msg = mcp_server._read_mcp_message()
+        # json.loads("") raises JSONDecodeError → returns None
+        assert msg is None
+
+
+# ── handle_request ─────────────────────────────────────────────────────
+
+class TestHandleRequest:
+    """Tests for handle_request() — JSON-RPC request handling."""
+
+    def test_initialize(self):
+        resp = mcp_server.handle_request({"jsonrpc": "2.0", "method": "initialize", "id": 1})
+        assert resp["id"] == 1
+        assert resp["result"]["protocolVersion"] == "2024-11-05"
+        assert "tools" in resp["result"]["capabilities"]
+
+    def test_tools_list(self):
+        resp = mcp_server.handle_request({"jsonrpc": "2.0", "method": "tools/list", "id": 2})
+        assert resp["id"] == 2
+        tools = resp["result"]["tools"]
+        assert len(tools) > 0
+        names = {t["name"] for t in tools}
+        assert "sandbox_run_code" in names
+        assert "sandbox_run_command" in names
+        assert "sandbox_write_file" in names
+        assert "sandbox_read_file" in names
+        assert "sandbox_reset" in names
+
+    def test_unknown_method_returns_error(self):
+        resp = mcp_server.handle_request({"jsonrpc": "2.0", "method": "unknown", "id": 3})
+        assert resp["id"] == 3
+        assert "error" in resp
+        assert resp["error"]["code"] == -32601
+
+    def test_notifications_initialized_returns_none(self):
+        resp = mcp_server.handle_request({"method": "notifications/initialized"})
+        assert resp is None
+
+    def test_tools_call_unknown_tool(self):
+        resp = mcp_server.handle_request({
+            "jsonrpc": "2.0", "method": "tools/call", "id": 5,
+            "params": {"name": "nonexistent", "arguments": {}},
+        })
+        assert resp["id"] == 5
+        assert "Unknown tool" in resp["result"]["content"][0]["text"]
+
+
+# ── get_sandbox ────────────────────────────────────────────────────────
+
+class TestGetSandbox:
+    """Tests for get_sandbox() — sandbox lifecycle with TTL refresh."""
+
+    def test_creates_sandbox_on_first_call(self):
+        mock_instance = Mock()
+        with patch("e2b_code_interpreter.Sandbox") as mock_cls:
+            mock_cls.create.return_value = mock_instance
+            result = mcp_server.get_sandbox()
+        assert result is mock_instance
+        mock_cls.create.assert_called_once()
+
+    def test_refreshes_ttl_on_subsequent_call(self):
+        """Fix: TTL is now refreshed via set_timeout() on each access to
+        prevent sandbox expiry during long-idle MCP sessions."""
+        mock_instance = Mock()
+        mcp_server._sandbox = mock_instance
+        result = mcp_server.get_sandbox(timeout=600)
+        assert result is mock_instance
+        mock_instance.set_timeout.assert_called_once_with(600)
+
+    def test_recreates_sandbox_if_set_timeout_fails(self):
+        """Fix: If set_timeout fails (sandbox expired), the sandbox is
+        automatically killed and recreated instead of propagating the error."""
+        mock_instance = Mock()
+        mock_instance.set_timeout.side_effect = Exception("expired")
+        mcp_server._sandbox = mock_instance
+
+        new_instance = Mock()
+        with patch("e2b_code_interpreter.Sandbox") as mock_cls:
+            mock_cls.create.return_value = new_instance
+            result = mcp_server.get_sandbox()
+
+        assert result is new_instance
+        mock_instance.kill.assert_called_once()
+        mock_cls.create.assert_called_once()
