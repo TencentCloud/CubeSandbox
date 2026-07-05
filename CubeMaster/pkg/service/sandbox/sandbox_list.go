@@ -7,6 +7,7 @@ package sandbox
 import (
 	"context"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -100,6 +101,17 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 	wg.Wait()
 	close(resChan)
 	<-done
+
+	// Results arrive over resChan in goroutine-completion order, which varies
+	// between calls and across nodes, so rsp.Data would otherwise be reshuffled
+	// on every list request. Sort by creation time descending (newest first),
+	// falling back to SandboxID for a deterministic, stable order.
+	sort.Slice(rsp.Data, func(i, j int) bool {
+		if rsp.Data[i].CreateAt != rsp.Data[j].CreateAt {
+			return rsp.Data[i].CreateAt > rsp.Data[j].CreateAt
+		}
+		return rsp.Data[i].SandboxID < rsp.Data[j].SandboxID
+	})
 	return
 }
 
