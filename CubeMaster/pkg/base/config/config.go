@@ -135,8 +135,9 @@ type ExtraConf struct {
 	NetQosList string            `yaml:"net_qos_list"`
 
 	// AllowedHostMountPrefixes restricts which host directories can be
-	// bind-mounted into sandboxes. Each entry must be an absolute path ending
-	// with "/". A hostPath is allowed if it is under at least one prefix.
+	// bind-mounted into sandboxes. Each entry must be an absolute path
+	// (trailing "/" is optional and will be appended automatically).
+	// A hostPath is allowed if it is under at least one prefix.
 	// Default (when empty): ["/data/shared/"].
 	AllowedHostMountPrefixes []string `yaml:"allowed_host_mount_prefixes"`
 }
@@ -1137,8 +1138,9 @@ func validate(cfg *Config) error {
 		}
 	}
 	for _, p := range cfg.ExtraConf.AllowedHostMountPrefixes {
-		if filepath.Clean(p) == "/" {
-			return fmt.Errorf("allowed_host_mount_prefixes must not contain root path %q", p)
+		cleaned := filepath.Clean(p)
+		if cleaned == "/" || cleaned == "." || !filepath.IsAbs(p) {
+			return fmt.Errorf("allowed_host_mount_prefixes entry %q must be an absolute path and must not be root or empty", p)
 		}
 	}
 	return nil
@@ -1149,13 +1151,26 @@ func GetConfig() *Config {
 	return cfg
 }
 
+var defaultAllowedHostMountPrefixes = []string{"/data/shared/"}
+
 // GetAllowedHostMountPrefixes returns the configured allowed host-mount
 // prefixes, defaulting to ["/data/shared/"] when not configured.
+// Trailing "/" is auto-appended if missing. Returns a defensive copy.
 func GetAllowedHostMountPrefixes() []string {
-	if c := cfg; c != nil && c.ExtraConf != nil && len(c.ExtraConf.AllowedHostMountPrefixes) > 0 {
-		return c.ExtraConf.AllowedHostMountPrefixes
+	c := cfg
+	if c == nil || c.ExtraConf == nil || len(c.ExtraConf.AllowedHostMountPrefixes) == 0 {
+		return append([]string{}, defaultAllowedHostMountPrefixes...)
 	}
-	return []string{"/data/shared/"}
+	raw := c.ExtraConf.AllowedHostMountPrefixes
+	result := make([]string, len(raw))
+	for i, p := range raw {
+		if !strings.HasSuffix(p, "/") {
+			result[i] = p + "/"
+		} else {
+			result[i] = p
+		}
+	}
+	return result
 }
 
 func notify(config *Config) {

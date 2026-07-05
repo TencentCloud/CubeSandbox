@@ -66,7 +66,7 @@ SDK raises an `ApiError` exception with HTTP status 500:
 
 ```python
 from cubesandbox import Sandbox
-from cubesandbox._exceptions import ApiError
+from cubesandbox import ApiError
 
 try:
     sandbox = Sandbox.create(
@@ -78,7 +78,7 @@ try:
 except ApiError as e:
     print(e.status_code)  # 500
     print(str(e))
-    # "host-mount" entry[0]: hostPath must be under one of [/data/shared/], got "/etc/passwd"
+    # "host-mount" entry[0]: hostPath "/etc/passwd" is not within an allowed mount prefix
 ```
 
 The raw HTTP response from CubeAPI looks like:
@@ -89,7 +89,7 @@ Content-Type: application/json
 
 {
   "code": 500,
-  "message": "internal error: \"host-mount\" entry[0]: hostPath must be under one of [/data/shared/], got \"/etc/passwd\""
+  "message": "internal error: \"host-mount\" entry[0]: hostPath \"/etc/passwd\" is not within an allowed mount prefix"
 }
 ```
 
@@ -193,7 +193,7 @@ with Sandbox.create(
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| `hostPath must be under one of [...]` | `hostPath` is outside the allowed prefixes | Move data under `/data/shared/` or add the path to `allowed_host_mount_prefixes` in CubeMaster config |
+| `hostPath "..." is not within an allowed mount prefix` | `hostPath` is outside the allowed prefixes | Move data under `/data/shared/` or add the path to `allowed_host_mount_prefixes` in CubeMaster config |
 | `No such file or directory` inside sandbox | `hostPath` does not exist on the Cubelet node | Create the directory on the node before running |
 | `Read-only file system` on write | Mounted with `readOnly: true` | Use `readOnly: false` or switch to `/mnt/rw` |
 | `Template not found` | Wrong template ID | Run `cubemastercli tpl list` |

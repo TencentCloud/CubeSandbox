@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -237,4 +238,87 @@ func TestDefaultNodeAffinitySelectorAllowedKeySet(t *testing.T) {
 	assert.Contains(t, allowed, constants.AffinityKeyInstanceType)
 	assert.NotContains(t, allowed, "gpu")
 	assert.NotContains(t, allowed, constants.AffinityKeyDisaterRecoverGroup)
+}
+
+func TestValidateAllowedHostMountPrefixes(t *testing.T) {
+	tests := []struct {
+		name     string
+		prefixes []string
+		wantErr  bool
+	}{
+		{"valid with trailing slash", []string{"/data/shared/"}, false},
+		{"valid without trailing slash", []string{"/data/shared"}, false},
+		{"multiple valid", []string{"/data/shared/", "/mnt/nfs/"}, false},
+		{"reject root path /", []string{"/"}, true},
+		{"reject root via traversal", []string{"/data/.."}, true},
+		{"reject empty string", []string{""}, true},
+		{"reject relative path", []string{"data/shared/"}, true},
+		{"reject dot path", []string{"."}, true},
+		{"one valid one invalid", []string{"/data/shared/", ""}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Config{
+				Log: &log.Conf{},
+				ExtraConf: &ExtraConf{
+					AllowedHostMountPrefixes: tt.prefixes,
+				},
+			}
+			err := validate(c)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestGetAllowedHostMountPrefixes_Default(t *testing.T) {
+	old := cfg
+	cfg = nil
+	defer func() { cfg = old }()
+
+	got := GetAllowedHostMountPrefixes()
+	assert.Equal(t, []string{"/data/shared/"}, got)
+}
+
+func TestGetAllowedHostMountPrefixes_AutoAppendSlash(t *testing.T) {
+	old := cfg
+	cfg = &Config{
+		ExtraConf: &ExtraConf{
+			AllowedHostMountPrefixes: []string{"/data/shared", "/mnt/nfs/"},
+		},
+	}
+	defer func() { cfg = old }()
+
+	got := GetAllowedHostMountPrefixes()
+	assert.Equal(t, []string{"/data/shared/", "/mnt/nfs/"}, got)
+}
+
+func TestGetAllowedHostMountPrefixes_DefensiveCopy(t *testing.T) {
+	old := cfg
+	cfg = &Config{
+		ExtraConf: &ExtraConf{
+			AllowedHostMountPrefixes: []string{"/data/shared/"},
+		},
+	}
+	defer func() { cfg = old }()
+
+	got := GetAllowedHostMountPrefixes()
+	got[0] = "/hacked/"
+	// original config must not be affected
+	assert.Equal(t, "/data/shared/", cfg.ExtraConf.AllowedHostMountPrefixes[0])
+}
+
+func TestGetAllowedHostMountPrefixes_DefaultDefensiveCopy(t *testing.T) {
+	old := cfg
+	cfg = nil
+	defer func() { cfg = old }()
+
+	got := GetAllowedHostMountPrefixes()
+	got[0] = "/hacked/"
+	// package-level default must not be affected
+	got2 := GetAllowedHostMountPrefixes()
+	assert.Equal(t, "/data/shared/", got2[0])
 }

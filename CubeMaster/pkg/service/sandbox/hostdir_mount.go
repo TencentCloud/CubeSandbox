@@ -65,9 +65,11 @@ func injectHostDirMounts(ctx context.Context, req *types.CreateCubeSandboxReq) e
 			return fmt.Errorf("%q entry[%d]: mountPath must be an absolute path, got %q",
 				AnnotationHostDirMount, i, o.MountPath)
 		}
-		if err := validateHostPath(o.HostPath); err != nil {
+		cleaned, err := validateHostPath(o.HostPath)
+		if err != nil {
 			return fmt.Errorf("%q entry[%d]: %w", AnnotationHostDirMount, i, err)
 		}
+		opts[i].HostPath = cleaned
 	}
 
 	for i, o := range opts {
@@ -108,14 +110,15 @@ func injectHostDirMounts(ctx context.Context, req *types.CreateCubeSandboxReq) e
 
 // validateHostPath checks that hostPath falls under one of the configured
 // allowed prefixes (see config.GetAllowedHostMountPrefixes). It resolves
-// ".." to prevent path-traversal bypasses.
-func validateHostPath(hostPath string) error {
-	cleaned := filepath.Clean(hostPath) + "/"
-	for _, prefix := range config.GetAllowedHostMountPrefixes() {
-		if strings.HasPrefix(cleaned, prefix) {
-			return nil
+// ".." to prevent path-traversal bypasses and returns the cleaned path.
+func validateHostPath(hostPath string) (string, error) {
+	allowedPrefixes := config.GetAllowedHostMountPrefixes()
+	cleaned := filepath.Clean(hostPath)
+	check := cleaned + "/"
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(check, prefix) {
+			return cleaned, nil
 		}
 	}
-	return fmt.Errorf("hostPath must be under one of %v, got %q",
-		config.GetAllowedHostMountPrefixes(), hostPath)
+	return "", fmt.Errorf("hostPath %q is not within an allowed mount prefix", hostPath)
 }

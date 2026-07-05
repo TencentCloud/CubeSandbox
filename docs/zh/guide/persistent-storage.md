@@ -172,7 +172,7 @@ with Sandbox.create(
 如果指定了不允许的路径，SDK 会抛出 `ApiError` 异常：
 
 ```python
-from cubesandbox._exceptions import ApiError
+from cubesandbox import ApiError
 
 try:
     sandbox = Sandbox.create(
@@ -184,7 +184,7 @@ try:
 except ApiError as e:
     print(e.status_code)  # 500
     print(str(e))
-    # "host-mount" entry[0]: hostPath must be under one of [/data/shared/], got "/etc/passwd"
+    # "host-mount" entry[0]: hostPath "/etc/passwd" is not within an allowed mount prefix
 ```
 
 ### 自定义允许的前缀
@@ -375,7 +375,7 @@ sudo chmod 0700 /data/shared/tenant-b
 
 | 现象 | 可能原因 | 解决方法 |
 |------|---------|---------|
-| `hostPath must be under one of [...]` | 路径不在允许的前缀范围内 | 将数据放到 `/data/shared/` 下，或在 CubeMaster 配置中更新 `allowed_host_mount_prefixes` |
+| `hostPath "..." is not within an allowed mount prefix` | 路径不在允许的前缀范围内 | 将数据放到 `/data/shared/` 下，或在 CubeMaster 配置中更新 `allowed_host_mount_prefixes` |
 | 沙箱内 `No such file or directory` | 沙箱宿主机节点上 `hostPath` 不存在 | 在运行前在节点上创建目录 |
 | 写入时 `Read-only file system` | 使用了 `readOnly: true` 挂载 | 改为 `readOnly: false` |
 | 写入时 `Permission denied` | 宿主目录所有者与沙箱用户不匹配 | 参见上方[权限管理](#权限管理) |

@@ -172,7 +172,7 @@ Out of the box, only the following paths are valid:
 If a disallowed path is specified, the SDK raises an `ApiError`:
 
 ```python
-from cubesandbox._exceptions import ApiError
+from cubesandbox import ApiError
 
 try:
     sandbox = Sandbox.create(
@@ -184,7 +184,7 @@ try:
 except ApiError as e:
     print(e.status_code)  # 500
     print(str(e))
-    # "host-mount" entry[0]: hostPath must be under one of [/data/shared/], got "/etc/passwd"
+    # "host-mount" entry[0]: hostPath "/etc/passwd" is not within an allowed mount prefix
 ```
 
 ### Custom Allowed Prefixes
@@ -375,7 +375,7 @@ Even if a sandbox attempts to access another tenant's path (e.g. via traversal),
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| `hostPath must be under one of [...]` | Path is outside allowed prefixes | Move data under `/data/shared/` or update `allowed_host_mount_prefixes` in CubeMaster config |
+| `hostPath "..." is not within an allowed mount prefix` | Path is outside allowed prefixes | Move data under `/data/shared/` or update `allowed_host_mount_prefixes` in CubeMaster config |
 | `No such file or directory` inside sandbox | `hostPath` does not exist on the sandbox host node | Create the directory on the node before running |
 | `Read-only file system` on write | Mounted with `readOnly: true` | Use `readOnly: false` |
 | `Permission denied` on write | Host directory ownership mismatch | See [Permissions](#permissions) section above |
