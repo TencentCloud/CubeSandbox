@@ -121,11 +121,13 @@ static __always_inline bool should_do_nat(const struct iphdr *l3)
  * matches, policy_value receives the matched flags for later L7 routing.
  */
 static __always_inline bool check_net_policy(__u32 ifindex, __u32 daddr,
-					     struct net_policy_value_v2 *policy_value)
+					     struct net_policy_value_v2 *policy_value,
+					     bool refresh_ttl)
 {
 	struct lpm_key key = { .prefixlen = 32, .ip = daddr };
 	struct net_policy_value_v2 *value;
 	void *inner_map;
+	__u64 now;
 
 	policy_value->expires_at_ns = 0;
 	policy_value->flags = 0;
@@ -136,13 +138,22 @@ static __always_inline bool check_net_policy(__u32 ifindex, __u32 daddr,
 	if (daddr == mvm_gateway_ip)
 		return true;
 
+	now = bpf_ktime_get_ns();
+
 	/* allow_out_v2 takes precedence. */
 	inner_map = bpf_map_lookup_elem(&allow_out_v2, &ifindex);
 	if (inner_map) {
 		value = bpf_map_lookup_elem(inner_map, &key);
 		if (value && (value->expires_at_ns == 0 ||
-			      value->expires_at_ns > bpf_ktime_get_ns())) {
+			      value->expires_at_ns > now)) {
 			*policy_value = *value;
+			/* Rate-limited refresh: only write when remaining
+			 * TTL drops below half, so a 10-min window yields
+			 * at most one write per ~5 minutes per destination.
+			 */
+			if (refresh_ttl && value->expires_at_ns != 0 &&
+			    value->expires_at_ns - now < DNS_LEARNED_REFRESH_NS / 2)
+				value->expires_at_ns = now + DNS_LEARNED_REFRESH_NS;
 			return true;
 		}
 		/* allow_out_v2 map exists but daddr not in it or entry expired,
@@ -1014,11 +1025,20 @@ int from_cube(struct __sk_buff *skb)
 		}
 	}
 
-	/* Enforce egress network policy before NAT. */
-	if (!check_net_policy(ifindex, daddr, &policy_value)) {
-		if (proto == IPPROTO_TCP)
-			return tcp_reply_reset(skb, ifindex);
-		return TC_ACT_SHOT;
+	/* Enforce egress network policy before NAT.  For non-SYN TCP,
+	 * also refresh DNS-learned entry TTL so long-lived connections
+	 * survive DNS TTL rotation.  l4 was parsed above for TCP.
+	 */
+	{
+		bool refresh = proto == IPPROTO_TCP &&
+			       !(l4->syn && !l4->ack) &&
+			       !l4->fin && !l4->rst;
+		if (!check_net_policy(ifindex, daddr, &policy_value,
+				      refresh)) {
+			if (proto == IPPROTO_TCP)
+				return tcp_reply_reset(skb, ifindex);
+			return TC_ACT_SHOT;
+		}
 	}
 
 	ret = pull_headers(skb, &l2, &l3);

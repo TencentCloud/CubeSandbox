@@ -38,6 +38,11 @@
 #define NET_POLICY_FLAG_L7_REQUIRED	1
 #define NSEC_PER_SEC			1000000000ULL
 #define DNS_QUERY_TRACK_TTL_NS		(10ULL * NSEC_PER_SEC)
+/* Duration to extend DNS-learned allow_out_v2 entries when non-SYN TCP
+ * traffic hits them.  Keeps long-lived connections alive across DNS TTL
+ * rotation while still letting the reaper reclaim truly idle entries.
+ */
+#define DNS_LEARNED_REFRESH_NS		(600ULL * NSEC_PER_SEC)
 
 /* https://en.wikipedia.org/wiki/IPv4#Header
  *
