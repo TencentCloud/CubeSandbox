@@ -10,12 +10,14 @@ package sweeper
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/tencentcloud/CubeSandbox/CubeProxy/sidecar/internal/cubemasterclient"
+	"github.com/tencentcloud/CubeSandbox/CubeProxy/sidecar/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/CubeProxy/sidecar/internal/registry"
 )
 
@@ -144,10 +146,8 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 		// at "paused", "pausing", "killing", or "killed", there is nothing
 		// for us to do — either the dataplane will resume it on demand
 		// (paused) or the sandbox is on its way out (killing/killed).
-		// Without this guard the sweeper logs "idle threshold exceeded"
-		// every Interval and the state-key TTL (StateLockTTL=60s) expires
-		// periodically, causing a pointless RPC churn against CubeMaster
-		// every minute.
+		// Without this guard the sweeper would log "idle threshold exceeded"
+		// every Interval and issue pointless RPC churn against CubeMaster.
 		curState, _, stateErr := s.o.Redis.GetState(ctx, e.Meta.SandboxID)
 		if stateErr != nil {
 			s.o.Log.Warn("get state failed; will attempt action anyway",
@@ -193,8 +193,8 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 }
 
 // tryPause acquires the state lock, calls CubeMaster, and pushes the new
-// state out to CubeProxy. It is idempotent — a lost SETNX race is treated as
-// success (someone else is pausing the same sandbox).
+// state out to CubeProxy. It is idempotent — a lost CAS race is treated as
+// success because someone else is already transitioning the same sandbox.
 //
 // Two CubeMaster ret_codes are not real failures and are mapped to
 // terminal-success behaviour:
@@ -208,7 +208,7 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 //     attempt). Treat exactly like a fresh successful pause.
 func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 	sid := e.Meta.SandboxID
-	got, err := s.o.Redis.AcquireState(ctx, sid, "pausing", s.o.StateLockTTL)
+	got, origState, err := s.o.Redis.TryTransitionState(ctx, sid, "pausing", s.o.StateLockTTL, "", "running")
 	if err != nil {
 		return err
 	}
@@ -246,21 +246,19 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 			// Redis + push it to CubeProxy (in case a peer sidecar paused
 			// it but didn't push, or our previous attempt failed only on
 			// the post-RPC bookkeeping).
+			// No return — proceed to success bookkeeping below.
 			s.o.Log.Info("sandbox already paused on cubemaster; reconciling state",
 				zap.String("sandbox_id", sid),
 				zap.Int("ret_code", apiErr.RetCode))
-			// no return — proceed to success bookkeeping below
 		default:
-			// Real failure. Roll back: clear the pausing state so a future
-			// sweep can retry, and tell CubeProxy the sandbox is back to
-			// running (it never actually paused).
-			_ = s.o.Redis.ClearState(ctx, sid)
-			_ = s.o.ProxyPush.SetState(ctx, sid, "running")
-			return errors.New("cubemaster pause: " + pauseErr.Error())
+			// Real failure. Roll back to the state CAS observed before it
+			// moved the sandbox into "pausing".
+			s.restoreState(ctx, sid, origState)
+			return fmt.Errorf("cubemaster pause: %w", pauseErr)
 		}
 	}
 
-	if err := s.o.Redis.SetState(ctx, sid, "paused", s.o.StateLockTTL); err != nil {
+	if err := s.o.Redis.SetState(ctx, sid, "paused", lifecycle.TerminalStateTTL); err != nil {
 		s.o.Log.Warn("write paused state failed",
 			zap.String("sandbox_id", sid), zap.Error(err))
 	}
@@ -288,15 +286,13 @@ func (s *Sweeper) KillStats() (triggered, failed int64) {
 	return s.killTriggered.Load(), s.killFailed.Load()
 }
 
-// tryKill is the kill-path counterpart of tryPause. Same coordination
-// pattern (SETNX → notify proxy → RPC → finalise), but the terminal state is
-// non-recoverable: on success we evict the registry entry and tell every
-// CubeProxy replica to forget the sandbox. The Lua gate maps `killing` /
-// `killed` to 410 Gone so any in-flight client request fails fast instead of
-// hanging on a doomed retry.
+// tryKill is the kill-path counterpart of tryPause. It uses the same Redis CAS
+// ownership pattern, but the terminal state is non-recoverable: on success we
+// evict the registry entry and tell every CubeProxy replica to forget the
+// sandbox.
 func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 	sid := e.Meta.SandboxID
-	got, err := s.o.Redis.AcquireState(ctx, sid, "killing", s.o.StateLockTTL)
+	got, origState, err := s.o.Redis.TryTransitionState(ctx, sid, "killing", s.o.StateLockTTL, "", "running")
 	if err != nil {
 		return err
 	}
@@ -304,11 +300,6 @@ func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 		// A peer sidecar (or our own resume / pause path) holds the state.
 		// Skip — the holder will drive the transition.
 		return nil
-	}
-
-	if err := s.o.ProxyPush.SetState(ctx, sid, "killing"); err != nil {
-		s.o.Log.Warn("push killing state failed",
-			zap.String("sandbox_id", sid), zap.Error(err))
 	}
 
 	killErr := s.o.CubeMaster.Kill(ctx, sid, e.Meta.InstanceType, cubemasterclient.KillReasonTimeout)
@@ -325,13 +316,12 @@ func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 				zap.String("sandbox_id", sid),
 				zap.Int("ret_code", apiErr.RetCode))
 		default:
-			_ = s.o.Redis.ClearState(ctx, sid)
-			_ = s.o.ProxyPush.SetState(ctx, sid, "running")
-			return errors.New("cubemaster kill: " + killErr.Error())
+			s.restoreState(ctx, sid, origState)
+			return fmt.Errorf("cubemaster kill: %w", killErr)
 		}
 	}
 
-	if err := s.o.Redis.SetState(ctx, sid, "killed", s.o.StateLockTTL); err != nil {
+	if err := s.o.Redis.SetState(ctx, sid, "killed", lifecycle.TerminalStateTTL); err != nil {
 		s.o.Log.Warn("write killed state failed",
 			zap.String("sandbox_id", sid), zap.Error(err))
 	}
@@ -347,4 +337,14 @@ func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 		zap.Int("timeout_seconds", e.Meta.TimeoutSeconds),
 		zap.String("kill_reason", cubemasterclient.KillReasonTimeout))
 	return nil
+}
+
+func (s *Sweeper) restoreState(ctx context.Context, sid, state string) {
+	if state == "" {
+		_ = s.o.Redis.ClearState(ctx, sid)
+		_ = s.o.ProxyPush.SetState(ctx, sid, "running")
+		return
+	}
+	_ = s.o.Redis.SetState(ctx, sid, state, lifecycle.TTLForRestoredState(state, s.o.StateLockTTL))
+	_ = s.o.ProxyPush.SetState(ctx, sid, state)
 }

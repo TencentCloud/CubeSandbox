@@ -9,10 +9,14 @@ import (
 	"time"
 )
 
-// stateStore is the subset of redisstream.Client we use. Tests substitute an
-// in-memory fake so we don't depend on a live Redis.
+// stateStore is the data store interface we use for lifecycle state management.
+// Tests substitute an in-memory fake so we don't depend on an external database.
 type stateStore interface {
-	AcquireState(ctx context.Context, sandboxID, state string, ttl time.Duration) (bool, error)
+	// TryTransitionState atomically changes sandboxID's lifecycle state to newState
+	// when the current underlying state is one of allowedCurrentStates.
+	// It returns whether the swap happened and the state observed before the
+	// decision. An empty observedState means the state was missing.
+	TryTransitionState(ctx context.Context, sandboxID, newState string, newStateTTL time.Duration, allowedCurrentStates ...string) (swapped bool, observedState string, err error)
 	SetState(ctx context.Context, sandboxID, state string, ttl time.Duration) error
 	ClearState(ctx context.Context, sandboxID string) error
 	GetState(ctx context.Context, sandboxID string) (string, bool, error)

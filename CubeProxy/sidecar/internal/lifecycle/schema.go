@@ -31,8 +31,9 @@ const (
 )
 
 // StateKey returns the per-sandbox pause/resume coordination key. Values are
-// "running" | "pausing" | "paused" | "resuming". The sidecar uses SETNX with
-// TTL to coordinate concurrent pause/resume across replicas.
+// "running" | "pausing" | "paused" | "resuming" | "killing" | "killed". The
+// sidecar uses CAS with a TTL to coordinate concurrent lifecycle transitions
+// across replicas.
 func StateKey(sandboxID string) string {
 	return "cube:v1:shared:sandbox:lifecycle:state:" + sandboxID
 }

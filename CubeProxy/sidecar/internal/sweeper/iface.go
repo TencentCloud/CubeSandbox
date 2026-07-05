@@ -9,12 +9,16 @@ import (
 	"time"
 )
 
-// stateStore is the subset of redisstream.Client that the sweeper needs.
+// stateStore is the data store interface the sweeper needs for lifecycle management.
 // Defining it as an interface here lets tests substitute an in-memory fake
-// without spinning up a real Redis. The concrete *redisstream.Client
+// without spinning up an external database. The concrete *redisstream.Client
 // satisfies this interface implicitly.
 type stateStore interface {
-	AcquireState(ctx context.Context, sandboxID, state string, ttl time.Duration) (bool, error)
+	// TryTransitionState atomically changes sandboxID's lifecycle state to newState
+	// when the current underlying state is one of allowedCurrentStates.
+	// It returns whether the swap happened and the state observed before the
+	// decision. An empty observedState means the state was missing.
+	TryTransitionState(ctx context.Context, sandboxID, newState string, newStateTTL time.Duration, allowedCurrentStates ...string) (swapped bool, observedState string, err error)
 	SetState(ctx context.Context, sandboxID, state string, ttl time.Duration) error
 	ClearState(ctx context.Context, sandboxID string) error
 	GetState(ctx context.Context, sandboxID string) (string, bool, error)

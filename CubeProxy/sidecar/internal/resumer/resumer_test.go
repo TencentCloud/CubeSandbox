@@ -22,34 +22,48 @@ import (
 type fakeStore struct {
 	mu     sync.Mutex
 	states map[string]string
-	// allowAcquire controls whether AcquireState succeeds. When the second
-	// element is non-empty, AcquireState seeds that state value into the
+	ttls   map[string]time.Duration
+	// allowAcquire controls whether TryTransitionState succeeds. When the second
+	// element is non-empty, TryTransitionState seeds that state value into the
 	// map (simulating a peer holding the lock) and returns false.
 	preLocked map[string]string
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{states: make(map[string]string), preLocked: make(map[string]string)}
+	return &fakeStore{
+		states:    make(map[string]string),
+		ttls:      make(map[string]time.Duration),
+		preLocked: make(map[string]string),
+	}
 }
 
-func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Duration) (bool, error) {
+func (f *fakeStore) TryTransitionState(_ context.Context, sid, newState string, _ time.Duration, allowedCurrentStates ...string) (swapped bool, observedState string, err error) {
+	if len(allowedCurrentStates) == 0 {
+		return false, "", errors.New("TryTransitionState requires at least one expected state")
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	cur := f.states[sid]
 	if v, ok := f.preLocked[sid]; ok {
-		f.states[sid] = v
-		return false, nil
+		if cur == "" {
+			f.states[sid] = v
+			cur = v
+		}
 	}
-	if _, ok := f.states[sid]; ok {
-		return false, nil
+	for _, e := range allowedCurrentStates {
+		if cur == e {
+			f.states[sid] = newState
+			return true, cur, nil
+		}
 	}
-	f.states[sid] = state
-	return true, nil
+	return false, cur, nil
 }
 
-func (f *fakeStore) SetState(_ context.Context, sid, state string, _ time.Duration) error {
+func (f *fakeStore) SetState(_ context.Context, sid, state string, ttl time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.states[sid] = state
+	f.ttls[sid] = ttl
 	return nil
 }
 
@@ -71,6 +85,12 @@ func (f *fakeStore) state(sid string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.states[sid]
+}
+
+func (f *fakeStore) ttl(sid string) time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ttls[sid]
 }
 
 // fakeMaster captures Resume calls; supports artificial latency to exercise
@@ -153,6 +173,9 @@ func TestResumer_HappyPath(t *testing.T) {
 	if got := store.state("sbx"); got != "running" {
 		t.Fatalf("expected redis state=running, got %q", got)
 	}
+	if got := store.ttl("sbx"); got != 0 {
+		t.Fatalf("running terminal state must not expire, ttl=%s", got)
+	}
 	// Regression: a successful resume must reset the registry's
 	// LastActiveMs to "now" — otherwise the sweeper, on its next 5s
 	// tick, computes idle = now - CreatedAt (hours ago) and noisily
@@ -221,20 +244,46 @@ func TestResumer_DedupesConcurrentResumes(t *testing.T) {
 }
 
 func TestResumer_RollsBackOnRPCFailure(t *testing.T) {
-	reg := registry.New()
-	reg.Upsert(lifecycle.SandboxLifecycleMeta{
-		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
-	})
-	store := newFakeStore()
-	master := &fakeMaster{failNext: true, failError: errors.New("master 500")}
-	push := &fakePush{}
-	r := newTestResumer(reg, store, master, push)
-
-	if err := r.Resume(context.Background(), "sbx"); err == nil {
-		t.Fatal("expected error from RPC failure")
+	tests := []struct {
+		name      string
+		orig      string
+		wantState string
+		wantTTL   time.Duration
+	}{
+		{
+			name: "missing",
+		},
+		{
+			name:      "paused",
+			orig:      "paused",
+			wantState: "paused",
+		},
 	}
-	if got := store.state("sbx"); got != "" {
-		t.Fatalf("state must be cleared on rollback, got %q", got)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := registry.New()
+			reg.Upsert(lifecycle.SandboxLifecycleMeta{
+				SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+			})
+			store := newFakeStore()
+			if tt.orig != "" {
+				store.states["sbx"] = tt.orig
+			}
+			master := &fakeMaster{failNext: true, failError: errors.New("master 500")}
+			push := &fakePush{}
+			r := newTestResumer(reg, store, master, push)
+
+			if err := r.Resume(context.Background(), "sbx"); err == nil {
+				t.Fatal("expected error from RPC failure")
+			}
+			if got := store.state("sbx"); got != tt.wantState {
+				t.Fatalf("state must roll back to %q, got %q", tt.wantState, got)
+			}
+			if got := store.ttl("sbx"); got != tt.wantTTL {
+				t.Fatalf("ttl must roll back to %s, got %s", tt.wantTTL, got)
+			}
+		})
 	}
 }
 
@@ -267,6 +316,31 @@ func TestResumer_WaitsWhenPeerHoldsLock(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&master.calls); got != 0 {
 		t.Fatalf("waiter must not call master.Resume, got %d", got)
+	}
+}
+
+func TestResumer_FailsFastWhenSandboxIsBeingKilled(t *testing.T) {
+	for _, state := range []string{"killing", "killed"} {
+		t.Run(state, func(t *testing.T) {
+			reg := registry.New()
+			reg.Upsert(lifecycle.SandboxLifecycleMeta{
+				SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+			})
+			store := newFakeStore()
+			store.states["sbx"] = state
+			master := &fakeMaster{}
+			push := &fakePush{}
+			r := newTestResumer(reg, store, master, push)
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := r.Resume(ctx, "sbx"); err == nil {
+				t.Fatal("expected killing state to fail resume")
+			}
+			if got := atomic.LoadInt32(&master.calls); got != 0 {
+				t.Fatalf("must not call master.Resume for %q state, got %d", state, got)
+			}
+		})
 	}
 }
 
@@ -317,5 +391,8 @@ func TestResumer_NoOpWhenStateIsAlreadyRunning(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&master.calls); got != 0 {
 		t.Fatalf("master.Resume must NOT be called when state=running, got %d", got)
+	}
+	if got := store.ttl("sbx-run"); got != 0 {
+		t.Fatalf("reconciled running state must not expire, ttl=%s", got)
 	}
 }

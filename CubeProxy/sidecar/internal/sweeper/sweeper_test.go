@@ -23,35 +23,46 @@ import (
 type fakeStore struct {
 	mu     sync.Mutex
 	states map[string]string
+	ttls   map[string]time.Duration
 
 	failAcquire bool
-	acquireBy   func(sid, state string) bool // when set, controls AcquireState success
+	acquireBy   func(sid, state string) bool // when set, controls TryTransitionState success
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{states: make(map[string]string)}
+	return &fakeStore{
+		states: make(map[string]string),
+		ttls:   make(map[string]time.Duration),
+	}
 }
 
-func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Duration) (bool, error) {
+func (f *fakeStore) TryTransitionState(_ context.Context, sid, newState string, _ time.Duration, allowedCurrentStates ...string) (swapped bool, observedState string, err error) {
+	if len(allowedCurrentStates) == 0 {
+		return false, "", errors.New("TryTransitionState requires at least one expected state")
+	}
 	if f.failAcquire {
-		return false, errors.New("redis down")
+		return false, "", errors.New("redis down")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.acquireBy != nil && !f.acquireBy(sid, state) {
-		return false, nil
+	cur := f.states[sid]
+	if f.acquireBy != nil && !f.acquireBy(sid, cur) {
+		return false, cur, nil
 	}
-	if _, ok := f.states[sid]; ok {
-		return false, nil // already held
+	for _, e := range allowedCurrentStates {
+		if cur == e {
+			f.states[sid] = newState
+			return true, cur, nil
+		}
 	}
-	f.states[sid] = state
-	return true, nil
+	return false, cur, nil
 }
 
-func (f *fakeStore) SetState(_ context.Context, sid, state string, _ time.Duration) error {
+func (f *fakeStore) SetState(_ context.Context, sid, state string, ttl time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.states[sid] = state
+	f.ttls[sid] = ttl
 	return nil
 }
 
@@ -73,6 +84,12 @@ func (f *fakeStore) state(sid string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.states[sid]
+}
+
+func (f *fakeStore) ttl(sid string) time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ttls[sid]
 }
 
 // fakeMaster captures every Pause / Kill call and lets tests inject errors.
@@ -209,6 +226,9 @@ func TestSweeper_PausesIdleSandbox(t *testing.T) {
 	if got := store.state("sbx-1"); got != "paused" {
 		t.Fatalf("expected redis state=paused, got %q", got)
 	}
+	if got := store.ttl("sbx-1"); got != 0 {
+		t.Fatalf("paused terminal state must not expire, ttl=%s", got)
+	}
 	pushed := push.states("sbx-1")
 	if len(pushed) < 2 || pushed[0] != "pausing" || pushed[len(pushed)-1] != "paused" {
 		t.Fatalf("expected push pausing→paused, got %v", pushed)
@@ -252,9 +272,11 @@ func TestSweeper_SkipsSandboxWithoutAutoPause(t *testing.T) {
 	if got := store.state("sbx-2"); got != "killed" {
 		t.Fatalf("expected redis state=killed, got %q", got)
 	}
-	pushed := push.states("sbx-2")
-	if len(pushed) == 0 || pushed[0] != "killing" {
-		t.Fatalf("expected first push state=killing, got %v", pushed)
+	if got := store.ttl("sbx-2"); got != 0 {
+		t.Fatalf("killed terminal state must not expire, ttl=%s", got)
+	}
+	if pushed := push.states("sbx-2"); len(pushed) != 0 {
+		t.Fatalf("kill path should delete metadata without pushing transient state, got %v", pushed)
 	}
 	triggered, failed := s.KillStats()
 	if triggered != 1 || failed != 0 {
@@ -262,34 +284,99 @@ func TestSweeper_SkipsSandboxWithoutAutoPause(t *testing.T) {
 	}
 }
 
-func TestSweeper_KillRollsBackOnFailure(t *testing.T) {
+func TestSweeper_KillRollbackRestoresOriginalState(t *testing.T) {
+	tests := []struct {
+		name      string
+		sid       string
+		orig      string
+		wantRedis string
+		wantProxy string
+		viaSweep  bool
+	}{
+		{
+			name:      "missing",
+			sid:       "sbx-killfail",
+			wantRedis: "",
+			wantProxy: "running",
+			viaSweep:  true,
+		},
+		{
+			name:      "running",
+			sid:       "sbx-killrunning",
+			orig:      "running",
+			wantRedis: "running",
+			wantProxy: "running",
+			viaSweep:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := registry.New()
+			store := newFakeStore()
+			if tt.orig != "" {
+				store.states[tt.sid] = tt.orig
+			}
+			master := &fakeMaster{failNextKill: true, failKillErr: errors.New("master 500")}
+			push := newFakePush()
+
+			now := time.Now()
+			meta := lifecycle.SandboxLifecycleMeta{
+				SandboxID: tt.sid, InstanceType: "cubebox",
+				AutoPause: false, TimeoutSeconds: 60,
+			}
+			s := newTestSweeper(reg, store, master, push, now)
+			if tt.viaSweep {
+				seedEntry(t, reg, meta, now.Add(-10*time.Minute).UnixMilli())
+				s.sweepOnce(context.Background())
+			} else if err := s.tryKill(context.Background(), registry.Entry{Meta: meta}); err == nil {
+				t.Fatal("expected kill failure")
+			}
+
+			if got := store.state(tt.sid); got != tt.wantRedis {
+				t.Fatalf("redis state should be restored to %q, got %q", tt.wantRedis, got)
+			}
+			pushed := push.states(tt.sid)
+			if len(pushed) == 0 || pushed[len(pushed)-1] != tt.wantProxy {
+				t.Fatalf("rollback should restore proxy to %q, got %v", tt.wantProxy, pushed)
+			}
+			if tt.viaSweep {
+				if reg.Get(tt.sid) == nil {
+					t.Fatal("registry entry should NOT be evicted on kill failure")
+				}
+				_, failed := s.KillStats()
+				if failed != 1 {
+					t.Fatalf("expected kill failed=1, got %d", failed)
+				}
+			}
+		})
+	}
+}
+
+func TestSweeper_KillSkipsPausedSandbox(t *testing.T) {
 	reg := registry.New()
 	store := newFakeStore()
-	master := &fakeMaster{failNextKill: true, failKillErr: errors.New("master 500")}
+	store.states["sbx-paused-kill"] = "paused"
+	master := &fakeMaster{}
 	push := newFakePush()
 
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
-		SandboxID: "sbx-killfail", InstanceType: "cubebox",
+		SandboxID: "sbx-paused-kill", InstanceType: "cubebox",
 		AutoPause: false, TimeoutSeconds: 60,
 	}, now.Add(-10*time.Minute).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
 	s.sweepOnce(context.Background())
 
-	if got := store.state("sbx-killfail"); got != "" {
-		t.Fatalf("redis state should be cleared after rollback, got %q", got)
+	if len(master.killCalls) != 0 {
+		t.Fatalf("paused sandbox must not be timeout-killed: %v", master.killCalls)
 	}
-	pushed := push.states("sbx-killfail")
-	if len(pushed) == 0 || pushed[len(pushed)-1] != "running" {
-		t.Fatalf("rollback should leave proxy at running, got %v", pushed)
+	if got := store.state("sbx-paused-kill"); got != "paused" {
+		t.Fatalf("paused state should be preserved, got %q", got)
 	}
-	if reg.Get("sbx-killfail") == nil {
-		t.Fatal("registry entry should NOT be evicted on kill failure")
-	}
-	_, failed := s.KillStats()
-	if failed != 1 {
-		t.Fatalf("expected kill failed=1, got %d", failed)
+	if got := push.deletedIDs(); len(got) != 0 {
+		t.Fatalf("paused sandbox metadata should not be deleted: %v", got)
 	}
 }
 
@@ -398,38 +485,67 @@ func TestSweeper_BootstrapWarmupSkipsBootstrapEntries(t *testing.T) {
 	}
 }
 
-func TestSweeper_RollsBackOnPauseFailure(t *testing.T) {
-	reg := registry.New()
-	store := newFakeStore()
-	master := &fakeMaster{failNext: true, failError: errors.New("master 500")}
-	push := newFakePush()
-
-	now := time.Now()
-	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
-		SandboxID: "sbx-4", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 60,
-	}, now.Add(-10*time.Minute).UnixMilli())
-
-	s := newTestSweeper(reg, store, master, push, now)
-	s.sweepOnce(context.Background())
-
-	if got := store.state("sbx-4"); got != "" {
-		t.Fatalf("redis state should be cleared after rollback, got %q", got)
+func TestSweeper_PauseRollbackRestoresOriginalState(t *testing.T) {
+	tests := []struct {
+		name      string
+		sid       string
+		orig      string
+		wantRedis string
+		wantProxy string
+	}{
+		{
+			name:      "missing",
+			sid:       "sbx-4",
+			wantRedis: "",
+			wantProxy: "running",
+		},
+		{
+			name:      "running",
+			sid:       "sbx-running",
+			orig:      "running",
+			wantRedis: "running",
+			wantProxy: "running",
+		},
 	}
-	pushed := push.states("sbx-4")
-	if len(pushed) == 0 || pushed[len(pushed)-1] != "running" {
-		t.Fatalf("rollback should leave proxy at running, got %v", pushed)
-	}
-	_, failed := s.Stats()
-	if failed != 1 {
-		t.Fatalf("expected failed=1, got %d", failed)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := registry.New()
+			store := newFakeStore()
+			if tt.orig != "" {
+				store.states[tt.sid] = tt.orig
+			}
+			master := &fakeMaster{failNext: true, failError: errors.New("master 500")}
+			push := newFakePush()
+
+			now := time.Now()
+			seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+				SandboxID: tt.sid, InstanceType: "cubebox",
+				AutoPause: true, TimeoutSeconds: 60,
+			}, now.Add(-10*time.Minute).UnixMilli())
+
+			s := newTestSweeper(reg, store, master, push, now)
+			s.sweepOnce(context.Background())
+
+			if got := store.state(tt.sid); got != tt.wantRedis {
+				t.Fatalf("redis state should be restored to %q, got %q", tt.wantRedis, got)
+			}
+			pushed := push.states(tt.sid)
+			if len(pushed) == 0 || pushed[len(pushed)-1] != tt.wantProxy {
+				t.Fatalf("rollback should restore proxy to %q, got %v", tt.wantProxy, pushed)
+			}
+			_, failed := s.Stats()
+			if failed != 1 {
+				t.Fatalf("expected failed=1, got %d", failed)
+			}
+		})
 	}
 }
 
 func TestSweeper_SkipsWhenLockHeldElsewhere(t *testing.T) {
 	reg := registry.New()
 	store := newFakeStore()
-	// Pre-seed the state map → AcquireState returns false (someone else owns).
+	// Pre-seed the state map → TryTransitionState returns false (someone else owns).
 	store.states["sbx-5"] = "pausing"
 
 	master := &fakeMaster{}
@@ -537,7 +653,7 @@ func TestSweeper_SkipsAlreadyPausedSandbox(t *testing.T) {
 	// Redis carries `state:<id>="paused"`. Subsequent sweeps must NOT
 	// re-attempt — the sandbox is already at the desired terminal state
 	// and there is no resource to reclaim. Without this guard the sweeper
-	// hammers SETNX every Interval and issues a pointless RPC against
+	// hammers the state key every Interval and issues pointless churn against
 	// CubeMaster every StateLockTTL seconds.
 	reg := registry.New()
 	store := newFakeStore()
@@ -615,6 +731,9 @@ func TestSweeper_AlreadyPausedReconcilesAsSuccess(t *testing.T) {
 
 	if got := store.state("sbx-already"); got != "paused" {
 		t.Fatalf("expected redis state=paused (reconciliation), got %q", got)
+	}
+	if got := store.ttl("sbx-already"); got != 0 {
+		t.Fatalf("reconciled paused state must not expire, ttl=%s", got)
 	}
 	pushed := push.states("sbx-already")
 	if len(pushed) == 0 || pushed[len(pushed)-1] != "paused" {

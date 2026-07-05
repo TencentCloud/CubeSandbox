@@ -124,17 +124,98 @@ func (c *Client) Ack(ctx context.Context, group, id string) error {
 	return c.rdb.XAck(ctx, lifecycle.EventStreamKey, group, id).Err()
 }
 
-// AcquireState performs a SET NX EX on the per-sandbox lifecycle state key with
-// the supplied desired state. Returns true on success. Used to coordinate
-// concurrent pause/resume across sidecars: whoever wins the SETNX owns the
-// transition.
-func (c *Client) AcquireState(ctx context.Context, sandboxID, state string, ttl time.Duration) (bool, error) {
-	key := lifecycle.StateKey(sandboxID)
-	ok, err := c.rdb.SetNX(ctx, key, state, ttl).Result()
-	if err != nil {
-		return false, fmt.Errorf("setnx %s: %w", key, err)
+var casScript = redis.NewScript(`
+local curr = redis.call("GET", KEYS[1]) or ""
+
+local allowed = false
+for i = 3, #ARGV do
+	if curr == ARGV[i] then
+		allowed = true
+		break
+	end
+end
+
+if not allowed then
+	return {0, curr}
+end
+
+redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+return {1, curr}
+`)
+
+// TryTransitionState atomically changes sandboxID's lifecycle state to newState
+// when the current Redis state is one of allowedCurrentStates.
+// It returns whether the swap happened and the state observed before the
+// decision. An empty observedState means the state key was missing.
+func (c *Client) TryTransitionState(ctx context.Context, sandboxID, newState string, newStateTTL time.Duration, allowedCurrentStates ...string) (swapped bool, observedState string, err error) {
+	if len(allowedCurrentStates) == 0 {
+		return false, "", errors.New("TryTransitionState requires at least one expected state")
 	}
-	return ok, nil
+	ttlMs, err := casTTLMillis(newStateTTL)
+	if err != nil {
+		return false, "", err
+	}
+	key := lifecycle.StateKey(sandboxID)
+	args := make([]any, 0, 2+len(allowedCurrentStates))
+	args = append(args, newState, ttlMs)
+	for _, e := range allowedCurrentStates {
+		args = append(args, e)
+	}
+
+	res, err := casScript.Run(ctx, c.rdb, []string{key}, args...).Result()
+	if err != nil {
+		return false, "", fmt.Errorf("cas state %s: %w", key, err)
+	}
+
+	acquired, state, err := parseCASResult(res)
+	if err != nil {
+		return false, "", fmt.Errorf("cas state %s: %w", key, err)
+	}
+	return acquired, state, nil
+}
+
+func casTTLMillis(ttl time.Duration) (int64, error) {
+	if ttl <= 0 {
+		return 0, errors.New("TryTransitionState requires a positive ttl")
+	}
+	if ttl < time.Millisecond {
+		return 1, nil
+	}
+	return ttl.Milliseconds(), nil
+}
+
+func parseCASResult(res any) (bool, string, error) {
+	arr, ok := res.([]any)
+	if !ok {
+		return false, "", fmt.Errorf("unexpected script return type %T", res)
+	}
+	if len(arr) != 2 {
+		return false, "", fmt.Errorf("unexpected script return length %d", len(arr))
+	}
+
+	var code int64
+	switch v := arr[0].(type) {
+	case int64:
+		code = v
+	case int:
+		code = int64(v)
+	default:
+		return false, "", fmt.Errorf("unexpected script status type %T", arr[0])
+	}
+
+	state, ok := arr[1].(string)
+	if !ok {
+		return false, "", fmt.Errorf("unexpected script state type %T", arr[1])
+	}
+
+	switch code {
+	case 0:
+		return false, state, nil
+	case 1:
+		return true, state, nil
+	default:
+		return false, "", fmt.Errorf("unexpected script status %d", code)
+	}
 }
 
 // SetState forces the state value (overwriting any existing). Used to

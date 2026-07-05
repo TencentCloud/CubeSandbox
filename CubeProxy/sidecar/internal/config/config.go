@@ -40,8 +40,8 @@ type Config struct {
 	DefaultIdleTimeout time.Duration
 
 	// Loop intervals.
-	StreamReadBlock  time.Duration // XREADGROUP BLOCK arg
-	LastActivePoll   time.Duration // GET /admin/last_active cadence
+	StreamReadBlock   time.Duration // XREADGROUP BLOCK arg
+	LastActivePoll    time.Duration // GET /admin/last_active cadence
 	IdleSweepInterval time.Duration // sweeper cadence
 	// BootstrapWarmup: after sidecar restart, wait this long before pausing
 	// any sandbox that was loaded via HGETALL bootstrap. Lets the
@@ -49,7 +49,7 @@ type Config struct {
 	// that arrive AFTER startup are not affected by this delay.
 	BootstrapWarmup time.Duration
 
-	// Pause/resume locks (SETNX TTL). Long enough to outlive a slow
+	// Pause/resume locks (CAS TTL). Long enough to outlive a slow
 	// CubeMaster RPC, short enough that a crashed sidecar releases the lock.
 	StateLockTTL time.Duration
 
@@ -199,6 +199,9 @@ func (c *Config) Validate() error {
 	}
 	if c.LastActivePoll <= 0 {
 		return errors.New("last active poll must be > 0")
+	}
+	if c.StateLockTTL <= 0 {
+		return errors.New("state lock ttl must be > 0")
 	}
 	return nil
 }

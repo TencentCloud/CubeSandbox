@@ -29,12 +29,18 @@ type fakeStore struct {
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{states: map[string]string{}} }
-func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Duration) (bool, error) {
-	if _, ok := f.states[sid]; ok {
-		return false, nil
+func (f *fakeStore) TryTransitionState(_ context.Context, sid, newState string, _ time.Duration, allowedCurrentStates ...string) (swapped bool, observedState string, err error) {
+	if len(allowedCurrentStates) == 0 {
+		return false, "", errors.New("TryTransitionState requires at least one expected state")
 	}
-	f.states[sid] = state
-	return true, nil
+	cur := f.states[sid]
+	for _, e := range allowedCurrentStates {
+		if cur == e {
+			f.states[sid] = newState
+			return true, cur, nil
+		}
+	}
+	return false, cur, nil
 }
 func (f *fakeStore) SetState(_ context.Context, sid, state string, _ time.Duration) error {
 	f.states[sid] = state
