@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -132,6 +133,12 @@ type ExtraConf struct {
 	FsQos      string            `yaml:"fs_qos"`
 	FsQosMap   map[string]string `yaml:"fs_qos_map"`
 	NetQosList string            `yaml:"net_qos_list"`
+
+	// AllowedHostMountPrefixes restricts which host directories can be
+	// bind-mounted into sandboxes. Each entry must be an absolute path ending
+	// with "/". A hostPath is allowed if it is under at least one prefix.
+	// Default (when empty): ["/data/shared/"].
+	AllowedHostMountPrefixes []string `yaml:"allowed_host_mount_prefixes"`
 }
 
 type RedisConf struct {
@@ -1129,12 +1136,26 @@ func validate(cfg *Config) error {
 			}
 		}
 	}
+	for _, p := range cfg.ExtraConf.AllowedHostMountPrefixes {
+		if filepath.Clean(p) == "/" {
+			return fmt.Errorf("allowed_host_mount_prefixes must not contain root path %q", p)
+		}
+	}
 	return nil
 }
 
 //go:noinline
 func GetConfig() *Config {
 	return cfg
+}
+
+// GetAllowedHostMountPrefixes returns the configured allowed host-mount
+// prefixes, defaulting to ["/data/shared/"] when not configured.
+func GetAllowedHostMountPrefixes() []string {
+	if c := cfg; c != nil && c.ExtraConf != nil && len(c.ExtraConf.AllowedHostMountPrefixes) > 0 {
+		return c.ExtraConf.AllowedHostMountPrefixes
+	}
+	return []string{"/data/shared/"}
 }
 
 func notify(config *Config) {

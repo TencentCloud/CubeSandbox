@@ -639,6 +639,9 @@ func checkAndGetHostDirVolumeSource(src *types.HostDirVolumeSources, out *cubebo
 		if s.HostPath == "" {
 			return fmt.Errorf("host_dir volume source %q: host_path must not be empty", s.Name)
 		}
+		if err := validateHostPath(s.HostPath); err != nil {
+			return fmt.Errorf("host_dir volume source %q: %w", s.Name, err)
+		}
 	}
 	out.VolumeSource.HostDirVolumes = &cubebox.HostDirVolumeSources{}
 	for _, s := range src.VolumeSources {

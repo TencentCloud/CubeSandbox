@@ -162,6 +162,44 @@ Host mount 是节点本地能力。在多机集群中，`hostPath` 必须存在�
 
 不要只依赖 `host-mount` 把本地笔记本上的文件传到远端 Cubelet 节点。
 
+## hostPath 不在允许的目录前缀下
+
+如果沙箱创建时报错类似：
+
+```text
+"host-mount" entry[0]: hostPath must be under one of [/data/shared/], got "/tmp/rw"
+```
+
+说明 `hostPath` 不在 CubeMaster 配置的允许目录列表内。出于安全考虑，
+CubeMaster 限制 host mount 只能挂载受信目录（默认：`/data/shared/`）。
+
+### 解决方式
+
+将数据放到允许的目录下：
+
+```bash
+sudo mkdir -p /data/shared/rw
+sudo chown 1000:1000 /data/shared/rw
+```
+
+```python
+mounts = json.dumps([
+    {"hostPath": "/data/shared/rw", "mountPath": "/mnt/rw", "readOnly": False},
+])
+```
+
+或者在 CubeMaster 配置文件（`conf.yaml`）中添加额外的允许前缀：
+
+```yaml
+extra_conf:
+  allowed_host_mount_prefixes:
+    - "/data/shared/"
+    - "/tmp/"          # 仅添加你信任的路径
+```
+
+> **警告：** 根路径 `/` 被明确禁止 —— 如果 `allowed_host_mount_prefixes`
+> 中包含 `/`，CubeMaster 将拒绝启动。请使用具体、窄范围的前缀以确保宿主机安全。
+
 ## 参考
 
 - 相关 issue：[#239](https://github.com/TencentCloud/CubeSandbox/issues/239)
