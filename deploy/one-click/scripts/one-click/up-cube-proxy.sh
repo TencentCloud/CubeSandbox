@@ -33,6 +33,7 @@ CUBE_PROXY_REDIS_PORT="${CUBE_PROXY_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}
 CUBE_PROXY_REDIS_PASSWORD="${CUBE_PROXY_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}"
 CUBE_PROXY_HTTPS_PORT="${CUBE_PROXY_HTTPS_PORT:-443}"
 CUBE_PROXY_HTTP_PORT="${CUBE_PROXY_HTTP_PORT:-80}"
+CUBE_PROXY_GRPC_PORT="${CUBE_PROXY_GRPC_PORT:-9090}"
 CUBE_PROXY_SSL_CERT="${CUBE_PROXY_SSL_CERT:-cube.app+3.pem}"
 CUBE_PROXY_SSL_KEY="${CUBE_PROXY_SSL_KEY:-cube.app+3-key.pem}"
 # Auto-pause sidecar runs in the same container as nginx; it is always
@@ -126,6 +127,7 @@ render_template_atomic \
   "${NGINX_CONF}" \
   -e "s/__CUBE_PROXY_HTTPS_PORT__/$(escape_sed "${CUBE_PROXY_HTTPS_PORT}")/g" \
   -e "s/__CUBE_PROXY_HTTP_PORT__/$(escape_sed "${CUBE_PROXY_HTTP_PORT}")/g" \
+  -e "s/__CUBE_PROXY_GRPC_PORT__/$(escape_sed "${CUBE_PROXY_GRPC_PORT}")/g" \
   -e "s/__CUBE_PROXY_SSL_CERT__/$(escape_sed "${CUBE_PROXY_SSL_CERT}")/g" \
   -e "s/__CUBE_PROXY_SSL_KEY__/$(escape_sed "${CUBE_PROXY_SSL_KEY}")/g"
 
@@ -159,7 +161,7 @@ docker_rm_if_exists "${CUBE_PROXY_CONTAINER_NAME}"
 # cube-proxy uses network_mode: host, so HTTP/HTTPS ports must be free on the
 # host before we attempt to start the container; otherwise the failure mode is
 # a cryptic "address already in use" from nginx inside the container.
-for port in "${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}"; do
+for port in "${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}" "${CUBE_PROXY_GRPC_PORT}"; do
   if command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${port} )"; then
     die "port ${port} is already in use; cube-proxy uses host networking and requires it to be free"
   fi
@@ -184,6 +186,7 @@ done
 
 http_ready=0
 https_ready=0
+grpc_ready=0
 for _ in {1..30}; do
   if [[ "${http_ready}" == "0" ]] && \
      command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${CUBE_PROXY_HTTP_PORT} )"; then
@@ -193,14 +196,27 @@ for _ in {1..30}; do
      command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${CUBE_PROXY_HTTPS_PORT} )"; then
     https_ready=1
   fi
-  if [[ "${http_ready}" == "1" && "${https_ready}" == "1" ]]; then
-    log "cube proxy listening on ${CUBE_PROXY_HTTP_PORT} and ${CUBE_PROXY_HTTPS_PORT}"
+  if [[ "${grpc_ready}" == "0" ]] && \
+     command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${CUBE_PROXY_GRPC_PORT} )"; then
+    grpc_ready=1
+  fi
+  if [[ "${http_ready}" == "1" && "${https_ready}" == "1" && "${grpc_ready}" == "1" ]]; then
+    log "cube proxy listening on ${CUBE_PROXY_HTTP_PORT}, ${CUBE_PROXY_HTTPS_PORT}, and ${CUBE_PROXY_GRPC_PORT}"
     exit 0
   fi
   sleep 2
 done
 
+not_ready=()
 if [[ "${http_ready}" != "1" ]]; then
-  die "cube proxy port ${CUBE_PROXY_HTTP_PORT} (HTTP) did not become ready"
+  not_ready+=("${CUBE_PROXY_HTTP_PORT} (HTTP)")
 fi
-die "cube proxy port ${CUBE_PROXY_HTTPS_PORT} (HTTPS) did not become ready"
+if [[ "${https_ready}" != "1" ]]; then
+  not_ready+=("${CUBE_PROXY_HTTPS_PORT} (HTTPS)")
+fi
+if [[ "${grpc_ready}" != "1" ]]; then
+  not_ready+=("${CUBE_PROXY_GRPC_PORT} (gRPC)")
+fi
+if (( ${#not_ready[@]} > 0 )); then
+  die "cube proxy port(s) did not become ready: ${not_ready[*]}"
+fi

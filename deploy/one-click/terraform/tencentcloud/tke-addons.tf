@@ -632,6 +632,11 @@ resource "kubernetes_deployment" "cube_proxy" {
             protocol       = "TCP"
           }
           port {
+            name           = "grpc"
+            container_port = 9090
+            protocol       = "TCP"
+          }
+          port {
             name           = "http80"
             container_port = 80
             protocol       = "TCP"
@@ -755,9 +760,10 @@ resource "kubernetes_service" "cube_proxy" {
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
       "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
-      }, var.enable_public_network ? {
+    }, var.enable_public_network ? {
       "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
-      } : {
+      "service.cloud.tencent.com/specify-protocol"                     = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]},\"9090\":{\"protocol\":[\"TCP\"]}}"
+    } : {
       "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
     })
   }
@@ -788,6 +794,12 @@ resource "kubernetes_service" "cube_proxy" {
       name        = "tcp-ssl-443"
       port        = 443
       target_port = 8080
+      protocol    = "TCP"
+    }
+    port {
+      name        = "tcp-grpc-9090"
+      port        = 9090
+      target_port = 9090
       protocol    = "TCP"
     }
   }

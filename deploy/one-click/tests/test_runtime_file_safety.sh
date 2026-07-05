@@ -63,7 +63,9 @@ run_cube_proxy_postcheck_case() {
   local env_content="$1"
   local listen_port="$2"
   local expected_port="$3"
-  local case_dir="${TMP_DIR}/cube-proxy-postcheck-${expected_port}"
+  local grpc_listen_port="${4:-9090}"
+  local grpc_expected_port="${5:-9090}"
+  local case_dir="${TMP_DIR}/cube-proxy-postcheck-${expected_port}-${grpc_expected_port}"
   local env_file="${case_dir}/.one-click.env"
   local stub_dir="${case_dir}/bin"
   local ss_log="${case_dir}/ss.args"
@@ -72,18 +74,28 @@ run_cube_proxy_postcheck_case() {
   printf '%s\n' "${env_content}" > "${env_file}"
   cat > "${stub_dir}/ss" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" > "${SS_ARGS_LOG}"
-printf 'LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n' "${SS_LISTEN_PORT}"
+printf '%s\n' "$*" >> "${SS_ARGS_LOG}"
+port=""
+for arg in "$@"; do
+  case "${arg}" in
+    *"sport = :"*) port="${arg#*sport = :}"; port="${port%% )*}" ;;
+  esac
+done
+if [[ "${port}" == "${SS_HTTP_PORT}" || "${port}" == "${SS_GRPC_PORT}" ]]; then
+  printf 'LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n' "${port}"
+fi
 SH
   chmod +x "${stub_dir}/ss"
 
   PATH="${stub_dir}:${PATH}" \
     ONE_CLICK_RUNTIME_ENV_FILE="${env_file}" \
     SS_ARGS_LOG="${ss_log}" \
-    SS_LISTEN_PORT="${listen_port}" \
+    SS_HTTP_PORT="${listen_port}" \
+    SS_GRPC_PORT="${grpc_listen_port}" \
     bash "${ONE_CLICK_DIR}/scripts/systemd/cube-proxy-postcheck.sh" >/dev/null
 
   assert_contains "${ss_log}" "sport = :${expected_port}"
+  assert_contains "${ss_log}" "sport = :${grpc_expected_port}"
 }
 
 test_render_template_replaces_empty_directory() {
@@ -791,6 +803,57 @@ CUBE_PROXY_POSTCHECK_DELAY=0" \
     8081
 }
 
+test_cube_proxy_postcheck_follows_grpc_port() {
+  run_cube_proxy_postcheck_case \
+    "CUBE_PROXY_HTTP_PORT=8081
+CUBE_PROXY_GRPC_PORT=50051
+CUBE_PROXY_POSTCHECK_RETRIES=1
+CUBE_PROXY_POSTCHECK_DELAY=0" \
+    8081 \
+    8081 \
+    50051 \
+    50051
+}
+
+test_cube_proxy_postcheck_fails_when_grpc_port_not_ready() {
+  local case_dir="${TMP_DIR}/cube-proxy-postcheck-grpc-fail"
+  local env_file="${case_dir}/.one-click.env"
+  local stub_dir="${case_dir}/bin"
+  local ss_log="${case_dir}/ss.args"
+
+  mkdir -p "${stub_dir}"
+  printf '%s\n' \
+    "CUBE_PROXY_HTTP_PORT=80
+CUBE_PROXY_GRPC_PORT=9090
+CUBE_PROXY_POSTCHECK_RETRIES=1
+CUBE_PROXY_POSTCHECK_DELAY=0" > "${env_file}"
+  cat > "${stub_dir}/ss" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SS_ARGS_LOG}"
+port=""
+for arg in "$@"; do
+  case "${arg}" in
+    *"sport = :"*) port="${arg#*sport = :}"; port="${port%% )*}" ;;
+  esac
+done
+if [[ "${port}" == "${SS_HTTP_PORT}" ]]; then
+  printf 'LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n' "${port}"
+fi
+SH
+  chmod +x "${stub_dir}/ss"
+
+  if PATH="${stub_dir}:${PATH}" \
+    ONE_CLICK_RUNTIME_ENV_FILE="${env_file}" \
+    SS_ARGS_LOG="${ss_log}" \
+    SS_HTTP_PORT="80" \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/cube-proxy-postcheck.sh" >/dev/null 2>&1; then
+    fail "expected postcheck to fail when gRPC port is not ready"
+  fi
+
+  assert_contains "${ss_log}" "sport = :80"
+  assert_contains "${ss_log}" "sport = :9090"
+}
+
 test_postcheck_skips_when_external_host_set() {
   # When an external endpoint is configured the local container is never
   # started, so the postcheck must short-circuit with exit 0 instead of
@@ -862,6 +925,8 @@ test_cube_proxy_postcheck_follows_http_port
 test_cube_proxy_postcheck_ignores_https_port
 test_cube_proxy_postcheck_ignores_deprecated_host_port
 test_cube_proxy_postcheck_prefers_http_over_deprecated_host_port
+test_cube_proxy_postcheck_follows_grpc_port
+test_cube_proxy_postcheck_fails_when_grpc_port_not_ready
 test_postcheck_skips_when_external_host_set
 test_mask_external_dep_services_remove_then_mask
 

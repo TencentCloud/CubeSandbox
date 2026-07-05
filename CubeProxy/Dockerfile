@@ -35,7 +35,7 @@ COPY start.sh /usr/local/openresty/nginx/sbin/start.sh
 # failure modes than failing the docker build right here.
 COPY bin/cube-proxy-sidecar /usr/local/openresty/nginx/sbin/cube-proxy-sidecar
 
-EXPOSE 8080 8081
+EXPOSE 8080 8081 9090
 
 STOPSIGNAL SIGQUIT
 

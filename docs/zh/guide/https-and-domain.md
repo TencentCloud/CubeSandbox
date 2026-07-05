@@ -89,6 +89,31 @@ CubeProxy 会在转发时剥离 `/sandbox/<id>/<port>` 前缀，沙箱内的应�
 
 ---
 
+## gRPC 接入（明文 HTTP/2）
+
+CubeProxy 还提供独立的沙箱 gRPC 接入监听端口。一键部署默认使用 `9090`，可通过 `.env` 中的 `CUBE_PROXY_GRPC_PORT` 调整。
+
+客户端以明文 HTTP/2 连接 CubeProxy IP，并通过 gRPC `:authority` 指定目标沙箱，格式与 Host 模式一致：
+
+```
+<container-port>-<sandbox-id>
+```
+
+例如，经部署在 `10.0.0.5` 的 CubeProxy 访问沙箱 `abc123` 的 `49983` 端口：
+
+```
+dial: 10.0.0.5:9090
+:authority: 49983-abc123
+```
+
+该模式适用于无法使用泛域名 DNS 或在 CubeProxy 侧终止 TLS 的 gRPC 客户端，路由元数据与 Host 模式共用，无需额外配置。
+
+若沙箱创建时设置了 `network.allow_public_traffic = false`，本监听端口同样会校验
+`e2b-traffic-access-token` / `cube-traffic-access-token`；gRPC 客户端需在每次请求的
+metadata（或等效 header）中携带 token。详见[限制公网访问](./restrict-public-access.md)。
+
+---
+
 ## HTTPS 证书配置
 
 CubeProxy 开箱提供 **HTTPS（443 端口）和 HTTP（80 端口）** 两种访问方式。E2B SDK 默认使用 HTTPS。Cube 一键安装已预装 `cube.app` 测试证书，可直接体验 HTTPS。

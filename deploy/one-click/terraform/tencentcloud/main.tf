@@ -262,6 +262,61 @@ resource "tencentcloud_security_group_rule_set" "jumpserver" {
     description = "Allow jump-server SSH (cloud-init moves sshd to 443)"
   }
 
+  # cube-proxy runs as a TKE pod (GlobalRouter, no hostNetwork), so its traffic to
+  # a compute node arrives sourced from the pod CIDR. It reaches each sandbox on a
+  # dynamic host port (20000-29999) on the compute node's private VPC IP, so the
+  # full range is opened with ALL. Bound to var.tke_cluster_cidr (not a literal) so
+  # the rule keeps matching if the TKE pod network is reconfigured.
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = var.tke_cluster_cidr
+    protocol    = "ALL"
+    port        = "ALL"
+    description = "Allow TKE cube-proxy (pod CIDR) -> compute node all ports"
+  }
+
+  # cube-master is exposed through an INTERNAL (VPC-only) CLB, so 8089 never needs
+  # to be reachable from the public internet. Scope it to the VPC CIDR; TKE pods
+  # are already covered by the var.tke_cluster_cidr rule above.
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "10.0.0.0/16"
+    protocol    = "TCP"
+    port        = "8089"
+    description = "Allow cube-master CLB (VPC-internal only)"
+  }
+
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "0.0.0.0/0"
+    protocol    = "TCP"
+    port        = "80"
+    description = "Allow CLB HTTP (cube-proxy + cube-webui)"
+  }
+
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "0.0.0.0/0"
+    protocol    = "TCP"
+    port        = "443"
+    description = "Allow CLB HTTPS (cube-proxy)"
+  }
+
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "0.0.0.0/0"
+    protocol    = "TCP"
+    port        = "9090"
+    description = "Allow cube-proxy plaintext gRPC ingress"
+  }
+
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "0.0.0.0/0"
+    protocol    = "TCP"
+    port        = "3000"
+    description = "Allow cube-api CLB (jumpserver public access)"
+  }
   ingress {
     action      = "ACCEPT"
     cidr_block  = "10.0.0.0/16"

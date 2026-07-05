@@ -4590,7 +4590,7 @@ print_cluster_operator_help() {
 	echo ""
 	echo -e "${CYAN}▶ 2. CLB (load balancer) IPs and ports${NC}"
 	echo -e "    ${GREEN}cube-webui${NC}  (public, HTTP)   : ${webui_ip:-N/A}  → port 80"
-	echo -e "    ${GREEN}cube-proxy${NC}  (public, TCP)    : ${proxy_ip:-N/A}  → ports 80, 443"
+	echo -e "    ${GREEN}cube-proxy${NC}  (public, TCP)    : ${proxy_ip:-N/A}  → ports 80, 443, 9090"
 	echo -e "    ${GREEN}cube-api${NC}    (public, TCP)    : ${api_ip:-N/A}  → port 3000"
 	echo -e "    ${GREEN}cube-master${NC} (VPC-internal)   : ${master_ip:-N/A}  → port 8089 (reachable from the jumpserver/VPC only)"
 
@@ -4900,7 +4900,7 @@ phase7_health_check() {
 	echo -e "  ${CYAN}Summary:${NC}"
 	echo -e "    cube-master : ${cm_ip:-N/A}:8089   (VPC-internal)"
 	echo -e "    cube-api    : ${api_ip:-N/A}:3000  (public)"
-	echo -e "    cube-proxy  : ${proxy_ip:-N/A}:80/443 (public)"
+	echo -e "    cube-proxy  : ${proxy_ip:-N/A}:80/443/9090 (public)"
 	echo -e "    cube-webui  : ${webui_ip:-N/A}:80   (public)"
 	return 0
 }
