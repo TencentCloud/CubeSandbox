@@ -94,6 +94,7 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 	switch req.InstanceType {
 	case cubebox.InstanceType_cubebox.String():
 		if !dealScfSandbox(ctx, req, t) {
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_NotFound)
 			rsp.Ret.RetMsg = "no such sandbox"
 			return
 		}

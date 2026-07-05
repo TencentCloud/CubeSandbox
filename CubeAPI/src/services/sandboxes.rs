@@ -242,7 +242,7 @@ impl SandboxService {
             .cubemaster
             .delete_sandbox(&req)
             .await
-            .map_err(internal_error)?;
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
 
         resp.ret
             .into_result()
@@ -874,6 +874,7 @@ mod tests {
 
     use super::{
         build_cube_network_config, filter_by_metadata, from_cubemaster_info, SandboxService,
+        RET_CODE_NOT_FOUND,
     };
     use crate::cubemaster::{
         CreateSandboxRequest, CubeMasterClient, ListSandboxResponse, SandboxInfo,
@@ -882,7 +883,11 @@ mod tests {
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
         SandboxNetworkConfig, SandboxState,
     };
-    use axum::{extract::State, routing::post, Json, Router};
+    use axum::{
+        extract::State,
+        routing::{delete, post},
+        Json, Router,
+    };
     use serde_json::Value;
     use tokio::sync::Mutex;
 
@@ -1377,6 +1382,48 @@ mod tests {
             create_body.get("create_time_env_vars").is_none(),
             "create_time_env_vars should be omitted when caller did not provide envs"
         );
+    }
+
+    #[tokio::test]
+    async fn kill_sandbox_maps_cubemaster_not_found_to_app_not_found() {
+        async fn delete_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-delete",
+                "ret": { "ret_code": RET_CODE_NOT_FOUND, "ret_msg": "no such sandbox" },
+                "sandbox_id": "sandbox-missing"
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let cubemaster_url =
+            spawn_server(Router::new().route("/cube/sandbox", delete(delete_handler))).await;
+        let service = SandboxService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        let err = service
+            .kill_sandbox("sandbox-missing")
+            .await
+            .expect_err("missing sandbox delete should return not found");
+
+        match err {
+            crate::error::AppError::NotFound(msg) => {
+                assert_eq!(msg, "sandbox sandbox-missing not found");
+            }
+            other => panic!("expected not found error, got {other:?}"),
+        }
     }
 
     #[test]
