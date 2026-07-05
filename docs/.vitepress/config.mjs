@@ -147,6 +147,12 @@ export default withMermaid(defineConfig({
               ]
             },
             {
+              text: 'Storage',
+              items: [
+                { text: 'Persistent Storage (Host Mount)', link: '/guide/persistent-storage' }
+              ]
+            },
+            {
               text: 'Operations',
               items: [
                 { text: 'WebUI Dashboard', link: '/guide/webui' },
@@ -172,8 +178,7 @@ export default withMermaid(defineConfig({
                   link: '/guide/troubleshooting/',
                   items: [
                     { text: 'Deployment', link: '/guide/troubleshooting/deployment' },
-                    { text: 'Templates', link: '/guide/troubleshooting/templates' },
-                    { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' }
+                    { text: 'Templates', link: '/guide/troubleshooting/templates' }
                   ]
                 },
                 {
@@ -276,6 +281,12 @@ export default withMermaid(defineConfig({
               ]
             },
             {
+              text: '存储',
+              items: [
+                { text: '持久化存储（Host Mount）', link: '/zh/guide/persistent-storage' }
+              ]
+            },
+            {
               text: '安全与运维',
               items: [
                 { text: 'WebUI 控制台', link: '/zh/guide/webui' },
@@ -301,8 +312,7 @@ export default withMermaid(defineConfig({
                   link: '/zh/guide/troubleshooting/',
                   items: [
                     { text: '部署相关', link: '/zh/guide/troubleshooting/deployment' },
-                    { text: '模板相关', link: '/zh/guide/troubleshooting/templates' },
-                    { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' }
+                    { text: '模板相关', link: '/zh/guide/troubleshooting/templates' }
                   ]
                 },
                 {

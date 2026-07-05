@@ -162,46 +162,6 @@ If you want the sandbox to work with the same repository as your local developme
 
 Do not rely on `host-mount` alone to transfer files from your laptop to a remote Cubelet node.
 
-## Host Path Not Under Allowed Prefix
-
-If sandbox creation fails with an error like:
-
-```text
-"host-mount" entry[0]: hostPath must be under one of [/data/shared/], got "/tmp/rw"
-```
-
-This means `hostPath` is outside the configured allowed directories. For
-security, CubeMaster restricts host mounts to a set of trusted prefixes
-(default: `/data/shared/`).
-
-### Resolution
-
-Either move the data under an allowed prefix:
-
-```bash
-sudo mkdir -p /data/shared/rw
-sudo chown 1000:1000 /data/shared/rw
-```
-
-```python
-mounts = json.dumps([
-    {"hostPath": "/data/shared/rw", "mountPath": "/mnt/rw", "readOnly": False},
-])
-```
-
-Or add additional allowed prefixes in CubeMaster config (`conf.yaml`):
-
-```yaml
-extra_conf:
-  allowed_host_mount_prefixes:
-    - "/data/shared/"
-    - "/tmp/"          # only add paths you trust
-```
-
-> **Warning:** The root path `/` is explicitly forbidden — CubeMaster
-> will refuse to start if `allowed_host_mount_prefixes` contains `/`.
-> Use specific, narrow prefixes to maintain host security.
-
 ## References
 
 - Related issue: [#239](https://github.com/TencentCloud/CubeSandbox/issues/239)
