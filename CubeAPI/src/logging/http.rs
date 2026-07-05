@@ -267,6 +267,11 @@ const MAX_OUTSTANDING_DELIVERY_TASKS: usize = 100_000;
 const MAX_WEBHOOK_RETRIES: usize = 6;
 const WEBHOOK_CONNECT_TIMEOUT_SECS: u64 = 5;
 const WEBHOOK_POOL_IDLE_TIMEOUT_SECS: u64 = 30;
+/// Intentionally smaller than `max_concurrency`: `max_concurrency` bounds
+/// in-flight requests, while this only limits how many idle connections are
+/// retained per host after a delivery burst. Webhook traffic is bursty and
+/// best-effort, so re-established connections on the next burst are an
+/// accepted trade-off for a small idle pool.
 const WEBHOOK_POOL_MAX_IDLE_PER_HOST: usize = 2;
 
 fn max_outstanding_deliveries(
@@ -295,6 +300,12 @@ fn validate_config(config: &WebhookConfig) -> anyhow::Result<()> {
     }
     if config.max_retries > MAX_WEBHOOK_RETRIES {
         bail!("webhook max_retries must not exceed {MAX_WEBHOOK_RETRIES}");
+    }
+    if config.initial_backoff_ms == 0 {
+        bail!("webhook initial_backoff_ms must be greater than zero");
+    }
+    if config.max_backoff_ms == 0 {
+        bail!("webhook max_backoff_ms must be greater than zero");
     }
     if config.initial_backoff_ms > config.max_backoff_ms {
         bail!("webhook initial_backoff_ms must not exceed max_backoff_ms");
@@ -577,11 +588,16 @@ async fn flush_deliveries(deliveries: &mut JoinSet<()>, flush_timeout: Duration)
 
 fn log_delivery_task_result(result: Result<(), JoinError>) {
     if let Err(join_error) = result {
-        error!(
-            cancelled = join_error.is_cancelled(),
-            panicked = join_error.is_panic(),
-            "HttpLogger delivery task failed"
-        );
+        if join_error.is_cancelled() {
+            // Expected during graceful shutdown when a flush timeout aborts
+            // pending deliveries; not a delivery-task defect.
+            warn!("HttpLogger delivery task cancelled");
+        } else {
+            error!(
+                panicked = join_error.is_panic(),
+                "HttpLogger delivery task failed"
+            );
+        }
     }
 }
 
@@ -592,6 +608,9 @@ async fn deliver_with_retry(
     options: DeliveryOptions,
 ) {
     for attempt in 0..=options.max_retries {
+        // The permit is intentionally acquired per attempt and released before
+        // the backoff sleep, so `max_concurrency` bounds in-flight HTTP
+        // requests rather than deliveries idling between retries.
         let permit = match semaphore.acquire().await {
             Ok(permit) => permit,
             Err(_) => {
@@ -1006,6 +1025,7 @@ mod tests {
 
     use axum::{
         extract::State,
+        http::HeaderMap,
         routing::{get, post},
         Router,
     };
@@ -1048,6 +1068,16 @@ mod tests {
         let mut config = valid_webhook_config();
         config.flush_timeout_secs = 0;
         assert!(validate_config(&config).is_err());
+
+        let mut config = valid_webhook_config();
+        config.initial_backoff_ms = 0;
+        let error = validate_config(&config).unwrap_err().to_string();
+        assert!(error.contains("initial_backoff_ms must be greater than zero"));
+
+        let mut config = valid_webhook_config();
+        config.max_backoff_ms = 0;
+        let error = validate_config(&config).unwrap_err().to_string();
+        assert!(error.contains("max_backoff_ms must be greater than zero"));
 
         let mut config = valid_webhook_config();
         config.initial_backoff_ms = 2_000;
@@ -1803,10 +1833,16 @@ mod tests {
     struct MockState {
         statuses: Arc<Mutex<VecDeque<StatusCode>>>,
         calls: Arc<AtomicUsize>,
+        requests: Arc<Mutex<Vec<(HeaderMap, Bytes)>>>,
     }
 
-    async fn mock_webhook(State(state): State<MockState>) -> StatusCode {
+    async fn mock_webhook(
+        State(state): State<MockState>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> StatusCode {
         state.calls.fetch_add(1, Ordering::SeqCst);
+        state.requests.lock().unwrap().push((headers, body));
         state
             .statuses
             .lock()
@@ -1815,12 +1851,20 @@ mod tests {
             .unwrap_or(StatusCode::OK)
     }
 
-    async fn spawn_mock_server(statuses: Vec<StatusCode>) -> (String, Arc<AtomicUsize>) {
+    async fn spawn_mock_server(
+        statuses: Vec<StatusCode>,
+    ) -> (
+        String,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Vec<(HeaderMap, Bytes)>>>,
+    ) {
         let state = MockState {
             statuses: Arc::new(Mutex::new(statuses.into())),
             calls: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::new(Mutex::new(Vec::new())),
         };
         let calls = state.calls.clone();
+        let requests = state.requests.clone();
         let app = Router::new()
             .route("/webhook", post(mock_webhook))
             .route("/__ready", get(|| async { StatusCode::NO_CONTENT }))
@@ -1855,11 +1899,11 @@ mod tests {
             "mock webhook server did not become ready after 100 attempts"
         );
 
-        (format!("http://{address}/webhook"), calls)
+        (format!("http://{address}/webhook"), calls, requests)
     }
 
     async fn delivery_attempts(statuses: Vec<StatusCode>, max_retries: usize) -> usize {
-        let (url, calls) = spawn_mock_server(statuses).await;
+        let (url, calls, _requests) = spawn_mock_server(statuses).await;
         let logger = HttpLogger::new(test_config(url, 8, max_retries))
             .await
             .unwrap();
@@ -1900,9 +1944,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn delivered_request_headers_match_documented_spec() {
+        let secret = "header-test-secret";
+        let (url, calls, requests) = spawn_mock_server(vec![StatusCode::OK]).await;
+        let mut config = test_config(url, 8, 0);
+        config.endpoints[0].secret = Some(secret.to_string());
+        let logger = HttpLogger::new(config).await.unwrap();
+
+        logger.log(test_event()).await;
+        logger.flush().await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 1, "readiness probes must not be captured");
+        let (headers, body) = &captured[0];
+
+        assert_eq!(
+            headers.get(reqwest::header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            headers.get(reqwest::header::USER_AGENT).unwrap(),
+            WEBHOOK_USER_AGENT
+        );
+        assert_eq!(headers.get(HEADER_EVENT).unwrap(), "sandbox.created");
+
+        let delivery_id = headers.get(HEADER_DELIVERY).unwrap().to_str().unwrap();
+        Uuid::parse_str(delivery_id).expect("delivery header must be a UUID");
+        let payload: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(payload["id"], delivery_id);
+
+        let timestamp = headers.get(HEADER_TIMESTAMP).unwrap().to_str().unwrap();
+        timestamp
+            .parse::<i64>()
+            .expect("timestamp header must be unix seconds");
+
+        let signature = headers.get(HEADER_SIGNATURE).unwrap().to_str().unwrap();
+        assert_eq!(
+            signature,
+            sign_payload(secret, timestamp, delivery_id, body)
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn full_queue_drops_events_without_blocking_log() {
-        let (url, calls) = spawn_mock_server(vec![StatusCode::OK]).await;
+        let (url, calls, _requests) = spawn_mock_server(vec![StatusCode::OK]).await;
         let logger = HttpLogger::new(test_config(url, 1, 0)).await.unwrap();
 
         timeout(Duration::from_millis(50), async {

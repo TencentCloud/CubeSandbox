@@ -110,7 +110,7 @@ Each endpoint supports:
 | `url` | Webhook receiver URL. |
 | `events` | Event names subscribed to by this endpoint. |
 | `secret` | Optional HMAC secret. When omitted, the request is unsigned. |
-| `enabled` | Whether the endpoint is active. |
+| `enabled` | Whether the endpoint is active. Optional, default `true`. |
 | `allow_private_urls` | Optional, default `false`. Explicitly permit this endpoint to target a local-development or internal receiver, such as `localhost`, a loopback IP, a private IP, or a link-local IP. |
 
 ### Endpoint URL Validation
@@ -140,6 +140,7 @@ Each event is sent as one HTTP POST per matching endpoint. Requests include:
 
 ```text
 Content-Type: application/json
+User-Agent: CubeAPI-Webhook/1.0
 X-Cube-Webhook-Event: <event>
 X-Cube-Webhook-Delivery: <uuid>
 X-Cube-Webhook-Timestamp: <unix-seconds>
