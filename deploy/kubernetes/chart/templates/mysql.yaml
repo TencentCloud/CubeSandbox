@@ -58,7 +58,6 @@ spec:
                   name: {{ include "cube.secretName" . }}
                   key: mysql-password
           args:
-            - --default-authentication-plugin=mysql_native_password
             - --skip-name-resolve
           ports:
             - name: mysql

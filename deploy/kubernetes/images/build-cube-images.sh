@@ -161,15 +161,6 @@ prepare_context() {
   printf '%s\n' "${ctx}"
 }
 
-copy_if_exists() {
-  local src="$1"
-  local dst="$2"
-  if [[ -e "${src}" ]]; then
-    mkdir -p "$(dirname "${dst}")"
-    cp -a "${src}" "${dst}"
-  fi
-}
-
 copy_cube_master_component_context() {
   local ctx="$1"
   local src="${PACKAGE_DIR}/CubeMaster"
@@ -226,24 +217,7 @@ copy_cube_proxy_component_context() {
 build_image() {
   local name="$1"
   local ctx="$2"
-  local dockerfile="${SCRIPT_DIR}/${name}/Dockerfile"
-  local image="${REGISTRY}/${name}:${IMAGE_TAG}"
-  local docker_args=(-f "${dockerfile}" -t "${image}")
-  if [[ "${NO_CACHE}" == "1" ]]; then
-    docker_args=(--no-cache --pull "${docker_args[@]}")
-  fi
-  log "building ${image}"
-  docker build "${docker_args[@]}" "${ctx}"
-  if [[ "${PUSH}" == "1" ]]; then
-    log "pushing ${image}"
-    docker push "${image}"
-  fi
-}
-
-build_component_image() {
-  local name="$1"
-  local dockerfile="$2"
-  local ctx="$3"
+  local dockerfile="${3:-${SCRIPT_DIR}/${name}/Dockerfile}"
   local image="${REGISTRY}/${name}:${IMAGE_TAG}"
   local docker_args=(-f "${dockerfile}" -t "${image}")
   if [[ "${NO_CACHE}" == "1" ]]; then
@@ -275,7 +249,7 @@ build_cube_api_image() {
     }
   ' "${REPO_ROOT}/CubeAPI/Dockerfile" > "${dockerfile}"
 
-  build_component_image cube-api "${dockerfile}" "${REPO_ROOT}/CubeAPI"
+  build_image cube-api "${REPO_ROOT}/CubeAPI" "${dockerfile}"
 }
 
 build_cube_egress_openresty_base_image() {
@@ -335,7 +309,7 @@ RUN chmod +x /usr/local/bin/cube-node-entrypoint.sh
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/cube-node-entrypoint.sh"]
 EOF
 
-  build_component_image cube-node "${dockerfile}" "${ctx}"
+  build_image cube-node "${ctx}" "${dockerfile}"
 }
 
 copy_cube_egress_net_context() {
@@ -352,7 +326,7 @@ copy_cube_egress_net_context() {
 
 ctx="$(prepare_context cube-master)"
 copy_cube_master_component_context "${ctx}"
-build_component_image cube-master "${REPO_ROOT}/CubeMaster/docker/Dockerfile" "${ctx}"
+build_image cube-master "${ctx}" "${REPO_ROOT}/CubeMaster/docker/Dockerfile"
 
 build_cube_api_image
 
@@ -362,7 +336,7 @@ build_image cubemastercli "${ctx}"
 
 ctx="$(prepare_context cube-proxy-node)"
 copy_cube_proxy_component_context "${ctx}"
-build_component_image cube-proxy-node "${REPO_ROOT}/CubeProxy/Dockerfile" "${ctx}"
+build_image cube-proxy-node "${ctx}" "${REPO_ROOT}/CubeProxy/Dockerfile"
 
 build_cube_egress_openresty_base_image
 build_cube_egress_image
@@ -372,7 +346,8 @@ copy_cube_egress_net_context "${ctx}"
 build_image cube-egress-net "${ctx}"
 
 ctx="$(prepare_context cube-webui)"
-copy_if_exists "${PACKAGE_DIR}/webui" "${ctx}/package/webui"
+[[ -d "${PACKAGE_DIR}/webui" ]] || fail "invalid sandbox-package: missing required cube-webui component webui"
+cp -a "${PACKAGE_DIR}/webui" "${ctx}/package/webui"
 [[ -f "${ctx}/package/webui/dist/index.html" ]] || fail "invalid webui package: missing dist/index.html"
 [[ -f "${ctx}/package/webui/nginx.conf" ]] || fail "invalid webui package: missing nginx.conf"
 build_image cube-webui "${ctx}"
@@ -384,12 +359,12 @@ else
   ctx="$(prepare_context cube-node)"
   copy_scripts "${ctx}" cube-node-entrypoint.sh
   for d in Cubelet network-agent cube-shim cube-kernel-scf cube-image cube-vs cube-snapshot; do
-    copy_if_exists "${PACKAGE_DIR}/${d}" "${ctx}/package/${d}"
-    mkdir -p "${ctx}/package/${d}"
+    [[ -d "${PACKAGE_DIR}/${d}" ]] || fail "invalid sandbox-package: missing required cube-node component ${d}"
+    cp -a "${PACKAGE_DIR}/${d}" "${ctx}/package/${d}"
   done
+  [[ -d "${PACKAGE_DIR}/scripts/common" ]] || fail "invalid sandbox-package: missing required cube-node component scripts/common"
   mkdir -p "${ctx}/package/scripts"
-  copy_if_exists "${PACKAGE_DIR}/scripts/common" "${ctx}/package/scripts/common"
-  mkdir -p "${ctx}/package/scripts/common"
+  cp -a "${PACKAGE_DIR}/scripts/common" "${ctx}/package/scripts/common"
   build_image cube-node "${ctx}"
 fi
 

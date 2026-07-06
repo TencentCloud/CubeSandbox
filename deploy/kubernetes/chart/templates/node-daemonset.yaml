@@ -245,7 +245,7 @@ spec:
               value: {{ .Values.cubeNode.network.cidr | quote }}
             - name: CUBE_SANDBOX_DNS_SERVERS
               {{- if .Values.cubeNode.dns.sandbox.nameservers }}
-              value: {{ join "," . | quote }}
+              value: {{ join "," .Values.cubeNode.dns.sandbox.nameservers | quote }}
               {{- else if and .Values.cubeNode.dns.sandbox.useCubeDns .Values.cubeDns.enabled (eq .Values.cubeDns.mode "nodeLocal") .Values.cubeDns.sandboxGateway.enabled }}
               value: "$(CUBE_SANDBOX_NODE_IP)"
               {{- else }}

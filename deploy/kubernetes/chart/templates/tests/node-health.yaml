@@ -12,7 +12,7 @@ metadata:
     app.kubernetes.io/component: test
   annotations:
     "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
   {{- with .Values.imagePullSecrets }}
@@ -105,7 +105,7 @@ metadata:
     app.kubernetes.io/component: test
   annotations:
     "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
   {{- with .Values.imagePullSecrets }}
@@ -144,7 +144,7 @@ metadata:
     app.kubernetes.io/component: test
   annotations:
     "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
   {{- with .Values.imagePullSecrets }}
@@ -180,7 +180,7 @@ metadata:
     app.kubernetes.io/component: test
   annotations:
     "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
   {{- with .Values.imagePullSecrets }}
@@ -216,7 +216,7 @@ metadata:
     app.kubernetes.io/component: test
   annotations:
     "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
   hostNetwork: true
@@ -254,7 +254,7 @@ metadata:
     app.kubernetes.io/component: test
   annotations:
     "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
   {{- with .Values.imagePullSecrets }}
@@ -305,7 +305,7 @@ metadata:
     app.kubernetes.io/component: test
   annotations:
     "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
   {{- with .Values.imagePullSecrets }}
@@ -342,7 +342,7 @@ metadata:
     app.kubernetes.io/component: test
   annotations:
     "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
   {{- with .Values.imagePullSecrets }}
