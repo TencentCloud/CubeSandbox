@@ -53,8 +53,21 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 <table>
   <tr>
     <td align="right" valign="top" width="100">
+      <a href="./docs/changelog/v0.5.0.md">
+        <img src="https://img.shields.io/badge/v0.5.0-2026.07.03-dc3545?style=flat-square" alt="v0.5.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>v0.5: AutoPause, Terraform deployer, ARM64 &amp; network policy hardening</strong><br/>
+      <b>AutoPause/AutoResume</b> — idle sandboxes auto-suspend and wake on the next request. <b>Terraform one-click cluster deploy</b> <b>ARM64</b> native full-stack support <b>network policy hardening</b> — per-sandbox traffic tokens, policy-routing egress.<br/>
+      <a href="./docs/changelog/v0.5.0.md">Changelog →</a> ·
+      <a href="./docs/guide/tencentcloud-terraform-deploy.md">Terraform deploy →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
       <a href="./docs/changelog/v0.4.0.md">
-        <img src="https://img.shields.io/badge/v0.4.0-New!-6f42c1?style=flat-square" alt="v0.4.0" />
+        <img src="https://img.shields.io/badge/v0.4.0-2026.06.14-6f42c1?style=flat-square" alt="v0.4.0" />
       </a>
     </td>
     <td valign="top">
@@ -96,8 +109,8 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 <table align="center">
   <tr align="center" valign="top">
     <td width="33%">
-      <strong>⚡ Sub-60ms boot · High density</strong><br/><br/>
-      Average &lt;60ms cold start, &lt;5MB overhead per instance — run thousands of Agents on one node<br/><br/>
+      <strong>⚡ Sub-60ms boot · High density · Auto pause/resume</strong><br/><br/>
+      Average &lt;60ms cold start, &lt;5MB overhead per instance — run thousands of Agents on one node. Supports automatic sandbox pause and resume for cost optimization<br/><br/>
       <a href="./docs/guide/quickstart.md">Quick start →</a>
     </td>
     <td width="33%">
