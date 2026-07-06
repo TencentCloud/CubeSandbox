@@ -33,14 +33,6 @@ examples/openai-agents-example/.scratch/
 examples/openai-agents-code-interpreter/__pycache__/
 examples/openai-agents-code-interpreter/output/
 examples/openai-agents-code-interpreter/.scratch/
-examples/code-sandbox-quickstart/__pycache__/
-examples/browser-sandbox/__pycache__/
-examples/host-mount/__pycache__/
-examples/network-policy/__pycache__/
-examples/snapshot-rollback-clone/__pycache__/
-
-# Auto-generated pip install fingerprints (local cache, do not commit)
-examples/*/.requirements_installed
 
 pvm-guest-build/
 pvm-host-build/

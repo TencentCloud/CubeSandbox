@@ -9,6 +9,5 @@
   "apiKeys": "API Keys",
   "settings": "Settings",
   "store": "Template Store",
-  "agentHub": "AgentHub",
-  "examples": "Sandbox Cases"
+  "agentHub": "AgentHub"
 }

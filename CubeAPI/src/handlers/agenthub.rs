@@ -725,7 +725,6 @@ fn openclaw_model_suffix(model: &str) -> &str {
 #[derive(Debug, Clone)]
 struct LlmRuntimePlan {
     /// Original model string as stored/displayed (e.g. `deepseek/deepseek-v4-flash`).
-    #[allow(dead_code)]
     public_model: String,
     /// Bare model id sent upstream as the request body `model` field.
     upstream_model_id: String,
@@ -1390,7 +1389,8 @@ pub async fn get_agent_gateway_health(
     Path(agent_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let record = read_agenthub_instance(&state, &agent_id).await?;
-    let proxy_base = state.config.sandbox_proxy_url.clone();
+    let proxy_base = std::env::var("AGENTHUB_SANDBOX_PROXY_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1".to_string());
     let url = format!(
         "{}/sandbox/{}/{}/",
         proxy_base.trim_end_matches('/'),
@@ -2146,7 +2146,7 @@ pub async fn clone_agent_instance(
                 .snapshots
                 .create(&record.sandbox_id, Some(format!("{} 分身源", record.name)))
                 .await
-                .inspect_err(|err| {
+                .map_err(|err| {
                     finish_agent_operation_blocking(
                         &state,
                         operation_id.as_deref(),
@@ -2154,6 +2154,7 @@ pub async fn clone_agent_instance(
                         None,
                         Some(&err.to_string()),
                     );
+                    err
                 })?;
             if let Some(store) = &state.agenthub_store {
                 let _ = store
@@ -2243,7 +2244,7 @@ pub async fn clone_agent_instance(
             volume_mounts: None,
         })
         .await
-        .inspect_err(|err| {
+        .map_err(|err| {
             finish_agent_operation_blocking(
                 &state,
                 operation_id.as_deref(),
@@ -2251,6 +2252,7 @@ pub async fn clone_agent_instance(
                 Some(&snapshot_id),
                 Some(&err.to_string()),
             );
+            err
         })?;
 
     let sandbox_id = created.sandbox_id.clone();
@@ -2464,7 +2466,7 @@ pub async fn publish_agent_template(
                     .snapshots
                     .create(&record.sandbox_id, body.name.clone())
                     .await
-                    .inspect_err(|err| {
+                    .map_err(|err| {
                         finish_agent_operation_blocking(
                             &state,
                             operation_id.as_deref(),
@@ -2472,6 +2474,7 @@ pub async fn publish_agent_template(
                             None,
                             Some(&err.to_string()),
                         );
+                        err
                     })?;
                 if let Some(store) = &state.agenthub_store {
                     let _ = store
@@ -2651,7 +2654,7 @@ pub async fn recover_agent_openclaw(
         .snapshots
         .rollback(&record.sandbox_id, &snapshot_id)
         .await
-        .inspect_err(|err| {
+        .map_err(|err| {
             finish_agent_operation_blocking(
                 &state,
                 operation_id.as_deref(),
@@ -2659,6 +2662,7 @@ pub async fn recover_agent_openclaw(
                 Some(&snapshot_id),
                 Some(&err.to_string()),
             );
+            err
         })?;
 
     if let Err(err) = restart_openclaw_for_record(&state, &record).await {
@@ -3798,10 +3802,9 @@ async fn run_envd_command(
     req: Value,
 ) -> AppResult<CommandOutput> {
     let host = format!("{}-{}.{}", ENVD_PORT, sandbox_id, domain);
-    let url = format!(
-        "{}/process.Process/Start",
-        state.config.sandbox_proxy_url.trim_end_matches('/')
-    );
+    let url = std::env::var("AGENTHUB_SANDBOX_PROXY_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1".to_string());
+    let url = format!("{}/process.Process/Start", url.trim_end_matches('/'));
 
     let body = connect_envelope(&serde_json::to_vec(&req).map_err(anyhow::Error::from)?);
     let resp = state
@@ -3809,7 +3812,7 @@ async fn run_envd_command(
         .post(url)
         .header("Host", host)
         .header("Content-Type", CONNECT_JSON)
-        .header("Authorization", &state.config.envd_auth)
+        .header("Authorization", "Basic cm9vdDo=")
         .body(body)
         .send()
         .await

@@ -1,14 +1,14 @@
 package main
 
 import (
-	"context"
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"sync"
 	"time"
-
-	cubesandbox "github.com/tencentcloud/CubeSandbox/sdk/go"
 )
 
 type IterResult struct {
@@ -18,27 +18,70 @@ type IterResult struct {
 	Err      string
 }
 
-func benchOne(client *cubesandbox.Client, cfg *Config, seq int) IterResult {
+type createResp struct {
+	SandboxID string `json:"sandboxID"`
+}
+
+func benchOne(client *http.Client, cfg *Config, seq int) IterResult {
 	r := IterResult{Seq: seq}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
+	apiURL := cfg.APIURL
 
 	// CREATE
 	t0 := time.Now()
-	sandbox, err := client.Create(ctx, cubesandbox.CreateOptions{TemplateID: cfg.Template})
+	req, err := http.NewRequest("POST", apiURL+"/sandboxes", bytes.NewReader(cfg.requestBody))
+	if err != nil {
+		r.Err = fmt.Sprintf("create request build: %v", err)
+		return r
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range cfg.requestHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
 	r.CreateMs = float64(time.Since(t0).Microseconds()) / 1000.0
 	if err != nil {
 		r.Err = fmt.Sprintf("create: %v", err)
 		return r
 	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		msg := string(respBody)
+		if len(msg) > 200 {
+			msg = msg[:200]
+		}
+		r.Err = fmt.Sprintf("create HTTP %d: %s", resp.StatusCode, msg)
+		return r
+	}
+
+	var cr createResp
+	if err := json.Unmarshal(respBody, &cr); err != nil {
+		r.Err = fmt.Sprintf("create json decode: %v", err)
+		return r
+	}
 
 	// DELETE
-	if cfg.Mode == "create-delete" {
+	if cfg.Mode == "create-delete" && cr.SandboxID != "" {
 		t0 = time.Now()
-		err := sandbox.Kill(ctx)
+		dreq, err := http.NewRequest("DELETE", apiURL+"/sandboxes/"+cr.SandboxID, nil)
+		if err != nil {
+			r.Err = fmt.Sprintf("delete request build: %v", err)
+			return r
+		}
+		for k, v := range cfg.requestHeaders {
+			dreq.Header.Set(k, v)
+		}
+		dresp, err := client.Do(dreq)
 		r.DeleteMs = float64(time.Since(t0).Microseconds()) / 1000.0
 		if err != nil {
 			r.Err = fmt.Sprintf("delete: %v", err)
+			return r
+		}
+		defer dresp.Body.Close()
+		if dresp.StatusCode != 200 && dresp.StatusCode != 204 {
+			r.Err = fmt.Sprintf("delete HTTP %d", dresp.StatusCode)
 			return r
 		}
 	}
@@ -77,10 +120,9 @@ func RunBenchmark(cfg *Config, resultCh chan<- IterResult) {
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
 
-	var client *cubesandbox.Client
+	var client *http.Client
 	if !cfg.DryRun {
-		// Use a tuned HTTP client for accurate benchmarking.
-		httpClient := &http.Client{
+		client = &http.Client{
 			Transport: &http.Transport{
 				MaxIdleConns:        cfg.Concurrency + 20,
 				MaxIdleConnsPerHost: cfg.Concurrency + 20,
@@ -89,14 +131,6 @@ func RunBenchmark(cfg *Config, resultCh chan<- IterResult) {
 			},
 			Timeout: 120 * time.Second,
 		}
-
-		sdkCfg := cubesandbox.Config{
-			APIURL:     cfg.APIURL,
-			APIKey:     cfg.APIKey,
-			TemplateID: cfg.Template,
-		}
-		client = cubesandbox.NewClient(sdkCfg, cubesandbox.WithHTTPClient(httpClient))
-		defer client.Close()
 
 		// Warmup
 		for i := 0; i < cfg.Warmup; i++ {

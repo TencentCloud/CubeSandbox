@@ -15,7 +15,6 @@ import {
   Settings,
   Store,
   Layers,
-  FlaskConical,
   Github,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -31,7 +30,6 @@ const NAV_ITEMS = [
   { to: '/observability', icon: Activity, key: 'observability' },
   { to: '/keys', icon: KeyRound, key: 'apiKeys' },
   { to: '/store', icon: Store, key: 'store' },
-  { to: '/examples', icon: FlaskConical, key: 'examples' },
   { to: '/agenthub', icon: Bot, key: 'agentHub' },
   { to: '/settings', icon: Settings, key: 'settings' },
 ] as const;
@@ -42,14 +40,10 @@ export function Rail() {
   const version = useControlPlaneVersion();
 
   return (
-    <aside className="group/rail fixed inset-y-0 left-0 z-20 flex w-[68px] flex-col justify-between border-r border-border/60 bg-background/60 py-3 backdrop-blur-xl transition-[width] duration-200 ease-out hover:w-[190px]">
-      <div className="flex flex-col gap-1 px-3">
-        {/* Logo */}
-        <div className="mb-4 flex h-10 items-center justify-center gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted/60 ring-1 ring-border/60 glow-ring">
-            <img src="/assets/cube-logo.svg" alt="CubeSandbox" className="h-7 w-7" />
-          </div>
-          <span className="overflow-hidden whitespace-nowrap text-base font-semibold tracking-tight text-foreground opacity-0 transition-opacity duration-150 group-hover/rail:opacity-100">CubeSandbox</span>
+    <aside className="fixed inset-y-0 left-0 z-20 flex w-[68px] flex-col items-center justify-between border-r border-border/60 bg-background/60 py-4 backdrop-blur-xl">
+      <div className="flex flex-col items-center gap-2">
+        <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-muted/60 ring-1 ring-border/60 glow-ring">
+          <img src="/assets/cube-logo.svg" alt="CubeSandbox" className="h-7 w-7" />
         </div>
         {NAV_ITEMS.map(({ to, icon: Icon, key }) => {
           const label = t(key);
@@ -60,30 +54,32 @@ export function Rail() {
               to={to}
               title={label}
               className={cn(
-                'relative flex h-10 items-center justify-center gap-3 rounded-lg px-2 text-sm text-muted-foreground transition-all duration-150 ease-cube',
+                'group relative flex h-10 w-10 items-center justify-center rounded-lg text-muted-foreground transition-all duration-150 ease-cube',
                 'hover:bg-muted hover:text-foreground',
-                active && 'bg-primary/15 text-primary font-medium',
-                'group-hover/rail:justify-start group-hover/rail:px-3'
+                active && 'bg-primary/15 text-primary ring-1 ring-primary/30'
               )}
             >
-              <Icon size={18} strokeWidth={1.75} className="shrink-0" />
-              <span className="absolute left-full top-1/2 z-50 ml-2 hidden -translate-y-1/2 rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground shadow-md group-hover/item:block group-hover/rail:relative group-hover/rail:left-0 group-hover/rail:top-auto group-hover/rail:translate-y-0 group-hover/rail:inline group-hover/rail:bg-transparent group-hover/rail:text-current group-hover/rail:shadow-none group-hover/rail:p-0">{label}</span>
+              <Icon size={18} strokeWidth={1.75} />
+              <span className="pointer-events-none absolute left-12 whitespace-nowrap rounded-md bg-popover/95 px-2 py-1 text-xs text-popover-foreground opacity-0 shadow-xl ring-1 ring-border/60 transition-opacity group-hover:opacity-100">
+                {label}
+              </span>
             </NavLink>
           );
         })}
       </div>
-      <div className="flex flex-col gap-2 px-3 pb-2">
+      <div className="flex flex-col items-center gap-4 pb-2">
         <a
           href="https://github.com/tencentcloud/CubeSandbox"
           target="_blank"
           rel="noopener noreferrer"
-          title="GitHub"
-          className="relative flex h-9 items-center justify-center gap-3 rounded-lg px-2 text-sm text-muted-foreground transition-all duration-150 ease-cube hover:bg-muted hover:text-foreground group-hover/rail:justify-start group-hover/rail:px-3"
+          className="group relative flex h-10 w-10 items-center justify-center rounded-lg text-muted-foreground transition-all duration-150 ease-cube hover:bg-muted hover:text-foreground"
         >
-          <Github size={18} strokeWidth={1.75} className="shrink-0" />
-          <span className="absolute left-full top-1/2 z-50 ml-2 hidden -translate-y-1/2 rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground shadow-md group-hover/item:block group-hover/rail:relative group-hover/rail:left-0 group-hover/rail:top-auto group-hover/rail:translate-y-0 group-hover/rail:inline group-hover/rail:bg-transparent group-hover/rail:text-current group-hover/rail:shadow-none group-hover/rail:p-0">GitHub</span>
+          <Github size={18} strokeWidth={1.75} />
+          <span className="pointer-events-none absolute left-12 whitespace-nowrap rounded-md bg-popover/95 px-2 py-1 text-xs text-popover-foreground opacity-0 shadow-xl ring-1 ring-border/60 transition-opacity group-hover:opacity-100">
+            GitHub
+          </span>
         </a>
-        <div className="overflow-hidden whitespace-nowrap text-center text-xs tracking-wider text-muted-foreground/70 text-num opacity-0 transition-opacity duration-150 group-hover/rail:opacity-100 group-hover/rail:text-left">v{version}</div>
+        <div className="text-xs tracking-wider text-muted-foreground/70 text-num">v{version}</div>
       </div>
     </aside>
   );

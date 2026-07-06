@@ -6,7 +6,7 @@ import urllib.request
 from pathlib import Path
 
 from dotenv import load_dotenv
-from cubesandbox import Sandbox
+from e2b import Sandbox
 
 for candidate in (Path(__file__).with_name(".env"), Path.cwd() / ".env"):
     if candidate.is_file():

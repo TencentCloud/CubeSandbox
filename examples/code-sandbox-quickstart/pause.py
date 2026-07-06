@@ -5,7 +5,7 @@ import argparse
 import os
 import time
 
-from cubesandbox import Sandbox
+from e2b_code_interpreter import Sandbox
 from env_utils import load_local_dotenv
 from rich import box
 from rich.console import Console
@@ -123,17 +123,6 @@ with Sandbox.create(template=template_id) as sandbox:
     console.rule(f"[{PAL['accent']}]Step 1 · Create Sandbox & Run Computation[/]")
     console.print(status_panel("running", sid))
 
-    # Wait for Jupyter kernel to be ready (envd starts before Jupyter)
-    for _ in range(30):
-        try:
-            import httpx
-            r = httpx.get(f"http://{sandbox.get_host(49999)}/", timeout=3)
-            if r.status_code == 200:
-                break
-        except Exception:
-            pass
-        time.sleep(1)
-
     console.print(
         Panel(
             Syntax(
@@ -211,20 +200,9 @@ with Sandbox.create(template=template_id) as sandbox:
     console.rule(f"[{PAL['ok']}]Step 4 · Resume Sandbox from Snapshot[/]")
 
     with console.status(f"[{PAL['ok']}]Resuming from snapshot...[/]"):
-        sandbox = Sandbox.connect(sid)
+        sandbox.connect()
 
     console.print(status_panel("running", sid))
-
-    # Wait for Jupyter kernel to be ready after resume
-    for _ in range(30):
-        try:
-            import httpx
-            r = httpx.get(f"http://{sandbox.get_host(49999)}/", timeout=3)
-            if r.status_code == 200:
-                break
-        except Exception:
-            pass
-        time.sleep(1)
 
     # ── Step 5: Verify State Preserved ───────────────────────────────────────
 

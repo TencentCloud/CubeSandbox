@@ -19,7 +19,7 @@ export function AppShell() {
       <Rail />
       <main className="ml-[68px] min-h-screen px-6 pb-10">
         <TopBar />
-        <div className="mx-auto max-w-[1800px]">
+        <div className="mx-auto max-w-[1400px]">
           <Outlet />
         </div>
       </main>

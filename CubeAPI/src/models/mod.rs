@@ -514,40 +514,6 @@ fn default_page_limit() -> i32 {
     100
 }
 
-// ─── Sandbox — exec code ──────────────────────────────────────────────────
-
-/// Request body for POST /cube/sandboxes/{sandboxID}/exec-code
-#[derive(Debug, Deserialize, Validate, ToSchema)]
-pub struct ExecCodeRequest {
-    /// Code to execute inside the sandbox.
-    #[validate(length(min = 1, max = 50000))]
-    pub code: String,
-    /// Language: "python" or "bash".
-    pub language: String,
-    /// Execution timeout in seconds (default 30, max 300).
-    #[serde(default = "default_exec_timeout")]
-    pub timeout_secs: Option<i32>,
-}
-
-fn default_exec_timeout() -> Option<i32> {
-    Some(30)
-}
-
-/// Response for POST /cube/sandboxes/{sandboxID}/exec-code
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ExecCodeResponse {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-    pub success: bool,
-    pub elapsed_ms: u64,
-    /// Rich results from the Jupyter kernel (Python mode only).
-    /// Each entry has a `type` field (`"result"`) plus optional
-    /// `text`, `html`, `png`, etc. keys.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub results: Option<Vec<serde_json::Value>>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::{NewSandbox, SandboxNetworkConfig};

@@ -71,52 +71,6 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
-
-    /// Default template ID used by the Examples runner.
-    /// Env var: CUBE_TEMPLATE_ID
-    #[serde(default = "default_template_id")]
-    pub default_template_id: Option<String>,
-
-    /// CubeAPI URL used by the Examples runner (passed as CUBE_API_URL to scripts).
-    /// Env var: CUBE_API_URL (default "http://127.0.0.1:3000")
-    #[serde(default = "default_cube_api_url")]
-    pub cube_api_url: Option<String>,
-
-    /// CubeProxy node IP for bypassing DNS resolution (passed as CUBE_PROXY_NODE_IP).
-    /// Env var: CUBE_PROXY_NODE_IP
-    #[serde(default)]
-    pub cube_proxy_node_ip: Option<String>,
-
-    /// CubeProxy HTTP port (passed as CUBE_PROXY_PORT_HTTP).
-    /// Env var: CUBE_PROXY_PORT_HTTP (no default; omitted when unset)
-    #[serde(default = "default_cube_proxy_port_http")]
-    pub cube_proxy_port_http: Option<u16>,
-
-    /// Base URL of the sandbox proxy used to reach in-sandbox services
-    /// (envd / Jupyter). Env var: AGENTHUB_SANDBOX_PROXY_URL (default
-    /// "http://127.0.0.1").
-    #[serde(default = "default_sandbox_proxy_url")]
-    pub sandbox_proxy_url: String,
-
-    /// `Authorization` header value used for internal service-to-service auth
-    /// with the in-sandbox envd / Jupyter endpoints.
-    ///
-    /// **Security**: this is a credential and must never be hardcoded in
-    /// business logic. It is sourced from the environment so deployments can
-    /// rotate it without code changes. Env var: CUBE_API_ENVD_AUTH (default
-    /// `Basic cm9vdDo=`, i.e. the envd built-in `root:` with an empty
-    /// password — override it in any non-local environment).
-    #[serde(default = "default_envd_auth")]
-    pub envd_auth: String,
-
-    /// Fallback CUBE_API_KEY injected into example subprocesses when the
-    /// parent process does not export CUBE_API_KEY.
-    ///
-    /// Intended for sandbox/demo deployments to provide an out-of-the-box
-    /// experience. In production, leave this unset and export CUBE_API_KEY
-    /// directly. Env var: CUBE_API_DEFAULT_KEY
-    #[serde(default = "default_api_key")]
-    pub default_api_key: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -154,35 +108,6 @@ fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .or_else(default_cube_sandbox_mysql_url)
-}
-fn default_template_id() -> Option<String> {
-    std::env::var("CUBE_TEMPLATE_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
-}
-fn default_cube_api_url() -> Option<String> {
-    std::env::var("CUBE_API_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| Some("http://127.0.0.1:3000".to_string()))
-}
-
-fn default_cube_proxy_port_http() -> Option<u16> {
-    std::env::var("CUBE_PROXY_PORT_HTTP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-}
-fn default_sandbox_proxy_url() -> String {
-    std::env::var("AGENTHUB_SANDBOX_PROXY_URL").unwrap_or_else(|_| "http://127.0.0.1".to_string())
-}
-fn default_envd_auth() -> String {
-    std::env::var("CUBE_API_ENVD_AUTH").unwrap_or_else(|_| "Basic cm9vdDo=".to_string())
-}
-fn default_api_key() -> Option<String> {
-    std::env::var("CUBE_API_DEFAULT_KEY")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| Some("cube_0000000000000000000000000000000000000000".to_string()))
 }
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
@@ -223,13 +148,6 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
-            default_template_id: default_template_id(),
-            cube_api_url: default_cube_api_url(),
-            cube_proxy_node_ip: None,
-            cube_proxy_port_http: default_cube_proxy_port_http(),
-            sandbox_proxy_url: default_sandbox_proxy_url(),
-            envd_auth: default_envd_auth(),
-            default_api_key: default_api_key(),
         }
     }
 }

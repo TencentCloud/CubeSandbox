@@ -4,7 +4,7 @@
 import * as React from 'react';
 import { cn } from '@/lib/utils';
 
-export type Tone = 'default' | 'info' | 'ok' | 'warn' | 'err' | 'mute';
+type Tone = 'default' | 'info' | 'ok' | 'warn' | 'err' | 'mute';
 
 export function Badge({
   className,

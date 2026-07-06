@@ -5,36 +5,44 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { agentHubApi, templateApi, storeApi, type TemplateSummary, type ImageMeta, type StoreCatalogItem } from '@/api/client';
+import { useNavigate } from 'react-router-dom';
+import { agentHubApi, templateApi, storeApi, type TemplateSummary, type ImageMeta } from '@/api/client';
 import { showToast } from '@/components/ui/ToastProvider';
-import { CATEGORIES, type CategoryId, type StoreTemplate } from '@/data/templateStore';
-import { getInstalledTemplates } from '@/lib/template-match';
+import { STORE_TEMPLATES, CATEGORIES, type StoreTemplate, type CategoryId } from '@/data/templateStore';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Code2, Globe, Bot, Box, Server, Search, X, ChevronDown, Package, Loader2, Plus, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Code2, Globe, Bot, Box, Search, X, ChevronDown, Package, Loader2, Plus, AlertTriangle, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-function categoryIcon(category: StoreCatalogItem['category']) {
+function categoryIcon(category: StoreTemplate['category']) {
   switch (category) {
     case 'code':    return Code2;
     case 'browser': return Globe;
     case 'ai':      return Bot;
-    case 'web':     return Server;
     case 'base':    return Box;
-    default:        return Box;
   }
+}
+
+/** 只计 status=READY 的模板为"已安装" */
+function getInstalledTemplates(item: StoreTemplate, templates: TemplateSummary[]): TemplateSummary[] {
+  return templates.filter((tpl) => {
+    if (!tpl.imageInfo) return false;
+    const statusOk = tpl.status?.toUpperCase() === 'READY';
+    if (!statusOk) return false;
+    if (item.digest && tpl.imageInfo.includes(item.digest)) return true;
+    const imageName = item.image.split('@')[0];
+    return tpl.imageInfo.includes(imageName);
+  });
 }
 
 function isOpenClawTemplate(item: StoreTemplate): boolean {
   return item.id === 'openclaw-lite' || item.id === 'openclaw-aio';
 }
-
 
 // ── InstallModal ──────────────────────────────────────────────────────────────
 
@@ -66,7 +74,7 @@ function InstallModal({ item, enableForAgentHub = false, onClose }: InstallModal
       try {
         await agentHubApi.registerMarketTemplate({
           templateId: templateID,
-          name: t(item.name_key as 'official', { defaultValue: item.id }),
+          name: t(item.nameKey as 'official', { defaultValue: item.id }),
           model: 'deepseek/deepseek-v4-flash',
           version: item.id,
           recommended: true,
@@ -129,7 +137,6 @@ function InstallModal({ item, enableForAgentHub = false, onClose }: InstallModal
         probePort: item.probe_port,
         probePath: item.probe_path,
         writableLayerSize: writableLayerSize.trim() || item.writable_layer_size,
-        dns: item.dns.length > 0 ? item.dns : undefined,
       }),
     onMutate: () => setPhase({ kind: 'submitting' }),
     onSuccess: (data) => {
@@ -171,9 +178,6 @@ function InstallModal({ item, enableForAgentHub = false, onClose }: InstallModal
             <div><span className="text-muted-foreground">expose-port: </span>{item.expose_ports.join(', ')}</div>
             <div><span className="text-muted-foreground">probe: </span>{item.probe_port}</div>
             <div><span className="text-muted-foreground">probe-path: </span>{item.probe_path}</div>
-            {item.dns.length > 0 && (
-              <div><span className="text-muted-foreground">dns: </span>{item.dns.join(', ')}</div>
-            )}
           </div>
 
           {/* 可编辑参数 */}
@@ -368,7 +372,7 @@ function InstalledDropdown({ installed, onInstallAnother }: InstalledDropdownPro
 // ── StoreCard ─────────────────────────────────────────────────────────────────
 
 interface StoreCardProps {
-  item: StoreCatalogItem;
+  item: StoreTemplate;
   installed: TemplateSummary[];
   onInstall: () => void;
   onInstallAndEnable: () => void;
@@ -418,7 +422,7 @@ function StoreCard({ item, installed, onInstall, onInstallAndEnable, onEnableIns
 
         {/* description */}
         <p className="text-xs text-muted-foreground leading-relaxed">
-          {t(item.description_key as 'official', { defaultValue: '' })}
+          {t(item.descriptionKey as 'official', { defaultValue: '' })}
         </p>
 
         {/* tags */}
@@ -474,23 +478,11 @@ export default function TemplateStorePage() {
   const { t } = useTranslation('store');
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-
-  useEffect(() => {
-    const q = searchParams.get('search');
-    if (q) setSearch(q);
-  }, [searchParams]);
 
   const { data: templates, isLoading } = useQuery({
     queryKey: ['templates'],
     queryFn: templateApi.list,
     refetchInterval: 30_000,
-  });
-
-  const { data: storeCatalog } = useQuery({
-    queryKey: ['store-catalog'],
-    queryFn: storeApi.catalog,
-    staleTime: 5 * 60 * 1000, // 5 minutes
   });
 
   const { data: storeMeta, refetch: refetchMeta } = useQuery({
@@ -529,17 +521,15 @@ export default function TemplateStorePage() {
     },
   });
 
-  const filtered = (storeCatalog ?? []).filter((item) => {
+  const filtered = STORE_TEMPLATES.filter((item) => {
     if (category !== 'all' && item.category !== category) return false;
     if (search.trim()) {
       const q = search.toLowerCase();
-      const name = t(item.name_key as 'official', { defaultValue: '' }).toLowerCase();
-      const description = t(item.description_key as 'official', { defaultValue: '' }).toLowerCase();
+      const name = t(item.nameKey as 'official', { defaultValue: '' }).toLowerCase();
+      const description = t(item.descriptionKey as 'official', { defaultValue: '' }).toLowerCase();
       return (
         name.includes(q) ||
         description.includes(q) ||
-        item.image.toLowerCase().includes(q) ||
-        item.id.toLowerCase().includes(q) ||
         item.tags.some((tag) => {
           const label = t(`tagLabels.${tag}` as 'official', { defaultValue: tag }).toLowerCase();
           return tag.toLowerCase().includes(q) || label.includes(q);
@@ -555,7 +545,7 @@ export default function TemplateStorePage() {
       try {
         await agentHubApi.registerMarketTemplate({
           templateId: template.templateID,
-          name: t(item.name_key as 'official', { defaultValue: item.id }),
+          name: t(item.nameKey as 'official', { defaultValue: item.id }),
           model: 'deepseek/deepseek-v4-flash',
           version: item.id,
           recommended: true,

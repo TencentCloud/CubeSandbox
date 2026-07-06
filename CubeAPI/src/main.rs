@@ -8,7 +8,6 @@ mod crypto;
 mod cubemaster;
 mod db;
 mod error;
-mod examples;
 mod handlers;
 mod logging;
 mod middleware;
@@ -185,31 +184,6 @@ fn main() -> anyhow::Result<()> {
         auth_enabled = cfg.auth_callback_url.is_some(),
         "cube-api starting"
     );
-
-    // Prime the examples-root resolver at startup so that misconfiguration
-    // (missing examples/ directory, wrong CUBE_EXAMPLES_DIR, etc.) surfaces
-    // as an immediate fail-fast — with the full candidate list printed —
-    // instead of as a confusing HTTP 500 the first time a user opens an
-    // example. The resolver caches the result in a OnceLock, so subsequent
-    // calls are free.
-    let _ = services::examples::examples_root();
-
-    // Warn operators who enable auth but forget to provide a real API key for
-    // example subprocesses. In this mode the hardcoded fallback is NOT injected
-    // (it is a publicly known value), so subprocesses won't have CUBE_API_KEY
-    // unless the parent process exports one or CUBE_API_DEFAULT_KEY is set.
-    if cfg.auth_callback_url.is_some()
-        && std::env::var("CUBE_API_KEY").is_err()
-        && cfg.default_api_key.as_deref().map_or(true, |k| {
-            k == "cube_0000000000000000000000000000000000000000"
-        })
-    {
-        tracing::warn!(
-            "AUTH_CALLBACK_URL is set but no real API key is available for example \
-             subprocesses. Export CUBE_API_KEY or set CUBE_API_DEFAULT_KEY to a \
-             secret value, otherwise example scripts will not receive CUBE_API_KEY."
-        );
-    }
 
     // ── Tokio runtime ──────────────────────────────────────────────────────
     let mut builder = tokio::runtime::Builder::new_multi_thread();

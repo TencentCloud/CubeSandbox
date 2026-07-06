@@ -188,29 +188,6 @@ const DEFAULT_RESUME_BODY: SandboxResumeRequest = {
   autoPause: false,
 };
 
-export interface JupyterResult {
-  type: 'result';
-  text?: string | null;
-  html?: string | null;
-  png?: string | null;
-  jpeg?: string | null;
-  svg?: string | null;
-  markdown?: string | null;
-  json?: Record<string, unknown> | null;
-  is_main_result?: boolean;
-  [key: string]: unknown;
-}
-
-export interface ExecCodeResult {
-  stdout: string;
-  stderr: string;
-  exit_code: number;
-  success: boolean;
-  elapsed_ms: number;
-  /** Rich results from the Jupyter kernel (Python mode only). */
-  results?: JupyterResult[] | null;
-}
-
 export const sandboxApi = {
   list: (params?: { metadata?: string; state?: RunningSandbox['state']; nextToken?: string; limit?: number }) =>
     api<ListedSandboxDto[]>('/v2/sandboxes', { params }).then((items) => items.map(mapSandbox)),
@@ -231,11 +208,6 @@ export const sandboxApi = {
     metadata?: Record<string, string>;
   }) =>
     api<SandboxSessionDto>('/sandboxes', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-  execCode: (id: string, body: { code: string; language: string; timeout_secs?: number }) =>
-    api<ExecCodeResult>(`/cube/sandboxes/${id}/exec-code`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -292,9 +264,6 @@ export const clusterApi = {
     authEnabled: boolean;
     sandboxDomain: string;
     instanceType: string;
-    defaultTemplateId?: string;
-    proxyNodeIp?: string;
-    proxyPortHttp?: number;
   }>('/config'),
 };
 
@@ -310,144 +279,9 @@ export interface StoreMeta {
   images: ImageMeta[];
 }
 
-export interface StoreCatalogItem {
-  id: string;
-  name_key: string;
-  description_key: string;
-  image_cn: string;
-  image_intl: string;
-  image: string;
-  digest: string | null;
-  tags: string[];
-  category: string;
-  size_mb: number;
-  expose_ports: number[];
-  probe_port: number;
-  probe_path: string;
-  writable_layer_size: string;
-  official: boolean;
-  dns: string[];
-}
-
-export interface StoreCatalogResponse {
-  items: StoreCatalogItem[];
-}
-
-export interface UpsertStoreCatalogRequest {
-  id: string;
-  name_key: string;
-  description_key: string;
-  image_cn: string;
-  image_intl: string;
-  digest?: string | null;
-  tags?: string[];
-  category: string;
-  size_mb?: number;
-  expose_ports?: number[];
-  probe_port?: number;
-  probe_path?: string;
-  writable_layer_size?: string;
-  official?: boolean;
-  dns?: string[];
-  sort_order?: number;
-}
-
 export const storeApi = {
-  catalog: () => api<StoreCatalogResponse>('/store/catalog').then((r) => r.items),
-  createCatalogItem: (body: UpsertStoreCatalogRequest) =>
-    api<StoreCatalogItem>('/store/catalog', { method: 'POST', body: JSON.stringify(body) }),
-  updateCatalogItem: (id: string, body: UpsertStoreCatalogRequest) =>
-    api<StoreCatalogItem>(`/store/catalog/${id}`, { method: 'PATCH', body: JSON.stringify({ ...body, id }) }),
-  deleteCatalogItem: (id: string) =>
-    api<void>(`/store/catalog/${id}`, { method: 'DELETE' }),
   meta: () => api<StoreMeta>('/store/meta'),
   refresh: () => api<StoreMeta>('/store/refresh', { method: 'POST' }),
-};
-
-export interface ExampleMeta {
-  id: string;
-  scenario: string;
-  filename: string;
-  title: string;
-  description: string;
-  category: string;
-  language: string;
-  store_item_id: string | null;
-}
-
-export interface ExampleSource {
-  id: string;
-  filename: string;
-  scenario: string;
-  language: string;
-  source: string;
-}
-
-export interface TopologyNodeDto {
-  id: string;
-  label: string;
-  plane: 'control' | 'data' | string;
-  kind: 'user' | 'control' | 'data' | 'vm' | 'store' | string;
-  description: string;
-}
-
-export interface TopologyEdgeDto {
-  from: string;
-  to: string;
-  label: string;
-  plane: 'control' | 'data' | string;
-}
-
-export interface TopologyGraphDto {
-  nodes: TopologyNodeDto[];
-  edges: TopologyEdgeDto[];
-}
-
-export interface ExampleRunResult {
-  stdout: string;
-  stderr: string;
-  exit_code: number;
-  success: boolean;
-  elapsed_ms: number;
-  topology: TopologyGraphDto;
-  ran_edited: boolean;
-}
-
-export interface RunExampleBody {
-  id: string;
-  template_id?: string;
-  language?: string;
-  code?: string;
-  api_url?: string;
-  proxy_node_ip?: string;
-}
-
-export const examplesApi = {
-  list: () => api<ExampleMeta[]>('/examples'),
-  /**
-   * Fetch source code for a single example.
-   * The id format is "scenario:file" (e.g. "code-sandbox-quickstart:create").
-   * We split it into two path segments to avoid URL-encoding issues with colons.
-   */
-  source: (id: string) => {
-    const [scenario, file, ...rest] = id.split(':');
-    if (!scenario || !file || rest.length > 0) {
-      throw new Error(`Invalid example id: "${id}". Expected "scenario:file".`);
-    }
-    return api<ExampleSource>(`/examples/${encodeURIComponent(scenario)}/${encodeURIComponent(file)}`);
-  },
-  run: (body: RunExampleBody) =>
-    api<ExampleRunResult>('/examples/run', {
-      method: 'POST',
-      body: JSON.stringify({
-        id: body.id,
-        template_id: body.template_id,
-        language: body.language,
-        code: body.code,
-        api_url: body.api_url,
-        proxy_node_ip: body.proxy_node_ip,
-      }),
-    }),
 };
 
 export interface AgentInstanceDto {

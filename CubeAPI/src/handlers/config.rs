@@ -24,15 +24,6 @@ pub struct RuntimeConfig {
     /// Default instance type.
     #[serde(rename = "instanceType")]
     pub instance_type: String,
-    /// Default template ID used by the Examples runner (from CUBE_TEMPLATE_ID).
-    #[serde(rename = "defaultTemplateId", skip_serializing_if = "Option::is_none")]
-    pub default_template_id: Option<String>,
-    /// CubeProxy node IP (passed as CUBE_PROXY_NODE_IP to example scripts).
-    #[serde(rename = "proxyNodeIp", skip_serializing_if = "Option::is_none")]
-    pub proxy_node_ip: Option<String>,
-    /// CubeProxy HTTP port (passed as CUBE_PROXY_PORT_HTTP to example scripts).
-    #[serde(rename = "proxyPortHttp", skip_serializing_if = "Option::is_none")]
-    pub proxy_port_http: Option<u16>,
 }
 
 /// Build the public-facing API endpoint URL.
@@ -76,9 +67,6 @@ pub async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
                 .is_some_and(|u| !u.is_empty()),
             sandbox_domain: cfg.sandbox_domain.clone(),
             instance_type: cfg.instance_type.clone(),
-            default_template_id: cfg.default_template_id.clone(),
-            proxy_node_ip: cfg.cube_proxy_node_ip.clone(),
-            proxy_port_http: cfg.cube_proxy_port_http,
         }),
     )
 }

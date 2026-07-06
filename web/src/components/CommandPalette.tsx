@@ -13,7 +13,6 @@ import {
   KeyRound,
   Settings,
   Plus,
-  Sparkles,
 } from 'lucide-react';
 import { useCommandPaletteStore } from '@/store/ui';
 
@@ -57,7 +56,6 @@ export function CommandPalette() {
               <Item icon={<Package size={14} />} label={tNav('templates')} onSelect={() => go('/templates')} />
               <Item icon={<Server size={14} />} label={tNav('nodes')} onSelect={() => go('/nodes')} />
               <Item icon={<Activity size={14} />} label={tNav('observability')} onSelect={() => go('/observability')} />
-              <Item icon={<Sparkles size={14} />} label={tNav('examples')} onSelect={() => go('/examples')} />
               <Item icon={<KeyRound size={14} />} label={tNav('apiKeys')} onSelect={() => go('/keys')} />
               <Item icon={<Settings size={14} />} label={tNav('settings')} onSelect={() => go('/settings')} />
             </Command.Group>

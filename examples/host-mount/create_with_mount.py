@@ -20,24 +20,14 @@ Use cases:
 
 import json
 import os
-import subprocess
 
-from cubesandbox import Sandbox
+from e2b_code_interpreter import Sandbox
+
 from env_utils import load_local_dotenv
 
 load_local_dotenv()
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
-
-# Ensure the host directories exist before creating the sandbox.
-# CubeMaster requires that bind-mount source paths already exist.
-for d in ["/tmp/rw", "/tmp/ro"]:
-    os.makedirs(d, exist_ok=True)
-    # Write a small marker so `ls` shows something meaningful
-    marker = os.path.join(d, "hello.txt")
-    if not os.path.exists(marker):
-        with open(marker, "w") as f:
-            f.write(f"marker from host {d}\n")
 
 with Sandbox.create(
     template=template_id,
