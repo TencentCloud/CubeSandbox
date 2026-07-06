@@ -1209,6 +1209,16 @@ mod tests {
         .unwrap();
         assert_eq!(translate(&pause_with_resume), (true, true));
 
+        // Some Python SDK versions and direct callers may send the Pythonic
+        // snake_case shape. Keep accepting it so lifecycle does not silently
+        // fall back to the default kill/no-resume behaviour.
+        let snake_case_pause_with_resume: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+            "lifecycle": {"on_timeout": "pause", "auto_resume": true},
+        }))
+        .unwrap();
+        assert_eq!(translate(&snake_case_pause_with_resume), (true, true));
+
         // Pause without auto_resume — caller must call connect() manually.
         let pause_only: NewSandbox = serde_json::from_value(serde_json::json!({
             "templateID": "tpl",

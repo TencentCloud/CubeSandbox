@@ -127,12 +127,12 @@ pub struct EgressRuleInject {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct SandboxLifecycleConfig {
     /// "kill" (default) | "pause".
-    #[serde(rename = "onTimeout", default)]
+    #[serde(rename = "onTimeout", alias = "on_timeout", default)]
     pub on_timeout: SandboxOnTimeout,
 
     /// Auto-resume on activity. Defaults to false. Only meaningful when
     /// `on_timeout` is set to "pause".
-    #[serde(rename = "autoResume", default)]
+    #[serde(rename = "autoResume", alias = "auto_resume", default)]
     pub auto_resume: bool,
 }
 
