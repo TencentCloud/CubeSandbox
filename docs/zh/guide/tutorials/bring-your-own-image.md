@@ -34,9 +34,10 @@ Cube-Sandbox 与沙箱容器之间的所有通信都是通过容器内的 `envd`
 了 `envd`，并附带一个通用入口脚本——后台拉起 `envd`、前台 `exec` 你
 提供的 `CMD`。你只需要三步：**写 Dockerfile → 构建推送 → 创建模板**。
 
-> 想看一个能直接跑通的完整示例？可以参考仓库里的
-> [`examples/cubesandbox-base-nginx`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-nginx)，
-> 里面是把 nginx 叠在 `cubesandbox-base` 上的最小 demo。
+> 想看能直接跑通的完整示例？可以参考仓库里的
+> [`examples/cubesandbox-base-nginx`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-nginx)（nginx 叠在 `cubesandbox-base` 上）、
+> [`examples/cubesandbox-base-java`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-java)（OpenJDK 17 + Maven 叠在 `cubesandbox-base` 上）或
+> [`examples/cubesandbox-base-go`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-go)（Go 工具链叠在 `cubesandbox-base` 上），都是在基础镜像上加一个真实服务的最小 demo。
 
 ### 2.1 写 Dockerfile
 

@@ -40,8 +40,12 @@ template**.
 
 > Prefer to read a runnable end-to-end example? See
 > [`examples/cubesandbox-base-nginx`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-nginx)
-> in the repo — a minimal demo that stacks nginx on top of
-> `cubesandbox-base`.
+> (nginx on `cubesandbox-base`),
+> [`examples/cubesandbox-base-java`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-java)
+> (OpenJDK 17 + Maven on `cubesandbox-base`), or
+> [`examples/cubesandbox-base-go`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-go)
+> (Go toolchain on `cubesandbox-base`) in the repo — all are minimal demos
+> that add a real service on top of the base image.
 
 ### 2.1 Write a Dockerfile
 
