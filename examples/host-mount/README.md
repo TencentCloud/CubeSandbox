@@ -13,8 +13,8 @@ the standard E2B API: they are requested through the `metadata` field of
 ```
 Cubelet host node
 ┌──────────────────────────────────────────────────────┐
-│  /tmp/rw  ───────────────────► /mnt/rw  (read-write) │
-│  /tmp/ro  ───────────────────► /mnt/ro  (read-only)  │
+│  /data/shared/rw  ───────────► /mnt/rw  (read-write) │
+│  /data/shared/ro  ───────────► /mnt/ro  (read-only)  │
 │                                                       │
 │              KVM MicroVM (sandbox)                    │
 └──────────────────────────────────────────────────────┘
@@ -104,13 +104,16 @@ Content-Type: application/json
 
 - A running Cube Sandbox deployment
 - Python 3.8+
-- The host directories (`/tmp/rw` and `/tmp/ro` in the example) must exist on
+- The host directories (`/data/shared/rw` and `/data/shared/ro` in the example) must exist on
   the Cubelet node before creating the sandbox
+- If you want to use a different host path prefix, see `docs/guide/persistent-storage.md`
+  for the `allowed_host_mount_prefixes` configuration and update the example
+  paths accordingly
 
 ```bash
 # On the Cubelet node (or wherever your sandbox VM runs):
-mkdir -p /tmp/rw /tmp/ro
-echo "hello from host" > /tmp/ro/greeting.txt
+mkdir -p /data/shared/rw /data/shared/ro
+echo "hello from host" > /data/shared/ro/greeting.txt
 ```
 
 Install dependencies:
@@ -174,8 +177,8 @@ with Sandbox.create(
     template=template_id,
     metadata={
         "host-mount": json.dumps([
-            {"hostPath": "/tmp/rw", "mountPath": "/mnt/rw", "readOnly": False},
-            {"hostPath": "/tmp/ro", "mountPath": "/mnt/ro", "readOnly": True},
+            {"hostPath": "/data/shared/rw", "mountPath": "/mnt/rw", "readOnly": False},
+            {"hostPath": "/data/shared/ro", "mountPath": "/mnt/ro", "readOnly": True},
         ])
     },
 ) as sandbox:
@@ -193,9 +196,9 @@ with Sandbox.create(
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| `hostPath "..." is not within an allowed mount prefix` | `hostPath` is outside the allowed prefixes | Move data under `/data/shared/` or add the path to `allowed_host_mount_prefixes` in CubeMaster config |
+| `hostPath "..." is not within an allowed mount prefix` | `hostPath` is outside the configured allowed prefixes | Move data under `/data/shared/`, or update `allowed_host_mount_prefixes` as described in `docs/guide/persistent-storage.md` |
 | `No such file or directory` inside sandbox | `hostPath` does not exist on the Cubelet node | Create the directory on the node before running |
-| `Read-only file system` on write | Mounted with `readOnly: true` | Use `readOnly: false` or switch to `/mnt/rw` |
+| `Read-only file system` when writing to `/mnt/ro/...` | Mounted with `readOnly: true` | Set that mount to `readOnly: false`, or write to the read-write sandbox path `/mnt/rw/...` instead |
 | `Template not found` | Wrong template ID | Run `cubemastercli tpl list` |
 | `Connection refused` | CubeAPI not reachable | Check `E2B_API_URL` and that port 3000 is open |
 

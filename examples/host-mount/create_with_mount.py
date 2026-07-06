@@ -36,12 +36,12 @@ with Sandbox.create(
         # path inside the sandbox VM.
         "host-mount": json.dumps([
             {
-                "hostPath":  "/tmp/rw",   # host directory (must exist on the Cubelet node)
+                "hostPath":  "/data/shared/rw",  # host directory under the default allowed prefix (must exist on the Cubelet node)
                 "mountPath": "/mnt/rw",   # where it appears inside the sandbox
                 "readOnly":  False,       # read-write mount
             },
             {
-                "hostPath":  "/tmp/ro",   # host directory (must exist on the Cubelet node)
+                "hostPath":  "/data/shared/ro",  # host directory under the default allowed prefix (must exist on the Cubelet node)
                 "mountPath": "/mnt/ro",   # where it appears inside the sandbox
                 "readOnly":  True,        # read-only mount
             },
