@@ -15,6 +15,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
 )
 
+var platformVersionSuffixes = []string{"-amd64", "-arm64", "-x86_64", "-aarch64"}
+
 // defaultReleaseManifestPath is the on-disk location of the release manifest
 // installed by the one-click bundle. It can be overridden with the
 // CUBE_RELEASE_MANIFEST environment variable (mainly for tests / non-standard
@@ -318,6 +320,9 @@ func versionIsDeclared(component, actual string, primary map[string]string, sets
 	return exp != "" && exp != "unknown" && versionMatchesDeclared(exp, actual)
 }
 
+// versionMatchesDeclared reports whether actual matches declared. Declared
+// values from the release manifest stay canonical; only actual is normalized
+// by stripping known platform suffixes before comparison.
 func versionMatchesDeclared(declared, actual string) bool {
 	if declared == actual {
 		return true
@@ -326,9 +331,15 @@ func versionMatchesDeclared(declared, actual string) bool {
 }
 
 func stripPlatformVersionSuffix(value string) string {
-	for _, suffix := range []string{"-amd64", "-arm64", "-x86_64", "-aarch64"} {
-		if strings.HasSuffix(value, suffix) {
-			return strings.TrimSuffix(value, suffix)
+	changed := true
+	for changed {
+		changed = false
+		for _, suffix := range platformVersionSuffixes {
+			if strings.HasSuffix(value, suffix) {
+				value = strings.TrimSuffix(value, suffix)
+				changed = true
+				break
+			}
 		}
 	}
 	return value

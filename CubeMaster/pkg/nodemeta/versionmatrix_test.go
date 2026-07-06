@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 )
 
@@ -95,16 +96,38 @@ func TestVersionIsDeclaredIgnoresPlatformSuffix(t *testing.T) {
 		},
 	}
 
-	for _, actual := range []string{"v0.5.0", "v0.5.0-arm64", "v0.5.0-amd64", "v0.5.0-aarch64", "v0.5.0-x86_64"} {
-		if !versionIsDeclared("cube-egress", actual, primary, sets) {
-			t.Fatalf("expected platform-specific version %q to match declaration", actual)
-		}
+	for _, actual := range []string{"v0.5.0", "v0.5.0-arm64", "v0.5.0-amd64", "v0.5.0-aarch64", "v0.5.0-x86_64", "v0.5.0-arm64-amd64"} {
+		assert.True(t, versionIsDeclared("cube-egress", actual, primary, sets), "platform-specific version %q should match declaration", actual)
 	}
-	for _, actual := range []string{"v0.5.0-dev", "v0.5.0-rc1", "v0.5.1-arm64", "unknown", ""} {
-		if versionIsDeclared("cube-egress", actual, primary, sets) {
-			t.Fatalf("version %q must not match declaration v0.5.0", actual)
-		}
+	for _, actual := range []string{"v0.5.0-dev", "v0.5.0-rc1", "v0.5.1-arm64", "v0.5.0-arm64-fips", "unknown", ""} {
+		assert.False(t, versionIsDeclared("cube-egress", actual, primary, sets), "version %q must not match declaration v0.5.0", actual)
 	}
+}
+
+func TestVersionIsDeclaredPlatformSuffixCaseSensitive(t *testing.T) {
+	primary := map[string]string{"cube-egress": "v0.5.0"}
+	sets := map[string]map[string]struct{}{
+		"cube-egress": {"v0.5.0": {}},
+	}
+
+	assert.False(
+		t,
+		versionIsDeclared("cube-egress", "v0.5.0-ARM64", primary, sets),
+		"platform suffix matching is case-sensitive by design",
+	)
+}
+
+func TestVersionIsDeclaredUsesPrimaryWhenSetMissing(t *testing.T) {
+	primary := map[string]string{"cube-egress": "v0.5.0"}
+
+	assert.True(t, versionIsDeclared("cube-egress", "v0.5.0-arm64", primary, nil))
+	assert.False(t, versionIsDeclared("cube-egress", "v0.5.0-dev", primary, nil))
+}
+
+func TestStripPlatformVersionSuffix(t *testing.T) {
+	assert.Equal(t, "v0.5.0", stripPlatformVersionSuffix("v0.5.0-arm64-amd64"))
+	assert.Equal(t, "v0.5.0-arm64-fips", stripPlatformVersionSuffix("v0.5.0-arm64-fips"))
+	assert.Equal(t, "v0.5.0-ARM64", stripPlatformVersionSuffix("v0.5.0-ARM64"))
 }
 
 func TestBuildVersionMatrixUsesDeclaredDistribution(t *testing.T) {
