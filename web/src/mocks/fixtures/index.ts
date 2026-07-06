@@ -90,6 +90,9 @@ function buildTemplates(): TemplateSummaryDto[] {
       jobID: 'job-mock-python-ready-01',
       createdAt: ago(86_400 * 18),
       imageInfo: 'registry.cube.dev/templates/python-3.11-ai:2024.11.02',
+      aliases: ['python-3.11-ai'],
+      names: ['python-3.11-ai'],
+      public: false,
     },
     {
       templateID: 'nodejs-20-web',
@@ -98,6 +101,9 @@ function buildTemplates(): TemplateSummaryDto[] {
       status: 'ready',
       createdAt: ago(86_400 * 34),
       imageInfo: 'registry.cube.dev/templates/nodejs-20-web:20.18.0',
+      aliases: ['nodejs-20-web'],
+      names: ['nodejs-20-web'],
+      public: false,
     },
     {
       templateID: 'cuda-12-pytorch',
@@ -107,6 +113,9 @@ function buildTemplates(): TemplateSummaryDto[] {
       jobID: 'job-mock-cuda-build-01',
       createdAt: ago(86_400 * 8),
       imageInfo: 'registry.cube.dev/templates/cuda12-torch:2.4.0',
+      aliases: ['cuda-12-pytorch'],
+      names: ['cuda-12-pytorch'],
+      public: false,
     },
     {
       templateID: 'playwright-chromium',
@@ -117,6 +126,9 @@ function buildTemplates(): TemplateSummaryDto[] {
       lastError: 'image pull backoff: 429 Too Many Requests from registry',
       createdAt: ago(3600 * 4),
       imageInfo: 'registry.cube.dev/templates/playwright:1.47.0',
+      aliases: ['playwright-chromium'],
+      names: ['playwright-chromium'],
+      public: false,
     },
   ];
 }

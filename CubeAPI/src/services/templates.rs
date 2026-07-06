@@ -14,11 +14,13 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        CreateTemplateRequest, RebuildTemplateRequest, TemplateBuildJob, TemplateBuildStatus,
-        TemplateCompatMatrixView, TemplateCompatRowView, TemplateCompatSummaryView, TemplateDetail,
-        TemplateNodeCompatView, TemplateSummary,
+        CreateTemplateRequest, RebuildTemplateRequest, TemplateAliasLookupResponse,
+        TemplateBuildJob, TemplateBuildStatus, TemplateCompatMatrixView, TemplateCompatRowView,
+        TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary,
     },
 };
+
+const TEMPLATE_PUBLIC: bool = false;
 
 #[derive(Clone)]
 pub struct TemplateService {
@@ -44,16 +46,7 @@ impl TemplateService {
         Ok(resp
             .data
             .into_iter()
-            .map(|s| TemplateSummary {
-                template_id: s.template_id,
-                instance_type: non_empty(s.instance_type),
-                version: non_empty(s.version),
-                status: s.status,
-                last_error: non_empty(s.last_error),
-                created_at: non_empty(s.created_at),
-                image_info: non_empty(s.image_info),
-                job_id: non_empty(s.job_id),
-            })
+            .map(template_summary_from_cubemaster)
             .collect())
     }
 
@@ -91,17 +84,38 @@ impl TemplateService {
             .and_then(|v| v.get("allowInternetAccess"))
             .and_then(|v| v.as_bool());
 
+        let aliases = alias_values_from_display_name(&resp.display_name);
         Ok(TemplateDetail {
             template_id: string_or(resp.template_id, template_id),
+            public: TEMPLATE_PUBLIC,
             instance_type: non_empty(resp.instance_type),
             version: non_empty(resp.version),
             status: resp.status,
             last_error: non_empty(resp.last_error),
+            created_at: non_empty(resp.created_at),
             replicas: resp.replicas,
             create_request: resp.create_request,
             network_type,
             allow_internet_access,
             job_id: non_empty(resp.job_id),
+            names: aliases.clone(),
+            aliases,
+        })
+    }
+
+    pub async fn get_template_by_alias(
+        &self,
+        alias: &str,
+    ) -> AppResult<TemplateAliasLookupResponse> {
+        let alias = alias.trim();
+        if alias.is_empty() {
+            return Err(AppError::BadRequest("alias is required".to_string()));
+        }
+
+        let detail = self.get_template(alias).await?;
+        Ok(TemplateAliasLookupResponse {
+            template_id: detail.template_id,
+            public: TEMPLATE_PUBLIC,
         })
     }
 
@@ -116,6 +130,7 @@ impl TemplateService {
         let dns_servers = validate_dns_servers(body.dns.as_deref())?;
         let container_overrides = build_template_container_overrides(&body, dns_servers.as_deref());
         let cube_network_config = build_template_cube_network_config(&body)?;
+        let alias = template_alias_from_request(&body);
 
         let req = CreateTemplateFromImageReq {
             request_id: new_request_id(),
@@ -128,6 +143,7 @@ impl TemplateService {
             template_id: String::new(),
             source_image_ref: body.image.trim().to_string(),
             writable_layer_size: body.writable_layer_size,
+            alias,
             exposed_ports: body.exposed_ports,
             network_type: non_empty_option(body.network_type),
             registry_username: non_empty_option(body.registry_username),
@@ -258,7 +274,7 @@ impl TemplateService {
 }
 
 fn map_err(e: CubeMasterError) -> AppError {
-    if e.is_invalid_path_parameter() {
+    if e.is_invalid_path_parameter() || e.is_params_error() {
         AppError::BadRequest(e.to_string())
     } else if e.is_not_found() || e.is_endpoint_missing() {
         AppError::NotFound(e.to_string())
@@ -286,6 +302,54 @@ fn string_or(value: String, fallback: &str) -> String {
         fallback.to_string()
     } else {
         value
+    }
+}
+
+fn alias_values_from_display_name(display_name: &str) -> Vec<String> {
+    let alias = display_name.trim();
+    if alias.is_empty() {
+        Vec::new()
+    } else {
+        vec![alias.to_string()]
+    }
+}
+
+fn template_summary_from_cubemaster(s: crate::cubemaster::TemplateSummaryItem) -> TemplateSummary {
+    let aliases = alias_values_from_display_name(&s.display_name);
+    TemplateSummary {
+        template_id: s.template_id,
+        public: TEMPLATE_PUBLIC,
+        instance_type: non_empty(s.instance_type),
+        version: non_empty(s.version),
+        status: s.status,
+        last_error: non_empty(s.last_error),
+        created_at: non_empty(s.created_at),
+        image_info: non_empty(s.image_info),
+        job_id: non_empty(s.job_id),
+        names: aliases.clone(),
+        aliases,
+    }
+}
+
+fn template_alias_from_request(body: &CreateTemplateRequest) -> Option<String> {
+    body.name
+        .as_deref()
+        .and_then(alias_from_name)
+        .or_else(|| body.alias.as_deref().and_then(alias_from_name))
+}
+
+fn alias_from_name(value: &str) -> Option<String> {
+    let name = value.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    let without_tag = name.split_once(':').map_or(name, |(name, _)| name).trim();
+    let alias = without_tag.rsplit('/').next().unwrap_or(without_tag).trim();
+    if alias.is_empty() {
+        None
+    } else {
+        Some(alias.to_string())
     }
 }
 
@@ -512,9 +576,22 @@ fn build_template_cube_network_config(
 mod tests {
     use super::*;
 
+    async fn spawn_server(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+        format!("http://{}", addr)
+    }
+
     fn sample_request() -> CreateTemplateRequest {
         CreateTemplateRequest {
             template_id: String::new(),
+            name: None,
+            alias: None,
             instance_type: Some("cubebox".to_string()),
             image: "python:3.11-slim".to_string(),
             writable_layer_size: Some("1G".to_string()),
@@ -560,6 +637,88 @@ mod tests {
     }
 
     #[test]
+    fn alias_values_from_display_name_returns_e2b_arrays() {
+        assert_eq!(
+            alias_values_from_display_name(" stable-python "),
+            vec!["stable-python".to_string()]
+        );
+        assert!(alias_values_from_display_name("   ").is_empty());
+    }
+
+    #[test]
+    fn template_name_prefers_name_over_alias_and_strips_tag() {
+        let mut body = sample_request();
+        body.name = Some("stable-python:v1".to_string());
+        body.alias = Some("legacy-python".to_string());
+
+        assert_eq!(
+            template_alias_from_request(&body).as_deref(),
+            Some("stable-python")
+        );
+    }
+
+    #[test]
+    fn template_name_accepts_e2b_namespace_and_strips_tag() {
+        let mut body = sample_request();
+        body.name = Some("team-slug/my-app:v2".to_string());
+
+        assert_eq!(
+            template_alias_from_request(&body).as_deref(),
+            Some("my-app")
+        );
+    }
+
+    #[test]
+    fn template_name_falls_back_to_deprecated_alias() {
+        let mut body = sample_request();
+        body.name = Some("   ".to_string());
+        body.alias = Some("legacy-python".to_string());
+
+        assert_eq!(
+            template_alias_from_request(&body).as_deref(),
+            Some("legacy-python")
+        );
+    }
+
+    #[test]
+    fn template_summary_from_cubemaster_maps_display_name_to_aliases_and_names() {
+        let summary = template_summary_from_cubemaster(crate::cubemaster::TemplateSummaryItem {
+            template_id: "tpl-1".to_string(),
+            instance_type: "cubebox".to_string(),
+            version: "v1".to_string(),
+            status: "ready".to_string(),
+            last_error: String::new(),
+            display_name: "stable-python".to_string(),
+            created_at: "2026-07-06T00:00:00Z".to_string(),
+            image_info: "python:3.11".to_string(),
+            job_id: "job-1".to_string(),
+        });
+
+        assert_eq!(summary.aliases, vec!["stable-python".to_string()]);
+        assert_eq!(summary.names, vec!["stable-python".to_string()]);
+        assert!(!summary.public);
+    }
+
+    #[test]
+    fn template_summary_from_cubemaster_uses_empty_arrays_without_display_name() {
+        let summary = template_summary_from_cubemaster(crate::cubemaster::TemplateSummaryItem {
+            template_id: "tpl-1".to_string(),
+            instance_type: String::new(),
+            version: String::new(),
+            status: "ready".to_string(),
+            last_error: String::new(),
+            display_name: String::new(),
+            created_at: String::new(),
+            image_info: String::new(),
+            job_id: String::new(),
+        });
+
+        assert!(summary.aliases.is_empty());
+        assert!(summary.names.is_empty());
+        assert!(!summary.public);
+    }
+
+    #[test]
     fn build_template_cube_network_config_includes_egress_rules() {
         let body = sample_request();
         let cfg = build_template_cube_network_config(&body)
@@ -601,5 +760,142 @@ mod tests {
     fn validate_dns_servers_rejects_invalid_ip() {
         let err = validate_dns_servers(Some(&["not-an-ip".to_string()])).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn create_template_forwards_name_as_cubemaster_alias() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use serde_json::Value;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "job": {
+                    "job_id": "job-1",
+                    "template_id": "tpl-1",
+                    "status": "accepted",
+                    "phase": "",
+                    "progress": 0,
+                    "error_message": "",
+                    "attempt_no": 1,
+                    "retry_of_job_id": ""
+                }
+            }))
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/from-image", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+        let mut req = sample_request();
+        req.name = Some("team-slug/stable-python:v1".to_string());
+        req.alias = Some("legacy-python".to_string());
+
+        service
+            .create_template(req)
+            .await
+            .expect("template create should succeed");
+
+        let body = capture
+            .body
+            .lock()
+            .await
+            .clone()
+            .expect("request body should be captured");
+        assert_eq!(body["alias"], "stable-python");
+    }
+
+    #[tokio::test]
+    async fn get_template_maps_created_at_and_private_visibility() {
+        use axum::{routing::get, Json, Router};
+
+        async fn get_template_handler() -> Json<serde_json::Value> {
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "template_id": "tpl-created",
+                "display_name": "stable-python",
+                "created_at": "2026-07-06T00:00:00Z",
+                "status": "ready",
+                "replicas": []
+            }))
+        }
+
+        let cubemaster_url =
+            spawn_server(Router::new().route("/cube/template", get(get_template_handler))).await;
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+
+        let detail = service
+            .get_template("tpl-created")
+            .await
+            .expect("template lookup should succeed");
+
+        assert_eq!(detail.created_at.as_deref(), Some("2026-07-06T00:00:00Z"));
+        assert!(!detail.public);
+    }
+
+    #[tokio::test]
+    async fn get_template_by_alias_returns_e2b_lookup_response() {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use std::collections::HashMap;
+
+        async fn get_template_handler(
+            Query(params): Query<HashMap<String, String>>,
+        ) -> Json<serde_json::Value> {
+            assert_eq!(
+                params.get("template_id").map(String::as_str),
+                Some("stable-python")
+            );
+            assert_eq!(
+                params.get("include_request").map(String::as_str),
+                Some("true")
+            );
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "template_id": "tpl-abc",
+                "display_name": "stable-python",
+                "status": "ready",
+                "replicas": []
+            }))
+        }
+
+        let cubemaster_url =
+            spawn_server(Router::new().route("/cube/template", get(get_template_handler))).await;
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+
+        let resp = service
+            .get_template_by_alias("stable-python")
+            .await
+            .expect("alias lookup should succeed");
+
+        assert_eq!(resp.template_id, "tpl-abc");
+        assert!(!resp.public);
     }
 }

@@ -315,6 +315,72 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+    post:
+      tags:
+      - handlers::templates
+      operationId: create_template
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTemplateRequest'
+        required: true
+      responses:
+        '202':
+          description: Template build job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateBuildJob'
+        '400':
+          description: Invalid request (bad alias, missing image, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /templates/aliases/{alias}:
+    get:
+      tags:
+      - handlers::templates
+      operationId: get_template_by_alias
+      parameters:
+      - name: alias
+        in: path
+        description: Template alias
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Template alias lookup
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateAliasLookupResponse'
+        '400':
+          description: Invalid alias
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Template alias not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /templates/compat:
     get:
       tags:
@@ -385,6 +451,205 @@ paths:
                 $ref: '#/components/schemas/TemplateDetail'
         '404':
           description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    post:
+      tags:
+      - handlers::templates
+      operationId: rebuild_template
+      parameters:
+      - name: templateID
+        in: path
+        description: Template identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RebuildTemplateRequest'
+        required: true
+      responses:
+        '202':
+          description: Rebuild job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateBuildJob'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    delete:
+      tags:
+      - handlers::templates
+      operationId: delete_template
+      parameters:
+      - name: templateID
+        in: path
+        description: Template identifier or alias
+        required: true
+        schema:
+          type: string
+      - name: instance_type
+        in: query
+        description: CubeMaster instance_type filter
+        required: false
+        schema:
+          type: string
+      - name: sync
+        in: query
+        description: Wait for deletion to complete before returning
+        required: false
+        schema:
+          type: boolean
+      responses:
+        '204':
+          description: Template deleted
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    patch:
+      tags:
+      - handlers::templates
+      operationId: update_template
+      parameters:
+      - name: templateID
+        in: path
+        description: Template identifier
+        required: true
+        schema:
+          type: string
+      responses:
+        '501':
+          description: Not implemented; use POST /templates/{id} to rebuild
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /templates/{templateID}/builds/{buildID}:
+    post:
+      tags:
+      - handlers::templates
+      operationId: start_template_build
+      parameters:
+      - name: templateID
+        in: path
+        description: Template identifier
+        required: true
+        schema:
+          type: string
+      - name: buildID
+        in: path
+        description: Build identifier
+        required: true
+        schema:
+          type: string
+      responses:
+        '202':
+          description: Build started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateBuildJob'
+        '404':
+          description: Template or build not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /templates/{templateID}/builds/{buildID}/logs:
+    get:
+      tags:
+      - handlers::templates
+      operationId: get_template_build_logs
+      parameters:
+      - name: templateID
+        in: path
+        description: Template identifier
+        required: true
+        schema:
+          type: string
+      - name: buildID
+        in: path
+        description: Build identifier
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Build logs (JSON)
+        '404':
+          description: Build not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /templates/{templateID}/builds/{buildID}/status:
+    get:
+      tags:
+      - handlers::templates
+      operationId: get_template_build_status
+      parameters:
+      - name: templateID
+        in: path
+        description: Template identifier
+        required: true
+        schema:
+          type: string
+      - name: buildID
+        in: path
+        description: Build identifier
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Build status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateBuildStatus'
+        '404':
+          description: Template or build not found
           content:
             application/json:
               schema:
@@ -598,6 +863,152 @@ components:
           type: string
         version:
           type: string
+    CreateTemplateRequest:
+      type: object
+      description: Body for POST /templates (create from image).
+      required:
+      - image
+      properties:
+        alias:
+          type:
+          - string
+          - 'null'
+          description: Deprecated E2B template alias. Used when `name` is absent or blank.
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Allow internet (public) access.
+        allowOut:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Allowed outbound CIDRs for CubeVS egress policy.
+        args:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Override container CMD args.
+        command:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Override container ENTRYPOINT.
+        cpu:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: CPU in millicores, e.g. 2000 means 2000m.
+          minimum: 0
+        denyOut:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Denied outbound CIDRs for CubeVS egress policy.
+        dns:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Container DNS nameservers.
+        env:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Environment variables as "KEY=VALUE" strings.
+        exposedPorts:
+          type:
+          - array
+          - 'null'
+          items:
+            type: integer
+            format: int32
+            minimum: 0
+          description: Ports the container listens on.
+        image:
+          type: string
+          description: Container image reference, e.g. `registry.example.com/code:latest`.
+        instanceType:
+          type:
+          - string
+          - 'null'
+        memory:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Memory in MiB, e.g. 2000.
+          minimum: 0
+        name:
+          type:
+          - string
+          - 'null'
+          description: |-
+            E2B v3 template name. A tag suffix after ':' is accepted by CubeAPI but
+            only the name portion is forwarded as the CubeMaster alias.
+        networkType:
+          type:
+          - string
+          - 'null'
+          description: Network mode, e.g. "tap".
+        nodes:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: Limit template distribution to these node IDs or host IPs.
+        probePath:
+          type:
+          - string
+          - 'null'
+          description: HTTP probe path, e.g. "/health". Defaults to "/health" when `probePort` is set.
+        probePort:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: HTTP probe port.
+          minimum: 0
+        registryPassword:
+          type:
+          - string
+          - 'null'
+          description: Registry password for private source images.
+        registryUsername:
+          type:
+          - string
+          - 'null'
+          description: Registry username for private source images.
+        templateID:
+          type: string
+          description: |-
+            Deprecated and ignored. Template IDs are always generated server-side
+            with the `tpl-` prefix; clients must use the returned `templateID`.
+        with_cube_ca:
+          type:
+          - boolean
+          - 'null'
+          description: |-
+            Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
+            Omitted or null defaults to true on CubeMaster.
+        writableLayerSize:
+          type:
+          - string
+          - 'null'
+          description: Writable layer size for the rootfs, e.g. "1G".
     HashMap:
       type: object
       additionalProperties:
@@ -806,6 +1217,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ComponentVersionView'
+    RebuildTemplateRequest:
+      type: object
+      description: Body for POST /templates/:id (rebuild).
+      additionalProperties: {}
     ResumedSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/resume (deprecated).
@@ -963,6 +1378,60 @@ components:
           type: string
         path:
           type: string
+    TemplateAliasLookupResponse:
+      type: object
+      required:
+      - templateID
+      - public
+      properties:
+        public:
+          type: boolean
+        templateID:
+          type: string
+    TemplateBuildJob:
+      type: object
+      description: Job envelope returned by create / rebuild.
+      required:
+      - jobID
+      - templateID
+      - status
+      - phase
+      - progress
+      properties:
+        errorMessage:
+          type: string
+        jobID:
+          type: string
+        phase:
+          type: string
+        progress:
+          type: integer
+          format: int32
+        status:
+          type: string
+        templateID:
+          type: string
+    TemplateBuildStatus:
+      type: object
+      description: Response for GET /templates/:id/builds/:bid/status
+      required:
+      - buildID
+      - templateID
+      - status
+      - progress
+      - message
+      properties:
+        buildID:
+          type: string
+        message:
+          type: string
+        progress:
+          type: integer
+          format: int32
+        status:
+          type: string
+        templateID:
+          type: string
     TemplateCompatAdoptResponseView:
       type: object
       required:
@@ -1031,33 +1500,54 @@ components:
       description: Detailed template response (GET /templates/:id).
       required:
       - templateID
+      - public
       - status
       - replicas
+      - aliases
+      - names
       properties:
+        aliases:
+          type: array
+          items:
+            type: string
+          description: Deprecated E2B aliases of the template.
         allowInternetAccess:
           type:
           - boolean
           - 'null'
           description: Whether public internet access is allowed for sandboxes from this template.
         createRequest: {}
+        createdAt:
+          type:
+          - string
+          - 'null'
+        instanceType:
+          type:
+          - string
+          - 'null'
         jobID:
           type:
           - string
           - 'null'
           description: Latest create/rebuild job id for the template.
-        instanceType:
-          type:
-          - string
-          - 'null'
         lastError:
           type:
           - string
           - 'null'
+        names:
+          type: array
+          items:
+            type: string
+          description: |-
+            E2B template names. CubeSandbox has no namespace model, so this mirrors
+            the stable alias when one is configured.
         networkType:
           type:
           - string
           - 'null'
           description: Network type used when the template was created, e.g. "tap".
+        public:
+          type: boolean
         replicas:
           type: array
           items: {}
@@ -1112,8 +1602,16 @@ components:
       description: Summary row returned by GET /templates.
       required:
       - templateID
+      - public
       - status
+      - aliases
+      - names
       properties:
+        aliases:
+          type: array
+          items:
+            type: string
+          description: Deprecated E2B aliases of the template.
         createdAt:
           type:
           - string
@@ -1126,10 +1624,24 @@ components:
           type:
           - string
           - 'null'
+        jobID:
+          type:
+          - string
+          - 'null'
+          description: Latest create/rebuild job id for the template.
         lastError:
           type:
           - string
           - 'null'
+        names:
+          type: array
+          items:
+            type: string
+          description: |-
+            E2B template names. CubeSandbox has no namespace model, so this mirrors
+            the stable alias when one is configured.
+        public:
+          type: boolean
         status:
           type: string
         templateID:
@@ -1138,11 +1650,6 @@ components:
           type:
           - string
           - 'null'
-        jobID:
-          type:
-          - string
-          - 'null'
-          description: Latest create/rebuild job id for the template.
     VersionMatrixView:
       type: object
       description: Full node x component version matrix.

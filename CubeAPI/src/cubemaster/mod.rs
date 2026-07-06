@@ -596,6 +596,19 @@ impl CubeMasterError {
             _ => false,
         }
     }
+
+    /// True when CubeMaster returned 130400 (params error — invalid client input).
+    /// These are user-facing validation failures (bad alias, missing field, etc.)
+    /// and should surface as HTTP 400, not 500.
+    pub fn is_params_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Api {
+                ret_code: 130400,
+                ..
+            }
+        )
+    }
 }
 
 /// Restrict path segments to characters that CubeMaster's resource identifiers
@@ -1740,6 +1753,8 @@ pub struct TemplateSummaryItem {
     #[serde(default)]
     pub last_error: String,
     #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
     pub created_at: String,
     #[serde(default)]
     pub image_info: String,
@@ -1778,6 +1793,10 @@ pub struct TemplateResponse {
     pub last_error: String,
     #[serde(default)]
     pub job_id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub created_at: String,
     /// Opaque replica list (node placement). Left as raw JSON to avoid
     /// coupling to CubeMaster-internal types.
     #[serde(default)]
@@ -1901,6 +1920,9 @@ pub struct CreateTemplateFromImageReq {
     /// Writable layer size, e.g. "1G".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub writable_layer_size: Option<String>,
+    /// Human-readable stable template alias.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     /// Ports exposed by the container.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exposed_ports: Option<Vec<u16>>,
@@ -2259,7 +2281,7 @@ pub struct VersionMatrixResponse {
 mod tests {
     use super::{
         non_empty_str, validate_path_segment, validate_volume_id, CubeMasterError,
-        GetSandboxResponse, SandboxInfo,
+        GetSandboxResponse, SandboxInfo, TemplateResponse, TemplateSummaryItem,
     };
 
     #[test]
@@ -2390,6 +2412,33 @@ mod tests {
             serde_json::from_value(payload).expect("sandbox info should deserialize aliases");
         assert_eq!(info.cpu_count, 4);
         assert_eq!(info.memory_mb, 4096);
+    }
+
+    #[test]
+    fn template_summary_item_deserializes_display_name() {
+        let item: TemplateSummaryItem = serde_json::from_value(serde_json::json!({
+            "template_id": "tpl-1",
+            "display_name": "stable-python",
+            "status": "ready"
+        }))
+        .expect("summary should deserialize");
+
+        assert_eq!(item.display_name, "stable-python");
+    }
+
+    #[test]
+    fn template_response_deserializes_display_name() {
+        let resp: TemplateResponse = serde_json::from_value(serde_json::json!({
+            "ret": {"ret_code": 0, "ret_msg": "success"},
+            "template_id": "tpl-1",
+            "display_name": "stable-python",
+            "created_at": "2026-07-06T00:00:00Z",
+            "status": "ready"
+        }))
+        .expect("response should deserialize");
+
+        assert_eq!(resp.display_name, "stable-python");
+        assert_eq!(resp.created_at, "2026-07-06T00:00:00Z");
     }
 
     #[test]

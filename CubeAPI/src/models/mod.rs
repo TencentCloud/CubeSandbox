@@ -535,7 +535,10 @@ fn default_page_limit() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{NewSandbox, SandboxNetworkConfig, SetTimeoutRequest};
+    use super::{
+        CreateTemplateRequest, NewSandbox, SandboxNetworkConfig, SetTimeoutRequest,
+        TemplateAliasLookupResponse,
+    };
     use validator::Validate;
 
     #[test]
@@ -599,6 +602,31 @@ mod tests {
             Some("value")
         );
     }
+
+    #[test]
+    fn create_template_request_accepts_name_and_alias() {
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "name": "stable-python:v1",
+            "alias": "legacy-python",
+            "image": "python:3.11"
+        }))
+        .expect("create template request should deserialize");
+
+        assert_eq!(req.name.as_deref(), Some("stable-python:v1"));
+        assert_eq!(req.alias.as_deref(), Some("legacy-python"));
+    }
+
+    #[test]
+    fn template_alias_lookup_response_serializes_e2b_shape() {
+        let resp = TemplateAliasLookupResponse {
+            template_id: "tpl-abc".to_string(),
+            public: true,
+        };
+
+        let json = serde_json::to_value(resp).expect("response should serialize");
+        assert_eq!(json["templateID"], "tpl-abc");
+        assert_eq!(json["public"], true);
+    }
 }
 
 // ─── Templates ─────────────────────────────────────────────────────────────
@@ -618,6 +646,7 @@ pub struct ListTemplatesQuery {
 pub struct TemplateSummary {
     #[serde(rename = "templateID")]
     pub template_id: String,
+    pub public: bool,
     #[serde(rename = "instanceType", skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -632,6 +661,11 @@ pub struct TemplateSummary {
     /// Latest create/rebuild job id for the template.
     #[serde(rename = "jobID", skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
+    /// Deprecated E2B aliases of the template.
+    pub aliases: Vec<String>,
+    /// E2B template names. CubeSandbox has no namespace model, so this mirrors
+    /// the stable alias when one is configured.
+    pub names: Vec<String>,
 }
 
 /// Detailed template response (GET /templates/:id).
@@ -639,6 +673,7 @@ pub struct TemplateSummary {
 pub struct TemplateDetail {
     #[serde(rename = "templateID")]
     pub template_id: String,
+    pub public: bool,
     #[serde(rename = "instanceType", skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -646,6 +681,8 @@ pub struct TemplateDetail {
     pub status: String,
     #[serde(rename = "lastError", skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
     pub replicas: Vec<serde_json::Value>,
     #[serde(rename = "createRequest", skip_serializing_if = "Option::is_none")]
     pub create_request: Option<serde_json::Value>,
@@ -661,6 +698,11 @@ pub struct TemplateDetail {
     /// Latest create/rebuild job id for the template.
     #[serde(rename = "jobID", skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
+    /// Deprecated E2B aliases of the template.
+    pub aliases: Vec<String>,
+    /// E2B template names. CubeSandbox has no namespace model, so this mirrors
+    /// the stable alias when one is configured.
+    pub names: Vec<String>,
 }
 
 /// Body for POST /templates (create from image).
@@ -671,6 +713,13 @@ pub struct CreateTemplateRequest {
     #[serde(rename = "templateID", default)]
     #[allow(dead_code)]
     pub template_id: String,
+    /// E2B v3 template name. A tag suffix after ':' is accepted by CubeAPI but
+    /// only the name portion is forwarded as the CubeMaster alias.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Deprecated E2B template alias. Used when `name` is absent or blank.
+    #[serde(default)]
+    pub alias: Option<String>,
     #[serde(rename = "instanceType", default)]
     pub instance_type: Option<String>,
     /// Container image reference, e.g. `registry.example.com/code:latest`.
@@ -741,6 +790,13 @@ pub struct CreateTemplateRequest {
 pub struct RebuildTemplateRequest {
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TemplateAliasLookupResponse {
+    #[serde(rename = "templateID")]
+    pub template_id: String,
+    pub public: bool,
 }
 
 /// Job envelope returned by create / rebuild.

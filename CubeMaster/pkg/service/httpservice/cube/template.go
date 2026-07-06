@@ -20,6 +20,7 @@ import (
 var deleteTemplateFn = templatecenter.DeleteTemplate
 var getTemplateInfoFn = templatecenter.GetTemplateInfo
 var getTemplateRequestFn = templatecenter.GetTemplateRequest
+var resolveTemplateIdentifierFn = templatecenter.ResolveTemplateIdentifier
 
 type templateResponse struct {
 	*types.Res
@@ -211,7 +212,22 @@ func getTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	if templateID == "" {
 		return listTemplates(r, rt)
 	}
-	info, err := getTemplateInfoFn(r.Context(), templateID)
+	resolvedTemplateID, err := resolveTemplateIdentifierFn(r.Context(), templateID)
+	if err != nil {
+		code := int(errorcode.ErrorCode_MasterInternalError)
+		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
+			code = int(errorcode.ErrorCode_NotFound)
+		}
+		rt.RetCode = int64(code)
+		return &templateResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: code,
+				RetMsg:  err.Error(),
+			}},
+			TemplateID: templateID,
+		}
+	}
+	info, err := getTemplateInfoFn(r.Context(), resolvedTemplateID)
 	if err != nil {
 		code := int(errorcode.ErrorCode_MasterInternalError)
 		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
@@ -228,7 +244,7 @@ func getTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	}
 	var createReq *types.CreateCubeSandboxReq
 	if includeRequest {
-		createReq, err = getTemplateRequestFn(r.Context(), templateID)
+		createReq, err = getTemplateRequestFn(r.Context(), resolvedTemplateID)
 		if err != nil {
 			code := int(errorcode.ErrorCode_MasterInternalError)
 			if errors.Is(err, templatecenter.ErrTemplateNotFound) {
