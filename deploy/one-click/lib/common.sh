@@ -697,8 +697,8 @@ patch_cubelet_config_template() {
   if [[ -n "${eth_name}" ]]; then
     validate_interface_name "${eth_name}" "CUBE_SANDBOX_ETH_NAME"
     if grep -Eq '^[[:space:]]*eth_name = "' "${cubelet_config}"; then
-      sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${eth_name}\"/" "${cubelet_config}"
-      if ! grep -Fq "eth_name = \"${eth_name}\"" "${cubelet_config}"; then
+      sed -i -E "s|^([[:space:]]*)eth_name = \"[^\"]*\"|\1eth_name = \"${eth_name}\"|" "${cubelet_config}"
+      if ! grep -Eq "^[[:space:]]*eth_name = \"${eth_name}\"\$" "${cubelet_config}"; then
         log "WARNING: failed to patch eth_name in Cubelet config (${cubelet_config})"
       fi
     else
@@ -708,8 +708,8 @@ patch_cubelet_config_template() {
 
   if [[ -n "${network_cidr}" ]]; then
     if grep -Eq '^[[:space:]]*cidr = "' "${cubelet_config}"; then
-      sed -i "s|cidr = \"[^\"]*\"|cidr = \"${network_cidr}\"|" "${cubelet_config}"
-      if ! grep -Fq "cidr = \"${network_cidr}\"" "${cubelet_config}"; then
+      sed -i -E "s|^([[:space:]]*)cidr = \"[^\"]*\"|\1cidr = \"${network_cidr}\"|" "${cubelet_config}"
+      if ! grep -Eq "^[[:space:]]*cidr = \"${network_cidr}\"\$" "${cubelet_config}"; then
         log "WARNING: failed to patch cidr in Cubelet config (${cubelet_config})"
       fi
       log "patched cubevs CIDR: ${network_cidr}"
@@ -725,8 +725,8 @@ patch_cubelet_config_template() {
       cube_router_enable_toml="true"
     fi
     if grep -Eq '^[[:space:]]*cube_router_enable = ' "${cubelet_config}"; then
-      sed -i "s|cube_router_enable = .*|cube_router_enable = ${cube_router_enable_toml}|" "${cubelet_config}"
-      if ! grep -Fq "cube_router_enable = ${cube_router_enable_toml}" "${cubelet_config}"; then
+      sed -i -E "s|^([[:space:]]*)cube_router_enable = .*|\1cube_router_enable = ${cube_router_enable_toml}|" "${cubelet_config}"
+      if ! grep -Eq "^[[:space:]]*cube_router_enable = ${cube_router_enable_toml}\$" "${cubelet_config}"; then
         log "WARNING: failed to patch cube_router_enable in Cubelet config (${cubelet_config})"
       fi
       log "patched cube-router enable: ${cube_router_enable_toml}"
@@ -737,8 +737,8 @@ patch_cubelet_config_template() {
 
   if [[ -n "${cube_router_cidr}" ]]; then
     if grep -Eq '^[[:space:]]*cube_router_cidr = "' "${cubelet_config}"; then
-      sed -i "s|cube_router_cidr = \"[^\"]*\"|cube_router_cidr = \"${cube_router_cidr}\"|" "${cubelet_config}"
-      if ! grep -Fq "cube_router_cidr = \"${cube_router_cidr}\"" "${cubelet_config}"; then
+      sed -i -E "s|^([[:space:]]*)cube_router_cidr = \"[^\"]*\"|\1cube_router_cidr = \"${cube_router_cidr}\"|" "${cubelet_config}"
+      if ! grep -Eq "^[[:space:]]*cube_router_cidr = \"${cube_router_cidr}\"\$" "${cubelet_config}"; then
         log "WARNING: failed to patch cube_router_cidr in Cubelet config (${cubelet_config})"
       fi
       log "patched cube-router CIDR: ${cube_router_cidr}"

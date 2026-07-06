@@ -332,6 +332,21 @@ EOF
   grep -Fq 'cube_router_enable = true' "${cfg}" || fail "patch should update cube_router_enable"
   grep -Fq 'cube_router_cidr = "172.20.0.0/16"' "${cfg}" || fail "patch should update cube_router_cidr"
 
+  local default_router_cidr_cfg="${TMP_DIR}/cubelet-default-router-cidr.toml"
+  cat > "${default_router_cidr_cfg}" <<'EOF'
+    eth_name = "eth0"
+    cidr = "192.168.0.0/18"
+    cube_router_enable = false
+    cube_router_cidr = ""
+EOF
+  patch_cubelet_config_template "${default_router_cidr_cfg}" "" "172.16.128.0/20" "1" "" >/dev/null 2>&1
+  grep -Fq 'cidr = "172.16.128.0/20"' "${default_router_cidr_cfg}" \
+    || fail "patch should update only the top-level cidr key"
+  grep -Fq 'cube_router_enable = true' "${default_router_cidr_cfg}" \
+    || fail "patch should update cube_router_enable when cube-router is enabled"
+  grep -Fq 'cube_router_cidr = ""' "${default_router_cidr_cfg}" \
+    || fail "patching cidr must not modify cube_router_cidr when cube-router CIDR is empty"
+
   local target="${TMP_DIR}/symlink-target.toml" link="${TMP_DIR}/symlink-config.toml"
   cat > "${target}" <<'EOF'
 eth_name = "eth0"
