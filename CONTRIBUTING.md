@@ -133,6 +133,15 @@ Commits without a valid `Signed-off-by` line will not be accepted.
 - **Rust** — follow `rustfmt` and `clippy` recommendations.
 - **Documentation** — use clear, concise language. Both English and Chinese docs should be kept in sync.
 
+## Issue & PR Close Policy
+
+Issues and PRs are closed under the following conditions:
+
+- **Stale after a `need-info` request** — if a maintainer asks for more information or requested changes and the author does not respond **for more than 2 weeks**, the Issue/PR is closed as stale. It can be reopened once the requested information or changes are provided.
+- **Resolved or superseded** — the underlying bug is fixed, the feature is implemented, or the change has been superseded by another PR/approach.
+- **Out of scope / won't fix** — closed with a comment explaining why.
+- **Duplicate** — closed with a link to the original Issue/PR.
+
 ## Reporting Security Issues
 
 If you discover a security vulnerability, please report it responsibly via [GitHub Security Advisories](https://github.com/tencentcloud/CubeSandbox/security/advisories) rather than opening a public Issue.

@@ -1,12 +1,50 @@
-* @fslongjin @ls-ggg @tinklone @up2wing @chenhengqi
+# Default owners for anything not covered by a more specific rule below.
+* @fslongjin @ls-ggg @chenhengqi
 
-/CubeEgress/ @chenhengqi
-/CubeNet/ @chenhengqi
-/CubeShim/ @ls-ggg @fslongjin
-/Cubelet/ @fslongjin
-/agent/ @ls-ggg @fslongjin
-/docs/ @tinklone
-/examples/ @tinklone
+# ---------------------------------------------------------------------------
+# Module ownership
+# CODEOWNERS applies last-match-wins, so more specific paths are listed below
+# the catch-all rule above.
+# ---------------------------------------------------------------------------
+
+# Network: network configuration, tap devices, connectivity
+/CubeNet/ @chenhengqi @zhouxianping
+/CubeEgress/ @chenhengqi @zhouxianping
+/network-agent/ @chenhengqi @zhouxianping
+
+# Cubelet / CubeMaster: overall system/orchestration flow
+/Cubelet/ @fslongjin @ls-ggg @chenhengqi
+/CubeMaster/ @fslongjin @ls-ggg @chenhengqi
+
+# Shim: containerd shim
+/CubeShim/ @ls-ggg
+
+# agent: in-guest runtime
+/agent/ @ls-ggg
+
+# Hypervisor (Cloud Hypervisor fork)
 /hypervisor/ @up2wing @lisongqian
-/network-agent/ @fslongjin
+
+# API / SDK: external interfaces, client SDKs
+/CubeAPI/ @ls-ggg @fslongjin
+/sdk/ @tinklone @wbzdssm
+
+# Docs: doc errors, sample code (primary owner; module-specific pages are
+# still covered by the owning module's rule above when paths overlap)
+/docs/ @fslongjin
+
+# ARM platform
+*aarch64* @lkml-likexu
+*arm64* @lkml-likexu
+
+# Deployment: one-click / k8s
+/deploy/one-click/ @fslongjin
+
+# Terraform deployment
+/deploy/one-click/terraform/ @lkml-likexu @tinklone
+
+# CI / test cases / examples
+/.github/workflows/ @tinklone
+/examples/ @tinklone
+
 /cubecow @lisongqian
