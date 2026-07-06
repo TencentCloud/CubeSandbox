@@ -929,8 +929,10 @@ int from_cube(struct __sk_buff *skb)
 	__u32 daddr, ifindex, dst_ifindex;
 	__u64 tcp_ret;
 	struct net_policy_value_v2 policy_value = {};
+	struct bpf_sock_tuple tuple = {};
 	struct mvm_port mvm_port = {};
 	struct mvm_meta *mvm_meta;
+	struct bpf_sock *sk;
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct tcphdr *l4;
@@ -1011,6 +1013,23 @@ int from_cube(struct __sk_buff *skb)
 				return TC_ACT_SHOT;
 
 			return bpf_redirect(nodenic_ifindex, 0);
+		}
+	}
+
+	if (proto == IPPROTO_TCP &&
+	    __pull_headers(skb, &l2, &l3, &l4) &&
+	    (l4->dest == bpf_htons(80) || l4->dest == bpf_htons(443))) {
+		tuple.ipv4.saddr = mvm_meta->ip;
+		tuple.ipv4.daddr = daddr;
+		tuple.ipv4.sport = l4->source;
+		tuple.ipv4.dport = l4->dest;
+		sk = bpf_skc_lookup_tcp(skb, &tuple, sizeof(tuple.ipv4), BPF_F_CURRENT_NETNS, 0);
+		if (sk) {
+			__u32 state = sk->state;
+
+			bpf_sk_release(sk);
+			if (state == BPF_TCP_ESTABLISHED)
+				return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 		}
 	}
 

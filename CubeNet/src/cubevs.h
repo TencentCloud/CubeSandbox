@@ -70,6 +70,9 @@
 #define ICMP_CSUM_OFF(LEN)		(sizeof(struct ethhdr) + LEN + offsetof(struct icmphdr, checksum))
 #define ICMP_ECHO_ID_OFF(LEN)		(sizeof(struct ethhdr) + LEN + offsetof(struct icmphdr, un.echo.id))
 
+/* Current network namespace */
+#define BPF_F_CURRENT_NETNS		(-1L)
+
 /* IP and MAC address inside MVMs */
 const volatile __u32 mvm_inner_ip       = 0x0644fea9;	/* 169.254.68.6, network byte order */
 const volatile __u32 mvm_macaddr_p1     = 0xfc6f9020;	/* 20:90:6f:fc:fc:fc */
