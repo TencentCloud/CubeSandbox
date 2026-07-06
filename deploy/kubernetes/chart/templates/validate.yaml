@@ -1,0 +1,119 @@
+{{- $computeSelector := .Values.placement.compute.nodeSelector -}}
+{{- $controlPlaneSelector := .Values.placement.controlPlane.nodeSelector -}}
+{{- if and .Values.controlPlane.enabled (not $controlPlaneSelector) }}
+{{- fail "controlPlane.enabled=true requires placement.controlPlane.nodeSelector" }}
+{{- end }}
+{{- if .Values.cubeNode.enabled }}
+{{- if not $computeSelector }}
+{{- fail "cube-node requires placement.compute.nodeSelector, otherwise host-mutating bootstrap may run on all nodes" }}
+{{- end }}
+{{- if and .Values.bootstrap.pvmHostKernel.enabled (not (hasKey $computeSelector "cube.tencent.com/allow-pvm-bootstrap")) }}
+{{- fail "bootstrap.pvmHostKernel.enabled=true requires placement.compute.nodeSelector to include cube.tencent.com/allow-pvm-bootstrap=true" }}
+{{- end }}
+{{- if and (eq .Values.cubeNode.ipSource "static") (not .Values.cubeNode.staticNodeIP) }}
+{{- fail "cubeNode.ipSource=static requires cubeNode.staticNodeIP" }}
+{{- end }}
+{{- if and .Values.bootstrap.pvmHostKernel.enabled (not .Values.cubeNode.pvmGuestKernel.enabled) }}
+{{- fail "bootstrap.pvmHostKernel.enabled=true requires cubeNode.pvmGuestKernel.enabled=true to match one-click CUBE_PVM_ENABLE consistency" }}
+{{- end }}
+{{- if and .Values.cubeNode.dns.useCubeDns (not .Values.cubeDns.enabled) }}
+{{- fail "cubeNode.dns.useCubeDns=true requires cubeDns.enabled=true" }}
+{{- end }}
+{{- if and .Values.cubeNode.dns.useCubeDns (ne .Values.cubeDns.mode "nodeLocal") }}
+{{- fail "cubeNode.dns.useCubeDns=true requires cubeDns.mode=nodeLocal" }}
+{{- end }}
+{{- if and .Values.cubeNode.dns.useCubeDns (not .Values.security.hostNetwork) }}
+{{- fail "cubeNode.dns.useCubeDns=true requires security.hostNetwork=true because node-local DNS is bound on host loopback" }}
+{{- end }}
+{{- if and .Values.cubeNode.dns.sandbox.useCubeDns (not .Values.cubeDns.sandboxGateway.enabled) }}
+{{- fail "cubeNode.dns.sandbox.useCubeDns=true requires cubeDns.sandboxGateway.enabled=true" }}
+{{- end }}
+{{- if and .Values.cubeNode.dns.sandbox.useCubeDns (not .Values.cubeDns.enabled) }}
+{{- fail "cubeNode.dns.sandbox.useCubeDns=true requires cubeDns.enabled=true" }}
+{{- end }}
+{{- if and .Values.cubeNode.dns.sandbox.useCubeDns (ne .Values.cubeDns.mode "nodeLocal") }}
+{{- fail "cubeNode.dns.sandbox.useCubeDns=true requires cubeDns.mode=nodeLocal" }}
+{{- end }}
+{{- end }}
+{{- if .Values.externalControlPlane.enabled }}
+{{- if not .Values.externalControlPlane.masterEndpoint }}
+{{- fail "externalControlPlane.enabled=true requires externalControlPlane.masterEndpoint" }}
+{{- end }}
+{{- end }}
+{{- if and .Values.cubeNode.enabled (not .Values.controlPlane.enabled) (not .Values.externalControlPlane.enabled) }}
+{{- fail "cubeNode.enabled=true with controlPlane.enabled=false requires externalControlPlane.enabled=true" }}
+{{- end }}
+{{- $controlPlaneNeedsMysql := and .Values.controlPlane.enabled (or .Values.controlPlane.master.enabled .Values.controlPlane.api.enabled) -}}
+{{- if and $controlPlaneNeedsMysql (not (eq (include "cube.mysqlBuiltinEnabled" .) "true")) (not .Values.mysql.host) }}
+{{- fail "control plane requires mysql.host when mysql.enabled=false" }}
+{{- end }}
+{{- $controlPlaneNeedsRedis := and .Values.controlPlane.enabled .Values.controlPlane.master.enabled -}}
+{{- if and $controlPlaneNeedsRedis (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) }}
+{{- fail "control plane master requires redis.host when redis.enabled=false" }}
+{{- end }}
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+{{- if not $controlPlaneSelector }}
+{{- fail "cubeProxy.enabled=true requires placement.controlPlane.nodeSelector because CubeProxy runs on control nodes" }}
+{{- end }}
+{{- if and (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (not .Values.cubeProxy.redis.host) }}
+{{- fail "cubeProxy.enabled=true requires redis.host or cubeProxy.redis.host when redis.enabled=false" }}
+{{- end }}
+{{- if not (has .Values.cubeProxy.tls.mode (list "existingSecret" "certManager" "selfSigned" "inline")) }}
+{{- fail "cubeProxy.tls.mode must be one of: existingSecret, certManager, selfSigned, inline" }}
+{{- end }}
+{{- if and (eq .Values.cubeProxy.tls.mode "existingSecret") (not .Values.cubeProxy.tls.existingSecret) }}
+{{- fail "cubeProxy.tls.mode=existingSecret requires cubeProxy.tls.existingSecret" }}
+{{- end }}
+{{- if and (eq .Values.cubeProxy.tls.mode "inline") (or (not .Values.cubeProxy.tls.cert) (not .Values.cubeProxy.tls.key)) }}
+{{- fail "cubeProxy.tls.mode=inline requires both cubeProxy.tls.cert and cubeProxy.tls.key" }}
+{{- end }}
+{{- if and (eq .Values.cubeProxy.tls.mode "certManager") (not .Values.cubeProxy.tls.certManager.issuerRef.name) }}
+{{- fail "cubeProxy.tls.mode=certManager requires cubeProxy.tls.certManager.issuerRef.name" }}
+{{- end }}
+{{- if .Values.cubeProxy.sidecar.adminToken }}
+{{- fail "cubeProxy.sidecar.adminToken is not supported until CubeProxy nginx admin server token injection is chart-managed; leave it empty" }}
+{{- end }}
+{{- if not .Values.cubeProxy.hostNetwork }}
+{{- fail "cubeProxy.hostNetwork=true is required to keep CubeProxy aligned with one-click control-node ingress semantics" }}
+{{- end }}
+{{- if and .Values.cubeProxy.hostNetwork .Values.cubeProxy.ports.http.hostPort (ne (int .Values.cubeProxy.ports.http.hostPort) (int .Values.cubeProxy.ports.http.containerPort)) }}
+{{- fail "cubeProxy.hostNetwork=true requires cubeProxy.ports.http.hostPort to equal cubeProxy.ports.http.containerPort or be empty" }}
+{{- end }}
+{{- if and .Values.cubeProxy.hostNetwork .Values.cubeProxy.ports.https.hostPort (ne (int .Values.cubeProxy.ports.https.hostPort) (int .Values.cubeProxy.ports.https.containerPort)) }}
+{{- fail "cubeProxy.hostNetwork=true requires cubeProxy.ports.https.hostPort to equal cubeProxy.ports.https.containerPort or be empty" }}
+{{- end }}
+{{- end }}
+{{- if .Values.cubeEgress.enabled }}
+{{- if not (has .Values.cubeEgress.ca.mode (list "existingSecret" "selfSigned" "inline")) }}
+{{- fail "cubeEgress.ca.mode must be one of: existingSecret, selfSigned, inline" }}
+{{- end }}
+{{- if and (eq .Values.cubeEgress.ca.mode "existingSecret") (not .Values.cubeEgress.ca.existingSecret) }}
+{{- fail "cubeEgress.ca.mode=existingSecret requires cubeEgress.ca.existingSecret" }}
+{{- end }}
+{{- if and (eq .Values.cubeEgress.ca.mode "inline") (or (not .Values.cubeEgress.ca.inline.rootCert) (not .Values.cubeEgress.ca.inline.rootKey) (not .Values.cubeEgress.ca.inline.placeholderCert) (not .Values.cubeEgress.ca.inline.placeholderKey)) }}
+{{- fail "cubeEgress.ca.mode=inline requires rootCert, rootKey, placeholderCert, and placeholderKey" }}
+{{- end }}
+{{- if and .Values.cubeEgress.network.enabled (not .Values.cubeEgress.network.ingressInterface) }}
+{{- fail "cubeEgress.network.enabled=true requires cubeEgress.network.ingressInterface" }}
+{{- end }}
+{{- end }}
+{{- if .Values.cubeDns.enabled }}
+{{- if not $computeSelector }}
+{{- fail "cubeDns.enabled=true requires placement.compute.nodeSelector because cube-dns runs on compute nodes" }}
+{{- end }}
+{{- if not (has .Values.cubeDns.mode (list "nodeLocal" "service")) }}
+{{- fail "cubeDns.mode must be one of: nodeLocal, service" }}
+{{- end }}
+{{- if and (eq .Values.cubeDns.mode "nodeLocal") (not .Values.cubeDns.bindAddress) }}
+{{- fail "cubeDns.mode=nodeLocal requires cubeDns.bindAddress" }}
+{{- end }}
+{{- if and .Values.cubeDns.sandboxGateway.enabled (ne .Values.cubeDns.mode "nodeLocal") }}
+{{- fail "cubeDns.sandboxGateway.enabled=true requires cubeDns.mode=nodeLocal" }}
+{{- end }}
+{{- if and (eq .Values.cubeDns.mode "service") (not (default .Values.cubeProxy.advertiseIP .Values.cubeDns.answerIP)) }}
+{{- fail "cubeDns.mode=service requires cubeDns.answerIP or cubeProxy.advertiseIP because CubeProxy is exposed on control-node hostNetwork" }}
+{{- end }}
+{{- if not (default .Values.cubeProxy.domain .Values.cubeDns.domain) }}
+{{- fail "cubeDns.enabled=true requires cubeDns.domain or cubeProxy.domain" }}
+{{- end }}
+{{- end }}

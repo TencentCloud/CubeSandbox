@@ -1,0 +1,18 @@
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.master.enabled .Values.controlPlane.master.persistence.enabled (not .Values.controlPlane.master.persistence.hostPath) (not .Values.controlPlane.master.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "cube.masterStoragePVCName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+spec:
+  accessModes:
+    {{- toYaml .Values.controlPlane.master.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.controlPlane.master.persistence.size | quote }}
+  {{- if .Values.controlPlane.master.persistence.storageClassName }}
+  storageClassName: {{ .Values.controlPlane.master.persistence.storageClassName | quote }}
+  {{- end }}
+{{- end }}

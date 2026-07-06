@@ -1,0 +1,121 @@
+{{- if eq (include "cube.redisBuiltinEnabled" .) "true" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.redisName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  clusterIP: None
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: {{ .Values.redis.port }}
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cube.redisName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: {{ include "cube.redisName" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: redis
+    spec:
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: redis
+          image: {{ include "cube.image" .Values.redis.image | quote }}
+          imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+          command: ["redis-server"]
+          args: ["--requirepass", "$(REDIS_PASSWORD)"]
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: redis-password
+          ports:
+            - name: redis
+              containerPort: 6379
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - redis-cli -a "${REDIS_PASSWORD}" ping | grep -x PONG
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - redis-cli -a "${REDIS_PASSWORD}" ping | grep -x PONG
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - redis-cli -a "${REDIS_PASSWORD}" ping | grep -x PONG
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          {{- if .Values.redis.persistence.enabled }}
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          {{- end }}
+          {{- with .Values.redis.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if and .Values.redis.persistence.enabled (or .Values.redis.persistence.hostPath .Values.redis.persistence.existingClaim) }}
+      volumes:
+        - name: redis-data
+          {{- if .Values.redis.persistence.hostPath }}
+          hostPath:
+            path: {{ .Values.redis.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.redisPVCName" . }}
+          {{- end }}
+      {{- end }}
+  {{- if and .Values.redis.persistence.enabled (not .Values.redis.persistence.hostPath) (not .Values.redis.persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+        labels:
+          {{- include "cube.labels" . | nindent 10 }}
+          app.kubernetes.io/component: redis
+      spec:
+        accessModes:
+          {{- toYaml .Values.redis.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.persistence.size | quote }}
+        {{- if .Values.redis.persistence.storageClassName }}
+        storageClassName: {{ .Values.redis.persistence.storageClassName | quote }}
+        {{- end }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,405 @@
+{{- if .Values.helmTest.enabled }}
+{{- $domain := default .Values.cubeProxy.domain .Values.cubeDns.domain -}}
+{{- $internalMaster := and .Values.controlPlane.enabled .Values.controlPlane.master.enabled -}}
+{{- $internalAPI := and .Values.controlPlane.enabled .Values.controlPlane.api.enabled -}}
+{{- $externalAPIEndpoint := default "" .Values.externalControlPlane.apiEndpoint -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "cube.fullname" . }}-health-test
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  serviceAccountName: {{ include "cube.fullname" . }}-test
+  containers:
+    - name: curl
+      image: {{ include "cube.image" .Values.helmTest.image | quote }}
+      imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
+      command:
+        - sh
+        - -ec
+        - |
+          token_path=/var/run/secrets/kubernetes.io/serviceaccount/token
+          ca_path=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          ns={{ .Release.Namespace | quote }}
+          kube_api="https://kubernetes.default.svc"
+          kget() {
+            curl --connect-timeout 5 --max-time 20 --cacert "${ca_path}" \
+              -H "Authorization: Bearer $(cat "${token_path}")" \
+              -fsS "${kube_api}$1"
+          }
+
+          {{- if or $internalMaster .Values.externalControlPlane.enabled }}
+          echo '[health-test] check CubeMaster'
+          curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.masterEndpoint" . }}/notify/health
+          {{- else }}
+          echo '[health-test] skip CubeMaster: no internal or external control plane'
+          {{- end }}
+
+          {{- if or $internalAPI $externalAPIEndpoint }}
+          echo '[health-test] check CubeAPI'
+          api_endpoint={{ include "cube.apiEndpoint" . | quote }}
+          case "${api_endpoint}" in
+            http://*|https://*) api_base="${api_endpoint}" ;;
+            *) api_base="http://${api_endpoint}" ;;
+          esac
+          curl --connect-timeout 5 --max-time 15 -fsS "${api_base%/}/health"
+
+          {{- if .Values.cubeNode.enabled }}
+          echo '[health-test] check node registration'
+          nodes_json="$(curl --connect-timeout 5 --max-time 15 -fsS "${api_base%/}/cubeapi/v1/nodes")"
+          printf '%s\n' "${nodes_json}"
+          healthy_nodes="$(printf '%s\n' "${nodes_json}" | grep -o '"healthy"[[:space:]]*:[[:space:]]*true' | wc -l | tr -d ' ')"
+          node_ids="$(printf '%s\n' "${nodes_json}" | grep -o '"nodeID"[[:space:]]*:' | wc -l | tr -d ' ')"
+          test "${healthy_nodes}" -ge 1
+          test "${node_ids}" -ge 1
+          {{- else }}
+          echo '[health-test] skip node registration: cubeNode.enabled=false'
+          {{- end }}
+          {{- else }}
+          echo '[health-test] skip CubeAPI: no internal API and externalControlPlane.apiEndpoint is empty'
+          {{- end }}
+
+          {{- if and .Values.webui.enabled $internalAPI }}
+          echo '[health-test] check WebUI'
+          curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.webuiName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.webui.service.port }}/ >/dev/null
+          curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.webuiName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.webui.service.port }}/cubeapi/v1/health
+          {{- end }}
+
+          {{- if eq (include "cube.proxyEnabled" .) "true" }}
+          echo '[health-test] check CubeProxy through control-node test pod'
+          {{- end }}
+
+          {{- if .Values.cubeNode.enabled }}
+          echo '[health-test] check CubeNode DaemonSet readiness'
+          node_ds="$(kget "/apis/apps/v1/namespaces/${ns}/daemonsets/{{ include "cube.nodeName" . }}")"
+          printf '%s\n' "${node_ds}" | grep -Eq '"numberReady"[[:space:]]*:[[:space:]]*[1-9]'
+          printf '%s\n' "${node_ds}" | grep -Eq '"desiredNumberScheduled"[[:space:]]*:[[:space:]]*[1-9]'
+          {{- end }}
+
+          {{- if .Values.cubeEgress.enabled }}
+          echo '[health-test] check CubeEgress containers are present in CubeNode pods'
+          pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dcube-node")"
+          printf '%s\n' "${pods_json}" | grep -qF 'cube-egress'
+          printf '%s\n' "${pods_json}" | grep -qF 'cube-egress-net'
+          {{- end }}
+{{ if eq (include "cube.cubemastercliEnabled" .) "true" }}
+{{- $images := default dict .Values.images -}}
+{{- $cubemastercliImage := default (dict "repository" "ccr.ccs.tencentyun.com/cubesandbox-chart/cubemastercli" "tag" "v0.5.0" "pullPolicy" "Always") (get $images "cubemastercli") -}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "cube.fullname" . }}-cubemastercli-test
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: cubemastercli
+      image: {{ include "cube.image" $cubemastercliImage | quote }}
+      imagePullPolicy: {{ dig "pullPolicy" "Always" $cubemastercliImage }}
+      env:
+        {{- include "cube.timezoneEnv" . | nindent 8 }}
+        - name: CUBE_RELEASE
+          value: {{ .Release.Name | quote }}
+        - name: CUBE_NAMESPACE
+          value: {{ .Release.Namespace | quote }}
+        - name: CUBE_MASTER_ENDPOINT
+          value: {{ include "cube.cubemastercliMasterEndpoint" . | quote }}
+        - name: CUBEMASTERCLI_ADDRESS
+          value: {{ include "cube.cubemastercliMasterAddress" . | quote }}
+        - name: CUBEMASTERCLI_PORT
+          value: {{ include "cube.cubemastercliMasterPort" . | quote }}
+      command:
+        - /bin/sh
+        - -ec
+        - cubemastercli --address "${CUBEMASTERCLI_ADDRESS}" --port "${CUBEMASTERCLI_PORT}" node list
+{{- end }}
+{{ if eq (include "cube.mysqlBuiltinEnabled" .) "true" }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "cube.fullname" . }}-mysql-test
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: mysql
+      image: {{ include "cube.image" .Values.mysql.image | quote }}
+      imagePullPolicy: {{ .Values.mysql.image.pullPolicy }}
+      env:
+        {{- include "cube.timezoneEnv" . | nindent 8 }}
+        - name: MYSQL_PWD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cube.secretName" . }}
+              key: mysql-password
+      command:
+        - sh
+        - -ec
+        - |
+          echo '[health-test] check MySQL'
+          mysqladmin ping -h {{ include "cube.mysqlHost" . | quote }} -P {{ .Values.mysql.port }} -u{{ .Values.mysql.user | quote }} --silent
+{{- end }}
+{{ if eq (include "cube.redisBuiltinEnabled" .) "true" }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "cube.fullname" . }}-redis-test
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: redis
+      image: {{ include "cube.image" .Values.redis.image | quote }}
+      imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+      env:
+        {{- include "cube.timezoneEnv" . | nindent 8 }}
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cube.secretName" . }}
+              key: redis-password
+      command:
+        - sh
+        - -ec
+        - |
+          echo '[health-test] check Redis'
+          redis-cli -h {{ include "cube.redisHost" . | quote }} -p {{ .Values.redis.port }} -a "${REDIS_PASSWORD}" ping | grep -x PONG
+{{- end }}
+{{ if eq (include "cube.proxyEnabled" .) "true" }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "cube.fullname" . }}-proxy-control-test
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
+  containers:
+    - name: proxy
+      image: {{ include "cube.image" .Values.helmTest.image | quote }}
+      imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
+      env:
+        {{- include "cube.timezoneEnv" . | nindent 8 }}
+        - name: NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+      command:
+        - sh
+        - -ec
+        - |
+          echo '[health-test] check control-node CubeProxy'
+          curl --connect-timeout 5 --max-time 15 -fsS -o /dev/null http://127.0.0.1:{{ .Values.cubeProxy.probes.readiness.port }}{{ .Values.cubeProxy.probes.readiness.path }}
+{{- end }}
+{{ if .Values.cubeDns.enabled }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "cube.fullname" . }}-dns-test
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if eq .Values.cubeDns.mode "nodeLocal" }}
+  hostNetwork: true
+  dnsPolicy: None
+  dnsConfig:
+    nameservers:
+      - {{ .Values.cubeNode.dns.nameserver | quote }}
+    searches:
+      - {{ printf "%s.svc.%s" .Release.Namespace .Values.cubeNode.dns.clusterDomain | quote }}
+      - {{ printf "svc.%s" .Values.cubeNode.dns.clusterDomain | quote }}
+      - {{ .Values.cubeNode.dns.clusterDomain | quote }}
+    options:
+      - name: ndots
+        value: "5"
+  {{- include "cube.computePlacement" . | nindent 2 }}
+  {{- end }}
+  containers:
+    - name: dns
+      image: {{ include "cube.image" .Values.helmTest.dnsImage | quote }}
+      imagePullPolicy: {{ .Values.helmTest.dnsImage.pullPolicy }}
+      command:
+        - sh
+        - -ec
+        - |
+          echo '[health-test] check CubeDNS'
+          {{- if eq .Values.cubeDns.mode "nodeLocal" }}
+          nslookup {{ $domain | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} | grep -Eq 'Name:|Address'
+          nslookup {{ printf "wildcard-check.%s" $domain | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} | grep -Eq 'Name:|Address'
+          nslookup {{ printf "kubernetes.default.svc.%s" .Values.cubeNode.dns.clusterDomain | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} | grep -Eq 'Name:|Address'
+          {{- else }}
+          nslookup {{ $domain | quote }} {{ printf "%s-dns.%s.svc.cluster.local" (include "cube.fullname" .) .Release.Namespace | quote }} | grep -Eq 'canonical name|Address'
+          nslookup {{ printf "wildcard-check.%s" $domain | quote }} {{ printf "%s-dns.%s.svc.cluster.local" (include "cube.fullname" .) .Release.Namespace | quote }} | grep -Eq 'canonical name|Address'
+          {{- end }}
+{{- end }}
+{{ if .Values.cubeNode.enabled }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "cube.fullname" . }}-node-image-test
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- include "cube.computePlacement" . | nindent 2 }}
+  containers:
+    - name: node-image-assets
+      image: {{ include "cube.image" .Values.images.node | quote }}
+      imagePullPolicy: {{ .Values.images.node.pullPolicy }}
+      command:
+        - sh
+        - -ec
+        - |
+          TOOLBOX_ROOT="${TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
+          echo '[health-test] check cube-node image runtime assets'
+          test -x /usr/local/bin/cube-runtime
+          test -x /usr/local/bin/containerd-shim-cube-rs
+          test -x /usr/local/bin/cubecli
+          test -x /usr/local/bin/cubevsmapdump
+          test -f "${TOOLBOX_ROOT}/Cubelet/config/config.toml"
+          test -f "${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
+          test -f "${TOOLBOX_ROOT}/cube-kernel-scf/vmlinux-bm"
+          test -f "${TOOLBOX_ROOT}/cube-kernel-scf/vmlinux-pvm"
+          test -f "${TOOLBOX_ROOT}/cube-image/cube-guest-image-cpu.img"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "cube.fullname" . }}-node-runtime-test
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if and .Values.cubeDns.enabled (eq .Values.cubeDns.mode "nodeLocal") }}
+  hostNetwork: true
+  dnsPolicy: None
+  dnsConfig:
+    nameservers:
+      - {{ .Values.cubeNode.dns.nameserver | quote }}
+    searches:
+      - {{ printf "%s.svc.%s" .Release.Namespace .Values.cubeNode.dns.clusterDomain | quote }}
+      - {{ printf "svc.%s" .Values.cubeNode.dns.clusterDomain | quote }}
+      - {{ .Values.cubeNode.dns.clusterDomain | quote }}
+    options:
+      - name: ndots
+        value: "5"
+  {{- end }}
+  {{- include "cube.computePlacement" . | nindent 2 }}
+  containers:
+    - name: node-runtime
+      image: {{ include "cube.image" .Values.helmTest.dnsImage | quote }}
+      imagePullPolicy: {{ .Values.helmTest.dnsImage.pullPolicy }}
+      command:
+        - sh
+        - -ec
+        - |
+          echo '[health-test] check cube-node host runtime assets'
+          test -e /dev/kvm
+          test -d {{ .Values.hostPaths.dataCubelet | quote }}
+          test -S {{ printf "%s/cubelet.sock" .Values.hostPaths.dataCubelet | quote }}
+          test -S {{ printf "%s/network-agent-grpc.sock" .Values.hostPaths.tmpCube | quote }}
+          {{- if and .Values.cubeDns.enabled (eq .Values.cubeDns.mode "nodeLocal") }}
+          nslookup {{ $domain | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} >/dev/null
+          {{- end }}
+      volumeMounts:
+        - name: dev
+          mountPath: /dev
+          readOnly: true
+        - name: data-cubelet
+          mountPath: {{ .Values.hostPaths.dataCubelet }}
+        - name: tmp-cube
+          mountPath: {{ .Values.hostPaths.tmpCube }}
+  volumes:
+    - name: dev
+      hostPath:
+        path: {{ .Values.hostPaths.dev }}
+        type: Directory
+    - name: data-cubelet
+      hostPath:
+        path: {{ .Values.hostPaths.dataCubelet }}
+        type: DirectoryOrCreate
+    - name: tmp-cube
+      hostPath:
+        path: {{ .Values.hostPaths.tmpCube }}
+        type: DirectoryOrCreate
+{{- end }}
+{{- end }}

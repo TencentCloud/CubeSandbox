@@ -1,0 +1,64 @@
+CubeSandbox chart installed.
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+{{- if .Values.controlPlane.enabled }}
+Control plane:
+  CubeMaster Service: {{ include "cube.masterName" . }}:{{ .Values.controlPlane.master.service.port }}
+  CubeAPI Service:    {{ include "cube.apiName" . }}:{{ .Values.controlPlane.api.service.port }}
+{{- if .Values.webui.enabled }}
+  WebUI Service:      {{ include "cube.webuiName" . }}:{{ .Values.webui.service.port }}
+{{- end }}
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  cubemastercli Deployment: {{ include "cube.cubemastercliName" . }}
+{{- end }}
+{{- else if .Values.externalControlPlane.enabled }}
+External control plane:
+  CubeMaster Endpoint: {{ .Values.externalControlPlane.masterEndpoint }}
+{{- if .Values.externalControlPlane.apiEndpoint }}
+  CubeAPI Endpoint:    {{ .Values.externalControlPlane.apiEndpoint }}
+{{- end }}
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  cubemastercli Deployment: {{ include "cube.cubemastercliName" . }}
+{{- end }}
+{{- end }}
+{{- if .Values.cubeDns.enabled }}
+{{- if eq .Values.cubeDns.mode "nodeLocal" }}
+  CubeDNS DaemonSet: {{ include "cube.fullname" . }}-dns (node-local {{ .Values.cubeDns.bindAddress }}:53)
+{{- else }}
+  CubeDNS Service:    {{ include "cube.fullname" . }}-dns:{{ .Values.cubeDns.service.port }}
+{{- end }}
+{{- end }}
+
+Cube Node DaemonSet:
+  {{ include "cube.nodeName" . }}
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+
+Cube Proxy Node Deployment:
+  {{ include "cube.proxyName" . }}
+  HTTP/HTTPS control-node endpoint: <cube-proxy-control-node-ip>:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}
+  No ClusterIP Service is created; point wildcard DNS at the control node or external load balancer.
+{{- end }}
+
+Useful commands:
+  kubectl get pods -n {{ .Release.Namespace }} -o wide
+  kubectl get ds -n {{ .Release.Namespace }} {{ include "cube.nodeName" . }}
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+  kubectl get deploy -n {{ .Release.Namespace }} {{ include "cube.proxyName" . }}
+{{- end }}
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c pvm-host-bootstrap --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cube-node-init --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=cube-node -c cube-node --tail=100
+{{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubemastercli --help
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+{{- end }}
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --timeout 20m
+{{- if .Values.diagnostics.enabled }}
+  kubectl get configmap -n {{ .Release.Namespace }} {{ include "cube.fullname" . }}-diagnostics -o jsonpath='{.data.cube-diag-k8s\.sh}' > /tmp/cube-diag-k8s.sh
+  sh /tmp/cube-diag-k8s.sh {{ .Release.Namespace }} {{ .Release.Name }}
+{{- end }}
+
+WARNING: If bootstrap.pvmHostKernel.enabled=true, this release may install a host kernel and reboot selected compute nodes.
+Helm rollback does not roll back host kernel/GRUB changes.

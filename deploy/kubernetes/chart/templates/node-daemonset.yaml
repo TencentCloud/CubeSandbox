@@ -1,0 +1,481 @@
+{{- if .Values.cubeNode.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "cube.nodeName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-node
+spec:
+  updateStrategy:
+    {{- toYaml .Values.cubeNode.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cube-node
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cube-node
+      annotations:
+        {{- with .Values.cubeNode.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
+      automountServiceAccountToken: true
+      hostNetwork: {{ .Values.security.hostNetwork }}
+      hostPID: {{ .Values.security.hostPID }}
+      {{- if .Values.cubeNode.dns.useCubeDns }}
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - {{ .Values.cubeNode.dns.nameserver | quote }}
+        searches:
+          - {{ printf "%s.svc.%s" .Release.Namespace .Values.cubeNode.dns.clusterDomain | quote }}
+          - {{ printf "svc.%s" .Values.cubeNode.dns.clusterDomain | quote }}
+          - {{ .Values.cubeNode.dns.clusterDomain | quote }}
+        options:
+          - name: ndots
+            value: "5"
+      {{- else }}
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.computePlacement" . | nindent 6 }}
+      initContainers:
+        {{- if .Values.cubeNode.dns.useCubeDns }}
+        - name: wait-cube-dns
+          image: {{ include "cube.image" .Values.cubeNode.dns.checkImage | quote }}
+          imagePullPolicy: {{ .Values.cubeNode.dns.checkImage.pullPolicy }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_DNS_NAMESERVER
+              value: {{ .Values.cubeNode.dns.nameserver | quote }}
+            - name: CUBE_DNS_DOMAIN
+              value: {{ (default .Values.cubeProxy.domain .Values.cubeDns.domain) | quote }}
+            - name: CUBE_DNS_TIMEOUT
+              value: {{ .Values.cubeNode.dns.waitTimeoutSeconds | quote }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              deadline=$(( $(date +%s) + ${CUBE_DNS_TIMEOUT} ))
+              while [ "$(date +%s)" -le "${deadline}" ]; do
+                if nslookup "${CUBE_DNS_DOMAIN}" "${CUBE_DNS_NAMESERVER}" >/dev/null 2>&1 \
+                  && nslookup "wildcard-check.${CUBE_DNS_DOMAIN}" "${CUBE_DNS_NAMESERVER}" >/dev/null 2>&1 \
+                  && nslookup "kubernetes.default.svc.{{ .Values.cubeNode.dns.clusterDomain }}" "${CUBE_DNS_NAMESERVER}" >/dev/null 2>&1; then
+                  echo "cube dns is ready at ${CUBE_DNS_NAMESERVER}"
+                  exit 0
+                fi
+                echo "waiting for cube dns at ${CUBE_DNS_NAMESERVER}"
+                sleep 2
+              done
+              echo "cube dns is not ready at ${CUBE_DNS_NAMESERVER}" >&2
+              exit 1
+        {{- end }}
+        {{- if .Values.bootstrap.pvmHostKernel.enabled }}
+        - name: pvm-host-bootstrap
+          image: {{ include "cube.image" .Values.images.pvmHostBootstrap | quote }}
+          imagePullPolicy: {{ .Values.images.pvmHostBootstrap.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOST_ROOT
+              value: /host
+            - name: DESIRED_KERNEL_PATTERN
+              value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
+            - name: PVM_KERNEL_BOOT_ARGS
+              value: {{ .Values.bootstrap.pvmHostKernel.bootArgs | quote }}
+            - name: PVM_KERNEL_RPM_PATH
+              value: {{ .Values.bootstrap.pvmHostKernel.package.rpmPath | quote }}
+            - name: PVM_KERNEL_DEB_PATH
+              value: {{ .Values.bootstrap.pvmHostKernel.package.debPath | quote }}
+            - name: PVM_KERNEL_RPM_URL
+              value: {{ .Values.bootstrap.pvmHostKernel.package.rpmUrl | quote }}
+            - name: PVM_KERNEL_DEB_URL
+              value: {{ .Values.bootstrap.pvmHostKernel.package.debUrl | quote }}
+            - name: PVM_KERNEL_PACKAGE_SOURCE
+              value: {{ .Values.bootstrap.pvmHostKernel.package.source | quote }}
+            - name: REBOOT_ENABLED
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.enabled | quote }}
+            - name: REBOOT_COORDINATED
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.coordinated | quote }}
+            - name: LEASE_NAME
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseName | quote }}
+            - name: LEASE_TTL_SECONDS
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.leaseTTLSeconds | quote }}
+            - name: REBOOT_MAX_COUNT
+              value: {{ .Values.bootstrap.pvmHostKernel.reboot.maxCount | quote }}
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: dev
+              mountPath: /dev
+            - name: sys
+              mountPath: /sys
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+        {{- end }}
+        {{- if .Values.bootstrap.nodeInit.enabled }}
+        - name: cube-node-init
+          image: {{ include "cube.image" .Values.images.nodeInit | quote }}
+          imagePullPolicy: {{ .Values.images.nodeInit.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: HOST_ROOT
+              value: /host
+            - name: DATA_CUBELET
+              value: {{ .Values.hostPaths.dataCubelet | quote }}
+            - name: REQUIRE_KVM
+              value: {{ .Values.bootstrap.nodeInit.requireKVM | quote }}
+            - name: REQUIRE_XFS
+              value: {{ .Values.bootstrap.nodeInit.requireXFS | quote }}
+            - name: CHMOD_KVM
+              value: {{ .Values.bootstrap.nodeInit.chmodKVM | quote }}
+            - name: LOAD_KVM_MODULE
+              value: {{ .Values.bootstrap.nodeInit.loadKVMModule | quote }}
+            - name: WRITE_UDEV_RULE
+              value: {{ .Values.bootstrap.nodeInit.writeUdevRule | quote }}
+            - name: CREATE_HOST_DIRS
+              value: {{ .Values.bootstrap.nodeInit.createHostDirs | quote }}
+            - name: CHECK_MASTER_CONNECTIVITY
+              value: {{ .Values.bootstrap.nodeInit.checkMasterConnectivity | quote }}
+            - name: CUBE_MASTER_ENDPOINT
+              value: {{ include "cube.masterEndpoint" . | quote }}
+            - name: LOOPBACK_ENABLED
+              value: {{ .Values.bootstrap.nodeInit.dataCubelet.loopback.enabled | quote }}
+            - name: LOOPBACK_IMAGE_PATH
+              value: {{ .Values.bootstrap.nodeInit.dataCubelet.loopback.imagePath | quote }}
+            - name: LOOPBACK_SIZE
+              value: {{ .Values.bootstrap.nodeInit.dataCubelet.loopback.size | quote }}
+            - name: CHECK_MEMORY
+              value: {{ .Values.bootstrap.nodeInit.checkMemory | quote }}
+            - name: MIN_MEMORY_KB
+              value: {{ .Values.bootstrap.nodeInit.minMemoryKB | quote }}
+            - name: CHECK_CGROUP_CPU
+              value: {{ .Values.bootstrap.nodeInit.checkCgroupCPU | quote }}
+            - name: CHECK_GLIBC
+              value: {{ .Values.bootstrap.nodeInit.checkGlibc | quote }}
+            - name: CHECK_CIDR
+              value: {{ .Values.bootstrap.nodeInit.checkCIDR | quote }}
+            - name: CHECK_CUBECOW_DEPS
+              value: {{ .Values.bootstrap.nodeInit.checkCubecowDeps | quote }}
+            - name: CUBE_PVM_ENABLE
+              value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
+            - name: CUBE_SANDBOX_NETWORK_CIDR
+              value: {{ .Values.cubeNode.network.cidr | quote }}
+            - name: CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK
+              value: {{ ternary "1" "0" .Values.cubeNode.network.cidrSkipConflictCheck | quote }}
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: dev
+              mountPath: /dev
+            - name: sys
+              mountPath: /sys
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: data-cubelet
+              mountPath: {{ .Values.hostPaths.dataCubelet }}
+              mountPropagation: Bidirectional
+            - name: data-log
+              mountPath: {{ .Values.hostPaths.dataLog }}
+            - name: data-cube-shim
+              mountPath: {{ .Values.hostPaths.dataCubeShim }}
+              mountPropagation: Bidirectional
+            - name: data-snapshot-pack
+              mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
+            - name: tmp-cube
+              mountPath: {{ .Values.hostPaths.tmpCube }}
+              mountPropagation: Bidirectional
+        {{- end }}
+      containers:
+        - name: cube-node
+          image: {{ include "cube.image" .Values.images.node | quote }}
+          imagePullPolicy: {{ .Values.images.node.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - NET_ADMIN
+                - SYS_MODULE
+                - SYS_RESOURCE
+                - IPC_LOCK
+                - SYS_PTRACE
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_ROLE
+              value: node
+            - name: CUBE_MASTER_ENDPOINT
+              value: {{ include "cube.masterEndpoint" . | quote }}
+            - name: CUBE_SANDBOX_NODE_IP
+              {{- if eq .Values.cubeNode.ipSource "statusHostIP" }}
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+              {{- else }}
+              value: {{ .Values.cubeNode.staticNodeIP | quote }}
+              {{- end }}
+            - name: CUBE_PVM_ENABLE
+              value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
+            - name: CUBE_SANDBOX_AUTO_DETECT_ETH
+              value: {{ .Values.cubeNode.network.autoDetectEthName | quote }}
+            - name: CUBE_SANDBOX_ETH_NAME
+              value: {{ .Values.cubeNode.network.ethName | quote }}
+            - name: CUBE_SANDBOX_NETWORK_CIDR
+              value: {{ .Values.cubeNode.network.cidr | quote }}
+            - name: CUBE_SANDBOX_DNS_SERVERS
+              {{- if .Values.cubeNode.dns.sandbox.nameservers }}
+              value: {{ join "," . | quote }}
+              {{- else if and .Values.cubeNode.dns.sandbox.useCubeDns .Values.cubeDns.enabled (eq .Values.cubeDns.mode "nodeLocal") .Values.cubeDns.sandboxGateway.enabled }}
+              value: "$(CUBE_SANDBOX_NODE_IP)"
+              {{- else }}
+              value: ""
+              {{- end }}
+            {{- with .Values.cubeNode.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: cubelet-grpc
+              containerPort: 9999
+            - name: cubelet-http
+              containerPort: 9998
+            - name: cubelet-debug
+              containerPort: 9966
+            - name: network-agent
+              containerPort: 19090
+          {{- if .Values.cubeNode.probes.startup.enabled }}
+          startupProbe:
+            tcpSocket:
+              port: {{ .Values.cubeNode.probes.startup.tcpSocketPort }}
+            periodSeconds: {{ .Values.cubeNode.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.cubeNode.probes.startup.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeNode.probes.readiness.enabled }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.cubeNode.probes.readiness.tcpSocketPort }}
+            initialDelaySeconds: {{ .Values.cubeNode.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeNode.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeNode.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeNode.probes.liveness.enabled }}
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.cubeNode.probes.liveness.tcpSocketPort }}
+            initialDelaySeconds: {{ .Values.cubeNode.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeNode.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeNode.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: dev
+              mountPath: /dev
+            - name: sys
+              mountPath: /sys
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: data-cubelet
+              mountPath: {{ .Values.hostPaths.dataCubelet }}
+              mountPropagation: Bidirectional
+            - name: data-log
+              mountPath: {{ .Values.hostPaths.dataLog }}
+            - name: data-cube-shim
+              mountPath: {{ .Values.hostPaths.dataCubeShim }}
+              mountPropagation: Bidirectional
+            - name: data-snapshot-pack
+              mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
+            - name: tmp-cube
+              mountPath: {{ .Values.hostPaths.tmpCube }}
+              mountPropagation: Bidirectional
+          {{- with .Values.cubeNode.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- if .Values.cubeEgress.enabled }}
+        - name: cube-egress
+          image: {{ include "cube.image" .Values.images.cubeEgress | quote }}
+          imagePullPolicy: {{ .Values.images.cubeEgress.pullPolicy }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              mkdir -p /data/log/cube-egress
+              exec /usr/local/openresty/nginx/sbin/start.sh
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - NET_BIND_SERVICE
+                - CHOWN
+                - SETUID
+                - SETGID
+                - DAC_READ_SEARCH
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_EGRESS_BOOTSTRAP_URL
+              value: {{ .Values.cubeEgress.bootstrapURL | quote }}
+            - name: CUBE_EGRESS_DEBUG_DUMP
+              value: {{ ternary "1" "0" .Values.cubeEgress.debugDump | quote }}
+          ports:
+            - name: egress-admin
+              containerPort: 9090
+            - name: egress-http
+              containerPort: 8080
+            - name: egress-https
+              containerPort: 8443
+          {{- if .Values.cubeEgress.probes.readiness.enabled }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - {{ printf "curl -fsS http://127.0.0.1:%v%s >/dev/null" .Values.cubeEgress.probes.readiness.port .Values.cubeEgress.probes.readiness.path | quote }}
+            initialDelaySeconds: {{ .Values.cubeEgress.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeEgress.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeEgress.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeEgress.probes.liveness.enabled }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - {{ printf "curl -fsS http://127.0.0.1:%v%s >/dev/null" .Values.cubeEgress.probes.liveness.port .Values.cubeEgress.probes.liveness.path | quote }}
+            initialDelaySeconds: {{ .Values.cubeEgress.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeEgress.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeEgress.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: cube-egress-ca
+              mountPath: /etc/cube/ca
+              readOnly: true
+            - name: data-log
+              mountPath: {{ .Values.hostPaths.dataLog }}
+            - name: cube-egress-run
+              mountPath: /var/run/openresty
+          {{- with .Values.cubeEgress.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- if .Values.cubeEgress.network.enabled }}
+        - name: cube-egress-net
+          image: {{ include "cube.image" .Values.images.cubeEgressNet | quote }}
+          imagePullPolicy: {{ .Values.images.cubeEgressNet.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - SYS_MODULE
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_INGRESS_IFACE
+              value: {{ .Values.cubeEgress.network.ingressInterface | quote }}
+            - name: CUBE_TPROXY_ON_IP
+              value: {{ .Values.cubeEgress.network.tproxyOnIP | quote }}
+            - name: CUBE_EGRESS_NET_INITIAL_WAIT_SECONDS
+              value: {{ .Values.cubeEgress.network.initialWaitSeconds | quote }}
+            - name: CUBE_EGRESS_NET_REAPPLY_INTERVAL_SECONDS
+              value: {{ .Values.cubeEgress.network.reapplyIntervalSeconds | quote }}
+          {{- if .Values.cubeEgress.network.probes.readiness.enabled }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - {{ include "cube.egressNetProbeCommand" . | quote }}
+            initialDelaySeconds: {{ .Values.cubeEgress.network.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeEgress.network.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeEgress.network.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeEgress.network.probes.liveness.enabled }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - {{ include "cube.egressNetProbeCommand" . | quote }}
+            initialDelaySeconds: {{ .Values.cubeEgress.network.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cubeEgress.network.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeEgress.network.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+          {{- with .Values.cubeEgress.netResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- end }}
+      volumes:
+        - name: host-root
+          hostPath:
+            path: {{ .Values.hostPaths.root }}
+            type: Directory
+        - name: dev
+          hostPath:
+            path: {{ .Values.hostPaths.dev }}
+            type: Directory
+        - name: sys
+          hostPath:
+            path: {{ .Values.hostPaths.sys }}
+            type: Directory
+        - name: lib-modules
+          hostPath:
+            path: {{ .Values.hostPaths.libModules }}
+            type: Directory
+        - name: data-cubelet
+          hostPath:
+            path: {{ .Values.hostPaths.dataCubelet }}
+            type: DirectoryOrCreate
+        - name: data-log
+          hostPath:
+            path: {{ .Values.hostPaths.dataLog }}
+            type: DirectoryOrCreate
+        - name: data-cube-shim
+          hostPath:
+            path: {{ .Values.hostPaths.dataCubeShim }}
+            type: DirectoryOrCreate
+        - name: data-snapshot-pack
+          hostPath:
+            path: {{ .Values.hostPaths.dataSnapshotPack }}
+            type: DirectoryOrCreate
+        - name: tmp-cube
+          hostPath:
+            path: {{ .Values.hostPaths.tmpCube }}
+            type: DirectoryOrCreate
+      {{- if .Values.cubeEgress.enabled }}
+        - name: cube-egress-ca
+          secret:
+            secretName: {{ include "cube.egressCASecretName" . }}
+        - name: cube-egress-run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+      {{- end }}
+{{- end }}

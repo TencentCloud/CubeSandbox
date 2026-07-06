@@ -1,0 +1,161 @@
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.master.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cube.masterName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+spec:
+  replicas: {{ .Values.controlPlane.master.replicas }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: master
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: master
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: cube-master
+          image: {{ include "cube.image" .Values.images.master | quote }}
+          imagePullPolicy: {{ .Values.images.master.pullPolicy }}
+          {{- with .Values.controlPlane.master.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.controlPlane.master.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_MASTER_CONFIG_PATH
+              value: /usr/local/services/cubemaster/conf.yaml
+            - name: CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR
+              value: /data/CubeMaster/storage
+            - name: CUBE_NODE_IPS
+              value: {{ join "," .Values.controlPlane.master.nodeIPs | quote }}
+            {{- with .Values.controlPlane.master.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: cubemaster
+              containerPort: {{ .Values.controlPlane.master.service.port }}
+          {{- if .Values.controlPlane.master.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.controlPlane.master.probes.readiness.path | quote }}
+              port: cubemaster
+            initialDelaySeconds: {{ .Values.controlPlane.master.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.controlPlane.master.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.controlPlane.master.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.controlPlane.master.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.controlPlane.master.probes.liveness.path | quote }}
+              port: cubemaster
+            initialDelaySeconds: {{ .Values.controlPlane.master.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.controlPlane.master.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.controlPlane.master.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: cube-master-config
+              mountPath: /usr/local/services/cubemaster/conf.yaml
+              subPath: conf.yaml
+              readOnly: true
+          {{- if .Values.cubeEgress.enabled }}
+            - name: cube-egress-ca
+              mountPath: /etc/cube/ca
+              readOnly: true
+          {{- end }}
+            - name: cube-master-log
+              mountPath: /data/log/CubeMaster
+            - name: cube-master-storage
+              mountPath: /data/CubeMaster/storage
+          {{- if .Values.controlPlane.templateBuilder.enabled }}
+            - name: docker-run
+              mountPath: /var/run
+          {{- end }}
+          {{- with .Values.controlPlane.master.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- if .Values.controlPlane.templateBuilder.enabled }}
+        - name: template-builder
+          image: {{ include "cube.image" .Values.images.templateBuilder | quote }}
+          imagePullPolicy: {{ .Values.images.templateBuilder.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.controlPlane.templateBuilder.privileged }}
+          {{- if .Values.global.timezone }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.controlPlane.templateBuilder.dockerdArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: docker-run
+              mountPath: /var/run
+            - name: docker-graph
+              mountPath: /var/lib/docker
+          {{- with .Values.controlPlane.templateBuilder.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+      volumes:
+        - name: cube-master-config
+          secret:
+            secretName: {{ include "cube.masterConfigSecretName" . }}
+      {{- if .Values.cubeEgress.enabled }}
+        - name: cube-egress-ca
+          secret:
+            secretName: {{ include "cube.egressCASecretName" . }}
+      {{- end }}
+        - name: cube-master-log
+          emptyDir: {}
+        - name: cube-master-storage
+          {{- if and .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath }}
+          hostPath:
+            path: {{ .Values.controlPlane.master.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else if .Values.controlPlane.master.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.masterStoragePVCName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- if .Values.controlPlane.templateBuilder.enabled }}
+        - name: docker-run
+          emptyDir: {}
+        - name: docker-graph
+          emptyDir: {}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.masterName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+spec:
+  type: {{ .Values.controlPlane.master.service.type }}
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+  ports:
+    - name: cubemaster
+      port: {{ .Values.controlPlane.master.service.port }}
+      targetPort: cubemaster
+{{- end }}

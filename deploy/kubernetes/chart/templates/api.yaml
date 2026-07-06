@@ -1,0 +1,140 @@
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.api.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cube.apiName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.controlPlane.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: cube-api
+          image: {{ include "cube.image" .Values.images.api | quote }}
+          imagePullPolicy: {{ .Values.images.api.pullPolicy }}
+          {{- with .Values.controlPlane.api.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.controlPlane.api.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_MASTER_ENDPOINT
+              value: {{ include "cube.masterEndpoint" . | quote }}
+            - name: CUBE_MASTER_ADDR
+              value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
+            - name: CUBE_API_BIND
+              value: {{ .Values.controlPlane.api.bind | quote }}
+            - name: CUBE_SANDBOX_MYSQL_HOST
+              value: {{ include "cube.mysqlHost" . | quote }}
+            - name: CUBE_SANDBOX_MYSQL_PORT
+              value: {{ .Values.mysql.port | quote }}
+            - name: CUBE_SANDBOX_MYSQL_USER
+              value: {{ .Values.mysql.user | quote }}
+            - name: CUBE_SANDBOX_MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: mysql-password
+            - name: CUBE_SANDBOX_MYSQL_DB
+              value: {{ .Values.mysql.database | quote }}
+            - name: CUBE_API_SANDBOX_DOMAIN
+              value: {{ .Values.controlPlane.api.sandboxDomain | quote }}
+            {{- with .Values.controlPlane.api.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http-api
+              containerPort: 3000
+          {{- if .Values.controlPlane.api.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.controlPlane.api.probes.readiness.path | quote }}
+              port: http-api
+            initialDelaySeconds: {{ .Values.controlPlane.api.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.controlPlane.api.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.controlPlane.api.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.controlPlane.api.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.controlPlane.api.probes.liveness.path | quote }}
+              port: http-api
+            initialDelaySeconds: {{ .Values.controlPlane.api.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.controlPlane.api.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.controlPlane.api.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.cubeEgress.enabled }}
+          volumeMounts:
+            - name: cube-egress-ca
+              mountPath: /etc/cube/ca
+              readOnly: true
+          {{- end }}
+          {{- with .Values.controlPlane.api.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.cubeEgress.enabled }}
+      volumes:
+        - name: cube-egress-ca
+          secret:
+            secretName: {{ include "cube.egressCASecretName" . }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.apiName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: {{ .Values.controlPlane.api.service.type }}
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  ports:
+    - name: http-api
+      port: {{ .Values.controlPlane.api.service.port }}
+      targetPort: http-api
+{{- if .Values.controlPlane.api.internalLoadBalancer.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.apiName" . }}-internal
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  annotations:
+    {{- toYaml .Values.controlPlane.api.internalLoadBalancer.annotations | nindent 4 }}
+spec:
+  type: LoadBalancer
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  ports:
+    - name: http-api
+      protocol: TCP
+      port: {{ .Values.controlPlane.api.internalLoadBalancer.port }}
+      targetPort: http-api
+{{- end }}
+{{- end }}
