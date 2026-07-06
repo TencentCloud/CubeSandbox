@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/26338?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26338" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26338" alt="TencentCloud/CubeSandbox | Trendshift" width="250" height="55" /></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/tencentcloud/CubeSandbox/stargazers"><img src="https://img.shields.io/github/stars/tencentcloud/cubesandbox?style=social" alt="GitHub Stars" /></a>
   <a href="https://github.com/tencentcloud/CubeSandbox/issues"><img src="https://img.shields.io/github/issues/tencentcloud/cubesandbox" alt="GitHub Issues" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0 License" /></a>
@@ -23,6 +27,8 @@
   <img src="https://img.shields.io/badge/🔌_API-E2B_Compatible-blueviolet" alt="E2B compatible" />
   <img src="https://img.shields.io/badge/📦_Deploy-High_Concurrency·High_Density-orange" alt="High concurrency & high density" />
 </p>
+
+
 
 <p align="center">
   <a href="./README_zh.md"><strong>中文文档</strong></a> ·

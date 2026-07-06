@@ -8,6 +8,11 @@
   <strong>一个极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务</strong>
 </p>
 
+
+<p align="center">
+  <a href="https://trendshift.io/repositories/26338?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26338" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26338" alt="TencentCloud/CubeSandbox | Trendshift" width="250" height="55" /></a>
+</p>
+
 <p align="center">
   <a href="https://github.com/tencentcloud/CubeSandbox/stargazers"><img src="https://img.shields.io/github/stars/tencentcloud/cubesandbox?style=social" alt="GitHub Stars" /></a>
   <a href="https://github.com/tencentcloud/CubeSandbox/issues"><img src="https://img.shields.io/github/issues/tencentcloud/cubesandbox" alt="GitHub Issues" /></a>
@@ -22,6 +27,7 @@
   <img src="https://img.shields.io/badge/🔌_接口-兼容_E2B-blueviolet" alt="E2B 兼容" />
   <img src="https://img.shields.io/badge/📦_部署-高并发·高密度-orange" alt="高并发·高密度" />
 </p>
+
 
 <p align="center">
   <a href="./README.md"><strong>English</strong></a> ·
