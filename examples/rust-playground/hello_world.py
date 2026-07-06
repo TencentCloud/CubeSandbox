@@ -16,7 +16,6 @@ This script:
 
 from __future__ import annotations
 
-import os
 import sys
 
 from e2b import Sandbox

@@ -16,7 +16,6 @@ This script demonstrates:
 
 from __future__ import annotations
 
-import os
 import sys
 
 from e2b import Sandbox
@@ -59,7 +58,7 @@ def main() -> int:
 
     print(f"Creating sandbox from template: {template_id}")
 
-    with Sandbox.create(template=template_id, timeout=300) as sandbox:
+    with Sandbox.create(template=template_id, timeout=360) as sandbox:
         sandbox_id = getattr(sandbox, "sandbox_id", None) or sandbox.id
         print(f"Sandbox ready: {sandbox_id}")
 
@@ -67,24 +66,16 @@ def main() -> int:
 
         # 1. Scaffold project
         print("\n--- Creating Cargo project ---")
-        cmds = [
-            f"mkdir -p {ws}/src",
-            f"cat > {ws}/Cargo.toml << 'EOF_CARGO'\n{CARGO_TOML}\nEOF_CARGO",
-            f"cat > {ws}/src/main.rs << 'EOF_RS'\n{MAIN_RS}\nEOF_RS",
-        ]
-        for cmd in cmds:
-            result = sandbox.commands.run(cmd, timeout=30)
-            if result.exit_code != 0:
-                print(f"Command failed: {cmd}", file=sys.stderr)
-                print(result.stderr, file=sys.stderr)
-                return 1
+        sandbox.commands.run(f"mkdir -p {ws}/src", timeout=30)
+        sandbox.files.write(f"{ws}/Cargo.toml", CARGO_TOML)
+        sandbox.files.write(f"{ws}/src/main.rs", MAIN_RS)
 
         print("Project scaffolded.")
 
         # 2. Build
         print("\n--- cargo build (fetching dependencies + compiling) ---")
         result = sandbox.commands.run(
-            "cargo build --release 2>&1",
+            "cargo build --release",
             cwd=ws,
             timeout=300,
         )

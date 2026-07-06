@@ -45,13 +45,10 @@ ENV HOME=/home/user \
     RUSTUP_HOME=/home/user/.rustup
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --profile minimal --default-toolchain ${RUST_TOOLCHAIN} \
+    | sh -s -- -y --no-modify-path --profile minimal --default-toolchain ${RUST_TOOLCHAIN} \
     && . "${CARGO_HOME}/env" \
     && rustc --version \
     && cargo --version
-
-# Pre-create workspace.
-RUN mkdir -p /home/user/workspace
 
 WORKDIR /home/user/workspace
 

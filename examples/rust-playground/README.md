@@ -44,7 +44,7 @@ docker build --platform linux/amd64 \
 docker push <your-registry>/rust-playground:latest
 ```
 
-The image installs the Rust toolchain (stable) via rustup, plus `build-essential`, `git`, `python3`, and common build tools. The Rust version is pinned via `--build-arg RUST_TOOLCHAIN=stable`.
+The image installs the Rust toolchain (stable) via rustup, plus `gcc`, `git`, `make`, `libssl-dev`, and other build dependencies. The Rust version is pinned via `--build-arg RUST_TOOLCHAIN=stable`.
 
 ## 2. Register as a Cube template
 

@@ -74,71 +74,75 @@ def main() -> int:
     sandbox_id = getattr(sandbox, "sandbox_id", None) or sandbox.id
     print(f"  Sandbox ID: {sandbox_id}")
 
-    run_cmd(sandbox, f"mkdir -p {ws}/src")
-    for name, content in PROJECT_FILES.items():
-        sandbox.files.write(f"{ws}/{name}", content)
-    run_cmd(sandbox, "cargo build --release 2>&1", cwd=ws, timeout=120)
-    result = run_cmd(sandbox, "./target/release/snapshot-demo", cwd=ws)
-    print(f"  Output: {result.strip()}")
-    assert "Checkpoint A" in result, "Expected Checkpoint A output"
-    print("  ✓ Project built and verified.")
+    clone = None
 
-    # --- Phase 2: Take snapshot A ---
-    print("\n[Phase 2] Taking snapshot (checkpoint A)...")
-    snap_info = sandbox.create_snapshot(name="checkpoint-a")
-    snap_id = snap_info.snapshot_id
-    print(f"  ✓ Snapshot saved. ID: {snap_id}")
+    try:
+        run_cmd(sandbox, f"mkdir -p {ws}/src")
+        for name, content in PROJECT_FILES.items():
+            sandbox.files.write(f"{ws}/{name}", content)
+        run_cmd(sandbox, "cargo build --release", cwd=ws, timeout=120)
+        result = run_cmd(sandbox, "./target/release/snapshot-demo", cwd=ws)
+        print(f"  Output: {result.strip()}")
+        assert "Checkpoint A" in result, "Expected Checkpoint A output"
+        print("  ✓ Project built and verified.")
 
-    # --- Phase 3: Modify the project (simulate iterative dev) ---
-    print("\n[Phase 3] Modifying project (checkpoint B)...")
-    sandbox.files.write(f"{ws}/src/main.rs", NEW_MAIN_RS)
-    run_cmd(sandbox, "cargo build --release 2>&1", cwd=ws, timeout=120)
-    result = run_cmd(sandbox, "./target/release/snapshot-demo", cwd=ws)
-    print(f"  Output: {result.strip()}")
-    assert "Checkpoint B" in result, "Expected Checkpoint B output"
-    print("  ✓ Modified version running with new behavior.")
+        # --- Phase 2: Take snapshot A ---
+        print("\n[Phase 2] Taking snapshot (checkpoint A)...")
+        snap_info = sandbox.create_snapshot(name="checkpoint-a")
+        snap_id = snap_info.snapshot_id
+        print(f"  ✓ Snapshot saved. ID: {snap_id}")
 
-    # --- Phase 4: Rollback to checkpoint A ---
-    print("\n[Phase 4] Rolling back to checkpoint A...")
-    sandbox.rollback(snap_id)
-    print("  ✓ Rollback completed. Sandbox is back at checkpoint A state.")
+        # --- Phase 3: Modify the project (simulate iterative dev) ---
+        print("\n[Phase 3] Modifying project (checkpoint B)...")
+        sandbox.files.write(f"{ws}/src/main.rs", NEW_MAIN_RS)
+        run_cmd(sandbox, "cargo build --release", cwd=ws, timeout=120)
+        result = run_cmd(sandbox, "./target/release/snapshot-demo", cwd=ws)
+        print(f"  Output: {result.strip()}")
+        assert "Checkpoint B" in result, "Expected Checkpoint B output"
+        print("  ✓ Modified version running with new behavior.")
 
-    result = run_cmd(sandbox, "./target/release/snapshot-demo", cwd=ws, timeout=30)
-    print(f"  Output after rollback: {result.strip()}")
-    assert "Checkpoint A" in result, "Expected original Checkpoint A output after rollback"
-    print("  ✓ Rollback verified: original version restored.")
+        # --- Phase 4: Rollback to checkpoint A ---
+        print("\n[Phase 4] Rolling back to checkpoint A...")
+        sandbox.rollback(snap_id)
+        print("  ✓ Rollback completed. Sandbox is back at checkpoint A state.")
 
-    # --- Phase 5: Clone from checkpoint A ---
-    print("\n[Phase 5] Cloning from checkpoint A to create an isolated fork...")
-    clone = Sandbox.create(template=snap_id, timeout=120)
-    clone_id = getattr(clone, "sandbox_id", None) or clone.id
-    print(f"  Clone sandbox ID: {clone_id}")
+        result = run_cmd(sandbox, "./target/release/snapshot-demo", cwd=ws, timeout=30)
+        print(f"  Output after rollback: {result.strip()}")
+        assert "Checkpoint A" in result, "Expected original Checkpoint A output after rollback"
+        print("  ✓ Rollback verified: original version restored.")
 
-    result = run_cmd(clone, "./target/release/snapshot-demo", cwd=ws, timeout=30)
-    print(f"  Clone output: {result.strip()}")
-    assert "Checkpoint A" in result, "Expected Checkpoint A on clone"
-    print("  ✓ Clone is at checkpoint A, isolated from original.")
+        # --- Phase 5: Clone from checkpoint A ---
+        print("\n[Phase 5] Cloning from checkpoint A to create an isolated fork...")
+        clone = Sandbox.create(template=snap_id, timeout=120)
+        clone_id = getattr(clone, "sandbox_id", None) or clone.id
+        print(f"  Clone sandbox ID: {clone_id}")
 
-    # Modify clone independently
-    print("\n[Phase 6] Modifying clone independently...")
-    clone.files.write(f"{ws}/src/main.rs", NEW_MAIN_RS.replace('"Checkpoint B',
-                                                                 '"Clone fork'))
-    run_cmd(clone, "cargo build --release 2>&1", cwd=ws, timeout=120)
-    result = run_cmd(clone, "./target/release/snapshot-demo", cwd=ws)
-    print(f"  Clone output after fork: {result.strip()}")
-    assert "Clone fork" in result, "Expected clone-fork output"
+        result = run_cmd(clone, "./target/release/snapshot-demo", cwd=ws, timeout=30)
+        print(f"  Clone output: {result.strip()}")
+        assert "Checkpoint A" in result, "Expected Checkpoint A on clone"
+        print("  ✓ Clone is at checkpoint A, isolated from original.")
 
-    # Verify original sandbox is unaffected
-    result = run_cmd(sandbox, "./target/release/snapshot-demo", cwd=ws, timeout=30)
-    print(f"  Original sandbox output: {result.strip()}")
-    assert "Checkpoint A" in result, "Original should still be at checkpoint A"
-    print("  ✓ Fork isolation confirmed: original and clone diverged independently.")
+        # Modify clone independently
+        print("\n[Phase 6] Modifying clone independently...")
+        clone.files.write(f"{ws}/src/main.rs", NEW_MAIN_RS.replace('"Checkpoint B',
+                                                                    '"Clone fork'))
+        run_cmd(clone, "cargo build --release", cwd=ws, timeout=120)
+        result = run_cmd(clone, "./target/release/snapshot-demo", cwd=ws)
+        print(f"  Clone output after fork: {result.strip()}")
+        assert "Clone fork" in result, "Expected clone-fork output"
 
-    # Cleanup
-    print("\n[Cleanup] Killing sandboxes...")
-    sandbox.kill()
-    clone.kill()
-    print("  ✓ Both sandboxes killed.")
+        # Verify original sandbox is unaffected
+        result = run_cmd(sandbox, "./target/release/snapshot-demo", cwd=ws, timeout=30)
+        print(f"  Original sandbox output: {result.strip()}")
+        assert "Checkpoint A" in result, "Original should still be at checkpoint A"
+        print("  ✓ Fork isolation confirmed: original and clone diverged independently.")
+
+    finally:
+        print("\n[Cleanup] Killing sandboxes...")
+        sandbox.kill()
+        if clone is not None:
+            clone.kill()
+        print("  ✓ Both sandboxes killed.")
 
     print("\n" + "=" * 60)
     print("All snapshot / clone / rollback demos passed!")

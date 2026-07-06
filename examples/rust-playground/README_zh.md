@@ -44,7 +44,7 @@ docker build --platform linux/amd64 \
 docker push <your-registry>/rust-playground:latest
 ```
 
-镜像通过 rustup 安装 Rust 工具链（stable），以及 `build-essential`、`git`、`python3` 等常见构建工具。可通过 `--build-arg RUST_TOOLCHAIN=nightly` 切换工具链版本。
+镜像通过 rustup 安装 Rust 工具链（stable），以及 `gcc`、`git`、`make`、`libssl-dev` 等构建依赖。可通过 `--build-arg RUST_TOOLCHAIN=nightly` 切换工具链版本。
 
 ## 2. 注册为 Cube 模板
 
@@ -125,6 +125,6 @@ python snapshot_rollback.py
 
 ## 参考
 
-- 模板指南：[`docs/guide/tutorials/template-from-image.md`](../../docs/guide/tutorials/template-from-image.md)
-- BYOI（envd）：[`docs/guide/tutorials/bring-your-own-image.md`](../../docs/guide/tutorials/bring-your-own-image.md)
-- 快照 / 克隆 / 回滚：[`docs/guide/snapshot-rollback-clone.md`](../../docs/guide/snapshot-rollback-clone.md)
+- 模板指南：[`docs/zh/guide/tutorials/template-from-image.md`](../../docs/zh/guide/tutorials/template-from-image.md)
+- BYOI（envd）：[`docs/zh/guide/tutorials/bring-your-own-image.md`](../../docs/zh/guide/tutorials/bring-your-own-image.md)
+- 快照 / 克隆 / 回滚：[`docs/zh/guide/snapshot-rollback-clone.md`](../../docs/zh/guide/snapshot-rollback-clone.md)
