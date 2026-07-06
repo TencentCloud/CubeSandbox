@@ -90,7 +90,6 @@ const (
 	ControllerConfigPlugin  plugin.Type = "io.cubelet.controller.config.v1"
 	ControllerCubeletPlugin plugin.Type = "io.cubelet.controller.cubelet.v1"
 	ControllerPlugin        plugin.Type = "io.cubelet.controller.v1"
-	ResourceManagerPlugin   plugin.Type = "io.cubelet.resource-manager.v1"
 
 	PluginCubelet                       string   = "cubelet"
 	PluginRunTemplateManager            PluginId = "run-template-manager"
