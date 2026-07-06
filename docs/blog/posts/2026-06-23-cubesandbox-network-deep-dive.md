@@ -3,8 +3,7 @@ title: "Cube Sandbox: A Deep Dive into Secure Sandbox Networking"
 date: 2026-06-23
 author: Cube Sandbox Team
 description: "AI Agents give machines autonomous execution power — and open a Pandora's box of data exfiltration and credential abuse. CubeSandbox builds an end-to-end network security system — from virtual switching to application-layer auditing — on a foundation of KVM MicroVM isolation, an eBPF in-kernel network datapath, and L7 proxy deep inspection. This article dissects the design and implementation of core components like CubeVS, CubeProxy, and CubeEgress, and shows how Cube balances open execution with security and control."
-featured: true
-weight: 3
+featured: false
 ---
 
 # Cube Sandbox: A Deep Dive into Secure Sandbox Networking

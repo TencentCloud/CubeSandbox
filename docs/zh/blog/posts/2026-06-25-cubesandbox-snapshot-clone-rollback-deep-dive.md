@@ -4,7 +4,7 @@ date: 2026-06-25
 author: sionli
 description: "磁盘快照秒回、内存快照只写少量页、克隆零拷贝——这三个看似魔法的现象背后，是 XFS reflink、/proc/pagemap 匿名页检测与 soft-dirty bit 三套内核机制在协作。本文层层拆解 v0.3.0 快照 / 克隆 / 回滚的底层原理。"
 featured: true
-weight: 2
+weight: 3
 ---
 
 # 几十 GiB 快照秒回、克隆"零拷贝"：Cube 快照克隆回滚技术原理深层揭秘

@@ -3,8 +3,7 @@ title: "Cube Sandbox 安全沙箱网络技术解析"
 date: 2026-06-23
 author: Cube Sandbox 团队
 description: "AI Agent 赋予机器自主执行能力，也打开了数据泄露与凭证滥用的潘多拉魔盒。CubeSandbox 以 KVM MicroVM 隔离为基座、eBPF 内核态网络为骨架、L7 代理深度检查为护盾，构建了一套从虚拟交换到应用层审计的端到端网络安全体系。本文逐层拆解 CubeVS、CubeProxy、CubeEgress 等核心组件的设计与实现，揭示其如何在开放执行与安全可控之间取得平衡。"
-featured: true
-weight: 3
+featured: false
 ---
 
 # Cube Sandbox 安全沙箱网络技术解析

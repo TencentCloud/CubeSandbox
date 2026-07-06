@@ -4,7 +4,7 @@ date: 2026-06-25
 author: sionli
 description: "How does Cube Sandbox achieve sub-second snapshots of tens-of-GiB filesystems, memory checkpoints that write only a fraction of total guest RAM, and cloning that creates N independent copies with near-zero disk growth? This article dissects the three interlocking kernel mechanisms — XFS reflink, /proc/pagemap anonymous page detection, and soft-dirty bit — that power Cube v0.3.0's snapshot, clone, and rollback capabilities."
 featured: true
-weight: 2
+weight: 3
 ---
 
 # Instant Snapshots, Zero-Copy Clones: A Deep Dive into Cube's Snapshot, Clone, and Rollback Mechanisms

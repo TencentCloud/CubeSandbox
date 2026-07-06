@@ -4,7 +4,7 @@ date: 2026-06-17
 author: Cube Sandbox 团队
 description: "继 v0.3.0 快照/克隆/回滚三件套之后，v0.4.0 由 15 位贡献者合入 58 个 commits，核心解决三个问题：出站治理（CubeEgress L7 代理 + 凭据注入 + 域名过滤 + 访问审计）、可观测性（容器日志转发 + vsock 通道）、一致性（节点组件版本矩阵 + 模板兼容性对账）。同时带来网络 P99 延迟降 41%、模板构建峰值磁盘从 4.2 倍降到 1.2 倍。"
 featured: true
-weight: 1
+weight: 2
 ---
 
 # Cube Sandbox v0.4.0：从"隔离 Agent"到"治理 Agent"
