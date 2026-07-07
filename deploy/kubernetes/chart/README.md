@@ -19,8 +19,16 @@ deploy/kubernetes/chart/
   values.yaml
   docs/
     ARCHITECTURE.md
+    QUICKSTART.md
+    FAQ.md
   templates/
 ```
+
+## Documentation
+
+- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — one-click install walkthrough from prerequisites to `helm test`.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — component layering, startup sequence, DNS / Proxy / Egress data flow, external control plane / compute-only mode.
+- [`docs/FAQ.md`](docs/FAQ.md) — common install and runtime issues grouped by subsystem.
 
 ## Architecture
 
