@@ -13,6 +13,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 VERSION="${VERSION:-v0.5.0}"
 IMAGE_TAG="${IMAGE_TAG:-${VERSION}}"
 REGISTRY="${REGISTRY:-ccr.ccs.tencentyun.com/cubesandbox-chart}"
+# SOURCE_REF pins the CubeMaster / CubeAPI / CubeProxy / CubeEgress source tree
+# used when building cube-api / cube-proxy-node / cube-egress from repository
+# source, ensuring the delivered images match the release tag rather than the
+# current worktree. Set SOURCE_REF="" to build from the current worktree.
+SOURCE_REF="${SOURCE_REF-${VERSION}}"
 PUSH="${PUSH:-0}"
 NO_CACHE="${NO_CACHE:-0}"
 BUILD_ROOT="${BUILD_ROOT:-/tmp/cube-kubernetes-images-${VERSION}}"
@@ -105,10 +110,14 @@ need docker
 need tar
 need curl
 need go
+if [[ -n "${SOURCE_REF}" ]]; then
+  need git
+fi
 
 DOWNLOAD_DIR="${BUILD_ROOT}/downloads"
 EXTRACT_DIR="${BUILD_ROOT}/extract"
 CONTEXT_DIR="${BUILD_ROOT}/contexts"
+SOURCE_TREE_DIR="${BUILD_ROOT}/source-tree"
 ONE_CLICK_DIRNAME="cube-sandbox-one-click-${VERSION}-${ONE_CLICK_ARCH}"
 ONE_CLICK_TAR="${DOWNLOAD_DIR}/${ONE_CLICK_DIRNAME}.tar.gz"
 PVM_KERNEL_RPM="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_RPM_URL}")"
@@ -117,6 +126,32 @@ SANDBOX_PACKAGE_TAR="${EXTRACT_DIR}/${ONE_CLICK_DIRNAME}/assets/package/sandbox-
 PACKAGE_DIR="${BUILD_ROOT}/sandbox-package"
 
 mkdir -p "${DOWNLOAD_DIR}" "${EXTRACT_DIR}" "${CONTEXT_DIR}"
+
+# When SOURCE_REF is set (default: ${VERSION}), export the CubeMaster / CubeAPI /
+# CubeProxy / CubeEgress source trees at that ref into ${SOURCE_TREE_DIR} and
+# point REPO_ROOT there. This ensures cube-api, cube-proxy-node, cube-egress and
+# related contexts are compiled from the release-tag source, not from whatever
+# happens to be in the current worktree (which may be ahead of the tag).
+if [[ -n "${SOURCE_REF}" ]]; then
+  git -C "${REPO_ROOT}" rev-parse --verify "${SOURCE_REF}^{commit}" >/dev/null 2>&1 \
+    || fail "SOURCE_REF=${SOURCE_REF} is not a valid git ref in ${REPO_ROOT}"
+  SOURCE_REF_SHA="$(git -C "${REPO_ROOT}" rev-parse "${SOURCE_REF}^{commit}")"
+  SOURCE_TREE_STAMP="${SOURCE_TREE_DIR}/.exported-sha"
+  if [[ ! -f "${SOURCE_TREE_STAMP}" ]] || [[ "$(cat "${SOURCE_TREE_STAMP}")" != "${SOURCE_REF_SHA}" ]]; then
+    log "exporting source tree at ${SOURCE_REF} (${SOURCE_REF_SHA:0:12}) into ${SOURCE_TREE_DIR}"
+    rm -rf "${SOURCE_TREE_DIR}"
+    mkdir -p "${SOURCE_TREE_DIR}"
+    for module in CubeMaster CubeAPI CubeProxy CubeEgress; do
+      git -C "${REPO_ROOT}" archive --format=tar "${SOURCE_REF_SHA}" -- "${module}" \
+        | tar -C "${SOURCE_TREE_DIR}" -x \
+        || fail "failed to export ${module} at ${SOURCE_REF}"
+    done
+    printf '%s\n' "${SOURCE_REF_SHA}" > "${SOURCE_TREE_STAMP}"
+  else
+    log "reusing exported source tree at ${SOURCE_REF} (${SOURCE_REF_SHA:0:12})"
+  fi
+  REPO_ROOT="${SOURCE_TREE_DIR}"
+fi
 
 if [[ -n "${PACKAGE_DIR_OVERRIDE:-}" ]]; then
   PACKAGE_DIR="${PACKAGE_DIR_OVERRIDE}"

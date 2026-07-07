@@ -23,6 +23,32 @@ want a different cache location.
 The script reuses valid artifacts already present under `${BUILD_ROOT}/downloads`
 and does not require a `.complete` marker.
 
+## Pinning source to a release tag
+
+`cube-api`, `cube-proxy-node`, and `cube-egress` are compiled from repository
+source (rather than binaries in the release tarball). By default the script
+pins those source trees to `${SOURCE_REF}` (defaulting to `${VERSION}`, so
+`v0.5.0` for the default build). It exports `CubeMaster/`, `CubeAPI/`,
+`CubeProxy/`, and `CubeEgress/` at that git ref into
+`${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT` there for
+the duration of the build. This guarantees the images match the release tag
+even when the current worktree is ahead of it.
+
+To build from the current worktree instead (typically for development), set
+`SOURCE_REF=""`:
+
+```bash
+SOURCE_REF="" PUSH=1 REGISTRY=<...> IMAGE_TAG=v0.5.0-dev \
+  ./deploy/kubernetes/images/build-cube-images.sh
+```
+
+To build from a different ref (branch, tag, or commit SHA):
+
+```bash
+SOURCE_REF=some-feature-branch PUSH=1 REGISTRY=<...> IMAGE_TAG=v0.5.0-featureX \
+  ./deploy/kubernetes/images/build-cube-images.sh
+```
+
 When the release package is older than the verified Kubernetes node runtime,
 build `cube-node` by rebasing a known-good node image and copying the current
 entrypoint into it:
