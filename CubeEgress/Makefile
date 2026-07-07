@@ -1,6 +1,6 @@
-IMAGE_TAG              ?= v0.4.0
+IMAGE_TAG              ?= v0.5.0
 IMAGE_LOCAL            := cube-egress
-CUBE_EGRESS_VERSION    ?= v1.0.0
+CUBE_EGRESS_VERSION    ?= v0.5.0
 CUBE_EGRESS_COMMIT     ?= $(shell git rev-parse HEAD | cut -c1-8)
 CUBE_EGRESS_BUILD_TIME ?= $(shell date +'%Y%m%d')
 

@@ -24,9 +24,24 @@ env:
   PVM_VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux-pvm
 
 jobs:
+  # Fail fast when a hard-coded component image tag in the bundle (terraform
+  # defaults, cube-egress launcher, env examples, ...) does not match the git
+  # tag being released. Gating the whole pipeline on this guarantees the
+  # published bundle never references an image tag that was not built/pushed.
+  verify_versions:
+    name: Verify release image tags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check hard-coded image tags match the release tag
+        run: scripts/bump-image.sh --check "${GITHUB_REF_NAME}"
+
   build_pvm_guest_vmlinux:
     name: Build PVM guest vmlinux for release (x86_64)
     runs-on: arc-runner-set-16c32g-containerd
+    needs: verify_versions
     container:
       image: ubuntu:24.04
 
@@ -112,6 +127,7 @@ jobs:
   ensure_release:
     name: Ensure GitHub Release exists
     runs-on: ubuntu-latest
+    needs: verify_versions
 
     steps:
       - name: Ensure GitHub Release exists
@@ -526,3 +542,18 @@ jobs:
             "vmlinux-release-assets/vmlinux-${BUNDLE_ARCH}" \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
+
+  # Build and push release component images via the reusable workflow (also
+  # runnable manually from Actions → Release Docker Images).
+  release_docker_images:
+    name: Build release docker images
+    needs: verify_versions
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/release-docker-images.yml
+    with:
+      image_tag: ${{ github.ref_name }}
+      components: all
+    secrets: inherit
