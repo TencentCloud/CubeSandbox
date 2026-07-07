@@ -4,10 +4,15 @@
   "section": {
     "template": "Choose template",
     "templateDesc": "Only templates with status ready are selectable.",
+    "config": "Configuration",
+    "configDesc": "Set the sandbox timeout duration.",
     "metadata": "Metadata",
     "metadataDesc": "Custom key-value pairs attached to the sandbox for identification and filtering."
   },
   "form": {
+    "timeout": "Timeout (seconds)",
+    "timeoutPlaceholder": "e.g. 300",
+    "timeoutHint": "How long the sandbox stays alive before it is killed or paused. Leave empty to use the server default.",
     "templateRequired": "Select a template to continue.",
     "alias": "Alias (optional)",
     "aliasPlaceholder": "e.g. my-dev-sandbox",

@@ -205,6 +205,7 @@ export const sandboxApi = {
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
   create: (body: {
     templateID: string;
+    timeout?: number;
     metadata?: Record<string, string>;
   }) =>
     api<SandboxSessionDto>('/sandboxes', {
