@@ -377,32 +377,6 @@ WHERE agent_id = ? AND deleted_at IS NULL
         self.get_instance(agent_id).await
     }
 
-    pub async fn update_model(
-        &self,
-        agent_id: &str,
-        model: &str,
-        setup: &AgentSetupResult,
-    ) -> anyhow::Result<Option<AgentHubInstanceRecord>> {
-        let last_error = (!setup.stderr.trim().is_empty()).then(|| setup.stderr.clone());
-        sqlx::query(
-            r#"
-UPDATE t_agenthub_instance
-SET model = ?,
-    setup_exit_code = ?,
-    last_error = ?
-WHERE agent_id = ? AND deleted_at IS NULL
-"#,
-        )
-        .bind(model)
-        .bind(setup.exit_code)
-        .bind(last_error)
-        .bind(agent_id)
-        .execute(&self.pool)
-        .await?;
-
-        self.get_instance(agent_id).await
-    }
-
     pub async fn update_status(
         &self,
         agent_id: &str,

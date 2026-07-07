@@ -724,8 +724,6 @@ fn openclaw_model_suffix(model: &str) -> &str {
 /// reason about prefixes, providers, or credential modes.
 #[derive(Debug, Clone)]
 struct LlmRuntimePlan {
-    /// Original model string as stored/displayed (e.g. `deepseek/deepseek-v4-flash`).
-    public_model: String,
     /// Bare model id sent upstream as the request body `model` field.
     upstream_model_id: String,
     /// Provider literal from settings (e.g. `deepseek`, `openai-compatible`).
@@ -762,7 +760,6 @@ impl LlmRuntimePlan {
             openclaw_primary,
             openclaw_api_key: llm.openclaw_api_key().to_string(),
             credential_mode: llm.credential_mode.clone(),
-            public_model,
         }
     }
 }
@@ -4041,7 +4038,6 @@ mod tests {
         );
         assert_eq!(plan.upstream_model_id, "deepseek-v4-flash");
         assert_eq!(plan.openclaw_primary, "openai-compatible/deepseek-v4-flash");
-        assert_eq!(plan.public_model, "deepseek/deepseek-v4-flash");
     }
 
     #[test]

@@ -384,22 +384,6 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
-    /// GET /cube/template/from-image?job_id=… — poll a create-from-image job.
-    pub async fn get_template_from_image_job(
-        &self,
-        job_id: &str,
-    ) -> Result<TemplateJobResponse, CubeMasterError> {
-        let url = format!("{}/cube/template/from-image", self.base_url);
-        let resp = self
-            .inner
-            .get(&url)
-            .query(&[("job_id", job_id)])
-            .send()
-            .await
-            .map_err(CubeMasterError::Http)?;
-        parse_response(resp).await
-    }
-
     /// POST /cube/template/redo — rebuild an existing template.
     pub async fn redo_template(
         &self,
@@ -1375,10 +1359,6 @@ pub struct SandboxLogsResponse {
     pub ret: RetCode,
     #[serde(default)]
     pub logs: Vec<SandboxLogLine>,
-    #[serde(rename = "nextCursor", default)]
-    pub next_cursor: Option<i64>,
-    #[serde(rename = "hasMore", default)]
-    pub has_more: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1924,7 +1904,7 @@ pub struct RedoTemplateReq {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Envelope for template-build jobs (from-image / redo / poll).
+/// Envelope for template-build jobs (from-image / redo).
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct TemplateJobResponse {
