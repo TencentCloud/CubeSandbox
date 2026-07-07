@@ -51,9 +51,15 @@ func prepareEnvdInjectionPayload(req *types.CreateTemplateFromImageReq) (*envdIn
 		return nil, nil
 	}
 	srcPath := envdHostPath(req)
+	if err := validateHostEnvdPath(srcPath); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
 		return nil, fmt.Errorf("envd-inject: read %q (set %s to override): %w", srcPath, envdHostDirEnv, err)
+	}
+	if err := validateEnvdELF(srcPath, data); err != nil {
+		return nil, err
 	}
 	sum := sha256.Sum256(data)
 	return &envdInjectionPayload{
@@ -61,6 +67,38 @@ func prepareEnvdInjectionPayload(req *types.CreateTemplateFromImageReq) (*envdIn
 		SHA256:   hex.EncodeToString(sum[:]),
 		Data:     data,
 	}, nil
+}
+
+func validateHostEnvdPath(srcPath string) error {
+	info, err := os.Lstat(srcPath)
+	if err != nil {
+		return fmt.Errorf("envd-inject: stat %q (set %s to override): %w", srcPath, envdHostDirEnv, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("envd-inject: %q must not be a symlink", srcPath)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("envd-inject: %q must be a regular file", srcPath)
+	}
+	if info.Mode().Perm()&0o002 != 0 {
+		return fmt.Errorf("envd-inject: %q must not be world-writable", srcPath)
+	}
+	dir := filepath.Dir(srcPath)
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("envd-inject: stat dir %q: %w", dir, err)
+	}
+	if dirInfo.Mode().Perm()&0o002 != 0 {
+		return fmt.Errorf("envd-inject: dir %q must not be world-writable", dir)
+	}
+	return nil
+}
+
+func validateEnvdELF(srcPath string, data []byte) error {
+	if len(data) < 4 || data[0] != 0x7f || data[1] != 'E' || data[2] != 'L' || data[3] != 'F' {
+		return fmt.Errorf("envd-inject: %q must be an ELF binary", srcPath)
+	}
+	return nil
 }
 
 func injectEnvdIntoRootfs(ctx context.Context, rootfsDir string, req *types.CreateTemplateFromImageReq) (string, error) {
