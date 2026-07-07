@@ -107,67 +107,35 @@ static __always_inline bool should_do_nat(const struct iphdr *l3)
 }
 
 /*
- * Check egress network policy for a packet.
+ * Check whether a TCP flow should be redirected to the L7 proxy.
  *
- * Priority: allow_out_v2 > deny_out > default allow
- *
- *   1. If allow_out_v2 has an inner map for this ifindex and daddr matches,
- *      the packet is explicitly allowed (even if deny_out would match).
- *   2. If deny_out has an inner map for this ifindex and daddr matches,
- *      the packet is denied.
- *   3. Otherwise the packet is allowed.
- *
- * Returns true if the packet is allowed, false if denied. When allow_out_v2
- * matches, policy_value receives the matched flags for later L7 routing.
+ * Looks up allow_out_v2 for the given ifindex/daddr and returns true iff
+ * the entry carries NET_POLICY_FLAG_L7_REQUIRED and the destination port
+ * is 80 or 443. This is a fast, self-contained lookup — the general
+ * egress policy check (allow / deny) is enforced later inside
+ * create_nat_session().
  */
-static __always_inline bool check_net_policy(__u32 ifindex, __u32 daddr,
-					     struct net_policy_value_v2 *policy_value)
+static __always_inline bool should_redirect_to_l7_proxy(__u32 ifindex, __u32 daddr,
+							const struct tcphdr *l4)
 {
 	struct lpm_key key = { .prefixlen = 32, .ip = daddr };
 	struct net_policy_value_v2 *value;
 	void *inner_map;
 
-	policy_value->expires_at_ns = 0;
-	policy_value->flags = 0;
-
-	/* Traffic to mvm_gateway_ip is internal (destined for cube-dev),
-	 * skip network policy enforcement.
-	 */
-	if (daddr == mvm_gateway_ip)
-		return true;
-
-	/* allow_out_v2 takes precedence. */
-	inner_map = bpf_map_lookup_elem(&allow_out_v2, &ifindex);
-	if (inner_map) {
-		value = bpf_map_lookup_elem(inner_map, &key);
-		if (value && (value->expires_at_ns == 0 ||
-			      value->expires_at_ns > bpf_ktime_get_ns())) {
-			*policy_value = *value;
-			return true;
-		}
-		/* allow_out_v2 map exists but daddr not in it or entry expired,
-		 * fall through to deny_out check.
-		 */
-	}
-
-	/* check deny_out */
-	inner_map = bpf_map_lookup_elem(&deny_out, &ifindex);
-	if (inner_map) {
-		if (bpf_map_lookup_elem(inner_map, &key))
-			return false;
-	}
-
-	/* default: allow */
-	return true;
-}
-
-static __always_inline bool should_redirect_to_l7_proxy(const struct net_policy_value_v2 *policy_value,
-							const struct tcphdr *l4)
-{
-	if (!(policy_value->flags & NET_POLICY_FLAG_L7_REQUIRED))
+	if (l4->dest != bpf_htons(80) && l4->dest != bpf_htons(443))
 		return false;
 
-	return l4->dest == bpf_htons(80) || l4->dest == bpf_htons(443);
+	inner_map = bpf_map_lookup_elem(&allow_out_v2, &ifindex);
+	if (!inner_map)
+		return false;
+
+	value = bpf_map_lookup_elem(inner_map, &key);
+	if (!value)
+		return false;
+	if (value->expires_at_ns != 0 && value->expires_at_ns <= bpf_ktime_get_ns())
+		return false;
+
+	return value->flags & NET_POLICY_FLAG_L7_REQUIRED;
 }
 
 enum tcp_nat_result {
@@ -505,7 +473,7 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_id);
 	if (!snat_ip || !snat_ip->ip || !snat_id)
 		return 0;
-	ok = create_icmp_sessions(&key, now, skb->ingress_ifindex, snat_ip, snat_id);
+	ok = create_icmp_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_id);
 	if (!ok)
 		return 0;
 	sess = bpf_map_lookup_elem(&egress_sessions, &key);
@@ -603,7 +571,7 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
 	if (!snat_ip || !snat_ip->ip || !snat_port)
 		return 0;
-	ok = create_udp_sessions(&key, now, skb->ingress_ifindex, snat_ip, snat_port);
+	ok = create_udp_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_port);
 	if (!ok)
 		return 0;
 	sess = bpf_map_lookup_elem(&egress_sessions, &key);
@@ -755,9 +723,15 @@ do_create:
 		snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
 		if (!snat_ip || !snat_ip->ip || !snat_port)
 			return TCP_NAT_DROP;
-		ok = create_new_sessions(&key, now, skb->ingress_ifindex, snat_ip, snat_port);
-		if (!ok)
+		ok = create_new_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_port);
+		if (!ok) {
+			/* Preserve RST-on-deny: create_nat_session stamps
+			 * skb->cb when the failure is due to net policy.
+			 */
+			if (nat_cb_get(skb) == NAT_CB_DENIED_BY_POLICY)
+				return TCP_NAT_PACK(0, TCP_NAT_RESET);
 			return TCP_NAT_DROP;
+		}
 		sess = bpf_map_lookup_elem(&egress_sessions, &key);
 		if (!sess)
 			return TCP_NAT_DROP;
@@ -928,7 +902,6 @@ int from_cube(struct __sk_buff *skb)
 {
 	__u32 daddr, ifindex, dst_ifindex;
 	__u64 tcp_ret;
-	struct net_policy_value_v2 policy_value = {};
 	struct bpf_sock_tuple tuple = {};
 	struct mvm_port mvm_port = {};
 	struct mvm_meta *mvm_meta;
@@ -1033,13 +1006,6 @@ int from_cube(struct __sk_buff *skb)
 		}
 	}
 
-	/* Enforce egress network policy before NAT. */
-	if (!check_net_policy(ifindex, daddr, &policy_value)) {
-		if (proto == IPPROTO_TCP)
-			return tcp_reply_reset(skb, ifindex);
-		return TC_ACT_SHOT;
-	}
-
 	ret = pull_headers(skb, &l2, &l3);
 	if (ret != TC_ACT_OK)
 		return ret;
@@ -1047,13 +1013,24 @@ int from_cube(struct __sk_buff *skb)
 	if (!should_do_nat(l3))
 		return TC_ACT_SHOT;
 
-	if (l3->daddr == nodenic_ip)
+	if (l3->daddr == nodenic_ip) {
+		/* This branch bypasses do_*_nat() and therefore the policy
+		 * check inside create_nat_session(). Enforce policy inline.
+		 * TCP callers get an RST to match the guest-visible behavior
+		 * of the do_tcp_nat() path; UDP/ICMP silently drop.
+		 */
+		if (!session_policy_allowed(ifindex, daddr)) {
+			if (proto == IPPROTO_TCP)
+				return tcp_reply_reset(skb, ifindex);
+			return TC_ACT_SHOT;
+		}
 		return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
+	}
 
 	if (proto == IPPROTO_TCP) {
 		if (!__pull_headers(skb, &l2, &l3, &l4))
 			return TC_ACT_SHOT;
-		if (should_redirect_to_l7_proxy(&policy_value, l4))
+		if (should_redirect_to_l7_proxy(ifindex, daddr, l4))
 			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 		tcp_ret = do_tcp_nat(skb, mvm_meta);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)

@@ -242,6 +242,26 @@ struct snat_ip {
 	__u16 reserved;
 };
 
+/* skb->cb[0] is reserved as a per-invocation NAT status word used by
+ * create_nat_session() to communicate the failure reason back to callers
+ * in from_cube(). skb->cb[] is 5 * u32 scratch that survives across
+ * bpf-to-bpf calls within a single program invocation, so this works even
+ * when the session helpers are compiled as subprogs.
+ */
+#define NAT_CB_STATUS_INDEX		0
+#define NAT_CB_OK			0
+#define NAT_CB_DENIED_BY_POLICY		1
+
+static __always_inline void nat_cb_set(struct __sk_buff *skb, __u32 status)
+{
+	skb->cb[NAT_CB_STATUS_INDEX] = status;
+}
+
+static __always_inline __u32 nat_cb_get(const struct __sk_buff *skb)
+{
+	return skb->cb[NAT_CB_STATUS_INDEX];
+}
+
 /* static assert, make sure size of structs are expected
  */
 static __always_inline int _()
