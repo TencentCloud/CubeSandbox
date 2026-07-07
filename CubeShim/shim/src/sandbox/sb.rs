@@ -862,12 +862,7 @@ impl SandBox {
         );
         infof!(self.log, "snapshot dir:{}", snapshot.clone());
         let restore_memory_vol_url = self.conf.snapshot_memory_vol_url.clone();
-        let mut fss = vec![];
-        if let Some(fs) = self.conf.fs.as_ref() {
-            let f = Utils::restore_fs_configs(fs);
-            fss.push(f);
-        }
-        fss.extend(Utils::restore_virtiofs_configs(&self.conf.virtiofs));
+        let fss = build_fs_configs(&self.conf);
         let nets = Utils::restore_nets_config(&self.conf.net.interfaces)?;
         let disks = Utils::restore_disks_config(&self.conf.disk);
         let pmems = Utils::restore_pmems_config(&self.conf.pmem);
@@ -1306,8 +1301,19 @@ impl SandBox {
                 }
                 None => {
                     let resume_path = format!("{}/{}", PAUSE_VM_SNAPSHOT_BASE, self.id);
-                    ch.resume_vm_cube(format!("file://{}", resume_path).as_str())
-                        .await?;
+                    let resume_url = format!("file://{}", resume_path);
+                    // Route A (#228): rebuild virtio-fs backends from the
+                    // in-memory config so host-mount (native virtiofsd)
+                    // sandboxes survive pause/resume - the virtio-fs
+                    // device-state migration that pause relies on is not
+                    // enabled in this branch, so the snapshot's fs device
+                    // state can't be trusted. When no virtio-fs is configured
+                    // the resulting RestoreConfig equals what resume_vm_cube
+                    // built internally (fs: None), so the non-host-mount path
+                    // is unchanged.
+                    let restore_config =
+                        build_pause_resume_restore_config(&self.conf, &resume_url);
+                    ch.resume_vm_cube_with_config(restore_config).await?;
                 }
             }
         }
@@ -1343,6 +1349,46 @@ impl SandBox {
         }
 
         Ok(())
+    }
+}
+
+/// Rebuild the virtio-fs `FsConfig` vec from the in-memory config. Shared by
+/// the cold-restore path (`restore_vm`) and the pause/resume path
+/// (`build_pause_resume_restore_config`): the block-fs entry from `conf.fs`
+/// (fixed cube-fs id/tag) followed by one entry per `conf.virtiofs` host-mount
+/// (native virtiofsd), each carrying its own id/tag.
+fn build_fs_configs(conf: &config::Config) -> Vec<FsConfig> {
+    let mut fss = vec![];
+    if let Some(fs) = conf.fs.as_ref() {
+        fss.push(Utils::restore_fs_configs(fs));
+    }
+    fss.extend(Utils::restore_virtiofs_configs(&conf.virtiofs));
+    fss
+}
+
+/// Build the `RestoreConfig` used to resume a paused VM. The fs vec comes from
+/// `build_fs_configs` (the same helper `restore_vm` uses on the cold-restore path).
+///
+/// Route A for issue #228: for host-mount sandboxes (native virtiofsd, i.e.
+/// `conf.virtiofs` non-empty and/or `conf.fs` set) the FsConfig vec is rebuilt
+/// from the in-memory config so the VMM spawns fresh virtiofsd backends
+/// pointing at the shareDirs retained on the Cubelet node, instead of trusting
+/// the virtio-fs device state captured in the pause snapshot - that device-state
+/// migration is not enabled in this branch, so host-mount sandboxes cannot
+/// otherwise survive pause/resume.
+///
+/// When no virtio-fs is configured at all the returned config is identical to
+/// what `CubeHypervisor::resume_vm_cube` builds internally (`fs: None`), so the
+/// non-host-mount pause/resume path is preserved byte-for-byte.
+fn build_pause_resume_restore_config(
+    conf: &config::Config,
+    resume_url: &str,
+) -> RestoreConfig {
+    let fss = build_fs_configs(conf);
+    RestoreConfig {
+        source_url: PathBuf::from(resume_url),
+        fs: if fss.is_empty() { None } else { Some(fss) },
+        ..Default::default()
     }
 }
 
@@ -1384,6 +1430,12 @@ mod tests {
     use super::normalize_dns_for_agent;
     use super::Log;
     use super::SandBox;
+    use cube_hypervisor::config::BackendFsConfig;
+    use std::path::PathBuf;
+
+    use super::build_pause_resume_restore_config;
+    use super::config;
+    use super::{VIRTIO_FS_ID, VIRTIO_FS_TAG};
 
     #[tokio::test]
     async fn test_sandbox_prepare_resource() {
@@ -1443,5 +1495,98 @@ mod tests {
     fn test_normalize_dns_for_agent_accepts_prefixed_entry() {
         let got = normalize_dns_for_agent(" nameserver 8.8.8.8 ").unwrap();
         assert_eq!(got, "nameserver 8.8.8.8");
+    }
+
+    #[test]
+    fn test_resume_restore_config_builds_fs_for_host_mount() {
+        // host-mount sandbox: conf.virtiofs non-empty -> resume must rebuild
+        // the FsConfig vec so the VMM spawns fresh virtiofsd backends pointing
+        // at the retained shareDirs (issue #228 route A).
+        let mut conf = config::Config::default();
+        conf.virtiofs.push(config::VirtioFs {
+            id: "hostmount-rw".to_string(),
+            backendfs_config: Some(BackendFsConfig {
+                shared_dir: "/data/cubelet/hostdir/sb1/rw".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let cfg = build_pause_resume_restore_config(&conf, "file:///tmp/pause/sb1");
+
+        // source_url carries the resume snapshot location verbatim.
+        assert_eq!(cfg.source_url, PathBuf::from("file:///tmp/pause/sb1"));
+
+        let fss = cfg
+            .fs
+            .as_ref()
+            .expect("fs must be Some when host-mount virtiofs is configured");
+        assert_eq!(fss.len(), 1, "exactly one FsConfig per virtiofs entry");
+        // id/tag come from the virtiofs entry (matched by id in update_fses).
+        assert_eq!(fss[0].id.as_deref(), Some("hostmount-rw"));
+        assert_eq!(fss[0].tag, "hostmount-rw");
+        // shared_dir points at the retained hostdir on the Cubelet node.
+        assert_eq!(
+            fss[0].backendfs_config.as_ref().unwrap().shared_dir,
+            "/data/cubelet/hostdir/sb1/rw"
+        );
+        // native virtiofs queue geometry (mirrors create path).
+        assert_eq!(fss[0].num_queues, 1);
+        assert_eq!(fss[0].queue_size, 1024);
+    }
+
+    #[test]
+    fn test_resume_restore_config_no_virtiofs_keeps_fs_none() {
+        // No host-mount / virtio-fs: the config must equal what
+        // CubeHypervisor::resume_vm_cube builds internally (fs: None), so the
+        // pause/resume path for non-host-mount sandboxes is byte-identical
+        // (no regression).
+        let conf = config::Config::default();
+        let cfg = build_pause_resume_restore_config(&conf, "file:///tmp/pause/sb2");
+        assert!(
+            cfg.fs.is_none(),
+            "fs must be None when no virtio-fs is configured"
+        );
+        assert_eq!(cfg.source_url, PathBuf::from("file:///tmp/pause/sb2"));
+    }
+
+    #[test]
+    fn test_resume_restore_config_combines_fs_and_virtiofs() {
+        // Both a block-fs (conf.fs) and host-mount virtiofs: the rebuilt vec
+        // must carry both, mirroring restore_vm's ordering.
+        let mut conf = config::Config::default();
+        conf.fs = Some(config::Fs {
+            backendfs_config: Some(BackendFsConfig {
+                shared_dir: "/shared/blk".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        conf.virtiofs.push(config::VirtioFs {
+            id: "hostmount-ro".to_string(),
+            backendfs_config: Some(BackendFsConfig {
+                shared_dir: "/data/cubelet/hostdir/sb3/ro".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let cfg = build_pause_resume_restore_config(&conf, "file:///tmp/pause/sb3");
+        let fss = cfg.fs.as_ref().expect("fs must be Some");
+        assert_eq!(fss.len(), 2);
+        // First entry from conf.fs uses the fixed VIRTIO_FS_ID / VIRTIO_FS_TAG.
+        assert_eq!(fss[0].id.as_deref(), Some(VIRTIO_FS_ID));
+        assert_eq!(fss[0].tag, VIRTIO_FS_TAG);
+        assert_eq!(
+            fss[0].backendfs_config.as_ref().unwrap().shared_dir,
+            "/shared/blk"
+        );
+        // Second entry from conf.virtiofs carries its own id/tag.
+        assert_eq!(fss[1].id.as_deref(), Some("hostmount-ro"));
+        assert_eq!(fss[1].tag, "hostmount-ro");
+        assert_eq!(
+            fss[1].backendfs_config.as_ref().unwrap().shared_dir,
+            "/data/cubelet/hostdir/sb3/ro"
+        );
     }
 }
