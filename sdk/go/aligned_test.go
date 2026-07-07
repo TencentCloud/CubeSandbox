@@ -30,7 +30,7 @@ func TestCreateSerializesPolicyAndPublicTraffic(t *testing.T) {
 	_, err := client.Create(context.Background(), CreateOptions{
 		Network: NetworkOptions{
 			AllowPublicTraffic: &allowPublic,
-			AllowOut:           []string{"api.github.com"},
+			AllowOut:           []string{"172.67.0.0/16"},
 			Rules: []Rule{{
 				Name:   "gh",
 				Match:  Match{Host: "api.github.com", Scheme: "https"},
@@ -81,6 +81,63 @@ func TestCreateRejectsAllowOutDomainWithoutDenyAll(t *testing.T) {
 	if called {
 		t.Fatal("request should not be sent when validation fails")
 	}
+}
+
+func TestCreateRejectsAllowOutDomainWhenOnlyAllowPublicTrafficDisabled(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	allowPublic := false
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env"})
+	_, err := client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{
+			AllowPublicTraffic: &allowPublic,
+			AllowOut:           []string{"api.example.com"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "deny_out") {
+		t.Fatalf("err=%v, want allow_out domain guard", err)
+	}
+	if called {
+		t.Fatal("request should not be sent when validation fails")
+	}
+}
+
+func TestCreateAcceptsAllowOutDomainWhenInternetAccessDisabled(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	disableInternet := false
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env"})
+	_, err := client.Create(context.Background(), CreateOptions{
+		AllowInternetAccess: &disableInternet,
+		Network: NetworkOptions{
+			AllowOut: []string{"api.example.com"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got["allowInternetAccess"] != false {
+		t.Fatalf("allowInternetAccess=%#v, want false", got["allowInternetAccess"])
+	}
+	network, ok := got["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("network=%#v", got["network"])
+	}
+	assertStringSlice(t, network["allowOut"], []string{"api.example.com"})
 }
 
 func TestInjectRender(t *testing.T) {
