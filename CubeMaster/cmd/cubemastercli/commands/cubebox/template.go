@@ -776,6 +776,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the job to completion"},
 		cli.DurationFlag{Name: "interval", Value: defaultWatchInterval, Usage: "poll interval while watching the job"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
+		cli.StringSliceFlag{Name: "annotation", Usage: "set template annotation, KEY=VALUE format; repeat for multiple annotations"},
 	},
 	Action: func(c *cli.Context) error {
 		if c.String("image") == "" {
@@ -819,6 +820,26 @@ var TemplateCreateFromImageCommand = cli.Command{
 		req.CubeNetworkConfig, err = mergeCreateFromImageCubeNetworkConfigFlags(c, req.CubeNetworkConfig)
 		if err != nil {
 			return err
+		}
+
+		// Parse custom annotations provided via --annotation flags.
+		if rawAnnotations := c.StringSlice("annotation"); len(rawAnnotations) > 0 {
+			req.Annotations = make(map[string]string, len(rawAnnotations))
+			for _, kv := range rawAnnotations {
+				idx := strings.IndexByte(kv, '=')
+				if idx < 0 {
+					return fmt.Errorf("invalid annotation %q: expected KEY=VALUE format", kv)
+				}
+				key := strings.TrimSpace(kv[:idx])
+				val := strings.TrimSpace(kv[idx+1:])
+				if key == "" {
+					return fmt.Errorf("invalid annotation %q: key must not be empty after trimming", kv)
+				}
+				if val == "" {
+					return fmt.Errorf("invalid annotation %q: value must not be empty after trimming", kv)
+				}
+				req.Annotations[key] = val
+			}
 		}
 		body, err := jsoniter.Marshal(req)
 		if err != nil {

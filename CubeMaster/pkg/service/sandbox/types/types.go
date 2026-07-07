@@ -553,6 +553,10 @@ type CreateTemplateFromImageReq struct {
 	//   false → skip the bake entirely
 	// See design/cube-egress-ca-bake.md.
 	WithCubeCA *bool `json:"with_cube_ca,omitempty"`
+
+	// Annotations carries custom annotations merged into the template's
+	// CreateRequest. Template-owned keys take precedence.
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type RedoTemplateFromImageReq struct {

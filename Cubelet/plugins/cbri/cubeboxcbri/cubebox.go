@@ -164,6 +164,11 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 	annotations[constants.AnnotationsVMKernelPath] = kernelPath
 	annotations[constants.AnnotationsProduct] = e.config.instanceType
 
+	if reqAnnotations := realReq.GetAnnotations(); reqAnnotations != nil && reqAnnotations[constants.MasterAnnotationVMCgroupV2Enable] == "true" {
+		annotations[constants.AnnotationVMCgroupV2Enable] = "true"
+		logEntry.WithField("cgroup_v2", "enabled").Info("cgroup v2 annotation set on OCI spec")
+	}
+
 	if flowOpts.IsCreateSnapshot() {
 		annotations[constants.AnnotationAppSnapshotCreate] = "true"
 

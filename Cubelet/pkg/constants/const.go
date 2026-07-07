@@ -254,6 +254,18 @@ const (
 	AnnotationVMKernelCmdlineAppend = "cube.vm.kernel.cmdline.append"
 	AnnotationVirtiofs              = "cube.virtiofs"
 
+	// AnnotationVMCgroupV2Enable is the VM-level OCI spec annotation that enables cgroup v2
+	// (unified hierarchy) in the guest VM. It is set by the CBRI plugin when the request carries
+	// MasterAnnotationVMCgroupV2Enable=true. The cube shim reads this annotation and appends
+	// agent.unified_cgroup_hierarchy=true to the kernel cmdline.
+	AnnotationVMCgroupV2Enable = "cube.vm.cgroup_v2.enable"
+
+	// MasterAnnotationVMCgroupV2Enable is the cube.master-prefixed request annotation that users
+	// set to enable cgroup v2 in the guest VM. User-provided annotations are forwarded verbatim
+	// to the CBRI plugin (no annotation filtering in CubeMaster); each consumer is responsible
+	// for validating the annotations it cares about.
+	MasterAnnotationVMCgroupV2Enable = "cube.master.vm.cgroup_v2.enable"
+
 	AnnotationPropagationMounts          = "cube.propagation.mounts"
 	AnnotationPropagationContainerMounts = "cube.propagation.container.mounts"
 	AnnotationPropagationExecMounts      = "cube.propagation.exec.mounts"

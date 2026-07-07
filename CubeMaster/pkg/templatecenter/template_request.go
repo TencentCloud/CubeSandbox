@@ -37,6 +37,13 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 	if len(req.ExposedPorts) > 0 {
 		annotations[constants.AnnotationsExposedPort] = formatExposedPortsAnnotation(req.ExposedPorts)
 	}
+	if len(req.Annotations) > 0 {
+		for k, v := range req.Annotations {
+			if _, ok := annotations[k]; !ok {
+				annotations[k] = v
+			}
+		}
+	}
 	rootVolume := &types.Volume{
 		Name: rootfsWritableVolumeName,
 		VolumeSource: &types.VolumeSource{
