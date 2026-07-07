@@ -238,11 +238,13 @@ func TestRefreshCubeVSTapForRecoverPropagatesAttachFilterError(t *testing.T) {
 func TestRecoverCleansOrphanTapsWithoutPersistedState(t *testing.T) {
 	oldList := listCubeTapsFunc
 	oldRestore := restoreTapFunc
+	oldPrepareTap := cubevsPrepareTAPPolicy
 	oldListCubeVSTaps := cubevsListTAPDevices
 	oldListPortMappings := cubevsListPortMappings
 	t.Cleanup(func() {
 		listCubeTapsFunc = oldList
 		restoreTapFunc = oldRestore
+		cubevsPrepareTAPPolicy = oldPrepareTap
 		cubevsListTAPDevices = oldListCubeVSTaps
 		cubevsListPortMappings = oldListPortMappings
 	})
@@ -266,6 +268,7 @@ func TestRecoverCleansOrphanTapsWithoutPersistedState(t *testing.T) {
 	}
 	cubevsListTAPDevices = func() ([]cubevs.TAPDevice, error) { return nil, nil }
 	cubevsListPortMappings = func() (map[uint16]cubevs.MVMPort, error) { return map[uint16]cubevs.MVMPort{}, nil }
+	cubevsPrepareTAPPolicy = func(uint32) error { return nil }
 
 	store, err := newStateStore(t.TempDir())
 	if err != nil {
@@ -303,6 +306,7 @@ func TestRecoverKeepsPersistedTapAndRemovesOnlyOrphans(t *testing.T) {
 	oldAdd := cubevsAddTAPDevice
 	oldUpsert := cubevsUpsertTAPDevice
 	oldUpsertMeta := cubevsUpsertTAPDeviceMeta
+	oldPrepareTap := cubevsPrepareTAPPolicy
 	oldListCubeVSTaps := cubevsListTAPDevices
 	oldListPortMappings := cubevsListPortMappings
 	oldARP := addARPEntryFunc
@@ -316,6 +320,7 @@ func TestRecoverKeepsPersistedTapAndRemovesOnlyOrphans(t *testing.T) {
 		cubevsAddTAPDevice = oldAdd
 		cubevsUpsertTAPDevice = oldUpsert
 		cubevsUpsertTAPDeviceMeta = oldUpsertMeta
+		cubevsPrepareTAPPolicy = oldPrepareTap
 		cubevsListTAPDevices = oldListCubeVSTaps
 		cubevsListPortMappings = oldListPortMappings
 		addARPEntryFunc = oldARP
@@ -372,6 +377,7 @@ func TestRecoverKeepsPersistedTapAndRemovesOnlyOrphans(t *testing.T) {
 		return nil
 	}
 	cubevsUpsertTAPDeviceMeta = func(uint32, net.IP, string, uint32) error { return nil }
+	cubevsPrepareTAPPolicy = func(uint32) error { return nil }
 	cubevsListTAPDevices = func() ([]cubevs.TAPDevice, error) { return nil, nil }
 	cubevsListPortMappings = func() (map[uint16]cubevs.MVMPort, error) { return map[uint16]cubevs.MVMPort{}, nil }
 	addARPEntryFunc = func(net.IP, string, int) error { return nil }
@@ -505,6 +511,7 @@ func TestEnsureReleaseEnsureReusesTapFromPool(t *testing.T) {
 	oldRestore := restoreTapFunc
 	oldAddTap := cubevsAddTAPDevice
 	oldDelTap := cubevsDelTAPDevice
+	oldPrepareTap := cubevsPrepareTAPPolicy
 	oldAddPort := cubevsAddPortMap
 	oldDelPort := cubevsDelPortMap
 	oldRouteList := netlinkRouteListFiltered
@@ -514,6 +521,7 @@ func TestEnsureReleaseEnsureReusesTapFromPool(t *testing.T) {
 		restoreTapFunc = oldRestore
 		cubevsAddTAPDevice = oldAddTap
 		cubevsDelTAPDevice = oldDelTap
+		cubevsPrepareTAPPolicy = oldPrepareTap
 		cubevsAddPortMap = oldAddPort
 		cubevsDelPortMap = oldDelPort
 		netlinkRouteListFiltered = oldRouteList
@@ -540,6 +548,7 @@ func TestEnsureReleaseEnsureReusesTapFromPool(t *testing.T) {
 		return nil
 	}
 	cubevsDelTAPDevice = func(uint32, net.IP) error { return nil }
+	cubevsPrepareTAPPolicy = func(uint32) error { return nil }
 	cubevsAddPortMap = func(uint32, uint16, uint16) error { return nil }
 	cubevsDelPortMap = func(uint32, uint16, uint16) error { return nil }
 	netlinkRouteListFiltered = func(_ int, _ *netlink.Route, _ uint64) ([]netlink.Route, error) {
@@ -575,6 +584,13 @@ func TestEnsureReleaseEnsureReusesTapFromPool(t *testing.T) {
 	if _, err := svc.ReleaseNetwork(t.Context(), &ReleaseNetworkRequest{SandboxID: "sandbox-1"}); err != nil {
 		t.Fatalf("ReleaseNetwork error=%v", err)
 	}
+	if len(svc.tapPool) != 0 {
+		t.Fatalf("tapPool len=%d, want 0 before async preparation", len(svc.tapPool))
+	}
+	if len(svc.abnormalTapPool) != 1 {
+		t.Fatalf("abnormalTapPool len=%d, want 1 pending async preparation", len(svc.abnormalTapPool))
+	}
+	svc.handleAbnormalTaps()
 	if len(svc.tapPool) != 1 {
 		t.Fatalf("tapPool len=%d, want 1", len(svc.tapPool))
 	}
@@ -600,6 +616,7 @@ func TestGetTapFileRestoresMissingFD(t *testing.T) {
 	oldGetTap := cubevsGetTAPDevice
 	oldAddTap := cubevsAddTAPDevice
 	oldUpsert := cubevsUpsertTAPDevice
+	oldPrepareTap := cubevsPrepareTAPPolicy
 	oldARP := addARPEntryFunc
 	oldRouteList := netlinkRouteListFiltered
 	oldRouteReplace := netlinkRouteReplace
@@ -613,6 +630,7 @@ func TestGetTapFileRestoresMissingFD(t *testing.T) {
 		cubevsGetTAPDevice = oldGetTap
 		cubevsAddTAPDevice = oldAddTap
 		cubevsUpsertTAPDevice = oldUpsert
+		cubevsPrepareTAPPolicy = oldPrepareTap
 		addARPEntryFunc = oldARP
 		netlinkRouteListFiltered = oldRouteList
 		netlinkRouteReplace = oldRouteReplace
@@ -659,6 +677,7 @@ func TestGetTapFileRestoresMissingFD(t *testing.T) {
 	cubevsGetTAPDevice = func(uint32) (*cubevs.TAPDevice, error) { return &cubevs.TAPDevice{}, nil }
 	cubevsAddTAPDevice = func(uint32, net.IP, string, uint32, cubevs.MVMOptions) error { return nil }
 	cubevsUpsertTAPDevice = func(uint32, net.IP, string, uint32, cubevs.MVMOptions) error { return nil }
+	cubevsPrepareTAPPolicy = func(uint32) error { return nil }
 	addARPEntryFunc = func(net.IP, string, int) error { return nil }
 	netlinkRouteListFiltered = func(_ int, _ *netlink.Route, _ uint64) ([]netlink.Route, error) { return nil, nil }
 	netlinkRouteReplace = func(_ *netlink.Route) error { return nil }
@@ -715,6 +734,7 @@ func TestGetTapFileHotPathOpenFailureSelfHeals(t *testing.T) {
 	oldGetTap := cubevsGetTAPDevice
 	oldAddTap := cubevsAddTAPDevice
 	oldUpsert := cubevsUpsertTAPDevice
+	oldPrepareTap := cubevsPrepareTAPPolicy
 	oldARP := addARPEntryFunc
 	oldRouteList := netlinkRouteListFiltered
 	oldRouteReplace := netlinkRouteReplace
@@ -728,6 +748,7 @@ func TestGetTapFileHotPathOpenFailureSelfHeals(t *testing.T) {
 		cubevsGetTAPDevice = oldGetTap
 		cubevsAddTAPDevice = oldAddTap
 		cubevsUpsertTAPDevice = oldUpsert
+		cubevsPrepareTAPPolicy = oldPrepareTap
 		addARPEntryFunc = oldARP
 		netlinkRouteListFiltered = oldRouteList
 		netlinkRouteReplace = oldRouteReplace
@@ -774,6 +795,7 @@ func TestGetTapFileHotPathOpenFailureSelfHeals(t *testing.T) {
 	cubevsGetTAPDevice = func(uint32) (*cubevs.TAPDevice, error) { return &cubevs.TAPDevice{}, nil }
 	cubevsAddTAPDevice = func(uint32, net.IP, string, uint32, cubevs.MVMOptions) error { return nil }
 	cubevsUpsertTAPDevice = func(uint32, net.IP, string, uint32, cubevs.MVMOptions) error { return nil }
+	cubevsPrepareTAPPolicy = func(uint32) error { return nil }
 	addARPEntryFunc = func(net.IP, string, int) error { return nil }
 	netlinkRouteListFiltered = func(_ int, _ *netlink.Route, _ uint64) ([]netlink.Route, error) { return nil, nil }
 	netlinkRouteReplace = func(_ *netlink.Route) error { return nil }

@@ -29,6 +29,7 @@ func installEnsureMocks(t *testing.T) {
 	oldRestore := restoreTapFunc
 	oldAddTap := cubevsAddTAPDevice
 	oldDelTap := cubevsDelTAPDevice
+	oldPrepareTap := cubevsPrepareTAPPolicy
 	oldAddPort := cubevsAddPortMap
 	oldDelPort := cubevsDelPortMap
 	oldList := listCubeTapsFunc
@@ -41,6 +42,7 @@ func installEnsureMocks(t *testing.T) {
 		restoreTapFunc = oldRestore
 		cubevsAddTAPDevice = oldAddTap
 		cubevsDelTAPDevice = oldDelTap
+		cubevsPrepareTAPPolicy = oldPrepareTap
 		cubevsAddPortMap = oldAddPort
 		cubevsDelPortMap = oldDelPort
 		listCubeTapsFunc = oldList
@@ -61,6 +63,7 @@ func installEnsureMocks(t *testing.T) {
 	}
 	cubevsAddTAPDevice = func(uint32, net.IP, string, uint32, cubevs.MVMOptions) error { return nil }
 	cubevsDelTAPDevice = func(uint32, net.IP) error { return nil }
+	cubevsPrepareTAPPolicy = func(uint32) error { return nil }
 	cubevsAddPortMap = func(uint32, uint16, uint16) error { return nil }
 	cubevsDelPortMap = func(uint32, uint16, uint16) error { return nil }
 	listCubeTapsFunc = func() (map[string]*tapDevice, error) { return map[string]*tapDevice{}, nil }
@@ -305,6 +308,92 @@ func TestCreateStateRollbackRecyclesPoolTap(t *testing.T) {
 	}
 }
 
+func TestCreateStateRollbackWithholdsPoolTapWhenCleanupFails(t *testing.T) {
+	installEnsureMocks(t)
+	cubevsAddTAPDevice = func(uint32, net.IP, string, uint32, cubevs.MVMOptions) error {
+		return errors.New("register boom")
+	}
+	cubevsDelTAPDevice = func(uint32, net.IP) error {
+		return errors.New("cleanup boom")
+	}
+
+	svc := newConcurrencyTestService(t)
+	pooled := &tapDevice{Name: tapName("192.168.0.50"), Index: 70, IP: net.ParseIP("192.168.0.50").To4()}
+	svc.allocator.Assign(pooled.IP)
+	svc.mu.Lock()
+	svc.enqueueTapLocked(pooled)
+	svc.mu.Unlock()
+
+	_, err := svc.EnsureNetwork(context.Background(), &EnsureNetworkRequest{
+		SandboxID:    "sb",
+		PortMappings: []PortMapping{{ContainerPort: 80}},
+	})
+	if err == nil {
+		t.Fatal("EnsureNetwork: expected register failure")
+	}
+	if !isTapCleanupError(err) {
+		t.Fatalf("EnsureNetwork error=%v, want tap cleanup error", err)
+	}
+
+	svc.mu.Lock()
+	poolLen := len(svc.tapPool)
+	abnormalLen := len(svc.abnormalTapPool)
+	statesLen := len(svc.states)
+	svc.mu.Unlock()
+	if poolLen != 0 {
+		t.Fatalf("tapPool len=%d, want 0 (cleanup failed tap must not be reused)", poolLen)
+	}
+	if abnormalLen != 1 {
+		t.Fatalf("abnormalTapPool len=%d, want 1", abnormalLen)
+	}
+	if statesLen != 0 {
+		t.Fatalf("states len=%d, want 0", statesLen)
+	}
+}
+
+func TestCreateStateRollbackQueuesPoolTapWhenPrepareFails(t *testing.T) {
+	installEnsureMocks(t)
+	cubevsAddTAPDevice = func(uint32, net.IP, string, uint32, cubevs.MVMOptions) error {
+		return errors.New("register boom")
+	}
+	cubevsPrepareTAPPolicy = func(uint32) error {
+		return errors.New("prepare boom")
+	}
+
+	svc := newConcurrencyTestService(t)
+	pooled := &tapDevice{Name: tapName("192.168.0.51"), Index: 71, IP: net.ParseIP("192.168.0.51").To4()}
+	svc.allocator.Assign(pooled.IP)
+	svc.mu.Lock()
+	svc.enqueueTapLocked(pooled)
+	svc.mu.Unlock()
+
+	_, err := svc.EnsureNetwork(context.Background(), &EnsureNetworkRequest{
+		SandboxID:    "sb",
+		PortMappings: []PortMapping{{ContainerPort: 80}},
+	})
+	if err == nil {
+		t.Fatal("EnsureNetwork: expected register failure")
+	}
+
+	svc.mu.Lock()
+	poolLen := len(svc.tapPool)
+	pendingLen := len(svc.abnormalTapPool)
+	pendingStage := ""
+	if pendingLen > 0 {
+		pendingStage = svc.abnormalTapPool[0].LastStage
+	}
+	svc.mu.Unlock()
+	if poolLen != 0 {
+		t.Fatalf("tapPool len=%d, want 0 before pool preparation succeeds", poolLen)
+	}
+	if pendingLen != 1 {
+		t.Fatalf("abnormalTapPool len=%d, want 1 pending preparation", pendingLen)
+	}
+	if pendingStage != abnormalStagePreparePool {
+		t.Fatalf("pending stage=%q, want %q", pendingStage, abnormalStagePreparePool)
+	}
+}
+
 // TestCreateStateRollbackDestroysNonPoolTapOnSaveFailure asserts that a freshly
 // created (non-pool) tap is destroyed, its IP released, and cubevs metadata
 // cleaned up when state persistence fails.
@@ -349,6 +438,95 @@ func TestCreateStateRollbackDestroysNonPoolTapOnSaveFailure(t *testing.T) {
 	svc.mu.Unlock()
 	if statesLen != 0 || poolLen != 0 {
 		t.Fatalf("residue after rollback: states=%d pool=%d", statesLen, poolLen)
+	}
+}
+
+func TestReleaseNetworkDoesNotRecycleTapWhenCubeVSCleanupFails(t *testing.T) {
+	installEnsureMocks(t)
+	cubevsDelTAPDevice = func(uint32, net.IP) error {
+		return errors.New("cleanup boom")
+	}
+
+	svc := newConcurrencyTestService(t)
+	ip := net.ParseIP("192.168.0.60").To4()
+	tap := &tapDevice{Name: tapName(ip.String()), Index: 80, IP: ip, File: newTestTapFile(t)}
+	state := &managedState{
+		persistedState: persistedState{
+			SandboxID:     "sb",
+			NetworkHandle: "sb",
+			TapName:       tap.Name,
+			TapIfIndex:    tap.Index,
+			SandboxIP:     ip.String(),
+		},
+		tap: tap,
+	}
+	svc.states["sb"] = state
+	if err := svc.store.Save(&state.persistedState); err != nil {
+		t.Fatalf("store.Save error=%v", err)
+	}
+
+	_, err := svc.ReleaseNetwork(context.Background(), &ReleaseNetworkRequest{SandboxID: "sb", NetworkHandle: "sb"})
+	if err == nil {
+		t.Fatal("ReleaseNetwork: expected cleanup failure")
+	}
+
+	svc.mu.Lock()
+	_, stillActive := svc.states["sb"]
+	poolLen := len(svc.tapPool)
+	svc.mu.Unlock()
+	if !stillActive {
+		t.Fatal("state was removed despite cleanup failure")
+	}
+	if poolLen != 0 {
+		t.Fatalf("tapPool len=%d, want 0 (cleanup failed tap must not be reused)", poolLen)
+	}
+}
+
+func TestReleaseNetworkQueuesTapWhenAsyncPrepareFails(t *testing.T) {
+	installEnsureMocks(t)
+	cubevsPrepareTAPPolicy = func(uint32) error {
+		return errors.New("prepare boom")
+	}
+
+	svc := newConcurrencyTestService(t)
+	ip := net.ParseIP("192.168.0.61").To4()
+	tap := &tapDevice{Name: tapName(ip.String()), Index: 81, IP: ip, File: newTestTapFile(t)}
+	state := &managedState{
+		persistedState: persistedState{
+			SandboxID:     "sb",
+			NetworkHandle: "sb",
+			TapName:       tap.Name,
+			TapIfIndex:    tap.Index,
+			SandboxIP:     ip.String(),
+		},
+		tap: tap,
+	}
+	svc.states["sb"] = state
+	if err := svc.store.Save(&state.persistedState); err != nil {
+		t.Fatalf("store.Save error=%v", err)
+	}
+
+	resp, err := svc.ReleaseNetwork(context.Background(), &ReleaseNetworkRequest{SandboxID: "sb", NetworkHandle: "sb"})
+	if err != nil {
+		t.Fatalf("ReleaseNetwork error=%v", err)
+	}
+	if resp == nil || !resp.Released {
+		t.Fatalf("ReleaseNetwork resp=%+v, want Released=true", resp)
+	}
+
+	svc.mu.Lock()
+	_, stillActive := svc.states["sb"]
+	poolLen := len(svc.tapPool)
+	pendingLen := len(svc.abnormalTapPool)
+	svc.mu.Unlock()
+	if stillActive {
+		t.Fatal("state remained active after successful cleanup")
+	}
+	if poolLen != 0 {
+		t.Fatalf("tapPool len=%d, want 0 before async preparation succeeds", poolLen)
+	}
+	if pendingLen != 1 {
+		t.Fatalf("abnormalTapPool len=%d, want 1 pending async preparation", pendingLen)
 	}
 }
 

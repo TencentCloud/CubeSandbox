@@ -28,6 +28,7 @@ var (
 	cubevsUpsertTAPDevice     = cubevs.UpsertTAPDevice
 	cubevsUpsertTAPDeviceMeta = cubevs.UpsertTAPDeviceMeta
 	cubevsDelTAPDevice        = cubevs.DelTAPDevice
+	cubevsPrepareTAPPolicy    = cubevs.PrepareTAPDevicePolicy
 	cubevsAddPortMap          = cubevs.AddPortMapping
 	cubevsDelPortMap          = cubevs.DelPortMapping
 	listCubeTapsFunc          = listCubeTaps
@@ -406,11 +407,22 @@ func (s *localService) createState(ctx context.Context, req *EnsureNetworkReques
 	}
 	actualMappings, err := s.configurePortMappings(tap, requestedMappings)
 	if err != nil {
-		s.releaseAcquiredTap(tap, fromPool)
+		if isTapCleanupError(err) {
+			s.enqueueCleanupFailedTap(ctx, tap, err)
+		} else {
+			s.releaseAcquiredTap(tap, fromPool)
+		}
 		return nil, err
 	}
 	if err := s.registerCubeVSTap(tap.Index, tap.IP, req.SandboxID, req.CubeNetworkConfig); err != nil {
-		s.clearPortMappings(tap)
+		cleanupErr := errors.Join(
+			s.clearPortMappings(tap),
+			s.cleanupCubeVSTap(tap.Index, tap.IP.To4()),
+		)
+		if cleanupErr != nil {
+			s.enqueueCleanupFailedTap(ctx, tap, cleanupErr)
+			return nil, errors.Join(err, markTapCleanupError(cleanupErr))
+		}
 		s.releaseAcquiredTap(tap, fromPool)
 		return nil, err
 	}
@@ -432,13 +444,18 @@ func (s *localService) createState(ctx context.Context, req *EnsureNetworkReques
 		policyKnown: true,
 	}
 	if err := s.store.Save(&state.persistedState); err != nil {
-		if delErr := cubevsDelTAPDevice(uint32(tap.Index), tap.IP.To4()); delErr != nil {
+		cleanupErr := errors.Join(
+			s.clearPortMappings(tap),
+			s.cleanupCubeVSTap(tap.Index, tap.IP.To4()),
+		)
+		if cleanupErr != nil {
 			CubeLog.WithContext(ctx).Warnf(
-				"network-agent createState rollback: cubevs del tap failed (stale eBPF entries may leak): sandbox_id=%s ifindex=%d ip=%s err=%v",
-				req.SandboxID, tap.Index, tap.IP.String(), delErr,
+				"network-agent createState rollback cleanup failed; tap will not be reused until cleanup succeeds: sandbox_id=%s ifindex=%d ip=%s err=%v",
+				req.SandboxID, tap.Index, tap.IP.String(), cleanupErr,
 			)
+			s.enqueueCleanupFailedTap(ctx, tap, cleanupErr)
+			return nil, errors.Join(err, markTapCleanupError(cleanupErr))
 		}
-		s.clearPortMappings(tap)
 		s.releaseAcquiredTap(tap, fromPool)
 		return nil, err
 	}
@@ -478,24 +495,92 @@ func (s *localService) acquireTap() (*tapDevice, bool, error) {
 		s.allocator.Release(ip)
 		return nil, false, err
 	}
+	if err := s.prepareTapForPool(tap); err != nil {
+		closeTapFile(tap.File)
+		_ = destroyTapFunc(tap.Index)
+		s.allocator.Release(ip)
+		return nil, false, err
+	}
 	return tap, false, nil
 }
 
-// releaseAcquiredTap rolls back a tap obtained via acquireTap when a later
-// creation step fails. Pool taps are recycled back into the pool (their IP stays
-// allocated for reuse); freshly created taps are destroyed and their IP freed.
-// Callers must perform stage-specific compensation (clearPortMappings,
-// cubevsDelTAPDevice) before calling this.
+// releaseAcquiredTap rolls back a tap obtained via acquireTap after all
+// stage-specific cleanup has succeeded. Pool taps are recycled back into the
+// pool (their IP stays allocated for reuse); freshly created taps are destroyed
+// and their IP freed.
 func (s *localService) releaseAcquiredTap(tap *tapDevice, fromPool bool) {
 	if fromPool {
-		s.mu.Lock()
-		s.recycleTapLocked(tap)
-		s.mu.Unlock()
+		if err := s.prepareAndStageTapForPool(context.Background(), tap, "recycle"); err != nil {
+			s.enqueuePrepareFailedTap(context.Background(), tap, err)
+		}
 		return
 	}
 	closeTapFile(tap.File)
 	_ = destroyTapFunc(tap.Index)
 	s.allocator.Release(tap.IP)
+}
+
+func (s *localService) cleanupCubeVSTap(ifindex int, ip net.IP) error {
+	if err := cubevsDelTAPDevice(uint32(ifindex), ip); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (s *localService) prepareTapForPool(tap *tapDevice) error {
+	if tap == nil {
+		return nil
+	}
+	return cubevsPrepareTAPPolicy(uint32(tap.Index))
+}
+
+func (s *localService) prepareAndStageTapForPool(ctx context.Context, tap *tapDevice, reason string) error {
+	if err := s.prepareTapForPool(tap); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.stageTapForPoolLocked(tap, reason)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *localService) enqueueTapForAsyncPrepare(ctx context.Context, tap *tapDevice, reason string) {
+	if tap == nil {
+		return
+	}
+	CubeLog.WithContext(ctx).Infof(
+		"network-agent tap cleanup complete; async pool preparation queued: name=%s ifindex=%d ip=%s reason=%s",
+		tap.Name, tap.Index, tap.IP, reason,
+	)
+	s.mu.Lock()
+	s.enqueuePreparePoolLocked(tap, reason)
+	s.mu.Unlock()
+}
+
+func (s *localService) enqueuePrepareFailedTap(ctx context.Context, tap *tapDevice, err error) {
+	if tap == nil {
+		return
+	}
+	CubeLog.WithContext(ctx).Warnf(
+		"network-agent tap pool preparation failed; withholding tap from reuse: name=%s ifindex=%d ip=%s err=%v",
+		tap.Name, tap.Index, tap.IP, err,
+	)
+	s.mu.Lock()
+	s.requeuePreparePoolFailureLocked(tap, err)
+	s.mu.Unlock()
+}
+
+func (s *localService) enqueueCleanupFailedTap(ctx context.Context, tap *tapDevice, err error) {
+	if tap == nil {
+		return
+	}
+	CubeLog.WithContext(ctx).Errorf(
+		"network-agent tap cleanup failed; withholding tap from reuse: name=%s ifindex=%d ip=%s err=%v",
+		tap.Name, tap.Index, tap.IP, err,
+	)
+	s.mu.Lock()
+	s.enqueueAbnormalLocked(tap, abnormalStageRecoverCleanup, err)
+	s.mu.Unlock()
 }
 
 func (s *localService) reconcileState(ctx context.Context, state *managedState) error {
@@ -599,16 +684,16 @@ func (s *localService) releaseState(ctx context.Context, state *managedState) er
 	} else {
 		state.tap.PortMappings = append([]PortMapping(nil), state.PortMappings...)
 	}
-	s.clearPortMappings(state.tap)
-	if err := cubevsDelTAPDevice(uint32(state.TapIfIndex), net.ParseIP(state.SandboxIP).To4()); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+	if err := s.clearPortMappings(state.tap); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	s.recycleTapLocked(state.tap)
-	s.mu.Unlock()
+	if err := s.cleanupCubeVSTap(state.TapIfIndex, net.ParseIP(state.SandboxIP).To4()); err != nil {
+		return err
+	}
 	if err := s.store.Delete(state.SandboxID); err != nil {
 		return err
 	}
+	s.enqueueTapForAsyncPrepare(ctx, state.tap, "recycle")
 	// Best-effort: drop the L7 policy from CubeEgress so a future
 	// sandbox that lands on the same IP sees a clean slate. Failures
 	// here are logged at WARN, never propagated — see deleteEgressForState.
@@ -693,13 +778,21 @@ func (s *localService) recover() error {
 			continue
 		}
 		if inCubeVS {
-			s.clearPortMappings(restoredTap)
-			if err := cubevsDelTAPDevice(uint32(restoredTap.Index), restoredTap.IP.To4()); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-				s.enqueueAbnormalLocked(restoredTap, abnormalStageRecoverCleanup, err)
+			cleanupErr := errors.Join(
+				s.clearPortMappings(restoredTap),
+				s.cleanupCubeVSTap(restoredTap.Index, restoredTap.IP.To4()),
+			)
+			if cleanupErr != nil {
+				s.enqueueAbnormalLocked(restoredTap, abnormalStageRecoverCleanup, cleanupErr)
 				continue
 			}
 		}
-		s.stageTapForPoolLocked(restoredTap, "recover")
+		if err := s.prepareAndStageTapForPool(context.Background(), restoredTap, "recover"); err != nil {
+			s.mu.Lock()
+			s.requeuePreparePoolFailureLocked(restoredTap, err)
+			s.mu.Unlock()
+			continue
+		}
 	}
 	for _, state := range states {
 		if _, ok := recovered[state.SandboxID]; ok {
@@ -716,9 +809,12 @@ func (s *localService) recover() error {
 				staleTap.PortMappings = append([]PortMapping(nil), state.PortMappings...)
 			}
 			CubeLog.WithContext(context.Background()).Warnf("network-agent recover dropping stale state for sandbox %s: tap %s missing on host, cleaning persisted state and cubevs entries", state.SandboxID, state.TapName)
-			s.clearPortMappings(staleTap)
-			if err := cubevsDelTAPDevice(uint32(device.Ifindex), staleTap.IP); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-				return err
+			cleanupErr := errors.Join(
+				s.clearPortMappings(staleTap),
+				s.cleanupCubeVSTap(device.Ifindex, staleTap.IP),
+			)
+			if cleanupErr != nil {
+				return cleanupErr
 			}
 		}
 		if err := s.store.Delete(state.SandboxID); err != nil {

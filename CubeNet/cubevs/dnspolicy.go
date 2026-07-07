@@ -165,7 +165,9 @@ func flushDNSAllowInnerMap(inner *ebpf.Map) error {
 	var oldValue dnsAllowValue
 	iter := inner.Iterate()
 	for iter.Next(&oldKey, &oldValue) {
-		_ = inner.Delete(&oldKey)
+		if err := inner.Delete(&oldKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("dns allow delete failed: %w", err)
+		}
 	}
 	if err := iter.Err(); err != nil {
 		return fmt.Errorf("dns allow iterate failed: %w", err)

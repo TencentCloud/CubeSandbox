@@ -46,9 +46,11 @@ func TestRecycleTapLockedStagesTapWithoutRestore(t *testing.T) {
 func TestCreatePoolTapLockedStagesNewTapWithoutRestore(t *testing.T) {
 	oldNewTap := newTapFunc
 	oldRestore := restoreTapFunc
+	oldPrepareTap := cubevsPrepareTAPPolicy
 	t.Cleanup(func() {
 		newTapFunc = oldNewTap
 		restoreTapFunc = oldRestore
+		cubevsPrepareTAPPolicy = oldPrepareTap
 	})
 
 	restoreCalls := 0
@@ -65,6 +67,7 @@ func TestCreatePoolTapLockedStagesNewTapWithoutRestore(t *testing.T) {
 			InUse: true,
 		}, nil
 	}
+	cubevsPrepareTAPPolicy = func(uint32) error { return nil }
 
 	svc := newLifecycleTestService(t)
 	if err := svc.createPoolTap(); err != nil {
@@ -82,16 +85,61 @@ func TestCreatePoolTapLockedStagesNewTapWithoutRestore(t *testing.T) {
 	}
 }
 
+func TestCreatePoolTapDoesNotPoolWhenPrepareFails(t *testing.T) {
+	oldNewTap := newTapFunc
+	oldPrepareTap := cubevsPrepareTAPPolicy
+	oldDestroy := destroyTapFunc
+	t.Cleanup(func() {
+		newTapFunc = oldNewTap
+		cubevsPrepareTAPPolicy = oldPrepareTap
+		destroyTapFunc = oldDestroy
+	})
+
+	newTapFunc = func(ip net.IP, _ string, _ int, _ int) (*tapDevice, error) {
+		return &tapDevice{
+			Name:  tapName(ip.String()),
+			Index: 31,
+			IP:    ip,
+			File:  newTestTapFile(t),
+			InUse: true,
+		}, nil
+	}
+	cubevsPrepareTAPPolicy = func(uint32) error { return errors.New("prepare boom") }
+	destroyCalls := 0
+	destroyTapFunc = func(int) error {
+		destroyCalls++
+		return nil
+	}
+
+	svc := newLifecycleTestService(t)
+	usedBefore := svc.allocator.usedIPNum
+	if err := svc.createPoolTap(); err == nil {
+		t.Fatal("createPoolTap returned nil error")
+	}
+	if len(svc.tapPool) != 0 {
+		t.Fatalf("tapPool len=%d, want 0", len(svc.tapPool))
+	}
+	if destroyCalls != 1 {
+		t.Fatalf("destroyCalls=%d, want 1", destroyCalls)
+	}
+	if svc.allocator.usedIPNum != usedBefore {
+		t.Fatalf("usedIPNum=%d, want %d", svc.allocator.usedIPNum, usedBefore)
+	}
+}
+
 func TestHandleAbnormalTapsRecoversTapBackToPool(t *testing.T) {
 	oldRestore := restoreTapFunc
+	oldPrepareTap := cubevsPrepareTAPPolicy
 	t.Cleanup(func() {
 		restoreTapFunc = oldRestore
+		cubevsPrepareTAPPolicy = oldPrepareTap
 	})
 
 	restoreTapFunc = func(tap *tapDevice, _ int, _ string, _ int) (*tapDevice, error) {
 		tap.File = newTestTapFile(t)
 		return tap, nil
 	}
+	cubevsPrepareTAPPolicy = func(uint32) error { return nil }
 
 	svc := newLifecycleTestService(t)
 	tap := &tapDevice{
