@@ -27,6 +27,11 @@ on:
         description: 'Image tag to build and push'
         required: true
         type: string
+      ref:
+        description: 'Git ref to build from (defaults to the caller ref)'
+        required: false
+        type: string
+        default: ''
       components:
         description: 'Comma-separated components to build, or "all"'
         required: false
@@ -42,7 +47,9 @@ permissions:
   packages: write
 
 env:
-  CHECKOUT_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' && inputs.ref || github.ref }}
+  # ref is declared under both triggers (default ''), so this reference is always
+  # defined; an empty ref falls back to the ref that triggered the run.
+  CHECKOUT_REF: ${{ inputs.ref != '' && inputs.ref || github.ref }}
 
 jobs:
   verify_versions:
@@ -118,6 +125,10 @@ jobs:
           file: CubeEgress/Dockerfile
           platforms: ${{ matrix.platform }}
           push: true
+          # Push plain per-arch manifests (no provenance/SBOM attestations) so the
+          # publish_*_manifest step can combine them into a single clean multi-arch
+          # manifest list; attestations would add extra manifest entries that break
+          # `docker buildx imagetools create`.
           provenance: false
           build-args: |
             CUBE_EGRESS_VERSION=${{ inputs.image_tag }}
@@ -127,6 +138,9 @@ jobs:
             ghcr.io/tencentcloud/cube-egress:${{ inputs.image_tag }}-${{ matrix.arch }}
             cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-egress:${{ inputs.image_tag }}-${{ matrix.arch }}
             cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress:${{ inputs.image_tag }}-${{ matrix.arch }}
+          # Per-arch cache; base image layers (apt/luarocks) are reused across re-runs.
+          cache-from: type=gha,scope=cube-egress-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=cube-egress-${{ matrix.arch }}
 
   publish_cube_egress_manifest:
     name: cube-egress manifests
@@ -175,12 +189,17 @@ jobs:
       - name: Create multi-arch manifests
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
+          # Bind step outputs to env vars instead of interpolating ${{ }} into the
+          # script body, so no expression value can ever be parsed as shell. The
+          # unquoted ${MANIFEST_TAGS} expansion below is deliberate word-splitting
+          # into individual tags.
+          MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
         run: |
           for image in \
             ghcr.io/tencentcloud/cube-egress \
             cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-egress \
             cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress; do
-            for tag in ${{ steps.tags.outputs.list }}; do
+            for tag in ${MANIFEST_TAGS}; do
               docker buildx imagetools create -t "${image}:${tag}" \
                 "${image}:${IMAGE_TAG}-amd64" \
                 "${image}:${IMAGE_TAG}-arm64"

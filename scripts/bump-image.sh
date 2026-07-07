@@ -78,8 +78,11 @@ edit_expr() {
 		echo "s{((?:IMAGE_TAG|CUBE_EGRESS_VERSION)\\s*\\?=\\s*)${PERL_SEMVER}}{\$1\$ENV{VER}}"
 		;;
 	deploy/one-click/terraform/tencentcloud/variables.tf)
-		# The only v-prefixed semvers in this file are the release image tags.
-		echo "s{${PERL_SEMVER}}{\$ENV{VER}}g"
+		# Only rewrite semvers on image-tag `default` lines (the bare image_tag
+		# default and the fully-qualified per-component image defaults), so an
+		# unrelated v-prefixed semver added later (e.g. a provider constraint)
+		# is left untouched.
+		echo "s{${PERL_SEMVER}}{\$ENV{VER}}g if /^\\s*default\\s*=.*(?:\"v\\d|:v\\d)/;"
 		;;
 	deploy/one-click/terraform/tencentcloud/create.sh | \
 		deploy/one-click/README.md | \
@@ -92,7 +95,7 @@ edit_expr() {
 		echo "s{${PERL_SEMVER}}{\$ENV{VER}}g if /CUBE_IMAGE_TAG/;"
 		;;
 	deploy/one-click/terraform/tencentcloud/build_images.sh)
-		echo "s{(TAG:-)${PERL_SEMVER}}{\$1\$ENV{VER}}"
+		echo "s{(TAG:-)${PERL_SEMVER}}{\$1\$ENV{VER}}g"
 		;;
 	deploy/one-click/terraform/tencentcloud/env.example)
 		echo "s{${PERL_SEMVER}}{\$ENV{VER}}g if /IMAGE/;"
@@ -155,22 +158,30 @@ do_check() {
 		fi
 	done
 
+	# Reverse scan: catch a release image tag hard-coded in a file that is NOT in
+	# FILES. Patterns live in one array so the search and the extraction below stay
+	# in sync; they cover the tag formats actually used in this repo: a qualified
+	# image ref (registry/name:tag) and the tag/version assignment forms
+	# (IMAGE_TAG / *_IMAGE_TAG=, CUBE_EGRESS_VERSION, TAG:-).
+	local -a patterns=(
+		"(${COMPONENTS}):${ERE_SEMVER}"
+		"(IMAGE_TAG|CUBE_EGRESS_VERSION|TAG:-).*${ERE_SEMVER}"
+	)
+	local -a grep_args=()
+	local p
+	for p in "${patterns[@]}"; do grep_args+=(-e "$p"); done
+
 	# Prefer `git grep`: it only searches tracked files, so it is fast and skips
 	# build artifacts (e.g. deploy/one-click/.work), node_modules and vendored
 	# trees automatically. Fall back to grep when run outside a git work tree.
 	local matches
 	if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-		matches="$(git grep -nE \
-			-e "(${COMPONENTS}):${ERE_SEMVER}" \
-			-e "TENCENTCLOUD_CUBE_IMAGE_TAG=${ERE_SEMVER}" \
-			-- . 2>/dev/null || true)"
+		matches="$(git grep -nE "${grep_args[@]}" -- . 2>/dev/null || true)"
 	else
 		matches="$(grep -REn \
 			--exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.work \
 			--exclude='*.sum' --exclude='*.mod' \
-			-e "(${COMPONENTS}):${ERE_SEMVER}" \
-			-e "TENCENTCLOUD_CUBE_IMAGE_TAG=${ERE_SEMVER}" \
-			. 2>/dev/null || true)"
+			"${grep_args[@]}" . 2>/dev/null || true)"
 	fi
 	# Drop references that are intentionally version-pinned fixtures/history.
 	matches="$(printf '%s\n' "$matches" |
@@ -179,14 +190,13 @@ do_check() {
 	local line tag
 	while IFS= read -r line; do
 		[[ -z "$line" ]] && continue
-		tag="$(printf '%s' "$line" |
-			grep -oE "(${COMPONENTS}):${ERE_SEMVER}|TENCENTCLOUD_CUBE_IMAGE_TAG=${ERE_SEMVER}" |
-			grep -oE "${ERE_SEMVER}" | head -1)"
-		if [[ -n "$tag" && "$tag" != "${VERSION}" ]]; then
-			echo "::error::stray image tag ${tag} (expected ${VERSION}): ${line%%:*}" >&2
-			echo "    ${line}" >&2
+		# Pull every semver that sits inside a matched image-tag context on the
+		# line and require each to equal the target version.
+		while IFS= read -r tag; do
+			[[ -n "$tag" && "$tag" != "${VERSION}" ]] || continue
+			echo "::error::stray image tag ${tag} (expected ${VERSION}): ${line}" >&2
 			drift=1
-		fi
+		done < <(printf '%s' "$line" | grep -oE "${grep_args[@]}" | grep -oE "${ERE_SEMVER}")
 	done <<<"$matches"
 
 	if [[ "$drift" -ne 0 ]]; then

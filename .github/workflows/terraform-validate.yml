@@ -18,6 +18,9 @@ on:
       - 'deploy/one-click/webui/**'
       - 'deploy/one-click/cubeproxy/**'
       - 'CubeProxy/Dockerfile'
+      # bump-image.sh is the single source of truth for the hard-coded image
+      # tags this deployer bakes in; test_bump_image.sh guards it.
+      - 'scripts/bump-image.sh'
       - '.github/workflows/terraform-validate.yml'
   workflow_dispatch:
 
@@ -77,3 +80,9 @@ jobs:
       - name: .env parsing checks
         shell: bash
         run: ./deploy/one-click/tests/test_env_value.sh
+
+      # Guards bump-image.sh: the --check gate, the bump rewrite, the reverse
+      # scan, and the variables.tf line guard against non-image semvers.
+      - name: bump-image tag consistency checks
+        shell: bash
+        run: ./deploy/one-click/tests/test_bump_image.sh
