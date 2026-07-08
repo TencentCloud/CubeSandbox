@@ -310,7 +310,11 @@ pub async fn resume_sandbox(
     tracing::info!(sandbox_id = %sandbox_id, "resume_sandbox: success");
     state
         .logger
-        .log(LogEvent::new(LogLevel::Info, "sandbox.resumed").field("sandbox_id", &sandbox_id))
+        .log(
+            LogEvent::new(LogLevel::Info, "sandbox.resumed")
+                .field("sandbox_id", &sandbox_id)
+                .field("template_id", &sandbox.template_id),
+        )
         .await;
 
     Ok((StatusCode::CREATED, Json(sandbox)))

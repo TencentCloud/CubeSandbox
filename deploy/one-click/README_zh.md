@@ -128,11 +128,12 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
 - `Cubelet/dynamicconf/` -> `Cubelet/dynamicconf/`
 - `configs/single-node/network-agent.yaml` -> `network-agent/network-agent.yaml`
 - `CubeAPI/bin/cube-api` -> `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
+- `CubeAPI/webhooks.example.toml` -> `/usr/local/services/cubetoolbox/CubeAPI/webhooks.example.toml`
 - `support/` -> `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` -> `/usr/local/services/cubetoolbox/webui/`
 
-其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`；`network-agent` 实际启动时优先通过 `--cubelet-config` 读取 `Cubelet/config/config.toml` 中的网络插件配置，以保证和 `Cubelet` 的网络参数保持一致；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
+其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`；`network-agent` 实际启动时优先通过 `--cubelet-config` 读取 `Cubelet/config/config.toml` 中的网络插件配置，以保证和 `Cubelet` 的网络参数保持一致；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。可选的 CubeAPI Webhook 使用静态 TOML 文件，例如 `/usr/local/services/cubetoolbox/CubeAPI/webhooks.toml`，并通过 `.one-click.env` 中的 `CUBE_API_WEBHOOK_CONFIG` 指向该文件；修改后需要重启 CubeAPI 生效。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
 
 ## 目标机安装
 
@@ -290,6 +291,9 @@ WEB_UI_UPSTREAM=http://host.docker.internal:3010
 CUBE_API_BIND=0.0.0.0:3000
 CUBE_API_HEALTH_ADDR=127.0.0.1:3000
 CUBE_API_SANDBOX_DOMAIN=cube.app
+# CUBE_API_WEBHOOK_CONFIG=/usr/local/services/cubetoolbox/CubeAPI/webhooks.toml
+# CUBE_WEBHOOK_SECRET_0=change-me
+# 多个 endpoint 需要不同密钥时，可在这里配置前缀为 `CUBE_WEBHOOK_SECRET_` 的环境变量。
 ```
 
 安装过程中会做这些事：

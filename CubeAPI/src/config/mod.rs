@@ -76,6 +76,12 @@ pub struct ServerConfig {
     /// Env var: CUBE_API_KEY
     #[serde(default)]
     pub cube_api_key: Option<String>,
+
+    /// Optional Webhook TOML config path.
+    ///
+    /// Env var: `CUBE_API_WEBHOOK_CONFIG`. When unset, Webhook delivery is disabled.
+    #[serde(default = "default_webhook_config_path")]
+    pub webhook_config_path: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -110,6 +116,13 @@ fn default_log_prefix() -> String {
     "cube-api".to_string()
 }
 
+fn default_webhook_config_path() -> Option<String> {
+    std::env::var("CUBE_API_WEBHOOK_CONFIG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
@@ -135,6 +148,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
+            webhook_config_path: default_webhook_config_path(),
         }
     }
 }

@@ -55,6 +55,10 @@ fi
 if [[ -n "${AUTH_CALLBACK_URL:-}" ]]; then
   CUBE_API_OPTIONAL_EXPORTS+="export AUTH_CALLBACK_URL=\"${AUTH_CALLBACK_URL}\"; "
 fi
+if [[ -n "${CUBE_API_WEBHOOK_CONFIG:-}" ]]; then
+  CUBE_API_OPTIONAL_EXPORTS+="export CUBE_API_WEBHOOK_CONFIG=\"${CUBE_API_WEBHOOK_CONFIG}\"; "
+fi
+append_env_exports_by_prefix CUBE_API_OPTIONAL_EXPORTS CUBE_WEBHOOK_SECRET_
 if [[ -n "${DATABASE_URL:-}" ]]; then
   CUBE_API_OPTIONAL_EXPORTS+="export DATABASE_URL=\"${DATABASE_URL}\"; "
 else

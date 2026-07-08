@@ -28,6 +28,12 @@ fi
 if [[ -n "${CUBE_API_KEY:-}" ]]; then
   export CUBE_API_KEY
 fi
+if [[ -n "${CUBE_API_WEBHOOK_CONFIG:-}" ]]; then
+  export CUBE_API_WEBHOOK_CONFIG
+fi
+while IFS= read -r webhook_secret_env; do
+  [[ -n "${webhook_secret_env}" ]] && export "${webhook_secret_env}"
+done < <(compgen -A variable -- CUBE_WEBHOOK_SECRET_)
 if [[ -n "${DATABASE_URL:-}" ]]; then
   export DATABASE_URL
 else

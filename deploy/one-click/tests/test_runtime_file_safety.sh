@@ -199,6 +199,29 @@ test_quickcheck_reports_node_registration_failure_explicitly() {
   assert_not_contains "${path}" "| rg -q"
 }
 
+test_append_env_exports_by_prefix_forwards_webhook_secrets() {
+  local exports=""
+  CUBE_WEBHOOK_SECRET_0="alpha beta"
+  CUBE_WEBHOOK_SECRET_A='quote"slash\'
+  CUBE_WEBHOOK_TOKEN_0="not-a-secret"
+
+  append_env_exports_by_prefix exports CUBE_WEBHOOK_SECRET_
+
+  assert_stdout_contains "${exports}" "export CUBE_WEBHOOK_SECRET_0="
+  assert_stdout_contains "${exports}" "export CUBE_WEBHOOK_SECRET_A="
+  if [[ "${exports}" == *"CUBE_WEBHOOK_TOKEN_0"* ]]; then
+    fail "webhook secret prefix export should not include non-secret variables"
+  fi
+
+  (
+    unset CUBE_WEBHOOK_SECRET_0 CUBE_WEBHOOK_SECRET_A CUBE_WEBHOOK_TOKEN_0
+    eval "${exports}"
+    [[ "${CUBE_WEBHOOK_SECRET_0}" == "alpha beta" ]] || exit 1
+    [[ "${CUBE_WEBHOOK_SECRET_A}" == 'quote"slash\' ]] || exit 1
+    [[ -z "${CUBE_WEBHOOK_TOKEN_0:-}" ]] || exit 1
+  ) || fail "prefixed webhook secret exports should round-trip shell-sensitive values"
+}
+
 # quickcheck runs once right after `systemctl enable --now <target>` returns, so
 # it must tolerate the brief startup race before cubelet/network-agent bind
 # their sockets and serve their health endpoints. Guard the retry semantics so a
@@ -832,6 +855,7 @@ test_detect_glibc_version_consumes_full_ldd_output
 test_online_install_glibc_detection_avoids_head_pipe
 test_one_click_scripts_do_not_require_ripgrep
 test_quickcheck_reports_node_registration_failure_explicitly
+test_append_env_exports_by_prefix_forwards_webhook_secrets
 test_quickcheck_probes_are_race_tolerant
 test_quickcheck_wait_until_retries_then_succeeds
 test_quickcheck_wait_until_times_out_with_descriptive_die

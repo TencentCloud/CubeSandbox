@@ -1,0 +1,26 @@
+# CubeAPI Webhook configuration.
+# Copy this file to /usr/local/services/cubetoolbox/CubeAPI/webhooks.toml
+# and set CUBE_API_WEBHOOK_CONFIG in .one-click.env to enable it.
+
+[delivery]
+queue_size = 10000
+request_timeout_secs = 5
+max_attempts = 3
+initial_backoff_ms = 500
+max_backoff_secs = 10
+max_in_flight = 100
+
+[[endpoints]]
+name = "local-dev"
+url = "http://127.0.0.1:8088/webhook"
+events = [
+  "sandbox.created",
+  "sandbox.deleted",
+  "sandbox.paused",
+  "sandbox.resumed",
+  "api.error",
+]
+# Optional. The env var value is read by CubeAPI on startup and used for
+# X-Cube-Signature-256: sha256=<hex HMAC-SHA256(raw_body)>.
+# Use CUBE_WEBHOOK_SECRET_1, CUBE_WEBHOOK_SECRET_2, ... for additional endpoints.
+secret_env = "CUBE_WEBHOOK_SECRET_0"

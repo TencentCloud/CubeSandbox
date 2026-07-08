@@ -198,7 +198,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()> {
-    use logging::{arc, file::FileLogger, filtered::FilteredLogger, multi::MultiLogger, LogLevel};
+    use logging::{
+        arc, file::FileLogger, filtered::FilteredLogger, http::HttpLogger, http::HttpLoggerConfig,
+        multi::MultiLogger, LogLevel,
+    };
 
     // ── Logger ────────────────────────────────────────────────────────────
     let min_level = if debug {
@@ -207,17 +210,22 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
         LogLevel::Info
     };
 
-    let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
+    let mut multi_logger = MultiLogger::new();
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
-    let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
-        min_level,
-    ));
+    let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
+    let file_logger = arc(FilteredLogger::new(arc(file_logger), min_level));
+    multi_logger = multi_logger.add(file_logger);
+
+    // File logging keeps the existing level gate. Webhooks filter by event name
+    // independently, so diagnostic events such as api.request can be subscribed
+    // to without requiring --debug for the file backend.
+    if let Some(path) = cfg.webhook_config_path.as_deref() {
+        let webhook_config = HttpLoggerConfig::from_file(path)?;
+        let webhook_logger = HttpLogger::new(webhook_config)?;
+        tracing::info!(webhook_config_path = %path, "cube-api webhook logger enabled");
+        multi_logger = multi_logger.add(arc(webhook_logger));
+    }
+    let logger: logging::ArcLogger = arc(multi_logger);
 
     tracing::info!(
         log_dir = %cfg.log_dir,

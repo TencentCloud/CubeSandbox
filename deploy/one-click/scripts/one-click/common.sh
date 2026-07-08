@@ -233,6 +233,21 @@ command_output_contains_fixed_string() {
   grep -Fq -- "${needle}" <<<"${output}"
 }
 
+append_env_exports_by_prefix() {
+  local target_name="$1"
+  local prefix="$2"
+  local env_name
+  local escaped_value
+  local current_value
+
+  while IFS= read -r env_name; do
+    [[ -n "${env_name}" ]] || continue
+    printf -v escaped_value "%q" "${!env_name}"
+    current_value="${!target_name:-}"
+    printf -v "${target_name}" "%s%s" "${current_value}" "export ${env_name}=${escaped_value}; "
+  done < <(compgen -A variable -- "${prefix}")
+}
+
 start_with_pidfile() {
   local name="$1"
   local cmd="$2"
