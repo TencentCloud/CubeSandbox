@@ -26,6 +26,7 @@ const RET_CODE_OK: i32 = 0;
 const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
+const RET_CODE_MASTER_INTERNAL: i32 = 130593;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
@@ -243,11 +244,24 @@ impl SandboxService {
             annotations: None,
         };
 
-        let resp = self
-            .cubemaster
-            .delete_sandbox(&req)
-            .await
-            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
+        let resp = match self.cubemaster.delete_sandbox(&req).await {
+            Ok(resp) => resp,
+            Err(
+                e @ CubeMasterError::Api {
+                    ret_code: RET_CODE_MASTER_INTERNAL,
+                    ..
+                },
+            ) => match self.fetch_sandbox_detail(sandbox_id).await {
+                Ok(detail) if detail.status == SandboxStatus::Paused => {
+                    return Err(AppError::Conflict(format!(
+                        "sandbox {} is paused; resume it before deleting",
+                        sandbox_id
+                    )));
+                }
+                _ => return Err(internal_error(e)),
+            },
+            Err(e) => return Err(sandbox_not_found_or_internal(e, sandbox_id)),
+        };
 
         resp.ret
             .into_result()
@@ -899,7 +913,7 @@ mod tests {
     };
     use axum::{
         extract::State,
-        routing::{delete, post},
+        routing::{delete, get, post},
         Json, Router,
     };
     use serde_json::Value;
@@ -1530,6 +1544,65 @@ mod tests {
             }
             other => panic!("expected not found error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn kill_sandbox_returns_conflict_for_paused_delete_state_error() {
+        async fn delete_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-delete",
+                "sandbox_id": "sb-paused",
+                "ret": {
+                    "ret_code": super::RET_CODE_MASTER_INTERNAL,
+                    "ret_msg": "backend delete failed"
+                }
+            }))
+        }
+
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-paused",
+                    "host_id": "host-1",
+                    "status": 5,
+                    "template_id": "tpl-1"
+                }]
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/sandbox", delete(delete_handler))
+                .route("/cube/sandbox/info", get(info_handler)),
+        )
+        .await;
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        let err = service
+            .kill_sandbox("sb-paused")
+            .await
+            .expect_err("paused-state delete should return a conflict");
+
+        assert!(matches!(err, crate::error::AppError::Conflict(_)));
+        assert!(err.to_string().contains("resume it before deleting"));
     }
 
     #[test]
