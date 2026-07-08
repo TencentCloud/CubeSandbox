@@ -22,6 +22,7 @@ from ._policy import (
 from ._pty import Pty
 from ._stream import _parse_line
 from ._transport import build_client
+from ._volume import VolumeMountArg, _serialize_volume_mounts
 
 JUPYTER_PORT = 49999
 
@@ -152,6 +153,7 @@ class Sandbox:
         allow_internet_access: bool = True,
         network: Dict[str, Any] | None = None,
         lifecycle: Dict[str, Any] | None = None,
+        volume_mounts: list[VolumeMountArg] | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> "Sandbox":
@@ -189,6 +191,12 @@ class Sandbox:
 
                 Absent ``lifecycle`` keeps today's behaviour (idle sandboxes
                 are killed).
+            volume_mounts: Optional list of persistent volumes to mount into
+                the sandbox. Each entry is a :class:`~cubesandbox.VolumeMount`
+                (or a ``{"name": <volumeID>, "path": <mount-path>}`` dict);
+                ``name`` must be an existing ``volumeID`` created via
+                :meth:`cubesandbox.Volume.create`. Serialized as the e2b-shaped
+                ``volumeMounts`` field.
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
@@ -242,6 +250,8 @@ class Sandbox:
         # camelCase keys. Absent => server-side default ("kill" on timeout).
         if lifecycle:
             payload["lifecycle"] = _serialize_lifecycle(lifecycle)
+        if volume_mounts:
+            payload["volumeMounts"] = _serialize_volume_mounts(volume_mounts)
         payload.update(kwargs)
 
         s = requests.Session()

@@ -6,7 +6,7 @@
   <a href="https://github.com/TencentCloud/CubeSandbox"><img src="https://img.shields.io/badge/CubeSandbox-GitHub-blue" alt="CubeSandbox" /></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue" alt="Python 3.9+" />
-  <img src="https://img.shields.io/badge/version-0.3.0-orange" alt="v0.3.0" />
+  <img src="https://img.shields.io/badge/version-0.4.0-orange" alt="v0.4.0" />
 </p>
 
 ---
@@ -225,6 +225,43 @@ with Sandbox.create(metadata={"host-mount": mounts}) as sb:
     print(result.text)
 ```
 
+### Persistent volumes
+
+Volumes are e2b-compatible persistent stores backed by a volume plugin
+(COS, NFS, …). Manage their lifecycle with the `Volume` helper, then mount
+them into a sandbox via `Sandbox.create(volume_mounts=[...])`. Data survives
+across sandbox restarts and can be shared between sandboxes.
+
+```python
+from cubesandbox import Sandbox, Volume, VolumeMount
+
+# Create a volume — name is optional (server generates a UUID when omitted).
+# Omitting driver is e2b-compatible: NO driver is sent, so the backend uses its
+# first configured plugin. Pass a non-empty driver to pin a specific plugin.
+vol = Volume.create("my-data")                   # default plugin
+# vol = Volume.create("my-data", driver="cos")   # pin a plugin
+print(vol.volume_id, vol.token)
+
+# Mount it into a sandbox at a path
+with Sandbox.create(
+    volume_mounts=[VolumeMount(name=vol.volume_id, path="/workspace")],
+) as sb:
+    sb.files.write("/workspace/note.txt", "persisted!")
+    print(sb.files.read("/workspace/note.txt"))
+
+# A plain dict works too: {"name": <volumeID>, "path": <mount-path>}
+
+# List / get / delete
+for v in Volume.list():
+    print(v.volume_id, v.name)
+Volume.get(vol.volume_id)
+Volume.delete(vol.volume_id)   # kill any mounting sandbox first — delete does not auto-detach
+```
+
+Volume `name` must match `^[a-zA-Z0-9_-]+$` and be at most 128 characters;
+invalid names raise `ValueError` before any network call. See
+[`docs/volume.md`](docs/volume.md) for the full API, parameters and error codes.
+
 ### List & health check
 
 ```python
@@ -265,7 +302,7 @@ with Sandbox.create(config=cfg) as sb:
 
 | Method | Description |
 |---|---|
-| `Sandbox.create(template, *, timeout, env_vars, metadata, config)` | `POST /sandboxes` — create a new sandbox |
+| `Sandbox.create(template, *, timeout, env_vars, metadata, volume_mounts, config)` | `POST /sandboxes` — create a new sandbox (optionally mounting volumes) |
 | `Sandbox.connect(sandbox_id, *, config)` | `POST /sandboxes/:id/connect` — connect (auto-resumes if paused) |
 | `Sandbox.list(config)` | `GET /sandboxes` — list running sandboxes (v1) |
 | `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list sandboxes (v2) |
@@ -297,6 +334,19 @@ with Sandbox.create(config=cfg) as sb:
 | `sb.files.rename(old, new)` | Move/rename → `dict` |
 | `sb.files.remove(path)` | Delete file or directory |
 | `sb.files.watch_dir(path)` | Stream filesystem events → `Watcher` (context manager + iterator) |
+
+### `Volume` — persistent volumes (class methods)
+
+| Method | Description |
+|---|---|
+| `Volume.create(name=None, *, driver=None, config=None)` | `POST /volumes` — create a volume; omit `driver` for e2b-compatible behavior (backend's first plugin), or pass a non-empty `driver` (e.g. `"cos"`) to pin a plugin → `VolumeInfo` |
+| `Volume.list(config)` | `GET /volumes` — list volumes → `list[VolumeInfo]` (no token) |
+| `Volume.get(volume_id, *, config)` | `GET /volumes/:id` — get one volume (with token) |
+| `Volume.delete(volume_id, *, config)` | `DELETE /volumes/:id` — delete a volume |
+
+Mount a volume into a sandbox with `Sandbox.create(volume_mounts=[VolumeMount(name, path)])`.
+`VolumeInfo` exposes `.volume_id`, `.name`, `.token`. Full reference:
+[`docs/volume.md`](docs/volume.md).
 
 ### `Execution` object
 

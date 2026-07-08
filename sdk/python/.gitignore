@@ -6,3 +6,6 @@ __pycache__/
 dist/
 build/
 .venv/
+
+# Packaging artifact produced by local build scripts
+cubesandbox.zip

@@ -14,6 +14,9 @@ class Config:
     api_url: str = field(
         default_factory=lambda: os.environ.get("CUBE_API_URL", "http://127.0.0.1:3000")
     )
+    api_key: str | None = field(
+        default_factory=lambda: os.environ.get("CUBE_API_KEY")
+    )
     template_id: str | None = field(
         default_factory=lambda: os.environ.get("CUBE_TEMPLATE_ID")
     )
