@@ -175,16 +175,16 @@ fn default_max_in_flight() -> usize {
 }
 
 fn validate_delivery(delivery: &DeliveryConfig) -> anyhow::Result<()> {
-    if delivery.queue_size <= 0 {
+    if delivery.queue_size == 0 {
         bail!("webhook delivery queue_size must be greater than 0");
     }
-    if delivery.request_timeout_secs <= 0 {
+    if delivery.request_timeout_secs == 0 {
         bail!("webhook delivery request_timeout_secs must be greater than 0");
     }
-    if delivery.max_attempts <= 0 {
+    if delivery.max_attempts == 0 {
         bail!("webhook delivery max_attempts must be greater than 0");
     }
-    if delivery.max_in_flight <= 0 {
+    if delivery.max_in_flight == 0 {
         bail!("webhook delivery max_in_flight must be greater than 0");
     }
     Ok(())
@@ -335,12 +335,16 @@ fn spawn_deliveries(
         let body = body.clone();
         let delivery_id = Uuid::new_v4().to_string();
         tasks.spawn(async move {
-            let permit = semaphore.acquire_owned().await;
-            let Ok(_permit) = permit else {
-                error!("HttpLogger: webhook semaphore closed, dropping delivery");
-                return;
-            };
-            deliver_with_retry(client, endpoint, body, event_name, delivery_id, delivery).await;
+            deliver_with_retry(
+                client,
+                endpoint,
+                semaphore,
+                body,
+                event_name,
+                delivery_id,
+                delivery,
+            )
+            .await;
         });
     }
 }
@@ -348,13 +352,24 @@ fn spawn_deliveries(
 async fn deliver_with_retry(
     client: Client,
     endpoint: Arc<Endpoint>,
+    semaphore: Arc<Semaphore>,
     body: Vec<u8>,
     event_name: String,
     delivery_id: String,
     delivery: DeliveryConfig,
 ) {
     for attempt in 1..=delivery.max_attempts {
-        match send_once(&client, &endpoint, &body, &event_name, &delivery_id).await {
+        let result = {
+            // Limit only the HTTP attempt; retry backoff must not consume a permit.
+            let permit = semaphore.clone().acquire_owned().await;
+            let Ok(_permit_guard) = permit else {
+                error!("HttpLogger: webhook semaphore closed, dropping delivery");
+                return;
+            };
+            send_once(&client, &endpoint, &body, &event_name, &delivery_id).await
+        };
+
+        match result {
             Ok(status) if status.is_success() => return,
             Ok(status) => {
                 if !is_retriable_status(status) || attempt == delivery.max_attempts {
@@ -521,6 +536,19 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{addr}/webhook"), recorder)
+    }
+
+    async fn wait_for_count(recorder: &Arc<Recorder>, expected: usize, max_wait: Duration) -> bool {
+        tokio::time::timeout(max_wait, async {
+            loop {
+                if recorder.count.load(Ordering::SeqCst) >= expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .is_ok()
     }
 
     fn test_config(url: String, events: Vec<&str>) -> HttpLoggerConfig {
@@ -697,6 +725,59 @@ mod tests {
         logger.flush().await;
 
         assert_eq!(recorder.count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_backoff_does_not_hold_global_permit() {
+        let (failing_url, failing_recorder) = spawn_recorder(
+            vec![StatusCode::INTERNAL_SERVER_ERROR, StatusCode::NO_CONTENT],
+            None,
+        )
+        .await;
+        let (healthy_url, healthy_recorder) =
+            spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
+        let logger = HttpLogger::new(HttpLoggerConfig {
+            delivery: DeliveryConfig {
+                queue_size: 16,
+                request_timeout_secs: 1,
+                max_attempts: 2,
+                initial_backoff_ms: 500,
+                max_backoff_secs: 1,
+                max_in_flight: 1,
+            },
+            endpoints: vec![
+                WebhookEndpointConfig {
+                    name: "failing".to_string(),
+                    url: failing_url,
+                    events: vec!["api.error".to_string()],
+                    secret_env: None,
+                },
+                WebhookEndpointConfig {
+                    name: "healthy".to_string(),
+                    url: healthy_url,
+                    events: vec!["sandbox.created".to_string()],
+                    secret_env: None,
+                },
+            ],
+        })
+        .unwrap();
+
+        logger
+            .log(LogEvent::new(LogLevel::Error, "api.error").field("handler", "create_sandbox"))
+            .await;
+        assert!(wait_for_count(&failing_recorder, 1, Duration::from_millis(100)).await);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sbx-1"))
+            .await;
+        assert!(
+            wait_for_count(&healthy_recorder, 1, Duration::from_millis(200)).await,
+            "healthy webhook delivery should not wait for another endpoint's retry backoff"
+        );
+
+        logger.flush().await;
+        assert_eq!(failing_recorder.count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
