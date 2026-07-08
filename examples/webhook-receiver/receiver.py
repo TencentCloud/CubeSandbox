@@ -33,7 +33,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         print(
             json.dumps(
                 {
-                    "delivery": self.headers.get("X-Cube-Delivery"),
+                    "event_id": self.headers.get("X-Cube-Event-Id"),
                     "event": self.headers.get("X-Cube-Event"),
                     "payload": payload,
                 },

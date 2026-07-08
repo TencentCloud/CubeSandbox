@@ -327,22 +327,18 @@ fn spawn_deliveries(
         return;
     };
 
+    let event_id = Uuid::new_v4().to_string();
+
     for endpoint in endpoints.iter().cloned() {
         let client = client.clone();
         let semaphore = semaphore.clone();
         let delivery = delivery.clone();
         let event_name = event.event.clone();
         let body = body.clone();
-        let delivery_id = Uuid::new_v4().to_string();
+        let event_id = event_id.clone();
         tasks.spawn(async move {
             deliver_with_retry(
-                client,
-                endpoint,
-                semaphore,
-                body,
-                event_name,
-                delivery_id,
-                delivery,
+                client, endpoint, semaphore, body, event_name, event_id, delivery,
             )
             .await;
         });
@@ -355,7 +351,7 @@ async fn deliver_with_retry(
     semaphore: Arc<Semaphore>,
     body: Vec<u8>,
     event_name: String,
-    delivery_id: String,
+    event_id: String,
     delivery: DeliveryConfig,
 ) {
     for attempt in 1..=delivery.max_attempts {
@@ -366,7 +362,7 @@ async fn deliver_with_retry(
                 error!("HttpLogger: webhook semaphore closed, dropping delivery");
                 return;
             };
-            send_once(&client, &endpoint, &body, &event_name, &delivery_id).await
+            send_once(&client, &endpoint, &body, &event_name, &event_id).await
         };
 
         match result {
@@ -376,7 +372,7 @@ async fn deliver_with_retry(
                     error!(
                         endpoint = %endpoint.name,
                         event = %event_name,
-                        delivery_id = %delivery_id,
+                        event_id = %event_id,
                         attempts = attempt,
                         status = %status,
                         "HttpLogger: webhook delivery failed"
@@ -386,7 +382,7 @@ async fn deliver_with_retry(
                 warn!(
                     endpoint = %endpoint.name,
                     event = %event_name,
-                    delivery_id = %delivery_id,
+                    event_id = %event_id,
                     attempt,
                     status = %status,
                     "HttpLogger: webhook delivery retrying"
@@ -397,7 +393,7 @@ async fn deliver_with_retry(
                     error!(
                         endpoint = %endpoint.name,
                         event = %event_name,
-                        delivery_id = %delivery_id,
+                        event_id = %event_id,
                         attempts = attempt,
                         error = %err,
                         "HttpLogger: webhook delivery failed"
@@ -407,7 +403,7 @@ async fn deliver_with_retry(
                 warn!(
                     endpoint = %endpoint.name,
                     event = %event_name,
-                    delivery_id = %delivery_id,
+                    event_id = %event_id,
                     attempt,
                     error = %err,
                     "HttpLogger: webhook delivery retrying"
@@ -424,14 +420,14 @@ async fn send_once(
     endpoint: &Endpoint,
     body: &[u8],
     event_name: &str,
-    delivery_id: &str,
+    event_id: &str,
 ) -> Result<StatusCode, reqwest::Error> {
     let mut request = client
         .post(endpoint.url.clone())
         .header(CONTENT_TYPE, "application/json")
         .header(USER_AGENT, "CubeSandbox-Webhook/1.0")
         .header("X-Cube-Event", event_name)
-        .header("X-Cube-Delivery", delivery_id)
+        .header("X-Cube-Event-Id", event_id)
         .body(body.to_vec());
 
     if let Some(secret) = endpoint.secret.as_ref() {
@@ -711,6 +707,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sends_one_event_id_header_across_fanout_and_rotates_between_events() {
+        let (audit_url, audit_recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
+        let (ops_url, ops_recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
+        let logger = HttpLogger::new(HttpLoggerConfig {
+            delivery: DeliveryConfig {
+                queue_size: 16,
+                request_timeout_secs: 1,
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                max_backoff_secs: 1,
+                max_in_flight: 4,
+            },
+            endpoints: vec![
+                WebhookEndpointConfig {
+                    name: "audit".to_string(),
+                    url: audit_url,
+                    events: vec!["sandbox.created".to_string()],
+                    secret_env: None,
+                },
+                WebhookEndpointConfig {
+                    name: "ops".to_string(),
+                    url: ops_url,
+                    events: vec!["sandbox.created".to_string()],
+                    secret_env: None,
+                },
+            ],
+        })
+        .unwrap();
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sbx-1"))
+            .await;
+        logger.flush().await;
+
+        let audit_requests = audit_recorder.requests.lock().unwrap();
+        let ops_requests = ops_recorder.requests.lock().unwrap();
+        assert_eq!(audit_requests.len(), 1);
+        assert_eq!(ops_requests.len(), 1);
+        let audit_event_id = audit_requests[0]
+            .headers
+            .get("x-cube-event-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let ops_event_id = ops_requests[0]
+            .headers
+            .get("x-cube-event-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(!audit_event_id.is_empty());
+        assert_eq!(audit_event_id, ops_event_id);
+        assert!(!audit_requests[0].headers.contains_key("x-cube-delivery"));
+        assert!(!ops_requests[0].headers.contains_key("x-cube-delivery"));
+        drop(audit_requests);
+        drop(ops_requests);
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sbx-2"))
+            .await;
+        logger.flush().await;
+
+        let audit_requests = audit_recorder.requests.lock().unwrap();
+        let ops_requests = ops_recorder.requests.lock().unwrap();
+        assert_eq!(audit_requests.len(), 2);
+        assert_eq!(ops_requests.len(), 2);
+        let second_audit_event_id = audit_requests[1]
+            .headers
+            .get("x-cube-event-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let second_ops_event_id = ops_requests[1]
+            .headers
+            .get("x-cube-event-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(second_audit_event_id, second_ops_event_id);
+        assert_ne!(audit_event_id, second_audit_event_id);
+    }
+
+    #[tokio::test]
     async fn retries_retriable_delivery_failures() {
         let (url, recorder) = spawn_recorder(
             vec![StatusCode::INTERNAL_SERVER_ERROR, StatusCode::NO_CONTENT],
@@ -725,6 +808,23 @@ mod tests {
         logger.flush().await;
 
         assert_eq!(recorder.count.load(Ordering::SeqCst), 2);
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let first_event_id = requests[0]
+            .headers
+            .get("x-cube-event-id")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let second_event_id = requests[1]
+            .headers
+            .get("x-cube-event-id")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(first_event_id, second_event_id);
+        assert!(!requests[0].headers.contains_key("x-cube-delivery"));
+        assert!(!requests[1].headers.contains_key("x-cube-delivery"));
     }
 
     #[tokio::test]

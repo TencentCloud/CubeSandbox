@@ -64,7 +64,7 @@ sudo systemctl restart cube-sandbox-cube-api.service
 
 ## Payload 与 Header
 
-CubeAPI 会为每个匹配事件发送一次 HTTP `POST`。JSON body 沿用 CubeAPI
+CubeAPI 会为每个匹配 endpoint 发送一次 HTTP `POST`。JSON body 沿用 CubeAPI
 结构化日志的扁平结构：
 
 ```json
@@ -84,8 +84,11 @@ Header：
 | `Content-Type` | `application/json` |
 | `User-Agent` | `CubeSandbox-Webhook/1.0` |
 | `X-Cube-Event` | 事件名，例如 `sandbox.created` |
-| `X-Cube-Delivery` | 投递 id，重试时保持不变 |
+| `X-Cube-Event-Id` | 事件 id，同一事件投递到多个 endpoint 时保持一致，重试时也保持不变 |
 | `X-Cube-Signature-256` | 配置 `secret_env` 后出现，格式为 `sha256=<hex>` |
+
+接收端可以使用 `X-Cube-Event-Id` 做幂等处理。同一个事件 fan-out 到多个
+endpoint 时，各 endpoint 收到的 event id 相同；该事件重试时也继续使用相同 id。
 
 用原始 request body 验签：
 

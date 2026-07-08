@@ -67,7 +67,7 @@ sudo systemctl restart cube-sandbox-cube-api.service
 
 ## Payload and Headers
 
-CubeAPI sends one HTTP `POST` per matching event. The JSON body uses the same
+CubeAPI sends one HTTP `POST` per matching endpoint. The JSON body uses the same
 flat shape as CubeAPI structured logs:
 
 ```json
@@ -87,8 +87,12 @@ Headers:
 | `Content-Type` | `application/json` |
 | `User-Agent` | `CubeSandbox-Webhook/1.0` |
 | `X-Cube-Event` | Event name, for example `sandbox.created` |
-| `X-Cube-Delivery` | Unique delivery id reused across retries |
+| `X-Cube-Event-Id` | Event id shared by all endpoint deliveries for the same event and reused across retries |
 | `X-Cube-Signature-256` | Present when `secret_env` is set. Format: `sha256=<hex>` |
+
+Receivers can use `X-Cube-Event-Id` for idempotency. When one event fans out to
+multiple endpoints, each endpoint receives the same event id. Retries for that
+event keep the same id.
 
 Verify the signature against the raw request body:
 
