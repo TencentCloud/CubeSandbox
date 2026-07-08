@@ -21,6 +21,10 @@
 # To override the CubeAPI upstream at runtime, mount a custom nginx.conf:
 #   docker run -p 80:80 -v ./my-nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro cube-webui:v1.0
 
+# Base image ARGs used in FROM must be declared before the first FROM so Docker
+# treats them as global build args available to later stages.
+ARG OPENRESTY_BASE_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+
 # ── Build stage ────────────────────────────────────────────────────────────────
 FROM node:22-alpine AS builder
 
@@ -45,7 +49,6 @@ ENV CUBE_VERSION=${CUBE_VERSION}
 RUN npm run build
 
 # ── Runtime stage ──────────────────────────────────────────────────────────────
-ARG OPENRESTY_BASE_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
 FROM ${OPENRESTY_BASE_IMAGE}
 
 RUN sed -i 's#https\?://dl-cdn.alpinelinux.org#http://mirrors.tencent.com#g' /etc/apk/repositories \

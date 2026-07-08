@@ -18,9 +18,11 @@ ARG CUBE_BUILD_TIME=unknown
 WORKDIR /src
 
 COPY CubeMaster/go.mod CubeMaster/go.sum ./
+COPY cubelog/go.mod cubelog/go.sum /cubelog/
 RUN go mod download
 
 COPY CubeMaster/ ./
+COPY cubelog/ /cubelog/
 
 ENV CGO_ENABLED=0
 RUN set -eux; \
@@ -34,7 +36,7 @@ RUN set -eux; \
         -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Version=${CUBE_VERSION}' \
         -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Commit=${CUBE_COMMIT}' \
         -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.BuildTime=${CUBE_BUILD_TIME}'" \
-      ./cmd/cubemaster/...
+      ./cmd/cubemaster
 
 # ── Runtime stage ──────────────────────────────────────────────────────────────
 FROM ubuntu:24.04
