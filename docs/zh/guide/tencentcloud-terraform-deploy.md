@@ -86,8 +86,9 @@
 
 - `TENCENTCLOUD_USE_TCR=true`：创建 TCR，在跳板机构建并推送五个组件镜像。
 - `TENCENTCLOUD_USE_CFS=true` 且 `TENCENTCLOUD_CUBEMASTER_REPLICAS>1`：创建 CFS，cubemaster 多副本共享存储。
+- `TENCENTCLOUD_CUBE_PROXY_REPLICAS>1`：让 cube-proxy 以多副本方式运行，并复用同一个 CLB 对外服务。
 
-`cube-proxy` 默认**单副本**（`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`）。自动暂停 / 自动恢复由独立的 `cube-lifecycle-manager` 协调；每个 cube-proxy 副本会注册到 Redis，manager 可自动发现，无需静态配置副本列表。
+`cube-proxy` 支持**多副本**。默认仍为单副本（`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`），适合小规模部署；当代理流量增长时，可以按需调高。每个 cube-proxy 副本都会把自己的 admin endpoint 注册到 Redis，独立的 `cube-lifecycle-manager` 从 Redis 注册表发现副本并协调自动暂停 / 自动恢复，因此无需静态配置副本列表。
 
 ## 默认配置创建的资源明细
 
@@ -315,7 +316,7 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / 演示值 | 应用库名 / 账号 / 密码 |
 | `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `1` | cube-master 副本数 |
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `1` | cube-api 副本数 |
-| `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy 副本数。每个副本都会注册到 Redis，供 cube-lifecycle-manager 发现 |
+| `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy 副本数。支持设置为大于 `1`；每个副本都会注册到 Redis，供 cube-lifecycle-manager 发现 |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `1` | cube-lifecycle-manager 副本数。除非已验证 CLM 高可用行为，否则建议保持 `1` |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `1` | cube-webui 副本数 |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT` | `5m` | lifecycle metadata 未指定 `TimeoutSeconds` 时使用的默认空闲超时 |

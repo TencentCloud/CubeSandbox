@@ -87,8 +87,9 @@ Matching `env.example` / `variables.tf`, the **default is public images + single
 
 - `TENCENTCLOUD_USE_TCR=true`: create TCR and build/push the five component images on the jumpserver.
 - `TENCENTCLOUD_USE_CFS=true` with `TENCENTCLOUD_CUBEMASTER_REPLICAS>1`: create CFS for cubemaster multi-replica shared storage.
+- `TENCENTCLOUD_CUBE_PROXY_REPLICAS>1`: run cube-proxy with multiple replicas behind the same CLB.
 
-`cube-proxy` defaults to **single replica** (`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`). Auto-pause / auto-resume is coordinated by the standalone `cube-lifecycle-manager`, and each cube-proxy replica registers itself in Redis so the manager can discover it without static wiring.
+`cube-proxy` supports **multiple replicas**. The default remains a single replica (`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`) for small deployments, but you can increase it when proxy traffic grows. Each cube-proxy replica registers its admin endpoint in Redis, and the standalone `cube-lifecycle-manager` discovers replicas from that registry for auto-pause / auto-resume coordination, so no static replica list is required.
 
 ## Resources Created by the Default Configuration
 
@@ -316,7 +317,7 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / demo | Application DB name / account / password |
 | `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `1` | cube-master replica count |
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `1` | cube-api replica count |
-| `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy replica count. Each replica registers in Redis for cube-lifecycle-manager discovery |
+| `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy replica count. Values greater than `1` are supported; each replica registers in Redis for cube-lifecycle-manager discovery |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `1` | cube-lifecycle-manager replica count. Keep `1` unless CLM HA behavior has been validated for your deployment |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `1` | cube-webui replica count |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT` | `5m` | Default idle timeout used when lifecycle metadata omits `TimeoutSeconds` |
