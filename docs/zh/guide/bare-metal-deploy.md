@@ -65,6 +65,10 @@ cd cube-sandbox-one-click-<version>-arm64
 - CubeProxy 提供 TLS（mkcert）和 CoreDNS 域名路由（`cube.app`）
 :::
 
+::: tip 无 guest PMU 的 ARM64 主机
+在部分 aarch64 主机上——较旧的内核、嵌套虚拟化环境、或某些 ARM 核心——KVM 不会向 guest 暴露 PMUv3。这些主机上 MicroVM 仍可正常启动：hypervisor 会在不启用 PMU 的情况下初始化 vCPU，guest 只是看不到硬件性能计数器，无需任何额外操作。
+:::
+
 ## 第二步：制作模板
 
 安装完成后，使用预构建镜像创建代码解释器模板：

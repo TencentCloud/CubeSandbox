@@ -66,6 +66,10 @@ chmod +x install.sh
 - CubeProxy providing TLS (mkcert) and CoreDNS domain routing (`cube.app`)
 :::
 
+::: tip ARM64 hosts without a guest PMU
+On some aarch64 hosts — older kernels, nested-virtualization setups, or certain ARM cores — KVM does not expose a guest PMUv3. MicroVMs still boot on these hosts; the hypervisor initializes the vCPU without a PMU and the guest simply sees no hardware performance counters. No action is needed.
+:::
+
 ## Step 2: Create a Template
 
 After installation, create a code interpreter template using a pre-built image:

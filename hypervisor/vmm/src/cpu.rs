@@ -294,6 +294,32 @@ macro_rules! round_up {
     };
 }
 
+/// Recover the raw errno from a `vcpu_init` failure so `Vcpu::init` can tell
+/// "feature unsupported" (EINVAL) apart from genuine errors. The kvm-ioctls
+/// error is a `vmm_sys_util::errno::Error` wrapped in anyhow inside
+/// `HypervisorCpuError::VcpuInit`; returns `None` if it is any other variant or
+/// the errno cannot be recovered.
+#[cfg(target_arch = "aarch64")]
+fn vcpu_init_errno(e: &hypervisor::HypervisorCpuError) -> Option<i32> {
+    let hypervisor::HypervisorCpuError::VcpuInit(source) = e else {
+        return None;
+    };
+    source
+        .downcast_ref::<vmm_sys_util::errno::Error>()
+        .map(|err| err.errno())
+}
+
+/// Decide whether a `vcpu_init` failure warrants retrying without a PMU. Only
+/// EINVAL means "feature unsupported"; any other errno -- or an error whose
+/// errno cannot be recovered -- is a genuine failure that clearing the PMU bit
+/// would not fix, so it must be propagated rather than masked with a retry.
+/// Split out from `Vcpu::init` so the decision is unit-testable without a KVM
+/// vcpu to inject failures into (see test_vcpu_init_retry_decision).
+#[cfg(target_arch = "aarch64")]
+fn should_retry_without_pmu(e: &hypervisor::HypervisorCpuError) -> bool {
+    vcpu_init_errno(e) == Some(libc::EINVAL)
+}
+
 /// A wrapper around creating and using a kvm-based VCPU.
 pub struct Vcpu {
     // The hypervisor abstracted CPU.
@@ -383,6 +409,12 @@ impl Vcpu {
     }
 
     /// Initializes an aarch64 specific vcpu for booting Linux.
+    ///
+    /// A guest PMU is requested when the host KVM supports it. On hosts that do
+    /// not advertise PMUv3 for the guest -- older kernels, some nested-virt
+    /// setups, a few ARM cores -- the vcpu is initialized without a PMU rather
+    /// than failing to boot, since nothing in the guest depends on a hardware
+    /// PMU being exposed.
     #[cfg(target_arch = "aarch64")]
     pub fn init(&self, vm: &Arc<dyn hypervisor::Vm>) -> Result<()> {
         let mut kvi: kvm_bindings::kvm_vcpu_init = kvm_bindings::kvm_vcpu_init::default();
@@ -390,14 +422,36 @@ impl Vcpu {
         // This reads back the kernel's preferred target type.
         vm.get_preferred_target(&mut kvi)
             .map_err(Error::VcpuArmPreferredTarget)?;
-        // We already checked that the capability is supported.
         kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PSCI_0_2;
-        kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PMU_V3;
         // Non-boot cpus are powered off initially.
         if self.id > 0 {
             kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_POWER_OFF;
         }
-        self.vcpu.vcpu_init(&kvi).map_err(Error::VcpuArmInit)
+
+        // Try with a PMU first; on hosts without PMUv3, vcpu_init reports EINVAL,
+        // so clear the bit and retry once. The guest FDT PMU node is gated
+        // separately by has_pmu_support(), so a vcpu armed without a PMU here is
+        // never advertised one it does not have.
+        //
+        // PMU_V3 must remain the last feature flag set before vcpu_init: the
+        // retry below recovers solely by clearing this bit, so adding another
+        // flag after this line would let an EINVAL from that flag be silently
+        // "recovered" by dropping the wrong feature.
+        kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PMU_V3;
+        if let Err(e) = self.vcpu.vcpu_init(&kvi) {
+            if !should_retry_without_pmu(&e) {
+                return Err(Error::VcpuArmInit(e));
+            }
+            warn!(
+                "vcpu_init with KVM_ARM_VCPU_PMU_V3 failed for vcpu {}: {:?}, \
+                 retrying without PMU support",
+                self.id, e
+            );
+            kvi.features[0] &= !(1 << kvm_bindings::KVM_ARM_VCPU_PMU_V3);
+            self.vcpu.vcpu_init(&kvi).map_err(Error::VcpuArmInit)?;
+        }
+
+        Ok(())
     }
 
     /// Runs the VCPU until it exits, returning the reason.
@@ -2672,6 +2726,7 @@ mod tests {
 #[cfg(target_arch = "aarch64")]
 #[cfg(test)]
 mod tests {
+    use super::Vcpu;
     use arch::{aarch64::regs, layout};
     use hypervisor::kvm::aarch64::is_system_register;
     use hypervisor::kvm::kvm_bindings::{
@@ -2766,5 +2821,82 @@ mod tests {
         let res = vcpu.get_mp_state();
         assert!(res.is_ok());
         assert!(vcpu.set_mp_state(res.unwrap()).is_ok());
+    }
+
+    #[test]
+    fn test_vcpu_init_pmu_fallback() {
+        // Vcpu::init() must succeed both on PMU-capable hosts (PMU-enabled
+        // first attempt) and on hosts without PMUv3 (fallback to a PMU-less
+        // init). Exercising it here guards against reintroducing the boot
+        // failure the fallback fixes; the branch actually taken depends on the
+        // host running the test, so this only has discriminating power on a
+        // PMU-less host. The deterministic guarantee comes from
+        // test_vcpu_init_errno_classification below, which locks in the errno
+        // decoding that decides whether the fallback fires.
+        let hv = hypervisor::new().unwrap();
+        let vm = hv.create_vm().unwrap();
+
+        let vcpu = Vcpu::new(0, &vm, None).unwrap();
+        vcpu.init(&vm).expect("boot vcpu init failed");
+
+        // Non-boot vcpus (id > 0) take the POWER_OFF path; that too must init
+        // regardless of PMU availability.
+        let secondary = Vcpu::new(1, &vm, None).unwrap();
+        secondary.init(&vm).expect("secondary vcpu init failed");
+    }
+
+    #[test]
+    fn test_vcpu_init_errno_classification() {
+        use super::vcpu_init_errno;
+
+        // EINVAL wrapped exactly as vcpu_init produces it (errno::Error ->
+        // anyhow -> HypervisorCpuError::VcpuInit) must decode back to EINVAL:
+        // this is the value the fallback keys on.
+        let einval = hypervisor::HypervisorCpuError::VcpuInit(
+            vmm_sys_util::errno::Error::new(libc::EINVAL).into(),
+        );
+        assert_eq!(vcpu_init_errno(&einval), Some(libc::EINVAL));
+
+        // A different errno must be reported as-is so the fallback does not fire.
+        let enomem = hypervisor::HypervisorCpuError::VcpuInit(
+            vmm_sys_util::errno::Error::new(libc::ENOMEM).into(),
+        );
+        assert_eq!(vcpu_init_errno(&enomem), Some(libc::ENOMEM));
+
+        // VcpuInit carrying a non-errno source cannot be classified, so the
+        // fallback conservatively treats it as a genuine failure (None).
+        let opaque =
+            hypervisor::HypervisorCpuError::VcpuInit(anyhow::anyhow!("not an errno error"));
+        assert_eq!(vcpu_init_errno(&opaque), None);
+    }
+
+    #[test]
+    fn test_vcpu_init_retry_decision() {
+        use super::should_retry_without_pmu;
+
+        // EINVAL is the only errno that means "PMU unsupported", so it is the
+        // only case that retries without a PMU.
+        let einval = hypervisor::HypervisorCpuError::VcpuInit(
+            vmm_sys_util::errno::Error::new(libc::EINVAL).into(),
+        );
+        assert!(should_retry_without_pmu(&einval));
+
+        // A non-EINVAL errno is a genuine failure and must be propagated. This
+        // covers the propagation branch of Vcpu::init that cannot be triggered
+        // on real KVM without injecting failures.
+        let enomem = hypervisor::HypervisorCpuError::VcpuInit(
+            vmm_sys_util::errno::Error::new(libc::ENOMEM).into(),
+        );
+        assert!(!should_retry_without_pmu(&enomem));
+
+        // An unclassifiable error is conservatively treated as genuine.
+        let opaque =
+            hypervisor::HypervisorCpuError::VcpuInit(anyhow::anyhow!("not an errno error"));
+        assert!(!should_retry_without_pmu(&opaque));
+
+        // A different HypervisorCpuError variant is not a vcpu_init failure at
+        // all, so it must never retry.
+        let other = hypervisor::HypervisorCpuError::RunVcpu(anyhow::anyhow!("unrelated"));
+        assert!(!should_retry_without_pmu(&other));
     }
 }
