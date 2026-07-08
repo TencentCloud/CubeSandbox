@@ -16,6 +16,7 @@ locals {
   cube_api_image    = var.cubeapi_image != "" ? var.cubeapi_image : "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
   cube_proxy_image  = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cube-proxy:${var.image_tag}"
   cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/webui:${var.image_tag}"
+  cube_lcm_image    = var.cube_lifecycle_manager_image != "" ? var.cube_lifecycle_manager_image : "${local.image_registry}/${local.image_namespace}/cube-lifecycle-manager:${var.image_tag}"
 
   # cube_db / cube_user are wired through Terraform (var.cube_db / var.cube_user)
   # so the MySQL account/database created in main.tf, the cube-master conf Secret
@@ -44,10 +45,81 @@ locals {
   # All files under the certificate directory
   cert_files = fileset("${path.module}/cubeproxy-certs", "*")
 
-  # create.sh writes this file next to the Terraform module before applying
-  # addons. Direct `terraform validate` from the source tree has no generated
-  # file yet, so fall back to the canonical one-click WebUI nginx template.
-  webui_nginx_conf = try(file("${path.module}/webui-nginx.conf"), file("${path.module}/../../webui/nginx.conf"))
+  # create.sh writes these files next to the Terraform module before applying
+  # addons. Terraform evaluates locals even during early targeted network applies,
+  # so every file() call must be guarded with fileexists().
+  webui_nginx_conf = fileexists("${path.module}/webui-nginx.conf") ? file("${path.module}/webui-nginx.conf") : (
+    fileexists("${path.module}/../../webui/nginx.conf") ? file("${path.module}/../../webui/nginx.conf") : <<-EOF
+      worker_processes auto;
+      events { worker_connections 1024; }
+      http {
+        server {
+          listen 80;
+          root /usr/share/nginx/html;
+          index index.html;
+          location ^~ /sandbox/ { proxy_pass __SANDBOX_PROXY_UPSTREAM__; }
+          location /cubeapi/ { proxy_pass __WEB_UI_UPSTREAM__/cubeapi/; }
+          location / { try_files $uri $uri/ /index.html; }
+        }
+      }
+    EOF
+  )
+  cubeproxy_nginx_conf = replace(
+    replace(
+      replace(
+        replace(
+          replace(
+            replace(
+              fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
+                fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : (
+                  fileexists("${path.module}/../../../../CubeProxy/nginx.conf") ? file("${path.module}/../../../../CubeProxy/nginx.conf") : <<-EOF
+                    user root;
+                    worker_processes auto;
+                    error_log /data/log/cube-proxy/error.log notice;
+                    daemon off;
+                    events { worker_connections 100000; }
+                    http {
+                      include mime.types;
+                      default_type application/octet-stream;
+                      server {
+                        listen __CUBE_PROXY_HTTP_PORT__;
+                        server_name _;
+                        location / { return 404; }
+                      }
+                      server {
+                        listen __CUBE_PROXY_HTTPS_PORT__ ssl;
+                        server_name _;
+                        ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
+                        ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
+                        location / { return 404; }
+                      }
+                      server {
+                        listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
+                        server_name _;
+                        location / { return 404; }
+                      }
+                    }
+                  EOF
+                )
+              ),
+              "__CUBE_PROXY_HTTP_PORT__",
+              "8081"
+            ),
+            "__CUBE_PROXY_HTTPS_PORT__",
+            "8080"
+          ),
+          "__CUBE_PROXY_SSL_CERT__",
+          "cube.app+3.pem"
+        ),
+        "__CUBE_PROXY_SSL_KEY__",
+        "cube.app+3-key.pem"
+      ),
+      "__CUBE_PROXY_ADMIN_LISTEN__:8082",
+      "0.0.0.0:8082"
+    ),
+    "listen 127.0.0.1:8082;",
+    "listen 0.0.0.0:8082;"
+  )
 
   # Precondition for creating the TKE addons
   deploy_addons = var.create_tke && var.deploy_tke_addons
@@ -74,6 +146,8 @@ resource "local_file" "tke_kubeconfig" {
   depends_on = [
     kubernetes_deployment.cube_webui,
     kubernetes_service.cube_webui,
+    kubernetes_deployment.cube_lifecycle_manager,
+    kubernetes_service.cube_lifecycle_manager,
     kubernetes_deployment.cube_proxy,
     kubernetes_service.cube_proxy,
     kubernetes_deployment.cube_api,
@@ -550,6 +624,158 @@ resource "kubernetes_service" "cube_api" {
 }
 
 # ---------------------------------------------------------------
+# cube-lifecycle-manager: Secret → Deployment → ClusterIP Service
+# ---------------------------------------------------------------
+
+resource "kubernetes_secret" "cube_lifecycle_manager_conf" {
+  count = local.deploy_addons ? 1 : 0
+  type  = "Opaque"
+
+  metadata {
+    name      = "cube-lifecycle-manager-conf"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+  }
+
+  data = {
+    "redis-password"   = var.redis_password
+    "cube-admin-token" = var.cube_admin_token
+  }
+}
+
+resource "kubernetes_deployment" "cube_lifecycle_manager" {
+  count = local.deploy_addons ? 1 : 0
+
+  metadata {
+    name      = "cube-lifecycle-manager"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-lifecycle-manager" }
+  }
+
+  spec {
+    replicas = var.cube_lifecycle_manager_replicas
+
+    selector {
+      match_labels = { app = "cube-lifecycle-manager" }
+    }
+
+    template {
+      metadata {
+        labels = { app = "cube-lifecycle-manager" }
+      }
+
+      spec {
+        container {
+          name  = "cube-lifecycle-manager"
+          image = local.cube_lcm_image
+
+          port {
+            name           = "http"
+            container_port = 8083
+            protocol       = "TCP"
+          }
+
+          env {
+            name  = "CUBE_LCM_REDIS_ADDR"
+            value = "${tencentcloud_redis_instance.redis.ip}:6379"
+          }
+          env {
+            name = "CUBE_LCM_REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cube_lifecycle_manager_conf[0].metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
+          env {
+            name  = "CUBE_LCM_REDIS_DB"
+            value = "0"
+          }
+          env {
+            name  = "CUBE_LCM_CUBEMASTER_URL"
+            value = local.cubemaster_url
+          }
+          env {
+            name  = "CUBE_LCM_LISTEN_ADDR"
+            value = "0.0.0.0:8083"
+          }
+          env {
+            name  = "CUBE_LCM_DEFAULT_IDLE_TIMEOUT"
+            value = var.cube_lifecycle_manager_default_idle_timeout
+          }
+          env {
+            name  = "CUBE_LCM_HEARTBEAT_TTL"
+            value = var.cube_lifecycle_manager_heartbeat_ttl
+          }
+          env {
+            name  = "CUBE_LCM_DISCOVERY_REFRESH"
+            value = var.cube_lifecycle_manager_discovery_refresh
+          }
+          env {
+            name = "CUBE_LCM_ADMIN_TOKEN"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cube_lifecycle_manager_conf[0].metadata[0].name
+                key  = "cube-admin-token"
+              }
+            }
+          }
+
+          liveness_probe {
+            http_get {
+              path = "/healthz"
+              port = 8083
+            }
+            initial_delay_seconds = 10
+            period_seconds        = 10
+            timeout_seconds       = 3
+            failure_threshold     = 6
+          }
+
+          readiness_probe {
+            http_get {
+              path = "/readyz"
+              port = 8083
+            }
+            initial_delay_seconds = 5
+            period_seconds        = 5
+            timeout_seconds       = 3
+            failure_threshold     = 3
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    kubernetes_service.cubemaster,
+    tencentcloud_redis_instance.redis,
+  ]
+}
+
+resource "kubernetes_service" "cube_lifecycle_manager" {
+  count = local.deploy_addons ? 1 : 0
+
+  metadata {
+    name      = "cube-lifecycle-manager"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-lifecycle-manager" }
+  }
+
+  spec {
+    type     = "ClusterIP"
+    selector = { app = "cube-lifecycle-manager" }
+
+    port {
+      name        = "http"
+      port        = 8083
+      target_port = 8083
+      protocol    = "TCP"
+    }
+  }
+}
+
+# ---------------------------------------------------------------
 # cube-proxy: Secrets → Deployment → CLB Service (public network)
 # ---------------------------------------------------------------
 
@@ -571,12 +797,28 @@ resource "kubernetes_secret" "cubeproxy_global" {
       set $timeout_min 500;
       set $timeout_max 700;
       set $cube_proxy_host_ip "127.0.0.1";
+      set $cube_sidecar_addr "cube-lifecycle-manager.cubesandbox.svc.cluster.local:8083";
+      set $cube_admin_token "${var.cube_admin_token}";
     EOT
     # Same Redis password exposed as a discrete key so the cube-proxy container
     # can read it via secret_key_ref instead of a plaintext Deployment env value
     # (which would show up in `kubectl get deploy -o yaml`). Projected out of the
     # global.conf volume mount via that mount's explicit `items` below.
     "redis-password" = var.redis_password
+  }
+}
+
+resource "kubernetes_config_map" "cubeproxy_nginx_conf" {
+  count = local.deploy_addons ? 1 : 0
+
+  metadata {
+    name      = "cubeproxy-nginx-conf"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-proxy" }
+  }
+
+  data = {
+    "nginx.conf" = local.cubeproxy_nginx_conf
   }
 }
 
@@ -599,16 +841,21 @@ resource "kubernetes_secret" "cubeproxy_certs" {
 # cube-proxy Deployment
 resource "kubernetes_deployment" "cube_proxy" {
   count = local.deploy_addons ? 1 : 0
+
+  depends_on = [
+    kubernetes_service.cube_lifecycle_manager,
+    tencentcloud_redis_instance.redis,
+  ]
+
   metadata {
     name      = "cube-proxy"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
     labels    = { app = "cube-proxy" }
   }
   spec {
-    # Defaults to 1. auto-pause/auto-resume (driven by the co-resident
-    # cube-proxy-sidecar sweeper) is only correct in single-replica mode; with
-    # >1 replica the front-end LB MUST hash on SandboxID, otherwise per-replica
-    # idle detection misfires. See var.cube_proxy_replicas in variables.tf.
+    # PR #705 moves lifecycle coordination into cube-lifecycle-manager. Each
+    # cube-proxy replica publishes its admin endpoint to Redis so CLM can
+    # discover and push lifecycle state without static per-replica wiring.
     replicas = var.cube_proxy_replicas
     selector {
       match_labels = { app = "cube-proxy" }
@@ -641,6 +888,11 @@ resource "kubernetes_deployment" "cube_proxy" {
             container_port = 443
             protocol       = "TCP"
           }
+          port {
+            name           = "admin"
+            container_port = 8082
+            protocol       = "TCP"
+          }
           env {
             name  = "CUBE_PROXY_REDIS_IP"
             value = tencentcloud_redis_instance.redis.ip
@@ -658,11 +910,83 @@ resource "kubernetes_deployment" "cube_proxy" {
               }
             }
           }
+          env {
+            name  = "CUBE_PROXY_REGISTRY_ENABLE"
+            value = "1"
+          }
+          env {
+            name = "POD_NAME"
+            value_from {
+              field_ref {
+                field_path = "metadata.name"
+              }
+            }
+          }
+          env {
+            name = "POD_IP"
+            value_from {
+              field_ref {
+                field_path = "status.podIP"
+              }
+            }
+          }
+          env {
+            name  = "CUBE_PROXY_ID"
+            value = "$(POD_NAME)"
+          }
+          env {
+            name  = "CUBE_PROXY_ADMIN_URL"
+            value = "http://$(POD_IP):8082"
+          }
+          env {
+            name  = "CUBE_PROXY_RESUME_URL"
+            value = "http://$(POD_IP):8082"
+          }
+          env {
+            name  = "CUBE_PROXY_NODE_IP"
+            value = "$(POD_IP)"
+          }
+          env {
+            name  = "CUBE_PROXY_VERSION"
+            value = var.image_tag
+          }
+          env {
+            name  = "CUBE_PROXY_HEARTBEAT_INTERVAL_MS"
+            value = tostring(var.cube_proxy_heartbeat_interval_ms)
+          }
+          env {
+            name  = "CUBE_PROXY_REGISTRY_REDIS_HOST"
+            value = tencentcloud_redis_instance.redis.ip
+          }
+          env {
+            name  = "CUBE_PROXY_REGISTRY_REDIS_PORT"
+            value = "6379"
+          }
+          env {
+            name = "CUBE_PROXY_REGISTRY_REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cubeproxy_global[0].metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
+          env {
+            name  = "CUBE_PROXY_REGISTRY_REDIS_DB"
+            value = "0"
+          }
 
           # global.conf mount
           volume_mount {
             name       = "global-conf"
             mount_path = "/usr/local/openresty/nginx/conf/global"
+            read_only  = true
+          }
+
+          volume_mount {
+            name       = "nginx-conf"
+            mount_path = "/usr/local/openresty/nginx/conf/nginx.conf"
+            sub_path   = "nginx.conf"
             read_only  = true
           }
 
@@ -719,6 +1043,13 @@ resource "kubernetes_deployment" "cube_proxy" {
               key  = "global.conf"
               path = "global.conf"
             }
+          }
+        }
+
+        volume {
+          name = "nginx-conf"
+          config_map {
+            name = kubernetes_config_map.cubeproxy_nginx_conf[0].metadata[0].name
           }
         }
 

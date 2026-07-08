@@ -81,7 +81,6 @@ variable "compute_node_count" {
     error_message = "compute_node_count must be a non-negative integer."
   }
 }
-
 variable "compute_data_disk_size" {
   description = "Per compute-node CBS data disk size in GB; formatted as XFS and mounted at /data/cubelet (override with TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE)"
   type        = number
@@ -312,6 +311,11 @@ variable "webui_image" {
   default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/webui:v0.5.0"
 }
 
+variable "cube_lifecycle_manager_image" {
+  description = "Full cube-lifecycle-manager image override."
+  type        = string
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.5.0"
+}
 # Per-component replica counts. All four default to 1 in env.example / variables.tf
 # and are independently tunable via -var / TF_VAR_* / the TENCENTCLOUD_*_REPLICAS
 # env knobs wired by create.sh.
@@ -345,30 +349,25 @@ variable "cube_api_replicas" {
   }
 }
 
-# cube-proxy defaults to a SINGLE replica (unlike the other components, which
-# default to 2). This is deliberate: the auto-pause/auto-resume feature is only
-# correct in single-replica mode.
-#
-# Each cube-proxy pod runs a co-resident cube-proxy-sidecar whose sweeper decides
-# when a sandbox is idle based on the last-active timestamps it observes on its
-# OWN cube-proxy. With >1 replica behind a round-robin / least-conn CLB, requests
-# for a single sandbox are spread across replicas, so no individual sidecar sees
-# the full activity stream. A replica that happened not to serve recent requests
-# will believe the sandbox is idle and pause it out from under an actively-used
-# session, producing a pause -> auto-resume churn loop.
-#
-# If you must scale cube-proxy to >1 replica for HA/throughput, the front-end
-# load balancer MUST be configured to hash on the sandbox ID so that all traffic
-# for a given sandbox is pinned to one replica (consistent session affinity by
-# SandboxID). Without that, auto-pause/auto-resume will misfire.
 variable "cube_proxy_replicas" {
-  description = "cube-proxy Deployment replica count. Defaults to 1: auto-pause/auto-resume is only correct in single-replica mode. Setting >1 REQUIRES the front-end LB to hash on SandboxID (session affinity), otherwise auto-pause/auto-resume will misfire."
+  description = "cube-proxy Deployment replica count. PR #705 uses Redis-backed cube-proxy discovery through cube-lifecycle-manager, so multiple replicas can be discovered without static wiring."
   type        = number
   default     = 1
 
   validation {
     condition     = var.cube_proxy_replicas >= 1 && floor(var.cube_proxy_replicas) == var.cube_proxy_replicas
     error_message = "cube_proxy_replicas must be an integer >= 1."
+  }
+}
+
+variable "cube_lifecycle_manager_replicas" {
+  description = "cube-lifecycle-manager Deployment replica count. Keep 1 unless CLM HA behavior has been validated for the target deployment."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.cube_lifecycle_manager_replicas >= 1 && floor(var.cube_lifecycle_manager_replicas) == var.cube_lifecycle_manager_replicas
+    error_message = "cube_lifecycle_manager_replicas must be an integer >= 1."
   }
 }
 
@@ -380,5 +379,56 @@ variable "cube_webui_replicas" {
   validation {
     condition     = var.cube_webui_replicas >= 1 && floor(var.cube_webui_replicas) == var.cube_webui_replicas
     error_message = "cube_webui_replicas must be an integer >= 1."
+  }
+}
+
+variable "cube_lifecycle_manager_default_idle_timeout" {
+  description = "Default idle timeout used by cube-lifecycle-manager when lifecycle metadata omits TimeoutSeconds."
+  type        = string
+  default     = "5m"
+
+  validation {
+    condition     = can(regex("^[0-9]+(ns|us|µs|ms|s|m|h)$", var.cube_lifecycle_manager_default_idle_timeout))
+    error_message = "cube_lifecycle_manager_default_idle_timeout must be a Go duration such as 5m, 30s, or 1h."
+  }
+}
+
+variable "cube_lifecycle_manager_heartbeat_ttl" {
+  description = "TTL for cube-proxy registry heartbeats. Should be a small multiple of cube_proxy_heartbeat_interval_ms."
+  type        = string
+  default     = "15s"
+
+  validation {
+    condition     = can(regex("^[0-9]+(ns|us|µs|ms|s|m|h)$", var.cube_lifecycle_manager_heartbeat_ttl))
+    error_message = "cube_lifecycle_manager_heartbeat_ttl must be a Go duration such as 15s, 1m, or 1h."
+  }
+}
+
+variable "cube_lifecycle_manager_discovery_refresh" {
+  description = "Redis discovery scan interval for cube-lifecycle-manager."
+  type        = string
+  default     = "3s"
+
+  validation {
+    condition     = can(regex("^[0-9]+(ns|us|µs|ms|s|m|h)$", var.cube_lifecycle_manager_discovery_refresh))
+    error_message = "cube_lifecycle_manager_discovery_refresh must be a Go duration such as 3s, 1m, or 1h."
+  }
+}
+
+variable "cube_admin_token" {
+  description = "Optional shared token used by cube-lifecycle-manager when calling cube-proxy /admin/* endpoints."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "cube_proxy_heartbeat_interval_ms" {
+  description = "Heartbeat interval in milliseconds for cube-proxy Redis registration."
+  type        = number
+  default     = 5000
+
+  validation {
+    condition     = var.cube_proxy_heartbeat_interval_ms >= 1000 && floor(var.cube_proxy_heartbeat_interval_ms) == var.cube_proxy_heartbeat_interval_ms
+    error_message = "cube_proxy_heartbeat_interval_ms must be an integer >= 1000."
   }
 }

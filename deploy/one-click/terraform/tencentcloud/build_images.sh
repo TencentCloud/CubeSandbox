@@ -15,14 +15,15 @@
 #   tar xzf assets/package/sandbox-package.tar.gz -C assets/package/
 #   assets/package/sandbox-package/terraform/tencentcloud/build_images.sh
 #
-# It builds four images straight from the package contents:
-#   cube-api    <- CubeAPI/Dockerfile          (prebuilt CubeAPI/bin/cube-api)
-#   cubemaster  <- CubeMaster/Dockerfile       (prebuilt CubeMaster/bin/cubemaster)
-#   cubeproxy   <- cubeproxy/build-context/Dockerfile
-#   cube-webui  <- webui/Dockerfile.package    (prebuilt webui/dist)
+# It builds five images straight from the package contents:
+#   cube-api                <- CubeAPI/Dockerfile          (prebuilt CubeAPI/bin/cube-api)
+#   cubemaster              <- CubeMaster/Dockerfile       (prebuilt CubeMaster/bin/cubemaster)
+#   cubeproxy               <- cubeproxy/build-context/Dockerfile
+#   cube-lifecycle-manager  <- cube-lifecycle-manager/build-context/Dockerfile
+#   cube-webui              <- webui/Dockerfile.package    (prebuilt webui/dist)
 #
 # Selecting images:
-#   build_images.sh                       # all four (default)
+#   build_images.sh                       # all five (default)
 #   build_images.sh cube-api webui        # only the listed ones
 #
 # Options / environment:
@@ -37,6 +38,7 @@
 #   CUBE_API_IMAGE=...         fully-qualified ref overrides (per component);
 #   CUBE_MASTER_IMAGE=...      default to ${REGISTRY}/${NAMESPACE}/<name>:${TAG},
 #   CUBE_PROXY_IMAGE=...       matching terraform/tencentcloud (var.image_tag) so
+#   CUBE_LCM_IMAGE=...
 #   CUBE_WEBUI_IMAGE=...       freshly built images work with the TKE deployment.
 #   WEB_UI_UPSTREAM=...        CubeAPI upstream baked into the webui image
 #                              (default http://host.docker.internal:3000)
@@ -72,6 +74,7 @@ TAG="${TAG:-v0.5.0}"
 CUBE_API_IMAGE="${CUBE_API_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-api:${TAG}}"
 CUBE_MASTER_IMAGE="${CUBE_MASTER_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-master:${TAG}}"
 CUBE_PROXY_IMAGE="${CUBE_PROXY_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-proxy:${TAG}}"
+CUBE_LCM_IMAGE="${CUBE_LCM_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-lifecycle-manager:${TAG}}"
 CUBE_WEBUI_IMAGE="${CUBE_WEBUI_IMAGE:-${REGISTRY}/${NAMESPACE}/webui:${TAG}}"
 
 WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3000}"
@@ -236,6 +239,12 @@ build_cube_proxy() {
 		"${PKG_ROOT}/cubeproxy/build-context"
 }
 
+build_cube_lifecycle_manager() {
+	docker_build "${CUBE_LCM_IMAGE}" \
+		"${PKG_ROOT}/cube-lifecycle-manager/build-context/Dockerfile" \
+		"${PKG_ROOT}/cube-lifecycle-manager/build-context"
+}
+
 build_cube_webui() {
 	docker_build "${CUBE_WEBUI_IMAGE}" \
 		"${PKG_ROOT}/webui/Dockerfile.package" "${PKG_ROOT}/webui" \
@@ -249,17 +258,18 @@ main() {
 		case "${arg}" in
 		-h | --help) usage 0 ;;
 		--push) PUSH=1 ;;
-		all) targets+=(cube-api cube-master cube-proxy webui) ;;
+		all) targets+=(cube-api cube-master cube-proxy cube-lifecycle-manager webui) ;;
 		cube-api | cubeapi) targets+=(cube-api) ;;
 		cube-master | cubemaster | master) targets+=(cube-master) ;;
 		cube-proxy | cubeproxy | proxy) targets+=(cube-proxy) ;;
+		cube-lifecycle-manager | lifecycle-manager | lcm) targets+=(cube-lifecycle-manager) ;;
 		webui | cube-webui) targets+=(webui) ;;
 		*) die "unknown argument: ${arg} (run with --help)" ;;
 		esac
 	done
 
 	if [[ "${#targets[@]}" -eq 0 ]]; then
-		targets=(cube-api cube-master cube-proxy webui)
+		targets=(cube-api cube-master cube-proxy cube-lifecycle-manager webui)
 	fi
 
 	command -v docker >/dev/null 2>&1 || die "docker is required but was not found in PATH"
@@ -271,6 +281,7 @@ main() {
 		cube-api) build_cube_api ;;
 		cube-master) build_cube_master ;;
 		cube-proxy) build_cube_proxy ;;
+		cube-lifecycle-manager) build_cube_lifecycle_manager ;;
 		webui) build_cube_webui ;;
 		esac
 	done

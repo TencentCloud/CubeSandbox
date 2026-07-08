@@ -36,6 +36,7 @@ test_component_build_inputs_exist() {
   require_file "${ONE_CLICK_DIR}/webui/Dockerfile.package" "cube-webui Dockerfile"
   # cube-proxy's build-context (and its Dockerfile) come from the CubeProxy source.
   require_file "${ROOT_DIR}/CubeProxy/Dockerfile" "cube-proxy Dockerfile (CubeProxy source)"
+  require_file "${ROOT_DIR}/cube-lifecycle-manager/Dockerfile" "cube-lifecycle-manager Dockerfile"
   # webui nginx.conf is the canonical source for both the package and the
   # terraform webui-nginx.conf the addons render.
   require_file "${ONE_CLICK_DIR}/webui/nginx.conf" "webui nginx.conf source"
@@ -69,8 +70,8 @@ test_image_names_match() {
   # Guard against a regex that silently matches too few/many lines.
   local built_n
   built_n="$(printf '%s\n' "${built}" | grep -c .)"
-  if [[ "${built_n}" -ne 4 ]]; then
-    fail "expected 4 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
+  if [[ "${built_n}" -ne 5 ]]; then
+    fail "expected 5 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
   fi
   if [[ "${built}" != "${composed}" ]]; then
     fail "image name drift between build_images.sh and tke-addons.tf:

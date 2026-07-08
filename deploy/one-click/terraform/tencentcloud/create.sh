@@ -584,7 +584,74 @@ prepare_webui_nginx_conf() {
 		echo -e "  ${GREEN}✓ Generated webui-nginx.conf from webui/nginx.conf${NC}"
 		return 0
 	fi
-	echo -e "${YELLOW}⚠ webui-nginx.conf not found and cannot be generated from webui/nginx.conf; cube-webui addon deployment may fail${NC}"
+
+	cat >"${dst}" <<'EOF'
+worker_processes auto;
+events { worker_connections 1024; }
+http {
+  server {
+    listen 80;
+    root /usr/share/nginx/html;
+    index index.html;
+    location ^~ /sandbox/ { proxy_pass __SANDBOX_PROXY_UPSTREAM__; }
+    location /cubeapi/ { proxy_pass __WEB_UI_UPSTREAM__/cubeapi/; }
+    location / { try_files $uri $uri/ /index.html; }
+  }
+}
+EOF
+	echo -e "  ${YELLOW}⚠ webui/nginx.conf source not found; generated a minimal webui-nginx.conf fallback${NC}"
+	return 0
+}
+
+# ---------------------------------------------------------------
+# prepare_cubeproxy_nginx_conf — ensure the cubeproxy-nginx.conf required by
+#   tke-addons.tf exists. The Kubernetes deployment mounts this file so the
+#   admin listener is reachable by cube-lifecycle-manager.
+# ---------------------------------------------------------------
+prepare_cubeproxy_nginx_conf() {
+	local dst="${SCRIPT_DIR}/cubeproxy-nginx.conf"
+	[ -f "${dst}" ] && return 0
+
+	local src
+	for src in \
+		"${SCRIPT_DIR}/../../../../CubeProxy/nginx.conf" \
+		"${SCRIPT_DIR}/../../cubeproxy/nginx.conf.template"; do
+		if [ -f "${src}" ]; then
+			cp -f "${src}" "${dst}"
+			echo -e "  ${GREEN}✓ Generated cubeproxy-nginx.conf from ${src}${NC}"
+			return 0
+		fi
+	done
+
+	cat >"${dst}" <<'EOF'
+user root;
+worker_processes auto;
+error_log /data/log/cube-proxy/error.log notice;
+daemon off;
+events { worker_connections 100000; }
+http {
+  include mime.types;
+  default_type application/octet-stream;
+  server {
+    listen __CUBE_PROXY_HTTP_PORT__;
+    server_name _;
+    location / { return 404; }
+  }
+  server {
+    listen __CUBE_PROXY_HTTPS_PORT__ ssl;
+    server_name _;
+    ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
+    ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
+    location / { return 404; }
+  }
+  server {
+    listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
+    server_name _;
+    location / { return 404; }
+  }
+}
+EOF
+	echo -e "  ${YELLOW}⚠ cube-proxy nginx source not found; generated a minimal cubeproxy-nginx.conf fallback${NC}"
 	return 0
 }
 
@@ -786,6 +853,7 @@ setup_env() {
 	export TF_VAR_cubeapi_image="${TENCENTCLOUD_CUBEAPI_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_cubeproxy_image="${TENCENTCLOUD_CUBEPROXY_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:${CUBE_IMAGE_TAG}}"
 	export TF_VAR_webui_image="${TENCENTCLOUD_WEBUI_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/webui:${CUBE_IMAGE_TAG}}"
+	export TF_VAR_cube_lifecycle_manager_image="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:${CUBE_IMAGE_TAG}}"
 	SSH_PORT="${TENCENTCLOUD_SSH_PORT:-22}"
 	[ -n "${TENCENTCLOUD_MYSQL_PASSWORD:-}" ] && export TF_VAR_mysql_root_password="$TENCENTCLOUD_MYSQL_PASSWORD"
 	[ -n "${TENCENTCLOUD_REDIS_PASSWORD:-}" ] && export TF_VAR_redis_password="$TENCENTCLOUD_REDIS_PASSWORD"
@@ -794,7 +862,13 @@ setup_env() {
 	export TF_VAR_cubemaster_replicas="${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}"
 	export TF_VAR_cube_api_replicas="${TENCENTCLOUD_CUBE_API_REPLICAS:-1}"
 	export TF_VAR_cube_proxy_replicas="${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}"
+	export TF_VAR_cube_lifecycle_manager_replicas="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}"
 	export TF_VAR_cube_webui_replicas="${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}"
+	export TF_VAR_cube_lifecycle_manager_default_idle_timeout="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT:-5m}"
+	export TF_VAR_cube_lifecycle_manager_heartbeat_ttl="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}"
+	export TF_VAR_cube_lifecycle_manager_discovery_refresh="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}"
+	export TF_VAR_cube_admin_token="${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}"
+	export TF_VAR_cube_proxy_heartbeat_interval_ms="${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}"
 	# Network exposure mode. Default (false) fronts cube-api/cube-proxy/cube-webui
 	# with VPC-internal CLBs; set to 'true' for public CLBs reachable from the
 	# internet (see the "Hardening the Public-Facing Services" doc section).
@@ -1354,7 +1428,7 @@ build_and_push_images() {
 
 	# 4) Build and push (REGISTRY/NAMESPACE/TAG match the defaults in tke-addons.tf)
 	echo -e "  ${CYAN}Running build_images.sh on the jumpserver: building & pushing${NC}"
-	echo -e "  ${CYAN}  cubemaster/cube-api/cubeproxy/cube-webui → ${reg}/${ns} (tag=${tag})...${NC}"
+	echo -e "  ${CYAN}  cubemaster/cube-api/cubeproxy/cube-lifecycle-manager/cube-webui → ${reg}/${ns} (tag=${tag})...${NC}"
 	echo -e "  ${YELLOW}  (docker build produces a lot of output, please be patient)${NC}"
 	if "${js_ssh[@]}" root@"${js_pub_ip}" \
 		"REGISTRY='${reg}' NAMESPACE='${ns}' TAG='${tag}' PUSH=1 bash '${pkg_root}/terraform/tencentcloud/build_images.sh' all"; then
@@ -4099,12 +4173,25 @@ TENCENTCLOUD_CUBE_USER='${TENCENTCLOUD_CUBE_USER:-cube}'
 TENCENTCLOUD_CUBE_PASSWORD='${TENCENTCLOUD_CUBE_PASSWORD:-}'
 TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY='${CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}}'
 TENCENTCLOUD_CUBE_IMAGE_TAG='${TENCENTCLOUD_CUBE_IMAGE_TAG:-v0.5.0}'
+TENCENTCLOUD_IMAGE_REGISTRY='${TF_VAR_image_registry:-${TENCENTCLOUD_IMAGE_REGISTRY:-cube-sandbox-cn.tencentcloudcr.com}}'
+TENCENTCLOUD_IMAGE_NAMESPACE='${TF_VAR_image_namespace:-${TENCENTCLOUD_IMAGE_NAMESPACE:-cube-sandbox}}'
+TENCENTCLOUD_CUBEMASTER_IMAGE='${TF_VAR_cubemaster_image:-${TENCENTCLOUD_CUBEMASTER_IMAGE:-}}'
+TENCENTCLOUD_CUBEAPI_IMAGE='${TF_VAR_cubeapi_image:-${TENCENTCLOUD_CUBEAPI_IMAGE:-}}'
+TENCENTCLOUD_CUBEPROXY_IMAGE='${TF_VAR_cubeproxy_image:-${TENCENTCLOUD_CUBEPROXY_IMAGE:-}}'
+TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE='${TF_VAR_cube_lifecycle_manager_image:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE:-}}'
+TENCENTCLOUD_WEBUI_IMAGE='${TF_VAR_webui_image:-${TENCENTCLOUD_WEBUI_IMAGE:-}}'
 TENCENTCLOUD_TKE_CLUSTER_VERSION='${TKE_CLUSTER_VERSION:-1.34.1}'
 TENCENTCLOUD_TKE_NODE_COUNT='${TKE_NODE_COUNT:-2}'
 TENCENTCLOUD_CUBEMASTER_REPLICAS='${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}'
 TENCENTCLOUD_CUBE_API_REPLICAS='${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}'
+TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS='${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_WEBUI_REPLICAS='${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}}'
+TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT='${TF_VAR_cube_lifecycle_manager_default_idle_timeout:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT:-5m}}'
+TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL='${TF_VAR_cube_lifecycle_manager_heartbeat_ttl:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}}'
+TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH='${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}'
+TENCENTCLOUD_CUBE_ADMIN_TOKEN='${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}'
+TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS='${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}'
 TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='${TF_VAR_enable_public_network:-${TENCENTCLOUD_ENABLE_PUBLIC_NETWORK:-false}}'
 TENCENTCLOUD_LOCAL_BUNDLE='${LOCAL_BUNDLE:-${TENCENTCLOUD_LOCAL_BUNDLE:-}}'
 TENCENTCLOUD_PVM_KERNEL_VMLINUX='${PVM_KERNEL_VMLINUX:-${TENCENTCLOUD_PVM_KERNEL_VMLINUX:-}}'
@@ -4305,11 +4392,18 @@ write_resolved_tfvars_file() {
 		--arg cubemaster_image "${TF_VAR_cubemaster_image:-${TENCENTCLOUD_CUBEMASTER_IMAGE:-}}" \
 		--arg cubeapi_image "${TF_VAR_cubeapi_image:-${TENCENTCLOUD_CUBEAPI_IMAGE:-}}" \
 		--arg cubeproxy_image "${TF_VAR_cubeproxy_image:-${TENCENTCLOUD_CUBEPROXY_IMAGE:-}}" \
+		--arg cube_lifecycle_manager_image "${TF_VAR_cube_lifecycle_manager_image:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE:-}}" \
 		--arg webui_image "${TF_VAR_webui_image:-${TENCENTCLOUD_WEBUI_IMAGE:-}}" \
 		--argjson cubemaster_replicas "$(_number_or_default "${TF_VAR_cubemaster_replicas:-${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}}" 1)" \
 		--argjson cube_api_replicas "$(_number_or_default "${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}" 1)" \
 		--argjson cube_proxy_replicas "$(_number_or_default "${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}" 1)" \
+		--argjson cube_lifecycle_manager_replicas "$(_number_or_default "${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}}" 1)" \
 		--argjson cube_webui_replicas "$(_number_or_default "${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}}" 1)" \
+		--arg cube_lifecycle_manager_default_idle_timeout "${TF_VAR_cube_lifecycle_manager_default_idle_timeout:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT:-5m}}" \
+		--arg cube_lifecycle_manager_heartbeat_ttl "${TF_VAR_cube_lifecycle_manager_heartbeat_ttl:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}}" \
+		--arg cube_lifecycle_manager_discovery_refresh "${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}" \
+		--arg cube_admin_token "${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}" \
+		--argjson cube_proxy_heartbeat_interval_ms "$(_number_or_default "${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}" 5000)" \
 		'{
 			vpc_name: $vpc_name,
 			region: $region,
@@ -4347,11 +4441,18 @@ write_resolved_tfvars_file() {
 			cubemaster_image: $cubemaster_image,
 			cubeapi_image: $cubeapi_image,
 			cubeproxy_image: $cubeproxy_image,
+			cube_lifecycle_manager_image: $cube_lifecycle_manager_image,
 			webui_image: $webui_image,
 			cubemaster_replicas: $cubemaster_replicas,
 			cube_api_replicas: $cube_api_replicas,
 			cube_proxy_replicas: $cube_proxy_replicas,
-			cube_webui_replicas: $cube_webui_replicas
+			cube_lifecycle_manager_replicas: $cube_lifecycle_manager_replicas,
+			cube_webui_replicas: $cube_webui_replicas,
+			cube_lifecycle_manager_default_idle_timeout: $cube_lifecycle_manager_default_idle_timeout,
+			cube_lifecycle_manager_heartbeat_ttl: $cube_lifecycle_manager_heartbeat_ttl,
+			cube_lifecycle_manager_discovery_refresh: $cube_lifecycle_manager_discovery_refresh,
+			cube_admin_token: $cube_admin_token,
+			cube_proxy_heartbeat_interval_ms: $cube_proxy_heartbeat_interval_ms,
 		}
 		| with_entries(select(.value != "" and .value != null))' >"$tmp"
 
@@ -4724,15 +4825,19 @@ _reconcile_addons() {
 	local entries='
 kubernetes_secret.cube_egress_ca|-n cubesandbox delete secret cube-egress-ca
 kubernetes_secret.cubemaster_conf|-n cubesandbox delete secret cubemaster-conf
+kubernetes_secret.cube_lifecycle_manager_conf|-n cubesandbox delete secret cube-lifecycle-manager-conf
 kubernetes_secret.cubeproxy_global|-n cubesandbox delete secret cubeproxy-global
 kubernetes_secret.cubeproxy_certs|-n cubesandbox delete secret cubeproxy-certs
+kubernetes_config_map.cubeproxy_nginx_conf|-n cubesandbox delete configmap cubeproxy-nginx-conf
 kubernetes_config_map.cube_webui_nginx_conf|-n cubesandbox delete configmap cube-webui-nginx-conf
 kubernetes_service.cubemaster|-n cubesandbox delete svc cubemaster
 kubernetes_service.cube_api|-n cubesandbox delete svc cube-api
+kubernetes_service.cube_lifecycle_manager|-n cubesandbox delete svc cube-lifecycle-manager
 kubernetes_service.cube_proxy|-n cubesandbox delete svc cube-proxy
 kubernetes_service.cube_webui|-n cubesandbox delete svc cube-webui
 kubernetes_deployment.cubemaster|-n cubesandbox delete deploy cubemaster
 kubernetes_deployment.cube_api|-n cubesandbox delete deploy cube-api
+kubernetes_deployment.cube_lifecycle_manager|-n cubesandbox delete deploy cube-lifecycle-manager
 kubernetes_deployment.cube_proxy|-n cubesandbox delete deploy cube-proxy
 kubernetes_deployment.cube_webui|-n cubesandbox delete deploy cube-webui
 '
@@ -4765,13 +4870,13 @@ EOF
 # ---------------------------------------------------------------
 # phase7_health_check — synchronously verify the cluster components are healthy
 #   after the TKE addons have been deployed: wait for the cube-master, cube-api,
-#   cube-proxy (and cube-webui) Deployments to roll out, then probe the HTTP
+#   cube-lifecycle-manager, cube-proxy and cube-webui Deployments to roll out, then probe the HTTP
 #   health endpoints of cube-master and cube-api through their CLBs (reachable
 #   from the jumpserver). Returns 0 only when every component is healthy, so the
 #   orchestrator can fail-fast.
 # ---------------------------------------------------------------
 phase7_health_check() {
-	banner "Step: Health check — cube-master / cube-api / cube-proxy / cube-webui"
+	banner "Step: Health check — cube-master / cube-api / cube-lifecycle-manager / cube-proxy / cube-webui"
 
 	local ns="cubesandbox"
 	# The namespace must be present (created by the addons apply in Step 6).
@@ -4792,7 +4897,7 @@ phase7_health_check() {
 	# ---- 1) Wait for each Deployment to roll out (synchronous, fail-fast) ---
 	#     On failure, dump pod state + events + container logs to explain why.
 	local dep out ready ok=1
-	for dep in cubemaster cube-api cube-proxy cube-webui; do
+	for dep in cubemaster cube-api cube-lifecycle-manager cube-proxy cube-webui; do
 		echo -e "  ${CYAN}▶ deployment/${dep}: waiting for rollout (timeout 300s)...${NC}"
 		out=$(_js_kubectl -n "${ns}" rollout status deploy/"${dep}" --timeout=300s 2>&1)
 		if echo "$out" | grep -qi "successfully rolled out"; then
@@ -4959,14 +5064,12 @@ main() {
 	# 1. Initialize terraform
 	step1_init
 
-	# tke-addons.tf renders cube-webui's config from webui-nginx.conf via file(),
-	# which Terraform evaluates on EVERY plan/apply regardless of that resource's
-	# count. The file must therefore exist before the FIRST terraform plan (the
-	# metadata plan in select_zone), the state refresh and the base applies — not
-	# just before the addons step. Generate it now (idempotent; derived from the
-	# canonical webui/nginx.conf). Release bundles already ship it; this also covers
-	# running create.sh straight from the source tree.
+	# tke-addons.tf renders nginx configs via file(), which Terraform evaluates on
+	# EVERY plan/apply regardless of resource count. The files must therefore exist
+	# before the FIRST terraform plan. Release bundles already ship them; this also
+	# covers running create.sh straight from the source tree.
 	prepare_webui_nginx_conf
+	prepare_cubeproxy_nginx_conf
 
 	# 1.1 Reconcile stale Kubernetes state: if the TKE cluster is NOT in state (it
 	# was destroyed / never created / removed from state) but leftover kubernetes_*
@@ -5289,8 +5392,12 @@ main() {
 		kubernetes_service.cubemaster[0]
 		kubernetes_deployment.cube_api[0]
 		kubernetes_service.cube_api[0]
+		kubernetes_secret.cube_lifecycle_manager_conf[0]
+		kubernetes_deployment.cube_lifecycle_manager[0]
+		kubernetes_service.cube_lifecycle_manager[0]
 		kubernetes_secret.cubeproxy_global[0]
 		kubernetes_secret.cubeproxy_certs[0]
+		kubernetes_config_map.cubeproxy_nginx_conf[0]
 		kubernetes_deployment.cube_proxy[0]
 		kubernetes_service.cube_proxy[0]
 		kubernetes_config_map.cube_webui_nginx_conf[0]
@@ -5311,7 +5418,7 @@ main() {
 	# Restart the Deployments so any ConfigMap changes take effect.
 	if _js_kubectl get ns cubesandbox 2>/dev/null | grep -q Active; then
 		echo -e "  ${CYAN}Restarting Deployments...${NC}"
-		for _dep in cubemaster cube-api cube-proxy cube-webui; do
+		for _dep in cubemaster cube-api cube-lifecycle-manager cube-proxy cube-webui; do
 			_js_kubectl -n cubesandbox rollout restart deploy ${_dep} 2>/dev/null || true
 		done
 	fi

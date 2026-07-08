@@ -70,6 +70,13 @@ export TF_VAR_ssh_private_key_path="$SSH_PRI_KEY"
 export TF_VAR_compute_node_count="${TF_VAR_compute_node_count:-${TENCENTCLOUD_COMPUTE_NODE_COUNT:-2}}"
 export TF_VAR_cubelet_node_status_update_frequency="${TF_VAR_cubelet_node_status_update_frequency:-${TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY:-1s}}"
 export TF_VAR_tke_node_count="${TF_VAR_tke_node_count:-${TENCENTCLOUD_TKE_NODE_COUNT:-2}}"
+export TF_VAR_cube_lifecycle_manager_image="${TF_VAR_cube_lifecycle_manager_image:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE:-}}"
+export TF_VAR_cube_lifecycle_manager_replicas="${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}}"
+export TF_VAR_cube_lifecycle_manager_default_idle_timeout="${TF_VAR_cube_lifecycle_manager_default_idle_timeout:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT:-5m}}"
+export TF_VAR_cube_lifecycle_manager_heartbeat_ttl="${TF_VAR_cube_lifecycle_manager_heartbeat_ttl:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL:-15s}}"
+export TF_VAR_cube_lifecycle_manager_discovery_refresh="${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}"
+export TF_VAR_cube_admin_token="${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}"
+export TF_VAR_cube_proxy_heartbeat_interval_ms="${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}"
 
 mkdir -p "$SCRIPT_DIR/.kube"
 
@@ -1155,13 +1162,13 @@ unset _TF_JSON
 # Fallbacks: parse the resource id straight from the state if the JSON path above
 # did not resolve it (so the VPC CVM sweep is never silently skipped).
 if [ -z "$VPC_ID" ]; then
-	VPC_ID="$(terraform state show tencentcloud_vpc.cluster 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
+	VPC_ID="$(terraform state show tencentcloud_vpc.cluster 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}' || true)"
 fi
 if [ -z "$JS_INSTANCE_ID" ]; then
-	JS_INSTANCE_ID="$(terraform state show tencentcloud_instance.jumpserver 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
+	JS_INSTANCE_ID="$(terraform state show tencentcloud_instance.jumpserver 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}' || true)"
 fi
 if [ -z "$NAT_GATEWAY_ID" ]; then
-	NAT_GATEWAY_ID="$(terraform state show tencentcloud_nat_gateway.cluster 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}')"
+	NAT_GATEWAY_ID="$(terraform state show tencentcloud_nat_gateway.cluster 2>/dev/null | awk -F'"' '/^[[:space:]]*id[[:space:]]*=/{print $2; exit}' || true)"
 fi
 
 # Teardown status: which resources are still tracked in state (→ will be
@@ -1345,33 +1352,7 @@ else
 	echo -e "  ${CYAN}No Kubernetes addon resources in state; skipping.${NC}"
 fi
 
-# (b) the node-pool CVM workers.
-if in_state 'tencentcloud_kubernetes_node_pool.tke'; then
-	echo -e "  ${CYAN}Removing TKE node pool (CVM workers)...${NC}"
-	run_destroy -target=tencentcloud_kubernetes_node_pool.tke || destroy_fail "TKE node-pool destroy"
-else
-	echo -e "  ${CYAN}No TKE node pool in state; skipping.${NC}"
-fi
-
-# (c) the TKE cluster (its inline initial worker node goes with it).
-if in_state 'tencentcloud_kubernetes_cluster.tke'; then
-	echo -e "  ${CYAN}Removing the TKE cluster...${NC}"
-	run_destroy -target=tencentcloud_kubernetes_cluster.tke || destroy_fail "TKE cluster destroy"
-else
-	echo -e "  ${CYAN}No TKE cluster in state; skipping.${NC}"
-fi
-
-# The addons + cluster are gone; the intranet API Server tunnel is no longer needed.
-_close_apiserver_tunnel
-
-# (d) Terminate the worker CVMs the node pool kept behind (delete_keep_instance).
-#     Best-effort: they only block the shared key pair, deleted later in phase 6.
-echo -e "  ${CYAN}Terminating any orphaned TKE worker CVMs...${NC}"
-terminate_cvms "$TKE_NODE_CVMS" || echo -e "${YELLOW}⚠ Orphan CVM termination had issues; continuing.${NC}"
-
-# ============================================================
-# Phase 2/6 — reverse of create step 5: MySQL + Redis.
-# ============================================================
+# (b) pre-created Kubernetes compute workers attached to the cluster.
 echo ""
 echo -e "${CYAN}━━━ Phase 2/6: Destroy MySQL + Redis ━━━${NC}"
 phase_db_targets=()
@@ -1411,22 +1392,6 @@ fi
 # ============================================================
 echo ""
 echo -e "${CYAN}━━━ Phase 3/6: Destroy compute nodes ━━━${NC}"
-if in_state 'tencentcloud_instance.compute'; then
-	run_destroy -target=tencentcloud_instance.compute || destroy_fail "Compute node destroy"
-else
-	echo -e "  ${CYAN}No compute nodes in state; skipping.${NC}"
-fi
-
-# Before the jump-server goes away: finish the recycle-bin release (it runs tccli)
-# and clear any orphaned CVMs still in the VPC (they hold the shared SG/key pair).
-echo -e "  ${CYAN}Verifying MySQL/Redis are fully removed from the recycle bin (jumpserver still alive)...${NC}"
-ensure_recycle_bin_cleared "$MYSQL_ID" "$REDIS_ID" || {
-	echo -e "${YELLOW}⚠ Recycle-bin verification had issues; continuing.${NC}"
-	NEEDS_MANUAL_CLEANUP=1
-}
-echo -e "  ${CYAN}Terminating any remaining CVMs in the VPC (except the jumpserver)...${NC}"
-terminate_vpc_cvms "$VPC_ID" "$JS_INSTANCE_ID" || echo -e "${YELLOW}⚠ VPC CVM cleanup had issues; continuing.${NC}"
-
 echo ""
 echo -e "${CYAN}━━━ Phase 3/6: Destroy the jump-server ━━━${NC}"
 if in_state 'tencentcloud_instance.jumpserver'; then
@@ -1540,7 +1505,34 @@ fi
 # ============================================================
 echo ""
 echo -e "${CYAN}━━━ Phase 6/6: Destroy VPC / security group / key pair (final sweep) ━━━${NC}"
-run_destroy "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" || destroy_fail "Final network destroy"
+# Security group rule-set resources manage rules inside a security group, not a
+# separately billed cloud object. In partial-failure teardowns the provider may
+# fail while refreshing these rule sets even though the SG itself is still
+# visible and deletable. Drop only the rule-set state here; deleting the SG below
+# removes the rules with it.
+while IFS= read -r _sg_ruleset; do
+	[ -n "$_sg_ruleset" ] || continue
+	echo -e "  ${CYAN}terraform state rm ${_sg_ruleset} (rules are removed with the security group)${NC}"
+	terraform state rm "$_sg_ruleset" >/dev/null 2>&1 || true
+done < <(terraform state list 2>/dev/null | grep -E '^tencentcloud_security_group_rule_set\.' || true)
+
+phase_network_targets=()
+for _res in \
+	tencentcloud_key_pair.cluster \
+	tencentcloud_security_group.clb \
+	tencentcloud_security_group.compute \
+	tencentcloud_security_group.jumpserver \
+	tencentcloud_security_group.tke_pod \
+	tencentcloud_vpc.cluster \
+	random_string.deploy_suffix; do
+	in_state "$_res" && phase_network_targets+=(-target="$_res")
+done
+if [ "${#phase_network_targets[@]}" -gt 0 ]; then
+	run_destroy "${phase_network_targets[@]+"${phase_network_targets[@]}"}" || destroy_fail "Final network destroy"
+else
+	echo -e "  ${CYAN}No VPC/security-group/key resources in state; running final sweep.${NC}"
+	run_destroy "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" || destroy_fail "Final network destroy"
+fi
 
 # Remove the local kubeconfig artifact. It was deliberately kept on disk through
 # the teardown (and detached from terraform state in Phase 1) so the kubernetes

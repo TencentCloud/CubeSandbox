@@ -83,10 +83,10 @@
 
 **高级模式：**
 
-- `TENCENTCLOUD_USE_TCR=true`：创建 TCR，在跳板机构建并推送四个组件镜像。
+- `TENCENTCLOUD_USE_TCR=true`：创建 TCR，在跳板机构建并推送五个组件镜像。
 - `TENCENTCLOUD_USE_CFS=true` 且 `TENCENTCLOUD_CUBEMASTER_REPLICAS>1`：创建 CFS，cubemaster 多副本共享存储。
 
-`cube-proxy` 默认**单副本**（`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`）。自动暂停 / 自动恢复在单副本下才可靠（当前为 sidecar 模型；合并 PR #705 后将改为独立的 `cube-lifecycle-manager`）。多副本时前端 LB 须按 SandboxID hash（会话保持）。
+`cube-proxy` 默认**单副本**（`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`）。自动暂停 / 自动恢复由独立的 `cube-lifecycle-manager` 协调；每个 cube-proxy 副本会注册到 Redis，manager 可自动发现，无需静态配置副本列表。
 
 ## 默认配置创建的资源明细
 
@@ -270,7 +270,7 @@ export TENCENTCLOUD_SECRET_KEY="your-secret-key"
 2. 如不存在则在 `terraform/tencentcloud/.ssh/` 下生成 SSH 密钥对。
 3. 在跳板机上用内置 `mkcert` 生成 cube-proxy 的 TLS 证书（`cube.app` / `*.cube.app`），下载到 `terraform/tencentcloud/cubeproxy-certs/` 供 Secret 挂载。
 4. **默认模式**（`USE_TCR=false`）：拉取公网预置镜像，部署 TKE 插件与 CVM 计算节点（默认 2 台）。
-5. **TCR 模式**（`USE_TCR=true`）：创建 TCR，在跳板机构建并推送四个组件镜像，再部署 TKE 与计算节点。
+5. **TCR 模式**（`USE_TCR=true`）：创建 TCR，在跳板机构建并推送五个组件镜像，再部署 TKE 与计算节点。
 
 ## 配置
 
@@ -287,6 +287,7 @@ export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                    # 默认：公网预置镜像
 export TENCENTCLOUD_USE_CFS=false                    # 默认：无 CFS
 export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.0
+export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 ```
 
 ### 常用变量
@@ -313,8 +314,14 @@ export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.0
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / 演示值 | 应用库名 / 账号 / 密码 |
 | `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `1` | cube-master 副本数 |
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `1` | cube-api 副本数 |
-| `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy 副本数。**默认 1**：自动暂停 / 恢复仅单副本下正确；要 >1 须前端 LB 按 SandboxID hash |
+| `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy 副本数。每个副本都会注册到 Redis，供 cube-lifecycle-manager 发现 |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `1` | cube-lifecycle-manager 副本数。除非已验证 CLM 高可用行为，否则建议保持 `1` |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `1` | cube-webui 副本数 |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT` | `5m` | lifecycle metadata 未指定 `TimeoutSeconds` 时使用的默认空闲超时 |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL` | `15s` | cube-proxy Redis 注册心跳的过期时间 |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH` | `3s` | cube-lifecycle-manager 扫描 Redis 注册表的间隔 |
+| `TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS` | `5000` | cube-proxy 注册心跳间隔（毫秒） |
+| `TENCENTCLOUD_CUBE_ADMIN_TOKEN` | 空 | cube-lifecycle-manager 调用 cube-proxy `/admin/*` 接口时使用的可选共享 token |
 | `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK` | `false` | cube-api / cube-proxy / cube-webui 的网络暴露模式。**默认 `false`**：关联内网 CLB，仅 VPC 内网（经跳板机 / VPN）可访问；设为 `true` 则关联公网 CLB，对公网开放，安全组同步放行 `0.0.0.0/0`。cube-master 始终为内网 CLB，不受此开关影响。开启公网前请阅读[公网服务加固建议](#公网服务加固建议) |
 
 ### 非交互 / CI 运行

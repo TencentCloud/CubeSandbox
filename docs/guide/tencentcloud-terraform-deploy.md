@@ -84,10 +84,10 @@ Matching `env.example` / `variables.tf`, the **default is public images + single
 
 **Advanced modes:**
 
-- `TENCENTCLOUD_USE_TCR=true`: create TCR and build/push the four component images on the jumpserver.
+- `TENCENTCLOUD_USE_TCR=true`: create TCR and build/push the five component images on the jumpserver.
 - `TENCENTCLOUD_USE_CFS=true` with `TENCENTCLOUD_CUBEMASTER_REPLICAS>1`: create CFS for cubemaster multi-replica shared storage.
 
-`cube-proxy` defaults to **single replica** (`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`). Auto-pause / auto-resume is reliable only with one replica (current sidecar model; after PR #705 merges this becomes a standalone `cube-lifecycle-manager`). For multiple replicas the front-end LB must hash on SandboxID (session affinity).
+`cube-proxy` defaults to **single replica** (`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`). Auto-pause / auto-resume is coordinated by the standalone `cube-lifecycle-manager`, and each cube-proxy replica registers itself in Redis so the manager can discover it without static wiring.
 
 ## Resources Created by the Default Configuration
 
@@ -271,7 +271,7 @@ See [Configuration](#configuration) below for the meaning and defaults of each `
 2. Generates an SSH key pair under `terraform/tencentcloud/.ssh/` if none exists.
 3. Generates the cube-proxy TLS certificate (`cube.app` / `*.cube.app`) on the jumpserver with the bundled `mkcert`, downloading it to `terraform/tencentcloud/cubeproxy-certs/` for the Secret mount.
 4. **Default mode** (`USE_TCR=false`): pull public pre-built images and deploy TKE addons and CVM compute nodes (2 by default).
-5. **TCR mode** (`USE_TCR=true`): create TCR, build and push the four component images on the jumpserver, then deploy TKE and compute nodes.
+5. **TCR mode** (`USE_TCR=true`): create TCR, build and push the five component images on the jumpserver, then deploy TKE and compute nodes.
 
 ## Configuration
 
@@ -288,6 +288,7 @@ export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                    # default: public pre-built images
 export TENCENTCLOUD_USE_CFS=false                    # default: no CFS
 export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.0
+export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 ```
 
 ### Common Variables
@@ -314,8 +315,14 @@ export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.0
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / demo | Application DB name / account / password |
 | `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `1` | cube-master replica count |
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `1` | cube-api replica count |
-| `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy replica count. **Default 1**: auto-pause/auto-resume only works in single-replica mode. Going >1 requires the LB to hash on SandboxID |
+| `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy replica count. Each replica registers in Redis for cube-lifecycle-manager discovery |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `1` | cube-lifecycle-manager replica count. Keep `1` unless CLM HA behavior has been validated for your deployment |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `1` | cube-webui replica count |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DEFAULT_IDLE_TIMEOUT` | `5m` | Default idle timeout used when lifecycle metadata omits `TimeoutSeconds` |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL` | `15s` | TTL for cube-proxy Redis registry heartbeats |
+| `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH` | `3s` | Redis discovery scan interval for cube-lifecycle-manager |
+| `TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS` | `5000` | cube-proxy registry heartbeat interval in milliseconds |
+| `TENCENTCLOUD_CUBE_ADMIN_TOKEN` | empty | Optional shared token for cube-lifecycle-manager -> cube-proxy `/admin/*` calls |
 | `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK` | `false` | Network exposure mode for cube-api / cube-proxy / cube-webui. **Default `false`**: VPC-internal CLBs, reachable only from inside the VPC (via jumpserver / VPN). Set to `true` for public CLBs reachable from the internet, with the security group opening `0.0.0.0/0` accordingly. cube-master always stays VPC-internal. Read [Hardening the Public-Facing Services](#hardening-the-public-facing-services) before enabling |
 
 ### Non-interactive / CI runs
