@@ -18,8 +18,19 @@ A sandbox is always in exactly one of these states:
 
 Two settings drive transitions:
 
-- **`timeout`**: how many seconds of inactivity trigger "timeout" (defaults to a fixed value in SDK Config, e.g. 300s).
-- **`on_timeout`**: what happens at timeout — `"kill"` (default; destroy) or `"pause"` (snapshot for later).
+- **`timeout`** (optional): seconds of **idle** time before a timeout fires (e2b uses milliseconds via `timeoutMs`; Cube uses seconds). When omitted, the server decides — the SDK no longer injects a hard-coded default.
+- **`on_timeout`**: what happens at timeout — `"kill"` (default; destroy) or `"pause"` (snapshot for later resume).
+
+`timeout` values (e2b-aligned):
+
+| Value | Behavior |
+|-------|----------|
+| omitted | Server default idle TTL; if the server has no positive default, the sandbox **never** times out |
+| `NEVER_TIMEOUT` (`-1`) | **Never** time out — no idle reclamation |
+| `0` | **Immediate** timeout — reclaimed on the first idle sweep |
+| positive integer `N` | Timeout after **N** seconds of idle time |
+
+Go: `cubesandbox.NeverTimeout`; Python: `from cubesandbox import NEVER_TIMEOUT`.
 
 ```
                        ┌──────────────────────────────────────┐
@@ -57,13 +68,13 @@ Key parameters of `Sandbox.create()`:
 | Parameter               | Description                                                                                  |
 |-------------------------|----------------------------------------------------------------------------------------------|
 | `template`              | Template ID used to boot the sandbox; defaults to env var `CUBE_TEMPLATE_ID`.                |
-| `timeout`               | Idle timeout in **seconds**. (Note: e2b's `timeoutMs` is milliseconds; Cube uses seconds.)   |
+| `timeout`               | Optional idle timeout in seconds; see the table above |
 | `lifecycle`             | Lifecycle policy — see [Platform-managed auto-pause / auto-resume](#platform-managed-auto-pause-auto-resume) below. |
 | `metadata`              | Arbitrary key/value pairs stored on the sandbox; readable from the list / detail endpoints. |
 | `env_vars`              | Environment variables injected into the sandbox process.                                     |
 | `allow_internet_access` | Whether outbound internet is allowed; `network` provides finer-grained egress control.       |
 
-> Cube doesn't impose hard wall-clock ceilings (24h Pro / 1h Base) the way hosted e2b does. The idle `timeout` is still required — it prevents stranded sandboxes from holding resources indefinitely.
+> Cube doesn't impose hard wall-clock ceilings (24h Pro / 1h Base) the way hosted e2b does. When you omit `timeout`, the effective idle TTL is set by your cluster operator — see [Operational Notes](#operational-notes) below.
 
 ## Inspect a Running Sandbox
 
@@ -80,7 +91,7 @@ print(info)
 # }
 ```
 
-`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available).
+`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). For **never-timeout** sandboxes there is no deadline, so `endAt` is **omitted** from the response rather than reported as equal to `startedAt`.
 
 ## List Running Sandboxes
 
@@ -142,7 +153,7 @@ Any of these resets the idle clock:
 - SDK calls: `sandbox.run_code(...)`, `sandbox.commands.run(...)`, `sandbox.files.read(...)` / `write(...)`.
 - Direct HTTP traffic to a service inside the sandbox (e.g. via the URL returned by `getHost()`).
 
-Sandboxes that don't opt in (no `lifecycle` argument) default to `on_timeout="kill"`: once they sit idle for `timeout` seconds the platform destroys them. This matches e2b's `lifecycle.on_timeout="kill"` semantic. If you want a sandbox that never gets reaped automatically, set `timeout` high enough or have the client send periodic activity to reset the idle clock.
+Sandboxes that don't opt in (no `lifecycle` argument) default to `on_timeout="kill"`: once they sit idle for the effective `timeout` the platform destroys them. This matches e2b's `lifecycle.on_timeout="kill"` semantic. To avoid automatic reclamation, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), set a high `timeout`, or send periodic activity to reset the idle clock.
 
 ### End-to-end examples
 
@@ -162,6 +173,19 @@ python examples/code-sandbox-quickstart/auto-kill.py
 ```
 
 ## Operational Notes
+
+### Cluster default idle timeout (`default_timeout_insec`)
+
+When the client omits `timeout`, CubeMaster applies `cubelet_conf.default_timeout_insec` in `CubeMaster/conf.yaml` (one-click installs: `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml`).
+
+| Config value | Effect when the client omits `timeout` |
+|--------------|----------------------------------------|
+| unset or `<= 0` | **No cluster-wide idle TTL** — sandboxes never time out from idle |
+| positive `N` | Default idle TTL of **N** seconds |
+
+The repository ships with **no cluster-wide idle timeout** (`default_timeout_insec: -1`). Set a positive value (for example `300`) if you want the cluster to reclaim sandboxes that never pass an explicit `timeout`. Restart `cube-sandbox-cubemaster.service` after edits.
+
+`create_timeout_insec` in the same section is unrelated: it only bounds the create/scheduling RPC deadline, not sandbox idle TTL. See [Service management — CubeMaster settings](service-management.md#cubemaster-settings).
 
 - **Pause fidelity**: CPU registers, process memory, TCP state (with no external peer), and filesystem mutations all survive the snapshot. Outbound sockets the sandbox itself opened are dropped on pause and must be reopened by the application after resume.
 - **Cluster coordination**: auto-pause is driven by the `cube-lifecycle-manager` service that runs on the control node. It consumes lifecycle events CubeMaster publishes via Redis stream, discovers every live CubeProxy replica through a Redis-backed registration table, and broadcasts state to each of them. Cross-replica races are resolved by Redis `SETNX` state locks so the same sandbox is never paused or resumed twice concurrently.

@@ -73,11 +73,20 @@ func (p *storeTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID str
 	}
 
 	now := time.Now().UnixMilli()
-	meta.TimeoutSeconds = timeoutSeconds
+	ts := timeoutSeconds
+	meta.TimeoutSeconds = &ts
 	meta.CreatedAt = now
-	meta.EndAt = now + int64(timeoutSeconds)*1000
+	meta.EndAt = projectedEndAt(now, timeoutSeconds)
 	p.store.PublishUpdate(ctx, meta)
 	return meta.EndAt, nil
+}
+
+// projectedEndAt maps idle TTL to EndAt (unix ms). See docs/guide/lifecycle.md.
+func projectedEndAt(nowMs int64, timeoutSeconds int) int64 {
+	if timeoutSeconds < 0 {
+		return 0
+	}
+	return nowMs + int64(timeoutSeconds)*1000
 }
 
 // LookupEndAt reads the latest meta.EndAt straight from the lifecycle snapshot in Redis.
@@ -95,8 +104,8 @@ func (p *storeTimeoutProvider) LookupEndAt(ctx context.Context, sandboxID string
 	if meta.EndAt > 0 {
 		return meta.EndAt, nil
 	}
-	if meta.CreatedAt > 0 && meta.TimeoutSeconds > 0 {
-		return meta.CreatedAt + int64(meta.TimeoutSeconds)*1000, nil
+	if meta.CreatedAt > 0 && meta.TimeoutSeconds != nil && *meta.TimeoutSeconds > 0 {
+		return meta.CreatedAt + int64(*meta.TimeoutSeconds)*1000, nil
 	}
 	return 0, nil
 }
@@ -114,16 +123,22 @@ func onAfterCreate(ctx context.Context, sandboxID, hostID, hostIP string, req *s
 		return nil
 	}
 	now := time.Now().UnixMilli()
+	// ConstructCubeletReq normalizes req.Timeout before create; guard nil defensively.
+	timeoutSeconds := sandboxtypes.NeverTimeout
+	if req.Timeout != nil {
+		timeoutSeconds = *req.Timeout
+	}
+	ts := timeoutSeconds
 	meta := &SandboxLifecycleMeta{
 		SandboxID:      sandboxID,
 		HostID:         hostID,
 		HostIP:         hostIP,
 		InstanceType:   req.InstanceType,
-		TimeoutSeconds: req.Timeout,
+		TimeoutSeconds: &ts,
 		AutoPause:      req.AutoPause,
 		AutoResume:     req.AutoResume,
 		CreatedAt:      now,
-		EndAt:          now + int64(req.Timeout)*1000,
+		EndAt:          projectedEndAt(now, timeoutSeconds),
 	}
 	if req.Annotations != nil {
 		// Template ID is conventionally carried via annotations from CubeAPI;

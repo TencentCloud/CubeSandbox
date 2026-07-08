@@ -131,6 +131,7 @@ the existing installation.
 One-click does not create an extra global `configs/` layer on the target machine; instead, files are placed directly into each component's native configuration paths:
 
 - `configs/single-node/cubemaster.yaml` → `CubeMaster/conf.yaml`
+  - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — Operational Notes](../../docs/guide/lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
 - `Cubelet/config/` → `Cubelet/config/`
 - `Cubelet/dynamicconf/` → `Cubelet/dynamicconf/`
 - `configs/single-node/network-agent.yaml` → `network-agent/network-agent.yaml`

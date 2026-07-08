@@ -197,7 +197,7 @@ func TestSweeper_PausesIdleSandbox(t *testing.T) {
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-1", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 300,
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(300),
 	}, now.Add(-10*time.Minute).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
@@ -228,7 +228,7 @@ func TestSweeper_SkipsSandboxWithoutAutoPause(t *testing.T) {
 
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-2", InstanceType: "cubebox",
-		AutoPause: false, TimeoutSeconds: 60,
+		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 	}, now.Add(-1*time.Hour).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
@@ -271,7 +271,7 @@ func TestSweeper_KillRollsBackOnFailure(t *testing.T) {
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-killfail", InstanceType: "cubebox",
-		AutoPause: false, TimeoutSeconds: 60,
+		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 	}, now.Add(-10*time.Minute).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
@@ -308,7 +308,7 @@ func TestSweeper_KillNotFoundEvictsRegistry(t *testing.T) {
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-killgone", InstanceType: "cubebox",
-		AutoPause: false, TimeoutSeconds: 60,
+		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 	}, now.Add(-10*time.Minute).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
@@ -337,7 +337,7 @@ func TestSweeper_KillSkipsAlreadyKillingSandbox(t *testing.T) {
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-killmid", InstanceType: "cubebox",
-		AutoPause: false, TimeoutSeconds: 60,
+		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 	}, now.Add(-1*time.Hour).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
@@ -362,7 +362,7 @@ func TestSweeper_BootstrapWarmupSkipsBootstrapEntries(t *testing.T) {
 	startedAt := time.Now()
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-bootstrap", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 60,
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 		CreatedAt: startedAt.Add(-1 * time.Hour).UnixMilli(), // ancient
 	})
 	// Pin FirstSeenAt to startedAt — that's exactly what main.go's
@@ -407,7 +407,7 @@ func TestSweeper_RollsBackOnPauseFailure(t *testing.T) {
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-4", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 60,
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 	}, now.Add(-10*time.Minute).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
@@ -438,7 +438,7 @@ func TestSweeper_SkipsWhenLockHeldElsewhere(t *testing.T) {
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-5", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 1,
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(1),
 	}, now.Add(-1*time.Hour).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
@@ -464,7 +464,7 @@ func TestSweeper_FallsBackToCreatedAtWhenNoActivityRecorded(t *testing.T) {
 	// the sandbox should NOT be paused.
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-recent", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 300,
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(300),
 		CreatedAt: now.Add(-1 * time.Minute).UnixMilli(),
 	})
 	// Pretend the entry was added long enough ago to clear the grace window.
@@ -480,7 +480,7 @@ func TestSweeper_FallsBackToCreatedAtWhenNoActivityRecorded(t *testing.T) {
 	// Now CreatedAt is 10 minutes old → past timeout → expect pause.
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-old", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 300,
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(300),
 		CreatedAt: now.Add(-10 * time.Minute).UnixMilli(),
 	})
 	at2 := now.Add(2 * time.Minute)
@@ -511,7 +511,7 @@ func TestSweeper_NotFoundEvictsRegistryEntry(t *testing.T) {
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-gone", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 60,
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 	}, now.Add(-10*time.Minute).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
@@ -549,7 +549,7 @@ func TestSweeper_SkipsAlreadyPausedSandbox(t *testing.T) {
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-zzz", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 60,
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 	}, now.Add(-1*time.Hour).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
@@ -576,7 +576,7 @@ func TestSweeper_SkipsPausingSandbox(t *testing.T) {
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-mid", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 60,
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 	}, now.Add(-1*time.Hour).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)
@@ -584,6 +584,86 @@ func TestSweeper_SkipsPausingSandbox(t *testing.T) {
 
 	if len(master.calls) != 0 {
 		t.Fatalf("sweeper must NOT call Pause when peer is mid-flight: %v", master.calls)
+	}
+}
+
+func TestSweeper_NeverTimeoutIsSkipped(t *testing.T) {
+	// Never-timeout entries must not be reclaimed. See docs/guide/lifecycle.md.
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{}
+	push := newFakePush()
+
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-never", InstanceType: "cubebox",
+		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(-1),
+	}, now.Add(-24*time.Hour).UnixMilli())
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.sweepOnce(context.Background())
+
+	if len(master.calls) != 0 || len(master.killCalls) != 0 {
+		t.Fatalf("never-timeout sandbox must not be paused/killed: pause=%v kill=%v",
+			master.calls, master.killCalls)
+	}
+	if reg.Get("sbx-never") == nil {
+		t.Fatal("never-timeout entry must remain in the registry")
+	}
+}
+
+func TestSweeper_ZeroTimeoutReclaimsImmediately(t *testing.T) {
+	// Zero timeout reclaims on the first sweep. See docs/guide/lifecycle.md.
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{}
+	push := newFakePush()
+
+	now := time.Now()
+	// Freshly created (CreatedAt = now) and never active — with timeout 0 the
+	// idle check trips immediately.
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-immediate", InstanceType: "cubebox",
+		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(0),
+		CreatedAt: now.UnixMilli(),
+	})
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.sweepOnce(context.Background())
+
+	if len(master.killCalls) != 1 || master.killCalls[0] != "sbx-immediate" {
+		t.Fatalf("zero-timeout sandbox must be killed immediately: %v", master.killCalls)
+	}
+}
+
+func TestSweeper_NilTimeoutFallsBackToDefaultIdle(t *testing.T) {
+	// Nil timeout falls back to DefaultIdleTimeout. See docs/guide/lifecycle.md.
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{}
+	push := newFakePush()
+
+	now := time.Now()
+
+	// Idle for 1 minute (< 5m default) → must survive.
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-legacy-recent", InstanceType: "cubebox",
+		AutoPause: false, TimeoutSeconds: nil,
+		CreatedAt: now.Add(-1 * time.Minute).UnixMilli(),
+	})
+	// Idle for 10 minutes (> 5m default) → must be reclaimed.
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-legacy-old", InstanceType: "cubebox",
+		AutoPause: false, TimeoutSeconds: nil,
+		CreatedAt: now.Add(-10 * time.Minute).UnixMilli(),
+	})
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.sweepOnce(context.Background())
+
+	if len(master.killCalls) != 1 || master.killCalls[0] != "sbx-legacy-old" {
+		t.Fatalf("nil timeout must use DefaultIdleTimeout: expected only sbx-legacy-old killed, got %v",
+			master.killCalls)
 	}
 }
 
@@ -607,7 +687,7 @@ func TestSweeper_AlreadyPausedReconcilesAsSuccess(t *testing.T) {
 	now := time.Now()
 	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx-already", InstanceType: "cubebox",
-		AutoPause: true, TimeoutSeconds: 60,
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 	}, now.Add(-10*time.Minute).UnixMilli())
 
 	s := newTestSweeper(reg, store, master, push, now)

@@ -464,7 +464,7 @@ pub async fn create_agent_instance(
         .sandboxes
         .create_sandbox(NewSandbox {
             template_id: template_id.clone(),
-            timeout,
+            timeout: Some(timeout),
             lifecycle: None,
             secure: None,
             allow_internet_access: Some(true),
@@ -2226,7 +2226,7 @@ pub async fn clone_agent_instance(
         .sandboxes
         .create_sandbox(NewSandbox {
             template_id: snapshot_id.clone(),
-            timeout,
+            timeout: Some(timeout),
             lifecycle: None,
             secure: None,
             allow_internet_access: Some(true),
@@ -2932,7 +2932,7 @@ pub async fn resume_agent_openclaw(
     state
         .services
         .sandboxes
-        .connect_sandbox(&record.sandbox_id, timeout)
+        .connect_sandbox(&record.sandbox_id, Some(timeout))
         .await?;
     let store = state.agenthub_store.as_ref().ok_or_else(|| {
         AppError::BadRequest("AgentHub database persistence is not configured".to_string())

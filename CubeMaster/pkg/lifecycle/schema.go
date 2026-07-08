@@ -60,14 +60,15 @@ const (
 // also the payload field of OpCreate stream entries. OpDelete entries omit
 // the payload field — the sandbox ID is enough to drop a registry entry.
 type SandboxLifecycleMeta struct {
-	SandboxID      string `json:"sandbox_id"`
-	TemplateID     string `json:"template_id,omitempty"`
-	HostID         string `json:"host_id,omitempty"`
-	HostIP         string `json:"host_ip,omitempty"`
-	InstanceType   string `json:"instance_type,omitempty"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
-	AutoPause      bool   `json:"auto_pause,omitempty"`
-	AutoResume     bool   `json:"auto_resume,omitempty"`
+	SandboxID    string `json:"sandbox_id"`
+	TemplateID   string `json:"template_id,omitempty"`
+	HostID       string `json:"host_id,omitempty"`
+	HostIP       string `json:"host_ip,omitempty"`
+	InstanceType string `json:"instance_type,omitempty"`
+	// *int so nil (legacy absent) ≠ explicit 0. See docs/guide/lifecycle.md.
+	TimeoutSeconds *int `json:"timeout_seconds,omitempty"`
+	AutoPause      bool `json:"auto_pause,omitempty"`
+	AutoResume     bool `json:"auto_resume,omitempty"`
 	// CreatedAt is unix milliseconds. Sidecars use it as the initial
 	// "last active" baseline before they ever observe a real request.
 	CreatedAt int64 `json:"created_at,omitempty"`

@@ -232,7 +232,7 @@ func CanonicalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.
 	if out.Labels == nil {
 		out.Labels = map[string]string{}
 	}
-	out.Timeout = 0
+	out.Timeout = nil
 	out.InsId = ""
 	out.InsIp = ""
 	out.Request = nil

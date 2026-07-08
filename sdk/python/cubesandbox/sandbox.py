@@ -25,6 +25,9 @@ from ._transport import build_client
 
 JUPYTER_PORT = 49999
 
+#: Never-timeout sentinel. See docs/guide/lifecycle.md.
+NEVER_TIMEOUT = -1
+
 
 def _check_response(resp: requests.Response) -> None:
     if resp.ok:
@@ -156,7 +159,8 @@ class Sandbox:
 
         Args:
             template: Template ID. Falls back to ``CUBE_TEMPLATE_ID`` env var.
-            timeout: Sandbox TTL in seconds. Defaults to ``Config.timeout`` (300).
+            timeout: Sandbox idle timeout in seconds (``None`` omits the field).
+                See ``docs/guide/lifecycle.md``.
             env_vars: Environment variables injected into the sandbox.
             metadata: Arbitrary key-value metadata (e.g. network-policy, host-mount).
             allow_internet_access: When ``False``, the sandbox is blocked from
@@ -200,7 +204,10 @@ class Sandbox:
         if not tpl:
             raise ValueError("template is required. Set CUBE_TEMPLATE_ID or pass template=")
 
-        payload: dict = {"templateID": tpl, "timeout": timeout or cfg.timeout}
+        # Omitted when None; see docs/guide/lifecycle.md.
+        payload: dict = {"templateID": tpl}
+        if timeout is not None:
+            payload["timeout"] = timeout
         if env_vars:
             payload["envVars"] = env_vars
         if metadata:
@@ -262,8 +269,9 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
+        # Connect omits timeout; see docs/guide/lifecycle.md.
         resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
-                      json={"timeout": cfg.timeout},
+                      json={},
                       headers={"Content-Type": "application/json"})
         _check_response(resp)
         return cls(resp.json(), config=cfg)
@@ -421,7 +429,7 @@ class Sandbox:
                 f"Sandbox {self.sandbox_id!r} did not reach 'paused' state within {timeout}s"
             )
 
-    def resume(self, timeout: int = 300) -> None:
+    def resume(self, timeout: int | None = None) -> None:
         """POST /sandboxes/:sandboxID/resume - Resume a paused sandbox.
 
         .. deprecated::
@@ -429,16 +437,20 @@ class Sandbox:
             and returns a fresh :class:`Sandbox` instance.
 
         Args:
-            timeout: Sandbox TTL in seconds after resume (default: 300).
+            timeout: Sandbox TTL in seconds after resume (``None`` omits the field).
+                See ``docs/guide/lifecycle.md``.
 
         Raises:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
             ApiError: If the sandbox is already running (HTTP 409) or on
                 unexpected backend error (HTTP 500).
         """
+        body: dict = {}
+        if timeout is not None:
+            body["timeout"] = timeout
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/resume",
-            json={"timeout": timeout},
+            json=body,
         )
         _check_response(resp)
 

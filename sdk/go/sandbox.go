@@ -89,16 +89,17 @@ func (s *Sandbox) Pause(ctx context.Context, opts PauseOptions) error {
 //
 // Deprecated: use Client.Connect instead, which auto-resumes paused sandboxes
 // and returns a fresh Sandbox instance.
-func (s *Sandbox) Resume(ctx context.Context, timeout time.Duration) error {
+// The timeout is optional; nil omits it. See docs/guide/lifecycle.md.
+func (s *Sandbox) Resume(ctx context.Context, timeout *time.Duration) error {
 	if err := s.ensureClient(); err != nil {
 		return err
 	}
-	if timeout <= 0 {
-		timeout = s.client.config.Timeout
-	}
 
 	path := "/sandboxes/" + url.PathEscape(s.SandboxID) + "/resume"
-	payload := map[string]any{"timeout": durationSeconds(timeout)}
+	payload := map[string]any{}
+	if timeout != nil {
+		payload["timeout"] = timeoutPayloadSeconds(*timeout)
+	}
 	return s.client.doJSON(ctx, http.MethodPost, path, payload, nil, http.StatusOK, http.StatusCreated, http.StatusNoContent)
 }
 

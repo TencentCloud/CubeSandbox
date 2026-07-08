@@ -130,3 +130,11 @@ func durationSeconds(d time.Duration) int {
 	}
 	return seconds
 }
+
+// timeoutPayloadSeconds maps a duration to wire seconds. See docs/guide/lifecycle.md.
+func timeoutPayloadSeconds(d time.Duration) int {
+	if d < 0 {
+		return -1
+	}
+	return durationSeconds(d)
+}

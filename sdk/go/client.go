@@ -78,7 +78,9 @@ func (c *Client) Create(ctx context.Context, opts CreateOptions) (*Sandbox, erro
 }
 
 func (c *Client) Connect(ctx context.Context, sandboxID string) (*Sandbox, error) {
-	payload := map[string]any{"timeout": durationSeconds(c.config.Timeout)}
+	// Do not fabricate a timeout on connect: with no caller-provided value we
+	// omit the field entirely and let the server keep its own timeout policy.
+	payload := map[string]any{}
 	var sandbox Sandbox
 	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/connect", payload, &sandbox, http.StatusOK); err != nil {
 		return nil, err
@@ -120,13 +122,12 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 		return nil, fmt.Errorf("template is required. Set CUBE_TEMPLATE_ID or pass TemplateID")
 	}
 
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = c.config.Timeout
-	}
 	payload := map[string]any{
 		"templateID": templateID,
-		"timeout":    durationSeconds(timeout),
+	}
+	// Omitted when nil; see docs/guide/lifecycle.md.
+	if opts.Timeout != nil {
+		payload["timeout"] = timeoutPayloadSeconds(*opts.Timeout)
 	}
 	if len(opts.EnvVars) > 0 {
 		payload["envVars"] = opts.EnvVars

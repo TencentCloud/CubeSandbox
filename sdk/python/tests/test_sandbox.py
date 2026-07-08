@@ -104,6 +104,30 @@ class TestCreate:
         assert body["templateID"] == "tpl-foo"
         assert body["timeout"] == 600
 
+    def test_create_omits_timeout_when_absent(self):
+        # No timeout argument → the field is omitted so CubeMaster applies its
+        # server-side default (no implicit client fill).
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(template="tpl-foo", config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert "timeout" not in body
+
+    def test_create_sends_explicit_zero_timeout(self):
+        # An explicit 0 must be forwarded as-is (not dropped as falsy).
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(template="tpl-foo", timeout=0, config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert body["timeout"] == 0
+
+    def test_create_sends_never_timeout(self):
+        # NEVER_TIMEOUT must be forwarded as -1.
+        from cubesandbox import NEVER_TIMEOUT
+
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            Sandbox.create(template="tpl-foo", timeout=NEVER_TIMEOUT, config=make_config())
+        body = m.call_args.kwargs["json"]
+        assert body["timeout"] == -1
+
     def test_create_sends_env_vars(self):
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             Sandbox.create(env_vars={"FOO": "bar"}, config=make_config())
@@ -621,13 +645,15 @@ class TestConnect:
             with pytest.raises(SandboxNotFoundError):
                 Sandbox.connect(SANDBOX_ID, config=make_config())
 
-    def test_connect_sends_timeout(self):
+    def test_connect_omits_timeout(self):
+        # connect no longer fabricates a timeout: the field must be absent so
+        # the server keeps its own timeout policy.
         cfg = make_config()
         cfg.timeout = 600
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA)) as m:
             Sandbox.connect(SANDBOX_ID, config=cfg)
         body = m.call_args.kwargs["json"]
-        assert body["timeout"] == 600
+        assert "timeout" not in body
 
 
 # ── GET /sandboxes ────────────────────────────────────────────────────────────
@@ -785,13 +811,35 @@ class TestResume:
         body = m.call_args.kwargs["json"]
         assert body["timeout"] == 120
 
-    def test_resume_default_timeout(self):
+    def test_resume_omits_timeout_by_default(self):
+        # resume() with no argument must omit the timeout field so the server
+        # keeps its own timeout policy.
         sb = make_sandbox()
         with patch.object(sb._session, "post",
                           return_value=mock_response(SANDBOX_DATA, status=201)) as m:
             sb.resume()
         body = m.call_args.kwargs["json"]
-        assert body["timeout"] == 300
+        assert "timeout" not in body
+
+    def test_resume_explicit_zero_is_sent(self):
+        # An explicit 0 must be forwarded as-is (not dropped as falsy).
+        sb = make_sandbox()
+        with patch.object(sb._session, "post",
+                          return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            sb.resume(timeout=0)
+        body = m.call_args.kwargs["json"]
+        assert body["timeout"] == 0
+
+    def test_resume_sends_never_timeout(self):
+        # NEVER_TIMEOUT must be forwarded as -1.
+        from cubesandbox import NEVER_TIMEOUT
+
+        sb = make_sandbox()
+        with patch.object(sb._session, "post",
+                          return_value=mock_response(SANDBOX_DATA, status=201)) as m:
+            sb.resume(timeout=NEVER_TIMEOUT)
+        body = m.call_args.kwargs["json"]
+        assert body["timeout"] == -1
 
     def test_resume_not_found(self):
         sb = make_sandbox()

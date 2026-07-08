@@ -103,7 +103,7 @@ func TestCreateSendsPythonCompatiblePayload(t *testing.T) {
 	})
 
 	sb, err := client.Create(context.Background(), CreateOptions{
-		Timeout:             600 * time.Second,
+		Timeout:             DurationPtr(600 * time.Second),
 		EnvVars:             map[string]string{"FOO": "bar"},
 		Metadata:            map[string]string{"network-policy": "custom"},
 		AllowInternetAccess: &disallowInternet,
@@ -171,6 +171,43 @@ func TestCreateOmitsOptionalFieldsAndRequiresTemplate(t *testing.T) {
 	}
 }
 
+func TestCreateTimeoutWireValues(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = nil
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-t"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-t"})
+	ctx := context.Background()
+
+	// Omitted → field absent (server decides).
+	if _, err := client.Create(ctx, CreateOptions{}); err != nil {
+		t.Fatalf("Create(omit): %v", err)
+	}
+	if _, ok := got["timeout"]; ok {
+		t.Fatalf("timeout must be omitted when unset: %#v", got)
+	}
+
+	// Explicit zero is sent as 0.
+	if _, err := client.Create(ctx, CreateOptions{Timeout: DurationPtr(0)}); err != nil {
+		t.Fatalf("Create(0): %v", err)
+	}
+	assertNumber(t, got, "timeout", 0)
+
+	// NeverTimeout is sent as -1.
+	if _, err := client.Create(ctx, CreateOptions{Timeout: DurationPtr(NeverTimeout)}); err != nil {
+		t.Fatalf("Create(never): %v", err)
+	}
+	assertNumber(t, got, "timeout", -1)
+}
+
 func TestLifecycleEndpoints(t *testing.T) {
 	var calls []string
 	var connectTimeout, resumeTimeout int
@@ -220,8 +257,10 @@ func TestLifecycleEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	if connectTimeout != 600 {
-		t.Fatalf("connect timeout=%d", connectTimeout)
+	// Connect no longer fabricates a timeout: the field is omitted so the
+	// server keeps its own timeout policy (decoded default int is 0).
+	if connectTimeout != 0 {
+		t.Fatalf("connect must omit timeout, got=%d", connectTimeout)
 	}
 
 	list, err := client.List(ctx)
@@ -244,7 +283,7 @@ func TestLifecycleEndpoints(t *testing.T) {
 	if err := sb.Pause(ctx, PauseOptions{Wait: &wait}); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
-	if err := sb.Resume(ctx, 120*time.Second); err != nil {
+	if err := sb.Resume(ctx, DurationPtr(120*time.Second)); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	if resumeTimeout != 120 {
@@ -793,6 +832,34 @@ func sandboxJSON(sandboxID, templateID string) string {
 
 func sandboxInfoJSON(sandboxID, state string) string {
 	return fmt.Sprintf(`{"sandboxID":%q,"templateID":"tpl-test","clientID":"client-1","startedAt":"2026-05-14T00:00:00Z","endAt":"2026-05-14T01:00:00Z","envdVersion":"0.0.1","domain":"cube.app","cpuCount":2,"memoryMB":512,"state":%q}`, sandboxID, state)
+}
+
+func TestSandboxInfoEndAtOmitted(t *testing.T) {
+	const payload = `{"sandboxID":"sb-1","templateID":"tpl-1","clientID":"c-1","startedAt":"2026-05-14T00:00:00Z","envdVersion":"0.0.1","cpuCount":2,"memoryMB":512,"state":"running"}`
+
+	var info SandboxInfo
+	if err := json.Unmarshal([]byte(payload), &info); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if info.EndAt != nil {
+		t.Fatalf("EndAt=%#v, want nil when API omits endAt", info.EndAt)
+	}
+}
+
+func TestSandboxInfoEndAtPresent(t *testing.T) {
+	const payload = `{"sandboxID":"sb-1","templateID":"tpl-1","clientID":"c-1","startedAt":"2026-05-14T00:00:00Z","endAt":"2026-05-14T01:00:00Z","envdVersion":"0.0.1","cpuCount":2,"memoryMB":512,"state":"running"}`
+
+	var info SandboxInfo
+	if err := json.Unmarshal([]byte(payload), &info); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if info.EndAt == nil {
+		t.Fatal("EndAt=nil, want non-nil when API includes endAt")
+	}
+	want := time.Date(2026, 5, 14, 1, 0, 0, 0, time.UTC)
+	if !info.EndAt.Equal(want) {
+		t.Fatalf("EndAt=%v want %v", info.EndAt, want)
+	}
 }
 
 func serverHostPort(t *testing.T, rawURL string) (string, int) {

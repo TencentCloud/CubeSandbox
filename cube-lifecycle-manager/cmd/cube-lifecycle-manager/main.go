@@ -317,7 +317,7 @@ func handleEvent(ctx context.Context, ev redisstream.Event, push *proxypush.Clie
 			zap.String("sandbox_id", ev.SandboxID),
 			zap.Bool("auto_pause", ev.Meta.AutoPause),
 			zap.Bool("auto_resume", ev.Meta.AutoResume),
-			zap.Int("timeout_seconds", ev.Meta.TimeoutSeconds),
+			zap.Intp("timeout_seconds", ev.Meta.TimeoutSeconds),
 			zap.Int("registry_size", reg.Len()))
 		if err := push.UpsertMeta(ctx, *ev.Meta); err != nil {
 			log.Warn("create event push failed",
@@ -344,7 +344,7 @@ func handleEvent(ctx context.Context, ev redisstream.Event, push *proxypush.Clie
 			zap.String("sandbox_id", ev.SandboxID),
 			zap.Bool("auto_pause", ev.Meta.AutoPause),
 			zap.Bool("auto_resume", ev.Meta.AutoResume),
-			zap.Int("timeout_seconds", ev.Meta.TimeoutSeconds),
+			zap.Intp("timeout_seconds", ev.Meta.TimeoutSeconds),
 			zap.Int64("created_at_ms", ev.Meta.CreatedAt),
 			zap.Int64("end_at_ms", ev.Meta.EndAt))
 		if err := push.UpsertMeta(ctx, *ev.Meta); err != nil {

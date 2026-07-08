@@ -12,6 +12,16 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 )
 
+// NeverTimeout is the never-timeout idle TTL sentinel (-1).
+// See docs/guide/lifecycle.md — Timeout semantics (canonical).
+const NeverTimeout = -1
+
+// TimeoutPtr is a convenience constructor for the pointer-typed
+// CreateCubeSandboxReq.Timeout field.
+func TimeoutPtr(v int) *int {
+	return &v
+}
+
 type Request struct {
 	RequestID string `json:"requestID" p:"requestID"  v:"required"`
 }
@@ -35,7 +45,9 @@ type HostChangeEvent struct {
 type CreateCubeSandboxReq struct {
 	*Request
 
-	Timeout           int                `json:"timeout,omitempty" d:"60"`
+	// Optional idle TTL in seconds; nil = client omitted the field.
+	// See docs/guide/lifecycle.md — Timeout semantics (canonical).
+	Timeout           *int               `json:"timeout,omitempty"`
 	SnapshotDir       string             `json:"snapshot_dir,omitempty"`
 	InsId             string             `json:"ins_id,omitempty"`
 	InsIp             string             `json:"ins_ip,omitempty"`

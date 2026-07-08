@@ -54,14 +54,21 @@ const (
 
 // SandboxLifecycleMeta mirrors CubeMaster/pkg/lifecycle.SandboxLifecycleMeta.
 type SandboxLifecycleMeta struct {
-	SandboxID      string `json:"sandbox_id"`
-	TemplateID     string `json:"template_id,omitempty"`
-	HostID         string `json:"host_id,omitempty"`
-	HostIP         string `json:"host_ip,omitempty"`
-	InstanceType   string `json:"instance_type,omitempty"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
-	AutoPause      bool   `json:"auto_pause,omitempty"`
-	AutoResume     bool   `json:"auto_resume,omitempty"`
-	CreatedAt      int64  `json:"created_at,omitempty"`
-	EndAt          int64  `json:"end_at,omitempty"`
+	SandboxID    string `json:"sandbox_id"`
+	TemplateID   string `json:"template_id,omitempty"`
+	HostID       string `json:"host_id,omitempty"`
+	HostIP       string `json:"host_ip,omitempty"`
+	InstanceType string `json:"instance_type,omitempty"`
+	// *int so nil (legacy absent) ≠ explicit 0. See docs/guide/lifecycle.md.
+	TimeoutSeconds *int  `json:"timeout_seconds,omitempty"`
+	AutoPause      bool  `json:"auto_pause,omitempty"`
+	AutoResume     bool  `json:"auto_resume,omitempty"`
+	CreatedAt      int64 `json:"created_at,omitempty"`
+	EndAt          int64 `json:"end_at,omitempty"`
+}
+
+// TimeoutSecondsPtr is a convenience constructor for the TimeoutSeconds
+// pointer field. Prefer it over inline &v so intent reads clearly.
+func TimeoutSecondsPtr(v int) *int {
+	return &v
 }

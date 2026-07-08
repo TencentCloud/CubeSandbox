@@ -152,7 +152,7 @@ func TestSandboxRequiresAttachedClient(t *testing.T) {
 	if err := (&Sandbox{}).Pause(ctx, PauseOptions{}); err == nil {
 		t.Fatal("Pause without client returned nil error")
 	}
-	if err := (&Sandbox{}).Resume(ctx, 0); err == nil {
+	if err := (&Sandbox{}).Resume(ctx, nil); err == nil {
 		t.Fatal("Resume without client returned nil error")
 	}
 	if err := (&Sandbox{}).Kill(ctx); err == nil {
@@ -289,7 +289,8 @@ func TestResumeDefaultTimeoutAndErrors(t *testing.T) {
 		client:    NewClient(Config{APIURL: server.URL, Timeout: 123 * time.Second}),
 		SandboxID: "sb-resume",
 	}
-	if err := sb.Resume(context.Background(), 0); err != nil {
+	// Resume now sends exactly the timeout it is given; nil omits the field.
+	if err := sb.Resume(context.Background(), DurationPtr(123*time.Second)); err != nil {
 		t.Fatalf("Resume returned error: %v", err)
 	}
 	if !strings.Contains(gotBody, `"timeout":123`) {
@@ -297,7 +298,7 @@ func TestResumeDefaultTimeoutAndErrors(t *testing.T) {
 	}
 
 	sb.client.config.APIURL = "http://%"
-	if err := sb.Resume(context.Background(), time.Second); err == nil {
+	if err := sb.Resume(context.Background(), DurationPtr(time.Second)); err == nil {
 		t.Fatal("Resume with malformed URL returned nil error")
 	}
 }

@@ -126,6 +126,20 @@ sudo systemctl restart cube-sandbox-<service>.service
 If you only edited the helper script (`/usr/local/services/cubetoolbox/scripts/systemd/*.sh`), `daemon-reload` is **not** needed — the next `restart` re-invokes the script.
 :::
 
+## CubeMaster settings {#cubemaster-settings}
+
+Path: `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml` (from `configs/single-node/cubemaster.yaml` in one-click bundles).
+
+Under `cubelet_conf`:
+
+| Key | Purpose |
+|-----|---------|
+| `default_timeout_insec` | Server default **sandbox idle TTL** (seconds) when the client omits `timeout`. **Unset or `<= 0` means no cluster-wide idle timeout** (sandboxes never time out from idle unless the client sets `timeout`). The repository ships `-1` for this “no default” behavior. Set a positive value (e.g. `300`) in production if you want automatic reclamation of sandboxes created without an explicit TTL. |
+| `create_timeout_insec` | Create/scheduling RPC deadline only — **not** sandbox idle TTL. Defaults to `300` when unset. |
+| `common_timeout_insec` | Generic CubeMaster→Cubelet RPC timeout for non-create paths. |
+
+After changing `default_timeout_insec`, restart CubeMaster and read [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec) for client-visible behavior.
+
 ### Scenario B: a service is failing or restart-looping
 
 Every service has `Restart=on-failure`, so a single crash is auto-recovered. If the unit is restart-looping, find the root cause first.

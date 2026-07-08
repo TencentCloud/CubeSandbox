@@ -130,9 +130,14 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 			baseline = e.FirstSeenAt.UnixMilli()
 		}
 
-		timeout := time.Duration(e.Meta.TimeoutSeconds) * time.Second
-		if timeout <= 0 {
+		// Idle-timeout decision. See docs/guide/lifecycle.md.
+		var timeout time.Duration
+		if e.Meta.TimeoutSeconds == nil {
 			timeout = s.o.DefaultIdleTimeout
+		} else if ts := *e.Meta.TimeoutSeconds; ts < 0 {
+			continue
+		} else {
+			timeout = time.Duration(ts) * time.Second
 		}
 
 		idleFor := time.Duration(nowMs-baseline) * time.Millisecond
@@ -165,7 +170,7 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 			s.o.Log.Info("idle threshold exceeded; pausing",
 				zap.String("sandbox_id", e.Meta.SandboxID),
 				zap.Duration("idle_for", idleFor),
-				zap.Int("timeout_seconds", e.Meta.TimeoutSeconds))
+				zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds))
 
 			if err := s.tryPause(ctx, e); err != nil {
 				s.pauseFailed.Add(1)
@@ -178,7 +183,7 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 			s.o.Log.Info("idle threshold exceeded; killing",
 				zap.String("sandbox_id", e.Meta.SandboxID),
 				zap.Duration("idle_for", idleFor),
-				zap.Int("timeout_seconds", e.Meta.TimeoutSeconds),
+				zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds),
 				zap.String("kill_reason", cubemasterclient.KillReasonTimeout))
 
 			if err := s.tryKill(ctx, e); err != nil {
@@ -272,7 +277,7 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 	s.pauseTriggered.Add(1)
 	s.o.Log.Info("auto-paused sandbox",
 		zap.String("sandbox_id", sid),
-		zap.Int("timeout_seconds", e.Meta.TimeoutSeconds))
+		zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds))
 	return nil
 }
 
@@ -344,7 +349,7 @@ func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 	s.killTriggered.Add(1)
 	s.o.Log.Info("timeout-killed sandbox",
 		zap.String("sandbox_id", sid),
-		zap.Int("timeout_seconds", e.Meta.TimeoutSeconds),
+		zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds),
 		zap.String("kill_reason", cubemasterclient.KillReasonTimeout))
 	return nil
 }

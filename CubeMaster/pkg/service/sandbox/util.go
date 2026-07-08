@@ -120,6 +120,22 @@ func getReqResource(req *types.CreateCubeSandboxReq) (cpu, mem resource.Quantity
 	return cpu, mem, err
 }
 
+// resolveTimeoutSeconds normalizes client timeout + server default.
+// See docs/guide/lifecycle.md — Timeout semantics (canonical).
+func resolveTimeoutSeconds(clientTimeout *int, serverDefault int) (int, error) {
+	switch {
+	case clientTimeout == nil:
+		if serverDefault > 0 {
+			return serverDefault, nil
+		}
+		return types.NeverTimeout, nil
+	case *clientTimeout < 0:
+		return types.NeverTimeout, nil
+	default:
+		return *clientTimeout, nil
+	}
+}
+
 func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (*cubebox.RunCubeSandboxRequest, error) {
 	if err := checkParam(req); err != nil {
 		return nil, err
@@ -127,9 +143,12 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	log.G(ctx).Infof("[hostdir] ConstructCubeletReq: annotations=%v volumes_before_inject=%d",
 		req.Annotations, len(req.Volumes))
 
-	if req.Timeout <= 0 {
-		req.Timeout = config.GetConfig().CubeletConf.CommonTimeoutInsec
+	// Normalize the sandbox idle timeout into a concrete value.
+	timeoutSeconds, err := resolveTimeoutSeconds(req.Timeout, config.GetConfig().CubeletConf.DefaultTimeoutInsec)
+	if err != nil {
+		return nil, err
 	}
+	req.Timeout = &timeoutSeconds
 
 	out := &cubebox.RunCubeSandboxRequest{
 		RequestID:         req.RequestID,
@@ -148,7 +167,7 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		formatConstructCubeNetworkConfig(out.CubeNetworkConfig),
 	)
 
-	err := checkAndGetAnnotation(req, out)
+	err = checkAndGetAnnotation(req, out)
 	if err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}

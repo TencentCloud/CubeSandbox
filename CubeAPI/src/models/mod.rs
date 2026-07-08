@@ -171,9 +171,9 @@ pub struct NewSandbox {
     #[serde(rename = "templateID")]
     pub template_id: String,
 
-    #[validate(range(min = 0))]
-    #[serde(default = "default_timeout")]
-    pub timeout: i32,
+    /// Optional idle TTL in seconds. See docs/guide/lifecycle.md.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
 
     /// Sandbox lifecycle configuration. Maps to e2b's `lifecycle` object so
     /// callers that already speak e2b can pass through unchanged. Absent
@@ -213,10 +213,6 @@ pub struct NewSandbox {
 
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
-}
-
-fn default_timeout() -> i32 {
-    15
 }
 
 // ─── Sandbox — create / connect response ──────────────────────────────────
@@ -265,8 +261,10 @@ pub struct ListedSandbox {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    #[serde(rename = "endAt")]
-    pub end_at: DateTime<Utc>,
+    /// Projected next-timeout instant. Omitted for never-timeout sandboxes
+    /// (no deadline) rather than being misreported as equal to startedAt.
+    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
     #[serde(rename = "memoryMB")]
@@ -295,8 +293,10 @@ pub struct SandboxDetail {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    #[serde(rename = "endAt")]
-    pub end_at: DateTime<Utc>,
+    /// Projected next-timeout instant. Omitted for never-timeout sandboxes
+    /// (no deadline) rather than being misreported as equal to startedAt.
+    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "envdVersion")]
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]
@@ -322,8 +322,9 @@ pub struct SandboxDetail {
 #[derive(Debug, Deserialize, ToSchema)]
 #[allow(dead_code)]
 pub struct ResumedSandbox {
-    #[serde(default = "default_timeout")]
-    pub timeout: i32,
+    /// Idle timeout in seconds; None when the client did not send one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
     #[serde(rename = "autoPause", default)]
     pub auto_pause: bool,
 }
@@ -331,8 +332,9 @@ pub struct ResumedSandbox {
 /// Request body for POST /sandboxes/{id}/connect.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ConnectSandbox {
-    #[validate(range(min = 0))]
-    pub timeout: i32,
+    /// Idle timeout in seconds; None when the client did not send one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
 }
 
 /// Request body for POST /sandboxes/{id}/snapshots.
@@ -516,7 +518,26 @@ fn default_page_limit() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{NewSandbox, SandboxNetworkConfig};
+    use super::{NewSandbox, SandboxNetworkConfig, SetTimeoutRequest};
+    use validator::Validate;
+
+    #[test]
+    fn set_timeout_request_rejects_negative_values() {
+        let req = SetTimeoutRequest { timeout: -1 };
+        assert!(
+            req.validate().is_err(),
+            "negative timeout should be rejected"
+        );
+    }
+
+    #[test]
+    fn set_timeout_request_accepts_zero_and_positive() {
+        for timeout in [0, 60, 3600] {
+            let req = SetTimeoutRequest { timeout };
+            req.validate()
+                .unwrap_or_else(|e| panic!("timeout={timeout} should be valid: {e}"));
+        }
+    }
 
     #[test]
     fn sandbox_network_config_accepts_snake_case_policy_fields() {

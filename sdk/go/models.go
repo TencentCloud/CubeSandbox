@@ -26,7 +26,7 @@ type SandboxInfo struct {
 	SandboxID    string            `json:"sandboxID"`
 	ClientID     string            `json:"clientID"`
 	StartedAt    time.Time         `json:"startedAt"`
-	EndAt        time.Time         `json:"endAt"`
+	EndAt        *time.Time        `json:"endAt,omitempty"`
 	EnvdVersion  string            `json:"envdVersion"`
 	Domain       string            `json:"domain,omitempty"`
 	CPUCount     int               `json:"cpuCount"`
@@ -53,14 +53,25 @@ type NetworkOptions struct {
 }
 
 type CreateOptions struct {
-	TemplateID          string
-	Timeout             time.Duration
+	TemplateID string
+	// Optional idle TTL; nil omits the field. See docs/guide/lifecycle.md.
+	Timeout             *time.Duration
 	EnvVars             map[string]string
 	Metadata            map[string]string
 	AllowInternetAccess *bool
 	Network             NetworkOptions
 	Extra               map[string]any
 }
+
+// DurationPtr returns a pointer to d. It is a convenience for optional
+// duration fields such as CreateOptions.Timeout and Sandbox.Resume, where nil
+// means "not provided; let the server decide".
+func DurationPtr(d time.Duration) *time.Duration {
+	return &d
+}
+
+// NeverTimeout requests a sandbox that never idle-times-out. See docs/guide/lifecycle.md.
+const NeverTimeout time.Duration = -1
 
 type PauseOptions struct {
 	Wait     *bool

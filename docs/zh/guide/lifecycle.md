@@ -16,10 +16,21 @@
 | `resuming`  | 平台正在从快照恢复沙箱，瞬时态                                       |
 | `terminated`| 沙箱被显式销毁（`kill`）或因 `on_timeout="kill"` 超时被回收，无法恢复 |
 
-状态转换主要由两个变量驱动：
+状态转换主要由两个参数驱动：
 
-- **`timeout`**：空闲多久后触发"超时"（默认在 SDK Config 里给一个固定值，比如 300 秒）。
-- **`on_timeout`**：超时之后做什么 —— `"kill"`（默认，直接销毁）或 `"pause"`（暂停以备恢复）。
+- **`timeout`**（可选）：沙箱**空闲**多久后触发超时，单位为**秒**（e2b 的 `timeoutMs` 是毫秒）。不传时由服务端决定；SDK 不再自带 300 秒之类的默认值。
+- **`on_timeout`**：超时后怎么办——`"kill"`（默认，销毁）或 `"pause"`（暂停，可之后恢复）。
+
+`timeout` 取值（语义对齐 e2b）：
+
+| 取值 | 行为 |
+|------|------|
+| 不传 | 使用服务端配置的默认空闲超时；服务端未配置或设为 ≤ 0 时，**永不超时** |
+| `NEVER_TIMEOUT`（`-1`） | **永不超时**——不会因空闲被自动回收 |
+| `0` | **立刻超时**——空闲后首次扫描即回收 |
+| 正整数 `N` | 空闲 **N 秒**后触发超时 |
+
+Go：`cubesandbox.NeverTimeout`；Python：`from cubesandbox import NEVER_TIMEOUT`。
 
 ```
                        ┌──────────────────────────────────────┐
@@ -56,13 +67,13 @@ print(sandbox.sandbox_id)
 | 参数                    | 说明                                                                       |
 |-------------------------|----------------------------------------------------------------------------|
 | `template`              | 模板 ID，沙箱基于它启动；缺省读环境变量 `CUBE_TEMPLATE_ID`                  |
-| `timeout`               | 空闲超时，**秒**（注意：e2b 的 `timeoutMs` 是毫秒，Cube 是秒）              |
+| `timeout`               | 可选，空闲超时（秒），见上文取值说明 |
 | `lifecycle`             | 生命周期策略，详见下文 "[平台自动暂停 / 自动恢复](#平台自动暂停-自动恢复)" |
 | `metadata`              | 任意键值对，写入沙箱元数据，可在列表 / 详情接口中读出                      |
 | `env_vars`              | 注入沙箱进程的环境变量                                                     |
 | `allow_internet_access` | 是否允许出公网；`network` 提供更细粒度的出站策略                           |
 
-> Cube 的最大单次运行时长不像托管 e2b 那样有严格的 24h/1h 平台上限——但 idle `timeout` 仍然是必需的，它防止意外遗漏的沙箱长期占用资源。
+> Cube 不像托管 e2b 那样有严格的 24h/1h 单次运行上限。省略 `timeout` 时，实际空闲 TTL 由集群运维在服务端配置（见下文[设计与运维要点](#设计与运维要点)）。
 
 ## 查询沙箱信息
 
@@ -79,7 +90,7 @@ print(info)
 # }
 ```
 
-`endAt` 表示按当前 `timeout` 估算的下一次超时时间。每次接收到新请求或调用 `set_timeout`（若有），`endAt` 会被刷新。
+`endAt` 表示按当前 `timeout` 估算的下一次超时时间。每次接收到新请求或调用 `set_timeout`（若有），`endAt` 会被刷新。对于**永不超时**的沙箱没有截止时间，因此响应中会**省略** `endAt`，而不是把它渲染成等于 `startedAt`。
 
 ## 列出运行中的沙箱
 
@@ -141,7 +152,7 @@ sandbox = Sandbox.create(
 - 通过 SDK 调用：`sandbox.run_code(...)`、`sandbox.commands.run(...)`、`sandbox.files.read(...)` / `write(...)`。
 - 通过 HTTP 直连沙箱内的服务（例如 `getHost()` 返回的 URL）。
 
-未配置 `auto_pause` / 不传 `lifecycle` 的沙箱默认行为是 `on_timeout="kill"`：空闲超过 `timeout` 秒后，平台会主动销毁该沙箱。这与 e2b `lifecycle.on_timeout="kill"` 语义一致。如果完全不希望被自动回收，请在创建时把 `timeout` 设得足够大、或主动在客户端发心跳调用刷新 idle 计时。
+未配置 `auto_pause` / 不传 `lifecycle` 的沙箱默认行为是 `on_timeout="kill"`：空闲超过 `timeout` 秒后，平台会主动销毁该沙箱。这与 e2b `lifecycle.on_timeout="kill"` 语义一致。若不希望被自动回收，可传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、把 `timeout` 设得足够大，或通过定期活动刷新空闲计时。
 
 ### 端到端示例
 
@@ -161,6 +172,19 @@ python examples/code-sandbox-quickstart/auto-kill.py
 ```
 
 ## 设计与运维要点
+
+### 集群默认空闲超时（`default_timeout_insec`）
+
+客户端不传 `timeout` 时，由 CubeMaster 读取 `CubeMaster/conf.yaml` 中的 `cubelet_conf.default_timeout_insec`（one-click 安装路径：`/usr/local/services/cubetoolbox/CubeMaster/conf.yaml`）。
+
+| 配置值 | 客户端省略 `timeout` 时的效果 |
+|--------|------------------------------|
+| 未配置或 `<= 0` | **不设集群级空闲 TTL** —— 沙箱不会因空闲被自动回收 |
+| 正整数 `N` | 默认空闲 **N 秒**后触发超时 |
+
+仓库默认**不配置集群级空闲超时**（`default_timeout_insec: -1`）。若希望集群自动回收未显式传 `timeout` 的沙箱，可改为正数（例如 `300`）。修改后需重启 `cube-sandbox-cubemaster.service`。
+
+同一段里的 `create_timeout_insec` 与空闲 TTL 无关，仅限制创建/调度 RPC 的截止时间。更多 CubeMaster 配置项见[服务管理 — CubeMaster 配置项](service-management.md#cubemaster-settings)。
 
 - **暂停的状态保真度**：CPU 寄存器、进程内存、TCP 连接（无外部对端）、文件系统改动都会随快照保留；面向外部的连接（如 sandbox 主动建立的 outbound socket）会在暂停时断开，恢复后由应用层自行重连。
 - **集群一致性**：自动暂停由部署在 control 节点上的 `cube-lifecycle-manager` 服务统一协调；它消费 CubeMaster 通过 Redis stream 发布的生命周期事件，通过 Redis 注册表实时发现所有在线的 CubeProxy 副本并广播状态。多副本环境下用 Redis SETNX 互斥锁确保同一沙箱不会被并发暂停或恢复。

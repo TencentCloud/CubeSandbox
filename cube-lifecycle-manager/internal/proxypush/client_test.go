@@ -136,7 +136,7 @@ func TestUpsertMeta_RoundTrip(t *testing.T) {
 
 	c := New([]string{srv.URL}, "", time.Second, zap.NewNop())
 	meta := lifecycle.SandboxLifecycleMeta{
-		SandboxID: "sbx-1", AutoPause: true, TimeoutSeconds: 60,
+		SandboxID: "sbx-1", AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
 	}
 	if err := c.UpsertMeta(context.Background(), meta); err != nil {
 		t.Fatalf("UpsertMeta failed: %v", err)

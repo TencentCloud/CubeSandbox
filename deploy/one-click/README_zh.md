@@ -120,6 +120,7 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 one-click 不会在目标机额外创建一层全局 `configs/`，而是直接落到各组件原生配置入口：
 
 - `configs/single-node/cubemaster.yaml` -> `CubeMaster/conf.yaml`
+  - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — 设计与运维要点](../../docs/zh/guide/lifecycle.md#集群默认空闲超时default_timeout_insec)。
 - `Cubelet/config/` -> `Cubelet/config/`
 - `Cubelet/dynamicconf/` -> `Cubelet/dynamicconf/`
 - `configs/single-node/network-agent.yaml` -> `network-agent/network-agent.yaml`

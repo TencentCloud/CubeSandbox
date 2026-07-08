@@ -117,11 +117,13 @@ impl SandboxService {
             .and_then(|s| s.started_at.as_ref().cloned())
             .or(d.started_at)
             .unwrap_or_else(chrono::Utc::now);
+        // Leave end_at as None for never-timeout sandboxes (CubeMaster returns
+        // no end instant) instead of collapsing it onto started_at, which
+        // would read as "already expired".
         let end_at = summary
             .as_ref()
             .and_then(|s| s.end_at.as_ref().cloned())
-            .or(d.end_at)
-            .unwrap_or(started_at);
+            .or(d.end_at);
 
         let envd_version = envd_version_from_annotations(&d.annotations);
         Ok(SandboxDetail {
@@ -196,7 +198,10 @@ impl SandboxService {
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
             instance_type: self.instance_type.clone(),
-            timeout: Some(timeout),
+            // Pass the client's timeout through as-is: None → field omitted so
+            // CubeMaster applies its server default; Some(0) → immediate
+            // timeout; Some(n) → explicit TTL. No SDK/API-side default fill.
+            timeout,
             annotations,
             labels,
             create_time_env_vars: env_vars,
@@ -266,10 +271,14 @@ impl SandboxService {
         )
     }
 
-    pub async fn resume_sandbox(&self, sandbox_id: &str, timeout: i32) -> AppResult<Sandbox> {
+    pub async fn resume_sandbox(
+        &self,
+        sandbox_id: &str,
+        timeout: Option<i32>,
+    ) -> AppResult<Sandbox> {
         let resp = self
             .cubemaster
-            .update_sandbox(&self.build_update_request(sandbox_id, "resume", Some(timeout)))
+            .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
             .await
             .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
 
@@ -295,13 +304,17 @@ impl SandboxService {
         ))
     }
 
-    pub async fn connect_sandbox(&self, sandbox_id: &str, timeout: i32) -> AppResult<Sandbox> {
+    pub async fn connect_sandbox(
+        &self,
+        sandbox_id: &str,
+        timeout: Option<i32>,
+    ) -> AppResult<Sandbox> {
         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
 
         if d.status == SandboxStatus::Paused {
             let resp = self
                 .cubemaster
-                .update_sandbox(&self.build_update_request(sandbox_id, "resume", Some(timeout)))
+                .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
                 .await
                 .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
 
@@ -714,7 +727,7 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         sandbox_id: s.sandbox_id,
         client_id: s.host_id,
         started_at,
-        end_at: s.end_at.unwrap_or(now),
+        end_at: s.end_at,
         cpu_count: s.cpu_count,
         memory_mb: s.memory_mb,
         disk_size_mb: Some(0),
@@ -877,6 +890,7 @@ mod tests {
     };
     use crate::cubemaster::{
         CreateSandboxRequest, CubeMasterClient, ListSandboxResponse, SandboxInfo,
+        SandboxUpdateRequest,
     };
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
@@ -1162,6 +1176,88 @@ mod tests {
         );
     }
 
+    fn empty_create_request() -> CreateSandboxRequest {
+        CreateSandboxRequest {
+            request_id: "req-1".to_string(),
+            instance_type: "cubebox".to_string(),
+            timeout: None,
+            annotations: HashMap::new(),
+            labels: None,
+            create_time_env_vars: None,
+            distribution_scope: None,
+            volumes: None,
+            containers: vec![],
+            exposed_ports: vec![],
+            network_type: None,
+            cube_network_config: None,
+            auto_pause: false,
+            auto_resume: false,
+        }
+    }
+
+    /// CubeMaster applies its server default only when the timeout key is
+    /// absent. Lock down the three-value wire shape (omit / 0 / negative / positive).
+    #[test]
+    fn create_sandbox_request_timeout_wire_shape() {
+        let mut req = empty_create_request();
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            json.get("timeout").is_none(),
+            "timeout=None should be omitted, got: {json}"
+        );
+
+        for (value, label) in [(0, "zero"), (-1, "never"), (45, "positive")] {
+            req.timeout = Some(value);
+            let json = serde_json::to_value(&req).unwrap();
+            assert_eq!(
+                json.get("timeout"),
+                Some(&serde_json::Value::from(value)),
+                "timeout={label} should be forwarded as-is, got: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_sandbox_timeout_defaults_to_none_when_omitted() {
+        let req: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+        }))
+        .unwrap();
+        assert_eq!(req.timeout, None);
+    }
+
+    #[test]
+    fn sandbox_update_request_timeout_wire_shape() {
+        let req = SandboxUpdateRequest {
+            request_id: "req-1".to_string(),
+            sandbox_id: "sb-1".to_string(),
+            instance_type: "cubebox".to_string(),
+            action: "resume".to_string(),
+            timeout: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            json.get("timeout").is_none(),
+            "resume/connect with timeout=None should omit field, got: {json}"
+        );
+
+        for (value, label) in [(0, "zero"), (-1, "never"), (120, "positive")] {
+            let req = SandboxUpdateRequest {
+                request_id: "req-1".to_string(),
+                sandbox_id: "sb-1".to_string(),
+                instance_type: "cubebox".to_string(),
+                action: "resume".to_string(),
+                timeout: Some(value),
+            };
+            let json = serde_json::to_value(&req).unwrap();
+            assert_eq!(
+                json.get("timeout"),
+                Some(&serde_json::Value::from(value)),
+                "update timeout={label} should be forwarded as-is, got: {json}"
+            );
+        }
+    }
+
     /// The inbound API mirrors the e2b `lifecycle` object (camelCase nested
     /// struct). CubeAPI then translates it to the two CubeMaster-side bools
     /// when constructing the create-sandbox RPC. Verify the translation
@@ -1287,7 +1383,7 @@ mod tests {
         let sandbox = service
             .create_sandbox(NewSandbox {
                 template_id: "tpl-1".to_string(),
-                timeout: 15,
+                timeout: Some(15),
                 lifecycle: None,
                 secure: None,
                 allow_internet_access: None,
@@ -1362,7 +1458,7 @@ mod tests {
         let sandbox = service
             .create_sandbox(NewSandbox {
                 template_id: "tpl-1".to_string(),
-                timeout: 15,
+                timeout: Some(15),
                 lifecycle: None,
                 secure: None,
                 allow_internet_access: None,

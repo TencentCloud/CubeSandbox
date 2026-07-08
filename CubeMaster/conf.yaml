@@ -21,6 +21,10 @@ cubelet_conf:
     grpc_port: 9999
   common_timeout_insec: 30
   create_image_timeout_insec: 300
+  # See docs/guide/lifecycle.md — Timeout semantics (canonical).
+  default_timeout_insec: -1
+  # Create-path RPC/scheduling deadline (seconds).
+  create_timeout_insec: 300
   create_concurrent_limit: 100
   destroy_concurent_limit: 100
   enable_exposed_port: true
