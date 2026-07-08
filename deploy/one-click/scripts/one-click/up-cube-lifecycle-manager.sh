@@ -31,10 +31,10 @@ COMPOSE_FILE="${CUBE_LCM_DIR}/docker-compose.yaml"
 #   3. default    → int.tencentcloudcr.com (overseas/international)
 #
 # The image is published by cube-lifecycle-manager/Makefile's `make push`
-# to both registries under the same :v0.4.0 tag; either default resolves
+# to both registries under the same :v0.5.1-rc1 tag; either default resolves
 # to whatever the operator most recently published.
-CUBE_LCM_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.5.1"
-CUBE_LCM_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.5.1"
+CUBE_LCM_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.5.1-rc1"
+CUBE_LCM_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.5.1-rc1"
 if [[ -n "${CUBE_SANDBOX_CUBE_LCM_IMAGE:-}" ]]; then
   CUBE_LCM_IMAGE="${CUBE_SANDBOX_CUBE_LCM_IMAGE}"
 elif [[ "${MIRROR:-}" == "cn" ]]; then

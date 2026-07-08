@@ -29,7 +29,7 @@ ERE_SEMVER='v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?'
 
 # Component images that follow the release version. openresty-tproxy is
 # deliberately excluded: its tag tracks the OpenResty version, not the release.
-COMPONENTS='cube-egress|cube-master|cube-api|cube-proxy|webui'
+COMPONENTS='cube-egress|cube-master|cube-api|cube-proxy|webui|cube-lifecycle-manager'
 
 usage() {
 	sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -75,7 +75,16 @@ edit_expr() {
 		echo "s{:${PERL_SEMVER}}{:\$ENV{VER}}g"
 		;;
 	CubeEgress/Makefile)
-		echo "s{((?:IMAGE_TAG|CUBE_EGRESS_VERSION)\\s*\\?=\\s*)${PERL_SEMVER}}{\$1\$ENV{VER}}"
+		echo "s{((?:IMAGE_TAG|CUBE_VERSION)\\s*\\?=\\s*)${PERL_SEMVER}}{\$1\$ENV{VER}}"
+		;;
+	cube-lifecycle-manager/Makefile)
+		echo "s{((?:IMAGE_TAG|CUBE_VERSION)\\s*\\?=\\s*)${PERL_SEMVER}}{\$1\$ENV{VER}}"
+		;;
+	cube-lifecycle-manager/README.md)
+		echo "s{${PERL_SEMVER}}{\$ENV{VER}}g if /cube-lifecycle-manager:|IMAGE_TAG/;"
+		;;
+	deploy/one-click/scripts/one-click/up-cube-lifecycle-manager.sh)
+		echo "s{:${PERL_SEMVER}}{:\$ENV{VER}}g"
 		;;
 	deploy/one-click/terraform/tencentcloud/variables.tf)
 		# Only rewrite semvers on image-tag `default` lines (the bare image_tag
@@ -110,6 +119,9 @@ edit_expr() {
 FILES=(
 	deploy/one-click/scripts/systemd/cube-egress-start.sh
 	CubeEgress/Makefile
+	cube-lifecycle-manager/Makefile
+	cube-lifecycle-manager/README.md
+	deploy/one-click/scripts/one-click/up-cube-lifecycle-manager.sh
 	deploy/one-click/terraform/tencentcloud/variables.tf
 	deploy/one-click/terraform/tencentcloud/create.sh
 	deploy/one-click/terraform/tencentcloud/build_images.sh
@@ -162,10 +174,10 @@ do_check() {
 	# FILES. Patterns live in one array so the search and the extraction below stay
 	# in sync; they cover the tag formats actually used in this repo: a qualified
 	# image ref (registry/name:tag) and the tag/version assignment forms
-	# (IMAGE_TAG / *_IMAGE_TAG=, CUBE_EGRESS_VERSION, TAG:-).
+	# (IMAGE_TAG / *_IMAGE_TAG=, CUBE_VERSION, TAG:-).
 	local -a patterns=(
 		"(${COMPONENTS}):${ERE_SEMVER}"
-		"(IMAGE_TAG|CUBE_EGRESS_VERSION|TAG:-).*${ERE_SEMVER}"
+		"(IMAGE_TAG|CUBE_VERSION|TAG:-).*${ERE_SEMVER}"
 	)
 	local -a grep_args=()
 	local p

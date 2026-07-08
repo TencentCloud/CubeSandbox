@@ -146,6 +146,7 @@ jobs:
     needs:
       - ensure_release
       - build_pvm_guest_vmlinux
+      - release_docker_images
     env:
       KERNEL_ARCH: x86_64
       BUNDLE_ARCH: amd64
@@ -361,7 +362,9 @@ jobs:
   release_arm64:
     name: Release one-click bundle (arm64)
     runs-on: ubuntu-24.04-arm
-    needs: ensure_release
+    needs:
+      - ensure_release
+      - release_docker_images
     env:
       KERNEL_ARCH: aarch64
       BUNDLE_ARCH: arm64
@@ -544,7 +547,9 @@ jobs:
             --clobber
 
   # Build and push release component images via the reusable workflow (also
-  # runnable manually from Actions → Release Docker Images).
+  # runnable manually from Actions → Release Docker Images). release_amd64 /
+  # release_arm64 depend on this job so the one-click bundle is not uploaded to
+  # GitHub Release until every component image tag is published.
   release_docker_images:
     name: Build release docker images
     needs: verify_versions

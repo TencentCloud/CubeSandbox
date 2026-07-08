@@ -1,8 +1,8 @@
 FROM cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/openresty-tproxy:1.29.2.5
 
-ARG CUBE_EGRESS_VERSION=0.0.0-dev
-ARG CUBE_EGRESS_COMMIT=unknown
-ARG CUBE_EGRESS_BUILD_TIME=unknown
+ARG CUBE_VERSION=0.0.0-dev
+ARG CUBE_COMMIT=unknown
+ARG CUBE_BUILD_TIME=unknown
 
 RUN apt update && \
 	DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends \
@@ -18,7 +18,7 @@ RUN luarocks install lua-resty-openssl
 
 RUN mkdir -p /data/log/cube-egress /var/run/openresty /etc/cube/ca
 
-RUN echo "{\"version\":\"${CUBE_EGRESS_VERSION}\",\"commit\":\"${CUBE_EGRESS_COMMIT}\",\"build_time\":\"${CUBE_EGRESS_BUILD_TIME}\"}" \
+RUN echo "{\"version\":\"${CUBE_VERSION}\",\"commit\":\"${CUBE_COMMIT}\",\"build_time\":\"${CUBE_BUILD_TIME}\"}" \
     > /etc/cube/version.json
 
 RUN groupadd --system --gid 8049 cube-proxy && \

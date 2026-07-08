@@ -1,8 +1,8 @@
-IMAGE_TAG           ?= v0.5.1
+IMAGE_TAG           ?= v0.5.1-rc1
 IMAGE_LOCAL         := cube-lifecycle-manager
-CUBE_LCM_VERSION    ?= v1.0.0
-CUBE_LCM_COMMIT     ?= $(shell git rev-parse HEAD | cut -c1-8)
-CUBE_LCM_BUILD_TIME ?= $(shell date +'%Y%m%d')
+CUBE_VERSION        ?= $(IMAGE_TAG)
+CUBE_COMMIT         ?= $(shell git rev-parse HEAD | cut -c1-8)
+CUBE_BUILD_TIME     ?= $(shell date +'%Y%m%d')
 
 # Target architecture; defaults to the host architecture.
 # Override with: make build ARCH=amd64  or  make build ARCH=arm64
@@ -32,9 +32,9 @@ build:
 	$(call msg,BUILD IMAGE $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH))
 	$(Q)docker build --rm $(QUIET) \
 		--platform linux/$(ARCH) \
-		--build-arg CUBE_LCM_VERSION=$(CUBE_LCM_VERSION) \
-		--build-arg CUBE_LCM_COMMIT=$(CUBE_LCM_COMMIT) \
-		--build-arg CUBE_LCM_BUILD_TIME=$(CUBE_LCM_BUILD_TIME) \
+		--build-arg CUBE_VERSION=$(CUBE_VERSION) \
+		--build-arg CUBE_COMMIT=$(CUBE_COMMIT) \
+		--build-arg CUBE_BUILD_TIME=$(CUBE_BUILD_TIME) \
 		-t $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH) \
 		.
 

@@ -45,7 +45,8 @@ ENV CUBE_VERSION=${CUBE_VERSION}
 RUN npm run build
 
 # ── Runtime stage ──────────────────────────────────────────────────────────────
-FROM cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+ARG OPENRESTY_BASE_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+FROM ${OPENRESTY_BASE_IMAGE}
 
 RUN sed -i 's#https\?://dl-cdn.alpinelinux.org#http://mirrors.tencent.com#g' /etc/apk/repositories \
     && apk add --no-cache tzdata wget \

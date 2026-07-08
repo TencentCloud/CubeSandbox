@@ -12,6 +12,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 FILES=(
 	deploy/one-click/scripts/systemd/cube-egress-start.sh
 	CubeEgress/Makefile
+	cube-lifecycle-manager/Makefile
+	cube-lifecycle-manager/README.md
+	deploy/one-click/scripts/one-click/up-cube-lifecycle-manager.sh
 	deploy/one-click/terraform/tencentcloud/variables.tf
 	deploy/one-click/terraform/tencentcloud/create.sh
 	deploy/one-click/terraform/tencentcloud/build_images.sh
@@ -30,7 +33,7 @@ fail() {
 
 # Detect the version the seeded tree currently pins, so the test does not hard
 # code a value that future releases will move.
-CURRENT="$(grep -oE 'cube-egress:v[0-9]+\.[0-9]+\.[0-9]+' \
+CURRENT="$(grep -oE 'cube-egress:v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?' \
 	"${REPO_ROOT}/deploy/one-click/scripts/systemd/cube-egress-start.sh" | head -1 | cut -d: -f2)"
 [[ -n "${CURRENT}" ]] || {
 	echo "FAIL: could not detect current version from cube-egress-start.sh" >&2

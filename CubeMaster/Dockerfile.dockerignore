@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for CubeMaster/Dockerfile (context = repository root).
+# The repo-root .dockerignore is tailored to docker/Dockerfile.builder and would
+# exclude CubeMaster/ without these overrides.
+**
+!CubeMaster
+!CubeMaster/**

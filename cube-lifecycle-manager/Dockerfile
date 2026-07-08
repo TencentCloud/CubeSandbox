@@ -16,9 +16,9 @@
 # ── Build stage ────────────────────────────────────────────────────────────
 FROM golang:1.25-alpine AS builder
 
-ARG CUBE_LCM_VERSION=0.0.0-dev
-ARG CUBE_LCM_COMMIT=unknown
-ARG CUBE_LCM_BUILD_TIME=unknown
+ARG CUBE_VERSION=0.0.0-dev
+ARG CUBE_COMMIT=unknown
+ARG CUBE_BUILD_TIME=unknown
 
 WORKDIR /src
 
@@ -42,7 +42,7 @@ RUN CGO_ENABLED=0 GOOS=linux \
 # Written in the builder stage because the distroless runtime lacks a shell.
 RUN mkdir -p /out/etc/cube && \
     printf '{"version":"%s","commit":"%s","build_time":"%s"}\n' \
-      "${CUBE_LCM_VERSION}" "${CUBE_LCM_COMMIT}" "${CUBE_LCM_BUILD_TIME}" \
+      "${CUBE_VERSION}" "${CUBE_COMMIT}" "${CUBE_BUILD_TIME}" \
       > /out/etc/cube/version.json
 
 # ── Runtime stage ──────────────────────────────────────────────────────────

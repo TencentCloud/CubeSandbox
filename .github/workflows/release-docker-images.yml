@@ -1,9 +1,9 @@
 name: Release Docker Images
 
 # Reusable pipeline for building and pushing release component images to GHCR and
-# Tencent Cloud TCR (cn/int). Add a new component by copying the cube-egress job
-# pair (build_<name> + publish_<name>_manifest) and extending the components
-# input description / filter expression below.
+# Tencent Cloud TCR (cn/int). Each component builds amd64 + arm64 in parallel,
+# then publishes a multi-arch manifest. Add a component by extending the
+# prepare job's component table and publish_manifests matrix below.
 on:
   workflow_dispatch:
     inputs:
@@ -17,7 +17,7 @@ on:
         type: string
         default: ''
       components:
-        description: 'Comma-separated components to build, or "all" (cube-egress, ...)'
+        description: 'Comma-separated components to build, or "all" (cube-egress, cube-master, cube-api, cube-proxy, webui, cube-lifecycle-manager)'
         required: false
         type: string
         default: all
@@ -47,9 +47,8 @@ permissions:
   packages: write
 
 env:
-  # ref is declared under both triggers (default ''), so this reference is always
-  # defined; an empty ref falls back to the ref that triggered the run.
   CHECKOUT_REF: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+  OPENRESTY_BASE_IMAGE: cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
 
 jobs:
   verify_versions:
@@ -65,25 +64,138 @@ jobs:
       - name: Check hard-coded image tags match the release tag
         run: scripts/bump-image.sh --check "${{ inputs.image_tag }}"
 
-  # ── cube-egress ──────────────────────────────────────────────────────────────
-
-  build_cube_egress:
-    name: cube-egress (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
+  prepare:
+    name: Resolve component matrix
+    runs-on: ubuntu-latest
     needs: verify_versions
-    if: >-
-      github.repository == 'TencentCloud/CubeSandbox' &&
-      (inputs.components == 'all' || contains(format(',{0},', inputs.components), ',cube-egress,'))
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+      publish: ${{ steps.filter.outputs.publish }}
+    steps:
+      - name: Filter components
+        id: filter
+        env:
+          COMPONENTS: ${{ inputs.components }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          raw = os.environ["COMPONENTS"].strip()
+          if raw == "all":
+              selected = None
+          else:
+              selected = {c.strip() for c in raw.split(",") if c.strip()}
+              if not selected:
+                  print("error: components is empty after parsing", file=sys.stderr)
+                  sys.exit(1)
+
+          known = {
+              "cube-egress",
+              "cube-master",
+              "cube-api",
+              "cube-proxy",
+              "webui",
+              "cube-lifecycle-manager",
+          }
+          if selected is not None:
+              unknown = sorted(selected - known)
+              if unknown:
+                  print(f"error: unknown component(s): {', '.join(unknown)}", file=sys.stderr)
+                  print(f"valid: {', '.join(sorted(known))}", file=sys.stderr)
+                  sys.exit(1)
+
+          def want(name: str) -> bool:
+              return selected is None or name in selected
+
+          defs = [
+              {
+                  "component": "cube-egress",
+                  "image": "cube-egress",
+                  "context": "CubeEgress",
+                  "dockerfile": "CubeEgress/Dockerfile",
+                  "cache_scope": "cube-egress",
+              },
+              {
+                  "component": "cube-master",
+                  "image": "cube-master",
+                  "context": ".",
+                  "dockerfile": "CubeMaster/Dockerfile",
+                  "cache_scope": "cube-master",
+              },
+              {
+                  "component": "cube-api",
+                  "image": "cube-api",
+                  "context": "CubeAPI",
+                  "dockerfile": "CubeAPI/Dockerfile",
+                  "cache_scope": "cube-api",
+              },
+              {
+                  "component": "cube-proxy",
+                  "image": "cube-proxy",
+                  "context": "CubeProxy",
+                  "dockerfile": "CubeProxy/Dockerfile",
+                  "cache_scope": "cube-proxy",
+              },
+              {
+                  "component": "webui",
+                  "image": "webui",
+                  "context": ".",
+                  "dockerfile": "deploy/one-click/webui/Dockerfile",
+                  "cache_scope": "webui",
+              },
+              {
+                  "component": "cube-lifecycle-manager",
+                  "image": "cube-lifecycle-manager",
+                  "context": "cube-lifecycle-manager",
+                  "dockerfile": "cube-lifecycle-manager/Dockerfile",
+                  "cache_scope": "cube-lifecycle-manager",
+              },
+          ]
+          arches = [
+              {
+                  "arch": "amd64",
+                  "platform": "linux/amd64",
+                  "runner": "ubuntu-latest",
+              },
+              {
+                  "arch": "arm64",
+                  "platform": "linux/arm64",
+                  "runner": "ubuntu-24.04-arm",
+              },
+          ]
+
+          build_include = []
+          publish_include = []
+          for item in defs:
+              if not want(item["component"]):
+                  continue
+              publish_include.append(
+                  {"component": item["component"], "image": item["image"]}
+              )
+              for arch in arches:
+                  build_include.append({**item, **arch})
+
+          if not build_include:
+              print("error: no components selected for build", file=sys.stderr)
+              sys.exit(1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"build={json.dumps({'include': build_include})}\n")
+              out.write(f"publish={json.dumps({'include': publish_include})}\n")
+          PY
+
+  build_images:
+    name: ${{ matrix.component }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: [verify_versions, prepare]
+    if: github.repository == 'TencentCloud/CubeSandbox'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            platform: linux/amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
+      matrix: ${{ fromJSON(needs.prepare.outputs.build) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -116,40 +228,46 @@ jobs:
 
       - name: Compute build metadata
         id: meta
-        run: echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_OUTPUT}"
+        run: |
+          echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_OUTPUT}"
+          echo "commit=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
       - name: Build and push per-arch image
         uses: docker/build-push-action@v6
         with:
-          context: CubeEgress
-          file: CubeEgress/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
           push: true
           # Push plain per-arch manifests (no provenance/SBOM attestations) so the
-          # publish_*_manifest step can combine them into a single clean multi-arch
+          # publish_manifests step can combine them into a single clean multi-arch
           # manifest list; attestations would add extra manifest entries that break
           # `docker buildx imagetools create`.
           provenance: false
           build-args: |
-            CUBE_EGRESS_VERSION=${{ inputs.image_tag }}
-            CUBE_EGRESS_COMMIT=${{ github.sha }}
-            CUBE_EGRESS_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+            CUBE_VERSION=${{ inputs.image_tag }}
+            CUBE_COMMIT=${{ steps.meta.outputs.commit }}
+            CUBE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+            CUBE_PROXY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
+            OPENRESTY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
           tags: |
-            ghcr.io/tencentcloud/cube-egress:${{ inputs.image_tag }}-${{ matrix.arch }}
-            cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-egress:${{ inputs.image_tag }}-${{ matrix.arch }}
-            cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress:${{ inputs.image_tag }}-${{ matrix.arch }}
-          # Per-arch cache; base image layers (apt/luarocks) are reused across re-runs.
-          cache-from: type=gha,scope=cube-egress-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=cube-egress-${{ matrix.arch }}
+            ghcr.io/tencentcloud/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
+            cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
+            cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}-${{ matrix.arch }}
 
-  publish_cube_egress_manifest:
-    name: cube-egress manifests
+  publish_manifests:
+    name: ${{ matrix.component }} manifests
     runs-on: ubuntu-latest
-    needs: build_cube_egress
+    needs: [build_images, prepare]
     if: >-
       always() &&
-      needs.build_cube_egress.result == 'success' &&
+      needs.build_images.result == 'success' &&
       github.repository == 'TencentCloud/CubeSandbox'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.publish) }}
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -189,6 +307,7 @@ jobs:
       - name: Create multi-arch manifests
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_NAME: ${{ matrix.image }}
           # Bind step outputs to env vars instead of interpolating ${{ }} into the
           # script body, so no expression value can ever be parsed as shell. The
           # unquoted ${MANIFEST_TAGS} expansion below is deliberate word-splitting
@@ -196,9 +315,9 @@ jobs:
           MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
         run: |
           for image in \
-            ghcr.io/tencentcloud/cube-egress \
-            cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-egress \
-            cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress; do
+            "ghcr.io/tencentcloud/${IMAGE_NAME}" \
+            "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}" \
+            "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"; do
             for tag in ${MANIFEST_TAGS}; do
               docker buildx imagetools create -t "${image}:${tag}" \
                 "${image}:${IMAGE_TAG}-amd64" \

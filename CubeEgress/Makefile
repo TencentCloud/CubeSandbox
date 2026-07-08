@@ -1,8 +1,8 @@
-IMAGE_TAG              ?= v0.5.0
+IMAGE_TAG              ?= v0.5.1-rc1
 IMAGE_LOCAL            := cube-egress
-CUBE_EGRESS_VERSION    ?= v0.5.0
-CUBE_EGRESS_COMMIT     ?= $(shell git rev-parse HEAD | cut -c1-8)
-CUBE_EGRESS_BUILD_TIME ?= $(shell date +'%Y%m%d')
+CUBE_VERSION           ?= $(IMAGE_TAG)
+CUBE_COMMIT            ?= $(shell git rev-parse HEAD | cut -c1-8)
+CUBE_BUILD_TIME        ?= $(shell date +'%Y%m%d')
 
 # Target architecture; defaults to the host architecture.
 # Override with: make build ARCH=amd64  or  make build ARCH=arm64
@@ -32,9 +32,9 @@ build:
 	$(call msg,BUILD IMAGE $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH))
 	$(Q)docker build --rm $(QUIET) --network host \
 		--platform linux/$(ARCH) \
-		--build-arg CUBE_EGRESS_VERSION=$(CUBE_EGRESS_VERSION) \
-		--build-arg CUBE_EGRESS_COMMIT=$(CUBE_EGRESS_COMMIT) \
-		--build-arg CUBE_EGRESS_BUILD_TIME=$(CUBE_EGRESS_BUILD_TIME) \
+		--build-arg CUBE_VERSION=$(CUBE_VERSION) \
+		--build-arg CUBE_COMMIT=$(CUBE_COMMIT) \
+		--build-arg CUBE_BUILD_TIME=$(CUBE_BUILD_TIME) \
 		-t $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH) \
 		.
 
