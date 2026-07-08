@@ -1,0 +1,273 @@
+name: Unit Test Check
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'CubeAPI/**'
+      - 'CubeShim/**'
+      - 'CubeNet/**'
+      - 'network-agent/**'
+      - 'docker/Dockerfile.builder'
+      - '.github/workflows/build-builder-image.yml'
+      - '.github/workflows/unit-test-check.yml'
+      - 'Makefile'
+  pull_request:
+    paths:
+      - 'CubeAPI/**'
+      - 'CubeShim/**'
+      - 'CubeNet/**'
+      - 'network-agent/**'
+      - 'docker/Dockerfile.builder'
+      - '.github/workflows/build-builder-image.yml'
+      - '.github/workflows/unit-test-check.yml'
+      - 'Makefile'
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'Component to test'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - cubeapi
+          - cubeshim
+          - network-agent
+
+concurrency:
+  group: unit-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  BUILDER_IMAGE_REMOTE: ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
+  BUILDER_IMAGE_LOCAL: cube-sandbox-builder:ci
+
+jobs:
+  detect-changes:
+    name: Prepare Test Targets
+    runs-on: ubuntu-latest
+    outputs:
+      has_work: ${{ steps.select.outputs.has_work }}
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Select components
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          declare -A seen=()
+          components=()
+
+          add_component() {
+            local name="$1"
+            if [[ -z "${seen[$name]+x}" ]]; then
+              seen["$name"]=1
+              components+=("$name")
+            fi
+          }
+
+          add_all_components() {
+            add_component "CubeAPI"
+            add_component "CubeShim"
+            add_component "network-agent"
+          }
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            selected_component="${{ github.event.inputs.component || 'all' }}"
+            case "${selected_component}" in
+              all) add_all_components ;;
+              cubeapi) add_component "CubeAPI" ;;
+              cubeshim) add_component "CubeShim" ;;
+              network-agent) add_component "network-agent" ;;
+              *)
+                echo "::error::unsupported component input: ${selected_component}"
+                exit 1
+                ;;
+            esac
+          else
+            if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+              base_ref="${{ github.event.pull_request.base.sha }}"
+              head_ref="${{ github.event.pull_request.head.sha }}"
+            else
+              base_ref="${{ github.event.before }}"
+              head_ref="${GITHUB_SHA}"
+            fi
+
+            if [[ -z "${base_ref}" || "${base_ref}" == "0000000000000000000000000000000000000000" ]]; then
+              changed_files="$(git diff-tree --no-commit-id --name-only -r "${head_ref}")"
+            else
+              changed_files="$(git diff --name-only "${base_ref}" "${head_ref}")"
+            fi
+
+            printf 'Changed files:\n%s\n' "${changed_files}"
+
+            while IFS= read -r file; do
+              [[ -n "${file}" ]] || continue
+              case "${file}" in
+                docker/Dockerfile.builder|.github/workflows/build-builder-image.yml|.github/workflows/unit-test-check.yml|Makefile)
+                  add_all_components
+                  ;;
+                CubeAPI/*)
+                  add_component "CubeAPI"
+                  ;;
+                CubeShim/*)
+                  add_component "CubeShim"
+                  ;;
+                network-agent/*|CubeNet/*)
+                  add_component "network-agent"
+                  ;;
+              esac
+            done <<< "${changed_files}"
+          fi
+
+          if [[ ${#components[@]} -eq 0 ]]; then
+            echo "has_work=false" >> "${GITHUB_OUTPUT}"
+            echo "matrix=[]" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          matrix="$(
+            printf '%s\n' "${components[@]}" | jq -R -s -c '
+              split("\n")[:-1]
+              | map({
+                  component: .,
+                  display_name: (
+                    if . == "CubeAPI" then "CubeAPI"
+                    elif . == "CubeShim" then "CubeShim"
+                    elif . == "network-agent" then "Network Agent"
+                    else error("unsupported component: " + .)
+                    end
+                  ),
+                  make_target: (
+                    if . == "CubeAPI" then "cube-api-test"
+                    elif . == "CubeShim" then "shim-test"
+                    elif . == "network-agent" then "network-agent-test"
+                    else error("unsupported component: " + .)
+                    end
+                  )
+                })
+            '
+          )"
+
+          echo "Selected matrix: ${matrix}"
+          echo "has_work=true" >> "${GITHUB_OUTPUT}"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+
+  test:
+    name: Test ${{ matrix.display_name }}
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect builder changes
+        id: builder_changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_ref="${{ github.event.pull_request.base.sha }}"
+            head_ref="${{ github.event.pull_request.head.sha }}"
+          else
+            base_ref="${{ github.event.before }}"
+            head_ref="${GITHUB_SHA}"
+          fi
+
+          if [[ -z "${base_ref}" || "${base_ref}" == "0000000000000000000000000000000000000000" ]]; then
+            changed_files="$(git diff-tree --no-commit-id --name-only -r "${head_ref}")"
+          else
+            changed_files="$(git diff --name-only "${base_ref}" "${head_ref}")"
+          fi
+
+          builder_inputs_changed="false"
+          while IFS= read -r file; do
+            case "${file}" in
+              docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
+                builder_inputs_changed="true"
+                break
+                ;;
+            esac
+          done <<< "${changed_files}"
+
+          echo "changed=${builder_inputs_changed}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GitHub Container Registry
+        id: ghcr_login
+        if: steps.builder_changes.outputs.changed != 'true'
+        continue-on-error: true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Warn about GHCR login failure
+        if: steps.ghcr_login.outcome == 'failure'
+        shell: bash
+        run: echo "::warning::GHCR login failed - will attempt pull as anonymous or build locally"
+
+      - name: Resolve builder image
+        id: builder_image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          build_local_builder_image() {
+            docker build \
+              -t "${BUILDER_IMAGE_LOCAL}" \
+              -f docker/Dockerfile.builder \
+              --build-arg GITHUB_ACTIONS=true \
+              --build-arg RUSTUP_DIST_SERVER=https://static.rust-lang.org \
+              --build-arg RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup \
+              .
+          }
+
+          image="${BUILDER_IMAGE_REMOTE}"
+
+          if [[ "${{ steps.builder_changes.outputs.changed }}" == "true" ]]; then
+            echo "Builder inputs changed, building local builder image..."
+            build_local_builder_image
+            image="${BUILDER_IMAGE_LOCAL}"
+          elif docker pull "${BUILDER_IMAGE_REMOTE}"; then
+            echo "Using published builder image ${BUILDER_IMAGE_REMOTE}"
+          else
+            echo "Failed to pull ${BUILDER_IMAGE_REMOTE}, building local fallback image..."
+            build_local_builder_image
+            image="${BUILDER_IMAGE_LOCAL}"
+          fi
+
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run ${{ matrix.display_name }} unit tests
+        shell: bash
+        env:
+          MAKE_TARGET: ${{ matrix.make_target }}
+        run: |
+          set -euo pipefail
+
+          echo "Component: ${{ matrix.component }}"
+          echo "Builder image: ${{ steps.builder_image.outputs.image }}"
+
+          make "${MAKE_TARGET}" \
+            BUILDER_IMAGE="${{ steps.builder_image.outputs.image }}"
