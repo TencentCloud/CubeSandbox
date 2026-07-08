@@ -210,6 +210,10 @@ cubemastercli tpl create-from-image \
 
 > **Registry note:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
 
+::: warning Multi-Arch image availability
+Currently only `sandbox-code:latest` is published as a **Multi-Arch** image (supporting both x86_64 and aarch64/ARM64). The other official Cube images hosted on `tencentcloudcr.com` are still being updated for Multi-Arch and may not yet run on your architecture. If you need an image for an architecture that isn't covered yet, build your own custom Multi-Arch image by combining [Creating Templates from OCI Images](./tutorials/template-from-image.md) with Docker's [Multi-platform builds](https://docs.docker.com/build/building/multi-platform/).
+:::
+
 Then monitor the build progress:
 
 ```bash

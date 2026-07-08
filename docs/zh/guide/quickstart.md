@@ -211,6 +211,10 @@ cubemastercli tpl create-from-image \
 
 > **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`。
 
+::: warning Multi-Arch 镜像支持情况
+目前仅 `sandbox-code:latest` 已发布为 **Multi-Arch** 镜像（同时支持 x86_64 与 aarch64/ARM64）。其他托管在 `tencentcloudcr.com` 的 cube 官方镜像仍在陆续更新 Multi-Arch 支持中，可能暂时无法在你的架构上运行。如果需要尚未覆盖架构的镜像，可参阅[从 OCI 镜像制作模板](./tutorials/template-from-image.md)并结合 Docker 的 [Multi-platform builds](https://docs.docker.com/build/building/multi-platform/) 自行构建自定义 Multi-Arch 镜像。
+:::
+
 然后，执行下面的这行命令，监控构建进度：
 
 ```bash
