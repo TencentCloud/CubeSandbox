@@ -102,12 +102,13 @@ func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest,
 		return nil, err
 	}
 
-	req, err := s.newEnvdRequest(ctx, http.MethodPost, "/process.Process/Start", nil, bytes.NewReader(raw))
+	req, err := s.newEnvdRequest(ctx, http.MethodPost, "/process.Process/Start", nil, encodeConnectEnvelope(raw))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", connectContentType)
 	req.Header.Set("Connect-Protocol-Version", connectProtocolVersion)
+	req.Header.Set("Connect-Content-Encoding", "identity")
 	req.Header.Set("Authorization", basicAuthUser(opts.User))
 	setConnectTimeout(req, opts.Timeout)
 
@@ -347,6 +348,18 @@ func readConnectEnvelope(r io.Reader) (byte, []byte, error) {
 	return header[0], payload, nil
 }
 
+// encodeConnectEnvelope wraps payload in a Connect streaming message: a 5-byte
+// header (1 flag byte + big-endian uint32 length) followed by the payload. Both
+// request and response messages on a streaming Connect RPC use this framing.
+func encodeConnectEnvelope(payload []byte) io.Reader {
+	buf := bytes.NewBuffer(make([]byte, 0, 5+len(payload)))
+	var header [5]byte
+	binary.BigEndian.PutUint32(header[1:], uint32(len(payload)))
+	buf.Write(header[:])
+	buf.Write(payload)
+	return buf
+}
+
 func parseConnectEndStream(raw []byte) error {
 	if len(raw) == 0 {
 		return nil
@@ -539,15 +552,8 @@ func (s *Sandbox) watchDir(ctx context.Context, path string) (*Watcher, error) {
 		return nil, err
 	}
 
-	var envelope bytes.Buffer
-	var header [5]byte
-	header[0] = 0
-	binary.BigEndian.PutUint32(header[1:], uint32(len(payload)))
-	envelope.Write(header[:])
-	envelope.Write(payload)
-
 	streamCtx, cancel := context.WithCancel(ctx)
-	req, err := s.newEnvdRequest(streamCtx, http.MethodPost, "/filesystem.Filesystem/WatchDir", nil, &envelope)
+	req, err := s.newEnvdRequest(streamCtx, http.MethodPost, "/filesystem.Filesystem/WatchDir", nil, encodeConnectEnvelope(payload))
 	if err != nil {
 		cancel()
 		return nil, err
@@ -643,6 +649,19 @@ func (e *processEndEvent) exitCode() (int, bool) {
 	}
 	if e.ExitCodeSnake != nil {
 		return *e.ExitCodeSnake, true
+	}
+	// envd serializes the end event as proto3 JSON, which omits a zero-valued
+	// exitCode field entirely. A successful (exit 0) process therefore arrives
+	// with no exitCode key at all — only status="exit status 0" and
+	// exited=true. Recover the code from the status string, then fall back to
+	// the exited flag so exit-0 commands don't spuriously fail.
+	if s := strings.TrimSpace(e.Status); strings.HasPrefix(s, "exit status ") {
+		if code, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(s, "exit status "))); err == nil {
+			return code, true
+		}
+	}
+	if e.Exited {
+		return 0, true
 	}
 	return 0, false
 }
