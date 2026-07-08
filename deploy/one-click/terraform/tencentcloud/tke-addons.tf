@@ -17,6 +17,7 @@ locals {
   cube_proxy_image  = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cube-proxy:${var.image_tag}"
   cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/webui:${var.image_tag}"
   cube_lcm_image    = var.cube_lifecycle_manager_image != "" ? var.cube_lifecycle_manager_image : "${local.image_registry}/${local.image_namespace}/cube-lifecycle-manager:${var.image_tag}"
+  cube_admin_token  = var.cube_admin_token != "" ? var.cube_admin_token : random_password.cube_admin_token[0].result
 
   # cube_db / cube_user are wired through Terraform (var.cube_db / var.cube_user)
   # so the MySQL account/database created in main.tf, the cube-master conf Secret
@@ -69,60 +70,60 @@ locals {
       replace(
         replace(
           replace(
-            replace(
-              fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
-                fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : (
-                  fileexists("${path.module}/../../../../CubeProxy/nginx.conf") ? file("${path.module}/../../../../CubeProxy/nginx.conf") : <<-EOF
-                    user root;
-                    worker_processes auto;
-                    error_log /data/log/cube-proxy/error.log notice;
-                    daemon off;
-                    events { worker_connections 100000; }
-                    http {
-                      include mime.types;
-                      default_type application/octet-stream;
-                      server {
-                        listen __CUBE_PROXY_HTTP_PORT__;
-                        server_name _;
-                        location / { return 404; }
-                      }
-                      server {
-                        listen __CUBE_PROXY_HTTPS_PORT__ ssl;
-                        server_name _;
-                        ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
-                        ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
-                        location / { return 404; }
-                      }
-                      server {
-                        listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
-                        server_name _;
-                        location / { return 404; }
-                      }
-                    }
-                  EOF
-                )
-              ),
-              "__CUBE_PROXY_HTTP_PORT__",
-              "8081"
+            fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
+              fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : <<-EOF
+                user root;
+                worker_processes auto;
+                error_log /data/log/cube-proxy/error.log notice;
+                daemon off;
+                events { worker_connections 100000; }
+                http {
+                  include mime.types;
+                  default_type application/octet-stream;
+                  server {
+                    listen __CUBE_PROXY_HTTP_PORT__;
+                    server_name _;
+                    location / { return 404; }
+                  }
+                  server {
+                    listen __CUBE_PROXY_HTTPS_PORT__ ssl;
+                    server_name _;
+                    ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
+                    ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
+                    location / { return 404; }
+                  }
+                  server {
+                    listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
+                    server_name _;
+                    location / { return 404; }
+                  }
+                }
+              EOF
             ),
-            "__CUBE_PROXY_HTTPS_PORT__",
-            "8080"
+            "__CUBE_PROXY_HTTP_PORT__",
+            "8081"
           ),
-          "__CUBE_PROXY_SSL_CERT__",
-          "cube.app+3.pem"
+          "__CUBE_PROXY_HTTPS_PORT__",
+          "8080"
         ),
-        "__CUBE_PROXY_SSL_KEY__",
-        "cube.app+3-key.pem"
+        "__CUBE_PROXY_SSL_CERT__",
+        "cube.app+3.pem"
       ),
-      "__CUBE_PROXY_ADMIN_LISTEN__:8082",
-      "0.0.0.0:8082"
+      "__CUBE_PROXY_SSL_KEY__",
+      "cube.app+3-key.pem"
     ),
-    "listen 127.0.0.1:8082;",
-    "listen 0.0.0.0:8082;"
+    "__CUBE_PROXY_ADMIN_LISTEN__:8082",
+    "0.0.0.0:8082"
   )
 
   # Precondition for creating the TKE addons
   deploy_addons = var.create_tke && var.deploy_tke_addons
+}
+
+resource "random_password" "cube_admin_token" {
+  count   = var.cube_admin_token == "" ? 1 : 0
+  length  = 32
+  special = false
 }
 
 # Write the kubeconfig to a local file (written as soon as TKE is created, independent of the addons).
@@ -638,7 +639,7 @@ resource "kubernetes_secret" "cube_lifecycle_manager_conf" {
 
   data = {
     "redis-password"   = var.redis_password
-    "cube-admin-token" = var.cube_admin_token
+    "cube-admin-token" = local.cube_admin_token
   }
 }
 
@@ -798,7 +799,7 @@ resource "kubernetes_secret" "cubeproxy_global" {
       set $timeout_max 700;
       set $cube_proxy_host_ip "127.0.0.1";
       set $cube_sidecar_addr "cube-lifecycle-manager.cubesandbox.svc.cluster.local:8083";
-      set $cube_admin_token "${var.cube_admin_token}";
+      set $cube_admin_token "${local.cube_admin_token}";
     EOT
     # Same Redis password exposed as a discrete key so the cube-proxy container
     # can read it via secret_key_ref instead of a plaintext Deployment env value

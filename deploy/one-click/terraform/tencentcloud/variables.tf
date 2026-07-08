@@ -350,7 +350,7 @@ variable "cube_api_replicas" {
 }
 
 variable "cube_proxy_replicas" {
-  description = "cube-proxy Deployment replica count. PR #705 uses Redis-backed cube-proxy discovery through cube-lifecycle-manager, so multiple replicas can be discovered without static wiring."
+  description = "cube-proxy Deployment replica count. Redis-backed cube-proxy discovery through cube-lifecycle-manager allows multiple replicas without static wiring."
   type        = number
   default     = 1
 
@@ -416,10 +416,15 @@ variable "cube_lifecycle_manager_discovery_refresh" {
 }
 
 variable "cube_admin_token" {
-  description = "Optional shared token used by cube-lifecycle-manager when calling cube-proxy /admin/* endpoints."
+  description = "Optional shared token used by cube-lifecycle-manager and cube-proxy admin endpoints. If empty, Terraform auto-generates one."
   type        = string
   default     = ""
   sensitive   = true
+
+  validation {
+    condition     = var.cube_admin_token == "" || length(var.cube_admin_token) >= 16
+    error_message = "cube_admin_token must be empty for auto-generation or at least 16 characters when explicitly set."
+  }
 }
 
 variable "cube_proxy_heartbeat_interval_ms" {

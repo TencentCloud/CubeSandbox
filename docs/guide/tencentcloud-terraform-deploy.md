@@ -1,6 +1,6 @@
 # Tencent Cloud Cluster Deployment (Terraform)
 
-This guide explains how to use the Terraform deployer shipped in the release bundle to stand up a **clustered** Cube Sandbox on Tencent Cloud in one shot: a managed TKE control plane running `cube-master` / `cube-api` / `cube-proxy` / `cube-webui`, backed by cloud MySQL + Redis, with one or more CVM PVM compute nodes. A jumpserver (SSH on port `443`) acts as the build host and the bastion for the otherwise-private VPC.
+This guide explains how to use the Terraform deployer shipped in the release bundle to stand up a **clustered** Cube Sandbox on Tencent Cloud in one shot: a managed TKE control plane running `cube-master` / `cube-api` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui`, backed by cloud MySQL + Redis, with one or more CVM PVM compute nodes. A jumpserver (SSH on port `443`) acts as the build host and the bastion for the otherwise-private VPC.
 
 ::: tip Network Hardening
 Network hardening for the cluster deployment is handled by **Tencent Cloud security groups**: the deployer creates **4 per-role security groups** (jumpserver / compute / TKE pod / CLB), each opening only the ingress that role actually needs on a least-privilege basis (compute and TKE nodes get no public ingress at all), and assigns no public IP to compute nodes. **The default is internal mode** (`TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='false'`): the three user-facing services — WebUI / cube-api / cube-proxy — are fronted by **VPC-internal CLBs**, reachable only from inside the VPC (via the jumpserver / VPN) with no public exposure. To allow public access, explicitly set `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK='true'` to switch them to public CLBs. To tighten further, adjust the inbound/outbound rules of each individual group (`cubesandbox-sg-jumpserver` / `cubesandbox-sg-compute` / `cubesandbox-sg-tke-pod` / `cubesandbox-sg-clb`) as needed in the [Tencent Cloud security group console](https://console.cloud.tencent.com/vpc/securitygroup). **When public mode is enabled**, also see [Hardening the Public-Facing Services](#hardening-the-public-facing-services).
@@ -30,12 +30,13 @@ This deployment uses cloud resources to **quickly stand up a highly-available Cu
   ┌────────────┼─────────────────────────────────┼──────────┐
   │            │            VPC internal          │           │
   │  ┌─────────┴────────┐       ┌───────────────┴─────┐    │
-  │  │ Compute CVM ×N   │       │  TKE managed cluster │    │
-  │  │  Cubelet         │       │  cube-master (×1)   │    │
-  │  │  network-agent   │       │  cube-api (×1)      │    │
-  │  │  CubeEgress      │       │  cube-proxy (×1)    │    │
-  │  └──────────────────┘       │  cube-webui (×1)    │    │
-  │                             └───┬─────────────┬───┘    │
+  │  │ Compute CVM ×N   │       │  TKE managed cluster      │
+  │  │  Cubelet         │       │  cube-master (×1)         │
+  │  │  network-agent   │       │  cube-api (×1)            │
+  │  │  CubeEgress      │       │  cube-proxy (×1)          │
+  │  └──────────────────┘       │  cube-lifecycle-manager   │
+  │                             │  cube-webui (×1)          │
+  │                             └───┬─────────────┬─────────┘
   │                                 │             │         │
   │                    ┌────────────┴───┐ (opt.)  │         │
   │                    │  CFS (NFS)     │         │         │
@@ -56,7 +57,7 @@ This deployment uses cloud resources to **quickly stand up a highly-available Cu
 |-----------|------|-------|
 | Jumpserver | CVM (public IP, SSH 443) | Build host (TCR mode) and bastion into the private VPC |
 | Load balancer | CLB (internal/public) | Fronts `cube-api` / `cube-proxy` / `cube-webui`; internal mode by default, user traffic entry point |
-| Control plane | Managed TKE cluster | Runs `cube-master` / `cube-api` / `cube-proxy` / `cube-webui` |
+| Control plane | Managed TKE cluster | Runs `cube-master` / `cube-api` / `cube-proxy` / `cube-lifecycle-manager` / `cube-webui` |
 | Compute node | CVM PVM | Runs `Cubelet` / `network-agent` / `CubeEgress`; **actually hosts sandboxes** |
 | Database | Cloud MySQL 8.0 + Redis 7.0 | VPC-internal only, no public access |
 | Shared storage | CFS (General Standard NFS, **optional**) | When `USE_CFS=true` and cubemaster has multiple replicas, ReadWriteMany share for `/data/CubeMaster/storage` |
@@ -322,7 +323,7 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_HEARTBEAT_TTL` | `15s` | TTL for cube-proxy Redis registry heartbeats |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH` | `3s` | Redis discovery scan interval for cube-lifecycle-manager |
 | `TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS` | `5000` | cube-proxy registry heartbeat interval in milliseconds |
-| `TENCENTCLOUD_CUBE_ADMIN_TOKEN` | empty | Optional shared token for cube-lifecycle-manager -> cube-proxy `/admin/*` calls |
+| `TENCENTCLOUD_CUBE_ADMIN_TOKEN` | empty | Shared token for cube-lifecycle-manager -> cube-proxy `/admin/*` calls. Leave empty to auto-generate; custom values must be at least 16 characters |
 | `TENCENTCLOUD_ENABLE_PUBLIC_NETWORK` | `false` | Network exposure mode for cube-api / cube-proxy / cube-webui. **Default `false`**: VPC-internal CLBs, reachable only from inside the VPC (via jumpserver / VPN). Set to `true` for public CLBs reachable from the internet, with the security group opening `0.0.0.0/0` accordingly. cube-master always stays VPC-internal. Read [Hardening the Public-Facing Services](#hardening-the-public-facing-services) before enabling |
 
 ### Non-interactive / CI runs
@@ -353,7 +354,7 @@ The default deployment provisions **2× 4C8G compute nodes** (`SA9.MEDIUM8`, 200
 | Compute node (PVM) | `SA9.MEDIUM8` | 4C8G + 200GB data disk | 2 |
 | TKE Worker | `SA9.LARGE8` | 4C8G | 2 (`worker_config.count`) |
 | Jumpserver | `SA9.MEDIUM4` | 2C4G | 1 |
-| Control-plane Pods | — | cubemaster / cube-api / cube-webui ×1 each | on TKE workers |
+| Control-plane Pods | — | cubemaster / cube-api / cube-proxy / cube-lifecycle-manager / cube-webui ×1 each | on TKE workers |
 
 ::: warning
 The default configuration is only suitable for functional validation and small-scale evaluation. For large-scale production usage, you **must adjust the compute node and TKE node specs and counts**, otherwise you will encounter CPU/memory exhaustion, Pod scheduling failures, and sandbox creation timeouts.

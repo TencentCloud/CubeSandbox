@@ -618,9 +618,12 @@ find "${PACKAGE_ROOT}/terraform/tencentcloud" -maxdepth 1 -type f \
 # not maintained separately but derived from the canonical webui/nginx.conf so
 # the two never drift.
 copy_file "${CUBE_WEBUI_TEMPLATE_DIR}/nginx.conf" "${PACKAGE_ROOT}/terraform/tencentcloud/webui-nginx.conf"
-# tke-addons.tf also mounts cube-proxy's nginx.conf so the admin listener can be
-# cluster-reachable by cube-lifecycle-manager in Kubernetes deployments.
-copy_file "${CUBE_PROXY_SOURCE_DIR}/nginx.conf" "${PACKAGE_ROOT}/terraform/tencentcloud/cubeproxy-nginx.conf"
+# tke-addons.tf also mounts cube-proxy's nginx.conf; render the Terraform copy
+# with placeholders so the Kubernetes deployment can bind the admin listener on
+# the Pod IP while preserving CubeProxy/nginx.conf as the canonical source.
+generate_cube_proxy_nginx_template \
+  "${CUBE_PROXY_SOURCE_DIR}/nginx.conf" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/cubeproxy-nginx.conf"
 # Verify the terraform deployer actually shipped (mirrors the guarding done for
 # the other components), so a renamed/emptied source dir fails the build loudly
 # instead of producing a bundle with an absent/broken deployer.
@@ -683,8 +686,10 @@ find "${DIST_ROOT}/terraform/tencentcloud" -maxdepth 1 -type f \
 # sandbox-package copy above) so create.sh can apply tke-addons.tf straight from
 # the extracted bundle without the source tree present.
 copy_file "${CUBE_WEBUI_TEMPLATE_DIR}/nginx.conf" "${DIST_ROOT}/terraform/tencentcloud/webui-nginx.conf"
-# Ship cube-proxy's canonical nginx.conf for the Terraform TKE deployment too.
-copy_file "${CUBE_PROXY_SOURCE_DIR}/nginx.conf" "${DIST_ROOT}/terraform/tencentcloud/cubeproxy-nginx.conf"
+# Ship the placeholder-rendered cube-proxy nginx config for Terraform too.
+generate_cube_proxy_nginx_template \
+  "${CUBE_PROXY_SOURCE_DIR}/nginx.conf" \
+  "${DIST_ROOT}/terraform/tencentcloud/cubeproxy-nginx.conf"
 # Verify the top-level terraform deployer copy shipped intact too.
 for _tf in create.sh destroy.sh build_images.sh lib-state-sync.sh lib-phases.sh \
   main.tf variables.tf tke-addons.tf query_outputs.tf webui-nginx.conf cubeproxy-nginx.conf; do
