@@ -233,18 +233,30 @@ command_output_contains_fixed_string() {
   grep -Fq -- "${needle}" <<<"${output}"
 }
 
+# Append an export statement to a command string that will later be passed to
+# `bash -c`. Do not hand-roll this as `export NAME="${value}"`: values containing
+# `$()`, backticks, quotes, or backslashes would be interpreted during the second
+# bash parse and could execute commands. `%q` keeps the value as data.
+append_env_export() {
+  local target_name="$1"
+  local env_name="$2"
+  local env_value="$3"
+  local escaped_value
+  local current_value
+
+  printf -v escaped_value "%q" "${env_value}"
+  current_value="${!target_name:-}"
+  printf -v "${target_name}" "%s%s" "${current_value}" "export ${env_name}=${escaped_value}; "
+}
+
 append_env_exports_by_prefix() {
   local target_name="$1"
   local prefix="$2"
   local env_name
-  local escaped_value
-  local current_value
 
   while IFS= read -r env_name; do
     [[ -n "${env_name}" ]] || continue
-    printf -v escaped_value "%q" "${!env_name}"
-    current_value="${!target_name:-}"
-    printf -v "${target_name}" "%s%s" "${current_value}" "export ${env_name}=${escaped_value}; "
+    append_env_export "${target_name}" "${env_name}" "${!env_name}"
   done < <(compgen -A variable -- "${prefix}")
 }
 

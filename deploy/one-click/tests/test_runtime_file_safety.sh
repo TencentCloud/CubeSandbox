@@ -199,6 +199,22 @@ test_quickcheck_reports_node_registration_failure_explicitly() {
   assert_not_contains "${path}" "| rg -q"
 }
 
+test_append_env_export_shell_escapes_values() {
+  local exports=""
+  local marker="${TMP_DIR}/append-env-export-command-ran"
+  local value="\$(touch ${marker}) quote\"slash\\ space value"
+
+  append_env_export exports CUBE_API_WEBHOOK_CONFIG "${value}"
+
+  (
+    unset CUBE_API_WEBHOOK_CONFIG
+    eval "${exports}"
+    [[ "${CUBE_API_WEBHOOK_CONFIG}" == "${value}" ]] || exit 1
+  ) || fail "single env export should round-trip shell-sensitive values"
+
+  [[ ! -e "${marker}" ]] || fail "escaped env export must not execute command substitutions"
+}
+
 test_append_env_exports_by_prefix_forwards_webhook_secrets() {
   local exports=""
   CUBE_WEBHOOK_SECRET_0="alpha beta"
@@ -855,6 +871,7 @@ test_detect_glibc_version_consumes_full_ldd_output
 test_online_install_glibc_detection_avoids_head_pipe
 test_one_click_scripts_do_not_require_ripgrep
 test_quickcheck_reports_node_registration_failure_explicitly
+test_append_env_export_shell_escapes_values
 test_append_env_exports_by_prefix_forwards_webhook_secrets
 test_quickcheck_probes_are_race_tolerant
 test_quickcheck_wait_until_retries_then_succeeds
