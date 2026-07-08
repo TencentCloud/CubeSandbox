@@ -655,7 +655,7 @@ func TestCommandsRunUsesEnvdProcessStart(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if gotHost != "49999-sb-proc.cube.test" {
+	if gotHost != "49983-sb-proc.cube.test" {
 		t.Fatalf("Host=%q", gotHost)
 	}
 	if gotHeaders.Get("Content-Type") != connectContentType || gotHeaders.Get("Connect-Protocol-Version") != connectProtocolVersion {
@@ -721,7 +721,7 @@ func TestFilesReadUsesEnvdHTTPFileAPI(t *testing.T) {
 	if content != "file content" {
 		t.Fatalf("content=%q", content)
 	}
-	if gotHost != "49999-sb-files.cube.test" || gotPath != "/tmp/foo bar.txt" || gotToken != "envd-token" {
+	if gotHost != "49983-sb-files.cube.test" || gotPath != "/tmp/foo bar.txt" || gotToken != "envd-token" {
 		t.Fatalf("host/path/token=%q/%q/%q", gotHost, gotPath, gotToken)
 	}
 }
@@ -944,7 +944,7 @@ func TestFilesListUsesEnvdFilesystemRPC(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name != "a.txt" || entries[0].Size != 10 || entries[0].IsDir() {
 		t.Fatalf("entries=%#v", entries)
 	}
-	if gotHost != "49999-sb-fs.cube.test" || gotPath != "/filesystem.Filesystem/ListDir" || gotCT != "application/json" {
+	if gotHost != "49983-sb-fs.cube.test" || gotPath != "/filesystem.Filesystem/ListDir" || gotCT != "application/json" {
 		t.Fatalf("host/path/ct=%q/%q/%q", gotHost, gotPath, gotCT)
 	}
 }

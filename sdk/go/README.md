@@ -198,10 +198,14 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 When `CUBE_PROXY_NODE_IP` is set, data-plane requests connect directly to that IP and port while preserving the virtual sandbox host:
 
 ```text
-URL:  <CUBE_PROXY_SCHEME>://49999-<sandboxID>.<CUBE_SANDBOX_DOMAIN>/<envd-endpoint>
+URL:  <CUBE_PROXY_SCHEME>://49983-<sandboxID>.<CUBE_SANDBOX_DOMAIN>/<envd-endpoint>
 TCP:  <CUBE_PROXY_NODE_IP>:<CUBE_PROXY_PORT_HTTP>
-Host: 49999-<sandboxID>.<CUBE_SANDBOX_DOMAIN>
+Host: 49983-<sandboxID>.<CUBE_SANDBOX_DOMAIN>
 ```
+
+The host prefix is the sandbox's internal service port: `49983` (envd) for
+commands/filesystem/files/PTY, and `49999` (Jupyter) for the code interpreter
+(`RunCode` / `/execute`).
 
 You can also set it directly:
 

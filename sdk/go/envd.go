@@ -225,7 +225,7 @@ func multipartFileBody(path string, data []byte) (io.Reader, string, error) {
 func (s *Sandbox) newEnvdRequest(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Request, error) {
 	target := url.URL{
 		Scheme:   s.client.config.ProxyScheme,
-		Host:     s.GetHost(JupyterPort),
+		Host:     s.GetHost(EnvdPort),
 		Path:     path,
 		RawQuery: query.Encode(),
 	}

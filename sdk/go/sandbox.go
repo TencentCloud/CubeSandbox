@@ -13,7 +13,15 @@ import (
 	"time"
 )
 
-const JupyterPort = 49999
+const (
+	// JupyterPort is the code-interpreter (Jupyter) port, used only by the
+	// /execute endpoint (RunCode).
+	JupyterPort = 49999
+	// EnvdPort is the envd daemon port. All envd data-plane RPCs — commands,
+	// filesystem, files, and PTY — route here, matching the Python/Node SDKs
+	// (ENVD_PORT = 49983). Sending these to JupyterPort yields 404s.
+	EnvdPort = 49983
+)
 
 func (s *Sandbox) GetHost(port int) string {
 	domain := s.Domain
