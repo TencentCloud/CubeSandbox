@@ -9,6 +9,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+class MissingEnvironmentVariable(Exception):
+    """Raised when a required environment variable is not set."""
+
+
 def load_local_dotenv() -> None:
     """Best-effort load of a nearby .env file without overriding real env vars."""
     candidate_paths = [
@@ -31,5 +35,5 @@ def load_local_dotenv() -> None:
 def required(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        raise SystemExit(f"Missing required environment variable: {name}")
+        raise MissingEnvironmentVariable(name)
     return value

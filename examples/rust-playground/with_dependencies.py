@@ -58,8 +58,8 @@ def main() -> int:
 
     print(f"Creating sandbox from template: {template_id}")
 
-    with Sandbox.create(template=template_id, timeout=360) as sandbox:
-        sandbox_id = getattr(sandbox, "sandbox_id", None) or sandbox.id
+    with Sandbox.create(template=template_id, timeout=120) as sandbox:
+        sandbox_id = getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
         print(f"Sandbox ready: {sandbox_id}")
 
         ws = "/home/user/workspace/sandbox-demo"

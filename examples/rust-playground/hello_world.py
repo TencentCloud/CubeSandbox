@@ -42,7 +42,7 @@ def main() -> int:
     print(f"Creating sandbox from template: {template_id}")
 
     with Sandbox.create(template=template_id, timeout=120) as sandbox:
-        sandbox_id = getattr(sandbox, "sandbox_id", None) or sandbox.id
+        sandbox_id = getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
         print(f"Sandbox ready: {sandbox_id}")
 
         # 1. Write the Rust source file
