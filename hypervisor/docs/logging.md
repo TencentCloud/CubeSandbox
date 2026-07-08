@@ -23,7 +23,7 @@ Users should react to this error by checking their initial VM configuration.
 
 ### `warn!()`
 
-A serious problem has occured but the execution of the VM can continue although some functionality might be impacted.
+A serious problem has occurred but the execution of the VM can continue although some functionality might be impacted.
 
 A typical example of where this level of message should be generated is during an API call request that cannot be fulfilled.
 

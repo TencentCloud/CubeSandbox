@@ -135,7 +135,7 @@ This section illustrates the Windows specific aspects of the VM network configur
 
 ### Basic Networking
 
-As the simplest option, using `--net tap=` in the Cloud Hypervisor command line will create a `vmtapX` device on the host with the default IPv4 adress `192.168.249.1`. After SAC becomes available, the guest configuration can be set with
+As the simplest option, using `--net tap=` in the Cloud Hypervisor command line will create a `vmtapX` device on the host with the default IPv4 address `192.168.249.1`. After SAC becomes available, the guest configuration can be set with
 
 <pre>
 SAC>i 10 192.168.249.2 255.255.255.0 192.168.249.1
