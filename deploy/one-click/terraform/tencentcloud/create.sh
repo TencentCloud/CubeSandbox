@@ -620,38 +620,36 @@ prepare_cubeproxy_nginx_conf() {
 		return 0
 	fi
 
-	for src in \
-		"${SCRIPT_DIR}/../../../../CubeProxy/nginx.conf"; do
-		if [ -f "${src}" ]; then
-			{
-				cat <<'EOF'
+	src="${SCRIPT_DIR}/../../../../CubeProxy/nginx.conf"
+	if [ -f "${src}" ]; then
+		{
+			cat <<'EOF'
 # NOTE: This file is auto-generated from CubeProxy/nginx.conf.
 # DO NOT edit by hand; modify the upstream CubeProxy/nginx.conf instead.
 
 EOF
-				sed \
-					-e 's|^worker_processes [0-9]\+;|worker_processes auto;|' \
-					-e 's|^\(\s*listen \)8081\( reuseport;\)|\1__CUBE_PROXY_HTTP_PORT__\2|' \
-					-e 's|^\(\s*listen \)8080\( ssl reuseport;\)|\1__CUBE_PROXY_HTTPS_PORT__\2|' \
-					-e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
-					-e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
-					-e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
-					-e 's|/usr/local/openresty/nginx/certs/cube\.app+3\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__|' \
-					-e 's|/usr/local/openresty/nginx/certs/cube\.app+3-key\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__|' \
-					"${src}"
-			} >"${dst}"
-			local token
-			for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
-				if ! grep -q -F "${token}" "${dst}"; then
-					rm -f "${dst}"
-					echo -e "  ${RED}✗ cube-proxy nginx template is missing ${token}; upstream CubeProxy/nginx.conf may have changed${NC}" >&2
-					return 1
-				fi
-			done
-			echo -e "  ${GREEN}✓ Generated cubeproxy-nginx.conf from ${src}${NC}"
-			return 0
-		fi
-	done
+			sed \
+				-e 's|^worker_processes [0-9]\+;|worker_processes auto;|' \
+				-e 's|^\(\s*listen \)8081\( reuseport;\)|\1__CUBE_PROXY_HTTP_PORT__\2|' \
+				-e 's|^\(\s*listen \)8080\( ssl reuseport;\)|\1__CUBE_PROXY_HTTPS_PORT__\2|' \
+				-e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
+				-e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
+				-e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
+				-e 's|/usr/local/openresty/nginx/certs/cube\.app+3\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__|' \
+				-e 's|/usr/local/openresty/nginx/certs/cube\.app+3-key\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__|' \
+				"${src}"
+		} >"${dst}"
+		local token
+		for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
+			if ! grep -q -F "${token}" "${dst}"; then
+				rm -f "${dst}"
+				echo -e "  ${RED}✗ cube-proxy nginx template is missing ${token}; upstream CubeProxy/nginx.conf may have changed${NC}" >&2
+				return 1
+			fi
+		done
+		echo -e "  ${GREEN}✓ Generated cubeproxy-nginx.conf from ${src}${NC}"
+		return 0
+	fi
 
 	cat >"${dst}" <<'EOF'
 user root;
