@@ -160,6 +160,7 @@ static __always_inline bool dns_process_response_answer(struct __sk_buff *skb,
 		if (bpf_skb_load_bytes(skb, *cursor, &ip, sizeof(ip)))
 			return false;
 		ttl = bpf_ntohl(rr.ttl);
+		if (ttl < 300) ttl = 300;
 		dns_learn_response_ip(ifindex, ip, ttl, flags);
 	}
 
