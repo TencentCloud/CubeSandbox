@@ -36,11 +36,10 @@ type denyOutPolicyEntry struct {
 }
 
 type netPolicyPlan struct {
-	allowOutEntries       []allowOutPolicyEntry
-	dnsAllowRules         []dnsAllowRule
-	denyOutEntries        []denyOutPolicyEntry
-	includeDefaultDenyOut bool
-	dnsPolicyFlags        uint8
+	allowOutEntries []allowOutPolicyEntry
+	dnsAllowRules   []dnsAllowRule
+	denyOutEntries  []denyOutPolicyEntry
+	dnsPolicyFlags  uint8
 }
 
 // newInnerLPMMap creates a new LPM trie map with uint32 values for deny_out.
@@ -335,9 +334,7 @@ func buildNetPolicyPlan(opts MVMOptions) (*netPolicyPlan, error) {
 	}
 
 	var denyOutEntries []denyOutPolicyEntry
-	includeDefaultDenyOut := true
 	if opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess {
-		includeDefaultDenyOut = false
 		denyOutEntries, err = buildDenyOutPolicyEntries([]string{"0.0.0.0/0"})
 	} else {
 		if opts.DenyOut != nil {
@@ -352,11 +349,10 @@ func buildNetPolicyPlan(opts MVMOptions) (*netPolicyPlan, error) {
 	}
 
 	plan := &netPolicyPlan{
-		allowOutEntries:       allowOutEntries,
-		dnsAllowRules:         dnsAllowRules,
-		denyOutEntries:        denyOutEntries,
-		includeDefaultDenyOut: includeDefaultDenyOut,
-		dnsPolicyFlags:        dnsPolicyFlagsForDomains(dnsAllowDomains, l7DNSAllowDomains),
+		allowOutEntries: allowOutEntries,
+		dnsAllowRules:   dnsAllowRules,
+		denyOutEntries:  denyOutEntries,
+		dnsPolicyFlags:  dnsPolicyFlagsForDomains(dnsAllowDomains, l7DNSAllowDomains),
 	}
 	if err := validateNetPolicyPlan(plan); err != nil {
 		return nil, err
@@ -385,9 +381,6 @@ func appendDenyOutPolicyEntries(dst, src []denyOutPolicyEntry) []denyOutPolicyEn
 func effectiveDenyOutEntriesForReplace(plan *netPolicyPlan) []denyOutPolicyEntry {
 	if plan == nil {
 		return nil
-	}
-	if !plan.includeDefaultDenyOut {
-		return plan.denyOutEntries
 	}
 	entries := make([]denyOutPolicyEntry, len(plan.denyOutEntries), len(plan.denyOutEntries)+len(alwaysDeniedSandboxEntries))
 	copy(entries, plan.denyOutEntries)

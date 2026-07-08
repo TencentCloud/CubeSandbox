@@ -231,28 +231,22 @@ func TestBuildNetPolicyPlanDeduplicatesAndMergesFlags(t *testing.T) {
 	if got, want := len(plan.denyOutEntries), 2; got != want {
 		t.Fatalf("len(plan.denyOutEntries)=%d, want %d", got, want)
 	}
-	if !plan.includeDefaultDenyOut {
-		t.Fatal("includeDefaultDenyOut=false, want true")
-	}
 	if got, want := len(effectiveDenyOutEntriesForReplace(plan)), len(alwaysDeniedSandboxEntries)+1; got != want {
 		t.Fatalf("len(effectiveDenyOutEntriesForReplace(plan))=%d, want %d", got, want)
 	}
 }
 
-func TestBuildNetPolicyPlanBlockAllDoesNotIncludeDefaultDenyOut(t *testing.T) {
+func TestBuildNetPolicyPlanBlockAllKeepsDefaultDenyOutOnReplace(t *testing.T) {
 	allowInternetAccess := false
 	plan, err := buildNetPolicyPlan(MVMOptions{AllowInternetAccess: &allowInternetAccess})
 	if err != nil {
 		t.Fatalf("buildNetPolicyPlan returned error: %v", err)
 	}
-	if plan.includeDefaultDenyOut {
-		t.Fatal("includeDefaultDenyOut=true, want false for deny-all policy")
-	}
 	if got, want := len(plan.denyOutEntries), 1; got != want {
 		t.Fatalf("len(plan.denyOutEntries)=%d, want %d", got, want)
 	}
-	if got := len(effectiveDenyOutEntriesForReplace(plan)); got != 1 {
-		t.Fatalf("len(effectiveDenyOutEntriesForReplace(plan))=%d, want 1", got)
+	if got, want := len(effectiveDenyOutEntriesForReplace(plan)), len(alwaysDeniedSandboxEntries)+1; got != want {
+		t.Fatalf("len(effectiveDenyOutEntriesForReplace(plan))=%d, want %d", got, want)
 	}
 }
 
