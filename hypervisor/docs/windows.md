@@ -209,7 +209,7 @@ In this excercise, [WinDbg](https://docs.microsoft.com/en-us/windows-hardware/dr
 
 #### WinDbg VM
 
-For simplicity, the debugger VM is supposed to be only running under QEMU. It will require VGA and doesn't neccessarily depend on UEFI. As an OS, it can carry any supported Windows OS where the debugger of choice can be installed. The simplest way is to follow the image preparation instructions from the previous chapter, but avoid using the OVMF firmware. It is also not required to use VirtIO drivers, whereby it might be useful in some case. Though, while creating the image file for the debugger VM, be sure to choose a sufficient disk size that counts in the need to save the corresponding debug symbols and sources.
+For simplicity, the debugger VM is supposed to be only running under QEMU. It will require VGA and doesn't necessarily depend on UEFI. As an OS, it can carry any supported Windows OS where the debugger of choice can be installed. The simplest way is to follow the image preparation instructions from the previous chapter, but avoid using the OVMF firmware. It is also not required to use VirtIO drivers, whereby it might be useful in some cases. Though, while creating the image file for the debugger VM, be sure to choose a sufficient disk size that counts in the need to save the corresponding debug symbols and sources.
 
 To create the debugger Windows VM, the following command can be used:
 
