@@ -454,6 +454,23 @@ class Sandbox:
         )
         _check_response(resp)
 
+    def set_timeout(self, timeout: int) -> None:
+        """POST /sandboxes/:sandboxID/timeout - Set sandbox idle timeout.
+
+        Args:
+            timeout: New idle timeout in seconds. ``0`` requests immediate
+                timeout; positive values set a normal TTL.
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: If the timeout is invalid or on unexpected backend error.
+        """
+        resp = self._session.post(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/timeout",
+            json={"timeout": timeout},
+        )
+        _check_response(resp)
+
     def kill(self) -> None:
         """DELETE /sandboxes/:sandboxID - Destroy a sandbox.
 

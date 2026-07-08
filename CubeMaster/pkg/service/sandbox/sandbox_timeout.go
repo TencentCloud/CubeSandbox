@@ -42,9 +42,9 @@ func SetTimeout(ctx context.Context, req *types.SetTimeoutRequest) (rsp *types.S
 		rsp.Ret.RetMsg = "should provide sandboxID"
 		return
 	}
-	if req.Timeout <= 0 {
+	if req.Timeout < 0 {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
-		rsp.Ret.RetMsg = "timeout must be positive (seconds)"
+		rsp.Ret.RetMsg = "timeout must be non-negative (seconds)"
 		return
 	}
 
