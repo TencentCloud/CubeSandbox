@@ -849,6 +849,32 @@ class TestResume:
                 sb.resume()
 
 
+# ── POST /sandboxes/:id/timeout ───────────────────────────────────────────────
+
+class TestSetTimeout:
+    def test_set_timeout_success(self):
+        sb = make_sandbox()
+        with patch.object(sb._session, "post", return_value=mock_response(status=204)) as m:
+            sb.set_timeout(300)
+        url = m.call_args.args[0]
+        assert url.endswith(f"/sandboxes/{SANDBOX_ID}/timeout")
+        assert m.call_args.kwargs["json"] == {"timeout": 300}
+
+    def test_set_timeout_rejects_non_positive(self):
+        sb = make_sandbox()
+        with pytest.raises(ValueError, match="positive"):
+            sb.set_timeout(0)
+        with pytest.raises(ValueError, match="positive"):
+            sb.set_timeout(-1)
+
+    def test_set_timeout_not_found(self):
+        sb = make_sandbox()
+        with patch.object(sb._session, "post",
+                          return_value=mock_response({"message": "not found"}, status=404)):
+            with pytest.raises(SandboxNotFoundError):
+                sb.set_timeout(60)
+
+
 # ── properties / get_host ─────────────────────────────────────────────────────
 
 class TestProperties:

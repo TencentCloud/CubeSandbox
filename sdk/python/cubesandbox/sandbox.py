@@ -429,6 +429,30 @@ class Sandbox:
                 f"Sandbox {self.sandbox_id!r} did not reach 'paused' state within {timeout}s"
             )
 
+    def set_timeout(self, timeout: int) -> None:
+        """POST /sandboxes/:sandboxID/timeout - Set sandbox idle timeout.
+
+        Resets the idle clock from now. Semantics align with e2b's
+        ``set_timeout``; see ``docs/guide/lifecycle.md``.
+
+        Args:
+            timeout: New idle TTL in seconds. Must be a positive integer.
+                ``NEVER_TIMEOUT`` (-1) is not supported on this endpoint
+                (use :meth:`create` or :meth:`resume` instead).
+
+        Raises:
+            ValueError: If ``timeout`` is not positive.
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: On unexpected backend error (HTTP 500).
+        """
+        if timeout <= 0:
+            raise ValueError("timeout must be a positive integer (seconds)")
+        resp = self._session.post(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/timeout",
+            json={"timeout": timeout},
+        )
+        _check_response(resp)
+
     def resume(self, timeout: int | None = None) -> None:
         """POST /sandboxes/:sandboxID/resume - Resume a paused sandbox.
 

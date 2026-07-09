@@ -155,6 +155,9 @@ func TestSandboxRequiresAttachedClient(t *testing.T) {
 	if err := (&Sandbox{}).Resume(ctx, nil); err == nil {
 		t.Fatal("Resume without client returned nil error")
 	}
+	if err := (&Sandbox{}).SetTimeout(ctx, time.Minute); err == nil {
+		t.Fatal("SetTimeout without client returned nil error")
+	}
 	if err := (&Sandbox{}).Kill(ctx); err == nil {
 		t.Fatal("Kill without client returned nil error")
 	}

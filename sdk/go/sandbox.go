@@ -85,6 +85,23 @@ func (s *Sandbox) Pause(ctx context.Context, opts PauseOptions) error {
 	}
 }
 
+// SetTimeout sets the sandbox idle TTL from now.
+//
+// Semantics align with e2b's set_timeout; see docs/guide/lifecycle.md.
+// NeverTimeout is not supported on this endpoint.
+func (s *Sandbox) SetTimeout(ctx context.Context, timeout time.Duration) error {
+	if err := s.ensureClient(); err != nil {
+		return err
+	}
+	secs := durationSeconds(timeout)
+	if secs <= 0 {
+		return fmt.Errorf("timeout must be a positive duration")
+	}
+	path := "/sandboxes/" + url.PathEscape(s.SandboxID) + "/timeout"
+	payload := map[string]any{"timeout": secs}
+	return s.client.doJSON(ctx, http.MethodPost, path, payload, nil, http.StatusOK, http.StatusNoContent)
+}
+
 // Resume resumes a paused sandbox.
 //
 // Deprecated: use Client.Connect instead, which auto-resumes paused sandboxes

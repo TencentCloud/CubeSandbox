@@ -308,6 +308,56 @@ func TestLifecycleEndpoints(t *testing.T) {
 	}
 }
 
+func TestSetTimeout(t *testing.T) {
+	var timeoutBody map[string]int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/timeout":
+			if err := json.NewDecoder(r.Body).Decode(&timeoutBody); err != nil {
+				t.Fatalf("decode timeout: %v", err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/connect":
+			fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-test"))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-test"})
+	ctx := context.Background()
+	sb, err := client.Connect(ctx, testSandboxID)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	if err := sb.SetTimeout(ctx, 5*time.Minute); err != nil {
+		t.Fatalf("SetTimeout: %v", err)
+	}
+	if timeoutBody["timeout"] != 300 {
+		t.Fatalf("timeout body=%v, want 300", timeoutBody)
+	}
+
+	if err := sb.SetTimeout(ctx, 0); err == nil {
+		t.Fatal("SetTimeout(0) returned nil error")
+	}
+}
+
+func TestSetTimeoutNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"sandbox not found"}`, http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	sb := &Sandbox{client: NewClient(Config{APIURL: server.URL}), SandboxID: testSandboxID}
+	if err := sb.SetTimeout(context.Background(), time.Minute); !errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("SetTimeout error=%v, want ErrSandboxNotFound", err)
+	}
+}
+
 func TestAPIErrorMapping(t *testing.T) {
 	tests := []struct {
 		name       string
