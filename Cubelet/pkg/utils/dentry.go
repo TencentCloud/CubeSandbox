@@ -69,7 +69,19 @@ func GetDeviceIdleRatio(path string) (uint64, uint64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	return uint64(100) * buf.Bavail / buf.Blocks, uint64(100) * buf.Ffree / buf.Files, nil
+	var blockRatio uint64
+	if buf.Blocks > 0 {
+		blockRatio = uint64(100) * buf.Bavail / buf.Blocks
+	}
+	var inodeRatio uint64
+	if buf.Files > 0 {
+		inodeRatio = uint64(100) * buf.Ffree / buf.Files
+	} else {
+		// Filesystems like btrfs don't maintain a fixed inode table
+		// and report Files=0. Treat as 100% inode available.
+		inodeRatio = uint64(100)
+	}
+	return blockRatio, inodeRatio, nil
 }
 
 func GetAllDirname(pathname string) ([]string, error) {
