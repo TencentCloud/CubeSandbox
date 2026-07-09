@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Bring up cube-proxy on the control node from a pre-published image
+# (mirrors up-cube-lifecycle-manager.sh / cube-egress).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +21,6 @@ CUBE_PROXY_ENABLE="${CUBE_PROXY_ENABLE:-1}"
 [[ "${CUBE_PROXY_ENABLE}" == "1" ]] || die "CUBE_PROXY_ENABLE must be 1; cube proxy is required in one-click deployment"
 
 PROXY_DIR="${TOOLBOX_ROOT}/cubeproxy"
-BUILD_CONTEXT_DIR="${PROXY_DIR}/build-context"
 CUBE_PROXY_CERT_DIR="${CUBE_PROXY_CERT_DIR:-${PROXY_DIR}/certs}"
 CERT_DIR="${CUBE_PROXY_CERT_DIR}"
 GLOBAL_TEMPLATE="${PROXY_DIR}/global.conf.template"
@@ -24,8 +28,35 @@ GLOBAL_CONF="${PROXY_DIR}/global.conf"
 COMPOSE_TEMPLATE="${PROXY_DIR}/docker-compose.yaml.template"
 COMPOSE_FILE="${PROXY_DIR}/docker-compose.yaml"
 
-CUBE_PROXY_IMAGE_TAG="${CUBE_PROXY_IMAGE_TAG:-cube-proxy:one-click}"
-CUBE_PROXY_BASE_IMAGE="${CUBE_PROXY_BASE_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat}"
+# Image resolution priority mirrors up-cube-lifecycle-manager.sh:
+#   1. CUBE_SANDBOX_CUBE_PROXY_IMAGE (explicit operator override)
+#   2. MIRROR=cn  → cn.tencentcloudcr.com (China-region pull-through)
+#   3. default    → int.tencentcloudcr.com (overseas/international)
+#
+# The image is published by CubeProxy/Makefile's `make push` to both
+# registries under the same :v0.5.1-rc3 tag; either default resolves
+# to whatever the operator most recently published.
+#
+# Compatibility: CUBE_PROXY_IMAGE_TAG is deprecated (local compose build era).
+# A non-default leftover value is honored once with a warning; the old default
+# cube-proxy:one-click is ignored so upgrades adopt the pre-published image.
+CUBE_PROXY_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.5.1-rc3"
+CUBE_PROXY_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.5.1-rc3"
+if [[ -z "${CUBE_SANDBOX_CUBE_PROXY_IMAGE:-}" && -n "${CUBE_PROXY_IMAGE_TAG:-}" ]]; then
+  if [[ "${CUBE_PROXY_IMAGE_TAG}" == "cube-proxy:one-click" ]]; then
+    log "CUBE_PROXY_IMAGE_TAG=cube-proxy:one-click is deprecated and ignored; set CUBE_SANDBOX_CUBE_PROXY_IMAGE or MIRROR to select the pre-published cube-proxy image"
+  else
+    log "CUBE_PROXY_IMAGE_TAG is deprecated; using ${CUBE_PROXY_IMAGE_TAG}. Set CUBE_SANDBOX_CUBE_PROXY_IMAGE instead"
+    CUBE_SANDBOX_CUBE_PROXY_IMAGE="${CUBE_PROXY_IMAGE_TAG}"
+  fi
+fi
+if [[ -n "${CUBE_SANDBOX_CUBE_PROXY_IMAGE:-}" ]]; then
+  CUBE_PROXY_IMAGE="${CUBE_SANDBOX_CUBE_PROXY_IMAGE}"
+elif [[ "${MIRROR:-}" == "cn" ]]; then
+  CUBE_PROXY_IMAGE="${CUBE_PROXY_IMAGE_CN_DEFAULT}"
+else
+  CUBE_PROXY_IMAGE="${CUBE_PROXY_IMAGE_INT_DEFAULT}"
+fi
 CUBE_PROXY_CONTAINER_NAME="${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
 CUBE_SANDBOX_NODE_IP="${CUBE_SANDBOX_NODE_IP:-}"
 CUBE_PROXY_REDIS_IP="${CUBE_PROXY_REDIS_IP:-127.0.0.1}"
@@ -75,9 +106,7 @@ MKCERT_BUNDLED_BIN="${TOOLBOX_ROOT}/support/bin/mkcert"
 PREPARE_ONLY="${ONE_CLICK_PREPARE_ONLY:-0}"
 
 ensure_dir "${PROXY_DIR}"
-ensure_dir "${BUILD_CONTEXT_DIR}"
 mkdir -p "${CERT_DIR}"
-ensure_file "${BUILD_CONTEXT_DIR}/Dockerfile"
 ensure_file "${GLOBAL_TEMPLATE}"
 ensure_file "${COMPOSE_TEMPLATE}"
 [[ -n "${CUBE_SANDBOX_NODE_IP}" ]] || die "CUBE_SANDBOX_NODE_IP is required for cube proxy"
@@ -149,10 +178,8 @@ render_template_atomic \
 render_template_atomic \
   "${COMPOSE_TEMPLATE}" \
   "${COMPOSE_FILE}" \
-  -e "s#__CUBE_PROXY_IMAGE__#$(escape_sed "${CUBE_PROXY_IMAGE_TAG}" '#')#g" \
-  -e "s#__CUBE_PROXY_BASE_IMAGE__#$(escape_sed "${CUBE_PROXY_BASE_IMAGE}" '#')#g" \
+  -e "s#__CUBE_PROXY_IMAGE__#$(escape_sed "${CUBE_PROXY_IMAGE}" '#')#g" \
   -e "s#__CUBE_PROXY_CONTAINER_NAME__#$(escape_sed "${CUBE_PROXY_CONTAINER_NAME}" '#')#g" \
-  -e "s#__CUBE_PROXY_BUILD_CONTEXT__#$(escape_sed "${BUILD_CONTEXT_DIR}" '#')#g" \
   -e "s#__CUBE_PROXY_CERT_DIR__#$(escape_sed "${CERT_DIR}" '#')#g" \
   -e "s#__CUBE_PROXY_GLOBAL_CONF__#$(escape_sed "${GLOBAL_CONF}" '#')#g" \
   -e "s#__CUBE_PROXY_NGINX_CONF__#$(escape_sed "${NGINX_CONF}" '#')#g" \
@@ -185,7 +212,19 @@ for port in "${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}"; do
   fi
 done
 
-compose_run build cube-proxy
+# Pull explicitly so the failure mode (registry unreachable / not logged in /
+# image not pushed yet) surfaces here instead of midway through `compose up`.
+# If the image already exists locally and the registry is unreachable, fall
+# back to the cached copy (airgap / CUBE_SANDBOX_CUBE_PROXY_IMAGE preload).
+log "pulling ${CUBE_PROXY_IMAGE}"
+if ! docker pull "${CUBE_PROXY_IMAGE}" >/dev/null; then
+  if docker_image_exists "${CUBE_PROXY_IMAGE}"; then
+    log "WARN: pull failed but local image exists; using cached copy"
+  else
+    die "pull failed for ${CUBE_PROXY_IMAGE} and no local copy is cached; check registry reachability and credentials (or set MIRROR=cn / CUBE_SANDBOX_CUBE_PROXY_IMAGE)"
+  fi
+fi
+
 if [[ "${COMPOSE_DETACH}" == "0" ]]; then
   compose_run up cube-proxy
   exit $?

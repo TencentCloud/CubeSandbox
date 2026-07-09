@@ -258,8 +258,8 @@ collect_cube_proxy() {
   mkdir -p "${dest}"
 
   # cube-proxy runs inside a Docker container; its logs are not on the host
-  # filesystem. Find the running container by image name (cube-proxy:one-click
-  # as shipped by the one-click installer) and extract via docker exec.
+  # filesystem. Find the running container by name (or image path containing
+  # /cube-proxy:) and extract via docker exec.
   if ! command -v docker >/dev/null 2>&1; then
     _warn "docker not found — cannot collect cube-proxy container logs"
     return
@@ -273,10 +273,10 @@ collect_cube_proxy() {
            --format '{{.Names}}\t{{.ID}}' 2>/dev/null \
          | awk '$1=="cube-proxy" {print $2}' | head -1)"
   if [[ -z "${cid}" ]]; then
-    # Fall back: match by image name pattern cube-proxy:*
+    # Fall back: match by image name (local cube-proxy:* or registry .../cube-proxy:*)
     cid="$(docker ps --filter 'status=running' \
              --format '{{.Image}}\t{{.ID}}' 2>/dev/null \
-           | awk '$1~/^cube-proxy:/ {print $2}' | head -1)"
+           | awk '$1~/(^|\/)cube-proxy:/ {print $2}' | head -1)"
   fi
   if [[ -z "${cid}" ]]; then
     _warn "cube-proxy container not running — cannot collect its logs"

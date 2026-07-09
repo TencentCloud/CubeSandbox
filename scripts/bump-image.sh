@@ -77,13 +77,15 @@ edit_expr() {
 	CubeEgress/Makefile)
 		echo "s{((?:IMAGE_TAG|CUBE_VERSION)\\s*\\?=\\s*)${PERL_SEMVER}}{\$1\$ENV{VER}}"
 		;;
-	cube-lifecycle-manager/Makefile)
+	cube-lifecycle-manager/Makefile | \
+		CubeProxy/Makefile)
 		echo "s{((?:IMAGE_TAG|CUBE_VERSION)\\s*\\?=\\s*)${PERL_SEMVER}}{\$1\$ENV{VER}}"
 		;;
 	cube-lifecycle-manager/README.md)
 		echo "s{${PERL_SEMVER}}{\$ENV{VER}}g if /cube-lifecycle-manager:|IMAGE_TAG/;"
 		;;
-	deploy/one-click/scripts/one-click/up-cube-lifecycle-manager.sh)
+	deploy/one-click/scripts/one-click/up-cube-lifecycle-manager.sh | \
+		deploy/one-click/scripts/one-click/up-cube-proxy.sh)
 		echo "s{:${PERL_SEMVER}}{:\$ENV{VER}}g"
 		;;
 	deploy/one-click/terraform/tencentcloud/variables.tf)
@@ -122,6 +124,8 @@ FILES=(
 	cube-lifecycle-manager/Makefile
 	cube-lifecycle-manager/README.md
 	deploy/one-click/scripts/one-click/up-cube-lifecycle-manager.sh
+	CubeProxy/Makefile
+	deploy/one-click/scripts/one-click/up-cube-proxy.sh
 	deploy/one-click/terraform/tencentcloud/variables.tf
 	deploy/one-click/terraform/tencentcloud/create.sh
 	deploy/one-click/terraform/tencentcloud/build_images.sh

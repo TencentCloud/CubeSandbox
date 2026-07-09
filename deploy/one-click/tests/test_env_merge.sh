@@ -439,6 +439,73 @@ EOF
   assert_value "${out}" MY_CUSTOM_KEEP stays
 }
 
+test_migrates_custom_cube_proxy_image_tag() {
+  local new="${TMP_DIR}/new_proxy_img.example" old="${TMP_DIR}/old_proxy_img.env"
+  local out="${TMP_DIR}/out_proxy_img.env" diff="${TMP_DIR}/diff_proxy_img.txt"
+  write_new_example "${new}"
+  cat > "${old}" <<'EOF'
+CUBE_PROXY_IMAGE_TAG=my.reg/cube-proxy:custom
+CUBE_PROXY_BASE_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+CUBE_SANDBOX_MYSQL_PORT=3306
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_value "${out}" CUBE_SANDBOX_CUBE_PROXY_IMAGE "my.reg/cube-proxy:custom"
+  if grep -q "^CUBE_PROXY_IMAGE_TAG=" "${out}"; then
+    fail "CUBE_PROXY_IMAGE_TAG should have been dropped after migration"
+  fi
+  if grep -q "^CUBE_PROXY_BASE_IMAGE=" "${out}"; then
+    fail "CUBE_PROXY_BASE_IMAGE should have been dropped on upgrade"
+  fi
+  assert_contains "${diff}" "[migrated-legacy]"
+  assert_contains "${diff}" "CUBE_PROXY_IMAGE_TAG: my.reg/cube-proxy:custom -> CUBE_SANDBOX_CUBE_PROXY_IMAGE=my.reg/cube-proxy:custom"
+  assert_contains "${diff}" "[dropped]"
+}
+
+test_drops_default_cube_proxy_image_tag_without_migration() {
+  local new="${TMP_DIR}/new_proxy_def.example" old="${TMP_DIR}/old_proxy_def.env"
+  local out="${TMP_DIR}/out_proxy_def.env" diff="${TMP_DIR}/diff_proxy_def.txt"
+  write_new_example "${new}"
+  cat > "${old}" <<'EOF'
+CUBE_PROXY_IMAGE_TAG=cube-proxy:one-click
+CUBE_PROXY_BASE_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+CUBE_SANDBOX_MYSQL_PORT=3306
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  if grep -q "^CUBE_PROXY_IMAGE_TAG=" "${out}"; then
+    fail "default CUBE_PROXY_IMAGE_TAG should have been dropped"
+  fi
+  if grep -q "^CUBE_PROXY_BASE_IMAGE=" "${out}"; then
+    fail "CUBE_PROXY_BASE_IMAGE should have been dropped"
+  fi
+  if grep -q "^CUBE_SANDBOX_CUBE_PROXY_IMAGE=" "${out}"; then
+    fail "default cube-proxy:one-click must not migrate to CUBE_SANDBOX_CUBE_PROXY_IMAGE"
+  fi
+  assert_contains "${diff}" "[dropped]"
+}
+
+test_keeps_existing_cube_sandbox_cube_proxy_image_over_legacy_tag() {
+  local new="${TMP_DIR}/new_proxy_keep.example" old="${TMP_DIR}/old_proxy_keep.env"
+  local out="${TMP_DIR}/out_proxy_keep.env" diff="${TMP_DIR}/diff_proxy_keep.txt"
+  write_new_example "${new}"
+  cat > "${old}" <<'EOF'
+CUBE_PROXY_IMAGE_TAG=my.reg/cube-proxy:stale
+CUBE_SANDBOX_CUBE_PROXY_IMAGE=my.reg/cube-proxy:already-set
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_value "${out}" CUBE_SANDBOX_CUBE_PROXY_IMAGE "my.reg/cube-proxy:already-set"
+  if grep -q "^CUBE_PROXY_IMAGE_TAG=" "${out}"; then
+    fail "CUBE_PROXY_IMAGE_TAG should have been dropped"
+  fi
+  # Must not rewrite an already-present override from the stale IMAGE_TAG.
+  assert_not_contains "${diff}" "CUBE_PROXY_IMAGE_TAG: my.reg/cube-proxy:stale ->"
+}
+
 test_non_utf8_env_fails_cleanly() {
   local new="${TMP_DIR}/new_bad_utf8.example" old="${TMP_DIR}/old_bad_utf8.env"
   local out="${TMP_DIR}/out_bad_utf8.env" diff="${TMP_DIR}/diff_bad_utf8.txt" err="${TMP_DIR}/bad_utf8.err"
@@ -539,6 +606,9 @@ test_new_dotenv_overrides_take_priority
 test_version_lt
 test_diff_report_redacts_secrets
 test_drops_obsolete_agenthub_keys
+test_migrates_custom_cube_proxy_image_tag
+test_drops_default_cube_proxy_image_tag_without_migration
+test_keeps_existing_cube_sandbox_cube_proxy_image_over_legacy_tag
 test_non_utf8_env_fails_cleanly
 test_read_helpers_reject_invalid_key
 test_read_helpers

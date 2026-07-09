@@ -992,6 +992,10 @@ DEPRECATED_KEYS = {
     "AGENTHUB_LLM_CREDENTIAL_MODE",
     "AGENTHUB_SECRET_KEY",
     "CUBE_API_DATABASE_URL",
+    # cube-proxy now pulls a pre-published image (MIRROR / CUBE_SANDBOX_CUBE_PROXY_IMAGE);
+    # the old local-build knobs must not linger as kept-extra after upgrade.
+    "CUBE_PROXY_IMAGE_TAG",
+    "CUBE_PROXY_BASE_IMAGE",
 }
 
 LEGACY_CUBE_PROXY_CERT_DIR_DEFAULTS = {
@@ -999,6 +1003,12 @@ LEGACY_CUBE_PROXY_CERT_DIR_DEFAULTS = {
     "'${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs'",
     "${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs",
 }
+
+# Old one-click default for the locally-built cube-proxy image. Upgrades that
+# still carry this exact value drop it (via DEPRECATED_KEYS) and adopt the
+# pre-published TCR image selected by MIRROR; only non-default custom tags are
+# migrated to CUBE_SANDBOX_CUBE_PROXY_IMAGE.
+LEGACY_CUBE_PROXY_IMAGE_TAG_DEFAULT = "cube-proxy:one-click"
 
 
 def normalize_legacy_value(key, val, tmpl_val):
@@ -1057,6 +1067,20 @@ for line in template:
     else:
         added.append((key, tmpl_val))
     out_lines.append("%s=%s" % (key, chosen))
+
+# Migrate a customized CUBE_PROXY_IMAGE_TAG into CUBE_SANDBOX_CUBE_PROXY_IMAGE
+# before the obsolete key is dropped. The old default cube-proxy:one-click is
+# NOT migrated: upgrades adopt the pre-published TCR image selected by MIRROR.
+legacy_proxy_image_tag = old_values.get("CUBE_PROXY_IMAGE_TAG", "").strip()
+if (legacy_proxy_image_tag
+        and legacy_proxy_image_tag != LEGACY_CUBE_PROXY_IMAGE_TAG_DEFAULT
+        and "CUBE_SANDBOX_CUBE_PROXY_IMAGE" not in old_values):
+    old_values["CUBE_SANDBOX_CUBE_PROXY_IMAGE"] = legacy_proxy_image_tag
+    migrated_legacy.append((
+        "CUBE_PROXY_IMAGE_TAG",
+        legacy_proxy_image_tag,
+        "CUBE_SANDBOX_CUBE_PROXY_IMAGE=%s" % legacy_proxy_image_tag,
+    ))
 
 # Old-only keys (present in old runtime, absent from the new template) are
 # host/user specific (NODE_IP, ROLE, control-plane addr, custom vars). Never

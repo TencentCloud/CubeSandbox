@@ -109,7 +109,7 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 - `CubeAPI/bin/cube-api`
 - `containerd-shim-cube-rs`、`cube-runtime`
 - 本地构建得到的 `cube-image/cube-guest-image-cpu.img`
-- `cubeproxy/` 目录及其 `build-context`
+- `cubeproxy/` 目录（运行时拉取预构建镜像；`build-context` 仅供私有 TCR 重建）
 - `support/` 目录及其 compose 模板
 - `webui/` 目录、compose 模板、nginx 配置和已构建的 `web/dist` 静态资源
 - 基于 `vmlinux` 现场打包得到的 `cube-kernel-scf.zip`

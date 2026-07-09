@@ -15,6 +15,8 @@ FILES=(
 	cube-lifecycle-manager/Makefile
 	cube-lifecycle-manager/README.md
 	deploy/one-click/scripts/one-click/up-cube-lifecycle-manager.sh
+	CubeProxy/Makefile
+	deploy/one-click/scripts/one-click/up-cube-proxy.sh
 	deploy/one-click/terraform/tencentcloud/variables.tf
 	deploy/one-click/terraform/tencentcloud/create.sh
 	deploy/one-click/terraform/tencentcloud/build_images.sh

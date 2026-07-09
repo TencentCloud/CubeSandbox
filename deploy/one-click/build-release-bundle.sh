@@ -550,6 +550,10 @@ copy_dir_contents "${CUBE_PROXY_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cubeproxy"
 copy_dir_contents "${CUBE_COREDNS_TEMPLATE_DIR}" "${PACKAGE_ROOT}/coredns"
 copy_dir_contents "${CUBE_WEBUI_TEMPLATE_DIR}" "${PACKAGE_ROOT}/webui"
 copy_dir_contents "${CUBE_SYSTEMD_TEMPLATE_DIR}" "${PACKAGE_ROOT}/systemd"
+# cube-proxy runtime pulls a pre-published image (CubeProxy/Makefile `make
+# push` → cube-sandbox-{int,cn}.tencentcloudcr.com). build-context is still
+# shipped so terraform/tencentcloud/build_images.sh can rebuild into a private
+# TCR when TENCENTCLOUD_USE_TCR=true.
 copy_dir_contents "${CUBE_PROXY_SOURCE_DIR}" "${PACKAGE_ROOT}/cubeproxy/build-context"
 rm -f "${PACKAGE_ROOT}/cubeproxy/build-context/Makefile"
 generate_cube_proxy_nginx_template \

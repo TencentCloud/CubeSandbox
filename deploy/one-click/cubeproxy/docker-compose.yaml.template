@@ -3,11 +3,6 @@ services:
   cube-proxy:
     image: __CUBE_PROXY_IMAGE__
     container_name: __CUBE_PROXY_CONTAINER_NAME__
-    build:
-      context: __CUBE_PROXY_BUILD_CONTEXT__
-      dockerfile: Dockerfile
-      args:
-        CUBE_PROXY_BASE_IMAGE: "__CUBE_PROXY_BASE_IMAGE__"
     restart: unless-stopped
     network_mode: host
     environment:

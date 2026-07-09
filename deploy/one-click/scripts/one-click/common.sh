@@ -368,6 +368,11 @@ docker_rm_if_exists() {
   docker rm "${name}" >/dev/null 2>&1 || true
 }
 
+docker_image_exists() {
+  local image_ref="$1"
+  docker image inspect "${image_ref}" >/dev/null 2>&1
+}
+
 wait_for_http() {
   local url="$1"
   local retries="${2:-30}"
