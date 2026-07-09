@@ -1,0 +1,14 @@
+{
+  "name": "cubesandbox-node-web-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal Node.js web server example for CubeSandbox templates.",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
