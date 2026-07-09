@@ -209,10 +209,18 @@ func cleanupNetPolicy(ifindex uint32) error {
 	return flushInnerMap(denyOut, ifindex)
 }
 
-// PrepareTAPDevicePolicy installs policy entries that are invariant for a TAP
-// while it sits in the free pool. Per-sandbox policy application can then skip
-// rewriting these default private/link-local deny ranges on every create.
+// PrepareTAPDevicePolicy clears per-sandbox policy residue, then installs
+// policy entries that are invariant for a TAP while it sits in the free pool.
+// Per-sandbox policy application can then skip rewriting these default
+// private/link-local deny ranges on every create.
 func PrepareTAPDevicePolicy(ifindex uint32) error {
+	if err := cleanupNetPolicy(ifindex); err != nil {
+		return err
+	}
+	if err := cleanupDNSAllow(ifindex); err != nil {
+		return err
+	}
+
 	denyOut, err := loadPinnedMap(MapNameDenyOut)
 	if err != nil {
 		return err

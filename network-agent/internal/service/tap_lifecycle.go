@@ -109,24 +109,6 @@ func (s *localService) enqueueAbnormalLocked(tap *tapDevice, stage string, err e
 	)
 }
 
-func (s *localService) enqueuePreparePoolLocked(tap *tapDevice, reason string) {
-	if tap == nil {
-		return
-	}
-	closeTapFile(tap.File)
-	tap.File = nil
-	tap.InUse = false
-	tap.FailureCount = 0
-	tap.LastStage = abnormalStagePreparePool
-	tap.LastError = ""
-	tap.PortMappings = nil
-	s.abnormalTapPool = append(s.abnormalTapPool, tap)
-	CubeLog.WithContext(context.Background()).Infof(
-		"network-agent tap queued for async pool preparation: name=%s ifindex=%d reason=%s pool=%d pending=%d quarantined=%d",
-		tap.Name, tap.Index, reason, len(s.tapPool), len(s.abnormalTapPool), len(s.quarantinedTaps),
-	)
-}
-
 func (s *localService) requeuePreparePoolFailureLocked(tap *tapDevice, err error) {
 	if tap == nil {
 		return
@@ -186,7 +168,9 @@ func (s *localService) configurePortMappings(tap *tapDevice, requestedMappings [
 			s.ports.Assign(uint16(hostPort))
 		}
 		if err := cubevsAddPortMap(uint32(tap.Index), uint16(mapping.ContainerPort), uint16(hostPort)); err != nil {
-			s.ports.Release(uint16(hostPort))
+			if mapping.HostPort == 0 {
+				s.ports.Release(uint16(hostPort))
+			}
 			if cleanupErr := s.clearPortMappings(tap); cleanupErr != nil {
 				return nil, errors.Join(err, markTapCleanupError(cleanupErr))
 			}
@@ -351,7 +335,11 @@ func (s *localService) handleAbnormalTaps() {
 		if err != nil {
 			s.mu.Lock()
 			tap.FailureCount++
-			tap.LastStage = abnormalStageRetryRestore
+			retryStage := abnormalStageRetryRestore
+			if tap.LastStage == abnormalStageRecoverCleanup {
+				retryStage = abnormalStageRecoverCleanup
+			}
+			tap.LastStage = retryStage
 			tap.LastError = err.Error()
 			if isTapMissingError(err) {
 				logger.Warnf("network-agent abnormal tap missing on host, releasing ip: name=%s ifindex=%d ip=%s err=%v",
@@ -363,7 +351,7 @@ func (s *localService) handleAbnormalTaps() {
 				logger.Errorf("network-agent quarantined tap after repeated recovery failures: name=%s ifindex=%d failures=%d last_stage=%s err=%s quarantined=%d",
 					tap.Name, tap.Index, tap.FailureCount, tap.LastStage, tap.LastError, len(s.quarantinedTaps))
 			} else {
-				s.enqueueAbnormalLocked(tap, abnormalStageRetryRestore, err)
+				s.enqueueAbnormalLocked(tap, retryStage, err)
 			}
 			s.mu.Unlock()
 			continue

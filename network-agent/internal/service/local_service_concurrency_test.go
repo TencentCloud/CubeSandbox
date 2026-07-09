@@ -482,7 +482,7 @@ func TestReleaseNetworkDoesNotRecycleTapWhenCubeVSCleanupFails(t *testing.T) {
 	}
 }
 
-func TestReleaseNetworkQueuesTapWhenAsyncPrepareFails(t *testing.T) {
+func TestReleaseNetworkQueuesTapWhenPoolPrepareFails(t *testing.T) {
 	installEnsureMocks(t)
 	cubevsPrepareTAPPolicy = func(uint32) error {
 		return errors.New("prepare boom")
@@ -523,10 +523,10 @@ func TestReleaseNetworkQueuesTapWhenAsyncPrepareFails(t *testing.T) {
 		t.Fatal("state remained active after successful cleanup")
 	}
 	if poolLen != 0 {
-		t.Fatalf("tapPool len=%d, want 0 before async preparation succeeds", poolLen)
+		t.Fatalf("tapPool len=%d, want 0 before pool preparation succeeds", poolLen)
 	}
 	if pendingLen != 1 {
-		t.Fatalf("abnormalTapPool len=%d, want 1 pending async preparation", pendingLen)
+		t.Fatalf("abnormalTapPool len=%d, want 1 pending pool preparation", pendingLen)
 	}
 }
 

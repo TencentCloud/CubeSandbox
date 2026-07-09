@@ -535,6 +535,9 @@ func (s *localService) prepareTapForPool(tap *tapDevice) error {
 }
 
 func (s *localService) prepareAndStageTapForPool(ctx context.Context, tap *tapDevice, reason string) error {
+	if err := s.clearPortMappings(tap); err != nil {
+		return markTapCleanupError(err)
+	}
 	if err := s.prepareTapForPool(tap); err != nil {
 		return err
 	}
@@ -544,21 +547,12 @@ func (s *localService) prepareAndStageTapForPool(ctx context.Context, tap *tapDe
 	return nil
 }
 
-func (s *localService) enqueueTapForAsyncPrepare(ctx context.Context, tap *tapDevice, reason string) {
+func (s *localService) enqueuePrepareFailedTap(ctx context.Context, tap *tapDevice, err error) {
 	if tap == nil {
 		return
 	}
-	CubeLog.WithContext(ctx).Infof(
-		"network-agent tap cleanup complete; async pool preparation queued: name=%s ifindex=%d ip=%s reason=%s",
-		tap.Name, tap.Index, tap.IP, reason,
-	)
-	s.mu.Lock()
-	s.enqueuePreparePoolLocked(tap, reason)
-	s.mu.Unlock()
-}
-
-func (s *localService) enqueuePrepareFailedTap(ctx context.Context, tap *tapDevice, err error) {
-	if tap == nil {
+	if isTapCleanupError(err) {
+		s.enqueueCleanupFailedTap(ctx, tap, err)
 		return
 	}
 	CubeLog.WithContext(ctx).Warnf(
@@ -693,11 +687,13 @@ func (s *localService) releaseState(ctx context.Context, state *managedState) er
 	if err := s.store.Delete(state.SandboxID); err != nil {
 		return err
 	}
-	s.enqueueTapForAsyncPrepare(ctx, state.tap, "recycle")
-	// Best-effort: drop the L7 policy from CubeEgress so a future
-	// sandbox that lands on the same IP sees a clean slate. Failures
-	// here are logged at WARN, never propagated — see deleteEgressForState.
+	// Best-effort: drop the L7 policy from CubeEgress before the TAP becomes
+	// reusable, so a future sandbox that lands on the same IP sees a clean slate.
+	// Failures here are logged at WARN, never propagated — see deleteEgressForState.
 	s.deleteEgressForState(ctx, state.SandboxID, state.SandboxIP)
+	if err := s.prepareAndStageTapForPool(ctx, state.tap, "recycle"); err != nil {
+		s.enqueuePrepareFailedTap(ctx, state.tap, err)
+	}
 	return nil
 }
 
