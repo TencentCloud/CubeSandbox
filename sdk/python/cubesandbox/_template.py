@@ -232,6 +232,7 @@ class Template:
         dns: list[str] | None = None,
         allow_out: list[str] | None = None,
         deny_out: list[str] | None = None,
+        enable_ivshmem: bool | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> TemplateBuild:
@@ -267,6 +268,7 @@ class Template:
             dns: Container DNS nameservers.
             allow_out: Allowed outbound CIDRs for CubeVS egress policy.
             deny_out: Denied outbound CIDRs for CubeVS egress policy.
+            enable_ivshmem: Whether the template build sandbox should boot with ivshmem enabled.
             config: SDK config.  Uses default (env-based) config if omitted.
             **kwargs: Extra fields forwarded verbatim to the request body.
 
@@ -327,6 +329,8 @@ class Template:
             payload["allowOut"] = allow_out
         if deny_out is not None:
             payload["denyOut"] = deny_out
+        if enable_ivshmem is not None:
+            payload["enableIvshmem"] = enable_ivshmem
         payload.update(kwargs)
 
         s = requests.Session()

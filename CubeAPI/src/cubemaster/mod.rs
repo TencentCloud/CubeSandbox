@@ -1840,6 +1840,9 @@ pub struct CreateTemplateFromImageReq {
         skip_serializing_if = "Option::is_none"
     )]
     pub cube_network_config: Option<CreateTemplateCubeNetworkConfig>,
+    /// Whether the template build sandbox should include ivshmem.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_ivshmem: Option<bool>,
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_cube_ca: Option<bool>,

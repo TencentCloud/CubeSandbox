@@ -20,7 +20,7 @@ use serde_json;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::str::FromStr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -41,9 +41,51 @@ const DEV_URANDOM: &str = "/dev/urandom";
 pub const NET_DEVICE_ID_PRE: &str = "tap";
 pub const DISK_DEVICE_ID_PRE: &str = "disk";
 
+// ivshmem shared memory configuration
+const IVSHMEM_SHM_DIR: &str = "/dev/shm";
+const IVSHMEM_PREFIX: &str = "ivshmem-";
+
 pub struct Utils {}
 pub struct AsyncUtils {}
 impl Utils {
+    /// Validate sandbox_id before using it in filesystem paths.
+    fn validate_sandbox_id(id: &str) -> CResult<()> {
+        if id.is_empty() || id.len() > 255 {
+            return Err("invalid sandbox_id length".into());
+        }
+        if id.contains("..") || id.contains('/') || id.contains('\\') {
+            return Err("sandbox_id contains invalid path characters".into());
+        }
+        Ok(())
+    }
+
+    /// Return `/dev/shm/ivshmem-{sandbox_id}` for the sandbox.
+    pub fn ivshmem_path(sandbox_id: &str) -> CResult<PathBuf> {
+        Self::validate_sandbox_id(sandbox_id)?;
+        Ok(PathBuf::from(format!(
+            "{}/{}{}",
+            IVSHMEM_SHM_DIR, IVSHMEM_PREFIX, sandbox_id
+        )))
+    }
+
+    /// Create or truncate an ivshmem backend file with 0o600 permissions.
+    pub fn create_ivshmem_file(path: &Path, size: usize) -> CResult<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let f = File::options()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("failed to create ivshmem file {}: {}", path.display(), e))?;
+
+        f.set_len(size as u64)
+            .map_err(|e| format!("failed to set ivshmem file size: {}", e))?;
+
+        Ok(())
+    }
+
     pub fn load_spec(bundle: &str) -> CResult<Spec> {
         let mut conf_path = PathBuf::from(bundle);
         conf_path.push("config.json");
@@ -163,12 +205,30 @@ impl Utils {
             )),
         };
 
+        //delete ivshmem shared memory file
+        let ret_ivshmem: Result<(), String> = match Self::ivshmem_path(sandbox_id) {
+            Ok(ivshmem_path) => match fs::remove_file(&ivshmem_path) {
+                Ok(_) => Ok(()),
+                Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!(
+                    "failed to delete {}: {}",
+                    ivshmem_path.display(),
+                    e
+                )),
+            },
+            Err(e) => Err(format!("resolve ivshmem path failed:{}", e)),
+        };
+
         let mut err_msg = String::new();
         if let Err(e) = ret_vmdir {
             err_msg = err_msg + e.as_str();
         }
 
         if let Err(e) = ret_pausedir {
+            err_msg = err_msg + e.as_str();
+        }
+
+        if let Err(e) = ret_ivshmem {
             err_msg = err_msg + e.as_str();
         }
 
@@ -579,5 +639,111 @@ mod tests {
     fn utils_virtiofs_guest_base() {
         let base = Utils::virtiofs_guest_base("123".to_string());
         assert_eq!(base, format!("{}/{}", GUEST_VIRTIOFS_MNT_PATH, "123"));
+    }
+
+    // ivshmem path validation tests
+    #[test]
+    fn test_ivshmem_path_valid() {
+        let path = Utils::ivshmem_path("sb-12345").unwrap();
+        assert_eq!(path, PathBuf::from("/dev/shm/ivshmem-sb-12345"));
+    }
+
+    #[test]
+    fn test_ivshmem_path_empty() {
+        let result = Utils::ivshmem_path("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid sandbox_id length"));
+    }
+
+    #[test]
+    fn test_ivshmem_path_too_long() {
+        let long_id = "a".repeat(256);
+        let result = Utils::ivshmem_path(&long_id);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid sandbox_id length"));
+    }
+
+    #[test]
+    fn test_ivshmem_path_traversal_dotdot() {
+        let result = Utils::ivshmem_path("../etc/passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid path characters"));
+    }
+
+    #[test]
+    fn test_ivshmem_path_traversal_slash() {
+        let result = Utils::ivshmem_path("foo/bar");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid path characters"));
+    }
+
+    #[test]
+    fn test_ivshmem_path_traversal_backslash() {
+        let result = Utils::ivshmem_path("foo\\bar");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid path characters"));
+    }
+
+    #[test]
+    fn test_ivshmem_path_embedded_dotdot() {
+        let result = Utils::ivshmem_path("foo..bar");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid path characters"));
+    }
+
+    #[test]
+    fn test_ivshmem_path_max_length() {
+        let id = "a".repeat(255);
+        let result = Utils::ivshmem_path(&id);
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            PathBuf::from(format!("/dev/shm/ivshmem-{}", "a".repeat(255)))
+        );
+    }
+
+    #[test]
+    fn test_create_ivshmem_file_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join(format!("test-ivshmem-{}", std::process::id()));
+
+        // Clean up in case of previous failed test
+        let _ = fs::remove_file(&test_file);
+
+        // Create file
+        let result = Utils::create_ivshmem_file(&test_file, 1024 * 1024);
+        assert!(result.is_ok(), "Failed to create file: {:?}", result.err());
+
+        // Verify file exists
+        assert!(test_file.exists(), "File was not created");
+
+        // Verify size
+        let metadata = fs::metadata(&test_file).unwrap();
+        assert_eq!(metadata.len(), 1024 * 1024, "File size incorrect");
+
+        // Verify permissions (0o600)
+        let mode = metadata.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "File permissions incorrect: {:o}",
+            mode & 0o777
+        );
+
+        // Clean up
+        fs::remove_file(&test_file).unwrap();
+    }
+
+    #[test]
+    fn test_create_ivshmem_file_invalid_path() {
+        let invalid_path = PathBuf::from("/nonexistent/impossible/directory/test-ivshmem");
+        let result = Utils::create_ivshmem_file(&invalid_path, 1024);
+
+        assert!(result.is_err(), "Should fail with invalid path");
+        assert!(result
+            .unwrap_err()
+            .contains("failed to create ivshmem file"));
     }
 }

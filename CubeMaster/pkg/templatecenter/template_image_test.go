@@ -68,6 +68,22 @@ func TestNormalizeTemplateImageRequestIgnoresProvidedTemplateID(t *testing.T) {
 	}
 }
 
+func TestNormalizeTemplateImageRequestDropsDisabledIvshmemFlag(t *testing.T) {
+	disabled := false
+	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		EnableIvshmem:     &disabled,
+	})
+	if err != nil {
+		t.Fatalf("normalizeTemplateImageRequest failed: %v", err)
+	}
+	if req.EnableIvshmem != nil {
+		t.Fatal("EnableIvshmem should be canonicalized to nil when false")
+	}
+}
+
 func TestNormalizeTemplateImageRequestNormalizesExposedPorts(t *testing.T) {
 
 	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
@@ -660,6 +676,57 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 	}
 	if got.CubeNetworkConfig.Rules[0].Action.Inject[0].Format == req.CubeNetworkConfig.Rules[0].Action.Inject[0].Format {
 		t.Fatal("expected egress rule inject format pointer to be deep-cloned")
+	}
+}
+
+func TestGenerateTemplateCreateRequestAddsIvshmemAnnotation(t *testing.T) {
+	enabled := true
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-1",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		EnableIvshmem:     &enabled,
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-1",
+		TemplateSpecFingerprint: "fingerprint-1",
+		Ext4SHA256:              "sha256-1",
+		Ext4SizeBytes:           1024,
+		DownloadToken:           "token-1",
+	}
+	got, err := generateTemplateCreateRequest(req, artifact, image.DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.Annotations[constants.CubeAnnotationEnableIvshmem] != "true" {
+		t.Fatalf("expected ivshmem annotation to be set, got %q", got.Annotations[constants.CubeAnnotationEnableIvshmem])
+	}
+}
+
+func TestBuildTemplateSpecFingerprintIgnoresIvshmemFlag(t *testing.T) {
+	enabled := true
+	reqA := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-a"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	reqB := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-b"},
+		SourceImageRef:    reqA.SourceImageRef,
+		WritableLayerSize: reqA.WritableLayerSize,
+		InstanceType:      reqA.InstanceType,
+		NetworkType:       reqA.NetworkType,
+		EnableIvshmem:     &enabled,
+	}
+	gotA := buildTemplateSpecFingerprint(reqA, "sha256:source")
+	gotB := buildTemplateSpecFingerprint(reqB, "sha256:source")
+	if gotA != gotB {
+		t.Fatalf("ivshmem should not affect rootfs artifact fingerprint: %q vs %q", gotA, gotB)
 	}
 }
 

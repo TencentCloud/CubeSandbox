@@ -97,6 +97,9 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if cloned.NetworkType == "" {
 		cloned.NetworkType = cubeboxv1.NetworkType_tap.String()
 	}
+	if cloned.EnableIvshmem != nil && !*cloned.EnableIvshmem {
+		cloned.EnableIvshmem = nil
+	}
 	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
 		return nil, err
 	}

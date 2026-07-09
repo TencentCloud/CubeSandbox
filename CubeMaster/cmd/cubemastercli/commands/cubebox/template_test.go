@@ -123,6 +123,20 @@ func TestCreateFromImageCommandParsesNodeScope(t *testing.T) {
 	}
 }
 
+func TestApplyCreateFromImageIvshmemFlag(t *testing.T) {
+	withoutFlag := &types.CreateTemplateFromImageReq{}
+	applyCreateFromImageIvshmemFlag(newCreateFromImageContext(t, nil), withoutFlag)
+	if withoutFlag.EnableIvshmem != nil {
+		t.Fatalf("EnableIvshmem=%v, want nil when flag is not set", *withoutFlag.EnableIvshmem)
+	}
+
+	withFlag := &types.CreateTemplateFromImageReq{}
+	applyCreateFromImageIvshmemFlag(newCreateFromImageContext(t, []string{"--enable-ivshmem"}), withFlag)
+	if withFlag.EnableIvshmem == nil || !*withFlag.EnableIvshmem {
+		t.Fatalf("EnableIvshmem=%v, want true", withFlag.EnableIvshmem)
+	}
+}
+
 func TestMergeCreateFromImageCubeNetworkConfigFlagsRejectsUnexpectedArgs(t *testing.T) {
 	ctx := newCreateFromImageContext(t, []string{
 		"--allow-internet-access", "false",
