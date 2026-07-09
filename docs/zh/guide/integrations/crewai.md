@@ -76,7 +76,6 @@ from crewai_tools import E2BPythonTool
 cube_python = E2BPythonTool(
     template=os.environ["CUBE_TEMPLATE_ID"],
     persistent=False,
-    sandbox_timeout=120,
 )
 ```
 
@@ -90,16 +89,20 @@ import os
 from crewai import Agent, Crew, LLM, Process, Task
 from crewai_tools import E2BPythonTool
 
-llm_options = {"model": os.getenv("MODEL", "openai/gpt-4o-mini")}
-if os.getenv("OPENAI_API_KEY"):
-    llm_options["api_key"] = os.environ["OPENAI_API_KEY"]
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise RuntimeError("Missing required environment variable: OPENAI_API_KEY")
+
+llm_options = {
+    "model": os.getenv("MODEL", "openai/gpt-4o-mini"),
+    "api_key": api_key,
+}
 if os.getenv("OPENAI_BASE_URL"):
     llm_options["base_url"] = os.environ["OPENAI_BASE_URL"]
 
 cube_python = E2BPythonTool(
     template=os.environ["CUBE_TEMPLATE_ID"],
     persistent=False,
-    sandbox_timeout=120,
 )
 
 analyst = Agent(
@@ -125,11 +128,17 @@ task = Task(
     agent=analyst,
 )
 
-result = Crew(
-    agents=[analyst],
-    tasks=[task],
-    process=Process.sequential,
-).kickoff()
+try:
+    result = Crew(
+        agents=[analyst],
+        tasks=[task],
+        process=Process.sequential,
+    ).kickoff()
+except Exception as exc:
+    raise RuntimeError(
+        "Crew execution failed. Check LLM credentials, CubeAPI connectivity, "
+        "and sandbox execution timeouts."
+    ) from exc
 
 print(result)
 ```
@@ -139,13 +148,23 @@ print(result)
 排查连接问题时，可以直接调用工具：
 
 ```python
+import json
+
 result = cube_python.run(
-    code="print({'runtime': 'cube', 'sum': sum(range(10))})",
+    code=(
+        "import json\n"
+        "print(json.dumps({'runtime': 'cube', 'sum': sum(range(10))}, sort_keys=True))"
+    ),
     timeout=30,
 )
-if not all(fragment in str(result) for fragment in ("runtime", "cube", "45")):
-    raise RuntimeError(f"Unexpected Cube smoke test result: {result}")
-print(result)
+payload = json.loads(str(result).strip().splitlines()[-1])
+if (
+    not isinstance(payload, dict)
+    or payload.get("runtime") != "cube"
+    or payload.get("sum") != 45
+):
+    raise RuntimeError(f"Unexpected Cube smoke test payload: {payload!r}")
+print(json.dumps(payload, sort_keys=True))
 ```
 
 这样可以把 CubeAPI、模板和 SDK 配置问题，与 LLM 或 CrewAI 编排问题分开验证。
@@ -204,16 +223,20 @@ from e2b_code_interpreter import Sandbox
 with Sandbox.create(
     template=os.environ["CUBE_TEMPLATE_ID"],
     allow_internet_access=False,
-    network={"allow_out": ["10.0.1.0/24"]},
+    network={"allow_out": ["10.0.1.0/24", "api.example.com", "*.example.org"]},
 ) as sandbox:
     execution = sandbox.run_code("print('isolated execution')")
 ```
 
-`allow_out` 和 `deny_out` 接收 IP/CIDR，不支持域名规则。
+`allow_out` 接收 IPv4/CIDR 目标和 DNS 域名目标，也支持前缀 `*.` 通配域名。通配域名只匹配子域名，例如 `api.example.org`，不匹配顶级的 `example.org`。域名目标会通过 DNS A 记录学习为临时 IP 放行项；如果白名单需要严格生效，请使用 `allow_internet_access=False` 或显式 deny-all 兜底。`deny_out` 仍然是 IPv4/IP-CIDR 策略。
 
 ### 挂载宿主机数据
 
 宿主机目录挂载是通过沙箱 metadata 编码的 Cube 扩展能力：
+
+::: warning 校验宿主机挂载
+应把 `hostPath` 视为高权限配置，在传给 `Sandbox.create()` 前先与小范围 allowlist 校验；优先使用 `readOnly: true`，并避免让受提示词控制的 Agent 输入构造 host-mount metadata。宿主机挂载会把对应宿主机路径暴露给沙箱，虽然其他路径仍受 MicroVM 隔离保护；读写挂载还可能让沙箱内代码修改宿主机状态。
+:::
 
 ```python
 import json
@@ -241,10 +264,10 @@ with Sandbox.create(
 
 这里有两种不同的超时：
 
-- `E2BPythonTool` 的 `sandbox_timeout` 控制沙箱空闲生命周期。
+- `E2BPythonTool` 的 `sandbox_timeout` 控制持久模式下的沙箱空闲生命周期。
 - 传给 `tool.run(...)` 的 `timeout` 控制单次代码执行时间。
 
-建议同时使用，避免无限循环脚本长期占用沙箱。
+临时模式下应设置单次执行超时；当 `persistent=True` 时，还应设置较短的 `sandbox_timeout`，避免空闲的持久沙箱长期存活。
 
 ## 注意事项
 
@@ -260,8 +283,8 @@ with Sandbox.create(
 
 ## 参考资料
 
-- [CrewAI E2B Sandbox Tools](https://docs.crewai.com/en/tools/ai-ml/e2bsandboxtools)
-- [CrewAI 自定义工具](https://docs.crewai.com/en/learn/create-custom-tools)
+- [CrewAI E2B Sandbox Tools](https://docs.crewai.com/v1.15.2/en/tools/ai-ml/e2bsandboxtools.md)
+- [CrewAI 自定义工具](https://docs.crewai.com/v1.15.2/en/learn/create-custom-tools.md)
 - [Cube Sandbox Python 示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/code-sandbox-quickstart)
 - [Cube 网络策略示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/network-policy)
 - [Cube 宿主机挂载示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/host-mount)

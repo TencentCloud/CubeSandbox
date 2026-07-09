@@ -76,7 +76,6 @@ from crewai_tools import E2BPythonTool
 cube_python = E2BPythonTool(
     template=os.environ["CUBE_TEMPLATE_ID"],
     persistent=False,
-    sandbox_timeout=120,
 )
 ```
 
@@ -90,16 +89,20 @@ import os
 from crewai import Agent, Crew, LLM, Process, Task
 from crewai_tools import E2BPythonTool
 
-llm_options = {"model": os.getenv("MODEL", "openai/gpt-4o-mini")}
-if os.getenv("OPENAI_API_KEY"):
-    llm_options["api_key"] = os.environ["OPENAI_API_KEY"]
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise RuntimeError("Missing required environment variable: OPENAI_API_KEY")
+
+llm_options = {
+    "model": os.getenv("MODEL", "openai/gpt-4o-mini"),
+    "api_key": api_key,
+}
 if os.getenv("OPENAI_BASE_URL"):
     llm_options["base_url"] = os.environ["OPENAI_BASE_URL"]
 
 cube_python = E2BPythonTool(
     template=os.environ["CUBE_TEMPLATE_ID"],
     persistent=False,
-    sandbox_timeout=120,
 )
 
 analyst = Agent(
@@ -127,11 +130,17 @@ task = Task(
     agent=analyst,
 )
 
-result = Crew(
-    agents=[analyst],
-    tasks=[task],
-    process=Process.sequential,
-).kickoff()
+try:
+    result = Crew(
+        agents=[analyst],
+        tasks=[task],
+        process=Process.sequential,
+    ).kickoff()
+except Exception as exc:
+    raise RuntimeError(
+        "Crew execution failed. Check LLM credentials, CubeAPI connectivity, "
+        "and sandbox execution timeouts."
+    ) from exc
 
 print(result)
 ```
@@ -141,13 +150,23 @@ print(result)
 When debugging connectivity, invoke the tool directly:
 
 ```python
+import json
+
 result = cube_python.run(
-    code="print({'runtime': 'cube', 'sum': sum(range(10))})",
+    code=(
+        "import json\n"
+        "print(json.dumps({'runtime': 'cube', 'sum': sum(range(10))}, sort_keys=True))"
+    ),
     timeout=30,
 )
-if not all(fragment in str(result) for fragment in ("runtime", "cube", "45")):
-    raise RuntimeError(f"Unexpected Cube smoke test result: {result}")
-print(result)
+payload = json.loads(str(result).strip().splitlines()[-1])
+if (
+    not isinstance(payload, dict)
+    or payload.get("runtime") != "cube"
+    or payload.get("sum") != 45
+):
+    raise RuntimeError(f"Unexpected Cube smoke test payload: {payload!r}")
+print(json.dumps(payload, sort_keys=True))
 ```
 
 This isolates CubeAPI, template, and SDK configuration from any LLM or CrewAI orchestration issue.
@@ -206,16 +225,20 @@ from e2b_code_interpreter import Sandbox
 with Sandbox.create(
     template=os.environ["CUBE_TEMPLATE_ID"],
     allow_internet_access=False,
-    network={"allow_out": ["10.0.1.0/24"]},
+    network={"allow_out": ["10.0.1.0/24", "api.example.com", "*.example.org"]},
 ) as sandbox:
     execution = sandbox.run_code("print('isolated execution')")
 ```
 
-`allow_out` and `deny_out` accept IP/CIDR values. Domain-name rules are not supported.
+`allow_out` accepts IPv4/CIDR targets and DNS domain targets, including leading `*.` wildcard domains. Wildcards match subdomains such as `api.example.org`, not the apex domain `example.org`. Domain targets are learned from DNS A-record answers into temporary IP allow entries, so use `allow_internet_access=False` or an explicit deny-all fallback when the allowlist must be strict. `deny_out` remains an IPv4/IP-CIDR policy.
 
 ### Mount host data
 
 Host mounts are a Cube-specific extension encoded in sandbox metadata:
+
+::: warning Validate host mounts
+Treat `hostPath` values as privileged configuration. Validate them against a small allowlist before passing them to `Sandbox.create()`, prefer `readOnly: true`, and do not let prompt-controlled agent input construct host-mount metadata. A host mount exposes that host filesystem path to the sandbox despite MicroVM isolation for other paths; read-write mounts can also modify host state from inside the sandbox.
+:::
 
 ```python
 import json
@@ -243,10 +266,10 @@ The host path must already exist on the Cubelet node. Prefer read-only mounts fo
 
 There are two different timeout controls:
 
-- `sandbox_timeout` on `E2BPythonTool` controls the sandbox idle lifetime.
+- `sandbox_timeout` on `E2BPythonTool` controls the sandbox idle lifetime in persistent mode.
 - `timeout` passed to `tool.run(...)` controls an individual code execution.
 
-Use both so an infinite script cannot hold a sandbox indefinitely.
+Use per-execution timeouts in ephemeral mode. When `persistent=True`, also set a short `sandbox_timeout` so an idle persistent sandbox cannot stay alive indefinitely.
 
 ## Caveats
 
@@ -262,8 +285,8 @@ The complete bilingual example is available under [`examples/crewai-integration`
 
 ## References
 
-- [CrewAI E2B Sandbox Tools](https://docs.crewai.com/en/tools/ai-ml/e2bsandboxtools)
-- [CrewAI custom tools](https://docs.crewai.com/en/learn/create-custom-tools)
+- [CrewAI E2B Sandbox Tools](https://docs.crewai.com/v1.15.2/en/tools/ai-ml/e2bsandboxtools.md)
+- [CrewAI custom tools](https://docs.crewai.com/v1.15.2/en/learn/create-custom-tools.md)
 - [Cube Sandbox Python examples](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/code-sandbox-quickstart)
 - [Cube network policy example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/network-policy)
 - [Cube host-mount example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/host-mount)

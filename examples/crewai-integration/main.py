@@ -22,9 +22,13 @@ def require_environment() -> None:
 
 def create_llm() -> LLM:
     """Create a CrewAI LLM from OpenAI or an OpenAI-compatible endpoint."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing required environment variable: OPENAI_API_KEY")
+
     options: dict[str, Any] = {
         "model": os.getenv("MODEL", "openai/gpt-4o-mini"),
-        "api_key": os.environ["OPENAI_API_KEY"],
+        "api_key": api_key,
     }
     if base_url := os.getenv("OPENAI_BASE_URL"):
         options["base_url"] = base_url
@@ -38,7 +42,6 @@ def main() -> None:
     cube_python = E2BPythonTool(
         template=os.environ["CUBE_TEMPLATE_ID"],
         persistent=False,
-        sandbox_timeout=120,
     )
 
     analyst = Agent(
@@ -67,11 +70,18 @@ def main() -> None:
         agent=analyst,
     )
 
-    result = Crew(
-        agents=[analyst],
-        tasks=[task],
-        process=Process.sequential,
-    ).kickoff()
+    try:
+        result = Crew(
+            agents=[analyst],
+            tasks=[task],
+            process=Process.sequential,
+        ).kickoff()
+    except Exception as exc:
+        raise RuntimeError(
+            "Crew execution failed. Check LLM credentials, CubeAPI connectivity, "
+            "and sandbox execution timeouts."
+        ) from exc
+
     print(result)
 
 

@@ -37,13 +37,13 @@ Run the smoke test before involving CrewAI's LLM:
 python smoke_test.py
 ```
 
-The result should contain:
+The smoke test should print this exact JSON payload:
 
 ```text
 {"runtime": "cube", "sum": 45}
 ```
 
-The smoke test exits non-zero if the expected Cube output is not present.
+The smoke test exits non-zero if the parsed payload does not have `runtime == "cube"` and `sum == 45`.
 
 ## Run the Crew
 

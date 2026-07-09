@@ -37,13 +37,13 @@
 python smoke_test.py
 ```
 
-结果中应包含：
+smoke test 应打印下面这个精确的 JSON 载荷：
 
 ```text
 {"runtime": "cube", "sum": 45}
 ```
 
-如果结果中没有出现预期的 Cube 输出，smoke test 会以非零状态退出。
+如果解析后的载荷不满足 `runtime == "cube"` 且 `sum == 45`，smoke test 会以非零状态退出。
 
 ## 运行 Crew
 
