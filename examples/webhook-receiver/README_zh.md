@@ -30,6 +30,8 @@ WEBHOOK_RECEIVER_HOST=127.0.0.1 WEBHOOK_RECEIVER_PORT=8089 python3 receiver.py
 ```toml
 [delivery]
 queue_size = 10000
+default_batch_size = 1
+flush_interval_secs = 5
 request_timeout_secs = 5
 max_attempts = 3
 initial_backoff_ms = 500
@@ -37,7 +39,7 @@ max_backoff_secs = 10
 max_in_flight = 100
 
 [[endpoints]]
-name = "local-dev"
+name = "local-dev-lifecycle"
 url = "http://127.0.0.1:8088/webhook"
 events = [
   "sandbox.created",
@@ -46,8 +48,13 @@ events = [
   "sandbox.resumed",
   "api.error",
 ]
+batch_size = 1
 secret_env = "CUBE_WEBHOOK_SECRET_0"
 ```
+
+同一个 `url` 可以在另一条 endpoint 配置中复用，用于不重叠的高频事件集合，
+例如 `api.request` 和 `api.response`，并给那条配置设置更大的 `batch_size`。
+如果相同 `url` 和相同事件被重复订阅，CubeAPI 会拒绝启动。
 
 `url` 必须从 CubeAPI 进程所在机器可访问。只有接收端和 CubeAPI 在同一台机器上
 时才使用 `127.0.0.1`。在 `dev-env` 中，如果接收端跑在宿主机、CubeAPI 跑在
@@ -64,7 +71,8 @@ CUBE_WEBHOOK_SECRET_0=change-me
 sudo systemctl restart cube-sandbox-cube-api.service
 ```
 
-创建、暂停、恢复、销毁一个沙箱后，接收端会为每个投递成功的事件打印一段 JSON。
+创建、暂停、恢复、销毁一个沙箱后，在 `batch_size = 1` 下，接收端会为每个
+投递成功的事件打印一段 JSON batch。
 
 ## 故障模拟
 

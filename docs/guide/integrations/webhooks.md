@@ -1,7 +1,7 @@
 ---
 title: Webhook Event Notifications
 author: CubeSandbox Contributors
-date: 2026-07-08
+date: 2026-07-09
 tags:
   - integration
   - webhook
@@ -26,16 +26,33 @@ Create `/usr/local/services/cubetoolbox/CubeAPI/webhooks.toml`:
 
 ```toml
 [delivery]
+# Async queue capacity. When the queue is full, new events are dropped and logged
+# without blocking the API request path.
 queue_size = 10000
+# Default batch size for endpoints that do not set batch_size. Use 1 to deliver
+# each event as soon as possible.
+default_batch_size = 1
+# Global timed flush interval in seconds. Partial batches are delivered when this
+# interval elapses.
+flush_interval_secs = 5
+# Timeout for one HTTP POST attempt, in seconds.
 request_timeout_secs = 5
+# Maximum delivery attempts, including the first attempt and retries.
 max_attempts = 3
+# Delay before the first retry, in milliseconds. Later retries use exponential
+# backoff.
 initial_backoff_ms = 500
+# Maximum exponential-backoff delay, in seconds.
 max_backoff_secs = 10
+# Global maximum number of concurrent delivery tasks.
 max_in_flight = 100
 
 [[endpoints]]
-name = "ops"
+# Endpoint name, used in delivery logs.
+name = "ops-lifecycle"
+# Webhook receiver URL. CubeAPI sends HTTP POST requests to this address.
 url = "http://127.0.0.1:8088/webhook"
+# Event types subscribed by this endpoint.
 events = [
   "sandbox.created",
   "sandbox.deleted",
@@ -43,6 +60,19 @@ events = [
   "sandbox.resumed",
   "api.error",
 ]
+# Batch size for this endpoint. When omitted, delivery.default_batch_size is used.
+batch_size = 1
+# Optional. Environment variable that stores the HMAC-SHA256 signing secret. Do
+# not put the secret value directly in this file.
+secret_env = "CUBE_WEBHOOK_SECRET_0"
+
+[[endpoints]]
+# The same URL can be configured more than once, but event sets for the same URL
+# must not overlap across endpoint entries.
+name = "ops-api"
+url = "http://127.0.0.1:8088/webhook"
+events = ["api.request", "api.response"]
+batch_size = 100
 secret_env = "CUBE_WEBHOOK_SECRET_0"
 ```
 
@@ -67,18 +97,37 @@ sudo systemctl restart cube-sandbox-cube-api.service
 
 ## Payload and Headers
 
-CubeAPI sends one HTTP `POST` per matching endpoint. The JSON body uses the same
-flat shape as CubeAPI structured logs:
+CubeAPI sends one HTTP `POST` per matching endpoint batch. The JSON body is a
+batch envelope:
 
 ```json
 {
-  "timestamp": "2026-07-08T10:00:00Z",
-  "level": "info",
-  "event": "sandbox.created",
-  "sandbox_id": "sbx-xxx",
-  "template_id": "tpl-xxx"
+  "batch_id": "8f6a3f7d-7d87-4ef5-a639-2f6c2b1976f8",
+  "events": [
+    {
+      "timestamp": "2026-07-09T10:00:00Z",
+      "level": "info",
+      "event": "sandbox.created",
+      "sandbox_id": "sbx-xxx",
+      "template_id": "tpl-xxx"
+    }
+  ]
 }
 ```
+
+Each item in `events` uses the same flat shape as CubeAPI structured logs.
+`delivery.default_batch_size` is used when an endpoint does not set
+`batch_size`. With `batch_size = 1`, each batch contains one event and is
+delivered as soon as the worker receives it. If an endpoint sets `batch_size`
+greater than 1, CubeAPI buffers events separately for that endpoint and sends a
+batch when either `batch_size` is reached or the global `flush_interval_secs`
+elapses.
+
+The same URL may appear in multiple endpoint entries when the event sets are
+disjoint, which is useful for sending lifecycle events immediately and batching
+high-volume diagnostic events to the same receiver. CubeAPI rejects
+configuration where the same URL and event are subscribed by more than one
+endpoint entry.
 
 Headers:
 
@@ -86,13 +135,10 @@ Headers:
 | --- | --- |
 | `Content-Type` | `application/json` |
 | `User-Agent` | `CubeSandbox-Webhook/1.0` |
-| `X-Cube-Event` | Event name, for example `sandbox.created` |
-| `X-Cube-Event-Id` | Event id shared by all endpoint deliveries for the same event and reused across retries |
 | `X-Cube-Signature-256` | Present when `secret_env` is set. Format: `sha256=<hex>` |
 
-Receivers can use `X-Cube-Event-Id` for idempotency. When one event fans out to
-multiple endpoints, each endpoint receives the same event id. Retries for that
-event keep the same id.
+Receivers can use `batch_id` for idempotency. Retries reuse the same `batch_id`
+and resend the same batch body.
 
 Verify the signature against the raw request body:
 
@@ -144,10 +190,10 @@ exponential backoff capped by `max_backoff_secs`.
 
 Most IM robots, including WeCom robots, require their own message schema. Run a
 small relay service as the Webhook endpoint: verify the Cube signature, map the
-event payload to the robot's `msgtype` format, and send it to the robot URL.
+batch payload to the robot's `msgtype` format, and send it to the robot URL.
 
 For generic HTTP alerting systems that accept arbitrary JSON, subscribe the
-receiver directly and filter by `event`.
+receiver directly and filter by each item in `events`.
 
 The runnable receiver example lives in
 [`examples/webhook-receiver`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/webhook-receiver).

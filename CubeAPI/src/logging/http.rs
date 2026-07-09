@@ -4,9 +4,10 @@
 
 //! HTTP webhook log backend.
 //!
-//! Sends individual [`LogEvent`] values as JSON POST requests to configured
-//! endpoints. This backend is intentionally event-oriented rather than a
-//! generic HTTP log batcher: each matching event becomes one webhook delivery.
+//! Sends matching [`LogEvent`] values as JSON batch envelopes to configured
+//! endpoints. The default `default_batch_size = 1` preserves event-trigger
+//! behavior, while larger endpoint batches let operators use the same backend as
+//! a lightweight log sink with bounded flush latency.
 
 use super::{LogEvent, Logger};
 use anyhow::{anyhow, bail, Context};
@@ -16,7 +17,7 @@ use reqwest::{
     header::{CONTENT_TYPE, USER_AGENT},
     Client, StatusCode, Url,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::{
     collections::{HashMap, HashSet},
@@ -27,12 +28,13 @@ use std::{
 use tokio::{
     sync::{mpsc, oneshot, Semaphore},
     task::JoinSet,
+    time::MissedTickBehavior,
 };
 use tracing::{error, warn};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
-type EndpointRoutes = HashMap<String, Vec<Arc<Endpoint>>>;
+type EndpointRoutes = HashMap<String, Vec<Arc<Endpoint>>>; // event -> endpoints
 
 /// Configuration for the HTTP webhook backend.
 #[derive(Debug, Clone, Deserialize)]
@@ -59,6 +61,10 @@ impl HttpLoggerConfig {
 pub struct DeliveryConfig {
     #[serde(default = "default_queue_size")]
     pub queue_size: usize,
+    #[serde(default = "default_batch_size")]
+    pub default_batch_size: usize,
+    #[serde(default = "default_flush_interval_secs")]
+    pub flush_interval_secs: u64,
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
     #[serde(default = "default_max_attempts")]
@@ -75,6 +81,8 @@ impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
             queue_size: default_queue_size(),
+            default_batch_size: default_batch_size(),
+            flush_interval_secs: default_flush_interval_secs(),
             request_timeout_secs: default_request_timeout_secs(),
             max_attempts: default_max_attempts(),
             initial_backoff_ms: default_initial_backoff_ms(),
@@ -90,13 +98,35 @@ pub struct WebhookEndpointConfig {
     pub url: String,
     pub events: Vec<String>,
     #[serde(default)]
+    pub batch_size: Option<usize>,
+    #[serde(default)]
     pub secret_env: Option<String>,
 }
 
+#[derive(Debug)]
 struct Endpoint {
+    id: usize,
     name: String,
     url: Url,
+    batch_size: usize,
     secret: Option<String>,
+}
+
+#[derive(Debug)]
+struct ResolvedEndpoints {
+    routes: EndpointRoutes, // event -> endpoints
+    endpoints: Vec<Arc<Endpoint>>, // sorted by id
+}
+
+#[derive(Serialize)]
+struct BatchPayload<'a> {
+    batch_id: &'a str,
+    events: &'a [LogEvent],
+}
+
+struct EndpointBatch {
+    endpoint: Arc<Endpoint>,
+    events: Vec<LogEvent>,
 }
 
 enum Msg {
@@ -114,13 +144,21 @@ pub struct HttpLogger {
 impl HttpLogger {
     pub fn new(config: HttpLoggerConfig) -> anyhow::Result<Self> {
         validate_delivery(&config.delivery)?;
-        let routes = Arc::new(resolve_endpoint_routes(config.endpoints)?);
+        let resolved =
+            resolve_endpoint_routes(config.endpoints, config.delivery.default_batch_size)?;
+        let routes = Arc::new(resolved.routes);
         let client = Client::builder()
             .timeout(Duration::from_secs(config.delivery.request_timeout_secs))
             .build()
             .context("build webhook HTTP client")?;
         let (tx, rx) = mpsc::channel(config.delivery.queue_size);
-        spawn_worker(rx, client, routes.clone(), config.delivery);
+        spawn_worker(
+            rx,
+            client,
+            routes.clone(),
+            resolved.endpoints,
+            config.delivery,
+        );
         Ok(Self { tx, routes })
     }
 }
@@ -158,6 +196,12 @@ impl Logger for HttpLogger {
 fn default_queue_size() -> usize {
     10_000
 }
+fn default_batch_size() -> usize {
+    1
+}
+fn default_flush_interval_secs() -> u64 {
+    5
+}
 fn default_request_timeout_secs() -> u64 {
     5
 }
@@ -178,6 +222,12 @@ fn validate_delivery(delivery: &DeliveryConfig) -> anyhow::Result<()> {
     if delivery.queue_size == 0 {
         bail!("webhook delivery queue_size must be greater than 0");
     }
+    if delivery.default_batch_size == 0 {
+        bail!("webhook delivery default_batch_size must be greater than 0");
+    }
+    if delivery.flush_interval_secs == 0 {
+        bail!("webhook delivery flush_interval_secs must be greater than 0");
+    }
     if delivery.request_timeout_secs == 0 {
         bail!("webhook delivery request_timeout_secs must be greater than 0");
     }
@@ -190,14 +240,19 @@ fn validate_delivery(delivery: &DeliveryConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_endpoint_routes(configs: Vec<WebhookEndpointConfig>) -> anyhow::Result<EndpointRoutes> {
+fn resolve_endpoint_routes(
+    configs: Vec<WebhookEndpointConfig>,
+    default_batch_size: usize,
+) -> anyhow::Result<ResolvedEndpoints> {
     if configs.is_empty() {
         bail!("webhook config must contain at least one endpoint");
     }
 
     let mut routes: EndpointRoutes = HashMap::new();
+    let mut endpoints = Vec::with_capacity(configs.len());
+    let mut seen_endpoint_events = HashSet::new();
 
-    for cfg in configs {
+    for (id, cfg) in configs.into_iter().enumerate() {
         let name = cfg.name.trim();
         if name.is_empty() {
             bail!("webhook endpoint name must not be empty");
@@ -208,6 +263,7 @@ fn resolve_endpoint_routes(configs: Vec<WebhookEndpointConfig>) -> anyhow::Resul
         if url.scheme() != "http" && url.scheme() != "https" {
             bail!("webhook endpoint {name} URL must use http or https");
         }
+        let url_key = url.as_str().to_string();
 
         let events: HashSet<_> = cfg
             .events
@@ -217,6 +273,11 @@ fn resolve_endpoint_routes(configs: Vec<WebhookEndpointConfig>) -> anyhow::Resul
             .collect();
         if events.is_empty() {
             bail!("webhook endpoint {name} must subscribe to at least one event");
+        }
+
+        let batch_size = cfg.batch_size.unwrap_or(default_batch_size);
+        if batch_size == 0 {
+            bail!("webhook endpoint {name} batch_size must be greater than 0");
         }
 
         let secret = match cfg.secret_env {
@@ -237,35 +298,58 @@ fn resolve_endpoint_routes(configs: Vec<WebhookEndpointConfig>) -> anyhow::Resul
         };
 
         let endpoint = Arc::new(Endpoint {
+            id,
             name: name.to_string(),
             url,
+            batch_size,
             secret,
         });
 
         for event in events {
+            if !seen_endpoint_events.insert((url_key.clone(), event.clone())) {
+                bail!(
+                    "duplicate webhook endpoint subscription for url {} and event {}",
+                    endpoint.url,
+                    event
+                );
+            }
             routes.entry(event).or_default().push(endpoint.clone());
         }
+        endpoints.push(endpoint);
     }
 
-    Ok(routes)
+    Ok(ResolvedEndpoints { routes, endpoints })
 }
 
 fn spawn_worker(
     mut rx: mpsc::Receiver<Msg>,
     client: Client,
     routes: Arc<EndpointRoutes>,
+    endpoints: Vec<Arc<Endpoint>>,
     delivery: DeliveryConfig,
 ) {
     tokio::spawn(async move {
         let semaphore = Arc::new(Semaphore::new(delivery.max_in_flight));
         let mut tasks = JoinSet::new();
+        let mut buffers: Vec<EndpointBatch> = endpoints
+            .into_iter()
+            .map(|endpoint| EndpointBatch {
+                events: Vec::with_capacity(endpoint.batch_size),
+                endpoint,
+            })
+            .collect();
+        let mut flush_interval =
+            tokio::time::interval(Duration::from_secs(delivery.flush_interval_secs));
+        flush_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        flush_interval.tick().await;
 
         loop {
             tokio::select! {
                 msg = rx.recv() => {
                     match msg {
                         Some(Msg::Event(event)) => {
-                            spawn_deliveries(
+                            enqueue_event(
+                                &mut buffers,
                                 &mut tasks,
                                 client.clone(),
                                 routes.clone(),
@@ -275,6 +359,13 @@ fn spawn_worker(
                             );
                         }
                         Some(Msg::Flush(reply)) => {
+                            flush_all_buffers(
+                                &mut buffers,
+                                &mut tasks,
+                                client.clone(),
+                                semaphore.clone(),
+                                delivery.clone(),
+                            );
                             while tasks.len() > 0 {
                                 if let Some(result) = tasks.join_next().await {
                                     if let Err(err) = result {
@@ -284,8 +375,26 @@ fn spawn_worker(
                             }
                             let _ = reply.send(());
                         }
-                        None => break,
+                        None => {
+                            flush_all_buffers(
+                                &mut buffers,
+                                &mut tasks,
+                                client.clone(),
+                                semaphore.clone(),
+                                delivery.clone(),
+                            );
+                            break;
+                        }
                     }
+                }
+                _ = flush_interval.tick() => {
+                    flush_all_buffers(
+                        &mut buffers,
+                        &mut tasks,
+                        client.clone(),
+                        semaphore.clone(),
+                        delivery.clone(),
+                    );
                 }
                 result = tasks.join_next(), if tasks.len() > 0 => {
                     if let Some(Err(err)) = result {
@@ -303,7 +412,8 @@ fn spawn_worker(
     });
 }
 
-fn spawn_deliveries(
+fn enqueue_event(
+    buffers: &mut [EndpointBatch],
     tasks: &mut JoinSet<()>,
     client: Client,
     routes: Arc<EndpointRoutes>,
@@ -311,38 +421,107 @@ fn spawn_deliveries(
     delivery: DeliveryConfig,
     event: LogEvent,
 ) {
-    let body = match serde_json::to_vec(&event) {
+    let Some(endpoints) = routes.get(&event.event) else {
+        return;
+    };
+
+    for endpoint in endpoints.iter().cloned() {
+        let endpoint_id = endpoint.id;
+        let Some(batch) = buffers.get_mut(endpoint_id) else {
+            error!(
+                endpoint = %endpoint.name,
+                endpoint_id,
+                "HttpLogger: endpoint batch buffer missing, dropping event"
+            );
+            continue;
+        };
+        batch.events.push(event.clone());
+
+        if batch.events.len() >= batch.endpoint.batch_size {
+            let events = std::mem::replace(
+                &mut batch.events,
+                Vec::with_capacity(batch.endpoint.batch_size),
+            );
+            spawn_batch_delivery(
+                tasks,
+                client.clone(),
+                semaphore.clone(),
+                delivery.clone(),
+                batch.endpoint.clone(),
+                events,
+            );
+        }
+    }
+}
+
+fn flush_all_buffers(
+    buffers: &mut [EndpointBatch],
+    tasks: &mut JoinSet<()>,
+    client: Client,
+    semaphore: Arc<Semaphore>,
+    delivery: DeliveryConfig,
+) {
+    for batch in buffers.iter_mut() {
+        if batch.events.is_empty() {
+            continue;
+        }
+        let events = std::mem::replace(
+            &mut batch.events,
+            Vec::with_capacity(batch.endpoint.batch_size),
+        );
+        spawn_batch_delivery(
+            tasks,
+            client.clone(),
+            semaphore.clone(),
+            delivery.clone(),
+            batch.endpoint.clone(),
+            events,
+        );
+    }
+}
+
+fn spawn_batch_delivery(
+    tasks: &mut JoinSet<()>,
+    client: Client,
+    semaphore: Arc<Semaphore>,
+    delivery: DeliveryConfig,
+    endpoint: Arc<Endpoint>,
+    events: Vec<LogEvent>,
+) {
+    if events.is_empty() {
+        return;
+    }
+
+    let batch_id = Uuid::new_v4().to_string();
+    let event_count = events.len();
+    let body = match serde_json::to_vec(&BatchPayload {
+        batch_id: &batch_id,
+        events: &events,
+    }) {
         Ok(body) => body,
         Err(err) => {
             error!(
-                event = %event.event,
-                "HttpLogger: failed to serialise event for webhook: {}",
+                batch_id = %batch_id,
+                event_count,
+                "HttpLogger: failed to serialise webhook batch: {}",
                 err
             );
             return;
         }
     };
 
-    let Some(endpoints) = routes.get(&event.event) else {
-        return;
-    };
-
-    let event_id = Uuid::new_v4().to_string();
-
-    for endpoint in endpoints.iter().cloned() {
-        let client = client.clone();
-        let semaphore = semaphore.clone();
-        let delivery = delivery.clone();
-        let event_name = event.event.clone();
-        let body = body.clone();
-        let event_id = event_id.clone();
-        tasks.spawn(async move {
-            deliver_with_retry(
-                client, endpoint, semaphore, body, event_name, event_id, delivery,
-            )
-            .await;
-        });
-    }
+    tasks.spawn(async move {
+        deliver_with_retry(
+            client,
+            endpoint,
+            semaphore,
+            body,
+            batch_id,
+            event_count,
+            delivery,
+        )
+        .await;
+    });
 }
 
 async fn deliver_with_retry(
@@ -350,8 +529,8 @@ async fn deliver_with_retry(
     endpoint: Arc<Endpoint>,
     semaphore: Arc<Semaphore>,
     body: Vec<u8>,
-    event_name: String,
-    event_id: String,
+    batch_id: String,
+    event_count: usize,
     delivery: DeliveryConfig,
 ) {
     for attempt in 1..=delivery.max_attempts {
@@ -362,7 +541,7 @@ async fn deliver_with_retry(
                 error!("HttpLogger: webhook semaphore closed, dropping delivery");
                 return;
             };
-            send_once(&client, &endpoint, &body, &event_name, &event_id).await
+            send_once(&client, &endpoint, &body).await
         };
 
         match result {
@@ -371,8 +550,8 @@ async fn deliver_with_retry(
                 if !is_retriable_status(status) || attempt == delivery.max_attempts {
                     error!(
                         endpoint = %endpoint.name,
-                        event = %event_name,
-                        event_id = %event_id,
+                        batch_id = %batch_id,
+                        event_count,
                         attempts = attempt,
                         status = %status,
                         "HttpLogger: webhook delivery failed"
@@ -381,8 +560,8 @@ async fn deliver_with_retry(
                 }
                 warn!(
                     endpoint = %endpoint.name,
-                    event = %event_name,
-                    event_id = %event_id,
+                    batch_id = %batch_id,
+                    event_count,
                     attempt,
                     status = %status,
                     "HttpLogger: webhook delivery retrying"
@@ -392,8 +571,8 @@ async fn deliver_with_retry(
                 if attempt == delivery.max_attempts {
                     error!(
                         endpoint = %endpoint.name,
-                        event = %event_name,
-                        event_id = %event_id,
+                        batch_id = %batch_id,
+                        event_count,
                         attempts = attempt,
                         error = %err,
                         "HttpLogger: webhook delivery failed"
@@ -402,8 +581,8 @@ async fn deliver_with_retry(
                 }
                 warn!(
                     endpoint = %endpoint.name,
-                    event = %event_name,
-                    event_id = %event_id,
+                    batch_id = %batch_id,
+                    event_count,
                     attempt,
                     error = %err,
                     "HttpLogger: webhook delivery retrying"
@@ -419,15 +598,11 @@ async fn send_once(
     client: &Client,
     endpoint: &Endpoint,
     body: &[u8],
-    event_name: &str,
-    event_id: &str,
 ) -> Result<StatusCode, reqwest::Error> {
     let mut request = client
         .post(endpoint.url.clone())
         .header(CONTENT_TYPE, "application/json")
         .header(USER_AGENT, "CubeSandbox-Webhook/1.0")
-        .header("X-Cube-Event", event_name)
-        .header("X-Cube-Event-Id", event_id)
         .body(body.to_vec());
 
     if let Some(secret) = endpoint.secret.as_ref() {
@@ -547,10 +722,16 @@ mod tests {
         .is_ok()
     }
 
+    const EVENTUAL_DELIVERY_WAIT: Duration = Duration::from_secs(2);
+    const ABSENT_DELIVERY_WAIT: Duration = Duration::from_millis(50);
+    const RETRY_BACKOFF_GUARD_WAIT: Duration = Duration::from_secs(2);
+
     fn test_config(url: String, events: Vec<&str>) -> HttpLoggerConfig {
         HttpLoggerConfig {
             delivery: DeliveryConfig {
                 queue_size: 16,
+                default_batch_size: 1,
+                flush_interval_secs: 5,
                 request_timeout_secs: 1,
                 max_attempts: 3,
                 initial_backoff_ms: 1,
@@ -561,6 +742,7 @@ mod tests {
                 name: "test".to_string(),
                 url,
                 events: events.into_iter().map(str::to_string).collect(),
+                batch_size: None,
                 secret_env: None,
             }],
         }
@@ -571,6 +753,8 @@ mod tests {
         let raw = r#"
             [delivery]
             queue_size = 99
+            default_batch_size = 2
+            flush_interval_secs = 7
             request_timeout_secs = 3
             max_attempts = 4
             initial_backoff_ms = 250
@@ -581,15 +765,19 @@ mod tests {
             name = "local"
             url = "http://127.0.0.1:8088/webhook"
             events = ["sandbox.created", "api.error"]
+            batch_size = 3
             secret_env = "CUBE_WEBHOOK_SECRET_0"
         "#;
 
         let cfg = HttpLoggerConfig::from_toml_str(raw).unwrap();
 
         assert_eq!(cfg.delivery.queue_size, 99);
+        assert_eq!(cfg.delivery.default_batch_size, 2);
+        assert_eq!(cfg.delivery.flush_interval_secs, 7);
         assert_eq!(cfg.delivery.max_attempts, 4);
         assert_eq!(cfg.endpoints.len(), 1);
         assert_eq!(cfg.endpoints[0].name, "local");
+        assert_eq!(cfg.endpoints[0].batch_size, Some(3));
         assert_eq!(
             cfg.endpoints[0].events,
             vec!["sandbox.created", "api.error"]
@@ -611,21 +799,51 @@ mod tests {
                     "api.error".to_string(),
                     "sandbox.created".to_string(),
                 ],
+                batch_size: None,
                 secret_env: None,
             },
             WebhookEndpointConfig {
                 name: "alerts".to_string(),
                 url: "http://127.0.0.1:8080/alerts".to_string(),
                 events: vec!["sandbox.created".to_string()],
+                batch_size: None,
                 secret_env: None,
             },
         ];
 
-        let routes = resolve_endpoint_routes(configs).unwrap();
+        let resolved = resolve_endpoint_routes(configs, 1).unwrap();
 
-        assert_eq!(routes["sandbox.created"].len(), 2);
-        assert_eq!(routes["api.error"].len(), 1);
-        assert_eq!(routes["api.error"][0].name, "audit");
+        assert_eq!(resolved.routes["sandbox.created"].len(), 2);
+        assert_eq!(resolved.routes["api.error"].len(), 1);
+        assert_eq!(resolved.routes["api.error"][0].name, "audit");
+        assert_eq!(resolved.endpoints.len(), 2);
+        assert_eq!(resolved.endpoints[0].batch_size, 1);
+    }
+
+    #[test]
+    fn rejects_duplicate_url_event_pairs_across_endpoints() {
+        let configs = vec![
+            WebhookEndpointConfig {
+                name: "lifecycle".to_string(),
+                url: "http://127.0.0.1:8080/webhook".to_string(),
+                events: vec!["sandbox.created".to_string()],
+                batch_size: None,
+                secret_env: None,
+            },
+            WebhookEndpointConfig {
+                name: "api".to_string(),
+                url: "http://127.0.0.1:8080/webhook".to_string(),
+                events: vec!["sandbox.created".to_string(), "api.request".to_string()],
+                batch_size: Some(10),
+                secret_env: None,
+            },
+        ];
+
+        let err = resolve_endpoint_routes(configs, 1).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("duplicate webhook endpoint subscription"));
     }
 
     #[test]
@@ -675,11 +893,13 @@ mod tests {
 
         let requests = recorder.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].headers["x-cube-event"].to_str().unwrap(),
-            "sandbox.created"
-        );
-        assert!(requests[0].body.contains(r#""event":"sandbox.created""#));
+        assert!(!requests[0].headers.contains_key("x-cube-event"));
+        assert!(!requests[0].headers.contains_key("x-cube-event-id"));
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert!(body["batch_id"].as_str().is_some());
+        assert_eq!(body["events"].as_array().unwrap().len(), 1);
+        assert_eq!(body["events"][0]["event"], "sandbox.created");
+        assert_eq!(body["events"][0]["sandbox_id"], "sbx-1");
     }
 
     #[tokio::test]
@@ -707,12 +927,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sends_one_event_id_header_across_fanout_and_rotates_between_events() {
+    async fn sends_batch_envelope_across_fanout_and_rotates_between_events() {
         let (audit_url, audit_recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
         let (ops_url, ops_recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
         let logger = HttpLogger::new(HttpLoggerConfig {
             delivery: DeliveryConfig {
                 queue_size: 16,
+                default_batch_size: 1,
+                flush_interval_secs: 5,
                 request_timeout_secs: 1,
                 max_attempts: 1,
                 initial_backoff_ms: 1,
@@ -724,12 +946,14 @@ mod tests {
                     name: "audit".to_string(),
                     url: audit_url,
                     events: vec!["sandbox.created".to_string()],
+                    batch_size: None,
                     secret_env: None,
                 },
                 WebhookEndpointConfig {
                     name: "ops".to_string(),
                     url: ops_url,
                     events: vec!["sandbox.created".to_string()],
+                    batch_size: None,
                     secret_env: None,
                 },
             ],
@@ -745,24 +969,22 @@ mod tests {
         let ops_requests = ops_recorder.requests.lock().unwrap();
         assert_eq!(audit_requests.len(), 1);
         assert_eq!(ops_requests.len(), 1);
-        let audit_event_id = audit_requests[0]
-            .headers
-            .get("x-cube-event-id")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        let ops_event_id = ops_requests[0]
-            .headers
-            .get("x-cube-event-id")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        assert!(!audit_event_id.is_empty());
-        assert_eq!(audit_event_id, ops_event_id);
+        assert!(!audit_requests[0].headers.contains_key("x-cube-event"));
+        assert!(!ops_requests[0].headers.contains_key("x-cube-event"));
+        assert!(!audit_requests[0].headers.contains_key("x-cube-event-id"));
+        assert!(!ops_requests[0].headers.contains_key("x-cube-event-id"));
         assert!(!audit_requests[0].headers.contains_key("x-cube-delivery"));
         assert!(!ops_requests[0].headers.contains_key("x-cube-delivery"));
+        let audit_body: serde_json::Value = serde_json::from_str(&audit_requests[0].body).unwrap();
+        let ops_body: serde_json::Value = serde_json::from_str(&ops_requests[0].body).unwrap();
+        let audit_batch_id = audit_body["batch_id"].as_str().unwrap().to_string();
+        let ops_batch_id = ops_body["batch_id"].as_str().unwrap().to_string();
+        assert!(!audit_batch_id.is_empty());
+        assert!(!ops_batch_id.is_empty());
+        assert_eq!(audit_body["events"].as_array().unwrap().len(), 1);
+        assert_eq!(ops_body["events"].as_array().unwrap().len(), 1);
+        assert_eq!(audit_body["events"][0]["event"], "sandbox.created");
+        assert_eq!(ops_body["events"][0]["event"], "sandbox.created");
         drop(audit_requests);
         drop(ops_requests);
 
@@ -775,22 +997,193 @@ mod tests {
         let ops_requests = ops_recorder.requests.lock().unwrap();
         assert_eq!(audit_requests.len(), 2);
         assert_eq!(ops_requests.len(), 2);
-        let second_audit_event_id = audit_requests[1]
-            .headers
-            .get("x-cube-event-id")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        let second_ops_event_id = ops_requests[1]
-            .headers
-            .get("x-cube-event-id")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        assert_eq!(second_audit_event_id, second_ops_event_id);
-        assert_ne!(audit_event_id, second_audit_event_id);
+        let second_audit_body: serde_json::Value =
+            serde_json::from_str(&audit_requests[1].body).unwrap();
+        let second_ops_body: serde_json::Value =
+            serde_json::from_str(&ops_requests[1].body).unwrap();
+        let second_audit_batch_id = second_audit_body["batch_id"].as_str().unwrap();
+        let second_ops_batch_id = second_ops_body["batch_id"].as_str().unwrap();
+        assert_ne!(audit_batch_id, second_audit_batch_id);
+        assert_ne!(ops_batch_id, second_ops_batch_id);
+        assert_eq!(second_audit_body["events"][0]["sandbox_id"], "sbx-2");
+        assert_eq!(second_ops_body["events"][0]["sandbox_id"], "sbx-2");
+    }
+
+    #[tokio::test]
+    async fn buffers_events_until_batch_size_is_reached() {
+        let (url, recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
+        let logger = HttpLogger::new(HttpLoggerConfig {
+            delivery: DeliveryConfig {
+                queue_size: 16,
+                default_batch_size: 2,
+                flush_interval_secs: 60,
+                request_timeout_secs: 1,
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                max_backoff_secs: 1,
+                max_in_flight: 4,
+            },
+            endpoints: vec![WebhookEndpointConfig {
+                name: "test".to_string(),
+                url,
+                events: vec!["sandbox.created".to_string()],
+                batch_size: None,
+                secret_env: None,
+            }],
+        })
+        .unwrap();
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sbx-1"))
+            .await;
+        assert!(!wait_for_count(&recorder, 1, ABSENT_DELIVERY_WAIT).await);
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sbx-2"))
+            .await;
+        assert!(wait_for_count(&recorder, 1, EVENTUAL_DELIVERY_WAIT).await);
+        logger.flush().await;
+
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert!(body["batch_id"].as_str().is_some());
+        assert_eq!(body["events"].as_array().unwrap().len(), 2);
+        assert_eq!(body["events"][0]["sandbox_id"], "sbx-1");
+        assert_eq!(body["events"][1]["sandbox_id"], "sbx-2");
+    }
+
+    #[tokio::test]
+    async fn endpoint_batch_size_overrides_delivery_default() {
+        let (url, recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
+        let logger = HttpLogger::new(HttpLoggerConfig {
+            delivery: DeliveryConfig {
+                queue_size: 16,
+                default_batch_size: 1,
+                flush_interval_secs: 60,
+                request_timeout_secs: 1,
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                max_backoff_secs: 1,
+                max_in_flight: 4,
+            },
+            endpoints: vec![
+                WebhookEndpointConfig {
+                    name: "lifecycle".to_string(),
+                    url: url.clone(),
+                    events: vec!["sandbox.created".to_string()],
+                    batch_size: None,
+                    secret_env: None,
+                },
+                WebhookEndpointConfig {
+                    name: "api".to_string(),
+                    url,
+                    events: vec!["api.request".to_string()],
+                    batch_size: Some(2),
+                    secret_env: None,
+                },
+            ],
+        })
+        .unwrap();
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sbx-1"))
+            .await;
+        assert!(wait_for_count(&recorder, 1, EVENTUAL_DELIVERY_WAIT).await);
+
+        logger
+            .log(LogEvent::new(LogLevel::Debug, "api.request").field("handler", "health"))
+            .await;
+        assert!(!wait_for_count(&recorder, 2, ABSENT_DELIVERY_WAIT).await);
+
+        logger
+            .log(LogEvent::new(LogLevel::Debug, "api.request").field("handler", "list"))
+            .await;
+        assert!(wait_for_count(&recorder, 2, EVENTUAL_DELIVERY_WAIT).await);
+        logger.flush().await;
+
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let lifecycle_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        let api_body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert_eq!(lifecycle_body["events"].as_array().unwrap().len(), 1);
+        assert_eq!(lifecycle_body["events"][0]["event"], "sandbox.created");
+        assert_eq!(api_body["events"].as_array().unwrap().len(), 2);
+        assert_eq!(api_body["events"][0]["event"], "api.request");
+        assert_eq!(api_body["events"][1]["handler"], "list");
+    }
+
+    #[tokio::test]
+    async fn flush_sends_partial_batch() {
+        let (url, recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
+        let logger = HttpLogger::new(HttpLoggerConfig {
+            delivery: DeliveryConfig {
+                queue_size: 16,
+                default_batch_size: 2,
+                flush_interval_secs: 60,
+                request_timeout_secs: 1,
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                max_backoff_secs: 1,
+                max_in_flight: 4,
+            },
+            endpoints: vec![WebhookEndpointConfig {
+                name: "test".to_string(),
+                url,
+                events: vec!["sandbox.created".to_string()],
+                batch_size: None,
+                secret_env: None,
+            }],
+        })
+        .unwrap();
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sbx-1"))
+            .await;
+        logger.flush().await;
+
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["events"].as_array().unwrap().len(), 1);
+        assert_eq!(body["events"][0]["sandbox_id"], "sbx-1");
+    }
+
+    #[tokio::test]
+    async fn flush_interval_sends_partial_batch() {
+        let (url, recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
+        let logger = HttpLogger::new(HttpLoggerConfig {
+            delivery: DeliveryConfig {
+                queue_size: 16,
+                default_batch_size: 2,
+                flush_interval_secs: 1,
+                request_timeout_secs: 1,
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                max_backoff_secs: 1,
+                max_in_flight: 4,
+            },
+            endpoints: vec![WebhookEndpointConfig {
+                name: "test".to_string(),
+                url,
+                events: vec!["sandbox.created".to_string()],
+                batch_size: None,
+                secret_env: None,
+            }],
+        })
+        .unwrap();
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sbx-1"))
+            .await;
+        assert!(wait_for_count(&recorder, 1, Duration::from_millis(2500)).await);
+        logger.flush().await;
+
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["events"].as_array().unwrap().len(), 1);
+        assert_eq!(body["events"][0]["sandbox_id"], "sbx-1");
     }
 
     #[tokio::test]
@@ -810,21 +1203,17 @@ mod tests {
         assert_eq!(recorder.count.load(Ordering::SeqCst), 2);
         let requests = recorder.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        let first_event_id = requests[0]
-            .headers
-            .get("x-cube-event-id")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        let second_event_id = requests[1]
-            .headers
-            .get("x-cube-event-id")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert_eq!(first_event_id, second_event_id);
+        let first_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        let second_body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert_eq!(first_body["batch_id"], second_body["batch_id"]);
+        assert_eq!(first_body["events"].as_array().unwrap().len(), 1);
+        assert_eq!(second_body["events"].as_array().unwrap().len(), 1);
         assert!(!requests[0].headers.contains_key("x-cube-delivery"));
         assert!(!requests[1].headers.contains_key("x-cube-delivery"));
+        assert!(!requests[0].headers.contains_key("x-cube-event"));
+        assert!(!requests[1].headers.contains_key("x-cube-event"));
+        assert!(!requests[0].headers.contains_key("x-cube-event-id"));
+        assert!(!requests[1].headers.contains_key("x-cube-event-id"));
     }
 
     #[tokio::test]
@@ -839,10 +1228,12 @@ mod tests {
         let logger = HttpLogger::new(HttpLoggerConfig {
             delivery: DeliveryConfig {
                 queue_size: 16,
+                default_batch_size: 1,
+                flush_interval_secs: 5,
                 request_timeout_secs: 1,
                 max_attempts: 2,
-                initial_backoff_ms: 500,
-                max_backoff_secs: 1,
+                initial_backoff_ms: 3_000,
+                max_backoff_secs: 3,
                 max_in_flight: 1,
             },
             endpoints: vec![
@@ -850,12 +1241,14 @@ mod tests {
                     name: "failing".to_string(),
                     url: failing_url,
                     events: vec!["api.error".to_string()],
+                    batch_size: None,
                     secret_env: None,
                 },
                 WebhookEndpointConfig {
                     name: "healthy".to_string(),
                     url: healthy_url,
                     events: vec!["sandbox.created".to_string()],
+                    batch_size: None,
                     secret_env: None,
                 },
             ],
@@ -865,14 +1258,14 @@ mod tests {
         logger
             .log(LogEvent::new(LogLevel::Error, "api.error").field("handler", "create_sandbox"))
             .await;
-        assert!(wait_for_count(&failing_recorder, 1, Duration::from_millis(100)).await);
+        assert!(wait_for_count(&failing_recorder, 1, EVENTUAL_DELIVERY_WAIT).await);
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         logger
             .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "sbx-1"))
             .await;
         assert!(
-            wait_for_count(&healthy_recorder, 1, Duration::from_millis(200)).await,
+            wait_for_count(&healthy_recorder, 1, RETRY_BACKOFF_GUARD_WAIT).await,
             "healthy webhook delivery should not wait for another endpoint's retry backoff"
         );
 

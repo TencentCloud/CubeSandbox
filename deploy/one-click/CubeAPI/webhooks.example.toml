@@ -3,16 +3,33 @@
 # and set CUBE_API_WEBHOOK_CONFIG in .one-click.env to enable it.
 
 [delivery]
+# Async queue capacity. When the queue is full, new events are dropped and logged
+# without blocking the API request path.
 queue_size = 10000
+# Default batch size for endpoints that do not set batch_size. Use 1 to deliver
+# each event as soon as possible.
+default_batch_size = 1
+# Global timed flush interval in seconds. Partial batches are delivered when this
+# interval elapses.
+flush_interval_secs = 5
+# Timeout for one HTTP POST attempt, in seconds.
 request_timeout_secs = 5
+# Maximum delivery attempts, including the first attempt and retries.
 max_attempts = 3
+# Delay before the first retry, in milliseconds. Later retries use exponential
+# backoff.
 initial_backoff_ms = 500
+# Maximum exponential-backoff delay, in seconds.
 max_backoff_secs = 10
+# Global maximum number of concurrent delivery tasks.
 max_in_flight = 100
 
 [[endpoints]]
-name = "local-dev"
+# Endpoint name, used in delivery logs.
+name = "endpoint0"
+# Webhook receiver URL. CubeAPI sends HTTP POST requests to this address.
 url = "http://127.0.0.1:8088/webhook"
+# Event types subscribed by this endpoint.
 events = [
   "sandbox.created",
   "sandbox.deleted",
@@ -20,7 +37,28 @@ events = [
   "sandbox.resumed",
   "api.error",
 ]
-# Optional. The env var value is read by CubeAPI on startup and used for
-# X-Cube-Signature-256: sha256=<hex HMAC-SHA256(raw_body)>.
+# Batch size for this endpoint. When omitted, delivery.default_batch_size is used.
+batch_size = 1
+# Optional. Environment variable that stores the HMAC-SHA256 signing secret. Do
+# not put the secret value directly in this file. The env var value is read by
+# CubeAPI on startup and used for X-Cube-Signature-256:
+# sha256=<hex HMAC-SHA256(raw_body)>.
 # Use CUBE_WEBHOOK_SECRET_1, CUBE_WEBHOOK_SECRET_2, ... for additional endpoints.
+# secret_env must be prefixed with `CUBE_WEBHOOK_SECRET_`
 secret_env = "CUBE_WEBHOOK_SECRET_0"
+
+# Optional high-volume diagnostics stream. The same URL may be reused for a
+# disjoint event set, but the same URL and event must not appear in more than one
+# endpoint.
+#
+# [[endpoints]]
+# # Endpoint name, used in delivery logs.
+# name = "local-dev-api"
+# # Webhook receiver URL. CubeAPI sends HTTP POST requests to this address.
+# url = "http://127.0.0.1:8088/webhook"
+# # Event types subscribed by this endpoint.
+# events = ["api.request", "api.response"]
+# # Batch size for this endpoint. When omitted, delivery.default_batch_size is used.
+# batch_size = 100
+# # Reuse the same secret env var when the same receiver verifies both streams.
+# secret_env = "CUBE_WEBHOOK_SECRET_0"

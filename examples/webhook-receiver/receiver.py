@@ -30,20 +30,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"invalid json\n")
             return
 
-        print(
-            json.dumps(
-                {
-                    "event_id": self.headers.get("X-Cube-Event-Id"),
-                    "event": self.headers.get("X-Cube-Event"),
-                    "payload": payload,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            flush=True,
-        )
         self.send_response(204)
         self.end_headers()
+        print(json.dumps(payload, ensure_ascii=False, indent=2), flush=True)
 
     def _signature_valid(self, body):
         received = self.headers.get("X-Cube-Signature-256", "")

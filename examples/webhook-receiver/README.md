@@ -30,6 +30,8 @@ Create `/usr/local/services/cubetoolbox/CubeAPI/webhooks.toml`:
 ```toml
 [delivery]
 queue_size = 10000
+default_batch_size = 1
+flush_interval_secs = 5
 request_timeout_secs = 5
 max_attempts = 3
 initial_backoff_ms = 500
@@ -37,7 +39,7 @@ max_backoff_secs = 10
 max_in_flight = 100
 
 [[endpoints]]
-name = "local-dev"
+name = "local-dev-lifecycle"
 url = "http://127.0.0.1:8088/webhook"
 events = [
   "sandbox.created",
@@ -46,8 +48,14 @@ events = [
   "sandbox.resumed",
   "api.error",
 ]
+batch_size = 1
 secret_env = "CUBE_WEBHOOK_SECRET_0"
 ```
+
+You can reuse the same `url` in another endpoint entry for a disjoint high-volume
+event set, for example `api.request` and `api.response`, and give that entry a
+larger `batch_size`. CubeAPI rejects duplicate subscriptions for the same `url`
+and event.
 
 The `url` must be reachable from the CubeAPI process. Use `127.0.0.1` only when
 the receiver runs on the same host as CubeAPI. In `dev-env`, if this receiver is
@@ -65,8 +73,8 @@ CUBE_WEBHOOK_SECRET_0=change-me
 sudo systemctl restart cube-sandbox-cube-api.service
 ```
 
-Create, pause, resume, and delete a sandbox. The receiver should print one JSON
-object per delivered event.
+Create, pause, resume, and delete a sandbox. With `batch_size = 1`, the receiver
+should print one JSON batch per delivered event.
 
 ## Failure Simulation
 
