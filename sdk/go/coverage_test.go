@@ -161,6 +161,12 @@ func TestSandboxRequiresAttachedClient(t *testing.T) {
 	if _, err := (&Sandbox{}).RunCode(ctx, "1", RunCodeOptions{}); err == nil {
 		t.Fatal("RunCode without client returned nil error")
 	}
+	if err := (&Sandbox{}).SetTimeout(ctx, time.Second); err == nil {
+		t.Fatal("SetTimeout without client returned nil error")
+	}
+	if err := (*Sandbox)(nil).SetTimeout(ctx, time.Second); err == nil {
+		t.Fatal("SetTimeout on nil sandbox returned nil error")
+	}
 }
 
 func TestSandboxPauseBranches(t *testing.T) {

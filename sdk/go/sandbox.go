@@ -111,6 +111,30 @@ func (s *Sandbox) Resume(ctx context.Context, timeout *time.Duration) error {
 	return s.client.doJSON(ctx, http.MethodPost, path, payload, nil, http.StatusOK, http.StatusCreated, http.StatusNoContent)
 }
 
+// SetTimeout updates the sandbox idle timeout (POST /sandboxes/:id/timeout).
+//
+// Positive values set a new TTL in seconds. Zero requests immediate expiry.
+// NeverTimeout (-1) disables idle timeout entirely. Sub-second durations are
+// rounded up because the wire protocol uses integer seconds. Values other
+// than NeverTimeout that are < 0 are rejected with a descriptive error.
+//
+// Errors wrap ErrSandboxNotFound (404) or an *APIError for other HTTP errors.
+//
+// See docs/guide/lifecycle.md for timeout semantics.
+func (s *Sandbox) SetTimeout(ctx context.Context, timeout time.Duration) error {
+	if err := s.ensureClient(); err != nil {
+		return err
+	}
+	if timeout < 0 && timeout != NeverTimeout {
+		return fmt.Errorf("cubesandbox: timeout must be >= 0 or NeverTimeout (-1), got %v", timeout)
+	}
+
+	seconds := timeoutPayloadSeconds(timeout)
+	path := "/sandboxes/" + url.PathEscape(s.SandboxID) + "/timeout"
+	payload := map[string]any{"timeout": seconds}
+	return s.client.doJSON(ctx, http.MethodPost, path, payload, nil, http.StatusNoContent)
+}
+
 func (s *Sandbox) Kill(ctx context.Context) error {
 	if err := s.ensureClient(); err != nil {
 		return err

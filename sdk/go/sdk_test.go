@@ -1390,3 +1390,122 @@ func TestGetTemplateParsesNetworkFields(t *testing.T) {
 		t.Fatalf("AllowInternetAccess=%#v, want false", info.AllowInternetAccess)
 	}
 }
+
+// ── SetTimeout ─────────────────────────────────────────────────────────────
+
+func TestSetTimeoutWireValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		want    int
+	}{
+		{"positive", 120 * time.Second, 120},
+		{"zero", 0, 0},
+		{"never_timeout", NeverTimeout, -1},
+		{"sub_second_rounds_up", 500 * time.Millisecond, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					t.Errorf("method=%s, want POST", r.Method)
+				}
+				expectedPath := "/sandboxes/" + testSandboxID + "/timeout"
+				if r.URL.Path != expectedPath {
+					t.Errorf("path=%s, want %s", r.URL.Path, expectedPath)
+				}
+				json.NewDecoder(r.Body).Decode(&got)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			client := NewClient(Config{APIURL: server.URL})
+			sb := &Sandbox{client: client, SandboxID: testSandboxID}
+			ctx := context.Background()
+
+			if err := sb.SetTimeout(ctx, tt.timeout); err != nil {
+				t.Fatalf("SetTimeout: %v", err)
+			}
+			assertNumber(t, got, "timeout", float64(tt.want))
+		})
+	}
+}
+
+func TestSetTimeoutRejectsInvalidNegative(t *testing.T) {
+	client := NewClient(Config{APIURL: "http://unreachable"})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+
+	err := sb.SetTimeout(context.Background(), -5*time.Second)
+	if err == nil {
+		t.Fatal("SetTimeout(-5s) should return an error")
+	}
+	if !strings.Contains(err.Error(), "NeverTimeout") && !strings.Contains(err.Error(), "-1") {
+		t.Fatalf("error should mention NeverTimeout/-1, got: %v", err)
+	}
+}
+
+func TestSetTimeoutContextCancelled(t *testing.T) {
+	client := NewClient(Config{APIURL: "http://unreachable"})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := sb.SetTimeout(ctx, 60*time.Second)
+	if err == nil {
+		t.Fatal("SetTimeout with cancelled context returned nil error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled", err)
+	}
+}
+
+func TestSetTimeoutNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message":"sandbox not found"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL})
+	sb := &Sandbox{client: client, SandboxID: "sb-nonexistent"}
+	ctx := context.Background()
+
+	err := sb.SetTimeout(ctx, 60*time.Second)
+	if err == nil {
+		t.Fatal("SetTimeout for missing sandbox returned nil error")
+	}
+	if !errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("err=%v, want ErrSandboxNotFound", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *APIError", err)
+	}
+}
+
+func TestSetTimeoutServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"message":"internal error"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+
+	err := sb.SetTimeout(context.Background(), 60*time.Second)
+	if err == nil {
+		t.Fatal("SetTimeout for 500 returned nil error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("StatusCode=%d, want 500", apiErr.StatusCode)
+	}
+}
