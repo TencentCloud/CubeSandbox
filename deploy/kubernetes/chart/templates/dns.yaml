@@ -40,8 +40,11 @@ data:
         template IN AAAA (.*)\.{{ $domainRegex }} {
             rcode NOERROR
         }
+        errors
+        {{- if .Values.cubeDns.logQueries }}
         log
-        cache 300
+        {{- end }}
+        cache {{ .Values.cubeDns.cacheTTL | default 60 }}
         forward . {{ $forward }}
     }
 {{- if eq .Values.cubeDns.mode "nodeLocal" }}

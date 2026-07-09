@@ -265,23 +265,38 @@ spec:
               containerPort: 19090
           {{- if .Values.cubeNode.probes.startup.enabled }}
           startupProbe:
+            {{- if .Values.cubeNode.probes.startup.exec }}
+            exec:
+              {{- toYaml .Values.cubeNode.probes.startup.exec | nindent 14 }}
+            {{- else }}
             tcpSocket:
               port: {{ .Values.cubeNode.probes.startup.tcpSocketPort }}
+            {{- end }}
             periodSeconds: {{ .Values.cubeNode.probes.startup.periodSeconds }}
             failureThreshold: {{ .Values.cubeNode.probes.startup.failureThreshold }}
           {{- end }}
           {{- if .Values.cubeNode.probes.readiness.enabled }}
           readinessProbe:
+            {{- if .Values.cubeNode.probes.readiness.exec }}
+            exec:
+              {{- toYaml .Values.cubeNode.probes.readiness.exec | nindent 14 }}
+            {{- else }}
             tcpSocket:
               port: {{ .Values.cubeNode.probes.readiness.tcpSocketPort }}
+            {{- end }}
             initialDelaySeconds: {{ .Values.cubeNode.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.cubeNode.probes.readiness.periodSeconds }}
             failureThreshold: {{ .Values.cubeNode.probes.readiness.failureThreshold }}
           {{- end }}
           {{- if .Values.cubeNode.probes.liveness.enabled }}
           livenessProbe:
+            {{- if .Values.cubeNode.probes.liveness.exec }}
+            exec:
+              {{- toYaml .Values.cubeNode.probes.liveness.exec | nindent 14 }}
+            {{- else }}
             tcpSocket:
               port: {{ .Values.cubeNode.probes.liveness.tcpSocketPort }}
+            {{- end }}
             initialDelaySeconds: {{ .Values.cubeNode.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.cubeNode.probes.liveness.periodSeconds }}
             failureThreshold: {{ .Values.cubeNode.probes.liveness.failureThreshold }}
@@ -307,10 +322,8 @@ spec:
             - name: tmp-cube
               mountPath: {{ .Values.hostPaths.tmpCube }}
               mountPropagation: Bidirectional
-          {{- with .Values.cubeNode.resources }}
           resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- toYaml .Values.cubeNode.resources | nindent 12 }}
         {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress
           image: {{ include "cube.image" .Values.images.cubeEgress | quote }}

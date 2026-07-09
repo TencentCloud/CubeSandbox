@@ -6,6 +6,11 @@ fullnameOverride: ""
 
 global:
   timezone: Asia/Shanghai
+  # Cluster DNS domain used to build in-cluster Service FQDNs (mysql, redis,
+  # cube-master, cube-api). Override when the cluster is configured with
+  # kubelet --cluster-domain=<non-default>. Empty falls back to
+  # cubeNode.dns.clusterDomain, then "cluster.local".
+  clusterDomain: ""
 
 images:
   # Init container 1: installs/configures PVM host kernel and may reboot the host.
@@ -261,6 +266,14 @@ cubeDns:
     # Empty upstreams forwards to /etc/resolv.conf. Set explicit upstreams to
     # avoid forwarding loops in custom clusters.
     upstreams: []
+  # Cache TTL (seconds) for CoreDNS responses. Aligned with the 60s TTL emitted
+  # by the template plugin so clients do not see stale answers longer than the
+  # advertised TTL when the sandbox gateway IP changes.
+  cacheTTL: 60
+  # Log every DNS query at INFO level. Off by default because compute nodes
+  # running many sandboxes emit thousands of queries per minute; enable only
+  # when actively debugging DNS resolution.
+  logQueries: false
   service:
     type: ClusterIP
     port: 53
@@ -285,8 +298,14 @@ mysql:
   port: 3306
   database: cube_mvp
   user: cube
-  password: cube_pass
-  rootPassword: cube_root
+  # SECURITY: The default password is committed to a public repository and MUST
+  # be overridden for any environment that is not a throwaway local test. In
+  # production, provide `mysql.password` and `mysql.rootPassword` via -f
+  # secret-values.yaml or --set, or use `mysql.host` to point at an externally
+  # managed MySQL. templates/validate.yaml refuses to render when passwords
+  # equal the default sentinel below.
+  password: CHANGE_ME_MYSQL_PASSWORD
+  rootPassword: CHANGE_ME_MYSQL_ROOT_PASSWORD
   persistence:
     enabled: true
     existingClaim: ""
@@ -307,7 +326,9 @@ redis:
   # Non-empty host uses the configured third-party Redis service and skips cube-redis.
   host: ""
   port: 6379
-  password: ceuhvu123
+  # SECURITY: Override before any non-throwaway deployment. templates/validate.yaml
+  # refuses to render when this equals the CHANGE_ME_* sentinel.
+  password: CHANGE_ME_REDIS_PASSWORD
   persistence:
     enabled: true
     existingClaim: ""
@@ -360,23 +381,38 @@ cubeNode:
       pullPolicy: IfNotPresent
 
   env: []
-  resources: {}
+  # Sensible default resource requests / limits for the cube-node runtime
+  # container. Cube nodes host multiple KVM microVMs and must not be evicted
+  # by the scheduler under memory pressure. Downgrade or override in
+  # runtime-values.yaml when the workload profile is known.
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      memory: "4Gi"
 
   probes:
     startup:
       enabled: true
       tcpSocketPort: 9999
+      # Optional exec probe overriding the TCP check. Set to a shell command
+      # list (e.g. ["/bin/sh","-c","cubectl status --local"]) to detect a
+      # process that keeps port 9999 open while internally deadlocked.
+      exec: []
       periodSeconds: 10
       failureThreshold: 30
     readiness:
       enabled: true
       tcpSocketPort: 9999
+      exec: []
       initialDelaySeconds: 10
       periodSeconds: 10
       failureThreshold: 6
     liveness:
       enabled: true
       tcpSocketPort: 9999
+      exec: []
       initialDelaySeconds: 60
       periodSeconds: 20
       failureThreshold: 6
@@ -564,13 +600,36 @@ cubeEgress:
       initialDelaySeconds: 30
       periodSeconds: 20
       failureThreshold: 6
-  resources: {}
-  netResources: {}
+  # Sidecar resource defaults. Guarantees each cube-egress instance gets a
+  # baseline slice of CPU/Mem so it is not evicted before the main cube-node
+  # container under memory pressure. Tune for actual sandbox traffic volume.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      memory: "512Mi"
+  netResources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      memory: "128Mi"
 
 bootstrap:
   pvmHostKernel:
     enabled: true
     desiredKernelPattern: pvm.host
+    # KPTI (Kernel Page-Table Isolation) is disabled here because kvm_pvm on the
+    # CubeSandbox host kernel does not currently support KPTI and boot fails
+    # when it is on. This is a deliberate performance/compatibility choice for
+    # a sandbox-workload host that runs KVM microVMs behind hardware isolation
+    # (guest kernel + KVM boundary already contains the sandbox process).
+    # SECURITY TRADE-OFF: the host is more exposed to Meltdown/Spectre-family
+    # side-channel primitives running on the same host (e.g. other CubeSandbox
+    # sidecars). If the host also runs untrusted workloads outside of PVM
+    # guests, override bootArgs (drop "nopti pti=off") after confirming that
+    # kvm_pvm on your kernel supports KPTI.
     bootArgs: "nopti pti=off"
     package:
       # image: rpm/deb is baked into cube-pvm-host-bootstrap image under /artifacts.

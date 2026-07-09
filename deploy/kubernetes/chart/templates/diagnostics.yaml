@@ -50,12 +50,12 @@ data:
           done
     done
 
-    for ds in cube-node; do
-      run "rollout-${ds}" kubectl rollout status "daemonset/${RELEASE}-${ds#cube-}" -n "${NS}" --timeout=30s
+    for ds in {{ include "cube.nodeName" . | quote }}; do
+      run "rollout-${ds}" kubectl rollout status "daemonset/${ds}" -n "${NS}" --timeout=30s
     done
-    run rollout-proxy-node kubectl rollout status "deployment/${RELEASE}-proxy-node" -n "${NS}" --timeout=30s
-    run rollout-mysql kubectl rollout status "statefulset/${RELEASE}-mysql" -n "${NS}" --timeout=30s
-    run rollout-redis kubectl rollout status "statefulset/${RELEASE}-redis" -n "${NS}" --timeout=30s
+    run rollout-proxy-node kubectl rollout status "deployment/{{ include "cube.proxyName" . }}" -n "${NS}" --timeout=30s
+    run rollout-mysql kubectl rollout status "statefulset/{{ include "cube.mysqlName" . }}" -n "${NS}" --timeout=30s
+    run rollout-redis kubectl rollout status "statefulset/{{ include "cube.redisName" . }}" -n "${NS}" --timeout=30s
 
     echo "diagnostics written to ${OUT}"
 {{- end }}

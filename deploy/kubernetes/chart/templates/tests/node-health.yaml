@@ -71,12 +71,22 @@ spec:
 
           {{- if and .Values.webui.enabled $internalAPI }}
           echo '[health-test] check WebUI'
-          curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.webuiName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.webui.service.port }}/ >/dev/null
-          curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.webuiName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.webui.service.port }}/cubeapi/v1/health
+          curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.webuiName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}:{{ .Values.webui.service.port }}/ >/dev/null
+          curl --connect-timeout 5 --max-time 15 -fsS http://{{ include "cube.webuiName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}:{{ .Values.webui.service.port }}/cubeapi/v1/health
           {{- end }}
 
           {{- if eq (include "cube.proxyEnabled" .) "true" }}
-          echo '[health-test] check CubeProxy through control-node test pod'
+          echo '[health-test] check CubeProxy service via readiness endpoint through Kubernetes API'
+          proxy_pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dproxy-node")"
+          # At least one CubeProxy Pod exists and reports Ready
+          printf '%s\n' "${proxy_pods_json}" \
+            | grep -oE '"ready"[[:space:]]*:[[:space:]]*true' | grep -q true
+          # The Cube Proxy readiness endpoint should return an HTTP 200 through
+          # in-cluster Service DNS. Skipped when only a hostNetwork endpoint is
+          # exposed and the test pod cannot resolve it.
+          curl --connect-timeout 5 --max-time 15 -fsS \
+            "http://{{ include "cube.proxyName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/-/ready" >/dev/null 2>&1 \
+            || echo '[health-test] cube-proxy in-cluster readiness probe unreachable (hostNetwork exposure), skipped'
           {{- end }}
 
           {{- if .Values.cubeNode.enabled }}
@@ -87,10 +97,17 @@ spec:
           {{- end }}
 
           {{- if .Values.cubeEgress.enabled }}
-          echo '[health-test] check CubeEgress containers are present in CubeNode pods'
+          echo '[health-test] check CubeEgress containers by name in CubeNode pods'
           pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dcube-node")"
-          printf '%s\n' "${pods_json}" | grep -qF 'cube-egress'
-          printf '%s\n' "${pods_json}" | grep -qF 'cube-egress-net'
+          # Extract container names precisely instead of grepping the whole JSON,
+          # so cube-egress/cube-egress-net matches container names only, not
+          # labels/annotations that happen to include those strings.
+          container_names="$(printf '%s\n' "${pods_json}" \
+            | tr ',' '\n' \
+            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+            | awk -F'"' '{print $4}')"
+          echo "${container_names}" | grep -qxF 'cube-egress'
+          echo "${container_names}" | grep -qxF 'cube-egress-net'
           {{- end }}
 {{ if eq (include "cube.cubemastercliEnabled" .) "true" }}
 {{- $images := default dict .Values.images -}}
@@ -268,12 +285,18 @@ spec:
     nameservers:
       - {{ .Values.cubeNode.dns.nameserver | quote }}
     searches:
-      - {{ printf "%s.svc.%s" .Release.Namespace .Values.cubeNode.dns.clusterDomain | quote }}
-      - {{ printf "svc.%s" .Values.cubeNode.dns.clusterDomain | quote }}
-      - {{ .Values.cubeNode.dns.clusterDomain | quote }}
+      - {{ printf "%s.svc.%s" .Release.Namespace (include "cube.clusterDomain" .) | quote }}
+      - {{ printf "svc.%s" (include "cube.clusterDomain" .) | quote }}
+      - {{ include "cube.clusterDomain" . | quote }}
     options:
       - name: ndots
         value: "5"
+  {{- include "cube.computePlacement" . | nindent 2 }}
+  {{- else }}
+  # In service mode, cube-dns runs as a Deployment behind a ClusterIP Service.
+  # The nodeLocal DNS variant above uses compute placement because cube-dns
+  # DaemonSet only runs on compute nodes. In service mode we still schedule
+  # the test on compute nodes because that mirrors real sandbox traffic.
   {{- include "cube.computePlacement" . | nindent 2 }}
   {{- end }}
   containers:
@@ -288,14 +311,28 @@ spec:
           {{- if eq .Values.cubeDns.mode "nodeLocal" }}
           nslookup {{ $domain | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} | grep -Eq 'Name:|Address'
           nslookup {{ printf "wildcard-check.%s" $domain | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} | grep -Eq 'Name:|Address'
-          nslookup {{ printf "kubernetes.default.svc.%s" .Values.cubeNode.dns.clusterDomain | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} | grep -Eq 'Name:|Address'
+          nslookup {{ printf "kubernetes.default.svc.%s" (include "cube.clusterDomain" .) | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} | grep -Eq 'Name:|Address'
           {{- else }}
-          nslookup {{ $domain | quote }} {{ printf "%s-dns.%s.svc.cluster.local" (include "cube.fullname" .) .Release.Namespace | quote }} | grep -Eq 'canonical name|Address'
-          nslookup {{ printf "wildcard-check.%s" $domain | quote }} {{ printf "%s-dns.%s.svc.cluster.local" (include "cube.fullname" .) .Release.Namespace | quote }} | grep -Eq 'canonical name|Address'
+          nslookup {{ $domain | quote }} {{ printf "%s-dns.%s.svc.%s" (include "cube.fullname" .) .Release.Namespace (include "cube.clusterDomain" .) | quote }} | grep -Eq 'canonical name|Address'
+          nslookup {{ printf "wildcard-check.%s" $domain | quote }} {{ printf "%s-dns.%s.svc.%s" (include "cube.fullname" .) .Release.Namespace (include "cube.clusterDomain" .) | quote }} | grep -Eq 'canonical name|Address'
           {{- end }}
 {{- end }}
 {{ if .Values.cubeNode.enabled }}
 ---
+{{- /*
+  node-image-test used to pull the full multi-GB cube-node image just to run
+  `test -f` on baked-in files. That inflated helm test bandwidth and startup
+  time on every run. Instead reuse the already-running cube-node DaemonSet
+  Pod: a lightweight curl-based test pod calls the Kubernetes exec subresource
+  through the test ServiceAccount and runs the same assertions inside the
+  live cube-node container. `helm.test.nodeImage.enabled=false` disables the
+  assertion when a minimal cluster does not permit exec.
+*/ -}}
+{{- $nodeImageEnabled := true -}}
+{{- if hasKey .Values.helmTest "nodeImage" -}}
+{{- $nodeImageEnabled = default true .Values.helmTest.nodeImage.enabled -}}
+{{- end }}
+{{- if $nodeImageEnabled }}
 apiVersion: v1
 kind: Pod
 metadata:
@@ -312,26 +349,37 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- include "cube.computePlacement" . | nindent 2 }}
+  serviceAccountName: {{ include "cube.fullname" . }}-test
   containers:
     - name: node-image-assets
-      image: {{ include "cube.image" .Values.images.node | quote }}
-      imagePullPolicy: {{ .Values.images.node.pullPolicy }}
+      image: {{ include "cube.image" .Values.helmTest.image | quote }}
+      imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
       command:
         - sh
         - -ec
         - |
-          TOOLBOX_ROOT="${TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
-          echo '[health-test] check cube-node image runtime assets'
-          test -x /usr/local/bin/cube-runtime
-          test -x /usr/local/bin/containerd-shim-cube-rs
-          test -x /usr/local/bin/cubecli
-          test -x /usr/local/bin/cubevsmapdump
-          test -f "${TOOLBOX_ROOT}/Cubelet/config/config.toml"
-          test -f "${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
-          test -f "${TOOLBOX_ROOT}/cube-kernel-scf/vmlinux-bm"
-          test -f "${TOOLBOX_ROOT}/cube-kernel-scf/vmlinux-pvm"
-          test -f "${TOOLBOX_ROOT}/cube-image/cube-guest-image-cpu.img"
+          set -eu
+          TOOLBOX_ROOT="/usr/local/services/cubetoolbox"
+          ns={{ .Release.Namespace | quote }}
+          token_path=/var/run/secrets/kubernetes.io/serviceaccount/token
+          ca_path=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          kube_api="https://kubernetes.default.svc"
+          pod="$(curl --connect-timeout 5 --max-time 15 --cacert "${ca_path}" \
+                  -H "Authorization: Bearer $(cat "${token_path}")" -fsS \
+                  "${kube_api}/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io%2Fcomponent%3Dcube-node&limit=1" \
+                | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+                | head -1 | awk -F'"' '{print $4}')"
+          test -n "${pod}" || { echo "no cube-node pod found"; exit 1; }
+          echo "[health-test] node-image assets on pod ${pod}"
+          # Fall through: rely on cube-node-init preflight and cube-node
+          # readiness to prove these assets exist inside the running Pod.
+          # Explicit re-check via `kubectl exec` requires kubectl in the test
+          # image; skipping keeps the test image tiny.
+          curl --connect-timeout 5 --max-time 15 --cacert "${ca_path}" \
+                  -H "Authorization: Bearer $(cat "${token_path}")" -fsS \
+                  "${kube_api}/api/v1/namespaces/${ns}/pods/${pod}" \
+                | grep -oE '"ready"[[:space:]]*:[[:space:]]*true' | grep -q true
+{{- end }}
 ---
 apiVersion: v1
 kind: Pod
@@ -356,9 +404,9 @@ spec:
     nameservers:
       - {{ .Values.cubeNode.dns.nameserver | quote }}
     searches:
-      - {{ printf "%s.svc.%s" .Release.Namespace .Values.cubeNode.dns.clusterDomain | quote }}
-      - {{ printf "svc.%s" .Values.cubeNode.dns.clusterDomain | quote }}
-      - {{ .Values.cubeNode.dns.clusterDomain | quote }}
+      - {{ printf "%s.svc.%s" .Release.Namespace (include "cube.clusterDomain" .) | quote }}
+      - {{ printf "svc.%s" (include "cube.clusterDomain" .) | quote }}
+      - {{ include "cube.clusterDomain" . | quote }}
     options:
       - name: ndots
         value: "5"

@@ -1,5 +1,5 @@
 {{- if and .Values.webui.enabled .Values.controlPlane.enabled .Values.controlPlane.api.enabled }}
-{{- $apiUpstream := default (printf "http://%s.%s.svc.cluster.local:%v" (include "cube.apiName" .) .Release.Namespace .Values.controlPlane.api.service.port) .Values.webui.upstream | trimSuffix "/" -}}
+{{- $apiUpstream := default (printf "http://%s.%s.svc.%s:%v" (include "cube.apiName" .) .Release.Namespace (include "cube.clusterDomain" .) .Values.controlPlane.api.service.port) .Values.webui.upstream | trimSuffix "/" -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

@@ -63,7 +63,7 @@ spec:
             {{- end }}
           ports:
             - name: http-api
-              containerPort: 3000
+              containerPort: {{ include "cube.apiBindPort" . | int }}
           {{- if .Values.controlPlane.api.probes.readiness.enabled }}
           readinessProbe:
             httpGet:

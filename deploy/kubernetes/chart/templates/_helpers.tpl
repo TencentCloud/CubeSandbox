@@ -171,7 +171,7 @@ tolerations:
 {{- if .Values.externalControlPlane.enabled -}}
 {{- .Values.externalControlPlane.masterEndpoint -}}
 {{- else -}}
-{{- printf "%s.%s.svc.cluster.local:%v" (include "cube.masterName" .) .Release.Namespace .Values.controlPlane.master.service.port -}}
+{{- printf "%s.%s.svc.%s:%v" (include "cube.masterName" .) .Release.Namespace (include "cube.clusterDomain" .) .Values.controlPlane.master.service.port -}}
 {{- end -}}
 {{- end -}}
 
@@ -202,12 +202,12 @@ tolerations:
 {{- if .Values.externalControlPlane.enabled -}}
 {{- .Values.externalControlPlane.apiEndpoint -}}
 {{- else -}}
-{{- printf "http://%s.%s.svc.cluster.local:%v" (include "cube.apiName" .) .Release.Namespace .Values.controlPlane.api.service.port -}}
+{{- printf "http://%s.%s.svc.%s:%v" (include "cube.apiName" .) .Release.Namespace (include "cube.clusterDomain" .) .Values.controlPlane.api.service.port -}}
 {{- end -}}
 {{- end -}}
 
 {{- define "cube.mysqlHost" -}}
-{{- if .Values.mysql.host -}}{{ .Values.mysql.host }}{{- else -}}{{ include "cube.mysqlName" . }}.{{ .Release.Namespace }}.svc.cluster.local{{- end -}}
+{{- if .Values.mysql.host -}}{{ .Values.mysql.host }}{{- else -}}{{ include "cube.mysqlName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}{{- end -}}
 {{- end -}}
 
 {{- define "cube.mysqlBuiltinEnabled" -}}
@@ -215,7 +215,7 @@ tolerations:
 {{- end -}}
 
 {{- define "cube.redisHost" -}}
-{{- if .Values.redis.host -}}{{ .Values.redis.host }}{{- else -}}{{ include "cube.redisName" . }}.{{ .Release.Namespace }}.svc.cluster.local{{- end -}}
+{{- if .Values.redis.host -}}{{ .Values.redis.host }}{{- else -}}{{ include "cube.redisName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}{{- end -}}
 {{- end -}}
 
 {{- define "cube.redisBuiltinEnabled" -}}
@@ -237,4 +237,27 @@ iptables -t mangle -S "${chain}" | grep -q -- "--dport 443"
 
 {{- define "cube.secretEnabled" -}}
 {{- if or (and .Values.controlPlane.enabled (or .Values.controlPlane.master.enabled .Values.controlPlane.api.enabled)) (eq (include "cube.proxyEnabled" .) "true") (eq (include "cube.mysqlBuiltinEnabled" .) "true") (eq (include "cube.redisBuiltinEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{/*
+Cluster domain used to build cluster-local DNS names (e.g. cluster.local).
+Priority: .Values.global.clusterDomain > .Values.cubeNode.dns.clusterDomain > cluster.local.
+Set global.clusterDomain when the cluster is configured with kubelet
+--cluster-domain=<something-other-than-cluster.local>.
+*/}}
+{{- define "cube.clusterDomain" -}}
+{{- $global := (default (dict) .Values.global).clusterDomain -}}
+{{- $cubeNode := (default (dict) (default (dict) .Values.cubeNode).dns).clusterDomain -}}
+{{- default (default "cluster.local" $cubeNode) $global -}}
+{{- end -}}
+
+{{/*
+Port that CubeAPI binds on, extracted from controlPlane.api.bind (default
+"0.0.0.0:3000"). Used for both containerPort and probes so operators can
+change bind without editing multiple places.
+*/}}
+{{- define "cube.apiBindPort" -}}
+{{- $bind := default "0.0.0.0:3000" .Values.controlPlane.api.bind -}}
+{{- $port := regexFind "[0-9]+$" $bind -}}
+{{- default "3000" $port -}}
 {{- end -}}

@@ -9,7 +9,14 @@ CUBELET_DYNAMICCONF="${CUBELET_DYNAMICCONF:-${TOOLBOX_ROOT}/Cubelet/dynamicconf/
 CUBE_KERNEL_DIR="${TOOLBOX_ROOT}/cube-kernel-scf"
 NETWORK_AGENT_STATE_DIR="${NETWORK_AGENT_STATE_DIR:-/data/cubelet/network-agent/state}"
 NETWORK_AGENT_HEALTH_URL="${NETWORK_AGENT_HEALTH_URL:-http://127.0.0.1:19090/readyz}"
-CUBE_MASTER_ENDPOINT="${CUBE_MASTER_ENDPOINT:-cube-master.cube-system.svc.cluster.local:8089}"
+if [[ -z "${CUBE_MASTER_ENDPOINT:-}" ]]; then
+  # Do not fall back to a hardcoded namespace like cube-system: when this env
+  # var is missing it means the DaemonSet template did not inject the endpoint
+  # for the current release/namespace, and silently defaulting would target
+  # the wrong control plane. Fail fast so the operator notices.
+  printf '[cube-node-entrypoint] FATAL: CUBE_MASTER_ENDPOINT is empty. The chart must inject it from cube.masterEndpoint helper.\n' >&2
+  exit 1
+fi
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-1}"
 CUBE_SANDBOX_AUTO_DETECT_ETH="${CUBE_SANDBOX_AUTO_DETECT_ETH:-true}"
 
@@ -126,7 +133,15 @@ configure_sandbox_dns() {
 validate_runtime_commands
 select_guest_kernel
 
-sed -i -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${CUBE_MASTER_ENDPOINT}\"#" "${CUBELET_DYNAMICCONF}"
+# Escape backslashes, ampersands, and forward slashes so they cannot terminate
+# or reinterpret the sed replacement expression when the input comes from
+# operator-supplied env vars (endpoint URLs, interface names, CIDRs, etc.).
+sed_escape_replacement() {
+  printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g' -e 's/[/]/\\\//g'
+}
+
+CUBE_MASTER_ENDPOINT_ESC="$(sed_escape_replacement "${CUBE_MASTER_ENDPOINT}")"
+sed -i -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${CUBE_MASTER_ENDPOINT_ESC}\"#" "${CUBELET_DYNAMICCONF}"
 configure_sandbox_dns
 
 if [[ -z "${CUBE_SANDBOX_ETH_NAME:-}" && "${CUBE_SANDBOX_AUTO_DETECT_ETH}" == "true" ]]; then
@@ -138,18 +153,25 @@ if [[ -z "${CUBE_SANDBOX_ETH_NAME:-}" && "${CUBE_SANDBOX_AUTO_DETECT_ETH}" == "t
   fi
 fi
 if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
-  sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${CUBE_SANDBOX_ETH_NAME}\"/" "${CUBELET_CONFIG}"
+  ETH_ESC="$(sed_escape_replacement "${CUBE_SANDBOX_ETH_NAME}")"
+  sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${ETH_ESC}\"/" "${CUBELET_CONFIG}"
 fi
 if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
-  sed -i "s|cidr = \"[^\"]*\"|cidr = \"${CUBE_SANDBOX_NETWORK_CIDR}\"|" "${CUBELET_CONFIG}"
+  CIDR_ESC="$(sed_escape_replacement "${CUBE_SANDBOX_NETWORK_CIDR}")"
+  sed -i "s|cidr = \"[^\"]*\"|cidr = \"${CIDR_ESC}\"|" "${CUBELET_CONFIG}"
 fi
 if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
+  # Reject anything that is not an integer so operators cannot inject
+  # replacement content via numeric-looking env variables.
+  [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"
   sed -i "s/tap_init_num = [0-9]\+/tap_init_num = ${CUBE_TAP_INIT_NUM}/" "${CUBELET_CONFIG}"
 fi
 if [[ -n "${CUBE_CGROUP_POOL_SIZE:-}" ]]; then
+  [[ "${CUBE_CGROUP_POOL_SIZE}" =~ ^[0-9]+$ ]] || fail "CUBE_CGROUP_POOL_SIZE must be a non-negative integer"
   sed -i "s/pool_size = [0-9]\+/pool_size = ${CUBE_CGROUP_POOL_SIZE}/" "${CUBELET_CONFIG}"
 fi
 if [[ -n "${CUBE_WORKFLOW_CONCURRENT:-}" ]]; then
+  [[ "${CUBE_WORKFLOW_CONCURRENT}" =~ ^[0-9]+$ ]] || fail "CUBE_WORKFLOW_CONCURRENT must be a non-negative integer"
   sed -i "s/concurrent = [0-9]\+/concurrent = ${CUBE_WORKFLOW_CONCURRENT}/g" "${CUBELET_CONFIG}"
 fi
 

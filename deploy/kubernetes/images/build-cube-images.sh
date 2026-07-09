@@ -29,6 +29,14 @@ ONE_CLICK_URL="${ONE_CLICK_URL:-https://downloads.sourceforge.net/project/cubesa
 PVM_KERNEL_RPM_URL="${PVM_KERNEL_RPM_URL:-https://downloads.sourceforge.net/project/cubesandbox.mirror/${VERSION}/kernel-6.6.69_opencloudos9.cubesandbox.pvm.host_gb85200d80fa2-1.x86_64.rpm}"
 PVM_KERNEL_DEB_URL="${PVM_KERNEL_DEB_URL:-https://downloads.sourceforge.net/project/cubesandbox.mirror/${VERSION}/linux-image-6.6.69-opencloudos9.cubesandbox.pvm.host-gb85200d80fa2_6.6.69-gb85200d80fa2-1_amd64.deb}"
 
+# Optional SHA256 checksums for the downloaded artifacts. When set, the
+# download function refuses to accept a mismatching file. Chart operators
+# should always set these when publishing images to protect the build against
+# SourceForge/mirror tampering. Leave empty for interactive development builds.
+ONE_CLICK_SHA256="${ONE_CLICK_SHA256:-}"
+PVM_KERNEL_RPM_SHA256="${PVM_KERNEL_RPM_SHA256:-}"
+PVM_KERNEL_DEB_SHA256="${PVM_KERNEL_DEB_SHA256:-}"
+
 # Bake kernel packages into cube-pvm-host-bootstrap by default so delivery only
 # depends on normal image pulls from the target registry.
 INCLUDE_PVM_KERNEL_RPM="${INCLUDE_PVM_KERNEL_RPM:-1}"
@@ -46,27 +54,38 @@ need() {
 validate_download() {
   local out="$1"
   local validator="${2:-file}"
+  local expected_sha="${3:-}"
   case "${validator}" in
     tar.gz)
-      tar -tzf "${out}" >/dev/null
+      tar -tzf "${out}" >/dev/null || return 1
       ;;
     file)
-      [[ -s "${out}" ]]
+      [[ -s "${out}" ]] || return 1
       ;;
     *)
       fail "unknown download validator: ${validator}"
       ;;
   esac
+  if [[ -n "${expected_sha}" ]]; then
+    local actual_sha
+    actual_sha="$(sha256sum "${out}" | awk '{print $1}')"
+    if [[ "${actual_sha}" != "${expected_sha}" ]]; then
+      log "sha256 mismatch on ${out}: expected ${expected_sha} got ${actual_sha}"
+      return 1
+    fi
+  fi
+  return 0
 }
 
 download_file() {
   local url="$1"
   local out="$2"
   local validator="${3:-file}"
+  local expected_sha="${4:-}"
   local attempt
 
   if [[ -f "${out}" ]]; then
-    if validate_download "${out}" "${validator}"; then
+    if validate_download "${out}" "${validator}" "${expected_sha}"; then
       log "reusing existing download: ${out}"
       return 0
     fi
@@ -78,7 +97,13 @@ download_file() {
   for attempt in $(seq 1 "${DOWNLOAD_RETRIES}"); do
     log "downloading $(basename "${out}") attempt ${attempt}/${DOWNLOAD_RETRIES}: ${url}"
     local curl_extra_args=()
-    if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
+    # --retry-all-errors was introduced in curl 7.71. Enable only when
+    # available AND we're not concerned about false-positive retries on 4xx.
+    # In practice CubeSandbox artifacts are static: a 4xx from SourceForge
+    # means the URL is wrong (typo, moved), not a transient issue, so keep
+    # it opt-in via CURL_RETRY_ALL_ERRORS=1.
+    if [[ "${CURL_RETRY_ALL_ERRORS:-0}" == "1" ]] \
+       && curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
       curl_extra_args+=(--retry-all-errors)
     fi
     if curl \
@@ -93,7 +118,7 @@ download_file() {
       --progress-bar \
       -o "${out}" \
       "${url}"; then
-      if validate_download "${out}" "${validator}"; then
+      if validate_download "${out}" "${validator}" "${expected_sha}"; then
         return 0
       fi
       log "downloaded file failed ${validator} validation: ${out}"
@@ -110,6 +135,7 @@ need docker
 need tar
 need curl
 need go
+need sha256sum
 if [[ -n "${SOURCE_REF}" ]]; then
   need git
 fi
@@ -159,7 +185,7 @@ if [[ -n "${PACKAGE_DIR_OVERRIDE:-}" ]]; then
 else
   if [[ ! -f "${ONE_CLICK_TAR}" ]] || ! tar -tzf "${ONE_CLICK_TAR}" >/dev/null 2>&1; then
     log "downloading one-click release package: ${ONE_CLICK_URL}"
-    download_file "${ONE_CLICK_URL}" "${ONE_CLICK_TAR}" tar.gz
+    download_file "${ONE_CLICK_URL}" "${ONE_CLICK_TAR}" tar.gz "${ONE_CLICK_SHA256}"
   fi
   if [[ ! -f "${SANDBOX_PACKAGE_TAR}" ]]; then
     log "extracting one-click release package"
@@ -411,12 +437,12 @@ ctx="$(prepare_context cube-pvm-host-bootstrap)"
 copy_scripts "${ctx}" pvm-host-bootstrap.sh
 if [[ "${INCLUDE_PVM_KERNEL_RPM}" == "1" ]]; then
   log "downloading PVM host kernel rpm for bootstrap image"
-  download_file "${PVM_KERNEL_RPM_URL}" "${PVM_KERNEL_RPM}" file
+  download_file "${PVM_KERNEL_RPM_URL}" "${PVM_KERNEL_RPM}" file "${PVM_KERNEL_RPM_SHA256}"
   cp "${PVM_KERNEL_RPM}" "${ctx}/artifacts/kernel-pvm-host.rpm"
 fi
 if [[ "${INCLUDE_PVM_KERNEL_DEB}" == "1" ]]; then
   log "downloading PVM host kernel deb for bootstrap image"
-  download_file "${PVM_KERNEL_DEB_URL}" "${PVM_KERNEL_DEB}" file
+  download_file "${PVM_KERNEL_DEB_URL}" "${PVM_KERNEL_DEB}" file "${PVM_KERNEL_DEB_SHA256}"
   cp "${PVM_KERNEL_DEB}" "${ctx}/artifacts/linux-image-pvm-host.deb"
 fi
 build_image cube-pvm-host-bootstrap "${ctx}"

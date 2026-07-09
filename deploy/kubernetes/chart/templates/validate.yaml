@@ -47,9 +47,15 @@
 {{- if and $controlPlaneNeedsMysql (not (eq (include "cube.mysqlBuiltinEnabled" .) "true")) (not .Values.mysql.host) }}
 {{- fail "control plane requires mysql.host when mysql.enabled=false" }}
 {{- end }}
+{{- if and (eq (include "cube.mysqlBuiltinEnabled" .) "true") (or (hasPrefix "CHANGE_ME" (default "" .Values.mysql.password)) (hasPrefix "CHANGE_ME" (default "" .Values.mysql.rootPassword))) }}
+{{- fail "mysql.password / mysql.rootPassword still equal the CHANGE_ME_* default sentinel. Override them before deploying (or set mysql.host to use external MySQL)." }}
+{{- end }}
 {{- $controlPlaneNeedsRedis := and .Values.controlPlane.enabled .Values.controlPlane.master.enabled -}}
 {{- if and $controlPlaneNeedsRedis (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) }}
 {{- fail "control plane master requires redis.host when redis.enabled=false" }}
+{{- end }}
+{{- if and (eq (include "cube.redisBuiltinEnabled" .) "true") (hasPrefix "CHANGE_ME" (default "" .Values.redis.password)) }}
+{{- fail "redis.password still equals the CHANGE_ME_* default sentinel. Override it before deploying (or set redis.host to use external Redis)." }}
 {{- end }}
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
 {{- if not $controlPlaneSelector }}

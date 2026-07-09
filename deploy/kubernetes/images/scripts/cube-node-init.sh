@@ -28,6 +28,23 @@ LOOPBACK_IMAGE_PATH="${LOOPBACK_IMAGE_PATH:-/data/cubelet-xfs.img}"
 LOOPBACK_SIZE="${LOOPBACK_SIZE:-25G}"
 
 host_path() { printf '%s%s' "$HOST_ROOT" "$1"; }
+# SECURITY MODEL (host_chroot_sh / host_mount_sh):
+#   Both helpers enter PID 1's uts/ipc/net/pid namespaces via `nsenter --target 1`
+#   and chroot into /host. This is a deliberate, architecturally required
+#   container escape: node bootstrap needs kernel-module loading, block
+#   device operations (XFS check/create), and host filesystem preparation
+#   which cannot be done from inside the container mount namespace.
+#
+#   Consequences to be aware of:
+#   - A compromise of the cube-node-init or pvm-host-bootstrap image grants
+#     unrestricted host root access. Treat these images as security-critical.
+#     Restrict the registry that can push them, sign them (cosign/notary),
+#     and pin `imagePullPolicy: Always` + a digest in production.
+#   - The pod's ServiceAccount is separate from this escape; SYS_PTRACE +
+#     hostPID on the runtime cube-node container is what governs kubelet
+#     credential exposure, not these init helpers.
+#   - Callers MUST quote every operator-supplied value before splicing it
+#     into the `sh -c` argument to prevent command injection.
 host_chroot_sh() {
   # Keep the container mount namespace so the host root bind mount remains
   # visible at $HOST_ROOT, but enter host uts/ipc/net/pid namespaces for host

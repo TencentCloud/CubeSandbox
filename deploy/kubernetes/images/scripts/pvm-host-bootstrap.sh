@@ -42,10 +42,20 @@ shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 host_sh() {
-  # Keep the container mount namespace so the host root bind mount remains
-  # visible at $HOST_ROOT, but enter host uts/ipc/net/pid namespaces for host
-  # service operations such as reboot.
+  # SECURITY: host_sh forwards its arguments to `/bin/sh -c` inside the host
+  # namespace, so callers must build the command string with shell_quote for
+  # any value that is not a literal constant. This function is intentionally
+  # kept for scripts that assemble shell pipelines. For invocations that only
+  # need argv-style execution use host_run instead, which does not go through
+  # `sh -c`.
   nsenter --target 1 --uts --ipc --net --pid -- chroot "$HOST_ROOT" /bin/sh -c "$*"
+}
+host_run() {
+  # Exec argv on the host without a shell interpreter. Preferred entry point
+  # for calls that don't need pipelines / redirection because each argument
+  # is passed to execve() untouched, so no meta-characters ($, `, ;, &&, etc.)
+  # trigger unintended shell expansion.
+  nsenter --target 1 --uts --ipc --net --pid -- chroot "$HOST_ROOT" "$@"
 }
 
 release_lease() {
@@ -139,10 +149,14 @@ install_kernel() {
 configure_bootloader() {
   log "configuring bootloader for kernel pattern ${DESIRED_KERNEL_PATTERN}"
   boot_args="$(shell_quote "$KERNEL_BOOT_ARGS")"
+  # Quote DESIRED_KERNEL_PATTERN so operator-supplied values (arriving via
+  # bootstrap.pvmHostKernel.desiredKernelPattern in the chart) cannot inject
+  # shell metacharacters into the host shell interpreter.
+  pattern="$(shell_quote "$DESIRED_KERNEL_PATTERN")"
   if [ -x "$(host_path /usr/sbin/grubby)" ]; then
-    host_sh "PVM_KERNEL_BOOT_ARGS=${boot_args}; pvm_kernel=\$(ls /boot/vmlinuz-*${DESIRED_KERNEL_PATTERN}* 2>/dev/null | sort | tail -1); test -n \"\$pvm_kernel\"; grubby --set-default \"\$pvm_kernel\"; if [ -n \"\$PVM_KERNEL_BOOT_ARGS\" ]; then grubby --update-kernel \"\$pvm_kernel\" --args \"\$PVM_KERNEL_BOOT_ARGS\"; fi"
+    host_sh "PVM_KERNEL_BOOT_ARGS=${boot_args}; PVM_DESIRED_PATTERN=${pattern}; pvm_kernel=\$(ls /boot/vmlinuz-*\"\${PVM_DESIRED_PATTERN}\"* 2>/dev/null | sort | tail -1); test -n \"\$pvm_kernel\"; grubby --set-default \"\$pvm_kernel\"; if [ -n \"\$PVM_KERNEL_BOOT_ARGS\" ]; then grubby --update-kernel \"\$pvm_kernel\" --args \"\$PVM_KERNEL_BOOT_ARGS\"; fi"
   elif [ -x "$(host_path /usr/sbin/update-grub)" ] || [ -x "$(host_path /usr/sbin/grub-mkconfig)" ]; then
-    host_sh "PVM_KERNEL_BOOT_ARGS=${boot_args}; pvm_kernel=\$(ls /boot/vmlinuz-*${DESIRED_KERNEL_PATTERN}* 2>/dev/null | sed 's|/boot/vmlinuz-||' | sort | tail -1); test -n \"\$pvm_kernel\"; if [ -f /etc/default/grub ]; then sed -i \"s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\\\"Advanced options for Ubuntu>Ubuntu, with Linux \${pvm_kernel}\\\"|\" /etc/default/grub; if [ -n \"\$PVM_KERNEL_BOOT_ARGS\" ]; then if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then sed -i \"s|^GRUB_CMDLINE_LINUX=\\\"\\(.*\\)\\\"|GRUB_CMDLINE_LINUX=\\\"\\1 \${PVM_KERNEL_BOOT_ARGS}\\\"|\" /etc/default/grub; else printf 'GRUB_CMDLINE_LINUX=\\\"%s\\\"\\n' \"\$PVM_KERNEL_BOOT_ARGS\" >> /etc/default/grub; fi; fi; fi; if command -v update-grub >/dev/null 2>&1; then update-grub; elif command -v grub-mkconfig >/dev/null 2>&1; then grub-mkconfig -o /boot/grub/grub.cfg; fi"
+    host_sh "PVM_KERNEL_BOOT_ARGS=${boot_args}; PVM_DESIRED_PATTERN=${pattern}; pvm_kernel=\$(ls /boot/vmlinuz-*\"\${PVM_DESIRED_PATTERN}\"* 2>/dev/null | sed 's|/boot/vmlinuz-||' | sort | tail -1); test -n \"\$pvm_kernel\"; if [ -f /etc/default/grub ]; then sed -i \"s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\\\"Advanced options for Ubuntu>Ubuntu, with Linux \${pvm_kernel}\\\"|\" /etc/default/grub; if [ -n \"\$PVM_KERNEL_BOOT_ARGS\" ]; then if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then sed -i \"s|^GRUB_CMDLINE_LINUX=\\\"\\(.*\\)\\\"|GRUB_CMDLINE_LINUX=\\\"\\1 \${PVM_KERNEL_BOOT_ARGS}\\\"|\" /etc/default/grub; else printf 'GRUB_CMDLINE_LINUX=\\\"%s\\\"\\n' \"\$PVM_KERNEL_BOOT_ARGS\" >> /etc/default/grub; fi; fi; fi; if command -v update-grub >/dev/null 2>&1; then update-grub; elif command -v grub-mkconfig >/dev/null 2>&1; then grub-mkconfig -o /boot/grub/grub.cfg; fi"
   else
     fail "no supported bootloader tool found in host root"
   fi
@@ -176,7 +190,13 @@ request_reboot_or_fail() {
     lease_time > "$(host_path "$STATE_DIR/reboot-requested")"
     log "rebooting host ${NODE_NAME}; reboot-count=${count}/${REBOOT_MAX_COUNT}"
     host_sh "if command -v systemctl >/dev/null 2>&1; then systemctl reboot; else reboot; fi" || true
-    sleep 3600
+    # The reboot command either succeeds (host goes down within a minute or
+    # two) or fails (in which case waiting any longer will not help). Sleep
+    # briefly so the init container exits with a clear failure signal after
+    # the reboot request has had time to take effect, letting the DaemonSet
+    # restart with the next attempt. The prior 1 hour sleep pinned the pod
+    # in Init state and hid the underlying reboot failure from operators.
+    sleep "${REBOOT_WAIT_SECONDS:-120}"
     exit 1
   fi
 
