@@ -8,6 +8,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -27,25 +29,26 @@ func TestSetTimeoutValidationAllowsZero(t *testing.T) {
 		Timeout:   0,
 	})
 
-	if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
-		t.Fatalf("timeout=0 should be accepted, got ret=%+v", rsp.Ret)
-	}
-	if rsp.EndAt <= 0 {
-		t.Fatalf("timeout=0 should return an immediate endAt, got %d", rsp.EndAt)
-	}
+	assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+	assert.Greater(t, rsp.EndAt, int64(0))
 }
 
 func TestSetTimeoutValidationRejectsNegative(t *testing.T) {
+	const sandboxID = "sb-timeout-negative-validation"
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
+		SandboxID: sandboxID,
+		HostIP:    "127.0.0.1",
+	})
+	defer localcache.DeleteSandboxCache(sandboxID)
+
 	// Only -1 (NeverTimeout) is accepted as a valid negative value.
 	rsp := SetTimeout(context.Background(), &types.SetTimeoutRequest{
 		RequestID: "req-negative",
-		SandboxID: "sb-timeout-negative-validation",
+		SandboxID: sandboxID,
 		Timeout:   -2,
 	})
 
-	if rsp.Ret.RetCode != int(errorcode.ErrorCode_MasterParamsError) {
-		t.Fatalf("timeout<-1 should be rejected as params error, got ret=%+v", rsp.Ret)
-	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), rsp.Ret.RetCode)
 }
 
 func TestRefreshValidationRejectsNonPositiveDuration(t *testing.T) {
@@ -109,7 +112,57 @@ func TestSetTimeoutValidationAllowsNeverTimeout(t *testing.T) {
 		Timeout:   types.NeverTimeout,
 	})
 
-	if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
-		t.Fatalf("timeout=-1 (NeverTimeout) should be accepted, got ret=%+v", rsp.Ret)
-	}
+	assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+}
+
+func TestRefreshValidationAllowsZero(t *testing.T) {
+	const sandboxID = "sb-refresh-zero-validation"
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
+		SandboxID: sandboxID,
+		HostIP:    "127.0.0.1",
+	})
+	defer localcache.DeleteSandboxCache(sandboxID)
+
+	rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{
+		RequestID: "req-refresh-zero",
+		SandboxID: sandboxID,
+		Duration:  0,
+	})
+
+	assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+	assert.Greater(t, rsp.EndAt, int64(0))
+}
+
+func TestRefreshValidationAllowsNeverTimeout(t *testing.T) {
+	const sandboxID = "sb-refresh-never-validation"
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
+		SandboxID: sandboxID,
+		HostIP:    "127.0.0.1",
+	})
+	defer localcache.DeleteSandboxCache(sandboxID)
+
+	rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{
+		RequestID: "req-refresh-never",
+		SandboxID: sandboxID,
+		Duration:  types.NeverTimeout,
+	})
+
+	assert.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
+}
+
+func TestRefreshValidationRejectsInvalidNegative(t *testing.T) {
+	const sandboxID = "sb-refresh-negative-validation"
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
+		SandboxID: sandboxID,
+		HostIP:    "127.0.0.1",
+	})
+	defer localcache.DeleteSandboxCache(sandboxID)
+
+	rsp := Refresh(context.Background(), &types.RefreshSandboxRequest{
+		RequestID: "req-refresh-negative",
+		SandboxID: sandboxID,
+		Duration:  -2,
+	})
+
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), rsp.Ret.RetCode)
 }

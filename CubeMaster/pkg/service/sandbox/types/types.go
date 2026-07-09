@@ -788,6 +788,7 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
 	Action       string `json:"action"`
+	Timeout      *int   `json:"timeout"`
 }
 
 // SetTimeoutRequest is the wire shape for POST /cube/sandbox/timeout.
@@ -818,7 +819,8 @@ type SetTimeoutRes struct {
 // RefreshSandboxRequest extends the sandbox idle window by `duration`
 // seconds. Semantically `refresh(d)` is identical to `set_timeout(d)` in
 // this implementation: both rebase CreatedAt to "now" and set the new
-// TimeoutSeconds. Mirrors e2b's refresh-then-set-timeout convergence.
+// TimeoutSeconds. Duration accepts -1 for never-timeout and 0 for immediate
+// timeout. Mirrors e2b's refresh-then-set-timeout convergence.
 type RefreshSandboxRequest struct {
 	RequestID    string `json:"requestID"`
 	SandboxID    string `json:"sandboxID"`

@@ -540,6 +540,9 @@ pub async fn refresh_sandbox(
     Path(sandbox_id): Path<String>,
     Json(body): Json<RefreshRequest>,
 ) -> AppResult<impl IntoResponse> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
     let duration = body.duration.unwrap_or(0);
     state
         .logger

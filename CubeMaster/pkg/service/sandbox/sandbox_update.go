@@ -50,6 +50,10 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		rsp.Ret = ret
 		return
 	}
+	if req.Action == "resume" && req.Timeout != nil && *req.Timeout < 0 {
+		timeout := types.NeverTimeout
+		req.Timeout = &timeout
+	}
 
 	var hostIP string
 	if v := localcache.GetSandboxCache(req.SandboxID); v != nil {

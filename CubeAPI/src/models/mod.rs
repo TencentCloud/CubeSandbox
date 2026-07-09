@@ -513,7 +513,7 @@ fn validate_timeout_value(timeout: i32) -> Result<(), validator::ValidationError
 /// Request body for POST /sandboxes/{id}/refreshes
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct RefreshRequest {
-    #[validate(range(min = 0, max = 3600))]
+    #[validate(range(min = -1, max = 3600))]
     pub duration: Option<i32>,
 }
 
@@ -546,7 +546,7 @@ fn default_page_limit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateTemplateRequest, NewSandbox, SandboxNetworkConfig, SetTimeoutRequest,
+        CreateTemplateRequest, NewSandbox, RefreshRequest, SandboxNetworkConfig, SetTimeoutRequest,
         TemplateAliasLookupResponse,
     };
     use validator::Validate;
@@ -576,6 +576,30 @@ mod tests {
             let req = SetTimeoutRequest { timeout };
             req.validate()
                 .unwrap_or_else(|e| panic!("timeout={timeout} should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn refresh_request_accepts_never_zero_and_positive_duration() {
+        for duration in [-1, 0, 60, 3600] {
+            let req = RefreshRequest {
+                duration: Some(duration),
+            };
+            req.validate()
+                .unwrap_or_else(|e| panic!("duration={duration} should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn refresh_request_rejects_out_of_range_duration() {
+        for duration in [-2, 3601] {
+            let req = RefreshRequest {
+                duration: Some(duration),
+            };
+            assert!(
+                req.validate().is_err(),
+                "duration={duration} should be rejected"
+            );
         }
     }
 

@@ -65,6 +65,7 @@ func SetTimeout(ctx context.Context, req *types.SetTimeoutRequest) (rsp *types.S
 
 // Refresh implements POST /cube/sandbox/refresh. Semantically identical to
 // SetTimeout: refresh(d) rebases the idle clock and sets TimeoutSeconds = d.
+// Duration accepts -1 for never-timeout, 0 for immediate timeout, or a positive TTL.
 func Refresh(ctx context.Context, req *types.RefreshSandboxRequest) (rsp *types.RefreshSandboxRes) {
 	rsp = &types.RefreshSandboxRes{
 		RequestID: req.RequestID,
@@ -90,13 +91,13 @@ func Refresh(ctx context.Context, req *types.RefreshSandboxRequest) (rsp *types.
 		rsp.Ret.RetMsg = "should provide sandboxID"
 		return
 	}
-	if req.Duration <= 0 {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
-		rsp.Ret.RetMsg = "duration must be positive (seconds)"
-		return
-	}
 	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
 		rsp.Ret = ret
+		return
+	}
+	if req.Duration < -1 {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = "duration must be >= -1 (use -1 for never timeout)"
 		return
 	}
 
