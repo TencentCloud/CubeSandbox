@@ -37,7 +37,7 @@
 每台计算节点需满足与控制节点相同的硬件和软件要求：
 
 - **物理机或裸金属服务器**（不支持嵌套虚拟化）
-- **x86_64** 架构，**已启用 KVM**（`ls /dev/kvm`）
+- **x86_64** 或 **aarch64**（ARM64）架构，**已启用 KVM**（`ls /dev/kvm`）
 - **Docker** 已安装并运行
 - 到控制节点的**网络连通性**（默认需访问 `CubeMaster` 的 `8089` 端口）
 
@@ -117,6 +117,38 @@ curl http://127.0.0.1:8089/internal/meta/nodes
 
 返回结果中应包含计算节点的 IP 和健康状态。
 
+## 配置 CubeMaster 调度评分
+
+多机部署时，应在控制节点的 CubeMaster 配置中设置 `scheduler.score`。如果未配置评分，CubeMaster 会先过滤可用节点，再按照过滤后的节点顺序进行选择，新的沙箱可能集中到第一个可用节点，直到资源过滤器把流量推到其他节点。
+
+可以将下面这些调度字段合并到 `cubemaster.yaml` 中已有的 `scheduler` 段。请保留当前部署已有的 `filter`、超时、overcommit 和其他 scheduler 配置。
+
+```yaml
+scheduler:
+  # 保留当前部署已有的 filter、超时、overcommit 和其他 scheduler 配置。
+  priority_select_num: 3
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    resource_weights:
+      mvm_num: 2
+      local_create_num: 3
+      quota_cpu_usage: 1
+      quota_mem_usage: 1
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - mvm_num
+          - local_create_num
+          - quota_cpu_usage
+          - quota_mem_usage
+```
+
+对于多机集群，建议将 `scheduler.priority_select_num` 设置为大于 `1` 的值，让 CubeMaster 从评分最高的一组节点中随机选择。随项目提供的默认配置使用 `priority_select_num: 1`，这意味着评分只会决定下一个沙箱落到哪一个节点，而不会在多个高分节点之间分散放置。小规模集群可以从 `3` 开始，并根据节点数量继续调整。`scheduler.least_select_name` 默认值为 `random`，通常不需要显式设置。
+
+更新 `cubemaster.yaml` 后，请按当前部署方式重启 CubeMaster，让调度器加载新的评分配置。
+
 ## 常用操作
 
 ### 停止计算节点服务
@@ -153,7 +185,7 @@ sudo ./down.sh
 | `ONE_CLICK_CONTROL_PLANE_IP` | 空 | 控制节点 IP，默认拼接为 `<ip>:8089` |
 | `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | 空 | 显式指定 CubeMaster 地址，优先级高于 `ONE_CLICK_CONTROL_PLANE_IP` |
 | `CUBE_SANDBOX_NODE_IP` | `10.0.0.10` | **必须修改。** 当前节点主网卡 IP |
-| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18`（取自 `config.toml`） | cubevs 本地网络 CIDR。需与控制节点一致。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /8~/30。安装时自动检测宿主机冲突。 |
+| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18`（取自 `config.toml`） | cubevs 本地网络 CIDR。需与控制节点一致。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /16~/24。安装时自动检测宿主机冲突。 |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | 设为 `1` 跳过冲突检测（不推荐）。 |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |
 

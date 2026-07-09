@@ -57,6 +57,14 @@ function _M.gate(ins_id)
         utils:respond_unavailable()
     end
 
+    if state == "killing" or state == "killed" then
+        ngx.log(ngx.WARN, "LEVEL_WARN||",
+            string.format("request %s sandbox %s is %s; returning 410",
+                ngx.var.http_x_cube_request_id or "-", ins_id, state))
+        ngx.var.cube_retcode = "310410"
+        ngx.exit(410)
+    end
+
     if state ~= "paused" then
         -- Unknown state — log once and let the request through; resume logic
         -- only fires for the well-known "paused" value to keep behaviour

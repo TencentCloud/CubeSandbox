@@ -98,10 +98,6 @@ fn map_err(e: CubeMasterError) -> AppError {
     }
 }
 
-pub(crate) fn build_overview(nodes: &[NodeSnapshot]) -> ClusterOverview {
-    build_overview_with_used(nodes, &HashMap::new())
-}
-
 fn build_overview_with_used(
     nodes: &[NodeSnapshot],
     used_map: &HashMap<String, (i64, i64)>,
@@ -208,11 +204,6 @@ pub(crate) fn to_view_with_used(
     }
 }
 
-/// Keep the old signature for tests (no sandbox data, pure CubeMaster values).
-pub(crate) fn to_view(s: NodeSnapshot) -> NodeView {
-    to_view_with_used(s, &HashMap::new())
-}
-
 fn to_version_matrix_view(m: crate::cubemaster::VersionMatrix) -> VersionMatrixView {
     VersionMatrixView {
         control_plane: ControlPlaneVersionView {
@@ -269,8 +260,9 @@ pub(crate) fn saturation_pct(total: i64, allocatable: i64) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_overview, saturation_pct, to_view};
+    use super::{build_overview_with_used, saturation_pct, to_view_with_used};
     use crate::cubemaster::{LocalTemplate, NodeCondition, NodeResources, NodeSnapshot};
+    use std::collections::HashMap;
 
     #[test]
     fn saturation_is_clamped() {
@@ -311,13 +303,13 @@ mod tests {
             ..Default::default()
         };
 
-        let view = to_view(snapshot.clone());
+        let view = to_view_with_used(snapshot.clone(), &HashMap::new());
         assert_eq!(view.node_id, "node-a");
         assert_eq!(view.capacity.cpu_milli, 2200);
         assert_eq!(view.allocatable.cpu_milli, 1000);
         assert_eq!(view.local_templates, vec!["tmpl-1".to_string()]);
 
-        let overview = build_overview(&[snapshot]);
+        let overview = build_overview_with_used(&[snapshot], &HashMap::new());
         assert_eq!(overview.node_count, 1);
         assert_eq!(overview.healthy_nodes, 1);
         assert_eq!(overview.total_cpu_milli, 2200);

@@ -16,7 +16,7 @@
 ### 硬件要求
 
 - **物理机或裸金属服务器**（不支持嵌套虚拟化）
-- **x86_64** 架构
+- **x86_64** 或 **aarch64**（ARM64）架构
 - **已启用 KVM** — 通过 `ls /dev/kvm` 验证
 - 推荐配置：8 核以上 CPU、16 GB 以上内存
 
@@ -37,6 +37,10 @@
 | Docker | 用于运行 builder 容器 |
 | `make` | 用于构建 builder 镜像 |
 | `tar`、`python3`、`truncate`、`ldd`、`mkfs.ext4` | Guest 镜像生成和打包所需 |
+
+::: tip 架构说明
+发布包按构建机的架构**原生构建**，组件不做交叉编译。请在与目标主机**相同架构**的机器上构建（`x86_64` 构建机产出 `x86_64` 发布包，`aarch64` 构建机产出 `aarch64` 发布包）。构建工具链会自动检测宿主机架构（通过 `uname -m`）；仅当需要覆盖检测结果时才设置 `TARGET_ARCH`。
+:::
 
 > 构建机和目标机可以是同一台物理机。
 
@@ -285,7 +289,7 @@ sudo ./down.sh
 | `ONE_CLICK_CONTROL_PLANE_IP` | 空 | 仅计算节点模式使用。详见[多机集群部署 — 配置环境变量](./multi-node-deploy.md#第二步配置环境变量) |
 | `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | 空 | 仅计算节点模式使用。详见[多机集群部署 — 配置环境变量](./multi-node-deploy.md#第二步配置环境变量) |
 | `CUBE_SANDBOX_NODE_IP` | 自动从 `eth0` 探测 | 节点主网卡 IP 地址。未设置时自动探测；若网卡名称不同请显式指定。 |
-| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` | cubevs 本地网络 CIDR，用于沙箱 IP 分配。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /8~/30。若与宿主机网卡、路由或 DNS 解析器地址冲突，安装前置检测会直接中止安装。未设置时使用固定默认值。 |
+| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` | cubevs 本地网络 CIDR，用于沙箱 IP 分配。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /16~/24。若与宿主机网卡、路由或 DNS 解析器地址冲突，安装前置检测会直接中止安装。未设置时使用固定默认值。 |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | 设为 `1` 可跳过默认或自定义沙箱 CIDR 的冲突检测（不推荐）。 |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |
 | `ONE_CLICK_RUNTIME_DIR` | `/var/run/cube-sandbox-one-click` | PID 和运行时文件目录 |

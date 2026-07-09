@@ -60,7 +60,7 @@ func TestIntegrationSandboxExecutionCommandsFilesAndErrors(t *testing.T) {
 	defer cancel()
 
 	sb := createIntegrationSandbox(t, ctx, client, CreateOptions{
-		Timeout: 2 * time.Minute,
+		Timeout: DurationPtr(2 * time.Minute),
 		EnvVars: map[string]string{
 			"CUBE_GO_SDK_CREATE_ENV": "create-env-ok",
 		},
@@ -187,7 +187,7 @@ func TestIntegrationPauseConnectAndResumeExecution(t *testing.T) {
 	defer cancel()
 
 	sb := createIntegrationSandbox(t, ctx, client, CreateOptions{
-		Timeout: 3 * time.Minute,
+		Timeout: DurationPtr(3 * time.Minute),
 		Metadata: map[string]string{
 			"sdk":      "go",
 			"scenario": "integration-pause-connect",

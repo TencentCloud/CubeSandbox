@@ -134,12 +134,68 @@ func cloneCubeNetworkConfig(in *types.CubeNetworkConfig) *types.CubeNetworkConfi
 	out := &types.CubeNetworkConfig{
 		AllowOut: append([]string(nil), in.AllowOut...),
 		DenyOut:  append([]string(nil), in.DenyOut...),
+		Rules:    cloneEgressRules(in.Rules),
 	}
 	if in.AllowInternetAccess != nil {
 		allowInternetAccess := *in.AllowInternetAccess
 		out.AllowInternetAccess = &allowInternetAccess
 	}
 	return out
+}
+
+func cloneEgressRules(in []*types.EgressRule) []*types.EgressRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*types.EgressRule, 0, len(in))
+	for _, r := range in {
+		out = append(out, cloneEgressRule(r))
+	}
+	return out
+}
+
+func cloneEgressRule(in *types.EgressRule) *types.EgressRule {
+	if in == nil {
+		return nil
+	}
+	out := &types.EgressRule{Name: in.Name}
+	if in.Match != nil {
+		out.Match = &types.EgressRuleMatch{
+			SNI:    cloneStringPtr(in.Match.SNI),
+			Host:   cloneStringPtr(in.Match.Host),
+			Method: append([]string(nil), in.Match.Method...),
+			Path:   cloneStringPtr(in.Match.Path),
+			Scheme: cloneStringPtr(in.Match.Scheme),
+		}
+	}
+	if in.Action != nil {
+		action := &types.EgressRuleAction{Allow: in.Action.Allow}
+		action.Audit = cloneStringPtr(in.Action.Audit)
+		if len(in.Action.Inject) > 0 {
+			action.Inject = make([]*types.EgressRuleInject, 0, len(in.Action.Inject))
+			for _, inj := range in.Action.Inject {
+				if inj == nil {
+					continue
+				}
+				cloned := &types.EgressRuleInject{
+					Header: inj.Header,
+					Secret: inj.Secret,
+					Format: cloneStringPtr(inj.Format),
+				}
+				action.Inject = append(action.Inject, cloned)
+			}
+		}
+		out.Action = action
+	}
+	return out
+}
+
+func cloneStringPtr(in *string) *string {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func formatTemplateImageCubeNetworkConfig(in *types.CubeNetworkConfig) string {

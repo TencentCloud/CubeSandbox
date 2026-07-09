@@ -16,6 +16,11 @@ var (
 	errIPExhausted = errors.New("ip exhausted")
 )
 
+const (
+	sandboxCIDRMinMask = 16
+	sandboxCIDRMaxMask = 24
+)
+
 type ipAllocator struct {
 	sync.Mutex
 	maxIdx    int
@@ -25,6 +30,7 @@ type ipAllocator struct {
 	startIdx  int
 	usedIPNum int
 	bitmap    []byte
+	reserved  map[int]struct{}
 }
 
 func newIPAllocator(cidr string) (*ipAllocator, error) {
@@ -36,7 +42,7 @@ func newIPAllocator(cidr string) (*ipAllocator, error) {
 		return nil, &net.ParseError{Type: "cidr address", Text: cidr}
 	}
 	mask := prefix.Bits()
-	if mask < 8 || mask > 30 {
+	if mask < sandboxCIDRMinMask || mask > sandboxCIDRMaxMask {
 		return nil, &net.ParseError{Type: "cidr mask fail", Text: cidr}
 	}
 	size := 1 << (32 - mask)
@@ -52,13 +58,14 @@ func newIPAllocator(cidr string) (*ipAllocator, error) {
 		size:      size,
 		startIdx:  startIdx,
 		bitmap:    make([]byte, byteNum),
+		reserved:  make(map[int]struct{}),
 		usedIPNum: 0,
 	}
 
 	// Reserve the network address (idx 0), gateway (idx 1), and broadcast (last idx).
-	allocator.setUsed(0)
-	allocator.setUsed(1)
-	allocator.setUsed(size - 1)
+	allocator.reserveIdx(0)
+	allocator.reserveIdx(1)
+	allocator.reserveIdx(size - 1)
 	allocator.gwIP = allocator.idx2IP(1)
 	return allocator, nil
 }
@@ -79,6 +86,28 @@ func (a *ipAllocator) setUsed(idx int) {
 func (a *ipAllocator) setUnused(idx int) {
 	a.usedIPNum--
 	a.bitmap[idx/8] &^= 1 << (idx % 8)
+}
+
+func (a *ipAllocator) reserveIdx(idx int) {
+	if !a.existIdx(idx) {
+		a.setUsed(idx)
+	}
+	a.reserved[idx] = struct{}{}
+}
+
+func (a *ipAllocator) ReserveLastUsable(count int) {
+	a.Lock()
+	defer a.Unlock()
+	if count <= 0 {
+		return
+	}
+	first := a.size - 1 - count
+	if first < 2 {
+		first = 2
+	}
+	for idx := first; idx < a.size-1; idx++ {
+		a.reserveIdx(idx)
+	}
 }
 
 func (a *ipAllocator) ip2Idx(ipv4 net.IP) int {
@@ -119,7 +148,7 @@ func (a *ipAllocator) Release(ip net.IP) {
 	if idx < 0 || idx >= a.size {
 		return
 	}
-	if idx <= 1 || idx == a.size-1 {
+	if _, ok := a.reserved[idx]; ok {
 		return
 	}
 	if a.existIdx(idx) {

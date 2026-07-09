@@ -1,0 +1,24 @@
+version: "3"
+services:
+  cube-lifecycle-manager:
+    image: __CUBE_LCM_IMAGE__
+    container_name: __CUBE_LCM_CONTAINER_NAME__
+    restart: unless-stopped
+    # host networking so:
+    #   - CLM binds :8083 on the node IP for CubeProxy /_sidecar_resume,
+    #   - CLM reaches Redis / CubeMaster via the node's own network stack
+    #     without extra port publishing.
+    network_mode: host
+    environment:
+      CUBE_LCM_REDIS_ADDR:            "__CUBE_LCM_REDIS_ADDR__"
+      CUBE_LCM_REDIS_PASSWORD:        "__CUBE_LCM_REDIS_PASSWORD__"
+      CUBE_LCM_REDIS_DB:              "__CUBE_LCM_REDIS_DB__"
+      CUBE_LCM_CUBEMASTER_URL:        "__CUBE_LCM_CUBEMASTER_URL__"
+      CUBE_LCM_LISTEN_ADDR:           "__CUBE_LCM_LISTEN_ADDR__"
+      CUBE_LCM_DEFAULT_IDLE_TIMEOUT:  "__CUBE_LCM_DEFAULT_IDLE_TIMEOUT__"
+      CUBE_LCM_HEARTBEAT_TTL:         "__CUBE_LCM_HEARTBEAT_TTL__"
+      CUBE_LCM_DISCOVERY_REFRESH:     "__CUBE_LCM_DISCOVERY_REFRESH__"
+      # Optional shared secret enforced on outbound /admin/* pushes to every
+      # CubeProxy admin server. Must match the value $cube_admin_token that
+      # CubeProxy's global.conf substitutes.
+      CUBE_LCM_ADMIN_TOKEN:           "__CUBE_ADMIN_TOKEN__"

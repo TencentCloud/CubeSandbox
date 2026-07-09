@@ -3,7 +3,7 @@ title: "让传统软件服务适配 Agent：从快速创建到分支、克隆与
 date: 2026-06-17
 author: Cube Sandbox 团队
 description: 当软件服务的使用对象从人变为 Agent，对服务的要求发生了根本变化——创建不再是运维动作，而是推理和执行循环的一部分。Neon 被 Databricks 以 10 亿美金收购，印证了这条技术路线的价值。Cube Sandbox 把"极速创建、分支克隆、状态回滚"做成通用运行环境能力，让任何传统软件服务几乎零代码修改即可变为 Agent 友好的服务。
-featured: true
+featured: false
 weight: 2
 ---
 

@@ -24,7 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequest) (*cubebox.UpdateCubeSandboxResponse, error) {
@@ -206,8 +206,20 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 	}
 	if !sb.GetStatus().IsPaused() {
-		rsp.Ret.RetMsg = "sandbox is not paused"
-		rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
+		// Split the non-paused case into two: an already-running sandbox is
+		// the *goal state* of resume, so we surface it as TaskStateInvalid
+		// (130490) which the CLM / CubeProxy treat as an idempotent
+		// success and use to reconcile a stale local "paused" cache. Any
+		// other non-paused state (Exited / Unknown / Created / ...) is a
+		// genuine resume failure and keeps TaskResumeFailed (130589).
+		state := sb.GetStatus().Get().State()
+		if state == cubebox.ContainerState_CONTAINER_RUNNING {
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			rsp.Ret.RetMsg = "sandbox already running"
+		} else {
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
+			rsp.Ret.RetMsg = fmt.Sprintf("sandbox not resumable in state=%s", state)
+		}
 		return rsp, nil
 	}
 

@@ -11,7 +11,7 @@
 :::
 
 ::: tip 已经有支持 KVM 的服务器？
-如果你已经有一台开启了 KVM 的 x86_64 Linux 服务器（物理机或裸金属服务器），可以直接参阅[裸金属 / 物理机部署](./bare-metal-deploy.md)，跳过 PVM 安装步骤。
+如果你已经有一台开启了 KVM 的 x86_64 或 aarch64（ARM64）Linux 服务器（物理机或裸金属服务器），可以直接参阅[裸金属 / 物理机部署](./bare-metal-deploy.md)，跳过 PVM 安装步骤。
 :::
 
 ## 前置条件
@@ -19,6 +19,12 @@
 - **x86_64** 架构的云服务器（普通云服务器即可，无需 `/dev/kvm`）
 - 有 **root 权限**
 - 可访问互联网（用于下载发布包、拉取 Docker 镜像）
+
+::: warning ARM64（aarch64）主机
+本快速开始通过 **PVM** 在普通云服务器上启用 KVM，而 PVM 宿主机内核**仅支持 x86_64**（发布附件为 `*.x86_64.rpm` / `*_amd64.deb`）。PVM **不支持** ARM64。
+
+在 **aarch64（ARM64）** 上，请使用本身已提供原生 KVM 的机器（物理机 / 裸金属 ARM64 服务器），改为参阅[裸金属 / 物理机部署](./bare-metal-deploy.md)或[本地构建部署](./self-build-deploy.md) —— 两者均支持 aarch64。
+:::
 
 ### 🖥 受支持的系统
 
@@ -204,6 +210,10 @@ cubemastercli tpl create-from-image \
 ```
 
 > **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`。
+
+::: warning Multi-Arch 镜像支持情况
+目前仅 `sandbox-code:latest` 已发布为 **Multi-Arch** 镜像（同时支持 x86_64 与 aarch64/ARM64）。其他托管在 `tencentcloudcr.com` 的 cube 官方镜像仍在陆续更新 Multi-Arch 支持中，可能暂时无法在你的架构上运行。如果需要尚未覆盖架构的镜像，可参阅[从 OCI 镜像制作模板](./tutorials/template-from-image.md)并结合 Docker 的 [Multi-platform builds](https://docs.docker.com/build/building/multi-platform/) 自行构建自定义 Multi-Arch 镜像。
+:::
 
 然后，执行下面的这行命令，监控构建进度：
 

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { templateApi, type TemplateCompatMatrix, type TemplateCompatRow } from '@/api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -20,69 +21,190 @@ interface CreateModalProps {
   onClose: () => void;
 }
 
+interface CreateFormState {
+  image: string;
+  instanceType: string;
+  writableLayerSize: string;
+  exposedPorts: string;
+  probePort: string;
+  probePath: string;
+  cpu: string;
+  memory: string;
+  envVars: string;
+  allowInternet: boolean;
+  // advanced
+  networkType: string;
+  nodes: string;
+  command: string;
+  args: string;
+  dns: string;
+  allowOut: string;
+  denyOut: string;
+  registryUsername: string;
+  registryPassword: string;
+  withCubeCa: boolean;
+}
+
+const INITIAL_FORM: CreateFormState = {
+  image: '',
+  instanceType: '',
+  writableLayerSize: '1G',
+  exposedPorts: '',
+  probePort: '',
+  probePath: '',
+  cpu: '',
+  memory: '',
+  envVars: '',
+  allowInternet: false,
+  networkType: '',
+  nodes: '',
+  command: '',
+  args: '',
+  dns: '',
+  allowOut: '',
+  denyOut: '',
+  registryUsername: '',
+  registryPassword: '',
+  withCubeCa: true,
+};
+
+/** Split a comma- or newline-separated list into a clean string array. */
+function splitList(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** Parse exposed ports input; returns an array of valid ports or null if any token is invalid. */
+function parsePorts(input: string): { ok: true; ports: number[] } | { ok: false } {
+  const tokens = input
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (tokens.length === 0) return { ok: true, ports: [] };
+  const ports: number[] = [];
+  for (const tok of tokens) {
+    if (!/^\d{1,5}$/.test(tok)) return { ok: false };
+    const n = Number(tok);
+    if (!Number.isFinite(n) || n < 1 || n > 65535) return { ok: false };
+    ports.push(n);
+  }
+  return { ok: true, ports };
+}
+
+/** Build the createTemplate API body from the form state, dropping empty fields. */
+function buildCreateBody(state: CreateFormState): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    image: state.image.trim(),
+  };
+
+  const setStr = (k: string, v: string) => {
+    const t = v.trim();
+    if (t) body[k] = t;
+  };
+  const setNum = (k: string, v: string) => {
+    const t = v.trim();
+    if (!t) return;
+    const n = Number(t);
+    if (Number.isFinite(n) && n >= 0) body[k] = n;
+  };
+  const setList = (k: string, v: string) => {
+    const list = splitList(v);
+    if (list.length > 0) body[k] = list;
+  };
+
+  setStr('instanceType', state.instanceType);
+  setStr('writableLayerSize', state.writableLayerSize);
+  const ports = parsePorts(state.exposedPorts);
+  if (ports.ok && ports.ports.length > 0) body.exposedPorts = ports.ports;
+  setNum('probePort', state.probePort);
+  setStr('probePath', state.probePath);
+  setNum('cpu', state.cpu);
+  setNum('memory', state.memory);
+  setList('env', state.envVars);
+  if (state.allowInternet) body.allowInternetAccess = true;
+
+  setStr('networkType', state.networkType);
+  setList('nodes', state.nodes);
+  setList('command', state.command);
+  setList('args', state.args);
+  setList('dns', state.dns);
+  setList('allowOut', state.allowOut);
+  setList('denyOut', state.denyOut);
+  setStr('registryUsername', state.registryUsername);
+  setStr('registryPassword', state.registryPassword);
+  body.with_cube_ca = state.withCubeCa;
+
+  return body;
+}
+
 function CreateTemplateModal({ onClose }: CreateModalProps) {
   const { t } = useTranslation('templates');
   const qc = useQueryClient();
-  const [image, setImage] = useState('');
-  const [instanceType, setInstanceType] = useState('');
-  const [writableLayerSize, setWritableLayerSize] = useState('1G');
-  const [exposedPorts, setExposedPorts] = useState('');
-  const [probePort, setProbePort] = useState('');
-  const [probePath, setProbePath] = useState('');
-  const [cpu, setCpu] = useState('');
-  const [memory, setMemory] = useState('');
-  const [envVars, setEnvVars] = useState('');
-  const [allowInternet, setAllowInternet] = useState(false);
+  const [form, setForm] = useState<CreateFormState>(INITIAL_FORM);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  const portsValidation = useMemo(() => parsePorts(form.exposedPorts), [form.exposedPorts]);
+  const portsInvalid = !portsValidation.ok;
+  const imageValid = form.image.trim().length > 0;
+  // writableLayerSize is required by CubeMaster (500 writable_layer_size is required
+  // otherwise). INITIAL_FORM seeds a sensible default of "1G", but a user could
+  // still clear the field manually.
+  const wlayerValid = form.writableLayerSize.trim().length > 0;
+  const formInvalid = !imageValid || portsInvalid || !wlayerValid;
+
+  const update = <K extends keyof CreateFormState>(key: K, value: CreateFormState[K]) => {
+    setForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  // Sync probePort to the first exposed port when the user finishes editing
+  // the exposedPorts input (onBlur), instead of on every keystroke. Doing it
+  // on every keystroke causes "8" to be auto-synced while the user is still
+  // typing "80" — once probePort is non-empty, the next keystroke won't
+  // overwrite it, so the sync would be stuck at "8" forever.
+  const syncProbePortFromExposedPorts = (exposedPortsValue: string) => {
+    setForm((prev) => {
+      if (prev.probePort.trim()) return prev; // user has customized probePort; don't touch it
+      const parsed = parsePorts(exposedPortsValue);
+      const first = parsed.ok ? parsed.ports[0] : undefined;
+      if (first === undefined) return prev;
+      return { ...prev, probePort: String(first) };
+    });
+  };
 
   const mutation = useMutation({
-    mutationFn: () => {
-      const ports = exposedPorts.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
-      const envList = envVars.split('\n').map(s => s.trim()).filter(Boolean);
-      return templateApi.create({
-        image,
-        instanceType: instanceType.trim() || undefined,
-        writableLayerSize: writableLayerSize.trim() || undefined,
-        exposedPorts: ports.length > 0 ? ports : undefined,
-        probePort: probePort.trim() ? parseInt(probePort.trim(), 10) : undefined,
-        probePath: probePath.trim() || undefined,
-        cpu: cpu.trim() ? parseInt(cpu.trim(), 10) : undefined,
-        memory: memory.trim() ? parseInt(memory.trim(), 10) : undefined,
-        env: envList.length > 0 ? envList : undefined,
-        allowInternetAccess: allowInternet || undefined,
-      });
-    },
+    mutationFn: () => templateApi.create(buildCreateBody(form) as Parameters<typeof templateApi.create>[0]),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['templates'] });
       onClose();
     },
   });
 
-  const valid = image.trim().length > 0 && writableLayerSize.trim().length > 0 && exposedPorts.trim().length > 0;
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <Card className="w-full max-w-2xl shadow-xl overflow-y-auto max-h-[90vh]">
-        <CardHeader className="flex flex-row items-center justify-between pb-3">
-          <CardTitle className="text-base">{t('create.title')}</CardTitle>
+      <Card className="w-full max-w-3xl shadow-xl overflow-y-auto max-h-[90vh]">
+        <CardHeader className="flex flex-row items-center justify-between pb-4">
+          <CardTitle className="text-lg">{t('create.title')}</CardTitle>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
-            <X className="h-4 w-4" />
+            <X className="h-5 w-5" />
           </button>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Row 1: image */}
-          <div className="grid grid-cols-1 gap-3">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
-                {t('create.image')} <span className="text-destructive text-sm font-bold">*</span>
-              </label>
-              <Input
-                placeholder="registry.example.com/image:tag"
-                value={image}
-                onChange={(e) => setImage(e.target.value.trim())}
-              />
-            </div>
+        <CardContent className="space-y-5 text-base [&_label]:text-sm [&_label]:font-medium [&_p]:text-sm [&_input[type='text']]:h-10 [&_input[type='text']]:text-base [&_input[type='text']]:px-3.5 [&_input[type='number']]:h-10 [&_input[type='number']]:text-base [&_input[type='password']]:h-10 [&_input[type='password']]:text-base [&_textarea]:text-base [&_textarea]:min-h-[80px] [&_textarea]:p-3">
+          {/* image */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">
+              {t('create.image')} <span className="text-destructive text-sm font-bold">*</span>
+            </label>
+            <Input
+              placeholder="registry.example.com/image:tag"
+              value={form.image}
+              onChange={(e) => update('image', e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">{t('create.imageHint')}</p>
           </div>
-          {/* Row 2: instanceType + writableLayerSize */}
+
+          {/* instanceType + writableLayerSize */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">
@@ -90,43 +212,56 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               </label>
               <Input
                 placeholder={t('instanceDefault')}
-                value={instanceType}
-                onChange={(e) => setInstanceType(e.target.value)}
+                value={form.instanceType}
+                onChange={(e) => update('instanceType', e.target.value)}
               />
+              <p className="text-xs text-muted-foreground">{t('create.instanceTypeHint')}</p>
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">
-                {t('create.writableLayerSize')} <span className="text-destructive text-sm font-bold">*</span>
+                {t('create.writableLayerSize')}{' '}
+                <span className="text-destructive text-sm font-bold" aria-label={t('create.required')}>
+                  *
+                </span>
               </label>
               <Input
                 placeholder="1G"
-                value={writableLayerSize}
-                onChange={(e) => setWritableLayerSize(e.target.value)}
+                value={form.writableLayerSize}
+                onChange={(e) => update('writableLayerSize', e.target.value)}
+                aria-invalid={!wlayerValid}
               />
               <p className="text-xs text-muted-foreground">{t('create.writableLayerSizeHint')}</p>
             </div>
           </div>
-          {/* Row 3: exposedPorts 占全宽 */}
+
+          {/* exposedPorts */}
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-muted-foreground">
-              {t('create.exposedPorts')} <span className="text-destructive text-sm font-bold">*</span>
+              {t('create.exposedPorts')}
             </label>
             <Input
-              placeholder="49983"
-              value={exposedPorts}
-              onChange={(e) => { setExposedPorts(e.target.value); const first = e.target.value.split(',')[0].trim(); if (first) setProbePort(first); }}
+              placeholder="49983,9000"
+              value={form.exposedPorts}
+              onChange={(e) => update('exposedPorts', e.target.value)}
+              onBlur={(e) => syncProbePortFromExposedPorts(e.target.value)}
             />
-            <p className="text-xs text-muted-foreground">{t('create.exposedPortsHint')}</p>
+            {portsInvalid ? (
+              <p className="text-xs text-destructive">{t('create.exposedPortsError')}</p>
+            ) : (
+              <p className="text-xs text-muted-foreground">{t('create.exposedPortsHint')}</p>
+            )}
           </div>
+
+          {/* probePort + probePath */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">
                 {t('create.probePort')}
               </label>
               <Input
-                placeholder="49983"
-                value={probePort}
-                onChange={(e) => setProbePort(e.target.value)}
+                placeholder="80"
+                value={form.probePort}
+                onChange={(e) => update('probePort', e.target.value)}
               />
             </div>
             <div className="space-y-1.5">
@@ -135,41 +270,212 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
               </label>
               <Input
                 placeholder="/health"
-                value={probePath}
-                onChange={(e) => setProbePath(e.target.value)}
+                value={form.probePath}
+                onChange={(e) => update('probePath', e.target.value)}
               />
+              <p className="text-xs text-muted-foreground">{t('create.probePathHint')}</p>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground -mt-2">
+            {t('create.probeAutoSyncHint')}
+          </p>
+
+          {/* cpu + memory */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">
+                {t('create.cpu')}
+              </label>
+              <Input
+                placeholder="2000"
+                value={form.cpu}
+                onChange={(e) => update('cpu', e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">{t('create.cpuHint')}</p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">
+                {t('create.memory')}
+              </label>
+              <Input
+                placeholder="2000"
+                value={form.memory}
+                onChange={(e) => update('memory', e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">{t('create.memoryHint')}</p>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">CPU (millicores)</label>
-              <Input placeholder="2000" value={cpu} onChange={(e) => setCpu(e.target.value)} />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Memory (MiB)</label>
-              <Input placeholder="2000" value={memory} onChange={(e) => setMemory(e.target.value)} />
-            </div>
-          </div>
+          {/* env */}
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">env</label>
+            <label className="text-xs font-medium text-muted-foreground">
+              {t('create.env')}
+            </label>
             <textarea
               className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono resize-y min-h-[64px] focus:outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/40"
-              placeholder={"APP_ENV=production\nDEBUG=false"}
-              value={envVars}
-              onChange={(e) => setEnvVars(e.target.value)}
+              placeholder={'APP_ENV=production\nDEBUG=false'}
+              value={form.envVars}
+              onChange={(e) => update('envVars', e.target.value)}
             />
-            <p className="text-xs text-muted-foreground">每行一条，格式 KEY=VALUE</p>
+            <p className="text-xs text-muted-foreground">{t('create.envHint')}</p>
           </div>
+
+          {/* allow-internet */}
           <label className="flex items-center gap-2 cursor-pointer select-none">
             <input
               type="checkbox"
               className="h-4 w-4 rounded border"
-              checked={allowInternet}
-              onChange={(e) => setAllowInternet(e.target.checked)}
+              checked={form.allowInternet}
+              onChange={(e) => update('allowInternet', e.target.checked)}
             />
-            <span className="text-sm">allow-internet-access</span>
+            <span className="text-sm">{t('create.allowInternetAccess')}</span>
           </label>
+
+          {/* advanced toggle */}
+          <div className="pt-2 border-t border-border/60">
+            <button
+              type="button"
+              className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+              onClick={() => setShowAdvanced((v) => !v)}
+            >
+              {showAdvanced ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+              {showAdvanced ? t('create.advanced.hide') : t('create.advanced.show')}
+            </button>
+
+            {showAdvanced && (
+              <div className="mt-3 space-y-4">
+                {/* network + nodes */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t('create.networkType')}
+                    </label>
+                    <Input
+                      placeholder="tap"
+                      value={form.networkType}
+                      onChange={(e) => update('networkType', e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('create.networkTypeHint')}</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t('create.nodes')}
+                    </label>
+                    <Input
+                      placeholder={t('create.nodesPlaceholder')}
+                      value={form.nodes}
+                      onChange={(e) => update('nodes', e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('create.nodesHint')}</p>
+                  </div>
+                </div>
+
+                {/* command + args */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t('create.command')}
+                    </label>
+                    <textarea
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono resize-y min-h-[64px] focus:outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/40"
+                      placeholder={'/usr/local/bin/entrypoint.sh'}
+                      value={form.command}
+                      onChange={(e) => update('command', e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('create.commandHint')}</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t('create.args')}
+                    </label>
+                    <textarea
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono resize-y min-h-[64px] focus:outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/40"
+                      placeholder={'--config\n/etc/app.conf'}
+                      value={form.args}
+                      onChange={(e) => update('args', e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('create.argsHint')}</p>
+                  </div>
+                </div>
+
+                {/* dns + allowOut/denyOut */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-muted-foreground">
+                    {t('create.dns')}
+                  </label>
+                  <Input
+                    placeholder="1.1.1.1,8.8.8.8"
+                    value={form.dns}
+                    onChange={(e) => update('dns', e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">{t('create.dnsHint')}</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t('create.allowOut')}
+                    </label>
+                    <textarea
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono resize-y min-h-[64px] focus:outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/40"
+                      placeholder={'10.0.0.0/8\n192.168.0.0/16'}
+                      value={form.allowOut}
+                      onChange={(e) => update('allowOut', e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('create.allowOutHint')}</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t('create.denyOut')}
+                    </label>
+                    <textarea
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono resize-y min-h-[64px] focus:outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/40"
+                      placeholder={'169.254.0.0/16'}
+                      value={form.denyOut}
+                      onChange={(e) => update('denyOut', e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('create.denyOutHint')}</p>
+                  </div>
+                </div>
+
+                {/* registry */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t('create.registryUsername')}
+                    </label>
+                    <Input
+                      autoComplete="off"
+                      value={form.registryUsername}
+                      onChange={(e) => update('registryUsername', e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t('create.registryPassword')}
+                    </label>
+                    <Input
+                      type="password"
+                      autoComplete="off"
+                      value={form.registryPassword}
+                      onChange={(e) => update('registryPassword', e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {/* with_cube_ca */}
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border"
+                    checked={form.withCubeCa}
+                    onChange={(e) => update('withCubeCa', e.target.checked)}
+                  />
+                  <span className="text-sm">{t('create.withCubeCa')}</span>
+                </label>
+              </div>
+            )}
+          </div>
 
           {mutation.isError && (
             <p className="text-xs text-destructive">
@@ -183,7 +489,7 @@ function CreateTemplateModal({ onClose }: CreateModalProps) {
             </Button>
             <Button
               size="sm"
-              disabled={!valid || mutation.isPending}
+              disabled={formInvalid || mutation.isPending}
               onClick={() => mutation.mutate()}
             >
               {mutation.isPending ? t('create.creating') : t('create.submit')}

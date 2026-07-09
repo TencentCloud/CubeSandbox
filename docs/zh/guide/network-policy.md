@@ -194,7 +194,7 @@ CubeAPI 会把请求映射成 CubeMaster 的 `CubeNetworkConfig`，并转发 `al
 - `allowInternetAccess`：如果请求中显式设置，则覆盖模板值。
 - `allowOut`：把请求列表追加到模板列表后，并按字符串去重。
 - `denyOut`：把请求列表追加到模板列表后，并按字符串去重。
-- `rules`：按 `name` 合并。同名规则由请求侧覆盖；不同名规则追加到模板规则后面，保留 first-match-wins 的顺序。
+- `rules`：请求规则会排在模板规则之前。若两者包含相同的 `name`，由于规则列表采用 first-match-wins 机制，CubeEgress 会优先匹配请求规则；同名的模板规则不会被覆盖或删除，而是保留在合并后列表的后续位置。
 
 合并后的 `CubeNetworkConfig` 会发给 Cubelet/network-agent。network-agent 抽取 L7 网络可达目标后，由 CubeVS 校验最终唯一 eBPF map key。
 

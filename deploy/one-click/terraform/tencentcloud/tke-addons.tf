@@ -4,17 +4,20 @@
 ########################
 
 locals {
-  # All four component images share var.image_tag (matching build_images.sh's TAG).
-  # registry/namespace default to the TCR instance created by this run: before
-  # deploying the addons, create.sh calls build_images.sh to build and push these
-  # four images to that TCR. Override with var.image_registry / var.image_namespace
-  # (e.g. to reuse a public image source).
-  image_registry    = var.image_registry != "" ? var.image_registry : "${tencentcloud_tcr_instance.demo.name}.tencentcloudcr.com"
-  image_namespace   = var.image_namespace != "" ? var.image_namespace : tencentcloud_tcr_namespace.demo.name
-  cube_master_image = "${local.image_registry}/${local.image_namespace}/cubemaster:${var.image_tag}"
-  cube_api_image    = "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
-  cube_proxy_image  = "${local.image_registry}/${local.image_namespace}/cubeproxy:${var.image_tag}"
-  cube_webui_image  = "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
+  # Default mode uses tag-based public images and does not create/use TCR.
+  # If use_tcr=true, create.sh builds/pushes the images into the per-deployment TCR.
+  image_registry = var.use_tcr ? (
+    var.image_registry != "" ? var.image_registry : "${tencentcloud_tcr_instance.cluster[0].name}.tencentcloudcr.com"
+  ) : var.image_registry
+  image_namespace = var.use_tcr ? (
+    var.image_namespace != "" ? var.image_namespace : tencentcloud_tcr_namespace.cluster[0].name
+  ) : var.image_namespace
+  cube_master_image = var.cubemaster_image != "" ? var.cubemaster_image : "${local.image_registry}/${local.image_namespace}/cube-master:${var.image_tag}"
+  cube_api_image    = var.cubeapi_image != "" ? var.cubeapi_image : "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
+  cube_proxy_image  = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cube-proxy:${var.image_tag}"
+  cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/webui:${var.image_tag}"
+  cube_lcm_image    = var.cube_lifecycle_manager_image != "" ? var.cube_lifecycle_manager_image : "${local.image_registry}/${local.image_namespace}/cube-lifecycle-manager:${var.image_tag}"
+  cube_admin_token  = var.cube_admin_token != "" ? var.cube_admin_token : random_password.cube_admin_token[0].result
 
   # cube_db / cube_user are wired through Terraform (var.cube_db / var.cube_user)
   # so the MySQL account/database created in main.tf, the cube-master conf Secret
@@ -35,12 +38,92 @@ locals {
   # var.cubemaster_replicas docs in variables.tf for why under-reporting the
   # master count oversubscribes the compute nodes.
   cubemaster_replicas = var.cubemaster_replicas
+  # Multi-node scheduling: pick randomly from the top scored compute nodes.
+  # The multi-node guide recommends 3 as a small-cluster starting point; cap at
+  # the actual compute-node count so the default 2-node POC uses 2.
+  cubemaster_priority_select_num = max(1, min(var.compute_node_count, 3))
 
   # All files under the certificate directory
   cert_files = fileset("${path.module}/cubeproxy-certs", "*")
 
+  # create.sh writes these files next to the Terraform module before applying
+  # addons. Terraform evaluates locals even during early targeted network applies,
+  # so every file() call must be guarded with fileexists().
+  webui_nginx_conf = fileexists("${path.module}/webui-nginx.conf") ? file("${path.module}/webui-nginx.conf") : (
+    fileexists("${path.module}/../../webui/nginx.conf") ? file("${path.module}/../../webui/nginx.conf") : <<-EOF
+      worker_processes auto;
+      events { worker_connections 1024; }
+      http {
+        server {
+          listen 80;
+          root /usr/share/nginx/html;
+          index index.html;
+          location ^~ /sandbox/ { proxy_pass __SANDBOX_PROXY_UPSTREAM__; }
+          location /cubeapi/ { proxy_pass __WEB_UI_UPSTREAM__/cubeapi/; }
+          location / { try_files $uri $uri/ /index.html; }
+        }
+      }
+    EOF
+  )
+  cubeproxy_nginx_conf = replace(
+    replace(
+      replace(
+        replace(
+          replace(
+            fileexists("${path.module}/cubeproxy-nginx.conf") ? file("${path.module}/cubeproxy-nginx.conf") : (
+              fileexists("${path.module}/../../cubeproxy/nginx.conf.template") ? file("${path.module}/../../cubeproxy/nginx.conf.template") : <<-EOF
+                user root;
+                worker_processes auto;
+                error_log /data/log/cube-proxy/error.log notice;
+                daemon off;
+                events { worker_connections 100000; }
+                http {
+                  include mime.types;
+                  default_type application/octet-stream;
+                  server {
+                    listen __CUBE_PROXY_HTTP_PORT__;
+                    server_name _;
+                    location / { return 404; }
+                  }
+                  server {
+                    listen __CUBE_PROXY_HTTPS_PORT__ ssl;
+                    server_name _;
+                    ssl_certificate /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__;
+                    ssl_certificate_key /usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__;
+                    location / { return 404; }
+                  }
+                  server {
+                    listen __CUBE_PROXY_ADMIN_LISTEN__:8082;
+                    server_name _;
+                    location / { return 404; }
+                  }
+                }
+              EOF
+            ),
+            "__CUBE_PROXY_HTTP_PORT__",
+            "8081"
+          ),
+          "__CUBE_PROXY_HTTPS_PORT__",
+          "8080"
+        ),
+        "__CUBE_PROXY_SSL_CERT__",
+        "cube.app+3.pem"
+      ),
+      "__CUBE_PROXY_SSL_KEY__",
+      "cube.app+3-key.pem"
+    ),
+    "__CUBE_PROXY_ADMIN_LISTEN__:8082",
+    "0.0.0.0:8082"
+  )
+
   # Precondition for creating the TKE addons
   deploy_addons = var.create_tke && var.deploy_tke_addons
+}
+
+resource "random_password" "cube_admin_token" {
+  count   = var.cube_admin_token == "" ? 1 : 0
+  length  = 32
+  special = false
 }
 
 # Write the kubeconfig to a local file (written as soon as TKE is created, independent of the addons).
@@ -64,6 +147,8 @@ resource "local_file" "tke_kubeconfig" {
   depends_on = [
     kubernetes_deployment.cube_webui,
     kubernetes_service.cube_webui,
+    kubernetes_deployment.cube_lifecycle_manager,
+    kubernetes_service.cube_lifecycle_manager,
     kubernetes_deployment.cube_proxy,
     kubernetes_service.cube_proxy,
     kubernetes_deployment.cube_api,
@@ -78,7 +163,7 @@ resource "local_file" "tke_kubeconfig" {
 # ---------------------------------------------------------------
 resource "kubernetes_namespace" "cubesandbox" {
   count      = local.deploy_addons ? 1 : 0
-  depends_on = [tencentcloud_tcr_instance.demo, tencentcloud_tcr_namespace.demo]
+  depends_on = [tencentcloud_kubernetes_cluster.tke]
   metadata {
     name = "cubesandbox"
   }
@@ -252,11 +337,32 @@ resource "kubernetes_secret" "cubemaster_conf" {
         max_retry    = 2
       }
       scheduler = {
-        priority_select_num         = 1
+        priority_select_num         = local.cubemaster_priority_select_num
         metric_update_timeout       = "300s"
         local_metric_update_timeout = "300s"
         filter = {
           enable_filters = ["cpu", "mem", "template_locality", "realtime_create_num"]
+        }
+        score = {
+          enable_scorers = ["real_time_weighted_average"]
+          resource_weights = {
+            mvm_num          = 2
+            local_create_num = 3
+            cpu_usage        = 1
+            quota_mem_usage  = 1
+          }
+          plugin_conf = {
+            real_time_weighted_average = {
+              weight = 1.0
+              enable_weight_factors = [
+                "mvm_num",
+                "local_create_num",
+                "cpu_usage",
+                "quota_mem_usage",
+              ]
+              time_decay_seconds = 300
+            }
+          }
         }
       }
     })
@@ -331,15 +437,24 @@ resource "kubernetes_deployment" "cubemaster" {
             secret_name = kubernetes_secret.cubemaster_conf[0].metadata[0].name
           }
         }
-        # CFS-backed shared storage (provisioned in main.tf). Mounted directly as
-        # an in-tree NFS volume — the TKE node mounts the CFS share (negotiating
-        # NFS 4.0, whose mount root is "/") and bind-mounts it into every pod, so
-        # the cube-master replicas share /data/CubeMaster/storage.
-        volume {
-          name = "data"
-          nfs {
-            server = tencentcloud_cfs_file_system.cubemaster_data.mount_ip
-            path   = "/"
+        # Default no-CFS mode uses pod-local emptyDir storage, suitable for the
+        # default single-replica cube-master. Set use_cfs=true when scaling
+        # cube-master beyond one replica or when persistent shared storage is needed.
+        dynamic "volume" {
+          for_each = var.use_cfs ? [1] : []
+          content {
+            name = "data"
+            nfs {
+              server = tencentcloud_cfs_file_system.cubemaster_data[0].mount_ip
+              path   = "/"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.use_cfs ? [] : [1]
+          content {
+            name = "data"
+            empty_dir {}
           }
         }
         # Both the public cert and the private key are projected here:
@@ -371,19 +486,22 @@ resource "kubernetes_deployment" "cubemaster" {
 }
 
 # cube-master private-network CLB Service
+# NOTE: cubemaster always stays VPC-internal regardless of enable_public_network,
+# so it does NOT use replace_triggered_by — its CLB type never changes.
 resource "kubernetes_service" "cubemaster" {
   count = local.deploy_addons ? 1 : 0
   metadata {
     name      = "cubemaster"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
     annotations = {
-      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.demo.id
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
       "service.cloud.tencent.com/modification-protection"           = "false"
       "service.cloud.tencent.com/pass-to-target"                    = "true"
-      "service.cloud.tencent.com/security-groups"                   = tencentcloud_security_group.demo.id
+      "service.cloud.tencent.com/security-groups"                   = tencentcloud_security_group.clb.id
     }
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations; ignore to avoid drift.
     ignore_changes = [
       metadata[0].annotations,
     ]
@@ -397,6 +515,19 @@ resource "kubernetes_service" "cubemaster" {
       port     = 8089
       protocol = "TCP"
     }
+  }
+}
+
+# ---------------------------------------------------------------
+# Network mode trigger — forces Service (CLB) recreation when
+# enable_public_network flips. Public↔internal requires a new CLB
+# instance (different type / different VIP), so recreation is the
+# correct behaviour. Without this, the lifecycle ignore_changes on
+# annotations would silently suppress the CLB type switch.
+# ---------------------------------------------------------------
+resource "null_resource" "network_mode_trigger" {
+  triggers = {
+    enable_public_network = tostring(var.enable_public_network)
   }
 }
 
@@ -456,15 +587,30 @@ resource "kubernetes_service" "cube_api" {
   metadata {
     name      = "cube-api"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
-    annotations = {
+    # When enable_public_network is false (default), pin the CLB to a
+    # VPC-internal subnet so it only gets a private VIP. When true, omit the
+    # internal-subnetid annotation so TKE provisions a public CLB.
+    annotations = merge({
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
-      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.demo.id
-    }
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
+      }, var.enable_public_network ? {
+      "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
+      } : {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
+    })
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations (e.g. bindedip,
+    # loadbalanceId) that would otherwise cause perpetual drift on every plan.
     ignore_changes = [
       metadata[0].annotations,
+    ]
+    # Force Service (and hence CLB) recreation when the network mode flips.
+    # Public↔internal requires a brand-new CLB instance, so recreation is safe
+    # and expected — the VIP will change.
+    replace_triggered_by = [
+      null_resource.network_mode_trigger,
     ]
   }
 
@@ -474,6 +620,158 @@ resource "kubernetes_service" "cube_api" {
     port {
       port     = 3000
       protocol = "TCP"
+    }
+  }
+}
+
+# ---------------------------------------------------------------
+# cube-lifecycle-manager: Secret → Deployment → ClusterIP Service
+# ---------------------------------------------------------------
+
+resource "kubernetes_secret" "cube_lifecycle_manager_conf" {
+  count = local.deploy_addons ? 1 : 0
+  type  = "Opaque"
+
+  metadata {
+    name      = "cube-lifecycle-manager-conf"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+  }
+
+  data = {
+    "redis-password"   = var.redis_password
+    "cube-admin-token" = local.cube_admin_token
+  }
+}
+
+resource "kubernetes_deployment" "cube_lifecycle_manager" {
+  count = local.deploy_addons ? 1 : 0
+
+  metadata {
+    name      = "cube-lifecycle-manager"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-lifecycle-manager" }
+  }
+
+  spec {
+    replicas = var.cube_lifecycle_manager_replicas
+
+    selector {
+      match_labels = { app = "cube-lifecycle-manager" }
+    }
+
+    template {
+      metadata {
+        labels = { app = "cube-lifecycle-manager" }
+      }
+
+      spec {
+        container {
+          name  = "cube-lifecycle-manager"
+          image = local.cube_lcm_image
+
+          port {
+            name           = "http"
+            container_port = 8083
+            protocol       = "TCP"
+          }
+
+          env {
+            name  = "CUBE_LCM_REDIS_ADDR"
+            value = "${tencentcloud_redis_instance.redis.ip}:6379"
+          }
+          env {
+            name = "CUBE_LCM_REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cube_lifecycle_manager_conf[0].metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
+          env {
+            name  = "CUBE_LCM_REDIS_DB"
+            value = "0"
+          }
+          env {
+            name  = "CUBE_LCM_CUBEMASTER_URL"
+            value = local.cubemaster_url
+          }
+          env {
+            name  = "CUBE_LCM_LISTEN_ADDR"
+            value = "0.0.0.0:8083"
+          }
+          env {
+            name  = "CUBE_LCM_DEFAULT_IDLE_TIMEOUT"
+            value = var.cube_lifecycle_manager_default_idle_timeout
+          }
+          env {
+            name  = "CUBE_LCM_HEARTBEAT_TTL"
+            value = var.cube_lifecycle_manager_heartbeat_ttl
+          }
+          env {
+            name  = "CUBE_LCM_DISCOVERY_REFRESH"
+            value = var.cube_lifecycle_manager_discovery_refresh
+          }
+          env {
+            name = "CUBE_LCM_ADMIN_TOKEN"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cube_lifecycle_manager_conf[0].metadata[0].name
+                key  = "cube-admin-token"
+              }
+            }
+          }
+
+          liveness_probe {
+            http_get {
+              path = "/healthz"
+              port = 8083
+            }
+            initial_delay_seconds = 10
+            period_seconds        = 10
+            timeout_seconds       = 3
+            failure_threshold     = 6
+          }
+
+          readiness_probe {
+            http_get {
+              path = "/readyz"
+              port = 8083
+            }
+            initial_delay_seconds = 5
+            period_seconds        = 5
+            timeout_seconds       = 3
+            failure_threshold     = 3
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    kubernetes_service.cubemaster,
+    tencentcloud_redis_instance.redis,
+  ]
+}
+
+resource "kubernetes_service" "cube_lifecycle_manager" {
+  count = local.deploy_addons ? 1 : 0
+
+  metadata {
+    name      = "cube-lifecycle-manager"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-lifecycle-manager" }
+  }
+
+  spec {
+    type     = "ClusterIP"
+    selector = { app = "cube-lifecycle-manager" }
+
+    port {
+      name        = "http"
+      port        = 8083
+      target_port = 8083
+      protocol    = "TCP"
     }
   }
 }
@@ -500,12 +798,28 @@ resource "kubernetes_secret" "cubeproxy_global" {
       set $timeout_min 500;
       set $timeout_max 700;
       set $cube_proxy_host_ip "127.0.0.1";
+      set $cube_sidecar_addr "cube-lifecycle-manager.cubesandbox.svc.cluster.local:8083";
+      set $cube_admin_token "${local.cube_admin_token}";
     EOT
     # Same Redis password exposed as a discrete key so the cube-proxy container
     # can read it via secret_key_ref instead of a plaintext Deployment env value
     # (which would show up in `kubectl get deploy -o yaml`). Projected out of the
     # global.conf volume mount via that mount's explicit `items` below.
     "redis-password" = var.redis_password
+  }
+}
+
+resource "kubernetes_config_map" "cubeproxy_nginx_conf" {
+  count = local.deploy_addons ? 1 : 0
+
+  metadata {
+    name      = "cubeproxy-nginx-conf"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-proxy" }
+  }
+
+  data = {
+    "nginx.conf" = local.cubeproxy_nginx_conf
   }
 }
 
@@ -528,12 +842,21 @@ resource "kubernetes_secret" "cubeproxy_certs" {
 # cube-proxy Deployment
 resource "kubernetes_deployment" "cube_proxy" {
   count = local.deploy_addons ? 1 : 0
+
+  depends_on = [
+    kubernetes_service.cube_lifecycle_manager,
+    tencentcloud_redis_instance.redis,
+  ]
+
   metadata {
     name      = "cube-proxy"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
     labels    = { app = "cube-proxy" }
   }
   spec {
+    # PR #705 moves lifecycle coordination into cube-lifecycle-manager. Each
+    # cube-proxy replica publishes its admin endpoint to Redis so CLM can
+    # discover and push lifecycle state without static per-replica wiring.
     replicas = var.cube_proxy_replicas
     selector {
       match_labels = { app = "cube-proxy" }
@@ -566,6 +889,11 @@ resource "kubernetes_deployment" "cube_proxy" {
             container_port = 443
             protocol       = "TCP"
           }
+          port {
+            name           = "admin"
+            container_port = 8082
+            protocol       = "TCP"
+          }
           env {
             name  = "CUBE_PROXY_REDIS_IP"
             value = tencentcloud_redis_instance.redis.ip
@@ -583,11 +911,83 @@ resource "kubernetes_deployment" "cube_proxy" {
               }
             }
           }
+          env {
+            name  = "CUBE_PROXY_REGISTRY_ENABLE"
+            value = "1"
+          }
+          env {
+            name = "POD_NAME"
+            value_from {
+              field_ref {
+                field_path = "metadata.name"
+              }
+            }
+          }
+          env {
+            name = "POD_IP"
+            value_from {
+              field_ref {
+                field_path = "status.podIP"
+              }
+            }
+          }
+          env {
+            name  = "CUBE_PROXY_ID"
+            value = "$(POD_NAME)"
+          }
+          env {
+            name  = "CUBE_PROXY_ADMIN_URL"
+            value = "http://$(POD_IP):8082"
+          }
+          env {
+            name  = "CUBE_PROXY_RESUME_URL"
+            value = "http://$(POD_IP):8082"
+          }
+          env {
+            name  = "CUBE_PROXY_NODE_IP"
+            value = "$(POD_IP)"
+          }
+          env {
+            name  = "CUBE_PROXY_VERSION"
+            value = var.image_tag
+          }
+          env {
+            name  = "CUBE_PROXY_HEARTBEAT_INTERVAL_MS"
+            value = tostring(var.cube_proxy_heartbeat_interval_ms)
+          }
+          env {
+            name  = "CUBE_PROXY_REGISTRY_REDIS_HOST"
+            value = tencentcloud_redis_instance.redis.ip
+          }
+          env {
+            name  = "CUBE_PROXY_REGISTRY_REDIS_PORT"
+            value = "6379"
+          }
+          env {
+            name = "CUBE_PROXY_REGISTRY_REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cubeproxy_global[0].metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
+          env {
+            name  = "CUBE_PROXY_REGISTRY_REDIS_DB"
+            value = "0"
+          }
 
           # global.conf mount
           volume_mount {
             name       = "global-conf"
             mount_path = "/usr/local/openresty/nginx/conf/global"
+            read_only  = true
+          }
+
+          volume_mount {
+            name       = "nginx-conf"
+            mount_path = "/usr/local/openresty/nginx/conf/nginx.conf"
+            sub_path   = "nginx.conf"
             read_only  = true
           }
 
@@ -600,6 +1000,36 @@ resource "kubernetes_deployment" "cube_proxy" {
               sub_path   = lower(replace(volume_mount.value, "/[^a-zA-Z0-9-]/", "-"))
               read_only  = true
             }
+          }
+
+          # --- Health probes ---
+          # liveness: if nginx stops accepting connections on the dataplane port
+          # (process hang / deadlock), kubelet restarts the container. A plain
+          # crash/OOM is already covered by restartPolicy: Always; this catches
+          # the "still alive but unresponsive" case.
+          liveness_probe {
+            tcp_socket {
+              port = 8081
+            }
+            initial_delay_seconds = 5
+            period_seconds        = 10
+            timeout_seconds       = 3
+            failure_threshold     = 3
+            success_threshold     = 1
+          }
+
+          # readiness: only route traffic once nginx is accepting connections, so
+          # the endpoint is removed from the Service during restart and the CLB
+          # stops forwarding to this pod before it is ready (avoids 502s).
+          readiness_probe {
+            tcp_socket {
+              port = 8081
+            }
+            initial_delay_seconds = 3
+            period_seconds        = 5
+            timeout_seconds       = 2
+            failure_threshold     = 2
+            success_threshold     = 1
           }
         }
 
@@ -614,6 +1044,13 @@ resource "kubernetes_deployment" "cube_proxy" {
               key  = "global.conf"
               path = "global.conf"
             }
+          }
+        }
+
+        volume {
+          name = "nginx-conf"
+          config_map {
+            name = kubernetes_config_map.cubeproxy_nginx_conf[0].metadata[0].name
           }
         }
 
@@ -643,17 +1080,30 @@ resource "kubernetes_service" "cube_proxy" {
   metadata {
     name      = "cube-proxy"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
-    annotations = {
+    # Public mode: a public CLB billed by traffic (internet-charge-type).
+    # Internal mode (default): pin to a VPC-internal subnet for a private VIP.
+    annotations = merge({
+      "service.cloud.tencent.com/specify-protocol"        = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]}}"
+      "service.cloud.tencent.com/modification-protection" = "false"
+      "service.cloud.tencent.com/pass-to-target"          = "true"
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
+      }, var.enable_public_network ? {
       "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
-      "service.cloud.tencent.com/specify-protocol"                     = "{\"80\":{\"protocol\":[\"TCP\"]},\"443\":{\"protocol\":[\"TCP\"]}}"
-      "service.cloud.tencent.com/modification-protection"              = "false"
-      "service.cloud.tencent.com/pass-to-target"                       = "true"
-      "service.cloud.tencent.com/security-groups"                      = tencentcloud_security_group.demo.id
-    }
+      } : {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
+    })
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations (e.g. bindedip,
+    # loadbalanceId) that would otherwise cause perpetual drift on every plan.
     ignore_changes = [
       metadata[0].annotations,
+    ]
+    # Force Service (and hence CLB) recreation when the network mode flips.
+    # Public↔internal requires a brand-new CLB instance, so recreation is safe
+    # and expected — the VIP will change.
+    replace_triggered_by = [
+      null_resource.network_mode_trigger,
     ]
   }
 
@@ -695,7 +1145,7 @@ resource "kubernetes_config_map" "cube_webui_nginx_conf" {
     #   __SANDBOX_PROXY_UPSTREAM__ → cube-proxy (the /sandbox/ backend, port 80)
     "nginx.conf" = replace(
       replace(
-        file("${path.module}/webui-nginx.conf"),
+        local.webui_nginx_conf,
         "__WEB_UI_UPSTREAM__",
         "http://${kubernetes_service.cube_api[0].spec[0].cluster_ip}:3000"
       ),
@@ -786,15 +1236,30 @@ resource "kubernetes_service" "cube_webui" {
   metadata {
     name      = "cube-webui"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
-    annotations = {
+    # When enable_public_network is false (default), pin the CLB to a
+    # VPC-internal subnet so it only gets a private VIP. When true, bill by
+    # traffic (matching cube-api / cube-proxy) for cost predictability.
+    annotations = merge({
       "service.cloud.tencent.com/modification-protection" = "false"
       "service.cloud.tencent.com/pass-to-target"          = "true"
-      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.demo.id
-    }
+      "service.cloud.tencent.com/security-groups"         = tencentcloud_security_group.clb.id
+      }, var.enable_public_network ? {
+      "service.kubernetes.io/qcloud-loadbalancer-internet-charge-type" = "TRAFFIC_POSTPAID_BY_HOUR"
+      } : {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
+    })
   }
   lifecycle {
+    # TKE controller-manager injects runtime annotations (e.g. bindedip,
+    # loadbalanceId) that would otherwise cause perpetual drift on every plan.
     ignore_changes = [
       metadata[0].annotations,
+    ]
+    # Force Service (and hence CLB) recreation when the network mode flips.
+    # Public↔internal requires a brand-new CLB instance, so recreation is safe
+    # and expected — the VIP will change.
+    replace_triggered_by = [
+      null_resource.network_mode_trigger,
     ]
   }
 

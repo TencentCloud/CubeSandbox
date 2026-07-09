@@ -127,12 +127,12 @@ pub struct EgressRuleInject {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct SandboxLifecycleConfig {
     /// "kill" (default) | "pause".
-    #[serde(rename = "onTimeout", default)]
+    #[serde(rename = "onTimeout", alias = "on_timeout", default)]
     pub on_timeout: SandboxOnTimeout,
 
     /// Auto-resume on activity. Defaults to false. Only meaningful when
     /// `on_timeout` is set to "pause".
-    #[serde(rename = "autoResume", default)]
+    #[serde(rename = "autoResume", alias = "auto_resume", default)]
     pub auto_resume: bool,
 }
 
@@ -163,15 +163,17 @@ pub struct SandboxVolumeMount {
 /// Rule: ID abbreviations → uppercase (templateID, sandboxID, envVars);
 ///       allow_internet_access is a known SDK snake_case quirk;
 ///       lifecycle is a nested object — see SandboxLifecycleConfig.
+/// `envVars` is the canonical field name; `envs` is accepted as a compatibility
+/// alias for E2B SDK callers.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[allow(dead_code)]
 pub struct NewSandbox {
     #[serde(rename = "templateID")]
     pub template_id: String,
 
-    #[validate(range(min = 0))]
-    #[serde(default = "default_timeout")]
-    pub timeout: i32,
+    /// Optional idle TTL in seconds. See docs/guide/lifecycle.md.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
 
     /// Sandbox lifecycle configuration. Maps to e2b's `lifecycle` object so
     /// callers that already speak e2b can pass through unchanged. Absent
@@ -199,7 +201,11 @@ pub struct NewSandbox {
     )]
     pub distribution_scope: Option<Vec<String>>,
 
-    #[serde(rename = "envVars", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        alias = "envs",
+        rename = "envVars",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub env_vars: Option<EnvVars>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,10 +213,6 @@ pub struct NewSandbox {
 
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
-}
-
-fn default_timeout() -> i32 {
-    15
 }
 
 // ─── Sandbox — create / connect response ──────────────────────────────────
@@ -259,8 +261,10 @@ pub struct ListedSandbox {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    #[serde(rename = "endAt")]
-    pub end_at: DateTime<Utc>,
+    /// Projected next-timeout instant. Omitted for never-timeout sandboxes
+    /// (no deadline) rather than being misreported as equal to startedAt.
+    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
     #[serde(rename = "memoryMB")]
@@ -289,8 +293,10 @@ pub struct SandboxDetail {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    #[serde(rename = "endAt")]
-    pub end_at: DateTime<Utc>,
+    /// Projected next-timeout instant. Omitted for never-timeout sandboxes
+    /// (no deadline) rather than being misreported as equal to startedAt.
+    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "envdVersion")]
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]
@@ -316,8 +322,9 @@ pub struct SandboxDetail {
 #[derive(Debug, Deserialize, ToSchema)]
 #[allow(dead_code)]
 pub struct ResumedSandbox {
-    #[serde(default = "default_timeout")]
-    pub timeout: i32,
+    /// Idle timeout in seconds; None when the client did not send one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
     #[serde(rename = "autoPause", default)]
     pub auto_pause: bool,
 }
@@ -325,8 +332,9 @@ pub struct ResumedSandbox {
 /// Request body for POST /sandboxes/{id}/connect.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ConnectSandbox {
-    #[validate(range(min = 0))]
-    pub timeout: i32,
+    /// Idle timeout in seconds; None when the client did not send one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
 }
 
 /// Request body for POST /sandboxes/{id}/snapshots.
@@ -510,7 +518,26 @@ fn default_page_limit() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::SandboxNetworkConfig;
+    use super::{NewSandbox, SandboxNetworkConfig, SetTimeoutRequest};
+    use validator::Validate;
+
+    #[test]
+    fn set_timeout_request_rejects_negative_values() {
+        let req = SetTimeoutRequest { timeout: -1 };
+        assert!(
+            req.validate().is_err(),
+            "negative timeout should be rejected"
+        );
+    }
+
+    #[test]
+    fn set_timeout_request_accepts_zero_and_positive() {
+        for timeout in [0, 60, 3600] {
+            let req = SetTimeoutRequest { timeout };
+            req.validate()
+                .unwrap_or_else(|e| panic!("timeout={timeout} should be valid: {e}"));
+        }
+    }
 
     #[test]
     fn sandbox_network_config_accepts_snake_case_policy_fields() {
@@ -525,6 +552,25 @@ mod tests {
             Some(vec!["api.example.com".to_string(), "8.8.8.8".to_string()])
         );
         assert_eq!(cfg.deny_out, Some(vec!["0.0.0.0/0".to_string()]));
+    }
+
+    #[test]
+    fn new_sandbox_accepts_e2b_envs_alias() {
+        let req: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl-1",
+            "envs": {
+                "CUBE_TEST_ENV": "value"
+            }
+        }))
+        .expect("new sandbox request should deserialize");
+
+        assert_eq!(
+            req.env_vars
+                .as_ref()
+                .and_then(|envs| envs.get("CUBE_TEST_ENV"))
+                .map(String::as_str),
+            Some("value")
+        );
     }
 }
 

@@ -16,7 +16,7 @@ After deployment, you will have a fully functional Cube Sandbox instance with:
 ### Hardware
 
 - **Physical machine or bare-metal server** (nested virtualization is not supported)
-- **x86_64** architecture
+- **x86_64** or **aarch64** (ARM64) architecture
 - **KVM enabled** — verify with `ls /dev/kvm`
 - Recommended: 8+ CPU cores, 16+ GB RAM
 
@@ -37,6 +37,10 @@ After deployment, you will have a fully functional Cube Sandbox instance with:
 | Docker | For running the builder container |
 | `make` | For building the builder image |
 | `tar`, `python3`, `truncate`, `ldd`, `mkfs.ext4` | For guest image generation and packaging |
+
+::: tip Architecture
+The release bundle is built **natively** for the build machine's architecture — components are not cross-compiled. Build on a machine of the **same architecture** as your target host (an `x86_64` build machine produces an `x86_64` bundle; an `aarch64` build machine produces an `aarch64` bundle). The build toolchain auto-detects the host architecture (via `uname -m`); set `TARGET_ARCH` only if you need to override the detected value.
+:::
 
 > The build machine and target machine can be the same physical host.
 
@@ -285,7 +289,7 @@ You can also point to prebuilt binaries to skip compilation:
 | `ONE_CLICK_CONTROL_PLANE_IP` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
 | `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
 | `CUBE_SANDBOX_NODE_IP` | auto-detected from `eth0` | Node's primary network interface IP. Auto-detected if unset; set explicitly if your interface differs. |
-| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` | cubevs local network CIDR for sandbox IP allocation. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /8–/30. Conflicts with host interfaces, routes, or resolver nameservers abort installation during preflight. Uses the fixed default when unset. |
+| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` | cubevs local network CIDR for sandbox IP allocation. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /16–/24. Conflicts with host interfaces, routes, or resolver nameservers abort installation during preflight. Uses the fixed default when unset. |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | Set to `1` to skip CIDR conflict detection for the default or custom sandbox CIDR (not recommended). |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | Run health check after installation |
 | `ONE_CLICK_RUNTIME_DIR` | `/var/run/cube-sandbox-one-click` | PID and runtime files directory |

@@ -27,9 +27,36 @@ import (
 )
 
 const (
-	snapshotRequestLockPrefix = "snapshot-request:"
-	snapshotIDPrefix          = "snap-"
+	snapshotRequestLockPrefix  = "snapshot-request:"
+	snapshotSandboxLockPrefix  = "snapshot-sandbox:"
+	snapshotResourceLockPrefix = "snapshot-resource:"
+	snapshotIDPrefix           = "snap-"
 )
+
+func snapshotRequestLockKey(requestID string) string {
+	return snapshotRequestLockPrefix + strings.TrimSpace(requestID)
+}
+
+func snapshotSandboxLockKey(sandboxID string) string {
+	return snapshotSandboxLockPrefix + strings.TrimSpace(sandboxID)
+}
+
+func snapshotResourceLockKey(snapshotID string) string {
+	return snapshotResourceLockPrefix + strings.TrimSpace(snapshotID)
+}
+
+func withSnapshotWriteLocks(keys []string, fn func() error) error {
+	if len(keys) == 0 {
+		return fn()
+	}
+	key := strings.TrimSpace(keys[0])
+	if key == "" {
+		return withSnapshotWriteLocks(keys[1:], fn)
+	}
+	return withTemplateWriteLock(key, func() error {
+		return withSnapshotWriteLocks(keys[1:], fn)
+	})
+}
 
 // snapshotCreateJobRequest is the WAL payload for an in-flight snapshot-create
 // operation. Note: the canonical create-request is no longer carried inside the
@@ -105,10 +132,12 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	if err != nil {
 		return nil, err
 	}
-	lockKey := snapshotRequestLockPrefix + requestID
 	var jobID string
 	reusedExistingJob := false
-	if err := withTemplateWriteLock(lockKey, func() error {
+	if err := withSnapshotWriteLocks([]string{
+		snapshotSandboxLockKey(sandboxID),
+		snapshotRequestLockKey(requestID),
+	}, func() error {
 		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
 			if existing.Operation != JobOperationSnapshotCreate {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
@@ -365,7 +394,6 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 	if strings.TrimSpace(requestID) == "" {
 		return nil, errors.New("requestID is required")
 	}
-	lockKey := snapshotRequestLockPrefix + requestID
 	var jobID string
 	reusedExistingJob := false
 	var existingRequest snapshotRollbackJobRequest
@@ -374,7 +402,11 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 	var replica ReplicaStatus
 	var nodeID string
 	var nodeIP string
-	if err := withTemplateWriteLock(lockKey, func() error {
+	if err := withSnapshotWriteLocks([]string{
+		snapshotSandboxLockKey(sandboxID),
+		snapshotResourceLockKey(snapshotID),
+		snapshotRequestLockKey(requestID),
+	}, func() error {
 		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
 			if existing.Operation != JobOperationSnapshotRollback {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
@@ -582,11 +614,13 @@ func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType str
 	if strings.TrimSpace(requestID) == "" {
 		return nil, errors.New("requestID is required")
 	}
-	lockKey := snapshotRequestLockPrefix + requestID
 	var jobID string
 	reusedExistingJob := false
 	var existingRequest snapshotDeleteJobRequest
-	if err := withTemplateWriteLock(lockKey, func() error {
+	if err := withSnapshotWriteLocks([]string{
+		snapshotResourceLockKey(snapshotID),
+		snapshotRequestLockKey(requestID),
+	}, func() error {
 		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
 			if existing.Operation != JobOperationSnapshotDelete {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
@@ -637,9 +671,9 @@ func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType str
 			}
 		}
 		if activeRefs, err := ListActiveSnapshotRuntimeRefs(ctx, snapshotID); err != nil {
-			log.G(ctx).Warnf("snapshot %s runtime-ref precheck failed (continuing with delete): %v", snapshotID, err)
+			return err
 		} else if len(activeRefs) > 0 {
-			log.G(ctx).Warnf("snapshot %s still has %d active runtime ref(s): %s; proceeding with delete", snapshotID, len(activeRefs), formatSnapshotRuntimeRefConsumers(activeRefs))
+			return fmt.Errorf("%w: snapshot %s still has %d active runtime ref(s): %s", ErrTemplateAttemptInProgress, snapshotID, len(activeRefs), formatSnapshotRuntimeRefConsumers(activeRefs))
 		}
 		attemptNo, retryOfJobID, err := nextSnapshotAttempt(ctx, snapshotID)
 		if err != nil {

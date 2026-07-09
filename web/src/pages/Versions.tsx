@@ -42,7 +42,38 @@ function declaredVersionsFor(row: ComponentRow): string[] {
 
 function isVersionUndeclared(row: ComponentRow, version: string): boolean {
   const declared = declaredVersionsFor(row);
-  return declared.length > 0 && version !== '' && version !== 'unknown' && !declared.includes(version);
+  return (
+    declared.length > 0 &&
+    version !== '' &&
+    version !== 'unknown' &&
+    !declared.some((declaredVersion) => versionMatchesDeclared(declaredVersion, version))
+  );
+}
+
+const platformVersionSuffixes = ['-amd64', '-arm64', '-x86_64', '-aarch64'] as const;
+
+// Declared manifest versions stay canonical; only actual is normalized.
+function versionMatchesDeclared(declared: string, actual: string): boolean {
+  if (declared === actual) {
+    return true;
+  }
+  return stripPlatformVersionSuffix(actual) === declared;
+}
+
+function stripPlatformVersionSuffix(version: string): string {
+  let normalized = version;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const suffix of platformVersionSuffixes) {
+      if (normalized.endsWith(suffix)) {
+        normalized = normalized.slice(0, -suffix.length);
+        changed = true;
+        break;
+      }
+    }
+  }
+  return normalized;
 }
 
 function rowHasUndeclaredVersion(row: ComponentRow): boolean {

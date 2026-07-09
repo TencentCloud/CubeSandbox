@@ -24,6 +24,11 @@ cubelet_conf:
     grpc_port: 9999
   common_timeout_insec: 30
   create_image_timeout_insec: 300
+  # Sandbox idle TTL when the client omits timeout; unset or <=0 = no cluster default (never idle-timeout).
+  # Shipped default: no cluster-wide idle timeout. Set e.g. 300 in production if needed.
+  default_timeout_insec: -1
+  # Create/scheduling RPC deadline only (not sandbox idle TTL).
+  create_timeout_insec: 300
   create_concurrent_limit: 100
   destroy_concurent_limit: 100
   enable_exposed_port: true

@@ -380,7 +380,7 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sa
 	}
 	delete(cloned.Annotations, constants.CubeAnnotationsAppSnapshotCreate)
 	cloned.SnapshotDir = ""
-	cloned.Timeout = 0
+	cloned.Timeout = nil
 	cloned.InsId = ""
 	cloned.InsIp = ""
 	cloned.Request = nil

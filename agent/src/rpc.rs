@@ -91,6 +91,8 @@ use nix::unistd::{Gid, Uid};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::FileExt;
+#[cfg(target_arch = "aarch64")]
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::str::FromStr;
 const CONTAINER_BASE: &str = "/run/cube-containers";
@@ -1829,15 +1831,58 @@ pub fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer
         moniclock::Clock::new().elapsed().as_millis()
     );
 
-    let port: u16 = 0x680;
-    let data: u8 = 0x8;
-    unsafe {
-        libc::ioperm(port as u64, 5, 1);
-    }
-    let mut ioport = x86_64::instructions::port::Port::new(port);
+    #[cfg(target_arch = "x86_64")]
+    {
+        let port: u16 = 0x680;
+        let data: u8 = 0x8;
+        let ret = unsafe { libc::ioperm(port as u64, 5, 1) };
+        if ret != 0 {
+            return Err(anyhow!(
+                "ioperm for vsock server ready notify port 0x{:x} failed: {}",
+                port,
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut ioport = x86_64::instructions::port::Port::new(port);
 
-    unsafe {
-        ioport.write(data);
+        unsafe {
+            ioport.write(data);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        const SYS_CTRL_MMIO_ADDR: libc::off_t = 0x0903_0000;
+        const SYS_CTRL_MMIO_SIZE: usize = 0x1000;
+        const SYS_VSOCK_SERVER: u8 = 1 << 3;
+
+        let dev_mem = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/mem")
+            .context("open /dev/mem for sys_ctrl mmio notify")?;
+        let map = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                SYS_CTRL_MMIO_SIZE,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                dev_mem.as_raw_fd(),
+                SYS_CTRL_MMIO_ADDR,
+            )
+        };
+        if map == libc::MAP_FAILED {
+            return Err(anyhow!(
+                "mmap sys_ctrl mmio notify addr 0x{:x} failed: {}",
+                SYS_CTRL_MMIO_ADDR,
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        unsafe {
+            std::ptr::write_volatile(map as *mut u8, SYS_VSOCK_SERVER);
+            libc::munmap(map, SYS_CTRL_MMIO_SIZE);
+        }
     }
 
     Ok(server)

@@ -3,7 +3,7 @@ title: "Making Legacy Software Agent-Friendly: Fast Spawn, Branching, and Rollba
 date: 2026-06-17
 author: Cube Sandbox Team
 description: When software consumers shift from humans to Agents, the requirements change fundamentally — creating a service is no longer an ops task, but part of the inference-and-action loop. Neon's $1B acquisition by Databricks validates this thesis. Cube Sandbox turns "fast spawn, clone, and rollback" into a general-purpose runtime capability, letting any traditional software service become Agent-friendly with near-zero code changes.
-featured: true
+featured: false
 weight: 2
 ---
 

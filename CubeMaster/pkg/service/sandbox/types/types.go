@@ -12,6 +12,16 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 )
 
+// NeverTimeout is the never-timeout idle TTL sentinel (-1).
+// See docs/guide/lifecycle.md — Timeout semantics (canonical).
+const NeverTimeout = -1
+
+// TimeoutPtr is a convenience constructor for the pointer-typed
+// CreateCubeSandboxReq.Timeout field.
+func TimeoutPtr(v int) *int {
+	return &v
+}
+
 type Request struct {
 	RequestID string `json:"requestID" p:"requestID"  v:"required"`
 }
@@ -35,7 +45,9 @@ type HostChangeEvent struct {
 type CreateCubeSandboxReq struct {
 	*Request
 
-	Timeout           int                `json:"timeout,omitempty" d:"60"`
+	// Optional idle TTL in seconds; nil = client omitted the field.
+	// See docs/guide/lifecycle.md — Timeout semantics (canonical).
+	Timeout           *int               `json:"timeout,omitempty"`
 	SnapshotDir       string             `json:"snapshot_dir,omitempty"`
 	InsId             string             `json:"ins_id,omitempty"`
 	InsIp             string             `json:"ins_ip,omitempty"`
@@ -44,8 +56,12 @@ type CreateCubeSandboxReq struct {
 
 	Containers []*Container `json:"containers,omitempty"`
 
-	Annotations       map[string]string `json:"annotations,omitempty" `
-	Labels            map[string]string `json:"labels,omitempty" `
+	Annotations map[string]string `json:"annotations,omitempty" `
+	Labels      map[string]string `json:"labels,omitempty" `
+	// CreateTimeEnvVars carries sandbox-level env vars requested at create
+	// time. CubeMaster serializes them into an internal annotation so cubelet
+	// can initialize envd after sandbox startup.
+	CreateTimeEnvVars map[string]string `json:"create_time_env_vars,omitempty"`
 	DistributionScope []string          `json:"distribution_scope,omitempty"`
 	InstanceType      string            `json:"instance_type,omitempty"`
 	NetworkType       string            `json:"network_type,omitempty"`
@@ -412,6 +428,11 @@ type DeleteCubeSandboxReq struct {
 	InstanceType string             `json:"instance_type,omitempty"`
 
 	Sync bool `json:"sync,omitempty"`
+
+	// KillReason is a free-form string explaining why this destroy was
+	// initiated. Mirrors e2b's KillReason enum (request | timeout | orphaned
+	// | base_template_missing | ...).
+	KillReason string `json:"kill_reason,omitempty"`
 }
 
 type ListCubeSandboxReq struct {
@@ -447,6 +468,7 @@ type SandboxBriefData struct {
 	NameSpace   string            `json:"namespace,omitempty"`
 	CreateAt    int64             `json:"create_at,omitempty"`
 	PauseAt     int64             `json:"pause_at,omitempty"`
+	EndAt       int64             `json:"end_at,omitempty"`
 }
 
 type GetCubeSandboxReq struct {
@@ -477,6 +499,7 @@ type SandboxData struct {
 	ExposedPortEndpoint    string            `json:"exposed_port_endpoint,omitempty"`
 	ExposedPortMode        string            `json:"exposed_port_mode,omitempty"`
 	RequestedContainerPort int32             `json:"requested_container_port,omitempty"`
+	EndAt                  int64             `json:"end_at,omitempty"`
 }
 
 type ContainerInfo struct {
@@ -663,6 +686,50 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id" p:"sandbox_id"  v:"required"`
 	InstanceType string `json:"instance_type" p:"instance_type"  v:"required"`
 	Action       string `json:"action" p:"action"  v:"required"`
+}
+
+// SetTimeoutRequest is the wire shape for POST /cube/sandbox/timeout.
+// Mirrors CubeAPI's SandboxTimeoutRequest field-for-field. `timeout` is the
+// new idle TTL in seconds counted from "now": the master refreshes the
+// lifecycle meta's CreatedAt so the sweeper's
+//
+//	baseline = max(LastActiveMs, CreatedAt)
+//
+// rule treats the sandbox as freshly active and re-arms the
+// timeout-then-kill (or pause) ladder.
+type SetTimeoutRequest struct {
+	RequestID    string `json:"requestID" p:"requestID" v:"required"`
+	SandboxID    string `json:"sandboxID" p:"sandboxID" v:"required"`
+	InstanceType string `json:"instanceType" p:"instanceType"`
+	Timeout      int32  `json:"timeout" p:"timeout"`
+}
+
+// SetTimeoutRes is the master-side response for /cube/sandbox/timeout.
+// EndAt is unix milliseconds and lets CubeAPI / SDK return a deterministic
+type SetTimeoutRes struct {
+	RequestID string `json:"requestID,omitempty"`
+	SandboxID string `json:"sandboxID,omitempty"`
+	EndAt     int64  `json:"end_at,omitempty"`
+	Ret       *Ret   `json:"ret,omitempty"`
+}
+
+// RefreshSandboxRequest extends the sandbox idle window by `duration`
+// seconds. Semantically `refresh(d)` is identical to `set_timeout(d)` in
+// this implementation: both rebase CreatedAt to "now" and set the new
+// TimeoutSeconds. Mirrors e2b's refresh-then-set-timeout convergence.
+type RefreshSandboxRequest struct {
+	RequestID    string `json:"requestID" p:"requestID" v:"required"`
+	SandboxID    string `json:"sandboxID" p:"sandboxID" v:"required"`
+	InstanceType string `json:"instanceType" p:"instanceType"`
+	Duration     int32  `json:"duration" p:"duration"`
+}
+
+// RefreshSandboxRes mirrors SetTimeoutRes.
+type RefreshSandboxRes struct {
+	RequestID string `json:"requestID,omitempty"`
+	SandboxID string `json:"sandboxID,omitempty"`
+	EndAt     int64  `json:"end_at,omitempty"`
+	Ret       *Ret   `json:"ret,omitempty"`
 }
 
 type ListInventoryReq struct {

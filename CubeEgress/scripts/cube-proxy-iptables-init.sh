@@ -50,20 +50,6 @@ require_modules() {
     done
 }
 
-apply_sysctls() {
-    declare -A wanted=(
-        [net.ipv4.conf.all.rp_filter]=0
-        [net.ipv4.conf.${INGRESS_IFACE}.rp_filter]=0
-        [net.ipv4.conf.lo.rp_filter]=0
-        [net.ipv4.conf.all.route_localnet]=1
-        [net.ipv4.conf.${INGRESS_IFACE}.accept_local]=1
-    )
-    local s
-    for s in "${!wanted[@]}"; do
-        sysctl -wq "${s}=${wanted[$s]}" || log "WARN: failed to set ${s}"
-    done
-}
-
 # Create-or-flush our sub-chain, then ensure PREROUTING jumps to it once.
 install_chain() {
     iptables -t mangle -N "${CHAIN}" 2>/dev/null || true
@@ -135,18 +121,6 @@ show_status() {
 
     log "=== ip route table ${ROUTE_TABLE} ==="
     ip route show table "${ROUTE_TABLE}" || log "(empty)"
-
-    log "=== sysctls ==="
-    local s
-    for s in \
-        net.ipv4.conf.all.rp_filter \
-        "net.ipv4.conf.${INGRESS_IFACE}.rp_filter" \
-        net.ipv4.conf.lo.rp_filter \
-        net.ipv4.conf.all.route_localnet \
-        "net.ipv4.conf.${INGRESS_IFACE}.accept_local"
-    do
-        printf '  %s = %s\n' "${s}" "$(sysctl -n "${s}" 2>/dev/null || echo '?')"
-    done
 }
 
 main() {
@@ -156,7 +130,6 @@ main() {
             require_root
             require_iface
             require_modules
-            apply_sysctls
             install_chain
             install_routing
             log "cube-proxy iptables/route rules installed"
@@ -166,7 +139,7 @@ main() {
             require_root
             remove_chain
             remove_routing
-            log "cube-proxy iptables/route rules removed (sysctls left as-is)"
+            log "cube-proxy iptables/route rules removed"
             ;;
         status)
             show_status

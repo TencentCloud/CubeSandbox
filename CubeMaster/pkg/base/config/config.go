@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -43,18 +44,18 @@ type Config struct {
 }
 
 type CommonConf struct {
-	MockUpdateAction                bool              `yaml:"mock_update_action"`
-	DebugDumpHttpBody               bool              `yaml:"debug_dump_http_body"`
-	MockDebug                       bool              `yaml:"mock_debug"`
-	MockNodeNum                     int               `yaml:"mock_node_num"`
-	MockCreateDirect                bool              `yaml:"mock_create_direct"`
-	MockCreateDirectHandle          bool              `yaml:"mock_create_direct_handle"`
-	MockHttpDirect                  bool              `yaml:"mock_http_direct"`
-	MockCreateSleep                 time.Duration     `yaml:"mock_create_sleep"`
-	MockPercents                    []float64         `yaml:"mock_percents"`
-	CubeDestroyCheckFilter          bool              `yaml:"cube_destroy_check_filter"`
-	Debug                           Debug             `toml:"debug"`
-	HttpPort                        int               `yaml:"http_port"`
+	MockUpdateAction       bool          `yaml:"mock_update_action"`
+	DebugDumpHttpBody      bool          `yaml:"debug_dump_http_body"`
+	MockDebug              bool          `yaml:"mock_debug"`
+	MockNodeNum            int           `yaml:"mock_node_num"`
+	MockCreateDirect       bool          `yaml:"mock_create_direct"`
+	MockCreateDirectHandle bool          `yaml:"mock_create_direct_handle"`
+	MockHttpDirect         bool          `yaml:"mock_http_direct"`
+	MockCreateSleep        time.Duration `yaml:"mock_create_sleep"`
+	MockPercents           []float64     `yaml:"mock_percents"`
+	CubeDestroyCheckFilter bool          `yaml:"cube_destroy_check_filter"`
+	Debug                  Debug         `toml:"debug"`
+	HttpPort               int           `yaml:"http_port"`
 	// HttpBind is the HTTP listen address. Empty means 0.0.0.0 (all
 	// interfaces); set to 127.0.0.1 to keep the API loopback-only.
 	HttpBind                        string            `yaml:"http_bind"`
@@ -132,6 +133,13 @@ type ExtraConf struct {
 	FsQos      string            `yaml:"fs_qos"`
 	FsQosMap   map[string]string `yaml:"fs_qos_map"`
 	NetQosList string            `yaml:"net_qos_list"`
+
+	// AllowedHostMountPrefixes restricts which host directories can be
+	// bind-mounted into sandboxes. Each entry must be an absolute path
+	// (trailing "/" is optional and will be appended automatically).
+	// A hostPath is allowed if it is under at least one prefix.
+	// Default (when empty): ["/data/shared/"].
+	AllowedHostMountPrefixes []string `yaml:"allowed_host_mount_prefixes"`
 }
 
 type RedisConf struct {
@@ -537,26 +545,30 @@ type TemplateScore struct {
 }
 
 type CubeletConf struct {
-	Grpc                    *GrpcConf            `yaml:"grpc"`
-	CommonTimeoutInsec      int                  `yaml:"common_timeout_insec"`
-	CreateImageTimeoutInSec int                  `yaml:"create_image_timeout_insec"`
-	AsyncFlows              map[string]asyncFlow `yaml:"async_flows"`
-	RetryCode               []string             `yaml:"retry_code"`
-	LoopRetryCode           []string             `yaml:"loop_retry_code"`
-	ReuseRetryCode          []string             `yaml:"reuse_retry_code"`
-	CircuitBreakCode        []string             `yaml:"circuit_break_code"`
-	ExcludeLoopRetryCode    []string             `yaml:"exclude_loop_retry_code"`
-	BackoffRetryCode        []string             `yaml:"backoff_retry_code"`
-	MaxRetries              int64                `yaml:"max_retries"`
-	LoopMaxRetries          int64                `yaml:"loop_max_retries"`
-	BufferQueueMinJob       int64                `yaml:"buffer_queue_min_job"`
-	CreateConcurrentLimit   int64                `yaml:"create_concurrent_limit"`
-	DestroyConcurentLimit   int64                `yaml:"destroy_concurent_limit"`
-	ExposedPortList         []string             `yaml:"exposed_port_list"`
-	EnableExposedPort       bool                 `yaml:"enable_exposed_port"`
-	DisableRedisProxyPort   bool                 `yaml:"disable_redis_proxy_port"`
-	MaxDelayInSecond        int64                `yaml:"max_delay_in_second"`
-	BackoffRetryDelay       time.Duration        `yaml:"backoff_retry_delay"`
+	Grpc                    *GrpcConf `yaml:"grpc"`
+	CommonTimeoutInsec      int       `yaml:"common_timeout_insec"`
+	CreateImageTimeoutInSec int       `yaml:"create_image_timeout_insec"`
+	// Server default idle TTL when the client omits timeout. See docs/guide/lifecycle.md.
+	DefaultTimeoutInsec int `yaml:"default_timeout_insec"`
+	// Create RPC / scheduling deadline; decoupled from idle TTL.
+	CreateTimeoutInsec    int                  `yaml:"create_timeout_insec"`
+	AsyncFlows            map[string]asyncFlow `yaml:"async_flows"`
+	RetryCode             []string             `yaml:"retry_code"`
+	LoopRetryCode         []string             `yaml:"loop_retry_code"`
+	ReuseRetryCode        []string             `yaml:"reuse_retry_code"`
+	CircuitBreakCode      []string             `yaml:"circuit_break_code"`
+	ExcludeLoopRetryCode  []string             `yaml:"exclude_loop_retry_code"`
+	BackoffRetryCode      []string             `yaml:"backoff_retry_code"`
+	MaxRetries            int64                `yaml:"max_retries"`
+	LoopMaxRetries        int64                `yaml:"loop_max_retries"`
+	BufferQueueMinJob     int64                `yaml:"buffer_queue_min_job"`
+	CreateConcurrentLimit int64                `yaml:"create_concurrent_limit"`
+	DestroyConcurentLimit int64                `yaml:"destroy_concurent_limit"`
+	ExposedPortList       []string             `yaml:"exposed_port_list"`
+	EnableExposedPort     bool                 `yaml:"enable_exposed_port"`
+	DisableRedisProxyPort bool                 `yaml:"disable_redis_proxy_port"`
+	MaxDelayInSecond      int64                `yaml:"max_delay_in_second"`
+	BackoffRetryDelay     time.Duration        `yaml:"backoff_retry_delay"`
 }
 
 type GrpcConf struct {
@@ -884,6 +896,10 @@ func preHandleCubeletConf(config *Config) error {
 	if config.CubeletConf.CommonTimeoutInsec == 0 {
 		config.CubeletConf.CommonTimeoutInsec = 30
 	}
+	// DefaultTimeoutInsec is left untouched — see docs/guide/lifecycle.md.
+	if config.CubeletConf.CreateTimeoutInsec <= 0 {
+		config.CubeletConf.CreateTimeoutInsec = 300
+	}
 	if config.CubeletConf.MaxRetries == 0 {
 		config.CubeletConf.MaxRetries = 5
 	}
@@ -1129,12 +1145,40 @@ func validate(cfg *Config) error {
 			}
 		}
 	}
+	for _, p := range cfg.ExtraConf.AllowedHostMountPrefixes {
+		cleaned := filepath.Clean(p)
+		if cleaned == "/" || cleaned == "." || !filepath.IsAbs(p) {
+			return fmt.Errorf("allowed_host_mount_prefixes entry %q must be an absolute path and must not be root or empty", p)
+		}
+	}
 	return nil
 }
 
 //go:noinline
 func GetConfig() *Config {
 	return cfg
+}
+
+var defaultAllowedHostMountPrefixes = []string{"/data/shared/"}
+
+// GetAllowedHostMountPrefixes returns the configured allowed host-mount
+// prefixes, defaulting to ["/data/shared/"] when not configured.
+// Trailing "/" is auto-appended if missing. Returns a defensive copy.
+func GetAllowedHostMountPrefixes() []string {
+	c := cfg
+	if c == nil || c.ExtraConf == nil || len(c.ExtraConf.AllowedHostMountPrefixes) == 0 {
+		return append([]string{}, defaultAllowedHostMountPrefixes...)
+	}
+	raw := c.ExtraConf.AllowedHostMountPrefixes
+	result := make([]string, len(raw))
+	for i, p := range raw {
+		if !strings.HasSuffix(p, "/") {
+			result[i] = p + "/"
+		} else {
+			result[i] = p
+		}
+	}
+	return result
 }
 
 func notify(config *Config) {

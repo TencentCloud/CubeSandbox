@@ -275,8 +275,9 @@ func StreamRegistryToDir(ctx context.Context, source *PreparedSource, destDir st
 				_ = f.Close()
 				return fmt.Errorf("native export failed to decompress layer %d: %w", i, err)
 			}
-
-			_, applyErr := archive.Apply(egCtx, destDir, decompressed, archive.WithNoSameOwner())
+			// WithNoSameOwner,it squashes all uid/gid to the
+			// unpacking user (root), breaking images with non-root-owned files.
+			_, applyErr := archive.Apply(egCtx, destDir, decompressed)
 			_ = decompressed.Close()
 			_ = f.Close() // safe to double close, ensures FD is freed immediately
 

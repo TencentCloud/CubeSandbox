@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -203,13 +204,15 @@ func init() {
 			}
 
 			l := &local{
-				client:        client,
-				localTask:     i.(tasks.TasksClient),
-				config:        config,
-				criImage:      obj.(*cubeimages.CubeImageService),
-				cbriManager:   cbriManager,
-				cubeboxManger: cubeboxAPIObj.(cubes.CubeboxAPI),
-				shims:         shimPlugin.(*v2.ShimManager),
+				client:         client,
+				localTask:      i.(tasks.TasksClient),
+				config:         config,
+				criImage:       obj.(*cubeimages.CubeImageService),
+				cbriManager:    cbriManager,
+				cubeboxManger:  cubeboxAPIObj.(cubes.CubeboxAPI),
+				shims:          shimPlugin.(*v2.ShimManager),
+				envdHTTPClient: newEnvdHTTPClient(),
+				envdInitPort:   defaultEnvdInitPort,
 			}
 
 			CubeLog.Info("Start recovering state")
@@ -254,9 +257,12 @@ type local struct {
 	config    *CubeConfig
 	shims     *v2.ShimManager
 
-	criImage      *cubeimages.CubeImageService
-	cbriManager   cbri.APIManager
-	cubeboxManger cubes.CubeboxAPI
+	criImage       *cubeimages.CubeImageService
+	cbriManager    cbri.APIManager
+	cubeboxManger  cubes.CubeboxAPI
+	envdHTTPClient *http.Client
+	envdInitPort   int
+	destroyFn      func(context.Context, *workflow.DestroyContext) error
 }
 
 const (

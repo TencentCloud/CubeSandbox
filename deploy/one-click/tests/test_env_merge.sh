@@ -166,6 +166,56 @@ EOF
   ) || fail "merged env did not source/expand correctly"
 }
 
+test_upsert_env_kv_preserves_shell_sensitive_values() {
+  local env_file="${TMP_DIR}/upsert-sensitive.env"
+  local secret=$'p@$$ word `tick` "quote" #hash;\\slash'
+
+  upsert_env_kv "${env_file}" "CUBE_EXTERNAL_MYSQL_PASSWORD" "${secret}"
+
+  assert_contains "${env_file}" 'CUBE_EXTERNAL_MYSQL_PASSWORD="'
+  (
+    unset CUBE_EXTERNAL_MYSQL_PASSWORD
+    load_env_file "${env_file}"
+    [[ "${CUBE_EXTERNAL_MYSQL_PASSWORD}" == "${secret}" ]] || {
+      echo "expected '${secret}', got '${CUBE_EXTERNAL_MYSQL_PASSWORD:-}'" >&2
+      exit 1
+    }
+  ) || fail "upsert_env_kv did not preserve shell-sensitive value"
+}
+
+test_upsert_env_kv_quotes_shell_metachar_only_values() {
+  local env_file="${TMP_DIR}/upsert-metachar.env"
+  local secret='CubeSandbox123;'
+
+  upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${secret}"
+
+  assert_contains "${env_file}" 'CUBE_EXTERNAL_REDIS_PASSWORD="CubeSandbox123;'
+  (
+    unset CUBE_EXTERNAL_REDIS_PASSWORD
+    load_env_file "${env_file}"
+    [[ "${CUBE_EXTERNAL_REDIS_PASSWORD}" == "${secret}" ]] || {
+      echo "expected '${secret}', got '${CUBE_EXTERNAL_REDIS_PASSWORD:-}'" >&2
+      exit 1
+    }
+  ) || fail "shell metachar-only value should still be quoted safely"
+}
+
+test_upsert_env_kv_keeps_plain_scalars_readable() {
+  local env_file="${TMP_DIR}/upsert-plain.env"
+
+  cat > "${env_file}" <<'EOF'
+ONE_CLICK_DEPLOY_ROLE=control
+KEEP_ME=1
+EOF
+
+  upsert_env_kv "${env_file}" "ONE_CLICK_DEPLOY_ROLE" "compute"
+
+  assert_value "${env_file}" ONE_CLICK_DEPLOY_ROLE compute
+  assert_value "${env_file}" KEEP_ME 1
+  [[ "$(read_env_key "${env_file}" ONE_CLICK_DEPLOY_ROLE)" == "compute" ]] \
+    || fail "read_env_key should keep seeing plain scalar values"
+}
+
 test_keeps_old_only_host_keys() {
   local new="${TMP_DIR}/new6.example" old="${TMP_DIR}/old6.env"
   local out="${TMP_DIR}/out6.env" diff="${TMP_DIR}/diff6.txt"
@@ -476,6 +526,9 @@ test_adds_new_keys_with_defaults
 test_three_way_adopts_new_default_for_untouched_key
 test_three_way_keeps_customized_over_new_default
 test_preserves_shell_sensitive_values
+test_upsert_env_kv_preserves_shell_sensitive_values
+test_upsert_env_kv_quotes_shell_metachar_only_values
+test_upsert_env_kv_keeps_plain_scalars_readable
 test_keeps_old_only_host_keys
 test_preserves_comments_and_structure
 test_two_way_fallback_without_baseline

@@ -464,7 +464,7 @@ pub async fn create_agent_instance(
         .sandboxes
         .create_sandbox(NewSandbox {
             template_id: template_id.clone(),
-            timeout,
+            timeout: Some(timeout),
             lifecycle: None,
             secure: None,
             allow_internet_access: Some(true),
@@ -724,8 +724,6 @@ fn openclaw_model_suffix(model: &str) -> &str {
 /// reason about prefixes, providers, or credential modes.
 #[derive(Debug, Clone)]
 struct LlmRuntimePlan {
-    /// Original model string as stored/displayed (e.g. `deepseek/deepseek-v4-flash`).
-    public_model: String,
     /// Bare model id sent upstream as the request body `model` field.
     upstream_model_id: String,
     /// Provider literal from settings (e.g. `deepseek`, `openai-compatible`).
@@ -762,7 +760,6 @@ impl LlmRuntimePlan {
             openclaw_primary,
             openclaw_api_key: llm.openclaw_api_key().to_string(),
             credential_mode: llm.credential_mode.clone(),
-            public_model,
         }
     }
 }
@@ -2229,7 +2226,7 @@ pub async fn clone_agent_instance(
         .sandboxes
         .create_sandbox(NewSandbox {
             template_id: snapshot_id.clone(),
-            timeout,
+            timeout: Some(timeout),
             lifecycle: None,
             secure: None,
             allow_internet_access: Some(true),
@@ -2935,7 +2932,7 @@ pub async fn resume_agent_openclaw(
     state
         .services
         .sandboxes
-        .connect_sandbox(&record.sandbox_id, timeout)
+        .connect_sandbox(&record.sandbox_id, Some(timeout))
         .await?;
     let store = state.agenthub_store.as_ref().ok_or_else(|| {
         AppError::BadRequest("AgentHub database persistence is not configured".to_string())
@@ -3242,8 +3239,10 @@ enum OpenClawApplyMode {
     /// without bundled state.
     FullInit,
     /// Only merge the LLM-related blocks into existing config, preserving the
-    /// gateway (and its token). Used when the sandbox already carries OpenClaw
-    /// state (published template fast path / clone from snapshot).
+    /// gateway (and its token). Gateway `bind` is forced to `"lan"` regardless
+    /// of existing state to ensure cube-proxy can reach the sandbox tap IP.
+    /// Used when the sandbox already carries OpenClaw state (published template
+    /// fast path / clone from snapshot).
     MergeLlm,
 }
 
@@ -3687,7 +3686,7 @@ if mode == "full_init":
             token = existing
         if not token:
             token = secrets.token_hex(16)
-        gateway["bind"] = os.environ.get("OPENCLAW_BIND", "auto")
+        gateway["bind"] = "lan"
         gateway["port"] = int(os.environ.get("OPENCLAW_PORT", "18789"))
         gateway["mode"] = "local"
         gateway["tailscale"] = {"mode": "off", "resetOnExit": False}
@@ -3737,6 +3736,10 @@ if mode == "full_init":
             "secret": os.environ["OPENCLAW_BOT_SECRET"],
             "enabled": True,
         }, ensure_ascii=False, indent=2) + "\n")
+
+# Cube-proxy dials the sandbox tap IP, so merge_llm / template fast paths must
+# still expose the gateway on non-loopback interfaces ("lan", not loopback/auto).
+data.setdefault("gateway", {})["bind"] = "lan"
 
 tmp = config_path.with_suffix(".json.tmp")
 tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
@@ -4035,7 +4038,6 @@ mod tests {
         );
         assert_eq!(plan.upstream_model_id, "deepseek-v4-flash");
         assert_eq!(plan.openclaw_primary, "openai-compatible/deepseek-v4-flash");
-        assert_eq!(plan.public_model, "deepseek/deepseek-v4-flash");
     }
 
     #[test]

@@ -531,19 +531,13 @@ func TestValidateSnapshotMetricsRejectsMissingKeys(t *testing.T) {
 	}
 }
 
-// TestDeleteSnapshotDoesNotBlockWhenRuntimeRefsExist verifies that the
-// in-use / runtime-ref prechecks no longer abort DeleteSnapshot. Even when
-// sandboxes still reference the snapshot, delete must proceed past the
-// guards because rootfs is reflink/CoW-derived (source can be removed
-// without affecting derived sandbox rootfs) and the memory vol stays
-// accessible to the running hypervisor via its open fd / dm handle until
-// the sandbox exits.
+// TestDeleteSnapshotBlocksWhenRuntimeRefsExist verifies that the active
+// runtime binding table is the current-state authority: deleting a snapshot
+// that is still attached to a sandbox must fail with a conflict.
 //
-// The test patches nextSnapshotAttempt with a sentinel error and asserts
-// DeleteSnapshot bubbles up that sentinel - if either guard still rejected,
-// we would see the legacy ErrTemplateInUse / "still used by running
-// sandboxes" message and never reach nextSnapshotAttempt.
-func TestDeleteSnapshotDoesNotBlockWhenRuntimeRefsExist(t *testing.T) {
+// The legacy template in-use precheck remains warning-only, but active runtime
+// refs are authoritative and must prevent reaching nextSnapshotAttempt.
+func TestDeleteSnapshotBlocksWhenRuntimeRefsExist(t *testing.T) {
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -576,8 +570,7 @@ func TestDeleteSnapshotDoesNotBlockWhenRuntimeRefsExist(t *testing.T) {
 			}},
 		}, nil
 	})
-	// Both prechecks now report the snapshot as still in use - they should
-	// only emit warnings instead of aborting DeleteSnapshot.
+	// The legacy template in-use precheck is still warning-only.
 	patches.ApplyFunc(isTemplateInUse, func(ctx context.Context, templateID, instanceType string) (bool, error) {
 		return true, nil
 	})
@@ -589,23 +582,23 @@ func TestDeleteSnapshotDoesNotBlockWhenRuntimeRefsExist(t *testing.T) {
 		}}, nil
 	})
 
-	sentinel := errors.New("sentinel: reached nextSnapshotAttempt past in-use guards")
+	sentinel := errors.New("sentinel: reached nextSnapshotAttempt past runtime-ref guard")
 	patches.ApplyFunc(nextSnapshotAttempt, func(ctx context.Context, snapshotID string) (int32, string, error) {
 		return 0, "", sentinel
 	})
 
 	_, err := DeleteSnapshot(context.Background(), "req-delete", "snap-in-use", "cubebox")
 	if err == nil {
-		t.Fatalf("DeleteSnapshot returned nil error; expected sentinel to propagate")
+		t.Fatal("DeleteSnapshot returned nil error; expected active runtime refs to block deletion")
 	}
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("DeleteSnapshot error = %q, want sentinel %q (a guard appears to still block)", err.Error(), sentinel.Error())
+	if errors.Is(err, sentinel) {
+		t.Fatalf("DeleteSnapshot reached nextSnapshotAttempt despite active runtime refs: %v", err)
 	}
-	if errors.Is(err, ErrTemplateInUse) {
-		t.Fatalf("DeleteSnapshot returned ErrTemplateInUse; the in-use guard should be a warning only")
+	if !errors.Is(err, ErrTemplateAttemptInProgress) {
+		t.Fatalf("DeleteSnapshot error = %v, want ErrTemplateAttemptInProgress", err)
 	}
-	if strings.Contains(err.Error(), "still used by running sandboxes") {
-		t.Fatalf("DeleteSnapshot error = %q, runtime-ref guard should no longer reject", err.Error())
+	if !strings.Contains(err.Error(), "active runtime ref") {
+		t.Fatalf("DeleteSnapshot error = %q, want active runtime ref message", err.Error())
 	}
 }
 

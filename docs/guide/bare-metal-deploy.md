@@ -1,6 +1,6 @@
 # Bare-Metal / Physical Machine Deployment
 
-> **Use case:** You already have an x86_64 Linux machine with KVM support (`/dev/kvm` available), such as a physical machine, bare-metal server, or a cloud VM with nested virtualization enabled.
+> **Use case:** You already have an x86_64 or aarch64 (ARM64) Linux machine with KVM support (`/dev/kvm` available), such as a physical machine, bare-metal server, or a cloud VM with nested virtualization enabled.
 >
 > If you're on an **ordinary cloud VM** without `/dev/kvm`, you don't need bare-metal — use PVM to enable KVM on standard cloud VMs, see [Quick Start](./quickstart.md).
 
@@ -10,7 +10,7 @@ If you plan to use Cube Sandbox in a production environment, please refer to the
 
 ## Prerequisites
 
-- **x86_64** Linux machine
+- **x86_64** or **aarch64** (ARM64) Linux machine
 - `/dev/kvm` present and read/writable (`ls -la /dev/kvm`)
 - **Root access**
 - **Docker** installed and running
@@ -28,10 +28,35 @@ sudo su root
 
 ## Step 1: Install
 
+### x86_64 (AMD64)
+
 Run as root:
 
 ```bash
 curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+```
+
+### ARM64 (aarch64) Hosts
+
+::: warning online-install.sh ARM64 support coming soon
+The `online-install.sh` one-command installer currently auto-discovers **x86_64** packages only. ARM64 support in `online-install.sh` will be available in an upcoming release. For now, ARM64 users should follow the manual steps below.
+:::
+
+**Step 1:** Go to the release page for your region, find the latest release that includes ARM64 assets, and download the `cube-sandbox-one-click-*-arm64.tar.gz` package:
+
+| Platform | Release Page |
+|---|---|
+| GitHub | [TencentCloud/CubeSandbox/releases](https://github.com/TencentCloud/CubeSandbox/releases) |
+| CNB (China) | [CubeSandbox/CubeSandbox/-/releases](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases) |
+
+**Step 2:** Extract and run the installer:
+
+```bash
+# Replace <version> with the actual version you downloaded (e.g. v0.5.0-rc3)
+tar -xzf cube-sandbox-one-click-<version>-arm64.tar.gz
+cd cube-sandbox-one-click-<version>-arm64
+chmod +x install.sh
+./install.sh
 ```
 
 ::: details What gets installed
@@ -39,6 +64,10 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-cl
 - CubeMaster, Cubelet, network-agent, CubeShim running as host processes
 - MySQL and Redis managed via Docker Compose
 - CubeProxy providing TLS (mkcert) and CoreDNS domain routing (`cube.app`)
+:::
+
+::: tip ARM64 hosts without a guest PMU
+On some aarch64 hosts — older kernels, nested-virtualization setups, or certain ARM cores — KVM does not expose a guest PMUv3. MicroVMs still boot on these hosts; the hypervisor initializes the vCPU without a PMU and the guest simply sees no hardware performance counters. No action is needed.
 :::
 
 ## Step 2: Create a Template

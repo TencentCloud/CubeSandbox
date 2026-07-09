@@ -55,12 +55,13 @@ type managedState struct {
 }
 
 type localService struct {
-	cfg       Config
-	store     *stateStore
-	allocator *ipAllocator
-	ports     *portAllocator
-	device    *machineDevice
-	cubeDev   *cubeDev
+	cfg        Config
+	store      *stateStore
+	allocator  *ipAllocator
+	ports      *portAllocator
+	device     *machineDevice
+	cubeDev    *cubeDev
+	cubeRouter *cubeRouter
 
 	mu                sync.Mutex
 	states            map[string]*managedState
@@ -94,6 +95,9 @@ func NewLocalService(cfg Config) (Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.CubeRouterEnable && cfg.CubeRouterCIDR == "" {
+		allocator.ReserveLastUsable(2)
+	}
 	ports, err := newPortAllocator()
 	if err != nil {
 		return nil, err
@@ -115,26 +119,61 @@ func NewLocalService(cfg Config) (Service, error) {
 		return nil, err
 	}
 	mvmGatewayIP := net.ParseIP(cfg.MvmGwDestIP).To4()
+	var crouter *cubeRouter
+	snatIfindex := device.Index
+	snatIP := device.IP
+	egressSrcMac := device.Mac
+	egressDstMac := device.GatewayMac
+	var egressRedirectFlags uint64
+	var cubeRouterIfindex uint32
+	if cfg.CubeRouterEnable {
+		routerSpec, err := cubeRouterSpecFromConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		if err := ensureCubeRouterMatches(routerSpec); err != nil {
+			return nil, err
+		}
+		crouter, err = getOrCreateCubeRouter(routerSpec, cfg.MvmMtu)
+		if err != nil {
+			return nil, err
+		}
+		if err := configureCubeRouterHostNetworking(crouter); err != nil {
+			return nil, err
+		}
+		snatIfindex = crouter.Index
+		snatIP = crouter.NATIP
+		egressSrcMac = mvmMacAddr
+		egressDstMac = crouter.Mac
+		egressRedirectFlags = cubevs.BPFRedirectFlagIngress
+		cubeRouterIfindex = uint32(crouter.Index)
+	} else if err := cleanupCubeRouter(); err != nil {
+		return nil, err
+	}
 	params := cubevs.Params{
-		MVMInnerIP:         mvmInnerIP,
-		MVMMacAddr:         mvmMacAddr,
-		MVMGatewayIP:       mvmGatewayIP,
-		Cubegw0Ifindex:     uint32(cdev.Index),
-		Cubegw0IP:          cdev.IP,
-		Cubegw0MacAddr:     cdev.Mac,
-		NodeIfindex:        uint32(device.Index),
-		NodeIP:             device.IP,
-		NodeMacAddr:        device.Mac,
-		NodeGatewayMacAddr: device.GatewayMac,
+		MVMInnerIP:          mvmInnerIP,
+		MVMMacAddr:          mvmMacAddr,
+		MVMGatewayIP:        mvmGatewayIP,
+		Cubegw0Ifindex:      uint32(cdev.Index),
+		Cubegw0IP:           cdev.IP,
+		Cubegw0MacAddr:      cdev.Mac,
+		EgressSrcMacAddr:    egressSrcMac,
+		EgressDstMacAddr:    egressDstMac,
+		EgressRedirectFlags: egressRedirectFlags,
+		CubeRouterIfindex:   cubeRouterIfindex,
+		NodeIfindex:         uint32(device.Index),
+		NodeIP:              device.IP,
+		NodeMacAddr:         device.Mac,
+		NodeGatewayMacAddr:  device.GatewayMac,
 	}
 	if err := cubevs.Init(params); err != nil {
 		return nil, err
 	}
 	if err := cubevs.SetSNATIPs([]*cubevs.SNATIP{{
-		Ifindex: device.Index,
-		IP:      device.IP,
+		Ifindex: snatIfindex,
+		IP:      snatIP,
 	}}); err != nil {
-		return nil, fmt.Errorf("set default local egress snat ip failed: %w", err)
+		return nil, fmt.Errorf("set egress snat ip failed: %w", err)
 	}
 	if err := os.WriteFile("/proc/sys/net/ipv4/ip_local_port_range", []byte("10000\t19999"), 0644); err != nil {
 		return nil, fmt.Errorf("set ip_local_port_range failed: %w", err)
@@ -155,6 +194,7 @@ func NewLocalService(cfg Config) (Service, error) {
 		ports:             ports,
 		device:            device,
 		cubeDev:           cdev,
+		cubeRouter:        crouter,
 		states:            make(map[string]*managedState),
 		tapPool:           make([]*tapDevice, 0, cfg.TapInitNum),
 		abnormalTapPool:   make([]*tapDevice, 0),

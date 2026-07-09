@@ -20,6 +20,12 @@
 - `scripts/one-click/`：systemd 托管部署安装后使用的校验与维护辅助脚本。
 - `terraform/tencentcloud/`：在腾讯云上部署**集群版** CubeSandbox 的 Terraform 部署器（TKE 控制面 + CVM 计算节点）。`create.sh` 为入口，`destroy.sh` 负责整体销毁。这些文件同时位于发布包顶层和 `sandbox-package` 内（见“腾讯云集群部署”）。
 
+## 支持的操作系统
+
+- 构建 / 部署执行机：推荐使用 Linux。腾讯云 Terraform 部署脚本（`terraform/tencentcloud/create.sh` 和 `destroy.sh`）也支持 macOS，包括 macOS 默认的 Bash 3.2 环境。
+- Windows：不支持原生 `cmd.exe` / PowerShell 直接执行。Windows 用户请通过 WSL2（Ubuntu 或其他 Linux 发行版）运行这些 shell 脚本。
+- 目标机：one-click 运行时要求 Linux，并依赖 systemd 与 Docker/containerd 能力。腾讯云 Terraform 部署器会创建 Linux CVM/TKE 资源，并通过 SSH 完成配置。
+
 ## 构建输入
 
 必须准备的固定 kernel 制品是普通 guest kernel `vmlinux`，也可以额外打包 PVM guest kernel `vmlinux-pvm`：
@@ -114,6 +120,7 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 one-click 不会在目标机额外创建一层全局 `configs/`，而是直接落到各组件原生配置入口：
 
 - `configs/single-node/cubemaster.yaml` -> `CubeMaster/conf.yaml`
+  - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — 设计与运维要点](../../docs/zh/guide/lifecycle.md#集群默认空闲超时default_timeout_insec)。
 - `Cubelet/config/` -> `Cubelet/config/`
 - `Cubelet/dynamicconf/` -> `Cubelet/dynamicconf/`
 - `configs/single-node/network-agent.yaml` -> `network-agent/network-agent.yaml`
@@ -289,7 +296,7 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 - 用 `CUBE_SANDBOX_NODE_IP` 渲染 `cubeproxy/global.conf`
 - 安装 `/etc/systemd/system/cube-sandbox-*.service|target|timer`，并把宿主机进程与容器统一交给 systemd 管理
 - MySQL、Redis、cube proxy、WebUI、CoreDNS 仍使用 Docker 运行，但生命周期改由各自的 systemd service 直接管理，而不是运行期依赖 `docker compose up -d`
-- 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`：同样会创建该 dummy link，并让 `dnsmasq` 在 `169.254.254.53` 上额外监听，安装器同时把 `/etc/resolv.conf` 从 NetworkManager 手里接管（`rc-manager=unmanaged`）并改写为指向该非 loopback IP。这样宿主与 `systemd-resolved` 路径保持对称，避免 Docker 在 `/etc/resolv.conf` 只剩 loopback nameserver 时默默回退到内置公网 DNS（`8.8.8.8`）——一旦回退，宿主上所有依赖域名解析的容器（典型如 `docker build` 跑 `apk update`）都会因为公网 DNS 在内网不可达而失败。
+- 若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`：同样会创建该 dummy link，并让 `dnsmasq` 在 `169.254.254.53` 上额外监听，安装器同时把 `/etc/resolv.conf` 从 NetworkManager 手里接管（`rc-manager=unmanaged`）并改写为指向该非 loopback IP。这样宿主与 `systemd-resolved` 路径保持对称，避免 Docker 在 `/etc/resolv.conf` 只剩 loopback nameserver 时默默回退到内置公网 DNS（`8.8.8.8`）——一旦回退，宿主上所有依赖域名解析的容器（典型如 `docker build` 跑 `apk update`）都会因为公网 DNS 在内网不可达而失败。若目标机上 NetworkManager 会初始化其 `dnsmasq` 插件但从不真正拉起子进程（例如通过 `ifcfg` + `assume` 管理的 bond 网卡），可设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本直接拉起并管理 `dnsmasq`，而不再依赖 NetworkManager 插件；面向客户端的解析器布局（dummy link、监听地址、入口 IP）在其它方面完全一致。
 - 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 systemd 状态与业务健康检查
 - 在 `/usr/local/services/cubetoolbox/webui/` 下运行标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/cubeapi/v1/health`
 
@@ -361,8 +368,8 @@ sudo yum install -y e2fsprogs util-linux
 二选一命令：
 
 - 证书准备阶段：`mkcert`（已内置在安装包中，若系统无此命令会自动从包内安装）
-- DNS 分流阶段：`resolvectl`，或 `systemctl + NetworkManager`
-- 若缺少 `dnsmasq` 且走 `NetworkManager` 回退路径，还需包管理器之一：`dnf` / `yum` / `apt-get`
+- DNS 分流阶段：`resolvectl`，或（默认的 `networkmanager` dnsmasq 回退路径需要）`systemctl + NetworkManager`。`standalone` dnsmasq 模式（`CUBE_PROXY_DNSMASQ_MODE=standalone`）不要求已加载/可重启的 `NetworkManager`
+- 若缺少 `dnsmasq` 且走任一 dnsmasq 回退路径（`networkmanager` 或 `standalone`），还需包管理器之一：`dnf` / `yum` / `apt-get`
 
 条件命令：
 
@@ -393,7 +400,7 @@ sudo yum install -y e2fsprogs util-linux
 > 配置、防火墙规则与凭据轮换。
 
 - 目标机需要 `root` 权限。
-- 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会回退到 `NetworkManager + dnsmasq`：同样创建该 dummy link，并通过 `listen-address` / `bind-interfaces` 让 `dnsmasq` 同时绑定 `127.0.0.1` 和 `169.254.254.53`；随后安装器自己写 `/etc/resolv.conf`（NetworkManager 切到 `rc-manager=unmanaged`），把 nameserver 指向 `169.254.254.53`，让宿主应用和 Docker 容器看到同一个非 loopback 解析器。
+- 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会回退到 `NetworkManager + dnsmasq`：同样创建该 dummy link，并通过 `listen-address` / `bind-interfaces` 让 `dnsmasq` 同时绑定 `127.0.0.1` 和 `169.254.254.53`；随后安装器自己写 `/etc/resolv.conf`（NetworkManager 切到 `rc-manager=unmanaged`），把 nameserver 指向 `169.254.254.53`，让宿主应用和 Docker 容器看到同一个非 loopback 解析器。当 NetworkManager 会加载其 `dnsmasq` 插件但从不拉起子进程（例如通过 `ifcfg` + `assume` 管理的 bond 网卡）时，可在 `.one-click.env` 中设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本直接拉起并管理 `dnsmasq`。
 - 目标机默认联网拉取 `mysql:8.0` 和 `redis:7-alpine`。
 - `mkcert` 二进制已内置在发布包中（`support/bin/mkcert`），安装时若系统未预装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
 - `cube proxy` 的 TLS 证书和私钥保存在宿主机 `CUBE_PROXY_CERT_DIR`，并通过 `docker compose` 以只读方式挂载进容器；更新证书后无需重建镜像，只需重启 `cube-proxy` 或在容器内 reload nginx。
@@ -408,22 +415,38 @@ sudo yum install -y e2fsprogs util-linux
 - 如果 `assets/kernel-artifacts/` 下缺少 `vmlinux`，`build-vm-assets.sh` 和 `build-release-bundle.sh` 会立即失败；`vmlinux-pvm` 在构建时是可选制品，但安装时若设置 `CUBE_PVM_ENABLE=1`，发布包内必须包含它；发布包里的 `cube-kernel-scf.zip` 会在打包阶段自动生成。
 - 如果 `deploy/guest-image/Dockerfile` 构建失败，或构建机的 `mkfs.ext4` 不支持 `-d`，guest image 生成会立即失败。
 - `cube-snapshot/spec.json` 在当前 one-click 首版中不是强制产物；缺失时相关插件会退化为告警，而不是阻塞基础启动。
-- 如果目标机既没有 `systemd-resolved` / `resolvectl`，也没有可重启的 `NetworkManager`，当前 one-click 仍会报错，因为这类环境下暂未接入第三套宿主机 DNS 方案。
+- 默认的 `NetworkManager + dnsmasq` 回退路径依赖 NetworkManager 拉起 `dnsmasq` 子进程。在 NetworkManager 会初始化插件但从不真正拉起它的目标机上（例如通过 `ifcfg` + `assume` 管理的 bond 网卡），可设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本自己拉起并管理 `dnsmasq`。standalone 模式不需要可重启的 `NetworkManager`，但在完全没有任何解析器管理器的目标机上，你必须确保之后没有其它组件覆盖 `/etc/resolv.conf`。该模式下 `dnsmasq` 作为一个不受 systemd 托管的裸子进程运行，若之后崩溃不会自动重启；可通过 `systemctl restart cube-sandbox-dns` 恢复。
 
 ## DNS 排障
 
 - 查看当前 split DNS 状态：`resolvectl status`
 - 验证宿主机 stub 是否正常：`dig +tcp +timeout=3 docker.cnb.cool @127.0.0.53`
-- 验证本地 DNS 入口是否正常：两条路径下客户端入口都是同一个 dummy link IP，统一执行 `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`。CoreDNS 内部仍然绑在 `127.0.0.54`，但只有 `systemd-resolved` 路径直连 CoreDNS，`NetworkManager` 回退路径先到 `dnsmasq` 再转发到 CoreDNS。
+- 验证本地 DNS 入口是否正常：在 `systemd-resolved` 路径以及两条 `dnsmasq` 回退路径（`NetworkManager` 托管或 `standalone`）下，客户端入口都是同一个 dummy link IP，统一执行 `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`。CoreDNS 内部仍然绑在 `127.0.0.54`，但只有 `systemd-resolved` 路径直连 CoreDNS，回退路径先到 `dnsmasq` 再转发到 CoreDNS。
 - 验证宿主 `/etc/resolv.conf` 是否走该入口：`cat /etc/resolv.conf` 应能看到 `nameserver 169.254.254.53`（两条路径均如此）。
 - 验证容器视角：`docker run --rm alpine cat /etc/resolv.conf` 也应是 `nameserver 169.254.254.53`。如果看到 `nameserver 8.8.8.8`，说明宿主 `/etc/resolv.conf` 退化到了 loopback nameserver，导致 Docker 回退到内置公网 DNS。
 - 若使用 `systemd-resolved` 路径，正常情况下默认网卡不应承载本地 CoreDNS 地址；该地址应只出现在专用 dummy link 上。
 
 ## 腾讯云集群部署 (Terraform)
 
+> 完整指南（架构图、资源清单、TKE / PrivateDNS / CFS 前置条件、E2B 与 `*.cube.app` 域名、容量规划、加固与排障）请参阅文档站：[腾讯云集群部署（Terraform）](../../docs/zh/guide/tencentcloud-terraform-deploy.md)。
+
 除了单机的 `install.sh` 之外，发布包还附带一个基于 Terraform 的部署器，可在腾讯云上拉起**集群版** CubeSandbox：由托管的 TKE 控制面运行 `cubemaster` / `cube-api` / `cube-proxy` / `cube-webui`，后端使用云上 MySQL + Redis，并带一个或多个 CVM PVM 计算节点。跳板机（SSH 端口 `443`）既是构建主机，也是这个原本私有 VPC 的堡垒机。
 
-`cubemaster` 运行多个副本，通过一块以 ReadWriteMany 方式挂载的 CFS（文件存储，通用标准型）NFS 共享盘共用 `/data/CubeMaster/storage` 目录——该文件系统弹性按量计费，会在部署 addons 之前先行创建，使各副本读写同一份模板 / 存档 / 运行时状态。
+默认部署模式（与 `env.example` / `variables.tf` 一致）使用**公网预置镜像**（`TENCENTCLOUD_USE_TCR=false`），不在跳板机构建镜像；`cubemaster` 默认**单副本**且**不创建 CFS**（`TENCENTCLOUD_USE_CFS=false`，使用 Pod 本地存储）。启用 `TENCENTCLOUD_USE_CFS=true` 且提高 `TENCENTCLOUD_CUBEMASTER_REPLICAS` 时，才会创建 CFS 共享盘供多副本共用 `/data/CubeMaster/storage`。
+
+`cube-proxy` 默认运行**单副本**（`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`）。自动暂停 / 自动恢复只有在单副本下才正确，因为每个 sidecar sweeper 只能看到打到自身 Pod 的流量。若要扩展到多副本，前端 LB 必须按 SandboxID 做 hash（会话保持），否则自动暂停 / 自动恢复会误判。
+
+### 部署前准备（摘要）
+
+首次 `create.sh` apply 前建议完成：
+
+1. **TKE 服务角色授权**（必须）：登录 [TKE 控制台](https://console.cloud.tencent.com/tke2) 完成服务授权。文档：[服务授权相关角色权限说明](https://cloud.tencent.com/document/product/457/43416)。子账号还需 [TKE 预设策略授权](https://cloud.tencent.com/document/product/457/46033)。
+2. **Private DNS**（按需）：`USE_TCR=true` 或 E2B SDK 访问 `*.cube.app` 时需开通。控制台：[DNSPod 内网解析](https://console.dnspod.cn/privateDNS)。文档：[Private DNS 产品介绍](https://cloud.tencent.com/document/product/1338/50527)。
+3. **CFS**（按需）：仅 `TENCENTCLOUD_USE_CFS=true` 且 cubemaster 多副本时需要。控制台：[CFS](https://console.cloud.tencent.com/cfs)。文档：[CFS 快速入门](https://cloud.tencent.com/document/product/582/9132)。
+
+> **TKE worker 与 PVM 计算节点是两套资源：** `TENCENTCLOUD_TKE_NODE_COUNT` 控制 TKE worker（运行控制面 Pod）；`TENCENTCLOUD_COMPUTE_NODE_COUNT` 控制 PVM 计算节点（运行 Cubelet / sandbox）。默认均为 `2`，职责不同。
+
+> **E2B SDK：** 集群版不含单机 one-click 的 CoreDNS split DNS。除配置 `E2B_API_URL` 外，还须为 `*.cube.app` 配置 Private DNS 或等价解析，详见[完整指南 — E2B 与 cube.app 域名](../../docs/zh/guide/tencentcloud-terraform-deploy.md#e2b-与-cubeapp-域名)。
 
 该部署器被放在解压后发布包的**顶层**，因此解压后即可直接运行：
 
@@ -442,7 +465,8 @@ export TENCENTCLOUD_SECRET_KEY="your-secret-key"
 - 它会自动探测本地 bundle（外层的 `cube-sandbox-one-click-<version>.tar.gz`，若该 tar 包已不存在则重新打包解压目录），并将其作为组件镜像和计算节点安装的离线源。当探测到本地 bundle 或通过 `TENCENTCLOUD_LOCAL_BUNDLE=/path/to.tar.gz` 指定时，无需任何公网下载；否则跳板机会回退到**在线安装**（下载 `online-install.sh` 与安装包），此时需要公网访问。
 - 如果不存在 SSH 密钥对，它会在 `terraform/tencentcloud/.ssh/` 下自动生成。
 - 它会在跳板机上使用内置的 `mkcert`（随 `assets/package/sandbox-package.tar.gz` 发布，即解压内层包后的 `sandbox-package/support/bin/mkcert`，与 `scripts/one-click/up-cube-proxy.sh` 流程一致）生成 cube-proxy CLB 的 TLS 证书（`cube.app` / `*.cube.app`），在跳板机的 `/root/cubeproxy-certs` 保留一份副本，并下载到本地 `terraform/tencentcloud/cubeproxy-certs/` 供 Secret 挂载。
-- 它会构建并推送四个组件镜像到它创建的 TCR 实例，然后部署 TKE addons 和 CVM 计算节点。`create.sh` 始终至少创建一个计算节点；用 `TENCENTCLOUD_COMPUTE_NODE_COUNT` 调整数量。
+- **默认模式**（`TENCENTCLOUD_USE_TCR=false`）：直接拉取公网预置镜像，部署 TKE addons 和 CVM 计算节点。
+- **TCR 模式**（`TENCENTCLOUD_USE_TCR=true`）：创建 TCR 并在跳板机构建/推送四个组件镜像，再部署 TKE addons 和计算节点。默认创建 2 个计算节点；用 `TENCENTCLOUD_COMPUTE_NODE_COUNT` 调整数量。
 
 cube-webui 的 nginx 配置（`webui-nginx.conf`）不单独维护：它派生自规范文件 `deploy/one-click/webui/nginx.conf`（由发布包构建时放入，或在源码树中运行 `create.sh` 时复制）。
 
@@ -452,17 +476,20 @@ cube-webui 的 nginx 配置（`webui-nginx.conf`）不单独维护：它派生�
 
 ```bash
 export TENCENTCLOUD_REGION=ap-guangzhou
-export TENCENTCLOUD_COMPUTE_NODE_COUNT=2    # CVM PVM 计算节点数（默认 1）
-export TENCENTCLOUD_TKE_NODE_COUNT=2        # TKE worker 节点数（默认 2）
-export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=S5.2XLARGE16
-export TENCENTCLOUD_CUBE_IMAGE_TAG=latest   # 四个镜像共用的 tag
+export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-6
+export TENCENTCLOUD_COMPUTE_NODE_COUNT=2          # CVM PVM 计算节点数（默认 2）
+export TENCENTCLOUD_TKE_NODE_COUNT=2              # TKE worker 节点数（默认 2）
+export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
+export TENCENTCLOUD_USE_TCR=false                 # 默认使用公网预置镜像
+export TENCENTCLOUD_USE_CFS=false                 # 默认无 CFS，cubemaster 单副本
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.1-rc3
 ```
 
 非交互 / CI 运行时建议显式设置以下变量（没有 TTY 时交互菜单会回退到默认值，显式设置可避免意外）。密码变量是例外：非交互运行会拒绝使用仓库中公开可见的内置演示密码并要求显式设置；如需在临时沙箱中使用不安全的默认密码，可设置 `TENCENTCLOUD_ALLOW_INSECURE_DEFAULTS=1`。
 
 ```bash
-export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-3    # 否则取首个查询到的可用区 / <region>-3
-export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=S5.2XLARGE16  # 否则取首选默认机型
+export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-6
+export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_LOCAL_BUNDLE=/path/to/cube-sandbox-one-click-<version>.tar.gz  # 在已解压的发布包内运行时会自动探测
 export TENCENTCLOUD_PVM_KERNEL_VMLINUX=/path/to/vmlinux-pvm  # 仅当发布包不含 vmlinux-pvm 时需要
 export TENCENTCLOUD_MYSQL_PASSWORD=...      # 非交互运行必填（无不安全回退）
@@ -482,7 +509,8 @@ export TENCENTCLOUD_BUILD_IMAGES=0          # 复用已推送的镜像
 > **⚠ 避免不合理计费：** 当 `destroy.sh` 无法正常删除全部资源时（例如 MySQL/Redis 处于回收站/隔离状态，或 Terraform 已无法感知的残留资源），请登录腾讯云控制台手动删除残留资源，以免被继续计费：
 > [VPC / 网络资源](https://console.cloud.tencent.com/vpc)、
 > [MySQL 回收站](https://console.cloud.tencent.com/cdb/recycle)、
-> [Redis 回收站](https://console.cloud.tencent.com/redis/recycle)。
+> [Redis 回收站](https://console.cloud.tencent.com/redis/recycle)、
+> [CFS 文件系统](https://console.cloud.tencent.com/cfs)（若曾启用 `USE_CFS=true`）。
 > 当某个销毁步骤失败或回收站清理未确认成功时，`destroy.sh` 也会打印这些链接进行提醒。
 
 上述文件也内嵌在 `assets/package/sandbox-package.tar.gz` 中（供跳板机侧的 `build_images.sh` 使用）；顶层副本只是让部署器无需先解压内层包即可访问。
@@ -504,10 +532,10 @@ export TENCENTCLOUD_BUILD_IMAGES=0          # 复用已推送的镜像
   gitignore——没有远端 backend）。请保留该目录与生成的 `.env`，以便后续 `destroy.sh`
   或重新运行能找到并管理同一批资源。不要在临时副本里运行 `create.sh` 后又指望另一个
   副本来清理。
-- **分阶段、fail-fast 的 apply：** 资源按顺序创建——网络（VPC / 子网 / NAT）→ TCR →
-  CVM（跳板机 + 计算节点）→ 在跳板机上构建并推送镜像 → MySQL / Redis → CFS 共享存储 →
+- **分阶段、fail-fast 的 apply：** 资源按顺序创建——网络（VPC / 子网 / NAT）→ **（`USE_TCR=true` 时）** TCR →
+  CVM（跳板机 + 计算节点）→ **（TCR 模式）** 在跳板机上构建并推送镜像 → MySQL / Redis → **（`USE_CFS=true` 时）** CFS 共享存储 →
   TKE 集群 + Kubernetes addons → 健康检查 → 计算节点初始化。Kubernetes provider 只有在
-  TKE API Server 就绪后才会启用。销毁时会在删除子网之前先删除 CFS（其 NFS 挂载点是该子网
+  TKE API Server 就绪后才会启用。销毁时，若创建了 CFS，会在删除子网之前先删除 CFS（其 NFS 挂载点是该子网
   内的一块弹性网卡）。
 - 解析后的选择会保存到 `terraform/tencentcloud/.env` 并在下次运行时自动加载；显式设置
   的环境变量始终优先。

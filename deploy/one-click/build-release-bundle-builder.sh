@@ -83,15 +83,15 @@ echo "[one-click] building cube-api in builder" >&2
 install -m 0755 /workspace/CubeAPI/target/release/cube-api "${PREBUILT_DIR}/cube-api"
 
 echo "[one-click] building network-agent in builder" >&2
-(cd /workspace/network-agent && go build -ldflags "${NETAGENT_LDFLAGS}" -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
+(cd /workspace/CubeNet && make -C cubevs gen && cd /workspace/network-agent && go build -ldflags "${NETAGENT_LDFLAGS}" -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
 
 echo "[one-click] building cubevsmapdump in builder" >&2
-(cd /workspace/CubeNet/cubevs && go build -o "${PREBUILT_DIR}/cubevsmapdump" ./cmd/cubevsmapdump)
+(cd /workspace/CubeNet/cubevs && make gen && go build -o "${PREBUILT_DIR}/cubevsmapdump" ./cmd/cubevsmapdump)
 
 echo "[one-click] building cube-agent in builder" >&2
 # Agent Makefile reads CUBE_VERSION/CUBE_COMMIT/CUBE_BUILD_TIME directly.
 (cd /workspace/agent && make -j1)
-install -m 0755 /workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent "${PREBUILT_DIR}/cube-agent"
+make -C /workspace/agent BINDIR=${PREBUILT_DIR} install
 
 echo "[one-click] building shim workspace in builder" >&2
 # CUBE_VERSION/COMMIT/BUILD_TIME picked up by shim/build.rs and cube-runtime/build.rs

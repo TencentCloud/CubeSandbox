@@ -9,9 +9,9 @@
 rustflags = [ "-C", "link-arg=-lpthread" ]
 
 [target.aarch64-unknown-linux-musl]
-## Only setting linker with `aarch64-linux-musl-gcc`, the
+## Only setting linker with `musl-gcc`, the
 ## `rust-agent` could be totally statically linked.
-linker = "aarch64-linux-musl-gcc"
+linker = "musl-gcc"
 
 ## The __addtf3, __subtf3 and __multf3 symbols are used by aarch64-musl,
 ## but are not provided by rust compiler-builtins.

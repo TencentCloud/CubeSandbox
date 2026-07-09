@@ -5,8 +5,9 @@
 --      method, path, dst_ip, scheme).
 --   2. Look up the policy for the sandbox source IP.
 --   3. Walk policy.rules in order, first-match-wins.
---   4. On allow: enforce gates G1 (https only) and G4 (Host == SNI),
---      then for each inject{header, secret, format} run
+--   4. On allow: enforce gates G1 (scheme is http or https) and
+--      G4 (HTTPS: Host == SNI; HTTP: Host present), then for each
+--      inject{header, secret, format} run
 --      ngx.req.set_header. The secret value is embedded inline in the
 --      policy entry — no external lookup —
 --      so the only inject-failure shape left is "policy malformed at
@@ -17,10 +18,11 @@
 --   6. On deny, return 403 here without touching upstream.
 --
 -- Gate ownership in this module:
---   G1 https            — checked here (ctx.scheme == "https")
+--   G1 scheme valid     — checked here (ctx.scheme is "http" or "https")
 --   G2 TLS handshake OK — implicit (request reached HTTP layer)
---   G3 SNI matches rule — by rule_matches() above
+--   G3 SNI matches rule — by rule_matches() above (HTTPS only; HTTP has no SNI)
 --   G4 Host == SNI      — checked here, before any inject
+--                         (HTTPS: Host==SNI; HTTP: Host present)
 --   G5 dst IP authentic — implicit via G6 (proxy_ssl_verify)
 --   G6 upstream cert    — Pδ; nginx proxy_ssl_verify on (already in
 --                         http {}-level config)
@@ -48,11 +50,16 @@
 --               admin → access_phase path without needing an
 --               external admin server.
 --   "pending" — bootstrap fetch in flight (init_worker scheduled
---               a timer that hasn't completed). Fail-open with a
---               one-shot WARN: brief startup window, alternative
---               is dropping the very first connections.
+--               a timer that hasn't completed). Fail CLOSED: return
+--               403. CubeEgress is the outbound security boundary
+--               for untrusted sandbox code, so serving traffic
+--               without policies would let a sandbox bypass
+--               host/SNI/method/path controls during every startup
+--               or restart window. bootstrap.lua's own header says
+--               cube-egress MUST NOT serve data-plane traffic
+--               without policies; this gate enforces that invariant.
 --   "unknown" — meta_store unavailable (shouldn't happen). Same
---               fail-open as "pending"; a missing meta_store means
+--               fail-closed as "pending"; a missing meta_store means
 --               we also can't safely look up policies.
 --   any other — treated like "unknown" for safety.
 --
@@ -175,22 +182,40 @@ end
 --   false, "reason"           → drop ALL injects for this request
 --   false, "reason", true     → drop ALL injects AND mark security_event
 local function inject_gates(ctx)
-    -- G1: scheme must be https. Plain HTTP cannot transport credentials
-    -- safely; rules that target plain HTTP and request inject are an
-    -- operator error. Treat as drop, not security_event.
-    if ctx.scheme ~= "https" then
-        return false, "g1_not_https", false
+    -- G1: scheme must be either "http" or "https". We now allow inject
+    -- on plain HTTP as well as HTTPS — operators may legitimately need
+    -- to inject credentials into plaintext traffic on trusted networks
+    -- (e.g. intra-cluster 80). Any other scheme value means something
+    -- unexpected (ngx.var.scheme is http for the :8080 server block and
+    -- https for :8443, so this branch is only hit on misconfig); drop
+    -- inject, but do not flag security_event.
+    if ctx.scheme ~= "http" and ctx.scheme ~= "https" then
+        return false, "g1_unsupported_scheme", false
     end
-    -- G4: HTTP Host must equal the SNI. The SNI is what we used to pick
-    -- the rule and what proxy_ssl_name will send to the upstream.
-    -- A mismatch means the sandbox is trying to convince us
-    -- "talk to host A's cert/SNI but route the request as if Host=B"
-    -- — exactly the request-smuggling shape we want to block.
-    if not ctx.sni or not ctx.host then
-        return false, "g4_missing_sni_or_host", true
-    end
-    if string.lower(ctx.sni) ~= string.lower(ctx.host) then
-        return false, "g4_host_sni_mismatch", true
+    -- G4: HTTP Host must equal the SNI (HTTPS) or be present (HTTP).
+    --
+    --   HTTPS: SNI is what we used to pick the rule and what
+    --   proxy_ssl_name will send to the upstream. A mismatch means the
+    --   sandbox is trying to convince us "talk to host A's cert/SNI but
+    --   route the request as if Host=B" — exactly the request-smuggling
+    --   shape we want to block.
+    --
+    --   HTTP: there is no SNI, so the Host header is the only routing
+    --   identity. rule_matches() has already validated Host against the
+    --   rule's match constraint, so we only need to assert Host is
+    --   present — an empty Host on an otherwise-matched inject rule is
+    --   a misconfig / smuggling attempt and drops the inject.
+    if ctx.scheme == "https" then
+        if not ctx.sni or not ctx.host then
+            return false, "g4_missing_sni_or_host", true
+        end
+        if string.lower(ctx.sni) ~= string.lower(ctx.host) then
+            return false, "g4_host_sni_mismatch", true
+        end
+    else  -- ctx.scheme == "http"
+        if not ctx.host or ctx.host == "" then
+            return false, "g4_missing_host", true
+        end
     end
     return true
 end
@@ -307,7 +332,8 @@ local function allow(decision)
     -- ALL injects but the request still proceeds ("any G
     -- failure → drop inject; request continues based on action.allow").
     -- Failed gates flag security_event when the failure reason is
-    -- sandbox-controlled (G4 mismatch / missing SNI/Host on https).
+    -- sandbox-controlled (G4 mismatch, missing SNI/Host on https,
+    -- missing Host on http).
     --
     -- Important: when the rule says "we plan to inject header X", we
     -- ALWAYS clear that header from the sandbox-provided request first,
@@ -390,14 +416,19 @@ function _M.decide()
         security_event   = false,
     }
 
-    -- Bootstrap escape hatch (see module header).
+    -- Bootstrap gate (see module header).
     -- "ready" and "skipped" both proceed to normal policy enforcement.
-    -- "pending" / "unknown" / anything else fail open with a one-shot
-    -- WARN, since the brief startup window between init_worker and
-    -- the bootstrap timer firing shouldn't drop traffic.
+    -- "pending" / "unknown" / anything else fail CLOSED. CubeEgress is
+    -- the documented outbound security boundary for untrusted sandbox
+    -- code, so serving data-plane traffic before policies are loaded
+    -- would let a sandbox exfiltrate data or bypass host/SNI/method/path
+    -- controls during every startup or restart window. bootstrap.lua's
+    -- own header says cube-egress MUST NOT serve data-plane traffic
+    -- without policies; we enforce that invariant here.
     local meta = ngx.shared.meta_store
     local bootstrap_status = (meta and meta:get("bootstrap_status")) or "unknown"
     if bootstrap_status ~= "ready" and bootstrap_status ~= "skipped" then
+        decision.security_event = true
         decision.reason = "bootstrap_not_ready:" .. bootstrap_status
         decision.audit_level = "metadata"
         ngx.ctx.cube_decision = decision
@@ -408,13 +439,12 @@ function _M.decide()
             local newly = meta:add(seen_key, 1)
             if newly then
                 ngx.log(ngx.WARN, "[access] bootstrap_status=", bootstrap_status,
-                                   "; allowing all traffic without policy ",
-                                   "enforcement. Set CUBE_EGRESS_BOOTSTRAP_URL ",
+                                   "; denying all traffic until bootstrap ",
+                                   "completes. Set CUBE_EGRESS_BOOTSTRAP_URL ",
                                    "and load policies for production behavior.")
             end
         end
-        decision.allow = true
-        return
+        return ngx.exit(403)
     end
 
     if not ctx.sandbox_ip then

@@ -65,7 +65,7 @@ Reverse proxy and request routing component built on **OpenResty** (nginx + Lua)
 - **Host-based**: parses `<port>-<sandbox_id>.<domain>` from the `Host` header.
 - **Path-based**: parses `/sandbox/<sandbox_id>/<port>/...` from the URL path (useful when wildcard DNS and TLS are inconvenient — see the [HTTPS & Domain guide](../guide/https-and-domain.md)).
 
-It is paired with an **auto-pause / auto-resume sidecar** (written in **Go**) that watches lifecycle events, transparently pausing idle sandboxes and resuming paused ones on incoming requests.
+It is paired with the standalone **cube-lifecycle-manager** service (written in **Go**) that watches lifecycle events, transparently pauses idle sandboxes, and resumes paused ones on incoming requests. cube-lifecycle-manager discovers every live CubeProxy replica in real time through a Redis-backed registration table, so CubeProxy can scale to multiple replicas without any static wiring.
 
 ### Cubelet
 

@@ -13,7 +13,15 @@ import (
 	"time"
 )
 
-const JupyterPort = 49999
+const (
+	// JupyterPort is the code-interpreter (Jupyter) port, used only by the
+	// /execute endpoint (RunCode).
+	JupyterPort = 49999
+	// EnvdPort is the envd daemon port. All envd data-plane RPCs — commands,
+	// filesystem, files, and PTY — route here, matching the Python/Node SDKs
+	// (ENVD_PORT = 49983). Sending these to JupyterPort yields 404s.
+	EnvdPort = 49983
+)
 
 func (s *Sandbox) GetHost(port int) string {
 	domain := s.Domain
@@ -89,16 +97,17 @@ func (s *Sandbox) Pause(ctx context.Context, opts PauseOptions) error {
 //
 // Deprecated: use Client.Connect instead, which auto-resumes paused sandboxes
 // and returns a fresh Sandbox instance.
-func (s *Sandbox) Resume(ctx context.Context, timeout time.Duration) error {
+// The timeout is optional; nil omits it. See docs/guide/lifecycle.md.
+func (s *Sandbox) Resume(ctx context.Context, timeout *time.Duration) error {
 	if err := s.ensureClient(); err != nil {
 		return err
 	}
-	if timeout <= 0 {
-		timeout = s.client.config.Timeout
-	}
 
 	path := "/sandboxes/" + url.PathEscape(s.SandboxID) + "/resume"
-	payload := map[string]any{"timeout": durationSeconds(timeout)}
+	payload := map[string]any{}
+	if timeout != nil {
+		payload["timeout"] = timeoutPayloadSeconds(*timeout)
+	}
 	return s.client.doJSON(ctx, http.MethodPost, path, payload, nil, http.StatusOK, http.StatusCreated, http.StatusNoContent)
 }
 
@@ -179,7 +188,7 @@ func (s *Sandbox) Commands() *Commands {
 }
 
 func (s *Sandbox) Files() *Files {
-	return &Files{reader: s, writer: s}
+	return &Files{reader: s, writer: s, filer: s}
 }
 
 func (s *Sandbox) ensureClient() error {

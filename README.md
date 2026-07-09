@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/26338?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26338" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26338" alt="TencentCloud/CubeSandbox | Trendshift" width="250" height="55" /></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/tencentcloud/CubeSandbox/stargazers"><img src="https://img.shields.io/github/stars/tencentcloud/cubesandbox?style=social" alt="GitHub Stars" /></a>
   <a href="https://github.com/tencentcloud/CubeSandbox/issues"><img src="https://img.shields.io/github/issues/tencentcloud/cubesandbox" alt="GitHub Issues" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0 License" /></a>
@@ -23,6 +27,8 @@
   <img src="https://img.shields.io/badge/🔌_API-E2B_Compatible-blueviolet" alt="E2B compatible" />
   <img src="https://img.shields.io/badge/📦_Deploy-High_Concurrency·High_Density-orange" alt="High concurrency & high density" />
 </p>
+
+
 
 <p align="center">
   <a href="./README_zh.md"><strong>中文文档</strong></a> ·
@@ -47,8 +53,21 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 <table>
   <tr>
     <td align="right" valign="top" width="100">
+      <a href="./docs/changelog/v0.5.0.md">
+        <img src="https://img.shields.io/badge/v0.5.0-2026.07.03-dc3545?style=flat-square" alt="v0.5.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>v0.5: AutoPause, Terraform deployer, ARM64 &amp; network policy hardening</strong><br/>
+      <b>AutoPause/AutoResume</b> — idle sandboxes auto-suspend and wake on the next request. <b>Terraform one-click cluster deploy</b> <b>ARM64</b> native full-stack support <b>network policy hardening</b> — per-sandbox traffic tokens, policy-routing egress.<br/>
+      <a href="./docs/changelog/v0.5.0.md">Changelog →</a> ·
+      <a href="./docs/guide/tencentcloud-terraform-deploy.md">Terraform deploy →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
       <a href="./docs/changelog/v0.4.0.md">
-        <img src="https://img.shields.io/badge/v0.4.0-New!-6f42c1?style=flat-square" alt="v0.4.0" />
+        <img src="https://img.shields.io/badge/v0.4.0-2026.06.14-6f42c1?style=flat-square" alt="v0.4.0" />
       </a>
     </td>
     <td valign="top">
@@ -90,8 +109,8 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 <table align="center">
   <tr align="center" valign="top">
     <td width="33%">
-      <strong>⚡ Sub-60ms boot · High density</strong><br/><br/>
-      Average &lt;60ms cold start, &lt;5MB overhead per instance — run thousands of Agents on one node<br/><br/>
+      <strong>⚡ Sub-60ms boot · High density · Auto pause/resume</strong><br/><br/>
+      Average &lt;60ms cold start, &lt;5MB overhead per instance — run thousands of Agents on one node. Supports automatic sandbox pause and resume for cost optimization<br/><br/>
       <a href="./docs/guide/quickstart.md">Quick start →</a>
     </td>
     <td width="33%">
@@ -355,6 +374,20 @@ We welcome contributions of all kinds—whether it's a bug report, feature sugge
 - 🛠️ **Want to Code?** Check out our <a href="./CONTRIBUTING.md" target="_blank">CONTRIBUTING.md</a> to learn how to submit a Pull Request.
 - 📝 **Want to contribute docs?** Submit bilingual PRs to our community doc channels: <a href="./docs/guide/troubleshooting/index.md" target="_blank">Troubleshooting</a>, <a href="./docs/guide/usecases/index.md" target="_blank">Use Cases</a>, and <a href="./docs/guide/integrations/index.md" target="_blank">Integrations</a>.
 - 💬 **Want to Chat?** Join our <a href="https://discord.gg/kkapzDXShb" target="_blank">Discord</a>.
+
+## Roadmap
+
+**Coming soon** — see the [full roadmap](./docs/guide/roadmap.md) for details.
+
+| Feature | Description |
+|---|---|
+| **Kubernetes-Native Deployment** | Deploy and operate CubeSandbox entirely within a K8s cluster using CRDs, operators, and native scheduling — no out-of-band orchestration |
+| **Volume Support** | Persistent and shared volume support compatible with the E2B volume protocol |
+| **Cross-Node Pause & Resume** | Suspend a sandbox on one node and resume it on another with full memory and filesystem state preserved |
+| **E2B API Compatibility** | Close remaining gaps with the E2B specification for full drop-in compatibility |
+| **Control Plane / Data Plane Separation** | Decouple the control plane from the data plane so control plane upgrades or failures never affect sandboxes already in flight |
+| **Sandbox Fault Recovery** | Automatic detection and recovery of crashed VMs, stuck shim processes, and network partitions with configurable recovery policies |
+| **Scheduling & Operations Enhancements** | Resource-aware placement, affinity rules, live rebalancing, and node drain with sandbox migration |
 
 ## License
 

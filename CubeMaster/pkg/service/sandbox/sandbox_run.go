@@ -589,7 +589,9 @@ func (c *createSandboxContext) newContext(ctx context.Context, req *types.Create
 	}
 	c.selctx.ReqRes = reqResource
 
-	c.ctx, c.cancel = context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
+	// Create RPC deadline uses create_timeout_insec, not idle TTL.
+	createDeadline := time.Duration(config.GetConfig().CubeletConf.CreateTimeoutInsec) * time.Second
+	c.ctx, c.cancel = context.WithTimeout(ctx, createDeadline)
 	c.selctx.Ctx = c.ctx
 
 	switch {

@@ -44,10 +44,20 @@ use vmm_sys_util::{errno::Result, eventfd::EventFd};
 /// Vector value used to disable MSI for a queue.
 const VIRTQ_MSI_NO_VECTOR: u16 = 0xffff;
 
-#[derive(Debug)]
 pub enum Error {
     /// Failed to retrieve queue ring's index.
     QueueRingIndex(QueueError),
+    /// Missing virtqueue state in snapshot.
+    QueueStateMissing(usize),
+}
+
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QueueRingIndex(e) => f.debug_tuple("QueueRingIndex").field(e).finish(),
+            Self::QueueStateMissing(i) => f.debug_tuple("QueueStateMissing").field(i).finish(),
+        }
+    }
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -522,16 +532,23 @@ impl VirtioPciDevice {
 
         // Update virtqueues indexes for both available and used rings.
         for (i, queue) in self.queues.iter_mut().enumerate() {
-            queue.set_size(state.queues[i].size);
-            queue.set_ready(state.queues[i].ready);
+            let queue_state = state.queues.get(i).ok_or(Error::QueueStateMissing(i))?;
+
+            queue.set_size(queue_state.size);
+            queue.set_ready(queue_state.ready);
+
+            if !queue_state.ready {
+                continue;
+            }
+
             queue
-                .try_set_desc_table_address(GuestAddress(state.queues[i].desc_table))
+                .try_set_desc_table_address(GuestAddress(queue_state.desc_table))
                 .unwrap();
             queue
-                .try_set_avail_ring_address(GuestAddress(state.queues[i].avail_ring))
+                .try_set_avail_ring_address(GuestAddress(queue_state.avail_ring))
                 .unwrap();
             queue
-                .try_set_used_ring_address(GuestAddress(state.queues[i].used_ring))
+                .try_set_used_ring_address(GuestAddress(queue_state.used_ring))
                 .unwrap();
             queue.set_next_avail(
                 queue

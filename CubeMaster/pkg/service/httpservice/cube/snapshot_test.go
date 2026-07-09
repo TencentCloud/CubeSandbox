@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -82,6 +83,15 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 		assert.Equal(t, "READY", got.Operation.Status)
 	}
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
+func TestSnapshotErrorCodeMapsMySQLLockErrorsToDBError(t *testing.T) {
+	for _, err := range []error{
+		&mysql.MySQLError{Number: 1213, Message: "Deadlock found when trying to get lock"},
+		&mysql.MySQLError{Number: 1205, Message: "Lock wait timeout exceeded"},
+	} {
+		assert.Equal(t, int(errorcode.ErrorCode_DBError), snapshotErrorCode(err))
+	}
 }
 
 func TestCreateSnapshotAcceptsSnakeCaseRequestID(t *testing.T) {

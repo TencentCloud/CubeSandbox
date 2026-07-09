@@ -37,7 +37,7 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 	req := &sandboxtypes.CreateCubeSandboxReq{
 		InstanceType: "cubebox",
 		SnapshotDir:  "/snapshots/should-be-cleared",
-		Timeout:      1,
+		Timeout:      sandboxtypes.TimeoutPtr(1),
 		Annotations: map[string]string{
 			constants.CubeAnnotationsAppSnapshotCreate:        "true",
 			constants.CubeAnnotationRuntimeSnapshotID:         "snap-stale",

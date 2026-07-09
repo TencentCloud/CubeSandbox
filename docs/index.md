@@ -16,13 +16,17 @@ features:
   - title: "🔒 Hardware Isolation"
     details: Every sandbox runs a dedicated OS kernel in its own MicroVM.
   - title: "🔌 E2B SDK Compatible"
-    details: Drop-in replacement for E2B Cloud. Switch by changing one environment variable — zero client code changes.
+    details: Compatible with E2B SDK interface. Switch from E2B Cloud seamlessly by changing one environment variable — zero client code changes.
   - title: "📦 High-density Deployment"
-    details: MB-level per-sandbox overhead enables thousands of instances per server via kernel sharing and Copy-on-Write.
+    details: MB-level per-sandbox overhead enables thousands of instances per server via kernel sharing and Copy-on-Write (CoW). Supports automatic sandbox pause and resume, further improving deployment density and cost optimization.
   - title: "🛡️ Network Security"
     details: eBPF-based inter-sandbox isolation and egress filtering at kernel level; built-in L7 security proxy enables per-domain/path/method policies with automatic credential injection — secrets never visible to sandbox code.
-  - title: "📸 State Management"
-    details: "Create checkpoints on running sandboxes, roll back to any saved state, or fork into parallel exploration environments at millisecond granularity."
+  - title: "📸 Flexible State Management"
+    details: High-frequency snapshot and rollback at hundred-millisecond granularity. Create checkpoints on running sandboxes, roll back to any saved state at any time, or fork from a specific state to explore in parallel.
+  - title: "🚀 Production Deployment"
+    details: Deploy production clusters on Tencent Cloud with one click using Terraform.
+  - title: "💪 ARM Architecture Support"
+    details: Full native ARM64 support across compilation, build, and deployment workflows.
 ---
 
 ## Get Started

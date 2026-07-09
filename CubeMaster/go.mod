@@ -5,7 +5,6 @@ go 1.25.7
 // toolchain go1.22.9
 
 require (
-	github.com/agiledragon/gomonkey v2.0.2+incompatible
 	github.com/agiledragon/gomonkey/v2 v2.9.0
 	github.com/alicebob/miniredis/v2 v2.35.0
 	github.com/charmbracelet/bubbles v1.0.0

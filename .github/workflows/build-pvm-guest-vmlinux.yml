@@ -8,7 +8,7 @@ on:
       - 'deploy/pvm/configs/pvm_guest'
       - '.github/workflows/build-pvm-guest-vmlinux.yml'
     tags:
-      - '*'
+      - 'v*'
   workflow_dispatch:
 
 env:

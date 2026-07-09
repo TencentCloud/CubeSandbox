@@ -27,8 +27,6 @@ const STORE_IMAGES: &[&str] = &[
 
 #[derive(Deserialize)]
 struct InspectResult {
-    #[serde(rename = "Id")]
-    id: String,
     #[serde(rename = "Size")]
     size: u64,
     #[serde(rename = "RepoDigests")]

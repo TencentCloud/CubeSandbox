@@ -113,6 +113,7 @@ export default withMermaid(defineConfig({
                 { text: 'PVM Deployment', link: '/guide/pvm-deploy' },
                 { text: 'Bare-Metal Deployment', link: '/guide/bare-metal-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
+                { text: 'Tencent Cloud Cluster (Terraform)', link: '/guide/tencentcloud-terraform-deploy' },
                 { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' }
               ]
@@ -120,6 +121,7 @@ export default withMermaid(defineConfig({
             {
               text: 'Core Concepts',
               items: [
+                { text: 'Roadmap', link: '/guide/roadmap' },
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
                 { text: 'Templates Overview', link: '/guide/templates' },
                 { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
@@ -139,8 +141,15 @@ export default withMermaid(defineConfig({
               text: 'Networking',
               items: [
                 { text: 'Network Policy', link: '/guide/network-policy' },
+                { text: 'Route-Aware Egress', link: '/guide/route-aware-egress' },
                 { text: 'Security Proxy', link: '/guide/security-proxy' },
                 { text: 'Restrict Public Access', link: '/guide/restrict-public-access' }
+              ]
+            },
+            {
+              text: 'Storage',
+              items: [
+                { text: 'Persistent Storage (Host Mount)', link: '/guide/persistent-storage' }
               ]
             },
             {
@@ -148,6 +157,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'WebUI Dashboard', link: '/guide/webui' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
+                { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
                 { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
                 { text: 'Network Hardening', link: '/guide/network-hardening' },
@@ -168,8 +178,7 @@ export default withMermaid(defineConfig({
                   link: '/guide/troubleshooting/',
                   items: [
                     { text: 'Deployment', link: '/guide/troubleshooting/deployment' },
-                    { text: 'Templates', link: '/guide/troubleshooting/templates' },
-                    { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' }
+                    { text: 'Templates', link: '/guide/troubleshooting/templates' }
                   ]
                 },
                 {
@@ -238,6 +247,7 @@ export default withMermaid(defineConfig({
                 { text: 'PVM部署', link: '/zh/guide/pvm-deploy' },
                 { text: '裸金属/物理机部署', link: '/zh/guide/bare-metal-deploy' },
                 { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },
+                { text: '腾讯云集群部署（Terraform）', link: '/zh/guide/tencentcloud-terraform-deploy' },
                 { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' }
               ]
@@ -245,6 +255,7 @@ export default withMermaid(defineConfig({
             {
               text: '核心概念',
               items: [
+                { text: '路线图', link: '/zh/guide/roadmap' },
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
@@ -264,8 +275,15 @@ export default withMermaid(defineConfig({
               text: '网络',
               items: [
                 { text: '网络策略', link: '/zh/guide/network-policy' },
+                { text: '路由感知出网', link: '/zh/guide/route-aware-egress' },
                 { text: '安全代理', link: '/zh/guide/security-proxy' },
                 { text: '限制公开访问', link: '/zh/guide/restrict-public-access' }
+              ]
+            },
+            {
+              text: '存储',
+              items: [
+                { text: '持久化存储（Host Mount）', link: '/zh/guide/persistent-storage' }
               ]
             },
             {
@@ -273,6 +291,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'WebUI 控制台', link: '/zh/guide/webui' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
+                { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
                 { text: 'HTTPS 证书与域名解析', link: '/zh/guide/https-and-domain' },
                 { text: '网络加固', link: '/zh/guide/network-hardening' },
@@ -293,8 +312,7 @@ export default withMermaid(defineConfig({
                   link: '/zh/guide/troubleshooting/',
                   items: [
                     { text: '部署相关', link: '/zh/guide/troubleshooting/deployment' },
-                    { text: '模板相关', link: '/zh/guide/troubleshooting/templates' },
-                    { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' }
+                    { text: '模板相关', link: '/zh/guide/troubleshooting/templates' }
                   ]
                 },
                 {

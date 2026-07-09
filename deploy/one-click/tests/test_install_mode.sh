@@ -322,23 +322,46 @@ test_patch_cubelet_config_template_refuses_symlink() {
   cat > "${cfg}" <<'EOF'
 eth_name = "eth0"
 cidr = "192.168.0.0/18"
+cube_router_enable = false
+cube_router_cidr = ""
 EOF
 
-  patch_cubelet_config_template "${cfg}" "ens3" "10.123.0.0/16" >/dev/null 2>&1
+  patch_cubelet_config_template "${cfg}" "ens3" "10.123.0.0/16" "1" "172.20.0.0/16" >/dev/null 2>&1
   grep -Fq 'eth_name = "ens3"' "${cfg}" || fail "patch should update eth_name"
   grep -Fq 'cidr = "10.123.0.0/16"' "${cfg}" || fail "patch should update cidr"
+  grep -Fq 'cube_router_enable = true' "${cfg}" || fail "patch should update cube_router_enable"
+  grep -Fq 'cube_router_cidr = "172.20.0.0/16"' "${cfg}" || fail "patch should update cube_router_cidr"
+
+  local default_router_cidr_cfg="${TMP_DIR}/cubelet-default-router-cidr.toml"
+  cat > "${default_router_cidr_cfg}" <<'EOF'
+    eth_name = "eth0"
+    cidr = "192.168.0.0/18"
+    cube_router_enable = false
+    cube_router_cidr = ""
+EOF
+  patch_cubelet_config_template "${default_router_cidr_cfg}" "" "172.16.128.0/20" "1" "" >/dev/null 2>&1
+  grep -Fq 'cidr = "172.16.128.0/20"' "${default_router_cidr_cfg}" \
+    || fail "patch should update only the top-level cidr key"
+  grep -Fq 'cube_router_enable = true' "${default_router_cidr_cfg}" \
+    || fail "patch should update cube_router_enable when cube-router is enabled"
+  grep -Fq 'cube_router_cidr = ""' "${default_router_cidr_cfg}" \
+    || fail "patching cidr must not modify cube_router_cidr when cube-router CIDR is empty"
 
   local target="${TMP_DIR}/symlink-target.toml" link="${TMP_DIR}/symlink-config.toml"
   cat > "${target}" <<'EOF'
 eth_name = "eth0"
 cidr = "192.168.0.0/18"
+cube_router_enable = false
+cube_router_cidr = ""
 EOF
   ln -s "${target}" "${link}"
-  if ( patch_cubelet_config_template "${link}" "ens4" "10.124.0.0/16" ) >/dev/null 2>&1; then
+  if ( patch_cubelet_config_template "${link}" "ens4" "10.124.0.0/16" "1" "172.21.0.0/16" ) >/dev/null 2>&1; then
     fail "patch_cubelet_config_template should reject symlink configs"
   fi
   grep -Fq 'eth_name = "eth0"' "${target}" || fail "symlink target must not be modified"
   grep -Fq 'cidr = "192.168.0.0/18"' "${target}" || fail "symlink target CIDR must not be modified"
+  grep -Fq 'cube_router_enable = false' "${target}" || fail "symlink target cube-router enable must not be modified"
+  grep -Fq 'cube_router_cidr = ""' "${target}" || fail "symlink target cube-router CIDR must not be modified"
 }
 
 test_upgrade_preflight_and_backup() {
@@ -409,6 +432,110 @@ test_validation_library_fallback_die() {
   fi
 }
 
+test_redis_cli_help_supports_flag() {
+  local stub_dir="${TMP_DIR}/redis-cli-help"
+  local help_output=""
+  mkdir -p "${stub_dir}"
+
+  cat > "${stub_dir}/redis-cli" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+  cat <<'HELP'
+Usage: redis-cli [OPTIONS]
+  --connect-timeout <seconds>
+  --timeout <seconds>
+HELP
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "${stub_dir}/redis-cli"
+
+  help_output="$(PATH="${stub_dir}:${PATH}" redis_cli_help_output)"
+  redis_cli_help_supports_flag "${help_output}" "--connect-timeout" \
+    || fail "redis_cli_help_supports_flag should detect --connect-timeout"
+  redis_cli_help_supports_flag "${help_output}" "--timeout" \
+    || fail "redis_cli_help_supports_flag should detect --timeout"
+  if redis_cli_help_supports_flag "${help_output}" "--time"; then
+    fail "redis_cli_help_supports_flag should not substring-match partial flags"
+  fi
+
+  cat > "${stub_dir}/redis-cli" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+  cat <<'HELP'
+Usage: redis-cli [OPTIONS]
+  --connect-timeout <seconds>
+  -h <hostname>
+HELP
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "${stub_dir}/redis-cli"
+
+  help_output="$(PATH="${stub_dir}:${PATH}" redis_cli_help_output)"
+  if redis_cli_help_supports_flag "${help_output}" "--connect-timeout"; then
+    :
+  else
+    fail "redis_cli_help_supports_flag should still detect explicitly listed flags"
+  fi
+  if redis_cli_help_supports_flag "${help_output}" "--timeout"; then
+    fail "redis_cli_help_supports_flag should not treat --connect-timeout as --timeout"
+  fi
+}
+
+test_run_with_timeout_if_available() {
+  local timeout_log="${TMP_DIR}/timeout-wrapper.log"
+  local direct_log="${TMP_DIR}/timeout-direct.log"
+  local timeout_plain_log="${TMP_DIR}/timeout-plain.log"
+
+  if ! (
+    timeout() {
+      if [[ "${1:-}" == "--help" ]]; then
+        printf '%s\n' 'usage: timeout [-k DURATION] DURATION COMMAND'
+        return 0
+      fi
+      printf '%s\n' "$*" > "${timeout_log}"
+    }
+    redis-cli() {
+      fail "run_with_timeout_if_available should prefer timeout when available"
+    }
+    run_with_timeout_if_available 3 redis-cli -h 127.0.0.1 -p 6389 ping
+  ) >/dev/null 2>&1; then
+    fail "run_with_timeout_if_available should succeed through timeout wrapper"
+  fi
+  assert_contains "${timeout_log}" "-k 1 3 redis-cli -h 127.0.0.1 -p 6389 ping"
+
+  if ! (
+    timeout() {
+      if [[ "${1:-}" == "--help" ]]; then
+        printf '%s\n' 'usage: timeout DURATION COMMAND'
+        return 0
+      fi
+      printf '%s\n' "$*" > "${timeout_plain_log}"
+    }
+    redis-cli() {
+      fail "run_with_timeout_if_available should still use timeout without -k support"
+    }
+    run_with_timeout_if_available 3 redis-cli -h 127.0.0.1 -p 6389 ping
+  ) >/dev/null 2>&1; then
+    fail "run_with_timeout_if_available should succeed through plain timeout wrapper"
+  fi
+  assert_contains "${timeout_plain_log}" "3 redis-cli -h 127.0.0.1 -p 6389 ping"
+
+  if ! (
+    PATH="${TMP_DIR}/no-timeout-path"
+    redis-cli() {
+      printf '%s\n' "$*" > "${direct_log}"
+    }
+    run_with_timeout_if_available 3 redis-cli -h 127.0.0.1 -p 6389 ping
+  ) >/dev/null 2>&1; then
+    fail "run_with_timeout_if_available should fall back to direct command"
+  fi
+  assert_contains "${direct_log}" "-h 127.0.0.1 -p 6389 ping"
+}
+
 test_install_sh_wires_upgrade_flow() {
   local f="${ONE_CLICK_DIR}/install.sh"
   assert_contains "${f}" "resolve_install_mode"
@@ -430,9 +557,16 @@ test_install_sh_wires_upgrade_flow() {
   assert_contains "${f}" 'cp -f "${SCRIPT_DIR}/env.example" "${INSTALL_PREFIX}/env.example"'
   # upgrade writes the merged env as the runtime env
   assert_contains "${f}" 'cp -f "${MERGED_ENV}" "${RUNTIME_ENV_FILE}"'
+  # External Redis preflight must tolerate older redis-cli binaries that lack
+  # timeout flags instead of failing before connectivity is checked.
+  assert_contains "${f}" 'redis_help_output="$(redis_cli_help_output)"'
+  assert_contains "${f}" 'redis_cli_help_supports_flag "${redis_help_output}" "--connect-timeout"'
+  assert_contains "${f}" 'redis_timeout_args+=(--connect-timeout "${connect_timeout}")'
+  assert_contains "${f}" 'redis_timeout_args+=(--timeout "${connect_timeout}")'
+  assert_contains "${f}" 'run_redis_preflight_cmd "${use_timeout_wrapper}" "${connect_timeout}"'
   # on upgrade, CIDR host-conflict detection is skipped (M2)
-  assert_contains "${f}" 'check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR"'
-  assert_contains "${f}" 'check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR"'
+  assert_contains "${f}" 'check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR" 24 16'
+  assert_contains "${f}" 'check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR" 24 16'
 }
 
 test_explicit_install_mode
@@ -453,6 +587,8 @@ test_compute_control_plane_preflight
 test_patch_cubelet_config_template_refuses_symlink
 test_upgrade_preflight_and_backup
 test_validation_library_fallback_die
+test_redis_cli_help_supports_flag
+test_run_with_timeout_if_available
 test_install_sh_wires_upgrade_flow
 
 echo "install mode tests OK"

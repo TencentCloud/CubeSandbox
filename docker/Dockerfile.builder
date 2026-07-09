@@ -15,6 +15,7 @@ ARG RUST_TOOLCHAIN_AGENT=1.89
 ARG GITHUB_ACTIONS=false
 ARG RUSTUP_DIST_SERVER=https://rsproxy.cn
 ARG RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+ARG TARGETARCH
 
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
@@ -31,16 +32,30 @@ ENV LANG=C.UTF-8 \
     LIBSECCOMP_LINK_TYPE=static \
     LIBSECCOMP_LIB_PATH=/usr/local/lib64/libseccomp/lib
 
+RUN set -eux; \
+    TARGETARCH="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${TARGETARCH}" in \
+      amd64) PROTOC_ARCH=x86_64;; \
+      arm64) PROTOC_ARCH=aarch_64;; \
+      *)     PROTOC_ARCH=$(uname -m | sed 's/^aarch64$/aarch_64/');; \
+    esac; \
+    { \
+      echo "TARGETARCH=${TARGETARCH}"; \
+      echo "TARGET_UNAME_ARCH=$(uname -m)"; \
+      echo "PROTOC_ARCH=${PROTOC_ARCH}"; \
+    } > /etc/buildenv
+
 RUN apt-get update -o Acquire::Retries=3 \
     && apt install -y ca-certificates --no-install-recommends
-    
+
 RUN if [ "${GITHUB_ACTIONS}" != "true" ]; then \
         sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_PRIMARY_MIRROR}|g; \
                 s|http://security.ubuntu.com/ubuntu|${APT_SECURITY_MIRROR}|g" \
             /etc/apt/sources.list; \
     fi
 
-RUN apt-get update -o Acquire::Retries=3 \
+RUN . /etc/buildenv \
+    && apt-get update -o Acquire::Retries=3 \
     && apt-get install -y --no-install-recommends \
         bash \
         bc \
@@ -57,7 +72,6 @@ RUN apt-get update -o Acquire::Retries=3 \
         flex \
         bison \
         gperf \
-        gcc-multilib \
         git \
         git-lfs \
         jq \
@@ -93,17 +107,33 @@ RUN apt-get update -o Acquire::Retries=3 \
         xz-utils \
         zip \
         zlib1g-dev \
+        gnupg \
+        lsb-release \
+        software-properties-common \
+    && if [ "${TARGETARCH}" = "amd64" ]; then \
+       apt-get install -y --no-install-recommends gcc-multilib; \
+       apt-get install -y gcc-aarch64-linux-gnu; \
+    else \
+       apt-get install -y --no-install-recommends; \
+       apt-get install -y gcc-x86-64-linux-gnu; \
+    fi \
     && rm -rf /var/lib/apt/lists/*
-
-RUN if [ -x /usr/bin/llvm-strip-14 ] && [ ! -e /usr/local/bin/llvm-strip ]; then ln -s /usr/bin/llvm-strip-14 /usr/local/bin/llvm-strip; fi \
+# Install clang-14
+RUN wget -O - https://apt.llvm.org/llvm.sh | bash -s -- 14 && apt-get install -y llvm-14 \
+    && rm -rf /var/lib/apt/lists/* && clang-14 --version && llvm-strip-14 --version \
+    && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100 \
+    && if [ -x /usr/bin/llvm-strip-14 ] && [ ! -e /usr/local/bin/llvm-strip ]; then ln -s /usr/bin/llvm-strip-14 /usr/local/bin/llvm-strip; fi \
     && if [ ! -e /usr/bin/musl-g++ ]; then ln -s /usr/bin/g++ /usr/bin/musl-g++; fi
 
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
+RUN . /etc/buildenv \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tgz \
     && rm -rf /usr/local/go \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm -f /tmp/go.tgz
 
-RUN wget -q "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" -O /tmp/protoc.zip \
+RUN . /etc/buildenv \
+    && wget -q "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip" -O /tmp/protoc.zip \
     && unzip -q /tmp/protoc.zip -d /tmp/protoc \
     && install -m 0755 /tmp/protoc/bin/protoc /usr/local/bin/protoc \
     && cp -r /tmp/protoc/include/* /usr/local/include/ \
@@ -120,10 +150,11 @@ ENV RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER}"
 ENV RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT}"
 
 RUN set -eux; \
-    for toolchain in "${RUST_TOOLCHAIN_HYPERVISOR}" "${RUST_TOOLCHAIN_E2BAPI}" "${RUST_TOOLCHAIN_AGENT}"; do \
+    . /etc/buildenv \
+    && for toolchain in "${RUST_TOOLCHAIN_HYPERVISOR}" "${RUST_TOOLCHAIN_E2BAPI}" "${RUST_TOOLCHAIN_AGENT}"; do \
         rustup toolchain install "${toolchain}" --profile minimal; \
         rustup component add rust-src clippy rustfmt rust-analyzer llvm-tools-preview --toolchain "${toolchain}"; \
-        rustup target add x86_64-unknown-linux-musl --toolchain "${toolchain}"; \
+        rustup target add ${TARGET_UNAME_ARCH}-unknown-linux-musl --toolchain "${toolchain}"; \
     done; \
     rustup default "${RUST_TOOLCHAIN_DEFAULT}"
 
@@ -132,21 +163,18 @@ RUN mkdir -p "${CARGO_HOME}" /root/.cargo \
     && ln -sf "${CARGO_HOME}/config.toml" /root/.cargo/config.toml \
     && ln -sf "${CARGO_HOME}/env" /root/.cargo/env
 
-RUN tmp_dir="$(mktemp -d)" \
+RUN . /etc/buildenv \
+    && tmp_dir="$(mktemp -d)" \
     && wget -q "https://github.com/seccomp/libseccomp/releases/download/v${LIBSECCOMP_VERSION}/libseccomp-${LIBSECCOMP_VERSION}.tar.gz" -O "${tmp_dir}/libseccomp.tgz" \
     && tar -xzf "${tmp_dir}/libseccomp.tgz" -C "${tmp_dir}" --strip-components=1 \
     && cd "${tmp_dir}" \
-    && CC=musl-gcc ./configure --host=x86_64-linux-musl CPPFLAGS="-I/usr/include/x86_64-linux-musl -idirafter /usr/include -idirafter /usr/include/x86_64-linux-gnu" CFLAGS="-O2 -I/usr/include/x86_64-linux-musl -idirafter /usr/include -idirafter /usr/include/x86_64-linux-gnu" --disable-shared --enable-static --prefix=/usr/local/lib64/libseccomp \
+    && CC=musl-gcc ./configure --host=${TARGET_UNAME_ARCH}-linux-musl CPPFLAGS="-I/usr/include/${TARGET_UNAME_ARCH}-linux-musl -idirafter /usr/include -idirafter /usr/include/${TARGET_UNAME_ARCH}-linux-gnu" CFLAGS="-O2 -I/usr/include/${TARGET_UNAME_ARCH}-linux-musl -idirafter /usr/include -idirafter /usr/include/${TARGET_UNAME_ARCH}-linux-gnu" --disable-shared --enable-static --prefix=/usr/local/lib64/libseccomp \
     && make -j"$(nproc)" \
     && make install \
     && rm -rf "${tmp_dir}"
 
-RUN arch="$(dpkg --print-architecture)" \
-    && case "${arch}" in \
-        amd64) openssl_dir=/usr/include/x86_64-linux-gnu/openssl ;; \
-        arm64) openssl_dir=/usr/include/aarch64-linux-gnu/openssl ;; \
-        *) openssl_dir='' ;; \
-    esac \
+RUN . /etc/buildenv \
+    && openssl_dir=/usr/include/${TARGET_UNAME_ARCH}-linux-gnu/openssl \
     && if [ -n "${openssl_dir}" ] && [ -f "${openssl_dir}/opensslconf.h" ] && [ ! -f /usr/include/openssl/opensslconf.h ]; then \
         cp "${openssl_dir}/opensslconf.h" /usr/include/openssl/opensslconf.h; \
     fi

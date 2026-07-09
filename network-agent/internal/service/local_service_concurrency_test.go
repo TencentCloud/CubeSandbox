@@ -130,7 +130,7 @@ func TestEnsureNetworkConcurrentSameSandboxDeduplicates(t *testing.T) {
 	if got := atomic.LoadInt32(&created); got != 1 {
 		t.Fatalf("newTap created=%d, want 1 (dedup failed)", got)
 	}
-	// reserved network/gateway/broadcast (3) + exactly one allocated IP.
+	// reserved network/gateway/broadcast + one allocated IP.
 	if svc.allocator.usedIPNum != 4 {
 		t.Fatalf("usedIPNum=%d, want 4 (one IP allocated)", svc.allocator.usedIPNum)
 	}

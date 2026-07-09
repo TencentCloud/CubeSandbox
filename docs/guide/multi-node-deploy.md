@@ -37,7 +37,7 @@ You must have a working control node deployed via the [Self-Build Deployment Gui
 Each compute node must meet the same hardware and software requirements as the control node:
 
 - **Physical machine or bare-metal server** (nested virtualization is not supported)
-- **x86_64** architecture with **KVM enabled** (`ls /dev/kvm`)
+- **x86_64** or **aarch64** (ARM64) architecture with **KVM enabled** (`ls /dev/kvm`)
 - **Docker** installed and running
 - **Network connectivity** to the control node (specifically to `CubeMaster` on port `8089` by default)
 
@@ -117,6 +117,38 @@ curl http://127.0.0.1:8089/internal/meta/nodes
 
 The response should include the compute node's IP and a healthy status.
 
+## Configure CubeMaster Scheduler Scoring
+
+For multi-node deployments, configure CubeMaster's `scheduler.score` on the control node. If scoring is omitted, CubeMaster filters eligible nodes and then selects from the filtered node order, which can concentrate new sandboxes on the first eligible node until resource filters push traffic elsewhere.
+
+Merge the following scheduler fields into the existing `scheduler` section of `cubemaster.yaml`. Keep your existing `filter`, timeout, overcommit, and other scheduler settings.
+
+```yaml
+scheduler:
+  # Keep your existing filter, timeout, overcommit, and other scheduler settings.
+  priority_select_num: 3
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    resource_weights:
+      mvm_num: 2
+      local_create_num: 3
+      quota_cpu_usage: 1
+      quota_mem_usage: 1
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - mvm_num
+          - local_create_num
+          - quota_cpu_usage
+          - quota_mem_usage
+```
+
+For multi-node clusters, set `scheduler.priority_select_num` to a value greater than `1` so CubeMaster randomly selects from the top scored nodes. The shipped default config uses `priority_select_num: 1`, which means scoring only determines which single node receives the next sandbox. Use `3` as a starting point for small clusters and tune it based on your node count. `scheduler.least_select_name` defaults to `random`, so it usually does not need to be set explicitly.
+
+After updating `cubemaster.yaml`, restart CubeMaster with your normal deployment procedure so the scheduler loads the new scoring configuration.
+
 ## Common Operations
 
 ### Stop Compute Node Services
@@ -153,7 +185,7 @@ Compute nodes use the same `.env` file format. The following variables are speci
 | `ONE_CLICK_CONTROL_PLANE_IP` | empty | Control-plane host IP; expanded to `<ip>:8089` by default |
 | `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | empty | Explicit CubeMaster address; takes precedence over `ONE_CLICK_CONTROL_PLANE_IP` |
 | `CUBE_SANDBOX_NODE_IP` | `10.0.0.10` | **Required.** This node's primary network interface IP |
-| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` (from `config.toml`) | cubevs local network CIDR. Should match the control-plane value. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /8–/30. Auto-detected for host network conflicts at install time. |
+| `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` (from `config.toml`) | cubevs local network CIDR. Should match the control-plane value. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /16–/24. Auto-detected for host network conflicts at install time. |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | Set to `1` to skip CIDR conflict detection (not recommended). |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | Run health check after installation |
 

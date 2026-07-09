@@ -1307,6 +1307,11 @@ func (l *local) loadNet(sandboxID string) *MvmNet {
 }
 
 func getGwIPAndMask(cidr string) (net.IP, int, error) {
+	const (
+		sandboxCIDRMinMask = 16
+		sandboxCIDRMaxMask = 24
+	)
+
 	prefix, err := netip.ParsePrefix(cidr)
 	if err != nil {
 		return nil, 0, err
@@ -1315,7 +1320,7 @@ func getGwIPAndMask(cidr string) (net.IP, int, error) {
 		return nil, 0, fmt.Errorf("invalid IPv4 CIDR: %s", cidr)
 	}
 	mask := prefix.Bits()
-	if mask < 8 || mask > 30 {
+	if mask < sandboxCIDRMinMask || mask > sandboxCIDRMaxMask {
 		return nil, 0, &net.ParseError{Type: "cidr mask fail", Text: cidr}
 	}
 	// Gateway is network address + 1

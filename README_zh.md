@@ -8,6 +8,11 @@
   <strong>一个极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务</strong>
 </p>
 
+
+<p align="center">
+  <a href="https://trendshift.io/repositories/26338?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26338" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26338" alt="TencentCloud/CubeSandbox | Trendshift" width="250" height="55" /></a>
+</p>
+
 <p align="center">
   <a href="https://github.com/tencentcloud/CubeSandbox/stargazers"><img src="https://img.shields.io/github/stars/tencentcloud/cubesandbox?style=social" alt="GitHub Stars" /></a>
   <a href="https://github.com/tencentcloud/CubeSandbox/issues"><img src="https://img.shields.io/github/issues/tencentcloud/cubesandbox" alt="GitHub Issues" /></a>
@@ -22,6 +27,7 @@
   <img src="https://img.shields.io/badge/🔌_接口-兼容_E2B-blueviolet" alt="E2B 兼容" />
   <img src="https://img.shields.io/badge/📦_部署-高并发·高密度-orange" alt="高并发·高密度" />
 </p>
+
 
 <p align="center">
   <a href="./README.md"><strong>English</strong></a> ·
@@ -47,8 +53,21 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 <table>
   <tr>
     <td align="right" valign="top" width="100">
+      <a href="./docs/zh/changelog/v0.5.0.md">
+        <img src="https://img.shields.io/badge/v0.5.0-2026.07.03-dc3545?style=flat-square" alt="v0.5.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>v0.5：自动暂停恢复、Terraform 一键集群、ARM64 全栈支持、沙箱网络策略增强</strong><br/>
+      <b>自动暂停恢复</b> — 闲置沙箱自动暂停，新请求到达时毫秒级唤醒。<b>Terraform 一键集群部署</b> <b>ARM64</b> 全栈原生支持 <b>沙箱网络策略增强</b> — 流量令牌鉴权、出向策略路由。<br/>
+      <a href="./docs/zh/changelog/v0.5.0.md">更新日志 →</a> ·
+      <a href="./docs/zh/guide/tencentcloud-terraform-deploy.md">Terraform 部署 →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
       <a href="./docs/zh/changelog/v0.4.0.md">
-        <img src="https://img.shields.io/badge/v0.4.0-New!-6f42c1?style=flat-square" alt="v0.4.0" />
+        <img src="https://img.shields.io/badge/v0.4.0-2026.06.14-6f42c1?style=flat-square" alt="v0.4.0" />
       </a>
     </td>
     <td valign="top">
@@ -90,8 +109,8 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 <table align="center">
   <tr align="center" valign="top">
     <td width="33%">
-      <strong>⚡ 毫秒启动 · 高密度</strong><br/><br/>
-      平均 &lt;60ms 冷启动，单实例额外开销 &lt;5MB，单机轻松跑起数千 Agent<br/><br/>
+      <strong>⚡ 毫秒启动 · 高密度· 自动暂停恢复</strong><br/><br/>
+      平均 &lt;60ms 冷启动，单实例额外开销 &lt;5MB，单机轻松跑起数千 Agent。支持沙箱的自动暂停及恢复，实现成本优化<br/><br/>
       <a href="./docs/zh/guide/quickstart.md">快速开始 →</a>
     </td>
     <td width="33%">
@@ -368,6 +387,20 @@ http://<控制节点 IP>:12088
   <em>💬 扫描上方二维码加入微信交流群，与核心开发者和社区伙伴零距离沟通！</em>
 </p>
 
+
+## Roadmap
+
+**即将上线** — 详见[完整路线图](./docs/zh/guide/roadmap.md)。
+
+| 特性 | 说明 |
+|---|---|
+| **Kubernetes 原生部署** | 使用 CRD、Operator 和原生调度在 K8s 集群内完整部署运营 CubeSandbox，无需额外编排组件 |
+| **Volume 支持** | 兼容 E2B Volume 协议的持久化与共享存储能力 |
+| **跨机暂停与恢复** | 在一台宿主机上暂停沙箱，在另一台上完整恢复内存和文件系统状态 |
+| **E2B API 对齐补齐** | 补齐与 E2B 规范的剩余差距，实现完整的兼容替代 |
+| **控制面与数据面分离** | 解耦控制面与数据面，控制面升级或故障不影响已在运行的沙箱，保证全路径高可用 |
+| **沙箱异常恢复** | 自动检测并恢复 VM Crash、shim 卡死、网络分区等异常，支持可配置恢复策略 |
+| **调度与运维能力增强** | 资源感知调度、亲和规则、在线均衡与带迁移的节点排空 |
 
 ## 许可证
 

@@ -10,7 +10,7 @@
 
 AgentHub 会基于 CubeSandbox 模板创建数字助手。部署前需要先制作数字助手模板（见下方命令），然后将自动生成的 `tpl-` 前缀模板 ID 写入 `.env`：
 
-```env
+```bash
 AGENTHUB_DS_OPENCLAW_TEMPLATE=<your-digital-assistant-template-id>
 ```
 

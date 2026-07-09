@@ -44,6 +44,11 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 		destroyReq.Annotations = make(map[string]string)
 		destroyReq.Annotations[constants.CubeAnnotationsInsType] = req.InstanceType
 	}
+	reason := req.KillReason
+	if reason == "" {
+		reason = "request"
+	}
+	destroyReq.Annotations[constants.CubeAnnotationsKillReason] = reason
 	collectMemoryOption(req, destroyReq)
 	if config.GetConfig().Common.CubeDestroyCheckFilter {
 
@@ -89,6 +94,7 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 	switch req.InstanceType {
 	case cubebox.InstanceType_cubebox.String():
 		if !dealScfSandbox(ctx, req, t) {
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_NotFound)
 			rsp.Ret.RetMsg = "no such sandbox"
 			return
 		}

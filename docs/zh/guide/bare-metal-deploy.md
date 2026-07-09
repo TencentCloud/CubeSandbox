@@ -1,6 +1,6 @@
 # 裸金属 / 物理机部署
 
-> **适用场景：** 已有支持 KVM 的 x86_64 Linux 机器（`/dev/kvm` 可用），例如物理机、裸金属服务器、或已开启嵌套虚拟化的云服务器。
+> **适用场景：** 已有支持 KVM 的 x86_64 或 aarch64（ARM64）Linux 机器（`/dev/kvm` 可用），例如物理机、裸金属服务器、或已开启嵌套虚拟化的云服务器。
 >
 > 如果你用的是**普通云服务器**（`/dev/kvm` 不可用），无需裸金属 —— 通过 PVM 即可在普通云服务器上启用 KVM，请参阅[快速开始](./quickstart.md)。
 
@@ -10,7 +10,7 @@
 
 ## 前置条件
 
-- **x86_64** 架构的 Linux 机器
+- **x86_64** 或 **aarch64**（ARM64）架构的 Linux 机器
 - `/dev/kvm` 存在且可读写（`ls -la /dev/kvm`）
 - 有 **root 权限**
 - **Docker** 已安装并正常运行
@@ -28,10 +28,34 @@ sudo su root
 
 ## 第一步：安装
 
+### x86_64（AMD64）
+
 以 root 身份执行：
 
 ```bash
 curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh | MIRROR=cn bash
+```
+
+### ARM64（aarch64）主机
+
+::: warning online-install.sh 即将支持 ARM64
+`online-install.sh` 一键安装脚本当前仅自动发现 **x86_64** 包。ARM64 的自动检测与一键安装支持将于近期版本补齐。目前 ARM64 用户请按照以下手动步骤操作。
+:::
+
+**第一步：** 前往对应平台的发布页面，找到包含 ARM64 资产的最新 Release，下载 `cube-sandbox-one-click-*-arm64.tar.gz` 包：
+
+| 平台 | 发布页面 |
+|---|---|
+| GitHub | [TencentCloud/CubeSandbox/releases](https://github.com/TencentCloud/CubeSandbox/releases) |
+| CNB（国内） | [CubeSandbox/CubeSandbox/-/releases](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases) |
+
+**第二步：** 解压并运行安装脚本：
+
+```bash
+# 将 <version> 替换为你实际下载的版本（如 v0.5.0-rc3）
+tar -xzf cube-sandbox-one-click-<version>-arm64.tar.gz
+cd cube-sandbox-one-click-<version>-arm64
+./install.sh
 ```
 
 ::: details 安装了哪些组件
@@ -39,6 +63,10 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-cl
 - CubeMaster、Cubelet、network-agent、CubeShim 作为宿主机进程运行
 - MySQL 和 Redis 通过 Docker Compose 管理
 - CubeProxy 提供 TLS（mkcert）和 CoreDNS 域名路由（`cube.app`）
+:::
+
+::: tip 无 guest PMU 的 ARM64 主机
+在部分 aarch64 主机上——较旧的内核、嵌套虚拟化环境、或某些 ARM 核心——KVM 不会向 guest 暴露 PMUv3。这些主机上 MicroVM 仍可正常启动：hypervisor 会在不启用 PMU 的情况下初始化 vCPU，guest 只是看不到硬件性能计数器，无需任何额外操作。
 :::
 
 ## 第二步：制作模板

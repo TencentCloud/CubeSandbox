@@ -115,12 +115,20 @@ locals {
   _avail_zones    = [for z in local.all_zones : z if z.state == "AVAILABLE"]
   available_zones = length(local._avail_zones) > 0 ? local._avail_zones : local.all_zones
 
-  primary_zone     = var.availability_zone != "" ? var.availability_zone : local.available_zones[0].name
-  mysql_slave_zone = length(local.available_zones) > 1 ? local.available_zones[1].name : local.available_zones[0].name
+  primary_zone = var.availability_zone != "" ? var.availability_zone : local.available_zones[0].name
+
+  # MySQL two-node multi-AZ deployments require first_slave_zone != availability_zone.
+  # Pick the first AVAILABLE zone that is different from the explicit primary zone;
+  # the old available_zones[1] shortcut breaks when primary itself is the second
+  # available zone, e.g. primary=ap-guangzhou-6 and zones=[5,6,7].
+  mysql_slave_candidates = [for z in local.available_zones : z.name if z.name != local.primary_zone]
+  mysql_slave_zone       = length(local.mysql_slave_candidates) > 0 ? local.mysql_slave_candidates[0] : local.primary_zone
 
   jumpserver_zone = var.jumpserver_availability_zone != "" ? var.jumpserver_availability_zone : local.primary_zone
   compute_zone    = var.compute_availability_zone != "" ? var.compute_availability_zone : local.primary_zone
   tke_worker_zone = var.tke_worker_availability_zone != "" ? var.tke_worker_availability_zone : local.primary_zone
+
+  tke_worker_type = var.tke_worker_instance_type
 
   compute_zones = [
     for i in range(var.compute_node_count) :
@@ -157,11 +165,11 @@ locals {
   # regions it must fall back to a single-zone deployment or the apply fails.
   mysql_multi_az = length(local.available_zones) > 1
 
-  jumpserver_subnet_id = local.jumpserver_zone == local.primary_zone ? tencentcloud_subnet.demo.id : tencentcloud_subnet.cvm[local.jumpserver_zone].id
-  tke_worker_subnet_id = local.tke_worker_zone == local.primary_zone ? tencentcloud_subnet.demo.id : tencentcloud_subnet.cvm[local.tke_worker_zone].id
+  jumpserver_subnet_id = local.jumpserver_zone == local.primary_zone ? tencentcloud_subnet.cluster.id : tencentcloud_subnet.cvm[local.jumpserver_zone].id
+  tke_worker_subnet_id = local.tke_worker_zone == local.primary_zone ? tencentcloud_subnet.cluster.id : tencentcloud_subnet.cvm[local.tke_worker_zone].id
 
   tke_node_pool_subnet_ids = distinct(compact([
-    tencentcloud_subnet.demo.id,
+    tencentcloud_subnet.cluster.id,
     local.tke_worker_zone != local.primary_zone ? tencentcloud_subnet.cvm[local.tke_worker_zone].id : "",
   ]))
 }
@@ -170,8 +178,8 @@ locals {
 # SSH key: automatically reads the local ./.ssh/id_rsa.pub
 ########################
 
-resource "tencentcloud_key_pair" "demo" {
-  key_name   = "cubesandbox_demo_${random_string.deploy_suffix.result}"
+resource "tencentcloud_key_pair" "cluster" {
+  key_name   = "cs_cluster_${random_string.deploy_suffix.result}"
   public_key = file(pathexpand(var.ssh_public_key_path))
 }
 
@@ -179,14 +187,14 @@ resource "tencentcloud_key_pair" "demo" {
 # Network
 ########################
 
-resource "tencentcloud_vpc" "demo" {
+resource "tencentcloud_vpc" "cluster" {
   name       = var.vpc_name
   cidr_block = "10.0.0.0/16"
 }
 
-resource "tencentcloud_subnet" "demo" {
-  vpc_id            = tencentcloud_vpc.demo.id
-  name              = "cubesandbox-demo-subnet"
+resource "tencentcloud_subnet" "cluster" {
+  vpc_id            = tencentcloud_vpc.cluster.id
+  name              = "cubesandbox-cluster-subnet"
   cidr_block        = "10.0.1.0/24"
   availability_zone = local.primary_zone
 }
@@ -195,7 +203,7 @@ resource "tencentcloud_subnet" "demo" {
 resource "tencentcloud_subnet" "cvm" {
   for_each = local.cvm_subnet_cidrs
 
-  vpc_id            = tencentcloud_vpc.demo.id
+  vpc_id            = tencentcloud_vpc.cluster.id
   name              = "cubesandbox-cvm-${replace(each.key, "-", "")}"
   cidr_block        = each.value
   availability_zone = each.key
@@ -211,9 +219,9 @@ resource "tencentcloud_eip" "nat" {
   internet_max_bandwidth_out = 200
 }
 
-resource "tencentcloud_nat_gateway" "demo" {
+resource "tencentcloud_nat_gateway" "cluster" {
   name             = "cubesandbox-nat"
-  vpc_id           = tencentcloud_vpc.demo.id
+  vpc_id           = tencentcloud_vpc.cluster.id
   bandwidth        = 200
   max_concurrent   = 1000000
   assigned_eip_set = [tencentcloud_eip.nat.public_ip]
@@ -221,23 +229,30 @@ resource "tencentcloud_nat_gateway" "demo" {
 
 # Route: 0.0.0.0/0 → NAT gateway
 resource "tencentcloud_route_table_entry" "nat" {
-  route_table_id         = tencentcloud_vpc.demo.default_route_table_id
+  route_table_id         = tencentcloud_vpc.cluster.default_route_table_id
   destination_cidr_block = "0.0.0.0/0"
   next_type              = "NAT"
-  next_hub               = tencentcloud_nat_gateway.demo.id
+  next_hub               = tencentcloud_nat_gateway.cluster.id
 }
 
 ########################
-# Security group
+# Security groups (per-role, least privilege)
+#
+# A single shared security group used to front every role (jumpserver, compute
+# nodes, TKE workers and the CLBs), which meant e.g. a compute node inherited the
+# public 443/80/3000 ingress it never needs. The group is now split per role so
+# each only opens what it actually requires, and compromising one role no longer
+# grants the inbound surface of the others.
 ########################
 
-resource "tencentcloud_security_group" "demo" {
-  name        = "cubesandbox-demo-sg"
-  description = "CubeSandbox security group"
+# --- 1. Jumpserver: public SSH on 443 + VPC internal ---
+resource "tencentcloud_security_group" "jumpserver" {
+  name        = "cubesandbox-sg-jumpserver"
+  description = "CubeSandbox jumpserver: public SSH (443) + VPC internal"
 }
 
-resource "tencentcloud_security_group_rule_set" "demo" {
-  security_group_id = tencentcloud_security_group.demo.id
+resource "tencentcloud_security_group_rule_set" "jumpserver" {
+  security_group_id = tencentcloud_security_group.jumpserver.id
 
   ingress {
     action      = "ACCEPT"
@@ -245,46 +260,6 @@ resource "tencentcloud_security_group_rule_set" "demo" {
     protocol    = "TCP"
     port        = "443"
     description = "Allow jump-server SSH (cloud-init moves sshd to 443)"
-  }
-
-  # cube-proxy runs as a TKE pod (GlobalRouter, no hostNetwork), so its traffic to
-  # a compute node arrives sourced from the pod CIDR. It reaches each sandbox on a
-  # dynamic host port (20000-29999) on the compute node's private VPC IP, so the
-  # full range is opened with ALL. Bound to var.tke_cluster_cidr (not a literal) so
-  # the rule keeps matching if the TKE pod network is reconfigured.
-  ingress {
-    action      = "ACCEPT"
-    cidr_block  = var.tke_cluster_cidr
-    protocol    = "ALL"
-    port        = "ALL"
-    description = "Allow TKE cube-proxy (pod CIDR) -> compute node all ports"
-  }
-
-  # cube-master is exposed through an INTERNAL (VPC-only) CLB, so 8089 never needs
-  # to be reachable from the public internet. Scope it to the VPC CIDR; TKE pods
-  # are already covered by the var.tke_cluster_cidr rule above.
-  ingress {
-    action      = "ACCEPT"
-    cidr_block  = "10.0.0.0/16"
-    protocol    = "TCP"
-    port        = "8089"
-    description = "Allow cube-master CLB (VPC-internal only)"
-  }
-
-  ingress {
-    action      = "ACCEPT"
-    cidr_block  = "0.0.0.0/0"
-    protocol    = "TCP"
-    port        = "80"
-    description = "Allow CLB HTTP (cube-proxy + cube-webui)"
-  }
-
-  ingress {
-    action      = "ACCEPT"
-    cidr_block  = "0.0.0.0/0"
-    protocol    = "TCP"
-    port        = "3000"
-    description = "Allow cube-api CLB (jumpserver public access)"
   }
 
   ingress {
@@ -304,6 +279,140 @@ resource "tencentcloud_security_group_rule_set" "demo" {
   }
 }
 
+# --- 2. Compute nodes: TKE pod CIDR + VPC internal only (no public ingress) ---
+resource "tencentcloud_security_group" "compute" {
+  name        = "cubesandbox-sg-compute"
+  description = "CubeSandbox compute nodes: TKE pod CIDR + VPC internal only"
+}
+
+resource "tencentcloud_security_group_rule_set" "compute" {
+  security_group_id = tencentcloud_security_group.compute.id
+
+  # cube-proxy runs as a TKE pod (GlobalRouter, no hostNetwork), so its traffic to
+  # a compute node arrives sourced from the pod CIDR. It reaches each sandbox on a
+  # dynamic host port (20000-29999) on the compute node's private VPC IP, so the
+  # full range is opened with ALL. Bound to var.tke_cluster_cidr (not a literal) so
+  # the rule keeps matching if the TKE pod network is reconfigured.
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = var.tke_cluster_cidr
+    protocol    = "ALL"
+    port        = "ALL"
+    description = "Allow TKE cube-proxy (pod CIDR) -> compute node all ports"
+  }
+
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "10.0.0.0/16"
+    protocol    = "ALL"
+    port        = "ALL"
+    description = "Allow VPC internal traffic (jumpserver management, cube-master scheduling)"
+  }
+
+  egress {
+    action      = "ACCEPT"
+    cidr_block  = "0.0.0.0/0"
+    protocol    = "ALL"
+    port        = "ALL"
+    description = "Allow all outbound"
+  }
+}
+
+# --- 3. TKE workers (pod hosts): pod-to-pod + VPC internal only ---
+resource "tencentcloud_security_group" "tke_pod" {
+  name        = "cubesandbox-sg-tke-pod"
+  description = "CubeSandbox TKE workers: pod-to-pod + VPC internal"
+}
+
+resource "tencentcloud_security_group_rule_set" "tke_pod" {
+  security_group_id = tencentcloud_security_group.tke_pod.id
+
+  # Pod-to-pod traffic within the cluster arrives sourced from the TKE pod CIDR
+  # (GlobalRouter). Workers carry no public IP, so no public ingress is needed.
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = var.tke_cluster_cidr
+    protocol    = "ALL"
+    port        = "ALL"
+    description = "Allow pod-to-pod communication (TKE pod CIDR)"
+  }
+
+  # VPC internal covers CLB health checks (pass-to-target reaches pods from a VPC
+  # address), jumpserver management, and the cube-master CFS NFS mount.
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "10.0.0.0/16"
+    protocol    = "ALL"
+    port        = "ALL"
+    description = "Allow VPC internal traffic (CLB health checks, jumpserver, CFS NFS)"
+  }
+
+  egress {
+    action      = "ACCEPT"
+    cidr_block  = "0.0.0.0/0"
+    protocol    = "ALL"
+    port        = "ALL"
+    description = "Allow all outbound"
+  }
+}
+
+# --- 4. CLB (load balancers): only the public-facing service ports ---
+resource "tencentcloud_security_group" "clb" {
+  name        = "cubesandbox-sg-clb"
+  description = "CubeSandbox CLB: public-facing ports for cube services"
+}
+
+resource "tencentcloud_security_group_rule_set" "clb" {
+  security_group_id = tencentcloud_security_group.clb.id
+
+  # cube-proxy (80/443) + cube-webui (80) + cube-api (3000) front-end ingress.
+  # When enable_public_network is true the CLBs get public VIPs, so open these
+  # to the internet; when false (default) the CLBs are VPC-internal only, so
+  # scope the ingress to the VPC CIDR. Keep this in sync with the per-Service
+  # internal-subnetid annotations in tke-addons.tf.
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = var.enable_public_network ? "0.0.0.0/0" : "10.0.0.0/16"
+    protocol    = "TCP"
+    port        = "80"
+    description = "Allow CLB HTTP (cube-proxy + cube-webui)"
+  }
+
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = var.enable_public_network ? "0.0.0.0/0" : "10.0.0.0/16"
+    protocol    = "TCP"
+    port        = "443"
+    description = "Allow CLB HTTPS (cube-proxy)"
+  }
+
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = var.enable_public_network ? "0.0.0.0/0" : "10.0.0.0/16"
+    protocol    = "TCP"
+    port        = "3000"
+    description = "Allow cube-api CLB (jumpserver public access)"
+  }
+
+  # cube-master is exposed through an INTERNAL (VPC-only) CLB, so 8089 never needs
+  # to be reachable from the public internet. Scope it to the VPC CIDR.
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "10.0.0.0/16"
+    protocol    = "TCP"
+    port        = "8089"
+    description = "Allow cube-master CLB (VPC-internal only)"
+  }
+
+  egress {
+    action      = "ACCEPT"
+    cidr_block  = "0.0.0.0/0"
+    protocol    = "ALL"
+    port        = "ALL"
+    description = "Allow CLB -> backend (pod/node)"
+  }
+}
+
 ########################
 # Cloud File Storage (CFS) — shared persistent storage for cube-master
 #   The cube-master Deployment runs multiple replicas that must share the same
@@ -320,6 +429,7 @@ resource "tencentcloud_security_group_rule_set" "demo" {
 ########################
 
 resource "tencentcloud_cfs_access_group" "cubemaster_data" {
+  count       = var.use_cfs ? 1 : 0
   name        = "cubesandbox-cubemaster-${random_string.deploy_suffix.result}"
   description = "Allow the CubeSandbox VPC to mount the cube-master CFS share"
 }
@@ -328,7 +438,8 @@ resource "tencentcloud_cfs_access_group" "cubemaster_data" {
 # address is its VPC private IP — so authorize the whole VPC CIDR. no_root_squash
 # keeps root so cube-master (running as root) owns the files it writes.
 resource "tencentcloud_cfs_access_rule" "cubemaster_data" {
-  access_group_id = tencentcloud_cfs_access_group.cubemaster_data.id
+  count           = var.use_cfs ? 1 : 0
+  access_group_id = tencentcloud_cfs_access_group.cubemaster_data[0].id
   auth_client_ip  = "10.0.0.0/16"
   priority        = 1
   rw_permission   = "RW"
@@ -336,13 +447,14 @@ resource "tencentcloud_cfs_access_rule" "cubemaster_data" {
 }
 
 resource "tencentcloud_cfs_file_system" "cubemaster_data" {
+  count             = var.use_cfs ? 1 : 0
   name              = "cubesandbox-cubemaster-data"
   availability_zone = local.primary_zone
-  access_group_id   = tencentcloud_cfs_access_group.cubemaster_data.id
+  access_group_id   = tencentcloud_cfs_access_group.cubemaster_data[0].id
   protocol          = "NFS"
   storage_type      = "SD"
-  vpc_id            = tencentcloud_vpc.demo.id
-  subnet_id         = tencentcloud_subnet.demo.id
+  vpc_id            = tencentcloud_vpc.cluster.id
+  subnet_id         = tencentcloud_subnet.cluster.id
 }
 
 ########################
@@ -368,8 +480,8 @@ resource "tencentcloud_mysql_instance" "mysql" {
   slave_deploy_mode = local.mysql_multi_az ? 1 : 0 # 1 = multi-AZ, 0 = single-AZ
   slave_sync_mode   = 1                            # semi-sync
 
-  vpc_id        = tencentcloud_vpc.demo.id
-  subnet_id     = tencentcloud_subnet.demo.id
+  vpc_id        = tencentcloud_vpc.cluster.id
+  subnet_id     = tencentcloud_subnet.cluster.id
   intranet_port = 3306
 
   parameters = {
@@ -389,8 +501,11 @@ resource "tencentcloud_mysql_account" "cube" {
   host     = "%"
 }
 
-# Database-level privileges
+# Database-level privileges (after mysql_init_db creates var.cube_db — granting on a
+# missing database races with the local-exec CREATE DATABASE and can fail apply).
 resource "tencentcloud_mysql_privilege" "cube" {
+  depends_on = [null_resource.mysql_init_db]
+
   mysql_id     = tencentcloud_mysql_instance.mysql.id
   account_name = tencentcloud_mysql_account.cube.name
   account_host = tencentcloud_mysql_account.cube.host
@@ -459,8 +574,8 @@ resource "tencentcloud_redis_instance" "redis" {
   availability_zone = local.primary_zone
   type_id           = 9 # Redis 7.0 standard architecture (master/replica)
   mem_size          = var.redis_mem_size
-  vpc_id            = tencentcloud_vpc.demo.id
-  subnet_id         = tencentcloud_subnet.demo.id
+  vpc_id            = tencentcloud_vpc.cluster.id
+  subnet_id         = tencentcloud_subnet.cluster.id
   charge_type       = "POSTPAID"
   port              = 6379
   password          = var.redis_password
@@ -475,37 +590,36 @@ resource "tencentcloud_redis_instance" "redis" {
 ########################
 
 resource "tencentcloud_kubernetes_cluster" "tke" {
-  count      = var.create_tke ? 1 : 0
-  depends_on = [tencentcloud_tcr_instance.demo, tencentcloud_tcr_namespace.demo]
-
+  count                      = var.create_tke ? 1 : 0
   cluster_name               = var.tke_cluster_name
   cluster_version            = var.tke_cluster_version
   cluster_cidr               = var.tke_cluster_cidr
   service_cidr               = var.tke_service_cidr
-  vpc_id                     = tencentcloud_vpc.demo.id
+  vpc_id                     = tencentcloud_vpc.cluster.id
   cluster_deploy_type        = "MANAGED_CLUSTER"
-  cluster_level              = "L20"
+  cluster_level              = "L5"
   cluster_internet           = false # kube-apiserver: NO public-network access
   cluster_intranet           = true  # kube-apiserver: intranet (VPC-internal) access only
-  cluster_intranet_subnet_id = tencentcloud_subnet.demo.id
+  cluster_intranet_subnet_id = tencentcloud_subnet.cluster.id
   cluster_max_pod_num        = 256
   cluster_max_service_num    = 4096 # matches the number of IPs in service_cidr /20
   network_type               = "GR"
   container_runtime          = "containerd"
   deletion_protection        = false
 
-  # Enabling kube-apiserver access (intranet here) requires at least 1 initial
-  # worker node; the remaining nodes are managed by the node pool.
+  # Enabling kube-apiserver access (intranet here) requires at least 1 worker
+  # node. Count is driven by var.tke_node_count (TENCENTCLOUD_TKE_NODE_COUNT).
   worker_config {
-    count              = 1
-    availability_zone  = local.tke_worker_zone
-    instance_type      = var.compute_instance_type
-    system_disk_type   = "CLOUD_PREMIUM"
-    system_disk_size   = 50
-    subnet_id          = local.tke_worker_subnet_id
-    public_ip_assigned = false
-    security_group_ids = [tencentcloud_security_group.demo.id]
-    key_ids            = [tencentcloud_key_pair.demo.id]
+    count                = var.tke_node_count
+    availability_zone    = local.tke_worker_zone
+    instance_type        = local.tke_worker_type
+    instance_charge_type = "POSTPAID_BY_HOUR"
+    system_disk_type     = "CLOUD_BSSD"
+    system_disk_size     = 50
+    subnet_id            = local.tke_worker_subnet_id
+    public_ip_assigned   = false
+    security_group_ids   = [tencentcloud_security_group.tke_pod.id]
+    key_ids              = [tencentcloud_key_pair.cluster.id]
   }
 
   tags = {
@@ -514,11 +628,13 @@ resource "tencentcloud_kubernetes_cluster" "tke" {
 }
 
 resource "tencentcloud_kubernetes_node_pool" "tke" {
-  count = var.create_tke ? 1 : 0
+  # Disabled: the managed TKE cluster already creates the requested initial workers via worker_config.count.
+  # Keep this resource in config with count=0 so existing outputs/destroy logic remain safe.
+  count = 0
 
   name       = "${var.tke_cluster_name}-pool"
   cluster_id = tencentcloud_kubernetes_cluster.tke[0].id
-  vpc_id     = tencentcloud_vpc.demo.id
+  vpc_id     = tencentcloud_vpc.cluster.id
   subnet_ids = local.tke_node_pool_subnet_ids
 
   max_size            = var.tke_node_count + 2
@@ -527,12 +643,13 @@ resource "tencentcloud_kubernetes_node_pool" "tke" {
   deletion_protection = false
 
   auto_scaling_config {
-    instance_type              = var.compute_instance_type
-    system_disk_type           = "CLOUD_PREMIUM"
+    instance_type              = local.tke_worker_type
+    instance_charge_type       = "POSTPAID_BY_HOUR"
+    system_disk_type           = "CLOUD_BSSD"
     system_disk_size           = 50
-    orderly_security_group_ids = [tencentcloud_security_group.demo.id]
+    orderly_security_group_ids = [tencentcloud_security_group.tke_pod.id]
     public_ip_assigned         = false
-    key_ids                    = [tencentcloud_key_pair.demo.id]
+    key_ids                    = [tencentcloud_key_pair.cluster.id]
   }
 
   tags = {
@@ -544,9 +661,11 @@ resource "tencentcloud_kubernetes_node_pool" "tke" {
 # Tencent Container Registry (TCR)
 ########################
 
-resource "tencentcloud_tcr_instance" "demo" {
-  name          = "cubesandbox-${random_string.deploy_suffix.result}"
-  instance_type = "basic"
+resource "tencentcloud_tcr_instance" "cluster" {
+  count                = var.use_tcr ? 1 : 0
+  name                 = "cubesandbox-${random_string.deploy_suffix.result}"
+  instance_type        = "basic"
+  registry_charge_type = 1
   # Delete the auto-created COS backend bucket together with the instance so a
   # `terraform destroy` leaves no residual storage. NOTE: delete_bucket is a
   # delete-time flag read from state, so it only takes effect for instances
@@ -559,37 +678,41 @@ resource "tencentcloud_tcr_instance" "demo" {
   }
 }
 
-resource "tencentcloud_tcr_namespace" "demo" {
-  instance_id = tencentcloud_tcr_instance.demo.id
-  name        = "cubesandbox-demo"
+resource "tencentcloud_tcr_namespace" "cluster" {
+  count       = var.use_tcr ? 1 : 0
+  instance_id = tencentcloud_tcr_instance.cluster[0].id
+  name        = "cubesandbox-cluster"
   is_public   = true
 }
 
 # VPC private-network access
-resource "tencentcloud_tcr_vpc_attachment" "demo" {
-  instance_id              = tencentcloud_tcr_instance.demo.id
-  vpc_id                   = tencentcloud_vpc.demo.id
-  subnet_id                = tencentcloud_subnet.demo.id
+resource "tencentcloud_tcr_vpc_attachment" "cluster" {
+  count                    = var.use_tcr ? 1 : 0
+  instance_id              = tencentcloud_tcr_instance.cluster[0].id
+  vpc_id                   = tencentcloud_vpc.cluster.id
+  subnet_id                = tencentcloud_subnet.cluster.id
   enable_public_domain_dns = true
   enable_vpc_domain_dns    = true
 }
 
 # Long-lived access token (used for docker login)
-resource "tencentcloud_tcr_token" "demo" {
-  instance_id = tencentcloud_tcr_instance.demo.id
+resource "tencentcloud_tcr_token" "cluster" {
+  count       = var.use_tcr ? 1 : 0
+  instance_id = tencentcloud_tcr_instance.cluster[0].id
   description = "CubeSandbox deploy token"
 }
 
 # Write the TCR token onto the jumpserver for docker login
 resource "null_resource" "tcr_token_deploy" {
-  depends_on = [tencentcloud_tcr_token.demo, tencentcloud_instance.jumpserver]
+  count      = var.use_tcr ? 1 : 0
+  depends_on = [tencentcloud_instance.jumpserver]
 
   # Re-push the token when it is rotated (new token id) or the jumpserver is
   # replaced (new id) — otherwise the regenerated token would never reach
   # /root/.tcr_token and the later docker login / image build would fail with a
   # confusing auth error. Mirrors null_resource.mysql_init_db's trigger guard.
   triggers = {
-    tcr_token_id  = tencentcloud_tcr_token.demo.id
+    tcr_token_id  = tencentcloud_tcr_token.cluster[0].id
     jumpserver_id = tencentcloud_instance.jumpserver.id
   }
 
@@ -599,7 +722,7 @@ resource "null_resource" "tcr_token_deploy" {
     # rendered plan command, then pipe it over stdin to the jump-server (read back
     # by $(cat)) so it never appears in the remote argv / `ps` output (CWE-214).
     environment = {
-      TCR_TOKEN = tencentcloud_tcr_token.demo.token
+      TCR_TOKEN = tencentcloud_tcr_token.cluster[0].token
     }
     # The jumpserver runs cloud-init on first boot (switching SSH to port 443),
     # which can take a few minutes. Retry until the token lands instead of
@@ -635,21 +758,21 @@ resource "tencentcloud_instance" "jumpserver" {
   image_id          = data.tencentcloud_images.default.images.0.image_id
   instance_type     = var.jumpserver_instance_type
 
-  vpc_id    = tencentcloud_vpc.demo.id
+  vpc_id    = tencentcloud_vpc.cluster.id
   subnet_id = local.jumpserver_subnet_id
 
   instance_charge_type = "POSTPAID_BY_HOUR"
 
-  system_disk_type = "CLOUD_PREMIUM"
+  system_disk_type = "CLOUD_BSSD"
   system_disk_size = 50
 
   # Public network (the jumpserver needs a public IP as the entry point)
   allocate_public_ip         = true
   internet_max_bandwidth_out = 200
 
-  key_ids = [tencentcloud_key_pair.demo.id]
+  key_ids = [tencentcloud_key_pair.cluster.id]
 
-  orderly_security_groups = [tencentcloud_security_group.demo.id]
+  orderly_security_groups = [tencentcloud_security_group.jumpserver.id]
 
   # Change SSH port 22 → 443 + install base tools
   user_data = base64encode(<<-EOF
@@ -692,36 +815,121 @@ resource "tencentcloud_instance" "compute" {
   image_id          = data.tencentcloud_images.default.images.0.image_id
   instance_type     = local.compute_types[count.index]
 
-  vpc_id = tencentcloud_vpc.demo.id
+  vpc_id = tencentcloud_vpc.cluster.id
   subnet_id = (
     local.compute_zones[count.index] == local.primary_zone ?
-    tencentcloud_subnet.demo.id :
+    tencentcloud_subnet.cluster.id :
     tencentcloud_subnet.cvm[local.compute_zones[count.index]].id
   )
 
   instance_charge_type = "POSTPAID_BY_HOUR"
 
-  system_disk_type = "CLOUD_PREMIUM"
+  system_disk_type = "CLOUD_BSSD"
   system_disk_size = 50
+
+  # Dedicated CBS data disk per compute node, formatted as XFS and mounted at
+  # /data/cubelet by the user_data script below. Sized via compute_data_disk_size.
+  data_disks {
+    data_disk_type       = "CLOUD_BSSD"
+    data_disk_size       = var.compute_data_disk_size
+    delete_with_instance = true
+  }
+
+  # Format the first data disk as XFS and mount it at /data/cubelet on first
+  # boot. The disk is matched by serial/size rather than a fixed /dev/vdX name
+  # so it stays correct even if device ordering shifts. Idempotent: re-running
+  # (e.g. on reboot) is a no-op once the disk is formatted and in fstab.
+  user_data = base64encode(<<-EOF
+    #!/bin/bash
+    set -euo pipefail
+
+    MOUNT_POINT=/data/cubelet
+
+    # Find the unformatted, unmounted data disk (excludes the system disk, which
+    # already carries a partition table / filesystem).
+    # Covers virtio (vdX), SCSI/SATA (sdX), and NVMe (nvmeXnY) device naming.
+    DATA_DISK=""
+    for i in $(seq 1 30); do
+      for dev in /dev/vd? /dev/sd? /dev/nvme?n? /dev/nvme??n?; do
+        [ -b "$dev" ] || continue
+        # Skip disks that already have partitions or a filesystem.
+        # NVMe partitions are named nvmeXnYpZ (with a 'p' separator), while
+        # sd/vd partitions are sdX1, vdX1 (digit appended directly).
+        devbase="$(basename "$dev")"
+        if lsblk -no NAME "$dev" | grep -qE "^$devbase""p?[0-9]"; then
+          continue
+        fi
+        if blkid "$dev" >/dev/null 2>&1; then
+          continue
+        fi
+        DATA_DISK="$dev"
+        break
+      done
+      [ -n "$DATA_DISK" ] && break
+      sleep 5
+    done
+
+    if [ -z "$DATA_DISK" ]; then
+      echo "============================================================" >&2
+      echo "WARNING: cubelet data disk not found after 30 retries (150s)." >&2
+      echo "         /data/cubelet will fall back to the system disk." >&2
+      echo "         Sandbox images and runtime data may exhaust the 50GB" >&2
+      echo "         system disk and cause 'no space left on device' later." >&2
+      echo "         Check CBS data disk provisioning in the TencentCloud console." >&2
+      echo "============================================================" >&2
+      exit 0
+    fi
+
+    mkfs.xfs -f "$DATA_DISK"
+    mkdir -p "$MOUNT_POINT"
+
+    # Wait for udev to settle so blkid can read the fresh UUID reliably.
+    udevadm settle --timeout=10 2>/dev/null || true
+
+    DISK_UUID=""
+    for _retry in 1 2 3 4 5; do
+      DISK_UUID="$(blkid -s UUID -o value "$DATA_DISK" 2>/dev/null)" && [ -n "$DISK_UUID" ] && break
+      sleep 1
+    done
+
+    if [ -z "$DISK_UUID" ]; then
+      echo "ERROR: failed to obtain UUID for $DATA_DISK after retries; falling back to device path" >&2
+      FSTAB_SRC="$DATA_DISK"
+    else
+      FSTAB_SRC="UUID=$DISK_UUID"
+    fi
+
+    if ! grep -q "$MOUNT_POINT" /etc/fstab; then
+      echo "$FSTAB_SRC $MOUNT_POINT xfs defaults,noatime,nofail 0 2" >> /etc/fstab
+    fi
+    mount "$MOUNT_POINT"
+  EOF
+  )
 
   # Private network only (accessed through the jumpserver)
   allocate_public_ip = false
 
-  key_ids = [tencentcloud_key_pair.demo.id]
+  key_ids = [tencentcloud_key_pair.cluster.id]
 
-  orderly_security_groups = [tencentcloud_security_group.demo.id]
+  orderly_security_groups = [tencentcloud_security_group.compute.id]
 }
 
 ########################
 # Outputs
 ########################
 
-output "security_group_id" {
-  value = tencentcloud_security_group.demo.id
+output "security_group_ids" {
+  description = "Per-role security group ids (jumpserver / compute / tke_pod / clb)"
+  value = {
+    jumpserver = tencentcloud_security_group.jumpserver.id
+    compute    = tencentcloud_security_group.compute.id
+    tke_pod    = tencentcloud_security_group.tke_pod.id
+    clb        = tencentcloud_security_group.clb.id
+  }
 }
 
 output "subnet_id" {
-  value = tencentcloud_subnet.demo.id
+  value = tencentcloud_subnet.cluster.id
 }
 
 # Jumpserver
@@ -739,22 +947,22 @@ output "jumpserver_ssh_command" {
 
 # TCR outputs
 output "tcr_id" {
-  value = tencentcloud_tcr_instance.demo.id
+  value = var.use_tcr ? tencentcloud_tcr_instance.cluster[0].id : ""
 }
 
 output "tcr_registry_name" {
-  value = "${tencentcloud_tcr_instance.demo.name}.tencentcloudcr.com"
+  value = var.use_tcr ? "${tencentcloud_tcr_instance.cluster[0].name}.tencentcloudcr.com" : ""
 }
 output "tcr_registry_url" {
-  value = "${tencentcloud_tcr_instance.demo.name}.tencentcloudcr.com/${tencentcloud_tcr_namespace.demo.name}"
+  value = var.use_tcr ? "${tencentcloud_tcr_instance.cluster[0].name}.tencentcloudcr.com/${tencentcloud_tcr_namespace.cluster[0].name}" : ""
 }
 
 output "tcr_namespace" {
-  value = tencentcloud_tcr_namespace.demo.name
+  value = var.use_tcr ? tencentcloud_tcr_namespace.cluster[0].name : ""
 }
 
 output "tcr_token_user" {
-  value     = tencentcloud_tcr_token.demo.user_name
+  value     = var.use_tcr ? tencentcloud_tcr_token.cluster[0].user_name : ""
   sensitive = true
 }
 
@@ -833,6 +1041,7 @@ output "config_summary" {
     tke_worker_availability_zone = local.tke_worker_zone
     jumpserver_instance_type     = var.jumpserver_instance_type
     compute_instance_type        = var.compute_instance_type
+    tke_worker_instance_type     = local.tke_worker_type
     compute_instance_types       = local.compute_types
     compute_availability_zones   = local.compute_zones
   }

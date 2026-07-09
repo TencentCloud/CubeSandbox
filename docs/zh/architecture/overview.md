@@ -65,7 +65,7 @@ flowchart TB
 - **Host 模式**：解析 `Host` 头中的 `<port>-<sandbox_id>.<domain>`。
 - **路径模式**：解析 URL 中的 `/sandbox/<sandbox_id>/<port>/...`（在不便配置泛解析 DNS 与 TLS 时尤其方便，详见 [HTTPS 与域名指南](../guide/https-and-domain.md)）。
 
-它配套一个**自动暂停 / 自动恢复 sidecar**（基于 **Go** 实现），监听生命周期事件，透明地暂停空闲沙箱、并在请求到达时恢复已暂停的沙箱。
+它配套独立部署的 **cube-lifecycle-manager** 服务（基于 **Go** 实现），负责监听生命周期事件、透明地暂停空闲沙箱、并在请求到达时恢复已暂停的沙箱。cube-lifecycle-manager 通过 Redis 上的注册表实时发现所有在线的 CubeProxy 副本，因此 CubeProxy 可多副本扩展，不需要任何静态配置。
 
 ### Cubelet
 

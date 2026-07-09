@@ -70,6 +70,9 @@
 #define ICMP_CSUM_OFF(LEN)		(sizeof(struct ethhdr) + LEN + offsetof(struct icmphdr, checksum))
 #define ICMP_ECHO_ID_OFF(LEN)		(sizeof(struct ethhdr) + LEN + offsetof(struct icmphdr, un.echo.id))
 
+/* Current network namespace */
+#define BPF_F_CURRENT_NETNS		(-1L)
+
 /* IP and MAC address inside MVMs */
 const volatile __u32 mvm_inner_ip       = 0x0644fea9;	/* 169.254.68.6, network byte order */
 const volatile __u32 mvm_macaddr_p1     = 0xfc6f9020;	/* 20:90:6f:fc:fc:fc */
@@ -83,6 +86,16 @@ const volatile __u32 cubegw0_ip         = 0x017100cb;	/* 203.0.113.1, network by
 const volatile __u32 cubegw0_ifindex    = 216;
 const volatile __u32 cubegw0_macaddr_p1 = 0xcf6f9020;	/* 20:90:6f:cf:cf:cf */
 const volatile __u16 cubegw0_macaddr_p2 = 0xcfcf;
+
+/* L2 rewrite and redirect flags for ordinary egress traffic.
+ * direct mode: src=node MAC, dst=node gateway MAC, redirect flags=0.
+ * custom mode: src=MVM MAC, dst=cube-router MAC, redirect flags=BPF_F_INGRESS.
+ */
+const volatile __u32 egress_smacaddr_p1     = 0xfc6f9020;	/* 20:90:6f:fc:fc:fc */
+const volatile __u16 egress_smacaddr_p2     = 0xfcfc;
+const volatile __u32 egress_dmacaddr_p1     = 0xcf6f9022;	/* 22:90:6f:cf:cf:cf */
+const volatile __u16 egress_dmacaddr_p2     = 0xcfcf;
+const volatile __u64 egress_redirect_flags  = BPF_F_INGRESS;
 
 /* Ifindex, IP and MAC address of Node itself */
 const volatile __u32 nodenic_ip         = 0x020a8709;	/* 9.135.10.2, network byte order */
@@ -228,6 +241,26 @@ struct snat_ip {
 	__u16 max_port;			/* the next port to be used */
 	__u16 reserved;
 };
+
+/* skb->cb[0] is reserved as a per-invocation NAT status word used by
+ * create_nat_session() to communicate the failure reason back to callers
+ * in from_cube(). skb->cb[] is 5 * u32 scratch that survives across
+ * bpf-to-bpf calls within a single program invocation, so this works even
+ * when the session helpers are compiled as subprogs.
+ */
+#define NAT_CB_STATUS_INDEX		0
+#define NAT_CB_OK			0
+#define NAT_CB_DENIED_BY_POLICY		1
+
+static __always_inline void nat_cb_set(struct __sk_buff *skb, __u32 status)
+{
+	skb->cb[NAT_CB_STATUS_INDEX] = status;
+}
+
+static __always_inline __u32 nat_cb_get(const struct __sk_buff *skb)
+{
+	return skb->cb[NAT_CB_STATUS_INDEX];
+}
 
 /* static assert, make sure size of structs are expected
  */

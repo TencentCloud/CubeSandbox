@@ -27,6 +27,7 @@ use devices::ioapic;
 use hypervisor::HypervisorVmError;
 #[cfg(target_arch = "x86_64")]
 use libc::{MAP_NORESERVE, MAP_POPULATE, MAP_SHARED, PROT_READ, PROT_WRITE};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "guest_debug")]
 use std::collections::BTreeMap;
@@ -190,6 +191,24 @@ const MPOL_MF_MOVE: u32 = 1 << 1;
 
 // Reserve 1 MiB for platform MMIO devices (e.g. ACPI control devices)
 const PLATFORM_DEVICE_AREA_SIZE: u64 = 1 << 20;
+
+// KVM's dirty log and vm-memory's AtomicBitmap both size their bitmaps with one
+// bit per host page (via sysconf(_SC_PAGESIZE)), so interpreting those bitmaps
+// must use the same granularity: 4 KiB on x86_64, 64 KiB on some ARM64 hosts.
+// The value is fixed for the process lifetime, so probe it once and cache it to
+// keep sysconf() off the hot dirty-log path.
+static HOST_PAGE_SIZE: Lazy<u64> = Lazy::new(|| {
+    // Trivially safe: sysconf(_SC_PAGESIZE) takes no pointer argument.
+    let ret = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    // POSIX returns -1 on failure; a non-positive page size would corrupt the
+    // dirty-log bitmap granularity. The checked conversion keeps this invariant
+    // self-documenting and rejects any negative value regardless of build mode.
+    u64::try_from(ret).expect("sysconf(_SC_PAGESIZE) returned non-positive value")
+});
+
+fn host_page_size() -> u64 {
+    *HOST_PAGE_SIZE
+}
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct HotPlugState {
@@ -3085,7 +3104,8 @@ impl Transportable for MemoryManager {
                     .map(|(x, y)| x | y)
                     .collect();
 
-                let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, range.gpa, 4096);
+                let sub_table =
+                    MemoryRangeTable::from_bitmap(dirty_bitmap, range.gpa, host_page_size());
 
                 if !sub_table.regions().is_empty() {
                     for r in sub_table.regions() {
@@ -3175,7 +3195,7 @@ impl Migratable for MemoryManager {
                 .map(|(x, y)| x | y)
                 .collect();
 
-            let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, r.gpa, 4096);
+            let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, r.gpa, host_page_size());
 
             if sub_table.regions().is_empty() {
                 info!("Dirty Memory Range Table is empty");

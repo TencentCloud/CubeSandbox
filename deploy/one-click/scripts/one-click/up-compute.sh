@@ -62,6 +62,8 @@ start_with_pidfile \
 
 refresh_pidfile_from_pattern "cubelet" "^${CUBELET_BIN} --config" 10 1 || log "cubelet pidfile refresh skipped"
 
+"${SCRIPT_DIR}/up-cube-egress.sh"
+
 # quickcheck.sh now waits for each runtime signal to become ready within a single
 # shared budget (CUBE_QUICKCHECK_READY_TIMEOUT), so a single invocation is
 # already race-tolerant. Do NOT wrap it in an outer retry loop: that would

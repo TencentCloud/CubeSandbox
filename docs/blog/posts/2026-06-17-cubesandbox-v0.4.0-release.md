@@ -4,7 +4,7 @@ date: 2026-06-17
 author: Cube Sandbox Team
 description: "Following v0.3.0's snapshot/clone/rollback trio, v0.4.0 ships 58 commits from 15 contributors centered on three questions: egress governance (CubeEgress L7 proxy + credential injection + domain filtering + access audit), observability (container log forwarding via vsock), and consistency (node component version matrix + template compatibility checks). Also delivers a 41% reduction in network P99 latency and cuts template build peak disk from 4.2x to 1.2x image size."
 featured: true
-weight: 1
+weight: 2
 ---
 
 # Cube Sandbox v0.4.0: From "Isolating Agents" to "Governing Agents"

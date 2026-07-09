@@ -295,11 +295,12 @@ static __always_inline void update_session(enum ip_conntrack_dir dir, struct nat
 		sess->state = new_state;
 }
 
-static __always_inline bool create_new_sessions(struct session_key *ekey,
+static __always_inline bool create_new_sessions(struct __sk_buff *skb,
+						struct session_key *ekey,
 						__u64 now_ns, __u32 vm_ifindex,
 						struct snat_ip *snat_ip, __u16 snat_port)
 {
-	return create_nat_session(ekey, now_ns, vm_ifindex, snat_ip, snat_port,
+	return create_nat_session(skb, ekey, now_ns, vm_ifindex, snat_ip, snat_port,
 				  TCP_CONNTRACK_SYN_SENT);
 }
 

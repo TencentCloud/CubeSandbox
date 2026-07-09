@@ -36,6 +36,7 @@ test_component_build_inputs_exist() {
   require_file "${ONE_CLICK_DIR}/webui/Dockerfile.package" "cube-webui Dockerfile"
   # cube-proxy's build-context (and its Dockerfile) come from the CubeProxy source.
   require_file "${ROOT_DIR}/CubeProxy/Dockerfile" "cube-proxy Dockerfile (CubeProxy source)"
+  require_file "${ROOT_DIR}/cube-lifecycle-manager/Dockerfile" "cube-lifecycle-manager Dockerfile"
   # webui nginx.conf is the canonical source for both the package and the
   # terraform webui-nginx.conf the addons render.
   require_file "${ONE_CLICK_DIR}/webui/nginx.conf" "webui nginx.conf source"
@@ -69,8 +70,8 @@ test_image_names_match() {
   # Guard against a regex that silently matches too few/many lines.
   local built_n
   built_n="$(printf '%s\n' "${built}" | grep -c .)"
-  if [[ "${built_n}" -ne 4 ]]; then
-    fail "expected 4 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
+  if [[ "${built_n}" -ne 5 ]]; then
+    fail "expected 5 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
   fi
   if [[ "${built}" != "${composed}" ]]; then
     fail "image name drift between build_images.sh and tke-addons.tf:
@@ -115,7 +116,34 @@ test_webui_nginx_placeholders() {
   done
 }
 
-# 3c) The TKE addon ConfigMap embeds a cube_box_req_template whose default egress
+# 3c) The Terraform cube-proxy ConfigMap consumes a placeholder-rendered copy of
+#     CubeProxy/nginx.conf. Guard the sed-based template generation so an upstream
+#     listen/cert path format change fails in CI instead of leaving the admin
+#     listener on 127.0.0.1 or a literal placeholder in the rendered ConfigMap.
+test_cubeproxy_nginx_template_generation() {
+  local src="${ROOT_DIR}/CubeProxy/nginx.conf"
+  local tmp token
+  [[ -f "${src}" ]] || { fail "CubeProxy nginx.conf missing: ${src}"; return; }
+
+  tmp="$(mktemp)"
+  sed \
+    -e 's|^worker_processes [0-9]\+;|worker_processes auto;|' \
+    -e 's|^\(\s*listen \)8081\( reuseport;\)|\1__CUBE_PROXY_HTTP_PORT__\2|' \
+    -e 's|^\(\s*listen \)8080\( ssl reuseport;\)|\1__CUBE_PROXY_HTTPS_PORT__\2|' \
+    -e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
+    -e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
+    -e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
+    -e 's|/usr/local/openresty/nginx/certs/cube\.app+3\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__|' \
+    -e 's|/usr/local/openresty/nginx/certs/cube\.app+3-key\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__|' \
+    "${src}" >"${tmp}"
+
+  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
+    grep -q -F "${token}" "${tmp}" || fail "cube-proxy nginx template generation is missing ${token}; CubeProxy/nginx.conf may have changed"
+  done
+  rm -f "${tmp}"
+}
+
+# 3d) The TKE addon ConfigMap embeds a cube_box_req_template whose default egress
 #     policy MUST sit under the "cube_network_config" JSON key — the only key
 #     CubeMaster deserializes (CreateCubeSandboxReq.CubeNetworkConfig). The legacy
 #     "cubevs_context" key is silently dropped, so the denyOut policy would never
@@ -134,7 +162,7 @@ test_tke_addons_network_config_key() {
   fi
 }
 
-# 3d) Reinstall first removes packaged component directories, then lays the new
+# 3e) Reinstall first removes packaged component directories, then lays the new
 #     package down. Guard that list against drifting when build-release-bundle.sh
 #     adds a new top-level package component.
 extract_package_root_dirs() {
@@ -208,6 +236,7 @@ test_build_scripts_parse() {
 test_component_build_inputs_exist
 test_image_names_match
 test_webui_nginx_placeholders
+test_cubeproxy_nginx_template_generation
 test_tke_addons_network_config_key
 test_reinstall_cleanup_tracks_packaged_components
 test_terraform_deployer_files_present

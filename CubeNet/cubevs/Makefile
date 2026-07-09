@@ -1,6 +1,7 @@
 COVERAGE_PROFILE=.coverage
 COVERAGE_REPORT=coverage.html
 
+BPF_GENS := $(wildcard *_bpfel.go)
 BPF_OBJS := $(wildcard *_bpfel.o)
 
 ifeq ($(V),1)
@@ -48,4 +49,4 @@ $(BPF_OBJS):
 .PHONY: clean
 clean:
 	$(call msg,CLEAN)
-	$(Q)rm -f $(COVERAGE_PROFILE) $(COVERAGE_REPORT)
+	$(Q)rm -f $(COVERAGE_PROFILE) $(COVERAGE_REPORT) $(BPF_GENS) $(BPF_OBJS)
