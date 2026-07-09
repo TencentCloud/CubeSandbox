@@ -19,9 +19,8 @@ ARG TARGETARCH
 # TLS is pure-rustls, so no OpenSSL is required.
 #
 # The target triple is derived from TARGETARCH so the image builds natively on
-# both amd64 and arm64. It is written to /etc/rust-target so the later
-# dependency- and application-build steps in this stage reuse the same triple
-# without re-deriving it.
+# both amd64 and arm64. It is written to /etc/rust-target so the later build
+# step in this stage reuses the same triple without re-deriving it.
 RUN set -eux; \
     arch="${TARGETARCH:-$(apk --print-arch)}"; \
     case "${arch}" in \
@@ -35,26 +34,31 @@ RUN set -eux; \
 
 WORKDIR /app
 
-# Copy manifests + build script first so the (expensive) dependency-compilation
-# layer is cached and reused unless the dependency set itself changes.
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY build.rs ./
+# Release metadata injected by CI (see release-docker-images.yml). build.rs
+# embeds these into the binary via CUBE_VERSION_FULL.
+ARG CUBE_VERSION=0.0.0-dev
+ARG CUBE_COMMIT=unknown
+ARG CUBE_BUILD_TIME=unknown
+ENV CUBE_VERSION=$CUBE_VERSION \
+    CUBE_COMMIT=$CUBE_COMMIT \
+    CUBE_BUILD_TIME=$CUBE_BUILD_TIME
 
-# Phase 1: compile dependencies against a dummy main so a one-line application
-# source change doesn't invalidate the whole dependency cache.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    mkdir src && echo "fn main() {}" > src/main.rs \
-    && cargo build --release --locked --target "$(cat /etc/rust-target)" --bin cube-api 2>/dev/null || true \
-    && rm -rf src
+# Single-shot build: copy manifests + sources together, then cargo build once.
+# Do NOT use a dummy-main dependency-cache phase — Cargo's mtime-based
+# fingerprinting can skip relinking after COPY overwrites src/, leaving a
+# ~400KB empty binary in the final image (see cargo#9312).
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
+COPY src/ src/
 
-# Phase 2: copy the real source — only application code recompiles from here on.
 # The built binary is staged at a fixed, arch-independent path so the runtime
 # stage's COPY --from doesn't need to know the target triple.
-COPY src/ src/
+# Size + --help gates catch a silently-broken binary before it is published.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     rust_target="$(cat /etc/rust-target)" \
     && cargo build --release --locked --target "${rust_target}" --bin cube-api \
-    && install -Dm0755 "target/${rust_target}/release/cube-api" /out/cube-api
+    && install -Dm0755 "target/${rust_target}/release/cube-api" /out/cube-api \
+    && test "$(stat -c%s /out/cube-api)" -gt 5000000 \
+    && /out/cube-api --help 2>&1 | grep -qi 'cube-api'
 
 # ── Runtime stage ──────────────────────────────────────────────────────────────
 FROM alpine:3.21
