@@ -45,7 +45,19 @@ func GetDiskCap(path string) (uint64, uint64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	return 100 * stat.Bavail / stat.Blocks, 100 * stat.Ffree / stat.Files, nil
+	var blockRatio uint64
+	if stat.Blocks > 0 {
+		blockRatio = 100 * stat.Bavail / stat.Blocks
+	}
+	var inodeRatio uint64
+	if stat.Files > 0 {
+		inodeRatio = 100 * stat.Ffree / stat.Files
+	} else {
+		// Filesystems like btrfs don't maintain a fixed inode table
+		// and report Files=0. Treat as 100% inode available.
+		inodeRatio = 100
+	}
+	return blockRatio, inodeRatio, nil
 }
 
 func GetSha256Value(image string) (string, error) {

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
@@ -72,6 +73,8 @@ func GetDeviceIdleRatio(path string) (uint64, uint64, error) {
 	var blockRatio uint64
 	if buf.Blocks > 0 {
 		blockRatio = uint64(100) * buf.Bavail / buf.Blocks
+	} else {
+		log.Printf("WARNING: GetDeviceIdleRatio(%q): statfs Blocks == 0, block ratio unavailable", path)
 	}
 	var inodeRatio uint64
 	if buf.Files > 0 {
@@ -79,6 +82,7 @@ func GetDeviceIdleRatio(path string) (uint64, uint64, error) {
 	} else {
 		// Filesystems like btrfs don't maintain a fixed inode table
 		// and report Files=0. Treat as 100% inode available.
+		log.Printf("WARNING: GetDeviceIdleRatio(%q): statfs Files == 0, treating inode ratio as 100%% (btrfs-like filesystem)", path)
 		inodeRatio = uint64(100)
 	}
 	return blockRatio, inodeRatio, nil
