@@ -865,6 +865,13 @@ class TestSetTimeout:
             sb.set_timeout(0)
         assert m.call_args.kwargs["json"] == {"timeout": 0}
 
+    def test_set_timeout_sends_never_timeout(self):
+        from cubesandbox import NEVER_TIMEOUT
+        sb = make_sandbox()
+        with patch.object(sb._session, "post", return_value=mock_response(status=204)) as m:
+            sb.set_timeout(NEVER_TIMEOUT)
+        assert m.call_args.kwargs["json"] == {"timeout": -1}
+
     def test_set_timeout_not_found(self):
         sb = make_sandbox()
         with patch.object(sb._session, "post",

@@ -479,8 +479,25 @@ fn default_log_limit() -> i32 {
 /// Request body for POST /sandboxes/{id}/timeout
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct SetTimeoutRequest {
-    #[validate(range(min = 0))]
+    #[validate(custom(function = "validate_timeout_value"))]
     pub timeout: i32,
+}
+
+/// Validates the timeout value for SetTimeoutRequest.
+///
+/// Accepts:
+/// - `>= 0`: normal TTL in seconds (0 = immediate expire)
+/// - `-1`:  never-timeout sentinel (see `NEVER_TIMEOUT` in SDK)
+///
+/// Rejects all other negative values.
+fn validate_timeout_value(timeout: i32) -> Result<(), validator::ValidationError> {
+    if timeout >= 0 || timeout == -1 {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new(
+            "timeout_must_be_non_negative_or_never",
+        ))
+    }
 }
 
 /// Request body for POST /sandboxes/{id}/refreshes
@@ -522,12 +539,22 @@ mod tests {
     use validator::Validate;
 
     #[test]
-    fn set_timeout_request_rejects_negative_values() {
+    fn set_timeout_request_rejects_invalid_negative_values() {
+        // Only -1 (NEVER_TIMEOUT) is accepted as a valid negative value.
+        for timeout in [-2, -100, -999] {
+            let req = SetTimeoutRequest { timeout };
+            assert!(
+                req.validate().is_err(),
+                "timeout={timeout} should be rejected (only -1 is valid negative)"
+            );
+        }
+    }
+
+    #[test]
+    fn set_timeout_request_accepts_never_timeout() {
         let req = SetTimeoutRequest { timeout: -1 };
-        assert!(
-            req.validate().is_err(),
-            "negative timeout should be rejected"
-        );
+        req.validate()
+            .unwrap_or_else(|e| panic!("NEVER_TIMEOUT (-1) should be valid: {e}"));
     }
 
     #[test]

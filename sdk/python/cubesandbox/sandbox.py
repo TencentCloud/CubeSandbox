@@ -459,7 +459,8 @@ class Sandbox:
 
         Args:
             timeout: New idle timeout in seconds. ``0`` requests immediate
-                timeout; positive values set a normal TTL.
+                timeout; positive values set a normal TTL; ``NEVER_TIMEOUT``
+                (-1) disables idle timeout entirely.
 
         Raises:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
