@@ -23,7 +23,9 @@
 - `e2b-traffic-access-token`（与 E2B 完全兼容）
 - `cube-traffic-access-token`（CubeSandbox 原生别名）
 
-缺失 header、或携带错误 token 的请求会在触达沙箱之前被 **HTTP 403** 拒绝。
+缺失 header、或携带错误 token 的请求会在触达沙箱之前被 **HTTP 404** 拒绝。
+CubeProxy 故意返回 404（而不是 403），使「token 缺失/错误」与「沙箱不存在」
+对外表现一致，避免泄露沙箱是否存在。
 
 ## 快速上手
 
@@ -43,9 +45,9 @@ print(sandbox.traffic_access_token)
 # 80 端口，否则用 commands.run 启动自己的进程并 expose 端口）。
 url = f"http://{sandbox.get_host(80)}/"
 
-# 不带 token → 403
+# 不带 token → 404（刻意为之；与沙箱不存在同状态码）
 resp = requests.get(url)
-assert resp.status_code == 403
+assert resp.status_code == 404
 
 # 带 E2B 兼容 header → 200
 resp = requests.get(
@@ -77,7 +79,10 @@ assert resp.status_code == 200
 | 调用意图 | 怎么传 | `traffic_access_token` | 入站请求行为 |
 |---|---|---|---|
 | 默认 —— 公网可达 | 不传 `network`，或 `allow_public_traffic=True` | `None` | 接受所有请求 |
-| 锁定访问 | `network={"allow_public_traffic": False}` | 不透明 token | 拒绝未携带正确 token 的请求（403） |
+| 锁定访问 | `network={"allow_public_traffic": False}` | 不透明 token | 拒绝未携带正确 token 的请求（404） |
+
+CubeProxy 的所有入站监听（HTTP、HTTPS 以及默认明文 gRPC 端口 `9090`）均执行相同校验。
+gRPC 客户端应通过 metadata 发送 `e2b-traffic-access-token` 或 `cube-traffic-access-token`。
 
 ## Header 语义
 
@@ -124,7 +129,7 @@ SaaS API、安全代理在出站端注入 API 凭证以避免密钥进入沙箱�
 | HTTP 状态 | 触发条件 |
 |---|---|
 | `200`（或上游返回的状态码） | token 匹配 |
-| `403` | 沙箱被标记为 `allow_public_traffic=false`，但请求未携带 `e2b-traffic-access-token` / `cube-traffic-access-token`，或 token 值不匹配 |
+| `404` | 沙箱被标记为 `allow_public_traffic=false`，但请求未携带 `e2b-traffic-access-token` / `cube-traffic-access-token`，或 token 值不匹配。与「沙箱不存在」同状态码，属刻意设计 |
 
 所有其他错误路径（沙箱不存在、上游不健康等）与默认公开
 访问模式下完全一致，本特性不引入新的失败模式。

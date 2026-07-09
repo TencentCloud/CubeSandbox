@@ -27,7 +27,9 @@ of two equivalent headers:
 - `cube-traffic-access-token` (CubeSandbox-native alias)
 
 Requests missing the header — or carrying a wrong value — are rejected
-with **HTTP 403** before reaching the sandbox.
+with **HTTP 404** before reaching the sandbox. CubeProxy deliberately
+returns 404 (not 403) so that a missing/wrong token looks the same as an
+unknown sandbox and does not leak whether the sandbox exists.
 
 ## Quickstart
 
@@ -47,9 +49,9 @@ print(sandbox.traffic_access_token)
 # has nginx on :80, otherwise launch your own and use commands.run).
 url = f"http://{sandbox.get_host(80)}/"
 
-# No header → 403
+# No header → 404 (deliberate; same status as unknown sandbox)
 resp = requests.get(url)
-assert resp.status_code == 403
+assert resp.status_code == 404
 
 # E2B-compatible header → 200
 resp = requests.get(
@@ -82,7 +84,11 @@ keeps all existing callers working unchanged.
 | Caller intent | What to pass | `traffic_access_token` | CubeProxy behavior |
 |---|---|---|---|
 | Default — publicly reachable | omit `network`, or `allow_public_traffic=True` | `None` | accepts every request |
-| Lock down | `network={"allow_public_traffic": False}` | opaque token | rejects requests without a valid token header (403) |
+| Lock down | `network={"allow_public_traffic": False}` | opaque token | rejects requests without a valid token header (404) |
+
+The same enforcement applies to every CubeProxy ingress listener (HTTP, HTTPS, and
+the plaintext gRPC port `9090` by default). gRPC callers should send the token as
+metadata using `e2b-traffic-access-token` or `cube-traffic-access-token`.
 
 ## Header semantics
 
@@ -137,7 +143,7 @@ sandbox (security proxy), and require a token on every inbound request
 | HTTP status | Returned when |
 |---|---|
 | `200` (or your upstream's status) | token matches |
-| `403` | sandbox is restricted (`allow_public_traffic=false`), but the request carries no `e2b-traffic-access-token` / `cube-traffic-access-token`, or the value does not match |
+| `404` | sandbox is restricted (`allow_public_traffic=false`), but the request carries no `e2b-traffic-access-token` / `cube-traffic-access-token`, or the value does not match. Same status as "sandbox not found", by design |
 
 All other sandbox error paths (sandbox not found, upstream unhealthy,
 etc.) are unchanged from the public-by-default flow.

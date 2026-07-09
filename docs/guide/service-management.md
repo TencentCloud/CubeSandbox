@@ -69,7 +69,7 @@ The target lists its child services via `Wants=`; each service declares membersh
 | `cube-sandbox-network-agent.service` | Host process | `19090` (health) | control / compute | network |
 | `cube-sandbox-cubelet.service` | Host process | `9999` (gRPC) | control / compute | network-agent + `/data/cubelet` (XFS) |
 | `cube-sandbox-coredns.service` | Docker container | `127.0.0.54:53` or `169.254.254.53:53` | control | docker |
-| `cube-sandbox-cube-proxy.service` | Docker container | `443` (TLS) / `80` | control | docker, redis |
+| `cube-sandbox-cube-proxy.service` | Docker container | `443` (TLS) / `80` / `9090` (gRPC) | control | docker, redis |
 | `cube-sandbox-dns.service` | oneshot (no daemon) | — | control | coredns (`BindsTo`) |
 | `cube-sandbox-webui.service` | Docker container | `12088` | control | docker, cube-api |
 
@@ -387,7 +387,7 @@ Common root causes:
 
 - Container build needs the network (e.g. `cube-proxy`'s `apk update`) and the upstream mirror is flaky — see [Deployment Troubleshooting](./troubleshooting/deployment.md)
 - `ExecStartPost` health probe timeout (port already in use, upstream not yet ready)
-- For `cube-sandbox-cube-proxy.service`, `CUBE_PROXY_HTTP_PORT` is the actual nginx HTTP proxy listener used by the post-start TCP check. `CUBE_PROXY_HOST_PORT` is deprecated and ignored; set `CUBE_PROXY_HTTP_PORT` instead if you need a non-default check port.
+- For `cube-sandbox-cube-proxy.service`, `CUBE_PROXY_HTTP_PORT` and `CUBE_PROXY_GRPC_PORT` are the nginx listeners checked by the post-start TCP probe. `CUBE_PROXY_HOST_PORT` is deprecated and ignored; set `CUBE_PROXY_HTTP_PORT` instead if you need a non-default HTTP check port.
 - `/data/log` or `/data/cubelet` missing / wrong permissions / XFS not mounted
 
 ### Dashboard / API unreachable

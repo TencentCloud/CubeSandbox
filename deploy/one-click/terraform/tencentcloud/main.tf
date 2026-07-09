@@ -390,6 +390,14 @@ resource "tencentcloud_security_group_rule_set" "clb" {
     action      = "ACCEPT"
     cidr_block  = var.enable_public_network ? "0.0.0.0/0" : "10.0.0.0/16"
     protocol    = "TCP"
+    port        = "9090"
+    description = "Allow cube-proxy plaintext gRPC ingress"
+  }
+
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = var.enable_public_network ? "0.0.0.0/0" : "10.0.0.0/16"
+    protocol    = "TCP"
     port        = "3000"
     description = "Allow cube-api CLB (jumpserver public access)"
   }
