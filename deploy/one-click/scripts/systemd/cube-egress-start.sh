@@ -4,9 +4,9 @@
 #
 # Launch the cube-egress container in foreground (Type=simple unit).
 #
-# Network model is host (mandatory): nginx.conf binds explicitly to
-# 192.168.0.1:8080/8443 with IP_TRANSPARENT, which only works in the
-# host network namespace where the cube-dev iface lives.
+# Network model is host (mandatory): nginx.conf binds explicitly to the
+# cube-dev gateway IP with IP_TRANSPARENT, which only works in the host
+# network namespace where the cube-dev iface lives.
 #
 # CA + audit dir come from cube-egress-prepare.sh (run as a oneshot
 # ExecStartPre or independently by the operator).
@@ -48,6 +48,8 @@ AUDIT_DIR="${CUBE_EGRESS_AUDIT_DIR:-/data/log/cube-egress}"
 # this URL is reachable from inside the container without any port
 # forwarding.
 BOOTSTRAP_URL="${CUBE_EGRESS_BOOTSTRAP_URL:-http://127.0.0.1:19090/v1/policies/dump}"
+TPROXY_ON_IP="$(derive_cube_tproxy_on_ip)"
+log "cube-egress TPROXY listen IP: ${TPROXY_ON_IP}"
 
 ensure_dir "${CA_DIR}"
 ensure_dir "${AUDIT_DIR}"
@@ -97,6 +99,7 @@ docker create \
   --cap-add=SETGID \
   --cap-add=DAC_READ_SEARCH \
   -e "CUBE_EGRESS_BOOTSTRAP_URL=${BOOTSTRAP_URL}" \
+  -e "CUBE_TPROXY_ON_IP=${TPROXY_ON_IP}" \
   "${CUBE_EGRESS_IMAGE}" >/dev/null
 
 # `docker start -a` keeps the foreground attached to the container

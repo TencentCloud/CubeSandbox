@@ -20,6 +20,8 @@ require_root
 
 INIT_SCRIPT="${CUBE_EGRESS_NET_INIT:-${TOOLBOX_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh}"
 ensure_executable "${INIT_SCRIPT}"
+export CUBE_TPROXY_ON_IP="$(derive_cube_tproxy_on_ip)"
+log "cube-egress TPROXY rules IP: ${CUBE_TPROXY_ON_IP}"
 
 # cube-dev is created lazily by network-agent at first-sandbox time,
 # so on a fresh boot it isn't there yet. We give it a short window to

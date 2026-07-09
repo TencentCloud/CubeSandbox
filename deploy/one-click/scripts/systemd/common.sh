@@ -108,6 +108,29 @@ load_runtime_env() {
   fi
 }
 
+# Derive the cube-dev gateway address used by CubeEgress TPROXY listeners.
+# Cubelet/network-agent define the gateway as the sandbox CIDR network address + 1.
+derive_cube_tproxy_on_ip() {
+  if [[ -n "${CUBE_TPROXY_ON_IP:-}" ]]; then
+    validate_ipv4_literal "${CUBE_TPROXY_ON_IP}" "CUBE_TPROXY_ON_IP"
+    printf '%s\n' "${CUBE_TPROXY_ON_IP}"
+    return 0
+  fi
+
+  local cidr="${CUBE_SANDBOX_NETWORK_CIDR:-}"
+  if [[ -z "${cidr}" && -f "${TOOLBOX_ROOT}/Cubelet/config/config.toml" ]]; then
+    cidr="$(sed -nE '/^[[:space:]]*cidr[[:space:]]*=[[:space:]]*"/{s/.*"([^"]+)".*/\1/p;q;}' "${TOOLBOX_ROOT}/Cubelet/config/config.toml" 2>/dev/null || true)"
+  fi
+  cidr="${cidr:-192.168.0.0/18}"
+
+  require_cmd python3
+  python3 -c 'import ipaddress, sys
+net = ipaddress.ip_network(sys.argv[1], strict=True)
+if net.version != 4:
+    raise SystemExit(f"invalid sandbox CIDR {sys.argv[1]!r}: expected IPv4")
+print(net.network_address + 1)' "${cidr}"
+}
+
 one_click_deploy_role() {
   local role="${ONE_CLICK_DEPLOY_ROLE:-control}"
   case "${role}" in

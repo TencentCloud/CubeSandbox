@@ -18,6 +18,7 @@ PLACEHOLDER_CERT="${CA_DIR}/placeholder.crt"
 PLACEHOLDER_KEY="${CA_DIR}/placeholder.key"
 AUDIT_DIR="/data/log/cube-egress"
 NGINX_BIN="/usr/local/openresty/nginx/sbin/nginx"
+NGINX_CONF="/usr/local/openresty/nginx/conf/nginx.conf"
 
 log()   { printf '[entrypoint] %s\n' "$*" >&2; }
 fatal() { log "FATAL: $*"; exit 1; }
@@ -108,7 +109,23 @@ if (( (owner_bits & 3) != 3 )); then
     fatal "audit dir mode ${audit_mode} lacks owner rwx bits: ${AUDIT_DIR}"
 fi
 
-# -------- 5. nginx config validity --------
+# -------- 5. Render nginx listener IP and validate config --------
+TPROXY_ON_IP="${CUBE_TPROXY_ON_IP:-192.168.0.1}"
+if ! [[ "${TPROXY_ON_IP}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    fatal "CUBE_TPROXY_ON_IP must be an IPv4 address, got: ${TPROXY_ON_IP}"
+fi
+IFS=. read -r ip_a ip_b ip_c ip_d <<< "${TPROXY_ON_IP}"
+for octet in "${ip_a}" "${ip_b}" "${ip_c}" "${ip_d}"; do
+    if (( 10#${octet} < 0 || 10#${octet} > 255 )); then
+        fatal "CUBE_TPROXY_ON_IP has an invalid octet: ${TPROXY_ON_IP}"
+    fi
+done
+log "Rendering nginx listen IP: ${TPROXY_ON_IP}"
+sed -i -E \
+    -e "s/listen[[:space:]]+[0-9.]+:8080[[:space:]]+transparent/listen ${TPROXY_ON_IP}:8080 transparent/" \
+    -e "s/listen[[:space:]]+[0-9.]+:8443[[:space:]]+ssl[[:space:]]+transparent/listen ${TPROXY_ON_IP}:8443 ssl transparent/" \
+    "${NGINX_CONF}"
+
 log "Running nginx -t"
 "${NGINX_BIN}" -t
 

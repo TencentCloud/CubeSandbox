@@ -22,12 +22,12 @@
 # Required before this runs:
 #   - cube-dev interface exists (host-side gateway iface for sandbox VMs)
 #   - the cube-egress container is reachable on TPROXY_ON_IP:TPROXY_PORT_*
-#     (it shares the host network namespace, so `--on-ip 192.168.0.1`
-#     hits OpenResty's `listen 192.168.0.1:8080;` / `listen 192.168.0.1:8443 ssl;`).
+#     (it shares the host network namespace, so `--on-ip ${cube-dev-gw}`
+#     hits OpenResty's matching HTTP/HTTPS listeners).
 set -euo pipefail
 
 # -------- Tunables (must match nginx.conf) --------
-TPROXY_ON_IP="${CUBE_TPROXY_ON_IP:-192.168.0.1}"  # cube-dev IP
+TPROXY_ON_IP="${CUBE_TPROXY_ON_IP:-192.168.0.1}"  # cube-dev gateway IP
 TPROXY_PORT_HTTP=8080
 TPROXY_PORT_HTTPS=8443
 ROUTE_TABLE=100
