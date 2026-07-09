@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CubeSandbox 架构教学指南</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "default",
+    flowchart: { curve: "basis", htmlLabels: true, useMaxWidth: true },
+    securityLevel: "loose"
+  });
+</script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel-2: #1e2230;
+    --ink: #e6e9f0;
+    --muted: #9aa3b2;
+    --accent: #4f8cff;
+    --accent-2: #36c2a8;
+    --border: #2a2f3d;
+    --warn: #f5a623;
+    --danger: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.7;
+  }
+  header.hero {
+    padding: 64px 24px 48px;
+    text-align: center;
+    background: radial-gradient(1200px 400px at 50% -10%, rgba(79,140,255,0.25), transparent),
+      linear-gradient(180deg, #11141c, var(--bg));
+    border-bottom: 1px solid var(--border);
+  }
+  header.hero h1 {
+    font-size: 38px;
+    margin: 0 0 12px;
+    background: linear-gradient(90deg, #fff, #9fc1ff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  header.hero p { color: var(--muted); max-width: 720px; margin: 0 auto; font-size: 16px; }
+  .badges { margin-top: 20px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .badge {
+    font-size: 13px; padding: 6px 12px; border-radius: 999px;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--accent-2);
+  }
+  .layout { display: flex; max-width: 1200px; margin: 0 auto; }
+  nav.toc {
+    position: sticky; top: 0; align-self: flex-start;
+    width: 240px; padding: 28px 16px; height: 100vh; overflow-y: auto;
+    border-right: 1px solid var(--border); font-size: 14px;
+  }
+  nav.toc a { display: block; color: var(--muted); text-decoration: none; padding: 7px 10px; border-radius: 8px; }
+  nav.toc a:hover { background: var(--panel-2); color: var(--ink); }
+  main { flex: 1; padding: 32px 40px 96px; min-width: 0; }
+  section { scroll-margin-top: 16px; margin-bottom: 56px; }
+  section h2 {
+    font-size: 26px; margin: 0 0 8px; padding-bottom: 10px;
+    border-bottom: 2px solid var(--accent); display: inline-block;
+  }
+  section h3 { font-size: 19px; color: #cdd6e6; margin-top: 28px; }
+  p { color: #d4d9e4; }
+  .muted { color: var(--muted); }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 20px 22px; margin: 18px 0;
+  }
+  .diagram {
+    background: #fbfcfe; border-radius: 14px; padding: 18px;
+    border: 1px solid var(--border); overflow-x: auto; margin: 18px 0;
+  }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .comp {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; border-top: 3px solid var(--accent);
+  }
+  .comp h4 { margin: 0 0 6px; font-size: 16px; }
+  .comp .lang { font-size: 12px; color: var(--accent-2); font-weight: 600; }
+  .comp p { font-size: 13.5px; color: var(--muted); margin: 6px 0 0; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 10px 12px; text-align: left; }
+  th { background: var(--panel-2); color: #cdd6e6; }
+  td { background: var(--panel); color: #d4d9e4; }
+  code {
+    background: #0c0e14; border: 1px solid var(--border); border-radius: 6px;
+    padding: 1px 6px; font-size: 13px; color: #ffd9a0; font-family: "SFMono-Regular", Consolas, monospace;
+  }
+  pre {
+    background: #0c0e14; border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; overflow-x: auto; font-size: 13.5px;
+  }
+  pre code { background: none; border: none; padding: 0; color: #e6e9f0; }
+  .note { border-left: 4px solid var(--warn); background: rgba(245,166,35,0.08); padding: 12px 16px; border-radius: 8px; margin: 16px 0; }
+  .note b { color: var(--warn); }
+  footer { text-align: center; color: var(--muted); padding: 32px; border-top: 1px solid var(--border); font-size: 13px; }
+  .pill { display:inline-block; font-size:12px; padding:2px 8px; border-radius:6px; background:var(--panel-2); border:1px solid var(--border); color:var(--accent-2); margin-right:6px;}
+  @media (max-width: 880px) {
+    nav.toc { display: none; }
+    main { padding: 24px 18px 64px; }
+  }
+</style>
+</head>
+<body>
+<header class="hero">
+  <h1>CubeSandbox 架构教学指南</h1>
+  <p>一份面向开发者的可视化教学文档：用流程图拆解 CubeSandbox 的整体架构、请求生命周期、沙箱状态机、存储快照、网络安全与出网管控。适合刚接触该项目、希望快速建立心智模型的同学。</p>
+  <div class="badges">
+    <span class="badge">基于 RustVMM + KVM</span>
+    <span class="badge">硬件级隔离</span>
+    <span class="badge">亚 60ms 启动</span>
+    <span class="badge">E2B 兼容</span>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="toc">
+    <a href="#intro">1. 这是什么</a>
+    <a href="#arch">2. 整体架构</a>
+    <a href="#control-data">3. 控制面 / 数据面</a>
+    <a href="#components">4. 核心组件</a>
+    <a href="#request">5. 创建沙箱：请求生命周期</a>
+    <a href="#lifecycle">6. 沙箱生命周期状态机</a>
+    <a href="#storage">7. 存储：CubeCoW 快照与克隆</a>
+    <a href="#network">8. 网络：CubeVS 流量路径</a>
+    <a href="#security">9. 安全：出网管控</a>
+    <a href="#quickstart">10. 快速上手</a>
+    <a href="#glossary">11. 术语表</a>
+  </nav>
+
+  <main>
+    <section id="intro">
+      <h2>1. 这是什么</h2>
+      <p>CubeSandbox 是一个面向 AI Agent 的高性能、开箱即用的安全沙箱服务。它在 KVM 之上把"微虚拟机（MicroVM）"启动到几十毫秒级别，每个沙箱都运行自己独立的 Linux 内核，因此没有 Docker 那种"共享内核逃逸"的风险，可以安全地执行不可信的、由大模型生成的代码。</p>
+      <p class="muted">关键数字：平均冷启动 <code>&lt;60ms</code>，单实例内存开销 <code>&lt;5MB</code>，单节点可跑上千个沙箱，并且与 E2B SDK 兼容——业务代码基本不用改，只换一个环境变量即可迁移。</p>
+      <div class="card">
+        <table>
+          <tr><th>指标</th><th>Docker 容器</th><th>传统 VM</th><th>CubeSandbox</th></tr>
+          <tr><td>隔离级别</td><td>低（共享内核）</td><td>高（独立内核）</td><td>极高（独立内核 + eBPF）</td></tr>
+          <tr><td>启动速度</td><td>~200ms</td><td>数秒</td><td>亚毫秒（&lt;60ms）</td></tr>
+          <tr><td>内存开销</td><td>低</td><td>高</td><td>极低（&lt;5MB）</td></tr>
+          <tr><td>部署密度</td><td>高</td><td>低</td><td>极高（单节点上千）</td></tr>
+          <tr><td>E2B 兼容</td><td>—</td><td>—</td><td>✅ 直接替换</td></tr>
+        </table>
+      </div>
+    </section>
+
+    <section id="arch">
+      <h2>2. 整体架构</h2>
+      <p>下图是系统的"鸟瞰图"。一条外部请求从客户端 SDK 出发，依次经过 CubeAPI → CubeMaster → Cubelet → CubeShim → CubeHypervisor，最终落到 MicroVM。控制面通过 Redis 共享状态，数据面在网络和出网处分别由 CubeVS（eBPF）和 CubeEgress（L7 代理）把关。</p>
+      <div class="diagram">
+        <div class="mermaid">
+flowchart TB
+    Client["客户端 / SDK"] -->|"E2B 兼容 REST"| API["CubeAPI"]
+    API -->|"gRPC"| Master["CubeMaster"]
+    Master -->|"gRPC"| Cubelet["Cubelet"]
+    Cubelet -->|"containerd Shim v2"| Shim["CubeShim"]
+    Shim -->|"KVM API"| Hyp["CubeHypervisor\n(RustVMM)"]
+    Hyp --> VM["MicroVM\n(沙箱)"]
+
+    Master -.->|"生命周期事件"| Redis[("Redis")]
+    Proxy["CubeProxy"] -.->|"元数据查询"| Redis
+    Client -->|"访问沙箱服务"| Proxy
+    Proxy -->|"路由到沙箱"| VM
+
+    Cubelet -->|"卷操作"| CoW["CubeCoW\n(xfs reflink)"]
+    VM -->|"出网流量"| VS["CubeVS\n(eBPF)"]
+    VS -->|"TPROXY"| Egress["CubeEgress\n(OpenResty)"]
+    VS -->|"SNAT"| Internet(["互联网"])
+        </div>
+      </div>
+      <div class="note"><b>记忆要点：</b>控制面（API/Master/Proxy/Redis）是"无状态"的，所有协调都走 Redis；数据面（Cubelet/Shim/Hypervisor/CoW/VS/Egress）是"节点本地"的，每个计算节点各自管理本机上的沙箱。</div>
+    </section>
+
+    <section id="control-data">
+      <h2>3. 控制面 / 数据面</h2>
+      <p>理解 CubeSandbox 最重要的一个分法，就是把系统拆成"控制面"和"数据面"两层：</p>
+      <div class="grid">
+        <div class="comp" style="border-top-color:var(--accent)">
+          <h4>控制面 (Control Plane)</h4>
+          <p class="lang">CubeAPI · CubeMaster · WebUI · Redis</p>
+          <p>负责 API 网关、调度、状态协调、运营看板。无本地状态，Redis 是唯一真相源，因此可水平扩展。</p>
+        </div>
+        <div class="comp" style="border-top-color:var(--accent-2)">
+          <h4>数据面 (Data Plane)</h4>
+          <p class="lang">Cubelet · CubeShim · CubeHypervisor · CubeCoW · CubeVS · CubeEgress · CubeProxy</p>
+          <p>负责 VM 生命周期、存储、网络、安全执行与请求路由。每个计算节点本地运行一套。</p>
+        </div>
+      </div>
+      <div class="diagram">
+        <div class="mermaid">
+flowchart LR
+    subgraph CP["控制面"]
+      A["CubeAPI"] --> M["CubeMaster"]
+      M --> R[("Redis")]
+      W["WebUI"] --> M
+    end
+    subgraph DP["数据面 (每节点)"]
+      L["Cubelet"] --> S["CubeShim"]
+      S --> H["CubeHypervisor"]
+      L --> C["CubeCoW"]
+      V["CubeVS"] --> E["CubeEgress"]
+    end
+    CP -. "gRPC 调度" .-> DP
+    CP -. "元数据 / 事件" .-> R
+        </div>
+      </div>
+    </section>
+
+    <section id="components">
+      <h2>4. 核心组件</h2>
+      <p>每个组件各司其职，下面用卡片 + 一张关系图串起来。</p>
+      <div class="grid">
+        <div class="comp"><h4>CubeAPI</h4><p class="lang">Rust (Axum)</p><p>E2B 兼容的 REST API 网关，把 SDK 调用翻译成内部 gRPC，处理鉴权回调并转发给 CubeMaster。</p></div>
+        <div class="comp"><h4>CubeMaster</h4><p class="lang">Go</p><p>集群级编排调度器，按资源情况选节点、派发任务给 Cubelet，并向 Redis 发布生命周期事件。</p></div>
+        <div class="comp"><h4>CubeProxy</h4><p class="lang">OpenResty (Lua)</p><p>反向代理与请求路由，支持 Host 与 Path 两种模式，从 Redis 读取沙箱元数据做路由。</p></div>
+        <div class="comp"><h4>Cubelet</h4><p class="lang">Go</p><p>节点本地调度代理，管理本机所有沙箱的完整生命周期与 CubeCoW 卷操作。</p></div>
+        <div class="comp"><h4>CubeShim</h4><p class="lang">Rust</p><p>实现 containerd Shim v2，桥接容器运行时与真实 MicroVM，负责资源准备、VM 启动/恢复、vsock 通信。</p></div>
+        <div class="comp"><h4>CubeHypervisor</h4><p class="lang">RustVMM + KVM</p><p>轻量 VMM，管理 vCPU、内存、virtio 设备、启动/暂停/快照/恢复，seccomp 加固。</p></div>
+        <div class="comp"><h4>CubeVS</h4><p class="lang">eBPF (C/Go)</p><p>内核态网络数据面：SNAT/DNAT、有状态连接跟踪、LPM 路由策略、ARP 代理。</p></div>
+        <div class="comp"><h4>CubeCoW</h4><p class="lang">Rust</p><p>基于 XFS reflink 的瘦供给存储引擎，O(1) 快照与克隆，零拷贝。</p></div>
+        <div class="comp"><h4>CubeEgress</h4><p class="lang">OpenResty (Lua)</p><p>主机本地 L7 出网代理，做域名过滤、凭据注入、访问审计。</p></div>
+      </div>
+      <div class="diagram">
+        <div class="mermaid">
+flowchart TB
+    SDK["SDK / 客户端"] --> API["CubeAPI (Rust)"]
+    API --> Master["CubeMaster (Go)"]
+    Master --> Cubelet["Cubelet (Go)"]
+    Cubelet --> Shim["CubeShim (Rust)"]
+    Shim --> Hyp["CubeHypervisor (RustVMM)"]
+    Hyp --> VM["MicroVM"]
+    Proxy["CubeProxy (Lua)"] --> VM
+    Cubelet --> CoW["CubeCoW (Rust)"]
+    VM --> VS["CubeVS (eBPF)"]
+    VS --> Egress["CubeEgress (Lua)"]
+    Master --> Redis[("Redis")]
+        </div>
+      </div>
+    </section>
+
+    <section id="request">
+      <h2>5. 创建沙箱：请求生命周期</h2>
+      <p>当你调用 <code>Sandbox.create()</code> 时，一次创建请求在系统中是这样流动的：CubeAPI 收到 REST 请求后转成 gRPC 给 CubeMaster，Master 选好节点后交给 Cubelet，Cubelet 用 CubeCoW 从模板克隆出 rootfs，再通过 Shim 启动 Hypervisor 里的 MicroVM，最后把"运行中"的事件写回 Redis。</p>
+      <div class="diagram">
+        <div class="mermaid">
+sequenceDiagram
+    participant C as 客户端 / SDK
+    participant A as CubeAPI
+    participant M as CubeMaster
+    participant R as Redis
+    participant L as Cubelet
+    participant S as CubeShim
+    participant H as CubeHypervisor
+    participant V as CubeVS
+    C->>A: POST /sandboxes (E2B 兼容)
+    A->>M: gRPC CreateSandbox
+    M->>M: 选择目标节点 (资源适配)
+    M->>L: gRPC RunCubeSandbox
+    L->>L: 准备 rootfs (CubeCoW 从模板克隆)
+    L->>S: containerd Shim v2 → Create + Start
+    S->>H: launch_vmm → create_vm → restore_vm
+    H-->>S: VM 就绪 (vsock 监听中)
+    S-->>L: Task 已启动
+    L->>V: AddTAPDevice + AttachFilter
+    L-->>M: 沙箱运行中
+    M->>R: 发布生命周期事件
+    M-->>A: sandbox_id + 元数据
+    A-->>C: 201 { sandbox_id, ... }
+        </div>
+      </div>
+    </section>
+
+    <section id="lifecycle">
+      <h2>6. 沙箱生命周期状态机</h2>
+      <p>每个沙箱在任何时刻都处于且仅处于一个状态：<code>running</code> / <code>pausing</code> / <code>paused</code> / <code>resuming</code> / <code>terminated</code>。两个关键参数驱动状态切换：<code>timeout</code>（空闲多久触发）与 <code>on_timeout</code>（超时后 <code>kill</code> 还是 <code>pause</code>）。</p>
+      <div class="diagram">
+        <div class="mermaid">
+stateDiagram-v2
+    [*] --> running: create()
+    running --> pausing: timeout & on_timeout=pause
+    pausing --> paused: 快照落盘
+    paused --> resuming: connect() / 自动恢复请求
+    resuming --> running: 从快照恢复
+    running --> terminated: kill()
+    running --> terminated: timeout & on_timeout=kill
+    paused --> terminated: kill()
+    terminated --> [*]
+        </div>
+      </div>
+      <div class="note"><b>auto-pause / auto-resume：</b>大多数 Agent 工作负载并非一直忙碌。空闲时自动暂停（内存冻结到快照、CPU/内存零占用），下次请求到达时透明恢复（亚秒到数秒）。由 <code>cube-lifecycle-manager</code> 消费 Redis 事件流统一协调，并用 Redis <code>SETNX</code> 锁避免并发重复暂停/恢复。</div>
+    </section>
+
+    <section id="storage">
+      <h2>7. 存储：CubeCoW 快照与克隆</h2>
+      <p>CubeCoW 是 CubeSandbox 的存储引擎，核心是 Linux 内核的 <code>FICLONE</code> ioctl（XFS reflink），让快照和克隆变成"元数据操作"——共享物理区块，不拷贝字节。这让"创建沙箱""打快照""克隆""回滚"都能在百毫秒内完成。</p>
+      <div class="diagram">
+        <div class="mermaid">
+flowchart TB
+    T["模板 (只读基础)"] -->|"FICLONE"| R["沙箱 rootfs 卷 (CoW)"]
+    R -->|"FICLONE"| S["快照 A"]
+    R -->|"FICLONE"| C1["克隆 1"]
+    R -->|"FICLONE"| C2["克隆 2"]
+    R -->|"增量脏页"| S2["快照 B (仅变更页)"]
+
+    subgraph 构建
+      O["OCI 镜像"] --> B["Buildkit"]
+      B --> RO["rootfs + 冷启动"]
+      RO --> MS["内存快照"]
+      MS --> T
+    end
+    subgraph 启动
+      R2["克隆 rootfs + 内存卷"] --> RS["CubeShim 从内存快照恢复 VM"]
+    end
+        </div>
+      </div>
+      <ul>
+        <li>模板构建：OCI 镜像 → Buildkit → rootfs + 冷启动 → 内存快照 → 注册为模板。</li>
+        <li>沙箱启动：Cubelet 用 CubeCoW 克隆模板的 rootfs 与内存卷（O(1)，无数据拷贝），CubeShim 从内存快照恢复 VM。</li>
+        <li>增量快照：只持久化"脏页"（相对上一份快照变化的匿名内存页），未变页面通过 reflink 共享，写入放大与快照体积都最小。</li>
+      </ul>
+    </section>
+
+    <section id="network">
+      <h2>8. 网络：CubeVS 流量路径</h2>
+      <p>CubeVS 用 3 个 eBPF 程序在内核态完成全部网络数据面，没有 iptables、没有 Linux Bridge、没有 OVS。每个沙箱有独立 TAP 设备，内部固定地址 <code>169.254.68.6</code>，网关 <code>169.254.68.5</code>。</p>
+      <h3>出网（沙箱 → 外部）</h3>
+      <div class="diagram">
+        <div class="mermaid">
+flowchart LR
+    A["沙箱 169.254.68.6"] -->|"原始包"| B["TAP 设备"]
+    B -->|"TC ingress"| C["from_cube\n(mvmtap.bpf.c)"]
+    C -->|"SNAT + 策略 + 会话"| D["Host NIC (eth0)"]
+    D --> E["外部网络"]
+        </div>
+      </div>
+      <h3>入网（外部 → 沙箱，会话反向 NAT）</h3>
+      <div class="diagram">
+        <div class="mermaid">
+flowchart LR
+    A["外部网络"] -->|"回包"| B["Host NIC (eth0)"]
+    B -->|"TC ingress"| C["from_world\n(nodenic.bpf.c)"]
+    C -->|"会话查找 + 反向 NAT"| D["TAP 设备"]
+    D --> E["沙箱 169.254.68.6"]
+        </div>
+      </div>
+      <h3>本地代理 / Overlay → 沙箱</h3>
+      <div class="diagram">
+        <div class="mermaid">
+flowchart LR
+    A["OpenResty TPROXY / Overlay"] -->|"包"| B["cube-dev"]
+    B -->|"TC egress"| C["from_envoy\n(localgw.bpf.c)"]
+    C -->|"DNAT 到沙箱 IP + 重定向"| D["TAP 设备"]
+    D --> E["沙箱"]
+        </div>
+      </div>
+      <p class="muted">三个程序分工：<code>from_cube</code> 装在 TAP 上（沙箱→主机，做 SNAT/策略/ARP 代理）；<code>from_world</code> 装在主机网卡上（外部→主机，做反向 NAT/端口映射）；<code>from_envoy</code> 装在 cube-dev 上（代理→沙箱，做 DNAT）。它们通过 9 个 pinned BPF map 共享状态。</p>
+    </section>
+
+    <section id="security">
+      <h2>9. 安全：出网管控</h2>
+      <p>安全是分层强制的：硬件隔离（独立内核）→ 网络隔离（CubeVS 默认拒绝私有/链路本地网段）→ 出网控制（CubeEgress L7 域名白名单）→ 凭据保险库（密钥经 header 注入，绝不进入沙箱）→ Seccomp → 鉴权。</p>
+      <div class="diagram">
+        <div class="mermaid">
+flowchart TB
+    APP["沙箱内的应用"] -->|"HTTPS 请求"| VS["CubeVS (eBPF 策略)"]
+    VS -->|"命中 L7_REQUIRED 80/443"| TP["TPROXY 重定向到 cube-dev"]
+    TP --> EG["CubeEgress (OpenResty)"]
+    EG -->|"1. 域名过滤 (SNI/Host)"| CHK{"允许?"}
+    CHK -->|"否"| DROP["丢弃 + 审计日志"]
+    CHK -->|"是"| INJ["凭据注入 (Authorization header)"]
+    INJ --> NET["目标 API (密钥不进沙箱)"]
+    EG -->|"审计"| AUDIT[("每主机 JSONL 审计日志")]
+        </div>
+      </div>
+      <p class="muted">沙箱信任 CubeEgress 签发的一个根 CA（烘焙进模板），因此可以透明做 TLS  inspecting。Agent 像平常一样调用 LLM/外部 API，密钥却永不进入沙箱、模型上下文或日志。</p>
+    </section>
+
+    <section id="quickstart">
+      <h2>10. 快速上手</h2>
+      <p>环境要求：<code>x86_64 Linux</code> + <code>KVM</code>。一行 Python 即可创建并运行代码：</p>
+      <pre><code>from cubesandbox import Sandbox
+
+# 空闲 60 秒后自动销毁（默认 on_timeout=kill）
+sandbox = Sandbox.create(template="&lt;your-template-id&gt;", timeout=60)
+
+# 运行代码
+sandbox.run_code("print('hello from sandbox')")
+
+# 自动暂停 / 恢复（节省资源）
+sandbox = Sandbox.create(
+    template="&lt;your-template-id&gt;",
+    timeout=300,
+    lifecycle={"on_timeout": "pause", "auto_resume": True},
+)</code></pre>
+      <p class="muted">安装后浏览器打开 <code>http://&lt;控制节点IP&gt;:12088</code> 即可用 Web 控制台管理沙箱、模板、节点。</p>
+    </section>
+
+    <section id="glossary">
+      <h2>11. 术语表</h2>
+      <table>
+        <tr><th>术语</th><th>含义</th></tr>
+        <tr><td>MicroVM</td><td>微虚拟机，运行独立内核的轻量虚拟机，是 CubeSandbox 的隔离单元。</td></tr>
+        <tr><td>Shim v2</td><td>containerd 定义的运行时接口，CubeShim 用 Rust 实现它把 MicroVM 接入容器运行时。</td></tr>
+        <tr><td>CubeCoW</td><td>基于 XFS reflink 的存储引擎，提供 O(1) 快照与克隆。</td></tr>
+        <tr><td>reflink / FICLONE</td><td>内核文件克隆 ioctl，使两份文件共享物理区块、不拷贝数据。</td></tr>
+        <tr><td>eBPF</td><td>内核态可编程技术，CubeVS 用它做 NAT、策略、连接跟踪。</td></tr>
+        <tr><td>TPROXY</td><td>Linux 透明代理机制，CubeEgress 用它拦截出网流量做 L7 检查。</td></tr>
+        <tr><td>Auto-pause / Auto-resume</td><td>空闲自动暂停、下次请求透明恢复的生命周期策略。</td></tr>
+        <tr><td>E2B 兼容</td><td>SDK 形态与 E2B 一致，业务代码只改一个 URL 环境变量即可迁移。</td></tr>
+      </table>
+    </section>
+  </main>
+</div>
+
+<footer>
+  CubeSandbox 架构教学指南 · 由项目文档（README / docs/architecture / docs/guide/lifecycle）整理绘制 · 流程图使用 Mermaid 渲染
+</footer>
+</body>
+</html>
