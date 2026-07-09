@@ -5,7 +5,7 @@
 # Launch the cube-egress container in foreground (Type=simple unit).
 #
 # Network model is host (mandatory): nginx.conf binds explicitly to
-# 192.168.0.1:8080/8443 with IP_TRANSPARENT, which only works in the
+# the cube-dev gateway IP with IP_TRANSPARENT, which only works in the
 # host network namespace where the cube-dev iface lives.
 #
 # CA + audit dir come from cube-egress-prepare.sh (run as a oneshot
@@ -48,6 +48,7 @@ AUDIT_DIR="${CUBE_EGRESS_AUDIT_DIR:-/data/log/cube-egress}"
 # this URL is reachable from inside the container without any port
 # forwarding.
 BOOTSTRAP_URL="${CUBE_EGRESS_BOOTSTRAP_URL:-http://127.0.0.1:19090/v1/policies/dump}"
+SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-192.168.0.0/18}"
 
 ensure_dir "${CA_DIR}"
 ensure_dir "${AUDIT_DIR}"
@@ -97,6 +98,7 @@ docker create \
   --cap-add=SETGID \
   --cap-add=DAC_READ_SEARCH \
   -e "CUBE_EGRESS_BOOTSTRAP_URL=${BOOTSTRAP_URL}" \
+  -e "CUBE_SANDBOX_NETWORK_CIDR=${SANDBOX_NETWORK_CIDR}" \
   "${CUBE_EGRESS_IMAGE}" >/dev/null
 
 # `docker start -a` keeps the foreground attached to the container

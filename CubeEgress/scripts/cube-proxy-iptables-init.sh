@@ -22,20 +22,51 @@
 # Required before this runs:
 #   - cube-dev interface exists (host-side gateway iface for sandbox VMs)
 #   - the cube-egress container is reachable on TPROXY_ON_IP:TPROXY_PORT_*
-#     (it shares the host network namespace, so `--on-ip 192.168.0.1`
-#     hits OpenResty's `listen 192.168.0.1:8080;` / `listen 192.168.0.1:8443 ssl;`).
+#     (it shares the host network namespace, so `--on-ip <cube-dev gateway>`
+#     hits OpenResty's matching transparent listeners).
 set -euo pipefail
 
+log()   { printf '[iptables-init] %s\n' "$*" >&2; }
+fatal() { log "FATAL: $*"; exit 1; }
+
+sandbox_gateway_ip_from_cidr() {
+    local cidr="$1"
+    local ip="${cidr%/*}"
+    local mask="${cidr#*/}"
+    local a b c d ip_int host_bits mask_int network_int
+
+    [[ "${cidr}" == */* && "${ip}" != "${cidr}" && "${mask}" =~ ^[0-9]+$ ]] \
+        || fatal "invalid CUBE_SANDBOX_NETWORK_CIDR: ${cidr}"
+    [[ "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        || fatal "invalid CUBE_SANDBOX_NETWORK_CIDR address: ${cidr}"
+    IFS=. read -r a b c d <<< "${ip}"
+    local octet
+    for octet in "${a}" "${b}" "${c}" "${d}"; do
+        [[ "${octet}" =~ ^[0-9]{1,3}$ ]] || fatal "invalid CUBE_SANDBOX_NETWORK_CIDR address: ${cidr}"
+        (( 10#${octet} >= 0 && 10#${octet} <= 255 )) || fatal "invalid CUBE_SANDBOX_NETWORK_CIDR address: ${cidr}"
+    done
+
+    host_bits=$(( 32 - 10#${mask} ))
+    (( host_bits >= 1 && host_bits <= 31 )) || fatal "invalid CUBE_SANDBOX_NETWORK_CIDR mask: ${cidr}"
+    ip_int=$(( (10#${a} << 24) + (10#${b} << 16) + (10#${c} << 8) + 10#${d} ))
+    mask_int=$(( (0xFFFFFFFF << host_bits) & 0xFFFFFFFF ))
+    network_int=$(( ip_int & mask_int ))
+
+    printf '%s.%s.%s.%s\n' \
+        "$(( ((network_int + 1) >> 24) & 255 ))" \
+        "$(( ((network_int + 1) >> 16) & 255 ))" \
+        "$(( ((network_int + 1) >> 8) & 255 ))" \
+        "$(( (network_int + 1) & 255 ))"
+}
+
 # -------- Tunables (must match nginx.conf) --------
-TPROXY_ON_IP="${CUBE_TPROXY_ON_IP:-192.168.0.1}"  # cube-dev IP
+SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-192.168.0.0/18}"
+TPROXY_ON_IP="$(sandbox_gateway_ip_from_cidr "${SANDBOX_NETWORK_CIDR}")"  # cube-dev IP
 TPROXY_PORT_HTTP=8080
 TPROXY_PORT_HTTPS=8443
 ROUTE_TABLE=100
 INGRESS_IFACE="${CUBE_INGRESS_IFACE:-cube-dev}"
 CHAIN="TRANSPROXY"
-
-log()   { printf '[iptables-init] %s\n' "$*" >&2; }
-fatal() { log "FATAL: $*"; exit 1; }
 
 require_root()  { [[ "$(id -u)" -eq 0 ]] || fatal "must run as root"; }
 require_iface() { ip link show "${INGRESS_IFACE}" &>/dev/null \
