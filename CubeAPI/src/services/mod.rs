@@ -6,6 +6,7 @@ pub mod cluster;
 pub mod sandboxes;
 pub mod snapshots;
 pub mod templates;
+pub mod terminal;
 
 use crate::{
     config::ServerConfig,

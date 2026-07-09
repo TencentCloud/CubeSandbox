@@ -305,12 +305,17 @@ export interface components {
         ListedSandbox: {
             alias?: string | null;
             clientID: string;
+            containers?: components["schemas"]["SandboxContainer"][] | null;
             /** Format: int32 */
             cpuCount: number;
             /** Format: int32 */
             diskSizeMB?: number | null;
-            /** Format: date-time */
-            endAt: string;
+            /**
+             * Format: date-time
+             * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
+             *     (no deadline) rather than being misreported as equal to startedAt.
+             */
+            endAt?: string | null;
             envdVersion: string;
             /** Format: int32 */
             memoryMB: number;
@@ -396,8 +401,11 @@ export interface components {
         /** @description Request body for POST /sandboxes/{id}/resume (deprecated). */
         ResumedSandbox: {
             autoPause?: boolean;
-            /** Format: int32 */
-            timeout?: number;
+            /**
+             * Format: int32
+             * @description Idle timeout in seconds; None when the client did not send one.
+             */
+            timeout?: number | null;
         };
         /**
          * @description Response for POST /sandboxes and POST /sandboxes/{id}/connect.
@@ -413,17 +421,34 @@ export interface components {
             templateID: string;
             trafficAccessToken?: string | null;
         };
+        /** @description Container available inside a sandbox for terminal login selection. */
+        SandboxContainer: {
+            containerID: string;
+            /** Format: int32 */
+            cpuCount?: number | null;
+            image?: string | null;
+            kind?: string | null;
+            /** Format: int32 */
+            memoryMB?: number | null;
+            name?: string | null;
+            state?: null | components["schemas"]["SandboxState"];
+        };
         /** @description Detailed sandbox info returned by GET /sandboxes/{sandboxID}. */
         SandboxDetail: {
             alias?: string | null;
             clientID: string;
+            containers?: components["schemas"]["SandboxContainer"][] | null;
             /** Format: int32 */
             cpuCount: number;
             /** Format: int32 */
             diskSizeMB?: number | null;
             domain?: string | null;
-            /** Format: date-time */
-            endAt: string;
+            /**
+             * Format: date-time
+             * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
+             *     (no deadline) rather than being misreported as equal to startedAt.
+             */
+            endAt?: string | null;
             envdAccessToken?: string | null;
             envdVersion: string;
             /** Format: int32 */
@@ -491,9 +516,9 @@ export interface components {
             /** @description Whether public internet access is allowed for sandboxes from this template. */
             allowInternetAccess?: boolean | null;
             createRequest?: unknown;
+            instanceType?: string | null;
             /** @description Latest create/rebuild job id for the template. */
             jobID?: string | null;
-            instanceType?: string | null;
             lastError?: string | null;
             /** @description Network type used when the template was created, e.g. "tap". */
             networkType?: string | null;
@@ -518,12 +543,12 @@ export interface components {
             createdAt?: string | null;
             imageInfo?: string | null;
             instanceType?: string | null;
+            /** @description Latest create/rebuild job id for the template. */
+            jobID?: string | null;
             lastError?: string | null;
             status: string;
             templateID: string;
             version?: string | null;
-            /** @description Latest create/rebuild job id for the template. */
-            jobID?: string | null;
         };
         /** @description Full node x component version matrix. */
         VersionMatrixView: {

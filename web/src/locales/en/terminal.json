@@ -1,0 +1,26 @@
+{
+  "open": "Open terminal",
+  "title": "Terminal",
+  "subtitle": "{{sandboxID}} shell",
+  "unavailable": "Terminal is available only while the sandbox is running.",
+  "connect": "Connect",
+  "disconnect": "Disconnect",
+  "reconnect": "Reconnect",
+  "connected": "Connected",
+  "connecting": "Connecting...",
+  "disconnected": "Disconnected",
+  "closed": "Terminal session closed.",
+  "error": "Terminal error",
+  "fontSize": "Font size",
+  "fullscreen": "Fullscreen",
+  "defaultContainer": "Default container",
+  "container": "Container",
+  "copy": "Copy",
+  "paste": "Paste",
+  "status": {
+    "starting": "Starting terminal session...",
+    "ready": "Terminal ready.",
+    "reconnecting": "Open a new terminal session to reconnect.",
+    "notRunning": "Start or resume the sandbox before opening a terminal."
+  }
+}

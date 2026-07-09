@@ -1076,6 +1076,21 @@ pub struct SandboxDetail {
     pub disk_size_mb: i32,
     pub annotations: HashMap<String, String>,
     pub labels: HashMap<String, String>,
+    pub containers: Vec<SandboxContainerDetail>,
+}
+
+/// Normalized container detail used by CubeAPI handlers.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SandboxContainerDetail {
+    pub name: String,
+    pub container_id: String,
+    pub status: SandboxStatus,
+    pub image: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub cpu_count: i32,
+    pub memory_mb: i32,
+    pub kind: String,
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
@@ -1230,15 +1245,22 @@ impl GetSandboxResponse {
         let (cpu_count, memory_mb) = primary_container
             .map(|c| (parse_cpu_millicores(&c.cpu), parse_mem_mb(&c.mem)))
             .unwrap_or((0, 0));
-        let status = match item.status {
-            0 => SandboxStatus::Unknown, // CONTAINER_CREATED
-            1 => SandboxStatus::Running, // CONTAINER_RUNNING
-            2 => SandboxStatus::Stopped, // CONTAINER_EXITED
-            3 => SandboxStatus::Unknown, // CONTAINER_UNKNOWN
-            4 => SandboxStatus::Pausing, // CONTAINER_PAUSING
-            5 => SandboxStatus::Paused,  // CONTAINER_PAUSED
-            _ => SandboxStatus::Unknown,
-        };
+        let started_at = primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at));
+        let status = sandbox_status_from_code(item.status);
+        let containers = item
+            .containers
+            .into_iter()
+            .map(|container| SandboxContainerDetail {
+                name: container.name,
+                container_id: container.container_id,
+                status: sandbox_status_from_code(container.status),
+                image: container.image,
+                started_at: datetime_from_unix_nanos(container.create_at),
+                cpu_count: parse_cpu_millicores(&container.cpu),
+                memory_mb: parse_mem_mb(&container.mem),
+                kind: container.kind,
+            })
+            .collect();
         let template_id = extract_template_id(&item.template_id, &item.annotations, &item.labels);
         let sid = item.sandbox_id;
         Some(SandboxDetail {
@@ -1247,14 +1269,27 @@ impl GetSandboxResponse {
             instance_type: instance_type.to_string(),
             status,
             template_id,
-            started_at: primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at)),
+            started_at,
             end_at: item.end_at,
             cpu_count,
             memory_mb,
             disk_size_mb: 0,
             annotations: item.annotations,
             labels: item.labels,
+            containers,
         })
+    }
+}
+
+fn sandbox_status_from_code(status: i32) -> SandboxStatus {
+    match status {
+        0 => SandboxStatus::Unknown, // CONTAINER_CREATED
+        1 => SandboxStatus::Running, // CONTAINER_RUNNING
+        2 => SandboxStatus::Stopped, // CONTAINER_EXITED
+        3 => SandboxStatus::Unknown, // CONTAINER_UNKNOWN
+        4 => SandboxStatus::Pausing, // CONTAINER_PAUSING
+        5 => SandboxStatus::Paused,  // CONTAINER_PAUSED
+        _ => SandboxStatus::Unknown,
     }
 }
 
@@ -2295,15 +2330,21 @@ mod tests {
                 "template_id": "tpl-1",
                 "containers": [
                     {
+                        "name": "workload",
                         "container_id": "workload-1",
                         "type": "workload",
+                        "status": 1,
+                        "image": "registry.example/workload:latest",
                         "create_at": 1713953785140309977i64,
                         "cpu": "500m",
                         "mem": "512Mi"
                     },
                     {
+                        "name": "sandbox",
                         "container_id": "sb-1",
                         "type": "sandbox",
+                        "status": 1,
+                        "image": "registry.example/sandbox:latest",
                         "create_at": 1713953785140309977i64,
                         "cpu": "2000m",
                         "mem": "2048Mi"
@@ -2321,6 +2362,15 @@ mod tests {
         assert_eq!(detail.host_id, "host-1");
         assert_eq!(detail.cpu_count, 2);
         assert_eq!(detail.memory_mb, 2048);
+        assert_eq!(detail.containers.len(), 2);
+        assert_eq!(detail.containers[0].container_id, "workload-1");
+        assert_eq!(detail.containers[0].name, "workload");
+        assert_eq!(detail.containers[0].cpu_count, 0);
+        assert_eq!(detail.containers[0].memory_mb, 512);
+        assert_eq!(detail.containers[1].container_id, "sb-1");
+        assert_eq!(detail.containers[1].kind, "sandbox");
+        assert_eq!(detail.containers[1].cpu_count, 2);
+        assert_eq!(detail.containers[1].memory_mb, 2048);
         assert_eq!(
             detail
                 .started_at

@@ -18,7 +18,9 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates},
+    handlers::{
+        agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates, terminal,
+    },
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -68,6 +70,7 @@ pub fn build_router(state: AppState) -> Router {
 fn build_e2b_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
     Router::new()
         .route("/health", get(health::health))
+        .merge(build_terminal_routes())
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
 }
@@ -84,6 +87,7 @@ fn build_cubeapi_router(state: &AppState, auth_configured: bool) -> Router<AppSt
     Router::new()
         .route("/health", get(health::health))
         .merge(build_auth_routes(state))
+        .merge(build_terminal_routes())
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
         .merge(build_cluster_routes(state, auth_configured))
@@ -103,6 +107,13 @@ fn build_auth_routes(state: &AppState) -> Router<AppState> {
             rate_limited_routes.layer(middleware::from_fn_with_state(state.clone(), rate_limit)),
         );
     open_routes
+}
+
+fn build_terminal_routes() -> Router<AppState> {
+    Router::new().route(
+        "/sandboxes/:sandboxID/terminal",
+        get(terminal::open_terminal),
+    )
 }
 
 /// Same long-budget routes mounted under the `/cubeapi/v1` prefix.

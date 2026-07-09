@@ -1,0 +1,26 @@
+{
+  "open": "打开终端",
+  "title": "终端",
+  "subtitle": "{{sandboxID}} Shell",
+  "unavailable": "仅运行中的沙箱可打开终端。",
+  "connect": "连接",
+  "disconnect": "断开",
+  "reconnect": "重新连接",
+  "connected": "已连接",
+  "connecting": "连接中...",
+  "disconnected": "已断开",
+  "closed": "终端会话已关闭。",
+  "error": "终端错误",
+  "fontSize": "字号",
+  "fullscreen": "全屏",
+  "defaultContainer": "默认容器",
+  "container": "容器",
+  "copy": "复制",
+  "paste": "粘贴",
+  "status": {
+    "starting": "正在启动终端会话...",
+    "ready": "终端已就绪。",
+    "reconnecting": "请打开新的终端会话以重新连接。",
+    "notRunning": "请先启动或恢复沙箱再打开终端。"
+  }
+}

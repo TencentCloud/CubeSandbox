@@ -17,8 +17,9 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxContainer,
+        SandboxDetail, SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response,
+        SandboxNetworkConfig, SandboxState,
     },
 };
 
@@ -141,6 +142,7 @@ impl SandboxService {
             disk_size_mb: Some(d.disk_size_mb),
             metadata: optional_metadata(d.labels),
             state: sandbox_state_from_status(d.status),
+            containers: optional_containers(d.containers),
             volume_mounts: None,
         })
     }
@@ -734,7 +736,40 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         metadata: optional_metadata(s.labels),
         state: sandbox_state_from_str(&s.status),
         envd_version,
+        containers: None,
         volume_mounts: None,
+    }
+}
+
+fn optional_containers(
+    containers: Vec<crate::cubemaster::SandboxContainerDetail>,
+) -> Option<Vec<SandboxContainer>> {
+    let containers: Vec<SandboxContainer> = containers
+        .into_iter()
+        .filter(|container| !container.container_id.trim().is_empty())
+        .map(|container| SandboxContainer {
+            container_id: container.container_id,
+            name: non_empty_string(container.name),
+            image: non_empty_string(container.image),
+            state: Some(sandbox_state_from_status(container.status)),
+            kind: non_empty_string(container.kind),
+            cpu_count: Some(container.cpu_count),
+            memory_mb: Some(container.memory_mb),
+        })
+        .collect();
+    if containers.is_empty() {
+        None
+    } else {
+        Some(containers)
+    }
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -889,8 +924,8 @@ mod tests {
         build_cube_network_config, filter_by_metadata, from_cubemaster_info, SandboxService,
     };
     use crate::cubemaster::{
-        CreateSandboxRequest, CubeMasterClient, ListSandboxResponse, SandboxInfo,
-        SandboxUpdateRequest,
+        CreateSandboxRequest, CubeMasterClient, ListSandboxResponse, SandboxContainerDetail,
+        SandboxInfo, SandboxStatus, SandboxUpdateRequest,
     };
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
@@ -1096,6 +1131,46 @@ mod tests {
         assert_eq!(listed.cpu_count, 2);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+        assert!(listed.containers.is_none());
+    }
+
+    #[test]
+    fn optional_containers_maps_cubemaster_container_details() {
+        let containers = super::optional_containers(vec![
+            SandboxContainerDetail {
+                name: " primary ".to_string(),
+                container_id: "container-1".to_string(),
+                status: SandboxStatus::Running,
+                image: "registry.example/primary:latest".to_string(),
+                started_at: None,
+                cpu_count: 2,
+                memory_mb: 2048,
+                kind: "sandbox".to_string(),
+            },
+            SandboxContainerDetail {
+                name: "".to_string(),
+                container_id: "".to_string(),
+                status: SandboxStatus::Paused,
+                image: "".to_string(),
+                started_at: None,
+                cpu_count: 0,
+                memory_mb: 0,
+                kind: "".to_string(),
+            },
+        ])
+        .expect("non-empty container list");
+
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].container_id, "container-1");
+        assert_eq!(containers[0].name.as_deref(), Some("primary"));
+        assert_eq!(
+            containers[0].image.as_deref(),
+            Some("registry.example/primary:latest")
+        );
+        assert_eq!(containers[0].state, Some(SandboxState::Running));
+        assert_eq!(containers[0].kind.as_deref(), Some("sandbox"));
+        assert_eq!(containers[0].cpu_count, Some(2));
+        assert_eq!(containers[0].memory_mb, Some(2048));
     }
 
     #[test]

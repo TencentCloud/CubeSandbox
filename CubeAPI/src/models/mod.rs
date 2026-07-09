@@ -156,6 +156,25 @@ pub struct SandboxVolumeMount {
     pub path: String,
 }
 
+/// Container available inside a sandbox for terminal login selection.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SandboxContainer {
+    #[serde(rename = "containerID")]
+    pub container_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<SandboxState>,
+    #[serde(rename = "kind", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(rename = "cpuCount", skip_serializing_if = "Option::is_none")]
+    pub cpu_count: Option<i32>,
+    #[serde(rename = "memoryMB", skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<i32>,
+}
+
 // ─── Sandbox — create request ──────────────────────────────────────────────
 
 /// Request body for POST /sandboxes
@@ -276,6 +295,8 @@ pub struct ListedSandbox {
     pub state: SandboxState,
     #[serde(rename = "envdVersion")]
     pub envd_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub containers: Option<Vec<SandboxContainer>>,
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
 }
@@ -312,6 +333,8 @@ pub struct SandboxDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<SandboxMetadata>,
     pub state: SandboxState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub containers: Option<Vec<SandboxContainer>>,
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
 }
@@ -488,6 +511,51 @@ pub struct SetTimeoutRequest {
 pub struct RefreshRequest {
     #[validate(range(min = 0, max = 3600))]
     pub duration: Option<i32>,
+}
+
+// ─── Sandbox terminal websocket ───────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum TerminalClientMessage {
+    Input { data: String },
+    Resize { rows: u16, cols: u16 },
+    Close,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum TerminalServerMessage {
+    Status {
+        status: String,
+        session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pid: Option<i64>,
+    },
+    Output {
+        data: String,
+    },
+    Error {
+        message: String,
+    },
+    Exit {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TerminalQuery {
+    pub rows: Option<u16>,
+    pub cols: Option<u16>,
+    pub container: Option<String>,
+    #[serde(rename = "sessionToken")]
+    pub session_token: Option<String>,
+    #[serde(rename = "apiKey")]
+    pub api_key: Option<String>,
+    pub bearer: Option<String>,
 }
 
 // ─── Sandbox — list query ──────────────────────────────────────────────────

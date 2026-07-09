@@ -11,10 +11,11 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Pause, Play, Trash2, RefreshCw, TerminalSquare } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { TerminalPanel } from '@/components/TerminalPanel';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -36,6 +37,7 @@ export default function SandboxDetailPage() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const { t } = useTranslation('sandboxDetail');
+  const { t: tt } = useTranslation('terminal');
 
   // ── Sandbox detail ──────────────────────────────────────────────────────
   const { data, isLoading } = useQuery({
@@ -61,6 +63,7 @@ export default function SandboxDetailPage() {
   }, [logs.data]);
 
   const [actionError, setActionError] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const onLifecycleError = (err: unknown) => {
     setActionError(formatSandboxActionError(err, t));
   };
@@ -97,6 +100,7 @@ export default function SandboxDetailPage() {
   const state = data?.state ?? 'running';
   const tone = state === 'paused' || state === 'pausing' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   const entries = logs.data?.logs ?? [];
+  const terminalDisabled = state !== 'running' || isLoading;
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -117,6 +121,14 @@ export default function SandboxDetailPage() {
           </p>
         </div>
         <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setTerminalOpen(true)}
+            disabled={terminalDisabled}
+            title={terminalDisabled ? tt('unavailable') : tt('open')}
+          >
+            <TerminalSquare size={14} /> {tt('open')}
+          </Button>
           {state === 'paused' ? (
             <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
               <Play size={14} /> {t('actions.resume')}
@@ -248,6 +260,12 @@ export default function SandboxDetailPage() {
           )}
         </pre>
       </Card>
+      <TerminalPanel
+        sandboxID={sandboxID}
+        open={terminalOpen}
+        onOpenChange={setTerminalOpen}
+        containers={data?.containers}
+      />
     </div>
   );
 }

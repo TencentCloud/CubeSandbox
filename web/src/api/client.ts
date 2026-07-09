@@ -7,6 +7,7 @@ import type { components } from './generated/schema';
 export type ClusterOverviewDto = components['schemas']['ClusterOverview'];
 export type ListedSandboxDto = components['schemas']['ListedSandbox'];
 export type SandboxDetailDto = components['schemas']['SandboxDetail'];
+export type SandboxContainer = components['schemas']['SandboxContainer'];
 export type SandboxSessionDto = components['schemas']['Sandbox'];
 export type SandboxLogsDto = components['schemas']['SandboxLogsV2Response'];
 export type SandboxLogEntry = components['schemas']['SandboxLogEntry'];
@@ -187,6 +188,25 @@ const DEFAULT_RESUME_BODY: SandboxResumeRequest = {
   timeout: 15,
   autoPause: false,
 };
+
+export function sandboxTerminalWebSocketUrl(
+  id: string,
+  params: { rows?: number; cols?: number; container?: string } = {},
+): string {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const query = new URLSearchParams();
+  if (params.rows) query.set('rows', String(params.rows));
+  if (params.cols) query.set('cols', String(params.cols));
+  if (params.container) query.set('container', params.container);
+
+  const apiKey = localStorage.getItem('cube.apiKey') ?? '';
+  const sessionToken = localStorage.getItem('cube.session') ?? '';
+  if (apiKey) query.set('apiKey', apiKey);
+  if (sessionToken) query.set('sessionToken', sessionToken);
+
+  const qs = query.toString();
+  return `${proto}//${window.location.host}/cubeapi/v1/sandboxes/${encodeURIComponent(id)}/terminal${qs ? `?${qs}` : ''}`;
+}
 
 export const sandboxApi = {
   list: (params?: { metadata?: string; state?: RunningSandbox['state']; nextToken?: string; limit?: number }) =>

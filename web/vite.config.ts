@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 
 const pkg = JSON.parse(readFileSync(path.resolve(__dirname, './package.json'), 'utf-8'));
 
@@ -44,5 +44,9 @@ export default defineConfig({
     proxy: {
       '/cubeapi': 'http://127.0.0.1:3000',
     },
+  },
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.ts',
   },
 });

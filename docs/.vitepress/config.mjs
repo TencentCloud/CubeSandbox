@@ -156,6 +156,7 @@ export default withMermaid(defineConfig({
               text: 'Operations',
               items: [
                 { text: 'WebUI Dashboard', link: '/guide/webui' },
+                { text: 'WebUI Terminal Login', link: '/guide/webui-terminal' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
@@ -290,6 +291,7 @@ export default withMermaid(defineConfig({
               text: '安全与运维',
               items: [
                 { text: 'WebUI 控制台', link: '/zh/guide/webui' },
+                { text: 'WebUI 终端登录', link: '/zh/guide/webui-terminal' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
