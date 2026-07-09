@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-pub mod cluster;
 pub mod sandboxes;
 pub mod snapshots;
 pub mod templates;
@@ -83,7 +82,6 @@ fn is_valid_dns_domain_name(domain: &str) -> bool {
 
 #[derive(Clone)]
 pub struct AppServices {
-    pub cluster: cluster::ClusterService,
     pub sandboxes: sandboxes::SandboxService,
     pub snapshots: snapshots::SnapshotService,
     pub templates: templates::TemplateService,
@@ -93,7 +91,6 @@ pub struct AppServices {
 impl AppServices {
     pub fn new(config: &ServerConfig, cubemaster: CubeMasterClient) -> Self {
         Self {
-            cluster: cluster::ClusterService::new(cubemaster.clone()),
             sandboxes: sandboxes::SandboxService::new(
                 cubemaster.clone(),
                 config.instance_type.clone(),

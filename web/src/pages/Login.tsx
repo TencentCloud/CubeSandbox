@@ -32,7 +32,7 @@ export default function LoginPage() {
     setError(null);
     try {
       const res = await authApi.login({ username: username.trim(), password });
-      setSession(res.token, res.username);
+      setSession(res.accessToken, res.refreshToken, res.username);
       navigate(redirectTo, { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {

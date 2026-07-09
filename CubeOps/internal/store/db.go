@@ -1,0 +1,113 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+package store
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
+	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
+	"github.com/tencentcloud/CubeSandbox/cubedb/dao/driver/mysql"
+	"gorm.io/gorm"
+)
+
+// Store wraps the database connection and provides access to all data operations.
+type Store struct {
+	db *gorm.DB
+}
+
+// New opens the database connection, runs migrations, and bootstraps the master key.
+func New(ctx context.Context, cfg dao.Config) (*Store, error) {
+	// Register the MySQL driver (idempotent via init()).
+	_ = mysql.DriverName
+
+	gormDB, err := dao.Open(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	slog.Info("running database migrations")
+	if err := dao.Migrate(ctx); err != nil {
+		return nil, fmt.Errorf("schema migration failed: %w", err)
+	}
+
+	s := &Store{db: gormDB}
+
+	// Bootstrap the encryption master key from the settings table.
+	if err := s.bootstrapMasterKey(ctx); err != nil {
+		return nil, fmt.Errorf("bootstrap master key: %w", err)
+	}
+
+	// Seed the default admin account.
+	if err := s.seedDefaultAdmin(ctx); err != nil {
+		return nil, fmt.Errorf("seed default admin: %w", err)
+	}
+
+	slog.Info("database initialised")
+	return s, nil
+}
+
+// DB returns the underlying *gorm.DB for direct use by business code.
+func (s *Store) DB() *gorm.DB {
+	return s.db
+}
+
+// Close releases the database connection.
+func (s *Store) Close() error {
+	return dao.Close()
+}
+
+// bootstrapMasterKey loads or creates the master encryption key from the DB.
+func (s *Store) bootstrapMasterKey(ctx context.Context) error {
+	b64, err := s.GetOrCreateSetting(ctx, "secret_master_key", crypto.GenerateMasterKeyB64())
+	if err != nil {
+		return err
+	}
+	if err := crypto.InstallMasterKey(b64); err != nil {
+		return fmt.Errorf("install master key: %w", err)
+	}
+	slog.Info("master encryption key installed")
+	return nil
+}
+
+// BootstrapJWTSecret loads or creates the JWT signing secret from the DB.
+// If JWT_SECRET env var is set, it takes priority and is NOT overwritten.
+// Otherwise, a random 32-byte secret is generated, persisted to the settings
+// table, and returned.  This allows zero-config deployment — the secret is
+// auto-generated on first run and reused on subsequent runs.
+func (s *Store) BootstrapJWTSecret(ctx context.Context, envSecret string) (string, error) {
+	if envSecret != "" {
+		return envSecret, nil
+	}
+	// Try to load from DB; if not found, generate and persist.
+	existing, _ := s.GetSetting(ctx, "jwt_secret")
+	if existing != "" {
+		slog.Info("JWT secret loaded from database")
+		return existing, nil
+	}
+	generated := crypto.GenerateMasterKeyB64()
+	if err := s.SetSetting(ctx, "jwt_secret", generated); err != nil {
+		return "", fmt.Errorf("persist JWT secret: %w", err)
+	}
+	slog.Info("JWT secret auto-generated and persisted to database")
+	return generated, nil
+}
+
+// seedDefaultAdmin creates the default admin/admin account if it doesn't exist.
+func (s *Store) seedDefaultAdmin(ctx context.Context) error {
+	hash, err := crypto.HashPassword("admin")
+	if err != nil {
+		return fmt.Errorf("hash default password: %w", err)
+	}
+	result := s.db.WithContext(ctx).Exec(
+		"INSERT IGNORE INTO t_agenthub_user (username, password) VALUES (?, ?)",
+		"admin", hash,
+	)
+	if result.Error != nil {
+		return fmt.Errorf("seed admin: %w", result.Error)
+	}
+	return nil
+}

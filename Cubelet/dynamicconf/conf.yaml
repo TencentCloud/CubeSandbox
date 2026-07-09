@@ -12,7 +12,8 @@ common:
   disable_host_netfile: true
   # Default DNS servers for guest containers. dns_config.servers in a template or request takes precedence.
   default_dns_servers:
-    - 119.29.29.29
+    - 9.218.233.130
+    - 9.218.230.76
 
 host:
   scheduler_label: "default-cluster"

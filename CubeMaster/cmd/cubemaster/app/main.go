@@ -19,9 +19,6 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao"
-	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao/driver/mysql"    // register mysql driver
-	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao/driver/postgres" // register postgres driver
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
@@ -38,6 +35,8 @@ import (
 	volumeplugin "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
 	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/binary"
 	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/rpc"
+	"github.com/tencentcloud/CubeSandbox/cubedb/dao"
+	_ "github.com/tencentcloud/CubeSandbox/cubedb/dao/driver/mysql" // register mysql driver
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -197,7 +196,7 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 // process; whoever loses the lock race blocks until the winner is done,
 // then sees the schema is already at HEAD and returns immediately.
 func initDatabaseSchema(ctx context.Context, cfg *config.Config) error {
-	// The schema produced by pkg/base/dao/migrate/migrations is a single
+	// The schema produced by cubedb/migrate/migrations is a single
 	// catalog covering both the OSS-side tables (t_cube_host_*, t_cube_node_*,
 	// ...) and the instance-side tables (t_cube_template_*, t_cube_instance_*,
 	// t_cube_sandbox_spec, ...). Running migrations against only one of the

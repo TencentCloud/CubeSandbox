@@ -49,7 +49,20 @@ type Tab = 'personal' | 'team';
 
 const HIDE_AGENT_RECOVER = import.meta.env.VITE_HIDE_AGENT_RECOVER === '1';
 const OPENCLAW_GATEWAY_PORT = 18789;
-const LOGIN_ENV_PORT = 49999;
+const DEFAULT_LOGIN_ENV_PORT = 49999;
+
+/// Extract the environment port from the agent's envUrl.
+/// envUrl format: http://{port}-{sandboxId}.{domain}
+/// Falls back to DEFAULT_LOGIN_ENV_PORT when parsing fails.
+function envPortFromUrl(envUrl?: string): number {
+  if (!envUrl) return DEFAULT_LOGIN_ENV_PORT;
+  try {
+    const url = new URL(envUrl, typeof window !== 'undefined' ? window.location.href : 'http://localhost');
+    const match = url.hostname.match(/^(\d+)-/);
+    if (match) return parseInt(match[1], 10);
+  } catch { /* fall through */ }
+  return DEFAULT_LOGIN_ENV_PORT;
+}
 
 const MODEL_OPTIONS = [
   { value: 'DeepSeek V4 Flash', labelKey: 'modelDialog.options.deepseekV4Flash' },
@@ -1834,7 +1847,7 @@ function AgentCard({
           className="gap-1.5"
           disabled={!isRunning || !agent.sandboxId}
           onClick={() => {
-            const url = buildCubeProxyUrl(agent, LOGIN_ENV_PORT, agent.envUrl);
+            const url = buildCubeProxyUrl(agent, envPortFromUrl(agent.envUrl), agent.envUrl);
             if (url) window.open(url, '_blank', 'noopener,noreferrer');
           }}
           title={!isRunning ? t('card.status.stopped') : undefined}
