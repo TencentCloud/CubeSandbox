@@ -81,6 +81,9 @@ async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 utoipa = { version = "5.4.0", features = ["chrono", "uuid", "yaml"] }
 base64 = "0.22.1"
+hmac = "0.12.1"
+sha2 = "0.10.9"
+hex = "0.4.3"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "mysql", "chrono", "json"] }
 
 # ── Secrets at rest ───────────────────────────────────────────────────────

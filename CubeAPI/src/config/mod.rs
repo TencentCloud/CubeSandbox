@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
@@ -71,6 +71,48 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+
+    /// Webhook endpoints that receive selected structured lifecycle events.
+    ///
+    /// Preferred env var: `CUBE_API_WEBHOOKS_JSON`, for example:
+    /// `[{"url":"http://127.0.0.1:9000/webhook","events":["sandbox.created"],"secret":"..."}]`
+    ///
+    /// Simple env vars:
+    ///   - `CUBE_API_WEBHOOK_URLS=http://127.0.0.1:9000/webhook,http://127.0.0.1:9001/webhook`
+    ///   - `CUBE_API_WEBHOOK_EVENTS=sandbox.created,sandbox.deleted`
+    ///   - `CUBE_API_WEBHOOK_SECRET=shared-secret`
+    #[serde(default = "default_webhooks")]
+    pub webhooks: Vec<WebhookEndpointConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct WebhookEndpointConfig {
+    /// Full URL that receives JSON POST requests.
+    pub url: String,
+
+    /// Event names this endpoint subscribes to. Use `*` to receive every event.
+    #[serde(
+        default = "default_webhook_events",
+        deserialize_with = "deserialize_webhook_events"
+    )]
+    pub events: Vec<String>,
+
+    /// Optional HMAC-SHA256 secret. When set, delivery includes
+    /// `X-Cube-Signature-256: sha256=<hex>`.
+    #[serde(default)]
+    pub secret: Option<String>,
+
+    /// Number of retries after the first failed attempt.
+    #[serde(default = "default_webhook_max_retries")]
+    pub max_retries: u32,
+
+    /// Per-request timeout.
+    #[serde(default = "default_webhook_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// Initial retry delay. Each retry doubles this delay.
+    #[serde(default = "default_webhook_retry_initial_delay_ms")]
+    pub retry_initial_delay_ms: u64,
 }
 
 fn default_bind() -> String {
@@ -108,6 +150,145 @@ fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .or_else(default_cube_sandbox_mysql_url)
+}
+
+fn default_webhooks() -> Vec<WebhookEndpointConfig> {
+    if let Ok(raw) = std::env::var("CUBE_API_WEBHOOKS_JSON") {
+        return match serde_json::from_str::<Vec<WebhookEndpointConfig>>(&raw) {
+            Ok(endpoints) => normalize_webhook_endpoints(endpoints),
+            Err(err) => {
+                eprintln!("invalid CUBE_API_WEBHOOKS_JSON: {err}");
+                Vec::new()
+            }
+        };
+    }
+
+    let urls = std::env::var("CUBE_API_WEBHOOK_URLS")
+        .ok()
+        .map(|value| parse_csv(&value))
+        .unwrap_or_default();
+    if urls.is_empty() {
+        return Vec::new();
+    }
+
+    let events = std::env::var("CUBE_API_WEBHOOK_EVENTS")
+        .ok()
+        .map(|value| parse_csv(&value))
+        .filter(|events| !events.is_empty())
+        .unwrap_or_else(default_webhook_events);
+    let secret = std::env::var("CUBE_API_WEBHOOK_SECRET")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let max_retries = env_parse_or(
+        "CUBE_API_WEBHOOK_MAX_RETRIES",
+        default_webhook_max_retries(),
+    );
+    let timeout_secs = env_parse_or(
+        "CUBE_API_WEBHOOK_TIMEOUT_SECS",
+        default_webhook_timeout_secs(),
+    );
+    let retry_initial_delay_ms = env_parse_or(
+        "CUBE_API_WEBHOOK_RETRY_INITIAL_DELAY_MS",
+        default_webhook_retry_initial_delay_ms(),
+    );
+
+    urls.into_iter()
+        .map(|url| WebhookEndpointConfig {
+            url,
+            events: events.clone(),
+            secret: secret.clone(),
+            max_retries,
+            timeout_secs,
+            retry_initial_delay_ms,
+        })
+        .collect()
+}
+
+fn normalize_webhook_endpoints(
+    endpoints: Vec<WebhookEndpointConfig>,
+) -> Vec<WebhookEndpointConfig> {
+    endpoints
+        .into_iter()
+        .filter_map(|mut endpoint| {
+            endpoint.url = endpoint.url.trim().to_string();
+            endpoint.events = normalize_webhook_events(endpoint.events);
+            if endpoint.url.is_empty() {
+                None
+            } else {
+                Some(endpoint)
+            }
+        })
+        .collect()
+}
+
+fn normalize_webhook_events(events: Vec<String>) -> Vec<String> {
+    let events: Vec<String> = events
+        .into_iter()
+        .map(|event| event.trim().to_string())
+        .filter(|event| !event.is_empty())
+        .collect();
+    if events.is_empty() {
+        default_webhook_events()
+    } else {
+        events
+    }
+}
+
+fn default_webhook_events() -> Vec<String> {
+    vec![
+        "sandbox.created".to_string(),
+        "sandbox.deleted".to_string(),
+        "sandbox.paused".to_string(),
+        "sandbox.resumed".to_string(),
+    ]
+}
+
+fn default_webhook_max_retries() -> u32 {
+    3
+}
+
+fn default_webhook_timeout_secs() -> u64 {
+    5
+}
+
+fn default_webhook_retry_initial_delay_ms() -> u64 {
+    200
+}
+
+fn parse_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn env_parse_or<T>(name: &str, fallback: T) -> T
+where
+    T: std::str::FromStr,
+{
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<T>().ok())
+        .unwrap_or(fallback)
+}
+
+fn deserialize_webhook_events<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RawEvents {
+        List(Vec<String>),
+        Csv(String),
+    }
+
+    let events = match RawEvents::deserialize(deserializer)? {
+        RawEvents::List(events) => events,
+        RawEvents::Csv(events) => parse_csv(&events),
+    };
+    Ok(normalize_webhook_events(events))
 }
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
@@ -148,6 +329,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
+            webhooks: default_webhooks(),
         }
     }
 }
