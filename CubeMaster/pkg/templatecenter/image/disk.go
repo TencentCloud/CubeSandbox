@@ -104,7 +104,7 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 		}
 		containerID := strings.TrimSpace(string(containerIDBytes))
 		defer func() {
-			_ = dockerRun(cleanupCtx, "", "rm", "-f", containerID)
+			_ = dockerRun(cleanupCtx, "", "rm", "-f", "--", containerID)
 		}()
 
 		if err := pipeExportToDir(ctx, containerID, mountPoint); err != nil {
@@ -141,7 +141,7 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 // pipeExportToDir streams the docker export of a container directly into a target
 // directory via tar -xf -.
 func pipeExportToDir(ctx context.Context, containerID, destDir string) error {
-	exportCmd := exec.CommandContext(ctx, "docker", "export", containerID)
+	exportCmd := exec.CommandContext(ctx, "docker", "export", "--", containerID)
 	// --same-owner --numeric-owner preserves the image's original uid/gid.
 	// GNU tar restores ownership only with --same-owner (the default for root,
 	// set explicitly to be robust); --numeric-owner avoids name lookups

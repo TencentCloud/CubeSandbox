@@ -65,7 +65,7 @@ func (b *boundedBuffer) String() string {
 
 func dockerLogin(ctx context.Context, configDir, imageRef, username, password string) error {
 	registry := registryHostFromImageRef(imageRef)
-	cmd := exec.CommandContext(ctx, "docker", "--config", configDir, "login", registry, "-u", username, "--password-stdin")
+	cmd := exec.CommandContext(ctx, "docker", "--config", configDir, "login", "-u", username, "--password-stdin", "--", registry)
 	cmd.Stdin = strings.NewReader(password)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

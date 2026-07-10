@@ -49,6 +49,46 @@ func TestNormalizeTemplateImageRequestDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeTemplateImageRequestTrimsAndValidatesSourceImageRef(t *testing.T) {
+	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "  registry.example.com:5000/ns/app:1.2.3  ",
+		WritableLayerSize: "20Gi",
+	})
+	if err != nil {
+		t.Fatalf("normalizeTemplateImageRequest failed: %v", err)
+	}
+	if req.SourceImageRef != "registry.example.com:5000/ns/app:1.2.3" {
+		t.Fatalf("SourceImageRef=%q, want trimmed reference", req.SourceImageRef)
+	}
+}
+
+func TestNormalizeTemplateImageRequestRejectsInvalidSourceImageRef(t *testing.T) {
+	invalidRefs := []string{
+		"",
+		"--help",
+		"-v",
+		"docker://--help",
+		"registry.example.com/image --authfile /etc/shadow",
+		"registry.example.com/image\n--flag",
+		"image;rm",
+		"library/nginx:",
+		"library/nginx@sha256:not-a-digest",
+	}
+	for _, imageRef := range invalidRefs {
+		t.Run(imageRef, func(t *testing.T) {
+			_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+				Request:           &types.Request{RequestID: "req-1"},
+				SourceImageRef:    imageRef,
+				WritableLayerSize: "20Gi",
+			})
+			if err == nil || !strings.Contains(err.Error(), "source_image_ref") {
+				t.Fatalf("normalizeTemplateImageRequest(%q) error=%v, want source_image_ref validation error", imageRef, err)
+			}
+		})
+	}
+}
+
 func TestNormalizeTemplateImageRequestIgnoresProvidedTemplateID(t *testing.T) {
 
 	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{

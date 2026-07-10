@@ -14,6 +14,7 @@ import (
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 )
 
 func resolveTemplateNodes(instanceType string, scope []string) ([]*node.Node, error) {
@@ -72,16 +73,18 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if req.Request == nil || strings.TrimSpace(req.RequestID) == "" {
 		return nil, errors.New("requestID is required")
 	}
-	if strings.TrimSpace(req.SourceImageRef) == "" {
+	sourceImageRef := strings.TrimSpace(req.SourceImageRef)
+	if sourceImageRef == "" {
 		return nil, errors.New("source_image_ref is required")
 	}
-	if strings.HasPrefix(strings.TrimSpace(req.SourceImageRef), "-") {
-		return nil, errors.New("source_image_ref must not start with '-'")
+	if err := image.ValidateImageRef(sourceImageRef); err != nil {
+		return nil, fmt.Errorf("source_image_ref: %w", err)
 	}
 	if strings.TrimSpace(req.WritableLayerSize) == "" {
 		return nil, errors.New("writable_layer_size is required")
 	}
 	cloned := *req
+	cloned.SourceImageRef = sourceImageRef
 	exposedPorts, err := normalizeTemplateExposedPorts(req.ExposedPorts)
 	if err != nil {
 		return nil, err
