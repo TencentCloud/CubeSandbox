@@ -68,6 +68,7 @@ cargo build --release
 |----------|---------|-------------|
 | `CUBE_API_BIND` | `0.0.0.0:3000` | Listen address |
 | `LOG_LEVEL` | `info` | Log level |
+| `CUBE_API_WEBHOOKS` | unset | JSON array of lifecycle webhook endpoints; see the [Webhook guide](../docs/guide/webhooks.md) |
 
 CubeAPI also exposes dashboard-oriented routes under `/cubeapi/v1`. The one-click WebUI is served by a separate nginx container on port `12088`; that nginx instance serves the packaged static dashboard and proxies same-origin `/cubeapi` requests back to the host CubeAPI through Docker `host-gateway`.
 
@@ -132,4 +133,3 @@ python pause.py
 python create_with_mount.py
 python browser.py
 python test.py
-

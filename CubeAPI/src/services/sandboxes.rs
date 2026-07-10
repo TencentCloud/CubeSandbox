@@ -63,6 +63,11 @@ pub struct SandboxService {
     sandbox_domain: String,
 }
 
+pub struct ConnectSandboxOutcome {
+    pub sandbox: Sandbox,
+    pub resumed: bool,
+}
+
 impl SandboxService {
     pub fn new(
         cubemaster: CubeMasterClient,
@@ -308,10 +313,11 @@ impl SandboxService {
         &self,
         sandbox_id: &str,
         timeout: Option<i32>,
-    ) -> AppResult<Sandbox> {
+    ) -> AppResult<ConnectSandboxOutcome> {
         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
+        let resumed = d.status == SandboxStatus::Paused;
 
-        if d.status == SandboxStatus::Paused {
+        if resumed {
             let resp = self
                 .cubemaster
                 .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
@@ -329,13 +335,16 @@ impl SandboxService {
         }
 
         let envd_version = envd_version_from_annotations(&d.annotations);
-        Ok(self.sandbox_response(
-            d.template_id,
-            sandbox_id.to_string(),
-            d.host_id,
-            envd_version,
-            None,
-        ))
+        Ok(ConnectSandboxOutcome {
+            sandbox: self.sandbox_response(
+                d.template_id,
+                sandbox_id.to_string(),
+                d.host_id,
+                envd_version,
+                None,
+            ),
+            resumed,
+        })
     }
 
     pub async fn get_logs(
@@ -899,11 +908,68 @@ mod tests {
     };
     use axum::{
         extract::State,
-        routing::{delete, post},
+        routing::{delete, get, post},
         Json, Router,
     };
     use serde_json::Value;
     use tokio::sync::Mutex;
+
+    #[derive(Clone)]
+    struct ConnectCapture {
+        status: Arc<Mutex<i32>>,
+        updates: Arc<Mutex<Vec<Value>>>,
+    }
+
+    async fn connect_info_handler(State(capture): State<ConnectCapture>) -> Json<Value> {
+        let status = *capture.status.lock().await;
+        Json(serde_json::json!({
+            "requestID": "req-info",
+            "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "data": [{
+                "sandbox_id": "sb-connect",
+                "status": status,
+                "host_id": "host-1",
+                "template_id": "tpl-connect",
+                "containers": []
+            }]
+        }))
+    }
+
+    async fn connect_update_handler(
+        State(capture): State<ConnectCapture>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        capture.updates.lock().await.push(body);
+        *capture.status.lock().await = 1;
+        Json(serde_json::json!({
+            "ret": { "ret_code": 0, "ret_msg": "ok" }
+        }))
+    }
+
+    async fn connect_test_service(initial_status: i32) -> (SandboxService, ConnectCapture) {
+        let capture = ConnectCapture {
+            status: Arc::new(Mutex::new(initial_status)),
+            updates: Arc::new(Mutex::new(Vec::new())),
+        };
+        let app = Router::new()
+            .route("/cube/sandbox/info", get(connect_info_handler))
+            .route("/cube/sandbox/update", post(connect_update_handler))
+            .with_state(capture.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(format!("http://{address}"), reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+        (service, capture)
+    }
 
     #[test]
     fn metadata_filter_matches_all_pairs() {
@@ -919,6 +985,38 @@ mod tests {
         ));
         assert!(!filter_by_metadata(Some(&metadata), Some("user=bob")));
         assert!(!filter_by_metadata(None, Some("user=alice")));
+    }
+
+    #[tokio::test]
+    async fn connect_resumes_a_paused_sandbox_and_reports_the_transition() {
+        let (service, capture) = connect_test_service(5).await;
+
+        let outcome = service
+            .connect_sandbox("sb-connect", Some(90))
+            .await
+            .expect("paused sandbox should connect");
+
+        assert!(outcome.resumed);
+        assert_eq!(outcome.sandbox.sandbox_id, "sb-connect");
+        assert_eq!(outcome.sandbox.template_id, "tpl-connect");
+        let updates = capture.updates.lock().await;
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["action"], "resume");
+        assert_eq!(updates[0]["timeout"], 90);
+    }
+
+    #[tokio::test]
+    async fn connect_does_not_report_resume_for_a_running_sandbox() {
+        let (service, capture) = connect_test_service(1).await;
+
+        let outcome = service
+            .connect_sandbox("sb-connect", Some(90))
+            .await
+            .expect("running sandbox should connect");
+
+        assert!(!outcome.resumed);
+        assert_eq!(outcome.sandbox.sandbox_id, "sb-connect");
+        assert!(capture.updates.lock().await.is_empty());
     }
 
     #[test]

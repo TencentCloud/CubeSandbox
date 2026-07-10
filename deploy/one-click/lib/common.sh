@@ -1102,7 +1102,7 @@ with open(out_file, "w", encoding="utf-8") as fh:
 # passwords/tokens/connection strings in plaintext. The merged output file
 # (out_file) intentionally keeps the real values -- it IS the runtime env.
 SECRET_RE = re.compile(
-    r'(PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|PRIVATE_KEY|DATABASE_URL|API_KEY|ACCESS_KEY|CLIENT_SECRET|AUTH_TOKEN)',
+    r'(PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|PRIVATE_KEY|DATABASE_URL|API_KEY|ACCESS_KEY|CLIENT_SECRET|AUTH_TOKEN|WEBHOOKS)',
     re.I)
 
 
