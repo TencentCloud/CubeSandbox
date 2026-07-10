@@ -35,7 +35,8 @@
   <a href="./docs/guide/quickstart.md"><strong>Quick Start</strong></a> ·
   <a href="./docs/index.md"><strong>Documentation</strong></a> ·
   <a href="./docs/changelog/index.md"><strong>Changelog</strong></a> ·
-  <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a>
+  <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a> ·
+  <a href="https://github.com/TencentCloud/CubeSandbox/issues/158"><strong>End User Program</strong></a>
 </p>
 
 ---
