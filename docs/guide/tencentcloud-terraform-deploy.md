@@ -289,7 +289,7 @@ export TENCENTCLOUD_TKE_NODE_COUNT=2                 # TKE worker nodes (control
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                    # default: public pre-built images
 export TENCENTCLOUD_USE_CFS=false                    # default: no CFS
-export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.1-rc10
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.1-rc11
 export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 ```
 

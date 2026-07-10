@@ -34,14 +34,14 @@ COMPOSE_FILE="${PROXY_DIR}/docker-compose.yaml"
 #   3. default    → int.tencentcloudcr.com (overseas/international)
 #
 # The image is published by CubeProxy/Makefile's `make push` to both
-# registries under the same :v0.5.1-rc10 tag; either default resolves
+# registries under the same :v0.5.1-rc11 tag; either default resolves
 # to whatever the operator most recently published.
 #
 # Compatibility: CUBE_PROXY_IMAGE_TAG is deprecated (local compose build era).
 # A non-default leftover value is honored once with a warning; the old default
 # cube-proxy:one-click is ignored so upgrades adopt the pre-published image.
-CUBE_PROXY_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.5.1-rc10"
-CUBE_PROXY_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.5.1-rc10"
+CUBE_PROXY_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.5.1-rc11"
+CUBE_PROXY_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.5.1-rc11"
 if [[ -z "${CUBE_SANDBOX_CUBE_PROXY_IMAGE:-}" && -n "${CUBE_PROXY_IMAGE_TAG:-}" ]]; then
   if [[ "${CUBE_PROXY_IMAGE_TAG}" == "cube-proxy:one-click" ]]; then
     log "CUBE_PROXY_IMAGE_TAG=cube-proxy:one-click is deprecated and ignored; set CUBE_SANDBOX_CUBE_PROXY_IMAGE or MIRROR to select the pre-published cube-proxy image"

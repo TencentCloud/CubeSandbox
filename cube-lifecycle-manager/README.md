@@ -14,7 +14,7 @@ between CubeMaster, CubeProxy and Redis.
 
 ```sh
 make test    # go test ./...
-make build   # local image, tag: cube-lifecycle-manager:v0.5.1-rc10-<arch>
+make build   # local image, tag: cube-lifecycle-manager:v0.5.1-rc11-<arch>
 ```
 
 ## Publishing images
@@ -35,7 +35,7 @@ make manifest
 
 Overrides:
 
-- `IMAGE_TAG=<tag>` — override the release tag (default `v0.5.1-rc10`)
+- `IMAGE_TAG=<tag>` — override the release tag (default `v0.5.1-rc11`)
 - `V=1` — verbose docker commands
 
 ## Configuration
