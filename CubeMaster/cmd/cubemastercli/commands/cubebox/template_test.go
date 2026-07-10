@@ -432,3 +432,31 @@ func TestPrintTemplateSummaryIncludesOptionalMetadata(t *testing.T) {
 		t.Fatalf("stdout=%q, missing replica table header", stdout)
 	}
 }
+
+func TestResolveTemplateIDFromFlag(t *testing.T) {
+	ctx := newRedoContext(t, []string{"--template-id", "tpl-1"})
+	if got := resolveTemplateID(ctx); got != "tpl-1" {
+		t.Fatalf("got %q, want tpl-1", got)
+	}
+}
+
+func TestResolveTemplateIDFromPositional(t *testing.T) {
+	ctx := newRedoContext(t, []string{"tpl-1"})
+	if got := resolveTemplateID(ctx); got != "tpl-1" {
+		t.Fatalf("got %q, want tpl-1", got)
+	}
+}
+
+func TestResolveTemplateIDFlagOverridesPositional(t *testing.T) {
+	ctx := newRedoContext(t, []string{"--template-id", "flag-id", "positional-id"})
+	if got := resolveTemplateID(ctx); got != "flag-id" {
+		t.Fatalf("got %q, want flag-id", got)
+	}
+}
+
+func TestResolveTemplateIDEmpty(t *testing.T) {
+	ctx := newRedoContext(t, nil)
+	if got := resolveTemplateID(ctx); got != "" {
+		t.Fatalf("got %q, want empty", got)
+	}
+}

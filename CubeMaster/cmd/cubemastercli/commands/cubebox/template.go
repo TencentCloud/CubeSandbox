@@ -449,9 +449,23 @@ var TemplateCreateCommand = cli.Command{
 	},
 }
 
+// resolveTemplateID returns the template ID from the --template-id flag,
+// falling back to the first positional argument to match docker/kubectl
+// conventions (e.g. `cubemastercli tpl info <template-id>`).
+func resolveTemplateID(c *cli.Context) string {
+	if id := c.String("template-id"); id != "" {
+		return id
+	}
+	if c.NArg() > 0 {
+		return c.Args().First()
+	}
+	return ""
+}
+
 var TemplateInfoCommand = cli.Command{
-	Name:  "info",
-	Usage: "show template metadata and node replicas",
+	Name:      "info",
+	Usage:     "show template metadata and node replicas",
+	ArgsUsage: "<template-id>",
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "template-id",
@@ -467,7 +481,7 @@ var TemplateInfoCommand = cli.Command{
 		},
 	},
 	Action: func(c *cli.Context) error {
-		templateID := c.String("template-id")
+		templateID := resolveTemplateID(c)
 		if templateID == "" {
 			return errors.New("template-id is required")
 		}
@@ -590,8 +604,9 @@ var TemplateRenderCommand = cli.Command{
 }
 
 var TemplateDeleteCommand = cli.Command{
-	Name:  "delete",
-	Usage: "delete template metadata and node replicas",
+	Name:      "delete",
+	Usage:     "delete template metadata and node replicas",
+	ArgsUsage: "<template-id>",
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "template-id",
@@ -599,7 +614,7 @@ var TemplateDeleteCommand = cli.Command{
 		},
 	},
 	Action: func(c *cli.Context) error {
-		templateID := c.String("template-id")
+		templateID := resolveTemplateID(c)
 		if templateID == "" {
 			return errors.New("template-id is required")
 		}
@@ -849,8 +864,9 @@ var TemplateCreateFromImageCommand = cli.Command{
 }
 
 var TemplateRedoCommand = cli.Command{
-	Name:  "redo",
-	Usage: "redo a template on all, specific, or failed nodes",
+	Name:      "redo",
+	Usage:     "redo a template on all, specific, or failed nodes",
+	ArgsUsage: "<template-id>",
 	Flags: []cli.Flag{
 		cli.StringFlag{Name: "template-id", Usage: "template id to redo"},
 		cli.StringSliceFlag{Name: "node", Usage: "redo only the specified node id or host ip; repeat to specify multiple nodes"},
@@ -861,7 +877,7 @@ var TemplateRedoCommand = cli.Command{
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
 	},
 	Action: func(c *cli.Context) error {
-		templateID := c.String("template-id")
+		templateID := resolveTemplateID(c)
 		if templateID == "" {
 			return errors.New("template-id is required")
 		}
