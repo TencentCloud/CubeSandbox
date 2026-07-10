@@ -42,6 +42,60 @@ func TestNativeRootfsExportEnabledParsesEnv(t *testing.T) {
 	}
 }
 
+func TestNativeInsecureRegistryEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   string
+		imageRef string
+		want     bool
+	}{
+		{
+			name:     "unset keeps TLS",
+			imageRef: "registry.example.com:5000/team/app:latest",
+			want:     false,
+		},
+		{
+			name:     "exact host matches",
+			config:   "registry.example.com:5000",
+			imageRef: "docker://registry.example.com:5000/team/app:latest",
+			want:     true,
+		},
+		{
+			name:     "trims list entries and ignores case",
+			config:   " other.example.com, REGISTRY.EXAMPLE.COM:5000 ",
+			imageRef: "registry.example.com:5000/team/app:latest",
+			want:     true,
+		},
+		{
+			name:     "different port does not match",
+			config:   "registry.example.com:5000",
+			imageRef: "registry.example.com:5001/team/app:latest",
+			want:     false,
+		},
+		{
+			name:     "repository path does not match host",
+			config:   "registry.example.com/team",
+			imageRef: "registry.example.com/team/app:latest",
+			want:     false,
+		},
+		{
+			name:     "docker hub can be allowlisted explicitly",
+			config:   "docker.io",
+			imageRef: "library/nginx:latest",
+			want:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(nativeInsecureRegistriesEnv, tt.config)
+			if got := nativeInsecureRegistryEnabled(tt.imageRef); got != tt.want {
+				t.Fatalf("nativeInsecureRegistryEnabled(%q)=%v, want %v", tt.imageRef, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNativeExportConcurrencyParsesEnv(t *testing.T) {
 	t.Setenv(nativeExportJobsEnv, "")
 	if got := nativeExportConcurrency(); got != defaultNativeExportConcurrency {

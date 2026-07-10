@@ -331,6 +331,12 @@ You can also point to prebuilt binaries to skip compilation:
 | `CUBE_API_HEALTH_ADDR` | `127.0.0.1:3000` | cube-api health check address |
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Sandbox domain for CubeProxy routing |
 
+### Native Image Export
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CUBEMASTER_NATIVE_INSECURE_REGISTRIES` | empty | Comma-separated registry hosts allowed to use HTTP during native image export, for example `registry.internal:5000`. Entries must exactly match the image registry host, including a non-default port. All other registries continue to require HTTPS. |
+
 ### Docker Mirror (Optional)
 
 | Variable | Default | Description |

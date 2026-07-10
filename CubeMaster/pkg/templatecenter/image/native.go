@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ const (
 	defaultNativeExportConcurrency = 6
 	maxNativeExportConcurrency     = 32
 	nativeExportJobsEnv            = "CUBEMASTER_NATIVE_ROOTFS_EXPORT_JOBS"
+	nativeInsecureRegistriesEnv    = "CUBEMASTER_NATIVE_INSECURE_REGISTRIES"
 	// nativeCopyBufferSize is the buffer size for I/O operations. 1MB is chosen as a
 	// good balance between memory usage and read/write system call overhead.
 	nativeCopyBufferSize = 1024 * 1024
@@ -44,6 +46,19 @@ var nativeCopyBufferPool = sync.Pool{
 func nativeRootfsExportEnabled() bool {
 	v, err := strconv.ParseBool(os.Getenv("CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED"))
 	return err != nil || v
+}
+
+// nativeInsecureRegistryEnabled reports whether the native image exporter may
+// use HTTP for the registry that serves imageRef. Registry hosts must be listed
+// exactly, including a non-default port, in CUBEMASTER_NATIVE_INSECURE_REGISTRIES.
+func nativeInsecureRegistryEnabled(imageRef string) bool {
+	registryHost := registryHostFromImageRef(imageRef)
+	for _, configuredHost := range strings.Split(os.Getenv(nativeInsecureRegistriesEnv), ",") {
+		if strings.EqualFold(strings.TrimSpace(configuredHost), registryHost) {
+			return true
+		}
+	}
+	return false
 }
 
 // registryAuthOption converts PreparedSource credentials into a remote.Option.

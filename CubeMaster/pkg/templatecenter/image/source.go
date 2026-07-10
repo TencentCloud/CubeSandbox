@@ -78,7 +78,11 @@ func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 	}
 
 	rawRef := strings.TrimPrefix(spec.ImageRef, "docker://")
-	ref, err := name.ParseReference(rawRef)
+	parseOptions := []name.Option{}
+	if nativeInsecureRegistryEnabled(spec.ImageRef) {
+		parseOptions = append(parseOptions, name.Insecure)
+	}
+	ref, err := name.ParseReference(rawRef, parseOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("native export failed to parse image ref %q: %w", rawRef, err)
 	}
