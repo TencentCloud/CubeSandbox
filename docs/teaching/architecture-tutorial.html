@@ -167,17 +167,17 @@ flowchart TB
     API -->|"gRPC"| Master["CubeMaster"]
     Master -->|"gRPC"| Cubelet["Cubelet"]
     Cubelet -->|"containerd Shim v2"| Shim["CubeShim"]
-    Shim -->|"KVM API"| Hyp["CubeHypervisor\n(RustVMM)"]
-    Hyp --> VM["MicroVM\n(沙箱)"]
+    Shim -->|"KVM API"| Hyp["CubeHypervisor<br/>(RustVMM)"]
+    Hyp --> VM["MicroVM<br/>(沙箱)"]
 
     Master -.->|"生命周期事件"| Redis[("Redis")]
     Proxy["CubeProxy"] -.->|"元数据查询"| Redis
     Client -->|"访问沙箱服务"| Proxy
     Proxy -->|"路由到沙箱"| VM
 
-    Cubelet -->|"卷操作"| CoW["CubeCoW\n(xfs reflink)"]
-    VM -->|"出网流量"| VS["CubeVS\n(eBPF)"]
-    VS -->|"TPROXY"| Egress["CubeEgress\n(OpenResty)"]
+    Cubelet -->|"卷操作"| CoW["CubeCoW<br/>(xfs reflink)"]
+    VM -->|"出网流量"| VS["CubeVS<br/>(eBPF)"]
+    VS -->|"TPROXY"| Egress["CubeEgress<br/>(OpenResty)"]
     VS -->|"SNAT"| Internet(["互联网"])
         </div>
       </div>
@@ -341,7 +341,7 @@ flowchart TB
         <div class="mermaid">
 flowchart LR
     A["沙箱 169.254.68.6"] -->|"原始包"| B["TAP 设备"]
-    B -->|"TC ingress"| C["from_cube\n(mvmtap.bpf.c)"]
+    B -->|"TC ingress"| C["from_cube<br/>(mvmtap.bpf.c)"]
     C -->|"SNAT + 策略 + 会话"| D["Host NIC (eth0)"]
     D --> E["外部网络"]
         </div>
@@ -351,7 +351,7 @@ flowchart LR
         <div class="mermaid">
 flowchart LR
     A["外部网络"] -->|"回包"| B["Host NIC (eth0)"]
-    B -->|"TC ingress"| C["from_world\n(nodenic.bpf.c)"]
+    B -->|"TC ingress"| C["from_world<br/>(nodenic.bpf.c)"]
     C -->|"会话查找 + 反向 NAT"| D["TAP 设备"]
     D --> E["沙箱 169.254.68.6"]
         </div>
@@ -361,7 +361,7 @@ flowchart LR
         <div class="mermaid">
 flowchart LR
     A["OpenResty TPROXY / Overlay"] -->|"包"| B["cube-dev"]
-    B -->|"TC egress"| C["from_envoy\n(localgw.bpf.c)"]
+    B -->|"TC egress"| C["from_envoy<br/>(localgw.bpf.c)"]
     C -->|"DNAT 到沙箱 IP + 重定向"| D["TAP 设备"]
     D --> E["沙箱"]
         </div>
@@ -385,7 +385,7 @@ flowchart TB
     EG -->|"审计"| AUDIT[("每主机 JSONL 审计日志")]
         </div>
       </div>
-      <p class="muted">沙箱信任 CubeEgress 签发的一个根 CA（烘焙进模板），因此可以透明做 TLS  inspecting。Agent 像平常一样调用 LLM/外部 API，密钥却永不进入沙箱、模型上下文或日志。</p>
+      <p class="muted">沙箱信任 CubeEgress 签发的一个根 CA（烘焙进模板），因此可以透明做 TLS inspection。Agent 像平常一样调用 LLM/外部 API，密钥却永不进入沙箱、模型上下文或日志。</p>
     </section>
 
     <section id="quickstart">
