@@ -1,0 +1,9 @@
+pytest>=7.0
+httpx>=0.27
+requests>=2
+
+# Optional backends:
+# - cubesandbox is loaded from ../../../../sdk/python by default.
+# - Install e2b-code-interpreter or e2b when running the e2b backend.
+# e2b-code-interpreter
+# e2b

@@ -1,0 +1,72 @@
+name: SDK Compat E2E
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'tests/e2e/sdk_compat/**'
+      - 'sdk/python/cubesandbox/**'
+      - '.github/workflows/sdk-compat-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-compat-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-gate:
+    name: Collection Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          pip install -r tests/e2e/sdk_compat/requirements.txt
+
+      - name: Validate test collection
+        working-directory: tests/e2e/sdk_compat
+        run: |
+          set -euo pipefail
+          # Collection-only: validates the test suite imports and parametrization
+          # without provisioning a live CubeAPI/CubeProxy environment. Actual live
+          # E2E runs happen in dedicated environments (see the live-e2e job below).
+          PYTHONPATH=../../../sdk/python python3 -m pytest cases/ --collect-only -q
+
+  live-e2e:
+    name: Live E2E
+    needs: pr-gate
+    if: ${{ vars.CUBE_API_URL != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          pip install -r tests/e2e/sdk_compat/requirements.txt
+
+      - name: Run live SDK compat E2E
+        working-directory: tests/e2e/sdk_compat
+        env:
+          CUBE_API_URL: ${{ secrets.CUBE_API_URL }}
+          CUBE_TEMPLATE_ID: ${{ secrets.CUBE_TEMPLATE_ID }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=../../../sdk/python python3 -m pytest cases/ --run-e2e -q
