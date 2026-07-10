@@ -139,10 +139,11 @@ Current capability domains:
 - `cases/metadata/`: env var propagation, cross-API metadata interoperability.
 - `cases/errors/`: sandbox lifecycle error handling (info after kill, double-kill idempotency).
 - `cases/concurrency/`: sequential reuse and parallel sandbox isolation.
+- `cases/network/`: DNS resolution, HTTP/HTTPS egress (requires internet).
+- `cases/proxy/`: CubeProxy routing for commands, filesystem, and run_code.
 
 Keep new cases backend-neutral. Add backend-specific behavior through capability
-markers instead of branching inside test bodies. Future domains can be added next
-to the existing directories, for example `network/` and `proxy/`.
+markers instead of branching inside test bodies.
 
 ## Markers And Capabilities
 
