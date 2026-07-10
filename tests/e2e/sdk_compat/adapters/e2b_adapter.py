@@ -52,7 +52,9 @@ class E2BAdapter(SandboxAdapter):
         Sandbox = _import_e2b_sandbox()
         _configure_e2b_transport(config)
         os.environ.setdefault("E2B_API_URL", config.cube_api_url)
-        os.environ.setdefault("E2B_API_KEY", os.environ.get("CUBE_API_KEY", "dummy"))
+        # CubeSandbox deployments with auth disabled accept any key, but the
+        # E2B SDK validates the format client-side (requires e2b_ + hex).
+        os.environ.setdefault("E2B_API_KEY", os.environ.get("CUBE_API_KEY", "e2b_0000000000000000000000000000000000000000"))
 
         kwargs: dict[str, Any] = {
             "template": config.cube_template_id,
