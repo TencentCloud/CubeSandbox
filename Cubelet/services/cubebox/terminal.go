@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,7 +67,7 @@ func (s *service) Terminal(stream grpc.BidiStreamingServer[cubebox.TerminalMessa
 		ContainerId: open.ContainerId,
 		Terminal:    true,
 		Args:        args,
-		Env:         open.Env,
+		Env:         terminalEnv(open.Env),
 		Cwd:         open.Cwd,
 	})
 	if err != nil {
@@ -185,6 +186,16 @@ func (s *service) Terminal(stream grpc.BidiStreamingServer[cubebox.TerminalMessa
 func terminalCleanupContext(namespace string) (context.Context, context.CancelFunc) {
 	ctx := namespaces.WithNamespace(context.Background(), namespace)
 	return context.WithTimeout(ctx, 5*time.Second)
+}
+
+func terminalEnv(env []string) []string {
+	result := append([]string(nil), env...)
+	for _, value := range env {
+		if strings.HasPrefix(value, "TERM=") {
+			return result
+		}
+	}
+	return append(result, "TERM=xterm-256color")
 }
 
 func validateTerminalOpen(open *cubebox.TerminalOpen) error {

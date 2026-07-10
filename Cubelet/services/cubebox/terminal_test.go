@@ -78,6 +78,22 @@ func TestTerminalCleanupContextPreservesNamespace(t *testing.T) {
 	}
 }
 
+func TestTerminalEnvDefaultsTermAndPreservesExplicitValue(t *testing.T) {
+	input := []string{"PATH=/usr/bin"}
+	withDefault := terminalEnv(input)
+	if got := withDefault[len(withDefault)-1]; got != "TERM=xterm-256color" {
+		t.Fatalf("default terminal env = %q, want TERM=xterm-256color", got)
+	}
+	if len(input) != 1 {
+		t.Fatalf("terminalEnv mutated its input: %+v", input)
+	}
+
+	explicit := terminalEnv([]string{"TERM=screen-256color", "LANG=C.UTF-8"})
+	if len(explicit) != 2 || explicit[0] != "TERM=screen-256color" {
+		t.Fatalf("explicit terminal env was not preserved: %+v", explicit)
+	}
+}
+
 func TestReceiveTerminalInputWritesResizesAndCloses(t *testing.T) {
 	stream := &fakeTerminalStream{received: []*api.TerminalMessage{
 		{Message: &api.TerminalMessage_Input{Input: []byte("echo ok\n")}},
