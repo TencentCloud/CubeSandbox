@@ -56,6 +56,7 @@ BINARIES := \
 	cubevsmapdump \
 	network-agent \
 	shim \
+	cube-snapshot \
 	#
 
 # All versioned binaries should consume the canonical CUBE_VERSION /
@@ -104,6 +105,7 @@ help:
 	@printf "  cubecow-smoke Build cubecow smoke test CLI in Docker\n"
 	@printf "  cubecow-test-native Build SDK artifacts and run native tests in Docker\n"
 	@printf "  network-agent Build network-agent in Docker\n"
+	@printf "  cube-snapshot Build cube-snapshot (CubeBlobstore) in Docker\n"
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cubeapi       Build CubeAPI (cube-api) in Docker\n"
@@ -255,6 +257,11 @@ network-agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeNet && make -C cubevs gen && cd /workspace/network-agent && make proto && make build && cp bin/network-agent /workspace/_output/bin/network-agent'
 
+.PHONY: cube-snapshot
+cube-snapshot: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeBlobstore && go mod download && make build && cp bin/cube-snapshot /workspace/_output/bin/cube-snapshot'
+
 .PHONY: cube-proxy-sidecar
 cube-proxy-sidecar: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
@@ -335,7 +342,7 @@ manual-release: all
 	@mkdir -p "$(RELEASE_DIR)"
 	@PKG_TS="$$(date +%Y%m%d-%H%M%S)"; \
 	PKG_NAME="cube-manual-update-$${PKG_TS}.tar.gz"; \
-	tar -C "$(OUTPUT_DIR)" -czf "$(RELEASE_DIR)/$${PKG_NAME}" cubemaster cubemastercli cubelet cubecli network-agent cubevsmapdump; \
+	tar -C "$(OUTPUT_DIR)" -czf "$(RELEASE_DIR)/$${PKG_NAME}" cubemaster cubemastercli cubelet cubecli network-agent cubevsmapdump cube-snapshot; \
 	sha256sum "$(RELEASE_DIR)/$${PKG_NAME}" > "$(RELEASE_DIR)/$${PKG_NAME}.sha256"; \
 	install -m 0755 "$(MANUAL_DEPLOY_SCRIPT)" "$(RELEASE_DIR)/deploy-manual.sh"; \
 	printf 'Manual release ready:\n  %s\n  %s\n  %s\n' \
@@ -413,3 +420,5 @@ fmt:
 	else \
 		printf '  %-8s %s\n' "SKIP" "web (npm not available)"; \
 	fi
+	@printf '  %-8s %s\n' "FMT" "CubeBlobstore"
+	@$(MAKE) -C CubeBlobstore fmt
