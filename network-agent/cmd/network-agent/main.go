@@ -66,6 +66,7 @@ func main() {
 	}
 	if err := initLogger(*logPath, *logLevel, *logRollNum, *logRollSize); err != nil {
 		CubeLog.Fatalf("network-agent init logger failed: %v", err)
+		panic(err)
 	}
 
 	if *pprofListen != "" {
@@ -78,6 +79,7 @@ func main() {
 		cfg, err = service.LoadConfigFromCubeletTOML(cfg, *cubeletConfig)
 		if err != nil {
 			CubeLog.Fatalf("network-agent load cubelet config failed: %v", err)
+			panic(err)
 		}
 	}
 
@@ -134,6 +136,7 @@ func main() {
 	svc, err := initService(cfg)
 	if err != nil {
 		CubeLog.Fatalf("network-agent init failed: %v", err)
+		panic(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -141,15 +144,18 @@ func main() {
 	CubeLog.Infof("network-agent bootstrap health check with service: %s", describeService(svc))
 	if err := svc.Health(ctx); err != nil {
 		CubeLog.Fatalf("network-agent bootstrap health check failed: %v", err)
+		panic(err)
 	}
 
 	apiServer, err := httpserver.NewEndpoint(*listenEndpoint, svc)
 	if err != nil {
 		CubeLog.Fatalf("network-agent api server init failed: %v", err)
+		panic(err)
 	}
 	go func() {
 		if err := apiServer.Start(); err != nil {
 			CubeLog.Fatalf("network-agent api server failed: %v", err)
+			panic(err)
 		}
 	}()
 
@@ -158,10 +164,12 @@ func main() {
 		grpcSrv, err = grpcserver.New(*grpcListen, svc)
 		if err != nil {
 			CubeLog.Fatalf("network-agent grpc server init failed: %v", err)
+			panic(err)
 		}
 		go func() {
 			if err := grpcSrv.Start(); err != nil {
 				CubeLog.Fatalf("network-agent grpc server failed: %v", err)
+				panic(err)
 			}
 		}()
 	}
@@ -171,10 +179,12 @@ func main() {
 		tapFDSrv, err = fdserver.New(cfg.TapFDSocketPath, provider)
 		if err != nil {
 			CubeLog.Fatalf("network-agent tap fd server init failed: %v", err)
+			panic(err)
 		}
 		go func() {
 			if err := tapFDSrv.Start(); err != nil {
 				CubeLog.Fatalf("network-agent tap fd server failed: %v", err)
+				panic(err)
 			}
 		}()
 	}
@@ -183,6 +193,7 @@ func main() {
 	go func() {
 		if err := healthServer.Start(); err != nil {
 			CubeLog.Fatalf("network-agent health server failed: %v", err)
+			panic(err)
 		}
 	}()
 
