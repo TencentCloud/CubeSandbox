@@ -48,3 +48,4 @@ lang: en-US
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
 | [Pi Agent Integration Guide](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
+| [Webhook Event Notifications](./webhooks.md) | initiallyqq | 2026-07-10 | integration, webhook, observability |

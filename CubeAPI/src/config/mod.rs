@@ -71,6 +71,48 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+
+    /// Comma-separated Webhook URLs for sandbox lifecycle events.
+    ///
+    /// Env var: `WEBHOOK_URLS`. Leave unset to disable Webhook delivery.
+    #[serde(default)]
+    pub webhook_urls: Option<String>,
+
+    /// Comma-separated event names sent to Webhook endpoints.
+    ///
+    /// Env var: `WEBHOOK_EVENTS`. Defaults to the four sandbox lifecycle events.
+    #[serde(default)]
+    pub webhook_events: Option<String>,
+
+    /// Optional HMAC-SHA256 secret shared by all configured Webhook endpoints.
+    ///
+    /// Env var: `WEBHOOK_SECRET`.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+
+    /// Maximum number of pending events per Webhook endpoint.
+    ///
+    /// Env var: `WEBHOOK_QUEUE_CAPACITY` (default: 1000).
+    #[serde(default = "default_webhook_queue_capacity")]
+    pub webhook_queue_capacity: usize,
+
+    /// Number of retries after the initial Webhook delivery attempt.
+    ///
+    /// Env var: `WEBHOOK_MAX_RETRIES` (default: 3).
+    #[serde(default = "default_webhook_max_retries")]
+    pub webhook_max_retries: usize,
+
+    /// Base delay in milliseconds for exponential Webhook retry backoff.
+    ///
+    /// Env var: `WEBHOOK_RETRY_BASE_MS` (default: 200).
+    #[serde(default = "default_webhook_retry_base_ms")]
+    pub webhook_retry_base_ms: u64,
+
+    /// Request timeout in seconds for Webhook delivery.
+    ///
+    /// Env var: `WEBHOOK_REQUEST_TIMEOUT_SECS` (default: 10).
+    #[serde(default = "default_webhook_request_timeout_secs")]
+    pub webhook_request_timeout_secs: u64,
 }
 
 fn default_bind() -> String {
@@ -108,6 +150,22 @@ fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .or_else(default_cube_sandbox_mysql_url)
+}
+
+fn default_webhook_queue_capacity() -> usize {
+    1000
+}
+
+fn default_webhook_max_retries() -> usize {
+    3
+}
+
+fn default_webhook_retry_base_ms() -> u64 {
+    200
+}
+
+fn default_webhook_request_timeout_secs() -> u64 {
+    10
 }
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
@@ -148,6 +206,13 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
+            webhook_urls: None,
+            webhook_events: None,
+            webhook_secret: None,
+            webhook_queue_capacity: default_webhook_queue_capacity(),
+            webhook_max_retries: default_webhook_max_retries(),
+            webhook_retry_base_ms: default_webhook_retry_base_ms(),
+            webhook_request_timeout_secs: default_webhook_request_timeout_secs(),
         }
     }
 }

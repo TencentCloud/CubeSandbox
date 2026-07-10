@@ -199,7 +199,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()> {
-    use logging::{arc, file::FileLogger, filtered::FilteredLogger, multi::MultiLogger, LogLevel};
+    use logging::{
+        arc, file::FileLogger, filtered::FilteredLogger, http::HttpLogger, http::HttpLoggerConfig,
+        multi::MultiLogger, LogLevel,
+    };
 
     // ── Logger ────────────────────────────────────────────────────────────
     let min_level = if debug {
@@ -210,15 +213,36 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
-    let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
-        min_level,
-    ));
+    let mut backends = MultiLogger::new().add(arc(file_logger));
+    let webhook_events = cfg
+        .webhook_events
+        .as_deref()
+        .map(parse_webhook_events)
+        .unwrap_or_else(default_webhook_events);
+
+    if let Some(urls) = cfg.webhook_urls.as_deref() {
+        for url in urls.split(',').map(str::trim).filter(|url| !url.is_empty()) {
+            let mut webhook_config = HttpLoggerConfig::new(url, webhook_events.clone());
+            webhook_config.secret = cfg.webhook_secret.clone();
+            webhook_config.queue_capacity = cfg.webhook_queue_capacity;
+            webhook_config.max_retries = cfg.webhook_max_retries;
+            webhook_config.retry_base_ms = cfg.webhook_retry_base_ms;
+            webhook_config.request_timeout_secs = cfg.webhook_request_timeout_secs;
+
+            match HttpLogger::new(webhook_config) {
+                Ok(logger) => {
+                    tracing::info!(webhook_url = %url, "Webhook logger enabled");
+                    backends = backends.add(arc(logger));
+                }
+                Err(err) => {
+                    tracing::warn!(webhook_url = %url, %err, "Webhook logger disabled");
+                }
+            }
+        }
+    }
+
+    // FilteredLogger gates by level → MultiLogger fans out to configured backends.
+    let logger: logging::ArcLogger = arc(FilteredLogger::new(arc(backends), min_level));
 
     tracing::info!(
         log_dir = %cfg.log_dir,
@@ -245,6 +269,32 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     logging::Logger::flush(&*logger).await;
     tracing::info!("cube-api shut down gracefully");
     Ok(())
+}
+
+fn default_webhook_events() -> Vec<String> {
+    [
+        "sandbox.created",
+        "sandbox.deleted",
+        "sandbox.paused",
+        "sandbox.resumed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn parse_webhook_events(value: &str) -> Vec<String> {
+    let events: Vec<_> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|event| !event.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if events.is_empty() {
+        default_webhook_events()
+    } else {
+        events
+    }
 }
 
 async fn shutdown_signal() {
