@@ -48,3 +48,4 @@ lang: en-US
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
 | [Pi Agent Integration Guide](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
+| [Gemini CLI Integration Guide](./gemini-cli.md) | initiallyqq | 2026-07-10 | integration, gemini-cli, coding-agent, agent |
