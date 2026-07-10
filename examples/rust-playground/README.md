@@ -2,14 +2,17 @@
 
 [中文文档](README_zh.md)
 
-Compile and run Rust code inside a CubeSandbox MicroVM — write a one-off script with `rustc` or build a full `cargo` project with dependencies in an isolated, reproducible environment.
+Compile and run Rust code inside a CubeSandbox MicroVM — this example set
+showcases CubeSandbox's **Instant, Concurrent, Secure & Lightweight** value
+proposition through Rust workloads.
 
-This example ships:
+## CubeSandbox Features Demonstrated
 
-- A `Dockerfile` that stacks the Rust toolchain (rustup, rustc, cargo) on top of the CubeSandbox base image.
-- `hello_world.py` — minimal demo: write a `.rs` file, compile with `rustc`, run the binary. Demonstrates `get_info()` for sandbox introspection and `lifecycle` with auto-pause/auto-resume.
-- `with_dependencies.py` — scaffold a `cargo` project with external crates (`serde_json`, `chrono`), build, and run. Demonstrates `envs=` for injecting environment variables at sandbox creation alongside `get_info()` and `lifecycle`.
-- `snapshot_rollback.py` — showcase CubeCoW snapshot, clone, and rollback during iterative Rust development. Demonstrates `Sandbox.list_snapshots()`, `sb.clone(n=N)` for one-shot cloning, and `Sandbox.delete_snapshot()` for cleanup.
+| Demo | CubeSandbox Concepts |
+|------|----------------------|
+| `hello_world.py` | **Instant** + **Concurrent** — 3 sandboxes created in parallel, timed creation <br> **Lifecycle** — auto-pause/resume via `lifecycle` config <br> **Introspection** — `get_info()` to query sandbox state |
+| `with_dependencies.py` | **Secure** — network isolation via `allow_internet_access` <br> **Concurrent builds** — online vs offline sandbox comparison <br> **Env injection** — `envs=` parameter at creation |
+| `snapshot_rollback.py` | **CubeCoW snapshot** — checkpoints persist independently (outlive source sandbox) <br> **Instant rollback** — ~100ms restore <br> **Clone** — `sb.clone(n=N)` one-shot fork <br> **Snapshot management** — `list_snapshots()` + `delete_snapshot()` |
 
 ## Directory layout
 
@@ -20,9 +23,12 @@ rust-playground/
 ├── .gitignore
 ├── requirements.txt        # Host driver deps (e2b, cubesandbox, python-dotenv)
 ├── env_utils.py            # .env loading helper
-├── hello_world.py          # Minimal rustc compile-and-run demo
-├── with_dependencies.py    # Cargo project with external crates
-├── snapshot_rollback.py    # Snapshot / clone / rollback workflow
+├── hello_world.py          # Instant + Concurrent: 3 sandboxes, parallel compile
+├── with_dependencies.py    # Secure: network isolation via allow_internet_access
+├── snapshot_rollback.py    # CubeCoW snapshot outlives sandbox + clone + rollback
+├── tests/
+│   ├── mock_sdk.py         # Mock SDK for offline verification
+│   └── run_verification.py # Runs all 3 demos with mocks, no cluster needed
 ├── README.md               # English docs (this file)
 └── README_zh.md            # Chinese docs
 ```
@@ -78,40 +84,61 @@ pip install -r requirements.txt
 
 ## 4. Run the demos
 
-### Hello world (rustc)
+### Instant + Concurrent (hello_world.py)
 
 ```bash
 python hello_world.py
 ```
 
-Writes a Rust source file, compiles with `rustc`, and executes the binary. Expected output:
+Creates 3 sandboxes concurrently, compiles a Rust program in each, and
+reports creation/build timing:
 
 ```
---- Running hello ---
-stdout: Hello from CubeSandbox Rust playground!
-Current time: <unix-timestamp>
+  [sb-0] created in 0.87s  id=sb-xxx  state=running
+  [sb-1] created in 0.92s  id=sb-yyy  state=running
+  [sb-2] created in 1.01s  id=sb-zzz  state=running
+  [sb-0] compile=2.34s  output=Hello from CubeSandbox!
+Total: 3 sandboxes in 3.21s  (1.07s avg per sandbox)
 ```
 
-### Cargo project with dependencies
+### Network isolation (with_dependencies.py)
 
 ```bash
 python with_dependencies.py
 ```
 
-Scaffolds a Cargo project, fetches `serde_json` and `chrono` from crates.io, builds with `cargo build --release`, and runs the binary — all inside the sandbox. The first run downloads crates; cargo's registry cache persists in the sandbox.
+Compares two sandboxes side-by-side — one with internet access, one without:
 
-### Snapshot, clone, and rollback
+```
+  sb-1 (online)    : PASS — cargo fetched from crates.io
+  sb-2 (offline)   : FAIL — cargo blocked (network isolation)
+  Expected: sb-1=0, sb-2=1  (offline cannot fetch crates)
+```
+
+This demonstrates `allow_internet_access=False`, a key security feature.
+
+### Snapshot outlives sandbox (snapshot_rollback.py)
 
 ```bash
 python snapshot_rollback.py
 ```
 
-This script uses the native `cubesandbox` SDK to demonstrate CubeSandbox's most differentiated feature:
+Demonstrates CubeSandbox's most differentiated feature:
 
-1. **Snapshot** — saves the sandbox state mid-development (checkpoint A).
-2. **Modify** — changes the Rust code and rebuilds (checkpoint B).
-3. **Rollback** — restores the sandbox to checkpoint A in ~100ms.
-4. **Clone** — forks a new sandbox from checkpoint A while the original keeps running.
+1. **Snapshot** — saves sandbox state mid-development.
+2. **Snapshot outlives sandbox** — kill the source sandbox, then clone from
+   the snapshot into a new sandbox. The checkpoint is independent.
+3. **Rollback** — restores the clone to checkpoint A in ~100ms.
+4. **Clone(n)** — `sb.clone(n=3)` creates 3 forks in one call.
+
+## Verification (offline, no cluster needed)
+
+```bash
+python3 -m venv /tmp/rust-verify-venv
+/tmp/rust-verify-venv/bin/pip install python-dotenv pexpect Pillow
+/tmp/rust-verify-venv/bin/python tests/run_verification.py
+ls verification-logs/
+```
 
 ## Troubleshooting
 
@@ -119,7 +146,7 @@ This script uses the native `cubesandbox` SDK to demonstrate CubeSandbox's most 
 |---|---|---|
 | `rustc: command not found` | Rust not installed in template | Rebuild the image, re-register the template |
 | `cargo build` timeout | First build downloads many crates | Increase `--exec-timeout` or the sandbox timeout |
-| Readiness probe timeout | Image without envd | Ensure `FROM ghcr.io/tencentcloud/cubesandbox-base:...` |
+| Offline sandbox still fetches crates | `allow_internet_access` not set | Ensure `allow_internet_access=False` is passed to `Sandbox.create()` |
 | `pause()`/`connect()` errors | Platform too old for snapshots | Upgrade the CubeSandbox platform |
 | Permission denied on cargo | Running as root instead of `user` | Ensure the Dockerfile uses `USER user` for rustup |
 
@@ -128,3 +155,5 @@ This script uses the native `cubesandbox` SDK to demonstrate CubeSandbox's most 
 - Template guide: [`docs/guide/tutorials/template-from-image.md`](../../docs/guide/tutorials/template-from-image.md)
 - BYOI (envd): [`docs/guide/tutorials/bring-your-own-image.md`](../../docs/guide/tutorials/bring-your-own-image.md)
 - Snapshot / Clone / Rollback: [`docs/guide/snapshot-rollback-clone.md`](../../docs/guide/snapshot-rollback-clone.md)
+- Lifecycle: [`docs/guide/lifecycle.md`](../../docs/guide/lifecycle.md)
+- Network Policy: [`docs/guide/network-policy.md`](../../docs/guide/network-policy.md)

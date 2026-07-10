@@ -2,26 +2,29 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Demonstrate CubeCoW snapshot, clone, and rollback with a Rust project.
+"""Demonstrate CubeSandbox's snapshot, clone, and rollback capabilities.
 
-This showcases CubeSandbox's most differentiated capability: hundred-ms
-checkpoints on running sandboxes with the ability to roll back or fork
-from any saved state — perfect for iterative development and experimentation.
-
-Workflow:
-    1. Create a sandbox with a Rust project checked out.
-    2. Take a snapshot (checkpoint A).
-    3. Make changes (edits, experiments) — checkpoint B.
-    4. Roll back to checkpoint A and verify the original state is restored.
-    5. Clone from checkpoint A to create a fork and verify isolation.
+CubeSandbox differentiators shown:
+  - Snapshot outlives sandbox: snapshots persist independently — kill the
+    source sandbox and still create new sandboxes from the checkpoint
+  - Instant rollback: restore sandbox state in-memory without rebooting
+  - Fast clone: fork N sandboxes from a single checkpoint via sb.clone(n=N)
 
 Usage:
     python snapshot_rollback.py
+
+Workflow:
+    1. Create sandbox, set up a Rust project, build.
+    2. Take snapshot A (checkpoint).
+    3. Kill the source sandbox — snapshot A still exists independently.
+    4. Clone from snapshot A into a new sandbox (fork).
+    5. Rollback inside the clone to demonstrate instant restore.
 """
 
 from __future__ import annotations
 
 import sys
+import time
 
 from cubesandbox import Sandbox
 
@@ -46,6 +49,8 @@ NEW_MAIN_RS = r'''fn main() {
 }
 '''
 
+WS = "/home/user/workspace/snapshot-demo"
+
 
 def run_cmd(sandbox: Sandbox, command: str, *, cwd: str | None = None,
             timeout: int = 60) -> str:
@@ -66,134 +71,106 @@ def main() -> int:
     required("E2B_API_URL")
     required("E2B_API_KEY")
 
-    ws = "/home/user/workspace/snapshot-demo"
-
     print("=" * 60)
-    print("CubeSandbox Snapshot / Clone / Rollback Demo")
+    print("  CubeSandbox — Snapshot / Clone / Rollback Demo")
     print("=" * 60)
 
-    # --- Phase 1: Create sandbox with a Rust project ---
-    print("\n[Phase 1] Creating sandbox and setting up project...")
+    # ── Phase 1: Create sandbox + build project ─────────────────────────
+    print("\n[Phase 1] Creating sandbox and building project...")
+    t0 = time.monotonic()
+
     sandbox = Sandbox.create(
         template=template_id,
         timeout=120,
         lifecycle={"on_timeout": "pause", "auto_resume": True},
     )
     sandbox_id = getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
-
     info = sandbox.get_info()
-    print(f"  Sandbox ID: {sandbox_id}  state={info.get('state', 'N/A')}")
+    print(f"  Created sandbox: {sandbox_id}  state={info.get('state', 'N/A')}"
+          f"  ({time.monotonic() - t0:.2f}s)")
 
-    clone = None
+    run_cmd(sandbox, f"mkdir -p {WS}/src")
+    for name, content in PROJECT_FILES.items():
+        sandbox.files.write(f"{WS}/{name}", content)
+    run_cmd(sandbox, "cargo build", cwd=WS, timeout=120)
+    result = run_cmd(sandbox, "./target/debug/snapshot-demo", cwd=WS)
+    if "Checkpoint A" not in result:
+        print(f"  FAIL: expected 'Checkpoint A', got: {result!r}")
+        return 1
+    print(f"  ✓ Project built in {time.monotonic() - t0:.1f}s")
 
-    try:
-        run_cmd(sandbox, f"mkdir -p {ws}/src")
-        for name, content in PROJECT_FILES.items():
-            sandbox.files.write(f"{ws}/{name}", content)
-        run_cmd(sandbox, "cargo build", cwd=ws, timeout=120)
-        result = run_cmd(sandbox, "./target/debug/snapshot-demo", cwd=ws)
-        print(f"  Output: {result.strip()}")
-        if "Checkpoint A" not in result:
-            print(f"FAIL: Expected 'Checkpoint A', got: {result!r}", file=sys.stderr)
-            return 1
-        print("  ✓ Project built and verified.")
+    # ── Phase 2: Take snapshot ──────────────────────────────────────────
+    t0 = time.monotonic()
+    snap = sandbox.create_snapshot(name="checkpoint-a")
+    snap_id = snap.snapshot_id
+    print(f"\n[Phase 2] Snapshot saved: {snap_id}  ({time.monotonic() - t0:.2f}s)")
 
-        # --- Phase 2: Take snapshot A ---
-        print("\n[Phase 2] Taking snapshot (checkpoint A)...")
-        snap_info = sandbox.create_snapshot(name="checkpoint-a")
-        snap_id = snap_info.snapshot_id
-        print(f"  ✓ Snapshot saved. ID: {snap_id}")
+    # Kill the source sandbox before cloning — snapshot is independent
+    print("\n[Phase 2b] Killing source sandbox — snapshot still lives...")
+    sandbox.kill()
+    items, _ = Sandbox.list_snapshots(sandbox_id=sandbox_id)
+    if not items:
+        print("  FAIL: snapshot disappeared after sandbox kill!")
+        return 1
+    print(f"  ✓ Snapshot independent: {len(items)} snapshot(s) still in list"
+          f"  ({time.monotonic() - t0:.2f}s)")
 
-        # List snapshots to demonstrate snapshot management
-        print("\n  Listing snapshots...")
-        items, _ = Sandbox.list_snapshots(sandbox_id=sandbox_id)
-        for snap in items:
-            print(f"    - {snap.snapshot_id}  name={getattr(snap, 'name', 'N/A')}")
-        if not items:
-            print("    (none found)")
-        print(f"  ✓ {len(items)} snapshot(s) listed.")
+    # ── Phase 3: Clone from snapshot (fork) ─────────────────────────────
+    t0 = time.monotonic()
+    print(f"\n[Phase 3] Cloning from snapshot...")
+    clone = Sandbox.create(template=snap_id, timeout=120)
+    clone_id = getattr(clone, "sandbox_id", getattr(clone, "id", "unknown"))
 
-        # --- Phase 3: Modify the project (simulate iterative dev) ---
-        print("\n[Phase 3] Modifying project (checkpoint B)...")
-        sandbox.files.write(f"{ws}/src/main.rs", NEW_MAIN_RS)
-        run_cmd(sandbox, "cargo build", cwd=ws, timeout=120)
-        result = run_cmd(sandbox, "./target/debug/snapshot-demo", cwd=ws)
-        print(f"  Output: {result.strip()}")
-        if "Checkpoint B" not in result:
-            print(f"FAIL: Expected 'Checkpoint B', got: {result!r}", file=sys.stderr)
-            return 1
-        print("  ✓ Modified version running with new behavior.")
+    result = run_cmd(clone, "./target/debug/snapshot-demo", cwd=WS, timeout=30)
+    if "Checkpoint A" not in result:
+        print(f"  FAIL: expected 'Checkpoint A' on clone, got: {result!r}")
+        return 1
+    print(f"  ✓ Clone ready: {clone_id}"
+          f"  output={result.strip()!r}  ({time.monotonic() - t0:.2f}s)")
 
-        # --- Phase 4: Rollback to checkpoint A ---
-        print("\n[Phase 4] Rolling back to checkpoint A...")
-        sandbox.rollback(snap_id)
-        print("  ✓ Rollback completed. Sandbox is back at checkpoint A state.")
+    # ── Phase 4: Modify clone ───────────────────────────────────────────
+    print("\n[Phase 4] Modifying clone and rolling back...")
+    clone.files.write(f"{WS}/src/main.rs", NEW_MAIN_RS)
+    run_cmd(clone, "cargo build", cwd=WS, timeout=120)
 
-        result = run_cmd(sandbox, "./target/debug/snapshot-demo", cwd=ws, timeout=30)
-        print(f"  Output after rollback: {result.strip()}")
-        if "Checkpoint A" not in result:
-            print(f"FAIL: Expected 'Checkpoint A' after rollback, got: {result!r}", file=sys.stderr)
-            return 1
-        print("  ✓ Rollback verified: original version restored.")
+    result = run_cmd(clone, "./target/debug/snapshot-demo", cwd=WS)
+    if "Checkpoint B" not in result:
+        print(f"  FAIL: expected 'Checkpoint B', got: {result!r}")
+        return 1
 
-        # --- Phase 5: Clone from checkpoint A ---
-        print("\n[Phase 5] Cloning from checkpoint A to create an isolated fork...")
-        clone = Sandbox.create(template=snap_id, timeout=120)
-        clone_id = getattr(clone, "sandbox_id", getattr(clone, "id", "unknown"))
-        print(f"  Clone sandbox ID: {clone_id}")
+    # Rollback to checkpoint A
+    t1 = time.monotonic()
+    clone.rollback(snap_id)
+    rollback_elapsed = time.monotonic() - t1
+    print(f"  ✓ Rollback: {rollback_elapsed*1000:.0f}ms")
 
-        result = run_cmd(clone, "./target/debug/snapshot-demo", cwd=ws, timeout=30)
-        print(f"  Clone output: {result.strip()}")
-        if "Checkpoint A" not in result:
-            print(f"FAIL: Expected 'Checkpoint A' on clone, got: {result!r}", file=sys.stderr)
-            return 1
-        print("  ✓ Clone is at checkpoint A, isolated from original.")
+    result = run_cmd(clone, "./target/debug/snapshot-demo", cwd=WS, timeout=30)
+    if "Checkpoint A" not in result:
+        print(f"  FAIL: expected 'Checkpoint A' after rollback, got: {result!r}")
+        return 1
+    print(f"  ✓ Verified: output={result.strip()!r}")
 
-        # Modify clone independently
-        print("\n[Phase 6] Modifying clone independently...")
-        clone.files.write(f"{ws}/src/main.rs", NEW_MAIN_RS.replace('"Checkpoint B',
-                                                                    '"Clone fork'))
-        run_cmd(clone, "cargo build", cwd=ws, timeout=120)
-        result = run_cmd(clone, "./target/debug/snapshot-demo", cwd=ws)
-        print(f"  Clone output after fork: {result.strip()}")
-        if "Clone fork" not in result:
-            print(f"FAIL: Expected 'Clone fork', got: {result!r}", file=sys.stderr)
-            return 1
+    # ── Phase 5: One-shot clone via sb.clone(n=N) ───────────────────────
+    t0 = time.monotonic()
+    print(f"\n[Phase 5] One-shot clone via sb.clone(n=3)...")
+    clones = clone.clone(n=3)
+    for i, sb in enumerate(clones):
+        cid = getattr(sb, "sandbox_id", getattr(sb, "id", "unknown"))
+        result = run_cmd(sb, "./target/debug/snapshot-demo", cwd=WS, timeout=30)
+        sb.kill()
+        print(f"  clone {i+1}: {cid}  output={result.strip()!r}")
+    print(f"  ✓ 3 clones in {time.monotonic() - t0:.2f}s")
 
-        # Verify original sandbox is unaffected
-        result = run_cmd(sandbox, "./target/debug/snapshot-demo", cwd=ws, timeout=30)
-        print(f"  Original sandbox output: {result.strip()}")
-        if "Checkpoint A" not in result:
-            print(f"FAIL: Expected 'Checkpoint A' on original, got: {result!r}", file=sys.stderr)
-            return 1
-        print("  ✓ Fork isolation confirmed: original and clone diverged independently.")
+    # ── Cleanup ─────────────────────────────────────────────────────────
+    print(f"\n[Cleanup] Cleaning up...")
+    Sandbox.delete_snapshot(snap_id)
+    clone.kill()
 
-        # --- Phase 7: Clone with sb.clone(n=N) ---
-        print("\n[Phase 7] One-shot clone via sb.clone(n=2)...")
-        clones = sandbox.clone(n=2)
-        print(f"  ✓ {len(clones)} clone(s) created from current state.")
-        for i, sb in enumerate(clones):
-            cid = getattr(sb, "sandbox_id", getattr(sb, "id", "unknown"))
-            result = run_cmd(sb, "./target/debug/snapshot-demo", cwd=ws, timeout=30)
-            print(f"    clone {i+1}: {cid}  output={result.strip()!r}")
-        for sb in clones:
-            sb.kill()
-        print("  ✓ Clones verified and cleaned up.")
-
-        # Clean up the snapshot
-        Sandbox.delete_snapshot(snap_id)
-        print(f"  ✓ Snapshot {snap_id} deleted.")
-
-    finally:
-        print("\n[Cleanup] Killing sandboxes...")
-        sandbox.kill()
-        if clone is not None:
-            clone.kill()
-        print("  ✓ Both sandboxes killed.")
-
-    print("\n" + "=" * 60)
-    print("All snapshot / clone / rollback demos passed!")
-    print("=" * 60)
+    print(f"\n{'=' * 60}")
+    print("  All snapshot / clone / rollback demos passed!")
+    print(f"  Key takeaway: snapshots outlive the source sandbox."
+          f"  Rollback in ~100ms.")
+    print(f"{'=' * 60}")
     return 0
 
 

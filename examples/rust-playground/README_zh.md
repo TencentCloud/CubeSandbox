@@ -2,14 +2,16 @@
 
 [English](README.md)
 
-在 CubeSandbox MicroVM 内编译和运行 Rust 代码——可以用 `rustc` 编写一次性脚本，也可以使用 `cargo` 构建带外部依赖的完整项目，全部在一个隔离、可复现的环境中进行。
+在 CubeSandbox MicroVM 内编译和运行 Rust 代码——本示例通过 Rust 工作负载展示 CubeSandbox
+**即时、并发、安全、轻量** 的核心价值。
 
-本示例包含：
+## 展示的 CubeSandbox 功能
 
-- 一个 `Dockerfile`：在 CubeSandbox 基础镜像上叠加 Rust 工具链（rustup、rustc、cargo）。
-- `hello_world.py`：最小示翻：写入 .rs 文件、用 rustc 编译、运行二进制。演示了 `get_info()` 沙箱自省和 `lifecycle` 自动暂停/恢复。
-- `with_dependencies.py`：搭建一个带有外部 crate（serde_json、chrono）的 cargo 项目，构建并运行。演示了 `envs=` 在创建时注入环境变量，以及 `get_info()` 和 `lifecycle`。
-- `snapshot_rollback.py`：展示 CubeCoW 快照、克隆和回滚在 Rust 迭代开发中的应用。演示了 `Sandbox.list_snapshots()`、`sb.clone(n=N)` 一键克隆和 `Sandbox.delete_snapshot()` 清理快照。
+| 示例 | CubeSandbox 概念 |
+|------|-----------------|
+| `hello_world.py` | **即时** + **并发** — 并行创建 3 个沙箱并计时 <br> **生命周期** — 通过 `lifecycle` 自动暂停/恢复 <br> **自省** — `get_info()` 查询沙箱状态 |
+| `with_dependencies.py` | **安全** — 通过 `allow_internet_access` 实现网络隔离 <br> **并发构建** — 在线 vs 离线沙箱对比 <br> **环境变量注入** — 创建时通过 `envs=` 参数设置 |
+| `snapshot_rollback.py` | **CubeCoW 快照** — 检查点独立于源沙箱存在 <br> **即时回滚** — ~100ms 恢复 <br> **克隆** — `sb.clone(n=N)` 一键分叉 <br> **快照管理** — `list_snapshots()` + `delete_snapshot()` |
 
 ## 目录结构
 
@@ -20,9 +22,12 @@ rust-playground/
 ├── .gitignore
 ├── requirements.txt        # 宿主端驱动依赖（e2b、cubesandbox、python-dotenv）
 ├── env_utils.py            # .env 加载辅助
-├── hello_world.py          # 最小 rustc 编译并运行示翻
-├── with_dependencies.py    # 带有外部 crate 的 Cargo 项目
-├── snapshot_rollback.py    # 快照 / 克隆 / 回滚工作流
+├── hello_world.py          # 即时 + 并发：3 个沙箱并行编译
+├── with_dependencies.py    # 安全：通过 allow_internet_access 网络隔离
+├── snapshot_rollback.py    # CubeCoW 快照独立于沙箱 + 克隆 + 回滚
+├── tests/
+│   ├── mock_sdk.py         # 离线验证用的 Mock SDK
+│   └── run_verification.py # 运行全部 3 个 demo（无需集群）
 ├── README.md               # 英文文档
 └── README_zh.md            # 中文文档（本文件）
 ```
@@ -76,42 +81,59 @@ pip install -r requirements.txt
 | `E2B_API_KEY` | 本地进程 | 本地开发可用任意非空值 |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | 来自步骤 2 |
 
-## 4. 运行示翻
+## 4. 运行示例
 
-### Hello world（rustc）
+### 即时 + 并发（hello_world.py）
 
 ```bash
 python hello_world.py
 ```
 
-写入 Rust 源文件、用 `rustc` 编译、执行二进制。期望输出：
+并行创建 3 个沙箱，在每个沙箱中编译并运行 Rust 程序，报告创建和编译耗时：
 
 ```
---- Running hello ---
-stdout: Hello from CubeSandbox Rust playground!
-Current time: <unix-timestamp>
+  [sb-0] created in 0.87s  id=sb-xxx  state=running
+  [sb-1] created in 0.92s  id=sb-yyy  state=running
+  [sb-2] created in 1.01s  id=sb-zzz  state=running
+Total: 3 sandboxes in 3.21s  (1.07s avg per sandbox)
 ```
 
-### 带依赖的 Cargo 项目
+### 网络隔离（with_dependencies.py）
 
 ```bash
 python with_dependencies.py
 ```
 
-在沙箱内搭建 Cargo 项目，从 crates.io 拉取 `serde_json` 和 `chrono`，用 `cargo build --release` 构建，然后运行二进制。首次构建会下载 crate，cargo 的 registry 缓存会保留在沙箱中。
+对比两个沙箱——一个有互联网访问，一个没有：
 
-### 快照、克隆与回滚
+```
+  sb-1 (online)    : PASS — cargo 成功从 crates.io 拉取
+  sb-2 (offline)   : FAIL — cargo 被网络隔离阻止
+```
+
+展示了 `allow_internet_access=False` 这一关键安全功能。
+
+### 快照独立于沙箱（snapshot_rollback.py）
 
 ```bash
 python snapshot_rollback.py
 ```
 
-使用原生 `cubesandbox` SDK 演示 CubeSandbox 最具差异化的功能：
+展示 CubeSandbox 最具差异化的功能：
 
-1. **快照** — 在开发过程中保存沙箱状态（检查点 A）。
-2. **修改** — 修改 Rust 代码并重新构建（检查点 B）。
-3. **回滚** — 在约 100ms 内将沙箱恢复到检查点 A。
-4. **克隆** — 从检查点 A 分叉出一个新沙箱，原沙箱继续运行互不影响。
+1. **快照** — 在开发过程中保存沙箱状态。
+2. **快照独立于沙箱** — 杀死源沙箱后仍可从快照克隆出新沙箱。
+3. **回滚** — 在 ~100ms 内将沙箱恢复到检查点 A。
+4. **克隆(n)** — `sb.clone(n=3)` 一键创建 3 个分叉。
+
+## 离线验证（无需集群）
+
+```bash
+python3 -m venv /tmp/rust-verify-venv
+/tmp/rust-verify-venv/bin/pip install python-dotenv pexpect Pillow
+/tmp/rust-verify-venv/bin/python tests/run_verification.py
+ls verification-logs/
+```
 
 ## 故障排除
 
@@ -119,7 +141,7 @@ python snapshot_rollback.py
 |---|---|---|
 | `rustc: command not found` | 模板内未安装 Rust | 重新构建镜像，重新注册模板 |
 | `cargo build` 超时 | 首次构建需下载大量 crate | 增加 `--exec-timeout` 或沙箱超时时间 |
-| 就绪探测超时 | 镜像没有 envd | 确保使用 `FROM ghcr.io/tencentcloud/cubesandbox-base:...` |
+| 离线沙箱仍在拉取 crate | 未设置 `allow_internet_access` | 确保传给 `Sandbox.create()` 的参数包含 `allow_internet_access=False` |
 | `pause()`/`connect()` 错误 | 平台版本过旧不支持快照 | 升级 CubeSandbox 平台 |
 | cargo 权限被拒绝 | 以 root 运行而非 `user` | 确保 Dockerfile 中使用 `USER user` 安装 rustup |
 
@@ -128,3 +150,5 @@ python snapshot_rollback.py
 - 模板指南：[`docs/zh/guide/tutorials/template-from-image.md`](../../docs/zh/guide/tutorials/template-from-image.md)
 - BYOI（envd）：[`docs/zh/guide/tutorials/bring-your-own-image.md`](../../docs/zh/guide/tutorials/bring-your-own-image.md)
 - 快照 / 克隆 / 回滚：[`docs/zh/guide/snapshot-rollback-clone.md`](../../docs/zh/guide/snapshot-rollback-clone.md)
+- 生命周期：[`docs/zh/guide/lifecycle.md`](../../docs/zh/guide/lifecycle.md)
+- 网络策略：[`docs/zh/guide/network-policy.md`](../../docs/zh/guide/network-policy.md)

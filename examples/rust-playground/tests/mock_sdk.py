@@ -86,49 +86,46 @@ class MockCommands:
 
         # cargo build
         if cmd.startswith("cargo build"):
-            cargo_toml = self._files._store.get(
-                f"{cwd}/Cargo.toml" if cwd else "",
-                ""
-            )
-            main_rs = self._files._store.get(
-                f"{cwd}/src/main.rs" if cwd else "",
-                ""
-            )
-            if 'fn main()' in main_rs:
-                details = []
-                for dep in ["serde_json", "chrono"]:
-                    if dep in cargo_toml:
-                        details.append(f"  Downloaded {dep} v{_KNOWN_CRATES.get(dep, '?')}")
-                if details:
-                    out = "    Updating crates.io index\n" + "\n".join(details) + "\n   Compiling sandbox-demo v0.1.0\n    Finished `release` profile [optimized] target(s) in 15.32s\n"
-                else:
-                    bin_name = "snapshot-demo"
-                    out = f"   Compiling {bin_name} v0.1.0\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.21s\n"
-                # Mark binary as built so clone-from-snapshot can run it
-                if self._sandbox is not None:
-                    self._sandbox._binary_built = True
-                return MockCommandResult(0, out, "")
-            return MockCommandResult(1, "", "error[E0601]: `main` function not found in crate")
+            is_release = "--release" in cmd
+            cargo_toml = self._files._store.get(f"{cwd}/Cargo.toml" if cwd else "", "")
+            main_rs = self._files._store.get(f"{cwd}/src/main.rs" if cwd else "", "")
+            if 'fn main()' not in main_rs:
+                return MockCommandResult(1, "",
+                    "error[E0601]: `main` function not found in crate")
 
-        # cargo build --release
-        if cmd.startswith("cargo build --release"):
-            main_rs = self._files._store.get(
-                f"{cwd}/src/main.rs" if cwd else "",
-                ""
-            )
-            if 'fn main()' in main_rs:
-                out = "    Updating crates.io index\n    Downloaded serde_json v1.0.128\n    Downloaded chrono v0.4.38\n   Compiling sandbox-demo v0.1.0\n    Finished `release` profile [optimized] target(s) in 18.47s\n"
-                return MockCommandResult(0, out, "")
-            return MockCommandResult(1, "", "error[E0601]: `main` function not found")
+            has_deps = any(dep in cargo_toml for dep in ["serde_json", "chrono"])
+
+            # Network isolation check: if offline and deps are needed, fail
+            if has_deps and self._sandbox is not None and not self._sandbox.allow_internet_access:
+                return MockCommandResult(101, "",
+                    "error: failed to download serde_json v1.0\n"
+                    "Caused by: cannot fetch crates.io — network is disabled\n"
+                    "  (allow_internet_access=False)")
+
+            if has_deps:
+                out = ("    Updating crates.io index\n"
+                       "  Downloaded serde_json v1.0.128\n"
+                       "  Downloaded chrono v0.4.38\n"
+                       f"   Compiling sandbox-demo v0.1.0\n"
+                       f"    Finished `release` profile [optimized] target(s) in 15.32s\n")
+            else:
+                profile = "release" if is_release else "dev"
+                bin_name = cwd.rstrip("/").rsplit("/", 1)[-1] if cwd else "snapshot-demo"
+                out = (f"   Compiling {bin_name} v0.1.0\n"
+                       f"    Finished `{profile}` profile [unoptimized + debuginfo] target(s) in 3.21s\n")
+
+            if self._sandbox is not None:
+                self._sandbox._binary_built = True
+            return MockCommandResult(0, out, "")
 
         # ./target/release/sandbox-demo
         if "./target/release/sandbox-demo" in cmd:
-            main_rs = self._files._store.get(
-                f"{cwd}/src/main.rs" if cwd else "",
-                ""
-            )
-            if "Checkpoint A" in main_rs or "sandbox-demo" in self._files._store.get(f"{cwd}/src/main.rs", ""):
-                return MockCommandResult(0, '{"greeting":"Hello from CubeSandbox!","language":"Rust","crates":["serde_json","chrono"],"answer":42}\n', "")
+            main_rs = self._files._store.get(f"{cwd}/src/main.rs" if cwd else "", "")
+            if 'serde_json' in str(self._files._store):
+                return MockCommandResult(0,
+                    '{"greeting":"Hello from CubeSandbox!","language":"Rust",'
+                    '"timestamp":"2026-07-10T12:00:00+00:00",'
+                    '"crates":["serde_json","chrono"],"answer":42}\n', "")
             return MockCommandResult(0, "release binary output\n", "")
 
         # ./target/debug/snapshot-demo
@@ -172,7 +169,8 @@ _GLOBAL_SNAPSHOTS: dict[str, dict[str, Any]] = {}
 class MockSandbox:
     def __init__(self, template: str = "", timeout: int = 120,
                  envs: dict[str, str] | None = None,
-                 lifecycle: dict[str, Any] | None = None):
+                 lifecycle: dict[str, Any] | None = None,
+                 allow_internet_access: bool = True):
         global _SANDBOX_COUNTER
         _SANDBOX_COUNTER += 1
         self.sandbox_id = f"sb-{_SANDBOX_COUNTER:06d}"
@@ -181,6 +179,7 @@ class MockSandbox:
         self.timeout = timeout
         self.envs = envs or {}
         self.lifecycle = lifecycle or {}
+        self.allow_internet_access = allow_internet_access
         self._files = MockFiles()
         self._snapshot_ids: list[str] = []
         self._state = "running"
@@ -233,8 +232,10 @@ class MockSandbox:
     @classmethod
     def create(cls, template: str = "", timeout: int = 120,
                envs: dict[str, str] | None = None,
-               lifecycle: dict[str, Any] | None = None) -> MockSandbox:
-        sb = cls(template=template, timeout=timeout, envs=envs, lifecycle=lifecycle)
+               lifecycle: dict[str, Any] | None = None,
+               allow_internet_access: bool = True) -> MockSandbox:
+        sb = cls(template=template, timeout=timeout, envs=envs,
+                 lifecycle=lifecycle, allow_internet_access=allow_internet_access)
         # If template is a snapshot ID, restore that snapshot's files and mark binary built
         if template in _GLOBAL_SNAPSHOTS:
             state = _GLOBAL_SNAPSHOTS[template]
