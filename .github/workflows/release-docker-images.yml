@@ -310,8 +310,9 @@ jobs:
             done
           done
 
-  # Copy per-arch and multi-arch images to TCR cn from a China-side self-hosted
-  # runner so we do not push large layers from GitHub-hosted (US) runners to CN.
+  # Copy per-arch and multi-arch images from TCR int to TCR cn on a China-side
+  # self-hosted runner. TCR int already receives the release images during the
+  # build, and using it here avoids pulling large layers from GHCR into China.
   # This ARC runner set requires a job container.
   sync_cn:
     name: ${{ matrix.component }} sync to TCR CN
@@ -359,13 +360,14 @@ jobs:
 
       - name: Log in to registries
         env:
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TCR_INT_USERNAME: ${{ secrets.TCR_INT_USERNAME }}
+          TCR_INT_PASSWORD: ${{ secrets.TCR_INT_PASSWORD }}
           TCR_CN_USERNAME: ${{ secrets.TCR_CN_USERNAME }}
           TCR_CN_PASSWORD: ${{ secrets.TCR_CN_PASSWORD }}
         run: |
           set -euo pipefail
-          echo "${GHCR_TOKEN}" | crane auth login ghcr.io -u "${GHCR_USER}" --password-stdin
+          echo "${TCR_INT_PASSWORD}" | crane auth login cube-sandbox-int.tencentcloudcr.com \
+            -u "${TCR_INT_USERNAME}" --password-stdin
           echo "${TCR_CN_PASSWORD}" | crane auth login cube-sandbox-cn.tencentcloudcr.com \
             -u "${TCR_CN_USERNAME}" --password-stdin
 
@@ -385,15 +387,33 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           IMAGE_NAME: ${{ matrix.image }}
           MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
+          CRANE_COPY_ATTEMPTS: "3"
+          CRANE_COPY_TIMEOUT: 20m
         run: |
           set -euo pipefail
-          src="ghcr.io/tencentcloud/${IMAGE_NAME}"
+          src="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
           dst="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
+
+          copy_image() {
+            local from="$1"
+            local to="$2"
+            local attempt
+            for attempt in $(seq 1 "${CRANE_COPY_ATTEMPTS}"); do
+              echo "Copying ${from} -> ${to} (attempt ${attempt}/${CRANE_COPY_ATTEMPTS})"
+              if timeout "${CRANE_COPY_TIMEOUT}" crane copy "${from}" "${to}"; then
+                return 0
+              fi
+              if [[ "${attempt}" == "${CRANE_COPY_ATTEMPTS}" ]]; then
+                echo "Failed to copy ${from} -> ${to}" >&2
+                return 1
+              fi
+              sleep "$((attempt * 10))"
+            done
+          }
+
           for arch in amd64 arm64; do
-            echo "Copying ${src}:${IMAGE_TAG}-${arch} -> ${dst}:${IMAGE_TAG}-${arch}"
-            crane copy "${src}:${IMAGE_TAG}-${arch}" "${dst}:${IMAGE_TAG}-${arch}"
+            copy_image "${src}:${IMAGE_TAG}-${arch}" "${dst}:${IMAGE_TAG}-${arch}"
           done
           for tag in ${MANIFEST_TAGS}; do
-            echo "Copying ${src}:${tag} -> ${dst}:${tag}"
-            crane copy "${src}:${tag}" "${dst}:${tag}"
+            copy_image "${src}:${tag}" "${dst}:${tag}"
           done
