@@ -25,7 +25,7 @@ spec:
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
       containers:
         - name: cube-master
-          image: {{ include "cube.image" .Values.images.master | quote }}
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.master "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.master.pullPolicy }}
           {{- with .Values.controlPlane.master.command }}
           command:

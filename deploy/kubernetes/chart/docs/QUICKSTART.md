@@ -78,13 +78,42 @@ IMAGE_TAG=v0.5.0 \
 创建 `runtime-values.yaml`(下面是**最小可用**示例,生产环境请按 [`ARCHITECTURE.md#7`](ARCHITECTURE.md#7-关键-values-开关) 逐项调整):
 
 ```yaml
-# 镜像 registry(若使用了自建镜像,把 repository 换成你的地址)
-images:
-  master:
-    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-master
-    tag: v0.5.0
-  # ... 其他 9 个镜像同样格式
+# 镜像 registry
+# - Cube-owned 10 个镜像的默认 repository 已经指向公网可达的
+#   ccr.ccs.tencentyun.com/cubesandbox-chart/*, 无需修改即可开箱使用。
+# - 若把 chart 镜像镜像到私有 registry, 用一个开关一次改所有 Cube 镜像:
+#     global:
+#       imageRegistry: my-registry.example.com/mirror
+#   会渲染成 my-registry.example.com/mirror/cubesandbox-chart/cube-master:v0.5.0
+#   等等, 保留 sub-path (cubesandbox-chart/); 第三方镜像 (mysql/redis/
+#   coredns/busybox/curl) 不受影响。
+# - 也可以直接改单个镜像的 repository:
+#     images:
+#       master:
+#         repository: my-registry.example.com/mirror/cubesandbox-chart/cube-master
+#         tag: v0.5.0
 
+# StorageClass —— 默认不创建, 3 个 PVC (CubeMaster / MySQL / Redis)
+# 走集群 default StorageClass。self-hosted / EKS / GKE / AKS 用户
+# 不需要额外配置。
+#
+# 若要显式指定 PVC 使用的 SC:
+# controlPlane:
+#   master:
+#     persistence:
+#       storageClassName: premium-rwo   # GKE 示例
+# mysql:
+#   persistence:
+#     storageClassName: gp3             # EKS 示例
+# redis:
+#   persistence:
+#     storageClassName: default
+#
+# TKE 用户直接叠加 chart 内置的 `values-tke.yaml` 预设:
+#   helm upgrade --install cube ./deploy/kubernetes/chart \
+#     -f deploy/kubernetes/chart/values-tke.yaml \
+#     -f runtime-values.yaml
+#
 # CubeProxy 对外访问 IP(如果不用 LB,填 control 节点的 HostIP)
 cubeProxy:
   advertiseIP: "10.0.1.10"
@@ -172,7 +201,7 @@ kubectl label nodes <node> \
 # 不要打 taint
 ```
 
-`runtime-values.yaml` 中把持久化改成 hostPath 以避免 CBS 依赖:
+`runtime-values.yaml` 中把持久化改成 hostPath 以避免依赖任何 CSI:
 
 ```yaml
 controlPlane:
@@ -208,6 +237,66 @@ mysql:
 redis:
   enabled: false
 ```
+
+### 6.3 Self-hosted 集群 / EKS / GKE / AKS
+
+Chart 的默认值就是 self-hosted 友好:
+- **不创建 StorageClass** — 3 个 PVC(CubeMaster / MySQL / Redis)使用集群 default SC
+- **不硬编码 provisioner** — 兼容任何 CSI 后端
+
+若集群没有 default SC 或想显式指定,在 `runtime-values.yaml` 里配:
+
+```yaml
+controlPlane:
+  master:
+    persistence:
+      storageClassName: <your-sc-name>   # 例如 EKS gp3 / GKE premium-rwo / AKS managed-csi
+mysql:
+  persistence:
+    storageClassName: <your-sc-name>
+redis:
+  persistence:
+    storageClassName: <your-sc-name>
+```
+
+若集群完全没有可用 SC(纯本地实验环境),把 3 个 PVC 换成 hostPath:
+
+```yaml
+controlPlane:
+  master:
+    persistence:
+      hostPath: /data/CubeMaster/storage
+mysql:
+  persistence:
+    hostPath: /data/mysql
+redis:
+  persistence:
+    hostPath: /data/redis
+```
+
+镜像 pull 若需要走内部 mirror,一个开关搞定 Cube-owned 10 个镜像:
+
+```yaml
+global:
+  imageRegistry: my-mirror.example.com/cubesandbox
+```
+
+### 6.4 腾讯云 TKE
+
+用 chart 内置的 preset,一行叠加:
+
+```bash
+helm upgrade --install cube ./deploy/kubernetes/chart \
+  -f deploy/kubernetes/chart/values-tke.yaml \
+  -f runtime-values.yaml \
+  -n cube-system --create-namespace \
+  --timeout 90m
+```
+
+`values-tke.yaml` 会:
+- 让 chart 创建 `cube-cbs-wffc` StorageClass(provisioner=`com.tencent.cloud.csi.cbs`)
+- 把 3 个 PVC 绑定到该 SC
+- 使用 `WaitForFirstConsumer` 避免多可用区 CBS 盘错 zone
 
 ---
 

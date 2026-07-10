@@ -95,7 +95,7 @@ spec:
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
       containers:
         - name: webui
-          image: {{ include "cube.image" .Values.images.webui | quote }}
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.webui "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.webui.pullPolicy }}
           {{- if .Values.global.timezone }}
           env:

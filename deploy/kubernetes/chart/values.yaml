@@ -11,6 +11,15 @@ global:
   # kubelet --cluster-domain=<non-default>. Empty falls back to
   # cubeNode.dns.clusterDomain, then "cluster.local".
   clusterDomain: ""
+  # Optional registry prefix that replaces the registry portion of every
+  # Cube-owned image below. Leave empty to keep the per-image repository
+  # exactly as declared. Set to e.g. "my-registry.example.com/cubesandbox"
+  # to mirror all images into a private registry without editing each entry
+  # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
+  # / api / cubemastercli / proxyNode / cubeEgress / cubeEgressNet / webui
+  # entries but not to third-party images such as coredns / mysql / redis /
+  # docker-in-docker.
+  imageRegistry: ""
 
 images:
   # Init container 1: installs/configures PVM host kernel and may reboot the host.
@@ -78,14 +87,30 @@ images:
 
 imagePullSecrets: []
 
+# Optional StorageClass created by the chart. Off by default: on a plain
+# Kubernetes / self-hosted cluster the PVCs below should use the cluster's
+# default StorageClass, so leave `storageClass.create=false` and either leave
+# `controlPlane.master.persistence.storageClassName` / `mysql.persistence.storageClassName`
+# / `redis.persistence.storageClassName` empty (falls back to the cluster default)
+# or point them at an existing StorageClass name.
+#
+# When you do want the chart to provision its own StorageClass, set
+# `create=true` and supply `name` + `provisioner` (+ `parameters` when the
+# provisioner needs them). Example for TKE CBS is included below as a comment;
+# see values-tke.yaml for a ready-to-merge override.
 storageClass:
-  create: true
-  name: cube-cbs-wffc
-  provisioner: com.tencent.cloud.csi.cbs
+  create: false
+  name: ""
+  provisioner: ""
   reclaimPolicy: Delete
   volumeBindingMode: WaitForFirstConsumer
-  parameters:
-    type: cbs
+  parameters: {}
+  # --- Example: Tencent Cloud TKE CBS ---
+  # create: true
+  # name: cube-cbs-wffc
+  # provisioner: com.tencent.cloud.csi.cbs
+  # parameters:
+  #   type: cbs
 
 placement:
   # Control-plane components run only on dedicated control nodes.
@@ -141,7 +166,12 @@ controlPlane:
       enabled: true
       hostPath: ""
       existingClaim: ""
-      storageClassName: cube-cbs-wffc
+      # Empty falls back to the cluster's default StorageClass (recommended
+      # on self-hosted clusters). Set to the name of an explicit
+      # StorageClass — e.g. "cube-cbs-wffc" for the bundled TKE preset — to
+      # pin the PVC to a specific provisioner. `existingClaim` and
+      # `hostPath` override storageClassName when set.
+      storageClassName: ""
       size: 20Gi
       accessModes:
         - ReadWriteOnce
@@ -311,7 +341,10 @@ mysql:
     existingClaim: ""
     hostPath: ""
     size: 20Gi
-    storageClassName: cube-cbs-wffc
+    # Empty falls back to the cluster's default StorageClass. Override to
+    # bind the MySQL data PVC to a specific provisioner (e.g. cube-cbs-wffc
+    # from values-tke.yaml, or gp3 / pd-ssd / local-path on other clouds).
+    storageClassName: ""
     accessModes:
       - ReadWriteOnce
   resources: {}
@@ -334,7 +367,9 @@ redis:
     existingClaim: ""
     hostPath: ""
     size: 10Gi
-    storageClassName: cube-cbs-wffc
+    # Empty falls back to the cluster's default StorageClass. Override to
+    # bind the Redis data PVC to a specific provisioner.
+    storageClassName: ""
     accessModes:
       - ReadWriteOnce
   resources: {}

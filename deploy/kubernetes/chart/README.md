@@ -71,11 +71,20 @@ Default placement values:
 ```yaml
 global:
   timezone: Asia/Shanghai
+  # Non-default cluster DNS domain (empty falls back to cluster.local).
+  clusterDomain: ""
+  # Optional private-registry prefix that rewrites every Cube-owned image
+  # repository so operators mirroring the chart into a private registry
+  # only need to change one value.
+  imageRegistry: ""
 
+# StorageClass — off by default so PVCs use the cluster's default
+# StorageClass. Set create=true + provide provisioner to have the chart
+# manage its own SC. See values-tke.yaml for the TKE CBS preset.
 storageClass:
-  create: true
-  name: cube-cbs-wffc
-  provisioner: com.tencent.cloud.csi.cbs
+  create: false
+  name: ""
+  provisioner: ""
   volumeBindingMode: WaitForFirstConsumer
 
 placement:
@@ -192,32 +201,49 @@ controlPlane:
     persistence:
       enabled: true
       hostPath: ""
-      storageClassName: cube-cbs-wffc
+      storageClassName: ""   # empty → cluster default SC
 mysql:
   persistence:
     enabled: true
     hostPath: ""
-    storageClassName: cube-cbs-wffc
+    storageClassName: ""
 redis:
   persistence:
     enabled: true
     hostPath: ""
-    storageClassName: cube-cbs-wffc
+    storageClassName: ""
 ```
 
-Set `storageClassName` / `size` to tune dynamic PVCs, or `existingClaim` to
-bind pre-created volumes. Use `hostPath` only for single-node throwaway
-environments; multi-control-node deployments must use PVCs or external
-MySQL/Redis.
+Set `storageClassName` to a specific class (e.g. `gp3` on EKS,
+`premium-rwo` on GKE, `managed-csi` on AKS, `cube-cbs-wffc` on TKE) if
+you need to pin the PVC to a particular provisioner. Empty falls back to
+the cluster's default StorageClass, which works out of the box for most
+self-hosted / EKS / GKE / AKS clusters. Use `hostPath` only for
+single-node throwaway environments; multi-control-node deployments must
+use PVCs or external MySQL / Redis. `existingClaim` overrides both
+`storageClassName` and `hostPath`.
 
 Built-in MySQL and Redis use StatefulSet `volumeClaimTemplates` by default.
 For a release named `cube`, the generated claims are owned by the StatefulSet
 Pod, such as `mysql-data-cube-mysql-0` and `redis-data-cube-redis-0`.
 
-The default `cube-cbs-wffc` StorageClass uses `WaitForFirstConsumer`, which is
-important on TKE multi-zone clusters: CBS disks are provisioned in the same zone
-as the selected control node instead of being created in a random zone before
-the Pod is scheduled.
+### Tencent Cloud TKE preset
+
+Merge `values-tke.yaml` on top of your runtime values to have the chart
+provision a CBS-backed StorageClass named `cube-cbs-wffc` and pin every
+PVC to it:
+
+```bash
+helm upgrade --install cube ./deploy/kubernetes/chart \
+  -f deploy/kubernetes/chart/values-tke.yaml \
+  -f runtime-values.yaml \
+  -n cube-system --create-namespace
+```
+
+The preset uses `volumeBindingMode: WaitForFirstConsumer` so CBS disks
+are provisioned in the same zone as the scheduled control-plane Pod on
+multi-AZ TKE clusters. On non-TKE clusters do NOT include this file;
+provide the cluster's own StorageClass name instead.
 
 ## Database migration
 

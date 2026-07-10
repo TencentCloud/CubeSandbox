@@ -131,7 +131,7 @@ spec:
   {{- end }}
   containers:
     - name: cubemastercli
-      image: {{ include "cube.image" $cubemastercliImage | quote }}
+      image: {{ include "cube.cubeImage" (dict "image" $cubemastercliImage "context" $) | quote }}
       imagePullPolicy: {{ dig "pullPolicy" "Always" $cubemastercliImage }}
       env:
         {{- include "cube.timezoneEnv" . | nindent 8 }}

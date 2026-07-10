@@ -33,7 +33,7 @@ spec:
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
       containers:
         - name: cubemastercli
-          image: {{ include "cube.image" $image | quote }}
+          image: {{ include "cube.cubeImage" (dict "image" $image "context" $) | quote }}
           imagePullPolicy: {{ dig "pullPolicy" "Always" $image }}
           {{- with (dig "command" list $cubemastercli) }}
           command:

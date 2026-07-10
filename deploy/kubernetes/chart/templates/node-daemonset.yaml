@@ -80,7 +80,7 @@ spec:
         {{- end }}
         {{- if .Values.bootstrap.pvmHostKernel.enabled }}
         - name: pvm-host-bootstrap
-          image: {{ include "cube.image" .Values.images.pvmHostBootstrap | quote }}
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.pvmHostBootstrap.pullPolicy }}
           securityContext:
             privileged: {{ .Values.security.privileged }}
@@ -133,7 +133,7 @@ spec:
         {{- end }}
         {{- if .Values.bootstrap.nodeInit.enabled }}
         - name: cube-node-init
-          image: {{ include "cube.image" .Values.images.nodeInit | quote }}
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.nodeInit "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.nodeInit.pullPolicy }}
           securityContext:
             privileged: {{ .Values.security.privileged }}
@@ -209,7 +209,7 @@ spec:
         {{- end }}
       containers:
         - name: cube-node
-          image: {{ include "cube.image" .Values.images.node | quote }}
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.node "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.node.pullPolicy }}
           securityContext:
             privileged: {{ .Values.security.privileged }}
@@ -326,7 +326,7 @@ spec:
             {{- toYaml .Values.cubeNode.resources | nindent 12 }}
         {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress
-          image: {{ include "cube.image" .Values.images.cubeEgress | quote }}
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgress "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubeEgress.pullPolicy }}
           command:
             - /bin/bash
@@ -394,7 +394,7 @@ spec:
           {{- end }}
         {{- if .Values.cubeEgress.network.enabled }}
         - name: cube-egress-net
-          image: {{ include "cube.image" .Values.images.cubeEgressNet | quote }}
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgressNet "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubeEgressNet.pullPolicy }}
           securityContext:
             privileged: {{ .Values.security.privileged }}
