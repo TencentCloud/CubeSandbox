@@ -109,6 +109,84 @@ impl SandboxService {
             .collect())
     }
 
+    pub async fn batch_create_sandboxes(
+        &self,
+        requests: Vec<NewSandbox>,
+    ) -> Vec<crate::models::BatchResult> {
+        let mut handles = Vec::with_capacity(requests.len());
+        for req in requests {
+            let service = self.clone();
+            handles.push(tokio::spawn(async move {
+                match service.create_sandbox(req).await {
+                    Ok(sandbox) => {
+                        let id = sandbox.sandbox_id.clone();
+                        crate::models::BatchResult {
+                            sandbox_id: Some(id),
+                            sandbox: Some(sandbox),
+                            error: None,
+                        }
+                    }
+                    Err(e) => crate::models::BatchResult {
+                        sandbox_id: None,
+                        sandbox: None,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }));
+        }
+
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.await {
+                Ok(result) => results.push(result),
+                Err(e) => results.push(crate::models::BatchResult {
+                    sandbox_id: None,
+                    sandbox: None,
+                    error: Some(e.to_string()),
+                }),
+            }
+        }
+        results
+    }
+
+    pub async fn batch_destroy_sandboxes(
+        &self,
+        sandbox_ids: Vec<String>,
+    ) -> Vec<crate::models::BatchResult> {
+        let mut handles = Vec::with_capacity(sandbox_ids.len());
+        for id in sandbox_ids {
+            let service = self.clone();
+            handles.push(tokio::spawn(async move {
+                let sandbox_id = id.clone();
+                match service.kill_sandbox(&id).await {
+                    Ok(()) => crate::models::BatchResult {
+                        sandbox_id: Some(sandbox_id),
+                        sandbox: None,
+                        error: None,
+                    },
+                    Err(e) => crate::models::BatchResult {
+                        sandbox_id: Some(sandbox_id),
+                        sandbox: None,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }));
+        }
+
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.await {
+                Ok(result) => results.push(result),
+                Err(e) => results.push(crate::models::BatchResult {
+                    sandbox_id: None,
+                    sandbox: None,
+                    error: Some(e.to_string()),
+                }),
+            }
+        }
+        results
+    }
+
     pub async fn get_sandbox(&self, sandbox_id: &str) -> AppResult<SandboxDetail> {
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
         let summary = self.fetch_sandbox_summary(sandbox_id, &d.host_id).await?;

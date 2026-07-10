@@ -24,6 +24,8 @@ The following Sandbox core APIs are **fully E2B-compatible** and can be used dir
 | GET | `/sandboxes` | List all sandboxes (v1) | ✅ |
 | GET | `/v2/sandboxes` | List sandboxes (v2, supports state/metadata filtering, limit) | ✅ |
 | POST | `/sandboxes` | Create a sandbox | ✅ |
+| POST | `/sandboxes/batch` | Batch create sandboxes (Cube extension) | ✅ |
+| DELETE | `/sandboxes/batch` | Batch destroy sandboxes (Cube extension) | ✅ |
 | GET | `/sandboxes/:sandboxID` | Get single sandbox details | ✅ |
 | DELETE | `/sandboxes/:sandboxID` | Destroy a sandbox | ✅ |
 | POST | `/sandboxes/:sandboxID/pause` | Pause a sandbox (preserves memory snapshot) | ✅ |

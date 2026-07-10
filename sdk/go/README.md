@@ -170,6 +170,39 @@ _ = resumed
 
 `Sandbox.Resume` is available for compatibility but deprecated; prefer `Client.Connect`.
 
+## Batch Operations
+
+```go
+// Batch create: send multiple create requests, results are returned per-request
+results, err := client.CreateBatch(ctx, []cubesandbox.CreateOptions{
+	{TemplateID: "tpl-a"},
+	{TemplateID: "tpl-b"},
+	{TemplateID: "tpl-c"},
+})
+for i, r := range results {
+	if r.Error != nil {
+		log.Printf("sandbox %d failed: %v", i, *r.Error)
+		continue
+	}
+	fmt.Println(*r.SandboxID, r.Sandbox.Domain)
+}
+
+// Batch destroy: kill multiple sandboxes concurrently
+results, err = client.KillBatch(ctx, []string{"sb-1", "sb-2", "sb-3"})
+for _, r := range results {
+	if r.Error != nil {
+		log.Printf("kill %s failed: %v", *r.SandboxID, *r.Error)
+	}
+}
+```
+
+| Method | Description |
+|---|---|
+| `CreateBatch(ctx, requests)` | POST `/sandboxes/batch` — concurrently create multiple sandboxes; returns per-request `BatchResult` |
+| `KillBatch(ctx, sandboxIDs)` | DELETE `/sandboxes/batch` — concurrently destroy multiple sandboxes; returns per-ID `BatchResult` |
+
+Each `BatchResult` contains `SandboxID`, `Sandbox` (populated on create), and `Error` (non-nil on failure). The batch endpoints fire individual sandbox operations concurrently via the server and return all results in order.
+
 ## Network Policy
 
 ```go

@@ -184,6 +184,12 @@ type WatchEvent struct {
 	Type string `json:"type"`
 }
 
+type BatchResult struct {
+	SandboxID *string  `json:"sandboxID,omitempty"`
+	Sandbox   *Sandbox `json:"sandbox,omitempty"`
+	Error     *string  `json:"error,omitempty"`
+}
+
 func (e *Execution) mainText() string {
 	if e == nil {
 		return ""

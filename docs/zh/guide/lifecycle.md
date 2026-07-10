@@ -107,6 +107,54 @@ sandbox.kill()
 
 `kill()` 是不可逆的：与暂停不同，被 kill 的沙箱**不能**恢复。即便 `lifecycle.on_timeout="pause"`，调用 `kill()` 仍然立即终止并丢弃快照。
 
+## 批量操作
+
+Cube 扩展了两个批量 endpoint，方便并发创建和销毁多个沙箱：
+
+| Endpoint | Method | 说明 |
+|---|---|---|
+| `/sandboxes/batch` | POST | 一次请求批量创建多个沙箱 |
+| `/sandboxes/batch` | DELETE | 一次请求批量销毁多个沙箱 |
+
+两个端点都接受沙箱级请求数组，返回沙箱级结果数组 —— 每个结果都携带成功响应或错误信息，因此部分失败不会阻塞整体批处理。
+
+### Go
+
+```go
+// 批量创建：并发发起多个 create。
+results, err := client.CreateBatch(ctx, []cubesandbox.CreateOptions{
+    {TemplateID: "tpl-a"},
+    {TemplateID: "tpl-b"},
+    {TemplateID: "tpl-c"},
+})
+for _, r := range results {
+    if r.Error != nil {
+        log.Printf("create 失败: %v", *r.Error)
+        continue
+    }
+    fmt.Println("已创建", *r.SandboxID)
+}
+
+// 批量销毁：并发销毁一组沙箱。
+results, err = client.KillBatch(ctx, []string{"sb-1", "sb-2", "sb-3"})
+```
+
+### REST
+
+```bash
+# 批量创建
+curl -X POST http://localhost:3000/sandboxes/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"requests":[{"templateID":"tpl-a"},{"templateID":"tpl-b"}]}'
+
+# 批量销毁
+curl -X DELETE http://localhost:3000/sandboxes/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"sandboxIDs":["sb-1","sb-2","sb-3"]}'
+```
+
+每个操作在服务端并发执行，结果数组的顺序与输入一致。
+
 ## 显式暂停 / 恢复
 
 ```python

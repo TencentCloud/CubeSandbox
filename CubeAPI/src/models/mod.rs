@@ -8,6 +8,32 @@ use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 use validator::Validate;
 
+// ─── Batch operations ─────────────────────────────────────────────────────
+
+/// Request body for POST /sandboxes/batch
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct BatchCreateRequest {
+    pub requests: Vec<NewSandbox>,
+}
+
+/// Request body for DELETE /sandboxes/batch
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct BatchDestroyRequest {
+    #[serde(rename = "sandboxIDs")]
+    pub sandbox_ids: Vec<String>,
+}
+
+/// Per-sandbox result in a batch response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BatchResult {
+    #[serde(rename = "sandboxID", skip_serializing_if = "Option::is_none")]
+    pub sandbox_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<Sandbox>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 // ─── Common ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

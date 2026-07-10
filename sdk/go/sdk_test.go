@@ -1509,3 +1509,159 @@ func TestSetTimeoutServerError(t *testing.T) {
 		t.Fatalf("StatusCode=%d, want 500", apiErr.StatusCode)
 	}
 }
+
+func TestClient_CreateBatch(t *testing.T) {
+	createCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sandboxes/batch" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		requests, ok := body["requests"].([]any)
+		if !ok || len(requests) == 0 {
+			t.Fatalf("requests not found or empty: %#v", body)
+		}
+
+		results := make([]map[string]any, len(requests))
+		for i, req := range requests {
+			reqMap, ok := req.(map[string]any)
+			if !ok {
+				reqMap = map[string]any{}
+			}
+			createCount++
+			sandboxID := fmt.Sprintf("sb-batch-%d", createCount)
+			results[i] = map[string]any{
+				"sandboxID": sandboxID,
+				"sandbox": map[string]any{
+					"templateID":       reqMap["templateID"],
+					"sandboxID":        sandboxID,
+					"clientID":         "client-batch",
+					"envdVersion":      "0.0.1",
+					"envdAccessToken":  nil,
+					"trafficAccessToken": nil,
+					"domain":           "cube.app",
+				},
+				"error": nil,
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(results)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-default", Timeout: 300 * time.Second})
+	results, err := client.CreateBatch(context.Background(), []CreateOptions{
+		{TemplateID: "tpl-a"},
+		{TemplateID: "tpl-b"},
+		{TemplateID: "tpl-c"},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch returned error: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("got %d results, want 3", len(results))
+	}
+	for i, r := range results {
+		if r.SandboxID == nil || *r.SandboxID == "" {
+			t.Fatalf("result[%d] sandboxID missing: %#v", i, r)
+		}
+		if r.Sandbox == nil {
+			t.Fatalf("result[%d] sandbox missing: %#v", i, r)
+		}
+		if r.Error != nil {
+			t.Fatalf("result[%d] unexpected error: %s", i, *r.Error)
+		}
+	}
+	if createCount != 3 {
+		t.Fatalf("createCount=%d, want 3", createCount)
+	}
+}
+
+func TestClient_CreateBatchEmptyRequests(t *testing.T) {
+	client := NewClient(Config{APIURL: "http://unused"})
+	_, err := client.CreateBatch(context.Background(), nil)
+	if err == nil {
+		t.Fatal("CreateBatch with nil requests returned nil error")
+	}
+	if !strings.Contains(err.Error(), "at least one request") {
+		t.Fatalf("error=%v, want 'at least one request'", err)
+	}
+}
+
+func TestClient_KillBatch(t *testing.T) {
+	killedIDs := make([]string, 0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sandboxes/batch" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodDelete {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		ids, ok := body["sandboxIDs"].([]any)
+		if !ok || len(ids) == 0 {
+			t.Fatalf("sandboxIDs not found or empty: %#v", body)
+		}
+
+		results := make([]map[string]any, len(ids))
+		for i, id := range ids {
+			sid := id.(string)
+			killedIDs = append(killedIDs, sid)
+			results[i] = map[string]any{
+				"sandboxID": sid,
+				"sandbox":   nil,
+				"error":     nil,
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(results)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-default", Timeout: 300 * time.Second})
+	results, err := client.KillBatch(context.Background(), []string{"sb-1", "sb-2", "sb-3"})
+	if err != nil {
+		t.Fatalf("KillBatch returned error: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("got %d results, want 3", len(results))
+	}
+	for i, r := range results {
+		if r.SandboxID == nil || *r.SandboxID == "" {
+			t.Fatalf("result[%d] sandboxID missing: %#v", i, r)
+		}
+		if r.Error != nil {
+			t.Fatalf("result[%d] unexpected error: %s", i, *r.Error)
+		}
+	}
+	if len(killedIDs) != 3 {
+		t.Fatalf("killedIDs=%v, want 3", killedIDs)
+	}
+	for i, want := range []string{"sb-1", "sb-2", "sb-3"} {
+		if killedIDs[i] != want {
+			t.Fatalf("killedIDs[%d]=%q, want %q", i, killedIDs[i], want)
+		}
+	}
+}
+
+func TestClient_KillBatchEmptyIDs(t *testing.T) {
+	client := NewClient(Config{APIURL: "http://unused"})
+	_, err := client.KillBatch(context.Background(), nil)
+	if err == nil {
+		t.Fatal("KillBatch with nil sandboxIDs returned nil error")
+	}
+	if !strings.Contains(err.Error(), "at least one sandbox ID") {
+		t.Fatalf("error=%v, want 'at least one sandbox ID'", err)
+	}
+}

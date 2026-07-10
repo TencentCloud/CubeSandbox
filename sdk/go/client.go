@@ -97,6 +97,43 @@ func (c *Client) List(ctx context.Context) ([]SandboxInfo, error) {
 	return sandboxes, nil
 }
 
+func (c *Client) CreateBatch(ctx context.Context, requests []CreateOptions) ([]BatchResult, error) {
+	if len(requests) == 0 {
+		return nil, fmt.Errorf("cubesandbox: at least one request is required for batch create")
+	}
+	payloads := make([]map[string]any, len(requests))
+	for i, opts := range requests {
+		payload, err := c.createPayload(opts)
+		if err != nil {
+			return nil, fmt.Errorf("cubesandbox: invalid request at index %d: %w", i, err)
+		}
+		payloads[i] = payload
+	}
+	body := map[string]any{"requests": payloads}
+	var results []BatchResult
+	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes/batch", body, &results, http.StatusOK, http.StatusCreated); err != nil {
+		return nil, err
+	}
+	for i := range results {
+		if results[i].Sandbox != nil {
+			c.attachSandbox(results[i].Sandbox)
+		}
+	}
+	return results, nil
+}
+
+func (c *Client) KillBatch(ctx context.Context, sandboxIDs []string) ([]BatchResult, error) {
+	if len(sandboxIDs) == 0 {
+		return nil, fmt.Errorf("cubesandbox: at least one sandbox ID is required for batch kill")
+	}
+	body := map[string]any{"sandboxIDs": sandboxIDs}
+	var results []BatchResult
+	if err := c.doJSON(ctx, http.MethodDelete, "/sandboxes/batch", body, &results, http.StatusOK); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 func (c *Client) ListV2(ctx context.Context) ([]SandboxInfo, error) {
 	var sandboxes []SandboxInfo
 	if err := c.doJSON(ctx, http.MethodGet, "/v2/sandboxes", nil, &sandboxes, http.StatusOK); err != nil {

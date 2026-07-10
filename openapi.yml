@@ -126,6 +126,69 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /sandboxes/batch:
+    post:
+      tags:
+      - handlers::sandboxes
+      operationId: batch_create_sandboxes
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchCreateRequest'
+        required: true
+      responses:
+        '201':
+          description: Batch sandbox creation completed
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BatchResult'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    delete:
+      tags:
+      - handlers::sandboxes
+      operationId: batch_destroy_sandboxes
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchDestroyRequest'
+        required: true
+      responses:
+        '200':
+          description: Batch sandbox destruction completed
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BatchResult'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /sandboxes/{sandboxID}:
     get:
       tags:
@@ -477,6 +540,39 @@ components:
           format: int32
         message:
           type: string
+    BatchCreateRequest:
+      type: object
+      required:
+      - requests
+      properties:
+        requests:
+          type: array
+          items:
+            $ref: '#/components/schemas/NewSandbox'
+    BatchDestroyRequest:
+      type: object
+      required:
+      - sandboxIDs
+      properties:
+        sandboxIDs:
+          type: array
+          items:
+            type: string
+    BatchResult:
+      type: object
+      properties:
+        error:
+          type:
+          - string
+          - 'null'
+        sandbox:
+          type:
+          - $ref: '#/components/schemas/Sandbox'
+          - 'null'
+        sandboxID:
+          type:
+          - string
+          - 'null'
     ClusterOverview:
       type: object
       required:

@@ -108,6 +108,54 @@ sandbox.kill()
 
 `kill()` is **irreversible**: unlike pause, a killed sandbox cannot be brought back, even when `lifecycle.on_timeout="pause"` was set — `kill()` always wins and discards the snapshot.
 
+## Batch Operations
+
+Cube extends the E2B API surface with two batch endpoints for creating and destroying multiple sandboxes concurrently:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/sandboxes/batch` | POST | Create multiple sandboxes in a single request |
+| `/sandboxes/batch` | DELETE | Destroy multiple sandboxes in one round trip |
+
+Both endpoints accept an array of per-sandbox requests and return an array of per-sandbox results — each result carries either a successful response or an error, so partial failures don't block the whole batch.
+
+### Go
+
+```go
+// Batch create: fire many creates concurrently.
+results, err := client.CreateBatch(ctx, []cubesandbox.CreateOptions{
+    {TemplateID: "tpl-a"},
+    {TemplateID: "tpl-b"},
+    {TemplateID: "tpl-c"},
+})
+for _, r := range results {
+    if r.Error != nil {
+        log.Printf("create failed: %v", *r.Error)
+        continue
+    }
+    fmt.Println("created", *r.SandboxID)
+}
+
+// Batch kill: destroy a group of sandboxes concurrently.
+results, err = client.KillBatch(ctx, []string{"sb-1", "sb-2", "sb-3"})
+```
+
+### REST
+
+```bash
+# Batch create
+curl -X POST http://localhost:3000/sandboxes/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"requests":[{"templateID":"tpl-a"},{"templateID":"tpl-b"}]}'
+
+# Batch destroy
+curl -X DELETE http://localhost:3000/sandboxes/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"sandboxIDs":["sb-1","sb-2","sb-3"]}'
+```
+
+Each operation runs the individual create or kill concurrently on the server side and returns results in the same order as the input.
+
 ## Explicit Pause / Resume
 
 ```python

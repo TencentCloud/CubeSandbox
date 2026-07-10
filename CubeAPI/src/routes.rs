@@ -117,6 +117,11 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
     let routes = Router::new()
         .route("/sandboxes", get(sandboxes::list_sandboxes))
         .route("/sandboxes", post(sandboxes::create_sandbox))
+        .route("/sandboxes/batch", post(sandboxes::batch_create_sandboxes))
+        .route(
+            "/sandboxes/batch",
+            delete(sandboxes::batch_destroy_sandboxes),
+        )
         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))

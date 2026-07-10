@@ -14,12 +14,94 @@ use crate::{
     error::{AppError, AppResult},
     logging::{LogEvent, LogLevel},
     models::{
-        ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
-        RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
-        SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest,
+        ApiError, BatchCreateRequest, BatchDestroyRequest, ConnectSandbox, ListSandboxesQuery,
+        ListSandboxesV2Query, NewSandbox, RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail,
+        SandboxLogsQuery, SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest,
     },
     state::AppState,
 };
+
+// ─── POST /sandboxes/batch ────────────────────────────────────────────────────
+
+pub async fn batch_create_sandboxes(
+    State(state): State<AppState>,
+    Json(body): Json<BatchCreateRequest>,
+) -> AppResult<impl IntoResponse> {
+    let count = body.requests.len();
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "batch_create_sandboxes")
+                .field_value("count", count),
+        )
+        .await;
+
+    let results = state
+        .services
+        .sandboxes
+        .batch_create_sandboxes(body.requests)
+        .await;
+
+    let succeeded = results.iter().filter(|r| r.error.is_none()).count();
+    let failed = results.len() - succeeded;
+    tracing::info!(
+        succeeded = succeeded,
+        failed = failed,
+        "batch_create_sandboxes: completed"
+    );
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "sandbox.batch_created")
+                .field_value("succeeded", succeeded)
+                .field_value("failed", failed),
+        )
+        .await;
+
+    Ok((StatusCode::CREATED, Json(results)))
+}
+
+// ─── DELETE /sandboxes/batch ──────────────────────────────────────────────────
+
+pub async fn batch_destroy_sandboxes(
+    State(state): State<AppState>,
+    Json(body): Json<BatchDestroyRequest>,
+) -> AppResult<impl IntoResponse> {
+    let count = body.sandbox_ids.len();
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "batch_destroy_sandboxes")
+                .field_value("count", count),
+        )
+        .await;
+
+    let results = state
+        .services
+        .sandboxes
+        .batch_destroy_sandboxes(body.sandbox_ids)
+        .await;
+
+    let succeeded = results.iter().filter(|r| r.error.is_none()).count();
+    let failed = results.len() - succeeded;
+    tracing::info!(
+        succeeded = succeeded,
+        failed = failed,
+        "batch_destroy_sandboxes: completed"
+    );
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "sandbox.batch_deleted")
+                .field_value("succeeded", succeeded)
+                .field_value("failed", failed),
+        )
+        .await;
+
+    Ok(Json(results))
+}
 
 // ─── GET /sandboxes ───────────────────────────────────────────────────────────
 
@@ -487,4 +569,203 @@ pub async fn refresh_sandbox(
         )
         .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::ServerConfig,
+        logging::{arc, noop::NoopLogger},
+        state::AppState,
+    };
+    use axum::{routing::{delete, post}, Json};
+    use axum_test::TestServer;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    async fn mock_cubemaster_server() -> (String, Arc<Mutex<Vec<Value>>>) {
+        let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_create = captures.clone();
+        let captured_for_delete = captures.clone();
+
+        async fn create_handler(
+            axum::extract::State(captured): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            captured.lock().await.push(body.clone());
+            let tpl = body
+                .get("annotations")
+                .and_then(|v| v.get("cube.master.appsnapshot.template.id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if tpl == "invalid-tpl" {
+                return Json(json!({
+                    "requestID": "req-err",
+                    "ret": { "ret_code": 130404, "ret_msg": "template not found" }
+                }));
+            }
+            Json(json!({
+                "requestID": "req-ok",
+                "sandbox_id": format!("sb-{}", uuid::Uuid::new_v4()),
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "ext_info": {}
+            }))
+        }
+
+        async fn delete_handler(
+            axum::extract::State(captured): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            captured.lock().await.push(body.clone());
+            let sid = body["sandbox_id"].as_str().unwrap_or("");
+            if sid == "sb-missing" || sid == "sb-gone" {
+                return Json(json!({
+                    "requestID": "req-err",
+                    "ret": { "ret_code": 130404, "ret_msg": "sandbox not found" }
+                }));
+            }
+            Json(json!({
+                "requestID": "req-ok",
+                "sandbox_id": sid,
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let app = axum::Router::new()
+            .route("/cube/sandbox", post(create_handler))
+            .route("/cube/sandbox", delete(delete_handler))
+            .with_state(captured_for_create);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("mock server should run");
+        });
+        (format!("http://{}", addr), captured_for_delete)
+    }
+
+    async fn test_app(cubemaster_url: &str) -> axum::Router {
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = cubemaster_url.to_string();
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        axum::Router::new()
+            .route("/sandboxes/batch", post(batch_create_sandboxes))
+            .route("/sandboxes/batch", delete(batch_destroy_sandboxes))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn batch_create_all_success() {
+        let (url, _captures) = mock_cubemaster_server().await;
+        let server = TestServer::new(test_app(&url).await).expect("test server should build");
+
+        let resp = server
+            .post("/sandboxes/batch")
+            .json(&json!({
+                "requests": [
+                    {"templateID": "tpl-a"},
+                    {"templateID": "tpl-b"},
+                    {"templateID": "tpl-c"}
+                ]
+            }))
+            .await;
+
+        resp.assert_status(StatusCode::CREATED);
+        let results: Vec<Value> = resp.json();
+        assert_eq!(results.len(), 3);
+        for r in &results {
+            assert!(r["sandboxID"].is_string(), "sandboxID missing: {r}");
+            assert!(r["sandbox"].is_object(), "sandbox missing: {r}");
+            assert!(r["error"].is_null(), "unexpected error: {r}");
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_create_partial_failure() {
+        let (url, _captures) = mock_cubemaster_server().await;
+        let server = TestServer::new(test_app(&url).await).expect("test server should build");
+
+        let resp = server
+            .post("/sandboxes/batch")
+            .json(&json!({
+                "requests": [
+                    {"templateID": "tpl-good"},
+                    {"templateID": "invalid-tpl"},
+                    {"templateID": "tpl-also-good"}
+                ]
+            }))
+            .await;
+
+        resp.assert_status(StatusCode::CREATED);
+        let results: Vec<Value> = resp.json();
+        assert_eq!(results.len(), 3);
+
+        assert!(results[0]["sandboxID"].is_string(), "entry 0 should succeed");
+        assert!(results[0]["error"].is_null(), "entry 0 should have no error");
+
+        assert!(results[1]["sandboxID"].is_null(), "entry 1 should fail");
+        assert!(results[1]["sandbox"].is_null(), "entry 1 sandbox should be null");
+        assert!(
+            results[1]["error"].as_str().is_some_and(|s| !s.is_empty()),
+            "entry 1 should have error: {}",
+            results[1]
+        );
+
+        assert!(results[2]["sandboxID"].is_string(), "entry 2 should succeed");
+        assert!(results[2]["error"].is_null(), "entry 2 should have no error");
+    }
+
+    #[tokio::test]
+    async fn batch_destroy_all_success() {
+        let (url, _captures) = mock_cubemaster_server().await;
+        let server = TestServer::new(test_app(&url).await).expect("test server should build");
+
+        let resp = server
+            .delete("/sandboxes/batch")
+            .json(&json!({
+                "sandboxIDs": ["sb-1", "sb-2", "sb-3"]
+            }))
+            .await;
+
+        resp.assert_status_ok();
+        let results: Vec<Value> = resp.json();
+        assert_eq!(results.len(), 3);
+        for r in &results {
+            assert!(r["sandboxID"].is_string(), "sandboxID missing: {r}");
+            assert!(r["error"].is_null(), "unexpected error: {r}");
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_destroy_partial_failure() {
+        let (url, _captures) = mock_cubemaster_server().await;
+        let server = TestServer::new(test_app(&url).await).expect("test server should build");
+
+        let resp = server
+            .delete("/sandboxes/batch")
+            .json(&json!({
+                "sandboxIDs": ["sb-ok", "sb-missing", "sb-also-ok"]
+            }))
+            .await;
+
+        resp.assert_status_ok();
+        let results: Vec<Value> = resp.json();
+        assert_eq!(results.len(), 3);
+
+        assert!(results[0]["sandboxID"].is_string(), "entry 0 should succeed");
+        assert!(results[0]["error"].is_null(), "entry 0 should have no error");
+
+        assert!(
+            results[1]["error"].as_str().is_some_and(|s| !s.is_empty()),
+            "entry 1 should have error: {}",
+            results[1]
+        );
+
+        assert!(results[2]["sandboxID"].is_string(), "entry 2 should succeed");
+        assert!(results[2]["error"].is_null(), "entry 2 should have no error");
+    }
 }
