@@ -41,6 +41,23 @@ export interface TemplateDetail extends TemplateSummary {
   allowInternetAccess?: boolean | null;
 }
 
+export interface TerminalContainer {
+  id: string;
+  name: string;
+}
+
+export interface TerminalInfo {
+  enabled: boolean;
+  reason?: string | null;
+  containers: TerminalContainer[];
+}
+
+export interface TerminalSession {
+  ticket: string;
+  websocketPath: string;
+  expiresInSecs: number;
+}
+
 export interface TemplateCompatSummary {
   staleTemplates: number;
   staleReplicas: number;
@@ -203,6 +220,13 @@ export const sandboxApi = {
     api<void>(`/sandboxes/${id}/timeout`, { method: 'POST', body: JSON.stringify({ timeout: seconds }) }),
   logs: (id: string, params?: { cursor?: number; limit?: number; direction?: string }) =>
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
+  terminalInfo: (id: string) =>
+    api<TerminalInfo>(`/sandboxes/${encodeURIComponent(id)}/terminal`),
+  createTerminalSession: (id: string, body: { containerId?: string; shell?: '/bin/sh' | '/bin/bash' }) =>
+    api<TerminalSession>(`/sandboxes/${encodeURIComponent(id)}/terminal/sessions`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   create: (body: {
     templateID: string;
     timeout?: number;

@@ -18,7 +18,9 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates},
+    handlers::{
+        agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates, terminal,
+    },
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
 };
@@ -150,7 +152,31 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         )
         .route("/snapshots", get(snapshots::list_snapshots));
 
-    with_auth_and_rate_limit(routes, state, auth_configured)
+    let terminal_control_routes = Router::new()
+        .route(
+            "/sandboxes/:sandboxID/terminal",
+            get(terminal::terminal_info),
+        )
+        .route(
+            "/sandboxes/:sandboxID/terminal/sessions",
+            post(terminal::create_terminal_session),
+        );
+    // Browser WebSockets cannot attach the API-key/auth-callback headers that
+    // protect normal REST calls. They authenticate with the short-lived,
+    // one-use ticket created by terminal_control_routes instead.
+    let terminal_upgrade_route = Router::new().route(
+        "/sandboxes/:sandboxID/terminal/sessions/:ticket",
+        get(terminal::connect_terminal),
+    );
+
+    Router::new()
+        .merge(with_auth_and_rate_limit(routes, state, auth_configured))
+        .merge(with_auth_and_rate_limit(
+            terminal_control_routes,
+            state,
+            auth_configured,
+        ))
+        .merge(terminal_upgrade_route)
 }
 
 /// Sandbox-rooted routes that must run on the long (240 s) budget.  Snapshot

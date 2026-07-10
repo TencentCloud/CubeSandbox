@@ -27,6 +27,26 @@
     "pause": "暂停",
     "kill": "终止"
   },
+  "terminal": {
+    "open": "打开终端",
+    "onlyRunning": "仅运行中的沙箱可以打开终端。",
+    "title": "沙箱终端",
+    "container": "容器",
+    "shell": "Shell",
+    "connected": "已连接",
+    "connecting": "正在连接…",
+    "disconnected": "已断开",
+    "error": "连接失败",
+    "connectionFailed": "无法连接到终端。",
+    "unavailable": "此沙箱暂时无法使用终端。",
+    "reconnect": "重新连接",
+    "copy": "复制选中内容",
+    "fontSmaller": "减小字号",
+    "fontLarger": "增大字号",
+    "fullscreen": "切换全屏",
+    "close": "关闭终端",
+    "shortcuts": "复制/粘贴：Ctrl/⌘ + Shift + C/V"
+  },
   "errors": {
     "unknown": "未知错误",
     "actionFailed": "操作失败: {{message}}",

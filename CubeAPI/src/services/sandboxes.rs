@@ -63,6 +63,21 @@ pub struct SandboxService {
     sandbox_domain: String,
 }
 
+/// A resolved Cubelet endpoint for an interactive terminal. This deliberately
+/// stays internal: clients only ever receive an opaque, one-time ticket.
+#[derive(Debug, Clone)]
+pub struct TerminalTarget {
+    pub sandbox_id: String,
+    pub container_id: String,
+    pub host_ip: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TerminalContainer {
+    pub id: String,
+    pub name: String,
+}
+
 impl SandboxService {
     pub fn new(
         cubemaster: CubeMasterClient,
@@ -143,6 +158,100 @@ impl SandboxService {
             state: sandbox_state_from_status(d.status),
             volume_mounts: None,
         })
+    }
+
+    /// Resolve a running sandbox and one of its running containers to the
+    /// Cubelet node which owns it. This is performed server-side so the WebUI
+    /// never learns an address that can be used to bypass CubeAPI's controls.
+    pub async fn terminal_target(
+        &self,
+        sandbox_id: &str,
+        requested_container_id: Option<&str>,
+    ) -> AppResult<(TerminalTarget, Vec<TerminalContainer>)> {
+        let response = self
+            .cubemaster
+            .get_sandbox(sandbox_id, &self.instance_type)
+            .await
+            .map_err(|error| sandbox_not_found_or_internal(error, sandbox_id))?;
+        response
+            .ret
+            .as_result()
+            .map_err(|error| sandbox_not_found_or_internal(error, sandbox_id))?;
+        let sandbox = response
+            .data
+            .into_iter()
+            .find(|item| item.sandbox_id == sandbox_id)
+            .ok_or_else(|| AppError::NotFound(format!("sandbox {} not found", sandbox_id)))?;
+
+        // CubeMaster uses CONTAINER_RUNNING = 1 for both a sandbox and its
+        // containers. Never create a terminal for a paused/terminating VM.
+        if sandbox.status != 1 {
+            return Err(AppError::Conflict(format!(
+                "sandbox {} is not running",
+                sandbox_id
+            )));
+        }
+
+        let containers: Vec<TerminalContainer> = sandbox
+            .containers
+            .iter()
+            .filter(|container| container.status == 1 && !container.container_id.trim().is_empty())
+            .map(|container| TerminalContainer {
+                id: container.container_id.clone(),
+                name: if container.name.trim().is_empty() {
+                    container.container_id.clone()
+                } else {
+                    container.name.clone()
+                },
+            })
+            .collect();
+        if containers.is_empty() {
+            return Err(AppError::Conflict(format!(
+                "sandbox {} has no running containers",
+                sandbox_id
+            )));
+        }
+
+        let container_id = requested_container_id
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| containers[0].id.clone());
+        if !containers
+            .iter()
+            .any(|container| container.id == container_id)
+        {
+            return Err(AppError::BadRequest(format!(
+                "container {} is not running in sandbox {}",
+                container_id, sandbox_id
+            )));
+        }
+
+        let node = self
+            .cubemaster
+            .get_node(&sandbox.host_id)
+            .await
+            .map_err(internal_error)?;
+        node.ret.as_result().map_err(internal_error)?;
+        let host_ip = node
+            .data
+            .map(|node| node.host_ip)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                AppError::Internal(anyhow::anyhow!(
+                    "node {} for sandbox {} has no host IP",
+                    sandbox.host_id,
+                    sandbox_id
+                ))
+            })?;
+
+        Ok((
+            TerminalTarget {
+                sandbox_id: sandbox_id.to_string(),
+                container_id,
+                host_ip,
+            },
+            containers,
+        ))
     }
 
     pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox> {

@@ -62,6 +62,37 @@ fn session_token(headers: &HeaderMap) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Authenticate a WebUI session for security-sensitive browser-only features
+/// such as terminal tickets. The general API middleware handles API keys and
+/// external callbacks; a WebSocket cannot attach those arbitrary headers, so
+/// it is reached through a short-lived ticket issued by this check instead.
+pub(crate) async fn require_webui_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> AppResult<Option<String>> {
+    let Some(store) = &state.agenthub_store else {
+        // Standalone/local deployments without the WebUI user database retain
+        // the project's existing open-access behaviour.
+        return Ok(None);
+    };
+    let token = session_token(headers).ok_or_else(|| {
+        AppError::Unauthorized("a WebUI session is required to open a terminal".to_string())
+    })?;
+    store
+        .validate_session(&token)
+        .await
+        .map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "failed to validate terminal session: {}",
+                error
+            ))
+        })?
+        .map(Some)
+        .ok_or_else(|| {
+            AppError::Unauthorized("the WebUI session is invalid or expired".to_string())
+        })
+}
+
 fn password_matches(stored: Option<&str>, candidate: &str) -> bool {
     stored
         .map(|expected| crate::crypto::verify_password(expected, candidate))

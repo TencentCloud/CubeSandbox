@@ -16,6 +16,7 @@ mod openapi;
 mod routes;
 mod services;
 mod state;
+mod terminal_sessions;
 
 use clap::Parser;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};

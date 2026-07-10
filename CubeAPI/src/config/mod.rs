@@ -71,6 +71,20 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+
+    /// Shared credential used only by CubeAPI when it proxies a terminal
+    /// session to a Cubelet node. Terminal sessions remain disabled until this
+    /// is configured on both services.
+    #[serde(default = "default_terminal_proxy_token")]
+    pub terminal_proxy_token: Option<String>,
+
+    /// TCP port of Cubelet's internal terminal WebSocket listener.
+    #[serde(default = "default_terminal_port")]
+    pub terminal_port: u16,
+
+    /// Lifetime of a one-time browser terminal ticket, in seconds.
+    #[serde(default = "default_terminal_ticket_ttl_secs")]
+    pub terminal_ticket_ttl_secs: u64,
 }
 
 fn default_bind() -> String {
@@ -108,6 +122,27 @@ fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .or_else(default_cube_sandbox_mysql_url)
+}
+
+fn default_terminal_proxy_token() -> Option<String> {
+    std::env::var("CUBE_TERMINAL_PROXY_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn default_terminal_port() -> u16 {
+    std::env::var("CUBE_API_TERMINAL_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10_555)
+}
+
+fn default_terminal_ticket_ttl_secs() -> u64 {
+    std::env::var("CUBE_API_TERMINAL_TICKET_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &u64| *value > 0)
+        .unwrap_or(60)
 }
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
@@ -148,6 +183,9 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
+            terminal_proxy_token: default_terminal_proxy_token(),
+            terminal_port: default_terminal_port(),
+            terminal_ticket_ttl_secs: default_terminal_ticket_ttl_secs(),
         }
     }
 }

@@ -27,6 +27,26 @@
     "pause": "Pause",
     "kill": "Kill"
   },
+  "terminal": {
+    "open": "Open terminal",
+    "onlyRunning": "A terminal is available only while the sandbox is running.",
+    "title": "Sandbox terminal",
+    "container": "Container",
+    "shell": "Shell",
+    "connected": "Connected",
+    "connecting": "Connecting…",
+    "disconnected": "Disconnected",
+    "error": "Connection error",
+    "connectionFailed": "Unable to connect to the terminal.",
+    "unavailable": "Terminal is unavailable for this sandbox.",
+    "reconnect": "Reconnect",
+    "copy": "Copy selection",
+    "fontSmaller": "Decrease font size",
+    "fontLarger": "Increase font size",
+    "fullscreen": "Toggle fullscreen",
+    "close": "Close terminal",
+    "shortcuts": "Copy/paste: Ctrl/⌘ + Shift + C/V"
+  },
   "errors": {
     "unknown": "Unknown error",
     "actionFailed": "Action failed: {{message}}",

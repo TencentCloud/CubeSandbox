@@ -168,6 +168,7 @@ func init() {
 			}()
 
 			go s.destroyDeadContainers()
+			s.startTerminalServer()
 
 			return s, nil
 		},

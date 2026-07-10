@@ -30,6 +30,8 @@ tower-http = { version = "0.5", features = [
 tokio = { version = "1", features = ["full"] }
 # select!, join!, channel helpers
 futures = "0.3"
+tokio-tungstenite = "0.24"
+urlencoding = "2"
 
 # ── Serialization ─────────────────────────────────────────────────────────
 serde = { version = "1", features = ["derive"] }
