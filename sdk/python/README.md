@@ -266,7 +266,7 @@ with Sandbox.create(config=cfg) as sb:
 | Method | Description |
 |---|---|
 | `Sandbox.create(template, *, timeout, env_vars, metadata, config)` | `POST /sandboxes` — create a new sandbox |
-| `Sandbox.connect(sandbox_id, *, config)` | `POST /sandboxes/:id/connect` — connect (auto-resumes if paused) |
+| `Sandbox.connect(sandbox_id, *, timeout, config)` | `POST /sandboxes/:id/connect` — connect (auto-resumes if paused) |
 | `Sandbox.list(config)` | `GET /sandboxes` — list running sandboxes (v1) |
 | `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list sandboxes (v2) |
 | `Sandbox.health(config)` | `GET /health` — service health check |

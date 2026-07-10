@@ -251,13 +251,22 @@ class Sandbox:
         return cls(resp.json(), config=cfg)
 
     @classmethod
-    def connect(cls, sandbox_id: str, *, config: Config | None = None) -> "Sandbox":
+    def connect(
+        cls,
+        sandbox_id: str,
+        *,
+        timeout: int | None = None,
+        config: Config | None = None,
+    ) -> "Sandbox":
         """POST /sandboxes/:sandboxID/connect - Connect to an existing sandbox.
 
         Resumes the sandbox if it is currently paused.
 
         Args:
             sandbox_id: Sandbox identifier.
+            timeout: Sandbox TTL in seconds after connect/resume. Defaults to
+                the config's ``timeout`` (300). ``0`` requests immediate
+                timeout; ``NEVER_TIMEOUT`` (-1) disables idle timeout.
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
@@ -269,9 +278,9 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        # Connect omits timeout; see docs/guide/lifecycle.md.
+        body: dict = {"timeout": timeout if timeout is not None else cfg.timeout}
         resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
-                      json={},
+                      json=body,
                       headers={"Content-Type": "application/json"})
         _check_response(resp)
         return cls(resp.json(), config=cfg)

@@ -645,15 +645,23 @@ class TestConnect:
             with pytest.raises(SandboxNotFoundError):
                 Sandbox.connect(SANDBOX_ID, config=make_config())
 
-    def test_connect_omits_timeout(self):
-        # connect no longer fabricates a timeout: the field must be absent so
-        # the server keeps its own timeout policy.
+    def test_connect_sends_timeout(self):
+        # connect sends the config timeout so the server keeps the sandbox
+        # alive. The CubeAPI /connect endpoint requires a timeout field.
         cfg = make_config()
         cfg.timeout = 600
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA)) as m:
             Sandbox.connect(SANDBOX_ID, config=cfg)
         body = m.call_args.kwargs["json"]
-        assert "timeout" not in body
+        assert body["timeout"] == 600
+
+    def test_connect_explicit_timeout_overrides_config(self):
+        cfg = make_config()
+        cfg.timeout = 600
+        with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA)) as m:
+            Sandbox.connect(SANDBOX_ID, timeout=120, config=cfg)
+        body = m.call_args.kwargs["json"]
+        assert body["timeout"] == 120
 
 
 # ── GET /sandboxes ────────────────────────────────────────────────────────────

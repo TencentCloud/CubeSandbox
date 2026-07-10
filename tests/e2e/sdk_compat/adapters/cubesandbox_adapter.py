@@ -39,6 +39,8 @@ class CubeSandboxAdapter(SandboxAdapter):
         cls,
         sandbox_id: str,
         config: SdkE2EConfig,
+        *,
+        timeout: int | None = None,
     ) -> CubeSandboxAdapter:
         from cubesandbox import Config, Sandbox
 
@@ -49,7 +51,7 @@ class CubeSandboxAdapter(SandboxAdapter):
             proxy_port=config.cube_proxy_port_http,
             sandbox_domain=config.cube_sandbox_domain,
         )
-        return cls(Sandbox.connect(sandbox_id, config=sdk_config), sdk_config=sdk_config, e2e_config=config)
+        return cls(Sandbox.connect(sandbox_id, timeout=timeout, config=sdk_config), sdk_config=sdk_config, e2e_config=config)
 
     def __init__(self, sandbox: Any, *, sdk_config: Any, e2e_config: SdkE2EConfig | None = None) -> None:
         super().__init__(sandbox)
@@ -116,7 +118,7 @@ class CubeSandboxAdapter(SandboxAdapter):
         self._sandbox.pause(timeout=timeout)
 
     def resume_or_connect(self, *, timeout: int = 60) -> CubeSandboxAdapter:
-        return type(self).connect(self.sandbox_id, self._e2e_config or SdkE2EConfig.from_env())
+        return type(self).connect(self.sandbox_id, self._e2e_config or SdkE2EConfig.from_env(), timeout=timeout)
 
     def kill(self) -> None:
         self._sandbox.kill()
