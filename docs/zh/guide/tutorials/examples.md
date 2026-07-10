@@ -5,6 +5,7 @@
 | 示例 | 说明 |
 |------|------|
 | [代码沙箱快速入门](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/code-sandbox-quickstart) | 最基础的用法：创建沙箱、执行 Python 代码、运行 Shell 命令、管理网络策略等，全部通过 E2B SDK 完成。 |
+| [C/C++ CMake 沙箱](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/cpp-cmake-sandbox) | 使用 GCC、CMake、Ninja 和 ccache 隔离构建 C/C++ 项目；暂停和恢复沙箱后继续复用构建目录与编译缓存。 |
 | [浏览器沙箱（Playwright）](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/browser-sandbox) | 在 MicroVM 中运行无头 Chromium，通过 CDP 协议使用 Playwright 远程控制浏览器。 |
 | [OpenClaw 集成](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/openclaw-integration) | 部署 Cube Sandbox 并配置 OpenClaw Skill，让 AI Agent 能够在隔离的虚拟机环境中执行代码。 |
 | [SWE-bench + mini-swe-agent](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/mini-rl-training) | 使用 cube-sandbox + mini-swe-agent 在隔离沙箱中自动化 SWE-bench 编码任务，支持多模型切换和 RL 训练愿景。 |
