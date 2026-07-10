@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+*.log
+# local build output when trying the project outside a sandbox
+project/build/

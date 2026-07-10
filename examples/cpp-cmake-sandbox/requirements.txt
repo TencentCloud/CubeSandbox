@@ -1,0 +1,5 @@
+# 01_build_in_sandbox.py / 02_run_ctest.py use the E2B-compatible SDK
+e2b-code-interpreter>=2.4.1
+# 03_ccache_snapshot.py / 04_ccache_rollback.py use the native CubeSandbox SDK
+cubesandbox>=0.2.0
+python-dotenv
