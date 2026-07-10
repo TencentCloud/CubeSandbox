@@ -1,4 +1,4 @@
-IMAGE_TAG           ?= v0.5.1-rc9
+IMAGE_TAG           ?= v0.5.1-rc10
 IMAGE_LOCAL         := cube-proxy
 CUBE_VERSION        ?= $(IMAGE_TAG)
 CUBE_COMMIT         ?= $(shell git rev-parse HEAD | cut -c1-8)

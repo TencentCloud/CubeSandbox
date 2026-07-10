@@ -326,6 +326,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.publish) }}
+    # Job containers default to `sh` (dash); pipefail / [[ ]] need bash.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Install dependencies
         run: |
