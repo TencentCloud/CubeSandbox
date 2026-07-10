@@ -1,119 +1,135 @@
 # CubeAPI Webhook Receiver
 
-This example is a local CubeAPI webhook receiver implemented with the Python standard library. It listens on `127.0.0.1:18080` and accepts `POST /webhook`.
+This example provides a local CubeAPI webhook receiver implemented with the Python standard library. It listens on `127.0.0.1:18080` and accepts `POST /webhook`.
 
 ## Prerequisites
 
-This guide verifies webhook delivery against a working local CubeSandbox deployment. It does not replace the full CubeSandbox installation guide.
+This guide assumes that:
 
-Before starting, make sure that:
+- A local CubeSandbox deployment is already working.
+- CubeAPI is reachable at `http://127.0.0.1:3000`.
+- A valid sandbox template ID is available.
+- Python 3 and the Rust toolchain are installed.
+- Port `18080` is available.
+- You can temporarily stop and restart the existing CubeAPI service.
 
-- A local CubeSandbox deployment is already working, or you are deploying one from this source tree using the normal CubeSandbox deployment process.
-- The lifecycle curl commands below assume CubeAPI is reachable at `http://127.0.0.1:3000` after it starts.
-- You have a valid template ID that can create a sandbox.
-- You can stop and restart the local CubeAPI service if you are validating against an existing deployment.
-- Port `18080` is available for the example receiver.
-- Python 3 and the Rust toolchain are available on the validation machine.
+For installation from scratch, follow the main CubeSandbox deployment documentation before using this example.
 
-## Start the Receiver
+## Quick Start
 
-Without signature verification:
+Use three terminals for the following steps.
 
-```bash
-cd CubeAPI/examples/webhook-receiver
-python3 receiver.py
-```
+### 1. Start the Receiver
 
-With HMAC-SHA256 signature verification:
+In the first terminal, start the receiver with HMAC-SHA256 verification enabled:
 
 ```bash
 cd CubeAPI/examples/webhook-receiver
 WEBHOOK_SECRET=test-secret python3 receiver.py
 ```
 
-The receiver validates JSON before processing it. When `WEBHOOK_SECRET` is set, it also validates `X-Cube-Webhook-Signature` using the exact signing input:
+To test an unsigned endpoint, start the receiver without `WEBHOOK_SECRET` and omit the `secret` field from `CUBE_API_WEBHOOK_ENDPOINTS`:
+
+```bash
+python3 receiver.py
+```
+
+When signing is enabled, the receiver verifies `X-Cube-Webhook-Signature` using:
 
 ```text
 timestamp + "." + delivery_id + "." + raw_request_body
 ```
 
-The expected header format is `v1=<lowercase-hex>`.
+The expected signature format is:
 
-## Configure and Start CubeAPI
+```text
+v1=<lowercase-hex>
+```
 
-The lifecycle check below requires a working local CubeSandbox deployment. The webhook receiver only receives notifications; the sandbox lifecycle APIs still require the normal CubeSandbox services, templates, and runtime components to be available.
+### 2. Start CubeAPI from This Branch
 
-Configure `CUBE_API_WEBHOOK_ENDPOINTS` before starting the CubeAPI process. The endpoint secret must match `WEBHOOK_SECRET`.
-
-### Option A: Validate Against an Existing Local CubeSandbox Deployment
-
-Use this option when a local CubeSandbox deployment is already running and you want to validate this source tree or pull request. In this case, starting only the webhook receiver is not enough if the deployed CubeAPI service is still an older build without these webhook changes.
-
-Keep the other CubeSandbox services running, temporarily stop only the existing CubeAPI service, and run the CubeAPI binary built from this source tree:
+In the second terminal, build the current branch:
 
 ```bash
 cd CubeAPI
 cargo build
+```
 
+If an existing CubeAPI service is running, temporarily stop only that service:
+
+```bash
 sudo systemctl stop cube-sandbox-cube-api.service
+```
 
+Start the binary built from this branch:
+
+```bash
 CUBE_API_WEBHOOK_ENDPOINTS='[{"url":"http://127.0.0.1:18080/webhook","events":["sandbox.created","sandbox.deleted","sandbox.paused","sandbox.resumed"],"secret":"test-secret","enabled":true,"allow_private_urls":true}]' \
   ./target/debug/cube-api
 ```
 
-If your local CubeAPI service depends on additional environment variables, config files, or a specific working directory, run the debug binary with the same required service environment.
+Keep this process running during validation.
 
-Keep this foreground `cube-api` process running while you perform the lifecycle check below. After validation, stop it with `Ctrl+C` and restore the original service:
+> The deployed CubeAPI may depend on additional environment variables, configuration files, or a specific working directory. Preserve the settings used by the existing CubeAPI service when running the branch binary.
 
-```bash
-sudo systemctl start cube-sandbox-cube-api.service
-sudo systemctl status cube-sandbox-cube-api.service --no-pager -l
-```
+`allow_private_urls` is enabled only because this local receiver uses `127.0.0.1`. Private, loopback, and link-local targets are rejected by default. Do not enable this option for an untrusted endpoint.
 
-The exact service name may differ in non-systemd or customized deployments. The important point is that the running CubeAPI process must be built from this source tree and must be started with `CUBE_API_WEBHOOK_ENDPOINTS` already set.
+### 3. Run the Lifecycle Check
 
-### Option B: Deploy CubeSandbox from This Source Tree
-
-Use this option when you are deploying a new local CubeSandbox environment from this source tree. Follow the normal CubeSandbox deployment process for this repository or branch. Make sure the CubeAPI service created by that deployment is built from this source tree, and configure `CUBE_API_WEBHOOK_ENDPOINTS` in the CubeAPI service environment before the service starts.
-
-The exact way to set the service environment depends on the deployment method. For a foreground or manual start, the CubeAPI process would use an environment variable like this; for systemd, Docker, or Compose deployments, add the equivalent variable to the CubeAPI service environment before the service starts:
+In the third terminal, first confirm that CubeAPI is available:
 
 ```bash
-export CUBE_API_WEBHOOK_ENDPOINTS='[{"url":"http://127.0.0.1:18080/webhook","events":["sandbox.created","sandbox.deleted","sandbox.paused","sandbox.resumed"],"secret":"test-secret","enabled":true,"allow_private_urls":true}]'
+curl -fsS http://127.0.0.1:3000/health
 ```
 
-Do not start a second `cargo run` CubeAPI process on top of an already running deployment. If a CubeAPI service is already listening on `127.0.0.1:3000`, either configure that service before it starts or use Option A to temporarily replace it for validation.
-
-Do not set `WEBHOOK_SECRET` in the receiver when testing an unsigned endpoint.
-
-`"allow_private_urls": true` is required here because the receiver listens on the loopback address `127.0.0.1`, which CubeAPI rejects by default. It exists to make local development work; do not enable it for production endpoints unless the target really is a trusted internal or loopback receiver.
-
-## End-to-End Lifecycle Check
-
-Run the receiver and CubeAPI in separate terminals, then create, pause, resume, and delete one sandbox. Set a valid template ID first:
+Then set a valid template ID:
 
 ```bash
 export CUBE_TEMPLATE_ID=<your-template-id>
+```
 
+Create a sandbox and obtain its ID:
+
+```bash
 CREATE_RESPONSE=$(curl -fsS -X POST http://127.0.0.1:3000/sandboxes \
   -H 'Content-Type: application/json' \
   -d "{\"templateID\":\"${CUBE_TEMPLATE_ID}\",\"timeout\":300}")
 
 SANDBOX_ID=$(printf '%s' "$CREATE_RESPONSE" | python3 -c \
   'import json, sys; print(json.load(sys.stdin)["sandboxID"])')
-
-curl -fsS -X POST "http://127.0.0.1:3000/sandboxes/${SANDBOX_ID}/pause"
-curl -fsS -X POST "http://127.0.0.1:3000/sandboxes/${SANDBOX_ID}/resume" \
-  -H 'Content-Type: application/json' \
-  -d '{"timeout":300}'
-curl -fsS -X DELETE "http://127.0.0.1:3000/sandboxes/${SANDBOX_ID}"
 ```
 
-If CubeAPI authentication is enabled in your deployment, add the required authentication headers documented by that deployment to each curl request.
+Pause, resume, and delete the sandbox:
+
+```bash
+curl -fsS -X POST \
+  "http://127.0.0.1:3000/sandboxes/${SANDBOX_ID}/pause"
+
+curl -fsS -X POST \
+  "http://127.0.0.1:3000/sandboxes/${SANDBOX_ID}/resume" \
+  -H 'Content-Type: application/json' \
+  -d '{"timeout":300}'
+
+curl -fsS -X DELETE \
+  "http://127.0.0.1:3000/sandboxes/${SANDBOX_ID}"
+```
+
+If authentication is enabled, add the required authentication headers to each request.
+
+### 4. Restore the Original CubeAPI Service
+
+After validation, stop the foreground CubeAPI process with `Ctrl+C`, then restore the original service:
+
+```bash
+sudo systemctl start cube-sandbox-cube-api.service
+sudo systemctl status cube-sandbox-cube-api.service --no-pager -l
+```
+
+The service name may differ in customized or non-systemd deployments.
 
 ## Expected Output
 
-A successful run prints one request per lifecycle event in the receiver terminal. You should see all of the following events:
+The receiver should print one callback for each lifecycle event:
 
 ```text
 sandbox.created
@@ -122,26 +138,34 @@ sandbox.resumed
 sandbox.deleted
 ```
 
-When the lifecycle curl commands are run sequentially and the receiver is available, these events should normally appear in the same lifecycle order. Each notification contains delivery metadata and selected event fields; it is not a complete `Sandbox` object.
+Each notification contains delivery metadata and selected lifecycle fields. It is not a complete `Sandbox` object.
 
-When `WEBHOOK_SECRET` is set, each request must pass HMAC verification before the event is printed. If verification fails, the receiver returns `401 invalid signature`.
+When `WEBHOOK_SECRET` is configured, the receiver prints an event only after the request passes HMAC verification. An invalid signature returns:
+
+```text
+401 invalid signature
+```
 
 ## Troubleshooting
 
-- `401 invalid signature`: `WEBHOOK_SECRET` does not match the endpoint `secret`, or a proxy changed the raw request body or signed headers.
-- `400 invalid JSON`: the request body is not valid UTF-8 JSON.
-- Connection refused or delivery retries: the receiver is not running, the port is unavailable, or the configured address is wrong.
-- No callback received: the endpoint may be disabled, its `events` list may not match, or CubeAPI may have been started before loading `CUBE_API_WEBHOOK_ENDPOINTS`.
-- CubeAPI fails to start with a "private, loopback, or link-local address" error: the receiver address is non-public, so the endpoint needs `"allow_private_urls": true`.
-- When CubeAPI runs in a container, `127.0.0.1` refers to that container. Use a reachable host address or container service name for the receiver.
+| Problem | Possible cause |
+|---|---|
+| `401 invalid signature` | The receiver secret does not match the endpoint secret, or a proxy changed the signed body or headers |
+| `400 invalid JSON` | The request body is not valid UTF-8 JSON |
+| Connection refused or retries | The receiver is not running, the port is unavailable, or the URL is incorrect |
+| No callback received | The endpoint is disabled, the event is not subscribed, or CubeAPI was started without the webhook configuration |
+| Private-address startup error | The local receiver requires `"allow_private_urls": true` |
+| Receiver unavailable from a container | `127.0.0.1` refers to the container itself; use a reachable host address or service name |
 
 ## Alerting Adapter Pattern
 
-CubeAPI emits generic HTTP JSON and does not include vendor-specific robot protocols. For WeCom, Feishu, Slack, or another HTTP alerting service, deploy a small adapter that:
+CubeAPI emits generic HTTP JSON rather than vendor-specific robot messages.
+
+To integrate with WeCom, Feishu, Slack, or another alerting service, use a small adapter that:
 
 1. receives the CubeAPI webhook;
-2. verifies its HMAC against the raw body;
-3. formats the event for the target service; and
-4. forwards it using credentials held by the adapter.
+2. verifies the HMAC signature against the raw body;
+3. converts the lifecycle event into the target service format; and
+4. forwards it using credentials stored by the adapter.
 
-Do not hard-code vendor protocols in CubeAPI, and do not copy secrets into logs, event payloads, or pull-request descriptions.
+Do not hard-code vendor protocols into CubeAPI, and do not include credentials in webhook payloads, application logs, or pull-request descriptions.
