@@ -1,9 +1,10 @@
 name: Release Docker Images
 
-# Reusable pipeline for building and pushing release component images to GHCR and
-# Tencent Cloud TCR (cn/int). Each component builds amd64 + arm64 in parallel,
-# then publishes a multi-arch manifest. Add a component by extending the
-# prepare job's component table and publish_manifests matrix below.
+# Reusable pipeline for building and pushing release component images.
+# GitHub-hosted runners build amd64 + arm64 and publish multi-arch manifests to
+# GHCR and TCR int. A self-hosted job then copies those multi-arch images to
+# TCR cn (avoids slow US→CN pushes). Add a component by extending the prepare
+# job's component table and publish_manifests matrix below.
 on:
   workflow_dispatch:
     inputs:
@@ -212,13 +213,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Tencent Cloud TCR (cn)
-        uses: docker/login-action@v3
-        with:
-          registry: cube-sandbox-cn.tencentcloudcr.com
-          username: ${{ secrets.TCR_CN_USERNAME }}
-          password: ${{ secrets.TCR_CN_PASSWORD }}
-
       - name: Log in to Tencent Cloud TCR (int)
         uses: docker/login-action@v3
         with:
@@ -243,6 +237,7 @@ jobs:
           # publish_manifests step can combine them into a single clean multi-arch
           # manifest list; attestations would add extra manifest entries that break
           # `docker buildx imagetools create`.
+          # TCR cn is synced later from a self-hosted runner (US→CN push is slow).
           provenance: false
           build-args: |
             CUBE_VERSION=${{ inputs.image_tag }}
@@ -252,7 +247,6 @@ jobs:
             OPENRESTY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
           tags: |
             ghcr.io/tencentcloud/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
-            cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
             cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
           cache-from: type=gha,scope=${{ matrix.cache_scope }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}-${{ matrix.arch }}
@@ -278,13 +272,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Log in to Tencent Cloud TCR (cn)
-        uses: docker/login-action@v3
-        with:
-          registry: cube-sandbox-cn.tencentcloudcr.com
-          username: ${{ secrets.TCR_CN_USERNAME }}
-          password: ${{ secrets.TCR_CN_PASSWORD }}
 
       - name: Log in to Tencent Cloud TCR (int)
         uses: docker/login-action@v3
@@ -316,11 +303,86 @@ jobs:
         run: |
           for image in \
             "ghcr.io/tencentcloud/${IMAGE_NAME}" \
-            "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}" \
             "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"; do
             for tag in ${MANIFEST_TAGS}; do
               docker buildx imagetools create -t "${image}:${tag}" \
                 "${image}:${IMAGE_TAG}-amd64" \
                 "${image}:${IMAGE_TAG}-arm64"
             done
+          done
+
+  # Copy per-arch and multi-arch images to TCR cn from a China-side self-hosted
+  # runner so we do not push large layers from GitHub-hosted (US) runners to CN.
+  sync_cn:
+    name: ${{ matrix.component }} sync to TCR CN
+    runs-on: arc-runner-set-16c32g-containerd
+    needs: [publish_manifests, prepare]
+    if: >-
+      always() &&
+      needs.publish_manifests.result == 'success' &&
+      github.repository == 'TencentCloud/CubeSandbox'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.publish) }}
+    steps:
+      - name: Install crane
+        env:
+          CRANE_VERSION: v0.20.3
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "${arch}" in
+            x86_64|amd64) crane_arch=x86_64 ;;
+            aarch64|arm64) crane_arch=arm64 ;;
+            *) echo "unsupported arch: ${arch}" >&2; exit 1 ;;
+          esac
+          bin_dir="${RUNNER_TEMP}/crane-bin"
+          mkdir -p "${bin_dir}"
+          curl -fsSL \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${crane_arch}.tar.gz" \
+            | tar -xz -C "${bin_dir}" crane
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          "${bin_dir}/crane" version
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Tencent Cloud TCR (cn)
+        uses: docker/login-action@v3
+        with:
+          registry: cube-sandbox-cn.tencentcloudcr.com
+          username: ${{ secrets.TCR_CN_USERNAME }}
+          password: ${{ secrets.TCR_CN_PASSWORD }}
+
+      - name: Resolve manifest tags
+        id: tags
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          tags="${IMAGE_TAG}"
+          if [[ "${IMAGE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tags="${tags} latest"
+          fi
+          echo "list=${tags}" >> "${GITHUB_OUTPUT}"
+
+      - name: Copy images to TCR CN
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_NAME: ${{ matrix.image }}
+          MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
+        run: |
+          set -euo pipefail
+          src="ghcr.io/tencentcloud/${IMAGE_NAME}"
+          dst="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
+          for arch in amd64 arm64; do
+            echo "Copying ${src}:${IMAGE_TAG}-${arch} -> ${dst}:${IMAGE_TAG}-${arch}"
+            crane copy "${src}:${IMAGE_TAG}-${arch}" "${dst}:${IMAGE_TAG}-${arch}"
+          done
+          for tag in ${MANIFEST_TAGS}; do
+            echo "Copying ${src}:${tag} -> ${dst}:${tag}"
+            crane copy "${src}:${tag}" "${dst}:${tag}"
           done
