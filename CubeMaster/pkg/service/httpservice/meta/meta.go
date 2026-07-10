@@ -5,6 +5,7 @@
 package meta
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -16,14 +17,15 @@ import (
 )
 
 const (
-	metaURI             = "/internal/meta"
-	readyzAction        = "/readyz"
-	registerNodeAction  = "/nodes/register"
-	nodesAction         = "/nodes"
-	nodeAction          = "/nodes/{node_id}"
-	nodeStatusAction    = "/nodes/{node_id}/status"
-	nodeLabelsAction    = "/nodes/{node_id}/labels"
-	versionMatrixAction = "/version-matrix"
+	metaURI               = "/internal/meta"
+	readyzAction          = "/readyz"
+	registerNodeAction    = "/nodes/register"
+	nodesAction           = "/nodes"
+	nodeAction            = "/nodes/{node_id}"
+	nodeStatusAction      = "/nodes/{node_id}/status"
+	nodeLabelsAction      = "/nodes/{node_id}/labels"
+	nodeIsolationAction   = "/nodes/{node_id}/isolation"
+	versionMatrixAction   = "/version-matrix"
 )
 
 type nodesResponse struct {
@@ -74,6 +76,10 @@ func VersionMatrixAction() string {
 
 func NodeLabelsAction() string {
 	return nodeLabelsAction
+}
+
+func NodeIsolationAction() string {
+	return nodeIsolationAction
 }
 
 func ReadyzHandler(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +199,25 @@ func DeleteNodeLabelHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// IsolateNodeHandler cordons a node (PUT). Idempotent; no request body.
+func IsolateNodeHandler(w http.ResponseWriter, r *http.Request) {
+	writeIsolation(w, r, true)
+}
+
+// UnisolateNodeHandler removes the cordon (DELETE). Idempotent.
+func UnisolateNodeHandler(w http.ResponseWriter, r *http.Request) {
+	writeIsolation(w, r, false)
+}
+
+func writeIsolation(w http.ResponseWriter, r *http.Request, disabled bool) {
+	data, err := nodemeta.SetNodeSchedulingDisabled(r.Context(), mux.Vars(r)["node_id"], disabled)
+	if err != nil {
+		writeErr(w, http.StatusOK, err)
+		return
+	}
+	common.WriteResponse(w, http.StatusOK, &nodeResponse{Ret: successRet(), Data: data})
+}
+
 func successRet() *sandboxtypes.Ret {
 	return &sandboxtypes.Ret{
 		RetCode: int(errorcode.ErrorCode_Success),
@@ -202,8 +227,11 @@ func successRet() *sandboxtypes.Ret {
 
 func writeErr(w http.ResponseWriter, status int, err error) {
 	retCode := int(errorcode.ErrorCode_MasterInternalError)
-	if err == gorm.ErrRecordNotFound {
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
 		retCode = int(errorcode.ErrorCode_NotFound)
+	case errors.Is(err, nodemeta.ErrLabelsJSONCorrupt), errors.Is(err, nodemeta.ErrSchedulingLabelRejected):
+		retCode = int(errorcode.ErrorCode_MasterParamsError)
 	}
 	common.WriteResponse(w, status, &sandboxtypes.Res{
 		Ret: &sandboxtypes.Ret{

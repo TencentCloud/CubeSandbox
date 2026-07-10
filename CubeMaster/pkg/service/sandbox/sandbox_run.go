@@ -214,6 +214,20 @@ func (c *createSandboxContext) handleCubelet() {
 			return
 		}
 
+		// Final cordon gate on this replica before Cubelet Create.
+		if err := c.refreshAndAdmitHost(); err != nil {
+			if c.directHost {
+				status, _ := ret.FromError(err)
+				c.setMasterRsp(int(status.Code()), status.Message())
+				return
+			}
+			c.selctx.AddLastBadNode(c.selectHost)
+			c.reschedule = true
+			log.G(c.ctx).Warnf("selected host blocked by scheduling admission, reschedule host=%s err=%v",
+				c.selectHost.ID(), err)
+			continue
+		}
+
 		if c.callCubelet() {
 			c.retryCost += c.cubeletEndTime.Sub(c.cubeletStartTime)
 			c.retryTimes++
@@ -228,6 +242,22 @@ func (c *createSandboxContext) handleCubelet() {
 		c.dealSuccResult()
 		return
 	}
+}
+
+func (c *createSandboxContext) refreshAndAdmitHost() error {
+	if c.selectHost == nil {
+		return ret.Err(errorcode.ErrorCode_SelectNodesFailed, "no selected host")
+	}
+	current, ok := localcache.GetNode(c.selectHost.ID())
+	if !ok {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed, "selected host missing from cache: %s", c.selectHost.ID())
+	}
+	c.selectHost = current
+	if !current.SchedulingAllowed() {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"node %s is scheduling-disabled (cordon); new sandboxes are not admitted", current.ID())
+	}
+	return nil
 }
 
 func (c *createSandboxContext) callCubelet() bool {

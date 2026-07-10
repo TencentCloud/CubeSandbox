@@ -6,6 +6,7 @@
 package node
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -90,7 +91,69 @@ type Node struct {
 
 	NodeLabels map[string]string `json:"NodeLabels,omitempty"`
 
+	// schedulingDisabled is the cordon flag (true → block new sandboxes).
+	// Exposed via SchedulingDisabled() / JSON as "SchedulingDisabled".
+	schedulingDisabled atomic.Bool
+
 	labelsCache *nodeLabelsCacheStore
+}
+
+// DecodeSchedulingDisabled reports whether labels cordon the node.
+// Key absent → false; key present (canonical "true" or any other value) → true
+// so corrupt/non-canonical values fail closed.
+func DecodeSchedulingDisabled(labels map[string]string) bool {
+	if labels == nil {
+		return false
+	}
+	_, ok := labels[constants.LabelSchedulingDisabled]
+	return ok
+}
+
+// SetSchedulingDisabled stores the concurrent-safe cordon flag.
+func (n *Node) SetSchedulingDisabled(disabled bool) {
+	if n == nil {
+		return
+	}
+	n.schedulingDisabled.Store(disabled)
+}
+
+// SchedulingDisabled reports whether this node is cordoned.
+func (n *Node) SchedulingDisabled() bool {
+	return n != nil && n.schedulingDisabled.Load()
+}
+
+// SchedulingAllowed reports whether this node may receive new sandboxes based
+// solely on cordon state (health / metrics are orthogonal).
+func (n *Node) SchedulingAllowed() bool {
+	return n != nil && !n.schedulingDisabled.Load()
+}
+
+// MarshalJSON emits SchedulingDisabled from the atomic cordon flag.
+func (n *Node) MarshalJSON() ([]byte, error) {
+	type Alias Node
+	return json.Marshal(&struct {
+		*Alias
+		SchedulingDisabled bool `json:"SchedulingDisabled"`
+	}{
+		Alias:              (*Alias)(n),
+		SchedulingDisabled: n.SchedulingDisabled(),
+	})
+}
+
+// UnmarshalJSON loads SchedulingDisabled into the atomic cordon flag.
+func (n *Node) UnmarshalJSON(data []byte) error {
+	type Alias Node
+	aux := &struct {
+		*Alias
+		SchedulingDisabled bool `json:"SchedulingDisabled"`
+	}{
+		Alias: (*Alias)(n),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	n.SetSchedulingDisabled(aux.SchedulingDisabled)
+	return nil
 }
 
 type nodeLabelsCache struct {
@@ -108,11 +171,15 @@ func (n *Node) Clone() *Node {
 		return nil
 	}
 	// Clone provides a best-effort read-side snapshot. Mutable counters such
-	// as LocalCreateNum are refreshed via atomic loads after the structural
-	// copy so cloned read models stay aligned with the write path.
+	// as LocalCreateNum and schedulingDisabled are refreshed via atomic loads
+	// after the structural copy so cloned read models stay aligned with the
+	// write path under concurrent updates.
 	localCreateNum := atomic.LoadInt64(&n.LocalCreateNum)
+	schedulingDisabled := n.SchedulingDisabled()
 	cloned := *n
 	cloned.LocalCreateNum = localCreateNum
+	cloned.schedulingDisabled = atomic.Bool{}
+	cloned.SetSchedulingDisabled(schedulingDisabled)
 	cloned.labelsCache = nil
 	if n.VirtualNodeQuotaArray != nil {
 		cloned.VirtualNodeQuotaArray = append([]int64(nil), n.VirtualNodeQuotaArray...)

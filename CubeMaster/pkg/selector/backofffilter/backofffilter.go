@@ -45,9 +45,9 @@ func (l *backofffilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error
 			return node.NodeList{}, nil
 		}
 	}
-	nodes := localcache.GetHealthyNodesByInstanceType(-1, selCtx.InstanceType)
+	nodes := localcache.GetSchedulableNodesByInstanceType(-1, selCtx.InstanceType)
 	if log.IsDebug() {
-		log.G(selCtx.Ctx).Debugf("GetNodes:%+v,size:%d", nodes.String(), nodes.Len())
+		log.G(selCtx.Ctx).Debugf("GetSchedulableNodes:%+v,size:%d", nodes.String(), nodes.Len())
 	}
 	newNodes := make(node.NodeList, 0, nodes.Len())
 	for i := range nodes {

@@ -246,6 +246,15 @@ const (
 	AffinityKeyMemorySize          = "kubernetes.io/memory-size"
 	AffinityKeyCPUCores            = "kubernetes.io/cpu-cores"
 	AffinityKeyInstanceType        = "kubernetes.io/instance-type"
+
+	// LabelSchedulingDisabled is the control-plane reserved label that marks a
+	// node as cordoned: new sandboxes must not be scheduled onto it. The only
+	// legal persisted representations are key-absent (enabled) or value "true"
+	// (disabled). Owned exclusively by the isolation API; Cubelet register and
+	// the generic label API must never create, overwrite, or delete it.
+	LabelSchedulingDisabled = "cube.cloud.tencentcloud.com/scheduling-disabled"
+	// LabelSchedulingDisabledValue is the only legal value for LabelSchedulingDisabled.
+	LabelSchedulingDisabledValue = "true"
 )
 
 const (

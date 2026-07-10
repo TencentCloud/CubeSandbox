@@ -320,6 +320,7 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		}
 		old.NodeLabels = labels
 		old.InvalidateLabelsCache()
+		old.SetSchedulingDisabled(!n.SchedulingAllowed())
 		l.lockMetaData.Unlock()
 
 		l.updateSortedNodes(old)
