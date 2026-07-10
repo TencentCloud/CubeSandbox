@@ -41,9 +41,15 @@ def main() -> int:
 
     print(f"Creating sandbox from template: {template_id}")
 
-    with Sandbox.create(template=template_id, timeout=120) as sandbox:
+    with Sandbox.create(
+        template=template_id,
+        timeout=120,
+        lifecycle={"on_timeout": "pause", "auto_resume": True},
+    ) as sandbox:
         sandbox_id = getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
-        print(f"Sandbox ready: {sandbox_id}")
+
+        info = sandbox.get_info()
+        print(f"Sandbox ready: {sandbox_id}  state={info.get('state', 'N/A')}")
 
         # 1. Write the Rust source file
         print("\n--- Writing hello.rs ---")

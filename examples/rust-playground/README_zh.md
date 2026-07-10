@@ -7,9 +7,9 @@
 本示例包含：
 
 - 一个 `Dockerfile`：在 CubeSandbox 基础镜像上叠加 Rust 工具链（rustup、rustc、cargo）。
-- `hello_world.py`：最小示翻：写入 .rs 文件、用 rustc 编译、运行二进制。
-- `with_dependencies.py`：搭建一个带有外部 crate（serde_json、chrono）的 cargo 项目，构建并运行。
-- `snapshot_rollback.py`：展示 CubeCoW 快照、克隆和回滚在 Rust 迭代开发中的应用。
+- `hello_world.py`：最小示翻：写入 .rs 文件、用 rustc 编译、运行二进制。演示了 `get_info()` 沙箱自省和 `lifecycle` 自动暂停/恢复。
+- `with_dependencies.py`：搭建一个带有外部 crate（serde_json、chrono）的 cargo 项目，构建并运行。演示了 `envs=` 在创建时注入环境变量，以及 `get_info()` 和 `lifecycle`。
+- `snapshot_rollback.py`：展示 CubeCoW 快照、克隆和回滚在 Rust 迭代开发中的应用。演示了 `Sandbox.list_snapshots()`、`sb.clone(n=N)` 一键克隆和 `Sandbox.delete_snapshot()` 清理快照。
 
 ## 目录结构
 

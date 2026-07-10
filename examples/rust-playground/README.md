@@ -7,9 +7,9 @@ Compile and run Rust code inside a CubeSandbox MicroVM — write a one-off scrip
 This example ships:
 
 - A `Dockerfile` that stacks the Rust toolchain (rustup, rustc, cargo) on top of the CubeSandbox base image.
-- `hello_world.py` — minimal demo: write a `.rs` file, compile with `rustc`, run the binary.
-- `with_dependencies.py` — scaffold a `cargo` project with external crates (`serde_json`, `chrono`), build, and run.
-- `snapshot_rollback.py` — showcase CubeCoW snapshot, clone, and rollback during iterative Rust development.
+- `hello_world.py` — minimal demo: write a `.rs` file, compile with `rustc`, run the binary. Demonstrates `get_info()` for sandbox introspection and `lifecycle` with auto-pause/auto-resume.
+- `with_dependencies.py` — scaffold a `cargo` project with external crates (`serde_json`, `chrono`), build, and run. Demonstrates `envs=` for injecting environment variables at sandbox creation alongside `get_info()` and `lifecycle`.
+- `snapshot_rollback.py` — showcase CubeCoW snapshot, clone, and rollback during iterative Rust development. Demonstrates `Sandbox.list_snapshots()`, `sb.clone(n=N)` for one-shot cloning, and `Sandbox.delete_snapshot()` for cleanup.
 
 ## Directory layout
 

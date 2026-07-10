@@ -74,9 +74,15 @@ def main() -> int:
 
     # --- Phase 1: Create sandbox with a Rust project ---
     print("\n[Phase 1] Creating sandbox and setting up project...")
-    sandbox = Sandbox.create(template=template_id, timeout=120)
+    sandbox = Sandbox.create(
+        template=template_id,
+        timeout=120,
+        lifecycle={"on_timeout": "pause", "auto_resume": True},
+    )
     sandbox_id = getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
-    print(f"  Sandbox ID: {sandbox_id}")
+
+    info = sandbox.get_info()
+    print(f"  Sandbox ID: {sandbox_id}  state={info.get('state', 'N/A')}")
 
     clone = None
 
@@ -97,6 +103,15 @@ def main() -> int:
         snap_info = sandbox.create_snapshot(name="checkpoint-a")
         snap_id = snap_info.snapshot_id
         print(f"  ✓ Snapshot saved. ID: {snap_id}")
+
+        # List snapshots to demonstrate snapshot management
+        print("\n  Listing snapshots...")
+        items, _ = Sandbox.list_snapshots(sandbox_id=sandbox_id)
+        for snap in items:
+            print(f"    - {snap.snapshot_id}  name={getattr(snap, 'name', 'N/A')}")
+        if not items:
+            print("    (none found)")
+        print(f"  ✓ {len(items)} snapshot(s) listed.")
 
         # --- Phase 3: Modify the project (simulate iterative dev) ---
         print("\n[Phase 3] Modifying project (checkpoint B)...")
@@ -152,6 +167,22 @@ def main() -> int:
             print(f"FAIL: Expected 'Checkpoint A' on original, got: {result!r}", file=sys.stderr)
             return 1
         print("  ✓ Fork isolation confirmed: original and clone diverged independently.")
+
+        # --- Phase 7: Clone with sb.clone(n=N) ---
+        print("\n[Phase 7] One-shot clone via sb.clone(n=2)...")
+        clones = sandbox.clone(n=2)
+        print(f"  ✓ {len(clones)} clone(s) created from current state.")
+        for i, sb in enumerate(clones):
+            cid = getattr(sb, "sandbox_id", getattr(sb, "id", "unknown"))
+            result = run_cmd(sb, "./target/debug/snapshot-demo", cwd=ws, timeout=30)
+            print(f"    clone {i+1}: {cid}  output={result.strip()!r}")
+        for sb in clones:
+            sb.kill()
+        print("  ✓ Clones verified and cleaned up.")
+
+        # Clean up the snapshot
+        Sandbox.delete_snapshot(snap_id)
+        print(f"  ✓ Snapshot {snap_id} deleted.")
 
     finally:
         print("\n[Cleanup] Killing sandboxes...")
