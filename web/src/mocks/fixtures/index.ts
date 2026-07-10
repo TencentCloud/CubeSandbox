@@ -251,6 +251,24 @@ export function getSandboxDetail(sandboxID: string): SandboxDetailDto | undefine
     ...clone(sandbox),
     envdAccessToken: `eat_${sandbox.sandboxID.slice(-8)}`,
     domain: 'cube.local',
+    containers: [
+      {
+        containerID: sandbox.sandboxID,
+        name: 'sandbox',
+        status: sandbox.state === 'running' ? 1 : 5,
+        image: sandbox.templateID,
+        type: 'sandbox',
+      },
+      ...(sandbox.sandboxID === 'isb_9f2e4c7a1b0d83e6'
+        ? [{
+            containerID: `${sandbox.sandboxID}-sidecar`,
+            name: 'metrics-sidecar',
+            status: 1,
+            image: 'cube/metrics-sidecar:latest',
+            type: 'sidecar',
+          }]
+        : []),
+    ],
   };
 }
 

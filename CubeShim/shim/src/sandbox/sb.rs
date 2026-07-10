@@ -1032,6 +1032,14 @@ impl SandBox {
         Err(Error::NotFoundError(format!("not found container:{}", id)))
     }
 
+    pub async fn resize_pty(&self, id: &str, exec_id: &str, width: u32, height: u32) -> Result<()> {
+        let containers = self.containers.lock().await;
+        if let Some(container) = containers.get(id) {
+            return container.resize_pty(exec_id, width, height).await;
+        }
+        Err(Error::NotFoundError(format!("not found container:{}", id)))
+    }
+
     pub async fn delete_exec(
         &mut self,
         id: &String,

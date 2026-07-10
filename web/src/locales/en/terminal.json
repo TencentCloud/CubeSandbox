@@ -1,0 +1,35 @@
+{
+  "title": "Terminal · {{sandboxID}}",
+  "description": "Interactive shell for the selected sandbox container.",
+  "container": "Container",
+  "open": "Open terminal",
+  "unavailable": "Terminal is available only while the sandbox is running.",
+  "status": {
+    "connecting": "Connecting",
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "error": "Error"
+  },
+  "tools": {
+    "copy": "Copy selection",
+    "paste": "Paste",
+    "fontSmaller": "Decrease font size",
+    "fontLarger": "Increase font size",
+    "fullscreen": "Enter fullscreen",
+    "restore": "Exit fullscreen",
+    "reconnect": "Reconnect",
+    "disconnect": "Disconnect",
+    "close": "Close terminal"
+  },
+  "messages": {
+    "connecting": "Connecting to terminal…",
+    "disconnected": "Terminal disconnected.",
+    "unexpectedDisconnect": "Connection lost. Use reconnect to start a new session.",
+    "exited": "Shell exited with code {{code}}.",
+    "error": "Terminal error: {{message}}",
+    "unknownError": "Unknown error",
+    "invalidControl": "Received an invalid terminal control message.",
+    "noContainers": "No terminal container is available.",
+    "switchingContainer": "Switching container…"
+  }
+}

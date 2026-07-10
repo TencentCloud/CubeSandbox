@@ -133,6 +133,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sandboxes/{sandboxID}/terminal/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_terminal_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/templates": {
         parameters: {
             query?: never;
@@ -294,6 +310,22 @@ export interface components {
             commit?: string;
             version: string;
         };
+        CreateTerminalSessionRequest: {
+            /** Format: int32 */
+            cols?: number | null;
+            containerID?: string | null;
+            /** Format: int32 */
+            rows?: number | null;
+        };
+        CreateTerminalSessionResponse: {
+            containerID: string;
+            /** Format: date-time */
+            expiresAt: string;
+            /** Format: int64 */
+            idleTimeoutSeconds: number;
+            sessionID: string;
+            websocketURL: string;
+        };
         HashMap: {
             [key: string]: string;
         };
@@ -309,8 +341,12 @@ export interface components {
             cpuCount: number;
             /** Format: int32 */
             diskSizeMB?: number | null;
-            /** Format: date-time */
-            endAt: string;
+            /**
+             * Format: date-time
+             * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
+             *     (no deadline) rather than being misreported as equal to startedAt.
+             */
+            endAt?: string | null;
             envdVersion: string;
             /** Format: int32 */
             memoryMB: number;
@@ -396,8 +432,11 @@ export interface components {
         /** @description Request body for POST /sandboxes/{id}/resume (deprecated). */
         ResumedSandbox: {
             autoPause?: boolean;
-            /** Format: int32 */
-            timeout?: number;
+            /**
+             * Format: int32
+             * @description Idle timeout in seconds; None when the client did not send one.
+             */
+            timeout?: number | null;
         };
         /**
          * @description Response for POST /sandboxes and POST /sandboxes/{id}/connect.
@@ -413,17 +452,31 @@ export interface components {
             templateID: string;
             trafficAccessToken?: string | null;
         };
+        /** @description A container that can be selected as a terminal target. */
+        SandboxContainer: {
+            containerID: string;
+            image?: string | null;
+            name?: string | null;
+            /** Format: int32 */
+            status: number;
+            type?: string | null;
+        };
         /** @description Detailed sandbox info returned by GET /sandboxes/{sandboxID}. */
         SandboxDetail: {
             alias?: string | null;
             clientID: string;
+            containers?: components["schemas"]["SandboxContainer"][] | null;
             /** Format: int32 */
             cpuCount: number;
             /** Format: int32 */
             diskSizeMB?: number | null;
             domain?: string | null;
-            /** Format: date-time */
-            endAt: string;
+            /**
+             * Format: date-time
+             * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
+             *     (no deadline) rather than being misreported as equal to startedAt.
+             */
+            endAt?: string | null;
             envdAccessToken?: string | null;
             envdVersion: string;
             /** Format: int32 */
@@ -491,9 +544,9 @@ export interface components {
             /** @description Whether public internet access is allowed for sandboxes from this template. */
             allowInternetAccess?: boolean | null;
             createRequest?: unknown;
+            instanceType?: string | null;
             /** @description Latest create/rebuild job id for the template. */
             jobID?: string | null;
-            instanceType?: string | null;
             lastError?: string | null;
             /** @description Network type used when the template was created, e.g. "tap". */
             networkType?: string | null;
@@ -518,12 +571,12 @@ export interface components {
             createdAt?: string | null;
             imageInfo?: string | null;
             instanceType?: string | null;
+            /** @description Latest create/rebuild job id for the template. */
+            jobID?: string | null;
             lastError?: string | null;
             status: string;
             templateID: string;
             version?: string | null;
-            /** @description Latest create/rebuild job id for the template. */
-            jobID?: string | null;
         };
         /** @description Full node x component version matrix. */
         VersionMatrixView: {
@@ -885,6 +938,54 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ApiError"];
                 };
+            };
+        };
+    };
+    create_terminal_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTerminalSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description One-time terminal session */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateTerminalSessionResponse"];
+                };
+            };
+            /** @description Container is not part of the sandbox */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sandbox not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sandbox is not running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

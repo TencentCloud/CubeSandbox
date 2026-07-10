@@ -18,6 +18,8 @@ service CubeboxMgr {
   rpc List(ListCubeSandboxRequest) returns (ListCubeSandboxResponse);
   rpc Update(UpdateCubeSandboxRequest) returns (UpdateCubeSandboxResponse);
   rpc Exec(ExecCubeSandboxRequest) returns (ExecCubeSandboxResponse);
+  // Terminal opens an interactive TTY process in an existing container.
+  rpc Terminal(stream TerminalMessage) returns (stream TerminalMessage);
   // AppSnapshot creates a cubebox, makes an app snapshot, and destroys the cubebox.
   // Required annotations:
   //   - cube.master.appsnapshot.create: "true"
@@ -1137,4 +1139,49 @@ message CleanupOrphanStorageFilesResponse {
   string requestID = 1;
   cubelet.services.errorcode.v1.Ret ret = 2;
   repeated StorageOrphanEntry orphans = 3;
+}
+
+// TerminalMessage is the bidirectional protocol used by interactive terminal
+// sessions. The first client message must contain open.
+message TerminalMessage {
+  oneof message {
+    TerminalOpen open = 1;
+    bytes input = 2;
+    TerminalResize resize = 3;
+    TerminalClose close = 4;
+    bytes output = 5;
+    TerminalStarted started = 6;
+    TerminalExit exit = 7;
+    TerminalError error = 8;
+  }
+}
+
+message TerminalOpen {
+  string request_id = 1;
+  string sandbox_id = 2;
+  string container_id = 3;
+  repeated string args = 4;
+  string cwd = 5;
+  repeated string env = 6;
+  uint32 cols = 7;
+  uint32 rows = 8;
+}
+
+message TerminalResize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message TerminalClose {}
+
+message TerminalStarted {
+  string exec_id = 1;
+}
+
+message TerminalExit {
+  uint32 code = 1;
+}
+
+message TerminalError {
+  string message = 1;
 }

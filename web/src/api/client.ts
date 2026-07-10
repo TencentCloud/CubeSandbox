@@ -16,6 +16,9 @@ export type TemplateDetailDto = components['schemas']['TemplateDetail'];
 export type ApiNodeView = components['schemas']['NodeView'];
 export type VersionMatrixDto = components['schemas']['VersionMatrixView'];
 export type ComponentVersionDto = components['schemas']['ComponentVersionView'];
+export type SandboxContainer = components['schemas']['SandboxContainer'];
+export type TerminalSessionRequest = components['schemas']['CreateTerminalSessionRequest'];
+export type TerminalSession = components['schemas']['CreateTerminalSessionResponse'];
 
 export interface RunningSandbox extends ListedSandboxDto {}
 
@@ -203,6 +206,11 @@ export const sandboxApi = {
     api<void>(`/sandboxes/${id}/timeout`, { method: 'POST', body: JSON.stringify({ timeout: seconds }) }),
   logs: (id: string, params?: { cursor?: number; limit?: number; direction?: string }) =>
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
+  createTerminalSession: (id: string, body: TerminalSessionRequest) =>
+    api<TerminalSession>(`/sandboxes/${id}/terminal/sessions`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   create: (body: {
     templateID: string;
     timeout?: number;

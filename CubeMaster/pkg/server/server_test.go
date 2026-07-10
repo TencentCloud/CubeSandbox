@@ -24,3 +24,14 @@ func TestRegisterHandlersIncludesCADownloadRoute(t *testing.T) {
 		}
 	}
 }
+
+func TestRegisterHandlersIncludesSandboxTerminalRoute(t *testing.T) {
+	s := &internalHttp{router: mux.NewRouter()}
+	s.registerHandlers()
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/sandbox/terminal", nil)
+	var match mux.RouteMatch
+	if !s.router.Match(req, &match) {
+		t.Fatal("GET /cube/sandbox/terminal did not match any route")
+	}
+}

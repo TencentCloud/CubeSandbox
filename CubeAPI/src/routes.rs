@@ -21,6 +21,7 @@ use crate::{
     handlers::{agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates},
     middleware::{auth::unified_auth, rate_limit::rate_limit},
     state::AppState,
+    terminal,
 };
 
 const DEFAULT_ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -84,10 +85,28 @@ fn build_cubeapi_router(state: &AppState, auth_configured: bool) -> Router<AppSt
     Router::new()
         .route("/health", get(health::health))
         .merge(build_auth_routes(state))
+        .merge(build_terminal_routes(state, auth_configured))
         .merge(build_sandbox_routes(state, auth_configured))
         .merge(build_template_routes(state, auth_configured))
         .merge(build_cluster_routes(state, auth_configured))
         .merge(build_agenthub_routes(state, auth_configured))
+}
+
+fn build_terminal_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let session_route = Router::new().route(
+        "/sandboxes/:sandboxID/terminal/sessions",
+        post(terminal::create_terminal_session),
+    );
+    Router::new()
+        .merge(with_auth_and_rate_limit(
+            session_route,
+            state,
+            auth_configured,
+        ))
+        .route(
+            "/sandboxes/:sandboxID/terminal/ws",
+            get(terminal::terminal_websocket),
+        )
 }
 
 /// WebUI login routes. These are intentionally left unauthenticated (like
@@ -441,6 +460,103 @@ mod tests {
             .json(&login_body)
             .await
             .assert_status(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn terminal_session_creation_is_protected_by_auth_callback() {
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = "http://127.0.0.1:9".to_string();
+        config.auth_callback_url = Some("http://127.0.0.1:9/auth".to_string());
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        server
+            .post("/cubeapi/v1/sandboxes/sandbox/terminal/sessions")
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn terminal_session_creation_validates_sandbox_state_and_container() {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use std::collections::HashMap;
+
+        async fn sandbox_info(
+            Query(query): Query<HashMap<String, String>>,
+        ) -> Json<serde_json::Value> {
+            let sandbox_id = query.get("sandbox_id").map(String::as_str).unwrap_or("");
+            if sandbox_id == "missing" {
+                return Json(serde_json::json!({
+                    "requestID": "request",
+                    "ret": { "ret_code": 130404, "ret_msg": "not found" },
+                    "data": []
+                }));
+            }
+            let status = if sandbox_id == "paused" { 5 } else { 1 };
+            Json(serde_json::json!({
+                "requestID": "request",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": sandbox_id,
+                    "status": status,
+                    "host_id": "",
+                    "template_id": "template",
+                    "containers": [{
+                        "name": "sandbox",
+                        "container_id": "container",
+                        "status": status,
+                        "image": "image",
+                        "type": "sandbox",
+                        "cpu": "1000m",
+                        "mem": "512Mi"
+                    }]
+                }]
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/cube/sandbox/info", get(sandbox_info)),
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = format!("http://{}", address);
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        server
+            .post("/cubeapi/v1/sandboxes/missing/terminal/sessions")
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        server
+            .post("/cubeapi/v1/sandboxes/paused/terminal/sessions")
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status(StatusCode::CONFLICT);
+        server
+            .post("/cubeapi/v1/sandboxes/running/terminal/sessions")
+            .json(&serde_json::json!({ "containerID": "unknown" }))
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+        let response = server
+            .post("/cubeapi/v1/sandboxes/running/terminal/sessions")
+            .json(&serde_json::json!({ "containerID": "container", "cols": 100, "rows": 30 }))
+            .await;
+        response.assert_status_ok();
+        let body: serde_json::Value = response.json();
+        assert_eq!(body["containerID"], "container");
+        assert_eq!(body["idleTimeoutSeconds"], 1800);
+        assert!(body["sessionID"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
     }
 
     #[tokio::test]

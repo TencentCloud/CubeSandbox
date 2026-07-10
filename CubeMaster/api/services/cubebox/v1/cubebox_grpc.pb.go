@@ -28,6 +28,7 @@ const (
 	CubeboxMgr_List_FullMethodName                      = "/cubelet.services.cubebox.v1.CubeboxMgr/List"
 	CubeboxMgr_Update_FullMethodName                    = "/cubelet.services.cubebox.v1.CubeboxMgr/Update"
 	CubeboxMgr_Exec_FullMethodName                      = "/cubelet.services.cubebox.v1.CubeboxMgr/Exec"
+	CubeboxMgr_Terminal_FullMethodName                  = "/cubelet.services.cubebox.v1.CubeboxMgr/Terminal"
 	CubeboxMgr_AppSnapshot_FullMethodName               = "/cubelet.services.cubebox.v1.CubeboxMgr/AppSnapshot"
 	CubeboxMgr_CommitSandbox_FullMethodName             = "/cubelet.services.cubebox.v1.CubeboxMgr/CommitSandbox"
 	CubeboxMgr_RollbackSandbox_FullMethodName           = "/cubelet.services.cubebox.v1.CubeboxMgr/RollbackSandbox"
@@ -51,6 +52,8 @@ type CubeboxMgrClient interface {
 	List(ctx context.Context, in *ListCubeSandboxRequest, opts ...grpc.CallOption) (*ListCubeSandboxResponse, error)
 	Update(ctx context.Context, in *UpdateCubeSandboxRequest, opts ...grpc.CallOption) (*UpdateCubeSandboxResponse, error)
 	Exec(ctx context.Context, in *ExecCubeSandboxRequest, opts ...grpc.CallOption) (*ExecCubeSandboxResponse, error)
+	// Terminal opens an interactive TTY process in an existing container.
+	Terminal(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TerminalMessage, TerminalMessage], error)
 	// AppSnapshot creates a cubebox, makes an app snapshot, and destroys the cubebox.
 	// Required annotations:
 	//   - cube.master.appsnapshot.create: "true"
@@ -139,6 +142,19 @@ func (c *cubeboxMgrClient) Exec(ctx context.Context, in *ExecCubeSandboxRequest,
 	}
 	return out, nil
 }
+
+func (c *cubeboxMgrClient) Terminal(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TerminalMessage, TerminalMessage], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &CubeboxMgr_ServiceDesc.Streams[0], CubeboxMgr_Terminal_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[TerminalMessage, TerminalMessage]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CubeboxMgr_TerminalClient = grpc.BidiStreamingClient[TerminalMessage, TerminalMessage]
 
 func (c *cubeboxMgrClient) AppSnapshot(ctx context.Context, in *AppSnapshotRequest, opts ...grpc.CallOption) (*AppSnapshotResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -251,6 +267,8 @@ type CubeboxMgrServer interface {
 	List(context.Context, *ListCubeSandboxRequest) (*ListCubeSandboxResponse, error)
 	Update(context.Context, *UpdateCubeSandboxRequest) (*UpdateCubeSandboxResponse, error)
 	Exec(context.Context, *ExecCubeSandboxRequest) (*ExecCubeSandboxResponse, error)
+	// Terminal opens an interactive TTY process in an existing container.
+	Terminal(grpc.BidiStreamingServer[TerminalMessage, TerminalMessage]) error
 	// AppSnapshot creates a cubebox, makes an app snapshot, and destroys the cubebox.
 	// Required annotations:
 	//   - cube.master.appsnapshot.create: "true"
@@ -304,6 +322,9 @@ func (UnimplementedCubeboxMgrServer) Update(context.Context, *UpdateCubeSandboxR
 }
 func (UnimplementedCubeboxMgrServer) Exec(context.Context, *ExecCubeSandboxRequest) (*ExecCubeSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Exec not implemented")
+}
+func (UnimplementedCubeboxMgrServer) Terminal(grpc.BidiStreamingServer[TerminalMessage, TerminalMessage]) error {
+	return status.Error(codes.Unimplemented, "method Terminal not implemented")
 }
 func (UnimplementedCubeboxMgrServer) AppSnapshot(context.Context, *AppSnapshotRequest) (*AppSnapshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AppSnapshot not implemented")
@@ -445,6 +466,13 @@ func _CubeboxMgr_Exec_Handler(srv interface{}, ctx context.Context, dec func(int
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _CubeboxMgr_Terminal_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(CubeboxMgrServer).Terminal(&grpc.GenericServerStream[TerminalMessage, TerminalMessage]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CubeboxMgr_TerminalServer = grpc.BidiStreamingServer[TerminalMessage, TerminalMessage]
 
 func _CubeboxMgr_AppSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AppSnapshotRequest)
@@ -694,6 +722,13 @@ var CubeboxMgr_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _CubeboxMgr_CleanupOrphanStorageFiles_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Terminal",
+			Handler:       _CubeboxMgr_Terminal_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "api/services/cubebox/v1/cubebox.proto",
 }

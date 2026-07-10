@@ -314,6 +314,22 @@ pub struct SandboxDetail {
     pub state: SandboxState,
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub containers: Option<Vec<SandboxContainer>>,
+}
+
+/// A container that can be selected as a terminal target.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SandboxContainer {
+    #[serde(rename = "containerID")]
+    pub container_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub status: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 // ─── Sandbox — pause/resume/connect/snapshot ──────────────────────────────

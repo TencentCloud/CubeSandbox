@@ -24,6 +24,7 @@ const (
 	SandboxListAction              = "/sandbox/list"
 	SandboxInfoAction              = "/sandbox/info"
 	SandboxExecAction              = "/sandbox/exec"
+	SandboxTerminalAction          = "/sandbox/terminal"
 	SandboxUpdateAction            = "/sandbox/update"
 	SandboxTimeoutAction           = "/sandbox/timeout"
 	SandboxRefreshAction           = "/sandbox/refresh"
@@ -54,6 +55,10 @@ func actionURI(uri string) string {
 
 func HttpHandler(w http.ResponseWriter, r *http.Request) {
 	rt := CubeLog.GetTraceInfo(r.Context())
+	if r.URL.Path == actionURI(SandboxTerminalAction) {
+		handleTerminalAction(w, r, rt)
+		return
+	}
 	var rsp interface{}
 	switch {
 	case r.URL.Path == actionURI(SnapshotStorageAction):

@@ -70,6 +70,8 @@ governor = { version = "0.6", features = ["dashmap"] }
 # ── HTTP client (orchestrator / backend calls) ────────────────────────────
 # connection pool built-in, rustls for TLS
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+url = "2"
 
 # ── Validation ────────────────────────────────────────────────────────────
 validator = { version = "0.16", features = ["derive"] }

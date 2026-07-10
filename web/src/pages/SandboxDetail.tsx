@@ -11,10 +11,12 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Pause, Play, Trash2, RefreshCw, SquareTerminal } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { SandboxTerminalDialog } from '@/components/SandboxTerminalDialog';
+import { canOpenTerminal } from '@/lib/terminal';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -36,6 +38,8 @@ export default function SandboxDetailPage() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const { t } = useTranslation('sandboxDetail');
+  const { t: terminalT } = useTranslation('terminal');
+  const [terminalOpen, setTerminalOpen] = useState(false);
 
   // ── Sandbox detail ──────────────────────────────────────────────────────
   const { data, isLoading } = useQuery({
@@ -117,6 +121,15 @@ export default function SandboxDetailPage() {
           </p>
         </div>
         <div className="flex gap-2">
+          <span title={canOpenTerminal(state) ? terminalT('open') : terminalT('unavailable')}>
+            <Button
+              variant="outline"
+              onClick={() => setTerminalOpen(true)}
+              disabled={!canOpenTerminal(state)}
+            >
+              <SquareTerminal size={14} /> {terminalT('open')}
+            </Button>
+          </span>
           {state === 'paused' ? (
             <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
               <Play size={14} /> {t('actions.resume')}
@@ -248,6 +261,12 @@ export default function SandboxDetailPage() {
           )}
         </pre>
       </Card>
+      <SandboxTerminalDialog
+        open={terminalOpen}
+        onOpenChange={setTerminalOpen}
+        sandboxID={sandboxID}
+        containers={data?.containers}
+      />
     </div>
   );
 }

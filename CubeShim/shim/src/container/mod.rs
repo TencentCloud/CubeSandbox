@@ -871,6 +871,42 @@ impl Container {
         Ok(())
     }
 
+    pub async fn resize_pty(&self, exec_id: &str, width: u32, height: u32) -> Result<()> {
+        if !exec_id.is_empty() {
+            let execs = self.execs.lock().await;
+            let exec = execs.get(exec_id).ok_or_else(|| {
+                Error::NotFoundError(format!(
+                    "Exec id:{} not found, container:{}",
+                    exec_id, &self.real_id
+                ))
+            })?;
+            if !exec.tty.terminal {
+                return Err(Error::Other(format!(
+                    "Exec id:{} is not a terminal, container:{}",
+                    exec_id, &self.real_id
+                )));
+            }
+        }
+
+        let req = tty_win_resize_request(&self.id, exec_id, width, height);
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Other(format!("container:{} has no agent client", self.real_id)))?
+            .lock()
+            .await;
+        client
+            .tty_win_resize(self.ctx.clone(), &req)
+            .await
+            .map_err(|e| {
+                Error::Other(format!(
+                    "resize terminal, container:{}, execid:{} failed:{}",
+                    &self.real_id, exec_id, e
+                ))
+            })?;
+        Ok(())
+    }
+
     pub async fn destroy_exec(&mut self, exec_id: &String) -> CResult<(u32, DateTime<Utc>)> {
         let mut exit_code = 255;
         let mut exit_tm = Utc::now();
@@ -961,5 +997,35 @@ impl Container {
 
     pub fn get_id(&self) -> String {
         self.id.clone()
+    }
+}
+
+fn tty_win_resize_request(
+    container_id: &str,
+    exec_id: &str,
+    width: u32,
+    height: u32,
+) -> agent::TtyWinResizeRequest {
+    agent::TtyWinResizeRequest {
+        container_id: container_id.to_string(),
+        exec_id: exec_id.to_string(),
+        row: height,
+        column: width,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tty_win_resize_request;
+
+    #[test]
+    fn tty_resize_maps_containerd_dimensions_to_agent_request() {
+        let request = tty_win_resize_request("container", "exec", 132, 43);
+
+        assert_eq!(request.container_id, "container");
+        assert_eq!(request.exec_id, "exec");
+        assert_eq!(request.column, 132);
+        assert_eq!(request.row, 43);
     }
 }

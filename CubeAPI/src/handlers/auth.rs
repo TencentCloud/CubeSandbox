@@ -54,7 +54,7 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
-fn session_token(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn session_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get(SESSION_HEADER)
         .and_then(|v| v.to_str().ok())

@@ -17,14 +17,20 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxContainer,
+        SandboxDetail, SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response,
+        SandboxNetworkConfig, SandboxState,
     },
 };
 
 const RET_CODE_OK: i32 = 0;
 const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
+
+fn non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
 const RET_CODE_CONFLICT: i32 = 130409;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
@@ -126,6 +132,17 @@ impl SandboxService {
             .or(d.end_at);
 
         let envd_version = envd_version_from_annotations(&d.annotations);
+        let containers = d
+            .containers
+            .iter()
+            .map(|container| SandboxContainer {
+                container_id: container.container_id.clone(),
+                name: non_empty(&container.name),
+                status: container.status,
+                image: non_empty(&container.image),
+                kind: non_empty(&container.kind),
+            })
+            .collect::<Vec<_>>();
         Ok(SandboxDetail {
             template_id: d.template_id,
             alias: None,
@@ -142,6 +159,7 @@ impl SandboxService {
             metadata: optional_metadata(d.labels),
             state: sandbox_state_from_status(d.status),
             volume_mounts: None,
+            containers: Some(containers),
         })
     }
 

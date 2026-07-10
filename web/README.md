@@ -13,8 +13,8 @@ make web-build   # → web/dist/
 ## Routes
 
 - `/` Overview — cluster KPIs, recent sandboxes, template pipeline
-- `/sandboxes` list + lifecycle actions (pause/resume/kill)
-- `/sandboxes/:id` detail + logs
+- `/sandboxes` list + lifecycle actions (terminal/pause/resume/kill)
+- `/sandboxes/:id` detail + logs + interactive multi-container terminal
 - `/templates` catalog
 - `/nodes` fleet health
 - `/keys` store `X-API-Key` locally
@@ -27,3 +27,5 @@ Talks to **CubeAPI** (`CubeAPI/` in repo), which proxies templates/cluster/nodes
 The `X-API-Key` header (if present in localStorage under `cube.apiKey`) is injected on every request.
 
 The dashboard always calls CubeAPI through the same-origin `/cubeapi/v1` prefix. In local development Vite proxies `/cubeapi` according to `vite.config.ts`; in one-click deployments a standard nginx container publishes port `12088`, mounts the packaged `webui/dist`, and proxies `/cubeapi` to the host CubeAPI through Docker `host-gateway`.
+
+Interactive terminals create an authenticated, short-lived CubeAPI session first, then upgrade a same-origin WebSocket with the returned one-time session ID. Long-lived API keys and WebUI tokens are never placed in the WebSocket URL.

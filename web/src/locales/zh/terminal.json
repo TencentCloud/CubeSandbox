@@ -1,0 +1,35 @@
+{
+  "title": "终端 · {{sandboxID}}",
+  "description": "所选沙箱容器的交互式 shell。",
+  "container": "容器",
+  "open": "打开终端",
+  "unavailable": "仅运行中的沙箱可以打开终端。",
+  "status": {
+    "connecting": "正在连接",
+    "connected": "已连接",
+    "disconnected": "已断开",
+    "error": "错误"
+  },
+  "tools": {
+    "copy": "复制选中内容",
+    "paste": "粘贴",
+    "fontSmaller": "减小字号",
+    "fontLarger": "增大字号",
+    "fullscreen": "进入全屏",
+    "restore": "退出全屏",
+    "reconnect": "重新连接",
+    "disconnect": "断开连接",
+    "close": "关闭终端"
+  },
+  "messages": {
+    "connecting": "正在连接终端…",
+    "disconnected": "终端已断开。",
+    "unexpectedDisconnect": "连接意外中断，请使用重新连接创建新会话。",
+    "exited": "Shell 已退出，退出码 {{code}}。",
+    "error": "终端错误：{{message}}",
+    "unknownError": "未知错误",
+    "invalidControl": "收到无效的终端控制消息。",
+    "noContainers": "没有可用的终端容器。",
+    "switchingContainer": "正在切换容器…"
+  }
+}

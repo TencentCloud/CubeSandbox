@@ -67,7 +67,23 @@ If any number is red, click into **Nodes** to see which host is unhappy.
 
 To stop a sandbox, go to **Sandboxes**, find the row, and click the pause / kill button on the right.
 
-### 3.3 Configure the API key (only if auth is enabled)
+### 3.3 Open a container terminal
+
+Running sandboxes have a terminal button in both the **Sandboxes** row actions and the sandbox detail header. Click it to open an interactive `/bin/sh` inside the sandbox without exposing CubeMaster or Cubelet to the browser.
+
+- The sandbox must be in the `running` state. The button is disabled for paused, pausing, stopped, or failed sandboxes. Resume the sandbox before opening a terminal.
+- If the sandbox contains more than one container, use the selector in the terminal toolbar to choose the target. Switching containers closes the current shell and creates a new independent session.
+- Terminal session creation uses the same CubeAPI authentication and authorization as other sandbox operations. The WebSocket URL contains only a short-lived, one-time session ID; it never contains the API key or WebUI session token.
+- The default idle timeout is 30 minutes. Operators can change it with `TERMINAL_IDLE_TIMEOUT_SECS` on CubeAPI. Keyboard input, terminal output, and resize events all reset the timer.
+- Use the toolbar to reconnect after a shell exits or the network disconnects. Reconnect creates a new shell; shell process state and scrollback from a disconnected backend session are not restored.
+
+The terminal supports ANSI colors, cursor applications, copy/paste, scrollback, `Ctrl+C`, responsive resizing, and fullscreen mode. Clipboard paste may require browser permission. The command is currently fixed to `/bin/sh`, and the available utilities depend on the selected container image (minimal images may omit tools such as `top` or `ping`). File transfer, session persistence, and reconnecting to the same shell process are not supported.
+
+::: warning Terminal access is administrative access
+Anyone authorized to create a terminal session can run commands with the container user's privileges. Keep CubeAPI authentication enabled for shared or externally reachable deployments, and review the `terminal.*` audit events in CubeAPI logs.
+:::
+
+### 3.4 Configure the API key (only if auth is enabled)
 
 If your deployment has authentication turned on, the Dashboard needs an API key before any request will succeed.
 

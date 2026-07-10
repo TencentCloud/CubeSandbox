@@ -71,6 +71,11 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+
+    /// Close terminal sessions after this many seconds without traffic.
+    /// Env var: TERMINAL_IDLE_TIMEOUT_SECS (default 1800).
+    #[serde(default = "default_terminal_idle_timeout_secs")]
+    pub terminal_idle_timeout_secs: u64,
 }
 
 fn default_bind() -> String {
@@ -108,6 +113,14 @@ fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .or_else(default_cube_sandbox_mysql_url)
+}
+
+fn default_terminal_idle_timeout_secs() -> u64 {
+    std::env::var("TERMINAL_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1800)
 }
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
@@ -148,6 +161,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
+            terminal_idle_timeout_secs: default_terminal_idle_timeout_secs(),
         }
     }
 }

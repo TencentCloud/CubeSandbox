@@ -32,6 +32,9 @@ pub struct AppState {
 
     /// Optional database-backed AgentHub instance store.
     pub agenthub_store: Option<AgentHubStore>,
+
+    /// Short-lived, one-time terminal upgrade grants.
+    pub terminal_sessions: crate::terminal::TerminalSessionStore,
 }
 
 impl AppState {
@@ -73,6 +76,7 @@ impl AppState {
             logger,
             config: Arc::new(config),
             agenthub_store,
+            terminal_sessions: crate::terminal::TerminalSessionStore::default(),
         }
     }
 }

@@ -27,6 +27,19 @@ function notFound(message: string) {
 }
 
 export const handlers = [
+  http.get('/cubeapi/v1/auth/session', () => HttpResponse.json({
+    authRequired: false,
+    authenticated: false,
+  })),
+
+  http.post('/cubeapi/v1/auth/login', () => HttpResponse.json({
+    token: 'mock-session-token',
+    username: 'admin',
+    expiresInSecs: 86_400,
+  })),
+
+  http.post('/cubeapi/v1/auth/logout', () => new HttpResponse(null, { status: 204 })),
+
   http.get('/cubeapi/v1/health', async () => {
     await mockDelay();
     return HttpResponse.json({ status: 'ok', sandboxes: listSandboxes().length });
@@ -89,6 +102,29 @@ export const handlers = [
     await mockDelay();
     const sandbox = getSandboxDetail(String(params.sandboxID));
     return sandbox ? HttpResponse.json(sandbox) : notFound(`sandbox ${params.sandboxID} not found`);
+  }),
+
+  http.post('/cubeapi/v1/sandboxes/:sandboxID/terminal/sessions', async ({ params, request }) => {
+    await mockDelay();
+    const sandbox = getSandboxDetail(String(params.sandboxID));
+    if (!sandbox) return notFound(`sandbox ${params.sandboxID} not found`);
+    if (sandbox.state !== 'running') {
+      return HttpResponse.json({ code: 409, message: 'sandbox must be running' }, { status: 409 });
+    }
+    const body = await request.json() as { containerID?: string };
+    const container = sandbox.containers?.find((item) => item.containerID === body.containerID)
+      ?? sandbox.containers?.[0];
+    if (!container) {
+      return HttpResponse.json({ code: 400, message: 'container not found' }, { status: 400 });
+    }
+    const sessionID = crypto.randomUUID();
+    return HttpResponse.json({
+      sessionID,
+      websocketURL: `/cubeapi/v1/sandboxes/${sandbox.sandboxID}/terminal/ws?sessionID=${sessionID}`,
+      containerID: container.containerID,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      idleTimeoutSeconds: 1800,
+    });
   }),
 
   http.delete('/cubeapi/v1/sandboxes/:sandboxID', async ({ params }) => {

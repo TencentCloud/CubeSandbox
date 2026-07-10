@@ -558,8 +558,40 @@ impl Task for TaskService {
     async fn resize_pty(
         &self,
         _ctx: &TtrpcContext,
-        _req: api::ResizePtyRequest,
+        req: api::ResizePtyRequest,
     ) -> TtrpcResult<api::Empty> {
+        if req.width() == 0 || req.height() == 0 {
+            return Err(Others(
+                "terminal width and height must be positive".to_string(),
+            ));
+        }
+
+        infof!(
+            self.log,
+            "resize pty, id:{}, execid:{}, width:{}, height:{}",
+            req.id(),
+            req.exec_id(),
+            req.width(),
+            req.height()
+        );
+        let sb = self.sandbox.lock().await;
+        sb.resize_pty(req.id(), req.exec_id(), req.width(), req.height())
+            .await
+            .map_err(|e| {
+                errf!(
+                    self.log,
+                    "resize pty failed, id:{}, execid:{}, error:{}",
+                    req.id(),
+                    req.exec_id(),
+                    e
+                );
+                Error::Other(format!(
+                    "resize pty failed, id:{}, execid:{}: {}",
+                    req.id(),
+                    req.exec_id(),
+                    e
+                ))
+            })?;
         Ok(api::Empty::default())
     }
 
