@@ -35,7 +35,8 @@
   <a href="./docs/zh/index.md"><strong>文档</strong></a> ·
   <a href="./docs/zh/changelog/index.md"><strong>变更日志</strong></a> ·
   <a href="#wechat-group"><strong>微信交流群</strong></a> ·
-  <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a>
+  <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a> ·
+  <a href="https://wj.qq.com/s2/26753159/ss16/"><strong>核心用户计划</strong></a>
 </p>
 
 ---
