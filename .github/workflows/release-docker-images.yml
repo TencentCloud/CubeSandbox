@@ -310,13 +310,14 @@ jobs:
             done
           done
 
-  # Copy per-arch and multi-arch images from TCR int to TCR cn on a China-side
-  # self-hosted runner. TCR int already receives the release images during the
-  # build, and using it here avoids pulling large layers from GHCR into China.
+  # Sync per-arch and multi-arch images from TCR int to TCR cn on a China-side
+  # self-hosted runner (crane pull then push; avoids streaming copy stalls).
+  # TCR int already receives the release images during the build, and using it
+  # here avoids pulling large layers from GHCR into China.
   # This ARC runner set requires a job container.
   sync_cn:
     name: ${{ matrix.component }} sync to TCR CN
-    runs-on: arc-runner-set-8c16g-containerd-guangzhou
+    runs-on: arc-2c4g-ctd-gz
     container:
       image: ubuntu:24.04
     needs: [publish_manifests, prepare]
@@ -382,29 +383,39 @@ jobs:
           fi
           echo "list=${tags}" >> "${GITHUB_OUTPUT}"
 
-      - name: Copy images to TCR CN
+      - name: Sync images to TCR CN
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           IMAGE_NAME: ${{ matrix.image }}
           MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
-          CRANE_COPY_ATTEMPTS: "3"
-          CRANE_COPY_TIMEOUT: 20m
+          CRANE_SYNC_ATTEMPTS: "3"
+          # Split pull/push instead of `crane copy` streaming: concurrent
+          # pull+push was getting rwnd-limited / unexpected EOF against TCR CN.
+          CRANE_PULL_TIMEOUT: 20m
+          CRANE_PUSH_TIMEOUT: 20m
         run: |
           set -euo pipefail
           src="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
           dst="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
+          work_dir="${RUNNER_TEMP:-/tmp}/crane-sync"
+          mkdir -p "${work_dir}"
 
-          copy_image() {
+          sync_image() {
             local from="$1"
             local to="$2"
             local attempt
-            for attempt in $(seq 1 "${CRANE_COPY_ATTEMPTS}"); do
-              echo "Copying ${from} -> ${to} (attempt ${attempt}/${CRANE_COPY_ATTEMPTS})"
-              if timeout "${CRANE_COPY_TIMEOUT}" crane copy "${from}" "${to}"; then
+            local tarball="${work_dir}/image.tar"
+            for attempt in $(seq 1 "${CRANE_SYNC_ATTEMPTS}"); do
+              echo "Syncing ${from} -> ${to} (attempt ${attempt}/${CRANE_SYNC_ATTEMPTS})"
+              rm -f "${tarball}"
+              if timeout "${CRANE_PULL_TIMEOUT}" crane pull "${from}" "${tarball}" \
+                && timeout "${CRANE_PUSH_TIMEOUT}" crane push "${tarball}" "${to}"; then
+                rm -f "${tarball}"
                 return 0
               fi
-              if [[ "${attempt}" == "${CRANE_COPY_ATTEMPTS}" ]]; then
-                echo "Failed to copy ${from} -> ${to}" >&2
+              rm -f "${tarball}"
+              if [[ "${attempt}" == "${CRANE_SYNC_ATTEMPTS}" ]]; then
+                echo "Failed to sync ${from} -> ${to}" >&2
                 return 1
               fi
               sleep "$((attempt * 10))"
@@ -412,8 +423,8 @@ jobs:
           }
 
           for arch in amd64 arm64; do
-            copy_image "${src}:${IMAGE_TAG}-${arch}" "${dst}:${IMAGE_TAG}-${arch}"
+            sync_image "${src}:${IMAGE_TAG}-${arch}" "${dst}:${IMAGE_TAG}-${arch}"
           done
           for tag in ${MANIFEST_TAGS}; do
-            copy_image "${src}:${tag}" "${dst}:${tag}"
+            sync_image "${src}:${tag}" "${dst}:${tag}"
           done
