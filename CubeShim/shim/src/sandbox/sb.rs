@@ -48,6 +48,21 @@ use super::pmem::Pmem;
 
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 
+fn tty_win_resize_request(
+    container_id: &str,
+    exec_id: &str,
+    width: u32,
+    height: u32,
+) -> agent::TtyWinResizeRequest {
+    agent::TtyWinResizeRequest {
+        container_id: container_id.to_string(),
+        exec_id: exec_id.to_string(),
+        row: height,
+        column: width,
+        ..Default::default()
+    }
+}
+
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
     Normal,
@@ -1024,6 +1039,36 @@ impl SandBox {
         Err(Error::NotFoundError(format!("not found container:{}", id)))
     }
 
+    pub async fn resize_pty(
+        &self,
+        container_id: &str,
+        exec_id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let agent_container_id = {
+            let containers = self.containers.lock().await;
+            containers
+                .get(container_id)
+                .ok_or_else(|| {
+                    Error::NotFoundError(format!("not found container:{}", container_id))
+                })?
+                .get_id()
+        };
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Other("cube-agent client is not connected".to_string()))?
+            .lock()
+            .await;
+        let request = tty_win_resize_request(&agent_container_id, exec_id, width, height);
+        client
+            .tty_win_resize(self.ctx.clone(), &request)
+            .await
+            .map_err(|error| Error::Other(format!("resize terminal failed:{error}")))?;
+        Ok(())
+    }
+
     pub async fn start_exec(&self, id: &String, exec_id: &String) -> Result<()> {
         let mut containers = self.containers.lock().await;
         if let Some(c) = containers.get_mut(id) {
@@ -1382,6 +1427,7 @@ mod tests {
     use crate::common::PRODUCT_CUBEBOX;
 
     use super::normalize_dns_for_agent;
+    use super::tty_win_resize_request;
     use super::Log;
     use super::SandBox;
 
@@ -1443,5 +1489,15 @@ mod tests {
     fn test_normalize_dns_for_agent_accepts_prefixed_entry() {
         let got = normalize_dns_for_agent(" nameserver 8.8.8.8 ").unwrap();
         assert_eq!(got, "nameserver 8.8.8.8");
+    }
+
+    #[test]
+    fn test_tty_win_resize_request_maps_dimensions() {
+        let request = tty_win_resize_request("container", "exec", 120, 40);
+
+        assert_eq!(request.container_id, "container");
+        assert_eq!(request.exec_id, "exec");
+        assert_eq!(request.row, 40);
+        assert_eq!(request.column, 120);
     }
 }

@@ -8,16 +8,22 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"syscall"
+	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+const terminalProcessCleanupTimeout = 5 * time.Second
 
 // terminalStreamWriter serializes container stdout/stderr into the gRPC stream.
 // containerd may copy both pipes concurrently, while gRPC permits only one
@@ -91,6 +97,10 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 	if err != nil {
 		return status.Errorf(codes.Internal, "wait for terminal process: %v", err)
 	}
+	processExited := false
+	defer func() {
+		cleanupTerminalProcess(ctx, process, processExited)
+	}()
 	if err := process.Start(ctx); err != nil {
 		return status.Errorf(codes.Internal, "start terminal process: %v", err)
 	}
@@ -126,6 +136,7 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 
 	select {
 	case result := <-exitStatus:
+		processExited = true
 		process.IO().Wait()
 		code, _, resultErr := result.Result()
 		if resultErr != nil {
@@ -141,6 +152,38 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 		return receiveErr
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+func cleanupTerminalProcess(ctx context.Context, process containerd.Process, processExited bool) {
+	namespace, ok := namespaces.Namespace(ctx)
+	if !ok {
+		namespace = namespaces.Default
+	}
+	cleanupCtx, cancel := context.WithTimeout(
+		namespaces.WithNamespace(context.Background(), namespace),
+		terminalProcessCleanupTimeout,
+	)
+	defer cancel()
+
+	if !processExited {
+		exitStatus, err := process.Wait(cleanupCtx)
+		if err != nil {
+			log.G(cleanupCtx).Warnf("terminal: wait for exec process cleanup failed: %v", err)
+		}
+		if err := process.Kill(cleanupCtx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+			log.G(cleanupCtx).Warnf("terminal: kill exec process failed: %v", err)
+		}
+		if exitStatus != nil {
+			select {
+			case <-exitStatus:
+			case <-cleanupCtx.Done():
+				log.G(cleanupCtx).Warn("terminal: timed out waiting for exec process to exit")
+			}
+		}
+	}
+	if _, err := process.Delete(cleanupCtx); err != nil && !errdefs.IsNotFound(err) {
+		log.G(cleanupCtx).Warnf("terminal: delete exec process failed: %v", err)
 	}
 }
 
