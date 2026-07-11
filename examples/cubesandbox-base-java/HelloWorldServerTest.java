@@ -47,6 +47,9 @@ public class HelloWorldServerTest {
             testConcurrentRequestsAllSucceed(client, base);
         } finally {
             server.stop(0);
+            if (server.getExecutor() instanceof ExecutorService executor) {
+                executor.shutdownNow();
+            }
         }
 
         if (failures > 0) {

@@ -31,6 +31,7 @@ ENV GOROOT=/usr/local/go \
     PATH="/usr/local/go/bin:/go/bin:${PATH}"
 
 WORKDIR /app
+COPY go.mod /app/go.mod
 COPY main.go /app/main.go
 COPY main_test.go /app/main_test.go
 

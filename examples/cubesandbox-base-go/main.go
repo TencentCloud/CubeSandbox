@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"time"
 )
 
 func main() {
@@ -21,22 +22,33 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", handleRoot)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { handleRootForPort(w, r, port) })
 	mux.HandleFunc("/health", handleHealth)
 
 	fmt.Printf("helloserver listening on :%s (Go %s)\n", port, runtime.Version())
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	server := &http.Server{
+		Addr:         ":" + port,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  30 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		fmt.Fprintln(os.Stderr, "server error:", err)
 		os.Exit(1)
 	}
 }
 
 func handleRoot(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	port := os.Getenv("APP_PORT")
 	if port == "" {
 		port = "8080"
 	}
+	handleRootForPort(w, r, port)
+}
+
+func handleRootForPort(w http.ResponseWriter, r *http.Request, port string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, "<!doctype html>\n"+
 		"<title>cubesandbox-base-go</title>\n"+
 		"<h1>Hello from Go inside a CubeSandbox MicroVM</h1>\n"+
