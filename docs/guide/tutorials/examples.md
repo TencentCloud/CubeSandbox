@@ -5,6 +5,7 @@ Hands-on examples demonstrating various Cube Sandbox use cases. Each example is 
 | Example | Description |
 |---------|-------------|
 | [Code Sandbox Quickstart](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/code-sandbox-quickstart) | The most basic usage: create a sandbox, run Python code, execute shell commands, manage network policies, and more — all via the E2B SDK. |
+| [Go Sandbox](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/go-sandbox) | A ready-to-use Go runtime template: compile and unit-test Go programs via `go test` through the E2B SDK, including a restricted-egress (air-gapped / allowlist) differentiated scenario. |
 | [Browser Sandbox (Playwright)](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/browser-sandbox) | Run a headless Chromium inside a MicroVM and control it remotely with Playwright via CDP. |
 | [OpenClaw Integration](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/openclaw-integration) | Deploy Cube Sandbox and configure the OpenClaw skill so AI agents can execute code in isolated VM environments. |
 | [SWE-bench with mini-swe-agent](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/mini-rl-training) | Automate SWE-bench coding tasks in isolated sandboxes using cube-sandbox + mini-swe-agent, with multi-model support and RL training vision. |
