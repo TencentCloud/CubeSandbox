@@ -316,7 +316,7 @@ jobs:
   # This ARC runner set requires a job container.
   sync_cn:
     name: ${{ matrix.component }} sync to TCR CN
-    runs-on: arc-runner-set-16c32g-containerd
+    runs-on: arc-runner-set-8c16g-containerd-guangzhou
     container:
       image: ubuntu:24.04
     needs: [publish_manifests, prepare]
