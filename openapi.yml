@@ -1,8 +1,3 @@
----
-# Copyright (c) 2026 Tencent Inc.
-# SPDX-License-Identifier: Apache-2.0
-#
-
 openapi: 3.1.0
 info:
   title: CubeAPI
@@ -602,7 +597,6 @@ components:
       - sandboxID
       - clientID
       - startedAt
-      - endAt
       - cpuCount
       - memoryMB
       - state
@@ -623,8 +617,13 @@ components:
           - 'null'
           format: int32
         endAt:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
+          description: |-
+            Projected next-timeout instant. Omitted for never-timeout sandboxes
+            (no deadline) rather than being misreported as equal to startedAt.
         envdVersion:
           type: string
         memoryMB:
@@ -792,8 +791,11 @@ components:
         autoPause:
           type: boolean
         timeout:
-          type: integer
+          type:
+          - integer
+          - 'null'
           format: int32
+          description: Idle timeout in seconds; None when the client did not send one.
     Sandbox:
       type: object
       description: |-
@@ -829,6 +831,49 @@ components:
           type:
           - string
           - 'null'
+    SandboxContainer:
+      type: object
+      description: A single container running inside a sandbox.
+      required:
+      - containerID
+      - name
+      - state
+      - image
+      - cpuCount
+      - memoryMB
+      properties:
+        containerID:
+          type: string
+        cpuCount:
+          type: integer
+          format: int32
+        image:
+          type: string
+        kind:
+          type:
+          - string
+          - 'null'
+        memoryMB:
+          type: integer
+          format: int32
+        name:
+          type: string
+        startedAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        state:
+          $ref: '#/components/schemas/SandboxContainerState'
+    SandboxContainerState:
+      type: string
+      description: Lifecycle state of an individual container inside a sandbox.
+      enum:
+      - running
+      - paused
+      - pausing
+      - stopped
+      - unknown
     SandboxDetail:
       type: object
       description: Detailed sandbox info returned by GET /sandboxes/{sandboxID}.
@@ -837,7 +882,6 @@ components:
       - sandboxID
       - clientID
       - startedAt
-      - endAt
       - envdVersion
       - cpuCount
       - memoryMB
@@ -849,6 +893,10 @@ components:
           - 'null'
         clientID:
           type: string
+        containers:
+          type: array
+          items:
+            $ref: '#/components/schemas/SandboxContainer'
         cpuCount:
           type: integer
           format: int32
@@ -862,8 +910,13 @@ components:
           - string
           - 'null'
         endAt:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
+          description: |-
+            Projected next-timeout instant. Omitted for never-timeout sandboxes
+            (no deadline) rather than being misreported as equal to startedAt.
         envdAccessToken:
           type:
           - string
@@ -1019,15 +1072,15 @@ components:
           - 'null'
           description: Whether public internet access is allowed for sandboxes from this template.
         createRequest: {}
+        instanceType:
+          type:
+          - string
+          - 'null'
         jobID:
           type:
           - string
           - 'null'
           description: Latest create/rebuild job id for the template.
-        instanceType:
-          type:
-          - string
-          - 'null'
         lastError:
           type:
           - string
@@ -1105,6 +1158,11 @@ components:
           type:
           - string
           - 'null'
+        jobID:
+          type:
+          - string
+          - 'null'
+          description: Latest create/rebuild job id for the template.
         lastError:
           type:
           - string
@@ -1117,11 +1175,6 @@ components:
           type:
           - string
           - 'null'
-        jobID:
-          type:
-          - string
-          - 'null'
-          description: Latest create/rebuild job id for the template.
     VersionMatrixView:
       type: object
       description: Full node x component version matrix.

@@ -156,6 +156,37 @@ pub struct SandboxVolumeMount {
     pub path: String,
 }
 
+// ─── Sandbox — container state ─────────────────────────────────────────────
+
+/// Lifecycle state of an individual container inside a sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxContainerState {
+    Running,
+    Paused,
+    Pausing,
+    Stopped,
+    Unknown,
+}
+
+/// A single container running inside a sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SandboxContainer {
+    #[serde(rename = "containerID")]
+    pub container_id: String,
+    pub name: String,
+    pub state: SandboxContainerState,
+    pub image: String,
+    #[serde(rename = "cpuCount")]
+    pub cpu_count: i32,
+    #[serde(rename = "memoryMB")]
+    pub memory_mb: i32,
+    #[serde(rename = "startedAt", skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
 // ─── Sandbox — create request ──────────────────────────────────────────────
 
 /// Request body for POST /sandboxes
@@ -314,6 +345,8 @@ pub struct SandboxDetail {
     pub state: SandboxState,
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
+    #[serde(rename = "containers", default, skip_serializing_if = "Vec::is_empty")]
+    pub containers: Vec<SandboxContainer>,
 }
 
 // ─── Sandbox — pause/resume/connect/snapshot ──────────────────────────────

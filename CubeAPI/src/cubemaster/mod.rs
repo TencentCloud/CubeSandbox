@@ -1037,7 +1037,7 @@ pub struct GetSandboxDataItem {
     pub end_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct GetSandboxContainerItem {
     #[serde(default)]
@@ -1076,14 +1076,15 @@ pub struct SandboxDetail {
     pub disk_size_mb: i32,
     pub annotations: HashMap<String, String>,
     pub labels: HashMap<String, String>,
+    pub containers: Vec<GetSandboxContainerItem>,
 }
 
-fn parse_cpu_millicores(s: &str) -> i32 {
+pub(crate) fn parse_cpu_millicores(s: &str) -> i32 {
     let s = s.trim().trim_end_matches('m');
     s.parse::<i32>().unwrap_or(0) / 1000
 }
 
-fn parse_mem_mb(s: &str) -> i32 {
+pub(crate) fn parse_mem_mb(s: &str) -> i32 {
     let s = s
         .trim()
         .trim_end_matches("Mi")
@@ -1254,6 +1255,7 @@ impl GetSandboxResponse {
             disk_size_mb: 0,
             annotations: item.annotations,
             labels: item.labels,
+            containers: item.containers,
         })
     }
 }

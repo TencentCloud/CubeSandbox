@@ -9,16 +9,18 @@ use super::validate_allow_out_domains_require_deny_all;
 use crate::{
     constants::{ENVD_VERSION_ANNOTATION, ENVD_VERSION_FALLBACK},
     cubemaster::{
-        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
-        CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
-        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
+        datetime_from_unix_nanos, extract_template_id, parse_cpu_millicores, parse_mem_mb,
+        CreateSandboxRequest, CubeEgressRule, CubeEgressRuleAction, CubeEgressRuleInject,
+        CubeEgressRuleMatch, CubeMasterClient, CubeMasterError, CubeNetworkConfig,
+        DeleteSandboxRequest, GetSandboxContainerItem, ListSandboxRequest, SandboxInfo,
         SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
         SandboxUpdateRequest,
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxDetail, SandboxLog,
-        SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
+        EgressRule, LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxContainer,
+        SandboxContainerState, SandboxDetail, SandboxLog, SandboxLogEntry, SandboxLogs,
+        SandboxLogsV2Response, SandboxNetworkConfig, SandboxState,
     },
 };
 
@@ -142,6 +144,7 @@ impl SandboxService {
             metadata: optional_metadata(d.labels),
             state: sandbox_state_from_status(d.status),
             volume_mounts: None,
+            containers: map_containers(&d.containers),
         })
     }
 
@@ -793,6 +796,33 @@ fn optional_metadata(metadata: HashMap<String, String>) -> Option<HashMap<String
         None
     } else {
         Some(metadata)
+    }
+}
+
+fn map_containers(items: &[GetSandboxContainerItem]) -> Vec<SandboxContainer> {
+    items.iter().map(map_container).collect()
+}
+
+fn map_container(item: &GetSandboxContainerItem) -> SandboxContainer {
+    SandboxContainer {
+        container_id: item.container_id.clone(),
+        name: item.name.clone(),
+        state: container_state_from_status(item.status),
+        image: item.image.clone(),
+        cpu_count: parse_cpu_millicores(&item.cpu),
+        memory_mb: parse_mem_mb(&item.mem),
+        started_at: datetime_from_unix_nanos(item.create_at),
+        kind: Some(item.kind.clone()).filter(|k| !k.is_empty()),
+    }
+}
+
+fn container_state_from_status(status: i32) -> SandboxContainerState {
+    match status {
+        1 => SandboxContainerState::Running,
+        4 => SandboxContainerState::Pausing,
+        5 => SandboxContainerState::Paused,
+        2 => SandboxContainerState::Stopped,
+        _ => SandboxContainerState::Unknown,
     }
 }
 
