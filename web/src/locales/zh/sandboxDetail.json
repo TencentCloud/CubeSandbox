@@ -23,6 +23,7 @@
     "envd": "envd"
   },
   "actions": {
+    "terminal": "打开终端",
     "resume": "恢复",
     "pause": "暂停",
     "kill": "终止"

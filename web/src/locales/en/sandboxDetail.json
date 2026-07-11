@@ -23,6 +23,7 @@
     "envd": "envd"
   },
   "actions": {
+    "terminal": "Open terminal",
     "resume": "Resume",
     "pause": "Pause",
     "kill": "Kill"

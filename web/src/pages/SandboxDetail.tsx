@@ -11,10 +11,11 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Pause, Play, Trash2, RefreshCw, Terminal } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import { SandboxTerminalDialog } from '@/components/SandboxTerminalDialog';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -61,6 +62,7 @@ export default function SandboxDetailPage() {
   }, [logs.data]);
 
   const [actionError, setActionError] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const onLifecycleError = (err: unknown) => {
     setActionError(formatSandboxActionError(err, t));
   };
@@ -117,6 +119,9 @@ export default function SandboxDetailPage() {
           </p>
         </div>
         <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setTerminalOpen(true)} disabled={state !== 'running'}>
+            <Terminal size={14} /> {t('actions.terminal')}
+          </Button>
           {state === 'paused' ? (
             <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
               <Play size={14} /> {t('actions.resume')}
@@ -133,6 +138,7 @@ export default function SandboxDetailPage() {
       </div>
 
       <SandboxActionErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
+      <SandboxTerminalDialog open={terminalOpen} sandboxId={sandboxID} onOpenChange={setTerminalOpen} />
 
       {/* ── Info cards ── */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
