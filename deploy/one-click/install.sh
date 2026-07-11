@@ -152,6 +152,24 @@ fi
 
 init_external_dep_defaults
 
+init_terminal_gateway_token() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+
+  if [[ -z "${TERMINAL_GATEWAY_TOKEN:-}" ]]; then
+    require_cmd od
+    require_cmd tr
+    TERMINAL_GATEWAY_TOKEN="$(od -An -N32 -tx1 /dev/urandom | tr -d '[:space:]')"
+    log "generated terminal gateway token"
+  fi
+
+  [[ ${#TERMINAL_GATEWAY_TOKEN} -ge 32 ]] || die "TERMINAL_GATEWAY_TOKEN must be at least 32 characters"
+  [[ "${TERMINAL_GATEWAY_TOKEN}" =~ ^[A-Za-z0-9._~-]+$ ]] || \
+    die "TERMINAL_GATEWAY_TOKEN may contain only letters, digits, '.', '_', '~', and '-'"
+  export TERMINAL_GATEWAY_TOKEN
+}
+
+init_terminal_gateway_token
+
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
 case "${CUBE_PVM_ENABLE}" in
   0|1) ;;
@@ -300,6 +318,7 @@ generate_cubemaster_config_ports() {
   local mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
   local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
   local redis_password="${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
+  local terminal_gateway_token="${TERMINAL_GATEWAY_TOKEN}"
   # Decoupled from the TKE path: one-click decides CubeMaster's listen address
   # here. Defaults to 0.0.0.0 to stay reachable from compute nodes / host-net
   # cube-proxy; set CUBEMASTER_HTTP_BIND=127.0.0.1 to harden a lone node.
@@ -314,6 +333,7 @@ generate_cubemaster_config_ports() {
     -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
     -e "s|__CUBE_SANDBOX_REDIS_PASSWORD__|$(escape_sed "${redis_password}")|g" \
     -e "s|__CUBEMASTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
+    -e "s|__TERMINAL_GATEWAY_TOKEN__|$(escape_sed "${terminal_gateway_token}")|g" \
     "${cfg}"
 }
 
@@ -1113,6 +1133,9 @@ case "${MIRROR}" in
   *) die "unsupported MIRROR: ${MIRROR} (expected empty or cn)" ;;
 esac
 upsert_env_kv "${RUNTIME_ENV_FILE}" "MIRROR" "${MIRROR}"
+if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "TERMINAL_GATEWAY_TOKEN" "${TERMINAL_GATEWAY_TOKEN}"
+fi
 if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NODE_IP" "${CUBE_SANDBOX_NODE_IP}"
 fi
