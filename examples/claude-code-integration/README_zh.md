@@ -63,6 +63,22 @@ python network_policy.py "用一段话解释什么是 Unix pipe"
 python resume_claude_code.py "创建一个简单的 Python Web 服务"
 ```
 
+## 目录结构
+
+```
+claude-code-integration/
+├── run_claude_code.py      # 单次执行入口
+├── resume_claude_code.py   # 暂停与恢复示例
+├── network_policy.py       # 默认拒绝出口与凭据注入
+├── env_utils.py            # 提供商和命令构造工具
+├── _common.py              # 共用沙箱初始化与命令执行工具
+├── mcp_server.py           # 可选 MCP 服务
+├── sandbox_exec.py         # 独立沙箱执行工具
+├── tests/                  # 自动化测试
+├── requirements.txt
+└── .env.example
+```
+
 ## 使用场景
 
 ### 场景 A：隔离代码开发

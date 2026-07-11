@@ -116,6 +116,10 @@ claude-code-integration/
 ├── resume_claude_code.py       # Pause/resume session persistence
 ├── network_policy.py           # Default-deny egress + key injection
 ├── env_utils.py                # Environment & credential helpers
+├── _common.py                  # Shared sandbox setup and command helpers
+├── mcp_server.py               # Optional MCP tool server
+├── sandbox_exec.py             # Standalone sandbox execution helper
+├── tests/                      # Automated tests for helpers and MCP handling
 ├── requirements.txt            # Python dependencies
 ├── .env.example                # Configuration template
 ├── .gitignore

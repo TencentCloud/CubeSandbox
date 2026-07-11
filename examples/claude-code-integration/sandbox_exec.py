@@ -28,7 +28,13 @@ E2B_API_URL = os.getenv("E2B_API_URL", "http://127.0.0.1:3000")
 E2B_API_KEY = os.getenv("E2B_API_KEY", "e2b_000000")
 
 # Session file for cross-process sandbox reuse (used with --keep-alive)
-SESSION_FILE = Path(tempfile.gettempdir()) / "cubesandbox_claude_session"
+SESSION_FILE = Path(tempfile.gettempdir()) / f"cubesandbox_claude_session_{os.getuid()}"
+
+
+def _write_session(sandbox_id):
+    fd = os.open(SESSION_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as session_file:
+        session_file.write(sandbox_id)
 
 # In-process cache: keep one sandbox alive for reuse, avoid cold starts
 _sandbox = None
@@ -53,7 +59,7 @@ def _get_sandbox(timeout=300):
             except Exception:
                 SESSION_FILE.unlink(missing_ok=True)  # stale session, clean up
         _sandbox = Sandbox.create(TEMPLATE_ID, timeout=timeout)
-        SESSION_FILE.write_text(_sandbox.sandbox_id)
+        _write_session(_sandbox.sandbox_id)
     return _sandbox
 
 

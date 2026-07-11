@@ -23,22 +23,10 @@ from env_utils import (
     get_provider,
     resolve_llm_host,
     provider_inject,
-    env_export_string,
 )
+from _common import CC_USER, run_command, setup_sandbox
 
 load_dotenv()  # 加载 .env 文件中的环境变量
-
-CC_USER = "dev"  # 沙箱内运行 Claude Code 的非 root 用户名
-
-
-def run_command(sandbox, cmd, user="root", timeout=300):
-    """在沙箱中执行一条 shell 命令，返回 CommandResult。
-
-    cubesandbox SDK 的 commands.run() 对非零退出码不抛异常，
-    直接返回 CommandResult。调用者需自行检查 exit_code。
-    """
-    return sandbox.commands.run(cmd, user=user, timeout=timeout)
-
 
 def main():
     # ── 解析命令行参数 ────────────────────────────────────────────
@@ -109,36 +97,19 @@ def main():
     print(f"沙箱已创建: {sandbox_id}")
 
     try:
-        # ── 创建非 root 用户 ─────────────────────────────────────────
-        run_command(sandbox, f"id -u {CC_USER} || useradd -m -s /bin/bash {CC_USER}")
-        run_command(sandbox, f"mkdir -p /home/{CC_USER}/workspace && chown -R {CC_USER}:{CC_USER} /home/{CC_USER}")
-
-        # ── 安装 Claude Code（如果模板未预装）───────────────────────
+        # ── 创建非 root 用户并确保 Claude Code 可用 ─────────────────
         print("正在检查 Claude Code ...")
-        result = run_command(sandbox, "which claude", timeout=10)
-        if result.exit_code != 0:
-            print("  未找到，正在安装 Node.js ...")
-            result = run_command(sandbox,
-                "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - "
-                "&& apt-get install -y nodejs", timeout=180)
-            if result.exit_code != 0:
-                print(f"Node.js 安装失败: {result.stderr}")
-                print("提示：沙箱无互联网访问权限。请使用 --allow-internet 标志进行首次安装，"
-                      "或使用 Dockerfile 构建预装镜像。")
-                sys.exit(1)
-            print("  正在安装 Claude Code CLI ...")
-            result = run_command(sandbox,
-                "npm install -g @anthropic-ai/claude-code", timeout=300)
-            if result.exit_code != 0:
-                print(f"Claude Code 安装失败: {result.stderr}")
-                sys.exit(1)
-        print(f"  Claude Code: {run_command(sandbox, 'claude --version', timeout=10).stdout.strip()}")
+        try:
+            setup_sandbox(sandbox, {}, f"/home/{CC_USER}/workspace")
+        except RuntimeError as error:
+            print(f"Claude Code 设置失败: {error}")
+            print("提示：安全模式下首次在线安装需要 --allow-internet；"
+                  "生产环境建议使用 Dockerfile 构建预装镜像。")
+            sys.exit(1)
 
         # ── 设置占位凭据（真实密钥由 CubeEgress 在传输时注入）───
         placeholder_env = build_claude_env()
         placeholder_env["ANTHROPIC_AUTH_TOKEN"] = "sk-placeholder"
-        run_command(sandbox, env_export_string(placeholder_env))
-
         # ── 运行 Claude Code ───────────────────────────────────────
         cmd = claude_command(args.prompt, workdir=f"/home/{CC_USER}/workspace",
                              env_vars=placeholder_env, approve=True, user=CC_USER)

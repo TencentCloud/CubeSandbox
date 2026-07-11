@@ -21,20 +21,20 @@ PROVIDER_DEFAULT_MODEL = {
 }
 
 # 各提供商所需的环境变量配置
-PROVIDER_ENV_VARS = {
+PROVIDER_ENV_DEFAULTS = {
     "deepseek": {
-        "ANTHROPIC_AUTH_TOKEN": os.getenv("ANTHROPIC_AUTH_TOKEN", ""),
-        "ANTHROPIC_BASE_URL": os.getenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic"),
-        "ANTHROPIC_MODEL": os.getenv("ANTHROPIC_MODEL", "deepseek-v4-pro"),
+        "ANTHROPIC_AUTH_TOKEN": "",
+        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+        "ANTHROPIC_MODEL": "deepseek-v4-pro",
     },
     "anthropic": {
-        "ANTHROPIC_AUTH_TOKEN": os.getenv("ANTHROPIC_AUTH_TOKEN", ""),
-        "ANTHROPIC_BASE_URL": os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-        "ANTHROPIC_MODEL": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+        "ANTHROPIC_AUTH_TOKEN": "",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        "ANTHROPIC_MODEL": "claude-sonnet-4-6",
     },
     "openai": {
-        "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
-        "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", ""),
+        "OPENAI_API_KEY": "",
+        "OPENAI_BASE_URL": "",
     },
 }
 
@@ -56,14 +56,14 @@ def get_model():
 def build_claude_env():
     """构造在沙箱中运行 Claude Code 所需的环境变量字典。"""
     provider = get_provider()
-    if provider not in PROVIDER_ENV_VARS:
+    if provider not in PROVIDER_ENV_DEFAULTS:
         raise ValueError(
             f"不支持的提供商: {provider}。"
-            f"请选择: {', '.join(PROVIDER_ENV_VARS.keys())}"
+            f"请选择: {', '.join(PROVIDER_ENV_DEFAULTS.keys())}"
         )
 
     # 复制该提供商的环境变量配置
-    env_vars = dict(PROVIDER_ENV_VARS[provider])
+    env_vars = {key: os.getenv(key, default) for key, default in PROVIDER_ENV_DEFAULTS[provider].items()}
     env_vars["ANTHROPIC_MODEL"] = get_model()
     # 过滤掉空值
     return {k: v for k, v in env_vars.items() if v}

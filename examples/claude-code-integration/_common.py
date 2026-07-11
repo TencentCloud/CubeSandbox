@@ -38,8 +38,6 @@ def ensure_claude(sandbox):
         )
         if result.exit_code != 0:
             raise RuntimeError(f"Claude Code 安装失败: {result.stderr}")
-    ver = run_command(sandbox, "node --version", timeout=10)
-    print(f"  Node: {ver.stdout.strip()}")
     ver = run_command(sandbox, "claude --version", timeout=10)
     print(f"  Claude Code: {ver.stdout.strip()}")
 
