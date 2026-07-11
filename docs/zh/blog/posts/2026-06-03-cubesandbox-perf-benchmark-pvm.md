@@ -487,32 +487,42 @@ python bench_pause_resume_concurrency.py -c 10 -n 5 --no-header
 
 ## 五、HTTP 框架迁移性能对比（gorilla/mux → gin-gonic/gin）
 
-CubeMaster 的 HTTP API 层从 `gorilla/mux` 迁移到 `gin-gonic/gin`，将手写的 25+ case `switch` 路由分发器替换为 Gin 原生的 radix-tree 路由。本节通过两层基准测试验证迁移不影响创建性能。
+CubeMaster 的 HTTP API 层从 `gorilla/mux` 迁移到 `gin-gonic/gin`，将手写的 25+ case `switch` 路由分发器替换为 Gin 原生的 radix-tree 路由。本节通过 mux vs gin 对比基准测试验证迁移不影响创建性能。
 
-### 5.1 本地 HTTP 路由微基准
+### 5.1 本地 HTTP 路由对比微基准
 
-在开发机上直接测量 Gin 路由匹配 + handler 调用 + 响应写入的裸开销，排除业务逻辑耗时：
+在开发机上用相同的路由表、相同的 handler 逻辑，直接对比 mux 与 gin 的路由匹配 + 响应写入开销，排除业务逻辑耗时：
 
 ```bash
 cd CubeMaster
-go test -bench=BenchmarkGin -benchmem -count=3 -benchtime=1s ./pkg/server/ -run=^$
+go test -bench=Benchmark -benchmem -count=5 -benchtime=1s ./pkg/server/ -run=^$
 ```
 
-**测试环境**：AMD Ryzen 5 7500F (6C/12T)，Go 1.26.4，gin v1.10.0 Release 模式
+**测试环境**：AMD Ryzen 5 7500F 6 核 (12T)，Go 1.26.4，gin v1.10.0 Release 模式，5 轮取平均
 
-| 基准场景 | avg (ns/op) | 内存 (B/op) | 分配 (allocs/op) | 说明 |
-|---------|------------|-------------|-----------------|------|
-| `BenchmarkGinRouteMatch` | **3,070** | 7,151 | 33 | POST /cube/sandbox（典型创建请求路由） |
-| `BenchmarkGinParamRoute` | **2,529** | 6,629 | 25 | GET /cube/snapshot/:id（路径参数提取） |
-| `BenchmarkGinStaticPriority` | **2,613** | 6,750 | 26 | GET /cube/snapshot/storage（静态优先路由） |
+| 场景 | gorilla/mux (ns/op) | gin-gonic/gin (ns/op) | 差异 | 说明 |
+|------|-------------------:|---------------------:|-----:|------|
+| POST /cube/sandbox | **2,652** | **2,992** | +12.8% | 典型创建请求（静态路由） |
+| GET /cube/snapshot/:id | **3,310** | **3,133** | **-5.3%** | 路径参数提取 |
+| GET /cube/snapshot/storage | **2,816** | **3,089** | +9.7% | 静态优先路由 |
+| GET /cube/template/build/:id/status | **3,371** | **3,011** | **-10.7%** | 嵌套路径参数 |
 
-**结论**：Gin 路由层单次开销约 **2.5–3.1 μs**。对比 §3.2 中单并发创建延迟 **67,000 μs**（67 ms），HTTP 路由层占比 **< 0.005%**，完全在噪声范围内。迁移不会影响创建性能。
+| 场景 | mux 内存/分配 | gin 内存/分配 | 说明 |
+|------|-------------|-------------|------|
+| POST /cube/sandbox | 7,072 B / 28 allocs | 7,062 B / 31 allocs | 内存相当，gin 多 3 次分配 |
+| GET /cube/snapshot/:id | 7,345 B / 27 allocs | 7,159 B / 31 allocs | gin 少 186 B |
+| GET /cube/template/build/:id/status | 7,361 B / 27 allocs | 7,047 B / 29 allocs | gin 少 314 B |
+
+**分析**：
+- **静态路由**：Gin 比 mux 慢约 10-13%（+300 ns），因 Gin 的 radix-tree 节点遍历比 mux 的前缀匹配稍重
+- **参数路由**：Gin 比 mux 快 5-11%（-180~360 ns），因 Gin 的参数匹配是原生优化的
+- **绝对差异**：300-400 ns 量级。对比 §3.2 单并发创建延迟 67,000,000 ns（67 ms），HTTP 路由层占比 **< 0.0005%**
+
+**结论**：Gin 迁移对 sandbox 创建性能**无可测量影响**。静态路由的微小开销被参数路由的增益抵消，且整体路由开销远小于业务逻辑耗时。
 
 ### 5.2 PVM 端到端并发创建对比
 
-在 PVM 环境上使用 `cube-bench` 对比 master（mux）与 gin-refactor（gin）分支的并发创建性能：
-
-**步骤：**
+在 PVM 环境上使用 `cube-bench` 对比 master（mux）与 gin-refactor（gin）分支的端到端并发创建性能：
 
 ```bash
 # 1. 构建 cube-bench
@@ -537,7 +547,7 @@ cd examples/cube-bench && make
 | 20   | master (mux)    | — | — | — | |
 | 20   | gin-refactor    | — | — | — | |
 
-> **预期**：两分支数据应在正常波动范围内（±5%），因 HTTP 路由层开销（~3 μs）远小于 sandbox 创建耗时（~67 ms）。
+> **预期**：两分支数据应在正常波动范围内（±5%）。根据 §5.1 的微基准数据，HTTP 路由层开销（~3 μs）远小于 sandbox 创建耗时（~67 ms），迁移不会影响创建性能。
 
 ---
 ## 附录：测试脚本索引

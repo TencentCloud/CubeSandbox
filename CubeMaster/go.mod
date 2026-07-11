@@ -18,6 +18,7 @@ require (
 	github.com/gomodule/redigo v1.9.3
 	github.com/google/go-containerregistry v0.21.6
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/mux v1.8.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/json-iterator/go v1.1.12
