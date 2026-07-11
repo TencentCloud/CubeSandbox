@@ -1037,7 +1037,7 @@ pub struct GetSandboxDataItem {
     pub end_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct GetSandboxContainerItem {
     #[serde(default)]
