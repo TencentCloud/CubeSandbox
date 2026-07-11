@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gorilla/mux"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -169,7 +168,7 @@ func commitTemplateErrorCode(err error) int {
 
 func handleTemplateBuildStatusAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	_ = w
-	buildID := strings.TrimSpace(mux.Vars(r)["build_id"])
+	buildID := strings.TrimSpace(buildIDFromPath(r.URL.Path))
 	if buildID == "" {
 		return &templateBuildStatusResponse{
 			Res: &types.Res{Ret: &types.Ret{
@@ -211,4 +210,13 @@ func handleTemplateBuildStatusAction(w http.ResponseWriter, r *http.Request, rt 
 		Progress:     int(job.Progress),
 		Message:      message,
 	}
+}
+
+// TODO: [shortcut] Temporary manual path param extraction because handler
+// signature stays (w,r,rt) to preserve unit test compatibility.
+// Future migration to *gin.Context can use c.Param("build_id").
+func buildIDFromPath(path string) string {
+	prefix := actionURI(TemplateBuildStatusAction) + "/"
+	trimmed := strings.TrimPrefix(path, prefix)
+	return strings.TrimSuffix(trimmed, "/status")
 }

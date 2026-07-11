@@ -7,7 +7,7 @@ package meta
 import (
 	"net/http"
 
-	"github.com/gorilla/mux"
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
@@ -20,9 +20,9 @@ const (
 	readyzAction        = "/readyz"
 	registerNodeAction  = "/nodes/register"
 	nodesAction         = "/nodes"
-	nodeAction          = "/nodes/{node_id}"
-	nodeStatusAction    = "/nodes/{node_id}/status"
-	nodeLabelsAction    = "/nodes/{node_id}/labels"
+	nodeAction          = "/nodes/:node_id"
+	nodeStatusAction    = "/nodes/:node_id/status"
+	nodeLabelsAction    = "/nodes/:node_id/labels"
 	versionMatrixAction = "/version-matrix"
 )
 
@@ -76,14 +76,14 @@ func NodeLabelsAction() string {
 	return nodeLabelsAction
 }
 
-func ReadyzHandler(w http.ResponseWriter, r *http.Request) {
+func readyzGinHandler(c *gin.Context) {
 	retCode := int(errorcode.ErrorCode_Success)
 	retMsg := "ok"
 	if !nodemeta.Ready() {
 		retCode = int(errorcode.ErrorCode_MasterInternalError)
 		retMsg = "metadata service not ready"
 	}
-	common.WriteResponse(w, http.StatusOK, &sandboxtypes.Res{
+	common.WriteResponse(c.Writer, http.StatusOK, &sandboxtypes.Res{
 		Ret: &sandboxtypes.Ret{
 			RetCode: retCode,
 			RetMsg:  retMsg,
@@ -91,104 +91,104 @@ func ReadyzHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func RegisterNodeHandler(w http.ResponseWriter, r *http.Request) {
+func registerNodeGinHandler(c *gin.Context) {
 	req := &nodemeta.RegisterNodeRequest{}
-	if err := common.GetBodyReq(r, req); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
+	if err := common.GetBodyReq(c.Request, req); err != nil {
+		writeErr(c.Writer, http.StatusBadRequest, err)
 		return
 	}
-	data, err := nodemeta.RegisterNode(r.Context(), req)
+	data, err := nodemeta.RegisterNode(c.Request.Context(), req)
 	if err != nil {
-		writeErr(w, http.StatusOK, err)
+		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(w, http.StatusOK, &nodeResponse{
+	common.WriteResponse(c.Writer, http.StatusOK, &nodeResponse{
 		RequestID: req.RequestID,
 		Ret:       successRet(),
 		Data:      data,
 	})
 }
 
-func UpdateNodeStatusHandler(w http.ResponseWriter, r *http.Request) {
+func updateNodeStatusGinHandler(c *gin.Context) {
 	req := &nodemeta.UpdateNodeStatusRequest{}
-	if err := common.GetBodyReq(r, req); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
+	if err := common.GetBodyReq(c.Request, req); err != nil {
+		writeErr(c.Writer, http.StatusBadRequest, err)
 		return
 	}
-	nodeID := mux.Vars(r)["node_id"]
-	data, err := nodemeta.UpdateNodeStatus(r.Context(), nodeID, req)
+	nodeID := c.Param("node_id")
+	data, err := nodemeta.UpdateNodeStatus(c.Request.Context(), nodeID, req)
 	if err != nil {
-		writeErr(w, http.StatusOK, err)
+		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(w, http.StatusOK, &nodeResponse{
+	common.WriteResponse(c.Writer, http.StatusOK, &nodeResponse{
 		RequestID: req.RequestID,
 		Ret:       successRet(),
 		Data:      data,
 	})
 }
 
-func GetNodeHandler(w http.ResponseWriter, r *http.Request) {
-	nodeID := mux.Vars(r)["node_id"]
-	data, err := nodemeta.GetNode(r.Context(), nodeID)
+func getNodeGinHandler(c *gin.Context) {
+	nodeID := c.Param("node_id")
+	data, err := nodemeta.GetNode(c.Request.Context(), nodeID)
 	if err != nil {
-		writeErr(w, http.StatusOK, err)
+		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(w, http.StatusOK, &nodeResponse{
+	common.WriteResponse(c.Writer, http.StatusOK, &nodeResponse{
 		Ret:  successRet(),
 		Data: data,
 	})
 }
 
-func ListNodesHandler(w http.ResponseWriter, r *http.Request) {
-	data, err := nodemeta.ListNodes(r.Context())
+func listNodesGinHandler(c *gin.Context) {
+	data, err := nodemeta.ListNodes(c.Request.Context())
 	if err != nil {
-		writeErr(w, http.StatusOK, err)
+		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(w, http.StatusOK, &nodesResponse{
+	common.WriteResponse(c.Writer, http.StatusOK, &nodesResponse{
 		Ret:  successRet(),
 		Data: data,
 	})
 }
 
-func VersionMatrixHandler(w http.ResponseWriter, r *http.Request) {
-	data, err := nodemeta.GetVersionMatrix(r.Context())
+func versionMatrixGinHandler(c *gin.Context) {
+	data, err := nodemeta.GetVersionMatrix(c.Request.Context())
 	if err != nil {
-		writeErr(w, http.StatusOK, err)
+		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(w, http.StatusOK, &versionMatrixResponse{
+	common.WriteResponse(c.Writer, http.StatusOK, &versionMatrixResponse{
 		Ret:  successRet(),
 		Data: data,
 	})
 }
 
-func UpdateNodeLabelsHandler(w http.ResponseWriter, r *http.Request) {
-	nodeID := mux.Vars(r)["node_id"]
+func updateNodeLabelsGinHandler(c *gin.Context) {
+	nodeID := c.Param("node_id")
 	req := &nodemeta.UpdateNodeLabelsRequest{}
-	if err := common.GetBodyReq(r, req); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
+	if err := common.GetBodyReq(c.Request, req); err != nil {
+		writeErr(c.Writer, http.StatusBadRequest, err)
 		return
 	}
-	if err := nodemeta.UpdateNodeLabels(r.Context(), nodeID, req.Labels); err != nil {
-		writeErr(w, http.StatusOK, err)
+	if err := nodemeta.UpdateNodeLabels(c.Request.Context(), nodeID, req.Labels); err != nil {
+		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(w, http.StatusOK, &sandboxtypes.Res{
+	common.WriteResponse(c.Writer, http.StatusOK, &sandboxtypes.Res{
 		Ret: successRet(),
 	})
 }
 
-func DeleteNodeLabelHandler(w http.ResponseWriter, r *http.Request) {
-	nodeID := mux.Vars(r)["node_id"]
-	key := r.URL.Query().Get("key")
-	if err := nodemeta.DeleteNodeLabel(r.Context(), nodeID, key); err != nil {
-		writeErr(w, http.StatusOK, err)
+func deleteNodeLabelGinHandler(c *gin.Context) {
+	nodeID := c.Param("node_id")
+	key := c.Query("key")
+	if err := nodemeta.DeleteNodeLabel(c.Request.Context(), nodeID, key); err != nil {
+		writeErr(c.Writer, http.StatusOK, err)
 		return
 	}
-	common.WriteResponse(w, http.StatusOK, &sandboxtypes.Res{
+	common.WriteResponse(c.Writer, http.StatusOK, &sandboxtypes.Res{
 		Ret: successRet(),
 	})
 }
