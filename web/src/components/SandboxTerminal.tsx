@@ -96,7 +96,10 @@ export default function SandboxTerminal({ sandboxID, onClose }: SandboxTerminalP
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         onClose();
-      } else if (e.key === 'F11' || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'f')) {
+      } else if (
+        e.key === 'F11' ||
+        ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f')
+      ) {
         e.preventDefault();
         toggleFullscreen();
       }
@@ -169,7 +172,7 @@ export default function SandboxTerminal({ sandboxID, onClose }: SandboxTerminalP
               </CardDescription>
             </div>
             <Badge
-              tone={tone as any}
+              tone={tone}
               className={cn(
                 'h-5 px-1.5 text-[10px] uppercase tracking-wider',
                 displayStatus === 'connecting' && 'animate-pulse',

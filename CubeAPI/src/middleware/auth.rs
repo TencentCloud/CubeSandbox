@@ -5,7 +5,11 @@
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Request, State},
-    http::header::{HeaderValue, AUTHORIZATION},
+    http::{
+        header::{HeaderValue, AUTHORIZATION},
+        uri::PathAndQuery,
+        Uri,
+    },
     middleware::Next,
     response::Response,
 };
@@ -258,7 +262,50 @@ pub async fn websocket_auth(mut request: Request, next: Next) -> Result<Response
         }
     }
 
+    strip_websocket_auth_query_params(&mut request)?;
+
     Ok(next.run(request).await)
+}
+
+fn strip_websocket_auth_query_params(request: &mut Request) -> Result<(), AppError> {
+    let Some(query) = request.uri().query() else {
+        return Ok(());
+    };
+
+    let mut removed_secret = false;
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "api_key" | "access_token" => removed_secret = true,
+            _ => {
+                serializer.append_pair(&key, &value);
+            }
+        }
+    }
+
+    if !removed_secret {
+        return Ok(());
+    }
+
+    let sanitized_query = serializer.finish();
+    let path = request.uri().path();
+    let path_and_query = if sanitized_query.is_empty() {
+        path.to_string()
+    } else {
+        format!("{}?{}", path, sanitized_query)
+    };
+
+    let mut parts = request.uri().clone().into_parts();
+    parts.path_and_query = Some(
+        path_and_query
+            .parse::<PathAndQuery>()
+            .map_err(|_| AppError::BadRequest("invalid WebSocket query parameters".to_string()))?,
+    );
+    *request.uri_mut() = Uri::from_parts(parts)
+        .map_err(|_| AppError::BadRequest("invalid WebSocket URI".to_string()))?;
+
+    Ok(())
 }
 
 /// Terminal-only fallback: when no `auth_callback_url` is configured but an
@@ -524,5 +571,22 @@ mod tests {
             .collect();
         assert!(methods.contains(&"POST"), "should see POST");
         assert!(methods.contains(&"PATCH"), "should see PATCH");
+    }
+
+    #[tokio::test]
+    async fn websocket_auth_strips_credentials_from_request_uri() {
+        let mut request = axum::http::Request::builder()
+            .uri(
+                "/sandboxes/sb-1/terminal/ws?access_token=tok%201&cols=100&api_key=key%202&rows=40&container=web",
+            )
+            .body(Body::empty())
+            .unwrap();
+
+        strip_websocket_auth_query_params(&mut request).unwrap();
+
+        assert_eq!(
+            request.uri().to_string(),
+            "/sandboxes/sb-1/terminal/ws?cols=100&rows=40&container=web"
+        );
     }
 }

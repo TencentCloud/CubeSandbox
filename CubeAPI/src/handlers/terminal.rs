@@ -413,9 +413,14 @@ async fn envd_reader(
                 .await;
                 return reason.unwrap_or_else(|| "cancelled".to_string());
             },
-            _ = ping_rx.recv() => {
-                if let Err(e) = ws_tx.send(Message::Ping(vec![])).await {
-                    tracing::debug!(error = %e, "failed to send WebSocket ping");
+            ping = ping_rx.recv() => {
+                match ping {
+                    Some(()) => {
+                        if let Err(e) = ws_tx.send(Message::Ping(vec![])).await {
+                            tracing::debug!(error = %e, "failed to send WebSocket ping");
+                        }
+                    }
+                    None => return "keepalive_stopped".to_string(),
                 }
                 continue;
             },
