@@ -119,7 +119,7 @@ export default function SandboxDetailPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setTerminalOpen(true)} disabled={state !== 'running'}>
+          <Button variant="outline" onClick={() => setTerminalOpen(true)} disabled={state !== 'running' || !data?.terminalTargets?.length}>
             <Terminal size={14} /> {t('actions.terminal')}
           </Button>
           {state === 'paused' ? (
@@ -138,7 +138,7 @@ export default function SandboxDetailPage() {
       </div>
 
       <SandboxActionErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
-      <SandboxTerminalDialog open={terminalOpen} sandboxId={sandboxID} onOpenChange={setTerminalOpen} />
+      <SandboxTerminalDialog open={terminalOpen} sandboxId={sandboxID} targets={data?.terminalTargets ?? []} onOpenChange={setTerminalOpen} />
 
       {/* ── Info cards ── */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">

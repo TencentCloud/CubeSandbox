@@ -6,14 +6,16 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { Maximize2, TerminalSquare, X } from 'lucide-react';
+import { Maximize2, RefreshCw, TerminalSquare, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { getSessionToken } from '@/lib/session';
 
 type TerminalFrame =
-  | { type: 'open'; sandboxId: string; cols: number; rows: number }
+  | { type: 'open'; sandboxId: string; containerId: string; cols: number; rows: number }
   | { type: 'input'; data: string }
-  | { type: 'resize'; cols: number; rows: number };
+  | { type: 'resize'; cols: number; rows: number }
+  | { type: 'keepalive' };
 
 function terminalSocketUrl(sandboxId: string): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -24,16 +26,26 @@ function terminalSocketUrl(sandboxId: string): string {
 export function SandboxTerminalDialog({
   open,
   sandboxId,
+  targets,
   onOpenChange,
 }: {
   open: boolean;
   sandboxId: string;
+  targets: Array<{ containerID: string; name: string }>;
   onOpenChange(open: boolean): void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [fullScreen, setFullScreen] = useState(false);
+  const [containerId, setContainerId] = useState('');
+  const [connectionNonce, setConnectionNonce] = useState(0);
+
+  useEffect(() => {
+    if (!targets.some((target) => target.containerID === containerId)) {
+      setContainerId(targets[0]?.containerID ?? '');
+    }
+  }, [containerId, targets]);
 
   useEffect(() => {
     if (!open || !hostRef.current) return;
@@ -57,7 +69,15 @@ export function SandboxTerminalDialog({
     fit.fit();
     terminal.writeln('\x1b[90mConnecting to sandbox terminal…\x1b[0m');
 
-    const socket = new WebSocket(terminalSocketUrl(sandboxId));
+    const target = targets.find((item) => item.containerID === containerId) ?? targets[0];
+    if (!target) {
+      terminal.writeln('\x1b[31mNo running container is available for terminal login.\x1b[0m');
+      return () => terminal.dispose();
+    }
+    const sessionToken = getSessionToken();
+    const socket = sessionToken
+      ? new WebSocket(terminalSocketUrl(sandboxId), ['cube-terminal', sessionToken])
+      : new WebSocket(terminalSocketUrl(sandboxId), ['cube-terminal']);
     socketRef.current = socket;
     const send = (frame: TerminalFrame) => {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
@@ -65,11 +85,19 @@ export function SandboxTerminalDialog({
 
     socket.onopen = () => {
       setStatus('connected');
-      send({ type: 'open', sandboxId, cols: terminal.cols, rows: terminal.rows });
+      send({ type: 'open', sandboxId, containerId: target.containerID, cols: terminal.cols, rows: terminal.rows });
     };
     socket.onmessage = (event) => {
-      if (typeof event.data === 'string') terminal.write(event.data);
-      else if (event.data instanceof Blob) void event.data.text().then((data) => terminal.write(data));
+      const receive = (data: string) => {
+        try {
+          const frame = JSON.parse(data) as { type?: string; data?: string; message?: string };
+          if (frame.type === 'output') terminal.write(frame.data ?? '');
+          else if (frame.type === 'error') terminal.writeln(`\r\n\x1b[31m${frame.message ?? 'Terminal error'}\x1b[0m`);
+          else if (frame.type === 'exit') terminal.writeln('\r\n\x1b[90mTerminal process exited.\x1b[0m');
+        } catch { terminal.write(data); }
+      };
+      if (typeof event.data === 'string') receive(event.data);
+      else if (event.data instanceof Blob) void event.data.text().then(receive);
     };
     socket.onerror = () => terminal.writeln('\r\n\x1b[31mTerminal connection failed.\x1b[0m');
     socket.onclose = () => {
@@ -85,7 +113,10 @@ export function SandboxTerminalDialog({
     const observer = new ResizeObserver(resize);
     observer.observe(hostRef.current);
 
+    const keepalive = window.setInterval(() => send({ type: 'keepalive' } as TerminalFrame), 20_000);
+
     return () => {
+      window.clearInterval(keepalive);
       observer.disconnect();
       disposable.dispose();
       socket.close(1000, 'terminal panel closed');
@@ -93,7 +124,7 @@ export function SandboxTerminalDialog({
       terminal.dispose();
       setStatus('connecting');
     };
-  }, [open, sandboxId]);
+  }, [open, sandboxId, containerId, connectionNonce]);
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -106,7 +137,18 @@ export function SandboxTerminalDialog({
               <Dialog.Title className="text-sm font-semibold">Sandbox terminal</Dialog.Title>
               <Dialog.Description className="truncate font-mono text-xs text-muted-foreground">{sandboxId}</Dialog.Description>
             </div>
+            {targets.length > 1 && (
+              <select
+                aria-label="Terminal container"
+                className="h-8 max-w-40 rounded-md border border-border bg-background px-2 text-xs"
+                value={containerId}
+                onChange={(event) => setContainerId(event.target.value)}
+              >
+                {targets.map((target) => <option key={target.containerID} value={target.containerID}>{target.name || target.containerID}</option>)}
+              </select>
+            )}
             <span className={`h-2 w-2 rounded-full ${status === 'connected' ? 'bg-cube-ok' : status === 'connecting' ? 'bg-cube-warn animate-pulse' : 'bg-muted-foreground'}`} aria-label={status} />
+            {status === 'disconnected' && <Button size="sm" variant="ghost" onClick={() => setConnectionNonce((value) => value + 1)}><RefreshCw size={14} /> Reconnect</Button>}
             <Button size="icon" variant="ghost" title="Toggle fullscreen" onClick={() => setFullScreen((value) => !value)}><Maximize2 size={15} /></Button>
             <Dialog.Close asChild><Button size="icon" variant="ghost" title="Close terminal"><X size={16} /></Button></Dialog.Close>
           </div>

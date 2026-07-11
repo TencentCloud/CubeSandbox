@@ -28,6 +28,9 @@ pub enum AppError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     #[error("too many requests: {0}")]
     TooManyRequests(String),
 
@@ -43,6 +46,7 @@ impl IntoResponse for AppError {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, 400, msg.clone()),
             AppError::Internal(e) => (StatusCode::INTERNAL_SERVER_ERROR, 500, e.to_string()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, 409, msg.clone()),
+            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, 503, msg.clone()),
             AppError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, 429, msg.clone()),
             AppError::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, 501, msg.clone()),
         };

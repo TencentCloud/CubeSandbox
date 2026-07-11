@@ -3,11 +3,13 @@
 //
 
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Path, Query, State},
+    http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
+use futures::{SinkExt, StreamExt};
+use tokio_tungstenite::{connect_async, tungstenite::{client::IntoClientRequest, protocol::Message as TungsteniteMessage}};
 use validator::Validate;
 
 use crate::{
@@ -152,6 +154,113 @@ pub async fn get_sandbox(
         )
         .await;
     Ok(Json(detail))
+}
+
+// ─── GET /sandboxes/:sandboxID/terminal/ws ────────────────────────────────
+
+/// Upgrades an authenticated browser terminal session and proxies it to the
+/// private CubeMaster terminal endpoint. The browser never receives the
+/// CubeMaster address or the gateway secret.
+pub async fn sandbox_terminal(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> AppResult<impl IntoResponse> {
+    let operator = terminal_operator(&state, &headers).await?;
+    let gateway_token = state.config.terminal_gateway_token.clone().ok_or_else(|| {
+        crate::error::AppError::ServiceUnavailable("terminal gateway is not configured".to_string())
+    })?;
+    if gateway_token.trim().is_empty() {
+        return Err(crate::error::AppError::ServiceUnavailable("terminal gateway is not configured".to_string()));
+    }
+    state.logger.log(
+        LogEvent::new(LogLevel::Info, "terminal.session.open")
+            .field("sandbox_id", &sandbox_id)
+            .field("operator", &operator),
+    ).await;
+
+    Ok(ws.protocols(["cube-terminal"]).on_upgrade(move |socket| async move {
+        proxy_terminal(socket, state, sandbox_id, gateway_token, operator).await;
+    }))
+}
+
+async fn terminal_operator(state: &AppState, headers: &HeaderMap) -> AppResult<String> {
+    let Some(store) = &state.agenthub_store else { return Ok("unauthenticated-development".to_string()) };
+    let protocol = headers.get(SEC_WEBSOCKET_PROTOCOL).and_then(|value| value.to_str().ok()).unwrap_or("");
+    let token = protocol.split(',').map(str::trim).find(|value| *value != "cube-terminal").filter(|value| !value.is_empty());
+    let Some(token) = token else {
+        return Err(crate::error::AppError::Unauthorized("terminal session token is required".to_string()));
+    };
+    store.validate_session(token).await
+        .map_err(|error| crate::error::AppError::Internal(anyhow::anyhow!("failed to validate terminal session: {error}")))?
+        .ok_or_else(|| crate::error::AppError::Unauthorized("terminal session is invalid or expired".to_string()))
+}
+
+async fn proxy_terminal(
+    browser: WebSocket,
+    state: AppState,
+    sandbox_id: String,
+    gateway_token: String,
+    operator: String,
+) {
+    let master_url = state.config.cubemaster_url.replace("https://", "wss://").replace("http://", "ws://");
+    let url = format!("{master_url}/cube/sandbox/terminal/ws");
+    let mut request = match url.into_client_request() {
+        Ok(request) => request,
+        Err(error) => { tracing::error!(%error, sandbox_id, "terminal: invalid CubeMaster websocket URL"); return; }
+    };
+    match gateway_token.parse() {
+        Ok(value) => { request.headers_mut().insert("x-cube-terminal-gateway", value); }
+        Err(_) => { tracing::error!(sandbox_id, "terminal: invalid terminal gateway token"); return; }
+    }
+    let (master, _) = match connect_async(request).await {
+        Ok(connection) => connection,
+        Err(error) => { tracing::warn!(%error, sandbox_id, operator, "terminal: CubeMaster connection failed"); return; }
+    };
+    let (mut browser_tx, mut browser_rx) = browser.split();
+    let (mut master_tx, mut master_rx) = master.split();
+    loop {
+        tokio::select! {
+            incoming = browser_rx.next() => match incoming {
+                Some(Ok(message)) => match to_master_message(message) {
+                    Some(message) => if master_tx.send(message).await.is_err() { break; },
+                    None => break,
+                },
+                _ => break,
+            },
+            incoming = master_rx.next() => match incoming {
+                Some(Ok(message)) => match to_browser_message(message) {
+                    Some(message) => if browser_tx.send(message).await.is_err() { break; },
+                    None => break,
+                },
+                _ => break,
+            },
+        }
+    }
+    state.logger.log(LogEvent::new(LogLevel::Info, "terminal.session.close")
+        .field("sandbox_id", &sandbox_id).field("operator", &operator)).await;
+}
+
+fn to_master_message(message: Message) -> Option<TungsteniteMessage> {
+    match message {
+        Message::Text(value) => Some(TungsteniteMessage::Text(value.to_string())),
+        Message::Binary(value) => Some(TungsteniteMessage::Binary(value.to_vec())),
+        Message::Ping(value) => Some(TungsteniteMessage::Ping(value.to_vec())),
+        Message::Pong(value) => Some(TungsteniteMessage::Pong(value.to_vec())),
+        Message::Close(_) => None,
+    }
+}
+
+fn to_browser_message(message: TungsteniteMessage) -> Option<Message> {
+    match message {
+        TungsteniteMessage::Text(value) => Some(Message::Text(value.into())),
+        TungsteniteMessage::Binary(value) => Some(Message::Binary(value.into())),
+        TungsteniteMessage::Ping(value) => Some(Message::Ping(value.into())),
+        TungsteniteMessage::Pong(value) => Some(Message::Pong(value.into())),
+        TungsteniteMessage::Close(_) => None,
+        TungsteniteMessage::Frame(_) => None,
+    }
 }
 
 // ─── POST /sandboxes ──────────────────────────────────────────────────────────

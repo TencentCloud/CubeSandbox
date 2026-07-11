@@ -65,6 +65,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub auth_callback_url: Option<String>,
 
+    /// Shared secret used only for CubeAPI -> CubeMaster terminal WebSocket
+    /// bridging. It must match CubeMaster common.terminal_gateway_token.
+    #[serde(default)]
+    pub terminal_gateway_token: Option<String>,
+
     /// Optional MySQL database URL used by AgentHub persistence.
     ///
     /// Env var: `DATABASE_URL`. When unset, built from `CUBE_SANDBOX_MYSQL_*`.
@@ -147,6 +152,7 @@ impl Default for ServerConfig {
             log_dir: default_log_dir(),
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
+            terminal_gateway_token: std::env::var("TERMINAL_GATEWAY_TOKEN").ok(),
             database_url: default_database_url(),
         }
     }

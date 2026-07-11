@@ -24,6 +24,7 @@ const (
 	SandboxListAction              = "/sandbox/list"
 	SandboxInfoAction              = "/sandbox/info"
 	SandboxExecAction              = "/sandbox/exec"
+	SandboxTerminalAction          = "/sandbox/terminal/ws"
 	SandboxUpdateAction            = "/sandbox/update"
 	SandboxTimeoutAction           = "/sandbox/timeout"
 	SandboxRefreshAction           = "/sandbox/refresh"
