@@ -59,8 +59,8 @@ impl HttpLoggerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeliveryConfig {
-    #[serde(default = "default_queue_size")]
-    pub queue_size: usize,
+    #[serde(default = "default_event_queue_capacity")]
+    pub event_queue_capacity: usize,
     #[serde(default = "default_batch_size")]
     pub default_batch_size: usize,
     #[serde(default = "default_flush_interval_secs")]
@@ -73,21 +73,24 @@ pub struct DeliveryConfig {
     pub initial_backoff_ms: u64,
     #[serde(default = "default_max_backoff_secs")]
     pub max_backoff_secs: u64,
-    #[serde(default = "default_max_in_flight")]
-    pub max_in_flight: usize,
+    #[serde(default = "default_max_outstanding_deliveries")]
+    pub max_outstanding_deliveries: usize,
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
 }
 
 impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
-            queue_size: default_queue_size(),
+            event_queue_capacity: default_event_queue_capacity(),
             default_batch_size: default_batch_size(),
             flush_interval_secs: default_flush_interval_secs(),
             request_timeout_secs: default_request_timeout_secs(),
             max_attempts: default_max_attempts(),
             initial_backoff_ms: default_initial_backoff_ms(),
             max_backoff_secs: default_max_backoff_secs(),
-            max_in_flight: default_max_in_flight(),
+            max_outstanding_deliveries: default_max_outstanding_deliveries(),
+            max_concurrent_requests: default_max_concurrent_requests(),
         }
     }
 }
@@ -114,7 +117,7 @@ struct Endpoint {
 
 #[derive(Debug)]
 struct ResolvedEndpoints {
-    routes: EndpointRoutes, // event -> endpoints
+    routes: EndpointRoutes,        // event -> endpoints
     endpoints: Vec<Arc<Endpoint>>, // sorted by id
 }
 
@@ -151,7 +154,7 @@ impl HttpLogger {
             .timeout(Duration::from_secs(config.delivery.request_timeout_secs))
             .build()
             .context("build webhook HTTP client")?;
-        let (tx, rx) = mpsc::channel(config.delivery.queue_size);
+        let (tx, rx) = mpsc::channel(config.delivery.event_queue_capacity);
         spawn_worker(
             rx,
             client,
@@ -193,7 +196,7 @@ impl Logger for HttpLogger {
     }
 }
 
-fn default_queue_size() -> usize {
+fn default_event_queue_capacity() -> usize {
     10_000
 }
 fn default_batch_size() -> usize {
@@ -214,13 +217,16 @@ fn default_initial_backoff_ms() -> u64 {
 fn default_max_backoff_secs() -> u64 {
     10
 }
-fn default_max_in_flight() -> usize {
+fn default_max_outstanding_deliveries() -> usize {
+    1_000
+}
+fn default_max_concurrent_requests() -> usize {
     100
 }
 
 fn validate_delivery(delivery: &DeliveryConfig) -> anyhow::Result<()> {
-    if delivery.queue_size == 0 {
-        bail!("webhook delivery queue_size must be greater than 0");
+    if delivery.event_queue_capacity == 0 {
+        bail!("webhook delivery event_queue_capacity must be greater than 0");
     }
     if delivery.default_batch_size == 0 {
         bail!("webhook delivery default_batch_size must be greater than 0");
@@ -234,8 +240,11 @@ fn validate_delivery(delivery: &DeliveryConfig) -> anyhow::Result<()> {
     if delivery.max_attempts == 0 {
         bail!("webhook delivery max_attempts must be greater than 0");
     }
-    if delivery.max_in_flight == 0 {
-        bail!("webhook delivery max_in_flight must be greater than 0");
+    if delivery.max_outstanding_deliveries == 0 {
+        bail!("webhook delivery max_outstanding_deliveries must be greater than 0");
+    }
+    if delivery.max_concurrent_requests == 0 {
+        bail!("webhook delivery max_concurrent_requests must be greater than 0");
     }
     Ok(())
 }
@@ -329,7 +338,7 @@ fn spawn_worker(
     delivery: DeliveryConfig,
 ) {
     tokio::spawn(async move {
-        let semaphore = Arc::new(Semaphore::new(delivery.max_in_flight));
+        let request_semaphore = Arc::new(Semaphore::new(delivery.max_concurrent_requests));
         let mut tasks = JoinSet::new();
         let mut buffers: Vec<EndpointBatch> = endpoints
             .into_iter()
@@ -353,19 +362,19 @@ fn spawn_worker(
                                 &mut tasks,
                                 client.clone(),
                                 routes.clone(),
-                                semaphore.clone(),
+                                request_semaphore.clone(),
                                 delivery.clone(),
                                 event,
-                            );
+                            ).await;
                         }
                         Some(Msg::Flush(reply)) => {
                             flush_all_buffers(
                                 &mut buffers,
                                 &mut tasks,
                                 client.clone(),
-                                semaphore.clone(),
+                                request_semaphore.clone(),
                                 delivery.clone(),
-                            );
+                            ).await;
                             while tasks.len() > 0 {
                                 if let Some(result) = tasks.join_next().await {
                                     if let Err(err) = result {
@@ -380,9 +389,9 @@ fn spawn_worker(
                                 &mut buffers,
                                 &mut tasks,
                                 client.clone(),
-                                semaphore.clone(),
+                                request_semaphore.clone(),
                                 delivery.clone(),
-                            );
+                            ).await;
                             break;
                         }
                     }
@@ -392,9 +401,9 @@ fn spawn_worker(
                         &mut buffers,
                         &mut tasks,
                         client.clone(),
-                        semaphore.clone(),
+                        request_semaphore.clone(),
                         delivery.clone(),
-                    );
+                    ).await;
                 }
                 result = tasks.join_next(), if tasks.len() > 0 => {
                     if let Some(Err(err)) = result {
@@ -412,12 +421,23 @@ fn spawn_worker(
     });
 }
 
-fn enqueue_event(
+async fn wait_for_delivery_task_capacity(tasks: &mut JoinSet<()>, capacity: usize) {
+    while tasks.len() >= capacity {
+        let Some(result) = tasks.join_next().await else {
+            break;
+        };
+        if let Err(err) = result {
+            error!("HttpLogger: delivery task failed: {}", err);
+        }
+    }
+}
+
+async fn enqueue_event(
     buffers: &mut [EndpointBatch],
     tasks: &mut JoinSet<()>,
     client: Client,
     routes: Arc<EndpointRoutes>,
-    semaphore: Arc<Semaphore>,
+    request_semaphore: Arc<Semaphore>,
     delivery: DeliveryConfig,
     event: LogEvent,
 ) {
@@ -438,43 +458,47 @@ fn enqueue_event(
         batch.events.push(event.clone());
 
         if batch.events.len() >= batch.endpoint.batch_size {
+            let endpoint = batch.endpoint.clone();
             let events = std::mem::replace(
                 &mut batch.events,
                 Vec::with_capacity(batch.endpoint.batch_size),
             );
+            wait_for_delivery_task_capacity(tasks, delivery.max_outstanding_deliveries).await;
             spawn_batch_delivery(
                 tasks,
                 client.clone(),
-                semaphore.clone(),
+                request_semaphore.clone(),
                 delivery.clone(),
-                batch.endpoint.clone(),
+                endpoint,
                 events,
             );
         }
     }
 }
 
-fn flush_all_buffers(
+async fn flush_all_buffers(
     buffers: &mut [EndpointBatch],
     tasks: &mut JoinSet<()>,
     client: Client,
-    semaphore: Arc<Semaphore>,
+    request_semaphore: Arc<Semaphore>,
     delivery: DeliveryConfig,
 ) {
     for batch in buffers.iter_mut() {
         if batch.events.is_empty() {
             continue;
         }
+        let endpoint = batch.endpoint.clone();
         let events = std::mem::replace(
             &mut batch.events,
             Vec::with_capacity(batch.endpoint.batch_size),
         );
+        wait_for_delivery_task_capacity(tasks, delivery.max_outstanding_deliveries).await;
         spawn_batch_delivery(
             tasks,
             client.clone(),
-            semaphore.clone(),
+            request_semaphore.clone(),
             delivery.clone(),
-            batch.endpoint.clone(),
+            endpoint,
             events,
         );
     }
@@ -483,7 +507,7 @@ fn flush_all_buffers(
 fn spawn_batch_delivery(
     tasks: &mut JoinSet<()>,
     client: Client,
-    semaphore: Arc<Semaphore>,
+    request_semaphore: Arc<Semaphore>,
     delivery: DeliveryConfig,
     endpoint: Arc<Endpoint>,
     events: Vec<LogEvent>,
@@ -514,7 +538,7 @@ fn spawn_batch_delivery(
         deliver_with_retry(
             client,
             endpoint,
-            semaphore,
+            request_semaphore,
             body,
             batch_id,
             event_count,
@@ -527,7 +551,7 @@ fn spawn_batch_delivery(
 async fn deliver_with_retry(
     client: Client,
     endpoint: Arc<Endpoint>,
-    semaphore: Arc<Semaphore>,
+    request_semaphore: Arc<Semaphore>,
     body: Vec<u8>,
     batch_id: String,
     event_count: usize,
@@ -536,9 +560,9 @@ async fn deliver_with_retry(
     for attempt in 1..=delivery.max_attempts {
         let result = {
             // Limit only the HTTP attempt; retry backoff must not consume a permit.
-            let permit = semaphore.clone().acquire_owned().await;
+            let permit = request_semaphore.clone().acquire_owned().await;
             let Ok(_permit_guard) = permit else {
-                error!("HttpLogger: webhook semaphore closed, dropping delivery");
+                error!("HttpLogger: webhook request semaphore closed, dropping delivery");
                 return;
             };
             send_once(&client, &endpoint, &body).await
@@ -729,14 +753,15 @@ mod tests {
     fn test_config(url: String, events: Vec<&str>) -> HttpLoggerConfig {
         HttpLoggerConfig {
             delivery: DeliveryConfig {
-                queue_size: 16,
+                event_queue_capacity: 16,
                 default_batch_size: 1,
                 flush_interval_secs: 5,
                 request_timeout_secs: 1,
                 max_attempts: 3,
                 initial_backoff_ms: 1,
                 max_backoff_secs: 1,
-                max_in_flight: 4,
+                max_outstanding_deliveries: 16,
+                max_concurrent_requests: 4,
             },
             endpoints: vec![WebhookEndpointConfig {
                 name: "test".to_string(),
@@ -752,14 +777,15 @@ mod tests {
     fn parses_toml_config() {
         let raw = r#"
             [delivery]
-            queue_size = 99
+            event_queue_capacity = 99
+            max_outstanding_deliveries = 55
+            max_concurrent_requests = 11
             default_batch_size = 2
             flush_interval_secs = 7
             request_timeout_secs = 3
             max_attempts = 4
             initial_backoff_ms = 250
             max_backoff_secs = 8
-            max_in_flight = 12
 
             [[endpoints]]
             name = "local"
@@ -771,7 +797,9 @@ mod tests {
 
         let cfg = HttpLoggerConfig::from_toml_str(raw).unwrap();
 
-        assert_eq!(cfg.delivery.queue_size, 99);
+        assert_eq!(cfg.delivery.event_queue_capacity, 99);
+        assert_eq!(cfg.delivery.max_outstanding_deliveries, 55);
+        assert_eq!(cfg.delivery.max_concurrent_requests, 11);
         assert_eq!(cfg.delivery.default_batch_size, 2);
         assert_eq!(cfg.delivery.flush_interval_secs, 7);
         assert_eq!(cfg.delivery.max_attempts, 4);
@@ -786,6 +814,56 @@ mod tests {
             cfg.endpoints[0].secret_env.as_deref(),
             Some("CUBE_WEBHOOK_SECRET_0")
         );
+    }
+
+    #[test]
+    fn delivery_capacity_defaults_are_stable() {
+        let delivery = DeliveryConfig::default();
+
+        assert_eq!(delivery.event_queue_capacity, 10_000);
+        assert_eq!(delivery.max_outstanding_deliveries, 1_000);
+        assert_eq!(delivery.max_concurrent_requests, 100);
+    }
+
+    #[test]
+    fn rejects_zero_delivery_capacity_values() {
+        let mut delivery = DeliveryConfig::default();
+        delivery.event_queue_capacity = 0;
+        assert!(validate_delivery(&delivery).is_err());
+
+        let mut delivery = DeliveryConfig::default();
+        delivery.max_outstanding_deliveries = 0;
+        assert!(validate_delivery(&delivery).is_err());
+
+        let mut delivery = DeliveryConfig::default();
+        delivery.max_concurrent_requests = 0;
+        assert!(validate_delivery(&delivery).is_err());
+    }
+
+    #[tokio::test]
+    async fn waits_for_outstanding_delivery_capacity() {
+        let mut tasks = JoinSet::new();
+        let (release_tx, release_rx) = oneshot::channel();
+        tasks.spawn(async move {
+            let _ = release_rx.await;
+        });
+
+        {
+            let waiting = wait_for_delivery_task_capacity(&mut tasks, 1);
+            tokio::pin!(waiting);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+                    .await
+                    .is_err()
+            );
+
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), &mut waiting)
+                .await
+                .expect("capacity wait should finish after a delivery completes");
+        }
+
+        assert_eq!(tasks.len(), 0);
     }
 
     #[test]
@@ -932,14 +1010,15 @@ mod tests {
         let (ops_url, ops_recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
         let logger = HttpLogger::new(HttpLoggerConfig {
             delivery: DeliveryConfig {
-                queue_size: 16,
+                event_queue_capacity: 16,
                 default_batch_size: 1,
                 flush_interval_secs: 5,
                 request_timeout_secs: 1,
                 max_attempts: 1,
                 initial_backoff_ms: 1,
                 max_backoff_secs: 1,
-                max_in_flight: 4,
+                max_outstanding_deliveries: 16,
+                max_concurrent_requests: 4,
             },
             endpoints: vec![
                 WebhookEndpointConfig {
@@ -1014,14 +1093,15 @@ mod tests {
         let (url, recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
         let logger = HttpLogger::new(HttpLoggerConfig {
             delivery: DeliveryConfig {
-                queue_size: 16,
+                event_queue_capacity: 16,
                 default_batch_size: 2,
                 flush_interval_secs: 60,
                 request_timeout_secs: 1,
                 max_attempts: 1,
                 initial_backoff_ms: 1,
                 max_backoff_secs: 1,
-                max_in_flight: 4,
+                max_outstanding_deliveries: 16,
+                max_concurrent_requests: 4,
             },
             endpoints: vec![WebhookEndpointConfig {
                 name: "test".to_string(),
@@ -1058,14 +1138,15 @@ mod tests {
         let (url, recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
         let logger = HttpLogger::new(HttpLoggerConfig {
             delivery: DeliveryConfig {
-                queue_size: 16,
+                event_queue_capacity: 16,
                 default_batch_size: 1,
                 flush_interval_secs: 60,
                 request_timeout_secs: 1,
                 max_attempts: 1,
                 initial_backoff_ms: 1,
                 max_backoff_secs: 1,
-                max_in_flight: 4,
+                max_outstanding_deliveries: 16,
+                max_concurrent_requests: 4,
             },
             endpoints: vec![
                 WebhookEndpointConfig {
@@ -1118,14 +1199,15 @@ mod tests {
         let (url, recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
         let logger = HttpLogger::new(HttpLoggerConfig {
             delivery: DeliveryConfig {
-                queue_size: 16,
+                event_queue_capacity: 16,
                 default_batch_size: 2,
                 flush_interval_secs: 60,
                 request_timeout_secs: 1,
                 max_attempts: 1,
                 initial_backoff_ms: 1,
                 max_backoff_secs: 1,
-                max_in_flight: 4,
+                max_outstanding_deliveries: 16,
+                max_concurrent_requests: 4,
             },
             endpoints: vec![WebhookEndpointConfig {
                 name: "test".to_string(),
@@ -1154,14 +1236,15 @@ mod tests {
         let (url, recorder) = spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
         let logger = HttpLogger::new(HttpLoggerConfig {
             delivery: DeliveryConfig {
-                queue_size: 16,
+                event_queue_capacity: 16,
                 default_batch_size: 2,
                 flush_interval_secs: 1,
                 request_timeout_secs: 1,
                 max_attempts: 1,
                 initial_backoff_ms: 1,
                 max_backoff_secs: 1,
-                max_in_flight: 4,
+                max_outstanding_deliveries: 16,
+                max_concurrent_requests: 4,
             },
             endpoints: vec![WebhookEndpointConfig {
                 name: "test".to_string(),
@@ -1227,14 +1310,15 @@ mod tests {
             spawn_recorder(vec![StatusCode::NO_CONTENT], None).await;
         let logger = HttpLogger::new(HttpLoggerConfig {
             delivery: DeliveryConfig {
-                queue_size: 16,
+                event_queue_capacity: 16,
                 default_batch_size: 1,
                 flush_interval_secs: 5,
                 request_timeout_secs: 1,
                 max_attempts: 2,
                 initial_backoff_ms: 3_000,
                 max_backoff_secs: 3,
-                max_in_flight: 1,
+                max_outstanding_deliveries: 16,
+                max_concurrent_requests: 1,
             },
             endpoints: vec![
                 WebhookEndpointConfig {

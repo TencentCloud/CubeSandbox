@@ -29,14 +29,15 @@ WEBHOOK_RECEIVER_HOST=127.0.0.1 WEBHOOK_RECEIVER_PORT=8089 python3 receiver.py
 
 ```toml
 [delivery]
-queue_size = 10000
+event_queue_capacity = 10000
+max_outstanding_deliveries = 1000
+max_concurrent_requests = 100
 default_batch_size = 1
 flush_interval_secs = 5
 request_timeout_secs = 5
 max_attempts = 3
 initial_backoff_ms = 500
 max_backoff_secs = 10
-max_in_flight = 100
 
 [[endpoints]]
 name = "local-dev-lifecycle"
@@ -51,6 +52,17 @@ events = [
 batch_size = 1
 secret_env = "CUBE_WEBHOOK_SECRET_0"
 ```
+
+三个容量参数分别限制 channel 中等待的事件、尚未完成的 endpoint batch 投递，
+以及正在执行网络 I/O 的 HTTP attempt：
+
+```text
+event_queue_capacity -> max_outstanding_deliveries -> max_concurrent_requests
+```
+
+它们统计的单位不同，因此没有强制的数值大小关系。通常让
+`max_outstanding_deliveries` 大于 `max_concurrent_requests`，使处于重试退避的
+投递保留 task 名额时，不会占用全部 HTTP 请求并发。
 
 同一个 `url` 可以在另一条 endpoint 配置中复用，用于不重叠的高频事件集合，
 例如 `api.request` 和 `api.response`，并给那条配置设置更大的 `batch_size`。

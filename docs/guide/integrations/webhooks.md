@@ -26,9 +26,14 @@ Create `/usr/local/services/cubetoolbox/CubeAPI/webhooks.toml`:
 
 ```toml
 [delivery]
-# Async queue capacity. When the queue is full, new events are dropped and logged
-# without blocking the API request path.
-queue_size = 10000
+# Events waiting for the Webhook worker. A full queue drops new events without
+# blocking the API request path.
+event_queue_capacity = 10000
+# Endpoint batch deliveries that may exist at once, including deliveries waiting
+# for an HTTP permit, sending a request, or sleeping before a retry.
+max_outstanding_deliveries = 1000
+# HTTP request attempts that may perform network I/O concurrently.
+max_concurrent_requests = 100
 # Default batch size for endpoints that do not set batch_size. Use 1 to deliver
 # each event as soon as possible.
 default_batch_size = 1
@@ -44,9 +49,6 @@ max_attempts = 3
 initial_backoff_ms = 500
 # Maximum exponential-backoff delay, in seconds.
 max_backoff_secs = 10
-# Global maximum number of concurrent delivery tasks.
-max_in_flight = 100
-
 [[endpoints]]
 # Endpoint name, used in delivery logs.
 name = "ops-lifecycle"
@@ -185,6 +187,35 @@ from sandbox API calls without waiting for receivers.
 Failures are retried for network errors, timeouts, HTTP `408`, `429`, and `5xx`
 responses. Other `4xx` responses are treated as final failures. Retry delays use
 exponential backoff capped by `max_backoff_secs`.
+
+### Delivery Capacity and Backpressure
+
+The three capacity settings bound different stages and use different units:
+
+```text
+event channel                  endpoint delivery tasks             HTTP attempts
+event_queue_capacity      ->   max_outstanding_deliveries     ->   max_concurrent_requests
+```
+
+- `event_queue_capacity` counts events not yet processed by the Webhook worker.
+- `max_outstanding_deliveries` counts endpoint batch deliveries from task
+  creation through success or retry exhaustion. Waiting for an HTTP permit and
+  retry backoff both retain this slot.
+- `max_concurrent_requests` counts only HTTP attempts currently performing
+  network I/O. A delivery releases this permit before retry backoff.
+
+These values do not require a strict numeric ordering because one event may fan
+out to multiple endpoints and one batch delivery may contain multiple events.
+It is normally useful for `max_outstanding_deliveries` to exceed
+`max_concurrent_requests`, so deliveries in retry backoff do not prevent other
+deliveries from using available request concurrency. A larger
+`event_queue_capacity` can absorb short bursts but also consumes more memory and
+allows a larger delayed backlog.
+
+When the outstanding-delivery limit is reached, the worker waits for a delivery
+to finish before reading more events. The event channel then fills up to
+`event_queue_capacity`; additional matching events are dropped and logged while
+the sandbox API path continues normally.
 
 ## IM Robot and Alerting Integration
 

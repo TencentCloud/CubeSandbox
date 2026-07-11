@@ -29,14 +29,15 @@ Create `/usr/local/services/cubetoolbox/CubeAPI/webhooks.toml`:
 
 ```toml
 [delivery]
-queue_size = 10000
+event_queue_capacity = 10000
+max_outstanding_deliveries = 1000
+max_concurrent_requests = 100
 default_batch_size = 1
 flush_interval_secs = 5
 request_timeout_secs = 5
 max_attempts = 3
 initial_backoff_ms = 500
 max_backoff_secs = 10
-max_in_flight = 100
 
 [[endpoints]]
 name = "local-dev-lifecycle"
@@ -51,6 +52,19 @@ events = [
 batch_size = 1
 secret_env = "CUBE_WEBHOOK_SECRET_0"
 ```
+
+The capacity settings bound events waiting in the channel, endpoint batch
+deliveries that have not completed, and HTTP attempts performing network I/O,
+respectively:
+
+```text
+event_queue_capacity -> max_outstanding_deliveries -> max_concurrent_requests
+```
+
+They count different units, so there is no mandatory numeric ordering. It is
+normally useful for `max_outstanding_deliveries` to exceed
+`max_concurrent_requests`, allowing deliveries in retry backoff to retain their
+task slot without consuming all available HTTP request concurrency.
 
 You can reuse the same `url` in another endpoint entry for a disjoint high-volume
 event set, for example `api.request` and `api.response`, and give that entry a

@@ -3,9 +3,14 @@
 # and set CUBE_API_WEBHOOK_CONFIG in .one-click.env to enable it.
 
 [delivery]
-# Async queue capacity. When the queue is full, new events are dropped and logged
-# without blocking the API request path.
-queue_size = 10000
+# Events waiting for the Webhook worker. A full queue drops new events without
+# blocking the API request path.
+event_queue_capacity = 10000
+# Endpoint batch deliveries that may exist at once, including deliveries waiting
+# for an HTTP permit, sending a request, or sleeping before a retry.
+max_outstanding_deliveries = 1000
+# HTTP request attempts that may perform network I/O concurrently.
+max_concurrent_requests = 100
 # Default batch size for endpoints that do not set batch_size. Use 1 to deliver
 # each event as soon as possible.
 default_batch_size = 1
@@ -21,9 +26,6 @@ max_attempts = 3
 initial_backoff_ms = 500
 # Maximum exponential-backoff delay, in seconds.
 max_backoff_secs = 10
-# Global maximum number of concurrent delivery tasks.
-max_in_flight = 100
-
 [[endpoints]]
 # Endpoint name, used in delivery logs.
 name = "endpoint0"

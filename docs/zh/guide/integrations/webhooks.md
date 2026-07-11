@@ -25,8 +25,13 @@ CubeAPI 只在启动时读取 Webhook 配置。本版本不提供 REST 管理 AP
 
 ```toml
 [delivery]
-# 异步队列容量。队列满时新事件会被丢弃并记录错误日志，不阻塞 API 主路径。
-queue_size = 10000
+# 等待 Webhook worker 处理的事件数。队列满时新事件会被丢弃并记录错误日志，
+# 不阻塞 API 主路径。
+event_queue_capacity = 10000
+# 同时存在的 endpoint batch 投递数，包括等待 HTTP permit、发送请求和重试退避中的投递。
+max_outstanding_deliveries = 1000
+# 同时执行网络 I/O 的 HTTP 请求次数。
+max_concurrent_requests = 100
 # endpoint 未设置 batch_size 时使用的默认 batch 大小。设为 1 表示事件到达后尽快投递。
 default_batch_size = 1
 # 全局定时 flush 间隔，单位秒。未满 batch_size 的事件会在该间隔到期后投递。
@@ -39,9 +44,6 @@ max_attempts = 3
 initial_backoff_ms = 500
 # 指数退避的最大等待时间，单位秒。
 max_backoff_secs = 10
-# 全局最大并发投递任务数，避免接收端慢或不可达时占用过多资源。
-max_in_flight = 100
-
 [[endpoints]]
 # endpoint 名称，用于日志定位。
 name = "ops-lifecycle"
@@ -170,6 +172,31 @@ Webhook 投递是异步的。CubeAPI 只把匹配事件放入队列，沙箱 API
 
 网络错误、超时、HTTP `408`、`429`、`5xx` 会触发重试。其他 `4xx`
 视为最终失败。重试延迟使用指数退避，并受 `max_backoff_secs` 限制。
+
+### 投递容量与背压关系
+
+三个容量参数限制不同阶段，单位也不同：
+
+```text
+事件 channel                   endpoint 投递任务                    HTTP 请求 attempt
+event_queue_capacity      ->   max_outstanding_deliveries     ->   max_concurrent_requests
+```
+
+- `event_queue_capacity` 统计尚未被 Webhook worker 处理的事件。
+- `max_outstanding_deliveries` 统计从 task 创建到成功或重试耗尽的 endpoint
+  batch 投递；等待 HTTP permit 和重试退避期间都会占用这个名额。
+- `max_concurrent_requests` 只统计正在执行网络 I/O 的 HTTP attempt；进入重试
+  退避前会释放这个 permit。
+
+三个值不要求严格的数值大小关系，因为一个事件可能 fan-out 到多个 endpoint，
+一个 batch 投递也可能包含多个事件。通常让 `max_outstanding_deliveries` 大于
+`max_concurrent_requests` 更有利，这样处于重试退避的投递不会阻止其他投递使用
+空闲的请求并发。增大 `event_queue_capacity` 可以吸收短时突发流量，但也会占用
+更多内存并允许形成更大的延迟积压。
+
+达到 outstanding delivery 上限后，worker 会先等待一个投递完成，再继续读取事件。
+此时事件 channel 会逐渐填满；达到 `event_queue_capacity` 后，新的匹配事件会被
+丢弃并记录日志，沙箱 API 主路径仍会正常返回。
 
 ## 企业 IM 与通用告警集成
 
