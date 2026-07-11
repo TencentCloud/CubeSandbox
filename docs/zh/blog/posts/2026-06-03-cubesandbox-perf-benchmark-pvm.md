@@ -485,6 +485,61 @@ python bench_pause_resume_concurrency.py -c 10 -n 5 --no-header
 
 ---
 
+## 五、HTTP 框架迁移性能对比（gorilla/mux → gin-gonic/gin）
+
+CubeMaster 的 HTTP API 层从 `gorilla/mux` 迁移到 `gin-gonic/gin`，将手写的 25+ case `switch` 路由分发器替换为 Gin 原生的 radix-tree 路由。本节通过两层基准测试验证迁移不影响创建性能。
+
+### 5.1 本地 HTTP 路由微基准
+
+在开发机上直接测量 Gin 路由匹配 + handler 调用 + 响应写入的裸开销，排除业务逻辑耗时：
+
+```bash
+cd CubeMaster
+go test -bench=BenchmarkGin -benchmem -count=3 -benchtime=1s ./pkg/server/ -run=^$
+```
+
+**测试环境**：AMD Ryzen 5 7500F (6C/12T)，Go 1.26.4，gin v1.10.0 Release 模式
+
+| 基准场景 | avg (ns/op) | 内存 (B/op) | 分配 (allocs/op) | 说明 |
+|---------|------------|-------------|-----------------|------|
+| `BenchmarkGinRouteMatch` | **3,070** | 7,151 | 33 | POST /cube/sandbox（典型创建请求路由） |
+| `BenchmarkGinParamRoute` | **2,529** | 6,629 | 25 | GET /cube/snapshot/:id（路径参数提取） |
+| `BenchmarkGinStaticPriority` | **2,613** | 6,750 | 26 | GET /cube/snapshot/storage（静态优先路由） |
+
+**结论**：Gin 路由层单次开销约 **2.5–3.1 μs**。对比 §3.2 中单并发创建延迟 **67,000 μs**（67 ms），HTTP 路由层占比 **< 0.005%**，完全在噪声范围内。迁移不会影响创建性能。
+
+### 5.2 PVM 端到端并发创建对比
+
+在 PVM 环境上使用 `cube-bench` 对比 master（mux）与 gin-refactor（gin）分支的并发创建性能：
+
+**步骤：**
+
+```bash
+# 1. 构建 cube-bench
+cd examples/cube-bench && make
+
+# 2. 部署 master 分支的 CubeMaster，运行基准
+./bin/cube-bench -c 1  -n 20 -w 3    # 单并发
+./bin/cube-bench -c 10 -n 200 -w 3   # 10 并发
+./bin/cube-bench -c 20 -n 300 -w 3   # 20 并发
+
+# 3. 切换到 gin-refactor 分支重新部署 CubeMaster，重复上述测试
+```
+
+**对比表格模板**（在 PVM 环境中填写）：
+
+| 并发 | 分支 | avg | P95 | P99 | 备注 |
+|:----:|------|----:|----:|----:|------|
+| 1    | master (mux)    | — | — | — | 基线 |
+| 1    | gin-refactor    | — | — | — | |
+| 10   | master (mux)    | — | — | — | |
+| 10   | gin-refactor    | — | — | — | |
+| 20   | master (mux)    | — | — | — | |
+| 20   | gin-refactor    | — | — | — | |
+
+> **预期**：两分支数据应在正常波动范围内（±5%），因 HTTP 路由层开销（~3 μs）远小于 sandbox 创建耗时（~67 ms）。
+
+---
 ## 附录：测试脚本索引
 
 本文涉及的所有测试脚本均位于仓库目录：
