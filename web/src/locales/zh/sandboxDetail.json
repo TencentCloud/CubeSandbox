@@ -25,7 +25,26 @@
   "actions": {
     "resume": "恢复",
     "pause": "暂停",
-    "kill": "终止"
+    "kill": "终止",
+    "terminal": "打开终端",
+    "terminalDisabledTooltip": "仅当沙箱处于运行状态时可打开终端"
+  },
+  "terminal": {
+    "title": "终端",
+    "connecting": "连接中…",
+    "connected": "已连接",
+    "disconnected": "已断开",
+    "close": "关闭终端",
+    "reconnect": "重新连接",
+    "fullscreen": "全屏",
+    "exitFullscreen": "退出全屏",
+    "fontSizeIncrease": "放大字号",
+    "fontSizeDecrease": "缩小字号",
+    "container": "容器",
+    "errors": {
+      "disconnected": "已断开：{{reason}}",
+      "noRunningContainers": "没有可登录的运行中容器。"
+    }
   },
   "errors": {
     "unknown": "未知错误",

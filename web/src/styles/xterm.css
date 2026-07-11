@@ -1,0 +1,45 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 Tencent. All rights reserved. */
+
+/* xterm.js integration tweaks. The theme itself is set via Terminal.options
+ * in useTerminal.ts so it stays in sync with the app light/dark mode. */
+
+.xterm {
+  height: 100%;
+  padding: 0;
+}
+
+.xterm-screen {
+  height: 100%;
+}
+
+.xterm-viewport {
+  border-radius: 0 0 calc(var(--radius) - 2px) calc(var(--radius) - 2px);
+}
+
+.xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* xterm leaves some internal measurement helpers in the DOM. Hide them so they
+ * don't show up as a stray row of characters above the rendered terminal. */
+.xterm-width-cache-measure-container,
+.xterm-char-measure-element {
+  position: absolute !important;
+  left: -9999px !important;
+  top: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}

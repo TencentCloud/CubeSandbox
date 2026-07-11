@@ -3,7 +3,7 @@
 
 import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { sandboxApi, type RunningSandbox } from '@/api/client';
 import { Card } from '@/components/ui/card';
@@ -11,7 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Pause, Play, Trash2, Search, Plus } from 'lucide-react';
+import { Pause, Play, Trash2, Search, Plus, Terminal } from 'lucide-react';
 import { formatBytes, formatRelative, short } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
@@ -22,6 +22,7 @@ type StateFilter = 'all' | 'running' | 'paused';
 export default function SandboxesPage() {
   const [q, setQ] = useState('');
   const [stateFilter, setStateFilter] = useState<StateFilter>('all');
+  const nav = useNavigate();
   const qc = useQueryClient();
   const { t } = useTranslation('sandboxes');
 
@@ -162,6 +163,7 @@ export default function SandboxesPage() {
             onKill={() => killMut.mutate(sb.sandboxID)}
             onPause={() => pauseMut.mutate(sb.sandboxID)}
             onResume={() => resumeMut.mutate(sb.sandboxID)}
+            onOpenTerminal={() => nav(`/sandboxes/${sb.sandboxID}?terminal=1`)}
             busy={pendingId === sb.sandboxID}
           />
         ))}
@@ -178,12 +180,14 @@ function Row({
   onKill,
   onPause,
   onResume,
+  onOpenTerminal,
   busy,
 }: {
   sb: RunningSandbox;
   onKill: () => void;
   onPause: () => void;
   onResume: () => void;
+  onOpenTerminal: () => void;
   busy: boolean;
 }) {
   const { t } = useTranslation('sandboxes');
@@ -213,6 +217,15 @@ function Row({
       <div className="text-xs text-muted-foreground/80 text-num">{sb.clientID || '—'}</div>
       <div className="text-xs text-muted-foreground">{formatRelative(sb.startedAt)}</div>
       <div className="flex justify-end gap-1">
+        <Button
+          size="icon"
+          variant="ghost"
+          title={state === 'running' ? t('actions.terminal') : t('actions.terminalDisabledTooltip')}
+          onClick={onOpenTerminal}
+          disabled={busy || state !== 'running'}
+        >
+          <Terminal size={14} />
+        </Button>
         {state === 'paused' ? (
           <Button size="icon" variant="ghost" title={t('actions.resume')} onClick={onResume} disabled={busy}>
             <Play size={14} />

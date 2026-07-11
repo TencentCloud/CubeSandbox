@@ -25,7 +25,9 @@
   "actions": {
     "resume": "恢复",
     "pause": "暂停",
-    "kill": "终止"
+    "kill": "终止",
+    "terminal": "打开终端",
+    "terminalDisabledTooltip": "仅当沙箱处于运行状态时可打开终端"
   },
   "errors": {
     "unknown": "未知错误",

@@ -25,7 +25,26 @@
   "actions": {
     "resume": "Resume",
     "pause": "Pause",
-    "kill": "Kill"
+    "kill": "Kill",
+    "terminal": "Open Terminal",
+    "terminalDisabledTooltip": "Terminal is only available while the sandbox is running"
+  },
+  "terminal": {
+    "title": "Terminal",
+    "connecting": "Connecting…",
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "close": "Close Terminal",
+    "reconnect": "Reconnect",
+    "fullscreen": "Full screen",
+    "exitFullscreen": "Exit full screen",
+    "fontSizeIncrease": "Increase font size",
+    "fontSizeDecrease": "Decrease font size",
+    "container": "Container",
+    "errors": {
+      "disconnected": "Disconnected: {{reason}}",
+      "noRunningContainers": "No running containers are available for terminal login."
+    }
   },
   "errors": {
     "unknown": "Unknown error",

@@ -32,6 +32,13 @@ export const handlers = [
     return HttpResponse.json({ status: 'ok', sandboxes: listSandboxes().length });
   }),
 
+  http.get('/cubeapi/v1/auth/session', async () => {
+    await mockDelay();
+    // In mock mode authentication is not required, so AuthGuard lets the
+    // user straight into the dashboard without showing the login page.
+    return HttpResponse.json({ authRequired: false, authenticated: false, username: 'mock' });
+  }),
+
   http.get('/cubeapi/v1/cluster/overview', async () => {
     await mockDelay();
     return HttpResponse.json(getClusterOverview());

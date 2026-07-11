@@ -67,7 +67,25 @@ If any number is red, click into **Nodes** to see which host is unhappy.
 
 To stop a sandbox, go to **Sandboxes**, find the row, and click the pause / kill button on the right.
 
-### 3.3 Configure the API key (only if auth is enabled)
+### 3.3 Open a terminal inside a running sandbox
+
+For **running** sandboxes, both the sandbox list and the sandbox detail page show an **Open Terminal** button.
+
+1. Click **Open Terminal**.
+2. A popup with an `xterm.js` shell appears.
+3. If the sandbox has more than one container, use the **Container** dropdown in the popup header to choose which container to log in to. Only containers in the `running` state can be selected.
+4. Type commands as you would in a normal shell. The terminal supports:
+   - ANSI colors and cursor control
+   - Window resize (the shell receives the new dimensions automatically)
+   - Copy / paste
+   - Scrollback
+   - Full screen (`F11` or `Ctrl/Cmd + Shift + F`)
+   - Font size adjustment
+   - Reconnect if the connection drops
+
+> **Note:** Multi-container targeting depends on the in-guest `envd` daemon accepting a `container_id` field in the `process.Process/Start` request. The WebUI passes the selected container ID; verify that your `envd` version supports this field.
+
+### 3.4 Configure the API key (only if auth is enabled)
 
 If your deployment has authentication turned on, the Dashboard needs an API key before any request will succeed.
 

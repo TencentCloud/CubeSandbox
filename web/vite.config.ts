@@ -9,6 +9,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
 const pkg = JSON.parse(readFileSync(path.resolve(__dirname, './package.json'), 'utf-8'));
+const cubeApiProxyTarget = process.env.CUBE_API_PROXY_TARGET ?? 'http://127.0.0.1:3000';
 
 // Displayed app version, aligned with the release tag. Release builds inject the
 // tag via CUBE_VERSION (release-one-click.yml passes github.ref_name); otherwise
@@ -42,7 +43,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/cubeapi': 'http://127.0.0.1:3000',
+      '/cubeapi': {
+        target: cubeApiProxyTarget,
+        changeOrigin: true,
+        ws: true,
+      },
     },
   },
 });

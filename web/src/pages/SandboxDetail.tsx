@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate, useParams, Link } from 'react-router-dom';
+import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { sandboxApi } from '@/api/client';
 import { Card, CardTitle, CardDescription, CardHeader } from '@/components/ui/card';
@@ -11,10 +11,11 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Pause, Play, Trash2, RefreshCw, Terminal } from 'lucide-react';
 import { cn, formatBytes, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
+import SandboxTerminal from '@/components/SandboxTerminal';
 
 // ── Log level colors ────────────────────────────────────────────────────────
 const LEVEL_CLASS: Record<string, string> = {
@@ -34,8 +35,10 @@ function formatLogTime(ts: string): string {
 export default function SandboxDetailPage() {
   const { sandboxID = '' } = useParams();
   const nav = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const qc = useQueryClient();
   const { t } = useTranslation('sandboxDetail');
+  const showTerminal = searchParams.get('terminal') === '1';
 
   // ── Sandbox detail ──────────────────────────────────────────────────────
   const { data, isLoading } = useQuery({
@@ -98,6 +101,13 @@ export default function SandboxDetailPage() {
   const tone = state === 'paused' || state === 'pausing' ? 'warn' : state === 'running' ? 'ok' : 'mute';
   const entries = logs.data?.logs ?? [];
 
+  // Close the terminal automatically if the sandbox stops running.
+  useEffect(() => {
+    if (showTerminal && state !== 'running') {
+      setSearchParams({}, { replace: true });
+    }
+  }, [showTerminal, state, setSearchParams]);
+
   return (
     <div className="animate-fade-in space-y-5">
       {/* ── Header ── */}
@@ -117,6 +127,14 @@ export default function SandboxDetailPage() {
           </p>
         </div>
         <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setSearchParams({ terminal: '1' }, { replace: true })}
+            title={state === 'running' ? t('actions.terminal') : t('actions.terminalDisabledTooltip')}
+            disabled={state !== 'running'}
+          >
+            <Terminal size={14} /> {t('actions.terminal')}
+          </Button>
           {state === 'paused' ? (
             <Button variant="outline" onClick={() => resume.mutate()} disabled={resume.isPending}>
               <Play size={14} /> {t('actions.resume')}
@@ -248,6 +266,10 @@ export default function SandboxDetailPage() {
           )}
         </pre>
       </Card>
+
+      {showTerminal && (
+        <SandboxTerminal sandboxID={sandboxID} onClose={() => setSearchParams({}, { replace: true })} />
+      )}
     </div>
   );
 }
