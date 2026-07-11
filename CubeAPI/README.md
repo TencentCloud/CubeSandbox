@@ -189,7 +189,7 @@ CubeAPI sends a generic signed HTTP event and does not implement vendor-specific
 
 The same adapter pattern works for generic HTTP alerting systems. Do not put bot tokens, credentials, or complete sandbox objects into webhook event fields.
 
-For a local standard-library receiver, see [`examples/webhook-receiver/`](examples/webhook-receiver/README.md).
+For a step-by-step local validation guide and a standard-library receiver, see the [English guide](examples/webhook-receiver/README.md) or the [简体中文指南](examples/webhook-receiver/README_zh.md).
 
 ---
 

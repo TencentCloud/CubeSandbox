@@ -1,5 +1,7 @@
 # CubeAPI Webhook Receiver
 
+[简体中文](./README_zh.md)
+
 This example provides a local CubeAPI webhook receiver implemented with the Python standard library. It listens on `127.0.0.1:18080` and accepts `POST /webhook`.
 
 ## Prerequisites
@@ -17,7 +19,7 @@ For installation from scratch, follow the main CubeSandbox deployment documentat
 
 ## Quick Start
 
-Use three terminals for the following steps.
+Use three terminals for the following steps. This keeps the receiver output, CubeAPI runtime logs, and lifecycle API commands separate during validation.
 
 ### 1. Start the Receiver
 
