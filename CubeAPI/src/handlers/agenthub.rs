@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    envd,
     error::{AppError, AppResult},
     models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
@@ -25,10 +26,8 @@ const DEEPSEEK_V4_FLASH_MODEL_LABEL: &str = "DeepSeek V4 Flash";
 const DEFAULT_OPENCLAW_MODEL: &str = DEEPSEEK_V4_FLASH_MODEL;
 const DEEPSEEK_V4_PRO_MODEL: &str = "deepseek/deepseek-v4-pro";
 const DEEPSEEK_V4_PRO_MODEL_LABEL: &str = "DeepSeek V4 Pro";
-const ENVD_PORT: u16 = 49983;
 const LOGIN_ENV_PORT: u16 = 8080;
 const OPENCLAW_UI_PORT: u16 = 18789;
-const CONNECT_JSON: &str = "application/connect+json";
 const SETTING_DEEPSEEK_API_KEY: &str = "deepseek_api_key";
 const SETTING_LLM_PROVIDER: &str = "llm_provider";
 const SETTING_LLM_BASE_URL: &str = "llm_base_url";
@@ -3798,18 +3797,22 @@ async fn run_envd_command(
     domain: &str,
     req: Value,
 ) -> AppResult<CommandOutput> {
-    let host = format!("{}-{}.{}", ENVD_PORT, sandbox_id, domain);
-    let url = std::env::var("AGENTHUB_SANDBOX_PROXY_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1".to_string());
-    let url = format!("{}/process.Process/Start", url.trim_end_matches('/'));
+    let host = envd::envd_host(envd::ENVD_PORT, sandbox_id, domain);
+    let url = envd::envd_process_url("Start");
 
-    let body = connect_envelope(&serde_json::to_vec(&req).map_err(anyhow::Error::from)?);
+    let body = envd::connect_envelope(&serde_json::to_vec(&req).map_err(anyhow::Error::from)?);
     let resp = state
         .http_client
         .post(url)
         .header("Host", host)
-        .header("Content-Type", CONNECT_JSON)
-        .header("Authorization", "Basic cm9vdDo=")
+        .header("Content-Type", envd::CONNECT_JSON)
+        .header(
+            "Authorization",
+            envd::basic_auth_header(
+                &state.config.envd_auth_username,
+                state.config.envd_auth_password.as_deref(),
+            ),
+        )
         .body(body)
         .send()
         .await
@@ -3826,14 +3829,6 @@ async fn run_envd_command(
         AppError::Internal(anyhow::anyhow!("failed reading envd command stream: {}", e))
     })?;
     parse_connect_stream(&bytes)
-}
-
-fn connect_envelope(payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + 5);
-    out.push(0);
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
-    out
 }
 
 fn parse_connect_stream(bytes: &[u8]) -> AppResult<CommandOutput> {

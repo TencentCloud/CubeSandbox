@@ -53,6 +53,9 @@ pub struct ServerConfig {
     ///   - `X-Request-Method: <HTTP method>` (e.g. GET, POST, DELETE, PATCH)
     ///
     /// An HTTP 200 response grants access; any other status code returns 401 to the client.
+    /// On success, the callback may optionally return identity headers for audit logs:
+    ///   - `X-User-ID: <user identifier>`
+    ///   - `X-User-Name: <display name>`
     ///
     /// **Security note**: Multiple HTTP methods (e.g. GET/POST/DELETE/PATCH) are mounted
     /// on the same path (e.g. `/templates/:id`). Callbacks that only whitelist by path
@@ -71,6 +74,30 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+
+    /// Username used for envd Basic authentication (default: "root").
+    ///
+    /// Env var: `ENVD_AUTH_USERNAME`
+    #[serde(default = "default_envd_auth_username")]
+    pub envd_auth_username: String,
+
+    /// Password used for envd Basic authentication (default: empty).
+    ///
+    /// Env var: `ENVD_AUTH_PASSWORD`
+    #[serde(default)]
+    pub envd_auth_password: Option<String>,
+
+    /// Idle timeout for terminal WebSocket sessions in seconds; 0 disables (default: 300).
+    ///
+    /// Env var: `TERMINAL_IDLE_TIMEOUT_SECONDS`
+    #[serde(default = "default_terminal_idle_timeout_seconds")]
+    pub terminal_idle_timeout_seconds: u64,
+
+    /// WebSocket keepalive interval in seconds; 0 disables (default: 30).
+    ///
+    /// Env var: `TERMINAL_KEEPALIVE_INTERVAL_SECONDS`
+    #[serde(default = "default_terminal_keepalive_interval_seconds")]
+    pub terminal_keepalive_interval_seconds: u64,
 }
 
 fn default_bind() -> String {
@@ -123,6 +150,24 @@ fn default_cube_sandbox_mysql_url() -> Option<String> {
     ))
 }
 
+fn default_envd_auth_username() -> String {
+    std::env::var("ENVD_AUTH_USERNAME").unwrap_or_else(|_| "root".to_string())
+}
+
+fn default_terminal_idle_timeout_seconds() -> u64 {
+    std::env::var("TERMINAL_IDLE_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300)
+}
+
+fn default_terminal_keepalive_interval_seconds() -> u64 {
+    std::env::var("TERMINAL_KEEPALIVE_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30)
+}
+
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
@@ -148,6 +193,10 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
+            envd_auth_username: default_envd_auth_username(),
+            envd_auth_password: None,
+            terminal_idle_timeout_seconds: default_terminal_idle_timeout_seconds(),
+            terminal_keepalive_interval_seconds: default_terminal_keepalive_interval_seconds(),
         }
     }
 }

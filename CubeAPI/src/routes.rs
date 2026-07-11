@@ -18,8 +18,14 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates},
-    middleware::{auth::unified_auth, rate_limit::rate_limit},
+    handlers::{
+        agenthub, auth, cluster, config, health, sandboxes, snapshots, store, templates, terminal,
+    },
+    middleware::{
+        auth::{terminal_session_auth, unified_auth, websocket_auth},
+        rate_limit::rate_limit,
+        terminal_audit::terminal_audit,
+    },
     state::AppState,
 };
 
@@ -150,7 +156,14 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         )
         .route("/snapshots", get(snapshots::list_snapshots));
 
-    with_auth_and_rate_limit(routes, state, auth_configured)
+    let terminal_routes = Router::new().route(
+        "/sandboxes/:sandboxID/terminal/ws",
+        get(terminal::terminal_ws),
+    );
+
+    with_auth_and_rate_limit(routes, state, auth_configured).merge(
+        with_terminal_auth_and_rate_limit(terminal_routes, state, auth_configured),
+    )
 }
 
 /// Sandbox-rooted routes that must run on the long (240 s) budget.  Snapshot
@@ -348,6 +361,56 @@ fn with_auth_and_rate_limit(
             .layer(middleware::from_fn_with_state(state.clone(), unified_auth))
     } else {
         routes
+    }
+}
+
+/// Same as `with_auth_and_rate_limit`, but additionally rewrites WebSocket
+/// auth query parameters (`api_key`, `access_token`) into HTTP headers before
+/// the unified auth middleware runs.  Used only for the terminal WebSocket
+/// route because browsers cannot set custom headers on a WebSocket handshake.
+///
+/// Layer order (outer -> inner):
+///   terminal_audit -> websocket_auth -> terminal_session_auth -> unified_auth -> rate_limit -> handler
+///
+/// `terminal_audit` is outermost so it can log every rejection (auth, rate
+/// limit, state validation, backend error) as well as the 101 upgrade.
+///
+/// Authorization policy: per-sandbox access control is expected to be enforced
+/// by the configured `auth_callback_url`, which receives the concrete sandbox
+/// ID in `X-Request-Path`.  CubeAPI does not currently have sandbox ownership
+/// metadata, so no additional resource-level check is performed here.
+///
+/// Note: layers are applied in reverse order; `terminal_audit` is added last
+/// so it wraps all the others.
+fn with_terminal_auth_and_rate_limit(
+    routes: Router<AppState>,
+    state: &AppState,
+    auth_configured: bool,
+) -> Router<AppState> {
+    if auth_configured {
+        routes
+            .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
+            .layer(middleware::from_fn_with_state(state.clone(), unified_auth))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                terminal_session_auth,
+            ))
+            .layer(middleware::from_fn(websocket_auth))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                terminal_audit,
+            ))
+    } else {
+        routes
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                terminal_session_auth,
+            ))
+            .layer(middleware::from_fn(websocket_auth))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                terminal_audit,
+            ))
     }
 }
 

@@ -30,6 +30,10 @@ tower-http = { version = "0.5", features = [
 tokio = { version = "1", features = ["full"] }
 # select!, join!, channel helpers
 futures = "0.3"
+# Byte buffer utilities for streaming protocols
+bytes = "1"
+# CancellationToken and other sync utilities
+tokio-util = "0.7"
 
 # ── Serialization ─────────────────────────────────────────────────────────
 serde = { version = "1", features = ["derive"] }
@@ -69,10 +73,13 @@ governor = { version = "0.6", features = ["dashmap"] }
 
 # ── HTTP client (orchestrator / backend calls) ────────────────────────────
 # connection pool built-in, rustls for TLS
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 
 # ── Validation ────────────────────────────────────────────────────────────
 validator = { version = "0.16", features = ["derive"] }
+
+# ── URL parsing / query string decoding ───────────────────────────────────
+url = "2"
 
 # ── Async trait support ───────────────────────────────────────────────────
 async-trait = "0.1"

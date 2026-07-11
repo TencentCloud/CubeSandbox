@@ -7,6 +7,7 @@ mod constants;
 mod crypto;
 mod cubemaster;
 mod db;
+mod envd;
 mod error;
 mod handlers;
 mod logging;
@@ -117,6 +118,30 @@ struct Cli {
     #[arg(long, value_name = "DOMAIN")]
     sandbox_domain: Option<String>,
 
+    /// Username used for envd Basic authentication (default: "root").
+    ///
+    /// Overrides the ENVD_AUTH_USERNAME environment variable.
+    #[arg(long, value_name = "USER")]
+    envd_auth_username: Option<String>,
+
+    /// Password used for envd Basic authentication (default: empty).
+    ///
+    /// Overrides the ENVD_AUTH_PASSWORD environment variable.
+    #[arg(long, value_name = "PASSWORD")]
+    envd_auth_password: Option<String>,
+
+    /// Idle timeout for terminal WebSocket sessions in seconds (default: 300, 0 disables).
+    ///
+    /// Overrides the TERMINAL_IDLE_TIMEOUT_SECONDS environment variable.
+    #[arg(long, value_name = "SECONDS")]
+    terminal_idle_timeout_seconds: Option<u64>,
+
+    /// WebSocket keepalive interval in seconds (default: 30, 0 disables).
+    ///
+    /// Overrides the TERMINAL_KEEPALIVE_INTERVAL_SECONDS environment variable.
+    #[arg(long, value_name = "SECONDS")]
+    terminal_keepalive_interval_seconds: Option<u64>,
+
     /// Export the current OpenAPI spec to a YAML file and exit.
     #[arg(long, value_name = "PATH")]
     export_openapi: Option<String>,
@@ -168,6 +193,18 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(v) = cli.sandbox_domain {
         cfg.sandbox_domain = v;
+    }
+    if let Some(v) = cli.envd_auth_username {
+        cfg.envd_auth_username = v;
+    }
+    if let Some(v) = cli.envd_auth_password {
+        cfg.envd_auth_password = Some(v);
+    }
+    if let Some(v) = cli.terminal_idle_timeout_seconds {
+        cfg.terminal_idle_timeout_seconds = v;
+    }
+    if let Some(v) = cli.terminal_keepalive_interval_seconds {
+        cfg.terminal_keepalive_interval_seconds = v;
     }
 
     // ── Tracing (stdout) ───────────────────────────────────────────────────
@@ -238,9 +275,12 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     tracing::info!("cube-api listening on {}", cfg.bind);
 
     // ── Graceful shutdown ──────────────────────────────────────────────────
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     logging::Logger::flush(&*logger).await;
     tracing::info!("cube-api shut down gracefully");
