@@ -1,2 +1,3 @@
 cubesandbox
+e2b-code-interpreter
 python-dotenv

@@ -93,8 +93,9 @@ filesystems and `cd $PROJECT && cat file.py` inside the sandbox would fail.
 This example solves it with CubeSandbox's [`host-mount`](../host-mount)
 extension: the first time a sandbox is created for a session,
 `cubesandbox_exec.py` bind-mounts the project directory (the hook's `cwd`
-field) **read-write at the same path** inside the sandbox. Host-side file
-edits and sandbox-side Bash commands then see identical contents.
+field) **read-only at the same path** inside the sandbox. Sandbox-side Bash
+commands can safely read the same source files as host-side tools, but host
+tools remain the sole writer for project files.
 
 This requires the project directory to be under one of CubeMaster's
 `allowed_host_mount_prefixes` (default: `/data/shared/`):
@@ -123,9 +124,9 @@ project root to `allowed_host_mount_prefixes` or keep it under
   cold-start cost per command.
 - **`cd` / `export` persist across calls.** Each `commands.run()` invocation
   is otherwise stateless, so before running your command the wrapper
-  restores `$PWD` and exported vars from files inside the sandbox
-  (`/tmp/.cubesandbox_cwd`, `/tmp/.cubesandbox_env_state`), and updates them
-  afterwards. From Claude Code's point of view this behaves like one
+  restores `$PWD` and exported vars from a randomly named, owner-only
+  directory inside the sandbox's `/tmp`, and updates them afterwards. From
+  Claude Code's point of view this behaves like one
   continuous shell session, the same as its native (non-sandboxed) Bash
   tool.
 - **Manual reset.** `cubesandbox-exec --reset --session <id>` kills the
@@ -142,6 +143,9 @@ sandbox-backend/
 ├── sandbox_exec.py         # Standalone CLI (e2b SDK, opt-in)
 ├── mcp_server.py            # MCP server (opt-in sandbox tools for Claude Code)
 ├── install.sh              # Installs hooks + settings.json registration (+ --uninstall)
+├── test_cubesandbox_exec.py # Session cache and sandbox lifecycle tests
+├── test_cubesandbox_rewrite.py # Hook command-rewrite safety tests
+├── test_mcp_server.py       # MCP framing and tool dispatch tests
 ├── requirements.txt
 ├── .env.example
 └── README.md                # This file
@@ -154,7 +158,7 @@ sandbox-backend/
 | Bash output unchanged, no sandbox created | Hook not registered / Claude Code not restarted | Check `~/.claude/settings.json`, restart `claude` |
 | `CUBE_TEMPLATE_ID is not set` | `.env` missing/not loaded | `cp .env.example .env` and fill in values; `cubesandbox-exec` loads `.env` from its own directory |
 | `hostPath ... is not within an allowed mount prefix` (warning) | Project dir not under `allowed_host_mount_prefixes` | Add it to CubeMaster config, or ignore -- sandbox still works, just without shared FS |
-| Commands run but `cd`/`export` don't stick between calls | `/tmp/.cubesandbox_cwd` or `_env_state` not writable in the template image | Ensure the template's `/tmp` is writable by `CUBE_SANDBOX_USER` |
+| Commands run but `cd`/`export` don't stick between calls | The session's private state directory under `/tmp` is not writable in the template image | Ensure the template's `/tmp` is writable by `CUBE_SANDBOX_USER` |
 | Every command spins up a brand-new sandbox | `session_id` missing from hook payload, or `~/.cache/cubesandbox-hook` not writable | Check hook stdin payload has `session_id`; check `CUBE_HOOK_STATE_DIR` permissions |
 | `SandboxNotFoundError` / stale sandbox | Sandbox TTL (`CUBE_SANDBOX_TIMEOUT`) expired between calls | Increase `CUBE_SANDBOX_TIMEOUT`, or accept the automatic recreate (some cwd/env state is lost) |
 

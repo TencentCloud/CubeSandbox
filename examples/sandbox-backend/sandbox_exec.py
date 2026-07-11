@@ -15,11 +15,8 @@ import argparse
 import os
 import shlex
 import sys
-from dotenv import load_dotenv
 from e2b_code_interpreter import Sandbox
 from e2b.sandbox.commands.command_handle import CommandExitException
-
-load_dotenv()
 
 TEMPLATE_ID = os.getenv("CUBE_TEMPLATE_ID", "")
 E2B_API_URL = os.getenv("E2B_API_URL", "http://127.0.0.1:3000")
@@ -100,6 +97,12 @@ def cleanup():
 
 
 def main():
+    from dotenv import load_dotenv
+    load_dotenv()
+    global TEMPLATE_ID, E2B_API_URL, E2B_API_KEY
+    TEMPLATE_ID = os.getenv("CUBE_TEMPLATE_ID", TEMPLATE_ID)
+    E2B_API_URL = os.getenv("E2B_API_URL", E2B_API_URL)
+    E2B_API_KEY = os.getenv("E2B_API_KEY", E2B_API_KEY)
     parser = argparse.ArgumentParser(
         description="Execute code in a CubeSandbox sandbox"
     )

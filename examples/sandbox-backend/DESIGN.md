@@ -9,14 +9,14 @@
 实现时对"待解决问题"一节做了如下处理，供后续review参考：
 
 1. **`cd` 不再特殊放行**：不判断命令是否是 `cd`，而是让 `cd`/`export` 都统一走
-   `cubesandbox-exec`。执行时在沙箱内用两个状态文件
-   （`/tmp/.cubesandbox_cwd`、`/tmp/.cubesandbox_env_state`）持久化 cwd 和已导出的
+   `cubesandbox-exec`。执行时在沙箱内用每会话随机、仅所有者可读写的状态目录
+   （`/tmp/.cubesandbox-state-<random>`）持久化 cwd 和已导出的
    环境变量：每次执行前 `source`/`cd` 恢复，执行后写回。这样多次独立的
    `commands.run()` 调用之间也能保持连续的 shell 状态，不需要在 hook 里猜测哪些
    命令是"纯 shell builtin"。
 2. **文件系统一致性**：创建沙箱时，用 `host-mount`（见 `../host-mount/`）把 hook
-   输入里的 `cwd`（Claude Code 项目目录）以读写方式挂载到沙箱内的同一路径，
-   使 Bash 在沙箱里看到的文件和 Read/Write/Edit 在 host 上看到的一致。如果该路径
+   输入里的 `cwd`（Claude Code 项目目录）以只读方式挂载到沙箱内的同一路径，
+   使 Bash 能读取与 Read/Write/Edit 在 host 上相同的项目文件，同时不能通过挂载修改 host。如果该路径
    不在 CubeMaster 的 `allowed_host_mount_prefixes` 白名单内，会捕获 `ApiError` 并
    降级为不挂载的普通沙箱（打印警告，不中断执行）。
 3. **沙箱生命周期**：一个 Claude Code session（hook 输入里的 `session_id`）对应
@@ -182,14 +182,14 @@ examples/sandbox-backend/
 
 ### 与 MCP 方案的对比
 
-| | MCP 方案 (已实现) | Hook 方案 (设计中) |
+| | MCP 方案 (已实现) | Hook 方案 (已实现) |
 |---|---|---|
 | 拦截方式 | AI 显式调用 `sandbox_run_code` 工具 | PreToolUse hook 自动拦截 Bash |
 | 透明度 | AI 知道自己在用沙箱 | AI 完全无感 |
-| 可靠性 | 依赖 AI 配合，可能被绕过 | 100% 覆盖，无法绕过 |
+| 可靠性 | 依赖 AI 配合，可能被绕过 | 覆盖 Claude Code 的 Bash 工具调用 |
 | 粒度控制 | 精细，可选择性沙箱化 | 粗粒度，默认全部拦截 |
 | 额外功能 | 可自定义工具（sandbox_reset 等） | 纯执行代理 |
-| 实现复杂度 | 中（MCP 协议、Content-Length 帧解析） | 低（~50 行 hook 脚本 + CLI） |
+| 实现复杂度 | 中（MCP 协议、Content-Length 帧解析） | 中（hook 脚本 + 会话化 CLI） |
 
 ### 待解决问题
 

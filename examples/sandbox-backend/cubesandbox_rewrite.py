@@ -52,14 +52,42 @@ def _has_unquoted_newline(command: str) -> bool:
     like ``cubesandbox-exec\\nrm -rf /`` would execute ``rm -rf /`` on
     the host — we must never let such a command bypass rewriting.
     """
-    in_single = in_double = False
-    for ch in command:
-        if ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif ch in "\n\r" and not in_single and not in_double:
-            return True
+    in_single = in_double = in_ansi_c = False
+    index = 0
+    while index < len(command):
+        ch = command[index]
+        if in_ansi_c:
+            if ch == "\\" and index + 1 < len(command):
+                if command[index + 1] in "nr":
+                    return True
+                index += 2
+                continue
+            if ch == "'":
+                in_ansi_c = False
+        elif in_single:
+            if ch == "'":
+                in_single = False
+        elif in_double:
+            if ch == "\\" and index + 1 < len(command):
+                index += 2
+                continue
+            if ch == '"':
+                in_double = False
+        else:
+            if ch == "\\" and index + 1 < len(command):
+                index += 2
+                continue
+            if ch == "$" and index + 1 < len(command) and command[index + 1] == "'":
+                in_ansi_c = True
+                index += 2
+                continue
+            if ch == "'":
+                in_single = True
+            elif ch == '"':
+                in_double = True
+            elif ch in "\n\r":
+                return True
+        index += 1
     return False
 
 

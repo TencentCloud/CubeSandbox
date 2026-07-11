@@ -114,9 +114,10 @@ SHIMEOF
 chmod +x "$SHIM_PATH"
 
 echo "Installing Python dependencies (cubesandbox, python-dotenv)..."
-python3 -m pip install --user -q -r "$SCRIPT_DIR/requirements.txt" || \
-    pip install --user -q -r "$SCRIPT_DIR/requirements.txt" || \
-    { echo "pip install failed; install 'cubesandbox' and 'python-dotenv' manually." >&2; exit 1; }
+if ! python3 -m pip install --user -q -r "$SCRIPT_DIR/requirements.txt"; then
+    echo "pip install failed; install 'cubesandbox' and 'python-dotenv' manually." >&2
+    exit 1
+fi
 
 # Back up settings.json before mutating it so a botched merge is recoverable.
 if [[ -f "$SETTINGS_FILE" ]]; then

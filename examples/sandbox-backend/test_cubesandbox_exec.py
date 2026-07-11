@@ -145,6 +145,7 @@ class TestGetSandboxReuse:
         exec_module.Sandbox.create.assert_called_once()
         saved = exec_module._load_state("fresh-session")
         assert saved["sandbox_id"] == "sb-new"
+        assert saved["state_token"]
 
     def test_recreates_when_sandbox_expired(self, exec_module, tmp_state_dir):
         """If the cached sandbox is gone (SandboxNotFoundError), a new
@@ -160,3 +161,4 @@ class TestGetSandboxReuse:
         assert sb is mock_sb
         saved = exec_module._load_state("sess1")
         assert saved["sandbox_id"] == "sb-reborn"
+        assert saved["state_token"]

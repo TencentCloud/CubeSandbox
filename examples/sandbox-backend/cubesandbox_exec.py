@@ -30,6 +30,7 @@ import argparse
 import fcntl
 import json
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -45,11 +46,6 @@ SANDBOX_USER = "root"
 SANDBOX_TTL = 1800
 STATE_DIR = Path(os.getenv("CUBE_HOOK_STATE_DIR", os.path.expanduser("~/.cache/cubesandbox-hook")))
 DEFAULT_SESSION = "default"
-
-# Files inside the sandbox used to persist shell state between otherwise
-# stateless commands.run() calls.
-_CWD_FILE = "/tmp/.cubesandbox_cwd"
-_ENV_FILE = "/tmp/.cubesandbox_env_state"
 
 # One lock file per STATE_DIR; fcntl.flock serializes concurrent
 # cubesandbox-exec processes that race to create a sandbox for the same
@@ -159,7 +155,11 @@ def get_sandbox(session_id: str, mount: str | None) -> Sandbox:
                 print(f"[cubesandbox-exec] warning: reconnect failed ({e}); creating a new sandbox", file=sys.stderr)
 
         sandbox = _create_sandbox(mount)
-        _save_state(session_id, {"sandbox_id": sandbox.sandbox_id, "mount": mount})
+        _save_state(session_id, {
+            "sandbox_id": sandbox.sandbox_id,
+            "mount": mount,
+            "state_token": secrets.token_urlsafe(24),
+        })
         return sandbox
 
 
@@ -172,9 +172,7 @@ def _connect(sandbox_id: str) -> Sandbox:
 
 def _create_sandbox(mount: str | None) -> Sandbox:
     """Create a sandbox, optionally bind-mounting *mount* (Claude Code's
-    project cwd) read-write at the same path so Bash-tool commands running
-    in the sandbox see the exact same files as the host-side Read/Write/Edit
-    tools. Falls back to a plain sandbox if the host-mount is rejected
+    project cwd) read-only at the same path. Falls back to a plain sandbox if the host-mount is rejected
     (e.g. the path isn't under CubeMaster's ``allowed_host_mount_prefixes``).
     """
     if mount:
@@ -184,7 +182,7 @@ def _create_sandbox(mount: str | None) -> Sandbox:
                 timeout=SANDBOX_TTL,
                 metadata={
                     "host-mount": json.dumps([
-                        {"hostPath": mount, "mountPath": mount, "readOnly": False},
+                        {"hostPath": mount, "mountPath": mount, "readOnly": True},
                     ])
                 },
             )
@@ -203,15 +201,25 @@ def _create_sandbox(mount: str | None) -> Sandbox:
 
 def run(command: str, session_id: str, timeout: float | None, mount: str | None) -> int:
     sandbox = get_sandbox(session_id, mount)
+    state = _load_state(session_id)
+    state_token = state.get("state_token")
+    if not isinstance(state_token, str):
+        print("[cubesandbox-exec] error: sandbox state is missing", file=sys.stderr)
+        return 1
 
     default_cwd = mount or "$HOME"
+    state_dir = f"/tmp/.cubesandbox-state-{state_token}"
+    cwd_file = f"{state_dir}/cwd"
+    env_file = f"{state_dir}/env"
     wrapped = (
-        f"[ -f {_ENV_FILE} ] && source {_ENV_FILE} >/dev/null 2>&1; "
-        f'cd "$(cat {_CWD_FILE} 2>/dev/null || echo {default_cwd})" 2>/dev/null; '
+        f"umask 077; mkdir -p -- {state_dir}; "
+        f"[ -d {state_dir} ] && [ ! -L {state_dir} ] || exit 1; "
+        f"[ -f {env_file} ] && [ ! -L {env_file} ] && source {env_file} >/dev/null 2>&1; "
+        f'cd "$(cat {cwd_file} 2>/dev/null || echo {default_cwd})" 2>/dev/null; '
         f"{command}\n"
         "__CBX_STATUS__=$?; "
-        f"pwd > {_CWD_FILE} 2>/dev/null; "
-        f"export -p > {_ENV_FILE} 2>/dev/null; "
+        f"pwd > {cwd_file} 2>/dev/null; "
+        f"export -p > {env_file} 2>/dev/null; "
         "exit $__CBX_STATUS__"
     )
 
@@ -255,7 +263,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--mount", default=None,
-        help="Host directory to bind-mount read-write into the sandbox at the same path "
+        help="Host directory to bind-mount read-only into the sandbox at the same path "
              "(only used the first time a sandbox is created for --session). Must be under "
              "CubeMaster's allowed_host_mount_prefixes.",
     )

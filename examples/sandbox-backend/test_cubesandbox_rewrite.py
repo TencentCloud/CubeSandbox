@@ -86,6 +86,17 @@ class TestAlreadySandboxed:
         assert hook._already_sandboxed(cmd) is True
 
     @pytest.mark.parametrize("cmd", [
+        f"{EXEC_BIN}$'\\\\n'rm -rf /",
+        f"{EXEC_BIN}$'\\\\r'echo pwned",
+    ])
+    def test_ansi_c_newline_injection_blocked(self, cmd):
+        assert hook._already_sandboxed(cmd) is False
+
+    def test_escaped_double_quote_keeps_newline_quoted(self):
+        cmd = f'{EXEC_BIN} "echo \\"quoted\\"\\ntext"'
+        assert hook._already_sandboxed(cmd) is True
+
+    @pytest.mark.parametrize("cmd", [
         f"{EXEC_BIN}extra 'cmd'",          # prefix match, not exact
         f"not-{EXEC_BIN} 'cmd'",            # different binary entirely
         f"{EXEC_BIN}_backup 'cmd'",         # suffix variant

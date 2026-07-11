@@ -30,10 +30,6 @@ import os
 import shlex
 import sys
 import traceback
-from dotenv import load_dotenv
-
-load_dotenv()
-
 # ── Configuration ──────────────────────────────────────────────────────
 E2B_API_URL = os.getenv("E2B_API_URL", "http://127.0.0.1:3000")
 E2B_API_KEY = os.getenv("E2B_API_KEY", "e2b_000000")
@@ -295,6 +291,8 @@ def _read_mcp_message():
 
 def main():
     """Run the MCP server on stdio (JSON-RPC)."""
+    from dotenv import load_dotenv
+    load_dotenv()
     while True:
         try:
             request = _read_mcp_message()
