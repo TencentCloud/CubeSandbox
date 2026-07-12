@@ -48,3 +48,6 @@ lang: en-US
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
 | [Pi Agent Integration Guide](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
+| [Claude Code Integration Guide](./claude-code.md) | zhangzherui | 2026-07-11 | integration, claude-code, coding-agent, agent |
+| [CodeBuddy Integration Guide](./codebuddy.md) | zhangzherui | 2026-07-11 | integration, codebuddy, coding-agent, agent |
+| [OpenCode Integration Guide](./opencode.md) | zhangzherui | 2026-07-11 | integration, opencode, coding-agent, agent |

@@ -48,3 +48,6 @@ lang: zh-CN
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
 | [Pi Agent 集成指南](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
+| [Claude Code 集成指南](./claude-code.md) | zhangzherui | 2026-07-11 | integration, claude-code, coding-agent, agent |
+| [CodeBuddy 集成指南](./codebuddy.md) | zhangzherui | 2026-07-11 | integration, codebuddy, coding-agent, agent |
+| [OpenCode 集成指南](./opencode.md) | zhangzherui | 2026-07-11 | integration, opencode, coding-agent, agent |
