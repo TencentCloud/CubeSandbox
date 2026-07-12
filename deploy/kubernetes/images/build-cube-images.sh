@@ -357,15 +357,16 @@ build_cube_node_from_base_image() {
 
   [[ -n "${CUBE_NODE_BASE_IMAGE}" ]] || fail "CUBE_NODE_BASE_IMAGE is required"
   ctx="$(prepare_context cube-node)"
-  copy_scripts "${ctx}" cube-node-entrypoint.sh
+  copy_scripts "${ctx}" cube-node-entrypoint.sh stage-toolbox.sh
   dockerfile="${ctx}/Dockerfile.rebase"
 
   cat > "${dockerfile}" <<EOF
 FROM ${CUBE_NODE_BASE_IMAGE}
 
 COPY scripts/cube-node-entrypoint.sh /usr/local/bin/cube-node-entrypoint.sh
+COPY scripts/stage-toolbox.sh /usr/local/bin/stage-toolbox.sh
 
-RUN chmod +x /usr/local/bin/cube-node-entrypoint.sh
+RUN chmod +x /usr/local/bin/cube-node-entrypoint.sh /usr/local/bin/stage-toolbox.sh
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/cube-node-entrypoint.sh"]
 EOF
@@ -418,7 +419,7 @@ if [[ -n "${CUBE_NODE_BASE_IMAGE}" ]]; then
   build_cube_node_from_base_image
 else
   ctx="$(prepare_context cube-node)"
-  copy_scripts "${ctx}" cube-node-entrypoint.sh
+  copy_scripts "${ctx}" cube-node-entrypoint.sh stage-toolbox.sh
   for d in Cubelet network-agent cube-shim cube-kernel-scf cube-image cube-vs cube-snapshot; do
     [[ -d "${PACKAGE_DIR}/${d}" ]] || fail "invalid sandbox-package: missing required cube-node component ${d}"
     cp -a "${PACKAGE_DIR}/${d}" "${ctx}/package/${d}"

@@ -30,6 +30,7 @@ COPY package/cube-vs ${TOOLBOX_ROOT}/cube-vs
 COPY package/cube-snapshot ${TOOLBOX_ROOT}/cube-snapshot
 COPY package/scripts/common ${TOOLBOX_ROOT}/scripts/common
 COPY scripts/cube-node-entrypoint.sh /usr/local/bin/cube-node-entrypoint.sh
+COPY scripts/stage-toolbox.sh /usr/local/bin/stage-toolbox.sh
 
 RUN chmod +x \
       ${TOOLBOX_ROOT}/Cubelet/bin/cubelet \
@@ -39,6 +40,7 @@ RUN chmod +x \
       ${TOOLBOX_ROOT}/cube-shim/bin/cube-runtime \
       ${TOOLBOX_ROOT}/cube-shim/bin/containerd-shim-cube-rs \
       /usr/local/bin/cube-node-entrypoint.sh \
+      /usr/local/bin/stage-toolbox.sh \
     && ln -sfn ${TOOLBOX_ROOT}/cube-shim/bin/containerd-shim-cube-rs /usr/local/bin/containerd-shim-cube-rs \
     && ln -sfn ${TOOLBOX_ROOT}/cube-shim/bin/cube-runtime /usr/local/bin/cube-runtime \
     && ln -sfn ${TOOLBOX_ROOT}/Cubelet/bin/cubecli /usr/local/bin/cubecli \

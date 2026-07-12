@@ -97,9 +97,10 @@ flowchart TB
 | 容器 | 类型 | 镜像 | 职责 |
 | --- | --- | --- | --- |
 | `wait-cube-dns` | Init Container | `cubeNode.dns.checkImage` | 等待 node-local `cube-dns` 可用，并验证 `cube.app`、wildcard、Kubernetes Service 域名解析 |
+| `stage-toolbox` | Init Container | `images.node` | 将镜像内 `/usr/local/services/cubetoolbox` **覆盖式**同步到宿主机同名 hostPath（与一键包一致），使 shim/runtime 二进制在 Pod 重建后仍可被存量进程持有 |
 | `pvm-host-bootstrap` | Init Container，可选 | `images.pvmHostBootstrap` | 安装/配置 PVM host kernel，必要时协调节点重启 |
 | `cube-node-init` | Init Container | `images.nodeInit` | 节点预检和准备：KVM、XFS、内存、glibc、cgroup、cubecow 依赖、CIDR 冲突、CubeMaster 连通性 |
-| `cube-node` | 主容器 | `images.node` | 运行 cubelet 和 network-agent；选择 guest kernel；向 CubeMaster 注册节点 |
+| `cube-node` | 主容器 | `images.node` | 运行 cubelet 和 network-agent；选择 guest kernel；向 CubeMaster 注册节点；挂载 hostPath toolbox |
 | `cube-egress` | Sidecar | `images.cubeEgress` | 透明出站代理，提供 loopback admin health |
 | `cube-egress-net` | Sidecar | `images.cubeEgressNet` | 管理 host network namespace 中的 TPROXY、ip rule、sysctl 规则 |
 
@@ -107,6 +108,7 @@ flowchart TB
 
 | hostPath | 用途 |
 | --- | --- |
+| `/usr/local/services/cubetoolbox` | 镜像 toolbox 的宿主机副本（与一键包 INSTALL_PREFIX 相同；Cubelet / network-agent / cube-shim / guest kernel）；升级时覆盖，存量 shim 靠 inode 存活 |
 | `/data/cubelet` | cubelet 数据和 `cubelet.sock` |
 | `/tmp/cube` | network-agent gRPC socket |
 | `/data/cube-shim` | cube runtime/shim 运行数据 |
@@ -275,9 +277,11 @@ sequenceDiagram
 `cube-node` 使用 startupProbe、readinessProbe、livenessProbe：
 
 - startupProbe：等待 cubelet 9999 启动，避免慢启动期间被 liveness 提前杀死。
-- readiness/liveness：检查 cubelet 9999。
+- readiness/liveness：默认 readiness 为 exec 门禁（9999 + network-agent `/readyz` + sock），确保 `LoadExistingShims` / network-agent `recover()` 完成后再 Ready；liveness 仍检查 cubelet 9999。
 - `cube-egress`：检查 `127.0.0.1:9090/admin/v1/health`。
 - `cube-egress-net`：检查 `cube-dev`、ip rule、table 100 local route、mangle `TRANSPROXY` 80/443 规则。
+
+计算面镜像升级（不杀存量沙箱）见 [`UPGRADE.md`](UPGRADE.md)。
 
 ### 4.4 节点注册与健康链路
 

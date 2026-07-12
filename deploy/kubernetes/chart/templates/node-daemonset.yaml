@@ -27,6 +27,7 @@ spec:
       automountServiceAccountToken: true
       hostNetwork: {{ .Values.security.hostNetwork }}
       hostPID: {{ .Values.security.hostPID }}
+      terminationGracePeriodSeconds: {{ .Values.cubeNode.terminationGracePeriodSeconds }}
       {{- if .Values.cubeNode.dns.useCubeDns }}
       dnsPolicy: None
       dnsConfig:
@@ -78,6 +79,84 @@ spec:
               echo "cube dns is not ready at ${CUBE_DNS_NAMESERVER}" >&2
               exit 1
         {{- end }}
+        # Stage image toolbox onto a hostPath before any other compute init so
+        # cube-shim / cube-runtime binaries survive Pod rebuilds (overlay unmount).
+        # Inline script so this works with existing cube-node images that do not
+        # yet ship /usr/local/bin/stage-toolbox.sh; the image still provides the
+        # toolbox tree under /usr/local/services/cubetoolbox.
+        - name: stage-toolbox
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.node "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.node.pullPolicy }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              set -euo pipefail
+              IMAGE_TOOLBOX_ROOT="${IMAGE_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
+              HOST_TOOLBOX_ROOT="${HOST_TOOLBOX_ROOT:-/host-toolbox}"
+              # Align with one-click install.sh: do not wipe runtime dirs under
+              # the install prefix (cube-snapshot / cubebox_os_image / ...).
+              PRESERVE_NAMES=(cube-snapshot cubebox_os_image cubeletmnt cube-vs)
+              log() { printf '[stage-toolbox] %s\n' "$*"; }
+              fail() { printf '[stage-toolbox] ERROR: %s\n' "$*" >&2; exit 1; }
+              should_preserve() {
+                local name="$1" preserved
+                for preserved in "${PRESERVE_NAMES[@]}"; do
+                  [[ "${name}" == "${preserved}" ]] && return 0
+                done
+                return 1
+              }
+              [[ -d "${IMAGE_TOOLBOX_ROOT}" ]] || fail "image toolbox missing: ${IMAGE_TOOLBOX_ROOT}"
+              [[ -n "${HOST_TOOLBOX_ROOT}" && "${HOST_TOOLBOX_ROOT}" != "/" ]] || fail "invalid HOST_TOOLBOX_ROOT"
+              [[ "${HOST_TOOLBOX_ROOT}" != "${IMAGE_TOOLBOX_ROOT}" ]] || fail "HOST_TOOLBOX_ROOT must differ from IMAGE_TOOLBOX_ROOT"
+              mkdir -p "${HOST_TOOLBOX_ROOT}"
+              log "staging ${IMAGE_TOOLBOX_ROOT} -> ${HOST_TOOLBOX_ROOT} (selective overwrite)"
+              while IFS= read -r -d '' entry; do
+                name="$(basename "${entry}")"
+                if should_preserve "${name}"; then
+                  log "preserving ${name}"
+                  continue
+                fi
+                rm -rf "${entry}"
+              done < <(find "${HOST_TOOLBOX_ROOT}" -mindepth 1 -maxdepth 1 -print0)
+              while IFS= read -r -d '' entry; do
+                name="$(basename "${entry}")"
+                dest="${HOST_TOOLBOX_ROOT}/${name}"
+                if should_preserve "${name}" && [[ -e "${dest}" ]]; then
+                  log "skipping image copy over preserved ${name}"
+                  continue
+                fi
+                rm -rf "${dest}"
+                cp -a "${entry}" "${dest}"
+              done < <(find "${IMAGE_TOOLBOX_ROOT}" -mindepth 1 -maxdepth 1 -print0)
+              chmod +x \
+                "${HOST_TOOLBOX_ROOT}/Cubelet/bin/cubelet" \
+                "${HOST_TOOLBOX_ROOT}/Cubelet/bin/cubecli" \
+                "${HOST_TOOLBOX_ROOT}/network-agent/bin/network-agent" \
+                "${HOST_TOOLBOX_ROOT}/network-agent/bin/cubevsmapdump" \
+                "${HOST_TOOLBOX_ROOT}/cube-shim/bin/cube-runtime" \
+                "${HOST_TOOLBOX_ROOT}/cube-shim/bin/containerd-shim-cube-rs" \
+                2>/dev/null || true
+              for required in \
+                Cubelet/bin/cubelet \
+                network-agent/bin/network-agent \
+                cube-shim/bin/containerd-shim-cube-rs \
+                cube-shim/bin/cube-runtime
+              do
+                [[ -x "${HOST_TOOLBOX_ROOT}/${required}" ]] || fail "missing executable after stage: ${required}"
+              done
+              log "toolbox staged successfully at ${HOST_TOOLBOX_ROOT}"
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: IMAGE_TOOLBOX_ROOT
+              value: /usr/local/services/cubetoolbox
+            - name: HOST_TOOLBOX_ROOT
+              value: /host-toolbox
+          volumeMounts:
+            - name: toolbox
+              mountPath: /host-toolbox
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
         {{- if .Values.bootstrap.pvmHostKernel.enabled }}
         - name: pvm-host-bootstrap
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.pvmHostBootstrap "context" $) | quote }}
@@ -211,6 +290,22 @@ spec:
         - name: cube-node
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.node "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.node.pullPolicy }}
+          # Keep /data/cubelet/state on the dataCubelet hostPath. cubelet's
+          # default mountTmpfsDir() puts a 500Mi tmpfs over state inside its
+          # private mount NS; that tmpfs (and shim bundle metadata) disappears
+          # when the Pod is deleted, so LoadExistingShims cannot reconnect.
+          # Bind-mounting state first makes mountinfo.Mounted(state)=true in the
+          # NS cubelet clones, so mountTmpfsDir is a no-op.
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              set -euo pipefail
+              mkdir -p /data/cubelet/state
+              if ! findmnt --mountpoint /data/cubelet/state >/dev/null 2>&1; then
+                mount --bind /data/cubelet/state /data/cubelet/state
+              fi
+              exec /usr/local/bin/cube-node-entrypoint.sh
           securityContext:
             privileged: {{ .Values.security.privileged }}
             capabilities:
@@ -227,6 +322,8 @@ spec:
               value: node
             - name: CUBE_MASTER_ENDPOINT
               value: {{ include "cube.masterEndpoint" . | quote }}
+            - name: TOOLBOX_ROOT
+              value: /usr/local/services/cubetoolbox
             - name: CUBE_SANDBOX_NODE_IP
               {{- if eq .Values.cubeNode.ipSource "statusHostIP" }}
               valueFrom:
@@ -263,6 +360,19 @@ spec:
               containerPort: 9966
             - name: network-agent
               containerPort: 19090
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/bash
+                  - -ec
+                  - |
+                    # Graceful stop for control processes only. Never match
+                    # containerd-shim-cube-rs / cube-runtime / VMM — those must
+                    # survive Pod rebuilds so existing sandboxes keep running.
+                    pkill -TERM -f '/usr/local/services/cubetoolbox/Cubelet/bin/cubelet --config' || true
+                    pkill -TERM -f '/usr/local/services/cubetoolbox/network-agent/bin/network-agent' || true
+                    sleep 5
           {{- if .Values.cubeNode.probes.startup.enabled }}
           startupProbe:
             {{- if .Values.cubeNode.probes.startup.exec }}
@@ -279,7 +389,8 @@ spec:
           readinessProbe:
             {{- if .Values.cubeNode.probes.readiness.exec }}
             exec:
-              {{- toYaml .Values.cubeNode.probes.readiness.exec | nindent 14 }}
+              command:
+                {{- toYaml .Values.cubeNode.probes.readiness.exec | nindent 16 }}
             {{- else }}
             tcpSocket:
               port: {{ .Values.cubeNode.probes.readiness.tcpSocketPort }}
@@ -292,7 +403,8 @@ spec:
           livenessProbe:
             {{- if .Values.cubeNode.probes.liveness.exec }}
             exec:
-              {{- toYaml .Values.cubeNode.probes.liveness.exec | nindent 14 }}
+              command:
+                {{- toYaml .Values.cubeNode.probes.liveness.exec | nindent 16 }}
             {{- else }}
             tcpSocket:
               port: {{ .Values.cubeNode.probes.liveness.tcpSocketPort }}
@@ -309,6 +421,8 @@ spec:
             - name: lib-modules
               mountPath: /lib/modules
               readOnly: true
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
             - name: data-cubelet
               mountPath: {{ .Values.hostPaths.dataCubelet }}
               mountPropagation: Bidirectional
@@ -322,6 +436,13 @@ spec:
             - name: tmp-cube
               mountPath: {{ .Values.hostPaths.tmpCube }}
               mountPropagation: Bidirectional
+            # Persist shim ttrpc sockets (/run/containerd/s/*) across Pod
+            # rebuilds so LoadExistingShims can reconnect. See hostPaths.runContainerd.
+            - name: run-containerd
+              mountPath: /run/containerd
+            # Persist CH API / vsock sockets (/run/vc/vm/*). See hostPaths.runVc.
+            - name: run-vc
+              mountPath: /run/vc
           resources:
             {{- toYaml .Values.cubeNode.resources | nindent 12 }}
         {{- if .Values.cubeEgress.enabled }}
@@ -450,6 +571,10 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.root }}
             type: Directory
+        - name: toolbox
+          hostPath:
+            path: {{ .Values.hostPaths.toolbox }}
+            type: DirectoryOrCreate
         - name: dev
           hostPath:
             path: {{ .Values.hostPaths.dev }}
@@ -481,6 +606,14 @@ spec:
         - name: tmp-cube
           hostPath:
             path: {{ .Values.hostPaths.tmpCube }}
+            type: DirectoryOrCreate
+        - name: run-containerd
+          hostPath:
+            path: {{ .Values.hostPaths.runContainerd }}
+            type: DirectoryOrCreate
+        - name: run-vc
+          hostPath:
+            path: {{ .Values.hostPaths.runVc }}
             type: DirectoryOrCreate
       {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress-ca

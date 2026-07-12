@@ -347,9 +347,22 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 
 ## G. 升级、回滚与卸载
 
-### G1. `helm upgrade` 后 cube-node DaemonSet 全部重启,会不会中断服务?
+### G1. `helm upgrade` 后 cube-node DaemonSet 滚动重建,会不会中断存量沙箱?
 
-会。默认策略是 `RollingUpdate`,节点上活跃的 sandbox 会被中断。生产环境推荐:
+**默认不会中断存量沙箱**（cubelet / network-agent 控制面组件升级场景）。
+
+机制对齐一键包「停服务、不杀 shim、覆盖二进制、重启」：
+
+1. `stage-toolbox` initContainer 把镜像内 toolbox **按目录选择性**同步到宿主机 `/usr/local/services/cubetoolbox`（对齐 one-click：只换软件包，保留 `cube-snapshot` / `cubebox_os_image` / `cubeletmnt` / `cube-vs`），主容器再挂回同路径。删 Pod 卸载的是容器 overlay，不是该 hostPath；存量 shim 继续持有已 unlink 的旧 inode。
+2. shim ttrpc / VMM socket 目录也是 hostPath：容器 `/run/containerd` → 宿主机 `/data/cubelet/run/containerd`，容器 `/run/vc` → 宿主机 `/data/cubelet/run/vc`（**不是**节点真实的 `/run/containerd`）。否则 Pod 重建后 `LoadExistingShims` 无法 dial `unix:///run/containerd/s/{hash}`。
+3. `/data/cubelet/state` 通过启动前 `mount --bind` 留在 hostPath 上，避免 cubelet 默认 state tmpfs 在 Pod 删除后带走 `bootstrap.json`/`address`。
+4. `preStop` / entrypoint 只 TERM **cubelet** 与 **network-agent**，不匹配 `containerd-shim-cube-rs` / `cube-runtime`。
+5. 新 Pod 启动后 cubelet `LoadExistingShims` + `RecoverAllCubebox`、network-agent `recover()` 重连。
+6. 默认 `updateStrategy.rollingUpdate.maxUnavailable: 1`，逐节点滚动；readiness 在 recover 完成（9999 + network-agent readyz + sock）后才 Ready。
+
+完整步骤见 [`UPGRADE.md`](UPGRADE.md)。
+
+若仍希望完全手工控制节奏：
 
 ```yaml
 cubeNode:
@@ -357,14 +370,15 @@ cubeNode:
     type: OnDelete
 ```
 
-然后手工按节点滚动:
-
 ```bash
-# 1. 把 node 上的 sandbox pause/迁移
-# 2. 删除 cube-node Pod,DaemonSet 会拉起新版本
 kubectl -n cube-system delete pod -l app.kubernetes.io/component=cube-node --field-selector spec.nodeName=<node>
-# 3. 等新 Pod Ready 后继续下一个节点
 ```
+
+**注意**：
+
+- 升级的是控制组件镜像；存量沙箱仍跑**旧** shim/runtime 二进制（N/N-1），直到沙箱自然销毁。
+- 不要在升级路径执行 `cubecli unsafe init` / `InitHost`，那会 Destroy 全部沙箱。
+- 升级窗口内**新建**沙箱可能短暂失败并被 CubeMaster reschedule，见 UPGRADE.md。
 
 ### G2. `helm rollback` 会回滚 host kernel 吗?
 
@@ -376,7 +390,7 @@ kubectl -n cube-system delete pod -l app.kubernetes.io/component=cube-node --fie
 
 ```bash
 # 在每个 compute 节点执行
-sudo rm -rf /data/cubelet /data/cube-shim /data/snapshot_pack /data/log /tmp/cube
+sudo rm -rf /data/cubelet /data/cube-shim /data/snapshot_pack /data/log /usr/local/services/cubetoolbox /tmp/cube
 # 如果不再需要 PVM host kernel,还需要:
 # 1. 卸载 kernel 包
 # 2. 更新 GRUB 默认引导

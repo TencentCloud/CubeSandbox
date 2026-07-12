@@ -311,7 +311,7 @@ kubectl delete namespace cube-system
 
 - 节点 label / taint(chart 不管理)
 - 外部 MySQL / Redis 数据
-- compute 节点上的 hostPath 数据:`/data/CubeMaster/storage`, `/data/cubelet`, `/data/cube-shim`, `/data/snapshot_pack`, `/data/log`
+- compute 节点上的 hostPath 数据:`/data/CubeMaster/storage`, `/data/cubelet`, `/data/cube-shim`, `/data/snapshot_pack`, `/usr/local/services/cubetoolbox`, `/data/log`
 - PVM host kernel 修改(GRUB、`/boot`、initramfs)—— 需要按平台 runbook 回滚
 - 外部 DNS / LB 记录
 
@@ -320,5 +320,6 @@ kubectl delete namespace cube-system
 ## 8. 下一步
 
 - 阅读 [`ARCHITECTURE.md`](ARCHITECTURE.md) 深入理解组件关系和数据流
+- 阅读 [`UPGRADE.md`](UPGRADE.md) 了解计算面镜像升级（不杀存量沙箱）
 - 阅读 [`FAQ.md`](FAQ.md) 应对常见部署 / 运行问题
 - 生产环境 TLS、DNS、监控、备份策略请参考主 README 相应章节

@@ -377,8 +377,16 @@ redis:
 cubeNode:
   enabled: true
   podAnnotations: {}
+  # RollingUpdate with maxUnavailable=1 upgrades one compute node at a time so
+  # the CubeMaster scheduling window without a live cubelet stays small.
+  # Switch to OnDelete for fully manual per-node rollouts.
   updateStrategy:
     type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  # Give cubelet/network-agent time to exit cleanly on Pod delete. preStop only
+  # signals those two processes; containerd-shim-cube-rs / microVMs are left alone.
+  terminationGracePeriodSeconds: 30
 
   # How CUBE_SANDBOX_NODE_IP is populated. Currently statusHostIP or static are supported.
   ipSource: statusHostIP
@@ -440,7 +448,18 @@ cubeNode:
     readiness:
       enabled: true
       tcpSocketPort: 9999
-      exec: []
+      # Recovery gate: cubelet must be listening AND network-agent must have
+      # finished its TAP/state recover() before the Pod is marked Ready. This
+      # keeps RollingUpdate from advancing while the node is still reconnecting
+      # to existing shims after an image upgrade.
+      exec:
+        - /bin/bash
+        - -ec
+        - |
+          ss -lntp 2>/dev/null | grep -q ':9999' || exit 1
+          curl -fsS http://127.0.0.1:19090/readyz >/dev/null
+          test -S /data/cubelet/cubelet.sock
+          test -S /tmp/cube/network-agent-grpc.sock
       initialDelaySeconds: 10
       periodSeconds: 10
       failureThreshold: 6
@@ -720,6 +739,27 @@ hostPaths:
   dataCubeShim: /data/cube-shim
   dataSnapshotPack: /data/snapshot_pack
   tmpCube: /tmp/cube
+  # Host-persistent copy of the cube-node image toolbox (Cubelet, network-agent,
+  # cube-shim, guest kernels, ...). Same path as one-click INSTALL_PREFIX so
+  # K8s and one-click share the KillMode=process / unlink-inode upgrade model.
+  # The stage-toolbox initContainer selectively replaces package trees on every
+  # Pod start (aligned with one-click install.sh), while preserving runtime
+  # dirs such as cube-snapshot / cubebox_os_image / cubeletmnt / cube-vs.
+  # Running shims keep their already-mapped inodes across upgrades because
+  # this hostPath is never unmounted when the Pod is deleted.
+  toolbox: /usr/local/services/cubetoolbox
+  # Shim ttrpc listen sockets: containerd-shim SOCKET_ROOT is hardcoded to
+  # /run/containerd, and LoadExistingShims dials unix:///run/containerd/s/{hash}
+  # from bootstrap.json/address after Pod rebuild. Do NOT point this hostPath
+  # at the node's real /run/containerd (owned by kubelet/containerd); use a
+  # dedicated directory under dataCubelet so cube-node's mount NS gets a
+  # persistent /run/containerd without colliding with the node runtime.
+  runContainerd: /data/cubelet/run/containerd
+  # Cloud Hypervisor API + vsock sockets (CubeShim VM_PATH=/run/vc/vm/).
+  # Surviving shims and post-reconnect cubelet paths such as
+  # /run/vc/vm/{id}/chapi and /run/vc/vm/{id}/cube.sock need this tree to
+  # remain on a filesystem that is not torn down with the Pod overlay.
+  runVc: /data/cubelet/run/vc
 
 serviceAccount:
   create: true

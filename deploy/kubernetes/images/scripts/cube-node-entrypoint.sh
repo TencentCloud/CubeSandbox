@@ -184,7 +184,18 @@ mkdir -p \
   /data/log/CubeShim \
   /data/log/CubeVmm \
   /data/cube-shim/disks \
-  /data/snapshot_pack/disks
+  /data/snapshot_pack/disks \
+  /data/cubelet/state
+
+# Keep shim bundle metadata on the dataCubelet hostPath across Pod rebuilds.
+# cubelet mountTmpfsDir() skips when state is already mounted; without this,
+# a 500Mi tmpfs in cubelet's private mount NS holds bootstrap.json/address and
+# is discarded when the Pod (and that mount NS) goes away, breaking
+# LoadExistingShims even if shim processes and /run/containerd sockets survive.
+if ! findmnt --mountpoint /data/cubelet/state >/dev/null 2>&1; then
+  mount --bind /data/cubelet/state /data/cubelet/state
+  log "bound /data/cubelet/state to hostPath (skip state tmpfs)"
+fi
 
 rm -f \
   /tmp/cube/network-agent.sock \
@@ -192,6 +203,12 @@ rm -f \
   /tmp/cube/network-agent-tap.sock \
   || true
 
+# stop_stale_processes intentionally matches ONLY cubelet / network-agent.
+# Never broaden these patterns to containerd-shim-cube-rs, cube-runtime, or
+# VMM processes: those must survive Pod rebuilds so existing sandboxes keep
+# running across image upgrades (one-click KillMode=process equivalent).
+# Also never call InitHost / cubecli unsafe init from this entrypoint — that
+# path destroys every sandbox on the node.
 stop_stale_processes() {
   local name="$1"
   local pattern="$2"
@@ -215,6 +232,8 @@ stop_stale_processes network-agent "${NETWORK_AGENT_BIN}"
 stop_stale_processes cubelet "${CUBELET_BIN}"
 
 cleanup() {
+  # TERM/INT/HUP/EXIT: stop only the control processes we started. Do not
+  # pkill shim/runtime — Pod deletion must leave microVMs alive for recover.
   if [[ -n "${NETWORK_AGENT_PID:-}" ]]; then
     kill "${NETWORK_AGENT_PID}" 2>/dev/null || true
   fi
