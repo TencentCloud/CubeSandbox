@@ -28,57 +28,13 @@ spec:
       hostNetwork: {{ .Values.security.hostNetwork }}
       hostPID: {{ .Values.security.hostPID }}
       terminationGracePeriodSeconds: {{ .Values.cubeNode.terminationGracePeriodSeconds }}
-      {{- if .Values.cubeNode.dns.useCubeDns }}
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-          - {{ .Values.cubeNode.dns.nameserver | quote }}
-        searches:
-          - {{ printf "%s.svc.%s" .Release.Namespace .Values.cubeNode.dns.clusterDomain | quote }}
-          - {{ printf "svc.%s" .Values.cubeNode.dns.clusterDomain | quote }}
-          - {{ .Values.cubeNode.dns.clusterDomain | quote }}
-        options:
-          - name: ndots
-            value: "5"
-      {{- else }}
       dnsPolicy: ClusterFirstWithHostNet
-      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "cube.computePlacement" . | nindent 6 }}
       initContainers:
-        {{- if .Values.cubeNode.dns.useCubeDns }}
-        - name: wait-cube-dns
-          image: {{ include "cube.image" .Values.cubeNode.dns.checkImage | quote }}
-          imagePullPolicy: {{ .Values.cubeNode.dns.checkImage.pullPolicy }}
-          env:
-            {{- include "cube.timezoneEnv" . | nindent 12 }}
-            - name: CUBE_DNS_NAMESERVER
-              value: {{ .Values.cubeNode.dns.nameserver | quote }}
-            - name: CUBE_DNS_DOMAIN
-              value: {{ (default .Values.cubeProxy.domain .Values.cubeDns.domain) | quote }}
-            - name: CUBE_DNS_TIMEOUT
-              value: {{ .Values.cubeNode.dns.waitTimeoutSeconds | quote }}
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              deadline=$(( $(date +%s) + ${CUBE_DNS_TIMEOUT} ))
-              while [ "$(date +%s)" -le "${deadline}" ]; do
-                if nslookup "${CUBE_DNS_DOMAIN}" "${CUBE_DNS_NAMESERVER}" >/dev/null 2>&1 \
-                  && nslookup "wildcard-check.${CUBE_DNS_DOMAIN}" "${CUBE_DNS_NAMESERVER}" >/dev/null 2>&1 \
-                  && nslookup "kubernetes.default.svc.{{ .Values.cubeNode.dns.clusterDomain }}" "${CUBE_DNS_NAMESERVER}" >/dev/null 2>&1; then
-                  echo "cube dns is ready at ${CUBE_DNS_NAMESERVER}"
-                  exit 0
-                fi
-                echo "waiting for cube dns at ${CUBE_DNS_NAMESERVER}"
-                sleep 2
-              done
-              echo "cube dns is not ready at ${CUBE_DNS_NAMESERVER}" >&2
-              exit 1
-        {{- end }}
         # Stage image toolbox onto a hostPath before any other compute init so
         # cube-shim / cube-runtime binaries survive Pod rebuilds (overlay unmount).
         # Inline script so this works with existing cube-node images that do not
@@ -343,11 +299,11 @@ spec:
             - name: CUBE_SANDBOX_DNS_SERVERS
               {{- if .Values.cubeNode.dns.sandbox.nameservers }}
               value: {{ join "," .Values.cubeNode.dns.sandbox.nameservers | quote }}
-              {{- else if and .Values.cubeNode.dns.sandbox.useCubeDns .Values.cubeDns.enabled (eq .Values.cubeDns.mode "nodeLocal") .Values.cubeDns.sandboxGateway.enabled }}
-              value: "$(CUBE_SANDBOX_NODE_IP)"
               {{- else }}
               value: ""
               {{- end }}
+            - name: CUBE_SANDBOX_DNS_FOLLOW_NODE
+              value: {{ ternary "true" "false" (and .Values.cubeNode.dns.sandbox.followNodeDns (not .Values.cubeNode.dns.sandbox.nameservers)) | quote }}
             {{- with .Values.cubeNode.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -1,5 +1,5 @@
 {{- if .Values.helmTest.enabled }}
-{{- $domain := default .Values.cubeProxy.domain .Values.cubeDns.domain -}}
+{{- $domain := .Values.cubeProxy.domain -}}
 {{- $internalMaster := and .Values.controlPlane.enabled .Values.controlPlane.master.enabled -}}
 {{- $internalAPI := and .Values.controlPlane.enabled .Values.controlPlane.api.enabled -}}
 {{- $externalAPIEndpoint := default "" .Values.externalControlPlane.apiEndpoint -}}
@@ -260,7 +260,7 @@ spec:
           echo '[health-test] check control-node CubeProxy'
           curl --connect-timeout 5 --max-time 15 -fsS -o /dev/null http://127.0.0.1:{{ .Values.cubeProxy.probes.readiness.port }}{{ .Values.cubeProxy.probes.readiness.path }}
 {{- end }}
-{{ if .Values.cubeDns.enabled }}
+{{ if eq (include "cube.configureClusterDNS" .) "true" }}
 ---
 apiVersion: v1
 kind: Pod
@@ -274,31 +274,12 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
+  dnsPolicy: ClusterFirst
   {{- with .Values.imagePullSecrets }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- if eq .Values.cubeDns.mode "nodeLocal" }}
-  hostNetwork: true
-  dnsPolicy: None
-  dnsConfig:
-    nameservers:
-      - {{ .Values.cubeNode.dns.nameserver | quote }}
-    searches:
-      - {{ printf "%s.svc.%s" .Release.Namespace (include "cube.clusterDomain" .) | quote }}
-      - {{ printf "svc.%s" (include "cube.clusterDomain" .) | quote }}
-      - {{ include "cube.clusterDomain" . | quote }}
-    options:
-      - name: ndots
-        value: "5"
-  {{- include "cube.computePlacement" . | nindent 2 }}
-  {{- else }}
-  # In service mode, cube-dns runs as a Deployment behind a ClusterIP Service.
-  # The nodeLocal DNS variant above uses compute placement because cube-dns
-  # DaemonSet only runs on compute nodes. In service mode we still schedule
-  # the test on compute nodes because that mirrors real sandbox traffic.
-  {{- include "cube.computePlacement" . | nindent 2 }}
-  {{- end }}
+  {{- include "cube.controlPlanePlacement" . | nindent 2 }}
   containers:
     - name: dns
       image: {{ include "cube.image" .Values.helmTest.dnsImage | quote }}
@@ -307,15 +288,16 @@ spec:
         - sh
         - -ec
         - |
-          echo '[health-test] check CubeDNS'
-          {{- if eq .Values.cubeDns.mode "nodeLocal" }}
-          nslookup {{ $domain | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} | grep -Eq 'Name:|Address'
-          nslookup {{ printf "wildcard-check.%s" $domain | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} | grep -Eq 'Name:|Address'
-          nslookup {{ printf "kubernetes.default.svc.%s" (include "cube.clusterDomain" .) | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} | grep -Eq 'Name:|Address'
-          {{- else }}
-          nslookup {{ $domain | quote }} {{ printf "%s-dns.%s.svc.%s" (include "cube.fullname" .) .Release.Namespace (include "cube.clusterDomain" .) | quote }} | grep -Eq 'canonical name|Address'
-          nslookup {{ printf "wildcard-check.%s" $domain | quote }} {{ printf "%s-dns.%s.svc.%s" (include "cube.fullname" .) .Release.Namespace (include "cube.clusterDomain" .) | quote }} | grep -Eq 'canonical name|Address'
-          {{- end }}
+          echo '[health-test] check cluster DNS for sandbox domain'
+          target={{ include "cube.proxyServiceFQDN" . | quote }}
+          # busybox nslookup prints the DNS server Address first; take the last A record.
+          a_record() { nslookup "$1" | sed -n 's/^Address: \([0-9][0-9.]*\)$/\1/p' | tail -n 1; }
+          domain_ip="$(a_record {{ $domain | quote }})"
+          target_ip="$(a_record "$target")"
+          test -n "$domain_ip"
+          test -n "$target_ip"
+          test "$domain_ip" = "$target_ip"
+          test -n "$(a_record {{ printf "wildcard-check.%s" $domain | quote }})"
 {{- end }}
 {{ if .Values.cubeNode.enabled }}
 ---
@@ -397,20 +379,6 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- if and .Values.cubeDns.enabled (eq .Values.cubeDns.mode "nodeLocal") }}
-  hostNetwork: true
-  dnsPolicy: None
-  dnsConfig:
-    nameservers:
-      - {{ .Values.cubeNode.dns.nameserver | quote }}
-    searches:
-      - {{ printf "%s.svc.%s" .Release.Namespace (include "cube.clusterDomain" .) | quote }}
-      - {{ printf "svc.%s" (include "cube.clusterDomain" .) | quote }}
-      - {{ include "cube.clusterDomain" . | quote }}
-    options:
-      - name: ndots
-        value: "5"
-  {{- end }}
   {{- include "cube.computePlacement" . | nindent 2 }}
   containers:
     - name: node-runtime
@@ -425,9 +393,6 @@ spec:
           test -d {{ .Values.hostPaths.dataCubelet | quote }}
           test -S {{ printf "%s/cubelet.sock" .Values.hostPaths.dataCubelet | quote }}
           test -S {{ printf "%s/network-agent-grpc.sock" .Values.hostPaths.tmpCube | quote }}
-          {{- if and .Values.cubeDns.enabled (eq .Values.cubeDns.mode "nodeLocal") }}
-          nslookup {{ $domain | quote }} {{ .Values.cubeNode.dns.nameserver | quote }} >/dev/null
-          {{- end }}
       volumeMounts:
         - name: dev
           mountPath: /dev

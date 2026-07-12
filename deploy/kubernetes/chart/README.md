@@ -57,8 +57,9 @@ external control plane / compute-only 模式见：
 
 The chart separates placement into dedicated control-plane nodes and compute
 nodes. Control-plane Deployments, StatefulSets, and `cube-proxy-node` use
-`placement.controlPlane`; `cube-node` and node-local `cube-dns` use
-`placement.compute`.
+`placement.controlPlane`; `cube-node` uses `placement.compute`. In-cluster
+`*.cube.app` is wired automatically when CubeProxy is enabled: the chart
+patches cluster CoreDNS so the domain rewrites to the CubeProxy Service.
 
 The chart refuses to render host-mutating compute components without
 `placement.compute.nodeSelector`. This prevents PVM bootstrap and Cube runtime
@@ -397,41 +398,21 @@ cubeProxy:
     ipv6: false
 ```
 
-## Cube DNS
+## Cluster DNS for sandbox domain
 
-`cubeDns.enabled=true` delivers CoreDNS for one-click style sandbox domain
-resolution. The default `cubeDns.mode=nodeLocal` runs `cube-dns` as a
-hostNetwork DaemonSet on Cube compute nodes selected by `placement.compute`
-and listens on `127.0.0.54:53`.
-`cube-node` Pods use `dnsPolicy: None` and explicitly set
-`dnsConfig.nameservers: [127.0.0.54]`, so `cube.app` and wildcard domains are
-resolved inside the Big Pod without modifying host-wide DNS.
+When CubeProxy is enabled, the chart patches **cluster CoreDNS** so
+`cubeProxy.domain` / `*.domain` rewrite to the CubeProxy headless Service
+(Pod IP). Users only set the domain:
 
-Sandbox guest DNS is configured separately from the `cube-node` Pod DNS. The
-guest cannot use `127.0.0.54` because that address is the guest loopback inside
-the sandbox. By default `cubeDns.sandboxGateway.enabled=true` also binds
-node-local `cube-dns` on the compute node HostIP, and
-`cubeNode.dns.sandbox.useCubeDns=true` injects that HostIP into Cubelet
-`default_dns_servers`.
-
-CubeVS eBPF egress does not traverse host kube-proxy ClusterIP DNAT, so guests
-should not rely on Kubernetes Service ClusterIPs as if they were ordinary
-external addresses. The chart no longer renders sandbox service proxy resources
-or DNS overrides for them; expose required in-cluster services through the
-platform networking layer, AgentWay provider configuration, or an
-operator-managed proxy outside this chart.
-
-Set `cubeProxy.advertiseIP` or `cubeDns.answerIP` to return the control-node
-CubeProxy entrypoint. If both are empty in node-local mode, `cube-dns` falls
-back to the current compute HostIP for compatibility with older local-proxy
-topologies; that fallback is not suitable when CubeProxy runs only on control
-nodes. Optional `cubeDns.mode=service` keeps the older ClusterIP DNS model,
-where callers must explicitly point their DNS policy or upstream DNS to the
-`cube-dns` Service. In service mode, set `cubeDns.answerIP` or
-`cubeProxy.advertiseIP` to an explicit CubeProxy entrypoint.
-
-The chart does not silently rewrite Kubernetes nodes' host DNS settings.
-For external clients, browsers, SDKs, or any Pod that is not explicitly using this `dnsConfig`, configure DNS/LB/Ingress outside the chart so `cubeProxy.domain` and wildcard subdomains resolve to an explicit control-node CubeProxy endpoint or external load balancer.
+```yaml
+cubeProxy:
+  domain: cube.app                 # change this if you use a custom domain
+  configureClusterDNS: true        # set false only if kube-system/coredns must not be patched
+cubeNode:
+  dns:
+    sandbox:
+      followNodeDns: true          # guests use node/cluster DNS
+```
 
 ## WebUI
 

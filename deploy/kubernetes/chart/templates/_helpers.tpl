@@ -98,6 +98,8 @@ tolerations:
 {{- end }}
 {{- end -}}
 
+{{/* Proxy Service FQDN and cluster-DNS enablement helpers. */}}
+
 {{- define "cube.nodeServiceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- printf "%s-node" (include "cube.fullname" .) -}}
@@ -132,6 +134,14 @@ tolerations:
 
 {{- define "cube.proxyEnabled" -}}
 {{- if and .Values.cubeProxy.enabled (or .Values.controlPlane.enabled (not .Values.externalControlPlane.enabled)) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.proxyServiceFQDN" -}}
+{{- printf "%s.%s.svc.%s" (include "cube.proxyName" .) .Release.Namespace (include "cube.clusterDomain" .) -}}
+{{- end -}}
+
+{{- define "cube.configureClusterDNS" -}}
+{{- if and .Values.cubeProxy.configureClusterDNS (eq (include "cube.proxyEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
 {{- define "cube.cubemastercliEnabled" -}}

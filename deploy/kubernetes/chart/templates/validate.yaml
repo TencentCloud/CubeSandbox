@@ -16,24 +16,6 @@
 {{- if and .Values.bootstrap.pvmHostKernel.enabled (not .Values.cubeNode.pvmGuestKernel.enabled) }}
 {{- fail "bootstrap.pvmHostKernel.enabled=true requires cubeNode.pvmGuestKernel.enabled=true to match one-click CUBE_PVM_ENABLE consistency" }}
 {{- end }}
-{{- if and .Values.cubeNode.dns.useCubeDns (not .Values.cubeDns.enabled) }}
-{{- fail "cubeNode.dns.useCubeDns=true requires cubeDns.enabled=true" }}
-{{- end }}
-{{- if and .Values.cubeNode.dns.useCubeDns (ne .Values.cubeDns.mode "nodeLocal") }}
-{{- fail "cubeNode.dns.useCubeDns=true requires cubeDns.mode=nodeLocal" }}
-{{- end }}
-{{- if and .Values.cubeNode.dns.useCubeDns (not .Values.security.hostNetwork) }}
-{{- fail "cubeNode.dns.useCubeDns=true requires security.hostNetwork=true because node-local DNS is bound on host loopback" }}
-{{- end }}
-{{- if and .Values.cubeNode.dns.sandbox.useCubeDns (not .Values.cubeDns.sandboxGateway.enabled) }}
-{{- fail "cubeNode.dns.sandbox.useCubeDns=true requires cubeDns.sandboxGateway.enabled=true" }}
-{{- end }}
-{{- if and .Values.cubeNode.dns.sandbox.useCubeDns (not .Values.cubeDns.enabled) }}
-{{- fail "cubeNode.dns.sandbox.useCubeDns=true requires cubeDns.enabled=true" }}
-{{- end }}
-{{- if and .Values.cubeNode.dns.sandbox.useCubeDns (ne .Values.cubeDns.mode "nodeLocal") }}
-{{- fail "cubeNode.dns.sandbox.useCubeDns=true requires cubeDns.mode=nodeLocal" }}
-{{- end }}
 {{- end }}
 {{- if .Values.externalControlPlane.enabled }}
 {{- if not .Values.externalControlPlane.masterEndpoint }}
@@ -88,6 +70,9 @@
 {{- if and .Values.cubeProxy.hostNetwork .Values.cubeProxy.ports.https.hostPort (ne (int .Values.cubeProxy.ports.https.hostPort) (int .Values.cubeProxy.ports.https.containerPort)) }}
 {{- fail "cubeProxy.hostNetwork=true requires cubeProxy.ports.https.hostPort to equal cubeProxy.ports.https.containerPort or be empty" }}
 {{- end }}
+{{- if and .Values.cubeProxy.configureClusterDNS (eq (include "cube.proxyEnabled" .) "true") (not .Values.cubeProxy.domain) }}
+{{- fail "cubeProxy.configureClusterDNS=true requires cubeProxy.domain" }}
+{{- end }}
 {{- end }}
 {{- if .Values.cubeEgress.enabled }}
 {{- if not (has .Values.cubeEgress.ca.mode (list "existingSecret" "selfSigned" "inline")) }}
@@ -101,25 +86,5 @@
 {{- end }}
 {{- if and .Values.cubeEgress.network.enabled (not .Values.cubeEgress.network.ingressInterface) }}
 {{- fail "cubeEgress.network.enabled=true requires cubeEgress.network.ingressInterface" }}
-{{- end }}
-{{- end }}
-{{- if .Values.cubeDns.enabled }}
-{{- if not $computeSelector }}
-{{- fail "cubeDns.enabled=true requires placement.compute.nodeSelector because cube-dns runs on compute nodes" }}
-{{- end }}
-{{- if not (has .Values.cubeDns.mode (list "nodeLocal" "service")) }}
-{{- fail "cubeDns.mode must be one of: nodeLocal, service" }}
-{{- end }}
-{{- if and (eq .Values.cubeDns.mode "nodeLocal") (not .Values.cubeDns.bindAddress) }}
-{{- fail "cubeDns.mode=nodeLocal requires cubeDns.bindAddress" }}
-{{- end }}
-{{- if and .Values.cubeDns.sandboxGateway.enabled (ne .Values.cubeDns.mode "nodeLocal") }}
-{{- fail "cubeDns.sandboxGateway.enabled=true requires cubeDns.mode=nodeLocal" }}
-{{- end }}
-{{- if and (eq .Values.cubeDns.mode "service") (not (default .Values.cubeProxy.advertiseIP .Values.cubeDns.answerIP)) }}
-{{- fail "cubeDns.mode=service requires cubeDns.answerIP or cubeProxy.advertiseIP because CubeProxy is exposed on control-node hostNetwork" }}
-{{- end }}
-{{- if not (default .Values.cubeProxy.domain .Values.cubeDns.domain) }}
-{{- fail "cubeDns.enabled=true requires cubeDns.domain or cubeProxy.domain" }}
 {{- end }}
 {{- end }}

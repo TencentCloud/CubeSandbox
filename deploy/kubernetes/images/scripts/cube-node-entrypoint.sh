@@ -121,6 +121,22 @@ patch_common_yaml_list() {
 }
 
 configure_sandbox_dns() {
+  if [[ -z "${CUBE_SANDBOX_DNS_SERVERS:-}" && "${CUBE_SANDBOX_DNS_FOLLOW_NODE:-false}" == "true" ]]; then
+    CUBE_SANDBOX_DNS_SERVERS="$(
+      awk '
+        /^nameserver[[:space:]]+/ {
+          ip=$2
+          if (ip ~ /^127\./) next
+          if (ip ~ /^169\.254\./) next
+          if (ip == "::1") next
+          if (seen[ip]++) next
+          if (n++) printf ","
+          printf "%s", ip
+        }
+      ' /etc/resolv.conf
+    )"
+    log "sandbox DNS follow-node nameservers: ${CUBE_SANDBOX_DNS_SERVERS:-<empty>}"
+  fi
   patch_common_yaml_list default_dns_servers "${CUBE_SANDBOX_DNS_SERVERS:-}"
 }
 

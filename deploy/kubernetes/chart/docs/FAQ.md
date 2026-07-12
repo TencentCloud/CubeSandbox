@@ -33,7 +33,7 @@ placement:
 | `cube-node requires placement.compute.nodeSelector` | 计算节点必须显式指定,不能空 |
 | `bootstrap.pvmHostKernel.enabled=true requires ... allow-pvm-bootstrap=true` | 计算节点 nodeSelector 必须包含 `allow-pvm-bootstrap=true`,防止误替换内核 |
 | `cubeProxy.enabled=true requires placement.controlPlane.nodeSelector` | CubeProxy 只跑在 control 节点上 |
-| `cubeDns.enabled=true requires placement.compute.nodeSelector` | node-local DNS 只跑在 compute 节点上 |
+| `cubeProxy.configureClusterDNS=true requires cubeProxy.domain` | 开启集群 DNS 注入时必须有 sandbox 域名 |
 
 ### A2. `helm install --wait` 挂在 CubeNode DaemonSet Ready 数不足
 
@@ -260,10 +260,12 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-node --tail=200 | grep -i re
 
 按方向排查:
 
-1. **compute 节点内部**(cube-node Pod / sandbox guest):`dig @127.0.0.54 test.cube.app`
-   - 无应答 → cube-dns 未启动,查 `kubectl -n cube-system get pods -l app.kubernetes.io/name=cube-dns`
-   - 应答不是 CubeProxy 入口 IP → 检查 `cubeProxy.advertiseIP` / `cubeDns.answerIP`
-2. **compute 节点外部**(客户浏览器 / SDK):用户侧 DNS 未配置。Chart 只交付 in-cluster DNS,面向公网的 DNS/LB 需要用户自行设置
+1. **集群内**（Pod / 跟随节点 DNS 的 sandbox guest）:`nslookup test.cube.app`
+   - 无应答 → 查 `kubectl -n kube-system get cm coredns -o yaml` 是否含 `# BEGIN cube-sandbox-dns`
+   - 或看 Job：`kubectl -n cube-system logs job/cube-cluster-dns-apply`
+   - 应答应是 CubeProxy Pod IP（headless Service）；对照 `kubectl -n cube-system get endpoints cube-proxy-node -o wide`
+2. **guest DNS**：默认 `followNodeDns=true`；显式覆盖用 `cubeNode.dns.sandbox.nameservers`
+3. **集群外部**(客户浏览器 / SDK):用户侧 DNS / Private DNS / LB 仍需自行配置
 
 ### E2. CubeProxy 起不来:`hostNetwork port 80/443 already in use`
 

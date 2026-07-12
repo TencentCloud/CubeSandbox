@@ -17,8 +17,8 @@ global:
   # to mirror all images into a private registry without editing each entry
   # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
   # / api / cubemastercli / proxyNode / cubeEgress / cubeEgressNet / webui
-  # entries but not to third-party images such as coredns / mysql / redis /
-  # docker-in-docker.
+  # entries but not to third-party images such as mysql / redis /
+  # docker-in-docker / alpine/k8s.
   imageRegistry: ""
 
 images:
@@ -75,14 +75,15 @@ images:
     tag: v0.5.0
     pullPolicy: Always
 
-  coredns:
-    repository: ccr.ccs.tencentyun.com/tkeimages/coredns
-    tag: v1.11.1-tke.1
-    pullPolicy: IfNotPresent
-
   templateBuilder:
     repository: docker
     tag: "27-dind"
+    pullPolicy: IfNotPresent
+
+  # Used by the post-install Job that merges *.cubeProxy.domain into cluster CoreDNS.
+  kubectl:
+    repository: alpine/k8s
+    tag: "1.28.15"
     pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -124,7 +125,7 @@ placement:
         value: "true"
         effect: NoSchedule
 
-  # Compute placement is used by cube-node and node-local cube-dns.
+  # Compute placement is used by cube-node.
   compute:
     nodeSelector:
       cube.tencent.com/role: compute
@@ -266,50 +267,6 @@ webui:
   upstream: ""
   resources: {}
 
-cubeDns:
-  # One-click deploys CoreDNS for cube.app / wildcard resolution and lets the
-  # compute runtime resolve through a local DNS address. The default Kubernetes
-  # mode runs CoreDNS on Cube compute nodes and lets cube-node Pods use
-  # 127.0.0.54 explicitly via dnsConfig, without modifying host /etc/resolv.conf.
-  enabled: true
-  # nodeLocal: DaemonSet on Cube nodes, binds bindAddress. Set answerIP or
-  #            cubeProxy.advertiseIP when CubeProxy runs only on control nodes.
-  # service:   Deployment + ClusterIP Service for DNS itself. Requires
-  #            answerIP or cubeProxy.advertiseIP for cube.app records because
-  #            CubeProxy is exposed by control-node hostNetwork.
-  mode: nodeLocal
-  replicas: 1
-  bindAddress: 127.0.0.54
-  sandboxGateway:
-    # Also bind node-local cube-dns on the compute node HostIP so Cube sandbox
-    # guests can use it as their nameserver. The regular cube-node Pod DNS
-    # keeps using bindAddress.
-    enabled: true
-  domain: cube.app
-  # Empty answerIP uses cubeProxy.advertiseIP when set. If both are empty in
-  # nodeLocal mode, cube-dns returns the local compute HostIP for older local
-  # proxy topologies; control-node CubeProxy deployments should set one of them.
-  # service mode requires answerIP or cubeProxy.advertiseIP because CubeProxy is
-  # not exposed by Service.
-  answerIP: ""
-  forward:
-    # Empty upstreams forwards to /etc/resolv.conf. Set explicit upstreams to
-    # avoid forwarding loops in custom clusters.
-    upstreams: []
-  # Cache TTL (seconds) for CoreDNS responses. Aligned with the 60s TTL emitted
-  # by the template plugin so clients do not see stale answers longer than the
-  # advertised TTL when the sandbox gateway IP changes.
-  cacheTTL: 60
-  # Log every DNS query at INFO level. Off by default because compute nodes
-  # running many sandboxes emit thousands of queries per minute; enable only
-  # when actively debugging DNS resolution.
-  logQueries: false
-  service:
-    type: ClusterIP
-    port: 53
-    annotations: {}
-  resources: {}
-
 diagnostics:
   # One-click ships cube-diag scripts. In Kubernetes the chart exposes an
   # equivalent kubectl-based diagnostic script through a ConfigMap so operators
@@ -408,20 +365,13 @@ cubeNode:
     cidrSkipConflictCheck: false
 
   dns:
-    useCubeDns: true
-    nameserver: 127.0.0.54
     clusterDomain: cluster.local
     sandbox:
-      # DNS injected into Cube sandbox guest /etc/resolv.conf. When useCubeDns
-      # is true and nameservers is empty, the chart injects the current compute
-      # node HostIP so guests use the node-local cube-dns sandboxGateway.
-      useCubeDns: true
+      # Guests inherit the cube-node Pod nameservers (cluster DNS) so they can
+      # resolve in-cluster Services and *.cubeProxy.domain.
+      # Set nameservers to an explicit list to override.
+      followNodeDns: true
       nameservers: []
-    waitTimeoutSeconds: 120
-    checkImage:
-      repository: busybox
-      tag: "1.36"
-      pullPolicy: IfNotPresent
 
   env: []
   # Sensible default resource requests / limits for the cube-node runtime
@@ -478,9 +428,8 @@ cubeProxy:
   # One-click enables CubeProxy by default. This chart follows that behavior
   # and creates a self-signed test certificate unless production TLS is provided.
   enabled: true
-  # Public sandbox domain returned by CubeAPI and terminated by CubeProxy.
-  # For production, configure DNS for this domain and wildcard subdomains to
-  # the CubeProxy entrypoint, for example *.sandbox.example.com.
+  # Public sandbox domain (also used for TLS CN / wildcard DNS).
+  # For production, point external DNS at CubeProxy as well.
   domain: cube.app
   podAnnotations: {}
   replicas: 1
@@ -489,10 +438,15 @@ cubeProxy:
   # One-click CubeProxy is part of the control-node stack. This chart follows
   # that model and schedules CubeProxy through placement.controlPlane.
   hostNetwork: true
-  # IP returned by cube-dns for cube.app / *.cube.app when cubeDns.answerIP is
-  # empty. Set this to the selected control node IP, or set cubeDns.answerIP
-  # directly when using an external load balancer.
+  # Optional hint for external clients / docs (not used for in-cluster DNS).
   advertiseIP: ""
+  # When true, Helm patches cluster CoreDNS so *.cubeProxy.domain rewrites to
+  # the CubeProxy headless Service. Set false only if mutating kube-system/coredns
+  # is not allowed (disabling does not remove a previously injected block;
+  # uninstall runs the cleanup hook).
+  configureClusterDNS: true
+  service:
+    annotations: {}
   ports:
     http:
       containerPort: 80

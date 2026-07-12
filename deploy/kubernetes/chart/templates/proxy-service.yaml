@@ -1,0 +1,28 @@
+{{- if eq (include "cube.proxyEnabled" .) "true" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.proxyName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-proxy-node
+  {{- with .Values.cubeProxy.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # Headless so DNS returns CubeProxy Pod IPs (HostIP with hostNetwork).
+  clusterIP: None
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-proxy-node
+  ports:
+    - name: http
+      port: {{ .Values.cubeProxy.ports.http.containerPort }}
+      targetPort: {{ .Values.cubeProxy.ports.http.containerPort }}
+      protocol: TCP
+    - name: https
+      port: {{ .Values.cubeProxy.ports.https.containerPort }}
+      targetPort: {{ .Values.cubeProxy.ports.https.containerPort }}
+      protocol: TCP
+{{- end }}

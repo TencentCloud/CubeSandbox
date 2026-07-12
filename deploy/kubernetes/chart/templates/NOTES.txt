@@ -23,22 +23,22 @@ External control plane:
   cubemastercli Deployment: {{ include "cube.cubemastercliName" . }}
 {{- end }}
 {{- end }}
-{{- if .Values.cubeDns.enabled }}
-{{- if eq .Values.cubeDns.mode "nodeLocal" }}
-  CubeDNS DaemonSet: {{ include "cube.fullname" . }}-dns (node-local {{ .Values.cubeDns.bindAddress }}:53)
-{{- else }}
-  CubeDNS Service:    {{ include "cube.fullname" . }}-dns:{{ .Values.cubeDns.service.port }}
-{{- end }}
+{{- if eq (include "cube.configureClusterDNS" .) "true" }}
+  Cluster DNS: *.{{ .Values.cubeProxy.domain }} -> {{ include "cube.proxyServiceFQDN" . }} (patched into kube-system/coredns)
 {{- end }}
 
 Cube Node DaemonSet:
   {{ include "cube.nodeName" . }}
+{{- if .Values.cubeNode.dns.sandbox.followNodeDns }}
+  Sandbox guest DNS: follow node / cluster DNS
+{{- end }}
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
 
 Cube Proxy Node Deployment:
   {{ include "cube.proxyName" . }}
   HTTP/HTTPS control-node endpoint: <cube-proxy-control-node-ip>:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}
-  No ClusterIP Service is created; point wildcard DNS at the control node or external load balancer.
+  Headless Service: {{ include "cube.proxyName" . }}
+  External clients still need their own DNS/LB if they are outside the cluster.
 {{- end }}
 
 Useful commands:
