@@ -34,6 +34,14 @@ class Receiver(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"ok\n")
 
+    def do_GET(self):
+        if self.path != "/health":
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok\n")
+
     def log_message(self, fmt, *args):
         return
 

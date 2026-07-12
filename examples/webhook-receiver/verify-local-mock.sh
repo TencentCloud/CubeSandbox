@@ -32,10 +32,23 @@ require_command python3
 }
 
 mkdir -p "${RUN_DIR}"
+wait_for_http() {
+    local url="$1"
+
+    for _ in $(seq 1 50); do
+        curl -fsS "${url}" >/dev/null 2>&1 && return 0
+        sleep 0.1
+    done
+    echo "service did not become ready: ${url}" >&2
+    return 1
+}
+
 python3 "${SCRIPT_DIR}/cubemaster-mock.py" --port "${MOCK_PORT}" >"${RUN_DIR}/cubemaster-mock.log" 2>&1 &
 MOCK_PID=$!
 python3 "${SCRIPT_DIR}/receiver.py" --port "${RECEIVER_PORT}" --secret change-me >"${RUN_DIR}/receiver.log" 2>&1 &
 RECEIVER_PID=$!
+wait_for_http "http://127.0.0.1:${MOCK_PORT}/health"
+wait_for_http "http://127.0.0.1:${RECEIVER_PORT}/health"
 
 env \
     CUBE_API_BIND="127.0.0.1:${API_PORT}" \
@@ -54,11 +67,7 @@ env \
     "${API_BIN}" >"${RUN_DIR}/cube-api.log" 2>&1 &
 API_PID=$!
 
-for _ in $(seq 1 50); do
-    curl -fsS "http://127.0.0.1:${API_PORT}/health" >/dev/null 2>&1 && break
-    sleep 0.1
-done
-curl -fsS "http://127.0.0.1:${API_PORT}/health" >/dev/null
+wait_for_http "http://127.0.0.1:${API_PORT}/health"
 
 create="$(curl -fsS -X POST "http://127.0.0.1:${API_PORT}/sandboxes" \
     -H 'Content-Type: application/json' -d '{"templateID":"tpl-local","timeout":120}')"

@@ -34,6 +34,7 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "sandbox.paused",
     "sandbox.resumed",
 ];
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct HttpLoggerConfig {
@@ -70,6 +71,16 @@ struct WebhookPayload {
 enum Msg {
     Event(LogEvent),
     Flush(oneshot::Sender<()>),
+}
+
+enum EndpointMsg {
+    Delivery(Vec<u8>),
+    Flush(oneshot::Sender<()>),
+}
+
+struct DeliveryTarget {
+    endpoint: Arc<WebhookEndpoint>,
+    tx: mpsc::Sender<EndpointMsg>,
 }
 
 #[derive(Clone)]
@@ -147,7 +158,19 @@ fn normalize_endpoint(
     default_timeout: Duration,
     default_max_retries: usize,
 ) -> anyhow::Result<WebhookEndpoint> {
-    let url = Url::parse(endpoint.url.trim())?;
+    let raw_url = endpoint.url.trim();
+    anyhow::ensure!(
+        !raw_url.is_empty(),
+        "webhook endpoint {} has an empty URL; expected http:// or https:// URL",
+        endpoint.name
+    );
+    let url = Url::parse(raw_url).map_err(|err| {
+        anyhow::anyhow!(
+            "webhook endpoint {} has an invalid URL {:?}: {err}",
+            endpoint.name,
+            raw_url
+        )
+    })?;
     anyhow::ensure!(
         matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
         "webhook endpoint {} has invalid url",
@@ -229,7 +252,9 @@ impl Logger for HttpLogger {
     async fn flush(&self) {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(Msg::Flush(tx)).await.is_ok() {
-            let _ = rx.await;
+            if tokio::time::timeout(FLUSH_TIMEOUT, rx).await.is_err() {
+                warn!("HttpLogger: webhook flush timed out");
+            }
         }
     }
 
@@ -243,42 +268,142 @@ async fn run_worker(config: HttpLoggerConfig, mut rx: mpsc::Receiver<Msg>) {
         return;
     }
 
-    let client = Client::new();
-    let sem = Arc::new(Semaphore::new(config.delivery_concurrency));
-    let mut pending = JoinSet::new();
+    let endpoint_count = config.endpoints.len();
+    let endpoint_queue_size = (config.queue_size / endpoint_count).max(1);
+    let endpoint_concurrency = config.delivery_concurrency.div_ceil(endpoint_count);
+    let global_semaphore = Arc::new(Semaphore::new(config.delivery_concurrency));
+    let client = webhook_client();
+    let endpoints = config
+        .endpoints
+        .into_iter()
+        .map(|endpoint| {
+            let endpoint = Arc::new(endpoint);
+            let (tx, endpoint_rx) = mpsc::channel(endpoint_queue_size);
+            tokio::spawn(run_endpoint_worker(
+                endpoint.clone(),
+                client.clone(),
+                global_semaphore.clone(),
+                endpoint_concurrency,
+                config.default_initial_backoff,
+                config.default_max_backoff,
+                endpoint_rx,
+            ));
+            DeliveryTarget { endpoint, tx }
+        })
+        .collect::<Vec<_>>();
+
     while let Some(msg) = rx.recv().await {
         match msg {
             Msg::Event(event) => {
                 let Some((event_name, body)) = encode_event(event) else {
-                    drain_finished(&mut pending).await;
                     continue;
                 };
-                for endpoint in config.endpoints.iter().cloned() {
-                    if !endpoint.events.contains(&event_name) {
+                for target in &endpoints {
+                    if !target.endpoint.events.contains(&event_name) {
                         continue;
                     }
-                    let Ok(permit) = sem.clone().try_acquire_owned() else {
-                        warn!(endpoint = %endpoint.name, event = %event_name, "HttpLogger: delivery concurrency exhausted, dropping event");
-                        continue;
-                    };
-                    let client = client.clone();
-                    let body = body.clone();
-                    let initial_backoff = config.default_initial_backoff;
-                    let max_backoff = config.default_max_backoff;
-                    pending.spawn(async move {
-                        let _permit = permit;
-                        deliver_with_retry(&client, &endpoint, body, initial_backoff, max_backoff)
-                            .await;
-                    });
+                    if let Err(err) = target.tx.try_send(EndpointMsg::Delivery(body.clone())) {
+                        warn!(
+                            endpoint = %target.endpoint.name,
+                            error = %err,
+                            "HttpLogger: endpoint queue unavailable, dropping event"
+                        );
+                    }
                 }
-                drain_finished(&mut pending).await;
             }
             Msg::Flush(reply) => {
-                while pending.join_next().await.is_some() {}
+                flush_endpoints(&endpoints).await;
                 let _ = reply.send(());
             }
         }
     }
+}
+
+async fn run_endpoint_worker(
+    endpoint: Arc<WebhookEndpoint>,
+    client: Client,
+    global_semaphore: Arc<Semaphore>,
+    concurrency: usize,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    mut rx: mpsc::Receiver<EndpointMsg>,
+) {
+    let endpoint_semaphore = Arc::new(Semaphore::new(concurrency));
+    let mut pending = JoinSet::new();
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            EndpointMsg::Delivery(body) => {
+                // Each endpoint has a separate queue and permit pool, so a bad endpoint
+                // cannot keep healthy endpoints from scheduling their own deliveries.
+                let endpoint_permit = endpoint_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("webhook endpoint semaphore is never closed");
+                let global_permit = global_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("webhook delivery semaphore is never closed");
+                let endpoint = endpoint.clone();
+                let client = client.clone();
+                pending.spawn(async move {
+                    let _endpoint_permit = endpoint_permit;
+                    let _global_permit = global_permit;
+                    deliver_with_retry(&client, &endpoint, body, initial_backoff, max_backoff)
+                        .await;
+                });
+                drain_finished(&mut pending).await;
+            }
+            EndpointMsg::Flush(reply) => {
+                flush_pending(&mut pending).await;
+                let _ = reply.send(());
+            }
+        }
+    }
+}
+
+async fn flush_endpoints(endpoints: &[DeliveryTarget]) {
+    for target in endpoints {
+        let (tx, rx) = oneshot::channel();
+        match target.tx.try_send(EndpointMsg::Flush(tx)) {
+            Ok(()) => {
+                if tokio::time::timeout(FLUSH_TIMEOUT, rx).await.is_err() {
+                    warn!(endpoint = %target.endpoint.name, "HttpLogger: endpoint flush timed out");
+                }
+            }
+            Err(err) => warn!(
+                endpoint = %target.endpoint.name,
+                error = %err,
+                "HttpLogger: endpoint flush unavailable"
+            ),
+        }
+    }
+}
+
+async fn flush_pending(pending: &mut JoinSet<()>) {
+    let completed = tokio::time::timeout(FLUSH_TIMEOUT, async {
+        while let Some(result) = pending.join_next().await {
+            if let Err(err) = result {
+                warn!(error = %err, "HttpLogger: webhook delivery task failed");
+            }
+        }
+    })
+    .await;
+    if completed.is_err() {
+        warn!("HttpLogger: aborting webhook deliveries after flush timeout");
+        pending.abort_all();
+        drain_finished(pending).await;
+    }
+}
+
+fn webhook_client() -> Client {
+    Client::builder()
+        // Webhook endpoints are operator-configured but must not turn a 3xx response
+        // into a request to an arbitrary internal address.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("failed to build webhook HTTP client")
 }
 
 fn encode_event(event: LogEvent) -> Option<(String, Vec<u8>)> {
@@ -434,6 +559,115 @@ mod tests {
     }
 
     #[test]
+    fn payload_without_a_nonempty_sandbox_id_is_dropped() {
+        assert!(build_payload(LogEvent::new(LogLevel::Info, "sandbox.created")).is_none());
+        assert!(build_payload(
+            LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "  ")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn endpoint_validation_reports_operator_facing_errors() {
+        let endpoint = |url: &str, events: Vec<&str>| WebhookEndpointConfig {
+            name: "test-endpoint".to_string(),
+            url: url.to_string(),
+            events: events.into_iter().map(str::to_string).collect(),
+            ..Default::default()
+        };
+
+        assert!(normalize_endpoint(
+            &endpoint("", vec!["sandbox.created"]),
+            Duration::from_secs(1),
+            0
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("empty URL"));
+        assert!(normalize_endpoint(
+            &endpoint("ftp://example.test/hook", vec!["sandbox.created"]),
+            Duration::from_secs(1),
+            0
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("invalid url"));
+        assert!(normalize_endpoint(
+            &endpoint("http://", vec!["sandbox.created"]),
+            Duration::from_secs(1),
+            0
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("invalid URL"));
+        assert!(normalize_endpoint(
+            &endpoint("https://example.test/hook", vec!["sandbox.unknown"]),
+            Duration::from_secs(1),
+            0
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported event"));
+    }
+
+    #[test]
+    fn webhook_config_validation_rejects_invalid_global_limits() {
+        let valid_endpoint = WebhookEndpointConfig {
+            name: "test-endpoint".to_string(),
+            url: "https://example.test/hook".to_string(),
+            events: vec!["sandbox.created".to_string()],
+            ..Default::default()
+        };
+        let valid_config = || WebhookConfig {
+            enabled: true,
+            queue_size: 1,
+            delivery_concurrency: 1,
+            default_timeout_ms: 1,
+            default_max_retries: 0,
+            default_initial_backoff_ms: 1,
+            default_max_backoff_ms: 1,
+            endpoints: vec![valid_endpoint.clone()],
+        };
+
+        let mut config = valid_config();
+        config.queue_size = 0;
+        assert!(HttpLoggerConfig::try_from(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("queue_size"));
+        let mut config = valid_config();
+        config.delivery_concurrency = 0;
+        assert!(HttpLoggerConfig::try_from(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("delivery_concurrency"));
+        let mut config = valid_config();
+        config.default_timeout_ms = 0;
+        assert!(HttpLoggerConfig::try_from(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("default_timeout_ms"));
+        let mut config = valid_config();
+        config.default_initial_backoff_ms = 0;
+        assert!(HttpLoggerConfig::try_from(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("default_initial_backoff_ms"));
+        let mut config = valid_config();
+        config.default_max_backoff_ms = 0;
+        assert!(HttpLoggerConfig::try_from(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("default_max_backoff_ms"));
+        let mut config = valid_config();
+        config.endpoints.clear();
+        assert!(HttpLoggerConfig::try_from(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("endpoints"));
+    }
+
+    #[test]
     fn sign_uses_timestamp_dot_body() {
         let body = br#"{"event":"sandbox.created"}"#;
         let got = sign("secret", "1782945600", body);
@@ -489,6 +723,61 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["event"], "sandbox.created");
         assert_eq!(body["sandbox_id"], "sandbox-1");
+    }
+
+    #[tokio::test]
+    async fn delivery_does_not_follow_redirects() {
+        let redirected_requests = Arc::new(AtomicUsize::new(0));
+        let target = Router::new().route(
+            "/target",
+            post({
+                let redirected_requests = redirected_requests.clone();
+                move || {
+                    let redirected_requests = redirected_requests.clone();
+                    async move {
+                        redirected_requests.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(target_listener, target).await.unwrap();
+        });
+
+        let redirect = Router::new().route(
+            "/webhook",
+            post(move || async move {
+                (
+                    axum::http::StatusCode::TEMPORARY_REDIRECT,
+                    [(
+                        axum::http::header::LOCATION,
+                        format!("http://{target_addr}/target"),
+                    )],
+                )
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(redirect_listener, redirect).await.unwrap();
+        });
+
+        let endpoint = WebhookEndpoint {
+            name: "redirect".to_string(),
+            url: Url::parse(&format!("http://{redirect_addr}/webhook")).unwrap(),
+            events: HashSet::from(["sandbox.created".to_string()]),
+            secret: None,
+            timeout: Duration::from_secs(1),
+            max_retries: 0,
+        };
+        assert!(deliver_once(&webhook_client(), &endpoint, b"{}".to_vec())
+            .await
+            .is_err());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(redirected_requests.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -565,6 +854,178 @@ mod tests {
         )
         .await
         .expect("log should not block on webhook delivery");
+    }
+
+    #[tokio::test]
+    async fn queues_delivery_while_concurrency_is_exhausted() {
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let release_first = Arc::new(tokio::sync::Notify::new());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/webhook",
+            post({
+                let first_started = first_started.clone();
+                let release_first = release_first.clone();
+                let requests = requests.clone();
+                move || {
+                    let first_started = first_started.clone();
+                    let release_first = release_first.clone();
+                    let requests = requests.clone();
+                    async move {
+                        let request_number = requests.fetch_add(1, Ordering::SeqCst);
+                        if request_number == 0 {
+                            first_started.notify_one();
+                            release_first.notified().await;
+                        }
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let logger = HttpLogger::new(HttpLoggerConfig {
+            enabled: true,
+            queue_size: 2,
+            delivery_concurrency: 1,
+            default_initial_backoff: Duration::from_millis(1),
+            default_max_backoff: Duration::from_millis(1),
+            endpoints: vec![WebhookEndpoint {
+                name: "blocked".to_string(),
+                url: Url::parse(&format!("http://{addr}/webhook")).unwrap(),
+                events: HashSet::from(["sandbox.created".to_string()]),
+                secret: None,
+                timeout: Duration::from_secs(5),
+                max_retries: 0,
+            }],
+        });
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "one"))
+            .await;
+        tokio::time::timeout(Duration::from_secs(1), first_started.notified())
+            .await
+            .expect("first delivery should start");
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "two"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+        release_first.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while requests.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("queued delivery should run after the first request completes");
+        logger.flush().await;
+    }
+
+    #[tokio::test]
+    async fn blocked_endpoint_does_not_delay_healthy_endpoint() {
+        let slow_started = Arc::new(tokio::sync::Notify::new());
+        let release_slow = Arc::new(tokio::sync::Notify::new());
+        let slow_requests = Arc::new(AtomicUsize::new(0));
+        let slow = Router::new().route(
+            "/webhook",
+            post({
+                let slow_started = slow_started.clone();
+                let release_slow = release_slow.clone();
+                let slow_requests = slow_requests.clone();
+                move || {
+                    let slow_started = slow_started.clone();
+                    let release_slow = release_slow.clone();
+                    let slow_requests = slow_requests.clone();
+                    async move {
+                        if slow_requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                            slow_started.notify_one();
+                            release_slow.notified().await;
+                        }
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+        let slow_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let slow_addr = slow_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(slow_listener, slow).await.unwrap();
+        });
+
+        let healthy_requests = Arc::new(AtomicUsize::new(0));
+        let healthy = Router::new().route(
+            "/webhook",
+            post({
+                let healthy_requests = healthy_requests.clone();
+                move || {
+                    let healthy_requests = healthy_requests.clone();
+                    async move {
+                        healthy_requests.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+        let healthy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let healthy_addr = healthy_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(healthy_listener, healthy).await.unwrap();
+        });
+
+        let endpoint = |name: &str, addr| WebhookEndpoint {
+            name: name.to_string(),
+            url: Url::parse(&format!("http://{addr}/webhook")).unwrap(),
+            events: HashSet::from(["sandbox.created".to_string()]),
+            secret: None,
+            timeout: Duration::from_secs(5),
+            max_retries: 0,
+        };
+        let logger = HttpLogger::new(HttpLoggerConfig {
+            enabled: true,
+            queue_size: 4,
+            delivery_concurrency: 2,
+            default_initial_backoff: Duration::from_millis(1),
+            default_max_backoff: Duration::from_millis(1),
+            endpoints: vec![
+                endpoint("slow", slow_addr),
+                endpoint("healthy", healthy_addr),
+            ],
+        });
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "one"))
+            .await;
+        tokio::time::timeout(Duration::from_secs(1), slow_started.notified())
+            .await
+            .expect("slow endpoint should receive the first delivery");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while healthy_requests.load(Ordering::SeqCst) < 1 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("healthy endpoint should receive the first delivery");
+
+        logger
+            .log(LogEvent::new(LogLevel::Info, "sandbox.created").field("sandbox_id", "two"))
+            .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while healthy_requests.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("healthy endpoint should not wait for the blocked endpoint");
+
+        release_slow.notify_waiters();
+        logger.flush().await;
     }
 
     #[test]

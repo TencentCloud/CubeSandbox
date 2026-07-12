@@ -11,6 +11,7 @@ use crate::{
     config::ServerConfig,
     cubemaster::CubeMasterClient,
     error::{AppError, AppResult},
+    logging::ArcLogger,
 };
 
 const DENY_ALL_IPV4_CIDR: &str = "0.0.0.0/0";
@@ -89,12 +90,13 @@ pub struct AppServices {
 }
 
 impl AppServices {
-    pub fn new(config: &ServerConfig, cubemaster: CubeMasterClient) -> Self {
+    pub fn new(config: &ServerConfig, cubemaster: CubeMasterClient, logger: ArcLogger) -> Self {
         Self {
             sandboxes: sandboxes::SandboxService::new(
                 cubemaster.clone(),
                 config.instance_type.clone(),
                 config.sandbox_domain.clone(),
+                logger,
             ),
             snapshots: snapshots::SnapshotService::new(
                 cubemaster.clone(),

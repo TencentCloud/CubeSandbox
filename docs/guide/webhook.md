@@ -37,6 +37,7 @@ export WEBHOOK__ENDPOINTS__0__MAX_RETRIES=3
 CubeAPI registers the HTTP webhook logger in `MultiLogger` at startup. Restart CubeAPI after changing endpoints, secrets, or retry values.
 
 Endpoint URL validation only requires `http` or `https` scheme and a non-empty host. Private and loopback addresses are allowed for local receivers and internal alerting systems.
+Endpoint indexes may be sparse, for example `WEBHOOK__ENDPOINTS__0__...` and `WEBHOOK__ENDPOINTS__2__...`.
 
 ## Payload
 
@@ -46,11 +47,7 @@ Endpoint URL validation only requires `http` or `https` scheme and a non-empty h
   "event": "sandbox.created",
   "timestamp": "2026-07-01T20:00:00Z",
   "sandbox_id": "sandbox-1",
-  "template_id": "template-1",
-  "host_id": "node-1",
-  "host_ip": "10.0.0.1",
-  "instance_type": "cubebox",
-  "metadata": {}
+  "template_id": "template-1"
 }
 ```
 
@@ -60,8 +57,8 @@ Fields:
 - `event`: Event type.
 - `timestamp`: Event time in UTC RFC3339Nano format.
 - `sandbox_id`: Sandbox ID.
-- `template_id`, `host_id`, `host_ip`, `instance_type`: Best-effort context fields.
-- `metadata`: Reserved for future context.
+- `template_id`: Present for create and resume events when CubeMaster returns it.
+- Additional fields may be included when the originating structured log event contains them; receivers must ignore fields they do not recognize.
 
 ## Signature
 
@@ -93,9 +90,9 @@ Receivers should reject stale timestamps to reduce replay risk.
 
 ## Delivery semantics
 
-Webhook delivery is at-most-once with limited retries. Events are queued in memory and are not persisted. If the queue is full or delivery concurrency is exhausted, CubeAPI drops the event and logs a warning.
+Webhook delivery is at-most-once with limited retries. Events are queued in memory and are not persisted. If the global or an endpoint-specific queue is full, CubeAPI drops that delivery and logs a warning.
 
-Retries use exponential backoff with a bounded maximum backoff. Delivery work runs with a concurrency limit so failed endpoints do not block sandbox API requests.
+Retries use exponential backoff with a bounded maximum backoff. Delivery work uses a global concurrency limit and endpoint-specific queues so a failed endpoint does not block healthy endpoint deliveries or sandbox API requests. Redirects are not followed.
 
 ## Local validation
 

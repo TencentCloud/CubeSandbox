@@ -50,6 +50,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/health":
+            return self.respond({"status": "ok"})
         if parsed.path == "/cube/sandbox/info":
             sandbox_id = parse_qs(parsed.query).get("sandbox_id", [self.sandbox_id])[0]
             payload = success()

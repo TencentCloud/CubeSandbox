@@ -292,57 +292,54 @@ fn parse_indexed_webhook_endpoints(
         }
     }
 
-    let max_index = endpoints
-        .keys()
-        .chain(events.keys().map(|(index, _)| index))
-        .copied()
-        .max();
     let mut result = Vec::new();
-    if let Some(max_index) = max_index {
-        for index in 0..=max_index {
-            let fields = endpoints.remove(&index).ok_or_else(|| {
-                anyhow::anyhow!("missing WEBHOOK__ENDPOINTS__{index} configuration")
-            })?;
-            let endpoint_events = events
-                .iter()
-                .filter(|((endpoint_index, _), _)| *endpoint_index == index)
-                .map(|((_, event_index), value)| (*event_index, value.trim().to_string()))
-                .collect::<BTreeMap<_, _>>();
-            let events = endpoint_events
-                .into_iter()
-                .enumerate()
-                .map(|(expected, (actual, value))| {
-                    anyhow::ensure!(
-                        actual == expected,
-                        "missing WEBHOOK__ENDPOINTS__{index}__EVENTS__{expected}"
-                    );
-                    Ok(value)
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            result.push(WebhookEndpointConfig {
-                name: fields.get("NAME").map_or_else(String::new, Clone::clone),
-                url: fields.get("URL").map_or_else(String::new, Clone::clone),
-                events,
-                secret: fields
-                    .get("SECRET")
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty()),
-                timeout_ms: fields
-                    .get("TIMEOUT_MS")
-                    .map(|value| value.parse())
-                    .transpose()
-                    .map_err(|err| {
-                        anyhow::anyhow!("invalid WEBHOOK__ENDPOINTS__{index}__TIMEOUT_MS: {err}")
-                    })?,
-                max_retries: fields
-                    .get("MAX_RETRIES")
-                    .map(|value| value.parse())
-                    .transpose()
-                    .map_err(|err| {
-                        anyhow::anyhow!("invalid WEBHOOK__ENDPOINTS__{index}__MAX_RETRIES: {err}")
-                    })?,
-            });
-        }
+    for (index, _) in &events {
+        anyhow::ensure!(
+            endpoints.contains_key(&index.0),
+            "WEBHOOK__ENDPOINTS__{} has events but no endpoint configuration",
+            index.0
+        );
+    }
+    for (index, fields) in endpoints {
+        let endpoint_events = events
+            .iter()
+            .filter(|((endpoint_index, _), _)| *endpoint_index == index)
+            .map(|((_, event_index), value)| (*event_index, value.trim().to_string()))
+            .collect::<BTreeMap<_, _>>();
+        let events = endpoint_events
+            .into_iter()
+            .enumerate()
+            .map(|(expected, (actual, value))| {
+                anyhow::ensure!(
+                    actual == expected,
+                    "missing WEBHOOK__ENDPOINTS__{index}__EVENTS__{expected}"
+                );
+                Ok(value)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        result.push(WebhookEndpointConfig {
+            name: fields.get("NAME").map_or_else(String::new, Clone::clone),
+            url: fields.get("URL").map_or_else(String::new, Clone::clone),
+            events,
+            secret: fields
+                .get("SECRET")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            timeout_ms: fields
+                .get("TIMEOUT_MS")
+                .map(|value| value.parse())
+                .transpose()
+                .map_err(|err| {
+                    anyhow::anyhow!("invalid WEBHOOK__ENDPOINTS__{index}__TIMEOUT_MS: {err}")
+                })?,
+            max_retries: fields
+                .get("MAX_RETRIES")
+                .map(|value| value.parse())
+                .transpose()
+                .map_err(|err| {
+                    anyhow::anyhow!("invalid WEBHOOK__ENDPOINTS__{index}__MAX_RETRIES: {err}")
+                })?,
+        });
     }
     Ok(result)
 }
@@ -389,6 +386,26 @@ mod tests {
         assert_eq!(endpoints[1].name, "secondary");
         assert_eq!(endpoints[1].events, vec!["sandbox.paused"]);
         assert_eq!(endpoints[1].secret.as_deref(), Some("secret-two"));
+    }
+
+    #[test]
+    fn parses_sparse_indexed_webhook_endpoints() {
+        let endpoints = parse_indexed_webhook_endpoints(vec![
+            ("WEBHOOK__ENDPOINTS__2__NAME".into(), "secondary".into()),
+            (
+                "WEBHOOK__ENDPOINTS__2__URL".into(),
+                "http://two.example/webhook".into(),
+            ),
+            (
+                "WEBHOOK__ENDPOINTS__2__EVENTS__0".into(),
+                "sandbox.paused".into(),
+            ),
+        ])
+        .expect("sparse endpoint indexes should parse");
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].name, "secondary");
+        assert_eq!(endpoints[0].events, vec!["sandbox.paused"]);
     }
 }
 
