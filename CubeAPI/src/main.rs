@@ -15,6 +15,7 @@ mod routes;
 mod services;
 mod state;
 
+use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -131,7 +132,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // ── Config ─────────────────────────────────────────────────────────────
-    let mut cfg = config::ServerConfig::from_env().unwrap_or_default();
+    let mut cfg = config::ServerConfig::from_env().context("load CubeAPI configuration")?;
 
     // CLI flags override env vars / config file (highest priority)
     if cli.debug {

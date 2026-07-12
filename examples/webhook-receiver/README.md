@@ -61,6 +61,20 @@ python3 receiver.py \
 
 The receiver converts `event_id`, `event`, `sandbox_id`, `timestamp`, `template_id`, and host context into a text message before forwarding.
 
+## Local mock verification
+
+When a local host cannot run the CubeSandbox compute data plane, run the
+CubeAPI lifecycle webhook path against the included CubeMaster contract mock:
+
+```bash
+./examples/webhook-receiver/verify-local-mock.sh
+```
+
+The script starts the mock, this receiver, and a locally built CubeAPI binary.
+It verifies create, pause, resume, and delete responses, then prints the four
+received webhook payloads. Set `CUBE_API_BIN` to override the default binary
+path (`CubeAPI/target/debug/cube-api`).
+
 ## Expected payload
 
 ```json

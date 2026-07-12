@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::{collections::BTreeMap, env, str::FromStr};
+
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -172,11 +174,221 @@ fn default_webhook_max_backoff_ms() -> u64 {
 impl ServerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
-        let cfg = config::Config::builder()
-            .add_source(config::Environment::default().separator("__"))
-            .build()?
-            .try_deserialize()?;
+
+        // `config::Environment` deserializes `ENDPOINTS__0` as a map, not a
+        // Vec. Parse the documented indexed webhook variables explicitly so
+        // startup cannot silently discard a valid webhook configuration.
+        let mut cfg = Self::default();
+        override_string("LOG_LEVEL", &mut cfg.log_level);
+        override_parsed("WORKER_THREADS", &mut cfg.worker_threads)?;
+        override_parsed("RATE_LIMIT_PER_SEC", &mut cfg.rate_limit_per_sec)?;
+        override_string("INSTANCE_TYPE", &mut cfg.instance_type);
+        override_string("LOG_DIR", &mut cfg.log_dir);
+        override_string("LOG_PREFIX", &mut cfg.log_prefix);
+        cfg.auth_callback_url = optional_env("AUTH_CALLBACK_URL");
+        cfg.database_url = optional_env("DATABASE_URL").or_else(default_cube_sandbox_mysql_url);
+        cfg.webhook = webhook_from_env()?;
         Ok(cfg)
+    }
+}
+
+fn optional_env(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn override_string(key: &str, target: &mut String) {
+    if let Some(value) = optional_env(key) {
+        *target = value;
+    }
+}
+
+fn override_parsed<T>(key: &str, target: &mut T) -> anyhow::Result<()>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    let Some(value) = optional_env(key) else {
+        return Ok(());
+    };
+    *target = value
+        .parse()
+        .map_err(|err| anyhow::anyhow!("invalid {key}={value:?}: {err}"))?;
+    Ok(())
+}
+
+fn webhook_from_env() -> anyhow::Result<WebhookConfig> {
+    let mut webhook = WebhookConfig::default();
+    if let Some(value) = optional_env("WEBHOOK__ENABLED") {
+        webhook.enabled = value
+            .parse()
+            .map_err(|err| anyhow::anyhow!("invalid WEBHOOK__ENABLED={value:?}: {err}"))?;
+    }
+    override_parsed("WEBHOOK__QUEUE_SIZE", &mut webhook.queue_size)?;
+    override_parsed(
+        "WEBHOOK__DELIVERY_CONCURRENCY",
+        &mut webhook.delivery_concurrency,
+    )?;
+    override_parsed(
+        "WEBHOOK__DEFAULT_TIMEOUT_MS",
+        &mut webhook.default_timeout_ms,
+    )?;
+    override_parsed(
+        "WEBHOOK__DEFAULT_MAX_RETRIES",
+        &mut webhook.default_max_retries,
+    )?;
+    override_parsed(
+        "WEBHOOK__DEFAULT_INITIAL_BACKOFF_MS",
+        &mut webhook.default_initial_backoff_ms,
+    )?;
+    override_parsed(
+        "WEBHOOK__DEFAULT_MAX_BACKOFF_MS",
+        &mut webhook.default_max_backoff_ms,
+    )?;
+
+    webhook.endpoints = parse_indexed_webhook_endpoints(env::vars())?;
+    Ok(webhook)
+}
+
+fn parse_indexed_webhook_endpoints(
+    vars: impl IntoIterator<Item = (String, String)>,
+) -> anyhow::Result<Vec<WebhookEndpointConfig>> {
+    let mut endpoints: BTreeMap<usize, BTreeMap<String, String>> = BTreeMap::new();
+    let mut events: BTreeMap<(usize, usize), String> = BTreeMap::new();
+    for (key, value) in vars {
+        let Some(rest) = key.strip_prefix("WEBHOOK__ENDPOINTS__") else {
+            continue;
+        };
+        let mut parts = rest.split("__");
+        let index = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("invalid webhook endpoint variable {key}"))?
+            .parse::<usize>()
+            .map_err(|err| anyhow::anyhow!("invalid webhook endpoint index in {key}: {err}"))?;
+        let field = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("invalid webhook endpoint variable {key}"))?;
+
+        if field == "EVENTS" {
+            let event_index = parts
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("invalid webhook event variable {key}"))?
+                .parse::<usize>()
+                .map_err(|err| anyhow::anyhow!("invalid webhook event index in {key}: {err}"))?;
+            if parts.next().is_some() {
+                anyhow::bail!("invalid webhook event variable {key}");
+            }
+            events.insert((index, event_index), value);
+        } else {
+            if parts.next().is_some() {
+                anyhow::bail!("invalid webhook endpoint variable {key}");
+            }
+            endpoints
+                .entry(index)
+                .or_default()
+                .insert(field.to_string(), value);
+        }
+    }
+
+    let max_index = endpoints
+        .keys()
+        .chain(events.keys().map(|(index, _)| index))
+        .copied()
+        .max();
+    let mut result = Vec::new();
+    if let Some(max_index) = max_index {
+        for index in 0..=max_index {
+            let fields = endpoints.remove(&index).ok_or_else(|| {
+                anyhow::anyhow!("missing WEBHOOK__ENDPOINTS__{index} configuration")
+            })?;
+            let endpoint_events = events
+                .iter()
+                .filter(|((endpoint_index, _), _)| *endpoint_index == index)
+                .map(|((_, event_index), value)| (*event_index, value.trim().to_string()))
+                .collect::<BTreeMap<_, _>>();
+            let events = endpoint_events
+                .into_iter()
+                .enumerate()
+                .map(|(expected, (actual, value))| {
+                    anyhow::ensure!(
+                        actual == expected,
+                        "missing WEBHOOK__ENDPOINTS__{index}__EVENTS__{expected}"
+                    );
+                    Ok(value)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            result.push(WebhookEndpointConfig {
+                name: fields.get("NAME").map_or_else(String::new, Clone::clone),
+                url: fields.get("URL").map_or_else(String::new, Clone::clone),
+                events,
+                secret: fields
+                    .get("SECRET")
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                timeout_ms: fields
+                    .get("TIMEOUT_MS")
+                    .map(|value| value.parse())
+                    .transpose()
+                    .map_err(|err| {
+                        anyhow::anyhow!("invalid WEBHOOK__ENDPOINTS__{index}__TIMEOUT_MS: {err}")
+                    })?,
+                max_retries: fields
+                    .get("MAX_RETRIES")
+                    .map(|value| value.parse())
+                    .transpose()
+                    .map_err(|err| {
+                        anyhow::anyhow!("invalid WEBHOOK__ENDPOINTS__{index}__MAX_RETRIES: {err}")
+                    })?,
+            });
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_indexed_webhook_endpoints_in_order() {
+        let endpoints = parse_indexed_webhook_endpoints(vec![
+            ("WEBHOOK__ENDPOINTS__1__NAME".into(), "secondary".into()),
+            ("WEBHOOK__ENDPOINTS__0__NAME".into(), "primary".into()),
+            (
+                "WEBHOOK__ENDPOINTS__0__URL".into(),
+                "http://one.example/webhook".into(),
+            ),
+            (
+                "WEBHOOK__ENDPOINTS__1__URL".into(),
+                "http://two.example/webhook".into(),
+            ),
+            (
+                "WEBHOOK__ENDPOINTS__0__EVENTS__1".into(),
+                "sandbox.deleted".into(),
+            ),
+            (
+                "WEBHOOK__ENDPOINTS__0__EVENTS__0".into(),
+                "sandbox.created".into(),
+            ),
+            (
+                "WEBHOOK__ENDPOINTS__1__EVENTS__0".into(),
+                "sandbox.paused".into(),
+            ),
+            ("WEBHOOK__ENDPOINTS__1__SECRET".into(), "secret-two".into()),
+        ])
+        .expect("indexed webhook endpoints should parse");
+
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0].name, "primary");
+        assert_eq!(
+            endpoints[0].events,
+            vec!["sandbox.created", "sandbox.deleted"]
+        );
+        assert_eq!(endpoints[1].name, "secondary");
+        assert_eq!(endpoints[1].events, vec!["sandbox.paused"]);
+        assert_eq!(endpoints[1].secret.as_deref(), Some("secret-two"));
     }
 }
 
