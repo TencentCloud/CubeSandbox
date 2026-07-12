@@ -5,6 +5,27 @@
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct WebhookEndpointConfig {
+    pub url: String,
+    #[serde(default = "default_webhook_events")]
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
+pub fn default_webhook_events() -> Vec<String> {
+    [
+        "sandbox.created",
+        "sandbox.deleted",
+        "sandbox.paused",
+        "sandbox.resumed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
     /// Bind address, e.g. "0.0.0.0:3000". Env var: CUBE_API_BIND (default "0.0.0.0:3000")
     #[serde(default = "default_bind")]
@@ -71,6 +92,20 @@ pub struct ServerConfig {
     /// Example: mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
+
+    /// JSON array of Webhook endpoints. Each endpoint has its own event filter
+    /// and optional HMAC secret. Env var: WEBHOOK_ENDPOINTS_JSON.
+    #[serde(default)]
+    pub webhook_endpoints_json: Option<String>,
+
+    #[serde(default = "default_webhook_queue_capacity")]
+    pub webhook_queue_capacity: usize,
+    #[serde(default = "default_webhook_max_retries")]
+    pub webhook_max_retries: usize,
+    #[serde(default = "default_webhook_retry_base_ms")]
+    pub webhook_retry_base_ms: u64,
+    #[serde(default = "default_webhook_request_timeout_secs")]
+    pub webhook_request_timeout_secs: u64,
 }
 
 fn default_bind() -> String {
@@ -108,6 +143,19 @@ fn default_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .or_else(default_cube_sandbox_mysql_url)
+}
+
+fn default_webhook_queue_capacity() -> usize {
+    1024
+}
+fn default_webhook_max_retries() -> usize {
+    3
+}
+fn default_webhook_retry_base_ms() -> u64 {
+    250
+}
+fn default_webhook_request_timeout_secs() -> u64 {
+    10
 }
 
 fn default_cube_sandbox_mysql_url() -> Option<String> {
@@ -148,6 +196,32 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             database_url: default_database_url(),
+            webhook_endpoints_json: None,
+            webhook_queue_capacity: default_webhook_queue_capacity(),
+            webhook_max_retries: default_webhook_max_retries(),
+            webhook_retry_base_ms: default_webhook_retry_base_ms(),
+            webhook_request_timeout_secs: default_webhook_request_timeout_secs(),
         }
+    }
+}
+
+impl ServerConfig {
+    pub fn webhook_endpoints(&self) -> anyhow::Result<Vec<WebhookEndpointConfig>> {
+        let Some(raw) = self.webhook_endpoints_json.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let endpoints: Vec<WebhookEndpointConfig> = serde_json::from_str(raw)
+            .map_err(|err| anyhow::anyhow!("invalid WEBHOOK_ENDPOINTS_JSON: {err}"))?;
+        for (index, endpoint) in endpoints.iter().enumerate() {
+            let url = reqwest::Url::parse(&endpoint.url)
+                .map_err(|err| anyhow::anyhow!("invalid webhook endpoint #{index}: {err}"))?;
+            if !matches!(url.scheme(), "http" | "https") {
+                anyhow::bail!("webhook endpoint #{index} must use http or https");
+            }
+            if endpoint.events.is_empty() {
+                anyhow::bail!("webhook endpoint #{index} must subscribe to at least one event");
+            }
+        }
+        Ok(endpoints)
     }
 }

@@ -199,7 +199,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()> {
-    use logging::{arc, file::FileLogger, filtered::FilteredLogger, multi::MultiLogger, LogLevel};
+    use logging::{
+        arc, file::FileLogger, filtered::FilteredLogger, http::HttpLogger,
+        http::HttpLoggerConfig, multi::MultiLogger, LogLevel,
+    };
 
     // ── Logger ────────────────────────────────────────────────────────────
     let min_level = if debug {
@@ -210,15 +213,29 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
 
     let file_logger = FileLogger::new(cfg.log_dir.clone(), cfg.log_prefix.clone()).await?;
 
-    // FilteredLogger gates by level → MultiLogger fans out to file (+ future backends)
-    let logger: logging::ArcLogger = arc(FilteredLogger::new(
-        arc(
-            MultiLogger::new().add(arc(file_logger)), // Uncomment to add more backends:
-                                                      // .add(arc(logging::http::HttpLogger::new(Default::default())))
-                                                      // .add(arc(logging::otlp::OtlpLogger::new()))
-        ),
-        min_level,
-    ));
+    let mut backends = MultiLogger::new().add(arc(file_logger));
+    for endpoint in cfg.webhook_endpoints()? {
+        let config = HttpLoggerConfig {
+            url: endpoint.url.clone(),
+            events: endpoint.events.into_iter().collect(),
+            secret: endpoint.secret,
+            queue_capacity: cfg.webhook_queue_capacity,
+            max_retries: cfg.webhook_max_retries,
+            retry_base_ms: cfg.webhook_retry_base_ms,
+            request_timeout_secs: cfg.webhook_request_timeout_secs,
+        };
+        match HttpLogger::new(config) {
+            Ok(webhook) => {
+                tracing::info!(url = %endpoint.url, "webhook endpoint enabled");
+                backends = backends.add(arc(webhook));
+            }
+            Err(err) => tracing::warn!(url = %endpoint.url, %err, "webhook endpoint disabled"),
+        }
+    }
+
+    // FilteredLogger gates by level; MultiLogger fans out to file and Webhooks.
+    let logger: logging::ArcLogger =
+        arc(FilteredLogger::new(arc(backends), min_level));
 
     tracing::info!(
         log_dir = %cfg.log_dir,
