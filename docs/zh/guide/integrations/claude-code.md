@@ -1,7 +1,7 @@
 ---
 title: Claude Code 集成指南
 author: shsaihdsaiudh
-date: 2026-07-05
+date: 2026-07-06
 tags:
   - integration
   - claude-code
@@ -13,7 +13,7 @@ lang: zh-CN
 
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 是 Anthropic 开发的终端型 AI 编码 Agent。它能在终端环境中运行代码、编辑文件、执行命令——天然适合以 CubeSandbox 作为执行后端，实现隔离、可复现的开发工作流。
 
-本指南介绍如何将 Claude Code 作为**沙箱化编码 Agent** 在 CubeSandbox MicroVM 中运行。
+本指南同时介绍在 CubeSandbox MicroVM 中运行 Claude Code，以及让 Claude Code 留在宿主机、只沙箱化其 Bash 工具调用的方案。
 
 ## 架构
 
@@ -32,10 +32,19 @@ CubeAPI (:3000) ──► CubeMaster ──► Cubelet ──► KVM MicroVM
                                                 LLM API (DeepSeek / Anthropic / OpenAI)
 ```
 
+下方模式 1-3 会在 MicroVM 内运行 Claude Code 本身；模式 4 使用宿主机侧 `PreToolUse` Hook：
+
+```
+Claude Code（宿主机）
+    |-- Read / Write / Edit ----------> 宿主机项目
+    `-- Bash --> PreToolUse Hook --> CubeAPI --> 可复用 MicroVM
+                                                `-- 只读挂载项目目录
+```
+
 ## 环境准备
 
 - 运行中的 [CubeSandbox 部署](/zh/guide/quickstart)
-- Python 3.8+ 和 `e2b-code-interpreter`
+- Python 3.9+ 和 `e2b-code-interpreter`
 - CubeSandbox 代码模板（见下方[模板创建](#模板创建)）
 - LLM 提供商的 API 密钥
 
@@ -89,7 +98,7 @@ Claude Code 在沙箱中需要以下环境变量：
 | `CC_PROVIDER` | LLM 提供商：`deepseek`、`anthropic` 或 `openai` | `deepseek` |
 | `ANTHROPIC_AUTH_TOKEN` | API 密钥（DeepSeek / Anthropic） | `sk-a1b2c3d4...`（DeepSeek）或 `sk-ant-...`（Anthropic） |
 | `ANTHROPIC_BASE_URL` | API 端点地址（DeepSeek / Anthropic） | `https://api.deepseek.com/anthropic` |
-| `ANTHROPIC_MODEL` | 模型名称 | `deepseek-v4-pro` |
+| `CC_MODEL` | 集成脚本选择的模型 | `deepseek-v4-pro` |
 | `OPENAI_API_KEY` | API 密钥（OpenAI 兼容提供商） | `sk-...` |
 | `OPENAI_BASE_URL` | API 端点地址（OpenAI 兼容提供商） | `https://api.openai.com/v1` |
 
@@ -158,6 +167,45 @@ python network_policy.py --allow-internet "分析这段代码的安全性"
 4. CubeEgress 拦截 TLS 流量，将 `Authorization: Bearer sk-placeholder` 替换为真实密钥
 5. 沙箱永远看不到真实密钥——即使被攻破也无法泄露
 
+### 4. 宿主机 Claude Code + PreToolUse Hook
+
+当 Claude Code 需要在宿主机保持交互、但其 `Bash` 工具调用需要进入 CubeSandbox 时，可以使用该方案。在示例目录中执行：
+
+```bash
+python3 -m pip install -r requirements.txt
+cp .env.example .env
+# 在 .env 中设置 CUBE_API_URL 和 CUBE_TEMPLATE_ID
+
+cd hooks
+./install.sh
+```
+
+安装后重启 Claude Code。安装脚本会把 `Bash` 匹配器合并进 `~/.claude/settings.json`，并且只把白名单内的 `CUBE_*` 配置写入 Hook 配置，不会复制 LLM 提供商的 API 密钥。
+
+每个 Claude Code `session_id` 复用一个沙箱，映射默认保存在 `~/.cache/cubesandbox-hook/`。Hook 还会在多次 Bash 调用间保留沙箱 Shell 的工作目录和导出的环境变量。
+
+第一次调用时，Hook 可以请求把 Claude Code 项目目录以相同路径**只读**挂载进沙箱。需要把项目根目录加入 CubeMaster 的宿主机挂载允许列表：
+
+```yaml
+extra_conf:
+  allowed_host_mount_prefixes:
+    - "/data/shared/"
+    - "/home/you/projects/"
+```
+
+`hostPath` 在调度到的 Cubelet 节点上解析，而不是在运行 Claude Code 的机器上解析。只有 Claude Code 与 Cubelet 位于同一节点，或项目已通过共享存储/同步机制存在于每个候选 Cubelet 的相同绝对路径时，才能得到一致文件视图。Hook 不会把本地项目上传或同步到远端部署；不要直接放行只存在于客户端、但可能在 Cubelet 上指向其他数据的路径。
+
+该 Hook 只覆盖 Claude Code 的 `Bash` 工具。`Read`、`Write`、`Edit` 仍然访问宿主机，沙箱命令也不能通过只读挂载写入项目文件或构建产物。如果 CubeMaster 拒绝挂载，命令会降级到无挂载沙箱中执行；Bash 仍然隔离，但无法与宿主机文件工具保持一致的文件视图。
+
+开始无关任务前或卸载前，可以重置指定会话：
+
+```bash
+python3 ~/.claude/hooks/cubesandbox_exec.py --reset --session <session-id>
+
+cd hooks
+./install.sh --uninstall
+```
+
 ## 提供商支持
 
 | 提供商 | `ANTHROPIC_BASE_URL` | 默认模型 |
@@ -173,7 +221,7 @@ python network_policy.py --allow-internet "分析这段代码的安全性"
 CC_PROVIDER=deepseek
 ANTHROPIC_AUTH_TOKEN=sk-...
 ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-ANTHROPIC_MODEL=deepseek-v4-pro
+CC_MODEL=deepseek-v4-pro
 ```
 
 ## 最佳实践
@@ -259,3 +307,5 @@ cubemastercli tpl list
 - `resume_claude_code.py` — 暂停/恢复会话
 - `network_policy.py` — 安全出口与密钥注入
 - `env_utils.py` — 环境变量与凭证管理
+- `hooks/` — 宿主机侧 `PreToolUse` Hook、执行器与安装脚本
+- `tests/` — 共用工具、MCP 处理与 Hook 生命周期测试

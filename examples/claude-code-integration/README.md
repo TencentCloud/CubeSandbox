@@ -2,7 +2,7 @@
 
 [中文文档](./README_zh.md)
 
-Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — a terminal-based AI coding agent — inside **CubeSandbox** MicroVMs for isolated, reproducible, and secure development.
+Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) inside **CubeSandbox** MicroVMs, or keep Claude Code on the host and transparently redirect its Bash commands into a MicroVM.
 
 ```
 Host machine
@@ -27,11 +27,12 @@ CubeMaster ──► Cubelet ──► KVM MicroVM
 | **Snapshot persistence** | Pause/resume Claude Code sessions with full state preserved |
 | **Secure key injection** | CubeEgress injects API keys on the wire — sandbox never sees real credentials |
 | **Network policy** | Default-deny egress with fine-grained LLM API host allowlisting |
+| **Transparent Bash isolation** | An optional `PreToolUse` hook redirects host-side Claude Code Bash calls into a reusable sandbox |
 
 ## Prerequisites
 
 - Running CubeSandbox deployment
-- Python 3.8+ with `e2b-code-interpreter`
+- Python 3.9+ with `e2b-code-interpreter`
 - A CubeSandbox code template (see Step 1 below)
 
 ## Quick Start
@@ -57,6 +58,7 @@ cubemastercli tpl create-from-image \
 ### Step 2 — Configure Environment
 
 ```bash
+python3 -m pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your API key and template ID
 ```
@@ -107,6 +109,53 @@ Sandbox has no internet access — only the LLM API host is allowed through Cube
 python network_policy.py "Analyze the security of this code: ..."
 ```
 
+### Mode D: Host Claude Code with a `PreToolUse` hook
+
+This alternative keeps Claude Code on the host. A `PreToolUse` hook rewrites every Claude Code `Bash` tool call and sends it through the native CubeSandbox SDK:
+
+```
+Claude Code (host)
+    |-- Read / Write / Edit ----------> host project
+    |
+    `-- Bash --> PreToolUse hook --> CubeAPI --> reusable MicroVM
+                                              `-- project mounted read-only
+```
+
+After completing Step 2, install the hook and restart Claude Code:
+
+```bash
+cd hooks
+./install.sh
+```
+
+The installer registers the hook in `~/.claude/settings.json` without replacing other settings. It copies only the whitelisted `CUBE_*` values from `../.env` to the installed hook configuration; provider API keys are not copied.
+
+The hook reuses one sandbox per Claude Code `session_id`. It stores the session-to-sandbox mapping under `~/.cache/cubesandbox-hook/` by default and preserves shell `cd` and exported variables across Bash calls.
+
+For filesystem consistency, the first Bash call can mount Claude Code's project directory at the same path inside the sandbox. The mount is **read-only**, so sandbox commands can inspect host project files but cannot edit them or write build artifacts there. Claude Code's `Read`, `Write`, and `Edit` tools still run on the host; this hook covers `Bash` only.
+
+`hostPath` is resolved on the scheduled Cubelet node, not on the machine running Claude Code. This shared view therefore works only when Claude Code is co-located with that Cubelet or the project is already shared or synchronized to the identical absolute path on every eligible Cubelet. The hook does not upload or synchronize a local project to a remote deployment; do not allowlist a client-only path that could refer to unrelated data on a Cubelet.
+
+The project path must be allowed by CubeMaster:
+
+```yaml
+extra_conf:
+  allowed_host_mount_prefixes:
+    - "/data/shared/"
+    - "/home/you/projects/"
+```
+
+If the mount is rejected, command execution falls back to an isolated sandbox without the mount. Bash remains isolated, but it no longer has a consistent view of files read or changed by Claude Code's host-side file tools.
+
+Reset the sandbox for a known session before starting unrelated work, or reset it before uninstalling:
+
+```bash
+python3 ~/.claude/hooks/cubesandbox_exec.py --reset --session <session-id>
+
+cd hooks
+./install.sh --uninstall
+```
+
 ## Directory Structure
 
 ```
@@ -119,10 +168,23 @@ claude-code-integration/
 ├── _common.py                  # Shared sandbox setup and command helpers
 ├── mcp_server.py               # Optional MCP tool server
 ├── sandbox_exec.py             # Standalone sandbox execution helper
-├── tests/                      # Automated tests for helpers and MCP handling
+├── hooks/                      # Host Claude Code PreToolUse hook and installer
+│   ├── cubesandbox_exec.py
+│   ├── cubesandbox_rewrite.py
+│   └── install.sh
+├── tests/                      # Automated tests
+│   ├── conftest.py
+│   ├── test_common.py
+│   ├── test_cubesandbox_exec.py
+│   ├── test_cubesandbox_rewrite.py
+│   ├── test_env_utils.py
+│   ├── test_hook_install.py
+│   ├── test_mcp_server.py
+│   └── test_sandbox_exec.py
 ├── requirements.txt            # Python dependencies
 ├── .env.example                # Configuration template
 ├── .gitignore
+├── TROUBLESHOOTING.md          # Extended troubleshooting
 ├── README.md                   # This file
 └── README_zh.md                # Chinese documentation
 ```
