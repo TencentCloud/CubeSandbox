@@ -58,20 +58,38 @@
 {{- if and (eq .Values.cubeProxy.tls.mode "certManager") (not .Values.cubeProxy.tls.certManager.issuerRef.name) }}
 {{- fail "cubeProxy.tls.mode=certManager requires cubeProxy.tls.certManager.issuerRef.name" }}
 {{- end }}
-{{- if .Values.cubeProxy.sidecar.adminToken }}
-{{- fail "cubeProxy.sidecar.adminToken is not supported until CubeProxy nginx admin server token injection is chart-managed; leave it empty" }}
+{{- $clbSecurityGroups := index (default dict .Values.cubeProxy.service.annotations) "service.cloud.tencent.com/security-groups" | default "" -}}
+{{- if and (eq (.Values.cubeProxy.service.type | default "ClusterIP") "LoadBalancer") (hasPrefix "CHANGE_ME" $clbSecurityGroups) }}
+{{- fail "cubeProxy.service.annotations[\"service.cloud.tencent.com/security-groups\"] still equals the CHANGE_ME_* sentinel from values-tke.yaml. Override it with your VPC security group id(s) (comma-separated), or set it to \"\" if you manage CLB security groups outside Helm." }}
 {{- end }}
-{{- if not .Values.cubeProxy.hostNetwork }}
-{{- fail "cubeProxy.hostNetwork=true is required to keep CubeProxy aligned with one-click control-node ingress semantics" }}
+{{- if hasKey .Values.cubeProxy "sidecar" }}
+{{- fail "cubeProxy.sidecar was removed; lifecycle coordination is handled by lifecycleManager (cube-lifecycle-manager). Remove cubeProxy.sidecar from your values." }}
 {{- end }}
-{{- if and .Values.cubeProxy.hostNetwork .Values.cubeProxy.ports.http.hostPort (ne (int .Values.cubeProxy.ports.http.hostPort) (int .Values.cubeProxy.ports.http.containerPort)) }}
-{{- fail "cubeProxy.hostNetwork=true requires cubeProxy.ports.http.hostPort to equal cubeProxy.ports.http.containerPort or be empty" }}
+{{- if hasKey .Values.cubeProxy "hostNetwork" }}
+{{- fail "cubeProxy.hostNetwork was removed; CubeProxy always runs on the Pod network behind a ClusterIP Service + Ingress. Remove cubeProxy.hostNetwork from your values." }}
 {{- end }}
-{{- if and .Values.cubeProxy.hostNetwork .Values.cubeProxy.ports.https.hostPort (ne (int .Values.cubeProxy.ports.https.hostPort) (int .Values.cubeProxy.ports.https.containerPort)) }}
-{{- fail "cubeProxy.hostNetwork=true requires cubeProxy.ports.https.hostPort to equal cubeProxy.ports.https.containerPort or be empty" }}
+{{- if and .Values.lifecycleManager.adminToken (lt (len .Values.lifecycleManager.adminToken) 16) }}
+{{- fail "lifecycleManager.adminToken must be empty for auto-generation or at least 16 characters when explicitly set" }}
 {{- end }}
 {{- if and .Values.cubeProxy.configureClusterDNS (eq (include "cube.proxyEnabled" .) "true") (not .Values.cubeProxy.domain) }}
 {{- fail "cubeProxy.configureClusterDNS=true requires cubeProxy.domain" }}
+{{- end }}
+{{- if and .Values.cubeProxy.ingress.enabled (not .Values.cubeProxy.domain) (not .Values.cubeProxy.ingress.hosts) }}
+{{- fail "cubeProxy.ingress.enabled=true requires cubeProxy.domain or cubeProxy.ingress.hosts" }}
+{{- end }}
+{{- if ne (include "cube.lifecycleManagerEnabled" .) "true" }}
+{{- fail "cubeProxy.enabled=true requires lifecycleManager.enabled=true (cube-lifecycle-manager replaces the obsolete cube-proxy-sidecar)" }}
+{{- end }}
+{{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
+{{- if not (include "cube.masterEndpoint" .) }}
+{{- fail "lifecycleManager.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}
+{{- end }}
+{{- if and (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (not .Values.lifecycleManager.redis.host) (not .Values.cubeProxy.redis.host) }}
+{{- fail "lifecycleManager.enabled=true requires redis.host, lifecycleManager.redis.host, or cubeProxy.redis.host when redis.enabled=false" }}
+{{- end }}
+{{- if not .Values.images.lifecycleManager.repository }}
+{{- fail "lifecycleManager.enabled=true requires images.lifecycleManager.repository" }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- if .Values.cubeEgress.enabled }}

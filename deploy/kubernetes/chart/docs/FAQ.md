@@ -263,17 +263,19 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-node --tail=200 | grep -i re
 1. **集群内**（Pod / 跟随节点 DNS 的 sandbox guest）:`nslookup test.cube.app`
    - 无应答 → 查 `kubectl -n kube-system get cm coredns -o yaml` 是否含 `# BEGIN cube-sandbox-dns`
    - 或看 Job：`kubectl -n cube-system logs job/cube-cluster-dns-apply`
-   - 应答应是 CubeProxy Pod IP（headless Service）；对照 `kubectl -n cube-system get endpoints cube-proxy-node -o wide`
+   - 应答应是 CubeProxy **ClusterIP**；对照 `kubectl -n cube-system get svc cube-proxy-node -o wide`
 2. **guest DNS**：默认 `followNodeDns=true`；显式覆盖用 `cubeNode.dns.sandbox.nameservers`
-3. **集群外部**(客户浏览器 / SDK):用户侧 DNS / Private DNS / LB 仍需自行配置
+3. **集群外部**(客户浏览器 / SDK):把 `cube.app` / `*.cube.app` 指到 Ingress Controller / LB
 
-### E2. CubeProxy 起不来:`hostNetwork port 80/443 already in use`
+### E2. Ingress / 外部入口不通
 
-Control 节点上 80/443 被其他服务占用。方案:
+CubeProxy 不再占用节点 80/443。排查:
 
-- 释放占用端口
-- 或改用非默认端口:`cubeProxy.ports.http.hostPort: 8080`(但客户端 URL 也要跟着改)
-- **不推荐**:关掉 hostNetwork 走 ClusterIP,会绕开 one-click 的入口语义
+- Ingress Controller 是否存在：`kubectl get ingressclass`、`kubectl get ingress -n cube-system`
+- passthrough 注解是否匹配你的 Controller（默认是 nginx-ingress）
+- TKE：`-f values-tke.yaml` 默认 **关闭 Ingress**，改用 `LoadBalancer` Service（CLB）暴露 CubeProxy，DNS 指到 Service EXTERNAL-IP；不要用 NodePort 硬接 qcloud Ingress
+- nginx Controller 是否开启 SSL passthrough（需 `--enable-ssl-passthrough`）
+- 无 Ingress 时也可设 `cubeProxy.ingress.enabled=false`，自行把流量接到 Service
 
 ### E3. selfSigned TLS 浏览器提示不安全
 

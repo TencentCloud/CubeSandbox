@@ -36,9 +36,13 @@ Cube Node DaemonSet:
 
 Cube Proxy Node Deployment:
   {{ include "cube.proxyName" . }}
-  HTTP/HTTPS control-node endpoint: <cube-proxy-control-node-ip>:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}
-  Headless Service: {{ include "cube.proxyName" . }}
-  External clients still need their own DNS/LB if they are outside the cluster.
+  Service ({{ .Values.cubeProxy.service.type | default "ClusterIP" }}): {{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/{{ .Values.cubeProxy.ports.https.containerPort }}
+{{- if .Values.cubeProxy.ingress.enabled }}
+  Ingress: {{ include "cube.proxyName" . }} (TLS passthrough → CubeProxy; point external DNS at the Ingress)
+{{- end }}
+{{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
+  Lifecycle Manager: {{ include "cube.lifecycleManagerName" . }}:{{ .Values.lifecycleManager.service.port }}
+{{- end }}
 {{- end }}
 
 Useful commands:

@@ -11,18 +11,21 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  # Headless so DNS returns CubeProxy Pod IPs (HostIP with hostNetwork).
-  clusterIP: None
+  type: {{ .Values.cubeProxy.service.type | default "ClusterIP" }}
   selector:
     {{- include "cube.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: cube-proxy-node
   ports:
     - name: http
       port: {{ .Values.cubeProxy.ports.http.containerPort }}
-      targetPort: {{ .Values.cubeProxy.ports.http.containerPort }}
+      targetPort: http
       protocol: TCP
     - name: https
       port: {{ .Values.cubeProxy.ports.https.containerPort }}
-      targetPort: {{ .Values.cubeProxy.ports.https.containerPort }}
+      targetPort: https
+      protocol: TCP
+    - name: admin
+      port: {{ .Values.cubeProxy.adminPort }}
+      targetPort: admin
       protocol: TCP
 {{- end }}

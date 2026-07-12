@@ -1,0 +1,118 @@
+{{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
+{{- $redisHost := default (include "cube.redisHost" .) .Values.lifecycleManager.redis.host -}}
+{{- $redisPort := default .Values.redis.port .Values.lifecycleManager.redis.port -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cube.lifecycleManagerName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lifecycle-manager
+spec:
+  replicas: {{ .Values.lifecycleManager.replicas }}
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: lifecycle-manager
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: lifecycle-manager
+      {{- with .Values.lifecycleManager.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: cube-lifecycle-manager
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.lifecycleManager "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.lifecycleManager.pullPolicy }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: CUBE_LCM_REDIS_ADDR
+              value: {{ printf "%s:%v" $redisHost $redisPort | quote }}
+            - name: CUBE_LCM_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: redis-password
+            - name: CUBE_LCM_REDIS_DB
+              value: {{ .Values.lifecycleManager.redis.db | quote }}
+            - name: CUBE_LCM_CUBEMASTER_URL
+              value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
+            - name: CUBE_LCM_LISTEN_ADDR
+              value: {{ .Values.lifecycleManager.listenAddr | quote }}
+            - name: CUBE_LCM_DEFAULT_IDLE_TIMEOUT
+              value: {{ .Values.lifecycleManager.defaultIdleTimeout | quote }}
+            - name: CUBE_LCM_HEARTBEAT_TTL
+              value: {{ .Values.lifecycleManager.heartbeatTTL | quote }}
+            - name: CUBE_LCM_DISCOVERY_REFRESH
+              value: {{ .Values.lifecycleManager.discoveryRefresh | quote }}
+            - name: CUBE_LCM_LAST_ACTIVE_POLL
+              value: {{ .Values.lifecycleManager.lastActivePoll | quote }}
+            - name: CUBE_LCM_IDLE_SWEEP_INTERVAL
+              value: {{ .Values.lifecycleManager.idleSweepInterval | quote }}
+            - name: CUBE_LCM_BOOTSTRAP_WARMUP
+              value: {{ .Values.lifecycleManager.bootstrapWarmup | quote }}
+            - name: CUBE_LCM_STATE_LOCK_TTL
+              value: {{ .Values.lifecycleManager.stateLockTTL | quote }}
+            - name: CUBE_LCM_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: cube-admin-token
+          ports:
+            - name: http
+              containerPort: {{ .Values.lifecycleManager.service.port }}
+              protocol: TCP
+          {{- if .Values.lifecycleManager.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.lifecycleManager.probes.readiness.path | quote }}
+              port: {{ .Values.lifecycleManager.probes.readiness.port }}
+            initialDelaySeconds: {{ .Values.lifecycleManager.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.lifecycleManager.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.lifecycleManager.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.lifecycleManager.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.lifecycleManager.probes.liveness.path | quote }}
+              port: {{ .Values.lifecycleManager.probes.liveness.port }}
+            initialDelaySeconds: {{ .Values.lifecycleManager.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.lifecycleManager.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.lifecycleManager.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- with .Values.lifecycleManager.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.lifecycleManagerName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lifecycle-manager
+  {{- with .Values.lifecycleManager.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: lifecycle-manager
+  ports:
+    - name: http
+      port: {{ .Values.lifecycleManager.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

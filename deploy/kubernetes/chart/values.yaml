@@ -16,9 +16,9 @@ global:
   # exactly as declared. Set to e.g. "my-registry.example.com/cubesandbox"
   # to mirror all images into a private registry without editing each entry
   # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
-  # / api / cubemastercli / proxyNode / cubeEgress / cubeEgressNet / webui
-  # entries but not to third-party images such as mysql / redis /
-  # docker-in-docker / alpine/k8s.
+  # / api / cubemastercli / proxyNode / lifecycleManager / cubeEgress /
+  # cubeEgressNet / webui entries but not to third-party images such as mysql /
+  # redis / docker-in-docker / alpine/k8s.
   imageRegistry: ""
 
 images:
@@ -57,6 +57,11 @@ images:
 
   proxyNode:
     repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-proxy-node
+    tag: v0.5.0
+    pullPolicy: Always
+
+  lifecycleManager:
+    repository: ccr.ccs.tencentyun.com/cubesandbox-chart/cube-lifecycle-manager
     tag: v0.5.0
     pullPolicy: Always
 
@@ -267,6 +272,50 @@ webui:
   upstream: ""
   resources: {}
 
+lifecycleManager:
+  # Standalone sandbox auto-pause / auto-resume coordinator. Replaces the
+  # obsolete in-process cube-proxy-sidecar. Enabled by default when CubeProxy
+  # is enabled; CubeProxy points $cube_sidecar_addr at this Service and
+  # registers itself in Redis for CLM discovery.
+  enabled: true
+  replicas: 1
+  podAnnotations: {}
+  listenAddr: "0.0.0.0:8083"
+  service:
+    port: 8083
+    annotations: {}
+  redis:
+    # Empty host uses redis.host or chart-managed cube-redis.
+    host: ""
+    port: ""
+    db: 0
+  defaultIdleTimeout: 5m
+  heartbeatTTL: 15s
+  discoveryRefresh: 3s
+  lastActivePoll: 5s
+  idleSweepInterval: 5s
+  bootstrapWarmup: 30s
+  stateLockTTL: 60s
+  # Shared with CubeProxy admin endpoints (X-Cube-Admin-Token). Empty means
+  # the chart auto-generates and persists one in the release Secret.
+  adminToken: ""
+  probes:
+    readiness:
+      enabled: true
+      path: /readyz
+      port: 8083
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /healthz
+      port: 8083
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 6
+  resources: {}
+
 diagnostics:
   # One-click ships cube-diag scripts. In Kubernetes the chart exposes an
   # equivalent kubectl-based diagnostic script through a ConfigMap so operators
@@ -427,33 +476,47 @@ cubeProxy:
   #
   # One-click enables CubeProxy by default. This chart follows that behavior
   # and creates a self-signed test certificate unless production TLS is provided.
+  # Traffic reaches CubeProxy via ClusterIP Service + Ingress (TLS still
+  # terminates in CubeProxy; Ingress uses SSL passthrough / HTTPS backend).
   enabled: true
-  # Public sandbox domain (also used for TLS CN / wildcard DNS).
-  # For production, point external DNS at CubeProxy as well.
+  # Public sandbox domain (also used for TLS CN / wildcard DNS / Ingress hosts).
+  # For production, point external DNS at the Ingress entrypoint.
   domain: cube.app
   podAnnotations: {}
   replicas: 1
   strategy:
     type: RollingUpdate
-  # One-click CubeProxy is part of the control-node stack. This chart follows
-  # that model and schedules CubeProxy through placement.controlPlane.
-  hostNetwork: true
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   # Optional hint for external clients / docs (not used for in-cluster DNS).
   advertiseIP: ""
   # When true, Helm patches cluster CoreDNS so *.cubeProxy.domain rewrites to
-  # the CubeProxy headless Service. Set false only if mutating kube-system/coredns
+  # the CubeProxy ClusterIP Service. Set false only if mutating kube-system/coredns
   # is not allowed (disabling does not remove a previously injected block;
   # uninstall runs the cleanup hook).
   configureClusterDNS: true
   service:
+    type: ClusterIP
     annotations: {}
+  ingress:
+    # Requires a cluster Ingress Controller. Set false to manage the entrypoint
+    # yourself (still keep the ClusterIP Service as the backend).
+    enabled: true
+    className: ""
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    # Empty hosts use cubeProxy.domain and "*.cubeProxy.domain".
+    hosts: []
+    # Passthrough mode usually leaves this empty; override when the controller
+    # requires an Ingress TLS block.
+    tls: []
   ports:
     http:
       containerPort: 80
-      hostPort: ""
     https:
       containerPort: 443
-      hostPort: ""
   redis:
     # Empty host uses redis.host or chart-managed cube-redis.
     host: ""
@@ -506,20 +569,14 @@ cubeProxy:
     # Used only when tls.mode=inline.
     cert: ""
     key: ""
-  sidecar:
-    # CubeProxy image starts cube-proxy-sidecar from CubeProxy/Dockerfile.
-    # These values wire it to Kubernetes Services instead of the one-click
-    # loopback defaults.
-    listenAddr: 127.0.0.1:8083
-    proxyAdminURLs:
-      - http://127.0.0.1:8082
-    defaultIdleTimeout: 5m
-    lastActivePoll: 5s
-    idleSweepInterval: 5s
-    bootstrapWarmup: 30s
-    stateLockTTL: 60s
-    # Leave empty until CubeProxy nginx admin server also has token injection.
-    adminToken: ""
+  # Admin HTTP server (stock nginx.conf listens on 127.0.0.1:8082). The chart
+  # rewrites this so cube-lifecycle-manager can reach /admin/* from other Pods.
+  adminListen: "0.0.0.0"
+  adminPort: 8082
+  # Redis registry so cube-lifecycle-manager can discover each proxy replica.
+  registry:
+    enabled: true
+    heartbeatIntervalMs: 5000
   resolver:
     # CubeProxy nginx Lua Redis client needs an nginx resolver when Redis is
     # configured by DNS name (the default Kubernetes Service DNS name).

@@ -25,14 +25,15 @@ and does not require a `.complete` marker.
 
 ## Pinning source to a release tag
 
-`cube-api`, `cube-proxy-node`, and `cube-egress` are compiled from repository
-source (rather than binaries in the release tarball). By default the script
-pins those source trees to `${SOURCE_REF}` (defaulting to `${VERSION}`, so
-`v0.5.0` for the default build). It exports `CubeMaster/`, `CubeAPI/`,
-`CubeProxy/`, and `CubeEgress/` at that git ref into
-`${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT` there for
-the duration of the build. This guarantees the images match the release tag
-even when the current worktree is ahead of it.
+`cube-api`, `cube-proxy-node`, `cube-egress`, `cube-lifecycle-manager`, and
+`cube-webui` are compiled from repository source (rather than binaries in the
+release tarball). By default the script pins those source trees to
+`${SOURCE_REF}` (defaulting to `${VERSION}`, so `v0.5.0` for the default
+build). It exports `CubeMaster/`, `CubeAPI/`, `CubeProxy/`, `CubeEgress/`,
+`cube-lifecycle-manager/`, `web/`, and `deploy/one-click/webui/` at that git
+ref into `${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT`
+there for the duration of the build. This guarantees the images match the
+release tag even when the current worktree is ahead of it.
 
 To build from the current worktree instead (typically for development), set
 `SOURCE_REF=""`:
@@ -75,7 +76,8 @@ entrypoint behavior.
   release-package `CubeMaster/bin/cubemastercli` binary and minimal runtime
   dependencies. It is separate from `cube-master` and `cube-node` so runtime
   image responsibilities remain clean.
-- `cube-proxy-node` is built from `CubeProxy/Dockerfile`; no duplicate Dockerfile is kept here.
+- `cube-proxy-node` is built from `CubeProxy/Dockerfile`; no duplicate Dockerfile is kept here. Auto-pause/resume is **not** baked into this image — use the standalone `cube-lifecycle-manager` image instead of the retired `cube-proxy-sidecar`.
+- `cube-lifecycle-manager` is built from `cube-lifecycle-manager/Dockerfile`; no duplicate Dockerfile is kept here.
 - `cube-egress` is built from `CubeEgress/Dockerfile`; no duplicate Dockerfile is kept here. Its `cube-egress/openresty:1.29.2.5-tproxy` base image is built first from `CubeEgress/openresty/Dockerfile`, because that patched OpenResty base is part of the upstream CubeEgress build chain rather than a public pull-only dependency.
   The build script also tags that local base as
   `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/openresty-tproxy`, matching
@@ -86,9 +88,12 @@ entrypoint behavior.
   `CubeEgress/scripts/cube-proxy-iptables-init.sh` plus a small idempotent
   entrypoint that waits for `cube-dev`, applies rules, and removes them on
   termination.
-- `cube-webui` packages the one-click `webui/dist` static assets and reuses
-  the one-click WebUI nginx layout. The chart mounts a rendered nginx config so
-  `/cubeapi/` proxies to the chart-managed CubeAPI Service.
+- `cube-webui` is built exactly like CI (`.github/workflows/release-docker-images.yml`):
+  context = repository root, file = `deploy/one-click/webui/Dockerfile`, with
+  `OPENRESTY_BASE_IMAGE` / `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`.
+  Requires BuildKit (`DOCKER_BUILDKIT=1`) for the adjacent
+  `Dockerfile.dockerignore`. The chart may still mount a ConfigMap nginx.conf
+  over the image default at runtime.
 - The template builder sidecar uses a dind image by default; no duplicate Dockerfile is kept here.
 
 The Helm chart stays under `deploy/kubernetes/chart`; image build logic stays here to avoid coupling chart templates with image construction.

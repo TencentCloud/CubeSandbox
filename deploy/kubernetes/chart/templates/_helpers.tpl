@@ -140,6 +140,23 @@ tolerations:
 {{- printf "%s.%s.svc.%s" (include "cube.proxyName" .) .Release.Namespace (include "cube.clusterDomain" .) -}}
 {{- end -}}
 
+{{- define "cube.lifecycleManagerName" -}}
+{{- printf "%s-lifecycle-manager" (include "cube.fullname" .) -}}
+{{- end -}}
+
+{{- define "cube.lifecycleManagerEnabled" -}}
+{{- $lcm := default dict .Values.lifecycleManager -}}
+{{- if and (dig "enabled" true $lcm) (eq (include "cube.proxyEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.lifecycleManagerFQDN" -}}
+{{- printf "%s.%s.svc.%s" (include "cube.lifecycleManagerName" .) .Release.Namespace (include "cube.clusterDomain" .) -}}
+{{- end -}}
+
+{{- define "cube.lifecycleManagerAddr" -}}
+{{- printf "%s:%v" (include "cube.lifecycleManagerFQDN" .) .Values.lifecycleManager.service.port -}}
+{{- end -}}
+
 {{- define "cube.configureClusterDNS" -}}
 {{- if and .Values.cubeProxy.configureClusterDNS (eq (include "cube.proxyEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
 {{- end -}}

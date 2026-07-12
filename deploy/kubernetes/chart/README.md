@@ -9,7 +9,7 @@ It follows the final Big Pod delivery design:
 - PVM host kernel installation and host reboot are handled by a dedicated Init Container;
 - Cube Node host preparation is handled by a second Init Container;
 - MySQL schema migration is handled by CubeMaster itself using embedded migrations;
-- Cube Master, Cube API, cubemastercli, Cube Proxy Node, WebUI, Template Builder, and Cube Node use separate images.
+- Cube Master, Cube API, cubemastercli, Cube Proxy Node, cube-lifecycle-manager, WebUI, Template Builder, and Cube Node use separate images.
 
 ## Directory
 
@@ -48,6 +48,7 @@ external control plane / compute-only 模式见：
 | `cube-api` | HTTP API only. Runs `cube-api`. |
 | `cubemastercli` | Operational CLI only. Packages the real `CubeMaster/bin/cubemastercli` binary for exec-based operations. |
 | `cube-proxy-node` | Data-plane proxy. Reuses `CubeProxy/Dockerfile` and runs as a chart-managed control-plane Deployment when `cubeProxy.enabled=true`. |
+| `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume coordinator. Replaces the obsolete in-process cube-proxy-sidecar; CubeProxy discovers it via Service DNS and Redis registry. |
 | `cube-egress` | CubeEgress transparent outbound proxy. Reuses `CubeEgress/Dockerfile` and runs as a Cube Node sidecar when `cubeEgress.enabled=true`. |
 | `cube-egress-net` | Host network rule helper for CubeEgress TPROXY/ip-rule/sysctl setup. |
 | `cube-webui` | One-click WebUI static assets and OpenResty runtime. |
@@ -246,6 +247,13 @@ are provisioned in the same zone as the scheduled control-plane Pod on
 multi-AZ TKE clusters. On non-TKE clusters do NOT include this file;
 provide the cluster's own StorageClass name instead.
 
+It also exposes CubeProxy as a `LoadBalancer` Service (CLB) with Ingress
+disabled, and sets TKE CLB annotations for `pass-to-target` plus a
+`CHANGE_ME_TKE_CLB_SECURITY_GROUP` sentinel on
+`service.cloud.tencent.com/security-groups`. Helm fails render until you
+override that value in runtime values (comma-separated for multiple SGs),
+or set it to `""` if you manage CLB security groups outside Helm.
+
 ## Database migration
 
 The chart does not deliver a separate DB migration Job or image. CubeMaster owns MySQL schema migration and runs its embedded `CubeMaster/pkg/base/dao/migrate/migrations/mysql` migrations during startup.
@@ -284,9 +292,9 @@ carry this operational entry point.
 
 `cube-proxy-node` is a Cube data-plane component. It is enabled by default to match one-click behavior and is installed, upgraded, and uninstalled with the Cube release as a control-plane Deployment.
 
-The default TLS mode is `selfSigned`, matching the one-click mkcert-style test experience. Production environments should provide a real TLS certificate and reserve node host ports 80/443 on selected nodes. The image reuses `CubeProxy/Dockerfile`; the chart does not override nginx with a Kubernetes-only configuration.
+The default TLS mode is `selfSigned`, matching the one-click mkcert-style test experience. Production environments should provide a real TLS certificate for CubeProxy. External clients reach `cubeProxy.domain` / `*.domain` through the chart Ingress (SSL passthrough; TLS still terminates in CubeProxy). The image reuses `CubeProxy/Dockerfile`; the chart does not override nginx with a Kubernetes-only configuration.
 
-`cube-proxy-node` also starts the built-in `cube-proxy-sidecar`. The chart wires the sidecar to the chart-managed or third-party Redis endpoint and to the CubeMaster Kubernetes Service. Do not run a separate unmanaged CubeProxy sidecar.
+`cube-proxy-node` depends on chart-managed `cube-lifecycle-manager` for sandbox auto-pause / auto-resume. The chart wires nginx `$cube_sidecar_addr` to the lifecycle-manager Service, opens the proxy admin listener for in-cluster discovery, and registers each proxy replica in Redis. Do not deploy a separate cube-proxy-sidecar.
 
 ### Production TLS Secret
 
@@ -360,24 +368,18 @@ cubeProxy:
 
 This mode creates a release-scoped Secret with `tls.crt`, `tls.key`, and `ca.crt`. Import `ca.crt` into clients if browser or SDK trust is required. Do not use this mode for production.
 
-`cube-proxy-node` uses `placement.controlPlane`, matching the one-click control-node placement for CubeProxy. The chart does not create node labels.
+`cube-proxy-node` uses `placement.controlPlane`. The chart does not create node labels.
 
-`cubeProxy.hostNetwork=true` is also the default. This is required for one-click
-parity: CubeProxy must terminate `cube.app` / wildcard traffic on a node-local
-host-network endpoint. When the sandbox owner is on a compute node, CubeProxy
-uses Redis routing metadata to connect to the owner `HostIP:hostPort`. The
-chart patches the image's default nginx listeners to
-the configured `cubeProxy.ports.*.containerPort` values, which default to `80`
-and `443`.
+CubeProxy runs on the **Pod network** (no `hostNetwork`). Traffic path:
 
-The chart does not create a `cube-proxy-node` ClusterIP Service. A normal
-Kubernetes Service load-balances requests across proxy Pods, which does not
-match the one-click model where callers reach an explicit CubeProxy host
-endpoint. For sandbox data-plane traffic, point wildcard DNS at a specific
-control-node CubeProxy IP or at an external load balancer that preserves the intended
-CubeProxy topology.
+1. External clients → Ingress Controller → ClusterIP Service → CubeProxy Pod
+2. In-cluster clients / sandbox guests → CoreDNS rewrite → same ClusterIP Service
 
-CubeProxy admin health remains loopback-only inside each Pod, matching the image's nginx admin listener. The chart validates it through Pod readiness/liveness probes rather than exposing it through a Service.
+TLS for `cube.app` / wildcards still terminates **inside CubeProxy**. The default Ingress annotations enable nginx-ingress SSL passthrough + HTTPS backend; override `cubeProxy.ingress.className` / `annotations` for TKE CLB or other controllers. Set `cubeProxy.ingress.enabled=false` if you manage the entrypoint yourself (keep the Service as backend).
+
+When the sandbox owner is on a compute node, CubeProxy still uses Redis routing metadata to connect to the owner `HostIP:hostPort`. The chart patches the image's default nginx listeners to the configured `cubeProxy.ports.*.containerPort` values (default `80` / `443`).
+
+CubeProxy admin is reachable in-cluster at each Pod IP:`adminPort` (default `8082`) for cube-lifecycle-manager discovery; probes use the admin token header.
 
 CubeProxy reads sandbox routing metadata from Redis in nginx Lua. Because nginx
 does not automatically inherit Kubernetes DNS resolution for Lua cosocket
@@ -401,7 +403,7 @@ cubeProxy:
 ## Cluster DNS for sandbox domain
 
 When CubeProxy is enabled, the chart patches **cluster CoreDNS** so
-`cubeProxy.domain` / `*.domain` rewrite to the CubeProxy headless Service
+`cubeProxy.domain` / `*.domain` rewrite to the CubeProxy ClusterIP Service
 (Pod IP). Users only set the domain:
 
 ```yaml

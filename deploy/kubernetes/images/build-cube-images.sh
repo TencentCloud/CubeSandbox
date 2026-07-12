@@ -9,30 +9,62 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+WORKTREE_ROOT="${REPO_ROOT}"
 
 VERSION="${VERSION:-v0.5.0}"
 IMAGE_TAG="${IMAGE_TAG:-${VERSION}}"
 REGISTRY="${REGISTRY:-ccr.ccs.tencentyun.com/cubesandbox-chart}"
-# SOURCE_REF pins the CubeMaster / CubeAPI / CubeProxy / CubeEgress source tree
-# used when building cube-api / cube-proxy-node / cube-egress from repository
-# source, ensuring the delivered images match the release tag rather than the
-# current worktree. Set SOURCE_REF="" to build from the current worktree.
+# SOURCE_REF pins the CubeMaster / CubeAPI / CubeProxy / CubeEgress /
+# cube-lifecycle-manager / web / deploy/one-click/webui source tree used when
+# building cube-api / cube-proxy-node / cube-egress / cube-lifecycle-manager /
+# cube-webui from repository source, ensuring the delivered images match the
+# release tag rather than the current worktree. Set SOURCE_REF="" to build from
+# the current worktree.
 SOURCE_REF="${SOURCE_REF-${VERSION}}"
 PUSH="${PUSH:-0}"
 NO_CACHE="${NO_CACHE:-0}"
 BUILD_ROOT="${BUILD_ROOT:-/tmp/cube-kubernetes-images-${VERSION}}"
 CUBE_NODE_BASE_IMAGE="${CUBE_NODE_BASE_IMAGE:-}"
 CUBE_EGRESS_OPENRESTY_BASE_IMAGE="${CUBE_EGRESS_OPENRESTY_BASE_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/openresty-tproxy}"
+# CubeProxy / webui OpenResty bases. Private TCR defaults need auth; override to
+# a reachable image (same knobs CI passes as OPENRESTY_BASE_IMAGE).
+CUBE_PROXY_BASE_IMAGE="${CUBE_PROXY_BASE_IMAGE:-openresty/openresty:1.21.4.1-6-alpine-fat}"
+OPENRESTY_BASE_IMAGE="${OPENRESTY_BASE_IMAGE:-${CUBE_PROXY_BASE_IMAGE}}"
+# Match CI release-docker-images.yml metadata build-args for webui / LCM.
+CUBE_COMMIT="${CUBE_COMMIT:-$(git -C "${WORKTREE_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)}"
+CUBE_BUILD_TIME="${CUBE_BUILD_TIME:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
+# webui Dockerfile.dockerignore requires BuildKit (per-Dockerfile ignore files).
+export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
 
 ONE_CLICK_ARCH="${ONE_CLICK_ARCH:-amd64}"
-ONE_CLICK_URL="${ONE_CLICK_URL:-https://downloads.sourceforge.net/project/cubesandbox.mirror/${VERSION}/cube-sandbox-one-click-${VERSION}-${ONE_CLICK_ARCH}.tar.gz}"
-PVM_KERNEL_RPM_URL="${PVM_KERNEL_RPM_URL:-https://downloads.sourceforge.net/project/cubesandbox.mirror/${VERSION}/kernel-6.6.69_opencloudos9.cubesandbox.pvm.host_gb85200d80fa2-1.x86_64.rpm}"
-PVM_KERNEL_DEB_URL="${PVM_KERNEL_DEB_URL:-https://downloads.sourceforge.net/project/cubesandbox.mirror/${VERSION}/linux-image-6.6.69-opencloudos9.cubesandbox.pvm.host-gb85200d80fa2_6.6.69-gb85200d80fa2-1_amd64.deb}"
+# MIRROR selects the release download origin for one-click + PVM host packages:
+#   cn  -> https://cnb.cool/CubeSandbox/CubeSandbox/-/releases (China)
+#   ""  -> https://github.com/TencentCloud/CubeSandbox/releases (default / overseas)
+# Explicit ONE_CLICK_URL / PVM_KERNEL_*_URL overrides still win.
+MIRROR="${MIRROR:-}"
+ONE_CLICK_ARTIFACT="${ONE_CLICK_ARTIFACT:-cube-sandbox-one-click-${VERSION}-${ONE_CLICK_ARCH}.tar.gz}"
+PVM_KERNEL_RPM_ARTIFACT="${PVM_KERNEL_RPM_ARTIFACT:-kernel-6.6.69_opencloudos9.cubesandbox.pvm.host_gb85200d80fa2-1.x86_64.rpm}"
+PVM_KERNEL_DEB_ARTIFACT="${PVM_KERNEL_DEB_ARTIFACT:-linux-image-6.6.69-opencloudos9.cubesandbox.pvm.host-gb85200d80fa2_6.6.69-gb85200d80fa2-1_amd64.deb}"
+case "${MIRROR}" in
+  cn|CN|cnb|CNB)
+    RELEASE_DOWNLOAD_BASE="https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/download/${VERSION}"
+    ;;
+  ""|github|GITHUB|gh|GH)
+    RELEASE_DOWNLOAD_BASE="https://github.com/TencentCloud/CubeSandbox/releases/download/${VERSION}"
+    ;;
+  *)
+    printf '[build-cube-images] ERROR: unsupported MIRROR=%s (use cn or github)\n' "${MIRROR}" >&2
+    exit 1
+    ;;
+esac
+ONE_CLICK_URL="${ONE_CLICK_URL:-${RELEASE_DOWNLOAD_BASE}/${ONE_CLICK_ARTIFACT}}"
+PVM_KERNEL_RPM_URL="${PVM_KERNEL_RPM_URL:-${RELEASE_DOWNLOAD_BASE}/${PVM_KERNEL_RPM_ARTIFACT}}"
+PVM_KERNEL_DEB_URL="${PVM_KERNEL_DEB_URL:-${RELEASE_DOWNLOAD_BASE}/${PVM_KERNEL_DEB_ARTIFACT}}"
 
 # Optional SHA256 checksums for the downloaded artifacts. When set, the
 # download function refuses to accept a mismatching file. Chart operators
 # should always set these when publishing images to protect the build against
-# SourceForge/mirror tampering. Leave empty for interactive development builds.
+# release-mirror tampering. Leave empty for interactive development builds.
 ONE_CLICK_SHA256="${ONE_CLICK_SHA256:-}"
 PVM_KERNEL_RPM_SHA256="${PVM_KERNEL_RPM_SHA256:-}"
 PVM_KERNEL_DEB_SHA256="${PVM_KERNEL_DEB_SHA256:-}"
@@ -152,27 +184,32 @@ SANDBOX_PACKAGE_TAR="${EXTRACT_DIR}/${ONE_CLICK_DIRNAME}/assets/package/sandbox-
 PACKAGE_DIR="${BUILD_ROOT}/sandbox-package"
 
 mkdir -p "${DOWNLOAD_DIR}" "${EXTRACT_DIR}" "${CONTEXT_DIR}"
+log "release download base (${MIRROR:-github}): ${RELEASE_DOWNLOAD_BASE}"
 
 # When SOURCE_REF is set (default: ${VERSION}), export the CubeMaster / CubeAPI /
-# CubeProxy / CubeEgress source trees at that ref into ${SOURCE_TREE_DIR} and
-# point REPO_ROOT there. This ensures cube-api, cube-proxy-node, cube-egress and
-# related contexts are compiled from the release-tag source, not from whatever
-# happens to be in the current worktree (which may be ahead of the tag).
+# CubeProxy / CubeEgress / cube-lifecycle-manager / web / deploy/one-click/webui
+# trees at that ref into ${SOURCE_TREE_DIR} and point REPO_ROOT there. This
+# ensures cube-api, cube-proxy-node, cube-egress, cube-lifecycle-manager,
+# cube-webui and related contexts are compiled from the release-tag source, not
+# from whatever happens to be in the current worktree (which may be ahead of
+# the tag).
 if [[ -n "${SOURCE_REF}" ]]; then
-  git -C "${REPO_ROOT}" rev-parse --verify "${SOURCE_REF}^{commit}" >/dev/null 2>&1 \
-    || fail "SOURCE_REF=${SOURCE_REF} is not a valid git ref in ${REPO_ROOT}"
-  SOURCE_REF_SHA="$(git -C "${REPO_ROOT}" rev-parse "${SOURCE_REF}^{commit}")"
+  git -C "${WORKTREE_ROOT}" rev-parse --verify "${SOURCE_REF}^{commit}" >/dev/null 2>&1 \
+    || fail "SOURCE_REF=${SOURCE_REF} is not a valid git ref in ${WORKTREE_ROOT}"
+  SOURCE_REF_SHA="$(git -C "${WORKTREE_ROOT}" rev-parse "${SOURCE_REF}^{commit}")"
   SOURCE_TREE_STAMP="${SOURCE_TREE_DIR}/.exported-sha"
-  if [[ ! -f "${SOURCE_TREE_STAMP}" ]] || [[ "$(cat "${SOURCE_TREE_STAMP}")" != "${SOURCE_REF_SHA}" ]]; then
+  SOURCE_EXPORT_SET="CubeMaster CubeAPI CubeProxy CubeEgress cube-lifecycle-manager web deploy/one-click/webui"
+  if [[ ! -f "${SOURCE_TREE_STAMP}" ]] \
+    || [[ "$(cat "${SOURCE_TREE_STAMP}")" != "${SOURCE_REF_SHA}"$'\n'"${SOURCE_EXPORT_SET}" ]]; then
     log "exporting source tree at ${SOURCE_REF} (${SOURCE_REF_SHA:0:12}) into ${SOURCE_TREE_DIR}"
     rm -rf "${SOURCE_TREE_DIR}"
     mkdir -p "${SOURCE_TREE_DIR}"
-    for module in CubeMaster CubeAPI CubeProxy CubeEgress; do
-      git -C "${REPO_ROOT}" archive --format=tar "${SOURCE_REF_SHA}" -- "${module}" \
+    for module in ${SOURCE_EXPORT_SET}; do
+      git -C "${WORKTREE_ROOT}" archive --format=tar "${SOURCE_REF_SHA}" -- "${module}" \
         | tar -C "${SOURCE_TREE_DIR}" -x \
         || fail "failed to export ${module} at ${SOURCE_REF}"
     done
-    printf '%s\n' "${SOURCE_REF_SHA}" > "${SOURCE_TREE_STAMP}"
+    printf '%s\n%s\n' "${SOURCE_REF_SHA}" "${SOURCE_EXPORT_SET}" > "${SOURCE_TREE_STAMP}"
   else
     log "reusing exported source tree at ${SOURCE_REF} (${SOURCE_REF_SHA:0:12})"
   fi
@@ -249,13 +286,12 @@ copy_cubemastercli_context() {
 copy_cube_proxy_component_context() {
   local ctx="$1"
   local src="${REPO_ROOT}/CubeProxy"
-  local sidecar_src="${src}/sidecar"
-  local sidecar_out="${ctx}/bin/cube-proxy-sidecar"
 
   [[ -f "${src}/nginx.conf" ]] || fail "missing CubeProxy nginx.conf"
   [[ -d "${src}/conf/includes" ]] || fail "missing CubeProxy conf/includes"
-  [[ -f "${sidecar_src}/go.mod" ]] || fail "missing CubeProxy sidecar source"
 
+  # Auto-pause/resume moved out of cube-proxy-sidecar into the standalone
+  # cube-lifecycle-manager image. cube-proxy-node is nginx/OpenResty only.
   cp -a "${src}/lua" "${ctx}/lua"
   mkdir -p "${ctx}/conf"
   cp -a "${src}/conf/includes" "${ctx}/conf/includes"
@@ -263,24 +299,76 @@ copy_cube_proxy_component_context() {
   cp "${src}/rotate_nginx_log.sh" "${ctx}/rotate_nginx_log.sh"
   cp "${src}/root" "${ctx}/root"
   cp "${src}/start.sh" "${ctx}/start.sh"
+}
 
-  mkdir -p "${ctx}/bin"
-  log "building CubeProxy sidecar for cube-proxy-node image context"
-  (
-    cd "${sidecar_src}"
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-      go build -trimpath -tags 'netgo osusergo' -ldflags '-s -w' \
-        -o "${sidecar_out}" ./cmd/sidecar
+build_cube_lifecycle_manager_image() {
+  local src="${REPO_ROOT}/cube-lifecycle-manager"
+  [[ -f "${src}/Dockerfile" ]] || fail "missing cube-lifecycle-manager Dockerfile"
+  [[ -f "${src}/go.mod" ]] || fail "missing cube-lifecycle-manager go.mod"
+  build_image cube-lifecycle-manager "${src}" "${src}/Dockerfile" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
+    --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
+    --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
+}
+
+# Same as .github/workflows/release-docker-images.yml for component "webui":
+# context=., file=deploy/one-click/webui/Dockerfile, OPENRESTY_BASE_IMAGE + CUBE_*.
+build_cube_webui_image() {
+  local dockerfile="${REPO_ROOT}/deploy/one-click/webui/Dockerfile"
+  local image="${REGISTRY}/cube-webui:${IMAGE_TAG}"
+  local docker_args=(
+    -f "${dockerfile}"
+    -t "${image}"
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}"
+    --build-arg "CUBE_COMMIT=${CUBE_COMMIT}"
+    --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
+    --build-arg "OPENRESTY_BASE_IMAGE=${OPENRESTY_BASE_IMAGE}"
+    --build-arg "CUBE_PROXY_BASE_IMAGE=${CUBE_PROXY_BASE_IMAGE}"
   )
-  chmod +x "${sidecar_out}"
+  [[ -f "${dockerfile}" ]] || fail "missing webui Dockerfile: ${dockerfile}"
+  [[ -f "${REPO_ROOT}/web/package.json" ]] || fail "missing web/ frontend sources in ${REPO_ROOT}"
+  if [[ "${NO_CACHE}" == "1" ]]; then
+    docker_args=(--no-cache --pull "${docker_args[@]}")
+  fi
+  log "building ${image} from ${dockerfile} (context=${REPO_ROOT}, base=${OPENRESTY_BASE_IMAGE})"
+  docker build "${docker_args[@]}" "${REPO_ROOT}"
+  if [[ "${PUSH}" == "1" ]]; then
+    log "pushing ${image}"
+    docker push "${image}"
+  fi
+}
+
+build_cube_proxy_node_image() {
+  local ctx="$1"
+  local dockerfile="${REPO_ROOT}/CubeProxy/Dockerfile"
+  local image="${REGISTRY}/cube-proxy-node:${IMAGE_TAG}"
+  local docker_args=(
+    -f "${dockerfile}"
+    -t "${image}"
+    --build-arg "CUBE_PROXY_BASE_IMAGE=${CUBE_PROXY_BASE_IMAGE}"
+  )
+  if [[ "${NO_CACHE}" == "1" ]]; then
+    docker_args=(--no-cache --pull "${docker_args[@]}")
+  fi
+  log "building ${image} from ${dockerfile} (base=${CUBE_PROXY_BASE_IMAGE})"
+  docker build "${docker_args[@]}" "${ctx}"
+  if [[ "${PUSH}" == "1" ]]; then
+    log "pushing ${image}"
+    docker push "${image}"
+  fi
 }
 
 build_image() {
   local name="$1"
   local ctx="$2"
-  local dockerfile="${3:-${SCRIPT_DIR}/${name}/Dockerfile}"
+  shift 2
+  local dockerfile="${SCRIPT_DIR}/${name}/Dockerfile"
+  if [[ $# -gt 0 && "$1" != --* ]]; then
+    dockerfile="$1"
+    shift
+  fi
   local image="${REGISTRY}/${name}:${IMAGE_TAG}"
-  local docker_args=(-f "${dockerfile}" -t "${image}")
+  local docker_args=(-f "${dockerfile}" -t "${image}" "$@")
   if [[ "${NO_CACHE}" == "1" ]]; then
     docker_args=(--no-cache --pull "${docker_args[@]}")
   fi
@@ -398,7 +486,9 @@ build_image cubemastercli "${ctx}"
 
 ctx="$(prepare_context cube-proxy-node)"
 copy_cube_proxy_component_context "${ctx}"
-build_image cube-proxy-node "${ctx}" "${REPO_ROOT}/CubeProxy/Dockerfile"
+build_cube_proxy_node_image "${ctx}"
+
+build_cube_lifecycle_manager_image
 
 build_cube_egress_openresty_base_image
 build_cube_egress_image
@@ -407,12 +497,7 @@ ctx="$(prepare_context cube-egress-net)"
 copy_cube_egress_net_context "${ctx}"
 build_image cube-egress-net "${ctx}"
 
-ctx="$(prepare_context cube-webui)"
-[[ -d "${PACKAGE_DIR}/webui" ]] || fail "invalid sandbox-package: missing required cube-webui component webui"
-cp -a "${PACKAGE_DIR}/webui" "${ctx}/package/webui"
-[[ -f "${ctx}/package/webui/dist/index.html" ]] || fail "invalid webui package: missing dist/index.html"
-[[ -f "${ctx}/package/webui/nginx.conf" ]] || fail "invalid webui package: missing nginx.conf"
-build_image cube-webui "${ctx}"
+build_cube_webui_image
 
 if [[ -n "${CUBE_NODE_BASE_IMAGE}" ]]; then
   log "building cube-node by rebasing ${CUBE_NODE_BASE_IMAGE}"
@@ -455,6 +540,7 @@ Built CubeSandbox images:
   ${REGISTRY}/cube-api:${IMAGE_TAG}
   ${REGISTRY}/cubemastercli:${IMAGE_TAG}
   ${REGISTRY}/cube-proxy-node:${IMAGE_TAG}
+  ${REGISTRY}/cube-lifecycle-manager:${IMAGE_TAG}
   ${REGISTRY}/cube-egress:${IMAGE_TAG}
   ${REGISTRY}/cube-egress-net:${IMAGE_TAG}
   ${REGISTRY}/cube-webui:${IMAGE_TAG}

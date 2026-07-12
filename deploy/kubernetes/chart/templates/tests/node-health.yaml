@@ -76,17 +76,14 @@ spec:
           {{- end }}
 
           {{- if eq (include "cube.proxyEnabled" .) "true" }}
-          echo '[health-test] check CubeProxy service via readiness endpoint through Kubernetes API'
-          proxy_pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dproxy-node")"
-          # At least one CubeProxy Pod exists and reports Ready
+          echo '[health-test] check CubeProxy Deployment'
+          proxy_pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dcube-proxy-node")"
           printf '%s\n' "${proxy_pods_json}" \
             | grep -oE '"ready"[[:space:]]*:[[:space:]]*true' | grep -q true
-          # The Cube Proxy readiness endpoint should return an HTTP 200 through
-          # in-cluster Service DNS. Skipped when only a hostNetwork endpoint is
-          # exposed and the test pod cannot resolve it.
-          curl --connect-timeout 5 --max-time 15 -fsS \
-            "http://{{ include "cube.proxyName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/-/ready" >/dev/null 2>&1 \
-            || echo '[health-test] cube-proxy in-cluster readiness probe unreachable (hostNetwork exposure), skipped'
+          echo '[health-test] check CubeProxy ClusterIP Service HTTP'
+          curl --connect-timeout 5 --max-time 15 -fsS -o /dev/null \
+            "http://{{ include "cube.proxyName" . }}.{{ .Release.Namespace }}.svc.{{ include "cube.clusterDomain" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/" \
+            || echo '[health-test] cube-proxy Service HTTP soft-failed (may require Host header / TLS path)'
           {{- end }}
 
           {{- if .Values.cubeNode.enabled }}
@@ -236,8 +233,6 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
-  hostNetwork: true
-  dnsPolicy: ClusterFirstWithHostNet
   {{- with .Values.imagePullSecrets }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
@@ -249,16 +244,16 @@ spec:
       imagePullPolicy: {{ .Values.helmTest.image.pullPolicy }}
       env:
         {{- include "cube.timezoneEnv" . | nindent 8 }}
-        - name: NODE_IP
-          valueFrom:
-            fieldRef:
-              fieldPath: status.hostIP
       command:
         - sh
         - -ec
         - |
-          echo '[health-test] check control-node CubeProxy'
-          curl --connect-timeout 5 --max-time 15 -fsS -o /dev/null http://127.0.0.1:{{ .Values.cubeProxy.probes.readiness.port }}{{ .Values.cubeProxy.probes.readiness.path }}
+          echo '[health-test] check CubeProxy via ClusterIP Service'
+          curl --connect-timeout 5 --max-time 15 -fsS -o /dev/null \
+            "http://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.http.containerPort }}/" \
+            || curl --connect-timeout 5 --max-time 15 -k -fsS -o /dev/null \
+            "https://{{ include "cube.proxyServiceFQDN" . }}:{{ .Values.cubeProxy.ports.https.containerPort }}/" \
+            || { echo "cube-proxy Service unreachable"; exit 1; }
 {{- end }}
 {{ if eq (include "cube.configureClusterDNS" .) "true" }}
 ---
