@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 import time
 from typing import Any
@@ -26,36 +27,39 @@ class MockSnapshotInfo:
 
 class MockFiles:
     def __init__(self) -> None:
-        self._store: dict[str, str] = {}
+        self._store: dict[str, str | bytes] = {}
 
-    def write(self, path: str, content: str) -> None:
+    def write(self, path: str, content: str | bytes) -> None:
         self._store[path] = content
 
-    def read(self, path: str) -> str:
-        return self._store.get(path, "")
+    def read(self, path: str, format: str = "text") -> str | bytes:
+        content = self._store.get(path, "")
+        if isinstance(content, bytes):
+            if format == "text":
+                return content.decode("utf-8", errors="replace")
+            return content
+        if isinstance(content, str):
+            if format == "bytes":
+                return content.encode("utf-8")
+            return content
+        return content
 
     def exists(self, path: str) -> bool:
         return path in self._store
 
-    def snapshot(self) -> dict[str, str]:
+    def snapshot(self) -> dict[str, str | bytes]:
         return dict(self._store)
 
-    def restore(self, state: dict[str, str]) -> None:
+    def restore(self, state: dict[str, str | bytes]) -> None:
         self._store = dict(state)
 
 
 # ── Mock command runner ─────────────────────────────────────────────────────
 
-_RUSTC_RESULTS: dict[str, tuple[int, str, str]] = {}
-
 _KNOWN_CRATES = {
     "serde_json": "1.0.128",
     "chrono": "0.4.38",
 }
-
-
-def _register_rustc(source_hash: str, exit_code: int, stdout: str, stderr: str):
-    _RUSTC_RESULTS[source_hash] = (exit_code, stdout, stderr)
 
 
 class MockCommands:
@@ -68,6 +72,8 @@ class MockCommands:
         self._log.append(f"$ {command}  (cwd={cwd})")
 
         cmd = command.strip()
+        # Strip CARGO_ENV / RUSTUP_HOME prefixes used by snapshot_driven_dev
+        cmd = re.sub(r'^(CARGO_HOME=\S+\s+)?(RUSTUP_HOME=\S+\s+)?(HOME=\S+\s+)?', '', cmd).strip()
 
         # mkdir
         if cmd.startswith("mkdir"):
@@ -77,14 +83,10 @@ class MockCommands:
         if cmd.startswith("rustc "):
             src_name = cmd.removeprefix("rustc ").strip()
             content = self._files._store.get(f"/home/user/workspace/{src_name}", "")
-            h = str(hash(content))
-            if h in _RUSTC_RESULTS:
-                ec, out, err = _RUSTC_RESULTS[h]
+            if 'fn main()' in content:
+                ec, out, err = 0, "", ""
             else:
-                if 'fn main()' in content:
-                    ec, out, err = 0, "", ""
-                else:
-                    ec, out, err = 1, "", "error[E0601]: `main` function not found"
+                ec, out, err = 1, "", "error[E0601]: `main` function not found"
             return MockCommandResult(ec, out, err)
 
         # cargo build
@@ -96,7 +98,7 @@ class MockCommands:
                 return MockCommandResult(1, "",
                     "error[E0601]: `main` function not found in crate")
 
-            has_deps = any(dep in cargo_toml for dep in ["serde_json", "chrono"])
+            has_deps = any(dep in cargo_toml for dep in _KNOWN_CRATES)
 
             # Network isolation check: if offline and deps are needed, fail
             if has_deps and self._sandbox is not None and not self._sandbox.allow_internet_access:
@@ -209,13 +211,22 @@ class MockSandbox:
         self.files = self._files
         self.commands = MockCommands(self._files, sandbox=self)
 
-    def get_info(self) -> dict[str, Any]:
-        return {
-            "sandbox_id": self.sandbox_id,
-            "state": self._state,
-            "template": self.template,
-            "timeout": self.timeout,
-        }
+    class MockInfoState:
+        def __init__(self, value: str):
+            self.value = value
+
+    def get_info(self) -> MockSandboxInfo:
+        class MockSandboxInfo:
+            sandbox_id: str
+            state: "MockSandbox.MockInfoState"
+            template: str
+            timeout: int
+        info = MockSandboxInfo()
+        info.sandbox_id = self.sandbox_id
+        info.state = self.MockInfoState(self._state)
+        info.template = self.template
+        info.timeout = self.timeout
+        return info
 
     def create_snapshot(self, name: str | None = None) -> MockSnapshotInfo:
         snap_id = f"snap-{uuid.uuid4().hex[:12]}"
@@ -263,14 +274,28 @@ class MockSandbox:
             sb._binary_built = state.get("binary_built", False)
         return sb
 
+    class MockSnapshotPager:
+        def __init__(self, items: list[MockSnapshotInfo]):
+            self._items = items
+            self._index = 0
+
+        @property
+        def has_next(self) -> bool:
+            return self._index < len(self._items)
+
+        def next_items(self) -> list[MockSnapshotInfo]:
+            remaining = self._items[self._index:]
+            self._index = len(self._items)
+            return remaining
+
     @classmethod
     def list_snapshots(cls, sandbox_id: str | None = None,
-                       next_token: str | None = None) -> tuple[list[MockSnapshotInfo], str | None]:
+                       next_token: str | None = None) -> "MockSandbox.MockSnapshotPager":
         items = []
         for snap_id, state in _GLOBAL_SNAPSHOTS.items():
             if sandbox_id is None or state.get("sandbox_id") == sandbox_id:
                 items.append(MockSnapshotInfo(snapshot_id=snap_id, name=state.get("name")))
-        return items, None
+        return cls.MockSnapshotPager(items)
 
     @classmethod
     def delete_snapshot(cls, snapshot_id: str) -> None:
@@ -288,7 +313,23 @@ class MockSandbox:
 
 def install():
     import sys
-    sys.modules["e2b"] = type(sys)("e2b")
-    sys.modules["e2b"].Sandbox = MockSandbox
+    from types import ModuleType
+
+    mod = ModuleType("e2b")
+    mod.Sandbox = MockSandbox
+    sys.modules["e2b"] = mod
+
+    # Sub-module for CommandExitException used by network_isolation
+    exc_mod = ModuleType("e2b.sandbox")
+    exc_mod.commands = None
+    sys.modules["e2b.sandbox"] = exc_mod
+
+    cmd_mod = ModuleType("e2b.sandbox.commands")
+    cmd_mod.command_handle = None
+    sys.modules["e2b.sandbox.commands"] = cmd_mod
+
+    handle_mod = ModuleType("e2b.sandbox.commands.command_handle")
+    handle_mod.CommandExitException = type("CommandExitException", (Exception,), {})
+    sys.modules["e2b.sandbox.commands.command_handle"] = handle_mod
     sys.modules["cubesandbox"] = type(sys)("cubesandbox")
     sys.modules["cubesandbox"].Sandbox = MockSandbox

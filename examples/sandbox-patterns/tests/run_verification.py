@@ -40,7 +40,9 @@ def run_demo(name: str, module_path: str) -> str:
                 print(f"\n  ✗ FAILED with exit code {rc}")
             else:
                 print(f"\n  ✓ PASSED")
-        except Exception as e:
+        except BaseException as e:
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
             print(f"\n  ✗ EXCEPTION: {type(e).__name__}: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)

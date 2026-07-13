@@ -65,7 +65,7 @@ def run_cmd(sandbox: Sandbox, command: str, *, cwd: str | None = None,
         if result.stderr:
             msg += f"\n  stderr: {result.stderr}"
         print(msg, file=sys.stderr)
-        raise SystemExit(1)
+        raise RuntimeError(msg)
     return (result.stdout or "")
 
 

@@ -59,7 +59,7 @@ RUN mkdir -p /home/user/workspace/cargo-cache-warmup/src \
     && cd /home/user/workspace/cargo-cache-warmup \
     && printf '[package]\nname = "cache-warmup"\nversion = "0.1.0"\nedition = "2021"\n' > Cargo.toml \
     && printf 'fn main() { println!("cache warmup"); }\n' > src/main.rs \
-    && cargo build 2>/dev/null || true \
+    && cargo build || true \
     && rm -rf /home/user/workspace/cargo-cache-warmup
 
 WORKDIR /home/user/workspace
