@@ -79,9 +79,9 @@ def main() -> int:
         lifecycle={"on_timeout": "pause", "auto_resume": True},
         allow_internet_access=True,
     ) as builder:
-        builder_id = getattr(builder, "sandbox_id", getattr(builder, "id", "unknown"))
+        builder_id = builder.sandbox_id
         info = builder.get_info()
-        print(f"  Builder: {builder_id}  state={info.get('state', 'N/A')}"
+        print(f"  Builder: {builder_id}  state={info.state.value}"
               f"  ({time.monotonic() - t0:.2f}s)")
 
         # Scaffold project with dependencies
@@ -99,8 +99,10 @@ def main() -> int:
 
         print(f"  Builder: compile succeeded in {time.monotonic() - t1:.1f}s")
 
-        # Read binary from builder via host SDK
-        binary_data = builder.files.read(f"{BUILDER_WS}/target/release/multi-container-demo")
+        # Read binary from builder via host SDK (format="bytes" preserves ELF)
+        raw_data = builder.files.read(f"{BUILDER_WS}/target/release/multi-container-demo",
+                                      format="bytes")
+        binary_data = bytes(raw_data)
         if not binary_data:
             print("  Builder: binary not found!", file=sys.stderr)
             return 1
@@ -119,9 +121,9 @@ def main() -> int:
         lifecycle={"on_timeout": "pause", "auto_resume": True},
         allow_internet_access=False,
     ) as runner:
-        runner_id = getattr(runner, "sandbox_id", getattr(runner, "id", "unknown"))
+        runner_id = runner.sandbox_id
         info = runner.get_info()
-        print(f"  Runner: {runner_id}  state={info.get('state', 'N/A')}"
+        print(f"  Runner: {runner_id}  state={info.state.value}"
               f"  ({time.monotonic() - t0:.2f}s)")
 
         # Write binary from host into runner

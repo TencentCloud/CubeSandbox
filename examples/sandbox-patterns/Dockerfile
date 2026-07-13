@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Rust-enabled CubeSandbox template.
+# CubeSandbox template image with Rust toolchain for scenario demos.
 #
 # The image installs the Rust toolchain (rustc, cargo, rustup) on top
 # of the official CubeSandbox base image. The inherited cube-entrypoint
@@ -10,11 +10,11 @@
 # crates.io index cache, reducing first-use latency in sandboxes.
 #
 # Build:
-#   docker build -t rust-playground:latest examples/rust-playground
+#   docker build -t sandbox-patterns:latest examples/sandbox-patterns
 #
 # Register as a Cube template:
 #   cubemastercli tpl create-from-image \
-#     --image <your-registry>/rust-playground:latest \
+#     --image <your-registry>/sandbox-patterns:latest \
 #     --writable-layer-size 4G \
 #     --expose-port 49983 \
 #     --probe       49983 \

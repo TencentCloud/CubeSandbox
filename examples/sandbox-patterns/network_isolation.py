@@ -28,6 +28,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from e2b import Sandbox
+from e2b.sandbox.commands.command_handle import CommandExitException
 
 from env_utils import load_local_dotenv, required
 
@@ -81,26 +82,31 @@ def run_demo(template_id: str, index: int, online: bool) -> int:
         allow_internet_access=online,
     ) as sandbox:
         create_elapsed = time.monotonic() - t0
-        sandbox_id = getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
+        sandbox_id = sandbox.sandbox_id
 
         info = sandbox.get_info()
         print(f"  [{name}] created in {create_elapsed:.2f}s"
-              f"  id={sandbox_id}  state={info.get('state', 'N/A')}"
+              f"  id={sandbox_id}  state={info.state.value}"
               f"  internet={online}")
 
         scaffold_project(sandbox)
         print(f"  [{name}] project scaffolded")
 
         t1 = time.monotonic()
-        result = sandbox.commands.run("cargo build --release", cwd=WORKSPACE, timeout=300)
-        build_elapsed = time.monotonic() - t1
+        try:
+            result = sandbox.commands.run("cargo build --release", cwd=WORKSPACE, timeout=300)
+            build_elapsed = time.monotonic() - t1
+            exit_code = result.exit_code
+        except CommandExitException as exc:
+            build_elapsed = time.monotonic() - t1
+            exit_code = exc.exit_code if hasattr(exc, 'exit_code') else 1
+            print(f"  [{name}] build FAILED (code {exit_code}) after {build_elapsed:.1f}s"
+                  f"  error={str(exc)[:200]}", file=sys.stderr)
+            return 1
 
-        if result.exit_code == 0:
+        if exit_code == 0:
             print(f"  [{name}] build succeeded in {build_elapsed:.1f}s")
         else:
-            stderr = (result.stderr or "")[-500:]
-            print(f"  [{name}] build FAILED after {build_elapsed:.1f}s"
-                  f"  stderr={stderr}", file=sys.stderr)
             return 1
 
         result = sandbox.commands.run("./target/release/sandbox-demo", cwd=WORKSPACE, timeout=30)

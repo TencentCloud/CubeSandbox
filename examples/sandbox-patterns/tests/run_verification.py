@@ -20,7 +20,7 @@ demo_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(demo_dir))
 
 # Set required env vars for all demos
-os.environ["CUBE_TEMPLATE_ID"] = "template-rust-playground-v1"
+os.environ["CUBE_TEMPLATE_ID"] = "template-sandbox-patterns-v1"
 os.environ["E2B_API_URL"] = "http://127.0.0.1:3000"
 os.environ["E2B_API_KEY"] = "mock-key-for-verification"
 

@@ -51,11 +51,11 @@ def create_and_run_workspace(template_id: str, index: int) -> int:
     ) as sandbox:
         create_elapsed = time.monotonic() - t0
 
-        sandbox_id = getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
+        sandbox_id = sandbox.sandbox_id
         info = sandbox.get_info()
 
         print(f"  [{name}] created in {create_elapsed:.2f}s"
-              f"  id={sandbox_id}  state={info.get('state', 'N/A')}")
+              f"  id={sandbox_id}  state={info.state.value}")
 
         sandbox.files.write("/home/user/workspace/workload.rs", WORKLOAD_RS)
 

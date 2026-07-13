@@ -7,9 +7,8 @@
 CubeSandbox differentiators shown:
   - Snapshot outlives sandbox: snapshots persist independently — kill the
     source sandbox and still create new sandboxes from the checkpoint
-  - Instant rollback: restore sandbox state in-memory without rebooting
-  - Fast clone: fork N sandboxes from a single checkpoint via sb.clone(n=N)
-  - Snapshot management: list_snapshots() + delete_snapshot()
+  - Instant rollback: restore sandbox state by re-creating from a snapshot
+  - Snapshot management: create_snapshot() + list_snapshots() + delete_snapshot()
 
 Usage:
     python snapshot_driven_dev.py
@@ -19,8 +18,7 @@ Workflow:
     2. Take snapshot A (checkpoint) — save the entire workspace state.
     3. Kill the source sandbox — snapshot A still exists independently.
     4. Clone from snapshot A into a new sandbox (fork a workspace).
-    5. Make changes in the clone, then roll back to original state.
-    6. One-shot fork N sandboxes from the clone via clone(n=N).
+    5. Make changes in the clone, then roll back by re-creating from snapshot.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ from __future__ import annotations
 import sys
 import time
 
-from cubesandbox import Sandbox
+from e2b import Sandbox
 
 from env_utils import load_local_dotenv, required
 
@@ -54,8 +52,13 @@ NEW_MAIN_RS = r'''fn main() {
 WS = "/home/user/workspace/snapshot-demo"
 
 
+CARGO_ENV = "CARGO_HOME=/home/user/.cargo RUSTUP_HOME=/home/user/.rustup HOME=/home/user"
+
+
 def run_cmd(sandbox: Sandbox, command: str, *, cwd: str | None = None,
             timeout: int = 60) -> str:
+    if command.startswith(("cargo ", "rustup ", "rustc ")):
+        command = f"{CARGO_ENV} {command}"
     result = sandbox.commands.run(command, cwd=cwd, timeout=timeout)
     if result.exit_code != 0:
         msg = f"Command failed (exit={result.exit_code}): {command}"
@@ -86,9 +89,9 @@ def main() -> int:
         timeout=120,
         lifecycle={"on_timeout": "pause", "auto_resume": True},
     )
-    sandbox_id = getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "unknown"))
+    sandbox_id = sandbox.sandbox_id
     info = sandbox.get_info()
-    print(f"  Created workspace: {sandbox_id}  state={info.get('state', 'N/A')}"
+    print(f"  Created workspace: {sandbox_id}  state={info.state.value}"
           f"  ({time.monotonic() - t0:.2f}s)")
 
     run_cmd(sandbox, f"mkdir -p {WS}/src")
@@ -110,7 +113,10 @@ def main() -> int:
     # Kill the source sandbox before cloning — snapshot is independent
     print("\n[Phase 2b] Killing source workspace — checkpoint still lives...")
     sandbox.kill()
-    items, _ = Sandbox.list_snapshots(sandbox_id=sandbox_id)
+    pager = Sandbox.list_snapshots()
+    items = []
+    if pager.has_next:
+        items = pager.next_items()
     if not items:
         print("  FAIL: checkpoint disappeared after workspace kill!")
         return 1
@@ -121,7 +127,7 @@ def main() -> int:
     t0 = time.monotonic()
     print(f"\n[Phase 3] Forking workspace from checkpoint...")
     clone = Sandbox.create(template=snap_id, timeout=120)
-    clone_id = getattr(clone, "sandbox_id", getattr(clone, "id", "unknown"))
+    clone_id = clone.sandbox_id
 
     result = run_cmd(clone, "./target/debug/snapshot-demo", cwd=WS, timeout=30)
     if "Checkpoint A" not in result:
@@ -130,7 +136,7 @@ def main() -> int:
     print(f"  ✓ Fork ready: {clone_id}"
           f"  output={result.strip()!r}  ({time.monotonic() - t0:.2f}s)")
 
-    # ── Phase 4: Modify clone ───────────────────────────────────────────
+    # ── Phase 4: Modify clone then roll back ────────────────────────────
     print("\n[Phase 4] Modifying workspace and rolling back...")
     clone.files.write(f"{WS}/src/main.rs", NEW_MAIN_RS)
     run_cmd(clone, "cargo build", cwd=WS, timeout=120)
@@ -139,10 +145,12 @@ def main() -> int:
     if "Checkpoint B" not in result:
         print(f"  FAIL: expected 'Checkpoint B', got: {result!r}")
         return 1
+    print("  ✓ Changes applied successfully")
 
-    # Rollback to checkpoint A
+    # Rollback to checkpoint A by re-creating from snapshot
     t1 = time.monotonic()
-    clone.rollback(snap_id)
+    clone.kill()
+    clone = Sandbox.create(template=snap_id, timeout=120)
     rollback_elapsed = time.monotonic() - t1
     print(f"  ✓ Rollback: {rollback_elapsed*1000:.0f}ms")
 
@@ -152,12 +160,13 @@ def main() -> int:
         return 1
     print(f"  ✓ Verified: output={result.strip()!r}")
 
-    # ── Phase 5: One-shot clone via sb.clone(n=N) ───────────────────────
+    # ── Phase 5: Fork N workspaces from same checkpoint ─────────────────
     t0 = time.monotonic()
-    print(f"\n[Phase 5] Scaling out: one-shot fork via sb.clone(n=3)...")
-    clones = clone.clone(n=3)
-    for i, sb in enumerate(clones):
-        cid = getattr(sb, "sandbox_id", getattr(sb, "id", "unknown"))
+    print(f"\n[Phase 5] Scaling out: fork 3 workspaces from snapshot...")
+    clone.kill()
+    for i in range(3):
+        sb = Sandbox.create(template=snap_id, timeout=60)
+        cid = sb.sandbox_id
         result = run_cmd(sb, "./target/debug/snapshot-demo", cwd=WS, timeout=30)
         sb.kill()
         print(f"  fork {i+1}: {cid}  output={result.strip()!r}")
@@ -166,12 +175,11 @@ def main() -> int:
     # ── Cleanup ─────────────────────────────────────────────────────────
     print(f"\n[Cleanup] Cleaning up...")
     Sandbox.delete_snapshot(snap_id)
-    clone.kill()
 
     print(f"\n{'=' * 60}")
     print("  All checkpoint-driven development demos passed!")
-    print(f"  Key takeaway: snapshots outlive the source workspace."
-          f"  Rollback in ~100ms.  Clone(n) for parallel forks.")
+    print(f"  Key takeaway: snapshots outlive the source workspace.")
+    print(f"  Rollback by re-creating from snapshot.  Fork N for parallel forks.")
     print(f"{'=' * 60}")
     return 0
 

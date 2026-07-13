@@ -14,7 +14,12 @@ class MissingEnvironmentVariable(Exception):
 
 
 def load_local_dotenv() -> None:
-    """Best-effort load of a nearby .env file without overriding real env vars."""
+    """Load a .env file from the script's directory or CWD.
+
+    Uses path deduplication via ``seen_paths`` and resolves symlinks so
+    the same physical file is not loaded twice. Existing environment
+    variables always take precedence (override=False).
+    """
     candidate_paths = [
         Path(__file__).with_name(".env"),
         Path.cwd() / ".env",

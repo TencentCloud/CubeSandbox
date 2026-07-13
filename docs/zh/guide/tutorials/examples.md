@@ -6,7 +6,7 @@
 |------|------|
 | [代码沙箱快速入门](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/code-sandbox-quickstart) | 最基础的用法：创建沙箱、执行 Python 代码、运行 Shell 命令、管理网络策略等，全部通过 E2B SDK 完成。 |
 | [浏览器沙箱（Playwright）](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/browser-sandbox) | 在 MicroVM 中运行无头 Chromium，通过 CDP 协议使用 Playwright 远程控制浏览器。 |
-| [场景化示例 (Rust Playground)](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/rust-playground) | 四个 CubeSandbox 场景 — 有状态工作区生命周期、出口策略执行、检查点驱动开发（快照/克隆/回滚）以及多沙箱协作（基于角色的网络隔离）。 |
+| [场景化示例](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/sandbox-patterns) | 四个 CubeSandbox 平台模式 — 有状态工作区生命周期、出口策略执行、检查点驱动开发（快照/克隆/回滚）以及多沙箱协作（基于角色的网络隔离）。以 Rust 模板为载体演示。 |
 | [OpenClaw 集成](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/openclaw-integration) | 部署 Cube Sandbox 并配置 OpenClaw Skill，让 AI Agent 能够在隔离的虚拟机环境中执行代码。 |
 | [SWE-bench + mini-swe-agent](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/mini-rl-training) | 使用 cube-sandbox + mini-swe-agent 在隔离沙箱中自动化 SWE-bench 编码任务，支持多模型切换和 RL 训练愿景。 |
 | [OpenAI Agents SDK 集成](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/openai-agents-example) | 将 OpenAI Agents SDK 的 `E2BSandboxClient` 对接 Cube Sandbox。包含最小 Shell Agent（含 Pause/Resume 演示）以及完整的 SWE-bench Django 调试 Agent（流式输出 + 全链路追踪）。 |
