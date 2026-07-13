@@ -70,6 +70,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub terminal_gateway_token: Option<String>,
 
+    /// Maximum active Web terminal sessions handled by this CubeAPI process
+    /// for one sandbox.
+    #[serde(default = "default_terminal_max_sessions_per_sandbox")]
+    pub terminal_max_sessions_per_sandbox: usize,
+
     /// Optional MySQL database URL used by AgentHub persistence.
     ///
     /// Env var: `DATABASE_URL`. When unset, built from `CUBE_SANDBOX_MYSQL_*`.
@@ -115,6 +120,14 @@ fn default_database_url() -> Option<String> {
         .or_else(default_cube_sandbox_mysql_url)
 }
 
+fn default_terminal_max_sessions_per_sandbox() -> usize {
+    std::env::var("TERMINAL_MAX_SESSIONS_PER_SANDBOX")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(4)
+}
+
 fn default_cube_sandbox_mysql_url() -> Option<String> {
     let host = std::env::var("CUBE_SANDBOX_MYSQL_HOST").ok()?;
     let port = std::env::var("CUBE_SANDBOX_MYSQL_PORT").unwrap_or_else(|_| "3306".to_string());
@@ -153,6 +166,7 @@ impl Default for ServerConfig {
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
             terminal_gateway_token: std::env::var("TERMINAL_GATEWAY_TOKEN").ok(),
+            terminal_max_sessions_per_sandbox: default_terminal_max_sessions_per_sandbox(),
             database_url: default_database_url(),
         }
     }

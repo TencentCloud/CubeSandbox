@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
@@ -25,11 +26,14 @@ const (
 	terminalIdleTimeout  = 30 * time.Minute
 	terminalWriteTimeout = 10 * time.Second
 	terminalMaxFrame     = 64 * 1024
+	terminalOpenError    = "unable to open terminal"
 )
 
 var terminalUpgrader = websocket.Upgrader{
-	// CubeAPI is the only public caller in the standard deployment. It has
-	// already authenticated the browser before opening this internal hop.
+	// This is an authenticated server-to-server hop, so the browser Origin is
+	// not an authorization boundary and CubeAPI may omit it. CubeMaster must
+	// remain on a private network: exposing this endpoint would let a client
+	// with a stolen gateway token connect from any browser origin.
 	CheckOrigin: func(*http.Request) bool { return true },
 }
 
@@ -80,14 +84,16 @@ func TerminalWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 
 	hostIP, ok := terminalSandboxHost(r.Context(), first.SandboxID)
 	if !ok {
-		writeTerminalFrame(conn, terminalServerFrame{Type: "error", Message: "sandbox not found"})
+		log.G(r.Context()).Warnf("terminal sandbox lookup failed: sandbox_id=%s", first.SandboxID)
+		writeTerminalFrame(conn, terminalServerFrame{Type: "error", Message: terminalOpenError})
 		return
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	stream, closeStream, err := openTerminalStream(ctx, hostIP)
 	if err != nil {
-		writeTerminalFrame(conn, terminalServerFrame{Type: "error", Message: "terminal backend unavailable"})
+		log.G(r.Context()).Warnf("terminal backend connection failed: sandbox_id=%s host_ip=%s error=%v", first.SandboxID, hostIP, err)
+		writeTerminalFrame(conn, terminalServerFrame{Type: "error", Message: terminalOpenError})
 		return
 	}
 	defer closeStream()
@@ -95,7 +101,8 @@ func TerminalWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 		RequestId: uuid.NewString(), SandboxId: first.SandboxID, ContainerId: first.ContainerID,
 		Cols: first.Cols, Rows: first.Rows,
 	}}}); err != nil {
-		writeTerminalFrame(conn, terminalServerFrame{Type: "error", Message: "unable to start terminal"})
+		log.G(r.Context()).Warnf("terminal open request failed: sandbox_id=%s container_id=%s error=%v", first.SandboxID, first.ContainerID, err)
+		writeTerminalFrame(conn, terminalServerFrame{Type: "error", Message: terminalOpenError})
 		return
 	}
 

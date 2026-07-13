@@ -68,6 +68,8 @@ cargo build --release
 |----------|---------|-------------|
 | `CUBE_API_BIND` | `0.0.0.0:3000` | Listen address |
 | `LOG_LEVEL` | `info` | Log level |
+| `TERMINAL_GATEWAY_TOKEN` | unset | Shared secret for the private CubeAPI to CubeMaster terminal hop |
+| `TERMINAL_MAX_SESSIONS_PER_SANDBOX` | `4` | Active Web terminal sessions per sandbox and CubeAPI process |
 
 CubeAPI also exposes dashboard-oriented routes under `/cubeapi/v1`. The one-click WebUI is served by a separate nginx container on port `12088`; that nginx instance serves the packaged static dashboard and proxies same-origin `/cubeapi` requests back to the host CubeAPI through Docker `host-gateway`.
 

@@ -185,12 +185,28 @@ pub async fn sandbox_terminal(
             "terminal gateway is not configured".to_string(),
         ));
     }
+    let session_permit = state
+        .terminal_sessions
+        .try_acquire(&sandbox_id)
+        .ok_or_else(|| {
+            crate::error::AppError::TooManyRequests(
+                "terminal session limit reached for sandbox".to_string(),
+            )
+        })?;
     Ok(ws
         .protocols(["cube-terminal"])
         .max_message_size(TERMINAL_MAX_FRAME_SIZE)
         .max_frame_size(TERMINAL_MAX_FRAME_SIZE)
         .on_upgrade(move |socket| async move {
-            proxy_terminal(socket, state, sandbox_id, gateway_token, operator).await;
+            proxy_terminal(
+                socket,
+                state,
+                sandbox_id,
+                gateway_token,
+                operator,
+                session_permit,
+            )
+            .await;
         }))
 }
 
@@ -287,6 +303,7 @@ async fn proxy_terminal(
     sandbox_id: String,
     gateway_token: String,
     operator: String,
+    _session_permit: crate::state::TerminalSessionPermit,
 ) {
     let master_url = state
         .config

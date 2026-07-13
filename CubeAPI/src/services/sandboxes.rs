@@ -11,9 +11,9 @@ use crate::{
     cubemaster::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
-        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
-        SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest,
+        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, GetSandboxContainerItem,
+        ListSandboxRequest, SandboxInfo, SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus,
+        SandboxTimeoutRequest, SandboxUpdateRequest,
     },
     error::{AppError, AppResult},
     models::{
@@ -147,7 +147,7 @@ impl SandboxService {
             terminal_targets: d
                 .containers
                 .iter()
-                .filter(|container| !container.container_id.is_empty() && container.status == 1)
+                .filter(|container| is_terminal_target(container))
                 .map(|container| TerminalTarget {
                     container_id: container.container_id.clone(),
                     name: if container.name.is_empty() {
@@ -796,6 +796,10 @@ fn parse_state_filter(value: Option<&str>) -> Option<SandboxState> {
     }
 }
 
+fn is_terminal_target(container: &GetSandboxContainerItem) -> bool {
+    container.kind == "workload" && !container.container_id.is_empty() && container.status == 1
+}
+
 fn is_success_ret_code(ret_code: i32) -> bool {
     matches!(ret_code, RET_CODE_OK | RET_CODE_HTTP_OK)
 }
@@ -914,12 +918,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        build_cube_network_config, filter_by_metadata, from_cubemaster_info, SandboxService,
-        RET_CODE_NOT_FOUND,
+        build_cube_network_config, filter_by_metadata, from_cubemaster_info, is_terminal_target,
+        SandboxService, RET_CODE_NOT_FOUND,
     };
     use crate::cubemaster::{
-        CreateSandboxRequest, CubeMasterClient, ListSandboxResponse, SandboxInfo,
-        SandboxUpdateRequest,
+        CreateSandboxRequest, CubeMasterClient, GetSandboxContainerItem, ListSandboxResponse,
+        SandboxInfo, SandboxUpdateRequest,
     };
     use crate::models::{
         EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
@@ -932,6 +936,34 @@ mod tests {
     };
     use serde_json::Value;
     use tokio::sync::Mutex;
+
+    fn terminal_container(kind: &str, status: i32, container_id: &str) -> GetSandboxContainerItem {
+        GetSandboxContainerItem {
+            name: String::new(),
+            container_id: container_id.to_string(),
+            status,
+            image: String::new(),
+            create_at: 0,
+            cpu: String::new(),
+            mem: String::new(),
+            kind: kind.to_string(),
+            pause_at: 0,
+        }
+    }
+
+    #[test]
+    fn terminal_targets_include_only_running_workload_containers() {
+        assert!(is_terminal_target(&terminal_container(
+            "workload", 1, "ctr-1"
+        )));
+        assert!(!is_terminal_target(&terminal_container(
+            "sandbox", 1, "infra-1"
+        )));
+        assert!(!is_terminal_target(&terminal_container(
+            "workload", 5, "ctr-2"
+        )));
+        assert!(!is_terminal_target(&terminal_container("workload", 1, "")));
+    }
 
     #[test]
     fn metadata_filter_matches_all_pairs() {

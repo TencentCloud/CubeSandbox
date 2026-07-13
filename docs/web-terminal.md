@@ -18,11 +18,15 @@ common:
 ```bash
 # CubeAPI environment
 TERMINAL_GATEWAY_TOKEN=replace-with-a-long-random-secret
+# Optional; defaults to four active sessions per sandbox and CubeAPI process.
+TERMINAL_MAX_SESSIONS_PER_SANDBOX=4
 ```
 
 The CubeMaster terminal WebSocket stays disabled when this value is empty.
 Keep CubeMaster on a private network; browsers connect only to CubeAPI through
-the existing HTTPS/WSS proxy.
+the existing HTTPS/WSS proxy. CubeMaster intentionally accepts the CubeAPI
+server-to-server WebSocket without using browser Origin as an authorization
+signal, so its terminal endpoint must never be exposed directly.
 
 ## Authentication and auditing
 
@@ -37,7 +41,9 @@ with the operator, sandbox ID, and container ID. The URL sandbox ID must match
 the first protocol frame, and `open` is emitted only after that frame reaches
 CubeMaster; failed upgrades and backend connection attempts do not create an
 open audit record. Each terminal is a separate Cubelet TTY process, so multiple
-sessions and sandboxes remain isolated.
+sessions and sandboxes remain isolated. CubeAPI rejects sessions above
+`TERMINAL_MAX_SESSIONS_PER_SANDBOX` with HTTP 429. The limit is process-local,
+so multiply it by the number of CubeAPI replicas when sizing a deployment.
 
 ## Validation checklist
 

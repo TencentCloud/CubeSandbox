@@ -6,9 +6,55 @@ use crate::cubemaster::CubeMasterClient;
 use crate::db::AgentHubStore;
 use crate::logging::ArcLogger;
 use crate::services::AppServices;
+use dashmap::{mapref::entry::Entry, DashMap};
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct TerminalSessionLimiter {
+    counts: Arc<DashMap<String, usize>>,
+    max_per_sandbox: usize,
+}
+
+impl TerminalSessionLimiter {
+    fn new(max_per_sandbox: usize) -> Self {
+        Self {
+            counts: Arc::new(DashMap::new()),
+            max_per_sandbox: max_per_sandbox.max(1),
+        }
+    }
+
+    pub fn try_acquire(&self, sandbox_id: &str) -> Option<TerminalSessionPermit> {
+        let mut count = self.counts.entry(sandbox_id.to_string()).or_default();
+        if *count >= self.max_per_sandbox {
+            return None;
+        }
+        *count += 1;
+        drop(count);
+        Some(TerminalSessionPermit {
+            limiter: self.clone(),
+            sandbox_id: sandbox_id.to_string(),
+        })
+    }
+}
+
+pub struct TerminalSessionPermit {
+    limiter: TerminalSessionLimiter,
+    sandbox_id: String,
+}
+
+impl Drop for TerminalSessionPermit {
+    fn drop(&mut self) {
+        if let Entry::Occupied(mut entry) = self.limiter.counts.entry(self.sandbox_id.clone()) {
+            if *entry.get() <= 1 {
+                entry.remove();
+            } else {
+                *entry.get_mut() -= 1;
+            }
+        }
+    }
+}
 
 /// Shared application state passed to every handler via Axum's `State` extractor.
 /// All fields must be cheap to clone (Arc / DashMap / etc.) — Axum clones State
@@ -32,6 +78,9 @@ pub struct AppState {
 
     /// Optional database-backed AgentHub instance store.
     pub agenthub_store: Option<AgentHubStore>,
+
+    /// Process-local active terminal session limit keyed by sandbox ID.
+    pub terminal_sessions: TerminalSessionLimiter,
 }
 
 impl AppState {
@@ -65,6 +114,8 @@ impl AppState {
             },
             None => None,
         };
+        let terminal_sessions =
+            TerminalSessionLimiter::new(config.terminal_max_sessions_per_sandbox);
 
         Self {
             rate_limiter,
@@ -73,6 +124,25 @@ impl AppState {
             logger,
             config: Arc::new(config),
             agenthub_store,
+            terminal_sessions,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_session_limit_is_per_sandbox_and_releases_capacity() {
+        let limiter = TerminalSessionLimiter::new(2);
+        let first = limiter.try_acquire("sandbox-1").unwrap();
+        let second = limiter.try_acquire("sandbox-1").unwrap();
+        assert!(limiter.try_acquire("sandbox-1").is_none());
+        assert!(limiter.try_acquire("sandbox-2").is_some());
+
+        drop(first);
+        assert!(limiter.try_acquire("sandbox-1").is_some());
+        drop(second);
     }
 }
