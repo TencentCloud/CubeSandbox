@@ -39,7 +39,6 @@ func TestAppliedResults_PartialError(t *testing.T) {
 			Failed:  mkResult(2),
 			Err:     fmt.Errorf("boom"),
 		}
-		// goose returns (nil, *PartialError) on partial failure.
 		got := appliedResults(nil, pErr)
 		if len(got) != 1 || got[0].Source.Version != 1 {
 			t.Fatalf("expected version 1 from PartialError.Applied, got %+v", got)
@@ -65,44 +64,51 @@ func TestAppliedResults_PartialError(t *testing.T) {
 	})
 }
 
-// TestCollectFSFingerprints_RealMigrations verifies the embedded migration set
+// TestCollectFSFingerprints_RealMigrations verifies each embedded migration set
 // is fingerprintable and deterministic (no docker required).
 func TestCollectFSFingerprints_RealMigrations(t *testing.T) {
-	spec := dialectSpecs["mysql"]
-	subFS, err := fs.Sub(spec.rootFS, spec.subdir)
-	if err != nil {
-		t.Fatalf("fs.Sub: %v", err)
-	}
+	for _, dialect := range []string{"mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			spec, ok := dialectSpecs[dialect]
+			if !ok {
+				t.Fatalf("missing dialectSpecs[%q]", dialect)
+			}
+			subFS, err := fs.Sub(spec.rootFS, spec.subdir)
+			if err != nil {
+				t.Fatalf("fs.Sub: %v", err)
+			}
 
-	fp, err := collectFSFingerprints(subFS)
-	if err != nil {
-		t.Fatalf("collectFSFingerprints: %v", err)
-	}
-	if len(fp) == 0 {
-		t.Fatal("expected at least one migration fingerprint")
-	}
-	// The frozen baseline must be present and parsed as version 1.
-	if _, ok := fp[1]; !ok {
-		t.Errorf("missing fingerprint for baseline version 1")
-	}
-	for v, f := range fp {
-		if f.version != v {
-			t.Errorf("version key %d != fingerprint.version %d", v, f.version)
-		}
-		if len(f.sum) != 64 {
-			t.Errorf("version %d: sha256 hex must be 64 chars, got %d", v, len(f.sum))
-		}
-	}
+			fp, err := collectFSFingerprints(subFS)
+			if err != nil {
+				t.Fatalf("collectFSFingerprints: %v", err)
+			}
+			if len(fp) == 0 {
+				t.Fatal("expected at least one migration fingerprint")
+			}
+			// The frozen baseline must be present and parsed as version 1.
+			if _, ok := fp[1]; !ok {
+				t.Errorf("missing fingerprint for baseline version 1")
+			}
+			for v, f := range fp {
+				if f.version != v {
+					t.Errorf("version key %d != fingerprint.version %d", v, f.version)
+				}
+				if len(f.sum) != 64 {
+					t.Errorf("version %d: sha256 hex must be 64 chars, got %d", v, len(f.sum))
+				}
+			}
 
-	// Deterministic: a second pass yields identical sums.
-	again, err := collectFSFingerprints(subFS)
-	if err != nil {
-		t.Fatalf("collectFSFingerprints (2nd): %v", err)
-	}
-	for v, f := range fp {
-		if again[v].sum != f.sum {
-			t.Errorf("version %d sum not deterministic: %s vs %s", v, f.sum, again[v].sum)
-		}
+			// Deterministic: a second pass yields identical sums.
+			again, err := collectFSFingerprints(subFS)
+			if err != nil {
+				t.Fatalf("collectFSFingerprints (2nd): %v", err)
+			}
+			for v, f := range fp {
+				if again[v].sum != f.sum {
+					t.Errorf("version %d sum not deterministic: %s vs %s", v, f.sum, again[v].sum)
+				}
+			}
+		})
 	}
 }
 

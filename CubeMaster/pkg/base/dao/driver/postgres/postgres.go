@@ -3,14 +3,14 @@
 //
 
 // Package postgres plugs the PostgreSQL engine into pkg/base/dao.
-// Blank-import it from main.go (or the integration test bootstrap) so
-// the driver registers itself with the dao registry.
+// Blank-import it from main.go so the driver registers with the dao registry.
 package postgres
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -22,16 +22,11 @@ import (
 )
 
 const (
-	// DriverName is the canonical short name; it doubles as the
-	// migrations sub-directory under pkg/base/dao/migrate/migrations.
+	// DriverName is also the migrations sub-directory under migrate/migrations.
 	DriverName = "postgres"
 
-	// advisoryLockID is the pg_advisory_lock key held for the entire
-	// goose.Up() run (outer layer of the two-layer locking scheme).
-	// The value is arbitrary but MUST remain stable across versions;
-	// changing it would let a paused old instance and a new instance
-	// both acquire the lock and race. pg_advisory_lock accepts bigint,
-	// so any int64 value is valid.
+	// Outer goose.Up advisory lock id; MUST stay stable across versions or
+	// old/new instances can both acquire the lock.
 	advisoryLockID = 3764529487
 
 	defaultLockTimeoutSeconds = 60
@@ -80,18 +75,10 @@ func (d *driver) SessionLocker(cfg dao.Config) lock.SessionLocker {
 	}
 }
 
-// buildDSN constructs a PostgreSQL connection string from the dao.Config.
-// It uses the key=value format accepted by libpq / pgx.
-//
-// TLS is controlled by the "sslmode" key in cfg.Extra (e.g. "require",
-// "verify-full"). Defaults to "disable" for dev/test parity with the MySQL
-// driver; production deployments SHOULD set sslmode explicitly.
-//
-// statement_timeout (milliseconds) is derived from WriteTimeoutSeconds as a
-// server-side query time limit. This is not a perfect equivalent of MySQL's
-// network-level readTimeout/writeTimeout, but it prevents hung queries from
-// holding a connection pool slot indefinitely. Business code should still
-// pass context deadlines for fine-grained control.
+// buildDSN maps dao.Config to a libpq key=value DSN.
+// Addr is host:port (SplitHostPort); bare host omits port= (libpq default 5432).
+// sslmode from Extra["sslmode"], default "disable".
+// WriteTimeoutSeconds → statement_timeout; ReadTimeoutSeconds → idle_in_transaction_session_timeout (ms).
 func buildDSN(cfg dao.Config) string {
 	connTimeout := cfg.ConnTimeoutSeconds
 	if connTimeout <= 0 {
@@ -103,13 +90,19 @@ func buildDSN(cfg dao.Config) string {
 		sslmode = v
 	}
 
+	host, port, err := net.SplitHostPort(cfg.Addr)
+	var hostPart string
+	if err == nil {
+		hostPart = fmt.Sprintf("host=%s port=%s", host, port)
+	} else {
+		hostPart = fmt.Sprintf("host=%s", cfg.Addr)
+	}
+
 	dsn := fmt.Sprintf(
-		"host=%s user=%s password=%s dbname=%s sslmode=%s connect_timeout=%d",
-		cfg.Addr, cfg.User, cfg.Pwd, cfg.DBName, sslmode, connTimeout,
+		"%s user=%s password=%s dbname=%s sslmode=%s connect_timeout=%d",
+		hostPart, cfg.User, cfg.Pwd, cfg.DBName, sslmode, connTimeout,
 	)
 
-	// Append additional libpq options via the options parameter.
-	// statement_timeout is in milliseconds.
 	var options []string
 	if cfg.WriteTimeoutSeconds > 0 {
 		options = append(options, fmt.Sprintf("-c statement_timeout=%d", cfg.WriteTimeoutSeconds*1000))

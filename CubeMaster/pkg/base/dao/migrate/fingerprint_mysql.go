@@ -10,7 +10,6 @@ import (
 	"fmt"
 )
 
-// mysqlFingerprintStore implements fingerprintStore using MySQL-specific SQL.
 type mysqlFingerprintStore struct{}
 
 func (s *mysqlFingerprintStore) EnsureTable(ctx context.Context, db *sql.DB) error {
@@ -33,7 +32,7 @@ func (s *mysqlFingerprintStore) LoadStored(ctx context.Context, db *sql.DB) (map
 }
 
 func (s *mysqlFingerprintStore) CurrentlyApplied(ctx context.Context, db *sql.DB) (map[int64]bool, error) {
-	return currentlyAppliedVersions(ctx, db)
+	return currentlyAppliedVersions(ctx, db, tableExistsMySQL)
 }
 
 func (s *mysqlFingerprintStore) RecordOne(ctx context.Context, db *sql.DB, fp fileFingerprint) error {
@@ -47,4 +46,15 @@ func (s *mysqlFingerprintStore) RecordOne(ctx context.Context, db *sql.DB, fp fi
 		return fmt.Errorf("record fingerprint for version %d: %w", fp.version, err)
 	}
 	return nil
+}
+
+func tableExistsMySQL(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	var n int
+	err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.tables
+		  WHERE table_schema = DATABASE() AND table_name = ?`, name).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("check table %q exists: %w", name, err)
+	}
+	return n > 0, nil
 }

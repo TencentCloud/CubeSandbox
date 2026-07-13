@@ -11,21 +11,15 @@ import (
 	"time"
 )
 
-// sessionLocker implements goose.SessionLocker on top of PostgreSQL's
-// pg_advisory_lock / pg_advisory_unlock. Advisory locks are session-scoped:
-// when the connection goes away (process crash, broken pipe), PostgreSQL
-// releases the lock automatically — there is no need for a janitor / TTL.
+// sessionLocker implements goose.SessionLocker via pg_advisory_lock.
+// Session-scoped: connection death releases the lock (no janitor/TTL).
 type sessionLocker struct {
 	id      int64
 	timeout int // seconds
 }
 
-// SessionLock acquires a session-level advisory lock with a timeout.
-// PostgreSQL's pg_advisory_lock blocks indefinitely, so we use
-// pg_try_advisory_lock in a retry loop with a deadline derived from
-// s.timeout. This mirrors the MySQL driver's GET_LOCK(name, timeout)
-// semantics. Retries use exponential backoff (200ms → 400ms → … capped
-// at 2s) to avoid thundering-herd pressure on cluster restart.
+// SessionLock uses pg_try_advisory_lock + retry until s.timeout
+// (GET_LOCK-compatible); backoff 200ms→2s.
 func (s *sessionLocker) SessionLock(ctx context.Context, conn *sql.Conn) error {
 	deadline := time.Now().Add(time.Duration(s.timeout) * time.Second)
 	const (
@@ -51,7 +45,6 @@ func (s *sessionLocker) SessionLock(ctx context.Context, conn *sql.Conn) error {
 			return fmt.Errorf("acquire advisory lock %d: %w", s.id, ctx.Err())
 		case <-time.After(interval):
 		}
-		// Exponential backoff capped at maxInterval.
 		interval = interval * 2
 		if interval > maxInterval {
 			interval = maxInterval
@@ -59,9 +52,7 @@ func (s *sessionLocker) SessionLock(ctx context.Context, conn *sql.Conn) error {
 	}
 }
 
-// SessionUnlock is best-effort: if the lock has already been released by
-// connection death there is nothing to do, and surfacing such errors would
-// mask the real (preceding) failure.
+// SessionUnlock is best-effort so unlock errors do not mask a prior failure.
 func (s *sessionLocker) SessionUnlock(ctx context.Context, conn *sql.Conn) error {
 	_, err := conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", s.id)
 	return err

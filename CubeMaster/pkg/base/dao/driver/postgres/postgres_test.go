@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao"
 )
 
@@ -43,9 +44,19 @@ func TestBuildDSN(t *testing.T) {
 		ConnTimeoutSeconds: 10,
 	}
 	got := buildDSN(cfg)
-	want := "host=127.0.0.1:5432 user=cube password=cube_pass dbname=cube_mvp sslmode=disable connect_timeout=10"
+	want := "host=127.0.0.1 port=5432 user=cube password=cube_pass dbname=cube_mvp sslmode=disable connect_timeout=10"
 	if got != want {
 		t.Fatalf("buildDSN:\n  got:  %s\n  want: %s", got, want)
+	}
+	parsed, err := pgx.ParseConfig(got)
+	if err != nil {
+		t.Fatalf("pgx.ParseConfig: %v", err)
+	}
+	if parsed.Host != "127.0.0.1" {
+		t.Fatalf("parsed Host = %q, want 127.0.0.1", parsed.Host)
+	}
+	if parsed.Port != 5432 {
+		t.Fatalf("parsed Port = %d, want 5432", parsed.Port)
 	}
 }
 

@@ -16,12 +16,7 @@ import (
 	"github.com/ory/dockertest/v3/docker"
 )
 
-// Shared dockertest fixture helpers used by MySQL, PostgreSQL, and cross-
-// dialect alignment tests.
-//
-// When Docker is unavailable:
-//   - Locally: t.Skip (or use CUBEMASTER_DAO_TEST_{MYSQL,POSTGRES}_DSN)
-//   - CI / CUBEMASTER_REQUIRE_DOCKER_TESTS=1: t.Fatal (must not go green by skip)
+// Docker missing: skip locally; CI / CUBEMASTER_REQUIRE_DOCKER_TESTS=1 → Fatal.
 
 const (
 	mysqlDSNEnv           = "CUBEMASTER_DAO_TEST_MYSQL_DSN"
@@ -40,7 +35,6 @@ type dbTestEnv struct {
 	usesDocker bool
 }
 
-// requireDockerTests reports whether missing Docker must fail (CI) rather than skip.
 func requireDockerTests() bool {
 	v := os.Getenv(requireDockerTestsEnv)
 	if v == "1" || strings.EqualFold(v, "true") {
@@ -50,8 +44,6 @@ func requireDockerTests() bool {
 	return ci == "true" || ci == "1"
 }
 
-// abortOrSkipDocker skips locally when Docker is unavailable, but fails hard
-// under CI / CUBEMASTER_REQUIRE_DOCKER_TESTS so the job cannot go green by skip.
 func abortOrSkipDocker(t *testing.T, format string, args ...any) {
 	t.Helper()
 	msg := fmt.Sprintf(format, args...)
@@ -61,8 +53,6 @@ func abortOrSkipDocker(t *testing.T, format string, args ...any) {
 	t.Skipf("%s", msg)
 }
 
-// newMySQLEnv spins up a throwaway MySQL via dockertest, or returns the DSN
-// from $CUBEMASTER_DAO_TEST_MYSQL_DSN, or skips/fails per requireDockerTests.
 func newMySQLEnv(t *testing.T) *dbTestEnv {
 	t.Helper()
 	if dsn := os.Getenv(mysqlDSNEnv); dsn != "" {
@@ -91,9 +81,7 @@ func newMySQLEnv(t *testing.T) *dbTestEnv {
 		abortOrSkipDocker(t, "could not start mysql container (%v); set %s", err, mysqlDSNEnv)
 	}
 	port := resource.GetPort("3306/tcp")
-	// DSN parameters intentionally mirror pkg/base/dao/driver/mysql.buildDSN so
-	// the test path exercises the same connection-level options as production
-	// (notably: multiStatements is NOT enabled).
+	// Mirror mysql.buildDSN; multiStatements intentionally NOT enabled.
 	dsn := fmt.Sprintf(
 		"root:root@tcp(127.0.0.1:%s)/cube_test?charset=utf8&parseTime=true&loc=Local&timeout=5s&readTimeout=5s&writeTimeout=5s",
 		port,
@@ -121,8 +109,6 @@ func newMySQLEnv(t *testing.T) *dbTestEnv {
 	}
 }
 
-// newPostgresEnv spins up a throwaway PostgreSQL via dockertest, or returns
-// the DSN from $CUBEMASTER_DAO_TEST_POSTGRES_DSN, or skips/fails per requireDockerTests.
 func newPostgresEnv(t *testing.T) *dbTestEnv {
 	t.Helper()
 	if dsn := os.Getenv(postgresDSNEnv); dsn != "" {
