@@ -20,14 +20,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/cube"
 	inner "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/inner"
 	metahttp "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/meta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/middleware"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/notify"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -55,39 +52,36 @@ type internalHttp struct {
 	engine *gin.Engine
 }
 
+// newEngine builds the gin engine with the routing-level policies that must be
+// shared between production (NewInternalHttp) and tests. It deliberately keeps
+// the request middleware OFF the engine itself so that NoRoute / NoMethod stay
+// bare — gorilla/mux does not run router middleware on unmatched or
+// method-mismatch requests (MatchErr != nil), so neither must gin here (in
+// particular, checkAuth must not run on probes / mistyped URLs).
+func newEngine() *gin.Engine {
+	gin.SetMode(gin.ReleaseMode)
+	engine := gin.New()
+	engine.RedirectTrailingSlash = false
+	engine.HandleMethodNotAllowed = true
+	// Mux parity: unmatched path → plain HTTP 404, no middleware (no auth).
+	engine.NoRoute(func(c *gin.Context) {
+		http.NotFound(c.Writer, c.Request)
+	})
+	// Mux parity: method-mismatch → HTTP 405 (empty body, Allow header), no
+	// middleware. gorilla/mux returns 405 via methodNotAllowedHandler() when
+	// match.MatchErr == ErrMethodMismatch.
+	engine.NoMethod(func(c *gin.Context) {
+		c.AbortWithStatus(http.StatusMethodNotAllowed)
+	})
+	return engine
+}
+
 func NewInternalHttp(ctx context.Context, cfg *config.Config) (*internalHttp, error) {
 	if cfg == nil || cfg.Common == nil {
 		return nil, errors.New("config is nil")
 	}
 
-	gin.SetMode(gin.ReleaseMode)
-	engine := gin.New()
-	engine.RedirectTrailingSlash = false
-	engine.HandleMethodNotAllowed = true
-	engine.NoRoute(func(c *gin.Context) {
-		rt := CubeLog.GetTraceInfo(c.Request.Context())
-		if rt != nil {
-			rt.RetCode = -1
-		}
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
-			Ret: &types.Ret{
-				RetCode: -1,
-				RetMsg:  http.StatusText(http.StatusNotFound),
-			},
-		})
-	})
-	engine.NoMethod(func(c *gin.Context) {
-		rt := CubeLog.GetTraceInfo(c.Request.Context())
-		if rt != nil {
-			rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		}
-		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
-			Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_MasterParamsError),
-				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
-			},
-		})
-	})
+	engine := newEngine()
 	s := &internalHttp{
 		Server: &http.Server{
 			Addr:         net.JoinHostPort(cfg.Common.HttpBind, strconv.Itoa(cfg.Common.HttpPort)),
@@ -103,22 +97,19 @@ func NewInternalHttp(ctx context.Context, cfg *config.Config) (*internalHttp, er
 	return s, nil
 }
 
+// registerRoutes mounts the request middleware (logging / auth / recovery /
+// trace) on a root group so it runs for every matched route — mirroring the
+// previous gorilla/mux router-level middleware — while leaving the engine-level
+// NoRoute / NoMethod handlers bare.
 func (s *internalHttp) registerRoutes() {
-	r := s.engine
-	r.Use(middleware.GinRequestMiddleware())
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	root := s.engine.Group("")
+	root.Use(middleware.GinRequestMiddleware())
+	root.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	notifyG := r.Group(notify.NotifyURI())
-	notify.RegisterNotifyRoutes(notifyG)
-
-	cubeG := r.Group(cube.CubeURI())
-	cube.RegisterCubeRoutes(cubeG)
-
-	innerG := r.Group(inner.InnerURI())
-	inner.RegisterInnerRoutes(innerG)
-
-	metaG := r.Group(metahttp.MetaURI())
-	metahttp.RegisterMetaRoutes(metaG)
+	notify.RegisterNotifyRoutes(root.Group(notify.NotifyURI()))
+	cube.RegisterCubeRoutes(root.Group(cube.CubeURI()))
+	inner.RegisterInnerRoutes(root.Group(inner.InnerURI()))
+	metahttp.RegisterMetaRoutes(root.Group(metahttp.MetaURI()))
 }
 
 func (s *internalHttp) Start() error {
