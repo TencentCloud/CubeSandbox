@@ -25,6 +25,16 @@ ping -c 1 127.0.0.1
 
 The terminal supports ANSI colors, cursor control, paste, scrollback, and resize. The panel can be expanded to fullscreen and its font size can be adjusted from the toolbar.
 
+## Verification Screenshots
+
+The sandbox list exposes the terminal action only for a running sandbox:
+
+![Running sandbox terminal action](../assets/webui-terminal-list.png)
+
+The interactive terminal preserves ANSI output and executes commands inside the selected sandbox:
+
+![Connected WebUI terminal session](../assets/webui-terminal-session.png)
+
 If CubeAPI receives multiple container records for the sandbox, the terminal
 panel shows a **Container** selector. Changing the selected container opens a
 new terminal session for that container. The sandbox list opens the default
