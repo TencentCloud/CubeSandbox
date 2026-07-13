@@ -44,6 +44,10 @@ Cube Sandbox provides a Docker-based builder image for a consistent build enviro
 # Build the builder image
 make builder-image
 
+# From mainland China, fetch the llvm.sh installer and clang-14 apt packages from
+# a China mirror (the LLVM GPG key still comes from apt.llvm.org)
+make builder-image MIRROR=cn
+
 # Start an interactive shell inside the builder
 make builder-shell
 
