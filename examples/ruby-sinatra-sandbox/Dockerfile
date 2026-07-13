@@ -4,7 +4,7 @@ ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
 FROM ${CUBE_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG BUNDLER_VERSION=2.6.9
+ARG BUNDLER_VERSION=2.5.23
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
