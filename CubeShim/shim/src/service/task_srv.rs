@@ -561,6 +561,10 @@ impl Task for TaskService {
         req: api::ResizePtyRequest,
     ) -> TtrpcResult<api::Empty> {
         let sandbox = self.sandbox.lock().await;
+        if sandbox.paused().await {
+            errf!(self.log, "sandbox not in normal state");
+            return Err(Others("sandbox not in normal state".to_string()));
+        }
         sandbox
             .resize_pty(req.id(), req.exec_id(), req.width(), req.height())
             .await

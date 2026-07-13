@@ -37,7 +37,7 @@ func (w *terminalStreamWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := w.stream.Send(&cubebox.TerminalServerMessage{
-		Payload: &cubebox.TerminalServerMessage_Output{Output: append([]byte(nil), data...)},
+		Payload: &cubebox.TerminalServerMessage_Output{Output: data},
 	}); err != nil {
 		return 0, err
 	}

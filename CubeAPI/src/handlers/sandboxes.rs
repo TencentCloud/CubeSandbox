@@ -194,19 +194,23 @@ pub async fn sandbox_terminal(
         }))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct TerminalOpenFrame {
     #[serde(rename = "type")]
     frame_type: String,
     sandbox_id: String,
     container_id: String,
+    #[serde(default)]
+    cols: u32,
+    #[serde(default)]
+    rows: u32,
 }
 
 fn terminal_open_target(
     message: &Message,
     expected_sandbox_id: &str,
-) -> Result<String, &'static str> {
+) -> Result<TerminalOpenFrame, &'static str> {
     let Message::Text(payload) = message else {
         return Err("first terminal frame must be JSON text");
     };
@@ -218,7 +222,20 @@ fn terminal_open_target(
     if frame.sandbox_id != expected_sandbox_id {
         return Err("terminal sandbox does not match request path");
     }
-    Ok(frame.container_id)
+    Ok(frame)
+}
+
+fn sanitized_terminal_open_message(frame: &TerminalOpenFrame) -> TungsteniteMessage {
+    TungsteniteMessage::Text(
+        serde_json::json!({
+            "type": "open",
+            "sandboxId": frame.sandbox_id,
+            "containerId": frame.container_id,
+            "cols": frame.cols,
+            "rows": frame.rows,
+        })
+        .to_string(),
+    )
 }
 
 fn terminal_error(message: &str) -> Message {
@@ -309,9 +326,9 @@ async fn proxy_terminal(
         tokio::select! {
             incoming = browser_rx.next() => match incoming {
                 Some(Ok(message)) => {
-                    let opening_container = if container_id.is_none() {
+                    let opening = if container_id.is_none() {
                         match terminal_open_target(&message, &sandbox_id) {
-                            Ok(container_id) => Some(container_id),
+                            Ok(frame) => Some(frame),
                             Err(error) => {
                                 let _ = browser_tx.send(terminal_error(error)).await;
                                 break;
@@ -320,17 +337,21 @@ async fn proxy_terminal(
                     } else {
                         None
                     };
-                    match to_master_message(message) {
+                    let outgoing = opening
+                        .as_ref()
+                        .map(sanitized_terminal_open_message)
+                        .or_else(|| to_master_message(message));
+                    match outgoing {
                         Some(message) => {
                             if master_tx.send(message).await.is_err() { break; }
-                            if let Some(opening_container) = opening_container {
+                            if let Some(opening) = opening {
                                 state.logger.log(
                                     LogEvent::new(LogLevel::Info, "terminal.session.open")
                                         .field("sandbox_id", &sandbox_id)
-                                        .field("container_id", &opening_container)
+                                        .field("container_id", &opening.container_id)
                                         .field("operator", &operator),
                                 ).await;
-                                container_id = Some(opening_container);
+                                container_id = Some(opening.container_id);
                             }
                         },
                         None => break,
@@ -390,7 +411,9 @@ mod terminal_tests {
         let matching =
             Message::Text(r#"{"type":"open","sandboxId":"sandbox-1","containerId":"main"}"#.into());
         assert_eq!(
-            terminal_open_target(&matching, "sandbox-1").unwrap(),
+            terminal_open_target(&matching, "sandbox-1")
+                .unwrap()
+                .container_id,
             "main"
         );
 
@@ -407,6 +430,24 @@ mod terminal_tests {
         let input = Message::Text(r#"{"type":"input","data":"whoami"}"#.into());
         assert!(terminal_open_target(&input, "sandbox-1").is_err());
         assert!(terminal_open_target(&Message::Binary(vec![1, 2, 3].into()), "sandbox-1").is_err());
+    }
+
+    #[test]
+    fn terminal_open_frame_forwards_only_allowed_fields() {
+        let message = Message::Text(
+            r#"{"type":"open","sandboxId":"sandbox-1","containerId":"main","cols":120,"rows":40,"args":["/bin/bash"],"env":["TOKEN=secret"]}"#
+                .into(),
+        );
+        let frame = terminal_open_target(&message, "sandbox-1").unwrap();
+        let TungsteniteMessage::Text(sanitized) = sanitized_terminal_open_message(&frame) else {
+            panic!("sanitized terminal open frame must be text");
+        };
+        let payload: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+
+        assert_eq!(payload["cols"], 120);
+        assert_eq!(payload["rows"], 40);
+        assert!(payload.get("args").is_none());
+        assert!(payload.get("env").is_none());
     }
 }
 
