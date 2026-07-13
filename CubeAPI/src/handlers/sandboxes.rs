@@ -165,6 +165,8 @@ pub async fn get_sandbox(
 
 // ─── GET /sandboxes/:sandboxID/terminal/ws ────────────────────────────────
 
+const TERMINAL_MAX_FRAME_SIZE: usize = 64 * 1024;
+
 /// Upgrades an authenticated browser terminal session and proxies it to the
 /// private CubeMaster terminal endpoint. The browser never receives the
 /// CubeMaster address or the gateway secret.
@@ -185,6 +187,8 @@ pub async fn sandbox_terminal(
     }
     Ok(ws
         .protocols(["cube-terminal"])
+        .max_message_size(TERMINAL_MAX_FRAME_SIZE)
+        .max_frame_size(TERMINAL_MAX_FRAME_SIZE)
         .on_upgrade(move |socket| async move {
             proxy_terminal(socket, state, sandbox_id, gateway_token, operator).await;
         }))
@@ -358,10 +362,10 @@ async fn proxy_terminal(
 
 fn to_master_message(message: Message) -> Option<TungsteniteMessage> {
     match message {
-        Message::Text(value) => Some(TungsteniteMessage::Text(value.to_string())),
-        Message::Binary(value) => Some(TungsteniteMessage::Binary(value.to_vec())),
-        Message::Ping(value) => Some(TungsteniteMessage::Ping(value.to_vec())),
-        Message::Pong(value) => Some(TungsteniteMessage::Pong(value.to_vec())),
+        Message::Text(value) => Some(TungsteniteMessage::Text(value)),
+        Message::Binary(value) => Some(TungsteniteMessage::Binary(value)),
+        Message::Ping(value) => Some(TungsteniteMessage::Ping(value)),
+        Message::Pong(value) => Some(TungsteniteMessage::Pong(value)),
         Message::Close(_) => None,
     }
 }

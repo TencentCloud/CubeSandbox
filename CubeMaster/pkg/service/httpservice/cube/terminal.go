@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	terminalIdleTimeout = 30 * time.Minute
-	terminalMaxFrame    = 64 * 1024
+	terminalIdleTimeout  = 30 * time.Minute
+	terminalWriteTimeout = 10 * time.Second
+	terminalMaxFrame     = 64 * 1024
 )
 
 var terminalUpgrader = websocket.Upgrader{
@@ -118,7 +119,9 @@ func TerminalWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			switch payload := message.GetPayload().(type) {
 			case *cubebox.TerminalServerMessage_Output:
-				_ = write(terminalServerFrame{Type: "output", Data: string(payload.Output)})
+				if err := write(terminalServerFrame{Type: "output", Data: string(payload.Output)}); err != nil {
+					return
+				}
 			case *cubebox.TerminalServerMessage_Exit:
 				_ = write(terminalServerFrame{Type: "exit", ExitCode: payload.Exit.GetExitCode()})
 				return
@@ -200,6 +203,9 @@ func readTerminalFrame(conn *websocket.Conn, frame *terminalClientFrame) error {
 }
 
 func writeTerminalFrame(conn *websocket.Conn, frame terminalServerFrame) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(terminalWriteTimeout)); err != nil {
+		return err
+	}
 	return conn.WriteJSON(frame)
 }
 

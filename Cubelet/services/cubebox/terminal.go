@@ -91,16 +91,15 @@ func (s *service) AttachTerminal(stream cubebox.CubeboxMgr_AttachTerminalServer)
 	if err != nil {
 		return status.Errorf(codes.Internal, "create terminal process: %v", err)
 	}
-	defer process.Delete(context.Background())
+	processExited := false
+	defer func() {
+		cleanupTerminalProcess(ctx, process, processExited)
+	}()
 
 	exitStatus, err := process.Wait(ctx)
 	if err != nil {
 		return status.Errorf(codes.Internal, "wait for terminal process: %v", err)
 	}
-	processExited := false
-	defer func() {
-		cleanupTerminalProcess(ctx, process, processExited)
-	}()
 	if err := process.Start(ctx); err != nil {
 		return status.Errorf(codes.Internal, "start terminal process: %v", err)
 	}
