@@ -114,9 +114,14 @@ class TestGetProvider:
         monkeypatch.setenv("CC_PROVIDER", "ANTHROPIC")
         assert get_provider() == "anthropic"
 
-    def test_custom_provider(self, monkeypatch):
+    def test_unknown_provider_name_is_normalized(self, monkeypatch):
         monkeypatch.setenv("CC_PROVIDER", "openai")
         assert get_provider() == "openai"
+
+    def test_openai_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("CC_PROVIDER", "openai")
+        with pytest.raises(ValueError, match="Unsupported provider"):
+            build_claude_env()
 
 
 # ── get_model ──────────────────────────────────────────────────────────
@@ -146,7 +151,7 @@ class TestBuildClaudeEnv:
 
     def test_unsupported_provider_raises(self, monkeypatch):
         monkeypatch.setenv("CC_PROVIDER", "unsupported")
-        with pytest.raises(ValueError, match="不支持的提供商"):
+        with pytest.raises(ValueError, match="Unsupported provider"):
             build_claude_env()
 
     def test_filters_empty_values(self, monkeypatch):

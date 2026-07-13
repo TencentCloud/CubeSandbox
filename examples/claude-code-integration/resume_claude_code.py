@@ -91,7 +91,7 @@ def main():
         if not args.no_cleanup:
             print(f"\n正在暂停沙箱 {sandbox_id} ...")
             sandbox.pause()
-            print(f"沙箱已暂停。以后可使用以下命令恢复:")
+            print("沙箱已暂停。以后可使用以下命令恢复:")
             print(f"  python resume_claude_code.py --resume-from {sandbox_id}")
         else:
             print(f"\n沙箱保持运行: {sandbox_id}")

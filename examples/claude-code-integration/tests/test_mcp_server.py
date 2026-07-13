@@ -25,7 +25,7 @@ class TestReadMcpMessage:
 
     def test_valid_message(self):
         body = json.dumps({"jsonrpc": "2.0", "method": "initialize", "id": 1})
-        stdin = io.StringIO(f"Content-Length: {len(body)}\r\n\r\n{body}")
+        stdin = io.StringIO(body + "\n")
         with patch.object(sys, "stdin", stdin):
             msg = mcp_server._read_mcp_message()
         assert msg == {"jsonrpc": "2.0", "method": "initialize", "id": 1}
@@ -38,31 +38,16 @@ class TestReadMcpMessage:
             with pytest.raises(EOFError):
                 mcp_server._read_mcp_message()
 
-    def test_malformed_content_length_returns_none(self):
-        stdin = io.StringIO("Content-Length: abc\r\n\r\n")
-        with patch.object(sys, "stdin", stdin):
-            msg = mcp_server._read_mcp_message()
-        assert msg is None
-
-    def test_missing_content_length_returns_none(self):
-        stdin = io.StringIO("Some-Header: value\r\n\r\n")
-        with patch.object(sys, "stdin", stdin):
-            msg = mcp_server._read_mcp_message()
-        assert msg is None
-
     def test_invalid_json_returns_none(self):
-        body = "not json"
-        stdin = io.StringIO(f"Content-Length: {len(body)}\r\n\r\n{body}")
+        stdin = io.StringIO("not json\n")
         with patch.object(sys, "stdin", stdin):
             msg = mcp_server._read_mcp_message()
         assert msg is None
 
-    def test_empty_body_with_valid_content_length(self):
-        body = ""
-        stdin = io.StringIO(f"Content-Length: 0\r\n\r\n")
+    def test_blank_line_returns_none(self):
+        stdin = io.StringIO("\n")
         with patch.object(sys, "stdin", stdin):
             msg = mcp_server._read_mcp_message()
-        # json.loads("") raises JSONDecodeError → returns None
         assert msg is None
 
 
@@ -106,6 +91,22 @@ class TestHandleRequest:
         })
         assert resp["id"] == 5
         assert "Unknown tool" in resp["result"]["content"][0]["text"]
+        assert resp["result"]["isError"] is True
+
+    def test_command_failure_preserves_exit_code_and_both_streams(self):
+        result = {"exit_code": 7, "stdout": "partial output", "stderr": "failed"}
+        with patch.object(mcp_server, "run_command", return_value=result):
+            resp = mcp_server.handle_request({
+                "jsonrpc": "2.0", "method": "tools/call", "id": 6,
+                "params": {"name": "sandbox_run_command", "arguments": {"command": "false"}},
+            })
+
+        tool_result = resp["result"]
+        text = tool_result["content"][0]["text"]
+        assert tool_result["isError"] is True
+        assert "exit_code: 7" in text
+        assert "stdout:\npartial output" in text
+        assert "stderr:\nfailed" in text
 
 
 # ── get_sandbox ────────────────────────────────────────────────────────
@@ -145,3 +146,29 @@ class TestGetSandbox:
         assert result is new_instance
         mock_instance.kill.assert_called_once()
         mock_cls.create.assert_called_once()
+
+    def test_cleanup_kills_and_clears_cached_sandbox(self):
+        mock_instance = Mock()
+        mcp_server._sandbox = mock_instance
+
+        mcp_server.cleanup_sandbox()
+
+        mock_instance.kill.assert_called_once()
+        assert mcp_server._sandbox is None
+
+
+def test_main_uses_newline_delimited_json_and_cleans_up():
+    request = json.dumps({"jsonrpc": "2.0", "method": "tools/list", "id": 9})
+    stdin = io.StringIO(request + "\n")
+    stdout = io.StringIO()
+    with (
+        patch.object(sys, "stdin", stdin),
+        patch.object(sys, "stdout", stdout),
+        patch.object(mcp_server, "cleanup_sandbox") as cleanup,
+    ):
+        mcp_server.main()
+
+    lines = stdout.getvalue().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["id"] == 9
+    cleanup.assert_called_once()

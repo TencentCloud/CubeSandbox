@@ -29,7 +29,7 @@ CubeAPI (:3000) ──► CubeMaster ──► Cubelet ──► KVM MicroVM
                                                     │  ANTHROPIC_AUTH_TOKEN
                                                     │  ANTHROPIC_BASE_URL
                                                     ▼
-                                                LLM API (DeepSeek / Anthropic / OpenAI)
+                                                Anthropic 协议 LLM API
 ```
 
 下方模式 1-3 会在 MicroVM 内运行 Claude Code 本身；模式 4 使用宿主机侧 `PreToolUse` Hook：
@@ -95,14 +95,11 @@ Claude Code 在沙箱中需要以下环境变量：
 
 | 变量 | 说明 | 示例 |
 |------|------|------|
-| `CC_PROVIDER` | LLM 提供商：`deepseek`、`anthropic` 或 `openai` | `deepseek` |
+| `CC_PROVIDER` | LLM 提供商：`deepseek` 或 `anthropic` | `deepseek` |
 | `ANTHROPIC_AUTH_TOKEN` | API 密钥（DeepSeek / Anthropic） | `sk-a1b2c3d4...`（DeepSeek）或 `sk-ant-...`（Anthropic） |
 | `ANTHROPIC_BASE_URL` | API 端点地址（DeepSeek / Anthropic） | `https://api.deepseek.com/anthropic` |
 | `CC_MODEL` | 集成脚本选择的模型 | `deepseek-v4-pro` |
-| `OPENAI_API_KEY` | API 密钥（OpenAI 兼容提供商） | `sk-...` |
-| `OPENAI_BASE_URL` | API 端点地址（OpenAI 兼容提供商） | `https://api.openai.com/v1` |
-
-设置 `CC_PROVIDER=anthropic` 切换到 Anthropic API，或 `CC_PROVIDER=openai` 使用 OpenAI 兼容提供商（需要 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`）。
+设置 `CC_PROVIDER=anthropic` 切换到 Anthropic API。Claude Code 使用 Anthropic 协议，仅设置 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 无法直接使用 OpenAI 兼容端点。
 
 ::: tip 使用 DeepSeek？
 设置 `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`，模型名如 `deepseek-v4-pro`。
@@ -212,7 +209,6 @@ cd hooks
 |--------|---------------------|----------|
 | DeepSeek | `https://api.deepseek.com/anthropic` | `deepseek-v4-pro` |
 | Anthropic | `https://api.anthropic.com` | `claude-sonnet-4-6` |
-| OpenAI | *(设置 `OPENAI_BASE_URL`)* | `gpt-4o` |
 
 通过 `.env` 文件配置：
 

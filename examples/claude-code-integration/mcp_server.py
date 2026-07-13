@@ -24,6 +24,7 @@ Add to ~/.claude/mcp.json or project .claude/mcp.json:
 }
 """
 
+import atexit
 import json
 import os
 import shlex
@@ -61,6 +62,20 @@ def get_sandbox(timeout=600):
     return _sandbox
 
 
+def cleanup_sandbox():
+    """Destroy the cached sandbox when the MCP process exits."""
+    global _sandbox
+    sandbox, _sandbox = _sandbox, None
+    if sandbox is not None:
+        try:
+            sandbox.kill()
+        except Exception as error:
+            print(f"Failed to clean up sandbox: {error}", file=sys.stderr)
+
+
+atexit.register(cleanup_sandbox)
+
+
 def run_command(cmd, timeout=120):
     """Run a command inside the sandbox."""
     from e2b.sandbox.commands.command_handle import CommandExitException
@@ -69,6 +84,18 @@ def run_command(cmd, timeout=120):
         return {"exit_code": result.exit_code, "stdout": result.stdout.strip(), "stderr": result.stderr.strip()}
     except CommandExitException as e:
         return {"exit_code": getattr(e, "exit_code", 1), "stdout": "", "stderr": str(e)}
+
+
+def format_command_result(result):
+    """Preserve status and both output streams in an MCP tool result."""
+    sections = [f"exit_code: {result['exit_code']}"]
+    if result["stdout"]:
+        sections.append(f"stdout:\n{result['stdout']}")
+    if result["stderr"]:
+        sections.append(f"stderr:\n{result['stderr']}")
+    if len(sections) == 1:
+        sections.append("(no output)")
+    return "\n".join(sections)
 
 
 # ── MCP Tool Definitions ──────────────────────────────────────────────
@@ -185,19 +212,22 @@ def handle_request(request):
     elif method == "tools/call":
         tool_name = request["params"]["name"]
         arguments = request["params"].get("arguments", {})
+        is_error = False
 
         try:
             if tool_name == "sandbox_run_code":
                 code = arguments["code"]
                 timeout = arguments.get("timeout", 120)
                 result = run_command(f"python3 -c {shlex.quote(code)}", timeout=timeout)
-                text = result["stdout"] or result["stderr"] or "(no output)"
+                text = format_command_result(result)
+                is_error = result["exit_code"] != 0
 
             elif tool_name == "sandbox_run_command":
                 cmd = arguments["command"]
                 timeout = arguments.get("timeout", 120)
                 result = run_command(cmd, timeout=timeout)
-                text = result["stdout"] or result["stderr"] or "(no output)"
+                text = format_command_result(result)
+                is_error = result["exit_code"] != 0
 
             elif tool_name == "sandbox_write_file":
                 path = arguments["path"]
@@ -211,25 +241,25 @@ def handle_request(request):
                 text = content if isinstance(content, str) else content.decode("utf-8", errors="replace")
 
             elif tool_name == "sandbox_reset":
-                global _sandbox
-                if _sandbox:
-                    _sandbox.kill()
-                    _sandbox = None
+                cleanup_sandbox()
                 text = "Sandbox destroyed. A new one will be created on next use."
 
             else:
                 text = f"Unknown tool: {tool_name}"
+                is_error = True
 
         except Exception as e:
             import traceback
             traceback.print_exc(file=sys.stderr)
             text = f"Error: {e}"
+            is_error = True
 
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
                 "content": [{"type": "text", "text": text}],
+                "isError": is_error,
             },
         }
 
@@ -247,47 +277,36 @@ def handle_request(request):
 # ── Main Loop ─────────────────────────────────────────────────────────
 
 def _read_mcp_message():
-    """Read one MCP message from stdin using Content-Length framing.
+    """Read one newline-delimited JSON-RPC message from MCP stdio.
 
     Raises EOFError when stdin is exhausted (client disconnected).
     Returns None for malformed messages (skipped without hanging).
     """
-    content_length = None
-    while True:
-        line = sys.stdin.readline()
-        if not line:
-            raise EOFError()  # stdin closed
-        line = line.rstrip("\r\n")
-        if not line:
-            break  # empty line = end of headers
-        if line.startswith("Content-Length:"):
-            try:
-                content_length = int(line.split(":", 1)[1].strip())
-            except ValueError:
-                pass  # ignore malformed Content-Length
-    if content_length is None:
-        return None  # no valid Content-Length header
-    body = sys.stdin.read(content_length)
+    line = sys.stdin.readline()
+    if not line:
+        raise EOFError()
     try:
-        return json.loads(body)
+        return json.loads(line)
     except json.JSONDecodeError:
         return None
 
 
 def main():
     """Run the MCP server on stdio (JSON-RPC)."""
-    while True:
-        try:
-            request = _read_mcp_message()
-        except EOFError:
-            break
-        if request is None:
-            continue
-        response = handle_request(request)
-        if response is not None:
-            body = json.dumps(response)
-            sys.stdout.write(f"Content-Length: {len(body)}\r\n\r\n{body}")
-            sys.stdout.flush()
+    try:
+        while True:
+            try:
+                request = _read_mcp_message()
+            except EOFError:
+                break
+            if request is None:
+                continue
+            response = handle_request(request)
+            if response is not None:
+                sys.stdout.write(json.dumps(response) + "\n")
+                sys.stdout.flush()
+    finally:
+        cleanup_sandbox()
 
 
 if __name__ == "__main__":

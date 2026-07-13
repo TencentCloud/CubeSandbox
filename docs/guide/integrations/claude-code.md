@@ -29,7 +29,7 @@ CubeAPI (:3000) ──► CubeMaster ──► Cubelet ──► KVM MicroVM
                                                     │  ANTHROPIC_AUTH_TOKEN
                                                     │  ANTHROPIC_BASE_URL
                                                     ▼
-                                                LLM API (DeepSeek / Anthropic / OpenAI)
+                                                Anthropic-protocol LLM API
 ```
 
 Modes 1-3 below run Claude Code itself in the MicroVM. Mode 4 uses a host-side `PreToolUse` hook instead:
@@ -46,7 +46,7 @@ Claude Code (host)
 - Running [CubeSandbox deployment](/guide/quickstart)
 - Python 3.9+ with `e2b-code-interpreter`
 - A CubeSandbox code template (see [Template Creation](#template-creation) below)
-- API key for your LLM provider (DeepSeek, Anthropic, or OpenAI-compatible)
+- API key for an Anthropic-protocol provider such as DeepSeek or Anthropic
 
 ## Template Creation
 
@@ -107,14 +107,11 @@ Claude Code requires these environment variables inside the sandbox:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `CC_PROVIDER` | LLM provider: `deepseek`, `anthropic`, or `openai` | `deepseek` |
+| `CC_PROVIDER` | LLM provider: `deepseek` or `anthropic` | `deepseek` |
 | `ANTHROPIC_AUTH_TOKEN` | API key (DeepSeek / Anthropic) | `sk-a1b2c3d4...` (DeepSeek) or `sk-ant-...` (Anthropic) |
 | `ANTHROPIC_BASE_URL` | API endpoint URL (DeepSeek / Anthropic) | `https://api.deepseek.com/anthropic` |
 | `CC_MODEL` | Model selected by the integration scripts | `deepseek-v4-pro` |
-| `OPENAI_API_KEY` | API key (OpenAI-compatible providers) | `sk-...` |
-| `OPENAI_BASE_URL` | API endpoint URL (OpenAI-compatible providers) | `https://api.openai.com/v1` |
-
-Set `CC_PROVIDER=anthropic` to switch to the Anthropic API, or `CC_PROVIDER=openai` for OpenAI-compatible providers (which require `OPENAI_API_KEY` and `OPENAI_BASE_URL`).
+Set `CC_PROVIDER=anthropic` to switch to the Anthropic API. Claude Code uses the Anthropic protocol, so an OpenAI-compatible endpoint cannot be selected with `OPENAI_API_KEY` and `OPENAI_BASE_URL` alone.
 
 ::: tip Using DeepSeek?
 Set `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic` and use DeepSeek model names like `deepseek-v4-pro`.
@@ -224,7 +221,6 @@ cd hooks
 |----------|---------------------|---------------|
 | DeepSeek | `https://api.deepseek.com/anthropic` | `deepseek-v4-pro` |
 | Anthropic | `https://api.anthropic.com` | `claude-sonnet-4-6` |
-| OpenAI | *(set `OPENAI_BASE_URL`)* | `gpt-4o` |
 
 Set via environment variables or `.env` file:
 

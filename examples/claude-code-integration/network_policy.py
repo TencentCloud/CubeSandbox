@@ -75,7 +75,7 @@ def main():
 
     print(f"提供商: {provider}")
     print(f"LLM 主机（经 CubeEgress）: {llm_host}")
-    print(f"凭据注入: 已启用（沙箱内只有占位符，真实密钥在线路注入）")
+    print("凭据注入: 已启用（沙箱内只有占位符，真实密钥在线路注入）")
 
     # ── 创建沙箱 ────────────────────────────────────────────────────
     # 默认 allow_internet_access=False（安全模式）：沙箱无法直接上网，

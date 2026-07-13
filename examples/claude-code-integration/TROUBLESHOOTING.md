@@ -253,13 +253,13 @@ from cubesandbox import Sandbox  # cubesandbox SDK 原样传递 rules 列表
 
 **修复**：检测类型，bytes 时 decode 为 str
 
-### 17. MCP 协议缺少 Content-Length 帧解析
+### 17. MCP stdio 使用了错误的 Content-Length 帧
 
 **位置**：`mcp_server.py`
 
-**问题**：MCP stdio 传输要求 Content-Length 头部标明消息体长度，原始实现只逐行读 JSON
+**问题**：原实现沿用了 LSP 的 `Content-Length` 帧，但 MCP stdio 要求每条 JSON-RPC 消息独占一行
 
-**修复**：实现 Content-Length 帧解析
+**修复**：按换行读取和写入 JSON-RPC 消息，并在 stdin EOF 时退出
 
 ### 18. workdir 未转义
 
