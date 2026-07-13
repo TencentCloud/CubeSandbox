@@ -7,23 +7,28 @@ package cube
 import (
 	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func handleSandboxAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	switch r.Method {
+func handleSandboxAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	var res interface{}
+	switch c.Request.Method {
 	case http.MethodPost:
-		return createSandbox(w, r, rt)
+		res = createSandbox(c.Writer, c.Request, rt)
 	case http.MethodDelete:
-		return deleteSandbox(w, r, rt)
+		res = deleteSandbox(c.Writer, c.Request, rt)
 	default:
-		return &types.Res{
+		res = &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
 			},
 		}
 	}
+	common.WriteResponse(c.Writer, http.StatusOK, res)
 }

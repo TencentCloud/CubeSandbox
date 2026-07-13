@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/go-sql-driver/mysql"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -127,42 +128,45 @@ type snapshotStorageResource struct {
 	LastUpdatedAt int64  `json:"last_updated_at,omitempty"`
 }
 
-func handleSnapshotAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	switch r.Method {
+func handleSnapshotAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	var res interface{}
+	switch c.Request.Method {
 	case http.MethodPost:
-		extendSnapshotWriteDeadline(w)
-		return createSnapshot(r, rt)
+		extendSnapshotWriteDeadline(c.Writer)
+		res = createSnapshot(c.Request, rt)
 	case http.MethodGet:
-		return getSnapshot(r, rt)
+		res = getSnapshot(c.Request, rt, c.Param("snapshot_id"))
 	case http.MethodDelete:
-		extendSnapshotWriteDeadline(w)
-		return deleteSnapshot(r, rt)
+		extendSnapshotWriteDeadline(c.Writer)
+		res = deleteSnapshot(c.Request, rt, c.Param("snapshot_id"))
 	default:
-		return &types.Res{
+		res = &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
 			},
 		}
 	}
+	common.WriteResponse(c.Writer, http.StatusOK, res)
 }
-
-func handleSnapshotStorageAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
-	if r.Method != http.MethodGet {
-		return &types.Res{
+func handleSnapshotStorageAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	if c.Request.Method != http.MethodGet {
+		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
 			},
-		}
+		})
+		return
 	}
-	refresh := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("refresh")), "true") ||
-		strings.TrimSpace(r.URL.Query().Get("refresh")) == "1"
-	data, err := listSnapshotStorageFn(r.Context(), refresh)
+	refresh := strings.EqualFold(strings.TrimSpace(c.Request.URL.Query().Get("refresh")), "true") ||
+		strings.TrimSpace(c.Request.URL.Query().Get("refresh")) == "1"
+	data, err := listSnapshotStorageFn(c.Request.Context(), refresh)
 	response := &snapshotStorageResponse{
 		Res: &types.Res{
-			RequestID: requestIDFromQuery(r),
+			RequestID: requestIDFromQuery(c.Request),
 			Ret:       &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"},
 		},
 		Data: make([]*snapshotStorageResource, 0, len(data)),
@@ -175,39 +179,43 @@ func handleSnapshotStorageAction(w http.ResponseWriter, r *http.Request, rt *Cub
 	}
 	rt.RequestID = response.Res.RequestID
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	return response
+	common.WriteResponse(c.Writer, http.StatusOK, response)
 }
 
-func handleSandboxRollbackAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	extendSnapshotWriteDeadline(w)
+func handleSandboxRollbackAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	extendSnapshotWriteDeadline(c.Writer)
 	req := &snapshotRollbackRequest{}
-	if err := common.GetBodyReq(r, req); err != nil {
-		return &operationResponse{
+	if err := common.GetBodyReq(c.Request, req); err != nil {
+		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
 			Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: err.Error()}},
-		}
+		})
+		return
 	}
 	requestID := firstNonEmptyTrimmed(req.RequestID, req.LegacyRequestID)
-	pathSandboxID := sandboxIDFromRollbackPath(r.URL.Path)
+	pathSandboxID := c.Param("sandbox_id")
 	if req.SandboxID == "" {
 		req.SandboxID = pathSandboxID
 	}
 	if pathSandboxID != "" && strings.TrimSpace(req.SandboxID) != pathSandboxID {
-		return &operationResponse{
+		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  "sandbox_id in path does not match request body",
 			}},
-		}
+		})
+		return
 	}
 	if requestID == "" || strings.TrimSpace(req.SandboxID) == "" || strings.TrimSpace(req.SnapshotID) == "" {
-		return &operationResponse{
+		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  "request_id, sandbox_id and snapshot_id are required",
 			}},
-		}
+		})
+		return
 	}
-	ctx, cancel := snapshotExecutionContext(r.Context(), map[string]any{
+	ctx, cancel := snapshotExecutionContext(c.Request.Context(), map[string]any{
 		"RequestId":  requestID,
 		"Action":     "RollbackSnapshot",
 		"SnapshotID": req.SnapshotID,
@@ -218,22 +226,23 @@ func handleSandboxRollbackAction(w http.ResponseWriter, r *http.Request, rt *Cub
 	if err != nil {
 		code := snapshotErrorCode(err)
 		rt.RetCode = int64(code)
-		return &operationResponse{
+		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
 			Res: &types.Res{
 				RequestID: requestID,
 				Ret:       &types.Ret{RetCode: code, RetMsg: err.Error()},
 			},
-		}
+		})
+		return
 	}
 	rt.RequestID = requestID
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	return &operationResponse{
+	common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
 		Res: &types.Res{
 			RequestID: requestID,
 			Ret:       &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"},
 		},
 		Operation: operationResourceFromInfo(snapshotOperationInfoFromJob(info)),
-	}
+	})
 }
 
 func extendSnapshotWriteDeadline(w http.ResponseWriter) {
@@ -251,40 +260,43 @@ func snapshotExecutionContext(parent context.Context, fields map[string]any) (co
 	return context.WithTimeout(log.WithLogger(base, log.G(parent).WithFields(fields)), templatecenter.SnapshotOperationTimeout())
 }
 
-func handleSnapshotOperationAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
-	if r.Method != http.MethodGet {
-		return &types.Res{
+func handleSnapshotOperationAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	if c.Request.Method != http.MethodGet {
+		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
 			},
-		}
+		})
+		return
 	}
-	operationID := resourceIDFromPath(r.URL.Path, actionURI(OperationAction))
-	requestID := requestIDFromQuery(r)
+	operationID := c.Param("operation_id")
+	requestID := requestIDFromQuery(c.Request)
 	if operationID == "" {
-		return &operationResponse{
+		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  "operation_id is required",
 			}},
-		}
+		})
+		return
 	}
-	info, err := getSnapshotOperationFn(r.Context(), operationID)
+	info, err := getSnapshotOperationFn(c.Request.Context(), operationID)
 	if err != nil {
 		code := snapshotErrorCode(err)
 		rt.RetCode = int64(code)
-		return &operationResponse{
+		common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
 			Res: &types.Res{RequestID: requestID, Ret: &types.Ret{RetCode: code, RetMsg: err.Error()}},
-		}
+		})
+		return
 	}
 	rt.RequestID = requestID
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	return &operationResponse{
+	common.WriteResponse(c.Writer, http.StatusOK, &operationResponse{
 		Res:       &types.Res{RequestID: requestID, Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"}},
 		Operation: operationResourceFromInfo(info),
-	}
+	})
 }
 
 func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
@@ -366,8 +378,7 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	}
 }
 
-func getSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	snapshotID := resourceIDFromPath(r.URL.Path, actionURI(SnapshotAction))
+func getSnapshot(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string) interface{} {
 	requestID := requestIDFromQuery(r)
 	if snapshotID == "" {
 		infos, nextToken, err := listSnapshotsFn(r.Context(), &templatecenter.ListSnapshotsOptions{
@@ -439,8 +450,7 @@ func getSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 // kept around purely for human audit; programmatic clients have no reason
 // to poll.  The snapshot API is synchronous — CubeAPI waits for a
 // terminal state and does not expose a polling interface to callers.
-func deleteSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	snapshotID := resourceIDFromPath(r.URL.Path, actionURI(SnapshotAction))
+func deleteSnapshot(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string) interface{} {
 	if snapshotID == "" {
 		return &operationResponse{
 			Res: &types.Res{Ret: &types.Ret{
@@ -639,26 +649,6 @@ func snapshotStorageResourceFromStatus(info templatecenter.SnapshotStorageStatus
 		LastError:     info.LastError,
 		LastUpdatedAt: info.LastUpdatedAt,
 	}
-}
-
-func resourceIDFromPath(path, prefix string) string {
-	path = strings.TrimSpace(path)
-	if !strings.HasPrefix(path, prefix+"/") {
-		return ""
-	}
-	return strings.Trim(strings.TrimPrefix(path, prefix+"/"), "/")
-}
-
-func sandboxIDFromRollbackPath(path string) string {
-	path = strings.Trim(strings.TrimSpace(path), "/")
-	parts := strings.Split(path, "/")
-	if len(parts) != 4 {
-		return ""
-	}
-	if parts[0] != strings.Trim(CubeURI(), "/") || parts[1] != strings.Trim(SandboxAction, "/") || parts[3] != "rollback" {
-		return ""
-	}
-	return strings.TrimSpace(parts[2])
 }
 
 func requestIDFromQuery(r *http.Request) string {

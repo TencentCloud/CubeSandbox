@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
@@ -50,28 +52,30 @@ var caServableFiles = map[string]struct{}{
 // header, request-source ACL, or mTLS — should land before this
 // endpoint is exposed to anything wider; a verifyAuth(r) hook is the
 // natural place to add it.
-func handleCADownloadAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		return &types.Res{
+func handleCADownloadAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
 			},
-		}
+		})
+		return
 	}
 
-	// Trim and basename so a malicious caller can't request
-	// /cube/ca/../../etc/passwd. filepath.Base alone normalises any
-	// traversal attempt to a single path element; the allow-list then
+	// The filename is a gin path param (:filename), so it is already a
+	// single path segment; the allow-list below is the real boundary and
 	// rejects anything not on the documented list.
-	requested := filepath.Base(filepath.Clean(r.URL.Path))
+	requested := c.Param("filename")
 	if _, ok := caServableFiles[requested]; !ok {
-		return &types.Res{
+		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_NotFound),
 				RetMsg:  http.StatusText(http.StatusNotFound),
 			},
-		}
+		})
+		return
 	}
 
 	fullPath := filepath.Join(caRootDir, requested)
@@ -86,36 +90,37 @@ func handleCADownloadAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.
 		if errors.Is(err, os.ErrNotExist) {
 			retCode = int(errorcode.ErrorCode_NotFound)
 		}
-		return &types.Res{
+		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
 			Ret: &types.Ret{
 				RetCode: retCode,
 				RetMsg:  err.Error(),
 			},
-		}
+		})
+		return
 	}
 	defer f.Close()
 
 	stat, err := f.Stat()
 	if err != nil {
-		return &types.Res{
+		common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterInternalError),
 				RetMsg:  err.Error(),
 			},
-		}
+		})
+		return
 	}
 
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(stat.Size(), 10))
-	if r.Method == http.MethodHead {
+	c.Writer.Header().Set("Content-Type", "application/octet-stream")
+	c.Writer.Header().Set("Content-Length", strconv.FormatInt(stat.Size(), 10))
+	if c.Request.Method == http.MethodHead {
 		rt.RetCode = int64(errorcode.ErrorCode_Success)
-		return nil
+		return
 	}
 	// http.ServeContent gives us range support for free; the CA files
 	// are tiny (sub-kilobyte) so range isn't load-bearing, but it
 	// keeps the response handling consistent with the artifact
 	// download endpoint.
-	http.ServeContent(w, r, requested, stat.ModTime(), f)
+	http.ServeContent(c.Writer, c.Request, requested, stat.ModTime(), f)
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
-	return nil
 }

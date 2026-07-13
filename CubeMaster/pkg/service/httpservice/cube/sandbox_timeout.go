@@ -7,36 +7,40 @@ package cube
 import (
 	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func handleSandboxTimeoutAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
-	if r.Method != http.MethodPost {
-		return &types.SetTimeoutRes{
+func handleSandboxTimeoutAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	if c.Request.Method != http.MethodPost {
+		common.WriteResponse(c.Writer, http.StatusOK, &types.SetTimeoutRes{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
 			},
-		}
+		})
+		return
 	}
 
 	req := &types.SetTimeoutRequest{}
-	if err := utils.DecodeHttpBody(r.Body, req); err != nil {
+	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		return &types.SetTimeoutRes{
+		common.WriteResponse(c.Writer, http.StatusOK, &types.SetTimeoutRes{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  err.Error(),
 			},
-		}
+		})
+		return
 	}
 	if req.RequestID == "" {
 		req.RequestID = uuid.New().String()
@@ -48,7 +52,7 @@ func handleSandboxTimeoutAction(w http.ResponseWriter, r *http.Request, rt *Cube
 	rt.InstanceID = req.SandboxID
 	rt.InstanceType = req.InstanceType
 
-	ctx := log.WithLogger(r.Context(), log.G(r.Context()).WithFields(map[string]interface{}{
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]interface{}{
 		"RequestId":    req.RequestID,
 		"InstanceId":   req.SandboxID,
 		"InstanceType": req.InstanceType,
@@ -57,29 +61,31 @@ func handleSandboxTimeoutAction(w http.ResponseWriter, r *http.Request, rt *Cube
 	if res != nil && res.Ret != nil {
 		rt.RetCode = int64(res.Ret.RetCode)
 	}
-	return res
+	common.WriteResponse(c.Writer, http.StatusOK, res)
 }
 
-func handleSandboxRefreshAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
-	if r.Method != http.MethodPost {
-		return &types.RefreshSandboxRes{
+func handleSandboxRefreshAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	if c.Request.Method != http.MethodPost {
+		common.WriteResponse(c.Writer, http.StatusOK, &types.RefreshSandboxRes{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
 			},
-		}
+		})
+		return
 	}
 
 	req := &types.RefreshSandboxRequest{}
-	if err := utils.DecodeHttpBody(r.Body, req); err != nil {
+	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		return &types.RefreshSandboxRes{
+		common.WriteResponse(c.Writer, http.StatusOK, &types.RefreshSandboxRes{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  err.Error(),
 			},
-		}
+		})
+		return
 	}
 	if req.RequestID == "" {
 		req.RequestID = uuid.New().String()
@@ -91,7 +97,7 @@ func handleSandboxRefreshAction(w http.ResponseWriter, r *http.Request, rt *Cube
 	rt.InstanceID = req.SandboxID
 	rt.InstanceType = req.InstanceType
 
-	ctx := log.WithLogger(r.Context(), log.G(r.Context()).WithFields(map[string]interface{}{
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]interface{}{
 		"RequestId":    req.RequestID,
 		"InstanceId":   req.SandboxID,
 		"InstanceType": req.InstanceType,
@@ -100,5 +106,5 @@ func handleSandboxRefreshAction(w http.ResponseWriter, r *http.Request, rt *Cube
 	if res != nil && res.Ret != nil {
 		rt.RetCode = int64(res.Ret.RetCode)
 	}
-	return res
+	common.WriteResponse(c.Writer, http.StatusOK, res)
 }

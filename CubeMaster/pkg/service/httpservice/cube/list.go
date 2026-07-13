@@ -11,16 +11,19 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func handleListAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
+func handleListAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	rsp := &types.ListCubeSandboxRes{
 		Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
@@ -32,10 +35,10 @@ func handleListAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 	}()
 	req := &types.ListCubeSandboxReq{}
 
-	err := utils.DecodeHttpBody(r.Body, req)
+	err := utils.DecodeHttpBody(c.Request.Body, req)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			querys := r.URL.Query()
+			querys := c.Request.URL.Query()
 			req.RequestID = querys.Get("requestID")
 			req.HostID = querys.Get("host_id")
 			req.InstanceType = querys.Get("instance_type")
@@ -66,7 +69,8 @@ func handleListAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 		} else {
 			rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 			rsp.Ret.RetMsg = err.Error()
-			return rsp
+			common.WriteListResponse(c.Writer, http.StatusOK, rsp)
+			return
 		}
 	}
 
@@ -75,10 +79,10 @@ func handleListAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 		req.InstanceType = cubebox.InstanceType_cubebox.String()
 	}
 	rt.InstanceType = req.InstanceType
-	ctx := log.WithLogger(r.Context(), log.G(r.Context()).WithFields(map[string]any{
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
 		"RequestId":    req.RequestID,
 		"InstanceType": req.InstanceType,
 	}))
 	rsp = sandbox.ListSandbox(ctx, req)
-	return rsp
+	common.WriteListResponse(c.Writer, http.StatusOK, rsp)
 }

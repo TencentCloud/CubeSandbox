@@ -11,10 +11,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
@@ -204,14 +207,16 @@ func TestHandleSnapshotOperationMapsNotFound(t *testing.T) {
 		return nil, templatecenter.ErrSnapshotOperationNotFound
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/cube/operation/op-missing", nil)
 	rt := &CubeLog.RequestTrace{}
-	resp := handleSnapshotOperationAction(httptest.NewRecorder(), req, rt)
+	ctx := CubeLog.WithRequestTrace(context.Background(), rt)
+	w := httptest.NewRecorder()
+	gc, _ := gin.CreateTestContext(w)
+	gc.Request = httptest.NewRequest(http.MethodGet, "/cube/operation/op-missing", nil).WithContext(ctx)
+	gc.Params = gin.Params{{Key: "operation_id", Value: "op-missing"}}
+	handleSnapshotOperationAction(gc)
 
-	got, ok := resp.(*operationResponse)
-	if !ok {
-		t.Fatalf("unexpected response type %T", resp)
-	}
+	var got operationResponse
+	require.NoError(t, common.FastestJsoniter.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, int(errorcode.ErrorCode_NotFound), got.Ret.RetCode)
 	assert.Equal(t, int64(errorcode.ErrorCode_NotFound), rt.RetCode)
 }
@@ -232,7 +237,7 @@ func TestGetSnapshotListSupportsFiltersAndPagination(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/cube/snapshot?snapshot_id=snap-1&sandbox_id=sb-1&status=READY&limit=1&next_token=1&request_id=req-list", nil)
 	rt := &CubeLog.RequestTrace{}
-	resp := getSnapshot(req, rt)
+	resp := getSnapshot(req, rt, "")
 
 	got := resp.(*snapshotListResponse)
 	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
@@ -266,9 +271,15 @@ func TestHandleSandboxRollbackActionUsesPathSandboxID(t *testing.T) {
 		"snapshot_id":"snap-1"
 	}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := handleSandboxRollbackAction(httptest.NewRecorder(), req, rt)
+	ctx := CubeLog.WithRequestTrace(context.Background(), rt)
+	w := httptest.NewRecorder()
+	gc, _ := gin.CreateTestContext(w)
+	gc.Request = req.WithContext(ctx)
+	gc.Params = gin.Params{{Key: "sandbox_id", Value: "sb-path"}}
+	handleSandboxRollbackAction(gc)
 
-	got := resp.(*operationResponse)
+	var got operationResponse
+	require.NoError(t, common.FastestJsoniter.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
 	assert.Equal(t, "req-rb", got.RequestID)
 	assert.Equal(t, "op-rb", got.Operation.OperationID)

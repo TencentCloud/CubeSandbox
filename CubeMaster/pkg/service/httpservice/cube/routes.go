@@ -6,59 +6,66 @@ package cube
 import "github.com/gin-gonic/gin"
 
 // RegisterCubeRoutes registers all /cube routes onto the given gin.RouterGroup.
-// The method/path registrations mirror the original gorilla/mux wiring in
-// server.go:86-110 exactly — only handlers that were registered there are
-// registered here.
+// The method/path registrations preserve parity with the previous observable
+// behavior of the gorilla/mux wiring in server.go. Two intentional deltas from
+// a literal mux mirror:
+//
+//   - GET /cube/snapshot/storage is registered as an explicit static route
+//     (ahead of /cube/snapshot/:snapshot_id), so the storage listing is never
+//     shadowed by the param + method switch — safer than the mux approach of
+//     parsing the path inside a single handler.
+//   - mux's POST /internal/fake_create is NOT registered here; it lives in the
+//     inner router (see the inner package).
 func RegisterCubeRoutes(g *gin.RouterGroup) {
 	// Sandbox CRUD
-	g.POST(SandboxAction, Adapt(handleSandboxAction))
-	g.DELETE(SandboxAction, Adapt(handleSandboxAction))
-	g.POST(SandboxPreviewAction, Adapt(handleSandboxPreviewAction))
-	g.POST(SandboxCommitAction, Adapt(handleSandboxCommitAction))
-	g.POST(SandboxRollbackAction, Adapt(handleSandboxRollbackAction))
-	g.POST(SandboxAction+"/:sandbox_id/rollback", Adapt(handleSandboxRollbackAction))
-	g.POST(SandboxUpdateAction, Adapt(handleUpdateAction))
-	g.POST(SandboxTimeoutAction, Adapt(handleSandboxTimeoutAction))
-	g.POST(SandboxRefreshAction, Adapt(handleSandboxRefreshAction))
-	g.POST(SandboxExecAction, Adapt(handleExecAction))
-	g.GET(SandboxInfoAction, Adapt(handleInfoAction))
-	g.POST(SandboxInfoAction, Adapt(handleInfoAction))
-	g.GET(SandboxListAction, AdaptList(handleListAction))
-	g.POST(SandboxListAction, AdaptList(handleListAction))
-	g.GET(SandboxLogsAction, Adapt(handleSandboxLogsAction))
-	g.POST(SandboxLogsAction, Adapt(handleSandboxLogsAction))
+	g.POST(SandboxAction, handleSandboxAction)
+	g.DELETE(SandboxAction, handleSandboxAction)
+	g.POST(SandboxPreviewAction, handleSandboxPreviewAction)
+	g.POST(SandboxCommitAction, handleSandboxCommitAction)
+	g.POST(SandboxRollbackAction, handleSandboxRollbackAction)
+	g.POST(SandboxAction+"/:sandbox_id/rollback", handleSandboxRollbackAction)
+	g.POST(SandboxUpdateAction, handleUpdateAction)
+	g.POST(SandboxTimeoutAction, handleSandboxTimeoutAction)
+	g.POST(SandboxRefreshAction, handleSandboxRefreshAction)
+	g.POST(SandboxExecAction, handleExecAction)
+	g.GET(SandboxInfoAction, handleInfoAction)
+	g.POST(SandboxInfoAction, handleInfoAction)
+	g.GET(SandboxListAction, handleListAction)
+	g.POST(SandboxListAction, handleListAction)
+	g.GET(SandboxLogsAction, handleSandboxLogsAction)
+	g.POST(SandboxLogsAction, handleSandboxLogsAction)
 
 	// Image
-	g.POST(ImageAction, Adapt(handleImageAction))
-	g.DELETE(ImageAction, Adapt(handleImageAction))
+	g.POST(ImageAction, handleImageAction)
+	g.DELETE(ImageAction, handleImageAction)
 
 	// Snapshot (NOTE: DELETE /snapshot collection-level is NOT registered —
 	// the original mux only registered DELETE /snapshot/{snapshot_id})
-	g.POST(SnapshotAction, Adapt(handleSnapshotAction))
-	g.GET(SnapshotAction, Adapt(handleSnapshotAction))
-	g.GET(SnapshotStorageAction, Adapt(handleSnapshotStorageAction))
-	g.GET(SnapshotAction+"/:snapshot_id", Adapt(handleSnapshotAction))
-	g.DELETE(SnapshotAction+"/:snapshot_id", Adapt(handleSnapshotAction))
-	g.GET(OperationAction+"/:operation_id", Adapt(handleSnapshotOperationAction))
+	g.POST(SnapshotAction, handleSnapshotAction)
+	g.GET(SnapshotAction, handleSnapshotAction)
+	g.GET(SnapshotStorageAction, handleSnapshotStorageAction)
+	g.GET(SnapshotAction+"/:snapshot_id", handleSnapshotAction)
+	g.DELETE(SnapshotAction+"/:snapshot_id", handleSnapshotAction)
+	g.GET(OperationAction+"/:operation_id", handleSnapshotOperationAction)
 
 	// Template
-	g.POST(TemplateAction, Adapt(handleTemplateAction))
-	g.GET(TemplateAction, Adapt(handleTemplateAction))
-	g.DELETE(TemplateAction, Adapt(handleTemplateAction))
-	g.GET(TemplateCompatAction, Adapt(handleTemplateCompatAction))
-	g.POST(TemplateCompatAction, Adapt(handleTemplateCompatAction))
-	g.POST(TemplateRedoAction, Adapt(handleRedoTemplateAction))
-	g.GET(TemplateBuildStatusAction+"/:build_id/status", Adapt(handleTemplateBuildStatusAction))
-	g.GET(TemplateFromImageAction, Adapt(handleTemplateFromImageAction))
-	g.POST(TemplateFromImageAction, Adapt(handleTemplateFromImageAction))
-	g.GET(TemplateArtifactDownloadAction, Adapt(handleTemplateArtifactDownloadAction))
-	g.HEAD(TemplateArtifactDownloadAction, Adapt(handleTemplateArtifactDownloadAction))
+	g.POST(TemplateAction, handleTemplateAction)
+	g.GET(TemplateAction, handleTemplateAction)
+	g.DELETE(TemplateAction, handleTemplateAction)
+	g.GET(TemplateCompatAction, handleTemplateCompatAction)
+	g.POST(TemplateCompatAction, handleTemplateCompatAction)
+	g.POST(TemplateRedoAction, handleRedoTemplateAction)
+	g.GET(TemplateBuildStatusAction+"/:build_id/status", handleTemplateBuildStatusAction)
+	g.GET(TemplateFromImageAction, handleTemplateFromImageAction)
+	g.POST(TemplateFromImageAction, handleTemplateFromImageAction)
+	g.GET(TemplateArtifactDownloadAction, handleTemplateArtifactDownloadAction)
+	g.HEAD(TemplateArtifactDownloadAction, handleTemplateArtifactDownloadAction)
 
 	// Artifact / CA download
-	g.GET(CADownloadActionPrefix+":filename", Adapt(handleCADownloadAction))
-	g.HEAD(CADownloadActionPrefix+":filename", Adapt(handleCADownloadAction))
-	g.GET(RootfsArtifactAction, Adapt(handleRootfsArtifactAction))
+	g.GET(CADownloadActionPrefix+":filename", handleCADownloadAction)
+	g.HEAD(CADownloadActionPrefix+":filename", handleCADownloadAction)
+	g.GET(RootfsArtifactAction, handleRootfsArtifactAction)
 
 	// Inventory
-	g.POST(ListInventoryAction, Adapt(handleListInventoryAction))
+	g.POST(ListInventoryAction, handleListInventoryAction)
 }

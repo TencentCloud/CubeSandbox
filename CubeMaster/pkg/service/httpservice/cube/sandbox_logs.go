@@ -11,11 +11,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 const (
@@ -68,18 +70,18 @@ type SandboxLogsRes struct {
 
 var fastJSON = jsoniter.ConfigFastest
 
-// handleSandboxLogsAction handles POST /cube/sandbox/logs.
-func handleSandboxLogsAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
+func handleSandboxLogsAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	req := &SandboxLogsReq{}
-	if err := utils.DecodeHttpBody(r.Body, req); err != nil {
+	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		// Also support query params for GET-style calls.
-		q := r.URL.Query()
+		q := c.Request.URL.Query()
 		req.SandboxID = q.Get("sandbox_id")
 		if req.SandboxID == "" {
 			req.SandboxID = q.Get("sandboxID")
 		}
-		if c := q.Get("cursor"); c != "" {
-			req.Cursor, _ = strconv.ParseInt(c, 10, 64)
+		if cursor := q.Get("cursor"); cursor != "" {
+			req.Cursor, _ = strconv.ParseInt(cursor, 10, 64)
 		}
 		if l := q.Get("limit"); l != "" {
 			req.Limit, _ = strconv.Atoi(l)
@@ -88,14 +90,15 @@ func handleSandboxLogsAction(w http.ResponseWriter, r *http.Request, rt *CubeLog
 
 	if req.SandboxID == "" {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		return &SandboxLogsRes{
+		common.WriteResponse(c.Writer, http.StatusOK, &SandboxLogsRes{
 			Res: &types.Res{
 				Ret: &types.Ret{
 					RetCode: int(errorcode.ErrorCode_MasterParamsError),
 					RetMsg:  "sandboxID is required",
 				},
 			},
-		}
+		})
+		return
 	}
 
 	limit := req.Limit
@@ -110,25 +113,26 @@ func handleSandboxLogsAction(w http.ResponseWriter, r *http.Request, rt *CubeLog
 	if err != nil {
 		CubeLog.Errorf("readShimLogs sandboxID=%s err=%v", req.SandboxID, err)
 		rt.RetCode = int64(errorcode.ErrorCode_MasterInternalError)
-		return &SandboxLogsRes{
+		common.WriteResponse(c.Writer, http.StatusOK, &SandboxLogsRes{
 			Res: &types.Res{
 				Ret: &types.Ret{
 					RetCode: int(errorcode.ErrorCode_MasterInternalError),
 					RetMsg:  err.Error(),
 				},
 			},
-		}
+		})
+		return
 	}
 
 	rt.RetCode = 0
-	return &SandboxLogsRes{
+	common.WriteResponse(c.Writer, http.StatusOK, &SandboxLogsRes{
 		Res: &types.Res{
 			Ret: &types.Ret{RetCode: 0, RetMsg: ""},
 		},
 		Logs:       entries,
 		NextCursor: nextCursor,
 		HasMore:    hasMore,
-	}
+	})
 }
 
 // readShimLogs scans the shim log file and returns entries matching sandboxID.

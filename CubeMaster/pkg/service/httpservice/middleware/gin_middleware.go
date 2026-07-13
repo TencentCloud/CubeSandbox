@@ -64,7 +64,7 @@ func GinRequestMiddleware() gin.HandlerFunc {
 						RetMsg:  http.StatusText(http.StatusInternalServerError),
 					},
 				})
-			c.Abort()
+				c.Abort()
 			}
 			rt.Cost = time.Since(start)
 			select {

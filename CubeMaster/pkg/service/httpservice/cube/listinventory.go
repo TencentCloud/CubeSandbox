@@ -7,6 +7,7 @@ package cube
 import (
 	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -14,11 +15,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func handleListInventoryAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
+func handleListInventoryAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	rsp := &types.ListInventoryRes{
 		Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
@@ -29,10 +32,11 @@ func handleListInventoryAction(w http.ResponseWriter, r *http.Request, rt *CubeL
 		rt.RetCode = int64(rsp.Ret.RetCode)
 	}()
 	req := &types.ListInventoryReq{}
-	if err := utils.DecodeHttpBody(r.Body, req); err != nil {
+	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = err.Error()
-		return rsp
+		common.WriteResponse(c.Writer, http.StatusOK, rsp)
+		return
 	}
 
 	rt.RequestID = req.RequestID
@@ -41,7 +45,7 @@ func handleListInventoryAction(w http.ResponseWriter, r *http.Request, rt *CubeL
 		req.InstanceType = cubebox.InstanceType_cubebox.String()
 	}
 	rt.InstanceType = req.InstanceType
-	ctx := log.WithLogger(r.Context(), log.G(r.Context()).WithFields(map[string]any{
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
 		"RequestId":    req.RequestID,
 		"InstanceType": req.InstanceType,
 	}))
@@ -85,7 +89,7 @@ func handleListInventoryAction(w http.ResponseWriter, r *http.Request, rt *CubeL
 		rsp.Data = append(rsp.Data, v)
 	}
 	log.G(ctx).Infof("handleListInventoryAction success:%s", utils.InterfaceToString(rsp))
-	return rsp
+	common.WriteResponse(c.Writer, http.StatusOK, rsp)
 }
 
 func mergeInventory(all map[string]*types.InstanceTypeQuotaItem, in *types.InstanceTypeQuotaItem) {

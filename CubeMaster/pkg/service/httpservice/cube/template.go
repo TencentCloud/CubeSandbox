@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
@@ -61,22 +62,25 @@ type deleteTemplateRequest struct {
 	Sync         bool   `json:"sync,omitempty"`
 }
 
-func handleTemplateAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	switch r.Method {
+func handleTemplateAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	var res interface{}
+	switch c.Request.Method {
 	case http.MethodPost:
-		return createTemplate(w, r, rt)
+		res = createTemplate(c.Writer, c.Request, rt)
 	case http.MethodGet:
-		return getTemplate(w, r, rt)
+		res = getTemplate(c.Writer, c.Request, rt)
 	case http.MethodDelete:
-		return deleteTemplate(w, r, rt)
+		res = deleteTemplate(c.Writer, c.Request, rt)
 	default:
-		return &types.Res{
+		res = &types.Res{
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  http.StatusText(http.StatusMethodNotAllowed),
 			},
 		}
 	}
+	common.WriteResponse(c.Writer, http.StatusOK, res)
 }
 
 func deleteTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {

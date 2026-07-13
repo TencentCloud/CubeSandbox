@@ -10,22 +10,25 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func handleInfoAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
+func handleInfoAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	req := &types.GetCubeSandboxReq{}
 
-	err := utils.DecodeHttpBody(r.Body, req)
+	err := utils.DecodeHttpBody(c.Request.Body, req)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			querys := r.URL.Query()
+			querys := c.Request.URL.Query()
 			req.RequestID = querys.Get("requestID")
 			req.HostID = querys.Get("host_id")
 			req.SandboxID = querys.Get("sandbox_id")
@@ -36,12 +39,13 @@ func handleInfoAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 			}
 		} else {
 			rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-			return &types.Res{
+			common.WriteResponse(c.Writer, http.StatusOK, &types.Res{
 				Ret: &types.Ret{
 					RetCode: int(errorcode.ErrorCode_MasterParamsError),
 					RetMsg:  err.Error(),
 				},
-			}
+			})
+			return
 		}
 	}
 	rt.RequestID = req.RequestID
@@ -49,11 +53,11 @@ func handleInfoAction(w http.ResponseWriter, r *http.Request, rt *CubeLog.Reques
 		req.InstanceType = cubebox.InstanceType_cubebox.String()
 	}
 	rt.InstanceType = req.InstanceType
-	ctx := log.WithLogger(r.Context(), log.G(r.Context()).WithFields(map[string]any{
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
 		"RequestId":    req.RequestID,
 		"InstanceType": req.InstanceType,
 	}))
 	rsp := sandbox.SandboxInfo(ctx, req)
 	rt.RetCode = int64(rsp.Ret.RetCode)
-	return rsp
+	common.WriteResponse(c.Writer, http.StatusOK, rsp)
 }
