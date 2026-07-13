@@ -92,6 +92,14 @@ impl Endpoint {
     }
 }
 
+#[derive(Debug)]
+enum DeliveryBuildError {
+    /// `serde_json` serialization failed; preserve the per-endpoint drop behavior.
+    Serialization(serde_json::Error),
+    /// The fully serialized body exceeded the configured event-level limit.
+    PayloadTooLarge { payload_bytes: usize },
+}
+
 struct Delivery {
     endpoint_index: usize,
     url: Url,
@@ -107,7 +115,8 @@ impl Delivery {
         event: &LogEvent,
         endpoint: &Endpoint,
         fields: &HashMap<String, Value>,
-    ) -> anyhow::Result<Self> {
+        max_payload_bytes: usize,
+    ) -> Result<Self, DeliveryBuildError> {
         let id = Uuid::new_v4().to_string();
         let timestamp = event.timestamp.timestamp().to_string();
         let payload = WebhookPayload {
@@ -117,7 +126,13 @@ impl Delivery {
             event: &event.event,
             fields,
         };
-        let body = Bytes::from(serde_json::to_vec(&payload)?);
+        let body =
+            Bytes::from(serde_json::to_vec(&payload).map_err(DeliveryBuildError::Serialization)?);
+        if body.len() > max_payload_bytes {
+            return Err(DeliveryBuildError::PayloadTooLarge {
+                payload_bytes: body.len(),
+            });
+        }
         let signature = endpoint
             .secret
             .as_deref()
@@ -138,6 +153,7 @@ impl Delivery {
 #[derive(Clone, Copy)]
 struct DeliveryOptions {
     max_retries: usize,
+    max_payload_bytes: usize,
     initial_backoff_ms: u64,
     max_backoff_ms: u64,
 }
@@ -197,6 +213,7 @@ impl HttpLogger {
             max_outstanding_deliveries(queue_capacity, endpoints.len(), max_concurrency);
         let options = DeliveryOptions {
             max_retries: config.max_retries,
+            max_payload_bytes: config.max_payload_bytes,
             initial_backoff_ms: config.initial_backoff_ms,
             max_backoff_ms: config.max_backoff_ms,
         };
@@ -265,6 +282,8 @@ impl Logger for HttpLogger {
 const MAX_OUTSTANDING_DELIVERY_TASKS: usize = 100_000;
 /// Maximum number of retries after the initial delivery attempt.
 const MAX_WEBHOOK_RETRIES: usize = 6;
+/// Hard upper bound for the configurable webhook payload size limit.
+const MAX_WEBHOOK_PAYLOAD_BYTES: usize = 1024 * 1024;
 const WEBHOOK_CONNECT_TIMEOUT_SECS: u64 = 5;
 const WEBHOOK_POOL_IDLE_TIMEOUT_SECS: u64 = 30;
 /// Intentionally smaller than `max_concurrency`: `max_concurrency` bounds
@@ -300,6 +319,12 @@ fn validate_config(config: &WebhookConfig) -> anyhow::Result<()> {
     }
     if config.max_retries > MAX_WEBHOOK_RETRIES {
         bail!("webhook max_retries must not exceed {MAX_WEBHOOK_RETRIES}");
+    }
+    if config.max_payload_bytes == 0 {
+        bail!("webhook max_payload_bytes must be greater than zero");
+    }
+    if config.max_payload_bytes > MAX_WEBHOOK_PAYLOAD_BYTES {
+        bail!("webhook max_payload_bytes must not exceed {MAX_WEBHOOK_PAYLOAD_BYTES}");
     }
     if config.initial_backoff_ms == 0 {
         bail!("webhook initial_backoff_ms must be greater than zero");
@@ -535,33 +560,47 @@ fn spawn_deliveries(
     semaphore: &Arc<Semaphore>,
     options: DeliveryOptions,
 ) {
-    let mut matching_endpoints = endpoints
+    let matching: Vec<&Endpoint> = endpoints
         .iter()
         .filter(|endpoint| endpoint.matches(&event.event))
-        .peekable();
+        .collect();
 
-    if matching_endpoints.peek().is_none() {
+    if matching.is_empty() {
         return;
     }
 
     let fields = sanitized_fields(&event.fields);
+    let mut built = Vec::with_capacity(matching.len());
 
-    for endpoint in matching_endpoints {
-        match Delivery::new(&event, endpoint, &fields) {
-            Ok(delivery) => {
-                deliveries.spawn(deliver_with_retry(
-                    delivery,
-                    client.clone(),
-                    semaphore.clone(),
-                    options,
-                ));
+    for endpoint in &matching {
+        match Delivery::new(&event, endpoint, &fields, options.max_payload_bytes) {
+            Ok(delivery) => built.push(delivery),
+            Err(DeliveryBuildError::PayloadTooLarge { payload_bytes }) => {
+                warn!(
+                    event = %event.event,
+                    payload_bytes,
+                    limit_bytes = options.max_payload_bytes,
+                    matched_endpoints = matching.len(),
+                    drop_reason = "payload_too_large",
+                    "webhook payload exceeds max_payload_bytes; dropping event"
+                );
+                return;
             }
-            Err(_) => error!(
+            Err(DeliveryBuildError::Serialization(_serialization_error)) => error!(
                 endpoint_index = endpoint.index,
                 event = %event.event,
                 "failed to build webhook delivery; dropping delivery"
             ),
         }
+    }
+
+    for delivery in built {
+        deliveries.spawn(deliver_with_retry(
+            delivery,
+            client.clone(),
+            semaphore.clone(),
+            options,
+        ));
     }
 }
 
@@ -1036,6 +1075,7 @@ mod tests {
         WebhookConfig {
             endpoints: vec![endpoint(&["*"])],
             queue_capacity: 16,
+            max_payload_bytes: 1024 * 1024,
             timeout_secs: 5,
             max_retries: 2,
             initial_backoff_ms: 100,
@@ -1107,6 +1147,41 @@ mod tests {
 
         assert!(error.contains("max_retries"));
         assert!(error.contains(&MAX_WEBHOOK_RETRIES.to_string()));
+        for leaked in [
+            "sensitive.example.test",
+            "embedded-user",
+            "embedded-password",
+            "query-token",
+            "endpoint-signing-secret",
+        ] {
+            assert!(!error.contains(leaked), "error must not contain {leaked}");
+        }
+    }
+
+    #[test]
+    fn validate_config_rejects_zero_and_oversized_max_payload_bytes() {
+        let mut config = valid_webhook_config();
+        config.max_payload_bytes = 0;
+        let error = validate_config(&config).unwrap_err().to_string();
+        assert!(error.contains("max_payload_bytes must be greater than zero"));
+
+        let mut config = valid_webhook_config();
+        config.max_payload_bytes = MAX_WEBHOOK_PAYLOAD_BYTES;
+        assert!(validate_config(&config).is_ok());
+
+        let mut config = valid_webhook_config();
+        config.max_payload_bytes = MAX_WEBHOOK_PAYLOAD_BYTES + 1;
+        config.endpoints[0].url = concat!(
+            "https://embedded-user:embedded-password@sensitive.example.test/",
+            "hook?token=query-token"
+        )
+        .to_string();
+        config.endpoints[0].secret = Some("endpoint-signing-secret".to_string());
+
+        let error = validate_config(&config).unwrap_err().to_string();
+
+        assert!(error.contains("max_payload_bytes"));
+        assert!(error.contains(&MAX_WEBHOOK_PAYLOAD_BYTES.to_string()));
         for leaked in [
             "sensitive.example.test",
             "embedded-user",
@@ -1315,6 +1390,7 @@ mod tests {
                 allow_private_urls: true,
             }],
             queue_capacity,
+            max_payload_bytes: 1024 * 1024,
             timeout_secs: 1,
             max_retries,
             initial_backoff_ms: 1,
@@ -1629,9 +1705,37 @@ mod tests {
         let unsigned_endpoint = compile_endpoint(&endpoint(&["sandbox.created"]), 0).unwrap();
         let unsigned_event = test_event();
         let unsigned_fields = sanitized_fields(&unsigned_event.fields);
-        let unsigned_delivery =
-            Delivery::new(&unsigned_event, &unsigned_endpoint, &unsigned_fields).unwrap();
+        let unsigned_delivery = Delivery::new(
+            &unsigned_event,
+            &unsigned_endpoint,
+            &unsigned_fields,
+            MAX_WEBHOOK_PAYLOAD_BYTES,
+        )
+        .unwrap();
         assert!(unsigned_delivery.signature.is_none());
+    }
+
+    #[test]
+    fn hmac_is_computed_over_the_exact_checked_bytes() {
+        let secret = "checked-body-secret";
+        let mut endpoint_config = endpoint(&["*"]);
+        endpoint_config.secret = Some(secret.to_string());
+        let compiled = compile_endpoint(&endpoint_config, 0).unwrap();
+        let event = test_event();
+        let fields = sanitized_fields(&event.fields);
+        let wide = Delivery::new(&event, &compiled, &fields, MAX_WEBHOOK_PAYLOAD_BYTES).unwrap();
+        let payload_bytes = wide.body.len();
+
+        let delivery = Delivery::new(&event, &compiled, &fields, payload_bytes).unwrap();
+        let expected = sign_payload(
+            secret,
+            &delivery.timestamp,
+            &delivery.id,
+            delivery.body.as_ref(),
+        );
+
+        assert_eq!(delivery.body.len(), payload_bytes);
+        assert_eq!(delivery.signature.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
@@ -1649,7 +1753,8 @@ mod tests {
         let event = test_event();
         let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
         let fields = sanitized_fields(&event.fields);
-        let delivery = Delivery::new(&event, &compiled, &fields).unwrap();
+        let delivery =
+            Delivery::new(&event, &compiled, &fields, MAX_WEBHOOK_PAYLOAD_BYTES).unwrap();
         let payload: Value = serde_json::from_slice(delivery.body.as_ref()).unwrap();
 
         assert_eq!(payload["id"], delivery.id);
@@ -1659,6 +1764,142 @@ mod tests {
         assert_eq!(payload["sandbox_id"], "sandbox-123");
         assert_eq!(payload["template_id"], "template-456");
         assert!(payload.get("fields").is_none());
+    }
+
+    #[test]
+    fn payload_size_limit_is_exact_at_boundary() {
+        let event = test_event();
+        let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
+        let fields = sanitized_fields(&event.fields);
+        let wide = Delivery::new(&event, &compiled, &fields, MAX_WEBHOOK_PAYLOAD_BYTES).unwrap();
+        let payload_bytes = wide.body.len();
+
+        assert!(payload_bytes > 0);
+        assert!(Delivery::new(&event, &compiled, &fields, payload_bytes).is_ok());
+        assert!(matches!(
+            Delivery::new(&event, &compiled, &fields, payload_bytes - 1),
+            Err(DeliveryBuildError::PayloadTooLarge {
+                payload_bytes: actual,
+            }) if actual == payload_bytes
+        ));
+    }
+
+    #[test]
+    fn payload_size_is_measured_in_serialized_utf8_bytes() {
+        let ascii_value = "abcdef";
+        let cjk_value = "沙箱事件负载";
+        assert_eq!(ascii_value.chars().count(), 6);
+        assert_eq!(cjk_value.chars().count(), 6);
+        assert_eq!(cjk_value.len() - ascii_value.len(), 12);
+
+        let base = LogEvent::new(LogLevel::Info, "sandbox.created");
+        let ascii_event = base.clone().field("payload", ascii_value);
+        let cjk_event = base.field("payload", cjk_value);
+        let ascii_fields = sanitized_fields(&ascii_event.fields);
+        let cjk_fields = sanitized_fields(&cjk_event.fields);
+        let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
+        let ascii_delivery = Delivery::new(
+            &ascii_event,
+            &compiled,
+            &ascii_fields,
+            MAX_WEBHOOK_PAYLOAD_BYTES,
+        )
+        .unwrap();
+        let cjk_delivery = Delivery::new(
+            &cjk_event,
+            &compiled,
+            &cjk_fields,
+            MAX_WEBHOOK_PAYLOAD_BYTES,
+        )
+        .unwrap();
+        let common_limit = ascii_delivery.body.len();
+
+        assert_eq!(cjk_delivery.body.len(), common_limit + 12);
+        assert!(Delivery::new(&ascii_event, &compiled, &ascii_fields, common_limit).is_ok());
+        assert!(matches!(
+            Delivery::new(&cjk_event, &compiled, &cjk_fields, common_limit),
+            Err(DeliveryBuildError::PayloadTooLarge { payload_bytes })
+                if payload_bytes == cjk_delivery.body.len()
+        ));
+    }
+
+    #[test]
+    fn payload_size_counts_json_escape_expansion() {
+        let plain_value = "abcdef";
+        let escaped_value = "a\"b\\c\n";
+        assert_eq!(plain_value.len(), escaped_value.len());
+
+        let base = LogEvent::new(LogLevel::Info, "sandbox.created");
+        let plain_event = base.clone().field("payload", plain_value);
+        let escaped_event = base.field("payload", escaped_value);
+        let plain_fields = sanitized_fields(&plain_event.fields);
+        let escaped_fields = sanitized_fields(&escaped_event.fields);
+        let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
+        let plain_delivery = Delivery::new(
+            &plain_event,
+            &compiled,
+            &plain_fields,
+            MAX_WEBHOOK_PAYLOAD_BYTES,
+        )
+        .unwrap();
+        let escaped_delivery = Delivery::new(
+            &escaped_event,
+            &compiled,
+            &escaped_fields,
+            MAX_WEBHOOK_PAYLOAD_BYTES,
+        )
+        .unwrap();
+        let common_limit = plain_delivery.body.len();
+        let raw_json = std::str::from_utf8(escaped_delivery.body.as_ref()).unwrap();
+
+        assert_eq!(escaped_delivery.body.len(), common_limit + 3);
+        assert!(raw_json.contains(r#""payload":"a\"b\\c\n""#));
+        assert!(Delivery::new(&plain_event, &compiled, &plain_fields, common_limit).is_ok());
+        assert!(matches!(
+            Delivery::new(&escaped_event, &compiled, &escaped_fields, common_limit),
+            Err(DeliveryBuildError::PayloadTooLarge { payload_bytes })
+                if payload_bytes == escaped_delivery.body.len()
+        ));
+    }
+
+    #[test]
+    fn delivery_metadata_counts_toward_payload_size() {
+        let event = LogEvent::new(LogLevel::Info, "sandbox.created");
+        let fields = sanitized_fields(&event.fields);
+        let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
+
+        assert!(matches!(
+            Delivery::new(&event, &compiled, &fields, 10),
+            Err(DeliveryBuildError::PayloadTooLarge { .. })
+        ));
+
+        let delivery =
+            Delivery::new(&event, &compiled, &fields, MAX_WEBHOOK_PAYLOAD_BYTES).unwrap();
+        let payload: Value = serde_json::from_slice(delivery.body.as_ref()).unwrap();
+        assert_eq!(payload.as_object().unwrap().len(), 4);
+        assert_eq!(payload["id"], delivery.id);
+        assert!(payload["timestamp"].is_string());
+        assert_eq!(payload["level"], "info");
+        assert_eq!(payload["event"], "sandbox.created");
+    }
+
+    #[test]
+    fn four_lifecycle_events_fit_well_under_default_limit() {
+        let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
+        let default_limit = WebhookConfig::default().max_payload_bytes;
+
+        for event_name in DEFAULT_LIFECYCLE_EVENTS {
+            let event = LogEvent::new(LogLevel::Info, event_name)
+                .field("sandbox_id", "sandbox-123")
+                .field("template_id", "template-456");
+            let fields = sanitized_fields(&event.fields);
+            let delivery = Delivery::new(&event, &compiled, &fields, default_limit).unwrap();
+
+            assert!(
+                delivery.body.len() < default_limit / 100,
+                "{event_name} payload should remain well below the default limit"
+            );
+        }
     }
 
     fn nested_object(levels: usize, leaf: Value) -> Value {
@@ -1792,7 +2033,8 @@ mod tests {
             );
         let compiled = compile_endpoint(&endpoint(&["*"]), 0).unwrap();
         let fields = sanitized_fields(&event.fields);
-        let delivery = Delivery::new(&event, &compiled, &fields).unwrap();
+        let delivery =
+            Delivery::new(&event, &compiled, &fields, MAX_WEBHOOK_PAYLOAD_BYTES).unwrap();
         let payload: Value = serde_json::from_slice(delivery.body.as_ref()).unwrap();
 
         assert!(payload.get("access_token").is_none());
@@ -1984,6 +2226,89 @@ mod tests {
         assert_eq!(
             signature,
             sign_payload(secret, timestamp, delivery_id, body)
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_event_sends_no_request_and_no_retry() {
+        let statuses = vec![
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::OK,
+        ];
+        let (url, calls, requests) = spawn_mock_server(statuses).await;
+        let mut config = test_config(url, 8, 3);
+        config.max_payload_bytes = 8;
+        let logger = HttpLogger::new(config).await.unwrap();
+
+        logger.log(test_event()).await;
+        logger.flush().await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_event_is_dropped_for_all_endpoints_deterministically() {
+        let secret = "second-endpoint-secret";
+        let statuses = vec![StatusCode::OK, StatusCode::OK];
+        let (url, calls, requests) = spawn_mock_server(statuses).await;
+        let event = test_event();
+
+        let mut tiny_config = test_config(url.clone(), 8, 0);
+        let mut tiny_second_endpoint = tiny_config.endpoints[0].clone();
+        tiny_second_endpoint.secret = Some(secret.to_string());
+        tiny_config.endpoints.push(tiny_second_endpoint);
+        tiny_config.max_payload_bytes = 8;
+        let tiny_logger = HttpLogger::new(tiny_config).await.unwrap();
+
+        tiny_logger.log(event.clone()).await;
+        tiny_logger.flush().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(requests.lock().unwrap().is_empty());
+        drop(tiny_logger);
+
+        let mut wide_config = test_config(url, 8, 0);
+        let mut wide_second_endpoint = wide_config.endpoints[0].clone();
+        wide_second_endpoint.secret = Some(secret.to_string());
+        wide_config.endpoints.push(wide_second_endpoint);
+        wide_config.max_payload_bytes = MAX_WEBHOOK_PAYLOAD_BYTES;
+        let wide_logger = HttpLogger::new(wide_config).await.unwrap();
+
+        wide_logger.log(event).await;
+        wide_logger.flush().await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2, "readiness probes must not be captured");
+        assert_eq!(captured[0].1.len(), captured[1].1.len());
+
+        let mut delivery_ids = Vec::with_capacity(captured.len());
+        let mut normalized_payloads = Vec::with_capacity(captured.len());
+        for (headers, body) in &*captured {
+            let mut payload: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(payload["event"], "sandbox.created");
+            assert_eq!(payload["level"], "info");
+            assert_eq!(payload["sandbox_id"], "sandbox-123");
+            assert_eq!(payload["template_id"], "template-456");
+            assert!(payload.get("fields").is_none());
+            let delivery_id = payload["id"].as_str().unwrap().to_string();
+            assert_eq!(
+                delivery_id,
+                headers.get(HEADER_DELIVERY).unwrap().to_str().unwrap()
+            );
+            delivery_ids.push(delivery_id);
+            assert!(payload.as_object_mut().unwrap().remove("id").is_some());
+            normalized_payloads.push(payload);
+        }
+        assert_ne!(delivery_ids[0], delivery_ids[1]);
+        assert_eq!(normalized_payloads[0], normalized_payloads[1]);
+        assert_eq!(
+            captured
+                .iter()
+                .filter(|(headers, _)| headers.contains_key(HEADER_SIGNATURE))
+                .count(),
+            1
         );
     }
 

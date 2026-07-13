@@ -4,6 +4,8 @@
 
 This example provides a local CubeAPI webhook receiver implemented with the Python standard library. It listens on `127.0.0.1:18080` and accepts `POST /webhook`.
 
+`receiver.py` rejects request bodies larger than its 1 MiB `MAX_BODY_BYTES`. CubeAPI's serialized webhook-body limit defaults to 256 KiB and cannot be configured above 1 MiB, so this example receiver accepts every body permitted by the sender policy.
+
 ## Prerequisites
 
 This guide assumes that:

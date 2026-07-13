@@ -113,6 +113,16 @@ Each endpoint supports:
 | `enabled` | Whether the endpoint is active. Optional, default `true`. |
 | `allow_private_urls` | Optional, default `false`. Explicitly permit this endpoint to target a local-development or internal receiver, such as `localhost`, a loopback IP, a private IP, or a link-local IP. |
 
+`max_payload_bytes` is a global `WebhookConfig` setting, separate from `CUBE_API_WEBHOOK_ENDPOINTS`. It defaults to 256 KiB, must be greater than zero, and has a hard maximum of 1 MiB. Configure it through:
+
+```bash
+export WEBHOOK__MAX_PAYLOAD_BYTES=262144   # max serialized webhook body, in bytes
+```
+
+CubeAPI fully serializes each webhook body with `serde_json::to_vec` before checking the limit. Each accepted `Delivery.body` is at most `max_payload_bytes`; retained delivery bodies remain regulated by the existing outstanding-task mechanism, and the matching-endpoint batch currently being constructed is retained temporarily. This is not a complete webhook memory bound: the limit does not bound the original `LogEvent`, the transient allocation required to serialize an oversized event, `FileLogger` memory, reqwest/hyper buffering, or CubeMaster response memory.
+
+The finite default is an intentional runtime behavior change: an event whose serialized body exceeds 256 KiB and was previously deliverable is now dropped unless the configured limit is raised to accommodate it, up to the 1 MiB hard maximum.
+
 ### Endpoint URL Validation
 
 CubeAPI validates every configured endpoint URL at startup and refuses to start on a violation:
@@ -176,6 +186,7 @@ Lifecycle payloads include `event`, `timestamp`, and `sandbox_id`; they also inc
 - Network errors, request timeouts, `408`, `425`, `429`, and `5xx` responses are retried with exponential backoff capped by `max_backoff_ms`.
 - `3xx` and other `4xx` responses are not retried.
 - Delivery failures are logged but do not change the sandbox API result.
+- Events whose fully serialized payload exceeds `max_payload_bytes` (default 256 KiB, hard maximum 1 MiB) are dropped for all matching endpoints and logged locally; they are never signed, sent, or retried.
 - Delivery is best-effort. CubeAPI does not implement batch delivery, a database outbox, disk spool, persistent replay, dead-letter queues, or exactly-once delivery.
 
 ### Alerting and Enterprise IM Integration

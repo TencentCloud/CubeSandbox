@@ -237,6 +237,7 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
             queue_capacity = cfg.webhook.queue_capacity,
             timeout_secs = cfg.webhook.timeout_secs,
             max_retries = cfg.webhook.max_retries,
+            max_payload_bytes = cfg.webhook.max_payload_bytes,
             max_concurrency = cfg.webhook.max_concurrency,
             flush_timeout_secs = cfg.webhook.flush_timeout_secs,
             "HTTP webhook logger enabled"

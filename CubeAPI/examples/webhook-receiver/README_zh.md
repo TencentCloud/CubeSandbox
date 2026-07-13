@@ -4,6 +4,8 @@
 
 本示例使用 Python 标准库实现了一个本地 CubeAPI Webhook 接收端。接收端监听 `127.0.0.1:18080`，并通过 `POST /webhook` 接收 CubeAPI 推送的生命周期事件。
 
+`receiver.py` 会拒绝超过其 1 MiB `MAX_BODY_BYTES` 的请求体。CubeAPI 的序列化 Webhook 请求体上限默认为 256 KiB，且配置值不能超过 1 MiB，因此该示例接收端可以接受发送端策略允许的所有请求体。
+
 ## 前置条件
 
 开始验证前，请确认以下条件已经满足：

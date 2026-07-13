@@ -14,6 +14,12 @@ pub struct WebhookConfig {
     #[serde(default = "default_webhook_queue_capacity")]
     pub queue_capacity: usize,
 
+    /// Maximum serialized webhook request body size in bytes. Events whose
+    /// serialized payload exceeds this limit are dropped for all matching
+    /// endpoints and logged; the oversized body is never signed or sent.
+    #[serde(default = "default_webhook_max_payload_bytes")]
+    pub max_payload_bytes: usize,
+
     #[serde(default = "default_webhook_timeout_secs")]
     pub timeout_secs: u64,
 
@@ -38,6 +44,7 @@ impl Default for WebhookConfig {
         Self {
             endpoints: default_webhook_endpoints(),
             queue_capacity: default_webhook_queue_capacity(),
+            max_payload_bytes: default_webhook_max_payload_bytes(),
             timeout_secs: default_webhook_timeout_secs(),
             max_retries: default_webhook_max_retries(),
             initial_backoff_ms: default_webhook_initial_backoff_ms(),
@@ -278,6 +285,9 @@ fn validate_webhook_endpoints_json(value: &str) -> anyhow::Result<()> {
 fn default_webhook_queue_capacity() -> usize {
     1024
 }
+fn default_webhook_max_payload_bytes() -> usize {
+    256 * 1024
+}
 fn default_webhook_timeout_secs() -> u64 {
     5
 }
@@ -355,6 +365,7 @@ mod tests {
     #[test]
     fn webhook_delivery_defaults_are_bounded() {
         assert_eq!(default_webhook_queue_capacity(), 1024);
+        assert_eq!(default_webhook_max_payload_bytes(), 256 * 1024);
         assert_eq!(default_webhook_timeout_secs(), 5);
         assert_eq!(default_webhook_max_retries(), 3);
         assert_eq!(default_webhook_initial_backoff_ms(), 200);
