@@ -9,99 +9,20 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/ory/dockertest/v3"
-	"github.com/ory/dockertest/v3/docker"
 	"github.com/pressly/goose/v3/lock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao/migrate"
 )
 
-const (
-	pgDsnEnv       = "CUBEMASTER_DAO_TEST_POSTGRES_DSN"
-	pgImage        = "postgres"
-	pgImageTag     = "16-alpine"
-	pgProbeTimeout = 90 * time.Second
-)
-
-type pgTestEnv struct {
-	dsn        string
-	teardown   func()
-	usesDocker bool
-}
-
-func newPostgres(t *testing.T) *pgTestEnv {
-	t.Helper()
-	if dsn := os.Getenv(pgDsnEnv); dsn != "" {
-		t.Logf("using external PostgreSQL from %s", pgDsnEnv)
-		return &pgTestEnv{dsn: dsn, teardown: func() {}, usesDocker: false}
-	}
-	pool, err := dockertest.NewPool("")
-	if err != nil {
-		t.Skipf("dockertest not available (%v); set %s to run this test", err, pgDsnEnv)
-	}
-	if err := pool.Client.Ping(); err != nil {
-		t.Skipf("docker daemon not reachable (%v); set %s to run this test", err, pgDsnEnv)
-	}
-	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: pgImage,
-		Tag:        pgImageTag,
-		Env: []string{
-			"POSTGRES_USER=cube",
-			"POSTGRES_PASSWORD=cube_pass",
-			"POSTGRES_DB=cube_test",
-		},
-	}, func(hostConfig *docker.HostConfig) {
-		hostConfig.AutoRemove = true
-		hostConfig.RestartPolicy = docker.RestartPolicy{Name: "no"}
-	})
-	if err != nil {
-		t.Skipf("could not start postgres container (%v); set %s to skip docker", err, pgDsnEnv)
-	}
-	port := resource.GetPort("5432/tcp")
-	dsn := fmt.Sprintf(
-		"host=127.0.0.1 port=%s user=cube password=cube_pass dbname=cube_test sslmode=disable",
-		port,
-	)
-
-	pool.MaxWait = pgProbeTimeout
-	if err := pool.Retry(func() error {
-		db, err := sql.Open("pgx", dsn)
-		if err != nil {
-			return err
-		}
-		defer db.Close()
-		return db.Ping()
-	}); err != nil {
-		_ = pool.Purge(resource)
-		t.Fatalf("postgres container never became reachable: %v", err)
-	}
-
-	return &pgTestEnv{
-		dsn:        dsn,
-		usesDocker: true,
-		teardown: func() {
-			_ = pool.Purge(resource)
-		},
-	}
-}
-
+// newPostgres / openPGDB are thin aliases over the shared dockertest fixture.
+func newPostgres(t *testing.T) *dbTestEnv { return newPostgresEnv(t) }
 func openPGDB(t *testing.T, dsn string) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Fatalf("ping: %v", err)
-	}
-	return db
+	return openPostgresDB(t, dsn)
 }
 
 // pgTestSessionLocker uses pg_try_advisory_lock with a test-specific key.
@@ -232,6 +153,18 @@ func assertPGHeadSchema(t *testing.T, db *sql.DB) {
 			table:   "t_cube_artifact_node_placement",
 			columns: []string{"artifact_id", "node_id", "node_ip"},
 		},
+		{
+			table: "t_cube_snapshot_runtime_active",
+			columns: []string{
+				"sandbox_id", "binding_type", "snapshot_id",
+				"node_id", "node_ip", "memory_vol", "rootfs_vol", "sandbox_gen",
+			},
+			indexes: []string{
+				"idx_snapshot_runtime_active_snapshot",
+				"idx_snapshot_runtime_active_node",
+				"idx_snapshot_runtime_active_node_ip",
+			},
+		},
 	}
 	for _, c := range cases {
 		cols := pgTableColumns(ctx, t, db, c.table)
@@ -360,5 +293,141 @@ func TestPostgres_FingerprintDetectsContentDrift(t *testing.T) {
 	t.Setenv("CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK", "1")
 	if err := migrate.Run(ctx, db, "postgres", pgTestSessionLocker()); err != nil {
 		t.Fatalf("migrate.Run with skip env should succeed: %v", err)
+	}
+}
+
+// TestPostgres_Upgrade_RuntimeActiveBinding proves the 20260701040100
+// migration's data-normalize + backfill path on PostgreSQL:
+//  1. migrate to HEAD then roll back just before the active-binding migration
+//  2. seed ACTIVE runtime_ref rows with empty binding_type and duplicates
+//  3. re-run migrate and assert dedup + projection into runtime_active
+//  4. re-run again to prove the migration is idempotent
+func TestPostgres_Upgrade_RuntimeActiveBinding(t *testing.T) {
+	env := newPostgres(t)
+	defer env.teardown()
+	db := openPGDB(t, env.dsn)
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	if err := migrate.Run(ctx, db, "postgres", pgTestSessionLocker()); err != nil {
+		t.Fatalf("initial migrate.Run: %v", err)
+	}
+
+	// Roll back to the migration immediately before runtime_active so we can
+	// seed historical ACTIVE rows and exercise the Up path with real data.
+	// 20260624121500 = template_definition_rootfs_artifact_id (last before
+	// 20260701040100_snapshot_runtime_active_binding).
+	const priorVersion int64 = 20260624121500
+	if err := migrate.DownTo(ctx, db, "postgres", pgTestSessionLocker(), priorVersion); err != nil {
+		t.Fatalf("DownTo(%d): %v", priorVersion, err)
+	}
+
+	// Confirm the active table was dropped by Down.
+	var activeExists bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM information_schema.tables
+		    WHERE table_schema = current_schema()
+		      AND table_name = 't_cube_snapshot_runtime_active'
+		 )`).Scan(&activeExists); err != nil {
+		t.Fatalf("check active table: %v", err)
+	}
+	if activeExists {
+		t.Fatal("expected t_cube_snapshot_runtime_active to be dropped after DownTo")
+	}
+
+	// Seed: two ACTIVE rows sharing (sandbox_id='', binding_type='') that will
+	// both normalize to (sb-dup, memory_backing); one already-correct ACTIVE;
+	// one empty-binding singleton. Distinct snapshot_ids so we can assert which
+	// duplicate survived (MAX(id) wins).
+	if _, err := db.ExecContext(ctx, `INSERT INTO t_cube_snapshot_runtime_ref
+		(snapshot_id, sandbox_id, node_id, binding_type, status, sandbox_gen)
+		VALUES
+		  ('snap-dup-old', 'sb-dup', 'node-1', '',              'ACTIVE', 1),
+		  ('snap-dup-new', 'sb-dup', 'node-1', '',              'ACTIVE', 2),
+		  ('snap-ok',      'sb-ok',  'node-2', 'memory_backing','ACTIVE', 1),
+		  ('snap-empty',   'sb-e',   'node-3', '',              'ACTIVE', 1)`); err != nil {
+		t.Fatalf("seed ACTIVE runtime_ref rows: %v", err)
+	}
+
+	if err := migrate.Run(ctx, db, "postgres", pgTestSessionLocker()); err != nil {
+		t.Fatalf("migrate.Run after seed: %v", err)
+	}
+
+	// Dedup: exactly one ACTIVE left for sb-dup, and it must be snap-dup-new
+	// (higher id). The older duplicate must be RELEASED.
+	var dupActiveSnap, dupActiveStatus string
+	if err := db.QueryRowContext(ctx,
+		`SELECT snapshot_id, status FROM t_cube_snapshot_runtime_ref
+		  WHERE sandbox_id = 'sb-dup' AND snapshot_id = 'snap-dup-new'`).
+		Scan(&dupActiveSnap, &dupActiveStatus); err != nil {
+		t.Fatalf("query snap-dup-new: %v", err)
+	}
+	if dupActiveStatus != "ACTIVE" {
+		t.Errorf("snap-dup-new status=%q, want ACTIVE", dupActiveStatus)
+	}
+	var dupOldStatus, dupOldErr string
+	if err := db.QueryRowContext(ctx,
+		`SELECT status, COALESCE(last_error, '') FROM t_cube_snapshot_runtime_ref
+		  WHERE sandbox_id = 'sb-dup' AND snapshot_id = 'snap-dup-old'`).
+		Scan(&dupOldStatus, &dupOldErr); err != nil {
+		t.Fatalf("query snap-dup-old: %v", err)
+	}
+	if dupOldStatus != "RELEASED" {
+		t.Errorf("snap-dup-old status=%q, want RELEASED", dupOldStatus)
+	}
+	if !strings.Contains(dupOldErr, "deduplicated") {
+		t.Errorf("snap-dup-old last_error=%q, want deduplicated marker", dupOldErr)
+	}
+
+	// Active projection: three rows (sb-dup, sb-ok, sb-e), binding_type filled.
+	type activeRow struct {
+		sandboxID, bindingType, snapshotID string
+	}
+	rows, err := db.QueryContext(ctx,
+		`SELECT sandbox_id, binding_type, snapshot_id
+		   FROM t_cube_snapshot_runtime_active
+		  ORDER BY sandbox_id`)
+	if err != nil {
+		t.Fatalf("select runtime_active: %v", err)
+	}
+	defer rows.Close()
+	var got []activeRow
+	for rows.Next() {
+		var r activeRow
+		if err := rows.Scan(&r.sandboxID, &r.bindingType, &r.snapshotID); err != nil {
+			t.Fatalf("scan active: %v", err)
+		}
+		got = append(got, r)
+	}
+	want := []activeRow{
+		{"sb-dup", "memory_backing", "snap-dup-new"},
+		{"sb-e", "memory_backing", "snap-empty"},
+		{"sb-ok", "memory_backing", "snap-ok"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("runtime_active row count=%d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("runtime_active[%d]=%v, want %v", i, got[i], want[i])
+		}
+	}
+
+	assertPGHeadSchema(t, db)
+
+	// Idempotent re-run must not fail or duplicate.
+	if err := migrate.Run(ctx, db, "postgres", pgTestSessionLocker()); err != nil {
+		t.Fatalf("idempotent re-run: %v", err)
+	}
+	var activeCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM t_cube_snapshot_runtime_active`).Scan(&activeCount); err != nil {
+		t.Fatalf("count active after re-run: %v", err)
+	}
+	if activeCount != 3 {
+		t.Errorf("after idempotent re-run: active count=%d, want 3", activeCount)
 	}
 }

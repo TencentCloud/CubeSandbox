@@ -17,6 +17,19 @@ ensuring that both engines land on the same HEAD. The SQL syntax differs only
 where MySQL and PostgreSQL diverge (data types, DDL constructs, locking
 mechanisms, etc.).
 
+Cross-dialect alignment is enforced automatically:
+
+1. **File parity** (`TestMigrationVersionParityAcrossDialects`) — every version
+   (and description suffix) present under `migrations/mysql/` must also exist
+   under `migrations/postgres/`, and vice versa. No Docker required.
+2. **Schema alignment** (`TestSchemaAlignment_MySQL_vs_Postgres`) — both engines
+   are migrated to HEAD inside throwaway dockertest containers; their normalized
+   logical schemas (tables, columns, nullability, type categories, ordered index
+   signatures including PRIMARY KEY) must be equivalent.
+
+When adding a new MySQL migration, you **must** add the matching PostgreSQL
+file in the same PR.
+
 ## Naming conventions
 
 Same as MySQL: frozen historical block (`0001`–`0010`) followed by UTC
@@ -40,10 +53,12 @@ timestamp-prefixed migrations (`YYYYMMDDhhmmss_<description>.sql`).
 
 | MySQL | PostgreSQL |
 |-------|-----------|
-| `bigint unsigned` | `bigint` (with CHECK >= 0 where needed) |
+| `bigint unsigned` | `bigint` (no CHECK; unsigned range is not enforced at DDL level — keep application-level validation if needed) |
 | `int unsigned` | `integer` |
 | `tinyint(1)` | `boolean` |
-| `mediumtext` / `text` | `text` |
+| `tinyint` (non-boolean) | `smallint` |
+| `mediumtext` / `longtext` / `text` | `text` |
+| `json` | `jsonb` (preferred PG JSON type; alignment tests normalize both to `json`) |
 | `varchar(N)` | `varchar(N)` |
 | `datetime` | `timestamp` |
 | `AUTO_INCREMENT` | `BIGSERIAL` / `SERIAL` |
@@ -55,3 +70,21 @@ timestamp-prefixed migrations (`YYYYMMDDhhmmss_<description>.sql`).
 | `INSERT IGNORE` | `INSERT ... ON CONFLICT DO NOTHING` |
 | `UPDATE ... JOIN` | `UPDATE ... FROM ... WHERE` |
 | stored procedures (`CREATE PROCEDURE`) | PL/pgSQL functions (`CREATE FUNCTION`) |
+
+### Documented dialect differences (aligned by tests via normalization)
+
+These differences are intentional and must **not** be treated as schema drift:
+
+- `json` vs `jsonb`
+- `mediumtext`/`longtext` vs `text`
+- `tinyint`/`int unsigned`/`bigint unsigned` vs `smallint`/`integer`/`bigint`
+- MySQL `ON UPDATE CURRENT_TIMESTAMP` (not expressible as a column default in
+  Postgres; application code or triggers own this behaviour)
+- Occasional Postgres `DEFAULT ''` on `NOT NULL` text columns where MySQL has
+  no default (empty-string insert semantics stay equivalent for our DAO paths)
+- Postgres `DEFAULT NULL` / `NULL::typename` vs MySQL "no default" on nullable
+  columns (both mean null-default; alignment normalizes them to `none`)
+
+Default-value comparison stores a normalized literal (not just a kind). The
+only intentional `none ↔ literal` exemption is **NOT NULL text/varchar with
+`DEFAULT ''` on one side**; `DEFAULT 0` vs no default (or `0` vs `1`) fails.

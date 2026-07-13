@@ -9,111 +9,21 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/ory/dockertest/v3"
-	"github.com/ory/dockertest/v3/docker"
 	"github.com/pressly/goose/v3/lock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao/migrate"
 )
 
-// dsnEnv lets a dev/CI machine point the test at an existing MySQL when
-// Docker is not available. The test always wins over the env var when
-// dockertest succeeds, since that produces a clean, scoped instance.
-const (
-	dsnEnv          = "CUBEMASTER_DAO_TEST_MYSQL_DSN"
-	mysqlImage      = "mysql"
-	mysqlImageTag   = "8.0"
-	probeTimeout    = 90 * time.Second
-	probeRetryEvery = 1 * time.Second
-)
-
-type testEnv struct {
-	dsn        string
-	teardown   func()
-	usesDocker bool
-}
-
-// newMySQL spins up a throwaway MySQL via dockertest, or returns the DSN
-// from $CUBEMASTER_DAO_TEST_MYSQL_DSN, or skips the test. Skipping is the
-// correct CI behaviour when the runner has neither: a green-by-default
-// "test never ran" beats a red "I couldn't find a database".
-func newMySQL(t *testing.T) *testEnv {
-	t.Helper()
-	if dsn := os.Getenv(dsnEnv); dsn != "" {
-		t.Logf("using external MySQL from %s", dsnEnv)
-		return &testEnv{dsn: dsn, teardown: func() {}, usesDocker: false}
-	}
-	pool, err := dockertest.NewPool("")
-	if err != nil {
-		t.Skipf("dockertest not available (%v); set %s to run this test", err, dsnEnv)
-	}
-	if err := pool.Client.Ping(); err != nil {
-		t.Skipf("docker daemon not reachable (%v); set %s to run this test", err, dsnEnv)
-	}
-	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: mysqlImage,
-		Tag:        mysqlImageTag,
-		Env: []string{
-			"MYSQL_ROOT_PASSWORD=root",
-			"MYSQL_DATABASE=cube_test",
-		},
-	}, func(hostConfig *docker.HostConfig) {
-		hostConfig.AutoRemove = true
-		hostConfig.RestartPolicy = docker.RestartPolicy{Name: "no"}
-	})
-	if err != nil {
-		t.Skipf("could not start mysql container (%v); set %s to skip docker", err, dsnEnv)
-	}
-	port := resource.GetPort("3306/tcp")
-	// DSN parameters intentionally mirror pkg/base/dao/driver/mysql.buildDSN so
-	// the test path exercises the same connection-level options as production
-	// (notably: multiStatements is NOT enabled). If a future migration relies
-	// on multi-statement Exec, fix the migration rather than papering over it
-	// here.
-	dsn := fmt.Sprintf(
-		"root:root@tcp(127.0.0.1:%s)/cube_test?charset=utf8&parseTime=true&loc=Local&timeout=5s&readTimeout=5s&writeTimeout=5s",
-		port,
-	)
-
-	pool.MaxWait = probeTimeout
-	if err := pool.Retry(func() error {
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			return err
-		}
-		defer db.Close()
-		return db.Ping()
-	}); err != nil {
-		_ = pool.Purge(resource)
-		t.Fatalf("mysql container never became reachable: %v", err)
-	}
-
-	return &testEnv{
-		dsn:        dsn,
-		usesDocker: true,
-		teardown: func() {
-			_ = pool.Purge(resource)
-		},
-	}
-}
-
+// newMySQL / openDB are thin aliases over the shared dockertest fixture
+// (dockertest_fixture_test.go) so existing call sites stay readable.
+func newMySQL(t *testing.T) *dbTestEnv { return newMySQLEnv(t) }
 func openDB(t *testing.T, dsn string) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Fatalf("ping: %v", err)
-	}
-	return db
+	return openMySQLDB(t, dsn)
 }
 
 // testSessionLocker stamps every Run with a clearly-named global lock so
@@ -479,6 +389,18 @@ func assertHeadSchema(t *testing.T, db *sql.DB) {
 		{
 			table:   "t_cube_snapshot_runtime_ref",
 			columns: []string{"snapshot_id", "binding_type", "sandbox_gen"},
+		},
+		{
+			table: "t_cube_snapshot_runtime_active",
+			columns: []string{
+				"sandbox_id", "binding_type", "snapshot_id",
+				"node_id", "node_ip", "memory_vol", "rootfs_vol", "sandbox_gen",
+			},
+			indexes: []string{
+				"idx_snapshot_runtime_active_snapshot",
+				"idx_snapshot_runtime_active_node",
+				"idx_snapshot_runtime_active_node_ip",
+			},
 		},
 	}
 	for _, c := range cases {
