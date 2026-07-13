@@ -65,7 +65,7 @@ var ErrLimitReached = errors.New("the read limit is reached")
 
 func ReadAtMost(r io.Reader, limit int64) ([]byte, error) {
 	limitedReader := &io.LimitedReader{R: r, N: limit}
-	// data, err := ioutil.ReadAll(limitedReader)
+		data, err := io.ReadAll(limitedReader)
 	data, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return data, err
