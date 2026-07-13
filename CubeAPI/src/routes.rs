@@ -36,7 +36,12 @@ pub fn build_router(state: AppState) -> Router {
         .config
         .auth_callback_url
         .as_deref()
-        .is_some_and(|u| !u.is_empty());
+        .is_some_and(|u| !u.is_empty())
+        || state
+            .config
+            .cube_api_key
+            .as_deref()
+            .is_some_and(|k| !k.is_empty());
 
     let standard_router = apply_http_layers(
         Router::new().merge(build_e2b_router(&state, auth_configured)),

@@ -59,6 +59,23 @@ pub struct ServerConfig {
     /// CLI flag: --auth-callback-url  |  Env var: AUTH_CALLBACK_URL
     #[serde(default)]
     pub auth_callback_url: Option<String>,
+
+    /// Built-in simple API key for lightweight authentication.
+    ///
+    /// When `auth_callback_url` is unset and this field is set, every request
+    /// (except /health) must carry either:
+    ///   - `Authorization: Bearer <token>`, or
+    ///   - `X-API-Key: <key>`
+    ///
+    /// The extracted credential is compared as a string against this value.
+    /// A match grants access; a mismatch or missing credential returns 401.
+    ///
+    /// This is mutually exclusive with `auth_callback_url`: when both are set,
+    /// `auth_callback_url` (callback mode) takes priority.
+    ///
+    /// Env var: CUBE_API_KEY
+    #[serde(default)]
+    pub cube_api_key: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -117,6 +134,7 @@ impl Default for ServerConfig {
             log_dir: default_log_dir(),
             log_prefix: default_log_prefix(),
             auth_callback_url: None,
+            cube_api_key: std::env::var("CUBE_API_KEY").ok().filter(|s| !s.is_empty()),
         }
     }
 }

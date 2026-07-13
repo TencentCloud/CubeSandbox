@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
@@ -95,6 +98,19 @@ func (s *Store) UpsertInstance(ctx context.Context, inst *AgentInstance) error {
 		}
 	}
 
+	// Parse envPort from inst.EnvURL (format: http://{port}-{sandboxId}.{domain}).
+	// Falls back to 8080 when parsing fails, matching the default for all-in-one images.
+	envPort := 8080
+	if inst.EnvURL != "" {
+		if u, err := url.Parse(inst.EnvURL); err == nil {
+			if match := regexp.MustCompile(`^(\d+)-`).FindStringSubmatch(u.Hostname()); match != nil {
+				if p, err := strconv.Atoi(match[1]); err == nil {
+					envPort = p
+				}
+			}
+		}
+	}
+
 	return s.db.WithContext(ctx).Exec(
 		`INSERT INTO t_agenthub_instance (
 			agent_id, sandbox_id, template_id, name, engine, env, model, version, status,
@@ -123,7 +139,7 @@ func (s *Store) UpsertInstance(ctx context.Context, inst *AgentInstance) error {
 		inst.ID, inst.SandboxID, inst.TemplateID, inst.Name, inst.Engine, inst.Env,
 		inst.Model, inst.Version, inst.Status,
 		botsJSON, inst.Avatar, inst.AvatarTone, inst.Domain,
-		18789, 8080, gatewayToken,
+		18789, envPort, gatewayToken,
 		inst.PersistenceMode, inst.RootfsSourceType, inst.RootfsSourceID,
 		inst.OpenclawPersistID, inst.OpenclawStatePath,
 		wecomBotID, wecomBotSecret,

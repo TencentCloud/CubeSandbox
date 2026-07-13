@@ -6,7 +6,6 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -128,6 +127,105 @@ done
 [ -f /var/log/openclaw.log ] && tail -80 /var/log/openclaw.log >&2 || true
 exit 1`
 
+// openclawUpgradeScript is the bash script that upgrades and restarts the
+// OpenClaw gateway inside a sandbox via envd. Identical to old Rust
+// upgrade_agent_openclaw.
+const openclawUpgradeScript = `set -e
+upgraded=0
+openclaw_bin="$(command -v openclaw || true)"
+
+if command -v npm >/dev/null 2>&1; then
+  npm_json="$(npm ls -g --depth=0 --json 2>/dev/null || true)"
+  npm_packages="$(printf '%s' "$npm_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+for name in (data.get("dependencies") or {}):
+    if "openclaw" in name.lower():
+        print(name)
+' || true)"
+  if [ -n "$npm_packages" ]; then
+    for pkg in $npm_packages; do
+      npm install -g "${pkg}@latest"
+      upgraded=1
+    done
+  fi
+fi
+
+if [ "$upgraded" != "1" ] && command -v pnpm >/dev/null 2>&1; then
+  pnpm_root="$(pnpm root -g 2>/dev/null || true)"
+  if [ -n "$pnpm_root" ]; then
+    for pkg_dir in "$pnpm_root"/*openclaw* "$pnpm_root"/@*/*openclaw*; do
+      [ -e "$pkg_dir/package.json" ] || continue
+      pkg="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("name",""))' "$pkg_dir/package.json")"
+      [ -n "$pkg" ] || continue
+      pnpm add -g "${pkg}@latest"
+      upgraded=1
+    done
+  fi
+fi
+
+if [ "$upgraded" != "1" ]; then
+  if python3 -m pip show openclaw >/dev/null 2>&1; then
+    python3 -m pip install -U openclaw
+    upgraded=1
+  elif command -v pip3 >/dev/null 2>&1 && pip3 show openclaw >/dev/null 2>&1; then
+    pip3 install -U openclaw
+    upgraded=1
+  elif command -v pip >/dev/null 2>&1 && pip show openclaw >/dev/null 2>&1; then
+    pip install -U openclaw
+    upgraded=1
+  elif command -v uv >/dev/null 2>&1 && uv pip show openclaw >/dev/null 2>&1; then
+    uv pip install -U openclaw
+    upgraded=1
+  fi
+fi
+
+if [ "$upgraded" != "1" ]; then
+  echo "OpenClaw upgrade source was not detected; refreshing existing OpenClaw service." >&2
+fi
+if command -v supervisorctl >/dev/null 2>&1; then
+  supervisorctl restart openclaw
+else
+  pkill -f '(^|[ /])openclaw([ ]|$)' 2>/dev/null || true
+  pkill -f 'node .*openclaw' 2>/dev/null || true
+  mkdir -p /var/log
+  if command -v openclaw >/dev/null 2>&1; then
+    nohup openclaw gateway run >/var/log/openclaw.log 2>&1 &
+  elif [ -x /opt/openclaw/openclaw ]; then
+    nohup /opt/openclaw/openclaw gateway run >/var/log/openclaw.log 2>&1 &
+  elif [ -f /opt/openclaw/package.json ] && command -v npm >/dev/null 2>&1; then
+    (cd /opt/openclaw && nohup npm start >/var/log/openclaw.log 2>&1 &)
+  elif [ -f /app/package.json ] && command -v npm >/dev/null 2>&1; then
+    (cd /app && nohup npm start >/var/log/openclaw.log 2>&1 &)
+  else
+    echo "Neither supervisorctl nor a direct OpenClaw startup command was found" >&2
+    exit 127
+  fi
+fi
+for i in $(seq 1 30); do
+  if python3 - <<'PY'
+import json, os, socket, sys
+try:
+    token = json.load(open("/root/.openclaw/openclaw.json")).get("gateway", {}).get("auth", {}).get("token", "")
+    port = int(os.environ.get("OPENCLAW_PORT", "18789"))
+    if not token:
+        sys.exit(1)
+    s = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+    s.close()
+except Exception:
+    sys.exit(1)
+PY
+  then
+    if command -v supervisorctl >/dev/null 2>&1; then supervisorctl status openclaw; else ps -ef | grep -E '[o]penclaw|node .*openclaw' || true; fi
+    break
+  fi
+  sleep 0.5
+done
+[ -n "$openclaw_bin" ] && "$openclaw_bin" --version || true`
+
 // restartOpenclawForInstance restarts the OpenClaw gateway process inside the
 // sandbox for the given agent instance. Returns the command output and error.
 // Matches old Rust restart_openclaw_for_record.
@@ -136,6 +234,25 @@ func restartOpenclawForInstance(inst *store.AgentInstance) (*CommandOutput, erro
 		"process": map[string]interface{}{
 			"cmd":  "/bin/bash",
 			"args": []string{"-l", "-c", openclawRestartScript},
+			"envs": map[string]string{
+				"NODE_EXTRA_CA_CERTS":          "/root/.openclaw/cube-egress-ca.crt",
+				"OPENCLAW_NODE_EXTRA_CA_CERTS": "/root/.openclaw/cube-egress-ca.crt",
+			},
+			"cwd": "/root",
+		},
+		"stdin": false,
+	}
+	return runEnvdCommand(envdHTTPClient, inst.SandboxID, inst.Domain, req)
+}
+
+// upgradeOpenclawForInstance upgrades and restarts the OpenClaw gateway
+// inside the sandbox for the given agent instance.
+// Matches old Rust upgrade_agent_openclaw.
+func upgradeOpenclawForInstance(inst *store.AgentInstance) (*CommandOutput, error) {
+	req := map[string]interface{}{
+		"process": map[string]interface{}{
+			"cmd":  "/bin/bash",
+			"args": []string{"-l", "-c", openclawUpgradeScript},
 			"envs": map[string]string{
 				"NODE_EXTRA_CA_CERTS":          "/root/.openclaw/cube-egress-ca.crt",
 				"OPENCLAW_NODE_EXTRA_CA_CERTS": "/root/.openclaw/cube-egress-ca.crt",
@@ -318,8 +435,31 @@ func (h *AgentHubHandler) sandboxAction(w http.ResponseWriter, r *http.Request, 
 }
 
 // UpgradeAgent handles POST /agenthub/instances/{agentID}/upgrade.
+// Upgrades OpenClaw to the latest version (via npm/pnpm/pip) and restarts it.
+// Matches old Rust upgrade_agent_openclaw.
 func (h *AgentHubHandler) UpgradeAgent(w http.ResponseWriter, r *http.Request) {
-	h.RestartAgent(w, r)
+	agentID := mux.Vars(r)["agentID"]
+	inst, err := h.store.GetInstance(r.Context(), agentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get instance: "+err.Error())
+		return
+	}
+	if inst == nil {
+		writeError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+
+	output, err := upgradeOpenclawForInstance(inst)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to upgrade: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"exitCode": output.ExitCode,
+		"stdout":   output.Stdout,
+		"stderr":   output.Stderr,
+	})
 }
 
 // UpdateModel handles PUT /agenthub/instances/{agentID}/model.
@@ -392,11 +532,13 @@ func (h *AgentHubHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		credentialMode = "egress"
 	}
 
-	// Check if LLM API key is configured
-	apiKey, _ := h.store.GetSetting(ctx, "llm_api_key")
-	if apiKey == "" {
-		apiKey, _ = h.store.GetSetting(ctx, "deepseek_api_key")
+	// Check if LLM API key is configured.
+	// Matches old CubeAPI: try llm_api_key first, then deepseek_api_key.
+	rawApiKey, _ := h.store.GetSetting(ctx, "llm_api_key")
+	if rawApiKey == "" {
+		rawApiKey, _ = h.store.GetSetting(ctx, "deepseek_api_key")
 	}
+	apiKey := decryptSetting(rawApiKey)
 	apiKeyConfigured := apiKey != ""
 	apiKeySource := "none"
 	var apiKeyMasked *string
@@ -433,6 +575,23 @@ func maskSecret(s string) string {
 		return "****"
 	}
 	return s[:4] + "****" + s[len(s)-4:]
+}
+
+// decryptSetting returns the plaintext value. If the stored value has the
+// enc:v1: prefix, it decrypts it; otherwise it returns the value as-is
+// (for backward compatibility with old CubeAPI plaintext storage).
+func decryptSetting(stored string) string {
+	if stored == "" {
+		return ""
+	}
+	if !strings.HasPrefix(stored, "enc:v1:") {
+		return stored // plaintext (old CubeAPI format)
+	}
+	plain, err := crypto.DecryptSecret(stored)
+	if err != nil {
+		return stored // fallback to raw value if decrypt fails
+	}
+	return plain
 }
 
 // UpdateSettings handles PUT /agenthub/settings.
@@ -838,16 +997,18 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 	// Determine envPort based on template image.
 	// All-in-One images have a web desktop on 8080;
 	// lightweight images have a code interpreter on 49999 and no desktop.
+	// Query CubeMaster directly (no CubeAPI dependency).
 	envPort := 8080
-	cubeAPIURL := os.Getenv("CUBE_API_URL")
-	if cubeAPIURL == "" {
-		cubeAPIURL = "http://127.0.0.1:3000"
-	}
-	if resp, err := http.Get(fmt.Sprintf("%s/templates/%s", cubeAPIURL, templateID)); err == nil {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if strings.Contains(strings.ToLower(string(body)), "lightweight") {
-			envPort = 49999
+	if raw, err := h.cm.ListTemplates(r.Context(), templateID, false); err == nil {
+		// CubeMaster returns flat structure for single-template query:
+		// {ret, template_id, image_info, ...}
+		var tmpl struct {
+			ImageInfo string `json:"image_info"`
+		}
+		if json.Unmarshal(raw, &tmpl) == nil {
+			if strings.Contains(strings.ToLower(tmpl.ImageInfo), "lightweight") {
+				envPort = 49999
+			}
 		}
 	}
 	envURL := fmt.Sprintf("http://%d-%s.%s", envPort, sandboxID, domain)
@@ -1049,6 +1210,9 @@ func (h *AgentHubHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Record operation for "最近操作" history (matching old CubeAPI).
+	_ = h.store.RecordOperation(r.Context(), agentID, inst.SandboxID, "snapshot", "succeeded", "")
+
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"snapshotID": snapshotID,
 		"names":      []string{},
@@ -1122,6 +1286,8 @@ func (h *AgentHubHandler) RollbackAgent(w http.ResponseWriter, r *http.Request) 
 	}
 
 	_ = h.store.UpdateInstanceStatus(r.Context(), agentID, "running")
+	// Record operation for "最近操作" history (matching old CubeAPI).
+	_ = h.store.RecordOperation(r.Context(), agentID, inst.SandboxID, "rollback", "succeeded", "")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "rolled-back"})
 }
 
@@ -1371,6 +1537,9 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create clone record: "+err.Error())
 		return
 	}
+
+	// Record operation for "最近操作" history (matching old CubeAPI).
+	_ = h.store.RecordOperation(r.Context(), agentID, inst.SandboxID, "clone", "succeeded", "")
 
 	writeJSON(w, http.StatusCreated, clone)
 }

@@ -251,8 +251,6 @@ func (h *ClusterHandler) GetNode(w http.ResponseWriter, r *http.Request) {
 func (h *ClusterHandler) Versions(w http.ResponseWriter, r *http.Request) {
 	data, err := h.cm.ClusterVersions(r.Context())
 	if err != nil {
-		// CubeMaster may not implement this endpoint — return empty matrix
-		// so the UI degrades gracefully (same behavior as old Rust code).
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"controlPlane": map[string]string{},
 			"components":   []interface{}{},

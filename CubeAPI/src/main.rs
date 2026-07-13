@@ -179,7 +179,8 @@ fn main() -> anyhow::Result<()> {
         debug_mode = cli.debug,
         log_level = %cfg.log_level,
         bind = %cfg.bind,
-        auth_enabled = cfg.auth_callback_url.is_some(),
+        auth_enabled = cfg.auth_callback_url.is_some()
+            || cfg.cube_api_key.is_some(),
         "cube-api starting"
     );
 

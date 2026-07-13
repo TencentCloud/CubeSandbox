@@ -565,7 +565,12 @@ function DeleteTemplateModal({ templateID, onClose }: DeleteModalProps) {
 // ── main page ────────────────────────────────────────────────────────────────
 
 export default function TemplatesPage() {
-  const { data, isLoading } = useQuery({ queryKey: ['templates'], queryFn: templateApi.list });
+  const { data, isLoading } = useQuery({
+    queryKey: ['templates'],
+    queryFn: templateApi.list,
+    // Auto-refresh so newly created templates transition from RUNNING → READY
+    refetchInterval: 10_000,
+  });
   const { data: compat } = useQuery({
     queryKey: ['templates', 'compat'],
     queryFn: templateApi.compat,

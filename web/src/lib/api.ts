@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Tencent. All rights reserved.
 
 // Minimal fetch wrapper with dual base URLs:
-// - `api()`  → CubeAPI (SDK/E2B endpoints, root path, X-API-Key auth)
-// - `ops()`  → CubeOps (ops endpoints, /opsapi/v1 prefix, JWT Bearer auth)
+// - `api()`  → SDK/E2B endpoints (root path, JWT Bearer auth via CubeOps)
+// - `ops()`  → CubeOps ops endpoints (/opsapi/v1 prefix, JWT Bearer auth)
 
 export type ApiInit = RequestInit & {
   params?: Record<string, string | number | boolean | undefined>;
@@ -86,7 +86,6 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
   const query = buildQuery(params);
 
   const accessToken = getAccessToken();
-  const apiKey = localStorage.getItem('cube.apiKey') ?? '';
   const url = `${SDK_BASE}${path}${query}`;
 
   const doFetch = (token: string) => fetch(url, {
@@ -94,7 +93,6 @@ export async function api<T = unknown>(path: string, init: ApiInit = {}): Promis
     headers: {
       ...(rest.body != null ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(apiKey ? { 'X-API-Key': apiKey } : {}),
       ...(headers ?? {}),
     },
   });

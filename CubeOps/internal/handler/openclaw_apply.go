@@ -16,7 +16,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 )
 
@@ -166,21 +165,13 @@ func resolveLLMConfig(ctx context.Context, s *store.Store) (*llmConfig, error) {
 	credentialMode, _ := s.GetSetting(nil, "llm_credential_mode")
 	credentialMode = normalizeLLMCredentialMode(credentialMode)
 
-	// Read API key (try llm_api_key first, then deepseek_api_key for backward compat)
+	// Read API key (try llm_api_key first, then deepseek_api_key).
+	// Matches old CubeAPI resolve_llm_config.
 	apiKey, _ := s.GetSetting(ctx, "llm_api_key")
-	if apiKey != "" {
-		if dec, err := crypto.DecryptSecret(apiKey); err == nil {
-			apiKey = strings.TrimSpace(dec)
-		}
-	}
 	if apiKey == "" {
 		apiKey, _ = s.GetSetting(ctx, "deepseek_api_key")
-		if apiKey != "" {
-			if dec, err := crypto.DecryptSecret(apiKey); err == nil {
-				apiKey = strings.TrimSpace(dec)
-			}
-		}
 	}
+	apiKey = decryptSetting(apiKey)
 	if apiKey == "" {
 		return nil, fmt.Errorf("LLM API key is not configured. Configure it on the AgentHub settings page first")
 	}

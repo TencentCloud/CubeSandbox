@@ -110,6 +110,85 @@ func (c *Client) ConnectSandbox(ctx context.Context, sandboxID string, timeout i
 	})
 }
 
+// --- SDK-facing methods (direct CubeMaster REST calls) ---
+
+// ListSandboxesWithBody lists sandboxes with a custom request body.
+func (c *Client) ListSandboxesWithBody(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	return c.post(ctx, "/cube/sandbox/list", body)
+}
+
+// SetSandboxTimeout sets an absolute TTL for a sandbox.
+func (c *Client) SetSandboxTimeout(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	return c.post(ctx, "/cube/sandbox/timeout", body)
+}
+
+// RefreshSandbox extends a sandbox's TTL by a delta.
+func (c *Client) RefreshSandbox(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	return c.post(ctx, "/cube/sandbox/refresh", body)
+}
+
+// GetSandboxLogs fetches sandbox stdout/stderr logs.
+func (c *Client) GetSandboxLogs(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	return c.post(ctx, "/cube/sandbox/logs", body)
+}
+
+// ConnectSandboxWithBody resumes a paused sandbox with a custom request body.
+func (c *Client) ConnectSandboxWithBody(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	return c.post(ctx, "/cube/sandbox/connect", body)
+}
+
+// ListSnapshots lists snapshots with query parameters.
+func (c *Client) ListSnapshots(ctx context.Context, params map[string]string) (json.RawMessage, error) {
+	return c.getWithQuery(ctx, "/cube/snapshot", params)
+}
+
+// ListTemplates lists templates, or fetches a single one when templateID is non-empty.
+func (c *Client) ListTemplates(ctx context.Context, templateID string, includeRequest bool) (json.RawMessage, error) {
+	params := map[string]string{}
+	if templateID != "" {
+		params["template_id"] = templateID
+	}
+	if includeRequest {
+		params["include_request"] = "true"
+	}
+	return c.getWithQuery(ctx, "/cube/template", params)
+}
+
+// CreateTemplateFromImage creates a template from an OCI image.
+func (c *Client) CreateTemplateFromImage(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	return c.post(ctx, "/cube/template/from-image", body)
+}
+
+// RedoTemplate rebuilds an existing template.
+func (c *Client) RedoTemplate(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	return c.post(ctx, "/cube/template/redo", body)
+}
+
+// DeleteTemplate deletes a template by id.
+func (c *Client) DeleteTemplate(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	return c.deleteWithBody(ctx, "/cube/template", body)
+}
+
+// GetTemplateBuildStatus fetches the build status for a template build job.
+func (c *Client) GetTemplateBuildStatus(ctx context.Context, buildID string) (json.RawMessage, error) {
+	return c.get(ctx, fmt.Sprintf("/cube/template/build/%s/status", buildID))
+}
+
+// StartTemplateBuild starts (or retries) a template build job.
+func (c *Client) StartTemplateBuild(ctx context.Context, buildID string, body interface{}) (json.RawMessage, error) {
+	return c.post(ctx, fmt.Sprintf("/cube/template/build/%s", buildID), body)
+}
+
+// GetTemplateCompat fetches the template compatibility matrix.
+func (c *Client) GetTemplateCompat(ctx context.Context) (json.RawMessage, error) {
+	return c.get(ctx, "/cube/template/compat")
+}
+
+// AdoptTemplateCompatBaseline adopts the compatibility baseline for a template.
+func (c *Client) AdoptTemplateCompatBaseline(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	return c.post(ctx, "/cube/template/compat", body)
+}
+
 // --- internal helpers ---
 
 func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) {
@@ -117,6 +196,26 @@ func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) 
 	if err != nil {
 		return nil, err
 	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return readResponse(resp)
+}
+
+func (c *Client) getWithQuery(ctx context.Context, path string, params map[string]string) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	q := req.URL.Query()
+	for k, v := range params {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
+	req.URL.RawQuery = q.Encode()
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err

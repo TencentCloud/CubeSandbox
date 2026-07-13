@@ -60,9 +60,9 @@ func (s *Store) Close() error {
 	return dao.Close()
 }
 
-// bootstrapMasterKey loads or creates the master encryption key from the DB.
+// bootstrapMasterKey loads or creates the master encryption key from t_system_setting.
 func (s *Store) bootstrapMasterKey(ctx context.Context) error {
-	b64, err := s.GetOrCreateSetting(ctx, "secret_master_key", crypto.GenerateMasterKeyB64())
+	b64, err := s.GetOrCreateSystemSetting(ctx, "secret_master_key", crypto.GenerateMasterKeyB64())
 	if err != nil {
 		return err
 	}
@@ -73,37 +73,37 @@ func (s *Store) bootstrapMasterKey(ctx context.Context) error {
 	return nil
 }
 
-// BootstrapJWTSecret loads or creates the JWT signing secret from the DB.
+// BootstrapJWTSecret loads or creates the JWT signing secret from t_system_setting.
 // If JWT_SECRET env var is set, it takes priority and is NOT overwritten.
-// Otherwise, a random 32-byte secret is generated, persisted to the settings
-// table, and returned.  This allows zero-config deployment — the secret is
-// auto-generated on first run and reused on subsequent runs.
+// Otherwise, a random 32-byte secret is generated, persisted to the system
+// settings table, and returned.  This allows zero-config deployment — the
+// secret is auto-generated on first run and reused on subsequent runs.
 func (s *Store) BootstrapJWTSecret(ctx context.Context, envSecret string) (string, error) {
 	if envSecret != "" {
 		return envSecret, nil
 	}
-	// Try to load from DB; if not found, generate and persist.
-	existing, _ := s.GetSetting(ctx, "jwt_secret")
+	// Try to load from t_system_setting; if not found, generate and persist.
+	existing, _ := s.GetSystemSetting(ctx, "jwt_secret")
 	if existing != "" {
-		slog.Info("JWT secret loaded from database")
+		slog.Info("JWT secret loaded from database (t_system_setting)")
 		return existing, nil
 	}
 	generated := crypto.GenerateMasterKeyB64()
-	if err := s.SetSetting(ctx, "jwt_secret", generated); err != nil {
+	if err := s.SetSystemSetting(ctx, "jwt_secret", generated); err != nil {
 		return "", fmt.Errorf("persist JWT secret: %w", err)
 	}
-	slog.Info("JWT secret auto-generated and persisted to database")
+	slog.Info("JWT secret auto-generated and persisted to database (t_system_setting)")
 	return generated, nil
 }
 
-// seedDefaultAdmin creates the default admin/admin account if it doesn't exist.
+// seedDefaultAdmin creates the default admin/admin account in t_system_user.
 func (s *Store) seedDefaultAdmin(ctx context.Context) error {
 	hash, err := crypto.HashPassword("admin")
 	if err != nil {
 		return fmt.Errorf("hash default password: %w", err)
 	}
 	result := s.db.WithContext(ctx).Exec(
-		"INSERT IGNORE INTO t_agenthub_user (username, password) VALUES (?, ?)",
+		"INSERT IGNORE INTO t_system_user (username, password) VALUES (?, ?)",
 		"admin", hash,
 	)
 	if result.Error != nil {

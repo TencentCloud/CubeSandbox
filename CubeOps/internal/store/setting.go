@@ -11,7 +11,44 @@ import (
 
 const settingMasterKey = "secret_master_key"
 
-// GetSetting retrieves a setting value by key.
+// ── System-level settings (t_system_setting) ────────────────────────────────
+
+// GetSystemSetting retrieves a system-level setting value by key.
+func (s *Store) GetSystemSetting(ctx context.Context, key string) (string, error) {
+	var val string
+	err := s.db.WithContext(ctx).Raw(
+		"SELECT setting_value FROM t_system_setting WHERE setting_key = ? LIMIT 1", key,
+	).Scan(&val).Error
+	if errors.Is(err, sql.ErrNoRows) || val == "" {
+		return "", nil
+	}
+	return val, err
+}
+
+// GetOrCreateSystemSetting atomically gets an existing system setting or
+// creates it with the given value. Uses INSERT IGNORE for concurrency safety.
+func (s *Store) GetOrCreateSystemSetting(ctx context.Context, key, value string) (string, error) {
+	if err := s.db.WithContext(ctx).Exec(
+		"INSERT IGNORE INTO t_system_setting (setting_key, setting_value) VALUES (?, ?)",
+		key, value,
+	).Error; err != nil {
+		return "", err
+	}
+	return s.GetSystemSetting(ctx, key)
+}
+
+// SetSystemSetting upserts a system-level setting value.
+func (s *Store) SetSystemSetting(ctx context.Context, key, value string) error {
+	return s.db.WithContext(ctx).Exec(
+		"INSERT INTO t_system_setting (setting_key, setting_value) VALUES (?, ?) "+
+			"ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+		key, value,
+	).Error
+}
+
+// ── AgentHub-level settings (t_agenthub_setting) ────────────────────────────
+
+// GetSetting retrieves an AgentHub-level setting value by key.
 func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
 	var val string
 	err := s.db.WithContext(ctx).Raw(
@@ -46,11 +83,13 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	).Error
 }
 
+// ── System users (t_system_user) ────────────────────────────────────────────
+
 // GetUserPassword retrieves the stored password hash for a user.
 func (s *Store) GetUserPassword(ctx context.Context, username string) (string, error) {
 	var pwd string
 	err := s.db.WithContext(ctx).Raw(
-		"SELECT password FROM t_agenthub_user WHERE username = ? LIMIT 1", username,
+		"SELECT password FROM t_system_user WHERE username = ? LIMIT 1", username,
 	).Scan(&pwd).Error
 	if errors.Is(err, sql.ErrNoRows) || pwd == "" {
 		return "", nil
@@ -61,7 +100,7 @@ func (s *Store) GetUserPassword(ctx context.Context, username string) (string, e
 // SetUserPassword updates the password hash for a user.
 func (s *Store) SetUserPassword(ctx context.Context, username, passwordHash string) error {
 	result := s.db.WithContext(ctx).Exec(
-		"UPDATE t_agenthub_user SET password = ? WHERE username = ?",
+		"UPDATE t_system_user SET password = ? WHERE username = ?",
 		passwordHash, username,
 	)
 	if result.Error != nil {

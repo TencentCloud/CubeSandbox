@@ -40,9 +40,6 @@ func New(cfg *config.Config, s *store.Store) *Server {
 
 // Start begins listening for HTTP requests.
 func (s *Server) Start() error {
-	// Initialise the CubeAPI reverse proxy for SDK endpoint passthrough.
-	handler.InitCubeAPIProxy(s.cfg.CubeAPIURL)
-
 	router := s.buildRouter()
 
 	s.httpSrv = &http.Server{
@@ -82,6 +79,7 @@ func (s *Server) buildRouter() *mux.Router {
 	storeHandler := handler.NewStoreHandler()
 	configHandler := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", "cube.app", "cubebox")
 	agenthubHandler := handler.NewAgentHubHandler(s.store, s.cm)
+	sdkHandler := handler.NewSDKHandler(s.cm)
 
 	// Public routes (no auth required)
 	public := r.PathPrefix("/api/v1").Subrouter()
@@ -144,10 +142,41 @@ func (s *Server) buildRouter() *mux.Router {
 	authed.HandleFunc("/agenthub/settings", agenthubHandler.GetSettings).Methods(http.MethodGet)
 	authed.HandleFunc("/agenthub/settings", agenthubHandler.UpdateSettings).Methods(http.MethodPut)
 
-	// SDK proxy — forward SDK/E2B-compatible endpoints to CubeAPI with JWT auth.
-	// This closes the auth gap left when /cubeapi/v1 admin mirror routes were removed.
-	// nginx routes /sandboxes, /templates, /snapshots, /v2/sandboxes → /api/v1/sdk/...
-	authed.PathPrefix("/sdk/").HandlerFunc(handler.CubeAPIProxy)
+	// SDK — WebUI sandbox/snapshot/template operations via CubeMaster direct.
+	// These replace the former CubeAPI reverse proxy; CubeOps now calls
+	// CubeMaster HTTP REST API directly for all SDK data needs.
+	authed.HandleFunc("/sdk/sandboxes", sdkHandler.ListSandboxes).Methods(http.MethodGet)
+	authed.HandleFunc("/sdk/sandboxes", sdkHandler.CreateSandbox).Methods(http.MethodPost)
+	authed.HandleFunc("/sdk/sandboxes/{id}", sdkHandler.GetSandbox).Methods(http.MethodGet)
+	authed.HandleFunc("/sdk/sandboxes/{id}", sdkHandler.DeleteSandbox).Methods(http.MethodDelete)
+	authed.HandleFunc("/sdk/sandboxes/{id}/logs", sdkHandler.GetSandboxLogs).Methods(http.MethodGet)
+	authed.HandleFunc("/sdk/sandboxes/{id}/timeout", sdkHandler.SetSandboxTimeout).Methods(http.MethodPost)
+	authed.HandleFunc("/sdk/sandboxes/{id}/refreshes", sdkHandler.RefreshSandbox).Methods(http.MethodPost)
+	authed.HandleFunc("/sdk/sandboxes/{id}/pause", sdkHandler.PauseSandbox).Methods(http.MethodPost)
+	authed.HandleFunc("/sdk/sandboxes/{id}/resume", sdkHandler.ResumeSandbox).Methods(http.MethodPost)
+	authed.HandleFunc("/sdk/sandboxes/{id}/connect", sdkHandler.ConnectSandbox).Methods(http.MethodPost)
+
+	// SDK — v2 sandboxes (E2B v2 compatible, same handlers)
+	authed.HandleFunc("/sdk/v2/sandboxes", sdkHandler.ListSandboxes).Methods(http.MethodGet)
+	authed.HandleFunc("/sdk/v2/sandboxes/{id}/logs", sdkHandler.GetSandboxLogs).Methods(http.MethodGet)
+
+	// SDK — snapshots
+	authed.HandleFunc("/sdk/snapshots", sdkHandler.ListSnapshots).Methods(http.MethodGet)
+	authed.HandleFunc("/sdk/sandboxes/{id}/snapshots", sdkHandler.CreateSnapshot).Methods(http.MethodPost)
+	authed.HandleFunc("/sdk/sandboxes/{id}/rollback", sdkHandler.RollbackSandbox).Methods(http.MethodPost)
+
+	// SDK — templates
+	// NOTE: literal paths (compat) must be registered BEFORE {id} routes,
+	// otherwise gorilla/mux matches "compat" as {id}="compat".
+	authed.HandleFunc("/sdk/templates", sdkHandler.ListTemplates).Methods(http.MethodGet)
+	authed.HandleFunc("/sdk/templates", sdkHandler.CreateTemplate).Methods(http.MethodPost)
+	authed.HandleFunc("/sdk/templates/compat", sdkHandler.GetTemplateCompat).Methods(http.MethodGet)
+	authed.HandleFunc("/sdk/templates/{id}", sdkHandler.GetTemplate).Methods(http.MethodGet)
+	authed.HandleFunc("/sdk/templates/{id}", sdkHandler.RebuildTemplate).Methods(http.MethodPost)
+	authed.HandleFunc("/sdk/templates/{id}", sdkHandler.DeleteTemplate).Methods(http.MethodDelete)
+	authed.HandleFunc("/sdk/templates/{id}/builds/{buildID}", sdkHandler.StartTemplateBuild).Methods(http.MethodPost)
+	authed.HandleFunc("/sdk/templates/{id}/builds/{buildID}/status", sdkHandler.GetTemplateBuildStatus).Methods(http.MethodGet)
+	authed.HandleFunc("/sdk/templates/{id}/builds/{buildID}/logs", sdkHandler.GetTemplateBuildLogs).Methods(http.MethodGet)
 
 	return r
 }

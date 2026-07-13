@@ -14,7 +14,6 @@ import enNodes from '@/locales/en/nodes.json';
 import enNodeDetail from '@/locales/en/nodeDetail.json';
 import enVersions from '@/locales/en/versions.json';
 import enNetwork from '@/locales/en/network.json';
-import enKeys from '@/locales/en/keys.json';
 import enPlaceholder from '@/locales/en/placeholder.json';
 import enSandboxNew from '@/locales/en/sandboxNew.json';
 import enTheme from '@/locales/en/theme.json';
@@ -37,7 +36,6 @@ import zhNodes from '@/locales/zh/nodes.json';
 import zhNodeDetail from '@/locales/zh/nodeDetail.json';
 import zhVersions from '@/locales/zh/versions.json';
 import zhNetwork from '@/locales/zh/network.json';
-import zhKeys from '@/locales/zh/keys.json';
 import zhPlaceholder from '@/locales/zh/placeholder.json';
 import zhSandboxNew from '@/locales/zh/sandboxNew.json';
 import zhTheme from '@/locales/zh/theme.json';
@@ -62,7 +60,6 @@ export const resources = {
     nodeDetail: enNodeDetail,
     versions: enVersions,
     network: enNetwork,
-    keys: enKeys,
     placeholder: enPlaceholder,
     sandboxNew: enSandboxNew,
     theme: enTheme,
@@ -86,7 +83,6 @@ export const resources = {
     nodeDetail: zhNodeDetail,
     versions: zhVersions,
     network: zhNetwork,
-    keys: zhKeys,
     placeholder: zhPlaceholder,
     sandboxNew: zhSandboxNew,
     theme: zhTheme,

@@ -261,6 +261,7 @@ export const clusterApi = {
   node: (id: string) => ops<ApiNodeView>(`/nodes/${id}`).then(mapNode),
   config: () => ops<{
     apiEndpoint: string;
+    opsApiEndpoint: string;
     rateLimitPerSec: number;
     authEnabled: boolean;
     sandboxDomain: string;
