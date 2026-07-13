@@ -106,9 +106,13 @@ export function SandboxTerminalDialog({
     };
 
     const disposable = terminal.onData((data) => send({ type: 'input', data }));
+    let resizeTimer: number | undefined;
     const resize = () => {
-      fit.fit();
-      send({ type: 'resize', cols: terminal.cols, rows: terminal.rows });
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        fit.fit();
+        send({ type: 'resize', cols: terminal.cols, rows: terminal.rows });
+      }, 100);
     };
     const observer = new ResizeObserver(resize);
     observer.observe(hostRef.current);
@@ -117,6 +121,7 @@ export function SandboxTerminalDialog({
 
     return () => {
       window.clearInterval(keepalive);
+      window.clearTimeout(resizeTimer);
       observer.disconnect();
       disposable.dispose();
       socket.close(1000, 'terminal panel closed');

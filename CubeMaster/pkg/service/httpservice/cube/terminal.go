@@ -19,7 +19,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
-	"google.golang.org/grpc"
 )
 
 const (
@@ -224,7 +223,7 @@ func openTerminalStream(ctx context.Context, hostIP string) (cubebox.CubeboxMgr_
 	if err != nil {
 		return nil, func() {}, err
 	}
-	stream, err := cubebox.NewCubeboxMgrClient(conn.Value()).AttachTerminal(ctx, grpc.WaitForReady(true))
+	stream, err := cubebox.NewCubeboxMgrClient(conn.Value()).AttachTerminal(ctx)
 	if err != nil {
 		conn.Close()
 		return nil, func() {}, err
