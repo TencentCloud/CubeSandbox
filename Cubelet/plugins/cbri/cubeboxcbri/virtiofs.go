@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
+	"encoding/json"
 	"github.com/containerd/containerd/v2/pkg/oci"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -84,7 +84,7 @@ func generateSandboxVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateCo
 	}
 
 	if len(allVirtios) > 0 {
-		vc, _ := jsoniter.Marshal(allVirtios)
+		vc, _ := json.Marshal(allVirtios)
 		specOpts = append(specOpts, oci.WithAnnotations(map[string]string{
 			constants.AnnotationVirtiofs: string(vc),
 		}))
@@ -135,7 +135,7 @@ func generateRestoreVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateCo
 	}
 
 	if len(allMnts) > 0 {
-		vc, _ := jsoniter.Marshal(allMnts)
+		vc, _ := json.Marshal(allMnts)
 		specOpts = append(specOpts, oci.WithAnnotations(map[string]string{
 			constants.AnnotationPropagationExecMounts:       string(vc),
 			constants.AnnotationPropagationContainerUmounts: virtiofs.GenPropagationContainerUmounts(),
@@ -203,7 +203,7 @@ func generateEmptyVirtiofsDevices(ctx context.Context) (map[string]string, error
 	allVirtios = append(allVirtios, rwVirtioCfg)
 
 	log.G(ctx).Debugf("%s: %+v", constants.AnnotationVirtiofs, allVirtios)
-	vc, _ := jsoniter.Marshal(allVirtios)
+	vc, _ := json.Marshal(allVirtios)
 
 	return map[string]string{
 		constants.AnnotationPropagationMounts:          virtiofs.GenPropagationVirtioDirs(),
@@ -289,7 +289,7 @@ func (e *cubeboxInstancePlugin) genVideoAnnotationOpt(ctx context.Context, opts 
 	videomemoryParam := fmt.Sprintf("vfb.videomemorysize=%d", videoMemorySize)
 
 	cmdlineAppend := []string{videoParam, videomemoryParam}
-	cmdlineAppendJSON, err := jsoniter.Marshal(cmdlineAppend)
+	cmdlineAppendJSON, err := json.Marshal(cmdlineAppend)
 	if err != nil {
 		return tmpSpecs, fmt.Errorf("failed to marshal cmdline append: %v", err)
 	}

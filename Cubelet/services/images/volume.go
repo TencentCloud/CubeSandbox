@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"time"
 
+	"encoding/json"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/multimetadb/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -254,7 +254,7 @@ func (l *volumeLocal) CleanUp(ctx context.Context, opts *workflow.CleanContext) 
 }
 
 func (l *volumeLocal) writeVolumeInfo(ctx context.Context, id string, info *createInfo) error {
-	b, _ := jsoniter.ConfigFastest.Marshal(info)
+	b, _ := json.Marshal(info)
 	err := l.db.Set(bucketName, id, b)
 	if err != nil {
 		return err
@@ -271,7 +271,7 @@ func (l *volumeLocal) readVolumeInfo(ctx context.Context, id string) (*createInf
 	_ = l.db.Delete(bucketName, id)
 
 	bf := &createInfo{}
-	err = jsoniter.ConfigFastest.Unmarshal(b, bf)
+	err = json.Unmarshal(b, bf)
 	if err != nil {
 		return nil, err
 	}

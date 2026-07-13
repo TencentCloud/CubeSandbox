@@ -26,7 +26,6 @@ import (
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/typeurl/v2"
-	jsoniter "github.com/json-iterator/go"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -432,7 +431,7 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate sandbox dns annotation failed: %v", err)
 	}
 	if len(dnsServers) > 0 {
-		data, err := jsoniter.Marshal(dnsServers)
+		data, err := json.Marshal(dnsServers)
 		if err != nil {
 			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "marshal dns servers failed: %v", err)
 		}
@@ -687,7 +686,7 @@ func WithCubeFsAnnotation(ctx context.Context,
 			sandBox.VirtiofsMap = make(map[string]*virtiofs.VirtiofsConfig)
 		}
 		sandBox.VirtiofsMap[constants.CubeDefaultNamespace] = virtiofsConfig
-		vc, err := jsoniter.Marshal(virtiofsConfig)
+		vc, err := json.Marshal(virtiofsConfig)
 		if err != nil {
 			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "marshal virtiofs config failed: %v", err)
 		}

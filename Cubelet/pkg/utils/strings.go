@@ -16,17 +16,14 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
-	"io/ioutil"
 	"reflect"
 	"strings"
 	"unsafe"
 
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
-
-var JSONTool = jsoniter.ConfigCompatibleWithStandardLibrary
 
 func String2Slice(s string) []byte {
 	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))
@@ -48,7 +45,7 @@ func InStringSlice(ss []string, str string) bool {
 }
 
 func Decode(body string, req interface{}) error {
-	return JSONTool.Unmarshal([]byte(body), req)
+	return json.Unmarshal([]byte(body), req)
 }
 
 func HashCode(dimension string) uint32 {
@@ -56,7 +53,7 @@ func HashCode(dimension string) uint32 {
 }
 
 func InterfaceToString(obj interface{}) string {
-	body, _ := JSONTool.Marshal(obj)
+	body, _ := json.Marshal(obj)
 	return string(body)
 }
 
@@ -68,7 +65,8 @@ var ErrLimitReached = errors.New("the read limit is reached")
 
 func ReadAtMost(r io.Reader, limit int64) ([]byte, error) {
 	limitedReader := &io.LimitedReader{R: r, N: limit}
-	data, err := ioutil.ReadAll(limitedReader)
+	// data, err := ioutil.ReadAll(limitedReader)
+	data, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return data, err
 	}

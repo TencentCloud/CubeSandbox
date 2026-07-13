@@ -8,8 +8,8 @@ import (
 	"context"
 	"fmt"
 
+	"encoding/json"
 	"github.com/containerd/containerd/v2/client"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/apis/shimapi/shimtypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
@@ -47,7 +47,8 @@ func (csc *cubeShimControl) AddDevices(ctx context.Context, devices []*shimtypes
 			API_UPDATE_ACTION_KEY: API_ACTION_HOT_PLUGIN_ADD,
 		})
 
-		b, err := jsoniter.MarshalToString(toAppendDevices)
+		data, err := json.Marshal(toAppendDevices)
+		b := string(data)
 		if err != nil {
 			logEntry.WithError(err).Errorf("failed to marshal device list")
 			return fmt.Errorf("failed to marshal device list")
@@ -90,7 +91,8 @@ func (csc *cubeShimControl) DelDevices(ctx context.Context, devices []*shimtypes
 			"action":  "HotPlugDevice.del",
 		})
 
-		b, err := jsoniter.MarshalToString(toADeletedDevices)
+		data, err := json.Marshal(toADeletedDevices)
+		b := string(data)
 		if err != nil {
 			logEntry.WithError(err).Errorf("failed to marshal device list")
 			return fmt.Errorf("failed to marshal device list")

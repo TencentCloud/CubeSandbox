@@ -15,8 +15,8 @@ import (
 	"sort"
 	"strings"
 
+	"encoding/json"
 	"github.com/containerd/containerd/v2/pkg/oci"
-	jsoniter "github.com/json-iterator/go"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
@@ -173,7 +173,8 @@ func (cn *CubeboxNetfile) OciContainerNetfileSpec(ctx context.Context, container
 			files = append(files, f)
 		}
 
-		d, err := jsoniter.MarshalToString(files)
+		data, err := json.Marshal(files)
+		d := string(data)
 		if err != nil {
 			log.G(ctx).Errorf("container %s marshal netfile files to string failed:%v", containerName, err)
 			return nil

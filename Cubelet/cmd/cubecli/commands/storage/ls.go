@@ -11,7 +11,7 @@ import (
 	"os"
 	"text/tabwriter"
 
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	"github.com/urfave/cli/v2"
 	"google.golang.org/grpc/status"
 
@@ -70,7 +70,8 @@ var lsdb = &cli.Command{
 
 		if cliCtx.Bool("raw") {
 			for _, sb := range resp.GetSandboxes() {
-				out, _ := jsoniter.MarshalToString(sb)
+				data, _ := json.Marshal(sb)
+				out := string(data)
 				fmt.Printf("%s\t%s\n", sb.GetSandboxID(), out)
 			}
 			return nil
@@ -107,7 +108,8 @@ func printStorageRows(w io.Writer, sandboxes []*cubebox.SandboxStorageInfo, each
 				volume.GetGen(),
 			)
 			if eachRaw {
-				raw, _ := jsoniter.MarshalToString(volume)
+				data, _ := json.Marshal(volume)
+				raw := string(data)
 				row += fmt.Sprintf("\t%s", raw)
 			}
 			if _, err := fmt.Fprintln(tw, row); err != nil {

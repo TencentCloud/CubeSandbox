@@ -7,7 +7,7 @@ package cubebox
 import (
 	"errors"
 
-	jsoniter "github.com/json-iterator/go"
+	"encoding/json"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 
@@ -214,7 +214,7 @@ func (s *Store) Sync(id string) error {
 
 	sbCopy := s.createSafeCopy(sb)
 
-	bs, err := jsoniter.Marshal(sbCopy)
+	bs, err := json.Marshal(sbCopy)
 	if err != nil {
 		return err
 	}
