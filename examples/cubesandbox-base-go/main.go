@@ -16,10 +16,7 @@ import (
 )
 
 func main() {
-	port := os.Getenv("APP_PORT")
-	if port == "" {
-		port = "8080"
-	}
+	port := configuredPort()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { handleRootForPort(w, r, port) })
@@ -27,11 +24,12 @@ func main() {
 
 	fmt.Printf("helloserver listening on :%s (Go %s)\n", port, runtime.Version())
 	server := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  30 * time.Second,
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 	if err := server.ListenAndServe(); err != nil {
 		fmt.Fprintln(os.Stderr, "server error:", err)
@@ -39,12 +37,12 @@ func main() {
 	}
 }
 
-func handleRoot(w http.ResponseWriter, r *http.Request) {
+func configuredPort() string {
 	port := os.Getenv("APP_PORT")
 	if port == "" {
 		port = "8080"
 	}
-	handleRootForPort(w, r, port)
+	return port
 }
 
 func handleRootForPort(w http.ResponseWriter, r *http.Request, port string) {

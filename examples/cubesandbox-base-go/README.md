@@ -111,7 +111,7 @@ python3 test_sandbox.py
 cubesandbox-base-go/
 ├── Dockerfile              # FROM cubesandbox-base, installs Go toolchain, builds & runs the server
 ├── main.go                 # Standard-library HTTP server (net/http), no third-party deps
-├── main_test.go            # Unit tests for handleRoot / handleHealth (go test, no external deps)
+├── main_test.go            # Unit tests for the root / health handlers (go test, no external deps)
 ├── test_sandbox.py         # E2B SDK smoke test: go version/env, file read, HTTP GET :8080
 ├── env.example             # E2B_API_URL / E2B_API_KEY / CUBE_TEMPLATE_ID
 ├── requirements.txt        # e2b + python-dotenv
@@ -134,9 +134,9 @@ cubesandbox-base-go/
 - **`GOPATH` is `/go`** with no pre-created `src` tree. Go modules are the
   default and recommended workflow; if you need legacy `GOPATH` mode, `mkdir -p
   /go/src` in your downstream Dockerfile.
-- `main.go` is a demo, not a production server — it has no TLS, no graceful
-  shutdown, no timeouts, and serves a single route. Swap it for your real
-  application's binary.
+- `main.go` is a demo, not a production server — it has no TLS or graceful
+  shutdown. It includes basic HTTP timeouts, but production services should
+  tune them for their workload. Swap it for your real application's binary.
 - The Go binary is built with `CGO_ENABLED=0` (pure Go). If your project needs
   CGo (e.g. links a C library), drop that flag and ensure the toolchain image
   has a C compiler (`apt-get install -y gcc`).

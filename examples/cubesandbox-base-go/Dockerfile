@@ -18,10 +18,12 @@ FROM ${CUBE_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG GO_VERSION=1.23.4
+ARG GO_SHA256=6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971
 
 # Install the Go toolchain from the official tarball — newer than Ubuntu
 # 22.04's apt golang (1.18) and self-contained under /usr/local/go.
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
+    && echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c - \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz \
     && /usr/local/go/bin/go version

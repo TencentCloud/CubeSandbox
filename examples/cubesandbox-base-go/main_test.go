@@ -12,7 +12,7 @@ func TestHandleRootReturnsOKWithExpectedContent(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	handleRoot(rr, req)
+	handleRootForPort(rr, req, "8080")
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("handleRoot status = %d, want %d", rr.Code, http.StatusOK)
@@ -41,7 +41,7 @@ func TestHandleRootEchoesAppPortFromEnv(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	handleRoot(rr, req)
+	handleRootForPort(rr, req, configuredPort())
 
 	if !strings.Contains(rr.Body.String(), ":9999") {
 		t.Errorf("body should contain the APP_PORT value 9999\nbody:\n%s", rr.Body.String())
@@ -54,7 +54,7 @@ func TestHandleRootDefaultsToPort8080(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	handleRoot(rr, req)
+	handleRootForPort(rr, req, configuredPort())
 
 	if !strings.Contains(rr.Body.String(), ":8080") {
 		t.Errorf("body should contain default port 8080\nbody:\n%s", rr.Body.String())
