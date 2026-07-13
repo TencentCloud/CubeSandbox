@@ -14,8 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 )
 
@@ -183,10 +181,8 @@ func TestAdmitResumeNoOpWhenPolicyDisabled(t *testing.T) {
 	// of failing loudly on the actual behaviour.
 	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{}}}
 	sb := sandboxWithResourceForTest("sb", cubeboxstore.Status{PausedAt: time.Now().UnixNano()}, "1000m", "2Gi", 1, 0, 0)
-	rsp := &cubebox.UpdateCubeSandboxResponse{Ret: &errorcode.Ret{RetCode: errorcode.ErrorCode_Success}}
 
-	require.Nil(t, s.admitResume(context.Background(), sb, rsp))
-	assert.Equal(t, errorcode.ErrorCode_Success, rsp.Ret.RetCode)
+	require.Nil(t, s.admitResume(context.Background(), sb))
 }
 
 // TestResumeDemandUsesBytePrecision locks the fix for the admission/accounting

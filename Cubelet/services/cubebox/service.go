@@ -134,14 +134,14 @@ func init() {
 				return nil, fmt.Errorf("not a workflow engine")
 			}
 			s := &service{
-				engine:             e,
-				cubeboxMgr:         cb,
-				cleaner:            newDeadContainerCleaner(config.deadContainerTTL),
-				eventMonitor:       newEventMonitor(cb),
-				config:             config,
-				events:             ep.(*exchange.Exchange),
-				numaNodeIndex:      0,
-				updateSandboxLocks: utils.NewResourceLocks(),
+				engine:                e,
+				cubeboxMgr:            cb,
+				cleaner:               newDeadContainerCleaner(config.deadContainerTTL),
+				eventMonitor:          newEventMonitor(cb),
+				config:                config,
+				events:                ep.(*exchange.Exchange),
+				numaNodeIndex:         0,
+				sandboxLifecycleLocks: utils.NewResourceLocks(),
 				otherRuntime: &ociRuntime{
 					cubeboxMgr: cb,
 				},
@@ -182,8 +182,8 @@ type service struct {
 	engine       *workflow.Engine
 	events       *exchange.Exchange
 	cubebox.UnimplementedCubeboxMgrServer
-	numaNodeIndex      uint32
-	updateSandboxLocks *utils.ResourceLocks
+	numaNodeIndex         uint32
+	sandboxLifecycleLocks *utils.ResourceLocks
 
 	otherRuntime *ociRuntime
 }
@@ -524,23 +524,16 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	}
 
 	ns := namespaces.Default
-	cb, er := s.cubeboxMgr.cubeboxManger.Get(ctx, req.SandboxID)
-	if er == nil {
-		ns = cb.Namespace
+	sb, getErr := s.cubeboxMgr.cubeboxManger.Get(ctx, req.SandboxID)
+	if getErr == nil {
+		ns = sb.Namespace
 
-		if cb.RequestSource != "" {
+		if sb.RequestSource != "" {
 			ua := getUserAgent(ctx)
 			stepLog = stepLog.WithFields(CubeLog.Fields{"user-agent": ua})
-			if ua != cb.RequestSource {
-				log.G(ctx).Warnf("Illegal deletion: user agent %q is not equal to the user agent in cubebox %q", ua, cb.RequestSource)
+			if ua != sb.RequestSource {
+				log.G(ctx).Warnf("Illegal deletion: user agent %q is not equal to the user agent in cubebox %q", ua, sb.RequestSource)
 			}
-		}
-
-		if cb.UserMarkDeletedTime == nil {
-			now := time.Now()
-			cb.UserMarkDeletedTime = &now
-			cb.DeleteRequestID = req.RequestID
-			s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
 		}
 	}
 	ctx = namespaces.WithNamespace(ctx, ns)
@@ -556,6 +549,15 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 			ctx = constants.WithCollectMemory(ctx)
 		}
 		if set := req.GetAnnotations()["cube.debug.cleanup"]; set == "true" {
+			// Preserve the existing debug-cleanup contract: it marks the sandbox
+			// before the early return and is not subject to the normal destroy
+			// deadline or lifecycle lock.
+			if getErr == nil && sb.UserMarkDeletedTime == nil {
+				now := time.Now()
+				sb.UserMarkDeletedTime = &now
+				sb.DeleteRequestID = req.RequestID
+				s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
+			}
 			cleanOpts := &workflow.CleanContext{
 				BaseWorkflowInfo: workflow.BaseWorkflowInfo{
 					SandboxID: req.SandboxID,
@@ -568,20 +570,77 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		}
 	}
 
-	ctx = log.WithLogger(ctx, stepLog)
 	ctx, cancel := context.WithTimeout(ctx, s.config.destroyDeadline)
 	defer cancel()
-	if sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, req.SandboxID); err == nil {
-		runtimeType := s.cubeboxMgr.config.DefaultRuntimeName
-		if sb.OciRuntime != nil {
-			runtimeType = sb.OciRuntime.Type
+
+	// Preserve the existing destroy path's fresh state read after its deadline
+	// is established. Running deletes must not use the object observed before
+	// annotation handling and timeout setup.
+	destroyCtx := ctx
+	sb, ctx, getErr = s.loadDestroySandboxRuntime(destroyCtx, req.SandboxID)
+	ctx = log.WithLogger(ctx, stepLog)
+
+	if getErr == nil && constants.IsCubeRuntime(ctx) {
+		// Decide whether a paused preflight is needed only after acquiring the
+		// lifecycle lock. Otherwise a RUNNING sandbox can pause between the
+		// initial read and engine.Destroy, bypassing the paused-delete guard.
+		lockDeadline, ok := deleteLifecycleLockDeadline(ctx, time.Now())
+		if !ok {
+			// This is deadline-budget exhaustion before any Resume attempt. It
+			// deliberately uses TaskResumeFailed so CubeAPI returns the same
+			// retryable 503/Retry-After: 5 contract as other paused-delete
+			// budget and resume-preparation failures.
+			rsp.Ret.RetMsg = "cannot start delete: insufficient time remains for the Cubelet RPC response; retry DELETE after 5 seconds"
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
+			return rsp, nil
 		}
-		ctx = constants.WithRuntimeType(ctx, runtimeType)
+		lockCtx, lockCancel := context.WithDeadline(ctx, lockDeadline)
+		defer lockCancel()
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, req.SandboxID)
+		if lockErr != nil {
+			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry DELETE after 2 seconds"
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+		defer unlock()
+
+		// The state may have changed while waiting for the lifecycle lock. Reload
+		// it under the lock before deciding whether a paused preflight is needed.
+		sb, ctx, getErr = s.loadDestroySandboxRuntime(destroyCtx, req.SandboxID)
+		ctx = log.WithLogger(ctx, stepLog)
+
+		if getErr == nil && constants.IsCubeRuntime(ctx) {
+			autoResumed, budget, resumeRet := s.resumePausedSandboxForDestroy(ctx, sb)
+			if resumeRet != nil {
+				rsp.Ret.RetMsg = resumeRet.RetMsg
+				rsp.Ret.RetCode = resumeRet.RetCode
+				return rsp, nil
+			}
+			if autoResumed {
+				// Do not let a successful wake-up consume the response window needed
+				// for the Cubelet RPC to return to CubeMaster.
+				cleanupCtx, cleanupCancel := context.WithDeadline(ctx, budget.cleanupDeadline())
+				defer cleanupCancel()
+				ctx = cleanupCtx
+			}
+		}
+	}
+
+	if getErr == nil {
+		// Do not mark the sandbox as deleted until the paused preflight has
+		// reached RUNNING. A rejected or failed auto-resume returns above; direct
+		// running deletes retain the existing marker-before-destroy behavior.
+		if sb.UserMarkDeletedTime == nil {
+			now := time.Now()
+			sb.UserMarkDeletedTime = &now
+			sb.DeleteRequestID = req.RequestID
+			s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
+		}
 
 		if !constants.IsCubeRuntime(ctx) {
-			err = s.otherRuntime.cubeboxMgr.Destroy(ctx, destroyInfo)
-			if err != nil {
-				rsp.Ret.RetMsg = err.Error()
+			destroyErr := s.otherRuntime.cubeboxMgr.Destroy(ctx, destroyInfo)
+			if destroyErr != nil {
+				rsp.Ret.RetMsg = destroyErr.Error()
 				rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 			} else {
 				rsp.Ret.RetMsg = "success"
@@ -595,6 +654,21 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	rsp.Ret.RetMsg = err.Message()
 	rsp.Ret.RetCode = err.Code()
 	return rsp, nil
+}
+
+func (s *service) loadDestroySandboxRuntime(ctx context.Context, sandboxID string) (*cubeboxstore.CubeBox, context.Context, error) {
+	ns := namespaces.Default
+	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, sandboxID)
+	if err != nil {
+		return nil, namespaces.WithNamespace(ctx, ns), err
+	}
+
+	ctx = namespaces.WithNamespace(ctx, sb.Namespace)
+	runtimeType := s.cubeboxMgr.config.DefaultRuntimeName
+	if sb.OciRuntime != nil {
+		runtimeType = sb.OciRuntime.Type
+	}
+	return sb, constants.WithRuntimeType(ctx, runtimeType), nil
 }
 
 func dealDestroyInnerMetric(rsp *cubebox.DestroyCubeSandboxResponse, destroyInfo *workflow.DestroyContext) {

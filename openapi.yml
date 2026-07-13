@@ -177,8 +177,29 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '408':
+          description: The existing standard API request timeout expired before the synchronous delete completed
+        '409':
+          description: Paused sandbox cannot be admitted for internal resume because node capacity or resource metadata is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '500':
           description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Sandbox is pausing or another lifecycle operation is in progress (Retry-After 2); the Cubelet RPC has too little remaining time or its internal resume could not be completed (Retry-After 5)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                format: int64
+                minimum: 0
+              description: Seconds a client should wait before retrying DELETE
           content:
             application/json:
               schema:

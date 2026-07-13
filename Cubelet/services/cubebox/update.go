@@ -74,7 +74,7 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 	}
 	rt.CalleeAction = action
 
-	unlock := s.updateSandboxLocks.Lock(req.SandboxID)
+	unlock := s.sandboxLifecycleLocks.Lock(req.SandboxID)
 	defer unlock()
 	defer recov.HandleCrash(func(panicError interface{}) {
 		log.G(ctx).Fatalf("Update panic info:%s, stack:%s", panicError, string(debug.Stack()))
@@ -105,16 +105,20 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 	}
 }
 
-func addPauseResumeMetaData(ctx context.Context, req *cubebox.UpdateCubeSandboxRequest) context.Context {
+func addSandboxTaskMetaData(ctx context.Context, sandboxID string) context.Context {
 	md, ok := ttrpc.GetMetadata(ctx)
 	if !ok {
 		md = ttrpc.MD{}
 	}
-	md.Append("pod_scope", req.SandboxID)
+	md.Append("pod_scope", sandboxID)
 	ctx = ttrpc.WithMetadata(ctx, md)
 	tmpmd, _ := ttrpc.GetMetadata(ctx)
 	log.G(ctx).Debugf("metadata:%+v", tmpmd)
 	return ctx
+}
+
+func addPauseResumeMetaData(ctx context.Context, req *cubebox.UpdateCubeSandboxRequest) context.Context {
+	return addSandboxTaskMetaData(ctx, req.SandboxID)
 }
 
 func (s *service) UpdateWithPause(ctx context.Context, req *cubebox.UpdateCubeSandboxRequest, sb *cubeboxstore.CubeBox) (*cubebox.UpdateCubeSandboxResponse, error) {
@@ -223,43 +227,118 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 		return rsp, nil
 	}
 
-	if rejected := s.admitResume(ctx, sb, rsp); rejected != nil {
-		return rejected, nil
+	log.G(ctx).Infof("UpdateWithResume:%s", utils.InterfaceToString(req))
+	now := time.Now()
+	result := s.resumeLocked(ctx, sb, resumeOptions{
+		taskDeadline:      now.Add(taskResumeTimeout),
+		reconcileDeadline: now.Add(taskResumeTimeout + reconcileStatusTimeout),
+		persist:           true,
+	})
+	// Preserve the explicit Resume contract: an RPC error remains visible to
+	// its caller even when reconciliation has already converged the local state
+	// to RUNNING. Delete has a different terminal goal and handles that result
+	// separately in resumePausedSandboxForDestroy.
+	rsp.Ret = result.ret
+	return rsp, nil
+}
+
+// resumeTask is the narrow part of containerd.Task needed by the resume
+// transition. Keeping the core on this interface makes its timeout and
+// reconciliation rules deterministic to test without a live containerd task.
+type resumeTask interface {
+	Resume(context.Context) error
+	Status(context.Context) (containerd.Status, error)
+}
+
+type resumeOptions struct {
+	taskDeadline      time.Time
+	reconcileDeadline time.Time
+	persist           bool
+}
+
+type resumeResult struct {
+	ret               *errorcode.Ret
+	running           bool
+	reconciledRunning bool
+}
+
+// resumeLocked performs the pause -> running transition while the caller owns
+// the sandbox lifecycle lock. It does not validate the current state because
+// explicit Resume and Destroy intentionally apply different state policies.
+func (s *service) resumeLocked(ctx context.Context, sb *cubeboxstore.CubeBox, opts resumeOptions) resumeResult {
+	// The caller's runtime resume budget covers task loading and the resume RPC.
+	// Delete persists the converged state with its normal delete marker after
+	// this function returns, so it avoids a second synchronous store write in
+	// the bounded wake-up phase.
+	preflightCtx, preflightCancel := context.WithDeadline(ctx, opts.taskDeadline)
+	defer preflightCancel()
+
+	if rejected := s.admitResume(preflightCtx, sb); rejected != nil {
+		return resumeResult{ret: rejected}
+	}
+	if err := preflightCtx.Err(); err != nil {
+		return resumeResult{ret: &errorcode.Ret{
+			RetCode: errorcode.ErrorCode_TaskResumeFailed,
+			RetMsg:  err.Error(),
+		}}
 	}
 
 	ns := sb.Namespace
 	if ns == "" {
 		ns = namespaces.Default
 	}
-	ctx = namespaces.WithNamespace(ctx, ns)
-	task, err := sb.FirstContainer().Container.Task(ctx, nil)
-	if err != nil {
-		rsp.Ret.RetMsg = err.Error()
-		rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
-		return rsp, nil
+	syncCtx := namespaces.WithNamespace(ctx, ns)
+	preflightCtx = namespaces.WithNamespace(preflightCtx, ns)
+	firstContainer := sb.FirstContainer()
+	if firstContainer == nil || firstContainer.Container == nil {
+		return resumeResult{ret: &errorcode.Ret{
+			RetCode: errorcode.ErrorCode_TaskResumeFailed,
+			RetMsg:  "failed to load task for paused sandbox",
+		}}
 	}
-	log.G(ctx).Infof("UpdateWithResume:%s", utils.InterfaceToString(req))
-	ctx = addPauseResumeMetaData(ctx, req)
+	task, err := firstContainer.Container.Task(preflightCtx, nil)
+	if err != nil {
+		return resumeResult{ret: &errorcode.Ret{
+			RetCode: errorcode.ErrorCode_TaskResumeFailed,
+			RetMsg:  err.Error(),
+		}}
+	}
 
-	// 保证无论是否 panic，状态都会落盘
-	defer func() {
-		s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID)
-	}()
+	preflightCtx = addSandboxTaskMetaData(preflightCtx, sb.ID)
+	if opts.persist {
+		// Explicit Resume persists both an ordinary successful transition and a
+		// reconciliation that discovers the VM became RUNNING despite an RPC
+		// error. DELETE persists its converged RUNNING state immediately after
+		// this function returns, before it writes the delete marker.
+		defer s.cubeboxMgr.cubeboxManger.SyncByID(syncCtx, sb.ID)
+	}
 	defer utils.Recover()
 
-	resumeCtx, resumeCancel := context.WithTimeout(ctx, taskResumeTimeout)
+	return resumeTaskLocked(preflightCtx, sb, task, opts)
+}
+
+func resumeTaskLocked(ctx context.Context, sb *cubeboxstore.CubeBox, task resumeTask, opts resumeOptions) resumeResult {
+	resumeCtx, resumeCancel := context.WithDeadline(ctx, opts.taskDeadline)
 	defer resumeCancel()
 	if err := task.Resume(resumeCtx); err != nil {
-		// Same as pause: resume may time out midway while cubeshim has already
-		// brought the VM back to RUNNING. Query the real status once and
-		// converge to the truth, so the state never stays stuck at PAUSED.
-		reconcileStatusAfterResumeError(ctx, sb, task, err)
-		rsp.Ret.RetMsg = err.Error()
-		rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
-		return rsp, nil
+		// A ttrpc error can race a completed resume. Reconcile against the shim
+		// within the caller-supplied budget before deciding that deletion must
+		// stop. Explicit Resume still returns this original RPC error.
+		reconciledRunning := reconcileStatusAfterResumeError(ctx, sb, task, err, opts.reconcileDeadline)
+		return resumeResult{
+			ret: &errorcode.Ret{
+				RetCode: errorcode.ErrorCode_TaskResumeFailed,
+				RetMsg:  err.Error(),
+			},
+			running:           reconciledRunning,
+			reconciledRunning: reconciledRunning,
+		}
 	}
 	convergeResumeStateAfterOpaqueRestore(sb, time.Now().UTC())
-	return rsp, nil
+	return resumeResult{
+		ret:     &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
+		running: true,
+	}
 }
 
 // admitResume enforces the resume side of the release-paused-resources policy.
@@ -271,8 +350,8 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 // here -- rather than overcommitting host RAM and risking an OOM -- is the
 // explicit trade-off the policy makes.
 //
-// It returns a non-nil response (already populated) when resume must be
-// rejected, or nil to proceed. Under a release ratio r the still-paused sandbox
+// It returns a non-nil business error when resume must be rejected, or nil to
+// proceed. Under a release ratio r the still-paused sandbox
 // already contributes (1-r) of its quota to aggregateAllocated, so resuming it
 // (a full reservation) only adds the remaining r fraction; we check that
 // incremental demand against the node quota to model the post-resume state.
@@ -286,8 +365,7 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 func (s *service) admitResume(
 	ctx context.Context,
 	sb *cubeboxstore.CubeBox,
-	rsp *cubebox.UpdateCubeSandboxResponse,
-) *cubebox.UpdateCubeSandboxResponse {
+) *errorcode.Ret {
 	// GetHostConf always returns a non-nil config (it falls back to defaults).
 	hostConf := config.GetHostConf()
 	releaseRatio := clampRatio(hostConf.Quota.PausedResourceReleaseRatio)
@@ -300,10 +378,12 @@ func (s *service) admitResume(
 		// Policy active but we cannot size this sandbox's demand. Fail closed
 		// (reject) rather than silently admit and risk overcommit; this also
 		// surfaces any sandbox missing resource metadata instead of hiding it.
-		rsp.Ret.RetMsg = "resume rejected by paused_resource_release_ratio policy: missing resource metadata"
-		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
+		ret := &errorcode.Ret{
+			RetCode: errorcode.ErrorCode_Conflict,
+			RetMsg:  "resume rejected by paused_resource_release_ratio policy: missing resource metadata",
+		}
 		log.G(ctx).Warnf("admitResume reject sandbox=%s: missing resource metadata under paused_resource_release_ratio policy", sb.ID)
-		return rsp
+		return ret
 	}
 
 	// Recomputed live (no cache) on purpose: admission must reflect the current
@@ -325,14 +405,16 @@ func (s *service) admitResume(
 		needCPUMilli:  needCPU,
 		cpuQuotaMilli: int64(hostConf.Quota.Cpu),
 	}); reason != "" {
-		rsp.Ret.RetMsg = "resume rejected by paused_resource_release_ratio policy: " + reason
+		ret := &errorcode.Ret{
+			RetCode: errorcode.ErrorCode_Conflict,
+			RetMsg:  "resume rejected by paused_resource_release_ratio policy: " + reason,
+		}
 		// Conflict (not TaskResumeFailed) so the capacity rejection surfaces as
 		// HTTP 409 at the API edge: this is an expected, retriable state (free
 		// up capacity and retry), not a backend failure that should read as a
 		// 500. The descriptive RetMsg is carried through to the client.
-		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
-		log.G(ctx).Warnf("admitResume reject sandbox=%s: %s", sb.ID, rsp.Ret.RetMsg)
-		return rsp
+		log.G(ctx).Warnf("admitResume reject sandbox=%s: %s", sb.ID, ret.RetMsg)
+		return ret
 	}
 
 	return nil
@@ -521,19 +603,36 @@ func convergeResumeStateAfterOpaqueRestore(sb *cubeboxstore.CubeBox, attachedAt 
 		c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 			status.PausedAt = 0
 			status.PausingAt = 0
+			// A paused task restored after Cubelet restart may have only
+			// PausedAt persisted. Once the shim proves it resumed, restore the
+			// running marker so normal destroy does not treat it as terminated.
+			if status.StartedAt == 0 {
+				status.StartedAt = attachedAt.UnixNano()
+			}
 			return status, nil
 		})
 	}
 }
 
-// reconcileStatusAfterResumeError is the dual of the pause case.
+// reconcileStatusAfterResumeError is the dual of the pause case. It returns
+// true only when the shim proves the VM is RUNNING and local state has been
+// converged accordingly. The fresh query context is bounded by deadline so a
+// caller with a short operation budget cannot spend extra time reconciling.
 func reconcileStatusAfterResumeError(
 	parentCtx context.Context,
 	sb *cubeboxstore.CubeBox,
-	task containerd.Task,
+	task resumeTask,
 	resumeErr error,
-) {
-	queryCtx, cancel := context.WithTimeout(context.Background(), reconcileStatusTimeout)
+	deadline time.Time,
+) bool {
+	queryTimeout, ok := boundedReconcileTimeout(deadline)
+	if !ok {
+		log.G(parentCtx).Errorf(
+			"reconcileStatusAfterResumeError: deadline exhausted sandbox=%s resumeErr=%v",
+			sb.ID, resumeErr)
+		return false
+	}
+	queryCtx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 	defer cancel()
 	if ns, ok := namespaces.Namespace(parentCtx); ok && ns != "" {
 		queryCtx = namespaces.WithNamespace(queryCtx, ns)
@@ -544,7 +643,7 @@ func reconcileStatusAfterResumeError(
 		log.G(parentCtx).Errorf(
 			"reconcileStatusAfterResumeError: task.Status failed sandbox=%s resumeErr=%v statusErr=%v",
 			sb.ID, resumeErr, qerr)
-		return
+		return false
 	}
 
 	switch st.Status {
@@ -556,6 +655,7 @@ func reconcileStatusAfterResumeError(
 			"reconcileStatusAfterResumeError: shim reports RUNNING despite resumeErr=%v, converging sandbox=%s",
 			resumeErr, sb.ID)
 		convergeResumeStateAfterOpaqueRestore(sb, time.Now().UTC())
+		return true
 	case containerd.Paused:
 		// Really not resumed, the state stays PAUSED and needs no rewrite (the
 		// success path has not run yet).
@@ -567,6 +667,18 @@ func reconcileStatusAfterResumeError(
 			"reconcileStatusAfterResumeError: shim reports %s, leaving status untouched sandbox=%s",
 			st.Status, sb.ID)
 	}
+	return false
+}
+
+func boundedReconcileTimeout(deadline time.Time) (time.Duration, bool) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, false
+	}
+	if remaining < reconcileStatusTimeout {
+		return remaining, true
+	}
+	return reconcileStatusTimeout, true
 }
 
 // reconcileStuckPausingSandbox is the startup/background fallback -- the third

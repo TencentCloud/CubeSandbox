@@ -100,8 +100,7 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 		}
 		if req.Sync {
 			if err := callCubelet(ctx, t.CallEp, destroyReq); err != nil {
-				rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
-				rsp.Ret.RetMsg = err.Error()
+				setSyncDestroyFailure(rsp, err)
 			}
 			return
 		}
@@ -115,6 +114,30 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 		rsp.Ret.RetMsg = err.Error()
 	}
 	return
+}
+
+func setSyncDestroyFailure(rsp *types.DeleteCubeSandboxRes, err error) {
+	if status, ok := ret.FromError(err); ok && isDeleteAutoResumeBusinessCode(status.Code()) {
+		rsp.Ret.RetCode = int(status.Code())
+		rsp.Ret.RetMsg = status.Message()
+		return
+	}
+
+	// Keep the existing sync-delete contract for every other failure, including
+	// typed connection errors constructed by the Cubelet client wrapper.
+	rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
+	rsp.Ret.RetMsg = err.Error()
+}
+
+func isDeleteAutoResumeBusinessCode(code errorcode.ErrorCode) bool {
+	switch code {
+	case errorcode.ErrorCode_Conflict,
+		errorcode.MasterCode(cubeleterrorcode.ErrorCode_TaskStateInvalid),
+		errorcode.MasterCode(cubeleterrorcode.ErrorCode_TaskResumeFailed):
+		return true
+	default:
+		return false
+	}
 }
 
 func dealScfSandbox(ctx context.Context, req *types.DeleteCubeSandboxReq, t *task.Task) bool {

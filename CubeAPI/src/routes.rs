@@ -370,8 +370,14 @@ mod tests {
         logging::{arc, noop::NoopLogger},
         state::AppState,
     };
-    use axum::http::StatusCode;
+    use axum::{
+        extract::Json,
+        http::{header::RETRY_AFTER, StatusCode},
+        routing::delete,
+        Router,
+    };
     use axum_test::TestServer;
+    use serde_json::Value;
 
     async fn test_server() -> TestServer {
         let mut config = ServerConfig::default();
@@ -379,6 +385,80 @@ mod tests {
 
         let state = AppState::new(config, arc(NoopLogger)).await;
         TestServer::new(build_router(state)).expect("router should build")
+    }
+
+    #[tokio::test]
+    async fn delete_paused_sandbox_maps_business_errors_from_cubemaster() {
+        async fn delete_handler(Json(request): Json<Value>) -> Json<Value> {
+            let sandbox_id = request["sandbox_id"].as_str().unwrap_or_default();
+            let (ret_code, ret_msg) = match sandbox_id {
+                "sb-pausing" => (130490, "sandbox is pausing; retry DELETE after 2 seconds"),
+                "sb-resume-failed" => (
+                    130589,
+                    "failed to resume paused sandbox before delete: shim timeout; retry DELETE after 5 seconds",
+                ),
+                "sb-capacity" => (
+                    130409,
+                    "resume rejected by paused_resource_release_ratio policy: node is full",
+                ),
+                _ => panic!("unexpected sandbox id: {sandbox_id}"),
+            };
+
+            Json(serde_json::json!({
+                "requestID": "delete-request",
+                "sandbox_id": sandbox_id,
+                "ret": { "ret_code": ret_code, "ret_msg": ret_msg },
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/cube/sandbox", delete(delete_handler)),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = format!("http://{address}");
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        for (sandbox_id, retry_after, message) in [
+            (
+                "sb-pausing",
+                "2",
+                "sandbox is pausing; retry DELETE after 2 seconds",
+            ),
+            (
+                "sb-resume-failed",
+                "5",
+                "failed to resume paused sandbox before delete: shim timeout; retry DELETE after 5 seconds",
+            ),
+        ] {
+            let response = server.delete(&format!("/sandboxes/{sandbox_id}")).await;
+
+            assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.header(RETRY_AFTER), retry_after);
+            let error: crate::models::ApiError = response.json();
+            assert_eq!(error.code, 503);
+            assert_eq!(error.message, message);
+        }
+
+        let response = server.delete("/sandboxes/sb-capacity").await;
+
+        assert_eq!(response.status_code(), StatusCode::CONFLICT);
+        let error: crate::models::ApiError = response.json();
+        assert_eq!(error.code, 409);
+        assert_eq!(
+            error.message,
+            "resume rejected by paused_resource_release_ratio policy: node is full"
+        );
     }
 
     #[tokio::test]
