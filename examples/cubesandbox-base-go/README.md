@@ -129,8 +129,9 @@ cubesandbox-base-go/
 
 ## Known limitations
 
-- The image ships a **single Go version** (default `1.23.4`). Override with
-  `--build-arg GO_VERSION=<x.y.z>` for a different release.
+- The image ships a **single Go version** (default `1.23.4`). To use a different
+  release, override both `GO_VERSION` and `GO_SHA256` with the matching checksum
+  published on [go.dev/dl](https://go.dev/dl/).
 - **`GOPATH` is `/go`** with no pre-created `src` tree. Go modules are the
   default and recommended workflow; if you need legacy `GOPATH` mode, `mkdir -p
   /go/src` in your downstream Dockerfile.
