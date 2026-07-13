@@ -79,7 +79,7 @@ var Fix = &cli.Command{
 
 		for _, data := range nfsImageMap {
 			img := &imagestore.Image{}
-			err = json.Unmarshal(data, &img)
+			err = json.Unmarshal(data, img)
 			if err != nil {
 				fmt.Printf("unmarshal nfs image failed %s\n", err.Error())
 				continue
