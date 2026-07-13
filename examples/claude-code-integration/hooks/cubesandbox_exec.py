@@ -143,11 +143,15 @@ def _load_state(session_id: str) -> Dict[str, Any]:
     path = _state_path(session_id)
     try:
         _ensure_state_dir()
-        file_stat = path.lstat()
-        if not stat.S_ISREG(file_stat.st_mode):
-            return {}
-        os.chmod(path, 0o600)
-        state = json.loads(path.read_text(encoding="utf-8"))
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as state_file:
+            if not stat.S_ISREG(os.fstat(state_file.fileno()).st_mode):
+                return {}
+            os.fchmod(state_file.fileno(), 0o600)
+            state = json.load(state_file)
     except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError):
         return {}
     return state if isinstance(state, dict) else {}
@@ -229,6 +233,13 @@ def _try_cached_sandbox(session_id: str) -> Optional[Any]:
     except SandboxNotFoundError:
         return None
     except CubeSandboxError as exc:
+        print(
+            f"[cubesandbox-exec] warning: reconnect failed ({exc}); "
+            "creating a new sandbox",
+            file=sys.stderr,
+        )
+        return None
+    except Exception as exc:
         print(
             f"[cubesandbox-exec] warning: reconnect failed ({exc}); "
             "creating a new sandbox",

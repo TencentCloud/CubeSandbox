@@ -72,6 +72,16 @@ def test_state_write_is_atomic(executor, monkeypatch):
     assert list(executor.STATE_DIR.glob("*.tmp")) == []
 
 
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW unavailable")
+def test_state_read_rejects_symlink(executor, tmp_path):
+    executor._ensure_state_dir()
+    target = tmp_path / "attacker-state.json"
+    target.write_text('{"sandbox_id":"attacker"}', encoding="utf-8")
+    executor._state_path("session").symlink_to(target)
+
+    assert executor._load_state("session") == {}
+
+
 def test_cached_sandbox_connect_refreshes_ttl(executor):
     executor._save_state(
         "session",
@@ -109,6 +119,14 @@ def test_expired_cache_is_recreated(executor):
 
     assert executor.get_sandbox("session", None) is created
     assert executor._load_state("session")["sandbox_id"] == "sb-fresh"
+
+
+def test_unexpected_reconnect_error_falls_back(executor, capsys):
+    executor._save_state("session", {"sandbox_id": "sb-cached"})
+    executor.Sandbox.connect.side_effect = ConnectionError("network down")
+
+    assert executor._try_cached_sandbox("session") is None
+    assert "creating a new sandbox" in capsys.readouterr().err
 
 
 def test_mount_is_read_only_and_api_rejection_falls_back(executor, capsys):

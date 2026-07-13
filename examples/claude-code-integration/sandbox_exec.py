@@ -14,6 +14,7 @@ Usage from Claude Code:
 import argparse
 import os
 import shlex
+import stat
 import sys
 from pathlib import Path
 import tempfile
@@ -32,9 +33,30 @@ SESSION_FILE = Path(tempfile.gettempdir()) / f"cubesandbox_claude_session_{os.ge
 
 
 def _write_session(sandbox_id):
-    fd = os.open(SESSION_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(SESSION_FILE, flags, 0o600)
     with os.fdopen(fd, "w") as session_file:
+        if not stat.S_ISREG(os.fstat(session_file.fileno()).st_mode):
+            raise OSError(f"unsafe session file: {SESSION_FILE}")
+        os.fchmod(session_file.fileno(), 0o600)
         session_file.write(sandbox_id)
+
+
+def _read_session():
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(SESSION_FILE, flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as session_file:
+            if not stat.S_ISREG(os.fstat(session_file.fileno()).st_mode):
+                return None
+            return session_file.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+
 
 # In-process cache: keep one sandbox alive for reuse, avoid cold starts
 _sandbox = None
@@ -50,8 +72,8 @@ def _get_sandbox(timeout=300):
     global _sandbox
     if _sandbox is None:
         # Try to reconnect to a session from a previous --keep-alive invocation
-        if SESSION_FILE.exists():
-            sandbox_id = SESSION_FILE.read_text().strip()
+        sandbox_id = _read_session()
+        if sandbox_id:
             try:
                 _sandbox = Sandbox.connect(sandbox_id)
                 _sandbox.set_timeout(timeout)  # refresh TTL
@@ -76,7 +98,11 @@ def exec_code(code, pip_packages=None, timeout=120):
     sandbox = _get_sandbox(timeout + 60)
 
     if pip_packages:
-        r = _run(sandbox, f"pip install {' '.join(shlex.quote(p) for p in pip_packages)}", timeout=60)
+        r = _run(
+            sandbox,
+            f"pip install {' '.join(shlex.quote(p) for p in pip_packages)}",
+            timeout=60,
+        )
         if r.exit_code != 0:
             return f"[pip error] {r.stderr}"
 
@@ -132,9 +158,12 @@ def main():
     parser.add_argument("--cmd", help="Shell command to execute")
     parser.add_argument("--pip", nargs="+", help="Pip packages to install first")
     parser.add_argument("--timeout", type=int, default=120, help="Execution timeout")
-    parser.add_argument("--keep-alive", action="store_true",
-                        help="Keep sandbox alive after execution; next invocation "
-                             "reconnects to it via session file")
+    parser.add_argument(
+        "--keep-alive",
+        action="store_true",
+        help="Keep sandbox alive after execution; next invocation "
+        "reconnects to it via session file",
+    )
     args = parser.parse_args()
 
     if not TEMPLATE_ID:

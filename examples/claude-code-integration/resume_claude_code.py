@@ -23,24 +23,22 @@ def main():
         description="在 CubeSandbox 中暂停/恢复 Claude Code"
     )
     parser.add_argument(
-        "prompt", nargs="?", default="Create a file hello.txt with 'Hello from Claude Code!' inside.",
-        help="交给 Claude Code 执行的任务提示"
+        "prompt",
+        nargs="?",
+        default="Create a file hello.txt with 'Hello from Claude Code!' inside.",
+        help="交给 Claude Code 执行的任务提示",
+    )
+    parser.add_argument("--resume-from", default=None, help="从已有的沙箱 ID 恢复会话")
+    parser.add_argument(
+        "--template-id",
+        default=os.getenv("CUBE_TEMPLATE_ID"),
+        help="CubeSandbox 模板 ID",
     )
     parser.add_argument(
-        "--resume-from", default=None,
-        help="从已有的沙箱 ID 恢复会话"
+        "--timeout", type=int, default=600, help="沙箱执行超时时间（秒）"
     )
     parser.add_argument(
-        "--template-id", default=os.getenv("CUBE_TEMPLATE_ID"),
-        help="CubeSandbox 模板 ID"
-    )
-    parser.add_argument(
-        "--timeout", type=int, default=600,
-        help="沙箱执行超时时间（秒）"
-    )
-    parser.add_argument(
-        "--no-cleanup", action="store_true",
-        help="保持沙箱存活而不暂停它"
+        "--no-cleanup", action="store_true", help="保持沙箱存活而不暂停它"
     )
     args = parser.parse_args()
 
@@ -75,17 +73,20 @@ def main():
     try:
         # ── 运行 Claude Code ───────────────────────────────────────
         cmd = claude_command(
-            args.prompt, workdir,
-            env_vars=claude_env, approve=True, user=CC_USER
+            args.prompt, workdir, env_vars=claude_env, approve=True, user=CC_USER
         )
         print(f"\n正在运行 Claude Code（以 {CC_USER} 身份）...")
-        result = run_command(sandbox, cmd, user=CC_USER, timeout=max(30, args.timeout - 60))
+        result = run_command(
+            sandbox, cmd, user=CC_USER, timeout=max(30, args.timeout - 60)
+        )
 
         if result.exit_code == 0:
             print("\n" + "=" * 60)
             print(result.stdout)
         else:
-            raise RuntimeError(f"Claude Code 退出码 {result.exit_code}: {result.stderr}")
+            raise RuntimeError(
+                f"Claude Code 退出码 {result.exit_code}: {result.stderr}"
+            )
 
         # ── 暂停沙箱 ──────────────────────────────────────────────
         if not args.no_cleanup:
@@ -96,7 +97,12 @@ def main():
         else:
             print(f"\n沙箱保持运行: {sandbox_id}")
 
-    except (Exception, KeyboardInterrupt) as e:
+    except KeyboardInterrupt:
+        print("已中断。")
+        if not args.no_cleanup and sandbox is not None:
+            sandbox.kill()
+        raise
+    except Exception as e:
         print(f"错误: {e}")
         if not args.no_cleanup and sandbox is not None:
             sandbox.kill()

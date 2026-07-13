@@ -113,7 +113,17 @@ def test_all_tool_input_fields_are_preserved():
 
 
 @pytest.mark.parametrize(
-    "timeout", [0, -1, True, "1000", float("nan"), float("inf"), 10**1000]
+    "timeout",
+    [
+        0,
+        -1,
+        True,
+        "1000",
+        float("nan"),
+        float("inf"),
+        3_600_001,
+        10**1000,
+    ],
 )
 def test_only_positive_finite_numeric_timeout_is_forwarded(timeout):
     argv = shlex.split(
@@ -125,6 +135,18 @@ def test_only_positive_finite_numeric_timeout_is_forwarded(timeout):
         )["command"]
     )
     assert not any(argument.startswith("--timeout=") for argument in argv)
+
+
+def test_maximum_timeout_is_forwarded():
+    argv = shlex.split(
+        _updated_input(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo ok", "timeout": 3_600_000},
+            }
+        )["command"]
+    )
+    assert "--timeout=3600.000" in argv
 
 
 def test_empty_command_is_still_rewritten():

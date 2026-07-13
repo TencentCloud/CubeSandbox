@@ -1,4 +1,6 @@
 """Tests for sandbox_exec.py — session-based cross-process sandbox reuse."""
+
+import os
 from unittest.mock import Mock, patch
 
 import pytest
@@ -16,6 +18,7 @@ def temp_session(monkeypatch, tmp_path):
 
 
 # ── _get_sandbox ───────────────────────────────────────────────────────
+
 
 class TestGetSandbox:
     """Tests for _get_sandbox() — cross-process session reuse via file."""
@@ -71,8 +74,20 @@ class TestGetSandbox:
             sandbox_exec._get_sandbox()
         assert temp_session.read_text() == "sb-123"
 
+    @pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW unavailable")
+    def test_session_helpers_reject_symlink(self, temp_session, tmp_path):
+        target = tmp_path / "attacker-session"
+        target.write_text("sb-attacker")
+        temp_session.symlink_to(target)
+
+        assert sandbox_exec._read_session() is None
+        with pytest.raises(OSError):
+            sandbox_exec._write_session("sb-safe")
+        assert target.read_text() == "sb-attacker"
+
 
 # ── cleanup ────────────────────────────────────────────────────────────
+
 
 class TestCleanup:
     """Tests for cleanup() — sandbox destruction and session clearing."""

@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 EXEC_SCRIPT = Path(__file__).resolve().with_name("cubesandbox_exec.py")
 DEFAULT_SESSION = "default"
+MAX_TIMEOUT_MS = 60 * 60 * 1000
 
 
 class HookInputError(ValueError):
@@ -60,6 +61,7 @@ def rewrite_payload(payload: Any) -> Optional[Dict[str, Any]]:
             and not isinstance(timeout_ms, bool)
             and math.isfinite(timeout_ms)
             and timeout_ms > 0
+            and timeout_ms <= MAX_TIMEOUT_MS
         )
     except OverflowError:
         positive_timeout = False
