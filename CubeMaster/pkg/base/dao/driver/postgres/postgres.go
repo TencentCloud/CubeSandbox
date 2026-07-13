@@ -11,6 +11,8 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,10 +77,18 @@ func (d *driver) SessionLocker(cfg dao.Config) lock.SessionLocker {
 	}
 }
 
-// buildDSN maps dao.Config to a libpq key=value DSN.
-// Addr is host:port (SplitHostPort); bare host omits port= (libpq default 5432).
+// buildDSN maps dao.Config to a postgres:// URI. url.UserPassword percent-encodes
+// credentials so passwords with spaces/quotes/=/@ do not break libpq parsing.
+//
+// Addr is host:port (SplitHostPort); bare host omits port (libpq default 5432).
 // sslmode from Extra["sslmode"], default "disable".
-// WriteTimeoutSeconds → statement_timeout; ReadTimeoutSeconds → idle_in_transaction_session_timeout (ms).
+//
+// PG has no client read/write I/O timeouts like MySQL. The shared yaml fields
+// approximate a server-side statement budget:
+// statement_timeout = max(ReadTimeoutSeconds, WriteTimeoutSeconds) ms, unless
+// Extra["statement_timeout"] overrides (milliseconds). Transaction-idle killing
+// must be opted in via Extra["idle_in_transaction_session_timeout"] (ms) — never
+// derived from ReadTimeoutSeconds.
 func buildDSN(cfg dao.Config) string {
 	connTimeout := cfg.ConnTimeoutSeconds
 	if connTimeout <= 0 {
@@ -91,28 +101,52 @@ func buildDSN(cfg dao.Config) string {
 	}
 
 	host, port, err := net.SplitHostPort(cfg.Addr)
-	var hostPart string
-	if err == nil {
-		hostPart = fmt.Sprintf("host=%s port=%s", host, port)
-	} else {
-		hostPart = fmt.Sprintf("host=%s", cfg.Addr)
+	if err != nil {
+		host = cfg.Addr
+		port = ""
 	}
 
-	dsn := fmt.Sprintf(
-		"%s user=%s password=%s dbname=%s sslmode=%s connect_timeout=%d",
-		hostPart, cfg.User, cfg.Pwd, cfg.DBName, sslmode, connTimeout,
-	)
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(cfg.User, cfg.Pwd),
+		Path:   "/" + cfg.DBName,
+	}
+	if port != "" {
+		u.Host = net.JoinHostPort(host, port)
+	} else {
+		u.Host = host
+	}
+
+	q := url.Values{}
+	q.Set("sslmode", sslmode)
+	q.Set("connect_timeout", strconv.Itoa(connTimeout))
 
 	var options []string
-	if cfg.WriteTimeoutSeconds > 0 {
-		options = append(options, fmt.Sprintf("-c statement_timeout=%d", cfg.WriteTimeoutSeconds*1000))
+	if stmt := statementTimeoutMillis(cfg); stmt != "" {
+		options = append(options, "-c statement_timeout="+stmt)
 	}
-	if cfg.ReadTimeoutSeconds > 0 {
-		options = append(options, fmt.Sprintf("-c idle_in_transaction_session_timeout=%d", cfg.ReadTimeoutSeconds*1000))
+	if v, ok := cfg.Extra["idle_in_transaction_session_timeout"]; ok && v != "" {
+		options = append(options, "-c idle_in_transaction_session_timeout="+v)
 	}
 	if len(options) > 0 {
-		dsn += fmt.Sprintf(" options='%s'", strings.Join(options, " "))
+		q.Set("options", strings.Join(options, " "))
 	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
 
-	return dsn
+// statementTimeoutMillis returns the statement_timeout value in milliseconds,
+// or "" when unset. Extra["statement_timeout"] wins over max(read, write).
+func statementTimeoutMillis(cfg dao.Config) string {
+	if v, ok := cfg.Extra["statement_timeout"]; ok && v != "" {
+		return v
+	}
+	sec := cfg.ReadTimeoutSeconds
+	if cfg.WriteTimeoutSeconds > sec {
+		sec = cfg.WriteTimeoutSeconds
+	}
+	if sec <= 0 {
+		return ""
+	}
+	return strconv.Itoa(sec * 1000)
 }

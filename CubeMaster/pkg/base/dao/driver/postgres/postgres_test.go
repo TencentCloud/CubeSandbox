@@ -8,6 +8,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao"
@@ -43,20 +44,21 @@ func TestBuildDSN(t *testing.T) {
 		DBName:             "cube_mvp",
 		ConnTimeoutSeconds: 10,
 	}
-	got := buildDSN(cfg)
-	want := "host=127.0.0.1 port=5432 user=cube password=cube_pass dbname=cube_mvp sslmode=disable connect_timeout=10"
-	if got != want {
-		t.Fatalf("buildDSN:\n  got:  %s\n  want: %s", got, want)
-	}
-	parsed, err := pgx.ParseConfig(got)
+	parsed, err := pgx.ParseConfig(buildDSN(cfg))
 	if err != nil {
 		t.Fatalf("pgx.ParseConfig: %v", err)
 	}
 	if parsed.Host != "127.0.0.1" {
-		t.Fatalf("parsed Host = %q, want 127.0.0.1", parsed.Host)
+		t.Fatalf("Host = %q, want 127.0.0.1", parsed.Host)
 	}
 	if parsed.Port != 5432 {
-		t.Fatalf("parsed Port = %d, want 5432", parsed.Port)
+		t.Fatalf("Port = %d, want 5432", parsed.Port)
+	}
+	if parsed.User != "cube" || parsed.Password != "cube_pass" || parsed.Database != "cube_mvp" {
+		t.Fatalf("user/pass/db = %q/%q/%q", parsed.User, parsed.Password, parsed.Database)
+	}
+	if parsed.ConnectTimeout != 10*time.Second {
+		t.Fatalf("ConnectTimeout = %v, want 10s", parsed.ConnectTimeout)
 	}
 }
 
@@ -67,10 +69,15 @@ func TestBuildDSNDefaultTimeout(t *testing.T) {
 		Pwd:    "p",
 		DBName: "db",
 	}
-	got := buildDSN(cfg)
-	want := "host=localhost user=u password=p dbname=db sslmode=disable connect_timeout=5"
-	if got != want {
-		t.Fatalf("buildDSN default timeout:\n  got:  %s\n  want: %s", got, want)
+	parsed, err := pgx.ParseConfig(buildDSN(cfg))
+	if err != nil {
+		t.Fatalf("pgx.ParseConfig: %v", err)
+	}
+	if parsed.Host != "localhost" {
+		t.Fatalf("Host = %q, want localhost", parsed.Host)
+	}
+	if parsed.ConnectTimeout.Seconds() != 5 {
+		t.Fatalf("ConnectTimeout = %v, want 5s", parsed.ConnectTimeout)
 	}
 }
 
@@ -93,21 +100,122 @@ func TestBuildDSNWithSSLMode(t *testing.T) {
 }
 
 func TestBuildDSNWithTimeouts(t *testing.T) {
-	cfg := dao.Config{
-		Addr:                "localhost",
-		User:                "u",
-		Pwd:                 "p",
-		DBName:              "db",
-		ConnTimeoutSeconds:  5,
-		ReadTimeoutSeconds:  30,
-		WriteTimeoutSeconds: 10,
+	base := dao.Config{
+		Addr:               "localhost",
+		User:               "u",
+		Pwd:                "p",
+		DBName:             "db",
+		ConnTimeoutSeconds: 5,
 	}
-	got := buildDSN(cfg)
-	if !strings.Contains(got, "statement_timeout=10000") {
-		t.Fatalf("expected statement_timeout=10000 in DSN options, got: %s", got)
+
+	t.Run("max of read and write", func(t *testing.T) {
+		cfg := base
+		cfg.ReadTimeoutSeconds = 30
+		cfg.WriteTimeoutSeconds = 10
+		parsed, err := pgx.ParseConfig(buildDSN(cfg))
+		if err != nil {
+			t.Fatalf("ParseConfig: %v", err)
+		}
+		opts := parsed.RuntimeParams["options"]
+		if !strings.Contains(opts, "statement_timeout=30000") {
+			t.Fatalf("expected statement_timeout=30000 in options %q", opts)
+		}
+		if strings.Contains(opts, "idle_in_transaction_session_timeout") {
+			t.Fatalf("ReadTimeout must not map to idle_in_transaction, options=%q", opts)
+		}
+	})
+
+	t.Run("read only", func(t *testing.T) {
+		cfg := base
+		cfg.ReadTimeoutSeconds = 30
+		parsed, err := pgx.ParseConfig(buildDSN(cfg))
+		if err != nil {
+			t.Fatalf("ParseConfig: %v", err)
+		}
+		if !strings.Contains(parsed.RuntimeParams["options"], "statement_timeout=30000") {
+			t.Fatalf("options=%q", parsed.RuntimeParams["options"])
+		}
+	})
+
+	t.Run("write only", func(t *testing.T) {
+		cfg := base
+		cfg.WriteTimeoutSeconds = 10
+		parsed, err := pgx.ParseConfig(buildDSN(cfg))
+		if err != nil {
+			t.Fatalf("ParseConfig: %v", err)
+		}
+		if !strings.Contains(parsed.RuntimeParams["options"], "statement_timeout=10000") {
+			t.Fatalf("options=%q", parsed.RuntimeParams["options"])
+		}
+	})
+
+	t.Run("extra idle opt-in", func(t *testing.T) {
+		cfg := base
+		cfg.WriteTimeoutSeconds = 10
+		cfg.Extra = map[string]string{"idle_in_transaction_session_timeout": "60000"}
+		parsed, err := pgx.ParseConfig(buildDSN(cfg))
+		if err != nil {
+			t.Fatalf("ParseConfig: %v", err)
+		}
+		opts := parsed.RuntimeParams["options"]
+		if !strings.Contains(opts, "statement_timeout=10000") {
+			t.Fatalf("options=%q", opts)
+		}
+		if !strings.Contains(opts, "idle_in_transaction_session_timeout=60000") {
+			t.Fatalf("options=%q", opts)
+		}
+	})
+
+	t.Run("extra statement_timeout overrides max", func(t *testing.T) {
+		cfg := base
+		cfg.ReadTimeoutSeconds = 30
+		cfg.WriteTimeoutSeconds = 10
+		cfg.Extra = map[string]string{"statement_timeout": "45000"}
+		parsed, err := pgx.ParseConfig(buildDSN(cfg))
+		if err != nil {
+			t.Fatalf("ParseConfig: %v", err)
+		}
+		opts := parsed.RuntimeParams["options"]
+		if !strings.Contains(opts, "statement_timeout=45000") {
+			t.Fatalf("options=%q", opts)
+		}
+		if strings.Contains(opts, "statement_timeout=30000") {
+			t.Fatalf("max-derived timeout should be overridden, options=%q", opts)
+		}
+	})
+}
+
+func TestBuildDSNSpecialPasswords(t *testing.T) {
+	// Regression: unquoted keyword=value DSN silently truncated passwords with spaces.
+	passwords := []string{
+		"cube_pass",
+		"my pass",
+		"my pass'secure",
+		`a\b`,
+		"a=b",
+		"p@ss:word",
+		"pct%25val",
 	}
-	if !strings.Contains(got, "idle_in_transaction_session_timeout=30000") {
-		t.Fatalf("expected idle_in_transaction_session_timeout=30000 in DSN options, got: %s", got)
+	for _, pwd := range passwords {
+		t.Run(pwd, func(t *testing.T) {
+			cfg := dao.Config{
+				Addr:               "127.0.0.1:5432",
+				User:               "cube",
+				Pwd:                pwd,
+				DBName:             "cube_mvp",
+				ConnTimeoutSeconds: 5,
+			}
+			parsed, err := pgx.ParseConfig(buildDSN(cfg))
+			if err != nil {
+				t.Fatalf("ParseConfig: %v (dsn=%s)", err, buildDSN(cfg))
+			}
+			if parsed.Password != pwd {
+				t.Fatalf("Password = %q, want %q (dsn=%s)", parsed.Password, pwd, buildDSN(cfg))
+			}
+			if parsed.User != "cube" || parsed.Database != "cube_mvp" {
+				t.Fatalf("user/db corrupted: %q / %q", parsed.User, parsed.Database)
+			}
+		})
 	}
 }
 
