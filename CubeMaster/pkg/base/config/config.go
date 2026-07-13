@@ -1162,6 +1162,15 @@ func GetConfig() *Config {
 	return cfg
 }
 
+// GetTerminalGatewayToken returns an empty value until configuration is loaded,
+// keeping the internal terminal endpoint disabled by default.
+func GetTerminalGatewayToken() string {
+	if cfg == nil || cfg.Common == nil {
+		return ""
+	}
+	return cfg.Common.TerminalGatewayToken
+}
+
 var defaultAllowedHostMountPrefixes = []string{"/data/shared/"}
 
 // GetAllowedHostMountPrefixes returns the configured allowed host-mount

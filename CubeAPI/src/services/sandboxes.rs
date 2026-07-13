@@ -144,11 +144,17 @@ impl SandboxService {
             metadata: optional_metadata(d.labels),
             state: sandbox_state_from_status(d.status),
             volume_mounts: None,
-            terminal_targets: d.containers.iter()
+            terminal_targets: d
+                .containers
+                .iter()
                 .filter(|container| !container.container_id.is_empty() && container.status == 1)
                 .map(|container| TerminalTarget {
                     container_id: container.container_id.clone(),
-                    name: if container.name.is_empty() { container.kind.clone() } else { container.name.clone() },
+                    name: if container.name.is_empty() {
+                        container.kind.clone()
+                    } else {
+                        container.name.clone()
+                    },
                 })
                 .collect(),
         })

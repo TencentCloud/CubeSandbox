@@ -3,13 +3,20 @@
 //
 
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Path, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use futures::{SinkExt, StreamExt};
-use tokio_tungstenite::{connect_async, tungstenite::{client::IntoClientRequest, protocol::Message as TungsteniteMessage}};
+use serde::Deserialize;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, protocol::Message as TungsteniteMessage},
+};
 use validator::Validate;
 
 use crate::{
@@ -172,29 +179,85 @@ pub async fn sandbox_terminal(
         crate::error::AppError::ServiceUnavailable("terminal gateway is not configured".to_string())
     })?;
     if gateway_token.trim().is_empty() {
-        return Err(crate::error::AppError::ServiceUnavailable("terminal gateway is not configured".to_string()));
+        return Err(crate::error::AppError::ServiceUnavailable(
+            "terminal gateway is not configured".to_string(),
+        ));
     }
-    state.logger.log(
-        LogEvent::new(LogLevel::Info, "terminal.session.open")
-            .field("sandbox_id", &sandbox_id)
-            .field("operator", &operator),
-    ).await;
+    Ok(ws
+        .protocols(["cube-terminal"])
+        .on_upgrade(move |socket| async move {
+            proxy_terminal(socket, state, sandbox_id, gateway_token, operator).await;
+        }))
+}
 
-    Ok(ws.protocols(["cube-terminal"]).on_upgrade(move |socket| async move {
-        proxy_terminal(socket, state, sandbox_id, gateway_token, operator).await;
-    }))
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalOpenFrame {
+    #[serde(rename = "type")]
+    frame_type: String,
+    sandbox_id: String,
+    container_id: String,
+}
+
+fn terminal_open_target(
+    message: &Message,
+    expected_sandbox_id: &str,
+) -> Result<String, &'static str> {
+    let Message::Text(payload) = message else {
+        return Err("first terminal frame must be JSON text");
+    };
+    let frame: TerminalOpenFrame =
+        serde_json::from_str(payload).map_err(|_| "invalid terminal open frame")?;
+    if frame.frame_type != "open" || frame.container_id.is_empty() {
+        return Err("first terminal frame must open a container");
+    }
+    if frame.sandbox_id != expected_sandbox_id {
+        return Err("terminal sandbox does not match request path");
+    }
+    Ok(frame.container_id)
+}
+
+fn terminal_error(message: &str) -> Message {
+    Message::Text(
+        serde_json::json!({"type": "error", "message": message})
+            .to_string()
+            .into(),
+    )
 }
 
 async fn terminal_operator(state: &AppState, headers: &HeaderMap) -> AppResult<String> {
-    let Some(store) = &state.agenthub_store else { return Ok("unauthenticated-development".to_string()) };
-    let protocol = headers.get(SEC_WEBSOCKET_PROTOCOL).and_then(|value| value.to_str().ok()).unwrap_or("");
-    let token = protocol.split(',').map(str::trim).find(|value| *value != "cube-terminal").filter(|value| !value.is_empty());
-    let Some(token) = token else {
-        return Err(crate::error::AppError::Unauthorized("terminal session token is required".to_string()));
+    let Some(store) = &state.agenthub_store else {
+        return Err(crate::error::AppError::ServiceUnavailable(
+            "terminal requires WebUI session authentication".to_string(),
+        ));
     };
-    store.validate_session(token).await
-        .map_err(|error| crate::error::AppError::Internal(anyhow::anyhow!("failed to validate terminal session: {error}")))?
-        .ok_or_else(|| crate::error::AppError::Unauthorized("terminal session is invalid or expired".to_string()))
+    let protocol = headers
+        .get(SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let token = protocol
+        .split(',')
+        .map(str::trim)
+        .find(|value| *value != "cube-terminal")
+        .filter(|value| !value.is_empty());
+    let Some(token) = token else {
+        return Err(crate::error::AppError::Unauthorized(
+            "terminal session token is required".to_string(),
+        ));
+    };
+    store
+        .validate_session(token)
+        .await
+        .map_err(|error| {
+            crate::error::AppError::Internal(anyhow::anyhow!(
+                "failed to validate terminal session: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            crate::error::AppError::Unauthorized(
+                "terminal session is invalid or expired".to_string(),
+            )
+        })
 }
 
 async fn proxy_terminal(
@@ -204,28 +267,70 @@ async fn proxy_terminal(
     gateway_token: String,
     operator: String,
 ) {
-    let master_url = state.config.cubemaster_url.replace("https://", "wss://").replace("http://", "ws://");
+    let master_url = state
+        .config
+        .cubemaster_url
+        .replace("https://", "wss://")
+        .replace("http://", "ws://");
     let url = format!("{master_url}/cube/sandbox/terminal/ws");
     let mut request = match url.into_client_request() {
         Ok(request) => request,
-        Err(error) => { tracing::error!(%error, sandbox_id, "terminal: invalid CubeMaster websocket URL"); return; }
+        Err(error) => {
+            tracing::error!(%error, sandbox_id, "terminal: invalid CubeMaster websocket URL");
+            return;
+        }
     };
     match gateway_token.parse() {
-        Ok(value) => { request.headers_mut().insert("x-cube-terminal-gateway", value); }
-        Err(_) => { tracing::error!(sandbox_id, "terminal: invalid terminal gateway token"); return; }
+        Ok(value) => {
+            request
+                .headers_mut()
+                .insert("x-cube-terminal-gateway", value);
+        }
+        Err(_) => {
+            tracing::error!(sandbox_id, "terminal: invalid terminal gateway token");
+            return;
+        }
     }
     let (master, _) = match connect_async(request).await {
         Ok(connection) => connection,
-        Err(error) => { tracing::warn!(%error, sandbox_id, operator, "terminal: CubeMaster connection failed"); return; }
+        Err(error) => {
+            tracing::warn!(%error, sandbox_id, operator, "terminal: CubeMaster connection failed");
+            return;
+        }
     };
     let (mut browser_tx, mut browser_rx) = browser.split();
     let (mut master_tx, mut master_rx) = master.split();
+    let mut container_id = None;
     loop {
         tokio::select! {
             incoming = browser_rx.next() => match incoming {
-                Some(Ok(message)) => match to_master_message(message) {
-                    Some(message) => if master_tx.send(message).await.is_err() { break; },
-                    None => break,
+                Some(Ok(message)) => {
+                    let opening_container = if container_id.is_none() {
+                        match terminal_open_target(&message, &sandbox_id) {
+                            Ok(container_id) => Some(container_id),
+                            Err(error) => {
+                                let _ = browser_tx.send(terminal_error(error)).await;
+                                break;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    match to_master_message(message) {
+                        Some(message) => {
+                            if master_tx.send(message).await.is_err() { break; }
+                            if let Some(opening_container) = opening_container {
+                                state.logger.log(
+                                    LogEvent::new(LogLevel::Info, "terminal.session.open")
+                                        .field("sandbox_id", &sandbox_id)
+                                        .field("container_id", &opening_container)
+                                        .field("operator", &operator),
+                                ).await;
+                                container_id = Some(opening_container);
+                            }
+                        },
+                        None => break,
+                    }
                 },
                 _ => break,
             },
@@ -238,8 +343,17 @@ async fn proxy_terminal(
             },
         }
     }
-    state.logger.log(LogEvent::new(LogLevel::Info, "terminal.session.close")
-        .field("sandbox_id", &sandbox_id).field("operator", &operator)).await;
+    if let Some(container_id) = container_id {
+        state
+            .logger
+            .log(
+                LogEvent::new(LogLevel::Info, "terminal.session.close")
+                    .field("sandbox_id", &sandbox_id)
+                    .field("container_id", &container_id)
+                    .field("operator", &operator),
+            )
+            .await;
+    }
 }
 
 fn to_master_message(message: Message) -> Option<TungsteniteMessage> {
@@ -260,6 +374,35 @@ fn to_browser_message(message: TungsteniteMessage) -> Option<Message> {
         TungsteniteMessage::Pong(value) => Some(Message::Pong(value.into())),
         TungsteniteMessage::Close(_) => None,
         TungsteniteMessage::Frame(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_open_frame_must_match_request_sandbox() {
+        let matching =
+            Message::Text(r#"{"type":"open","sandboxId":"sandbox-1","containerId":"main"}"#.into());
+        assert_eq!(
+            terminal_open_target(&matching, "sandbox-1").unwrap(),
+            "main"
+        );
+
+        let mismatched =
+            Message::Text(r#"{"type":"open","sandboxId":"sandbox-2","containerId":"main"}"#.into());
+        assert_eq!(
+            terminal_open_target(&mismatched, "sandbox-1"),
+            Err("terminal sandbox does not match request path")
+        );
+    }
+
+    #[test]
+    fn terminal_first_frame_must_be_open_json_text() {
+        let input = Message::Text(r#"{"type":"input","data":"whoami"}"#.into());
+        assert!(terminal_open_target(&input, "sandbox-1").is_err());
+        assert!(terminal_open_target(&Message::Binary(vec![1, 2, 3].into()), "sandbox-1").is_err());
     }
 }
 

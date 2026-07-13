@@ -129,39 +129,59 @@ func TerminalWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	clientFrames := make(chan terminalClientFrame)
+	clientReadDone := make(chan error, 1)
+	go func() {
+		for {
+			var frame terminalClientFrame
+			if err := readTerminalFrame(conn, &frame); err != nil {
+				clientReadDone <- err
+				return
+			}
+			if err := conn.SetReadDeadline(time.Now().Add(terminalIdleTimeout)); err != nil {
+				clientReadDone <- err
+				return
+			}
+			select {
+			case clientFrames <- frame:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	for {
-		var frame terminalClientFrame
-		if err := readTerminalFrame(conn, &frame); err != nil {
-			return
-		}
-		if err := conn.SetReadDeadline(time.Now().Add(terminalIdleTimeout)); err != nil {
-			return
-		}
-		switch frame.Type {
-		case "input":
-			if err := stream.Send(&cubebox.TerminalClientMessage{Payload: &cubebox.TerminalClientMessage_Stdin{Stdin: []byte(frame.Data)}}); err != nil {
-				return
-			}
-		case "resize":
-			if err := stream.Send(&cubebox.TerminalClientMessage{Payload: &cubebox.TerminalClientMessage_Resize{Resize: &cubebox.TerminalResize{Cols: frame.Cols, Rows: frame.Rows}}}); err != nil {
-				return
-			}
-		case "keepalive":
-			// The read deadline above is the keepalive; no backend operation needed.
-		default:
-			_ = write(terminalServerFrame{Type: "error", Message: "unsupported terminal frame"})
-			return
-		}
 		select {
 		case <-backendDone:
 			return
-		default:
+		case <-clientReadDone:
+			return
+		case frame := <-clientFrames:
+			switch frame.Type {
+			case "input":
+				if err := stream.Send(&cubebox.TerminalClientMessage{Payload: &cubebox.TerminalClientMessage_Stdin{Stdin: []byte(frame.Data)}}); err != nil {
+					return
+				}
+			case "resize":
+				if err := stream.Send(&cubebox.TerminalClientMessage{Payload: &cubebox.TerminalClientMessage_Resize{Resize: &cubebox.TerminalResize{Cols: frame.Cols, Rows: frame.Rows}}}); err != nil {
+					return
+				}
+			case "keepalive":
+				// The reader refreshed the idle deadline; no backend operation needed.
+			default:
+				_ = write(terminalServerFrame{Type: "error", Message: "unsupported terminal frame"})
+				return
+			}
 		}
 	}
 }
 
 func terminalGatewayAuthorized(r *http.Request) bool {
-	expected := config.GetConfig().Common.TerminalGatewayToken
+	expected := config.GetTerminalGatewayToken()
+	return terminalGatewayAuthorizedWithToken(r, expected)
+}
+
+func terminalGatewayAuthorizedWithToken(r *http.Request, expected string) bool {
 	return expected != "" && r.Header.Get("X-Cube-Terminal-Gateway") == expected
 }
 

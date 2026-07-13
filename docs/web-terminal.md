@@ -27,14 +27,17 @@ the existing HTTPS/WSS proxy.
 ## Authentication and auditing
 
 The browser passes its existing WebUI session token using the WebSocket
-subprotocol header, never in a URL. When the CubeAPI database is configured,
-an absent, expired, or invalid session is rejected before the WebSocket is
-upgraded. Existing API-key/Bearer authentication middleware also protects the
-route when an auth callback is configured.
+subprotocol header, never in a URL. Terminal access is disabled when the WebUI
+session store is unavailable. An absent, expired, or invalid session is rejected
+before the WebSocket is upgraded. Existing API-key/Bearer authentication
+middleware also protects the route when an auth callback is configured.
 
 CubeAPI emits `terminal.session.open` and `terminal.session.close` audit events
-with the operator and sandbox ID. Each terminal is a separate Cubelet TTY
-process, so multiple sessions and sandboxes remain isolated.
+with the operator, sandbox ID, and container ID. The URL sandbox ID must match
+the first protocol frame, and `open` is emitted only after that frame reaches
+CubeMaster; failed upgrades and backend connection attempts do not create an
+open audit record. Each terminal is a separate Cubelet TTY process, so multiple
+sessions and sandboxes remain isolated.
 
 ## Validation checklist
 

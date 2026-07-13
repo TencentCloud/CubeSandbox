@@ -314,7 +314,11 @@ pub struct SandboxDetail {
     pub state: SandboxState,
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
-    #[serde(rename = "terminalTargets", skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(
+        rename = "terminalTargets",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
     pub terminal_targets: Vec<TerminalTarget>,
 }
 
