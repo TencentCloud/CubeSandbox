@@ -34,6 +34,9 @@ class MockFiles:
     def read(self, path: str) -> str:
         return self._store.get(path, "")
 
+    def exists(self, path: str) -> bool:
+        return path in self._store
+
     def snapshot(self) -> dict[str, str]:
         return dict(self._store)
 
@@ -116,6 +119,12 @@ class MockCommands:
 
             if self._sandbox is not None:
                 self._sandbox._binary_built = True
+                # Write a dummy binary to _store so files.read() can find it
+                if cwd:
+                    binary_path = f"{cwd}/target/release/{cwd.rstrip('/').rsplit('/', 1)[-1]}"
+                    self._files._store[binary_path] = "mock-binary-content"
+                    debug_path = f"{cwd}/target/debug/{cwd.rstrip('/').rsplit('/', 1)[-1]}"
+                    self._files._store[debug_path] = "mock-binary-content-debug"
             return MockCommandResult(0, out, "")
 
         # ./target/release/sandbox-demo
@@ -127,6 +136,13 @@ class MockCommands:
                     '"timestamp":"2026-07-10T12:00:00+00:00",'
                     '"crates":["serde_json","chrono"],"answer":42}\n', "")
             return MockCommandResult(0, "release binary output\n", "")
+
+        # /home/user/workspace/runner/multi-container-demo
+        if "multi-container-demo" in cmd and not cmd.startswith(("cargo", "rustc")):
+            return MockCommandResult(0,
+                '{\n  "service": "builder",\n  "status": "compiled",\n'
+                '  "timestamp": "2026-07-10T12:00:00+00:00",\n'
+                '  "version": "0.1.0"\n}\n', "")
 
         # ./target/debug/snapshot-demo
         if "./target/debug/snapshot-demo" in cmd:
@@ -152,6 +168,10 @@ class MockCommands:
                 "Hello from CubeSandbox Rust playground!\n"
                 f"Current time: {int(time.time())}\n",
                 "")
+
+        # chmod
+        if cmd.startswith("chmod"):
+            return MockCommandResult(0, "", "")
 
         # echo $SESSION_ID
         if cmd.startswith("echo"):

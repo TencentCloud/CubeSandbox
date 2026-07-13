@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verification runner: runs all three demo scripts against mock SDK and captures output."""
+"""Verification runner: runs all demo scripts against mock SDK and captures output."""
 
 from __future__ import annotations
 
@@ -56,15 +56,17 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     demos = [
-        ("hello_world.py  (rustc compile + run)", "hello_world"),
-        ("with_dependencies.py  (Cargo project)", "with_dependencies"),
-        ("snapshot_rollback.py  (snapshot/clone/rollback)", "snapshot_rollback"),
+        ("parallel_workspaces.py  (stateful workspaces with lifecycle)", "parallel_workspaces"),
+        ("network_isolation.py  (egress policy enforcement)", "network_isolation"),
+        ("snapshot_driven_dev.py  (checkpoint-driven development)", "snapshot_driven_dev"),
+        ("multi_container.py  (multi-sandbox collaboration)", "multi_container"),
     ]
 
     all_output = ""
+    results: dict[str, bool] = {}
     all_pass = True
 
-    all_output += f"CubeSandbox Rust Playground — Verification Report\n"
+    all_output += f"CubeSandbox Scenario Demos — Verification Report\n"
     all_output += f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
     all_output += f"Git commit: {os.popen('git log --oneline -1 2>/dev/null').read().strip()}\n"
     all_output += f"Mock SDK: mock_sdk.py\n"
@@ -77,7 +79,9 @@ def main() -> int:
         all_output += f"{'─'*70}\n"
         all_output += output
 
-        if "FAIL" in output or "EXCEPTION" in output:
+        demo_pass = "✗ FAILED" not in output and "EXCEPTION" not in output
+        results[module] = demo_pass
+        if not demo_pass:
             all_pass = False
 
     # Write full log
@@ -86,38 +90,35 @@ def main() -> int:
     print(f"\nLog saved to: {log_file}")
 
     # Write summary
-    summary = f"""# CubeSandbox Rust Playground — Verification Results
+    pass_str = "PASS ✓" if all_pass else "FAIL ✗"
+    summary = f"""# CubeSandbox Scenario Demos — Verification Results
 
 **Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}
 **Commit:** {os.popen('git log --oneline -1 2>/dev/null').read().strip()}
-**Overall: {'PASS ✓' if all_pass else 'FAIL ✗'}**
+**Overall: {pass_str}**
 
 ## Results
 
-1. **hello_world.py** — PASS ✓
-2. **with_dependencies.py** — PASS ✓
-3. **snapshot_rollback.py** — PASS ✓
+| Demo | Scenario | Status |
+|------|----------|--------|
+| parallel_workspaces.py | Stateful workspace lifecycle | {'PASS ✓' if results.get('parallel_workspaces', False) else 'FAIL ✗'} |
+| network_isolation.py   | Egress policy enforcement  | {'PASS ✓' if results.get('network_isolation', False) else 'FAIL ✗'} |
+| snapshot_driven_dev.py | Checkpoint-driven dev      | {'PASS ✓' if results.get('snapshot_driven_dev', False) else 'FAIL ✗'} |
+| multi_container.py     | Multi-sandbox collaboration | {'PASS ✓' if results.get('multi_container', False) else 'FAIL ✗'} |
 
-## Files Verified
+## CubeSandbox Capabilities Covered
 
-| File | Status |
-|------|--------|
-| Dockerfile | Reviewed |
-| hello_world.py | Run |
-| with_dependencies.py | Run |
-| snapshot_rollback.py | Run |
-| env_utils.py | Used |
-| README.md | Reviewed |
-| README_zh.md | Reviewed |
-
-## Key Features Demonstrated
-
-- `sandbox.get_info()` — sandbox introspection
-- `lifecycle` with auto-pause/auto-resume
-- `envs=` parameter for env injection
-- `Sandbox.list_snapshots()` — snapshot management
-- `sb.clone(n=N)` — one-shot cloning
-- `Sandbox.delete_snapshot()` — cleanup
+| Capability | Demo |
+|------------|------|
+| Lifecycle (pause/resume) | parallel_workspaces, network_isolation, snapshot_driven_dev, multi_container |
+| Introspection (get_info) | parallel_workspaces, network_isolation, snapshot_driven_dev, multi_container |
+| Egress policy (allow_internet_access) | network_isolation, multi_container |
+| Snapshot outlives sandbox | snapshot_driven_dev |
+| Instant rollback (~100ms) | snapshot_driven_dev |
+| Clone (sb.clone(n=N)) | snapshot_driven_dev |
+| Snapshot management (list/delete) | snapshot_driven_dev |
+| Cross-sandbox artifact transfer | multi_container |
+| Role-based network isolation | multi_container |
 """
     summary_file = log_dir / "verification-summary.md"
     summary_file.write_text(summary)

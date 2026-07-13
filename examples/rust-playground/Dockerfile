@@ -1,10 +1,13 @@
 # syntax=docker/dockerfile:1.7
 #
-# Rust playground inside a CubeSandbox template.
+# Rust-enabled CubeSandbox template.
 #
 # The image installs the Rust toolchain (rustc, cargo, rustup) on top
 # of the official CubeSandbox base image. The inherited cube-entrypoint
 # keeps envd running on :49983 so Cube can use the standard probe.
+#
+# A dummy Cargo project is pre-built during image creation to warm the
+# crates.io index cache, reducing first-use latency in sandboxes.
 #
 # Build:
 #   docker build -t rust-playground:latest examples/rust-playground
@@ -12,7 +15,7 @@
 # Register as a Cube template:
 #   cubemastercli tpl create-from-image \
 #     --image <your-registry>/rust-playground:latest \
-#     --writable-layer-size 2G \
+#     --writable-layer-size 4G \
 #     --expose-port 49983 \
 #     --probe       49983 \
 #     --probe-path  /health
@@ -23,8 +26,8 @@ FROM ${CUBE_BASE_IMAGE}
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RUST_TOOLCHAIN=stable
 
-# build-essential would bring g++ (~20 MB), so we install only what Rust
-# actually needs: gcc (the C linker that rustc requires) + development headers.
+# Install only what Rust needs: gcc (C linker for rustc) + dev headers.
+# build-essential is intentionally omitted (~20 MB for g++).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -49,6 +52,15 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && . "${CARGO_HOME}/env" \
     && rustc --version \
     && cargo --version
+
+# Pre-build a dummy project to cache crates.io index and metadata.
+# This avoids the ~15s index fetch on first cargo build in a sandbox.
+RUN mkdir -p /home/user/workspace/cargo-cache-warmup/src \
+    && cd /home/user/workspace/cargo-cache-warmup \
+    && printf '[package]\nname = "cache-warmup"\nversion = "0.1.0"\nedition = "2021"\n' > Cargo.toml \
+    && printf 'fn main() { println!("cache warmup"); }\n' > src/main.rs \
+    && cargo build 2>/dev/null || true \
+    && rm -rf /home/user/workspace/cargo-cache-warmup
 
 WORKDIR /home/user/workspace
 

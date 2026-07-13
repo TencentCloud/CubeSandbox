@@ -2,22 +2,23 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Demonstrate CubeSandbox's secure network isolation and sandbox configuration.
+"""Enforce egress network policies across sandbox environments.
 
 CubeSandbox differentiators shown:
-  - Secure: network isolation via allow_internet_access — one sandbox downloads
-    crates from the internet, another builds entirely offline
-  - Env injection: set RUST_BACKTRACE, CARGO_TERM_COLOR at creation time
+  - Secure: per-sandbox network isolation via allow_internet_access —
+    one sandbox has full internet access, another is fully air-gapped
+  - Env injection: inject environment variables at sandbox creation
   - Lifecycle: auto-pause/resume via lifecycle config
+  - Side-by-side comparison: same workload, different network policies
 
 Usage:
-    python with_dependencies.py
+    python network_isolation.py
 
 This script:
-    1. Creates 2 sandboxes concurrently — one with internet, one without.
-    2. Both scaffold the same Cargo project with serde_json + chrono.
-    3. The online sandbox downloads crates from crates.io.
-    4. The offline sandbox fails to fetch (demonstrates network isolation).
+    1. Creates 2 sandboxes side-by-side — one online, one offline.
+    2. Both scaffold the same Cargo project with external dependencies.
+    3. The online sandbox downloads crates from the internet.
+    4. The offline sandbox is blocked (demonstrates egress policy enforcement).
 """
 
 from __future__ import annotations
@@ -87,11 +88,9 @@ def run_demo(template_id: str, index: int, online: bool) -> int:
               f"  id={sandbox_id}  state={info.get('state', 'N/A')}"
               f"  internet={online}")
 
-        # Scaffold
         scaffold_project(sandbox)
         print(f"  [{name}] project scaffolded")
 
-        # Build
         t1 = time.monotonic()
         result = sandbox.commands.run("cargo build --release", cwd=WORKSPACE, timeout=300)
         build_elapsed = time.monotonic() - t1
@@ -104,7 +103,6 @@ def run_demo(template_id: str, index: int, online: bool) -> int:
                   f"  stderr={stderr}", file=sys.stderr)
             return 1
 
-        # Run
         result = sandbox.commands.run("./target/release/sandbox-demo", cwd=WORKSPACE, timeout=30)
         output = (result.stdout or "").strip()
         print(f"  [{name}] output: {output[:100]}")
@@ -119,10 +117,11 @@ def main() -> int:
     required("E2B_API_URL")
     required("E2B_API_KEY")
 
-    print("CubeSandbox — Network Isolation + Concurrent Build Demo")
-    print(f"Template: {template_id}")
-    print("  sb-1: allow_internet_access=True   (will download crates)")
-    print("  sb-2: allow_internet_access=False  (build fails — no network)")
+    print("CubeSandbox — Egress Network Policy Enforcement Demo")
+    print(f"  Scenario: same workload, different egress policies")
+    print(f"  Template: {template_id}")
+    print("    sb-1: allow_internet_access=True   (can pull dependencies)")
+    print("    sb-2: allow_internet_access=False  (air-gapped — build fails)")
     print()
 
     t_start = time.monotonic()
@@ -136,10 +135,13 @@ def main() -> int:
     total_elapsed = time.monotonic() - t_start
 
     print()
-    print(f"Total: 2 sandboxes in {total_elapsed:.2f}s")
-    print(f"  sb-1 (online)    : {'PASS' if r1 == 0 else 'FAIL'} — cargo fetched from crates.io")
-    print(f"  sb-2 (offline)   : {'PASS' if r2 == 0 else 'FAIL'} — cargo blocked (network isolation)")
-    print(f"  Expected: sb-1=0, sb-2=1  (offline cannot fetch crates)")
+    print(f"  Total: 2 sandboxes in {total_elapsed:.2f}s")
+    print(f"    sb-1 (online)    : {'PASS' if r1 == 0 else 'FAIL'} — pulled dependencies successfully")
+    print(f"    sb-2 (offline)   : {'PASS' if r2 == 0 else 'FAIL'} — blocked by egress policy")
+    print(f"    Expected: sb-1=0, sb-2=1  (offline cannot fetch external resources)")
+    print()
+    print("  Key takeaway: per-sandbox allow_internet_access enforces")
+    print("  network isolation without changing the workload.")
 
     return 0 if r1 == 0 and r2 != 0 else 1
 
