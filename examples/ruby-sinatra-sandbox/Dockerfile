@@ -24,6 +24,8 @@ FROM ${CUBE_BASE_IMAGE}
 ARG DEBIAN_FRONTEND=noninteractive
 ARG BUNDLER_VERSION=2.5.23
 
+# curl is inherited from the base image; remove it to reduce the runtime attack
+# surface.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates ruby \
     && gem install bundler -v "${BUNDLER_VERSION}" --no-document \
@@ -48,4 +50,4 @@ EXPOSE 4567 49983
 
 # The base entrypoint keeps envd privileged for sandbox management. Only the
 # application process drops to the base image's unprivileged UID 1000 user.
-CMD ["runuser", "--user", "user", "--", "bundle", "exec", "ruby", "app.rb", "-o", "0.0.0.0"]
+CMD ["runuser", "--user", "user", "--", "bundle", "exec", "ruby", "app.rb"]

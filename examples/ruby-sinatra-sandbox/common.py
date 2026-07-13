@@ -43,7 +43,7 @@ def wait_for_app(sandbox, timeout: int = 60) -> dict:
             if health.get("status") != "ok" or not health.get("ruby"):
                 raise RuntimeError(f"Unexpected health response: {health!r}")
             return health
-        except requests.RequestException as exc:
+        except (requests.RequestException, ValueError) as exc:
             last_error = exc
             time.sleep(1)
     raise RuntimeError(f"Sinatra did not become ready at {url}: {last_error}")

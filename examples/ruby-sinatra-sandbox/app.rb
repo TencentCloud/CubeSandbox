@@ -11,9 +11,28 @@ set :server, :puma
 WORKSPACE = ENV.fetch("WORKSPACE", "/workspace")
 COUNTER_FILE = File.join(WORKSPACE, "data", "counter.txt")
 
-def counter
+configure do
   FileUtils.mkdir_p(File.dirname(COUNTER_FILE))
-  File.exist?(COUNTER_FILE) ? Integer(File.read(COUNTER_FILE).strip) : 0
+end
+
+def counter
+  File.open(COUNTER_FILE, File::RDWR | File::CREAT, 0o644) do |file|
+    file.flock(File::LOCK_SH)
+    contents = file.read.strip
+    contents.empty? ? 0 : Integer(contents)
+  end
+end
+
+def increment_counter
+  File.open(COUNTER_FILE, File::RDWR | File::CREAT, 0o644) do |file|
+    file.flock(File::LOCK_EX)
+    contents = file.read.strip
+    value = (contents.empty? ? 0 : Integer(contents)) + 1
+    file.rewind
+    file.write("#{value}\n")
+    file.truncate(file.pos)
+    value
+  end
 end
 
 get "/health" do
@@ -27,8 +46,6 @@ get "/counter" do
 end
 
 post "/counter" do
-  value = counter + 1
-  File.write(COUNTER_FILE, "#{value}\n")
   content_type :json
-  { counter: value }.to_json
+  { counter: increment_counter }.to_json
 end

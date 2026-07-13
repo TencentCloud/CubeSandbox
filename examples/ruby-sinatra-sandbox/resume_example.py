@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 import requests
 from cubesandbox import Sandbox
@@ -51,8 +52,9 @@ def main() -> None:
     finally:
         try:
             sandbox.kill()
-        except Exception:
-            pass
+        except Exception as exc:
+            warning = f"Warning: failed to kill sandbox {sandbox_id}: {exc}"
+            print(warning, file=sys.stderr)
 
 
 if __name__ == "__main__":
