@@ -20,7 +20,9 @@ def require_success(result, label):
     if result.exit_code != 0:
         raise RuntimeError(f"{label} failed ({result.exit_code}): {result.stderr}")
 
+print(f"template_id: {template_id}")
 with Sandbox.create(template=template_id) as sandbox:
+    print(f"sandbox_id: {sandbox.sandbox_id}")
     print("=== java -version ===")
     # java -version writes to stderr; merge so we can see it via stdout.
     r = sandbox.commands.run("java -version 2>&1")

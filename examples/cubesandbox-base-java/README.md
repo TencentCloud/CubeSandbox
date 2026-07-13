@@ -137,10 +137,10 @@ cubesandbox-base-java/
   project needs it, or use the [Gradle wrapper](https://docs.gradle.org/current/userguide/gradle_wrapper.html)
   (`./gradlew`) which needs no system install.
 - `HelloWorldServer` is a demo, not a production server — it has no TLS,
-  no graceful shutdown, and serves a single route. It does use a fixed
-  thread pool (`Executors.newFixedThreadPool(4)`) so concurrent requests
-  are handled in parallel, but the pool size is not configurable without
-  editing the source. Swap it for your real application's `CMD`.
+  no graceful shutdown, and serves a single route. It uses a fixed thread
+  pool sized from `Runtime.getRuntime().availableProcessors()` so concurrent
+  requests are handled in parallel. Swap it for your real application's
+  `CMD` and tune its executor for the workload.
 - The Java server runs as `root` (the container's default user, inherited
   from the base image's `CMD` execution). For a hardened template, drop
   privileges to the base image's `user` (uid 1000) account before starting
