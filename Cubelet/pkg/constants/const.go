@@ -206,6 +206,8 @@ const (
 	MasterAnnotationRootfsArtifactSizeBytes          = "cube.master.rootfs.artifact.size_bytes"
 	MasterAnnotationWritableLayerSize                = "cube.master.rootfs.writable_layer_size"
 	MasterAnnotationTemplateSpecFingerprint          = "cube.master.template.spec_fingerprint"
+	MasterAnnotationComponentEnvdVersion             = "cube.master.components.envd.version"
+	MasterAnnotationCreateTimeEnvVars                = "cube.master.internal.create_time_env_vars"
 	MasterAnnotationInstanceType                     = "cube.master.instance.type"
 	MasterAnnotationNetworkPolicyBlockAll            = "cube.master.network.policy.block_all"
 	MasterAnnotationNetworkPolicyAllowPublicServices = "cube.master.network.policy.allow_public_services"

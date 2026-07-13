@@ -2,6 +2,10 @@
 
 > **适用场景：** 云服务器上 `/dev/kvm` 不可用（云服务商屏蔽了嵌套虚拟化）。如果你的机器已经支持 KVM，直接参阅[快速开始](./quickstart.md)或[本地构建部署](./self-build-deploy.md)即可。
 
+::: warning 生产环境注意
+如果您计划在生产环境中使用 Cube Sandbox，请参阅[网络加固](./network-hardening.md)指南，在将服务暴露到不可信网络之前完成安全加固。
+:::
+
 得益于 PVM，您可以在**普通的云服务器**上部署 Cube Sandbox，所有沙箱实例均运行在 PVM 支持的 Micro-VM 中。
 
 与标准部署相比，PVM 部署只额外增加两个步骤：

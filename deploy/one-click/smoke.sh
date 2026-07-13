@@ -12,10 +12,7 @@ fi
 
 require_root
 
-TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
-INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
+INSTALL_PREFIX="${CUBE_SANDBOX_INSTALL_ROOT}"
 
 ensure_file "${INSTALL_PREFIX}/scripts/one-click/quickcheck.sh"
-ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
-ONE_CLICK_RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env" \
-  "${INSTALL_PREFIX}/scripts/one-click/quickcheck.sh"
+"${INSTALL_PREFIX}/scripts/one-click/quickcheck.sh"

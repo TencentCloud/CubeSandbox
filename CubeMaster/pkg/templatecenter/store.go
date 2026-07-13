@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -151,6 +152,7 @@ type TemplateInfo struct {
 	LastError                 string          `json:"last_error,omitempty"`
 	CreatedAt                 string          `json:"created_at,omitempty"`
 	ImageInfo                 string          `json:"image_info,omitempty"`
+	JobID                     string          `json:"job_id,omitempty"`
 	Replicas                  []ReplicaStatus `json:"replicas,omitempty"`
 
 	// CubeEgress CA bake metadata, surfaced for ops triage. Populated
@@ -227,6 +229,9 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 		info := templateInfoFromDefinition(def)
 		info.CreatedAt = formatUTCRFC3339(def.CreatedAt)
 		info.ImageInfo = imageInfo
+		if latestJob := latestJobByTemplateID[def.TemplateID]; latestJob != nil {
+			info.JobID = latestJobIDFromJob(latestJob)
+		}
 		out = append(out, info)
 	}
 	seen := make(map[string]struct{}, len(out))
@@ -265,6 +270,7 @@ func Init(ctx context.Context) error {
 			log.G(ctx).Warnf("warm ready template locality fail:%v", warmErr)
 		}
 		startSnapshotReconciler(ctx)
+		startArtifactGC(ctx)
 		scheduleInitialCompatScan(ctx)
 	})
 	return initErr
@@ -374,7 +380,7 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sa
 	}
 	delete(cloned.Annotations, constants.CubeAnnotationsAppSnapshotCreate)
 	cloned.SnapshotDir = ""
-	cloned.Timeout = 0
+	cloned.Timeout = nil
 	cloned.InsId = ""
 	cloned.InsIp = ""
 	cloned.Request = nil
@@ -454,6 +460,7 @@ func healthyTemplateNodes(instanceType string) []*node.Node {
 
 func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *sandboxtypes.CreateCubeSandboxReq, targets []*node.Node, opts replicaRunOptions) ([]ReplicaStatus, error) {
 	replicas := make([]ReplicaStatus, 0, len(targets))
+	envdVersions := make([]nodeEnvdVersion, 0, len(targets))
 	var lock sync.Mutex
 	var persistErr error
 	sem := make(chan struct{}, 4)
@@ -470,9 +477,13 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			replica := createReplicaOnNode(ctx, target, req, opts)
+			replica, envdVersion := createReplicaOnNode(ctx, target, req, opts)
 			lock.Lock()
 			replicas = append(replicas, replica)
+			envdVersions = append(envdVersions, nodeEnvdVersion{
+				NodeID:  target.ID(),
+				Version: envdVersion,
+			})
 			lock.Unlock()
 
 			if upsertErr := UpsertReplica(ctx, templateID, req.InstanceType, replica); upsertErr != nil {
@@ -484,10 +495,84 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 		}()
 	}
 	wg.Wait()
+	// Converge per-node envd versions into a single template value and persist it
+	// once to the definition annotation (idempotent; covers create and redo).
+	if envdVersion := convergeEnvdVersion(ctx, envdVersions); envdVersion != "" {
+		if err := persistTemplateEnvdVersion(ctx, templateID, envdVersion); err != nil {
+			log.G(ctx).Warnf("persist template envd version fail, template=%s err=%v", templateID, err)
+		}
+	}
 	return replicas, persistErr
 }
 
-func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtypes.CreateCubeSandboxReq, opts replicaRunOptions) ReplicaStatus {
+type nodeEnvdVersion struct {
+	NodeID  string
+	Version string
+}
+
+// convergeEnvdVersion picks a single template-level envd version from the
+// per-node collection results: the first valid semver wins, and any divergence
+// across nodes is logged but not treated as an error.
+func convergeEnvdVersion(ctx context.Context, versions []nodeEnvdVersion) string {
+	chosen := ""
+	for _, item := range versions {
+		v := sanitizeEnvdVersion(item.Version)
+		if v == "" {
+			continue
+		}
+		if chosen == "" {
+			chosen = v
+			continue
+		}
+		if v != chosen {
+			log.G(ctx).Warnf("envd version mismatch across nodes: keeping=%s saw=%s node=%s", chosen, v, item.NodeID)
+		}
+	}
+	return chosen
+}
+
+// persistTemplateEnvdVersion writes the converged envd version into the template
+// definition's request_json annotation exactly once (read-modify-write), then
+// invalidates the cached request so new sandboxes inherit the annotation. It is
+// idempotent: a no-op when the annotation already holds the same value.
+func persistTemplateEnvdVersion(ctx context.Context, templateID, version string) error {
+	version = sanitizeEnvdVersion(version)
+	if templateID == "" || version == "" {
+		return nil
+	}
+	// Serialize the request_json read-modify-write against concurrent template
+	// request reads/writes for the same template to avoid a lost update.
+	return withTemplateWriteLock(templateID, func() error {
+		def, err := GetDefinition(ctx, templateID)
+		if err != nil {
+			return err
+		}
+		req := &sandboxtypes.CreateCubeSandboxReq{}
+		if err := json.Unmarshal([]byte(def.RequestJSON), req); err != nil {
+			return err
+		}
+		if req.Annotations == nil {
+			req.Annotations = make(map[string]string)
+		}
+		if req.Annotations[constants.CubeAnnotationComponentEnvdVersion] == version {
+			return nil
+		}
+		req.Annotations[constants.CubeAnnotationComponentEnvdVersion] = version
+		payload, err := json.Marshal(req)
+		if err != nil {
+			return err
+		}
+		if err := updateDefinitionFields(ctx, templateID, map[string]any{"request_json": string(payload)}); err != nil {
+			return err
+		}
+		// Drop the stale cache entry so the next GetTemplateRequest reloads the
+		// definition (now carrying the envd annotation) from the database.
+		templateDefinitionCache.Delete(templateID)
+		return nil
+	})
+}
+
+func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtypes.CreateCubeSandboxReq, opts replicaRunOptions) (ReplicaStatus, string) {
 	replica := ReplicaStatus{
 		NodeID:          target.ID(),
 		NodeIP:          target.HostIP(),
@@ -504,14 +589,14 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	if err != nil {
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
-		return replica
+		return replica, ""
 	}
 	ensureRuntimeTemplateRequest(nodeReq)
 	cubeletReq, err := sandbox.ConstructCubeletReq(ctx, nodeReq)
 	if err != nil {
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
-		return replica
+		return replica, ""
 	}
 	rsp, err := cubelet.AppSnapshot(ctx, cubelet.GetCubeletAddr(target.HostIP()), &cubeboxv1.AppSnapshotRequest{
 		CreateRequest: cubeletReq,
@@ -520,7 +605,7 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	if err != nil {
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
-		return replica
+		return replica, ""
 	}
 	if rsp.GetRet() == nil || int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
 		replica.Phase = ReplicaPhaseFailed
@@ -529,11 +614,12 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 		} else {
 			replica.ErrorMessage = "empty appsnapshot response"
 		}
-		return replica
+		return replica, ""
 	}
 	replica.Status = ReplicaStatusReady
 	replica.Phase = ReplicaPhaseReady
 	bindGuestVersionToReplica(&replica, rsp.GetGuestImageVersion(), rsp.GetAgentVersion(), rsp.GetKernelVersion())
+	envdVersion := sanitizeEnvdVersion(rsp.GetEnvdVersion())
 	// v4: AppSnapshot replica is "thin" -- physical refs are owned by cubelet's
 	// local catalog. Master only persists control-plane state (status / phase /
 	// last job / error) so we deliberately ignore SnapshotPath/RootfsVol/
@@ -541,7 +627,7 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	replica.LastErrorPhase = ""
 	replica.CleanupRequired = false
 	replica.ErrorMessage = ""
-	return replica
+	return replica, envdVersion
 }
 
 func summarizeStatus(replicas []ReplicaStatus) (status string, lastError string) {
@@ -599,25 +685,7 @@ func refreshTemplateReplicaSummary(ctx context.Context, templateID string) error
 }
 
 func createDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
-	payload, err := json.Marshal(storedReq)
-	if err != nil {
-		return err
-	}
-	model := &models.TemplateDefinition{
-		TemplateID:   templateID,
-		InstanceType: instanceType,
-		Version:      version,
-		Status:       StatusPending,
-		Kind:         TemplateKindTemplate,
-		RequestJSON:  string(payload),
-	}
-	if err = store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).Create(model).Error; err != nil {
-		if strings.Contains(err.Error(), "1062") || strings.Contains(err.Error(), "Duplicate entry") {
-			return ErrDuplicateTemplate
-		}
-		return err
-	}
-	return nil
+	return createDefinitionTx(ctx, store.db.WithContext(ctx), templateID, storedReq, instanceType, version, definitionCreateOptions{})
 }
 
 func createDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
@@ -700,6 +768,7 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 	out.ImageInfo = extractImageInfoFromRequestJSON(def.RequestJSON)
 	if latestJob, jobErr := getLatestTemplateImageJobByTemplateID(ctx, templateID); jobErr == nil && latestJob != nil {
 		out.ImageInfo = composeImageInfo(latestJob.SourceImageRef, latestJob.SourceImageDigest)
+		out.JobID = latestJobIDFromJob(latestJob)
 	}
 	out.Replicas = make([]ReplicaStatus, 0, len(replicas))
 	for _, replica := range replicas {
@@ -744,6 +813,7 @@ func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
 		LastError:    job.ErrorMessage,
 		CreatedAt:    formatUTCRFC3339(job.CreatedAt),
 		ImageInfo:    composeImageInfo(job.SourceImageRef, job.SourceImageDigest),
+		JobID:        latestJobIDFromJob(job),
 	}
 }
 
@@ -886,6 +956,18 @@ func normalizeComponentVersion(value string) string {
 		return ""
 	}
 	return value
+}
+
+// envdSemverRe matches a major.minor.patch semantic version anywhere in the
+// input; the captured group is the version we keep.
+var envdSemverRe = regexp.MustCompile(`\d+\.\d+\.\d+`)
+
+// sanitizeEnvdVersion validates an envd version reported by the collection side
+// and returns the extracted semver, or "" when absent/malformed. This is a
+// defense-in-depth check on top of the cubelet-side validation, run before the
+// value is persisted into a template annotation.
+func sanitizeEnvdVersion(value string) string {
+	return envdSemverRe.FindString(strings.TrimSpace(value))
 }
 
 func normalizeCompatStatus(status string) string {

@@ -76,6 +76,7 @@ pub const GIC_V3_ITS_SIZE: u64 = 0x02_0000;
 pub const LEGACY_SERIAL_MAPPED_IO_START: GuestAddress = MAPPED_IO_START;
 pub const LEGACY_RTC_MAPPED_IO_START: GuestAddress = GuestAddress(0x0901_0000);
 pub const LEGACY_GPIO_MAPPED_IO_START: GuestAddress = GuestAddress(0x0902_0000);
+pub const LEGACY_SYS_CTRL_MAPPED_IO_START: GuestAddress = GuestAddress(0x0903_0000);
 
 /// Space 0x0905_0000 ~ 0x0906_0000 is reserved for pcie io address
 pub const MEM_PCI_IO_START: GuestAddress = GuestAddress(0x0905_0000);

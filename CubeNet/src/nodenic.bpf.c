@@ -385,16 +385,22 @@ static int do_tcp_nat(struct __sk_buff *skb)
 	if (!__pull_headers(skb, &l2, &l3, &l4))
 		return TC_ACT_OK;
 
-	dport = l4->dest;
-	mvm_port = bpf_map_lookup_elem(&remote_port_mapping, &dport);
-	if (mvm_port)
-		return tcp_nat_proxy(skb, l2, l3, l4, mvm_port);
+	/* Port mapping is exposed only on the configured primary NIC. The same
+	 * from_world program also runs on cube-router egress, where port mapping
+	 * must be skipped and only reverse NAT sessions are relevant.
+	 */
+	if (skb->ifindex == nodenic_ifindex) {
+		dport = l4->dest;
+		mvm_port = bpf_map_lookup_elem(&remote_port_mapping, &dport);
+		if (mvm_port)
+			return tcp_nat_proxy(skb, l2, l3, l4, mvm_port);
+	}
 
 	return tcp_nat_session(skb, l2, l3, l4);
 }
 
-/* This filter will be attached to the ingress path of host NIC.
- * It performs NAT and then redirect the traffics to Sandbox TAP devices.
+/* This filter is shared by the primary NIC ingress and cube-router egress.
+ * It performs reverse NAT and redirects matching traffic to Sandbox TAPs.
  */
 SEC("tc")
 int from_world(struct __sk_buff *skb)

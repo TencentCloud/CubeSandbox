@@ -11,8 +11,6 @@ Usage:
   sudo ./deploy-manual.sh /path/to/cube-manual-update-*.tar.gz
 
 Environment overrides:
-  ONE_CLICK_TOOLBOX_ROOT     Toolbox root, default: /usr/local/services/cubetoolbox
-  ONE_CLICK_INSTALL_PREFIX   Install prefix, default: same as toolbox root
   ONE_CLICK_RUNTIME_DIR      Runtime dir, default: /var/run/cube-sandbox-one-click
   ONE_CLICK_LOG_DIR          Log dir, default: /var/log/cube-sandbox-one-click
   ONE_CLICK_MANUAL_PACKAGE_TAR
@@ -92,8 +90,7 @@ main() {
   package_tar="$(resolve_package_path "${1:-}")" || die "manual update package not specified"
   ensure_file "${package_tar}"
 
-  local toolbox_root="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
-  local install_prefix="${ONE_CLICK_INSTALL_PREFIX:-${toolbox_root}}"
+  local install_prefix="${CUBE_SANDBOX_INSTALL_ROOT}"
   local runtime_dir="${ONE_CLICK_RUNTIME_DIR:-/var/run/cube-sandbox-one-click}"
   local log_dir="${ONE_CLICK_LOG_DIR:-/var/log/cube-sandbox-one-click}"
   local backup_dir="${install_prefix}/.backup/manual-update-$(date +%Y%m%d-%H%M%S)"
@@ -149,8 +146,6 @@ main() {
   restart_core_services "${role}"
 
   if [[ "${ONE_CLICK_SKIP_QUICKCHECK:-0}" != "1" ]]; then
-    ONE_CLICK_TOOLBOX_ROOT="${install_prefix}" \
-    ONE_CLICK_RUNTIME_ENV_FILE="${runtime_env_file}" \
     ONE_CLICK_RUNTIME_DIR="${runtime_dir}" \
     ONE_CLICK_LOG_DIR="${log_dir}" \
       "${install_prefix}/scripts/one-click/quickcheck.sh"

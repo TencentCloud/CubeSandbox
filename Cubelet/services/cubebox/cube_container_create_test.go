@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -322,6 +323,58 @@ func TestAppendExt4NetfileMounts(t *testing.T) {
 		Type:           constants.MountTypeBind,
 		Options:        []string{constants.MountOptBindRO, constants.MountOptReadOnly},
 	})
+}
+
+func TestCleanupAfterEnvdInitFailurePassesExpectedContextAndRequest(t *testing.T) {
+	flowOpts := &workflow.CreateContext{CubeBoxCreated: true}
+	req := &cubebox.RunCubeSandboxRequest{RequestID: "req-cleanup"}
+	sb := &cubeboxstore.CubeBox{
+		Namespace: "ns-cleanup",
+		Metadata: cubeboxstore.Metadata{
+			ID: "sb-cleanup",
+		},
+	}
+
+	called := false
+	l := &local{
+		destroyFn: func(ctx context.Context, opts *workflow.DestroyContext) error {
+			called = true
+			assert.True(t, constants.IsFailoverOperation(ctx))
+			assert.True(t, constants.IsCubeboxCreated(ctx))
+			ns, err := namespaces.NamespaceRequired(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, "ns-cleanup", ns)
+			require.NotNil(t, opts)
+			assert.Equal(t, "sb-cleanup", opts.SandboxID)
+			require.NotNil(t, opts.DestroyInfo)
+			assert.Equal(t, "sb-cleanup", opts.DestroyInfo.SandboxID)
+			assert.Equal(t, "req-cleanup", opts.DestroyInfo.RequestID)
+			return nil
+		},
+	}
+
+	err := l.cleanupAfterEnvdInitFailure(flowOpts, req, sb)
+	require.NoError(t, err)
+	require.True(t, called)
+}
+
+func TestCleanupAfterEnvdInitFailureReturnsDestroyError(t *testing.T) {
+	flowOpts := &workflow.CreateContext{Failover: true}
+	req := &cubebox.RunCubeSandboxRequest{RequestID: "req-cleanup"}
+	sb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{
+			ID: "sb-cleanup",
+		},
+	}
+
+	l := &local{
+		destroyFn: func(ctx context.Context, opts *workflow.DestroyContext) error {
+			return fmt.Errorf("destroy failed")
+		},
+	}
+
+	err := l.cleanupAfterEnvdInitFailure(flowOpts, req, sb)
+	require.EqualError(t, err, "destroy failed")
 }
 
 func TestAppendExt4NetfileMountsNoopWithoutNetfile(t *testing.T) {

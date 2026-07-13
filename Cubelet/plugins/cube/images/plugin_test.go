@@ -30,7 +30,7 @@ import (
 )
 
 func TestSandboxImageConfigMigration(t *testing.T) {
-	image := "rancher/mirrored-pause:3.10-amd64"
+	image := "rancher/mirrored-pause:3.10"
 	grpcCri := map[string]interface{}{
 		"sandbox_image": image,
 	}

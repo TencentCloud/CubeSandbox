@@ -9,9 +9,9 @@ import (
 	"github.com/florianl/go-tc"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target amd64 localgw ../src/localgw.bpf.c -- -I../vmlinux/x86
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target amd64 mvmtap  ../src/mvmtap.bpf.c  -- -I../vmlinux/x86
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target amd64 nodenic ../src/nodenic.bpf.c -- -I../vmlinux/x86
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $GOARCH localgw ../src/localgw.bpf.c -- -I../vmlinux/$GOARCH
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $GOARCH mvmtap  ../src/mvmtap.bpf.c  -- -I../vmlinux/$GOARCH
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $GOARCH nodenic ../src/nodenic.bpf.c -- -I../vmlinux/$GOARCH
 
 // Params is used to initialize CubeVS.
 type Params struct {
@@ -24,6 +24,13 @@ type Params struct {
 	Cubegw0Ifindex uint32
 	Cubegw0IP      net.IP
 	Cubegw0MacAddr net.HardwareAddr
+	// Ordinary egress L2 rewrite and redirect behavior.
+	EgressSrcMacAddr    net.HardwareAddr
+	EgressDstMacAddr    net.HardwareAddr
+	EgressRedirectFlags uint64
+	// Ifindex and MAC address of the cube-router device. Ifindex 0 disables
+	// cube-router hook attachment.
+	CubeRouterIfindex uint32
 	// Ifindex, IP and MAC address of Node itself
 	NodeIfindex uint32
 	NodeIP      net.IP
@@ -57,6 +64,8 @@ const (
 	TCIngress = TCDirection(tc.HandleMinIngress)
 	// TCEgress attaches TC filter to the egress path.
 	TCEgress = TCDirection(tc.HandleMinEgress)
+	// BPFRedirectFlagIngress redirects packets to the peer device ingress path.
+	BPFRedirectFlagIngress uint64 = 1
 )
 
 // MVMPort is used to store and retrieve port mapping.
@@ -159,6 +168,11 @@ const (
 	globalNameCubegw0Ifindex       = "cubegw0_ifindex"
 	globalNameCubegw0MacaddrP1     = "cubegw0_macaddr_p1"
 	globalNameCubegw0MacaddrP2     = "cubegw0_macaddr_p2"
+	globalNameEgressSMacaddrP1     = "egress_smacaddr_p1"
+	globalNameEgressSMacaddrP2     = "egress_smacaddr_p2"
+	globalNameEgressDMacaddrP1     = "egress_dmacaddr_p1"
+	globalNameEgressDMacaddrP2     = "egress_dmacaddr_p2"
+	globalNameEgressRedirectFlags  = "egress_redirect_flags"
 	globalNameNodeIP               = "nodenic_ip"
 	globalNameNodeIfindex          = "nodenic_ifindex"
 	globalNameNodeMacaddrP1        = "nodenic_macaddr_p1"

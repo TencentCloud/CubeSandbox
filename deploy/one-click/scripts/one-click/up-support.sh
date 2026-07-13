@@ -25,7 +25,6 @@ MYSQL_DB="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
 MYSQL_USER="${CUBE_SANDBOX_MYSQL_USER:-cube}"
 MYSQL_PASSWORD="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
 MYSQL_ROOT_PASSWORD="${CUBE_SANDBOX_MYSQL_ROOT_PASSWORD:-cube_root}"
-SQL_DIR="${TOOLBOX_ROOT}/sql"
 SUPPORT_DIR="${TOOLBOX_ROOT}/support"
 SUPPORT_TEMPLATE="${SUPPORT_DIR}/docker-compose.yaml.template"
 SUPPORT_COMPOSE_FILE="${SUPPORT_DIR}/docker-compose.yaml"
@@ -35,7 +34,6 @@ PREPARE_ONLY="${ONE_CLICK_PREPARE_ONLY:-0}"
 SUPPORT_COMPOSE_LOCK="${RUNTIME_DIR}/support-compose.lock"
 
 ensure_dir "${SUPPORT_DIR}"
-ensure_dir "${SQL_DIR}"
 ensure_file "${SUPPORT_TEMPLATE}"
 
 render_support_compose() {
@@ -57,8 +55,7 @@ render_support_compose() {
       -e "s/__MYSQL_DB__/$(escape_sed "${MYSQL_DB}")/g" \
       -e "s/__MYSQL_USER__/$(escape_sed "${MYSQL_USER}")/g" \
       -e "s/__MYSQL_PASSWORD__/$(escape_sed "${MYSQL_PASSWORD}")/g" \
-      -e "s/__MYSQL_ROOT_PASSWORD__/$(escape_sed "${MYSQL_ROOT_PASSWORD}")/g" \
-      -e "s#__SQL_DIR__#$(escape_sed "${SQL_DIR}" '#')#g"
+      -e "s/__MYSQL_ROOT_PASSWORD__/$(escape_sed "${MYSQL_ROOT_PASSWORD}")/g"
   ) 9>"${SUPPORT_COMPOSE_LOCK}"
 }
 

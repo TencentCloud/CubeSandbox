@@ -376,6 +376,19 @@ func (m *CowVolumeManager) DeleteByKind(ctx context.Context, name, kind string) 
 	if err = deleteFn(name); err == nil || isCowSemantic(err, cubecow.SemNotFound) {
 		return nil
 	}
+	// FIX-3: the recorded kind may not match the object's real cubecow type
+	// (e.g. an incremental memory snapshot recorded/derived as a volume).
+	// cubecow returns SemInvalidArgument ("is a snapshot; use delete_snapshot")
+	// in that case. Retry with the opposite delete function so cleanup stays
+	// kind-agnostic and idempotent rather than leaking the object.
+	if isCowSemantic(err, cubecow.SemInvalidArgument) {
+		if otherFn := m.oppositeDeleteFunc(kind); otherFn != nil {
+			if retryErr := otherFn(name); retryErr == nil || isCowSemantic(retryErr, cubecow.SemNotFound) {
+				return nil
+			}
+		}
+		return err
+	}
 	if isCowSemantic(err, cubecow.SemIoError) {
 		if retryErr := deleteFn(name); retryErr == nil || isCowSemantic(retryErr, cubecow.SemNotFound) {
 			return nil
@@ -449,6 +462,20 @@ func (m *CowVolumeManager) deleteFunc(kind string) (func(string) error, error) {
 		return m.engine.DeleteSnapshot, nil
 	default:
 		return nil, fmt.Errorf("unsupported cubecow kind %q", kind)
+	}
+}
+
+// oppositeDeleteFunc returns the delete function for the other cubecow kind, so
+// DeleteByKind can recover when the recorded kind does not match the object's
+// real type. Returns nil for an unrecognized kind.
+func (m *CowVolumeManager) oppositeDeleteFunc(kind string) func(string) error {
+	switch kind {
+	case cowKindVolume:
+		return m.engine.DeleteSnapshot
+	case cowKindSnapshot:
+		return m.engine.DeleteVolume
+	default:
+		return nil
 	}
 }
 

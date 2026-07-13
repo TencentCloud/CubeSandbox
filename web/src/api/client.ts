@@ -29,6 +29,7 @@ export interface TemplateSummary {
   lastError?: string | null;
   createdAt?: string | null;
   imageInfo?: string | null;
+  jobID?: string | null;
   networkType?: string | null;
   allowInternetAccess?: boolean | null;
 }
@@ -126,6 +127,7 @@ function mapTemplateSummary(dto: TemplateSummaryDto): TemplateSummary {
     lastError: dto.lastError,
     createdAt: dto.createdAt,
     imageInfo: dto.imageInfo,
+    jobID: dto.jobID ?? null,
     networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
     allowInternetAccess: (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
   };
@@ -142,6 +144,7 @@ function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
     imageInfo: undefined,
     replicas: dto.replicas,
     createRequest: dto.createRequest,
+    jobID: (dto as unknown as { jobID?: string }).jobID ?? null,
     networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
     allowInternetAccess: (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
   };
@@ -202,6 +205,7 @@ export const sandboxApi = {
     api<SandboxLogsDto>(`/v2/sandboxes/${id}/logs`, { params }),
   create: (body: {
     templateID: string;
+    timeout?: number;
     metadata?: Record<string, string>;
   }) =>
     api<SandboxSessionDto>('/sandboxes', {
@@ -213,8 +217,29 @@ export const sandboxApi = {
 export const templateApi = {
   list: () => api<TemplateSummaryDto[]>('/templates').then((items) => items.map(mapTemplateSummary)),
   get: (id: string) => api<TemplateDetailDto>(`/templates/${id}`).then(mapTemplateDetail),
-  create: (body: { templateID?: string; image: string; instanceType?: string; writableLayerSize?: string; exposedPorts?: number[]; probePort?: number; probePath?: string; cpu?: number; memory?: number; env?: string[]; allowInternetAccess?: boolean }) =>
-    api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) }),
+  create: (body: {
+    templateID?: string;
+    image: string;
+    instanceType?: string;
+    writableLayerSize?: string;
+    exposedPorts?: number[];
+    probePort?: number;
+    probePath?: string;
+    cpu?: number;
+    memory?: number;
+    env?: string[];
+    allowInternetAccess?: boolean;
+    networkType?: string;
+    nodes?: string[];
+    registryUsername?: string;
+    registryPassword?: string;
+    command?: string[];
+    args?: string[];
+    dns?: string[];
+    allowOut?: string[];
+    denyOut?: string[];
+    with_cube_ca?: boolean;
+  }) => api<unknown>('/templates', { method: 'POST', body: JSON.stringify(body) }),
   rebuild: (id: string) => api<unknown>(`/templates/${id}`, { method: 'POST', body: JSON.stringify({}) }),
   getBuildStatus: (id: string, buildID: string) =>
     api<unknown>(`/templates/${id}/builds/${buildID}/status`),

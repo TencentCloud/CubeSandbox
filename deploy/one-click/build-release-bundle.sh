@@ -24,11 +24,12 @@ CUBE_COREDNS_TEMPLATE_DIR="${SCRIPT_DIR}/coredns"
 CUBE_SUPPORT_TEMPLATE_DIR="${SCRIPT_DIR}/support"
 CUBE_WEBUI_TEMPLATE_DIR="${SCRIPT_DIR}/webui"
 CUBE_SYSTEMD_TEMPLATE_DIR="${SCRIPT_DIR}/systemd"
+CUBE_LCM_TEMPLATE_DIR="${SCRIPT_DIR}/cube-lifecycle-manager"
 CUBE_PROXY_SOURCE_DIR="${ONE_CLICK_CUBE_PROXY_SOURCE_DIR:-${ROOT_DIR}/CubeProxy}"
 CUBE_EGRESS_SOURCE_DIR="${ONE_CLICK_CUBE_EGRESS_SOURCE_DIR:-${ROOT_DIR}/CubeEgress}"
 WEB_SOURCE_DIR="${ONE_CLICK_WEB_SOURCE_DIR:-${ROOT_DIR}/web}"
 WEB_DIST_OVERRIDE="${ONE_CLICK_WEB_DIST_DIR:-}"
-MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert}"
+MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert-v1.4.4-linux-$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')}"
 CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
 KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/cube-kernel-scf.zip"
 
@@ -48,7 +49,6 @@ CUBELET_BUILD_MODE="${ONE_CLICK_CUBELET_BUILD_MODE:-local}"
 API_BUILD_MODE="${ONE_CLICK_CUBE_API_BUILD_MODE:-local}"
 NETWORK_AGENT_BUILD_MODE="${ONE_CLICK_NETWORK_AGENT_BUILD_MODE:-local}"
 CUBEVSMAPDUMP_BUILD_MODE="${ONE_CLICK_CUBEVSMAPDUMP_BUILD_MODE:-local}"
-CUBE_PROXY_SIDECAR_BUILD_MODE="${ONE_CLICK_CUBE_PROXY_SIDECAR_BUILD_MODE:-local}"
 
 CUBEMASTER_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTER_BIN:-}"
 CUBEMASTERCLI_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTERCLI_BIN:-}"
@@ -57,7 +57,6 @@ CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
 NETWORK_AGENT_BIN_OVERRIDE="${ONE_CLICK_NETWORK_AGENT_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
-CUBE_PROXY_SIDECAR_BIN_OVERRIDE="${ONE_CLICK_CUBE_PROXY_SIDECAR_BIN:-}"
 
 go_version_ldflags() {
   local version_pkg="$1"
@@ -307,6 +306,11 @@ components["cube-egress"] = {
     "commit": cube_commit,
     "build_time": cube_build_time,
 }
+components["cube-lifecycle-manager"] = {
+    "version": cube_version,
+    "commit": cube_commit,
+    "build_time": cube_build_time,
+}
 
 # ── Guest image ──
 guest_image = {
@@ -402,12 +406,13 @@ EOF
       -e 's|^\(\s*listen \)8080\( ssl reuseport;\)|\1__CUBE_PROXY_HTTPS_PORT__\2|' \
       -e 's|^\(\s*set \$host_proxy_port \)8081;|\1__CUBE_PROXY_HTTP_PORT__;|' \
       -e 's|^\(\s*set \$host_proxy_port \)8080;|\1__CUBE_PROXY_HTTPS_PORT__;|' \
+      -e 's|^\(\s*listen \)127\.0\.0\.1:8082;|\1__CUBE_PROXY_ADMIN_LISTEN__:8082;|' \
       -e 's|/usr/local/openresty/nginx/certs/cube\.app+3\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_CERT__|' \
       -e 's|/usr/local/openresty/nginx/certs/cube\.app+3-key\.pem|/usr/local/openresty/nginx/certs/__CUBE_PROXY_SSL_KEY__|' \
       "${src}"
   } > "${dst}"
 
-  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
+  for token in __CUBE_PROXY_HTTP_PORT__ __CUBE_PROXY_HTTPS_PORT__ __CUBE_PROXY_ADMIN_LISTEN__ __CUBE_PROXY_SSL_CERT__ __CUBE_PROXY_SSL_KEY__; do
     if ! grep -q -F "${token}" "${dst}"; then
       die "generated nginx.conf.template is missing placeholder ${token}; upstream CubeProxy/nginx.conf may have changed"
     fi
@@ -486,33 +491,6 @@ build_or_copy_go_binary \
   "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeNet/cubevs" "${CUBEVSMAPDUMP_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubevsmapdump" ./cmd/cubevsmapdump
-# Auto-pause sidecar ships embedded inside the cube-proxy container image
-# (CubeProxy/Dockerfile COPY bin/cube-proxy-sidecar). The cube-proxy image
-# is openresty:alpine-fat (musl libc), so the binary MUST be statically
-# linked — a default `go build` produces a glibc-linked binary that fails
-# at exec with rc=127 / "required file not found" on musl. Force
-# CGO_ENABLED=0 + -tags netgo,osusergo to get a pure-Go static binary.
-# Skip the generic build_or_copy_go_binary helper (which doesn't expose
-# these knobs) and call build directly here.
-if [[ -n "${CUBE_PROXY_SIDECAR_BIN_OVERRIDE}" ]]; then
-  log "using prebuilt cube-proxy-sidecar: ${CUBE_PROXY_SIDECAR_BIN_OVERRIDE}"
-  copy_file "${CUBE_PROXY_SIDECAR_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cube-proxy-sidecar"
-else
-  log "building cube-proxy-sidecar (static, CGO_ENABLED=0)"
-  case "${CUBE_PROXY_SIDECAR_BUILD_MODE}" in
-    local)
-      require_cmd go
-      (cd "${ROOT_DIR}/CubeProxy/sidecar" && \
-        go mod download && \
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-          go build -trimpath -tags 'netgo osusergo' -ldflags '-s -w' \
-            -o "${CORE_BIN_DIR}/cube-proxy-sidecar" ./cmd/sidecar) >&2
-      ;;
-    *)
-      die "unsupported cube-proxy-sidecar build mode: ${CUBE_PROXY_SIDECAR_BUILD_MODE}"
-      ;;
-  esac
-fi
 
 mkdir -p \
   "${PACKAGE_ROOT}/network-agent/bin" \
@@ -523,6 +501,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/Cubelet/config" \
   "${PACKAGE_ROOT}/Cubelet/dynamicconf" \
   "${PACKAGE_ROOT}/cubeproxy" \
+  "${PACKAGE_ROOT}/cube-lifecycle-manager" \
   "${PACKAGE_ROOT}/coredns" \
   "${PACKAGE_ROOT}/webui" \
   "${PACKAGE_ROOT}/webui/dist" \
@@ -535,14 +514,21 @@ mkdir -p \
   "${PACKAGE_ROOT}/scripts/systemd" \
   "${PACKAGE_ROOT}/scripts/cube-egress" \
   "${PACKAGE_ROOT}/cube-egress" \
-  "${PACKAGE_ROOT}/sql"
+  "${PACKAGE_ROOT}/terraform/tencentcloud"
 
 copy_file "${CORE_BIN_DIR}/network-agent" "${PACKAGE_ROOT}/network-agent/bin/network-agent"
 copy_file "${CORE_BIN_DIR}/cubevsmapdump" "${PACKAGE_ROOT}/network-agent/bin/cubevsmapdump"
 copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/network-agent/network-agent.yaml"
 
+# Lay down the one-click CubeAPI assets (Dockerfile, etc.) first, then copy the
+# binary on top: copy_dir_contents rm -rf's the destination, so copying the
+# binary afterwards keeps both coexisting in the package.
+copy_dir_contents "${SCRIPT_DIR}/CubeAPI" "${PACKAGE_ROOT}/CubeAPI"
 copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
 
+# Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the
+# copy_dir_contents wipe and coexist with the one-click CubeMaster assets.
+copy_dir_contents "${SCRIPT_DIR}/CubeMaster" "${PACKAGE_ROOT}/CubeMaster"
 copy_file "${CORE_BIN_DIR}/cubemaster" "${PACKAGE_ROOT}/CubeMaster/bin/cubemaster"
 copy_file "${CORE_BIN_DIR}/cubemastercli" "${PACKAGE_ROOT}/CubeMaster/bin/cubemastercli"
 copy_file "${ROOT_DIR}/configs/single-node/cubemaster.yaml" "${PACKAGE_ROOT}/CubeMaster/conf.yaml"
@@ -564,25 +550,22 @@ copy_dir_contents "${CUBE_PROXY_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cubeproxy"
 copy_dir_contents "${CUBE_COREDNS_TEMPLATE_DIR}" "${PACKAGE_ROOT}/coredns"
 copy_dir_contents "${CUBE_WEBUI_TEMPLATE_DIR}" "${PACKAGE_ROOT}/webui"
 copy_dir_contents "${CUBE_SYSTEMD_TEMPLATE_DIR}" "${PACKAGE_ROOT}/systemd"
+# cube-proxy runtime pulls a pre-published image (CubeProxy/Makefile `make
+# push` → cube-sandbox-{int,cn}.tencentcloudcr.com). build-context is still
+# shipped so terraform/tencentcloud/build_images.sh can rebuild into a private
+# TCR when TENCENTCLOUD_USE_TCR=true.
 copy_dir_contents "${CUBE_PROXY_SOURCE_DIR}" "${PACKAGE_ROOT}/cubeproxy/build-context"
 rm -f "${PACKAGE_ROOT}/cubeproxy/build-context/Makefile"
-# The build-context only needs the prebuilt sidecar binary, not the Go
-# source: the runtime image uses `COPY bin/cube-proxy-sidecar` (no Go
-# toolchain in the runtime stage). Strip the source tree to keep the
-# release bundle lean.
-rm -rf "${PACKAGE_ROOT}/cubeproxy/build-context/sidecar"
-# Drop the prebuilt sidecar binary into the build context so the Dockerfile's
-# COPY bin/cube-proxy-sidecar step has something to grab. Path matches the
-# in-tree CubeProxy/Makefile prebuild-sidecar layout (CubeProxy/bin/) so the
-# Dockerfile is identical for both build flows.
-mkdir -p "${PACKAGE_ROOT}/cubeproxy/build-context/bin"
-copy_file \
-  "${CORE_BIN_DIR}/cube-proxy-sidecar" \
-  "${PACKAGE_ROOT}/cubeproxy/build-context/bin/cube-proxy-sidecar"
-chmod +x "${PACKAGE_ROOT}/cubeproxy/build-context/bin/cube-proxy-sidecar"
 generate_cube_proxy_nginx_template \
   "${CUBE_PROXY_SOURCE_DIR}/nginx.conf" \
   "${PACKAGE_ROOT}/cubeproxy/nginx.conf.template"
+
+# cube-lifecycle-manager: docker-compose template only. Like cube-egress,
+# the runtime image is pre-published to cube-sandbox-{int,cn}.tencentcloudcr.com
+# by `make push` from the cube-lifecycle-manager/ source tree; up-cube-
+# lifecycle-manager.sh `docker pull`s it at deploy time. No source ships
+# inside the bundle.
+copy_dir_contents "${CUBE_LCM_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cube-lifecycle-manager"
 build_web_dist "${PACKAGE_ROOT}/webui/dist"
 copy_dir_contents "${CUBE_SUPPORT_TEMPLATE_DIR}" "${PACKAGE_ROOT}/support"
 copy_file "${MKCERT_BIN_ASSET}" "${PACKAGE_ROOT}/support/bin/mkcert"
@@ -597,19 +580,20 @@ copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image" "${PACKAGE_ROOT}/cube-image
 # siblings), so the runtime needs every script in this directory.
 copy_dir_contents "${SCRIPT_DIR}/scripts/one-click" "${PACKAGE_ROOT}/scripts/one-click"
 copy_dir_contents "${SCRIPT_DIR}/scripts/systemd" "${PACKAGE_ROOT}/scripts/systemd"
+# scripts/{one-click,systemd}/common.sh both `source ../common/validation.sh`,
+# so the shared scripts/common helpers must ship alongside them in the package.
+copy_dir_contents "${SCRIPT_DIR}/scripts/common" "${PACKAGE_ROOT}/scripts/common"
 # cube-diag is the documented diagnostic entry point (see docs/guide/service-management.md);
 # it must ship in the release bundle so the install layout exposes
 # ${INSTALL_PREFIX}/scripts/cube-diag/collect-logs.sh.
 copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cube-diag"
-# CubeEgress's host-side iptables/sysctl init script. Lives in the
+# CubeEgress's host-side iptables/route init script. Lives in the
 # CubeEgress repo subtree (CubeEgress/scripts/) — copy a single file
 # rather than the whole dir so we don't pull in the legacy
 # cube-proxy-net.service unit that conflicts with our deploy/one-click
 # integration.
 copy_file "${CUBE_EGRESS_SOURCE_DIR}/scripts/cube-proxy-iptables-init.sh" \
           "${PACKAGE_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh"
-mkdir -p "${PACKAGE_ROOT}/scripts/common"
-copy_file "${SCRIPT_DIR}/scripts/common/validation.sh" "${PACKAGE_ROOT}/scripts/common/validation.sh"
 
 # Host-side version marker for cube-egress: cubelet's versioninfo.Collector
 # detects the component by the presence of cube-egress/version and reports
@@ -617,7 +601,40 @@ copy_file "${SCRIPT_DIR}/scripts/common/validation.sh" "${PACKAGE_ROOT}/scripts/
 # declared-vs-actual comparison in CubeMaster's version matrix works.
 printf '%s\n' "${DIST_VERSION}" > "${PACKAGE_ROOT}/cube-egress/version"
 
-copy_dir_contents "${SCRIPT_DIR}/sql" "${PACKAGE_ROOT}/sql"
+copy_dir_contents "${SCRIPT_DIR}/terraform/tencentcloud" "${PACKAGE_ROOT}/terraform/tencentcloud"
+# Strip any developer-local terraform state / kubeconfig / SSH keys / TLS
+# material / saved credentials so they never ship inside sandbox-package either.
+rm -rf \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/.terraform" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/.bin" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/.kube" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/.ssh" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/cubeproxy-certs"
+# .env holds the operator's saved selections INCLUDING passwords (mode 600); it
+# must never end up in a published tarball. Match every secret-bearing pattern
+# the deployer's .gitignore anticipates (.env / .env.* / *.pem / *.key /
+# credentials* / *.tfvars[.json] / state).
+find "${PACKAGE_ROOT}/terraform/tencentcloud" -maxdepth 1 -type f \
+  \( -name "*.tfstate" -o -name "*.tfstate.*" -o -name ".terraform.lock.hcl" \
+     -o -name ".env" -o -name ".env.*" -o -name "*.pem" -o -name "*.key" \
+     -o -name "credentials*" -o -name "*.tfvars" -o -name "*.tfvars.json" \) -delete 2>/dev/null || true
+# tke-addons.tf renders cube-webui's nginx config from webui-nginx.conf; it is
+# not maintained separately but derived from the canonical webui/nginx.conf so
+# the two never drift.
+copy_file "${CUBE_WEBUI_TEMPLATE_DIR}/nginx.conf" "${PACKAGE_ROOT}/terraform/tencentcloud/webui-nginx.conf"
+# tke-addons.tf also mounts cube-proxy's nginx.conf; render the Terraform copy
+# with placeholders so the Kubernetes deployment can bind the admin listener on
+# the Pod IP while preserving CubeProxy/nginx.conf as the canonical source.
+generate_cube_proxy_nginx_template \
+  "${CUBE_PROXY_SOURCE_DIR}/nginx.conf" \
+  "${PACKAGE_ROOT}/terraform/tencentcloud/cubeproxy-nginx.conf"
+# Verify the terraform deployer actually shipped (mirrors the guarding done for
+# the other components), so a renamed/emptied source dir fails the build loudly
+# instead of producing a bundle with an absent/broken deployer.
+for _tf in create.sh destroy.sh build_images.sh lib-state-sync.sh lib-phases.sh \
+  main.tf variables.tf tke-addons.tf query_outputs.tf webui-nginx.conf cubeproxy-nginx.conf; do
+  ensure_file "${PACKAGE_ROOT}/terraform/tencentcloud/${_tf}"
+done
 
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;
@@ -625,6 +642,7 @@ find "${PACKAGE_ROOT}/scripts/systemd" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/common" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-egress" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
 tar -C "${WORK_ROOT}" -czf "${PACKAGE_TAR}" "sandbox-package"
@@ -638,9 +656,51 @@ copy_file "${SCRIPT_DIR}/smoke.sh" "${DIST_ROOT}/smoke.sh"
 copy_file "${SCRIPT_DIR}/online-install.sh" "${DIST_ROOT}/online-install.sh"
 copy_file "${SCRIPT_DIR}/env.example" "${DIST_ROOT}/env.example"
 copy_file "${SCRIPT_DIR}/lib/common.sh" "${DIST_ROOT}/lib/common.sh"
-copy_file "${SCRIPT_DIR}/scripts/common/validation.sh" "${DIST_ROOT}/scripts/common/validation.sh"
+# lib/common.sh `source`s ${ONE_CLICK_DIR}/scripts/common/validation.sh, so the
+# shared helpers must ship at the bundle top level too (install.sh /
+# install-compute.sh source lib/common.sh from here).
+copy_dir_contents "${SCRIPT_DIR}/scripts/common" "${DIST_ROOT}/scripts/common"
 copy_file "${PACKAGE_TAR}" "${DIST_ROOT}/assets/package/sandbox-package.tar.gz"
 copy_file "${KERNEL_ARTIFACT_ZIP}" "${DIST_ROOT}/assets/kernel-artifacts/cube-kernel-scf.zip"
+
+# Ship the Tencent Cloud terraform cluster deployer at the bundle top level so
+# that, right after `tar xzf cube-sandbox-one-click-<version>.tar.gz`, the user
+# can run:
+#     cd cube-sandbox-one-click-<version>
+#     ./terraform/tencentcloud/create.sh
+# to spin up a clustered CubeSandbox (TKE control plane + CVM compute nodes).
+# The same files are also embedded inside sandbox-package (consumed by the
+# jumpserver-side build_images.sh), but those stay buried in the inner package
+# until it is extracted; surfacing them here makes the deployer reachable.
+copy_dir_contents "${SCRIPT_DIR}/terraform/tencentcloud" "${DIST_ROOT}/terraform/tencentcloud"
+# Never leak a developer's local terraform state, kubeconfig, SSH keys,
+# TLS material or saved credentials (.env) into the release; create.sh
+# regenerates them.
+rm -rf \
+  "${DIST_ROOT}/terraform/tencentcloud/.terraform" \
+  "${DIST_ROOT}/terraform/tencentcloud/.bin" \
+  "${DIST_ROOT}/terraform/tencentcloud/.kube" \
+  "${DIST_ROOT}/terraform/tencentcloud/.ssh" \
+  "${DIST_ROOT}/terraform/tencentcloud/cubeproxy-certs"
+find "${DIST_ROOT}/terraform/tencentcloud" -maxdepth 1 -type f \
+  \( -name "*.tfstate" -o -name "*.tfstate.*" -o -name ".terraform.lock.hcl" \
+     -o -name ".env" -o -name ".env.*" -o -name "*.pem" -o -name "*.key" \
+     -o -name "credentials*" -o -name "*.tfvars" -o -name "*.tfvars.json" \) -delete 2>/dev/null || true
+# Derive cube-webui's nginx config from the canonical webui/nginx.conf (see the
+# sandbox-package copy above) so create.sh can apply tke-addons.tf straight from
+# the extracted bundle without the source tree present.
+copy_file "${CUBE_WEBUI_TEMPLATE_DIR}/nginx.conf" "${DIST_ROOT}/terraform/tencentcloud/webui-nginx.conf"
+# Ship the placeholder-rendered cube-proxy nginx config for Terraform too.
+generate_cube_proxy_nginx_template \
+  "${CUBE_PROXY_SOURCE_DIR}/nginx.conf" \
+  "${DIST_ROOT}/terraform/tencentcloud/cubeproxy-nginx.conf"
+# Verify the top-level terraform deployer copy shipped intact too.
+for _tf in create.sh destroy.sh build_images.sh lib-state-sync.sh lib-phases.sh \
+  main.tf variables.tf tke-addons.tf query_outputs.tf webui-nginx.conf cubeproxy-nginx.conf; do
+  ensure_file "${DIST_ROOT}/terraform/tencentcloud/${_tf}"
+done
+find "${DIST_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
+
 chmod +x \
   "${DIST_ROOT}/install.sh" \
   "${DIST_ROOT}/install-compute.sh" \

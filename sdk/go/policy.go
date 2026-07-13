@@ -63,10 +63,10 @@ const (
 		"outbound traffic or include '0.0.0.0/0' in deny_out to block all other traffic."
 )
 
-// validateAllowOutDomainsRequireDenyAll mirrors the Python guard: allowing
-// specific domains is meaningful only when all other egress is denied, either
-// by disabling public traffic (defaultDenyAll) or by listing 0.0.0.0/0 in
-// denyOut. Returns nil when allowOut carries no domain target.
+// validateAllowOutDomainsRequireDenyAll mirrors the current server contract:
+// allowing specific domains is meaningful only when all other egress is denied,
+// either by allowInternetAccess=false (defaultDenyAll) or by listing
+// 0.0.0.0/0 in denyOut. Returns nil when allowOut carries no domain target.
 func validateAllowOutDomainsRequireDenyAll(allowOut, denyOut []string, defaultDenyAll bool) error {
 	hasDomain := false
 	for _, target := range allowOut {

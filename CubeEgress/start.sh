@@ -18,9 +18,66 @@ PLACEHOLDER_CERT="${CA_DIR}/placeholder.crt"
 PLACEHOLDER_KEY="${CA_DIR}/placeholder.key"
 AUDIT_DIR="/data/log/cube-egress"
 NGINX_BIN="/usr/local/openresty/nginx/sbin/nginx"
+NGINX_CONF="/usr/local/openresty/nginx/conf/nginx.conf"
 
 log()   { printf '[entrypoint] %s\n' "$*" >&2; }
 fatal() { log "FATAL: $*"; exit 1; }
+
+validate_ipv4_literal() {
+    local value="$1"
+    local name="${2:-IPv4 address}"
+    local a b c d octet
+
+    [[ "${value}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        || fatal "invalid ${name}: ${value}"
+    IFS=. read -r a b c d <<< "${value}"
+    for octet in "${a}" "${b}" "${c}" "${d}"; do
+        [[ "${octet}" =~ ^[0-9]{1,3}$ ]] || fatal "invalid ${name}: ${value}"
+        (( 10#${octet} >= 0 && 10#${octet} <= 255 )) || fatal "invalid ${name}: ${value}"
+    done
+}
+
+sandbox_gateway_ip_from_cidr() {
+    local cidr="$1"
+    local ip="${cidr%/*}"
+    local mask="${cidr#*/}"
+    local a b c d ip_int host_bits mask_int network_int
+
+    [[ "${cidr}" == */* && "${ip}" != "${cidr}" && "${mask}" =~ ^[0-9]+$ ]] \
+        || fatal "invalid CUBE_SANDBOX_NETWORK_CIDR: ${cidr}"
+    validate_ipv4_literal "${ip}" "CUBE_SANDBOX_NETWORK_CIDR address"
+    IFS=. read -r a b c d <<< "${ip}"
+
+    host_bits=$(( 32 - 10#${mask} ))
+    (( host_bits >= 1 && host_bits <= 31 )) || fatal "invalid CUBE_SANDBOX_NETWORK_CIDR mask: ${cidr}"
+    ip_int=$(( (10#${a} << 24) + (10#${b} << 16) + (10#${c} << 8) + 10#${d} ))
+    mask_int=$(( (0xFFFFFFFF << host_bits) & 0xFFFFFFFF ))
+    network_int=$(( ip_int & mask_int ))
+
+    printf '%s.%s.%s.%s\n' \
+        "$(( ((network_int + 1) >> 24) & 255 ))" \
+        "$(( ((network_int + 1) >> 16) & 255 ))" \
+        "$(( ((network_int + 1) >> 8) & 255 ))" \
+        "$(( (network_int + 1) & 255 ))"
+}
+
+configure_listen_ip() {
+    local sandbox_network_cidr="${CUBE_SANDBOX_NETWORK_CIDR:-192.168.0.0/18}"
+    local listen_ip
+    listen_ip="$(sandbox_gateway_ip_from_cidr "${sandbox_network_cidr}")"
+    validate_ipv4_literal "${listen_ip}" "CubeEgress listen IP"
+
+    [[ -f "${NGINX_CONF}" ]] || fatal "nginx config missing: ${NGINX_CONF}"
+    sed -i -E \
+        -e "s/listen [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:8080 transparent reuseport;/listen ${listen_ip}:8080 transparent reuseport;/" \
+        -e "s/listen [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:8443 ssl transparent reuseport;/listen ${listen_ip}:8443 ssl transparent reuseport;/" \
+        "${NGINX_CONF}"
+    grep -Fq "listen ${listen_ip}:8080 transparent reuseport;" "${NGINX_CONF}" \
+        || fatal "failed to render HTTP listen IP in ${NGINX_CONF}"
+    grep -Fq "listen ${listen_ip}:8443 ssl transparent reuseport;" "${NGINX_CONF}" \
+        || fatal "failed to render HTTPS listen IP in ${NGINX_CONF}"
+    log "nginx transparent listen IP: ${listen_ip}"
+}
 
 # -------- 0. Must run as root --------
 # Several downstream steps require uid 0:
@@ -108,7 +165,8 @@ if (( (owner_bits & 3) != 3 )); then
     fatal "audit dir mode ${audit_mode} lacks owner rwx bits: ${AUDIT_DIR}"
 fi
 
-# -------- 5. nginx config validity --------
+# -------- 5. Render listener IP and validate nginx config --------
+configure_listen_ip
 log "Running nginx -t"
 "${NGINX_BIN}" -t
 

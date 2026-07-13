@@ -22,6 +22,7 @@ type TemplateDefinition struct {
 	StorageBackend            string `json:"storage_backend" gorm:"column:storage_backend"`
 	Retain                    bool   `json:"retain" gorm:"column:retain"`
 	RootfsSizeBytesAtSnapshot uint64 `json:"rootfs_size_bytes_at_snapshot" gorm:"column:rootfs_size_bytes_at_snapshot"`
+	RootfsArtifactID          string `json:"rootfs_artifact_id" gorm:"column:rootfs_artifact_id"`
 	RequestJSON               string `json:"request_json" gorm:"column:request_json"`
 	LastError                 string `json:"last_error" gorm:"column:last_error"`
 }

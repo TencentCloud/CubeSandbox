@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SYSTEMD_HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
+TOOLBOX_ROOT="/usr/local/services/cubetoolbox"
 ENV_FILE="${ONE_CLICK_RUNTIME_ENV_FILE:-${TOOLBOX_ROOT}/.one-click.env}"
 UNIT_SOURCE_DIR="${ONE_CLICK_SYSTEMD_UNIT_SOURCE_DIR:-${TOOLBOX_ROOT}/systemd}"
 UNIT_INSTALL_DIR="${ONE_CLICK_SYSTEMD_UNIT_INSTALL_DIR:-/etc/systemd/system}"
@@ -130,7 +130,10 @@ resolve_control_plane_cubemaster_addr() {
   local addr="${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}"
   local ip="${ONE_CLICK_CONTROL_PLANE_IP:-}"
   local default_addr="${CUBEMASTER_ADDR:-127.0.0.1:8089}"
-  local port="${default_addr##*:}"
+  # 8089 is the cubemaster protocol port (a fixed constant), NOT derived from
+  # CUBEMASTER_ADDR -- that variable is the control node's local listen address;
+  # using its port here was an accidental coupling that broke when they differed.
+  local cubemaster_port=8089
 
   if [[ "${role}" != "compute" ]]; then
     printf '%s\n' "${default_addr}"
@@ -145,8 +148,8 @@ resolve_control_plane_cubemaster_addr() {
 
   if [[ -n "${ip}" ]]; then
     validate_ipv4_literal "${ip}" "ONE_CLICK_CONTROL_PLANE_IP"
-    validate_host_port "${ip}:${port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
-    printf '%s:%s\n' "${ip}" "${port}"
+    validate_host_port "${ip}:${cubemaster_port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
+    printf '%s:%s\n' "${ip}" "${cubemaster_port}"
     return 0
   fi
 
@@ -292,6 +295,60 @@ stop_pid_with_timeout() {
 
   if kill -0 "${pid}" >/dev/null 2>&1; then
     kill "${force_signal}" "${pid}" >/dev/null 2>&1 || true
+  fi
+}
+
+# True if the process ${pid} was launched with exactly the argument ${want}
+# (NUL-delimited match against /proc/<pid>/cmdline). Unlike a `pgrep -f` substring
+# scan this is an exact, per-argument comparison, so it cannot be fooled by an
+# unrelated process that merely embeds the string somewhere in its argv, and it
+# does not treat the argument as a regex.
+pid_cmdline_has_arg() {
+  local pid="$1"
+  local want="$2"
+  local cmdline="/proc/${pid}/cmdline"
+  local arg
+
+  [[ -n "${pid}" && -r "${cmdline}" ]] || return 1
+  while IFS= read -r -d '' arg; do
+    [[ "${arg}" == "${want}" ]] && return 0
+  done < "${cmdline}"
+  return 1
+}
+
+# Stop a dnsmasq instance we launched directly, identified by its config-file
+# path. Only signal a PID we can confirm belongs to that instance: prefer the
+# pid-file when it still points at our process, otherwise scan the process table
+# for candidates. In both cases the candidate is confirmed by an exact
+# "--conf-file=<path>" argv match (pid_cmdline_has_arg), not a substring/regex
+# scan, so we never SIGTERM/SIGKILL an unrelated process the kernel recycled the
+# PID onto, or one that merely has "dnsmasq" (or the path) somewhere in its argv.
+stop_dnsmasq_by_conf() {
+  local pid_file="$1"
+  local conf_path="$2"
+  local timeout="${3:-10}"
+  local want_arg="--conf-file=${conf_path}"
+  local pid=""
+
+  if [[ -f "${pid_file}" ]]; then
+    pid="$(<"${pid_file}")"
+    if [[ -z "${pid}" ]] || ! pid_cmdline_has_arg "${pid}" "${want_arg}"; then
+      pid=""
+    fi
+  fi
+  if [[ -z "${pid}" ]]; then
+    # pgrep -f only narrows the candidate set (its argument is a regex and can
+    # over-match); pid_cmdline_has_arg then confirms each candidate exactly.
+    local cand
+    for cand in $(pgrep -f -- "conf-file=${conf_path}" 2>/dev/null || true); do
+      if pid_cmdline_has_arg "${cand}" "${want_arg}"; then
+        pid="${cand}"
+        break
+      fi
+    done
+  fi
+  if [[ -n "${pid}" ]]; then
+    stop_pid_with_timeout "${pid}" "${timeout}" || true
   fi
 }
 

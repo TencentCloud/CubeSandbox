@@ -3,12 +3,11 @@
 //
 
 use std::collections::HashMap;
-
 use uuid::Uuid;
 
 use super::validate_allow_out_domains_require_deny_all;
 use crate::{
-    constants::ENVD_VERSION,
+    constants::{ENVD_VERSION_ANNOTATION, ENVD_VERSION_FALLBACK},
     cubemaster::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
@@ -27,7 +26,36 @@ const RET_CODE_OK: i32 = 0;
 const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
+const RET_CODE_MASTER_INTERNAL: i32 = 130593;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
+const ENV_VAR_NAME_MAX_LEN: usize = 256;
+const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
+
+/// Environment variable names that may compromise sandbox isolation if injected
+/// at the runtime level (loader overrides, language runtime paths).
+const FORBIDDEN_ENV_NAMES: &[&str] = &[
+    "BASH_ENV",
+    "ENV",
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "LD_ORIGIN_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "GCONV_PATH",
+    "PATH",
+    "PYTHONPATH",
+    "NODE_PATH",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "GEM_PATH",
+    "RUBYOPT",
+    "RUBYLIB",
+    "PERL5LIB",
+    "PERLLIB",
+    "CLASSPATH",
+    "IFS",
+];
 
 #[derive(Clone)]
 pub struct SandboxService {
@@ -90,12 +118,15 @@ impl SandboxService {
             .and_then(|s| s.started_at.as_ref().cloned())
             .or(d.started_at)
             .unwrap_or_else(chrono::Utc::now);
+        // Leave end_at as None for never-timeout sandboxes (CubeMaster returns
+        // no end instant) instead of collapsing it onto started_at, which
+        // would read as "already expired".
         let end_at = summary
             .as_ref()
             .and_then(|s| s.end_at.as_ref().cloned())
-            .or(d.end_at)
-            .unwrap_or(started_at);
+            .or(d.end_at);
 
+        let envd_version = envd_version_from_annotations(&d.annotations);
         Ok(SandboxDetail {
             template_id: d.template_id,
             alias: None,
@@ -103,7 +134,7 @@ impl SandboxService {
             client_id: d.host_id,
             started_at,
             end_at,
-            envd_version: ENVD_VERSION.to_string(),
+            envd_version,
             envd_access_token: None,
             domain: Some(self.sandbox_domain.clone()),
             cpu_count: d.cpu_count,
@@ -116,7 +147,20 @@ impl SandboxService {
     }
 
     pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox> {
-        let template_id = body.template_id.clone();
+        let NewSandbox {
+            template_id,
+            timeout,
+            lifecycle,
+            allow_internet_access,
+            network,
+            metadata,
+            distribution_scope,
+            env_vars,
+            ..
+        } = body;
+        if let Some(env_vars) = env_vars.as_ref() {
+            validate_env_vars(env_vars)?;
+        }
         let mut annotations = HashMap::from([
             (
                 "cube.master.appsnapshot.template.id".to_string(),
@@ -128,7 +172,7 @@ impl SandboxService {
             ),
         ]);
 
-        let labels = body.metadata.map(|mut meta| {
+        let labels = metadata.map(|mut meta| {
             if let Some(value) = meta.remove(HOSTDIR_MOUNT_KEY) {
                 annotations.insert(HOSTDIR_MOUNT_KEY.to_string(), value);
             }
@@ -136,13 +180,12 @@ impl SandboxService {
         });
 
         let cube_network_config =
-            build_cube_network_config(body.allow_internet_access, body.network.as_ref())?;
+            build_cube_network_config(allow_internet_access, network.as_ref())?;
 
         // Derive the two CubeMaster-side bools from the e2b-shaped lifecycle
         // object. Absent lifecycle keeps today's behaviour: idle sandboxes
         // are killed (auto_pause = false), and auto_resume defaults off.
-        let (auto_pause, auto_resume) = body
-            .lifecycle
+        let (auto_pause, auto_resume) = lifecycle
             .as_ref()
             .map(|lc| {
                 use crate::models::SandboxOnTimeout;
@@ -156,10 +199,14 @@ impl SandboxService {
         let req = CreateSandboxRequest {
             request_id: new_request_id(),
             instance_type: self.instance_type.clone(),
-            timeout: Some(body.timeout),
+            // Pass the client's timeout through as-is: None → field omitted so
+            // CubeMaster applies its server default; Some(0) → immediate
+            // timeout; Some(n) → explicit TTL. No SDK/API-side default fill.
+            timeout,
             annotations,
             labels,
-            distribution_scope: body.distribution_scope,
+            create_time_env_vars: env_vars,
+            distribution_scope,
             volumes: None,
             containers: vec![],
             exposed_ports: vec![],
@@ -177,7 +224,14 @@ impl SandboxService {
 
         resp.ret.into_result().map_err(internal_error)?;
 
-        Ok(self.sandbox_response(template_id, resp.sandbox_id, resp.request_id))
+        let envd_version = envd_version_from_annotations(&resp.ext_info);
+        Ok(self.sandbox_response(
+            template_id,
+            resp.sandbox_id,
+            resp.request_id,
+            envd_version,
+            resp.traffic_access_token,
+        ))
     }
 
     pub async fn kill_sandbox(&self, sandbox_id: &str) -> AppResult<()> {
@@ -190,11 +244,24 @@ impl SandboxService {
             annotations: None,
         };
 
-        let resp = self
-            .cubemaster
-            .delete_sandbox(&req)
-            .await
-            .map_err(internal_error)?;
+        let resp = match self.cubemaster.delete_sandbox(&req).await {
+            Ok(resp) => resp,
+            Err(
+                e @ CubeMasterError::Api {
+                    ret_code: RET_CODE_MASTER_INTERNAL,
+                    ..
+                },
+            ) => match self.fetch_sandbox_detail(sandbox_id).await {
+                Ok(detail) if detail.status == SandboxStatus::Paused => {
+                    return Err(AppError::Conflict(format!(
+                        "sandbox {} is paused; resume it before deleting",
+                        sandbox_id
+                    )));
+                }
+                _ => return Err(internal_error(e)),
+            },
+            Err(e) => return Err(sandbox_not_found_or_internal(e, sandbox_id)),
+        };
 
         resp.ret
             .into_result()
@@ -218,10 +285,14 @@ impl SandboxService {
         )
     }
 
-    pub async fn resume_sandbox(&self, sandbox_id: &str, timeout: i32) -> AppResult<Sandbox> {
+    pub async fn resume_sandbox(
+        &self,
+        sandbox_id: &str,
+        timeout: Option<i32>,
+    ) -> AppResult<Sandbox> {
         let resp = self
             .cubemaster
-            .update_sandbox(&self.build_update_request(sandbox_id, "resume", Some(timeout)))
+            .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
             .await
             .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
 
@@ -233,16 +304,31 @@ impl SandboxService {
         )?;
 
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
-        Ok(self.sandbox_response(d.template_id, sandbox_id.to_string(), d.host_id))
+        let envd_version = envd_version_from_annotations(&d.annotations);
+        // resume/connect paths reload the sandbox via fetch_sandbox_detail,
+        // which does not surface the traffic_access_token. The token only
+        // matters at create time (so the caller can persist it); afterward
+        // CubeProxy reads it directly from Redis. None here is correct.
+        Ok(self.sandbox_response(
+            d.template_id,
+            sandbox_id.to_string(),
+            d.host_id,
+            envd_version,
+            None,
+        ))
     }
 
-    pub async fn connect_sandbox(&self, sandbox_id: &str, timeout: i32) -> AppResult<Sandbox> {
+    pub async fn connect_sandbox(
+        &self,
+        sandbox_id: &str,
+        timeout: Option<i32>,
+    ) -> AppResult<Sandbox> {
         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
 
         if d.status == SandboxStatus::Paused {
             let resp = self
                 .cubemaster
-                .update_sandbox(&self.build_update_request(sandbox_id, "resume", Some(timeout)))
+                .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
                 .await
                 .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
 
@@ -256,7 +342,14 @@ impl SandboxService {
             d = self.fetch_sandbox_detail(sandbox_id).await?;
         }
 
-        Ok(self.sandbox_response(d.template_id, sandbox_id.to_string(), d.host_id))
+        let envd_version = envd_version_from_annotations(&d.annotations);
+        Ok(self.sandbox_response(
+            d.template_id,
+            sandbox_id.to_string(),
+            d.host_id,
+            envd_version,
+            None,
+        ))
     }
 
     pub async fn get_logs(
@@ -447,15 +540,19 @@ impl SandboxService {
         template_id: String,
         sandbox_id: String,
         client_id: String,
+        envd_version: String,
+        traffic_access_token: Option<String>,
     ) -> Sandbox {
         Sandbox {
             template_id,
             sandbox_id,
             alias: None,
             client_id,
-            envd_version: ENVD_VERSION.to_string(),
+            envd_version,
             envd_access_token: None,
-            traffic_access_token: None,
+            // Empty string from CubeMaster (publicly reachable sandbox) is
+            // normalized to None so the JSON field is omitted on the wire.
+            traffic_access_token: traffic_access_token.filter(|s| !s.is_empty()),
             domain: Some(self.sandbox_domain.clone()),
         }
     }
@@ -487,6 +584,56 @@ impl SandboxService {
             limit,
         }
     }
+}
+
+/// Validate environment variable names against the POSIX name convention
+/// and a deny-list of runtime-loader / path-override names that could
+/// compromise sandbox isolation.
+fn validate_env_vars(env_vars: &HashMap<String, String>) -> AppResult<()> {
+    for (name, value) in env_vars {
+        if name.is_empty() || name.len() > ENV_VAR_NAME_MAX_LEN {
+            return Err(AppError::BadRequest(format!(
+                "invalid env var name length: {name:?}"
+            )));
+        }
+        let bytes = name.as_bytes();
+        if !bytes
+            .first()
+            .map_or(false, |b| b.is_ascii_alphabetic() || *b == b'_')
+            || !bytes
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        {
+            return Err(AppError::BadRequest(format!(
+                "env var name must match [a-zA-Z_][a-zA-Z0-9_]*: {name:?}"
+            )));
+        }
+        if FORBIDDEN_ENV_NAMES
+            .iter()
+            .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+        {
+            return Err(AppError::BadRequest(format!(
+                "env var name not allowed: {name}"
+            )));
+        }
+        if value.len() > ENV_VAR_VALUE_MAX_LEN {
+            return Err(AppError::BadRequest(format!(
+                "env var value too large for {name:?}: {} bytes",
+                value.len()
+            )));
+        }
+        if value.contains('\0') {
+            return Err(AppError::BadRequest(format!(
+                "env var value contains NUL byte: {name:?}"
+            )));
+        }
+        if value.chars().any(|ch| ch != '\t' && ch.is_control()) {
+            return Err(AppError::BadRequest(format!(
+                "env var value contains control character: {name:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn internal_error(error: impl std::fmt::Display) -> AppError {
@@ -563,11 +710,24 @@ fn ensure_update_result(
     Err(AppError::Internal(anyhow::anyhow!(ret_msg)))
 }
 
+/// Resolve the reported `envdVersion` from a sandbox/template annotation map,
+/// falling back to the conservative default when the annotation is absent or
+/// blank (e.g. legacy templates created before version collection existed).
+pub(crate) fn envd_version_from_annotations(annotations: &HashMap<String, String>) -> String {
+    annotations
+        .get(ENVD_VERSION_ANNOTATION)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| ENVD_VERSION_FALLBACK.to_string())
+}
+
 pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandbox {
     use crate::models::ListedSandbox;
 
     let now = chrono::Utc::now();
     let template_id = extract_template_id(&s.template_id, &s.annotations, &s.labels);
+    let envd_version = envd_version_from_annotations(&s.annotations);
 
     // Prefer explicit started_at; fall back to create_at (Unix nanos from Cubelet); last resort: now
     let started_at = s
@@ -581,13 +741,13 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         sandbox_id: s.sandbox_id,
         client_id: s.host_id,
         started_at,
-        end_at: s.end_at.unwrap_or(now),
+        end_at: s.end_at,
         cpu_count: s.cpu_count,
         memory_mb: s.memory_mb,
         disk_size_mb: Some(0),
         metadata: optional_metadata(s.labels),
         state: sandbox_state_from_str(&s.status),
-        envd_version: ENVD_VERSION.to_string(),
+        envd_version,
         volume_mounts: None,
     }
 }
@@ -688,7 +848,10 @@ pub(crate) fn build_cube_network_config(
         .map(|rs| rs.iter().map(map_egress_rule).collect())
         .unwrap_or_default();
 
+    let allow_public_traffic = network.and_then(|n| n.allow_public_traffic);
+
     if allow_internet_access.is_none()
+        && allow_public_traffic.is_none()
         && allow_out.is_empty()
         && deny_out.is_empty()
         && rules.is_empty()
@@ -698,6 +861,7 @@ pub(crate) fn build_cube_network_config(
 
     Ok(Some(CubeNetworkConfig {
         allow_internet_access,
+        allow_public_traffic,
         allow_out,
         deny_out,
         rules,
@@ -733,13 +897,27 @@ fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
-    use super::{build_cube_network_config, filter_by_metadata, from_cubemaster_info};
-    use crate::cubemaster::{CreateSandboxRequest, ListSandboxResponse, SandboxInfo};
-    use crate::models::{
-        EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, SandboxNetworkConfig,
-        SandboxState,
+    use super::{
+        build_cube_network_config, filter_by_metadata, from_cubemaster_info, SandboxService,
+        RET_CODE_NOT_FOUND,
     };
+    use crate::cubemaster::{
+        CreateSandboxRequest, CubeMasterClient, ListSandboxResponse, SandboxInfo,
+        SandboxUpdateRequest,
+    };
+    use crate::models::{
+        EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
+        SandboxNetworkConfig, SandboxState,
+    };
+    use axum::{
+        extract::State,
+        routing::{delete, get, post},
+        Json, Router,
+    };
+    use serde_json::Value;
+    use tokio::sync::Mutex;
 
     #[test]
     fn metadata_filter_matches_all_pairs() {
@@ -983,6 +1161,8 @@ mod tests {
             timeout: Some(60),
             annotations: HashMap::new(),
             labels: None,
+            create_time_env_vars: None,
+            distribution_scope: None,
             volumes: None,
             containers: vec![],
             exposed_ports: vec![],
@@ -1015,13 +1195,95 @@ mod tests {
         );
     }
 
+    fn empty_create_request() -> CreateSandboxRequest {
+        CreateSandboxRequest {
+            request_id: "req-1".to_string(),
+            instance_type: "cubebox".to_string(),
+            timeout: None,
+            annotations: HashMap::new(),
+            labels: None,
+            create_time_env_vars: None,
+            distribution_scope: None,
+            volumes: None,
+            containers: vec![],
+            exposed_ports: vec![],
+            network_type: None,
+            cube_network_config: None,
+            auto_pause: false,
+            auto_resume: false,
+        }
+    }
+
+    /// CubeMaster applies its server default only when the timeout key is
+    /// absent. Lock down the three-value wire shape (omit / 0 / negative / positive).
+    #[test]
+    fn create_sandbox_request_timeout_wire_shape() {
+        let mut req = empty_create_request();
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            json.get("timeout").is_none(),
+            "timeout=None should be omitted, got: {json}"
+        );
+
+        for (value, label) in [(0, "zero"), (-1, "never"), (45, "positive")] {
+            req.timeout = Some(value);
+            let json = serde_json::to_value(&req).unwrap();
+            assert_eq!(
+                json.get("timeout"),
+                Some(&serde_json::Value::from(value)),
+                "timeout={label} should be forwarded as-is, got: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_sandbox_timeout_defaults_to_none_when_omitted() {
+        let req: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+        }))
+        .unwrap();
+        assert_eq!(req.timeout, None);
+    }
+
+    #[test]
+    fn sandbox_update_request_timeout_wire_shape() {
+        let req = SandboxUpdateRequest {
+            request_id: "req-1".to_string(),
+            sandbox_id: "sb-1".to_string(),
+            instance_type: "cubebox".to_string(),
+            action: "resume".to_string(),
+            timeout: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            json.get("timeout").is_none(),
+            "resume/connect with timeout=None should omit field, got: {json}"
+        );
+
+        for (value, label) in [(0, "zero"), (-1, "never"), (120, "positive")] {
+            let req = SandboxUpdateRequest {
+                request_id: "req-1".to_string(),
+                sandbox_id: "sb-1".to_string(),
+                instance_type: "cubebox".to_string(),
+                action: "resume".to_string(),
+                timeout: Some(value),
+            };
+            let json = serde_json::to_value(&req).unwrap();
+            assert_eq!(
+                json.get("timeout"),
+                Some(&serde_json::Value::from(value)),
+                "update timeout={label} should be forwarded as-is, got: {json}"
+            );
+        }
+    }
+
     /// The inbound API mirrors the e2b `lifecycle` object (camelCase nested
     /// struct). CubeAPI then translates it to the two CubeMaster-side bools
     /// when constructing the create-sandbox RPC. Verify the translation
     /// covers each meaningful combination.
     #[test]
     fn lifecycle_object_translates_to_cubemaster_bools() {
-        use crate::models::{NewSandbox, SandboxLifecycleConfig, SandboxOnTimeout};
+        use crate::models::{NewSandbox, SandboxOnTimeout};
 
         // Helper that mimics services::create_sandbox's lifecycle decoding.
         fn translate(body: &NewSandbox) -> (bool, bool) {
@@ -1062,6 +1324,16 @@ mod tests {
         .unwrap();
         assert_eq!(translate(&pause_with_resume), (true, true));
 
+        // Some Python SDK versions and direct callers may send the Pythonic
+        // snake_case shape. Keep accepting it so lifecycle does not silently
+        // fall back to the default kill/no-resume behaviour.
+        let snake_case_pause_with_resume: NewSandbox = serde_json::from_value(serde_json::json!({
+            "templateID": "tpl",
+            "lifecycle": {"on_timeout": "pause", "auto_resume": true},
+        }))
+        .unwrap();
+        assert_eq!(translate(&snake_case_pause_with_resume), (true, true));
+
         // Pause without auto_resume — caller must call connect() manually.
         let pause_only: NewSandbox = serde_json::from_value(serde_json::json!({
             "templateID": "tpl",
@@ -1077,5 +1349,360 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(translate(&empty), (false, false));
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_forwards_create_time_env_vars_to_cubemaster() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            create_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.create_body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-1",
+                "sandbox_id": "sb-123",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/sandbox", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        let env_vars = HashMap::from([(
+            "CUBE_TEST_CREATE_ENV".to_string(),
+            "from-create".to_string(),
+        )]);
+        let sandbox = service
+            .create_sandbox(NewSandbox {
+                template_id: "tpl-1".to_string(),
+                timeout: Some(15),
+                lifecycle: None,
+                secure: None,
+                allow_internet_access: None,
+                network: None,
+                metadata: None,
+                distribution_scope: None,
+                env_vars: Some(env_vars),
+                mcp: None,
+                volume_mounts: None,
+            })
+            .await
+            .expect("sandbox create should succeed");
+
+        assert_eq!(sandbox.sandbox_id, "sb-123");
+        let create_body = capture
+            .create_body
+            .lock()
+            .await
+            .clone()
+            .expect("create body");
+        assert_eq!(
+            create_body["create_time_env_vars"]["CUBE_TEST_CREATE_ENV"],
+            serde_json::json!("from-create")
+        );
+        assert!(create_body.get("envVars").is_none());
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_omits_create_time_env_vars_when_absent() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            create_body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.create_body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-1",
+                "sandbox_id": "sb-no-envs",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/sandbox", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        let sandbox = service
+            .create_sandbox(NewSandbox {
+                template_id: "tpl-1".to_string(),
+                timeout: Some(15),
+                lifecycle: None,
+                secure: None,
+                allow_internet_access: None,
+                network: None,
+                metadata: None,
+                distribution_scope: None,
+                env_vars: None,
+                mcp: None,
+                volume_mounts: None,
+            })
+            .await
+            .expect("sandbox create should succeed");
+
+        assert_eq!(sandbox.sandbox_id, "sb-no-envs");
+        let create_body = capture
+            .create_body
+            .lock()
+            .await
+            .clone()
+            .expect("create body");
+        assert!(
+            create_body.get("create_time_env_vars").is_none(),
+            "create_time_env_vars should be omitted when caller did not provide envs"
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_sandbox_maps_cubemaster_not_found_to_app_not_found() {
+        async fn delete_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-delete",
+                "ret": { "ret_code": RET_CODE_NOT_FOUND, "ret_msg": "no such sandbox" },
+                "sandbox_id": "sandbox-missing"
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let cubemaster_url =
+            spawn_server(Router::new().route("/cube/sandbox", delete(delete_handler))).await;
+        let service = SandboxService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        let err = service
+            .kill_sandbox("sandbox-missing")
+            .await
+            .expect_err("missing sandbox delete should return not found");
+
+        match err {
+            crate::error::AppError::NotFound(msg) => {
+                assert_eq!(msg, "sandbox sandbox-missing not found");
+            }
+            other => panic!("expected not found error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn kill_sandbox_returns_conflict_for_paused_delete_state_error() {
+        async fn delete_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-delete",
+                "sandbox_id": "sb-paused",
+                "ret": {
+                    "ret_code": super::RET_CODE_MASTER_INTERNAL,
+                    "ret_msg": "backend delete failed"
+                }
+            }))
+        }
+
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-paused",
+                    "host_id": "host-1",
+                    "status": 5,
+                    "template_id": "tpl-1"
+                }]
+            }))
+        }
+
+        async fn spawn_server(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should run");
+            });
+            format!("http://{}", addr)
+        }
+
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/sandbox", delete(delete_handler))
+                .route("/cube/sandbox/info", get(info_handler)),
+        )
+        .await;
+
+        let service = SandboxService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+            "cube.app".to_string(),
+        );
+
+        let err = service
+            .kill_sandbox("sb-paused")
+            .await
+            .expect_err("paused-state delete should return a conflict");
+
+        assert!(matches!(err, crate::error::AppError::Conflict(_)));
+        assert!(err.to_string().contains("resume it before deleting"));
+    }
+
+    #[test]
+    fn create_sandbox_rejects_dangerous_env_var_names() {
+        for name in super::FORBIDDEN_ENV_NAMES {
+            let err = super::validate_env_vars(&HashMap::from([(
+                (*name).to_string(),
+                "val".to_string(),
+            )]))
+            .expect_err("dangerous env var name should be rejected");
+            assert!(
+                err.to_string().contains("not allowed"),
+                "error for {name} should say 'not allowed': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_sandbox_rejects_dangerous_env_var_names_case_insensitive() {
+        for name in ["ld_preload", "Ld_Preload", "LD_PRELOAD"] {
+            let err =
+                super::validate_env_vars(&HashMap::from([(name.to_string(), "val".to_string())]))
+                    .expect_err(&format!(
+                        "dangerous env var name {name} should be rejected case-insensitively"
+                    ));
+            assert!(
+                err.to_string().contains("not allowed"),
+                "error for {name} should say 'not allowed': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_sandbox_rejects_invalid_env_var_name_format() {
+        for (name, desc) in [
+            ("", "empty"),
+            ("9VAR", "starts with digit"),
+            ("MY-VAR", "contains hyphen"),
+            ("MY.VAR", "contains dot"),
+        ] {
+            let err =
+                super::validate_env_vars(&HashMap::from([(name.to_string(), "v".to_string())]))
+                    .expect_err(&format!("{desc} should be rejected: {name}"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("must match") || msg.contains("invalid env var name"),
+                "error for {desc} ({name}) should mention name validation: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_sandbox_rejects_invalid_env_var_value() {
+        let too_large = "x".repeat(super::ENV_VAR_VALUE_MAX_LEN + 1);
+        let err = super::validate_env_vars(&HashMap::from([("TOO_LARGE".to_string(), too_large)]))
+            .expect_err("oversized env var value should be rejected");
+        assert!(
+            err.to_string().contains("value too large"),
+            "oversized env var value error should mention size: {err}"
+        );
+
+        let err = super::validate_env_vars(&HashMap::from([(
+            "HAS_NUL".to_string(),
+            "abc\0def".to_string(),
+        )]))
+        .expect_err("env var value with NUL should be rejected");
+        assert!(
+            err.to_string().contains("contains NUL"),
+            "NUL-containing env var value error should mention NUL: {err}"
+        );
+
+        let err = super::validate_env_vars(&HashMap::from([(
+            "HAS_ESC".to_string(),
+            "line\x1b[31mred".to_string(),
+        )]))
+        .expect_err("env var value with control character should be rejected");
+        assert!(
+            err.to_string().contains("control character"),
+            "control-character env var value error should mention control character: {err}"
+        );
+
+        let err = super::validate_env_vars(&HashMap::from([(
+            "HAS_NEWLINE".to_string(),
+            "line1\nline2".to_string(),
+        )]))
+        .expect_err("env var value with newline should be rejected");
+        assert!(
+            err.to_string().contains("control character"),
+            "newline env var value error should mention control character: {err}"
+        );
+    }
+
+    #[test]
+    fn create_sandbox_accepts_valid_env_var_names() {
+        super::validate_env_vars(&HashMap::from([
+            ("MY_VAR".to_string(), "val".to_string()),
+            ("_underscore_prefix".to_string(), "val".to_string()),
+            ("CUBE_TEST_ENV".to_string(), "val".to_string()),
+            ("TAB_OK".to_string(), "hello\tworld".to_string()),
+        ]))
+        .expect("valid env var names should be accepted");
     }
 }

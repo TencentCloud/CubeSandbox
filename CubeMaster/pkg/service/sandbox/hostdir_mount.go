@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
@@ -63,6 +65,11 @@ func injectHostDirMounts(ctx context.Context, req *types.CreateCubeSandboxReq) e
 			return fmt.Errorf("%q entry[%d]: mountPath must be an absolute path, got %q",
 				AnnotationHostDirMount, i, o.MountPath)
 		}
+		cleaned, err := validateHostPath(o.HostPath)
+		if err != nil {
+			return fmt.Errorf("%q entry[%d]: %w", AnnotationHostDirMount, i, err)
+		}
+		opts[i].HostPath = cleaned
 	}
 
 	for i, o := range opts {
@@ -99,4 +106,19 @@ func injectHostDirMounts(ctx context.Context, req *types.CreateCubeSandboxReq) e
 	}
 
 	return nil
+}
+
+// validateHostPath checks that hostPath falls under one of the configured
+// allowed prefixes (see config.GetAllowedHostMountPrefixes). It resolves
+// ".." to prevent path-traversal bypasses and returns the cleaned path.
+func validateHostPath(hostPath string) (string, error) {
+	allowedPrefixes := config.GetAllowedHostMountPrefixes()
+	cleaned := filepath.Clean(hostPath)
+	check := cleaned + "/"
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(check, prefix) {
+			return cleaned, nil
+		}
+	}
+	return "", fmt.Errorf("hostPath %q is not within an allowed mount prefix", hostPath)
 }

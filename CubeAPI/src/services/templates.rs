@@ -52,6 +52,7 @@ impl TemplateService {
                 last_error: non_empty(s.last_error),
                 created_at: non_empty(s.created_at),
                 image_info: non_empty(s.image_info),
+                job_id: non_empty(s.job_id),
             })
             .collect())
     }
@@ -100,6 +101,7 @@ impl TemplateService {
             create_request: resp.create_request,
             network_type,
             allow_internet_access,
+            job_id: non_empty(resp.job_id),
         })
     }
 
@@ -133,6 +135,7 @@ impl TemplateService {
             distribution_scope: non_empty_vec(body.nodes),
             container_overrides,
             cube_network_config,
+            with_cube_ca: body.with_cube_ca,
         };
 
         let resp = self
@@ -530,6 +533,7 @@ mod tests {
             dns: Some(vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()]),
             allow_out: Some(vec!["172.67.0.0/16".to_string()]),
             deny_out: Some(vec!["10.0.0.0/8".to_string()]),
+            with_cube_ca: Some(false),
         }
     }
 

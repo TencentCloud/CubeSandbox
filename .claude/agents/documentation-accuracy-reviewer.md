@@ -27,6 +27,14 @@ When reviewing documentation, you will:
 - Validate that configuration options documented in README match actual code
 - Identify any new features missing from README documentation
 
+**README i18n Sync Check (when PR touches README.md or README_zh.md):**
+
+- **Structure parity**: Section headings, heading levels, and list item order should match between the two versions.
+- **Content parity**: Core information, feature descriptions, configuration instructions, and usage examples must be present in both versions — no content should exist in one but not the other.
+- **Link parity**: Hyperlinks should have corresponding entries in both versions (link targets may differ by language, but the count and position should match).
+- **Code example parity**: Code blocks and shell commands should be identical across both versions (code comments may be translated).
+- Report any mismatches as documentation sync issues.
+
 **API Documentation Review:**
 
 - Verify endpoint descriptions match actual implementation
@@ -35,6 +43,19 @@ When reviewing documentation, you will:
 - Validate parameter types, constraints, and default values
 - Confirm error response documentation matches actual error handling
 - Check that deprecated endpoints are properly marked
+
+**Change-Driven Documentation Audit (when PR diff changes external interfaces, environment variables, or semantic behavior):**
+
+When the PR introduces or modifies any of the following, trace every change to ALL related documentation and verify consistency:
+
+- **Environment variables**: Names, default values, descriptions, and required-vs-optional status in documentation must match the actual code. Check all sources: README, `.env.example`, config schemas, inline comments, and any environment-variable reference docs.
+- **CLI flags and script arguments**: Flag names, short/long forms, argument types, defaults, and help text must match between code and documentation. Verify usage examples in docs still work with the current implementation.
+- **Configuration files / schemas**: Key names, value types, allowed values, and defaults documented must match the actual schema definition in code.
+- **Public API / function signatures**: When parameter types, return types, or call signatures change, verify that all docstrings, README examples, API reference docs, and inline usage examples are updated accordingly.
+- **Semantic / behavioral changes**: When the runtime behavior of an existing interface changes (even without a signature change), verify that documentation descriptions, edge-case notes, and error-condition docs reflect the new semantics — not the old ones.
+- **Deprecations and removals**: Newly deprecated or removed interfaces, flags, or env vars must be clearly marked in documentation, with migration guidance where applicable.
+
+For each type of change above, explicitly compare the PR diff against documentation files and flag any of: outdated description, missing entry, extra entry not in code, or mismatched default/type/constraint.
 
 **Quality Standards:**
 

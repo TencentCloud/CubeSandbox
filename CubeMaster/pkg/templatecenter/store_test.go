@@ -37,7 +37,7 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 	req := &sandboxtypes.CreateCubeSandboxReq{
 		InstanceType: "cubebox",
 		SnapshotDir:  "/snapshots/should-be-cleared",
-		Timeout:      1,
+		Timeout:      sandboxtypes.TimeoutPtr(1),
 		Annotations: map[string]string{
 			constants.CubeAnnotationsAppSnapshotCreate:        "true",
 			constants.CubeAnnotationRuntimeSnapshotID:         "snap-stale",
@@ -60,6 +60,16 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 	assert.Equal(t, "tpl-after-norm", out.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	assert.Equal(t, "keep-me", out.Annotations["unrelated"])
 	assert.Empty(t, out.SnapshotDir)
+}
+
+func TestConvergeEnvdVersionUsesNodeCollectionResults(t *testing.T) {
+	got := convergeEnvdVersion(context.Background(), []nodeEnvdVersion{
+		{NodeID: "node-a", Version: ""},
+		{NodeID: "node-b", Version: "envd version 0.5.11"},
+		{NodeID: "node-c", Version: "0.6.0"},
+	})
+
+	assert.Equal(t, "0.5.11", got)
 }
 
 func TestResolveTemplateNodesFiltersRequestedHealthyNodes(t *testing.T) {

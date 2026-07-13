@@ -1,5 +1,8 @@
 common:
   http_port: 8089
+  # Listen address; 0.0.0.0 = all interfaces. Set to 127.0.0.1 to harden a
+  # single all-in-one node (breaks compute nodes / host-net proxy reaching it).
+  http_bind: __CUBEMASTER_HTTP_BIND__
   http_readtimeout: 120
   http_writetimeout: 360
   http_idletimeout: 360
@@ -21,6 +24,11 @@ cubelet_conf:
     grpc_port: 9999
   common_timeout_insec: 30
   create_image_timeout_insec: 300
+  # Sandbox idle TTL when the client omits timeout; unset or <=0 = no cluster default (never idle-timeout).
+  # Shipped default: no cluster-wide idle timeout. Set e.g. 300 in production if needed.
+  default_timeout_insec: -1
+  # Create/scheduling RPC deadline only (not sandbox idle TTL).
+  create_timeout_insec: 300
   create_concurrent_limit: 100
   destroy_concurent_limit: 100
   enable_exposed_port: true
@@ -40,13 +48,13 @@ req_template_conf:
     Poststop: true
     Prestop: true
   cube_box_req_template: >-
-    {"volumes":[{"name":"tmp","volume_source":{"empty_dir":{"medium":0}}}],"containers":[{"name":"cubebox-default","envs":[{"key":"TZ","value":"Asia/Shanghai"},{"key":"TERM","value":"xterm"}],"volume_mounts":[{"name":"tmp","container_path":"/"}],"security_context":{"privileged":true,"readonly_rootfs":false,"no_new_privs":false}}],"network_type":"tap","cubevs_context":{"allowInternetAccess":true,"denyOut":["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/18"]}}
+    {"volumes":[{"name":"tmp","volume_source":{"empty_dir":{"medium":0}}}],"containers":[{"name":"cubebox-default","envs":[{"key":"TZ","value":"Asia/Shanghai"},{"key":"TERM","value":"xterm"}],"volume_mounts":[{"name":"tmp","container_path":"/"}],"security_context":{"privileged":true,"readonly_rootfs":false,"no_new_privs":false}}],"network_type":"tap","cube_network_config":{"allowInternetAccess":true,"denyOut":["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/16"]}}
 
 ossdb_config:
   addr: "127.0.0.1:__CUBE_SANDBOX_MYSQL_PORT__"
-  user: "cube"
-  pwd: "cube_pass"
-  db_name: "cube_mvp"
+  user: "__CUBE_SANDBOX_MYSQL_USER__"
+  pwd: "__CUBE_SANDBOX_MYSQL_PASSWORD__"
+  db_name: "__CUBE_SANDBOX_MYSQL_DB__"
   conn_timeout: 5
   read_timeout: 5
   write_timeout: 5
@@ -56,9 +64,9 @@ ossdb_config:
 
 instance_db_config:
   addr: "127.0.0.1:__CUBE_SANDBOX_MYSQL_PORT__"
-  user: "cube"
-  pwd: "cube_pass"
-  db_name: "cube_mvp"
+  user: "__CUBE_SANDBOX_MYSQL_USER__"
+  pwd: "__CUBE_SANDBOX_MYSQL_PASSWORD__"
+  db_name: "__CUBE_SANDBOX_MYSQL_DB__"
   conn_timeout: 5
   read_timeout: 5
   write_timeout: 5
@@ -68,12 +76,19 @@ instance_db_config:
 
 redis:
   nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"
-  password: "ceuhvu123"
+  password: "__CUBE_SANDBOX_REDIS_PASSWORD__"
   db_no: 0
   max_idle: 8
   max_active: 32
   idle_timeout: 30
   max_retry: 2
+  # Safety TTL (seconds) for node-metric keys; refreshed on every heartbeat so
+  # live nodes never expire, offline nodes auto-clean. <=0 disables.
+  node_metric_ttl_sec: 600
+  # Sandbox proxy route TTL. Keep 0 (disabled): the route key has no refresh
+  # path, so any TTL below the max sandbox lifetime would break live routing.
+  # Teardown removes it via DEL. Only set > max sandbox lifetime if needed.
+  sandbox_proxy_ttl_sec: 0
 
 scheduler:
   priority_select_num: 1

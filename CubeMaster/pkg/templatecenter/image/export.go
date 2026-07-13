@@ -17,12 +17,25 @@ func exportImageRootfs(ctx context.Context, source *PreparedSource, destRootfsDi
 	if source == nil {
 		return errors.New("resolved source image is nil")
 	}
-	if err := validateImageRef(source.LocalRef); err != nil {
-		return err
+	if source.ExportMode != ExportModeNative {
+		if err := validateImageRef(source.LocalRef); err != nil {
+			return err
+		}
 	}
+
+	if source.ExportMode == ExportModeNative {
+		if err := os.RemoveAll(destRootfsDir); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(destRootfsDir, 0o755); err != nil {
+			return err
+		}
+		return StreamRegistryToDir(ctx, source, destRootfsDir)
+	}
+
 	// Use the strategy chosen at prepare time rather than re-detecting, so the
-	// prepare and export phases never diverge (see PreparedSource.useDockerless).
-	if source.UseDockerless {
+	// prepare and export phases never diverge.
+	if source.ExportMode == ExportModeDockerless {
 		return dockerlessExportImageRootfs(ctx, source, destRootfsDir)
 	}
 	return dockerExportImageRootfs(ctx, source, destRootfsDir)

@@ -8,9 +8,10 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use validator::Validate;
 
 use crate::{
-    error::AppResult,
+    error::{AppError, AppResult},
     logging::{LogEvent, LogLevel},
     models::{
         ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
@@ -421,6 +422,9 @@ pub async fn set_sandbox_timeout(
     Path(sandbox_id): Path<String>,
     Json(body): Json<SetTimeoutRequest>,
 ) -> AppResult<impl IntoResponse> {
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
     state
         .logger
         .log(

@@ -47,6 +47,7 @@ const (
 	CubeAnnotationsInsDataDisk              = "cube.master.instance.data_disk"
 	CubeAnnotationsInsUserData              = "cube.master.instance.user_data"
 	CubeAnnotationsInsType                  = "cube.master.instance.type"
+	CubeAnnotationsKillReason               = "cube.master.instance.kill_reason"
 	CubeAnnotationsInsSecurityGroupIDS      = "cube.master.instance.sg_ids"
 	CubeAnnotationsInsRetainIP              = "cube.master.instance.retain_ip"
 	CubeAnnotationsInsRegion                = "cube.master.instance.region"
@@ -78,8 +79,18 @@ const (
 	CubeAnnotationRootfsArtifactSizeBytes    = "cube.master.rootfs.artifact.size_bytes"
 	CubeAnnotationWritableLayerSize          = "cube.master.rootfs.writable_layer_size"
 	CubeAnnotationTemplateSpecFingerprint    = "cube.master.template.spec_fingerprint"
+	// CubeAnnotationCreateTimeEnvVars stores the serialized create-time env map
+	// that CubeMaster passes to cubelet for envd initialization.
+	CubeAnnotationCreateTimeEnvVars = "cube.master.internal.create_time_env_vars"
 
 	CubeAnnotationsVirtiofsCache = "cube.master.virtiofs.cache"
+
+	// CubeAnnotationComponentsPrefix is the namespace for pre-installed
+	// runtime-component metadata carried on templates/sandboxes.
+	CubeAnnotationComponentsPrefix = "cube.master.components."
+	// CubeAnnotationComponentEnvdVersion carries the real envd semantic version
+	// collected at template-creation time and propagated to sandbox instances.
+	CubeAnnotationComponentEnvdVersion = "cube.master.components.envd.version"
 )
 const (
 	CubeAnnotationsUseNetFileCache = "cube.instance.use_netfile_cache"
@@ -155,22 +166,28 @@ const (
 )
 
 const (
-	HeartbeatHealth             = "LIVE"
-	HostStatusRunning           = "RUNNING"
-	MetadataTableName           = "t_cube_host_info"
-	HostTypeTableName           = "t_cube_host_type"
-	HostSubInfoTableName        = "t_cube_sub_host_info"
-	InstanceInfoTableName       = "t_cube_instance_info"
-	InstanceUserDataTableName   = "t_cube_instance_userdata"
-	NodeMetaRegistrationTable   = "t_cube_node_registration"
-	NodeMetaStatusTable         = "t_cube_node_status"
-	NodeComponentVersionTable   = "t_cube_node_component_version"
-	TemplateDefinitionTableName = "t_cube_template_definition"
-	TemplateReplicaTableName    = "t_cube_template_replica"
-	RootfsArtifactTableName     = "t_cube_rootfs_artifact"
-	TemplateImageJobTableName   = "t_cube_template_image_job"
-	SnapshotRuntimeRefTableName = "t_cube_snapshot_runtime_ref"
-	SandboxSpecTableName        = "t_cube_sandbox_spec"
+	HeartbeatHealth                = "LIVE"
+	HostStatusRunning              = "RUNNING"
+	MetadataTableName              = "t_cube_host_info"
+	HostTypeTableName              = "t_cube_host_type"
+	HostSubInfoTableName           = "t_cube_sub_host_info"
+	InstanceInfoTableName          = "t_cube_instance_info"
+	InstanceUserDataTableName      = "t_cube_instance_userdata"
+	NodeMetaRegistrationTable      = "t_cube_node_registration"
+	NodeMetaStatusTable            = "t_cube_node_status"
+	NodeComponentVersionTable      = "t_cube_node_component_version"
+	TemplateDefinitionTableName    = "t_cube_template_definition"
+	TemplateReplicaTableName       = "t_cube_template_replica"
+	RootfsArtifactTableName        = "t_cube_rootfs_artifact"
+	TemplateImageJobTableName      = "t_cube_template_image_job"
+	SnapshotRuntimeRefTableName    = "t_cube_snapshot_runtime_ref"
+	SnapshotRuntimeActiveTableName = "t_cube_snapshot_runtime_active"
+	SandboxSpecTableName           = "t_cube_sandbox_spec"
+	// ArtifactNodePlacementTableName records on which nodes an ext4 rootfs
+	// artifact is physically present, independent of replica lifecycle, so the
+	// last-owner-cleanup / GC paths can enumerate every node that ever held an
+	// artifact even after the referencing replica rows are gone.
+	ArtifactNodePlacementTableName = "t_cube_artifact_node_placement"
 )
 
 const (

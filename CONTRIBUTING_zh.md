@@ -44,6 +44,10 @@ Cube Sandbox 提供了基于 Docker 的构建镜像，以确保一致的构建�
 # 构建构建镜像
 make builder-image
 
+# 中国大陆用户可通过镜像源获取 llvm.sh 安装脚本与 clang-14 apt 软件包
+# （LLVM GPG 签名密钥仍从 apt.llvm.org 获取）
+make builder-image MIRROR=cn
+
 # 进入构建容器的交互式 Shell
 make builder-shell
 
@@ -132,6 +136,15 @@ Signed-off-by: Your Name <your.email@example.com>
 - **Go** — 遵循标准 `gofmt` 格式化规范及项目约定。
 - **Rust** — 遵循 `rustfmt` 和 `clippy` 的建议。
 - **文档** — 使用清晰简洁的语言，中英文文档应保持同步。
+
+## Issue / PR 关闭规则
+
+Issue 与 PR 会在以下条件下被关闭：
+
+- **`need-info` 超时未回复**：维护者要求补充信息或修改后，作者**超过两周未回应**，将被作为过期项关闭。待补充所需信息或完成修改后可重新打开。
+- **已解决或被取代**：问题已修复、功能已实现，或已被其他 PR/方案取代。
+- **不在项目范围内 / 不予处理**：关闭时会说明原因。
+- **重复提交**：关闭并附上原始 Issue/PR 链接。
 
 ## 报告安全问题
 

@@ -122,12 +122,15 @@ hello cube
 | `exec_code.py` | `sandbox.run_code()` — execute Python code inside a sandbox |
 | `cmd.py` | `sandbox.commands.run()` — execute shell commands |
 | `create.py` | `sandbox.get_info()` — retrieve sandbox metadata |
+| `create_with_envs.py` | `Sandbox.create(envs=...)` — pass create-time environment variables |
 | `read.py` | `sandbox.files.read()` — read a file from the sandbox filesystem |
 | `pause.py` | `sandbox.pause()` / `sandbox.connect()` — snapshot and restore |
-| `auto_resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — let the platform pause idle sandboxes and resume them on the next request |
+| `auto-resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — let the platform pause idle sandboxes and resume them on the next request |
+| `auto-kill.py` | `lifecycle={"on_timeout": "kill"}` — let the platform tear down idle sandboxes (the default — destruction is irreversible, the sandbox cannot be resumed) |
 | `network_no_internet.py` | `allow_internet_access=False` — fully air-gapped sandbox |
 | `network_allowlist.py` | `allow_out` — whitelist specific CIDRs, block everything else |
 | `network_denylist.py` | `deny_out` — block specific CIDRs, allow the rest |
+| `restrict_public_access.py` | `network={"allow_public_traffic": False}` — require a per-sandbox token on every public-URL request |
 
 ### exec_code.py — Run Python Code
 
@@ -144,6 +147,21 @@ with Sandbox.create(template=template_id) as sandbox:
     print(result.stdout)
 ```
 
+### Create-Time Environment Variables
+
+You can pass environment variables when creating a sandbox. They are then
+available to subsequent command execution in that sandbox:
+
+```python
+python create_with_envs.py
+```
+
+Expected output:
+
+```text
+user-session-test
+```
+
 ### pause.py — Pause & Resume
 
 Snapshot a running sandbox to free compute resources, then restore it later:
@@ -156,7 +174,7 @@ with Sandbox.create(template=template_id) as sandbox:
     print(sandbox.get_info())
 ```
 
-### auto_resume.py — Auto Pause & Auto Resume
+### auto-resume.py — Auto Pause & Auto Resume
 
 Like `pause.py`, but the platform handles the pause/resume cycle on its own.
 The `lifecycle` argument mirrors the e2b SDK
@@ -176,6 +194,30 @@ sandbox.run_code("print('back from a transparent resume')")
 sandbox.kill()
 ```
 
+### auto-kill.py — Auto Kill on Idle Timeout
+
+The destructive twin of `auto-resume.py`. Setting `on_timeout="kill"` (also the
+default when no `lifecycle` is passed) tells the platform to tear the sandbox
+down once it idles past `timeout` — no snapshot is kept, the next request
+fails fast with **410 Gone**:
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    timeout=30,             # idle threshold the sweeper uses
+    lifecycle={"on_timeout": "kill"},
+)
+sandbox.run_code("print('first call')")
+time.sleep(50)              # exceeds the timeout — sweeper kills the sandbox
+try:
+    sandbox.run_code("print('should never run')")
+except Exception as exc:
+    print(f"sandbox is gone: {exc!r}")  # destruction is final
+```
+
+The TUI version of this demo additionally cross-checks `Sandbox.list()` and
+spawns a control sandbox to rule out cluster-wide failures.
+
 ### Network Policies
 
 ```bash
@@ -187,6 +229,31 @@ python network_allowlist.py
 
 # Denylist: block specific CIDRs, allow the rest
 python network_denylist.py
+```
+
+### restrict_public_access.py — Require a Token on Every Public-URL Request
+
+By default a sandbox's public URL is reachable by anyone who knows it. For
+sensitive workloads, set `network={"allow_public_traffic": False}` at create
+time. CubeMaster issues a per-sandbox `traffic_access_token`; CubeProxy then
+rejects every request that doesn't carry it in either of these headers
+([reference](https://e2b.dev/docs/network/restrict-public-access)):
+
+- `e2b-traffic-access-token` (E2B-compatible)
+- `cube-traffic-access-token` (CubeSandbox-native alias)
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    network={"allow_public_traffic": False},
+)
+url = f"http://{sandbox.get_host(80)}/"
+
+# Without the token → 403
+requests.get(url)
+
+# With the token → 200
+requests.get(url, headers={"e2b-traffic-access-token": sandbox.traffic_access_token})
 ```
 
 ## 5. Troubleshooting
@@ -207,12 +274,16 @@ code-sandbox-quickstart/
 ├── exec_code.py               # Run Python code inside a sandbox
 ├── cmd.py                     # Execute shell commands
 ├── create.py                  # Create sandbox and inspect metadata
+├── create_with_envs.py        # Create sandbox with create-time env vars
+├── env_utils.py               # Shared .env loader helper
 ├── read.py                    # Read files from the sandbox filesystem
 ├── pause.py                   # Pause and resume a sandbox
-├── auto_resume.py             # Auto-pause / auto-resume on idle timeout
+├── auto-resume.py             # Auto-pause / auto-resume on idle timeout
+├── auto-kill.py               # Auto-kill on idle timeout (destruction is final)
 ├── network_no_internet.py     # Fully air-gapped sandbox
 ├── network_allowlist.py       # Outbound CIDR allowlist
 ├── network_denylist.py        # Outbound CIDR denylist
+├── restrict_public_access.py  # Token-gated public URL access
 ├── requirements.txt           # Python dependencies
 └── .env.example               # Environment variable template
 ```

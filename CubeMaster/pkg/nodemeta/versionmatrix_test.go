@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 )
 
@@ -87,14 +88,60 @@ func TestVersionIsDeclaredForKernelVariants(t *testing.T) {
 	}
 }
 
+func TestVersionIsDeclaredIgnoresPlatformSuffix(t *testing.T) {
+	primary := map[string]string{"cube-egress": "v0.5.0"}
+	sets := map[string]map[string]struct{}{
+		"cube-egress": {
+			"v0.5.0": {},
+		},
+	}
+
+	for _, actual := range []string{"v0.5.0", "v0.5.0-arm64", "v0.5.0-amd64", "v0.5.0-aarch64", "v0.5.0-x86_64", "v0.5.0-arm64-amd64"} {
+		assert.True(t, versionIsDeclared("cube-egress", actual, primary, sets), "platform-specific version %q should match declaration", actual)
+	}
+	for _, actual := range []string{"v0.5.0-dev", "v0.5.0-rc1", "v0.5.1-arm64", "v0.5.0-arm64-fips", "unknown", ""} {
+		assert.False(t, versionIsDeclared("cube-egress", actual, primary, sets), "version %q must not match declaration v0.5.0", actual)
+	}
+}
+
+func TestVersionIsDeclaredPlatformSuffixCaseSensitive(t *testing.T) {
+	primary := map[string]string{"cube-egress": "v0.5.0"}
+	sets := map[string]map[string]struct{}{
+		"cube-egress": {"v0.5.0": {}},
+	}
+
+	assert.False(
+		t,
+		versionIsDeclared("cube-egress", "v0.5.0-ARM64", primary, sets),
+		"platform suffix matching is case-sensitive by design",
+	)
+}
+
+func TestVersionIsDeclaredUsesPrimaryWhenSetMissing(t *testing.T) {
+	primary := map[string]string{"cube-egress": "v0.5.0"}
+
+	assert.True(t, versionIsDeclared("cube-egress", "v0.5.0-arm64", primary, nil))
+	assert.False(t, versionIsDeclared("cube-egress", "v0.5.0-dev", primary, nil))
+}
+
+func TestStripPlatformVersionSuffix(t *testing.T) {
+	assert.Equal(t, "v0.5.0", stripPlatformVersionSuffix("v0.5.0-arm64-amd64"))
+	assert.Equal(t, "v0.5.0-arm64-fips", stripPlatformVersionSuffix("v0.5.0-arm64-fips"))
+	assert.Equal(t, "v0.5.0-ARM64", stripPlatformVersionSuffix("v0.5.0-ARM64"))
+}
+
 func TestBuildVersionMatrixUsesDeclaredDistribution(t *testing.T) {
 	declared := map[string]string{
-		"cubelet": "v1.0.0",
-		"kernel":  "kernel-v1@sha256:ordinary",
+		"cubelet":     "v1.0.0",
+		"cube-egress": "v0.5.0",
+		"kernel":      "kernel-v1@sha256:ordinary",
 	}
 	declaredSets := map[string]map[string]struct{}{
 		"cubelet": {
 			"v1.0.0": {},
+		},
+		"cube-egress": {
+			"v0.5.0": {},
 		},
 		"kernel": {
 			"kernel-v1@sha256:ordinary": {},
@@ -103,6 +150,7 @@ func TestBuildVersionMatrixUsesDeclaredDistribution(t *testing.T) {
 	}
 	rows := []*models.NodeComponentVersion{
 		{NodeID: "node-bm", Component: "cubelet", Version: "v1.0.0"},
+		{NodeID: "node-bm", Component: "cube-egress", Version: "v0.5.0-arm64"},
 		{NodeID: "node-bm", Component: "kernel", Version: "kernel-v1@sha256:ordinary"},
 		{NodeID: "node-pvm", Component: "cubelet", Version: "v1.1.0-test"},
 		{NodeID: "node-pvm", Component: "kernel", Version: "kernel-pvm-v1@sha256:pvm"},
@@ -126,6 +174,13 @@ func TestBuildVersionMatrixUsesDeclaredDistribution(t *testing.T) {
 	}
 	if !findNodeComponent(t, matrix, "node-pvm", "kernel").Declared {
 		t.Fatalf("PVM kernel identity should be declared")
+	}
+	egress := findNodeComponent(t, matrix, "node-bm", "cube-egress")
+	if !egress.Declared {
+		t.Fatalf("platform-specific cube-egress version should match the release declaration")
+	}
+	if egress.Version != "v0.5.0-arm64" {
+		t.Fatalf("cube-egress matrix should preserve the reported version, got %q", egress.Version)
 	}
 	if findNodeComponent(t, matrix, "node-pvm", "cubelet").Declared {
 		t.Fatalf("cubelet test build should be marked undeclared")

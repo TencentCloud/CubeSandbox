@@ -47,4 +47,5 @@ lang: zh-CN
 
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
+| [Pi Agent 集成指南](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
 | [CrewAI 集成指南](./crewai.md) | ruirui6946 | 2026-06-23 | integration, crewai |

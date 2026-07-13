@@ -26,6 +26,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
+const maxCreateTimeEnvVarsAnnotationBytes = 16 * 1024
+
 func checkAndGetReqResource(req *types.CreateCubeSandboxReq) (*selctx.RequestResource, error) {
 	res := &selctx.RequestResource{
 		Cpu: resource.MustParse("0"),
@@ -107,15 +109,31 @@ func getReqResource(req *types.CreateCubeSandboxReq) (cpu, mem resource.Quantity
 
 	if config.GetConfig().Scheduler != nil {
 		if cpu.Cmp(config.GetConfig().Scheduler.MaxMvmCPURes()) >= 0 {
-			err = ret.Errorf(errorcode.ErrorCode_MasterParamsError, "request Resources cpu[%dm] is invalid",
+			return cpu, mem, ret.Errorf(errorcode.ErrorCode_MasterParamsError, "request Resources cpu[%dm] is invalid",
 				cpu.MilliValue())
 		}
 		if mem.Cmp(config.GetConfig().Scheduler.MaxMvmMemoryRes()) >= 0 {
-			err = ret.Errorf(errorcode.ErrorCode_MasterParamsError, "request Resources  mem[%dKB] is invalid",
+			return cpu, mem, ret.Errorf(errorcode.ErrorCode_MasterParamsError, "request Resources  mem[%dKB] is invalid",
 				mem.Value()/1024)
 		}
 	}
 	return cpu, mem, err
+}
+
+// resolveTimeoutSeconds normalizes client timeout + server default.
+// See docs/guide/lifecycle.md — Timeout semantics (canonical).
+func resolveTimeoutSeconds(clientTimeout *int, serverDefault int) (int, error) {
+	switch {
+	case clientTimeout == nil:
+		if serverDefault > 0 {
+			return serverDefault, nil
+		}
+		return types.NeverTimeout, nil
+	case *clientTimeout < 0:
+		return types.NeverTimeout, nil
+	default:
+		return *clientTimeout, nil
+	}
 }
 
 func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (*cubebox.RunCubeSandboxRequest, error) {
@@ -125,9 +143,12 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	log.G(ctx).Infof("[hostdir] ConstructCubeletReq: annotations=%v volumes_before_inject=%d",
 		req.Annotations, len(req.Volumes))
 
-	if req.Timeout <= 0 {
-		req.Timeout = config.GetConfig().CubeletConf.CommonTimeoutInsec
+	// Normalize the sandbox idle timeout into a concrete value.
+	timeoutSeconds, err := resolveTimeoutSeconds(req.Timeout, config.GetConfig().CubeletConf.DefaultTimeoutInsec)
+	if err != nil {
+		return nil, err
 	}
+	req.Timeout = &timeoutSeconds
 
 	out := &cubebox.RunCubeSandboxRequest{
 		RequestID:         req.RequestID,
@@ -146,7 +167,7 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		formatConstructCubeNetworkConfig(out.CubeNetworkConfig),
 	)
 
-	err := checkAndGetAnnotation(req, out)
+	err = checkAndGetAnnotation(req, out)
 	if err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
@@ -637,6 +658,11 @@ func checkAndGetHostDirVolumeSource(src *types.HostDirVolumeSources, out *cubebo
 		if s.HostPath == "" {
 			return fmt.Errorf("host_dir volume source %q: host_path must not be empty", s.Name)
 		}
+		cleaned, err := validateHostPath(s.HostPath)
+		if err != nil {
+			return fmt.Errorf("host_dir volume source %q: %w", s.Name, err)
+		}
+		s.HostPath = cleaned
 	}
 	out.VolumeSource.HostDirVolumes = &cubebox.HostDirVolumeSources{}
 	for _, s := range src.VolumeSources {
@@ -683,6 +709,33 @@ func checkAndGetAnnotation(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 	if v, ok := req.Annotations[constants.CubeAnnotationsInsRegion]; !ok || v == "" {
 		out.Annotations[constants.CubeAnnotationsInsRegion] = config.GetConfig().Log.Region
 	}
+	if err := setCreateTimeEnvVarsAnnotation(out.Annotations, req.CreateTimeEnvVars); err != nil {
+		return err
+	}
+	return nil
+}
+
+func setCreateTimeEnvVarsAnnotation(out map[string]string, envVars map[string]string) error {
+	if len(envVars) == 0 {
+		return nil
+	}
+	if out == nil {
+		return errors.New("annotation output map is nil")
+	}
+	// Carry the create-time env map to cubelet so the sandbox runtime can
+	// initialize envd after startup for envd-backed command execution.
+	payload, err := utils.JSONTool.Marshal(envVars)
+	if err != nil {
+		return fmt.Errorf("marshal create_time_env_vars failed: %w", err)
+	}
+	if len(payload) > maxCreateTimeEnvVarsAnnotationBytes {
+		return fmt.Errorf(
+			"create_time_env_vars annotation payload too large: %d bytes exceeds limit %d",
+			len(payload),
+			maxCreateTimeEnvVarsAnnotationBytes,
+		)
+	}
+	out[constants.CubeAnnotationCreateTimeEnvVars] = string(payload)
 	return nil
 }
 
@@ -760,6 +813,33 @@ func safePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {
 		}
 	}
 	return utils.InterfaceToString(tmpReq)
+}
+
+func safePrintCreateCubeSandboxRes(rsp *types.CreateCubeSandboxRes) string {
+	if rsp == nil {
+		return "<nil>"
+	}
+	tmp := &types.CreateCubeSandboxRes{
+		RequestID:          rsp.RequestID,
+		Ret:                rsp.Ret,
+		SandboxID:          rsp.SandboxID,
+		SandboxIP:          rsp.SandboxIP,
+		HostID:             rsp.HostID,
+		HostIP:             rsp.HostIP,
+		TrafficAccessToken: redactToken(rsp.TrafficAccessToken),
+		ExtInfo:            rsp.ExtInfo,
+	}
+	return utils.InterfaceToString(tmp)
+}
+
+// redactToken returns a boolean indicator instead of the raw token value,
+// preserving enough context for log triage ("was a token issued?") without
+// leaking the secret itself.
+func redactToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	return "***REDACTED***"
 }
 
 func simplePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {

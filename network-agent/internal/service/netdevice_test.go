@@ -5,6 +5,7 @@
 package service
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -92,6 +93,96 @@ func TestEnsureRouteToCubeDevRequiresDevice(t *testing.T) {
 	err := ensureRouteToCubeDev("192.168.0.0/18", nil)
 	if err == nil {
 		t.Fatal("ensureRouteToCubeDev error=nil, want missing device")
+	}
+}
+
+func TestDeriveCubeRouterSpec(t *testing.T) {
+	spec, err := deriveCubeRouterCIDRSpec("10.254.0.0/24", "22:90:6f:cf:cf:cf")
+	if err != nil {
+		t.Fatalf("deriveCubeRouterCIDRSpec error=%v", err)
+	}
+	if spec.IP.String() != "10.254.0.1" {
+		t.Fatalf("router ip=%s, want 10.254.0.1", spec.IP)
+	}
+	if spec.NATIP.String() != "10.254.0.2" {
+		t.Fatalf("router nat ip=%s, want 10.254.0.2", spec.NATIP)
+	}
+	if spec.Mask != 24 {
+		t.Fatalf("mask=%d, want 24", spec.Mask)
+	}
+	if !spec.RoutedPrefix {
+		t.Fatal("explicit cube-router CIDR should be routed prefix")
+	}
+}
+
+func TestDeriveCubeRouterSpecRejectsHostBits(t *testing.T) {
+	if _, err := deriveCubeRouterCIDRSpec("10.254.0.9/24", "22:90:6f:cf:cf:cf"); err == nil {
+		t.Fatal("deriveCubeRouterSpec error=nil, want non-network CIDR rejection")
+	}
+}
+
+func TestDeriveCubeRouterSpecFromSandboxCIDR(t *testing.T) {
+	spec, err := deriveCubeRouterSpecFromSandboxCIDR("192.168.0.0/18", "22:90:6f:cf:cf:cf")
+	if err != nil {
+		t.Fatalf("deriveCubeRouterSpecFromSandboxCIDR error=%v", err)
+	}
+	if spec.IP.String() != "192.168.63.253" {
+		t.Fatalf("router ip=%s, want 192.168.63.253", spec.IP)
+	}
+	if spec.NATIP.String() != "192.168.63.254" {
+		t.Fatalf("router nat ip=%s, want 192.168.63.254", spec.NATIP)
+	}
+	if spec.Mask != 32 {
+		t.Fatalf("mask=%d, want 32", spec.Mask)
+	}
+	if spec.RoutedPrefix {
+		t.Fatal("derived sandbox CIDR cube-router should use host route")
+	}
+}
+
+func TestCubeRouterMasqueradeRulesReserveTCPPortRange(t *testing.T) {
+	router := &cubeRouter{Name: cubeRouterName, NATIP: net.ParseIP("192.168.63.254").To4()}
+	rules := cubeRouterMasqueradeRules(router)
+	if len(rules) != 3 {
+		t.Fatalf("rules len=%d, want 3", len(rules))
+	}
+
+	tcpRule := strings.Join(rules[0], " ")
+	if !strings.Contains(tcpRule, "-p tcp") {
+		t.Fatalf("TCP rule=%q, want TCP protocol match", tcpRule)
+	}
+	if !strings.Contains(tcpRule, "-s 192.168.63.254/32") {
+		t.Fatalf("TCP rule=%q, want NAT IP source match", tcpRule)
+	}
+	if strings.Contains(tcpRule, "--mark") {
+		t.Fatalf("TCP rule=%q, must not depend on packet mark", tcpRule)
+	}
+	snatPortMin, snatPortMax := cubeSNATPortRange()
+	if !strings.Contains(tcpRule, fmt.Sprintf("--to-ports %d-%d", snatPortMin, snatPortMax)) {
+		t.Fatalf("TCP rule=%q, want reserved SNAT port range", tcpRule)
+	}
+
+	for i, protocol := range []string{"udp", "icmp"} {
+		rule := strings.Join(rules[i+1], " ")
+		if !strings.Contains(rule, "-p "+protocol) {
+			t.Fatalf("%s rule=%q, want protocol match", protocol, rule)
+		}
+		if strings.Contains(rule, "--to-ports") {
+			t.Fatalf("%s rule=%q, must not constrain ports", protocol, rule)
+		}
+	}
+}
+
+func TestIptablesArgsWithAction(t *testing.T) {
+	got, err := iptablesArgsWithAction(
+		[]string{"-t", "nat", "-A", "POSTROUTING", "-j", "MASQUERADE"},
+		"-D",
+	)
+	if err != nil {
+		t.Fatalf("iptablesArgsWithAction error=%v", err)
+	}
+	if strings.Join(got, " ") != "-t nat -D POSTROUTING -j MASQUERADE" {
+		t.Fatalf("args=%q, want -A replaced with -D", strings.Join(got, " "))
 	}
 }
 

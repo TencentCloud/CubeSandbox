@@ -384,22 +384,6 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
-    /// GET /cube/template/from-image?job_id=… — poll a create-from-image job.
-    pub async fn get_template_from_image_job(
-        &self,
-        job_id: &str,
-    ) -> Result<TemplateJobResponse, CubeMasterError> {
-        let url = format!("{}/cube/template/from-image", self.base_url);
-        let resp = self
-            .inner
-            .get(&url)
-            .query(&[("job_id", job_id)])
-            .send()
-            .await
-            .map_err(CubeMasterError::Http)?;
-        parse_response(resp).await
-    }
-
     /// POST /cube/template/redo — rebuild an existing template.
     pub async fn redo_template(
         &self,
@@ -564,7 +548,10 @@ impl CubeMasterError {
 ///   as a potential source of routing ambiguity;
 /// * `.` and `..` are reserved for relative path resolution and easily slip
 ///   through naive equality checks.
-fn validate_path_segment(name: &'static str, value: &str) -> Result<(), CubeMasterError> {
+pub(crate) fn validate_path_segment(
+    name: &'static str,
+    value: &str,
+) -> Result<(), CubeMasterError> {
     let is_valid = !value.is_empty()
         && value
             .bytes()
@@ -637,6 +624,15 @@ pub struct CreateSandboxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<HashMap<String, String>>,
 
+    #[serde(
+        rename = "create_time_env_vars",
+        skip_serializing_if = "Option::is_none"
+    )]
+    /// Sandbox-level env vars requested at create time. CubeMaster forwards
+    /// them to cubelet via an internal annotation, and cubelet uses them to
+    /// initialize envd after sandbox startup.
+    pub create_time_env_vars: Option<HashMap<String, String>>,
+
     #[serde(rename = "distribution_scope", skip_serializing_if = "Option::is_none")]
     pub distribution_scope: Option<Vec<String>>,
 
@@ -681,6 +677,14 @@ pub struct CubeNetworkConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub allow_internet_access: Option<bool>,
+
+    /// Gate inbound public-URL access. When Some(false), CubeMaster mints a
+    /// per-sandbox traffic_access_token that CubeProxy then enforces via the
+    /// e2b-traffic-access-token / cube-traffic-access-token request headers.
+    /// Omitted on the wire when None to keep request bodies minimal for the
+    /// public-by-default case. Maps to CubeMaster allowPublicTraffic.
+    #[serde(rename = "allowPublicTraffic", skip_serializing_if = "Option::is_none")]
+    pub allow_public_traffic: Option<bool>,
 
     /// Allowed outbound CIDRs whitelist.
     #[serde(rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
@@ -894,7 +898,17 @@ pub struct CreateSandboxResponse {
     pub request_id: String,
     #[serde(default)]
     pub sandbox_id: String,
+    /// Per-sandbox token CubeProxy enforces against
+    /// e2b-traffic-access-token / cube-traffic-access-token request
+    /// headers. Populated only when the create request set
+    /// allowPublicTraffic = false. Empty/None otherwise.
+    #[serde(default)]
+    pub traffic_access_token: Option<String>,
     pub ret: RetCode,
+    /// Generic extension metadata echoed by CubeMaster on success (e.g. the
+    /// collected envd version). Not surfaced wholesale to the external API.
+    #[serde(default)]
+    pub ext_info: HashMap<String, String>,
 }
 
 // ─── Delete sandbox ────────────────────────────────────────────────────────
@@ -968,12 +982,12 @@ pub struct SandboxInfo {
     pub host_id: String,
     #[serde(default, deserialize_with = "deserialize_sandbox_status")]
     pub status: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub started_at: Option<DateTime<Utc>>,
     /// Unix nanoseconds from Cubelet container.created_at — used as fallback for started_at
     #[serde(default)]
     pub create_at: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default, alias = "cpuCount")]
     pub cpu_count: i32,
@@ -1019,6 +1033,8 @@ pub struct GetSandboxDataItem {
     pub containers: Vec<GetSandboxContainerItem>,
     #[serde(default)]
     pub namespace: String,
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
+    pub end_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1084,6 +1100,62 @@ pub(crate) fn datetime_from_unix_nanos(value: i64) -> Option<DateTime<Utc>> {
     let seconds = value.div_euclid(1_000_000_000);
     let nanos = value.rem_euclid(1_000_000_000) as u32;
     DateTime::<Utc>::from_timestamp(seconds, nanos)
+}
+
+pub(crate) fn datetime_from_unix_millis(value: i64) -> Option<DateTime<Utc>> {
+    if value <= 0 {
+        return None;
+    }
+    let seconds = value.div_euclid(1_000);
+    let nanos = (value.rem_euclid(1_000) as u32) * 1_000_000;
+    DateTime::<Utc>::from_timestamp(seconds, nanos)
+}
+
+/// Deserialise an `Option<DateTime<Utc>>` from one of three on-the-wire
+/// shapes our CubeMaster fleet has used over time:
+///
+///   * `null` or missing                 → `None`
+///   * RFC 3339 string  ("2026-..Z")     → parsed via `DateTime::parse_from_rfc3339`
+///   * integer / numeric string          → treated as unix-milliseconds
+///
+pub(crate) fn deserialize_optional_datetime<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum DateTimeValue {
+        Null,
+        Int(i64),
+        Float(f64),
+        Str(String),
+    }
+
+    let raw = Option::<DateTimeValue>::deserialize(deserializer)?;
+    let parsed = match raw {
+        None | Some(DateTimeValue::Null) => None,
+        Some(DateTimeValue::Int(ms)) => datetime_from_unix_millis(ms),
+        Some(DateTimeValue::Float(ms)) => datetime_from_unix_millis(ms.round() as i64),
+        Some(DateTimeValue::Str(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else if let Ok(ms) = trimmed.parse::<i64>() {
+                datetime_from_unix_millis(ms)
+            } else {
+                Some(
+                    DateTime::parse_from_rfc3339(trimmed)
+                        .map_err(D::Error::custom)?
+                        .with_timezone(&Utc),
+                )
+            }
+        }
+    };
+    Ok(parsed)
 }
 
 #[derive(Deserialize)]
@@ -1176,7 +1248,7 @@ impl GetSandboxResponse {
             status,
             template_id,
             started_at: primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at)),
-            end_at: None,
+            end_at: item.end_at,
             cpu_count,
             memory_mb,
             disk_size_mb: 0,
@@ -1217,7 +1289,7 @@ pub struct SandboxUpdateResponse {
 }
 
 // ─── Set sandbox timeout (absolute) ───────────────────────────────────────
-// ❌ New API — not yet implemented on CubeMaster
+// ✅ Implemented: POST /cube/sandbox/timeout
 
 #[derive(Debug, Serialize)]
 pub struct SandboxTimeoutRequest {
@@ -1238,12 +1310,13 @@ pub struct SandboxTimeoutResponse {
     pub request_id: String,
     #[serde(rename = "sandboxID", default)]
     pub sandbox_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
     pub ret: RetCode,
 }
 
 // ─── Refresh sandbox TTL (relative extend) ────────────────────────────────
-// ❌ New API — not yet implemented on CubeMaster
+// ✅ Implemented: POST /cube/sandbox/refresh
 
 #[derive(Debug, Serialize)]
 pub struct SandboxRefreshRequest {
@@ -1264,6 +1337,7 @@ pub struct SandboxRefreshResponse {
     pub request_id: String,
     #[serde(rename = "sandboxID", default)]
     pub sandbox_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
     pub ret: RetCode,
 }
@@ -1285,10 +1359,6 @@ pub struct SandboxLogsResponse {
     pub ret: RetCode,
     #[serde(default)]
     pub logs: Vec<SandboxLogLine>,
-    #[serde(rename = "nextCursor", default)]
-    pub next_cursor: Option<i64>,
-    #[serde(rename = "hasMore", default)]
-    pub has_more: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1592,6 +1662,8 @@ pub struct TemplateSummaryItem {
     pub created_at: String,
     #[serde(default)]
     pub image_info: String,
+    #[serde(default)]
+    pub job_id: String,
 }
 
 /// Envelope for GET /cube/template (list mode).
@@ -1623,6 +1695,8 @@ pub struct TemplateResponse {
     pub status: String,
     #[serde(default)]
     pub last_error: String,
+    #[serde(default)]
+    pub job_id: String,
     /// Opaque replica list (node placement). Left as raw JSON to avoid
     /// coupling to CubeMaster-internal types.
     #[serde(default)]
@@ -1766,6 +1840,9 @@ pub struct CreateTemplateFromImageReq {
         skip_serializing_if = "Option::is_none"
     )]
     pub cube_network_config: Option<CreateTemplateCubeNetworkConfig>,
+    /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub with_cube_ca: Option<bool>,
 }
 
 /// Minimal container overrides for template creation.
@@ -1827,7 +1904,7 @@ pub struct RedoTemplateReq {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Envelope for template-build jobs (from-image / redo / poll).
+/// Envelope for template-build jobs (from-image / redo).
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct TemplateJobResponse {

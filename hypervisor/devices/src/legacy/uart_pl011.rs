@@ -7,18 +7,15 @@
 //!
 
 use crate::{read_le_u32, write_le_u32};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 use std::{io, result};
-use versionize::{VersionMap, Versionize, VersionizeResult};
-use versionize_derive::Versionize;
 use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
-use vm_migration::{
-    Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
-};
+use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 
 /* Registers */
 const UARTDR: u64 = 0;
@@ -94,7 +91,7 @@ pub struct Pl011 {
     timestamp: std::time::Instant,
 }
 
-#[derive(Versionize)]
+#[derive(Serialize, Deserialize)]
 pub struct Pl011State {
     flags: u32,
     lcr: u32,
@@ -112,8 +109,6 @@ pub struct Pl011State {
     read_count: u32,
     read_trigger: u32,
 }
-
-impl VersionMapped for Pl011State {}
 
 impl Pl011 {
     /// Constructs an AMBA PL011 UART device.
@@ -417,11 +412,11 @@ impl Snapshottable for Pl011 {
     }
 
     fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
-        Snapshot::new_from_versioned_state(&self.id, &self.state())
+        Snapshot::new_from_state(&self.id, &self.state())
     }
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
-        self.set_state(&snapshot.to_versioned_state(&self.id)?);
+        self.set_state(&snapshot.to_state(&self.id)?);
         Ok(())
     }
 }

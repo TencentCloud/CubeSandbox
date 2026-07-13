@@ -18,7 +18,13 @@ This directory is used to build and deliver the single-machine one-click release
 - `env.example`: Shared environment variable template for both the build machine and the target machine.
 - `lib/common.sh`: Common shell utility functions.
 - `scripts/one-click/`: Validation and maintenance helpers used by the systemd-managed deployment after installation.
-- `sql/`: MySQL initialization schema and seed data.
+- `terraform/tencentcloud/`: Terraform deployer for a **clustered** CubeSandbox on Tencent Cloud (TKE control plane + CVM compute nodes). `create.sh` is the entry point; `destroy.sh` tears everything down. These files are shipped both at the release-bundle top level and inside `sandbox-package` (see "Tencent Cloud Cluster Deployment").
+
+## Supported Operating Systems
+
+- Build / deployment host: Linux is recommended. macOS is supported for the Tencent Cloud Terraform deployer (`terraform/tencentcloud/create.sh` and `destroy.sh`), including the default macOS Bash 3.2 environment.
+- Windows: native `cmd.exe` / PowerShell execution is not supported. Use WSL2 (Ubuntu or another Linux distribution) when running the shell scripts from Windows.
+- Target machines: the one-click runtime expects Linux with systemd and Docker/containerd support. The Tencent Cloud Terraform deployer creates Linux CVMs/TKE resources and configures them through SSH.
 
 ## Build Inputs
 
@@ -125,6 +131,7 @@ the existing installation.
 One-click does not create an extra global `configs/` layer on the target machine; instead, files are placed directly into each component's native configuration paths:
 
 - `configs/single-node/cubemaster.yaml` → `CubeMaster/conf.yaml`
+  - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — Operational Notes](../../docs/guide/lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
 - `Cubelet/config/` → `Cubelet/config/`
 - `Cubelet/dynamicconf/` → `Cubelet/dynamicconf/`
 - `configs/single-node/network-agent.yaml` → `network-agent/network-agent.yaml`
@@ -146,7 +153,7 @@ cp env.example .env
 sudo ./install.sh
 ```
 
-The default installation path is `/usr/local/services/cubetoolbox`.
+The one-click installation path is fixed at `/usr/local/services/cubetoolbox`.
 
 New one-click installations are managed by systemd only:
 
@@ -174,7 +181,7 @@ Before installation, you can explicitly set the current node's internal IP in `.
 # CUBE_SANDBOX_NODE_IP=10.0.0.10
 ```
 
-If `CUBE_SANDBOX_NODE_IP` is explicitly set, the installation script will use that value directly; otherwise, the auto-detected node IP is written to MySQL's `t_cube_host_info.ip` and `t_cube_sub_host_info.host_ip`, and used to render `cube proxy` / DNS addresses.
+If `CUBE_SANDBOX_NODE_IP` is explicitly set, the installation script will use that value directly; otherwise, the auto-detected node IP is persisted in the runtime environment and used to render `cube proxy` / DNS addresses.
 
 ### Digital Assistant Environment Variables
 
@@ -218,8 +225,9 @@ sudo ./install-compute.sh
 
 In compute node mode, the installer will:
 
-- Install only `Cubelet`, `network-agent`, `cube-shim`, `cube-image`, `cube-kernel-scf`, and the required scripts.
-- Start only `network-agent` and `cubelet`.
+- Install `Cubelet`, `network-agent`, `cube-shim`, `cube-image`, `cube-kernel-scf`, `cube-egress`, the required scripts, and `docker`.
+- Start `network-agent` and `cubelet`, and bring up `cube-egress` via `cube-sandbox-compute.target` (the transparent egress MITM proxy, run as a docker container, which enforces per-sandbox egress policy).
+- Before `cube-egress` starts, pull the MITM root CA (cert + key) from the control node's `/cube/ca/<file>` endpoint so it matches the CA baked into templates — templates then trust the leaf certs the compute-node `cube-egress` signs.
 - Point `Cubelet`'s `meta_server_endpoint` to `ONE_CLICK_CONTROL_PLANE_IP:8089`.
 - Automatically register the node via the control node's `/internal/meta` API.
 
@@ -268,9 +276,7 @@ When `CUBE_EXTERNAL_MYSQL_HOST` (and/or `CUBE_EXTERNAL_REDIS_HOST`) is set, `ins
 - makes `quickcheck.sh` and `up-support.sh` skip lifecycle management of the now-external dependency. (`down-support.sh` has no external-dep awareness and still issues a `docker compose down`, but this is a harmless no-op because the local containers were never started for the external dependency.)
 
 The external MySQL must already grant the configured user access to the target
-database; CubeMaster runs its own schema migrations on first start, and the
-single-node seed rows are applied through a host-side `mysql` client (install
-the MySQL client package on the control node when seeding an external DB).
+database. CubeMaster runs its own embedded schema migrations on first start.
 
 `cube proxy` and its DNS resolution are mandatory capabilities in one-click. The following two values in `.env` must remain `1`:
 
@@ -285,7 +291,7 @@ Other common parameters:
 CUBE_PROXY_HTTPS_PORT=443
 CUBE_PROXY_HTTP_PORT=80
 # Deprecated: CUBE_PROXY_HOST_PORT is ignored; configure CUBE_PROXY_HTTP_PORT instead.
-CUBE_PROXY_CERT_DIR="${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"
+CUBE_PROXY_CERT_DIR=/usr/local/services/cubetoolbox/cubeproxy/certs
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
 WEB_UI_ENABLE=1
 WEB_UI_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
@@ -303,7 +309,7 @@ During installation, the following steps are performed:
 - `cubeproxy/global.conf` is rendered using `CUBE_SANDBOX_NODE_IP`.
 - `cube-sandbox-*.service|target|timer` unit files are installed under `/etc/systemd/system/`, and both host processes and Docker containers are managed uniformly by systemd.
 - MySQL, Redis, cube proxy, WebUI, and CoreDNS still run in Docker, but their lifecycle is managed directly by dedicated systemd services instead of relying on runtime `docker compose up -d`.
-- If `resolvectl` is available, one-click creates a dedicated dummy link (default `cube-dns0`) with a local address, binds CoreDNS to `169.254.254.53` on that link by default, and routes `cube.app` through the link without affecting the host's default public DNS path. If `resolvectl` is unavailable on the target machine, the installer falls back to `NetworkManager + dnsmasq`: it still creates the same dummy link, asks `dnsmasq` to additionally listen on `169.254.254.53`, takes `/etc/resolv.conf` ownership away from NetworkManager (`rc-manager=unmanaged`) and rewrites it to point at the same non-loopback IP. This keeps the host resolver symmetrical with the `systemd-resolved` path and avoids the Docker daemon's silent fallback to public DNS (`8.8.8.8`) that happens when `/etc/resolv.conf` contains only loopback nameservers — without it, every container on the host (including `docker build`'s `apk update` step) ends up using DNS servers that internal machines cannot reach.
+- If `resolvectl` is available, one-click creates a dedicated dummy link (default `cube-dns0`) with a local address, binds CoreDNS to `169.254.254.53` on that link by default, and routes `cube.app` through the link without affecting the host's default public DNS path. If `resolvectl` is unavailable on the target machine, the installer falls back to `NetworkManager + dnsmasq`: it still creates the same dummy link, asks `dnsmasq` to additionally listen on `169.254.254.53`, takes `/etc/resolv.conf` ownership away from NetworkManager (`rc-manager=unmanaged`) and rewrites it to point at the same non-loopback IP. This keeps the host resolver symmetrical with the `systemd-resolved` path and avoids the Docker daemon's silent fallback to public DNS (`8.8.8.8`) that happens when `/etc/resolv.conf` contains only loopback nameservers — without it, every container on the host (including `docker build`'s `apk update` step) ends up using DNS servers that internal machines cannot reach. On hosts where NetworkManager initializes its `dnsmasq` plugin but never spawns the child process (for example bonded interfaces managed via `ifcfg` + `assume`), set `CUBE_PROXY_DNSMASQ_MODE=standalone` so the DNS scripts launch and own `dnsmasq` directly instead of relying on the NetworkManager plugin; the client-facing resolver layout (dummy link, listen addresses, entry IP) is otherwise identical.
 - Host processes `network-agent`, `cubemaster`, `cube-api`, and `cubelet` are started through systemd, and `quickcheck.sh` verifies both unit state and service health.
 - A standard WebUI nginx container is started under `/usr/local/services/cubetoolbox/webui/`. It mounts `webui/dist` as read-only static content, publishes `WEB_UI_HOST_PORT` (`12088` by default), maps `host.docker.internal` to Docker `host-gateway`, and verifies `/cubeapi/v1/health` through the nginx reverse proxy.
 
@@ -324,6 +330,7 @@ export E2B_API_KEY=e2b_000000
 
 Required commands:
 
+- `docker` (cube-egress runs as a docker container; the installer installs it automatically — this is a hard prerequisite, so in offline/air-gapped environments where automatic installation isn't possible, install Docker beforehand)
 - `tar`
 - `ss`
 - `bash`
@@ -375,8 +382,8 @@ Required commands:
 One-of-two commands:
 
 - Certificate preparation: `mkcert` (bundled in the release package; auto-installed from the package if not present on the system).
-- DNS split routing: `resolvectl`, or `systemctl + NetworkManager`.
-- If `dnsmasq` is missing and the `NetworkManager` fallback path is taken, one of the following package managers is also required: `dnf` / `yum` / `apt-get`.
+- DNS split routing: `resolvectl`, or (for the default `networkmanager` dnsmasq fallback) `systemctl + NetworkManager`. The `standalone` dnsmasq mode (`CUBE_PROXY_DNSMASQ_MODE=standalone`) does not require a loaded/restartable `NetworkManager`.
+- If `dnsmasq` is missing and either dnsmasq fallback path is taken (`networkmanager` or `standalone`), one of the following package managers is also required: `dnf` / `yum` / `apt-get`.
 
 Conditional commands:
 
@@ -403,8 +410,13 @@ sudo yum install -y e2fsprogs util-linux
 
 ## Prerequisites
 
+> **Security**: All core services bind `0.0.0.0` by default. Before deploying on
+> a machine reachable from untrusted networks, review the
+> [Network Hardening Guide](../../docs/guide/network-hardening.md) for bind-address
+> configuration, firewall rules, and credential rotation.
+
 - The target machine requires `root` privileges.
-- The target machine preferentially uses `systemd-resolved` / `resolvectl` for split DNS of `cube.app`. The current implementation creates a dedicated dummy link (default `cube-dns0`), assigns it a local `/32` address, binds CoreDNS to `169.254.254.53` on that link by default, and attaches that address plus `~cube.app` to the link. If that capability is unavailable, the installation script will fall back to `NetworkManager + dnsmasq`: the same dummy link is created and `dnsmasq` is configured (via `listen-address` / `bind-interfaces`) to listen on both `127.0.0.1` and `169.254.254.53`. `/etc/resolv.conf` is then written by the installer (NetworkManager runs with `rc-manager=unmanaged`) to point at `169.254.254.53`, so host applications and Docker containers see the same non-loopback resolver.
+- The target machine preferentially uses `systemd-resolved` / `resolvectl` for split DNS of `cube.app`. The current implementation creates a dedicated dummy link (default `cube-dns0`), assigns it a local `/32` address, binds CoreDNS to `169.254.254.53` on that link by default, and attaches that address plus `~cube.app` to the link. If that capability is unavailable, the installation script will fall back to `NetworkManager + dnsmasq`: the same dummy link is created and `dnsmasq` is configured (via `listen-address` / `bind-interfaces`) to listen on both `127.0.0.1` and `169.254.254.53`. `/etc/resolv.conf` is then written by the installer (NetworkManager runs with `rc-manager=unmanaged`) to point at `169.254.254.53`, so host applications and Docker containers see the same non-loopback resolver. When NetworkManager loads its `dnsmasq` plugin but never spawns the child (for example bonded interfaces managed via `ifcfg` + `assume`), set `CUBE_PROXY_DNSMASQ_MODE=standalone` in `.one-click.env` so the DNS scripts start and manage `dnsmasq` directly.
 - The target machine pulls `mysql:8.0` and `redis:7-alpine` from the internet by default.
 - The `mkcert` binary is bundled in the release package (`support/bin/mkcert`). If `mkcert` is not pre-installed on the system, it is automatically copied from the package to `/usr/local/bin/mkcert` — no internet download required.
 - TLS certificates and private keys for `cube proxy` are stored on the host under `CUBE_PROXY_CERT_DIR` and mounted read-only into the container via `docker compose`. After updating certificates, simply restart `cube-proxy` or reload nginx inside the container — no image rebuild required.
@@ -419,13 +431,222 @@ sudo yum install -y e2fsprogs util-linux
 - If `vmlinux` is missing from `assets/kernel-artifacts/`, `build-vm-assets.sh` and `build-release-bundle.sh` will fail immediately. `vmlinux-pvm` is optional at build time, but installation with `CUBE_PVM_ENABLE=1` requires it to be present in the package. The installed `cube-kernel-scf/vmlinux` path is an active symlink to `vmlinux-bm` or `vmlinux-pvm`. The `cube-kernel-scf.zip` in the release package is generated automatically during the packaging phase.
 - If the `deploy/guest-image/Dockerfile` build fails, or the build machine's `mkfs.ext4` does not support the `-d` flag, guest image generation will fail immediately.
 - `cube-snapshot/spec.json` is not a mandatory artifact in the current first release of one-click. If absent, the related plugin degrades to a warning rather than blocking the basic startup.
-- If the target machine has neither `systemd-resolved` / `resolvectl` nor a restartable `NetworkManager`, one-click will currently report an error, as a third host DNS solution for such environments has not yet been integrated.
+- The default `NetworkManager + dnsmasq` fallback relies on NetworkManager to spawn the `dnsmasq` child. On hosts where NetworkManager initializes the plugin but never spawns it (for example bonded interfaces managed via `ifcfg` + `assume`), set `CUBE_PROXY_DNSMASQ_MODE=standalone` so the DNS scripts launch and manage `dnsmasq` themselves. Standalone mode does not require a restartable `NetworkManager`, but on hosts with no resolver manager at all you must ensure nothing else overwrites `/etc/resolv.conf` afterwards. In this mode `dnsmasq` runs as a bare child that systemd does not supervise, so if it later crashes nothing restarts it automatically; recover with `systemctl restart cube-sandbox-dns`.
 
 ## DNS Troubleshooting
 
 - Inspect the current split-DNS state: `resolvectl status`
 - Verify the host stub resolver path: `dig +tcp +timeout=3 docker.cnb.cool @127.0.0.53`
-- Verify the local CoreDNS path: on both the `systemd-resolved` path and the `NetworkManager + dnsmasq` fallback path, the client entry point is the same dummy-link IP, so run `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`. CoreDNS itself stays bound to `127.0.0.54` internally; only the `systemd-resolved` path talks to CoreDNS directly, while the fallback path goes through `dnsmasq`.
+- Verify the local CoreDNS path: on the `systemd-resolved` path and on both `dnsmasq` fallback paths (`NetworkManager`-managed or `standalone`), the client entry point is the same dummy-link IP, so run `dig +tcp +timeout=3 foo.cube.app @169.254.254.53`. CoreDNS itself stays bound to `127.0.0.54` internally; only the `systemd-resolved` path talks to CoreDNS directly, while the fallback paths go through `dnsmasq`.
 - Verify the host stub resolver path also routes through the new entry point: `cat /etc/resolv.conf` should show `nameserver 169.254.254.53` on both paths.
 - Verify the container view: `docker run --rm alpine cat /etc/resolv.conf` should also show `nameserver 169.254.254.53`. If it shows `nameserver 8.8.8.8` instead, the host's `/etc/resolv.conf` regressed to a loopback nameserver and Docker fell back to its built-in public DNS.
 - On the `systemd-resolved` path, the local CoreDNS address should appear only on the dedicated dummy link, not on the default network interface.
+
+## Tencent Cloud Cluster Deployment (Terraform)
+
+> Full guide (architecture, resource list, TKE / PrivateDNS / CFS preflight, E2B and `*.cube.app` DNS, capacity planning, hardening, troubleshooting): [Tencent Cloud Cluster Deployment (Terraform)](../../docs/guide/tencentcloud-terraform-deploy.md).
+
+In addition to the single-machine `install.sh`, the release bundle ships a
+Terraform-based deployer that stands up a **clustered** CubeSandbox on Tencent
+Cloud: a managed TKE control plane running `cubemaster` / `cube-api` /
+`cube-proxy` / `cube-webui`, backed by cloud MySQL + Redis, with one or more CVM
+PVM compute nodes. A jumpserver (SSH on port `443`) is the build host and bastion
+for the otherwise-private VPC.
+
+The default deployment mode (matching `env.example` / `variables.tf`) uses **public pre-built images** (`TENCENTCLOUD_USE_TCR=false`) with no image build on the jumpserver; cubemaster defaults to **single replica** with **no CFS** (`TENCENTCLOUD_USE_CFS=false`, Pod-local storage). Set `TENCENTCLOUD_USE_CFS=true` and raise `TENCENTCLOUD_CUBEMASTER_REPLICAS` to create a CFS share for multi-replica cubemaster at `/data/CubeMaster/storage`.
+
+`cube-proxy` runs a **single replica** by default
+(`TENCENTCLOUD_CUBE_PROXY_REPLICAS=1`). Auto-pause/auto-resume only works
+correctly with one replica, because each sidecar sweeper only sees traffic
+hitting its own pod. To scale beyond 1 replica the front-end LB must hash on
+SandboxID (session affinity); otherwise auto-pause/auto-resume will misfire.
+
+### Pre-deployment setup (summary)
+
+Before the first `create.sh` apply:
+
+1. **TKE service role authorization** (required): log in to the [TKE console](https://console.cloud.tencent.com/tke2) and complete service authorization. Docs: [Service authorization role permissions](https://cloud.tencent.com/document/product/457/43416). Sub-accounts also need [TKE preset policy authorization](https://cloud.tencent.com/document/product/457/46033).
+2. **Private DNS** (as needed): required for `USE_TCR=true` or E2B SDK access to `*.cube.app`. Console: [DNSPod Private DNS](https://console.dnspod.cn/privateDNS). Docs: [Private DNS product overview](https://cloud.tencent.com/document/product/1338/50527).
+3. **CFS** (as needed): only when `TENCENTCLOUD_USE_CFS=true` and cubemaster runs multiple replicas. Console: [CFS](https://console.cloud.tencent.com/cfs). Docs: [CFS quick start](https://cloud.tencent.com/document/product/582/9132).
+
+> **TKE workers and PVM compute nodes are separate:** `TENCENTCLOUD_TKE_NODE_COUNT` controls TKE workers (control-plane Pods); `TENCENTCLOUD_COMPUTE_NODE_COUNT` controls PVM compute nodes (Cubelet / sandboxes). Both default to `2` but serve different roles.
+
+> **E2B SDK:** the cluster deployment does not include single-machine CoreDNS split DNS. Besides `E2B_API_URL`, you must configure `*.cube.app` resolution (Private DNS or equivalent). See the [full guide — E2B and the cube.app domain](../../docs/guide/tencentcloud-terraform-deploy.md#e2b-and-the-cubeapp-domain).
+
+The deployer is surfaced at the **top level** of the extracted bundle, so right
+after extracting the package you can run it directly:
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>.tar.gz
+cd cube-sandbox-one-click-<version>
+
+export TENCENTCLOUD_SECRET_ID="your-secret-id"
+export TENCENTCLOUD_SECRET_KEY="your-secret-key"
+
+./terraform/tencentcloud/create.sh
+```
+
+`create.sh` runs entirely from the extracted bundle:
+
+- It auto-detects the local bundle (the outer `cube-sandbox-one-click-<version>.tar.gz`,
+  or re-packs the extracted directory if the tarball is gone) and uses it as the
+  offline source for component images and compute-node installation. When a local
+  bundle is detected or set via `TENCENTCLOUD_LOCAL_BUNDLE=/path/to.tar.gz`, no
+  public download is required; otherwise the jumpserver falls back to an **online
+  install** (it downloads `online-install.sh` and the package), which needs public
+  network access.
+- It generates an SSH key pair under `terraform/tencentcloud/.ssh/` if none exists.
+- It generates the cube-proxy CLB's TLS certificate (`cube.app` / `*.cube.app`)
+  on the jumpserver using the bundled `mkcert` (shipped inside
+  `assets/package/sandbox-package.tar.gz`, i.e. `sandbox-package/support/bin/mkcert`
+  once that inner package is extracted; the same flow as
+  `scripts/one-click/up-cube-proxy.sh`), keeping a copy under
+  `/root/cubeproxy-certs` on the jumpserver and downloading it to
+  `terraform/tencentcloud/cubeproxy-certs/` for the Secret mount.
+- **Default mode** (`TENCENTCLOUD_USE_TCR=false`): pull public pre-built images and deploy TKE addons and CVM compute nodes.
+- **TCR mode** (`TENCENTCLOUD_USE_TCR=true`): create TCR, build and push the four component images on the jumpserver, then deploy TKE addons and compute nodes. Default creates 2 compute nodes; use `TENCENTCLOUD_COMPUTE_NODE_COUNT` to adjust.
+
+cube-webui's nginx config (`webui-nginx.conf`) is not maintained separately: it
+is derived from the canonical `deploy/one-click/webui/nginx.conf` (placed there
+by the bundle build, or copied by `create.sh` when run from the source tree).
+
+Requirements on the machine running `create.sh`: `ssh`, `scp`, `nc`, and network
+access to the Tencent Cloud APIs. `terraform` and `jq` are auto-installed if
+missing — `terraform` from the HashiCorp release site (needs `curl`/`wget` +
+`unzip`), `jq` from the system package manager or, failing that, a static binary
+from GitHub. `mkcert`/`openssl` are not required locally — certificates are
+produced on the jumpserver.
+
+Common environment overrides (these match the `create.sh` and `variables.tf`
+defaults):
+
+```bash
+export TENCENTCLOUD_REGION=ap-guangzhou
+export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-6
+export TENCENTCLOUD_COMPUTE_NODE_COUNT=2          # CVM PVM compute nodes (default 2)
+export TENCENTCLOUD_TKE_NODE_COUNT=2              # TKE worker nodes (default 2)
+export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
+export TENCENTCLOUD_USE_TCR=false                 # default: public pre-built images
+export TENCENTCLOUD_USE_CFS=false                 # default: no CFS, cubemaster single replica
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.5.1
+```
+
+For non-interactive / CI runs, also set these (without a TTY the interactive
+menus fall back to defaults, so set them explicitly to stay in control). The
+password variables are the exception: a non-interactive run refuses to start
+with the built-in, publicly-known demo passwords and requires them to be set —
+or set `TENCENTCLOUD_ALLOW_INSECURE_DEFAULTS=1` to opt into the insecure
+defaults for a throwaway sandbox.
+
+```bash
+export TENCENTCLOUD_AVAILABILITY_ZONE=ap-guangzhou-6
+export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
+export TENCENTCLOUD_LOCAL_BUNDLE=/path/to/cube-sandbox-one-click-<version>.tar.gz  # auto-detected when run from inside an extracted bundle
+export TENCENTCLOUD_PVM_KERNEL_VMLINUX=/path/to/vmlinux-pvm  # only needed if the bundle ships no vmlinux-pvm
+export TENCENTCLOUD_MYSQL_PASSWORD=...      # required for non-interactive runs (no insecure fallback)
+export TENCENTCLOUD_REDIS_PASSWORD=...      # required for non-interactive runs
+export TENCENTCLOUD_CUBE_PASSWORD=...       # required for non-interactive runs
+export TENCENTCLOUD_BUILD_IMAGES=0          # TCR mode: reuse already-pushed images
+```
+
+Tear everything down with:
+
+```bash
+./terraform/tencentcloud/destroy.sh
+```
+
+`destroy.sh` also needs `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY` and
+reuses the selections saved in `terraform/tencentcloud/.env` from `create.sh`. It
+runs without prompting — running `destroy.sh` itself confirms the teardown.
+
+> **⚠ Avoid unexpected billing:** if `destroy.sh` cannot remove every resource
+> (for example MySQL/Redis stuck in the recycle bin / isolated state, or
+> leftovers Terraform can no longer see), log in to the Tencent Cloud console and
+> delete the remaining resources by hand so you are not billed for orphans:
+> [VPC / network](https://console.cloud.tencent.com/vpc),
+> [MySQL recycle bin](https://console.cloud.tencent.com/cdb/recycle),
+> [Redis recycle bin](https://console.cloud.tencent.com/redis/recycle),
+> [CFS file systems](https://console.cloud.tencent.com/cfs) (if `USE_CFS=true` was enabled).
+> `destroy.sh` also prints these same links when a teardown step fails or a
+> recycle-bin cleanup is not confirmed.
+
+The same files are also embedded inside `assets/package/sandbox-package.tar.gz`
+(consumed by the jumpserver-side `build_images.sh`); the top-level copy simply
+makes the deployer reachable without first extracting the inner package.
+
+### Environment requirements & how Terraform is used
+
+`create.sh` drives Terraform from your local machine; you do not need a
+pre-installed Terraform:
+
+- **Credentials:** export `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY`
+  (create an API key pair at <https://console.cloud.tencent.com/cam/capi>). The
+  common `TENCENTCLOUD_*` variables are listed in
+  `terraform/tencentcloud/env.example`; advanced toggles are documented in the
+  `create.sh` header comments.
+- **Local tools:** `ssh`, `scp`, `nc`, plus network access to the Tencent Cloud
+  APIs. `terraform` and `jq` are auto-installed when missing — into
+  `/usr/local/bin` when it is writable (e.g. running as root), otherwise into a
+  local `.bin/`. `terraform` is fetched from the HashiCorp release site (needs
+  `curl`/`wget` + `unzip`); `jq` comes from the system package manager, falling
+  back to a static binary from GitHub.
+  `mkcert` / `openssl` are **not** needed locally — the cube-proxy certificate is
+  produced on the jumpserver.
+- **Terraform state lives locally** under `terraform/tencentcloud/` (`*.tfstate`,
+  gitignored — there is no remote backend). Keep that directory and the generated
+  `.env`, so a later `destroy.sh` or re-run can find and manage the same
+  resources. Do not run `create.sh` from a throwaway copy and then expect a
+  different copy to clean it up.
+- **Phased, fail-fast apply:** resources are created in order — network
+  (VPC / subnet / NAT) → **(when `USE_TCR=true`)** TCR → CVMs (jump-server + compute) →
+  **(TCR mode)** image build/push on the jump-server → MySQL / Redis → **(when `USE_CFS=true`)**
+  CFS shared storage → TKE cluster + Kubernetes addons → health checks → compute-node setup.
+  The Kubernetes provider is only engaged after the TKE API server exists. On teardown,
+  if CFS was created, it is destroyed before its subnet (its NFS mount target is an ENI in that subnet).
+- Resolved selections are saved to `terraform/tencentcloud/.env` and auto-loaded
+  on the next run; explicit environment variables always win.
+
+### Retrying after a partial failure
+
+If a stage fails part-way (for example an instance type or availability zone that
+is sold out in the chosen region/zone, an account quota limit, or a transient API
+error), you do **not** have to destroy everything and start over:
+
+- Fix the cause — most often by **changing configuration**: pick a different
+  `TENCENTCLOUD_AVAILABILITY_ZONE` / `TENCENTCLOUD_COMPUTE_INSTANCE_TYPE` /
+  `TENCENTCLOUD_REGION`, raise the quota, set a password, etc. — then simply
+  **re-run `./terraform/tencentcloud/create.sh`**.
+- On a re-run, `create.sh` reloads the saved selections from `.env`, reconciles
+  state with what already exists in the cloud (refreshing and importing stateful
+  resources rather than recreating them), and **continues from where it left
+  off**. Existing compute nodes are kept (it never scales down).
+- Availability genuinely varies by region **and** availability zone — a type
+  offered in one zone may be unavailable in another. The interactive zone /
+  instance-type menus are queried live for your region, and the final choice is
+  validated at apply time.
+- Only run `destroy.sh` when you actually want to tear the deployment down; it is
+  not required between ordinary retries.
+
+### Advanced: cube-proxy TLS certificates (bring your own)
+
+`cube-proxy` terminates TLS for `cube.app` / `*.cube.app`, and its bundled nginx
+config hard-codes the certificate paths `…/certs/cube.app+3.pem` and
+`…/certs/cube.app+3-key.pem`:
+
+- By default, `create.sh` (`prepare_cubeproxy_certs`) generates a **self-signed**
+  pair on the jumpserver with the bundled `mkcert` (SANs: `cube.app`,
+  `*.cube.app`, `localhost`, `127.0.0.1`), downloads it to
+  `terraform/tencentcloud/cubeproxy-certs/`, and Terraform packs every file in
+  that directory into the `cubeproxy-certs` Secret (a Secret, not a ConfigMap,
+  because it holds the TLS private key), mounted read-only into the cube-proxy
+  pod at `/usr/local/openresty/nginx/certs/`.
+- **Bring your own certificate:** before running `create.sh`, drop your PEM cert +
+  key into `terraform/tencentcloud/cubeproxy-certs/`, named exactly
+  `cube.app+3.pem` and `cube.app+3-key.pem` (the names nginx expects) and covering
+  the `cube.app` and `*.cube.app` SANs. `create.sh` reuses existing files instead
+  of generating new ones, so a CA-signed certificate (for example a real domain
+  mapped onto `cube.app`) is used as-is, with no self-signed warning.
+- **Rotate a certificate:** replace the two files and re-run `create.sh`; the
+  deploy stage refreshes the `cubeproxy-certs` Secret and restarts cube-proxy
+  to pick up the new material. The self-signed default trips browsers/clients with
+  an "untrusted CA" warning, so replace it for any non-throwaway use.

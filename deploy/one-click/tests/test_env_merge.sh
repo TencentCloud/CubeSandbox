@@ -50,13 +50,12 @@ assert_not_contains() {
 write_new_example() {
   cat > "$1" <<'EOF'
 # sample env template
-ONE_CLICK_INSTALL_PREFIX=/usr/local/services/cubetoolbox
 ONE_CLICK_DEPLOY_ROLE=control
 CUBE_PVM_ENABLE=0
 CUBE_SANDBOX_MYSQL_PORT=3306
 CUBE_SANDBOX_REDIS_PASSWORD=ceuhvu123
 WEB_UI_IMAGE=registry/openresty:1.21.4.1-6
-CUBE_PROXY_CERT_DIR="${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"
+CUBE_PROXY_CERT_DIR=/usr/local/services/cubetoolbox/cubeproxy/certs
 DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
 NEW_FEATURE_FLAG=on
 # CUBE_SANDBOX_NODE_IP=10.0.0.10
@@ -149,14 +148,12 @@ EOF
 
   merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
 
-  # ${} expansion in an untouched key is kept verbatim (not expanded/mangled)
-  assert_contains "${out}" 'CUBE_PROXY_CERT_DIR="${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"'
+  assert_value "${out}" CUBE_PROXY_CERT_DIR "/usr/local/services/cubetoolbox/cubeproxy/certs"
   assert_value "${out}" DATABASE_URL "mysql://u:p@host:3306/db2"
   # WEIRD_KEY is old-only -> appended verbatim, value with '=' intact
   assert_value "${out}" WEIRD_KEY "a=b=c"
 
-  # The merged file must remain valid shell that sources cleanly and expands ${}
-  # using the (preserved) ONE_CLICK_INSTALL_PREFIX line from the template itself.
+  # The merged file must remain valid shell that sources cleanly.
   (
     set -a
     # shellcheck disable=SC1090
@@ -167,6 +164,56 @@ EOF
     [[ "${DATABASE_URL}" == "mysql://u:p@host:3306/db2" ]] || exit 1
     [[ "${WEIRD_KEY}" == "a=b=c" ]] || exit 1
   ) || fail "merged env did not source/expand correctly"
+}
+
+test_upsert_env_kv_preserves_shell_sensitive_values() {
+  local env_file="${TMP_DIR}/upsert-sensitive.env"
+  local secret=$'p@$$ word `tick` "quote" #hash;\\slash'
+
+  upsert_env_kv "${env_file}" "CUBE_EXTERNAL_MYSQL_PASSWORD" "${secret}"
+
+  assert_contains "${env_file}" 'CUBE_EXTERNAL_MYSQL_PASSWORD="'
+  (
+    unset CUBE_EXTERNAL_MYSQL_PASSWORD
+    load_env_file "${env_file}"
+    [[ "${CUBE_EXTERNAL_MYSQL_PASSWORD}" == "${secret}" ]] || {
+      echo "expected '${secret}', got '${CUBE_EXTERNAL_MYSQL_PASSWORD:-}'" >&2
+      exit 1
+    }
+  ) || fail "upsert_env_kv did not preserve shell-sensitive value"
+}
+
+test_upsert_env_kv_quotes_shell_metachar_only_values() {
+  local env_file="${TMP_DIR}/upsert-metachar.env"
+  local secret='CubeSandbox123;'
+
+  upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${secret}"
+
+  assert_contains "${env_file}" 'CUBE_EXTERNAL_REDIS_PASSWORD="CubeSandbox123;'
+  (
+    unset CUBE_EXTERNAL_REDIS_PASSWORD
+    load_env_file "${env_file}"
+    [[ "${CUBE_EXTERNAL_REDIS_PASSWORD}" == "${secret}" ]] || {
+      echo "expected '${secret}', got '${CUBE_EXTERNAL_REDIS_PASSWORD:-}'" >&2
+      exit 1
+    }
+  ) || fail "shell metachar-only value should still be quoted safely"
+}
+
+test_upsert_env_kv_keeps_plain_scalars_readable() {
+  local env_file="${TMP_DIR}/upsert-plain.env"
+
+  cat > "${env_file}" <<'EOF'
+ONE_CLICK_DEPLOY_ROLE=control
+KEEP_ME=1
+EOF
+
+  upsert_env_kv "${env_file}" "ONE_CLICK_DEPLOY_ROLE" "compute"
+
+  assert_value "${env_file}" ONE_CLICK_DEPLOY_ROLE compute
+  assert_value "${env_file}" KEEP_ME 1
+  [[ "$(read_env_key "${env_file}" ONE_CLICK_DEPLOY_ROLE)" == "compute" ]] \
+    || fail "read_env_key should keep seeing plain scalar values"
 }
 
 test_keeps_old_only_host_keys() {
@@ -213,6 +260,70 @@ EOF
 
   assert_value "${out}" WEB_UI_IMAGE "registry/openresty:1.21.4.0-OLD"
   assert_contains "${diff}" "two-way-fallback"
+}
+
+test_two_way_migrates_legacy_cube_proxy_cert_dir_default() {
+  local new="${TMP_DIR}/new_proxy_default.example" old="${TMP_DIR}/old_proxy_default.env"
+  local out="${TMP_DIR}/out_proxy_default.env" diff="${TMP_DIR}/diff_proxy_default.txt"
+  write_new_example "${new}"
+  cat > "${old}" <<'EOF'
+ONE_CLICK_INSTALL_PREFIX=/usr/local/services/cubetoolbox
+CUBE_PROXY_CERT_DIR="${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_not_contains "${out}" "ONE_CLICK_INSTALL_PREFIX="
+  assert_value "${out}" CUBE_PROXY_CERT_DIR "/usr/local/services/cubetoolbox/cubeproxy/certs"
+  assert_contains "${diff}" "[migrated-legacy]"
+  assert_contains "${diff}" 'CUBE_PROXY_CERT_DIR: "${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs" -> /usr/local/services/cubetoolbox/cubeproxy/certs'
+  (
+    set -a
+    # shellcheck disable=SC1090
+    source "${out}"
+    set +a
+    [[ "${CUBE_PROXY_CERT_DIR}" == "/usr/local/services/cubetoolbox/cubeproxy/certs" ]] \
+      || { echo "unexpected cert dir: ${CUBE_PROXY_CERT_DIR}" >&2; exit 1; }
+  ) || fail "legacy CUBE_PROXY_CERT_DIR default was not migrated to fixed path"
+}
+
+test_two_way_migrates_single_quoted_legacy_cube_proxy_cert_dir_default() {
+  local new="${TMP_DIR}/new_proxy_single_default.example" old="${TMP_DIR}/old_proxy_single_default.env"
+  local out="${TMP_DIR}/out_proxy_single_default.env" diff="${TMP_DIR}/diff_proxy_single_default.txt"
+  write_new_example "${new}"
+  cat > "${old}" <<'EOF'
+ONE_CLICK_INSTALL_PREFIX=/usr/local/services/cubetoolbox
+CUBE_PROXY_CERT_DIR='${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs'
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_not_contains "${out}" "ONE_CLICK_INSTALL_PREFIX="
+  assert_value "${out}" CUBE_PROXY_CERT_DIR "/usr/local/services/cubetoolbox/cubeproxy/certs"
+  assert_contains "${diff}" "[migrated-legacy]"
+  assert_contains "${diff}" "CUBE_PROXY_CERT_DIR: '\${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs' -> /usr/local/services/cubetoolbox/cubeproxy/certs"
+  (
+    set -a
+    # shellcheck disable=SC1090
+    source "${out}"
+    set +a
+    [[ "${CUBE_PROXY_CERT_DIR}" == "/usr/local/services/cubetoolbox/cubeproxy/certs" ]] \
+      || { echo "unexpected cert dir: ${CUBE_PROXY_CERT_DIR}" >&2; exit 1; }
+  ) || fail "single-quoted legacy CUBE_PROXY_CERT_DIR default was not migrated to fixed path"
+}
+
+test_two_way_preserves_custom_cube_proxy_cert_dir() {
+  local new="${TMP_DIR}/new_proxy_custom.example" old="${TMP_DIR}/old_proxy_custom.env"
+  local out="${TMP_DIR}/out_proxy_custom.env" diff="${TMP_DIR}/diff_proxy_custom.txt"
+  write_new_example "${new}"
+  cat > "${old}" <<'EOF'
+CUBE_PROXY_CERT_DIR=/custom/certs
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_value "${out}" CUBE_PROXY_CERT_DIR "/custom/certs"
+  assert_contains "${diff}" "[preserved]"
 }
 
 test_new_dotenv_overrides_take_priority() {
@@ -298,12 +409,14 @@ OPENCLAW_DEFAULT_MODEL=deepseek/deepseek-v4-flash
 AGENTHUB_LLM_CREDENTIAL_MODE=egress
 AGENTHUB_SECRET_KEY=base64key
 CUBE_API_DATABASE_URL=mysql://old:pass@host:3306/db
+ONE_CLICK_INSTALL_PREFIX=/opt/cube
+ONE_CLICK_TOOLBOX_ROOT=/opt/cube
 MY_CUSTOM_KEEP=stays
 EOF
 
   merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
 
-  # All 13 DEPRECATED_KEYS must be removed from the merged runtime env.
+  # All DEPRECATED_KEYS must be removed from the merged runtime env.
   for k in \
     AGENTHUB_DEEPSEEK_API_KEY OPENCLAW_DEEPSEEK_API_KEY \
     AGENTHUB_LLM_API_KEY OPENCLAW_LLM_API_KEY \
@@ -311,7 +424,8 @@ EOF
     AGENTHUB_LLM_BASE_URL OPENCLAW_LLM_BASE_URL \
     AGENTHUB_LLM_MODEL OPENCLAW_DEFAULT_MODEL \
     AGENTHUB_LLM_CREDENTIAL_MODE \
-    AGENTHUB_SECRET_KEY CUBE_API_DATABASE_URL; do
+    AGENTHUB_SECRET_KEY CUBE_API_DATABASE_URL \
+    ONE_CLICK_INSTALL_PREFIX ONE_CLICK_TOOLBOX_ROOT; do
     if grep -q "^${k}=" "${out}"; then
       fail "obsolete key ${k} should have been dropped from ${out}"
     fi
@@ -323,6 +437,73 @@ EOF
   assert_not_contains "${diff}" "sk-agenthub-secret"
   # A non-obsolete custom key is still preserved verbatim.
   assert_value "${out}" MY_CUSTOM_KEEP stays
+}
+
+test_migrates_custom_cube_proxy_image_tag() {
+  local new="${TMP_DIR}/new_proxy_img.example" old="${TMP_DIR}/old_proxy_img.env"
+  local out="${TMP_DIR}/out_proxy_img.env" diff="${TMP_DIR}/diff_proxy_img.txt"
+  write_new_example "${new}"
+  cat > "${old}" <<'EOF'
+CUBE_PROXY_IMAGE_TAG=my.reg/cube-proxy:custom
+CUBE_PROXY_BASE_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+CUBE_SANDBOX_MYSQL_PORT=3306
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_value "${out}" CUBE_SANDBOX_CUBE_PROXY_IMAGE "my.reg/cube-proxy:custom"
+  if grep -q "^CUBE_PROXY_IMAGE_TAG=" "${out}"; then
+    fail "CUBE_PROXY_IMAGE_TAG should have been dropped after migration"
+  fi
+  if grep -q "^CUBE_PROXY_BASE_IMAGE=" "${out}"; then
+    fail "CUBE_PROXY_BASE_IMAGE should have been dropped on upgrade"
+  fi
+  assert_contains "${diff}" "[migrated-legacy]"
+  assert_contains "${diff}" "CUBE_PROXY_IMAGE_TAG: my.reg/cube-proxy:custom -> CUBE_SANDBOX_CUBE_PROXY_IMAGE=my.reg/cube-proxy:custom"
+  assert_contains "${diff}" "[dropped]"
+}
+
+test_drops_default_cube_proxy_image_tag_without_migration() {
+  local new="${TMP_DIR}/new_proxy_def.example" old="${TMP_DIR}/old_proxy_def.env"
+  local out="${TMP_DIR}/out_proxy_def.env" diff="${TMP_DIR}/diff_proxy_def.txt"
+  write_new_example "${new}"
+  cat > "${old}" <<'EOF'
+CUBE_PROXY_IMAGE_TAG=cube-proxy:one-click
+CUBE_PROXY_BASE_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+CUBE_SANDBOX_MYSQL_PORT=3306
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  if grep -q "^CUBE_PROXY_IMAGE_TAG=" "${out}"; then
+    fail "default CUBE_PROXY_IMAGE_TAG should have been dropped"
+  fi
+  if grep -q "^CUBE_PROXY_BASE_IMAGE=" "${out}"; then
+    fail "CUBE_PROXY_BASE_IMAGE should have been dropped"
+  fi
+  if grep -q "^CUBE_SANDBOX_CUBE_PROXY_IMAGE=" "${out}"; then
+    fail "default cube-proxy:one-click must not migrate to CUBE_SANDBOX_CUBE_PROXY_IMAGE"
+  fi
+  assert_contains "${diff}" "[dropped]"
+}
+
+test_keeps_existing_cube_sandbox_cube_proxy_image_over_legacy_tag() {
+  local new="${TMP_DIR}/new_proxy_keep.example" old="${TMP_DIR}/old_proxy_keep.env"
+  local out="${TMP_DIR}/out_proxy_keep.env" diff="${TMP_DIR}/diff_proxy_keep.txt"
+  write_new_example "${new}"
+  cat > "${old}" <<'EOF'
+CUBE_PROXY_IMAGE_TAG=my.reg/cube-proxy:stale
+CUBE_SANDBOX_CUBE_PROXY_IMAGE=my.reg/cube-proxy:already-set
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_value "${out}" CUBE_SANDBOX_CUBE_PROXY_IMAGE "my.reg/cube-proxy:already-set"
+  if grep -q "^CUBE_PROXY_IMAGE_TAG=" "${out}"; then
+    fail "CUBE_PROXY_IMAGE_TAG should have been dropped"
+  fi
+  # Must not rewrite an already-present override from the stale IMAGE_TAG.
+  assert_not_contains "${diff}" "CUBE_PROXY_IMAGE_TAG: my.reg/cube-proxy:stale ->"
 }
 
 test_non_utf8_env_fails_cleanly() {
@@ -412,13 +593,22 @@ test_adds_new_keys_with_defaults
 test_three_way_adopts_new_default_for_untouched_key
 test_three_way_keeps_customized_over_new_default
 test_preserves_shell_sensitive_values
+test_upsert_env_kv_preserves_shell_sensitive_values
+test_upsert_env_kv_quotes_shell_metachar_only_values
+test_upsert_env_kv_keeps_plain_scalars_readable
 test_keeps_old_only_host_keys
 test_preserves_comments_and_structure
 test_two_way_fallback_without_baseline
+test_two_way_migrates_legacy_cube_proxy_cert_dir_default
+test_two_way_migrates_single_quoted_legacy_cube_proxy_cert_dir_default
+test_two_way_preserves_custom_cube_proxy_cert_dir
 test_new_dotenv_overrides_take_priority
 test_version_lt
 test_diff_report_redacts_secrets
 test_drops_obsolete_agenthub_keys
+test_migrates_custom_cube_proxy_image_tag
+test_drops_default_cube_proxy_image_tag_without_migration
+test_keeps_existing_cube_sandbox_cube_proxy_image_over_legacy_tag
 test_non_utf8_env_fails_cleanly
 test_read_helpers_reject_invalid_key
 test_read_helpers

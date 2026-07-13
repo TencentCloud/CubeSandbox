@@ -14,6 +14,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
 func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
@@ -22,6 +26,9 @@ func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, 
 	// external CLI subprocesses (docker / skopeo).
 	if err := validateImageRef(spec.ImageRef); err != nil {
 		return nil, err
+	}
+	if nativeRootfsExportEnabled() {
+		return prepareNativeSource(ctx, spec)
 	}
 	// In dockerless mode there is no local docker daemon to hold the image, so a
 	// redo re-resolves the source from the registry via skopeo. This intentionally
@@ -56,10 +63,97 @@ func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, 
 }
 
 func PrepareSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
+	if nativeRootfsExportEnabled() {
+		return prepareNativeSource(ctx, spec)
+	}
 	if hasDockerlessRootfsExportTools() {
 		return prepareDockerlessSource(ctx, spec)
 	}
 	return prepareDockerSource(ctx, spec)
+}
+
+func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
+	if err := validateImageRef(spec.ImageRef); err != nil {
+		return nil, err
+	}
+
+	rawRef := strings.TrimPrefix(spec.ImageRef, "docker://")
+	ref, err := name.ParseReference(rawRef)
+	if err != nil {
+		return nil, fmt.Errorf("native export failed to parse image ref %q: %w", rawRef, err)
+	}
+
+	var authCfg *RegistryAuthConfig
+	if spec.RegistryUsername != "" || spec.RegistryPassword != "" {
+		authCfg = &RegistryAuthConfig{Username: spec.RegistryUsername, Password: spec.RegistryPassword}
+	}
+	authOpt := registryAuthOption(authCfg)
+	jobs := nativeExportConcurrency()
+	platOpt := remote.WithPlatform(defaultPlatform())
+	jobsOpt := remote.WithJobs(jobs)
+
+	img, err := remote.Image(ref, remote.WithContext(ctx), authOpt, platOpt, jobsOpt)
+	if err != nil {
+		return nil, fmt.Errorf("native export failed to resolve image %q (if this is a multi-arch index, verify the requested platform exists): %w", rawRef, err)
+	}
+
+	cfgFile, err := img.ConfigFile()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get config file for %q: %w", rawRef, err)
+	}
+
+	manifest, err := img.Manifest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get manifest for %q: %w", rawRef, err)
+	}
+
+	var compressedSize int64
+	for _, layer := range manifest.Layers {
+		compressedSize += layer.Size
+	}
+
+	digest, err := img.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get digest for %q: %w", rawRef, err)
+	}
+
+	// Make sure the digest aligns with the dockerless/skopeo canonical format
+	// (name@sha256:...) to preserve fingerprint cache hits.
+	unifiedDigest := imageDigestFromReference(ref, digest.String())
+
+	cfg := convertV1Config(cfgFile.Config)
+	configJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal image Config: %w", err)
+	}
+
+	return &PreparedSource{
+		LocalRef:            spec.ImageRef,
+		Digest:              unifiedDigest,
+		Config:              cfg,
+		ConfigJSON:          string(configJSON),
+		MasterNodeIP:        NormalizeBaseURL(spec.DownloadBaseURL),
+		ExportMode:          ExportModeNative,
+		CompressedSizeBytes: compressedSize,
+		RegistryAuth:        authCfg,
+		nativeImage:         img,
+		Cleanup:             func(context.Context) {}, // no-op for native
+		OnPullProgress:      spec.OnPullProgress,
+	}, nil
+}
+
+// convertV1Config extracts only the fields necessary for container execution.
+// Fields like ExposedPorts, Volumes, Labels, StopSignal, and Healthcheck
+// are intentionally omitted as they are not relevant to Cube's runtime
+// configuration or rootfs extraction logic.
+func convertV1Config(cfg v1.Config) DockerImageConfig {
+	return DockerImageConfig{
+		Entrypoint: cfg.Entrypoint,
+		Cmd:        cfg.Cmd,
+		Env:        cfg.Env,
+		WorkingDir: cfg.WorkingDir,
+		User:       cfg.User,
+	}
 }
 
 func prepareDockerlessSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
@@ -103,7 +197,7 @@ func prepareDockerlessSource(ctx context.Context, spec SourceSpec) (*PreparedSou
 		Config:              configInfo.Config,
 		ConfigJSON:          string(configJSON),
 		MasterNodeIP:        NormalizeBaseURL(spec.DownloadBaseURL),
-		UseDockerless:       true,
+		ExportMode:          ExportModeDockerless,
 		SkopeoAuthFile:      authFile,
 		CompressedSizeBytes: skopeoLayersTotalSize(inspectInfo),
 		OnPullProgress:      spec.OnPullProgress,
@@ -295,6 +389,26 @@ func skopeoImageDigest(info skopeoInspectImage, imageRef string) string {
 		return info.Digest
 	}
 	return name + "@" + info.Digest
+}
+
+// imageDigestFromReference unifies native digest formatting with skopeo's
+// canonical dockerless form so equivalent refs share cache keys.
+func imageDigestFromReference(ref name.Reference, hexDigest string) string {
+	if hexDigest == "" {
+		return ""
+	}
+	namePart := dockerlessCanonicalName(ref.Context().Name())
+	if namePart == "" {
+		return hexDigest
+	}
+	return namePart + "@" + hexDigest
+}
+
+func dockerlessCanonicalName(namePart string) string {
+	if strings.HasPrefix(namePart, "index.docker.io/") {
+		return "docker.io/" + strings.TrimPrefix(namePart, "index.docker.io/")
+	}
+	return namePart
 }
 
 func firstNonEmptyDigest(info dockerInspectImage) string {

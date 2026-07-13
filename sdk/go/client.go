@@ -78,7 +78,9 @@ func (c *Client) Create(ctx context.Context, opts CreateOptions) (*Sandbox, erro
 }
 
 func (c *Client) Connect(ctx context.Context, sandboxID string) (*Sandbox, error) {
-	payload := map[string]any{"timeout": durationSeconds(c.config.Timeout)}
+	// Do not fabricate a timeout on connect: with no caller-provided value we
+	// omit the field entirely and let the server keep its own timeout policy.
+	payload := map[string]any{}
 	var sandbox Sandbox
 	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/connect", payload, &sandbox, http.StatusOK); err != nil {
 		return nil, err
@@ -120,13 +122,12 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 		return nil, fmt.Errorf("template is required. Set CUBE_TEMPLATE_ID or pass TemplateID")
 	}
 
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = c.config.Timeout
-	}
 	payload := map[string]any{
 		"templateID": templateID,
-		"timeout":    durationSeconds(timeout),
+	}
+	// Omitted when nil; see docs/guide/lifecycle.md.
+	if opts.Timeout != nil {
+		payload["timeout"] = timeoutPayloadSeconds(*opts.Timeout)
 	}
 	if len(opts.EnvVars) > 0 {
 		payload["envVars"] = opts.EnvVars
@@ -134,15 +135,14 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 	if len(opts.Metadata) > 0 {
 		payload["metadata"] = opts.Metadata
 	}
-	if opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess {
+	internetAccessDisabled := opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess
+	if internetAccessDisabled {
 		payload["allowInternetAccess"] = false
 	}
 
-	// Allowing specific domains is only enforceable when all other egress is
-	// denied (public traffic off, or 0.0.0.0/0 in denyOut).
-	defaultDenyAll := (opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess) ||
-		(opts.Network.AllowPublicTraffic != nil && !*opts.Network.AllowPublicTraffic)
-	if err := validateAllowOutDomainsRequireDenyAll(opts.Network.AllowOut, opts.Network.DenyOut, defaultDenyAll); err != nil {
+	// Mirror the server-side contract: domain allowOut requires either
+	// allowInternetAccess=false or an explicit deny-all CIDR in denyOut.
+	if err := validateAllowOutDomainsRequireDenyAll(opts.Network.AllowOut, opts.Network.DenyOut, internetAccessDisabled); err != nil {
 		return nil, err
 	}
 

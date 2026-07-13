@@ -53,7 +53,7 @@ func TestConstructCreateReqPreservesDistributionScope(t *testing.T) {
 	assert.Equal(t, []string{"node-a", "10.0.0.2"}, got.DistributionScope)
 }
 
-func TestDeleteTemplateMapsAttemptInProgressToParamsError(t *testing.T) {
+func TestDeleteTemplateMapsAttemptInProgressToConflict(t *testing.T) {
 	origDeleteTemplateFn := deleteTemplateFn
 	t.Cleanup(func() {
 		deleteTemplateFn = origDeleteTemplateFn
@@ -70,9 +70,9 @@ func TestDeleteTemplateMapsAttemptInProgressToParamsError(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected response type %T", resp)
 	}
-	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Equal(t, int(errorcode.ErrorCode_Conflict), got.Ret.RetCode)
 	assert.Contains(t, got.Ret.RetMsg, "build still running")
-	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
+	assert.Equal(t, int64(errorcode.ErrorCode_Conflict), rt.RetCode)
 }
 
 func TestDeleteTemplateMapsCleanupLocatorMissingToNotFound(t *testing.T) {

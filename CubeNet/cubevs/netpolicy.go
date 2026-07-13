@@ -22,6 +22,26 @@ var alwaysDeniedSandboxCIDRs = []string{
 	"192.168.0.0/16",
 }
 
+var alwaysDeniedSandboxEntries = mustBuildDenyOutPolicyEntries(alwaysDeniedSandboxCIDRs)
+
+type allowOutPolicyEntry struct {
+	key    lpmKey
+	flags  uint8
+	source string
+}
+
+type denyOutPolicyEntry struct {
+	key    lpmKey
+	source string
+}
+
+type netPolicyPlan struct {
+	allowOutEntries []allowOutPolicyEntry
+	dnsAllowRules   []dnsAllowRule
+	denyOutEntries  []denyOutPolicyEntry
+	dnsPolicyFlags  uint8
+}
+
 // newInnerLPMMap creates a new LPM trie map with uint32 values for deny_out.
 func newInnerLPMMap() (*ebpf.Map, error) {
 	return newInnerLPMMapWithValueSize(uint32(unsafe.Sizeof(uint32(0))), btfTypeLPMKey, btfTypeU32)
@@ -141,7 +161,9 @@ func flushInnerMapWithValue(outerMap *ebpf.Map, ifindex uint32, value any) error
 	var key lpmKey
 	iter := inner.Iterate()
 	for iter.Next(&key, value) {
-		_ = inner.Delete(&key)
+		if err := inner.Delete(&key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("inner map delete failed: %w", err)
+		}
 	}
 	if err := iter.Err(); err != nil {
 		return fmt.Errorf("inner map iterate failed: %w", err)
@@ -187,6 +209,33 @@ func cleanupNetPolicy(ifindex uint32) error {
 	return flushInnerMap(denyOut, ifindex)
 }
 
+// PrepareTAPDevicePolicy clears per-sandbox policy residue, then installs
+// policy entries that are invariant for a TAP while it sits in the free pool.
+// Per-sandbox policy application can then skip rewriting these default
+// private/link-local deny ranges on every create.
+func PrepareTAPDevicePolicy(ifindex uint32) error {
+	if err := cleanupNetPolicy(ifindex); err != nil {
+		return err
+	}
+	if err := cleanupDNSAllow(ifindex); err != nil {
+		return err
+	}
+
+	denyOut, err := loadPinnedMap(MapNameDenyOut)
+	if err != nil {
+		return err
+	}
+	defer denyOut.Close()
+
+	if err := ensureDenyOutInnerMap(denyOut, ifindex); err != nil {
+		return err
+	}
+	if err := populateInnerMap(denyOut, ifindex, alwaysDeniedSandboxEntries); err != nil {
+		return fmt.Errorf("populate default %s failed: %w", MapNameDenyOut, err)
+	}
+	return nil
+}
+
 // parseCIDR parses a CIDR string (e.g. "10.0.0.0/8") or a plain IP
 // (e.g. "10.1.2.3") into an lpmKey.
 func parseCIDR(s string) (lpmKey, error) {
@@ -201,6 +250,159 @@ func parseCIDR(s string) (lpmKey, error) {
 	}
 	ones, _ := ipNet.Mask.Size()
 	return lpmKey{Prefixlen: uint32(ones), IP: ipToUint32(ipNet.IP)}, nil
+}
+
+func mustBuildDenyOutPolicyEntries(cidrs []string) []denyOutPolicyEntry {
+	entries, err := buildDenyOutPolicyEntries(cidrs)
+	if err != nil {
+		panic(err)
+	}
+	return entries
+}
+
+func buildAllowOutPolicyEntries(allowOutCIDRs, l7AllowOutCIDRs []string) ([]allowOutPolicyEntry, error) {
+	entries := make([]allowOutPolicyEntry, 0, len(allowOutCIDRs)+len(l7AllowOutCIDRs))
+	indexByKey := make(map[lpmKey]int, len(allowOutCIDRs)+len(l7AllowOutCIDRs))
+
+	add := func(cidrs []string, flags uint8) error {
+		for _, cidr := range cidrs {
+			key, err := parseCIDR(cidr)
+			if err != nil {
+				return err
+			}
+			if idx, ok := indexByKey[key]; ok {
+				entries[idx].flags |= flags
+				continue
+			}
+			indexByKey[key] = len(entries)
+			entries = append(entries, allowOutPolicyEntry{
+				key:    key,
+				flags:  flags,
+				source: cidr,
+			})
+		}
+		return nil
+	}
+
+	if err := add(allowOutCIDRs, 0); err != nil {
+		return nil, err
+	}
+	if err := add(l7AllowOutCIDRs, uint8(netPolicyFlagL7Required)); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func buildDenyOutPolicyEntries(cidrs []string) ([]denyOutPolicyEntry, error) {
+	entries := make([]denyOutPolicyEntry, 0, len(cidrs))
+	seen := make(map[lpmKey]struct{}, len(cidrs))
+	for _, cidr := range cidrs {
+		key, err := parseCIDR(cidr)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		entries = append(entries, denyOutPolicyEntry{
+			key:    key,
+			source: cidr,
+		})
+	}
+	return entries, nil
+}
+
+func buildNetPolicyPlan(opts MVMOptions) (*netPolicyPlan, error) {
+	var allowOut []string
+	if opts.AllowOut != nil {
+		allowOut = *opts.AllowOut
+	}
+	allowOutCIDRs, dnsAllowDomains, err := splitAllowOutTargets(allowOut)
+	if err != nil {
+		return nil, err
+	}
+
+	var l7AllowOut []string
+	if opts.L7AllowOut != nil {
+		l7AllowOut = *opts.L7AllowOut
+	}
+	l7AllowOutCIDRs, l7DNSAllowDomains, err := splitAllowOutTargets(l7AllowOut)
+	if err != nil {
+		return nil, err
+	}
+
+	allowOutEntries, err := buildAllowOutPolicyEntries(allowOutCIDRs, l7AllowOutCIDRs)
+	if err != nil {
+		return nil, err
+	}
+	dnsAllowRules, err := buildDNSAllowRules(dnsAllowDomains, l7DNSAllowDomains)
+	if err != nil {
+		return nil, err
+	}
+
+	var denyOutEntries []denyOutPolicyEntry
+	if opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess {
+		denyOutEntries, err = buildDenyOutPolicyEntries([]string{"0.0.0.0/0"})
+	} else {
+		if opts.DenyOut != nil {
+			denyOutEntries, err = buildDenyOutPolicyEntries(*opts.DenyOut)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	plan := &netPolicyPlan{
+		allowOutEntries: allowOutEntries,
+		dnsAllowRules:   dnsAllowRules,
+		denyOutEntries:  denyOutEntries,
+		dnsPolicyFlags:  dnsPolicyFlagsForDomains(dnsAllowDomains, l7DNSAllowDomains),
+	}
+	if err := validateNetPolicyPlan(plan); err != nil {
+		return nil, err
+	}
+	return plan, nil
+}
+
+func appendDenyOutPolicyEntries(dst, src []denyOutPolicyEntry) []denyOutPolicyEntry {
+	if len(src) == 0 {
+		return dst
+	}
+	seen := make(map[lpmKey]struct{}, len(dst)+len(src))
+	for _, entry := range dst {
+		seen[entry.key] = struct{}{}
+	}
+	for _, entry := range src {
+		if _, ok := seen[entry.key]; ok {
+			continue
+		}
+		seen[entry.key] = struct{}{}
+		dst = append(dst, entry)
+	}
+	return dst
+}
+
+func effectiveDenyOutEntriesForReplace(plan *netPolicyPlan) []denyOutPolicyEntry {
+	if plan == nil {
+		return nil
+	}
+	entries := make([]denyOutPolicyEntry, len(plan.denyOutEntries), len(plan.denyOutEntries)+len(alwaysDeniedSandboxEntries))
+	copy(entries, plan.denyOutEntries)
+	return appendDenyOutPolicyEntries(entries, alwaysDeniedSandboxEntries)
+}
+
+func validateNetPolicyPlan(plan *netPolicyPlan) error {
+	if err := validateNetPolicyEntryCount("network.allow_out_v2", len(plan.allowOutEntries), maxNetPolicyEntries); err != nil {
+		return err
+	}
+	if err := validateNetPolicyEntryCount("network.dns_allow", len(plan.dnsAllowRules), maxDNSAllowDomains); err != nil {
+		return err
+	}
+	return validateNetPolicyEntryCount("network.deny_out", len(effectiveDenyOutEntriesForReplace(plan)), maxNetPolicyEntries)
 }
 
 func validateNetPolicyEntryCounts(allowOutCIDRs, l7AllowOutCIDRs, dnsAllowDomains, l7DNSAllowDomains, denyOut []string) error {
@@ -379,9 +581,9 @@ func isValidDNSDomainName(domain string) bool {
 	return true
 }
 
-// populateInnerMap parses the given CIDR list and inserts each entry
-// into the inner LPM trie map for the specified ifindex.
-func populateInnerMap(outerMap *ebpf.Map, ifindex uint32, cidrs []string) error {
+// populateInnerMap inserts pre-parsed deny_out entries into the inner LPM trie
+// map for the specified ifindex.
+func populateInnerMap(outerMap *ebpf.Map, ifindex uint32, entries []denyOutPolicyEntry) error {
 	var innerMapID uint32
 	err := outerMap.Lookup(&ifindex, &innerMapID)
 	if err != nil {
@@ -395,21 +597,17 @@ func populateInnerMap(outerMap *ebpf.Map, ifindex uint32, cidrs []string) error 
 	defer inner.Close()
 
 	val := uint32(netPolicyValueStatic)
-	for _, cidr := range cidrs {
-		key, err := parseCIDR(cidr)
+	for _, entry := range entries {
+		err = inner.Update(&entry.key, &val, ebpf.UpdateAny)
 		if err != nil {
-			return err
-		}
-		err = inner.Update(&key, &val, ebpf.UpdateAny)
-		if err != nil {
-			return fmt.Errorf("inner map update failed: %w, cidr: %s", err, cidr)
+			return fmt.Errorf("inner map update failed: %w, cidr: %s", err, entry.source)
 		}
 	}
 	return nil
 }
 
-// populateAllowOutInnerMap parses the given CIDR list and inserts static allow entries.
-func populateAllowOutInnerMap(outerMap *ebpf.Map, ifindex uint32, cidrs []string, flags uint8) error {
+// populateAllowOutInnerMap inserts pre-parsed static allow_out_v2 entries.
+func populateAllowOutInnerMap(outerMap *ebpf.Map, ifindex uint32, entries []allowOutPolicyEntry) error {
 	var innerMapID uint32
 	err := outerMap.Lookup(&ifindex, &innerMapID)
 	if err != nil {
@@ -422,24 +620,19 @@ func populateAllowOutInnerMap(outerMap *ebpf.Map, ifindex uint32, cidrs []string
 	}
 	defer inner.Close()
 
-	for _, cidr := range cidrs {
-		key, err := parseCIDR(cidr)
-		if err != nil {
-			return err
-		}
-
-		val := netPolicyValueV2{Flags: flags}
+	for _, entry := range entries {
+		val := netPolicyValueV2{Flags: entry.flags}
 		var oldVal netPolicyValueV2
-		if err := inner.Lookup(&key, &oldVal); err == nil {
+		if err := inner.Lookup(&entry.key, &oldVal); err == nil {
 			// Static allow entries never expire, but they must preserve existing flags.
 			val.Flags |= oldVal.Flags
 		} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("inner map lookup failed: %w, cidr: %s", err, cidr)
+			return fmt.Errorf("inner map lookup failed: %w, cidr: %s", err, entry.source)
 		}
 
-		err = inner.Update(&key, &val, ebpf.UpdateAny)
+		err = inner.Update(&entry.key, &val, ebpf.UpdateAny)
 		if err != nil {
-			return fmt.Errorf("inner map update failed: %w, cidr: %s", err, cidr)
+			return fmt.Errorf("inner map update failed: %w, cidr: %s", err, entry.source)
 		}
 	}
 	return nil
@@ -459,7 +652,8 @@ func netPolicyValueV2Expired(value netPolicyValueV2, now uint64) bool {
 //   - L7AllowOut IP/CIDR targets are inserted into allow_out_v2 with the L7 flag.
 //   - AllowOut domain targets are inserted into dns_allow inner map.
 //   - L7AllowOut domain targets are inserted into dns_allow with the L7 flag.
-//   - DenyOut always includes alwaysDeniedSandboxCIDRs.
+//   - Default private/link-local DenyOut ranges are preloaded when a TAP enters
+//     the free pool. Replace paths replay them after flushing policy maps.
 //   - AllowInternetAccess=false: DenyOut is set to "0.0.0.0/0" (deny all).
 func applyNetPolicy(ifindex uint32, opts MVMOptions) error {
 	return applyNetPolicyWithMode(ifindex, opts, false)
@@ -473,45 +667,12 @@ func replaceNetPolicy(ifindex uint32, opts MVMOptions) error {
 }
 
 func applyNetPolicyWithMode(ifindex uint32, opts MVMOptions, replace bool) error {
-	// Process allowOut.
-	var allowOut []string
-	if opts.AllowOut != nil {
-		allowOut = *opts.AllowOut
-	}
-	allowOutCIDRs, dnsAllowDomains, err := splitAllowOutTargets(allowOut)
+	plan, err := buildNetPolicyPlan(opts)
 	if err != nil {
 		return err
 	}
 
-	var l7AllowOut []string
-	if opts.L7AllowOut != nil {
-		l7AllowOut = *opts.L7AllowOut
-	}
-	l7AllowOutCIDRs, l7DNSAllowDomains, err := splitAllowOutTargets(l7AllowOut)
-	if err != nil {
-		return err
-	}
-
-	// Process denyOut: always append alwaysDeniedSandboxCIDRs.
-	// If AllowInternetAccess is false, deny all outbound traffic.
-	var denyOut []string
-	if opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess {
-		denyOut = []string{"0.0.0.0/0"}
-	} else {
-		if opts.DenyOut != nil {
-			denyOut = append(*opts.DenyOut, alwaysDeniedSandboxCIDRs...)
-		} else {
-			denyOut = append(denyOut, alwaysDeniedSandboxCIDRs...)
-		}
-	}
-
-	if err := validateNetPolicyEntryCounts(allowOutCIDRs, l7AllowOutCIDRs, dnsAllowDomains, l7DNSAllowDomains, denyOut); err != nil {
-		return err
-	}
-
-	dnsPolicyModeFlags := dnsPolicyFlagsForDomains(dnsAllowDomains, l7DNSAllowDomains)
-
-	if replace || len(allowOutCIDRs)+len(l7AllowOutCIDRs) > 0 {
+	if replace || len(plan.allowOutEntries) > 0 {
 		allowOutMap, err := loadPinnedMap(MapNameAllowOutV2)
 		if err != nil {
 			return err
@@ -526,20 +687,20 @@ func applyNetPolicyWithMode(ifindex uint32, opts MVMOptions, replace bool) error
 				return fmt.Errorf("flush %s failed: %w", MapNameAllowOutV2, err)
 			}
 		}
-		err = populateAllowOutInnerMap(allowOutMap, ifindex, allowOutCIDRs, 0)
-		if err != nil {
-			return fmt.Errorf("populate %s failed: %w", MapNameAllowOutV2, err)
-		}
-		err = populateAllowOutInnerMap(allowOutMap, ifindex, l7AllowOutCIDRs, uint8(netPolicyFlagL7Required))
+		err = populateAllowOutInnerMap(allowOutMap, ifindex, plan.allowOutEntries)
 		if err != nil {
 			return fmt.Errorf("populate %s failed: %w", MapNameAllowOutV2, err)
 		}
 	}
-	if err := applyDNSAllow(ifindex, dnsAllowDomains, l7DNSAllowDomains); err != nil {
+	if err := applyDNSAllow(ifindex, plan.dnsAllowRules, replace); err != nil {
 		return fmt.Errorf("populate %s failed: %w", MapNameDNSAllow, err)
 	}
 
-	if replace || len(denyOut) > 0 {
+	denyOutEntries := plan.denyOutEntries
+	if replace {
+		denyOutEntries = effectiveDenyOutEntriesForReplace(plan)
+	}
+	if replace || len(denyOutEntries) > 0 {
 		denyOutMap, err := loadPinnedMap(MapNameDenyOut)
 		if err != nil {
 			return err
@@ -554,11 +715,14 @@ func applyNetPolicyWithMode(ifindex uint32, opts MVMOptions, replace bool) error
 				return fmt.Errorf("flush %s failed: %w", MapNameDenyOut, err)
 			}
 		}
-		err = populateInnerMap(denyOutMap, ifindex, denyOut)
+		err = populateInnerMap(denyOutMap, ifindex, denyOutEntries)
 		if err != nil {
 			return fmt.Errorf("populate %s failed: %w", MapNameDenyOut, err)
 		}
 	}
 
-	return setDNSPolicyFlags(ifindex, dnsPolicyModeFlags)
+	if !replace && plan.dnsPolicyFlags == 0 {
+		return nil
+	}
+	return setDNSPolicyFlags(ifindex, plan.dnsPolicyFlags)
 }

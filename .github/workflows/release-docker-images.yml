@@ -1,0 +1,430 @@
+name: Release Docker Images
+
+# Reusable pipeline for building and pushing release component images.
+# GitHub-hosted runners build amd64 + arm64 and publish multi-arch manifests to
+# GHCR and TCR int. A self-hosted job then copies per-arch and multi-arch images
+# to TCR cn (avoids slow US→CN pushes). Add a component by extending the prepare
+# job's component table and publish_manifests matrix below.
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to build and push (e.g. v0.5.0)'
+        required: true
+        type: string
+      ref:
+        description: 'Git ref to build from (branch or tag; defaults to the branch you run from)'
+        required: false
+        type: string
+        default: ''
+      components:
+        description: 'Comma-separated components to build, or "all" (cube-egress, cube-master, cube-api, cube-proxy, webui, cube-lifecycle-manager)'
+        required: false
+        type: string
+        default: all
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Image tag to build and push'
+        required: true
+        type: string
+      ref:
+        description: 'Git ref to build from (defaults to the caller ref)'
+        required: false
+        type: string
+        default: ''
+      components:
+        description: 'Comma-separated components to build, or "all"'
+        required: false
+        type: string
+        default: all
+
+concurrency:
+  group: release-docker-images-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CHECKOUT_REF: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+  OPENRESTY_BASE_IMAGE: cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+
+jobs:
+  verify_versions:
+    name: Verify release image tags
+    runs-on: ubuntu-latest
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Check hard-coded image tags match the release tag
+        run: scripts/bump-image.sh --check "${{ inputs.image_tag }}"
+
+  prepare:
+    name: Resolve component matrix
+    runs-on: ubuntu-latest
+    needs: verify_versions
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+      publish: ${{ steps.filter.outputs.publish }}
+    steps:
+      - name: Filter components
+        id: filter
+        env:
+          COMPONENTS: ${{ inputs.components }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          raw = os.environ["COMPONENTS"].strip()
+          if raw == "all":
+              selected = None
+          else:
+              selected = {c.strip() for c in raw.split(",") if c.strip()}
+              if not selected:
+                  print("error: components is empty after parsing", file=sys.stderr)
+                  sys.exit(1)
+
+          known = {
+              "cube-egress",
+              "cube-master",
+              "cube-api",
+              "cube-proxy",
+              "webui",
+              "cube-lifecycle-manager",
+          }
+          if selected is not None:
+              unknown = sorted(selected - known)
+              if unknown:
+                  print(f"error: unknown component(s): {', '.join(unknown)}", file=sys.stderr)
+                  print(f"valid: {', '.join(sorted(known))}", file=sys.stderr)
+                  sys.exit(1)
+
+          def want(name: str) -> bool:
+              return selected is None or name in selected
+
+          defs = [
+              {
+                  "component": "cube-egress",
+                  "image": "cube-egress",
+                  "context": "CubeEgress",
+                  "dockerfile": "CubeEgress/Dockerfile",
+                  "cache_scope": "cube-egress",
+              },
+              {
+                  "component": "cube-master",
+                  "image": "cube-master",
+                  "context": ".",
+                  "dockerfile": "CubeMaster/Dockerfile",
+                  "cache_scope": "cube-master",
+              },
+              {
+                  "component": "cube-api",
+                  "image": "cube-api",
+                  "context": "CubeAPI",
+                  "dockerfile": "CubeAPI/Dockerfile",
+                  "cache_scope": "cube-api",
+              },
+              {
+                  "component": "cube-proxy",
+                  "image": "cube-proxy",
+                  "context": "CubeProxy",
+                  "dockerfile": "CubeProxy/Dockerfile",
+                  "cache_scope": "cube-proxy",
+              },
+              {
+                  "component": "webui",
+                  "image": "webui",
+                  "context": ".",
+                  "dockerfile": "deploy/one-click/webui/Dockerfile",
+                  "cache_scope": "webui",
+              },
+              {
+                  "component": "cube-lifecycle-manager",
+                  "image": "cube-lifecycle-manager",
+                  "context": "cube-lifecycle-manager",
+                  "dockerfile": "cube-lifecycle-manager/Dockerfile",
+                  "cache_scope": "cube-lifecycle-manager",
+              },
+          ]
+          arches = [
+              {
+                  "arch": "amd64",
+                  "platform": "linux/amd64",
+                  "runner": "ubuntu-latest",
+              },
+              {
+                  "arch": "arm64",
+                  "platform": "linux/arm64",
+                  "runner": "ubuntu-24.04-arm",
+              },
+          ]
+
+          build_include = []
+          publish_include = []
+          for item in defs:
+              if not want(item["component"]):
+                  continue
+              publish_include.append(
+                  {"component": item["component"], "image": item["image"]}
+              )
+              for arch in arches:
+                  build_include.append({**item, **arch})
+
+          if not build_include:
+              print("error: no components selected for build", file=sys.stderr)
+              sys.exit(1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"build={json.dumps({'include': build_include})}\n")
+              out.write(f"publish={json.dumps({'include': publish_include})}\n")
+          PY
+
+  build_images:
+    name: ${{ matrix.component }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: [verify_versions, prepare]
+    if: github.repository == 'TencentCloud/CubeSandbox'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.build) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Tencent Cloud TCR (int)
+        uses: docker/login-action@v3
+        with:
+          registry: cube-sandbox-int.tencentcloudcr.com
+          username: ${{ secrets.TCR_INT_USERNAME }}
+          password: ${{ secrets.TCR_INT_PASSWORD }}
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_OUTPUT}"
+          echo "commit=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push per-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          # Push plain per-arch manifests (no provenance/SBOM attestations) so the
+          # publish_manifests step can combine them into a single clean multi-arch
+          # manifest list; attestations would add extra manifest entries that break
+          # `docker buildx imagetools create`.
+          provenance: false
+          build-args: |
+            CUBE_VERSION=${{ inputs.image_tag }}
+            CUBE_COMMIT=${{ steps.meta.outputs.commit }}
+            CUBE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+            CUBE_PROXY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
+            OPENRESTY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
+          tags: |
+            ghcr.io/tencentcloud/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
+            cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${{ matrix.image }}:${{ inputs.image_tag }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}-${{ matrix.arch }}
+
+  publish_manifests:
+    name: ${{ matrix.component }} manifests
+    runs-on: ubuntu-latest
+    needs: [build_images, prepare]
+    if: >-
+      always() &&
+      needs.build_images.result == 'success' &&
+      github.repository == 'TencentCloud/CubeSandbox'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.publish) }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Tencent Cloud TCR (int)
+        uses: docker/login-action@v3
+        with:
+          registry: cube-sandbox-int.tencentcloudcr.com
+          username: ${{ secrets.TCR_INT_USERNAME }}
+          password: ${{ secrets.TCR_INT_PASSWORD }}
+
+      - name: Resolve manifest tags
+        id: tags
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          tags="${IMAGE_TAG}"
+          if [[ "${IMAGE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tags="${tags} latest"
+          fi
+          echo "list=${tags}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create multi-arch manifests
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_NAME: ${{ matrix.image }}
+          # Bind step outputs to env vars instead of interpolating ${{ }} into the
+          # script body, so no expression value can ever be parsed as shell. The
+          # unquoted ${MANIFEST_TAGS} expansion below is deliberate word-splitting
+          # into individual tags.
+          MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
+        run: |
+          for image in \
+            "ghcr.io/tencentcloud/${IMAGE_NAME}" \
+            "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"; do
+            for tag in ${MANIFEST_TAGS}; do
+              docker buildx imagetools create -t "${image}:${tag}" \
+                "${image}:${IMAGE_TAG}-amd64" \
+                "${image}:${IMAGE_TAG}-arm64"
+            done
+          done
+
+  # Sync per-arch and multi-arch images from TCR int to TCR cn on a China-side
+  # self-hosted runner (crane pull then push; avoids streaming copy stalls).
+  # TCR int already receives the release images during the build, and using it
+  # here avoids pulling large layers from GHCR into China.
+  # This ARC runner set requires a job container.
+  sync_cn:
+    name: ${{ matrix.component }} sync to TCR CN
+    runs-on: arc-2c4g-ctd-gz
+    container:
+      image: ubuntu:24.04
+    needs: [publish_manifests, prepare]
+    if: >-
+      always() &&
+      needs.publish_manifests.result == 'success' &&
+      github.repository == 'TencentCloud/CubeSandbox'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.publish) }}
+    # Job containers default to `sh` (dash); pipefail / [[ ]] need bash.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install crane
+        env:
+          CRANE_VERSION: v0.20.3
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "${arch}" in
+            x86_64|amd64) crane_arch=x86_64 ;;
+            aarch64|arm64) crane_arch=arm64 ;;
+            *) echo "unsupported arch: ${arch}" >&2; exit 1 ;;
+          esac
+          bin_dir="${RUNNER_TEMP}/crane-bin"
+          mkdir -p "${bin_dir}"
+          curl -fsSL \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${crane_arch}.tar.gz" \
+            | tar -xz -C "${bin_dir}" crane
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          "${bin_dir}/crane" version
+
+      - name: Log in to registries
+        env:
+          TCR_INT_USERNAME: ${{ secrets.TCR_INT_USERNAME }}
+          TCR_INT_PASSWORD: ${{ secrets.TCR_INT_PASSWORD }}
+          TCR_CN_USERNAME: ${{ secrets.TCR_CN_USERNAME }}
+          TCR_CN_PASSWORD: ${{ secrets.TCR_CN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "${TCR_INT_PASSWORD}" | crane auth login cube-sandbox-int.tencentcloudcr.com \
+            -u "${TCR_INT_USERNAME}" --password-stdin
+          echo "${TCR_CN_PASSWORD}" | crane auth login cube-sandbox-cn.tencentcloudcr.com \
+            -u "${TCR_CN_USERNAME}" --password-stdin
+
+      - name: Resolve manifest tags
+        id: tags
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          tags="${IMAGE_TAG}"
+          if [[ "${IMAGE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tags="${tags} latest"
+          fi
+          echo "list=${tags}" >> "${GITHUB_OUTPUT}"
+
+      - name: Sync images to TCR CN
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_NAME: ${{ matrix.image }}
+          MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
+          CRANE_SYNC_ATTEMPTS: "3"
+          # Split pull/push instead of `crane copy` streaming: concurrent
+          # pull+push was getting rwnd-limited / unexpected EOF against TCR CN.
+          CRANE_PULL_TIMEOUT: 20m
+          CRANE_PUSH_TIMEOUT: 20m
+        run: |
+          set -euo pipefail
+          src="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
+          dst="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
+          work_dir="${RUNNER_TEMP:-/tmp}/crane-sync"
+          mkdir -p "${work_dir}"
+
+          sync_image() {
+            local from="$1"
+            local to="$2"
+            local attempt
+            local tarball="${work_dir}/image.tar"
+            for attempt in $(seq 1 "${CRANE_SYNC_ATTEMPTS}"); do
+              echo "Syncing ${from} -> ${to} (attempt ${attempt}/${CRANE_SYNC_ATTEMPTS})"
+              rm -f "${tarball}"
+              if timeout "${CRANE_PULL_TIMEOUT}" crane pull "${from}" "${tarball}" \
+                && timeout "${CRANE_PUSH_TIMEOUT}" crane push "${tarball}" "${to}"; then
+                rm -f "${tarball}"
+                return 0
+              fi
+              rm -f "${tarball}"
+              if [[ "${attempt}" == "${CRANE_SYNC_ATTEMPTS}" ]]; then
+                echo "Failed to sync ${from} -> ${to}" >&2
+                return 1
+              fi
+              sleep "$((attempt * 10))"
+            done
+          }
+
+          for arch in amd64 arm64; do
+            sync_image "${src}:${IMAGE_TAG}-${arch}" "${dst}:${IMAGE_TAG}-${arch}"
+          done
+          for tag in ${MANIFEST_TAGS}; do
+            sync_image "${src}:${tag}" "${dst}:${tag}"
+          done

@@ -30,6 +30,7 @@ type templateResponse struct {
 	DisplayName                string                         `json:"display_name,omitempty"`
 	CreatedAt                  string                         `json:"created_at,omitempty"`
 	ImageInfo                  string                         `json:"image_info,omitempty"`
+	JobID                      string                         `json:"job_id,omitempty"`
 	Replicas                   []templatecenter.ReplicaStatus `json:"replicas,omitempty"`
 	CreateRequest              *types.CreateCubeSandboxReq    `json:"create_request,omitempty"`
 	CubeEgressCABaked          bool                           `json:"cube_egress_ca_baked,omitempty"`
@@ -50,6 +51,7 @@ type templateSummary struct {
 	LastError    string `json:"last_error,omitempty"`
 	CreatedAt    string `json:"created_at,omitempty"`
 	ImageInfo    string `json:"image_info,omitempty"`
+	JobID        string `json:"job_id,omitempty"`
 }
 
 type deleteTemplateRequest struct {
@@ -198,6 +200,7 @@ func createTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestT
 		Version:                    info.Version,
 		Status:                     info.Status,
 		LastError:                  info.LastError,
+		JobID:                      info.JobID,
 		Replicas:                   info.Replicas,
 		CubeEgressCABaked:          info.CubeEgressCABaked,
 		CubeEgressCAFingerprint:    info.CubeEgressCAFingerprint,
@@ -261,6 +264,7 @@ func getTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrac
 		DisplayName:                info.DisplayName,
 		CreatedAt:                  info.CreatedAt,
 		ImageInfo:                  info.ImageInfo,
+		JobID:                      info.JobID,
 		Replicas:                   info.Replicas,
 		CreateRequest:              createReq,
 		CubeEgressCABaked:          info.CubeEgressCABaked,
@@ -300,6 +304,7 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			LastError:    info.LastError,
 			CreatedAt:    info.CreatedAt,
 			ImageInfo:    info.ImageInfo,
+			JobID:        info.JobID,
 		})
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)

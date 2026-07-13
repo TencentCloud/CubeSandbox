@@ -49,6 +49,7 @@ type templateResponse struct {
 	DisplayName                string                      `json:"display_name,omitempty"`
 	CreatedAt                  string                      `json:"created_at,omitempty"`
 	ImageInfo                  string                      `json:"image_info,omitempty"`
+	JobID                      string                      `json:"job_id,omitempty"`
 	Replicas                   []templateReplicaStatus     `json:"replicas,omitempty"`
 	CreateRequest              *types.CreateCubeSandboxReq `json:"create_request,omitempty"`
 	CubeEgressCABaked          bool                        `json:"cube_egress_ca_baked,omitempty"`
@@ -69,6 +70,7 @@ type templateSummary struct {
 	LastError    string `json:"last_error,omitempty"`
 	CreatedAt    string `json:"created_at,omitempty"`
 	ImageInfo    string `json:"image_info,omitempty"`
+	JobID        string `json:"job_id,omitempty"`
 }
 
 type templateImageJobResponse struct {
@@ -1031,19 +1033,23 @@ var TemplateListCommand = cli.Command{
 		}
 		wideOutput := strings.EqualFold(strings.TrimSpace(c.String("output")), "wide")
 		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
-		tabHeader := "TEMPLATE_ID\tSTATUS\tCREATED_AT\tIMAGE_INFO"
+		tabHeader := "TEMPLATE_ID\tSTATUS\tJOB_ID\tCREATED_AT\tIMAGE_INFO"
 		if wideOutput {
-			tabHeader = "TEMPLATE_ID\tSTATUS\tLAST_ERROR\tCREATED_AT\tIMAGE_INFO"
+			tabHeader = "TEMPLATE_ID\tSTATUS\tJOB_ID\tLAST_ERROR\tCREATED_AT\tIMAGE_INFO"
 		}
 		fmt.Fprintln(w, tabHeader)
 		for _, item := range rsp.Data {
+			jobID := item.JobID
+			if jobID == "" {
+				jobID = "-"
+			}
 			if wideOutput {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-					item.TemplateID, item.Status, item.LastError, item.CreatedAt, item.ImageInfo)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+					item.TemplateID, item.Status, jobID, item.LastError, item.CreatedAt, item.ImageInfo)
 				continue
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-				item.TemplateID, item.Status, item.CreatedAt, item.ImageInfo)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				item.TemplateID, item.Status, jobID, item.CreatedAt, item.ImageInfo)
 		}
 		return w.Flush()
 	},
@@ -1065,6 +1071,9 @@ func printTemplateSummary(rsp *templateResponse) {
 	}
 	if rsp.LastError != "" {
 		log.Printf("last_error: %s\n", rsp.LastError)
+	}
+	if jobID := strings.TrimSpace(rsp.JobID); jobID != "" {
+		log.Printf("job_id: %s\n", jobID)
 	}
 	// CubeEgress CA bake status. Always print so an operator can tell
 	// at a glance whether sandboxes from this template will trust

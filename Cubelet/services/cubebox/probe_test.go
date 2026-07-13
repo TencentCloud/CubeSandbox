@@ -5,10 +5,16 @@
 package cubebox
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	neturl "net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -18,11 +24,18 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"k8s.io/utils/pointer"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
 
 func TestProbeErrIp(t *testing.T) {
 	cnt := &cubebox.ContainerConfig{
@@ -144,6 +157,216 @@ func TestProbeErrAction(t *testing.T) {
 	retErr := l.doProbe(ctx, cnt, ci)
 	err, _ := ret.FromError(retErr)
 	assert.Equal(t, errorcode.ErrorCode_InvalidParamFormat, err.Code())
+}
+
+func TestDoCreateTimeEnvdInitPostsEnvVars(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/init" {
+			t.Fatalf("path=%q, want /init", r.URL.Path)
+		}
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	u, err := neturl.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("parse server port: %v", err)
+	}
+
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			constants.MasterAnnotationComponentEnvdVersion: "0.2.0",
+			constants.MasterAnnotationCreateTimeEnvVars:    `{"SESSION_ID":"user-session-test","USER_ID":"42"}`,
+		},
+	}
+	sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
+
+	l := &local{envdHTTPClient: server.Client(), envdInitPort: port}
+	if err := l.doCreateTimeEnvdInit(context.Background(), req, sandBox); err != nil {
+		t.Fatalf("doCreateTimeEnvdInit err=%v", err)
+	}
+	envVars, ok := gotBody["envVars"].(map[string]any)
+	if !ok {
+		t.Fatalf("envVars payload missing: %#v", gotBody)
+	}
+	if envVars["SESSION_ID"] != "user-session-test" {
+		t.Fatalf("SESSION_ID=%v, want user-session-test", envVars["SESSION_ID"])
+	}
+	if envVars["USER_ID"] != "42" {
+		t.Fatalf("USER_ID=%v, want 42", envVars["USER_ID"])
+	}
+}
+
+func TestDoCreateTimeEnvdInitFailsOnHTTPError(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		http.Error(w, "envd refused init", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	u, err := neturl.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("parse server port: %v", err)
+	}
+
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			constants.MasterAnnotationComponentEnvdVersion: "0.2.0",
+			constants.MasterAnnotationCreateTimeEnvVars:    `{"SESSION_ID":"user-session-test"}`,
+		},
+	}
+	sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
+
+	l := &local{envdHTTPClient: server.Client(), envdInitPort: port}
+	retErr := l.doCreateTimeEnvdInit(context.Background(), req, sandBox)
+	if retErr == nil {
+		t.Fatal("expected init failure")
+	}
+	errInfo, _ := ret.FromError(retErr)
+	assert.Equal(t, errorcode.ErrorCode_ExecCommandInSandboxFailed, errInfo.Code())
+	assert.Contains(t, errInfo.Message(), "envd refused init")
+	assert.Equal(t, 1, callCount)
+}
+
+func TestDoCreateTimeEnvdInitRetriesTransientHTTPError(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount < envdInitMaxAttempts {
+			http.Error(w, "envd warming up", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	u, err := neturl.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("parse server port: %v", err)
+	}
+
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			constants.MasterAnnotationComponentEnvdVersion: "0.2.0",
+			constants.MasterAnnotationCreateTimeEnvVars:    `{"SESSION_ID":"user-session-test"}`,
+		},
+	}
+	sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
+
+	l := &local{envdHTTPClient: server.Client(), envdInitPort: port}
+	if err := l.doCreateTimeEnvdInit(context.Background(), req, sandBox); err != nil {
+		t.Fatalf("doCreateTimeEnvdInit err=%v", err)
+	}
+	assert.Equal(t, envdInitMaxAttempts, callCount)
+}
+
+func TestDoCreateTimeEnvdInitRetriesTransportError(t *testing.T) {
+	callCount := 0
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			callCount++
+			if callCount < envdInitMaxAttempts {
+				return nil, fmt.Errorf("dial tcp %s: connection refused", r.URL.Host)
+			}
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewReader(nil)),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			constants.MasterAnnotationComponentEnvdVersion: "0.2.0",
+			constants.MasterAnnotationCreateTimeEnvVars:    `{"SESSION_ID":"user-session-test"}`,
+		},
+	}
+	sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
+
+	l := &local{envdHTTPClient: client, envdInitPort: 49983}
+	if err := l.doCreateTimeEnvdInit(context.Background(), req, sandBox); err != nil {
+		t.Fatalf("doCreateTimeEnvdInit err=%v", err)
+	}
+	assert.Equal(t, envdInitMaxAttempts, callCount)
+}
+
+func TestDoCreateTimeEnvdInitFallsBackWithoutEnvdSupportAnnotation(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if r.URL.Path != "/init" {
+			t.Fatalf("path=%q, want /init", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	u, err := neturl.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("parse server port: %v", err)
+	}
+
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			constants.MasterAnnotationCreateTimeEnvVars: `{"SESSION_ID":"user-session-test"}`,
+		},
+	}
+	sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
+
+	l := &local{envdHTTPClient: server.Client(), envdInitPort: port}
+	if err := l.doCreateTimeEnvdInit(context.Background(), req, sandBox); err != nil {
+		t.Fatalf("doCreateTimeEnvdInit err=%v", err)
+	}
+	if !called {
+		t.Fatal("expected missing envd support annotation to still issue envd init request")
+	}
+}
+
+func TestDoCreateTimeEnvdInitFailsWithoutEnvdSupportAnnotationWhenEnvdUnavailable(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("dial tcp %s: connection refused", r.URL.Host)
+		}),
+	}
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			constants.MasterAnnotationCreateTimeEnvVars: `{"SESSION_ID":"user-session-test"}`,
+		},
+	}
+	sandBox := &cubeboxstore.CubeBox{IP: "127.0.0.1"}
+
+	l := &local{envdHTTPClient: client, envdInitPort: 49983}
+	retErr := l.doCreateTimeEnvdInit(context.Background(), req, sandBox)
+	if retErr == nil {
+		t.Fatal("expected init failure when envd init cannot be reached without envd support annotation")
+	}
+	errInfo, _ := ret.FromError(retErr)
+	assert.Equal(t, errorcode.ErrorCode_ExecCommandInSandboxFailed, errInfo.Code())
+	assert.Contains(t, errInfo.Message(), "connection refused")
 }
 
 func TestProbe(t *testing.T) {

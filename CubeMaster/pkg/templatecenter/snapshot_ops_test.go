@@ -531,19 +531,13 @@ func TestValidateSnapshotMetricsRejectsMissingKeys(t *testing.T) {
 	}
 }
 
-// TestDeleteSnapshotDoesNotBlockWhenRuntimeRefsExist verifies that the
-// in-use / runtime-ref prechecks no longer abort DeleteSnapshot. Even when
-// sandboxes still reference the snapshot, delete must proceed past the
-// guards because rootfs is reflink/CoW-derived (source can be removed
-// without affecting derived sandbox rootfs) and the memory vol stays
-// accessible to the running hypervisor via its open fd / dm handle until
-// the sandbox exits.
+// TestDeleteSnapshotBlocksWhenRuntimeRefsExist verifies that the active
+// runtime binding table is the current-state authority: deleting a snapshot
+// that is still attached to a sandbox must fail with a conflict.
 //
-// The test patches nextSnapshotAttempt with a sentinel error and asserts
-// DeleteSnapshot bubbles up that sentinel - if either guard still rejected,
-// we would see the legacy ErrTemplateInUse / "still used by running
-// sandboxes" message and never reach nextSnapshotAttempt.
-func TestDeleteSnapshotDoesNotBlockWhenRuntimeRefsExist(t *testing.T) {
+// The legacy template in-use precheck remains warning-only, but active runtime
+// refs are authoritative and must prevent reaching nextSnapshotAttempt.
+func TestDeleteSnapshotBlocksWhenRuntimeRefsExist(t *testing.T) {
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -576,8 +570,7 @@ func TestDeleteSnapshotDoesNotBlockWhenRuntimeRefsExist(t *testing.T) {
 			}},
 		}, nil
 	})
-	// Both prechecks now report the snapshot as still in use - they should
-	// only emit warnings instead of aborting DeleteSnapshot.
+	// The legacy template in-use precheck is still warning-only.
 	patches.ApplyFunc(isTemplateInUse, func(ctx context.Context, templateID, instanceType string) (bool, error) {
 		return true, nil
 	})
@@ -589,22 +582,115 @@ func TestDeleteSnapshotDoesNotBlockWhenRuntimeRefsExist(t *testing.T) {
 		}}, nil
 	})
 
-	sentinel := errors.New("sentinel: reached nextSnapshotAttempt past in-use guards")
+	sentinel := errors.New("sentinel: reached nextSnapshotAttempt past runtime-ref guard")
 	patches.ApplyFunc(nextSnapshotAttempt, func(ctx context.Context, snapshotID string) (int32, string, error) {
 		return 0, "", sentinel
 	})
 
 	_, err := DeleteSnapshot(context.Background(), "req-delete", "snap-in-use", "cubebox")
 	if err == nil {
-		t.Fatalf("DeleteSnapshot returned nil error; expected sentinel to propagate")
+		t.Fatal("DeleteSnapshot returned nil error; expected active runtime refs to block deletion")
 	}
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("DeleteSnapshot error = %q, want sentinel %q (a guard appears to still block)", err.Error(), sentinel.Error())
+	if errors.Is(err, sentinel) {
+		t.Fatalf("DeleteSnapshot reached nextSnapshotAttempt despite active runtime refs: %v", err)
 	}
-	if errors.Is(err, ErrTemplateInUse) {
-		t.Fatalf("DeleteSnapshot returned ErrTemplateInUse; the in-use guard should be a warning only")
+	if !errors.Is(err, ErrTemplateAttemptInProgress) {
+		t.Fatalf("DeleteSnapshot error = %v, want ErrTemplateAttemptInProgress", err)
 	}
-	if strings.Contains(err.Error(), "still used by running sandboxes") {
-		t.Fatalf("DeleteSnapshot error = %q, runtime-ref guard should no longer reject", err.Error())
+	if !strings.Contains(err.Error(), "active runtime ref") {
+		t.Fatalf("DeleteSnapshot error = %q, want active runtime ref message", err.Error())
+	}
+}
+
+func TestRunSnapshotDeleteJobCleansTemplateJobs(t *testing.T) {
+	origReplicaCleanup := runReplicaCleanup
+	origMetadataCleanup := runMetadataCleanup
+	origJobCleanup := runTemplateJobCleanup
+	t.Cleanup(func() {
+		runReplicaCleanup = origReplicaCleanup
+		runMetadataCleanup = origMetadataCleanup
+		runTemplateJobCleanup = origJobCleanup
+	})
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	jobsCleaned := false
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error {
+		return nil
+	})
+	patches.ApplyFunc(discoverTemplateCleanupTargets, func(ctx context.Context, templateID, instanceType string) (*templateCleanupTargets, error) {
+		return &templateCleanupTargets{}, nil
+	})
+	patches.ApplyFunc(snapshotDeleteLocators, func(targets *templateCleanupTargets) ([]templateCleanupLocator, error) {
+		return nil, nil
+	})
+	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
+	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
+		return nil
+	}
+	runMetadataCleanup = func(ctx context.Context, templateID string) error {
+		return nil
+	}
+	runTemplateJobCleanup = func(ctx context.Context, templateID string) error {
+		if templateID != "snap-del" {
+			t.Fatalf("runTemplateJobCleanup templateID = %q, want snap-del", templateID)
+		}
+		jobsCleaned = true
+		return nil
+	}
+
+	if err := runSnapshotDeleteJob(context.Background(), "job-del", "snap-del"); err != nil {
+		t.Fatalf("runSnapshotDeleteJob returned error: %v", err)
+	}
+	if !jobsCleaned {
+		t.Fatal("expected runTemplateJobCleanup to be called")
+	}
+}
+
+func TestExecuteSnapshotDeleteJobReturnsReadyWithoutJobLookup(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(claimSnapshotJobExecution, func(ctx context.Context, jobID, phase string, progress int32) (bool, error) {
+		return true, nil
+	})
+	patches.ApplyFunc(runSnapshotDeleteJob, func(ctx context.Context, jobID, snapshotID string) error {
+		return nil
+	})
+	getJobInfoCallCount := 0
+	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
+		getJobInfoCallCount++
+		return nil, nil
+	})
+
+	info, err := executeSnapshotDeleteJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{
+		JobID:      "job-del",
+		TemplateID: "snap-del",
+		Status:     JobStatusPending,
+	}, "snap-del")
+	if err != nil {
+		t.Fatalf("executeSnapshotDeleteJob returned error: %v", err)
+	}
+	if info == nil {
+		t.Fatal("expected non-nil job info")
+	}
+	if info.JobID != "job-del" {
+		t.Fatalf("jobID = %q, want %q", info.JobID, "job-del")
+	}
+	if info.TemplateID != "snap-del" {
+		t.Fatalf("templateID = %q, want %q", info.TemplateID, "snap-del")
+	}
+	if info.Status != JobStatusReady {
+		t.Fatalf("status = %q, want %q", info.Status, JobStatusReady)
+	}
+	if info.Phase != JobPhaseReady {
+		t.Fatalf("phase = %q, want %q", info.Phase, JobPhaseReady)
+	}
+	if info.Progress != 100 {
+		t.Fatalf("progress = %d, want 100", info.Progress)
+	}
+	if getJobInfoCallCount != 0 {
+		t.Fatalf("GetTemplateImageJobInfo called %d time(s), want 0", getJobInfoCallCount)
 	}
 }

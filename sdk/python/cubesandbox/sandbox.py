@@ -19,10 +19,14 @@ from ._policy import (
     _serialize_rule,
     _validate_allow_out_domains_require_deny_all,
 )
+from ._pty import Pty
 from ._stream import _parse_line
 from ._transport import build_client
 
 JUPYTER_PORT = 49999
+
+#: Never-timeout sentinel. See docs/guide/lifecycle.md.
+NEVER_TIMEOUT = -1
 
 
 def _check_response(resp: requests.Response) -> None:
@@ -83,6 +87,7 @@ class Sandbox:
         self._client: httpx.Client | None = None
         self._commands = Commands(self)
         self._files = Filesystem(self)
+        self._pty = Pty(self)
 
 
     @property
@@ -96,6 +101,25 @@ class Sandbox:
     @property
     def domain(self) -> str:
         return self._data.get("domain") or self._config.sandbox_domain
+
+    @property
+    def traffic_access_token(self) -> str | None:
+        """Per-sandbox token returned when ``network.allow_public_traffic=False``.
+
+        Send it as either the ``e2b-traffic-access-token`` (E2B-compatible)
+        or ``cube-traffic-access-token`` header on every request to the
+        sandbox's public URL — CubeProxy rejects unauthenticated traffic
+        with HTTP 403 when the sandbox was created with public access
+        restricted.
+
+        ``None`` for sandboxes with the default (publicly reachable)
+        configuration, including instances obtained via :meth:`connect` /
+        :meth:`resume` (the token is only delivered on the original create
+        response). Persist it client-side at create time if you need it
+        later.
+        """
+        token = self._data.get("trafficAccessToken")
+        return token or None
 
     def get_host(self, port: int) -> str:
         """Return the virtual hostname for a sandbox port.
@@ -111,6 +135,10 @@ class Sandbox:
     @property
     def files(self) -> "Filesystem":
         return self._files
+
+    @property
+    def pty(self) -> "Pty":
+        return self._pty
 
 
     @classmethod
@@ -131,7 +159,8 @@ class Sandbox:
 
         Args:
             template: Template ID. Falls back to ``CUBE_TEMPLATE_ID`` env var.
-            timeout: Sandbox TTL in seconds. Defaults to ``Config.timeout`` (300).
+            timeout: Sandbox idle timeout in seconds (``None`` omits the field).
+                See ``docs/guide/lifecycle.md``.
             env_vars: Environment variables injected into the sandbox.
             metadata: Arbitrary key-value metadata (e.g. network-policy, host-mount).
             allow_internet_access: When ``False``, the sandbox is blocked from
@@ -175,7 +204,10 @@ class Sandbox:
         if not tpl:
             raise ValueError("template is required. Set CUBE_TEMPLATE_ID or pass template=")
 
-        payload: dict = {"templateID": tpl, "timeout": timeout or cfg.timeout}
+        # Omitted when None; see docs/guide/lifecycle.md.
+        payload: dict = {"templateID": tpl}
+        if timeout is not None:
+            payload["timeout"] = timeout
         if env_vars:
             payload["envVars"] = env_vars
         if metadata:
@@ -237,8 +269,9 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
+        # Connect omits timeout; see docs/guide/lifecycle.md.
         resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
-                      json={"timeout": cfg.timeout},
+                      json={},
                       headers={"Content-Type": "application/json"})
         _check_response(resp)
         return cls(resp.json(), config=cfg)
@@ -396,7 +429,7 @@ class Sandbox:
                 f"Sandbox {self.sandbox_id!r} did not reach 'paused' state within {timeout}s"
             )
 
-    def resume(self, timeout: int = 300) -> None:
+    def resume(self, timeout: int | None = None) -> None:
         """POST /sandboxes/:sandboxID/resume - Resume a paused sandbox.
 
         .. deprecated::
@@ -404,15 +437,37 @@ class Sandbox:
             and returns a fresh :class:`Sandbox` instance.
 
         Args:
-            timeout: Sandbox TTL in seconds after resume (default: 300).
+            timeout: Sandbox TTL in seconds after resume (``None`` omits the field).
+                See ``docs/guide/lifecycle.md``.
 
         Raises:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
             ApiError: If the sandbox is already running (HTTP 409) or on
                 unexpected backend error (HTTP 500).
         """
+        body: dict = {}
+        if timeout is not None:
+            body["timeout"] = timeout
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/resume",
+            json=body,
+        )
+        _check_response(resp)
+
+    def set_timeout(self, timeout: int) -> None:
+        """POST /sandboxes/:sandboxID/timeout - Set sandbox idle timeout.
+
+        Args:
+            timeout: New idle timeout in seconds. ``0`` requests immediate
+                timeout; positive values set a normal TTL; ``NEVER_TIMEOUT``
+                (-1) disables idle timeout entirely.
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: If the timeout is invalid or on unexpected backend error.
+        """
+        resp = self._session.post(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/timeout",
             json={"timeout": timeout},
         )
         _check_response(resp)
@@ -726,4 +781,15 @@ class Sandbox:
 
     def _build_data_client(self) -> httpx.Client:
         """Build an HTTP client for CubeProxy-routed sandbox data-plane APIs."""
-        return build_client(self._config)
+        return build_client(self._config, headers=self._traffic_token_headers())
+
+    def _traffic_token_headers(self) -> dict[str, str]:
+        """Headers that must accompany every CubeProxy data-plane request.
+
+        When the sandbox was created with ``network.allow_public_traffic=False``,
+        CubeProxy rejects unauthenticated traffic with 403. Attaching the token
+        as a default header on the httpx client covers run_code, the Connect
+        fallback path, and filesystem read/write in one place.
+        """
+        token = self.traffic_access_token
+        return {"e2b-traffic-access-token": token} if token else {}

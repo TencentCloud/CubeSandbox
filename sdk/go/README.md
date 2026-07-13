@@ -1,6 +1,6 @@
 # cubesandbox Go SDK
 
-Go SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox). It matches the current Python SDK surface: sandbox lifecycle, code execution, commands, file read/write, snapshots, clone, rollback, and L7 egress policy.
+Go SDK for [CubeSandbox](https://github.com/TencentCloud/CubeSandbox). It matches the current Python SDK surface: sandbox lifecycle, code execution, commands, PTY (interactive terminal), filesystem operations (read, write, list, stat, exists, remove, rename, mkdir, watch), snapshots, clone, rollback, and L7 egress policy.
 
 ## Install
 
@@ -71,16 +71,105 @@ fmt.Println(result.Stdout, result.Stderr, result.ExitCode)
 
 `Commands.Run` starts `/bin/bash -l -c <command>` through envd's `process.Process/Start` API and returns stdout, stderr, and the `EndEvent` exit code. Callers are still responsible for treating untrusted shell input carefully.
 
+## PTY (interactive terminal)
+
+`sb.Pty()` opens a real pseudo-terminal for interactive programs that need a TTY — shells/REPLs, full-screen tools (`vim`, `top`), or agent-driven terminals. It mirrors the Python/Node `sandbox.pty` surface.
+
+```go
+pty := sb.Pty()
+
+// Start an interactive login shell (80x24). Optionally set opts.User / opts.Cwd.
+handle, err := pty.Create(ctx, cubesandbox.PtySize{Rows: 24, Cols: 80}, cubesandbox.PtyCreateOptions{})
+if err != nil {
+	panic(err)
+}
+
+// Drive it: send input, resize the window.
+_ = handle.SendStdin(ctx, []byte("echo hi && stty size\n"))
+_ = handle.Resize(ctx, cubesandbox.PtySize{Rows: 40, Cols: 120})
+
+// Consume output with Wait's callback OR by ranging handle.Output() — not both,
+// they share one stream. Wait blocks until the shell exits (or you call
+// handle.Kill / handle.Disconnect) and returns the exit code.
+code, err := handle.Wait(func(chunk []byte) {
+	os.Stdout.Write(chunk)
+})
+fmt.Println("pty exited with", code, err)
+```
+
+Reattach to a still-running PTY from elsewhere with `pty.Connect(ctx, pid, ...)`, or control one by PID without a handle:
+
+```go
+handle, _ := pty.Create(ctx, cubesandbox.PtySize{Rows: 24, Cols: 80}, cubesandbox.PtyCreateOptions{})
+handle.Disconnect() // detach without killing; the shell keeps running
+
+again, _ := pty.Connect(ctx, handle.PID(), cubesandbox.PtyConnectOptions{})
+_ = pty.SendStdin(ctx, again.PID(), []byte("ls\n"))
+killed, _ := pty.Kill(ctx, again.PID()) // false if the PID already exited
+_ = killed
+```
+
+| Method | Description |
+|---|---|
+| `Pty.Create(ctx, size, opts)` | Start `/bin/bash -i -l` with a PTY; seeds `TERM`/`LANG`/`LC_ALL` (overridable via `opts.Envs`). Streaming `process.Process/Start`. |
+| `Pty.Connect(ctx, pid, opts)` | Reattach to a running PTY. Streaming `process.Process/Connect`. |
+| `Pty.Kill(ctx, pid)` | `SIGKILL` a PTY; returns `false` (not an error) if the PID was not found. |
+| `Pty.SendStdin(ctx, pid, data)` | Write bytes to the PTY master (`SendInput`). |
+| `Pty.Resize(ctx, pid, size)` | Resize the window (`Update`). |
+| `handle.Output()` | Channel of raw output chunks; closed when the stream ends. |
+| `handle.Wait(onData)` | Block until exit, return the exit code; surfaces envd errors (e.g. `signal: killed`). |
+| `handle.Disconnect()` | Stop receiving output without killing the PTY. |
+| `handle.PID()` / `ExitCode()` / `ErrorMessage()` | PTY process ID; exit code (returns `0, false` until known); and envd end error. |
+| `handle.Kill` / `SendStdin` / `Resize` | Per-handle shortcuts that target this PTY's PID. |
+
+Consume output via **either** `Output()` **or** `Wait(onData)`, not both — they share one stream.
+
+`PtyCreateOptions.Timeout` / `PtyConnectOptions.Timeout` (default 60s, `<= 0` uses the default) is both sent to envd as `Connect-Timeout-Ms` and enforced client-side as an idle abort that resets on every received frame; on expiry `Wait` returns an "idle" timeout error.
+
 ## Files
 
 ```go
+// Read & write
 content, err := sb.Files().Read(ctx, "/etc/hosts")
-
 err = sb.Files().Write(ctx, "/tmp/hello.txt", []byte("hi"))
+
+// Batch write
+n, err := sb.Files().WriteFiles(ctx, []cubesandbox.WriteEntry{
+	{Path: "/tmp/a.txt", Data: []byte("aaa")},
+	{Path: "/tmp/b.txt", Data: []byte("bbb")},
+})
+
+// Directory operations
+entries, err := sb.Files().List(ctx, "/tmp")
+entry, err := sb.Files().Stat(ctx, "/tmp/hello.txt")
+exists, err := sb.Files().Exists(ctx, "/tmp/hello.txt")
+entry, err = sb.Files().MakeDir(ctx, "/tmp/mydir")
+entry, err = sb.Files().Rename(ctx, "/tmp/old.txt", "/tmp/new.txt")
+err = sb.Files().Remove(ctx, "/tmp/hello.txt")
+
+// Watch for changes
+watcher, err := sb.Files().WatchDir(ctx, "/tmp")
+if err != nil {
+	panic(err)
+}
+defer watcher.Close()
+for ev := range watcher.Events {
+	fmt.Println(ev.Name, ev.Type) // e.g. "hello.txt" "EVENT_TYPE_CREATE"
+}
 ```
 
-`Files.Read` downloads content through envd's `GET /files?path=...` file API.
-`Files.Write` uploads through `POST /files`, falling back to a multipart body when the envd version rejects a raw octet-stream.
+| Method | Description |
+|---|---|
+| `Read(ctx, path)` | Download file content via `GET /files` |
+| `Write(ctx, path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
+| `WriteFiles(ctx, entries)` | Batch write, stops on first error, returns count |
+| `List(ctx, path)` | List directory entries via `ListDir` RPC |
+| `Stat(ctx, path)` | File/directory metadata via `Stat` RPC |
+| `Exists(ctx, path)` | `true` if path exists (Stat + 404 check) |
+| `MakeDir(ctx, path)` | Create directory via `MakeDir` RPC |
+| `Rename(ctx, old, new)` | Move/rename via `Move` RPC |
+| `Remove(ctx, path)` | Delete file or directory via `Remove` RPC |
+| `WatchDir(ctx, path)` | Stream filesystem events (Connect streaming) |
 
 ## Snapshots, Clone, Rollback
 
@@ -164,10 +253,14 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 When `CUBE_PROXY_NODE_IP` is set, data-plane requests connect directly to that IP and port while preserving the virtual sandbox host:
 
 ```text
-URL:  <CUBE_PROXY_SCHEME>://49999-<sandboxID>.<CUBE_SANDBOX_DOMAIN>/<envd-endpoint>
+URL:  <CUBE_PROXY_SCHEME>://49983-<sandboxID>.<CUBE_SANDBOX_DOMAIN>/<envd-endpoint>
 TCP:  <CUBE_PROXY_NODE_IP>:<CUBE_PROXY_PORT_HTTP>
-Host: 49999-<sandboxID>.<CUBE_SANDBOX_DOMAIN>
+Host: 49983-<sandboxID>.<CUBE_SANDBOX_DOMAIN>
 ```
+
+The host prefix is the sandbox's internal service port: `49983` (envd) for
+commands/filesystem/files/PTY, and `49999` (Jupyter) for the code interpreter
+(`RunCode` / `/execute`).
 
 You can also set it directly:
 

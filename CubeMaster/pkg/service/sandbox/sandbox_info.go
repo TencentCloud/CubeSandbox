@@ -172,6 +172,7 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 		one.TemplateID = templateID
 		one.Annotations = buildAnnotationsFromLabels(sandboxLabels)
 		one.Labels = sandboxLabels
+		one.EndAt = LookupSandboxEndAt(ctx, sandbox.GetId())
 		rsp.Data = append(rsp.Data, one)
 	}
 	return nil

@@ -13,8 +13,6 @@ import (
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 )
 
 func TestDeleteTemplateWithTargetsAllowsJobOnlyCleanup(t *testing.T) {
@@ -330,61 +328,6 @@ func TestDeleteTemplateWithTargetsPreservesMetadataAfterArtifactFailure(t *testi
 	}
 	if invalidated {
 		t.Fatal("cache should remain intact after artifact cleanup failure")
-	}
-}
-
-func TestResolveArtifactCleanupNodesUsesHistoricalTargets(t *testing.T) {
-	targets := &templateCleanupTargets{
-		Replicas: []models.TemplateReplica{
-			{ArtifactID: "artifact-1", NodeID: "node-a", NodeIP: "10.0.0.1"},
-			{ArtifactID: "artifact-1", NodeID: "node-a", NodeIP: "10.0.0.1"},
-		},
-		Jobs: []models.TemplateImageJob{
-			{ArtifactID: "artifact-1", NodeID: "node-b", NodeIP: "10.0.0.2"},
-			{ArtifactID: "artifact-2", NodeID: "node-c", NodeIP: "10.0.0.3"},
-		},
-	}
-
-	got := resolveArtifactCleanupNodes(targets, "artifact-1")
-	if len(got) != 2 {
-		t.Fatalf("expected 2 cleanup targets, got %d", len(got))
-	}
-	expected := map[string]struct{}{
-		"node-a|10.0.0.1": {},
-		"node-b|10.0.0.2": {},
-	}
-	for _, item := range got {
-		key := item.ID() + "|" + item.HostIP()
-		if _, ok := expected[key]; !ok {
-			t.Fatalf("unexpected cleanup node: %+v", item)
-		}
-		delete(expected, key)
-	}
-	if len(expected) != 0 {
-		t.Fatalf("missing cleanup nodes: %+v", expected)
-	}
-}
-
-func TestResolveArtifactCleanupNodesFallsBackToLocalcacheAddress(t *testing.T) {
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-	patches.ApplyFunc(localcache.GetNode, func(nodeID string) (*node.Node, bool) {
-		if nodeID == "node-a" {
-			return &node.Node{InsID: "node-a", IP: "10.0.0.1"}, true
-		}
-		return nil, false
-	})
-
-	got := resolveArtifactCleanupNodes(&templateCleanupTargets{
-		Replicas: []models.TemplateReplica{
-			{ArtifactID: "artifact-1", NodeID: "node-a"},
-		},
-	}, "artifact-1")
-	if len(got) != 1 {
-		t.Fatalf("expected 1 cleanup target, got %d", len(got))
-	}
-	if got[0].ID() != "node-a" || got[0].HostIP() != "10.0.0.1" {
-		t.Fatalf("unexpected cleanup target: %+v", got[0])
 	}
 }
 

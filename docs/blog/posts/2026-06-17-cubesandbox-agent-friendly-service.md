@@ -3,7 +3,7 @@ title: "Making Legacy Software Agent-Friendly: Fast Spawn, Branching, and Rollba
 date: 2026-06-17
 author: Cube Sandbox Team
 description: When software consumers shift from humans to Agents, the requirements change fundamentally — creating a service is no longer an ops task, but part of the inference-and-action loop. Neon's $1B acquisition by Databricks validates this thesis. Cube Sandbox turns "fast spawn, clone, and rollback" into a general-purpose runtime capability, letting any traditional software service become Agent-friendly with near-zero code changes.
-featured: true
+featured: false
 weight: 2
 ---
 
@@ -59,9 +59,9 @@ Fourth, rollback is not destroy-and-rebuild. It restores the current sandbox in-
 
 For a deeper technical walkthrough, see:
 
-- [From Serverless to Agent: Design Thinking Behind Cube](https://cubesandbox.com/blog/posts/2026-05-22-from-serverless-to-agent.html)
-- [Cube Sandbox v0.3.0: A Time Machine and a Cloning Booth for Your AI Agents](https://cubesandbox.com/blog/posts/2026-06-03-cubesandbox-v0.3.0-snapshot.html)
-- [CubeSandbox Performance Benchmark Report](https://cubesandbox.com/blog/posts/2026-06-03-cubesandbox-perf-benchmark-pvm.html)
+- [From Serverless to Agent: Design Thinking Behind Cube](./2026-05-22-from-serverless-to-agent.md)
+- [Cube Sandbox v0.3.0: A Time Machine and a Cloning Booth for Your AI Agents](./2026-06-03-cubesandbox-v0.3.0-snapshot.md)
+- [CubeSandbox Performance Benchmark Report](./2026-06-03-cubesandbox-perf-benchmark-pvm.md)
 
 The diagram below summarizes the relationship between snapshot, clone, and rollback in CubeSandbox: snapshot freezes a running state into a checkpoint; clone forks multiple branches from that checkpoint (or a running sandbox); rollback rewinds a failed branch back to the checkpoint in-place.
 

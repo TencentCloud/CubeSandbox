@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ONE_CLICK_RUNTIME_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
+TOOLBOX_ROOT="/usr/local/services/cubetoolbox"
 ENV_FILE="${ONE_CLICK_RUNTIME_ENV_FILE:-${TOOLBOX_ROOT}/.one-click.env}"
 
 if [[ -f "${ENV_FILE}" ]]; then
@@ -183,7 +183,10 @@ resolve_control_plane_cubemaster_addr() {
   local addr="${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}"
   local ip="${ONE_CLICK_CONTROL_PLANE_IP:-}"
   local default_addr="${CUBEMASTER_ADDR:-127.0.0.1:8089}"
-  local port="${default_addr##*:}"
+  # 8089 is the cubemaster protocol port (a fixed constant), NOT derived from
+  # CUBEMASTER_ADDR -- that variable is the control node's local listen address;
+  # using its port here was an accidental coupling that broke when they differed.
+  local cubemaster_port=8089
 
   if [[ "${role}" != "compute" ]]; then
     printf '%s\n' "${default_addr}"
@@ -198,8 +201,8 @@ resolve_control_plane_cubemaster_addr() {
 
   if [[ -n "${ip}" ]]; then
     validate_ipv4_literal "${ip}" "ONE_CLICK_CONTROL_PLANE_IP"
-    validate_host_port "${ip}:${port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
-    printf '%s:%s\n' "${ip}" "${port}"
+    validate_host_port "${ip}:${cubemaster_port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
+    printf '%s:%s\n' "${ip}" "${cubemaster_port}"
     return 0
   fi
 
@@ -363,6 +366,11 @@ docker_rm_if_exists() {
   # cover this graceful stop.
   docker stop -t "${stop_timeout}" "${name}" >/dev/null 2>&1 || true
   docker rm "${name}" >/dev/null 2>&1 || true
+}
+
+docker_image_exists() {
+  local image_ref="$1"
+  docker image inspect "${image_ref}" >/dev/null 2>&1
 }
 
 wait_for_http() {

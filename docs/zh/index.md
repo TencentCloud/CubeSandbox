@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "Cube Sandbox"
   text: "Empowering your AI Agents."
-  tagline: "极速启动、高并发、安全且轻量化的 AI Agent 沙箱。"
+  tagline: "极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务"
   actions:
     - theme: brand
       text: 快速开始
@@ -16,13 +16,17 @@ features:
   - title: "🔒 硬件级隔离"
     details: 每个沙箱配备独立操作系统内核，运行在专属 MicroVM 中。
   - title: "🔌 E2B 生态兼容"
-    details: 完全兼容 E2B SDK 接口，替换一个环境变量即可从 E2B 云无缝切换，零业务代码改动。
+    details: 兼容 E2B SDK 接口，替换一个环境变量即可从 E2B 云无缝切换，零业务代码改动。
   - title: "📦 高密度部署"
-    details: 单沙箱额外开销仅 MB 级，通过内核共享与写时复制（CoW），单机可运行数千个实例。
+    details: 单沙箱额外开销仅 MB 级，通过内核共享与写时复制（CoW），单机可运行数千个实例。支持沙箱的自动暂停及恢复，进一步提升部署密度，实现成本优化。
   - title: "🛡️ 网络安全"
-    details: 基于 eBPF 的 CubeVS 在内核态实现严格的沙箱间网络隔离，支持细粒度出站流量过滤策略。
+    details: 基于 eBPF 的内核态沙箱间网络隔离与出站过滤；内置 L7 安全代理支持按域名/路径/方法的精细策略及自动凭证注入，密钥对沙箱内代码不可见。
   - title: "📸 灵活的状态管理"
     details: 百毫秒级的高频快照与回滚。支持对运行中沙箱创建检查点，随时回滚到任意快照状态，或从指定状态快速创建分叉探索环境。
+  - title: "🚀 生产部署"
+    details: 支持在腾讯云上使用 Terraform 一键部署生产集群。
+  - title: "💪 ARM 架构支持"
+    details: ARM64 全栈原生支持，覆盖编译、构建、部署全流程。
 ---
 
 ## 开始使用
@@ -30,7 +34,7 @@ features:
 - [快速开始](./guide/quickstart.md) — 几分钟内从零到运行沙箱
 - [本地构建部署](./guide/self-build-deploy.md) — 从源码构建并在单机上部署
 - [多机集群部署](./guide/multi-node-deploy.md) — 扩展到多节点集群
-- [架构概览](../architecture/overview.md) — 了解系统设计与核心组件
+- [架构概览](./architecture/overview.md) — 了解系统设计与核心组件
 
 ## 场景示例
 

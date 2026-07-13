@@ -3,7 +3,7 @@ name: Release PVM Host Kernel Packages
 on:
   push:
     tags:
-      - '*'
+      - 'v*'
   workflow_dispatch:
 
 concurrency:

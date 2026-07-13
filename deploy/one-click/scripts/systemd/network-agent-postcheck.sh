@@ -33,7 +33,7 @@ network_agent_tap_init_num() {
 network_agent_postcheck_timeout() {
   local tap_init_num="$1"
   local base_taps="${NETWORK_AGENT_POSTCHECK_BASE_TAPS:-500}"
-  local base_timeout="${NETWORK_AGENT_POSTCHECK_BASE_TIMEOUT:-60}"
+  local base_timeout="${NETWORK_AGENT_POSTCHECK_BASE_TIMEOUT:-300}"
   local min_timeout="${NETWORK_AGENT_POSTCHECK_MIN_TIMEOUT:-30}"
   local timeout
 

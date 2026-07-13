@@ -70,15 +70,20 @@ pub struct VmConfig {
 
 impl Default for VmConfig {
     fn default() -> Self {
-        let params = vec![
+        let mut params = vec![
             "root=/dev/pmem0".to_string(),
             "rootflags=dax,errors=remount-ro ro".to_string(),
             "rootfstype=ext4".to_string(),
             "panic=1".to_string(),
-            "no_timer_check".to_string(),
-            "noreplace-smp".to_string(),
-            "printk.devkmsg=on".to_string(),
-            "console=hvc0".to_string(),
+        ];
+        #[cfg(target_arch = "x86_64")]
+        params.extend(["no_timer_check".to_string(), "noreplace-smp".to_string()]);
+        params.extend(["printk.devkmsg=on".to_string()]);
+        #[cfg(target_arch = "aarch64")]
+        params.push("console=ttyAMA0,115200".to_string());
+        #[cfg(not(target_arch = "aarch64"))]
+        params.push("console=hvc0".to_string());
+        params.extend([
             "net.ifnames=0".to_string(),
             "audit=0".to_string(),
             "LANG=C".to_string(),
@@ -87,7 +92,7 @@ impl Default for VmConfig {
             "agent.debug_console".to_string(),
             "agent.debug_console_vport=1026".to_string(),
             "mitigations=off".to_string(),
-        ];
+        ]);
 
         let pmems = vec![PmemConfig {
             file: PathBuf::from(IMAGE_PATH),
@@ -451,15 +456,20 @@ mod tests {
         assert_eq!(config.console.mode, ConsoleOutputMode::Tty);
         assert_eq!(config.rng.src, PathBuf::from("/dev/urandom"));
 
-        let params = vec![
+        let mut params = vec![
             "root=/dev/pmem0".to_string(),
             "rootflags=dax,errors=remount-ro ro".to_string(),
             "rootfstype=ext4".to_string(),
             "panic=1".to_string(),
-            "no_timer_check".to_string(),
-            "noreplace-smp".to_string(),
-            "printk.devkmsg=on".to_string(),
-            "console=hvc0".to_string(),
+        ];
+        #[cfg(target_arch = "x86_64")]
+        params.extend(["no_timer_check".to_string(), "noreplace-smp".to_string()]);
+        params.extend(["printk.devkmsg=on".to_string()]);
+        #[cfg(target_arch = "aarch64")]
+        params.push("console=ttyAMA0,115200".to_string());
+        #[cfg(not(target_arch = "aarch64"))]
+        params.push("console=hvc0".to_string());
+        params.extend([
             "net.ifnames=0".to_string(),
             "audit=0".to_string(),
             "LANG=C".to_string(),
@@ -468,7 +478,7 @@ mod tests {
             "agent.debug_console".to_string(),
             "agent.debug_console_vport=1026".to_string(),
             "mitigations=off".to_string(),
-        ];
+        ]);
         assert_eq!(config.cmdlines, params);
     }
 

@@ -220,7 +220,7 @@ about:
 
 For host-level deployment of the proxy itself (systemd units, CA
 bootstrap, the iptables one-shot service), see the
-[`deploy/one-click`](https://github.com/tencentcloud/CubeSandbox/tree/main/deploy/one-click)
+[`deploy/one-click`](https://github.com/tencentcloud/CubeSandbox/tree/master/deploy/one-click)
 sources — those wire CubeEgress into both the control and compute
 targets automatically.
 

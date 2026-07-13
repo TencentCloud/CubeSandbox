@@ -117,12 +117,15 @@ hello cube
 | `exec_code.py` | `sandbox.run_code()` — 在沙箱中执行 Python 代码 |
 | `cmd.py` | `sandbox.commands.run()` — 执行 Shell 命令 |
 | `create.py` | `sandbox.get_info()` — 获取沙箱元数据 |
+| `create_with_envs.py` | `Sandbox.create(envs=...)` — 创建时注入环境变量 |
 | `read.py` | `sandbox.files.read()` — 读取沙箱文件系统中的文件 |
 | `pause.py` | `sandbox.pause()` / `sandbox.connect()` — 快照与恢复 |
-| `auto_resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — 平台在空闲超时后自动暂停沙箱，下一次请求自动恢复 |
+| `auto-resume.py` | `lifecycle={"on_timeout": "pause", "auto_resume": True}` — 平台在空闲超时后自动暂停沙箱，下一次请求自动恢复 |
+| `auto-kill.py` | `lifecycle={"on_timeout": "kill"}` — 平台在空闲超时后直接销毁沙箱（默认行为，销毁不可逆，沙箱无法恢复） |
 | `network_no_internet.py` | `allow_internet_access=False` — 完全断网沙箱 |
 | `network_allowlist.py` | `allow_out` — 白名单 CIDR，拦截其余所有出口 |
 | `network_denylist.py` | `deny_out` — 黑名单 CIDR，其余放行 |
+| `restrict_public_access.py` | `network={"allow_public_traffic": False}` — 公网 URL 必须携带 per-sandbox token 才可访问 |
 
 ### exec_code.py — 运行 Python 代码
 
@@ -139,6 +142,20 @@ with Sandbox.create(template=template_id) as sandbox:
     print(result.stdout)
 ```
 
+### 创建时注入环境变量
+
+可以在创建沙箱时传入环境变量，后续在该沙箱中的命令执行也可以读取到这些变量：
+
+```python
+python create_with_envs.py
+```
+
+预期输出:
+
+```text
+user-session-test
+```
+
 ### pause.py — 暂停与恢复
 
 将运行中的沙箱快照以释放计算资源，之后恢复：
@@ -151,7 +168,7 @@ with Sandbox.create(template=template_id) as sandbox:
     print(sandbox.get_info())
 ```
 
-### auto_resume.py — 自动暂停与自动恢复
+### auto-resume.py — 自动暂停与自动恢复
 
 与 `pause.py` 类似，但暂停/恢复完全交给平台自动管理。`lifecycle` 参数与 e2b SDK 对齐
 （参考 [e2b 文档](https://e2b.dev/docs/sandbox/auto-resume)）：`on_timeout="pause"`
@@ -170,6 +187,29 @@ sandbox.run_code("print('back from a transparent resume')")
 sandbox.kill()
 ```
 
+### auto-kill.py — 空闲超时后自动销毁
+
+`auto-resume.py` 的孪生销毁版本。`on_timeout="kill"`（不传 `lifecycle`
+时的默认值）告诉平台：沙箱空闲超过 `timeout` 后直接拆除 VM，不
+保留快照，下一次请求会以 **410 Gone** 快速失败：
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    timeout=30,             # 扫描器使用的空闲阈值
+    lifecycle={"on_timeout": "kill"},
+)
+sandbox.run_code("print('first call')")
+time.sleep(50)              # 超过空闲阈值，扫描器销毁沙箱
+try:
+    sandbox.run_code("print('should never run')")
+except Exception as exc:
+    print(f"sandbox is gone: {exc!r}")  # 销毁不可逆
+```
+
+TUI 版本额外交叉校验 `Sandbox.list()` 不再返回该沙箱，并创建一个对照
+沙箱来排除集群整体故障造成的假阳性。
+
 ### 网络策略
 
 ```bash
@@ -181,6 +221,31 @@ python network_allowlist.py
 
 # 黑名单：屏蔽指定 CIDR，其余放行
 python network_denylist.py
+```
+
+### restrict_public_access.py — 限制公网 URL 访问
+
+默认情况下沙箱的公网 URL 任何知道地址的人都可访问。对敏感场景，可以在创建沙箱时
+传入 `network={"allow_public_traffic": False}`：CubeMaster 会为该沙箱签发一个
+`traffic_access_token`，CubeProxy 随后会拒绝所有未携带该 token 的请求
+（参考 [e2b 文档](https://e2b.dev/docs/network/restrict-public-access)）。
+请求方可以使用以下任一 header：
+
+- `e2b-traffic-access-token`（与 E2B 完全兼容）
+- `cube-traffic-access-token`（CubeSandbox 原生别名）
+
+```python
+sandbox = Sandbox.create(
+    template=template_id,
+    network={"allow_public_traffic": False},
+)
+url = f"http://{sandbox.get_host(80)}/"
+
+# 不带 token → 403
+requests.get(url)
+
+# 带 token → 200
+requests.get(url, headers={"e2b-traffic-access-token": sandbox.traffic_access_token})
 ```
 
 ## 5. 常见问题
@@ -201,12 +266,16 @@ code-sandbox-quickstart/
 ├── exec_code.py               # 在沙箱中运行 Python 代码
 ├── cmd.py                     # 执行 Shell 命令
 ├── create.py                  # 创建沙箱并查看元数据
+├── create_with_envs.py        # 创建时注入环境变量
+├── env_utils.py               # 共享的 .env 加载辅助脚本
 ├── read.py                    # 读取沙箱文件系统中的文件
 ├── pause.py                   # 暂停与恢复沙箱
-├── auto_resume.py             # 自动暂停 / 自动恢复（基于空闲超时）
+├── auto-resume.py             # 自动暂停 / 自动恢复（基于空闲超时）
+├── auto-kill.py               # 空闲超时后自动销毁（不可恢复）
 ├── network_no_internet.py     # 完全断网沙箱
 ├── network_allowlist.py       # 出口 CIDR 白名单
 ├── network_denylist.py        # 出口 CIDR 黑名单
+├── restrict_public_access.py  # 公网 URL 鉴权 token
 ├── requirements.txt           # Python 依赖
 └── .env.example               # 环境变量模板
 ```

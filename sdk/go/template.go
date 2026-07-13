@@ -29,6 +29,7 @@ type TemplateInfo struct {
 	LastError           string `json:"lastError,omitempty"`
 	CreatedAt           string `json:"createdAt,omitempty"`
 	ImageInfo           string `json:"imageInfo,omitempty"`
+	JobID               string `json:"jobID,omitempty"`
 	NetworkType         string `json:"networkType,omitempty"`
 	AllowInternetAccess *bool  `json:"allowInternetAccess,omitempty"`
 }
@@ -61,7 +62,8 @@ type BuildTemplateOptions struct {
 	DNS                  []string
 	AllowOut             []string
 	DenyOut              []string
-	// Extra 在命名字段之后合并进请求体, 同名键会覆盖上方字段, 与 Python kwargs 行为一致.
+	// Extra is merged into the request payload after the named fields above,
+	// so duplicate keys override those fields to match Python kwargs behavior.
 	Extra                map[string]any
 }
 

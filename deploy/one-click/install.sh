@@ -94,8 +94,7 @@ warn_default_external_credentials() {
   fi
 }
 
-TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
-INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
+INSTALL_PREFIX="${CUBE_SANDBOX_INSTALL_ROOT}"
 
 # Resolve install vs upgrade mode and, for upgrades, run preflight + backup and
 # build the config-preserving merged env BEFORE any destructive change. The
@@ -147,6 +146,7 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   # Override bundle/default values with the merged (old-priority) env so the
   # rest of the installer keeps the user's existing configuration.
   load_env_file "${MERGED_ENV}"
+  apply_cli_overrides
   DEPLOY_ROLE="$(one_click_deploy_role)"
 fi
 
@@ -182,13 +182,15 @@ detect_installed_role() {
 }
 
 needs_docker_for_install() {
-  if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
-    return 0
-  fi
-
-  local installed_role
-  installed_role="$(detect_installed_role)"
-  [[ -n "${installed_role}" && "${installed_role}" != "compute" ]]
+  # docker is required for EVERY role. cube-egress (the transparent egress
+  # MITM proxy) runs as a docker container and is wired into both
+  # cube-sandbox-control.target and cube-sandbox-compute.target, so compute
+  # nodes need docker just as much as control nodes — even though the sandboxes
+  # themselves run on the cube runtime (cubelet + containerd-shim-cube-rs +
+  # PVM/KVM), not docker. Skipping docker on compute leaves cube-egress unable
+  # to start, silently disabling per-sandbox egress policy enforcement on that
+  # node.
+  return 0
 }
 
 require_any_cmd() {
@@ -218,10 +220,26 @@ check_dns_preflight() {
     return 0
   fi
 
-  require_cmd systemctl
-  local nm_load_state
-  nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
-  [[ "${nm_load_state}" == "loaded" ]] || die "DNS setup requires resolvectl or NetworkManager"
+  # Without resolvectl the DNS scripts fall back to dnsmasq. CUBE_PROXY_DNSMASQ_MODE
+  # picks who owns it (see dns-host-route-up.sh); mirror that check here so the
+  # installer does not reject a host the runtime would actually support.
+  local dnsmasq_mode="${CUBE_PROXY_DNSMASQ_MODE:-networkmanager}"
+  case "${dnsmasq_mode}" in
+    networkmanager)
+      require_cmd systemctl
+      local nm_load_state
+      nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
+      [[ "${nm_load_state}" == "loaded" ]] || \
+        die "DNS setup requires resolvectl or NetworkManager (or set CUBE_PROXY_DNSMASQ_MODE=standalone)"
+      ;;
+    standalone)
+      # standalone mode manages dnsmasq itself and only uses NetworkManager
+      # opportunistically, so it does not require one to be loaded.
+      ;;
+    *)
+      die "unsupported CUBE_PROXY_DNSMASQ_MODE: ${dnsmasq_mode} (expected networkmanager or standalone)"
+      ;;
+  esac
 
   if ! command -v dnsmasq >/dev/null 2>&1; then
     require_any_cmd dnf yum apt-get
@@ -277,12 +295,25 @@ generate_cubemaster_config_ports() {
 
   local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
   local mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  local mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+  local mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+  local mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
   local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+  local redis_password="${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
+  # Decoupled from the TKE path: one-click decides CubeMaster's listen address
+  # here. Defaults to 0.0.0.0 to stay reachable from compute nodes / host-net
+  # cube-proxy; set CUBEMASTER_HTTP_BIND=127.0.0.1 to harden a lone node.
+  local http_bind="${CUBEMASTER_HTTP_BIND:-0.0.0.0}"
 
   ensure_file "${cfg}"
   sed -i \
     -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_USER__|$(escape_sed "${mysql_user}")|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_PASSWORD__|$(escape_sed "${mysql_password}")|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_DB__|$(escape_sed "${mysql_db}")|g" \
     -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
+    -e "s|__CUBE_SANDBOX_REDIS_PASSWORD__|$(escape_sed "${redis_password}")|g" \
+    -e "s|__CUBEMASTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
     "${cfg}"
 }
 
@@ -389,7 +420,43 @@ EOF
   if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
     if command -v redis-cli >/dev/null 2>&1; then
       log "checking connectivity to external Redis ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
+      local redis_help_output
       local redis_reply
+      local redis_base_cmd=()
+      local redis_timeout_args=()
+      local use_timeout_wrapper=0
+      local supports_redis_connect_timeout=0
+      local supports_redis_timeout=0
+      redis_help_output="$(redis_cli_help_output)"
+      if redis_cli_help_supports_flag "${redis_help_output}" "--connect-timeout"; then
+        redis_timeout_args+=(--connect-timeout "${connect_timeout}")
+        supports_redis_connect_timeout=1
+      fi
+      if redis_cli_help_supports_flag "${redis_help_output}" "--timeout"; then
+        redis_timeout_args+=(--timeout "${connect_timeout}")
+        supports_redis_timeout=1
+      fi
+      if [[ "${supports_redis_connect_timeout}" != "1" ]]; then
+        log "redis-cli does not support --connect-timeout; continuing without that client-side timeout bound"
+      fi
+      if [[ "${supports_redis_timeout}" != "1" ]]; then
+        log "redis-cli does not support --timeout; continuing without that client-side timeout bound"
+      fi
+      if [[ "${supports_redis_connect_timeout}" != "1" || "${supports_redis_timeout}" != "1" ]]; then
+        if command -v timeout >/dev/null 2>&1; then
+          # Some redis-cli builds lack one or both timeout flags. Bound the
+          # whole client process so connectivity preflight still fails fast.
+          use_timeout_wrapper=1
+        else
+          log "timeout command not found; Redis preflight may block longer when redis-cli lacks timeout flags"
+        fi
+      fi
+      redis_base_cmd=(
+        redis-cli
+        -h "${CUBE_EXTERNAL_REDIS_HOST}"
+        -p "${CUBE_EXTERNAL_REDIS_PORT}"
+        "${redis_timeout_args[@]}"
+      )
       if [[ -n "${CUBE_EXTERNAL_REDIS_PASSWORD}" ]]; then
         # SECURITY: PING is NOT an authenticated command. A reachable server that
         # has no 'requirepass' set answers PONG even when a (wrong/extraneous)
@@ -401,15 +468,13 @@ EOF
         # The password is fed via stdin (`-x AUTH`) rather than as a command-line
         # argument so it is not exposed in /proc/<pid>/cmdline to other local
         # users; --no-auth-warning keeps redis-cli from echoing it on stderr.
-        # --connect-timeout bounds the TCP handshake; --timeout bounds Redis
-        # protocol I/O so a middlebox that accepts the socket but stalls the
-        # response (broken proxy / overloaded server) cannot hang this preflight
-        # indefinitely.
-        redis_reply="$(printf '%s' "${CUBE_EXTERNAL_REDIS_PASSWORD}" | redis-cli \
-          -h "${CUBE_EXTERNAL_REDIS_HOST}" \
-          -p "${CUBE_EXTERNAL_REDIS_PORT}" \
-          --connect-timeout "${connect_timeout}" \
-          --timeout "${connect_timeout}" \
+        # When the local redis-cli supports them, timeout flags bound the TCP
+        # handshake and Redis protocol I/O so a middlebox that accepts the
+        # socket but stalls the response cannot hang this preflight indefinitely.
+        redis_reply="$(printf '%s' "${CUBE_EXTERNAL_REDIS_PASSWORD}" | run_redis_preflight_cmd \
+          "${use_timeout_wrapper}" \
+          "${connect_timeout}" \
+          "${redis_base_cmd[@]}" \
           --no-auth-warning \
           -x AUTH 2>&1 || true)"
         if [[ "${redis_reply}" != "OK" ]]; then
@@ -418,11 +483,7 @@ EOF
         fi
       else
         local redis_pong
-        redis_pong="$(redis-cli \
-          -h "${CUBE_EXTERNAL_REDIS_HOST}" \
-          -p "${CUBE_EXTERNAL_REDIS_PORT}" \
-          --connect-timeout "${connect_timeout}" \
-          --timeout "${connect_timeout}" ping 2>/dev/null || true)"
+        redis_pong="$(run_redis_preflight_cmd "${use_timeout_wrapper}" "${connect_timeout}" "${redis_base_cmd[@]}" ping 2>/dev/null || true)"
         if [[ "${redis_pong}" != "PONG" ]]; then
           die "cannot reach external Redis at ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT} (PING did not return PONG).
   Verify CUBE_EXTERNAL_REDIS_HOST / _PORT and that the server is reachable from this host."
@@ -780,7 +841,7 @@ stop_existing_systemd_deployment() {
 stop_existing_legacy_deployment() {
   # Legacy bridge for upgrading pre-systemd one-click installs.
   # New installs are systemd-only; this path only stops old nohup/pidfile deployments
-  # before the install prefix is replaced.
+  # before the install root is replaced.
   local installed_role="$1"
   local legacy_stop_script=""
 
@@ -792,18 +853,14 @@ stop_existing_legacy_deployment() {
 
   if [[ -n "${legacy_stop_script}" ]]; then
     log "stopping legacy pre-systemd deployment under ${INSTALL_PREFIX}"
-    ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
-    ONE_CLICK_RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env" \
-      "${legacy_stop_script}" || true
+    "${legacy_stop_script}" || true
   fi
 }
 
 install_systemd_units() {
   local install_units_script="${INSTALL_PREFIX}/scripts/systemd/install-units.sh"
   ensure_file "${install_units_script}"
-  ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
-  ONE_CLICK_RUNTIME_ENV_FILE="${INSTALL_PREFIX}/.one-click.env" \
-    "${install_units_script}"
+  "${install_units_script}"
 }
 
 start_systemd_target() {
@@ -876,6 +933,7 @@ check_pvm_consistency_preflight
 check_cubelet_fs_preflight
 check_cgroup_cpu_preflight
 check_glibc_preflight
+check_compute_control_plane_preflight
 
 CUBE_SANDBOX_NODE_IP="$(detect_node_ip)"
 export CUBE_SANDBOX_NODE_IP
@@ -891,6 +949,9 @@ fi
 # Validate the effective cubevs CIDR before installing packages or replacing
 # the existing deployment. If unset, use CubeSandbox's fixed packaged default.
 CUBE_SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-}"
+CUBE_SANDBOX_CUBE_ROUTER_ENABLE="${CUBE_SANDBOX_CUBE_ROUTER_ENABLE:-0}"
+validate_bool_01 "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}" "CUBE_SANDBOX_CUBE_ROUTER_ENABLE"
+CUBE_SANDBOX_CUBE_ROUTER_CIDR="${CUBE_SANDBOX_CUBE_ROUTER_CIDR:-}"
 # On upgrade the CIDR is the cluster's own (preserved from the old install);
 # its existing cubevs bridge/route would self-trigger the host-conflict scan,
 # so skip conflict detection (format validation still runs) while still
@@ -900,11 +961,16 @@ if [[ "${INSTALL_MODE}" == "upgrade" || "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLI
   cidr_skip_conflict=1
 fi
 if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR}" ]]; then
-  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR"
+  check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR" 24 16
   export CUBE_SANDBOX_NETWORK_CIDR
 else
-  check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR"
+  check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR" 24 16
 fi
+if [[ "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}" == "1" && -n "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}" ]]; then
+  check_cidr_preflight "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_CUBE_ROUTER_CIDR" 30 16
+  export CUBE_SANDBOX_CUBE_ROUTER_CIDR
+fi
+export CUBE_SANDBOX_CUBE_ROUTER_ENABLE
 
 install_required_dependencies
 check_install_preflight
@@ -925,7 +991,9 @@ validate_cubelet_cow_startup_deps "${PKG_ROOT}/Cubelet/config/config.toml"
 patch_cubelet_config_template \
   "${PKG_ROOT}/Cubelet/config/config.toml" \
   "${CUBE_SANDBOX_ETH_NAME:-}" \
-  "${CUBE_SANDBOX_NETWORK_CIDR:-}"
+  "${CUBE_SANDBOX_NETWORK_CIDR:-}" \
+  "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}" \
+  "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}"
 
 installed_role="${DEPLOY_ROLE}"
 detected_installed_role="$(detect_installed_role)"
@@ -947,28 +1015,25 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   fi
 fi
 
-if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
-  rm -rf \
-    "${INSTALL_PREFIX}/network-agent" \
-    "${INSTALL_PREFIX}/CubeAPI" \
-    "${INSTALL_PREFIX}/CubeMaster" \
-    "${INSTALL_PREFIX}/Cubelet" \
-    "${INSTALL_PREFIX}/cubeproxy" \
-    "${INSTALL_PREFIX}/coredns" \
-    "${INSTALL_PREFIX}/webui" \
-    "${INSTALL_PREFIX}/support" \
-    "${INSTALL_PREFIX}/systemd" \
-    "${INSTALL_PREFIX}/cube-shim" \
-    "${INSTALL_PREFIX}/cube-kernel-scf" \
-    "${INSTALL_PREFIX}/cube-image" \
-    "${INSTALL_PREFIX}/scripts" \
-    "${INSTALL_PREFIX}/sql" \
-    "${INSTALL_PREFIX}/.one-click.env"
-else
-  # Full wipe of a custom prefix, but preserve any upgrade backup directory so
-  # the config snapshot survives for recovery/rollback.
-  wipe_custom_install_prefix_contents "${INSTALL_PREFIX}"
-fi
+assert_safe_install_prefix "${INSTALL_PREFIX}"
+rm -rf \
+  "${INSTALL_PREFIX}/network-agent" \
+  "${INSTALL_PREFIX}/CubeAPI" \
+  "${INSTALL_PREFIX}/CubeMaster" \
+  "${INSTALL_PREFIX}/Cubelet" \
+  "${INSTALL_PREFIX}/cubeproxy" \
+  "${INSTALL_PREFIX}/coredns" \
+  "${INSTALL_PREFIX}/webui" \
+  "${INSTALL_PREFIX}/support" \
+  "${INSTALL_PREFIX}/systemd" \
+  "${INSTALL_PREFIX}/cube-shim" \
+  "${INSTALL_PREFIX}/cube-kernel-scf" \
+  "${INSTALL_PREFIX}/cube-image" \
+  "${INSTALL_PREFIX}/cube-egress" \
+  "${INSTALL_PREFIX}/cube-lifecycle-manager" \
+  "${INSTALL_PREFIX}/scripts" \
+  "${INSTALL_PREFIX}/sql" \
+  "${INSTALL_PREFIX}/.one-click.env"
 
 mkdir -p "${INSTALL_PREFIX}"
 if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
@@ -1073,6 +1138,12 @@ if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
     upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK" "${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK}"
   fi
 fi
+if [[ "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}" == "1" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_ROUTER_ENABLE" "${CUBE_SANDBOX_CUBE_ROUTER_ENABLE}"
+fi
+if [[ -n "${CUBE_SANDBOX_CUBE_ROUTER_CIDR:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_ROUTER_CIDR" "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}"
+fi
 
 # Persist external MySQL config so every systemd unit / helper picks it up
 # instead of the local container. The CUBE_EXTERNAL_* markers let quickcheck
@@ -1151,9 +1222,7 @@ check_runtime_file_paths_not_directories
 start_systemd_target
 
 if [[ "${ONE_CLICK_RUN_QUICKCHECK:-1}" == "1" ]]; then
-  ONE_CLICK_TOOLBOX_ROOT="${INSTALL_PREFIX}" \
-  ONE_CLICK_RUNTIME_ENV_FILE="${RUNTIME_ENV_FILE}" \
-    "${INSTALL_PREFIX}/scripts/one-click/quickcheck.sh"
+  "${INSTALL_PREFIX}/scripts/one-click/quickcheck.sh"
 fi
 
 log "install complete (role=${DEPLOY_ROLE})"

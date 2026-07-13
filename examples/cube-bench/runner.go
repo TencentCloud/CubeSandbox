@@ -25,19 +25,16 @@ type createResp struct {
 func benchOne(client *http.Client, cfg *Config, seq int) IterResult {
 	r := IterResult{Seq: seq}
 	apiURL := cfg.APIURL
-	headers := map[string]string{"Authorization": "Bearer " + cfg.APIKey}
-
-	body, _ := json.Marshal(map[string]string{"templateID": cfg.Template})
 
 	// CREATE
 	t0 := time.Now()
-	req, err := http.NewRequest("POST", apiURL+"/sandboxes", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", apiURL+"/sandboxes", bytes.NewReader(cfg.requestBody))
 	if err != nil {
 		r.Err = fmt.Sprintf("create request build: %v", err)
 		return r
 	}
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range headers {
+	for k, v := range cfg.requestHeaders {
 		req.Header.Set(k, v)
 	}
 
@@ -73,7 +70,7 @@ func benchOne(client *http.Client, cfg *Config, seq int) IterResult {
 			r.Err = fmt.Sprintf("delete request build: %v", err)
 			return r
 		}
-		for k, v := range headers {
+		for k, v := range cfg.requestHeaders {
 			dreq.Header.Set(k, v)
 		}
 		dresp, err := client.Do(dreq)
@@ -82,7 +79,7 @@ func benchOne(client *http.Client, cfg *Config, seq int) IterResult {
 			r.Err = fmt.Sprintf("delete: %v", err)
 			return r
 		}
-		dresp.Body.Close()
+		defer dresp.Body.Close()
 		if dresp.StatusCode != 200 && dresp.StatusCode != 204 {
 			r.Err = fmt.Sprintf("delete HTTP %d", dresp.StatusCode)
 			return r

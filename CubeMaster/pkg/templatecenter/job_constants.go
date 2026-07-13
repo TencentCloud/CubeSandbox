@@ -6,7 +6,10 @@ package templatecenter
 
 import (
 	"errors"
+	"strings"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 )
 
 const (
@@ -14,6 +17,14 @@ const (
 	ArtifactStatusBuilding = "BUILDING"
 	ArtifactStatusReady    = "READY"
 	ArtifactStatusFailed   = "FAILED"
+	// ArtifactStatusCleanupPending marks an artifact whose logical references
+	// have reached zero and whose physical files are being / awaiting removal.
+	// A row in this state must never be reused; the create/reuse path rebuilds
+	// instead. GC retries cleanup until the artifact row can be safely deleted.
+	ArtifactStatusCleanupPending = "CLEANUP_PENDING"
+	// ArtifactStatusOrphaned marks an artifact with no surviving references that
+	// was never fully built/distributed (e.g. interrupted build); GC reclaims it.
+	ArtifactStatusOrphaned = "ORPHANED"
 
 	JobStatusPending = "PENDING"
 	JobStatusRunning = "RUNNING"
@@ -58,3 +69,10 @@ const (
 )
 
 var ErrNoFailedTemplateReplicas = errors.New("no failed template replicas matched redo request")
+
+func latestJobIDFromJob(job *models.TemplateImageJob) string {
+	if job == nil {
+		return ""
+	}
+	return strings.TrimSpace(job.JobID)
+}

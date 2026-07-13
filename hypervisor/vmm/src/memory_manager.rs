@@ -7,7 +7,7 @@ use crate::coredump::{
     CoredumpMemoryRegion, CoredumpMemoryRegions, DumpState, GuestDebuggableError,
 };
 use crate::migration::{memory_blob_to_path, url_to_path};
-use crate::pagemap_anon::filter_memory_ranges_by_pagemap_anon;
+use crate::pagemap_anon::{filter_memory_ranges_by_pagemap_anon, host_page_size};
 use crate::soft_dirty::{
     clear_soft_dirty, filter_memory_ranges_by_anon_and_soft_dirty, probe_soft_dirty_support,
 };
@@ -190,6 +190,12 @@ const MPOL_MF_MOVE: u32 = 1 << 1;
 
 // Reserve 1 MiB for platform MMIO devices (e.g. ACPI control devices)
 const PLATFORM_DEVICE_AREA_SIZE: u64 = 1 << 20;
+
+// KVM's dirty log and vm-memory's AtomicBitmap both size their bitmaps with one
+// bit per host page (via sysconf(_SC_PAGESIZE)), so interpreting those bitmaps
+// must use the same granularity: 4 KiB on x86_64, 64 KiB on some ARM64 hosts.
+// This reuses `pagemap_anon::host_page_size()` (cached, probed once) so the
+// whole crate shares a single source of truth for the host page size.
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct HotPlugState {
@@ -3085,7 +3091,8 @@ impl Transportable for MemoryManager {
                     .map(|(x, y)| x | y)
                     .collect();
 
-                let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, range.gpa, 4096);
+                let sub_table =
+                    MemoryRangeTable::from_bitmap(dirty_bitmap, range.gpa, host_page_size());
 
                 if !sub_table.regions().is_empty() {
                     for r in sub_table.regions() {
@@ -3175,7 +3182,7 @@ impl Migratable for MemoryManager {
                 .map(|(x, y)| x | y)
                 .collect();
 
-            let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, r.gpa, 4096);
+            let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, r.gpa, host_page_size());
 
             if sub_table.regions().is_empty() {
                 info!("Dirty Memory Range Table is empty");

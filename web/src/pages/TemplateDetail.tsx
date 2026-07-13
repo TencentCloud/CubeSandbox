@@ -464,9 +464,20 @@ export default function TemplateDetailPage() {
   });
 
   const cachedSummary = qc.getQueryData<Array<{
-    templateID: string; status: string; imageInfo?: string | null; createdAt?: string | null;
+    templateID: string; status: string; imageInfo?: string | null; createdAt?: string | null; jobID?: string | null;
   }>>(['templates'])?.find(t => t.templateID === templateID);
   const cachedStatus = cachedSummary?.status?.toUpperCase();
+
+  useEffect(() => {
+    if (activeBuildID) return;
+    const jobID = data?.jobID ?? cachedSummary?.jobID;
+    if (!jobID) return;
+    const status = (data?.status ?? cachedSummary?.status)?.toUpperCase();
+    if (status === 'RUNNING' || status === 'PENDING' || status === 'CREATING' || status === 'BUILDING') {
+      setActiveBuildID(jobID);
+      setShowLogs(true);
+    }
+  }, [activeBuildID, cachedSummary, data?.jobID, data?.status]);
 
   const { data: buildStatus } = useQuery({
     queryKey: ['template-build-status', templateID, activeBuildID],

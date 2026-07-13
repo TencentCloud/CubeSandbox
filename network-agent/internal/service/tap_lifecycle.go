@@ -6,6 +6,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -27,11 +28,36 @@ const maxAbnormalRecoveryAttempts = 3
 
 const (
 	abnormalStageRecycle         = "recycle"
+	abnormalStagePreparePool     = "prepare_pool"
 	abnormalStageRecoverRestore  = "recover_restore"
 	abnormalStageRecoverCleanup  = "recover_cleanup"
 	abnormalStageRetryRestore    = "retry_restore"
 	abnormalStageLegacyDestroyed = "legacy_destroy_queue"
 )
+
+type tapCleanupError struct {
+	err error
+}
+
+func (e tapCleanupError) Error() string {
+	return e.err.Error()
+}
+
+func (e tapCleanupError) Unwrap() error {
+	return e.err
+}
+
+func markTapCleanupError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return tapCleanupError{err: err}
+}
+
+func isTapCleanupError(err error) bool {
+	var cleanupErr tapCleanupError
+	return errors.As(err, &cleanupErr)
+}
 
 func (s *localService) enqueueTapLocked(tap *tapDevice) {
 	if tap == nil {
@@ -83,6 +109,37 @@ func (s *localService) enqueueAbnormalLocked(tap *tapDevice, stage string, err e
 	)
 }
 
+func (s *localService) requeuePreparePoolFailureLocked(tap *tapDevice, err error) {
+	if tap == nil {
+		return
+	}
+	closeTapFile(tap.File)
+	tap.File = nil
+	tap.InUse = false
+	tap.PortMappings = nil
+	tap.FailureCount++
+	tap.LastStage = abnormalStagePreparePool
+	if err != nil {
+		tap.LastError = err.Error()
+	}
+	if tap.FailureCount >= maxAbnormalRecoveryAttempts {
+		if s.quarantinedTaps == nil {
+			s.quarantinedTaps = make(map[string]*tapDevice)
+		}
+		s.quarantinedTaps[tap.Name] = tap
+		CubeLog.WithContext(context.Background()).Errorf(
+			"network-agent quarantined tap after repeated pool preparation failures: name=%s ifindex=%d failures=%d err=%v quarantined=%d",
+			tap.Name, tap.Index, tap.FailureCount, err, len(s.quarantinedTaps),
+		)
+		return
+	}
+	s.abnormalTapPool = append(s.abnormalTapPool, tap)
+	CubeLog.WithContext(context.Background()).Warnf(
+		"network-agent tap pool preparation failed, will retry: name=%s ifindex=%d failures=%d err=%v pending=%d",
+		tap.Name, tap.Index, tap.FailureCount, err, len(s.abnormalTapPool),
+	)
+}
+
 func (s *localService) dequeueAbnormalLocked() *tapDevice {
 	for len(s.abnormalTapPool) > 0 {
 		tap := s.abnormalTapPool[0]
@@ -101,7 +158,9 @@ func (s *localService) configurePortMappings(tap *tapDevice, requestedMappings [
 		if hostPort == 0 {
 			allocatedPort, err := s.ports.Allocate()
 			if err != nil {
-				s.clearPortMappings(tap)
+				if cleanupErr := s.clearPortMappings(tap); cleanupErr != nil {
+					return nil, errors.Join(err, markTapCleanupError(cleanupErr))
+				}
 				return nil, err
 			}
 			hostPort = int32(allocatedPort)
@@ -112,7 +171,9 @@ func (s *localService) configurePortMappings(tap *tapDevice, requestedMappings [
 			if mapping.HostPort == 0 {
 				s.ports.Release(uint16(hostPort))
 			}
-			s.clearPortMappings(tap)
+			if cleanupErr := s.clearPortMappings(tap); cleanupErr != nil {
+				return nil, errors.Join(err, markTapCleanupError(cleanupErr))
+			}
 			return nil, err
 		}
 		actualMappings = append(actualMappings, PortMapping{
@@ -121,20 +182,32 @@ func (s *localService) configurePortMappings(tap *tapDevice, requestedMappings [
 			HostPort:      int32(hostPort),
 			ContainerPort: mapping.ContainerPort,
 		})
+		tap.PortMappings = append([]PortMapping(nil), actualMappings...)
 	}
-	tap.PortMappings = append([]PortMapping(nil), actualMappings...)
 	return actualMappings, nil
 }
 
-func (s *localService) clearPortMappings(tap *tapDevice) {
+func (s *localService) clearPortMappings(tap *tapDevice) error {
 	if tap == nil {
-		return
+		return nil
 	}
+	remaining := tap.PortMappings[:0]
+	var cleanupErr error
 	for _, mapping := range tap.PortMappings {
-		_ = cubevsDelPortMap(uint32(tap.Index), uint16(mapping.ContainerPort), uint16(mapping.HostPort))
+		if err := cubevsDelPortMap(uint32(tap.Index), uint16(mapping.ContainerPort), uint16(mapping.HostPort)); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete port mapping %d->%d for tap %s(%d): %w",
+				mapping.ContainerPort, mapping.HostPort, tap.Name, tap.Index, err))
+			remaining = append(remaining, mapping)
+			continue
+		}
 		s.ports.Release(uint16(mapping.HostPort))
 	}
+	if cleanupErr != nil {
+		tap.PortMappings = remaining
+		return cleanupErr
+	}
 	tap.PortMappings = nil
+	return nil
 }
 
 func (s *localService) recycleTapLocked(tap *tapDevice) {
@@ -155,9 +228,12 @@ func (s *localService) createPoolTap() error {
 		s.allocator.Release(ip)
 		return err
 	}
-	s.mu.Lock()
-	s.stageTapForPoolLocked(tap, "create_pool")
-	s.mu.Unlock()
+	if err := s.prepareAndStageTapForPool(context.Background(), tap, "create_pool"); err != nil {
+		closeTapFile(tap.File)
+		_ = destroyTapFunc(tap.Index)
+		s.allocator.Release(ip)
+		return err
+	}
 	return nil
 }
 
@@ -247,11 +323,23 @@ func (s *localService) handleAbnormalTaps() {
 		if tap == nil {
 			break
 		}
+		if tap.LastStage == abnormalStagePreparePool {
+			if err := s.prepareAndStageTapForPool(context.Background(), tap, "async_prepare"); err != nil {
+				s.mu.Lock()
+				s.requeuePreparePoolFailureLocked(tap, err)
+				s.mu.Unlock()
+			}
+			continue
+		}
 		restored, err := s.tryRecoverAbnormalTap(tap)
 		if err != nil {
 			s.mu.Lock()
 			tap.FailureCount++
-			tap.LastStage = abnormalStageRetryRestore
+			retryStage := abnormalStageRetryRestore
+			if tap.LastStage == abnormalStageRecoverCleanup {
+				retryStage = abnormalStageRecoverCleanup
+			}
+			tap.LastStage = retryStage
 			tap.LastError = err.Error()
 			if isTapMissingError(err) {
 				logger.Warnf("network-agent abnormal tap missing on host, releasing ip: name=%s ifindex=%d ip=%s err=%v",
@@ -263,14 +351,17 @@ func (s *localService) handleAbnormalTaps() {
 				logger.Errorf("network-agent quarantined tap after repeated recovery failures: name=%s ifindex=%d failures=%d last_stage=%s err=%s quarantined=%d",
 					tap.Name, tap.Index, tap.FailureCount, tap.LastStage, tap.LastError, len(s.quarantinedTaps))
 			} else {
-				s.enqueueAbnormalLocked(tap, abnormalStageRetryRestore, err)
+				s.enqueueAbnormalLocked(tap, retryStage, err)
 			}
 			s.mu.Unlock()
 			continue
 		}
-		s.mu.Lock()
-		s.stageTapForPoolLocked(restored, "abnormal_recovered")
-		s.mu.Unlock()
+		if err := s.prepareAndStageTapForPool(context.Background(), restored, "abnormal_recovered"); err != nil {
+			s.mu.Lock()
+			s.requeuePreparePoolFailureLocked(restored, err)
+			s.mu.Unlock()
+			continue
+		}
 	}
 
 	if missingReleased {
@@ -306,8 +397,11 @@ func (s *localService) tryRecoverAbnormalTap(tap *tapDevice) (*tapDevice, error)
 		return nil, err
 	}
 	if tap.LastStage == abnormalStageRecoverCleanup {
-		s.clearPortMappings(restored)
-		if err := cubevsDelTAPDevice(uint32(restored.Index), restored.IP.To4()); err != nil {
+		if err := s.clearPortMappings(restored); err != nil {
+			tap.LastError = err.Error()
+			return nil, err
+		}
+		if err := s.cleanupCubeVSTap(restored.Index, restored.IP.To4()); err != nil {
 			tap.LastError = err.Error()
 			return nil, err
 		}

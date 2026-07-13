@@ -8,11 +8,11 @@ on:
       - 'deploy/pvm/configs/pvm_guest'
       - '.github/workflows/build-pvm-guest-vmlinux.yml'
     tags:
-      - '*'
+      - 'v*'
   workflow_dispatch:
 
 env:
-  PVM_KERNEL_TAG: 6.6.69-1.cubesandbox
+  PVM_KERNEL_TAG: 6.6.69-1.2.cubesandbox
   PVM_VMLINUX_CACHE_PATH: kernel-cache/vmlinux-pvm
 
 jobs:

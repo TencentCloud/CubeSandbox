@@ -57,6 +57,7 @@ proto: check-proto-tools sync-client-proto
 
 test:
 	$(call msg,Run unit tests,$(APP))
+	$(Q)$(MAKE) -C ../CubeNet/cubevs gen
 	$(Q)go test ./...
 
 clean:

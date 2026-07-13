@@ -3,7 +3,7 @@ title: "让传统软件服务适配 Agent：从快速创建到分支、克隆与
 date: 2026-06-17
 author: Cube Sandbox 团队
 description: 当软件服务的使用对象从人变为 Agent，对服务的要求发生了根本变化——创建不再是运维动作，而是推理和执行循环的一部分。Neon 被 Databricks 以 10 亿美金收购，印证了这条技术路线的价值。Cube Sandbox 把"极速创建、分支克隆、状态回滚"做成通用运行环境能力，让任何传统软件服务几乎零代码修改即可变为 Agent 友好的服务。
-featured: true
+featured: false
 weight: 2
 ---
 
@@ -61,7 +61,7 @@ Neon、Turso 解决的是数据库服务的分支和回滚；Upstash 解决的�
 
 - [从 Serverless 到 Agent：Cube 系统的一些设计思考](https://mp.weixin.qq.com/s/uKxzHzIamkmOnzra_UBglw)
 - [Cube Sandbox v0.3.0 来了：让 AI Agent 拥有"时光机"和"分身术"](https://mp.weixin.qq.com/s/NbcybX_QJAWppMtW-n7rtw)
-- [CubeSandbox 性能测试报告](https://cubesandbox.com/zh/blog/posts/2026-06-03-cubesandbox-perf-benchmark-pvm.html)
+- [CubeSandbox 性能测试报告](./2026-06-03-cubesandbox-perf-benchmark-pvm.md)
 
 下面这张图可以概括 CubeSandbox 中 snapshot、clone 和 rollback 的关系：snapshot 把某一刻的运行态固定成 checkpoint；clone 从这个 checkpoint 或运行中沙箱派生多个分支；rollback 则把失败分支原地拉回到 checkpoint。
 
@@ -73,11 +73,11 @@ Neon、Turso 解决的是数据库服务的分支和回滚；Upstash 解决的�
 
 ## 准备工作
 
-1. 部署一个 CubeSandbox 服务，参照 [CubeSandbox 快速部署指南](https://cubesandbox.com/zh/guide/quickstart.html)
+1. 部署一个 CubeSandbox 服务，参照 [CubeSandbox 快速部署指南](../../guide/quickstart.md)
 
 2. 在我们的示例中，会使用到 Redis 的服务，有两种方法（任何一种都可以）构建这个 Redis 服务的模版：
 
-   2.1 参照[自定义镜像](https://cubesandbox.com/zh/guide/tutorials/bring-your-own-image.html)自行构建一个 Redis 服务模版
+   2.1 参照[自定义镜像](../../guide/tutorials/bring-your-own-image.md)自行构建一个 Redis 服务模版
 
    2.2 使用我们制作好的 Redis 镜像：
 
@@ -268,7 +268,7 @@ $ redis-cli -h 10.206.0.4 -p 20008
 
 更进一步，这种模式可以推广到其他有状态服务，只需简单两步：
 
-1. 参照[自定义镜像](https://cubesandbox.com/zh/guide/tutorials/bring-your-own-image.html)，构建一个包含自己服务的模版，记录下模版 ID：`tpl-abcdeeff`
+1. 参照[自定义镜像](../../guide/tutorials/bring-your-own-image.md)，构建一个包含自己服务的模版，记录下模版 ID：`tpl-abcdeeff`
 2. 编辑 cube-service-gateway 的配置文件，加上新构建的服务模版：
 
 ```json

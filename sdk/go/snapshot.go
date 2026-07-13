@@ -42,9 +42,12 @@ func (s *Sandbox) CreateSnapshot(ctx context.Context, name string) (*SnapshotInf
 	if err := s.ensureClient(); err != nil {
 		return nil, err
 	}
-	var payload map[string]any
+	// Always send a JSON object body: the server deserializes into a
+	// CreateSnapshotRequest struct and rejects an empty/null body with 422,
+	// even though every field is optional. An empty name simply omits it.
+	payload := map[string]any{}
 	if name != "" {
-		payload = map[string]any{"name": name}
+		payload["name"] = name
 	}
 	var info SnapshotInfo
 	path := "/sandboxes/" + url.PathEscape(s.SandboxID) + "/snapshots"

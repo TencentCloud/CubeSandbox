@@ -6,8 +6,10 @@ package images
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/containerd/plugin/registry"
@@ -17,9 +19,11 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/platforms"
 	"github.com/containerd/plugin"
+	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/ext4image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -122,6 +126,9 @@ func initFunc(ic *plugin.InitContext) (interface{}, error) {
 	if register, ok := cubeboxAPIObj.(cubes.CubeboxEventListenerRegistry); ok {
 		register.Register(srv.imageGCManager)
 	}
+	if usage, ok := cubeboxAPIObj.(imageUsageChecker); ok {
+		srv.imageUsage = usage
+	}
 	go srv.imageGCManager.Run(ic.Context)
 
 	return srv, nil
@@ -164,11 +171,19 @@ func parseImageGCPolicy(c ImageGCConfig) ImageGCPolicy {
 	return policy
 }
 
+// imageUsageChecker reports whether an image/artifact id is still referenced by
+// a running sandbox on this node. Implemented by the cubebox store plugin; used
+// by the ext4 artifact destroy path to refuse deleting an in-use OS image.
+type imageUsageChecker interface {
+	IsImageInUse(imageID string) (bool, error)
+}
+
 type service struct {
 	l              *local
 	imageGCManager *imageGCManager
 	client         *containerd.Client
 	volume         *volumeLocal
+	imageUsage     imageUsageChecker
 	images.UnimplementedImagesServer
 }
 
@@ -282,6 +297,13 @@ func (s *service) DestroyImage(ctx context.Context, req *images.DestroyImageRequ
 		return rsp, nil
 	}
 
+	// FIX-1: ext4 OS image artifacts are not containerd images; the legacy
+	// CRI RemoveImage path silently no-ops on them (LocalResolve NotFound).
+	// Route ext4 deletions to the synchronous, idempotent pmem destroy path.
+	if req.GetSpec().GetStorageMedia() == cubeimages.ImageStorageMediaType_ext4.String() {
+		return s.destroyExt4Artifact(ctx, req, rsp), nil
+	}
+
 	ns := namespaces.Default
 	if req.Spec.Namespace != "" {
 		ns = req.Spec.Namespace
@@ -301,6 +323,39 @@ func (s *service) DestroyImage(ctx context.Context, req *images.DestroyImageRequ
 	}
 	log.G(ctx).Debugf("Remove image succ:%v", utils.InterfaceToString(req.GetSpec()))
 	return rsp, nil
+}
+
+// destroyExt4Artifact removes an ext4 OS image artifact's on-disk files. The
+// instanceType is taken from the MasterAnnotationInstanceType annotation (set
+// symmetrically by CreateImage distribution), defaulting to the cubebox
+// instance type (currently the only ext4 instance type). A running-sandbox
+// reference results in a Conflict so an in-use OS image is never deleted;
+// CubeMaster GC retries after the sandbox exits.
+func (s *service) destroyExt4Artifact(ctx context.Context, req *images.DestroyImageRequest, rsp *images.DestroyImageResponse) *images.DestroyImageResponse {
+	artifactID := req.GetSpec().GetImage()
+	instanceType := strings.TrimSpace(req.GetSpec().GetAnnotations()[constants.MasterAnnotationInstanceType])
+	if instanceType == "" {
+		instanceType = cubebox.InstanceType_cubebox.String()
+	}
+
+	var inUse ext4image.ArtifactInUseFunc
+	if s.imageUsage != nil {
+		inUse = s.imageUsage.IsImageInUse
+	}
+
+	err := ext4image.DestroyPmemArtifact(ctx, instanceType, artifactID, inUse)
+	if err == nil {
+		log.G(ctx).Infof("destroyed ext4 artifact %q (instanceType=%s)", artifactID, instanceType)
+		return rsp
+	}
+	if errors.Is(err, ext4image.ErrArtifactInUse) {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
+		rsp.Ret.RetMsg = err.Error()
+		return rsp
+	}
+	rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+	rsp.Ret.RetMsg = fmt.Sprintf("destroy ext4 artifact %q: %v", artifactID, err)
+	return rsp
 }
 
 type ExpirationTimeSetter interface {

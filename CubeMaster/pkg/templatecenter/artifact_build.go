@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/cube_egress_ca"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"strings"
 	"time"
 )
@@ -78,14 +79,18 @@ func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImag
 			}
 		}
 	}
-	_ = updateRootfsArtifact(ctx, artifactID, map[string]any{
-		"template_spec_fingerprint": fingerprint,
-		"source_image_ref":          req.SourceImageRef,
-		"source_image_digest":       source.Digest,
-		"writable_layer_size":       req.WritableLayerSize,
-		"status":                    ArtifactStatusBuilding,
-		"last_error":                "",
-	})
+	// Claim the artifact row under its FOR UPDATE lock before (re)building. This
+	// serialises against last-owner-cleanup (which locks the same row in its
+	// phases) and resurrects a CLEANUP_PENDING / soft-deleted row, so a
+	// concurrent deletion cannot remove the artifact out from under this build
+	// (FIX-1 create/reuse guard).
+	claimed, claimErr := claimRootfsArtifactForBuild(ctx, artifactID, fingerprint, req, source.Digest)
+	if claimErr != nil {
+		return nil, nil, false, claimErr
+	}
+	if claimed != nil {
+		record = claimed
+	}
 	record, generatedReq, err = buildRootfsArtifact(ctx, record, req, source, downloadBaseURL, caPEM, caFingerprint)
 	if err != nil {
 		_ = updateRootfsArtifact(ctx, artifactID, map[string]any{
@@ -95,6 +100,65 @@ func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImag
 		return nil, nil, false, err
 	}
 	return record, generatedReq, true, nil
+}
+
+// claimRootfsArtifactForBuild atomically ensures the artifact row exists and is
+// marked BUILDING while holding its FOR UPDATE lock. It resurrects a
+// soft-deleted or CLEANUP_PENDING row (raced with a concurrent
+// last-owner-cleanup) instead of letting the build proceed against a row that
+// is about to vanish. Because the deleter takes the same row lock in both its
+// decision (TX1) and finalisation (TX2) phases, after this commit the deleter's
+// phase-3 re-check observes a live BUILDING row plus the active build job and
+// backs off without deleting or overwriting the in-flight build status.
+func claimRootfsArtifactForBuild(ctx context.Context, artifactID, fingerprint string, req *types.CreateTemplateFromImageReq, sourceDigest string) (*models.RootfsArtifact, error) {
+	var claimed *models.RootfsArtifact
+	err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var existing models.RootfsArtifact
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Unscoped().
+			Table(constants.RootfsArtifactTableName).
+			Where("artifact_id = ?", artifactID).First(&existing).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			row := &models.RootfsArtifact{
+				ArtifactID:              artifactID,
+				TemplateSpecFingerprint: fingerprint,
+				SourceImageRef:          req.SourceImageRef,
+				SourceImageDigest:       sourceDigest,
+				WritableLayerSize:       req.WritableLayerSize,
+				Status:                  ArtifactStatusBuilding,
+			}
+			if createErr := tx.Table(constants.RootfsArtifactTableName).Create(row).Error; createErr != nil {
+				return createErr
+			}
+			claimed = row
+			return nil
+		case err != nil:
+			return err
+		default:
+			if updErr := tx.Unscoped().Table(constants.RootfsArtifactTableName).
+				Where("artifact_id = ?", artifactID).
+				Updates(map[string]any{
+					"template_spec_fingerprint": fingerprint,
+					"source_image_ref":          req.SourceImageRef,
+					"source_image_digest":       sourceDigest,
+					"writable_layer_size":       req.WritableLayerSize,
+					"status":                    ArtifactStatusBuilding,
+					"last_error":                "",
+					"deleted_at":                nil,
+					"updated_at":                time.Now(),
+				}).Error; updErr != nil {
+				return updErr
+			}
+			existing.Status = ArtifactStatusBuilding
+			existing.DeletedAt = gorm.DeletedAt{}
+			claimed = &existing
+			return nil
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
 }
 
 func findReusableRootfsArtifact(ctx context.Context, fingerprint, artifactID string) (*models.RootfsArtifact, bool, error) {

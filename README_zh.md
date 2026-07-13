@@ -8,6 +8,11 @@
   <strong>一个极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务</strong>
 </p>
 
+
+<p align="center">
+  <a href="https://trendshift.io/repositories/26338?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26338" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26338" alt="TencentCloud/CubeSandbox | Trendshift" width="250" height="55" /></a>
+</p>
+
 <p align="center">
   <a href="https://github.com/tencentcloud/CubeSandbox/stargazers"><img src="https://img.shields.io/github/stars/tencentcloud/cubesandbox?style=social" alt="GitHub Stars" /></a>
   <a href="https://github.com/tencentcloud/CubeSandbox/issues"><img src="https://img.shields.io/github/issues/tencentcloud/cubesandbox" alt="GitHub Issues" /></a>
@@ -23,13 +28,15 @@
   <img src="https://img.shields.io/badge/📦_部署-高并发·高密度-orange" alt="高并发·高密度" />
 </p>
 
+
 <p align="center">
   <a href="./README.md"><strong>English</strong></a> ·
   <a href="./docs/zh/guide/quickstart.md"><strong>快速开始</strong></a> ·
   <a href="./docs/zh/index.md"><strong>文档</strong></a> ·
   <a href="./docs/zh/changelog/index.md"><strong>变更日志</strong></a> ·
   <a href="#wechat-group"><strong>微信交流群</strong></a> ·
-  <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a>
+  <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a> ·
+  <a href="https://wj.qq.com/s2/26753159/ss16/"><strong>核心用户计划</strong></a>
 </p>
 
 ---
@@ -47,14 +54,29 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 <table>
   <tr>
     <td align="right" valign="top" width="100">
-      <a href="./docs/zh/changelog/v0.4.0.md">
-        <img src="https://img.shields.io/badge/v0.4.0-New!-6f42c1?style=flat-square" alt="v0.4.0" />
+      <a href="./docs/zh/changelog/v0.5.0.md">
+        <img src="https://img.shields.io/badge/v0.5.0-2026.07.03-dc3545?style=flat-square" alt="v0.5.0" />
       </a>
     </td>
     <td valign="top">
-      <strong>CubeEgress 安全代理</strong><br/>
-      CubeSandbox 0.4.0 推出 <b>CubeEgress</b> —— 基于 OpenResty 的出站网关，支持凭据注入、域名过滤与访问审计。同时带来容器日志转发（<code>cubecli cubebox logs</code>）与组件版本管理能力。58 个 commits，15 位贡献者。
-      <a href="./docs/zh/changelog/v0.4.0.md">更新日志 →</a>
+      <strong>v0.5：自动暂停恢复、Terraform 一键集群、ARM64 全栈支持、沙箱网络策略增强</strong><br/>
+      <b>自动暂停恢复</b> — 闲置沙箱自动暂停，新请求到达时毫秒级唤醒。<b>Terraform 一键集群部署</b> <b>ARM64</b> 全栈原生支持 <b>沙箱网络策略增强</b> — 流量令牌鉴权、出向策略路由。<br/>
+      <a href="./docs/zh/changelog/v0.5.0.md">更新日志 →</a> ·
+      <a href="./docs/zh/guide/tencentcloud-terraform-deploy.md">Terraform 部署 →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
+      <a href="./docs/zh/changelog/v0.4.0.md">
+        <img src="https://img.shields.io/badge/v0.4.0-2026.06.14-6f42c1?style=flat-square" alt="v0.4.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>v0.4：出站更安全，运维更省心</strong><br/>
+      <b>凭证托管</b> — Agent 照常调外部 API，Key 不进沙箱。<b>控制台</b> — 版本矩阵、模板健康检查，升级后该不该重建一眼可见。<br/>
+      <a href="./docs/zh/changelog/v0.4.0.md">更新日志 →</a> ·
+      <a href="./docs/zh/guide/security-proxy.md">安全代理指南 →</a> ·
+      <a href="./docs/zh/guide/webui.md">WebUI 指南 →</a>
     </td>
   </tr>
   <tr>
@@ -83,18 +105,77 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
   </tr>
 </table>
 
-## 视频演示 (Demos)
+## 产品能力一览
+
+<table align="center">
+  <tr align="center" valign="top">
+    <td width="33%">
+      <strong>⚡ 毫秒启动 · 高密度· 自动暂停恢复</strong><br/><br/>
+      平均 &lt;60ms 冷启动，单实例额外开销 &lt;5MB，单机轻松跑起数千 Agent。支持沙箱的自动暂停及恢复，实现成本优化<br/><br/>
+      <a href="./docs/zh/guide/quickstart.md">快速开始 →</a>
+    </td>
+    <td width="33%">
+      <strong>🔒 硬件级隔离</strong><br/><br/>
+      每个沙箱独立 Guest OS 内核，告别 Docker 共享内核，放心跑大模型生成的未知代码<br/><br/>
+      <a href="./docs/zh/architecture/overview.md">架构概览 →</a>
+    </td>
+    <td width="33%">
+      <strong>🔌 E2B 无缝迁移</strong><br/><br/>
+      原生兼容 E2B SDK，替换一个 URL 环境变量即可接入，零业务代码改动<br/><br/>
+      <a href="./docs/zh/guide/tutorials/examples.md">示例项目 →</a>
+    </td>
+  </tr>
+  <tr align="center" valign="top">
+    <td width="33%">
+      <strong>🖥️ Web 控制台</strong><br/><br/>
+      浏览器管集群：沙箱、模板、节点、版本矩阵，装完即开 <code>:12088</code><br/><br/>
+      <a href="./docs/zh/guide/webui.md">WebUI 指南 →</a>
+    </td>
+    <td width="33%">
+      <strong>🔐 凭证托管</strong><br/><br/>
+      Agent 照常调 LLM 与外部 API，Key 不进沙箱、不进模型上下文、不落日志<br/><br/>
+      <a href="./docs/zh/guide/security-proxy.md">安全代理指南 →</a>
+    </td>
+    <td width="33%">
+      <strong>🛡️ 出站管控</strong><br/><br/>
+      域名白名单放行、越权出站当场拦截，全量访问留审计日志方便合规<br/><br/>
+      <a href="./docs/zh/guide/security-proxy.md">安全代理指南 →</a>
+    </td>
+  </tr>
+  <tr align="center" valign="top">
+    <td width="33%">
+      <strong>📸 快照 · 克隆 · 回档</strong><br/><br/>
+      百毫秒级检查点，运行中随时快照，回滚到任意状态或分叉探索<br/><br/>
+      <a href="./docs/zh/changelog/v0.3.0.md">v0.3 更新日志 →</a>
+    </td>
+    <td width="33%">
+      <strong>📦 模板体系</strong><br/><br/>
+      OCI 镜像一键转模板，模板商店装官方预置环境，跨节点自动分发<br/><br/>
+      <a href="./docs/zh/guide/templates.md">模板指南 →</a>
+    </td>
+    <td width="33%">
+      <strong>🤖 AgentHub 数字助手</strong><br/><br/>
+      基于 OpenClaw 一键创建 AI 助手，支持快照、回档与助手模板发布<br/><br/>
+      <a href="./docs/zh/guide/digital-assistant.md">数字助手 →</a>
+    </td>
+  </tr>
+</table>
+
+## 视频演示
 
 <table align="center">
   <tr align="center" valign="middle">
-    <td width="33%" valign="middle">
+    <td width="25%" valign="middle">
       <video src="https://github.com/user-attachments/assets/f87c409e-29fc-4e86-9eac-dbeaff2aca18" controls="controls" muted="muted" style="max-width: 100%;"></video>
     </td>
-    <td width="33%" valign="middle">
+    <td width="25%" valign="middle">
       <video src="https://github.com/user-attachments/assets/50e7126e-bb73-4abc-aa85-677fdf2e8c67" controls="controls" muted="muted" style="max-width: 100%;"></video>
     </td>
-    <td width="33%" valign="middle">
+    <td width="25%" valign="middle">
       <video src="https://github.com/user-attachments/assets/052e0e77-e2d9-409e-90b8-d13c28b80495" controls="controls" muted="muted" style="max-width: 100%;"></video>
+    </td>
+    <td width="25%" valign="middle">
+      <video src="https://github.com/user-attachments/assets/c8845a84-5792-4062-ae9d-4787c24f5a58" controls="controls" muted="muted" style="max-width: 100%;"></video>
     </td>
   </tr>
   <tr align="center" valign="top">
@@ -105,21 +186,14 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
       <em>性能测试</em>
     </td>
     <td>
-      <em>RL场景演示 (SWE-Bench)</em>
+      <em>RL 场景 (SWE-Bench)</em>
+    </td>
+    <td>
+      <em>快照 · 克隆 · 回档</em>
     </td>
   </tr>
 </table>
 
-## 核心优势
-
-- **极致冷启动：** 基于资源池化预置和快照克隆技术，直接跳过耗时初始化流程。整个沙箱服务端到端冷启动一个可服务的沙箱时间平均 < 60ms
-- **单机千例的高密部署：** 基于 CoW 技术实现极致内存复用，用 Rust 重构底层极致裁剪，使得单实例内存开销低至 <5MB，轻松在一台机器上跑起数千个 Agent。
-- **真正的内核级隔离：** 告别不安全的 Docker 共享内核（Namespace）。每个 Agent 拥有独立的 Guest OS 内核，杜绝容器逃逸，放心运行任何大模型生成的未知代码。
-- **零成本迁移（E2B 完美平替）：** 原生兼容 E2B SDK 接口规范。只需替换一个 URL 环境变量，无需业务代码改动就可切换到免费的 Cube Sandbox，并获得更好的性能体验。
-- **网络安全：** 基于 eBPF 的 CubeVS 在内核态实现严格的沙箱间网络隔离，支持细粒度出站流量过滤策略。
-- **开箱即用：** 可一键快速部署，同时支持单机部署和集群部署。
-- **事件级快照回滚：** 百毫秒级的高频快照与回滚能力。支持对运行中沙箱创建检查点，随时回滚到任意快照状态，或从指定状态快速创建分叉探索环境。
-- **可用于生产环境：** Cube Sandbox 已在腾讯云生产环境中经历大规模的服务验证，稳定可靠。
 
 ## 性能与方案对比 (Benchmarks)
 
@@ -135,8 +209,7 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 
 > *Cube Sandbox 测试数据说明：其中，启动速度项基于裸金属环境测试，单并发下为 60ms，50 并发场景下平均 67ms（P95 90ms，P99 137ms），整体保持在百毫秒级。内存开销项基于 ≤ 32GB 规格沙箱实测，更大规格下开销会略有上升，但幅度极小。*
 
-详细的创建时延和资源消耗情况可参考：
-
+详细的创建时延和资源消耗情况可参考 [核心操作性能基准测试报告（裸金属）](./docs/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark.md) 与 [PVM 云服务器测试报告](./docs/zh/blog/posts/2026-06-03-cubesandbox-perf-benchmark-pvm.md)。
 
 <table align="center">
   <tr align="center" valign="middle">
@@ -238,13 +311,42 @@ Cube Sandbox 需要一台支持 **KVM** 的 **x86_64 Linux** 环境。
   </tr>
 </table>
 
+### 装完第一件事：打开 Web 控制台
+
+<p align="center">
+  <img src="docs/assets/webui-demo.gif" alt="WebUI 控制台演示" width="720" />
+</p>
+
+<p align="center">
+  <em>🖥️ 可视化管理 —— 从概览到创建沙箱、查看日志，全程在浏览器完成。</em>
+</p>
+
+一键部署完成后，在浏览器访问：
+
+```
+http://<控制节点 IP>:12088
+```
+
+
+**推荐三步：**
+
+1. **先看概览** — 打开 **Overview**，确认节点 Ready、资源有余量，集群可以正常接单
+2. **备好模板** — 到 **Template Store** 一键安装官方预置镜像；若 **Templates** 里已有 `READY` 模板可跳过
+3. **创建沙箱** — **Sandboxes → + New sandbox**，选 `READY` 模板创建，几秒内进入详情页查看实时日志
+
+
+完整说明见 [WebUI 控制台指南](./docs/zh/guide/webui.md)。
+
 ## 深入探索
 
 - [文档首页](./docs/zh/index.md) — 完整指南导航
+- ☁️ [PVM 部署](./docs/zh/guide/pvm-deploy.md) — 在普通云服务器上部署，无需裸金属或嵌套虚拟化
 - [模板概览](./docs/zh/guide/templates.md) — 镜像到模板的概念与工作流
 - [示例项目](./docs/zh/guide/tutorials/examples.md) — 展示各种使用场景的示例（涵盖代码执行、浏览器自动化、OpenClaw 集成与 RL 训练等）
+- 🖥️ [WebUI 控制台](./docs/zh/guide/webui.md) — 装完即用的可视化管理（`:12088`）
+- 🔐 [安全代理与凭证托管](./docs/zh/guide/security-proxy.md) — CubeEgress 域名过滤、注入与审计
+- 🤖 [数字助手 AgentHub](./docs/zh/guide/digital-assistant.md) — OpenClaw 助手创建与管理（Preview）
 - 💻 [开发环境（QEMU 虚机）](./docs/zh/guide/dev-environment.md) — 暂时没有 KVM 访问权限？在一次性的 OpenCloudOS 9 虚机里体验 Cube Sandbox
-- ☁️ [PVM 部署](./docs/zh/guide/pvm-deploy.md) — 在普通云服务器上部署，无需裸金属或嵌套虚拟化
 
 ## 架构概览
 
@@ -259,6 +361,7 @@ Cube Sandbox 需要一台支持 **KVM** 的 **x86_64 Linux** 环境。
 | **CubeProxy** | 反向代理，兼容 E2B 协议，将请求路由到对应沙箱。 |
 | **Cubelet** | 计算节点本地调度组件，管理单节点所有沙箱实例的完整生命周期。 |
 | **CubeVS** | 基于 eBPF 内核态转发的虚拟交换机，提供网络隔离与安全策略支持。 |
+| **CubeEgress** | 基于 OpenResty 的出站安全网关：L7 域名过滤、凭证注入、访问审计；与 CubeVS 内核策略配合，沙箱流量不可绕过。 |
 | **CubeHypervisor & CubeShim** | 虚拟化层 —— CubeHypervisor 负责管理 KVM MicroVM，CubeShim 实现 containerd Shim v2 接口，将沙箱集成到容器运行时。 |
 
 详见[架构概览](./docs/zh/architecture/overview.md)和 [CubeVS 网络模型](./docs/zh/architecture/network.md)。
@@ -285,6 +388,20 @@ Cube Sandbox 需要一台支持 **KVM** 的 **x86_64 Linux** 环境。
   <em>💬 扫描上方二维码加入微信交流群，与核心开发者和社区伙伴零距离沟通！</em>
 </p>
 
+
+## Roadmap
+
+**即将上线** — 详见[完整路线图](./docs/zh/guide/roadmap.md)。
+
+| 特性 | 说明 |
+|---|---|
+| **Kubernetes 原生部署** | 使用 CRD、Operator 和原生调度在 K8s 集群内完整部署运营 CubeSandbox，无需额外编排组件 |
+| **Volume 支持** | 兼容 E2B Volume 协议的持久化与共享存储能力 |
+| **跨机暂停与恢复** | 在一台宿主机上暂停沙箱，在另一台上完整恢复内存和文件系统状态 |
+| **E2B API 对齐补齐** | 补齐与 E2B 规范的剩余差距，实现完整的兼容替代 |
+| **控制面与数据面分离** | 解耦控制面与数据面，控制面升级或故障不影响已在运行的沙箱，保证全路径高可用 |
+| **沙箱异常恢复** | 自动检测并恢复 VM Crash、shim 卡死、网络分区等异常，支持可配置恢复策略 |
+| **调度与运维能力增强** | 资源感知调度、亲和规则、在线均衡与带迁移的节点排空 |
 
 ## 许可证
 

@@ -22,6 +22,7 @@ const (
 	nodesAction         = "/nodes"
 	nodeAction          = "/nodes/{node_id}"
 	nodeStatusAction    = "/nodes/{node_id}/status"
+	nodeLabelsAction    = "/nodes/{node_id}/labels"
 	versionMatrixAction = "/version-matrix"
 )
 
@@ -69,6 +70,10 @@ func NodeStatusAction() string {
 
 func VersionMatrixAction() string {
 	return versionMatrixAction
+}
+
+func NodeLabelsAction() string {
+	return nodeLabelsAction
 }
 
 func ReadyzHandler(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +162,34 @@ func VersionMatrixHandler(w http.ResponseWriter, r *http.Request) {
 	common.WriteResponse(w, http.StatusOK, &versionMatrixResponse{
 		Ret:  successRet(),
 		Data: data,
+	})
+}
+
+func UpdateNodeLabelsHandler(w http.ResponseWriter, r *http.Request) {
+	nodeID := mux.Vars(r)["node_id"]
+	req := &nodemeta.UpdateNodeLabelsRequest{}
+	if err := common.GetBodyReq(r, req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := nodemeta.UpdateNodeLabels(r.Context(), nodeID, req.Labels); err != nil {
+		writeErr(w, http.StatusOK, err)
+		return
+	}
+	common.WriteResponse(w, http.StatusOK, &sandboxtypes.Res{
+		Ret: successRet(),
+	})
+}
+
+func DeleteNodeLabelHandler(w http.ResponseWriter, r *http.Request) {
+	nodeID := mux.Vars(r)["node_id"]
+	key := r.URL.Query().Get("key")
+	if err := nodemeta.DeleteNodeLabel(r.Context(), nodeID, key); err != nil {
+		writeErr(w, http.StatusOK, err)
+		return
+	}
+	common.WriteResponse(w, http.StatusOK, &sandboxtypes.Res{
+		Ret: successRet(),
 	})
 }
 

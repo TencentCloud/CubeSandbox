@@ -4,7 +4,7 @@ After=docker.service network-online.target cube-sandbox-cube-egress-net.service 
 Requires=docker.service cube-sandbox-network-agent.service
 Wants=network-online.target cube-sandbox-cube-egress-net.service
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
-PartOf=cube-sandbox-control.target
+PartOf=cube-sandbox-control.target cube-sandbox-compute.target
 
 # Why net.service is Wants= and not Requires=:
 # net.service installs the host TPROXY iptables rules and waits for

@@ -59,7 +59,7 @@ func NewInternalHttp(ctx context.Context, cfg *config.Config) (*internalHttp, er
 	router := mux.NewRouter()
 	s := &internalHttp{
 		Server: &http.Server{
-			Addr:         fmt.Sprintf("0.0.0.0:%d", cfg.Common.HttpPort),
+			Addr:         fmt.Sprintf("%s:%d", cfg.Common.HttpBind, cfg.Common.HttpPort),
 			ReadTimeout:  time.Second * time.Duration(cfg.Common.ReadTimeout),
 			WriteTimeout: time.Second * time.Duration(cfg.Common.WriteTimeout),
 			IdleTimeout:  time.Second * time.Duration(cfg.Common.IdleTimeout),
@@ -89,6 +89,8 @@ func (s *internalHttp) registerHandlers() {
 	cubeGroup.HandleFunc(cube.SandboxInfoAction, cube.HttpHandler).Methods(http.MethodGet, http.MethodPost)
 	cubeGroup.HandleFunc(cube.SandboxExecAction, cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.SandboxUpdateAction, cube.HttpHandler).Methods(http.MethodPost)
+	cubeGroup.HandleFunc(cube.SandboxTimeoutAction, cube.HttpHandler).Methods(http.MethodPost)
+	cubeGroup.HandleFunc(cube.SandboxRefreshAction, cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.SandboxCommitAction, cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.SandboxRollbackAction, cube.HttpHandler).Methods(http.MethodPost)
 	cubeGroup.HandleFunc(cube.SandboxPreviewAction, cube.HttpHandler).Methods(http.MethodPost)
@@ -120,6 +122,8 @@ func (s *internalHttp) registerHandlers() {
 	metaGroup.HandleFunc(metahttp.VersionMatrixAction(), metahttp.VersionMatrixHandler).Methods(http.MethodGet)
 	metaGroup.HandleFunc(metahttp.NodeAction(), metahttp.GetNodeHandler).Methods(http.MethodGet)
 	metaGroup.HandleFunc(metahttp.NodeStatusAction(), metahttp.UpdateNodeStatusHandler).Methods(http.MethodPost)
+	metaGroup.HandleFunc(metahttp.NodeLabelsAction(), metahttp.UpdateNodeLabelsHandler).Methods(http.MethodPost)
+	metaGroup.HandleFunc(metahttp.NodeLabelsAction(), metahttp.DeleteNodeLabelHandler).Methods(http.MethodDelete)
 }
 
 func (s *internalHttp) Start() error {

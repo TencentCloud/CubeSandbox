@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -57,13 +58,14 @@ func (f *fakeRedis) snapshot() []recordedCall {
 }
 
 func TestSandboxLifecycleMeta_JSONRoundTrip(t *testing.T) {
+	timeout := 60
 	in := SandboxLifecycleMeta{
 		SandboxID:      "sbx-1",
 		TemplateID:     "tpl-1",
 		HostID:         "host-1",
 		HostIP:         "10.0.0.1",
 		InstanceType:   "cubebox",
-		TimeoutSeconds: 60,
+		TimeoutSeconds: &timeout,
 		AutoPause:      true,
 		AutoResume:     true,
 		CreatedAt:      1700000000000,
@@ -76,7 +78,9 @@ func TestSandboxLifecycleMeta_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out != in {
+	// TimeoutSeconds is a pointer now, so compare by value (DeepEqual) rather
+	// than == which would compare pointer identity.
+	if !reflect.DeepEqual(out, in) {
 		t.Fatalf("round trip mismatch: got %+v want %+v", out, in)
 	}
 }
@@ -85,9 +89,10 @@ func TestStore_PublishCreate_HappyPath(t *testing.T) {
 	r := &fakeRedis{}
 	s := NewStore(r)
 
+	timeout := 60
 	meta := &SandboxLifecycleMeta{
 		SandboxID:      "sbx-42",
-		TimeoutSeconds: 60,
+		TimeoutSeconds: &timeout,
 		AutoPause:      true,
 	}
 	s.PublishCreate(context.Background(), meta)
@@ -118,7 +123,7 @@ func TestStore_PublishCreate_HappyPath(t *testing.T) {
 	if err := json.Unmarshal(payloadBytes, &got); err != nil {
 		t.Fatalf("payload json: %v", err)
 	}
-	if got.SandboxID != "sbx-42" || !got.AutoPause || got.TimeoutSeconds != 60 {
+	if got.SandboxID != "sbx-42" || !got.AutoPause || got.TimeoutSeconds == nil || *got.TimeoutSeconds != 60 {
 		t.Fatalf("payload wrong: %+v", got)
 	}
 }

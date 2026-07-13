@@ -123,9 +123,10 @@ production, use [Quick Start](./quickstart.md) or
 
 Software dependencies required on the host:
 
-- Linux x86_64 with KVM enabled (`/dev/kvm` exists)
+- Linux x86_64 or aarch64 (ARM64) with KVM enabled (`/dev/kvm` exists)
 - Nested virtualization enabled
-- `qemu-system-x86_64`, `qemu-img`, `curl`, `ssh`, `scp`, `setsid`
+- `qemu-system-x86_64` (or `qemu-system-aarch64` on ARM64), `qemu-img`, `curl`, `ssh`, `scp`, `setsid`
+  - On aarch64 the dev-env VM boots with QEMU's `virt` machine and UEFI firmware, so the EDK2/AAVMF firmware (`QEMU_EFI.fd`, e.g. the `qemu-efi-aarch64` package) must also be installed. The scripts auto-detect the host architecture; override with `TARGET_ARCH` if needed.
 
 Quick sanity check:
 

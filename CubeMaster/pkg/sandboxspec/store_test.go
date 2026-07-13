@@ -30,7 +30,7 @@ func TestCanonicalizeRequestStripsTransientSnapshotAnnotations(t *testing.T) {
 			"unrelated-annotation":                            "preserve",
 		},
 		Labels:  map[string]string{"keep": "me"},
-		Timeout: 30,
+		Timeout: sandboxtypes.TimeoutPtr(30),
 	}
 
 	out, err := CanonicalizeRequest(req)

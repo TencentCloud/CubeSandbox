@@ -276,6 +276,10 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
+	// collectEnvdVersion uses containerd Exec, which must run before
+	// cube-runtime marks the guest as app-snapshotting and disables exec.
+	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
+
 	stepLog.Info("Step 4: Executing cube-runtime snapshot...")
 	// AppSnapshot builds a brand-new template from a fresh sandbox: there is
 	// no base memory blob to overlay onto, so we always ask for a full memory
@@ -389,6 +393,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	rsp.GuestImageVersion = versions.GuestImage
 	rsp.AgentVersion = versions.Agent
 	rsp.KernelVersion = versions.Kernel
+	rsp.EnvdVersion = envdVersion
 
 	// Persist the catalog entry so subsequent create-from-template and
 	// CleanupTemplate calls can resolve physical refs locally. The build

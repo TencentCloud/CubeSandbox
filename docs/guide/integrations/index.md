@@ -47,4 +47,5 @@ lang: en-US
 
 | Title | Author | Date | Tags |
 | --- | --- | --- | --- |
+| [Pi Agent Integration Guide](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
 | [CrewAI Integration Guide](./crewai.md) | ruirui6946 | 2026-06-23 | integration, crewai |

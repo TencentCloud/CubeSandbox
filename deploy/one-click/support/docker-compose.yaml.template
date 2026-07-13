@@ -25,7 +25,6 @@ services:
       retries: 20
     volumes:
       - __MYSQL_VOLUME__:/var/lib/mysql
-      - __SQL_DIR__:/docker-entrypoint-initdb.d:ro
 
   redis:
     image: __REDIS_IMAGE__

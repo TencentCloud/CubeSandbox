@@ -24,8 +24,7 @@ if not container_port or not ins_id then
     ngx.log(ngx.ERR, "LEVEL_WARN||",
         string.format("request %s invalid Host for port/instance parse: %s",
             ngx.var.http_x_cube_request_id, ngx.var.http_host))
-    ngx.var.cube_retcode = "310400"
-    ngx.exit(400)
+    utils:respond_bad_request()
 end
 
 -- log_phase reads ngx.var.ins_id to record activity. The host-based location

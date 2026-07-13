@@ -37,7 +37,9 @@ use std::sync::{Arc, Barrier};
 use std::{collections::HashMap, convert::TryInto};
 use thiserror::Error;
 use virtio_bindings::bindings::virtio_blk::*;
-use virtio_bindings::bindings::virtio_ring::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
+use virtio_bindings::bindings::virtio_ring::{
+    VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
+};
 use virtio_queue::{Queue, QueueOwnedT, QueueT};
 use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryError};
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};

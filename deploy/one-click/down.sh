@@ -12,8 +12,7 @@ fi
 
 require_root
 
-TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
-INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
+INSTALL_PREFIX="${CUBE_SANDBOX_INSTALL_ROOT}"
 ensure_dir "${INSTALL_PREFIX}"
 
 ROLE_FILE="${INSTALL_PREFIX}/.one-click.env"

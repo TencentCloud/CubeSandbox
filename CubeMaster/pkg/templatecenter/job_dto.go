@@ -49,6 +49,30 @@ func jobModelToInfo(ctx context.Context, record *models.TemplateImageJob) (*type
 	return info, nil
 }
 
+// cloneTemplateImageJobInfo returns an independent copy of src. When
+// TemplateImageJobInfo, Res, or RootfsArtifactInfo gain new pointer/slice/map
+// fields, update the deep-copy branches here accordingly.
+func cloneTemplateImageJobInfo(src *types.TemplateImageJobInfo) *types.TemplateImageJobInfo {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	dst.RedoScope = append([]string(nil), src.RedoScope...)
+	if src.Artifact != nil {
+		artifact := *src.Artifact
+		dst.Artifact = &artifact
+	}
+	if src.Template != nil {
+		template := *src.Template
+		if src.Template.Ret != nil {
+			ret := *src.Template.Ret
+			template.Ret = &ret
+		}
+		dst.Template = &template
+	}
+	return &dst
+}
+
 func artifactModelToInfo(record *models.RootfsArtifact) *types.RootfsArtifactInfo {
 	return &types.RootfsArtifactInfo{
 		ArtifactID:              record.ArtifactID,

@@ -55,7 +55,6 @@ Options:
 
 Environment variables:
   ONE_CLICK_DEPLOY_ROLE              control (default) or compute
-  ONE_CLICK_TOOLBOX_ROOT             Installation root (default: /usr/local/services/cubetoolbox)
   ONE_CLICK_RUNTIME_DIR              PID file directory (default: /var/run/cube-sandbox-one-click)
   NETWORK_AGENT_HEALTH_ADDR          network-agent health address (default: 127.0.0.1:19090)
   CUBE_API_HEALTH_ADDR               cube-api health address (default: 127.0.0.1:3000)
@@ -78,8 +77,8 @@ Examples:
 EOF
 }
 
-# ── Config (override via env) ──────────────────────────────────────────────────
-TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
+# ── Config ─────────────────────────────────────────────────────────────────────
+TOOLBOX_ROOT="/usr/local/services/cubetoolbox"
 RUNTIME_DIR="${ONE_CLICK_RUNTIME_DIR:-/var/run/cube-sandbox-one-click}"
 NA_HEALTH_ADDR="${NETWORK_AGENT_HEALTH_ADDR:-127.0.0.1:19090}"
 CUBE_API_HEALTH_ADDR="${CUBE_API_HEALTH_ADDR:-127.0.0.1:3000}"
@@ -106,7 +105,8 @@ _resolve_master_addr() {
   fi
   local addr="${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}"
   local ip="${ONE_CLICK_CONTROL_PLANE_IP:-}"
-  local port="${CUBEMASTER_ADDR##*:}"
+  # 8089 is the cubemaster protocol port (fixed), not derived from CUBEMASTER_ADDR.
+  local port=8089
   if [[ -n "${addr}" ]]; then printf '%s\n' "${addr}"; return; fi
   if [[ -n "${ip}" ]];   then printf '%s:%s\n' "${ip}" "${port}"; return; fi
   printf '%s\n' "${CUBEMASTER_ADDR}"

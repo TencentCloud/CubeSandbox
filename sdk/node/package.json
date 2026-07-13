@@ -1,0 +1,59 @@
+{
+  "name": "@cubesandbox/sdk",
+  "version": "0.3.0",
+  "description": "Node.js / TypeScript SDK for CubeSandbox",
+  "license": "Apache-2.0",
+  "author": "Tencent Inc.",
+  "homepage": "https://github.com/TencentCloud/CubeSandbox",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TencentCloud/CubeSandbox.git",
+    "directory": "sdk/node"
+  },
+  "keywords": [
+    "cubesandbox",
+    "sandbox",
+    "e2b",
+    "ai-agent",
+    "code-interpreter"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "undici": "^6.19.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsup": "^8.2.4",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}

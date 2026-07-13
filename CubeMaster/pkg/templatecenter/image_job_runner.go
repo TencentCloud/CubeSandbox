@@ -57,7 +57,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		defer source.Cleanup(ctx)
 	}
 	pullProgressFlushed := false
-	if !source.UseDockerless {
+	if source.ExportMode == image.ExportModeDocker {
 		// Docker/Podman Engine pulls happen during PrepareSource. Flush before
 		// moving to UNPACKING so stale live cache cannot show 13/14 after
 		// PULLING has already completed.
@@ -139,7 +139,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	}
 	if expected > 0 && ready == 0 {
 		if builtFreshArtifact {
-			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType); cleanupErr != nil {
+			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType, req.TemplateID); cleanupErr != nil {
 				logger.Errorf("cleanup fresh rootfs artifact after distribution failure fail: %v", cleanupErr)
 			}
 		}
@@ -184,7 +184,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	}
 	if err != nil {
 		if builtFreshArtifact {
-			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType); cleanupErr != nil {
+			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType, req.TemplateID); cleanupErr != nil {
 				logger.Errorf("cleanup fresh rootfs artifact after create template error fail: %v", cleanupErr)
 			}
 		}
@@ -202,7 +202,7 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	jobPhase := JobPhaseReady
 	if info.Status == StatusFailed {
 		if builtFreshArtifact {
-			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType); cleanupErr != nil {
+			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType, req.TemplateID); cleanupErr != nil {
 				logger.Errorf("cleanup fresh rootfs artifact after failed template status fail: %v", cleanupErr)
 			}
 		}

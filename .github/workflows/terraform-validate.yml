@@ -1,0 +1,88 @@
+name: Terraform Deployer Validate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'deploy/one-click/terraform/**'
+      # The deployer also depends on the release-bundle builder and the
+      # component Dockerfile/package contexts it assembles. Changes there can
+      # break bundle layout or image builds, so validate them too (the
+      # package-layout dry run below covers the wiring).
+      - 'deploy/one-click/build-release-bundle.sh'
+      - 'deploy/one-click/build-release-bundle-builder.sh'
+      - 'deploy/one-click/lib/**'
+      - 'deploy/one-click/tests/**'
+      - 'deploy/one-click/CubeAPI/**'
+      - 'deploy/one-click/CubeMaster/**'
+      - 'deploy/one-click/webui/**'
+      - 'deploy/one-click/cubeproxy/**'
+      - 'CubeProxy/Dockerfile'
+      # bump-image.sh is the single source of truth for the hard-coded image
+      # tags this deployer bakes in; test_bump_image.sh guards it.
+      - 'scripts/bump-image.sh'
+      - '.github/workflows/terraform-validate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-validate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: fmt + validate + shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          # Pin to the same version create.sh installs (ensure_terraform's
+          # TERRAFORM_VERSION) so `fmt -check` / `validate` in CI match what users
+          # actually run, instead of floating to the latest release.
+          terraform_version: 1.15.6
+          terraform_wrapper: false
+
+      - name: Install shellcheck
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Validate the Tencent Cloud deployer
+        shell: bash
+        working-directory: deploy/one-click/terraform/tencentcloud
+        # REQUIRE_TOOLS=1: terraform + shellcheck are installed above, so a
+        # missing tool here means a broken setup step and must fail the build
+        # rather than silently skip its checks.
+        run: REQUIRE_TOOLS=1 ./validate.sh
+
+      # Lightweight dry run of the release-bundle / image-build layout: catches
+      # Dockerfile/context renames and image-name drift between build_images.sh
+      # and the addon Terraform without docker/terraform/cloud.
+      - name: Package layout dry run
+        shell: bash
+        run: ./deploy/one-click/tests/test_package_layout.sh
+
+      # Cloud-free coverage of create.sh's phase/rerun state machine
+      # (lib-phases.sh): first-run, rerun and partial-failure transitions.
+      - name: Phase-flag / rerun recovery checks
+        shell: bash
+        run: ./deploy/one-click/tests/test_phase_flags.sh
+
+      # Cloud-free coverage of the shared .env parser (lib-state-sync.sh:
+      # _env_value / _load_env_file) that create.sh and destroy.sh restore saved
+      # selections with — guards against a parse regression silently corrupting a
+      # reused value (e.g. an instance type with a trailing "# comment" glued on).
+      - name: .env parsing checks
+        shell: bash
+        run: ./deploy/one-click/tests/test_env_value.sh
+
+      # Guards bump-image.sh: the --check gate, the bump rewrite, the reverse
+      # scan, and the variables.tf line guard against non-image semvers.
+      - name: bump-image tag consistency checks
+        shell: bash
+        run: ./deploy/one-click/tests/test_bump_image.sh

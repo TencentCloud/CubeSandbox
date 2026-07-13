@@ -8,16 +8,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+
 	"github.com/google/uuid"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"strconv"
-	"sync"
 )
 
 func buildReplicaForDistribution(target *node.Node, req *types.CreateCubeSandboxReq, artifactID, jobID string) ReplicaStatus {
@@ -41,7 +45,7 @@ func buildReplicaForDistribution(target *node.Node, req *types.CreateCubeSandbox
 	}
 }
 
-func cleanupArtifactOnNodes(ctx context.Context, artifactID string, targets []*node.Node) error {
+func cleanupArtifactOnNodes(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
 	if artifactID == "" {
 		return nil
 	}
@@ -50,27 +54,57 @@ func cleanupArtifactOnNodes(ctx context.Context, artifactID string, targets []*n
 		if target == nil {
 			continue
 		}
-		rsp, err := deleteImageOnCubelet(ctx, getCubeletAddrForDelete(target.HostIP()), &imagev1.DestroyImageRequest{
-			RequestID: uuid.NewString(),
-			Spec: &imagev1.ImageSpec{
-				Image: artifactID,
-			},
-		})
-		if err != nil {
-			if isIgnorableArtifactDeleteError(err) {
-				continue
-			}
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete artifact %s on node %s: %w", artifactID, target.ID(), err))
-			continue
-		}
-		if rsp.GetRet() != nil && int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
-			if isIgnorableArtifactDeleteMessage(rsp.GetRet().GetRetMsg()) {
-				continue
-			}
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete artifact %s on node %s failed: %s", artifactID, target.ID(), rsp.GetRet().GetRetMsg()))
+		if _, err := destroyArtifactOnNode(ctx, artifactID, instanceType, target); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	return cleanupErr
+}
+
+// destroyArtifactOnNode issues an idempotent ext4 artifact destroy to a single
+// node. It fills storage_media=ext4 and the instance-type annotation so the
+// cubelet routes to its synchronous pmem destroy path (a plain DestroyImage is
+// a no-op for ext4 artifacts that are not containerd images).
+//
+// Returns inUse=true (and nil error) when the node refuses because a running
+// sandbox still references the artifact: that is a protection, not a failure,
+// and the caller keeps the artifact for GC to retry. NotFound is treated as
+// success (idempotent). Any other failure is returned as an error.
+func destroyArtifactOnNode(ctx context.Context, artifactID, instanceType string, target *node.Node) (bool, error) {
+	if target == nil {
+		return false, nil
+	}
+	instanceType = strings.TrimSpace(instanceType)
+	if instanceType == "" {
+		log.G(ctx).Warnf("artifact cleanup: empty instanceType for artifact %s on node %s, defaulting to cubebox", artifactID, target.ID())
+		instanceType = cubeboxv1.InstanceType_cubebox.String()
+	}
+	rsp, err := deleteImageOnCubelet(ctx, getCubeletAddrForDelete(target.HostIP()), &imagev1.DestroyImageRequest{
+		RequestID: uuid.NewString(),
+		Spec: &imagev1.ImageSpec{
+			Image:        artifactID,
+			StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),
+			Annotations: map[string]string{
+				constants.CubeAnnotationsInsType: instanceType,
+			},
+		},
+	})
+	if err != nil {
+		if isIgnorableArtifactDeleteError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("delete artifact %s on node %s: %w", artifactID, target.ID(), err)
+	}
+	if rsp.GetRet() != nil && int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
+		if int(rsp.GetRet().GetRetCode()) == int(errorcode.ErrorCode_Conflict) {
+			return true, nil // running sandbox still uses it; defer to GC
+		}
+		if isIgnorableArtifactDeleteMessage(rsp.GetRet().GetRetMsg()) {
+			return false, nil
+		}
+		return false, fmt.Errorf("delete artifact %s on node %s failed: %s", artifactID, target.ID(), rsp.GetRet().GetRetMsg())
+	}
+	return false, nil
 }
 
 func cleanupTemplateReplicasOnNodes(ctx context.Context, templateID string, replicas []models.TemplateReplica, targets []*node.Node) error {
@@ -187,6 +221,14 @@ func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFrom
 			readyTargets = append(readyTargets, target)
 			if templateID != "" && generatedReq != nil {
 				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
+			}
+			// Record physical placement independently of the replica lifecycle so
+			// last-owner-cleanup / GC can later reach this node even after the
+			// replica row is removed (FIX-1).
+			if err := upsertArtifactNodePlacement(ctx, artifact.ArtifactID, target.ID(), target.HostIP()); err != nil {
+				// Non-fatal: placement is a cleanup optimisation, not a
+				// correctness gate for distribution. Backfill/GC reconcile later.
+				log.G(ctx).Warnf("record artifact placement %s on node %s failed: %v", artifact.ArtifactID, target.ID(), err)
 			}
 		}()
 	}

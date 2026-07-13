@@ -30,6 +30,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 const MODULE: &str = "Shim";
+const INTERNAL_PROBE_EXEC_ID_PREFIX: &str = "cubesandbox-internal-probe-";
 
 #[derive(Clone)]
 pub struct TaskService {
@@ -510,7 +511,7 @@ impl Task for TaskService {
             req.exec_id()
         );
         let sb = self.sandbox.lock().await;
-        if sb.app_snapshot_create() {
+        if sb.app_snapshot_create() && !is_internal_probe_exec_id(req.exec_id()) {
             infof!(self.log, "exec disabled while app snapshotting");
             return Err(Others("exec disabled while app snapshotting".to_string()));
         }
@@ -622,6 +623,26 @@ impl Task for TaskService {
         })?;
         infof!(self.log, "resume req finish");
         Ok(api::Empty::default())
+    }
+}
+
+fn is_internal_probe_exec_id(exec_id: &str) -> bool {
+    exec_id.starts_with(INTERNAL_PROBE_EXEC_ID_PREFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_probe_exec_requires_exec_id_prefix() {
+        assert!(is_internal_probe_exec_id(
+            "cubesandbox-internal-probe-4e7d6a"
+        ));
+        assert!(!is_internal_probe_exec_id("internal-probe-4e7d6a"));
+        assert!(!is_internal_probe_exec_id(
+            "user-cubesandbox-internal-probe-4e7d6a"
+        ));
     }
 }
 

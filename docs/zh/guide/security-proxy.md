@@ -195,7 +195,7 @@ inject 的 `secret` 值在写入任何日志路径前都会被剥除。审计日
   HTTPS 在规则评估之前就会因 self-signed cert 报错。
 
 代理本身的部署（systemd 单元、CA 引导、iptables oneshot 服务）见
-[`deploy/one-click`](https://github.com/tencentcloud/CubeSandbox/tree/main/deploy/one-click)
+[`deploy/one-click`](https://github.com/tencentcloud/CubeSandbox/tree/master/deploy/one-click)
 源码 —— 那一套会自动把 CubeEgress 接到 control 和 compute target
 里。
 

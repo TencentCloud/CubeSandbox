@@ -75,7 +75,8 @@ import (
 const (
 	cubeSharedBindRootPath = "/run/cube-bind-share"
 
-	K8sEmptyDirPath = "kubernetes.io~empty-dir"
+	K8sEmptyDirPath        = "kubernetes.io~empty-dir"
+	envdInitCleanupTimeout = 10 * time.Second
 )
 
 func init() {
@@ -283,58 +284,75 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		})
 	}
 
-	sandBox.Lock()
-	defer func() {
-		if err := l.cubeboxManger.Save(ctx, sandBox); err != nil {
-			log.G(ctx).Warnf("saveSandBoxInfo failed.%s", err.Error())
-		}
-		sandBox.Unlock()
-	}()
-
-	for _, param := range params {
-		ci := param.ci
-		containerLog := sanboxlog.WithFields(CubeLog.Fields{
-			"containerID": ci.ID,
-			"isPod":       ci.IsPod,
-		})
-		err = func() (retE error) {
-			containerLog := log.G(ctx).WithField("container-id", ci.ID)
-			retE = l.runContainer(param.ctxTmp, sandBox, param.ci, param.cOpts, ociRuntime)
-			withOciSpec := log.IsDebug() || retE != nil
-			if ci.Container != nil && withOciSpec {
-				info, err := ci.Container.Info(ctx, containerd.WithoutRefreshedMetadata)
-				if err == nil {
-					v, err := typeurl.UnmarshalAny(info.Spec)
-					if err != nil {
-						return fmt.Errorf("failed to unmarshal container spec with url %s: %w", info.Spec.GetTypeUrl(), err)
-					}
-					jsonstr := log.WithJsonValue(struct {
-						containers.Container
-						Spec interface{} `json:"Spec,omitempty"`
-					}{
-						Container: info,
-						Spec:      v,
-					})
-					containerLog.Debugf("container-oci-spec: %s", jsonstr)
-				}
+	if err := func() error {
+		sandBox.Lock()
+		defer func() {
+			if err := l.cubeboxManger.Save(ctx, sandBox); err != nil {
+				log.G(ctx).Warnf("saveSandBoxInfo failed.%s", err.Error())
 			}
-			if retE != nil {
-				containerLog.Errorf("run container failed.%s", retE.Error())
-			} else {
-				containerLog.Debug("run container success")
-			}
-			return retE
+			sandBox.Unlock()
 		}()
-		if err != nil {
-			return fmt.Errorf("failed to run container %s: %w", param.ci.ID, err)
+
+		for _, param := range params {
+			ci := param.ci
+			containerLog := sanboxlog.WithFields(CubeLog.Fields{
+				"containerID": ci.ID,
+				"isPod":       ci.IsPod,
+			})
+			err = func() (retE error) {
+				containerLog := log.G(ctx).WithField("container-id", ci.ID)
+				retE = l.runContainer(param.ctxTmp, sandBox, param.ci, param.cOpts, ociRuntime)
+				withOciSpec := log.IsDebug() || retE != nil
+				if ci.Container != nil && withOciSpec {
+					info, err := ci.Container.Info(ctx, containerd.WithoutRefreshedMetadata)
+					if err == nil {
+						v, err := typeurl.UnmarshalAny(info.Spec)
+						if err != nil {
+							return fmt.Errorf("failed to unmarshal container spec with url %s: %w", info.Spec.GetTypeUrl(), err)
+						}
+						jsonstr := log.WithJsonValue(struct {
+							containers.Container
+							Spec interface{} `json:"Spec,omitempty"`
+						}{
+							Container: info,
+							Spec:      v,
+						})
+						containerLog.Debugf("container-oci-spec: %s", jsonstr)
+					}
+				}
+				if retE != nil {
+					containerLog.Errorf("run container failed.%s", retE.Error())
+				} else {
+					containerLog.Debug("run container success")
+				}
+				return retE
+			}()
+			if err != nil {
+				return fmt.Errorf("failed to run container %s: %w", param.ci.ID, err)
+			}
+			if err := l.doProbe(param.ctxTmp, param.cntrReq, param.ci); err != nil {
+				return err
+			}
+			err = l.cbriManager.PostCreateContainer(ctx, sandBox, param.ci)
+			if err != nil {
+				containerLog.Errorf("post create container failed, err: %v", err)
+			}
 		}
-		if err := l.doProbe(param.ctxTmp, param.cntrReq, param.ci); err != nil {
-			return err
+		return nil
+	}(); err != nil {
+		return err
+	}
+
+	if err := l.doCreateTimeEnvdInit(ctx, realReq, sandBox); err != nil {
+		cleanupErr := l.cleanupAfterEnvdInitFailure(flowOpts, realReq, sandBox)
+		if cleanupErr == nil {
+			// The sandbox has already been torn down synchronously, so the outer
+			// workflow failover does not need to repeat the same destroy path.
+			flowOpts.Failover = false
+		} else {
+			sanboxlog.Errorf("cleanup sandbox after envd init failure failed: %v", cleanupErr)
 		}
-		err = l.cbriManager.PostCreateContainer(ctx, sandBox, param.ci)
-		if err != nil {
-			containerLog.Errorf("post create container failed, err: %v", err)
-		}
+		return err
 	}
 
 	pid := sandBox.Endpoint.Pid
@@ -355,6 +373,38 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}
 
 	return nil
+}
+
+func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,
+	realReq *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) error {
+	// CubeMaster already compensates create failures on the main path, but
+	// cubelet workflow failover skips PreConditionFailed and runtime-local
+	// callers still benefit from immediate teardown close to the runtime.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), envdInitCleanupTimeout)
+	defer cancel()
+	if sandBox.Namespace != "" {
+		cleanupCtx = namespaces.WithNamespace(cleanupCtx, sandBox.Namespace)
+	}
+	cleanupCtx = constants.WithFailoverOperation(cleanupCtx)
+	if flowOpts.CubeBoxCreated {
+		cleanupCtx = constants.WithCubeboxCreated(cleanupCtx)
+	}
+	return l.destroySandboxAfterEnvdInitFailure(cleanupCtx, &workflow.DestroyContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{
+			SandboxID: sandBox.ID,
+		},
+		DestroyInfo: &cubebox.DestroyCubeSandboxRequest{
+			RequestID: realReq.RequestID,
+			SandboxID: sandBox.ID,
+		},
+	})
+}
+
+func (l *local) destroySandboxAfterEnvdInitFailure(ctx context.Context, opts *workflow.DestroyContext) error {
+	if l != nil && l.destroyFn != nil {
+		return l.destroyFn(ctx, opts)
+	}
+	return l.Destroy(ctx, opts)
 }
 
 func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox, flowOpts *workflow.CreateContext) ([]oci.SpecOpts, error) {

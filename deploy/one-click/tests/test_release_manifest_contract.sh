@@ -31,7 +31,7 @@ EOF
   "guest_image": {},
   "kernel": {
     "version": "6.6.119-49.6",
-    "pvm_version": "6.6.69-1.cubesandbox",
+    "pvm_version": "6.6.69-1.2.cubesandbox",
     "vmlinux_digest_sha256": "sha256:ordinary",
     "vmlinux_pvm_digest_sha256": "sha256:pvm"
   }
@@ -61,7 +61,7 @@ ordinary_identity = kernel_identity(kernel["version"], kernel["vmlinux_digest_sh
 pvm_identity = kernel_identity(kernel["pvm_version"], kernel["vmlinux_pvm_digest_sha256"])
 if ordinary_identity != "6.6.119-49.6@sha256:ordinary":
     raise SystemExit(f"unexpected ordinary kernel identity: {ordinary_identity}")
-if pvm_identity != "6.6.69-1.cubesandbox@sha256:pvm":
+if pvm_identity != "6.6.69-1.2.cubesandbox@sha256:pvm":
     raise SystemExit(f"unexpected PVM kernel identity: {pvm_identity}")
 if kernel_identity("unknown", "sha256:fallback") != "sha256:fallback":
     raise SystemExit("kernel identity must use digest when tag is unknown")

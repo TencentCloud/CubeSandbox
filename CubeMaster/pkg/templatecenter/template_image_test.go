@@ -578,6 +578,91 @@ func TestGenerateTemplateCreateRequestAppliesDNSConfigOverride(t *testing.T) {
 	}
 }
 
+func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
+	allowInternetAccess := false
+	sni := "sni.example.com"
+	host := "api.example.com"
+	path := "/v1"
+	scheme := "https"
+	audit := "log-only"
+	format := "bearer %s"
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-1",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		CubeNetworkConfig: &types.CubeNetworkConfig{
+			AllowInternetAccess: &allowInternetAccess,
+			Rules: []*types.EgressRule{{
+				Name: "allow-api",
+				Match: &types.EgressRuleMatch{
+					SNI:    &sni,
+					Host:   &host,
+					Method: []string{"GET"},
+					Path:   &path,
+					Scheme: &scheme,
+				},
+				Action: &types.EgressRuleAction{
+					Allow: true,
+					Audit: &audit,
+					Inject: []*types.EgressRuleInject{{
+						Header: "Authorization",
+						Secret: "secret-id",
+						Format: &format,
+					}},
+				},
+			}},
+		},
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-1",
+		TemplateSpecFingerprint: "fingerprint-1",
+		Ext4SHA256:              "sha256-1",
+		Ext4SizeBytes:           1024,
+		DownloadToken:           "token-1",
+	}
+
+	got, err := generateTemplateCreateRequest(req, artifact, image.DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	if got.CubeNetworkConfig == nil {
+		t.Fatal("expected CubeNetworkConfig to be propagated")
+	}
+	if len(got.CubeNetworkConfig.Rules) != 1 {
+		t.Fatalf("expected 1 egress rule, got %d", len(got.CubeNetworkConfig.Rules))
+	}
+	if got.CubeNetworkConfig.Rules[0] == req.CubeNetworkConfig.Rules[0] {
+		t.Fatal("expected egress rule to be cloned, got shared pointer")
+	}
+	if got.CubeNetworkConfig.Rules[0].Match == nil || got.CubeNetworkConfig.Rules[0].Match.Host == nil || *got.CubeNetworkConfig.Rules[0].Match.Host != "api.example.com" {
+		t.Fatalf("unexpected cloned egress rule: %+v", got.CubeNetworkConfig.Rules[0])
+	}
+	if got.CubeNetworkConfig.Rules[0].Match == req.CubeNetworkConfig.Rules[0].Match {
+		t.Fatal("expected egress rule match to be cloned, got shared pointer")
+	}
+	if got.CubeNetworkConfig.Rules[0].Match.SNI == req.CubeNetworkConfig.Rules[0].Match.SNI ||
+		got.CubeNetworkConfig.Rules[0].Match.Host == req.CubeNetworkConfig.Rules[0].Match.Host ||
+		got.CubeNetworkConfig.Rules[0].Match.Path == req.CubeNetworkConfig.Rules[0].Match.Path ||
+		got.CubeNetworkConfig.Rules[0].Match.Scheme == req.CubeNetworkConfig.Rules[0].Match.Scheme {
+		t.Fatal("expected egress rule match string pointers to be deep-cloned")
+	}
+	if got.CubeNetworkConfig.Rules[0].Action == nil || got.CubeNetworkConfig.Rules[0].Action == req.CubeNetworkConfig.Rules[0].Action {
+		t.Fatal("expected egress rule action to be cloned")
+	}
+	if got.CubeNetworkConfig.Rules[0].Action.Audit == req.CubeNetworkConfig.Rules[0].Action.Audit {
+		t.Fatal("expected egress rule audit pointer to be deep-cloned")
+	}
+	if len(got.CubeNetworkConfig.Rules[0].Action.Inject) != 1 || got.CubeNetworkConfig.Rules[0].Action.Inject[0] == req.CubeNetworkConfig.Rules[0].Action.Inject[0] {
+		t.Fatal("expected egress rule inject entries to be cloned")
+	}
+	if got.CubeNetworkConfig.Rules[0].Action.Inject[0].Format == req.CubeNetworkConfig.Rules[0].Action.Inject[0].Format {
+		t.Fatal("expected egress rule inject format pointer to be deep-cloned")
+	}
+}
+
 func TestMarshalTemplateImageJobRequestIgnoresRequestIDAndPassword(t *testing.T) {
 	reqA := &types.CreateTemplateFromImageReq{
 		Request:            &types.Request{RequestID: "req-a"},
@@ -763,6 +848,35 @@ func TestFormatUTCRFC3339(t *testing.T) {
 	}
 }
 
+func TestTemplateInfoFromJobIncludesLatestJobID(t *testing.T) {
+	info := templateInfoFromJob(&models.TemplateImageJob{
+		TemplateID: "tpl-a",
+		JobID:      "job-build-1",
+		Status:     JobStatusRunning,
+	})
+	if info.JobID != "job-build-1" {
+		t.Fatalf("expected running job id, got %q", info.JobID)
+	}
+
+	done := templateInfoFromJob(&models.TemplateImageJob{
+		TemplateID: "tpl-b",
+		JobID:      "job-done-1",
+		Status:     JobStatusReady,
+	})
+	if done.JobID != "job-done-1" {
+		t.Fatalf("expected terminal job id, got %q", done.JobID)
+	}
+
+	failed := templateInfoFromJob(&models.TemplateImageJob{
+		TemplateID: "tpl-c",
+		JobID:      "job-failed-1",
+		Status:     JobStatusFailed,
+	})
+	if failed.JobID != "job-failed-1" {
+		t.Fatalf("expected failed job id, got %q", failed.JobID)
+	}
+}
+
 func TestTemplateInfoFromJobPrefersTemplateStatus(t *testing.T) {
 	info := templateInfoFromJob(&models.TemplateImageJob{
 		TemplateID:     "tpl-a",
@@ -872,48 +986,38 @@ func TestCleanupLocalRootfsArtifactRemovesManagedDirectory(t *testing.T) {
 	}
 }
 
-func TestCleanupFailedRootfsArtifactKeepsMetadataOnCleanupFailure(t *testing.T) {
+func TestCleanupFailedRootfsArtifactDelegatesToLastOwnerCleanup(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
-	distributionErr := errors.New("delete image on node-a failed")
-	updateCalled := false
-	deleteCalled := false
-
-	patches.ApplyFunc(cleanupDistributedArtifact, func(ctx context.Context, artifactID, instanceType string) error {
-		return distributionErr
-	})
-	patches.ApplyFunc(cleanupLocalRootfsArtifact, func(artifactID, ext4Path string) error {
-		return nil
-	})
-	patches.ApplyFunc(deleteRootfsArtifactRecord, func(ctx context.Context, artifactID string) error {
-		deleteCalled = true
-		return nil
-	})
-	patches.ApplyFunc(updateRootfsArtifact, func(ctx context.Context, artifactID string, values map[string]any) error {
-		updateCalled = true
-		if values["status"] != ArtifactStatusFailed {
-			t.Fatalf("unexpected status update: %+v", values)
-		}
-		lastError, _ := values["last_error"].(string)
-		if !strings.Contains(lastError, distributionErr.Error()) {
-			t.Fatalf("last_error=%q does not contain cleanup error", lastError)
-		}
+	var (
+		gotArtifactID   string
+		gotInstanceType string
+		gotExclude      string
+	)
+	patches.ApplyFunc(cleanupArtifactFully, func(ctx context.Context, artifactID, instanceType, excludeTemplateID string) error {
+		gotArtifactID = artifactID
+		gotInstanceType = instanceType
+		gotExclude = excludeTemplateID
 		return nil
 	})
 
-	err := cleanupFailedRootfsArtifact(context.Background(), &models.RootfsArtifact{
+	if err := cleanupFailedRootfsArtifact(context.Background(), &models.RootfsArtifact{
 		ArtifactID: "artifact-1",
 		Ext4Path:   filepath.Join(t.TempDir(), "artifact-1", "artifact-1.ext4"),
-	}, cubeboxv1.InstanceType_cubebox.String())
-	if !errors.Is(err, distributionErr) {
-		t.Fatalf("expected distribution cleanup error, got %v", err)
+	}, cubeboxv1.InstanceType_cubebox.String(), "tpl-owner"); err != nil {
+		t.Fatalf("cleanupFailedRootfsArtifact returned error: %v", err)
 	}
-	if deleteCalled {
-		t.Fatal("rootfs artifact record should not be deleted when cleanup fails")
+	if gotArtifactID != "artifact-1" {
+		t.Fatalf("artifactID not forwarded, got %q", gotArtifactID)
 	}
-	if !updateCalled {
-		t.Fatal("rootfs artifact record should be marked failed when cleanup is incomplete")
+	if gotInstanceType != cubeboxv1.InstanceType_cubebox.String() {
+		t.Fatalf("instanceType not forwarded, got %q", gotInstanceType)
+	}
+	// The build's own template must be excluded so its in-flight job/definition
+	// does not pin the artifact and block its own failure cleanup.
+	if gotExclude != "tpl-owner" {
+		t.Fatalf("expected own template excluded, got %q", gotExclude)
 	}
 }
 
@@ -1177,7 +1281,7 @@ func TestRunRedoTemplateImageJobStopsOnArtifactCleanupFailure(t *testing.T) {
 			GeneratedRequestJSON: string(generatedReqPayload),
 		}, nil
 	})
-	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID string, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
 		return errors.New("cleanup image failed")
 	})
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {

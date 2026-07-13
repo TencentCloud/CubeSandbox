@@ -1019,6 +1019,11 @@ components:
           - 'null'
           description: Whether public internet access is allowed for sandboxes from this template.
         createRequest: {}
+        jobID:
+          type:
+          - string
+          - 'null'
+          description: Latest create/rebuild job id for the template.
         instanceType:
           type:
           - string
@@ -1112,6 +1117,11 @@ components:
           type:
           - string
           - 'null'
+        jobID:
+          type:
+          - string
+          - 'null'
+          description: Latest create/rebuild job id for the template.
     VersionMatrixView:
       type: object
       description: Full node x component version matrix.

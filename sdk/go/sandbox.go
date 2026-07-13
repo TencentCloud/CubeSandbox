@@ -13,7 +13,14 @@ import (
 	"time"
 )
 
-const JupyterPort = 49999
+// JupyterPort hosts the code-interpreter (`/execute`), while EnvdPort hosts the
+// envd data-plane RPCs (commands, files, filesystem, pty). They mirror the
+// Python/Node SDKs (JUPYTER_PORT=49999, ENVD_PORT=49983); routing an envd RPC
+// to JupyterPort returns 404.
+const (
+	JupyterPort = 49999
+	EnvdPort    = 49983
+)
 
 func (s *Sandbox) GetHost(port int) string {
 	domain := s.Domain
@@ -89,17 +96,42 @@ func (s *Sandbox) Pause(ctx context.Context, opts PauseOptions) error {
 //
 // Deprecated: use Client.Connect instead, which auto-resumes paused sandboxes
 // and returns a fresh Sandbox instance.
-func (s *Sandbox) Resume(ctx context.Context, timeout time.Duration) error {
+// The timeout is optional; nil omits it. See docs/guide/lifecycle.md.
+func (s *Sandbox) Resume(ctx context.Context, timeout *time.Duration) error {
 	if err := s.ensureClient(); err != nil {
 		return err
 	}
-	if timeout <= 0 {
-		timeout = s.client.config.Timeout
-	}
 
 	path := "/sandboxes/" + url.PathEscape(s.SandboxID) + "/resume"
-	payload := map[string]any{"timeout": durationSeconds(timeout)}
+	payload := map[string]any{}
+	if timeout != nil {
+		payload["timeout"] = timeoutPayloadSeconds(*timeout)
+	}
 	return s.client.doJSON(ctx, http.MethodPost, path, payload, nil, http.StatusOK, http.StatusCreated, http.StatusNoContent)
+}
+
+// SetTimeout updates the sandbox idle timeout (POST /sandboxes/:id/timeout).
+//
+// Positive values set a new TTL in seconds. Zero requests immediate expiry.
+// NeverTimeout (-1) disables idle timeout entirely. Sub-second durations are
+// rounded up because the wire protocol uses integer seconds. Values other
+// than NeverTimeout that are < 0 are rejected with a descriptive error.
+//
+// Errors wrap ErrSandboxNotFound (404) or an *APIError for other HTTP errors.
+//
+// See docs/guide/lifecycle.md for timeout semantics.
+func (s *Sandbox) SetTimeout(ctx context.Context, timeout time.Duration) error {
+	if err := s.ensureClient(); err != nil {
+		return err
+	}
+	if timeout < 0 && timeout != NeverTimeout {
+		return fmt.Errorf("cubesandbox: timeout must be >= 0 or NeverTimeout (-1), got %v", timeout)
+	}
+
+	seconds := timeoutPayloadSeconds(timeout)
+	path := "/sandboxes/" + url.PathEscape(s.SandboxID) + "/timeout"
+	payload := map[string]any{"timeout": seconds}
+	return s.client.doJSON(ctx, http.MethodPost, path, payload, nil, http.StatusNoContent)
 }
 
 func (s *Sandbox) Kill(ctx context.Context) error {
@@ -179,7 +211,7 @@ func (s *Sandbox) Commands() *Commands {
 }
 
 func (s *Sandbox) Files() *Files {
-	return &Files{reader: s, writer: s}
+	return &Files{reader: s, writer: s, filer: s}
 }
 
 func (s *Sandbox) ensureClient() error {

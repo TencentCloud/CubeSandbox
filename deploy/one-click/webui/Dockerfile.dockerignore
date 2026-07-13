@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for the multi-stage webui/Dockerfile, whose context is the
+# repository root. With BuildKit (DOCKER_BUILDKIT=1) this "<Dockerfile>.dockerignore"
+# takes precedence over the repo-root .dockerignore, which is an allowlist tailored
+# to docker/Dockerfile.builder ("**" plus only docker/) and would otherwise filter
+# out web/ and deploy/, breaking the build-context COPYs in webui/Dockerfile.
+#
+# Patterns are relative to the build context (the repository root). Ignore
+# everything, then re-include only what the build actually needs.
+**
+
+# Frontend source compiled by the builder stage.
+!web
+!web/**
+
+# ...but never the host build artifacts: node_modules is ~180 MB, which bloats the
+# context, busts the npm ci layer cache, and would overlay wrong-arch (host/glibc)
+# binaries onto the node:alpine (musl) builder.
+web/node_modules
+web/node_modules/**
+web/dist
+web/dist/**
+web/.vite
+web/.vite/**
+
+# Defense-in-depth: keep local env/secret files out of the context even if they
+# appear under web/ later (the build only promotes /app/dist to the final image,
+# but this avoids uploading them to the daemon at all).
+web/.env
+web/.env.*
+web/**/*.pem
+web/**/*.key
+
+# Only the nginx config baked into the runtime stage — not the rest of deploy/,
+# which is ~2 GB.
+!deploy/one-click/webui/nginx.conf

@@ -27,9 +27,36 @@ import (
 )
 
 const (
-	snapshotRequestLockPrefix = "snapshot-request:"
-	snapshotIDPrefix          = "snap-"
+	snapshotRequestLockPrefix  = "snapshot-request:"
+	snapshotSandboxLockPrefix  = "snapshot-sandbox:"
+	snapshotResourceLockPrefix = "snapshot-resource:"
+	snapshotIDPrefix           = "snap-"
 )
+
+func snapshotRequestLockKey(requestID string) string {
+	return snapshotRequestLockPrefix + strings.TrimSpace(requestID)
+}
+
+func snapshotSandboxLockKey(sandboxID string) string {
+	return snapshotSandboxLockPrefix + strings.TrimSpace(sandboxID)
+}
+
+func snapshotResourceLockKey(snapshotID string) string {
+	return snapshotResourceLockPrefix + strings.TrimSpace(snapshotID)
+}
+
+func withSnapshotWriteLocks(keys []string, fn func() error) error {
+	if len(keys) == 0 {
+		return fn()
+	}
+	key := strings.TrimSpace(keys[0])
+	if key == "" {
+		return withSnapshotWriteLocks(keys[1:], fn)
+	}
+	return withTemplateWriteLock(key, func() error {
+		return withSnapshotWriteLocks(keys[1:], fn)
+	})
+}
 
 // snapshotCreateJobRequest is the WAL payload for an in-flight snapshot-create
 // operation. Note: the canonical create-request is no longer carried inside the
@@ -105,10 +132,12 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	if err != nil {
 		return nil, err
 	}
-	lockKey := snapshotRequestLockPrefix + requestID
 	var jobID string
 	reusedExistingJob := false
-	if err := withTemplateWriteLock(lockKey, func() error {
+	if err := withSnapshotWriteLocks([]string{
+		snapshotSandboxLockKey(sandboxID),
+		snapshotRequestLockKey(requestID),
+	}, func() error {
 		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
 			if existing.Operation != JobOperationSnapshotCreate {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
@@ -322,6 +351,13 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	}); err != nil {
 		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err)
 	}
+	// Commit yields a single authoritative envd version; persist it (best-effort)
+	// to the snapshot definition annotation so created sandboxes inherit it.
+	if envdVersion := sanitizeEnvdVersion(commitRsp.GetEnvdVersion()); envdVersion != "" {
+		if err := persistTemplateEnvdVersion(ctx, snapshotID, envdVersion); err != nil {
+			logger.Warnf("persist snapshot envd version fail, snapshot=%s err=%v", snapshotID, err)
+		}
+	}
 	resultPayload, _ := json.Marshal(map[string]any{
 		"snapshot_path":     snapshotPath,
 		"rootfs_vol":        commitRsp.GetRootfsVol(),
@@ -358,7 +394,6 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 	if strings.TrimSpace(requestID) == "" {
 		return nil, errors.New("requestID is required")
 	}
-	lockKey := snapshotRequestLockPrefix + requestID
 	var jobID string
 	reusedExistingJob := false
 	var existingRequest snapshotRollbackJobRequest
@@ -367,7 +402,11 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 	var replica ReplicaStatus
 	var nodeID string
 	var nodeIP string
-	if err := withTemplateWriteLock(lockKey, func() error {
+	if err := withSnapshotWriteLocks([]string{
+		snapshotSandboxLockKey(sandboxID),
+		snapshotResourceLockKey(snapshotID),
+		snapshotRequestLockKey(requestID),
+	}, func() error {
 		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
 			if existing.Operation != JobOperationSnapshotRollback {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
@@ -575,11 +614,13 @@ func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType str
 	if strings.TrimSpace(requestID) == "" {
 		return nil, errors.New("requestID is required")
 	}
-	lockKey := snapshotRequestLockPrefix + requestID
 	var jobID string
 	reusedExistingJob := false
 	var existingRequest snapshotDeleteJobRequest
-	if err := withTemplateWriteLock(lockKey, func() error {
+	if err := withSnapshotWriteLocks([]string{
+		snapshotResourceLockKey(snapshotID),
+		snapshotRequestLockKey(requestID),
+	}, func() error {
 		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
 			if existing.Operation != JobOperationSnapshotDelete {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
@@ -630,9 +671,9 @@ func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType str
 			}
 		}
 		if activeRefs, err := ListActiveSnapshotRuntimeRefs(ctx, snapshotID); err != nil {
-			log.G(ctx).Warnf("snapshot %s runtime-ref precheck failed (continuing with delete): %v", snapshotID, err)
+			return err
 		} else if len(activeRefs) > 0 {
-			log.G(ctx).Warnf("snapshot %s still has %d active runtime ref(s): %s; proceeding with delete", snapshotID, len(activeRefs), formatSnapshotRuntimeRefConsumers(activeRefs))
+			return fmt.Errorf("%w: snapshot %s still has %d active runtime ref(s): %s", ErrTemplateAttemptInProgress, snapshotID, len(activeRefs), formatSnapshotRuntimeRefConsumers(activeRefs))
 		}
 		attemptNo, retryOfJobID, err := nextSnapshotAttempt(ctx, snapshotID)
 		if err != nil {
@@ -708,16 +749,13 @@ func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 	if err := runReplicaCleanup(ctx, snapshotID, locators); err != nil {
 		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
 	}
-	if err := deleteSnapshotMetadataOnly(ctx, snapshotID); err != nil {
+	if err := runMetadataCleanup(ctx, snapshotID); err != nil {
 		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
 	}
 	invalidateTemplateCaches(snapshotID)
-	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
-		"status":      JobStatusReady,
-		"phase":       JobPhaseReady,
-		"progress":    100,
-		"result_json": `{"deleted":true}`,
-	}); err != nil {
+	// Mirror template delete: drop job rows so ListTemplates does not
+	// resurrect the snapshot from orphan job fallback entries.
+	if err := runTemplateJobCleanup(ctx, snapshotID); err != nil {
 		return err
 	}
 	success = true
@@ -1005,6 +1043,24 @@ func deleteSnapshotMetadataOnly(ctx context.Context, snapshotID string) error {
 	return cleanupTemplateMetadata(ctx, snapshotID)
 }
 
+func rootfsArtifactIDFromCreateRequest(req *sandboxtypes.CreateCubeSandboxReq) string {
+	if req == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(req.Annotations[constants.CubeAnnotationRootfsArtifactID]); id != "" {
+		return id
+	}
+	for _, container := range req.Containers {
+		if container == nil || container.Image == nil {
+			continue
+		}
+		if id := strings.TrimSpace(container.Image.Annotations[constants.CubeAnnotationRootfsArtifactID]); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
 func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
 	payload, err := json.Marshal(storedReq)
 	if err != nil {
@@ -1030,6 +1086,7 @@ func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, sto
 		StorageBackend:            opts.StorageBackend,
 		Retain:                    opts.Retain,
 		RootfsSizeBytesAtSnapshot: opts.RootfsSizeBytesAtSnapshot,
+		RootfsArtifactID:          rootfsArtifactIDFromCreateRequest(storedReq),
 		RequestJSON:               string(payload),
 	}
 	if kind == TemplateKindSnapshot && model.StorageBackend == "" {
@@ -1255,7 +1312,13 @@ func executeSnapshotDeleteJob(ctx context.Context, info *sandboxtypes.TemplateIm
 	if err := runSnapshotDeleteJob(jobCtx, info.JobID, snapshotID); err != nil {
 		return nil, err
 	}
-	return finalizeSnapshotJobByID(ctx, info.JobID)
+	// runSnapshotDeleteJob removes job rows on success; return a terminal
+	// READY view without re-querying the deleted job record.
+	result := cloneTemplateImageJobInfo(info)
+	result.Status = JobStatusReady
+	result.Phase = JobPhaseReady
+	result.Progress = 100
+	return result, nil
 }
 
 func resolveExistingSnapshotJobByID(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {

@@ -41,8 +41,8 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         env:
             ANTHROPIC_BASE_URL: https://tokenhub.tencentmaas.com
-            ANTHROPIC_MODEL: deepseek-v4-flash
-            ANTHROPIC_SMALL_FAST_MODEL: deepseek-v4-flash
+            ANTHROPIC_MODEL: deepseek-v4-flash-202605
+            ANTHROPIC_SMALL_FAST_MODEL: deepseek-v4-flash-202605
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}

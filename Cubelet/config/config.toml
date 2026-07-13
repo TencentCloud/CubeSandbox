@@ -38,7 +38,7 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
   [plugins."io.cubelet.controller.config.v1.cubelet"]
     # Static-only cadence for node status and resource reporting.
     # Do not configure this in dynamicconf/conf.yaml.
-    node_status_update_frequency = "10s"
+    node_status_update_frequency = "1s"
 
   [plugins."io.cubelet.internal.v1.volume"]
   [plugins."io.cubelet.internal.v1.shimlog"]
@@ -71,6 +71,8 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     mvm_gw_mac_addr = "20:90:6f:cf:cf:cf"
     mvm_gw_dest_ip = "169.254.68.5"
     mvm_mtu = 1500
+    cube_router_enable = false
+    cube_router_cidr = ""
     # metric
     check_interval_in_sec = "5s"
     report_stat_interval_in_sec = "60s"
@@ -176,7 +178,9 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
   [plugins."io.containerd.monitor.v1.cgroups"]
     no_prometheus = false
   [plugins."io.containerd.runtime.v2.task"]
-    platforms = ["linux/amd64"]
+    # Declare both platforms so the same config runs on amd64 and arm64 hosts;
+    # containerd matches image manifests against the host's native platform.
+    platforms = ["linux/amd64", "linux/arm64"]
     sched_core = false
   [plugins."io.cubelet.chi.v1.vsocket-manager"]
     proxyPort = 1032

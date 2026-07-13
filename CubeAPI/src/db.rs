@@ -377,32 +377,6 @@ WHERE agent_id = ? AND deleted_at IS NULL
         self.get_instance(agent_id).await
     }
 
-    pub async fn update_model(
-        &self,
-        agent_id: &str,
-        model: &str,
-        setup: &AgentSetupResult,
-    ) -> anyhow::Result<Option<AgentHubInstanceRecord>> {
-        let last_error = (!setup.stderr.trim().is_empty()).then(|| setup.stderr.clone());
-        sqlx::query(
-            r#"
-UPDATE t_agenthub_instance
-SET model = ?,
-    setup_exit_code = ?,
-    last_error = ?
-WHERE agent_id = ? AND deleted_at IS NULL
-"#,
-        )
-        .bind(model)
-        .bind(setup.exit_code)
-        .bind(last_error)
-        .bind(agent_id)
-        .execute(&self.pool)
-        .await?;
-
-        self.get_instance(agent_id).await
-    }
-
     pub async fn update_status(
         &self,
         agent_id: &str,
@@ -809,6 +783,50 @@ LIMIT 1
         })
         .transpose()
         .map_err(anyhow::Error::from)
+    }
+
+    pub async fn find_template_ids_by_template_or_source_snapshot(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query(
+            r#"
+SELECT template_id
+FROM t_agenthub_template
+WHERE deleted_at IS NULL
+  AND (template_id = ? OR source_snapshot_id = ?)
+"#,
+        )
+        .bind(id)
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| row.try_get("template_id").map_err(anyhow::Error::from))
+            .collect()
+    }
+
+    pub async fn snapshot_has_other_live_template_refs(
+        &self,
+        snapshot_id: &str,
+        exclude_template_id: &str,
+    ) -> anyhow::Result<bool> {
+        let row = sqlx::query(
+            r#"
+SELECT 1
+FROM t_agenthub_template
+WHERE deleted_at IS NULL
+  AND source_snapshot_id = ?
+  AND template_id <> ?
+LIMIT 1
+"#,
+        )
+        .bind(snapshot_id)
+        .bind(exclude_template_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
     }
 
     pub async fn soft_delete_snapshot(

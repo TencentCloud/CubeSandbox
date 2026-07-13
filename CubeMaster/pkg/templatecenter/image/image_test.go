@@ -266,8 +266,8 @@ func TestExportImageRootfsUsesDockerlessSkopeoUmociWhenAvailable(t *testing.T) {
 	})
 
 	source := &PreparedSource{
-		LocalRef:      "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:v1.2.3",
-		UseDockerless: true,
+		LocalRef:   "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:v1.2.3",
+		ExportMode: ExportModeDockerless,
 	}
 	if err := exportImageRootfs(context.Background(), source, rootfsDir); err != nil {
 		t.Fatalf("exportImageRootfs failed: %v", err)
@@ -289,11 +289,11 @@ func TestExportImageRootfsUsesDockerlessSkopeoUmociWhenAvailable(t *testing.T) {
 	}
 	wantUmociArgs := []string{
 		"unpack",
-		"--rootless",
-		"--image",
-		ociDir + ":v1.2.3",
-		filepath.Join(filepath.Dir(ociDir), "bundle"),
 	}
+	if os.Geteuid() != 0 {
+		wantUmociArgs = append(wantUmociArgs, "--rootless")
+	}
+	wantUmociArgs = append(wantUmociArgs, "--image", ociDir+":v1.2.3", filepath.Join(filepath.Dir(ociDir), "bundle"))
 	if calls[1].name != "umoci" || !reflect.DeepEqual(calls[1].args, wantUmociArgs) {
 		t.Fatalf("unexpected umoci call: %#v", calls[1])
 	}
@@ -319,9 +319,9 @@ func TestExportImageRootfsUsesDockerPathWhenSourceNotDockerless(t *testing.T) {
 		return nil
 	})
 
-	// useDockerless is false, so the export must honor the docker path chosen at
+	// ExportMode: ExportModeDocker, so the export must honor the docker path chosen at
 	// prepare time even if skopeo/umoci happen to be installed.
-	if err := exportImageRootfs(context.Background(), &PreparedSource{LocalRef: "example.com/app:latest"}, t.TempDir()); err != nil {
+	if err := exportImageRootfs(context.Background(), &PreparedSource{LocalRef: "example.com/app:latest", ExportMode: ExportModeDocker}, t.TempDir()); err != nil {
 		t.Fatalf("exportImageRootfs failed: %v", err)
 	}
 	if !dockerExportCalled {
@@ -357,7 +357,7 @@ func TestExportImageRootfsPassesAuthFileToSkopeoCopy(t *testing.T) {
 
 	source := &PreparedSource{
 		LocalRef:       "example.com/app:latest",
-		UseDockerless:  true,
+		ExportMode:     ExportModeDockerless,
 		SkopeoAuthFile: "/tmp/auth-xyz/auth.json",
 	}
 	if err := exportImageRootfs(context.Background(), source, rootfsDir); err != nil {
@@ -546,7 +546,7 @@ func TestEstimateImageSizeFromInspectDockerlessUsesSkopeoSize(t *testing.T) {
 
 	source := &PreparedSource{
 		LocalRef:            "example.com/app:latest",
-		UseDockerless:       true,
+		ExportMode:          ExportModeDockerless,
 		CompressedSizeBytes: 1000,
 	}
 	got, err := estimateImageSizeFromInspect(context.Background(), source)
@@ -560,8 +560,8 @@ func TestEstimateImageSizeFromInspectDockerlessUsesSkopeoSize(t *testing.T) {
 
 func TestEstimateImageSizeFromInspectDockerlessMissingSize(t *testing.T) {
 	source := &PreparedSource{
-		LocalRef:      "example.com/app:latest",
-		UseDockerless: true,
+		LocalRef:   "example.com/app:latest",
+		ExportMode: ExportModeDockerless,
 	}
 	if _, err := estimateImageSizeFromInspect(context.Background(), source); err == nil {
 		t.Fatal("expected error when skopeo reports no layer sizes")
@@ -855,7 +855,7 @@ func TestBuildExt4StreamingSuccessSkipsPhase1(t *testing.T) {
 		return nil
 	})
 	streamingCalled := false
-	patches.ApplyFunc(createExt4ImageStreaming, func(ctx context.Context, source *PreparedSource, workDir, ext4Path string, estimatedSizeBytes int64) error {
+	patches.ApplyFunc(createExt4ImageStreaming, func(ctx context.Context, source *PreparedSource, workDir, ext4Path string, estimatedSizeBytes int64, postExport func(context.Context, string) error) error {
 		streamingCalled = true
 		if err := os.MkdirAll(workDir, 0o755); err != nil {
 			return err
@@ -877,7 +877,7 @@ func TestBuildExt4StreamingSuccessSkipsPhase1(t *testing.T) {
 		return nil
 	})
 
-	result, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest"}, BuildOptions{ArtifactID: "artifact-stream"})
+	result, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest", ExportMode: ExportModeNative}, BuildOptions{ArtifactID: "artifact-stream"})
 	if err != nil {
 		t.Fatalf("BuildExt4 failed: %v", err)
 	}
@@ -889,6 +889,65 @@ func TestBuildExt4StreamingSuccessSkipsPhase1(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workRoot, "artifact-stream")); !os.IsNotExist(err) {
 		t.Fatalf("workDir should be removed after streaming success, stat err=%v", err)
+	}
+}
+
+func TestBuildExt4StreamingWithPostExport(t *testing.T) {
+	workRoot := t.TempDir()
+	storeRoot := t.TempDir()
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_DIR", workRoot)
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", storeRoot)
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFuncReturn(loopMountExt4Enabled, true)
+	patches.ApplyFuncReturn(canUseLoopMount, true)
+	patches.ApplyFuncReturn(estimateImageSizeFromInspect, int64(1024), nil)
+	patches.ApplyFuncReturn(checkDiskSpace, nil)
+	postExportCalled := false
+	streamingCalled := false
+	patches.ApplyFunc(createExt4ImageStreaming, func(ctx context.Context, source *PreparedSource, workDir, ext4Path string, estimatedSizeBytes int64, postExport func(context.Context, string) error) error {
+		streamingCalled = true
+		if postExport != nil {
+			_ = postExport(ctx, workDir)
+		}
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(ext4Path), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(ext4Path, []byte("streaming-post"), 0o644)
+	})
+	patches.ApplyFunc(computeFileSHA256, func(path string) (string, int64, error) {
+		return "sha-streaming-post", 14, nil
+	})
+	patches.ApplyFunc(exportImageRootfs, func(ctx context.Context, source *PreparedSource, destRootfsDir string) error {
+		t.Fatal("phase-1 export should not run after streaming success")
+		return nil
+	})
+	patches.ApplyFunc(createExt4Image, func(ctx context.Context, rootfsDir, ext4Path string) error {
+		t.Fatal("phase-1 ext4 creation should not run after streaming success")
+		return nil
+	})
+
+	postHook := func(ctx context.Context, mountPoint string) error {
+		postExportCalled = true
+		return nil
+	}
+
+	result, err := BuildExt4(context.Background(), &PreparedSource{LocalRef: "docker.io/library/nginx:latest", ExportMode: ExportModeDocker}, BuildOptions{ArtifactID: "artifact-post", PostRootfsExport: postHook})
+	if err != nil {
+		t.Fatalf("BuildExt4 failed: %v", err)
+	}
+	if !streamingCalled {
+		t.Fatal("expected streaming build to run")
+	}
+	if !postExportCalled {
+		t.Fatal("expected postExport hook to be called")
+	}
+	if result.SHA256 != "sha-streaming-post" || result.SizeBytes != 14 {
+		t.Fatalf("unexpected result: %#v", result)
 	}
 }
 
@@ -909,7 +968,7 @@ func TestBuildExt4StreamingFailureFallsBackToPhase1(t *testing.T) {
 		return nil
 	})
 	patches.ApplyFunc(isLocalFastFS, func(path string) bool { return true })
-	patches.ApplyFunc(createExt4ImageStreaming, func(ctx context.Context, source *PreparedSource, workDir, ext4Path string, estimatedSizeBytes int64) error {
+	patches.ApplyFunc(createExt4ImageStreaming, func(ctx context.Context, source *PreparedSource, workDir, ext4Path string, estimatedSizeBytes int64, postExport func(context.Context, string) error) error {
 		if err := os.MkdirAll(workDir, 0o755); err != nil {
 			return err
 		}
@@ -1009,7 +1068,7 @@ func TestPrepareLocalSourceUsesDockerlessWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareLocalSource failed: %v", err)
 	}
-	if !got.UseDockerless {
+	if got.ExportMode != ExportModeDockerless {
 		t.Fatalf("expected dockerless source, got %#v", got)
 	}
 	if got.CompressedSizeBytes != 10 {

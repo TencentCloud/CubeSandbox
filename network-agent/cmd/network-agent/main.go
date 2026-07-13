@@ -54,6 +54,10 @@ func main() {
 		logRollNum     = flag.Int("log-roll-num", defaultRollNum, "network-agent log files roll number")
 		logRollSize    = flag.Int("log-roll-size", defaultRollSizeMB, "network-agent log files roll size(MB)")
 		pprofListen    = flag.String("pprof-listen", "", "optional pprof/debug http listen address (e.g. 127.0.0.1:6060); empty disables profiling")
+		// Route-aware egress options.
+		cubeRouterEnable = flag.Bool("cube-router-enable", defaultCfg.CubeRouterEnable, "enable cube-router route-aware egress")
+		cubeRouterCIDR   = flag.String("cube-router-cidr", defaultCfg.CubeRouterCIDR, "optional cube-router IPv4 CIDR; empty derives addresses from sandbox CIDR")
+		cubeRouterMAC    = flag.String("cube-router-mac-addr", defaultCfg.CubeRouterMacAddr, "cube-router MAC address")
 	)
 	flag.Parse()
 	if showVersion {
@@ -62,6 +66,7 @@ func main() {
 	}
 	if err := initLogger(*logPath, *logLevel, *logRollNum, *logRollSize); err != nil {
 		CubeLog.Fatalf("network-agent init logger failed: %v", err)
+		panic(err)
 	}
 
 	if *pprofListen != "" {
@@ -74,6 +79,7 @@ func main() {
 		cfg, err = service.LoadConfigFromCubeletTOML(cfg, *cubeletConfig)
 		if err != nil {
 			CubeLog.Fatalf("network-agent load cubelet config failed: %v", err)
+			panic(err)
 		}
 	}
 
@@ -115,12 +121,22 @@ func main() {
 	if overrides["host-proxy-bind-ip"] {
 		cfg.HostProxyBindIP = *hostProxyBind
 	}
+	if overrides["cube-router-enable"] {
+		cfg.CubeRouterEnable = *cubeRouterEnable
+	}
+	if overrides["cube-router-cidr"] {
+		cfg.CubeRouterCIDR = *cubeRouterCIDR
+	}
+	if overrides["cube-router-mac-addr"] {
+		cfg.CubeRouterMacAddr = *cubeRouterMAC
+	}
 
 	CubeLog.Infof("network-agent startup config: cubelet-config=%q, config={%s}", *cubeletConfig, summarizeConfig(cfg))
 
 	svc, err := initService(cfg)
 	if err != nil {
 		CubeLog.Fatalf("network-agent init failed: %v", err)
+		panic(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -128,15 +144,18 @@ func main() {
 	CubeLog.Infof("network-agent bootstrap health check with service: %s", describeService(svc))
 	if err := svc.Health(ctx); err != nil {
 		CubeLog.Fatalf("network-agent bootstrap health check failed: %v", err)
+		panic(err)
 	}
 
 	apiServer, err := httpserver.NewEndpoint(*listenEndpoint, svc)
 	if err != nil {
 		CubeLog.Fatalf("network-agent api server init failed: %v", err)
+		panic(err)
 	}
 	go func() {
 		if err := apiServer.Start(); err != nil {
 			CubeLog.Fatalf("network-agent api server failed: %v", err)
+			panic(err)
 		}
 	}()
 
@@ -145,10 +164,12 @@ func main() {
 		grpcSrv, err = grpcserver.New(*grpcListen, svc)
 		if err != nil {
 			CubeLog.Fatalf("network-agent grpc server init failed: %v", err)
+			panic(err)
 		}
 		go func() {
 			if err := grpcSrv.Start(); err != nil {
 				CubeLog.Fatalf("network-agent grpc server failed: %v", err)
+				panic(err)
 			}
 		}()
 	}
@@ -158,10 +179,12 @@ func main() {
 		tapFDSrv, err = fdserver.New(cfg.TapFDSocketPath, provider)
 		if err != nil {
 			CubeLog.Fatalf("network-agent tap fd server init failed: %v", err)
+			panic(err)
 		}
 		go func() {
 			if err := tapFDSrv.Start(); err != nil {
 				CubeLog.Fatalf("network-agent tap fd server failed: %v", err)
+				panic(err)
 			}
 		}()
 	}
@@ -170,6 +193,7 @@ func main() {
 	go func() {
 		if err := healthServer.Start(); err != nil {
 			CubeLog.Fatalf("network-agent health server failed: %v", err)
+			panic(err)
 		}
 	}()
 
@@ -246,7 +270,7 @@ func validateService(svc service.Service) error {
 
 func summarizeConfig(cfg service.Config) string {
 	return fmt.Sprintf(
-		"eth_name=%q object_dir=%q cidr=%q mvm_inner_ip=%q mvm_mac_addr=%q mvm_gw_dest_ip=%q mvm_gw_mac_addr=%q mvm_mask=%d mvm_mtu=%d tap_init_num=%d state_dir=%q tap_fd_socket_path=%q host_proxy_bind_ip=%q connect_timeout=%s",
+		"eth_name=%q object_dir=%q cidr=%q mvm_inner_ip=%q mvm_mac_addr=%q mvm_gw_dest_ip=%q mvm_gw_mac_addr=%q mvm_mask=%d mvm_mtu=%d cube_router_enable=%v cube_router_cidr=%q cube_router_mac_addr=%q tap_init_num=%d state_dir=%q tap_fd_socket_path=%q host_proxy_bind_ip=%q connect_timeout=%s",
 		cfg.EthName,
 		cfg.ObjectDir,
 		cfg.CIDR,
@@ -256,6 +280,9 @@ func summarizeConfig(cfg service.Config) string {
 		cfg.MvmGwMacAddr,
 		cfg.MvmMask,
 		cfg.MvmMtu,
+		cfg.CubeRouterEnable,
+		cfg.CubeRouterCIDR,
+		cfg.CubeRouterMacAddr,
 		cfg.TapInitNum,
 		cfg.StateDir,
 		cfg.TapFDSocketPath,

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, fs, path::Path as FsPath, time::Duration};
+use std::{collections::HashMap, fs, path::Path as FsPath, sync::Mutex, time::Duration};
 
 use axum::{extract::Path, extract::State, http::StatusCode, response::IntoResponse, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -50,6 +50,13 @@ const PERSISTENCE_MODE_SHARED_FILES: &str = "shared_files";
 const ROOTFS_SOURCE_TEMPLATE: &str = "template";
 const ROOTFS_SOURCE_SNAPSHOT: &str = "snapshot";
 const SNAPSHOT_KIND_SANDBOX: &str = "sandbox";
+// OpenClaw shared-files snapshots persist as a host directory rooted at
+// OPENCLAW_HOST_SNAPSHOT_ROOT and are recorded with this kind (db.rs upsert).
+// They are NOT CubeMaster snapshots, so cascade cleanup must remove the host
+// directory rather than calling the snapshot service.
+const SNAPSHOT_KIND_AGENTHUB_STATE: &str = "agenthub_state";
+
+static OPENCLAW_SNAPSHOT_FS_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -420,7 +427,7 @@ pub async fn create_agent_instance(
             .as_deref()
             .filter(|path| FsPath::new(path).is_dir())
         {
-            copy_openclaw_state_dir(source_path, &state_path)?;
+            copy_openclaw_state_dir(source_path, &state_path).await?;
         }
         let mount_metadata = openclaw_host_mount_metadata(&state_path)?;
         Some((persist_id, state_path, mount_metadata))
@@ -457,7 +464,7 @@ pub async fn create_agent_instance(
         .sandboxes
         .create_sandbox(NewSandbox {
             template_id: template_id.clone(),
-            timeout,
+            timeout: Some(timeout),
             lifecycle: None,
             secure: None,
             allow_internet_access: Some(true),
@@ -717,8 +724,6 @@ fn openclaw_model_suffix(model: &str) -> &str {
 /// reason about prefixes, providers, or credential modes.
 #[derive(Debug, Clone)]
 struct LlmRuntimePlan {
-    /// Original model string as stored/displayed (e.g. `deepseek/deepseek-v4-flash`).
-    public_model: String,
     /// Bare model id sent upstream as the request body `model` field.
     upstream_model_id: String,
     /// Provider literal from settings (e.g. `deepseek`, `openai-compatible`).
@@ -755,7 +760,6 @@ impl LlmRuntimePlan {
             openclaw_primary,
             openclaw_api_key: llm.openclaw_api_key().to_string(),
             credential_mode: llm.credential_mode.clone(),
-            public_model,
         }
     }
 }
@@ -835,10 +839,28 @@ fn prepare_openclaw_state_dir(persist_id: &str) -> AppResult<String> {
     Ok(path)
 }
 
-fn copy_openclaw_state_dir(source: &str, target: &str) -> AppResult<()> {
+async fn copy_openclaw_state_dir(source: &str, target: &str) -> AppResult<()> {
+    let source = source.to_string();
+    let target = target.to_string();
+    tokio::task::spawn_blocking(move || copy_openclaw_state_dir_blocking(&source, &target))
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!(
+                "OpenClaw state copy task failed to join: {}",
+                e
+            ))
+        })?
+}
+
+fn copy_openclaw_state_dir_blocking(source: &str, target: &str) -> AppResult<()> {
     if source.trim().is_empty() || !FsPath::new(source).is_dir() {
         return Ok(());
     }
+    let _guard = OPENCLAW_SNAPSHOT_FS_LOCK.lock().map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "openclaw snapshot filesystem lock poisoned"
+        ))
+    })?;
     fs::create_dir_all(target).map_err(|e| {
         AppError::Internal(anyhow::anyhow!(
             "failed to create cloned OpenClaw state directory {}: {}",
@@ -871,6 +893,124 @@ fn copy_openclaw_state_dir(source: &str, target: &str) -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+// is_valid_agenthub_snapshot_id enforces the exact shape produced by
+// new_agenthub_snapshot_id (`agenthub-` + 32 lowercase hex). Any other value is
+// rejected before it is used to build a filesystem path, so a polluted /
+// attacker-controlled id can never traverse outside the managed snapshot root.
+fn is_valid_agenthub_snapshot_id(snapshot_id: &str) -> bool {
+    let Some(hex) = snapshot_id.strip_prefix("agenthub-") else {
+        return false;
+    };
+    hex.len() == 32
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+async fn remove_openclaw_snapshot_dir(snapshot_id: &str) -> AppResult<()> {
+    let snapshot_id = snapshot_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        remove_openclaw_snapshot_dir_under_blocking(
+            FsPath::new(OPENCLAW_HOST_SNAPSHOT_ROOT),
+            &snapshot_id,
+        )
+    })
+    .await
+    .map_err(|e| {
+        AppError::Internal(anyhow::anyhow!(
+            "OpenClaw snapshot removal task failed to join: {}",
+            e
+        ))
+    })?
+}
+
+// remove_openclaw_snapshot_dir_under idempotently removes the host directory
+// backing an OpenClaw shared-files snapshot. It is hardened against path
+// traversal and symlink escape (S2/R8):
+//   - the id must match the system-generated shape;
+//   - the snapshot root is canonicalized and the target is constructed as a
+//     direct child of that root;
+//   - the leaf is never canonicalized, so a top-level symlink is unlinked rather
+//     than followed;
+//   - a missing root/target is treated as success (idempotent).
+fn remove_openclaw_snapshot_dir_under_blocking(root: &FsPath, snapshot_id: &str) -> AppResult<()> {
+    if !is_valid_agenthub_snapshot_id(snapshot_id) {
+        return Err(AppError::BadRequest(format!(
+            "invalid AgentHub snapshot id: {}",
+            snapshot_id
+        )));
+    }
+    let _guard = OPENCLAW_SNAPSHOT_FS_LOCK.lock().map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "openclaw snapshot filesystem lock poisoned"
+        ))
+    })?;
+    let canon_root = match fs::canonicalize(root) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "openclaw snapshot root {} not resolvable: {}",
+                OPENCLAW_HOST_SNAPSHOT_ROOT,
+                e
+            )));
+        }
+    };
+    let path = canon_root.join(snapshot_id);
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "failed to stat openclaw snapshot dir {}: {}",
+                snapshot_id,
+                e
+            )));
+        }
+    };
+    if meta.file_type().is_symlink() {
+        // Remove only the link entry; never follow it to a target outside root.
+        return match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(AppError::Internal(anyhow::anyhow!(
+                "failed to remove openclaw snapshot symlink {}: {}",
+                snapshot_id,
+                e
+            ))),
+        };
+    }
+    if !meta.is_dir() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "openclaw snapshot path {} is not a directory",
+            snapshot_id
+        )));
+    }
+    match fs::remove_dir_all(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AppError::Internal(anyhow::anyhow!(
+            "failed to remove openclaw snapshot dir {}: {}",
+            snapshot_id,
+            e
+        ))),
+    }
+}
+
+// delete_cubemaster_snapshot_idempotent wraps the snapshot service delete so a
+// NotFound (already removed) is success — the cascade and any retry must be
+// idempotent (C3/F4: the underlying delete is not).
+async fn delete_cubemaster_snapshot_idempotent(
+    state: &AppState,
+    snapshot_id: &str,
+) -> AppResult<()> {
+    match state.services.snapshots.delete(snapshot_id).await {
+        Ok(_) => Ok(()),
+        Err(AppError::NotFound(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn openclaw_host_mount_metadata(host_path: &str) -> AppResult<String> {
@@ -1422,6 +1562,10 @@ pub async fn delete_agent_snapshot(
     Path((agent_id, snapshot_id)): Path<(String, String)>,
 ) -> AppResult<impl IntoResponse> {
     let record = read_agenthub_instance(&state, &agent_id).await?;
+    // Resolve the snapshot kind up front so we route physical cleanup to the
+    // right backend (OpenClaw host dir vs CubeMaster snapshot). The referenced
+    // guard is preserved.
+    let mut snapshot_kind: Option<String> = None;
     if let Some(store) = &state.agenthub_store {
         if let Ok(records) = store.list_snapshots(&agent_id).await {
             if records
@@ -1433,9 +1577,20 @@ pub async fn delete_agent_snapshot(
                 ));
             }
         }
+        if let Ok(Some(snap)) = store.get_snapshot(&record.agent_id, &snapshot_id).await {
+            snapshot_kind = snap.snapshot_kind;
+        }
     }
 
-    state.services.snapshots.delete(&snapshot_id).await?;
+    match snapshot_kind.as_deref() {
+        Some(kind) if kind == SNAPSHOT_KIND_AGENTHUB_STATE => {
+            remove_openclaw_snapshot_dir(&snapshot_id).await?;
+        }
+        _ => {
+            delete_cubemaster_snapshot_idempotent(&state, &snapshot_id).await?;
+        }
+    }
+
     if let Some(store) = &state.agenthub_store {
         store
             .soft_delete_snapshot(&record.agent_id, &snapshot_id)
@@ -1525,6 +1680,26 @@ pub async fn delete_agent_template(
     let store = state.agenthub_store.as_ref().ok_or_else(|| {
         AppError::BadRequest("AgentHub database persistence is not configured".to_string())
     })?;
+
+    // Cascade to the backing snapshot before removing the registration row
+    // (先物理后元数据). Market templates intentionally do NOT cascade to their
+    // shared `tpl-*` infrastructure template; that is reclaimed by the
+    // infrastructure DELETE /templates path + reference counting.
+    if let Some(record) = store.get_template(&template_id).await.map_err(|e| {
+        AppError::Internal(anyhow::anyhow!("failed to load AgentHub template: {}", e))
+    })? {
+        if record.source_agent_id != "market" {
+            cascade_delete_backing_snapshot(
+                &state,
+                store,
+                &template_id,
+                &record.source_agent_id,
+                &record.source_snapshot_id,
+            )
+            .await?;
+        }
+    }
+
     store
         .soft_delete_template(&template_id)
         .await
@@ -1532,6 +1707,64 @@ pub async fn delete_agent_template(
             AppError::Internal(anyhow::anyhow!("failed to delete AgentHub template: {}", e))
         })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// cascade_delete_backing_snapshot removes the snapshot backing an AgentHub
+// template (its host OpenClaw state dir or CubeMaster sandbox snapshot) and
+// soft-deletes the snapshot row. It never deletes a snapshot still referenced
+// by another (non-deleted) template, and never cascades to shared rootfs.
+async fn cascade_delete_backing_snapshot(
+    state: &AppState,
+    store: &crate::db::AgentHubStore,
+    template_id: &str,
+    agent_id: &str,
+    snapshot_id: &str,
+) -> AppResult<()> {
+    if snapshot_id.trim().is_empty() {
+        return Ok(());
+    }
+    // Guard against shared snapshots: if any other live template still points at
+    // this snapshot, leave the physical snapshot intact. Fail-safe — if we
+    // cannot determine sharing (DB error), do NOT delete the physical snapshot.
+    let still_shared = store
+        .snapshot_has_other_live_template_refs(snapshot_id, template_id)
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!(
+                "failed to check snapshot sharing before cascade delete: {}",
+                e
+            ))
+        })?;
+    if still_shared {
+        return Ok(());
+    }
+
+    let snap = store
+        .get_snapshot(agent_id, snapshot_id)
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("failed to load AgentHub snapshot: {}", e))
+        })?;
+    let Some(snap) = snap else {
+        // Snapshot row already gone; nothing to cascade.
+        return Ok(());
+    };
+
+    match snap.snapshot_kind.as_deref() {
+        Some(kind) if kind == SNAPSHOT_KIND_AGENTHUB_STATE => {
+            remove_openclaw_snapshot_dir(snapshot_id).await?;
+        }
+        _ => {
+            delete_cubemaster_snapshot_idempotent(state, snapshot_id).await?;
+        }
+    }
+    store
+        .soft_delete_snapshot(agent_id, snapshot_id)
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("failed to delete AgentHub snapshot: {}", e))
+        })?;
+    Ok(())
 }
 
 pub async fn list_agent_operations(
@@ -1594,7 +1827,7 @@ pub async fn create_agent_snapshot(
             let snapshot_id = new_agenthub_snapshot_id();
             let snapshot_path = openclaw_host_snapshot_path(&snapshot_id);
             let result = async {
-                copy_openclaw_state_dir(source_openclaw_path, &snapshot_path)?;
+                copy_openclaw_state_dir(source_openclaw_path, &snapshot_path).await?;
                 let Some(store) = &task_state.agenthub_store else {
                     return Err(AppError::BadRequest(
                         "AgentHub database persistence is not configured".to_string(),
@@ -1761,7 +1994,7 @@ pub async fn rollback_agent_to_snapshot(
                     "current assistant does not have an OpenClaw host state directory".to_string(),
                 )
             })?;
-        if let Err(err) = copy_openclaw_state_dir(source_path, target_path) {
+        if let Err(err) = copy_openclaw_state_dir(source_path, target_path).await {
             finish_agent_operation(
                 &state,
                 operation_id.as_deref(),
@@ -1956,7 +2189,7 @@ pub async fn clone_agent_instance(
             .as_ref()
             .is_some_and(|source_path| FsPath::new(source_path).is_dir());
         if let Some(source_path) = source_openclaw_state_path.filter(|_| copied_state) {
-            copy_openclaw_state_dir(source_path, &state_path)?;
+            copy_openclaw_state_dir(source_path, &state_path).await?;
         }
         let mount_metadata = openclaw_host_mount_metadata(&state_path)?;
         Some((persist_id, state_path, mount_metadata, copied_state))
@@ -1993,7 +2226,7 @@ pub async fn clone_agent_instance(
         .sandboxes
         .create_sandbox(NewSandbox {
             template_id: snapshot_id.clone(),
-            timeout,
+            timeout: Some(timeout),
             lifecycle: None,
             secure: None,
             allow_internet_access: Some(true),
@@ -2186,7 +2419,7 @@ pub async fn publish_agent_template(
                     })?;
                 let snapshot_id = new_agenthub_snapshot_id();
                 let snapshot_path = openclaw_host_snapshot_path(&snapshot_id);
-                copy_openclaw_state_dir(source_openclaw_path, &snapshot_path)?;
+                copy_openclaw_state_dir(source_openclaw_path, &snapshot_path).await?;
                 let rootfs_snapshot_id = record
                     .base_snapshot_id
                     .clone()
@@ -2699,7 +2932,7 @@ pub async fn resume_agent_openclaw(
     state
         .services
         .sandboxes
-        .connect_sandbox(&record.sandbox_id, timeout)
+        .connect_sandbox(&record.sandbox_id, Some(timeout))
         .await?;
     let store = state.agenthub_store.as_ref().ok_or_else(|| {
         AppError::BadRequest("AgentHub database persistence is not configured".to_string())
@@ -3006,8 +3239,10 @@ enum OpenClawApplyMode {
     /// without bundled state.
     FullInit,
     /// Only merge the LLM-related blocks into existing config, preserving the
-    /// gateway (and its token). Used when the sandbox already carries OpenClaw
-    /// state (published template fast path / clone from snapshot).
+    /// gateway (and its token). Gateway `bind` is forced to `"lan"` regardless
+    /// of existing state to ensure cube-proxy can reach the sandbox tap IP.
+    /// Used when the sandbox already carries OpenClaw state (published template
+    /// fast path / clone from snapshot).
     MergeLlm,
 }
 
@@ -3451,7 +3686,7 @@ if mode == "full_init":
             token = existing
         if not token:
             token = secrets.token_hex(16)
-        gateway["bind"] = os.environ.get("OPENCLAW_BIND", "auto")
+        gateway["bind"] = "lan"
         gateway["port"] = int(os.environ.get("OPENCLAW_PORT", "18789"))
         gateway["mode"] = "local"
         gateway["tailscale"] = {"mode": "off", "resetOnExit": False}
@@ -3501,6 +3736,10 @@ if mode == "full_init":
             "secret": os.environ["OPENCLAW_BOT_SECRET"],
             "enabled": True,
         }, ensure_ascii=False, indent=2) + "\n")
+
+# Cube-proxy dials the sandbox tap IP, so merge_llm / template fast paths must
+# still expose the gateway on non-loopback interfaces ("lan", not loopback/auto).
+data.setdefault("gateway", {})["bind"] = "lan"
 
 tmp = config_path.with_suffix(".json.tmp")
 tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
@@ -3682,6 +3921,12 @@ pub(crate) fn tokenized_gateway_url(url: String, token: Option<String>) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs as test_fs,
+        os::unix::fs as unix_fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn llm(provider: &str, credential_mode: &str) -> LlmConfig {
         LlmConfig {
@@ -3691,6 +3936,74 @@ mod tests {
             api_key: "sk-real-secret".to_string(),
             credential_mode: credential_mode.to_string(),
         }
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "cube-api-agenthub-{}-{}-{}",
+            name,
+            std::process::id(),
+            nanos
+        ));
+        test_fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
+    }
+
+    #[test]
+    fn remove_openclaw_snapshot_rejects_invalid_id() {
+        let root = temp_test_dir("invalid-id");
+        let err = remove_openclaw_snapshot_dir_under_blocking(&root, "../escape")
+            .expect_err("must reject");
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let _ = test_fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_openclaw_snapshot_missing_root_is_idempotent() {
+        let root = temp_test_dir("missing-root");
+        test_fs::remove_dir_all(&root).expect("remove temp root");
+        remove_openclaw_snapshot_dir_under_blocking(
+            &root,
+            "agenthub-0123456789abcdef0123456789abcdef",
+        )
+        .expect("missing root should be success");
+    }
+
+    #[test]
+    fn remove_openclaw_snapshot_removes_directory_leaf() {
+        let root = temp_test_dir("dir-leaf");
+        let snapshot_id = "agenthub-0123456789abcdef0123456789abcdef";
+        let snapshot_dir = root.join(snapshot_id);
+        test_fs::create_dir_all(&snapshot_dir).expect("create snapshot dir");
+        test_fs::write(snapshot_dir.join("state.json"), "{}").expect("write snapshot file");
+
+        remove_openclaw_snapshot_dir_under_blocking(&root, snapshot_id)
+            .expect("remove snapshot dir");
+
+        assert!(!snapshot_dir.exists());
+        assert!(root.exists());
+        let _ = test_fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_openclaw_snapshot_unlinks_leaf_symlink_only() {
+        let root = temp_test_dir("symlink-leaf");
+        let outside = temp_test_dir("symlink-target");
+        let snapshot_id = "agenthub-0123456789abcdef0123456789abcdef";
+        test_fs::write(outside.join("keep.txt"), "keep").expect("write outside file");
+        unix_fs::symlink(&outside, root.join(snapshot_id)).expect("create leaf symlink");
+
+        remove_openclaw_snapshot_dir_under_blocking(&root, snapshot_id)
+            .expect("remove snapshot symlink");
+
+        assert!(!root.join(snapshot_id).exists());
+        assert!(outside.join("keep.txt").exists());
+        let _ = test_fs::remove_dir_all(root);
+        let _ = test_fs::remove_dir_all(outside);
     }
 
     #[test]
@@ -3725,7 +4038,6 @@ mod tests {
         );
         assert_eq!(plan.upstream_model_id, "deepseek-v4-flash");
         assert_eq!(plan.openclaw_primary, "openai-compatible/deepseek-v4-flash");
-        assert_eq!(plan.public_model, "deepseek/deepseek-v4-flash");
     }
 
     #[test]

@@ -44,6 +44,10 @@ Cube Sandbox provides a Docker-based builder image for a consistent build enviro
 # Build the builder image
 make builder-image
 
+# From mainland China, fetch the llvm.sh installer and clang-14 apt packages from
+# a China mirror (the LLVM GPG key still comes from apt.llvm.org)
+make builder-image MIRROR=cn
+
 # Start an interactive shell inside the builder
 make builder-shell
 
@@ -132,6 +136,15 @@ Commits without a valid `Signed-off-by` line will not be accepted.
 - **Go** — follow standard `gofmt` formatting and project conventions.
 - **Rust** — follow `rustfmt` and `clippy` recommendations.
 - **Documentation** — use clear, concise language. Both English and Chinese docs should be kept in sync.
+
+## Issue & PR Close Policy
+
+Issues and PRs are closed under the following conditions:
+
+- **Stale after a `need-info` request** — if a maintainer asks for more information or requested changes and the author does not respond **for more than 2 weeks**, the Issue/PR is closed as stale. It can be reopened once the requested information or changes are provided.
+- **Resolved or superseded** — the underlying bug is fixed, the feature is implemented, or the change has been superseded by another PR/approach.
+- **Out of scope / won't fix** — closed with a comment explaining why.
+- **Duplicate** — closed with a link to the original Issue/PR.
 
 ## Reporting Security Issues
 

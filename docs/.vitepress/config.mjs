@@ -96,6 +96,7 @@ export default withMermaid(defineConfig({
           { text: 'Home', link: '/' },
           { text: 'Guide', link: '/guide/introduction' },
           { text: 'Architecture', link: '/architecture/overview' },
+          { text: 'Developer', link: '/dev/' },
           { text: 'Blog', link: '/blog/' },
           { text: 'About us', link: '/about-us' },
           { text: 'Changelog', link: '/changelog/' },
@@ -112,6 +113,7 @@ export default withMermaid(defineConfig({
                 { text: 'PVM Deployment', link: '/guide/pvm-deploy' },
                 { text: 'Bare-Metal Deployment', link: '/guide/bare-metal-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
+                { text: 'Tencent Cloud Cluster (Terraform)', link: '/guide/tencentcloud-terraform-deploy' },
                 { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' }
               ]
@@ -119,8 +121,10 @@ export default withMermaid(defineConfig({
             {
               text: 'Core Concepts',
               items: [
+                { text: 'Roadmap', link: '/guide/roadmap' },
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
                 { text: 'Templates Overview', link: '/guide/templates' },
+                { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
                 { text: 'Digital Assistant', link: '/guide/digital-assistant' },
                 { text: 'Performance Benchmark', link: '/guide/performance-benchmark' }
               ]
@@ -134,19 +138,34 @@ export default withMermaid(defineConfig({
               ]
             },
             {
+              text: 'Networking',
+              items: [
+                { text: 'Network Policy', link: '/guide/network-policy' },
+                { text: 'Route-Aware Egress', link: '/guide/route-aware-egress' },
+                { text: 'Security Proxy', link: '/guide/security-proxy' },
+                { text: 'Restrict Public Access', link: '/guide/restrict-public-access' }
+              ]
+            },
+            {
+              text: 'Storage',
+              items: [
+                { text: 'Persistent Storage (Host Mount)', link: '/guide/persistent-storage' }
+              ]
+            },
+            {
               text: 'Operations',
               items: [
                 { text: 'WebUI Dashboard', link: '/guide/webui' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
+                { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
                 { text: 'HTTPS & Domain Resolution', link: '/guide/https-and-domain' },
-                { text: 'Authentication', link: '/guide/authentication' },
-                { text: 'Egress Network Policy', link: '/guide/egress-network-policy' },
-                { text: 'Security Proxy', link: '/guide/security-proxy' }
+                { text: 'Network Hardening', link: '/guide/network-hardening' },
+                { text: 'Authentication', link: '/guide/authentication' }
               ]
             },
             {
-              text: 'Developer Docs',
+              text: 'Integration',
               items: [
                 { text: 'Connect to an Existing Cube Cluster', link: '/guide/connect-existing-cluster' }
               ]
@@ -159,8 +178,7 @@ export default withMermaid(defineConfig({
                   link: '/guide/troubleshooting/',
                   items: [
                     { text: 'Deployment', link: '/guide/troubleshooting/deployment' },
-                    { text: 'Templates', link: '/guide/troubleshooting/templates' },
-                    { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' }
+                    { text: 'Templates', link: '/guide/troubleshooting/templates' }
                   ]
                 },
                 {
@@ -188,6 +206,15 @@ export default withMermaid(defineConfig({
                 { text: 'Networking (CubeVS)', link: '/architecture/network' }
               ]
             }
+          ],
+          '/dev/': [
+            {
+              text: 'Developer Docs',
+              items: [
+                { text: 'Overview', link: '/dev/' },
+                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' }
+              ]
+            }
           ]
         }
       }
@@ -203,6 +230,7 @@ export default withMermaid(defineConfig({
           { text: '首页', link: '/zh/' },
           { text: '指南', link: '/zh/guide/introduction' },
           { text: '架构', link: '/zh/architecture/overview' },
+          { text: '开发者', link: '/zh/dev/' },
           { text: '博客', link: '/zh/blog/' },
           { text: '关于我们', link: '/zh/about-us' },
           { text: '更新日志', link: '/zh/changelog/' },
@@ -219,6 +247,7 @@ export default withMermaid(defineConfig({
                 { text: 'PVM部署', link: '/zh/guide/pvm-deploy' },
                 { text: '裸金属/物理机部署', link: '/zh/guide/bare-metal-deploy' },
                 { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },
+                { text: '腾讯云集群部署（Terraform）', link: '/zh/guide/tencentcloud-terraform-deploy' },
                 { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' }
               ]
@@ -226,8 +255,10 @@ export default withMermaid(defineConfig({
             {
               text: '核心概念',
               items: [
+                { text: '路线图', link: '/zh/guide/roadmap' },
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
                 { text: '模板概览', link: '/zh/guide/templates' },
+                { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
                 { text: '数字助手', link: '/zh/guide/digital-assistant' },
                 { text: '性能测试', link: '/zh/guide/performance-benchmark' }
               ]
@@ -241,19 +272,34 @@ export default withMermaid(defineConfig({
               ]
             },
             {
+              text: '网络',
+              items: [
+                { text: '网络策略', link: '/zh/guide/network-policy' },
+                { text: '路由感知出网', link: '/zh/guide/route-aware-egress' },
+                { text: '安全代理', link: '/zh/guide/security-proxy' },
+                { text: '限制公开访问', link: '/zh/guide/restrict-public-access' }
+              ]
+            },
+            {
+              text: '存储',
+              items: [
+                { text: '持久化存储（Host Mount）', link: '/zh/guide/persistent-storage' }
+              ]
+            },
+            {
               text: '安全与运维',
               items: [
                 { text: 'WebUI 控制台', link: '/zh/guide/webui' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
+                { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
                 { text: 'HTTPS 证书与域名解析', link: '/zh/guide/https-and-domain' },
-                { text: '鉴权', link: '/zh/guide/authentication' },
-                { text: '出网网络策略', link: '/zh/guide/egress-network-policy' },
-                { text: '安全代理', link: '/zh/guide/security-proxy' }
+                { text: '网络加固', link: '/zh/guide/network-hardening' },
+                { text: '鉴权', link: '/zh/guide/authentication' }
               ]
             },
             {
-              text: '开发文档',
+              text: '集成',
               items: [
                 { text: '连接到已有 Cube 集群', link: '/zh/guide/connect-existing-cluster' }
               ]
@@ -266,8 +312,7 @@ export default withMermaid(defineConfig({
                   link: '/zh/guide/troubleshooting/',
                   items: [
                     { text: '部署相关', link: '/zh/guide/troubleshooting/deployment' },
-                    { text: '模板相关', link: '/zh/guide/troubleshooting/templates' },
-                    { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' }
+                    { text: '模板相关', link: '/zh/guide/troubleshooting/templates' }
                   ]
                 },
                 {
@@ -293,6 +338,15 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '架构概览 (Overview)', link: '/zh/architecture/overview' },
                 { text: 'CubeVS 网络模型', link: '/zh/architecture/network' }
+              ]
+            }
+          ],
+          '/zh/dev/': [
+            {
+              text: '开发者文档',
+              items: [
+                { text: '概览', link: '/zh/dev/' },
+                { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' }
               ]
             }
           ]

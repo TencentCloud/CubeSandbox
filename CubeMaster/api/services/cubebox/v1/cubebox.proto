@@ -830,6 +830,8 @@ message AppSnapshotResponse {
   string agent_version = 12;
   // Guest kernel artifact identity bound when this snapshot was created.
   string kernel_version = 13;
+  // envd semantic version collected in-guest at snapshot time (best-effort).
+  string envd_version = 14;
 }
 
 message CommitSandboxRequest {
@@ -874,6 +876,8 @@ message CommitSandboxResponse {
   string agent_version = 14;
   // Guest kernel artifact identity bound when this snapshot was created.
   string kernel_version = 15;
+  // envd semantic version collected in-guest at commit time (best-effort).
+  string envd_version = 16;
 }
 
 message RollbackSandboxRequest {

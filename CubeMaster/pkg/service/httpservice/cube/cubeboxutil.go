@@ -254,6 +254,12 @@ func applyTemplateAnnotationsAndLabels(reqIn *types.CreateCubeSandboxReq, reqOut
 		}
 		maps.Copy(reqOut.Labels, reqIn.Labels)
 	}
+	if v := strings.TrimSpace(reqOut.Annotations[constants.CubeAnnotationComponentEnvdVersion]); v != "" {
+		if reqOut.Labels == nil {
+			reqOut.Labels = make(map[string]string)
+		}
+		reqOut.Labels[constants.CubeAnnotationComponentEnvdVersion] = v
+	}
 }
 
 func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *types.CubeNetworkConfig) *types.CubeNetworkConfig {
@@ -264,10 +270,19 @@ func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *t
 		return cloneCubeNetworkConfig(templateCfg)
 	}
 
-	out := cloneCubeNetworkConfig(templateCfg)
+	out := cloneCubeNetworkConfigBase(templateCfg)
 	if requestCfg.AllowInternetAccess != nil {
 		allowInternetAccess := *requestCfg.AllowInternetAccess
 		out.AllowInternetAccess = &allowInternetAccess
+	}
+	// AllowPublicTraffic: per-create override wins over the template. Templates
+	// rarely set this; the request side carries the user's explicit decision
+	// (e2b SDK shape: network.allowPublicTraffic). Without this the request's
+	// false would silently fall back to the template's (usually nil) value and
+	// CubeProxy would never enforce the gate.
+	if requestCfg.AllowPublicTraffic != nil {
+		allowPublicTraffic := *requestCfg.AllowPublicTraffic
+		out.AllowPublicTraffic = &allowPublicTraffic
 	}
 	if len(requestCfg.AllowOut) > 0 {
 		out.AllowOut = appendUniqueCIDRs(out.AllowOut, requestCfg.AllowOut)
@@ -276,53 +291,64 @@ func mergeCubeNetworkConfigs(templateCfg *types.CubeNetworkConfig, requestCfg *t
 		out.DenyOut = appendUniqueCIDRs(out.DenyOut, requestCfg.DenyOut)
 	}
 	if len(requestCfg.Rules) > 0 {
-		out.Rules = mergeEgressRules(out.Rules, requestCfg.Rules)
+		out.Rules = mergeEgressRules(templateCfg.Rules, requestCfg.Rules)
+	} else {
+		out.Rules = cloneEgressRules(templateCfg.Rules)
 	}
 	return out
 }
 
 func cloneCubeNetworkConfig(in *types.CubeNetworkConfig) *types.CubeNetworkConfig {
+	out := cloneCubeNetworkConfigBase(in)
+	if out == nil {
+		return nil
+	}
+	out.Rules = cloneEgressRules(in.Rules)
+	return out
+}
+
+func cloneCubeNetworkConfigBase(in *types.CubeNetworkConfig) *types.CubeNetworkConfig {
 	if in == nil {
 		return nil
 	}
 	out := &types.CubeNetworkConfig{
 		AllowOut: append([]string(nil), in.AllowOut...),
 		DenyOut:  append([]string(nil), in.DenyOut...),
-		Rules:    cloneEgressRules(in.Rules),
 	}
 	if in.AllowInternetAccess != nil {
 		allowInternetAccess := *in.AllowInternetAccess
 		out.AllowInternetAccess = &allowInternetAccess
 	}
+	if in.AllowPublicTraffic != nil {
+		allowPublicTraffic := *in.AllowPublicTraffic
+		out.AllowPublicTraffic = &allowPublicTraffic
+	}
 	return out
 }
 
-// mergeEgressRules combines template + request rules. Rules sharing the same
-// Name are overridden by the request side; otherwise request rules are
-// appended after template rules to preserve first-match-wins ordering with
-// the template's policy taking precedence on overlap.
+// mergeEgressRules combines template + request rules. Because egress rules are
+// first-match-wins, per-sandbox/request rules must come before template rules.
 func mergeEgressRules(base []*types.EgressRule, extra []*types.EgressRule) []*types.EgressRule {
 	if len(extra) == 0 {
-		return base
+		return cloneEgressRules(base)
 	}
-	indexByName := make(map[string]int, len(base))
-	out := cloneEgressRules(base)
-	for i, r := range out {
-		if r != nil {
-			indexByName[r.Name] = i
-		}
+	if len(base) == 0 {
+		return cloneEgressRules(extra)
 	}
+
+	out := make([]*types.EgressRule, 0, len(extra)+len(base))
 	for _, r := range extra {
 		if r == nil {
 			continue
 		}
-		cloned := cloneEgressRule(r)
-		if idx, ok := indexByName[r.Name]; ok {
-			out[idx] = cloned
+		out = append(out, cloneEgressRule(r))
+	}
+
+	for _, r := range base {
+		if r == nil {
 			continue
 		}
-		indexByName[r.Name] = len(out)
-		out = append(out, cloned)
+		out = append(out, cloneEgressRule(r))
 	}
 	return out
 }
@@ -511,7 +537,6 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 			return err
 		}
 	}
-
 	if templateReq.NetworkType != "" {
 		reqInOut.NetworkType = templateReq.NetworkType
 	}

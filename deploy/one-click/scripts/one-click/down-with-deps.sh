@@ -13,6 +13,10 @@ REMOVE_VOLUMES="${CUBE_SANDBOX_REMOVE_VOLUMES:-0}"
 
 "${SCRIPT_DIR}/down-webui.sh"
 "${SCRIPT_DIR}/down-cube-proxy.sh"
+# Stop CLM after cube-proxy: cube-proxy is the last thing that might still
+# be calling /_sidecar_resume; stopping CLM first would give it 502s during
+# the shutdown window.
+"${SCRIPT_DIR}/down-cube-lifecycle-manager.sh"
 "${SCRIPT_DIR}/down-dns.sh"
 
 "${SCRIPT_DIR}/down-local.sh"

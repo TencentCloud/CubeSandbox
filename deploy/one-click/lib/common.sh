@@ -6,6 +6,10 @@
 
 ONE_CLICK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ONE_CLICK_DIR="$(cd "${ONE_CLICK_LIB_DIR}/.." && pwd)"
+if [[ "${CUBE_SANDBOX_INSTALL_ROOT:-}" != "/usr/local/services/cubetoolbox" ]]; then
+  CUBE_SANDBOX_INSTALL_ROOT="/usr/local/services/cubetoolbox"
+fi
+readonly CUBE_SANDBOX_INSTALL_ROOT
 
 log() {
   echo "[one-click] $*" >&2
@@ -544,10 +548,42 @@ is_compute_role() {
   [[ "$(one_click_deploy_role)" == "compute" ]]
 }
 
+env_value_is_plain_scalar() {
+  local value="${1-}"
+  [[ -z "${value}" ]] && return 0
+  [[ "${value}" =~ ^[A-Za-z0-9_./:@%+=,-]*$ ]]
+}
+
+render_env_assignment_value() {
+  local key="$1"
+  local value="$2"
+
+  if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    die "env value for ${key} must not contain newlines"
+  fi
+
+  # Keep shell-safe scalars unquoted so preflight readers that deliberately do
+  # not source the file (for example, ONE_CLICK_DEPLOY_ROLE checks during
+  # upgrade preflight) continue to see plain values.
+  if env_value_is_plain_scalar "${value}"; then
+    printf '%s' "${value}"
+    return 0
+  fi
+
+  # Runtime helpers load .one-click.env via `set -a; source`, so persist any
+  # shell-sensitive value in a quoted form that preserves bytes literally.
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//\$/\\$}"
+  value="${value//\`/\\\`}"
+  printf '"%s"' "${value}"
+}
+
 upsert_env_kv() {
   local env_file="$1"
   local key="$2"
   local value="$3"
+  local rendered_value
   local tmp_file
   # SECURITY: tighten umask before mktemp so the temp file is created 0600 from
   # the start, closing the race window between creation and the chmod below.
@@ -568,11 +604,12 @@ upsert_env_kv() {
   # with looser permissions or mktemp honored a non-default mode.
   chmod 600 "${tmp_file}"
   local replaced=false
+  rendered_value="$(render_env_assignment_value "${key}" "${value}")"
 
   if [[ -f "${env_file}" ]]; then
     while IFS= read -r line || [[ -n "${line}" ]]; do
       if [[ "${line}" == "${key}="* ]]; then
-        printf '%s=%s\n' "${key}" "${value}" >> "${tmp_file}"
+        printf '%s=%s\n' "${key}" "${rendered_value}" >> "${tmp_file}"
         replaced=true
       else
         printf '%s\n' "${line}" >> "${tmp_file}"
@@ -581,10 +618,49 @@ upsert_env_kv() {
   fi
 
   if [[ "${replaced}" != "true" ]]; then
-    printf '%s=%s\n' "${key}" "${value}" >> "${tmp_file}"
+    printf '%s=%s\n' "${key}" "${rendered_value}" >> "${tmp_file}"
   fi
 
   mv -f "${tmp_file}" "${env_file}"
+}
+
+redis_cli_help_output() {
+  command -v redis-cli >/dev/null 2>&1 || return 1
+  redis-cli --help 2>&1 || true
+}
+
+redis_cli_help_supports_flag() {
+  local help_output="$1"
+  local flag="$2"
+
+  printf '%s\n' "${help_output}" | grep -Eq "(^|[[:space:]])${flag}([[:space:]]|$)"
+}
+
+run_with_timeout_if_available() {
+  local timeout_secs="$1"
+  shift
+
+  if command -v timeout >/dev/null 2>&1; then
+    if timeout --help 2>&1 | grep -q -- '-k'; then
+      timeout -k 1 "${timeout_secs}" "$@"
+    else
+      timeout "${timeout_secs}" "$@"
+    fi
+  else
+    "$@"
+  fi
+}
+
+run_redis_preflight_cmd() {
+  local use_timeout_wrapper="$1"
+  local connect_timeout="$2"
+  shift 2
+
+  if [[ "${use_timeout_wrapper}" == "1" ]]; then
+    run_with_timeout_if_available "${connect_timeout}" "$@"
+  else
+    "$@"
+  fi
 }
 
 validate_interface_name() {
@@ -597,10 +673,21 @@ validate_interface_name() {
     || die "invalid ${name}: ${value} (expected 1-15 chars: letters, digits, '_', '.', ':', '-')"
 }
 
+validate_bool_01() {
+  local value="$1"
+  local name="${2:-value}"
+  case "${value}" in
+    0|1) ;;
+    *) die "${name} must be 0 or 1 (got: '${value}')" ;;
+  esac
+}
+
 patch_cubelet_config_template() {
   local cubelet_config="$1"
   local eth_name="${2:-}"
   local network_cidr="${3:-}"
+  local cube_router_enable="${4:-}"
+  local cube_router_cidr="${5:-}"
 
   ensure_file "${cubelet_config}"
   if [[ -L "${cubelet_config}" ]]; then
@@ -610,8 +697,8 @@ patch_cubelet_config_template() {
   if [[ -n "${eth_name}" ]]; then
     validate_interface_name "${eth_name}" "CUBE_SANDBOX_ETH_NAME"
     if grep -Eq '^[[:space:]]*eth_name = "' "${cubelet_config}"; then
-      sed -i "s/eth_name = \"[^\"]*\"/eth_name = \"${eth_name}\"/" "${cubelet_config}"
-      if ! grep -Fq "eth_name = \"${eth_name}\"" "${cubelet_config}"; then
+      sed -i -E "s|^([[:space:]]*)eth_name = \"[^\"]*\"|\1eth_name = \"${eth_name}\"|" "${cubelet_config}"
+      if ! grep -Eq "^[[:space:]]*eth_name = \"${eth_name}\"\$" "${cubelet_config}"; then
         log "WARNING: failed to patch eth_name in Cubelet config (${cubelet_config})"
       fi
     else
@@ -621,13 +708,42 @@ patch_cubelet_config_template() {
 
   if [[ -n "${network_cidr}" ]]; then
     if grep -Eq '^[[:space:]]*cidr = "' "${cubelet_config}"; then
-      sed -i "s|cidr = \"[^\"]*\"|cidr = \"${network_cidr}\"|" "${cubelet_config}"
-      if ! grep -Fq "cidr = \"${network_cidr}\"" "${cubelet_config}"; then
+      sed -i -E "s|^([[:space:]]*)cidr = \"[^\"]*\"|\1cidr = \"${network_cidr}\"|" "${cubelet_config}"
+      if ! grep -Eq "^[[:space:]]*cidr = \"${network_cidr}\"\$" "${cubelet_config}"; then
         log "WARNING: failed to patch cidr in Cubelet config (${cubelet_config})"
       fi
       log "patched cubevs CIDR: ${network_cidr}"
     else
       log "WARNING: Cubelet config missing cidr key; skipped CIDR patch (${cubelet_config})"
+    fi
+  fi
+
+  if [[ -n "${cube_router_enable}" ]]; then
+    validate_bool_01 "${cube_router_enable}" "CUBE_SANDBOX_CUBE_ROUTER_ENABLE"
+    local cube_router_enable_toml="false"
+    if [[ "${cube_router_enable}" == "1" ]]; then
+      cube_router_enable_toml="true"
+    fi
+    if grep -Eq '^[[:space:]]*cube_router_enable = ' "${cubelet_config}"; then
+      sed -i -E "s|^([[:space:]]*)cube_router_enable = .*|\1cube_router_enable = ${cube_router_enable_toml}|" "${cubelet_config}"
+      if ! grep -Eq "^[[:space:]]*cube_router_enable = ${cube_router_enable_toml}\$" "${cubelet_config}"; then
+        log "WARNING: failed to patch cube_router_enable in Cubelet config (${cubelet_config})"
+      fi
+      log "patched cube-router enable: ${cube_router_enable_toml}"
+    else
+      log "WARNING: Cubelet config missing cube_router_enable key; skipped cube-router enable patch (${cubelet_config})"
+    fi
+  fi
+
+  if [[ -n "${cube_router_cidr}" ]]; then
+    if grep -Eq '^[[:space:]]*cube_router_cidr = "' "${cubelet_config}"; then
+      sed -i -E "s|^([[:space:]]*)cube_router_cidr = \"[^\"]*\"|\1cube_router_cidr = \"${cube_router_cidr}\"|" "${cubelet_config}"
+      if ! grep -Eq "^[[:space:]]*cube_router_cidr = \"${cube_router_cidr}\"\$" "${cubelet_config}"; then
+        log "WARNING: failed to patch cube_router_cidr in Cubelet config (${cubelet_config})"
+      fi
+      log "patched cube-router CIDR: ${cube_router_cidr}"
+    else
+      log "WARNING: Cubelet config missing cube_router_cidr key; skipped cube-router CIDR patch (${cubelet_config})"
     fi
   fi
 }
@@ -647,10 +763,9 @@ patch_cubelet_config_template() {
 # ---------------------------------------------------------------------------
 
 # assert_safe_install_prefix: refuse to perform a destructive full wipe of an
-# obviously unsafe install prefix. Guards against a mis-set
-# ONE_CLICK_INSTALL_PREFIX (e.g. "/" or "/usr", or a foreign dir like
-# "/usr/local" / "/var/lib") turning the custom-prefix wipe into a
-# system-destroying `rm -rf`. Beyond the root/system/top-level denylist, a
+# obviously unsafe install root. Guards against a bad caller accidentally
+# pointing a wipe at "/" or "/usr", or a foreign dir like "/usr/local" /
+# "/var/lib", turning the wipe into a system-destroying `rm -rf`. Beyond the root/system/top-level denylist, a
 # non-empty existing prefix is only wiped when it is a recognised CubeSandbox
 # install (presence of a marker artifact such as .one-click.env / CubeMaster)
 # or effectively empty. A lone '.backup' left over from an interrupted upgrade
@@ -659,14 +774,14 @@ patch_cubelet_config_template() {
 assert_safe_install_prefix() {
   local prefix="$1"
 
-  [[ -n "${prefix}" ]] || die "refusing to wipe an empty install prefix"
-  [[ "${prefix}" == /* ]] || die "refusing to wipe a non-absolute install prefix: ${prefix}"
-  [[ ! -L "${prefix}" ]] || die "refusing to wipe a symlink install prefix: ${prefix}"
+  [[ -n "${prefix}" ]] || die "refusing to wipe an empty install root"
+  [[ "${prefix}" == /* ]] || die "refusing to wipe a non-absolute install root: ${prefix}"
+  [[ ! -L "${prefix}" ]] || die "refusing to wipe a symlink install root: ${prefix}"
 
   # Normalize: drop a single trailing slash (but keep "/" detectable).
   local norm="${prefix%/}"
   [[ -n "${norm}" ]] || die "refusing to wipe the filesystem root: ${prefix}"
-  [[ ! -L "${norm}" ]] || die "refusing to wipe a symlink install prefix: ${prefix}"
+  [[ ! -L "${norm}" ]] || die "refusing to wipe a symlink install root: ${prefix}"
 
   case "${norm}" in
     /usr|/bin|/sbin|/lib|/lib64|/etc|/var|/boot|/dev|/proc|/sys|/run|/root|/home|/opt)
@@ -682,7 +797,7 @@ assert_safe_install_prefix() {
   # top-level directories cannot be wiped wholesale.
   local trimmed="${norm#/}"
   if [[ "${trimmed}" != */* ]]; then
-    die "refusing to wipe a top-level directory: ${prefix} (install prefix must be at least two levels deep)"
+    die "refusing to wipe a top-level directory: ${prefix} (install root must be at least two levels deep)"
   fi
 
   # Content sanity check: the custom-prefix wipe deletes every top-level entry
@@ -703,7 +818,7 @@ _assert_no_top_level_symlinks() {
   local symlink
   symlink="$(find "${dir}" -mindepth 1 -maxdepth 1 -type l -print -quit 2>/dev/null || true)"
   if [[ -n "${symlink}" ]]; then
-    die "refusing to wipe custom install prefix ${display}: contains top-level symlink (${symlink}); move it away and retry"
+    die "refusing to wipe install root ${display}: contains top-level symlink (${symlink}); move it away and retry"
   fi
 }
 
@@ -722,7 +837,7 @@ _assert_cube_prefix_marker_or_empty() {
     local stray
     stray="$(find "${dir}" -mindepth 1 -maxdepth 1 ! -name '.backup' -print -quit 2>/dev/null || true)"
     if [[ -n "${stray}" ]]; then
-      die "refusing to wipe custom install prefix ${display}: directory is not empty and contains no CubeSandbox installation markers (.one-click.env / CubeMaster / CubeAPI / Cubelet). Point ONE_CLICK_INSTALL_PREFIX at a dedicated CubeSandbox prefix, or remove the foreign content first."
+      die "refusing to wipe install root ${display}: directory is not empty and contains no CubeSandbox installation markers (.one-click.env / CubeMaster / CubeAPI / Cubelet). Remove the foreign content first."
     fi
   fi
 }
@@ -740,14 +855,14 @@ wipe_custom_install_prefix_contents() {
   fi
 
   before="$(stat -c '%d:%i' -- "${norm}")" \
-    || die "failed to stat install prefix before wipe: ${prefix}"
+    || die "failed to stat install root before wipe: ${prefix}"
 
   (
-    cd -- "${norm}" || die "failed to enter install prefix: ${prefix}"
+    cd -- "${norm}" || die "failed to enter install root: ${prefix}"
     after="$(stat -c '%d:%i' -- .)" \
-      || die "failed to stat install prefix after cd: ${prefix}"
+      || die "failed to stat install root after cd: ${prefix}"
     [[ "${before}" == "${after}" ]] \
-      || die "install prefix changed while preparing to wipe: ${prefix}"
+      || die "install root changed while preparing to wipe: ${prefix}"
 
     # Re-run the marker/empty check against the pinned cwd. This closes the
     # gap between path validation and destructive deletion.
@@ -862,6 +977,8 @@ def parse(path):
 # database (configured via the WebUI), and the DB master key is auto-bootstrapped
 # by CubeAPI, so AGENTHUB_SECRET_KEY is obsolete too.
 DEPRECATED_KEYS = {
+    "ONE_CLICK_INSTALL_PREFIX",
+    "ONE_CLICK_TOOLBOX_ROOT",
     "AGENTHUB_DEEPSEEK_API_KEY",
     "OPENCLAW_DEEPSEEK_API_KEY",
     "AGENTHUB_LLM_API_KEY",
@@ -875,7 +992,30 @@ DEPRECATED_KEYS = {
     "AGENTHUB_LLM_CREDENTIAL_MODE",
     "AGENTHUB_SECRET_KEY",
     "CUBE_API_DATABASE_URL",
+    # cube-proxy now pulls a pre-published image (MIRROR / CUBE_SANDBOX_CUBE_PROXY_IMAGE);
+    # the old local-build knobs must not linger as kept-extra after upgrade.
+    "CUBE_PROXY_IMAGE_TAG",
+    "CUBE_PROXY_BASE_IMAGE",
 }
+
+LEGACY_CUBE_PROXY_CERT_DIR_DEFAULTS = {
+    '"${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"',
+    "'${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs'",
+    "${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs",
+}
+
+# Old one-click default for the locally-built cube-proxy image. Upgrades that
+# still carry this exact value drop it (via DEPRECATED_KEYS) and adopt the
+# pre-published TCR image selected by MIRROR; only non-default custom tags are
+# migrated to CUBE_SANDBOX_CUBE_PROXY_IMAGE.
+LEGACY_CUBE_PROXY_IMAGE_TAG_DEFAULT = "cube-proxy:one-click"
+
+
+def normalize_legacy_value(key, val, tmpl_val):
+    if key == "CUBE_PROXY_CERT_DIR" and val in LEGACY_CUBE_PROXY_CERT_DIR_DEFAULTS:
+        return tmpl_val, True
+    return val, False
+
 
 new_defaults = parse(new_example)
 old_values = parse(old_runtime)
@@ -887,6 +1027,7 @@ added = []
 updated_default = []
 preserved = []
 explicit = []
+migrated_legacy = []
 dropped = []
 
 out_lines = []
@@ -912,7 +1053,9 @@ for line in template:
         chosen = new_overrides[key]
         explicit.append(key)
     elif key in old_values:
-        ov = old_values[key]
+        ov, migrated = normalize_legacy_value(key, old_values[key], tmpl_val)
+        if migrated:
+            migrated_legacy.append((key, old_values[key], ov))
         if (has_baseline and key in old_baseline_vals
                 and ov == old_baseline_vals[key] and ov != tmpl_val):
             chosen = tmpl_val
@@ -924,6 +1067,20 @@ for line in template:
     else:
         added.append((key, tmpl_val))
     out_lines.append("%s=%s" % (key, chosen))
+
+# Migrate a customized CUBE_PROXY_IMAGE_TAG into CUBE_SANDBOX_CUBE_PROXY_IMAGE
+# before the obsolete key is dropped. The old default cube-proxy:one-click is
+# NOT migrated: upgrades adopt the pre-published TCR image selected by MIRROR.
+legacy_proxy_image_tag = old_values.get("CUBE_PROXY_IMAGE_TAG", "").strip()
+if (legacy_proxy_image_tag
+        and legacy_proxy_image_tag != LEGACY_CUBE_PROXY_IMAGE_TAG_DEFAULT
+        and "CUBE_SANDBOX_CUBE_PROXY_IMAGE" not in old_values):
+    old_values["CUBE_SANDBOX_CUBE_PROXY_IMAGE"] = legacy_proxy_image_tag
+    migrated_legacy.append((
+        "CUBE_PROXY_IMAGE_TAG",
+        legacy_proxy_image_tag,
+        "CUBE_SANDBOX_CUBE_PROXY_IMAGE=%s" % legacy_proxy_image_tag,
+    ))
 
 # Old-only keys (present in old runtime, absent from the new template) are
 # host/user specific (NODE_IP, ROLE, control-plane addr, custom vars). Never
@@ -965,6 +1122,9 @@ for k, ov, nv in updated_default:
 report.append("[preserved] kept your customized values: %d" % len(preserved))
 for k, v in preserved:
     report.append("  = %s=%s" % (k, redact(k, v)))
+report.append("[migrated-legacy] legacy defaults rewritten to new fixed defaults: %d" % len(migrated_legacy))
+for k, ov, nv in migrated_legacy:
+    report.append("  ^ %s: %s -> %s" % (k, redact(k, ov), redact(k, nv)))
 report.append("[explicit] taken from new .env overrides: %d" % len(explicit))
 for k in explicit:
     report.append("  ! %s" % k)
@@ -979,8 +1139,8 @@ with open(diff_file, "w", encoding="utf-8") as fh:
     fh.write("\n".join(report) + "\n")
 
 sys.stderr.write(
-    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, >%d kept-extra, -%d dropped%s\n" % (
-        len(added), len(updated_default), len(preserved), len(extra), len(dropped),
+    "[one-click] env merge: +%d new, ~%d default-updated, =%d preserved, ^%d migrated-legacy, >%d kept-extra, -%d dropped%s\n" % (
+        len(added), len(updated_default), len(preserved), len(migrated_legacy), len(extra), len(dropped),
         "" if has_baseline else " (two-way fallback: no baseline)"))
 PY
 }
@@ -1383,6 +1543,12 @@ is_cube_tap_netdev() {
   [[ "${iface}" =~ ^z[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
+is_cube_managed_netdev() {
+  local iface="$1"
+  iface="${iface%%@*}"
+  [[ "${iface}" == "cube-dev" || "${iface}" == "cube-router" ]] || is_cube_tap_netdev "${iface}"
+}
+
 resolv_conf_candidates() {
   printf '%s\n' \
     "/run/systemd/resolve/resolv.conf" \
@@ -1443,9 +1609,9 @@ _check_cidr_conflict() {
       cubedev_cidr="${iface_cidr}"
       continue
     fi
-    # cubesandbox's persistent TAP devices are named "z<ipv4>" (tapNamePrefix
-    # "z"). They belong to cube and must not be treated as host conflicts.
-    if is_cube_tap_netdev "${iface_name}"; then
+    # Other cube-managed devices, including the optional cube-router and
+    # persistent TAP devices named "z<ipv4>", are also deployment residue.
+    if is_cube_managed_netdev "${iface_name}"; then
       continue
     fi
 
@@ -1481,9 +1647,9 @@ _check_cidr_conflict() {
     while IFS= read -r route_line; do
       [[ -n "${route_line}" ]] || continue
 
-      # Skip routes attached to cubesandbox's own gateway interface.
+      # Skip routes attached to cubesandbox-managed interfaces.
       if [[ "${route_line}" =~ dev[[:space:]]+([^[:space:]]+) ]]; then
-        if [[ "${BASH_REMATCH[1]}" == "cube-dev" ]] || is_cube_tap_netdev "${BASH_REMATCH[1]}"; then
+        if is_cube_managed_netdev "${BASH_REMATCH[1]}"; then
           continue
         fi
       fi
@@ -1604,6 +1770,7 @@ _check_cidr_conflict() {
   To change the CIDR, fully reset the cube network first:
     sudo systemctl stop 'cube-sandbox-*.target'
     sudo ip link delete cube-dev 2>/dev/null || true
+    sudo ip link delete cube-router 2>/dev/null || true
     ip tuntap show | awk -F: '/^z[0-9]+\\./{print \$1}' \\
       | xargs -r -n1 -I{} sudo ip tuntap del dev {} mode tap
   then re-run install with the new CIDR.
@@ -1634,6 +1801,8 @@ check_cidr_preflight() {
   # a conflict and block the upgrade.
   local skip_conflict="${2:-${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}}"
   local cidr_label="${3:-CUBE_SANDBOX_NETWORK_CIDR}"
+  local max_mask="${4:-24}"
+  local min_mask="${5:-16}"
 
   # Empty CIDR means there is nothing to validate.
   if [[ -z "${cidr}" ]]; then
@@ -1672,9 +1841,13 @@ check_cidr_preflight() {
     fi
   done
 
-  # 3. Valid mask range [8, 30] (use 10# prefix to prevent octal interpretation)
-  if ! [[ "${mask}" =~ ^[0-9]+$ ]] || (( 10#${mask} < 8 || 10#${mask} > 30 )); then
-    die "${cidr_label} mask must be between 8 and 30 (got: ${mask})"
+  # 3. Valid mask range [min_mask, max_mask] (use 10# prefix to prevent octal interpretation)
+  if ! [[ "${min_mask}" =~ ^[0-9]+$ ]] || ! [[ "${max_mask}" =~ ^[0-9]+$ ]] \
+    || (( 10#${min_mask} < 0 || 10#${max_mask} > 32 || 10#${min_mask} > 10#${max_mask} )); then
+    die "${cidr_label} mask range must be valid (got: ${min_mask}-${max_mask})"
+  fi
+  if ! [[ "${mask}" =~ ^[0-9]+$ ]] || (( 10#${mask} < 10#${min_mask} || 10#${mask} > 10#${max_mask} )); then
+    die "${cidr_label} mask must be between ${min_mask} and ${max_mask} (got: ${mask})"
   fi
 
   # 4. Network address alignment check
@@ -1755,4 +1928,72 @@ EOF
   fi
 
   log "glibc version ${glibc_ver} OK (>= ${min_major}.${min_minor})"
+}
+
+# check_compute_control_plane_preflight: fail fast when a compute node is
+# missing the mandatory control plane address. This mirrors the resolution
+# logic in resolve_control_plane_cubemaster_addr() (both scripts/one-click/
+# and scripts/systemd/) and must run before package extraction or dependency
+# installation so the user gets a friendly, actionable error before any
+# destructive change.
+check_compute_control_plane_preflight() {
+  local role
+  role="$(one_click_deploy_role)"
+
+  [[ "${role}" == "compute" ]] || return 0
+
+  local addr="${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}"
+  local ip="${ONE_CLICK_CONTROL_PLANE_IP:-}"
+  # 8089 is the cubemaster protocol port (a fixed constant); do not derive it
+  # from CUBEMASTER_ADDR, which is the control node's local listen address.
+  local cubemaster_port=8089
+
+  # Guard: when both variables are set they MUST resolve to the same address.
+  # ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR takes priority at runtime; silently
+  # ignoring a conflicting ONE_CLICK_CONTROL_PLANE_IP would be a configuration
+  # trap — the user would believe they are connecting to IP when they are not.
+  if [[ -n "${addr}" && -n "${ip}" ]]; then
+    local ip_resolved="${ip}:${cubemaster_port}"
+    if [[ "${addr}" != "${ip_resolved}" ]]; then
+      die "ONE_CLICK_CONTROL_PLANE_IP (resolves to ${ip_resolved}) and ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR (${addr}) conflict. Use only one of them; if you need a custom port, use ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=<host>:<port>."
+    fi
+  fi
+
+  if [[ -n "${addr}" ]]; then
+    validate_host_port "${addr}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
+    log "control plane cubemaster address preflight OK: ${addr}"
+    return 0
+  fi
+
+  if [[ -n "${ip}" ]]; then
+    validate_ipv4_literal "${ip}" "ONE_CLICK_CONTROL_PLANE_IP"
+    validate_host_port "${ip}:${cubemaster_port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
+    log "control plane IP preflight OK: ${ip} (cubemaster port ${cubemaster_port})"
+    return 0
+  fi
+
+  cat >&2 <<'EOF'
+
+╔══════════════════════════════════════════════════════════════════╗
+║  [!!] CONTROL PLANE ADDRESS NOT CONFIGURED                     ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  This is a COMPUTE node (ONE_CLICK_DEPLOY_ROLE=compute).         ║
+║  The control plane address is REQUIRED but not configured.       ║
+║                                                                  ║
+║  Set ONE of these variables in your .env file:                   ║
+║                                                                  ║
+║    Option A — control plane IP (recommended):                    ║
+║      ONE_CLICK_CONTROL_PLANE_IP=<control-plane-ip>               ║
+║                                                                  ║
+║    Option B — full CubeMaster host:port:                         ║
+║      ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=<host>:<port>       ║
+║                                                                  ║
+║  Or pass as environment variables:                               ║
+║    ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11 ./install-compute.sh     ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+EOF
+  die "ONE_CLICK_CONTROL_PLANE_IP or ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR is required for compute role"
 }

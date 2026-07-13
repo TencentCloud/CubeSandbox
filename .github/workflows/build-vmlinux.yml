@@ -1,16 +1,26 @@
 name: Build vmlinux
+run-name: Build vmlinux ${{ inputs.kernel_arch || 'all' }}
 
 on:
   push:
     paths:
-      - 'configs/kernel-oc9.config'
+      - 'configs/kernel-oc9.aarch64.config'
+      - 'configs/kernel-oc9.x86_64.config'
       - '.github/workflows/build-vmlinux.yml'
   workflow_dispatch:
+    inputs:
+      kernel_arch:
+        description: Kernel architecture to build
+        required: true
+        default: x86_64
+        type: choice
+        options:
+          - x86_64
+          - aarch64
 
 env:
   KERNEL_TAG: 6.6.119-49.6
   KERNEL_ARCHIVE_URL: https://cnb.cool/CubeSandbox/OpenCloudOS-Kernel/-/git/archive/6.6.119-49.6.zip
-  VMLINUX_CACHE_PATH: kernel-cache/vmlinux
 
 defaults:
   run:
@@ -18,11 +28,20 @@ defaults:
 
 jobs:
   build:
-    runs-on: arc-runner-set-16c32g-containerd
+    name: Build vmlinux (${{ matrix.kernel_arch }})
+    runs-on: ${{ matrix.runner }}
     container:
       image: ubuntu:24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.kernel_arch == 'x86_64' && '[{"kernel_arch":"x86_64","kbuild_arch":"x86","runner":"arc-runner-set-16c32g-containerd"}]' || github.event_name == 'workflow_dispatch' && inputs.kernel_arch == 'aarch64' && '[{"kernel_arch":"aarch64","kbuild_arch":"arm64","runner":"ubuntu-24.04-arm"}]' || '[{"kernel_arch":"x86_64","kbuild_arch":"x86","runner":"arc-runner-set-16c32g-containerd"},{"kernel_arch":"aarch64","kbuild_arch":"arm64","runner":"ubuntu-24.04-arm"}]') }}
     permissions:
       contents: read
+    env:
+      KERNEL_ARCH: ${{ matrix.kernel_arch }}
+      KBUILD_ARCH: ${{ matrix.kbuild_arch }}
+      VMLINUX_CACHE_PATH: kernel-cache/${{ matrix.kernel_arch }}/vmlinux
 
     steps:
       - name: Checkout
@@ -31,10 +50,10 @@ jobs:
       - name: Compute vmlinux cache metadata
         id: vmlinux_metadata
         run: |
-          config_hash="$(sha256sum configs/kernel-oc9.config | awk '{print $1}')"
+          config_hash="$(sha256sum "configs/kernel-oc9.${KERNEL_ARCH}.config" | awk '{print $1}')"
           echo "config_hash=${config_hash}" >> "${GITHUB_OUTPUT}"
-          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
-          echo "artifact_name=vmlinux-opencloudos-${KERNEL_TAG}-${config_hash}" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}" >> "${GITHUB_OUTPUT}"
 
       - name: Install kernel build dependencies
         run: |
@@ -79,15 +98,20 @@ jobs:
       - name: Configure kernel
         if: steps.restore_vmlinux.outputs.cache-hit != 'true'
         run: |
-          cp configs/kernel-oc9.config "${KERNEL_SRC}/.config"
-          make -C "${KERNEL_SRC}" olddefconfig
+          cp "configs/kernel-oc9.${KERNEL_ARCH}.config" "${KERNEL_SRC}/.config"
+          make -C "${KERNEL_SRC}" ARCH="${KBUILD_ARCH}" olddefconfig
 
       - name: Build vmlinux
         if: steps.restore_vmlinux.outputs.cache-hit != 'true'
         run: |
           (
             cd "${KERNEL_SRC}"
-            KCFLAGS="-Wa,-mx86-used-note=no" make -j "$(nproc)" vmlinux
+            if [[ "${KERNEL_ARCH}" == "x86_64" ]]; then
+              KCFLAGS="-Wa,-mx86-used-note=no" make ARCH="${KBUILD_ARCH}" -j "$(nproc)" vmlinux
+            else
+              make ARCH="${KBUILD_ARCH}" -j "$(nproc)" Image
+              cp arch/arm64/boot/Image vmlinux
+            fi
           )
           install -D -m 0644 "${KERNEL_SRC}/vmlinux" "${VMLINUX_CACHE_PATH}"
 

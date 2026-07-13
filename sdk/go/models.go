@@ -26,7 +26,7 @@ type SandboxInfo struct {
 	SandboxID    string            `json:"sandboxID"`
 	ClientID     string            `json:"clientID"`
 	StartedAt    time.Time         `json:"startedAt"`
-	EndAt        time.Time         `json:"endAt"`
+	EndAt        *time.Time        `json:"endAt,omitempty"`
 	EnvdVersion  string            `json:"envdVersion"`
 	Domain       string            `json:"domain,omitempty"`
 	CPUCount     int               `json:"cpuCount"`
@@ -53,14 +53,25 @@ type NetworkOptions struct {
 }
 
 type CreateOptions struct {
-	TemplateID          string
-	Timeout             time.Duration
+	TemplateID string
+	// Optional idle TTL; nil omits the field. See docs/guide/lifecycle.md.
+	Timeout             *time.Duration
 	EnvVars             map[string]string
 	Metadata            map[string]string
 	AllowInternetAccess *bool
 	Network             NetworkOptions
 	Extra               map[string]any
 }
+
+// DurationPtr returns a pointer to d. It is a convenience for optional
+// duration fields such as CreateOptions.Timeout and Sandbox.Resume, where nil
+// means "not provided; let the server decide".
+func DurationPtr(d time.Duration) *time.Duration {
+	return &d
+}
+
+// NeverTimeout requests a sandbox that never idle-times-out. See docs/guide/lifecycle.md.
+const NeverTimeout time.Duration = -1
 
 type PauseOptions struct {
 	Wait     *bool
@@ -132,6 +143,45 @@ type OutputMessage struct {
 	Text      string
 	Timestamp string
 	IsStderr  bool
+}
+
+// WriteEntry is a path + data pair for Files.WriteFiles.
+type WriteEntry struct {
+	Path string
+	Data []byte
+}
+
+// FileEntry represents a file or directory returned by envd filesystem RPCs.
+type FileEntry struct {
+	Name         string `json:"name"`
+	Type         string `json:"type"`
+	Path         string `json:"path"`
+	Size         int64  `json:"size,string"`
+	Mode         int    `json:"mode"`
+	Permissions  string `json:"permissions"`
+	Owner        string `json:"owner"`
+	Group        string `json:"group"`
+	ModifiedTime string `json:"modifiedTime"`
+}
+
+func (e FileEntry) IsDir() bool {
+	return e.Type == "FILE_TYPE_DIRECTORY"
+}
+
+// NotFoundError is returned when a filesystem path does not exist.
+type NotFoundError struct {
+	Path    string
+	Message string
+}
+
+func (e *NotFoundError) Error() string {
+	return e.Message
+}
+
+// WatchEvent represents a filesystem change detected by WatchDir.
+type WatchEvent struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 func (e *Execution) mainText() string {

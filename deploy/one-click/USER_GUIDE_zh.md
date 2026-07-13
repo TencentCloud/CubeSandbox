@@ -34,7 +34,7 @@ cp env.example .env
 sudo ./install.sh
 ```
 
-默认安装目录：
+固定安装目录：
 
 ```bash
 /usr/local/services/cubetoolbox

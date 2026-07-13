@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
@@ -541,9 +542,26 @@ func snapshotErrorCode(err error) int {
 		return int(errorcode.ErrorCode_NotFound)
 	case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):
 		return int(errorcode.ErrorCode_DBError)
+	case isMySQLLockError(err):
+		return int(errorcode.ErrorCode_DBError)
 	default:
 		return int(errorcode.ErrorCode_MasterParamsError)
 	}
+}
+
+func isMySQLLockError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		switch mysqlErr.Number {
+		case 1205, 1213:
+			return true
+		}
+	}
+	message := err.Error()
+	return strings.Contains(message, "Error 1213") ||
+		strings.Contains(message, "Error 1205") ||
+		strings.Contains(message, "Deadlock found when trying to get lock") ||
+		strings.Contains(message, "Lock wait timeout exceeded")
 }
 
 func snapshotOperationInfoFromJob(info *types.TemplateImageJobInfo) *templatecenter.SnapshotOperationInfo {

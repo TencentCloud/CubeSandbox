@@ -6,8 +6,10 @@ package templatecenter
 
 import (
 	"testing"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 )
 
 func TestSnapshotRuntimeRefFromAnnotationMapParsesLogicalFields(t *testing.T) {
@@ -29,5 +31,43 @@ func TestSnapshotRuntimeRefFromAnnotationMapParsesLogicalFields(t *testing.T) {
 	}
 	if ref.AttachedAt.IsZero() {
 		t.Fatal("AttachedAt should be parsed")
+	}
+}
+
+func TestSnapshotRuntimeActiveModelToInfoUsesActiveStatus(t *testing.T) {
+	seen := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	info := snapshotRuntimeActiveModelToInfo(models.SnapshotRuntimeActive{
+		SnapshotID:  " snap-1 ",
+		SandboxID:   " sb-1 ",
+		NodeID:      " node-a ",
+		NodeIP:      " 10.0.0.1 ",
+		BindingType: " memory_backing ",
+		MemoryVol:   " mem-1 ",
+		RootfsVol:   " rootfs-1 ",
+		SandboxGen:  7,
+		AttachedAt:  seen,
+		LastSeenAt:  &seen,
+		LastError:   " ",
+	})
+
+	if info.Status != SnapshotRuntimeRefStatusActive {
+		t.Fatalf("Status=%q, want ACTIVE", info.Status)
+	}
+	if info.SandboxID != "sb-1" || info.SnapshotID != "snap-1" {
+		t.Fatalf("unexpected binding identity: %#v", info)
+	}
+	if info.BindingType != SnapshotRuntimeBindingMemoryBacking {
+		t.Fatalf("BindingType=%q, want %q", info.BindingType, SnapshotRuntimeBindingMemoryBacking)
+	}
+	if info.SandboxGen != 7 {
+		t.Fatalf("SandboxGen=%d, want 7", info.SandboxGen)
+	}
+}
+
+func TestSnapshotRuntimeBindingKeyDefaultsBindingType(t *testing.T) {
+	got := snapshotRuntimeBindingKey(" sb-1 ", "")
+	want := "sb-1\x00" + SnapshotRuntimeBindingMemoryBacking
+	if got != want {
+		t.Fatalf("binding key=%q, want %q", got, want)
 	}
 }

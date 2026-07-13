@@ -1,4 +1,4 @@
-ARCH := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/' \
+ARCH := $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/' \
 			 | sed 's/ppc64le/powerpc/' | sed 's/mips.*/mips/' \
 			 | sed 's/riscv64/riscv/' | sed 's/loongarch.*/loongarch/')
 VMLINUX := $(ARCH)/vmlinux.h

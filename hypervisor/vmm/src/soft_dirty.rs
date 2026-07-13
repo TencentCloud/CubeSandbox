@@ -23,17 +23,16 @@
 //! Requires `CONFIG_MEM_SOFT_DIRTY=y`. On kernels without this config the
 //! caller is expected to silently fall back to the pagemap_anon path.
 
-use crate::pagemap_anon::{self, get_anon_pages};
+use crate::pagemap_anon::{self, coalesce_pages_to_ranges, get_anon_pages, host_page_size};
 use log::{debug, info, trace};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::time::Instant;
 use thiserror::Error;
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
-use vm_migration::protocol::{MemoryRange, MemoryRangeTable};
-
-/// Page size constant (4KB)
-pub const PAGE_SIZE: u64 = 4096;
+#[cfg(test)]
+use vm_migration::protocol::MemoryRange;
+use vm_migration::protocol::MemoryRangeTable;
 
 /// Size of a pagemap entry in bytes
 const PAGEMAP_ENTRY_SIZE: u64 = 8;
@@ -191,12 +190,13 @@ pub fn clear_soft_dirty() -> Result<()> {
 ///   were anonymous and previously written, so they must be saved on the
 ///   next snapshot to be safe.
 pub fn get_soft_dirty_pages(host_addr: u64, length: u64) -> Result<Vec<bool>> {
-    if host_addr % PAGE_SIZE != 0 {
+    let page_size = host_page_size();
+    if host_addr % page_size != 0 {
         return Err(SoftDirtyError::NotPageAligned);
     }
 
-    let num_pages = length.div_ceil(PAGE_SIZE) as usize;
-    let start_page = host_addr / PAGE_SIZE;
+    let num_pages = length.div_ceil(page_size) as usize;
+    let start_page = host_addr / page_size;
 
     let mut pagemap_file =
         File::open("/proc/self/pagemap").map_err(|e| SoftDirtyError::OpenFailed {
@@ -268,6 +268,7 @@ pub fn filter_memory_ranges_by_soft_dirty<B: vm_memory::bitmap::Bitmap + 'static
 ) -> Result<(MemoryRangeTable, SoftDirtyStats)> {
     let mut filtered_ranges = MemoryRangeTable::default();
     let mut stats = SoftDirtyStats::default();
+    let page_size = host_page_size();
 
     debug!(
         "Starting soft-dirty filtering for {} memory regions",
@@ -279,7 +280,7 @@ pub fn filter_memory_ranges_by_soft_dirty<B: vm_memory::bitmap::Bitmap + 'static
         let length = range.length;
 
         stats.total_bytes += length;
-        stats.total_pages += length.div_ceil(PAGE_SIZE);
+        stats.total_pages += length.div_ceil(page_size);
 
         trace!(
             "Processing memory region: GPA=0x{:x}, length={}",
@@ -293,36 +294,11 @@ pub fn filter_memory_ranges_by_soft_dirty<B: vm_memory::bitmap::Bitmap + 'static
 
         let dirty_pages = get_soft_dirty_pages(host_addr as u64, length)?;
 
-        let mut current_range_start: Option<u64> = None;
-        let mut current_range_length: u64 = 0;
-
-        for (page_idx, &is_dirty) in dirty_pages.iter().enumerate() {
-            let page_gpa = gpa + (page_idx as u64 * PAGE_SIZE);
-
-            if is_dirty {
-                stats.dirty_pages += 1;
-                stats.saved_bytes += PAGE_SIZE;
-
-                if current_range_start.is_none() {
-                    current_range_start = Some(page_gpa);
-                    current_range_length = PAGE_SIZE;
-                } else {
-                    current_range_length += PAGE_SIZE;
-                }
-            } else if let Some(start) = current_range_start.take() {
-                filtered_ranges.push(MemoryRange {
-                    gpa: start,
-                    length: current_range_length,
-                });
-                current_range_length = 0;
-            }
-        }
-
-        if let Some(start) = current_range_start {
-            filtered_ranges.push(MemoryRange {
-                gpa: start,
-                length: current_range_length,
-            });
+        let (region_ranges, dirty_count) = coalesce_pages_to_ranges(gpa, &dirty_pages, page_size);
+        stats.dirty_pages += dirty_count;
+        stats.saved_bytes += dirty_count * page_size;
+        for r in region_ranges {
+            filtered_ranges.push(r);
         }
     }
 
@@ -374,6 +350,7 @@ pub fn filter_memory_ranges_by_anon_and_soft_dirty<B: vm_memory::bitmap::Bitmap 
 ) -> Result<(MemoryRangeTable, SoftDirtyStats)> {
     let mut filtered_ranges = MemoryRangeTable::default();
     let mut stats = SoftDirtyStats::default();
+    let page_size = host_page_size();
 
     debug!(
         "Starting anon ∩ soft-dirty filtering for {} memory regions",
@@ -385,7 +362,7 @@ pub fn filter_memory_ranges_by_anon_and_soft_dirty<B: vm_memory::bitmap::Bitmap 
         let length = range.length;
 
         stats.total_bytes += length;
-        stats.total_pages += length.div_ceil(PAGE_SIZE);
+        stats.total_pages += length.div_ceil(page_size);
 
         trace!(
             "Processing memory region: GPA=0x{:x}, length={}",
@@ -402,39 +379,19 @@ pub fn filter_memory_ranges_by_anon_and_soft_dirty<B: vm_memory::bitmap::Bitmap 
 
         debug_assert_eq!(anon_pages.len(), dirty_pages.len());
 
-        let mut current_range_start: Option<u64> = None;
-        let mut current_range_length: u64 = 0;
+        // A page must be saved only when it is both anonymous (CoW) and
+        // soft-dirty in the current window.
+        let must_save: Vec<bool> = anon_pages
+            .iter()
+            .zip(dirty_pages.iter())
+            .map(|(&is_anon, &is_dirty)| is_anon && is_dirty)
+            .collect();
 
-        for (page_idx, (&is_anon, &is_dirty)) in
-            anon_pages.iter().zip(dirty_pages.iter()).enumerate()
-        {
-            let page_gpa = gpa + (page_idx as u64 * PAGE_SIZE);
-            let must_save = is_anon && is_dirty;
-
-            if must_save {
-                stats.dirty_pages += 1;
-                stats.saved_bytes += PAGE_SIZE;
-
-                if current_range_start.is_none() {
-                    current_range_start = Some(page_gpa);
-                    current_range_length = PAGE_SIZE;
-                } else {
-                    current_range_length += PAGE_SIZE;
-                }
-            } else if let Some(start) = current_range_start.take() {
-                filtered_ranges.push(MemoryRange {
-                    gpa: start,
-                    length: current_range_length,
-                });
-                current_range_length = 0;
-            }
-        }
-
-        if let Some(start) = current_range_start {
-            filtered_ranges.push(MemoryRange {
-                gpa: start,
-                length: current_range_length,
-            });
+        let (region_ranges, save_count) = coalesce_pages_to_ranges(gpa, &must_save, page_size);
+        stats.dirty_pages += save_count;
+        stats.saved_bytes += save_count * page_size;
+        for r in region_ranges {
+            filtered_ranges.push(r);
         }
     }
 
@@ -498,7 +455,9 @@ mod tests {
 
     #[test]
     fn test_get_soft_dirty_pages_not_page_aligned() {
-        let result = get_soft_dirty_pages(4097, 4096);
+        // One byte past a page boundary is never aligned on 4 KiB or 64 KiB hosts.
+        let unaligned = host_page_size() + 1;
+        let result = get_soft_dirty_pages(unaligned, host_page_size());
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -532,7 +491,7 @@ mod tests {
         }
 
         // Allocate one page-aligned scratch buffer.
-        let page = PAGE_SIZE as usize;
+        let page = host_page_size() as usize;
         let layout = std::alloc::Layout::from_size_align(page, page).unwrap();
         // SAFETY: standard allocation followed by an explicit deallocation
         // at the end of the test.
@@ -597,7 +556,10 @@ mod tests {
         // GuestMemoryMmap::from_ranges() defaults to an anonymous MAP_PRIVATE
         // mapping, which is exactly the kind of memory soft-dirty tracks.
         const NUM_PAGES: u64 = 16;
-        let region_len = (NUM_PAGES * PAGE_SIZE) as usize;
+        // Drive the test at the host's real page size so it exercises the
+        // 64 KiB path when run on an ARM64 64 KiB kernel.
+        let page_size = host_page_size();
+        let region_len = (NUM_PAGES * page_size) as usize;
         let guest_memory =
             GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), region_len)]).unwrap();
 
@@ -611,14 +573,14 @@ mod tests {
         for p in 0..NUM_PAGES {
             // SAFETY: host_base..host_base+region_len is a valid mapping
             // owned by `guest_memory`; we touch one byte per page.
-            unsafe { host_base.add((p * PAGE_SIZE) as usize).write_volatile(0) };
+            unsafe { host_base.add((p * page_size) as usize).write_volatile(0) };
         }
 
         let ranges = {
             let mut t = MemoryRangeTable::default();
             t.push(MemoryRange {
                 gpa: 0,
-                length: NUM_PAGES * PAGE_SIZE,
+                length: NUM_PAGES * page_size,
             });
             t
         };
@@ -626,10 +588,10 @@ mod tests {
         // Helper: write one byte into the page at `page_idx`.
         let dirty_page = |page_idx: u64, val: u8| {
             // SAFETY: 0 <= page_idx < NUM_PAGES, mapping is at least
-            // NUM_PAGES * PAGE_SIZE bytes long.
+            // NUM_PAGES * page_size bytes long.
             unsafe {
                 host_base
-                    .add((page_idx * PAGE_SIZE) as usize)
+                    .add((page_idx * page_size) as usize)
                     .write_volatile(val)
             };
         };
@@ -655,7 +617,7 @@ mod tests {
         // [page 2 .. page 5).
         assert_eq!(
             collect(&filtered),
-            vec![(2 * PAGE_SIZE, 3 * PAGE_SIZE)],
+            vec![(2 * page_size, 3 * page_size)],
             "round 2: expected exactly the three written pages, coalesced"
         );
         assert_eq!(stats.total_pages, NUM_PAGES);
@@ -663,7 +625,7 @@ mod tests {
             stats.dirty_pages, 3,
             "round 2: expected exactly 3 dirty pages"
         );
-        assert_eq!(stats.saved_bytes, 3 * PAGE_SIZE);
+        assert_eq!(stats.saved_bytes, 3 * page_size);
 
         // Re-arm the tracker for the next window. After this point, the bits
         // for pages 2/3/4 must be cleared again.
@@ -680,7 +642,7 @@ mod tests {
 
         assert_eq!(
             collect(&filtered),
-            vec![(7 * PAGE_SIZE, PAGE_SIZE)],
+            vec![(7 * page_size, page_size)],
             "round 3: expected ONLY page 7, soft-dirty must be a delta and \
              must NOT report pages 2/3/4 from the previous window"
         );
@@ -738,7 +700,9 @@ mod tests {
         }
 
         const NUM_PAGES: u64 = 16;
-        let region_len = (NUM_PAGES * PAGE_SIZE) as usize;
+        // Use the host's real page size so this covers ARM64 64 KiB kernels.
+        let page_size = host_page_size();
+        let region_len = (NUM_PAGES * page_size) as usize;
         let guest_memory =
             GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), region_len)]).unwrap();
 
@@ -747,14 +711,14 @@ mod tests {
             .expect("get_host_address") as *mut u8;
         for p in 0..NUM_PAGES {
             // SAFETY: host_base..host_base+region_len is owned by guest_memory.
-            unsafe { host_base.add((p * PAGE_SIZE) as usize).write_volatile(0) };
+            unsafe { host_base.add((p * page_size) as usize).write_volatile(0) };
         }
 
         let ranges = {
             let mut t = MemoryRangeTable::default();
             t.push(MemoryRange {
                 gpa: 0,
-                length: NUM_PAGES * PAGE_SIZE,
+                length: NUM_PAGES * page_size,
             });
             t
         };
@@ -763,7 +727,7 @@ mod tests {
             // SAFETY: 0 <= page_idx < NUM_PAGES.
             unsafe {
                 host_base
-                    .add((page_idx * PAGE_SIZE) as usize)
+                    .add((page_idx * page_size) as usize)
                     .write_volatile(val)
             };
         };
@@ -796,12 +760,12 @@ mod tests {
         // anon ∩ soft-dirty == soft-dirty exactly: only pages 5 and 6.
         assert_eq!(
             collect(&filtered),
-            vec![(5 * PAGE_SIZE, 2 * PAGE_SIZE)],
+            vec![(5 * page_size, 2 * page_size)],
             "anon ∩ soft-dirty must yield exactly the two pages \
              written in this window, coalesced"
         );
         assert_eq!(stats.total_pages, NUM_PAGES);
         assert_eq!(stats.dirty_pages, 2);
-        assert_eq!(stats.saved_bytes, 2 * PAGE_SIZE);
+        assert_eq!(stats.saved_bytes, 2 * page_size);
     }
 }
