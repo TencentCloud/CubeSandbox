@@ -40,7 +40,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Set E2B_API_URL and CUBE_TEMPLATE_ID in .env.
+# Set E2B_API_KEY, E2B_API_URL, and CUBE_TEMPLATE_ID in .env.
 python run_example.py
 ```
 
@@ -53,9 +53,10 @@ counter, and prints the CubeProxy URL.
 python resume_example.py
 ```
 
-This writes `41` to `/workspace/data/counter.txt`, pauses the MicroVM, reconnects
-to the same sandbox, and verifies the file survived. Keep mutable application
-data under `/workspace`; bake dependencies into the image.
+This increments the counter through the Sinatra API, pauses the MicroVM,
+reconnects to the same sandbox, and verifies the counter through the API again.
+Keep mutable application data under `/workspace`; bake dependencies into the
+image.
 
 ## Security and resources
 

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 
+import requests
 from cubesandbox import Sandbox
 
-from common import required, wait_for_app
+from common import load_environment, public_url, required, tls_verify, wait_for_app
 
 
 def main() -> None:
+    load_environment()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args()
@@ -21,16 +23,31 @@ def main() -> None:
 
     try:
         wait_for_app(sandbox)
-        sandbox.commands.run("printf '41\\n' > /workspace/data/counter.txt")
-        print(f"Pausing {sandbox_id} with counter=41")
+        response = requests.post(
+            public_url(sandbox, "/counter"), timeout=10, verify=tls_verify()
+        )
+        response.raise_for_status()
+        before_pause = response.json()
+        if before_pause != {"counter": 1}:
+            raise RuntimeError(f"Expected counter=1 before pause, got {before_pause!r}")
+        print(f"Counter API before pause PASS: {before_pause}")
+
+        print(f"Pausing {sandbox_id} with counter=1")
         sandbox.pause()
 
         sandbox = Sandbox.connect(sandbox_id=sandbox_id)
         wait_for_app(sandbox)
-        value = sandbox.files.read("/workspace/data/counter.txt").strip()
-        if value != "41":
-            raise RuntimeError(f"Expected restored counter 41, got {value!r}")
-        print(f"Restored {sandbox_id}; counter={value}")
+        response = requests.get(
+            public_url(sandbox, "/counter"), timeout=10, verify=tls_verify()
+        )
+        response.raise_for_status()
+        after_resume = response.json()
+        if after_resume != before_pause:
+            raise RuntimeError(
+                f"Expected restored counter {before_pause!r}, got {after_resume!r}"
+            )
+        print(f"Counter API after resume PASS: {after_resume}")
+        print(f"Restored {sandbox_id}; application state persisted")
     finally:
         try:
             sandbox.kill()

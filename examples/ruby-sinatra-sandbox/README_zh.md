@@ -39,7 +39,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# 在 .env 中填写 E2B_API_URL 与 CUBE_TEMPLATE_ID。
+# 在 .env 中填写 E2B_API_KEY、E2B_API_URL 与 CUBE_TEMPLATE_ID。
 python run_example.py
 ```
 
@@ -51,8 +51,8 @@ python run_example.py
 python resume_example.py
 ```
 
-脚本将 `41` 写入 `/workspace/data/counter.txt`，暂停 MicroVM，再连接同一沙箱并
-验证文件仍然存在。可变数据应放在 `/workspace`，依赖则应在镜像构建阶段安装。
+脚本通过 Sinatra API 递增计数器，暂停 MicroVM，再连接同一沙箱，并再次通过
+API 验证计数器状态。可变数据应放在 `/workspace`，依赖则应在镜像构建阶段安装。
 
 ## 安全与资源建议
 
