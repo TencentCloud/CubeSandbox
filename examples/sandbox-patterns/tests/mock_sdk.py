@@ -8,6 +8,12 @@ import time
 from typing import Any
 
 
+class CommandExitException(Exception):
+    def __init__(self, exit_code: int = 1, message: str = ""):
+        self.exit_code = exit_code
+        super().__init__(message or f"Command exited with code {exit_code}")
+
+
 # ── Shared helpers ──────────────────────────────────────────────────────────
 
 class MockCommandResult:
@@ -102,8 +108,9 @@ class MockCommands:
 
             # Network isolation check: if offline and deps are needed, fail
             if has_deps and self._sandbox is not None and not self._sandbox.allow_internet_access:
-                return MockCommandResult(101, "",
-                    "error: failed to download serde_json v1.0\n"
+                raise CommandExitException(
+                    exit_code=101,
+                    message="error: failed to download serde_json v1.0\n"
                     "Caused by: cannot fetch crates.io — network is disabled\n"
                     "  (allow_internet_access=False)")
 
@@ -187,6 +194,12 @@ class MockCommands:
 _SANDBOX_COUNTER = 0
 # Global snapshot store so list_snapshots() classmethod can find snapshots
 _GLOBAL_SNAPSHOTS: dict[str, dict[str, Any]] = {}
+
+
+def reset_state() -> None:
+    _GLOBAL_SNAPSHOTS.clear()
+    global _SANDBOX_COUNTER
+    _SANDBOX_COUNTER = 0
 
 class MockSandbox:
     def __init__(self, template: str = "", timeout: int = 120,
@@ -309,7 +322,7 @@ class MockSandbox:
         self.kill()
 
 
-# ── Patch sys.modules so that "from e2b import Sandbox" gets our mock ───────
+    # ── Patch sys.modules so that "from e2b import Sandbox" gets our mock ───────
 
 def install():
     import sys
@@ -329,7 +342,7 @@ def install():
     sys.modules["e2b.sandbox.commands"] = cmd_mod
 
     handle_mod = ModuleType("e2b.sandbox.commands.command_handle")
-    handle_mod.CommandExitException = type("CommandExitException", (Exception,), {})
+    handle_mod.CommandExitException = CommandExitException
     sys.modules["e2b.sandbox.commands.command_handle"] = handle_mod
     sys.modules["cubesandbox"] = type(sys)("cubesandbox")
     sys.modules["cubesandbox"].Sandbox = MockSandbox

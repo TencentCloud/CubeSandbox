@@ -41,7 +41,7 @@
 - 阶段 2b：杀死源沙箱 — 快照仍然独立存在。
 - 阶段 3：从检查点 A 分叉出一个新沙箱（恢复工作区状态）。
 - 阶段 4：在分叉中修改代码，然后回滚到检查点 A（亚秒级）。
-- 阶段 5：一键 `sb.clone(n=3)` 从当前状态分叉出 3 个沙箱。
+- 阶段 5：通过 `Sandbox.create(template=snap_id)` 从快照分叉出 3 个沙箱。
 
 ### 4. `multi_container.py` — 多沙箱协作
 
@@ -59,7 +59,7 @@
 |------|------|-----------------|
 | `parallel_workspaces.py` | 有状态工作区生命周期管理 | **生命周期** — 通过 `lifecycle` 自动暂停/恢复 <br> **自省** — `get_info()` 查询沙箱状态 <br> **并发工作区** — 多沙箱并行 |
 | `network_isolation.py` | 出口网络策略执行 | **安全** — 按沙箱设置 `allow_internet_access` <br> **环境变量注入** — 创建时通过 `envs=` 参数 <br> **策略对比** — 在线 vs 离线沙箱对比 |
-| `snapshot_driven_dev.py` | 检查点驱动的迭代开发 | **CubeCoW 快照** — 检查点独立于源沙箱存在 <br> **即时回滚** — 从检查点恢复 <br> **克隆** — `sb.clone(n=N)` 一键分叉 <br> **快照管理** — `list_snapshots()` + `delete_snapshot()` |
+| `snapshot_driven_dev.py` | 检查点驱动的迭代开发 | **CubeCoW 快照** — 检查点独立于源沙箱存在 <br> **即时回滚** — 从检查点恢复 <br> **分叉** — `Sandbox.create(template=snap_id)` 批量分叉 <br> **快照管理** — `list_snapshots()` + `delete_snapshot()` |
 | `multi_container.py` | 多沙箱协作 | **基于角色的隔离** — 构建者（在线）vs 运行者（离线） <br> **跨沙箱产物传输** — 通过宿主 SDK |
 
 ---

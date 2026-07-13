@@ -28,7 +28,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from e2b import Sandbox
-from e2b.sandbox.commands.command_handle import CommandExitException
+try:
+    from e2b.sandbox.commands.command_handle import CommandExitException
+except ModuleNotFoundError:
+    raise RuntimeError(
+        "CommandExitException not available. Run via the verification harness:\n"
+        "  python tests/run_verification.py") from None
 
 from env_utils import load_local_dotenv, required
 

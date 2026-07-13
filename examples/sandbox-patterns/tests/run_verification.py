@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import sys
 import time
 import contextlib
@@ -40,9 +41,7 @@ def run_demo(name: str, module_path: str) -> str:
                 print(f"\n  ✗ FAILED with exit code {rc}")
             else:
                 print(f"\n  ✓ PASSED")
-        except BaseException as e:
-            if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                raise
+        except Exception as e:
             print(f"\n  ✗ EXCEPTION: {type(e).__name__}: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
@@ -70,11 +69,13 @@ def main() -> int:
 
     all_output += f"CubeSandbox Scenario Demos — Verification Report\n"
     all_output += f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-    all_output += f"Git commit: {os.popen('git log --oneline -1 2>/dev/null').read().strip()}\n"
+    result = subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True, timeout=10)
+    all_output += f"Git commit: {result.stdout.strip()}\n"
     all_output += f"Mock SDK: mock_sdk.py\n"
     all_output += f"{'='*70}\n"
 
     for name, module in demos:
+        mock_sdk.reset_state()
         output = run_demo(name, module)
         all_output += f"\n{'─'*70}\n"
         all_output += f"DEMO: {name}\n"
@@ -96,7 +97,7 @@ def main() -> int:
     summary = f"""# CubeSandbox Scenario Demos — Verification Results
 
 **Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}
-**Commit:** {os.popen('git log --oneline -1 2>/dev/null').read().strip()}
+**Commit:** {subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True, timeout=10).stdout.strip()}
 **Overall: {pass_str}**
 
 ## Results
@@ -117,7 +118,7 @@ def main() -> int:
 | Egress policy (allow_internet_access) | network_isolation, multi_container |
 | Snapshot outlives sandbox | snapshot_driven_dev |
 | Instant rollback (~100ms) | snapshot_driven_dev |
-| Clone (sb.clone(n=N)) | snapshot_driven_dev |
+| Fork from snapshot (Sandbox.create(template=snap_id)) | snapshot_driven_dev |
 | Snapshot management (list/delete) | snapshot_driven_dev |
 | Cross-sandbox artifact transfer | multi_container |
 | Role-based network isolation | multi_container |

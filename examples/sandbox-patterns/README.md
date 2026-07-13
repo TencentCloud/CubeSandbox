@@ -43,7 +43,7 @@ What happens:
 - Phase 2b: Kill the source sandbox — the snapshot remains independently.
 - Phase 3: Fork a new sandbox from checkpoint A (restore workspace state).
 - Phase 4: Make changes in the fork, then rollback to checkpoint A (sub-second).
-- Phase 5: One-shot `sb.clone(n=3)` forks 3 sandboxes from the current state.
+- Phase 5: Fork 3 sandboxes from the snapshot via `Sandbox.create(template=snap_id)`.
 
 ### 4. `multi_container.py` — Multi-Sandbox Collaboration
 
@@ -61,7 +61,7 @@ What happens:
 |------|----------|--------------------------|
 | `parallel_workspaces.py` | Stateful workspace lifecycle | **Lifecycle** — auto-pause/resume via `lifecycle` config <br> **Introspection** — `get_info()` to query sandbox state <br> **Concurrent workspaces** — multiple sandboxes in parallel |
 | `network_isolation.py` | Egress network policy enforcement | **Secure** — per-sandbox `allow_internet_access` <br> **Env injection** — `envs=` parameter at creation <br> **Side-by-side policy comparison** |
-| `snapshot_driven_dev.py` | Checkpoint-driven iterative development | **CubeCoW snapshot** — checkpoints outlive source sandbox <br> **Instant rollback** — restore from checkpoint <br> **Clone** — `sb.clone(n=N)` one-shot fork <br> **Snapshot management** — `list_snapshots()` + `delete_snapshot()` |
+| `snapshot_driven_dev.py` | Checkpoint-driven iterative development | **CubeCoW snapshot** — checkpoints outlive source sandbox <br> **Instant rollback** — restore from checkpoint <br> **Fork** — `Sandbox.create(template=snap_id)` fork N workspaces <br> **Snapshot management** — `list_snapshots()` + `delete_snapshot()` |
 | `multi_container.py` | Multi-sandbox collaboration | **Role-based isolation** — builder (online) vs runner (air-gapped) <br> **Cross-sandbox artifact transfer** — via host SDK |
 
 ---
