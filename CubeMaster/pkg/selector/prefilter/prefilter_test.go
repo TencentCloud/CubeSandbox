@@ -62,8 +62,8 @@ func TestPreFilterExcludesMetricTimeoutNode(t *testing.T) {
 	}
 	staleMetric := &node.Node{
 		InsID: "node-stale-metric", IP: "10.0.0.2", Healthy: true,
-		MetaDataUpdateAt: now,
-		MetricUpdate:     now.Add(-(timeout + time.Second)),
+		MetaDataUpdateAt:    now,
+		MetricUpdate:        now.Add(-(timeout + time.Second)),
 		MetricLocalUpdateAt: now.Add(-(timeout + time.Second)),
 	}
 

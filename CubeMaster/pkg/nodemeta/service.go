@@ -985,7 +985,6 @@ func applyCurrentHealth(snap *NodeSnapshot, now time.Time) {
 	snap.UnhealthyReason = status.UnhealthyReason
 }
 
-
 func toSchedulerNode(snap *NodeSnapshot) *node.Node {
 	if snap == nil {
 		return nil

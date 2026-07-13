@@ -17,15 +17,15 @@ import (
 )
 
 const (
-	metaURI               = "/internal/meta"
-	readyzAction          = "/readyz"
-	registerNodeAction    = "/nodes/register"
-	nodesAction           = "/nodes"
-	nodeAction            = "/nodes/{node_id}"
-	nodeStatusAction      = "/nodes/{node_id}/status"
-	nodeLabelsAction      = "/nodes/{node_id}/labels"
-	nodeIsolationAction   = "/nodes/{node_id}/isolation"
-	versionMatrixAction   = "/version-matrix"
+	metaURI             = "/internal/meta"
+	readyzAction        = "/readyz"
+	registerNodeAction  = "/nodes/register"
+	nodesAction         = "/nodes"
+	nodeAction          = "/nodes/{node_id}"
+	nodeStatusAction    = "/nodes/{node_id}/status"
+	nodeLabelsAction    = "/nodes/{node_id}/labels"
+	nodeIsolationAction = "/nodes/{node_id}/isolation"
+	versionMatrixAction = "/version-matrix"
 )
 
 type nodesResponse struct {
