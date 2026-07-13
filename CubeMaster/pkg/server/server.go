@@ -60,6 +60,7 @@ func NewInternalHttp(ctx context.Context, cfg *config.Config) (*internalHttp, er
 		return nil, errors.New("config is nil")
 	}
 
+	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.RedirectTrailingSlash = false
 	engine.HandleMethodNotAllowed = true
