@@ -460,3 +460,74 @@ func TestResolveTemplateIDEmpty(t *testing.T) {
 		t.Fatalf("got %q, want empty", got)
 	}
 }
+
+// newCmdContext builds a *cli.Context from a command definition and args,
+// used to verify resolveTemplateID works correctly with each command's
+// specific flag set (info, delete, redo).
+func newCmdContext(t *testing.T, cmd cli.Command, args []string) *cli.Context {
+	t.Helper()
+	set := flag.NewFlagSet(cmd.Name, flag.ContinueOnError)
+	for _, cliFlag := range cmd.Flags {
+		cliFlag.Apply(set)
+	}
+	if err := set.Parse(args); err != nil {
+		t.Fatalf("parse args %v: %v", args, err)
+	}
+	ctx := cli.NewContext(nil, set, nil)
+	ctx.Command = cmd
+	return ctx
+}
+
+func TestResolveTemplateIDFromAllTemplateCommands(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  cli.Command
+		args []string
+		want string
+	}{
+		{
+			name: "info via positional arg",
+			cmd:  TemplateInfoCommand,
+			args: []string{"tpl-info-1"},
+			want: "tpl-info-1",
+		},
+		{
+			name: "delete via positional arg",
+			cmd:  TemplateDeleteCommand,
+			args: []string{"tpl-delete-1"},
+			want: "tpl-delete-1",
+		},
+		{
+			name: "redo via positional arg",
+			cmd:  TemplateRedoCommand,
+			args: []string{"tpl-redo-1"},
+			want: "tpl-redo-1",
+		},
+		{
+			name: "info flag overrides positional",
+			cmd:  TemplateInfoCommand,
+			args: []string{"--template-id", "flag-id", "positional-id"},
+			want: "flag-id",
+		},
+		{
+			name: "delete flag overrides positional",
+			cmd:  TemplateDeleteCommand,
+			args: []string{"--template-id", "flag-id", "positional-id"},
+			want: "flag-id",
+		},
+		{
+			name: "redo flag overrides positional",
+			cmd:  TemplateRedoCommand,
+			args: []string{"--template-id", "flag-id", "positional-id"},
+			want: "flag-id",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := newCmdContext(t, tt.cmd, tt.args)
+			if got := resolveTemplateID(ctx); got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
