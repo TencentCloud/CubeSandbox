@@ -66,6 +66,7 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		return
 	}
 	if config.GetConfig().Common.MockUpdateAction {
+		publishUpdateTimeout(ctx, req)
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_Success)
 		rsp.Ret.RetMsg = "mock update action success"
 		return
@@ -98,10 +99,18 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 	rsp.Ret.RetCode = int(cubeRsp.GetRet().GetRetCode())
 	rsp.Ret.RetMsg = cubeRsp.GetRet().GetRetMsg()
 	if rsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {
+		publishUpdateTimeout(ctx, req)
 		// Only on genuine success — IsAlreadyInState / NotFound are handled
 		// upstream by CLM's own reconciliation and would send misleading
 		// state signals through the lifecycle channel.
 		runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, req.Action, req.RequestID)
 	}
 	return
+}
+
+func publishUpdateTimeout(ctx context.Context, req *types.UpdateRequest) {
+	if req == nil || req.Action != "resume" || req.Timeout == nil {
+		return
+	}
+	refreshTimeoutMeta(ctx, req.SandboxID, *req.Timeout)
 }
