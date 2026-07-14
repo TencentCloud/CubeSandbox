@@ -34,9 +34,10 @@ JSON 无效、URL 不是 HTTP(S) 或订阅为空时，CubeAPI 会启动失败，
 {"timestamp":"2026-07-12T08:00:00Z","level":"info","event":"sandbox.created","sandbox_id":"sb-123","template_id":"tpl-456"}
 ```
 
-请求包含 `X-Cube-Event`。配置密钥后还包含
-`X-Cube-Signature-256: sha256=<hex>`。接收端应先对原始请求体计算 HMAC-SHA256，
-以常量时间比较签名，然后再解析 JSON。参见[接收端示例](../../../../examples/webhook-receiver/README_zh.md)。
+请求包含 `X-Cube-Event`。配置密钥后还包含 `X-Cube-Timestamp: <Unix 秒>` 和
+`X-Cube-Signature-256: sha256=<hex>`。接收端应对
+`<timestamp>.<原始请求体>` 计算 HMAC-SHA256，拒绝超出五分钟新鲜度窗口的时间戳，
+以常量时间比较签名，然后再解析 JSON。参见[接收端示例](../../../examples/webhook-receiver/README_zh.md)。
 
 ## 投递语义
 

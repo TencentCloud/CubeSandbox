@@ -5,6 +5,7 @@
 This dependency-free development receiver validates CubeAPI HMAC signatures,
 checks the event header and required payload fields, prints accepted events,
 and can optionally forward a text notification to a WeCom bot.
+Signed requests older than five minutes are rejected to limit replay attacks.
 
 ```bash
 export CUBE_WEBHOOK_SECRET=created-endpoint-secret
@@ -12,7 +13,7 @@ python receiver.py
 ```
 
 Configure CubeAPI with the matching URL and secret as described in the
-[integration guide](../../docs/guide/integrations/webhooks.md). Set
+[integration guide](https://github.com/TencentCloud/CubeSandbox/blob/master/docs/guide/integrations/webhooks.md). Set
 `WEBHOOK_RECEIVER_HOST` or `WEBHOOK_RECEIVER_PORT` to change the listener.
 Set `WECOM_BOT_URL` to forward accepted events to a WeCom group robot.
 

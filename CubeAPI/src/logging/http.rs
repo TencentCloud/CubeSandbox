@@ -3,9 +3,14 @@
 
 //! Non-blocking HTTP Webhook backend for structured lifecycle events.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::HashSet,
+    fmt,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use hmac::{Hmac, Mac};
 use reqwest::{Client, StatusCode};
 use sha2::Sha256;
@@ -16,7 +21,7 @@ use super::{LogEvent, Logger};
 
 type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpLoggerConfig {
     pub url: String,
     pub events: HashSet<String>,
@@ -25,6 +30,21 @@ pub struct HttpLoggerConfig {
     pub max_retries: usize,
     pub retry_base_ms: u64,
     pub request_timeout_secs: u64,
+}
+
+impl fmt::Debug for HttpLoggerConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpLoggerConfig")
+            .field("url", &self.url)
+            .field("events", &self.events)
+            .field("secret", &self.secret.as_ref().map(|_| "**REDACTED**"))
+            .field("queue_capacity", &self.queue_capacity)
+            .field("max_retries", &self.max_retries)
+            .field("retry_base_ms", &self.retry_base_ms)
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .finish()
+    }
 }
 
 enum Command {
@@ -42,11 +62,17 @@ impl HttpLogger {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_secs.max(1)))
             .build()?;
+        let signer = config.secret.as_deref().map(|secret| {
+            HmacSha256::new_from_slice(secret.as_bytes())
+                .expect("HMAC-SHA256 accepts keys of any length")
+        });
         let (tx, mut rx) = mpsc::channel(config.queue_capacity.max(1));
         tokio::spawn(async move {
             while let Some(command) = rx.recv().await {
                 match command {
-                    Command::Deliver(event) => deliver(&client, &config, &event).await,
+                    Command::Deliver(event) => {
+                        deliver(&client, &config, signer.as_ref(), &event).await
+                    }
                     Command::Barrier(done) => {
                         let _ = done.send(());
                     }
@@ -57,17 +83,35 @@ impl HttpLogger {
     }
 }
 
-async fn deliver(client: &Client, config: &HttpLoggerConfig, event: &LogEvent) {
+async fn deliver(
+    client: &Client,
+    config: &HttpLoggerConfig,
+    signer: Option<&HmacSha256>,
+    event: &LogEvent,
+) {
     if !config.events.contains(&event.event) {
         return;
     }
     let body = match serde_json::to_vec(event) {
-        Ok(body) => body,
+        Ok(body) => Bytes::from(body),
         Err(err) => {
             error!(event = %event.event, %err, "webhook serialization failed");
             return;
         }
     };
+    let signed_headers = signer.map(|signer| {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+        let mut mac = signer.clone();
+        mac.update(timestamp.as_bytes());
+        mac.update(b".");
+        mac.update(&body);
+        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        (timestamp, signature)
+    });
 
     for attempt in 0..=config.max_retries {
         let mut request = client
@@ -75,14 +119,10 @@ async fn deliver(client: &Client, config: &HttpLoggerConfig, event: &LogEvent) {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header("X-Cube-Event", &event.event)
             .body(body.clone());
-        if let Some(secret) = config.secret.as_deref() {
-            let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-                .expect("HMAC accepts keys of any length");
-            mac.update(&body);
-            request = request.header(
-                "X-Cube-Signature-256",
-                format!("sha256={}", hex::encode(mac.finalize().into_bytes())),
-            );
+        if let Some((timestamp, signature)) = signed_headers.as_ref() {
+            request = request
+                .header("X-Cube-Timestamp", timestamp)
+                .header("X-Cube-Signature-256", signature);
         }
 
         match request.send().await {
@@ -102,7 +142,8 @@ async fn deliver(client: &Client, config: &HttpLoggerConfig, event: &LogEvent) {
             let factor = 1u64.checked_shl(attempt.min(31) as u32).unwrap_or(u64::MAX);
             tokio::time::sleep(Duration::from_millis(
                 config.retry_base_ms.saturating_mul(factor),
-            )).await;
+            ))
+            .await;
         }
     }
     error!(url = %config.url, event = %event.event, "webhook retries exhausted");
@@ -120,7 +161,9 @@ impl Logger for HttpLogger {
         match self.tx.try_send(Command::Deliver(event)) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => warn!("webhook queue full; event dropped"),
-            Err(mpsc::error::TrySendError::Closed(_)) => error!("webhook worker closed; event dropped"),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                error!("webhook worker closed; event dropped")
+            }
         }
     }
 
@@ -138,13 +181,8 @@ impl Logger for HttpLogger {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::VecDeque,
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-    };
+    use super::*;
+    use crate::logging::LogLevel;
     use axum::{
         body::Bytes,
         extract::State,
@@ -152,9 +190,14 @@ mod tests {
         routing::post,
         Router,
     };
+    use std::{
+        collections::VecDeque,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
     use tokio::sync::Mutex;
-    use super::*;
-    use crate::logging::LogLevel;
 
     #[derive(Clone, Default)]
     struct StateData {
@@ -164,25 +207,46 @@ mod tests {
         statuses: Arc<Mutex<VecDeque<StatusCode>>>,
     }
 
-    async fn receive(State(state): State<StateData>, headers: HeaderMap, body: Bytes) -> StatusCode {
+    async fn receive(
+        State(state): State<StateData>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> StatusCode {
         state.attempts.fetch_add(1, Ordering::SeqCst);
         state.bodies.lock().await.push(body.to_vec());
         state.headers.lock().await.push(headers);
-        state.statuses.lock().await.pop_front().unwrap_or(StatusCode::NO_CONTENT)
+        state
+            .statuses
+            .lock()
+            .await
+            .pop_front()
+            .unwrap_or(StatusCode::NO_CONTENT)
     }
 
     async fn receiver(state: StateData) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, Router::new().route("/", post(receive)).with_state(state)).await.unwrap();
+            axum::serve(
+                listener,
+                Router::new().route("/", post(receive)).with_state(state),
+            )
+            .await
+            .unwrap();
         });
         format!("http://{address}/")
     }
 
     fn config(url: String, event: &str) -> HttpLoggerConfig {
-        HttpLoggerConfig { url, events: [event.to_owned()].into(), secret: None,
-            queue_capacity: 8, max_retries: 2, retry_base_ms: 1, request_timeout_secs: 2 }
+        HttpLoggerConfig {
+            url,
+            events: [event.to_owned()].into(),
+            secret: None,
+            queue_capacity: 8,
+            max_retries: 2,
+            retry_base_ms: 1,
+            request_timeout_secs: 2,
+        }
     }
 
     fn event(name: &str) -> LogEvent {
@@ -192,7 +256,8 @@ mod tests {
     #[tokio::test]
     async fn filters_and_delivers_without_blocking() {
         let state = StateData::default();
-        let logger = HttpLogger::new(config(receiver(state.clone()).await, "sandbox.created")).unwrap();
+        let logger =
+            HttpLogger::new(config(receiver(state.clone()).await, "sandbox.created")).unwrap();
         logger.log(event("sandbox.deleted")).await;
         logger.log(event("sandbox.created")).await;
         logger.flush().await;
@@ -209,7 +274,10 @@ mod tests {
         logger.flush().await;
         let body = state.bodies.lock().await[0].clone();
         let headers = state.headers.lock().await;
+        let timestamp = headers[0]["x-cube-timestamp"].to_str().unwrap();
         let mut mac = HmacSha256::new_from_slice(b"endpoint-secret").unwrap();
+        mac.update(timestamp.as_bytes());
+        mac.update(b".");
         mac.update(&body);
         let expected = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
         assert_eq!(
@@ -222,18 +290,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn debug_redacts_secret() {
+        let mut cfg = config("http://localhost".into(), "sandbox.created");
+        cfg.secret = Some("do-not-log-me".into());
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("**REDACTED**"));
+        assert!(!debug.contains("do-not-log-me"));
+    }
+
     #[tokio::test]
     async fn retries_500_but_not_400() {
         let transient = StateData::default();
-        transient.statuses.lock().await.extend([StatusCode::INTERNAL_SERVER_ERROR, StatusCode::NO_CONTENT]);
-        let logger = HttpLogger::new(config(receiver(transient.clone()).await, "sandbox.resumed")).unwrap();
+        transient
+            .statuses
+            .lock()
+            .await
+            .extend([StatusCode::INTERNAL_SERVER_ERROR, StatusCode::NO_CONTENT]);
+        let logger =
+            HttpLogger::new(config(receiver(transient.clone()).await, "sandbox.resumed")).unwrap();
         logger.log(event("sandbox.resumed")).await;
         logger.flush().await;
         assert_eq!(transient.attempts.load(Ordering::SeqCst), 2);
 
         let permanent = StateData::default();
-        permanent.statuses.lock().await.push_back(StatusCode::BAD_REQUEST);
-        let logger = HttpLogger::new(config(receiver(permanent.clone()).await, "sandbox.resumed")).unwrap();
+        permanent
+            .statuses
+            .lock()
+            .await
+            .push_back(StatusCode::BAD_REQUEST);
+        let logger =
+            HttpLogger::new(config(receiver(permanent.clone()).await, "sandbox.resumed")).unwrap();
         logger.log(event("sandbox.resumed")).await;
         logger.flush().await;
         assert_eq!(permanent.attempts.load(Ordering::SeqCst), 1);

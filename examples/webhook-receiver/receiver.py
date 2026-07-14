@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -14,10 +15,25 @@ PORT = int(os.getenv("WEBHOOK_RECEIVER_PORT", "8088"))
 WECOM_BOT_URL = os.getenv("WECOM_BOT_URL", "")
 
 
-def valid_signature(body: bytes, supplied: str) -> bool:
+MAX_SIGNATURE_AGE_SECONDS = 300
+
+
+def valid_signature(
+    body: bytes, supplied: str, timestamp: str, now: int | None = None
+) -> bool:
     if not SECRET:
         return True
-    expected = "sha256=" + hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
+    try:
+        signed_at = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+    current_time = int(time.time()) if now is None else now
+    if abs(current_time - signed_at) > MAX_SIGNATURE_AGE_SECONDS:
+        return False
+    signed_payload = timestamp.encode() + b"." + body
+    expected = "sha256=" + hmac.new(
+        SECRET.encode(), signed_payload, hashlib.sha256
+    ).hexdigest()
     return hmac.compare_digest(supplied, expected)
 
 
@@ -40,7 +56,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        if not valid_signature(body, self.headers.get("X-Cube-Signature-256", "")):
+        if not valid_signature(
+            body,
+            self.headers.get("X-Cube-Signature-256", ""),
+            self.headers.get("X-Cube-Timestamp", ""),
+        ):
             self.send_error(401, "invalid signature")
             return
         try:

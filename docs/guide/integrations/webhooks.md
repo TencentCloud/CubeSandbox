@@ -38,9 +38,11 @@ Every POST is the existing structured `LogEvent`, flattened as JSON:
 ```
 
 Headers include `X-Cube-Event` and, when a secret is configured,
-`X-Cube-Signature-256: sha256=<hex>`. Compute HMAC-SHA256 over the exact raw
-request body and use constant-time comparison before parsing JSON. See the
-[receiver example](../../../../examples/webhook-receiver/README.md).
+`X-Cube-Timestamp: <unix-seconds>` and `X-Cube-Signature-256: sha256=<hex>`.
+Compute HMAC-SHA256 over `<timestamp>.<exact raw request body>`, reject
+timestamps outside a five-minute freshness window, and use constant-time
+comparison before parsing JSON. See the
+[receiver example](../../../examples/webhook-receiver/README.md).
 
 ## Delivery guarantees
 

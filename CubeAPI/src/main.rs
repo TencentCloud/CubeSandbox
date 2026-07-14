@@ -200,8 +200,8 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()> {
     use logging::{
-        arc, file::FileLogger, filtered::FilteredLogger, http::HttpLogger,
-        http::HttpLoggerConfig, multi::MultiLogger, LogLevel,
+        arc, file::FileLogger, filtered::FilteredLogger, http::HttpLogger, http::HttpLoggerConfig,
+        multi::MultiLogger, LogLevel,
     };
 
     // ── Logger ────────────────────────────────────────────────────────────
@@ -234,8 +234,7 @@ async fn async_main(cfg: config::ServerConfig, debug: bool) -> anyhow::Result<()
     }
 
     // FilteredLogger gates by level; MultiLogger fans out to file and Webhooks.
-    let logger: logging::ArcLogger =
-        arc(FilteredLogger::new(arc(backends), min_level));
+    let logger: logging::ArcLogger = arc(FilteredLogger::new(arc(backends), min_level));
 
     tracing::info!(
         log_dir = %cfg.log_dir,
