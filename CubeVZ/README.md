@@ -27,6 +27,17 @@ it is exactly one layer from macOS to the sandbox guest.
 - Saved-template APFS cloning and guest-to-host vsock readiness/shutdown control.
 - A loopback CubeAPI-compatible lifecycle server implementing the `POST` and
   `DELETE /sandboxes` contract used by the official `cube-bench` tool.
+- A native API surface for sandbox listing, inspection, pause/resume, timeout
+  refresh, logs, snapshots/rollback, template metadata/build status, and the
+  `/cubeapi/v1` aliases used by existing clients.
+- Persistent sandbox metadata under the configured sandboxes directory. A
+  server restart recovers cold/paused records and reapplies expiration policy.
+- Optional static API-key or delegated callback authentication for the
+  management plane, plus scheduler forwarding for configured worker nodes.
+- Guest data-plane services: envd on port `49983`, code execution on `49999`,
+  and dynamic guest-port forwarding through the vsock control channel. The
+  bundled guest image exposes Python and shell execution over the same NDJSON
+  `/execute` protocol as the SDK.
 - A host readiness check that includes architecture, framework support, and the
   required code-signing entitlement.
 
@@ -131,11 +142,12 @@ a saved state exists. Apple's restore format is tied to that VM configuration.
 
 ## Current boundary
 
-CubeVZ now provides a complete template-create/delete lifecycle slice and the
-CubeAPI HTTP contract required by `cube-bench`; it is no longer limited to a
-standalone VM runner. It is not yet a drop-in replacement for every Linux
-CubeShim/CubeAPI feature: code execution, filesystem APIs, network policy, port
-management, pause/rollback, authentication, and distributed scheduling remain
-outside this macOS backend. The Linux containerd/CubeShim implementation is not
-run inside another Linux host VM; `cube-vz-api` replaces that lifecycle boundary
-with a native backend.
+CubeVZ now provides the end-to-end native path used by the lifecycle benchmark:
+CubeAPI HTTP → APFS COW clone → `Virtualization.framework` → ARM64 Linux guest
+→ envd/exec vsock data plane. It is still not a drop-in replacement for every
+Linux CubeShim/CubeAPI feature. Metrics and in-place network-policy updates
+return an explicit `501`; template builds acknowledge a local ready job rather
+than running a remote image builder; and distributed scheduling only forwards
+to explicitly configured workers. The Linux containerd/CubeShim implementation
+is not run inside another Linux host VM—`cube-vz-api` is the native macOS
+lifecycle boundary.

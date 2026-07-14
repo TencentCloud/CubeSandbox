@@ -50,7 +50,7 @@ RUN mkdir -p /rootfs && \
       --keys-dir /etc/apk/keys \
       --repository "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/main" \
       --repository "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community" \
-      add alpine-base bash ca-certificates coreutils curl dnsmasq iproute2 ipset iptables linux-virt sysbench
+      add alpine-base bash ca-certificates coreutils curl dnsmasq iproute2 ipset iptables linux-virt python3 sysbench
 
 COPY --from=envd-builder /out/envd /rootfs/usr/bin/envd
 COPY --from=envd-builder /out/envd-ref /rootfs/etc/cubesandbox-envd-ref
@@ -58,12 +58,14 @@ COPY --from=egress-builder /out/cube-vz-egress /rootfs/usr/local/sbin/cube-vz-eg
 
 COPY guest-init.sh /rootfs/usr/local/sbin/cube-vz-bench-init
 COPY lifecycle-init.sh /rootfs/usr/local/sbin/cube-vz-lifecycle-init
+COPY cube-vz-exec.py /rootfs/usr/local/sbin/cube-vz-exec
 COPY cube-vz-agent.c /tmp/cube-vz-agent.c
 
 RUN cc -static -O2 -Wall -Wextra -Werror -pthread \
       -o /rootfs/usr/local/sbin/cube-vz-agent /tmp/cube-vz-agent.c && \
     chmod 0755 /rootfs/usr/local/sbin/cube-vz-bench-init \
       /rootfs/usr/local/sbin/cube-vz-lifecycle-init \
+      /rootfs/usr/local/sbin/cube-vz-exec \
       /rootfs/usr/local/sbin/cube-vz-agent && \
     mkdir -p /rootfs/dev /rootfs/home/user /rootfs/proc /rootfs/sys /rootfs/run \
       /rootfs/tmp /rootfs/var/lib/cube-vz-bench /rootfs/var/log \

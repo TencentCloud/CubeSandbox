@@ -65,6 +65,8 @@ final class ClusterScheduler {
     self.manager = manager
   }
 
+  var nodeID: String { localNodeID }
+
   func register(_ request: ClusterRegistrationRequest) throws {
     guard !request.nodeID.isEmpty, request.nodeID != localNodeID else {
       throw CubeVZError.invalidArguments("invalid remote nodeID")
@@ -81,7 +83,11 @@ final class ClusterScheduler {
     )
   }
 
-  func create(request: CreateSandboxRequest, rawBody: Data) async throws -> ForwardResponse {
+  func create(
+    request: CreateSandboxRequest,
+    rawBody: Data,
+    headers: [String: String] = [:]
+  ) async throws -> ForwardResponse {
     let nodeID = try selectNode(distributionScope: request.distributionScope)
     if nodeID == localNodeID {
       let response = try await manager.create(request: request)
@@ -98,7 +104,7 @@ final class ClusterScheduler {
     let response = try await forward(
       method: "POST",
       path: "/sandboxes",
-      headers: ["content-type": "application/json"],
+      headers: headers.merging(["content-type": "application/json"]) { _, replacement in replacement },
       body: rawBody,
       to: node.url
     )

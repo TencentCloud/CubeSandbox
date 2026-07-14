@@ -16,6 +16,9 @@ private let usage = """
     --advertise-url URL URL other nodes use to reach this node
     --workers LIST      Comma-separated nodeID=http://IPv4:port workers
     --coordinator-url   Coordinator URL for periodic worker registration
+    --api-key KEY       Static management-plane key (Authorization: Bearer or X-API-Key)
+    --auth-callback-url URL
+                        Optional callback URL for delegated management auth
   """
 
 @main
@@ -71,7 +74,14 @@ private struct CubeVZAPIMain {
         bindAddress: bindAddress,
         port: port,
         manager: manager,
-        scheduler: scheduler
+        scheduler: scheduler,
+        authCallbackURL: try parseOptionalURL(
+          options["--auth-callback-url"]
+            ?? ProcessInfo.processInfo.environment["CUBE_AUTH_CALLBACK_URL"]
+        ),
+        apiKey: options["--api-key"]
+          ?? ProcessInfo.processInfo.environment["CUBE_API_KEY"]
+          ?? ProcessInfo.processInfo.environment["E2B_API_KEY"]
       )
       try server.start()
       print("cube-vz-api: listening on http://\(bindAddress):\(port)")
@@ -107,6 +117,7 @@ private struct CubeVZAPIMain {
     let allowed = Set([
       "--template-dir", "--sandboxes-dir", "--template-id", "--bind-address", "--port",
       "--node-id", "--advertise-url", "--workers", "--coordinator-url",
+      "--api-key", "--auth-callback-url",
     ])
     var result: [String: String] = [:]
     var index = 0
@@ -122,5 +133,17 @@ private struct CubeVZAPIMain {
       index += 2
     }
     return result
+  }
+
+  private static func parseOptionalURL(_ value: String?) throws -> URL? {
+    guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      return nil
+    }
+    guard let url = URL(string: value), url.scheme == "http" || url.scheme == "https",
+      url.host != nil
+    else {
+      throw CubeVZError.invalidArguments("--auth-callback-url must be an http(s) URL")
+    }
+    return url
   }
 }

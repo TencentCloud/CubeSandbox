@@ -188,6 +188,9 @@ func (s *Sandbox) RunCode(ctx context.Context, code string, opts RunCodeOptions)
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if s.TrafficAccessToken != "" {
+		req.Header.Set("E2B-Traffic-Access-Token", s.TrafficAccessToken)
+	}
 
 	resp, err := s.client.dataHTTP.Do(req)
 	if err != nil {

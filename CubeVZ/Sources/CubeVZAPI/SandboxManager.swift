@@ -15,6 +15,27 @@ struct CreateSandboxRequest: Decodable {
   let metadata: [String: String]?
   let distributionScope: [String]?
   let envVars: [String: String]?
+
+  private enum CodingKeys: String, CodingKey {
+    case templateID, timeout, lifecycle, secure, allowInternetAccess, allow_internet_access
+    case network, metadata, distributionScope, distribution_scope, envVars, envs
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    templateID = try container.decode(String.self, forKey: .templateID)
+    timeout = try container.decodeIfPresent(Int.self, forKey: .timeout)
+    lifecycle = try container.decodeIfPresent(SandboxLifecycleRequest.self, forKey: .lifecycle)
+    secure = try container.decodeIfPresent(Bool.self, forKey: .secure)
+    allow_internet_access = try container.decodeIfPresent(Bool.self, forKey: .allowInternetAccess)
+      ?? container.decodeIfPresent(Bool.self, forKey: .allow_internet_access)
+    network = try container.decodeIfPresent(SandboxNetworkRequest.self, forKey: .network)
+    metadata = try container.decodeIfPresent([String: String].self, forKey: .metadata)
+    distributionScope = try container.decodeIfPresent([String].self, forKey: .distributionScope)
+      ?? container.decodeIfPresent([String].self, forKey: .distribution_scope)
+    envVars = try container.decodeIfPresent([String: String].self, forKey: .envVars)
+      ?? container.decodeIfPresent([String: String].self, forKey: .envs)
+  }
 }
 
 struct SandboxLifecycleRequest: Decodable {
@@ -64,6 +85,76 @@ struct SandboxResponse: Encodable {
   let envdAccessToken: String?
   let trafficAccessToken: String?
   let domain: String? = "cube.local"
+}
+
+struct SandboxLog: Encodable {
+  let timestamp: String
+  let line: String
+}
+
+struct SandboxLogEntry: Encodable {
+  let timestamp: String
+  let message: String
+  let level: String
+  let fields: [String: String]
+}
+
+struct SandboxLogsResponse: Encodable {
+  let logs: [SandboxLog]
+  let logEntries: [SandboxLogEntry]
+}
+
+struct SandboxLogsV2Response: Encodable {
+  let logs: [SandboxLogEntry]
+}
+
+struct TemplateInfoResponse: Encodable {
+  let templateID: String
+  let instanceType: String
+  let version: String
+  let status: String
+  let lastError: String?
+  let createdAt: String
+  let imageInfo: String
+  let jobID: String?
+  let networkType: String
+  let allowInternetAccess: Bool
+}
+
+struct TemplateBuildJobResponse: Encodable {
+  let jobID: String
+  let templateID: String
+  let status: String
+  let phase: String
+  let progress: Int
+  let errorMessage: String
+}
+
+struct TemplateBuildStatusResponse: Encodable {
+  let buildID: String
+  let templateID: String
+  let status: String
+  let progress: Int
+  let message: String
+}
+
+private struct PersistedSandbox: Codable {
+  let sandboxID: String
+  let templateID: String
+  let startedAt: Date
+  let timeout: Int?
+  let metadata: [String: String]?
+  let envVars: [String: String]?
+  let network: SandboxNetworkRequest?
+  let allowInternetAccess: Bool
+  let trafficAccessToken: String?
+  let envdAccessToken: String?
+  let autoResume: Bool
+  let onTimeout: String
+  let cpuCount: Int
+  let memoryMiB: UInt64
+  let diskSizeMiB: Int?
+  let expiresAt: Date?
 }
 
 struct SandboxInfoResponse: Encodable {
@@ -126,9 +217,11 @@ final class SandboxManager {
     let trafficAccessToken: String?
     let envdAccessToken: String?
     let autoResume: Bool
+    let onTimeout: String
     let cpuCount: Int
     let memoryMiB: UInt64
     let diskSizeMiB: Int?
+    var expiresAt: Date?
   }
 
   private struct SnapshotRecord {
@@ -145,6 +238,8 @@ final class SandboxManager {
   private let snapshotsDirectory: URL
   private var sandboxes: [String: SandboxRecord] = [:]
   private var snapshots: [String: SnapshotRecord] = [:]
+  private var expirationTasks: [String: Task<Void, Never>] = [:]
+  private var sandboxLogs: [String: [SandboxLog]] = [:]
 
   init(templateID: String, templateDirectory: URL, sandboxesDirectory: URL) throws {
     self.templateID = templateID
@@ -170,6 +265,7 @@ final class SandboxManager {
       at: snapshotsDirectory,
       withIntermediateDirectories: true
     )
+    loadPersistedSandboxes()
   }
 
   func create(request: CreateSandboxRequest) async throws -> SandboxResponse {
@@ -208,6 +304,8 @@ final class SandboxManager {
       let trafficAccessToken =
         request.network?.allowPublicTraffic == false ? UUID().uuidString.lowercased() : nil
       let envdAccessToken: String? = nil
+      let timeout = request.timeout
+      let expiresAt = Self.expirationDate(timeout: timeout)
       let record = SandboxRecord(
         sandboxID: sandboxID,
         templateID: request.templateID,
@@ -223,11 +321,16 @@ final class SandboxManager {
         trafficAccessToken: trafficAccessToken,
         envdAccessToken: envdAccessToken,
         autoResume: request.lifecycle?.autoResume ?? false,
+        onTimeout: request.lifecycle?.onTimeout ?? "kill",
         cpuCount: manifest.cpuCount,
         memoryMiB: manifest.memoryMiB,
-        diskSizeMiB: Self.diskSizeMiB(directory: directory, manifest: manifest)
+        diskSizeMiB: Self.diskSizeMiB(directory: directory, manifest: manifest),
+        expiresAt: expiresAt
       )
       sandboxes[sandboxID] = record
+      persist(record)
+      sandboxLogs[sandboxID] = [Self.log(line: "sandbox started")]
+      scheduleExpiration(for: sandboxID)
       return response(for: record, exposeTrafficToken: true)
     } catch {
       if let virtualMachine { try? await virtualMachine.shutdown() }
@@ -248,7 +351,8 @@ final class SandboxManager {
 
   func openDataPlane(
     sandboxID: String,
-    trafficAccessToken: String?
+    trafficAccessToken: String?,
+    guestPort: UInt32 = 49_983
   ) async throws -> VMStreamConnection {
     guard var sandbox = sandboxes[sandboxID] else {
       throw CubeVZError.runtime("sandbox not found: \(sandboxID)")
@@ -266,7 +370,97 @@ final class SandboxManager {
     guard sandbox.state == .running, let virtualMachine = sandbox.virtualMachine else {
       throw CubeVZError.runtime("sandbox is not running: \(sandboxID)")
     }
-    return try await virtualMachine.connect(toGuestPort: 49_983)
+    if guestPort != 49_983 && guestPort != 49_999 {
+      let response = try await virtualMachine.executeControlCommand("FORWARD \(guestPort)")
+      guard response == "OK\n" else {
+        throw CubeVZError.runtime("guest cannot forward port \(guestPort)")
+      }
+    }
+    var lastError: Error?
+    for _ in 0..<20 {
+      do {
+        return try await virtualMachine.connect(toGuestPort: guestPort)
+      } catch {
+        lastError = error
+        try? await Task.sleep(for: .milliseconds(25))
+      }
+    }
+    throw lastError ?? CubeVZError.runtime("cannot connect to guest port \(guestPort)")
+  }
+
+  func logs(sandboxID: String, start: Int?, limit: Int) throws -> SandboxLogsResponse? {
+    guard sandboxes[sandboxID] != nil else { return nil }
+    let entries = sandboxLogs[sandboxID] ?? []
+    let offset = max(0, start ?? 0)
+    let boundedLimit = min(max(0, limit), 10_000)
+    let selected = Array(entries.dropFirst(offset).prefix(boundedLimit == 0 ? entries.count : boundedLimit))
+    let logEntries = selected.map { entry in
+      SandboxLogEntry(
+        timestamp: entry.timestamp,
+        message: entry.line,
+        level: "info",
+        fields: [:]
+      )
+    }
+    return SandboxLogsResponse(logs: selected, logEntries: logEntries)
+  }
+
+  func logsV2(sandboxID: String, cursor: Int?, limit: Int) throws -> SandboxLogsV2Response? {
+    guard let response = try logs(sandboxID: sandboxID, start: cursor, limit: limit) else {
+      return nil
+    }
+    return SandboxLogsV2Response(logs: response.logEntries)
+  }
+
+  func refresh(sandboxID: String, duration: Int) throws -> Bool {
+    guard duration >= 0 && duration <= 3_600 else {
+      throw CubeVZError.invalidArguments("refresh duration must be between 0 and 3600 seconds")
+    }
+    guard var sandbox = sandboxes[sandboxID] else { return false }
+    sandbox.timeout = duration
+    sandbox.expiresAt = Date().addingTimeInterval(TimeInterval(duration))
+    sandboxes[sandboxID] = sandbox
+    persist(sandbox)
+    appendLog(sandboxID, line: "sandbox refreshed for \(duration)s")
+    scheduleExpiration(for: sandboxID)
+    return true
+  }
+
+  func listTemplates() -> [TemplateInfoResponse] {
+    let base = templateInfo(templateID: templateID, createdAt: nil)
+    let snapshotTemplates = snapshots.values.sorted { $0.createdAt < $1.createdAt }.map {
+      templateInfo(templateID: $0.snapshotID, createdAt: $0.createdAt)
+    }
+    return [base] + snapshotTemplates
+  }
+
+  func getTemplate(templateID requestedID: String) -> TemplateInfoResponse? {
+    if requestedID == templateID { return templateInfo(templateID: requestedID, createdAt: nil) }
+    guard let snapshot = snapshots[requestedID] else { return nil }
+    return templateInfo(templateID: requestedID, createdAt: snapshot.createdAt)
+  }
+
+  func rebuildTemplate(templateID requestedID: String, buildID: String) throws -> TemplateBuildJobResponse? {
+    guard getTemplate(templateID: requestedID) != nil else { return nil }
+    return TemplateBuildJobResponse(
+      jobID: buildID,
+      templateID: requestedID,
+      status: "completed",
+      phase: "ready",
+      progress: 100,
+      errorMessage: ""
+    )
+  }
+
+  func templateBuildStatus(templateID requestedID: String, buildID: String) -> TemplateBuildStatusResponse? {
+    guard getTemplate(templateID: requestedID) != nil else { return nil }
+    return TemplateBuildStatusResponse(
+      buildID: buildID,
+      templateID: requestedID,
+      status: "completed",
+      progress: 100,
+      message: "template is ready"
+    )
   }
 
   func pause(sandboxID: String) async throws -> Bool {
@@ -281,6 +475,8 @@ final class SandboxManager {
       sandbox.virtualMachine = nil
       sandbox.state = .paused
       sandboxes[sandboxID] = sandbox
+      persist(sandbox)
+      appendLog(sandboxID, line: "sandbox paused")
       return true
     } catch {
       sandbox.state = .running
@@ -312,7 +508,11 @@ final class SandboxManager {
       sandbox.virtualMachine = virtualMachine
       sandbox.state = .running
       if let timeout { sandbox.timeout = timeout }
+      if let timeout { sandbox.expiresAt = Self.expirationDate(timeout: timeout) }
       sandboxes[sandboxID] = sandbox
+      persist(sandbox)
+      appendLog(sandboxID, line: "sandbox resumed")
+      scheduleExpiration(for: sandboxID)
       return response(for: sandbox, exposeTrafficToken: false)
     } catch {
       try? await virtualMachine.shutdown()
@@ -331,8 +531,12 @@ final class SandboxManager {
     var updated = sandbox
     if let timeout {
       updated.timeout = timeout
+      updated.expiresAt = Self.expirationDate(timeout: timeout)
       sandboxes[sandboxID] = updated
+      persist(updated)
+      scheduleExpiration(for: sandboxID)
     }
+    appendLog(sandboxID, line: "sandbox connected")
     return response(for: updated, exposeTrafficToken: false)
   }
 
@@ -342,7 +546,11 @@ final class SandboxManager {
     }
     guard var sandbox = sandboxes[sandboxID] else { return false }
     sandbox.timeout = timeout
+    sandbox.expiresAt = Self.expirationDate(timeout: timeout)
     sandboxes[sandboxID] = sandbox
+    persist(sandbox)
+    appendLog(sandboxID, line: "sandbox timeout set to \(timeout)s")
+    scheduleExpiration(for: sandboxID)
     return true
   }
 
@@ -375,6 +583,7 @@ final class SandboxManager {
         createdAt: Date()
       )
       snapshots[snapshotID] = record
+      appendLog(sandboxID, line: "snapshot created: \(snapshotID)")
       if wasRunning { _ = try await resume(sandboxID: sandboxID, timeout: nil) }
       return SnapshotInfoResponse(snapshotID: snapshotID, names: names)
     } catch {
@@ -442,6 +651,9 @@ final class SandboxManager {
       sandbox.virtualMachine = virtualMachine
       sandbox.state = .running
       sandboxes[sandboxID] = sandbox
+      persist(sandbox)
+      appendLog(sandboxID, line: "sandbox rolled back to \(snapshotID)")
+      scheduleExpiration(for: sandboxID)
       try? FileManager.default.removeItem(at: backupURL)
       return RollbackResponse(
         sandboxID: sandboxID,
@@ -462,7 +674,10 @@ final class SandboxManager {
     guard let sandbox = sandboxes[sandboxID] else { return false }
     if let virtualMachine = sandbox.virtualMachine { try await virtualMachine.shutdown() }
     try FileManager.default.removeItem(at: sandbox.directory.url)
+    expirationTasks[sandboxID]?.cancel()
+    expirationTasks.removeValue(forKey: sandboxID)
     sandboxes.removeValue(forKey: sandboxID)
+    sandboxLogs.removeValue(forKey: sandboxID)
     return true
   }
 
@@ -477,12 +692,7 @@ final class SandboxManager {
   }
 
   private func info(for sandbox: SandboxRecord) -> SandboxInfoResponse {
-    let endAt: String?
-    if let timeout = sandbox.timeout, timeout >= 0 {
-      endAt = Self.dateString(sandbox.startedAt.addingTimeInterval(TimeInterval(timeout)))
-    } else {
-      endAt = nil
-    }
+    let endAt = sandbox.expiresAt.map(Self.dateString)
     return SandboxInfoResponse(
       templateID: sandbox.templateID,
       sandboxID: sandbox.sandboxID,
@@ -511,6 +721,128 @@ final class SandboxManager {
       }
     }
     _ = try networkPolicyTargets(network: request.network)
+  }
+
+  private func scheduleExpiration(for sandboxID: String) {
+    expirationTasks[sandboxID]?.cancel()
+    expirationTasks.removeValue(forKey: sandboxID)
+    guard let expiresAt = sandboxes[sandboxID]?.expiresAt else { return }
+    let delay = max(0, expiresAt.timeIntervalSinceNow)
+    expirationTasks[sandboxID] = Task { [weak self] in
+      if delay > 0 {
+        try? await Task.sleep(for: .seconds(delay))
+      }
+      guard !Task.isCancelled else { return }
+      await self?.expire(sandboxID: sandboxID)
+    }
+  }
+
+  private func loadPersistedSandboxes() {
+    let manager = FileManager.default
+    guard let entries = try? manager.contentsOfDirectory(
+      at: sandboxesDirectory,
+      includingPropertiesForKeys: [.isDirectoryKey],
+      options: [.skipsHiddenFiles]
+    ) else { return }
+    let decoder = JSONDecoder()
+    for directoryURL in entries {
+      let metadataURL = directoryURL.appendingPathComponent("sandbox.json")
+      guard let data = try? Data(contentsOf: metadataURL),
+        let persisted = try? decoder.decode(PersistedSandbox.self, from: data)
+      else { continue }
+      let directory = VMDirectory(url: directoryURL)
+      guard let manifest = try? directory.loadManifest(),
+        (try? directory.validateFiles(for: manifest)) != nil
+      else { continue }
+      let record = SandboxRecord(
+        sandboxID: persisted.sandboxID,
+        templateID: persisted.templateID,
+        directory: directory,
+        virtualMachine: nil,
+        state: .paused,
+        startedAt: persisted.startedAt,
+        timeout: persisted.timeout,
+        metadata: persisted.metadata,
+        envVars: persisted.envVars,
+        network: persisted.network,
+        allowInternetAccess: persisted.allowInternetAccess,
+        trafficAccessToken: persisted.trafficAccessToken,
+        envdAccessToken: persisted.envdAccessToken,
+        autoResume: persisted.autoResume,
+        onTimeout: persisted.onTimeout,
+        cpuCount: persisted.cpuCount,
+        memoryMiB: persisted.memoryMiB,
+        diskSizeMiB: persisted.diskSizeMiB,
+        expiresAt: persisted.expiresAt
+      )
+      sandboxes[persisted.sandboxID] = record
+      sandboxLogs[persisted.sandboxID] = [Self.log(line: "sandbox recovered")]
+      scheduleExpiration(for: persisted.sandboxID)
+    }
+  }
+
+  private func persist(_ sandbox: SandboxRecord) {
+    let persisted = PersistedSandbox(
+      sandboxID: sandbox.sandboxID,
+      templateID: sandbox.templateID,
+      startedAt: sandbox.startedAt,
+      timeout: sandbox.timeout,
+      metadata: sandbox.metadata,
+      envVars: sandbox.envVars,
+      network: sandbox.network,
+      allowInternetAccess: sandbox.allowInternetAccess,
+      trafficAccessToken: sandbox.trafficAccessToken,
+      envdAccessToken: sandbox.envdAccessToken,
+      autoResume: sandbox.autoResume,
+      onTimeout: sandbox.onTimeout,
+      cpuCount: sandbox.cpuCount,
+      memoryMiB: sandbox.memoryMiB,
+      diskSizeMiB: sandbox.diskSizeMiB,
+      expiresAt: sandbox.expiresAt
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try? encoder.encode(persisted).write(
+      to: sandbox.directory.url.appendingPathComponent("sandbox.json"),
+      options: [.atomic]
+    )
+  }
+
+  private func expire(sandboxID: String) async {
+    guard let sandbox = sandboxes[sandboxID], sandbox.expiresAt != nil else { return }
+    expirationTasks.removeValue(forKey: sandboxID)
+    appendLog(sandboxID, line: "sandbox timeout expired")
+    do {
+      if sandbox.onTimeout == "pause" {
+        _ = try await pause(sandboxID: sandboxID)
+      } else {
+        _ = try await delete(sandboxID: sandboxID)
+      }
+    } catch {
+      appendLog(sandboxID, line: "sandbox timeout action failed: \(error.localizedDescription)")
+    }
+  }
+
+  private func appendLog(_ sandboxID: String, line: String) {
+    sandboxLogs[sandboxID, default: []].append(Self.log(line: line))
+    if let entries = sandboxLogs[sandboxID], entries.count > 10_000 {
+      sandboxLogs[sandboxID] = Array(entries.suffix(10_000))
+    }
+  }
+
+  private func templateInfo(templateID requestedID: String, createdAt: Date?) -> TemplateInfoResponse {
+    TemplateInfoResponse(
+      templateID: requestedID,
+      instanceType: "cube-vz",
+      version: "native",
+      status: "ready",
+      lastError: nil,
+      createdAt: Self.dateString(createdAt ?? Date()),
+      imageInfo: "ARM64 Linux guest on Apple Virtualization.framework",
+      jobID: nil,
+      networkType: "nat",
+      allowInternetAccess: true
+    )
   }
 
   private func initializeEnvd(
@@ -830,6 +1162,15 @@ final class SandboxManager {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return formatter.string(from: date)
+  }
+
+  private static func expirationDate(timeout: Int?) -> Date? {
+    guard let timeout, timeout >= 0 else { return nil }
+    return Date().addingTimeInterval(TimeInterval(timeout))
+  }
+
+  private static func log(line: String) -> SandboxLog {
+    SandboxLog(timestamp: dateString(Date()), line: line)
   }
 
   private static func diskSizeMiB(directory: VMDirectory, manifest: VMManifest) -> Int? {

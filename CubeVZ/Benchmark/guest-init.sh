@@ -7,6 +7,8 @@ set -eu
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin
 export HOME=/root
 export LANG=C
+export ENVD_PORT=49983
+export EXEC_PORT=49999
 
 mount -o remount,rw /
 mountpoint -q /proc || mount -t proc proc /proc
@@ -16,6 +18,35 @@ mkdir -p /dev/pts /run /tmp /var/lib/cube-vz-bench
 mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts
 chmod 1777 /tmp
 dmesg -n 1 2>/dev/null || true
+
+# Keep the benchmark guest representative of a lifecycle guest: envd handles
+# the commands/files/filesystem/PTY RPCs on 49983, while cube-vz-exec provides
+# the SDK-compatible /execute stream on 49999.  Both are bridged to host vsock
+# by cube-vz-agent when a host API is attached; the benchmark itself exercises
+# the VM from the serial console and can therefore continue independently.
+/usr/bin/envd -isnotfc -port "$ENVD_PORT" >>/var/log/envd.log 2>&1 &
+echo "CUBEVZ_ENVD_START pid=$! port=$ENVD_PORT"
+/usr/local/sbin/cube-vz-exec --host 127.0.0.1 --port "$EXEC_PORT" \
+  >>/var/log/cube-vz-exec.log 2>&1 &
+echo "CUBEVZ_EXEC_START pid=$! port=$EXEC_PORT"
+/usr/local/sbin/cube-vz-agent >>/var/log/cube-vz-agent.log 2>&1 &
+echo "CUBEVZ_AGENT_START pid=$!"
+
+exec_probe=""
+for _ in $(seq 1 100); do
+  exec_probe="$(curl -fsS -H 'Content-Type: application/json' \
+    --data-binary '{"code":"1 + 1","language":"python"}' \
+    "http://127.0.0.1:${EXEC_PORT}/execute" 2>/dev/null || true)"
+  if printf '%s\n' "$exec_probe" | grep -Fq '"text":"2"'; then
+    echo "CUBEVZ_EXEC_SELFTEST=ok"
+    break
+  fi
+  sleep 0.01
+done
+if ! printf '%s\n' "$exec_probe" | grep -Fq '"text":"2"'; then
+  echo "CUBEVZ_EXEC_SELFTEST=error"
+  exit 1
+fi
 
 read -r guest_uptime_seconds _ </proc/uptime
 
