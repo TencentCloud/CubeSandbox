@@ -546,10 +546,10 @@ type ContainerOverrides struct {
 
 type CreateTemplateFromImageReq struct {
 	*Request
-	SourceImageRef     string              `json:"source_image_ref,omitempty" p:"source_image_ref" v:"required"`
-	RegistryUsername   string              `json:"registry_username,omitempty"`
-	RegistryPassword   string              `json:"registry_password,omitempty"`
-	TemplateID         string              `json:"template_id,omitempty" p:"template_id"`
+	SourceImageRef   string `json:"source_image_ref,omitempty" p:"source_image_ref" v:"required"`
+	RegistryUsername string `json:"registry_username,omitempty"`
+	RegistryPassword string `json:"registry_password,omitempty"`
+	TemplateID       string `json:"template_id,omitempty" p:"template_id"`
 	// Alias is a human-readable, stable name for the template. When set,
 	// sandboxes can reference the template by this alias instead of the
 	// auto-generated template ID, surviving rebuilds that produce a new ID.

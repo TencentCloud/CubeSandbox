@@ -17,8 +17,7 @@ use crate::{
     models::{
         ApiError, CreateTemplateRequest, ListTemplatesQuery, RebuildTemplateRequest,
         TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
-        TemplateCompatAdoptResponseView, TemplateCompatMatrixView,
-        TemplateDetail, TemplateSummary,
+        TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateDetail, TemplateSummary,
     },
     state::AppState,
 };

@@ -722,14 +722,6 @@ func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string,
 	return true, nil
 }
 
-// ensureTemplateDefinition is a thin delegator (see createDefinition for the
-// gomonkey rationale).
-//
-//go:noinline
-func ensureTemplateDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
-	return ensureTemplateDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, definitionCreateOptions{})
-}
-
 func finalizeTemplateReplicas(ctx context.Context, templateID, instanceType, version string, replicas []ReplicaStatus) (*TemplateInfo, error) {
 	setTemplateLocalityCache(templateID, replicas)
 	registerReadyTemplateReplicas(templateID, replicas)
