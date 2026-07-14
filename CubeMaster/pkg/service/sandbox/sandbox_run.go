@@ -245,19 +245,30 @@ func (c *createSandboxContext) handleCubelet() {
 }
 
 func (c *createSandboxContext) refreshAndAdmitHost() error {
-	if c.selectHost == nil {
-		return ret.Err(errorcode.ErrorCode_SelectNodesFailed, "no selected host")
-	}
-	current, ok := localcache.GetNode(c.selectHost.ID())
-	if !ok {
-		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed, "selected host missing from cache: %s", c.selectHost.ID())
+	current, err := admitSelectedHost(c.selectHost, localcache.GetNode)
+	if err != nil {
+		return err
 	}
 	c.selectHost = current
+	return nil
+}
+
+// admitSelectedHost re-reads the selected host from cache and rejects cordoned
+// nodes. getNode is injected so unit tests cover all admission paths without a
+// live localcache.
+func admitSelectedHost(selected *node.Node, getNode func(string) (*node.Node, bool)) (*node.Node, error) {
+	if selected == nil {
+		return nil, ret.Err(errorcode.ErrorCode_SelectNodesFailed, "no selected host")
+	}
+	current, ok := getNode(selected.ID())
+	if !ok {
+		return nil, ret.Errorf(errorcode.ErrorCode_SelectNodesFailed, "selected host missing from cache: %s", selected.ID())
+	}
 	if !current.SchedulingAllowed() {
-		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+		return nil, ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
 			"node %s is scheduling-disabled (cordon); new sandboxes are not admitted", current.ID())
 	}
-	return nil
+	return current, nil
 }
 
 func (c *createSandboxContext) callCubelet() bool {

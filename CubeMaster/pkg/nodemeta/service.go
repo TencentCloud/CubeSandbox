@@ -658,7 +658,8 @@ func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
 }
 
 // readLabelsJSONForUpdate reads labels_json with SELECT ... FOR UPDATE.
-// Corrupt JSON returns ErrLabelsJSONCorrupt (fail-closed for isolation writes).
+// Corrupt JSON returns ErrLabelsJSONCorrupt (fail-closed for all label writers:
+// register merge, admin labels, and isolation).
 func readLabelsJSONForUpdate(tx *gorm.DB, nodeID string) (map[string]string, error) {
 	var reg models.NodeRegistration
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).

@@ -115,8 +115,6 @@ func GetHealthyNodesByInstanceType(n int, product string) node.NodeList {
 // GetSchedulableNodesByInstanceType returns healthy nodes that may receive new
 // sandboxes. Cordon filtering happens before limit n so isolated nodes do not
 // consume PreSelectNum. Healthy-but-isolated nodes remain in GetHealthyNodes*.
-//
-//go:noinline
 func GetSchedulableNodesByInstanceType(n int, product string) node.NodeList {
 	return collectClusterNodes(n, product, true)
 }
