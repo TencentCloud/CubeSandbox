@@ -34,10 +34,18 @@ You can also pass an explicit `Config` to every method via `config=`.
 
 | Method | HTTP | Parameters | Returns |
 |---|---|---|---|
-| `Volume.create(name=None, *, driver=None, config=None)` | `POST /volumes` | `name`: optional, `^[a-zA-Z0-9_-]+$`, ≤128 chars. `driver`: **optional** plugin name (e.g. `"cos"`, `"nfs"`); when falsy (`None`/`""`) no driver is sent → backend uses the first configured plugin. | `VolumeInfo` |
+| `Volume.create(name=None, *, driver=None, config=None)` | `POST /volumes` | See parameter table below | `VolumeInfo` |
 | `Volume.list(*, config=None)` | `GET /volumes` | — | `list[VolumeInfo]` (**`token` always empty**) |
 | `Volume.get(volume_id, *, config=None)` | `GET /volumes/{id}` | `volume_id`: identifier | `VolumeInfo` (with `token`) |
 | `Volume.delete(volume_id, *, config=None)` | `DELETE /volumes/{id}` | `volume_id`: identifier | `None` |
+
+**`Volume.create` parameters**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `name` | `str \| None` | No | Volume name. Must match `^[a-zA-Z0-9_-]+$`, ≤128 chars. Omit for a server-assigned UUID. |
+| `driver` | `str \| None` | No | Volume plugin name. Currently supported: `"cos"`. Pass `None` or `""` to omit the field → backend uses its default plugin. |
+| `config` | `Config \| None` | No | SDK config, overrides environment variables. |
 
 ### `create`: default plugin vs. pinned driver
 
@@ -81,36 +89,19 @@ VolumeMount(name=<volume_id>, path="/workspace")   # typed
 
 ## Examples
 
-### 1. Create (default plugin, e2b-compatible)
+### 1. Create
 
 ```python
 from cubesandbox import Volume
 
-vol = Volume.create("my-data")     # name optional; omit to get a UUID
+vol = Volume.create("my-data")     # with a name
 print(vol.volume_id, vol.name, vol.token)
+
+vol = Volume.create()              # omit name → server-assigned UUID
+print(vol.volume_id)               # auto-generated UUID
 ```
 
-### 2. Create pinned to a specific driver
-
-```python
-vol = Volume.create("my-data", driver="cos")
-
-# An empty driver means "unspecified": no driver is sent, so the backend uses
-# its first configured plugin.
-Volume.create("x", driver="")   # equivalent to Volume.create("x")
-```
-
-### 3. List / get / delete
-
-```python
-for v in Volume.list():            # note: v.token is "" here
-    print(v.volume_id, v.name)
-
-one = Volume.get(vol.volume_id)    # one.token is populated
-Volume.delete(vol.volume_id)       # kill any mounting sandbox first (see note)
-```
-
-### 4. Mount into a sandbox and use it
+### 2. Pin a specific plugin
 
 ```python
 from cubesandbox import Sandbox, Volume, VolumeMount
@@ -124,9 +115,34 @@ with Sandbox.create(
     print(sb.files.read("/workspace/note.txt"))   # "persisted!"
 ```
 
-### 5. Cross-sandbox persistence (the real test)
+### 3. Query and delete
 
-Data written in one sandbox is readable from another mounting the same volume:
+```python
+for v in Volume.list():            # note: v.token is "" here
+    print(v.volume_id, v.name)
+
+one = Volume.get(vol.volume_id)    # one.token is populated
+Volume.delete(vol.volume_id)       # kill all mounting sandboxes first (see Notes)
+```
+
+### 4. Mount into a sandbox
+
+```python
+from cubesandbox import Sandbox, Volume, VolumeMount
+
+vol = Volume.create("my-data", driver="cos")
+
+with Sandbox.create(
+    volume_mounts=[VolumeMount(name=vol.volume_id, path="/workspace")],
+) as sb:
+    sb.files.write("/workspace/note.txt", "persisted!")
+    print(sb.files.read("/workspace/note.txt"))   # "persisted!"
+```
+
+### 5. Cross-sandbox data sharing
+
+Multiple sandboxes can mount the same volume concurrently. Data is visible
+to all mounters in real time.
 
 ```python
 from cubesandbox import Sandbox, Volume, VolumeMount
@@ -134,27 +150,19 @@ from cubesandbox import Sandbox, Volume, VolumeMount
 vol = Volume.create("shared", driver="cos")
 mount = [VolumeMount(name=vol.volume_id, path="/workspace")]
 
-# Sandbox A writes, then is destroyed.
+# Sandbox A writes data.
 a = Sandbox.create(volume_mounts=mount)
 a.files.write("/workspace/probe.txt", "hello from A")
-a.kill()
 
-# Sandbox B mounts the SAME volume and reads it back.
+# Sandbox B mounts the same volume and reads it immediately.
 with Sandbox.create(volume_mounts=mount) as b:
     print(b.files.read("/workspace/probe.txt"))   # "hello from A"
 
+# ⚠️ All mounting sandboxes must be killed before deleting the volume.
+a.kill()
+b.kill()  # context manager already killed it on exit; explicit for clarity
 Volume.delete(vol.volume_id)
 ```
-
-> An end-to-end script covering exactly this flow lives at
-> `tests/integration_test_volume.py`. Run it **on the CubeProxy host** so the
-> data-plane write stays on loopback:
->
-> ```bash
-> CUBE_API_URL=http://127.0.0.1:3000 CUBE_TEMPLATE_ID=<tpl> \
-> CUBE_PROXY_NODE_IP=127.0.0.1 CUBE_VOLUME_DRIVER=cos \
-> python3 tests/integration_test_volume.py
-> ```
 
 ---
 
@@ -184,28 +192,21 @@ from cubesandbox import Volume, VolumeNotFoundError, ApiError
 try:
     Volume.get("does-not-exist")
 except VolumeNotFoundError:
-    ...                       # ideally: 404
+    ...                       # 404
 except ApiError as e:
-    print(e.status_code)      # currently: 500 — see the known issue below
+    print(e.status_code)      # 500
 ```
-
-### Known backend issue
-
-The backend currently collapses **all** volume business errors into
-**HTTP 500** (`ret_code` is hardcoded to `-1`), so `VolumeNotFoundError` (404),
-name-conflict (409) and bad-request (400) are **not** distinguishable at the SDK
-level today — they all surface as `ApiError(500)`. The mapping above reflects
-the intended contract; it becomes accurate once the backend returns proper
-status codes. Details: [`volume-error-code-bug.md`](./volume-error-code-bug.md).
 
 ---
 
 ## Notes
 
-- **`delete` does not auto-detach.** Deleting a volume still mounted by a
-  running sandbox may leak the backend mount. Always `sb.kill()` the mounting
-  sandbox(es) first, then `Volume.delete(...)`.
+- **Kill all mounting sandboxes before deleting a volume.** A volume can be
+  mounted by multiple sandboxes concurrently. `Volume.delete()` does not
+  auto-detach — if any running sandbox still holds the volume, the delete may
+  fail or leak backend mounts. Always `sb.kill()` every sandbox that mounts the
+  volume before calling `Volume.delete(volume_id)`.
 - **`list` never returns tokens.** Tokens are only surfaced by `create` and
-  `get`; call `Volume.get(id)` when you need the token.
-- **Name is optional everywhere.** Omit it and the server assigns a UUID used as
-  both name and `volume_id`.
+  `get`; call `Volume.get(volume_id)` when you need the token.
+- **`name` is optional.** Omit it and the server assigns a UUID that serves as
+  both `volume_id` and `name`.

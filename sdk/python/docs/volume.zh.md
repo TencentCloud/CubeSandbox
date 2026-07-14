@@ -34,10 +34,18 @@ from cubesandbox import Sandbox, Volume, VolumeMount
 
 | 方法 | HTTP | 入参 | 返回 |
 |---|---|---|---|
-| `Volume.create(name=None, *, driver=None, config=None)` | `POST /volumes` | `name`：可选，`^[a-zA-Z0-9_-]+$`，≤128 字符。`driver`：**可选**插件名（如 `"cos"`、`"nfs"`）；不传（`None`/`""`）则不发送 driver，后端使用第一个已配置的插件。 | `VolumeInfo` |
-| `Volume.list(*, config=None)` | `GET /volumes` | 无 | `list[VolumeInfo]`（**`token` 恒为空**） |
+| `Volume.create(name=None, *, driver=None, config=None)` | `POST /volumes` | 见下方参数表 | `VolumeInfo` |
+| `Volume.list(*, config=None)` | `GET /volumes` | — | `list[VolumeInfo]`（**`token` 恒为空**） |
 | `Volume.get(volume_id, *, config=None)` | `GET /volumes/{id}` | `volume_id`：卷标识 | `VolumeInfo`（**含 `token`**） |
 | `Volume.delete(volume_id, *, config=None)` | `DELETE /volumes/{id}` | `volume_id`：卷标识 | `None` |
+
+**`Volume.create` 参数**
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | `str \| None` | 否 | 卷名称。须满足 `^[a-zA-Z0-9_-]+$`，≤128 字符。省略时服务端分配 UUID。 |
+| `driver` | `str \| None` | 否 | 卷插件名称。当前支持：`"cos"`。传 `None` 或 `""` 时不发送该字段，后端使用默认插件。 |
+| `config` | `Config \| None` | 否 | SDK 配置对象，覆盖环境变量。 |
 
 ### 返回值详解
 
@@ -50,11 +58,6 @@ from cubesandbox import Sandbox, Volume, VolumeMount
 | `list` | `list[VolumeInfo]` | ✅ 每项有值 | ✅ 每项有值 | ⚠️ **恒为空串**（列表不返回 token） |
 | `get` | `VolumeInfo` | ✅ 有值 | ✅ 有值 | ✅ 插件签发时有值，否则为空串 |
 | `delete` | `None` | — | — | — |
-
-> - `create` / `get` 会尽力填充 `token`，但若底层插件不签发
->   token，则 `.token` 为空串 `""`（不是 `None`）。
-> - `list` 出于设计**永远不返回 token**，需要 token 时请单独调用 `Volume.get(id)`。
-> - `delete` 成功即返回 `None`；失败则抛异常（见下方错误码）。
 
 ### `create`：默认插件 vs. 指定 driver
 
@@ -91,35 +94,19 @@ VolumeMount(name=<volume_id>, path="/workspace")   # 强类型
 
 ## 示例
 
-### 1. 创建（默认插件，e2b 兼容）
+### 1. 创建
 
 ```python
 from cubesandbox import Volume
 
-vol = Volume.create("my-data")     # name 可选；省略则得到一个 UUID
+vol = Volume.create("my-data")     # 指定名称
 print(vol.volume_id, vol.name, vol.token)
+
+vol = Volume.create()              # 省略 name，服务端生成 UUID
+print(vol.volume_id)               # 自动生成的 UUID
 ```
 
-### 2. 创建并绑定指定 driver
-
-```python
-vol = Volume.create("my-data", driver="cos")
-
-# driver 传空串等价于不指定：不发送 driver，后端使用第一个已配置的插件。
-Volume.create("x", driver="")   # 等价于 Volume.create("x")
-```
-
-### 3. List / get / delete
-
-```python
-for v in Volume.list():            # 注意：此处 v.token 为 ""
-    print(v.volume_id, v.name)
-
-one = Volume.get(vol.volume_id)    # one.token 已填充
-Volume.delete(vol.volume_id)       # 先杀掉所有挂载它的沙箱（见下方注意事项）
-```
-
-### 4. 挂载进沙箱并使用
+### 2. 绑定指定插件
 
 ```python
 from cubesandbox import Sandbox, Volume, VolumeMount
@@ -129,13 +116,37 @@ vol = Volume.create("my-data", driver="cos")
 with Sandbox.create(
     volume_mounts=[VolumeMount(name=vol.volume_id, path="/workspace")],
 ) as sb:
-    sb.files.write("/workspace/note.txt", "persisted!")
-    print(sb.files.read("/workspace/note.txt"))   # "persisted!"
+    sb.files.write("/workspace/note.txt", "已持久化！")
+    print(sb.files.read("/workspace/note.txt"))   # "已持久化！"
 ```
 
-### 5. 跨沙箱持久化（真正的验证）
+### 3. 查询与删除
 
-在一个沙箱里写入的数据，可从另一个挂载同一卷的沙箱读回：
+```python
+for v in Volume.list():            # 注意：此处 v.token 为 ""
+    print(v.volume_id, v.name)
+
+one = Volume.get(vol.volume_id)    # one.token 已填充
+Volume.delete(vol.volume_id)       # 删除前须先 kill 所有挂载它的沙箱（见注意事项）
+```
+
+### 4. 挂载进沙箱
+
+```python
+from cubesandbox import Sandbox, Volume, VolumeMount
+
+vol = Volume.create("my-data", driver="cos")
+
+with Sandbox.create(
+    volume_mounts=[VolumeMount(name=vol.volume_id, path="/workspace")],
+) as sb:
+    sb.files.write("/workspace/note.txt", "已持久化！")
+    print(sb.files.read("/workspace/note.txt"))   # "已持久化！"
+```
+
+### 5. 跨沙箱数据共享
+
+多个沙箱可同时挂载同一个卷，数据对所有挂载者实时可见。
 
 ```python
 from cubesandbox import Sandbox, Volume, VolumeMount
@@ -143,26 +154,19 @@ from cubesandbox import Sandbox, Volume, VolumeMount
 vol = Volume.create("shared", driver="cos")
 mount = [VolumeMount(name=vol.volume_id, path="/workspace")]
 
-# 沙箱 A 写入，然后销毁。
+# 沙箱 A 写入数据。
 a = Sandbox.create(volume_mounts=mount)
 a.files.write("/workspace/probe.txt", "hello from A")
-a.kill()
 
-# 沙箱 B 挂载同一个卷并读回。
+# 沙箱 B 挂载同一卷，立即可读。
 with Sandbox.create(volume_mounts=mount) as b:
     print(b.files.read("/workspace/probe.txt"))   # "hello from A"
 
+# ⚠️ 删除卷前，必须 kill 所有挂载它的沙箱。
+a.kill()
+b.kill()  # 上下文管理器退出时已自动 kill，此处仅为说明
 Volume.delete(vol.volume_id)
 ```
-
-> 覆盖上述完整流程的端到端脚本位于 `tests/integration_test_volume.py`。请**在 CubeProxy
-> 宿主机上**运行，让数据面写入走 loopback：
->
-> ```bash
-> CUBE_API_URL=http://127.0.0.1:3000 CUBE_TEMPLATE_ID=<tpl> \
-> CUBE_PROXY_NODE_IP=127.0.0.1 CUBE_VOLUME_DRIVER=cos \
-> python3 tests/integration_test_volume.py
-> ```
 
 ---
 
@@ -192,24 +196,18 @@ from cubesandbox import Volume, VolumeNotFoundError, ApiError
 try:
     Volume.get("does-not-exist")
 except VolumeNotFoundError:
-    ...                       # 理想情况：404
+    ...                       # 404
 except ApiError as e:
-    print(e.status_code)      # 当前实际：500 —— 见下方已知问题
+    print(e.status_code)      # 500
 ```
-
-### 已知后端问题
-
-后端目前把**所有**卷业务错误都塌成 **HTTP 500**（`ret_code` 被硬编码为 `-1`），因此
-`VolumeNotFoundError`（404）、重名冲突（409）、参数错误（400）在 SDK 层**当前无法区分**
-——它们都会以 `ApiError(500)` 的形式暴露。上面的映射表反映的是**预期契约**，等后端返回正确
-状态码后才会真正生效。详情见 [`volume-error-code-bug.md`](./volume-error-code-bug.md)。
 
 ---
 
 ## 注意事项
 
-- **`delete` 不会自动 detach。** 删除仍被运行中沙箱挂载的卷，可能导致后端挂载泄漏。请务必
-  先对挂载它的沙箱执行 `sb.kill()`，再调用 `Volume.delete(...)`。
-- **`list` 从不返回 token。** token 只在 `create` 和 `get` 时暴露；需要 token 时请调用
-  `Volume.get(id)`。
-- **name 处处可选。** 省略时服务端会分配一个 UUID，并同时用作卷名与 `volume_id`。
+- **删除卷前必须 kill 所有挂载方。** 一个卷可以被多个沙箱同时挂载。`Volume.delete()` 不会
+  自动 detach——若仍有运行中的沙箱持有该卷，删除操作可能失败或导致后端挂载泄漏。务必先对所有
+  挂载它的沙箱执行 `sb.kill()`，再调用 `Volume.delete(volume_id)`。
+- **`list` 不返回 token。** token 仅在 `create` 和 `get` 时暴露；需要 token 时请调用
+  `Volume.get(volume_id)`。
+- **`name` 可选。** 省略时服务端分配一个 UUID，该 UUID 同时用作 `volume_id` 和 `name`。
