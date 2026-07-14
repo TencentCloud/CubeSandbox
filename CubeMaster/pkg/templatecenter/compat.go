@@ -61,6 +61,20 @@ func configureCompatHooks() {
 	}
 }
 
+func configurePreheatHooks() {
+	nodemeta.OnNodeRegistered = func(nodeID string) {
+		signalPreheatReconcile()
+	}
+	nodemeta.OnNodeLabelsChanged = func(nodeID string) {
+		signalPreheatReconcile()
+	}
+	nodemeta.OnNodeHealthTransitioned = func(nodeID string, healthy bool) {
+		if healthy {
+			signalPreheatReconcile()
+		}
+	}
+}
+
 func scheduleInitialCompatScan(ctx context.Context) {
 	nodes, err := nodemeta.ListNodes(ctx)
 	if err != nil {

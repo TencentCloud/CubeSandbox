@@ -266,13 +266,15 @@ func Init(ctx context.Context) error {
 		}
 		configureSnapshotRuntimeRefHooks()
 		configureSandboxSpecHooks()
-		configureCompatHooks()
-		if warmErr := warmReadyTemplateLocality(ctx); warmErr != nil {
-			log.G(ctx).Warnf("warm ready template locality fail:%v", warmErr)
-		}
-		startSnapshotReconciler(ctx)
-		startArtifactGC(ctx)
-		scheduleInitialCompatScan(ctx)
+	configureCompatHooks()
+	configurePreheatHooks()
+	if warmErr := warmReadyTemplateLocality(ctx); warmErr != nil {
+		log.G(ctx).Warnf("warm ready template locality fail:%v", warmErr)
+	}
+	startSnapshotReconciler(ctx)
+	startArtifactGC(ctx)
+	startPreheatController(ctx)
+	scheduleInitialCompatScan(ctx)
 	})
 	return initErr
 }

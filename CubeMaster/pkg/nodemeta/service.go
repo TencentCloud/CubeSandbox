@@ -184,6 +184,15 @@ var global = &service{
 // nodemeta never imports templatecenter.
 var OnGuestAgentVersionChanged func(nodeID string)
 
+// Preheat controller callbacks. Same pattern as OnGuestAgentVersionChanged:
+// declared in nodemeta (which never imports templatecenter) to avoid an
+// import cycle, nil-checked at the call site, and fire-and-forget.
+var (
+	OnNodeRegistered         func(nodeID string)
+	OnNodeLabelsChanged      func(nodeID string)
+	OnNodeHealthTransitioned func(nodeID string, healthy bool)
+)
+
 func Init(ctx context.Context) error {
 	_ = ctx
 	// Schema is owned by pkg/base/dao/migrate and applied at startup
@@ -288,6 +297,9 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 	global.mu.Unlock()
 	syncLocalcache(snap)
 	global.persistVersions(ctx, req.NodeID, req.Versions, req.InventoryIncomplete)
+	if OnNodeRegistered != nil {
+		go OnNodeRegistered(snap.NodeID)
+	}
 	return cloneSnapshot(snap), nil
 }
 
@@ -322,6 +334,7 @@ func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusR
 
 	snap := global.ensureNode(nodeID)
 	global.mu.Lock()
+	prevHealthy := snap.Healthy
 	snap.NodeID = nodeID
 	snap.Conditions = append([]corev1.NodeCondition(nil), req.Conditions...)
 	snap.Images = append([]ContainerImage(nil), req.Images...)
@@ -329,6 +342,7 @@ func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusR
 	snap.HeartbeatTime = req.HeartbeatTime
 	snap.ReportedReady = reportedReady
 	applyCurrentHealth(snap, time.Now())
+	currHealthy := snap.Healthy
 	global.mu.Unlock()
 	syncLocalcache(snap)
 
@@ -339,6 +353,9 @@ func UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusR
 	// already provides the cross-replica fan-out used by the scheduler.
 	fanOutResourceMetric(ctx, nodeID, req)
 	global.persistVersions(ctx, nodeID, req.Versions, req.InventoryIncomplete)
+	if OnNodeHealthTransitioned != nil && prevHealthy != currHealthy {
+		go OnNodeHealthTransitioned(nodeID, currHealthy)
+	}
 	return cloneSnapshot(snap), nil
 }
 
@@ -670,6 +687,9 @@ func UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]stri
 	snap.labelsJSONCorrupt = false
 	global.mu.Unlock()
 	syncLocalcache(snap)
+	if OnNodeLabelsChanged != nil {
+		go OnNodeLabelsChanged(nodeID)
+	}
 	return nil
 }
 
