@@ -10,6 +10,26 @@ public enum ManagedVMStartMode: Sendable {
   case restored
 }
 
+public final class VMStreamConnection: @unchecked Sendable {
+  private let connection: VZVirtioSocketConnection
+
+  fileprivate init(connection: VZVirtioSocketConnection) {
+    self.connection = connection
+  }
+
+  public var fileDescriptor: Int32 {
+    connection.fileDescriptor
+  }
+
+  public func close() {
+    connection.close()
+  }
+
+  deinit {
+    connection.close()
+  }
+}
+
 private final class ControlConnectionDelegate: NSObject, VZVirtioSocketListenerDelegate,
   @unchecked Sendable
 {
@@ -165,6 +185,21 @@ public final class ManagedVM {
     if virtualMachine.state != .stopped {
       try await virtualMachine.stop()
     }
+  }
+
+  public func connect(toGuestPort port: UInt32) async throws -> VMStreamConnection {
+    guard virtualMachine.state == .running else {
+      throw CubeVZError.runtime("cannot connect to guest while VM is not running")
+    }
+    guard let socket = virtualMachine.socketDevices.first as? VZVirtioSocketDevice else {
+      throw CubeVZError.runtime("VM has no virtio socket device")
+    }
+    let connection = try await socket.connect(toPort: port)
+    return VMStreamConnection(connection: connection)
+  }
+
+  public func executeControlCommand(_ command: String) async throws -> String {
+    try await exchange(command: command.hasSuffix("\n") ? command : "\(command)\n")
   }
 
   private func exchange(command: String) async throws -> String {

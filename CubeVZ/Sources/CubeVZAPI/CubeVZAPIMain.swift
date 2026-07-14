@@ -10,7 +10,12 @@ private let usage = """
 
   options:
     --template-id ID    CubeAPI template ID (default: cube-vz)
+    --bind-address IP   IPv4 listen address (default: 127.0.0.1)
     --port N            Loopback HTTP port (default: 3000)
+    --node-id ID        Scheduler node ID (default: cube-vz-local)
+    --advertise-url URL URL other nodes use to reach this node
+    --workers LIST      Comma-separated nodeID=http://IPv4:port workers
+    --coordinator-url   Coordinator URL for periodic worker registration
   """
 
 @main
@@ -34,10 +39,61 @@ private struct CubeVZAPIMain {
         templateDirectory: URL(fileURLWithPath: templatePath).standardizedFileURL,
         sandboxesDirectory: URL(fileURLWithPath: sandboxesPath).standardizedFileURL
       )
-      let server = HTTPServer(port: port, manager: manager)
+      let bindAddress = options["--bind-address"] ?? "127.0.0.1"
+      let nodeID = options["--node-id"] ?? "cube-vz-local"
+      let defaultAdvertiseAddress = bindAddress == "0.0.0.0" ? "127.0.0.1" : bindAddress
+      guard
+        let advertiseURL = URL(
+          string: options["--advertise-url"] ?? "http://\(defaultAdvertiseAddress):\(port)"
+        )
+      else {
+        throw CubeVZError.invalidArguments("--advertise-url is invalid")
+      }
+      let scheduler = ClusterScheduler(
+        localNodeID: nodeID,
+        advertiseURL: advertiseURL,
+        manager: manager
+      )
+      for entry in (options["--workers"] ?? "").split(separator: ",") {
+        let parts = entry.split(separator: "=", maxSplits: 1)
+        guard parts.count == 2 else {
+          throw CubeVZError.invalidArguments("--workers entries must be nodeID=http://IPv4:port")
+        }
+        try scheduler.register(
+          ClusterRegistrationRequest(
+            nodeID: String(parts[0]),
+            url: String(parts[1]),
+            activeSandboxes: 0
+          )
+        )
+      }
+      let server = HTTPServer(
+        bindAddress: bindAddress,
+        port: port,
+        manager: manager,
+        scheduler: scheduler
+      )
       try server.start()
-      print("cube-vz-api: listening on http://127.0.0.1:\(port)")
+      print("cube-vz-api: listening on http://\(bindAddress):\(port)")
       print("cube-vz-api: template=\(options["--template-id"] ?? "cube-vz")")
+      print("cube-vz-api: node=\(nodeID) advertise=\(advertiseURL.absoluteString)")
+      if let coordinator = options["--coordinator-url"] {
+        guard let coordinatorURL = URL(string: coordinator) else {
+          throw CubeVZError.invalidArguments("--coordinator-url is invalid")
+        }
+        Task { @MainActor in
+          while !Task.isCancelled {
+            do {
+              try await scheduler.registerWithCoordinator(coordinatorURL)
+            } catch {
+              FileHandle.standardError.write(
+                Data("cube-vz-api: coordinator registration failed: \(error)\n".utf8)
+              )
+            }
+            try? await Task.sleep(for: .seconds(5))
+          }
+        }
+      }
       while !Task.isCancelled {
         try await Task.sleep(for: .seconds(3_600))
       }
@@ -48,7 +104,10 @@ private struct CubeVZAPIMain {
   }
 
   private static func parseOptions(_ arguments: [String]) throws -> [String: String] {
-    let allowed = Set(["--template-dir", "--sandboxes-dir", "--template-id", "--port"])
+    let allowed = Set([
+      "--template-dir", "--sandboxes-dir", "--template-id", "--bind-address", "--port",
+      "--node-id", "--advertise-url", "--workers", "--coordinator-url",
+    ])
     var result: [String: String] = [:]
     var index = 0
     while index < arguments.count {
