@@ -16,6 +16,7 @@ RELEASE_DIR ?= $(ROOT_DIR)/_output/release
 MANUAL_DEPLOY_SCRIPT ?= $(ROOT_DIR)/deploy/one-click/deploy-manual.sh
 WEB_DIR ?= $(ROOT_DIR)/web
 CUBECOW_DIR ?= $(ROOT_DIR)/cubecow
+CUBEVZ_DIR ?= $(ROOT_DIR)/CubeVZ
 CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
@@ -113,6 +114,13 @@ help:
 	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
 	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
 	@printf "  network-agent-test Run network-agent unit tests in Docker\n"
+	@printf "  cube-vz       Build and sign the native Apple Silicon VM runner\n"
+	@printf "  cube-vz-api   Build and sign the macOS CubeAPI-compatible lifecycle server\n"
+	@printf "  cube-vz-test  Run the native CubeVZ self-tests on macOS\n"
+	@printf "  cube-vz-doctor Build CubeVZ and check host virtualization readiness\n"
+	@printf "  cube-vz-benchmark-guest Build the ARM64 benchmark kernel/rootfs with Docker\n"
+	@printf "  cube-vz-benchmark Run the end-to-end native VM benchmark on Apple Silicon\n"
+	@printf "  cube-vz-lifecycle-benchmark Run official cube-bench semantics against CubeVZ\n"
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
 	@printf "  all           Build cubemaster, cubelet, network-agent and cubevsmapdump in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
@@ -289,6 +297,50 @@ shim-test: builder-image
 shim: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeShim && cargo build --release --locked && install -m 0755 /workspace/CubeShim/target/release/containerd-shim-cube-rs /workspace/_output/bin/containerd-shim-cube-rs && install -m 0755 /workspace/CubeShim/target/release/cube-runtime /workspace/_output/bin/cube-runtime'
+
+# CubeVZ must be built on macOS because it links Apple's Virtualization.framework.
+# Ad-hoc signing with the virtualization entitlement is required even for local use.
+.PHONY: cube-vz-precheck
+cube-vz-precheck:
+	@test "$$(uname -s)" = Darwin || { echo "ERROR: cube-vz requires macOS"; exit 1; }
+	@test "$$(uname -m)" = arm64 || { echo "ERROR: cube-vz currently requires Apple Silicon"; exit 1; }
+	@command -v swift >/dev/null 2>&1 || { echo "ERROR: Swift toolchain not found; install Xcode Command Line Tools"; exit 1; }
+	@command -v codesign >/dev/null 2>&1 || { echo "ERROR: codesign not found; install Xcode Command Line Tools"; exit 1; }
+
+.PHONY: cube-vz
+cube-vz: cube-vz-precheck
+	cd "$(CUBEVZ_DIR)" && swift build -c release --product cube-vz
+	cd "$(CUBEVZ_DIR)" && swift build -c release --product cube-vz-api
+	@mkdir -p "$(OUTPUT_DIR)"
+	install -m 0755 "$(CUBEVZ_DIR)/.build/release/cube-vz" "$(OUTPUT_DIR)/cube-vz"
+	install -m 0755 "$(CUBEVZ_DIR)/.build/release/cube-vz-api" "$(OUTPUT_DIR)/cube-vz-api"
+	codesign --force --sign - --entitlements "$(CUBEVZ_DIR)/cube-vz.entitlements" "$(OUTPUT_DIR)/cube-vz"
+	codesign --force --sign - --entitlements "$(CUBEVZ_DIR)/cube-vz.entitlements" "$(OUTPUT_DIR)/cube-vz-api"
+
+.PHONY: cube-vz-api
+cube-vz-api: cube-vz
+
+.PHONY: cube-vz-test
+cube-vz-test: cube-vz-precheck
+	cd "$(CUBEVZ_DIR)" && swift build --product cube-vz-selftest
+	codesign --force --sign - --entitlements "$(CUBEVZ_DIR)/cube-vz.entitlements" "$(CUBEVZ_DIR)/.build/debug/cube-vz-selftest"
+	"$(CUBEVZ_DIR)/.build/debug/cube-vz-selftest"
+
+.PHONY: cube-vz-doctor
+cube-vz-doctor: cube-vz
+	"$(OUTPUT_DIR)/cube-vz" doctor
+
+.PHONY: cube-vz-benchmark-guest
+cube-vz-benchmark-guest: cube-vz-precheck
+	"$(CUBEVZ_DIR)/Benchmark/build-guest.sh"
+
+.PHONY: cube-vz-benchmark
+cube-vz-benchmark: cube-vz
+	CUBEVZ_BENCH_SKIP_BUILD=1 "$(CUBEVZ_DIR)/Benchmark/run-benchmark.sh"
+
+.PHONY: cube-vz-lifecycle-benchmark
+cube-vz-lifecycle-benchmark: cube-vz cube-vz-benchmark-guest
+	CUBEVZ_LIFECYCLE_SKIP_BUILD=1 "$(CUBEVZ_DIR)/Benchmark/run-lifecycle-benchmark.sh"
 
 # Build a guest kernel image (vmlinux for x86_64, Image for aarch64) from an external kernel source tree.
 #   make guest-kernel KERNEL_SRC=/path/to/linux                            # native build for the host arch

@@ -1,5 +1,6 @@
 # Rust build artifacts (per-module)
 **/target/
+**/.build/
 
 # IDE
 .idea/

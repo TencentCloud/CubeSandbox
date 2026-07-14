@@ -1,0 +1,141 @@
+# CubeVZ
+
+CubeVZ is the macOS/Apple Silicon backend prototype for CubeSandbox. It runs an
+ARM64 Linux sandbox directly on Apple `Virtualization.framework`:
+
+```text
+macOS process (cube-vz)
+        |
+        | Virtualization.framework / Apple Hypervisor
+        v
+ARM64 Linux sandbox VM
+```
+
+There is no Linux host VM and no nested KVM layer. The Linux guest remains the
+CubeSandbox isolation boundary, so this is still hardware virtualization, but
+it is exactly one layer from macOS to the sandbox guest.
+
+## What is implemented
+
+- Direct ARM64 Linux kernel boot with `VZLinuxBootLoader`.
+- Raw root disk attached as virtio-blk.
+- APFS `clonefile(2)` copy-on-write disks for cheap per-sandbox creation.
+- Virtio console on the invoking terminal.
+- Virtio entropy, memory balloon, vsock, and NAT networking.
+- Stable generic machine identifiers.
+- Native VM save/restore through `machine.vzstate` on macOS 14 or newer.
+- Saved-template APFS cloning and guest-to-host vsock readiness/shutdown control.
+- A loopback CubeAPI-compatible lifecycle server implementing the `POST` and
+  `DELETE /sandboxes` contract used by the official `cube-bench` tool.
+- A host readiness check that includes architecture, framework support, and the
+  required code-signing entitlement.
+
+## Requirements
+
+- Apple Silicon Mac (`arm64`).
+- macOS 14 or newer.
+- Xcode Command Line Tools with Swift 6.2 or newer.
+- An ARM64 Linux kernel in bootable `Image` format. The repository's
+  `make guest-kernel KERNEL_TARGET_ARCH=aarch64` target writes this image as
+  `_output/kernel/aarch64/vmlinux` for compatibility with existing packaging.
+- A raw block image containing the guest root filesystem. The existing
+  `cube-guest-image-cpu.img` is raw ext4 and is suitable; qcow2 is not.
+
+The checked-in ARM64 kernel config already enables the required virtio block,
+network, console, vsock, PCI, and ext4 drivers.
+
+## Build and verify
+
+From the repository root:
+
+```bash
+make cube-vz-test
+make cube-vz-doctor
+make cube-vz-benchmark
+make cube-vz-lifecycle-benchmark
+```
+
+`make cube-vz` writes the signed release binary to `_output/bin/cube-vz`.
+The Make target intentionally runs natively instead of inside the Linux builder
+container because `Virtualization.framework` exists only on macOS.
+
+Do not run the raw SwiftPM executable directly for VM operations unless you
+codesign it first. macOS requires the
+`com.apple.security.virtualization` entitlement; the Make targets apply it with
+an ad-hoc signature for local development.
+
+## Run the M4 benchmark
+
+`make cube-vz-benchmark` performs the complete path:
+
+1. Builds a reproducible Alpine ARM64 guest with Docker when artifacts are
+   missing. Docker is used only to assemble the Linux kernel, initramfs, and raw
+   ext4 image.
+2. Creates an APFS copy-on-write VM directory.
+3. Boots that guest directly through `Virtualization.framework`, without
+   Docker or a Linux host VM in the measured execution path.
+4. Runs sysbench CPU, memory, and direct random file-I/O workloads, powers the
+   guest down, and writes the console log plus a Markdown report under
+   `_output/cube-vz/benchmark-results/`.
+
+Force a guest artifact rebuild with:
+
+```bash
+CUBEVZ_BENCH_REBUILD_GUEST=1 make cube-vz-benchmark
+```
+
+The benchmark defaults to 2 vCPUs and 2048 MiB. Override them with
+`CUBEVZ_BENCH_VCPUS` and `CUBEVZ_BENCH_MEMORY_MIB`. A measured baseline from
+the implementation host is recorded in [Benchmark/RESULTS.md](Benchmark/RESULTS.md).
+
+## Run the official lifecycle benchmark
+
+`make cube-vz-lifecycle-benchmark` builds and signs both native binaries,
+creates a ready ARM64 Linux saved template, cross-compiles the repository's
+official `examples/cube-bench` binary for macOS ARM64, and runs these tiers:
+
+- concurrency 1, 20 create/delete cycles, 3 warmups;
+- concurrency 10, 200 create/delete cycles, 3 warmups.
+
+The measured POST includes APFS template cloning, VM construction, saved-state
+restore, and the guest vsock READY signal. Results and the API log are written
+under `_output/cube-vz/lifecycle-results/<timestamp>/`. The measured path is
+native macOS → `Virtualization.framework` → ARM64 Linux; Docker is only used
+before measurement to assemble guest artifacts and cross-compile `cube-bench`.
+
+## Create and run a sandbox VM
+
+```bash
+_output/bin/cube-vz create \
+  --vm-dir .workdir/cube-vz/demo \
+  --kernel _output/kernel/aarch64/vmlinux \
+  --disk /absolute/path/to/cube-guest-image-cpu.img \
+  --cpus 2 \
+  --memory-mib 2048
+
+_output/bin/cube-vz run --vm-dir .workdir/cube-vz/demo
+```
+
+The default command line is `console=hvc0 root=/dev/vda rw`. Override it with
+`--cmdline` if the guest image needs additional kernel parameters.
+
+While the VM is running:
+
+- `kill -USR1 <pid>` pauses it, atomically writes `machine.vzstate`, and exits.
+- A later `run` restores and consumes that saved state automatically.
+- `Ctrl-C`, `SIGINT`, or `SIGTERM` stops without creating new saved state.
+- `cube-vz reset-state --vm-dir ...` deletes saved state for a cold boot.
+
+Keep the VM configuration, kernel, machine identifier, and disk unchanged while
+a saved state exists. Apple's restore format is tied to that VM configuration.
+
+## Current boundary
+
+CubeVZ now provides a complete template-create/delete lifecycle slice and the
+CubeAPI HTTP contract required by `cube-bench`; it is no longer limited to a
+standalone VM runner. It is not yet a drop-in replacement for every Linux
+CubeShim/CubeAPI feature: code execution, filesystem APIs, network policy, port
+management, pause/rollback, authentication, and distributed scheduling remain
+outside this macOS backend. The Linux containerd/CubeShim implementation is not
+run inside another Linux host VM; `cube-vz-api` replaces that lifecycle boundary
+with a native backend.
