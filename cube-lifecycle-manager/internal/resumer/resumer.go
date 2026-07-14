@@ -96,10 +96,17 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	if entry == nil {
 		return errors.New("sandbox not in registry")
 	}
-	if !entry.Meta.AutoResume {
-		return errors.New("auto_resume not enabled for sandbox")
-	}
 
+	// AutoResume is intentionally NOT checked here: the flag governs whether
+	// CLM is allowed to drive a resume RPC on the user's behalf, not whether
+	// the dataplane request is allowed through when the sandbox is *already*
+	// running. If the user (via CubeMaster.Resume) has already brought the
+	// sandbox back up, the state event synchroniser will have flipped Redis
+	// state to "running"; we want acquireResumeOwnership to hit
+	// errAlreadyRunning and let this request pass, regardless of AutoResume.
+	// The check therefore lives inside the `ownErr == nil` branch, right
+	// before we'd actually call CubeMaster.
+	//
 	// cube:v1:shared:sandbox:lifecycle:state:<id> is dual-purpose: terminal
 	// markers (paused / running) AND in-flight transition locks (pausing /
 	// resuming) live in the same key. SETNX alone can't distinguish "I'm
@@ -107,15 +114,29 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	// for someone to resume it" — we need to peek first.
 	switch ownErr := r.acquireResumeOwnership(ctx, sandboxID); {
 	case ownErr == nil:
-		// We own the resume; call CubeMaster.
+		// We took the "resuming" lock; we're on the hook to drive the RPC.
+		// AutoResume gate lives here (the only path that would call
+		// CubeMaster.Resume) — return early if the sandbox opted out of
+		// auto-resume, and release the lock we just SET so the sweeper
+		// doesn't skip decisions for its TTL window.
+		if !entry.Meta.AutoResume {
+			_ = r.o.Redis.ClearState(ctx, sandboxID)
+			return errors.New("auto_resume not enabled for sandbox")
+		}
 		if err := r.callCubeMasterResume(ctx, sandboxID, entry.Meta.InstanceType); err != nil {
 			return err
 		}
 	case errors.Is(ownErr, errAlreadyRunning):
 		// Sandbox is already running per Redis. Skip the RPC and run the
 		// success bookkeeping below so we re-assert state to the proxy.
-		// (This is the case where a peer resume already completed but the
-		// proxy's local dict still says "paused".)
+		// This covers two important cases:
+		//   1. A peer resume already completed but the proxy's local dict
+		//      still says "paused".
+		//   2. The user called CubeMaster.Resume directly and the state
+		//      event synchroniser flipped Redis to "running" before the
+		//      next dataplane request arrived. In this case AutoResume may
+		//      well be false — that's fine; the sandbox is running and the
+		//      request should be forwarded.
 	default:
 		return ownErr
 	}

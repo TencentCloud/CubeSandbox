@@ -71,9 +71,14 @@ func (c *Client) EnsureGroup(ctx context.Context, group string) error {
 // Event is a decoded entry from the events stream.
 type Event struct {
 	StreamID  string
-	Op        string // create | delete
+	Op        string // create | delete | update | state
 	SandboxID string
-	Meta      *lifecycle.SandboxLifecycleMeta // populated only on create
+	// Meta is populated for create/update events (delete carries only the
+	// sandbox ID).
+	Meta *lifecycle.SandboxLifecycleMeta
+	// State is populated for state events emitted by CubeMaster after a
+	// successful pause / resume RPC. Consumed by statesync.
+	State     *lifecycle.StatePayload
 	Timestamp int64
 }
 
@@ -184,13 +189,24 @@ func decodeEvent(msg redis.XMessage) *Event {
 			ev.Timestamp = t
 		}
 	}
-	if op == lifecycle.OpCreate || op == lifecycle.OpUpdate {
+	switch op {
+	case lifecycle.OpCreate, lifecycle.OpUpdate:
 		if payload, ok := msg.Values[lifecycle.FieldPayload].(string); ok && payload != "" {
 			var meta lifecycle.SandboxLifecycleMeta
 			if err := json.Unmarshal([]byte(payload), &meta); err == nil {
 				meta.SandboxID = sid
 				ev.Meta = &meta
 			}
+		}
+	case lifecycle.OpState:
+		if payload, ok := msg.Values[lifecycle.FieldPayload].(string); ok && payload != "" {
+			var sp lifecycle.StatePayload
+			if err := json.Unmarshal([]byte(payload), &sp); err == nil {
+				ev.State = &sp
+			}
+			// If unmarshal fails ev.State stays nil; downstream
+			// statesync warns and drops, keeping the stream consumer
+			// resilient to schema drift.
 		}
 	}
 	return ev

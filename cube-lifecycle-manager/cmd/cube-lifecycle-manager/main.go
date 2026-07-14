@@ -27,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/redisstream"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/resumer"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/statesync"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/sweeper"
 )
 
@@ -173,8 +174,18 @@ func run() error {
 	if discSvc != nil {
 		loopCount++
 	}
+	stateSyncDeps := statesync.Deps{
+		Registry:  reg,
+		Redis:     stream,
+		ProxyPush: pushClient,
+		TTL:       cfg.StateLockTTL,
+		Log:       logger.Named("statesync"),
+	}
+
 	errs := make(chan error, loopCount)
-	go func() { errs <- consumeStream(rootCtx, stream, pushClient, reg, cfg, logger.Named("stream")) }()
+	go func() {
+		errs <- consumeStream(rootCtx, stream, pushClient, reg, cfg, stateSyncDeps, logger.Named("stream"))
+	}()
 	go func() { errs <- pollLastActive(rootCtx, pushClient, reg, cfg.LastActivePoll, logger.Named("active")) }()
 	go func() { errs <- sweep.Run(rootCtx) }()
 	go func() { errs <- apiSrv.Run(rootCtx) }()
@@ -271,7 +282,7 @@ func bootstrapRegistry(ctx context.Context, stream *redisstream.Client,
 // consumeStream is the increment-side of the lifecycle channel. It maintains
 // the registry + pushes deltas to CubeProxy as create / delete events arrive.
 func consumeStream(ctx context.Context, stream *redisstream.Client, push *proxypush.Client,
-	reg *registry.Registry, cfg *config.Config, log *zap.Logger) error {
+	reg *registry.Registry, cfg *config.Config, ssDeps statesync.Deps, log *zap.Logger) error {
 
 	for {
 		if ctx.Err() != nil {
@@ -289,7 +300,7 @@ func consumeStream(ctx context.Context, stream *redisstream.Client, push *proxyp
 			continue
 		}
 		for _, ev := range events {
-			handleEvent(ctx, ev, push, reg, log)
+			handleEvent(ctx, ev, push, reg, ssDeps, log)
 			if err := stream.Ack(ctx, cfg.ConsumerGroup, ev.StreamID); err != nil {
 				log.Warn("ack failed",
 					zap.String("id", ev.StreamID), zap.Error(err))
@@ -299,7 +310,7 @@ func consumeStream(ctx context.Context, stream *redisstream.Client, push *proxyp
 }
 
 func handleEvent(ctx context.Context, ev redisstream.Event, push *proxypush.Client,
-	reg *registry.Registry, log *zap.Logger) {
+	reg *registry.Registry, ssDeps statesync.Deps, log *zap.Logger) {
 
 	switch ev.Op {
 	case lifecycle.OpCreate:
@@ -351,6 +362,10 @@ func handleEvent(ctx context.Context, ev redisstream.Event, push *proxypush.Clie
 			log.Warn("update event push failed",
 				zap.String("sandbox_id", ev.SandboxID), zap.Error(err))
 		}
+	case lifecycle.OpState:
+		// Reconcile externally-driven pause/resume (e.g. SDK connect())
+		// against the CLM's Redis state key + CubeProxy dict.
+		statesync.Handle(ctx, ssDeps, ev)
 	default:
 		log.Warn("unknown event op",
 			zap.String("op", ev.Op),
