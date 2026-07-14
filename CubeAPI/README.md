@@ -113,15 +113,17 @@ Each endpoint supports:
 | `enabled` | Whether the endpoint is active. Optional, default `true`. |
 | `allow_private_urls` | Optional, default `false`. Explicitly permit this endpoint to target a local-development or internal receiver, such as `localhost`, a loopback IP, a private IP, or a link-local IP. |
 
-`max_payload_bytes` is a global `WebhookConfig` setting, separate from `CUBE_API_WEBHOOK_ENDPOINTS`. It defaults to 256 KiB, must be greater than zero, and has a hard maximum of 1 MiB. Configure it through:
+### Webhook Payload Size Limit
+
+`WEBHOOK__MAX_PAYLOAD_BYTES` sets the maximum size of a fully serialized webhook request body. It is a global webhook setting and is not part of the endpoint objects configured through `CUBE_API_WEBHOOK_ENDPOINTS`. The default is 262144 bytes (256 KiB). The value must be greater than zero and cannot exceed 1048576 bytes (1 MiB).
 
 ```bash
-export WEBHOOK__MAX_PAYLOAD_BYTES=262144   # max serialized webhook body, in bytes
+export WEBHOOK__MAX_PAYLOAD_BYTES=262144
 ```
 
-CubeAPI fully serializes each webhook body with `serde_json::to_vec` before checking the limit. Each accepted `Delivery.body` is at most `max_payload_bytes`; retained delivery bodies remain regulated by the existing outstanding-task mechanism, and the matching-endpoint batch currently being constructed is retained temporarily. This is not a complete webhook memory bound: the limit does not bound the original `LogEvent`, the transient allocation required to serialize an oversized event, `FileLogger` memory, reqwest/hyper buffering, or CubeMaster response memory.
+CubeAPI measures the UTF-8 byte length after the complete JSON payload has been serialized. A payload at the configured limit is allowed. A larger payload is not delivered to endpoints that match the event and is not retried. This does not affect the originating CubeAPI operation.
 
-The finite default is an intentional runtime behavior change: an event whose serialized body exceeds 256 KiB and was previously deliverable is now dropped unless the configured limit is raised to accommodate it, up to the 1 MiB hard maximum.
+This setting provides a predictable size boundary for webhook delivery. Configure it to match expected event sizes and the receiver's request-body limit, up to the 1 MiB hard maximum. It does not prevent the temporary allocation required to serialize an oversized payload and is not a limit on CubeAPI's total memory use.
 
 ### Endpoint URL Validation
 
