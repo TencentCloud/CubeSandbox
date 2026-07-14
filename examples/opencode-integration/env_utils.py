@@ -35,6 +35,7 @@ PROVIDER_DEFAULT_MODEL = {
 
 PASSTHROUGH_ENV_NAMES = (
     "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -90,6 +91,10 @@ def opencode_model() -> str:
     explicit = os.environ.get("OPENCODE_MODEL")
     if explicit:
         return explicit
+    if provider == "anthropic":
+        anthropic_model = os.environ.get("ANTHROPIC_MODEL")
+        if anthropic_model:
+            return anthropic_model
     default = PROVIDER_DEFAULT_MODEL.get(provider)
     if default:
         return default

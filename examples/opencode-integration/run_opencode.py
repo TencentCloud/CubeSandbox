@@ -70,6 +70,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip writing the demo files into the sandbox workspace.",
     )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Keep OpenCode's raw streamed JSON output.",
+    )
     args = parser.parse_args()
     if args.prompt is None:
         args.prompt = default_prompt(args.workspace)
@@ -162,6 +167,7 @@ def main() -> int:
             envs=opencode_env,
             timeout=args.exec_timeout,
             stream=True,
+            raw=args.raw,
         )
 
         print_result_summary(result)

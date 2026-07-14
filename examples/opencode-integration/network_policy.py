@@ -102,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--raw",
         action="store_true",
-        help="Keep OpenCode's raw streamed output (currently the default renderer).",
+        help="Keep OpenCode's raw streamed JSON output.",
     )
     args = parser.parse_args()
     if args.prompt is None:
@@ -171,6 +171,7 @@ def run_agent(sandbox: Sandbox, args: argparse.Namespace, envs: dict[str, str]):
         envs=envs,
         timeout=args.exec_timeout,
         stream=True,
+        raw=args.raw,
     )
 
 

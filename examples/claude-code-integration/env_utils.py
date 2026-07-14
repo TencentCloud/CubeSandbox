@@ -15,6 +15,7 @@ DEFAULT_WORKSPACE = "/workspace"
 
 PASSTHROUGH_ENV_NAMES = (
     "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -61,11 +62,14 @@ def int_env(name: str, default: int) -> int:
 def claude_code_model() -> str:
     """Resolve the model Claude Code should use.
 
-    Precedence: explicit ``CLAUDE_CODE_MODEL`` > default ``claude-sonnet-4-6``.
+    Precedence: ``CLAUDE_CODE_MODEL`` > ``ANTHROPIC_MODEL`` > default.
     """
     explicit = os.environ.get("CLAUDE_CODE_MODEL")
     if explicit:
         return explicit
+    anthropic_model = os.environ.get("ANTHROPIC_MODEL")
+    if anthropic_model:
+        return anthropic_model
     return "claude-sonnet-4-6"
 
 

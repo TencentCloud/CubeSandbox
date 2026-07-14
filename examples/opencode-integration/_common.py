@@ -11,6 +11,8 @@ used by ``network_policy.py``.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -25,6 +27,58 @@ def stream_writer(stream) -> Callable[[object], None]:
     return write
 
 
+def _render_stream_json_line(line: str) -> None:
+    """Render one OpenCode JSON event, falling back to the original line."""
+    line = line.rstrip("\r\n")
+    if not line.strip():
+        return
+    try:
+        event = json.loads(line)
+    except (ValueError, TypeError):
+        print(line)
+        return
+    if not isinstance(event, dict):
+        print(line)
+        return
+
+    part = event.get("part")
+    payload = part if isinstance(part, dict) else event
+    event_type = str(payload.get("type", event.get("type", "")))
+    if event_type in ("text", "assistant", "message"):
+        text = payload.get("text", payload.get("content", ""))
+        if isinstance(text, str) and text.strip():
+            print(text.strip())
+            return
+    if event_type in ("tool", "tool_use", "tool-call"):
+        name = payload.get("tool", payload.get("name", "tool"))
+        print(f"  -> [tool] {name}")
+        return
+    if event_type in ("error", "failed"):
+        message = payload.get("error", payload.get("message", payload))
+        print(f"  [error] {str(message)[:300]}")
+        return
+    # Preserve unfamiliar events so new OpenCode versions remain observable.
+    print(line)
+
+
+def stream_json_render_writer() -> Callable[[object], None]:
+    buffer = {"parts": []}
+
+    def write(chunk: object) -> None:
+        text = getattr(chunk, "line", chunk)
+        text = text if isinstance(text, str) else str(text)
+        lines = text.split("\n")
+        if len(lines) == 1:
+            buffer["parts"].append(text)
+            return
+        _render_stream_json_line("".join(buffer["parts"]) + lines[0])
+        for line in lines[1:-1]:
+            _render_stream_json_line(line)
+        buffer["parts"] = [lines[-1]]
+
+    return write
+
+
 def run_command(
     sandbox: Any,
     command: str,
@@ -33,6 +87,7 @@ def run_command(
     envs: dict[str, str] | None = None,
     timeout: int | float | None = None,
     stream: bool = False,
+    raw: bool | None = None,
     user: str = "root",
 ):
     # Run as root: /workspace and OpenCode's state dir (/root/.opencode) are
@@ -42,7 +97,11 @@ def run_command(
     if envs:
         kwargs["envs"] = envs
     if stream:
-        kwargs["on_stdout"] = stream_writer(sys.stdout)
+        if raw is None:
+            raw = os.environ.get("OPENCODE_STREAM_RAW", "").strip().lower() in (
+                "1", "true", "yes",
+            )
+        kwargs["on_stdout"] = stream_writer(sys.stdout) if raw else stream_json_render_writer()
         kwargs["on_stderr"] = stream_writer(sys.stderr)
 
     try:
@@ -59,7 +118,13 @@ def run_command(
 
 def ensure_success(result, action: str) -> None:
     exit_code = getattr(result, "exit_code", None)
-    if exit_code is not None and int(exit_code) != 0:
+    if exit_code is None:
+        return
+    try:
+        code = int(exit_code)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"Cannot parse exit code {exit_code!r} for: {action}") from exc
+    if code != 0:
         stdout = getattr(result, "stdout", "")
         stderr = getattr(result, "stderr", "")
         raise SystemExit(

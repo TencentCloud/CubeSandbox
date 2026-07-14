@@ -163,7 +163,13 @@ def run_command(
 
 def ensure_success(result, action: str) -> None:
     exit_code = getattr(result, "exit_code", None)
-    if exit_code is not None and int(exit_code) != 0:
+    if exit_code is None:
+        return
+    try:
+        code = int(exit_code)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"Cannot parse exit code {exit_code!r} for: {action}") from exc
+    if code != 0:
         stdout = getattr(result, "stdout", "")
         stderr = getattr(result, "stderr", "")
         raise SystemExit(

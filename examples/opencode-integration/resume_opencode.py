@@ -81,6 +81,11 @@ def parse_args() -> argparse.Namespace:
         default=int_env("OPENCODE_EXEC_TIMEOUT", 900),
         help="OpenCode command timeout in seconds. Defaults to OPENCODE_EXEC_TIMEOUT or 900.",
     )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Keep OpenCode's raw streamed JSON output.",
+    )
     return parser.parse_args()
 
 
@@ -90,6 +95,7 @@ def run_turn(
     prompt: str,
     exec_timeout: int,
     envs: dict[str, str],
+    raw: bool = False,
 ):
     command = shell_join(
         f"cd {shlex.quote(workspace)}",
@@ -102,6 +108,7 @@ def run_turn(
         envs=envs,
         timeout=exec_timeout,
         stream=True,
+        raw=raw,
     )
 
 
@@ -163,7 +170,7 @@ def main() -> int:
 
         print("\n=== Turn 1: create plan.md ===\n")
         result_1 = run_turn(
-            sandbox, args.workspace, turn_1_prompt, args.exec_timeout, opencode_env
+            sandbox, args.workspace, turn_1_prompt, args.exec_timeout, opencode_env, args.raw
         )
         ensure_success(result_1, "run OpenCode turn 1")
 
@@ -185,7 +192,7 @@ def main() -> int:
 
         print("\n=== Turn 2: continue the work ===\n")
         result_2 = run_turn(
-            sandbox, args.workspace, turn_2_prompt, args.exec_timeout, opencode_env
+            sandbox, args.workspace, turn_2_prompt, args.exec_timeout, opencode_env, args.raw
         )
         ensure_success(result_2, "run OpenCode turn 2")
 
