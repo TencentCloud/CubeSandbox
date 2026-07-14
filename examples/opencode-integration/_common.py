@@ -59,7 +59,7 @@ def run_command(
 
 def ensure_success(result, action: str) -> None:
     exit_code = getattr(result, "exit_code", None)
-    if exit_code not in (None, 0):
+    if exit_code is not None and int(exit_code) != 0:
         stdout = getattr(result, "stdout", "")
         stderr = getattr(result, "stderr", "")
         raise SystemExit(

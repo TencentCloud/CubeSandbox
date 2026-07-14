@@ -37,7 +37,8 @@ opencode-integration/
 
 ## 前置条件
 
-- 已部署 CubeSandbox，CubeAPI 可访问（`http://<node>:3000`）。
+- 已部署 CubeSandbox，CubeAPI 可通过 TLS 访问（`https://<node>:3000`）。
+  明文 HTTP 只适用于隔离的本地回环开发环境。
 - `cubemastercli` 已在 `$PATH` 且已连通集群。
 - 构建机装有 Docker，且 registry 能被 Cube 集群拉取。
 - 一个 LLM provider 的 API Key（默认 Anthropic；OpenAI 和 Google 也可通过
@@ -82,7 +83,7 @@ pip install -r requirements.txt
 
 | 变量 | 作用位置 | 说明 |
 |---|---|---|
-| `E2B_API_URL` | 本地进程 | CubeAPI 地址（`http://<node>:3000`） |
+| `E2B_API_URL` | 本地进程 | 启用 TLS 的 CubeAPI 地址（`https://<node>:3000`） |
 | `E2B_API_KEY` | 本地进程 | 本地开发填任意非空字符串 |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | 来自第 2 步 |
 | `OPENCODE_PROVIDER` | OpenCode CLI | `anthropic`（默认）、`openai`、`google` |
@@ -145,7 +146,7 @@ python network_policy.py
 | preflight 报 `opencode: command not found` | CLI 变更后未重建模板 | 重建镜像并重新注册模板 |
 | provider 鉴权失败 | 密钥未传入（直连）或缺少 inject 规则（vault） | 传 `envs={...}` 或修正规则的 `sni`/`host` |
 | `403 Forbidden - CubeEgress` | 默认拒绝且无匹配放行规则 | 把 LLM host（及所需其他 host）加入规则 |
-| vault 路径下 OpenCode 报 `Connection error` / TLS 失败 | OpenCode 基于 Node，忽略系统 CA 库，不信任 CubeEgress 拦截 CA | 脚本已把 `NODE_EXTRA_CA_CERTS` 指向系统 CA 包；若 CA 在别处，用 `OPENCODE_NODE_EXTRA_CA_CERTS` 覆盖 |
+| vault 路径下 OpenCode 报 `Connection error` / TLS 失败 | OpenCode 基于 Node，忽略系统 CA 库，不信任 CubeEgress 拦截 CA | 脚本已把 `NODE_EXTRA_CA_CERTS` 指向专用 CubeEgress CA；若 CA 在别处，用 `OPENCODE_NODE_EXTRA_CA_CERTS` 覆盖 |
 | 就绪探针超时 | 镜像缺少 envd | 确认 `FROM ghcr.io/tencentcloud/cubesandbox-base:...` |
 | `pause()`/`connect()` 报错 | 平台版本过低不支持快照 | 升级 CubeSandbox 平台 |
 

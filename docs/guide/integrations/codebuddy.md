@@ -33,7 +33,8 @@ project.
 
 ## Prerequisites
 
-- A running CubeSandbox deployment; CubeAPI reachable at `http://<node>:3000`.
+- A running CubeSandbox deployment; CubeAPI reachable at `https://<node>:3000`.
+  Use plain HTTP only for isolated local development on loopback.
 - `cubemastercli` on `$PATH`, connected to the cluster.
 - Docker on the build workstation, plus a registry the Cube nodes can pull from.
 - An LLM provider API key. Anthropic is the default; any Anthropic-compatible or
@@ -121,10 +122,11 @@ pip install -r requirements.txt
 
 | Variable | Where it flows | Notes |
 |---|---|---|
-| `E2B_API_URL` | Local process | CubeAPI address (`http://<node>:3000`) |
+| `E2B_API_URL` | Local process | TLS-protected CubeAPI address (`https://<node>:3000`) |
 | `E2B_API_KEY` | Local process | Any non-empty string in local dev |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | From step 2 |
 | `CODEBUDDY_MODEL` | CodeBuddy CLI `--model` flag | Model selection |
+| `CODEBUDDY_PROVIDER` | Local script | Provider name: `anthropic`, `openai`, `google`, `deepseek`, or `openrouter` |
 | `ANTHROPIC_API_KEY` | `envs=...` (direct) or CubeEgress inject (vault) | Provider key |
 | `ANTHROPIC_BASE_URL` | Passed into the exec env | Anthropic-compatible gateways (e.g. DeepSeek) |
 | `CODEBUDDY_LLM_HOST` | `network_policy.py` | LLM host allowed under default-deny egress |
@@ -272,7 +274,8 @@ version = sandbox.commands.run("codebuddy --version", timeout=60)
   strict isolation prefer the vault flavor (`network_policy.py`), where the key
   never enters the VM.
 - **CubeEgress CA (Node).** For the vault flavor the sandbox must trust the
-  CubeEgress root CA, which the base image installs into the system bundle.
+  CubeEgress root CA, which CubeMaster bakes as the dedicated
+  `/usr/local/share/ca-certificates/cube-egress-root.crt` anchor.
   CodeBuddy runs on Node.js, which ignores the system store, so
   `network_policy.py` also sets `NODE_EXTRA_CA_CERTS` (override via
   `CODEBUDDY_NODE_EXTRA_CA_CERTS`) — without it the vault path fails with

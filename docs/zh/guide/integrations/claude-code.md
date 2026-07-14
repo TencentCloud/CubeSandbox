@@ -30,7 +30,8 @@ lang: zh-CN
 
 ## 前置条件
 
-- 已部署 CubeSandbox，CubeAPI 可访问（`http://<node>:3000`）。
+- 已部署 CubeSandbox，CubeAPI 可通过 TLS 访问（`https://<node>:3000`）。
+  明文 HTTP 只适用于隔离的本地回环开发环境。
 - `cubemastercli` 已在 `$PATH` 且已连通集群。
 - 构建机装有 Docker，且 registry 能被 Cube 集群拉取。
 - 一个 Anthropic API Key（或通过 `ANTHROPIC_BASE_URL` 使用 Anthropic 兼容端点）。
@@ -112,7 +113,7 @@ pip install -r requirements.txt
 
 | 变量 | 作用位置 | 说明 |
 |---|---|---|
-| `E2B_API_URL` | 本地进程 | CubeAPI 地址（`http://<node>:3000`） |
+| `E2B_API_URL` | 本地进程 | 启用 TLS 的 CubeAPI 地址（`https://<node>:3000`） |
 | `E2B_API_KEY` | 本地进程 | 本地开发填任意非空字符串 |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | 来自第 2 步 |
 | `ANTHROPIC_API_KEY` | `envs=...`（直连）或 CubeEgress 注入（vault） | Anthropic 密钥 |

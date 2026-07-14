@@ -89,6 +89,7 @@ def run_turn(
     prompt: str,
     exec_timeout: int,
     envs: dict[str, str],
+    raw: bool = False,
 ):
     command = shell_join(
         f"cd {shlex.quote(workspace)}",
@@ -101,6 +102,7 @@ def run_turn(
         envs=envs,
         timeout=exec_timeout,
         stream=True,
+        raw=raw,
     )
 
 
@@ -133,9 +135,6 @@ def show_final_workspace(sandbox: Sandbox, workspace: str) -> None:
 def main() -> int:
     load_local_dotenv()
     args = parse_args()
-    if args.raw:
-        os.environ["CLAUDE_CODE_STREAM_RAW"] = "1"
-
     template_id = args.template or required("CUBE_TEMPLATE_ID")
     required("E2B_API_URL")
     required("E2B_API_KEY")
@@ -162,7 +161,7 @@ def main() -> int:
 
         print("\n=== Turn 1: create plan.md ===\n")
         result_1 = run_turn(
-            sandbox, args.workspace, turn_1_prompt, args.exec_timeout, claude_env
+            sandbox, args.workspace, turn_1_prompt, args.exec_timeout, claude_env, args.raw
         )
         ensure_success(result_1, "run Claude Code turn 1")
 
@@ -184,7 +183,7 @@ def main() -> int:
 
         print("\n=== Turn 2: continue the work ===\n")
         result_2 = run_turn(
-            sandbox, args.workspace, turn_2_prompt, args.exec_timeout, claude_env
+            sandbox, args.workspace, turn_2_prompt, args.exec_timeout, claude_env, args.raw
         )
         ensure_success(result_2, "run Claude Code turn 2")
 

@@ -30,7 +30,8 @@ lang: zh-CN
 
 ## 前置条件
 
-- 已部署 CubeSandbox，CubeAPI 可访问（`http://<node>:3000`）。
+- 已部署 CubeSandbox，CubeAPI 可通过 TLS 访问（`https://<node>:3000`）。
+  明文 HTTP 只适用于隔离的本地回环开发环境。
 - `cubemastercli` 已在 `$PATH` 且已连通集群。
 - 构建机装有 Docker，且 registry 能被 Cube 集群拉取。
 - 一个 LLM provider 的 API Key。默认 Anthropic；任何 Anthropic 兼容或 OpenAI 兼容端点均可（通过
@@ -114,10 +115,11 @@ pip install -r requirements.txt
 
 | 变量 | 作用位置 | 说明 |
 |---|---|---|
-| `E2B_API_URL` | 本地进程 | CubeAPI 地址（`http://<node>:3000`） |
+| `E2B_API_URL` | 本地进程 | 启用 TLS 的 CubeAPI 地址（`https://<node>:3000`） |
 | `E2B_API_KEY` | 本地进程 | 本地开发填任意非空字符串 |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | 来自第 2 步 |
 | `CODEBUDDY_MODEL` | CodeBuddy CLI `--model` 参数 | 选择模型 |
+| `CODEBUDDY_PROVIDER` | 本地脚本 | Provider 名称：`anthropic`、`openai`、`google`、`deepseek` 或 `openrouter` |
 | `ANTHROPIC_API_KEY` | `envs=...`（直连）或 CubeEgress 注入（vault） | provider 密钥 |
 | `ANTHROPIC_BASE_URL` | 传入 exec 环境 | Anthropic 兼容网关（如 DeepSeek） |
 | `CODEBUDDY_LLM_HOST` | `network_policy.py` | 默认拒绝出网下放行的 LLM host |
@@ -260,8 +262,8 @@ version = sandbox.commands.run("codebuddy --version", timeout=60)
 ## 参考
 
 - 可运行示例：[`examples/codebuddy-integration`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/codebuddy-integration)
-- 自带镜像：[`docs/guide/tutorials/bring-your-own-image.md`](../tutorials/bring-your-own-image.md)
-- 从镜像构建模板：[`docs/guide/tutorials/template-from-image.md`](../tutorials/template-from-image.md)
-- 快照 / 克隆 / 回滚：[`docs/guide/snapshot-rollback-clone.md`](../snapshot-rollback-clone.md)
-- 密钥保险柜 + 出网管控：[`docs/guide/security-proxy.md`](../security-proxy.md)
+- 自带镜像：[`docs/zh/guide/tutorials/bring-your-own-image.md`](../tutorials/bring-your-own-image.md)
+- 从镜像构建模板：[`docs/zh/guide/tutorials/template-from-image.md`](../tutorials/template-from-image.md)
+- 快照 / 克隆 / 回滚：[`docs/zh/guide/snapshot-rollback-clone.md`](../snapshot-rollback-clone.md)
+- 密钥保险柜 + 出网管控：[`docs/zh/guide/security-proxy.md`](../security-proxy.md)
 - CodeBuddy CLI：<https://www.npmjs.com/package/@tencent-ai/codebuddy-code>

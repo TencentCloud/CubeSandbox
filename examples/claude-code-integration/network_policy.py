@@ -48,8 +48,8 @@ PLACEHOLDER_KEY = "cube-egress-managed-placeholder"
 # the system trust store. On the vault path CubeEgress terminates TLS to inject
 # the credential, so Node must trust the CubeEgress root CA or every LLM call
 # fails with "Connection error". Point NODE_EXTRA_CA_CERTS at a bundle that
-# includes it; the CubeSandbox base image installs the CA into the system bundle.
-DEFAULT_NODE_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+# includes it; CubeMaster bakes a dedicated CubeEgress anchor into the image.
+DEFAULT_NODE_CA_BUNDLE = "/usr/local/share/ca-certificates/cube-egress-root.crt"
 
 DEFAULT_PROMPT = (
     "Reply with a single short sentence confirming you can reach the LLM API, "
@@ -171,15 +171,13 @@ def run_agent(sandbox: Sandbox, args: argparse.Namespace, envs: dict[str, str]):
         envs=envs,
         timeout=args.exec_timeout,
         stream=True,
+        raw=args.raw,
     )
 
 
 def main() -> int:
     load_local_dotenv()
     args = parse_args()
-    if args.raw:
-        os.environ["CLAUDE_CODE_STREAM_RAW"] = "1"
-
     template_id = args.template or required("CUBE_TEMPLATE_ID")
     required("E2B_API_URL")
     required("E2B_API_KEY")

@@ -36,7 +36,8 @@ codebuddy-integration/
 
 ## Prerequisites
 
-- A running CubeSandbox deployment; CubeAPI reachable at `http://<node>:3000`.
+- A running CubeSandbox deployment; CubeAPI reachable at `https://<node>:3000`.
+  Use plain HTTP only for isolated local development on loopback.
 - `cubemastercli` on `$PATH`, connected to the cluster.
 - Docker on the build workstation, plus a registry the Cube nodes can pull from.
 - An LLM provider API key (Anthropic by default; any Anthropic-compatible or
@@ -82,10 +83,11 @@ pip install -r requirements.txt
 
 | Variable | Where it flows | Notes |
 |---|---|---|
-| `E2B_API_URL` | Local process | CubeAPI address (`http://<node>:3000`) |
+| `E2B_API_URL` | Local process | TLS-protected CubeAPI address (`https://<node>:3000`) |
 | `E2B_API_KEY` | Local process | Any non-empty string in local dev |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | From step 2 |
 | `CODEBUDDY_MODEL` | CodeBuddy CLI `--model` flag | Model id for the provider |
+| `CODEBUDDY_PROVIDER` | Local script | Provider name: `anthropic`, `openai`, `google`, `deepseek`, or `openrouter` |
 | `ANTHROPIC_API_KEY` | `envs=...` (direct) or CubeEgress inject (vault) | Provider key |
 | `CODEBUDDY_LLM_HOST` | `network_policy.py` | LLM API host to allow; keep aligned with the provider |
 
@@ -150,7 +152,7 @@ allow rules or preinstall those dependencies into the template.
 | `codebuddy: command not found` in preflight | Template not rebuilt after CLI change | Rebuild the image, re-register the template |
 | Auth error from the provider | Key not forwarded (direct) or missing inject rule (vault) | Pass `envs={...}` or fix the rule's `sni`/`host` |
 | `403 Forbidden - CubeEgress` | Default-deny with no matching allow rule | Add the LLM host (and any extra hosts) to the rules |
-| `Connection error` / TLS failure from CodeBuddy on the vault path | CodeBuddy runs on Node, which ignores the system CA store and won't trust the CubeEgress interception CA | The script sets `NODE_EXTRA_CA_CERTS` to the system bundle; override with `CODEBUDDY_NODE_EXTRA_CA_CERTS` if your CA lives elsewhere |
+| `Connection error` / TLS failure from CodeBuddy on the vault path | CodeBuddy runs on Node, which ignores the system CA store and won't trust the CubeEgress interception CA | The script points `NODE_EXTRA_CA_CERTS` at the dedicated CubeEgress anchor; override with `CODEBUDDY_NODE_EXTRA_CA_CERTS` if your CA lives elsewhere |
 | Readiness probe timeout | Image without envd | Ensure `FROM ghcr.io/tencentcloud/cubesandbox-base:...` |
 | `pause()`/`connect()` errors | Platform too old for snapshots | Upgrade the CubeSandbox platform |
 

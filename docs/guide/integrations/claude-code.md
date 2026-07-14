@@ -33,7 +33,8 @@ project.
 
 ## Prerequisites
 
-- A running CubeSandbox deployment; CubeAPI reachable at `http://<node>:3000`.
+- A running CubeSandbox deployment; CubeAPI reachable at `https://<node>:3000`.
+  Use plain HTTP only for isolated local development on loopback.
 - `cubemastercli` on `$PATH`, connected to the cluster.
 - Docker on the build workstation, plus a registry the Cube nodes can pull from.
 - An Anthropic API key (or an Anthropic-compatible endpoint via `ANTHROPIC_BASE_URL`).
@@ -120,7 +121,7 @@ pip install -r requirements.txt
 
 | Variable | Where it flows | Notes |
 |---|---|---|
-| `E2B_API_URL` | Local process | CubeAPI address (`http://<node>:3000`) |
+| `E2B_API_URL` | Local process | TLS-protected CubeAPI address (`https://<node>:3000`) |
 | `E2B_API_KEY` | Local process | Any non-empty string in local dev |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | From step 2 |
 | `ANTHROPIC_API_KEY` | `envs=...` (direct) or CubeEgress inject (vault) | Anthropic key |
@@ -257,7 +258,8 @@ version = sandbox.commands.run("claude --version", timeout=60)
 - **Node.js version.** Claude Code needs a recent Node runtime; the base image
   ships an older apt Node, so always install via NodeSource (the Dockerfile does).
 - **Node.js CA (CubeEgress).** For the vault flavor the sandbox must trust the
-  CubeEgress root CA, which the base image installs into the system bundle.
+  CubeEgress root CA, which CubeMaster bakes as the dedicated
+  `/usr/local/share/ca-certificates/cube-egress-root.crt` anchor.
   Claude Code runs on Node.js, which ignores the system store, so
   `network_policy.py` also sets `NODE_EXTRA_CA_CERTS` (override via
   `CLAUDE_CODE_NODE_EXTRA_CA_CERTS`) — without it the vault path fails with

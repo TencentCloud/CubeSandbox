@@ -134,9 +134,6 @@ def show_workspace_result(sandbox: Sandbox, workspace: str, timeout: int) -> Non
 def main() -> int:
     load_local_dotenv()
     args = parse_args()
-    if args.raw:
-        os.environ["CODEBUDDY_STREAM_RAW"] = "1"
-
     template_id = args.template or required("CUBE_TEMPLATE_ID")
     required("E2B_API_URL")
     required("E2B_API_KEY")
@@ -175,6 +172,7 @@ def main() -> int:
             envs=codebuddy_env,
             timeout=args.exec_timeout,
             stream=True,
+            raw=args.raw,
         )
 
         print_result_summary(result)

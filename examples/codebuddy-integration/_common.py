@@ -101,14 +101,19 @@ def jsonl_render_writer() -> Callable[[object], None]:
     # partial line, per callback), not one event per call. Buffer and split on
     # newlines so each event is rendered exactly once. CodeBuddy newline-terminates
     # every event, so nothing important is left dangling in the buffer.
-    buffer = {"text": ""}
+    buffer = {"parts": []}
 
     def write(chunk: object) -> None:
         text = getattr(chunk, "line", chunk)
-        buffer["text"] += text if isinstance(text, str) else str(text)
-        while "\n" in buffer["text"]:
-            line, buffer["text"] = buffer["text"].split("\n", 1)
+        text = text if isinstance(text, str) else str(text)
+        lines = text.split("\n")
+        if len(lines) == 1:
+            buffer["parts"].append(text)
+            return
+        _render_jsonl_line("".join(buffer["parts"]) + lines[0])
+        for line in lines[1:-1]:
             _render_jsonl_line(line)
+        buffer["parts"] = [lines[-1]]
 
     return write
 
@@ -121,6 +126,7 @@ def run_command(
     envs: dict[str, str] | None = None,
     timeout: int | float | None = None,
     stream: bool = False,
+    raw: bool | None = None,
     user: str = "root",
 ):
     # Run as root: /workspace and CodeBuddy's state dir (/root/.codebuddy) are
@@ -133,9 +139,10 @@ def run_command(
         # Default to a concise transcript (assistant text + tool calls + errors).
         # Set CODEBUDDY_STREAM_RAW=1 (or pass --raw) to dump CodeBuddy's raw
         # JSONL instead.
-        raw = os.environ.get("CODEBUDDY_STREAM_RAW", "").strip().lower() in (
-            "1", "true", "yes"
-        )
+        if raw is None:
+            raw = os.environ.get("CODEBUDDY_STREAM_RAW", "").strip().lower() in (
+                "1", "true", "yes",
+            )
         kwargs["on_stdout"] = stream_writer(sys.stdout) if raw else jsonl_render_writer()
         kwargs["on_stderr"] = stream_writer(sys.stderr)
 
@@ -153,7 +160,7 @@ def run_command(
 
 def ensure_success(result, action: str) -> None:
     exit_code = getattr(result, "exit_code", None)
-    if exit_code not in (None, 0):
+    if exit_code is not None and int(exit_code) != 0:
         stdout = getattr(result, "stdout", "")
         stderr = getattr(result, "stderr", "")
         raise SystemExit(

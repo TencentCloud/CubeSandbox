@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import warnings
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -87,6 +88,12 @@ def build_claude_code_env(include_secrets: bool = True) -> dict[str, str]:
     Anthropic key rides the wire via egress injection, so it must never enter
     the sandbox environment.
     """
+    if include_secrets and any(os.environ.get(name) for name in ("HTTP_PROXY", "HTTPS_PROXY")):
+        warnings.warn(
+            "Direct-key mode forwards proxy settings; the proxy can observe LLM traffic and credentials.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     env: dict[str, str] = {}
     for name in PASSTHROUGH_ENV_NAMES:
         value = os.environ.get(name)

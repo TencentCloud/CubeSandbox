@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import warnings
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -151,6 +152,12 @@ def build_codebuddy_env(include_secrets: bool = True) -> dict[str, str]:
     provider key rides the wire via egress injection, so it must never enter
     the sandbox environment.
     """
+    if include_secrets and any(os.environ.get(name) for name in ("HTTP_PROXY", "HTTPS_PROXY")):
+        warnings.warn(
+            "Direct-key mode forwards proxy settings; the proxy can observe LLM traffic and credentials.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     env = {
         "CODEBUDDY_HOME": optional("CODEBUDDY_HOME", DEFAULT_CODEBUDDY_HOME),
         "CODEBUDDY_TELEMETRY": optional("CODEBUDDY_TELEMETRY", "0"),

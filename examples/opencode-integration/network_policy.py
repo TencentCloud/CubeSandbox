@@ -49,8 +49,8 @@ PLACEHOLDER_KEY = "cube-egress-managed-placeholder"
 # system trust store. On the vault path CubeEgress terminates TLS to inject the
 # credential, so Node must trust the CubeEgress root CA or every LLM call fails
 # with "Connection error". Point NODE_EXTRA_CA_CERTS at a bundle that includes
-# it; the CubeSandbox base image installs the CA into the system bundle below.
-DEFAULT_NODE_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+# it; CubeMaster bakes a dedicated CubeEgress anchor into the image.
+DEFAULT_NODE_CA_BUNDLE = "/usr/local/share/ca-certificates/cube-egress-root.crt"
 
 DEFAULT_PROMPT = (
     "Reply with a single short sentence confirming you can reach the LLM API, "
@@ -98,6 +98,11 @@ def parse_args() -> argparse.Namespace:
         "--skip-agent",
         action="store_true",
         help="Only show the egress checks; skip the actual OpenCode run.",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Keep OpenCode's raw streamed output (currently the default renderer).",
     )
     args = parser.parse_args()
     if args.prompt is None:
