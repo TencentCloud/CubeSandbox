@@ -24,6 +24,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG NODE_MAJOR=24
 ARG CLAUDE_CODE_VERSION=1.0.33
 
+ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
@@ -44,13 +47,10 @@ RUN apt-get update \
 # Install Claude Code in its own layer so bumping CLAUDE_CODE_VERSION does not
 # invalidate the slow OS + Node.js layer above (only this short layer rebuilds
 # on a version bump).
-RUN npm install -g --ignore-scripts "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+RUN npm install -g --ignore-scripts --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && claude --version \
     && npm cache clean --force \
     && rm -rf /root/.npm
-
-ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-    NPM_CONFIG_UPDATE_NOTIFIER=false
 
 RUN mkdir -p /workspace
 

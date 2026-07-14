@@ -51,10 +51,7 @@ PASSTHROUGH_ENV_NAMES = (
 
 def load_local_dotenv() -> None:
     """Best-effort load of a nearby .env file without overriding real env vars."""
-    candidate_paths = [
-        Path(__file__).with_name(".env"),
-        Path.cwd() / ".env",
-    ]
+    candidate_paths = [Path(__file__).with_name(".env")]
 
     seen_paths: set[Path] = set()
     for path in candidate_paths:

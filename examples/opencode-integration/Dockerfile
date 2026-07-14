@@ -24,6 +24,10 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG NODE_MAJOR=24
 ARG OPENCODE_VERSION=0.5.0
 
+ENV OPENCODE_DIR=/root/.opencode \
+    OPENCODE_TELEMETRY=0 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
@@ -43,14 +47,10 @@ RUN apt-get update \
 
 # Install OpenCode in its own layer so bumping OPENCODE_VERSION does not
 # invalidate the slow OS + Node.js layer above.
-RUN npm install -g --ignore-scripts "opencode-ai@${OPENCODE_VERSION}" \
+RUN npm install -g --ignore-scripts --no-audit --no-fund "opencode-ai@${OPENCODE_VERSION}" \
     && opencode --version \
     && npm cache clean --force \
     && rm -rf /root/.npm
-
-ENV OPENCODE_DIR=/root/.opencode \
-    OPENCODE_TELEMETRY=0 \
-    NPM_CONFIG_UPDATE_NOTIFIER=false
 
 RUN mkdir -p /workspace "${OPENCODE_DIR}"
 
