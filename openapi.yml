@@ -1504,13 +1504,14 @@ components:
       - status
       - replicas
       - aliases
-      - names
       properties:
         aliases:
           type: array
           items:
             type: string
-          description: Deprecated E2B aliases of the template.
+          description: |-
+            E2B template aliases. CubeSandbox has no namespace model, so this
+            mirrors the stable alias when one is configured.
         allowInternetAccess:
           type:
           - boolean
@@ -1534,13 +1535,6 @@ components:
           type:
           - string
           - 'null'
-        names:
-          type: array
-          items:
-            type: string
-          description: |-
-            E2B template names. CubeSandbox has no namespace model, so this mirrors
-            the stable alias when one is configured.
         networkType:
           type:
           - string
@@ -1605,13 +1599,14 @@ components:
       - public
       - status
       - aliases
-      - names
       properties:
         aliases:
           type: array
           items:
             type: string
-          description: Deprecated E2B aliases of the template.
+          description: |-
+            E2B template aliases. CubeSandbox has no namespace model, so this
+            mirrors the stable alias when one is configured.
         createdAt:
           type:
           - string
@@ -1633,13 +1628,6 @@ components:
           type:
           - string
           - 'null'
-        names:
-          type: array
-          items:
-            type: string
-          description: |-
-            E2B template names. CubeSandbox has no namespace model, so this mirrors
-            the stable alias when one is configured.
         public:
           type: boolean
         status:

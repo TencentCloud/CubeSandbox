@@ -696,11 +696,9 @@ func createDefinitionWithOptions(ctx context.Context, templateID string, storedR
 	})
 }
 
-// createDefinition is a thin delegator kept as a separate symbol so gomonkey
-// test patches on its exact signature are reliable. //go:noinline prevents the
-// compiler from inlining the delegation past the patch point.
-//
-//go:noinline
+// createDefinition creates a definition without alias metadata. Convenience
+// wrapper around createDefinitionWithOptions for callers that don't set an
+// alias.
 func createDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
 	return createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, definitionCreateOptions{})
 }

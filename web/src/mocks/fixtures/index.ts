@@ -91,7 +91,6 @@ function buildTemplates(): TemplateSummaryDto[] {
       createdAt: ago(86_400 * 18),
       imageInfo: 'registry.cube.dev/templates/python-3.11-ai:2024.11.02',
       aliases: ['python-3.11-ai'],
-      names: ['python-3.11-ai'],
       public: false,
     },
     {
@@ -102,7 +101,6 @@ function buildTemplates(): TemplateSummaryDto[] {
       createdAt: ago(86_400 * 34),
       imageInfo: 'registry.cube.dev/templates/nodejs-20-web:20.18.0',
       aliases: ['nodejs-20-web'],
-      names: ['nodejs-20-web'],
       public: false,
     },
     {
@@ -114,7 +112,6 @@ function buildTemplates(): TemplateSummaryDto[] {
       createdAt: ago(86_400 * 8),
       imageInfo: 'registry.cube.dev/templates/cuda12-torch:2.4.0',
       aliases: ['cuda-12-pytorch'],
-      names: ['cuda-12-pytorch'],
       public: false,
     },
     {
@@ -127,7 +124,6 @@ function buildTemplates(): TemplateSummaryDto[] {
       createdAt: ago(3600 * 4),
       imageInfo: 'registry.cube.dev/templates/playwright:1.47.0',
       aliases: ['playwright-chromium'],
-      names: ['playwright-chromium'],
       public: false,
     },
   ];

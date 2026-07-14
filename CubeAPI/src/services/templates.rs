@@ -84,7 +84,6 @@ impl TemplateService {
             .and_then(|v| v.get("allowInternetAccess"))
             .and_then(|v| v.as_bool());
 
-        let aliases = alias_values_from_display_name(&resp.display_name);
         Ok(TemplateDetail {
             template_id: string_or(resp.template_id, template_id),
             public: TEMPLATE_PUBLIC,
@@ -98,8 +97,7 @@ impl TemplateService {
             network_type,
             allow_internet_access,
             job_id: non_empty(resp.job_id),
-            names: aliases.clone(),
-            aliases,
+            aliases: alias_values_from_display_name(&resp.display_name),
         })
     }
 
@@ -315,7 +313,6 @@ fn alias_values_from_display_name(display_name: &str) -> Vec<String> {
 }
 
 fn template_summary_from_cubemaster(s: crate::cubemaster::TemplateSummaryItem) -> TemplateSummary {
-    let aliases = alias_values_from_display_name(&s.display_name);
     TemplateSummary {
         template_id: s.template_id,
         public: TEMPLATE_PUBLIC,
@@ -326,8 +323,7 @@ fn template_summary_from_cubemaster(s: crate::cubemaster::TemplateSummaryItem) -
         created_at: non_empty(s.created_at),
         image_info: non_empty(s.image_info),
         job_id: non_empty(s.job_id),
-        names: aliases.clone(),
-        aliases,
+        aliases: alias_values_from_display_name(&s.display_name),
     }
 }
 
@@ -681,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn template_summary_from_cubemaster_maps_display_name_to_aliases_and_names() {
+    fn template_summary_from_cubemaster_maps_display_name_to_aliases() {
         let summary = template_summary_from_cubemaster(crate::cubemaster::TemplateSummaryItem {
             template_id: "tpl-1".to_string(),
             instance_type: "cubebox".to_string(),
@@ -695,12 +691,11 @@ mod tests {
         });
 
         assert_eq!(summary.aliases, vec!["stable-python".to_string()]);
-        assert_eq!(summary.names, vec!["stable-python".to_string()]);
         assert!(!summary.public);
     }
 
     #[test]
-    fn template_summary_from_cubemaster_uses_empty_arrays_without_display_name() {
+    fn template_summary_from_cubemaster_uses_empty_aliases_without_display_name() {
         let summary = template_summary_from_cubemaster(crate::cubemaster::TemplateSummaryItem {
             template_id: "tpl-1".to_string(),
             instance_type: String::new(),
@@ -714,7 +709,6 @@ mod tests {
         });
 
         assert!(summary.aliases.is_empty());
-        assert!(summary.names.is_empty());
         assert!(!summary.public);
     }
 

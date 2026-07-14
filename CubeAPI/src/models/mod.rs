@@ -661,11 +661,9 @@ pub struct TemplateSummary {
     /// Latest create/rebuild job id for the template.
     #[serde(rename = "jobID", skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
-    /// Deprecated E2B aliases of the template.
+    /// E2B template aliases. CubeSandbox has no namespace model, so this
+    /// mirrors the stable alias when one is configured.
     pub aliases: Vec<String>,
-    /// E2B template names. CubeSandbox has no namespace model, so this mirrors
-    /// the stable alias when one is configured.
-    pub names: Vec<String>,
 }
 
 /// Detailed template response (GET /templates/:id).
@@ -698,11 +696,9 @@ pub struct TemplateDetail {
     /// Latest create/rebuild job id for the template.
     #[serde(rename = "jobID", skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
-    /// Deprecated E2B aliases of the template.
+    /// E2B template aliases. CubeSandbox has no namespace model, so this
+    /// mirrors the stable alias when one is configured.
     pub aliases: Vec<String>,
-    /// E2B template names. CubeSandbox has no namespace model, so this mirrors
-    /// the stable alias when one is configured.
-    pub names: Vec<String>,
 }
 
 /// Body for POST /templates (create from image).

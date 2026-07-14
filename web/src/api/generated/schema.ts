@@ -508,7 +508,10 @@ export interface components {
         };
         /** @description Detailed template response (GET /templates/:id). */
         TemplateDetail: {
-            /** @description Deprecated E2B aliases of the template. */
+            /**
+             * @description E2B template aliases. CubeSandbox has no namespace model, so this
+             *     mirrors the stable alias when one is configured.
+             */
             aliases: string[];
             /** @description Whether public internet access is allowed for sandboxes from this template. */
             allowInternetAccess?: boolean | null;
@@ -518,11 +521,6 @@ export interface components {
             /** @description Latest create/rebuild job id for the template. */
             jobID?: string | null;
             lastError?: string | null;
-            /**
-             * @description E2B template names. CubeSandbox has no namespace model, so this mirrors
-             *     the stable alias when one is configured.
-             */
-            names: string[];
             /** @description Network type used when the template was created, e.g. "tap". */
             networkType?: string | null;
             public: boolean;
@@ -544,7 +542,10 @@ export interface components {
         };
         /** @description Summary row returned by GET /templates. */
         TemplateSummary: {
-            /** @description Deprecated E2B aliases of the template. */
+            /**
+             * @description E2B template aliases. CubeSandbox has no namespace model, so this
+             *     mirrors the stable alias when one is configured.
+             */
             aliases: string[];
             createdAt?: string | null;
             imageInfo?: string | null;
@@ -552,11 +553,6 @@ export interface components {
             /** @description Latest create/rebuild job id for the template. */
             jobID?: string | null;
             lastError?: string | null;
-            /**
-             * @description E2B template names. CubeSandbox has no namespace model, so this mirrors
-             *     the stable alias when one is configured.
-             */
-            names: string[];
             public: boolean;
             status: string;
             templateID: string;
