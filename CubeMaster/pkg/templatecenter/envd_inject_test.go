@@ -21,18 +21,6 @@ func fakeEnvdBinary(s string) []byte {
 	return append([]byte{0x7f, 'E', 'L', 'F'}, []byte(s)...)
 }
 
-func stageEnvdHostBinary(t *testing.T, content []byte) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, envdBinaryName)
-	if err := os.WriteFile(path, content, envdInjectionFileMode); err != nil {
-		t.Fatalf("stage envd stub: %v", err)
-	}
-	t.Setenv(envdHostDirEnv, dir)
-	sum := sha256.Sum256(content)
-	return hex.EncodeToString(sum[:])
-}
-
 func reqWithEnvdAnnotation(value string) *types.CreateTemplateFromImageReq {
 	return &types.CreateTemplateFromImageReq{
 		ContainerOverrides: &types.ContainerOverrides{
@@ -43,14 +31,54 @@ func reqWithEnvdAnnotation(value string) *types.CreateTemplateFromImageReq {
 	}
 }
 
-func Test_injectEnvdIntoRootfs_optIn_copiesBinary(t *testing.T) {
-	want := fakeEnvdBinary("ENVD-STUB-CONTENT")
-	wantSHA := stageEnvdHostBinary(t, want)
+func TestNewEnvdInjectionPayloadFromBytesComputesSHA(t *testing.T) {
+	data := fakeEnvdBinary("uploaded")
+	payload, err := NewEnvdInjectionPayloadFromBytes(data)
+	assert.NoError(t, err)
+	assert.Equal(t, data, payload.Data)
+	sum := sha256.Sum256(data)
+	assert.Equal(t, hex.EncodeToString(sum[:]), payload.SHA256)
+}
+
+func TestNewEnvdInjectionPayloadFromBytesRejectsInvalidPayload(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    []byte
+		wantErr string
+	}{
+		{name: "empty", data: nil, wantErr: "must not be empty"},
+		{name: "not_elf", data: []byte("#!/bin/sh"), wantErr: "ELF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := NewEnvdInjectionPayloadFromBytes(tt.data)
+			assert.Error(t, err)
+			assert.Nil(t, payload)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestEnvdInjectionPayloadReleaseData(t *testing.T) {
+	payload, err := NewEnvdInjectionPayloadFromBytes(fakeEnvdBinary("uploaded"))
+	assert.NoError(t, err)
+	assert.NotEmpty(t, payload.Data)
+
+	payload.ReleaseData()
+
+	assert.Nil(t, payload.Data)
+	assert.NotEmpty(t, payload.SHA256)
+}
+
+func TestInjectEnvdPayloadIntoRootfsCopiesUploadedBinary(t *testing.T) {
+	want := fakeEnvdBinary("ENVD-PAYLOAD-CONTENT")
+	payload, err := NewEnvdInjectionPayloadFromBytes(want)
+	assert.NoError(t, err)
 	rootfs := t.TempDir()
 
-	gotSHA, err := injectEnvdIntoRootfs(context.Background(), rootfs, reqWithEnvdAnnotation("true"))
+	gotSHA, err := injectEnvdPayloadIntoRootfs(context.Background(), rootfs, payload)
 	assert.NoError(t, err)
-	assert.Equal(t, wantSHA, gotSHA)
+	assert.Equal(t, payload.SHA256, gotSHA)
 
 	dst := filepath.Join(rootfs, constants.CubeEnvdInImagePath)
 	got, err := os.ReadFile(dst)
@@ -62,155 +90,19 @@ func Test_injectEnvdIntoRootfs_optIn_copiesBinary(t *testing.T) {
 	assert.Equal(t, os.FileMode(envdInjectionFileMode), st.Mode().Perm())
 }
 
-func Test_injectEnvdIntoRootfs_disabled_leavesRootfsUntouched(t *testing.T) {
-	stageEnvdHostBinary(t, fakeEnvdBinary("not-used"))
-
-	tests := []struct {
-		name string
-		req  *types.CreateTemplateFromImageReq
-	}{
-		{name: "nil_request", req: nil},
-		{name: "no_overrides", req: &types.CreateTemplateFromImageReq{}},
-		{name: "no_annotations", req: &types.CreateTemplateFromImageReq{ContainerOverrides: &types.ContainerOverrides{}}},
-		{name: "annotation_false", req: reqWithEnvdAnnotation("false")},
-		{name: "annotation_other", req: reqWithEnvdAnnotation("yes")},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rootfs := t.TempDir()
-			sha, err := injectEnvdIntoRootfs(context.Background(), rootfs, tt.req)
-			assert.NoError(t, err)
-			assert.Empty(t, sha)
-			_, err = os.Stat(filepath.Join(rootfs, constants.CubeEnvdInImagePath))
-			assert.True(t, os.IsNotExist(err))
-		})
-	}
-}
-
-func Test_injectEnvdPayloadIntoRootfs_doesNotRereadHostBinary(t *testing.T) {
-	want := fakeEnvdBinary("ENVD-PAYLOAD-CONTENT")
-	dir := t.TempDir()
-	path := filepath.Join(dir, envdBinaryName)
-	assert.NoError(t, os.WriteFile(path, want, envdInjectionFileMode))
-	t.Setenv(envdHostDirEnv, dir)
-	req := reqWithEnvdAnnotation("true")
-	payload, err := prepareEnvdInjectionPayload(req)
-	assert.NoError(t, err)
-	assert.NoError(t, os.Remove(path))
-
+func TestInjectEnvdPayloadIntoRootfsNilPayloadLeavesRootfsUntouched(t *testing.T) {
 	rootfs := t.TempDir()
-	gotSHA, err := injectEnvdPayloadIntoRootfs(context.Background(), rootfs, payload)
+	sha, err := injectEnvdPayloadIntoRootfs(context.Background(), rootfs, nil)
 	assert.NoError(t, err)
-	assert.Equal(t, payload.SHA256, gotSHA)
-	got, err := os.ReadFile(filepath.Join(rootfs, constants.CubeEnvdInImagePath))
-	assert.NoError(t, err)
-	assert.Equal(t, want, got)
-}
-
-func Test_injectEnvdIntoRootfs_usesEnvdHostDir(t *testing.T) {
-	want := fakeEnvdBinary("ENVD-CUSTOM-DIR-CONTENT")
-	dir := t.TempDir()
-	path := filepath.Join(dir, envdBinaryName)
-	assert.NoError(t, os.WriteFile(path, want, envdInjectionFileMode))
-	t.Setenv(envdHostDirEnv, dir)
-	sum := sha256.Sum256(want)
-	wantSHA := hex.EncodeToString(sum[:])
-	req := reqWithEnvdAnnotation("true")
-	rootfs := t.TempDir()
-
-	gotSHA, err := injectEnvdIntoRootfs(context.Background(), rootfs, req)
-	assert.NoError(t, err)
-	assert.Equal(t, wantSHA, gotSHA)
-	got, err := os.ReadFile(filepath.Join(rootfs, constants.CubeEnvdInImagePath))
-	assert.NoError(t, err)
-	assert.Equal(t, want, got)
-}
-
-func Test_injectEnvdIntoRootfs_missingBinary_failsLoud(t *testing.T) {
-	t.Setenv(envdHostDirEnv, "/nonexistent-dir-for-envd-test")
-	rootfs := t.TempDir()
-
-	sha, err := injectEnvdIntoRootfs(context.Background(), rootfs, reqWithEnvdAnnotation("true"))
-	assert.Error(t, err)
 	assert.Empty(t, sha)
-	_, statErr := os.Stat(filepath.Join(rootfs, constants.CubeEnvdInImagePath))
-	assert.True(t, os.IsNotExist(statErr))
+	_, err = os.Stat(filepath.Join(rootfs, constants.CubeEnvdInImagePath))
+	assert.True(t, os.IsNotExist(err))
 }
 
-func Test_prepareEnvdInjectionPayload_rejectsInvalidHostFile(t *testing.T) {
-	tests := []struct {
-		name    string
-		stage   func(t *testing.T, dir string)
-		wantErr string
-	}{
-		{
-			name: "directory",
-			stage: func(t *testing.T, dir string) {
-				t.Helper()
-				assert.NoError(t, os.Mkdir(filepath.Join(dir, envdBinaryName), 0o755))
-			},
-			wantErr: "regular file",
-		},
-		{
-			name: "symlink",
-			stage: func(t *testing.T, dir string) {
-				t.Helper()
-				target := filepath.Join(dir, "envd-real")
-				assert.NoError(t, os.WriteFile(target, fakeEnvdBinary("target"), envdInjectionFileMode))
-				assert.NoError(t, os.Symlink(target, filepath.Join(dir, envdBinaryName)))
-			},
-			wantErr: "symlink",
-		},
-		{
-			name: "world_writable_file",
-			stage: func(t *testing.T, dir string) {
-				t.Helper()
-				path := filepath.Join(dir, envdBinaryName)
-				assert.NoError(t, os.WriteFile(path, fakeEnvdBinary("writable"), envdInjectionFileMode))
-				assert.NoError(t, os.Chmod(path, 0o777))
-			},
-			wantErr: "world-writable",
-		},
-		{
-			name: "world_writable_dir",
-			stage: func(t *testing.T, dir string) {
-				t.Helper()
-				path := filepath.Join(dir, envdBinaryName)
-				assert.NoError(t, os.WriteFile(path, fakeEnvdBinary("dir-writable"), envdInjectionFileMode))
-				assert.NoError(t, os.Chmod(dir, 0o777))
-			},
-			wantErr: "world-writable",
-		},
-		{
-			name: "not_elf",
-			stage: func(t *testing.T, dir string) {
-				t.Helper()
-				path := filepath.Join(dir, envdBinaryName)
-				assert.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\necho not elf\n"), envdInjectionFileMode))
-			},
-			wantErr: "ELF",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			t.Setenv(envdHostDirEnv, dir)
-			tt.stage(t, dir)
-
-			payload, err := prepareEnvdInjectionPayload(reqWithEnvdAnnotation(constants.CubeAnnotationsInjectEnvdOptIn))
-			assert.Error(t, err)
-			assert.Nil(t, payload)
-			assert.Contains(t, err.Error(), tt.wantErr)
-		})
-	}
-}
-
-func Test_buildTemplateSpecFingerprint_envdInfluence(t *testing.T) {
-	stageEnvdHostBinary(t, fakeEnvdBinary("envd-v1"))
+func TestBuildTemplateSpecFingerprintEnvdInfluence(t *testing.T) {
 	envdReq := reqWithEnvdAnnotation("true")
 	envdReq.SourceImageRef = "ubuntu:22.04"
-	payloadV1, err := prepareEnvdInjectionPayload(envdReq)
+	payloadV1, err := NewEnvdInjectionPayloadFromBytes(fakeEnvdBinary("envd-v1"))
 	assert.NoError(t, err)
 	plainReq := &types.CreateTemplateFromImageReq{SourceImageRef: "ubuntu:22.04"}
 
@@ -218,8 +110,7 @@ func Test_buildTemplateSpecFingerprint_envdInfluence(t *testing.T) {
 	fpPlain := buildTemplateSpecFingerprint(plainReq, "sha256:src")
 	assert.NotEqual(t, fpEnvdV1, fpPlain)
 
-	stageEnvdHostBinary(t, fakeEnvdBinary("envd-v2"))
-	payloadV2, err := prepareEnvdInjectionPayload(envdReq)
+	payloadV2, err := NewEnvdInjectionPayloadFromBytes(fakeEnvdBinary("envd-v2"))
 	assert.NoError(t, err)
 	fpEnvdV2 := buildTemplateSpecFingerprintWithEnvdSHA(envdReq, "sha256:src", "", payloadV2.SHA256)
 	assert.NotEqual(t, fpEnvdV1, fpEnvdV2)
@@ -227,7 +118,6 @@ func Test_buildTemplateSpecFingerprint_envdInfluence(t *testing.T) {
 	disableReq := reqWithEnvdAnnotation("false")
 	disableReq.SourceImageRef = "ubuntu:22.04"
 	fpDisable := buildTemplateSpecFingerprint(disableReq, "sha256:src")
-	stageEnvdHostBinary(t, fakeEnvdBinary("envd-v3"))
 	fpDisableAgain := buildTemplateSpecFingerprint(disableReq, "sha256:src")
 	assert.Equal(t, fpDisable, fpDisableAgain)
 }

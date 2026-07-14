@@ -39,18 +39,15 @@ import (
 // build in image.BuildExt4.
 var artifactBuildLocks sync.Map // map[string]*sync.Mutex
 
-func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, source *image.PreparedSource, downloadBaseURL string, envdPayload *envdInjectionPayload) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, bool, error) {
+func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, source *image.PreparedSource, downloadBaseURL string, envdPayload *EnvdInjectionPayload) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, bool, error) {
 	var generatedReq *types.CreateCubeSandboxReq
 	withCubeCA := resolveWithCubeCA(req.WithCubeCA)
 	caPEM, caFingerprint, err := loadCubeEgressCA(ctx, withCubeCA)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	if envdPayload == nil {
-		envdPayload, err = prepareEnvdInjectionPayload(req)
-		if err != nil {
-			return nil, nil, false, err
-		}
+	if envdPayload == nil && ShouldInjectEnvdIntoTemplate(req) {
+		return nil, nil, false, fmt.Errorf("envd-inject: uploaded envd payload is required; use multipart create-from-image upload")
 	}
 	envdSHA := ""
 	if envdPayload != nil {
@@ -261,7 +258,7 @@ func restoreRootfsArtifact(ctx context.Context, artifactID string) error {
 	return nil
 }
 
-func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req *types.CreateTemplateFromImageReq, source *image.PreparedSource, downloadBaseURL string, caPEM []byte, caFingerprint string, envdPayload *envdInjectionPayload) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
+func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req *types.CreateTemplateFromImageReq, source *image.PreparedSource, downloadBaseURL string, caPEM []byte, caFingerprint string, envdPayload *EnvdInjectionPayload) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
 	var caBakeResult cube_egress_ca.Result
 	opts := image.BuildOptions{ArtifactID: record.ArtifactID}
 	// Bake the CubeEgress root CA into the rootfs while it's still a mutable
@@ -271,6 +268,9 @@ func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req
 		var err error
 		if _, err = injectEnvdPayloadIntoRootfs(ctx, rootfsDir, envdPayload); err != nil {
 			return err
+		}
+		if envdPayload != nil {
+			envdPayload.ReleaseData()
 		}
 		caBakeResult, err = applyCubeEgressCAToRootfs(ctx, rootfsDir, caPEM, caFingerprint)
 		return err

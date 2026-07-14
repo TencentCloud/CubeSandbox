@@ -789,6 +789,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
 		cli.BoolFlag{Name: "enable-inject-envd", Usage: "enable cubesandbox-envd injection for this template build"},
+		cli.StringFlag{Name: "envd-path", Usage: "local envd binary path to upload when --enable-inject-envd is set; defaults to the CLI-embedded envd if available"},
 		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the job to completion"},
 		cli.DurationFlag{Name: "interval", Value: defaultWatchInterval, Usage: "poll interval while watching the job"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
@@ -838,14 +839,28 @@ var TemplateCreateFromImageCommand = cli.Command{
 		if err != nil {
 			return err
 		}
-		body, err := jsoniter.Marshal(req)
+		envdPayload, err := selectEnvdUploadPayload(c)
 		if err != nil {
 			return err
 		}
 		url := fmt.Sprintf("http://%s/cube/template/from-image", net.JoinHostPort(host, port))
 		rsp := &templateImageJobResponse{}
-		if err := doHttpReq(c, url, http.MethodPost, req.RequestID, bytes.NewBuffer(body), rsp); err != nil {
-			return err
+		if envdPayload != nil {
+			body, contentType, err := buildCreateFromImageMultipartBody(req, envdPayload)
+			if err != nil {
+				return err
+			}
+			if err := doHttpReqWithContentType(c, url, http.MethodPost, req.RequestID, body, contentType, rsp); err != nil {
+				return err
+			}
+		} else {
+			body, err := jsoniter.Marshal(req)
+			if err != nil {
+				return err
+			}
+			if err := doHttpReq(c, url, http.MethodPost, req.RequestID, bytes.NewBuffer(body), rsp); err != nil {
+				return err
+			}
 		}
 		if rsp.Ret == nil {
 			return errors.New("empty response")

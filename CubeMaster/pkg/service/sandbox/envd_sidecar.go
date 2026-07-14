@@ -37,7 +37,6 @@ func injectEnvdSidecar(ctx context.Context, req *types.CreateCubeSandboxReq, out
 	wrapEntrypointForEnvd(mainContainer)
 	appendExposedPortIfMissing(out, envdDefaultPort)
 	log.G(ctx).Infof("envd: wrapped entrypoint of container %q (envd path=%s, pre-baked at build time)", mainContainer.Name, constants.CubeEnvdInImagePath)
-	return
 }
 
 func wrapEntrypointForEnvd(c *types.Container) {

@@ -18,7 +18,7 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string) {
+func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *EnvdInjectionPayload) {
 	logger := log.G(ctx).WithFields(map[string]any{
 		"job_id":      jobID,
 		"template_id": req.TemplateID,
@@ -74,16 +74,6 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 	// halfway through ext4 build.
 	withCubeCA := resolveWithCubeCA(req.WithCubeCA)
 	_, caFingerprint, err := loadCubeEgressCA(ctx, withCubeCA)
-	if err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":        JobStatusFailed,
-			"phase":         JobPhasePulling,
-			"progress":      100,
-			"error_message": err.Error(),
-		})
-		return
-	}
-	envdPayload, err := prepareEnvdInjectionPayload(req)
 	if err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":        JobStatusFailed,

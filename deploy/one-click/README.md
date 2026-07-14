@@ -88,6 +88,15 @@ Run the following from the repository root on the host machine (recommended):
 ./deploy/one-click/build-release-bundle-builder.sh
 ```
 
+To embed a default `envd` binary into the packaged `cubemastercli`, prepare the binary on the build host and pass `ENVD_LOCAL_PATH` to the recommended builder entry point:
+
+```bash
+ENVD_LOCAL_PATH=/abs/path/to/envd \
+./deploy/one-click/build-release-bundle-builder.sh
+```
+
+When this variable is set, the host wrapper copies the file into `deploy/one-click/.work/envd`; the builder container then builds `cubemastercli` with that file embedded. If `ENVD_LOCAL_PATH` is omitted, the packaged `cubemastercli` does not include a default `envd`, and template builds that opt in to envd injection must pass `--envd-path` at runtime.
+
 This entry point will:
 
 - Compile `cubemaster`, `cubemastercli`, `cubelet`, `cubecli`, `cube-api`, `cube-agent`, `containerd-shim-cube-rs`, and `cube-runtime` inside a container using the root-level builder image. The network runtime is embedded in `cubelet` and no standalone network runtime binary is built.

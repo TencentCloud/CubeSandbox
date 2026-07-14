@@ -225,6 +225,10 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		resumePhase = JobPhaseSnapshotting
 	}
 	if resumePhase == JobPhaseBuildingExt4 {
+		if ShouldInjectEnvdIntoTemplate(&workingReq) {
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4, "redo cannot rebuild envd-enabled template rootfs because the original envd payload is not persisted")
+			return
+		}
 		if err := image.EnsureArtifactBuildPreflight(ctx); err != nil {
 			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4, err.Error())
 			return

@@ -18,98 +18,53 @@ import (
 )
 
 const (
-	envdHostDirDefault    = "/usr/local/share/cubesandbox-envd"
-	envdHostDirEnv        = "CUBE_MASTER_ENVD_HOST_DIR"
-	envdBinaryName        = "envd"
 	envdInjectionFileMode = 0o755
 	envdInjectionDirMode  = 0o755
 )
 
-func envdHostPath(req *types.CreateTemplateFromImageReq) string {
-	dir := os.Getenv(envdHostDirEnv)
-	if dir == "" {
-		dir = envdHostDirDefault
-	}
-	return filepath.Join(dir, envdBinaryName)
-}
-
-func shouldInjectEnvdIntoTemplate(req *types.CreateTemplateFromImageReq) bool {
+func ShouldInjectEnvdIntoTemplate(req *types.CreateTemplateFromImageReq) bool {
 	if req == nil || req.ContainerOverrides == nil || req.ContainerOverrides.Annotations == nil {
 		return false
 	}
 	return req.ContainerOverrides.Annotations[constants.CubeAnnotationsInjectEnvd] == constants.CubeAnnotationsInjectEnvdOptIn
 }
 
-type envdInjectionPayload struct {
-	HostPath string
-	SHA256   string
-	Data     []byte
+type EnvdInjectionPayload struct {
+	SHA256 string
+	Data   []byte
 }
 
-func prepareEnvdInjectionPayload(req *types.CreateTemplateFromImageReq) (*envdInjectionPayload, error) {
-	if !shouldInjectEnvdIntoTemplate(req) {
-		return nil, nil
+func (p *EnvdInjectionPayload) ReleaseData() {
+	if p != nil {
+		p.Data = nil
 	}
-	srcPath := envdHostPath(req)
-	if err := validateHostEnvdPath(srcPath); err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(srcPath)
-	if err != nil {
-		return nil, fmt.Errorf("envd-inject: read %q (set %s to override): %w", srcPath, envdHostDirEnv, err)
-	}
-	if err := validateEnvdELF(srcPath, data); err != nil {
+}
+
+func NewEnvdInjectionPayloadFromBytes(data []byte) (*EnvdInjectionPayload, error) {
+	if err := validateEnvdPayloadBytes(data); err != nil {
 		return nil, err
 	}
 	sum := sha256.Sum256(data)
-	return &envdInjectionPayload{
-		HostPath: srcPath,
-		SHA256:   hex.EncodeToString(sum[:]),
-		Data:     data,
+	return &EnvdInjectionPayload{
+		SHA256: hex.EncodeToString(sum[:]),
+		Data:   data,
 	}, nil
 }
 
-func validateHostEnvdPath(srcPath string) error {
-	info, err := os.Lstat(srcPath)
-	if err != nil {
-		return fmt.Errorf("envd-inject: stat %q (set %s to override): %w", srcPath, envdHostDirEnv, err)
+func validateEnvdPayloadBytes(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("envd-inject: uploaded envd must not be empty")
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("envd-inject: %q must not be a symlink", srcPath)
+	if len(data) > constants.MaxEnvdPayloadBytes {
+		return fmt.Errorf("envd-inject: uploaded envd exceeds 16MiB")
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("envd-inject: %q must be a regular file", srcPath)
-	}
-	if info.Mode().Perm()&0o002 != 0 {
-		return fmt.Errorf("envd-inject: %q must not be world-writable", srcPath)
-	}
-	dir := filepath.Dir(srcPath)
-	dirInfo, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("envd-inject: stat dir %q: %w", dir, err)
-	}
-	if dirInfo.Mode().Perm()&0o002 != 0 {
-		return fmt.Errorf("envd-inject: dir %q must not be world-writable", dir)
-	}
-	return nil
-}
-
-func validateEnvdELF(srcPath string, data []byte) error {
 	if len(data) < 4 || data[0] != 0x7f || data[1] != 'E' || data[2] != 'L' || data[3] != 'F' {
-		return fmt.Errorf("envd-inject: %q must be an ELF binary", srcPath)
+		return fmt.Errorf("envd-inject: uploaded envd must be an ELF binary")
 	}
 	return nil
 }
 
-func injectEnvdIntoRootfs(ctx context.Context, rootfsDir string, req *types.CreateTemplateFromImageReq) (string, error) {
-	payload, err := prepareEnvdInjectionPayload(req)
-	if err != nil {
-		return "", err
-	}
-	return injectEnvdPayloadIntoRootfs(ctx, rootfsDir, payload)
-}
-
-func injectEnvdPayloadIntoRootfs(ctx context.Context, rootfsDir string, payload *envdInjectionPayload) (string, error) {
+func injectEnvdPayloadIntoRootfs(ctx context.Context, rootfsDir string, payload *EnvdInjectionPayload) (string, error) {
 	if payload == nil {
 		return "", nil
 	}
@@ -122,6 +77,6 @@ func injectEnvdPayloadIntoRootfs(ctx context.Context, rootfsDir string, payload 
 		_ = os.Remove(dstPath)
 		return "", fmt.Errorf("envd-inject: write %q: %w", dstPath, err)
 	}
-	log.G(ctx).Infof("envd-inject: copied %s -> rootfs%s sha256=%s", payload.HostPath, constants.CubeEnvdInImagePath, payload.SHA256)
+	log.G(ctx).Infof("envd-inject: wrote uploaded envd -> rootfs%s sha256=%s", constants.CubeEnvdInImagePath, payload.SHA256)
 	return payload.SHA256, nil
 }

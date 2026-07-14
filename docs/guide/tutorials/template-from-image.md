@@ -108,9 +108,21 @@ cubemastercli tpl create-from-image \
 
 | Flag | Description |
 |------|-------------|
-| `--enable-inject-envd` | Bake the CubeMaster host-side `envd` binary into the template rootfs and start it when sandboxes are created from this template. |
+| `--enable-inject-envd` | Upload an `envd` binary from `cubemastercli` and bake it into the template rootfs. |
+| `--envd-path` | Local path on the machine running `cubemastercli`; used only when `--enable-inject-envd` is set. If omitted, `cubemastercli` uses its embedded default `envd` binary when available. |
 
-CubeMaster reads the host-side binary from `$CUBE_MASTER_ENVD_HOST_DIR/envd`; when that environment variable is unset, it uses `/usr/local/share/cubesandbox-envd/envd`. The injected binary is written inside the template rootfs at `/usr/local/bin/envd`. Changing the selected `envd` binary changes the template fingerprint, so builds do not reuse artifacts baked with an older `envd` binary.
+When `--enable-inject-envd` is set, `cubemastercli` uploads the selected `envd` binary with the create-from-image request. `--envd-path` is local to `cubemastercli`; it is not a CubeMaster host path and is never sent to CubeMaster as a path. CubeMaster validates the uploaded bytes, writes the binary to `/usr/local/bin/envd` inside the template rootfs, and includes `sha256(uploaded bytes)` in the rootfs artifact fingerprint.
+
+The uploaded `envd` must be a non-empty ELF binary no larger than 16 MiB, and it must be compatible with the target template rootfs operating system and CPU architecture. For example, a Linux x86_64 template image should receive a Linux x86_64 `envd` ELF; templates for other architectures need a matching `envd` binary.
+
+If `cubemastercli` was built without an embedded `envd` binary, `--enable-inject-envd` requires `--envd-path`.
+
+To build a `cubemastercli` binary with an embedded default `envd`, prepare the binary before building and pass `ENVD_LOCAL_PATH`:
+
+```bash
+# Use the official envd artifact once available, or a locally built envd binary for development builds.
+make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
+```
 
 ---
 

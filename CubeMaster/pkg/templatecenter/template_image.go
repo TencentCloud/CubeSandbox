@@ -93,6 +93,10 @@ func newRedoTemplateImageJobRecord(jobID string, normalized *types.RedoTemplateF
 }
 
 func SubmitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
+	return SubmitTemplateFromImageWithEnvdPayload(ctx, req, downloadBaseURL, nil)
+}
+
+func SubmitTemplateFromImageWithEnvdPayload(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *EnvdInjectionPayload) (*types.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
@@ -172,7 +176,7 @@ func SubmitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 		"attempt_no":      attemptNo,
 		"retry_of_job_id": retryOfJobID,
 		"image":           normalized.SourceImageRef,
-	}), jobID, normalized, downloadBaseURL)
+	}), jobID, normalized, downloadBaseURL, envdPayload)
 	return GetTemplateImageJobInfo(ctx, jobID)
 }
 
