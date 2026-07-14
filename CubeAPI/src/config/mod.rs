@@ -182,6 +182,44 @@ impl ServerConfig {
     }
 }
 
+#[cfg(test)]
+mod webhook_tests {
+    use super::*;
+
+    fn config_with(raw: &str) -> ServerConfig {
+        ServerConfig {
+            webhook_endpoints_json: Some(raw.to_owned()),
+            ..ServerConfig::default()
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_webhook_json() {
+        assert!(config_with("not-json").webhook_endpoints().is_err());
+    }
+
+    #[test]
+    fn rejects_non_http_webhook_url() {
+        let raw = r#"[{"url":"file:///tmp/hook","events":["sandbox.created"]}]"#;
+        assert!(config_with(raw).webhook_endpoints().is_err());
+    }
+
+    #[test]
+    fn rejects_empty_webhook_events() {
+        let raw = r#"[{"url":"https://hooks.example.test","events":[]}]"#;
+        assert!(config_with(raw).webhook_endpoints().is_err());
+    }
+
+    #[test]
+    fn rejects_mixed_valid_and_invalid_webhooks() {
+        let raw = r#"[
+            {"url":"https://hooks.example.test","events":["sandbox.created"]},
+            {"url":"ftp://invalid.example.test","events":["sandbox.deleted"]}
+        ]"#;
+        assert!(config_with(raw).webhook_endpoints().is_err());
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {

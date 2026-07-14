@@ -61,11 +61,17 @@ impl HttpLogger {
     pub fn new(config: HttpLoggerConfig) -> Result<Self, reqwest::Error> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_secs.max(1)))
+            // Never forward webhook bodies or HMAC headers to a redirect target.
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let signer = config.secret.as_deref().map(|secret| {
-            HmacSha256::new_from_slice(secret.as_bytes())
-                .expect("HMAC-SHA256 accepts keys of any length")
-        });
+        let signer = config
+            .secret
+            .as_deref()
+            .filter(|secret| !secret.is_empty())
+            .map(|secret| {
+                HmacSha256::new_from_slice(secret.as_bytes())
+                    .expect("HMAC-SHA256 accepts keys of any length")
+            });
         let (tx, mut rx) = mpsc::channel(config.queue_capacity.max(1));
         tokio::spawn(async move {
             while let Some(command) = rx.recv().await {
@@ -140,10 +146,17 @@ async fn deliver(
 
         if attempt < config.max_retries {
             let factor = 1u64.checked_shl(attempt.min(31) as u32).unwrap_or(u64::MAX);
-            tokio::time::sleep(Duration::from_millis(
-                config.retry_base_ms.saturating_mul(factor),
-            ))
-            .await;
+            let base = config.retry_base_ms.saturating_mul(factor);
+            let quarter = base / 4;
+            let jitter_span = quarter.saturating_mul(2).saturating_add(1);
+            let entropy = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as u64;
+            let delay = base
+                .saturating_sub(quarter)
+                .saturating_add(entropy % jitter_span);
+            tokio::time::sleep(Duration::from_millis(delay)).await;
         }
     }
     error!(url = %config.url, event = %event.event, "webhook retries exhausted");
@@ -170,7 +183,12 @@ impl Logger for HttpLogger {
     async fn flush(&self) {
         let (done, wait) = oneshot::channel();
         if self.tx.send(Command::Barrier(done)).await.is_ok() {
-            let _ = wait.await;
+            if tokio::time::timeout(Duration::from_secs(30), wait)
+                .await
+                .is_err()
+            {
+                warn!("timed out waiting for webhook worker to flush");
+            }
         }
     }
 
@@ -199,12 +217,29 @@ mod tests {
     };
     use tokio::sync::Mutex;
 
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct StateData {
         attempts: Arc<AtomicUsize>,
         bodies: Arc<Mutex<Vec<Vec<u8>>>>,
         headers: Arc<Mutex<Vec<HeaderMap>>>,
         statuses: Arc<Mutex<VecDeque<StatusCode>>>,
+    }
+
+    impl Default for StateData {
+        fn default() -> Self {
+            Self::with_statuses([StatusCode::NO_CONTENT])
+        }
+    }
+
+    impl StateData {
+        fn with_statuses(statuses: impl IntoIterator<Item = StatusCode>) -> Self {
+            Self {
+                attempts: Arc::new(AtomicUsize::new(0)),
+                bodies: Arc::new(Mutex::new(Vec::new())),
+                headers: Arc::new(Mutex::new(Vec::new())),
+                statuses: Arc::new(Mutex::new(statuses.into_iter().collect())),
+            }
+        }
     }
 
     async fn receive(
@@ -220,7 +255,7 @@ mod tests {
             .lock()
             .await
             .pop_front()
-            .unwrap_or(StatusCode::NO_CONTENT)
+            .expect("test server ran out of status codes")
     }
 
     async fn receiver(state: StateData) -> String {
@@ -301,28 +336,44 @@ mod tests {
 
     #[tokio::test]
     async fn retries_500_but_not_400() {
-        let transient = StateData::default();
-        transient
-            .statuses
-            .lock()
-            .await
-            .extend([StatusCode::INTERNAL_SERVER_ERROR, StatusCode::NO_CONTENT]);
+        let transient =
+            StateData::with_statuses([StatusCode::INTERNAL_SERVER_ERROR, StatusCode::NO_CONTENT]);
         let logger =
             HttpLogger::new(config(receiver(transient.clone()).await, "sandbox.resumed")).unwrap();
         logger.log(event("sandbox.resumed")).await;
         logger.flush().await;
         assert_eq!(transient.attempts.load(Ordering::SeqCst), 2);
 
-        let permanent = StateData::default();
-        permanent
-            .statuses
-            .lock()
-            .await
-            .push_back(StatusCode::BAD_REQUEST);
+        let permanent = StateData::with_statuses([StatusCode::BAD_REQUEST]);
         let logger =
             HttpLogger::new(config(receiver(permanent.clone()).await, "sandbox.resumed")).unwrap();
         logger.log(event("sandbox.resumed")).await;
         logger.flush().await;
         assert_eq!(permanent.attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stops_after_retry_exhaustion() {
+        let exhausted = StateData::with_statuses([
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ]);
+        let logger =
+            HttpLogger::new(config(receiver(exhausted.clone()).await, "sandbox.created")).unwrap();
+        logger.log(event("sandbox.created")).await;
+        logger.flush().await;
+        assert_eq!(exhausted.attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn empty_secret_disables_signing() {
+        let state = StateData::default();
+        let mut cfg = config(receiver(state.clone()).await, "sandbox.created");
+        cfg.secret = Some(String::new());
+        let logger = HttpLogger::new(cfg).unwrap();
+        logger.log(event("sandbox.created")).await;
+        logger.flush().await;
+        assert!(!state.headers.lock().await[0].contains_key("x-cube-signature-256"));
     }
 }
