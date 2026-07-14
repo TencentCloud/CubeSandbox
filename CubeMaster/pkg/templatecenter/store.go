@@ -684,53 +684,29 @@ func refreshTemplateReplicaSummary(ctx context.Context, templateID string) error
 	return nil
 }
 
-// createDefinition and createDefinitionWithOptions wrap createDefinitionTx
-// in a real DB transaction. This is critical for alias correctness: the
-// release-stale-alias UPDATE and the new-row INSERT inside createDefinitionTx
-// must be atomic. Without a transaction, store.db.WithContext(ctx) auto-
-// commits each statement separately, opening a TOCTOU window where two
-// concurrent creators could both release and then both claim the same alias.
-// The snapshot path (snapshot_ops.go) already wraps createDefinitionTx in its
-// own store.db.Transaction, so these wrappers only affect the template
-// (image/redo/commit) paths.
-//
-// Both wrappers call createDefinitionTx independently (rather than one
-// delegating to the other) so that gomonkey test patches on the exact
-// function signature are reliable and the compiler does not inline a trivial
-// delegation past the patch point.
-func createDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
-	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return createDefinitionTx(ctx, tx, templateID, storedReq, instanceType, version, definitionCreateOptions{})
-	})
-}
-
+// createDefinitionWithOptions wraps createDefinitionTx in a real DB transaction.
+// This is critical for alias correctness: the release-stale-alias UPDATE and the
+// new-row INSERT inside createDefinitionTx must be atomic (TOCTOU window
+// otherwise). The snapshot path (snapshot_ops.go) already wraps createDefinitionTx
+// in its own store.db.Transaction, so this wrapper only affects the template
+// (image/redo) paths.
 func createDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) error {
 	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return createDefinitionTx(ctx, tx, templateID, storedReq, instanceType, version, opts)
 	})
 }
 
-func ensureTemplateDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
-	if _, err := GetDefinition(ctx, templateID); err == nil {
-		return false, nil
-	} else if !errors.Is(err, ErrTemplateNotFound) {
-		return false, err
-	}
-	if err := createDefinition(ctx, templateID, storedReq, instanceType, version); err != nil {
-		return false, err
-	}
-	if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
-		log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
-	}
-	return true, nil
+// createDefinition is a thin delegator kept as a separate symbol so gomonkey
+// test patches on its exact signature are reliable. //go:noinline prevents the
+// compiler from inlining the delegation past the patch point.
+//
+//go:noinline
+func createDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
+	return createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, definitionCreateOptions{})
 }
 
-// ensureTemplateDefinitionWithOptions is the options-aware variant of
-// ensureTemplateDefinition. It is used by the image-job runner to thread the
-// alias (DisplayName) into the newly created definition. The original
-// ensureTemplateDefinition is kept as-is (no options) so existing callers
-// and their test mocks (gomonkey patches on the exact signature) are
-// unaffected.
+// ensureTemplateDefinitionWithOptions checks whether a definition already exists
+// and creates one if missing, threading alias metadata (DisplayName) via opts.
 func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) (bool, error) {
 	if _, err := GetDefinition(ctx, templateID); err == nil {
 		return false, nil
@@ -744,6 +720,14 @@ func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string,
 		log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
 	}
 	return true, nil
+}
+
+// ensureTemplateDefinition is a thin delegator (see createDefinition for the
+// gomonkey rationale).
+//
+//go:noinline
+func ensureTemplateDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) (bool, error) {
+	return ensureTemplateDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, definitionCreateOptions{})
 }
 
 func finalizeTemplateReplicas(ctx context.Context, templateID, instanceType, version string, replicas []ReplicaStatus) (*TemplateInfo, error) {
@@ -1434,16 +1418,6 @@ func ResolveTemplate(ctx context.Context, reqInOut *sandboxtypes.CreateCubeSandb
 	templateID := strings.TrimSpace(reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	if templateID == "" {
 		return nil
-	}
-	// Alias resolution: resolve human-readable aliases to template IDs.
-	if resolved, err := ResolveTemplateIdentifier(ctx, templateID); err != nil {
-		if errors.Is(err, ErrTemplateNotFound) {
-			return ret.Err(errorcode.ErrorCode_NotFound, fmt.Sprintf("template or alias %q not found", templateID))
-		}
-		return err
-	} else if resolved != "" && resolved != templateID {
-		templateID = resolved
-		reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
 	}
 	if constants.GetAppSnapshotVersion(reqInOut.Annotations) == "" {
 		return nil

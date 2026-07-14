@@ -142,7 +142,7 @@ func TestCreateTemplateUsesRequestedDistributionScope(t *testing.T) {
 	patches.ApplyFunc(normalizeStoredTemplateRequest, func(in *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, error) {
 		return in, nil
 	})
-	patches.ApplyFunc(createDefinition, func(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
+	patches.ApplyFunc(createDefinitionWithOptions, func(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, _ definitionCreateOptions) error {
 		return nil
 	})
 	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error {

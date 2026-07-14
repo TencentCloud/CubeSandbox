@@ -1,17 +1,21 @@
 -- Copyright (c) 2026 Tencent Inc.
 -- SPDX-License-Identifier: Apache-2.0
 --
--- Add a functional unique index on template_definitions.display_name so it
--- can serve as a stable template alias, scoped to template-kind rows only.
--- MySQL does not support PostgreSQL-style partial indexes (WHERE clauses on
--- indexes), so we use a functional index via CASE: the expression returns
--- display_name only for kind='template' rows with a non-empty value, and
--- NULL otherwise (including all snapshot-kind rows, whose display_name is
--- an informational label, not an alias). MySQL unique indexes allow
--- multiple NULLs but enforce uniqueness on non-NULL values, giving us
--- "UNIQUE WHERE kind='template' AND display_name != ''". This prevents a
--- snapshot's display_name from ever colliding with — or stealing — a
--- template's alias. Requires MySQL 8.0.13+ (functional key parts).
+-- Enforce template-alias uniqueness on t_cube_template_definition.display_name.
+--
+-- A STORED generated column (alias_key) derives a nullable value from
+-- display_name — non-NULL only for kind='template' rows with a non-empty
+-- display_name, NULL for snapshots and alias-less templates. A plain UNIQUE
+-- INDEX on alias_key then enforces uniqueness while allowing unlimited NULLs
+-- (both MySQL and PostgreSQL exempt NULLs from unique constraints).
+--
+-- This approach replaces a MySQL functional CASE index because functional
+-- indexes report COLUMN_NAME=NULL in INFORMATION_SCHEMA.STATISTICS, which
+-- breaks the cross-dialect schema-alignment test and produces mismatched
+-- index signatures vs PostgreSQL's partial index. A generated column yields
+-- identical index signatures (cols=alias_key) in both dialects.
+--
+-- PostgreSQL counterpart: postgres/20260704120000_template_alias_unique.sql
 
 -- +goose NO TRANSACTION
 -- +goose Up
@@ -35,15 +39,18 @@ JOIN (
  AND t.`id` <> d.`keep_id`
 SET t.`display_name` = '';
 
--- NOTE: the empty-string literal inside CASE is escaped as '''' (each '
--- doubled) because the entire index definition is itself a single-quoted
--- SQL string passed to the stored procedure. The functional expression
--- returns the alias only for kind='template' rows with a non-empty
--- display_name; everything else maps to NULL and is exempt from uniqueness.
+-- Generated column: non-NULL only for kind='template' with non-empty
+-- display_name. NULL everywhere else → exempt from the unique constraint.
+CALL cubemaster_add_column_if_missing(
+  't_cube_template_definition',
+  'alias_key',
+  'varchar(256) GENERATED ALWAYS AS (CASE WHEN `kind` = ''template'' AND `display_name` <> '''' THEN `display_name` ELSE NULL END) STORED'
+);
+
 CALL cubemaster_add_index_if_missing(
   't_cube_template_definition',
   'idx_template_definition_alias_unique',
-  'ADD UNIQUE INDEX `idx_template_definition_alias_unique` ((CASE WHEN `kind` = ''template'' AND `display_name` <> '''' THEN `display_name` ELSE NULL END))'
+  'ADD UNIQUE INDEX `idx_template_definition_alias_unique` (`alias_key`)'
 );
 
 SELECT RELEASE_LOCK('cubemaster_migration_20260704120000_tpl_alias_unique');
@@ -55,6 +62,11 @@ CALL cubemaster_acquire_migration_lock('cubemaster_migration_20260704120000_tpl_
 CALL cubemaster_drop_index_if_exists(
   't_cube_template_definition',
   'idx_template_definition_alias_unique'
+);
+
+CALL cubemaster_drop_column_if_exists(
+  't_cube_template_definition',
+  'alias_key'
 );
 
 SELECT RELEASE_LOCK('cubemaster_migration_20260704120000_tpl_alias_unique');
