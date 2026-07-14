@@ -363,6 +363,63 @@ sudo chmod 0700 /data/shared/tenant-b
 | 应用层 | 平台代码拼接路径，不信任用户输入 | 正常场景下的租户隔离 |
 | 操作系统 | 目录 owner/mode 权限 | 兜底防护，防止任何绕过 |
 
+## 嵌套挂载：共享可读、写入范围独立
+
+当一个挂载的 `mountPath` 位于另一个挂载的子目录下时，这两个挂载构成嵌套挂载。它适用于一组沙箱共享同一个工作区、但每个沙箱只能写入自己子目录的场景。这里的“组”可以是 Agent Team、项目、部门或租户；Cube Sandbox 本身不负责管理这些成员关系。
+
+例如，一个 Agent Team 可以使用下面的宿主机目录结构：
+
+```text
+/data/shared/tenant-a/team-blue/
+├── shared-input.txt
+└── members/
+    ├── agent-a/
+    └── agent-b/
+```
+
+Agent A 以只读方式挂载共享工作区，再把自己的目录嵌套挂载为读写：
+
+```python
+import json
+
+mounts = json.dumps([
+    {
+        "hostPath": "/data/shared/tenant-a/team-blue",
+        "mountPath": "/workspace",
+        "readOnly": True,
+    },
+    {
+        "hostPath": "/data/shared/tenant-a/team-blue/members/agent-a",
+        "mountPath": "/workspace/members/agent-a",
+        "readOnly": False,
+    },
+])
+```
+
+Agent B 使用相同的只读父挂载，只把 `members/agent-b` 挂载为读写。各 Agent 可以使用不同的沙箱模板，存储目录和访问模式不需要因此改变。
+
+| Agent A 可见的路径 | 可读 | 可写 | 原因 |
+|--------------------|------|------|------|
+| `/workspace/shared-input.txt` | 是 | 否 | 来自共享的只读父挂载 |
+| `/workspace/members/agent-a/` | 是 | 是 | 该位置被 Agent A 的读写子挂载替换 |
+| `/workspace/members/agent-b/` | 是 | 否 | 仍然来自共享的只读父挂载 |
+| 其他租户的工作区 | 否 | 否 | 对应宿主机路径没有挂载到当前沙箱 |
+
+这是一种**共享可读、写入范围独立**的模型。“写入范围独立”表示只有指定沙箱会获得该目录的可写挂载；如果只读父挂载暴露了这个目录，并不代表其他成员无法读取它。
+
+### 挂载语义和约束
+
+- AppSnapshot 恢复时，无论描述符按什么顺序传入，Cubelet 都会先应用父目标路径，再应用嵌套的子目标路径，避免后挂载的父目录遮住已经挂载的子目录。无关路径也会使用确定的顺序，但这个顺序不表示它们存在父子关系。
+- 子挂载会在对应子树位置遮住父挂载；两个目录视图不会合并。子挂载生效期间，父挂载在该位置原有的文件会被隐藏。
+- `readOnly` 对每个挂载独立生效，但仍需满足 Linux 的 UID、GID、mode 和 ACL 权限。即使子挂载是读写模式，如果宿主机权限不允许沙箱用户写入，仍会返回 `Permission denied`。
+- 推荐使用一个只读父挂载和明确的读写子挂载。避免重复目标路径或相互重叠的读写挂载，否则目录归属和最终可见结果会变得难以判断。
+- `mountPath` 应使用不含 `.` 或 `..` 路径段的规范绝对路径。不要依赖输入顺序处理相互重叠的目标路径。
+- Host Mount 是节点本地的，并且数据位于沙箱快照之外。恢复时，每个 `hostPath` 都必须在调度节点上可用；如需多节点运行，应在所有节点的同一路径挂载共享文件系统。
+
+::: warning 鉴权边界
+调用 `Sandbox.create()` 的平台必须根据已经认证的沙箱归属主体和适用的组边界（如租户、团队或项目）生成 `hostPath`。不要接受用户任意传入的宿主机路径，也不要把 `/data/shared/tenants/` 之类的全局根目录挂载到某个租户的沙箱中：只读挂载只能阻止写入，不能阻止该沙箱读取其他租户的数据。
+:::
+
 ## 最佳实践
 
 - **输入数据优先使用只读挂载**（数据集、模型、配置文件等）。这可以防止沙箱意外写入，是最安全的默认选项。
