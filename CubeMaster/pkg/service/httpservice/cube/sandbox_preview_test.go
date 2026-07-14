@@ -60,7 +60,7 @@ func TestPreviewSandboxReturnsResolvedRequests(t *testing.T) {
 		}
 	}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := previewSandbox(httptest.NewRecorder(), req, rt)
+	resp := previewSandbox(req, rt)
 
 	got, ok := resp.(*sandboxPreviewResponse)
 	if !ok {

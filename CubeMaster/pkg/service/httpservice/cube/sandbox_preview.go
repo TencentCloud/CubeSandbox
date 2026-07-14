@@ -39,11 +39,10 @@ func handleSandboxPreviewAction(c *gin.Context) {
 		return
 	}
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
-	common.WriteResponse(c.Writer, http.StatusOK, previewSandbox(c.Writer, c.Request, rt))
+	common.WriteResponse(c.Writer, http.StatusOK, previewSandbox(c.Request, rt))
 }
 
-func previewSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
+func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	req, err := constructCreateReq(r)
 	if err != nil {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)

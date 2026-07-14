@@ -44,6 +44,6 @@ func hostChangeGinHandler(c *gin.Context) {
 }
 
 func healthCheckGinHandler(c *gin.Context) {
-	rsp := healthCheck(c.Writer, c.Request)
+	rsp := healthCheck(c.Request)
 	common.WriteResponse(c.Writer, http.StatusOK, rsp)
 }

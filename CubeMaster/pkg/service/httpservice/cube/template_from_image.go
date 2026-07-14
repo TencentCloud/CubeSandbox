@@ -28,9 +28,9 @@ func handleTemplateFromImageAction(c *gin.Context) {
 	var res interface{}
 	switch c.Request.Method {
 	case http.MethodPost:
-		res = createTemplateFromImage(c.Writer, c.Request, rt)
+		res = createTemplateFromImage(c.Request, rt)
 	case http.MethodGet:
-		res = getTemplateFromImage(c.Writer, c.Request, rt)
+		res = getTemplateFromImage(c.Request, rt)
 	default:
 		res = &types.Res{
 			Ret: &types.Ret{
@@ -91,8 +91,7 @@ func handleRedoTemplateAction(c *gin.Context) {
 	})
 }
 
-func createTemplateFromImage(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
+func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	req := &types.CreateTemplateFromImageReq{}
 	if err := common.GetBodyReq(r, req); err != nil {
 		return &types.CreateTemplateFromImageRes{
@@ -130,8 +129,7 @@ func createTemplateFromImage(w http.ResponseWriter, r *http.Request, rt *CubeLog
 	}
 }
 
-func getTemplateFromImage(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
+func getTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	jobID := strings.TrimSpace(r.URL.Query().Get("job_id"))
 	if jobID == "" {
 		return &types.CreateTemplateFromImageRes{

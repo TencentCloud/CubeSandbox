@@ -67,11 +67,11 @@ func handleTemplateAction(c *gin.Context) {
 	var res interface{}
 	switch c.Request.Method {
 	case http.MethodPost:
-		res = createTemplate(c.Writer, c.Request, rt)
+		res = createTemplate(c.Request, rt)
 	case http.MethodGet:
-		res = getTemplate(c.Writer, c.Request, rt)
+		res = getTemplate(c.Request, rt)
 	case http.MethodDelete:
-		res = deleteTemplate(c.Writer, c.Request, rt)
+		res = deleteTemplate(c.Request, rt)
 	default:
 		res = &types.Res{
 			Ret: &types.Ret{
@@ -83,8 +83,7 @@ func handleTemplateAction(c *gin.Context) {
 	common.WriteResponse(c.Writer, http.StatusOK, res)
 }
 
-func deleteTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
+func deleteTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	req := &deleteTemplateRequest{}
 	if err := common.GetBodyReq(r, req); err != nil {
 		return &templateResponse{
@@ -150,8 +149,7 @@ func deleteTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestT
 	}
 }
 
-func createTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
+func createTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	req, err := constructCreateReq(r)
 	if err != nil {
 		return &templateResponse{
@@ -212,8 +210,7 @@ func createTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestT
 	}
 }
 
-func getTemplate(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
-	_ = w
+func getTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	templateID := r.URL.Query().Get("template_id")
 	includeRequest := r.URL.Query().Get("include_request") == "true" || r.URL.Query().Get("include_request") == "1"
 	if templateID == "" {

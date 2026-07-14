@@ -64,7 +64,7 @@ func TestDeleteTemplateMapsAttemptInProgressToConflict(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/cube/template", strings.NewReader(`{"RequestID":"req-1","template_id":"tpl-1"}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := deleteTemplate(httptest.NewRecorder(), req, rt)
+	resp := deleteTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {
@@ -86,7 +86,7 @@ func TestDeleteTemplateMapsCleanupLocatorMissingToNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/cube/template", strings.NewReader(`{"RequestID":"req-2","template_id":"tpl-2"}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := deleteTemplate(httptest.NewRecorder(), req, rt)
+	resp := deleteTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {
@@ -108,7 +108,7 @@ func TestDeleteTemplateSuccessResponse(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/cube/template", strings.NewReader(`{"RequestID":"req-3","template_id":"tpl-3","instance_type":"cubebox"}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := deleteTemplate(httptest.NewRecorder(), req, rt)
+	resp := deleteTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {
@@ -128,7 +128,7 @@ func fmtWrapped(base error, msg string) error {
 func TestDeleteTemplateRejectsMissingTemplateID(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/cube/template", strings.NewReader(`{"RequestID":"req-4"}`))
 	rt := &CubeLog.RequestTrace{}
-	resp := deleteTemplate(httptest.NewRecorder(), req, rt)
+	resp := deleteTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {
@@ -177,7 +177,7 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/cube/template?template_id=tpl-include&include_request=true", nil)
 	rt := &CubeLog.RequestTrace{}
-	resp := getTemplate(httptest.NewRecorder(), req, rt)
+	resp := getTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {
@@ -209,7 +209,7 @@ func TestGetTemplateIncludesDisplayMetadata(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/cube/template?template_id=tpl-metadata", nil)
 	rt := &CubeLog.RequestTrace{}
-	resp := getTemplate(httptest.NewRecorder(), req, rt)
+	resp := getTemplate(req, rt)
 
 	got, ok := resp.(*templateResponse)
 	if !ok {

@@ -19,9 +19,9 @@ func handleSandboxAction(c *gin.Context) {
 	var res interface{}
 	switch c.Request.Method {
 	case http.MethodPost:
-		res = createSandbox(c.Writer, c.Request, rt)
+		res = createSandbox(c.Request, rt)
 	case http.MethodDelete:
-		res = deleteSandbox(c.Writer, c.Request, rt)
+		res = deleteSandbox(c.Request, rt)
 	default:
 		res = &types.Res{
 			Ret: &types.Ret{
