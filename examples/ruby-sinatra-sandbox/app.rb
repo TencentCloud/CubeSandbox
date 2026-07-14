@@ -15,22 +15,28 @@ configure do
   FileUtils.mkdir_p(File.dirname(COUNTER_FILE))
 end
 
+def parse_counter(contents)
+  contents.empty? ? 0 : Integer(contents)
+rescue ArgumentError, TypeError
+  0
+end
+
 def counter
   File.open(COUNTER_FILE, File::RDWR | File::CREAT, 0o644) do |file|
     file.flock(File::LOCK_SH)
-    contents = file.read.strip
-    contents.empty? ? 0 : Integer(contents)
+    parse_counter(file.read.strip)
   end
 end
 
 def increment_counter
   File.open(COUNTER_FILE, File::RDWR | File::CREAT, 0o644) do |file|
     file.flock(File::LOCK_EX)
-    contents = file.read.strip
-    value = (contents.empty? ? 0 : Integer(contents)) + 1
+    value = parse_counter(file.read.strip) + 1
     file.rewind
     file.write("#{value}\n")
     file.truncate(file.pos)
+    file.flush
+    file.fsync
     value
   end
 end
