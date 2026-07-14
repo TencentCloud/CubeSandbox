@@ -296,7 +296,7 @@ CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
 WEB_UI_ENABLE=1
 WEB_UI_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
 WEB_UI_HOST_PORT=12088
-WEB_UI_UPSTREAM=http://host.docker.internal:3000
+WEB_UI_UPSTREAM=http://host.docker.internal:3010
 CUBE_API_BIND=0.0.0.0:3000
 CUBE_API_HEALTH_ADDR=127.0.0.1:3000
 CUBE_API_SANDBOX_DOMAIN=cube.app
@@ -311,7 +311,7 @@ During installation, the following steps are performed:
 - MySQL, Redis, cube proxy, WebUI, and CoreDNS still run in Docker, but their lifecycle is managed directly by dedicated systemd services instead of relying on runtime `docker compose up -d`.
 - If `resolvectl` is available, one-click creates a dedicated dummy link (default `cube-dns0`) with a local address, binds CoreDNS to `169.254.254.53` on that link by default, and routes `cube.app` through the link without affecting the host's default public DNS path. If `resolvectl` is unavailable on the target machine, the installer falls back to `NetworkManager + dnsmasq`: it still creates the same dummy link, asks `dnsmasq` to additionally listen on `169.254.254.53`, takes `/etc/resolv.conf` ownership away from NetworkManager (`rc-manager=unmanaged`) and rewrites it to point at the same non-loopback IP. This keeps the host resolver symmetrical with the `systemd-resolved` path and avoids the Docker daemon's silent fallback to public DNS (`8.8.8.8`) that happens when `/etc/resolv.conf` contains only loopback nameservers — without it, every container on the host (including `docker build`'s `apk update` step) ends up using DNS servers that internal machines cannot reach. On hosts where NetworkManager initializes its `dnsmasq` plugin but never spawns the child process (for example bonded interfaces managed via `ifcfg` + `assume`), set `CUBE_PROXY_DNSMASQ_MODE=standalone` so the DNS scripts launch and own `dnsmasq` directly instead of relying on the NetworkManager plugin; the client-facing resolver layout (dummy link, listen addresses, entry IP) is otherwise identical.
 - Host processes `network-agent`, `cubemaster`, `cube-api`, and `cubelet` are started through systemd, and `quickcheck.sh` verifies both unit state and service health.
-- A standard WebUI nginx container is started under `/usr/local/services/cubetoolbox/webui/`. It mounts `webui/dist` as read-only static content, publishes `WEB_UI_HOST_PORT` (`12088` by default), maps `host.docker.internal` to Docker `host-gateway`, and verifies `/cubeapi/v1/health` through the nginx reverse proxy.
+- A standard WebUI nginx container is started under `/usr/local/services/cubetoolbox/webui/`. It mounts `webui/dist` as read-only static content, publishes `WEB_UI_HOST_PORT` (`12088` by default), maps `host.docker.internal` to Docker `host-gateway`, and verifies `/health` through the nginx reverse proxy (served by CubeOps).
 
 Stopping one-click will simultaneously stop MySQL/Redis under `/usr/local/services/cubetoolbox/support`, WebUI, `cube proxy` / `CoreDNS`, and the host processes `network-agent` / `cubemaster` / `cube-api` / `cubelet`, and will roll back the host DNS routing configuration for `cube.app`.
 

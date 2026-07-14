@@ -111,7 +111,7 @@ test_terraform_deployer_files_present() {
 test_webui_nginx_placeholders() {
   local f="${ONE_CLICK_DIR}/webui/nginx.conf" t
   [[ -f "${f}" ]] || { fail "webui nginx.conf missing: ${f}"; return; }
-  for t in __WEB_UI_UPSTREAM__ __SANDBOX_PROXY_UPSTREAM__; do
+  for t in __WEB_UI_UPSTREAM__ __SANDBOX_PROXY_UPSTREAM__ __CUBE_OPS_UPSTREAM__; do
     grep -q -F "${t}" "${f}" || fail "webui/nginx.conf is missing placeholder ${t} (tke-addons.tf expects it)"
   done
 }

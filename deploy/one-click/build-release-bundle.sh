@@ -47,6 +47,7 @@ DIST_TAR="${SCRIPT_DIR}/dist/cube-sandbox-one-click-${DIST_VERSION}.tar.gz"
 CUBEMASTER_BUILD_MODE="${ONE_CLICK_CUBEMASTER_BUILD_MODE:-local}"
 CUBELET_BUILD_MODE="${ONE_CLICK_CUBELET_BUILD_MODE:-local}"
 API_BUILD_MODE="${ONE_CLICK_CUBE_API_BUILD_MODE:-local}"
+CUBE_OPS_BUILD_MODE="${ONE_CLICK_CUBE_OPS_BUILD_MODE:-local}"
 NETWORK_AGENT_BUILD_MODE="${ONE_CLICK_NETWORK_AGENT_BUILD_MODE:-local}"
 CUBEVSMAPDUMP_BUILD_MODE="${ONE_CLICK_CUBEVSMAPDUMP_BUILD_MODE:-local}"
 
@@ -55,6 +56,7 @@ CUBEMASTERCLI_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTERCLI_BIN:-}"
 CUBELET_BIN_OVERRIDE="${ONE_CLICK_CUBELET_BIN:-}"
 CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
+CUBE_OPS_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_BIN:-}"
 NETWORK_AGENT_BIN_OVERRIDE="${ONE_CLICK_NETWORK_AGENT_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
 
@@ -280,6 +282,14 @@ components["cube-api"] = {
     "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cube-api")),
 }
 
+# ── cubeops from CORE_BIN_DIR ──
+components["cubeops"] = {
+    "version": cube_version,
+    "commit": cube_commit,
+    "build_time": cube_build_time,
+    "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cubeops")),
+}
+
 # ── Rust binaries from build-vm-assets.sh ──
 components["cube-agent"] = {
     "version": cube_version,
@@ -484,6 +494,10 @@ build_or_copy_rust_binary \
   "${ROOT_DIR}/CubeAPI" "${API_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cube-api"
 build_or_copy_go_binary \
+  "cubeops" "${CUBE_OPS_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/cubeops" ./cmd/cubeops
+build_or_copy_go_binary \
   "network-agent" "${NETWORK_AGENT_BIN_OVERRIDE}" \
   "${ROOT_DIR}/network-agent" "${NETWORK_AGENT_BUILD_MODE}" \
   "${CORE_BIN_DIR}/network-agent" ./cmd/network-agent "${NETAGENT_VERSION_PKG}"
@@ -496,6 +510,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/network-agent/bin" \
   "${PACKAGE_ROOT}/network-agent/state" \
   "${PACKAGE_ROOT}/CubeAPI/bin" \
+  "${PACKAGE_ROOT}/CubeOps/bin" \
   "${PACKAGE_ROOT}/CubeMaster/bin" \
   "${PACKAGE_ROOT}/CubeMaster/plugin" \
   "${PACKAGE_ROOT}/Cubelet/bin" \
@@ -527,6 +542,9 @@ copy_file "${ROOT_DIR}/configs/single-node/network-agent.yaml" "${PACKAGE_ROOT}/
 # binary afterwards keeps both coexisting in the package.
 copy_dir_contents "${SCRIPT_DIR}/CubeAPI" "${PACKAGE_ROOT}/CubeAPI"
 copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
+
+# CubeOps binary — admin/ops API (Go), depends on cubedb via go.mod replace.
+copy_file "${CORE_BIN_DIR}/cubeops" "${PACKAGE_ROOT}/CubeOps/bin/cubeops"
 
 # Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the
 # copy_dir_contents wipe and coexist with the one-click CubeMaster assets.

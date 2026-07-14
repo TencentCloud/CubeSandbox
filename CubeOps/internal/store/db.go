@@ -82,18 +82,20 @@ func (s *Store) BootstrapJWTSecret(ctx context.Context, envSecret string) (strin
 	if envSecret != "" {
 		return envSecret, nil
 	}
-	// Try to load from t_system_setting; if not found, generate and persist.
-	existing, _ := s.GetSystemSetting(ctx, "jwt_secret")
-	if existing != "" {
-		slog.Info("JWT secret loaded from database (t_system_setting)")
-		return existing, nil
-	}
+	// Use GetOrCreateSystemSetting (INSERT IGNORE + read-back) so that
+	// concurrent starts (process restart overlap, multi-replica) all
+	// converge on the same value instead of overwriting each other.
 	generated := crypto.GenerateMasterKeyB64()
-	if err := s.SetSystemSetting(ctx, "jwt_secret", generated); err != nil {
+	winner, err := s.GetOrCreateSystemSetting(ctx, "jwt_secret", generated)
+	if err != nil {
 		return "", fmt.Errorf("persist JWT secret: %w", err)
 	}
-	slog.Info("JWT secret auto-generated and persisted to database (t_system_setting)")
-	return generated, nil
+	if winner == generated {
+		slog.Info("JWT secret auto-generated and persisted to database (t_system_setting)")
+	} else {
+		slog.Info("JWT secret loaded from database (t_system_setting)")
+	}
+	return winner, nil
 }
 
 // seedDefaultAdmin creates the default admin/admin account in t_system_user.

@@ -1019,6 +1019,7 @@ assert_safe_install_prefix "${INSTALL_PREFIX}"
 rm -rf \
   "${INSTALL_PREFIX}/network-agent" \
   "${INSTALL_PREFIX}/CubeAPI" \
+  "${INSTALL_PREFIX}/CubeOps" \
   "${INSTALL_PREFIX}/CubeMaster" \
   "${INSTALL_PREFIX}/Cubelet" \
   "${INSTALL_PREFIX}/cubeproxy" \
@@ -1072,6 +1073,7 @@ mkdir -p \
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   mkdir -p \
     /data/log/CubeAPI \
+    /data/log/CubeOps \
     /data/log/CubeMaster \
     /data/log/cube-proxy
 fi
@@ -1209,6 +1211,7 @@ fi
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   chmod +x "${INSTALL_PREFIX}/CubeAPI/bin/cube-api"
+  chmod +x "${INSTALL_PREFIX}/CubeOps/bin/cubeops"
   chmod +x "${INSTALL_PREFIX}/CubeMaster/bin/cubemaster" "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli"
 fi
 
