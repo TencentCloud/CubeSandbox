@@ -4,6 +4,9 @@
 
 ARG ENVD_REF=2026.16
 ARG GO_VERSION=1.25.4
+ARG CUBEVZ_TEMPLATE_IMAGE=alpine:3.22
+
+FROM --platform=$TARGETPLATFORM ${CUBEVZ_TEMPLATE_IMAGE} AS template-image
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS envd-builder
 
@@ -38,7 +41,6 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
 FROM --platform=$TARGETPLATFORM alpine:3.22 AS builder
 
 ARG ALPINE_VERSION=3.22
-ARG ROOTFS_SIZE_MIB=768
 
 RUN apk add --no-cache build-base e2fsprogs grep linux-headers openssl
 
@@ -52,6 +54,12 @@ RUN mkdir -p /rootfs && \
       --repository "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community" \
       add alpine-base bash ca-certificates coreutils curl dnsmasq iproute2 ipset iptables linux-virt python3 sysbench
 
+# Overlay the requested ARM64 OCI image onto the serviceable Alpine guest.
+# COPY is additive, so the kernel, envd dependencies and recovery shell remain
+# available even for distroless source images. CubeVZ services are copied again
+# below so a source image cannot replace the host/guest control plane.
+COPY --from=template-image / /rootfs/
+
 COPY --from=envd-builder /out/envd /rootfs/usr/bin/envd
 COPY --from=envd-builder /out/envd-ref /rootfs/etc/cubesandbox-envd-ref
 COPY --from=egress-builder /out/cube-vz-egress /rootfs/usr/local/sbin/cube-vz-egress
@@ -59,13 +67,19 @@ COPY --from=egress-builder /out/cube-vz-egress /rootfs/usr/local/sbin/cube-vz-eg
 COPY guest-init.sh /rootfs/usr/local/sbin/cube-vz-bench-init
 COPY lifecycle-init.sh /rootfs/usr/local/sbin/cube-vz-lifecycle-init
 COPY cube-vz-exec.py /rootfs/usr/local/sbin/cube-vz-exec
+COPY cube-vz-template-entrypoint.py /rootfs/usr/local/sbin/cube-vz-template-entrypoint
 COPY cube-vz-agent.c /tmp/cube-vz-agent.c
+
+ARG ROOTFS_SIZE_MIB=768
+ARG CUBEVZ_TEMPLATE_IMAGE=alpine:3.22
+ARG CUBEVZ_TEMPLATE_CONFIG_B64=
 
 RUN cc -static -O2 -Wall -Wextra -Werror -pthread \
       -o /rootfs/usr/local/sbin/cube-vz-agent /tmp/cube-vz-agent.c && \
     chmod 0755 /rootfs/usr/local/sbin/cube-vz-bench-init \
       /rootfs/usr/local/sbin/cube-vz-lifecycle-init \
       /rootfs/usr/local/sbin/cube-vz-exec \
+      /rootfs/usr/local/sbin/cube-vz-template-entrypoint \
       /rootfs/usr/local/sbin/cube-vz-agent && \
     mkdir -p /rootfs/dev /rootfs/home/user /rootfs/proc /rootfs/sys /rootfs/run \
       /rootfs/tmp /rootfs/var/lib/cube-vz-bench /rootfs/var/log \
@@ -86,6 +100,10 @@ RUN cc -static -O2 -Wall -Wextra -Werror -pthread \
     chown 8049:8049 /rootfs/etc/cube-vz/egress-ca.key \
       /rootfs/var/log/cube-vz-egress.jsonl && \
     chmod 0440 /rootfs/etc/cube-vz/egress-ca.key && \
+    if [ -n "${CUBEVZ_TEMPLATE_CONFIG_B64}" ]; then \
+      printf '%s' "${CUBEVZ_TEMPLATE_CONFIG_B64}" | base64 -d \
+        > /rootfs/etc/cube-vz/template-runtime.json; \
+    fi && \
     chown -R 1000:1000 /rootfs/home/user && \
     chmod 1777 /rootfs/tmp && \
     kernel_offset="$(grep -abo -m1 "$(printf '\037\213\010')" \
@@ -97,8 +115,9 @@ RUN cc -static -O2 -Wall -Wextra -Werror -pthread \
     truncate -s "${ROOTFS_SIZE_MIB}M" /out/rootfs.raw && \
     mkfs.ext4 -q -F -b 4096 -d /rootfs /out/rootfs.raw && \
     sha256sum /out/kernel /out/initrd /out/rootfs.raw > /out/SHA256SUMS && \
-    printf 'alpine=%s\nrootfs_size_mib=%s\n' \
-      "$(cat /rootfs/etc/alpine-release)" "${ROOTFS_SIZE_MIB}" > /out/build-info.txt
+    printf 'alpine=%s\nrootfs_size_mib=%s\nsource_image=%s\n' \
+      "$(cat /rootfs/etc/alpine-release)" "${ROOTFS_SIZE_MIB}" \
+      "${CUBEVZ_TEMPLATE_IMAGE}" > /out/build-info.txt
 
 FROM scratch
 COPY --from=builder /out/ /

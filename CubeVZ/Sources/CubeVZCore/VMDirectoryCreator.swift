@@ -15,6 +15,7 @@ public struct CreateVMRequest: Sendable {
   public var networkEnabled: Bool
   public var vsockEnabled: Bool
   public var allowFullCopy: Bool
+  public var volumeShareSlots: Int?
 
   public init(
     destination: URL,
@@ -26,7 +27,8 @@ public struct CreateVMRequest: Sendable {
     commandLine: String = "console=hvc0 root=/dev/vda rw",
     networkEnabled: Bool = true,
     vsockEnabled: Bool = true,
-    allowFullCopy: Bool = false
+    allowFullCopy: Bool = false,
+    volumeShareSlots: Int? = nil
   ) {
     self.destination = destination
     self.kernel = kernel
@@ -38,6 +40,7 @@ public struct CreateVMRequest: Sendable {
     self.networkEnabled = networkEnabled
     self.vsockEnabled = vsockEnabled
     self.allowFullCopy = allowFullCopy
+    self.volumeShareSlots = volumeShareSlots
   }
 }
 
@@ -56,6 +59,12 @@ public enum VMDirectoryCreator {
     do {
       try manager.createDirectory(at: temporary, withIntermediateDirectories: true)
       let vmDirectory = VMDirectory(url: temporary)
+      for slot in 0..<(request.volumeShareSlots ?? 0) {
+        try manager.createDirectory(
+          at: vmDirectory.volumeShareURL(slot: slot),
+          withIntermediateDirectories: true
+        )
+      }
 
       try cloneArtifact(
         from: request.kernel,
@@ -94,7 +103,8 @@ public enum VMDirectoryCreator {
         macAddress: request.networkEnabled
           ? VZMACAddress.randomLocallyAdministered().string
           : nil,
-        controlPort: request.vsockEnabled ? VMManifest.defaultControlPort : nil
+        controlPort: request.vsockEnabled ? VMManifest.defaultControlPort : nil,
+        volumeShareSlots: request.volumeShareSlots
       )
       try manifest.validate()
       let encoder = JSONEncoder()

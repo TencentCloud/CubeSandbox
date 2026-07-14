@@ -64,14 +64,19 @@ public final class ManagedVM {
   private var controlConnectionDelegate: ControlConnectionDelegate?
   private var controlListener: VZVirtioSocketListener?
 
-  public init(directory: VMDirectory, manifest: VMManifest) throws {
+  public init(
+    directory: VMDirectory,
+    manifest: VMManifest,
+    volumeDirectoryURLs: [URL]? = nil
+  ) throws {
     self.directory = directory
     self.manifest = manifest
     let configuration = try VMConfigurationBuilder.build(
       directory: directory,
       manifest: manifest,
       consoleInput: nil,
-      consoleOutput: nil
+      consoleOutput: nil,
+      volumeDirectoryURLs: volumeDirectoryURLs
     )
     virtualMachine = VZVirtualMachine(configuration: configuration)
 

@@ -23,6 +23,9 @@ mkdir -p "${OUTPUT_DIR}"
 docker buildx build \
   --platform linux/arm64 \
   --file "${SCRIPT_DIR}/Dockerfile" \
+  --build-arg "CUBEVZ_TEMPLATE_IMAGE=${CUBEVZ_TEMPLATE_IMAGE:-alpine:3.22}" \
+  --build-arg "CUBEVZ_TEMPLATE_CONFIG_B64=${CUBEVZ_TEMPLATE_CONFIG_B64:-}" \
+  --build-arg "ROOTFS_SIZE_MIB=${CUBEVZ_ROOTFS_SIZE_MIB:-768}" \
   --output "type=local,dest=${OUTPUT_DIR}" \
   "${SCRIPT_DIR}"
 

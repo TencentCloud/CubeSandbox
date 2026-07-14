@@ -214,13 +214,31 @@ static int start_service_bridge(unsigned short port) {
   return 0;
 }
 
-static int apply_network_policy(void) {
+static int run_script(const char *path) {
   pid_t child = fork();
   if (child < 0) {
     return -1;
   }
   if (child == 0) {
-    execl("/bin/sh", "sh", "/run/cube-vz-network.sh", (char *)NULL);
+    execl("/bin/sh", "sh", path, (char *)NULL);
+    _exit(127);
+  }
+  int status = 0;
+  while (waitpid(child, &status, 0) < 0) {
+    if (errno != EINTR) {
+      return -1;
+    }
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static int run_program(const char *path) {
+  pid_t child = fork();
+  if (child < 0) {
+    return -1;
+  }
+  if (child == 0) {
+    execl(path, path, (char *)NULL);
     _exit(127);
   }
   int status = 0;
@@ -276,7 +294,11 @@ int main(void) {
       if (strncmp(request, "PING", 4) == 0) {
         write_all(client, "READY\n");
       } else if (strncmp(request, "APPLY_NETWORK", 13) == 0) {
-        write_all(client, apply_network_policy() == 0 ? "OK\n" : "ERROR\n");
+        write_all(client, run_script("/run/cube-vz-network.sh") == 0 ? "OK\n" : "ERROR\n");
+      } else if (strncmp(request, "APPLY_VOLUMES", 13) == 0) {
+        write_all(client, run_script("/run/cube-vz-volumes.sh") == 0 ? "OK\n" : "ERROR\n");
+      } else if (strncmp(request, "START_TEMPLATE", 14) == 0) {
+        write_all(client, run_program("/usr/local/sbin/cube-vz-template-entrypoint") == 0 ? "OK\n" : "ERROR\n");
       } else if (strncmp(request, "FORWARD ", 8) == 0) {
         char *end = NULL;
         unsigned long parsed = strtoul(request + 8, &end, 10);

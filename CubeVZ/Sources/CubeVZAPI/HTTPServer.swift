@@ -85,6 +85,37 @@ private struct RefreshRequest: Decodable {
   let duration: Int?
 }
 
+private struct NetworkUpdateRequest: Decodable {
+  let allowInternetAccess: Bool?
+  let network: SandboxNetworkRequest?
+
+  private enum CodingKeys: String, CodingKey {
+    case allowInternetAccess, allow_internet_access, network
+    case allowPublicTraffic, allowOut, denyOut, maskRequestHost, rules
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    allowInternetAccess = try container.decodeIfPresent(Bool.self, forKey: .allowInternetAccess)
+      ?? container.decodeIfPresent(Bool.self, forKey: .allow_internet_access)
+    if let nested = try container.decodeIfPresent(SandboxNetworkRequest.self, forKey: .network) {
+      network = nested
+    } else if [.allowPublicTraffic, .allowOut, .denyOut, .maskRequestHost, .rules].contains(
+      where: container.contains
+    ) {
+      network = SandboxNetworkRequest(
+        allowPublicTraffic: try container.decodeIfPresent(Bool.self, forKey: .allowPublicTraffic),
+        allowOut: try container.decodeIfPresent([String].self, forKey: .allowOut),
+        denyOut: try container.decodeIfPresent([String].self, forKey: .denyOut),
+        maskRequestHost: try container.decodeIfPresent(String.self, forKey: .maskRequestHost),
+        rules: try container.decodeIfPresent([EgressRuleRequest].self, forKey: .rules)
+      )
+    } else {
+      network = nil
+    }
+  }
+}
+
 private struct SnapshotRequest: Decodable {
   let name: String?
 }
@@ -232,7 +263,12 @@ final class HTTPServer: @unchecked Sendable {
               proxy(request: request, client: client, connection: connection)
             }
           } catch {
-            sendError(status: 502, message: Self.message(for: error), to: client)
+            let mappedStatus = Self.status(for: error)
+            sendError(
+              status: mappedStatus == 500 ? 502 : mappedStatus,
+              message: Self.message(for: error),
+              to: client
+            )
           }
         }
         return
@@ -419,10 +455,25 @@ final class HTTPServer: @unchecked Sendable {
             }
 
           case ("GET", let path) where Self.sandboxID(from: path, suffix: "metrics") != nil:
-            sendError(status: 501, message: "sandbox metrics are not available on CubeVZ", to: client)
+            let sandboxID = Self.sandboxID(from: path, suffix: "metrics")!
+            if let response = manager.metrics(sandboxID: sandboxID) {
+              send(status: 200, body: try JSONEncoder().encode(response), to: client)
+            } else {
+              sendError(status: 404, message: "sandbox not found", to: client)
+            }
 
           case ("PUT", let path) where Self.sandboxID(from: path, suffix: "network") != nil:
-            sendError(status: 501, message: "network policy updates require sandbox restart on CubeVZ", to: client)
+            let sandboxID = Self.sandboxID(from: path, suffix: "network")!
+            let body = try decode(NetworkUpdateRequest.self, from: request.body)
+            if let response = try await manager.updateNetwork(
+              sandboxID: sandboxID,
+              allowInternetAccess: body.allowInternetAccess,
+              network: body.network
+            ) {
+              send(status: 200, body: try JSONEncoder().encode(response), to: client)
+            } else {
+              sendError(status: 404, message: "sandbox not found", to: client)
+            }
 
           case ("GET", "/snapshots"):
             let snapshots = manager.listSnapshots(
@@ -440,48 +491,26 @@ final class HTTPServer: @unchecked Sendable {
             )
 
           case ("POST", "/templates"):
-            // CubeVZ templates are provisioned out-of-band as a prepared VM
-            // directory. Keep the CubeAPI build contract useful for SDKs by
-            // acknowledging a local build request as an already-ready job.
-            let payload = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any]
-            let requestedID = (payload?["templateID"] as? String)
-              ?? (payload?["templateId"] as? String)
-              ?? (payload?["name"] as? String)
-            let templateID = requestedID?.isEmpty == false ? requestedID! : (manager.listTemplates().first?.templateID ?? "cube-vz")
-            let response = TemplateBuildJobResponse(
-              jobID: "build-\(UUID().uuidString.lowercased())",
-              templateID: templateID,
-              status: "completed",
-              phase: "ready",
-              progress: 100,
-              errorMessage: ""
-            )
+            let body = try decode(CreateTemplateRequest.self, from: request.body)
+            let response = try manager.createTemplate(request: body)
             send(status: 202, body: try JSONEncoder().encode(response), to: client)
 
           case ("POST", let path) where Self.templateBuildStartPath(from: path) != nil:
             let (templateID, buildID) = Self.templateBuildStartPath(from: path)!
-            if let response = manager.templateBuildStatus(templateID: templateID, buildID: buildID) {
-              let job = TemplateBuildJobResponse(
-                jobID: buildID,
-                templateID: templateID,
-                status: response.status,
-                phase: response.status == "completed" ? "ready" : response.status,
-                progress: response.progress,
-                errorMessage: response.message
-              )
-              send(status: 202, body: try JSONEncoder().encode(job), to: client)
+            if let response = try manager.startTemplateBuild(
+              templateID: templateID,
+              buildID: buildID
+            ) {
+              send(status: 202, body: try JSONEncoder().encode(response), to: client)
             } else {
               sendError(status: 404, message: "template or build not found", to: client)
             }
           case ("DELETE", let path) where path.hasPrefix("/templates/"):
-            let snapshotID = String(path.dropFirst("/templates/".count))
-            if try manager.deleteSnapshot(snapshotID: snapshotID) {
-              let response = try JSONSerialization.data(withJSONObject: [
-                "templateID": snapshotID,
-                "operationID": UUID().uuidString.lowercased(),
-                "status": "success",
-              ])
-              send(status: 200, body: response, to: client)
+            let requestedID = String(path.dropFirst("/templates/".count))
+            if try manager.deleteSnapshot(snapshotID: requestedID)
+              || manager.deleteTemplate(templateID: requestedID)
+            {
+              send(status: 204, body: Data(), to: client)
             } else {
               sendError(status: 404, message: "template not found", to: client)
             }
@@ -514,11 +543,7 @@ final class HTTPServer: @unchecked Sendable {
 
           case ("POST", let path) where Self.templateID(from: path, suffix: nil) != nil:
             let templateID = Self.templateID(from: path, suffix: nil)!
-            let buildID = "build-\(UUID().uuidString.lowercased())"
-            if let response = try manager.rebuildTemplate(
-              templateID: templateID,
-              buildID: buildID
-            ) {
+            if let response = try manager.rebuildTemplate(templateID: templateID) {
               send(status: 202, body: try JSONEncoder().encode(response), to: client)
             } else {
               sendError(status: 404, message: "template not found", to: client)
@@ -536,12 +561,19 @@ final class HTTPServer: @unchecked Sendable {
             }
 
           case ("GET", let path) where Self.templateBuildLogsPath(from: path) != nil:
-            let (templateID, _) = Self.templateBuildLogsPath(from: path)!
-            guard manager.getTemplate(templateID: templateID) != nil else {
-              sendError(status: 404, message: "template not found", to: client)
-              return
+            let (templateID, buildID) = Self.templateBuildLogsPath(from: path)!
+            let offset = Int(request.queryItems["offset"] ?? "0") ?? 0
+            let limit = Int(request.queryItems["limit"] ?? "100") ?? 100
+            if let response = manager.templateBuildLogs(
+              templateID: templateID,
+              buildID: buildID,
+              offset: offset,
+              limit: limit
+            ) {
+              send(status: 200, body: try JSONEncoder().encode(response), to: client)
+            } else {
+              sendError(status: 404, message: "template or build not found", to: client)
             }
-            send(status: 200, body: Data("{\"logs\":[]}".utf8), to: client)
 
           case ("GET", "/templates/compat"):
             let templateID = manager.listTemplates().first?.templateID ?? "cube-vz"
@@ -812,15 +844,18 @@ final class HTTPServer: @unchecked Sendable {
     if error is DecodingError { return 400 }
     guard let cubeError = error as? CubeVZError else { return 500 }
     switch cubeError {
-    case .invalidArguments: return 400
+    case .invalidArguments(let message):
+      return message.lowercased().contains("unknown template") ? 404 : 400
     case .unsupported: return 501
     case .invalidManifest, .filesystem: return 500
     case .runtime(let message):
       let lower = message.lowercased()
+      if lower.contains("access token") || lower.contains("authentication") { return 401 }
       if lower.contains("not found") || lower.contains("unknown template") { return 404 }
       if lower.contains("not paused") || lower.contains("not running") || lower.contains("transition") {
         return 409
       }
+      if lower.contains("in use") || lower.contains("already running") { return 409 }
       return 500
     }
   }
@@ -1005,6 +1040,7 @@ final class HTTPServer: @unchecked Sendable {
     switch status {
     case 200: reason = "OK"
     case 201: reason = "Created"
+    case 202: reason = "Accepted"
     case 204: reason = "No Content"
     case 400: reason = "Bad Request"
     case 401: reason = "Unauthorized"

@@ -19,6 +19,8 @@ private let usage = """
     --api-key KEY       Static management-plane key (Authorization: Bearer or X-API-Key)
     --auth-callback-url URL
                         Optional callback URL for delegated management auth
+    --guest-builder-dir DIR
+                        Directory containing Dockerfile and build-guest.sh for OCI templates
   """
 
 @main
@@ -40,7 +42,8 @@ private struct CubeVZAPIMain {
       let manager = try SandboxManager(
         templateID: options["--template-id"] ?? "cube-vz",
         templateDirectory: URL(fileURLWithPath: templatePath).standardizedFileURL,
-        sandboxesDirectory: URL(fileURLWithPath: sandboxesPath).standardizedFileURL
+        sandboxesDirectory: URL(fileURLWithPath: sandboxesPath).standardizedFileURL,
+        guestBuilderDirectory: guestBuilderDirectory(options["--guest-builder-dir"])
       )
       let bindAddress = options["--bind-address"] ?? "127.0.0.1"
       let nodeID = options["--node-id"] ?? "cube-vz-local"
@@ -117,7 +120,7 @@ private struct CubeVZAPIMain {
     let allowed = Set([
       "--template-dir", "--sandboxes-dir", "--template-id", "--bind-address", "--port",
       "--node-id", "--advertise-url", "--workers", "--coordinator-url",
-      "--api-key", "--auth-callback-url",
+      "--api-key", "--auth-callback-url", "--guest-builder-dir",
     ])
     var result: [String: String] = [:]
     var index = 0
@@ -145,5 +148,17 @@ private struct CubeVZAPIMain {
       throw CubeVZError.invalidArguments("--auth-callback-url must be an http(s) URL")
     }
     return url
+  }
+
+  private static func guestBuilderDirectory(_ explicitPath: String?) -> URL? {
+    let environmentPath = ProcessInfo.processInfo.environment["CUBEVZ_GUEST_BUILDER_DIR"]
+    if let path = explicitPath ?? environmentPath, !path.isEmpty {
+      return URL(fileURLWithPath: path).standardizedFileURL
+    }
+    let candidate = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+      .appendingPathComponent("CubeVZ/Benchmark", isDirectory: true)
+    return FileManager.default.isExecutableFile(
+      atPath: candidate.appendingPathComponent("build-guest.sh").path
+    ) ? candidate : nil
   }
 }

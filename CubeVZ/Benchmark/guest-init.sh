@@ -18,6 +18,13 @@ mkdir -p /dev/pts /run /tmp /var/lib/cube-vz-bench
 mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts
 chmod 1777 /tmp
 dmesg -n 1 2>/dev/null || true
+modprobe virtiofs 2>/dev/null || true
+mkdir -p /mnt/cube-volumes
+for slot in $(seq 0 15); do
+  mkdir -p "/mnt/cube-volumes/$slot"
+  mountpoint -q "/mnt/cube-volumes/$slot" || \
+    mount -t virtiofs "cube-volume-$slot" "/mnt/cube-volumes/$slot" 2>/dev/null || true
+done
 
 # Keep the benchmark guest representative of a lifecycle guest: envd handles
 # the commands/files/filesystem/PTY RPCs on 49983, while cube-vz-exec provides

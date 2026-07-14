@@ -22,6 +22,13 @@ modprobe virtio_net 2>/dev/null || true
 modprobe ip_tables 2>/dev/null || true
 modprobe iptable_filter 2>/dev/null || true
 modprobe nf_conntrack 2>/dev/null || true
+modprobe virtiofs 2>/dev/null || true
+mkdir -p /mnt/cube-volumes
+for slot in $(seq 0 15); do
+  mkdir -p "/mnt/cube-volumes/$slot"
+  mountpoint -q "/mnt/cube-volumes/$slot" || \
+    mount -t virtiofs "cube-volume-$slot" "/mnt/cube-volumes/$slot" 2>/dev/null || true
+done
 ip link set lo up
 if ip link show eth0 >/dev/null 2>&1; then
   ip link set eth0 up

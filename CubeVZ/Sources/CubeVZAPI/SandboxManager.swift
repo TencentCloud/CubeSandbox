@@ -15,10 +15,11 @@ struct CreateSandboxRequest: Decodable {
   let metadata: [String: String]?
   let distributionScope: [String]?
   let envVars: [String: String]?
+  let volumeMounts: [SandboxVolumeMountRequest]?
 
   private enum CodingKeys: String, CodingKey {
     case templateID, timeout, lifecycle, secure, allowInternetAccess, allow_internet_access
-    case network, metadata, distributionScope, distribution_scope, envVars, envs
+    case network, metadata, distributionScope, distribution_scope, envVars, envs, volumeMounts
   }
 
   init(from decoder: Decoder) throws {
@@ -35,7 +36,16 @@ struct CreateSandboxRequest: Decodable {
       ?? container.decodeIfPresent([String].self, forKey: .distribution_scope)
     envVars = try container.decodeIfPresent([String: String].self, forKey: .envVars)
       ?? container.decodeIfPresent([String: String].self, forKey: .envs)
+    volumeMounts = try container.decodeIfPresent(
+      [SandboxVolumeMountRequest].self,
+      forKey: .volumeMounts
+    )
   }
+}
+
+struct SandboxVolumeMountRequest: Codable, Equatable {
+  let name: String
+  let path: String
 }
 
 struct SandboxLifecycleRequest: Decodable {
@@ -87,7 +97,7 @@ struct SandboxResponse: Encodable {
   let domain: String? = "cube.local"
 }
 
-struct SandboxLog: Encodable {
+struct SandboxLog: Codable {
   let timestamp: String
   let line: String
 }
@@ -138,6 +148,67 @@ struct TemplateBuildStatusResponse: Encodable {
   let message: String
 }
 
+struct TemplateBuildLogsResponse: Encodable {
+  let logs: [String]
+}
+
+struct CreateTemplateRequest: Decodable, Sendable {
+  let image: String
+  let instanceType: String?
+  let writableLayerSize: String?
+  let exposedPorts: [UInt16]?
+  let probePort: UInt16?
+  let probePath: String?
+  let cpu: UInt32?
+  let memory: UInt32?
+  let env: [String]?
+  let allowInternetAccess: Bool?
+  let networkType: String?
+  let nodes: [String]?
+  let registryUsername: String?
+  let registryPassword: String?
+  let command: [String]?
+  let args: [String]?
+  let dns: [String]?
+  let allowOut: [String]?
+  let denyOut: [String]?
+}
+
+private struct PersistedTemplate: Codable {
+  let templateID: String
+  let image: String
+  let instanceType: String
+  let writableLayerSize: String?
+  let exposedPorts: [UInt16]
+  let probePort: UInt16?
+  let probePath: String?
+  let cpu: UInt32?
+  let memory: UInt32?
+  let env: [String]
+  let allowInternetAccess: Bool
+  let networkType: String
+  let nodes: [String]
+  let command: [String]
+  let args: [String]
+  let dns: [String]
+  let allowOut: [String]
+  let denyOut: [String]
+  let status: String
+  let lastError: String?
+  let createdAt: Date
+  let jobID: String
+}
+
+private struct PersistedTemplateBuild: Codable {
+  let buildID: String
+  let templateID: String
+  let status: String
+  let phase: String
+  let progress: Int
+  let message: String
+  let logs: [String]
+}
+
 private struct PersistedSandbox: Codable {
   let sandboxID: String
   let templateID: String
@@ -145,6 +216,8 @@ private struct PersistedSandbox: Codable {
   let timeout: Int?
   let metadata: [String: String]?
   let envVars: [String: String]?
+  let volumeMounts: [SandboxVolumeMountRequest]?
+  let launchTemplateProcess: Bool?
   let network: SandboxNetworkRequest?
   let allowInternetAccess: Bool
   let trafficAccessToken: String?
@@ -155,6 +228,13 @@ private struct PersistedSandbox: Codable {
   let memoryMiB: UInt64
   let diskSizeMiB: Int?
   let expiresAt: Date?
+}
+
+private struct PersistedSnapshot: Codable {
+  let snapshotID: String
+  let names: [String]
+  let originSandboxID: String
+  let createdAt: Date
 }
 
 struct SandboxInfoResponse: Encodable {
@@ -168,6 +248,7 @@ struct SandboxInfoResponse: Encodable {
   let diskSizeMB: Int?
   let metadata: [String: String]?
   let state: String
+  let volumeMounts: [SandboxVolumeMountRequest]?
   let envdVersion = "2026.16"
   let envdAccessToken: String?
   let domain: String? = "cube.local"
@@ -194,6 +275,16 @@ struct RollbackResponse: Encodable {
   let status = "success"
 }
 
+struct SandboxMetricsResponse: Encodable {
+  let sandboxID: String
+  let state: String
+  let uptimeSeconds: Int
+  let cpuCount: Int
+  let memoryMB: Int
+  let diskSizeMB: Int?
+  let expiresAt: String?
+}
+
 @MainActor
 final class SandboxManager {
   private enum LifecycleState: String {
@@ -212,9 +303,11 @@ final class SandboxManager {
     var timeout: Int?
     let metadata: [String: String]?
     let envVars: [String: String]?
-    let network: SandboxNetworkRequest?
-    let allowInternetAccess: Bool
-    let trafficAccessToken: String?
+    let volumeMounts: [SandboxVolumeMountRequest]?
+    let launchTemplateProcess: Bool
+    var network: SandboxNetworkRequest?
+    var allowInternetAccess: Bool
+    var trafficAccessToken: String?
     let envdAccessToken: String?
     let autoResume: Bool
     let onTimeout: String
@@ -232,23 +325,81 @@ final class SandboxManager {
     let createdAt: Date
   }
 
+  private struct TemplateRecord {
+    let templateID: String
+    var request: CreateTemplateRequest
+    var status: String
+    var lastError: String?
+    let createdAt: Date
+    var jobID: String
+  }
+
+  private struct TemplateBuildRecord {
+    let buildID: String
+    let templateID: String
+    var status: String
+    var phase: String
+    var progress: Int
+    var message: String
+    var logs: [String]
+  }
+
+  private struct GuestBuildResult: Sendable {
+    let exitCode: Int32
+    let logLines: [String]
+    let artifactsDirectory: URL
+  }
+
+  private struct ImageRuntime: Sendable {
+    let command: [String]
+    let args: [String]
+    let environment: [String]
+    let workingDirectory: String
+  }
+
   private let templateID: String
   private let templateDirectory: VMDirectory
+  private let baseTemplateCreatedAt: Date
   private let sandboxesDirectory: URL
   private let snapshotsDirectory: URL
+  private let volumesDirectory: URL
+  private let templatesDirectory: URL
+  private let guestBuilderDirectory: URL?
   private var sandboxes: [String: SandboxRecord] = [:]
   private var snapshots: [String: SnapshotRecord] = [:]
+  private var templates: [String: TemplateRecord] = [:]
+  private var templateBuilds: [String: TemplateBuildRecord] = [:]
   private var expirationTasks: [String: Task<Void, Never>] = [:]
   private var sandboxLogs: [String: [SandboxLog]] = [:]
 
-  init(templateID: String, templateDirectory: URL, sandboxesDirectory: URL) throws {
+  init(
+    templateID: String,
+    templateDirectory: URL,
+    sandboxesDirectory: URL,
+    guestBuilderDirectory: URL? = nil
+  ) throws {
     self.templateID = templateID
     self.templateDirectory = VMDirectory(url: templateDirectory)
+    let templateAttributes = try? FileManager.default.attributesOfItem(
+      atPath: self.templateDirectory.manifestURL.path
+    )
+    baseTemplateCreatedAt = (templateAttributes?[.creationDate] as? Date)
+      ?? (templateAttributes?[.modificationDate] as? Date)
+      ?? Date()
     self.sandboxesDirectory = sandboxesDirectory
     snapshotsDirectory = sandboxesDirectory.deletingLastPathComponent().appendingPathComponent(
       "snapshots",
       isDirectory: true
     )
+    volumesDirectory = sandboxesDirectory.deletingLastPathComponent().appendingPathComponent(
+      "volumes",
+      isDirectory: true
+    )
+    templatesDirectory = sandboxesDirectory.deletingLastPathComponent().appendingPathComponent(
+      "templates",
+      isDirectory: true
+    )
+    self.guestBuilderDirectory = guestBuilderDirectory
 
     let manifest = try self.templateDirectory.loadManifest()
     try self.templateDirectory.validateFiles(for: manifest)
@@ -265,19 +416,57 @@ final class SandboxManager {
       at: snapshotsDirectory,
       withIntermediateDirectories: true
     )
+    try FileManager.default.createDirectory(
+      at: volumesDirectory,
+      withIntermediateDirectories: true
+    )
+    try FileManager.default.createDirectory(
+      at: templatesDirectory,
+      withIntermediateDirectories: true
+    )
+    loadPersistedTemplates()
+    loadPersistedSnapshots()
     loadPersistedSandboxes()
   }
 
   func create(request: CreateSandboxRequest) async throws -> SandboxResponse {
     let source: VMDirectory
+    let launchTemplateProcess: Bool
+    var templateDefaults: TemplateRecord?
     if request.templateID == templateID {
       source = templateDirectory
+      launchTemplateProcess = false
     } else if let snapshot = snapshots[request.templateID] {
       source = snapshot.directory
+      launchTemplateProcess = false
+    } else if templates[request.templateID] != nil,
+      let prepared = preparedTemplateDirectory(templateID: request.templateID)
+    {
+      source = prepared
+      launchTemplateProcess = true
+      templateDefaults = templates[request.templateID]
     } else {
       throw CubeVZError.invalidArguments("unknown templateID: \(request.templateID)")
     }
     try validate(request: request)
+    let effectiveEnvVars = Self.mergedEnvironment(
+      template: templateDefaults?.request.env,
+      sandbox: request.envVars
+    )
+    let templateNetwork = templateDefaults.map { template in
+      SandboxNetworkRequest(
+        allowPublicTraffic: nil,
+        allowOut: template.request.allowOut,
+        denyOut: template.request.denyOut,
+        maskRequestHost: nil,
+        rules: nil
+      )
+    }
+    let effectiveNetwork = request.network ?? templateNetwork
+    let effectiveInternetAccess = request.allow_internet_access
+      ?? templateDefaults?.request.allowInternetAccess
+      ?? true
+    _ = try networkPolicyTargets(network: effectiveNetwork)
 
     let sandboxID = "sb-\(UUID().uuidString.lowercased())"
     let destination = sandboxesDirectory.appendingPathComponent(sandboxID, isDirectory: true)
@@ -286,23 +475,40 @@ final class SandboxManager {
 
     do {
       let manifest = try directory.loadManifest()
-      let createdVirtualMachine = try ManagedVM(directory: directory, manifest: manifest)
+      let volumeURLs = try volumeDirectoryURLs(
+        for: request.volumeMounts,
+        directory: directory,
+        manifest: manifest
+      )
+      let createdVirtualMachine = try ManagedVM(
+        directory: directory,
+        manifest: manifest,
+        volumeDirectoryURLs: volumeURLs
+      )
       virtualMachine = createdVirtualMachine
       _ = try await createdVirtualMachine.start()
       try await createdVirtualMachine.waitUntilReady(timeout: .seconds(10))
       try await initializeEnvd(
         createdVirtualMachine,
-        envVars: request.envVars,
-        network: request.network
+        envVars: effectiveEnvVars,
+        network: effectiveNetwork
+      )
+      try await applyVolumeMounts(
+        createdVirtualMachine,
+        mounts: request.volumeMounts,
+        availableSlots: manifest.volumeShareSlots ?? 0
       )
       try await applyNetworkPolicy(
         createdVirtualMachine,
-        allowInternetAccess: request.allow_internet_access ?? true,
-        network: request.network
+        allowInternetAccess: effectiveInternetAccess,
+        network: effectiveNetwork
       )
+      if launchTemplateProcess {
+        try await startTemplateProcess(createdVirtualMachine)
+      }
 
       let trafficAccessToken =
-        request.network?.allowPublicTraffic == false ? UUID().uuidString.lowercased() : nil
+        effectiveNetwork?.allowPublicTraffic == false ? UUID().uuidString.lowercased() : nil
       let envdAccessToken: String? = nil
       let timeout = request.timeout
       let expiresAt = Self.expirationDate(timeout: timeout)
@@ -315,9 +521,11 @@ final class SandboxManager {
         startedAt: Date(),
         timeout: request.timeout,
         metadata: request.metadata,
-        envVars: request.envVars,
-        network: request.network,
-        allowInternetAccess: request.allow_internet_access ?? true,
+        envVars: effectiveEnvVars,
+        volumeMounts: request.volumeMounts,
+        launchTemplateProcess: launchTemplateProcess,
+        network: effectiveNetwork,
+        allowInternetAccess: effectiveInternetAccess,
         trafficAccessToken: trafficAccessToken,
         envdAccessToken: envdAccessToken,
         autoResume: request.lifecycle?.autoResume ?? false,
@@ -330,6 +538,7 @@ final class SandboxManager {
       sandboxes[sandboxID] = record
       persist(record)
       sandboxLogs[sandboxID] = [Self.log(line: "sandbox started")]
+      persistLogs(sandboxID)
       scheduleExpiration(for: sandboxID)
       return response(for: record, exposeTrafficToken: true)
     } catch {
@@ -426,41 +635,132 @@ final class SandboxManager {
     return true
   }
 
+  func metrics(sandboxID: String) -> SandboxMetricsResponse? {
+    guard let sandbox = sandboxes[sandboxID] else { return nil }
+    return SandboxMetricsResponse(
+      sandboxID: sandboxID,
+      state: sandbox.state.rawValue,
+      uptimeSeconds: max(0, Int(Date().timeIntervalSince(sandbox.startedAt))),
+      cpuCount: sandbox.cpuCount,
+      memoryMB: Int(sandbox.memoryMiB),
+      diskSizeMB: sandbox.diskSizeMiB,
+      expiresAt: sandbox.expiresAt.map(Self.dateString)
+    )
+  }
+
+  func updateNetwork(
+    sandboxID: String,
+    allowInternetAccess: Bool?,
+    network: SandboxNetworkRequest?
+  ) async throws -> SandboxResponse? {
+    guard var sandbox = sandboxes[sandboxID] else { return nil }
+    _ = try networkPolicyTargets(network: network)
+    let effectiveInternetAccess = allowInternetAccess ?? sandbox.allowInternetAccess
+    if sandbox.state == .running {
+      guard let virtualMachine = sandbox.virtualMachine else {
+        throw CubeVZError.runtime("sandbox VM is unavailable: \(sandboxID)")
+      }
+      try await applyNetworkPolicy(
+        virtualMachine,
+        allowInternetAccess: effectiveInternetAccess,
+        network: network
+      )
+    } else if sandbox.state != .paused {
+      throw CubeVZError.runtime("sandbox is transitioning: \(sandboxID)")
+    }
+    sandbox.network = network
+    sandbox.allowInternetAccess = effectiveInternetAccess
+    if network?.allowPublicTraffic == false, sandbox.trafficAccessToken == nil {
+      sandbox.trafficAccessToken = UUID().uuidString.lowercased()
+    } else if network?.allowPublicTraffic != false {
+      sandbox.trafficAccessToken = nil
+    }
+    sandboxes[sandboxID] = sandbox
+    persist(sandbox)
+    appendLog(sandboxID, line: "sandbox network policy updated")
+    return response(for: sandbox, exposeTrafficToken: true)
+  }
+
   func listTemplates() -> [TemplateInfoResponse] {
     let base = templateInfo(templateID: templateID, createdAt: nil)
     let snapshotTemplates = snapshots.values.sorted { $0.createdAt < $1.createdAt }.map {
       templateInfo(templateID: $0.snapshotID, createdAt: $0.createdAt)
     }
-    return [base] + snapshotTemplates
+    let builtTemplates = templates.values.sorted { $0.createdAt < $1.createdAt }.map(
+      templateInfo(record:)
+    )
+    return [base] + snapshotTemplates + builtTemplates
   }
 
   func getTemplate(templateID requestedID: String) -> TemplateInfoResponse? {
     if requestedID == templateID { return templateInfo(templateID: requestedID, createdAt: nil) }
-    guard let snapshot = snapshots[requestedID] else { return nil }
-    return templateInfo(templateID: requestedID, createdAt: snapshot.createdAt)
+    if let snapshot = snapshots[requestedID] {
+      return templateInfo(templateID: requestedID, createdAt: snapshot.createdAt)
+    }
+    return templates[requestedID].map(templateInfo(record:))
   }
 
-  func rebuildTemplate(templateID requestedID: String, buildID: String) throws -> TemplateBuildJobResponse? {
-    guard getTemplate(templateID: requestedID) != nil else { return nil }
-    return TemplateBuildJobResponse(
-      jobID: buildID,
+  func createTemplate(request: CreateTemplateRequest) throws -> TemplateBuildJobResponse {
+    let templateID = "tpl-\(UUID().uuidString.lowercased())"
+    return try queueTemplateBuild(templateID: templateID, request: request)
+  }
+
+  func rebuildTemplate(templateID requestedID: String) throws -> TemplateBuildJobResponse? {
+    guard let template = templates[requestedID] else { return nil }
+    return try queueTemplateBuild(templateID: requestedID, request: template.request)
+  }
+
+  func startTemplateBuild(
+    templateID requestedID: String,
+    buildID: String
+  ) throws -> TemplateBuildJobResponse? {
+    guard let template = templates[requestedID] else { return nil }
+    return try queueTemplateBuild(
       templateID: requestedID,
-      status: "completed",
-      phase: "ready",
-      progress: 100,
-      errorMessage: ""
+      request: template.request,
+      buildID: buildID
     )
   }
 
-  func templateBuildStatus(templateID requestedID: String, buildID: String) -> TemplateBuildStatusResponse? {
-    guard getTemplate(templateID: requestedID) != nil else { return nil }
+  func templateBuildStatus(
+    templateID requestedID: String,
+    buildID: String
+  ) -> TemplateBuildStatusResponse? {
+    guard let build = templateBuilds[buildID], build.templateID == requestedID else { return nil }
     return TemplateBuildStatusResponse(
       buildID: buildID,
       templateID: requestedID,
-      status: "completed",
-      progress: 100,
-      message: "template is ready"
+      status: build.status,
+      progress: build.progress,
+      message: build.message
     )
+  }
+
+  func templateBuildLogs(
+    templateID requestedID: String,
+    buildID: String,
+    offset: Int,
+    limit: Int
+  ) -> TemplateBuildLogsResponse? {
+    guard let build = templateBuilds[buildID], build.templateID == requestedID else { return nil }
+    let start = max(0, offset)
+    let count = min(max(1, limit), 10_000)
+    return TemplateBuildLogsResponse(logs: Array(build.logs.dropFirst(start).prefix(count)))
+  }
+
+  func deleteTemplate(templateID requestedID: String) throws -> Bool {
+    guard templates[requestedID] != nil else { return false }
+    guard !sandboxes.values.contains(where: { $0.templateID == requestedID }) else {
+      throw CubeVZError.runtime("template is in use: \(requestedID)")
+    }
+    let directory = templatesDirectory.appendingPathComponent(requestedID, isDirectory: true)
+    if FileManager.default.fileExists(atPath: directory.path) {
+      try FileManager.default.removeItem(at: directory)
+    }
+    templates.removeValue(forKey: requestedID)
+    templateBuilds = templateBuilds.filter { $0.value.templateID != requestedID }
+    persistTemplates()
+    return true
   }
 
   func pause(sandboxID: String) async throws -> Bool {
@@ -491,7 +791,16 @@ final class SandboxManager {
       throw CubeVZError.runtime("sandbox is not paused: \(sandboxID)")
     }
     let manifest = try sandbox.directory.loadManifest()
-    let virtualMachine = try ManagedVM(directory: sandbox.directory, manifest: manifest)
+    let volumeURLs = try volumeDirectoryURLs(
+      for: sandbox.volumeMounts,
+      directory: sandbox.directory,
+      manifest: manifest
+    )
+    let virtualMachine = try ManagedVM(
+      directory: sandbox.directory,
+      manifest: manifest,
+      volumeDirectoryURLs: volumeURLs
+    )
     do {
       _ = try await virtualMachine.start()
       try await virtualMachine.waitUntilReady(timeout: .seconds(10))
@@ -499,6 +808,11 @@ final class SandboxManager {
         virtualMachine,
         envVars: sandbox.envVars,
         network: sandbox.network
+      )
+      try await applyVolumeMounts(
+        virtualMachine,
+        mounts: sandbox.volumeMounts,
+        availableSlots: manifest.volumeShareSlots ?? 0
       )
       try await applyNetworkPolicy(
         virtualMachine,
@@ -583,6 +897,7 @@ final class SandboxManager {
         createdAt: Date()
       )
       snapshots[snapshotID] = record
+      persist(record)
       appendLog(sandboxID, line: "snapshot created: \(snapshotID)")
       if wasRunning { _ = try await resume(sandboxID: sandboxID, timeout: nil) }
       return SnapshotInfoResponse(snapshotID: snapshotID, names: names)
@@ -635,13 +950,27 @@ final class SandboxManager {
       try FileManager.default.moveItem(at: sandbox.directory.url, to: backupURL)
       try FileManager.default.moveItem(at: replacementURL, to: sandbox.directory.url)
       let manifest = try sandbox.directory.loadManifest()
-      let virtualMachine = try ManagedVM(directory: sandbox.directory, manifest: manifest)
+      let volumeURLs = try volumeDirectoryURLs(
+        for: sandbox.volumeMounts,
+        directory: sandbox.directory,
+        manifest: manifest
+      )
+      let virtualMachine = try ManagedVM(
+        directory: sandbox.directory,
+        manifest: manifest,
+        volumeDirectoryURLs: volumeURLs
+      )
       _ = try await virtualMachine.start()
       try await virtualMachine.waitUntilReady(timeout: .seconds(10))
       try await initializeEnvd(
         virtualMachine,
         envVars: sandbox.envVars,
         network: sandbox.network
+      )
+      try await applyVolumeMounts(
+        virtualMachine,
+        mounts: sandbox.volumeMounts,
+        availableSlots: manifest.volumeShareSlots ?? 0
       )
       try await applyNetworkPolicy(
         virtualMachine,
@@ -704,6 +1033,7 @@ final class SandboxManager {
       diskSizeMB: sandbox.diskSizeMiB,
       metadata: sandbox.metadata,
       state: sandbox.state.rawValue,
+      volumeMounts: sandbox.volumeMounts,
       envdAccessToken: sandbox.envdAccessToken
     )
   }
@@ -720,6 +1050,7 @@ final class SandboxManager {
         throw CubeVZError.invalidArguments("invalid environment variable name: \(key)")
       }
     }
+    try validateVolumeMounts(request.volumeMounts)
     _ = try networkPolicyTargets(network: request.network)
   }
 
@@ -764,6 +1095,8 @@ final class SandboxManager {
         timeout: persisted.timeout,
         metadata: persisted.metadata,
         envVars: persisted.envVars,
+        volumeMounts: persisted.volumeMounts,
+        launchTemplateProcess: persisted.launchTemplateProcess ?? false,
         network: persisted.network,
         allowInternetAccess: persisted.allowInternetAccess,
         trafficAccessToken: persisted.trafficAccessToken,
@@ -776,9 +1109,120 @@ final class SandboxManager {
         expiresAt: persisted.expiresAt
       )
       sandboxes[persisted.sandboxID] = record
-      sandboxLogs[persisted.sandboxID] = [Self.log(line: "sandbox recovered")]
+      let logsURL = directoryURL.appendingPathComponent("sandbox.logs.json")
+      if let data = try? Data(contentsOf: logsURL),
+        let logs = try? decoder.decode([SandboxLog].self, from: data)
+      {
+        sandboxLogs[persisted.sandboxID] = logs
+      } else {
+        sandboxLogs[persisted.sandboxID] = []
+      }
+      appendLog(persisted.sandboxID, line: "sandbox recovered")
       scheduleExpiration(for: persisted.sandboxID)
     }
+  }
+
+  private func loadPersistedSnapshots() {
+    let manager = FileManager.default
+    guard let entries = try? manager.contentsOfDirectory(
+      at: snapshotsDirectory,
+      includingPropertiesForKeys: [.isDirectoryKey],
+      options: [.skipsHiddenFiles]
+    ) else { return }
+    let decoder = JSONDecoder()
+    for directoryURL in entries {
+      let metadataURL = directoryURL.appendingPathComponent("snapshot.json")
+      guard let data = try? Data(contentsOf: metadataURL),
+        let persisted = try? decoder.decode(PersistedSnapshot.self, from: data)
+      else { continue }
+      let directory = VMDirectory(url: directoryURL)
+      guard let manifest = try? directory.loadManifest(),
+        (try? directory.validateFiles(for: manifest)) != nil,
+        manager.fileExists(atPath: directory.stateURL.path)
+      else { continue }
+      snapshots[persisted.snapshotID] = SnapshotRecord(
+        snapshotID: persisted.snapshotID,
+        names: persisted.names,
+        originSandboxID: persisted.originSandboxID,
+        directory: directory,
+        createdAt: persisted.createdAt
+      )
+    }
+  }
+
+  private func loadPersistedTemplates() {
+    let decoder = JSONDecoder()
+    let registryURL = templatesDirectory.appendingPathComponent("registry.json")
+    if let data = try? Data(contentsOf: registryURL),
+      let persisted = try? decoder.decode([PersistedTemplate].self, from: data)
+    {
+      for item in persisted {
+        var status = item.status
+        var lastError = item.lastError
+        let directory = VMDirectory(
+          url: templatesDirectory.appendingPathComponent(item.templateID, isDirectory: true)
+        )
+        if status == "building" {
+          status = "failed"
+          lastError = "template build was interrupted by API restart"
+        } else if status == "ready" {
+          let valid = (try? directory.loadManifest()).flatMap { manifest in
+            try? directory.validateFiles(for: manifest)
+          } != nil && FileManager.default.fileExists(atPath: directory.stateURL.path)
+          if !valid {
+            status = "failed"
+            lastError = "prepared template artifacts are missing"
+          }
+        }
+        templates[item.templateID] = TemplateRecord(
+          templateID: item.templateID,
+          request: CreateTemplateRequest(
+            image: item.image,
+            instanceType: item.instanceType,
+            writableLayerSize: item.writableLayerSize,
+            exposedPorts: item.exposedPorts,
+            probePort: item.probePort,
+            probePath: item.probePath,
+            cpu: item.cpu,
+            memory: item.memory,
+            env: item.env,
+            allowInternetAccess: item.allowInternetAccess,
+            networkType: item.networkType,
+            nodes: item.nodes,
+            registryUsername: nil,
+            registryPassword: nil,
+            command: item.command,
+            args: item.args,
+            dns: item.dns,
+            allowOut: item.allowOut,
+            denyOut: item.denyOut
+          ),
+          status: status,
+          lastError: lastError,
+          createdAt: item.createdAt,
+          jobID: item.jobID
+        )
+      }
+    }
+
+    let buildsURL = templatesDirectory.appendingPathComponent("builds.json")
+    if let data = try? Data(contentsOf: buildsURL),
+      let persisted = try? decoder.decode([PersistedTemplateBuild].self, from: data)
+    {
+      for item in persisted {
+        let interrupted = item.status == "building"
+        templateBuilds[item.buildID] = TemplateBuildRecord(
+          buildID: item.buildID,
+          templateID: item.templateID,
+          status: interrupted ? "failed" : item.status,
+          phase: interrupted ? "failed" : item.phase,
+          progress: item.progress,
+          message: interrupted ? "template build was interrupted by API restart" : item.message,
+          logs: item.logs + (interrupted ? ["ERROR: build interrupted by API restart"] : [])
+        )
+      }
+    }
+    persistTemplates()
   }
 
   private func persist(_ sandbox: SandboxRecord) {
@@ -789,6 +1233,8 @@ final class SandboxManager {
       timeout: sandbox.timeout,
       metadata: sandbox.metadata,
       envVars: sandbox.envVars,
+      volumeMounts: sandbox.volumeMounts,
+      launchTemplateProcess: sandbox.launchTemplateProcess,
       network: sandbox.network,
       allowInternetAccess: sandbox.allowInternetAccess,
       trafficAccessToken: sandbox.trafficAccessToken,
@@ -804,6 +1250,73 @@ final class SandboxManager {
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     try? encoder.encode(persisted).write(
       to: sandbox.directory.url.appendingPathComponent("sandbox.json"),
+      options: [.atomic]
+    )
+  }
+
+  private func persist(_ snapshot: SnapshotRecord) {
+    let persisted = PersistedSnapshot(
+      snapshotID: snapshot.snapshotID,
+      names: snapshot.names,
+      originSandboxID: snapshot.originSandboxID,
+      createdAt: snapshot.createdAt
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try? encoder.encode(persisted).write(
+      to: snapshot.directory.url.appendingPathComponent("snapshot.json"),
+      options: [.atomic]
+    )
+  }
+
+  private func persistTemplates() {
+    let persistedTemplates = templates.values.sorted { $0.templateID < $1.templateID }.map {
+      template in
+      PersistedTemplate(
+        templateID: template.templateID,
+        image: template.request.image,
+        instanceType: template.request.instanceType ?? "cube-vz",
+        writableLayerSize: template.request.writableLayerSize,
+        exposedPorts: template.request.exposedPorts ?? [],
+        probePort: template.request.probePort,
+        probePath: template.request.probePath,
+        cpu: template.request.cpu,
+        memory: template.request.memory,
+        env: template.request.env ?? [],
+        allowInternetAccess: template.request.allowInternetAccess ?? true,
+        networkType: template.request.networkType ?? "nat",
+        nodes: template.request.nodes ?? [],
+        command: template.request.command ?? [],
+        args: template.request.args ?? [],
+        dns: template.request.dns ?? [],
+        allowOut: template.request.allowOut ?? [],
+        denyOut: template.request.denyOut ?? [],
+        status: template.status,
+        lastError: template.lastError,
+        createdAt: template.createdAt,
+        jobID: template.jobID
+      )
+    }
+    let persistedBuilds = templateBuilds.values.sorted { $0.buildID < $1.buildID }.map {
+      build in
+      PersistedTemplateBuild(
+        buildID: build.buildID,
+        templateID: build.templateID,
+        status: build.status,
+        phase: build.phase,
+        progress: build.progress,
+        message: build.message,
+        logs: build.logs
+      )
+    }
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try? encoder.encode(persistedTemplates).write(
+      to: templatesDirectory.appendingPathComponent("registry.json"),
+      options: [.atomic]
+    )
+    try? encoder.encode(persistedBuilds).write(
+      to: templatesDirectory.appendingPathComponent("builds.json"),
       options: [.atomic]
     )
   }
@@ -828,6 +1341,16 @@ final class SandboxManager {
     if let entries = sandboxLogs[sandboxID], entries.count > 10_000 {
       sandboxLogs[sandboxID] = Array(entries.suffix(10_000))
     }
+    persistLogs(sandboxID)
+  }
+
+  private func persistLogs(_ sandboxID: String) {
+    guard let sandbox = sandboxes[sandboxID], let logs = sandboxLogs[sandboxID] else { return }
+    let encoder = JSONEncoder()
+    try? encoder.encode(logs).write(
+      to: sandbox.directory.url.appendingPathComponent("sandbox.logs.json"),
+      options: [.atomic]
+    )
   }
 
   private func templateInfo(templateID requestedID: String, createdAt: Date?) -> TemplateInfoResponse {
@@ -837,12 +1360,373 @@ final class SandboxManager {
       version: "native",
       status: "ready",
       lastError: nil,
-      createdAt: Self.dateString(createdAt ?? Date()),
+      createdAt: Self.dateString(createdAt ?? baseTemplateCreatedAt),
       imageInfo: "ARM64 Linux guest on Apple Virtualization.framework",
       jobID: nil,
       networkType: "nat",
       allowInternetAccess: true
     )
+  }
+
+  private func templateInfo(record: TemplateRecord) -> TemplateInfoResponse {
+    TemplateInfoResponse(
+      templateID: record.templateID,
+      instanceType: record.request.instanceType ?? "cube-vz",
+      version: "native",
+      status: record.status,
+      lastError: record.lastError,
+      createdAt: Self.dateString(record.createdAt),
+      imageInfo: record.request.image,
+      jobID: record.jobID,
+      networkType: record.request.networkType ?? "nat",
+      allowInternetAccess: record.request.allowInternetAccess ?? true
+    )
+  }
+
+  private func preparedTemplateDirectory(templateID requestedID: String) -> VMDirectory? {
+    let directory = VMDirectory(
+      url: templatesDirectory.appendingPathComponent(requestedID, isDirectory: true)
+    )
+    guard let manifest = try? directory.loadManifest(),
+      (try? directory.validateFiles(for: manifest)) != nil,
+      FileManager.default.fileExists(atPath: directory.stateURL.path)
+    else { return nil }
+    return directory
+  }
+
+  private func queueTemplateBuild(
+    templateID requestedID: String,
+    request: CreateTemplateRequest,
+    buildID requestedBuildID: String? = nil
+  ) throws -> TemplateBuildJobResponse {
+    let image = request.image.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !image.isEmpty else {
+      throw CubeVZError.invalidArguments("template image is required")
+    }
+    try validateTemplateRequest(request)
+    if templates[requestedID]?.status == "building" {
+      throw CubeVZError.runtime("template build is already running: \(requestedID)")
+    }
+    _ = try Self.rootfsSizeMiB(request.writableLayerSize)
+    let buildID = requestedBuildID ?? "build-\(UUID().uuidString.lowercased())"
+    let createdAt = templates[requestedID]?.createdAt ?? Date()
+    templates[requestedID] = TemplateRecord(
+      templateID: requestedID,
+      request: request,
+      status: "building",
+      lastError: nil,
+      createdAt: createdAt,
+      jobID: buildID
+    )
+    templateBuilds[buildID] = TemplateBuildRecord(
+      buildID: buildID,
+      templateID: requestedID,
+      status: "building",
+      phase: "queued",
+      progress: 0,
+      message: "template build queued",
+      logs: ["queued ARM64 guest build for \(image)"]
+    )
+    persistTemplates()
+    Task { [weak self] in
+      await self?.performTemplateBuild(
+        templateID: requestedID,
+        buildID: buildID,
+        request: request
+      )
+    }
+    return TemplateBuildJobResponse(
+      jobID: buildID,
+      templateID: requestedID,
+      status: "building",
+      phase: "queued",
+      progress: 0,
+      errorMessage: ""
+    )
+  }
+
+  private func validateTemplateRequest(_ request: CreateTemplateRequest) throws {
+    if let cpu = request.cpu, cpu == 0 {
+      throw CubeVZError.invalidArguments("template cpu must be greater than zero")
+    }
+    if let memory = request.memory, memory < 256 {
+      throw CubeVZError.invalidArguments("template memory must be at least 256MiB")
+    }
+    if let port = request.probePort, port == 0 {
+      throw CubeVZError.invalidArguments("probePort must be greater than zero")
+    }
+    if request.exposedPorts?.contains(0) == true {
+      throw CubeVZError.invalidArguments("exposedPorts must be greater than zero")
+    }
+    for entry in request.env ?? [] {
+      let parts = entry.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+      guard parts.count == 2, !parts[0].isEmpty, !parts[0].contains("\0") else {
+        throw CubeVZError.invalidArguments("template env entries must use KEY=VALUE")
+      }
+    }
+    for value in (request.command ?? []) + (request.args ?? []) {
+      guard !value.contains("\0") else {
+        throw CubeVZError.invalidArguments("template command contains a NUL byte")
+      }
+    }
+  }
+
+  private func performTemplateBuild(
+    templateID requestedID: String,
+    buildID: String,
+    request: CreateTemplateRequest
+  ) async {
+    guard let builderDirectory = guestBuilderDirectory else {
+      failTemplateBuild(
+        templateID: requestedID,
+        buildID: buildID,
+        message: "guest builder directory is not configured"
+      )
+      return
+    }
+    let buildRoot = templatesDirectory.appendingPathComponent(
+      ".build-\(buildID)",
+      isDirectory: true
+    )
+    updateTemplateBuild(
+      buildID: buildID,
+      phase: "building-rootfs",
+      progress: 10,
+      message: "building ARM64 root filesystem"
+    )
+
+    do {
+      let result = try await Task.detached(priority: .userInitiated) {
+        try Self.runGuestBuild(
+          builderDirectory: builderDirectory,
+          buildRoot: buildRoot,
+          request: request
+        )
+      }.value
+      appendTemplateBuildLogs(buildID: buildID, lines: result.logLines)
+      guard result.exitCode == 0 else {
+        throw CubeVZError.runtime("Docker guest build exited with code \(result.exitCode)")
+      }
+
+      updateTemplateBuild(
+        buildID: buildID,
+        phase: "preparing-template",
+        progress: 75,
+        message: "preparing Virtualization.framework saved state"
+      )
+      let baseManifest = try templateDirectory.loadManifest()
+      let stagedURL = templatesDirectory.appendingPathComponent(
+        ".\(requestedID).partial-\(buildID)",
+        isDirectory: true
+      )
+      try? FileManager.default.removeItem(at: stagedURL)
+      let cpuCount = request.cpu.map { max(1, Int((UInt64($0) + 999) / 1_000)) }
+        ?? baseManifest.cpuCount
+      let memoryMiB = request.memory.map(UInt64.init) ?? baseManifest.memoryMiB
+      let staged = try VMDirectoryCreator.create(
+        CreateVMRequest(
+          destination: stagedURL,
+          kernel: result.artifactsDirectory.appendingPathComponent("kernel"),
+          disk: result.artifactsDirectory.appendingPathComponent("rootfs.raw"),
+          initrd: result.artifactsDirectory.appendingPathComponent("initrd"),
+          cpuCount: cpuCount,
+          memoryMiB: memoryMiB,
+          commandLine: baseManifest.commandLine,
+          networkEnabled: true,
+          vsockEnabled: true,
+          allowFullCopy: true,
+          volumeShareSlots: baseManifest.volumeShareSlots ?? 8
+        )
+      )
+      let virtualMachine = try ManagedVM(
+        directory: staged,
+        manifest: try staged.loadManifest()
+      )
+      _ = try await virtualMachine.start(restoreIfPresent: false)
+      try await virtualMachine.waitUntilReady(timeout: .seconds(30))
+      try await virtualMachine.saveStateAndStop()
+
+      let destination = templatesDirectory.appendingPathComponent(requestedID, isDirectory: true)
+      let backup = templatesDirectory.appendingPathComponent(
+        ".\(requestedID).backup-\(buildID)",
+        isDirectory: true
+      )
+      try? FileManager.default.removeItem(at: backup)
+      if FileManager.default.fileExists(atPath: destination.path) {
+        try FileManager.default.moveItem(at: destination, to: backup)
+      }
+      do {
+        try FileManager.default.moveItem(at: stagedURL, to: destination)
+        try? FileManager.default.removeItem(at: backup)
+      } catch {
+        if FileManager.default.fileExists(atPath: backup.path) {
+          try? FileManager.default.moveItem(at: backup, to: destination)
+        }
+        throw error
+      }
+
+      guard var template = templates[requestedID] else { return }
+      template.status = "ready"
+      template.lastError = nil
+      templates[requestedID] = template
+      updateTemplateBuild(
+        buildID: buildID,
+        phase: "ready",
+        progress: 100,
+        status: "completed",
+        message: "template is ready"
+      )
+      appendTemplateBuildLogs(buildID: buildID, lines: ["template saved state is ready"])
+      persistTemplates()
+      try? FileManager.default.removeItem(at: buildRoot)
+    } catch {
+      try? FileManager.default.removeItem(at: buildRoot)
+      failTemplateBuild(
+        templateID: requestedID,
+        buildID: buildID,
+        message: error.localizedDescription
+      )
+    }
+  }
+
+  private func updateTemplateBuild(
+    buildID: String,
+    phase: String,
+    progress: Int,
+    status: String = "building",
+    message: String
+  ) {
+    guard var build = templateBuilds[buildID] else { return }
+    build.phase = phase
+    build.progress = progress
+    build.status = status
+    build.message = message
+    templateBuilds[buildID] = build
+    persistTemplates()
+  }
+
+  private func appendTemplateBuildLogs(buildID: String, lines: [String]) {
+    guard var build = templateBuilds[buildID] else { return }
+    build.logs.append(contentsOf: lines.filter { !$0.isEmpty })
+    if build.logs.count > 10_000 { build.logs = Array(build.logs.suffix(10_000)) }
+    templateBuilds[buildID] = build
+    persistTemplates()
+  }
+
+  private func failTemplateBuild(templateID requestedID: String, buildID: String, message: String) {
+    if var template = templates[requestedID] {
+      template.status = "failed"
+      template.lastError = message
+      templates[requestedID] = template
+    }
+    updateTemplateBuild(
+      buildID: buildID,
+      phase: "failed",
+      progress: templateBuilds[buildID]?.progress ?? 0,
+      status: "failed",
+      message: message
+    )
+    appendTemplateBuildLogs(buildID: buildID, lines: ["ERROR: \(message)"])
+    persistTemplates()
+  }
+
+  private func validateVolumeMounts(_ mounts: [SandboxVolumeMountRequest]?) throws {
+    guard let mounts else { return }
+    guard mounts.count <= 16 else {
+      throw CubeVZError.invalidArguments("at most 16 volume mounts are supported")
+    }
+    var paths = Set<String>()
+    for mount in mounts {
+      guard
+        mount.name.range(
+          of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          options: .regularExpression
+        ) != nil
+      else {
+        throw CubeVZError.invalidArguments("invalid volume name: \(mount.name)")
+      }
+      let path = URL(fileURLWithPath: mount.path).standardizedFileURL.path
+      guard mount.path.hasPrefix("/"), path != "/", !path.contains("\0") else {
+        throw CubeVZError.invalidArguments("volume mount path must be an absolute non-root path")
+      }
+      let protectedPaths = ["/dev", "/proc", "/sys", "/run", "/mnt/cube-volumes"]
+      guard !protectedPaths.contains(where: { path == $0 || path.hasPrefix("\($0)/") }) else {
+        throw CubeVZError.invalidArguments("volume mount path is reserved: \(mount.path)")
+      }
+      guard paths.insert(path).inserted else {
+        throw CubeVZError.invalidArguments("duplicate volume mount path: \(mount.path)")
+      }
+    }
+  }
+
+  private func volumeDirectoryURLs(
+    for mounts: [SandboxVolumeMountRequest]?,
+    directory: VMDirectory,
+    manifest: VMManifest
+  ) throws -> [URL]? {
+    let slots = manifest.volumeShareSlots ?? 0
+    let mounts = mounts ?? []
+    guard mounts.count <= slots else {
+      throw CubeVZError.unsupported(
+        "template exposes \(slots) volume slots but \(mounts.count) mounts were requested"
+      )
+    }
+    guard slots > 0 else { return nil }
+    var urls: [URL] = []
+    for slot in 0..<slots {
+      let url: URL
+      if slot < mounts.count {
+        url = volumesDirectory.appendingPathComponent(mounts[slot].name, isDirectory: true)
+      } else {
+        url = directory.volumeShareURL(slot: slot)
+      }
+      try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+      urls.append(url)
+    }
+    return urls
+  }
+
+  private func applyVolumeMounts(
+    _ virtualMachine: ManagedVM,
+    mounts: [SandboxVolumeMountRequest]?,
+    availableSlots: Int
+  ) async throws {
+    let mounts = mounts ?? []
+    guard mounts.count <= availableSlots else {
+      throw CubeVZError.unsupported("not enough virtiofs volume slots")
+    }
+    guard !mounts.isEmpty else { return }
+    var lines = ["#!/bin/sh", "set -eu"]
+    for (slot, mount) in mounts.enumerated() {
+      let source = "/mnt/cube-volumes/\(slot)"
+      let target = URL(fileURLWithPath: mount.path).standardizedFileURL.path
+      lines.append("mountpoint -q \(Self.shellQuote(source))")
+      lines.append("mkdir -p \(Self.shellQuote(target))")
+      lines.append("mountpoint -q \(Self.shellQuote(target)) && umount \(Self.shellQuote(target)) || true")
+      lines.append("mount --bind \(Self.shellQuote(source)) \(Self.shellQuote(target))")
+    }
+    let script = lines.joined(separator: "\n") + "\n"
+    let response = try await guestHTTPRequest(
+      virtualMachine,
+      method: "POST",
+      path: "/files?path=%2Frun%2Fcube-vz-volumes.sh&username=root",
+      body: Data(script.utf8),
+      contentType: "application/octet-stream"
+    )
+    guard response.hasPrefix("HTTP/1.1 200") else {
+      throw CubeVZError.runtime("volume mount script upload failed")
+    }
+    let result = try await virtualMachine.executeControlCommand("APPLY_VOLUMES")
+    guard result == "OK\n" else {
+      throw CubeVZError.runtime("guest rejected volume mounts")
+    }
+  }
+
+  private func startTemplateProcess(_ virtualMachine: ManagedVM) async throws {
+    let result = try await virtualMachine.executeControlCommand("START_TEMPLATE")
+    guard result == "OK\n" else {
+      throw CubeVZError.runtime("guest failed to start the template command")
+    }
   }
 
   private func initializeEnvd(
@@ -1156,6 +2040,214 @@ final class SandboxManager {
         offset += written
       }
     }
+  }
+
+  nonisolated private static func runGuestBuild(
+    builderDirectory: URL,
+    buildRoot: URL,
+    request: CreateTemplateRequest
+  ) throws -> GuestBuildResult {
+    let manager = FileManager.default
+    let script = builderDirectory.appendingPathComponent("build-guest.sh")
+    guard manager.isExecutableFile(atPath: script.path) else {
+      throw CubeVZError.filesystem("guest build script is unavailable: \(script.path)")
+    }
+    try? manager.removeItem(at: buildRoot)
+    try manager.createDirectory(at: buildRoot, withIntermediateDirectories: true)
+    let artifacts = buildRoot.appendingPathComponent("artifacts", isDirectory: true)
+    let logURL = buildRoot.appendingPathComponent("build.log")
+    guard manager.createFile(atPath: logURL.path, contents: nil) else {
+      throw CubeVZError.filesystem("cannot create template build log")
+    }
+    let logHandle = try FileHandle(forWritingTo: logURL)
+    defer { try? logHandle.close() }
+
+    var environment = ProcessInfo.processInfo.environment
+    environment["CUBEVZ_BENCH_ASSET_DIR"] = artifacts.path
+    environment["CUBEVZ_TEMPLATE_IMAGE"] = request.image
+    environment["CUBEVZ_ROOTFS_SIZE_MIB"] = String(
+      try rootfsSizeMiB(request.writableLayerSize)
+    )
+
+    if let username = request.registryUsername, !username.isEmpty,
+      let password = request.registryPassword, !password.isEmpty
+    {
+      let dockerConfig = buildRoot.appendingPathComponent("docker-auth", isDirectory: true)
+      try manager.createDirectory(at: dockerConfig, withIntermediateDirectories: true)
+      let auth = Data("\(username):\(password)".utf8).base64EncodedString()
+      let registry = registryHost(for: request.image)
+      let config = try JSONSerialization.data(withJSONObject: [
+        "auths": [registry: ["auth": auth]]
+      ])
+      try config.write(to: dockerConfig.appendingPathComponent("config.json"), options: .atomic)
+      environment["DOCKER_CONFIG"] = dockerConfig.path
+    }
+
+    let imageRuntime = try inspectImageRuntime(
+      image: request.image,
+      request: request,
+      environment: environment,
+      logHandle: logHandle
+    )
+    let runtimeConfig: [String: Any] = [
+      "command": imageRuntime.command,
+      "args": imageRuntime.args,
+      "env": imageRuntime.environment,
+      "cwd": imageRuntime.workingDirectory,
+      "exposedPorts": request.exposedPorts ?? [],
+    ]
+    let runtimeData = try JSONSerialization.data(withJSONObject: runtimeConfig)
+    environment["CUBEVZ_TEMPLATE_CONFIG_B64"] = runtimeData.base64EncodedString()
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/bash")
+    process.arguments = [script.path]
+    process.environment = environment
+    process.currentDirectoryURL = builderDirectory
+    process.standardOutput = logHandle
+    process.standardError = logHandle
+    try process.run()
+    process.waitUntilExit()
+    try logHandle.synchronize()
+    let logData = (try? Data(contentsOf: logURL)) ?? Data()
+    let logLines = String(decoding: logData, as: UTF8.self)
+      .split(whereSeparator: { $0.isNewline })
+      .map(String.init)
+    return GuestBuildResult(
+      exitCode: process.terminationStatus,
+      logLines: logLines,
+      artifactsDirectory: artifacts
+    )
+  }
+
+  nonisolated private static func inspectImageRuntime(
+    image: String,
+    request: CreateTemplateRequest,
+    environment: [String: String],
+    logHandle: FileHandle
+  ) throws -> ImageRuntime {
+    let pull = Process()
+    pull.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    pull.arguments = ["docker", "pull", "--platform", "linux/arm64", image]
+    pull.environment = environment
+    pull.standardOutput = logHandle
+    pull.standardError = logHandle
+    try pull.run()
+    pull.waitUntilExit()
+    guard pull.terminationStatus == 0 else {
+      throw CubeVZError.runtime("cannot pull ARM64 template image: \(image)")
+    }
+
+    let output = Pipe()
+    let inspect = Process()
+    inspect.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    inspect.arguments = ["docker", "image", "inspect", image]
+    inspect.environment = environment
+    inspect.standardOutput = output
+    inspect.standardError = logHandle
+    try inspect.run()
+    inspect.waitUntilExit()
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    guard inspect.terminationStatus == 0,
+      let array = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+      let config = array.first?["Config"] as? [String: Any]
+    else {
+      throw CubeVZError.runtime("cannot inspect template image configuration")
+    }
+
+    let entrypoint = config["Entrypoint"] as? [String] ?? []
+    let imageCommand = config["Cmd"] as? [String] ?? []
+    let command: [String]
+    let args: [String]
+    if let requestedCommand = request.command, !requestedCommand.isEmpty {
+      command = requestedCommand
+      args = request.args ?? imageCommand
+    } else if !entrypoint.isEmpty {
+      command = entrypoint
+      args = request.args ?? imageCommand
+    } else {
+      command = imageCommand
+      args = request.args ?? []
+    }
+    return ImageRuntime(
+      command: command,
+      args: args,
+      environment: mergeEnvironment(
+        base: config["Env"] as? [String] ?? [],
+        overrides: request.env ?? []
+      ),
+      workingDirectory: (config["WorkingDir"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        ?? "/"
+    )
+  }
+
+  nonisolated private static func mergeEnvironment(
+    base: [String],
+    overrides: [String]
+  ) -> [String] {
+    var order: [String] = []
+    var values: [String: String] = [:]
+    for entry in base + overrides {
+      let parts = entry.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+      guard parts.count == 2, !parts[0].isEmpty else { continue }
+      let key = String(parts[0])
+      if values[key] == nil { order.append(key) }
+      values[key] = String(parts[1])
+    }
+    return order.compactMap { key in values[key].map { "\(key)=\($0)" } }
+  }
+
+  nonisolated private static func mergedEnvironment(
+    template: [String]?,
+    sandbox: [String: String]?
+  ) -> [String: String]? {
+    var result: [String: String] = [:]
+    for entry in template ?? [] {
+      let parts = entry.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+      guard parts.count == 2, !parts[0].isEmpty else { continue }
+      result[String(parts[0])] = String(parts[1])
+    }
+    for (key, value) in sandbox ?? [:] { result[key] = value }
+    return result.isEmpty ? nil : result
+  }
+
+  nonisolated private static func rootfsSizeMiB(_ value: String?) throws -> Int {
+    guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      return 768
+    }
+    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    let suffixes: [(String, Int)] = [
+      ("GIB", 1_024), ("GB", 1_024), ("G", 1_024),
+      ("MIB", 1), ("MB", 1), ("M", 1),
+    ]
+    var number = normalized
+    var multiplier = 1
+    if let match = suffixes.first(where: { normalized.hasSuffix($0.0) }) {
+      number = String(normalized.dropLast(match.0.count))
+      multiplier = match.1
+    }
+    guard let amount = Double(number), amount > 0 else {
+      throw CubeVZError.invalidArguments("invalid writableLayerSize: \(value)")
+    }
+    let result = Int(ceil(amount * Double(multiplier)))
+    guard (256...32_768).contains(result) else {
+      throw CubeVZError.invalidArguments(
+        "writableLayerSize must resolve to between 256MiB and 32GiB"
+      )
+    }
+    return result
+  }
+
+  nonisolated private static func registryHost(for image: String) -> String {
+    let first = image.split(separator: "/", maxSplits: 1).first.map(String.init) ?? ""
+    if first == "localhost" || first.contains(".") || first.contains(":") {
+      return first
+    }
+    return "https://index.docker.io/v1/"
+  }
+
+  nonisolated private static func shellQuote(_ value: String) -> String {
+    "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
   }
 
   nonisolated private static func dateString(_ date: Date) -> String {

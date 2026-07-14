@@ -138,7 +138,10 @@ class Executor:
             value = eval(compile(expression, "<cube-vz>", "eval"), self.namespace)
             if value is not None:
                 try:
-                    text = repr(value)
+                    # CubeSandbox SDKs expose the main text result without
+                    # Python repr quotes for strings; retain repr for other
+                    # objects so numbers and containers stay unambiguous.
+                    text = value if isinstance(value, str) else repr(value)
                 except BaseException:
                     text = f"<{type(value).__name__}>"
                 # SDKs use is_main_result to populate Execution.text.

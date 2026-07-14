@@ -18,6 +18,10 @@ public struct VMManifest: Codable, Equatable, Sendable {
   public var vsockEnabled: Bool
   public var macAddress: String?
   public var controlPort: UInt32?
+  /// Fixed virtiofs device count. Keeping the device topology stable lets a
+  /// saved template restore while each sandbox points slots at different host
+  /// directories.
+  public var volumeShareSlots: Int?
 
   public init(
     schemaVersion: Int = VMManifest.currentSchemaVersion,
@@ -30,7 +34,8 @@ public struct VMManifest: Codable, Equatable, Sendable {
     networkEnabled: Bool = true,
     vsockEnabled: Bool = true,
     macAddress: String? = nil,
-    controlPort: UInt32? = nil
+    controlPort: UInt32? = nil,
+    volumeShareSlots: Int? = nil
   ) {
     self.schemaVersion = schemaVersion
     self.cpuCount = cpuCount
@@ -43,6 +48,7 @@ public struct VMManifest: Codable, Equatable, Sendable {
     self.vsockEnabled = vsockEnabled
     self.macAddress = macAddress
     self.controlPort = controlPort
+    self.volumeShareSlots = volumeShareSlots
   }
 
   public func validate() throws {
@@ -77,6 +83,9 @@ public struct VMManifest: Codable, Equatable, Sendable {
     if vsockEnabled, controlPort == 0 {
       throw CubeVZError.invalidManifest("controlPort must be greater than zero")
     }
+    if let volumeShareSlots, !(0...16).contains(volumeShareSlots) {
+      throw CubeVZError.invalidManifest("volumeShareSlots must be between zero and 16")
+    }
   }
 
   private static func isRelativeFilename(_ value: String) -> Bool {
@@ -95,6 +104,7 @@ public struct VMDirectory: Sendable {
   public static let diskFilename = "rootfs.raw"
   public static let initrdFilename = "initrd"
   public static let stateFilename = "machine.vzstate"
+  public static let volumeSharesDirectoryName = "volume-shares"
 
   public let url: URL
 
@@ -107,6 +117,13 @@ public struct VMDirectory: Sendable {
     url.appendingPathComponent(Self.machineIdentifierFilename)
   }
   public var stateURL: URL { url.appendingPathComponent(Self.stateFilename) }
+  public var volumeSharesURL: URL {
+    url.appendingPathComponent(Self.volumeSharesDirectoryName, isDirectory: true)
+  }
+
+  public func volumeShareURL(slot: Int) -> URL {
+    volumeSharesURL.appendingPathComponent(String(slot), isDirectory: true)
+  }
 
   public func fileURL(named filename: String) -> URL {
     url.appendingPathComponent(filename)
