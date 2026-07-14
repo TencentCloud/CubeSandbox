@@ -77,6 +77,7 @@ export TF_VAR_cube_lifecycle_manager_heartbeat_ttl="${TF_VAR_cube_lifecycle_mana
 export TF_VAR_cube_lifecycle_manager_discovery_refresh="${TF_VAR_cube_lifecycle_manager_discovery_refresh:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_DISCOVERY_REFRESH:-3s}}"
 export TF_VAR_cube_admin_token="${TF_VAR_cube_admin_token:-${TENCENTCLOUD_CUBE_ADMIN_TOKEN:-}}"
 export TF_VAR_cube_proxy_heartbeat_interval_ms="${TF_VAR_cube_proxy_heartbeat_interval_ms:-${TENCENTCLOUD_CUBE_PROXY_HEARTBEAT_INTERVAL_MS:-5000}}"
+export TF_VAR_cube_proxy_admin_port="${TF_VAR_cube_proxy_admin_port:-${TENCENTCLOUD_CUBE_PROXY_ADMIN_PORT:-8082}}"
 
 mkdir -p "$SCRIPT_DIR/.kube"
 

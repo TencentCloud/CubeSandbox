@@ -71,12 +71,15 @@ CUBE_PROXY_HTTP_PORT="${CUBE_PROXY_HTTP_PORT:-80}"
 CUBE_PROXY_GRPC_PORT="${CUBE_PROXY_GRPC_PORT:-9090}"
 CUBE_PROXY_SSL_CERT="${CUBE_PROXY_SSL_CERT:-cube.app+3.pem}"
 CUBE_PROXY_SSL_KEY="${CUBE_PROXY_SSL_KEY:-cube.app+3-key.pem}"
-# Address the /admin/* server (port 8082) binds to. Defaults to the node's
+# Address the /admin/* server binds to. Defaults to the node's
 # cluster-reachable IP so cube-lifecycle-manager (running on the control
 # node) can push meta / state updates here. Token auth via
 # $cube_admin_token below prevents outside abuse; operators may further
 # tighten this with iptables / security groups.
 CUBE_PROXY_ADMIN_LISTEN="${CUBE_PROXY_ADMIN_LISTEN:-${CUBE_SANDBOX_NODE_IP}}"
+# Port the /admin/* server binds to. cube-proxy uses host networking, so this
+# port must be free on the host; override when 8082 is already taken.
+CUBE_PROXY_ADMIN_PORT="${CUBE_PROXY_ADMIN_PORT:-8082}"
 
 # Address of cube-lifecycle-manager reachable from this cube-proxy replica.
 # Consumed by the Lua $cube_sidecar_addr variable used by the
@@ -96,8 +99,8 @@ CUBE_ADMIN_TOKEN="${CUBE_ADMIN_TOKEN:-}"
 # ── CubeProxy service registration for cube-lifecycle-manager discovery ──
 # Enabled by default now that CLM owns lifecycle coordination.
 CUBE_PROXY_REGISTRY_ENABLE="${CUBE_PROXY_REGISTRY_ENABLE:-1}"
-CUBE_PROXY_ID="${CUBE_PROXY_ID:-${CUBE_SANDBOX_NODE_IP}:8082}"
-CUBE_PROXY_ADMIN_URL="${CUBE_PROXY_ADMIN_URL:-http://${CUBE_SANDBOX_NODE_IP}:8082}"
+CUBE_PROXY_ID="${CUBE_PROXY_ID:-${CUBE_SANDBOX_NODE_IP}:${CUBE_PROXY_ADMIN_PORT}}"
+CUBE_PROXY_ADMIN_URL="${CUBE_PROXY_ADMIN_URL:-http://${CUBE_SANDBOX_NODE_IP}:${CUBE_PROXY_ADMIN_PORT}}"
 CUBE_PROXY_RESUME_URL="${CUBE_PROXY_RESUME_URL:-${CUBE_PROXY_ADMIN_URL}}"
 CUBE_PROXY_NODE_IP="${CUBE_PROXY_NODE_IP:-${CUBE_SANDBOX_NODE_IP}}"
 CUBE_PROXY_VERSION="${CUBE_PROXY_VERSION:-}"
@@ -123,6 +126,38 @@ case "${COMPOSE_DETACH}" in
   0|1) ;;
   *) die "unsupported ONE_CLICK_COMPOSE_DETACH: ${COMPOSE_DETACH} (expected 0 or 1)" ;;
 esac
+
+# Validate the three host-network ports cube-proxy binds. Unlike the Terraform
+# variable (which has `> 0 && < 65536` range validation), the shell path had no
+# guard, so a typo like CUBE_PROXY_ADMIN_PORT=abc flowed straight into `ss`,
+# `escape_sed`, and the nginx template -- either confusing errors or a
+# specification that silently matches every sport. Reject a numeric-out-of-range
+# or non-numeric value up front with a clear, named message.
+_validate_host_port() {
+  local name="$1" port="$2"
+  [[ "${port}" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) \
+    || die "${name} must be a valid TCP port (1-65535), got: '${port}'"
+}
+_validate_host_port CUBE_PROXY_HTTP_PORT  "${CUBE_PROXY_HTTP_PORT}"
+_validate_host_port CUBE_PROXY_HTTPS_PORT "${CUBE_PROXY_HTTPS_PORT}"
+_validate_host_port CUBE_PROXY_GRPC_PORT  "${CUBE_PROXY_GRPC_PORT}"
+_validate_host_port CUBE_PROXY_ADMIN_PORT "${CUBE_PROXY_ADMIN_PORT}"
+# HTTP/HTTPS/gRPC must be distinct from the admin port (an accidental collision
+# would make nginx bind two server blocks to the same host port and crash-loop).
+if [[ "${CUBE_PROXY_ADMIN_PORT}" == "${CUBE_PROXY_HTTP_PORT}" \
+   || "${CUBE_PROXY_ADMIN_PORT}" == "${CUBE_PROXY_HTTPS_PORT}" \
+   || "${CUBE_PROXY_ADMIN_PORT}" == "${CUBE_PROXY_GRPC_PORT}" ]]; then
+  die "CUBE_PROXY_ADMIN_PORT (${CUBE_PROXY_ADMIN_PORT}) must differ from CUBE_PROXY_HTTP_PORT (${CUBE_PROXY_HTTP_PORT}), CUBE_PROXY_HTTPS_PORT (${CUBE_PROXY_HTTPS_PORT}) and CUBE_PROXY_GRPC_PORT (${CUBE_PROXY_GRPC_PORT})"
+fi
+# HTTP and HTTPS must also differ from each other: nginx generates two `listen`
+# directives for them (one plain, one `ssl reuseport`) from the same template,
+# so a duplicated port makes both try to bind the same host port. The `ss`
+# pre-check only catches an *external* listener, not this self-conflict, so an
+# equal pair would otherwise crash-loop the container with a cryptic
+# "address already in use" from nginx.
+if [[ "${CUBE_PROXY_HTTP_PORT}" == "${CUBE_PROXY_HTTPS_PORT}" ]]; then
+  die "CUBE_PROXY_HTTP_PORT (${CUBE_PROXY_HTTP_PORT}) and CUBE_PROXY_HTTPS_PORT (${CUBE_PROXY_HTTPS_PORT}) must differ"
+fi
 
 install_mkcert() {
   if command -v mkcert >/dev/null 2>&1; then
@@ -185,6 +220,7 @@ render_template_atomic \
   -e "s/__CUBE_PROXY_HTTP_PORT__/$(escape_sed "${CUBE_PROXY_HTTP_PORT}")/g" \
   -e "s/__CUBE_PROXY_GRPC_PORT__/$(escape_sed "${CUBE_PROXY_GRPC_PORT}")/g" \
   -e "s/__CUBE_PROXY_ADMIN_LISTEN__/$(escape_sed "${CUBE_PROXY_ADMIN_LISTEN}")/g" \
+  -e "s/__CUBE_PROXY_ADMIN_PORT__/$(escape_sed "${CUBE_PROXY_ADMIN_PORT}")/g" \
   -e "s/__CUBE_PROXY_SSL_CERT__/$(escape_sed "${CUBE_PROXY_SSL_CERT}")/g" \
   -e "s/__CUBE_PROXY_SSL_KEY__/$(escape_sed "${CUBE_PROXY_SSL_KEY}")/g"
 
@@ -219,12 +255,23 @@ fi
 compose_run down --remove-orphans >/dev/null 2>&1 || true
 docker_rm_if_exists "${CUBE_PROXY_CONTAINER_NAME}"
 
-# cube-proxy uses network_mode: host, so HTTP/HTTPS ports must be free on the
-# host before we attempt to start the container; otherwise the failure mode is
-# a cryptic "address already in use" from nginx inside the container.
-for port in "${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}" "${CUBE_PROXY_GRPC_PORT}"; do
+# cube-proxy uses network_mode: host, so HTTP/HTTPS/gRPC and admin ports must be
+# free on the host before we attempt to start the container; otherwise the
+# failure mode is a cryptic "address already in use" from nginx inside the
+# container that crash-loops without surfacing the real reason. The admin port
+# in particular has no default liveness check, so a conflict there would
+# otherwise stall the installer at cube-sandbox-control.target.
+# Map each port to the environment variable that overrides it, so the conflict
+# message names the *specific* override the operator should set (not always the
+# admin port, which is misleading when e.g. port 80 is the one already in use).
+for entry in "${CUBE_PROXY_HTTP_PORT}:CUBE_PROXY_HTTP_PORT" \
+             "${CUBE_PROXY_HTTPS_PORT}:CUBE_PROXY_HTTPS_PORT" \
+             "${CUBE_PROXY_GRPC_PORT}:CUBE_PROXY_GRPC_PORT" \
+             "${CUBE_PROXY_ADMIN_PORT}:CUBE_PROXY_ADMIN_PORT"; do
+  port="${entry%%:*}"
+  override_var="${entry##*:}"
   if command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${port} )"; then
-    die "port ${port} is already in use; cube-proxy uses host networking and requires it to be free"
+    die "port ${port} is already in use; cube-proxy uses host networking and requires it to be free. Set ${override_var} to a free port (or stop the occupying process) and retry."
   fi
 done
 
@@ -260,6 +307,7 @@ done
 http_ready=0
 https_ready=0
 grpc_ready=0
+admin_ready=0
 for _ in {1..30}; do
   if [[ "${http_ready}" == "0" ]] && \
      command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${CUBE_PROXY_HTTP_PORT} )"; then
@@ -273,23 +321,28 @@ for _ in {1..30}; do
      command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${CUBE_PROXY_GRPC_PORT} )"; then
     grpc_ready=1
   fi
-  if [[ "${http_ready}" == "1" && "${https_ready}" == "1" && "${grpc_ready}" == "1" ]]; then
-    log "cube proxy listening on ${CUBE_PROXY_HTTP_PORT}, ${CUBE_PROXY_HTTPS_PORT}, and ${CUBE_PROXY_GRPC_PORT}"
+  if [[ "${admin_ready}" == "0" ]] && \
+     command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${CUBE_PROXY_ADMIN_PORT} )"; then
+    admin_ready=1
+  fi
+  if [[ "${http_ready}" == "1" && "${https_ready}" == "1" && "${grpc_ready}" == "1" && "${admin_ready}" == "1" ]]; then
+    log "cube proxy listening on ${CUBE_PROXY_HTTP_PORT}, ${CUBE_PROXY_HTTPS_PORT}, ${CUBE_PROXY_GRPC_PORT} and admin ${CUBE_PROXY_ADMIN_PORT}"
     exit 0
   fi
   sleep 2
 done
 
-not_ready=()
-if [[ "${http_ready}" != "1" ]]; then
-  not_ready+=("${CUBE_PROXY_HTTP_PORT} (HTTP)")
-fi
-if [[ "${https_ready}" != "1" ]]; then
-  not_ready+=("${CUBE_PROXY_HTTPS_PORT} (HTTPS)")
-fi
-if [[ "${grpc_ready}" != "1" ]]; then
-  not_ready+=("${CUBE_PROXY_GRPC_PORT} (gRPC)")
-fi
-if (( ${#not_ready[@]} > 0 )); then
-  die "cube proxy port(s) did not become ready: ${not_ready[*]}"
+# Report every port that failed to bind in one message (not just the first),
+# so the operator does not need to re-run once per failing port. Each failure
+# names its override variable and points at the container logs, since the root
+# cause of a missing listener is usually a bind() error (e.g. "address already
+# in use") buried in `docker logs` that never surfaces through the target's
+# Wants= exit code.
+readiness_failures=()
+[[ "${http_ready}"  == "1" ]] || readiness_failures+=("HTTP port ${CUBE_PROXY_HTTP_PORT} (override CUBE_PROXY_HTTP_PORT)")
+[[ "${https_ready}" == "1" ]] || readiness_failures+=("HTTPS port ${CUBE_PROXY_HTTPS_PORT} (override CUBE_PROXY_HTTPS_PORT)")
+[[ "${grpc_ready}"  == "1" ]] || readiness_failures+=("gRPC port ${CUBE_PROXY_GRPC_PORT} (override CUBE_PROXY_GRPC_PORT)")
+[[ "${admin_ready}" == "1" ]] || readiness_failures+=("admin port ${CUBE_PROXY_ADMIN_PORT} (override CUBE_PROXY_ADMIN_PORT)")
+if [[ ${#readiness_failures[@]} -gt 0 ]]; then
+  die "cube proxy did not become ready on: ${readiness_failures[*]} -- check 'docker logs ${CUBE_PROXY_CONTAINER_NAME}' for a bind() failure (the listen directives bind at nginx master startup, so an already-in-use port crash-loops the container)."
 fi

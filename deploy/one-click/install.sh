@@ -297,6 +297,57 @@ check_proxy_cert_preflight() {
   :
 }
 
+# cube-proxy runs with network_mode: host, so its HTTP/HTTPS/gRPC/admin ports must be
+# free on the host before we start the unit. The failure mode when they are not
+# is nginx aborting inside the container with a cryptic "address already in use"
+# that crash-loops and -- because the control target only Wants= its members --
+# never surfaces as a non-zero exit, leaving quickcheck to burn the whole
+# readiness budget before reporting a generic "unit not active".
+#
+# Catching it here turns that 120s timeout into an immediate, actionable error.
+# This complements (does not replace) the same check in up-cube-proxy.sh: that
+# one is the source of truth for the `systemctl restart cube-sandbox-cube-proxy
+# .service` path which bypasses install.sh entirely. There is an inherent
+# TOCTOU window between this preflight and the actual container start, so the
+# service-level check must stay.
+#
+# MUST run after stop_existing_systemd_deployment: on an upgrade the *previous*
+# deployment legitimately holds these ports, so probing before the stop would
+# always false-positive. After the stop our own services have released the
+# ports and a remaining listener means a genuine external conflict.
+check_cube_proxy_port_conflict_preflight() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+
+  require_cmd ss
+  require_cmd grep
+
+  local http_port="${CUBE_PROXY_HTTP_PORT:-80}"
+  local https_port="${CUBE_PROXY_HTTPS_PORT:-443}"
+  local grpc_port="${CUBE_PROXY_GRPC_PORT:-9090}"
+  local admin_port="${CUBE_PROXY_ADMIN_PORT:-8082}"
+  local port override_var listeners
+
+  # Map each port to the environment variable that overrides it, so the conflict
+  # message names the *specific* override the operator should set -- telling
+  # someone whose port 80 is in use to set CUBE_PROXY_ADMIN_PORT would be
+  # misleading. Mirrors the same per-port override hint in up-cube-proxy.sh.
+  for entry in "${http_port}:CUBE_PROXY_HTTP_PORT" \
+               "${https_port}:CUBE_PROXY_HTTPS_PORT" \
+               "${grpc_port}:CUBE_PROXY_GRPC_PORT" \
+               "${admin_port}:CUBE_PROXY_ADMIN_PORT"; do
+    port="${entry%%:*}"
+    override_var="${entry##*:}"
+    # Same idiom as wait_for_tcp_port: filter ss to the requested sport and look
+    # for a LISTEN socket. `-H` drops the header line so an empty result grep-s
+    # cleanly. Any non-empty LISTEN row means the port is taken.
+    listeners="$(ss -H -lnt "( sport = :${port} )" 2>/dev/null || true)"
+    if grep -Fq 'LISTEN' <<<"${listeners}"; then
+      die "port ${port} is already in use; cube-proxy uses host networking and requires it to be free. Set ${override_var} to a free port (or stop the occupying process and retry):
+$(ss -lntp "( sport = :${port} )" 2>/dev/null || true)"
+    fi
+  done
+}
+
 restore_selinux_contexts() {
   command -v restorecon >/dev/null 2>&1 || return 0
   if command -v selinuxenabled >/dev/null 2>&1; then
@@ -1319,13 +1370,57 @@ install_systemd_units() {
   "${install_units_script}"
 }
 
+# systemctl only prints a terse "Job for <unit> failed" line when a unit fails to
+# start and never echoes the child's own ExecStart/ExecStartPost output. So the
+# actionable message a child logged -- e.g. cube-proxy aborting with "port 8082 is
+# already in use" -- is swallowed and the install looks like a silent stall. Walk
+# the target's requirement tree and dump the status + recent journal of every
+# cube-sandbox-* unit that did not reach 'active', so the operator sees the root
+# cause instead of an unexplained abort.
+dump_failed_cube_units() {
+  local target="$1"
+  local unit state found=0
+  while IFS= read -r unit; do
+    # `list-dependencies --plain` emits one unit per line; strip any residual
+    # whitespace so the glob match is exact (unit names never contain spaces).
+    unit="${unit//[[:space:]]/}"
+    [[ "${unit}" == cube-sandbox-*.service ]] || continue
+    # Read ActiveState once (atomic) instead of `is-active --quiet` then
+    # `is-active` again: the PR's own commit message flags that double-read as a
+    # TOCTOU race (a state flip between the calls could misreport). `show` prints
+    # `ActiveState=<value>` or nothing when the unit is absent.
+    state="$(
+      systemctl show --no-pager --property=ActiveState "${unit}" 2>/dev/null \
+        | sed -n 's/^ActiveState=//p'
+    )"
+    if [[ "${state}" != "active" ]]; then
+      found=1
+      log "----- ${unit} (state: ${state:-unknown}) -----"
+      systemctl status --no-pager --lines=0 "${unit}" >&2 || true
+      journalctl --no-pager -u "${unit}" -n 40 >&2 || true
+    fi
+  done < <(systemctl list-dependencies --plain "${target}" 2>/dev/null || true)
+  # Fallback when the dependency walk surfaced nothing (unexpected unit naming or
+  # an old systemd without --plain): dump whatever systemd currently flags failed.
+  if [[ "${found}" -eq 0 ]]; then
+    systemctl --failed --no-pager >&2 || true
+  fi
+}
+
 start_systemd_target() {
   local target
   target="$(systemd_target_for_role "${DEPLOY_ROLE}")"
   systemctl disable --now \
     cube-sandbox-control.target \
     cube-sandbox-compute.target >/dev/null 2>&1 || true
-  systemctl enable --now "${target}"
+  # `enable --now` returns non-zero as soon as a required child unit fails to
+  # start. Without this guard `set -e` would abort the installer right here --
+  # before the quickcheck below ever runs -- leaving no diagnostics on screen.
+  if ! systemctl enable --now "${target}"; then
+    log "ERROR: 'systemctl enable --now ${target}' failed; dumping failed unit diagnostics"
+    dump_failed_cube_units "${target}"
+    die "failed to start ${target}; inspect the unit status/journal above for the root cause."
+  fi
 }
 
 # When external MySQL/Redis is configured, mask the local container systemd
@@ -1473,6 +1568,11 @@ fi
 log "stopping existing systemd deployment under ${INSTALL_PREFIX}"
 stop_existing_systemd_deployment
 stop_existing_legacy_deployment "${installed_role}"
+
+# Now that any previous (upgrade) deployment has released its ports, verify the
+# cube-proxy host-network ports are free before we attempt to start the units --
+# an early, explicit conflict beats a 120s quickcheck timeout on a failed unit.
+check_cube_proxy_port_conflict_preflight
 
 # Upgrade: snapshot existing config now that all fail-fast preflights have
 # passed and right before any destructive change, then stash the env diff.

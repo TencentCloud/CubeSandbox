@@ -65,13 +65,16 @@ run_cube_proxy_postcheck_case() {
   local expected_port="$3"
   local grpc_listen_port="${4:-9090}"
   local grpc_expected_port="${5:-9090}"
-  local case_dir="${TMP_DIR}/cube-proxy-postcheck-${expected_port}-${grpc_expected_port}"
+  local admin_port="${6:-8082}"
+  local case_dir="${TMP_DIR}/cube-proxy-postcheck-${expected_port}-${grpc_expected_port}-${admin_port}"
   local env_file="${case_dir}/.one-click.env"
   local stub_dir="${case_dir}/bin"
   local ss_log="${case_dir}/ss.args"
 
   mkdir -p "${stub_dir}"
   printf '%s\n' "${env_content}" > "${env_file}"
+  # The postcheck probes HTTP + gRPC + admin, so the ss stub is invoked three
+  # times and must APPEND (>>) -- not overwrite (>) -- each call's args.
   cat > "${stub_dir}/ss" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${SS_ARGS_LOG}"
@@ -81,7 +84,7 @@ for arg in "$@"; do
     *"sport = :"*) port="${arg#*sport = :}"; port="${port%% )*}" ;;
   esac
 done
-if [[ "${port}" == "${SS_HTTP_PORT}" || "${port}" == "${SS_GRPC_PORT}" ]]; then
+if [[ "${port}" == "${SS_HTTP_PORT}" || "${port}" == "${SS_GRPC_PORT}" || "${port}" == "${SS_ADMIN_PORT}" ]]; then
   printf 'LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n' "${port}"
 fi
 SH
@@ -92,10 +95,12 @@ SH
     SS_ARGS_LOG="${ss_log}" \
     SS_HTTP_PORT="${listen_port}" \
     SS_GRPC_PORT="${grpc_listen_port}" \
+    SS_ADMIN_PORT="${admin_port}" \
     bash "${ONE_CLICK_DIR}/scripts/systemd/cube-proxy-postcheck.sh" >/dev/null
 
   assert_contains "${ss_log}" "sport = :${expected_port}"
   assert_contains "${ss_log}" "sport = :${grpc_expected_port}"
+  assert_contains "${ss_log}" "sport = :${admin_port}"
 }
 
 test_render_template_replaces_empty_directory() {
@@ -758,6 +763,116 @@ test_quickcheck_check_http_retries_then_succeeds() {
   (( calls == 3 )) || fail "check_http should retry 3 times, got ${calls}"
 }
 
+# A unit that has already definitively failed (e.g. cube-proxy nginx aborting
+# with "address already in use" under a bare `systemctl restart` that bypasses
+# install.sh's port preflight) will never converge to active, so polling it
+# until QUICKCHECK_DEADLINE just burns the whole readiness budget. check_unit_active
+# must detect that terminal state and die immediately instead of looping.
+test_quickcheck_check_unit_active_dies_fast_on_failed_unit() {
+  local sleep_log="${TMP_DIR}/failed-unit-slept"
+  local out_log="${TMP_DIR}/failed-unit-out"
+  : > "${sleep_log}"
+  : > "${out_log}"
+  # Drive in a subshell whose output we capture to a file (not `$(...)`): bash
+  # 3.2 (macOS) mis-parses a `${2:-}` inside a function defined within a command
+  # substitution. The `systemctl show ...` stub emits one atomic state snapshot
+  # (all categories in a single call), mirroring the real implementation which
+  # reads them in a single call to avoid a TOCTOU race between probes.
+  (
+    exec >"${out_log}" 2>&1
+    _quickcheck_source
+    # Deadline far in the future: if the failed short-circuit regresses, the
+    # loop would only reach the deadline after sleeping many times, so the
+    # sleep-log assertion below catches that regression too.
+    QUICKCHECK_READY_TIMEOUT=120
+    QUICKCHECK_READY_INTERVAL=2
+    QUICKCHECK_DEADLINE=$(( $(date +%s) + 120 ))
+    sleep() { echo slept >> "${sleep_log}"; }
+    systemctl() {
+      case "$1" in
+        show)
+          # Single atomic snapshot: a unit that has failed in a bind() race.
+          printf 'LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\nNRestarts=3\n'
+          ;;
+        status) echo "status stub"; return 0 ;;
+        journalctl) echo "journal stub"; return 0 ;;
+      esac
+    }
+    check_unit_active cube-sandbox-cube-proxy.service
+  ) && fail "check_unit_active should die fast when the unit has failed" || true
+  local out
+  out="$(<"${out_log}")"
+  assert_stdout_contains "${out}" "systemd unit failed: cube-sandbox-cube-proxy.service (sub=failed, result=exit-code, restarts=3)"
+  assert_stdout_contains "${out}" "status stub"
+  [[ ! -s "${sleep_log}" ]] || fail "check_unit_active must not sleep before failing on a failed (terminal) unit"
+}
+
+# A unit that is still starting (ActiveState=activating) has NOT failed
+# terminally; check_unit_active must keep retrying until it becomes active, not
+# short-circuit on the transient state.
+test_quickcheck_check_unit_active_retries_while_activating() {
+  local counter_file="${TMP_DIR}/activating-unit-calls"
+  local sleep_log="${TMP_DIR}/activating-unit-slept"
+  printf '0\n' > "${counter_file}"
+  : > "${sleep_log}"
+  (
+    _quickcheck_source
+    sleep() { echo slept >> "${sleep_log}"; }
+    QUICKCHECK_READY_TIMEOUT=30
+    QUICKCHECK_READY_INTERVAL=1
+    QUICKCHECK_DEADLINE=$(( $(date +%s) + 30 ))
+    systemctl() {
+      local n
+      n="$(<"${counter_file}")"
+      n=$(( n + 1 ))
+      printf '%s\n' "${n}" > "${counter_file}"
+      if (( n < 4 )); then
+        printf 'LoadState=loaded\nActiveState=activating\nSubState=start\nResult=success\nJob=start\nNRestarts=0\n'
+      else
+        printf 'LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nJob=\nNRestarts=0\n'
+      fi
+    }
+    check_unit_active cube-sandbox-network-agent.service
+  ) || fail "check_unit_active should retry while a unit is still activating, then succeed"
+  local calls
+  calls="$(<"${counter_file}")"
+  (( calls >= 3 )) || fail "check_unit_active should retry while activating, got ${calls} calls"
+  [[ -s "${sleep_log}" ]] || fail "check_unit_active should sleep between retries while activating"
+}
+
+# If `systemctl show` returns no output (a wrong/typo'd unit name that does not
+# exist on the host, or systemctl itself unavailable), `load_state` is empty and
+# none of the LoadState case arms used to match -- so the function looped until
+# QUICKCHECK_DEADLINE. That is almost certainly a wiring error, not a transient
+# gap, so it must fail fast with a named error instead of burning the budget.
+test_quickcheck_check_unit_active_fails_fast_on_missing_unit() {
+  local sleep_log="${TMP_DIR}/missing-unit-slept"
+  local out_log="${TMP_DIR}/missing-unit-out"
+  : > "${sleep_log}"
+  : > "${out_log}"
+  (
+    exec >"${out_log}" 2>&1
+    _quickcheck_source
+    QUICKCHECK_READY_TIMEOUT=120
+    QUICKCHECK_READY_INTERVAL=2
+    QUICKCHECK_DEADLINE=$(( $(date +%s) + 120 ))
+    sleep() { echo slept >> "${sleep_log}"; }
+    systemctl() {
+      case "$1" in
+        # `systemctl show` for a non-existent unit prints nothing -> empty output.
+        show) ;;
+        status) echo "status stub"; return 0 ;;
+        journalctl) echo "journal stub"; return 0 ;;
+      esac
+    }
+    check_unit_active cube-sandbox-nonexistent.service
+  ) && fail "check_unit_active should die fast when the unit has no LoadState" || true
+  local out
+  out="$(<"${out_log}")"
+  assert_stdout_contains "${out}" "systemd unit has no LoadState: cube-sandbox-nonexistent.service"
+  [[ ! -s "${sleep_log}" ]] || fail "check_unit_active must not sleep before failing on a unit with no LoadState"
+}
+
 test_cube_proxy_postcheck_defaults_to_http_port_80() {
   run_cube_proxy_postcheck_case \
     "CUBE_PROXY_POSTCHECK_RETRIES=1
@@ -999,6 +1114,9 @@ test_quickcheck_node_registration_succeeds_on_first_match
 test_quickcheck_node_registration_response_missing_host_ip_field
 test_quickcheck_check_socket_retries_then_succeeds
 test_quickcheck_check_http_retries_then_succeeds
+test_quickcheck_check_unit_active_dies_fast_on_failed_unit
+test_quickcheck_check_unit_active_retries_while_activating
+test_quickcheck_check_unit_active_fails_fast_on_missing_unit
 test_cube_proxy_postcheck_defaults_to_http_port_80
 test_cube_proxy_postcheck_follows_http_port
 test_cube_proxy_postcheck_ignores_https_port
