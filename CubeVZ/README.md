@@ -32,8 +32,28 @@ it is exactly one layer from macOS to the sandbox guest.
   `/cubeapi/v1` aliases used by existing clients.
 - Persistent sandbox metadata under the configured sandboxes directory. A
   server restart recovers cold/paused records and reapplies expiration policy.
+- Persistent named volumes over fixed virtiofs slots, including APFS COW
+  cloning for AgentHub's shared-files assistant state.
+- Real local OCI template builds: the requested ARM64 image root filesystem is
+  overlaid into the guest, image entrypoint/CMD/environment defaults are
+  retained, then a prepared native saved template is produced atomically.
+- Live allocation metrics and in-place egress/network-policy updates.
 - Optional static API-key or delegated callback authentication for the
-  management plane, plus scheduler forwarding for configured worker nodes.
+  management plane, plus durable local WebUI username/password sessions. The
+  initial local account is `admin`/`admin`; set
+`CUBEVZ_AGENTHUB_ADMIN_PASSWORD` before the first API start to choose a
+  different initial password. Set `--agenthub-template-id` (or
+  `CUBEVZ_AGENTHUB_OPENCLAW_TEMPLATE`) to the OCI-built template containing
+  OpenClaw when it differs from the base API template.
+- Persistent AgentHub APIs for OpenClaw agents: lifecycle, snapshots,
+  rollback/recovery, clone/publish/market templates, WeCom settings, LLM
+  settings, operation history, and gateway health. Shared-files snapshots
+  include an immutable copy of the OpenClaw virtiofs state; rollback, clone,
+  and published templates restore that state while booting a clean compatible
+  guest template. Shared-files configuration is atomically written to its
+  host-owned virtiofs volume (full snapshots use the guest data plane); a
+  template must contain the `openclaw` executable for its gateway to be
+  started and healthy.
 - Guest data-plane services: envd on port `49983`, code execution on `49999`,
   and dynamic guest-port forwarding through the vsock control channel. The
   bundled guest image exposes Python and shell execution over the same NDJSON
@@ -143,11 +163,10 @@ a saved state exists. Apple's restore format is tied to that VM configuration.
 ## Current boundary
 
 CubeVZ now provides the end-to-end native path used by the lifecycle benchmark:
-CubeAPI HTTP → APFS COW clone → `Virtualization.framework` → ARM64 Linux guest
-→ envd/exec vsock data plane. It is still not a drop-in replacement for every
-Linux CubeShim/CubeAPI feature. Metrics and in-place network-policy updates
-return an explicit `501`; template builds acknowledge a local ready job rather
-than running a remote image builder; and distributed scheduling only forwards
-to explicitly configured workers. The Linux containerd/CubeShim implementation
-is not run inside another Linux host VM—`cube-vz-api` is the native macOS
-lifecycle boundary.
+CubeAPI HTTP → APFS COW clone/virtiofs → `Virtualization.framework` → ARM64
+Linux guest → envd/exec vsock data plane. It is still not a drop-in replacement
+for every Linux CubeShim/CubeAPI deployment feature: workers must be explicitly
+configured, templates and durable volumes are local to their node, and an
+AgentHub gateway needs an OpenClaw-capable OCI template. The Linux
+containerd/CubeShim implementation is not run inside another Linux host VM—
+`cube-vz-api` is the native macOS lifecycle boundary.

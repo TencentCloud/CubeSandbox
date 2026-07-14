@@ -10,6 +10,8 @@ private let usage = """
 
   options:
     --template-id ID    CubeAPI template ID (default: cube-vz)
+    --agenthub-template-id ID
+                        Default OpenClaw-ready template used by AgentHub
     --bind-address IP   IPv4 listen address (default: 127.0.0.1)
     --port N            Loopback HTTP port (default: 3000)
     --node-id ID        Scheduler node ID (default: cube-vz-local)
@@ -45,6 +47,20 @@ private struct CubeVZAPIMain {
         sandboxesDirectory: URL(fileURLWithPath: sandboxesPath).standardizedFileURL,
         guestBuilderDirectory: guestBuilderDirectory(options["--guest-builder-dir"])
       )
+      let stateRoot = URL(fileURLWithPath: sandboxesPath).standardizedFileURL
+        .deletingLastPathComponent()
+        .appendingPathComponent("agenthub", isDirectory: true)
+      let localAuth = try LocalAuthManager(
+        directory: stateRoot,
+        initialPassword: ProcessInfo.processInfo.environment["CUBEVZ_AGENTHUB_ADMIN_PASSWORD"]
+      )
+      let agentHub = try AgentHubManager(
+        manager: manager,
+        defaultTemplateID: options["--agenthub-template-id"]
+          ?? ProcessInfo.processInfo.environment["CUBEVZ_AGENTHUB_OPENCLAW_TEMPLATE"]
+          ?? options["--template-id"] ?? "cube-vz",
+        directory: stateRoot
+      )
       let bindAddress = options["--bind-address"] ?? "127.0.0.1"
       let nodeID = options["--node-id"] ?? "cube-vz-local"
       let defaultAdvertiseAddress = bindAddress == "0.0.0.0" ? "127.0.0.1" : bindAddress
@@ -77,6 +93,8 @@ private struct CubeVZAPIMain {
         bindAddress: bindAddress,
         port: port,
         manager: manager,
+        localAuth: localAuth,
+        agentHub: agentHub,
         scheduler: scheduler,
         authCallbackURL: try parseOptionalURL(
           options["--auth-callback-url"]
@@ -118,7 +136,7 @@ private struct CubeVZAPIMain {
 
   private static func parseOptions(_ arguments: [String]) throws -> [String: String] {
     let allowed = Set([
-      "--template-dir", "--sandboxes-dir", "--template-id", "--bind-address", "--port",
+      "--template-dir", "--sandboxes-dir", "--template-id", "--agenthub-template-id", "--bind-address", "--port",
       "--node-id", "--advertise-url", "--workers", "--coordinator-url",
       "--api-key", "--auth-callback-url", "--guest-builder-dir",
     ])

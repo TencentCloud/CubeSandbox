@@ -22,6 +22,30 @@ struct CreateSandboxRequest: Decodable {
     case network, metadata, distributionScope, distribution_scope, envVars, envs, volumeMounts
   }
 
+  init(
+    templateID: String,
+    timeout: Int? = nil,
+    lifecycle: SandboxLifecycleRequest? = nil,
+    secure: Bool? = nil,
+    allowInternetAccess: Bool? = nil,
+    network: SandboxNetworkRequest? = nil,
+    metadata: [String: String]? = nil,
+    distributionScope: [String]? = nil,
+    envVars: [String: String]? = nil,
+    volumeMounts: [SandboxVolumeMountRequest]? = nil
+  ) {
+    self.templateID = templateID
+    self.timeout = timeout
+    self.lifecycle = lifecycle
+    self.secure = secure
+    allow_internet_access = allowInternetAccess
+    self.network = network
+    self.metadata = metadata
+    self.distributionScope = distributionScope
+    self.envVars = envVars
+    self.volumeMounts = volumeMounts
+  }
+
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     templateID = try container.decode(String.self, forKey: .templateID)
@@ -283,6 +307,12 @@ struct SandboxMetricsResponse: Encodable {
   let memoryMB: Int
   let diskSizeMB: Int?
   let expiresAt: String?
+}
+
+struct GuestCommandResult: Encodable {
+  let exitCode: Int
+  let stdout: String
+  let stderr: String
 }
 
 @MainActor
@@ -595,6 +625,181 @@ final class SandboxManager {
       }
     }
     throw lastError ?? CubeVZError.runtime("cannot connect to guest port \(guestPort)")
+  }
+
+  /// Writes a root-owned file through envd's authenticated in-guest file API.
+  /// AgentHub uses this to persist its OpenClaw configuration without exposing
+  /// another host-side mount or weakening the guest boundary.
+  func writeGuestFile(sandboxID: String, path: String, contents: Data) async throws {
+    guard let sandbox = sandboxes[sandboxID], sandbox.state == .running,
+      let virtualMachine = sandbox.virtualMachine
+    else {
+      throw CubeVZError.runtime("sandbox is not running: \(sandboxID)")
+    }
+    guard path.hasPrefix("/"), !path.contains("\0") else {
+      throw CubeVZError.invalidArguments("guest file path must be absolute")
+    }
+    let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
+      ?? path
+    let response = try await guestHTTPRequest(
+      virtualMachine,
+      method: "POST",
+      path: "/files?path=\(encodedPath)&username=root",
+      body: contents,
+      contentType: "application/octet-stream"
+    )
+    guard response.hasPrefix("HTTP/1.1 200") else {
+      throw CubeVZError.runtime("guest file upload failed: \(firstHTTPLine(response))")
+    }
+  }
+
+  /// Runs a bounded shell command using the same E2B data-plane execution
+  /// service exposed to SDK clients. It is intentionally scoped to an already
+  /// owned sandbox and never creates a host process.
+  func executeGuestShell(
+    sandboxID: String,
+    script: String,
+    timeoutSeconds: Int = 60
+  ) async throws -> GuestCommandResult {
+    guard let sandbox = sandboxes[sandboxID], sandbox.state == .running,
+      let virtualMachine = sandbox.virtualMachine
+    else {
+      throw CubeVZError.runtime("sandbox is not running: \(sandboxID)")
+    }
+    let payload: [String: Any] = [
+      "code": script,
+      "language": "shell",
+      "cwd": "/root",
+      "timeout": max(1, min(timeoutSeconds, 300)),
+    ]
+    let body = try JSONSerialization.data(withJSONObject: payload)
+    let response = try await guestHTTPRequest(
+      virtualMachine,
+      guestPort: 49_999,
+      method: "POST",
+      path: "/execute",
+      body: body,
+      contentType: "application/json"
+    )
+    guard response.hasPrefix("HTTP/1.1 200") else {
+      throw CubeVZError.runtime("guest command request failed: \(firstHTTPLine(response))")
+    }
+    return try Self.commandResult(from: response)
+  }
+
+  func probeGuestHTTP(sandboxID: String, port: UInt16, path: String = "/") async -> Bool {
+    guard let sandbox = sandboxes[sandboxID], sandbox.state == .running,
+      let virtualMachine = sandbox.virtualMachine
+    else { return false }
+    do {
+      if port != 49_983 && port != 49_999 {
+        let forward = try await virtualMachine.executeControlCommand("FORWARD \(port)")
+        guard forward == "OK\n" else { return false }
+      }
+      let response = try await guestHTTPRequest(
+        virtualMachine,
+        guestPort: UInt32(port),
+        method: "GET",
+        path: path,
+        body: Data(),
+        contentType: "application/json"
+      )
+      return response.hasPrefix("HTTP/1.1 2") || response.hasPrefix("HTTP/1.1 3")
+    } catch {
+      return false
+    }
+  }
+
+  /// Clone a durable named volume for a higher-level service such as AgentHub.
+  /// The host filesystem handles the copy and can preserve APFS copy-on-write
+  /// behavior for its individual files.
+  func cloneNamedVolume(sourceName: String, destinationName: String) throws {
+    try validateVolumeMounts([
+      SandboxVolumeMountRequest(name: sourceName, path: "/volume-source"),
+      SandboxVolumeMountRequest(name: destinationName, path: "/volume-destination"),
+    ])
+    let source = volumesDirectory.appendingPathComponent(sourceName, isDirectory: true)
+    let destination = volumesDirectory.appendingPathComponent(destinationName, isDirectory: true)
+    guard FileManager.default.fileExists(atPath: source.path) else {
+      throw CubeVZError.runtime("volume not found: \(sourceName)")
+    }
+    guard !FileManager.default.fileExists(atPath: destination.path) else {
+      throw CubeVZError.runtime("volume already exists: \(destinationName)")
+    }
+    try FileManager.default.copyItem(at: source, to: destination)
+  }
+
+  /// Restore a mounted named volume in place. Replacing the directory itself
+  /// would leave an active virtiofs share pointing at the old vnode, so this
+  /// deliberately replaces its children while retaining the mount root.
+  func restoreNamedVolume(snapshotName: String, destinationName: String) throws {
+    try validateVolumeMounts([
+      SandboxVolumeMountRequest(name: snapshotName, path: "/volume-source"),
+      SandboxVolumeMountRequest(name: destinationName, path: "/volume-destination"),
+    ])
+    guard snapshotName != destinationName else { return }
+    let source = volumesDirectory.appendingPathComponent(snapshotName, isDirectory: true)
+    let destination = volumesDirectory.appendingPathComponent(destinationName, isDirectory: true)
+    guard FileManager.default.fileExists(atPath: source.path) else {
+      throw CubeVZError.runtime("volume snapshot not found: \(snapshotName)")
+    }
+    try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+    let manager = FileManager.default
+    for item in try manager.contentsOfDirectory(at: destination, includingPropertiesForKeys: nil) {
+      try manager.removeItem(at: item)
+    }
+    for item in try manager.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
+      try manager.copyItem(at: item, to: destination.appendingPathComponent(item.lastPathComponent))
+    }
+  }
+
+  /// Atomically persist service-owned state in a named virtiofs volume.
+  /// Relative paths are deliberately constrained below a real (non-symlink)
+  /// directory tree so a guest cannot redirect a host-side service write.
+  func writeNamedVolumeFile(volumeName: String, relativePath: String, contents: Data) throws {
+    try validateVolumeMounts([SandboxVolumeMountRequest(name: volumeName, path: "/volume")])
+    let components = relativePath.split(separator: "/").map(String.init)
+    guard !components.isEmpty,
+      !relativePath.hasPrefix("/"),
+      !components.contains(".."),
+      !components.contains(".")
+    else {
+      throw CubeVZError.invalidArguments("volume file path must be a confined relative path")
+    }
+    let manager = FileManager.default
+    let volume = volumesDirectory.appendingPathComponent(volumeName, isDirectory: true)
+    try manager.createDirectory(at: volume, withIntermediateDirectories: true)
+    try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: volume.path)
+    var directory = volume
+    for component in components.dropLast() {
+      let next = directory.appendingPathComponent(component, isDirectory: true)
+      if manager.fileExists(atPath: next.path) {
+        let values = try next.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values.isDirectory == true, values.isSymbolicLink != true else {
+          throw CubeVZError.runtime("volume path contains a non-directory or symlink: \(component)")
+        }
+      } else {
+        try manager.createDirectory(at: next, withIntermediateDirectories: false)
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: next.path)
+      }
+      directory = next
+    }
+    let destination = directory.appendingPathComponent(components.last!)
+    if manager.fileExists(atPath: destination.path) {
+      let values = try destination.resourceValues(forKeys: [.isSymbolicLinkKey])
+      guard values.isSymbolicLink != true else {
+        throw CubeVZError.runtime("volume file path is a symlink: \(relativePath)")
+      }
+    }
+    try contents.write(to: destination, options: .atomic)
+    try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+  }
+
+  func deleteNamedVolume(_ name: String) throws {
+    try validateVolumeMounts([SandboxVolumeMountRequest(name: name, path: "/volume")])
+    let volume = volumesDirectory.appendingPathComponent(name, isDirectory: true)
+    guard FileManager.default.fileExists(atPath: volume.path) else { return }
+    try FileManager.default.removeItem(at: volume)
   }
 
   func logs(sandboxID: String, start: Int?, limit: Int) throws -> SandboxLogsResponse? {
@@ -1983,18 +2188,58 @@ final class SandboxManager {
     return lines.joined(separator: "\n") + "\n"
   }
 
+  private func firstHTTPLine(_ response: String) -> String {
+    response.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? "invalid response"
+  }
+
+  nonisolated private static func commandResult(from response: String) throws -> GuestCommandResult {
+    guard let separator = response.range(of: "\r\n\r\n") else {
+      throw CubeVZError.runtime("guest command returned malformed HTTP response")
+    }
+    let events = response[separator.upperBound...]
+    var stdout = ""
+    var stderr = ""
+    var exitCode = 0
+    for line in events.split(separator: "\n") where !line.isEmpty {
+      guard let data = String(line).data(using: .utf8),
+        let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let type = event["type"] as? String
+      else { continue }
+      switch type {
+      case "stdout":
+        stdout += event["text"] as? String ?? ""
+      case "stderr":
+        stderr += event["text"] as? String ?? ""
+      case "error":
+        let name = event["name"] as? String ?? "GuestError"
+        let value = event["value"] as? String ?? "unknown guest error"
+        if !stderr.isEmpty, !stderr.hasSuffix("\n") { stderr += "\n" }
+        stderr += "\(name): \(value)\n"
+        exitCode = max(exitCode, 1)
+      case "result":
+        if let extra = event["extra"] as? [String: Any], let code = extra["exit_code"] as? Int {
+          exitCode = code
+        }
+      default:
+        continue
+      }
+    }
+    return GuestCommandResult(exitCode: exitCode, stdout: stdout, stderr: stderr)
+  }
+
   private func guestHTTPRequest(
     _ virtualMachine: ManagedVM,
+    guestPort: UInt32 = 49_983,
     method: String,
     path: String,
     body: Data,
     contentType: String
   ) async throws -> String {
-    let connection = try await virtualMachine.connect(toGuestPort: 49_983)
+    let connection = try await virtualMachine.connect(toGuestPort: guestPort)
     return try await Task.detached(priority: .userInitiated) {
       let descriptor = connection.fileDescriptor
       let header = Data(
-        "\(method) \(path) HTTP/1.1\r\nHost: 127.0.0.1:49983\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        "\(method) \(path) HTTP/1.1\r\nHost: 127.0.0.1:\(guestPort)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
           .utf8
       )
       try Self.writeAll(header + body, to: descriptor)

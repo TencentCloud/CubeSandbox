@@ -154,6 +154,8 @@ final class HTTPServer: @unchecked Sendable {
   private let bindAddress: String
   private let port: UInt16
   private let manager: SandboxManager
+  private let localAuth: LocalAuthManager
+  private let agentHub: AgentHubManager
   private let scheduler: ClusterScheduler
   private let authCallbackURL: URL?
   private let apiKey: String?
@@ -168,6 +170,8 @@ final class HTTPServer: @unchecked Sendable {
     bindAddress: String,
     port: UInt16,
     manager: SandboxManager,
+    localAuth: LocalAuthManager,
+    agentHub: AgentHubManager,
     scheduler: ClusterScheduler,
     authCallbackURL: URL? = nil,
     apiKey: String? = nil
@@ -175,6 +179,8 @@ final class HTTPServer: @unchecked Sendable {
     self.bindAddress = bindAddress
     self.port = port
     self.manager = manager
+    self.localAuth = localAuth
+    self.agentHub = agentHub
     self.scheduler = scheduler
     self.authCallbackURL = authCallbackURL
     self.apiKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
@@ -618,25 +624,185 @@ final class HTTPServer: @unchecked Sendable {
             let body = try JSONSerialization.data(withJSONObject: ["status": "ok"])
             send(status: 200, body: body, to: client)
 
+          case ("GET", "/agenthub/instances"):
+            send(status: 200, body: try JSONEncoder().encode(agentHub.listInstances()), to: client)
+
+          case ("POST", "/agenthub/instances"):
+            let body = try decode(CreateAgentInstanceRequest.self, from: request.body)
+            let response = try await agentHub.createInstance(body)
+            send(status: 201, body: try JSONEncoder().encode(response), to: client)
+
+          case ("DELETE", let path) where Self.agentInstanceID(from: path) != nil:
+            let agentID = Self.agentInstanceID(from: path)!
+            if try await agentHub.deleteInstance(agentID: agentID) {
+              send(status: 204, body: Data(), to: client)
+            } else {
+              sendError(status: 404, message: "AgentHub instance not found", to: client)
+            }
+
+          case ("POST", let path) where Self.agentInstanceID(from: path, suffix: ["restart"]) != nil:
+            let response = try await agentHub.restart(agentID: Self.agentInstanceID(from: path, suffix: ["restart"])!)
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("POST", let path) where Self.agentInstanceID(from: path, suffix: ["pause"]) != nil:
+            let agentID = Self.agentInstanceID(from: path, suffix: ["pause"])!
+            if let response = try await agentHub.pause(agentID: agentID) {
+              send(status: 200, body: try JSONEncoder().encode(response), to: client)
+            } else {
+              sendError(status: 404, message: "AgentHub instance not found", to: client)
+            }
+
+          case ("POST", let path) where Self.agentInstanceID(from: path, suffix: ["resume"]) != nil:
+            let agentID = Self.agentInstanceID(from: path, suffix: ["resume"])!
+            if let response = try await agentHub.resume(agentID: agentID) {
+              send(status: 200, body: try JSONEncoder().encode(response), to: client)
+            } else {
+              sendError(status: 404, message: "AgentHub instance not found", to: client)
+            }
+
+          case ("POST", let path) where Self.agentInstanceID(from: path, suffix: ["upgrade"]) != nil:
+            let response = try await agentHub.upgrade(agentID: Self.agentInstanceID(from: path, suffix: ["upgrade"])!)
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("PUT", let path) where Self.agentInstanceID(from: path, suffix: ["model"]) != nil:
+            let body = try decode(UpdateAgentModelRequest.self, from: request.body)
+            let response = try await agentHub.updateModel(
+              agentID: Self.agentInstanceID(from: path, suffix: ["model"])!,
+              request: body
+            )
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("PUT", let path) where Self.agentInstanceID(from: path, suffix: ["wecom"]) != nil:
+            let body = try decode(UpdateWeComConfigRequest.self, from: request.body)
+            let response = try await agentHub.updateWeCom(
+              agentID: Self.agentInstanceID(from: path, suffix: ["wecom"])!,
+              request: body
+            )
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("GET", let path) where Self.agentInstanceID(from: path, suffix: ["wecom"]) != nil:
+            let response = try agentHub.wecomConfig(
+              agentID: Self.agentInstanceID(from: path, suffix: ["wecom"])!
+            )
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("GET", let path) where Self.agentInstanceID(from: path, suffix: ["gateway", "health"]) != nil:
+            let response = try await agentHub.gatewayHealth(
+              agentID: Self.agentInstanceID(from: path, suffix: ["gateway", "health"])!
+            )
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("GET", let path) where Self.agentInstanceID(from: path, suffix: ["operations"]) != nil:
+            let response = try agentHub.listOperations(
+              agentID: Self.agentInstanceID(from: path, suffix: ["operations"])!
+            )
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("GET", let path) where Self.agentInstanceID(from: path, suffix: ["snapshots"]) != nil:
+            let response = try agentHub.listSnapshots(
+              agentID: Self.agentInstanceID(from: path, suffix: ["snapshots"])!
+            )
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("POST", let path) where Self.agentInstanceID(from: path, suffix: ["snapshots"]) != nil:
+            let body = try decode(CreateAgentSnapshotRequest.self, from: request.body)
+            let response = try await agentHub.createSnapshot(
+              agentID: Self.agentInstanceID(from: path, suffix: ["snapshots"])!, request: body
+            )
+            send(status: 201, body: try JSONEncoder().encode(response), to: client)
+
+          case ("DELETE", let path) where Self.agentSnapshotPath(from: path) != nil:
+            let location = Self.agentSnapshotPath(from: path)!
+            if try agentHub.deleteSnapshot(agentID: location.agentID, snapshotID: location.snapshotID) {
+              send(status: 204, body: Data(), to: client)
+            } else {
+              sendError(status: 404, message: "AgentHub snapshot not found", to: client)
+            }
+
+          case ("PATCH", let path) where Self.agentSnapshotPath(from: path) != nil:
+            let location = Self.agentSnapshotPath(from: path)!
+            let body = try decode(UpdateAgentSnapshotRequest.self, from: request.body)
+            if try agentHub.updateSnapshot(agentID: location.agentID, snapshotID: location.snapshotID, request: body) {
+              send(status: 204, body: Data(), to: client)
+            } else {
+              sendError(status: 404, message: "AgentHub snapshot not found", to: client)
+            }
+
+          case ("POST", let path) where Self.agentInstanceID(from: path, suffix: ["rollback"]) != nil:
+            let body = try decode(RollbackAgentRequest.self, from: request.body)
+            let response = try await agentHub.rollback(
+              agentID: Self.agentInstanceID(from: path, suffix: ["rollback"])!, request: body
+            )
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("POST", let path) where Self.agentInstanceID(from: path, suffix: ["recover"]) != nil:
+            let response = try await agentHub.recover(
+              agentID: Self.agentInstanceID(from: path, suffix: ["recover"])!
+            )
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("POST", let path) where Self.agentInstanceID(from: path, suffix: ["clone"]) != nil:
+            let body = try decode(CloneAgentRequest.self, from: request.body)
+            let response = try await agentHub.clone(
+              agentID: Self.agentInstanceID(from: path, suffix: ["clone"])!, request: body
+            )
+            send(status: 201, body: try JSONEncoder().encode(response), to: client)
+
+          case ("POST", let path) where Self.agentInstanceID(from: path, suffix: ["publish-template"]) != nil:
+            let body = try decode(PublishAgentTemplateRequest.self, from: request.body)
+            let response = try await agentHub.publishTemplate(
+              agentID: Self.agentInstanceID(from: path, suffix: ["publish-template"])!, request: body
+            )
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("GET", "/agenthub/templates"):
+            send(status: 200, body: try JSONEncoder().encode(agentHub.listTemplates()), to: client)
+
+          case ("POST", "/agenthub/templates/market"):
+            let body = try decode(RegisterMarketAgentTemplateRequest.self, from: request.body)
+            let response = try agentHub.registerMarketTemplate(body)
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
+          case ("PATCH", let path) where Self.agentTemplateID(from: path) != nil:
+            let body = try decode(UpdateAgentTemplateRequest.self, from: request.body)
+            if try agentHub.updateTemplate(templateID: Self.agentTemplateID(from: path)!, request: body) {
+              send(status: 204, body: Data(), to: client)
+            } else {
+              sendError(status: 404, message: "AgentHub template not found", to: client)
+            }
+
+          case ("DELETE", let path) where Self.agentTemplateID(from: path) != nil:
+            if try agentHub.deleteTemplate(templateID: Self.agentTemplateID(from: path)!) {
+              send(status: 204, body: Data(), to: client)
+            } else {
+              sendError(status: 404, message: "AgentHub template not found", to: client)
+            }
+
+          case ("GET", "/agenthub/settings"):
+            send(status: 200, body: try JSONEncoder().encode(agentHub.settings()), to: client)
+
+          case ("PUT", "/agenthub/settings"):
+            let body = try decode(UpdateAgentSettingsRequest.self, from: request.body)
+            let response = try await agentHub.updateSettings(body)
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
+
           case ("GET", "/auth/session"):
-            let authRequired = authCallbackURL != nil || apiKey != nil
-            let hasCredential = request.headers["authorization"] != nil
-              || request.headers["x-api-key"] != nil
-              || request.headers["cube-api-key"] != nil
-            let body = try JSONSerialization.data(withJSONObject: [
-              "authRequired": authRequired,
-              "authenticated": !authRequired || hasCredential,
-            ])
-            send(status: 200, body: body, to: client)
+            let response = localAuth.session(token: request.headers["x-session-token"])
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
 
           case ("POST", "/auth/logout"):
+            localAuth.logout(token: request.headers["x-session-token"])
             send(status: 204, body: Data(), to: client)
 
           case ("POST", "/auth/login"):
-            sendError(status: 501, message: "CubeVZ uses API-key or callback authentication", to: client)
+            let login = try decode(LoginRequest.self, from: request.body)
+            let response = try localAuth.login(login)
+            send(status: 200, body: try JSONEncoder().encode(response), to: client)
 
           case ("POST", "/auth/change-password"):
-            sendError(status: 501, message: "password authentication is not configured", to: client)
+            let change = try decode(ChangePasswordRequest.self, from: request.body)
+            try localAuth.changePassword(change)
+            send(status: 204, body: Data(), to: client)
 
           default:
             sendError(status: 404, message: "route not found", to: client)
@@ -719,6 +885,31 @@ final class HTTPServer: @unchecked Sendable {
     return String(components[2])
   }
 
+  private static func agentInstanceID(from path: String, suffix: [String] = []) -> String? {
+    let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+    guard components.count == 3 + suffix.count,
+      components.prefix(2) == ["agenthub", "instances"],
+      components.dropFirst(3).elementsEqual(suffix), !components[2].isEmpty
+    else { return nil }
+    return components[2]
+  }
+
+  private static func agentSnapshotPath(from path: String) -> (agentID: String, snapshotID: String)? {
+    let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+    guard components.count == 5, components[0] == "agenthub", components[1] == "instances",
+      components[3] == "snapshots", !components[2].isEmpty, !components[4].isEmpty
+    else { return nil }
+    return (components[2], components[4])
+  }
+
+  private static func agentTemplateID(from path: String) -> String? {
+    let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+    guard components.count == 3, components[0] == "agenthub", components[1] == "templates",
+      components[2] != "market", !components[2].isEmpty
+    else { return nil }
+    return components[2]
+  }
+
   private static func anySandboxID(from path: String) -> String? {
     let components = path.split(separator: "/", omittingEmptySubsequences: true)
     if components.count >= 2, components[0] == "sandboxes" {
@@ -734,12 +925,26 @@ final class HTTPServer: @unchecked Sendable {
     try JSONDecoder().decode(type, from: body.isEmpty ? Data("{}".utf8) : body)
   }
 
+  @MainActor
   private func authorize(_ request: HTTPRequest) async throws {
     let routePath = Self.apiRoutePath(request.routePath)
     // Health is intentionally public, matching CubeAPI's unauthenticated
     // health probe. Data-plane requests are handled before this method and
     // are authenticated by the per-sandbox traffic token instead.
     if routePath == "/health" || routePath.hasPrefix("/auth/") { return }
+
+    // AgentHub is the local WebUI control plane. Unlike the CubeAPI SDK
+    // surface (which remains usable without a local password), it must carry
+    // a durable browser session unless a configured management credential is
+    // presented below.
+    if routePath.hasPrefix("/agenthub/") {
+      if localAuth.session(token: request.headers["x-session-token"]).authenticated {
+        return
+      }
+      if apiKey == nil && authCallbackURL == nil {
+        throw RequestError.authorizationRequired
+      }
+    }
     guard apiKey != nil || authCallbackURL != nil else { return }
 
     let authorization = request.headers["authorization"]

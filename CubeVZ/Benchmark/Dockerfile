@@ -89,6 +89,12 @@ RUN cc -static -O2 -Wall -Wextra -Werror -pthread \
     printf 'user:x:1000:\n' >> /rootfs/etc/group && \
     printf 'cube-proxy:x:8049:8049:CubeVZ Egress:/nonexistent:/sbin/nologin\n' >> /rootfs/etc/passwd && \
     printf 'cube-proxy:x:8049:\n' >> /rootfs/etc/group && \
+    if ! grep -q '^dnsmasq:' /rootfs/etc/passwd; then \
+      printf 'dnsmasq:x:453:453:dnsmasq:/var/empty:/sbin/nologin\n' >> /rootfs/etc/passwd; \
+    fi && \
+    if ! grep -q '^dnsmasq:' /rootfs/etc/group; then \
+      printf 'dnsmasq:x:453:\n' >> /rootfs/etc/group; \
+    fi && \
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
       -sha256 -days 3650 -nodes -batch -subj '/CN=CubeVZ Local Egress CA' \
       -keyout /rootfs/etc/cube-vz/egress-ca.key \
