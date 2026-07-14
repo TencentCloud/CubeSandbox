@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql" // database/sql driver
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/pressly/goose/v3/lock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/dao"
 	gormmysql "gorm.io/driver/mysql"
@@ -78,7 +78,9 @@ func (d *driver) SessionLocker(cfg dao.Config) lock.SessionLocker {
 }
 
 // buildDSN keeps DSN composition local to the driver so callers never
-// hand-craft format strings (and so we control charset / parseTime / loc).
+// hand-craft format strings. Uses go-sql-driver's Config.FormatDSN so
+// user/password/dbname with special characters (@ : / ? % space …) round-trip
+// through ParseDSN without silent truncation.
 func buildDSN(cfg dao.Config) string {
 	connTimeout := cfg.ConnTimeoutSeconds
 	if connTimeout <= 0 {
@@ -92,11 +94,20 @@ func buildDSN(cfg dao.Config) string {
 	if writeTimeout <= 0 {
 		writeTimeout = 5
 	}
-	return fmt.Sprintf(
-		"%s:%s@tcp(%s)/%s?charset=utf8&parseTime=true&loc=Local&timeout=%ds&readTimeout=%ds&writeTimeout=%ds",
-		cfg.User, cfg.Pwd, cfg.Addr, cfg.DBName,
-		connTimeout, readTimeout, writeTimeout,
-	)
+
+	mc := mysqldriver.NewConfig()
+	mc.User = cfg.User
+	mc.Passwd = cfg.Pwd
+	mc.Net = "tcp"
+	mc.Addr = cfg.Addr
+	mc.DBName = cfg.DBName
+	mc.Timeout = time.Duration(connTimeout) * time.Second
+	mc.ReadTimeout = time.Duration(readTimeout) * time.Second
+	mc.WriteTimeout = time.Duration(writeTimeout) * time.Second
+	mc.ParseTime = true
+	mc.Loc = time.Local
+	mc.Params = map[string]string{"charset": "utf8"}
+	return mc.FormatDSN()
 }
 
 // sessionLocker implements goose.SessionLocker on top of MySQL's

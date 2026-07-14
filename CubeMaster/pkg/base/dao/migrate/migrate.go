@@ -2,21 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package migrate runs version-controlled schema migrations against the
-// shared CubeMaster database. It wraps github.com/pressly/goose/v3 with
-// two extras the design calls out:
-//
-//  1. An outer cluster-wide lock — the lock.SessionLocker handed in by the
-//     driver — that serialises whole goose.Up() runs across instances.
-//
-//  2. An inner per-file lock asserted from inside every .sql migration via
-//     a CALL cubemaster_acquire_migration_lock(name, timeout) at the top
-//     and a SELECT RELEASE_LOCK at the bottom. The helper procedure is
-//     defined once in the baseline migration; it SIGNALs SQLSTATE 45000
-//     when GET_LOCK times out or returns NULL so goose aborts cleanly.
-//
-// New engines plug in by adding a sibling migrations/<dialect>/ folder
-// and an entry in dialectSpecs below.
+// Package migrate wraps goose with (1) a driver SessionLocker for whole Up
+// runs and (2) per-file locks inside SQL (baseline helper). New engines add
+// migrations/<dialect>/ and an entry in dialectSpecs.
 package migrate
 
 import (
@@ -35,50 +23,49 @@ import (
 //go:embed migrations/mysql/*.sql
 var mysqlMigrations embed.FS
 
-// dialectSpec wires a goose dialect to its embedded migrations FS.
+//go:embed migrations/postgres/*.sql
+var postgresMigrations embed.FS
+
+// nil store disables the fingerprint defence layer for that dialect.
 type dialectSpec struct {
 	dialect database.Dialect
 	rootFS  fs.FS
 	subdir  string
-	// fingerprints enables the content-fingerprint defence layer. The
-	// fingerprint store SQL is MySQL-specific (ON DUPLICATE KEY UPDATE,
-	// information_schema, ENGINE=InnoDB), so a future dialect must provide its
-	// own implementation before flipping this on.
-	fingerprints bool
+	store   fingerprintStore
 }
 
 var dialectSpecs = map[string]dialectSpec{
 	"mysql": {
-		dialect:      database.DialectMySQL,
-		rootFS:       mysqlMigrations,
-		subdir:       "migrations/mysql",
-		fingerprints: true,
+		dialect: database.DialectMySQL,
+		rootFS:  mysqlMigrations,
+		subdir:  "migrations/mysql",
+		store:   &mysqlFingerprintStore{},
+	},
+	"postgres": {
+		dialect: database.DialectPostgres,
+		rootFS:  postgresMigrations,
+		subdir:  "migrations/postgres",
+		store:   &postgresFingerprintStore{},
 	},
 }
 
-// newProvider creates a goose Provider wired with this package's conventions:
-// verbose logging and allow-out-of-order for timestamped migrations.
 func newProvider(
 	dialect string,
 	sqlDB *sql.DB,
 	locker lock.SessionLocker,
-) (*goose.Provider, fs.FS, bool, error) {
+) (*goose.Provider, fs.FS, fingerprintStore, error) {
 	spec, ok := dialectSpecs[dialect]
 	if !ok {
-		return nil, nil, false, fmt.Errorf("migrate: unknown dialect %q", dialect)
+		return nil, nil, nil, fmt.Errorf("migrate: unknown dialect %q", dialect)
 	}
 	subFS, err := fs.Sub(spec.rootFS, spec.subdir)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("migrate: fs.Sub %q: %w", spec.subdir, err)
+		return nil, nil, nil, fmt.Errorf("migrate: fs.Sub %q: %w", spec.subdir, err)
 	}
 	opts := []goose.ProviderOption{
 		goose.WithVerbose(true),
-		// New migrations use immutable, globally-unique UTC-timestamp version
-		// numbers (see migrations/<dialect>/README.md), so a migration authored
-		// earlier but merged later can legitimately have a version lower than an
-		// environment's current max. Allow goose to apply such out-of-order
-		// migrations instead of hard-failing startup. Safe because every
-		// migration is written idempotently via the *_if_missing helpers.
+		// Timestamp versions can land out of numeric order after merge;
+		// migrations are idempotent via *_if_missing.
 		goose.WithAllowOutofOrder(true),
 	}
 	if locker != nil {
@@ -86,62 +73,40 @@ func newProvider(
 	}
 	provider, err := goose.NewProvider(spec.dialect, sqlDB, subFS, opts...)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("migrate: new provider: %w", err)
+		return nil, nil, nil, fmt.Errorf("migrate: new provider: %w", err)
 	}
-	return provider, subFS, spec.fingerprints, nil
+	return provider, subFS, spec.store, nil
 }
 
-// Run applies every pending migration for the given dialect. The caller
-// is responsible for opening sqlDB; this function never closes it.
-//
-// Run is idempotent: if the database is already at HEAD it returns nil
-// without touching the schema, so it is safe to call on every process
-// start.
-//
-// When locker is non-nil, the goose Provider takes a cluster-wide lock
-// for the duration of the run (outer layer). Per-file inner locks are
-// asserted by the SQL migrations themselves via the helper procedure
-// established in the baseline migration.
+// Run applies pending migrations. Caller owns sqlDB. Idempotent at HEAD.
 func Run(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.SessionLocker) error {
-	provider, subFS, fpEnabled, err := newProvider(dialect, sqlDB, locker)
+	provider, subFS, fpStore, err := newProvider(dialect, sqlDB, locker)
 	if err != nil {
 		return err
 	}
 
-	// Defence layer (MySQL only): detect (and loudly reject) the case where an
-	// already-applied migration version's content changed on disk, which goose
-	// would otherwise skip silently. Must run before goose.Up.
-	//
-	// Note: the preflight reads goose_db_version / the fingerprint table WITHOUT
-	// holding goose's session lock (goose only takes it inside provider.Up). A
-	// concurrent instance's Up()/DownTo() could therefore move the bookkeeping
-	// between our read and goose's run. This is safe: InnoDB MVCC prevents dirty
-	// reads, and the worst case is a false-positive (startup blocked), never a
-	// false-negative (silent pass). Concurrent DownTo is an operator-only path.
+	// Preflight runs without goose's session lock; false-positive startup
+	// fail is OK, silent false-negative is not.
 	var fsFP map[int64]fileFingerprint
-	if fpEnabled {
+	if fpStore != nil {
 		fsFP, err = collectFSFingerprints(subFS)
 		if err != nil {
 			return fmt.Errorf("migrate: collect migration fingerprints: %w", err)
 		}
-		if err := ensureFingerprintTable(ctx, sqlDB); err != nil {
+		if err := fpStore.EnsureTable(ctx, sqlDB); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
-		if err := preflightFingerprints(ctx, sqlDB, fsFP); err != nil {
+		if err := preflightFingerprints(ctx, sqlDB, fsFP, fpStore); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
 
 	results, upErr := provider.Up(ctx)
-	// Record fingerprints for everything that actually applied — even on partial
-	// failure — so a fixed re-deploy never leaves an applied version
-	// unfingerprinted (which would reopen the silent-skip gap).
-	if fpEnabled {
-		recErr := recordFingerprints(ctx, sqlDB, fsFP, appliedResults(results, upErr))
+	// Record even on partial Up failure so applied versions are not left unfingerprinted.
+	if fpStore != nil {
+		recErr := recordFingerprints(ctx, sqlDB, fsFP, appliedResults(results, upErr), fpStore)
 		if recErr != nil {
 			if upErr != nil {
-				// Both goose and fingerprinting failed: surface both so the
-				// operator sees the fingerprint gap alongside the goose error.
 				return fmt.Errorf("migrate: goose up: %w; fingerprint recording: %w", upErr, recErr)
 			}
 			return fmt.Errorf("migrate: %w", recErr)
@@ -153,10 +118,7 @@ func Run(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.Session
 	return nil
 }
 
-// appliedResults returns the migrations goose actually applied. On partial
-// failure goose returns (nil, *PartialError) with the successfully-applied
-// migrations in PartialError.Applied rather than in the results slice, so we
-// must unwrap it to avoid losing fingerprints for the migrations that did run.
+// On PartialError, goose puts successful applies in PartialError.Applied, not results.
 func appliedResults(results []*goose.MigrationResult, upErr error) []*goose.MigrationResult {
 	var pErr *goose.PartialError
 	if errors.As(upErr, &pErr) {
@@ -165,9 +127,7 @@ func appliedResults(results []*goose.MigrationResult, upErr error) []*goose.Migr
 	return results
 }
 
-// DownTo rolls back migrations to (and including) the given version. It
-// is intended for tests and emergency operator use; production startup
-// only ever calls Run.
+// DownTo is for tests and emergency operator use; production startup only calls Run.
 func DownTo(ctx context.Context, sqlDB *sql.DB, dialect string, locker lock.SessionLocker, version int64) error {
 	provider, _, _, err := newProvider(dialect, sqlDB, locker)
 	if err != nil {

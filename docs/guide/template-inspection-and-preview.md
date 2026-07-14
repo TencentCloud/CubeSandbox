@@ -27,19 +27,21 @@ In practice:
 Basic metadata:
 
 ```bash
-cubemastercli tpl info --template-id <template-id>
+cubemastercli tpl info <template-id>
 ```
+
+The template ID can be passed as a positional argument (docker/kubectl style) or with `--template-id`; both forms are equivalent.
 
 Raw JSON output:
 
 ```bash
-cubemastercli tpl info --template-id <template-id> --json
+cubemastercli tpl info <template-id> --json
 ```
 
 Include the stored request body:
 
 ```bash
-cubemastercli tpl info --template-id <template-id> --json --include-request
+cubemastercli tpl info <template-id> --json --include-request
 ```
 
 Typical response shape:
@@ -142,13 +144,13 @@ When you only have a `template_id` and want to understand what sandbox creation 
 1. Check template status and replicas.
 
 ```bash
-cubemastercli tpl info --template-id <template-id>
+cubemastercli tpl info <template-id>
 ```
 
 2. If you need to know what the template itself stores, inspect `create_request`.
 
 ```bash
-cubemastercli tpl info --template-id <template-id> --json --include-request
+cubemastercli tpl info <template-id> --json --include-request
 ```
 
 3. Preview the effective request that would be used right now.

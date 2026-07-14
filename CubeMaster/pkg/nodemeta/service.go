@@ -135,9 +135,16 @@ type NodeSnapshot struct {
 	ReportedReady       bool                   `json:"-"`
 	Healthy             bool                   `json:"healthy"`
 	UnhealthyReason     string                 `json:"unhealthy_reason,omitempty"`
+	// SchedulingDisabled is the API-facing cordon view derived from the
+	// reserved label (or labels_json corruption). Not omitempty so enabled
+	// (false) remains distinguishable from older servers.
+	SchedulingDisabled bool `json:"scheduling_disabled"`
 	// versionsHash is the content hash of Versions, used to skip redundant DB
 	// writes on every heartbeat. Not serialised to JSON.
 	versionsHash string
+	// labelsJSONCorrupt marks that labels_json failed to parse; scheduling is
+	// fail-closed. Not serialised.
+	labelsJSONCorrupt bool
 }
 
 type service struct {
@@ -156,6 +163,11 @@ type service struct {
 	// node so concurrent heartbeats cannot race each other and issue redundant
 	// version writes or overwrite a newer in-memory hash with an older one.
 	versionWriteLocks sync.Map
+
+	// labelWriteLocks serialises label read-modify-write (register merge,
+	// admin labels, isolation) per node so DB commit and in-memory/localcache
+	// publication stay ordered.
+	labelWriteLocks sync.Map
 }
 
 var global = &service{
@@ -199,6 +211,10 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 	if req.HostIP == "" {
 		req.HostIP = req.NodeID
 	}
+	if _, ok := req.Labels[constants.LabelSchedulingDisabled]; ok {
+		log.G(ctx).Warnf("cubelet attempted to set scheduling-disabled label node_id=%s", req.NodeID)
+		return nil, ErrSchedulingLabelRejected
+	}
 	reg := &models.NodeRegistration{
 		NodeID:              req.NodeID,
 		HostIP:              req.HostIP,
@@ -212,9 +228,13 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 		CreateConcurrentNum: req.CreateConcurrentNum,
 		MaxMvmNum:           req.MaxMvmNum,
 	}
-	// Read existing labels from DB, merge cubelet labels (cubelet wins on conflict),
-	// then write back the merged result. Use SELECT ... FOR UPDATE inside a
-	// transaction to prevent concurrent admin label writes from being lost.
+	// Read existing labels from DB, merge cubelet labels (cubelet wins on
+	// conflict for user keys), preserve the control-plane scheduling-disabled
+	// key, then write back. Use SELECT ... FOR UPDATE inside a transaction
+	// under the per-node label write lock.
+	unlock := global.lockNodeLabels(req.NodeID)
+	defer unlock()
+
 	var mergedLabels map[string]string
 	if err := global.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.OnConflict{
@@ -231,11 +251,9 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 		if err != nil {
 			return err
 		}
-		for k, v := range req.Labels {
-			existing[k] = v
-		}
-		if len(existing) > maxLabelsPerNode {
-			return fmt.Errorf("a node cannot have more than %d labels, got %d after merge", maxLabelsPerNode, len(existing))
+		existing = stripAndPreserveSchedulingLabel(existing, req.Labels)
+		if countUserLabels(existing) > maxLabelsPerNode {
+			return fmt.Errorf("a node cannot have more than %d labels, got %d after merge", maxLabelsPerNode, countUserLabels(existing))
 		}
 		if err := tx.Table(constants.NodeMetaRegistrationTable).
 			Where("node_id = ?", req.NodeID).
@@ -254,6 +272,7 @@ func RegisterNode(ctx context.Context, req *RegisterNodeRequest) (*NodeSnapshot,
 	snap.HostIP = req.HostIP
 	snap.GRPCPort = req.GRPCPort
 	snap.Labels = cloneStringMap(mergedLabels)
+	snap.labelsJSONCorrupt = false
 	snap.Capacity = req.Capacity
 	snap.Allocatable = req.Allocatable
 	snap.InstanceType = req.InstanceType
@@ -561,6 +580,9 @@ func UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]stri
 	if err := validateNodeLabels(labels); err != nil {
 		return err
 	}
+	unlock := global.lockNodeLabels(nodeID)
+	defer unlock()
+
 	var nodeLabels map[string]string
 	if err := global.db.Transaction(func(tx *gorm.DB) error {
 		existing, err := readLabelsJSONForUpdate(tx, nodeID)
@@ -570,8 +592,8 @@ func UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]stri
 		for k, v := range labels {
 			existing[k] = v
 		}
-		if len(existing) > maxLabelsPerNode {
-			return fmt.Errorf("a node cannot have more than %d labels, got %d after merge", maxLabelsPerNode, len(existing))
+		if countUserLabels(existing) > maxLabelsPerNode {
+			return fmt.Errorf("a node cannot have more than %d labels, got %d after merge", maxLabelsPerNode, countUserLabels(existing))
 		}
 		if err := tx.Table(constants.NodeMetaRegistrationTable).
 			Where("node_id = ?", nodeID).
@@ -590,6 +612,7 @@ func UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]stri
 	snap := global.ensureNode(nodeID)
 	global.mu.Lock()
 	snap.Labels = cloneStringMap(nodeLabels)
+	snap.labelsJSONCorrupt = false
 	global.mu.Unlock()
 	syncLocalcache(snap)
 	return nil
@@ -602,6 +625,9 @@ func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
 	if err := validateNodeLabelKey(key); err != nil {
 		return err
 	}
+	unlock := global.lockNodeLabels(nodeID)
+	defer unlock()
+
 	var nodeLabels map[string]string
 	if err := global.db.Transaction(func(tx *gorm.DB) error {
 		existing, err := readLabelsJSONForUpdate(tx, nodeID)
@@ -625,14 +651,15 @@ func DeleteNodeLabel(ctx context.Context, nodeID, key string) error {
 	snap := global.ensureNode(nodeID)
 	global.mu.Lock()
 	snap.Labels = cloneStringMap(nodeLabels)
+	snap.labelsJSONCorrupt = false
 	global.mu.Unlock()
 	syncLocalcache(snap)
 	return nil
 }
 
-// readLabelsJSONForUpdate reads the labels_json column with a row-level lock
-// (SELECT ... FOR UPDATE) inside an ongoing transaction, preventing concurrent
-// read-modify-write races on the same node's labels.
+// readLabelsJSONForUpdate reads labels_json with SELECT ... FOR UPDATE.
+// Corrupt JSON returns ErrLabelsJSONCorrupt (fail-closed for all label writers:
+// register merge, admin labels, and isolation).
 func readLabelsJSONForUpdate(tx *gorm.DB, nodeID string) (map[string]string, error) {
 	var reg models.NodeRegistration
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -641,7 +668,11 @@ func readLabelsJSONForUpdate(tx *gorm.DB, nodeID string) (map[string]string, err
 		Take(&reg).Error; err != nil {
 		return nil, err
 	}
-	return parseLabelsJSON(reg.LabelsJSON)
+	labels, err := parseLabelsJSON(reg.LabelsJSON)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrLabelsJSONCorrupt, err)
+	}
+	return labels, nil
 }
 
 func parseLabelsJSON(raw string) (map[string]string, error) {
@@ -805,7 +836,14 @@ func (s *service) reload() error {
 			CreateConcurrentNum: reg.CreateConcurrentNum,
 			MaxMvmNum:           reg.MaxMvmNum,
 		}
-		_ = json.Unmarshal([]byte(reg.LabelsJSON), &snap.Labels)
+		labels, err := parseLabelsJSON(reg.LabelsJSON)
+		if err != nil {
+			log.G(context.Background()).Warnf("node labels_json corrupt node_id=%s err=%v; scheduling fail-closed", reg.NodeID, err)
+			snap.Labels = map[string]string{}
+			snap.labelsJSONCorrupt = true
+		} else {
+			snap.Labels = labels
+		}
 		_ = json.Unmarshal([]byte(reg.CapacityJSON), &snap.Capacity)
 		_ = json.Unmarshal([]byte(reg.AllocatableJSON), &snap.Allocatable)
 		next[reg.NodeID] = snap
@@ -849,21 +887,19 @@ func (s *service) reload() error {
 }
 
 // applyReloadResult merges a DB snapshot (next) into the live in-memory map.
-// Registration fields and versions always take the DB value; status/heartbeat
-// fields keep the in-memory value when it is fresher than the DB snapshot.
+// Registration fields take the DB value (same eventual-consistency trade-off as
+// other labels). Status/heartbeat keep in-memory when fresher. After unlocking,
+// nodes whose cordon state changed are synced to localcache.
 func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
+	toSync := make([]*NodeSnapshot, 0)
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for nodeID, newSnap := range next {
 		if existing, ok := s.nodes[nodeID]; ok {
-			// Registration fields: take from DB.  A theoretical race exists
-			// where the reload() DB scan captures a row before a concurrent
-			// RegisterNode write commits, causing applyReloadResult to
-			// overwrite a fresher in-memory value with a stale DB snapshot.
-			// This is an accepted trade-off: registration field changes are
-			// rare, and any inconsistency self-corrects on the next reload
-			// cycle (≤ SyncMetaDataInterval).
+			prevDisabled := snapshotSchedulingDisabled(existing)
+
 			existing.Labels = cloneStringMap(newSnap.Labels)
+			existing.labelsJSONCorrupt = newSnap.labelsJSONCorrupt
 			existing.Capacity = newSnap.Capacity
 			existing.Allocatable = newSnap.Allocatable
 			existing.InstanceType = newSnap.InstanceType
@@ -876,8 +912,6 @@ func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
 			existing.GRPCPort = newSnap.GRPCPort
 			existing.Versions = append([]ComponentVersion(nil), newSnap.Versions...)
 			existing.versionsHash = newSnap.versionsHash
-			// Status fields: keep in-memory version if fresher to avoid
-			// regressing heartbeat state that arrived during the DB scan.
 			if newSnap.HeartbeatTime.After(existing.HeartbeatTime) {
 				existing.Conditions = newSnap.Conditions
 				existing.Images = newSnap.Images
@@ -886,10 +920,21 @@ func (s *service) applyReloadResult(next map[string]*NodeSnapshot) {
 				existing.ReportedReady = newSnap.ReportedReady
 			}
 			applyCurrentHealth(existing, time.Now())
+
+			if prevDisabled != snapshotSchedulingDisabled(existing) {
+				toSync = append(toSync, cloneSnapshot(existing))
+			}
 		} else {
-			// New node discovered from DB (registered on another replica).
 			s.nodes[nodeID] = newSnap
 		}
+	}
+	s.mu.Unlock()
+
+	if !s.ready {
+		return
+	}
+	for _, snap := range toSync {
+		syncLocalcache(snap)
 	}
 }
 
@@ -961,7 +1006,7 @@ func toSchedulerNode(snap *NodeSnapshot) *node.Node {
 	if instanceType == "" {
 		instanceType = constants.DefaultInstanceTypeName
 	}
-	return &node.Node{
+	n := &node.Node{
 		InsID:               snap.NodeID,
 		UUID:                snap.NodeID,
 		IP:                  hostIP,
@@ -988,6 +1033,8 @@ func toSchedulerNode(snap *NodeSnapshot) *node.Node {
 		// correctly be excluded by the timeout filter until cubelet
 		// reports usage.
 	}
+	n.SetSchedulingDisabled(snapshotSchedulingDisabled(snap))
+	return n
 }
 
 func syncLocalcache(snap *NodeSnapshot) {
@@ -1019,6 +1066,7 @@ func cloneSnapshot(in *NodeSnapshot) *NodeSnapshot {
 	out.Images = append([]ContainerImage(nil), in.Images...)
 	out.LocalTemplates = append([]LocalTemplate(nil), in.LocalTemplates...)
 	out.Versions = append([]ComponentVersion(nil), in.Versions...)
+	out.SchedulingDisabled = snapshotSchedulingDisabled(in)
 	return &out
 }
 

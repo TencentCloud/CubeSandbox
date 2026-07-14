@@ -36,13 +36,13 @@ jobs:
           go-version-file: CubeMaster/go.mod
           cache-dependency-path: CubeMaster/go.sum
 
-      - name: Validate migration filenames
+      - name: Validate migration filenames & cross-dialect parity
         shell: bash
         working-directory: CubeMaster
         run: |
           set -euo pipefail
           go test ./pkg/base/dao/migrate/ \
-            -run 'TestMigrationFilenames|TestMigrationsDirHasReadme' -v
+            -run 'TestMigrationFilenames|TestMigrationsDirHasReadme|TestMigrationVersionParityAcrossDialects|TestDefaultsCompatible|TestNormalizeDefaultLiteral|TestClassifyMySQLDefault|TestRequireDockerTests' -v
 
       - name: Reject changes to already-merged migrations
         # Applied migrations are immutable: goose tracks them by integer version
@@ -130,3 +130,29 @@ jobs:
           fi
 
           echo "All migration changes are additive (new files only)."
+
+  schema-alignment:
+    name: Cross-dialect schema alignment (docker)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: CubeMaster/go.mod
+          cache-dependency-path: CubeMaster/go.sum
+
+      - name: Run migrate integration tests (MySQL + PostgreSQL + alignment)
+        shell: bash
+        working-directory: CubeMaster
+        env:
+          # Forbid t.Skip when Docker is unavailable — job must not go green by skip.
+          CUBEMASTER_REQUIRE_DOCKER_TESTS: "1"
+        run: |
+          set -euo pipefail
+          # ubuntu-latest runners have Docker pre-installed. These tests spin
+          # up throwaway MySQL 8.0 and PostgreSQL 16 containers via dockertest.
+          go test ./pkg/base/dao/migrate/ \
+            -run 'Alignment|Postgres|Run_' -v -count=1 -timeout 20m

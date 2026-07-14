@@ -5,6 +5,7 @@
 package meta
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +24,7 @@ const (
 	nodeAction          = "/nodes/:node_id"
 	nodeStatusAction    = "/nodes/:node_id/status"
 	nodeLabelsAction    = "/nodes/:node_id/labels"
+	nodeIsolationAction = "/nodes/:node_id/isolation"
 	versionMatrixAction = "/version-matrix"
 )
 
@@ -74,6 +76,10 @@ func VersionMatrixAction() string {
 
 func NodeLabelsAction() string {
 	return nodeLabelsAction
+}
+
+func NodeIsolationAction() string {
+	return nodeIsolationAction
 }
 
 func readyzGinHandler(c *gin.Context) {
@@ -193,6 +199,25 @@ func deleteNodeLabelGinHandler(c *gin.Context) {
 	})
 }
 
+// isolateNodeGinHandler cordons a node (PUT). Idempotent; no request body.
+func isolateNodeGinHandler(c *gin.Context) {
+	writeIsolation(c, true)
+}
+
+// unisolateNodeGinHandler removes the cordon (DELETE). Idempotent.
+func unisolateNodeGinHandler(c *gin.Context) {
+	writeIsolation(c, false)
+}
+
+func writeIsolation(c *gin.Context, disabled bool) {
+	data, err := nodemeta.SetNodeSchedulingDisabled(c.Request.Context(), c.Param("node_id"), disabled)
+	if err != nil {
+		writeErr(c.Writer, http.StatusOK, err)
+		return
+	}
+	common.WriteResponse(c.Writer, http.StatusOK, &nodeResponse{Ret: successRet(), Data: data})
+}
+
 func successRet() *sandboxtypes.Ret {
 	return &sandboxtypes.Ret{
 		RetCode: int(errorcode.ErrorCode_Success),
@@ -202,8 +227,11 @@ func successRet() *sandboxtypes.Ret {
 
 func writeErr(w http.ResponseWriter, status int, err error) {
 	retCode := int(errorcode.ErrorCode_MasterInternalError)
-	if err == gorm.ErrRecordNotFound {
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
 		retCode = int(errorcode.ErrorCode_NotFound)
+	case errors.Is(err, nodemeta.ErrLabelsJSONCorrupt), errors.Is(err, nodemeta.ErrSchedulingLabelRejected):
+		retCode = int(errorcode.ErrorCode_MasterParamsError)
 	}
 	common.WriteResponse(w, status, &sandboxtypes.Res{
 		Ret: &sandboxtypes.Ret{

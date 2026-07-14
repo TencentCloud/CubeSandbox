@@ -40,7 +40,7 @@ func writeManifest(t *testing.T, dir string) {
   "guest_image": {"version": "cube-image/2026.01", "agent_version": "agent-1.2.3"},
   "kernel": {
     "version": "5.10.0-100",
-    "pvm_version": "6.6.69-1.cubesandbox",
+    "pvm_version": "6.6.69-1.2.cubesandbox",
     "vmlinux_digest_sha256": "sha256:ordinary",
     "vmlinux_pvm_digest_sha256": "sha256:pvm"
   }
@@ -245,7 +245,7 @@ func TestCollectKernelFromActivePVMSymlink(t *testing.T) {
 	got := c.Collect()
 
 	kernel, ok := versionOf(t, got, ComponentKernel)
-	if !ok || kernel.Version != "6.6.69-1.cubesandbox@sha256:pvm" || kernel.Source != SourceFile {
+	if !ok || kernel.Version != "6.6.69-1.2.cubesandbox@sha256:pvm" || kernel.Source != SourceFile {
 		t.Fatalf("kernel must follow PVM active symlink, got %+v ok=%v", kernel, ok)
 	}
 }
@@ -331,7 +331,7 @@ func TestKernelSymlinkReread(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 	mkKernelLayout(t, dir, "vmlinux-pvm")
-	if kernel, _ := versionOf(t, c.Collect(), ComponentKernel); kernel.Version != "6.6.69-1.cubesandbox@sha256:pvm" {
+	if kernel, _ := versionOf(t, c.Collect(), ComponentKernel); kernel.Version != "6.6.69-1.2.cubesandbox@sha256:pvm" {
 		t.Fatalf("expected PVM kernel after symlink switch, got %q", kernel.Version)
 	}
 }

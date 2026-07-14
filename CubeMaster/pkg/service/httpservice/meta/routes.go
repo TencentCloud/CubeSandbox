@@ -17,4 +17,6 @@ func RegisterMetaRoutes(g *gin.RouterGroup) {
 	g.POST(nodeStatusAction, updateNodeStatusGinHandler)
 	g.POST(nodeLabelsAction, updateNodeLabelsGinHandler)
 	g.DELETE(nodeLabelsAction, deleteNodeLabelGinHandler)
+	g.PUT(nodeIsolationAction, isolateNodeGinHandler)
+	g.DELETE(nodeIsolationAction, unisolateNodeGinHandler)
 }

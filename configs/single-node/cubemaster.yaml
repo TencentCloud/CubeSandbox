@@ -52,9 +52,9 @@ req_template_conf:
 
 ossdb_config:
   addr: "127.0.0.1:__CUBE_SANDBOX_MYSQL_PORT__"
-  user: "cube"
-  pwd: "cube_pass"
-  db_name: "cube_mvp"
+  user: "__CUBE_SANDBOX_MYSQL_USER__"
+  pwd: "__CUBE_SANDBOX_MYSQL_PASSWORD__"
+  db_name: "__CUBE_SANDBOX_MYSQL_DB__"
   conn_timeout: 5
   read_timeout: 5
   write_timeout: 5
@@ -64,9 +64,9 @@ ossdb_config:
 
 instance_db_config:
   addr: "127.0.0.1:__CUBE_SANDBOX_MYSQL_PORT__"
-  user: "cube"
-  pwd: "cube_pass"
-  db_name: "cube_mvp"
+  user: "__CUBE_SANDBOX_MYSQL_USER__"
+  pwd: "__CUBE_SANDBOX_MYSQL_PASSWORD__"
+  db_name: "__CUBE_SANDBOX_MYSQL_DB__"
   conn_timeout: 5
   read_timeout: 5
   write_timeout: 5
@@ -76,7 +76,7 @@ instance_db_config:
 
 redis:
   nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"
-  password: "ceuhvu123"
+  password: "__CUBE_SANDBOX_REDIS_PASSWORD__"
   db_no: 0
   max_idle: 8
   max_active: 32

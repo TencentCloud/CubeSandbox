@@ -72,6 +72,21 @@ ifneq ($(wildcard $(HOME)/.git-credentials),)
 DOCKER_GIT_CRED += -v $(TMP_GIT_CREDENTIALS):$(BUILDER_CONTAINER_HOME)/.git-credentials
 endif
 
+# Builder image build-args. Set MIRROR=cn to fetch the llvm.sh installer script
+# and the clang-14 apt packages from a China-reachable mirror (override the mirror
+# host with LLVM_MIRROR_BASE=...); unset uses upstream apt.llvm.org. The LLVM GPG
+# signing key is always fetched from apt.llvm.org -- llvm.sh hardcodes that URL and
+# the mirror does not serve the key -- but that is a small request that usually
+# succeeds even when bulk package downloads from apt.llvm.org are slow. This
+# build-time MIRROR is unrelated to the runtime MIRROR=cn used by deploy/one-click.
+LLVM_MIRROR_BASE ?= https://mirrors.zju.edu.cn/llvm-apt
+BUILDER_BUILD_ARGS ?=
+ifeq ($(MIRROR),cn)
+BUILDER_BUILD_ARGS += --build-arg LLVM_MIRROR_BASE=$(LLVM_MIRROR_BASE)
+else ifneq ($(MIRROR),)
+$(warning MIRROR='$(MIRROR)' is not recognized by builder-image; expected 'cn' or empty -- building against upstream apt.llvm.org)
+endif
+
 .PHONY: all
 all: $(BINARIES)
 
@@ -117,7 +132,7 @@ builder-image:
 	@if [ -z "$(BUILDER_FORCE_REBUILD)" ] && docker image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
 		printf 'Builder image %s already present, skipping build (set BUILDER_FORCE_REBUILD=1 to rebuild)\n' "$(BUILDER_IMAGE)"; \
 	else \
-		docker build -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker; \
+		docker build $(BUILDER_BUILD_ARGS) -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker; \
 	fi
 
 .PHONY: prepare-builder-home

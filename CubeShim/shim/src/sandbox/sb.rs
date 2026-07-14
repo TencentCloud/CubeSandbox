@@ -735,11 +735,12 @@ impl SandBox {
         }
         vc.add_cmdline("highres=off".to_string());
         vc.add_cmdline("clocksource=kvm-clock".to_string());
+        vc.add_cmdline("agent.unified_cgroup_hierarchy=true".to_string());
 
-        // 添加外部传入的 pmem
+        // Add externally passed pmem
         vc.add_pmems(&self.conf.pmem);
 
-        // 检查额外内核参数是否与已有参数冲突
+        // Check if extra kernel parameters conflict with existing ones
         if !self.conf.extra_kernel_params.is_empty() {
             let conflicts = vc.check_cmdline_conflicts(&self.conf.extra_kernel_params);
             if !conflicts.is_empty() {
@@ -1411,10 +1412,14 @@ mod tests {
             .cmdlines
             .contains(&"another.param=foo".to_string()));
 
-        let mut set_expect: HashSet<String> = vec!["highres=off", "clocksource=kvm-clock"]
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
+        let mut set_expect: HashSet<String> = vec![
+            "highres=off",
+            "clocksource=kvm-clock",
+            "agent.unified_cgroup_hierarchy=true",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
         let set_unexpect: HashSet<String> = vec!["clocksource=tsc", "tsc=reliable"]
             .into_iter()
             .map(|s| s.to_string())

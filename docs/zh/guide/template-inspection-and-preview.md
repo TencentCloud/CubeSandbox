@@ -27,19 +27,21 @@
 查看基础信息：
 
 ```bash
-cubemastercli tpl info --template-id <template-id>
+cubemastercli tpl info <template-id>
 ```
+
+模板 ID 既可以用位置参数传入（与 docker/kubectl 风格一致），也可以继续使用 `--template-id`，两种写法等价。
 
 查看原始 JSON：
 
 ```bash
-cubemastercli tpl info --template-id <template-id> --json
+cubemastercli tpl info <template-id> --json
 ```
 
 把模板里保存的请求体一并带出来：
 
 ```bash
-cubemastercli tpl info --template-id <template-id> --json --include-request
+cubemastercli tpl info <template-id> --json --include-request
 ```
 
 典型返回结构如下：
@@ -142,13 +144,13 @@ cubemastercli tpl render -f req.json --template-id <template-id> --json
 1. 先看模板状态和副本。
 
 ```bash
-cubemastercli tpl info --template-id <template-id>
+cubemastercli tpl info <template-id>
 ```
 
 2. 如果你想确认模板本身存了什么，再看 `create_request`。
 
 ```bash
-cubemastercli tpl info --template-id <template-id> --json --include-request
+cubemastercli tpl info <template-id> --json --include-request
 ```
 
 3. 再看当前真正会生效的请求预览。
