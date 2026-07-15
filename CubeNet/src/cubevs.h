@@ -115,16 +115,6 @@ struct mvm_meta {
 	__u8 reserved[55];
 };
 
-static __always_inline bool dns_policy_learning_enabled(const struct mvm_meta *mvm_meta)
-{
-	return mvm_meta && (mvm_meta->dns_policy_flags & DNS_POLICY_FLAG_LEARNING_ENABLED);
-}
-
-static __always_inline bool dns_policy_enabled(const struct mvm_meta *mvm_meta)
-{
-	return mvm_meta && mvm_meta->dns_policy_flags;
-}
-
 /* https://elixir.bootlin.com/linux/v5.4.217/source/include/uapi/linux/if_arp.h#L144 */
 /* Linux kernel defines struct arphdr ONLY, we need the Ethernet part */
 struct arphdr_eth {
@@ -242,6 +232,23 @@ struct snat_ip {
 	__u16 reserved;
 };
 
+/* Tail-call state for DNS response handling on the ingress UDP NAT path.
+ *
+ * The response handler is split into its own tail-called program to keep the
+ * from_world verifier complexity within the 1M instruction budget. We stash
+ * the values the caller already derived (DNS payload offset, target sandbox
+ * ifindex, DNS server IP, sandbox-side port) so the tail-called program can
+ * re-pull headers, learn A records, and finish UDP NAT without re-deriving
+ * them from scratch.
+ */
+struct dns_response_state {
+	__u32 dns_off;
+	__u32 ifindex;		/* sandbox tap ifindex (sess->vm_ifindex) */
+	__u32 server_ip;	/* DNS server IP (l3->saddr in network byte order) */
+	__u16 source_port;	/* sandbox-side UDP port (sess->vm_port in nbo) */
+	__u16 reserved;
+};
+
 /* skb->cb[0] is reserved as a per-invocation NAT status word used by
  * create_nat_session() to communicate the failure reason back to callers
  * in from_cube(). skb->cb[] is 5 * u32 scratch that survives across
@@ -280,6 +287,13 @@ static __always_inline int _()
 	int q[sizeof(struct snat_ip) % 16 == 0 ? 1 : -1] = {};
 
 	return b[0] + d[0] + r[0] + f[0] + g[0] + h[0] + i[0] + l[0] + n[0] + o[0] + p[0] + q[0];
+}
+
+static __always_inline __attribute__((used)) __u32 __btf_pin(void)
+{
+	return __builtin_btf_type_id(*(struct lpm_key *)0, BPF_TYPE_ID_LOCAL) +
+	       __builtin_btf_type_id(*(struct net_policy_value_v2 *)0, BPF_TYPE_ID_LOCAL) +
+	       __builtin_btf_type_id(*(struct dns_allow_value *)0, BPF_TYPE_ID_LOCAL);
 }
 
 #endif /* __CUBEVS_H */

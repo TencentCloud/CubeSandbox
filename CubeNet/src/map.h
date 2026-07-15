@@ -96,19 +96,6 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } snat_iplist SEC(".maps");
 
-/* Inner map template for network policy (LPM trie)
- *
- * key:   struct lpm_key (prefixlen + IP)
- * value: struct net_policy_value_v2 (expiration and policy flags)
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-	__uint(max_entries, MAX_IP_RULE_ENTRIES);
-	__type(key, struct lpm_key);
-	__type(value, struct net_policy_value_v2);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} net_policy_inner SEC(".maps");
-
 /* Egress allow list v2 (hash of maps)
  *
  * key:   ifindex of the TAP device
@@ -152,36 +139,6 @@ struct {
 		__uint(map_flags, BPF_F_NO_PREALLOC);
 	});
 } deny_out SEC(".maps");
-
-/* Inner map template for dns_allow (LPM trie).
- *
- * The standalone map below registers struct dns_allow_key / struct
- * dns_allow_value as map types so libbpf has them in BTF. That alone is
- * sufficient for compilation units that never touch the value type from
- * program code (e.g. localgw.bpf.c), but as soon as a unit references
- * `struct dns_allow_value *` from program code (e.g. mvmtap.bpf.c via
- * dns_query.h), clang's BPF BTF emitter degrades the value type to a
- * BTF_KIND_FWD entry, which makes bpf2go fail to load the dns_allow
- * hash-of-maps inner map definition with "type is unsized".
- *
- * The fix is the LLVM CO-RE intrinsic right below the template: it tells
- * the BPF backend "this type must be preserved as a complete BTF entry."
- * It is the canonical way to anchor BTF for a referenced type.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-	__uint(max_entries, MAX_DOMAIN_RULE_ENTRIES);
-	__type(key, struct dns_allow_key);
-	__type(value, struct dns_allow_value);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} dns_allow_inner SEC(".maps");
-
-/* BTF anchor for struct dns_allow_value — see comment above. */
-static __always_inline __attribute__((used)) __u32 __dns_allow_value_btf_pin(void)
-{
-	return __builtin_btf_type_id(*(struct dns_allow_value *)0,
-				     BPF_TYPE_ID_LOCAL);
-}
 
 /* DNS policy rules (hash of maps)
  *
@@ -240,23 +197,6 @@ struct {
 	__type(key, __u32);
 	__type(value, struct dns_query_state);
 } dns_query_state SEC(".maps");
-
-/* Tail-call state for DNS response handling on the ingress UDP NAT path.
- *
- * The response handler is split into its own tail-called program to keep the
- * from_world verifier complexity within the 1M instruction budget. We stash
- * the values the caller already derived (DNS payload offset, target sandbox
- * ifindex, DNS server IP, sandbox-side port) so the tail-called program can
- * re-pull headers, learn A records, and finish UDP NAT without re-deriving
- * them from scratch.
- */
-struct dns_response_state {
-	__u32 dns_off;
-	__u32 ifindex;		/* sandbox tap ifindex (sess->vm_ifindex) */
-	__u32 server_ip;	/* DNS server IP (l3->saddr in network byte order) */
-	__u16 source_port;	/* sandbox-side UDP port (sess->vm_port in nbo) */
-	__u16 reserved;
-};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
