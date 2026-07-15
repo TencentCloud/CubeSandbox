@@ -1,0 +1,143 @@
+{
+  "config": {
+    "api_url": "http://127.0.0.1:33000",
+    "concurrency": 1,
+    "host_mount": "",
+    "mode": "create-delete",
+    "template": "cube-vz",
+    "total": 20,
+    "warmup": 3
+  },
+  "create": {
+    "avg": 216.67484999999996,
+    "count": 20,
+    "max": 233.716,
+    "min": 201.902,
+    "p50": 216.228,
+    "p90": 229.547,
+    "p95": 229.591,
+    "p99": 233.716,
+    "std": 9.44149473154487
+  },
+  "delete": {
+    "avg": 2.57735,
+    "count": 20,
+    "max": 2.708,
+    "min": 2.456,
+    "p50": 2.557,
+    "p90": 2.69,
+    "p95": 2.707,
+    "p99": 2.708,
+    "std": 0.08468845382061428
+  },
+  "raw": [
+    {
+      "create_ms": 216.607,
+      "delete_ms": 2.465,
+      "seq": 1
+    },
+    {
+      "create_ms": 214.687,
+      "delete_ms": 2.596,
+      "seq": 2
+    },
+    {
+      "create_ms": 205.769,
+      "delete_ms": 2.682,
+      "seq": 3
+    },
+    {
+      "create_ms": 203.213,
+      "delete_ms": 2.69,
+      "seq": 4
+    },
+    {
+      "create_ms": 223.916,
+      "delete_ms": 2.575,
+      "seq": 5
+    },
+    {
+      "create_ms": 220.461,
+      "delete_ms": 2.708,
+      "seq": 6
+    },
+    {
+      "create_ms": 229.547,
+      "delete_ms": 2.656,
+      "seq": 7
+    },
+    {
+      "create_ms": 229.248,
+      "delete_ms": 2.577,
+      "seq": 8
+    },
+    {
+      "create_ms": 216.984,
+      "delete_ms": 2.464,
+      "seq": 9
+    },
+    {
+      "create_ms": 201.902,
+      "delete_ms": 2.456,
+      "seq": 10
+    },
+    {
+      "create_ms": 214.696,
+      "delete_ms": 2.528,
+      "seq": 11
+    },
+    {
+      "create_ms": 221.779,
+      "delete_ms": 2.542,
+      "seq": 12
+    },
+    {
+      "create_ms": 229.591,
+      "delete_ms": 2.608,
+      "seq": 13
+    },
+    {
+      "create_ms": 216.228,
+      "delete_ms": 2.707,
+      "seq": 14
+    },
+    {
+      "create_ms": 205.764,
+      "delete_ms": 2.557,
+      "seq": 15
+    },
+    {
+      "create_ms": 233.716,
+      "delete_ms": 2.678,
+      "seq": 16
+    },
+    {
+      "create_ms": 220.687,
+      "delete_ms": 2.533,
+      "seq": 17
+    },
+    {
+      "create_ms": 211.347,
+      "delete_ms": 2.49,
+      "seq": 18
+    },
+    {
+      "create_ms": 209.642,
+      "delete_ms": 2.511,
+      "seq": 19
+    },
+    {
+      "create_ms": 207.713,
+      "delete_ms": 2.524,
+      "seq": 20
+    }
+  ],
+  "summary": {
+    "errors": 0,
+    "success_rate": 1,
+    "successful": 20,
+    "throughput_qps": 3.935452802307084,
+    "total_time_s": 5.082007333
+  },
+  "timestamp": "2026-07-15T08:46:16Z"
+}

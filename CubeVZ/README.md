@@ -284,18 +284,19 @@ silently emulated.
 | `make cube-vz-benchmark` | Runs CPU, memory, and direct random file-I/O workloads inside one native VM. |
 | `make cube-vz-lifecycle-benchmark` | Runs the official `examples/cube-bench` create/delete workload at concurrency 1 and 10. |
 
-The latest recorded M4 Pro lifecycle baseline completed all 220 measured
-create/delete cycles successfully:
+The reviewed M4 Pro lifecycle baseline completed all 660 measured create/delete
+cycles across three independent runs successfully. Headline values are medians
+of the three run-level metrics; ranges expose run-to-run variance:
 
 | Tier | Create average | Create P95 | Create P99 | Throughput |
 |---|---:|---:|---:|---:|
-| Concurrency 1 | 222.8 ms | 245.8 ms | 246.6 ms | 2.59 lifecycle/s |
-| Concurrency 10 | 282.9 ms | 363.8 ms | 414.7 ms | 17.80 lifecycle/s |
+| Concurrency 1 | 223.7 ms (216.7–226.4) | 242.2 ms (229.6–243.7) | 244.5 ms (233.7–279.8) | 2.63/s (2.49–3.94) |
+| Concurrency 10 | 330.2 ms (283.9–349.8) | 401.7 ms (382.3–417.7) | 438.4 ms (413.0–502.6) | 22.42/s (17.76–25.22) |
 
 See [Benchmark/RESULTS.md](Benchmark/RESULTS.md) for host details, phase
-timings, workload results, methodology, and comparison caveats. Timestamped raw
-reports are written under `_output/cube-vz/lifecycle-results/` and are not
-committed.
+timings, workload results, methodology, comparison caveats, and links to the
+tracked machine-readable reports. New timestamped reports are also written
+under `_output/cube-vz/lifecycle-results/`.
 
 The measured `POST` includes APFS template cloning, VZ construction and cold
 start, guest init, and real envd readiness. Docker execution and guest artifact
