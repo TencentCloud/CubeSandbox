@@ -21,12 +21,39 @@ public final class VMStreamConnection: @unchecked Sendable {
   }
 }
 
+private final class PendingControlConnection: @unchecked Sendable {
+  let connection: VZVirtioSocketConnection
+
+  init(_ connection: VZVirtioSocketConnection) {
+    self.connection = connection
+  }
+}
+
+private enum ControlWaitEvent: Sendable {
+  case connection(PendingControlConnection)
+  case timedOut
+  case streamClosed
+  case cancelled
+}
+
 private final class ControlConnectionDelegate: NSObject, VZVirtioSocketListenerDelegate,
   @unchecked Sendable
 {
   private let lock = NSLock()
+  private let stream: AsyncStream<PendingControlConnection>
+  private let continuation: AsyncStream<PendingControlConnection>.Continuation
   private var accepting = true
-  private var pending: VZVirtioSocketConnection?
+  private var pending: PendingControlConnection?
+
+  override init() {
+    let pair = AsyncStream.makeStream(
+      of: PendingControlConnection.self,
+      bufferingPolicy: .bufferingNewest(1)
+    )
+    stream = pair.stream
+    continuation = pair.continuation
+    super.init()
+  }
 
   func listener(
     _ listener: VZVirtioSocketListener,
@@ -34,18 +61,56 @@ private final class ControlConnectionDelegate: NSObject, VZVirtioSocketListenerD
     from socketDevice: VZVirtioSocketDevice
   ) -> Bool {
     lock.lock()
-    defer { lock.unlock() }
-    guard accepting, pending == nil else { return false }
-    pending = connection
+    guard accepting, pending == nil else {
+      lock.unlock()
+      return false
+    }
+    accepting = false
+    let pending = PendingControlConnection(connection)
+    self.pending = pending
+    lock.unlock()
+    continuation.yield(pending)
+    continuation.finish()
     return true
   }
 
-  func takeConnection() -> VZVirtioSocketConnection? {
-    lock.lock()
-    defer { lock.unlock() }
-    let connection = pending
-    pending = nil
-    return connection
+  func nextConnection(timeout: Duration) async throws -> VZVirtioSocketConnection {
+    let event = await withTaskGroup(of: ControlWaitEvent.self) { group in
+      group.addTask { [stream] in
+        for await connection in stream {
+          return .connection(connection)
+        }
+        return .streamClosed
+      }
+      group.addTask {
+        do {
+          try await Task.sleep(for: timeout)
+          return .timedOut
+        } catch {
+          return .cancelled
+        }
+      }
+      let first = await group.next() ?? .streamClosed
+      group.cancelAll()
+      return first
+    }
+
+    switch event {
+    case .connection(let pending):
+      lock.withLock {
+        if self.pending === pending {
+          self.pending = nil
+        }
+      }
+      return pending.connection
+    case .timedOut:
+      stopAccepting()
+      throw CubeVZError.runtime("guest readiness timed out")
+    case .streamClosed:
+      throw CubeVZError.runtime("guest control listener stopped before readiness")
+    case .cancelled:
+      throw CancellationError()
+    }
   }
 
   func stopAccepting() {
@@ -54,7 +119,12 @@ private final class ControlConnectionDelegate: NSObject, VZVirtioSocketListenerD
     let connection = pending
     pending = nil
     lock.unlock()
-    connection?.close()
+    continuation.finish()
+    connection?.connection.close()
+  }
+
+  deinit {
+    continuation.finish()
   }
 }
 
@@ -104,38 +174,35 @@ public final class ManagedVM {
   }
 
   public func waitUntilReady(timeout: Duration = .seconds(10)) async throws {
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: timeout)
-    var lastError = "guest did not open a vsock control connection"
+    guard virtualMachine.state == .running else {
+      throw CubeVZError.runtime(
+        "VM stopped before readiness; state=\(virtualMachine.state.rawValue)"
+      )
+    }
+    guard let delegate = controlConnectionDelegate else {
+      throw CubeVZError.runtime("VM has no control vsock listener")
+    }
 
-    while clock.now < deadline {
-      guard virtualMachine.state == .running else {
+    let connection = try await delegate.nextConnection(timeout: timeout)
+    do {
+      let response = try await Self.readResponse(descriptor: connection.fileDescriptor)
+      guard response == "READY\n" || response.hasPrefix("READY ") else {
         throw CubeVZError.runtime(
-          "VM stopped before readiness; state=\(virtualMachine.state.rawValue)"
+          "unexpected guest readiness response: \(response.debugDescription)"
         )
       }
-      if let connection = controlConnectionDelegate?.takeConnection() {
-        do {
-          let response = try await Self.readResponse(descriptor: connection.fileDescriptor)
-          if response == "READY\n" || response.hasPrefix("READY ") {
-            controlConnectionDelegate?.stopAccepting()
-            readinessMetadata =
-              response
-              .trimmingCharacters(in: .whitespacesAndNewlines)
-              .dropFirst("READY".count)
-              .trimmingCharacters(in: .whitespaces)
-            controlConnection = connection
-            return
-          }
-          lastError = "unexpected response \(response.debugDescription)"
-        } catch {
-          lastError = error.localizedDescription
-        }
-        connection.close()
-      }
-      try await Task.sleep(for: .milliseconds(1))
+      delegate.stopAccepting()
+      readinessMetadata =
+        response
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .dropFirst("READY".count)
+        .trimmingCharacters(in: .whitespaces)
+      controlConnection = connection
+    } catch {
+      connection.close()
+      delegate.stopAccepting()
+      throw error
     }
-    throw CubeVZError.runtime("guest readiness timed out: \(lastError)")
   }
 
   public func shutdown(timeout: Duration = .seconds(2)) async throws {

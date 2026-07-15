@@ -30,7 +30,7 @@ final class SandboxManager {
   private let sandboxesDirectory: URL
   private let sandboxesLockDescriptor: Int32
   private var sandboxes: [String: RunningSandbox] = [:]
-  private var reusableMACAddresses: [String] = []
+  private var reusableMACAddresses = ReusableMACAddressPool()
 
   init(templateID: String, templateDirectory: URL, sandboxesDirectory: URL) throws {
     self.templateID = templateID
@@ -85,7 +85,7 @@ final class SandboxManager {
       isDirectory: true
     )
     let reusableMACAddress =
-      reusableMACAddresses.popLast()
+      reusableMACAddresses.take()
       ?? VZMACAddress.randomLocallyAdministered().string
     let directory = try VMTemplateCloner.cloneCold(
       template: templateDirectory,
@@ -124,7 +124,7 @@ final class SandboxManager {
         try? await virtualMachine.shutdown()
       }
       try? FileManager.default.removeItem(at: destination)
-      reusableMACAddresses.append(reusableMACAddress)
+      reusableMACAddresses.recycle(reusableMACAddress)
       throw error
     }
   }
@@ -138,7 +138,7 @@ final class SandboxManager {
     try await sandbox.virtualMachine.discard()
     try FileManager.default.removeItem(at: sandbox.directory.url)
     sandboxes.removeValue(forKey: sandboxID)
-    reusableMACAddresses.append(sandbox.reusableMACAddress)
+    reusableMACAddresses.recycle(sandbox.reusableMACAddress)
     return true
   }
 

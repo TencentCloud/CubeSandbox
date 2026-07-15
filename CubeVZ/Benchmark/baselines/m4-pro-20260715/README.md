@@ -5,7 +5,7 @@ logs for the reviewed CubeVZ lifecycle baseline.
 
 ## Provenance
 
-- Source commit: `7bebde4` (`fix(cube-vz): address review findings`)
+- Source commit: `53f2792` (`fix(cube-vz): address review findings`)
 - Host: Mac16,7, Apple M4 Pro, 48 GiB RAM
 - Host OS: macOS 26.5.1 (25F80)
 - Guest: 2 vCPU, 2048 MiB RAM, raw ext4 root disk

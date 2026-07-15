@@ -16,11 +16,9 @@ private final class VMDelegate: NSObject, VZVirtualMachineDelegate, @unchecked S
   private let continuation: AsyncStream<RuntimeEvent>.Continuation
 
   override init() {
-    var captured: AsyncStream<RuntimeEvent>.Continuation?
-    stream = AsyncStream { continuation in
-      captured = continuation
-    }
-    continuation = captured!
+    let pair = AsyncStream.makeStream(of: RuntimeEvent.self)
+    stream = pair.stream
+    continuation = pair.continuation
     super.init()
   }
 
@@ -47,11 +45,9 @@ private final class SignalMonitor: @unchecked Sendable {
     signal(SIGTERM, SIG_IGN)
     signal(SIGINT, SIG_IGN)
 
-    var captured: AsyncStream<RuntimeEvent>.Continuation?
-    stream = AsyncStream { continuation in
-      captured = continuation
-    }
-    continuation = captured!
+    let pair = AsyncStream.makeStream(of: RuntimeEvent.self)
+    stream = pair.stream
+    continuation = pair.continuation
 
     terminateSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
     interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)

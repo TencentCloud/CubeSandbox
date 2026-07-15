@@ -43,7 +43,7 @@ The native lifecycle path was also measured with the repository's official
 virtio-vsock relay are ready. DELETE stops the guest and removes its VM
 directory.
 
-- Source commit: `7bebde4`
+- Source commit: `53f2792`
 - Timestamps: 2026-07-15 08:44–08:46 UTC
 - Mode: `create-delete`
 - Warmups: 3 per tier

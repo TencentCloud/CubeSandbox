@@ -5,50 +5,9 @@ import CubeVZCore
 import Darwin
 import Foundation
 
-private struct DataPlaneRoute {
-  let sandboxID: String
-  let port: UInt32
-
-  init(header: Data) throws {
-    guard let headerEnd = header.range(of: Data("\r\n\r\n".utf8)) else {
-      throw CubeVZError.invalidArguments("data-plane request headers are incomplete")
-    }
-    guard
-      let text = String(
-        data: header.subdata(in: header.startIndex..<headerEnd.lowerBound),
-        encoding: .utf8
-      )
-    else {
-      throw CubeVZError.invalidArguments("data-plane request headers are not UTF-8")
-    }
-    guard
-      let hostLine = text.split(separator: "\r\n").first(where: {
-        $0.lowercased().hasPrefix("host:")
-      })
-    else {
-      throw CubeVZError.invalidArguments("data-plane request has no Host header")
-    }
-
-    let host = hostLine.dropFirst("host:".count).trimmingCharacters(in: .whitespaces)
-    let firstLabel = host.split(separator: ".", maxSplits: 1).first.map(String.init) ?? host
-    guard let separator = firstLabel.firstIndex(of: "-") else {
-      throw CubeVZError.invalidArguments("invalid data-plane Host header")
-    }
-    let rawPort = firstLabel[..<separator]
-    let rawSandboxID = firstLabel[firstLabel.index(after: separator)...]
-    guard let port = UInt32(rawPort), port > 0, port <= UInt32(UInt16.max) else {
-      throw CubeVZError.invalidArguments("invalid data-plane port")
-    }
-    guard !rawSandboxID.isEmpty else {
-      throw CubeVZError.invalidArguments("invalid data-plane sandbox ID")
-    }
-    self.port = port
-    sandboxID = String(rawSandboxID)
-  }
-}
-
 final class DataPlaneProxy: @unchecked Sendable {
   private static let headerReadTimeoutNanoseconds: UInt64 = 5_000_000_000
+  private static let relayIdleTimeoutMilliseconds: Int32 = 60_000
   private static let maximumConnections = 128
   private static let maximumHeaderBytes = 64 * 1_024
 
@@ -67,44 +26,16 @@ final class DataPlaneProxy: @unchecked Sendable {
     self.manager = manager
   }
 
+  deinit {
+    POSIXSocket.close(&listenDescriptor)
+  }
+
   func start() throws {
     signal(SIGPIPE, SIG_IGN)
-    let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-    guard descriptor >= 0 else { throw posixError("socket") }
-
-    var reuseAddress: Int32 = 1
-    guard
-      setsockopt(
-        descriptor,
-        SOL_SOCKET,
-        SO_REUSEADDR,
-        &reuseAddress,
-        socklen_t(MemoryLayout.size(ofValue: reuseAddress))
-      ) == 0
-    else {
-      Darwin.close(descriptor)
-      throw posixError("setsockopt")
-    }
-
-    var address = sockaddr_in()
-    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_port = port.bigEndian
-    address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-    let bindResult = withUnsafePointer(to: &address) { pointer in
-      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-        Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-      }
-    }
-    guard bindResult == 0 else {
-      Darwin.close(descriptor)
-      throw posixError("bind")
-    }
-    guard Darwin.listen(descriptor, 256) == 0 else {
-      Darwin.close(descriptor)
-      throw posixError("listen")
-    }
-    listenDescriptor = descriptor
+    listenDescriptor = try POSIXSocket.makeLoopbackListener(
+      port: port,
+      context: "data-plane"
+    )
     workerQueue.async { [self] in acceptLoop() }
   }
 
@@ -139,12 +70,14 @@ final class DataPlaneProxy: @unchecked Sendable {
           )
           workerQueue.async { [self] in relay(client: client, guest: guest, prefix: prefix) }
         } catch {
-          sendError(status: 502, message: error.localizedDescription, to: client)
+          Self.log(error, context: "open data-plane route")
+          sendError(status: 502, message: "sandbox data plane unavailable", to: client)
           connectionSlots.signal()
         }
       }
     } catch {
-      sendError(status: 400, message: error.localizedDescription, to: client)
+      Self.log(error, context: "parse data-plane request")
+      sendError(status: 400, message: "invalid data-plane request", to: client)
       connectionSlots.signal()
     }
   }
@@ -157,10 +90,12 @@ final class DataPlaneProxy: @unchecked Sendable {
     let deadline = DispatchTime.now().uptimeNanoseconds + Self.headerReadTimeoutNanoseconds
     while data.count < Self.maximumHeaderBytes {
       var buffer = [UInt8](repeating: 0, count: 4_096)
-      let count = try read(
+      let count = try POSIXSocket.read(
         into: &buffer,
         from: descriptor,
-        before: deadline
+        before: deadline,
+        timeoutMessage: "data-plane request headers timed out",
+        context: "data-plane"
       )
       guard count > 0 else {
         throw CubeVZError.runtime("data-plane client disconnected")
@@ -183,7 +118,7 @@ final class DataPlaneProxy: @unchecked Sendable {
       Darwin.close(client)
       connectionSlots.signal()
     }
-    guard writeAll(prefix, to: guestDescriptor) else {
+    guard POSIXSocket.writeAll(prefix, to: guestDescriptor) else {
       return
     }
 
@@ -195,11 +130,12 @@ final class DataPlaneProxy: @unchecked Sendable {
         pollfd(fd: client, events: clientReadable ? Int16(POLLIN) : 0, revents: 0),
         pollfd(fd: guestDescriptor, events: guestReadable ? Int16(POLLIN) : 0, revents: 0),
       ]
-      let ready = Darwin.poll(&descriptors, 2, -1)
+      let ready = Darwin.poll(&descriptors, 2, Self.relayIdleTimeoutMilliseconds)
       if ready < 0 {
         if errno == EINTR { continue }
         break
       }
+      if ready == 0 { break }
       if clientReadable && descriptors[0].revents & Int16(POLLIN | POLLHUP | POLLERR) != 0 {
         var count: Int
         repeat {
@@ -207,7 +143,7 @@ final class DataPlaneProxy: @unchecked Sendable {
             Darwin.read(client, $0.baseAddress, $0.count)
           }
         } while count < 0 && errno == EINTR
-        if count <= 0 || !writeAll(buffer.prefix(max(count, 0)), to: guestDescriptor) {
+        if count <= 0 || !POSIXSocket.writeAll(buffer, count: count, to: guestDescriptor) {
           clientReadable = false
           Darwin.shutdown(guestDescriptor, SHUT_WR)
         }
@@ -219,7 +155,7 @@ final class DataPlaneProxy: @unchecked Sendable {
             Darwin.read(guestDescriptor, $0.baseAddress, $0.count)
           }
         } while count < 0 && errno == EINTR
-        if count <= 0 || !writeAll(buffer.prefix(max(count, 0)), to: client) {
+        if count <= 0 || !POSIXSocket.writeAll(buffer, count: count, to: client) {
           guestReadable = false
           Darwin.shutdown(client, SHUT_WR)
         }
@@ -227,73 +163,28 @@ final class DataPlaneProxy: @unchecked Sendable {
     }
   }
 
-  private func read(
-    into buffer: inout [UInt8],
-    from descriptor: Int32,
-    before deadline: UInt64
-  ) throws -> Int {
-    while true {
-      let now = DispatchTime.now().uptimeNanoseconds
-      guard now < deadline else {
-        throw CubeVZError.runtime("data-plane request headers timed out")
-      }
-      let remainingNanoseconds = deadline - now
-      let timeoutMilliseconds = Int32(
-        max(1, min(UInt64(Int32.max), (remainingNanoseconds + 999_999) / 1_000_000))
-      )
-      var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-      let ready = Darwin.poll(&pollDescriptor, 1, timeoutMilliseconds)
-      if ready < 0 && errno == EINTR { continue }
-      guard ready > 0 else {
-        if ready == 0 {
-          throw CubeVZError.runtime("data-plane request headers timed out")
-        }
-        throw posixError("poll")
-      }
-
-      var count: Int
-      repeat {
-        count = buffer.withUnsafeMutableBytes {
-          Darwin.read(descriptor, $0.baseAddress, $0.count)
-        }
-      } while count < 0 && errno == EINTR
-      return count
-    }
-  }
-
-  private func writeAll<C: Collection>(_ bytes: C, to descriptor: Int32) -> Bool
-  where C.Element == UInt8 {
-    let data = Data(bytes)
-    return data.withUnsafeBytes { raw in
-      var offset = 0
-      while offset < raw.count {
-        let count = Darwin.write(
-          descriptor,
-          raw.baseAddress?.advanced(by: offset),
-          raw.count - offset
-        )
-        if count < 0 && errno == EINTR { continue }
-        guard count > 0 else { return false }
-        offset += count
-      }
-      return true
-    }
-  }
-
   private func sendError(status: Int, message: String, to descriptor: Int32) {
     let body = (try? JSONSerialization.data(withJSONObject: ["error": message])) ?? Data()
-    let reason = status == 503 ? "Service Unavailable" : "Error"
+    let reason: String
+    switch status {
+    case 400: reason = "Bad Request"
+    case 502: reason = "Bad Gateway"
+    case 503: reason = "Service Unavailable"
+    default: reason = "Error"
+    }
     let header =
       "HTTP/1.1 \(status) \(reason)\r\n"
       + "Content-Type: application/json\r\n"
       + "Content-Length: \(body.count)\r\n"
       + "Connection: close\r\n\r\n"
-    let response = Data(header.utf8) + body
-    _ = writeAll(response, to: descriptor)
+    _ = POSIXSocket.writeAll(Data(header.utf8), to: descriptor)
+    _ = POSIXSocket.writeAll(body, to: descriptor)
     Darwin.close(descriptor)
   }
 
-  private func posixError(_ operation: String) -> CubeVZError {
-    .runtime("data-plane \(operation) failed: \(String(cString: strerror(errno)))")
+  private static func log(_ error: Error, context: String) {
+    FileHandle.standardError.write(
+      Data("cube-vz-api: \(context): \(error.localizedDescription)\n".utf8)
+    )
   }
 }

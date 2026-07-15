@@ -57,7 +57,7 @@ public enum VMDirectoryCreator {
       try manager.createDirectory(at: temporary, withIntermediateDirectories: true)
       let vmDirectory = VMDirectory(url: temporary)
 
-      try cloneArtifact(
+      try FileCloner.clone(
         from: request.kernel,
         to: vmDirectory.fileURL(named: VMDirectory.kernelFilename),
         allowFullCopy: request.allowFullCopy
@@ -70,7 +70,7 @@ public enum VMDirectoryCreator {
 
       var initrdFilename: String?
       if let initrd = request.initrd {
-        try cloneArtifact(
+        try FileCloner.clone(
           from: initrd,
           to: vmDirectory.fileURL(named: VMDirectory.initrdFilename),
           allowFullCopy: request.allowFullCopy
@@ -107,17 +107,5 @@ public enum VMDirectoryCreator {
       try? manager.removeItem(at: temporary)
       throw error
     }
-  }
-
-  private static func cloneArtifact(
-    from source: URL,
-    to destination: URL,
-    allowFullCopy: Bool
-  ) throws {
-    try FileCloner.clone(
-      from: source,
-      to: destination,
-      allowFullCopy: allowFullCopy
-    )
   }
 }

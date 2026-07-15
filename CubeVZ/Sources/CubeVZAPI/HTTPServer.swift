@@ -5,12 +5,6 @@ import CubeVZCore
 import Darwin
 import Foundation
 
-private struct HTTPRequest {
-  let method: String
-  let path: String
-  let body: Data
-}
-
 final class HTTPServer: @unchecked Sendable {
   private static let maximumConnections = 64
   private static let maximumRequestBytes = 1_048_576
@@ -31,44 +25,16 @@ final class HTTPServer: @unchecked Sendable {
     self.manager = manager
   }
 
+  deinit {
+    POSIXSocket.close(&listenDescriptor)
+  }
+
   func start() throws {
     signal(SIGPIPE, SIG_IGN)
-    let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-    guard descriptor >= 0 else { throw posixError("socket") }
-
-    var reuseAddress: Int32 = 1
-    guard
-      setsockopt(
-        descriptor,
-        SOL_SOCKET,
-        SO_REUSEADDR,
-        &reuseAddress,
-        socklen_t(MemoryLayout.size(ofValue: reuseAddress))
-      ) == 0
-    else {
-      Darwin.close(descriptor)
-      throw posixError("setsockopt")
-    }
-
-    var address = sockaddr_in()
-    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_port = port.bigEndian
-    address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-    let bindResult = withUnsafePointer(to: &address) { pointer in
-      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-        Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-      }
-    }
-    guard bindResult == 0 else {
-      Darwin.close(descriptor)
-      throw posixError("bind")
-    }
-    guard Darwin.listen(descriptor, 256) == 0 else {
-      Darwin.close(descriptor)
-      throw posixError("listen")
-    }
-    listenDescriptor = descriptor
+    listenDescriptor = try POSIXSocket.makeLoopbackListener(
+      port: port,
+      context: "control-plane"
+    )
 
     workerQueue.async { [self] in
       acceptLoop()
@@ -127,100 +93,43 @@ final class HTTPServer: @unchecked Sendable {
             sendError(status: 404, message: "route not found", to: client)
           }
         } catch {
+          Self.log(error, context: "handle control request")
+          let clientError = Self.clientError(for: error)
           sendError(
-            status: Self.statusCode(for: error),
-            message: error.localizedDescription,
+            status: clientError.status,
+            message: clientError.message,
             to: client
           )
         }
       }
     } catch {
-      sendError(status: 400, message: error.localizedDescription, to: client)
+      Self.log(error, context: "parse control request")
+      sendError(status: 400, message: "invalid HTTP request", to: client)
       connectionSlots.signal()
     }
   }
 
-  private func readRequest(from descriptor: Int32) throws -> HTTPRequest {
+  private func readRequest(from descriptor: Int32) throws -> ParsedHTTPRequest {
     var data = Data()
-    var expectedSize: Int?
     let deadline = DispatchTime.now().uptimeNanoseconds + Self.requestReadTimeoutNanoseconds
 
-    while data.count < Self.maximumRequestBytes {
+    while true {
+      if let expectedSize = try HTTPRequestParser.expectedRequestSize(
+        in: data,
+        maximumBytes: Self.maximumRequestBytes
+      ), data.count >= expectedSize {
+        return try HTTPRequestParser.parse(data, maximumBytes: Self.maximumRequestBytes)
+      }
       var buffer = [UInt8](repeating: 0, count: 4096)
-      let count = try read(
+      let count = try POSIXSocket.read(
         into: &buffer,
         from: descriptor,
-        before: deadline
+        before: deadline,
+        timeoutMessage: "HTTP request timed out",
+        context: "control-plane"
       )
       guard count > 0 else { throw CubeVZError.runtime("HTTP client disconnected") }
       data.append(contentsOf: buffer.prefix(count))
-      guard data.count <= Self.maximumRequestBytes else {
-        throw CubeVZError.invalidArguments("HTTP request is too large")
-      }
-
-      if expectedSize == nil,
-        let headerRange = data.range(of: Data("\r\n\r\n".utf8))
-      {
-        let header = String(decoding: data[..<headerRange.lowerBound], as: UTF8.self)
-        let contentLength = try HTTPRequestParser.contentLength(from: header)
-        guard contentLength <= Self.maximumRequestBytes - headerRange.upperBound else {
-          throw CubeVZError.invalidArguments("HTTP request is too large")
-        }
-        expectedSize = headerRange.upperBound + contentLength
-      }
-      if let expectedSize, data.count >= expectedSize { break }
-    }
-
-    guard let headerRange = data.range(of: Data("\r\n\r\n".utf8)) else {
-      throw CubeVZError.invalidArguments("invalid HTTP headers")
-    }
-    guard let expectedSize, data.count >= expectedSize else {
-      throw CubeVZError.invalidArguments("incomplete HTTP request body")
-    }
-    let header = String(decoding: data[..<headerRange.lowerBound], as: UTF8.self)
-    guard let requestLine = header.split(separator: "\r\n").first else {
-      throw CubeVZError.invalidArguments("missing HTTP request line")
-    }
-    let components = requestLine.split(separator: " ")
-    guard components.count >= 2 else {
-      throw CubeVZError.invalidArguments("invalid HTTP request line")
-    }
-    return HTTPRequest(
-      method: String(components[0]),
-      path: String(components[1]),
-      body: data.subdata(in: headerRange.upperBound..<expectedSize)
-    )
-  }
-
-  private func read(
-    into buffer: inout [UInt8],
-    from descriptor: Int32,
-    before deadline: UInt64
-  ) throws -> Int {
-    while true {
-      let now = DispatchTime.now().uptimeNanoseconds
-      guard now < deadline else {
-        throw CubeVZError.runtime("HTTP request timed out")
-      }
-      let remainingNanoseconds = deadline - now
-      let timeoutMilliseconds = Int32(
-        max(1, min(UInt64(Int32.max), (remainingNanoseconds + 999_999) / 1_000_000))
-      )
-      var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-      let ready = Darwin.poll(&pollDescriptor, 1, timeoutMilliseconds)
-      if ready < 0 && errno == EINTR { continue }
-      guard ready > 0 else {
-        if ready == 0 { throw CubeVZError.runtime("HTTP request timed out") }
-        throw posixError("poll")
-      }
-
-      var count: Int
-      repeat {
-        count = buffer.withUnsafeMutableBytes {
-          Darwin.read(descriptor, $0.baseAddress, $0.count)
-        }
-      } while count < 0 && errno == EINTR
-      return count
     }
   }
 
@@ -239,7 +148,8 @@ final class HTTPServer: @unchecked Sendable {
       "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
         .utf8
     )
-    writeAll(header + body, to: descriptor)
+    _ = POSIXSocket.writeAll(header, to: descriptor)
+    _ = POSIXSocket.writeAll(body, to: descriptor)
     Darwin.close(descriptor)
   }
 
@@ -248,33 +158,19 @@ final class HTTPServer: @unchecked Sendable {
     send(status: status, body: body, to: descriptor)
   }
 
-  private static func statusCode(for error: Error) -> Int {
-    if error is DecodingError { return 400 }
+  private static func clientError(for error: Error) -> (status: Int, message: String) {
+    if error is DecodingError { return (400, "invalid request body") }
     if let cubeError = error as? CubeVZError,
       case .invalidArguments = cubeError
     {
-      return 400
+      return (400, "invalid request")
     }
-    return 500
+    return (500, "internal server error")
   }
 
-  private func writeAll(_ data: Data, to descriptor: Int32) {
-    data.withUnsafeBytes { bytes in
-      var offset = 0
-      while offset < bytes.count {
-        let written = Darwin.write(
-          descriptor,
-          bytes.baseAddress?.advanced(by: offset),
-          bytes.count - offset
-        )
-        if written < 0 && errno == EINTR { continue }
-        if written <= 0 { return }
-        offset += written
-      }
-    }
-  }
-
-  private func posixError(_ operation: String) -> CubeVZError {
-    .runtime("\(operation) failed: \(String(cString: strerror(errno)))")
+  private static func log(_ error: Error, context: String) {
+    FileHandle.standardError.write(
+      Data("cube-vz-api: \(context): \(error.localizedDescription)\n".utf8)
+    )
   }
 }

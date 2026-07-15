@@ -90,6 +90,10 @@ backend: one virtio block disk, console, entropy, optional NAT networking, and
 optional vsock. The lifecycle guest kernel has its required ext4 and virtio
 drivers built in and boots without an initramfs.
 
+The standalone CLI accepts `--initrd` for custom kernels. Do not use that
+option with the bundled lifecycle kernel: its `BLK_DEV_INITRD` support is
+disabled, so that kernel intentionally ignores an attached initramfs.
+
 ## Requirements
 
 | Requirement | Minimum or expectation |
@@ -255,6 +259,9 @@ _output/bin/cube-vz run --vm-dir .workdir/cube-vz/demo
 `SIGINT` or `SIGTERM` stops the VM. Every `run` is a fresh cold boot; CubeVZ
 does not save or restore VM state.
 
+The bundled lifecycle kernel ignores `--initrd`; use the option only with a
+custom kernel built with initramfs support.
+
 ## API compatibility
 
 CubeVZ implements the minimum local contract required by `cube-bench` and the
@@ -267,18 +274,20 @@ current envd SDK path:
 | Control | `DELETE /sandboxes/:id` | Stops and removes one sandbox. |
 | Data plane | Any envd HTTP request for port `49983` | Transparently relays bytes to the selected guest over vsock. |
 
-The control server accepts requests up to 1 MiB. The data-plane proxy accepts
-up to 64 KiB of HTTP headers before routing. Both apply a five-second deadline
-while reading request headers. The process caps concurrent control connections
-at 64 and data-plane relays at 128; excess connections receive HTTP 503.
-Unsupported routes, templates, and guest ports are rejected rather than
+The control server accepts requests up to 1 MiB and applies a five-second
+deadline to the complete request, including its body. The data-plane proxy
+accepts up to 64 KiB of HTTP headers and applies a five-second deadline only
+while reading those routing headers. Established relays have a 60-second idle
+deadline. The process caps concurrent control connections at 64 and data-plane
+relays at 128; excess connections receive HTTP 503. Unsupported routes,
+templates, transfer encodings, and guest ports are rejected rather than
 silently emulated.
 
 ## Validation and benchmarks
 
 | Command | Purpose |
 |---|---|
-| `make cube-vz-test` | Runs manifest, path-safety, HTTP parsing, APFS clone, directory, template, and VZ configuration self-tests. |
+| `make cube-vz-test` | Runs manifest, path-safety, HTTP/control framing, data-plane routing, MAC-pool, APFS clone, directory, template, and VZ configuration self-tests. |
 | `make cube-vz-doctor` | Checks architecture, VZ support, and the virtualization entitlement. |
 | `make cube-vz-smoke` | Verifies lifecycle API, transparent envd relay, and a real Go SDK command. |
 | `make cube-vz-benchmark` | Runs CPU, memory, and direct random file-I/O workloads inside one native VM. |
@@ -314,8 +323,8 @@ construction occur before measurement.
   restart, it removes stale `sb-*` and interrupted partial-clone directories
   before accepting requests.
 - Every sandbox gets a fresh generic machine identifier. Active sandboxes have
-  distinct locally administered MAC addresses; inactive addresses are recycled
-  to avoid unbounded VZNAT DHCP identities.
+  distinct locally administered MAC addresses; up to 1,024 inactive addresses
+  are recycled to bound the VZNAT DHCP identity pool.
 - There is no hot pool, prewarmed VM, snapshot restore, saved state, or adaptive
   lifecycle branch. Every create uses the same APFS-clone plus cold-boot path.
 - The current data plane exposes only the envd service on guest port `49983`.
