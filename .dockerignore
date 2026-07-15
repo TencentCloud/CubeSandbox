@@ -2,3 +2,11 @@
 !.dockerignore
 !docker/
 !docker/Dockerfile.builder
+!CubeVZ/
+CubeVZ/*
+!CubeVZ/Guest/
+!CubeVZ/Guest/**
+!CubeVZ/Benchmark/
+CubeVZ/Benchmark/*
+!CubeVZ/Benchmark/cube-vz-agent.c
+!CubeVZ/Benchmark/cube-vz-relay.c

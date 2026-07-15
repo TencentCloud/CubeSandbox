@@ -27,37 +27,11 @@ it is exactly one layer from macOS to the sandbox guest.
 - Saved-template APFS cloning and guest-to-host vsock readiness/shutdown control.
 - A loopback CubeAPI-compatible lifecycle server implementing the `POST` and
   `DELETE /sandboxes` contract used by the official `cube-bench` tool.
-- A native API surface for sandbox listing, inspection, pause/resume, timeout
-  refresh, logs, snapshots/rollback, template metadata/build status, and the
-  `/cubeapi/v1` aliases used by existing clients.
-- Persistent sandbox metadata under the configured sandboxes directory. A
-  server restart recovers cold/paused records and reapplies expiration policy.
-- Persistent named volumes over fixed virtiofs slots, including APFS COW
-  cloning for AgentHub's shared-files assistant state.
-- Real local OCI template builds: the requested ARM64 image root filesystem is
-  overlaid into the guest, image entrypoint/CMD/environment defaults are
-  retained, then a prepared native saved template is produced atomically.
-- Live allocation metrics and in-place egress/network-policy updates.
-- Optional static API-key or delegated callback authentication for the
-  management plane, plus durable local WebUI username/password sessions. The
-  initial local account is `admin`/`admin`; set
-`CUBEVZ_AGENTHUB_ADMIN_PASSWORD` before the first API start to choose a
-  different initial password. Set `--agenthub-template-id` (or
-  `CUBEVZ_AGENTHUB_OPENCLAW_TEMPLATE`) to the OCI-built template containing
-  OpenClaw when it differs from the base API template.
-- Persistent AgentHub APIs for OpenClaw agents: lifecycle, snapshots,
-  rollback/recovery, clone/publish/market templates, WeCom settings, LLM
-  settings, operation history, and gateway health. Shared-files snapshots
-  include an immutable copy of the OpenClaw virtiofs state; rollback, clone,
-  and published templates restore that state while booting a clean compatible
-  guest template. Shared-files configuration is atomically written to its
-  host-owned virtiofs volume (full snapshots use the guest data plane); a
-  template must contain the `openclaw` executable for its gateway to be
-  started and healthy.
-- Guest data-plane services: envd on port `49983`, code execution on `49999`,
-  and dynamic guest-port forwarding through the vsock control channel. The
-  bundled guest image exposes Python and shell execution over the same NDJSON
-  `/execute` protocol as the SDK.
+- A separate loopback data-plane listener that transparently relays the SDK's
+  envd traffic over virtio-vsock. It reads the Host header only for routing and
+  forwards the original bytes unchanged; CubeVZ does not implement envd HTTP.
+- A minimal ARM64 guest artifact assembled from the repository's existing
+  `docker/Dockerfile.cube-base`, containing the real upstream envd service.
 - A host readiness check that includes architecture, framework support, and the
   required code-signing entitlement.
 
@@ -82,6 +56,8 @@ From the repository root:
 ```bash
 make cube-vz-test
 make cube-vz-doctor
+make cube-vz-guest
+make cube-vz-smoke
 make cube-vz-benchmark
 make cube-vz-lifecycle-benchmark
 ```
@@ -89,6 +65,18 @@ make cube-vz-lifecycle-benchmark
 `make cube-vz` writes the signed release binary to `_output/bin/cube-vz`.
 The Make target intentionally runs natively instead of inside the Linux builder
 container because `Virtualization.framework` exists only on macOS.
+
+`make cube-vz-guest` builds `_output/cube-vz/guest/{kernel,initrd,rootfs.raw}`.
+`make cube-vz-smoke` then verifies the complete minimal path:
+
+```text
+CubeSandbox Go SDK -> cube-vz-api -> data-plane proxy -> vsock relay -> envd
+```
+
+The control plane listens on the configured API port. The data plane listens
+on the next loopback port, so an API port of `3000` uses data-plane port `3001`.
+For the Go SDK, set `CUBE_PROXY_NODE_IP=127.0.0.1`,
+`CUBE_PROXY_PORT_HTTP=3001`, and `CUBE_SANDBOX_DOMAIN=cube.local`.
 
 Do not run the raw SwiftPM executable directly for VM operations unless you
 codesign it first. macOS requires the
@@ -162,11 +150,14 @@ a saved state exists. Apple's restore format is tied to that VM configuration.
 
 ## Current boundary
 
-CubeVZ now provides the end-to-end native path used by the lifecycle benchmark:
-CubeAPI HTTP → APFS COW clone/virtiofs → `Virtualization.framework` → ARM64
-Linux guest → envd/exec vsock data plane. It is still not a drop-in replacement
-for every Linux CubeShim/CubeAPI deployment feature: workers must be explicitly
-configured, templates and durable volumes are local to their node, and an
-AgentHub gateway needs an OpenClaw-capable OCI template. The Linux
-containerd/CubeShim implementation is not run inside another Linux host VM—
-`cube-vz-api` is the native macOS lifecycle boundary.
+CubeVZ owns only the Apple Virtualization.framework lifecycle and the transport
+needed to reach envd. The real envd remains inside the CubeSandbox guest, so SDK
+commands and filesystem APIs are not reimplemented in Swift. The minimal guest
+exposes only envd port `49983`.
+
+Jupyter/code-interpreter (`49999`), arbitrary exposed ports, network policy,
+pause/rollback, authentication, AgentHub, persistence, OCI template management,
+and distributed scheduling remain separate components and are intentionally not
+part of this minimal backend. The Linux containerd/CubeShim implementation is
+not run inside another Linux host VM; `cube-vz-api` replaces only its lifecycle
+boundary with a native backend.

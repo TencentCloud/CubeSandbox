@@ -22,7 +22,6 @@ private let usage = """
     --no-network              Disable the virtio NAT network device
     --no-vsock                Disable the host/guest virtio socket device
     --allow-full-copy         Fall back to a full disk copy if APFS clonefile fails
-    --volume-slots N          Fixed virtiofs volume slots (default: 8)
 
   run behavior:
     Existing machine.vzstate is restored automatically. While running, send
@@ -111,7 +110,6 @@ private struct CubeVZMain {
       try parsed.validate(
         allowedValues: [
           "--vm-dir", "--kernel", "--disk", "--initrd", "--cpus", "--memory-mib", "--cmdline",
-          "--volume-slots",
         ],
         allowedFlags: ["--no-network", "--no-vsock", "--allow-full-copy"]
       )
@@ -127,11 +125,7 @@ private struct CubeVZMain {
         commandLine: parsed.values["--cmdline"] ?? "console=hvc0 root=/dev/vda rw",
         networkEnabled: !parsed.flags.contains("--no-network"),
         vsockEnabled: !parsed.flags.contains("--no-vsock"),
-        allowFullCopy: parsed.flags.contains("--allow-full-copy"),
-        volumeShareSlots: try parseNonNegativeInt(
-          parsed.values["--volume-slots"] ?? "8",
-          "--volume-slots"
-        )
+        allowFullCopy: parsed.flags.contains("--allow-full-copy")
       )
       let directory = try VMDirectoryCreator.create(request)
       print("created \(directory.url.path)")
@@ -202,13 +196,6 @@ private struct CubeVZMain {
   private static func parseUInt64(_ value: String, _ option: String) throws -> UInt64 {
     guard let parsed = UInt64(value), parsed > 0 else {
       throw CubeVZError.invalidArguments("\(option) must be a positive integer")
-    }
-    return parsed
-  }
-
-  private static func parseNonNegativeInt(_ value: String, _ option: String) throws -> Int {
-    guard let parsed = Int(value), parsed >= 0 else {
-      throw CubeVZError.invalidArguments("\(option) must be a non-negative integer")
     }
     return parsed
   }

@@ -24,10 +24,6 @@ public final class VMStreamConnection: @unchecked Sendable {
   public func close() {
     connection.close()
   }
-
-  deinit {
-    connection.close()
-  }
 }
 
 private final class ControlConnectionDelegate: NSObject, VZVirtioSocketListenerDelegate,
@@ -64,19 +60,14 @@ public final class ManagedVM {
   private var controlConnectionDelegate: ControlConnectionDelegate?
   private var controlListener: VZVirtioSocketListener?
 
-  public init(
-    directory: VMDirectory,
-    manifest: VMManifest,
-    volumeDirectoryURLs: [URL]? = nil
-  ) throws {
+  public init(directory: VMDirectory, manifest: VMManifest) throws {
     self.directory = directory
     self.manifest = manifest
     let configuration = try VMConfigurationBuilder.build(
       directory: directory,
       manifest: manifest,
       consoleInput: nil,
-      consoleOutput: nil,
-      volumeDirectoryURLs: volumeDirectoryURLs
+      consoleOutput: nil
     )
     virtualMachine = VZVirtualMachine(configuration: configuration)
 
@@ -199,12 +190,7 @@ public final class ManagedVM {
     guard let socket = virtualMachine.socketDevices.first as? VZVirtioSocketDevice else {
       throw CubeVZError.runtime("VM has no virtio socket device")
     }
-    let connection = try await socket.connect(toPort: port)
-    return VMStreamConnection(connection: connection)
-  }
-
-  public func executeControlCommand(_ command: String) async throws -> String {
-    try await exchange(command: command.hasSuffix("\n") ? command : "\(command)\n")
+    return VMStreamConnection(connection: try await socket.connect(toPort: port))
   }
 
   private func exchange(command: String) async throws -> String {

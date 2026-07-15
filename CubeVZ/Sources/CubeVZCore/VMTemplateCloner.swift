@@ -46,13 +46,6 @@ public enum VMTemplateCloner {
         )
       }
 
-      for slot in 0..<(manifest.volumeShareSlots ?? 0) {
-        try manager.createDirectory(
-          at: clone.volumeShareURL(slot: slot),
-          withIntermediateDirectories: true
-        )
-      }
-
       try manager.moveItem(at: temporary, to: destination)
       let result = VMDirectory(url: destination)
       try result.validateFiles(for: manifest)

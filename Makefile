@@ -119,6 +119,8 @@ help:
 	@printf "  cube-vz-test  Run the native CubeVZ self-tests on macOS\n"
 	@printf "  cube-vz-doctor Build CubeVZ and check host virtualization readiness\n"
 	@printf "  cube-vz-benchmark-guest Build the ARM64 benchmark kernel/rootfs with Docker\n"
+	@printf "  cube-vz-guest Build the minimal ARM64 CubeSandbox/envd guest\n"
+	@printf "  cube-vz-smoke Verify lifecycle and envd data plane on Apple Silicon\n"
 	@printf "  cube-vz-benchmark Run the end-to-end native VM benchmark on Apple Silicon\n"
 	@printf "  cube-vz-lifecycle-benchmark Run official cube-bench semantics against CubeVZ\n"
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
@@ -333,6 +335,14 @@ cube-vz-doctor: cube-vz
 .PHONY: cube-vz-benchmark-guest
 cube-vz-benchmark-guest: cube-vz-precheck
 	"$(CUBEVZ_DIR)/Benchmark/build-guest.sh"
+
+.PHONY: cube-vz-guest
+cube-vz-guest: cube-vz-precheck
+	"$(CUBEVZ_DIR)/Guest/build.sh"
+
+.PHONY: cube-vz-smoke
+cube-vz-smoke: cube-vz cube-vz-guest
+	"$(CUBEVZ_DIR)/Guest/smoke.sh"
 
 .PHONY: cube-vz-benchmark
 cube-vz-benchmark: cube-vz

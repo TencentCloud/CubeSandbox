@@ -10,19 +10,7 @@ private let usage = """
 
   options:
     --template-id ID    CubeAPI template ID (default: cube-vz)
-    --agenthub-template-id ID
-                        Default OpenClaw-ready template used by AgentHub
-    --bind-address IP   IPv4 listen address (default: 127.0.0.1)
     --port N            Loopback HTTP port (default: 3000)
-    --node-id ID        Scheduler node ID (default: cube-vz-local)
-    --advertise-url URL URL other nodes use to reach this node
-    --workers LIST      Comma-separated nodeID=http://IPv4:port workers
-    --coordinator-url   Coordinator URL for periodic worker registration
-    --api-key KEY       Static management-plane key (Authorization: Bearer or X-API-Key)
-    --auth-callback-url URL
-                        Optional callback URL for delegated management auth
-    --guest-builder-dir DIR
-                        Directory containing Dockerfile and build-guest.sh for OCI templates
   """
 
 @main
@@ -44,87 +32,19 @@ private struct CubeVZAPIMain {
       let manager = try SandboxManager(
         templateID: options["--template-id"] ?? "cube-vz",
         templateDirectory: URL(fileURLWithPath: templatePath).standardizedFileURL,
-        sandboxesDirectory: URL(fileURLWithPath: sandboxesPath).standardizedFileURL,
-        guestBuilderDirectory: guestBuilderDirectory(options["--guest-builder-dir"])
+        sandboxesDirectory: URL(fileURLWithPath: sandboxesPath).standardizedFileURL
       )
-      let stateRoot = URL(fileURLWithPath: sandboxesPath).standardizedFileURL
-        .deletingLastPathComponent()
-        .appendingPathComponent("agenthub", isDirectory: true)
-      let localAuth = try LocalAuthManager(
-        directory: stateRoot,
-        initialPassword: ProcessInfo.processInfo.environment["CUBEVZ_AGENTHUB_ADMIN_PASSWORD"]
-      )
-      let agentHub = try AgentHubManager(
-        manager: manager,
-        defaultTemplateID: options["--agenthub-template-id"]
-          ?? ProcessInfo.processInfo.environment["CUBEVZ_AGENTHUB_OPENCLAW_TEMPLATE"]
-          ?? options["--template-id"] ?? "cube-vz",
-        directory: stateRoot
-      )
-      let bindAddress = options["--bind-address"] ?? "127.0.0.1"
-      let nodeID = options["--node-id"] ?? "cube-vz-local"
-      let defaultAdvertiseAddress = bindAddress == "0.0.0.0" ? "127.0.0.1" : bindAddress
-      guard
-        let advertiseURL = URL(
-          string: options["--advertise-url"] ?? "http://\(defaultAdvertiseAddress):\(port)"
-        )
-      else {
-        throw CubeVZError.invalidArguments("--advertise-url is invalid")
+      let server = HTTPServer(port: port, manager: manager)
+      guard port < UInt16.max else {
+        throw CubeVZError.invalidArguments("--port must leave room for the data-plane port")
       }
-      let scheduler = ClusterScheduler(
-        localNodeID: nodeID,
-        advertiseURL: advertiseURL,
-        manager: manager
-      )
-      for entry in (options["--workers"] ?? "").split(separator: ",") {
-        let parts = entry.split(separator: "=", maxSplits: 1)
-        guard parts.count == 2 else {
-          throw CubeVZError.invalidArguments("--workers entries must be nodeID=http://IPv4:port")
-        }
-        try scheduler.register(
-          ClusterRegistrationRequest(
-            nodeID: String(parts[0]),
-            url: String(parts[1]),
-            activeSandboxes: 0
-          )
-        )
-      }
-      let server = HTTPServer(
-        bindAddress: bindAddress,
-        port: port,
-        manager: manager,
-        localAuth: localAuth,
-        agentHub: agentHub,
-        scheduler: scheduler,
-        authCallbackURL: try parseOptionalURL(
-          options["--auth-callback-url"]
-            ?? ProcessInfo.processInfo.environment["CUBE_AUTH_CALLBACK_URL"]
-        ),
-        apiKey: options["--api-key"]
-          ?? ProcessInfo.processInfo.environment["CUBE_API_KEY"]
-          ?? ProcessInfo.processInfo.environment["E2B_API_KEY"]
-      )
+      let dataPlanePort = port + 1
+      let dataPlaneProxy = DataPlaneProxy(port: dataPlanePort, manager: manager)
       try server.start()
-      print("cube-vz-api: listening on http://\(bindAddress):\(port)")
+      try dataPlaneProxy.start()
+      print("cube-vz-api: listening on http://127.0.0.1:\(port)")
+      print("cube-vz-api: data plane on http://127.0.0.1:\(dataPlanePort)")
       print("cube-vz-api: template=\(options["--template-id"] ?? "cube-vz")")
-      print("cube-vz-api: node=\(nodeID) advertise=\(advertiseURL.absoluteString)")
-      if let coordinator = options["--coordinator-url"] {
-        guard let coordinatorURL = URL(string: coordinator) else {
-          throw CubeVZError.invalidArguments("--coordinator-url is invalid")
-        }
-        Task { @MainActor in
-          while !Task.isCancelled {
-            do {
-              try await scheduler.registerWithCoordinator(coordinatorURL)
-            } catch {
-              FileHandle.standardError.write(
-                Data("cube-vz-api: coordinator registration failed: \(error)\n".utf8)
-              )
-            }
-            try? await Task.sleep(for: .seconds(5))
-          }
-        }
-      }
       while !Task.isCancelled {
         try await Task.sleep(for: .seconds(3_600))
       }
@@ -135,11 +55,7 @@ private struct CubeVZAPIMain {
   }
 
   private static func parseOptions(_ arguments: [String]) throws -> [String: String] {
-    let allowed = Set([
-      "--template-dir", "--sandboxes-dir", "--template-id", "--agenthub-template-id", "--bind-address", "--port",
-      "--node-id", "--advertise-url", "--workers", "--coordinator-url",
-      "--api-key", "--auth-callback-url", "--guest-builder-dir",
-    ])
+    let allowed = Set(["--template-dir", "--sandboxes-dir", "--template-id", "--port"])
     var result: [String: String] = [:]
     var index = 0
     while index < arguments.count {
@@ -154,29 +70,5 @@ private struct CubeVZAPIMain {
       index += 2
     }
     return result
-  }
-
-  private static func parseOptionalURL(_ value: String?) throws -> URL? {
-    guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-      return nil
-    }
-    guard let url = URL(string: value), url.scheme == "http" || url.scheme == "https",
-      url.host != nil
-    else {
-      throw CubeVZError.invalidArguments("--auth-callback-url must be an http(s) URL")
-    }
-    return url
-  }
-
-  private static func guestBuilderDirectory(_ explicitPath: String?) -> URL? {
-    let environmentPath = ProcessInfo.processInfo.environment["CUBEVZ_GUEST_BUILDER_DIR"]
-    if let path = explicitPath ?? environmentPath, !path.isEmpty {
-      return URL(fileURLWithPath: path).standardizedFileURL
-    }
-    let candidate = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-      .appendingPathComponent("CubeVZ/Benchmark", isDirectory: true)
-    return FileManager.default.isExecutableFile(
-      atPath: candidate.appendingPathComponent("build-guest.sh").path
-    ) ? candidate : nil
   }
 }

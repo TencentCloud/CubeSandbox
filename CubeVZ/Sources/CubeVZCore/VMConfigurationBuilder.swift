@@ -9,8 +9,7 @@ public enum VMConfigurationBuilder {
     directory: VMDirectory,
     manifest: VMManifest,
     consoleInput: FileHandle? = .standardInput,
-    consoleOutput: FileHandle? = .standardOutput,
-    volumeDirectoryURLs: [URL]? = nil
+    consoleOutput: FileHandle? = .standardOutput
   ) throws -> VZVirtualMachineConfiguration {
     guard VZVirtualMachine.isSupported else {
       throw CubeVZError.unsupported("Apple Virtualization.framework is unavailable")
@@ -117,28 +116,6 @@ public enum VMConfigurationBuilder {
     }
     if manifest.vsockEnabled {
       configuration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
-    }
-
-    let volumeSlots = manifest.volumeShareSlots ?? 0
-    if volumeSlots > 0 {
-      let urls = volumeDirectoryURLs ?? (0..<volumeSlots).map(directory.volumeShareURL(slot:))
-      guard urls.count == volumeSlots else {
-        throw CubeVZError.invalidManifest(
-          "volume directory count \(urls.count) does not match \(volumeSlots) configured slots"
-        )
-      }
-      configuration.directorySharingDevices = try urls.enumerated().map { slot, url in
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-          isDirectory.boolValue
-        else {
-          throw CubeVZError.filesystem("volume share directory is missing: \(url.path)")
-        }
-        let sharedDirectory = VZSharedDirectory(url: url, readOnly: false)
-        let device = VZVirtioFileSystemDeviceConfiguration(tag: "cube-volume-\(slot)")
-        device.share = VZSingleDirectoryShare(directory: sharedDirectory)
-        return device
-      }
     }
 
     do {
