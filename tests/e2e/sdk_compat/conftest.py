@@ -391,6 +391,7 @@ def _log_effective_environment(cfg: SdkE2EConfig) -> None:
             {
                 "E2B_EFFECTIVE_API_URL": cfg.cube_api_url,
                 "E2B_API_KEY": _e2b_api_key_source(),
+                "SDK_E2E_E2B_VALIDATE_API_KEY": str(cfg.e2b_validate_api_key).lower(),
                 "SSL_CERT_FILE": os.environ.get("SSL_CERT_FILE"),
             }
         )
@@ -411,9 +412,7 @@ def _presence(name: str) -> str:
 def _e2b_api_key_source() -> str:
     if os.environ.get("E2B_API_KEY"):
         return "<set from E2B_API_KEY>"
-    if os.environ.get("CUBE_API_KEY"):
-        return "<set from CUBE_API_KEY>"
-    return "<missing E2B_API_KEY/CUBE_API_KEY>"
+    return "<missing E2B_API_KEY>"
 
 
 def _setup_log(message: str) -> None:

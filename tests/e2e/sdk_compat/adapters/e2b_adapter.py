@@ -20,6 +20,9 @@ from framework.models import (
     state_from_raw,
 )
 
+MAX_LIST_PAGES = 100
+
+
 def _import_e2b_sandbox():
     try:
         from e2b_code_interpreter import Sandbox  # type: ignore
@@ -126,6 +129,39 @@ def _sandbox_info_to_raw(info: Any) -> dict[str, Any]:
             normalized[alias] = normalized[source]
 
     return normalized
+
+
+def _sandbox_entry_to_dict(entry: Any) -> dict[str, Any]:
+    if isinstance(entry, dict):
+        data = dict(entry)
+    elif is_dataclass(entry) and not isinstance(entry, type):
+        data = asdict(entry)
+    else:
+        data = {
+            name: getattr(entry, name)
+            for name in ("sandbox_id", "sandboxID", "id", "state", "metadata", "template_id")
+            if hasattr(entry, name)
+        }
+
+    sandbox_id = first_present(data, "sandbox_id", "sandboxID", "id")
+    if sandbox_id is not None:
+        data.setdefault("sandbox_id", sandbox_id)
+        data.setdefault("sandboxID", sandbox_id)
+    state = data.get("state")
+    if state is not None:
+        data["state"] = str(getattr(state, "value", state))
+    return data
+
+
+def _list_sandboxes_via_cubeapi(config: SdkE2EConfig) -> list[dict[str, Any]]:
+    from adapters.api_adapter import ApiClient
+
+    api = ApiClient(config)
+    try:
+        entries = api.list_sandboxes()
+    finally:
+        api.close()
+    return [_sandbox_entry_to_dict(entry) for entry in entries]
 
 
 class E2BAdapter(SandboxAdapter):
@@ -294,8 +330,14 @@ class E2BAdapter(SandboxAdapter):
             entries = list_method(**_e2b_api_params(config))
             if hasattr(entries, "next_items"):
                 items: list[Any] = []
+                page_count = 0
                 while getattr(entries, "has_next", False):
+                    if page_count >= MAX_LIST_PAGES:
+                        raise RuntimeError(
+                            f"E2B sandbox listing exceeded {MAX_LIST_PAGES} pages"
+                        )
                     items.extend(entries.next_items())
+                    page_count += 1
                 entries = items
             return [_sandbox_entry_to_dict(entry) for entry in entries or []]
         except Exception:
@@ -306,16 +348,13 @@ class E2BAdapter(SandboxAdapter):
 
 
 def _e2b_api_params(config: SdkE2EConfig) -> dict[str, Any]:
-    api_key = os.environ.get("E2B_API_KEY") or os.environ.get("CUBE_API_KEY")
+    api_key = os.environ.get("E2B_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            "E2B backend requires E2B_API_KEY or CUBE_API_KEY; "
-            "refusing to use a default API key"
-        )
+        raise RuntimeError("E2B backend requires E2B_API_KEY")
     params = {
         "api_url": config.cube_api_url,
         "api_key": api_key,
-        "validate_api_key": False,
+        "validate_api_key": config.e2b_validate_api_key,
     }
     return {
         key: value
@@ -330,37 +369,6 @@ def _connection_config_accepts_keyword(name: str) -> bool:
     except ImportError:
         return True
     return _accepts_keyword(ConnectionConfig, name)
-
-
-def _sandbox_entry_to_dict(entry: Any) -> dict[str, Any]:
-    if isinstance(entry, dict):
-        data = dict(entry)
-    elif is_dataclass(entry) and not isinstance(entry, type):
-        data = asdict(entry)
-    else:
-        data = {
-            name: getattr(entry, name)
-            for name in ("sandbox_id", "sandboxID", "id", "state", "metadata", "template_id")
-            if hasattr(entry, name)
-        }
-
-    sandbox_id = first_present(data, "sandbox_id", "sandboxID", "id")
-    if sandbox_id is not None:
-        data.setdefault("sandbox_id", sandbox_id)
-        data.setdefault("sandboxID", sandbox_id)
-    state = data.get("state")
-    if state is not None:
-        data["state"] = str(getattr(state, "value", state))
-    return data
-def _list_sandboxes_via_cubeapi(config: SdkE2EConfig) -> list[dict[str, Any]]:
-    from adapters.api_adapter import ApiClient
-
-    api = ApiClient(config)
-    try:
-        entries = api.list_sandboxes()
-    finally:
-        api.close()
-    return [_sandbox_entry_to_dict(entry) for entry in entries]
 
 
 def _accepts_keyword(callable_obj: Any, name: str) -> bool:

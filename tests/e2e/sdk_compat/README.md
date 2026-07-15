@@ -189,9 +189,10 @@ Optional:
 - `SDK_E2E_BACKENDS`: comma-separated backend list. Defaults to `cubesandbox`.
 - `CUBE_API_KEY`: API key if the target environment requires one.
 - `E2B_API_KEY`: required when running the `e2b` backend. For a self-hosted
-  CubeSandbox endpoint, use the API key accepted by that endpoint. The adapter
-  falls back to `CUBE_API_KEY` when `E2B_API_KEY` is not set, but setting it
-  explicitly is recommended.
+  CubeSandbox endpoint, use the API key accepted by that endpoint.
+- `SDK_E2E_E2B_VALIDATE_API_KEY`: enable the E2B SDK's client-side `e2b_*`
+  API key format check. Defaults to `false` for self-hosted deployments that
+  issue keys in another format. Server-side authentication remains enabled.
 - `CUBE_PROXY_NODE_IP`: useful when wildcard sandbox DNS is unavailable from the runner.
 - `CUBE_PROXY_PORT_HTTP`: defaults to `80`.
 - `CUBE_SANDBOX_DOMAIN`: defaults to `cube.app`.
@@ -204,6 +205,11 @@ Optional:
 - `SDK_E2E_RUN_CODE_TIMEOUT`: code execution timeout in seconds. Defaults to `60`.
 - `SDK_E2E_NETWORK_PROBE_TIMEOUT`: TCP probe socket timeout in seconds for
   network policy cases. Defaults to `5`.
+- `SDK_E2E_TCP_TARGET_IP`: primary public TCP probe address. Defaults to
+  `8.8.8.8`.
+- `SDK_E2E_TCP_TARGET_PORT`: public TCP probe port. Defaults to `53`.
+- `SDK_E2E_ALTERNATE_TCP_TARGET_IP`: alternate public TCP probe address.
+  Defaults to `1.1.1.1`.
 - `SDK_E2E_KEEP_SANDBOX_ON_FAILURE`: preserve only sandboxes whose test setup
   or call phase failed. Passed and skipped tests are still cleaned up. Defaults
   to `false`.
@@ -313,11 +319,11 @@ Current capability domains:
 - `cases/filesystem/`: read/write, overwrite, multiline content, file API and shell interoperability.
 - `cases/run_code/`: expression text, stdout, kernel state, Python error reporting.
 - `cases/network/`: create-time network policy for allow/deny and public egress access.
+- `cases/concurrency/`: simultaneous multi-sandbox isolation.
 
 Keep new cases backend-neutral. Add backend-specific behavior through capability
 markers instead of branching inside test bodies. Future domains can be added next
-to the existing directories, for example `network/`, `proxy/`, `metadata/`,
-`errors/`, and `concurrency/`.
+to the existing directories, for example `proxy/`, `metadata/`, and `errors/`.
 
 ## Markers And Capabilities
 

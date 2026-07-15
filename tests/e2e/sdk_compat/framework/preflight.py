@@ -72,8 +72,8 @@ def _check_backend_dependencies(backends: tuple[str, ...], errors: list[str]) ->
 
     if "e2b" in backends:
         if _can_import("e2b_code_interpreter") or _can_import("e2b"):
-            if not (os.environ.get("E2B_API_KEY") or os.environ.get("CUBE_API_KEY")):
-                errors.append("e2b backend requires E2B_API_KEY or CUBE_API_KEY")
+            if not os.environ.get("E2B_API_KEY"):
+                errors.append("e2b backend requires E2B_API_KEY")
         else:
             errors.append(
                 "e2b backend requires e2b-code-interpreter or e2b. "

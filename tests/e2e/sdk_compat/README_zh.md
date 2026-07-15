@@ -33,7 +33,7 @@
 
 - `SDK_E2E_BACKENDS=e2b` 或 `SDK_E2E_BACKENDS=e2b,cubesandbox`：启用 E2B
   后端；
-- `E2B_API_KEY`：E2B SDK 使用的 API key；也可以使用 `CUBE_API_KEY`；
+- `E2B_API_KEY`：E2B SDK 使用的 API key，必须显式设置；
 - `CUBE_API_URL`：兼容 E2B 的 CubeSandbox 控制面地址，adapter 会显式传给
   E2B SDK；
 - `SSL_CERT_FILE`：自托管 HTTPS sandbox endpoint 使用的本地 CA 文件。
@@ -173,6 +173,8 @@ cp env.example .env
 - `SDK_E2E_BACKENDS`：后端列表，默认 `cubesandbox`；
 - `CUBE_API_KEY`：目标环境需要 API key 时使用；
 - `E2B_API_KEY`：运行 E2B 后端时需要；
+- `SDK_E2E_E2B_VALIDATE_API_KEY`：启用 E2B SDK 的客户端 `e2b_*` key
+  格式检查；自托管环境默认 `false`，服务端鉴权不受影响；
 - `CUBE_PROXY_NODE_IP`：无法解析 wildcard sandbox DNS 时使用；
 - `CUBE_PROXY_PORT_HTTP`：默认 `80`；
 - `CUBE_SANDBOX_DOMAIN`：默认 `cube.app`；
@@ -185,6 +187,10 @@ cp env.example .env
 - `SDK_E2E_RUN_CODE_TIMEOUT`：代码执行超时，默认 `60` 秒；
 - `SDK_E2E_NETWORK_PROBE_TIMEOUT`：network policy 用例中的 TCP socket
   探测超时，默认 `5` 秒；
+- `SDK_E2E_TCP_TARGET_IP`：公网 TCP 探测地址，默认 `8.8.8.8`；
+- `SDK_E2E_TCP_TARGET_PORT`：公网 TCP 探测端口，默认 `53`；
+- `SDK_E2E_ALTERNATE_TCP_TARGET_IP`：备用公网 TCP 探测地址，默认
+  `1.1.1.1`；
 - `SDK_E2E_KEEP_SANDBOX_ON_FAILURE`：仅保留 setup/call 失败的 sandbox；
 - `SDK_E2E_TRACE`：输出每次 SDK adapter 操作；
 - `SDK_E2E_SKIP_INTERNET_TESTS`：当 runner 或环境没有稳定公网出站时，
@@ -284,7 +290,8 @@ tests/e2e/sdk_compat/
   输出和缺失命令；
 - `cases/filesystem/`：读写、覆盖、多行内容、文件 API 与 shell 互操作；
 - `cases/run_code/`：表达式结果、stdout、kernel 状态和 Python 错误；
-- `cases/network/`：创建时的 allow/deny 和公网出站策略。
+- `cases/network/`：创建时的 allow/deny 和公网出站策略；
+- `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离。
 
 新增测试应保持后端无关，通过 capability marker 表达后端差异。
 
