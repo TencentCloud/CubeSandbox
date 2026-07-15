@@ -74,5 +74,8 @@ def test_missing_command_returns_127(sdk_sandbox, sdk_e2e_config):
 
 @pytest.mark.p1
 def test_command_timeout_is_enforced(sdk_sandbox):
-    with pytest.raises(Exception):  # noqa: B017 - SDKs expose timeout as backend-specific errors
+    with pytest.raises(
+        Exception,
+        match=r"(?i)timeout|timed out|deadline",
+    ):  # noqa: B017 - SDKs expose backend-specific timeout errors
         sdk_sandbox.run_command("sleep 5", timeout=1)

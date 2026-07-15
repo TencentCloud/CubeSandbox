@@ -84,10 +84,12 @@ def wait_for_platform_pause(
     config: SdkE2EConfig,
 ) -> bool:
     deadline = time.monotonic() + _platform_wait_timeout(config)
+    interval = 1.0
     while time.monotonic() < deadline:
         if fetch_state(adapter) in PAUSED_STATES:
             return True
-        time.sleep(2)
+        time.sleep(interval)
+        interval = min(interval * 2, 8.0)
     return False
 
 
@@ -99,6 +101,7 @@ def wait_for_platform_destroy(
 ) -> tuple[bool, dict[str, Any]]:
     details: dict[str, Any] = {}
     deadline = time.monotonic() + _platform_wait_timeout(config)
+    interval = 1.0
     while time.monotonic() < deadline:
         details["state"] = fetch_state(adapter)
         details["listed"] = sandbox_listed(sandbox_id, backend, config)
@@ -106,7 +109,8 @@ def wait_for_platform_destroy(
             return True, details
         if details["listed"] is False:
             return True, details
-        time.sleep(2)
+        time.sleep(interval)
+        interval = min(interval * 2, 8.0)
     return False, details
 
 

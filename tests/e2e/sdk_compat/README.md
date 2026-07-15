@@ -158,7 +158,7 @@ Run dual backend after installing E2B:
 
 ```bash
 pip install e2b-code-interpreter
-export E2B_API_KEY=e2b_000000
+export E2B_API_KEY=<your-e2b-api-key>
 export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
 export SDK_E2E_BACKENDS=e2b,cubesandbox
 pytest --run-e2e
@@ -328,6 +328,7 @@ Priority markers:
 - `p1`: daily compatibility regression.
 - `p2`: weekly or broader feature coverage.
 - `p3`: release qualification and long-running scenarios.
+- `slow`: tests that exceed the normal PR time budget.
 
 Capability markers:
 
@@ -336,7 +337,7 @@ Capability markers:
 - `@pytest.mark.requires_cubeproxy`: platform lifecycle cases that depend on cube-proxy and lifecycle-manager coordination. Skipped unless `SDK_E2E_PLATFORM_LIFECYCLE=true`.
 - Common capabilities include `lifecycle`, `commands`, `filesystem`, and `run_code`.
 - Shared optional capabilities include `pause_resume`, `network_allow_deny`, and `network_public_access`.
-- CubeSandbox-specific extended capabilities currently include `network_l7_rules` and `proxy_url`.
+- `platform_lifecycle` is available only to CubeSandbox platform-managed lifecycle cases.
 
 ## Cleanup
 

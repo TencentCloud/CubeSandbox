@@ -46,8 +46,8 @@ Use `requires_capability` for backend support boundaries:
 ```
 
 Available capability domains include `lifecycle`, `commands`, `filesystem`,
-`run_code`, `pause_resume`, `network_allow_deny`, `network_public_access`,
-`network_l7_rules`, and `proxy_url`.
+`run_code`, `pause_resume`, `network_allow_deny`, `network_public_access`, and
+`platform_lifecycle`.
 
 Use `smoke`, `p0`, `p1`, `p2`, `p3`, and `slow` to describe execution priority.
 Use `requires_cubeproxy` only for cases that require CubeProxy/lifecycle-manager

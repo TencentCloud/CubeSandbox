@@ -64,3 +64,20 @@ class SandboxAdapter(ABC):
         close = getattr(self.raw_sandbox, "close", None)
         if callable(close):
             close()
+
+
+def cleanup_raw_sandbox(sandbox: Any) -> None:
+    for name in ("kill", "delete"):
+        method = getattr(sandbox, name, None)
+        if callable(method):
+            try:
+                method()
+            except Exception:
+                pass
+            break
+    close = getattr(sandbox, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass

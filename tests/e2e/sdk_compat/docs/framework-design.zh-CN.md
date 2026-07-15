@@ -45,8 +45,8 @@ pytest 用例
 ```
 
 当前 capability 包括 `lifecycle`、`commands`、`filesystem`、`run_code`、
-`pause_resume`、`network_allow_deny`、`network_public_access`、
-`network_l7_rules` 和 `proxy_url`。
+`pause_resume`、`network_allow_deny`、`network_public_access` 和
+`platform_lifecycle`。
 
 使用 `smoke`、`p0`、`p1`、`p2`、`p3` 和 `slow` 表达执行优先级。只有依赖
 CubeProxy/lifecycle-manager 协调的用例才使用 `requires_cubeproxy`。

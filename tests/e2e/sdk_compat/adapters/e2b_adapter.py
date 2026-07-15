@@ -9,10 +9,16 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import Any
 
-from adapters.base import SandboxAdapter
+from adapters.base import SandboxAdapter, cleanup_raw_sandbox
 from framework.capabilities import E2B_CAPABILITIES
 from framework.config import SdkE2EConfig
-from framework.models import CodeResult, CommandResult, SandboxInfo, state_from_raw
+from framework.models import (
+    CodeResult,
+    CommandResult,
+    SandboxInfo,
+    first_present,
+    state_from_raw,
+)
 
 def _import_e2b_sandbox():
     try:
@@ -48,7 +54,7 @@ def _get_sandbox_id(sandbox: Any) -> str:
             return str(value)
     data = getattr(sandbox, "_data", None)
     if isinstance(data, dict):
-        value = _first_present_value(data, "sandboxID", "sandbox_id", "id")
+        value = first_present(data, "sandboxID", "sandbox_id", "id")
         if value is not None:
             return str(value)
     raise RuntimeError("could not determine E2B sandbox id")
@@ -162,9 +168,9 @@ class E2BAdapter(SandboxAdapter):
             else:
                 sandbox = Sandbox(**kwargs)
             return cls(sandbox, e2e_config=config)
-        except BaseException:
+        except Exception:
             if sandbox is not None:
-                _cleanup_raw_sandbox(sandbox)
+                cleanup_raw_sandbox(sandbox)
             raise
 
     @classmethod
@@ -195,7 +201,7 @@ class E2BAdapter(SandboxAdapter):
             if callable(method):
                 raw = _sandbox_info_to_raw(method())
                 break
-        raw_sandbox_id = _first_present_value(raw, "sandboxID", "sandbox_id")
+        raw_sandbox_id = first_present(raw, "sandboxID", "sandbox_id")
         return SandboxInfo(
             sandbox_id=str(raw_sandbox_id if raw_sandbox_id is not None else self.sandbox_id),
             state=state_from_raw(raw),
@@ -300,11 +306,15 @@ class E2BAdapter(SandboxAdapter):
 
 
 def _e2b_api_params(config: SdkE2EConfig) -> dict[str, Any]:
+    api_key = os.environ.get("E2B_API_KEY") or os.environ.get("CUBE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "E2B backend requires E2B_API_KEY or CUBE_API_KEY; "
+            "refusing to use a default API key"
+        )
     params = {
         "api_url": config.cube_api_url,
-        "api_key": os.environ.get("E2B_API_KEY")
-        or os.environ.get("CUBE_API_KEY")
-        or "e2b_000000",
+        "api_key": api_key,
         "validate_api_key": False,
     }
     return {
@@ -334,7 +344,7 @@ def _sandbox_entry_to_dict(entry: Any) -> dict[str, Any]:
             if hasattr(entry, name)
         }
 
-    sandbox_id = _first_present_value(data, "sandbox_id", "sandboxID", "id")
+    sandbox_id = first_present(data, "sandbox_id", "sandboxID", "id")
     if sandbox_id is not None:
         data.setdefault("sandbox_id", sandbox_id)
         data.setdefault("sandboxID", sandbox_id)
@@ -342,15 +352,6 @@ def _sandbox_entry_to_dict(entry: Any) -> dict[str, Any]:
     if state is not None:
         data["state"] = str(getattr(state, "value", state))
     return data
-
-
-def _first_present_value(data: dict[str, Any], *keys: str) -> Any | None:
-    for key in keys:
-        if key in data:
-            return data[key]
-    return None
-
-
 def _list_sandboxes_via_cubeapi(config: SdkE2EConfig) -> list[dict[str, Any]]:
     from adapters.api_adapter import ApiClient
 
@@ -360,23 +361,6 @@ def _list_sandboxes_via_cubeapi(config: SdkE2EConfig) -> list[dict[str, Any]]:
     finally:
         api.close()
     return [_sandbox_entry_to_dict(entry) for entry in entries]
-
-
-def _cleanup_raw_sandbox(sandbox: Any) -> None:
-    for name in ("kill", "delete"):
-        method = getattr(sandbox, name, None)
-        if callable(method):
-            try:
-                method()
-            except Exception:
-                pass
-            break
-    close = getattr(sandbox, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            pass
 
 
 def _accepts_keyword(callable_obj: Any, name: str) -> bool:

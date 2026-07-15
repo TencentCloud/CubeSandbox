@@ -91,5 +91,8 @@ def test_command_created_file_is_visible_to_files_api(sdk_sandbox, sdk_e2e_confi
 
 
 def test_reading_missing_file_raises(sdk_sandbox):
-    with pytest.raises(Exception):  # noqa: B017 - SDKs expose backend-specific errors
+    with pytest.raises(
+        Exception,
+        match=r"(?i)not found|does not exist|no such file|404",
+    ):  # noqa: B017 - SDKs expose backend-specific file errors
         sdk_sandbox.read_file("/tmp/sdk-compat-does-not-exist.txt")

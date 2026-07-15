@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import importlib
+import os
 from typing import Any
 
 from adapters.api_adapter import ApiClient
 from framework.config import SdkE2EConfig
+from framework.models import first_present
 from framework.platform_lifecycle import probe_platform_lifecycle
 from framework.reporting import JsonlReporter
 
@@ -70,11 +72,13 @@ def _check_backend_dependencies(backends: tuple[str, ...], errors: list[str]) ->
 
     if "e2b" in backends:
         if _can_import("e2b_code_interpreter") or _can_import("e2b"):
-            return
-        errors.append(
-            "e2b backend requires e2b-code-interpreter or e2b. "
-            "Install tests/e2e/sdk_compat/requirements.txt."
-        )
+            if not (os.environ.get("E2B_API_KEY") or os.environ.get("CUBE_API_KEY")):
+                errors.append("e2b backend requires E2B_API_KEY or CUBE_API_KEY")
+        else:
+            errors.append(
+                "e2b backend requires e2b-code-interpreter or e2b. "
+                "Install tests/e2e/sdk_compat/requirements.txt."
+            )
 
 
 def _can_import(module: str) -> bool:
@@ -86,7 +90,7 @@ def _can_import(module: str) -> bool:
 
 
 def _check_template_ready(template_id: str, template: dict[str, Any], errors: list[str]) -> None:
-    status = _first_present(
+    status = first_present(
         template,
         "status",
         "state",
@@ -97,20 +101,11 @@ def _check_template_ready(template_id: str, template: dict[str, Any], errors: li
         return
     if str(status).lower() not in {"ready", "active", "available"}:
         errors.append(f"template {template_id!r} is not ready: status={status!r}")
-
-
-def _first_present(data: dict[str, Any], *keys: str) -> Any | None:
-    for key in keys:
-        if key in data:
-            return data[key]
-    return None
-
-
 def _template_summary(template_id: str, template: dict[str, Any]) -> dict[str, Any]:
     return {
         "template_id": template_id,
-        "name": _first_present(template, "name", "templateName", "template_name"),
-        "status": _first_present(
+        "name": first_present(template, "name", "templateName", "template_name"),
+        "status": first_present(
             template,
             "status",
             "state",

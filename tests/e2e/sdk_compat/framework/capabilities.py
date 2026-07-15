@@ -11,6 +11,7 @@ CODE_INTERPRETER = "code_interpreter"
 PAUSE_RESUME = "pause_resume"
 NETWORK_ALLOW_DENY = "network_allow_deny"
 NETWORK_PUBLIC_ACCESS = "network_public_access"
+PLATFORM_LIFECYCLE = "platform_lifecycle"
 
 COMMON_CAPABILITIES = frozenset({LIFECYCLE, COMMANDS, FILESYSTEM, RUN_CODE})
 
@@ -31,5 +32,6 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         PAUSE_RESUME,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
+        PLATFORM_LIFECYCLE,
     }
 )

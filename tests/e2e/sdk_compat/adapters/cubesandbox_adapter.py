@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from adapters.base import SandboxAdapter
+from adapters.base import SandboxAdapter, cleanup_raw_sandbox
 from framework.capabilities import CUBESANDBOX_CAPABILITIES
 from framework.config import SdkE2EConfig
 from framework.models import CodeResult, CommandResult, SandboxInfo, state_from_raw
@@ -41,9 +41,9 @@ class CubeSandboxAdapter(SandboxAdapter):
                 **opts,
             )
             return cls(sandbox, sdk_config=sdk_config, e2e_config=config)
-        except BaseException:
+        except Exception:
             if sandbox is not None:
-                _cleanup_raw_sandbox(sandbox)
+                cleanup_raw_sandbox(sandbox)
             raise
 
     @classmethod
@@ -130,20 +130,3 @@ class CubeSandboxAdapter(SandboxAdapter):
 
 def _normalize_log_lines(items: Any) -> list[str]:
     return [str(getattr(item, "line", item)) for item in items or []]
-
-
-def _cleanup_raw_sandbox(sandbox: Any) -> None:
-    for name in ("kill", "delete"):
-        method = getattr(sandbox, name, None)
-        if callable(method):
-            try:
-                method()
-            except Exception:
-                pass
-            break
-    close = getattr(sandbox, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            pass

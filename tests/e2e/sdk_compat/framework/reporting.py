@@ -21,6 +21,8 @@ class JsonlReporter:
     def record(self, event: str, **fields: Any) -> None:
         if self._file.closed:
             return
+        # Keep the reporter as an independent redaction boundary. Trace events
+        # are sanitized when captured, but callers may pass other raw fields.
         payload = sanitize({"ts": time.time(), "event": event, **fields})
         try:
             self._file.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")

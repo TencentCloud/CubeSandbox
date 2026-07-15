@@ -8,7 +8,7 @@ import time
 import pytest
 
 from framework.assertions import assert_code_ok, assert_command_ok
-from framework.capabilities import LIFECYCLE, RUN_CODE
+from framework.capabilities import LIFECYCLE, PLATFORM_LIFECYCLE, RUN_CODE
 from framework.lifecycle import (
     PLATFORM_LIFECYCLE_SKIP_REASON,
     fetch_state,
@@ -61,6 +61,7 @@ def _wait_for_command_ready(adapter, config) -> None:
 
 
 @pytest.mark.requires_capability(RUN_CODE)
+@pytest.mark.requires_capability(PLATFORM_LIFECYCLE)
 @pytest.mark.requires_code_interpreter
 @pytest.mark.sandbox_create_options(lifecycle={"on_timeout": "pause", "auto_resume": True})
 def test_lifecycle_auto_resume_preserves_state(sdk_sandbox, sdk_e2e_config):
@@ -84,6 +85,7 @@ def test_lifecycle_auto_resume_preserves_state(sdk_sandbox, sdk_e2e_config):
 
 
 @pytest.mark.requires_capability(RUN_CODE)
+@pytest.mark.requires_capability(PLATFORM_LIFECYCLE)
 @pytest.mark.requires_code_interpreter
 @pytest.mark.sandbox_create_options(
     lifecycle={"on_timeout": "pause", "auto_resume": False},
@@ -129,6 +131,7 @@ def test_lifecycle_auto_pause_manual_connect_allows_command_and_run_code(
 
 
 @pytest.mark.requires_capability(RUN_CODE)
+@pytest.mark.requires_capability(PLATFORM_LIFECYCLE)
 @pytest.mark.requires_code_interpreter
 @pytest.mark.sandbox_create_options(
     lifecycle={"on_timeout": "pause", "auto_resume": True}
@@ -164,6 +167,7 @@ def test_lifecycle_auto_pause_auto_resume_allows_command_and_run_code(
 
 
 @pytest.mark.requires_capability(RUN_CODE)
+@pytest.mark.requires_capability(PLATFORM_LIFECYCLE)
 @pytest.mark.requires_code_interpreter
 @pytest.mark.sandbox_create_options(
     lifecycle={"on_timeout": "pause", "auto_resume": True}

@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import re
 import time
+from collections import deque
 from contextvars import ContextVar, Token
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
+from itertools import islice
 from typing import Any, Callable, TypeVar
 
 MAX_STRING_LENGTH = 2048
@@ -39,12 +41,15 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"\b("
     r"api[_-]?key|"
     r"access[_-]?key|"
+    r"api[_-]?token|"
+    r"access[_-]?token|"
     r"auth[_-]?token|"
+    r"bearer[_-]?token|"
     r"jwt|"
     r"password|"
     r"private[_-]?key|"
     r"secret|"
-    r"token"
+    r"private[_-]?token"
     r")\b"
     r"(\s*[:=]\s*)"
     r"([^\r\n]*)"
@@ -142,7 +147,7 @@ class TraceCollector:
         self.nodeid = nodeid
         self.verbose = verbose
         self._emit = emit
-        self._events: list[dict[str, Any]] = []
+        self._events: deque[dict[str, Any]] = deque(maxlen=MAX_TRACE_EVENTS)
         self._dropped_events = 0
 
     def capture(
@@ -195,10 +200,9 @@ class TraceCollector:
                 "error": error,
             }
         )
-        self._events.append(event)
-        if len(self._events) > MAX_TRACE_EVENTS:
-            self._events.pop(0)
+        if len(self._events) == MAX_TRACE_EVENTS:
             self._dropped_events += 1
+        self._events.append(event)
         if self.verbose and self._emit:
             try:
                 self._emit(self.format_event(event))
@@ -215,7 +219,8 @@ class TraceCollector:
         lines = ["SDK trace (most recent operations):"]
         if self._dropped_events:
             lines.append(f"SDK trace: {self._dropped_events} older operations were dropped")
-        for event in self._events[-10:]:
+        start = max(0, len(self._events) - 10)
+        for event in islice(self._events, start, None):
             lines.append(self.format_event(event))
         return "\n".join(lines)
 

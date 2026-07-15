@@ -19,6 +19,28 @@
 - [English case authoring guide](docs/case-authoring.md)
 - [中文用例编写指南](docs/zh/case-authoring.md)
 
+## Backend 环境变量
+
+`cubesandbox` 后端：
+
+- `CUBE_API_URL`：CubeAPI 控制面地址，默认
+  `http://127.0.0.1:3000`；
+- `CUBE_TEMPLATE_ID`：用于创建 sandbox 的 READY 模板 ID；
+- `CUBE_API_KEY`：目标 CubeAPI 需要认证时使用；
+- `CUBE_PROXY_NODE_IP`：runner 无法解析 sandbox wildcard DNS 时使用。
+
+`e2b` 后端：
+
+- `SDK_E2E_BACKENDS=e2b` 或 `SDK_E2E_BACKENDS=e2b,cubesandbox`：启用 E2B
+  后端；
+- `E2B_API_KEY`：E2B SDK 使用的 API key；也可以使用 `CUBE_API_KEY`；
+- `CUBE_API_URL`：兼容 E2B 的 CubeSandbox 控制面地址，adapter 会显式传给
+  E2B SDK；
+- `SSL_CERT_FILE`：自托管 HTTPS sandbox endpoint 使用的本地 CA 文件。
+
+E2B 后端不会关闭 TLS 证书校验。自托管 HTTPS 环境必须配置
+`SSL_CERT_FILE` 或系统 trust store。
+
 ## 准备模板
 
 执行在线 E2E 前，需要准备支持 Code Interpreter 的模板，并暴露 envd
@@ -211,6 +233,21 @@ SDK_E2E_REPORT_DIR/events.jsonl
 - `sandbox_cleanup` / `sandbox_kept`；
 - `test_result`。
 
+生成 HTML 报告：
+
+```bash
+pytest --run-e2e -m lifecycle \
+  --html=reports/sdk-dual/report.html \
+  --self-contained-html
+```
+
+生成 CI 使用的 JUnit XML 报告：
+
+```bash
+pytest --run-e2e -m lifecycle \
+  --junit-xml=reports/sdk-dual/junit.xml
+```
+
 失败结果会包含错误、sandbox 信息和最近的 SDK 操作 trace。trace 会对
 API key、环境变量等敏感值脱敏，并截断过大的字符串和集合。文件内容只
 记录长度，不记录明文或内容 hash。
@@ -272,8 +309,8 @@ Capability marker：
 
 常用 capability 有 `lifecycle`、`commands`、`filesystem`、`run_code`。
 可选共享 capability 包括 `pause_resume`、`network_allow_deny`、
-`network_public_access`；CubeSandbox 专属扩展 capability 包括
-`network_l7_rules` 和 `proxy_url`。
+`network_public_access`。
+`platform_lifecycle` 仅由 CubeSandbox 的平台托管生命周期用例提供。
 
 ## 清理
 

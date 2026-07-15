@@ -246,8 +246,6 @@ def sdk_sandbox(
         pytest.skip("CUBE_TEMPLATE_ID or --cube-template-id is required for SDK E2E")
 
     create_options = _create_options_for_node(request.node)
-    if sdk_backend == "e2b" and _is_auto_pause_case(create_options):
-        pytest.skip("e2b backend does not cover CubeSandbox platform-managed auto-pause cases")
 
     metadata = {
         "test_suite": "sdk_compat",
@@ -334,6 +332,8 @@ def _cleanup_sdk_sandbox(
     sdk_e2e_config: SdkE2EConfig,
     sdk_e2e_reporter: JsonlReporter,
 ) -> None:
+    if adapter is None:
+        return
     failed = _test_failed(request.node)
     if sdk_e2e_config.keep_sandbox_on_failure and failed:
         errors: list[str] = []
@@ -359,16 +359,6 @@ def _cleanup_sdk_sandbox(
         nodeid=request.node.nodeid,
         errors=errors,
     )
-
-
-def _is_auto_pause_case(create_options: dict) -> bool:
-    lifecycle = create_options.get("lifecycle")
-    if not isinstance(lifecycle, dict):
-        return False
-    on_timeout = lifecycle.get("on_timeout")
-    if isinstance(on_timeout, dict):
-        return on_timeout.get("action") == "pause"
-    return on_timeout == "pause"
 
 
 def _test_failed(node: pytest.Item) -> bool:
@@ -423,7 +413,7 @@ def _e2b_api_key_source() -> str:
         return "<set from E2B_API_KEY>"
     if os.environ.get("CUBE_API_KEY"):
         return "<set from CUBE_API_KEY>"
-    return "<using e2b_000000 local key>"
+    return "<missing E2B_API_KEY/CUBE_API_KEY>"
 
 
 def _setup_log(message: str) -> None:

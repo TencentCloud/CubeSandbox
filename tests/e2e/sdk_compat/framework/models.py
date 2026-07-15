@@ -29,6 +29,13 @@ class SandboxInfo:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+def first_present(data: dict[str, Any], *keys: str) -> Any | None:
+    for key in keys:
+        if key in data:
+            return data[key]
+    return None
+
+
 def state_from_raw(raw: dict[str, Any]) -> str | None:
     for key in ("state", "State", "status", "Status"):
         value = raw.get(key)
