@@ -268,8 +268,11 @@ current envd SDK path:
 | Data plane | Any envd HTTP request for port `49983` | Transparently relays bytes to the selected guest over vsock. |
 
 The control server accepts requests up to 1 MiB. The data-plane proxy accepts
-up to 64 KiB of HTTP headers before routing. Unsupported routes, templates, and
-guest ports are rejected rather than silently emulated.
+up to 64 KiB of HTTP headers before routing. Both apply a five-second deadline
+while reading request headers. The process caps concurrent control connections
+at 64 and data-plane relays at 128; excess connections receive HTTP 503.
+Unsupported routes, templates, and guest ports are rejected rather than
+silently emulated.
 
 ## Validation and benchmarks
 
@@ -306,6 +309,9 @@ construction occur before measurement.
 - Anyone able to connect as the local user can create, access, and destroy
   CubeVZ sandboxes.
 - Sandbox disks are ephemeral. `DELETE` does not preserve guest state.
+- The API holds an exclusive lock on its sandboxes directory. After a process
+  restart, it removes stale `sb-*` and interrupted partial-clone directories
+  before accepting requests.
 - Every sandbox gets a fresh generic machine identifier. Active sandboxes have
   distinct locally administered MAC addresses; inactive addresses are recycled
   to avoid unbounded VZNAT DHCP identities.

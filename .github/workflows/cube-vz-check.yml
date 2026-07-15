@@ -1,0 +1,51 @@
+name: CubeVZ Check
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'CubeVZ/**'
+      - 'Makefile'
+      - '.github/workflows/cube-vz-check.yml'
+  pull_request:
+    paths:
+      - 'CubeVZ/**'
+      - 'Makefile'
+      - '.github/workflows/cube-vz-check.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: cube-vz-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and self-test
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Show toolchain
+        run: |
+          uname -a
+          swift --version
+
+      - name: Check Swift formatting
+        working-directory: CubeVZ
+        run: swift format lint --recursive Sources
+
+      - name: Run native self-tests
+        run: make cube-vz-test CUBEVZ_SELFTEST_FLAGS=--skip-vz-configuration
+
+      - name: Build and sign release binaries
+        run: make cube-vz
+
+      - name: Verify signatures
+        run: |
+          codesign --verify --strict _output/bin/cube-vz
+          codesign --verify --strict _output/bin/cube-vz-api

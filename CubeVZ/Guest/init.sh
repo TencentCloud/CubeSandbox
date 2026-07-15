@@ -27,11 +27,19 @@ $BB udhcpc -q -b -t 3 -T 1 -A 1 \
   -i eth0 -s /usr/local/sbin/cube-vz-udhcpc &
 
 ENVD_LOG_FILE=/dev/console /usr/local/bin/cube-entrypoint.sh &
-/usr/local/sbin/cube-vz-relay 49983 &
+relay_ready_file=/run/cube-vz-relay.ready
+$BB rm -f "$relay_ready_file"
+/usr/local/sbin/cube-vz-relay 49983 "$relay_ready_file" &
+relay_pid=$!
 
 ready=0
 for _ in $($BB seq 1 1000); do
-  if $BB wget -q -O /dev/null http://127.0.0.1:49983/health; then
+  if ! $BB kill -0 "$relay_pid" 2>/dev/null; then
+    echo "CUBEVZ_RELAY_ERROR relay exited before readiness" >/dev/console
+    exit 1
+  fi
+  if [ -s "$relay_ready_file" ] \
+    && $BB wget -q -O /dev/null http://127.0.0.1:49983/health; then
     ready=1
     break
   fi

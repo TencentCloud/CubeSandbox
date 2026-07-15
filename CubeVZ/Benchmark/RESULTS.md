@@ -53,13 +53,6 @@ directory.
 | M4 Pro, concurrency 1 | 20 | 222.8 ms | 245.8 ms | 246.6 ms | 2.59 lifecycle/s |
 | M4 Pro, concurrency 10 | 200 | 282.9 ms | 363.8 ms | 414.7 ms | 17.80 lifecycle/s |
 
-Compared with the previous adaptive restore/cold baseline, concurrency-1
-average create improved 22.2% and concurrency-10 average improved 39.9%.
-Concurrency-10 P95 improved 38.3%, P99 improved 32.2%, and throughput improved
-37.8%. Compared with the first pinned direct-boot kernel baseline, the final
-VZ-only configuration reduced average create another 5.7% at concurrency 1
-and 3.3% at concurrency 10.
-
 The optimized path has one lifecycle mode:
 
 - every sandbox gets a fresh machine identifier and cold-boots an APFS-cloned
@@ -88,8 +81,10 @@ not part of POST readiness because CubeVZ control and envd traffic use vsock.
 An outbound Internet command issued immediately after create may therefore
 need a brief retry while VZNAT assigns the guest address.
 
-For context, the official Linux reports for the same 2-vCPU / 2-GiB sandbox
-size publish these create latencies:
+For context, the repository's official
+[BMI5 bare-metal report](../../docs/blog/posts/2026-06-01-cubesandbox-perf-benchmark.md)
+and [SA9 PVM report](../../docs/blog/posts/2026-06-03-cubesandbox-perf-benchmark-pvm.md)
+publish these create latencies for the same 2-vCPU / 2-GiB sandbox size:
 
 | Official Linux host / tier | Create avg | Create P95 | Relative M4 avg |
 |---|---:|---:|---:|

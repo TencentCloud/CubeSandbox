@@ -12,7 +12,9 @@ private struct HTTPRequest {
 }
 
 final class HTTPServer: @unchecked Sendable {
+  private static let maximumConnections = 64
   private static let maximumRequestBytes = 1_048_576
+  private static let requestReadTimeoutNanoseconds: UInt64 = 5_000_000_000
 
   private let port: UInt16
   private let manager: SandboxManager
@@ -22,6 +24,7 @@ final class HTTPServer: @unchecked Sendable {
     attributes: .concurrent
   )
   private var listenDescriptor: Int32 = -1
+  private let connectionSlots = DispatchSemaphore(value: maximumConnections)
 
   init(port: UInt16, manager: SandboxManager) {
     self.port = port
@@ -77,7 +80,15 @@ final class HTTPServer: @unchecked Sendable {
       let client = Darwin.accept(listenDescriptor, nil, nil)
       if client < 0 {
         if errno == EINTR { continue }
+        if [ECONNABORTED, EMFILE, ENFILE, ENOBUFS, ENOMEM].contains(errno) {
+          usleep(50_000)
+          continue
+        }
         return
+      }
+      guard connectionSlots.wait(timeout: .now()) == .success else {
+        sendError(status: 503, message: "control-plane capacity reached", to: client)
+        continue
       }
       workerQueue.async { [self] in
         handle(client: client)
@@ -88,7 +99,8 @@ final class HTTPServer: @unchecked Sendable {
   private func handle(client: Int32) {
     do {
       let request = try readRequest(from: client)
-      Task { @MainActor [manager] in
+      Task { @MainActor [self, manager] in
+        defer { connectionSlots.signal() }
         do {
           switch (request.method, request.path) {
           case ("GET", "/health"):
@@ -124,21 +136,22 @@ final class HTTPServer: @unchecked Sendable {
       }
     } catch {
       sendError(status: 400, message: error.localizedDescription, to: client)
+      connectionSlots.signal()
     }
   }
 
   private func readRequest(from descriptor: Int32) throws -> HTTPRequest {
     var data = Data()
     var expectedSize: Int?
+    let deadline = DispatchTime.now().uptimeNanoseconds + Self.requestReadTimeoutNanoseconds
 
     while data.count < Self.maximumRequestBytes {
       var buffer = [UInt8](repeating: 0, count: 4096)
-      var count: Int
-      repeat {
-        count = buffer.withUnsafeMutableBytes {
-          Darwin.read(descriptor, $0.baseAddress, $0.count)
-        }
-      } while count < 0 && errno == EINTR
+      let count = try read(
+        into: &buffer,
+        from: descriptor,
+        before: deadline
+      )
       guard count > 0 else { throw CubeVZError.runtime("HTTP client disconnected") }
       data.append(contentsOf: buffer.prefix(count))
       guard data.count <= Self.maximumRequestBytes else {
@@ -179,6 +192,38 @@ final class HTTPServer: @unchecked Sendable {
     )
   }
 
+  private func read(
+    into buffer: inout [UInt8],
+    from descriptor: Int32,
+    before deadline: UInt64
+  ) throws -> Int {
+    while true {
+      let now = DispatchTime.now().uptimeNanoseconds
+      guard now < deadline else {
+        throw CubeVZError.runtime("HTTP request timed out")
+      }
+      let remainingNanoseconds = deadline - now
+      let timeoutMilliseconds = Int32(
+        max(1, min(UInt64(Int32.max), (remainingNanoseconds + 999_999) / 1_000_000))
+      )
+      var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+      let ready = Darwin.poll(&pollDescriptor, 1, timeoutMilliseconds)
+      if ready < 0 && errno == EINTR { continue }
+      guard ready > 0 else {
+        if ready == 0 { throw CubeVZError.runtime("HTTP request timed out") }
+        throw posixError("poll")
+      }
+
+      var count: Int
+      repeat {
+        count = buffer.withUnsafeMutableBytes {
+          Darwin.read(descriptor, $0.baseAddress, $0.count)
+        }
+      } while count < 0 && errno == EINTR
+      return count
+    }
+  }
+
   private func send(status: Int, body: Data, to descriptor: Int32) {
     let reason: String
     switch status {
@@ -187,6 +232,7 @@ final class HTTPServer: @unchecked Sendable {
     case 204: reason = "No Content"
     case 400: reason = "Bad Request"
     case 404: reason = "Not Found"
+    case 503: reason = "Service Unavailable"
     default: reason = "Internal Server Error"
     }
     let header = Data(

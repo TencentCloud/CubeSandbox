@@ -35,6 +35,20 @@ static void write_all(int fd, const char *message) {
   }
 }
 
+static ssize_t read_line(int fd, char *buffer, size_t capacity) {
+  size_t used = 0;
+  while (used + 1 < capacity) {
+    ssize_t count = read(fd, buffer + used, capacity - used - 1);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) return count;
+    used += (size_t)count;
+    buffer[used] = '\0';
+    if (memchr(buffer, '\n', used) != NULL) return (ssize_t)used;
+  }
+  errno = EMSGSIZE;
+  return -1;
+}
+
 int main(int argc, char **argv) {
   char ready_message[256];
   if (argc > 1) {
@@ -71,7 +85,7 @@ int main(int argc, char **argv) {
     write_all(client, ready_message);
     for (;;) {
       char request[64] = {0};
-      ssize_t count = read(client, request, sizeof(request) - 1);
+      ssize_t count = read_line(client, request, sizeof(request));
       if (count <= 0) {
         break;
       }

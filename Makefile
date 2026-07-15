@@ -17,6 +17,7 @@ MANUAL_DEPLOY_SCRIPT ?= $(ROOT_DIR)/deploy/one-click/deploy-manual.sh
 WEB_DIR ?= $(ROOT_DIR)/web
 CUBECOW_DIR ?= $(ROOT_DIR)/cubecow
 CUBEVZ_DIR ?= $(ROOT_DIR)/CubeVZ
+CUBEVZ_SELFTEST_FLAGS ?=
 CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
@@ -326,7 +327,7 @@ cube-vz-api: cube-vz
 cube-vz-test: cube-vz-precheck
 	cd "$(CUBEVZ_DIR)" && swift build --product cube-vz-selftest
 	codesign --force --sign - --entitlements "$(CUBEVZ_DIR)/cube-vz.entitlements" "$(CUBEVZ_DIR)/.build/debug/cube-vz-selftest"
-	"$(CUBEVZ_DIR)/.build/debug/cube-vz-selftest"
+	"$(CUBEVZ_DIR)/.build/debug/cube-vz-selftest" $(CUBEVZ_SELFTEST_FLAGS)
 
 .PHONY: cube-vz-doctor
 cube-vz-doctor: cube-vz
@@ -345,7 +346,7 @@ cube-vz-smoke: cube-vz cube-vz-guest
 	"$(CUBEVZ_DIR)/Guest/smoke.sh"
 
 .PHONY: cube-vz-benchmark
-cube-vz-benchmark: cube-vz
+cube-vz-benchmark: cube-vz cube-vz-benchmark-guest
 	CUBEVZ_BENCH_SKIP_BUILD=1 "$(CUBEVZ_DIR)/Benchmark/run-benchmark.sh"
 
 .PHONY: cube-vz-lifecycle-benchmark

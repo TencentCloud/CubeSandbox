@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/vm_sockets.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -95,8 +96,8 @@ static void *serve_client(void *argument) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 2) {
-    fprintf(stderr, "usage: cube-vz-relay PORT\n");
+  if (argc < 2 || argc > 3) {
+    fprintf(stderr, "usage: cube-vz-relay PORT [READY_FILE]\n");
     return 2;
   }
   char *end = NULL;
@@ -123,6 +124,16 @@ int main(int argc, char **argv) {
     perror("cube-vz-relay: listen");
     close(server);
     return 1;
+  }
+  if (argc == 3) {
+    int ready = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (ready < 0 || write_bytes(ready, "READY\n", 6) < 0) {
+      perror("cube-vz-relay: ready file");
+      if (ready >= 0) close(ready);
+      close(server);
+      return 1;
+    }
+    close(ready);
   }
 
   for (;;) {

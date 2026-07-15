@@ -26,16 +26,22 @@ func main() {
 
 	result, err := sandbox.Commands().Run(
 		ctx,
-		"printf cube-vz-envd-ok",
-		cubesandbox.CommandOptions{Timeout: 10 * time.Second},
+		"BB=/usr/local/sbin/busybox; "+
+			"for i in $($BB seq 1 100); do "+
+			"if $BB ip -4 addr show dev eth0 | $BB grep -q 'inet ' && "+
+			"$BB ip route show default | $BB grep -q '^default '; then "+
+			"printf cube-vz-envd-network-ok; exit 0; fi; "+
+			"$BB sleep 0.05; done; "+
+			"$BB ip -4 addr show dev eth0 >&2; $BB ip route show >&2; exit 1",
+		cubesandbox.CommandOptions{Timeout: 15 * time.Second},
 	)
 	if err != nil {
 		fail("run envd command", err)
 	}
-	if result.ExitCode != 0 || result.Stdout != "cube-vz-envd-ok" || result.Stderr != "" {
+	if result.ExitCode != 0 || result.Stdout != "cube-vz-envd-network-ok" || result.Stderr != "" {
 		fail("verify envd command", fmt.Errorf("unexpected result: %#v", result))
 	}
-	fmt.Println("PASS CubeSandbox Go SDK -> CubeVZ -> existing envd command")
+	fmt.Println("PASS CubeSandbox Go SDK -> CubeVZ -> envd command + VZNAT DHCP")
 }
 
 func fail(operation string, err error) {

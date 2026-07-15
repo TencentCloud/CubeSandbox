@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Tencent. All rights reserved.
 
 import CubeVZCore
+import Darwin
 import Foundation
 @preconcurrency import Virtualization
 
@@ -27,6 +28,7 @@ final class SandboxManager {
   private let templateID: String
   private let templateDirectory: VMDirectory
   private let sandboxesDirectory: URL
+  private let sandboxesLockDescriptor: Int32
   private var sandboxes: [String: RunningSandbox] = [:]
   private var reusableMACAddresses: [String] = []
 
@@ -41,6 +43,32 @@ final class SandboxManager {
       at: sandboxesDirectory,
       withIntermediateDirectories: true
     )
+    let lockURL = sandboxesDirectory.appendingPathComponent(".cube-vz.lock")
+    let lockDescriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+    guard lockDescriptor >= 0 else {
+      throw CubeVZError.filesystem(
+        "cannot open sandbox directory lock: \(String(cString: strerror(errno)))"
+      )
+    }
+    guard Self.setDirectoryLock(lockDescriptor, type: Int16(F_WRLCK)) else {
+      Darwin.close(lockDescriptor)
+      throw CubeVZError.runtime(
+        "sandboxes directory is already in use: \(sandboxesDirectory.path)"
+      )
+    }
+    do {
+      try Self.removeStaleSandboxes(in: sandboxesDirectory)
+    } catch {
+      _ = Self.setDirectoryLock(lockDescriptor, type: Int16(F_UNLCK))
+      Darwin.close(lockDescriptor)
+      throw error
+    }
+    sandboxesLockDescriptor = lockDescriptor
+  }
+
+  deinit {
+    _ = Self.setDirectoryLock(sandboxesLockDescriptor, type: Int16(F_UNLCK))
+    Darwin.close(sandboxesLockDescriptor)
   }
 
   func create(templateID requestedTemplateID: String) async throws -> SandboxResponse {
@@ -155,6 +183,42 @@ final class SandboxManager {
       (guestReadiness ?? "none").replacingOccurrences(of: " ", with: ",")
     )
     FileHandle.standardError.write(Data(message.utf8))
+  }
+
+  private static func removeStaleSandboxes(in directory: URL) throws {
+    let entries: [URL]
+    do {
+      entries = try FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: nil
+      )
+    } catch {
+      throw CubeVZError.filesystem(
+        "cannot inspect sandboxes directory \(directory.path): \(error)"
+      )
+    }
+
+    for entry in entries {
+      let name = entry.lastPathComponent
+      let isSandbox = name.hasPrefix("sb-")
+      let isPartialSandbox = name.hasPrefix(".sb-") && name.contains(".partial-")
+      guard isSandbox || isPartialSandbox else { continue }
+      do {
+        try FileManager.default.removeItem(at: entry)
+      } catch {
+        throw CubeVZError.filesystem("cannot remove stale sandbox \(entry.path): \(error)")
+      }
+    }
+  }
+
+  nonisolated private static func setDirectoryLock(_ descriptor: Int32, type: Int16) -> Bool {
+    var lock = flock()
+    lock.l_start = 0
+    lock.l_len = 0
+    lock.l_pid = 0
+    lock.l_type = type
+    lock.l_whence = Int16(SEEK_SET)
+    return Darwin.fcntl(descriptor, F_SETLK, &lock) == 0
   }
 
   private static func milliseconds(_ duration: Duration) -> Double {

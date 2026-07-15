@@ -62,6 +62,22 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 
+malformed_status="$(printf 'POST /sandboxes HTTP/1.1\r\nHost: localhost\r\nContent-Length: -1\r\n\r\n' \
+  | nc -w 2 127.0.0.1 "${PORT}" \
+  | sed -n '1p' \
+  | tr -d '\r')"
+test "${malformed_status}" = "HTTP/1.1 400 Bad Request" || {
+  echo "ERROR: malformed Content-Length was not rejected: ${malformed_status}" >&2
+  exit 1
+}
+json_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d 'not-json' \
+  "http://127.0.0.1:${PORT}/sandboxes")"
+test "${json_status}" = 400
+curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null
+echo "PASS CubeVZ rejects malformed control-plane requests without exiting"
+
 response="$(curl -fsS \
   -H 'Content-Type: application/json' \
   -d '{"templateID":"cube-vz"}' \

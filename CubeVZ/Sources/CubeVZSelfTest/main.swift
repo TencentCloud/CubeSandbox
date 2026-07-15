@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Tencent. All rights reserved.
 
 import CubeVZCore
+import Darwin
 import Foundation
 
 private enum SelfTestError: Error, CustomStringConvertible {
@@ -17,15 +18,26 @@ private enum SelfTestError: Error, CustomStringConvertible {
 @main
 private enum CubeVZSelfTest {
   static func main() throws {
-    let tests: [(String, () throws -> Void)] = [
+    let arguments = Array(CommandLine.arguments.dropFirst())
+    let allowedArguments = Set(["--skip-vz-configuration"])
+    if let unknown = arguments.first(where: { !allowedArguments.contains($0) }) {
+      throw SelfTestError.failed("unknown self-test option: \(unknown)")
+    }
+
+    var tests: [(String, () throws -> Void)] = [
       ("manifest round trip", testManifestRoundTrip),
       ("manifest path confinement", testManifestPathConfinement),
       ("HTTP content-length parsing", testHTTPContentLengthParsing),
+      ("socket line framing", testSocketLineFraming),
       ("APFS copy-on-write clone", testAPFSClone),
       ("VM directory creation", testVMDirectoryCreation),
       ("template clone", testTemplateClone),
       ("Virtualization.framework configuration", testVMConfiguration),
     ]
+    if arguments.contains("--skip-vz-configuration") {
+      tests.removeAll { $0.0 == "Virtualization.framework configuration" }
+      print("SKIP Virtualization.framework configuration (runner has no nested VZ)")
+    }
 
     for (name, test) in tests {
       try test()
@@ -117,6 +129,30 @@ private enum CubeVZSelfTest {
     }
   }
 
+  private static func testSocketLineFraming() throws {
+    var descriptors: [Int32] = [-1, -1]
+    try require(
+      Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0,
+      "cannot create socket pair"
+    )
+    defer {
+      Darwin.close(descriptors[0])
+      Darwin.close(descriptors[1])
+    }
+
+    let writer = descriptors[1]
+    DispatchQueue.global().async {
+      _ = Darwin.write(writer, "REA", 3)
+      usleep(10_000)
+      _ = Darwin.write(writer, "DY init_s=0.1\n", 14)
+    }
+    let response = try SocketLineReader.readLine(from: descriptors[0])
+    try require(
+      response == "READY init_s=0.1\n",
+      "fragmented socket response was not reassembled"
+    )
+  }
+
   private static func testVMDirectoryCreation() throws {
     try withTemporaryDirectory { directory in
       let kernel = directory.appendingPathComponent("source-kernel")
@@ -157,13 +193,34 @@ private enum CubeVZSelfTest {
       let template = try VMDirectoryCreator.create(
         CreateVMRequest(destination: templateURL, kernel: kernel, disk: disk)
       )
+      let secondCloneURL = directory.appendingPathComponent("sandbox-2")
       let clone = try VMTemplateCloner.cloneCold(
         template: template,
         to: cloneURL,
         macAddress: "02:00:00:00:00:02"
       )
+      let secondClone = try VMTemplateCloner.cloneCold(
+        template: template,
+        to: secondCloneURL,
+        macAddress: "02:00:00:00:00:03"
+      )
       let manifest = try clone.loadManifest()
+      let secondManifest = try secondClone.loadManifest()
       try clone.validateFiles(for: manifest)
+      try secondClone.validateFiles(for: secondManifest)
+      try require(manifest.macAddress == "02:00:00:00:00:02", "clone MAC address changed")
+      try require(
+        secondManifest.macAddress == "02:00:00:00:00:03",
+        "second clone MAC address changed"
+      )
+      let templateMachineID = try Data(contentsOf: template.machineIdentifierURL)
+      let cloneMachineID = try Data(contentsOf: clone.machineIdentifierURL)
+      let secondCloneMachineID = try Data(contentsOf: secondClone.machineIdentifierURL)
+      try require(cloneMachineID != templateMachineID, "clone reused the template machine ID")
+      try require(
+        secondCloneMachineID != templateMachineID && secondCloneMachineID != cloneMachineID,
+        "sandbox clones do not have unique machine IDs"
+      )
       try require(
         try Data(contentsOf: clone.fileURL(named: manifest.diskFile))
           == Data("rootfs".utf8),

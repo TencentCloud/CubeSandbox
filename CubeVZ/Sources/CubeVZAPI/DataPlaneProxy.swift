@@ -10,7 +10,15 @@ private struct DataPlaneRoute {
   let port: UInt32
 
   init(header: Data) throws {
-    guard let text = String(data: header, encoding: .utf8) else {
+    guard let headerEnd = header.range(of: Data("\r\n\r\n".utf8)) else {
+      throw CubeVZError.invalidArguments("data-plane request headers are incomplete")
+    }
+    guard
+      let text = String(
+        data: header.subdata(in: header.startIndex..<headerEnd.lowerBound),
+        encoding: .utf8
+      )
+    else {
       throw CubeVZError.invalidArguments("data-plane request headers are not UTF-8")
     }
     guard
@@ -40,6 +48,8 @@ private struct DataPlaneRoute {
 }
 
 final class DataPlaneProxy: @unchecked Sendable {
+  private static let headerReadTimeoutNanoseconds: UInt64 = 5_000_000_000
+  private static let maximumConnections = 128
   private static let maximumHeaderBytes = 64 * 1_024
 
   private let port: UInt16
@@ -50,6 +60,7 @@ final class DataPlaneProxy: @unchecked Sendable {
     attributes: .concurrent
   )
   private var listenDescriptor: Int32 = -1
+  private let connectionSlots = DispatchSemaphore(value: maximumConnections)
 
   init(port: UInt16, manager: SandboxManager) {
     self.port = port
@@ -102,7 +113,15 @@ final class DataPlaneProxy: @unchecked Sendable {
       let client = Darwin.accept(listenDescriptor, nil, nil)
       if client < 0 {
         if errno == EINTR { continue }
+        if [ECONNABORTED, EMFILE, ENFILE, ENOBUFS, ENOMEM].contains(errno) {
+          usleep(50_000)
+          continue
+        }
         return
+      }
+      guard connectionSlots.wait(timeout: .now()) == .success else {
+        sendError(status: 503, message: "data-plane capacity reached", to: client)
+        continue
       }
       workerQueue.async { [self] in route(client: client) }
     }
@@ -121,10 +140,12 @@ final class DataPlaneProxy: @unchecked Sendable {
           workerQueue.async { [self] in relay(client: client, guest: guest, prefix: prefix) }
         } catch {
           sendError(status: 502, message: error.localizedDescription, to: client)
+          connectionSlots.signal()
         }
       }
     } catch {
       sendError(status: 400, message: error.localizedDescription, to: client)
+      connectionSlots.signal()
     }
   }
 
@@ -133,28 +154,36 @@ final class DataPlaneProxy: @unchecked Sendable {
   private func readHeaderPrefix(from descriptor: Int32) throws -> Data {
     var data = Data()
     let terminator = Data("\r\n\r\n".utf8)
+    let deadline = DispatchTime.now().uptimeNanoseconds + Self.headerReadTimeoutNanoseconds
     while data.count < Self.maximumHeaderBytes {
       var buffer = [UInt8](repeating: 0, count: 4_096)
-      var count: Int
-      repeat {
-        count = buffer.withUnsafeMutableBytes {
-          Darwin.read(descriptor, $0.baseAddress, $0.count)
-        }
-      } while count < 0 && errno == EINTR
+      let count = try read(
+        into: &buffer,
+        from: descriptor,
+        before: deadline
+      )
       guard count > 0 else {
         throw CubeVZError.runtime("data-plane client disconnected")
       }
       data.append(contentsOf: buffer.prefix(count))
-      if data.range(of: terminator) != nil { return data }
+      if let headerEnd = data.range(of: terminator) {
+        guard headerEnd.lowerBound <= Self.maximumHeaderBytes else {
+          throw CubeVZError.invalidArguments("data-plane request headers are too large")
+        }
+        return data
+      }
     }
     throw CubeVZError.invalidArguments("data-plane request headers are too large")
   }
 
   private func relay(client: Int32, guest: VMStreamConnection, prefix: Data) {
     let guestDescriptor = guest.fileDescriptor
-    guard writeAll(prefix, to: guestDescriptor) else {
+    defer {
       guest.close()
       Darwin.close(client)
+      connectionSlots.signal()
+    }
+    guard writeAll(prefix, to: guestDescriptor) else {
       return
     }
 
@@ -196,8 +225,40 @@ final class DataPlaneProxy: @unchecked Sendable {
         }
       }
     }
-    guest.close()
-    Darwin.close(client)
+  }
+
+  private func read(
+    into buffer: inout [UInt8],
+    from descriptor: Int32,
+    before deadline: UInt64
+  ) throws -> Int {
+    while true {
+      let now = DispatchTime.now().uptimeNanoseconds
+      guard now < deadline else {
+        throw CubeVZError.runtime("data-plane request headers timed out")
+      }
+      let remainingNanoseconds = deadline - now
+      let timeoutMilliseconds = Int32(
+        max(1, min(UInt64(Int32.max), (remainingNanoseconds + 999_999) / 1_000_000))
+      )
+      var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+      let ready = Darwin.poll(&pollDescriptor, 1, timeoutMilliseconds)
+      if ready < 0 && errno == EINTR { continue }
+      guard ready > 0 else {
+        if ready == 0 {
+          throw CubeVZError.runtime("data-plane request headers timed out")
+        }
+        throw posixError("poll")
+      }
+
+      var count: Int
+      repeat {
+        count = buffer.withUnsafeMutableBytes {
+          Darwin.read(descriptor, $0.baseAddress, $0.count)
+        }
+      } while count < 0 && errno == EINTR
+      return count
+    }
   }
 
   private func writeAll<C: Collection>(_ bytes: C, to descriptor: Int32) -> Bool
@@ -221,8 +282,9 @@ final class DataPlaneProxy: @unchecked Sendable {
 
   private func sendError(status: Int, message: String, to descriptor: Int32) {
     let body = (try? JSONSerialization.data(withJSONObject: ["error": message])) ?? Data()
+    let reason = status == 503 ? "Service Unavailable" : "Error"
     let header =
-      "HTTP/1.1 \(status) Error\r\n"
+      "HTTP/1.1 \(status) \(reason)\r\n"
       + "Content-Type: application/json\r\n"
       + "Content-Length: \(body.count)\r\n"
       + "Connection: close\r\n\r\n"

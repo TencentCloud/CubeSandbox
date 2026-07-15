@@ -25,7 +25,8 @@ private final class ControlConnectionDelegate: NSObject, VZVirtioSocketListenerD
   @unchecked Sendable
 {
   private let lock = NSLock()
-  private var pending: [VZVirtioSocketConnection] = []
+  private var accepting = true
+  private var pending: VZVirtioSocketConnection?
 
   func listener(
     _ listener: VZVirtioSocketListener,
@@ -33,16 +34,27 @@ private final class ControlConnectionDelegate: NSObject, VZVirtioSocketListenerD
     from socketDevice: VZVirtioSocketDevice
   ) -> Bool {
     lock.lock()
-    pending.append(connection)
-    lock.unlock()
+    defer { lock.unlock() }
+    guard accepting, pending == nil else { return false }
+    pending = connection
     return true
   }
 
   func takeConnection() -> VZVirtioSocketConnection? {
     lock.lock()
     defer { lock.unlock() }
-    guard !pending.isEmpty else { return nil }
-    return pending.removeFirst()
+    let connection = pending
+    pending = nil
+    return connection
+  }
+
+  func stopAccepting() {
+    lock.lock()
+    accepting = false
+    let connection = pending
+    pending = nil
+    lock.unlock()
+    connection?.close()
   }
 }
 
@@ -106,6 +118,7 @@ public final class ManagedVM {
         do {
           let response = try await Self.readResponse(descriptor: connection.fileDescriptor)
           if response == "READY\n" || response.hasPrefix("READY ") {
+            controlConnectionDelegate?.stopAccepting()
             readinessMetadata =
               response
               .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -178,9 +191,12 @@ public final class ManagedVM {
   ) throws -> String {
     var remaining = Array(command.utf8)[...]
     while !remaining.isEmpty {
-      let written = remaining.withUnsafeBytes {
-        Darwin.write(descriptor, $0.baseAddress, $0.count)
-      }
+      var written: Int
+      repeat {
+        written = remaining.withUnsafeBytes {
+          Darwin.write(descriptor, $0.baseAddress, $0.count)
+        }
+      } while written < 0 && errno == EINTR
       guard written > 0 else {
         throw CubeVZError.runtime("vsock write failed: \(String(cString: strerror(errno)))")
       }
@@ -191,17 +207,6 @@ public final class ManagedVM {
   }
 
   nonisolated private static func readResponseBlocking(descriptor: Int32) throws -> String {
-    var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-    guard Darwin.poll(&pollDescriptor, 1, 2_000) > 0 else {
-      throw CubeVZError.runtime("vsock response timed out")
-    }
-    var buffer = [UInt8](repeating: 0, count: 64)
-    let count = buffer.withUnsafeMutableBytes {
-      Darwin.read(descriptor, $0.baseAddress, $0.count)
-    }
-    guard count > 0 else {
-      throw CubeVZError.runtime("vsock read failed: \(String(cString: strerror(errno)))")
-    }
-    return String(decoding: buffer.prefix(count), as: UTF8.self)
+    try SocketLineReader.readLine(from: descriptor)
   }
 }
