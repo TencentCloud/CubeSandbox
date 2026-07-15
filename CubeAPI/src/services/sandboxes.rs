@@ -57,6 +57,12 @@ const FORBIDDEN_ENV_NAMES: &[&str] = &[
     "IFS",
 ];
 
+#[derive(Debug)]
+pub(crate) struct ConnectSandboxOutcome {
+    pub(crate) sandbox: Sandbox,
+    pub(crate) resume_performed: bool,
+}
+
 #[derive(Clone)]
 pub struct SandboxService {
     cubemaster: CubeMasterClient,
@@ -323,7 +329,19 @@ impl SandboxService {
         sandbox_id: &str,
         timeout: Option<i32>,
     ) -> AppResult<Sandbox> {
+        Ok(self
+            .connect_sandbox_with_outcome(sandbox_id, timeout)
+            .await?
+            .sandbox)
+    }
+
+    pub(crate) async fn connect_sandbox_with_outcome(
+        &self,
+        sandbox_id: &str,
+        timeout: Option<i32>,
+    ) -> AppResult<ConnectSandboxOutcome> {
         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
+        let mut resume_performed = false;
 
         if d.status == SandboxStatus::Paused {
             let resp = self
@@ -339,17 +357,22 @@ impl SandboxService {
                 "is already running",
             )?;
 
+            resume_performed = true;
             d = self.fetch_sandbox_detail(sandbox_id).await?;
         }
 
         let envd_version = envd_version_from_annotations(&d.annotations);
-        Ok(self.sandbox_response(
-            d.template_id,
-            sandbox_id.to_string(),
-            d.host_id,
-            envd_version,
-            None,
-        ))
+
+        Ok(ConnectSandboxOutcome {
+            sandbox: self.sandbox_response(
+                d.template_id,
+                sandbox_id.to_string(),
+                d.host_id,
+                envd_version,
+                None,
+            ),
+            resume_performed,
+        })
     }
 
     pub async fn get_logs(

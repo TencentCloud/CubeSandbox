@@ -21,6 +21,12 @@ use crate::{
     state::AppState,
 };
 
+fn sandbox_resumed_event(sandbox_id: &str, template_id: &str) -> LogEvent {
+    LogEvent::new(LogLevel::Info, "sandbox.resumed")
+        .field("sandbox_id", sandbox_id)
+        .field("template_id", template_id)
+}
+
 // ─── GET /sandboxes ───────────────────────────────────────────────────────────
 
 pub async fn list_sandboxes(
@@ -303,11 +309,7 @@ pub async fn resume_sandbox(
     tracing::info!(sandbox_id = %sandbox_id, "resume_sandbox: success");
     state
         .logger
-        .log(
-            LogEvent::new(LogLevel::Info, "sandbox.resumed")
-                .field("sandbox_id", &sandbox_id)
-                .field("template_id", &sandbox.template_id),
-        )
+        .log(sandbox_resumed_event(&sandbox_id, &sandbox.template_id))
         .await;
 
     Ok((StatusCode::CREATED, Json(sandbox)))
@@ -330,12 +332,21 @@ pub async fn connect_sandbox(
         )
         .await;
     tracing::info!("connect request");
-    let sandbox = state
+    let outcome = state
         .services
         .sandboxes
-        .connect_sandbox(&sandbox_id, body.timeout)
+        .connect_sandbox_with_outcome(&sandbox_id, body.timeout)
         .await?;
-    Ok((StatusCode::OK, Json(sandbox)))
+    if outcome.resume_performed {
+        state
+            .logger
+            .log(sandbox_resumed_event(
+                &sandbox_id,
+                &outcome.sandbox.template_id,
+            ))
+            .await;
+    }
+    Ok((StatusCode::OK, Json(outcome.sandbox)))
 }
 
 // ─── GET /sandboxes/:sandboxID/logs ───────────────────────────────────────────
@@ -491,4 +502,285 @@ pub async fn refresh_sandbox(
         )
         .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::VecDeque,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+    };
+
+    use async_trait::async_trait;
+    use axum::{
+        extract::State,
+        http::StatusCode,
+        routing::{get, post},
+        Json, Router,
+    };
+    use axum_test::TestServer;
+
+    use crate::{
+        config::ServerConfig,
+        cubemaster::CubeMasterClient,
+        logging::{arc, LogEvent, LogLevel, Logger},
+        routes::build_router,
+        services::AppServices,
+        state::AppState,
+    };
+
+    type MockResponse = (StatusCode, serde_json::Value);
+
+    #[derive(Clone)]
+    struct MockCubeMasterState {
+        info_responses: Arc<Mutex<VecDeque<MockResponse>>>,
+        update_responses: Arc<Mutex<VecDeque<MockResponse>>>,
+        update_calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingLogger {
+        events: Arc<Mutex<Vec<LogEvent>>>,
+    }
+
+    impl RecordingLogger {
+        fn events_named(&self, name: &str) -> Vec<LogEvent> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.event == name)
+                .cloned()
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl Logger for RecordingLogger {
+        async fn log(&self, event: LogEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+    }
+
+    async fn mock_sandbox_info(
+        State(state): State<MockCubeMasterState>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
+        let (status, body) = state
+            .info_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected sandbox detail request");
+        (status, Json(body))
+    }
+
+    async fn mock_sandbox_update(
+        State(state): State<MockCubeMasterState>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
+        state.update_calls.fetch_add(1, Ordering::SeqCst);
+        let (status, body) = state
+            .update_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected sandbox update request");
+        (status, Json(body))
+    }
+
+    async fn spawn_mock_cubemaster(
+        info_responses: Vec<MockResponse>,
+        update_responses: Vec<MockResponse>,
+    ) -> (String, MockCubeMasterState) {
+        let state = MockCubeMasterState {
+            info_responses: Arc::new(Mutex::new(info_responses.into())),
+            update_responses: Arc::new(Mutex::new(update_responses.into())),
+            update_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/cube/sandbox/info", get(mock_sandbox_info))
+            .route("/cube/sandbox/update", post(mock_sandbox_update))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        (format!("http://{address}"), state)
+    }
+
+    async fn test_server(base_url: String, logger: RecordingLogger) -> TestServer {
+        let config = ServerConfig {
+            cubemaster_url: base_url.clone(),
+            database_url: None,
+            ..ServerConfig::default()
+        };
+        let mut state = AppState::new(config, arc(logger)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let services = AppServices::new(
+            state.config.as_ref(),
+            CubeMasterClient::new(base_url, client.clone()),
+        );
+        state.http_client = client;
+        state.services = services;
+        TestServer::new(build_router(state)).expect("router should build")
+    }
+
+    fn sandbox_detail_response(status: i32) -> MockResponse {
+        (
+            StatusCode::OK,
+            serde_json::json!({
+                "requestID": "req-detail",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sandbox-123",
+                    "host_id": "host-1",
+                    "status": status,
+                    "template_id": "template-456",
+                    "annotations": {},
+                    "labels": {},
+                    "containers": []
+                }]
+            }),
+        )
+    }
+
+    fn successful_update_response() -> MockResponse {
+        (
+            StatusCode::OK,
+            serde_json::json!({
+                "ret": { "ret_code": 200, "ret_msg": "ok" }
+            }),
+        )
+    }
+
+    fn failed_update_response() -> MockResponse {
+        (
+            StatusCode::OK,
+            serde_json::json!({
+                "ret": { "ret_code": 130409, "ret_msg": "resume conflict" }
+            }),
+        )
+    }
+
+    fn unavailable_response() -> MockResponse {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({ "message": "temporarily unavailable" }),
+        )
+    }
+
+    #[tokio::test]
+    async fn resume_emits_existing_resumed_payload() {
+        let (base_url, mock) = spawn_mock_cubemaster(
+            vec![sandbox_detail_response(1)],
+            vec![successful_update_response()],
+        )
+        .await;
+        let logger = RecordingLogger::default();
+        let server = test_server(base_url, logger.clone()).await;
+
+        server
+            .post("/sandboxes/sandbox-123/resume")
+            .json(&serde_json::json!({ "timeout": 300 }))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        assert_eq!(mock.update_calls.load(Ordering::SeqCst), 1);
+        let events = logger.events_named("sandbox.resumed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].level, LogLevel::Info);
+        assert_eq!(events[0].fields.len(), 2);
+        assert_eq!(events[0].fields["sandbox_id"], "sandbox-123");
+        assert_eq!(events[0].fields["template_id"], "template-456");
+    }
+
+    #[tokio::test]
+    async fn connect_emits_resumed_after_successful_resume_operation() {
+        let (base_url, mock) = spawn_mock_cubemaster(
+            vec![sandbox_detail_response(5), sandbox_detail_response(1)],
+            vec![successful_update_response()],
+        )
+        .await;
+        let logger = RecordingLogger::default();
+        let server = test_server(base_url, logger.clone()).await;
+
+        server
+            .post("/sandboxes/sandbox-123/connect")
+            .json(&serde_json::json!({ "timeout": 300 }))
+            .await
+            .assert_status_ok();
+
+        assert_eq!(mock.update_calls.load(Ordering::SeqCst), 1);
+        let events = logger.events_named("sandbox.resumed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].fields.len(), 2);
+        assert_eq!(events[0].fields["sandbox_id"], "sandbox-123");
+        assert_eq!(events[0].fields["template_id"], "template-456");
+    }
+
+    #[tokio::test]
+    async fn connect_does_not_emit_resumed_for_running_sandbox() {
+        let (base_url, mock) =
+            spawn_mock_cubemaster(vec![sandbox_detail_response(1)], vec![]).await;
+        let logger = RecordingLogger::default();
+        let server = test_server(base_url, logger.clone()).await;
+
+        server
+            .post("/sandboxes/sandbox-123/connect")
+            .json(&serde_json::json!({ "timeout": 300 }))
+            .await
+            .assert_status_ok();
+
+        assert_eq!(mock.update_calls.load(Ordering::SeqCst), 0);
+        assert!(logger.events_named("sandbox.resumed").is_empty());
+    }
+
+    #[tokio::test]
+    async fn connect_does_not_emit_resumed_when_update_fails() {
+        let (base_url, mock) = spawn_mock_cubemaster(
+            vec![sandbox_detail_response(5)],
+            vec![failed_update_response()],
+        )
+        .await;
+        let logger = RecordingLogger::default();
+        let server = test_server(base_url, logger.clone()).await;
+
+        let response = server
+            .post("/sandboxes/sandbox-123/connect")
+            .json(&serde_json::json!({ "timeout": 300 }))
+            .await;
+
+        response.assert_status(StatusCode::CONFLICT);
+        assert_eq!(mock.update_calls.load(Ordering::SeqCst), 1);
+        assert!(logger.events_named("sandbox.resumed").is_empty());
+    }
+
+    #[tokio::test]
+    async fn connect_does_not_emit_resumed_when_follow_up_detail_fails() {
+        let (base_url, mock) = spawn_mock_cubemaster(
+            vec![sandbox_detail_response(5), unavailable_response()],
+            vec![successful_update_response()],
+        )
+        .await;
+        let logger = RecordingLogger::default();
+        let server = test_server(base_url, logger.clone()).await;
+
+        let response = server
+            .post("/sandboxes/sandbox-123/connect")
+            .json(&serde_json::json!({ "timeout": 300 }))
+            .await;
+
+        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mock.update_calls.load(Ordering::SeqCst), 1);
+        assert!(logger.events_named("sandbox.resumed").is_empty());
+    }
 }
