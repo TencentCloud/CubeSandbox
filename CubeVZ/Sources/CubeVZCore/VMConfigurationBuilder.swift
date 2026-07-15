@@ -97,9 +97,6 @@ public enum VMConfigurationBuilder {
     )
     configuration.serialPorts = [serial]
     configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
-    configuration.memoryBalloonDevices = [
-      VZVirtioTraditionalMemoryBalloonDeviceConfiguration()
-    ]
 
     if manifest.networkEnabled {
       let network = VZVirtioNetworkDeviceConfiguration()
@@ -120,7 +117,6 @@ public enum VMConfigurationBuilder {
 
     do {
       try configuration.validate()
-      try configuration.validateSaveRestoreSupport()
     } catch {
       throw CubeVZError.invalidManifest("Virtualization.framework rejected config: \(error)")
     }

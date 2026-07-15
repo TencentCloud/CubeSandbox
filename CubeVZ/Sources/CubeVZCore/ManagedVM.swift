@@ -119,7 +119,7 @@ public final class ManagedVM {
         }
         connection.close()
       }
-      try await Task.sleep(for: .milliseconds(5))
+      try await Task.sleep(for: .milliseconds(1))
     }
     throw CubeVZError.runtime("guest readiness timed out: \(lastError)")
   }

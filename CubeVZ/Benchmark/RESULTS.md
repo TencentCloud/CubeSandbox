@@ -42,32 +42,35 @@ The native lifecycle path was also measured with the repository's official
 virtio-vsock relay are ready. DELETE stops the guest and removes its VM
 directory.
 
-- Timestamp: 2026-07-15 07:35 UTC
+- Timestamp: 2026-07-15 08:02 UTC
 - Mode: `create-delete`
 - Warmups: 3 per tier
 - Success rate: 100% (220/220 measured sandbox lifecycle cycles)
-- Raw reports: `_output/cube-vz/lifecycle-results/20260715T073504Z/`
+- Raw reports: `_output/cube-vz/lifecycle-results/20260715T080214Z/`
 
 | Host / tier | Requests | Create avg | Create P95 | Create P99 | Throughput |
 |---|---:|---:|---:|---:|---:|
-| M4 Pro, concurrency 1 | 20 | 236.2 ms | 257.8 ms | 259.2 ms | 2.61 lifecycle/s |
-| M4 Pro, concurrency 10 | 200 | 292.6 ms | 383.3 ms | 418.6 ms | 17.60 lifecycle/s |
+| M4 Pro, concurrency 1 | 20 | 222.8 ms | 245.8 ms | 246.6 ms | 2.59 lifecycle/s |
+| M4 Pro, concurrency 10 | 200 | 282.9 ms | 363.8 ms | 414.7 ms | 17.80 lifecycle/s |
 
 Compared with the previous adaptive restore/cold baseline, concurrency-1
-average create improved 17.5% and concurrency-10 average improved 37.9%.
-Concurrency-10 P95 improved 35.0%, P99 improved 31.6%, and throughput improved
-36.2%.
+average create improved 22.2% and concurrency-10 average improved 39.9%.
+Concurrency-10 P95 improved 38.3%, P99 improved 32.2%, and throughput improved
+37.8%. Compared with the first pinned direct-boot kernel baseline, the final
+VZ-only configuration reduced average create another 5.7% at concurrency 1
+and 3.3% at concurrency 10.
 
 The optimized path has one lifecycle mode:
 
 - every sandbox gets a fresh machine identifier and cold-boots an APFS-cloned
   disk; saved-state preparation, restore, and adaptive branching are removed;
 - the pinned Linux 6.12.95 kernel has the required ext4 and virtio drivers
-  built in and boots the root disk without an initramfs;
+  built in, boots without an initramfs, and omits guest KVM, VFIO, balloon,
+  unused block-device, storage-stack, and filesystem subsystems;
 - inactive MAC addresses are recycled so concurrent VZNAT clients remain
   distinct without growing the DHCP identity set indefinitely;
-- envd starts in parallel with background DHCP, and health is polled every
-  10 ms over vsock;
+- envd starts in parallel with background DHCP; health is polled every 10 ms
+  on guest loopback and the READY result is delivered over vsock;
 - DELETE stops the VM through the host framework because the ephemeral disk is
   discarded immediately.
 
@@ -76,11 +79,11 @@ and real envd readiness. Per-phase API timings, including warmups, averaged:
 
 | Tier | APFS clone | VM construction | VM start | envd readiness | Total |
 |---|---:|---:|---:|---:|---:|
-| Concurrency 1 / cold boot | 1.0 ms | 3.1 ms | 77.1 ms | 155.2 ms | 236.5 ms |
-| Concurrency 10 / cold boot | 1.2 ms | 3.2 ms | 105.9 ms | 179.9 ms | 290.1 ms |
+| Concurrency 1 / cold boot | 1.0 ms | 3.0 ms | 80.0 ms | 139.5 ms | 223.4 ms |
+| Concurrency 10 / cold boot | 1.2 ms | 3.2 ms | 108.7 ms | 167.5 ms | 280.6 ms |
 
-Guest telemetry averaged 105 ms to init and 134 ms to envd at concurrency 1;
-at concurrency 10 those values were 120 ms and 160 ms. DHCP is deliberately
+Guest telemetry averaged 92 ms to init and 120 ms to envd at concurrency 1;
+at concurrency 10 those values were 109 ms and 149 ms. DHCP is deliberately
 not part of POST readiness because CubeVZ control and envd traffic use vsock.
 An outbound Internet command issued immediately after create may therefore
 need a brief retry while VZNAT assigns the guest address.
@@ -90,10 +93,10 @@ size publish these create latencies:
 
 | Official Linux host / tier | Create avg | Create P95 | Relative M4 avg |
 |---|---:|---:|---:|
-| Tencent BMI5 bare metal, concurrency 1 | 47.8 ms | 57.4 ms | M4 is 4.94x slower |
-| Tencent BMI5 bare metal, concurrency 10 | 88.7 ms | 116.9 ms | M4 is 3.30x slower |
-| Tencent SA9 PVM, concurrency 1 | 66.7 ms | 78.2 ms | M4 is 3.54x slower |
-| Tencent SA9 PVM, concurrency 10 | 170.9 ms | 216.7 ms | M4 is 1.71x slower |
+| Tencent BMI5 bare metal, concurrency 1 | 47.8 ms | 57.4 ms | M4 is 4.66x slower |
+| Tencent BMI5 bare metal, concurrency 10 | 88.7 ms | 116.9 ms | M4 is 3.19x slower |
+| Tencent SA9 PVM, concurrency 1 | 66.7 ms | 78.2 ms | M4 is 3.34x slower |
+| Tencent SA9 PVM, concurrency 10 | 170.9 ms | 216.7 ms | M4 is 1.66x slower |
 
 The API and APFS clone are no longer dominant. The remaining create latency is
 mostly Apple VM start plus scheduling the guest until envd is healthy. Because

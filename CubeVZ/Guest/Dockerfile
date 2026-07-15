@@ -42,6 +42,27 @@ RUN make olddefconfig && \
       --disable PROFILING \
       --disable IKCONFIG \
       --disable LOCALVERSION_AUTO \
+      --disable TASKSTATS \
+      --disable KVM \
+      --disable BINFMT_MISC \
+      --disable XFRM \
+      --disable NET_KEY \
+      --disable BLK_DEV_NULL_BLK \
+      --disable ZRAM \
+      --disable BLK_DEV_LOOP \
+      --disable BLK_DEV_RAM \
+      --disable MD \
+      --disable BLK_DEV_DM \
+      --disable TUN \
+      --disable INPUT \
+      --disable PPS \
+      --disable HID \
+      --disable VFIO \
+      --disable VIRTIO_BALLOON \
+      --disable FS_ENCRYPTION \
+      --disable FUSE_FS \
+      --disable OVERLAY_FS \
+      --disable SQUASHFS \
       --set-str LOCALVERSION "-cube-vz" && \
     make olddefconfig && \
     make -j"$(nproc)" Image && \
