@@ -3,6 +3,7 @@
 
 import CubeVZCore
 import Foundation
+@preconcurrency import Virtualization
 
 struct CreateSandboxRequest: Decodable {
   let templateID: String
@@ -20,12 +21,14 @@ final class SandboxManager {
   private struct RunningSandbox {
     let directory: VMDirectory
     let virtualMachine: ManagedVM
+    let reusableMACAddress: String
   }
 
   private let templateID: String
   private let templateDirectory: VMDirectory
   private let sandboxesDirectory: URL
   private var sandboxes: [String: RunningSandbox] = [:]
+  private var reusableMACAddresses: [String] = []
 
   init(templateID: String, templateDirectory: URL, sandboxesDirectory: URL) throws {
     self.templateID = templateID
@@ -34,11 +37,6 @@ final class SandboxManager {
 
     let manifest = try self.templateDirectory.loadManifest()
     try self.templateDirectory.validateFiles(for: manifest)
-    guard FileManager.default.fileExists(atPath: self.templateDirectory.stateURL.path) else {
-      throw CubeVZError.invalidManifest(
-        "template has no saved state: \(self.templateDirectory.stateURL.path)"
-      )
-    }
     try FileManager.default.createDirectory(
       at: sandboxesDirectory,
       withIntermediateDirectories: true
@@ -50,26 +48,47 @@ final class SandboxManager {
       throw CubeVZError.invalidArguments("unknown templateID: \(requestedTemplateID)")
     }
 
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+
     let sandboxID = "sb-\(UUID().uuidString.lowercased())"
     let destination = sandboxesDirectory.appendingPathComponent(
       sandboxID,
       isDirectory: true
     )
-    let directory = try VMTemplateCloner.clone(
+    let reusableMACAddress =
+      reusableMACAddresses.popLast()
+      ?? VZMACAddress.randomLocallyAdministered().string
+    let directory = try VMTemplateCloner.cloneCold(
       template: templateDirectory,
-      to: destination
+      to: destination,
+      macAddress: reusableMACAddress
     )
+    let clonedAt = clock.now
     var virtualMachine: ManagedVM?
 
     do {
       let manifest = try directory.loadManifest()
       let createdVirtualMachine = try ManagedVM(directory: directory, manifest: manifest)
+      let constructedAt = clock.now
       virtualMachine = createdVirtualMachine
-      _ = try await createdVirtualMachine.start()
+      try await createdVirtualMachine.start()
+      let startedVirtualMachineAt = clock.now
       try await createdVirtualMachine.waitUntilReady(timeout: .seconds(10))
+      let readyAt = clock.now
       sandboxes[sandboxID] = RunningSandbox(
         directory: directory,
-        virtualMachine: createdVirtualMachine
+        virtualMachine: createdVirtualMachine,
+        reusableMACAddress: reusableMACAddress
+      )
+      Self.logCreateTiming(
+        sandboxID: sandboxID,
+        clone: startedAt.duration(to: clonedAt),
+        construct: clonedAt.duration(to: constructedAt),
+        start: constructedAt.duration(to: startedVirtualMachineAt),
+        readiness: startedVirtualMachineAt.duration(to: readyAt),
+        guestReadiness: createdVirtualMachine.readinessMetadata,
+        total: startedAt.duration(to: readyAt)
       )
       return SandboxResponse(templateID: templateID, sandboxID: sandboxID)
     } catch {
@@ -77,6 +96,7 @@ final class SandboxManager {
         try? await virtualMachine.shutdown()
       }
       try? FileManager.default.removeItem(at: destination)
+      reusableMACAddresses.append(reusableMACAddress)
       throw error
     }
   }
@@ -85,9 +105,12 @@ final class SandboxManager {
     guard let sandbox = sandboxes[sandboxID] else {
       return false
     }
-    try await sandbox.virtualMachine.shutdown()
+    // Sandbox disks are ephemeral and removed immediately, so waiting for a
+    // guest userspace shutdown cannot preserve any state useful to DELETE.
+    try await sandbox.virtualMachine.discard()
     try FileManager.default.removeItem(at: sandbox.directory.url)
     sandboxes.removeValue(forKey: sandboxID)
+    reusableMACAddresses.append(sandbox.reusableMACAddress)
     return true
   }
 
@@ -109,5 +132,34 @@ final class SandboxManager {
       }
     }
     throw lastError ?? CubeVZError.runtime("cannot connect to guest port \(guestPort)")
+  }
+
+  private static func logCreateTiming(
+    sandboxID: String,
+    clone: Duration,
+    construct: Duration,
+    start: Duration,
+    readiness: Duration,
+    guestReadiness: String?,
+    total: Duration
+  ) {
+    let message = String(
+      format:
+        "cube-vz-api: create sandbox=%@ mode=cold clone_ms=%.3f construct_ms=%.3f start_ms=%.3f ready_ms=%.3f total_ms=%.3f guest=%@\n",
+      sandboxID,
+      milliseconds(clone),
+      milliseconds(construct),
+      milliseconds(start),
+      milliseconds(readiness),
+      milliseconds(total),
+      (guestReadiness ?? "none").replacingOccurrences(of: " ", with: ",")
+    )
+    FileHandle.standardError.write(Data(message.utf8))
+  }
+
+  private static func milliseconds(_ duration: Duration) -> Double {
+    let components = duration.components
+    return Double(components.seconds) * 1_000
+      + Double(components.attoseconds) / 1_000_000_000_000_000
   }
 }

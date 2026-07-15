@@ -3,7 +3,7 @@
 
 import Foundation
 
-public enum CubeVZError: Error, CustomStringConvertible, Equatable {
+public enum CubeVZError: Error, CustomStringConvertible, LocalizedError, Equatable {
   case invalidArguments(String)
   case invalidManifest(String)
   case unsupported(String)
@@ -24,4 +24,6 @@ public enum CubeVZError: Error, CustomStringConvertible, Equatable {
       return "runtime error: \(message)"
     }
   }
+
+  public var errorDescription: String? { description }
 }

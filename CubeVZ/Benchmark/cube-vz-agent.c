@@ -35,7 +35,13 @@ static void write_all(int fd, const char *message) {
   }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  char ready_message[256];
+  if (argc > 1) {
+    snprintf(ready_message, sizeof(ready_message), "READY %s\n", argv[1]);
+  } else {
+    snprintf(ready_message, sizeof(ready_message), "READY\n");
+  }
   printf("CUBEVZ_LIFECYCLE_READY port=%u\n", CONTROL_PORT);
   fflush(stdout);
 
@@ -62,7 +68,7 @@ int main(void) {
       }
     }
 
-    write_all(client, "READY\n");
+    write_all(client, ready_message);
     for (;;) {
       char request[64] = {0};
       ssize_t count = read(client, request, sizeof(request) - 1);
@@ -70,7 +76,7 @@ int main(void) {
         break;
       }
       if (strncmp(request, "PING", 4) == 0) {
-        write_all(client, "READY\n");
+        write_all(client, ready_message);
       } else if (strncmp(request, "SHUTDOWN", 8) == 0) {
         write_all(client, "OK\n");
         close(client);

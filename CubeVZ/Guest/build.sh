@@ -34,7 +34,7 @@ docker buildx build \
   --output "type=local,dest=${OUTPUT_DIR}" \
   "${REPO_ROOT}"
 
-for artifact in kernel initrd rootfs.raw SHA256SUMS build-info.txt; do
+for artifact in kernel rootfs.raw SHA256SUMS build-info.txt; do
   test -s "${OUTPUT_DIR}/${artifact}" || {
     echo "ERROR: CubeVZ guest artifact is missing: ${OUTPUT_DIR}/${artifact}" >&2
     exit 1

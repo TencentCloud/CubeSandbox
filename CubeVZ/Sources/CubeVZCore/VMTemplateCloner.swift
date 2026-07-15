@@ -2,12 +2,31 @@
 // Copyright (C) 2026 Tencent. All rights reserved.
 
 import Foundation
+import Virtualization
 
 public enum VMTemplateCloner {
-  public static func clone(
+  public static func cloneCold(
     template: VMDirectory,
     to destination: URL,
+    macAddress: String,
     allowFullCopy: Bool = false
+  ) throws -> VMDirectory {
+    guard VZMACAddress(string: macAddress) != nil else {
+      throw CubeVZError.invalidManifest("macAddress is invalid: \(macAddress)")
+    }
+    return try cloneFiles(
+      template: template,
+      to: destination,
+      allowFullCopy: allowFullCopy,
+      macAddress: macAddress
+    )
+  }
+
+  private static func cloneFiles(
+    template: VMDirectory,
+    to destination: URL,
+    allowFullCopy: Bool,
+    macAddress: String
   ) throws -> VMDirectory {
     let manager = FileManager.default
     let destination = destination.standardizedFileURL
@@ -17,9 +36,6 @@ public enum VMTemplateCloner {
 
     let manifest = try template.loadManifest()
     try template.validateFiles(for: manifest)
-    guard manager.fileExists(atPath: template.stateURL.path) else {
-      throw CubeVZError.filesystem("template has no saved state: \(template.stateURL.path)")
-    }
 
     let temporary = destination.deletingLastPathComponent().appendingPathComponent(
       ".\(destination.lastPathComponent).partial-\(UUID().uuidString)"
@@ -28,11 +44,8 @@ public enum VMTemplateCloner {
       try manager.createDirectory(at: temporary, withIntermediateDirectories: true)
       let clone = VMDirectory(url: temporary)
       var filenames = [
-        VMDirectory.manifestFilename,
-        VMDirectory.machineIdentifierFilename,
         manifest.kernelFile,
         manifest.diskFile,
-        VMDirectory.stateFilename,
       ]
       if let initrdFile = manifest.initrdFile {
         filenames.append(initrdFile)
@@ -45,6 +58,20 @@ public enum VMTemplateCloner {
           allowFullCopy: allowFullCopy
         )
       }
+
+      var clonedManifest = manifest
+      if clonedManifest.networkEnabled {
+        clonedManifest.macAddress = macAddress
+      }
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+      try encoder.encode(clonedManifest).write(to: clone.manifestURL, options: .atomic)
+
+      let machineIdentifier = VZGenericMachineIdentifier()
+      try machineIdentifier.dataRepresentation.write(
+        to: clone.machineIdentifierURL,
+        options: .atomic
+      )
 
       try manager.moveItem(at: temporary, to: destination)
       let result = VMDirectory(url: destination)

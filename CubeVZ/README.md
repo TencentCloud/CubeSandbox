@@ -23,8 +23,9 @@ it is exactly one layer from macOS to the sandbox guest.
 - Virtio console on the invoking terminal.
 - Virtio entropy, memory balloon, vsock, and NAT networking.
 - Stable generic machine identifiers.
-- Native VM save/restore through `machine.vzstate` on macOS 14 or newer.
-- Saved-template APFS cloning and guest-to-host vsock readiness/shutdown control.
+- Per-sandbox cold cloning with a fresh machine identifier and a recycled,
+  concurrency-safe MAC address.
+- Guest-to-host vsock readiness/shutdown control.
 - A loopback CubeAPI-compatible lifecycle server implementing the `POST` and
   `DELETE /sandboxes` contract used by the official `cube-bench` tool.
 - A separate loopback data-plane listener that transparently relays the SDK's
@@ -40,14 +41,14 @@ it is exactly one layer from macOS to the sandbox guest.
 - Apple Silicon Mac (`arm64`).
 - macOS 14 or newer.
 - Xcode Command Line Tools with Swift 6.2 or newer.
-- An ARM64 Linux kernel in bootable `Image` format. The repository's
-  `make guest-kernel KERNEL_TARGET_ARCH=aarch64` target writes this image as
-  `_output/kernel/aarch64/vmlinux` for compatibility with existing packaging.
+- Docker for the reproducible CubeVZ guest build. It compiles the pinned ARM64
+  Linux 6.12.95 kernel directly from kernel.org.
 - A raw block image containing the guest root filesystem. The existing
   `cube-guest-image-cpu.img` is raw ext4 and is suitable; qcow2 is not.
 
-The checked-in ARM64 kernel config already enables the required virtio block,
-network, console, vsock, PCI, and ext4 drivers.
+The checked-in ARM64 kernel config enables the required virtio block, network,
+console, vsock, PCI, and ext4 drivers as built-ins, so the lifecycle guest boots
+its ext4 root disk without an initramfs.
 
 ## Build and verify
 
@@ -66,7 +67,7 @@ make cube-vz-lifecycle-benchmark
 The Make target intentionally runs natively instead of inside the Linux builder
 container because `Virtualization.framework` exists only on macOS.
 
-`make cube-vz-guest` builds `_output/cube-vz/guest/{kernel,initrd,rootfs.raw}`.
+`make cube-vz-guest` builds `_output/cube-vz/guest/{kernel,rootfs.raw}`.
 `make cube-vz-smoke` then verifies the complete minimal path:
 
 ```text
@@ -110,17 +111,29 @@ the implementation host is recorded in [Benchmark/RESULTS.md](Benchmark/RESULTS.
 ## Run the official lifecycle benchmark
 
 `make cube-vz-lifecycle-benchmark` builds and signs both native binaries,
-creates a ready ARM64 Linux saved template, cross-compiles the repository's
-official `examples/cube-bench` binary for macOS ARM64, and runs these tiers:
+creates an immutable ARM64 Linux disk template containing the real CubeSandbox
+envd service, cross-compiles the repository's official `examples/cube-bench`
+binary for macOS ARM64, and runs these tiers:
 
 - concurrency 1, 20 create/delete cycles, 3 warmups;
 - concurrency 10, 200 create/delete cycles, 3 warmups.
 
-The measured POST includes APFS template cloning, VM construction, saved-state
-restore, and the guest vsock READY signal. Results and the API log are written
-under `_output/cube-vz/lifecycle-results/<timestamp>/`. The measured path is
-native macOS → `Virtualization.framework` → ARM64 Linux; Docker is only used
-before measurement to assemble guest artifacts and cross-compile `cube-bench`.
+The measured POST includes APFS template cloning, cold VM construction/start,
+and readiness of the real envd service behind the guest vsock relay. Results
+and per-phase timings are written under
+`_output/cube-vz/lifecycle-results/<timestamp>/`. The measured path is native
+macOS → `Virtualization.framework` → ARM64 Linux; Docker is only used before
+measurement to assemble guest artifacts and cross-compile `cube-bench`.
+
+Every create follows the same cold path: APFS clone, fresh machine identifier,
+VM start, then envd readiness over vsock. There is no saved state, adaptive
+branch, hot pool, or prewarmed VM. Sandboxes recycle inactive MAC addresses so
+VZNAT does not accumulate an unbounded set of short-lived DHCP identities.
+
+DHCP runs in the background because CubeVZ's control and data planes use vsock.
+POST therefore guarantees that envd is usable, but an outbound Internet command
+issued immediately after POST may need to retry briefly while VZNAT assigns an
+address. Guest timing metadata records init, envd, and final READY milestones.
 
 ## Create and run a sandbox VM
 
@@ -138,15 +151,8 @@ _output/bin/cube-vz run --vm-dir .workdir/cube-vz/demo
 The default command line is `console=hvc0 root=/dev/vda rw`. Override it with
 `--cmdline` if the guest image needs additional kernel parameters.
 
-While the VM is running:
-
-- `kill -USR1 <pid>` pauses it, atomically writes `machine.vzstate`, and exits.
-- A later `run` restores and consumes that saved state automatically.
-- `Ctrl-C`, `SIGINT`, or `SIGTERM` stops without creating new saved state.
-- `cube-vz reset-state --vm-dir ...` deletes saved state for a cold boot.
-
-Keep the VM configuration, kernel, machine identifier, and disk unchanged while
-a saved state exists. Apple's restore format is tied to that VM configuration.
+`Ctrl-C`, `SIGINT`, or `SIGTERM` stops the VM. A later `run` always performs a
+fresh cold boot.
 
 ## Current boundary
 

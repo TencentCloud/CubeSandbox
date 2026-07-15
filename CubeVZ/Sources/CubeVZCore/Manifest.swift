@@ -94,7 +94,6 @@ public struct VMDirectory: Sendable {
   public static let kernelFilename = "kernel"
   public static let diskFilename = "rootfs.raw"
   public static let initrdFilename = "initrd"
-  public static let stateFilename = "machine.vzstate"
 
   public let url: URL
 
@@ -106,7 +105,6 @@ public struct VMDirectory: Sendable {
   public var machineIdentifierURL: URL {
     url.appendingPathComponent(Self.machineIdentifierFilename)
   }
-  public var stateURL: URL { url.appendingPathComponent(Self.stateFilename) }
 
   public func fileURL(named filename: String) -> URL {
     url.appendingPathComponent(filename)

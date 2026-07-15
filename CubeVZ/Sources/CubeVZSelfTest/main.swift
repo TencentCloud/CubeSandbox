@@ -22,7 +22,7 @@ private enum CubeVZSelfTest {
       ("manifest path confinement", testManifestPathConfinement),
       ("APFS copy-on-write clone", testAPFSClone),
       ("VM directory creation", testVMDirectoryCreation),
-      ("saved template clone", testSavedTemplateClone),
+      ("template clone", testTemplateClone),
       ("Virtualization.framework configuration", testVMConfiguration),
     ]
 
@@ -111,7 +111,7 @@ private enum CubeVZSelfTest {
     }
   }
 
-  private static func testSavedTemplateClone() throws {
+  private static func testTemplateClone() throws {
     try withTemporaryDirectory { directory in
       let kernel = directory.appendingPathComponent("source-kernel")
       let disk = directory.appendingPathComponent("source-rootfs.raw")
@@ -123,13 +123,17 @@ private enum CubeVZSelfTest {
       let template = try VMDirectoryCreator.create(
         CreateVMRequest(destination: templateURL, kernel: kernel, disk: disk)
       )
-      try Data("saved-state".utf8).write(to: template.stateURL)
-      let clone = try VMTemplateCloner.clone(template: template, to: cloneURL)
+      let clone = try VMTemplateCloner.cloneCold(
+        template: template,
+        to: cloneURL,
+        macAddress: "02:00:00:00:00:02"
+      )
       let manifest = try clone.loadManifest()
       try clone.validateFiles(for: manifest)
       try require(
-        try Data(contentsOf: clone.stateURL) == Data("saved-state".utf8),
-        "saved state was not cloned"
+        try Data(contentsOf: clone.fileURL(named: manifest.diskFile))
+          == Data("rootfs".utf8),
+        "sandbox disk contents differ"
       )
 
       try Data("changed".utf8).write(to: clone.fileURL(named: manifest.diskFile))

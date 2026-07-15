@@ -9,10 +9,7 @@ private let usage = """
   Usage:
     cube-vz doctor
     cube-vz create --vm-dir DIR --kernel FILE --disk RAW_FILE [options]
-    cube-vz prepare-template --vm-dir DIR [--timeout-seconds N]
-    cube-vz clone-template --template-dir DIR --vm-dir DIR
     cube-vz run --vm-dir DIR
-    cube-vz reset-state --vm-dir DIR
 
   create options:
     --initrd FILE             Optional initial ramdisk
@@ -24,9 +21,7 @@ private let usage = """
     --allow-full-copy         Fall back to a full disk copy if APFS clonefile fails
 
   run behavior:
-    Existing machine.vzstate is restored automatically. While running, send
-    SIGUSR1 to the printed PID to save VM state and exit. SIGINT/SIGTERM stop
-    without creating a state file.
+    Boots the VM from its kernel and disk. SIGINT or SIGTERM stops it.
   """
 
 private struct Arguments {
@@ -137,42 +132,6 @@ private struct CubeVZMain {
       try directory.validateFiles(for: manifest)
       let runtime = try VMRuntime(directory: directory, manifest: manifest)
       try await runtime.run()
-
-    case "prepare-template":
-      try parsed.validate(allowedValues: ["--vm-dir", "--timeout-seconds"])
-      let directory = VMDirectory(url: fileURL(try parsed.required("--vm-dir")))
-      let manifest = try directory.loadManifest()
-      guard manifest.vsockEnabled else {
-        throw CubeVZError.invalidManifest("template preparation requires vsock")
-      }
-      let timeout = try parseInt(
-        parsed.values["--timeout-seconds"] ?? "10",
-        "--timeout-seconds"
-      )
-      let runtime = try ManagedVM(directory: directory, manifest: manifest)
-      _ = try await runtime.start(restoreIfPresent: false)
-      try await runtime.waitUntilReady(timeout: .seconds(timeout))
-      try await runtime.saveStateAndStop()
-      print("prepared template \(directory.url.path)")
-
-    case "clone-template":
-      try parsed.validate(allowedValues: ["--template-dir", "--vm-dir"])
-      let template = VMDirectory(url: fileURL(try parsed.required("--template-dir")))
-      let clone = try VMTemplateCloner.clone(
-        template: template,
-        to: fileURL(try parsed.required("--vm-dir"))
-      )
-      print("cloned \(clone.url.path)")
-
-    case "reset-state":
-      try parsed.validate(allowedValues: ["--vm-dir"])
-      let directory = VMDirectory(url: fileURL(try parsed.required("--vm-dir")))
-      if FileManager.default.fileExists(atPath: directory.stateURL.path) {
-        try FileManager.default.removeItem(at: directory.stateURL)
-        print("removed \(directory.stateURL.path)")
-      } else {
-        print("no saved state at \(directory.stateURL.path)")
-      }
 
     case "help", "--help", "-h":
       print(usage)

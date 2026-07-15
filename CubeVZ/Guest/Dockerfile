@@ -5,11 +5,54 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE} AS runtime
 
+FROM --platform=$TARGETPLATFORM alpine:3.22 AS kernel-builder
+
+ARG KERNEL_VERSION=6.12.95
+ARG KERNEL_SHA256=a9e8c51fcb1e695d1d35dde5886cba579cb6f29c9646c5889f39d63841d4b9f6
+
+RUN apk add --no-cache \
+      bc \
+      bash \
+      binutils \
+      bison \
+      build-base \
+      flex \
+      openssl-dev \
+      perl \
+      xz
+
+WORKDIR /kernel
+RUN wget -q "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz" && \
+    echo "${KERNEL_SHA256}  linux-${KERNEL_VERSION}.tar.xz" | sha256sum -c - && \
+    tar -xf "linux-${KERNEL_VERSION}.tar.xz" --strip-components=1 && \
+    rm "linux-${KERNEL_VERSION}.tar.xz"
+
+# Start from the repository's proven ARM64 microVM configuration. It already
+# builds ext4 and the required virtio block, network, console, entropy, and
+# vsock transports into the kernel, so CubeVZ can boot the root disk directly
+# without a generic distribution initramfs or loadable modules.
+COPY hypervisor/resources/linux-config-aarch64 /kernel/.config
+RUN make olddefconfig && \
+    scripts/config \
+      --disable BLK_DEV_INITRD \
+      --disable MODULES \
+      --disable DEBUG_INFO \
+      --disable FTRACE \
+      --disable KPROBES \
+      --disable PROFILING \
+      --disable IKCONFIG \
+      --disable LOCALVERSION_AUTO \
+      --set-str LOCALVERSION "-cube-vz" && \
+    make olddefconfig && \
+    make -j"$(nproc)" Image && \
+    install -Dm0644 arch/arm64/boot/Image /out/kernel
+
 FROM --platform=$TARGETPLATFORM alpine:3.22 AS packager
 
+ARG KERNEL_VERSION=6.12.95
 ARG ROOTFS_SIZE_MIB=2048
 
-RUN apk add --no-cache build-base busybox-static e2fsprogs grep linux-headers linux-virt
+RUN apk add --no-cache build-base busybox-static e2fsprogs linux-headers
 
 COPY --from=runtime / /rootfs/
 COPY CubeVZ/Guest/init.sh /rootfs/usr/local/sbin/cube-vz-init
@@ -22,20 +65,18 @@ RUN cc -static -O2 -Wall -Wextra -Werror \
     cc -static -O2 -Wall -Wextra -Werror -pthread \
       -o /rootfs/usr/local/sbin/cube-vz-relay /tmp/cube-vz-relay.c && \
     cp /bin/busybox.static /rootfs/usr/local/sbin/busybox && \
-    cp -a /lib/modules /rootfs/lib/ && \
     chmod 0755 /rootfs/usr/local/sbin/busybox /rootfs/usr/local/sbin/cube-vz-* && \
     mkdir -p /rootfs/dev /rootfs/proc /rootfs/sys /rootfs/run /rootfs/tmp /out && \
     chmod 1777 /rootfs/tmp && \
-    kernel_offset="$(grep -abo -m1 "$(printf '\037\213\010')" \
-      /boot/vmlinuz-virt | cut -d: -f1)" && \
-    test -n "${kernel_offset}" && \
-    tail -c "+$((kernel_offset + 1))" /boot/vmlinuz-virt | gzip -dc > /out/kernel && \
-    cp /boot/initramfs-virt /out/initrd && \
     truncate -s "${ROOTFS_SIZE_MIB}M" /out/rootfs.raw && \
     mkfs.ext4 -q -F -b 4096 -d /rootfs /out/rootfs.raw && \
-    sha256sum /out/kernel /out/initrd /out/rootfs.raw > /out/SHA256SUMS && \
-    printf 'envd_ref=%s\nrootfs_size_mib=%s\n' \
-      "$(cat /rootfs/etc/cubesandbox-envd-ref)" "${ROOTFS_SIZE_MIB}" > /out/build-info.txt
+    printf 'envd_ref=%s\nrootfs_size_mib=%s\nkernel=%s-cube-vz\ninitrd=none\n' \
+      "$(cat /rootfs/etc/cubesandbox-envd-ref)" "${ROOTFS_SIZE_MIB}" \
+      "${KERNEL_VERSION}" > /out/build-info.txt
+
+COPY --from=kernel-builder /out/kernel /out/kernel
+
+RUN sha256sum /out/kernel /out/rootfs.raw > /out/SHA256SUMS
 
 FROM scratch
 COPY --from=packager /out/ /

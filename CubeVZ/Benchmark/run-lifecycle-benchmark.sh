@@ -8,7 +8,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 OUTPUT_DIR=${CUBEVZ_OUTPUT_DIR:-$ROOT_DIR/_output}
 BIN_DIR=$OUTPUT_DIR/bin
-GUEST_DIR=$OUTPUT_DIR/cube-vz/benchmark-guest
+GUEST_DIR=$OUTPUT_DIR/cube-vz/guest
 WORK_DIR=${CUBEVZ_LIFECYCLE_WORK_DIR:-$ROOT_DIR/.workdir/cube-vz}
 TEMPLATE_DIR=$WORK_DIR/lifecycle-template
 SANDBOXES_DIR=$WORK_DIR/sandboxes
@@ -29,11 +29,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [ "${CUBEVZ_LIFECYCLE_SKIP_BUILD:-0}" != 1 ]; then
-  make -C "$ROOT_DIR" cube-vz cube-vz-benchmark-guest
+  make -C "$ROOT_DIR" cube-vz cube-vz-guest
 fi
 
 for file in "$BIN_DIR/cube-vz" "$BIN_DIR/cube-vz-api" \
-  "$GUEST_DIR/kernel" "$GUEST_DIR/initrd" "$GUEST_DIR/rootfs.raw"; do
+  "$GUEST_DIR/kernel" "$GUEST_DIR/rootfs.raw"; do
   test -f "$file" || { echo "ERROR: missing artifact: $file" >&2; exit 1; }
 done
 
@@ -43,13 +43,10 @@ mkdir -p "$SANDBOXES_DIR" "$RESULTS_DIR"
 "$BIN_DIR/cube-vz" create \
   --vm-dir "$TEMPLATE_DIR" \
   --kernel "$GUEST_DIR/kernel" \
-  --initrd "$GUEST_DIR/initrd" \
   --disk "$GUEST_DIR/rootfs.raw" \
   --cpus 2 \
   --memory-mib 2048 \
-  --cmdline "console=hvc0 root=/dev/vda rw rootfstype=ext4 modules=ext4,virtio_blk,virtio_pci init=/usr/local/sbin/cube-vz-lifecycle-init"
-"$BIN_DIR/cube-vz" prepare-template --vm-dir "$TEMPLATE_DIR" --timeout-seconds 30
-
+  --cmdline "console=hvc0 quiet loglevel=0 root=/dev/vda rw rootfstype=ext4 init=/usr/local/sbin/cube-vz-init"
 docker run --rm \
   -e CGO_ENABLED=0 \
   -e GOOS=darwin \

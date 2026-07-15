@@ -26,7 +26,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for artifact in kernel initrd rootfs.raw; do
+for artifact in kernel rootfs.raw; do
   test -s "${GUEST_DIR}/${artifact}" || {
     echo "ERROR: missing ${GUEST_DIR}/${artifact}; run make cube-vz-guest" >&2
     exit 1
@@ -47,13 +47,10 @@ mkdir -p "${SANDBOXES_DIR}"
 "${BIN_DIR}/cube-vz" create \
   --vm-dir "${TEMPLATE_DIR}" \
   --kernel "${GUEST_DIR}/kernel" \
-  --initrd "${GUEST_DIR}/initrd" \
   --disk "${GUEST_DIR}/rootfs.raw" \
   --cpus 2 \
   --memory-mib 2048 \
-  --cmdline "console=hvc0 root=/dev/vda rw rootfstype=ext4 modules=ext4,virtio_blk,virtio_pci init=/usr/local/sbin/cube-vz-init"
-"${BIN_DIR}/cube-vz" prepare-template --vm-dir "${TEMPLATE_DIR}" --timeout-seconds 30
-
+  --cmdline "console=hvc0 quiet loglevel=0 root=/dev/vda rw rootfstype=ext4 init=/usr/local/sbin/cube-vz-init"
 "${BIN_DIR}/cube-vz-api" \
   --template-dir "${TEMPLATE_DIR}" \
   --sandboxes-dir "${SANDBOXES_DIR}" \

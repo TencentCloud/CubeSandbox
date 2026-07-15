@@ -37,37 +37,69 @@ make cube-vz-benchmark
 ## CubeSandbox lifecycle benchmark
 
 The native lifecycle path was also measured with the repository's official
-`examples/cube-bench` client. A POST returns only after an APFS-cloned 2-vCPU,
-2-GiB sandbox has restored from `machine.vzstate` and sent READY over virtio
-vsock. DELETE shuts down the guest and removes its VM directory.
+`examples/cube-bench` client. A POST returns after an APFS-cloned 2-vCPU,
+2-GiB sandbox has cold-booted and the real CubeSandbox envd service plus its
+virtio-vsock relay are ready. DELETE stops the guest and removes its VM
+directory.
 
-- Timestamp: 2026-07-14 08:53 UTC
+- Timestamp: 2026-07-15 07:35 UTC
 - Mode: `create-delete`
 - Warmups: 3 per tier
 - Success rate: 100% (220/220 measured sandbox lifecycle cycles)
-- Raw reports: `_output/cube-vz/lifecycle-results/20260714T085302Z/`
+- Raw reports: `_output/cube-vz/lifecycle-results/20260715T073504Z/`
 
 | Host / tier | Requests | Create avg | Create P95 | Create P99 | Throughput |
 |---|---:|---:|---:|---:|---:|
-| M4 Pro, concurrency 1 | 20 | 326.6 ms | 336.9 ms | 341.7 ms | 1.72 lifecycle/s |
-| M4 Pro, concurrency 10 | 200 | 1,094.3 ms | 1,543.6 ms | 2,027.1 ms | 5.93 lifecycle/s |
+| M4 Pro, concurrency 1 | 20 | 236.2 ms | 257.8 ms | 259.2 ms | 2.61 lifecycle/s |
+| M4 Pro, concurrency 10 | 200 | 292.6 ms | 383.3 ms | 418.6 ms | 17.60 lifecycle/s |
+
+Compared with the previous adaptive restore/cold baseline, concurrency-1
+average create improved 17.5% and concurrency-10 average improved 37.9%.
+Concurrency-10 P95 improved 35.0%, P99 improved 31.6%, and throughput improved
+36.2%.
+
+The optimized path has one lifecycle mode:
+
+- every sandbox gets a fresh machine identifier and cold-boots an APFS-cloned
+  disk; saved-state preparation, restore, and adaptive branching are removed;
+- the pinned Linux 6.12.95 kernel has the required ext4 and virtio drivers
+  built in and boots the root disk without an initramfs;
+- inactive MAC addresses are recycled so concurrent VZNAT clients remain
+  distinct without growing the DHCP identity set indefinitely;
+- envd starts in parallel with background DHCP, and health is polled every
+  10 ms over vsock;
+- DELETE stops the VM through the host framework because the ephemeral disk is
+  discarded immediately.
+
+No hot pool or prewarmed VM is used. POST still includes APFS clone, VM startup,
+and real envd readiness. Per-phase API timings, including warmups, averaged:
+
+| Tier | APFS clone | VM construction | VM start | envd readiness | Total |
+|---|---:|---:|---:|---:|---:|
+| Concurrency 1 / cold boot | 1.0 ms | 3.1 ms | 77.1 ms | 155.2 ms | 236.5 ms |
+| Concurrency 10 / cold boot | 1.2 ms | 3.2 ms | 105.9 ms | 179.9 ms | 290.1 ms |
+
+Guest telemetry averaged 105 ms to init and 134 ms to envd at concurrency 1;
+at concurrency 10 those values were 120 ms and 160 ms. DHCP is deliberately
+not part of POST readiness because CubeVZ control and envd traffic use vsock.
+An outbound Internet command issued immediately after create may therefore
+need a brief retry while VZNAT assigns the guest address.
 
 For context, the official Linux reports for the same 2-vCPU / 2-GiB sandbox
 size publish these create latencies:
 
 | Official Linux host / tier | Create avg | Create P95 | Relative M4 avg |
 |---|---:|---:|---:|
-| Tencent BMI5 bare metal, concurrency 1 | 47.8 ms | 57.4 ms | M4 is 6.83x slower |
-| Tencent BMI5 bare metal, concurrency 10 | 88.7 ms | 116.9 ms | M4 is 12.34x slower |
-| Tencent SA9 PVM, concurrency 1 | 66.7 ms | 78.2 ms | M4 is 4.90x slower |
-| Tencent SA9 PVM, concurrency 10 | 170.9 ms | 216.7 ms | M4 is 6.40x slower |
+| Tencent BMI5 bare metal, concurrency 1 | 47.8 ms | 57.4 ms | M4 is 4.94x slower |
+| Tencent BMI5 bare metal, concurrency 10 | 88.7 ms | 116.9 ms | M4 is 3.30x slower |
+| Tencent SA9 PVM, concurrency 1 | 66.7 ms | 78.2 ms | M4 is 3.54x slower |
+| Tencent SA9 PVM, concurrency 10 | 170.9 ms | 216.7 ms | M4 is 1.71x slower |
 
-The API and APFS clone are not the dominant serial cost: 50 complete template
-directory clones took 0.28 seconds (5.6 ms each, including a fresh CLI process).
-Most of the remaining ~327 ms serial latency is therefore VM saved-state restore,
-memory mapping, and guest readiness inside `Virtualization.framework`. At
-concurrency 10, Apple VM restore and 2-GiB-per-VM memory pressure contend much
-more heavily than Linux KVM's shared-kernel/lazy-memory design.
+The API and APFS clone are no longer dominant. The remaining create latency is
+mostly Apple VM start plus scheduling the guest until envd is healthy. Because
+CubeVZ does not wait for DHCP while the official Linux backend may have network
+configured before POST returns, the relative table is useful context rather
+than a claim of identical readiness semantics.
 
 The bare-metal report used `create-only`, while the PVM report used the default
 create/delete flow. `cube-bench` measures POST separately in either mode, but

@@ -10,3 +10,8 @@ CubeVZ/*
 CubeVZ/Benchmark/*
 !CubeVZ/Benchmark/cube-vz-agent.c
 !CubeVZ/Benchmark/cube-vz-relay.c
+!hypervisor/
+hypervisor/*
+!hypervisor/resources/
+hypervisor/resources/*
+!hypervisor/resources/linux-config-aarch64

@@ -349,7 +349,7 @@ cube-vz-benchmark: cube-vz
 	CUBEVZ_BENCH_SKIP_BUILD=1 "$(CUBEVZ_DIR)/Benchmark/run-benchmark.sh"
 
 .PHONY: cube-vz-lifecycle-benchmark
-cube-vz-lifecycle-benchmark: cube-vz cube-vz-benchmark-guest
+cube-vz-lifecycle-benchmark: cube-vz cube-vz-guest
 	CUBEVZ_LIFECYCLE_SKIP_BUILD=1 "$(CUBEVZ_DIR)/Benchmark/run-lifecycle-benchmark.sh"
 
 # Build a guest kernel image (vmlinux for x86_64, Image for aarch64) from an external kernel source tree.

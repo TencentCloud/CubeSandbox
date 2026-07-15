@@ -5,11 +5,6 @@ import Darwin
 import Foundation
 @preconcurrency import Virtualization
 
-public enum ManagedVMStartMode: Sendable {
-  case coldBoot
-  case restored
-}
-
 public final class VMStreamConnection: @unchecked Sendable {
   private let connection: VZVirtioSocketConnection
 
@@ -53,15 +48,17 @@ private final class ControlConnectionDelegate: NSObject, VZVirtioSocketListenerD
 
 @MainActor
 public final class ManagedVM {
-  private let directory: VMDirectory
   private let manifest: VMManifest
   private let virtualMachine: VZVirtualMachine
   private var controlConnection: VZVirtioSocketConnection?
   private var controlConnectionDelegate: ControlConnectionDelegate?
   private var controlListener: VZVirtioSocketListener?
+  public private(set) var readinessMetadata: String?
 
-  public init(directory: VMDirectory, manifest: VMManifest) throws {
-    self.directory = directory
+  public init(
+    directory: VMDirectory,
+    manifest: VMManifest
+  ) throws {
     self.manifest = manifest
     let configuration = try VMConfigurationBuilder.build(
       directory: directory,
@@ -90,28 +87,8 @@ public final class ManagedVM {
     virtualMachine.state
   }
 
-  public func start(restoreIfPresent: Bool = true) async throws -> ManagedVMStartMode {
-    let stateExists = FileManager.default.fileExists(atPath: directory.stateURL.path)
-    if stateExists && restoreIfPresent {
-      try await virtualMachine.restoreMachineStateFrom(url: directory.stateURL)
-      try await virtualMachine.resume()
-      do {
-        try FileManager.default.removeItem(at: directory.stateURL)
-      } catch {
-        try? await virtualMachine.stop()
-        throw CubeVZError.filesystem(
-          "restored the VM but could not consume \(directory.stateURL.path): \(error)"
-        )
-      }
-      return .restored
-    }
-    if stateExists {
-      throw CubeVZError.runtime(
-        "saved state exists at \(directory.stateURL.path); refusing cold boot"
-      )
-    }
+  public func start() async throws {
     try await virtualMachine.start()
-    return .coldBoot
   }
 
   public func waitUntilReady(timeout: Duration = .seconds(10)) async throws {
@@ -128,7 +105,11 @@ public final class ManagedVM {
       if let connection = controlConnectionDelegate?.takeConnection() {
         do {
           let response = try await Self.readResponse(descriptor: connection.fileDescriptor)
-          if response == "READY\n" {
+          if response == "READY\n" || response.hasPrefix("READY ") {
+            readinessMetadata = response
+              .trimmingCharacters(in: .whitespacesAndNewlines)
+              .dropFirst("READY".count)
+              .trimmingCharacters(in: .whitespaces)
             controlConnection = connection
             return
           }
@@ -141,31 +122,6 @@ public final class ManagedVM {
       try await Task.sleep(for: .milliseconds(5))
     }
     throw CubeVZError.runtime("guest readiness timed out: \(lastError)")
-  }
-
-  public func saveStateAndStop() async throws {
-    if virtualMachine.state == .running {
-      try await virtualMachine.pause()
-    }
-    guard virtualMachine.state == .paused else {
-      throw CubeVZError.runtime(
-        "cannot save VM while state is \(virtualMachine.state.rawValue)"
-      )
-    }
-
-    let temporaryState = directory.stateURL.appendingPathExtension("partial")
-    try? FileManager.default.removeItem(at: temporaryState)
-    do {
-      try await virtualMachine.saveMachineStateTo(url: temporaryState)
-      if FileManager.default.fileExists(atPath: directory.stateURL.path) {
-        try FileManager.default.removeItem(at: directory.stateURL)
-      }
-      try FileManager.default.moveItem(at: temporaryState, to: directory.stateURL)
-      try await virtualMachine.stop()
-    } catch {
-      try? FileManager.default.removeItem(at: temporaryState)
-      throw error
-    }
   }
 
   public func shutdown(timeout: Duration = .seconds(2)) async throws {
@@ -181,6 +137,11 @@ public final class ManagedVM {
     if virtualMachine.state != .stopped {
       try await virtualMachine.stop()
     }
+  }
+
+  public func discard() async throws {
+    guard virtualMachine.state != .stopped else { return }
+    try await virtualMachine.stop()
   }
 
   public func connect(toGuestPort port: UInt32) async throws -> VMStreamConnection {
