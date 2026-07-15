@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -142,21 +144,63 @@ func parseConnectStream(data []byte) (*CommandOutput, error) {
 	return out, nil
 }
 
-// pollGatewayToken reads the gateway token repeatedly until it stabilizes
-// (same value twice in a row) or maxAttempts is reached. This handles the
-// case where OpenClaw rewrites openclaw.json on startup with a different
-// token than the one the apply script wrote.
-func pollGatewayToken(httpClient *http.Client, sandboxID, domain string) string {
-	var prev string
-	for i := 0; i < 10; i++ {
-		time.Sleep(2 * time.Second)
-		token := readOpenclawGatewayToken(httpClient, sandboxID, domain)
-		if token != "" && token == prev {
-			return token
-		}
-		prev = token
+// readOpenclawGatewayTokenFromHost reads the gateway auth token directly from
+// the host-side OpenClaw state directory (shared_files persistence mode).
+// This avoids a round-trip through envd and is more reliable because the host
+// file is not subject to in-process rewrites by OpenClaw during startup.
+// Matches old Rust read_openclaw_gateway_token_from_host.
+func readOpenclawGatewayTokenFromHost(statePath string) string {
+	if statePath == "" {
+		return ""
 	}
-	return prev
+	data, err := os.ReadFile(filepath.Join(statePath, "openclaw.json"))
+	if err != nil {
+		return ""
+	}
+	var v struct {
+		Gateway struct {
+			Auth struct {
+				Token string `json:"token"`
+			} `json:"auth"`
+		} `json:"gateway"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(v.Gateway.Auth.Token)
+}
+
+// resolveGatewayToken reads the gateway token with the same priority as the
+// old Rust code (CubeAPI/src/handlers/agenthub.rs):
+//  1. host-side file (shared_files mode only)
+//  2. sandbox-side file via envd (single read)
+//  3. fallback (the token CubeOps generated and passed to the apply script)
+//
+// A 5-second sleep is performed first to let OpenClaw finish its in-process
+// config reload after the apply script writes openclaw.json. Without this
+// delay, the host/sandbox file may still contain a transient token that
+// OpenClaw generates during startup, which differs from the token the apply
+// script wrote. This matches the Rust `tokio::time::sleep(Duration::from_secs(5))`.
+func resolveGatewayToken(httpClient *http.Client, sandboxID, domain, hostStatePath, fallbackToken string) string {
+	// Wait for OpenClaw's in-process reload window to settle.
+	time.Sleep(5 * time.Second)
+
+	// 1. Try host-side first (shared_files mode).
+	if hostToken := readOpenclawGatewayTokenFromHost(hostStatePath); hostToken != "" {
+		slog.Info("resolveGatewayToken: using host-side token",
+			"sandboxID", sandboxID, "hostStatePath", hostStatePath)
+		return hostToken
+	}
+	// 2. Single read from sandbox-side via envd.
+	if sandboxToken := readOpenclawGatewayToken(httpClient, sandboxID, domain); sandboxToken != "" {
+		slog.Info("resolveGatewayToken: using sandbox-side token",
+			"sandboxID", sandboxID)
+		return sandboxToken
+	}
+	// 3. Fallback to the generated token.
+	slog.Info("resolveGatewayToken: using fallback (generated) token",
+		"sandboxID", sandboxID)
+	return fallbackToken
 }
 
 // readOpenclawGatewayToken reads the gateway auth token from

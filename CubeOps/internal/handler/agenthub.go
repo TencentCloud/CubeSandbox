@@ -302,6 +302,21 @@ func (h *AgentHubHandler) DeleteInstance(w http.ResponseWriter, r *http.Request)
 		"instance_type": inst.Engine,
 	}); err != nil {
 		// Log but continue — DB record is the source of truth for the UI
+		slog.Warn("DeleteInstance: DeleteSandbox failed, continuing with cleanup",
+			"agentID", agentID, "sandboxID", inst.SandboxID, "err", err)
+	}
+
+	// Clean up host-side OpenClaw state directory (shared_files persistence mode).
+	// Best-effort: log errors but don't fail the delete, since the DB record is
+	// the source of truth and sandbox deletion already happened.
+	if inst.OpenclawStatePath != nil && *inst.OpenclawStatePath != "" {
+		if err := os.RemoveAll(*inst.OpenclawStatePath); err != nil {
+			slog.Warn("DeleteInstance: failed to clean up OpenClaw state directory",
+				"agentID", agentID, "path", *inst.OpenclawStatePath, "err", err)
+		} else {
+			slog.Info("DeleteInstance: cleaned up OpenClaw state directory",
+				"agentID", agentID, "path", *inst.OpenclawStatePath)
+		}
 	}
 
 	if err := h.store.SoftDeleteInstance(r.Context(), agentID); err != nil {
@@ -653,6 +668,23 @@ func (h *AgentHubHandler) DeleteSnapshot(w http.ResponseWriter, r *http.Request)
 	vars := mux.Vars(r)
 	agentID := vars["agentID"]
 	snapshotID := vars["snapshotID"]
+
+	// Look up the snapshot before soft-deleting so we can clean up host-side
+	// OpenClaw state files (agenthub_state kind). Best-effort cleanup: log
+	// errors but don't fail the delete, matching DeleteInstance semantics.
+	snap, _ := h.store.GetAgentSnapshot(r.Context(), agentID, snapshotID)
+	if snap != nil && snap.OpenclawStateSnapshotPath != nil && *snap.OpenclawStateSnapshotPath != "" {
+		if err := os.RemoveAll(*snap.OpenclawStateSnapshotPath); err != nil {
+			slog.Warn("DeleteSnapshot: failed to clean up OpenClaw snapshot directory",
+				"agentID", agentID, "snapshotID", snapshotID,
+				"path", *snap.OpenclawStateSnapshotPath, "err", err)
+		} else {
+			slog.Info("DeleteSnapshot: cleaned up OpenClaw snapshot directory",
+				"agentID", agentID, "snapshotID", snapshotID,
+				"path", *snap.OpenclawStateSnapshotPath)
+		}
+	}
+
 	if err := h.store.DeleteAgentSnapshot(r.Context(), agentID, snapshotID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete snapshot: "+err.Error())
 		return
@@ -958,15 +990,10 @@ func (h *AgentHubHandler) CreateInstance(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Read the gateway token back from the sandbox after apply.
-	// OpenClaw may trigger an in-process reload after the config file changes.
-	// Wait 5 seconds for the reload window so the stored URL matches the token
-	// the live gateway actually enforces (matching old Rust).
-	time.Sleep(5 * time.Second)
-	gatewayToken := readOpenclawGatewayToken(envdHTTPClient, sandboxID, domain)
-	if gatewayToken == "" {
-		gatewayToken = generatedToken // fallback to the token we passed to the script
-	}
+	// Read the gateway token back after apply.
+	// Priority (matching old Rust): host-side file > sandbox-side poll > generated fallback.
+	// OpenClaw may rewrite openclaw.json on startup, so we poll until stable.
+	gatewayToken := resolveGatewayToken(envdHTTPClient, sandboxID, domain, openclawStatePath, generatedToken)
 
 	// Build response (matching old Rust AgentInstanceResponse)
 	bots := []string{}
@@ -1157,16 +1184,82 @@ func (h *AgentHubHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Create snapshot via CubeMaster (matching old Rust CreateSnapshotRequest format)
-	requestID := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	displayName := ""
 	if req.Name != nil {
 		displayName = *req.Name
 	}
+
+	// Determine persistence mode.
+	persistenceMode := ""
+	if inst.PersistenceMode != nil {
+		persistenceMode = *inst.PersistenceMode
+	}
+	sharedFiles := persistenceMode == "shared_files"
+
+	// shared_files mode: the sandbox has a host_dir volume mount which
+	// CommitSandbox does not support. Instead, copy the OpenClaw host state
+	// directory to a snapshot directory and record it as an
+	// "agenthub_state" snapshot. Matches old Rust create_agent_snapshot
+	// shared_files branch.
+	if sharedFiles && inst.OpenclawStatePath != nil && *inst.OpenclawStatePath != "" {
+		sourceOpenclawPath := *inst.OpenclawStatePath
+		snapshotID := fmt.Sprintf("agenthub-%s", uuid.New().String())
+		snapPath := openclawHostSnapshotPath(snapshotID)
+		if err := copyOpenclawStateDir(sourceOpenclawPath, snapPath); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to copy OpenClaw state: "+err.Error())
+			return
+		}
+
+		// Determine rootfs snapshot ID (base snapshot or rootfs source).
+		rootfsSnapshotID := inst.BaseSnapshotID
+		if rootfsSnapshotID == "" && inst.RootfsSourceID != nil {
+			rootfsSnapshotID = *inst.RootfsSourceID
+		}
+		if rootfsSnapshotID == "" {
+			rootfsSnapshotID = inst.TemplateID
+		}
+		rootfsSourceType := "template"
+		if inst.RootfsSourceType != nil && *inst.RootfsSourceType != "" {
+			rootfsSourceType = *inst.RootfsSourceType
+		}
+
+		err = h.store.DB().WithContext(r.Context()).Exec(
+			`INSERT INTO t_agenthub_snapshot (
+				snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind, origin_sandbox_id,
+				rootfs_source_type, rootfs_source_id, rootfs_snapshot_id, openclaw_state_snapshot_path, deleted_at
+			) VALUES (?, ?, ?, ?, 'ready', 'agenthub_state', ?, ?, ?, ?, ?, NULL)
+			ON DUPLICATE KEY UPDATE
+				agent_id = VALUES(agent_id), sandbox_id = VALUES(sandbox_id),
+				name = VALUES(name), status = VALUES(status), snapshot_kind = VALUES(snapshot_kind),
+				origin_sandbox_id = VALUES(origin_sandbox_id),
+				rootfs_source_type = VALUES(rootfs_source_type),
+				rootfs_source_id = VALUES(rootfs_source_id),
+				rootfs_snapshot_id = VALUES(rootfs_snapshot_id),
+				openclaw_state_snapshot_path = VALUES(openclaw_state_snapshot_path), deleted_at = NULL`,
+			snapshotID, agentID, inst.SandboxID, displayName, inst.SandboxID,
+			rootfsSourceType, rootfsSnapshotID, rootfsSnapshotID, snapPath,
+		).Error
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record snapshot: "+err.Error())
+			return
+		}
+
+		_ = h.store.RecordOperation(r.Context(), agentID, inst.SandboxID, "snapshot", "succeeded", "")
+		writeJSON(w, http.StatusCreated, map[string]interface{}{
+			"snapshotID": snapshotID,
+			"names":      []string{},
+			"status":     "ready",
+		})
+		return
+	}
+
+	// full_snapshot mode: create a CubeMaster snapshot of the entire sandbox.
+	// Matches old Rust create_agent_snapshot full_snapshot branch.
+	requestID := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	snapResp, err := h.cm.CreateSnapshot(r.Context(), map[string]interface{}{
-		"request_id":    requestID,
-		"sandbox_id":    inst.SandboxID,
-		"display_name":  displayName,
+		"request_id":     requestID,
+		"sandbox_id":     inst.SandboxID,
+		"display_name":   displayName,
 		"create_request": map[string]interface{}{},
 	})
 	if err != nil {
@@ -1277,12 +1370,45 @@ func (h *AgentHubHandler) RollbackAgent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	_, err = h.cm.RollbackSandbox(r.Context(), inst.SandboxID, map[string]string{
-		"snapshot_id": req.SnapshotID,
-	})
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to rollback: "+err.Error())
-		return
+	// Look up the snapshot to determine its kind.
+	// shared_files / agenthub_state snapshots store OpenClaw state on the host
+	// filesystem, not in CubeMaster — they must be restored by copying the host
+	// state directory and restarting OpenClaw, not via RollbackSandbox.
+	snap, _ := h.store.GetAgentSnapshot(r.Context(), agentID, req.SnapshotID)
+	if snap != nil && snap.SnapshotKind != nil && *snap.SnapshotKind == "agenthub_state" {
+		if snap.OpenclawStateSnapshotPath == nil || *snap.OpenclawStateSnapshotPath == "" {
+			writeError(w, http.StatusBadRequest, "snapshot has no OpenClaw state path")
+			return
+		}
+		if inst.OpenclawStatePath == nil || *inst.OpenclawStatePath == "" {
+			writeError(w, http.StatusBadRequest, "instance has no active OpenClaw state path")
+			return
+		}
+		if err := copyOpenclawStateDir(*snap.OpenclawStateSnapshotPath, *inst.OpenclawStatePath); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to restore OpenClaw state: "+err.Error())
+			return
+		}
+		// Restart OpenClaw to pick up the restored state.
+		output, restartErr := restartOpenclawForInstance(inst)
+		if restartErr != nil || output.ExitCode != 0 {
+			errMsg := "unknown error"
+			if restartErr != nil {
+				errMsg = restartErr.Error()
+			} else if output != nil {
+				errMsg = output.Stderr
+			}
+			writeError(w, http.StatusBadGateway, "OpenClaw restart failed after state restore: "+errMsg)
+			return
+		}
+	} else {
+		// full_snapshot / sandbox snapshot: delegate to CubeMaster.
+		_, err = h.cm.RollbackSandbox(r.Context(), inst.SandboxID, map[string]string{
+			"snapshot_id": req.SnapshotID,
+		})
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to rollback: "+err.Error())
+			return
+		}
 	}
 
 	_ = h.store.UpdateInstanceStatus(r.Context(), agentID, "running")
@@ -1349,14 +1475,39 @@ func (h *AgentHubHandler) RecoverAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 3: rollback to the healthy snapshot.
-	_, err = h.cm.RollbackSandbox(ctx, inst.SandboxID, map[string]string{
-		"snapshot_id": snapshotID,
-	})
-	if err != nil {
-		_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
-		_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "rollback failed: "+err.Error())
-		writeError(w, http.StatusBadGateway, "failed to rollback sandbox: "+err.Error())
-		return
+	// shared_files / agenthub_state snapshots must be restored on the host
+	// filesystem (same logic as RollbackAgent). full_snapshot delegates to
+	// CubeMaster RollbackSandbox.
+	snap, _ := h.store.GetAgentSnapshot(ctx, agentID, snapshotID)
+	if snap != nil && snap.SnapshotKind != nil && *snap.SnapshotKind == "agenthub_state" {
+		if snap.OpenclawStateSnapshotPath == nil || *snap.OpenclawStateSnapshotPath == "" {
+			_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
+			_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "healthy snapshot has no OpenClaw state path")
+			writeError(w, http.StatusInternalServerError, "cannot recover: healthy snapshot has no OpenClaw state path")
+			return
+		}
+		if inst.OpenclawStatePath == nil || *inst.OpenclawStatePath == "" {
+			_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
+			_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "instance has no active OpenClaw state path")
+			writeError(w, http.StatusInternalServerError, "cannot recover: instance has no active OpenClaw state path")
+			return
+		}
+		if err := copyOpenclawStateDir(*snap.OpenclawStateSnapshotPath, *inst.OpenclawStatePath); err != nil {
+			_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
+			_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "state restore failed: "+err.Error())
+			writeError(w, http.StatusInternalServerError, "failed to restore OpenClaw state: "+err.Error())
+			return
+		}
+	} else {
+		_, err = h.cm.RollbackSandbox(ctx, inst.SandboxID, map[string]string{
+			"snapshot_id": snapshotID,
+		})
+		if err != nil {
+			_ = h.store.UpdateInstanceStatus(ctx, agentID, "error")
+			_ = h.store.RecordOperation(ctx, agentID, inst.SandboxID, "recover", "failed", "rollback failed: "+err.Error())
+			writeError(w, http.StatusBadGateway, "failed to rollback sandbox: "+err.Error())
+			return
+		}
 	}
 
 	// Step 4: restart OpenClaw again after rollback.
@@ -1402,7 +1553,11 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine snapshot source
+	// Determine snapshot source.
+	// For agenthub_state snapshots (shared_files mode), the CubeMaster rootfs
+	// source must be the snapshot's rootfs_snapshot_id (template ID), not the
+	// agenthub-xxx ID. We also capture the OpenClaw state snapshot path so we
+	// can clone the host state directory for shared_files clones.
 	snapshotID := ""
 	if req.SnapshotID != nil && strings.TrimSpace(*req.SnapshotID) != "" {
 		snapshotID = strings.TrimSpace(*req.SnapshotID)
@@ -1414,35 +1569,98 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 		snapshotID = inst.TemplateID
 	}
 
+	// Look up the snapshot (if it's an agenthub snapshot) to resolve the real
+	// rootfs source and the OpenClaw state path for shared_files cloning.
+	rootfsSnapshotID := snapshotID
+	var sourceOpenclawStatePath string
+	if req.SnapshotID != nil && strings.TrimSpace(*req.SnapshotID) != "" {
+		if snap, _ := h.store.GetAgentSnapshot(r.Context(), agentID, snapshotID); snap != nil {
+			if snap.RootfsSnapshotID != nil && *snap.RootfsSnapshotID != "" {
+				rootfsSnapshotID = *snap.RootfsSnapshotID
+			}
+			if snap.OpenclawStateSnapshotPath != nil && *snap.OpenclawStateSnapshotPath != "" {
+				sourceOpenclawStatePath = *snap.OpenclawStateSnapshotPath
+			}
+		}
+	}
+
 	cloneName := inst.Name + " 临时助手"
 	if req.Name != nil && strings.TrimSpace(*req.Name) != "" {
 		cloneName = strings.TrimSpace(*req.Name)
 	}
 
-	// Create sandbox via CubeMaster (same format as CreateInstance)
+	// shared_files clone: create a new host state directory and copy OpenClaw
+	// state from the source snapshot. The clone gets its own persist ID and
+	// host-mount, matching CreateInstance's shared_files handling.
+	cloneSharedFiles := inst.PersistenceMode != nil && *inst.PersistenceMode == "shared_files"
+	slog.Info("CloneAgent: debug",
+		"agentID", agentID, "cloneSharedFiles", cloneSharedFiles,
+		"sourceOpenclawStatePath", sourceOpenclawStatePath,
+		"rootfsSnapshotID", rootfsSnapshotID, "snapshotID", snapshotID)
+	var cloneOpenclawStatePath string
+	var cloneOpenclawPersistID string
+	if cloneSharedFiles && sourceOpenclawStatePath != "" {
+		cloneOpenclawPersistID = newOpenclawPersistID()
+		statePath, err := prepareOpenclawStateDir(cloneOpenclawPersistID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		cloneOpenclawStatePath = statePath
+		if err := copyOpenclawStateDir(sourceOpenclawStatePath, cloneOpenclawStatePath); err != nil {
+			slog.Warn("CloneAgent: failed to copy OpenClaw state for clone",
+				"agentID", agentID, "err", err)
+		}
+	}
+
+	// Create sandbox via CubeMaster (same format as CreateInstance).
 	requestID := fmt.Sprintf("req-%d", time.Now().UnixNano())
-	sandboxResp, err := h.cm.CreateSandbox(r.Context(), map[string]interface{}{
+	annotations := map[string]string{
+		"cube.master.appsnapshot.template.id":      rootfsSnapshotID,
+		"cube.master.appsnapshot.template.version": "v2",
+	}
+	labels := map[string]string{
+		"agenthub":                    "true",
+		"agenthub.name":               cloneName,
+		"agenthub.engine":             inst.Engine,
+		"agenthub.rootfs_source_type": "snapshot",
+		"agenthub.rootfs_source_id":   rootfsSnapshotID,
+	}
+	if cloneSharedFiles && cloneOpenclawStatePath != "" {
+		mountMeta, err := openclawHostMountMetadata(cloneOpenclawStatePath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		labels["agenthub.openclaw.persist_id"] = cloneOpenclawPersistID
+		annotations[hostdirMountKey] = mountMeta
+	}
+
+	cmReq := map[string]interface{}{
 		"RequestID":     requestID,
 		"instance_type": "cubebox",
 		"timeout":       86400,
 		"containers":    []interface{}{},
 		"exposed_ports": []interface{}{},
-		"annotations": map[string]string{
-			"cube.master.appsnapshot.template.id":      snapshotID,
-			"cube.master.appsnapshot.template.version": "v2",
-		},
-		"labels": map[string]string{
-			"agenthub":                   "true",
-			"agenthub.name":              cloneName,
-			"agenthub.engine":            inst.Engine,
-			"agenthub.rootfs_source_type": "snapshot",
-			"agenthub.rootfs_source_id":  snapshotID,
-		},
-		"network_type": "tap",
-		"auto_pause":   false,
-		"auto_resume":  false,
-	})
+		"annotations":   annotations,
+		"labels":        labels,
+		"network_type":  "tap",
+		"auto_pause":    false,
+		"auto_resume":   false,
+	}
+	// Distribution scope: shared_files clones are node-local (host mount).
+	if cloneSharedFiles {
+		if scope := agenthubDistributionScope("shared_files", "snapshot"); scope != nil {
+			cmReq["distribution_scope"] = scope
+		}
+	}
+
+	sandboxResp, err := h.cm.CreateSandbox(r.Context(), cmReq)
 	if err != nil {
+		// Best-effort cleanup of the host state dir we just created.
+		if cloneOpenclawStatePath != "" {
+			_ = os.RemoveAll(cloneOpenclawStatePath)
+		}
 		writeError(w, http.StatusBadGateway, "failed to create clone sandbox: "+err.Error())
 		return
 	}
@@ -1452,6 +1670,9 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	json.Unmarshal(sandboxResp, &sbResult)
 	if sbResult.SandboxID == "" {
+		if cloneOpenclawStatePath != "" {
+			_ = os.RemoveAll(cloneOpenclawStatePath)
+		}
 		writeError(w, http.StatusBadGateway, "CubeMaster returned empty sandbox_id")
 		return
 	}
@@ -1496,8 +1717,11 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 		applyOpenclawRuntime(envdHTTPClient, h.store, sbResult.SandboxID, inst.Domain, clonePlan, cloneOpts)
 	}
 
-	// Read gateway token from the clone sandbox
-	cloneGatewayToken := readOpenclawGatewayToken(envdHTTPClient, sbResult.SandboxID, inst.Domain)
+	// Read gateway token from the clone sandbox.
+	// For shared_files clones, read from the clone's own host state path.
+	// For non-shared_files clones, hostStatePath is empty and we fall through
+	// to sandbox-side polling.
+	cloneGatewayToken := resolveGatewayToken(envdHTTPClient, sbResult.SandboxID, inst.Domain, cloneOpenclawStatePath, "")
 	if cloneGatewayToken != "" {
 		gatewayURL = gatewayURL + "#token=" + cloneGatewayToken
 	}
@@ -1517,14 +1741,18 @@ func (h *AgentHubHandler) CloneAgent(w http.ResponseWriter, r *http.Request) {
 		Avatar:           inst.Avatar,
 		AvatarTone:       inst.AvatarTone,
 		SandboxID:        sbResult.SandboxID,
-		TemplateID:       snapshotID,
+		TemplateID:       inst.TemplateID,
 		GatewayURL:       gatewayURL,
 		GatewayToken:     cloneGatewayToken,
 		EnvURL:           envURL,
 		PersistenceMode:  inst.PersistenceMode,
 		RootfsSourceType: &rootfsSnapshot,
-		RootfsSourceID:   &snapshotID,
+		RootfsSourceID:   &rootfsSnapshotID,
 		Domain:           inst.Domain,
+	}
+	if cloneSharedFiles && cloneOpenclawPersistID != "" {
+		clone.OpenclawPersistID = &cloneOpenclawPersistID
+		clone.OpenclawStatePath = &cloneOpenclawStatePath
 	}
 	if inst.WecomConfig != nil {
 		clone.WecomConfig = &store.AgentWecomConfig{
