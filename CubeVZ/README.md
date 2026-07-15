@@ -1,169 +1,355 @@
 # CubeVZ
 
-CubeVZ is the macOS/Apple Silicon backend prototype for CubeSandbox. It runs an
-ARM64 Linux sandbox directly on Apple `Virtualization.framework`:
+CubeVZ is an experimental, native Apple Silicon backend for CubeSandbox. It
+boots an ARM64 Linux sandbox directly with Apple's
+`Virtualization.framework`, without a Linux host VM or nested KVM layer.
 
-```text
-macOS process (cube-vz)
-        |
-        | Virtualization.framework / Apple Hypervisor
-        v
-ARM64 Linux sandbox VM
+CubeVZ is intended for local development, compatibility testing, and lifecycle
+benchmarking on macOS. It is not a production replacement for CubeSandbox's
+Linux control plane.
+
+## Architecture
+
+CubeVZ keeps the existing CubeSandbox `envd` service inside the guest and
+replaces only the host-side VM lifecycle and transport boundary.
+
+```mermaid
+flowchart LR
+    SDK["CubeSandbox SDK or cube-bench"]
+    API["cube-vz-api<br/>control plane on 127.0.0.1:N"]
+    Proxy["data-plane proxy<br/>127.0.0.1:N+1"]
+    Manager["SandboxManager"]
+    Clone["APFS clonefile(2)<br/>cold sandbox directory"]
+    VZ["Apple Virtualization.framework"]
+    Relay["guest vsock relay"]
+    Envd["CubeSandbox envd<br/>127.0.0.1:49983"]
+    NAT["VZNAT<br/>outbound network"]
+
+    SDK -->|"POST / DELETE"| API
+    API --> Manager
+    Manager --> Clone
+    Clone --> VZ
+    SDK -->|"envd HTTP"| Proxy
+    Proxy -->|"virtio-vsock"| Relay
+    Relay --> Envd
+    VZ --> NAT
 ```
 
-There is no Linux host VM and no nested KVM layer. The Linux guest remains the
-CubeSandbox isolation boundary, so this is still hardware virtualization, but
-it is exactly one layer from macOS to the sandbox guest.
+The measured runtime path contains one virtualization layer:
 
-## What is implemented
+```text
+macOS process
+  -> Virtualization.framework / Apple Hypervisor
+    -> ARM64 Linux sandbox VM
+```
 
-- Direct ARM64 Linux kernel boot with `VZLinuxBootLoader`.
-- Raw root disk attached as virtio-blk.
-- APFS `clonefile(2)` copy-on-write disks for cheap per-sandbox creation.
-- Virtio console on the invoking terminal.
-- Virtio entropy, memory balloon, vsock, and NAT networking.
-- Stable generic machine identifiers.
-- Per-sandbox cold cloning with a fresh machine identifier and a recycled,
-  concurrency-safe MAC address.
-- Guest-to-host vsock readiness/shutdown control.
-- A loopback CubeAPI-compatible lifecycle server implementing the `POST` and
-  `DELETE /sandboxes` contract used by the official `cube-bench` tool.
-- A separate loopback data-plane listener that transparently relays the SDK's
-  envd traffic over virtio-vsock. It reads the Host header only for routing and
-  forwards the original bytes unchanged; CubeVZ does not implement envd HTTP.
-- A minimal ARM64 guest artifact assembled from the repository's existing
-  `docker/Dockerfile.cube-base`, containing the real upstream envd service.
-- A host readiness check that includes architecture, framework support, and the
-  required code-signing entitlement.
+### Sandbox lifecycle
+
+```mermaid
+sequenceDiagram
+    participant Client as SDK or cube-bench
+    participant API as cube-vz-api
+    participant APFS as APFS
+    participant VZ as Virtualization.framework
+    participant Guest as guest init and envd
+
+    Client->>API: POST /sandboxes
+    API->>APFS: clone immutable template
+    API->>API: assign fresh machine ID and reusable unique MAC
+    API->>VZ: construct and cold-start VM
+    VZ->>Guest: direct-boot kernel and ext4 root disk
+    par Service readiness
+        Guest->>Guest: start envd and vsock relay
+    and Network setup
+        Guest->>Guest: request VZNAT DHCP lease
+    end
+    Guest-->>API: READY over control vsock
+    API-->>Client: 201 Created
+    Client->>API: DELETE /sandboxes/:id
+    API->>VZ: stop VM
+    API->>APFS: remove ephemeral sandbox directory
+    API-->>Client: 204 No Content
+```
+
+`POST /sandboxes` guarantees that the real guest `envd` service is reachable
+over vsock. DHCP runs in parallel, so a command requiring outbound Internet
+access may need a brief retry immediately after creation.
+
+## Components
+
+| Component | Responsibility |
+|---|---|
+| `cube-vz` | Creates a VM directory, validates the host, and runs a standalone VM. |
+| `cube-vz-api` | Implements the local CubeAPI lifecycle subset and envd data-plane proxy. |
+| `CubeVZCore` | Owns manifests, APFS cloning, VZ configuration, VM startup, readiness, and shutdown. |
+| `Guest/` | Builds the direct-boot kernel and ext4 image containing upstream `envd`, init, DHCP, and vsock helpers. |
+| `Benchmark/` | Runs native VM workloads and the repository's official `cube-bench` lifecycle client. |
+
+The VZ configuration deliberately contains only the devices required by this
+backend: one virtio block disk, console, entropy, optional NAT networking, and
+optional vsock. The lifecycle guest kernel has its required ext4 and virtio
+drivers built in and boots without an initramfs.
 
 ## Requirements
 
-- Apple Silicon Mac (`arm64`).
-- macOS 14 or newer.
-- Xcode Command Line Tools with Swift 6.2 or newer.
-- Docker for the reproducible CubeVZ guest build. It compiles the pinned ARM64
-  Linux 6.12.95 kernel directly from kernel.org.
-- A raw block image containing the guest root filesystem. The existing
-  `cube-guest-image-cpu.img` is raw ext4 and is suitable; qcow2 is not.
+| Requirement | Minimum or expectation |
+|---|---|
+| Host | Apple Silicon (`arm64`) |
+| Operating system | macOS 14 or newer |
+| Toolchain | Xcode Command Line Tools with Swift 6.2 or newer |
+| Guest build | Docker Desktop with `buildx` and Linux ARM64 build support |
+| Storage | APFS for copy-on-write sandbox cloning |
+| Guest disk | Raw ext4 block image; qcow2 is not supported |
 
-The checked-in ARM64 kernel config enables the required virtio block, network,
-console, vsock, PCI, and ext4 drivers as built-ins, so the lifecycle guest boots
-its ext4 root disk without an initramfs.
+The executables require the `com.apple.security.virtualization` entitlement.
+Use the repository Make targets, which build and ad-hoc sign the binaries with
+the checked-in entitlement file.
 
-## Build and verify
+## Quick start
 
-From the repository root:
+Run these commands from the repository root:
 
 ```bash
 make cube-vz-test
 make cube-vz-doctor
 make cube-vz-guest
 make cube-vz-smoke
-make cube-vz-benchmark
-make cube-vz-lifecycle-benchmark
 ```
 
-`make cube-vz` writes the signed release binary to `_output/bin/cube-vz`.
-The Make target intentionally runs natively instead of inside the Linux builder
-container because `Virtualization.framework` exists only on macOS.
+The build produces:
 
-`make cube-vz-guest` builds `_output/cube-vz/guest/{kernel,rootfs.raw}`.
-`make cube-vz-smoke` then verifies the complete minimal path:
+| Artifact | Path |
+|---|---|
+| Standalone VM CLI | `_output/bin/cube-vz` |
+| Local lifecycle API | `_output/bin/cube-vz-api` |
+| Direct-boot guest kernel | `_output/cube-vz/guest/kernel` |
+| Raw ext4 guest disk | `_output/cube-vz/guest/rootfs.raw` |
+| Guest checksums and metadata | `_output/cube-vz/guest/SHA256SUMS`, `_output/cube-vz/guest/build-info.txt` |
 
-```text
-CubeSandbox Go SDK -> cube-vz-api -> data-plane proxy -> vsock relay -> envd
-```
+Docker is used only to produce Linux guest artifacts and helper binaries. VM
+creation and execution use native macOS binaries.
 
-The control plane listens on the configured API port. The data plane listens
-on the next loopback port, so an API port of `3000` uses data-plane port `3001`.
-For the Go SDK, set `CUBE_PROXY_NODE_IP=127.0.0.1`,
-`CUBE_PROXY_PORT_HTTP=3001`, and `CUBE_SANDBOX_DOMAIN=cube.local`.
+## Run the local CubeAPI-compatible service
 
-Do not run the raw SwiftPM executable directly for VM operations unless you
-codesign it first. macOS requires the
-`com.apple.security.virtualization` entitlement; the Make targets apply it with
-an ad-hoc signature for local development.
-
-## Run the M4 benchmark
-
-`make cube-vz-benchmark` performs the complete path:
-
-1. Builds a reproducible Alpine ARM64 guest with Docker when artifacts are
-   missing. Docker is used only to assemble the Linux kernel, initramfs, and raw
-   ext4 image.
-2. Creates an APFS copy-on-write VM directory.
-3. Boots that guest directly through `Virtualization.framework`, without
-   Docker or a Linux host VM in the measured execution path.
-4. Runs sysbench CPU, memory, and direct random file-I/O workloads, powers the
-   guest down, and writes the console log plus a Markdown report under
-   `_output/cube-vz/benchmark-results/`.
-
-Force a guest artifact rebuild with:
+### 1. Build and validate the backend
 
 ```bash
-CUBEVZ_BENCH_REBUILD_GUEST=1 make cube-vz-benchmark
+make cube-vz-test cube-vz-doctor cube-vz-guest
 ```
 
-The benchmark defaults to 2 vCPUs and 2048 MiB. Override them with
-`CUBEVZ_BENCH_VCPUS` and `CUBEVZ_BENCH_MEMORY_MIB`. A measured baseline from
-the implementation host is recorded in [Benchmark/RESULTS.md](Benchmark/RESULTS.md).
+### 2. Create an immutable template
 
-## Run the official lifecycle benchmark
+The destination must not already exist. Keep the template and sandbox
+directories on the same APFS volume.
 
-`make cube-vz-lifecycle-benchmark` builds and signs both native binaries,
-creates an immutable ARM64 Linux disk template containing the real CubeSandbox
-envd service, cross-compiles the repository's official `examples/cube-bench`
-binary for macOS ARM64, and runs these tiers:
+```bash
+export CUBEVZ_WORK_DIR="$PWD/.workdir/cube-vz/local"
+rm -rf "$CUBEVZ_WORK_DIR"
+mkdir -p "$CUBEVZ_WORK_DIR/sandboxes"
 
-- concurrency 1, 20 create/delete cycles, 3 warmups;
-- concurrency 10, 200 create/delete cycles, 3 warmups.
+_output/bin/cube-vz create \
+  --vm-dir "$CUBEVZ_WORK_DIR/template" \
+  --kernel _output/cube-vz/guest/kernel \
+  --disk _output/cube-vz/guest/rootfs.raw \
+  --cpus 2 \
+  --memory-mib 2048 \
+  --cmdline "console=hvc0 quiet loglevel=0 root=/dev/vda rw rootfstype=ext4 init=/usr/local/sbin/cube-vz-init"
+```
 
-The measured POST includes APFS template cloning, cold VM construction/start,
-and readiness of the real envd service behind the guest vsock relay. Results
-and per-phase timings are written under
-`_output/cube-vz/lifecycle-results/<timestamp>/`. The measured path is native
-macOS → `Virtualization.framework` → ARM64 Linux; Docker is only used before
-measurement to assemble guest artifacts and cross-compile `cube-bench`.
+Treat the resulting template directory as immutable while the API is running.
+If the source artifacts are on another filesystem, `cube-vz create` can use
+`--allow-full-copy` for this one-time template creation. Per-sandbox cloning
+still requires APFS `clonefile(2)`.
 
-Every create follows the same cold path: APFS clone, fresh machine identifier,
-VM start, then envd readiness over vsock. There is no saved state, adaptive
-branch, hot pool, or prewarmed VM. Sandboxes recycle inactive MAC addresses so
-VZNAT does not accumulate an unbounded set of short-lived DHCP identities.
+### 3. Start the service
 
-DHCP runs in the background because CubeVZ's control and data planes use vsock.
-POST therefore guarantees that envd is usable, but an outbound Internet command
-issued immediately after POST may need to retry briefly while VZNAT assigns an
-address. Guest timing metadata records init, envd, and final READY milestones.
+```bash
+_output/bin/cube-vz-api \
+  --template-dir "$CUBEVZ_WORK_DIR/template" \
+  --sandboxes-dir "$CUBEVZ_WORK_DIR/sandboxes" \
+  --template-id cube-vz \
+  --port 3000
+```
 
-## Create and run a sandbox VM
+With control port `3000`, the data-plane proxy listens on `3001`. Both
+listeners bind only to `127.0.0.1`.
+
+Verify the control plane from another terminal:
+
+```bash
+curl --fail --silent http://127.0.0.1:3000/health
+```
+
+### 4. Create and delete a sandbox
+
+```bash
+curl --fail --silent \
+  -H 'Content-Type: application/json' \
+  -d '{"templateID":"cube-vz"}' \
+  http://127.0.0.1:3000/sandboxes
+```
+
+The response contains a `sandboxID`:
+
+```json
+{
+  "clientID": "cube-vz-local",
+  "envdVersion": "cube-vz",
+  "sandboxID": "sb-<uuid>",
+  "templateID": "cube-vz"
+}
+```
+
+Delete the sandbox when finished:
+
+```bash
+curl --fail --silent \
+  -X DELETE \
+  http://127.0.0.1:3000/sandboxes/sb-<uuid>
+```
+
+Deletion is destructive: the VM is stopped and its ephemeral directory is
+removed immediately.
+
+### 5. Configure a CubeSandbox SDK client
+
+Use the following environment for clients that support the repository's local
+CubeAPI and proxy variables:
+
+```bash
+export CUBE_API_URL=http://127.0.0.1:3000
+export CUBE_TEMPLATE_ID=cube-vz
+export CUBE_PROXY_NODE_IP=127.0.0.1
+export CUBE_PROXY_PORT_HTTP=3001
+export CUBE_PROXY_SCHEME=http
+export CUBE_SANDBOX_DOMAIN=cube.local
+```
+
+The SDK sends envd requests to the data-plane listener with a host name in this
+form:
+
+```text
+49983-<sandbox-id>.cube.local
+```
+
+CubeVZ parses that host name only to select a running VM and guest port. It
+forwards the original HTTP bytes unchanged through virtio-vsock; it does not
+reimplement envd endpoints in Swift.
+
+## Run a standalone VM
+
+The standalone CLI is useful for guest development and console inspection:
 
 ```bash
 _output/bin/cube-vz create \
   --vm-dir .workdir/cube-vz/demo \
-  --kernel _output/kernel/aarch64/vmlinux \
-  --disk /absolute/path/to/cube-guest-image-cpu.img \
+  --kernel _output/cube-vz/guest/kernel \
+  --disk _output/cube-vz/guest/rootfs.raw \
   --cpus 2 \
-  --memory-mib 2048
+  --memory-mib 2048 \
+  --cmdline "console=hvc0 root=/dev/vda rw rootfstype=ext4 init=/usr/local/sbin/cube-vz-init"
 
 _output/bin/cube-vz run --vm-dir .workdir/cube-vz/demo
 ```
 
-The default command line is `console=hvc0 root=/dev/vda rw`. Override it with
-`--cmdline` if the guest image needs additional kernel parameters.
+`SIGINT` or `SIGTERM` stops the VM. Every `run` is a fresh cold boot; CubeVZ
+does not save or restore VM state.
 
-`Ctrl-C`, `SIGINT`, or `SIGTERM` stops the VM. A later `run` always performs a
-fresh cold boot.
+## API compatibility
 
-## Current boundary
+CubeVZ implements the minimum local contract required by `cube-bench` and the
+current envd SDK path:
 
-CubeVZ owns only the Apple Virtualization.framework lifecycle and the transport
-needed to reach envd. The real envd remains inside the CubeSandbox guest, so SDK
-commands and filesystem APIs are not reimplemented in Swift. The minimal guest
-exposes only envd port `49983`.
+| Listener | Route | Behavior |
+|---|---|---|
+| Control | `GET /health` | Reports API process health. |
+| Control | `POST /sandboxes` | Clones, starts, and waits for one sandbox. |
+| Control | `DELETE /sandboxes/:id` | Stops and removes one sandbox. |
+| Data plane | Any envd HTTP request for port `49983` | Transparently relays bytes to the selected guest over vsock. |
 
-Jupyter/code-interpreter (`49999`), arbitrary exposed ports, network policy,
-pause/rollback, authentication, AgentHub, persistence, OCI template management,
-and distributed scheduling remain separate components and are intentionally not
-part of this minimal backend. The Linux containerd/CubeShim implementation is
-not run inside another Linux host VM; `cube-vz-api` replaces only its lifecycle
-boundary with a native backend.
+The control server accepts requests up to 1 MiB. The data-plane proxy accepts
+up to 64 KiB of HTTP headers before routing. Unsupported routes, templates, and
+guest ports are rejected rather than silently emulated.
+
+## Validation and benchmarks
+
+| Command | Purpose |
+|---|---|
+| `make cube-vz-test` | Runs manifest, path-safety, HTTP parsing, APFS clone, directory, template, and VZ configuration self-tests. |
+| `make cube-vz-doctor` | Checks architecture, VZ support, and the virtualization entitlement. |
+| `make cube-vz-smoke` | Verifies lifecycle API, transparent envd relay, and a real Go SDK command. |
+| `make cube-vz-benchmark` | Runs CPU, memory, and direct random file-I/O workloads inside one native VM. |
+| `make cube-vz-lifecycle-benchmark` | Runs the official `examples/cube-bench` create/delete workload at concurrency 1 and 10. |
+
+The latest recorded M4 Pro lifecycle baseline completed all 220 measured
+create/delete cycles successfully:
+
+| Tier | Create average | Create P95 | Create P99 | Throughput |
+|---|---:|---:|---:|---:|
+| Concurrency 1 | 222.8 ms | 245.8 ms | 246.6 ms | 2.59 lifecycle/s |
+| Concurrency 10 | 282.9 ms | 363.8 ms | 414.7 ms | 17.80 lifecycle/s |
+
+See [Benchmark/RESULTS.md](Benchmark/RESULTS.md) for host details, phase
+timings, workload results, methodology, and comparison caveats. Timestamped raw
+reports are written under `_output/cube-vz/lifecycle-results/` and are not
+committed.
+
+The measured `POST` includes APFS template cloning, VZ construction and cold
+start, guest init, and real envd readiness. Docker execution and guest artifact
+construction occur before measurement.
+
+## Operational and security boundary
+
+- The control and data-plane listeners are loopback-only and provide no
+  authentication or TLS. Do not expose them through a network proxy or port
+  forward.
+- Anyone able to connect as the local user can create, access, and destroy
+  CubeVZ sandboxes.
+- Sandbox disks are ephemeral. `DELETE` does not preserve guest state.
+- Every sandbox gets a fresh generic machine identifier. Active sandboxes have
+  distinct locally administered MAC addresses; inactive addresses are recycled
+  to avoid unbounded VZNAT DHCP identities.
+- There is no hot pool, prewarmed VM, snapshot restore, saved state, or adaptive
+  lifecycle branch. Every create uses the same APFS-clone plus cold-boot path.
+- The current data plane exposes only the envd service on guest port `49983`.
+
+The following CubeSandbox capabilities remain outside this minimal backend:
+
+- Jupyter/code-interpreter service on port `49999`;
+- arbitrary exposed ports and ingress;
+- network policy enforcement;
+- pause, rollback, and persistent sandbox storage;
+- authentication and multi-tenant authorization;
+- AgentHub, OCI template management, and distributed scheduling;
+- Linux containerd and CubeShim lifecycle integration.
+
+## Troubleshooting
+
+### The VM binary exits with an entitlement error
+
+Rebuild through `make cube-vz` or `make cube-vz-doctor`. Do not run an unsigned
+SwiftPM executable from `.build/` for VM operations.
+
+### APFS cloning fails
+
+Confirm that the template and sandboxes directories are on the same APFS
+volume. Use `--allow-full-copy` only when creating the initial template from an
+artifact on another filesystem; the lifecycle backend intentionally requires
+copy-on-write per-sandbox clones.
+
+### Guest build fails before VM startup
+
+Confirm that Docker Desktop is running and that `docker buildx` can build
+`linux/arm64` images. Re-run `make cube-vz-guest` and inspect the Docker error
+before running smoke or lifecycle tests.
+
+### envd works but the first outbound command fails
+
+The control path becomes ready before background DHCP necessarily completes.
+Retry the outbound operation briefly. Persistent failures should be diagnosed
+from the `cube-vz-api` log and guest console.
+
+### The API cannot bind its port
+
+Choose another `--port` and leave the following port free as well. For example,
+`--port 33000` uses `33000` for control and `33001` for data-plane traffic.

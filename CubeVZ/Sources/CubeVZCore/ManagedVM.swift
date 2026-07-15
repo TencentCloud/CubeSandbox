@@ -106,7 +106,8 @@ public final class ManagedVM {
         do {
           let response = try await Self.readResponse(descriptor: connection.fileDescriptor)
           if response == "READY\n" || response.hasPrefix("READY ") {
-            readinessMetadata = response
+            readinessMetadata =
+              response
               .trimmingCharacters(in: .whitespacesAndNewlines)
               .dropFirst("READY".count)
               .trimmingCharacters(in: .whitespaces)

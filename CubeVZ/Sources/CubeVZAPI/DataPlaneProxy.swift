@@ -135,9 +135,12 @@ final class DataPlaneProxy: @unchecked Sendable {
     let terminator = Data("\r\n\r\n".utf8)
     while data.count < Self.maximumHeaderBytes {
       var buffer = [UInt8](repeating: 0, count: 4_096)
-      let count = buffer.withUnsafeMutableBytes {
-        Darwin.read(descriptor, $0.baseAddress, $0.count)
-      }
+      var count: Int
+      repeat {
+        count = buffer.withUnsafeMutableBytes {
+          Darwin.read(descriptor, $0.baseAddress, $0.count)
+        }
+      } while count < 0 && errno == EINTR
       guard count > 0 else {
         throw CubeVZError.runtime("data-plane client disconnected")
       }
@@ -169,18 +172,24 @@ final class DataPlaneProxy: @unchecked Sendable {
         break
       }
       if clientReadable && descriptors[0].revents & Int16(POLLIN | POLLHUP | POLLERR) != 0 {
-        let count = buffer.withUnsafeMutableBytes {
-          Darwin.read(client, $0.baseAddress, $0.count)
-        }
+        var count: Int
+        repeat {
+          count = buffer.withUnsafeMutableBytes {
+            Darwin.read(client, $0.baseAddress, $0.count)
+          }
+        } while count < 0 && errno == EINTR
         if count <= 0 || !writeAll(buffer.prefix(max(count, 0)), to: guestDescriptor) {
           clientReadable = false
           Darwin.shutdown(guestDescriptor, SHUT_WR)
         }
       }
       if guestReadable && descriptors[1].revents & Int16(POLLIN | POLLHUP | POLLERR) != 0 {
-        let count = buffer.withUnsafeMutableBytes {
-          Darwin.read(guestDescriptor, $0.baseAddress, $0.count)
-        }
+        var count: Int
+        repeat {
+          count = buffer.withUnsafeMutableBytes {
+            Darwin.read(guestDescriptor, $0.baseAddress, $0.count)
+          }
+        } while count < 0 && errno == EINTR
         if count <= 0 || !writeAll(buffer.prefix(max(count, 0)), to: client) {
           guestReadable = false
           Darwin.shutdown(client, SHUT_WR)
@@ -212,10 +221,12 @@ final class DataPlaneProxy: @unchecked Sendable {
 
   private func sendError(status: Int, message: String, to descriptor: Int32) {
     let body = (try? JSONSerialization.data(withJSONObject: ["error": message])) ?? Data()
-    let response = Data(
-      "HTTP/1.1 \(status) Error\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
-        .utf8
-    ) + body
+    let header =
+      "HTTP/1.1 \(status) Error\r\n"
+      + "Content-Type: application/json\r\n"
+      + "Content-Length: \(body.count)\r\n"
+      + "Connection: close\r\n\r\n"
+    let response = Data(header.utf8) + body
     _ = writeAll(response, to: descriptor)
     Darwin.close(descriptor)
   }

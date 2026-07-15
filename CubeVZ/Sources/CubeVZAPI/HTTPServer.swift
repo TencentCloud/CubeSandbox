@@ -12,6 +12,8 @@ private struct HTTPRequest {
 }
 
 final class HTTPServer: @unchecked Sendable {
+  private static let maximumRequestBytes = 1_048_576
+
   private let port: UInt16
   private let manager: SandboxManager
   private let workerQueue = DispatchQueue(
@@ -113,7 +115,11 @@ final class HTTPServer: @unchecked Sendable {
             sendError(status: 404, message: "route not found", to: client)
           }
         } catch {
-          sendError(status: 500, message: error.localizedDescription, to: client)
+          sendError(
+            status: Self.statusCode(for: error),
+            message: error.localizedDescription,
+            to: client
+          )
         }
       }
     } catch {
@@ -125,24 +131,28 @@ final class HTTPServer: @unchecked Sendable {
     var data = Data()
     var expectedSize: Int?
 
-    while data.count < 1_048_576 {
+    while data.count < Self.maximumRequestBytes {
       var buffer = [UInt8](repeating: 0, count: 4096)
-      let count = buffer.withUnsafeMutableBytes {
-        Darwin.read(descriptor, $0.baseAddress, $0.count)
-      }
+      var count: Int
+      repeat {
+        count = buffer.withUnsafeMutableBytes {
+          Darwin.read(descriptor, $0.baseAddress, $0.count)
+        }
+      } while count < 0 && errno == EINTR
       guard count > 0 else { throw CubeVZError.runtime("HTTP client disconnected") }
       data.append(contentsOf: buffer.prefix(count))
+      guard data.count <= Self.maximumRequestBytes else {
+        throw CubeVZError.invalidArguments("HTTP request is too large")
+      }
 
       if expectedSize == nil,
         let headerRange = data.range(of: Data("\r\n\r\n".utf8))
       {
         let header = String(decoding: data[..<headerRange.lowerBound], as: UTF8.self)
-        let contentLength =
-          header.split(separator: "\r\n").first { line in
-            line.lowercased().hasPrefix("content-length:")
-          }.flatMap {
-            Int($0.split(separator: ":", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces))
-          } ?? 0
+        let contentLength = try HTTPRequestParser.contentLength(from: header)
+        guard contentLength <= Self.maximumRequestBytes - headerRange.upperBound else {
+          throw CubeVZError.invalidArguments("HTTP request is too large")
+        }
         expectedSize = headerRange.upperBound + contentLength
       }
       if let expectedSize, data.count >= expectedSize { break }
@@ -150,6 +160,9 @@ final class HTTPServer: @unchecked Sendable {
 
     guard let headerRange = data.range(of: Data("\r\n\r\n".utf8)) else {
       throw CubeVZError.invalidArguments("invalid HTTP headers")
+    }
+    guard let expectedSize, data.count >= expectedSize else {
+      throw CubeVZError.invalidArguments("incomplete HTTP request body")
     }
     let header = String(decoding: data[..<headerRange.lowerBound], as: UTF8.self)
     guard let requestLine = header.split(separator: "\r\n").first else {
@@ -159,11 +172,10 @@ final class HTTPServer: @unchecked Sendable {
     guard components.count >= 2 else {
       throw CubeVZError.invalidArguments("invalid HTTP request line")
     }
-    let bodyEnd = min(expectedSize ?? data.count, data.count)
     return HTTPRequest(
       method: String(components[0]),
       path: String(components[1]),
-      body: data.subdata(in: headerRange.upperBound..<bodyEnd)
+      body: data.subdata(in: headerRange.upperBound..<expectedSize)
     )
   }
 
@@ -190,6 +202,16 @@ final class HTTPServer: @unchecked Sendable {
     send(status: status, body: body, to: descriptor)
   }
 
+  private static func statusCode(for error: Error) -> Int {
+    if error is DecodingError { return 400 }
+    if let cubeError = error as? CubeVZError,
+      case .invalidArguments = cubeError
+    {
+      return 400
+    }
+    return 500
+  }
+
   private func writeAll(_ data: Data, to descriptor: Int32) {
     data.withUnsafeBytes { bytes in
       var offset = 0
@@ -199,6 +221,7 @@ final class HTTPServer: @unchecked Sendable {
           bytes.baseAddress?.advanced(by: offset),
           bytes.count - offset
         )
+        if written < 0 && errno == EINTR { continue }
         if written <= 0 { return }
         offset += written
       }

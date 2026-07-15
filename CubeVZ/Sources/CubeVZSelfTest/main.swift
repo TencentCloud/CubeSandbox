@@ -20,6 +20,7 @@ private enum CubeVZSelfTest {
     let tests: [(String, () throws -> Void)] = [
       ("manifest round trip", testManifestRoundTrip),
       ("manifest path confinement", testManifestPathConfinement),
+      ("HTTP content-length parsing", testHTTPContentLengthParsing),
       ("APFS copy-on-write clone", testAPFSClone),
       ("VM directory creation", testVMDirectoryCreation),
       ("template clone", testTemplateClone),
@@ -80,6 +81,39 @@ private enum CubeVZSelfTest {
         try Data(contentsOf: source) == Data("cube-vz".utf8),
         "writing the clone changed the source"
       )
+    }
+  }
+
+  private static func testHTTPContentLengthParsing() throws {
+    try require(
+      try HTTPRequestParser.contentLength(from: "GET /health HTTP/1.1") == 0,
+      "missing Content-Length did not produce an empty body"
+    )
+    try require(
+      try HTTPRequestParser.contentLength(
+        from: "POST /sandboxes HTTP/1.1\r\ncOnTeNt-LeNgTh: 42"
+      ) == 42,
+      "Content-Length parsing is not case insensitive"
+    )
+
+    for value in ["", "-1", "invalid", "999999999999999999999999999999"] {
+      do {
+        _ = try HTTPRequestParser.contentLength(
+          from: "POST /sandboxes HTTP/1.1\r\nContent-Length: \(value)"
+        )
+        throw SelfTestError.failed("accepted invalid Content-Length \(value.debugDescription)")
+      } catch is CubeVZError {
+        continue
+      }
+    }
+
+    do {
+      _ = try HTTPRequestParser.contentLength(
+        from: "POST /sandboxes HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1"
+      )
+      throw SelfTestError.failed("accepted duplicate Content-Length headers")
+    } catch is CubeVZError {
+      return
     }
   }
 
