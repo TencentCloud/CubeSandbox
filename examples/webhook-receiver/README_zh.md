@@ -4,7 +4,7 @@
 
 这个无第三方依赖的开发接收端会校验 CubeAPI HMAC 签名、事件请求头和 payload
 必填字段，打印通过校验的事件，并可选择转发文本消息到企业微信群机器人。
-为限制重放攻击，签名请求的时间戳超过五分钟会被拒绝。
+为限制重放攻击，签名请求的时间戳超过五分钟或 nonce 已被接收过时会被拒绝。
 
 ```bash
 export CUBE_WEBHOOK_SECRET=created-endpoint-secret

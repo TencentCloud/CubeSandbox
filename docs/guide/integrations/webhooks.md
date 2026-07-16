@@ -38,10 +38,12 @@ Every POST is the existing structured `LogEvent`, flattened as JSON:
 ```
 
 Headers include `X-Cube-Event` and, when a secret is configured,
-`X-Cube-Timestamp: <unix-seconds>` and `X-Cube-Signature-256: sha256=<hex>`.
-Compute HMAC-SHA256 over `<timestamp>.<exact raw request body>`, reject
-timestamps outside a five-minute freshness window, and use constant-time
-comparison before parsing JSON. See the
+`X-Cube-Timestamp: <unix-seconds>`, `X-Cube-Nonce: <uuid>`, and
+`X-Cube-Signature-256: sha256=<hex>`. Compute HMAC-SHA256 over
+`<timestamp>.<nonce>.<exact raw request body>`, reject timestamps outside a
+five-minute freshness window and nonces already accepted in that window, and
+use constant-time comparison before parsing JSON. Each retry has a fresh nonce
+and signature. See the
 [receiver example](../../../examples/webhook-receiver/README.md).
 
 ## Delivery guarantees
@@ -52,6 +54,8 @@ responses retry with exponential backoff; other 4xx responses do not. Graceful
 shutdown drains all events accepted before the flush barrier. Delivery is
 at-least-once across retries but memory queues do not survive a process crash,
 so receivers must be idempotent using `(event, sandbox_id, timestamp)`.
+Events remain ordered for each endpoint; separate endpoints have independent
+delivery workers.
 
 For WeCom, set `WECOM_BOT_URL` on the example receiver. Keep the bot URL outside
 CubeAPI configuration so the receiver remains the security and formatting

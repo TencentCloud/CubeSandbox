@@ -5,7 +5,8 @@
 This dependency-free development receiver validates CubeAPI HMAC signatures,
 checks the event header and required payload fields, prints accepted events,
 and can optionally forward a text notification to a WeCom bot.
-Signed requests older than five minutes are rejected to limit replay attacks.
+Signed requests older than five minutes and repeated nonces are rejected to
+limit replay attacks.
 
 ```bash
 export CUBE_WEBHOOK_SECRET=created-endpoint-secret

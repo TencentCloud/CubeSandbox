@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,10 +17,12 @@ WECOM_BOT_URL = os.getenv("WECOM_BOT_URL", "")
 
 
 MAX_SIGNATURE_AGE_SECONDS = 300
+_seen_nonces: dict[str, int] = {}
+_nonce_lock = threading.Lock()
 
 
 def valid_signature(
-    body: bytes, supplied: str, timestamp: str, now: int | None = None
+    body: bytes, supplied: str, timestamp: str, nonce: str, now: int | None = None
 ) -> bool:
     if not SECRET:
         return True
@@ -30,11 +33,27 @@ def valid_signature(
     current_time = int(time.time()) if now is None else now
     if abs(current_time - signed_at) > MAX_SIGNATURE_AGE_SECONDS:
         return False
-    signed_payload = timestamp.encode() + b"." + body
+    if not nonce:
+        return False
+    signed_payload = timestamp.encode() + b"." + nonce.encode() + b"." + body
     expected = "sha256=" + hmac.new(
         SECRET.encode(), signed_payload, hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(supplied, expected)
+
+
+def claim_nonce(nonce: str, now: int | None = None) -> bool:
+    """Atomically reject a nonce already accepted inside the freshness window."""
+    current_time = int(time.time()) if now is None else now
+    cutoff = current_time - MAX_SIGNATURE_AGE_SECONDS
+    with _nonce_lock:
+        for value, accepted_at in list(_seen_nonces.items()):
+            if accepted_at < cutoff:
+                del _seen_nonces[value]
+        if nonce in _seen_nonces:
+            return False
+        _seen_nonces[nonce] = current_time
+        return True
 
 
 def forward_to_wecom(event: dict) -> None:
@@ -56,12 +75,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        nonce = self.headers.get("X-Cube-Nonce", "")
         if not valid_signature(
             body,
             self.headers.get("X-Cube-Signature-256", ""),
             self.headers.get("X-Cube-Timestamp", ""),
+            nonce,
         ):
             self.send_error(401, "invalid signature")
+            return
+        if SECRET and not claim_nonce(nonce):
+            self.send_error(409, "replayed webhook nonce")
             return
         try:
             event = json.loads(body)

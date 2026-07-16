@@ -34,10 +34,11 @@ JSON 无效、URL 不是 HTTP(S) 或订阅为空时，CubeAPI 会启动失败，
 {"timestamp":"2026-07-12T08:00:00Z","level":"info","event":"sandbox.created","sandbox_id":"sb-123","template_id":"tpl-456"}
 ```
 
-请求包含 `X-Cube-Event`。配置密钥后还包含 `X-Cube-Timestamp: <Unix 秒>` 和
-`X-Cube-Signature-256: sha256=<hex>`。接收端应对
-`<timestamp>.<原始请求体>` 计算 HMAC-SHA256，拒绝超出五分钟新鲜度窗口的时间戳，
-以常量时间比较签名，然后再解析 JSON。参见[接收端示例](../../../examples/webhook-receiver/README_zh.md)。
+请求包含 `X-Cube-Event`。配置密钥后还包含 `X-Cube-Timestamp: <Unix 秒>`、
+`X-Cube-Nonce: <uuid>` 和 `X-Cube-Signature-256: sha256=<hex>`。接收端应对
+`<timestamp>.<nonce>.<原始请求体>` 计算 HMAC-SHA256，拒绝超出五分钟新鲜度窗口的
+时间戳以及窗口内已经接收过的 nonce，以常量时间比较签名，然后再解析 JSON。
+每次重试都会生成新的 nonce 和签名。参见[接收端示例](../../../examples/webhook-receiver/README_zh.md)。
 
 ## 投递语义
 
@@ -45,6 +46,7 @@ API 主路径仅尝试写入有界队列，不等待网络；队列满时丢弃�
 网络错误、HTTP 408/429 与 5xx 使用指数退避重试，其他 4xx 不重试。优雅关闭时
 会排空 flush barrier 前已接收的事件。重试意味着接收端可能收到重复事件，应使用
 `(event, sandbox_id, timestamp)` 实现幂等。内存队列不会跨 CubeAPI 崩溃恢复。
+同一 endpoint 的事件保持投递顺序，不同 endpoint 使用相互独立的投递 worker。
 
 设置示例接收端的 `WECOM_BOT_URL` 即可对接企业微信群机器人，使接收端负责密钥
 隔离与消息格式转换。

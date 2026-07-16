@@ -16,6 +16,7 @@ use reqwest::{Client, StatusCode};
 use sha2::Sha256;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, warn};
+use uuid::Uuid;
 
 use super::{LogEvent, Logger};
 
@@ -74,6 +75,9 @@ impl HttpLogger {
             });
         let (tx, mut rx) = mpsc::channel(config.queue_capacity.max(1));
         tokio::spawn(async move {
+            // Delivery is deliberately sequential for each endpoint so lifecycle
+            // events cannot overtake one another. Different endpoint loggers have
+            // independent workers, and the bounded queue isolates API requests.
             while let Some(command) = rx.recv().await {
                 match command {
                     Command::Deliver(event) => {
@@ -105,29 +109,35 @@ async fn deliver(
             return;
         }
     };
-    let signed_headers = signer.map(|signer| {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .to_string();
-        let mut mac = signer.clone();
-        mac.update(timestamp.as_bytes());
-        mac.update(b".");
-        mac.update(&body);
-        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-        (timestamp, signature)
-    });
-
     for attempt in 0..=config.max_retries {
+        // A fresh cryptographic nonce makes every retry independently verifiable
+        // and lets receivers reject replayed requests within the timestamp window.
+        let attempt_nonce = Uuid::new_v4();
+        let signed_headers = signer.map(|signer| {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .to_string();
+            let nonce = attempt_nonce.to_string();
+            let mut mac = signer.clone();
+            mac.update(timestamp.as_bytes());
+            mac.update(b".");
+            mac.update(nonce.as_bytes());
+            mac.update(b".");
+            mac.update(&body);
+            let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+            (timestamp, nonce, signature)
+        });
         let mut request = client
             .post(&config.url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header("X-Cube-Event", &event.event)
             .body(body.clone());
-        if let Some((timestamp, signature)) = signed_headers.as_ref() {
+        if let Some((timestamp, nonce, signature)) = signed_headers.as_ref() {
             request = request
                 .header("X-Cube-Timestamp", timestamp)
+                .header("X-Cube-Nonce", nonce)
                 .header("X-Cube-Signature-256", signature);
         }
 
@@ -149,10 +159,11 @@ async fn deliver(
             let base = config.retry_base_ms.saturating_mul(factor);
             let quarter = base / 4;
             let jitter_span = quarter.saturating_mul(2).saturating_add(1);
-            let entropy = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos() as u64;
+            let entropy = u64::from_le_bytes(
+                attempt_nonce.as_bytes()[..8]
+                    .try_into()
+                    .expect("UUID contains at least eight bytes"),
+            );
             let delay = base
                 .saturating_sub(quarter)
                 .saturating_add(entropy % jitter_span);
@@ -310,8 +321,11 @@ mod tests {
         let body = state.bodies.lock().await[0].clone();
         let headers = state.headers.lock().await;
         let timestamp = headers[0]["x-cube-timestamp"].to_str().unwrap();
+        let nonce = headers[0]["x-cube-nonce"].to_str().unwrap();
         let mut mac = HmacSha256::new_from_slice(b"endpoint-secret").unwrap();
         mac.update(timestamp.as_bytes());
+        mac.update(b".");
+        mac.update(nonce.as_bytes());
         mac.update(b".");
         mac.update(&body);
         let expected = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
@@ -350,6 +364,26 @@ mod tests {
         logger.log(event("sandbox.resumed")).await;
         logger.flush().await;
         assert_eq!(permanent.attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn signs_each_retry_with_a_fresh_nonce() {
+        let state = StateData::with_statuses([
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::NO_CONTENT,
+        ]);
+        let mut cfg = config(receiver(state.clone()).await, "sandbox.resumed");
+        cfg.secret = Some("endpoint-secret".into());
+        let logger = HttpLogger::new(cfg).unwrap();
+        logger.log(event("sandbox.resumed")).await;
+        logger.flush().await;
+
+        let headers = state.headers.lock().await;
+        assert_ne!(headers[0]["x-cube-nonce"], headers[1]["x-cube-nonce"]);
+        assert_ne!(
+            headers[0]["x-cube-signature-256"],
+            headers[1]["x-cube-signature-256"]
+        );
     }
 
     #[tokio::test]
