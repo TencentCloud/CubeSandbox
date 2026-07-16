@@ -9,6 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -17,9 +21,23 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"strings"
-	"time"
 )
+
+// artifactBuildLocks serializes ensureRootfsArtifact callers that target the
+// same artifactID. Without this, two templates submitted in quick succession
+// for the same image spec race on buildRootfsArtifact: both goroutines share
+// the same workDir/storeDir/ext4Path, and one goroutine's defer cleanup can
+// wipe the ext4 file while the other is still relying on it — the surviving
+// caller then reaches distributeRootfsArtifact with a partial record
+// (ext4_size_bytes=0, download_token=""), cubelet rejects the pull with
+// "invalid size:0", and the template is marked FAILED.
+//
+// The lock is keyed by artifactID (deterministic from image+spec fingerprint)
+// so only racing submits for the same image spec are serialized; different
+// images build in parallel as before. DB claimRootfsArtifactForBuild only
+// covers a short FOR UPDATE transaction and does not protect the filesystem
+// build in image.BuildExt4.
+var artifactBuildLocks sync.Map // map[string]*sync.Mutex
 
 func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, source *image.PreparedSource, downloadBaseURL string) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, bool, error) {
 	var generatedReq *types.CreateCubeSandboxReq
@@ -30,6 +48,15 @@ func ensureRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImag
 	}
 	fingerprint := buildTemplateSpecFingerprintWithCA(req, source.Digest, caFingerprint)
 	artifactID := buildArtifactID(fingerprint)
+	// Serialize concurrent builds of the same artifactID. Without this, two
+	// submits of the same image spec race on workDir/storeDir/ext4Path; the
+	// losing goroutine's defer cleanup can wipe the ext4 file while the
+	// winner is still relying on it. See artifactBuildLocks comment for the
+	// full failure mode.
+	muV, _ := artifactBuildLocks.LoadOrStore(artifactID, &sync.Mutex{})
+	mu := muV.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
 	record, wasDeleted, err := findReusableRootfsArtifact(ctx, fingerprint, artifactID)
 	if err == nil && wasDeleted {
 		if restoreErr := restoreRootfsArtifact(ctx, artifactID); restoreErr != nil {
