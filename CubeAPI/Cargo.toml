@@ -70,6 +70,7 @@ governor = { version = "0.6", features = ["dashmap"] }
 # ── HTTP client (orchestrator / backend calls) ────────────────────────────
 # connection pool built-in, rustls for TLS
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+bytes = "1"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"

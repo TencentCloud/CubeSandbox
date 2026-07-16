@@ -74,6 +74,7 @@ impl HttpLogger {
     pub fn new(config: HttpLoggerConfig) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_secs))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let capacity = config.queue_capacity.max(1);
         let (tx, mut rx) = mpsc::channel(capacity);
@@ -98,12 +99,30 @@ impl HttpLogger {
 }
 
 async fn deliver(client: &reqwest::Client, config: &HttpLoggerConfig, event: LogEvent) {
-    let body = match serde_json::to_vec(&event) {
+    let body = match serde_json::to_vec(&event).map(bytes::Bytes::from) {
         Ok(body) => body,
         Err(err) => {
             error!(error = %err, event = %event.event, "Webhook event serialization failed");
             return;
         }
+    };
+
+    let signature = match config.secret.as_deref() {
+        Some(secret) => {
+            let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+                Ok(mac) => mac,
+                Err(err) => {
+                    error!(error = %err, event = %event.event, "Webhook HMAC initialization failed");
+                    return;
+                }
+            };
+            mac.update(&body);
+            Some(format!(
+                "sha256={}",
+                hex::encode(mac.finalize().into_bytes())
+            ))
+        }
+        None => None,
     };
 
     for attempt in 0..=config.max_retries {
@@ -112,12 +131,8 @@ async fn deliver(client: &reqwest::Client, config: &HttpLoggerConfig, event: Log
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.clone());
 
-        if let Some(secret) = config.secret.as_deref() {
-            let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-                .expect("HMAC accepts keys of any size");
-            mac.update(&body);
-            let signature = hex::encode(mac.finalize().into_bytes());
-            request = request.header("X-Cube-Signature-256", format!("sha256={signature}"));
+        if let Some(signature) = signature.as_deref() {
+            request = request.header("X-Cube-Signature-256", signature);
         }
 
         match request.send().await {
@@ -199,6 +214,7 @@ mod tests {
         body::Bytes,
         extract::State,
         http::{HeaderMap, StatusCode},
+        response::Redirect,
         routing::post,
         Router,
     };
@@ -252,6 +268,30 @@ mod tests {
             )
             .await
             .expect("receiver should run");
+        });
+        format!("http://{address}/webhook")
+    }
+
+    async fn redirect(State(target): State<String>) -> Redirect {
+        Redirect::temporary(&target)
+    }
+
+    async fn spawn_redirect(target: String) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should expose address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/webhook", post(redirect))
+                    .with_state(target),
+            )
+            .await
+            .expect("redirect server should run");
         });
         format!("http://{address}/webhook")
     }
@@ -317,5 +357,20 @@ mod tests {
         logger.flush().await;
 
         assert_eq!(state.attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn does_not_follow_redirects() {
+        let target_state = ReceiverState::default();
+        let target_url = spawn_receiver(target_state.clone()).await;
+        let redirect_url = spawn_redirect(target_url).await;
+        let mut config = HttpLoggerConfig::new(redirect_url, ["sandbox.created".to_string()]);
+        config.max_retries = 0;
+        let logger = HttpLogger::new(config).expect("logger should initialize");
+
+        logger.log(event("sandbox.created")).await;
+        logger.flush().await;
+
+        assert_eq!(target_state.attempts.load(Ordering::SeqCst), 0);
     }
 }
