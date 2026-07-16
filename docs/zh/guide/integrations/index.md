@@ -48,3 +48,4 @@ lang: zh-CN
 | 标题 | 作者 | 日期 | 标签 |
 | --- | --- | --- | --- |
 | [Pi Agent 集成指南](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
+| [CodeBuddy Code 集成指南](./codebuddy.md) | your-github-id | 2026-07-16 | integration, codebuddy, coding-agent, agent |

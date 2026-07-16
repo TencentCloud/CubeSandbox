@@ -1,0 +1,70 @@
+# Copyright (c) 2026 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: codebuddy-integration
+
+on:
+  pull_request:
+    paths:
+      - "examples/codebuddy-integration/**"
+      - "docs/**/integrations/codebuddy.md"
+      - ".github/workflows/codebuddy-integration.yml"
+  push:
+    branches: [main]
+
+jobs:
+  static:
+    name: Static checks (compile + unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile host driver scripts
+        working-directory: examples/codebuddy-integration
+        run: |
+          python3 -m py_compile env_utils.py _codebuddy_common.py \
+            run_codebuddy.py resume_codebuddy.py network_policy.py
+
+      - name: Run env_utils unit tests
+        working-directory: examples/codebuddy-integration
+        run: python3 -m unittest discover -s . -p test_env_utils.py -v
+
+      - name: Smoke-check --help output
+        working-directory: examples/codebuddy-integration
+        run: |
+          python3 run_codebuddy.py --help
+          python3 resume_codebuddy.py --help
+          python3 network_policy.py --help
+
+  dockerfile:
+    name: Dockerfile builds cleanly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (cache miss is fine; --load is just for smoke)
+        uses: docker/build-push-action@v6
+        with:
+          context: examples/codebuddy-integration
+          push: false
+          load: true
+          tags: codebuddy-cube:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: codebuddy --version inside the image
+        run: |
+          cid=$(docker run -d --rm codebuddy-cube:ci)
+          docker exec "$cid" codebuddy --version
+          # envd /health reachable means the readiness probe will succeed
+          docker exec "$cid" curl -fsS -o /dev/null \
+            http://127.0.0.1:49983/health
+          docker rm -f "$cid"
