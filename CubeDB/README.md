@@ -41,8 +41,8 @@ Blank-import from `main.go` to register the MySQL driver:
 
 ```go
 import (
-    "github.com/tencentcloud/CubeSandbox/cubedb/dao"
-    _ "github.com/tencentcloud/CubeSandbox/cubedb/dao/driver/mysql"
+    "github.com/tencentcloud/CubeSandbox/CubeDB/dao"
+    _ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"
 )
 ```
 
