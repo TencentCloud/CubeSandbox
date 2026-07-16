@@ -83,7 +83,6 @@ type templateImageJobResponse struct {
 type templateCommitRequest struct {
 	RequestID     string                      `json:"requestID,omitempty"`
 	SandboxID     string                      `json:"sandbox_id,omitempty"`
-	TemplateID    string                      `json:"template_id,omitempty"`
 	CreateRequest *types.CreateCubeSandboxReq `json:"create_request,omitempty"`
 }
 
@@ -662,7 +661,7 @@ var TemplateCommitCommand = cli.Command{
 		},
 		cli.StringFlag{
 			Name:  "file, f",
-			Usage: "original create_sandbox request json file",
+			Usage: "optional complete create_sandbox request json override",
 		},
 		cli.BoolFlag{
 			Name:  "allow-internet-access",
@@ -696,32 +695,8 @@ var TemplateCommitCommand = cli.Command{
 		if filePath == "" && c.NArg() > 0 {
 			filePath = c.Args().First()
 		}
-		if sandboxID == "" || filePath == "" {
-			return errors.New("sandbox-id and file are required")
-		}
-
-		reqBytes, err := getParams(filePath)
-		if err != nil {
-			return err
-		}
-		createReq := &types.CreateCubeSandboxReq{}
-		if err = jsoniter.Unmarshal(reqBytes, createReq); err != nil {
-			return err
-		}
-		if createReq.Request == nil {
-			createReq.Request = &types.Request{}
-		}
-		requestID := uuid.New().String()
-		createReq.RequestID = requestID
-		if createReq.Annotations == nil {
-			createReq.Annotations = map[string]string{}
-		}
-		createReq.CubeNetworkConfig = mergeCubeNetworkConfigFlags(c, createReq.CubeNetworkConfig)
-
-		req := &templateCommitRequest{
-			RequestID:     requestID,
-			SandboxID:     sandboxID,
-			CreateRequest: createReq,
+		if sandboxID == "" {
+			return errors.New("sandbox-id is required")
 		}
 
 		serverList = getServerAddrs(c)
@@ -729,6 +704,31 @@ var TemplateCommitCommand = cli.Command{
 			return errors.New("no server addr")
 		}
 		port = c.GlobalString("port")
+
+		hasNetworkOverrides := c.IsSet("allow-internet-access") || len(c.StringSlice("allow-out-cidr")) > 0 || len(c.StringSlice("deny-out-cidr")) > 0
+		if filePath == "" && hasNetworkOverrides {
+			return errors.New("network override flags require --file")
+		}
+
+		var createReq *types.CreateCubeSandboxReq
+		if filePath != "" {
+			reqBytes, err := getParams(filePath)
+			if err != nil {
+				return err
+			}
+			createReq = &types.CreateCubeSandboxReq{}
+			if err = jsoniter.Unmarshal(reqBytes, createReq); err != nil {
+				return err
+			}
+			createReq.CubeNetworkConfig = mergeCubeNetworkConfigFlags(c, createReq.CubeNetworkConfig)
+		}
+
+		requestID := uuid.New().String()
+		req := &templateCommitRequest{
+			RequestID:     requestID,
+			SandboxID:     sandboxID,
+			CreateRequest: createReq,
+		}
 		host := serverList[rand.Int()%len(serverList)]
 		url := fmt.Sprintf("http://%s/cube/sandbox/commit", net.JoinHostPort(host, port))
 		body, err := jsoniter.Marshal(req)

@@ -16,11 +16,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
@@ -30,6 +30,11 @@ import (
 // test gin.Context carrying rt, returning the decoded JSON response.
 func invokeCommitHandler(t *testing.T, req *http.Request, rt *CubeLog.RequestTrace) commitTemplateResponse {
 	t.Helper()
+	patches := gomonkey.NewPatches()
+	patches.ApplyFunc(sandbox.ResolveSandboxID, func(_ context.Context, sandboxID string) (string, error) {
+		return sandboxID, nil
+	})
+	defer patches.Reset()
 	ctx := CubeLog.WithRequestTrace(context.Background(), rt)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -72,7 +77,61 @@ func TestHandleSandboxCommitActionRejectsMissingFields(t *testing.T) {
 	got := invokeCommitHandler(t, req, rt)
 
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Res.Ret.RetCode)
-	assert.Contains(t, got.Res.Ret.RetMsg, "sandbox_id and create_request are required")
+	assert.Contains(t, got.Res.Ret.RetMsg, "sandbox_id is required")
+}
+
+func TestHandleSandboxCommitActionAllowsMissingCreateRequest(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(localcache.GetSandboxCache, func(sandboxID string) *localcache.SandboxCache {
+		return &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.1"}
+	})
+	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
+		return &node.Node{InsID: "node-1", IP: ip}, true
+	})
+	var gotRequestID, gotSandboxID, gotTemplateID string
+	var gotOverride *types.CreateCubeSandboxReq
+	patches.ApplyFunc(templatecenter.SubmitTemplateCommit, func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, override *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
+		gotRequestID = requestID
+		gotSandboxID = sandboxID
+		gotTemplateID = templateID
+		gotOverride = override
+		return &types.TemplateImageJobInfo{JobID: "job-1", TemplateID: templateID}, nil
+	})
+
+	body := `{"requestID":"req-1","sandbox_id":"sb-1"}`
+	req := httptest.NewRequest("POST", "/cube/sandbox/commit", strings.NewReader(body))
+	rt := &CubeLog.RequestTrace{}
+	got := invokeCommitHandler(t, req, rt)
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Res.Ret.RetCode)
+	assert.Equal(t, "req-1", gotRequestID)
+	assert.Equal(t, "sb-1", gotSandboxID)
+	assert.Equal(t, got.TemplateID, gotTemplateID)
+	assert.Nil(t, gotOverride)
+}
+
+func TestHandleSandboxCommitActionSanitizesInternalErrors(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(localcache.GetSandboxCache, func(sandboxID string) *localcache.SandboxCache {
+		return &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.1"}
+	})
+	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
+		return &node.Node{InsID: "node-1", IP: ip}, true
+	})
+	patches.ApplyFunc(templatecenter.SubmitTemplateCommit, func(context.Context, string, string, string, string, string, *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
+		return nil, fmt.Errorf("load sandbox spec: dial tcp 10.0.0.2:3306: connection refused")
+	})
+
+	body := `{"requestID":"req-1","sandbox_id":"sb-1"}`
+	req := httptest.NewRequest("POST", "/cube/sandbox/commit", strings.NewReader(body))
+	rt := &CubeLog.RequestTrace{}
+	got := invokeCommitHandler(t, req, rt)
+	assert.Equal(t, int(errorcode.ErrorCode_MasterInternalError), got.Res.Ret.RetCode)
+	assert.Equal(t, "failed to submit template commit", got.Res.Ret.RetMsg)
+	assert.NotContains(t, got.Res.Ret.RetMsg, "10.0.0.2:3306")
 }
 
 func TestHandleSandboxCommitActionIgnoresProvidedTemplateID(t *testing.T) {
@@ -86,8 +145,8 @@ func TestHandleSandboxCommitActionIgnoresProvidedTemplateID(t *testing.T) {
 	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
 		return &node.Node{InsID: "node-1", IP: ip}, true
 	})
-	patches.ApplyFunc(templatecenter.SubmitTemplateCommit, func(ctx context.Context, sandboxID, nodeID, nodeIP string, req *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
-		submittedTemplateID = req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
+	patches.ApplyFunc(templatecenter.SubmitTemplateCommit, func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, req *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
+		submittedTemplateID = templateID
 		return &types.TemplateImageJobInfo{
 			JobID:      "job-1",
 			TemplateID: submittedTemplateID,
@@ -145,6 +204,11 @@ func TestCommitTemplateErrorCode(t *testing.T) {
 			want: int(errorcode.ErrorCode_DBError),
 		},
 		{
+			name: "missing origin template is not found",
+			err:  fmt.Errorf("legacy fallback failed: %w", templatecenter.ErrTemplateNotFound),
+			want: int(errorcode.ErrorCode_NotFound),
+		},
+		{
 			name: "unknown error is internal error",
 			err:  fmt.Errorf("unexpected"),
 			want: int(errorcode.ErrorCode_MasterInternalError),
@@ -153,6 +217,42 @@ func TestCommitTemplateErrorCode(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, commitTemplateErrorCode(tc.err))
+		})
+	}
+}
+
+func TestCommitTemplateErrorMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "attempt details are sanitized",
+			err:  fmt.Errorf("%w: template tpl-secret is building as job-secret", templatecenter.ErrTemplateAttemptInProgress),
+			want: templatecenter.ErrTemplateAttemptInProgress.Error(),
+		},
+		{
+			name: "legacy template details are sanitized",
+			err:  fmt.Errorf("base template tpl-secret lookup failed: %w", templatecenter.ErrTemplateNotFound),
+			want: templatecenter.ErrTemplateNotFound.Error(),
+		},
+		{
+			name: "store state is sanitized",
+			err:  templatecenter.ErrTemplateStoreNotInitialized,
+			want: "template service is unavailable",
+		},
+		{
+			name: "database details are sanitized",
+			err:  fmt.Errorf("dial tcp 10.0.0.2:3306: connection refused"),
+			want: "failed to submit template commit",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, commitTemplateErrorMessage(tc.err))
+			assert.NotContains(t, commitTemplateErrorMessage(tc.err), "secret")
+			assert.NotContains(t, commitTemplateErrorMessage(tc.err), "10.0.0.2:3306")
 		})
 	}
 }
