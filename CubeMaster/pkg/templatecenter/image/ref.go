@@ -65,7 +65,8 @@ func registryHostFromImageRef(imageRef string) string {
 }
 
 func normalizeRegistryHost(host string) string {
-	if strings.EqualFold(host, "index.docker.io") {
+	if strings.EqualFold(host, "index.docker.io") ||
+		strings.EqualFold(host, "registry-1.docker.io") {
 		return "docker.io"
 	}
 	return host

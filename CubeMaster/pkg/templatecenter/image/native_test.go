@@ -95,6 +95,12 @@ func TestNativeInsecureRegistryEnabled(t *testing.T) {
 			imageRef: "index.docker.io/library/nginx:latest",
 			want:     true,
 		},
+		{
+			name:     "docker hub registry endpoint alias is normalized",
+			config:   []string{"registry-1.docker.io"},
+			imageRef: "docker.io/library/nginx:latest",
+			want:     true,
+		},
 	}
 
 	for _, tt := range tests {

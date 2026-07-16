@@ -1212,7 +1212,7 @@ func validateNativeInsecureRegistryPort(registry string) error {
 		}
 		port = parsedPort
 	default:
-		return fmt.Errorf("native_insecure_registries entry %q must bracket IPv6 addresses", registry)
+		return fmt.Errorf("native_insecure_registries entry %q must be a valid host[:port] or a bracketed IPv6 address", registry)
 	}
 
 	value, err := strconv.Atoi(port)

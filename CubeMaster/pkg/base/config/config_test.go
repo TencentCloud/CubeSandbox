@@ -323,6 +323,11 @@ func TestValidateNativeInsecureRegistries(t *testing.T) {
 	}
 }
 
+func TestValidateNativeInsecureRegistryPortReportsMalformedMultiColonEntry(t *testing.T) {
+	err := validateNativeInsecureRegistryPort("registry.internal:5000:5000")
+	assert.ErrorContains(t, err, "must be a valid host[:port] or a bracketed IPv6 address")
+}
+
 func TestGetAllowedHostMountPrefixes_Default(t *testing.T) {
 	old := cfg
 	cfg = nil

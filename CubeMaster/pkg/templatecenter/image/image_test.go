@@ -637,6 +637,7 @@ func TestRegistryHostFromImageRef(t *testing.T) {
 		{"docker://example.com:5000/ns/app:tag", "example.com:5000"},
 		{"library/nginx:latest", "docker.io"},
 		{"index.docker.io/library/nginx:latest", "docker.io"},
+		{"registry-1.docker.io/library/nginx:latest", "docker.io"},
 		{"192.168.1.10:5000/team/app", "192.168.1.10:5000"},
 		{"[2001:db8::1]:5000/team/app", "[2001:db8::1]:5000"},
 		{"localhost:5000/team/app", "localhost:5000"},
