@@ -75,6 +75,26 @@ func TestNestedLogSettingsUseSnakeCaseOnRoundTrip(t *testing.T) {
 	assert.NotContains(t, text, "enableLogMetric:")
 }
 
+func TestPreHandleCubeletConfAppSnapshotTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		set  int
+		want int
+	}{
+		{name: "unset", want: 300},
+		{name: "negative", set: -1, want: 300},
+		{name: "configured", set: 600, want: 600},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{CubeletConf: &CubeletConf{AppSnapshotTimeoutInSec: tt.set}}
+			assert.NoError(t, preHandleCubeletConf(cfg))
+			assert.Equal(t, tt.want, cfg.CubeletConf.AppSnapshotTimeoutInSec)
+		})
+	}
+}
+
 func TestGetEffectiveNodeMaxMemReservedInMBFallsBackForSmallNodes(t *testing.T) {
 	sconf := &SchedulerConf{
 		NodeMaxMemReservedInMB: 10 * 1024,

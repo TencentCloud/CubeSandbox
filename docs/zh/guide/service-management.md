@@ -130,15 +130,31 @@ sudo systemctl restart cube-sandbox-<service>.service
 
 路径：`/usr/local/services/cubetoolbox/CubeMaster/conf.yaml`（one-click 包内来自 `configs/single-node/cubemaster.yaml`）。
 
-`cubelet_conf` 段中与沙箱空闲超时相关的字段：
+`cubelet_conf` 段中的主要超时字段：
 
 | 配置项 | 说明 |
 |--------|------|
-| `default_timeout_insec` | 客户端**不传** `timeout` 时，集群默认的**沙箱空闲 TTL**（秒）。**未配置或 `<= 0` 表示不设集群级空闲超时**（沙箱不会因空闲被自动回收，除非客户端显式传 `timeout`）。仓库默认为 `-1`，即“无集群默认”。生产环境若需自动回收未带 TTL 的沙箱，可改为正数（如 `300`）。 |
-| `create_timeout_insec` | 仅限制创建/调度 RPC 的截止时间，**不是**沙箱空闲 TTL。未配置时默认 `300`。 |
-| `common_timeout_insec` | CubeMaster 访问 Cubelet 的通用 RPC 超时（非 create 专用）。 |
+| `default_timeout_insec` | 客户端不传 `timeout` 时，集群默认的**沙箱空闲 TTL**（秒）。**未配置或 `<= 0` 表示不设集群级空闲超时**（沙箱不会因空闲被自动回收，除非客户端显式传 `timeout`）。默认值为 `-1`，即“无集群默认”。生产环境若需自动回收未带 TTL 的沙箱，可改为正数，如 `300`（秒）。 |
+| `create_timeout_insec` | 沙箱创建/调度 RPC 的超时时间，默认值为 `300`（秒）。 |
+| `common_timeout_insec` | CubeMaster 访问 Cubelet 的通用 RPC 超时（非 create 专用），默认值为 `30`（秒） |
+| `create_image_timeout_insec` | CubeMaster 调用单个计算节点**下载镜像**的超时时间。它包含下载、校验和保存 rootfs artifact 的时间。大镜像、低带宽或磁盘较慢时可适当调大。默认值 `300`（秒）。 |
+| `app_snapshot_timeout_insec` | CubeMaster 调用单个计算节点**创建模版**的超时时间。它包含制作模版时启动临时虚拟机、等待 readiness probe、保存内存和磁盘状态、清理临时虚拟机并返回结果的总时间。未配置或配置为非正数时，使用默认值 `300`（秒）。网络较差或模版较大时可适当调大。|
 
-修改 `default_timeout_insec` 后需重启 CubeMaster；客户端可见语义见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。如果要调整节点选择、quota、label、调度评分或新增计算节点后的 template redo，请参阅[CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md)。
+下载镜像和创建模版的 timeout 相互独立，分别从对应 RPC 发起时开始计时。配置示例：
+
+```yaml
+cubelet_conf:
+  create_image_timeout_insec: 300
+  app_snapshot_timeout_insec: 600
+```
+
+修改上述任一 CubeMaster 配置后，需要重启 CubeMaster：
+
+```bash
+sudo systemctl restart cube-sandbox-cubemaster.service
+```
+
+相关说明见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。
 
 ### 场景 B：服务挂了 / 反复重启
 
