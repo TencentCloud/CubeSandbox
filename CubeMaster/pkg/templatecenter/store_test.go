@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -335,5 +337,73 @@ func TestResolveTemplateIdentifierAliasLookup(t *testing.T) {
 	_, err = ResolveTemplateIdentifier(context.Background(), "missing-alias")
 	if !errors.Is(err, ErrTemplateNotFound) {
 		t.Fatalf("ResolveTemplateIdentifier(\"missing-alias\") error = %v, want ErrTemplateNotFound", err)
+	}
+}
+
+// TestGetTemplateByAliasFiltersByKindExcludesSnapshots is the regression test
+// for issue #584: a snapshot that shares a template's display_name (alias)
+// must never be returned by GetTemplateByAlias. The write path only ever
+// reassigns aliases among template-kind rows (createDefinitionTx in
+// snapshot_ops.go), so the read path mirrors that invariant by filtering
+// kind = template; otherwise First() could return the snapshot row and
+// resolve the alias to a snap-* id instead of the tpl-* owner.
+//
+// This package's unit tests stub the DB, and the repo has no in-memory DB
+// driver (no sqlite/sqlmock; dependencies are frozen). To still exercise the
+// REAL query GetTemplateByAlias builds, we run it against a DryRun gorm.DB:
+// SQL is generated but never executed, and in DryRun stmt.SQL/stmt.Vars stay
+// populated, so an after-query callback observes the exact WHERE predicate.
+// SkipInitializeWithVersion keeps Initialize from issuing SELECT VERSION()
+// (which would otherwise need a live MySQL). The captured SQL is therefore
+// exactly what the read path runs in production.
+func TestGetTemplateByAliasFiltersByKindExcludesSnapshots(t *testing.T) {
+	sqlDB, err := sql.Open("mysql", "root:root@tcp(127.0.0.1:3306)/unused?parseTime=true")
+	require.NoError(t, err)
+
+	dryRunDB, err := gorm.Open(mysql.New(mysql.Config{
+		Conn:                      sqlDB,
+		SkipInitializeWithVersion: true,
+	}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	require.NoError(t, err)
+
+	// Capture the WHERE clause GetTemplateByAlias generates.
+	var capturedSQL string
+	var capturedVars []any
+	dryRunDB.Callback().Query().After("gorm:query").Register("capture_alias_query", func(tx *gorm.DB) {
+		capturedSQL = tx.Statement.SQL.String()
+		capturedVars = append(capturedVars, tx.Statement.Vars...)
+	})
+
+	oldDB := store.db
+	store.db = dryRunDB
+	t.Cleanup(func() { store.db = oldDB })
+
+	const alias = "shared-alias"
+	def, err := GetTemplateByAlias(context.Background(), alias)
+	require.NoError(t, err) // DryRun returns a zero-value def; the assertion target is the captured SQL.
+	require.NotNil(t, def)
+
+	// Regression: the WHERE clause must scope by kind so a snapshot sharing
+	// the alias cannot be returned. Before the fix this predicate was absent.
+	assert.Contains(t, capturedSQL, "kind = ?",
+		"GetTemplateByAlias must filter kind=? so a snapshot sharing the alias cannot shadow the owning template; got SQL: %s", capturedSQL)
+
+	// The kind column must bind to the template kind, mirroring the write-path
+	// invariant (kind = TemplateKindTemplate in createDefinitionTx).
+	kindBoundToTemplate := false
+	for _, v := range capturedVars {
+		if s, ok := v.(string); ok && s == TemplateKindTemplate {
+			kindBoundToTemplate = true
+		}
+	}
+	assert.True(t, kindBoundToTemplate,
+		"kind must bind to TemplateKindTemplate (%q); captured vars: %v", TemplateKindTemplate, capturedVars)
+
+	// The read path must never resolve an alias to a snapshot (snap-* id):
+	// the kind filter must not bind to the snapshot kind.
+	for _, v := range capturedVars {
+		if s, ok := v.(string); ok && s == TemplateKindSnapshot {
+			t.Fatalf("GetTemplateByAlias must never filter kind=snapshot; captured vars: %v", capturedVars)
+		}
 	}
 }

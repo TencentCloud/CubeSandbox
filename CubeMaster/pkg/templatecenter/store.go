@@ -899,9 +899,16 @@ func GetDefinition(ctx context.Context, templateID string) (*models.TemplateDefi
 	return def, nil
 }
 
-// GetTemplateByAlias looks up a non-deleted template definition by its
+// GetTemplateByAlias looks up a non-deleted TEMPLATE definition by its
 // display_name (used as a stable alias). Returns ErrTemplateNotFound when no
 // template has the given alias.
+//
+// The query is scoped to kind = template to mirror the write-path invariant
+// (createDefinitionTx only reassigns aliases among template-kind rows, see
+// snapshot_ops.go): a snapshot carries its own informational display_name and
+// must never resolve through a template alias. Without this filter, First()
+// could return a snapshot sharing the alias and shadow the owning template,
+// resolving the alias to a snap-* id instead of the tpl-* owner.
 func GetTemplateByAlias(ctx context.Context, alias string) (*models.TemplateDefinition, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
@@ -912,7 +919,7 @@ func GetTemplateByAlias(ctx context.Context, alias string) (*models.TemplateDefi
 	}
 	def := &models.TemplateDefinition{}
 	err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("display_name = ? AND status <> ?", alias, StatusDeleting).
+		Where("kind = ? AND display_name = ? AND status <> ?", TemplateKindTemplate, alias, StatusDeleting).
 		First(def).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
