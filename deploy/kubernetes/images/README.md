@@ -23,6 +23,47 @@ want a different cache location.
 The script reuses valid artifacts already present under `${BUILD_ROOT}/downloads`
 and does not require a `.complete` marker.
 
+Pass one or more image names to build only those images (package download and
+`SOURCE_REF` export are skipped when not needed):
+
+```bash
+./deploy/kubernetes/images/build-cube-images.sh cubelet
+./deploy/kubernetes/images/build-cube-images.sh cubelet cube-shim
+```
+
+Run `./deploy/kubernetes/images/build-cube-images.sh --help` for the full image
+list and option summary.
+
+## Local binaries for development
+
+After building components with the root Makefile (`make cubelet`, `make shim`,
+…), overlay `_output/bin` into the image context with `LOCAL_BIN=1` or
+`--local`. The overlay happens in the temporary docker context only; it does
+not mutate `PACKAGE_DIR` / `PACKAGE_DIR_OVERRIDE`.
+
+```bash
+make cubelet
+LOCAL_BIN=1 IMAGE_TAG=dev ./deploy/kubernetes/images/build-cube-images.sh cubelet
+
+make shim
+./deploy/kubernetes/images/build-cube-images.sh --local cube-shim
+```
+
+| Image | Overlaid from `_output/bin` | Makefile target |
+|-------|-----------------------------|-----------------|
+| `cubelet` | `cubelet`, `cubecli` | `make cubelet` |
+| `cube-shim` | `containerd-shim-cube-rs`, `cube-runtime` | `make shim` |
+| `network-agent` | `network-agent` (optional `cubevsmapdump`) | `make network-agent` |
+| `cube-master` | `cubemaster` | `make cubemaster` |
+| `cubemastercli` | `cubemastercli` | `make cubemaster` |
+
+Override the binary directory with `LOCAL_BIN_DIR` if needed. The script does
+not run `make` itself; missing binaries fail with a hint to build the matching
+target first.
+
+For source-built images (`cube-api`, `cube-proxy`, …), use `SOURCE_REF=""` to
+compile from the current worktree (see below).
+
 ## Pinning source to a release tag
 
 `cube-api`, `cube-proxy`, `cube-egress`, `cube-lifecycle-manager`, and

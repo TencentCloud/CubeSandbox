@@ -5,6 +5,12 @@
 # package (sandbox-package). cube-node intentionally uses
 # deploy/kubernetes/images/cube-node/Dockerfile because it is a Kubernetes delivery image
 # that bundles node-side runtime components.
+#
+# Development shortcuts:
+#   LOCAL_BIN=1 ./build-cube-images.sh cubelet
+#   ./build-cube-images.sh --local cube-shim
+# Overlay binaries from _output/bin (make cubelet / make shim / ...) into the
+# image build context. Pass one or more image names to build only those images.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,6 +29,8 @@ REGISTRY="${REGISTRY:-ccr.ccs.tencentyun.com/cubesandbox-chart}"
 SOURCE_REF="${SOURCE_REF-${VERSION}}"
 PUSH="${PUSH:-0}"
 NO_CACHE="${NO_CACHE:-0}"
+LOCAL_BIN="${LOCAL_BIN:-0}"
+LOCAL_BIN_DIR="${LOCAL_BIN_DIR:-${WORKTREE_ROOT}/_output/bin}"
 BUILD_ROOT="${BUILD_ROOT:-/tmp/cube-kubernetes-images-${VERSION}}"
 CUBE_NODE_BASE_IMAGE="${CUBE_NODE_BASE_IMAGE:-}"
 CUBE_EGRESS_OPENRESTY_BASE_IMAGE="${CUBE_EGRESS_OPENRESTY_BASE_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/openresty-tproxy}"
@@ -76,11 +84,174 @@ INCLUDE_PVM_KERNEL_DEB="${INCLUDE_PVM_KERNEL_DEB:-1}"
 DOWNLOAD_RETRIES="${DOWNLOAD_RETRIES:-5}"
 DOWNLOAD_CONNECT_TIMEOUT="${DOWNLOAD_CONNECT_TIMEOUT:-20}"
 
+ALL_IMAGES=(
+  cube-master
+  cube-api
+  cubemastercli
+  cube-proxy
+  cube-lifecycle-manager
+  cube-egress
+  cube-egress-net
+  cube-webui
+  cubelet
+  network-agent
+  cube-shim
+  cube-kernel
+  cube-guest
+  cube-node-init
+  cube-wait-node-prep
+  cube-pvm-host-bootstrap
+)
+
+# Images that need sandbox-package layout/binaries.
+PACKAGE_IMAGES=(
+  cube-master
+  cubemastercli
+  cubelet
+  network-agent
+  cube-shim
+  cube-kernel
+  cube-guest
+)
+
+# Images that read source trees under REPO_ROOT (worktree or SOURCE_REF export).
+SOURCE_IMAGES=(
+  cube-master
+  cube-api
+  cube-proxy
+  cube-lifecycle-manager
+  cube-egress
+  cube-egress-net
+  cube-webui
+)
+
+SELECTED_IMAGES=()
+BUILT_IMAGES=()
+PACKAGE_READY=0
+SOURCE_READY=0
+
 log() { printf '[build-cube-images] %s\n' "$*"; }
 fail() { printf '[build-cube-images] ERROR: %s\n' "$*" >&2; exit 1; }
 
 need() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options] [image...]
+
+Build CubeSandbox Kubernetes delivery images.
+
+Options:
+  -h, --help     Show this help
+  --local        Overlay binaries from LOCAL_BIN_DIR (default: <repo>/_output/bin)
+                 Equivalent to LOCAL_BIN=1
+
+Environment:
+  VERSION / IMAGE_TAG / REGISTRY / SOURCE_REF / PUSH / NO_CACHE / BUILD_ROOT
+  LOCAL_BIN / LOCAL_BIN_DIR / PACKAGE_DIR_OVERRIDE / MIRROR
+  CUBE_PROXY_BASE_IMAGE / OPENRESTY_BASE_IMAGE / CUBE_EGRESS_OPENRESTY_BASE_IMAGE
+
+When no image names are given, all images are built. With --local / LOCAL_BIN=1,
+package-based images overlay matching binaries from make output:
+
+  cubelet         <- cubelet, cubecli                 (make cubelet)
+  cube-shim       <- containerd-shim-cube-rs, cube-runtime  (make shim)
+  network-agent   <- network-agent                    (make network-agent)
+  cube-master     <- cubemaster                       (make cubemaster)
+  cubemastercli   <- cubemastercli                    (make cubemaster)
+
+Examples:
+  make cubelet
+  LOCAL_BIN=1 IMAGE_TAG=dev $0 cubelet
+
+  $0 --local cube-shim
+  SOURCE_REF="" IMAGE_TAG=dev $0 cube-api
+
+Available images:
+$(printf '  %s\n' "${ALL_IMAGES[@]}")
+EOF
+}
+
+is_known_image() {
+  local candidate="$1"
+  local name
+  for name in "${ALL_IMAGES[@]}"; do
+    if [[ "${name}" == "${candidate}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+parse_args() {
+  local arg
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+    shift
+    case "${arg}" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --local)
+        LOCAL_BIN=1
+        ;;
+      --)
+        while [[ $# -gt 0 ]]; do
+          SELECTED_IMAGES+=("$1")
+          shift
+        done
+        ;;
+      -*)
+        fail "unknown option: ${arg} (try --help)"
+        ;;
+      *)
+        SELECTED_IMAGES+=("${arg}")
+        ;;
+    esac
+  done
+
+  if [[ ${#SELECTED_IMAGES[@]} -eq 0 ]]; then
+    SELECTED_IMAGES=("${ALL_IMAGES[@]}")
+  else
+    local name
+    for name in "${SELECTED_IMAGES[@]}"; do
+      is_known_image "${name}" || fail "unknown image '${name}'. Valid: ${ALL_IMAGES[*]}"
+    done
+  fi
+}
+
+should_build() {
+  local candidate="$1"
+  local name
+  for name in "${SELECTED_IMAGES[@]}"; do
+    if [[ "${name}" == "${candidate}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+selection_needs_package() {
+  local name
+  for name in "${PACKAGE_IMAGES[@]}"; do
+    should_build "${name}" && return 0
+  done
+  return 1
+}
+
+selection_needs_source() {
+  local name
+  for name in "${SOURCE_IMAGES[@]}"; do
+    should_build "${name}" && return 0
+  done
+  return 1
+}
+
+record_built() {
+  BUILT_IMAGES+=("$1")
 }
 
 validate_download() {
@@ -163,37 +334,24 @@ download_file() {
   fail "failed to download valid file after ${DOWNLOAD_RETRIES} attempts: ${url}"
 }
 
-need docker
-need tar
-need curl
-need go
-need sha256sum
-if [[ -n "${SOURCE_REF}" ]]; then
+ensure_source_tree() {
+  [[ "${SOURCE_READY}" == "1" ]] && return 0
+  SOURCE_READY=1
+
+  # When SOURCE_REF is set (default: ${VERSION}), export the CubeMaster / CubeAPI /
+  # CubeProxy / CubeEgress / cube-lifecycle-manager / web / deploy/one-click/webui
+  # trees at that ref into ${SOURCE_TREE_DIR} and point REPO_ROOT there. This
+  # ensures cube-api, cube-proxy, cube-egress, cube-lifecycle-manager,
+  # cube-webui and related contexts are compiled from the release-tag source, not
+  # from whatever happens to be in the current worktree (which may be ahead of
+  # the tag).
+  if [[ -z "${SOURCE_REF}" ]]; then
+    REPO_ROOT="${WORKTREE_ROOT}"
+    log "using current worktree source (SOURCE_REF empty)"
+    return 0
+  fi
+
   need git
-fi
-
-DOWNLOAD_DIR="${BUILD_ROOT}/downloads"
-EXTRACT_DIR="${BUILD_ROOT}/extract"
-CONTEXT_DIR="${BUILD_ROOT}/contexts"
-SOURCE_TREE_DIR="${BUILD_ROOT}/source-tree"
-ONE_CLICK_DIRNAME="cube-sandbox-one-click-${VERSION}-${ONE_CLICK_ARCH}"
-ONE_CLICK_TAR="${DOWNLOAD_DIR}/${ONE_CLICK_DIRNAME}.tar.gz"
-PVM_KERNEL_RPM="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_RPM_URL}")"
-PVM_KERNEL_DEB="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_DEB_URL}")"
-SANDBOX_PACKAGE_TAR="${EXTRACT_DIR}/${ONE_CLICK_DIRNAME}/assets/package/sandbox-package.tar.gz"
-PACKAGE_DIR="${BUILD_ROOT}/sandbox-package"
-
-mkdir -p "${DOWNLOAD_DIR}" "${EXTRACT_DIR}" "${CONTEXT_DIR}"
-log "release download base (${MIRROR:-github}): ${RELEASE_DOWNLOAD_BASE}"
-
-# When SOURCE_REF is set (default: ${VERSION}), export the CubeMaster / CubeAPI /
-# CubeProxy / CubeEgress / cube-lifecycle-manager / web / deploy/one-click/webui
-# trees at that ref into ${SOURCE_TREE_DIR} and point REPO_ROOT there. This
-# ensures cube-api, cube-proxy, cube-egress, cube-lifecycle-manager,
-# cube-webui and related contexts are compiled from the release-tag source, not
-# from whatever happens to be in the current worktree (which may be ahead of
-# the tag).
-if [[ -n "${SOURCE_REF}" ]]; then
   git -C "${WORKTREE_ROOT}" rev-parse --verify "${SOURCE_REF}^{commit}" >/dev/null 2>&1 \
     || fail "SOURCE_REF=${SOURCE_REF} is not a valid git ref in ${WORKTREE_ROOT}"
   SOURCE_REF_SHA="$(git -C "${WORKTREE_ROOT}" rev-parse "${SOURCE_REF}^{commit}")"
@@ -214,32 +372,92 @@ if [[ -n "${SOURCE_REF}" ]]; then
     log "reusing exported source tree at ${SOURCE_REF} (${SOURCE_REF_SHA:0:12})"
   fi
   REPO_ROOT="${SOURCE_TREE_DIR}"
-fi
+}
 
-if [[ -n "${PACKAGE_DIR_OVERRIDE:-}" ]]; then
-  PACKAGE_DIR="${PACKAGE_DIR_OVERRIDE}"
-  [[ -d "${PACKAGE_DIR}" ]] || fail "PACKAGE_DIR_OVERRIDE does not exist: ${PACKAGE_DIR}"
-else
-  if [[ ! -f "${ONE_CLICK_TAR}" ]] || ! tar -tzf "${ONE_CLICK_TAR}" >/dev/null 2>&1; then
-    log "downloading one-click release package: ${ONE_CLICK_URL}"
-    download_file "${ONE_CLICK_URL}" "${ONE_CLICK_TAR}" tar.gz "${ONE_CLICK_SHA256}"
-  fi
-  if [[ ! -f "${SANDBOX_PACKAGE_TAR}" ]]; then
-    log "extracting one-click release package"
-    rm -rf "${EXTRACT_DIR}/${ONE_CLICK_DIRNAME}"
-    tar -C "${EXTRACT_DIR}" -xzf "${ONE_CLICK_TAR}"
-  fi
-  if [[ ! -d "${PACKAGE_DIR}" ]]; then
-    log "extracting sandbox-package"
-    rm -rf "${PACKAGE_DIR}"
-    mkdir -p "${BUILD_ROOT}"
-    tar -C "${BUILD_ROOT}" -xzf "${SANDBOX_PACKAGE_TAR}"
-  fi
-fi
+ensure_package_dir() {
+  [[ "${PACKAGE_READY}" == "1" ]] && return 0
+  PACKAGE_READY=1
 
-[[ -d "${PACKAGE_DIR}/CubeMaster" ]] || fail "invalid package dir: missing CubeMaster"
-[[ -d "${PACKAGE_DIR}/Cubelet" ]] || fail "invalid package dir: missing Cubelet"
-[[ -d "${PACKAGE_DIR}/CubeAPI" ]] || fail "invalid package dir: missing CubeAPI"
+  if [[ -n "${PACKAGE_DIR_OVERRIDE:-}" ]]; then
+    PACKAGE_DIR="${PACKAGE_DIR_OVERRIDE}"
+    [[ -d "${PACKAGE_DIR}" ]] || fail "PACKAGE_DIR_OVERRIDE does not exist: ${PACKAGE_DIR}"
+  else
+    if [[ ! -f "${ONE_CLICK_TAR}" ]] || ! tar -tzf "${ONE_CLICK_TAR}" >/dev/null 2>&1; then
+      log "downloading one-click release package: ${ONE_CLICK_URL}"
+      download_file "${ONE_CLICK_URL}" "${ONE_CLICK_TAR}" tar.gz "${ONE_CLICK_SHA256}"
+    fi
+    if [[ ! -f "${SANDBOX_PACKAGE_TAR}" ]]; then
+      log "extracting one-click release package"
+      rm -rf "${EXTRACT_DIR}/${ONE_CLICK_DIRNAME}"
+      tar -C "${EXTRACT_DIR}" -xzf "${ONE_CLICK_TAR}"
+    fi
+    if [[ ! -d "${PACKAGE_DIR}" ]]; then
+      log "extracting sandbox-package"
+      rm -rf "${PACKAGE_DIR}"
+      mkdir -p "${BUILD_ROOT}"
+      tar -C "${BUILD_ROOT}" -xzf "${SANDBOX_PACKAGE_TAR}"
+    fi
+  fi
+
+  [[ -d "${PACKAGE_DIR}/CubeMaster" ]] || fail "invalid package dir: missing CubeMaster"
+  [[ -d "${PACKAGE_DIR}/Cubelet" ]] || fail "invalid package dir: missing Cubelet"
+  [[ -d "${PACKAGE_DIR}/CubeAPI" ]] || fail "invalid package dir: missing CubeAPI"
+}
+
+make_hint_for_bin() {
+  case "$1" in
+    cubelet|cubecli) printf 'make cubelet' ;;
+    containerd-shim-cube-rs|cube-runtime) printf 'make shim' ;;
+    network-agent|cubevsmapdump) printf 'make network-agent' ;;
+    cubemaster|cubemastercli) printf 'make cubemaster' ;;
+    *) printf 'make <component>' ;;
+  esac
+}
+
+# Copy a locally built binary into the docker context. No-op unless LOCAL_BIN=1.
+# Does not mutate PACKAGE_DIR / PACKAGE_DIR_OVERRIDE.
+overlay_local_bin() {
+  local src_name="$1"
+  local dest_path="$2"
+  local required="${3:-1}"
+  local src="${LOCAL_BIN_DIR}/${src_name}"
+
+  [[ "${LOCAL_BIN}" == "1" ]] || return 0
+
+  if [[ ! -x "${src}" ]]; then
+    if [[ "${required}" == "1" ]]; then
+      fail "missing local binary ${src}; run: $(make_hint_for_bin "${src_name}")"
+    fi
+    return 0
+  fi
+  mkdir -p "$(dirname "${dest_path}")"
+  cp "${src}" "${dest_path}"
+  chmod +x "${dest_path}"
+  log "overlay local binary ${src} -> ${dest_path}"
+}
+
+overlay_local_bins_for_component() {
+  local name="$1"
+  local ctx="$2"
+  local pkg_basename="$3"
+
+  case "${name}" in
+    cubelet)
+      overlay_local_bin cubelet "${ctx}/package/${pkg_basename}/bin/cubelet"
+      overlay_local_bin cubecli "${ctx}/package/${pkg_basename}/bin/cubecli"
+      ;;
+    cube-shim)
+      overlay_local_bin containerd-shim-cube-rs \
+        "${ctx}/package/${pkg_basename}/bin/containerd-shim-cube-rs"
+      overlay_local_bin cube-runtime \
+        "${ctx}/package/${pkg_basename}/bin/cube-runtime"
+      ;;
+    network-agent)
+      overlay_local_bin network-agent "${ctx}/package/${pkg_basename}/bin/network-agent"
+      overlay_local_bin cubevsmapdump "${ctx}/package/${pkg_basename}/bin/cubevsmapdump" 0
+      ;;
+  esac
+}
 
 copy_scripts() {
   local ctx="$1"
@@ -269,6 +487,7 @@ copy_cube_master_component_context() {
 
   cp "${bin}" "${ctx}/cubemaster"
   chmod +x "${ctx}/cubemaster"
+  overlay_local_bin cubemaster "${ctx}/cubemaster"
   cp -a "${REPO_ROOT}/CubeMaster/docker/tools" "${ctx}/tools"
 }
 
@@ -281,6 +500,7 @@ copy_cubemastercli_context() {
 
   cp "${bin}" "${ctx}/cubemastercli"
   chmod +x "${ctx}/cubemastercli"
+  overlay_local_bin cubemastercli "${ctx}/cubemastercli"
 }
 
 copy_cube_proxy_component_context() {
@@ -309,6 +529,7 @@ build_cube_lifecycle_manager_image() {
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
     --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
     --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
+  record_built cube-lifecycle-manager
 }
 
 # Same as .github/workflows/release-docker-images.yml for component "webui":
@@ -336,6 +557,7 @@ build_cube_webui_image() {
     log "pushing ${image}"
     docker push "${image}"
   fi
+  record_built cube-webui
 }
 
 build_cube_proxy_image() {
@@ -356,6 +578,7 @@ build_cube_proxy_image() {
     log "pushing ${image}"
     docker push "${image}"
   fi
+  record_built cube-proxy
 }
 
 build_image() {
@@ -399,6 +622,7 @@ build_cube_api_image() {
   ' "${REPO_ROOT}/CubeAPI/Dockerfile" > "${dockerfile}"
 
   build_image cube-api "${REPO_ROOT}/CubeAPI" "${dockerfile}"
+  record_built cube-api
 }
 
 build_cube_egress_openresty_base_image() {
@@ -437,6 +661,7 @@ build_cube_egress_image() {
     log "pushing ${image}"
     docker push "${image}"
   fi
+  record_built cube-egress
 }
 
 build_cube_node_from_base_image() {
@@ -474,91 +699,142 @@ copy_cube_egress_net_context() {
     "${ctx}/scripts/cube-egress-net-entrypoint.sh"
 }
 
-ctx="$(prepare_context cube-master)"
-copy_cube_master_component_context "${ctx}"
-build_image cube-master "${ctx}" "${REPO_ROOT}/CubeMaster/docker/Dockerfile"
-
-build_cube_api_image
-
-ctx="$(prepare_context cubemastercli)"
-copy_cubemastercli_context "${ctx}"
-build_image cubemastercli "${ctx}"
-
-ctx="$(prepare_context cube-proxy)"
-copy_cube_proxy_component_context "${ctx}"
-build_cube_proxy_image "${ctx}"
-
-build_cube_lifecycle_manager_image
-
-build_cube_egress_openresty_base_image
-build_cube_egress_image
-
-ctx="$(prepare_context cube-egress-net)"
-copy_cube_egress_net_context "${ctx}"
-build_image cube-egress-net "${ctx}"
-
-build_cube_webui_image
-
 # Big Pod REV3: per-component images (no monolithic cube-node).
 build_component_image() {
   local name="$1"
   local pkg_dir="$2"
   local ctx
+  local pkg_basename
   [[ -d "${PACKAGE_DIR}/${pkg_dir}" ]] || fail "invalid sandbox-package: missing ${pkg_dir} for ${name}"
+  pkg_basename="$(basename "${pkg_dir}")"
   ctx="$(prepare_context "${name}")"
   copy_scripts "${ctx}" component-entrypoint.sh
   mkdir -p "${ctx}/package"
-  cp -a "${PACKAGE_DIR}/${pkg_dir}" "${ctx}/package/$(basename "${pkg_dir}")"
+  cp -a "${PACKAGE_DIR}/${pkg_dir}" "${ctx}/package/${pkg_basename}"
+  overlay_local_bins_for_component "${name}" "${ctx}" "${pkg_basename}"
   build_image "${name}" "${ctx}"
+  record_built "${name}"
 }
 
-build_component_image cubelet Cubelet
-build_component_image network-agent network-agent
-build_component_image cube-shim cube-shim
-build_component_image cube-kernel cube-kernel-scf
-build_component_image cube-guest cube-image
+run_selected_builds() {
+  local ctx
 
-ctx="$(prepare_context cube-node-init)"
-copy_scripts "${ctx}" cube-node-init.sh node-prep-lib.sh
-build_image cube-node-init "${ctx}"
+  if should_build cube-master; then
+    ensure_package_dir
+    ensure_source_tree
+    ctx="$(prepare_context cube-master)"
+    copy_cube_master_component_context "${ctx}"
+    build_image cube-master "${ctx}" "${REPO_ROOT}/CubeMaster/docker/Dockerfile"
+    record_built cube-master
+  fi
 
-ctx="$(prepare_context cube-wait-node-prep)"
-copy_scripts "${ctx}" node-prep-lib.sh wait-node-prep.sh write-node-prep-ready.sh
-build_image cube-wait-node-prep "${ctx}"
+  if should_build cube-api; then
+    ensure_source_tree
+    build_cube_api_image
+  fi
 
-ctx="$(prepare_context cube-pvm-host-bootstrap)"
-copy_scripts "${ctx}" pvm-host-bootstrap.sh node-prep-lib.sh
-if [[ "${INCLUDE_PVM_KERNEL_RPM}" == "1" ]]; then
-  log "downloading PVM host kernel rpm for bootstrap image"
-  download_file "${PVM_KERNEL_RPM_URL}" "${PVM_KERNEL_RPM}" file "${PVM_KERNEL_RPM_SHA256}"
-  cp "${PVM_KERNEL_RPM}" "${ctx}/artifacts/kernel-pvm-host.rpm"
-fi
-if [[ "${INCLUDE_PVM_KERNEL_DEB}" == "1" ]]; then
-  log "downloading PVM host kernel deb for bootstrap image"
-  download_file "${PVM_KERNEL_DEB_URL}" "${PVM_KERNEL_DEB}" file "${PVM_KERNEL_DEB_SHA256}"
-  cp "${PVM_KERNEL_DEB}" "${ctx}/artifacts/linux-image-pvm-host.deb"
-fi
-build_image cube-pvm-host-bootstrap "${ctx}"
+  if should_build cubemastercli; then
+    ensure_package_dir
+    ctx="$(prepare_context cubemastercli)"
+    copy_cubemastercli_context "${ctx}"
+    build_image cubemastercli "${ctx}"
+    record_built cubemastercli
+  fi
 
-cat <<EOF
+  if should_build cube-proxy; then
+    ensure_source_tree
+    ctx="$(prepare_context cube-proxy)"
+    copy_cube_proxy_component_context "${ctx}"
+    build_cube_proxy_image "${ctx}"
+  fi
+
+  if should_build cube-lifecycle-manager; then
+    ensure_source_tree
+    build_cube_lifecycle_manager_image
+  fi
+
+  if should_build cube-egress; then
+    ensure_source_tree
+    build_cube_egress_openresty_base_image
+    build_cube_egress_image
+  fi
+
+  if should_build cube-egress-net; then
+    ensure_source_tree
+    ctx="$(prepare_context cube-egress-net)"
+    copy_cube_egress_net_context "${ctx}"
+    build_image cube-egress-net "${ctx}"
+    record_built cube-egress-net
+  fi
+
+  if should_build cube-webui; then
+    ensure_source_tree
+    build_cube_webui_image
+  fi
+
+  if should_build cubelet; then
+    ensure_package_dir
+    build_component_image cubelet Cubelet
+  fi
+  if should_build network-agent; then
+    ensure_package_dir
+    build_component_image network-agent network-agent
+  fi
+  if should_build cube-shim; then
+    ensure_package_dir
+    build_component_image cube-shim cube-shim
+  fi
+  if should_build cube-kernel; then
+    ensure_package_dir
+    build_component_image cube-kernel cube-kernel-scf
+  fi
+  if should_build cube-guest; then
+    ensure_package_dir
+    build_component_image cube-guest cube-image
+  fi
+
+  if should_build cube-node-init; then
+    ctx="$(prepare_context cube-node-init)"
+    copy_scripts "${ctx}" cube-node-init.sh node-prep-lib.sh
+    build_image cube-node-init "${ctx}"
+    record_built cube-node-init
+  fi
+
+  if should_build cube-wait-node-prep; then
+    ctx="$(prepare_context cube-wait-node-prep)"
+    copy_scripts "${ctx}" node-prep-lib.sh wait-node-prep.sh write-node-prep-ready.sh
+    build_image cube-wait-node-prep "${ctx}"
+    record_built cube-wait-node-prep
+  fi
+
+  if should_build cube-pvm-host-bootstrap; then
+    ctx="$(prepare_context cube-pvm-host-bootstrap)"
+    copy_scripts "${ctx}" pvm-host-bootstrap.sh node-prep-lib.sh
+    if [[ "${INCLUDE_PVM_KERNEL_RPM}" == "1" ]]; then
+      log "downloading PVM host kernel rpm for bootstrap image"
+      download_file "${PVM_KERNEL_RPM_URL}" "${PVM_KERNEL_RPM}" file "${PVM_KERNEL_RPM_SHA256}"
+      cp "${PVM_KERNEL_RPM}" "${ctx}/artifacts/kernel-pvm-host.rpm"
+    fi
+    if [[ "${INCLUDE_PVM_KERNEL_DEB}" == "1" ]]; then
+      log "downloading PVM host kernel deb for bootstrap image"
+      download_file "${PVM_KERNEL_DEB_URL}" "${PVM_KERNEL_DEB}" file "${PVM_KERNEL_DEB_SHA256}"
+      cp "${PVM_KERNEL_DEB}" "${ctx}/artifacts/linux-image-pvm-host.deb"
+    fi
+    build_image cube-pvm-host-bootstrap "${ctx}"
+    record_built cube-pvm-host-bootstrap
+  fi
+}
+
+print_summary() {
+  local name
+  cat <<EOF
 
 Built CubeSandbox images:
-  ${REGISTRY}/cube-master:${IMAGE_TAG}
-  ${REGISTRY}/cube-api:${IMAGE_TAG}
-  ${REGISTRY}/cubemastercli:${IMAGE_TAG}
-  ${REGISTRY}/cube-proxy:${IMAGE_TAG}
-  ${REGISTRY}/cube-lifecycle-manager:${IMAGE_TAG}
-  ${REGISTRY}/cube-egress:${IMAGE_TAG}
-  ${REGISTRY}/cube-egress-net:${IMAGE_TAG}
-  ${REGISTRY}/cube-webui:${IMAGE_TAG}
-  ${REGISTRY}/cubelet:${IMAGE_TAG}
-  ${REGISTRY}/network-agent:${IMAGE_TAG}
-  ${REGISTRY}/cube-shim:${IMAGE_TAG}
-  ${REGISTRY}/cube-kernel:${IMAGE_TAG}
-  ${REGISTRY}/cube-guest:${IMAGE_TAG}
-  ${REGISTRY}/cube-node-init:${IMAGE_TAG}
-  ${REGISTRY}/cube-wait-node-prep:${IMAGE_TAG}
-  ${REGISTRY}/cube-pvm-host-bootstrap:${IMAGE_TAG}
+EOF
+  for name in "${BUILT_IMAGES[@]}"; do
+    printf '  %s/%s:%s\n' "${REGISTRY}" "${name}" "${IMAGE_TAG}"
+  done
+  cat <<EOF
 
 Use these values:
   images.*.repository: ${REGISTRY}/<image-name>
@@ -567,3 +843,42 @@ Use these values:
 Template builder is not built by this script. The chart uses a dind image by
 default and can be overridden through images.templateBuilder.* when needed.
 EOF
+}
+
+# --- main ---
+parse_args "$@"
+
+need docker
+need tar
+need curl
+need go
+need sha256sum
+
+DOWNLOAD_DIR="${BUILD_ROOT}/downloads"
+EXTRACT_DIR="${BUILD_ROOT}/extract"
+CONTEXT_DIR="${BUILD_ROOT}/contexts"
+SOURCE_TREE_DIR="${BUILD_ROOT}/source-tree"
+ONE_CLICK_DIRNAME="cube-sandbox-one-click-${VERSION}-${ONE_CLICK_ARCH}"
+ONE_CLICK_TAR="${DOWNLOAD_DIR}/${ONE_CLICK_DIRNAME}.tar.gz"
+PVM_KERNEL_RPM="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_RPM_URL}")"
+PVM_KERNEL_DEB="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_DEB_URL}")"
+SANDBOX_PACKAGE_TAR="${EXTRACT_DIR}/${ONE_CLICK_DIRNAME}/assets/package/sandbox-package.tar.gz"
+PACKAGE_DIR="${BUILD_ROOT}/sandbox-package"
+
+mkdir -p "${DOWNLOAD_DIR}" "${EXTRACT_DIR}" "${CONTEXT_DIR}"
+log "release download base (${MIRROR:-github}): ${RELEASE_DOWNLOAD_BASE}"
+log "selected images: ${SELECTED_IMAGES[*]}"
+if [[ "${LOCAL_BIN}" == "1" ]]; then
+  log "LOCAL_BIN=1; overlaying binaries from ${LOCAL_BIN_DIR}"
+fi
+
+# Eagerly prepare only what the selection needs so single-image builds stay fast.
+if selection_needs_source; then
+  ensure_source_tree
+fi
+if selection_needs_package; then
+  ensure_package_dir
+fi
+
+run_selected_builds
+print_summary
