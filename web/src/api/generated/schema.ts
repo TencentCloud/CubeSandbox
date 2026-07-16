@@ -305,8 +305,8 @@ export interface components {
         ListedSandbox: {
             alias?: string | null;
             clientID: string;
-            /** Format: int32 */
-            cpuCount: number;
+            /** K8s-style millicores string, e.g. "2000m" (= 2 vCPU), "128m" (= 0.128 vCPU). */
+            cpuCount: string;
             /** Format: int32 */
             diskSizeMB?: number | null;
             /** Format: date-time */
@@ -417,8 +417,8 @@ export interface components {
         SandboxDetail: {
             alias?: string | null;
             clientID: string;
-            /** Format: int32 */
-            cpuCount: number;
+            /** K8s-style millicores string, e.g. "2000m" (= 2 vCPU), "128m" (= 0.128 vCPU). */
+            cpuCount: string;
             /** Format: int32 */
             diskSizeMB?: number | null;
             domain?: string | null;

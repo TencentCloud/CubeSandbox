@@ -5,6 +5,7 @@ package handler
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -112,7 +113,7 @@ func inspectImage(image string) *ImageMeta {
 	}
 
 	sizeMB := float64(info.Size) / (1024.0 * 1024.0)
-	sizeMB = (sizeMB * 10) / 10 // round to 1 decimal
+	sizeMB = math.Round(sizeMB*10) / 10 // round to 1 decimal
 
 	// Pick the digest that matches the queried registry (first match wins)
 	registry := ""

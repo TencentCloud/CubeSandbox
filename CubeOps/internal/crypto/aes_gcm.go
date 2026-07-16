@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -145,16 +146,27 @@ func IsEncrypted(stored string) bool {
 
 // DecryptOrPassthrough decrypts a stored secret for use.
 // Values without the enc:v1: envelope are legacy plaintext and returned unchanged.
-// Encrypted values that cannot be decrypted return an empty string.
+// Encrypted values that cannot be decrypted return an empty string and log
+// a warning so the failure is observable in logs (and alertable) rather
+// than silently propagating an empty value to downstream callers.
 func DecryptOrPassthrough(stored string) string {
-	if IsEncrypted(stored) {
-		plaintext, err := DecryptSecret(stored)
-		if err != nil {
-			return ""
-		}
-		return plaintext
+	if !IsEncrypted(stored) {
+		return stored
 	}
-	return stored
+	plaintext, err := DecryptSecret(stored)
+	if err != nil {
+		// Log only a prefix to avoid leaking the full ciphertext into logs.
+		prefix := stored
+		if len(prefix) > 16 {
+			prefix = prefix[:16] + "..."
+		}
+		slog.Warn("DecryptOrPassthrough: decrypt failed; returning empty string",
+			"err", err,
+			"stored_prefix", prefix,
+		)
+		return ""
+	}
+	return plaintext
 }
 
 // HashPassword hashes a password with bcrypt.

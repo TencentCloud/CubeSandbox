@@ -43,11 +43,12 @@ func (s *Server) Start() error {
 	router := s.buildRouter()
 
 	s.httpSrv = &http.Server{
-		Addr:         s.cfg.Bind,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 300 * time.Second, // match nginx proxy_read_timeout
-		IdleTimeout:  120 * time.Second,
+		Addr:              s.cfg.Bind,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second, // mitigate Slowloris attacks
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      300 * time.Second, // match nginx proxy_read_timeout
+		IdleTimeout:       120 * time.Second,
 	}
 
 	slog.Info("CubeOps starting", "addr", s.cfg.Bind)
