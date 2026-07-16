@@ -3,15 +3,15 @@
 //
 // cubecow library crate
 //
-// Provides programmatic access to the cubecow xfs-reflink storage
+// Provides programmatic access to the cubecow copy-on-write storage
 // engine.
 //
 // The public entry points are:
 //
 // * [`Engine`] — backend-agnostic trait describing the operations every
 //   storage backend supports.
-// * [`ReflinkEngine`] — the xfs-reflink backend (currently the only
-//   shipping backend). Implements [`Engine`].
+// * [`ReflinkEngine`] — the xfs-reflink backend. Implements [`Engine`].
+// * [`RbdEngine`] — the Ceph RBD backend. Implements [`Engine`].
 // * [`initialize`] / [`initialize_without_logging`] — backend-selecting
 //   factory functions that read [`config::AppConfig::backend`] and
 //   return the appropriate `Box<dyn Engine>`. New code should prefer
@@ -26,6 +26,7 @@ mod pkg;
 pub use crate::pkg::errors::{CubecowError, CubecowResult};
 
 // Engine trait + concrete backends.
+pub use crate::engine::rbd::RbdEngine;
 pub use crate::engine::reflink::ReflinkEngine;
 pub use crate::engine::Engine;
 
@@ -45,7 +46,9 @@ pub struct Volume {
     pub size_bytes: u64,
     /// Backend device path used for block IO. For the xfs-reflink
     /// backend this is the regular file path inside the
-    /// reflink-enabled mount.
+    /// reflink-enabled mount; for the rbd backend it is a kernel block
+    /// device (/dev/rbdN) valid only on this node for the current
+    /// activation, and empty when the image is not mapped locally.
     pub device_path: String,
     /// Number of snapshots derived from this volume.
     pub snapshot_count: i32,
@@ -112,6 +115,7 @@ use crate::config::{AppConfig, BackendKind};
 pub fn initialize(config: AppConfig) -> anyhow::Result<Box<dyn Engine>> {
     match config.backend.kind {
         BackendKind::Reflink => Ok(Box::new(ReflinkEngine::initialize(config)?)),
+        BackendKind::Rbd => Ok(Box::new(RbdEngine::initialize(config)?)),
     }
 }
 
@@ -120,5 +124,6 @@ pub fn initialize(config: AppConfig) -> anyhow::Result<Box<dyn Engine>> {
 pub fn initialize_without_logging(config: AppConfig) -> anyhow::Result<Box<dyn Engine>> {
     match config.backend.kind {
         BackendKind::Reflink => Ok(Box::new(ReflinkEngine::initialize_without_logging(config)?)),
+        BackendKind::Rbd => Ok(Box::new(RbdEngine::initialize_without_logging(config)?)),
     }
 }

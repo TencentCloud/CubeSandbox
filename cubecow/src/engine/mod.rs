@@ -6,13 +6,14 @@
 // This module hosts:
 //
 // * [`Engine`] — the trait that every snapshot backend must implement.
-// * [`reflink::ReflinkEngine`] — the xfs-reflink backend; the only
-//   backend currently shipping with cubecow.
+// * [`reflink::ReflinkEngine`] — the xfs-reflink backend.
+// * [`rbd::RbdEngine`] — the Ceph RBD backend.
 //
 // New backends live as siblings of `reflink` and implement the same
 // trait. Selection between backends happens at construction time via
 // [`crate::initialize`] based on [`crate::config::BackendKind`].
 
+pub mod rbd;
 pub mod reflink;
 
 use std::collections::HashMap;
@@ -26,12 +27,12 @@ use crate::{Snapshot, Volume, VolumeBlockInfo};
 /// concrete backend is selected at construction time via
 /// [`crate::initialize`] based on `AppConfig.backend.kind`.
 ///
-/// The interface is intentionally pool-free: the reflink backend (the
-/// only one that ships) treats its `[backend.reflink].root_dir` as a
-/// single flat namespace and has no notion of LVM PV/VG/thin-pool
-/// partitioning. Any future backend that needs sub-namespaces is
-/// expected to model them with explicit prefixes in the volume name
-/// rather than re-introducing a pool concept here.
+/// The interface is intentionally pool-free: each backend maps its
+/// storage (the reflink `root_dir`, the rbd pool/namespace) to a single
+/// flat namespace, with no notion of LVM PV/VG/thin-pool partitioning.
+/// Any future backend that needs sub-namespaces is expected to model
+/// them with explicit prefixes in the volume name rather than
+/// re-introducing a pool concept here.
 pub trait Engine: Send + Sync {
     // -----------------------------------------------------------------------
     // Volume operations

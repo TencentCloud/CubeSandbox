@@ -1,12 +1,13 @@
 # cubecow
 
-A Copy-On-Write storage engine built on xfs-reflink (FICLONE), shipped as a Rust library crate that provides thin-provisioned volume management and O(1) snapshot/clone capabilities.
+A Copy-On-Write storage engine shipped as a Rust library crate that provides thin-provisioned volume management and snapshot/clone capabilities, with node-local (xfs-reflink) and cluster-shared (Ceph RBD) backends.
 
 ## Overview
 
-cubecow is a library crate that exposes a uniform interface through the `Engine` trait. It currently ships with a single backend:
+cubecow is a library crate that exposes a uniform interface through the `Engine` trait. It ships with two backends:
 
-- **xfs-reflink (`ReflinkEngine`)** — uses regular files as volumes and snapshots inside a directory on a FICLONE-capable filesystem (XFS with reflink=1 / Btrfs / OCFS2 / …), and relies on the kernel `FICLONE` ioctl for O(1) metadata snapshots.
+- **xfs-reflink (`ReflinkEngine`)** — the default. Uses regular files as volumes and snapshots inside a directory on a FICLONE-capable filesystem (XFS with reflink=1 / Btrfs / OCFS2 / …), and relies on the kernel `FICLONE` ioctl for O(1) metadata snapshots.
+- **Ceph RBD (`RbdEngine`)** — opt-in. Stores volumes and snapshots as standalone RBD images in a dedicated pool, reachable from any node in the cluster. A snapshot is an independent flattened clone of its source (a full copy — snapshot cost is O(allocated data), traded for cross-node independence). Requires Ceph Nautilus or newer.
 
 
 ## Key Features
@@ -99,10 +100,13 @@ file = "/var/log/cubecow.log"    # optional; logs go to stdout when unset
 rotation = "daily"               # "daily" | "hourly" | "never"
 
 [backend]
-kind = "reflink"                 # the only backend currently supported
+kind = "reflink"                 # "reflink" (default) | "rbd"
 
 [backend.reflink]
 root_dir = "/var/lib/cubecow/reflink"
+
+[backend.rbd]                    # only read when kind = "rbd"
+pool = "cubecow"                 # required; dedicated to cubecow
 ```
 
 ### JSON

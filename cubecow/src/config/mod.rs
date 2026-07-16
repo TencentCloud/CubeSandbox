@@ -38,6 +38,9 @@ pub struct BackendConfig {
     /// Settings for the xfs-reflink backend.
     #[serde(default)]
     pub reflink: ReflinkConfig,
+    /// Settings for the Ceph RBD backend.
+    #[serde(default)]
+    pub rbd: RbdConfig,
 }
 
 /// Configuration for the xfs-reflink backend.
@@ -72,14 +75,106 @@ fn default_reflink_root_dir() -> PathBuf {
     PathBuf::from("/var/lib/cubecow/reflink")
 }
 
+/// Configuration for the Ceph RBD backend.
+///
+/// The backend drives the `rbd` CLI (and `ceph` for pool capacity), so
+/// cluster connectivity follows the standard Ceph client conventions:
+/// `/etc/ceph/ceph.conf` and the default admin keyring unless `conf` /
+/// `client` say otherwise. The configured pool (optionally narrowed to
+/// an RBD namespace) should be dedicated to cubecow: the backend lists
+/// and classifies every image in it by convention. `reset_node_storage`
+/// only unmaps this node's local devices in the pool and never deletes
+/// cluster data.
+///
+/// A deletion that is positively blocked (image busy or still watched)
+/// falls back to `rbd trash mv` so the name frees up immediately; the
+/// trash itself is never purged by cubecow — reclaiming that capacity
+/// (`rbd trash purge` or a purge schedule) is the operator's call.
+///
+/// Requires Ceph Nautilus or newer: the backend relies on clone
+/// format 2, the array form of `rbd showmapped --format json`, and
+/// (preferred, with a fallback) `stored` in `ceph df`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RbdConfig {
+    /// RBD pool holding all cubecow images. Required.
+    #[serde(default)]
+    pub pool: String,
+    /// Optional RBD namespace within the pool.
+    #[serde(default)]
+    pub namespace: String,
+    /// Optional ceph.conf path, forwarded as `--conf`.
+    #[serde(default)]
+    pub conf: Option<PathBuf>,
+    /// Optional Ceph client id (without the `client.` prefix),
+    /// forwarded as `--id`.
+    #[serde(default)]
+    pub client: Option<String>,
+    /// `rbd` binary. Default: resolved from PATH.
+    #[serde(default = "default_rbd_bin")]
+    pub rbd_bin: String,
+    /// `ceph` binary, used for pool capacity metrics.
+    #[serde(default = "default_ceph_bin")]
+    pub ceph_bin: String,
+    /// Per-command timeout in seconds for regular rbd/ceph calls.
+    #[serde(default = "default_rbd_cmd_timeout_secs")]
+    pub cmd_timeout_secs: u64,
+    /// Timeout in seconds for long-running maintenance commands
+    /// (`rbd flatten`), which copy image data and scale with size.
+    #[serde(default = "default_rbd_slow_cmd_timeout_secs")]
+    pub slow_cmd_timeout_secs: u64,
+    /// Image features for `rbd create` / `rbd clone`. Restricted to
+    /// krbd-mappable features by default.
+    #[serde(default = "default_rbd_image_features")]
+    pub image_features: String,
+    /// Optional krbd map options, forwarded as `rbd map -o <value>`
+    /// (e.g. "exclusive").
+    #[serde(default)]
+    pub map_options: Option<String>,
+}
+
+impl Default for RbdConfig {
+    fn default() -> Self {
+        Self {
+            pool: String::new(),
+            namespace: String::new(),
+            conf: None,
+            client: None,
+            rbd_bin: default_rbd_bin(),
+            ceph_bin: default_ceph_bin(),
+            cmd_timeout_secs: default_rbd_cmd_timeout_secs(),
+            slow_cmd_timeout_secs: default_rbd_slow_cmd_timeout_secs(),
+            image_features: default_rbd_image_features(),
+            map_options: None,
+        }
+    }
+}
+
+fn default_rbd_bin() -> String {
+    "rbd".to_string()
+}
+fn default_ceph_bin() -> String {
+    "ceph".to_string()
+}
+fn default_rbd_cmd_timeout_secs() -> u64 {
+    60
+}
+fn default_rbd_slow_cmd_timeout_secs() -> u64 {
+    3600
+}
+fn default_rbd_image_features() -> String {
+    "layering,exclusive-lock".to_string()
+}
+
 /// Available storage backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendKind {
-    /// xfs-reflink backend (FICLONE-based snapshots) — the **default**
-    /// and currently the only shipping backend.
+    /// xfs-reflink backend (FICLONE-based snapshots) — the **default**.
     #[default]
     Reflink,
+    /// Ceph RBD backend (network block devices; snapshots and clones
+    /// live in the cluster, so any node can attach any volume).
+    Rbd,
 }
 
 /// Logging configuration.
@@ -196,6 +291,7 @@ impl AppConfig {
         // ---- Backend-specific required fields ----------------------------
         match self.backend.kind {
             BackendKind::Reflink => self.validate_reflink_requirements(),
+            BackendKind::Rbd => self.validate_rbd_requirements(),
         }
     }
 
@@ -218,6 +314,33 @@ impl AppConfig {
                 "[backend.reflink] root_dir = \"{}\" must be an absolute path",
                 root_dir.display()
             )));
+        }
+        Ok(())
+    }
+
+    /// Field-level validation for the rbd backend.
+    ///
+    /// Cluster reachability is probed at engine startup, not here —
+    /// `validate()` is meant to be cheap and side-effect free.
+    fn validate_rbd_requirements(&self) -> CubecowResult<()> {
+        let rbd = &self.backend.rbd;
+        if rbd.pool.is_empty() {
+            return Err(CubecowError::ConfigError(
+                "[backend.rbd] pool must not be empty when backend.kind = \"rbd\"".to_string(),
+            ));
+        }
+        for (field, value) in [("pool", &rbd.pool), ("namespace", &rbd.namespace)] {
+            if value.contains('/') || value.contains('@') || value.starts_with('-') {
+                return Err(CubecowError::ConfigError(format!(
+                    "[backend.rbd] {field} = \"{value}\" must not contain '/' or '@' \
+                     or start with '-'"
+                )));
+            }
+        }
+        if rbd.cmd_timeout_secs == 0 || rbd.slow_cmd_timeout_secs == 0 {
+            return Err(CubecowError::ConfigError(
+                "[backend.rbd] command timeouts must be positive".to_string(),
+            ));
         }
         Ok(())
     }
@@ -319,6 +442,24 @@ mod tests {
             CubecowError::ConfigError(msg) => {
                 assert!(msg.contains("[backend.reflink] root_dir"));
                 assert!(msg.contains("absolute"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_rbd_pool_that_parses_as_flag() {
+        let err = AppConfig::from_json_str(
+            r#"{
+                "log": {},
+                "backend": {"kind": "rbd", "rbd": {"pool": "--read-only"}}
+            }"#,
+        )
+        .unwrap_err();
+        match err {
+            CubecowError::ConfigError(msg) => {
+                assert!(msg.contains("[backend.rbd] pool"));
+                assert!(msg.contains("start with '-'"));
             }
             other => panic!("unexpected error: {other:?}"),
         }
