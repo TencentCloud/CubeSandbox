@@ -32,7 +32,7 @@ use serde_json::Value;
 use sha2::Sha256;
 use tokio::{
     runtime::Handle,
-    sync::{mpsc, oneshot, Semaphore, TryAcquireError},
+    sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore, TryAcquireError},
     task::{JoinError, JoinSet},
     time::{sleep, timeout},
 };
@@ -48,6 +48,10 @@ const HEADER_DELIVERY: &str = "X-Cube-Webhook-Delivery";
 const HEADER_TIMESTAMP: &str = "X-Cube-Webhook-Timestamp";
 const HEADER_SIGNATURE: &str = "X-Cube-Webhook-Signature";
 const WEBHOOK_USER_AGENT: &str = "CubeAPI-Webhook/1.0";
+
+/// Maximum number of attempts from one endpoint that may wait for, or have
+/// just been granted, shared HTTP capacity before releasing the local permit.
+const ENDPOINT_PENDING_ATTEMPT_WIDTH: usize = 1;
 
 const DEFAULT_LIFECYCLE_EVENTS: [&str; 4] = [
     "sandbox.created",
@@ -96,14 +100,54 @@ impl Endpoint {
     }
 }
 
-/// An enabled endpoint paired with its outstanding-delivery limiter.
+#[derive(Debug)]
+enum AttemptAdmissionError {
+    EndpointClosed,
+    GlobalClosed,
+}
+
+/// Coordinates one endpoint's access to the shared HTTP concurrency limit.
+#[derive(Clone)]
+struct EndpointAttemptAdmission {
+    pending: Arc<Semaphore>,
+    global: Arc<Semaphore>,
+}
+
+impl EndpointAttemptAdmission {
+    fn new(global: Arc<Semaphore>) -> Self {
+        Self {
+            pending: Arc::new(Semaphore::new(ENDPOINT_PENDING_ATTEMPT_WIDTH)),
+            global,
+        }
+    }
+
+    async fn acquire(&self) -> Result<OwnedSemaphorePermit, AttemptAdmissionError> {
+        let pending = self
+            .pending
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AttemptAdmissionError::EndpointClosed)?;
+        let global = self
+            .global
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AttemptAdmissionError::GlobalClosed)?;
+        drop(pending);
+        Ok(global)
+    }
+}
+
+/// An enabled endpoint paired with its delivery and attempt limiters.
 ///
-/// The limiter lives next to the endpoint it bounds so there is no parallel
+/// The limiters live next to the endpoint they bound so there is no parallel
 /// collection to mis-index: `Endpoint::index` is the sparse original
 /// configuration index used for logging, not a position in any vector.
 struct EndpointSlot {
     endpoint: Endpoint,
     outstanding: Arc<Semaphore>,
+    attempt_admission: EndpointAttemptAdmission,
 }
 
 #[derive(Debug)]
@@ -223,6 +267,7 @@ impl HttpLogger {
         let queue_capacity = config.queue_capacity;
         let max_concurrency = config.max_concurrency;
         let flush_timeout = Duration::from_secs(config.flush_timeout_secs);
+        let global = Arc::new(Semaphore::new(max_concurrency));
         let slots: Vec<EndpointSlot> =
             match per_endpoint_outstanding_budget(queue_capacity, endpoints.len()) {
                 Some(outstanding_budget) => endpoints
@@ -230,6 +275,7 @@ impl HttpLogger {
                     .map(|endpoint| EndpointSlot {
                         endpoint,
                         outstanding: Arc::new(Semaphore::new(outstanding_budget)),
+                        attempt_admission: EndpointAttemptAdmission::new(global.clone()),
                     })
                     .collect(),
                 None => Vec::new(),
@@ -246,7 +292,6 @@ impl HttpLogger {
             rx,
             Arc::new(slots),
             client,
-            Arc::new(Semaphore::new(max_concurrency)),
             options,
             flush_timeout,
         ));
@@ -550,7 +595,6 @@ async fn run_dispatcher(
     mut rx: mpsc::Receiver<Msg>,
     endpoints: Arc<Vec<EndpointSlot>>,
     client: reqwest::Client,
-    semaphore: Arc<Semaphore>,
     options: DeliveryOptions,
     flush_timeout: Duration,
 ) {
@@ -573,7 +617,6 @@ async fn run_dispatcher(
                             event,
                             &endpoints,
                             &client,
-                            &semaphore,
                             options,
                         );
                     }
@@ -596,7 +639,6 @@ fn spawn_deliveries(
     event: LogEvent,
     endpoints: &[EndpointSlot],
     client: &reqwest::Client,
-    semaphore: &Arc<Semaphore>,
     options: DeliveryOptions,
 ) {
     let matching: Vec<&EndpointSlot> = endpoints
@@ -641,8 +683,12 @@ fn spawn_deliveries(
         // endpoint's traffic. A full endpoint sheds only its own delivery.
         match slot.outstanding.clone().try_acquire_owned() {
             Ok(permit) => {
-                let delivery_task =
-                    deliver_with_retry(delivery, client.clone(), semaphore.clone(), options);
+                let delivery_task = deliver_with_retry(
+                    delivery,
+                    client.clone(),
+                    slot.attempt_admission.clone(),
+                    options,
+                );
                 deliveries.spawn(async move {
                     // The permit counts unfinished deliveries, so it is held
                     // through retries and backoff and released only when this
@@ -706,16 +752,25 @@ fn log_delivery_task_result(result: Result<(), JoinError>) {
 async fn deliver_with_retry(
     delivery: Delivery,
     client: reqwest::Client,
-    semaphore: Arc<Semaphore>,
+    attempt_admission: EndpointAttemptAdmission,
     options: DeliveryOptions,
 ) {
     for attempt in 0..=options.max_retries {
-        // The permit is intentionally acquired per attempt and released before
-        // the backoff sleep, so `max_concurrency` bounds in-flight HTTP
-        // requests rather than deliveries idling between retries.
-        let permit = match semaphore.acquire().await {
+        // Admission is intentionally repeated per attempt. The endpoint-local
+        // permit is released before this method returns the global permit, and
+        // the global permit is released before any retry backoff.
+        let permit = match attempt_admission.acquire().await {
             Ok(permit) => permit,
-            Err(_) => {
+            Err(AttemptAdmissionError::EndpointClosed) => {
+                error!(
+                    endpoint_index = delivery.endpoint_index,
+                    event = %delivery.event,
+                    delivery_id = %delivery.id,
+                    "HttpLogger endpoint attempt limiter closed; dropping delivery"
+                );
+                return;
+            }
+            Err(AttemptAdmissionError::GlobalClosed) => {
                 error!(
                     endpoint_index = delivery.endpoint_index,
                     event = %delivery.event,
@@ -1119,10 +1174,13 @@ fn normalize_field_name(key: &str) -> Cow<'_, str> {
 mod tests {
     use std::{
         collections::VecDeque,
+        future::Future,
+        pin::Pin,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
         },
+        task::{Context, Poll},
     };
 
     use axum::{
@@ -1133,6 +1191,11 @@ mod tests {
     };
 
     use super::*;
+
+    fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
+        let mut context = Context::from_waker(futures::task::noop_waker_ref());
+        future.poll(&mut context)
+    }
 
     fn valid_webhook_config() -> WebhookConfig {
         WebhookConfig {
@@ -1495,6 +1558,177 @@ mod tests {
         LogEvent::new(LogLevel::Info, "sandbox.created")
             .field("sandbox_id", "sandbox-123")
             .field("template_id", "template-456")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn endpoint_attempt_admission_bounds_global_queue_position() {
+        let global = Arc::new(Semaphore::new(0));
+        let hot = EndpointAttemptAdmission::new(global.clone());
+        let healthy = EndpointAttemptAdmission::new(global.clone());
+
+        let mut hot_head = Box::pin(hot.acquire());
+        assert!(matches!(poll_once(hot_head.as_mut()), Poll::Pending));
+        assert_eq!(hot.pending.available_permits(), 0);
+
+        let mut hot_backlog: Vec<_> = (0..8).map(|_| Box::pin(hot.acquire())).collect();
+        for attempt in &mut hot_backlog {
+            assert!(matches!(poll_once(attempt.as_mut()), Poll::Pending));
+        }
+
+        let mut healthy_attempt = Box::pin(healthy.acquire());
+        assert!(matches!(poll_once(healthy_attempt.as_mut()), Poll::Pending));
+        assert_eq!(healthy.pending.available_permits(), 0);
+
+        global.add_permits(1);
+        let Poll::Ready(Ok(hot_permit)) = poll_once(hot_head.as_mut()) else {
+            panic!("the first hot attempt should receive the first global permit");
+        };
+
+        assert!(matches!(poll_once(hot_backlog[0].as_mut()), Poll::Pending));
+        drop(hot_permit);
+        assert!(matches!(poll_once(hot_backlog[0].as_mut()), Poll::Pending));
+        let Poll::Ready(Ok(healthy_permit)) = poll_once(healthy_attempt.as_mut()) else {
+            panic!("the healthy attempt should precede replacement hot attempts");
+        };
+
+        drop(hot_backlog);
+        drop(healthy_permit);
+        assert_eq!(hot.pending.available_permits(), 1);
+        assert_eq!(healthy.pending.available_permits(), 1);
+        assert_eq!(global.available_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn endpoint_attempt_admission_is_not_an_active_request_cap() {
+        const GLOBAL_CAPACITY: usize = 4;
+
+        let global = Arc::new(Semaphore::new(GLOBAL_CAPACITY));
+        let admission = EndpointAttemptAdmission::new(global.clone());
+        let mut permits = Vec::with_capacity(GLOBAL_CAPACITY);
+
+        for _ in 0..GLOBAL_CAPACITY {
+            permits.push(admission.acquire().await.unwrap());
+            assert_eq!(admission.pending.available_permits(), 1);
+        }
+        assert_eq!(global.available_permits(), 0);
+
+        let mut extra = Box::pin(admission.acquire());
+        assert!(matches!(poll_once(extra.as_mut()), Poll::Pending));
+        assert_eq!(admission.pending.available_permits(), 0);
+
+        drop(permits.pop());
+        let Poll::Ready(Ok(extra_permit)) = poll_once(extra.as_mut()) else {
+            panic!("the next attempt should receive released global capacity");
+        };
+        permits.push(extra_permit);
+        assert_eq!(permits.len(), GLOBAL_CAPACITY);
+        assert_eq!(admission.pending.available_permits(), 1);
+        assert_eq!(global.available_permits(), 0);
+
+        drop(permits);
+        assert_eq!(global.available_permits(), GLOBAL_CAPACITY);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_attempt_admissions_reserve_no_global_capacity() {
+        const GLOBAL_CAPACITY: usize = 4;
+
+        let global = Arc::new(Semaphore::new(GLOBAL_CAPACITY));
+        let active = EndpointAttemptAdmission::new(global.clone());
+        let idle: Vec<_> = (0..64)
+            .map(|_| EndpointAttemptAdmission::new(global.clone()))
+            .collect();
+
+        assert_eq!(global.available_permits(), GLOBAL_CAPACITY);
+        assert!(idle
+            .iter()
+            .all(|admission| admission.pending.available_permits() == 1));
+
+        let mut permits = Vec::with_capacity(GLOBAL_CAPACITY);
+        for _ in 0..GLOBAL_CAPACITY {
+            permits.push(active.acquire().await.unwrap());
+        }
+        assert_eq!(global.available_permits(), 0);
+        assert!(idle
+            .iter()
+            .all(|admission| admission.pending.available_permits() == 1));
+
+        drop(permits);
+        assert_eq!(global.available_permits(), GLOBAL_CAPACITY);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn attempt_admission_cancellation_restores_permits() {
+        let global = Arc::new(Semaphore::new(0));
+        let admission = EndpointAttemptAdmission::new(global.clone());
+        let mut waiting_global = Box::pin(admission.acquire());
+        assert!(matches!(poll_once(waiting_global.as_mut()), Poll::Pending));
+        assert_eq!(admission.pending.available_permits(), 0);
+        drop(waiting_global);
+        assert_eq!(admission.pending.available_permits(), 1);
+
+        let mut head = Box::pin(admission.acquire());
+        assert!(matches!(poll_once(head.as_mut()), Poll::Pending));
+        let mut waiting_local = Box::pin(admission.acquire());
+        assert!(matches!(poll_once(waiting_local.as_mut()), Poll::Pending));
+        drop(waiting_local);
+        assert_eq!(admission.pending.available_permits(), 0);
+        drop(head);
+        assert_eq!(admission.pending.available_permits(), 1);
+
+        let mut granted = Box::pin(admission.acquire());
+        assert!(matches!(poll_once(granted.as_mut()), Poll::Pending));
+        global.add_permits(1);
+        assert_eq!(global.available_permits(), 0);
+        drop(granted);
+        assert_eq!(admission.pending.available_permits(), 1);
+        assert_eq!(global.available_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn global_bound_and_flush_abort_restore_admission_permits() {
+        let global = Arc::new(Semaphore::new(1));
+        let held_global = global.clone().acquire_owned().await.unwrap();
+        let admission = EndpointAttemptAdmission::new(global.clone());
+        let outstanding = Arc::new(Semaphore::new(2));
+
+        let first_outstanding = outstanding.clone().try_acquire_owned().unwrap();
+        let first_admission = admission.clone();
+        let mut waiting_global = Box::pin(async move {
+            let _outstanding = first_outstanding;
+            let _global = first_admission.acquire().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        assert!(matches!(poll_once(waiting_global.as_mut()), Poll::Pending));
+        assert_eq!(admission.pending.available_permits(), 0);
+
+        let second_outstanding = outstanding.clone().try_acquire_owned().unwrap();
+        let second_admission = admission.clone();
+        let mut waiting_local = Box::pin(async move {
+            let _outstanding = second_outstanding;
+            let _global = second_admission.acquire().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        assert!(matches!(poll_once(waiting_local.as_mut()), Poll::Pending));
+        assert_eq!(global.available_permits(), 0);
+        assert_eq!(outstanding.available_permits(), 0);
+
+        let mut deliveries = JoinSet::new();
+        deliveries.spawn(waiting_global);
+        deliveries.spawn(waiting_local);
+        timeout(
+            Duration::from_secs(5),
+            flush_deliveries(&mut deliveries, Duration::from_millis(1)),
+        )
+        .await
+        .expect("flush cancellation should complete");
+
+        assert!(deliveries.is_empty());
+        assert_eq!(admission.pending.available_permits(), 1);
+        assert_eq!(outstanding.available_permits(), 2);
+        assert_eq!(global.available_permits(), 0);
+        drop(held_global);
+        assert_eq!(global.available_permits(), 1);
     }
 
     #[test]
@@ -2502,6 +2736,46 @@ mod tests {
         )
     }
 
+    #[derive(Clone)]
+    struct RetryBackoffMockState {
+        arrivals: Arc<Semaphore>,
+        release_first: Arc<Semaphore>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    async fn retry_backoff_webhook(State(state): State<RetryBackoffMockState>) -> StatusCode {
+        let attempt = state.calls.fetch_add(1, Ordering::SeqCst);
+        state.arrivals.add_permits(1);
+        if attempt == 0 {
+            match state.release_first.acquire().await {
+                Ok(permit) => permit.forget(),
+                Err(_) => return StatusCode::SERVICE_UNAVAILABLE,
+            }
+            StatusCode::INTERNAL_SERVER_ERROR
+        } else {
+            StatusCode::OK
+        }
+    }
+
+    async fn spawn_retry_backoff_mock_server() -> (String, RetryBackoffMockState) {
+        let state = RetryBackoffMockState {
+            arrivals: Arc::new(Semaphore::new(0)),
+            release_first: Arc::new(Semaphore::new(0)),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/webhook", post(retry_backoff_webhook))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        (format!("http://{address}/webhook"), state)
+    }
+
     /// Waits for `count` arrivals, consuming their permits so every arrival is
     /// counted exactly once. The timeout is only a hang guard; the semaphore
     /// is the synchronization mechanism.
@@ -2511,6 +2785,55 @@ mod tests {
             .expect("timed out waiting for expected webhook requests")
             .expect("arrival semaphore closed")
             .forget();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retry_backoff_releases_attempt_and_global_capacity() {
+        let (url, mock) = spawn_retry_backoff_mock_server().await;
+        let mut endpoint_config = endpoint(&["*"]);
+        endpoint_config.url = url;
+        let endpoint = compile_endpoint(&endpoint_config, 0).unwrap();
+        let event = test_event();
+        let fields = sanitized_fields(&event.fields);
+        let delivery =
+            Delivery::new(&event, &endpoint, &fields, MAX_WEBHOOK_PAYLOAD_BYTES).unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let global = Arc::new(Semaphore::new(1));
+        let admission = EndpointAttemptAdmission::new(global.clone());
+        let options = DeliveryOptions {
+            max_retries: 1,
+            max_payload_bytes: MAX_WEBHOOK_PAYLOAD_BYTES,
+            initial_backoff_ms: 60_000,
+            max_backoff_ms: 60_000,
+        };
+
+        let delivery_task = tokio::spawn(deliver_with_retry(
+            delivery,
+            client,
+            admission.clone(),
+            options,
+        ));
+        acquire_arrivals(&mock.arrivals, 1).await;
+        assert_eq!(admission.pending.available_permits(), 1);
+        assert_eq!(global.available_permits(), 0);
+
+        mock.release_first.add_permits(1);
+        let observer = timeout(Duration::from_secs(5), admission.acquire())
+            .await
+            .expect("another attempt should obtain capacity before retry backoff")
+            .unwrap();
+        assert_eq!(admission.pending.available_permits(), 1);
+        assert_eq!(global.available_permits(), 0);
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+
+        delivery_task.abort();
+        let join_error = delivery_task
+            .await
+            .expect_err("the delivery should still be in retry backoff");
+        assert!(join_error.is_cancelled());
+        drop(observer);
+        assert_eq!(admission.pending.available_permits(), 1);
+        assert_eq!(global.available_permits(), 1);
     }
 
     fn gated_test_config(url: String, queue_capacity: usize) -> WebhookConfig {
@@ -2632,6 +2955,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_event_consumes_no_endpoint_budget() {
+        let global = Arc::new(Semaphore::new(4));
         let slots: Vec<EndpointSlot> = [
             compile_endpoint(&endpoint(&["*"]), 0).unwrap(),
             compile_endpoint(&endpoint(&["*"]), 1).unwrap(),
@@ -2640,10 +2964,10 @@ mod tests {
         .map(|endpoint| EndpointSlot {
             endpoint,
             outstanding: Arc::new(Semaphore::new(1)),
+            attempt_admission: EndpointAttemptAdmission::new(global.clone()),
         })
         .collect();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let semaphore = Arc::new(Semaphore::new(4));
         let options = DeliveryOptions {
             max_retries: 0,
             max_payload_bytes: 8,
@@ -2652,34 +2976,31 @@ mod tests {
         };
         let mut deliveries = JoinSet::new();
 
-        spawn_deliveries(
-            &mut deliveries,
-            test_event(),
-            &slots,
-            &client,
-            &semaphore,
-            options,
-        );
+        spawn_deliveries(&mut deliveries, test_event(), &slots, &client, options);
 
         assert!(deliveries.is_empty(), "no delivery task may be spawned");
         for slot in &slots {
             assert_eq!(slot.outstanding.available_permits(), 1);
+            assert_eq!(slot.attempt_admission.pending.available_permits(), 1);
         }
+        assert_eq!(global.available_permits(), 4);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn saturated_endpoint_budget_drops_only_its_own_delivery() {
+        let global = Arc::new(Semaphore::new(4));
         let saturated = EndpointSlot {
             endpoint: compile_endpoint(&endpoint(&["*"]), 0).unwrap(),
             outstanding: Arc::new(Semaphore::new(0)),
+            attempt_admission: EndpointAttemptAdmission::new(global.clone()),
         };
         let available = EndpointSlot {
             endpoint: compile_endpoint(&endpoint(&["*"]), 1).unwrap(),
             outstanding: Arc::new(Semaphore::new(1)),
+            attempt_admission: EndpointAttemptAdmission::new(global),
         };
         let slots = vec![saturated, available];
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let semaphore = Arc::new(Semaphore::new(4));
         let options = DeliveryOptions {
             max_retries: 0,
             max_payload_bytes: MAX_WEBHOOK_PAYLOAD_BYTES,
@@ -2688,14 +3009,7 @@ mod tests {
         };
         let mut deliveries = JoinSet::new();
 
-        spawn_deliveries(
-            &mut deliveries,
-            test_event(),
-            &slots,
-            &client,
-            &semaphore,
-            options,
-        );
+        spawn_deliveries(&mut deliveries, test_event(), &slots, &client, options);
 
         // Only the endpoint with remaining budget received a delivery task;
         // the spawned task has not been polled yet on this current-thread
