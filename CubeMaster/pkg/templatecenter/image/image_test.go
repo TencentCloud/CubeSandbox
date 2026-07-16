@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"os"
 	"path/filepath"
@@ -225,6 +226,47 @@ func TestPrepareSourceImageUsesSkopeoWhenDockerlessToolsAvailable(t *testing.T) 
 	}
 }
 
+func TestPrepareDockerlessSourceUsesInsecureRegistryConfig(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(config.GetNativeInsecureRegistries, func() []string {
+		return []string{"registry.internal:5000"}
+	})
+
+	var calls [][]string
+	patches.ApplyFunc(skopeoOutput, func(ctx context.Context, authFile string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) == 3 && args[0] == "inspect" {
+			return []byte(`{"Name":"registry.internal:5000/team/app","Digest":"sha256:abcd"}`), nil
+		}
+		if len(args) == 4 && args[0] == "inspect" && args[2] == "--config" {
+			return []byte(`{"config":{"Cmd":["app"]}}`), nil
+		}
+		t.Fatalf("unexpected skopeo args=%v", args)
+		return nil, nil
+	})
+
+	source, err := prepareDockerlessSource(context.Background(), SourceSpec{
+		ImageRef: "registry.internal:5000/team/app:latest",
+	})
+	if err != nil {
+		t.Fatalf("prepareDockerlessSource failed: %v", err)
+	}
+	defer source.Cleanup(context.Background())
+
+	wantCalls := [][]string{
+		{"inspect", "--tls-verify=false", "docker://registry.internal:5000/team/app:latest"},
+		{"inspect", "--tls-verify=false", "--config", "docker://registry.internal:5000/team/app:latest"},
+	}
+	if !reflect.DeepEqual(calls, wantCalls) {
+		t.Fatalf("unexpected skopeo calls: got %#v want %#v", calls, wantCalls)
+	}
+	if !source.SkopeoInsecure {
+		t.Fatal("expected prepared source to preserve insecure registry selection")
+	}
+}
+
 func TestExportImageRootfsUsesDockerlessSkopeoUmociWhenAvailable(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
@@ -336,7 +378,7 @@ func TestExportImageRootfsRejectsInjectableImageRef(t *testing.T) {
 	}
 }
 
-func TestExportImageRootfsPassesAuthFileToSkopeoCopy(t *testing.T) {
+func TestExportImageRootfsPassesAuthAndInsecureFlagsToSkopeoCopy(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
@@ -359,13 +401,14 @@ func TestExportImageRootfsPassesAuthFileToSkopeoCopy(t *testing.T) {
 		LocalRef:       "example.com/app:latest",
 		ExportMode:     ExportModeDockerless,
 		SkopeoAuthFile: "/tmp/auth-xyz/auth.json",
+		SkopeoInsecure: true,
 	}
 	if err := exportImageRootfs(context.Background(), source, rootfsDir); err != nil {
 		t.Fatalf("exportImageRootfs failed: %v", err)
 	}
-	want := []string{"copy", "--authfile", "/tmp/auth-xyz/auth.json", "docker://example.com/app:latest"}
-	if len(skopeoArgs) != 5 || !reflect.DeepEqual(skopeoArgs[:4], want) {
-		t.Fatalf("expected skopeo copy to receive --authfile, got %#v", skopeoArgs)
+	want := []string{"copy", "--authfile", "/tmp/auth-xyz/auth.json", "--src-tls-verify=false", "docker://example.com/app:latest"}
+	if len(skopeoArgs) != 6 || !reflect.DeepEqual(skopeoArgs[:5], want) {
+		t.Fatalf("expected skopeo copy to receive auth and insecure flags, got %#v", skopeoArgs)
 	}
 }
 
@@ -586,12 +629,24 @@ func TestEstimateImageSizeFromInspectDockerPath(t *testing.T) {
 	}
 }
 
-func TestRegistryHostFromImageRefStripsDockerTransport(t *testing.T) {
-	if got := registryHostFromImageRef("docker://example.com:5000/ns/app:tag"); got != "example.com:5000" {
-		t.Fatalf("registryHostFromImageRef()=%q, want example.com:5000", got)
+func TestRegistryHostFromImageRef(t *testing.T) {
+	tests := []struct {
+		imageRef string
+		want     string
+	}{
+		{"docker://example.com:5000/ns/app:tag", "example.com:5000"},
+		{"library/nginx:latest", "docker.io"},
+		{"index.docker.io/library/nginx:latest", "docker.io"},
+		{"192.168.1.10:5000/team/app", "192.168.1.10:5000"},
+		{"[2001:db8::1]:5000/team/app", "[2001:db8::1]:5000"},
+		{"localhost:5000/team/app", "localhost:5000"},
+		{"", ""},
 	}
-	if got := registryHostFromImageRef("library/nginx:latest"); got != "docker.io" {
-		t.Fatalf("registryHostFromImageRef()=%q, want docker.io", got)
+
+	for _, tt := range tests {
+		if got := registryHostFromImageRef(tt.imageRef); got != tt.want {
+			t.Errorf("registryHostFromImageRef(%q)=%q, want %q", tt.imageRef, got, tt.want)
+		}
 	}
 }
 
@@ -606,6 +661,7 @@ func TestValidateImageRef(t *testing.T) {
 	valid := []string{
 		"docker://registry.example.com/image:latest",
 		"registry.example.com:5000/ns/app:1.2.3",
+		"[2001:db8::1]:5000/ns/app:1.2.3",
 		"library/nginx",
 		"library/nginx@sha256:" + strings.Repeat("a", 64),
 		"reg.io/my_app.name/sub-component:tag_1.0",

@@ -344,6 +344,12 @@ common:
 ```
 
 All registries omitted from this list continue to require HTTPS.
+The same allowlist is honored by the daemonless skopeo fallback path.
+
+> [!WARNING]
+> HTTP does not encrypt registry traffic. If image credentials are supplied for
+> an allowlisted registry, they are transmitted in cleartext. Only use this
+> option on a trusted private network, and prefer HTTPS whenever possible.
 
 ### Docker Mirror (Optional)
 

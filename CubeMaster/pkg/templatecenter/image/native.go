@@ -52,8 +52,11 @@ func nativeRootfsExportEnabled() bool {
 // exactly, including a non-default port, in the CubeMaster configuration.
 func nativeInsecureRegistryEnabled(imageRef string, configuredHosts []string) bool {
 	registryHost := registryHostFromImageRef(imageRef)
+	if registryHost == "" {
+		return false
+	}
 	for _, configuredHost := range configuredHosts {
-		if strings.EqualFold(strings.TrimSpace(configuredHost), registryHost) {
+		if strings.EqualFold(normalizeRegistryHost(strings.TrimSpace(configuredHost)), registryHost) {
 			return true
 		}
 	}

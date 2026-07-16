@@ -19,6 +19,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
 func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
@@ -80,8 +81,10 @@ func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 
 	rawRef := strings.TrimPrefix(spec.ImageRef, "docker://")
 	parseOptions := []name.Option{}
-	if nativeInsecureRegistryEnabled(spec.ImageRef, config.GetNativeInsecureRegistries()) {
+	insecure := nativeInsecureRegistryEnabled(spec.ImageRef, config.GetNativeInsecureRegistries())
+	if insecure {
 		parseOptions = append(parseOptions, name.Insecure)
+		warnIfInsecureRegistryCredentials(ctx, spec)
 	}
 	ref, err := name.ParseReference(rawRef, parseOptions...)
 	if err != nil {
@@ -161,6 +164,16 @@ func convertV1Config(cfg v1.Config) DockerImageConfig {
 	}
 }
 
+func warnIfInsecureRegistryCredentials(ctx context.Context, spec SourceSpec) {
+	if spec.RegistryUsername == "" && spec.RegistryPassword == "" {
+		return
+	}
+	log.G(ctx).Warnf(
+		"registry credentials for %s will be sent over plain HTTP because it is listed in common.native_insecure_registries",
+		registryHostFromImageRef(spec.ImageRef),
+	)
+}
+
 func prepareDockerlessSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
 	if err := validateImageRef(spec.ImageRef); err != nil {
 		return nil, err
@@ -170,12 +183,21 @@ func prepareDockerlessSource(ctx context.Context, spec SourceSpec) (*PreparedSou
 		return nil, err
 	}
 	sourceRef := skopeoDockerImageRef(spec.ImageRef)
-	inspectOutput, err := skopeoOutput(ctx, authFile, "inspect", sourceRef)
+	insecure := nativeInsecureRegistryEnabled(spec.ImageRef, config.GetNativeInsecureRegistries())
+	if insecure {
+		warnIfInsecureRegistryCredentials(ctx, spec)
+	}
+	inspectArgs := []string{"inspect"}
+	if insecure {
+		inspectArgs = append(inspectArgs, "--tls-verify=false")
+	}
+	inspectOutput, err := skopeoOutput(ctx, authFile, append(inspectArgs, sourceRef)...)
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("skopeo inspect %s failed: %w", spec.ImageRef, err)
 	}
-	configOutput, err := skopeoOutput(ctx, authFile, "inspect", "--config", sourceRef)
+	configArgs := append(append([]string{}, inspectArgs...), "--config", sourceRef)
+	configOutput, err := skopeoOutput(ctx, authFile, configArgs...)
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("skopeo inspect --config %s failed: %w", spec.ImageRef, err)
@@ -204,6 +226,7 @@ func prepareDockerlessSource(ctx context.Context, spec SourceSpec) (*PreparedSou
 		MasterNodeIP:        NormalizeBaseURL(spec.DownloadBaseURL),
 		ExportMode:          ExportModeDockerless,
 		SkopeoAuthFile:      authFile,
+		SkopeoInsecure:      insecure,
 		CompressedSizeBytes: skopeoLayersTotalSize(inspectInfo),
 		OnPullProgress:      spec.OnPullProgress,
 		Cleanup: func(context.Context) {
@@ -325,10 +348,11 @@ func dockerInspectToPreparedSource(spec SourceSpec, inspectInfo dockerInspectIma
 
 // imageRefAllowedPattern is the strict character whitelist for image
 // references. It permits exactly the characters that appear in legitimate
-// registry/repository[:tag][@algo:hexdigest] references: alphanumerics and
-// `.`, `-`, `_`, `/`, `:`, `@`. Any other character (notably whitespace) is
-// rejected so the reference cannot be split into additional argv entries.
-var imageRefAllowedPattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+$`)
+// registry/repository[:tag][@algo:hexdigest] references: alphanumerics,
+// `.`, `-`, `_`, `/`, `:`, `@`, `[` and `]`. Any other character (notably
+// whitespace) is rejected so the reference cannot be split into additional
+// argv entries.
+var imageRefAllowedPattern = regexp.MustCompile(`^[A-Za-z0-9._:/@\[\]-]+$`)
 
 // validateImageRef guards against argument injection (CWE-88) when the image
 // reference is later passed as a positional argument to external CLIs

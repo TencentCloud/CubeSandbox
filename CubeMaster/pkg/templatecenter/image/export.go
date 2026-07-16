@@ -72,6 +72,9 @@ func dockerlessExportImageRootfs(ctx context.Context, source *PreparedSource, de
 	if source.SkopeoAuthFile != "" {
 		skopeoArgs = append(skopeoArgs, "--authfile", source.SkopeoAuthFile)
 	}
+	if source.SkopeoInsecure {
+		skopeoArgs = append(skopeoArgs, "--src-tls-verify=false")
+	}
 	skopeoArgs = append(skopeoArgs, sourceRef, ociImageRef)
 	if err := skopeoCopy(ctx, skopeoArgs, source.OnPullProgress, source.CompressedSizeBytes); err != nil {
 		return fmt.Errorf("skopeo copy %s failed: %w", source.LocalRef, err)

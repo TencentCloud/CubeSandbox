@@ -53,15 +53,22 @@ func imageNameWithoutTagDigest(imageRef string) string {
 
 func registryHostFromImageRef(imageRef string) string {
 	imageRef = strings.TrimPrefix(imageRef, "docker://")
-	parts := strings.Split(imageRef, "/")
-	if len(parts) == 0 {
-		return "docker.io"
+	if imageRef == "" {
+		return ""
 	}
+	parts := strings.Split(imageRef, "/")
 	first := parts[0]
 	if strings.Contains(first, ".") || strings.Contains(first, ":") || first == "localhost" {
-		return first
+		return normalizeRegistryHost(first)
 	}
 	return "docker.io"
+}
+
+func normalizeRegistryHost(host string) string {
+	if strings.EqualFold(host, "index.docker.io") {
+		return "docker.io"
+	}
+	return host
 }
 
 func NormalizeBaseURL(baseURL string) string {

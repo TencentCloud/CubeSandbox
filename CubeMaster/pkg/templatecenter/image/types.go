@@ -76,6 +76,9 @@ type PreparedSource struct {
 	ConfigJSON     string
 	MasterNodeIP   string
 	SkopeoAuthFile string
+	// SkopeoInsecure disables source-registry TLS verification for a registry
+	// explicitly listed in common.native_insecure_registries.
+	SkopeoInsecure bool
 	// CompressedSizeBytes is the sum of compressed layer blob sizes reported by
 	// skopeo inspect on the dockerless path, or by the image manifest on the
 	// native path. It lets disk-space pre-checks estimate image size without

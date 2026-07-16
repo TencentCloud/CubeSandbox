@@ -343,6 +343,11 @@ common:
 ```
 
 未列在此白名单中的 registry 仍要求使用 HTTPS。
+无守护进程的 skopeo 回退路径也会使用同一白名单。
+
+> [!WARNING]
+> HTTP 不会加密 registry 流量。若为白名单中的 registry 提供镜像凭据，凭据将以明文
+> 传输。请仅在可信私有网络中使用此选项，并尽可能优先使用 HTTPS。
 
 ### Docker 镜像加速（可选）
 

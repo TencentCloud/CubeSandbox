@@ -274,6 +274,43 @@ func TestValidateAllowedHostMountPrefixes(t *testing.T) {
 	}
 }
 
+func TestValidateNativeInsecureRegistries(t *testing.T) {
+	tests := []struct {
+		name       string
+		registries []string
+		wantErr    bool
+	}{
+		{"empty list", nil, false},
+		{"hostname without port", []string{"registry.internal"}, false},
+		{"hostname with port", []string{"registry.internal:5000"}, false},
+		{"localhost with port", []string{"localhost:5000"}, false},
+		{"bracketed IPv6 with port", []string{"[2001:db8::1]:5000"}, false},
+		{"reject empty entry", []string{""}, true},
+		{"reject surrounding whitespace", []string{" registry.internal:5000 "}, true},
+		{"reject scheme", []string{"http://registry.internal:5000"}, true},
+		{"reject repository path", []string{"registry.internal:5000/team"}, true},
+		{"reject credentials", []string{"user@registry.internal:5000"}, true},
+		{"reject query", []string{"registry.internal:5000?insecure=true"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Config{
+				Common: &CommonConf{
+					NativeInsecureRegistries: tt.registries,
+				},
+				Log: &log.Conf{},
+			}
+			err := validate(c)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestGetAllowedHostMountPrefixes_Default(t *testing.T) {
 	old := cfg
 	cfg = nil
@@ -337,4 +374,14 @@ func TestGetNativeInsecureRegistriesReturnsDefensiveCopy(t *testing.T) {
 
 	got[0] = "mutated.example"
 	assert.Equal(t, "registry.internal:5000", cfg.Common.NativeInsecureRegistries[0])
+}
+
+func TestGetNativeInsecureRegistriesReturnsNonNilEmptySlice(t *testing.T) {
+	old := cfg
+	cfg = nil
+	defer func() { cfg = old }()
+
+	got := GetNativeInsecureRegistries()
+	assert.NotNil(t, got)
+	assert.Empty(t, got)
 }

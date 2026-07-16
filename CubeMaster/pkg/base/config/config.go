@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -94,8 +95,8 @@ type CommonConf struct {
 	DisableCreateImageCluster       map[string]bool   `yaml:"disable_create_image_cluster"`
 	EnableAGSColdStartSwitch        bool              `yaml:"enable_ags_cold_start_switch"`
 	// NativeInsecureRegistries is an explicit allowlist of registry hosts the
-	// native image exporter may contact over plain HTTP. Entries must exactly
-	// match the registry host, including non-default ports.
+	// native and dockerless image exporters may contact over plain HTTP.
+	// Entries must exactly match the registry host, including non-default ports.
 	NativeInsecureRegistries []string `yaml:"native_insecure_registries"`
 }
 
@@ -1149,11 +1150,30 @@ func validate(cfg *Config) error {
 			}
 		}
 	}
+	if cfg.Common != nil {
+		for _, registry := range cfg.Common.NativeInsecureRegistries {
+			if err := validateNativeInsecureRegistry(registry); err != nil {
+				return err
+			}
+		}
+	}
 	for _, p := range cfg.ExtraConf.AllowedHostMountPrefixes {
 		cleaned := filepath.Clean(p)
 		if cleaned == "/" || cleaned == "." || !filepath.IsAbs(p) {
 			return fmt.Errorf("allowed_host_mount_prefixes entry %q must be an absolute path and must not be root or empty", p)
 		}
+	}
+	return nil
+}
+
+func validateNativeInsecureRegistry(registry string) error {
+	if registry == "" || registry != strings.TrimSpace(registry) {
+		return fmt.Errorf("native_insecure_registries entry %q must be a registry host[:port] without surrounding whitespace", registry)
+	}
+	parsed, err := url.Parse("//" + registry)
+	if err != nil || parsed.Host != registry || parsed.Hostname() == "" || parsed.User != nil ||
+		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("native_insecure_registries entry %q must be a registry host[:port] without a scheme or path", registry)
 	}
 	return nil
 }
@@ -1168,7 +1188,7 @@ func GetConfig() *Config {
 func GetNativeInsecureRegistries() []string {
 	c := cfg
 	if c == nil || c.Common == nil || len(c.Common.NativeInsecureRegistries) == 0 {
-		return nil
+		return []string{}
 	}
 	return append([]string{}, c.Common.NativeInsecureRegistries...)
 }

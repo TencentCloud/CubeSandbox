@@ -55,6 +55,11 @@ func TestNativeInsecureRegistryEnabled(t *testing.T) {
 			want:     false,
 		},
 		{
+			name:   "empty reference never matches",
+			config: []string{""},
+			want:   false,
+		},
+		{
 			name:     "exact host matches",
 			config:   []string{"registry.example.com:5000"},
 			imageRef: "docker://registry.example.com:5000/team/app:latest",
@@ -82,6 +87,12 @@ func TestNativeInsecureRegistryEnabled(t *testing.T) {
 			name:     "docker hub can be allowlisted explicitly",
 			config:   []string{"docker.io"},
 			imageRef: "library/nginx:latest",
+			want:     true,
+		},
+		{
+			name:     "docker hub long-form alias is normalized",
+			config:   []string{"docker.io"},
+			imageRef: "index.docker.io/library/nginx:latest",
 			want:     true,
 		},
 	}
