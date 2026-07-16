@@ -54,6 +54,7 @@ end
         - body:   response body string (JSON)
 --]]
 function _M.respond_with(self, status, body)
+    ngx.status = status
     ngx.header["Content-Type"] = "application/json"
     ngx.say(body)
     ngx.exit(status)
