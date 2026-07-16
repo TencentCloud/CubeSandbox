@@ -45,9 +45,16 @@ docs/dev-log.md
 docs/image-1.png
 docs/image.png
 
+# Keep the SDK compatibility E2E suite tracked while ignoring other test
+# directories and its generated local pytest cache.
 __pycache__
 /design
 /plan
-/tests
+/tests/*
+!/tests/e2e/
+/tests/e2e/*
+!/tests/e2e/sdk_compat/
+!/tests/e2e/sdk_compat/**
+/tests/e2e/sdk_compat/.pytest_cache/
 
 web/tsconfig.tsbuildinfo

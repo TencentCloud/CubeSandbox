@@ -170,6 +170,14 @@ func mergeCreateFromImageCubeNetworkConfigFlags(c *cli.Context, existing *types.
 	return mergeCubeNetworkConfigValues(existing, hasAllowInternetAccess, allowInternetAccess, allowOut, denyOut), nil
 }
 
+func applyCreateFromImageIvshmemFlag(c *cli.Context, req *types.CreateTemplateFromImageReq) {
+	if !c.IsSet("enable-ivshmem") {
+		return
+	}
+	enableIvshmem := c.Bool("enable-ivshmem")
+	req.EnableIvshmem = &enableIvshmem
+}
+
 func parseCreateFromImageExtraNetworkFlags(c *cli.Context) (*createFromImageExtraNetworkFlags, error) {
 	extraArgs := make([]string, 0, c.NArg())
 	for i := 0; i < c.NArg(); i++ {
@@ -778,6 +786,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringSliceFlag{Name: "deny-out-cidr", Usage: "append a denied egress CIDR to cube_network_config; repeat the flag to specify multiple CIDRs"},
 		cli.StringFlag{Name: "registry-username", Usage: "registry username"},
 		cli.StringFlag{Name: "registry-password", Usage: "registry password"},
+		cli.BoolFlag{Name: "enable-ivshmem", Usage: "boot the template build sandbox with ivshmem enabled"},
 
 		cli.StringSliceFlag{Name: "cmd", Usage: "override container ENTRYPOINT (command); repeat for multiple elements, e.g. --cmd /bin/sh --cmd -c"},
 		cli.StringSliceFlag{Name: "arg", Usage: "override container CMD (args); repeat for multiple elements"},
@@ -831,6 +840,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		// SDKs) can still rely on `nil = server-side default`.
 		withCubeCA := c.BoolT("with-cube-ca")
 		req.WithCubeCA = &withCubeCA
+		applyCreateFromImageIvshmemFlag(c, req)
 		req.CubeNetworkConfig, err = mergeCreateFromImageCubeNetworkConfigFlags(c, req.CubeNetworkConfig)
 		if err != nil {
 			return err

@@ -135,7 +135,7 @@ static __always_inline bool dns_response_header_is_supported(const struct dns_wi
 
 /* Read a DNS request header and reject packets that are already responses. */
 static __always_inline bool dns_read_query_header(struct __sk_buff *skb, __u32 dns_off,
-						 struct dns_wire_header *hdr, __u16 *flags)
+						  struct dns_wire_header *hdr, __u16 *flags)
 {
 	if (bpf_skb_load_bytes(skb, dns_off, hdr, sizeof(*hdr)))
 		return false;
@@ -146,7 +146,7 @@ static __always_inline bool dns_read_query_header(struct __sk_buff *skb, __u32 d
 
 /* Read a DNS response header and reject packets that are not responses. */
 static __always_inline bool dns_read_response_header(struct __sk_buff *skb, __u32 dns_off,
-						    struct dns_wire_header *hdr, __u16 *flags)
+						     struct dns_wire_header *hdr, __u16 *flags)
 {
 	if (bpf_skb_load_bytes(skb, dns_off, hdr, sizeof(*hdr)))
 		return false;
@@ -202,8 +202,8 @@ static __always_inline void dns_hash_qname_byte(__u64 *hash, __u8 byte)
 
 /* Hash one plain DNS QNAME exactly as it appears on the wire. */
 static __noinline bool dns_hash_qname(struct __sk_buff *skb, __u32 *cursor,
-					      struct dns_question_footer *question,
-					      __u64 *qname_hash)
+				      struct dns_question_footer *question,
+				      __u64 *qname_hash)
 {
 	__u32 label_remaining = 0;
 	__u64 hash = DNS_QNAME_HASH_OFFSET;
@@ -246,14 +246,9 @@ read_footer:
 	return true;
 }
 
-static __always_inline bool dns_question_footer_is_in(const struct dns_question_footer *question)
-{
-	return question->qclass == bpf_htons(DNS_CLASS_IN);
-}
-
 static __always_inline bool dns_question_footer_is_ipv4_a(const struct dns_question_footer *question)
 {
-	return question->qtype == bpf_htons(DNS_TYPE_A) && dns_question_footer_is_in(question);
+	return question->qtype == bpf_htons(DNS_TYPE_A) && question->qclass == bpf_htons(DNS_CLASS_IN);
 }
 
 #endif /* __DNS_PARSER_H */

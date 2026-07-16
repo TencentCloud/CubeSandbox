@@ -17,8 +17,8 @@ use crate::sandbox::pmem::Pmem;
 
 use cube_hypervisor::config::{RateLimiterConfig, TokenBucketConfig};
 use cube_hypervisor::vm_config::{
-    ConsoleConfig, ConsoleOutputMode, CpuTopology, DiskConfig, FsConfig, MacAddr, NetConfig,
-    PayloadConfig, PmemConfig, RngConfig, VmConfig as VC, VsockConfig,
+    ConsoleConfig, ConsoleOutputMode, CpuTopology, DiskConfig, FsConfig, IvshmemConfig, MacAddr,
+    NetConfig, PayloadConfig, PmemConfig, RngConfig, VmConfig as VC, VsockConfig,
 };
 use cube_hypervisor::vmm_config::VmmConfig;
 
@@ -52,6 +52,7 @@ impl HypConfig {
 
 #[derive(Clone, Debug)]
 pub struct VmConfig {
+    pub ivshmem: Option<IvshmemConfig>,
     pub vcpus: u32,
     pub memory_size: u64,
     pub dirty_log: bool,
@@ -106,6 +107,7 @@ impl Default for VmConfig {
             ..Default::default()
         };
         VmConfig {
+            ivshmem: None,
             vcpus: 0,
             memory_size: 0,
             dirty_log: false,
@@ -169,7 +171,18 @@ impl VmConfig {
         if let Some(vs) = self.vsock.clone() {
             vc.vsock = Some(vs)
         }
+        if let Some(ivshmem) = self.ivshmem.clone() {
+            vc.ivshmem = Some(ivshmem)
+        }
         vc
+    }
+
+    /// Enable ivshmem shared memory channel with a caller-supplied backend
+    /// file path. The caller is responsible for creating and sizing the
+    /// file before calling this. This keeps the shim agnostic of the
+    /// backend naming convention.
+    pub fn enable_ivshmem(&mut self, path: PathBuf, size: usize) {
+        self.ivshmem = Some(IvshmemConfig { path, size });
     }
 
     pub fn add_cmdline(&mut self, cmd: String) -> &mut Self {

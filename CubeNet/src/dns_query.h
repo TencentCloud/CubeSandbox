@@ -33,7 +33,7 @@
 
 /* Parse one bounded chunk of the DNS QNAME into a lower-case dotted name. */
 static __always_inline void dns_parse_query_name_chunk(struct __sk_buff *skb,
-					       struct dns_query_state *state)
+						       struct dns_query_state *state)
 {
 	int i;
 
@@ -126,7 +126,7 @@ static __always_inline bool dns_reverse_query_name_chunk(struct dns_query_state 
 
 /* Match the reversed DNS question against the per-sandbox DNS allow trie. */
 static __noinline struct dns_allow_value *dns_allow_match_value(void *inner_map,
-							 const struct dns_allow_key *question)
+								const struct dns_allow_key *question)
 {
 	struct dns_allow_value *value;
 	__u32 name_len = question->prefixlen >> 3;
@@ -245,23 +245,20 @@ static __always_inline int dns_handle_query(struct __sk_buff *skb, __u32 dns_off
 
 	inner_map = bpf_map_lookup_elem(&dns_allow, &ifindex);
 	if (!inner_map)
-		goto pass;
+		return CUBE_DNS_PASS;
 
 	if (!dns_query_should_filter_ipv4_a(skb, dns_off, &hdr, flags))
-		goto pass;
+		return CUBE_DNS_PASS;
 
 	state = bpf_map_lookup_elem(&dns_query_state, &key);
 	if (!state)
-		goto pass;
+		return CUBE_DNS_PASS;
 
 	dns_init_query_state(state, dns_off, ifindex, flags);
 
 	/* The tail-call programs parse, reverse, match, and then finish NAT. */
 	bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_PARSE);
 	return TC_ACT_SHOT;
-
-pass:
-	return CUBE_DNS_PASS;
 }
 
 #endif /* __DNS_QUERY_H */

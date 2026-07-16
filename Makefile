@@ -108,6 +108,11 @@ help:
 	@printf "  cubeapi       Build CubeAPI (cube-api) in Docker\n"
 	@printf "  cube-api      Alias of cubeapi\n"
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
+	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
+	@printf "  cubelet-test  Run Cubelet unit tests in Docker\n"
+	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
+	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
+	@printf "  network-agent-test Run network-agent unit tests in Docker\n"
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
 	@printf "  all           Build cubemaster, cubelet, network-agent and cubevsmapdump in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
@@ -259,6 +264,26 @@ cubeapi: builder-image
 
 .PHONY: cube-api
 cube-api: cubeapi
+
+.PHONY: cubemaster-test
+cubemaster-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make test'
+
+.PHONY: cubelet-test
+cubelet-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make test'
+
+.PHONY: network-agent-test
+network-agent-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/network-agent && go mod download && make test'
+
+.PHONY: cube-api-test
+cube-api-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeAPI && make test'
+
+.PHONY: shim-test
+shim-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeShim && make test'
 
 .PHONY: shim
 shim: builder-image

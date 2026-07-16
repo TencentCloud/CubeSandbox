@@ -565,6 +565,11 @@ type CreateTemplateFromImageReq struct {
 	//   false → skip the bake entirely
 	// See design/cube-egress-ca-bake.md.
 	WithCubeCA *bool `json:"with_cube_ca,omitempty"`
+
+	// EnableIvshmem controls whether the template build sandbox should boot
+	// with ivshmem enabled so the captured snapshot already contains the
+	// device topology.
+	EnableIvshmem *bool `json:"enable_ivshmem,omitempty"`
 }
 
 type RedoTemplateFromImageReq struct {

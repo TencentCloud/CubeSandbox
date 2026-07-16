@@ -135,6 +135,7 @@ impl TemplateService {
             distribution_scope: non_empty_vec(body.nodes),
             container_overrides,
             cube_network_config,
+            enable_ivshmem: body.enable_ivshmem,
             with_cube_ca: body.with_cube_ca,
         };
 
@@ -533,6 +534,7 @@ mod tests {
             dns: Some(vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()]),
             allow_out: Some(vec!["172.67.0.0/16".to_string()]),
             deny_out: Some(vec!["10.0.0.0/8".to_string()]),
+            enable_ivshmem: Some(true),
             with_cube_ca: Some(false),
         }
     }
