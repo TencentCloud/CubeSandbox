@@ -333,9 +333,16 @@ sudo ./down.sh
 
 ### 原生镜像导出
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `CUBEMASTER_NATIVE_INSECURE_REGISTRIES` | 空 | 原生镜像导出时允许使用 HTTP 的 registry host，使用逗号分隔，例如 `registry.internal:5000`。条目必须与镜像 registry host 完全匹配，非默认端口也必须写明；未列出的 registry 仍要求 HTTPS。 |
+原生镜像导出默认要求 HTTPS。若必须允许某个 registry 通过 HTTP 提供镜像，请在
+CubeMaster 配置文件中写入其精确 host（包含非默认端口）：
+
+```yaml
+common:
+  native_insecure_registries:
+    - registry.internal:5000
+```
+
+未列在此白名单中的 registry 仍要求使用 HTTPS。
 
 ### Docker 镜像加速（可选）
 

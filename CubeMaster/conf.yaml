@@ -8,6 +8,10 @@ common:
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
+  # Explicit registry host allowlist for native image exports that must use
+  # plain HTTP. Entries must match host[:port] exactly; HTTPS remains required
+  # for every registry omitted here.
+  native_insecure_registries: []
 
 log:
   module: "cubemaster"

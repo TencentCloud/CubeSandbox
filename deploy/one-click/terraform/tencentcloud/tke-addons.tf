@@ -256,6 +256,7 @@ resource "kubernetes_secret" "cubemaster_conf" {
         collect_metric_interval            = "1s"
         default_headless_service_nodes_num = local.cubemaster_replicas
         enable_check_com_net_id_param      = false
+        native_insecure_registries         = []
       }
       log = {
         module    = "cubemaster"

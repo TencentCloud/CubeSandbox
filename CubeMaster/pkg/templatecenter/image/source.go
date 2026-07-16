@@ -18,6 +18,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 )
 
 func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
@@ -79,7 +80,7 @@ func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 
 	rawRef := strings.TrimPrefix(spec.ImageRef, "docker://")
 	parseOptions := []name.Option{}
-	if nativeInsecureRegistryEnabled(spec.ImageRef) {
+	if nativeInsecureRegistryEnabled(spec.ImageRef, config.GetNativeInsecureRegistries()) {
 		parseOptions = append(parseOptions, name.Insecure)
 	}
 	ref, err := name.ParseReference(rawRef, parseOptions...)

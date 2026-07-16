@@ -333,9 +333,17 @@ You can also point to prebuilt binaries to skip compilation:
 
 ### Native Image Export
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CUBEMASTER_NATIVE_INSECURE_REGISTRIES` | empty | Comma-separated registry hosts allowed to use HTTP during native image export, for example `registry.internal:5000`. Entries must exactly match the image registry host, including a non-default port. All other registries continue to require HTTPS. |
+Native image export requires HTTPS by default. To explicitly allow a registry
+served over HTTP, add its exact host (including any non-default port) to the
+CubeMaster configuration file:
+
+```yaml
+common:
+  native_insecure_registries:
+    - registry.internal:5000
+```
+
+All registries omitted from this list continue to require HTTPS.
 
 ### Docker Mirror (Optional)
 

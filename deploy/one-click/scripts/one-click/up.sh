@@ -48,9 +48,6 @@ elif mkdir -p "${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR}" >/dev/null 2>&1; then
 else
   log "cubemaster artifact store ${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR} unavailable, fallback handled by cubemaster"
 fi
-if [[ -n "${CUBEMASTER_NATIVE_INSECURE_REGISTRIES:-}" ]]; then
-  CUBEMASTER_OPTIONAL_EXPORTS+="export CUBEMASTER_NATIVE_INSECURE_REGISTRIES=\"${CUBEMASTER_NATIVE_INSECURE_REGISTRIES}\"; "
-fi
 
 if [[ -n "${CUBE_MASTER_ADDR:-}" ]]; then
   CUBE_API_OPTIONAL_EXPORTS+="export CUBE_MASTER_ADDR=\"${CUBE_MASTER_ADDR}\"; "

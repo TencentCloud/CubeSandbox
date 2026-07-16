@@ -322,3 +322,19 @@ func TestGetAllowedHostMountPrefixes_DefaultDefensiveCopy(t *testing.T) {
 	got2 := GetAllowedHostMountPrefixes()
 	assert.Equal(t, "/data/shared/", got2[0])
 }
+
+func TestGetNativeInsecureRegistriesReturnsDefensiveCopy(t *testing.T) {
+	old := cfg
+	cfg = &Config{
+		Common: &CommonConf{
+			NativeInsecureRegistries: []string{"registry.internal:5000"},
+		},
+	}
+	defer func() { cfg = old }()
+
+	got := GetNativeInsecureRegistries()
+	assert.Equal(t, []string{"registry.internal:5000"}, got)
+
+	got[0] = "mutated.example"
+	assert.Equal(t, "registry.internal:5000", cfg.Common.NativeInsecureRegistries[0])
+}

@@ -29,7 +29,6 @@ const (
 	defaultNativeExportConcurrency = 6
 	maxNativeExportConcurrency     = 32
 	nativeExportJobsEnv            = "CUBEMASTER_NATIVE_ROOTFS_EXPORT_JOBS"
-	nativeInsecureRegistriesEnv    = "CUBEMASTER_NATIVE_INSECURE_REGISTRIES"
 	// nativeCopyBufferSize is the buffer size for I/O operations. 1MB is chosen as a
 	// good balance between memory usage and read/write system call overhead.
 	nativeCopyBufferSize = 1024 * 1024
@@ -50,10 +49,10 @@ func nativeRootfsExportEnabled() bool {
 
 // nativeInsecureRegistryEnabled reports whether the native image exporter may
 // use HTTP for the registry that serves imageRef. Registry hosts must be listed
-// exactly, including a non-default port, in CUBEMASTER_NATIVE_INSECURE_REGISTRIES.
-func nativeInsecureRegistryEnabled(imageRef string) bool {
+// exactly, including a non-default port, in the CubeMaster configuration.
+func nativeInsecureRegistryEnabled(imageRef string, configuredHosts []string) bool {
 	registryHost := registryHostFromImageRef(imageRef)
-	for _, configuredHost := range strings.Split(os.Getenv(nativeInsecureRegistriesEnv), ",") {
+	for _, configuredHost := range configuredHosts {
 		if strings.EqualFold(strings.TrimSpace(configuredHost), registryHost) {
 			return true
 		}

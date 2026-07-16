@@ -93,6 +93,10 @@ type CommonConf struct {
 	MaxNICQueue                     int               `yaml:"max_nic_queue"`
 	DisableCreateImageCluster       map[string]bool   `yaml:"disable_create_image_cluster"`
 	EnableAGSColdStartSwitch        bool              `yaml:"enable_ags_cold_start_switch"`
+	// NativeInsecureRegistries is an explicit allowlist of registry hosts the
+	// native image exporter may contact over plain HTTP. Entries must exactly
+	// match the registry host, including non-default ports.
+	NativeInsecureRegistries []string `yaml:"native_insecure_registries"`
 }
 
 type AuthConf struct {
@@ -1157,6 +1161,16 @@ func validate(cfg *Config) error {
 //go:noinline
 func GetConfig() *Config {
 	return cfg
+}
+
+// GetNativeInsecureRegistries returns a copy of the configured HTTP registry
+// allowlist so callers cannot mutate the live CubeMaster configuration.
+func GetNativeInsecureRegistries() []string {
+	c := cfg
+	if c == nil || c.Common == nil || len(c.Common.NativeInsecureRegistries) == 0 {
+		return nil
+	}
+	return append([]string{}, c.Common.NativeInsecureRegistries...)
 }
 
 var defaultAllowedHostMountPrefixes = []string{"/data/shared/"}
