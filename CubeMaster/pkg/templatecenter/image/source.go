@@ -188,15 +188,18 @@ func prepareDockerlessSource(ctx context.Context, spec SourceSpec) (*PreparedSou
 		warnIfInsecureRegistryCredentials(ctx, spec)
 	}
 	inspectArgs := []string{"inspect"}
+	configArgs := []string{"inspect"}
 	if insecure {
 		inspectArgs = append(inspectArgs, "--tls-verify=false")
+		configArgs = append(configArgs, "--tls-verify=false")
 	}
-	inspectOutput, err := skopeoOutput(ctx, authFile, append(inspectArgs, sourceRef)...)
+	inspectArgs = append(inspectArgs, sourceRef)
+	inspectOutput, err := skopeoOutput(ctx, authFile, inspectArgs...)
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("skopeo inspect %s failed: %w", spec.ImageRef, err)
 	}
-	configArgs := append(append([]string{}, inspectArgs...), "--config", sourceRef)
+	configArgs = append(configArgs, "--config", sourceRef)
 	configOutput, err := skopeoOutput(ctx, authFile, configArgs...)
 	if err != nil {
 		cleanup()

@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1174,6 +1176,48 @@ func validateNativeInsecureRegistry(registry string) error {
 	if err != nil || parsed.Host != registry || parsed.Hostname() == "" || parsed.User != nil ||
 		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return fmt.Errorf("native_insecure_registries entry %q must be a registry host[:port] without a scheme or path", registry)
+	}
+	if err := validateNativeInsecureRegistryPort(registry); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateNativeInsecureRegistryPort(registry string) error {
+	var port string
+	switch {
+	case strings.HasPrefix(registry, "["):
+		closeBracket := strings.IndexByte(registry, ']')
+		if closeBracket < 0 {
+			return fmt.Errorf("native_insecure_registries entry %q must use a valid bracketed IPv6 address", registry)
+		}
+		ip := net.ParseIP(registry[1:closeBracket])
+		if ip == nil || ip.To4() != nil {
+			return fmt.Errorf("native_insecure_registries entry %q must use a valid bracketed IPv6 address", registry)
+		}
+		if closeBracket == len(registry)-1 {
+			return nil
+		}
+		host, parsedPort, err := net.SplitHostPort(registry)
+		if err != nil || host == "" {
+			return fmt.Errorf("native_insecure_registries entry %q must use host[:port] syntax", registry)
+		}
+		port = parsedPort
+	case strings.Count(registry, ":") == 0:
+		return nil
+	case strings.Count(registry, ":") == 1:
+		host, parsedPort, err := net.SplitHostPort(registry)
+		if err != nil || host == "" {
+			return fmt.Errorf("native_insecure_registries entry %q must use host[:port] syntax", registry)
+		}
+		port = parsedPort
+	default:
+		return fmt.Errorf("native_insecure_registries entry %q must bracket IPv6 addresses", registry)
+	}
+
+	value, err := strconv.Atoi(port)
+	if err != nil || value < 1 || value > 65535 {
+		return fmt.Errorf("native_insecure_registries entry %q must use a numeric port from 1 through 65535", registry)
 	}
 	return nil
 }

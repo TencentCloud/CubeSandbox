@@ -283,7 +283,11 @@ func TestValidateNativeInsecureRegistries(t *testing.T) {
 		{"empty list", nil, false},
 		{"hostname without port", []string{"registry.internal"}, false},
 		{"hostname with port", []string{"registry.internal:5000"}, false},
+		{"maximum valid port", []string{"registry.internal:65535"}, false},
 		{"localhost with port", []string{"localhost:5000"}, false},
+		{"IPv4 without port", []string{"192.0.2.10"}, false},
+		{"IPv4 with port", []string{"192.0.2.10:5000"}, false},
+		{"bracketed IPv6 without port", []string{"[2001:db8::1]"}, false},
 		{"bracketed IPv6 with port", []string{"[2001:db8::1]:5000"}, false},
 		{"reject empty entry", []string{""}, true},
 		{"reject surrounding whitespace", []string{" registry.internal:5000 "}, true},
@@ -291,6 +295,14 @@ func TestValidateNativeInsecureRegistries(t *testing.T) {
 		{"reject repository path", []string{"registry.internal:5000/team"}, true},
 		{"reject credentials", []string{"user@registry.internal:5000"}, true},
 		{"reject query", []string{"registry.internal:5000?insecure=true"}, true},
+		{"reject zero port", []string{"registry.internal:0"}, true},
+		{"reject port above maximum", []string{"registry.internal:65536"}, true},
+		{"reject oversized port", []string{"registry.internal:999999"}, true},
+		{"reject text port", []string{"registry.internal:text"}, true},
+		{"reject trailing colon", []string{"registry.internal:"}, true},
+		{"reject unbracketed IPv6", []string{"2001:db8::1"}, true},
+		{"reject bracketed IPv4", []string{"[192.0.2.10]:5000"}, true},
+		{"reject invalid bracketed IPv6", []string{"[registry.internal]:5000"}, true},
 	}
 
 	for _, tt := range tests {
