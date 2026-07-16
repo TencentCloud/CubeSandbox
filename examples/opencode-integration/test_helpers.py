@@ -46,6 +46,14 @@ class HelperTests(unittest.TestCase):
                 "claude-test",
             )
 
+    def test_serve_command_uses_configured_port(self):
+        values = {
+            "OPENCODE_PROVIDER": "anthropic",
+            "OPENCODE_SERVER_PORT": "5123",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            self.assertIn("--port 5123", env_utils.opencode_serve_command())
+
     def test_non_numeric_exit_code_fails_cleanly(self):
         with self.assertRaisesRegex(SystemExit, "Cannot parse exit code"):
             _common.ensure_success(type("Result", (), {"exit_code": "error"})(), "test")

@@ -238,7 +238,7 @@ def opencode_run_command(
 
 
 def opencode_serve_command(
-    *, hostname: str = "127.0.0.1", port: int = 4096,
+    *, hostname: str = "127.0.0.1", port: int | None = None,
     provider: str | None = None, model: str | None = None,
 ) -> str:
     """Build an OpenCode serve invocation for SDK-based integration.
@@ -246,6 +246,8 @@ def opencode_serve_command(
     ``opencode serve --hostname 0.0.0.0 --port 4096`` starts an HTTP server
     that the ``@opencode-ai/sdk`` can connect to for programmatic control.
     """
+    if port is None:
+        port = int_env("OPENCODE_SERVER_PORT", 4096)
     args = ["opencode", "serve"]
     args.extend(["--hostname", hostname])
     args.extend(["--port", str(port)])
