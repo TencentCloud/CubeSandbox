@@ -288,6 +288,7 @@ resource "kubernetes_secret" "cubemaster_conf" {
         }
         common_timeout_insec       = 30
         create_image_timeout_insec = 300
+        app_snapshot_timeout_insec = 300
         create_concurrent_limit    = 100
         destroy_concurent_limit    = 100
         enable_exposed_port        = true
