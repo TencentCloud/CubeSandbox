@@ -40,6 +40,7 @@ PASSTHROUGH_ENV_NAMES = (
     "HTTPS_PROXY",
     "NO_PROXY",
 )
+PROXY_ENV_NAMES = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
 
 
 def load_local_dotenv() -> None:
@@ -66,6 +67,7 @@ def required(name: str) -> str:
 
 
 def optional(name: str, default: str = "") -> str:
+    """Return the configured non-empty value, otherwise ``default``."""
     return os.environ.get(name) or default
 
 
@@ -153,6 +155,8 @@ def build_opencode_env(include_secrets: bool = True) -> dict[str, str]:
         "OPENCODE_TELEMETRY": optional("OPENCODE_TELEMETRY", "0"),
     }
     for name in PASSTHROUGH_ENV_NAMES:
+        if not include_secrets and name in PROXY_ENV_NAMES:
+            continue
         value = os.environ.get(name)
         if value:
             env[name] = value

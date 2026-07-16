@@ -96,26 +96,34 @@ def _render_jsonl_line(line: str) -> None:
             _render_message(message)
 
 
+class _BufferedJSONWriter:
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+
+    def __call__(self, chunk: object) -> None:
+        text = getattr(chunk, "line", chunk)
+        text = text if isinstance(text, str) else str(text)
+        lines = text.split("\n")
+        if len(lines) == 1:
+            self.parts.append(text)
+            return
+        _render_jsonl_line("".join(self.parts) + lines[0])
+        for line in lines[1:-1]:
+            _render_jsonl_line(line)
+        self.parts = [lines[-1]]
+
+    def flush(self) -> None:
+        if self.parts:
+            _render_jsonl_line("".join(self.parts))
+            self.parts.clear()
+
+
 def jsonl_render_writer() -> Callable[[object], None]:
     # e2b delivers stdout as arbitrary chunks (often several JSONL events, or a
     # partial line, per callback), not one event per call. Buffer and split on
     # newlines so each event is rendered exactly once. CodeBuddy newline-terminates
     # every event, so nothing important is left dangling in the buffer.
-    buffer = {"parts": []}
-
-    def write(chunk: object) -> None:
-        text = getattr(chunk, "line", chunk)
-        text = text if isinstance(text, str) else str(text)
-        lines = text.split("\n")
-        if len(lines) == 1:
-            buffer["parts"].append(text)
-            return
-        _render_jsonl_line("".join(buffer["parts"]) + lines[0])
-        for line in lines[1:-1]:
-            _render_jsonl_line(line)
-        buffer["parts"] = [lines[-1]]
-
-    return write
+    return _BufferedJSONWriter()
 
 
 def run_command(
@@ -135,6 +143,7 @@ def run_command(
     kwargs = {key: value for key, value in kwargs.items() if value is not None}
     if envs:
         kwargs["envs"] = envs
+    stdout_writer = None
     if stream:
         # Default to a concise transcript (assistant text + tool calls + errors).
         # Set CODEBUDDY_STREAM_RAW=1 (or pass --raw) to dump CodeBuddy's raw
@@ -143,25 +152,31 @@ def run_command(
             raw = os.environ.get("CODEBUDDY_STREAM_RAW", "").strip().lower() in (
                 "1", "true", "yes",
             )
-        kwargs["on_stdout"] = stream_writer(sys.stdout) if raw else jsonl_render_writer()
+        stdout_writer = stream_writer(sys.stdout) if raw else jsonl_render_writer()
+        kwargs["on_stdout"] = stdout_writer
         kwargs["on_stderr"] = stream_writer(sys.stderr)
 
     try:
-        return sandbox.commands.run(command, **kwargs)
-    except TypeError as exc:
-        # Older SDKs name the parameter ``env`` instead of ``envs``. Only retry
-        # for that specific signature mismatch; re-raise any other TypeError so
-        # real bugs (e.g. a wrong-type command or timeout) are not masked.
-        if "envs" not in kwargs or "envs" not in str(exc):
-            raise
-        kwargs["env"] = kwargs.pop("envs")
-        return sandbox.commands.run(command, **kwargs)
+        try:
+            return sandbox.commands.run(command, **kwargs)
+        except TypeError as exc:
+            # Older SDKs name the parameter ``env`` instead of ``envs``. Only retry
+            # for that specific signature mismatch; re-raise any other TypeError so
+            # real bugs (e.g. a wrong-type command or timeout) are not masked.
+            if "envs" not in kwargs or "envs" not in str(exc):
+                raise
+            kwargs["env"] = kwargs.pop("envs")
+            return sandbox.commands.run(command, **kwargs)
+    finally:
+        flush = getattr(stdout_writer, "flush", None)
+        if flush:
+            flush()
 
 
 def ensure_success(result, action: str) -> None:
     exit_code = getattr(result, "exit_code", None)
     if exit_code is None:
-        return
+        raise SystemExit(f"Failed to {action}: command returned no exit code")
     try:
         code = int(exit_code)
     except (TypeError, ValueError) as exc:
