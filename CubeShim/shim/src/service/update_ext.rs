@@ -114,7 +114,20 @@ async fn do_rollback_snapshot(
         rollback_cfg.source_url
     );
 
-    let restore_config: RestoreConfig = rollback_cfg.into();
+    let mut restore_config: RestoreConfig = rollback_cfg.into();
+
+    // Rollback disks arrive as pre-built DiskConfigs and bypass the
+    // Disk -> wants_direct_io path, so re-derive O_DIRECT here.
+    if let Some(disks) = restore_config.disks.as_mut() {
+        for d in disks.iter_mut() {
+            d.direct = d
+                .path
+                .as_deref()
+                .and_then(|p| p.to_str())
+                .map(crate::common::utils::wants_direct_io)
+                .unwrap_or(false);
+        }
+    }
 
     // --- delegate to sb ---
     sb.rollback_vm(restore_config).await.map_err(|e| {

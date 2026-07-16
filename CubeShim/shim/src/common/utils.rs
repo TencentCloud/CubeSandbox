@@ -45,6 +45,17 @@ pub const DISK_DEVICE_ID_PRE: &str = "disk";
 const IVSHMEM_SHM_DIR: &str = "/dev/shm";
 const IVSHMEM_PREFIX: &str = "ivshmem-";
 
+/// Whether to open a sandbox volume disk with O_DIRECT: only block
+/// devices qualify (per-sandbox rbd volumes, where the host page cache
+/// merely duplicates the guest's own). File-backed volumes and
+/// un-stat-able paths stay buffered.
+pub fn wants_direct_io(path: &str) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    fs::metadata(path)
+        .map(|m| m.file_type().is_block_device())
+        .unwrap_or(false)
+}
+
 pub struct Utils {}
 pub struct AsyncUtils {}
 impl Utils {
@@ -309,6 +320,7 @@ impl Utils {
                 id: Some(format!("{}-{}", DISK_DEVICE_ID_PRE, disk_configs.len())),
                 path: Some(PathBuf::from(d.path.clone())),
                 rate_limiter_config: d.rate_limiter_config,
+                direct: wants_direct_io(&d.path),
                 ..Default::default()
             };
             disk_configs.push(disk_config);
@@ -576,6 +588,25 @@ mod tests {
             disk_configs[0].id,
             Some(format!("{}-{}", DISK_DEVICE_ID_PRE, disk_configs.len() - 1))
         )
+    }
+
+    #[test]
+    fn wants_direct_io_only_for_block_devices() {
+        let dir = std::env::temp_dir().join(format!("cube_direct_io_{}", process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        // A regular file (reflink-backend volume) keeps buffered I/O.
+        let file = dir.join("vol.raw");
+        fs::write(&file, b"x").unwrap();
+        assert!(!wants_direct_io(file.to_str().unwrap()));
+
+        // A directory is not a block device either.
+        assert!(!wants_direct_io(dir.to_str().unwrap()));
+
+        // A path that cannot be stat'd falls back to buffered.
+        assert!(!wants_direct_io(dir.join("missing").to_str().unwrap()));
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -290,6 +290,7 @@ impl VmConfig {
                 id: Some(format!("{}-{}", utils::DISK_DEVICE_ID_PRE, ds.len())),
                 path: Some(d.path.clone().into()),
                 rate_limiter_config: d.rate_limiter_config,
+                direct: utils::wants_direct_io(&d.path),
                 ..Default::default()
             };
             ds.push(disk_conf);
