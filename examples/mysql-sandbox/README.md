@@ -114,6 +114,38 @@ cubemastercli --version
 # Should output cubemastercli version
 ```
 
+## Before You Run
+
+> **IMPORTANT: Security warnings — read before using `multi_query.py`!**
+
+This sandbox executes SQL against your MySQL server. Please understand these safeguards:
+
+### Credential Security
+
+The helper `build_mysql_cmd()` in `env_utils.py` intentionally omits `-p<password>`.
+The `mysql` client reads `MYSQL_PWD` from the sandbox environment, so credentials
+never appear in `/proc/<pid>/cmdline` or `ps aux` inside the sandbox.
+
+**Do not** inject `DB_PASSWORD` into a shell command line. Pass it via
+`Sandbox.create(envs=...)` as `MYSQL_PWD` instead.
+
+### Destructive Cleanup in `multi_query.py`
+
+The cleanup step at the end of `multi_query.py` issues `DROP DATABASE`. To prevent
+accidental data loss, the DROP is gated by **two** independent signals:
+
+1. The environment variable `MYSQL_SANDBOX_ALLOW_DROP` must be set to a
+   truthy value (`1` / `true` / `yes` / `on`).
+2. The effective database name must start with the prefix `cube_demo_`
+   (the script prepends this prefix automatically, so `DB_NAME=smoke`
+   becomes `cube_demo_smoke`).
+
+If either signal is missing the DROP is skipped and the demo database is
+left intact.
+
+**Before running against a real server, always set `DB_NAME` to a throwaway value
+(e.g. `cube_demo_$(date +%s)`).**
+
 ## Quick Start
 
 ### Step 1: Build the Docker Image
@@ -209,10 +241,10 @@ DB_NAME="test_db"
 Or export environment variables directly:
 
 ```bash
-export E2B_API_KEY=e2b_000000
-export E2B_API_URL=http://127.0.0.1:3000
-export CUBE_TEMPLATE_ID=tpl-xxxxxxxxxxxxxxxx
-export SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
+E2B_API_KEY="e2b_000000"
+E2B_API_URL="http://127.0.0.1:3000"
+CUBE_TEMPLATE_ID="tpl-xxxxxxxxxxxxxxxx"
+SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
 ```
 
 ### Step 5: Install Dependencies
@@ -319,21 +351,14 @@ mysql-sandbox/
 ├── README_zh.md              # Chinese documentation
 ├── requirements.txt          # Python dependencies
 ├── .env.example              # Environment variables template
-├── screenshots/              # Verification screenshots (PNG)
 │
 ├── env_utils.py              # Shared environment utility functions
 │
 ├── check_mysql.py            # Verify MySQL client installation
 ├── run_query.py              # Execute SQL query example
 ├── network_isolated.py       # Network isolation demo
-├── snapshot_demo.py          # Snapshot and rollback demo
-├── multi_query.py            # Execute multiple queries
-│
-└── sql/                      # SQL scripts directory (optional)
-    ├── schema.sql            # Database schema
-    └── migrations/           # Migration scripts
-        ├── v1.sql
-        └── v2.sql
+├── snapshot_demo.py           # Snapshot and rollback demo
+└── multi_query.py            # Execute multiple queries
 ```
 
 ## Related Examples

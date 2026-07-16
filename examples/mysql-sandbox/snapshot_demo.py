@@ -10,12 +10,15 @@ This script demonstrates:
 Note: Snapshots are persistent and survive sandbox deletion.
 You can create a new sandbox from a snapshot using Sandbox.create(snapshot_id).
 """
-import sys
+
 import os
-sys.path.insert(0, str(__file__).rsplit('/', 1)[0])
+import sys
+
+sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
 from e2b_code_interpreter import Sandbox
-from env_utils import get_template_id, get_api_url, get_api_key, get_ssl_cert_file
+
+from env_utils import get_api_key, get_api_url, get_env, get_ssl_cert_file, get_template_id
 
 # Set environment variables for the sandbox
 os.environ["E2B_API_URL"] = get_api_url()
@@ -99,12 +102,14 @@ def demo_safe_database_operations():
     create_kwargs = {
         "template": template_id,
         "envs": {
-            "DB_HOST": os.environ.get("DB_HOST", "localhost"),
-            "DB_USER": os.environ.get("DB_USER", "root"),
-            "DB_PASSWORD": os.environ.get("DB_PASSWORD", ""),
-            "DB_NAME": os.environ.get("DB_NAME", ""),
+            "DB_HOST": get_env("DB_HOST", "localhost") or "localhost",
+            "DB_USER": get_env("DB_USER", "root") or "root",
+            "DB_NAME": get_env("DB_NAME", "") or "",
         },
     }
+    db_password = get_env("DB_PASSWORD", "") or ""
+    if db_password:
+        create_kwargs["envs"]["MYSQL_PWD"] = db_password
     if ssl_cert:
         create_kwargs["envs"]["SSL_CERT_FILE"] = ssl_cert
 
@@ -149,7 +154,7 @@ EOF
         print("    ✓ Migration script prepared")
 
     # Restore from snapshot (rollback)
-    print(f"\n[7] Rolling back to safe state...")
+    print("\n[7] Rolling back to safe state...")
     try:
         with Sandbox.create(pre_snapshot.snapshot_id) as restored:
             result = restored.commands.run("cat /srv/sql/schema.sql | head -5")
@@ -175,9 +180,9 @@ def demo_list_snapshots():
 
         for snap in snapshots:
             print(f"\n    Snapshot ID: {snap.snapshot_id}")
-            if hasattr(snap, 'name') and snap.name:
+            if hasattr(snap, "name") and snap.name:
                 print(f"    Name: {snap.name}")
-            if hasattr(snap, 'created_at') and snap.created_at:
+            if hasattr(snap, "created_at") and snap.created_at:
                 print(f"    Created: {snap.created_at}")
 
         if snapshots:
@@ -205,6 +210,7 @@ def main():
     except Exception as e:
         print(f"\nError: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

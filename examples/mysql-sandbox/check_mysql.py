@@ -11,14 +11,15 @@ If MySQL client is not pre-installed, this script will:
 - Attempt to install it using apt-get (Debian/Ubuntu) or yum (RHEL/CentOS)
 - Verify the installation
 """
+
 import os
 import sys
-import time
 
-sys.path.insert(0, str(__file__).rsplit('/', 1)[0])
+sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
 from e2b_code_interpreter import Sandbox
-from env_utils import get_template_id, get_api_url, get_api_key, get_ssl_cert_file
+
+from env_utils import get_api_key, get_api_url, get_ssl_cert_file, get_template_id
 
 # Set environment variables for the sandbox
 os.environ["E2B_API_URL"] = get_api_url()
@@ -42,13 +43,18 @@ def check_mysql_in_sandbox(sandbox: Sandbox, try_install: bool = True) -> bool:
         if result.exit_code == 0:
             print(f"    MySQL version: {result.stdout.strip()}")
             return True
-    except Exception:
-        pass  # Command not found, continue to install
+        # Non-zero exit code means mysql command exists but returned an error.
+        # Treat this as "not found" and offer to install.
+    except Exception as e:
+        # Real errors (auth failures, network timeouts, sandbox issues) are
+        # caught here so the user sees a meaningful message instead of silently
+        # falling through to the install attempt.
+        print(f"    Error checking MySQL client: {e}")
+        print("    Please verify your configuration and try again.")
+        return False
 
     if try_install:
         print("    MySQL client not found, attempting to install...")
-        
-        # Try apt-get first (Debian/Ubuntu)
         install_cmd = """
 if command -v apt-get &> /dev/null; then
     apt-get update -qq && apt-get install -y -qq mysql-client default-mysql-client 2>/dev/null
@@ -102,7 +108,9 @@ def main():
 
         # List available database tools
         print("\n[4] Checking available database tools...")
-        result = sandbox.commands.run("which mysql mysqldump mysql_config 2>/dev/null || echo 'MySQL tools not found'")
+        result = sandbox.commands.run(
+            "which mysql mysqldump mysql_config 2>/dev/null || echo 'MySQL tools not found'"
+        )
         print(f"    {result.stdout.strip()}")
 
         # Check system info
@@ -112,7 +120,9 @@ def main():
 
         # Verify sandbox isolation
         print("\n[6] Verifying sandbox environment...")
-        result = sandbox.commands.run("cat /etc/os-release 2>/dev/null | head -2 || cat /etc/alpine-release 2>/dev/null || echo 'OS info not available'")
+        result = sandbox.commands.run(
+            "cat /etc/os-release 2>/dev/null | head -2 || cat /etc/alpine-release 2>/dev/null || echo 'OS info not available'"
+        )
         print(f"    {result.stdout.strip()}")
 
         print("\n" + "=" * 60)

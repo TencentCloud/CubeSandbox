@@ -12,12 +12,15 @@ Network Policy Options:
 - network={"allow_out": ["10.0.0.0/8"]}: Only allow specific private networks
 - network={"deny_out": ["1.2.3.4/32"]}: Block specific IP/CIDR
 """
-import sys
+
 import os
-sys.path.insert(0, str(__file__).rsplit('/', 1)[0])
+import sys
+
+sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
 from e2b_code_interpreter import Sandbox
-from env_utils import get_template_id, get_api_url, get_api_key, get_ssl_cert_file
+
+from env_utils import get_api_key, get_api_url, get_env, get_ssl_cert_file, get_template_id
 
 # Set environment variables for the sandbox
 os.environ["E2B_API_URL"] = get_api_url()
@@ -53,7 +56,9 @@ def test_full_isolation():
 
         # Try to access internet - should fail
         print("\n[3] Testing internet access (should be blocked)...")
-        result = sandbox.commands.run("curl -s --connect-timeout 5 https://google.com 2>&1 || echo 'BLOCKED: Internet access denied'")
+        result = sandbox.commands.run(
+            "curl -s --connect-timeout 5 https://google.com 2>&1 || echo 'BLOCKED: Internet access denied'"
+        )
 
         if "BLOCKED" in result.stdout or result.exit_code != 0:
             print("    ✓ Internet access correctly blocked!")
@@ -90,6 +95,23 @@ def test_allowlist():
         print("    - 192.168.0.0/16 (Class B private)")
         print("    - 172.16.0.0/12 (Class C private)")
 
+        # Verify policy: public internet should be blocked
+        print("\n[4] Verifying network policy (public IPs should be blocked)...")
+        result = sandbox.commands.run(
+            "curl -s --connect-timeout 5 https://google.com 2>&1 || echo 'BLOCKED'"
+        )
+        if "BLOCKED" in result.stdout or result.exit_code != 0:
+            print("    ✓ Public internet correctly blocked!")
+        else:
+            print("    Note: Public internet access detected")
+
+        # Verify policy: private IPs in allowlist should work (DNS for private)
+        print("\n[5] Verifying internal network access...")
+        result = sandbox.commands.run(
+            "ip route show 2>/dev/null | head -3 || echo 'ip route not available'"
+        )
+        print(f"    {result.stdout.strip() if result.stdout else 'Network info not available'}")
+
         print("\n    ✓ Sandbox configured with CIDR allowlist!")
 
 
@@ -108,11 +130,14 @@ def test_database_access():
             "allow_out": ["10.0.0.0/8"],  # Only internal network
         },
         "envs": {
-            "DB_HOST": os.environ.get("DB_HOST", "localhost"),
-            "DB_USER": os.environ.get("DB_USER", "root"),
-            "DB_PASSWORD": os.environ.get("DB_PASSWORD", ""),
+            "DB_HOST": get_env("DB_HOST", "localhost") or "localhost",
+            "DB_USER": get_env("DB_USER", "root") or "root",
+            "DB_NAME": get_env("DB_NAME", "") or "",
         },
     }
+    db_password = get_env("DB_PASSWORD", "") or ""
+    if db_password:
+        create_kwargs["envs"]["MYSQL_PWD"] = db_password
     if ssl_cert:
         create_kwargs["envs"]["SSL_CERT_FILE"] = ssl_cert
 
@@ -122,6 +147,23 @@ def test_database_access():
         print("\n[3] Database connectivity configuration:")
         print("    Network policy: Only 10.0.0.0/8 allowed")
         print("    (Set DB_HOST, DB_USER, DB_PASSWORD to connect)")
+
+        # Verify policy: public internet should be blocked
+        print("\n[4] Verifying network policy (public IPs should be blocked)...")
+        result = sandbox.commands.run(
+            "curl -s --connect-timeout 5 https://google.com 2>&1 || echo 'BLOCKED'"
+        )
+        if "BLOCKED" in result.stdout or result.exit_code != 0:
+            print("    ✓ Public internet correctly blocked!")
+        else:
+            print("    Note: Public internet access detected")
+
+        # Verify policy: internal network should be accessible
+        print("\n[5] Checking internal network routes...")
+        result = sandbox.commands.run(
+            "ip route show 2>/dev/null | head -3 || echo 'Network routes not available'"
+        )
+        print(f"    {result.stdout.strip() if result.stdout else 'Network info not available'}")
 
         print("\n    ✓ Database sandbox configured!")
 
@@ -142,6 +184,7 @@ def main():
     except Exception as e:
         print(f"\nError: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

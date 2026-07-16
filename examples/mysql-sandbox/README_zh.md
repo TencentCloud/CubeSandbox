@@ -114,6 +114,33 @@ cubemastercli --version
 # 应输出 cubemastercli 版本
 ```
 
+## 使用前必读
+
+> **重要安全警告 — 使用 `multi_query.py` 前请务必阅读！**
+
+本沙箱会在你的 MySQL 服务器上执行 SQL。请先了解以下安全措施：
+
+### 凭据安全
+
+`env_utils.py` 中的 `build_mysql_cmd()` 故意省略 `-p<password>`。
+`mysql` 客户端从沙箱环境变量读取 `MYSQL_PWD`，因此密码不会出现在沙箱内的
+`/proc/<pid>/cmdline` 或 `ps aux` 中。
+
+**请勿**把 `DB_PASSWORD` 注入 shell 命令行，改为通过
+`Sandbox.create(envs=...)` 以 `MYSQL_PWD` 形式传入。
+
+### `multi_query.py` 的破坏性清理
+
+该脚本末尾会执行 `DROP DATABASE`。为防止误删数据，**DROP 需要两个独立的开关同时打开**：
+
+1. 环境变量 `MYSQL_SANDBOX_ALLOW_DROP` 必须为真值（`1` / `true` / `yes` / `on`）。
+2. 实际操作的库名必须以 `cube_demo_` 前缀开头（脚本会自动加上此前缀，
+   `DB_NAME=smoke` 会被改写为 `cube_demo_smoke`）。
+
+两者缺一则跳过 DROP，演示库不会被删除。
+
+**在生产服务器上运行前，请将 `DB_NAME` 设置为一次性值（如 `cube_demo_$(date +%s)`）。**
+
 ## 快速开始
 
 ### 第一步：构建 Docker 镜像
@@ -247,10 +274,10 @@ DB_NAME="test_db"
 或直接导出环境变量：
 
 ```bash
-export E2B_API_KEY=e2b_000000
-export E2B_API_URL=http://127.0.0.1:3000
-export CUBE_TEMPLATE_ID=tpl-xxxxxxxxxxxxxxxx
-export SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
+E2B_API_KEY="e2b_000000"
+E2B_API_URL="http://127.0.0.1:3000"
+CUBE_TEMPLATE_ID="tpl-xxxxxxxxxxxxxxxx"
+SSL_CERT_FILE="/root/.local/share/mkcert/rootCA.pem"
 ```
 
 ### 第五步：安装依赖
@@ -366,13 +393,7 @@ mysql-sandbox/
 ├── run_query.py              # 执行 SQL 查询示例
 ├── network_isolated.py       # 网络隔离演示
 ├── snapshot_demo.py          # 快照和回滚演示
-├── multi_query.py            # 执行多条查询
-│
-└── sql/                      # SQL 脚本目录（可选）
-    ├── schema.sql            # 数据库 schema
-    └── migrations/           # 迁移脚本
-        ├── v1.sql
-        └── v2.sql
+└── multi_query.py            # 执行多条查询
 ```
 
 ## 相关示例
