@@ -215,6 +215,9 @@ controlPlane:
   master:
     enabled: true
     replicas: 1
+    # CubeMaster -> Cubelet AppSnapshot RPC timeout. Increase for large
+    # templates or slow networks/disks.
+    appSnapshotTimeoutSeconds: 300
     # Default PVC is ReadWriteOnce: RollingUpdate with maxSurge would start a
     # second Pod before the old one releases the volume and hang on multi-attach.
     # Recreate deletes the old Pod first so the PVC can remount cleanly.

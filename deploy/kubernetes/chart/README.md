@@ -278,6 +278,11 @@ requirement).
 The `cube-master` image is built like CI from `CubeMaster/docker/Dockerfile` (repository-root context) and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.
 The chart stores the One-click `CubeMaster/conf.yaml` at `deploy/kubernetes/chart/files/cube-master/conf.yaml`, renders MySQL/Redis values into it, creates a release-scoped Secret named `<release>-master-config`, and mounts it to `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml` (same path as one-click); `CUBE_MASTER_CONFIG_PATH` points CubeMaster to that mounted file.
 
+During the `CREATING_TEMPLATE` phase, the CubeMaster-to-Cubelet `AppSnapshot`
+RPC defaults to a 300-second deadline. Increase
+`controlPlane.master.appSnapshotTimeoutSeconds` for large templates or slow
+networks/disks. Non-positive values fall back to 300 seconds.
+
 CubeMaster artifact storage maps to `/data/CubeMaster/storage`, matching one-click.
 The chart uses PVC-backed persistence by default so state can survive
 rescheduling across dedicated control nodes:
