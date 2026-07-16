@@ -642,6 +642,7 @@ func TestRegistryHostFromImageRef(t *testing.T) {
 		{"[2001:db8::1]:5000/team/app", "[2001:db8::1]:5000"},
 		{"localhost:5000/team/app", "localhost:5000"},
 		{"", ""},
+		{"/", ""},
 	}
 
 	for _, tt := range tests {

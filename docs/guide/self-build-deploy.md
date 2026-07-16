@@ -335,7 +335,7 @@ You can also point to prebuilt binaries to skip compilation:
 
 Native image export requires HTTPS by default. To explicitly allow a registry
 served over HTTP, add its exact host (including any non-default port) to the
-CubeMaster configuration file:
+CubeMaster configuration file. Host matching is case-insensitive:
 
 ```yaml
 common:

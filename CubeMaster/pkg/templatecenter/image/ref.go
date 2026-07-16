@@ -58,6 +58,9 @@ func registryHostFromImageRef(imageRef string) string {
 	}
 	parts := strings.Split(imageRef, "/")
 	first := parts[0]
+	if first == "" {
+		return ""
+	}
 	if strings.Contains(first, ".") || strings.Contains(first, ":") || first == "localhost" {
 		return normalizeRegistryHost(first)
 	}

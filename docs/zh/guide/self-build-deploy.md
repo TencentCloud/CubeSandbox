@@ -334,7 +334,7 @@ sudo ./down.sh
 ### 原生镜像导出
 
 原生镜像导出默认要求 HTTPS。若必须允许某个 registry 通过 HTTP 提供镜像，请在
-CubeMaster 配置文件中写入其精确 host（包含非默认端口）：
+CubeMaster 配置文件中写入其精确 host（包含非默认端口）。host 匹配不区分大小写：
 
 ```yaml
 common:
