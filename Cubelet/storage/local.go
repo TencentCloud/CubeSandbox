@@ -170,8 +170,8 @@ func (l *local) cleanupCowStateOnDisk() error {
 		return err
 	}
 	if rootDir == "" {
-		// External cubecow.toml owns its own layout; skip best-effort
-		// cleanup rather than reach into a directory we did not pick.
+		// Non-reflink backend (rbd): volumes live in the cluster, so
+		// there is no node-local reflink layout to clean.
 		return nil
 	}
 	volumesDir := filepath.Join(path.Clean(rootDir), "volumes")

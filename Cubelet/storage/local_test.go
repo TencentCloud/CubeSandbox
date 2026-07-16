@@ -1926,6 +1926,79 @@ func TestPrepareCowInlineConfigStampsBackendDefaults(t *testing.T) {
 	assert.Equal(t, "/var/lib/cubelet/cubecow-reflink", *cfg.Cow.Backend.Reflink.RootDir)
 }
 
+func TestPrepareCowInlineConfigRbdRequiresPool(t *testing.T) {
+	cfg := &Config{
+		Cow: CowInlineConfig{Backend: CowBackendConfig{Kind: cowBackendRbd}},
+	}
+	require.Error(t, cfg.PrepareCowInlineConfig())
+
+	cfg.Cow.Backend.Rbd.Pool = stringPtr("cubecow")
+	require.NoError(t, cfg.PrepareCowInlineConfig())
+	assert.Nil(t, cfg.Cow.Backend.Reflink.RootDir)
+}
+
+func TestPrepareCowInlineConfigRejectsUnknownKind(t *testing.T) {
+	cfg := &Config{
+		Cow: CowInlineConfig{Backend: CowBackendConfig{Kind: "dm-thin"}},
+	}
+	err := cfg.PrepareCowInlineConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dm-thin")
+}
+
+func TestBuildCowInitJSONEmitsRbdBackend(t *testing.T) {
+	cfg := &Config{
+		Cow: CowInlineConfig{
+			Backend: CowBackendConfig{
+				Kind: cowBackendRbd,
+				Rbd: CowRbdBackendConfig{
+					Pool:   stringPtr("cubecow"),
+					Client: stringPtr("cubelet"),
+				},
+			},
+		},
+	}
+	raw, err := cfg.BuildCowInitJSON()
+	require.NoError(t, err)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	backendCfg, ok := payload["backend"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, cowBackendRbd, backendCfg["kind"])
+	rbdCfg, ok := backendCfg["rbd"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "cubecow", rbdCfg["pool"])
+	assert.Equal(t, "cubelet", rbdCfg["client"])
+	_, hasNamespace := rbdCfg["namespace"]
+	assert.False(t, hasNamespace)
+	_, hasReflink := backendCfg["reflink"]
+	assert.False(t, hasReflink)
+}
+
+func TestCowStartupCommandsPerBackend(t *testing.T) {
+	reflinkCfg := &Config{}
+	assert.Contains(t, reflinkCfg.cowStartupCommands(), "losetup")
+
+	rbdCfg := &Config{
+		Cow: CowInlineConfig{Backend: CowBackendConfig{Kind: cowBackendRbd}},
+	}
+	cmds := rbdCfg.cowStartupCommands()
+	assert.Contains(t, cmds, "rbd")
+	assert.Contains(t, cmds, "ceph")
+	assert.NotContains(t, cmds, "losetup")
+}
+
+func TestCowReflinkRootDirEmptyForRbd(t *testing.T) {
+	cfg := &Config{
+		DataPath: "/var/lib/cubelet/io.cubelet.internal.v1.storage",
+		Cow:      CowInlineConfig{Backend: CowBackendConfig{Kind: cowBackendRbd}},
+	}
+	rootDir, err := cfg.cowReflinkRootDir()
+	require.NoError(t, err)
+	assert.Equal(t, "", rootDir)
+}
+
 func uint32Ptr(v uint32) *uint32 {
 	return &v
 }

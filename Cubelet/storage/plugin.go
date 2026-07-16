@@ -28,29 +28,43 @@ var cowLookPath = exec.LookPath
 var initCowEngine = initCowEngineWithConfig
 
 // StorageBackendCow is the canonical value of `storage_backend` for the
-// cubecow (reflink-only copy-on-write) backend. cubelet refuses to boot
-// when `storage_backend` is set to anything else under this build.
+// cubecow copy-on-write backend (reflink or rbd, selected via
+// `cow.backend.kind`). cubelet refuses to boot when `storage_backend`
+// is set to anything else under this build.
 const StorageBackendCow = "cubecow"
 
-// cowBackendReflink is the only backend `kind` cubecow now supports.
-// It is forwarded verbatim into the cubecow inline JSON payload and
-// matches the `BackendKind::Reflink` variant on the Rust side.
-const cowBackendReflink = "reflink"
+// Backend `kind` values forwarded verbatim into the cubecow inline
+// JSON payload; they match the `BackendKind` variants on the Rust side.
+const (
+	cowBackendReflink = "reflink"
+	cowBackendRbd     = "rbd"
+)
 
 // reflinkExt4InitCommands lists the external commands the **cubelet
 // upper layers** need when they initialise an ext4 default-medium
-// volume on top of a reflink-backed file. cubecow itself uses zero
-// external commands (mkdir/open/FICLONE/statvfs are pure libc) — but
-// `initExt4BlockDevice` in `cubecow_volume_manager.go` formats the
-// reflink file as ext4 and mounts it, which under the hood pulls in
-// `losetup` (auto-loop in mount(8)). Surface those commands here so a
-// missing binary is reported at startup rather than at the first
-// `CreateDefaultMediumVolume` call.
+// volume on top of a reflink-backed file. The reflink backend itself
+// uses zero external commands (mkdir/open/FICLONE/statvfs are pure
+// libc) — but `initExt4BlockDevice` in `cubecow_volume_manager.go`
+// formats the reflink file as ext4 and mounts it, which under the hood
+// pulls in `losetup` (auto-loop in mount(8)). Surface those commands
+// here so a missing binary is reported at startup rather than at the
+// first `CreateDefaultMediumVolume` call.
 var reflinkExt4InitCommands = []string{
 	"mkfs.ext4",
 	"mount",
 	"umount",
 	"losetup",
+}
+
+// rbdStartupCommands is the rbd-backend equivalent: volumes are real
+// block devices (no losetup), and cubecow itself shells out to `rbd`
+// (image lifecycle, map/unmap) and `ceph` (pool capacity metrics).
+var rbdStartupCommands = []string{
+	"mkfs.ext4",
+	"mount",
+	"umount",
+	"rbd",
+	"ceph",
 }
 
 type Config struct {
@@ -96,15 +110,15 @@ type Config struct {
 	CmdTimeout tomlext.Duration `toml:"cmd_timeout"`
 }
 
-// CowInlineConfig mirrors the cubecow `AppConfig` schema. cubecow is
-// reflink-only and cubelet always owns the cubecow init payload
-// (there is no external cubecow.toml fallback), so the only thing
-// users can tune through TOML is the `[log]` block. The reflink
+// CowInlineConfig mirrors the cubecow `AppConfig` schema. cubelet
+// always owns the cubecow init payload (there is no external
+// cubecow.toml fallback); users tune the `[log]` block, select the
+// backend kind, and provide rbd cluster settings. The reflink
 // backend's `root_dir` is derived from `data_path` and stamped onto
 // `Backend.Reflink` in PrepareCowInlineConfig.
 type CowInlineConfig struct {
 	Log     CowLogConfig     `toml:"log"`
-	Backend CowBackendConfig `toml:"-"`
+	Backend CowBackendConfig `toml:"backend"`
 }
 
 type CowLogConfig struct {
@@ -114,11 +128,13 @@ type CowLogConfig struct {
 	Rotation *string `toml:"rotation"`
 }
 
-// CowBackendConfig is filled in by cubelet at init time, never by the
-// user, and shipped to cubecow as the `[backend]` block.
+// CowBackendConfig is shipped to cubecow as the `[backend]` block.
+// `kind` selects the backend ("reflink" default, or "rbd"); reflink
+// settings stay cubelet-owned while rbd settings come from the user.
 type CowBackendConfig struct {
-	Kind    string `toml:"-"`
-	Reflink CowReflinkBackendConfig
+	Kind    string                  `toml:"kind"`
+	Reflink CowReflinkBackendConfig `toml:"-"`
+	Rbd     CowRbdBackendConfig     `toml:"rbd"`
 }
 
 // CowReflinkBackendConfig is the `[backend.reflink]` payload.
@@ -127,6 +143,19 @@ type CowBackendConfig struct {
 // cubelet's state.
 type CowReflinkBackendConfig struct {
 	RootDir *string `toml:"-"`
+}
+
+// CowRbdBackendConfig is the `[backend.rbd]` payload, forwarded to
+// cubecow. Only `pool` is required; unset fields fall back to the
+// cubecow-side defaults (standard Ceph client conventions).
+type CowRbdBackendConfig struct {
+	Pool               *string `toml:"pool"`
+	Namespace          *string `toml:"namespace"`
+	Conf               *string `toml:"conf"`
+	Client             *string `toml:"client"`
+	MapOptions         *string `toml:"map_options"`
+	CmdTimeoutSecs     *uint64 `toml:"cmd_timeout_secs"`
+	SlowCmdTimeoutSecs *uint64 `toml:"slow_cmd_timeout_secs"`
 }
 
 func (c *Config) BuildCowInitJSON() ([]byte, error) {
@@ -143,24 +172,40 @@ func (c *Config) BuildCowInitJSON() ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-// PrepareCowInlineConfig stamps cubelet-owned defaults (currently the
-// reflink backend kind and its `root_dir` derived from `data_path`)
-// onto the config so BuildCowInitJSON has everything cubecow needs.
+// PrepareCowInlineConfig stamps cubelet-owned defaults onto the config
+// so BuildCowInitJSON has everything cubecow needs: the reflink
+// backend's `root_dir` is derived from `data_path`; the rbd backend
+// requires a user-provided pool.
 func (c *Config) PrepareCowInlineConfig() error {
 	if c == nil {
 		return fmt.Errorf("nil storage config")
 	}
-	c.Cow.Backend.Kind = cowBackendReflink
-	autoDir := defaultReflinkAutoRootDir(c.DataPath)
-	c.Cow.Backend.Reflink.RootDir = &autoDir
+	switch c.Cow.Backend.Kind {
+	case "", cowBackendReflink:
+		c.Cow.Backend.Kind = cowBackendReflink
+		autoDir := defaultReflinkAutoRootDir(c.DataPath)
+		c.Cow.Backend.Reflink.RootDir = &autoDir
+	case cowBackendRbd:
+		if c.Cow.Backend.Rbd.Pool == nil || *c.Cow.Backend.Rbd.Pool == "" {
+			return fmt.Errorf("storage cow backend %q requires cow.backend.rbd.pool", cowBackendRbd)
+		}
+	default:
+		return fmt.Errorf("unsupported cow backend kind %q (expected %q or %q)",
+			c.Cow.Backend.Kind, cowBackendReflink, cowBackendRbd)
+	}
 	return nil
 }
 
 // cowReflinkRootDir returns the effective reflink root_dir for this
 // deployment so cleanup/diagnostics can act on the right directory.
+// Empty for non-reflink backends: there is no node-local layout to
+// clean.
 func (c *Config) cowReflinkRootDir() (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("nil storage config")
+	}
+	if c.Cow.Backend.Kind == cowBackendRbd {
+		return "", nil
 	}
 	return defaultReflinkAutoRootDir(c.DataPath), nil
 }
@@ -181,6 +226,9 @@ func defaultReflinkAutoRootDir(dataPath string) string {
 }
 
 func (c *Config) cowStartupCommands() []string {
+	if c != nil && c.Cow.Backend.Kind == cowBackendRbd {
+		return append([]string{}, rbdStartupCommands...)
+	}
 	return append([]string{}, reflinkExt4InitCommands...)
 }
 
@@ -235,6 +283,21 @@ func (c CowBackendConfig) toMap() map[string]any {
 	if sub := c.Reflink.toMap(); len(sub) > 0 {
 		m["reflink"] = sub
 	}
+	if sub := c.Rbd.toMap(); len(sub) > 0 {
+		m["rbd"] = sub
+	}
+	return m
+}
+
+func (c CowRbdBackendConfig) toMap() map[string]any {
+	m := map[string]any{}
+	setIfNotNil(m, "pool", c.Pool)
+	setIfNotNil(m, "namespace", c.Namespace)
+	setIfNotNil(m, "conf", c.Conf)
+	setIfNotNil(m, "client", c.Client)
+	setIfNotNil(m, "map_options", c.MapOptions)
+	setIfNotNil(m, "cmd_timeout_secs", c.CmdTimeoutSecs)
+	setIfNotNil(m, "slow_cmd_timeout_secs", c.SlowCmdTimeoutSecs)
 	return m
 }
 

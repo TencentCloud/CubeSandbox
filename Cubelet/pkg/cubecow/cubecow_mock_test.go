@@ -18,6 +18,7 @@ func TestMapError(t *testing.T) {
 		{name: "already_exists", rc: -2, wantCode: SemAlreadyExists, wantAction: ActFail},
 		{name: "resource_exhausted", rc: -3, wantCode: SemResourceExhausted, wantAction: ActFail},
 		{name: "invalid_argument", rc: -4, wantCode: SemInvalidArgument, wantAction: ActBug},
+		{name: "command_failed", rc: -5, wantCode: SemCommandFailed, wantAction: ActMarkStorageUnhealthy},
 		{name: "io_error", rc: -6, wantCode: SemIoError, wantAction: ActMarkStorageUnhealthy},
 		{name: "config_error", rc: -10, wantCode: SemConfigError, wantAction: ActOpsIntervention},
 		{name: "precondition_failed", rc: -11, wantCode: SemPreconditionFailed, wantAction: ActFail},

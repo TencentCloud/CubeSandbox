@@ -91,12 +91,13 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     network_agent_tap_fd_timeout = "2s"
 
   [plugins."io.cubelet.internal.v1.storage"]
-    # Default storage backend: cubecow (reflink-only copy-on-write).
+    # Default storage backend: cubecow (copy-on-write).
     storage_backend = "cubecow"
 
-    # Working directory for the cubelet storage plugin. cubecow reflink volumes land at
-    # <data_path>/cubecow-reflink, so the filesystem backing data_path must support
-    # FICLONE (e.g. xfs with `-m reflink=1` or btrfs).
+    # Working directory for the cubelet storage plugin. With the default reflink
+    # backend, cubecow volumes land at <data_path>/cubecow-reflink, so the
+    # filesystem backing data_path must support FICLONE (e.g. xfs with
+    # `-m reflink=1` or btrfs).
     data_path = "/data/cubelet/storage"
 
 
@@ -105,6 +106,20 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     format = "compact"
     file = "/data/log/cubecow/cubecow.log"
     rotation = "daily"
+
+    # cubecow backend selection. "reflink" (default) keeps volumes as FICLONE
+    # files on the local filesystem; "rbd" stores them as images in a Ceph RBD
+    # pool, reachable from every node. The pool must be dedicated to cubecow.
+    # [plugins."io.cubelet.internal.v1.storage".cow.backend]
+    # kind = "rbd"
+    # [plugins."io.cubelet.internal.v1.storage".cow.backend.rbd]
+    # pool = "cubecow"
+    # namespace = ""
+    # conf = "/etc/ceph/ceph.conf"
+    # client = "admin"
+    # map_options = ""
+    # cmd_timeout_secs = 60         # regular rbd/ceph calls
+    # slow_cmd_timeout_secs = 3600  # data-copying calls (flatten, rm)
 
     # Only needed when switching back to the legacy ext4 / raw / reflink-pool
     # backend: change storage_backend to the corresponding value (e.g. "ext4")

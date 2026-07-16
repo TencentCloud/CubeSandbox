@@ -20,8 +20,9 @@ const (
 )
 
 // cowMetricKeys mirrors the keys the cubecow Rust crate emits via
-// `cubecow_get_metrics()` for the reflink-only backend. The legacy
-// dm-thin pool_* keys are no longer surfaced.
+// `cubecow_get_metrics()`; both backends surface the same set (the rbd
+// backend reports Ceph pool capacity as total/used). The legacy dm-thin
+// pool_* keys are no longer surfaced.
 var cowMetricKeys = []string{
 	"total_bytes",
 	"used_bytes",

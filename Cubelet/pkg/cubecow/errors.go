@@ -14,6 +14,7 @@ const (
 	SemAlreadyExists      SemanticCode = -2
 	SemResourceExhausted  SemanticCode = -3
 	SemInvalidArgument    SemanticCode = -4
+	SemCommandFailed      SemanticCode = -5
 	SemIoError            SemanticCode = -6
 	SemConfigError        SemanticCode = -10
 	SemPreconditionFailed SemanticCode = -11
@@ -68,6 +69,8 @@ func (c SemanticCode) String() string {
 		return "resource_exhausted"
 	case SemInvalidArgument:
 		return "invalid_argument"
+	case SemCommandFailed:
+		return "command_failed"
 	case SemIoError:
 		return "io_error"
 	case SemConfigError:
@@ -116,6 +119,8 @@ func MapError(rc int32) (SemanticCode, Action) {
 		return SemResourceExhausted, ActFail
 	case int32(SemInvalidArgument):
 		return SemInvalidArgument, ActBug
+	case int32(SemCommandFailed):
+		return SemCommandFailed, ActMarkStorageUnhealthy
 	case int32(SemIoError):
 		return SemIoError, ActMarkStorageUnhealthy
 	case int32(SemConfigError):

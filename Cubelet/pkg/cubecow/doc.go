@@ -4,9 +4,12 @@
 
 // Package cubecow provides Go bindings for the cubecow C FFI library.
 //
-// cubecow is a reflink-only copy-on-write storage engine. Volumes are
-// regular files on a reflink-capable filesystem (XFS or Btrfs) and
-// snapshots are O(1) FICLONE-based clones of those files.
+// cubecow is a copy-on-write storage engine with two backends. With the
+// default reflink backend, volumes are regular files on a
+// reflink-capable filesystem (XFS or Btrfs) and snapshots are O(1)
+// FICLONE-based clones of those files. With the rbd backend, volumes
+// are Ceph RBD images and snapshots are independent flattened RBD
+// clones, reachable from any node in the cluster.
 //
 // Thread model:
 //   - cubecow_last_error() is thread-local on the Rust FFI side.
@@ -36,8 +39,8 @@
 //   - sb-<sandboxID>-rootfs-gen<N>
 //   - tpl-<templateID>-build-rootfs
 //
-// Device paths returned by cubecow are stable regular file paths on the
-// reflink filesystem; persisted device_path values can be reused after
-// restart without re-resolution (refresh on startup is still recommended
-// to detect manual filesystem changes).
+// Device paths returned by the reflink backend are stable regular file
+// paths on the reflink filesystem; the rbd backend returns kernel block
+// device paths (/dev/rbdN) that change across activations and nodes.
+// Callers must re-resolve device paths instead of persisting them.
 package cubecow
